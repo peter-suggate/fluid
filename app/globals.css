@@ -2676,3 +2676,75 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .toolstrip .oak-tree-editor { width: 100%; border: 0; margin: 0; padding: 0; pointer-events: auto; }
 .oak-tree-editor { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
 
+
+/* Interactive entities over a pane: lib/features/interactive/ui.tsx.
+   One layer the size of the shell. It never takes a pointer itself — the
+   canvas under it does, and the layer's capture listeners on the shell decide
+   what play, placement and editing claim — only its HUD and inspector do. */
+
+.interactive-layer { position: absolute; inset: 0; z-index: 7; pointer-events: none; }
+.interactive-overlay { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+
+/* Entities: the tone of the body family, brighter for what is being acted on. */
+.interactive-entity { fill: none; stroke: color-mix(in srgb, var(--tone-body) 78%, transparent); stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; }
+.interactive-entity.is-selected { stroke: var(--accent); stroke-width: 2.2; }
+.interactive-entity.is-targeted { stroke: var(--amber); stroke-width: 2.2; }
+.interactive-entity.is-controlled { stroke: var(--accent-strong); stroke-width: 1.8; }
+/* A missing plugin is shown, never hidden: dashed red, with its name beside it. */
+.interactive-entity.is-unavailable { stroke: var(--red); stroke-dasharray: 5 4; }
+.interactive-spawn { fill: none; stroke: color-mix(in srgb, var(--tone-body) 45%, transparent); stroke-width: 1; stroke-dasharray: 2 4; }
+.interactive-draft { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-dasharray: 6 4; }
+.interactive-draft.is-fallback { stroke: var(--amber); }
+.interactive-draft.is-refused { stroke: var(--red); }
+.interactive-foot { fill: var(--accent); }
+.interactive-label { fill: var(--ink); font: var(--text-micro); paint-order: stroke; stroke: color-mix(in srgb, var(--bg) 85%, transparent); stroke-width: 3px; }
+.interactive-label.is-unavailable, .interactive-label.is-refused { fill: var(--red); }
+.interactive-label.is-note { fill: var(--amber); }
+.interactive-crosshair circle { fill: var(--ink); stroke: color-mix(in srgb, var(--bg) 70%, transparent); stroke-width: 2; }
+
+/* The HUD: top centre of the pane, clear of the mode chip and the activity mark. */
+.interactive-hud-stack { position: absolute; top: 13px; left: 50%; transform: translateX(-50%); display: grid; justify-items: center; gap: 5px; max-width: calc(100% - 32px); pointer-events: none; }
+.interactive-hud { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); pointer-events: auto; }
+.interactive-badge { padding: 2px 6px; border: 1px dashed var(--amber); border-radius: var(--radius-s); color: var(--amber); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; cursor: help; }
+.interactive-context, .interactive-readiness { padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+/* Edit, observe and play are three states, so three marks: outline, tint, solid. */
+.interactive-context.is-edit { color: var(--muted); }
+.interactive-context.is-observe { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent); }
+.interactive-context.is-play { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.interactive-readiness.is-ready { color: var(--muted); }
+.interactive-readiness.is-preparing { border-color: var(--amber-line); background: var(--amber-wash); color: var(--amber); }
+.interactive-readiness.is-unavailable, .interactive-readiness.is-failed { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
+.interactive-history { color: var(--dim); font: var(--text-micro); cursor: help; }
+.interactive-reasons { margin: 0; padding: 4px 10px 4px 22px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost-chip); font: var(--text-micro); max-width: 520px; pointer-events: auto; }
+.interactive-reasons.is-unavailable, .interactive-reasons.is-failed { border-color: var(--red-line); color: var(--red); }
+.interactive-reasons.is-preparing { border-color: var(--amber-line); color: var(--amber); }
+.interactive-missing-summary { margin: 0; padding: 4px 9px; border: 1px dashed var(--red-line); border-radius: var(--radius-s); background: var(--overlay); color: var(--red); font: var(--text-micro); max-width: 520px; pointer-events: auto; }
+.interactive-notice { margin: 0; display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost-chip); box-shadow: var(--shadow-card); font: var(--text-micro); max-width: 520px; pointer-events: auto; }
+.interactive-notice.is-error { border-color: var(--red-line); color: var(--red); }
+.interactive-notice button { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; }
+
+/* Prompts sit under the crosshair, where the eye already is. */
+.interactive-prompts { position: absolute; left: 50%; top: calc(50% + 26px); transform: translateX(-50%); display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost-chip); font: var(--text-micro); pointer-events: none; }
+.interactive-prompt-subject { color: var(--dim); }
+.interactive-prompt { display: inline-flex; align-items: center; gap: 5px; }
+.interactive-prompt kbd { min-width: 18px; padding: 1px 5px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); font: var(--text-tag); text-align: center; }
+.interactive-prompt.is-unavailable { color: var(--dim); }
+.interactive-prompt.is-unavailable small { color: var(--amber); }
+
+/* The inspector is a toolstrip; these are only the parts a toolstrip has no row for. */
+.interactive-kind-tag { color: var(--dim); font: var(--text-micro); text-transform: none; letter-spacing: 0; }
+.interactive-control { display: inline-flex; align-items: center; gap: 5px; pointer-events: auto; }
+.interactive-impact { padding: 0 4px; border: 1px solid var(--line); border-radius: var(--radius-s); color: var(--dim); font: var(--text-tag); font-style: normal; text-transform: uppercase; }
+.interactive-impact.is-rebuild { color: var(--muted); }
+.interactive-impact.is-reset { color: var(--amber); border-color: var(--amber-line); }
+.interactive-impact.is-warn { background: var(--amber-wash); }
+.interactive-readout { font: var(--text-micro); color: var(--muted); }
+.interactive-behavior-head, .interactive-connection { display: flex; align-items: center; gap: 6px; min-width: 180px; padding: 2px 4px; font: var(--text-micro); pointer-events: auto; }
+.interactive-behavior-head b { font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.interactive-behavior-head small { color: var(--red); }
+.interactive-behavior-head button, .interactive-connection button { margin-left: auto; border: 0; background: none; color: var(--dim); font: inherit; cursor: pointer; }
+.interactive-behavior-head button:disabled, .interactive-connection button:disabled { cursor: not-allowed; opacity: .45; }
+.interactive-connection span { color: var(--muted); }
+.interactive-inspector-menus { display: flex; gap: 6px; padding: 2px 4px; pointer-events: auto; }
+.interactive-missing, .interactive-field-error { margin: 0; max-width: 240px; padding: 3px 5px; color: var(--red); font: var(--text-micro); pointer-events: auto; }
+.interactive-missing code { font-family: var(--mono); }

@@ -8,6 +8,7 @@ import {
 } from "./compare/compare-mode";
 import type { EditorActionEffect } from "./editor-action";
 import { createInflowAt, INFLOW_SELECTION_ID } from "./editor-inflow";
+import { performInteractiveRequest } from "../features/interactive/ring";
 import { serializeScene } from "./model";
 import { enableWaterLockReason } from "./scene-fluid-readiness";
 import { simulation } from "./simulation/controller";
@@ -205,6 +206,10 @@ export function performEditorAction(
       // Warned rather than thrown: a ring has already closed by the time this
       // runs, and taking the page down over a menu choice is the worse failure.
       console.warn(`performEditorAction: ignored host effect "${effect.id}" — the studio composes none.`);
+      return;
+    }
+    case "interactive": {
+      performInteractiveRequest(session.id, effect.request);
       return;
     }
     case "probe": {

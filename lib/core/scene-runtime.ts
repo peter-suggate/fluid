@@ -47,13 +47,13 @@ export interface SceneRuntimePlan {
 
 /** Derive runtime ownership from scene content/capabilities, not preset IDs. */
 export function planSceneRuntime(
-  scene: Pick<SceneDescription, "systems" | "terrain" | "rigidBodies">,
+  scene: Pick<SceneDescription, "systems" | "terrain" | "rigidBodies" | "interaction">,
 ): SceneRuntimePlan {
   // Do not infer this from fillFraction. Legacy scenes that intentionally
   // start empty still own a solver, while an explicit false is authoritative.
   const fluidEnabled = scene.systems?.fluid !== false;
   const dynamicRigidBodyCount = scene.rigidBodies.filter(({ motion }) => motion !== "static").length;
-  const rigidDynamics = dynamicRigidBodyCount > 0;
+  const rigidDynamics = dynamicRigidBodyCount > 0 || Boolean(scene.interaction?.entities.length);
   const rigidCoupling = fluidEnabled && rigidDynamics;
   const sparseVoxelPresentation = true;
   const capabilities: Record<SceneRuntimeCapability, boolean> = {

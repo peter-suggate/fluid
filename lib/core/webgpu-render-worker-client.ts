@@ -1,3 +1,5 @@
+import type { FluidStepRequest } from "../interaction/runtime/physics";
+import type { FluidExchange } from "../interaction/contracts";
 import { registerMeshAssetDistanceField } from "./imported-assets/asset-library";
 import type { MeshVolumeDistanceField } from "./imported-assets/mesh-volume";
 import { adoptEnvironmentProxyCatalog, useRemoteEnvironmentCatalogs, cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, markEnvironmentCatalogRemote, type EnvironmentProxyCatalog } from "./voxel-environments";
@@ -104,6 +106,7 @@ export type WebGPURenderWorkerRequest =
    * nothing is accepted, and the simulation stays on the resident document.
    */
   | { type: "preview-solid-edit"; previewId: number; base: SolidEditBaseIdentity; patches?: readonly SolidWorldVoxelPatch[] }
+  | { type: "interaction-fluid-step"; requestId: number; step: FluidStepRequest }
   | { type: "edit-fluid"; requestId: number; edit: LiveFluidEdit }
   | { type: "inject-liquid-ball"; requestId: number; ball: InjectedLiquidBall }
   | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
@@ -127,6 +130,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "solid-edit-validated"; requestId: number }
   /** `staged` is whether the display now shows the proposal; false leaves it on the resident document. */
   | { type: "solid-edit-previewed"; previewId: number; staged: boolean }
+  | { type: "interaction-fluid-result"; requestId: number; result: readonly FluidExchange[] }
   | { type: "fluid-edit-result"; requestId: number; result: LiveFluidEditResult }
   | { type: "inject-result"; requestId: number; taken: boolean }
   | { type: "shutdown-complete"; requestId: number }
@@ -418,6 +422,10 @@ export class WebGPURenderWorkerClient {
       ...(queued.patches && { patches: queued.patches }) });
   }
 
+  advanceInteractionFluid(step: FluidStepRequest): Promise<readonly FluidExchange[]> {
+    return this.request({ type: "interaction-fluid-step", requestId: this.nextRequestId(), step });
+  }
+
   editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
     return this.request<LiveFluidEditResult>({ type: "edit-fluid", requestId: this.nextRequestId(), edit });
   }
@@ -602,6 +610,7 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "initialized" || message.type === "shutdown-complete" || message.type === "solid-edit-validated") this.settle(message.requestId);
     else if (message.type === "simulation-running-set") this.settle(message.requestId, message.submittedTime_s);
     else if (message.type === "pick-result") this.settle(message.requestId, message.result);
+    else if (message.type === "interaction-fluid-result") this.settle(message.requestId, message.result);
     else if (message.type === "fluid-edit-result") this.settle(message.requestId, message.result);
     else if (message.type === "inject-result") this.settle(message.requestId, message.taken);
     else if (message.type === "request-failed") this.settle(message.requestId, undefined, message.message);

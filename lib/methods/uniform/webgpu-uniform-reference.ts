@@ -1,3 +1,5 @@
+import type { FluidStepRequest } from "../../interaction/runtime/physics";
+import type { FluidExchange } from "../../interaction/contracts";
 import { proceduralSolidField, proceduralSolidKey, PROCEDURAL_SOLID_MAGIC } from "../../core/procedural-solid";
 import { gpuInitializationDevice } from "../../core/gpu-initialization-device";
 import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
@@ -2448,6 +2450,37 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     await (completion ?? this.awaitFrameCompletion());
   }
 
+  private externalStepPending = false;
+  async advanceExternalRigidStep(request: FluidStepRequest): Promise<readonly FluidExchange[]> {
+    if (!this.scene.interaction?.entities.length) throw new Error("External body authority requires an interactive scene");
+    if (this.externalStepPending) throw new Error("External fluid step already pending");
+    if (!this.rigidCoupling) throw new Error("Interactive scenes require fluid/body coupling");
+    if (Math.abs(request.time_s - this.lastTime - request.dt_s) > 1e-7) throw new Error("Fluid and interactive clocks disagree");
+    this.externalStepPending = true;
+    let staging: GPUBuffer | undefined;
+    try {
+      if (!this.advanceTo(request.time_s, request.bodies)) throw new Error("Fluid step was not admitted");
+      await this.awaitFrameCompletion();
+      if (Math.abs((this.info.completedTime_s ?? 0) - request.time_s) > 1e-7) throw new Error("Fluid step did not complete the requested interval");
+      staging = this.device.createBuffer({ label: "Box3D fluid impulse readback", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.rigidExchange, 0, staging, 0, GPU_RIGID_EXCHANGE_BYTES);
+      this.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const values = new Int32Array(staging.getMappedRange());
+      return request.bodies.map((body, index) => {
+        const base = index * 12, weight = values[base + 11] / 65536;
+        return { generation: request.generation, tick: request.tick, solidRevision: request.solidRevision,
+          bodyId: body.description.id, bodyGeneration: request.bodyGenerations?.[body.description.id] ?? request.generation,
+          linearImpulse_N_s: { x: values[base] * 1e-6, y: values[base+1] * 1e-6, z: values[base+2] * 1e-6 },
+          angularImpulse_N_m_s: { x: values[base+3] * 1e-6, y: values[base+4] * 1e-6, z: values[base+5] * 1e-6 },
+          displacedVolume_m3: Math.max(0, values[base+6] / 65536 * this.mixedStepCellVolume),
+          fluidVelocity_m_s: { x: weight > 0 ? values[base+7] * 1e-4 / weight : 0, y: weight > 0 ? values[base+8] * 1e-4 / weight : 0, z: weight > 0 ? values[base+9] * 1e-4 / weight : 0 },
+          policy: "pressure-traction" as const };
+      });
+    } finally { staging?.destroy(); this.externalStepPending = false; }
+  }
+
   advanceTo(time_s: number, bodies: RigidBodyState[] = []): boolean {
     if(this.disposed)return false;
     if (this.framePending || this.pressureFrameFailure) return false;
@@ -2487,7 +2520,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const roster = this.advanceRoster, rostered = Math.min(12, bodies.length);
     for (let i = 0; i < rostered; i++) roster[i] = bodies[i]!;
     if (roster.length !== rostered) roster.length = rostered;
-    const activeBodies = this.prescribedSolidMotion.sample(roster, dt);
+    const activeBodies = this.scene.interaction?.entities.length ? roster : this.prescribedSolidMotion.sample(roster, dt);
     this.rigidSystem.syncBodies(activeBodies);
     const c = this.scene.container;
     const volumeBeforeSources=this.referenceVolumeCells;let volumeCells=volumeBeforeSources;
@@ -2617,7 +2650,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly markMixedBodies=(encoder:GPUCommandEncoder,tiles:GPUBuffer):void=>{this.mixedBodies!.encodeTiles(encoder,tiles,this.mixedStepDt);this.openWorldTerrain?.encodeTiles(encoder,tiles);};
   private readonly markOpenWorldTerrain=(encoder:GPUCommandEncoder,tiles:GPUBuffer):void=>this.openWorldTerrain!.encodeTiles(encoder,tiles);
   private readonly mixedCoupledBodies:UniformMixedFrameBodies={couple:(encoder:GPUCommandEncoder)=>{
-    this.mixedBodies!.encodeCoupling(encoder);this.rigidSystem.encode(encoder,this.mixedStepDt,this.mixedStepCellVolume,1,this.mixedStepCellHeight);
+    this.mixedBodies!.encodeCoupling(encoder);
+    if (!this.scene.interaction?.entities.length) this.rigidSystem.encode(encoder,this.mixedStepDt,this.mixedStepCellVolume,1,this.mixedStepCellHeight);
     this.mixedFrame!.solid!.encodeBodies(encoder);
   }};
   private readonly mixedUncoupledBodies:UniformMixedFrameBodies={couple:undefined};

@@ -156,7 +156,8 @@ export function TransportBar({ hostBlockReason }: { hostBlockReason?: string }) 
   const notice = session.runtime((state) => state.notice);
   const noticeTone = session.runtime((state) => state.noticeTone);
   const noticeSaid = session.runtime((state) => state.noticeSaid);
-  const rendererOnlyScene = session.scene((state) => !planSceneRuntime(state.scene).fluidSolver);
+  const fluidRequired = session.scene((state) => planSceneRuntime(state.scene).fluidSolver);
+  const rendererOnlyScene = session.scene((state) => !planSceneRuntime(state.scene).fluidSolver && !state.scene.interaction?.entities.length);
   const resourceReadiness = session.diagnostics((state) => state.resourceReadiness);
   const gpuInfo = session.diagnostics((state) => state.gpuInfo);
   const methodId = session.method((state) => state.methodId);
@@ -170,13 +171,13 @@ export function TransportBar({ hostBlockReason }: { hostBlockReason?: string }) 
   const browserSafetyLocked = safeBringupPolicy !== false;
   const [safeStepRequested, setSafeStepRequested] = useState(false);
   const idle = usePointerIdle();
-  const interaction = resourceInteractionGates(resourceReadiness, !rendererOnlyScene);
+  const interaction = resourceInteractionGates(resourceReadiness, fluidRequired);
   // The bar itself never narrates work: loading, compiling and topology states
   // show as progress in the activity tray (see `transportWorkStatus`, rendered
   // by ScenePane). Here they exist only as a lock, stated on the controls.
   const readiness = transportReadiness(gpuInfo, methodId);
   const transportLocked = Boolean(hostBlockReason) || rendererOnlyScene || !interaction.transportInteractive
-    || !readiness.initialSceneReady || !readiness.simulationReady;
+    || fluidRequired && (!readiness.initialSceneReady || !readiness.simulationReady);
   const transportLockedReason = hostBlockReason ?? transportLockReason(readiness, gpuInfo);
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const toggleRecording = () => {

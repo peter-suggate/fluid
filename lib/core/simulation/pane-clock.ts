@@ -157,14 +157,14 @@ export class PaneClockHost {
    * Turn wall-clock elapsed time into target-clock steps. Returns the steps
    * taken so the caller can apply per-step host work exactly once.
    */
-  advance(elapsed_s: number, primaryStep_s: number): number {
+  advance(elapsed_s: number, primaryStep_s: number, serialize = false): number {
     this.primaryStep_s = primaryStep_s;
     if (this.panesDtDiffer()) return 0;
     const dt = this.stepSize_s();
     this.accumulator_s += Math.max(0, Number.isFinite(elapsed_s) ? elapsed_s : 0);
     const collapsed = collapseGPUFixedSteps(this.accumulator_s, dt);
     if (collapsed.steps <= 0) return 0;
-    if (!this.lockstep()) {
+    if (!this.lockstep() && !serialize) {
       // Single pane: collapse every owed tick at once. Exact, because no host
       // fluid/body evolution occurs at the intermediate ticks.
       this.accumulator_s = collapsed.remainder_s;

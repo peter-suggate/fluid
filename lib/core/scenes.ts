@@ -1,3 +1,4 @@
+import { createInteractivePlayground } from "../interaction/playground";
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
@@ -1449,6 +1450,15 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     },
     camera: studioStageCamera,
   }),
+  ...([false, true] as const).map(wet => defineScene({
+    id: wet ? "interactive-pool" : "interactive-playground",
+    name: wet ? "Interactive pool" : "Interactive playground",
+    blurb: "A controllable character, a crate, a switch, a lift and a trigger. Entity controls are supplied by the interactive editor.",
+    audience: "explore", shelf: "Interactive", environment: "stage",
+    build: () => createInteractivePlayground(wet),
+    camera: { target_m: { x: 0, y: 1, z: 0 }, distance_m: 10 },
+    methodProfile: wet ? { methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene", rigidCoupling: "on" } } : undefined,
+  })),
   ...(["dam-break", "settled-tank", "hose-fill"] as const).map(mode => defineScene({
     id: `uniform-trough-${mode}`,
     name: `Voxel bath · ${mode === "dam-break" ? "dam break" : mode === "settled-tank" ? "settled tank" : "hose fill"}`,

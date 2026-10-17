@@ -1,3 +1,6 @@
+import { interactionScene } from "../interaction/adapters/scene";
+import type { FluidStepRequest } from "../interaction/runtime/physics";
+import type { FluidExchange } from "../interaction/contracts";
 import { proceduralSolidKey } from "./procedural-solid";
 import { layerOpacity, legacyVisualLayers, particleLayerShown, particleView, sliceLayersShown, withParticleDisplay, type ParticleDisplay, type VisualLayerState } from "./visual-layers";
 import { authoredFluidGeometryKey } from "./authored-fluid-edit";
@@ -2499,7 +2502,19 @@ export class FluidLabRenderer {
     }
   }
 
+  private currentInteractionScene = false;
+  async advanceInteractionFluid(request: FluidStepRequest): Promise<readonly FluidExchange[]> {
+    const fluid = this.gpuFluid;
+    if (!fluid?.advanceExternalRigidStep || fluid.simulationReady === false) throw new Error("The active fluid method has no ready interactive coupling adapter");
+    const result = await fluid.advanceExternalRigidStep(request);
+    if (this.gpuFluid !== fluid || this.disposed) throw new Error("Fluid generation changed during interactive step");
+    this.gpuAccountedSubmittedTime_s = request.time_s;
+    this.gpuInfoCallback?.({ ...fluid.info });
+    return result;
+  }
+
   private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1, resource?: ResourcePluginDefinition) {
+    if (this.currentInteractionScene) return fluid.info;
     if (!this.device) return fluid.info;
     if (fluid.info.simulationFailure) {
       this.stopAfterSimulationFailure(new SimulationFailureError(fluid.info.simulationFailure));
@@ -2623,6 +2638,8 @@ export class FluidLabRenderer {
   }
 
   draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
+    this.currentInteractionScene = Boolean(scene.interaction?.entities.length);
+    scene = interactionScene(scene);
     // A method declares that its field views compose as layers; every other
     // method draws one overlay mode, and a layer selection left behind by a
     // composing method means nothing to it.
@@ -2718,7 +2735,7 @@ export class FluidLabRenderer {
     } : config;
     const gpuSceneSourceRequired = sceneRuntime.fluidSolver || sparsePresentationRequired;
     const readyGPUFluid = gpuSceneSourceRequired
-      ? this.currentGPUFluid(this.simulationScene ?? scene, sceneConfig, presentationMode)
+      ? this.currentGPUFluid(this.simulationScene ? interactionScene(this.simulationScene) : scene, sceneConfig, presentationMode)
       : undefined;
     const fluidSource = readyGPUFluid ?? this.gpuFluid;
     const sparseSceneProducer = sparsePresentationRequired ? this.sparseSceneProducer(fluidSource) : undefined;
@@ -2906,7 +2923,7 @@ export class FluidLabRenderer {
     // A paused placement or carry still needs fresh render records. The rigid
     // system uploads only changed commands/roster entries, preserving GPU-owned
     // poses for all other bodies without spending a simulation step.
-    if (!this.simulationRunning) this.gpuFluid?.syncRigidBodies?.(bodies);
+    if (!this.simulationRunning || this.currentInteractionScene) this.gpuFluid?.syncRigidBodies?.(bodies);
     const residentRigidBuffer = this.gpuFluid?.rigidRenderBuffer;
     if (residentRigidBuffer) {
       this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));

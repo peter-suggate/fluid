@@ -13,6 +13,8 @@ import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
 import { validateBackdrop, type BackdropDescription } from "./backdrop";
 import type { DisplayGradeAuthoring, WaterOpticsAuthoring } from "./webgpu-lighting";
 import { WATER_ROUGHNESS_MIN } from "./webgpu-lighting";
+import type { InteractionDocument } from "../interaction/contracts";
+import { interactionCatalog } from "../interaction/installed";
 
 export type { BackdropDescription } from "./backdrop";
 
@@ -62,6 +64,8 @@ export interface RigidBodyDescription {
 
 export interface SceneDescription {
   schemaVersion: "2.0.0";
+  /** Optional versioned interactive content; omitted legacy scenes retain their behavior. */
+  interaction?: InteractionDocument;
   sceneId: string;
   /** Optional subsystem declarations. Omission preserves all legacy systems. */
   systems?: {
@@ -533,6 +537,7 @@ export function parseScene(input: string): SceneDescription {
   parsed.container.fluidWallMode ??= "no-slip";
   parsed.fluid.initialCondition ??= "dam-break";
   parsed.fluid.surfaceTension_N_m ??= 0.072;
+  if (parsed.interaction) parsed.interaction = interactionCatalog.inspectDocument(parsed.interaction).document;
   const errors = validateScene(parsed);
   if (errors.length > 0) throw new Error(errors.join("; "));
   return parsed;
@@ -540,6 +545,10 @@ export function parseScene(input: string): SceneDescription {
 
 export function validateScene(scene: SceneDescription): string[] {
   const errors: string[] = [];
+  if (scene.interaction !== undefined) {
+    try { interactionCatalog.inspectDocument(scene.interaction); }
+    catch (error) { errors.push(`Interactive scene: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   if (scene.surfaceStyle !== undefined && scene.surfaceStyle !== "smooth" && scene.surfaceStyle !== "voxel-flat") {
     errors.push(`Unknown scene surface style ${String(scene.surfaceStyle)}`);
   }

@@ -84,11 +84,12 @@ export function createEmptyScene(options: EmptySceneOptions = {}): SceneDescript
     // scene is about water before its author has said so.
     vessel: "none",
   };
-  scene.solidVoxels = [...solidVoxelShellForScene(scene)];
   // 8-cell bricks even though a fluid-free scene may use 4: painting the first
   // water is meant to flip `systems.fluid` on this same document, and
   // `validateScene` rejects a fluid scene on a 4-cell brick.
   scene.voxelDomain = { finestCellSize_m, brickSize_cells: 8 };
+  // Build the shell on the requested lattice, not the cloned default lattice.
+  scene.solidVoxels = [...solidVoxelShellForScene(scene)];
   // The fluid block stays because the schema requires it, but every trace of
   // `defaultScene`'s dam break has to go: these are the fields that would
   // otherwise seed water into a document that claims to be empty.

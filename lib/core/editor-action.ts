@@ -201,7 +201,20 @@ export type EditorActionEffect =
     readonly id: string;
     /** Whatever the verb needs. Opaque here on purpose: core may not name it. */
     readonly payload?: unknown;
-  };
+  }
+  /**
+   * A verb on the pane's interactive entities — see `lib/features/interactive`.
+   *
+   * Named by entity ID and catalog kind ID only: what a kind *is* stays in the
+   * interaction catalog, and the performer hands the request to the pane's
+   * interaction controller, which validates it through its host.
+   */
+  | { readonly kind: "interactive"; readonly request: InteractiveRingRequest };
+
+export type InteractiveRingRequest =
+  /** Arm a placement draft of this kind, standing on the clicked surface. */
+  | { readonly verb: "place"; readonly kindId: string; readonly point_m: Vec3; readonly normal: Vec3 }
+  | { readonly verb: "select" | "control" | "remove" | "duplicate"; readonly entityId: string };
 
 /** Palette token, shared with `EditorEntityTone` so a wedge is coloured like its entity. */
 export type EditorActionTone = "fluid" | "tank" | "body" | "prop" | "inflow" | "region" | "danger";

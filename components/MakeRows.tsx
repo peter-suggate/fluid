@@ -1,6 +1,7 @@
 "use client";
 
 import { RigidDropRow } from "../lib/features/rigid-placement/ui";
+import { InteractiveRows } from "../lib/features/interactive/ui";
 import { LiquidDropRow as SharedLiquidDropRow } from "../lib/features/liquid-drop/ui";
 import { RegionRow as SharedRegionRow } from "../lib/features/refinement-region/ui";
 import { studioRegionSpaceForMethod } from "../lib/core/editor-refinement-region";
@@ -117,5 +118,7 @@ export function MakeRows({ fluid }: { fluid: boolean }) {
     {fluid && <RegionRow />}
     <WaterRow />
     <RigidDropRow />
+    {/* Only when the pane has an interaction binding; otherwise renders nothing. */}
+    <InteractiveRows />
   </>;
 }

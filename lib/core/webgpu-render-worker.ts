@@ -254,6 +254,11 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       .catch((error) => failure(message.requestId, error));
   }
   else if (message.type === "reset-simulation-timeline") runtime.resetSimulationTimeline();
+  else if (message.type === "interaction-fluid-step") {
+    void runtime.advanceInteractionFluid(message.step)
+      .then(result => post({ type: "interaction-fluid-result", requestId: message.requestId, result }))
+      .catch(error => failure(message.requestId, error));
+  }
   else if (message.type === "edit-fluid") {
     void runtime.editFluid(message.edit)
       .then(result => post({ type: "fluid-edit-result", requestId: message.requestId, result }))

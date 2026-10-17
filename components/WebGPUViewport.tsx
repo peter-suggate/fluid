@@ -27,7 +27,8 @@ import {
 } from "../lib/core/editor-gizmo";
 import { CLICK_SLOP_PX, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "../lib/core/editor-tools";
 import { hoverSceneAt, restFluidInWorld, restInContainer, type EditorHover } from "../lib/core/editor-hover";
-import { roomPointForRay, targetActionsAt, targetAtRay } from "../lib/core/editor-probe-catalog";
+import { roomPointForRay, targetActionsAt, targetAtRay, targetSurfaceNormal } from "../lib/core/editor-probe-catalog";
+import { interactivePlacementWedge } from "../lib/features/interactive/ring";
 import { highlightInstanceRange, type EditorHighlight, type EditorTarget } from "../lib/core/editor-target";
 import { EditorHighlightLayer } from "./EditorHighlightLayer";
 import {
@@ -955,6 +956,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s, paneId),
       onEffectiveRendererStatus: (effectiveRendererStatus) => session.diagnostics.getState().set({ effectiveRendererStatus }),
     });
+    const detachInteractionFluid = simulation.attachInteractionFluid(paneId, {
+      isReady: () => session.diagnostics.getState().gpuStatus.state === 'ready',
+      subscribeReadiness: changed => session.diagnostics.subscribe((state, previous) => {
+        if (state.gpuStatus !== previous.gpuStatus) changed();
+      }),
+      step: request => renderer.advanceInteractionFluid(request),
+    });
     let safeSimulationEpoch: number | undefined;
     // This pane's orbit target as a transient detail focus: a new revision
     // only when it moves, never written to the document or the address.
@@ -1179,6 +1187,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       unsubscribeSafeScene();
       unsubscribeSafeMethod();
       unsubscribeSafeUI();
+      detachInteractionFluid();
       unsubscribeRunState();
       cancelAnimationFrame(frame);
       if (rendererRef.current === renderer) rendererRef.current = null;
@@ -1457,11 +1466,16 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       normalizedX: (event.clientX - rect.left) / Math.max(rect.width, 1),
       normalizedY: (event.clientY - rect.top) / Math.max(rect.height, 1),
     };
-    const actions = target
+    let actions = target
       ? targetActionsAt(context, target, aim)
       // LOOK has no target by construction, so the room answers from the point
       // the ray reaches rather than from a thing.
       : sceneActionsAt(context.scene, roomPointForRay(context.scene, ray), undefined, { placement: false, methodId: context.methodId });
+    // A surface that is not an object can take an interactive entity, when the
+    // pane has an interaction binding; the wedge lists the catalog's kinds.
+    const interactive = target && target.kind !== "entity"
+      ? interactivePlacementWedge(paneId, target.point_m, targetSurfaceNormal(context.scene, target)) : undefined;
+    if (interactive) actions = [...actions, interactive];
     if (actions.length === 0) { session.ui.getState().closeRadialMenu(); return; }
     // Client coordinates: the ring is a fixed-position layer over the window,
     // not a child of the canvas, so it must not be told canvas-relative ones.

@@ -1,3 +1,5 @@
+import { SceneInteractionHost } from "../../interaction/runtime/host";
+import type { InteractionFluidDriver } from "../../interaction/runtime/physics";
 import { sceneEqualExcept } from "../scene-comparison";
 import { methodConfigurationImpact } from "../method-lifecycle";
 import { validateMethodConfiguration } from "../stores/method-store";
@@ -109,6 +111,13 @@ export interface OpenSceneCardOptions {
 }
 
 interface PaneRuntime {
+  interaction?: SceneInteractionHost;
+  interactionScene?: SceneDescription;
+  interactionFluid?: InteractionFluidDriver;
+  interactionPending?: Promise<void>;
+  interactionEpoch?: number;
+  committingInteraction?: boolean;
+  interactionWatch?: () => void;
   /** Rigid states the renderer advances; rebuilt by `reset`, adopted by edits. */
   bodies: RigidBodyState[];
   /** The carry / gizmo constraint, re-applied every step it survives. */
@@ -252,7 +261,7 @@ function documentChangedSince(snapshot: EditorHistorySnapshot, committed: SceneD
  * rebuild runtime state (scene loads, body edits, resets) are methods here so
  * stores stay pure data.
  */
-class SimulationController {
+export class SimulationController {
   /**
    * The host clock. One target, N pane completions: single-pane mode is the
    * one-pane case of the same barrier, not a separate path.
@@ -287,7 +296,7 @@ class SimulationController {
   }
 
   private webgpuTransportReady(): boolean {
-    return !hostTransportBlockReason([...this.paneSessions.values()]);
+    return !hostTransportBlockReason([...this.paneSessions.values()]) && [...this.paneSessions].every(([id, pane]) => !pane.scene.getState().scene.interaction?.entities.length || this.interaction(id).getView().readiness.state === "ready");
   }
 
   constructor() {
@@ -311,6 +320,65 @@ class SimulationController {
   /** The slowest pane's completed state: the time the product is actually at. */
   completedTime(): number { return this.clock.completedTime(); }
   currentBodies(paneId: PaneId = PRIMARY_PANE_ID): RigidBodyState[] { return this.runtime(paneId).bodies; }
+
+  /** Stable pane-local service consumed by the interactive editor and input adapter. */
+  interaction(paneId: PaneId = PRIMARY_PANE_ID): SceneInteractionHost {
+    const runtime = this.runtime(paneId), session = this.session(paneId);
+    if (runtime.interaction) return runtime.interaction;
+    runtime.interactionScene = session.scene.getState().scene;
+    const host = new SceneInteractionHost(runtime.interactionScene, {
+      fluid: runtime.interactionFluid,
+      transport: action => action === 'reset' ? this.resetAll() : this.setRunState(action === 'play' ? 'running' : 'paused'),
+      published: bodies => { runtime.bodies = bodies; this.publishBodies(undefined, paneId); },
+      commitScene: (scene, label, impact) => {
+        this.recordHistory(label, undefined, paneId);
+        runtime.committingInteraction = true;
+        try {
+          runtime.interactionScene = scene;
+          if(impact==='reset')this.reset(scene, undefined, paneId);
+          else session.scene.getState().setScene(scene,session.scene.getState().presetId);
+        }
+        finally { runtime.committingInteraction = false; }
+        runtime.bodies = host.currentBodies(); this.publishBodies(undefined, paneId);
+      },
+    });
+    runtime.interaction = host;
+    runtime.interactionWatch = session.scene.subscribe(state => {
+      if (runtime.committingInteraction || state.scene === runtime.interactionScene) return;
+      runtime.interactionScene = state.scene;
+      void host.replaceScene(state.scene).catch(error => session.runtime.getState().setNotice(String(error), 'warn'));
+    });
+    void host.ready.catch(error => session.runtime.getState().setNotice(String(error), 'warn'));
+    return host;
+  }
+
+  attachInteractionFluid(paneId: PaneId, driver: InteractionFluidDriver): () => void {
+    const runtime = this.runtime(paneId);
+    runtime.interactionFluid = driver; runtime.interaction?.setFluidDriver(driver);
+    if (this.session(paneId).scene.getState().scene.interaction?.entities.length) this.interaction(paneId);
+    return () => {
+      const current = this.runtime(paneId);
+      if (current.interactionFluid !== driver) return;
+      current.interactionFluid = undefined; current.interaction?.setFluidDriver(undefined);
+      current.interaction?.releaseInput();
+    };
+  }
+
+  private advanceInteractions(dt: number) {
+    for (const [paneId, session] of this.paneSessions) {
+      if (!session.scene.getState().scene.interaction?.entities.length) continue;
+      const runtime = this.runtime(paneId), host = this.interaction(paneId);
+      if (runtime.interactionPending || host.getView().readiness.state !== 'ready') continue;
+      const time = host.getView().snapshot?.time_s ?? 0;
+      if (time + dt > this.clock.targetTime() + 1e-8) continue;
+      const epoch = runtime.interactionEpoch ?? 0;
+      const pending = host.advance(dt).then(() => {
+        if (epoch === (runtime.interactionEpoch ?? 0)) this.gpuAdvanceCompleted(host.getView().snapshot!.time_s, paneId);
+      }).catch(error => { if (epoch === (runtime.interactionEpoch ?? 0)) { this.setRunState('paused'); session.runtime.getState().setNotice(String(error), 'warn'); } })
+        .finally(() => { if (runtime.interactionPending === pending) runtime.interactionPending = undefined; });
+      runtime.interactionPending = pending;
+    }
+  }
 
   // ---- panes -------------------------------------------------------------
 
@@ -415,8 +483,11 @@ class SimulationController {
       // viewport registers it before its host attaches the realm: an effect
       // runs in the child first. It is carried over, or the pane could never
       // check a solid edit again.
-      const acceptLiveSolidEdit = this.paneRuntimes.get(paneId)?.acceptLiveSolidEdit;
-      this.paneRuntimes.set(paneId, { ...createPaneRuntime(), acceptLiveSolidEdit });
+      const previousRuntime = this.paneRuntimes.get(paneId);
+      previousRuntime?.interactionWatch?.();
+      void previousRuntime?.interaction?.dispose();
+      const acceptLiveSolidEdit = previousRuntime?.acceptLiveSolidEdit;
+      this.paneRuntimes.set(paneId, { ...createPaneRuntime(), acceptLiveSolidEdit, interactionFluid: previousRuntime?.interactionFluid });
       this.paneSessions.set(paneId, session);
       this.refreshSharedPaneStep();
     }
@@ -431,6 +502,8 @@ class SimulationController {
   /** Leaving compare mode. Pane A's realm is the session and never detaches. */
   detachPaneSession(paneId: PaneId): boolean {
     if (paneId === PRIMARY_PANE_ID) return false;
+    this.paneRuntimes.get(paneId)?.interactionWatch?.();
+    void this.paneRuntimes.get(paneId)?.interaction?.dispose();
     this.paneRuntimes.delete(paneId);
     const removed = this.paneSessions.delete(paneId);
     if (removed) this.refreshSharedPaneStep();
@@ -496,7 +569,10 @@ class SimulationController {
    */
   setRunState(runState: RunState) {
     const failure = hostTransportFailure([...this.paneSessions.values()]);
-    applyHostRunState(this.paneSessions.values(), runState === "running" && failure ? "paused" : runState);
+    const interactionsReady = [...this.paneSessions].every(([id, pane]) => !pane.scene.getState().scene.interaction?.entities.length || this.interaction(id).getView().readiness.state === "ready");
+    const next = runState === "running" && (failure || !interactionsReady) ? "paused" : runState;
+    applyHostRunState(this.paneSessions.values(), next);
+    for (const [id, pane] of this.paneSessions) if (pane.scene.getState().scene.interaction?.entities.length) this.interaction(id).setRunning(next === "running");
   }
 
   /** The run state the transport shows: pane A's, which is the host's. */
@@ -565,7 +641,7 @@ class SimulationController {
     // no attached pane plans a solver.
     let hostFluidSolver = false;
     for (const pane of this.paneSessions.values()) {
-      if (planSceneRuntime(pane.scene.getState().scene).fluidSolver) { hostFluidSolver = true; break; }
+      if (planSceneRuntime(pane.scene.getState().scene).fluidSolver || pane.scene.getState().scene.interaction?.entities.length) { hostFluidSolver = true; break; }
     }
     if (!hostFluidSolver) {
       this.setRunState("paused");
@@ -603,9 +679,10 @@ class SimulationController {
     // barrier opening instead, so neither pane runs ahead of the other.
     // Every pane's carry, not pane A's: the step the barrier just opened is a
     // step for both documents, and a body held in B has to be held through it.
-    if (this.clock.advance(elapsed, dt) > 0) {
+    if (this.clock.advance(elapsed, dt, [...this.paneSessions.values()].some(p => Boolean(p.scene.getState().scene.interaction?.entities.length))) > 0) {
       for (const paneId of this.paneRuntimes.keys()) this.applyDragConstraint(paneId);
     }
+    this.advanceInteractions(dt);
     if (this.rateWallClock === 0) { this.rateWallClock = now; this.rateSimTime = this.clock.completedTime(); }
     else if (now - this.rateWallClock > 500) {
       const committedTime = this.clock.completedTime();
@@ -638,7 +715,7 @@ class SimulationController {
     // queued work at the next pause. See `setRunState`.
     this.setRunState("paused");
     const scene = this.session(PRIMARY_PANE_ID).scene.getState().scene;
-    if (!planSceneRuntime(scene).fluidSolver) return;
+    if (![...this.paneSessions.values()].some(p => planSceneRuntime(p.scene.getState().scene).fluidSolver || p.scene.getState().scene.interaction?.entities.length)) return;
     const dt = effectiveSimulationStep_s(scene, this.session(PRIMARY_PANE_ID).method.getState());
     if (!this.webgpuTransportReady()) return;
     // One STEP is one step for every pane: the host refuses it until the
@@ -647,6 +724,7 @@ class SimulationController {
     if (this.safeBrowserBringup() && this.safeBrowserStepConsumed) return;
     if (this.safeBrowserBringup()) this.safeBrowserStepConsumed = true;
     this.clock.step(dt);
+    this.advanceInteractions(dt);
   }
 
   /** Apply one shared fixed step to rigid and fluid work without resetting time. */
@@ -731,8 +809,17 @@ class SimulationController {
   ) {
     const sceneStore = this.session(paneId).scene.getState();
     const scene = source ?? sceneStore.scene;
-    if (source) sceneStore.setScene(source, presetId);
     const paneRuntime = this.runtime(paneId);
+    if (source) {
+      const committing = paneRuntime.committingInteraction;
+      paneRuntime.committingInteraction = true;
+      try { sceneStore.setScene(source, presetId); } finally { paneRuntime.committingInteraction = committing; }
+    }
+    paneRuntime.interactionEpoch = (paneRuntime.interactionEpoch ?? 0) + 1;
+    paneRuntime.interactionScene = scene;
+    if (paneRuntime.interaction && !paneRuntime.committingInteraction) {
+      void paneRuntime.interaction.replaceScene(scene, true).then(() => paneRuntime.interaction?.setRunning(this.runState() === "running")).catch(error => this.session(paneId).runtime.getState().setNotice(String(error), "warn"));
+    } else if (!paneRuntime.interaction && scene.interaction?.entities.length) this.interaction(paneId);
     paneRuntime.bodies = initializeRigidBodies(scene.rigidBodies);
     const runtimePlan = planSceneRuntime(scene);
     // Reset is a host operation: every pane returns to its own t = 0.
@@ -1380,14 +1467,18 @@ class SimulationController {
 
   /** Register the viewport's atomic GPU acceptance seam for history edits. */
   registerLiveSolidEditAcceptance(paneId: PaneId, accept: (next: SceneDescription, base: SceneDescription) => Promise<void>): () => void {
-    this.runtime(paneId).acceptLiveSolidEdit = accept;
+    const checked = async (next: SceneDescription, base: SceneDescription) => {
+      this.runtime(paneId).interaction?.validateSolidEdit(next);
+      await accept(next, base);
+    };
+    this.runtime(paneId).acceptLiveSolidEdit = checked;
     // A document mirrored before the viewport mounted is checked now.
     this.submitMirroredSolidEdit(paneId);
     // Looked up again on the way out: attaching a realm replaces the runtime
     // this was registered on and carries the seam across.
     return () => {
       const runtime = this.paneRuntimes.get(paneId);
-      if (runtime?.acceptLiveSolidEdit === accept) runtime.acceptLiveSolidEdit = undefined;
+      if (runtime?.acceptLiveSolidEdit === checked) runtime.acceptLiveSolidEdit = undefined;
     };
   }
 
@@ -1609,6 +1700,12 @@ class SimulationController {
 
   /** Drop host-side debt when paused, retaining only work already admitted to a pane's GPU queue. */
   gpuSchedulingPaused(submittedTime_s?: number, paneId: PaneId = PRIMARY_PANE_ID) {
+    const runtime = this.runtime(paneId);
+    if (this.session(paneId).scene.getState().scene.interaction?.entities.length) {
+      const drain = () => this.clock.schedulingPaused(runtime.interaction?.getView().snapshot?.time_s ?? 0, paneId);
+      if (runtime.interactionPending) void runtime.interactionPending.then(drain); else drain();
+      return;
+    }
     this.clock.schedulingPaused(submittedTime_s, paneId);
   }
 

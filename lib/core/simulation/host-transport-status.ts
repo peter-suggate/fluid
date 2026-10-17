@@ -23,6 +23,8 @@ export function hostTransportBlockReason(panes: readonly PaneSession[]): string 
   const failure = hostTransportFailure(panes);
   if (failure) return failure;
   for (const pane of panes) {
+    // Dry interactive worlds have their own native readiness gate.
+    if (pane.scene.getState().scene.systems?.fluid === false) continue;
     const { gpuInfo, resourceReadiness } = pane.diagnostics.getState();
     const readiness = transportReadiness(gpuInfo, pane.method.getState().methodId);
     if (!resourceInteractionGates(resourceReadiness, true).transportInteractive

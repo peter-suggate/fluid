@@ -1,3 +1,5 @@
+import type { FluidStepRequest } from "../interaction/runtime/physics";
+import type { FluidExchange } from "../interaction/contracts";
 import type { LiveFluidEdit, LiveFluidEditResult } from "./live-fluid-edit";
 import { normalizeControlNumber, type ControlMetadata } from "../framework/controls";
 import type { FeatureComposition } from "../framework/composition";
@@ -361,6 +363,8 @@ export interface GPUSolverInstance {
   applyRuntimeValues?(values: MethodParamValues): void;
   /** Transient per-pane detail input (focus); latest revision wins at the next accepted frame. Never persisted. */
   applyDetailInput?(input: SolverDetailInput): void;
+  /** Serialized fluid interval with externally owned rigid motion. */
+  advanceExternalRigidStep?(request: FluidStepRequest): Promise<readonly FluidExchange[]>;
   advanceTo(time_s: number, bodies: RigidBodyState[]): boolean;
   /** Host-only timing snapshot; never fences or maps simulation buffers. */
   readPerformanceTraceSnapshot?(): Pick<GPUEulerianInfo,

@@ -494,7 +494,11 @@ fn umPointCell(p:vec3f)->vec3i{
  let c=vec3i(floor(p));let on=((c&vec3i(31))==vec3i(0))&(p==vec3f(c));
  if(!any(on)||umCellKind(c)==UM_RESIDENT){return c;}
  let faces=u32(on.x)|(u32(on.y)<<1u)|(u32(on.z)<<2u);
- for(var low=1u;low<8u;low++){
+ // Every eligible low is a subset of faces, hence <= faces. Use that
+ // runtime bound: Metal otherwise unrolls seven page-table searches at
+ // every inlined surface sample, making cold compilation take minutes.
+ // Candidate order and the first-resident tie break stay identical.
+ for(var low=1u;low<=faces;low++){
   if((low&faces)!=low){continue;}
   let q=c-vec3i(vec3u(low&1u,(low>>1u)&1u,low>>2u));
   if(umCellKind(q)==UM_RESIDENT){return q;}
