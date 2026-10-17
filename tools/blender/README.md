@@ -15,6 +15,11 @@ volumes and the preview image live in `public/assets/pool-party/`.
 Bundled volume metadata lives in `lib/core/imported-assets/metadata/`; application
 modules import it from the source tree, never through the public asset directory.
 The baker writes this metadata alongside each corresponding FVX payload update.
+Browser loading accepts both file-compressed FVX and responses already decoded
+by Fetch from HTTP `Content-Encoding: gzip`. It detects gzip from the payload
+bytes before decompression; the `.gz` URL suffix does not imply that Fetch still
+returns compressed bytes. HTTP, decoding and network failures identify the
+asset URL. Transport tests exercise both hosting modes through a real HTTP server.
 
 ## Rebuild
 

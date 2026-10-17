@@ -12,7 +12,8 @@ import coping from "./metadata/limestone-coping-volume.json";
 import copingCorner from "./metadata/limestone-coping-corner-volume.json";
 import waterline from "./metadata/ceramic-waterline-volume.json";
 import servingTable from "./metadata/teak-serving-table-volume.json";
-import { decodeMeshVolume, sampleMeshVolume, type MeshVolume, type MeshVolumeHeader } from "./mesh-volume";
+import { sampleMeshVolume, type MeshVolume, type MeshVolumeHeader } from "./mesh-volume";
+import { fetchMeshVolume } from "./mesh-volume-loader";
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
 import { walkSceneryNodes } from "../scenery-graph";
 
@@ -74,11 +75,7 @@ export async function ensureSceneMeshAssets(scene: SceneDescription, signal?: Ab
         // Shared loads have their own lifetime: cancelling one scene must not
         // abort another scene awaiting the same immutable asset.
         task = (async () => {
-          const response = await fetch(`/assets/pool-party/${id}.fvx.gz`);
-          if (!response.ok) throw new Error(`Loading ${id}: HTTP ${response.status}`);
-          const compressed = await response.arrayBuffer();
-          const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"));
-          registerMeshAsset(id, decodeMeshVolume(new Uint8Array(await new Response(stream).arrayBuffer())));
+          registerMeshAsset(id, await fetchMeshVolume(`/assets/pool-party/${id}.fvx.gz`));
         })();
         pending.set(id, task);
         void task.finally(() => pending.delete(id)).catch(() => {});

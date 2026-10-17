@@ -41,8 +41,8 @@ export interface MeshVolume {
 const NODES = 729, BRICK_BYTES = 12 + NODES * 16;
 const triple = (v: unknown): v is [number, number, number] => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
 
-/** Decode uncompressed FVX1. In a browser, decompress .fvx.gz with
- * DecompressionStream("gzip"); in Node use gunzipSync before calling this.
+/** Decode uncompressed FVX1. Browser loads use fetchMeshVolume to handle both
+ * HTTP and file-level compression; in Node use gunzipSync on disk payloads.
  * Typed channels are copied so callers may release/transfer the input buffer. */
 export function decodeMeshVolume(bytes: Uint8Array): MeshVolume {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
