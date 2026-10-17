@@ -1,3 +1,4 @@
+import { UniformColdFreeze } from "./uniform-cold-freeze";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_CANONICAL_LOAD} from "../../core/uniform-detail-abi";
 import {UniformMixedOwnership,type UniformMixedGenerationBuffers} from "./uniform-mixed-ownership";
@@ -270,7 +271,11 @@ export class UniformMixedOwnershipTransfer {
  private readonly fineGroups:number;
  /** Resident pages bound the coarse launches (one job per page). */
  private readonly pages:number;
- constructor(private readonly device:GPUDevice,readonly simulation:UniformMixedOwnership,readonly pressure:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
+ constructor(private readonly device:GPUDevice,readonly simulation:UniformMixedOwnership,readonly pressure:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,
+  /** COLD freeze: frozen tiles keep their simulation faces (and their
+   * pressure-side ones after the freezing frame); a warm tile's frozen
+   * faces keep the forced (frozen) value. */
+  private readonly freeze?:UniformColdFreeze){
   if(simulation.layout.tiles.length!==pressure.layout.tiles.length)throw new Error("Ownership transfer requires one tile lattice");
   const tiles=simulation.layout.tiles.length;
   this.fineGroups=Math.max(1,Math.min(TRANSFER_GRID,tiles));this.pages=uniformMixedPageCount(simulation.capacity.tiles);
@@ -281,6 +286,7 @@ export class UniformMixedOwnershipTransfer {
    ...[3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:(binding===4?"rgba32float":"r32float") as GPUTextureFormat,viewDimension:"3d" as const}})),
    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   ...(freeze?[{binding:7,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
   ]});
  }
  /** Fields read in the source ownership and written in the target's. The
@@ -293,10 +299,11 @@ export class UniformMixedOwnershipTransfer {
    {binding:0,resource:input.volume},{binding:1,resource:input.velocity},{binding:2,resource:{buffer:input.negative}},
    {binding:3,resource:output.volume},{binding:4,resource:output.velocity},{binding:5,resource:{buffer:output.negative}},
    {binding:6,resource:{buffer:status,size:64}},
+   ...(this.freeze?[{binding:7,resource:this.freeze.regions}]:[]),
   ]});
  }
  async initialize():Promise<void>{
-  const module=uniformDetailModule(this.device,{label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout,this.solid)});
+  const module=uniformDetailModule(this.device,{label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout,this.solid,this.freeze)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   // Only the transfer to pressure reads the solid library (the patch weights).
   const weighted=(entryPoint:string)=>!!this.solid&&entryPoint.startsWith("toPressure");
@@ -331,7 +338,7 @@ export class UniformMixedOwnershipTransfer {
 
 /** The transfer's kernels (UniformMixedOwnershipTransfer). Group 0 is the
  * simulation ownership in both directions; the pressure side is all-4h. */
-function uniformMixedOwnershipTransferWGSL(layout:UniformMixedLayout,solid?:UniformMixedSolid):string{
+function uniformMixedOwnershipTransferWGSL(layout:UniformMixedLayout,solid?:UniformMixedSolid,freeze?:UniformColdFreeze):string{
  // A statically cut tile's patches are weighted by their V.
  const cut=(tile:string)=>solid?.coarse?`umSolidEnabled()&&umSolidStaticCut(${tile})`:"false";
  // A +face patch's V: the record's where it holds it (umPatchFaceV).
@@ -345,7 +352,13 @@ ${solid?uniformMixedSolidWGSL(2,solid.coarse?.count):""}
 @group(1) @binding(4) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(5) var<storage,read_write> boundary:array<f32>;
 ${uniformMixedFrameStatusWGSL(1,6,"read")}
+${UniformColdFreeze.wgsl(freeze,1,7)}
 fn tBits(texel:vec4f)->u32{return u32(round(texel.w));}
+// A tile's freeze state (UniformColdFreeze): to pressure, a frozen tile
+// (after its freezing frame) keeps its pressure-side faces, which hold its
+// frozen field already; to simulation, a freezing or frozen one keeps all.
+fn tColdState(tile:u32)->u32{return umColdState(umPageOfTile(tile));}
+var<workgroup> tSkip:u32;
 // The simulation tile at tile coordinate c across the tile's positive face
 // on axis a is h: that 4h face holds sixteen simulation patches.
 fn tSplit(c:vec3u,a:u32)->bool{var q=c;q[a]+=1u;return umTilePresent(vec3i(q))&&umTileWidth(umTileAt(q))==1u;}
@@ -449,10 +462,14 @@ fn tFineToPressure(tile:u32,lane:u32){
 // The 4h tiles of resident page job g, one lane each (residentPages).
 fn tResidentCoarseTile(g:vec3u,lane:u32)->u32{let tile=umResidentPageTile(g.x,lane);if(!umTileLive(tile)||umTileWidth(tile)!=4u){return UM_TILES;}return tile;}
 @compute @workgroup_size(64) fn toPressureCoarse(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=tResidentCoarseTile(g,lane);if(umTileLive(tile)){tCoarseToPressure(tile);}
+ let tile=tResidentCoarseTile(g,lane);if(umTileLive(tile)&&tColdState(tile)!=2u){tCoarseToPressure(tile);}
 }
 @compute @workgroup_size(64) fn toPressureFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var job=group.x;job<umCounts.x;job+=groups.x){let tile=tFineTile(job);tFineToPressure(tile,lane);workgroupBarrier();}
+ for(var job=group.x;job<umCounts.x;job+=groups.x){
+  let tile=tFineTile(job);
+  if(UM_COLD_FREEZE){if(lane==0u){tSkip=u32(tColdState(tile)==2u);}if(workgroupUniformLoad(&tSkip)!=0u){continue;}}
+  tFineToPressure(tile,lane);workgroupBarrier();
+ }
 }
 // A 4h tile, one lane: its non-split positive faces copied at their anchors,
 // split ones written at their plane cells, and its negative walls. Both
@@ -467,6 +484,10 @@ fn tCoarseToSimulation(tile:u32){
   else{var below=origin;below[a]-=1;low[a]=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,below,0)[a];}
   if(tSplit(c,a)){splits|=1u<<a;}else{textureStore(output,anchor,texel);}
  }
+ // A split plane against a frozen h tile holds its h faces: the forced
+ // (frozen) values.
+ var frozenSplits=0u;
+ if(UM_COLD_FREEZE){for(var a=0u;a<3u;a++){if((splits&(1u<<a))!=0u){var next=origin;next[a]+=4;if(umFrozenCell(next)){frozenSplits|=1u<<a;}}}}
  for(var a=0u;a<3u;a++){
   if((splits&(1u<<a))==0u){continue;}
   let u=(a+1u)%3u;let v=(a+2u)%3u;
@@ -474,7 +495,7 @@ fn tCoarseToSimulation(tile:u32){
    var q=vec3u(0);q[a]=3u;q[u]=x;q[v]=y;
    // A cell on several split planes is written once, by the first.
    var packed=vec4f(0);var first=true;
-   for(var b=0u;b<3u;b++){if(q[b]==3u&&(splits&(1u<<b))!=0u){packed[b]=mix(low[b],high[b],1.0);if(b<a){first=false;}}}
+   for(var b=0u;b<3u;b++){if(q[b]==3u&&(splits&(1u<<b))!=0u){packed[b]=mix(low[b],high[b],1.0);if((frozenSplits&(1u<<b))!=0u){packed[b]=textureLoad(velocity,vec3i(base+q),0)[b];}if(b<a){first=false;}}}
    if(first){packed.w=f32(negativeBits);textureStore(output,vec3i(base+q),packed);}
   }}
  }
@@ -494,6 +515,8 @@ fn tFineToSimulation(tile:u32,lane:u32){
  var packed=vec4f(0);var bits=0u;
  for(var a=0u;a<3u;a++){
   packed[a]=mix(low[a],high[a],f32(local[a]+1u)/4.0);
+  // A +face against a frozen cell (only on a 16h region's high side) keeps the forced (frozen) value.
+  if(UM_COLD_FREEZE&&(cell[a]&15)==15){var next=cell;next[a]+=1;if(umFrozenCell(next)){packed[a]=textureLoad(velocity,cell,0)[a];}}
   if(local[a]==3u){bits|=positiveBits&(1u<<a);}
   if(local[a]==0u&&lowOpen[a]){boundary[umLowFaceIndex(vec3u(cell),a)]=mix(low[a],high[a],0.0);bits|=negativeBits&(1u<<(a+3u));}
  }
@@ -502,11 +525,11 @@ fn tFineToSimulation(tile:u32,lane:u32){
 // A latched frame failure (the verdict withheld the projection) transfers nothing back.
 @compute @workgroup_size(64) fn toSimulationCoarse(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umFrameFailed()){return;}
- let tile=tResidentCoarseTile(g,lane);if(umTileLive(tile)){tCoarseToSimulation(tile);}
+ let tile=tResidentCoarseTile(g,lane);if(umTileLive(tile)&&!umFrozenRegion(umPageOfTile(tile))){tCoarseToSimulation(tile);}
 }
 @compute @workgroup_size(64) fn toSimulationFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umFrameFailed()){return;}
- for(var job=group.x;job<umCounts.x;job+=groups.x){let tile=tFineTile(job);tFineToSimulation(tile,lane);}
+ for(var job=group.x;job<umCounts.x;job+=groups.x){let tile=tFineTile(job);if(!umFrozenRegion(umPageOfTile(tile))){tFineToSimulation(tile,lane);}}
 }
 `,["toPressureCoarse","toSimulationCoarse"]);
 }

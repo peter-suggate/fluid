@@ -80,7 +80,10 @@ fn umFarAirOwner(owner:UMOwner)->bool{
 
 /** skipPacked: a WGSL fn(UMOwner)->bool; a packed regular 4h owner it
  * accepts is left entirely alone (no evaluation and no store). */
-export function uniformMixedFaceTileDispatchWGSL(entry: string, evaluate: string, stored?: string, skipPacked?: string): string {
+export function uniformMixedFaceTileDispatchWGSL(entry: string, evaluate: string, stored?: string, skipPacked?: string,
+  /** A WGSL fn(UMOwner)->bool: an owner that evaluates and stores nothing
+   * (its texels and low walls hold), e.g. a frozen COLD one. */
+  skipOwner?: string): string {
   // stored: a WGSL fn(f32)->bool that gates each store on its first value.
   const store = (write: string, value: string) => stored ? `if(${stored}((${value}).x)){${write}}` : write;
   const boundary = (index: string) => stored ? `if(${stored}(value)){boundary[${index}]=value;}` : `boundary[${index}]=value;`;
@@ -145,6 +148,7 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
    if(positive.width!=0u){high=true;highFace=positive;}
   }
  }
+ ${skipOwner?`if(${skipOwner}(owner)){low=false;high=false;}`:""}
  // One evaluation site (Metal inlines every call: an evaluation written
  // twice is compiled twice): the low face first, then the positive one.
  for(var k=0u;k<2u;k++){

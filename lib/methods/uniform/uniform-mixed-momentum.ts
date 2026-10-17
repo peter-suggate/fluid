@@ -8,6 +8,7 @@ import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sam
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
+import { UniformColdFreeze } from "./uniform-cold-freeze";
 import { UNIFORM_MOMENTUM_RESIDUAL_PARTS, UNIFORM_MOMENTUM_TIER_PASS, uniformMomentumFitGrid, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
 
 export interface UniformMixedMomentumFields {
@@ -41,7 +42,12 @@ const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum
  * repeat a partially evaluated characteristic. */
 const uniformMixedMomentumUnitWGSL = uniformCachedMomentumSamplingWGSL + /* wgsl */ `
 // umMomentum through the unit sampler (umUnitEscaped when it cannot).
+// A frozen face keeps its frozen value; a thawing one folds its region's term in.
 fn umUnitMomentum(owner:UMOwner,face:UMFace)->f32 {
+ let freeze=umFaceFreeze(owner,face);if(freeze.x!=0.0){return umOriginalMomentum(face);}
+ return umUnitMomentumValue(owner,face)+freeze.y;
+}
+fn umUnitMomentumValue(owner:UMOwner,face:UMFace)->f32 {
  if(umMomentumRetained(owner)){return umRetainedFace(face);}
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
@@ -62,7 +68,9 @@ var<workgroup> umUnitEscapes:array<atomic<u32>,2>;
  if(lane<2u){atomicStore(&umUnitEscapes[lane],0u);}
  workgroupBarrier();
  var value=0.0;umUnitEscaped=false;
- if(owner.width!=0u){
+ // A frozen owner's texels and low walls hold (UniformColdFreeze).
+ let live=owner.width!=0u&&!umOwnerFrozen(owner);
+ if(live){
   let origin=umOrigin(owner);
   // One umUnitMomentum site: the low boundary face where it is open, then the positive one.
   let low=umLowOpen(vec3i(origin))[axis];
@@ -74,10 +82,10 @@ var<workgroup> umUnitEscapes:array<atomic<u32>,2>;
  }
  umUnitComponents[lane]=value;workgroupBarrier();
  let escapes=vec2u(atomicLoad(&umUnitEscapes[0]),atomicLoad(&umUnitEscapes[1]));
- if(lane<64u&&owner.width!=0u&&((escapes[cell/32u]>>(cell%32u))&1u)==0u){
+ if(lane<64u&&live&&((escapes[cell/32u]>>(cell%32u))&1u)==0u){
   textureStore(output,vec3i(umOrigin(owner)),vec4f(umUnitComponents[cell],umUnitComponents[cell+64u],umUnitComponents[cell+128u],0));
  }
- if(lane==0u&&owner.width!=0u&&any(escapes!=vec2u(0))){
+ if(lane==0u&&live&&any(escapes!=vec2u(0))){
   let entry=atomicAdd(&umDeferred[0],1u);
   atomicStore(&umDeferred[4u+3u*entry],owner.tile);atomicStore(&umDeferred[5u+3u*entry],escapes.x);atomicStore(&umDeferred[6u+3u*entry],escapes.y);
  }
@@ -173,7 +181,9 @@ export class UniformMixedMomentum {
   private residualPipeline?:GPUComputePipeline;
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,
     /** heat: the frame's region work tiers (UniformRegionHeat.tiers). */
-    heat: GPUBuffer, private readonly cullAir = false, private readonly hanging = false, private readonly sourceParams?: GPUBuffer) {
+    heat: GPUBuffer, private readonly cullAir = false, private readonly hanging = false, private readonly sourceParams?: GPUBuffer,
+    /** COLD freeze: frozen owners hold, frozen faces keep their value. */
+    private readonly freeze?: UniformColdFreeze) {
     // Far-air regular 4h owners (uniformMixedFarAirWGSL) are culled to zero,
     // so the merged launch skips them; forces supplies that zero itself.
     if(sourceParams&&!cullAir)throw new Error("Mixed momentum far-air skipping requires prediction culling");
@@ -190,6 +200,7 @@ export class UniformMixedMomentum {
       ...(sourceParams?[{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
       { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 20, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      ...(freeze?[{binding:21,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
     ] });
     this.tiers=new UniformMixedMomentumTiers(device,ownership,heat);
     this.claims=device.createBuffer({label:"Uniform mixed momentum job claims",size:4*UNIFORM_MIXED_CLAIM_WORDS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -223,6 +234,7 @@ export class UniformMixedMomentum {
       {binding:13,resource:{buffer:this.claims}},{binding:14,resource:{buffer:this.deferred}},
       ...(this.sourceParams?[{binding:17,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
       {binding:19,resource:{buffer:this.tiers.record}},{binding:20,resource:{buffer:this.tiers.models}},
+      ...(this.freeze?[{binding:21,resource:this.freeze.regions.createView()}]:[]),
     ] });
   }
   async initialize(): Promise<void> {
@@ -243,6 +255,19 @@ struct UMMomentumParams {hDt:vec4f,flags:vec4u}
 @group(1) @binding(14) var<storage,read_write> umDeferred:array<atomic<u32>>;
 ${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;\n@group(1) @binding(18) var unitHalo:texture_3d<f32>;":""}
 ${uniformMomentumTierWGSL(19,20)}
+${UniformColdFreeze.wgsl(this.freeze,1,21)}
+// A frozen owner (UniformColdFreeze): its texels and low walls hold.
+fn umOwnerFrozen(owner:UMOwner)->bool{return owner.width!=0u&&umFrozenRegion(umPageOfTile(owner.tile));}
+// x: 1 for a frozen face (an incident cell frozen), y: a thawing region's
+// term (the owner's, else the neighbour's).
+fn umFaceFreeze(owner:UMOwner,face:UMFace)->vec2f{
+ if(!UM_COLD_FREEZE){return vec2f(0);}
+ let own=umColdState(umPageOfTile(owner.tile));var other=own;var region=umPageOfTile(owner.tile);
+ if(face.neighbor.width!=0u&&face.neighbor.tile!=owner.tile){other=umColdState(umPageOfTile(face.neighbor.tile));}
+ if(own==1u||own==2u||other==1u||other==2u){return vec2f(1.0,0.0);}
+ if(own!=3u){if(other!=3u){return vec2f(0);}region=umPageOfTile(face.neighbor.tile);}
+ return vec2f(0.0,umColdTermOf(region,face.axis));
+}
 override umCullAir:bool=false;
 ${this.sourceParams?uniformMixedSourceWGSL(17)+uniformMixedFarAirWGSL("umSourceinflowStrength()>0.0"):""}
 ${uniformMixedFaceAddressWGSL}
@@ -304,7 +329,13 @@ fn umDropFace(face:UMFace)->bool {
  let h=umSourceParams.cellGravity.xyz;let reach=f32(face.width)*max(h.x,max(h.y,h.z));
  return umSourcedropDistance(umSourcetraceWorld(umFaceCenter(face)),reach)<reach;`:"return false;"}
 }
+// A frozen face (UniformColdFreeze) keeps its frozen value; a thawing one
+// folds its region's term in once.
 fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
+ let freeze=umFaceFreeze(owner,face);if(freeze.x!=0.0){return umOriginalMomentum(face);}
+ return umMomentumValue(owner,face)+freeze.y;
+}
+fn umMomentumValue(owner:UMOwner,face:UMFace)->f32 {
  if(umMomentumRetained(owner)){return umRetainedFace(face);}
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  // Every closed wall carries its projected velocity; the projection's
@@ -332,7 +363,8 @@ var<workgroup> umMomentumComponents:array<f32,192>;
  let cell=lane%64u;let axis=lane/64u;
  let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
  var value=0.0;
- if(owner.width!=0u){
+ let live=owner.width!=0u&&!umOwnerFrozen(owner);
+ if(live){
   let origin=umOrigin(owner);
   // One umMomentum site: the low boundary face where it is open, then the positive one.
   let low=umLowOpen(vec3i(origin))[axis];
@@ -342,9 +374,9 @@ var<workgroup> umMomentumComponents:array<f32,192>;
   }
  }
  umMomentumComponents[lane]=value;workgroupBarrier();
- if(lane<64u&&owner.width!=0u){textureStore(output,vec3i(umOrigin(owner)),vec4f(umMomentumComponents[cell],umMomentumComponents[cell+64u],umMomentumComponents[cell+128u],0));}
+ if(lane<64u&&live){textureStore(output,vec3i(umOrigin(owner)),vec4f(umMomentumComponents[cell],umMomentumComponents[cell+64u],umMomentumComponents[cell+128u],0));}
 }
-${uniformMixedFaceTileDispatchWGSL("momentumStep", "umMomentum(owner,face)",undefined,this.sourceParams?"umFarAirOwner":undefined)}
+${uniformMixedFaceTileDispatchWGSL("momentumStep", "umMomentum(owner,face)",undefined,this.sourceParams?"umFarAirOwner":undefined,"umOwnerFrozen")}
 ${this.hanging?uniformMixedMomentumUnitWGSL:""}
 `, ["momentumRegularStep", "momentumStep",...(this.hanging?["momentumUnitStep"]:[])], "umClaims") });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");

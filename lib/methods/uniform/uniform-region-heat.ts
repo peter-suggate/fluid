@@ -5,6 +5,7 @@ import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "./uniform-surface-transport.wgsl";
 import { UNIFORM_REGION_DYNAMICS, UNIFORM_REGION_DYNAMICS_WORDS } from "./uniform-mixed-region-dynamics";
+import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 
 /** Per-16h-region work heat (region = umPageOfTile(tile), UM_PAGES slots):
  * where a frame's non-pressure work goes. EXNB-style (the particle activity
@@ -25,11 +26,14 @@ import { UNIFORM_REGION_DYNAMICS, UNIFORM_REGION_DYNAMICS_WORDS } from "./unifor
  *   baseline was unknown: the first solve's change is the whole hydrostatic
  *   field), and the accumulated displacement restarts.
  *
+ * Every one-frame trigger but the host's own (force) is held
+ * UNIFORM_REGION_HEAT_HOLD_FRAMES frames more at its tier.
+ *
  * One-frame WARM triggers (level 0.75 this frame, no heat):
  * - the accumulated displacement bound exceeding UNIFORM_REGION_HEAT_BUDGET_H:
  *   sum over frames since the region last ran non-COLD of
  *   dt*|u|max/h (the frame plan's current extended velocity extrema of the
- *   region) + dt^2*|dp|/(rho*h^2) (stream 1's dynamics record word 6: the
+ *   region, plus a frozen region's coarse term |T|max: UniformColdFreeze) + dt^2*|dp|/(rho*h^2) (stream 1's dynamics record word 6: the
  *   velocity a pressure change across a cell drives, over one step). Exact
  *   zero motion adds exactly zero;
  * - a remap (width change) of one of the region's tiles: the remap hook
@@ -60,27 +64,44 @@ import { UNIFORM_REGION_DYNAMICS, UNIFORM_REGION_DYNAMICS_WORDS } from "./unifor
  * Buffer `tiers` (bind read-only through uniformRegionHeatWGSL):
  *   words [0, regions): the region's tier this frame (UNIFORM_REGION_TIER);
  *   words [regions, regions+4): diagnostics, regions COLD, WARM, HOT, free;
- *   words [R+4, 2R+4) (UNIFORM_REGION_HEAT_DEEP_WORD): deep COLD, 1 when the
+ *   word regions+4 (UNIFORM_REGION_HEAT_PROMOTED_WORD): regions a claim or
+ *     remap hook raised after the head this frame (rhPromoteTo: counted
+ *     when the hook raised the region's tier); words to regions+8 spare;
+ *   words [R+8, 2R+8) (UNIFORM_REGION_HEAT_DEEP_WORD): deep COLD, 1 when the
  *     region is live and it and every stored neighbour (26) are COLD;
- *   words [2R+4, 3R+4) (UNIFORM_REGION_HEAT_EPOCH_WORD): the region's
+ *   words [2R+8, 3R+8) (UNIFORM_REGION_HEAT_EPOCH_WORD): the region's
  *     non-COLD epoch, advanced by every deep pass that finds it non-COLD (a
  *     consumer that saw the same epoch and COLD then has seen no non-COLD
  *     frame since).
- * The deep words and epoch follow the tiers as encode leaves them; after a
+ *   words [3R+8, 4R+8) (UNIFORM_REGION_HEAT_DEEP_EPOCH_WORD): the region's
+ *     not-deep-COLD epoch, advanced by every deep pass that finds the region
+ *     or one of its stored neighbours non-COLD (or the region free): a
+ *     consumer that cached a result while the region was deep COLD at this
+ *     epoch has seen nothing change in the region's 27-region neighbourhood.
+ * The deep words and epochs follow the tiers as encode leaves them; after a
  * relayout's claims and remaps raise tiers, encodeDeep recomputes them.
  * The buffer is fixed for the frame's lifetime (never replaced). */
 export const UNIFORM_REGION_TIER={cold:0,warm:1,hot:2} as const;
-export const UNIFORM_REGION_HEAT_HEADER_WORDS=4;
+export const UNIFORM_REGION_HEAT_HEADER_WORDS=8;
+/** The header word that counts this frame's mid-frame promotions (claims, remaps). */
+export const UNIFORM_REGION_HEAT_PROMOTED_WORD=(regions:number):number=>regions+4;
 /** Word offsets in tiers of the deep COLD flags and the non-COLD epochs. */
 export const UNIFORM_REGION_HEAT_DEEP_WORD=(regions:number):number=>regions+UNIFORM_REGION_HEAT_HEADER_WORDS;
 export const UNIFORM_REGION_HEAT_EPOCH_WORD=(regions:number):number=>2*regions+UNIFORM_REGION_HEAT_HEADER_WORDS;
+export const UNIFORM_REGION_HEAT_DEEP_EPOCH_WORD=(regions:number):number=>3*regions+UNIFORM_REGION_HEAT_HEADER_WORDS;
 /** Retirement time of a trigger's heat, s (the NB-FLIP default). */
 export const UNIFORM_REGION_HEAT_FADE_SECONDS=0.5;
+/** Frames a GPU-raised one-frame tier (identity, pending claim or remap,
+ * unknown evidence, displacement over budget) is held after its own: the
+ * host's cold-frame evidence (uniform-cold-frame) lags
+ * UNIFORM_MIXED_RECEIPT_RING (2) frames, so a region a host skipper left
+ * out at the rise is still non-COLD when the host sees it. */
+export const UNIFORM_REGION_HEAT_HOLD_FRAMES=2;
 /** Displacement a COLD region may hold back, in h (the transport budget). */
 export const UNIFORM_REGION_HEAT_BUDGET_H=0.02;
 /** State words per region: heat, displacement (h), block word, window
  * coordinate xyz, pending trigger (claims, remaps), trigger bits. */
-const STATE_WORDS=8;
+const STATE_WORDS=9;
 const HEAT_GRID=1024;
 const PASS:GPUComputePassDescriptor={label:"Uniform region work heat"};
 
@@ -124,6 +145,15 @@ export interface UniformRegionHeatSources {
   particleHeat?:{buffer:GPUBuffer;word:number};
   /** The scene's source uniforms (UNIFORM_PARAMS_BYTES). */
   sourceParams?:GPUBuffer;
+  /** The COLD freeze (uniform-cold-freeze): a frozen region's coarse term
+   * T (its region snapshot, as of the frame before's head) adds
+   * dt*max|T|/h to the region's displacement, so a coarse response over
+   * the budget thaws it. */
+  coldFreeze?:UniformColdFreeze;
+  /** Hold GPU-raised one-frame tiers UNIFORM_REGION_HEAT_HOLD_FRAMES more
+   * frames (the NB-FLIP coldFrameSkip "on" setting; default true): host
+   * skippers then see every rise while it stands. False holds none. */
+  holdRises?:boolean;
 }
 
 export class UniformRegionHeat {
@@ -151,7 +181,7 @@ export class UniformRegionHeat {
     if(!Number.isInteger(this.regions))throw new Error(`Region heat: ${ownership.capacity.tiles} tiles are not whole regions`);
     const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
     // Every region reads HOT (and not deep COLD) until the first encode.
-    this.tiers=device.createBuffer({label:"Uniform region work tiers",size:4*UNIFORM_REGION_HEAT_EPOCH_WORD(this.regions)+4*this.regions,usage,mappedAtCreation:true});
+    this.tiers=device.createBuffer({label:"Uniform region work tiers",size:4*UNIFORM_REGION_HEAT_DEEP_EPOCH_WORD(this.regions)+4*this.regions,usage,mappedAtCreation:true});
     new Uint32Array(this.tiers.getMappedRange()).fill(UNIFORM_REGION_TIER.hot,0,this.regions);this.tiers.unmap();
     this.state=device.createBuffer({label:"Uniform region work heat state",size:4*STATE_WORDS*this.regions,usage});
     this.params=device.createBuffer({label:"Uniform region work heat params",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -166,8 +196,11 @@ export class UniformRegionHeat {
     this.layout=device.createBindGroupLayout({label:"Uniform region work heat",entries:[
       entry(0,{type:"storage"}),entry(1,{type:"storage"}),entry(2,{type:"uniform"}),entry(3,{type:"read-only-storage"}),entry(4,{type:"read-only-storage"}),
       ...(sources.bodyRegions?[entry(5,{type:"read-only-storage"})]:[]),...(sources.particleHeat?[entry(6,{type:"read-only-storage"})]:[]),...(sources.sourceParams?[entry(7,{type:"uniform"})]:[]),
+      ...(this.freezeOf(sources)?[{binding:8,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
     ]});
   }
+  /** The freeze the heat binds: none while UNIFORM_COLD_FREEZE is off. */
+  private freezeOf(sources:UniformRegionHeatSources):UniformColdFreeze|undefined{return UNIFORM_COLD_FREEZE?sources.coldFreeze:undefined;}
   /** Diagnostics: COLD, WARM, HOT and free region counts of the last encode. */
   get counts():{readonly buffer:GPUBuffer;readonly offset:number}{return {buffer:this.tiers,offset:4*this.regions};}
   /** Every region HOT at the next encode (any host state change). */
@@ -185,14 +218,21 @@ struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,pad0:u32,
 ${s.bodyRegions?"@group(1) @binding(5) var<storage,read> bodyMask:array<u32>;":""}
 ${s.particleHeat?`@group(1) @binding(6) var<storage,read> particleHeat:array<u32>;const RH_PARTICLE:u32=${s.particleHeat.word}u;`:""}
 ${s.sourceParams?uniformMixedSourceWGSL(7):""}
+${UniformColdFreeze.wgsl(this.freezeOf(s),1,8)}
+// A frozen region's coarse term: its speed bound, m/s (0 when not frozen).
+fn rhColdSpeed(region:u32)->f32{if(!umFrozenRegion(region)){return 0.0;}return max(abs(umColdTermOf(region,0u)),max(abs(umColdTermOf(region,1u)),abs(umColdTermOf(region,2u))));}
 const RH_REGIONS:u32=${this.regions}u;
 const RH_STATE:u32=${STATE_WORDS}u;
 const RH_BUDGET:f32=${UNIFORM_REGION_HEAT_BUDGET_H};
 const RH_UNKNOWN:f32=3.0e38;
-// Force, identity, pending and unknown: HOT this frame, no heat.
-const RH_ONE_FRAME:u32=0x27u;
-// Displacement over budget, a WARM promotion: WARM this frame, no heat.
-const RH_WARM_FRAME:u32=0x140u;
+// Force, identity, pending, unknown and a held HOT rise: HOT this frame, no heat.
+const RH_ONE_FRAME:u32=0x227u;
+// Displacement over budget, a WARM promotion, a held WARM rise: WARM this frame, no heat.
+const RH_WARM_FRAME:u32=0x540u;
+// The one-frame rises the host does not cause (all but force): held.
+const RH_HELD_HOT:u32=0x26u;
+const RH_HELD_WARM:u32=0x140u;
+const RH_HOLD_FRAMES:u32=${s.holdRises===false?0:UNIFORM_REGION_HEAT_HOLD_FRAMES}u;
 const RH_SPAN_H:f32=${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
 // A region's level: its heat, at least 2 on a one-frame HOT trigger and
 // 0.75 on a one-frame WARM one.
@@ -219,7 +259,7 @@ var<workgroup> rhParticle:atomic<u32>;
   let at=RH_STATE*region;
   if(live==0u){
    // A free region keeps no identity: whatever it later holds triggers.
-   if(l==0u){state[at]=0u;state[at+1u]=0u;state[at+2u]=0xffffffffu;state[at+6u]=0u;state[at+7u]=0u;}
+   if(l==0u){state[at]=0u;state[at+1u]=0u;state[at+2u]=0xffffffffu;state[at+6u]=0u;state[at+7u]=0u;state[at+8u]=0u;}
    continue;
   }
   ${s.particleHeat?`{let t=umPageTile(region,l);if(umTileLive(t)){atomicMax(&rhParticle,particleHeat[RH_PARTICLE+t]);}}`:""}
@@ -248,9 +288,17 @@ var<workgroup> rhParticle:atomic<u32>;
    if((state[at+7u]&RH_ONE_FRAME)!=0u){dp=0.0;}
    if(!(speed<=RH_UNKNOWN)||!(dp<=RH_UNKNOWN)){trigger|=32u;}
    else{
-    displacement+=rh.dt*speed*rh.hInverse+rh.pressure*dp;
+    displacement+=rh.dt*(speed+rhColdSpeed(region))*rh.hInverse+rh.pressure*dp;
     if(displacement>RH_BUDGET){trigger|=64u;}
    }
+   // A rise the host does not cause holds RH_HOLD_FRAMES frames more
+   // (bit 9 a held HOT, bit 10 a held WARM): the host's evidence lags
+   // UNIFORM_MIXED_RECEIPT_RING frames, and sees it while it still stands.
+   {let held=state[at+8u];var left=held>>8u;var tier=select(0u,held&255u,left>0u);
+    if(left>0u){trigger|=select(1024u,512u,tier>=${UNIFORM_REGION_TIER.hot}u);left--;}
+    if((trigger&RH_HELD_HOT)!=0u){tier=${UNIFORM_REGION_TIER.hot}u;left=RH_HOLD_FRAMES;}
+    else if((trigger&RH_HELD_WARM)!=0u){tier=max(tier,${UNIFORM_REGION_TIER.warm}u);left=RH_HOLD_FRAMES;}
+    state[at+8u]=select(0u,tier|(left<<8u),left>0u);}
    if(trigger!=0u){displacement=0.0;}
    var value=max(0.0,bitcast<f32>(state[at])-rh.cooling*rh.dt);
    if((trigger&~(RH_ONE_FRAME|RH_WARM_FRAME))!=0u){value=2.0;}
@@ -287,6 +335,7 @@ var<workgroup> rhParticle:atomic<u32>;
   cold=atomicLoad(&tiers[umPageOfTile(key)])==${UNIFORM_REGION_TIER.cold}u;
  }
  atomicStore(&tiers[${UNIFORM_REGION_HEAT_DEEP_WORD(this.regions)}u+region],u32(cold));
+ if(!cold){atomicAdd(&tiers[${UNIFORM_REGION_HEAT_DEEP_EPOCH_WORD(this.regions)}u+region],1u);}
 }
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
@@ -297,6 +346,7 @@ var<workgroup> rhParticle:atomic<u32>;
     if(s.bodyRegions)entries.push({binding:5,resource:{buffer:s.bodyRegions.buffer,size:4*this.regions}});
     if(s.particleHeat)entries.push({binding:6,resource:{buffer:s.particleHeat.buffer}});
     if(s.sourceParams)entries.push({binding:7,resource:{buffer:s.sourceParams,size:UNIFORM_PARAMS_BYTES}});
+    {const freeze=this.freezeOf(s);if(freeze)entries.push({binding:8,resource:freeze.regions.createView()});}
     this.group=this.device.createBindGroup({label:"Uniform region work heat",layout:this.layout,entries});
     this.hInverse=1/h;
   }
@@ -329,7 +379,7 @@ var<workgroup> rhParticle:atomic<u32>;
   promoteWGSL(group:number,tiersBinding:number,stateBinding:number):string{return /* wgsl */`
 @group(${group}) @binding(${tiersBinding}) var<storage,read_write> rhTiers:array<atomic<u32>>;
 @group(${group}) @binding(${stateBinding}) var<storage,read_write> rhState:array<atomic<u32>>;
-fn rhPromoteTo(region:u32,tier:u32){if(region>=${this.regions}u){return;}atomicMax(&rhTiers[region],tier);atomicMax(&rhState[${STATE_WORDS}u*region+6u],tier);}
+fn rhPromoteTo(region:u32,tier:u32){if(region>=${this.regions}u){return;}if(atomicMax(&rhTiers[region],tier)<tier){atomicAdd(&rhTiers[${UNIFORM_REGION_HEAT_PROMOTED_WORD(this.regions)}u],1u);}atomicMax(&rhState[${STATE_WORDS}u*region+6u],tier);}
 fn rhPromote(region:u32){rhPromoteTo(region,${UNIFORM_REGION_TIER.hot}u);}
 fn rhPromoteWarm(region:u32){rhPromoteTo(region,${UNIFORM_REGION_TIER.warm}u);}
 `;}

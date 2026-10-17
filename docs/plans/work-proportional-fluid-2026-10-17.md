@@ -1971,3 +1971,375 @@ Neither binds the correction texture any more, and stream 2 drops its stores. A 
 **Memory.** Unchanged. The scratch is already a vec4f per owner, and the correction texture stays allocated: the reference aliases it to gammaA, so removing it frees nothing.
 
 **Deleted.** Two tests pinned the removed `curvature` force field: `tests/uniform-retained-normals.test.ts` and `tests/uniform-zero-curvature-seams.test.ts`.
+
+## Settled melt: stream C (2026-10-18)
+
+Stream C owned pressure and the per-dispatch floor. In a settled frame the pressure band now launches nothing, and the host has a stale, non-blocking view of the region heat. Any stage can use that view to leave out launches that would have no work. Two NB-FLIP method params (`update: "solver"`, tier fine) control the new behaviour:
+
+- `coldRegions` (Melt A's key): "frozen16h" (default) or "fine".
+- `coldFrameSkip` (this stream): "on" (default) or "off". With "off", every launch is encoded and B's heat hold is disabled.
+
+With "off" for both, the solver behaves as it did before this work. That path is kept as a working option, not a fallback.
+
+### What was built
+
+**Host cold-frame evidence: `uniform-cold-frame.ts` (new).** The frame owns `readonly cold: UniformColdFrame`.
+
+- `cold.ceiling` is the highest region tier any live region may hold this advance. `cold.quiet` means the ceiling is COLD.
+- At the end of each frame, the receipt copies five region-heat header words: the COLD, WARM, HOT and free counts, and the mid-frame PROMOTED count. It also records the frame's live NB-FLIP particle count.
+- Frame N reads frame N-2's receipt. The receipt ring already guarantees that receipt has been checked before N encodes, so there is no blocking readback. This is the same deterministic lag as the pressure plan.
+- The ceiling is HOT, and every launch is encoded, in any of these cases:
+  - there is no evidence yet;
+  - the evidence predates the last host trigger;
+  - the evidence frame promoted a region mid-frame;
+  - the evidence frame had live particles.
+- Host triggers are:
+  - extension invalidation, a layout update, a relayout attach, a fine-capacity reservation;
+  - a kick, a change of parameters, a host edit, added source volume, a census first frame;
+  - a page drop or injection;
+  - any body whose pose changed between advances (`rosterPosesMoved`, every body in the roster).
+- With `coldFrameSkip` "off", the ceiling is always HOT.
+
+**Band skip: `uniform-pressure-band.ts`.**
+
+- The band receives the cold frame (`fields.coldFrame`). When the freeze is present and the frame is quiet, the band's `empty` gate leaves out:
+  - the whole prepare pass: list, spatial order, prep and bakes;
+  - the whole solve: init through measure, copy and project.
+- The header clear and the slot-map clear still run. They are the band's entire result in an all-COLD frame, because under the freeze every COLD region is freezing or frozen and lists no band tile.
+- A quiet frame is about 107 fewer dispatches.
+
+**Empty-band receipt.** The final measure now reports cycle 0 and DONE when the band holds no tile. Before, it reported every encoded cycle, which widened the next frames' capacity launches for no work.
+
+**Freeze integration of root and band** (agreed with A). This was done earlier in this stream and is summarised here:
+
+- The root rhs and project read A's region texture (binding 14) and write corrections to an r32float storage texture (binding 15). Textures were used because both kernels were already at the adapter's limit of 10 storage buffers.
+- The band list leaves out frozen tiles. A band face that borders a frozen cell is Neumann at its frozen F plus the region's T.
+
+**Allocation and planning.**
+
+- The receipt heat copy is now a plain loop; it used to allocate a `subarray` every frame.
+- `mixedBodyTiles` clears its marks sparsely, so `syncMixedLayout` no longer sweeps the whole plane every frame. It accounted for 7.5 ms of self time in an earlier settled profile window and does not appear in the new one.
+- The pose array grows only when the roster grows.
+- What remains of the encode cost is mostly Dawn's native cost per dispatch (58% of steady-state main-thread time), not JS planning.
+
+### Measurements
+
+Pool scene at 1/60 s, frames 6 to 20, one run per arm. GPU utilisation was 3-4% before the timed arms.
+
+| Settled | coldRegions fine, skip off (today) | frozen16h, skip on (default) |
+| --- | --- | --- |
+| Median frame (wall) | 19.3 ms | 14.3 ms |
+| Dispatches per frame | 579 | 474 |
+| Encode (mean, CPU) | 3.7 ms | 3.4 ms |
+| Pressure passes, profiled | 8.05 ms | 2.86 ms |
+| Band list and rows / solve / projection, profiled | 2.06 / 2.39 / 0.39 ms | 0 / 0 / 0 |
+| maxSpeed | 2.56e-6 m/s | 2.57e-6 m/s |
+
+The profiled pressure sum includes timestamp overhead. The remaining pressure work is:
+
+| Pass | Time |
+| --- | --- |
+| Root V-cycle slots | 0.75 ms |
+| Full-cycle slots | 0.47 ms |
+| rhs | 0.68 ms |
+| setup | 0.26 ms |
+| project | 0.21 ms |
+
+With frozen16h and skip off: 581 dispatches and about 17.5 ms. The GPU was not idle at that run's start, so treat its timing as indicative only.
+
+Pool-impact, 30 frames, frozen16h with skip on against fine with skip off:
+
+| Check | frozen16h, skip on | fine, skip off |
+| --- | --- | --- |
+| Impulse | 493.78 N s | 494.51 N s |
+| Deepest point | 1.3434 m | 1.3434 m |
+| Max momentum error | 1.56e-5 | 1.46e-5 |
+
+- Impact frames are never quiet: the ceiling stayed HOT every frame, so the skip encoded everything.
+- The impulse difference (-0.15%) comes from the freeze.
+- The baseline arm's median frame was 45.4 ms. In the skip-on arm, frames 3 to 11 ran at 35 to 50 ms, matching the baseline arm. From frame 12, an unlocked `tools/benchmark-svo-dry-frame-gpu.ts` from another session shared the GPU, so those frames carry no timing.
+
+**Residuals.**
+
+- With the freeze, the root's entry residual rises by about 6.5e-6 per frame as the frozen terms accumulate. A single gated root cycle resets it every 4 to 5 frames.
+- The baseline arm runs one root cycle about every second frame.
+- The band holds no tile in a settled frozen frame, so its receipt residual is 0. In the baseline it stays between 1e-5 and 7e-5.
+
+### Lag and contract
+
+- A region that heats with no host trigger at frame M is fully encoded from frame M+2. In frames M and M+1, a skipping stage may leave it out.
+- B's hold (`holdRises`, on only when `coldFrameSkip` is on) keeps a GPU-raised rise visible in the evidence for two more frames, so every rise reaches the host.
+- This is 2 frames, not the "no later than the next frame" that COMMON.md states. A lag of 1 would need a blocking readback, because the app keeps two frames in flight.
+
+### Not done, and why
+
+- **Root slots.** These were not cut in quiet frames. Root non-convergence is fatal (fail fast), and the slots are gated on the GPU. Encoding fewer than the floor's three slots on host evidence that may be 2 frames stale could turn a heating frame into a fatal frame. `UNIFORM_MIXED_SCHEDULE_FLOOR` records a past failure of exactly that kind (dam 128^3). Closed slots still cost about 1.2 ms.
+- **Root rhs, setup and project restricted to non-COLD rows.** Not done:
+  - The root is a single global all-4h solve, and frozen regions' rhs changes every frame through T.
+  - Setup writes into the shared pressure arena, which other stages rewrite every frame, so it cannot be retained either.
+- **Seam compatibility risk.** On a band face bordering a frozen cell, the Neumann flux is F + T(new). It is not that face's own root projection, so where T varies across a region the band rows carry a small compatibility error.
+- **Other stages' skips.** No other stage consumes `cold.quiet` yet. A gates its field stages itself (momentum, forces, transfers, extension publishes, remap publish), on `cold.quiet && freeze`.
+- **Tests.** `npm run check:types` and `npm run test:unit` pass (935 pass, 51 skipped). No tests were deleted.
+
+## Settled melt: stream B (2026-10-18)
+
+Stream B owned whole-domain bookkeeping (census, work control, plan, certificate, surface volume, region heat), the particle machinery, and NB-FLIP geometry. In a settled pool the frame now reaches an *idle* state from frame 7. In that state no census runs and no NB-FLIP stage launches, and a frame encodes 215 dispatches where it used to encode 460. All of the remaining dispatches are pressure work (169), sensors, or work whose input changes every head.
+
+### Settings
+
+All of these are NB-FLIP method params with `update: "solver"`. In each case the fast setting is the default, and "off" (or "full") gives the behaviour from before this stream exactly.
+
+- **`coldCensus`**: "replay" (default) or "full".
+  - With "replay", a deep-COLD region keeps its census decision and replays its classification records; it does not decide again.
+  - With "full", every region decides every census.
+- **The tier hold** (UNIFORM_REGION_HEAT_HOLD_FRAMES = 2) follows `coldFrameSkip`. C passes `holdRises: coldFrameSkip !== "off"`.
+- **The T-displacement trigger** follows `coldRegions`. This is the frozen region's T term added to the heat's displacement budget (`rhColdSpeed`).
+- **Idle** has no key of its own. It needs both the freeze (`coldRegions` "frozen16h") and quiet frames (`coldFrameSkip` "on"), so if either key is off, no frame is ever idle.
+
+The list-strided particle changes are not result-altering and have no toggle.
+
+### What was built
+
+**NB-FLIP idle: `uniform-narrow-band-flip.ts`.**
+
+- `beginAdvance(cold)` sets the flag: `idle = cold.quiet && quietLast && freeze present && started`.
+  - Quiet means that the evidence from frame N-2 has a live-particle count of 0.
+  - A quiet frame seeds nothing; it runs the `resampleKeep` batch, which reuses existing pipelines and needs no new compile.
+  - So an idle frame holds no live sample.
+- In an idle frame these stages encode nothing: move, refine, reconstruct, transfer, snapshot, redistance and update. retire returns false. clearAir only clears the air-changed word.
+
+**The freeze in the transfer: `uniform-narrow-band-flip.ts` and `uniform-narrow-band-surface.wgsl.ts`.**
+
+- `attachFreeze(freeze)` adds binding 18, A's region texture.
+- transferOwners and transferProperties leave frozen cells alone. transferFace leaves frozen faces at their original value and adds the thaw term (umThawFaceTerm) to the face mean.
+
+**The census skip in the relayout head: `uniform-mixed-frame.ts`.**
+
+- An idle frame drops its relayout.
+- The drop comes after the residency and censused lines. So `censused` stays set, residency is not reset, and the last census's generation, residency certificate and page claims stand.
+- The first frame off idle runs a normal census.
+
+**Host census inputs: `webgpu-uniform-reference.ts`.** Every host-known event that can need a census breaks idle on its own frame through `cold.trigger()`:
+
+- C's triggers: a page drop or injection ahead, and roster poses that moved;
+- added source volume;
+- solid edits and option or detail changes, through `invalidateExtension`;
+- `setRelayout` and `updateLayout`;
+- `mixedCensusMoved`, which covers these census inputs:
+  - the stale-mixed count and the scene revision;
+  - dt, compared with Math.fround because advanceTo's dt alternates by one ulp;
+  - the body count;
+  - padding, percent, fade and sparse;
+  - a pending edit join;
+  - a dynamic detail policy that is not current.
+
+**Idle guards for B's per-frame stages: `uniform-mixed-frame.ts`.** These guards run only in idle frames. They come in two kinds.
+
+The first kind leave out work whose inputs are unchanged since the last frame, so the outputs already hold what a run would write:
+
+- `plan.encode` in encodeParticleMomentum. It reads phi, velocity, ownership and tiers, and no solid.
+- `plan.encodeCertificate`. Its inputs are the extension (not run under extensionIdle), the support, ownership and dt.
+- `surfaceVolume.beginStep`. The gauge's rate is a function of phi, the budget and dt. The copy of the rate into the authority parameters still runs, because the host write zeroes that word every frame.
+
+The second kind leave out work whose result nothing reads:
+
+- the surface advect, its 16h surface work control, and the scratch phi resolve. Only reconstruct and redistance read the scratch, and neither runs.
+- the three resolves of phi after reconstruct, clearAir and redistance. Phi is unchanged in an idle frame.
+
+**Census replay: `uniform-mixed-dynamic.ts` and `uniform-narrow-band-budget.wgsl.ts`.** Deep-COLD regions keep their census decision (CC_DECIDED) and replay their classification. Non-COLD regions, and regions that neighbour a change, decide again.
+
+**Region heat: `uniform-region-heat.ts`.**
+
+- The 2-frame hold of GPU-raised tiers (state word 8).
+- The freeze binding (binding 8), and the T displacement (`rhColdSpeed`).
+- `encodeDeep` runs only in the relayout head.
+
+**Particle lists: `uniform-narrow-band-flip.ts` and `uniform-narrow-band-order.ts`.** Particle launches stride the occupied-tile and live-particle lists rather than the whole bin range.
+
+### Measurements
+
+All runs: pool, 1/60 s, frames 6 to 20, one run per arm.
+
+**Dispatches in a settled frame.**
+
+| State | Dispatches |
+| --- | --- |
+| Start of this stream | 474 |
+| Every launch encoded (NB idle forced off) | 460 |
+| Idle, NB stages only | 382 |
+| Idle, plus the census skip | 248 |
+| Idle, plus the frame-level guards above | 215 |
+
+The 215 dispatches of an idle frame break down as follows:
+
+- **Pressure: 169.** Full and V-cycle slots, setup, measure, checkpoints, gates, rhs, project, root owners and to-pressure.
+- **Kept on purpose: 46.**
+  - geometric fill and its geometry work control: 13;
+  - NB surface pressure authority: 10;
+  - body forces: 8 (A's);
+  - solid record: 4;
+  - heat: 3;
+  - region dynamics classify and publish: 2 + 2;
+  - freeze: 2;
+  - rigid coupling and integration: 2.
+
+**Wall time.** The GPU read 40 to 99% busy from another session for the whole of this stream, so no clean timing exists. One pair of runs, made back to back under the same load, is indicative only:
+
+| Arm | Median frame | Encode (mean, CPU) |
+| --- | --- | --- |
+| Idle on | 7.3 ms | 2.1 ms |
+| Idle forced off | 16.8 ms | 4.0 ms |
+
+Pool-impact is never quiet, so idle never engages there. Its encode path and dispatch count (614.5 per frame) are unchanged by this stream. Its wall times under the same load are not comparable with the 49 ms base.
+
+**Bit identity.**
+
+- **20 settled frames, idle on against idle forced off.** These all match:
+  - the dumped fields: phi, velocity, pressure, density, geometry target, centre phi and the authoritative velocity samples;
+  - the presented pressure and phi;
+  - the certificate words, region velocities, surface-volume budget and authority parameters.
+
+  These differ, as expected:
+  - The census bookkeeping of the 3472 free regions. Forced off, their epochs advance through encodeDeep twice a frame.
+  - The NB reuse caches. They are validated by revision.
+  - The certificate's tile lists. Their order differs from run to run because of the atomic appends; as multisets they are equal.
+- **Resumption.** A host trigger at frame 18, run to frame 24: the fields are bit-identical. Idle resumes at frame 21.
+- **coldCensus "full" against "replay".** The fields are bit-identical both with idle on and with idle forced off, the second being the case where the census runs every frame.
+
+**Physics.**
+
+| Check | Result |
+| --- | --- |
+| Pool-impact impulse | 493.776 N s |
+| Pool-impact deepest point | 1.34343 m |
+| Settled maxSpeed | 2.57e-6 m/s |
+
+These are unchanged by every B change. The impulse is -0.15% against the fine base of 494.5 N s; that difference is A's freeze, as C recorded.
+
+### Latency from a GPU-raised trigger (coldFrameSkip on)
+
+**The worst case is 2 frames.** A region the GPU heats at frame M, with no host trigger, gets full treatment from frame M+2.
+
+1. At frame M the heat raises the region's tier on the GPU. Stages gated on the GPU treat the region in frame M itself. Stages the host left out in frame M, because its evidence from frame M-2 was quiet, do not.
+2. Frame M's receipt carries the raised tier counts. With UNIFORM_MIXED_RECEIPT_RING = 2, frame M+2 is the first frame whose evidence is frame M. That frame sees a ceiling above COLD and encodes everything. Idle also ends there, because idle needs quiet at both N and N-1.
+3. The hold keeps a GPU-raised tier for 2 more frames, through M+2. So when the host's full encode arrives at M+2, the region is still above COLD on the GPU, and its region-gated kernels do its work.
+
+Without the hold, a rise that lasted only frame M would be reported to the host at M+2, but the region would already be COLD on the GPU again by then. It would get no host-skipped treatment at all. A hold of 2 frames is exactly the length of the receipt ring, so it is the shortest hold that covers the gap. A lag of 1 frame would need a blocking readback, because the app keeps two frames in flight.
+
+**Lags specific to idle.**
+
+- **A body integrated on the GPU** that starts moving with no host trigger is caught by the heat's body bit. The census and the NB stages resume at most 2 frames later. Derived geometry is not affected by this lag, because it is never skipped (see below).
+- **Host events** break idle on their own frame through `cold.trigger()`, so they have no lag.
+- **C's open risk**, a census remap in the middle of a frame under stale cold evidence, cannot happen in an idle frame, because no census runs there.
+
+### Not done, and why
+
+- **Geometric fill and geometry work control (13 dispatches).** Each head's swept-body mask runs from the record's last build to the current pose, and the record rebuilds every frame that has bodies. The geometry work control is the mask's only consumer (`consumeBodyEvidence`). If an idle frame left geometry out, a body that moved in that frame would lose its swept evidence for good, and the derived geometry in those regions would stay stale. Skipping it safely needs evidence that accumulates over skipped frames.
+- **NB surface pressure authority (10).** This file is not B's. Its cut pass reads the solid, which is rebuilt every frame that has bodies.
+- **Solid record, heat, dynamics and freeze.** These are the sensors that end idle, so they must run.
+- **Timing.** There are no clean milliseconds, because of GPU contention; see Measurements.
+- **Gates.**
+  - `npm run test:unit` passes: 940 tests pass, 51 are skipped, 0 fail. No tests were deleted.
+  - `npm run check:types` currently fails only in another session's files, which are in progress: `uniform-spatial-performance.ts` (`band` is private), and earlier `webgpu-uniform-reference.ts` at `mixedFrameTrace` (`origin_m`). B's files type-check.
+
+## Settled melt: stream A (2026-10-18)
+
+COLD regions are kept at 16h with no fine/4h field work. A COLD region's fine velocity is frozen, and its pressure response is carried as one 16h velocity term per region. This replaces per-texel retention copies. The NB-FLIP method parameter `coldRegions` selects it:
+- `"frozen16h"` is the default;
+- `"fine"` builds no freeze and is today's path exactly.
+
+It is a `select` with `update:"solver"`, wired through `narrowBandColdRegions` to `UniformMixedFrameCapacity.coldRegions`. C's band exclusion and B's transfer freeze key on the same freeze instance.
+
+### What was built
+
+**`uniform-cold-freeze.ts` (new).** `UniformColdFreeze` holds three pieces of state:
+- **Canonical region record:** 4 f32 per region, T.xyz (m/s) and state.
+- **`regions` snapshot:** a sampled rgba32float 2D texture (256 wide) that every stage reads. Texel `REGIONS` holds dt·g. A texture rather than a buffer, because C's root rhs/project is at the 10 storage-buffer limit.
+- **`corrections`:** an r32float 2D texture with one texel per 4h face, at `3*tile+axis`.
+
+Region states:
+
+| State | Meaning |
+| ---: | --- |
+| 0 | live |
+| 1 | freezing: the first COLD frame; T restarts at 0 |
+| 2 | frozen |
+| 3 | thawing: the first non-COLD frame; T is folded in once by `umThawFaceTerm`, then reset at the next head |
+
+Two kernels:
+- **`encodeHead`** runs once a frame on the final tiers: after `heat.encode`, or after `heat.encodeDeep` in a relayout head, so it follows its promotions.
+- **`encodeAccumulate`** runs after the root projection and before toSimulation. One workgroup per region. Each frozen region adds the mean of its tiles' corrections to T. It then resets each correction it read to `NO_FACE`. The texture is also filled with `NO_FACE` at initialize, so a face the projection never evaluates never counts.
+
+WGSL accessors: `umFrozenRegion`, `umFrozenCell`, `umFrozenFace`, `umColdTermOf`, `umColdFaceTerm`, `umThawFaceTerm`, `umColdForced` (raw + T + dt·g on an occupied axis-1 face, the forces' gravity rule) and `umColdCorrect`. With no freeze they compile to constants.
+
+**A frozen face** is any face incident to a frozen cell. Its value F stays in `f.velocity`, `f.negative` and the forced field. Freezing happens after projection, never before.
+
+**Momentum (`uniform-mixed-momentum.ts`, plus a `skipOwner` hook in `uniform-mixed-face-dispatch.wgsl.ts`).**
+- Frozen owners are neither evaluated nor stored, and the fused dispatch skips them.
+- A warm owner's frozen face returns the physical F.
+- A thawing face adds T.
+
+**Forces (`uniform-mixed-forces.ts`).**
+- Frozen owners return early in `forcesFine`, `forcesRegularCoarse` and the fused dispatch.
+- A warm owner's face against a frozen cell keeps the advected (frozen) value.
+
+**Ownership transfers (`uniform-mixed-remap.ts`, `UniformMixedOwnershipTransfer`).**
+- toPressure skips frozen (state 2) tiles. A freezing tile still restricts once, so the h tiles' pressure-only base anchors hold F.
+- toSimulation skips freezing and frozen tiles. A warm tile's split plane or +face against a frozen cell keeps velocityScratch's frozen value.
+
+**Extension (`uniform-mixed-extension.ts`).** The region word carries a frozen bit (16), set from tier COLD in `classifyRegions` when the instance was built with `coldFreeze`. The fine, coarse and list publishers write nothing in a frozen region, so velocityScratch is invariant there.
+
+**Frame (`uniform-mixed-frame.ts`, small hunks).**
+- Construction, initialize, head, accumulate and destroy.
+- `coldFreeze` is passed to the heat. The heat is B's: it thaws a region whose T exceeds the WARM budget.
+- `freeze` is passed to the band fields, the root projection and the NB-FLIP transfer.
+- Host skips that use C's `UniformColdFrame`:
+  - `frozenQuiet = freeze && cold.quiet` leaves out momentum, the 4h sampling cache, the hanging taps and toSimulation. With every region freezing or frozen, their kernels write nothing.
+  - `extensionIdle = frozenQuiet && narrowBandFlip.idle` (B's idle) also leaves out every extension encode (census/head, retainPair, preparePair/finishSnapshot/finishPair) and the forces. Phi is held, so no capillary cache is dirty. A skipped tail leaves the extension unretained, so the next swept encode marks every region.
+  - toPressure is kept. A region that flaps COLD→WARM→COLD inside the 2-frame evidence lag is in the freezing state under a quiet ceiling, and still needs its F restricted.
+
+### Measurements (1/60 s, settled and pool-impact, frames 6–20)
+
+Final arms (code as landed). Each arm waited for a quiet window (GPU utilisation under 10% for about 10 s), and the four ran back to back under the GPU lock. Utilisation was 0% at the start of every arm and rose to about 70% by its end, as another app's unlocked SVO benchmark resumed. The last frames of each arm are therefore contended; treat the numbers as indicative.
+
+| Scene | Arm | Wall mean | GPU pass sum |
+| --- | --- | ---: | ---: |
+| settled | `coldRegions:"fine"` | 22.1 ms | 15.5 ms |
+| settled | `"frozen16h"` | 6.0 ms (median 5.4) | 3.9 ms |
+| pool-impact | `"fine"` | 48.5 ms | 42.9 ms |
+| pool-impact | `"frozen16h"` | 51.4 ms | 42.9 ms |
+
+- **Settled:** the stream-A stages (momentum, hanging, 4h sampling, body forces, extension, transfer to simulation, phi resolve, surface advect, remap) fall from 4.77 ms to 0.26 ms of GPU time. The freeze itself costs 0.013 ms. What remains is mostly the root pressure (V-cycle 0.72, rhs 0.67, Full-cycle 0.48, setup 0.26, project 0.21 ms).
+- **Pool-impact:** GPU time does not change. The impact frames have WARM/HOT regions, so the quiet skips never fire there, and the per-owner frozen skips cost about what they save. The 3 ms wall difference is contention: its GPU sums are equal.
+- **Earlier, more contended runs:** settled fine 25.3 / GPU 19.5 ms vs frozen 9.2 / GPU 5.0 ms, under a steady 55–60% load.
+
+**Dispatches per settled frame:**
+
+| Configuration | Dispatches |
+| --- | ---: |
+| Before (C's band skip only) | 474 |
+| With A's frozenQuiet gates | 382 |
+| Sustained idle frames, with B's dt fix and B's idle guards | 215 |
+| Final, with the forces gate under idle | 207 (first quiet frame 457) |
+
+The remaining dispatches are the root pressure (V/Full cycles 137, setup 14, measure, gates, rhs, project), the authority and geometry fill (20), the dynamics classify (the forces themselves are skipped), the solid record, heat, the freeze (2) and toPressure (2).
+
+**Why quiet kept breaking.** The quiet evidence broke every 2–3 frames because `mixedCensusMoved` compared dt exactly, and dt alternated by one ulp. B now compares `Math.fround(dt)`.
+
+### Physics
+
+- **Pool-impact, 30 frames:** impulse 493.78 N s frozen vs 494.95 N s fine; deepest 1.3434 m in both.
+- **Pool-impact, 20 frames from 6:** impulse 423.72 vs 423.66 N s; deepest 1.34343 vs 1.34338 m.
+- **Settled maxSpeed:** 2.57e-6 m/s frozen vs 2.50e-6 m/s fine.
+- **Settled, all skips on vs `coldFrameSkip:"off"` (both with the freeze):**
+  - velocity differs by at most 1.5e-6 m/s;
+  - phi by at most 3e-8;
+  - geometry target and centre phi are identical.
+
+### Not done, and why
+
+- **Samplers do not compose T.** Momentum traces, extension seeds and G2P read F without T inside a frozen region. This is bounded by B's thaw trigger: T past the WARM budget thaws the region.
+- **No in-kernel frozen skip for the hanging taps, halo or 4h cache in mixed frames.** The same `UniformMixedHangingTaps` also fills NB-FLIP's snapshot taps from a different source, so a skip needs a separate pipeline variant. Settled frames skip these launches whole. In pool-impact the launches are about 0.4 ms in total.
+- **Phi resolve and surface advect.** They already hold deep-COLD vertices. In idle frames B now leaves them out entirely.
+- **C's section is out of date.** Its note that no other stage reads `cold.quiet` predates these gates.
+- **Timing.** The final arms each started from an idle GPU but ended contended. A fully clean before/after is left to the coordinator's integrated A/B.

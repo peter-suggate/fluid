@@ -30,6 +30,9 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  adaptiveSurface:"on",
  coarseParticleMode:"off",
  phiFineAdvection:values.phiFineAdvection==="trilinear"?"trilinear":"cubic",
+ coldCensus:values.coldCensus==="full"?"full":"replay",
+ coldRegions:values.coldRegions==="fine"?"fine":"frozen16h",
+ coldFrameSkip:values.coldFrameSkip==="off"?"off":"on",
 });
 // Derive the renderer lifetime key from this method's own schema; inheriting
 // Uniform Geometric's list misses NB-specific live controls.
@@ -37,6 +40,9 @@ const params:SimulationMethod["params"]=[
  ...narrowBandControlParams,
  {kind:"select",key:"particleTransfer",label:"Particle transfer",default:"flip",tier:"coarse",update:"solver",options:[{value:"flip",label:"FLIP (95%)"},{value:"apic",label:"APIC (experimental)"}],hint:"APIC replaces residual FLIP velocities with quadratic affine transfers, following Sato 2018. Restarts the solver."},
  NARROW_BAND_FINE_ADVECTION,
+ {kind:"select",key:"coldCensus",label:"Settled census",default:"replay",tier:"fine",update:"solver",options:[{value:"replay",label:"Keep settled decisions"},{value:"full",label:"Re-decide every tile"}],hint:"Settled regions keep their last detail decision until something near them moves; saves most of the census cost. Re-deciding classifies every tile every frame. Restarts the solver."},
+ {kind:"select",key:"coldRegions",label:"Settled regions",default:"frozen16h",tier:"fine",update:"solver",options:[{value:"frozen16h",label:"Frozen at 16h"},{value:"fine",label:"Full fine detail"}],hint:"Settled regions keep their fine velocity frozen and take pressure only as one 16h correction per region, so they cost almost nothing until they warm up again. Full fine detail re-solves every settled cell every step."},
+ {kind:"select",key:"coldFrameSkip",label:"Settled frame skip",default:"on",tier:"fine",update:"solver",options:[{value:"on",label:"Skip settled work"},{value:"off",label:"Run every stage"}],hint:"Stages with nothing to do in settled regions are left out of the frame, judged from the region heat two frames back. Running every stage launches all work every frame. Restarts the solver."},
  {kind:"number",key:"fineGridPadding",label:"Fine-grid padding",default:1,tier:"fine",update:"runtime",min:0,max:4,step:1,digits:0,unit:"h",hint:"Extra h cells around swept surface crossings. The particle band stays 4h wide."},
  ...UNIFORM_GEOMETRIC_PARAMS.filter(p=>!Object.hasOwn(fixed,p.key)).map(p=>Object.hasOwn(narrowBandAdaptiveDetail,p.key)?{...p,default:narrowBandAdaptiveDetail[p.key]} as typeof p:p)
   // One sweep: the particles carry the velocity, and what reads the extension
@@ -78,6 +84,6 @@ export const uniformNarrowBandMethod:SimulationMethod={
  appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:1,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
-  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineTrilinear:values.phiFineAdvection==="trilinear",narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
+  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineTrilinear:values.phiFineAdvection==="trilinear",narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

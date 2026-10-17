@@ -19,7 +19,7 @@ import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandFineTransf
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { UNIFORM_DETAIL_H_STORE, UNIFORM_DETAIL_MERGED_SLOTS, uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformMixedTopologyWGSL, uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_WINDOW, uniformBlockNeighbourWGSL, uniformKeyGroups, uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_WINDOW, uniformBlockNeighbourWGSL, uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
@@ -30,10 +30,12 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformPagePoolWGSL, type UniformPagePoolLayout } from "./uniform-page-pool";
 import { uniformPageInitBlocksWGSL, uniformPageInitGroups, type UniformPageInitBlocks } from "./uniform-page-initialise";
 import type { GPUFluidParticleSource } from "../../core/webgpu-particle-overlay";
+import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
+import type { UniformColdFrame } from "./uniform-cold-frame";
 
 /** How a batch step launches: a fixed 1024-group stride, the ownership's
- * counted launch, one group per tile, one group, or the fixed row that
- * strides the live samples (NARROW_BAND_PARTICLE_GRID). */
+ * counted launch, one group, or the fixed row that strides the live
+ * samples or the occupied tiles (NARROW_BAND_PARTICLE_GRID). */
 // Entries of fine-only batches (reconstruct, redistanceFine: encoded only
 // while the h-tile capacity is non-zero) on the h side of their group.
 const NB_H_STORE_ENTRIES=new Set(["coupleFine","redistanceFine"]);
@@ -46,7 +48,7 @@ const NB_H_TWIN_ENTRIES=["buildDistance"];
 // to one. buildDistance's twin is of its h-side pipeline (the redistance
 // and metric batches while the h capacity is non-zero).
 const NB_FREE_TWIN_ENTRIES=["coupleFine","buildDistance@h"];
-const NB_LAUNCH={grid:0,counted:1,tiles:2,one:3,particles:4} as const;
+const NB_LAUNCH={grid:0,counted:1,one:3,particles:4} as const;
 /** One launch of a batch, resolved once at initialization: its bind groups
  * by name (bind() replaces the groups), its pipeline and its launch. */
 interface NarrowBandStep{readonly groups:string;readonly base:boolean;readonly pipeline:GPUComputePipeline;readonly launch:number}
@@ -57,7 +59,7 @@ interface NarrowBandBatches{
  readonly activity:NarrowBandBatch;readonly search:NarrowBandBatch;readonly searchReconstruct:NarrowBandBatch;readonly searchRedistance:NarrowBandBatch;
  readonly diagnose:NarrowBandBatch;readonly reconstruct:NarrowBandBatch;readonly reconstructCoarse:NarrowBandBatch;readonly transfer:NarrowBandBatch;
  readonly snapshot:NarrowBandBatch;readonly retire:NarrowBandBatch;readonly redistanceFine:NarrowBandBatch;readonly redistanceMetric:NarrowBandBatch;readonly metric:NarrowBandBatch;readonly metricFine:NarrowBandBatch;
- readonly update:NarrowBandBatch;readonly resample:NarrowBandBatch;readonly clearAir:NarrowBandBatch;
+ readonly update:NarrowBandBatch;readonly resample:NarrowBandBatch;readonly resampleKeep:NarrowBandBatch;readonly clearAir:NarrowBandBatch;
 }
 const NB_REFINEMENT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP surface refinement"};
 const NB_SNAPSHOT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP snapshot"};
@@ -180,7 +182,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
 
  private readonly next:GPUBuffer;
  private readonly params:GPUBuffer;
- private readonly resources:GPUBindGroupLayout;
+ private resources:GPUBindGroupLayout;
+ /** The COLD freeze (attachFreeze): the transfer leaves frozen cells and faces. */
+ private freeze?:UniformColdFreeze;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  private groups:Record<string,readonly [UniformDetailGroup,UniformDetailGroup]>={};
  private batches?:NarrowBandBatches;
@@ -190,8 +194,6 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  /** Bank A's words (NB_DEPTH_A to NB_DEPTH_B): a vertex key each, or the two packed nearest banks where those are longer. */
  private readonly vertices:number;
  private readonly tiles:number;
- /** The launch with a group a tile key. */
- private readonly tileGroups:[number,number]=[0,0];
  /** Per-frame parameter records, filled in place. */
  private readonly stepWords=new Float32Array(8);
  private readonly activityWords=new Float32Array(4);
@@ -202,6 +204,12 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private started=false;
  private bandCurrent=false;
  private get activityWord():number{return 3*this.cells+this.vertices+9*this.tiles+4;}
+ /** The occupied tile list in the bins: word 0 its length, entries from
+  * word 4. A tile key joins it when its coverage (NB_COVERAGE) leaves 0,
+  * so the coverage is non-zero only on listed keys; the order's prepare
+  * clears exactly the listed keys and empties it. Every per-tile particle
+  * launch strides it on a fixed grid: none is sized by the tile keys. */
+ private readonly occupiedWord:number;
  /** The far-air gate plane (NARROW_BAND_AIR_GATE_PLANE): a word a tile key,
   * after the activity planes and the air planes before it. A claimed block
   * takes 1 (advect) until the next clear computes it. */
@@ -227,7 +235,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
-  this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;uniformKeyGroups(address.tileKeys,1,65535,this.tileGroups);
+  this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;
   // The band is a surface, but what a scene's surface grows to is not known
   // here. Budget one sample per domain cell, with a two-million floor: twice
   // the previous allocation, still capped by full-domain seeding and the
@@ -239,7 +247,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*particleBytes),buffer("particles B",this.capacity*particleBytes)];
   this.state=buffer("receipt and particle frame",64);
-  const binWords=3*cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
+  // After the air planes: the occupied tile list (occupiedWord).
+  this.occupiedWord=3*cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
+  const binWords=this.occupiedWord+4+address.tileKeys;
   const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
   const completeReuse=narrowBandReuseLayout(binWords,8*address.blocks);
   this.reuse=4*(binWords+completeReuse.words)<=limit?completeReuse:narrowBandReuseLayout(binWords,8*address.blocks,0);
@@ -249,7 +259,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
   this.next=buffer("cell starts and compact neighbor samples",cells*4+this.capacity*28);this.params=buffer("parameters",64,true);
   this.liveGate=buffer("live sample gate",16,true);device.queue.writeBuffer(this.liveGate,0,new Uint32Array([1,0,0,0]));
-  this.order=new UniformNarrowBandOrder(device,address,ownership.presentation.buffer,this.particles,this.bins,this.next,this.state,undefined,this.apic);
+  this.order=new UniformNarrowBandOrder(device,address,ownership.presentation.buffer,this.particles,this.bins,this.next,this.state,this.occupiedWord,undefined,this.apic);
   this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
   this.refinementParams=buffer("refinement prediction",48,true);device.queue.writeBuffer(this.refinementParams,32,new Uint32Array([address.blocks,0,0,0]));
   const size=uniformCoarseCacheExtent(address);
@@ -261,7 +271,12 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    ...[8,10,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
   ]});
-  this.resources=uniformDetailBindLayout(device,{entries:[
+  this.resources=this.resourceLayout(false);
+ }
+ /** The stage resources; with the freeze, its region snapshot at binding 18. */
+ private resourceLayout(freeze:boolean):GPUBindGroupLayout{
+  return uniformDetailBindLayout(this.device,{entries:[
+   ...(freeze?[{binding:18,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
    ...[0,1,2,3,4,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:(binding===5?"read-only-storage":"storage") as GPUBufferBindingType}})),
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    ...[7,8,10,11,15].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -271,6 +286,35 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    // The haloed copy of binding 11's taps (UniformMixedHangingTaps.haloOf): no detail field.
    {binding:12,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
   ]},[12]);
+ }
+ /** The COLD freeze (UniformColdFreeze; coldRegions "frozen16h"), before
+  * bind and initialize: the transfer writes no texel of a frozen cell and
+  * keeps the departure on a warm texel's frozen faces, and a thawing
+  * region's deposits take its coarse term (umThawFaceTerm). */
+ /** This advance's cold-frame evidence (beginAdvance). quiet: every live
+  * region was COLD at the evidence frame (UniformColdFrame), so no sample is
+  * seeded (seeding needs activity target heat, which raises its region off
+  * COLD: a lagged region seeds from the frame its tier is the evidence).
+  * idle: quiet at this advance and the last, with the freeze: the last
+  * advance seeded nothing and the evidence frame's receipt counted no live
+  * sample, so none is live now. Every COLD region is then frozen (no
+  * transfer write) and holds its phi (reconstruction, air, redistance), so
+  * the whole sample and surface machinery leaves its retained state exactly
+  * as its launches would: move, reconstruct, clearAir, retire, redistance,
+  * transfer, snapshot, update and refine are not encoded. activity is: its
+  * plane is the region heat's particle evidence, which ends an idle run. */
+ private quiet=false;private quietLast=false;
+ private idleNow=false;
+ get idle():boolean{return this.idleNow;}
+ beginAdvance(cold:UniformColdFrame):void{
+  const quiet=cold.quiet;
+  this.idleNow=quiet&&this.quietLast&&this.freeze!==undefined&&this.started;
+  this.quiet=quiet;this.quietLast=quiet;
+ }
+ attachFreeze(freeze:UniformColdFreeze|undefined):void{
+  if(Object.keys(this.groups).length||this.freeze)throw new Error("Narrow-band FLIP: the freeze attaches once, before bind");
+  this.freeze=UNIFORM_COLD_FREEZE?freeze:undefined;
+  if(this.freeze)this.resources=this.resourceLayout(true);
  }
  bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture;hanging:UniformMixedHangingTaps;sharedStageUnit?:GPUTexture}):void{
   const f=fields;this.snapshotInput={raw:f.departure,negative:f.negativeDeparture};
@@ -298,6 +342,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
     {binding:11,resource:name==="snapshot"||name==="update"?unit:f.unitExtended},{binding:12,resource:f.hanging.haloOf(name==="snapshot"||name==="update"?unit:f.unitExtended)},{binding:14,resource:name==="reconstruct"||name==="redistanceStore"?f.phi:f.phiScratch},
     {binding:15,resource:f.phase},
     {binding:16,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}},
+    ...(this.freeze?[{binding:18,resource:this.freeze.regions.createView()}]:[]),
    ]})) as [UniformDetailGroup,UniformDetailGroup];
   }
  }
@@ -450,6 +495,9 @@ fn nbParticlesLive()->bool{return params.live.x!=0u;}
 ${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
+${slots?UniformColdFreeze.wgsl(undefined,1,18):UniformColdFreeze.wgsl(this.freeze,1,18)}
+// A thawing region's coarse term on an h cell's three positive faces.
+fn nbThaw(cell:vec3u)->vec3f{return vec3f(umThawFaceTerm(vec3i(cell),0u,1u),umThawFaceTerm(vec3i(cell),1u,1u),umThawFaceTerm(vec3i(cell),2u,1u));}
 // The spatial order leaves the samples sorted by cell key, a tile's 64 cells
 // together and x fastest inside it. A cell's samples are one contiguous run
 // from its start, and the cells of an x row inside a tile follow one another,
@@ -473,6 +521,10 @@ fn nbStoreMotion(i:u32,p:vec4f){let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u
 // Live particle counts per tile drive sparse cell-bin clearing and ordering.
 const NB_COVERAGE:u32=2u*UM_CELL_KEYS;
 const NB_SURFACE_TILES:u32=NB_COVERAGE+UM_TILES;
+// The occupied tile list (UniformNarrowBandFlip.occupiedWord): its length,
+// then a tile key an entry. A key joins when its coverage leaves 0.
+const NB_OCCUPIED:u32=${this.occupiedWord}u;
+fn nbCover(tile:u32,samples:u32){if(atomicAdd(&bins[NB_COVERAGE+tile],samples)==0u){atomicStore(&bins[NB_OCCUPIED+4u+atomicAdd(&bins[NB_OCCUPIED],1u)],tile);}}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(p),0).x;}
@@ -636,13 +688,22 @@ var<workgroup> nbCellStart:array<u32,64>;
 var<workgroup> nbCellHeat:array<atomic<u32>,64>;
 var<workgroup> nbCellLive:array<atomic<u32>,2>;
 var<workgroup> nbStray:atomic<u32>;
-@compute @workgroup_size(64) fn markParticleTiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+65535u*group.y;if(!umTileLive(tile)){return;}
- let first=64u*tile;
- if(lane==0u){
-  nbMarkedPopulation=0u;
-  ${this.order.sparse?"if(atomicLoad(&bins[NB_COVERAGE+tile])!=0u)":""}{nbMarkedPopulation=links[first+63u]+atomicLoad(&bins[first+63u])-links[first];}
+var<workgroup> nbMarkedTile:u32;
+var<workgroup> nbMarkedCount:u32;
+// A fixed grid strides the occupied list: an unoccupied tile has no run.
+@compute @workgroup_size(64) fn markParticleTiles(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){nbMarkedCount=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);}
+ let count=workgroupUniformLoad(&nbMarkedCount);
+ for(var j=group.x+groups.x*group.y;j<count;j+=groups.x*groups.y){
+  if(lane==0u){nbMarkedTile=atomicLoad(&bins[NB_OCCUPIED+4u+j]);}
+  nbMarkTile(workgroupUniformLoad(&nbMarkedTile),lane);
+  workgroupBarrier();
  }
+}
+fn nbMarkTile(tile:u32,lane:u32){
+ if(!umTileLive(tile)){return;}
+ let first=64u*tile;
+ if(lane==0u){nbMarkedPopulation=links[first+63u]+atomicLoad(&bins[first+63u])-links[first];}
  if(workgroupUniformLoad(&nbMarkedPopulation)==0u){return;}
  if(lane==0u){atomicStore(&nbMarkedMask,0u);atomicStore(&nbOwnHeat,0u);atomicStore(&nbStray,0u);atomicStore(&nbCellLive[0],0u);atomicStore(&nbCellLive[1],0u);}
  if(lane<27u){atomicStore(&nbMarkedHeat[lane],0u);}
@@ -840,7 +901,7 @@ fn nbAdvect(i:u32){
   var heat=p.position.w;
   if(!ballistic){let arrived=nbTargetHeat(q);if(arrived>0.0){heat=min(heat,max(arrived,1.0));}}
   p.position=vec4f(q,heat);source[i]=p;
-  atomicAdd(&bins[umCellAt(vec3u(q))],1u);${this.order.sparse?"atomicAdd(&bins[NB_COVERAGE+umTileAt(vec3u(q)/4u)],1u);":""}
+  atomicAdd(&bins[umCellAt(vec3u(q))],1u);nbCover(umTileAt(vec3u(q)/4u),1u);
 }
 // A launch over the samples is one fixed row (NARROW_BAND_PARTICLE_GRID): a
 // lane takes a sample of its group's 64 a turn and strides the row through
@@ -974,7 +1035,7 @@ fn seedCell(c:vec3u,emit:bool){
  // initial particle slots or which cells fit if the pool is exhausted.
  if(seedCount==0u){return;}
  let cell=umCellAt(c);
- if(!emit){atomicStore(&bins[cell],seedCount);${this.order.sparse?"atomicAdd(&bins[NB_COVERAGE+umTileAt(c/4u)],seedCount);":""}return;}
+ if(!emit){atomicStore(&bins[cell],seedCount);nbCover(umTileAt(c/4u),seedCount);return;}
  let first=links[cell];let capacity=arrayLength(&particles);
  let kept=min(seedCount,capacity-min(first,capacity));
  if(kept<seedCount){nbPoolFull(true,seedCount-kept);}
@@ -1059,7 +1120,8 @@ fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-
 }
 fn transferFace(face:UMFace)->f32{
  let original=umLoadMixedFace(face.anchor,face.axis);
- if(face.width==0u||face.anchor[face.axis]<0||face.neighbor.width==0u){return original;}
+ // A face beside a frozen cell keeps the departure (F there).
+ if(face.width==0u||face.anchor[face.axis]<0||face.neighbor.width==0u||umFrozenFace(face.anchor,face.axis,face.width)){return original;}
  let q=umFaceCenter(face);let depth=particleDepth(q);let blend=select(0.0,1.0,depth>=-2.0);
  if(blend==0.0||depth>1.5){return original;}
  // Cells starting exactly at q+1.5 have zero kernel weight throughout.
@@ -1075,7 +1137,7 @@ fn transferFace(face:UMFace)->f32{
    total+=w;momentum+=w*u;
   }
  }}}
- if(total<1e-5){return original;}return mix(original,momentum/total,blend*nbTransferBlend(q,depth,total));
+ if(total<1e-5){return original;}return mix(original,momentum/total+umThawFaceTerm(face.anchor,face.axis,face.width),blend*nbTransferBlend(q,depth,total));
 }
 ${narrowBandTransferPropertiesSource(subgroups)}
 ${narrowBandFineTransferSource(subgroups,this.apic)}
@@ -1087,6 +1149,8 @@ ${narrowBandFineTransferSource(subgroups,this.apic)}
 @compute @workgroup_size(64) fn transferOwners(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width==0u){return;}
  let origin=umOrigin(owner);
+ // A frozen owner keeps every texel (UniformColdFreeze): f.velocity holds F.
+ if(umFrozenCell(vec3i(origin))){return;}
  // No live sample: every owner keeps its velocity.
  var far=!nbParticlesLive();
  if(!far){
@@ -1219,6 +1283,7 @@ ${narrowBandSurfaceWGSL}
    metricFine:this.compile(["depthGeometry","buildDistance@h@free","buildDistance@h"],undefined,"surface metric"),
    update:this.compile(["update"],undefined,"update"),
    resample:this.compile(["resampleCount","resamplePrefix","resample","seedCells","seedSources","seed"],"update","resample and seed"),
+   resampleKeep:this.compile(["resampleCount","resamplePrefix","resample"],"update","resample"),
   };
  }
  private compile(entries:readonly string[],groupName:string|undefined,label:string):NarrowBandBatch{
@@ -1229,8 +1294,8 @@ ${narrowBandSurfaceWGSL}
     // In-place redistance reads its own canonical texel: coarse vertices
     // always read the base home, including those outside the resident h ring.
     base:entry==="redistanceCoarse"||entry==="airClearCoarse",pipeline:uniformDetailPick(this.solid.select(selected)),
-    launch:entry==="couple"||entry==="transfer"?NB_LAUNCH.counted:entry==="markParticleTiles"?NB_LAUNCH.tiles:entry==="resamplePrefix"?NB_LAUNCH.one
-     :entry==="advectParticles"||entry==="snapshot"||entry==="update"||entry==="resampleCount"||entry==="resample"?NB_LAUNCH.particles:NB_LAUNCH.grid,
+    launch:entry==="couple"||entry==="transfer"?NB_LAUNCH.counted:entry==="resamplePrefix"?NB_LAUNCH.one
+     :entry==="advectParticles"||entry==="snapshot"||entry==="update"||entry==="resampleCount"||entry==="resample"||entry==="markParticleTiles"?NB_LAUNCH.particles:NB_LAUNCH.grid,
    };
   })};
  }
@@ -1248,8 +1313,7 @@ ${narrowBandSurfaceWGSL}
    if(group!==bound){pass.setBindGroup(1,group);bound=group;}
    if(step.launch===NB_LAUNCH.counted){this.ownership.dispatchAllCounted(pass,step.pipeline);continue;}
    pass.setPipeline(step.pipeline);
-   if(step.launch===NB_LAUNCH.tiles)pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);
-   else if(step.launch===NB_LAUNCH.one)pass.dispatchWorkgroups(1);
+   if(step.launch===NB_LAUNCH.one)pass.dispatchWorkgroups(1);
    else if(step.launch===NB_LAUNCH.particles)pass.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);
    else pass.dispatchWorkgroups(1024);
   }
@@ -1263,6 +1327,7 @@ ${narrowBandSurfaceWGSL}
   this.device.queue.writeBuffer(this.params,0,w);
  }
  move(encoder:GPUCommandEncoder,dt:number,openTop:boolean,gravity=0):void{
+  if(this.idleNow)return;
   const b=this.compiled;
   this.bandCurrent=false;
   this.writeStep(dt,+openTop,gravity);
@@ -1286,7 +1351,8 @@ ${narrowBandSurfaceWGSL}
   encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,this.cells*8);
   encoder.clearBuffer(this.bins,this.cells*8+this.tiles*4,this.tiles*4);
   this.measureBand(encoder,b.search);this.buildDistance(encoder,this.metric);this.cache.encode(encoder,this.cacheGroups.bootstrap!);
-  if(this.order.sparse)encoder.clearBuffer(this.bins,this.cells*8,this.tiles*4);
+  // Coverage and the occupied list start empty: countInitial lists its tiles.
+  encoder.clearBuffer(this.bins,this.cells*8,this.tiles*4);encoder.clearBuffer(this.bins,4*this.occupiedWord,4);
   this.run(encoder,b.countInitial);this.order.encodeOffsets(encoder,1-this.parity);
   this.run(encoder,b.seedInitial);this.run(encoder,b.commit);
   this.parity=1-this.parity;this.started=true;
@@ -1294,6 +1360,7 @@ ${narrowBandSurfaceWGSL}
  /** Called only for enabled automatic refinement. Explicit Requested/Full
   * layouts keep their authored semantics; particle lifetime is independent. */
  refine(encoder:GPUCommandEncoder,target:{buffer:GPUBuffer;wordOffset:number;words?:number},dt:number,padding=1):void{
+  if(this.idleNow)return;
   const lattice=this.ownership.capacity.lattice;
   const w=this.refinementWords,d=this.address.cells,h=lattice.cellSize_m;
   w[0]=d[0]!;w[1]=d[1]!;w[2]=d[2]!;w[3]=dt;w[4]=h[0]!;w[5]=h[1]!;w[6]=h[2]!;w[7]=padding;
@@ -1332,16 +1399,18 @@ ${narrowBandSurfaceWGSL}
   encoder.copyBufferToBuffer(importance.buffer,importance.offset,this.bins,this.activityWord*4,this.tiles*8);
   this.run(encoder,this.compiled.activity);
  }
- reconstruct(encoder:GPUCommandEncoder):void{this.syncSurfaceRevisions(encoder,true);const b=this.compiled;this.bandCurrent=false;this.measureBand(encoder,b.searchReconstruct);if(this.measureTraces)this.run(encoder,b.diagnose);
+ reconstruct(encoder:GPUCommandEncoder):void{if(this.idleNow)return;this.syncSurfaceRevisions(encoder,true);const b=this.compiled;this.bandCurrent=false;this.measureBand(encoder,b.searchReconstruct);if(this.measureTraces)this.run(encoder,b.diagnose);
   encoder.clearBuffer(this.bins,(2*this.cells+2*this.tiles)*4,this.vertices*4);
   this.run(encoder,this.ownership.coarseOnly?b.reconstructCoarse:b.reconstruct);}
  transfer(encoder:GPUCommandEncoder):void{
+  if(this.idleNow)return;
   // Clearing a buried zero invalidates the crossing/metric banks as well
   // as phi. The caller resolved phi before momentum or membership reads it.
   if(!this.bandCurrent){this.measureBand(encoder,this.compiled.search);this.buildDistance(encoder,this.metric);this.bandCurrent=true;}
   this.run(encoder,this.compiled.transfer);
  }
  snapshot(encoder:GPUCommandEncoder,slots?:UniformNarrowBandSlotSnapshot):void{
+  if(this.idleNow)return;
   // snapshot and update read the same tiers (nbSampleCold).
   this.syncTiers(encoder);const pass=encoder.beginComputePass(NB_SNAPSHOT_PASS);
   this.cache.encode(encoder,slots?.cache??this.cacheGroups.snapshot!,pass);
@@ -1357,7 +1426,7 @@ ${narrowBandSurfaceWGSL}
   * the search and metric redistance builds are the end-step ones. True when
   * it wrote phi: the caller resolves it before redistance. */
  retire(encoder:GPUCommandEncoder):boolean{
-  if(this.ownership.coarseOnly)return false;
+  if(this.ownership.coarseOnly||this.idleNow)return false;
   const b=this.compiled;
   this.measureBand(encoder,b.searchRedistance);this.run(encoder,b.retire);return true;
  }
@@ -1365,13 +1434,14 @@ ${narrowBandSurfaceWGSL}
   * also serve end-step particle membership. Adaptive coarse corners were
   * stored by retire(); only they could have moved a zero. */
  redistance(encoder:GPUCommandEncoder):void{
+  if(this.idleNow)return;
   const b=this.compiled,coarse=this.ownership.coarseOnly;
   this.measureBand(encoder,b.searchRedistance);
   this.buildDistance(encoder,coarse?b.redistanceMetric:b.redistanceFine);this.bandCurrent=true;
  }
  /** Clear only the certified empty field outside physical liquid/particle support.
   * It sets state word NARROW_BAND_AIR_CHANGED_WORD where it changes a 4h-lattice vertex. */
- clearAir(encoder:GPUCommandEncoder):void{this.syncTiers(encoder);encoder.clearBuffer(this.state,4*NARROW_BAND_AIR_CHANGED_WORD,4);this.run(encoder,this.compiled.clearAir);this.bandCurrent=false;}
+ clearAir(encoder:GPUCommandEncoder):void{encoder.clearBuffer(this.state,4*NARROW_BAND_AIR_CHANGED_WORD,4);if(this.idleNow)return;this.syncTiers(encoder);this.run(encoder,this.compiled.clearAir);this.bandCurrent=false;}
  private buildDistance(encoder:GPUCommandEncoder,batch:NarrowBandBatch):void{
   encoder.clearBuffer(this.bins,4*this.cells,4);
   this.run(encoder,batch);
@@ -1389,6 +1459,7 @@ ${narrowBandSurfaceWGSL}
   this.run(encoder,batch);
  }
  update(encoder:GPUCommandEncoder):void{
+  if(this.idleNow)return;
   const b=this.compiled;
   if(!this.bandCurrent){this.measureBand(encoder,b.search);this.buildDistance(encoder,this.metric);}this.bandCurrent=false;
   this.syncTiers(encoder);const pass=encoder.beginComputePass(NB_UPDATE_PASS);
@@ -1396,7 +1467,7 @@ ${narrowBandSurfaceWGSL}
   this.run(encoder,b.update,pass);pass.end();
   // The ordered epoch compacts into the other buffer; the bins keep its counts for the seeding.
   this.parity=1-this.parity;
-  this.run(encoder,b.resample);
+  this.run(encoder,this.quiet?b.resampleKeep:b.resample);
   this.run(encoder,b.commit);
   this.parity=1-this.parity;
  }

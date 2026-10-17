@@ -1,3 +1,4 @@
+import { UNIFORM_COLD_FREEZE } from "./uniform-cold-freeze";
 import { uniformMixedExtensionSlotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { uniformCompiledExtensionNeighborWGSL } from "./uniform-compiled-extension.wgsl";
 import { pairedExtensionSource, pairedSnapshotSource, replayedPublicationSource } from "./uniform-mixed-extension-pair.wgsl";
@@ -178,7 +179,7 @@ export class UniformMixedExtension {
  /** The last pair encode's marks held its quiet regions (finishPair's
   * hierarchy then runs only with a dirty region). */
  private heldTail=false;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false,private readonly coldFreeze=false){
   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
   if(!directRestriction)throw new Error("Mixed extension restricts the face-plane anchors directly");
   this.address=ownership.capacity.address;
@@ -365,7 +366,8 @@ fn mrBodyNear(region:u32)->bool{return region<arrayLength(&bodyRegions)&&(bodyRe
   }
   let valid=stamp[MR_VALID+region];let held=state<2u&&(mode.x==2u||(valid&2u)==0u);
   stamp[MR_VALID+region]=select(select(valid,valid&1u,held),3u,state>=2u);
-  let value=vec2f(f32(state+select(0u,8u,held)),f32(mode.y));
+  let frozen=${UNIFORM_COLD_FREEZE&&this.coldFreeze}&&umRegionTier(region)==UM_TIER_COLD;
+  let value=vec2f(f32(state+select(0u,8u,held)+select(0u,16u,frozen)),f32(mode.y));
   slots0[arrayLength(&slots0)-UM_PAGES-1u+region]=value;slots1[arrayLength(&slots1)-UM_PAGES-1u+region]=value;
   // Any dirty region: the head restricts and publishes (stampRegions cleared it).
   if(state>=2u){slots0[arrayLength(&slots0)-1u]=vec2f(1.0,0.0);slots1[arrayLength(&slots1)-1u]=vec2f(1.0,0.0);atomicStore(&work[0],1u);}
@@ -652,8 +654,11 @@ fn ueQuietUniform(lane:u32)->bool{if(lane==0u){ueQuietWord=select(0u,1u,ueQuiet(
 fn ueRegionState(tile:u32)->u32{return u32(ueRegionWord(tile).x)&7u;}
 // A held region (clean or halo, its slots not final: the marks' +8) publishes
 // its held values for unknown faces; a held halo (9) seeds.
-fn ueRegionHeld(tile:u32)->bool{return ${this.regularBulk?"false":"ueRegionWord(tile).x>=8.0"};}
-fn ueRegionSeedHeld(tile:u32)->bool{return ${this.regularBulk?"false":"ueRegionWord(tile).x==9.0"};}
+fn ueRegionHeld(tile:u32)->bool{return ${this.regularBulk?"false":"(u32(ueRegionWord(tile).x)&8u)!=0u"};}
+fn ueRegionSeedHeld(tile:u32)->bool{return ${this.regularBulk?"false":"(u32(ueRegionWord(tile).x)&15u)==9u"};}
+// A frozen region (UniformColdFreeze: COLD at the marks, +16) publishes
+// nothing: its texels and low walls hold the frozen field's extension.
+fn ueRegionFrozen(tile:u32)->bool{return ${this.regularBulk?"false":"(u32(ueRegionWord(tile).x)&16u)!=0u"};}
 fn ueRegionDirty(tile:u32)->bool{return ueRegionState(tile)>=2u;}
 // A seed launch binds array 1 as stateIn and array 0 as stateOut: the final
 // slot into the other array.
@@ -1328,7 +1333,7 @@ fn umPublished(face:UMFace)->f32{
  return ueHeldKept(slotIndex,umFarValue(face));`}
 }
 fn uePublishFine(owner:UMOwner,lane:u32){
- if(lane==0u){farTile=select(UM_TILES,owner.tile,owner.width!=0u);atomicStore(&farAsked,0u);}
+ if(lane==0u){farTile=select(UM_TILES,owner.tile,owner.width!=0u&&!ueRegionFrozen(owner.tile));atomicStore(&farAsked,0u);}
  if(workgroupUniformLoad(&farTile)>=UM_TILES){return;}
  // Resolve seeded and wall faces before preparing the distant-source cache.
  // Many h tiles already have every component: they publish these exact
@@ -1368,7 +1373,8 @@ var<workgroup> publishCoarseState:array<vec2f,192>;
 fn uePublishCoarse(owner:UMOwner,lane:u32){
  for(var i=lane;i<192u;i+=64u){publishCoarseState[i]=vec2f(0);}
  workgroupBarrier();
- if(owner.width!=0u){
+ let live=owner.width!=0u&&!ueRegionFrozen(owner.tile);
+ if(live){
   let origin=umOrigin(owner);
   if(lane<48u){
    let axis=lane/16u;let part=lane%16u;var local=vec3u(0);local[axis]=3u;local[(axis+1u)%3u]=part%4u;local[(axis+2u)%3u]=part/4u;
@@ -1377,7 +1383,7 @@ fn uePublishCoarse(owner:UMOwner,lane:u32){
  }
  workgroupBarrier();
  let x=publishCoarseState[lane];let y=publishCoarseState[lane+64u];let z=publishCoarseState[lane+128u];
- if(owner.width!=0u&&x.y+y.y+z.y>0.0){let anchor=vec3i(umOrigin(owner)+umCorner(lane,4u));textureStore(output,anchor,vec4f(x.x,y.x,z.x,textureLoad(physical,anchor,0).w));}
+ if(live&&x.y+y.y+z.y>0.0){let anchor=vec3i(umOrigin(owner)+umCorner(lane,4u));textureStore(output,anchor,vec4f(x.x,y.x,z.x,textureLoad(physical,anchor,0).w));}
 }
 // h seam owners publish through uePublishFine (the same values: umPublished
 // per unit face, with the staged far value); 4h seam tiles through uePublishCoarse.
@@ -1391,7 +1397,7 @@ fn uePublishCoarse(owner:UMOwner,lane:u32){
  }
 }
 ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPublished(face)",false,"value.w=textureLoad(physical,ownedFace.anchor,0).w;","ueOwner"),"let origin=umOrigin(owner);",`let origin=umOrigin(owner);
- if(ueQuiet()){return;}
+ if(ueQuiet()||ueRegionFrozen(owner.tile)){return;}
  // A regular 4h owner (one-width 3x3x3 stencil) has one width-4 patch per
  // positive face, anchored at origin+3e_axis, and each of those texels holds
  // only that component (no other positive face shares the anchor). Its far

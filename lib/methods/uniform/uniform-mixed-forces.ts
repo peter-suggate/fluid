@@ -10,6 +10,7 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_FORCE_MODE, uniformRegionForceWGSL, type UniformMixedRegionDynamics } from "./uniform-mixed-region-dynamics";
+import { UniformColdFreeze } from "./uniform-cold-freeze";
 
 export const UNIFORM_NORMAL_ANCHOR_ERROR=0.01;
 export const UNIFORM_CAPILLARY_DISPLACEMENT_ERROR_H=0.0001;
@@ -74,7 +75,9 @@ export class UniformMixedForces {
   private regularCoarsePipeline?: GPUComputePipeline;
   /** vectorViscosity must be true: the fine owners' viscosity is the vector
    * evaluator (the scalar one is the face kernels'). */
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false,private readonly vectorViscosity=true,private readonly retainedNormals=false,private readonly boundedNormals=true,private readonly zeroCurvatureSeams=true,private readonly dynamics?:UniformMixedRegionDynamics) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false,private readonly vectorViscosity=true,private readonly retainedNormals=false,private readonly boundedNormals=true,private readonly zeroCurvatureSeams=true,private readonly dynamics?:UniformMixedRegionDynamics,
+    /** COLD freeze: frozen owners hold; a frozen face keeps its advected (frozen) value. */
+    private readonly freeze?:UniformColdFreeze) {
     if(!vectorViscosity)throw new Error("Mixed forces: the scalar fine viscosity evaluator was removed");
     this.resources = uniformDetailBindLayout(device,{ entries: [
       ...[1,2,3,10,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -87,6 +90,7 @@ export class UniformMixedForces {
       ...(retainedNormals?[14,15].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})):[]),
       ...(dynamics?[{binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
+      ...(freeze?[{binding:18,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
     ] });
   }
   /** The curvature pass's normal scratch: a vec4f per owner the capacity holds. */
@@ -117,6 +121,7 @@ export class UniformMixedForces {
       ...(f.normalDirty?[{binding:14,resource:{buffer:f.normalDirty}},{binding:15,resource:f.retainedNormals!}]:[]),
       ...(this.dynamics?[{binding:16,resource:{buffer:this.dynamics.forceStore}}]:[]),
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
+      ...(this.freeze?[{binding:18,resource:this.freeze.regions.createView()}]:[]),
     ]});
     if(f.normalDirty)this.pendingByGroup.set(group,f.normalDirty);return group;
   }
@@ -134,6 +139,16 @@ struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f}
 @group(1) @binding(8) var centerPhi:texture_3d<f32>;
 override umCachedGeometry:bool=false;
 override umForceCached:bool=false;
+${UniformColdFreeze.wgsl(this.freeze,1,18)}
+// A frozen owner (UniformColdFreeze): its texels and low walls hold.
+fn umOwnerFrozen(owner:UMOwner)->bool{return owner.width!=0u&&umFrozenRegion(umPageOfTile(owner.tile));}
+// A frozen face (an incident cell frozen) keeps its advected value: the
+// frozen one, which transfer and momentum left in place.
+fn umForceFaceFrozen(owner:UMOwner,face:UMFace)->bool{
+ if(!UM_COLD_FREEZE){return false;}
+ if(umOwnerFrozen(owner)){return true;}
+ return face.neighbor.width!=0u&&face.neighbor.tile!=owner.tile&&umOwnerFrozen(face.neighbor);
+}
 ${this.cachedCurvature?`@group(1) @binding(13) var<storage,read_write> normals:array<vec4f>;`:""}
 ${this.retainedNormals?`@group(1) @binding(14) var<storage,read_write> normalDirty:array<atomic<u32>>; @group(1) @binding(15) var<storage,read_write> retained:array<f32>;
 fn umRetainedIndex(owner:UMOwner)->u32{let prefix=arrayLength(&retained)/4u-UM_TILES;if(owner.width==1u){return select(0xffffffffu,owner.index,owner.index<prefix);}return prefix+owner.tile;}`:""}
@@ -368,6 +383,7 @@ fn umInflow(face:UMFace,forced:f32)->f32 {
 fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool,retain:vec3u)->f32 {
  if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
  var value=0.0;if(face.width==4u){value=${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(advected,face.anchor,0)[face.axis];}else{value=textureLoad(advected,face.anchor,0)[face.axis];}let dt=force.hDt.w;
+ if(umForceFaceFrozen(owner,face)){return value;}
  let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
  let gravity=face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor));
  let kept=face.sign>0&&retain.x!=0u;
@@ -421,7 +437,7 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
 }
 @compute @workgroup_size(64) fn forcesFine(@builtin(global_invocation_id) gid:vec3u){
  // With solids bound, launched as a solid-free twin and a general pipeline (umSolidSkip).
- let owner=umAllOwner(gid);if(umSolidSkip()||owner.width!=1u){return;}let origin=umOrigin(owner);let at=vec3i(origin);
+ let owner=umAllOwner(gid);if(umSolidSkip()||owner.width!=1u||umOwnerFrozen(owner)){return;}let origin=umOrigin(owner);let at=vec3i(origin);
  let low=umLowOpen(at);
  // Do not query retained solid evidence in the already solid-free twin.
  let solidClear=!umSolidEnabled()||umSolidRegionClearAtBuild(at);
@@ -468,6 +484,15 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
  if(${this.sourceParams?"umSourceinflowStrength()>0.0":"false"}){
   for(var axis=0u;axis<3u;axis++){value[axis]=umInflow(umFace(owner,axis,1,0u),value[axis]);}
  }
+ // A +face on a 16h region's high side may meet a frozen cell: it keeps
+ // its advected (frozen) value.
+ if(UM_COLD_FREEZE){
+  let edge=(at&vec3i(15))==vec3i(15);
+  if(any(edge)){
+   let advectedValue=textureLoad(advected,at,0).xyz;
+   for(var axis=0u;axis<3u;axis++){if(edge[axis]){var next=at;next[axis]+=1;if(umFrozenCell(next)){value[axis]=advectedValue[axis];}}}
+  }
+ }
  textureStore(output,at,vec4f(value,0));
 }
 ${patched(uniformMixedFaceDispatchWGSL("forcesRegular","umForcedVelocity(owner,face)"),"let origin=umOrigin(owner);",`let origin=umOrigin(owner);
@@ -496,8 +521,8 @@ fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool,retain:vec3u)->f32 {
  if(!far){return umForcedVelocityClear(owner,face,false,retain);}
  return 0.0;
 }
-${patched(uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far,retain)",false,"","umForcesRegularCoarseOwner"),"let origin=umOrigin(owner);","let origin=umOrigin(owner);let far=umFarAirOwner(owner);let retain=umForceRetain(owner);")}
-${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner,face,select(0xffffffffu,4u*(job-seamFour)+slot,quad),part)"),"if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
+${patched(uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far,retain)",false,"","umForcesRegularCoarseOwner"),"let origin=umOrigin(owner);","let origin=umOrigin(owner);if(umOwnerFrozen(owner)){return;}let far=umFarAirOwner(owner);let retain=umForceRetain(owner);")}
+${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner,face,select(0xffffffffu,4u*(job-seamFour)+slot,quad),part)",undefined,undefined,"umOwnerFrozen"),"if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
 `,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheCurvature","cacheNormals","forceSlopes",...(this.retainedNormals?["curvatureRegions"]:[])]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});

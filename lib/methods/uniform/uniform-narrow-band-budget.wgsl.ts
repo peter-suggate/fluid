@@ -88,7 +88,8 @@ fn nbBudgetScore(w0:u32,w1:u32)->u32{
  let own=atomicLoad(&census[importanceIndex(t,1u)]);let p=vec3i(umTileCoord(t));
  let flight=nbBudgetInFlight(t,p,own);
  atomicOr(&census[nbBudgetFlight(t)],(select(0u,NB_FLIGHT,flight)|select(0u,NB_LIQUID,nbBudgetLiquid(own)))<<8u);
- if((own&${I.required}u)!=0u&&flight){rank=NB_BUDGET_FLIGHT;}
+ // In flight, or deep COLD (its width is frozen: ccDeep, the census's): outside the budget.
+ if((own&${I.required}u)!=0u&&(flight||ccDeep(t))){rank=NB_BUDGET_FLIGHT;}
  else if((own&${I.required}u)!=0u){
   let key=nbBudgetScore(atomicLoad(&census[importanceIndex(t,0u)]),own);
   rank=key<<8u;atomicAdd(&census[nbBudgetHist(key)],1u);

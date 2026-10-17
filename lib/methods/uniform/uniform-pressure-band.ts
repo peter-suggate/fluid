@@ -7,6 +7,8 @@ import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
 import {UNIFORM_MIXED_THETA_MIN,uniformMixedPressureLiquidWGSL,uniformMixedSurfaceThetaWGSL} from "./uniform-mixed-pressure-surface.wgsl";
 import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 import {UNIFORM_BODY_FLUX_REACH,UNIFORM_REGION_DYNAMICS,UNIFORM_REGION_DYNAMICS_WORDS} from "./uniform-mixed-region-dynamics";
+import {UNIFORM_COLD_FREEZE,UniformColdFreeze} from "./uniform-cold-freeze";
+import type {UniformColdFrame} from "./uniform-cold-frame";
 
 /** The band's local multigrid: V-cycles h -> 2h (2^3 aggregates per tile) ->
  * 4h (one aggregate per tile), red-black Gauss-Seidel at every level. */
@@ -154,6 +156,14 @@ export interface UniformPressureBandFields {
   * region's largest predictor residual (1/s) into its pressureResidual
   * word, which the frame head's classify cleared. */
  dynamics?:GPUBuffer;
+ /** The COLD freeze (UniformColdFreeze): a frozen region's tiles are no
+  * band tiles, and a band face to a frozen cell is Neumann at its frozen F
+  * plus the region's term T (the rows' flux; the projection writes F back). */
+ freeze?:UniformColdFreeze;
+ /** Host cold-frame evidence: with the freeze, a quiet frame (every live
+  * region COLD, so frozen) lists no band tile, and the band's launches are
+  * not encoded; the cleared header and slot map are its whole result. */
+ coldFrame?:UniformColdFrame;
 }
 
 /** The h pressure band of the two-stage solve: the global solve runs on
@@ -232,6 +242,8 @@ export class UniformPressureBand {
   * fineTiles: the simulation's h-tile capacity. A band tile is an h tile,
   * so the band never needs more slots than that (never fewer than one). */
  static capacityOf(tiles:number,fineTiles=tiles):number{return Math.max(1,Math.min(fineTiles,tiles,Math.max(4096,Math.ceil(tiles/2))));}
+ /** The COLD freeze the list, rows and init read (fields.freeze, switch on). */
+ private get cold():UniformColdFreeze|undefined{return UNIFORM_COLD_FREEZE?this.fields.freeze:undefined;}
  private readonly layouts=new Map<string,GPUBindGroupLayout>();
  private readonly groups=new Map<string,UniformDetailGroup>();
  private readonly pipelines=new Map<string,GPUComputePipeline>();
@@ -262,11 +274,12 @@ export class UniformPressureBand {
   const base=[params,buffer(2),buffer(9,"read-only-storage"),buffer(10),buffer(18)];
   // The dynamics record (24) is the measure's: the projection has no storage to spare.
   const solver=[...base,...(fields.dynamics?[buffer(24)]:[])];
+  const cold=UNIFORM_COLD_FREEZE&&fields.freeze?[{binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[];
   const entries:Record<string,GPUBindGroupLayoutEntry[]>={
-   list:[params,buffer(2),buffer(3,"read-only-storage"),texture(6)],
+   list:[params,buffer(2),buffer(3,"read-only-storage"),texture(6),...cold],
    copy:[params,buffer(2),texture(22),{binding:23,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}],
-   prep:[params,buffer(2),buffer(3,"read-only-storage"),buffer(4,"uniform"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9),buffer(10)],
-   init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage")],
+   prep:[params,buffer(2),buffer(3,"read-only-storage"),buffer(4,"uniform"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9),buffer(10),...cold],
+   init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),...cold],
    solver,
    project:[...base,texture(15),{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},buffer(17),buffer(21)],
   };
@@ -319,6 +332,7 @@ export class UniformPressureBand {
    solver:solverResources,
    project:{...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},18:{buffer:this.coarse},15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
+  const freeze=this.cold;if(freeze)for(const name of ["list","prep","init"])resources[name]![14]=freeze.regions;
   if(f.presentation.buffer.size<4*(f.presentation.word+64*this.capacity))throw new Error("The stage grids cannot hold the pressure band");
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure band ${name}`,layout:this.layouts.get(name)!,
    entries:Object.entries(map).map(([binding,resource])=>({binding:+binding,resource}))}));
@@ -623,19 +637,21 @@ var<workgroup> bSweepCount:u32;
 }`;
   const coarseForms:[string,number,number,number][]=[["coarseSolve",lanes,held,shared]];
   const sources:Record<string,string>={
-   list:header+surface+/* wgsl */`
+   list:header+surface+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
 @group(1) @binding(0) var<uniform> params:BandParams;
 @group(1) @binding(2) var<storage,read_write> index:array<atomic<u32>>;
 var<workgroup> member:atomic<u32>;
 // Every h simulation tile with a liquid pressure row is a band tile: its
-// h velocity is divergence-free only after the h solve.
+// h velocity is divergence-free only after the h solve. A frozen region's
+// tile is not (UniformColdFreeze): its velocity holds, the root alone
+// answers there.
 @compute @workgroup_size(64) fn main(${slots}){
  for(var j=group.x;j<umCounts.x;j+=groups.x){
   let t=bHTile(j);
   if(lane==0u){atomicStore(&member,0u);}
   workgroupBarrier();
   if(bWet(bPhiH(vec3i(umTileCoord(t)*4u+bLocal(lane))),1.0)){atomicStore(&member,1u);}
-  if(workgroupUniformLoad(&member)!=0u&&lane==0u){
+  if(workgroupUniformLoad(&member)!=0u&&lane==0u&&!umFrozenCell(vec3i(umTileCoord(t)*4u))){
    ${this.spatialOrder?"atomicStore(&index[SLOTS+t],1u);":`let slot=atomicAdd(&index[0],1u);
    if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[1],1u);}`}
   }
@@ -682,7 +698,7 @@ const B_TOTALS=SLOTS+UM_TILES;
  let slot=atomicLoad(&index[B_TOTALS+t/256u])+local-1u;
  if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[SLOTS+t],0u);}
 }`,
-   prep:header+indexed(false)+theta+surface+/* wgsl */`
+   prep:header+indexed(false)+theta+surface+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
 @group(1) @binding(9) var<storage,read_write> rows:array<f32>;
 // The iterate holds each row's phi until init starts it.
 @group(1) @binding(10) var<storage,read_write> solve:array<f32>;
@@ -736,7 +752,11 @@ ${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
    if(across!=UM_RESIDENT){
     if(across==UM_AIR){kind=K_OPEN;coefficient=1.0/(h*h*bTheta(own,0.5*params.policy.w));}
     else{kind=K_WALL;coefficient=0.5/(h*h);fraction=0.5;}
-   }else{
+   }
+   // A face to a frozen cell (only out of the tile: band tiles are live) is
+   // Neumann, wet or dry: its velocity holds F, the projection writes it back.
+   else if(l[axis]==select(0u,3u,sign>0)&&umFrozenCell(q)){kind=K_NEUMANN;}
+   else{
     let n=bNeighbour(q);
     // A closed cell's phi continues its neighbours': no vertex field of its own.
     var theta=1.0;
@@ -840,7 +860,7 @@ ${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
   for(var f=0u;f<6u;f++){coarse[bC(3u+f,j)]=couple[f];coarse[bC(17u+f,j)]=bitcast<f32>(near[f]);}
  }
 }`,
-   init:header+indexed(false)+rowsOf(true)+solveOf(true)+aggregates+wet+/* wgsl */`
+   init:header+indexed(false)+rowsOf(true)+solveOf(true)+aggregates+wet+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
 @group(1) @binding(11) var velocity:texture_3d<f32>;
 @group(1) @binding(12) var<storage,read> coarsePressure:array<f32>;
 @group(1) @binding(13) var<storage,read> coarsePhi:array<f32>;
@@ -967,7 +987,9 @@ fn bNeumann(cell:u32,p:vec3i,f:u32)->f32{
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);
    if(bFaceKind(kinds,f)==K_NEUMANN){
-    let kept=bNeumann(cell,p,f);rows[bForcedWord(cell,f)]=kept;rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}kept/(params.hDt[axis]*params.hDt.w);}
+    // A frozen face's flux composes its region's term; the row keeps F.
+    var a=p;if(sign<0){a[axis]-=1;}
+    let kept=bNeumann(cell,p,f);rows[bForcedWord(cell,f)]=kept;rhs-=params.policy.x*f32(sign)*${S?"bVolume(cell,f)*":""}(kept+umColdFaceTerm(a,axis,1u))/(params.hDt[axis]*params.hDt.w);}
   }
   rows[cell]=rhs;bFollowHalo(cell,p,kinds,0.0);
  }
@@ -1226,7 +1248,7 @@ fn bPublishTile(s:u32,lane:u32,r:u32){
  }
  if(!bInitial&&group.x==0u&&lane==0u){
   var cycle=bCycles;for(var j=bCycles;j>0u;j--){if(bMet(HISTORY+j-1u,1u<<(j-1u))){cycle=j-1u;}}
-  if(bInitialMet()){cycle=0u;}
+  if(bInitialMet()||bCount()==0u){cycle=0u;}
   atomicStore(&index[CYCLE],cycle);
   if(cycle<bCycles){atomicStore(&index[DONE],1u);atomicMax(&index[2],select(bIndex(HISTORY+cycle),bIndex(INITIAL),bInitialMet()));}
  }
@@ -1391,8 +1413,10 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  }
  /** The ownership holds no h tile (capacity 0, known to the host): the band
   * has no tile, and its launches (each a few microseconds empty) are not
-  * encoded. The cleared header is the whole receipt. */
- private get empty():boolean{return this.simulation.capacity.fineTiles===0;}
+  * encoded. The cleared header is the whole receipt. Likewise a quiet frame
+  * under the freeze (UniformPressureBandFields.coldFrame): its frozen
+  * regions list no tile. */
+ private get empty():boolean{return this.simulation.capacity.fineTiles===0||(this.cold!==undefined&&this.fields.coldFrame?.quiet===true);}
  /** Before the split, with the simulation authority's phi and
   * the forced field in simulation ownership: list band tiles, assemble rows
   * and bake the aggregate operators. */

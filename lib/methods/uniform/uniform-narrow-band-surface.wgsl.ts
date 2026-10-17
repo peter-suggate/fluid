@@ -184,6 +184,8 @@ fn nbTransferTheta(local:vec3f)->vec2f{
 @compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32${subgroups?",@builtin(subgroup_invocation_id) subgroupLane:u32":""}){
  if(!nbTransferPropertiesFit()){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=4u*umTileCoord(owner.tile);
+ // A frozen tile (UniformColdFreeze) keeps every texel: f.velocity holds F.
+ if(umFrozenCell(vec3i(origin))){return;}
  // No live sample (a uniform): no pair is listed and every cell keeps its velocity.
  if(!nbParticlesLive()){let cell=origin+umCorner(lane,4u);textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
  for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(q)]));}
@@ -197,7 +199,8 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  let local=umCorner(lane,4u);let cell=origin+local;let at=UM_CELL_KEYS+6u*(64u*group.x+lane);var needed=false;var properties:array<vec3f,3>;
  for(var axis=0u;axis<3u;axis++){
   var near=vec2f(0.0);var expected=1.0;var low=local;low[axis]+=1u;
-  if(umCellPresent(vec3i(origin+low))&&(nbBandReach(origin+low)&1u)!=0u){
+  // A face beside a frozen cell keeps the departure (F there).
+  if(umCellPresent(vec3i(origin+low))&&(nbBandReach(origin+low)&1u)!=0u&&!umFrozenFace(vec3i(cell),axis,1u)){
    var depth=0.0;
    // The positive MAC face has fraction zero along its normal. Preserve the
    // eight-corner accumulation order while skipping its four zero terms.
@@ -252,7 +255,7 @@ var<workgroup> nbRuns:array<vec2u,128>;
   if(nbTransferPropertiesFit()){
    let at=UM_CELL_KEYS+6u*(first+u32(member>=3u))+2u*axis;
    near=select(vec2f(0.0),unpack2x16unorm(atomicLoad(&bins[at])),valid);expected=bitcast<f32>(atomicLoad(&bins[at+1u]));
-  }else if(width==1u&&umAcrossKind(vec3i(o),axis,1)==UM_RESIDENT){
+  }else if(width==1u&&umAcrossKind(vec3i(o),axis,1)==UM_RESIDENT&&!umFrozenFace(vec3i(o),axis,1u)){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
    if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
   }
@@ -311,18 +314,19 @@ var<workgroup> nbRuns:array<vec2u,128>;
  }
  momentum=nbMomentum[lane];total=nbMass[lane];momentumNext=nbMomentumNext[lane];totalNext=nbMassNext[lane];
  `}
- if(valid&&member==0u&&owner.width==1u){
+ // A frozen cell keeps its texel; a thawing region's deposits take its term.
+ if(valid&&member==0u&&owner.width==1u&&!umFrozenCell(vec3i(origin))){
   let original=textureLoad(velocity,vec3i(origin),0);let mass=total;
   var transition=blend;
   for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,nbHot[6u*team+a]);}
-  let value=mix(original.xyz,momentum/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
+  let value=mix(original.xyz,momentum/max(mass,vec3f(1e-30))+nbThaw(origin),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(origin),vec4f(value,original.w));
  }
- if(valid&&member==0u&&next.width==1u){
+ if(valid&&member==0u&&next.width==1u&&!umFrozenCell(vec3i(nextOrigin))){
   let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=totalNext;
   var transition=nextBlend;
   for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nbHot[6u*team+3u+a]);}
-  let value=mix(original.xyz,momentumNext/max(mass,vec3f(1e-30)),select(vec3f(0),transition,mass>=vec3f(1e-5)));
+  let value=mix(original.xyz,momentumNext/max(mass,vec3f(1e-30))+nbThaw(nextOrigin),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(nextOrigin),vec4f(value,original.w));
  }
 }

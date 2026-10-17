@@ -97,6 +97,12 @@ export interface WebGPUUniformReferenceOptions {
   narrowBandVolumeControlSeconds?: number;
   narrowBandFinePadding?: number;
   narrowBandTransfer?: "flip" | "apic";
+  /** NB-FLIP coldCensus: "replay" (default) keeps a deep COLD region's census decision and replays its classification; "full" re-decides every tile every census. */
+  narrowBandColdCensus?: "replay" | "full";
+  /** NB-FLIP coldRegions: "frozen16h" (default) freezes a COLD region's fine velocity under a 16h coarse term; "fine" keeps full fine treatment. */
+  narrowBandColdRegions?: "frozen16h" | "fine";
+  /** NB-FLIP coldFrameSkip: "on" (default) leaves out launches the lagged region heat proves empty; "off" encodes every launch. */
+  narrowBandColdFrameSkip?: "on" | "off";
   /** NB-FLIP: the advected phi of h vertices is trilinear (4h vertices keep phiCubicAdvection). */
   phiFineTrilinear?: boolean;
   /** Independent dense vertex level set and conservative cell volume, advanced
@@ -318,6 +324,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private narrowBandFinePadding: number;
   private readonly narrowBandTransfer: "flip" | "apic";
+  private readonly narrowBandColdCensus: "replay" | "full";
+  private readonly narrowBandColdRegions: "frozen16h" | "fine";
+  private readonly narrowBandColdFrameSkip: "on" | "off";
   private phiFineTrilinear: boolean;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
   get pagePoolInfo(){return this.mixedFrame?.pagePoolInfo;}
@@ -591,6 +600,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** No lattice cell (halo excluded) set in the static solid voxel mask; see uvSolidFree. */
   private solidVoxelsEmpty = true;
   private readonly prescribedSolidMotion = new UniformPrescribedSolidMotion();
+  /** The last advance's roster poses (position, orientation; 12 bodies at most) and count. */
+  private coldRosterPoses = new Float64Array(12 * 7);
+  private coldRosterCount = 0;
   /** The pinned advance of a fixed-step mode; undefined runs the scene's maxDt. */
   private fixedStep_s: number | undefined;
   private velocityTransport: GPUVelocityTransport;
@@ -618,6 +630,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
     this.narrowBandFinePadding = options.narrowBandFinePadding ?? 1;
     this.narrowBandTransfer = options.narrowBandTransfer ?? "flip";
+    this.narrowBandColdCensus = options.narrowBandColdCensus ?? "replay";
+    this.narrowBandColdRegions = options.narrowBandColdRegions ?? "frozen16h";
+    this.narrowBandColdFrameSkip = options.narrowBandColdFrameSkip ?? "on";
     this.phiFineTrilinear = options.phiFineTrilinear === true;
     this.twoLevelVelocity = true;
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
@@ -1106,7 +1121,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // limits refuse a reservation (UniformMixedFrameCapacity).
     const tiles=this.address.poolTiles,gpuLayout=this.detail.policy==="dynamic";
     const solids=!this.solidVoxelsEmpty||sceneHasTerrain(this.scene),bodies=this.scene.rigidBodies.length;
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true},{
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
@@ -1121,6 +1136,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
     this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2],this.mixedFrame.solid!.coarse!);
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
+    // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
+    if(this.narrowBandColdCensus==="replay")this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers);
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure});
     // The frame's forces and its samples read the bed-slope lane; the bake is
@@ -1196,11 +1213,30 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * summed): the frame keeps its launch budgets and adds this bound.
    * Absent: any other cause, and the budgets start again at the ceilings. */
   private mixedEdit?:UniformWorkEdit;
+  /** Builds made due (staleMixed), and what the last census encode read of
+   * the host's own census inputs (mixedCensusMoved). */
+  private mixedStaleCount=0;
+  private mixedCensusBodies=0;
+  private readonly mixedCensusHeld={stale:-1,revision:-1,dt:NaN,bodies:-1,padding:NaN,percent:NaN,fade:NaN,sparse:NaN};
+  /** A census input only the host holds moved since the last census encode.
+   * An idle frame (UniformNarrowBandFlip.idle) runs no census, so each such
+   * change breaks idle on its own frame (frame.cold.trigger): a build made
+   * due (an edit, a release, an admission), a join, Dynamic's statics (solid
+   * mask, regions, settings, focus, an unsettled planner), the scene, dt,
+   * the roster's size and the census's runtime controls. dt compares as the
+   * f32 the census reads: advanceTo's step jitters in the last f64 bits. */
+  private mixedCensusMoved(dt:number,bodies:number):boolean{
+    const h=this.mixedCensusHeld;
+    return h.stale!==this.mixedStaleCount||this.mixedEditJoin!==undefined||h.revision!==this.sceneRevision||h.dt!==Math.fround(dt)||h.bodies!==bodies
+      ||h.padding!==this.narrowBandFinePadding||h.percent!==this.narrowBandAdaptiveBudgetPercent||h.fade!==this.narrowBandAdaptiveFadeSeconds||h.sparse!==this.narrowBandSparseParticleLifetime
+      ||(this.detail.policy==="dynamic"&&!this.detailStaticCurrent());
+  }
   /** The h tiles of the last host layout (hostMixedLayout): zero is all-4h, the layout a request's attach edits. */
   private mixedHostFine=-1;
   private mixedEditSeen?:{stamp:number;tiles:Uint32Array};
   /** The layout is due a build. edit: a request edit's bound; any cause without one makes the build an unknown one. */
   private staleMixed(edit?:UniformWorkEdit):void{
+    this.mixedStaleCount++;
     const held=this.mixedEdit;
     this.mixedEdit=!edit||(this.mixedStale&&!held)?undefined:{tiles:(held?.tiles??0)+edit.tiles,reach:(held?.reach??0)+edit.reach};
     this.mixedStale=true;
@@ -1364,7 +1400,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       }
       const swept=bodies.length?this.mixedBodyTiles(bodies,dt):undefined,joined=this.mixedEditJoin?.tiles;
       let extra=this.mixedStaticsAdded?.tiles??0;
-      if(swept||joined)for(let t=0;t<tiles;t++)if(swept?.[t]||joined?.[t])extra++;
+      // The swept count is the marking's own; only a live edit's join scans the tiles.
+      if(joined){for(let t=0;t<tiles;t++)if(swept?.[t]||joined[t])extra++;}else if(swept)extra+=this.mixedBodySwept;
       // The bound is the capacity the attach reserved, every tile the pool
       // can store: nothing grows here. A census has no generation to fall
       // back to.
@@ -1689,6 +1726,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedFrame!.encodePageCommit(encoder);
       this.mixedFrame?.narrowBandFlip?.activity(encoder,dynamic.importance,dt,this.narrowBandAdaptiveFadeSeconds,this.narrowBandSparseParticleLifetime);
       builder.encode(encoder);
+      {const h=this.mixedCensusHeld;h.stale=this.mixedStaleCount;h.revision=this.sceneRevision;h.dt=Math.fround(dt);h.bodies=this.mixedCensusBodies;
+       h.padding=this.narrowBandFinePadding;h.percent=this.narrowBandAdaptiveBudgetPercent;h.fade=this.narrowBandAdaptiveFadeSeconds;h.sparse=this.narrowBandSparseParticleLifetime;}
     },adopted:encoder=>{
       // Diagnostics only: a free read takes this build's receipt; mapped
       // once the frame submits (readMixedRelayout), never awaited.
@@ -1768,11 +1807,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * speeds may be older than the GPU's: a census that needs more defers its
    * build and its receipt grows the capacity (readMixedRelayout). */
   private mixedBodyScratch?:Uint8Array;
+  /** The tiles the last marking set (cleared one by one, not by a fill of
+   * every box tile), and how many. Grown, never per frame once the reach is seen. */
+  private mixedBodyMarked=new Uint32Array(64);
+  private mixedBodySwept=0;
   private mixedBodyTiles(bodies:readonly RigidBodyState[],dt:number):Uint8Array{
     const {cellSize_m,origin_m}=fluidRegionLattice(this.scene);
     const a=this.address,count=a.boxTiles,wx=4*cellSize_m[0],wy=4*cellSize_m[1],wz=4*cellSize_m[2],cell=Math.max(cellSize_m[0],cellSize_m[1],cellSize_m[2]);
     // One scratch mask per solver: the callers count it and keep nothing.
-    const tiles=this.mixedBodyScratch?.length===count?this.mixedBodyScratch.fill(0):(this.mixedBodyScratch=new Uint8Array(count));
+    let tiles=this.mixedBodyScratch,marked=this.mixedBodyMarked,swept=0;
+    if(tiles?.length===count){for(let i=0;i<this.mixedBodySwept;i++)tiles[marked[i]!]=0;}else tiles=this.mixedBodyScratch=new Uint8Array(count);
     for(const body of bodies){
       const v=body.linearVelocity_m_s,reach=boundingRadius(body)+Math.hypot(v.x,v.y,v.z)*dt+cell;
       const cx=body.position_m.x-origin_m.x,cy=body.position_m.y-origin_m.y,cz=body.position_m.z-origin_m.z;
@@ -1780,8 +1824,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const x0=uniformTileNear(a,0,Math.floor((cx-reach)/wx)-1),x1=uniformTileNear(a,0,Math.floor((cx+reach)/wx)+1);
       const y0=uniformTileNear(a,1,Math.floor((cy-reach)/wy)-1),y1=uniformTileNear(a,1,Math.floor((cy+reach)/wy)+1);
       const z0=uniformTileNear(a,2,Math.floor((cz-reach)/wz)-1),z1=uniformTileNear(a,2,Math.floor((cz+reach)/wz)+1);
-      for(let z=z0;z<=z1;z++)for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++)tiles[uniformBoxTileIndex(a,x,y,z)]=1;
+      for(let z=z0;z<=z1;z++)for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
+        const t=uniformBoxTileIndex(a,x,y,z);if(tiles[t])continue;tiles[t]=1;
+        if(swept===marked.length){const grown=new Uint32Array(2*marked.length);grown.set(marked);marked=this.mixedBodyMarked=grown;}
+        marked[swept++]=t;
+      }
     }
+    this.mixedBodySwept=swept;
     return tiles;
   }
   /** A live voxel edit on the mixed path, as the tiles the mask reported
@@ -1878,6 +1927,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.holdDetailStaticKey();
   }
   /** A frame's encode or receipt failed: fatal for the solver. */
+  /** Whether a rostered pose differs from the last advance's (the roster's
+   * length too); records this advance's. GPU-integrated bodies move through
+   * the region heat, not here. */
+  private rosterPosesMoved(bodies:readonly RigidBodyState[]):boolean{
+    const count=bodies.length;let moved=count!==this.coldRosterCount;
+    // Grows only with the roster (a host edit), never per frame.
+    if(7*count>this.coldRosterPoses.length)this.coldRosterPoses=new Float64Array(14*count);
+    const poses=this.coldRosterPoses;
+    for(let i=0;i<count;i++){
+      const b=bodies[i]!,p=b.position_m,o=b.orientation,k=7*i;
+      if(poses[k]!==p.x||poses[k+1]!==p.y||poses[k+2]!==p.z||poses[k+3]!==o.w||poses[k+4]!==o.x||poses[k+5]!==o.y||poses[k+6]!==o.z)moved=true;
+      poses[k]=p.x;poses[k+1]=p.y;poses[k+2]=p.z;poses[k+3]=o.w;poses[k+4]=o.x;poses[k+5]=o.y;poses[k+6]=o.z;
+    }
+    this.coldRosterCount=count;return moved;
+  }
   private failMixedFrame(error:unknown):void{
     if(this.disposed||this.pressureFrameFailure)return;
     this.pressureFrameFailure=error instanceof Error?error:new Error(String(error));
@@ -2574,6 +2638,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // advecting (horizon one); moving bodies sweep this step's tiles into
       // that census. The tail extends the final velocity for the next head.
       const bodyCount=activeBodies.length;
+      // Cold-frame host triggers this solver alone knows: pages asked for a
+      // drop ahead, and roster poses the host moved (held, prescribed or
+      // interactive bodies). Drops and inflow arrive as added volume.
+      if(this.pageDropAhead||this.pageInjectedAhead||this.rosterPosesMoved(activeBodies))frame.cold.trigger();
+      // An idle frame skips the census: a host census input that moved breaks idle here.
+      this.mixedCensusBodies=activeBodies.length;if(this.mixedCensusMoved(dt,activeBodies.length))frame.cold.trigger();
       // The census's body mark and the coupling read this step's values when
       // the frame encodes them, inside advance below: each is one function.
       // The cell's volume and height follow the scene alone.

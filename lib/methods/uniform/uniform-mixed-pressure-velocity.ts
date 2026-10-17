@@ -11,6 +11,7 @@ import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_BODY_FLUX_REACH } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_MIXED_ROOT_TILE_WORDS, uniformMixedRootMaskWords, uniformMixedRootTopologyBytes } from "./uniform-mixed-pressure-authority";
+import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 
 interface CommonFields {
  velocity:GPUTexture;
@@ -75,7 +76,12 @@ export class UniformMixedPressureVelocity {
  private projectPipeline?:GPUComputePipeline;
  /** Both launches' jobs: the lattice's residency pages. */
  private readonly pages:number;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer){
+ /** Coarse mode's COLD freeze (UniformColdFreeze): a frozen face's u* is
+  * F + T + gravity (umColdForced), and the projection keeps F there and
+  * stores its correction instead. */
+ private readonly cold?:UniformColdFreeze;
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer,freeze?:UniformColdFreeze){
+  this.cold=coarse&&UNIFORM_COLD_FREEZE?freeze:undefined;
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure coupling requires the all-4h solid record and all-4h ownership");
   this.pages=uniformMixedPageCount(ownership.capacity.tiles);
   const texture=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}});
@@ -83,9 +89,12 @@ export class UniformMixedPressureVelocity {
   const storage=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}});
   const uniform={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}};
   const topology=coarse?[texture(8),storage(9)]:solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
-  this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}},storage(5),storage(6),storage(7),...topology]});
+  // The freeze is textures: both launches are at the storage-buffer limit.
+  const regions=this.cold?[{binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[];
+  this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}},storage(5),storage(6),storage(7),...topology,...regions]});
   this.projectLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
-   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[]),...(rounding?[storage(12)]:[]),...(coarse?[storage(13)]:[])]});
+   {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[]),...(rounding?[storage(12)]:[]),...(coarse?[storage(13)]:[]),
+   ...regions,...(this.cold?[{binding:15,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"2d" as const}}]:[])]});
  }
  private rootTopology(f:CommonFields):GPUBufferBinding{
   const t=f.rootTopology,size=uniformMixedRootTopologyBytes(this.ownership.layout);
@@ -114,7 +123,8 @@ export class UniformMixedPressureVelocity {
   const faces=this.ownership.capacity.address.lowFaceKeys;
   return uniformDetailGroup(this.device,{layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:{buffer:f.authorityParams,size:16}},
    ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)})),...(topology?[{binding:8,resource:topology}]:[]),
-   ...(f.fine?[{binding:8,resource:f.fine.velocity},{binding:9,resource:{buffer:f.fine.negative,size:4*faces}}]:[])]});
+   ...(f.fine?[{binding:8,resource:f.fine.velocity},{binding:9,resource:{buffer:f.fine.negative,size:4*faces}}]:[]),
+   ...(this.cold?[{binding:14,resource:this.cold.regions}]:[])]});
  }
  bindProjection(f:UniformMixedPressureProjectionFields):UniformDetailGroup{
   if(f.velocity===f.output||f.negative.buffer===f.outputNegative.buffer)throw new Error("Mixed projection requires disjoint velocity output");
@@ -125,7 +135,8 @@ export class UniformMixedPressureVelocity {
    {binding:9,resource:this.scalar(f.outputNegative,faces)},
    ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
    ...(this.topology(f.topology)?[{binding:11,resource:f.topology!}]:[]),...(this.rounding?[{binding:12,resource:{buffer:this.rounding}}]:[]),
-   ...(this.coarse?[{binding:13,resource:this.rootTopology(f)}]:[])]});
+   ...(this.coarse?[{binding:13,resource:this.rootTopology(f)}]:[]),
+   ...(this.cold?[{binding:14,resource:this.cold.regions},{binding:15,resource:this.cold.corrections}]:[])]});
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
@@ -136,6 +147,7 @@ const UM_H=vec3f(${h.join(",")});
 @group(1) @binding(2) var<storage,read_write> phi:array<f32>;
 struct UMProjectionParams {hDt:vec4f,policy:vec4f}
 @group(1) @binding(3) var<uniform> params:UMProjectionParams;
+\${COLD}
 ${uniformMixedFaceAddressWGSL}
 ${uniformMixedPressureBoundaryIndexWGSL()}
 fn umPressurePhi(o:UMOwner)->f32{return phi[o.index];}
@@ -161,8 +173,21 @@ fn umFaceVelocity(face:UMFace)->f32 {
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(velocity,face.anchor,0)[face.axis];}
  return textureLoad(velocity,face.anchor,0)[face.axis];
 }
+${this.coarse?/* wgsl */`// COLD freeze (UniformColdFreeze): a face of owner o is frozen when its low
+// or high 4h cell's region is. Its stored velocity is F; u* is F + T +
+// gravity (umColdForced, forces' rule), except that a wall (a SOLID page
+// across) takes no T: no region term crosses it.
+fn umColdLow(o:UMOwner,face:UMFace)->vec3i{var low=vec3i(umOrigin(o));if(face.sign<0){low[face.axis]-=i32(o.width);}return low;}
+fn umColdWall(face:UMFace)->bool{return face.neighbor.width==0u&&umFaceKind(face)==UM_SOLID;}
+// What u* adds to a face's stored velocity: zero unless frozen.
+fn umColdAdd(o:UMOwner,face:UMFace,occupied:bool)->f32{
+ if(!UM_COLD_FREEZE){return 0.0;}
+ let low=umColdLow(o,face);var add=umColdForced(low,face.axis,o.width,0.0,occupied);
+ if(umColdWall(face)){add-=umColdFaceTerm(low,face.axis,o.width);}
+ return add;
+}`:""}
 `;
-  const rhsSource=common+/* wgsl */`
+  const rhsSource=common.replace("${COLD}",UniformColdFreeze.wgsl(this.cold,1,14))+/* wgsl */`
 // The authorities' parameters: z is the volume control rate (1/s).
 @group(1) @binding(4) var<uniform> authority:vec4f;
 @group(1) @binding(5) var<storage,read_write> rhs:array<f32>;
@@ -189,8 +214,9 @@ fn umCutMask(o:UMOwner,axis:u32,sign:i32)->u32{
 }
 // sum(V_h u_h) over those h faces of one 4h face, from the h forced field,
 // plus each face's moving-wall term.
-fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
- let origin=vec3i(umOrigin(o));let a=(axis+1u)%3u;let b=(axis+2u)%3u;var sum=0.0;
+// sum(V_h u_h) and sum(V_h): a frozen 4h face's added u* is uniform over its h faces.
+fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->vec2f{
+ let origin=vec3i(umOrigin(o));let a=(axis+1u)%3u;let b=(axis+2u)%3u;var sum=0.0;var weight=0.0;
  let mask=umCutMask(o,axis,sign);
  // No moving-wall flux past the body flux reach (UNIFORM_BODY_FLUX_REACH).
  let bodies=umBodyCount()>0u&&umBodyPoseNearTile(o.tile,${UNIFORM_BODY_FLUX_REACH}u);
@@ -205,11 +231,11 @@ fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
   // and the disabled-solid variant retain their original boundary rules.
   var volume=0.0;
   if(umSolidEnabled()&&!umFaceLow(c,axis)){volume=umPatchFaceV(umTileAt(vec3u(c)/4u),c,axis);}
-  else{volume=umPressureFaceV(c,axis);}sum+=volume*u;
+  else{volume=umPressureFaceV(c,axis);}sum+=volume*u;weight+=volume;
   // A moving wall's (V_i - V) u_s, V_i the owner-side h cell (divergenceAtWithCapacity).
   if(bodies){var inner=c;if(sign<0){inner[axis]+=1;}let capacity=umCellOpen(inner);if(capacity!=volume){sum+=(capacity-volume)*umSolidFaceVelocity(c,axis);}}
  }}
- return sum;
+ return vec2f(sum,weight);
 }
 // The record V of a 4h face, the operator's own weight (W1): its low owner's
 // V+, or with nothing stored across it the wall slot's (1/2 of the wall's
@@ -222,9 +248,12 @@ fn umRecordV(o:UMOwner,face:UMFace)->f32{
 // A 4h face's flux. Either tile simulated at h and cut: the sum of its 16 h
 // faces'. Else the 4h face velocity through the record V: an uncut face's is
 // exactly 1 (1/2 at a wall), a cut 4h owner's the open part of its face.
+// Only a liquid owner forms its flux: every frozen face of it is occupied.
 fn umCoarseFlux(o:UMOwner,face:UMFace)->f32{
- if(umCoarseCut(o,face.axis,face.sign)){return umCutFlux(o,face.axis,face.sign);}
- return umRecordV(o,face)*umFaceVelocity(face)*f32(face.width*face.width);
+ var flux=vec2f(0.0);
+ if(umCoarseCut(o,face.axis,face.sign)){flux=umCutFlux(o,face.axis,face.sign);}
+ else{let weight=umRecordV(o,face)*f32(face.width*face.width);flux=vec2f(weight*umFaceVelocity(face),weight);}
+ return flux.x+flux.y*umColdAdd(o,face,true);
 }`:this.solid?`@group(1) @binding(8) var topologyOut:texture_storage_3d<rgba32float,write>;
 // mgBuildFinestTopology on fine owners. Coarse owners never touch a solid
 // (promotion certificate): open 1, interior V 1, walls 1/2, ambient lid 1.
@@ -267,12 +296,12 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  // The coarse root warm-starts from the caller's last pressure; air holds 0.
  pressures[o.index]=${this.coarse?"select(0.0,max(pressures[o.index],minimum[o.index]),liquid)":"0.0"};
  ${uniformMixedPressureBoundaryLoop(`let face=umFace(o,axis,sign,0u);
-  ${this.coarse?"// Only a cut owner's wall face loads its sixteen h faces (select would load them at every wall).\n  var wall=0.0;if(umCoarseCut(o,axis,sign)){wall=umCutFlux(o,axis,sign)/16.0;}else{wall=umSolidCoarse(halo).x*umFaceVelocity(face);}":""}
+  ${this.coarse?"// Only a cut owner's wall face loads its sixteen h faces (select would load them at every wall).\n  var wall=0.0;if(umCoarseCut(o,axis,sign)){let cut=umCutFlux(o,axis,sign);wall=(cut.x+cut.y*umColdAdd(o,face,true))/16.0;}else{wall=umSolidCoarse(halo).x*(umFaceVelocity(face)+umColdAdd(o,face,true));}":""}
   let b=f32(sign)*params.policy.x*${this.coarse?"wall":this.solid?"select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0)*umFaceVelocity(face)":"0.5*umFaceVelocity(face)"}/(f32(o.width)*UM_H[axis]*params.hDt.w);
   rhs[halo]=select(0.0,b,liquid);minimum[halo]=select(0.0,-3.402823e38,umWallHeld(o));pressures[halo]=${this.coarse?"select(0.0,max(pressures[halo],minimum[halo]),liquid)":"0.0"};`)}
 }
 `;
-  const projectSource=common+/* wgsl */`
+  const projectSource=common.replace("${COLD}",UniformColdFreeze.wgsl(this.cold,1,14,15))+/* wgsl */`
 @group(1) @binding(4) var<storage,read_write> pressures:array<f32>;
 @group(1) @binding(7) var volume:texture_3d<f32>;
 @group(1) @binding(8) var output:texture_storage_3d<rgba32float,write>;
@@ -305,16 +334,19 @@ fn umProjectV(o:UMOwner,face:UMFace)->f32{
 fn umSolidPressure(o:UMOwner)->f32{return select(0.0,umPressure(o),umPressureLiquid(o));}`:""}
 // An absent page's volume is not transferred: it is the certified V=0.
 ${uniformMixedDetachedMassWGSL(o=>`umPressureLiquid(${o})`,o=>`select(0.0,${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(volume,vec3i(umOrigin(${o})),0).x,umTileResident(${o}.tile))`,"params.policy.w")}
-fn umProject(o:UMOwner,face:UMFace)->f32{
+// The projected value of a face and whether it is a liquid row's (y 1).
+// cold: the face is frozen, its u* the stored F plus umColdAdd.
+fn umProjectRow(o:UMOwner,face:UMFace,cold:bool)->vec2f{
  let liquid=umPressureLiquid(o);let scale=params.hDt.w/params.policy.x;
  // Air on both sides keeps its velocity only beside detached mass. Any
  // other air face is zero whatever its V: skip the V and velocity loads.
  if(!liquid&&(face.neighbor.width==0u||!umPressureLiquid(face.neighbor))
-  &&(face.neighbor.width==0u||!(umDetachedMass(o)||umDetachedMass(face.neighbor)))){return 0.0;}
- ${this.solid?"if(umProjectV(o,face)<=1e-6){return 0.0;}":""}
- let v=umFaceVelocity(face);
+  &&(face.neighbor.width==0u||!(umDetachedMass(o)||umDetachedMass(face.neighbor)))){return vec2f(0.0);}
+ ${this.solid?"if(umProjectV(o,face)<=1e-6){return vec2f(0.0);}":""}
+ var v=umFaceVelocity(face);
+ ${this.coarse?"if(cold){v+=umColdAdd(o,face,true);}":""}
  if(face.neighbor.width==0u){
-  if(!liquid){return v;}
+  if(!liquid){return vec2f(v,0.0);}
   // Nothing stored across the face. AIR is the air row the root solved
   // against (UniformMixedRootOwners: block 0's, zero pressure and far-air
   // phi); a SOLID page is the wall, at the pressure the root solved for its
@@ -322,10 +354,21 @@ fn umProject(o:UMOwner,face:UMFace)->f32{
   var other=0.0;var theta=1.0;var low=0.0;
   if(umFaceKind(face)==UM_AIR){theta=umPressureSurfaceTheta(umPressurePhi(o),phi[umTileAt(vec3u(umFaceAcross(face))/4u)]);}
   else{let slot=umBoundaryIndex(o,face.axis,face.sign);other=pressures[slot];low=umPressureLow(slot);}
-  return v-scale*f32(face.sign)*umPressureRounded(umPressureRounded(other-umPressure(o))+umPressureRounded(low-umPressureLow(o.index)))/(f32(o.width)*UM_H[face.axis]*theta);
+  return vec2f(v-scale*f32(face.sign)*umPressureRounded(umPressureRounded(other-umPressure(o))+umPressureRounded(low-umPressureLow(o.index)))/(f32(o.width)*UM_H[face.axis]*theta),1.0);
  }
- if(!liquid&&!umPressureLiquid(face.neighbor)){return v;}
- return v-scale*umReconstructedPressureGradient(o,face);
+ if(!liquid&&!umPressureLiquid(face.neighbor)){return vec2f(v,0.0);}
+ return vec2f(v-scale*umReconstructedPressureGradient(o,face),1.0);
+}
+// A frozen face keeps its stored F (the projection writes it back as it
+// is); a positive one stores its correction, projected - F - T, or no face
+// (3e38) where it is no liquid row or a wall, for UniformColdFreeze's
+// accumulate.
+fn umProject(o:UMOwner,face:UMFace)->f32{
+ ${this.coarse?`let low=umColdLow(o,face);let cold=UM_COLD_FREEZE&&umFrozenFace(low,face.axis,o.width);
+ let row=umProjectRow(o,face,cold);if(!cold){return row.x;}
+ let raw=umFaceVelocity(face);
+ if(face.sign>0){umColdCorrect(o.tile,face.axis,select(3.0e38,row.x-raw-umColdFaceTerm(low,face.axis,o.width),row.y>0.0&&!umColdWall(face)));}
+ return raw;`:"return umProjectRow(o,face,false).x;"}
 }
 fn umProjectWithSource(o:UMOwner,face:UMFace)->f32{
  let value=umProject(o,face);

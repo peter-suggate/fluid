@@ -1,7 +1,7 @@
 import { narrowBandParticleWGSL } from "./uniform-narrow-band-apic.wgsl";
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { ParticleBinScan } from "./particle-bin-scan";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformKeyGroups, uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformLatticeAddressWGSL, type UniformLatticeAddress } from "./uniform-lattice-address";
 
 /** The stage's pass descriptors: begun every frame, built once. */
 const PREPARE_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP clear occupied bins"};
@@ -45,13 +45,14 @@ export class UniformNarrowBandOrder {
  private groups!:readonly [GPUBindGroup,GPUBindGroup];
  /** Cell keys of the lattice: the bins' first two banks. */
  private readonly cells:number;
- /** The per-tile launches' grid: the lattice's, for life. */
- private readonly tileGroups:[number,number]=[0,0];
  get allocatedBytes():number{return this.enabled.size+this.dimensions.size+(this.tileOffsets?.size??0)+(this.scan?.allocatedBytes??0);}
  /** topology: the simulation ownership's, whose tail holds the pages. The
-  * optional policy override lets small fixtures exercise both paths. */
- constructor(private readonly device:GPUDevice,private readonly address:UniformLatticeAddress,private readonly topology:GPUBuffer,private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,readonly sparse=address.cellKeys>=4_194_304,private readonly apic=false){
-  this.cells=address.cellKeys;uniformKeyGroups(address.tileKeys,1,65535,this.tileGroups);
+  * optional policy override lets small fixtures exercise both paths.
+ * occupied: the bins word of the occupied tile list (its length, entries
+ * from 4 words on), which every tile with coverage is on: prepare and the
+ * cell offsets stride it on a fixed grid, and prepare empties it. */
+ constructor(private readonly device:GPUDevice,private readonly address:UniformLatticeAddress,private readonly topology:GPUBuffer,private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,private readonly occupied:number,readonly sparse=address.cellKeys>=4_194_304,private readonly apic=false){
+  this.cells=address.cellKeys;
   // Shared APIC scan's activation record: no failure and an active step.
   // This immutable record makes our sort unconditional, including bootstrap.
   this.dimensions=device.createBuffer({label:"FLIP spatial order dimensions",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -84,32 +85,41 @@ ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"orderDimensions.w"}})
 @group(0) @binding(3) var<storage,read_write> links:array<u32>;
 // The receipt: [0] the input's slots, [1] the live samples packed.
 @group(0) @binding(4) var<storage,read_write> state:array<u32>;
+// The occupied tile list's word in the bins (UniformNarrowBandFlip.occupiedWord).
+const ORDER_OCCUPIED:u32=${this.occupied}u;
 ${this.sparse?"@group(0) @binding(5) var<storage,read> tileOffsets:array<u32>;":""}
 ${this.sparse?/* wgsl */`
 var<workgroup> prefix:array<u32,64>;
-var<workgroup> tilePopulation:u32;
-// Only tiles populated by the previous move contain cell counts to clear.
-// Every tile key is visited, one a page holds or not: the scan sums them all.
-@compute @workgroup_size(64) fn prepare(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+65535u*group.y;if(tile>=orderTiles()){return;}
- let live=atomicLoad(&bins[2u*UM_CELL_KEYS()+tile]);
- if(live!=0u){atomicStore(&bins[64u*tile+lane],0u);atomicStore(&bins[UM_CELL_KEYS()+64u*tile+lane],0u);}
- workgroupBarrier();
- if(lane==0u){atomicStore(&bins[2u*UM_CELL_KEYS()+tile],0u);}
-}
-@compute @workgroup_size(64) fn prefixTile(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=group.x+65535u*group.y;if(tile>=orderTiles()){return;}
- if(tile==orderTiles()-1u&&lane==0u){state[1]=tileOffsets[tile]+atomicLoad(&bins[2u*UM_CELL_KEYS()+tile]);}
- if(!umTileLive(tile)){return;}
- if(lane==0u){tilePopulation=atomicLoad(&bins[2u*UM_CELL_KEYS()+tile]);}
- if(workgroupUniformLoad(&tilePopulation)==0u){return;}
- let cell=64u*tile+lane;let count=atomicLoad(&bins[cell]);prefix[lane]=count;workgroupBarrier();
- for(var stride=1u;stride<64u;stride*=2u){
-  var add=0u;if(lane>=stride){add=prefix[lane-stride];}
-  workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
+var<workgroup> prefixListed:u32;
+var<workgroup> prefixTileKey:u32;
+// Only the occupied tiles (the list: every tile with coverage) hold cell
+// counts to clear; the list is emptied after this pass.
+@compute @workgroup_size(64) fn prepare(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=min(atomicLoad(&bins[ORDER_OCCUPIED]),orderTiles());
+ for(var j=group.x;j<count;j+=groups.x){
+  let tile=atomicLoad(&bins[ORDER_OCCUPIED+4u+j]);
+  atomicStore(&bins[64u*tile+lane],0u);atomicStore(&bins[UM_CELL_KEYS()+64u*tile+lane],0u);
+  if(lane==0u){atomicStore(&bins[2u*UM_CELL_KEYS()+tile],0u);}
  }
- links[cell]=tileOffsets[tile]+prefix[lane]-count;
- atomicStore(&bins[UM_CELL_KEYS()+cell],0u);
+}
+@compute @workgroup_size(64) fn prefixTile(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(group.x==0u&&lane==0u){let last=orderTiles()-1u;state[1]=tileOffsets[last]+atomicLoad(&bins[2u*UM_CELL_KEYS()+last]);}
+ if(lane==0u){prefixListed=min(atomicLoad(&bins[ORDER_OCCUPIED]),orderTiles());}
+ let listed=workgroupUniformLoad(&prefixListed);
+ for(var j=group.x;j<listed;j+=groups.x){
+  if(lane==0u){prefixTileKey=atomicLoad(&bins[ORDER_OCCUPIED+4u+j]);}
+  let tile=workgroupUniformLoad(&prefixTileKey);
+  if(umTileLive(tile)){
+   let cell=64u*tile+lane;let count=atomicLoad(&bins[cell]);prefix[lane]=count;workgroupBarrier();
+   for(var stride=1u;stride<64u;stride*=2u){
+    var add=0u;if(lane>=stride){add=prefix[lane-stride];}
+    workgroupBarrier();prefix[lane]+=add;workgroupBarrier();
+   }
+   links[cell]=tileOffsets[tile]+prefix[lane]-count;
+   atomicStore(&bins[UM_CELL_KEYS()+cell],0u);
+  }
+  workgroupBarrier();
+ }
 }
 `:""}
 // The key of a stored cell, or 0xffffffff: a sample whose cell holds no
@@ -187,14 +197,15 @@ fn orderKey(slot:u32)->vec4u{let a=UM_CELL_KEYS()+4u*slot;return vec4u(links[a],
   this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[{binding:7,resource:{buffer:this.dimensions}},{binding:6,resource:{buffer:this.topology}},...[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))]})) as [GPUBindGroup,GPUBindGroup];
  }
  prepare(encoder:GPUCommandEncoder,parity:number):void{
-  if(!this.sparse){encoder.clearBuffer(this.bins,0,this.cells*8);return;}
-  const pass=encoder.beginComputePass(PREPARE_PASS);pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);pass.end();
+  if(!this.sparse)encoder.clearBuffer(this.bins,0,this.cells*8+4*this.address.tileKeys);
+  else{const pass=encoder.beginComputePass(PREPARE_PASS);pass.setPipeline(this.preparePipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);pass.end();}
+  encoder.clearBuffer(this.bins,4*this.occupied,4);
  }
  /** Dense scan for small domains; occupied-tile cell scans for large ones. */
  encodeOffsets(encoder:GPUCommandEncoder,parity:number):void{
   this.scan.encode(encoder);
   if(this.sparse){
-   const prefix=encoder.beginComputePass(PREFIX_PASS);prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);prefix.end();
+   const prefix=encoder.beginComputePass(PREFIX_PASS);prefix.setPipeline(this.prefixPipeline);prefix.setBindGroup(0,this.groups[parity]!);prefix.dispatchWorkgroups(NARROW_BAND_PARTICLE_GRID);prefix.end();
   }
  }
  encode(encoder:GPUCommandEncoder,parity:number):void{
