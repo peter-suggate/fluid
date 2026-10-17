@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { benchmarkSvoPrimaryPass } from "../tools/benchmark-svo-primary-pass";
 
-test("isolated load-op passes rebuild their untimed prefix before every sample", async () => {
+for (const compute of [false,true]) test(`isolated ${compute ? "compute" : "render"} passes rebuild their untimed prefix before every sample`, async () => {
   const submitted: string[][] = [];
   const device = {
     features: new Set(["timestamp-query"]),
@@ -11,7 +11,7 @@ test("isolated load-op passes rebuild their untimed prefix before every sample",
     createCommandEncoder: () => {
       const commands: string[] = [];
       return {
-        beginRenderPass: (d: GPURenderPassDescriptor) => {
+        [compute ? "beginComputePass" : "beginRenderPass"]: (d: GPURenderPassDescriptor) => {
           commands.push(d.label!);
           if (d.label === "load previous depth") assert.ok(d.timestampWrites);
           else assert.equal(d.timestampWrites, undefined);
@@ -31,7 +31,8 @@ test("isolated load-op passes rebuild their untimed prefix before every sample",
   try {
     const result = await benchmarkSvoPrimaryPass(device, encoder => {
       for (const label of ["clear and draw base depth", "load previous depth", "lighting"]) {
-        encoder.beginRenderPass({ label, colorAttachments: [] }).end();
+        if (compute) encoder.beginComputePass({ label }).end();
+        else encoder.beginRenderPass({ label, colorAttachments: [] }).end();
       }
     }, 1, 1, "load previous depth");
     assert.equal(result.samples_ms.length, 1);

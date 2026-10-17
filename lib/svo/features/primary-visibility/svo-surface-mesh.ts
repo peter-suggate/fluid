@@ -1,6 +1,7 @@
 import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
 import { svoMeshPlanarRasterWGSL } from "./svo-mesh-planar-raster";
 import { svoAuthoredSurfaceNormalsWGSL } from "./svo-authored-surface-normals";
+import { svoMeshSampleCoverageWGSL } from "./svo-mesh-sample-coverage";
 import { proceduralSolidRenderWGSL } from "../../../core/procedural-solid-render.wgsl";
 import { svoDualMarchingCubesMeshWGSL, svoVoxelMeshWGSL, svoContourMeshWGSL, svoDualContouringMeshWGSL } from "../meshing/plugins";
 import { svoCellContourWGSL } from "../construction/svo-cell-contour";
@@ -442,7 +443,7 @@ fn meshStreamVertex(streamVertex:u32,trianglesOnly:bool)->vec2u{
 }
 `;
 
-export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false): string {
+export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false, sampleCulling = true): string {
   const W = SVO_SURFACE_MESH_STATE;
   const F = SVO_SURFACE_MESH_FLAGS;
   const M = SVO_SURFACE_MESH_MODE;
@@ -1343,8 +1344,13 @@ fn meshQuadSelectedRead(quad:SurfaceQuad)->bool{
   let at=MESH_TABLE_OFFSET+leaf*${SVO_SURFACE_MESH_TABLE_WORDS}u+4u;
   return level==meshWorkRead[at];
 }`}
-// Cull exact cached quad bounds before invoking any vertex shader. No
-// occlusion or screen-size approximation: subpixel geometry is retained.
+${svoMeshSampleCoverageWGSL}
+fn meshCoverageClip(world:vec3f,camera:mat4x3f)->vec4f{
+  let relative=world-camera[0];
+  return vec4f(dot(relative,camera[2])/(cameraTanHalfFov()*uniforms.viewport.x/max(uniforms.viewport.y,1.0)),dot(relative,camera[3])/cameraTanHalfFov(),DRY_REVERSED_Z_NEAR_M,dot(relative,camera[1]));
+}
+// Cull cached bounds and triangles with no possible covered pixel sample.
+// No size/area LOD: subpixel geometry that can cover a sample is retained.
 // While a build is pending, quads inside its dirty boxes yield to the traced
 // background so the edited region is exact before its bricks are re-extracted.
 fn meshQuadVisible(index:u32)->bool{
@@ -1384,6 +1390,13 @@ fn meshQuadVisible(index:u32)->bool{
   for(var i=0u;i<4u;i+=1u){
     if(dot(center,planes[i])>dot(halfExtent,abs(planes[i]))+epsilon){return false;}
   }
+  ${contours && sampleCulling ? `if(meshTriangle(quad)){
+    let extent=vec3f(meshQuadExtent(quad));let lattice=vec3f(meshQuadOrigin(quad));
+    let a=dry.mapping.worldOrigin+(lattice+meshTrianglePoint(quad,0u)*extent)*dry.mapping.cellSize;
+    let b=dry.mapping.worldOrigin+(lattice+meshTrianglePoint(quad,1u)*extent)*dry.mapping.cellSize;
+    let c=dry.mapping.worldOrigin+(lattice+meshTrianglePoint(quad,2u)*extent)*dry.mapping.cellSize;
+    if(!meshTriangleMayCoverSample(meshCoverageClip(a,camera),meshCoverageClip(b,camera),meshCoverageClip(c,camera),uniforms.viewport.xy)){return false;}
+  }` : ""}
   return true;
 }
 var<workgroup> meshCullCount:atomic<u32>;
@@ -1440,8 +1453,7 @@ ${surfaceMeshStreamVertexWGSL}
     let p=meshTrianglePoint(quad,min(vertex,2u));
     world=dry.mapping.worldOrigin+(vec3f(meshQuadOrigin(quad))+p*vec3f(meshQuadExtent(quad)))*dry.mapping.cellSize;
   }` : ""}
-  let camera=dryRasterPrimaryCamera();let relative=world-camera[0];let z=dot(relative,camera[1]);
-  var position=vec4f(dot(relative,camera[2])/(cameraTanHalfFov()*uniforms.viewport.x/max(uniforms.viewport.y,1.0)),dot(relative,camera[3])/cameraTanHalfFov(),DRY_REVERSED_Z_NEAR_M,z);
+  var position=meshCoverageClip(world,dryRasterPrimaryCamera());
   ${culling ? "" : "// Without the cull pass, an unselected or freed quad collapses to a zero-area strip.\n  if(meshQuadDead(quad)||!meshQuadSelectedRead(quad)){position=vec4f(0.0,0.0,0.0,1.0);}"}
   var normal=vec3f(0.0);normal[axis]=select(-1.0,1.0,(face&1u)!=0u);
   ${contours ? `if(meshTriangle(quad)){

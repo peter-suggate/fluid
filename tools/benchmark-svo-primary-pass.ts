@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 /** Replay the real visibility encoder with warmed, immutable scene resources.
  * Submit its prefix separately so load-op attachments have their actual input,
  * including when timing a pass that draws over the primary depth buffer.
- * This measures the selected visibility pass alone, excluding preparation and lighting.
- * One render pass per command buffer avoids tiler timestamp-window overlap.
+ * Render and compute passes are selectable, so culling overhead is measured
+ * separately from the draw it reduces. One pass per command buffer avoids
+ * tiler timestamp-window overlap.
  */
 export async function benchmarkSvoPrimaryPass(
   device: GPUDevice,
@@ -26,10 +27,12 @@ export async function benchmarkSvoPrimaryPass(
       let matches = 0;
       const routed = new Proxy(discarded, {
         get(target, property) {
-          if (property === "beginRenderPass") return (descriptor: GPURenderPassDescriptor) => {
-            if (descriptor.label !== passLabel) return (matches ? target : preparation).beginRenderPass(descriptor);
+          if (property === "beginRenderPass" || property === "beginComputePass") return (descriptor: GPURenderPassDescriptor | GPUComputePassDescriptor = {}) => {
+            const begin = (encoder: GPUCommandEncoder, d: typeof descriptor) => property === "beginRenderPass"
+              ? encoder.beginRenderPass(d as GPURenderPassDescriptor) : encoder.beginComputePass(d);
+            if (descriptor.label !== passLabel) return begin(matches ? target : preparation, descriptor);
             matches++;
-            return primary.beginRenderPass({ ...descriptor, timestampWrites: {
+            return begin(primary, { ...descriptor, timestampWrites: {
               querySet: queries, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1,
             } });
           };
@@ -58,7 +61,7 @@ export async function benchmarkSvoPrimaryPass(
     const sorted = [...samples_ms].sort((a, b) => a - b);
     readback.unmap();
     return {
-      method: "isolated-production-render-pass-gpu-timestamps",
+      method: "isolated-production-pass-gpu-timestamps",
       scope: `${passLabel}; warmed fixed-camera resources; excludes preparation and lighting`,
       warmups, cycles,
       median_ms: sorted[Math.floor(sorted.length / 2)],

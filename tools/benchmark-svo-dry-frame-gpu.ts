@@ -23,9 +23,12 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  * Env: FLUID_SVO_DRY_FRAME_WIDTH / _HEIGHT / _WARMUPS / _CYCLES /
  *      FLUID_SVO_DRY_FRAME_PRIMARY_TIMING=1 isolates the real primary render
  *      pass after warmup (fixed scene/camera; excludes entry preparation).
- *      _PRIMARY_TIMING_LABELS optionally selects comma-separated render-pass
+ *      _PRIMARY_TIMING_LABELS optionally selects comma-separated production-pass
  *      labels; each is replayed alone with GPU timestamps and reported in JSON.
  *      _MESH_CENSUS=1 counts the culled mesh records by material before timing.
+ *      _MESH_SAMPLE_CULLING=0 retains the reference draw for image comparisons.
+ *      _MESH_CAMERA_CHECKS=1 captures orbit/close/return views alongside the
+ *      configured raw output after profiling, without changing scene detail.
  *      FLUID_SVO_DRY_FRAME_PRIMARY_COMPUTE_PROBE=1 additionally compares the
  *      same primary entry body as 32/64/128-thread compute workgroups and
  *      records full-population G-buffer differences. This is a prototype,
@@ -304,6 +307,7 @@ const readVoxelLightCounters = process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_COUNT
 const optimizationExperiments: SvoDryOptimizationExperiments = {
   surfaceMesh: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH === "1",
   surfaceMeshCulling: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_CULLING !== "0",
+  surfaceMeshSampleCulling: process.env.FLUID_SVO_DRY_FRAME_MESH_SAMPLE_CULLING !== "0",
   surfaceMeshMaxBytes: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES ? Number(process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES) : undefined,
   voxelLightCache: process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
   // Production builds the opaque single-directional deferred shader (webgpu-renderer.ts).
@@ -1198,9 +1202,10 @@ log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
 if (process.env.FLUID_SVO_DRY_FRAME_MESH_CENSUS === "1") {
   const { censusSvoMeshMaterials } = await import("./census-svo-mesh-materials");
   const counts = await censusSvoMeshMaterials(device, renderer);
-  log(`Drawn mesh materials: ${JSON.stringify(counts.map(row => ({ ...row,
-    primitive: scenePrimitives.metadata.find(p => p.materialId === row.materialId),
-  })))}`);
+  log(`Drawn mesh materials: ${JSON.stringify(counts.map(row => {
+    const primitive = scenePrimitives.metadata.find(p => p.materialId === row.materialId);
+    return { ...row, ...(primitive ? { primitive: { key: primitive.key, tags: primitive.tags, sourceKind: primitive.sourceKind } } : {}) };
+  }))}`);
 }
 
 const primaryPassTimings = [];
@@ -1210,7 +1215,7 @@ if (process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING === "1") {
   for (const label of labels) {
     const timing = await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles, label.trim());
     primaryPassTimings.push(timing);
-    log(`Isolated render pass: ${JSON.stringify(timing)}`);
+    log(`Isolated production pass: ${JSON.stringify(timing)}`);
   }
 }
 const primaryPassTiming = primaryPassTimings[0];
@@ -1410,6 +1415,24 @@ if (profileSeconds > 0) {
   if (configuredRawOutPath) {
     mkdirSync(path.dirname(configuredRawOutPath), { recursive: true });
     writeFileSync(configuredRawOutPath, await captureTextureBytes(target, 8, "Profile final frame capture"));
+    if (process.env.FLUID_SVO_DRY_FRAME_MESH_CAMERA_CHECKS === "1") {
+      for (const [name, view] of [
+        ["orbit", { ...camera, azimuth_rad: camera.azimuth_rad + 1.1 }],
+        ["close", { ...camera, distance_m: camera.distance_m * .25, elevation_rad: .25 }],
+        ["return", camera],
+      ] as const) {
+        activeCamera = view;
+        device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count));
+        for (let frame = 0; frame < 4; frame++) {
+          const encoder = device.createCommandEncoder({ label: `Mesh camera check ${name}` });
+          encodeFrame(encoder); device.queue.submit([encoder.finish()]); await device.queue.onSubmittedWorkDone();
+        }
+        writeFileSync(`${configuredRawOutPath}.${name}`, await captureTextureBytes(target, 8, `Mesh ${name} capture`));
+        const timing = await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles, "Voxel surface mesh rasterization");
+        log(`Mesh camera check: ${JSON.stringify({ name, camera: view, drawnRecords: renderer.surfaceMeshStatus?.quads, timing })}`);
+      }
+      assert.deepEqual(validationErrors, [], "GPU validation errors during mesh camera checks");
+    }
   }
   renderer.destroy();
   target.destroy();

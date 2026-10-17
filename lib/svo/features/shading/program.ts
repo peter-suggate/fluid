@@ -615,6 +615,8 @@ export interface SvoDryOptimizationExperiments {
   readonly surfaceMesh?: boolean;
   /** Disable only for paired performance/image comparisons. */
   readonly surfaceMeshCulling?: boolean;
+  /** Conservative single-sample rejection; false keeps the paired reference draw. */
+  readonly surfaceMeshSampleCulling?: boolean;
   /** Optional diagnostic budget; overflow retains exact ray rendering. */
   readonly surfaceMeshMaxBytes?: number;
   /** Persistent level-0 voxel visibility for directional light slot zero. */
@@ -5583,7 +5585,7 @@ ${experiments.opaqueRasterLighting ? "" : "  if(slot<0&&!cachedSun){return dryRe
 }
 fn dryContactVisibilitySolid(position:vec3f,normal:vec3f,feature:u32,owner:u32)->vec3f{return rasterContactVisibility();}
 ` + rasterAoProducerWGSL(backdropHooks) : ""}
-${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true, experiments.rasterAo === true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
+${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true, experiments.rasterAo === true, experiments.surfaceMeshSampleCulling !== false) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
     traversalMode === "raster-primary" ? "raster" : "traced",
     {
       brickOccupancyMode,

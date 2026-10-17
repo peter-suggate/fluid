@@ -102,3 +102,43 @@ export FLUID_SVO_DRY_FRAME_PROFILE_SECONDS=3
 ```
 
 The result JSON includes both isolated pass timings. Local diagnostic evidence is in `artifacts/pool-primary/`.
+
+## Sample coverage culling
+
+The 7.9 million records passing back-face and frustum checks are not all raster-visible. Most fine DMC triangles in the overview fall between the single-sample primary pass's pixel centres. The compute culler now projects each candidate triangle with the draw's camera transform and rejects it only when its expanded bounds or edge tests exclude every possible sample. Small triangles that cover even one sample remain drawable. Bounds spanning more than two by two samples, near-plane crossings and numerically large projections go to hardware without the edge test.
+
+A 1/16-pixel guard in both axes conservatively accounts for rasterizer vertex snapping and floating-point projection differences. Vulkan requires at least [four fractional bits of subpixel precision](https://docs.vulkan.org/refpages/latest/refpages/source/Required_Limits.html); the regression also checks the actual Metal rasterizer used for these measurements. This is not an area threshold or mesh simplification. Each frame re-evaluates coverage for the current camera and viewport, including after movement or zoom. The full 6.25 mm SVO, DMC geometry, normals, PBR identities and shadow casters remain available. Neither the 50 mm fluid grid nor the mesh's 1 GiB retained allocation changes.
+
+The overview's actual draw census changes as follows:
+
+| Material group | Before | After |
+| --- | ---: | ---: |
+| Foliage | 3,939,763 | 213,322 |
+| Pool/deck | 2,208,005 | 225,239 |
+| Tree/shrub structure | 935,754 | 49,636 |
+| House wall | 336,866 | 52,102 |
+| Guests | 297,672 | 16,199 |
+| Other | 173,468 | 11,975 |
+| **Total drawn records** | **7,891,528** | **568,473** |
+
+The first validated overview draw measured **1.64 ms** (95th percentile 1.70 ms), with bit-identical linear color and depth against the previous implementation. The retained live mesh still contains 15,823,181 records. This reduces the draw list rather than permanently deleting geometry. The SVO's spatial hierarchy and per-brick mesh ranges remain possible accelerators for candidate discovery; no coarse geometric LOD is enabled by this change.
+
+The final paired runs use the same settings and validation-enabled Metal device as above, with four warmups and twelve timestamp samples per view:
+
+| View / stage | Reference median | Optimized median | Optimized drawn records |
+| --- | ---: | ---: | ---: |
+| Overview mesh draw | 15.53 ms | 1.70 ms | 568,473 |
+| Orbit mesh draw | 22.61 ms | 1.70 ms | 584,026 |
+| Close mesh draw (camera distance 6.25 m) | 6.62 ms | 1.64 ms | 566,829 |
+| Return to overview mesh draw | 15.27 ms | 1.70 ms | 568,473 |
+| Overview culling compute | 2.69 ms | 2.69 ms | — |
+
+The overview submits **92.8% fewer records** and its draw is **89.0% faster**. Culling cost did not increase measurably. The reference orbit has desktop-contention outliers; the return measurement confirms the overview result. All four paired captures have **zero changed linear-color, display-color or depth pixels**, and both runs report no GPU validation errors. [Paired comparison](../artifacts/pool-coverage/comparison.json), [reference timing](../artifacts/pool-coverage/reference.log), [optimized timing](../artifacts/pool-coverage/optimized.log), [overview](../artifacts/pool-coverage/optimized.png), [close view](../artifacts/pool-coverage/optimized.close.png).
+
+Short three-second dry frame windows measured 119.38 → 99.38 ms median under variable desktop load. Lighting and imported-field rendering remain substantial; these measurements exclude fluid simulation and water compositing, and the roughly two-millisecond result refers specifically to the primary mesh draw at 1000×720. It is not a claim of two-millisecond total frames or all-camera/all-resolution performance.
+
+The GPU coverage regression checks 37,548 triangles across 17×19, 64×64 and 1000×720 viewports against actual hardware fragment coverage. It includes both windings, perspective, tiny sample-covering triangles, triangles between samples, raster snapping boundaries, degenerate edges and near-plane/eye crossings. Every hardware-covered triangle must survive the compute test.
+
+For paired checks, `FLUID_SVO_DRY_FRAME_MESH_SAMPLE_CULLING=0` keeps the reference draw and `=1` enables sample rejection. `FLUID_SVO_DRY_FRAME_MESH_CAMERA_CHECKS=1` saves orbit, close and return captures beside `FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT`. The isolated pass profiler also accepts compute labels; include `Voxel mesh culling` alongside `Voxel surface mesh rasterization` to account for the culling cost. Local evidence is in `artifacts/pool-coverage/`.
+
+`npm run check:types` passed. `npm run test:unit` passed with 920 passing tests and 47 skipped. Explicit GPU checks for sample coverage, stream parity and raster AO passed six tests with no skips.

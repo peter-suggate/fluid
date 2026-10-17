@@ -2197,7 +2197,7 @@ export class SparseVoxelDrySceneRenderer {
     // A fixed direct dispatch over the arena's capacity; each thread reads the
     // drawable quad count publication stored and the rest return at once.
     if (this.experiments.surfaceMeshCulling !== false) {
-      compute("Voxel mesh back-face, frustum and dirty-box culling", pipelines.cull, Math.ceil(this.surfaceMeshArena!.size / 32 / 64));
+      compute("Voxel mesh culling", pipelines.cull, Math.ceil(this.surfaceMeshArena!.size / 32 / 64));
     }
     tracePhase?.("surface-mesh-cull");
     const draw = encoder.beginRenderPass({ label: "Voxel surface mesh rasterization",
