@@ -67,3 +67,15 @@ test("the mesh shader extracts every level once and lets the camera pick one per
     assert.doesNotMatch(source, /meshCellIdentity/);
   }
 });
+
+test("native sampled surfaces omit duplicate mesh faces but raster shadow maps retain their casters", () => {
+  const append = (retainCasters: boolean) => svoSurfaceMeshWGSL(3, 1 << 7, true, true, retainCasters)
+    .split("fn meshAppend(")[1]!.split("\n}")[0]!;
+  const native = append(false), rasterShadows = append(true);
+  // Rejection must precede both count and emit allocations; otherwise the two
+  // extraction phases disagree and leave holes or uninitialised arena records.
+  assert.ok(native.indexOf("dryMaterial(") < native.indexOf("if(meshPhase==0u)"));
+  assert.match(native, /identity\.w&4u/);
+  assert.doesNotMatch(rasterShadows, /dryMaterial\(/);
+  assert.match(rasterShadows, /meshArena\[meshEmitBase\+slot\]=SurfaceQuad/);
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ProceduralSolidField, validateProceduralSolid } from "../procedural-solid";
-import { decodeMeshVolume, meshVolumeToSolid, sampleMeshVolume } from "./mesh-volume";
+import { decodeMeshVolume, meshVolumeToSolid, sampleMeshVolume, sampleMeshVolumeDistance } from "./mesh-volume";
 
 // An affine half-space with independently authored shading normals. Two bricks
 // exercise interpolation, gradients and provenance across an actual seam.
@@ -85,4 +85,25 @@ test("mesh volume rejects corrupt payloads, invalid nodes and inconsistent share
   assert.throws(() => decodeMeshVolume(duplicate), /duplicate/);
   const material = bytes.slice(); new DataView(material.buffer).setUint32(8 + headerBytes + 24, 99, true);
   assert.throws(() => decodeMeshVolume(material), /node/);
+});
+
+
+test("shared scalar samples survive a worker handoff without copying PBR channels", () => {
+  const volume = decodeMeshVolume(fixture().bytes, true);
+  const scalar = { header: volume.header, bricks: new Map([...volume.bricks].map(
+    ([key, { origin, distance }]) => [key, { origin, distance }])) };
+  const received = structuredClone(scalar);
+  const buffers = new Set([...volume.bricks.values()].map(b => b.distance.buffer));
+  assert.equal(buffers.size, 1, "all brick views share one immutable scalar allocation");
+  assert.ok([...buffers][0] instanceof SharedArrayBuffer);
+  for (const x of [-.8, -.000001, 0, .000001, .8, 1]) for (const y of [0, .333, .8]) {
+    assert.ok(Math.abs(sampleMeshVolumeDistance(received, [x,y,0]) - sampleMeshVolume(volume, [x,y,0]).distance) < 1e-12);
+  }
+  const brick = received.bricks.values().next().value!;
+  assert.deepEqual(Object.keys(brick).sort(), ["distance", "origin"]);
+  // Structured clone of a SAB aliases the existing allocation, including all
+  // brick offsets. A normal ArrayBuffer clone would not see this sentinel.
+  const source = volume.bricks.values().next().value!;
+  source.distance[0] = .125;
+  assert.equal(brick.distance[0], .125);
 });

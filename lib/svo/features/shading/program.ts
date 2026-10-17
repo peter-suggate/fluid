@@ -4706,7 +4706,7 @@ fn dryPlanarCatalogHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
 
 // Exact live-scene acceleration. Candidate nodes occupy the same fixed arena
 // as primitives, after the primitive span, so this adds no storage binding.
-fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32,sampledOnly:bool)->DryHit{
+fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32,sampledOnly:bool,anyHit:bool)->DryHit{
   var best=missHit();best.t=tMax;
   if(dry.primitiveCandidates.w==0u||dry.primitiveCandidates.y==0u){return best;}
   var stack:array<u32,${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}>;
@@ -4723,7 +4723,12 @@ fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32,sam
       if(leftOrPrimitive>=dry.metadata.x){continue;}let record=dryPrimitive(leftOrPrimitive);let owner=svoPrimitiveOwnerId(record);
       if(owner==ignoredOwner||dryOpaqueOwnerSuppressed(owner)||(sampledOnly&&!drySampledMaterial(svoPrimitiveMaterialId(record)))){continue;}
       ${primaryWorkMap ? "dryPrimaryWorkPrimitiveTests+=1u;" : ""}
-      let candidate=primitiveHit(record,ro,rd,tMin,best.t);if(candidate.t<best.t){best=candidate;}
+      let candidate=primitiveHit(record,ro,rd,tMin,best.t);
+      if(candidate.t<best.t){
+        // Opaque shadow visibility only needs one blocker. Primary rays still
+        // resolve the nearest surface, with the same exact intersection test.
+        if(anyHit){return candidate;}best=candidate;
+      }
     }else if(stackSize+2u<=${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK}u){
       stack[stackSize]=right;stack[stackSize+1u]=leftOrPrimitive;stackSize+=2u;
     }
@@ -4870,7 +4875,7 @@ fn traceStaticVoxelFrom(ro:vec3f,rd:vec3f,initialMinimum:f32)->DryHit {
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return missHit();}
   ${primaryEntrySeedTakeWGSL}
   var seeded=dryPlanarCatalogHit(ro,rd,initialMinimum,DRY_MISS);
-  ${analyticPrimaryUnbounded ? "let primitiveBest=traceScenePrimitives(ro,rd,initialMinimum,seeded.t,DRY_OWNER_NONE,false);if(primitiveBest.t<seeded.t){seeded=primitiveBest;}" : ""}
+  ${analyticPrimaryUnbounded ? "let primitiveBest=traceScenePrimitives(ro,rd,initialMinimum,seeded.t,DRY_OWNER_NONE,false,false);if(primitiveBest.t<seeded.t){seeded=primitiveBest;}" : ""}
   ${primaryEntrySeedResolveWGSL}
   var voxel=missHit();
   var minimum=max(initialMinimum,0.0);
@@ -5088,7 +5093,7 @@ ${svoVisibilityTraceWGSL}
 fn drySampledSurfaceVisibility(position:vec3f,normal:vec3f,direction:vec3f,maximumDistance:f32)->vec3f{
   let bias=max(0.0005,dry.tuningRays0.x*dot(abs(normal),dry.mapping.cellSize));
   let origin=position+normal*bias;let distance=max(0.0,maximumDistance-bias*dot(normal,direction));
-  let native=traceScenePrimitives(origin,direction,0.0,distance,DRY_OWNER_NONE,true);
+  let native=traceScenePrimitives(origin,direction,0.0,distance,DRY_OWNER_NONE,true,true);
   if(native.t<distance){return vec3f(1.0-dry.tuningRays0.y);}
   // A native surface can cover a coarser physics solid (the diving deck).
   // Its opacity cell extends above the true plane. Keep the native ray's
@@ -5578,7 +5583,7 @@ ${experiments.opaqueRasterLighting ? "" : "  if(slot<0&&!cachedSun){return dryRe
 }
 fn dryContactVisibilitySolid(position:vec3f,normal:vec3f,feature:u32,owner:u32)->vec3f{return rasterContactVisibility();}
 ` + rasterAoProducerWGSL(backdropHooks) : ""}
-${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
+${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true, experiments.rasterAo === true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
     traversalMode === "raster-primary" ? "raster" : "traced",
     {
       brickOccupancyMode,

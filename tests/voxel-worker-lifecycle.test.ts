@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { defaultScene } from "../lib/core/model";
+import { defaultScene, type SceneDescription } from "../lib/core/model";
 import { WebGPURenderWorkerClient, type WebGPURenderWorkerRequest, type WebGPURenderWorkerResponse } from "../lib/core/webgpu-render-worker-client";
 import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
 import type { GPUStatus } from "../lib/core/gpu-status";
@@ -112,5 +112,41 @@ test("fluid action waits for its receipt and shutdown rejects pending fluid acti
     const shutdown = client.shutdown(); await rejected;
     await assert.rejects(client.editFluid(edit), /no longer available/);
     worker.finishShutdown(); await shutdown;
+  });
+});
+
+
+test("worker scalar asset handoff makes imported scenery pickable without loading PBR on the window", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { gunzipSync } = await import("node:zlib");
+  const { decodeMeshVolume } = await import("../lib/core/imported-assets/mesh-volume");
+  const { meshAssetVolume, sampleAssetDistance, meshAssetHeader, loadedSceneMeshAssetDistanceFields } = await import("../lib/core/imported-assets/asset-library");
+  const { intersectSvoPrimitive } = await import("../lib/svo/contracts/svo-primitive-abi");
+  const asset = "diving-board-ladder";
+  const scene: SceneDescription = { ...defaultScene, scenery: { palettes: {}, nodes: [
+    { kind: "field-program", id: "board", program: { ops: [], result: 0, sampledVolume: { asset } },
+      material: { colorLinear: [1,1,1] } },
+  ] } };
+  assert.equal(loadedSceneMeshAssetDistanceFields(scene), undefined,
+    "an initialization draw must defer catalog publication, not throw or publish partial geometry");
+  assert.deepEqual(loadedSceneMeshAssetDistanceFields({ ...scene, scenery: undefined }), [],
+    "scenes without imported assets need no loading barrier");
+  assert.throws(() => sampleAssetDistance({ asset }, {x:0,y:0,z:0}), /has not loaded/);
+  const volume = decodeMeshVolume(gunzipSync(readFileSync(new URL("../public/assets/pool-party/diving-board-ladder.fvx.gz", import.meta.url))), true);
+  const field = { header: volume.header, bricks: new Map([...volume.bricks].map(
+    ([key, { origin, distance }]) => [key, { origin, distance }])) };
+  await withClient(async (_client, worker) => {
+    worker.emit(structuredClone({ type: "mesh-asset-distance-field", id: asset, field }));
+    assert.deepEqual(loadedSceneMeshAssetDistanceFields(scene)?.map(entry => entry.id), [asset]);
+    assert.throws(() => meshAssetVolume(asset), /has not loaded/, "the UI has no PBR copy");
+    const h = meshAssetHeader(asset), e = h.dimensions.map(v => v*h.cellSize/2);
+    const c = h.origin.map((v,i) => v+e[i]!);
+    const descriptor = { kind: "field-program" as const, primitiveId: 1, ownerId: 1, materialId: 1,
+      center_m: {x:c[0]!,y:c[1]!,z:c[2]!}, envelopeRadii_m: {x:e[0]!,y:e[1]!,z:e[2]!},
+      fieldProgramReference: 0, program: { ops: [], result: 0, sampledVolume: {asset} } };
+    const hit = intersectSvoPrimitive(descriptor, {origin_m: {x:0,y:6,z:0},direction:{x:0,y:-1,z:0}});
+    assert.ok(hit, "ray reaches the actual diving board using the handed-off scalar field");
+    const miss = intersectSvoPrimitive(descriptor, {origin_m: {x:1.7,y:6,z:.6},direction:{x:0,y:-1,z:0}});
+    assert.equal(miss, null, "empty space within the bounds must not become a box-shaped pick");
   });
 });

@@ -1333,7 +1333,8 @@ if (profileSeconds > 0) {
     coneScale,
     coneTracingMode,
     environmentRefinementDepth,
-    detailCellSize_mm: (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000,
+    detailCellSize_mm: solver.sparseVoxelSceneSource.structural!.domain.cellSize_m[0] * 1000,
+    fluidCellSize_mm: scene.voxelDomain.finestCellSize_m * 1000,
   }));
   const profileStarted = performance.now();
   let frame = 0;
@@ -1379,9 +1380,15 @@ if (profileSeconds > 0) {
     coneTracingMode,
     profileBatch,
     environmentRefinementDepth,
-    detailCellSize_mm: (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000,
+    detailCellSize_mm: solver.sparseVoxelSceneSource.structural!.domain.cellSize_m[0] * 1000,
+    fluidCellSize_mm: scene.voxelDomain.finestCellSize_m * 1000,
   };
-  console.log(JSON.stringify(result));
+  assert.deepEqual(validationErrors, [], "GPU validation errors during profiled frames");
+  console.log(JSON.stringify({ ...result, surfaceMesh: renderer.surfaceMeshStatus, validationErrors }));
+  if (configuredRawOutPath) {
+    mkdirSync(path.dirname(configuredRawOutPath), { recursive: true });
+    writeFileSync(configuredRawOutPath, await captureTextureBytes(target, 8, "Profile final frame capture"));
+  }
   renderer.destroy();
   target.destroy();
   uniformBuffer.destroy();

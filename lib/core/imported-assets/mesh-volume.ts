@@ -34,6 +34,11 @@ export interface MeshVolumeBrick {
   shadingNormal: Uint32Array;
   material: Uint32Array;
 }
+/** Geometry-only view used by the UI picker; normal and PBR channels stay in the renderer. */
+export interface MeshVolumeDistanceField {
+  header: MeshVolumeHeader;
+  bricks: ReadonlyMap<string, Pick<MeshVolumeBrick, "origin" | "distance">>;
+}
 export interface MeshVolume {
   header: MeshVolumeHeader;
   bricks: ReadonlyMap<string, MeshVolumeBrick>;
@@ -44,7 +49,8 @@ const triple = (v: unknown): v is [number, number, number] => Array.isArray(v) &
 /** Decode uncompressed FVX1. Browser loads use fetchMeshVolume to handle both
  * HTTP and file-level compression; in Node use gunzipSync on disk payloads.
  * Typed channels are copied so callers may release/transfer the input buffer. */
-export function decodeMeshVolume(bytes: Uint8Array): MeshVolume {
+export function decodeMeshVolume(bytes: Uint8Array, shareDistances =
+  typeof SharedArrayBuffer === "function" && globalThis.crossOriginIsolated === true): MeshVolume {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.length < 8 || new TextDecoder().decode(bytes.subarray(0, 4)) !== "FVX1") throw new Error("Invalid mesh volume magic");
   const length = view.getUint32(4, true);
@@ -63,13 +69,17 @@ export function decodeMeshVolume(bytes: Uint8Array): MeshVolume {
       && m.baseColorLinear.every((v: number) => v >= 0 && v <= 1) && Number.isFinite(m.roughness) && m.roughness >= 0 && m.roughness <= 1
       && Number.isFinite(m.metallic) && m.metallic >= 0 && m.metallic <= 1)) throw new Error("Invalid mesh volume header");
   if (bytes.length !== 8 + length + header.brickCount * BRICK_BYTES) throw new Error("Mesh volume payload length does not match brick count");
+  // One immutable scalar allocation can be shared with the window. Sharing
+  // these existing samples avoids another asset download or a second PBR image.
+  const distanceBytes = header.brickCount * NODES * Float32Array.BYTES_PER_ELEMENT;
+  const distances = shareDistances ? new SharedArrayBuffer(distanceBytes) : new ArrayBuffer(distanceBytes);
   const bricks = new Map<string, MeshVolumeBrick>();
   let at = 8 + length;
   for (let b = 0; b < header.brickCount; b++) {
     const origin: V3 = [view.getInt32(at, true), view.getInt32(at + 4, true), view.getInt32(at + 8, true)];
     at += 12;
     if (!origin.every((v, a) => v >= 0 && v % 8 === 0 && v < header.dimensions[a]!) || bricks.has(origin.join())) throw new Error("Invalid or duplicate mesh volume brick");
-    const brick: MeshVolumeBrick = { origin, distance: new Float32Array(NODES), geometricNormal: new Uint32Array(NODES),
+    const brick: MeshVolumeBrick = { origin, distance: new Float32Array(distances, b * NODES * 4, NODES), geometricNormal: new Uint32Array(NODES),
       shadingNormal: new Uint32Array(NODES), material: new Uint32Array(NODES) };
     for (let n = 0; n < NODES; n++, at += 16) {
       const d = view.getFloat32(at, true), m = view.getUint32(at + 12, true);
@@ -110,17 +120,12 @@ function normalized(v: number[]): V3 {
   return length > 1e-12 ? [v[0]! / length, v[1]! / length, v[2]! / length] : [0, 0, 0];
 }
 
-/** Positions are in asset-local Y-up metres, exactly as in the exported GLB.
- * gradient is the derivative of the sampled scalar (for geometry/physics).
- * geometricNormal and shadingNormal retain the source mesh's two normal fields.
- * Normals do not modify distance or occupancy. */
-export function sampleMeshVolume(volume: MeshVolume, position: V3) {
+function meshVolumeCell<B extends Pick<MeshVolumeBrick, "origin" | "distance">>(
+  volume: { header: MeshVolumeHeader; bricks: ReadonlyMap<string, B> }, position: V3) {
   if (!position.every(Number.isFinite)) throw new RangeError("Mesh volume position must be finite");
   const { header, bricks } = volume, h = header.cellSize;
   const q = position.map((v, a) => (v - header.origin[a]!) / h);
-  const empty = { distance: header.bandWidth, gradient: [0, 0, 0] as V3,
-    geometricNormal: [0, 0, 0] as V3, shadingNormal: [0, 0, 0] as V3, material: 0 };
-  if (q.some((v, a) => v < 0 || v > header.dimensions[a]!)) return empty;
+  if (q.some((v, a) => v < 0 || v > header.dimensions[a]!)) return undefined;
   // At the upper boundary use the last cell's upper node, not a missing brick.
   const cell = q.map((v, a) => Math.min(Math.floor(v), header.dimensions[a]! - 1));
   const base = cell.map(v => Math.floor(v / 8) * 8);
@@ -132,8 +137,35 @@ export function sampleMeshVolume(volume: MeshVolume, position: V3) {
     for (let a = 0; a < 3; a++) if (mask & (1 << a)) { if (q[a] !== base[a]) allowed = false; alternative[a]! -= 8; }
     if (allowed) { brick = bricks.get(alternative.join()); if (brick) base.splice(0, 3, ...alternative); }
   }
-  if (!brick) return empty;
+  if (!brick) return undefined;
   const local = q.map((v, a) => v - base[a]!) as unknown as V3;
+  return { brick, local };
+}
+
+/** Scalar-only queries skip normal decoding, material votes and gradient work. */
+export function sampleMeshVolumeDistance(volume: MeshVolumeDistanceField, position: V3): number {
+  const sample = meshVolumeCell(volume, position);
+  if (!sample) return volume.header.bandWidth;
+  const { brick, local } = sample;
+  const c = local.map(v => Math.min(7, Math.floor(v))), f = local.map((v, a) => v - c[a]!);
+  let distance = 0;
+  for (let k = 0; k < 8; k++) {
+    const x = k & 1, y = (k >> 1) & 1, z = k >> 2;
+    const value = brick.distance[c[0]!+x+9*(c[1]!+y+9*(c[2]!+z))]!;
+    distance += value * (x ? f[0]! : 1-f[0]!) * (y ? f[1]! : 1-f[1]!) * (z ? f[2]! : 1-f[2]!);
+  }
+  return distance;
+}
+
+/** Positions are in asset-local Y-up metres, exactly as in the exported GLB.
+ * gradient is the derivative of the sampled scalar (for geometry/physics).
+ * geometricNormal and shadingNormal retain the source mesh's two normal fields.
+ * Normals do not modify distance or occupancy. */
+export function sampleMeshVolume(volume: MeshVolume, position: V3) {
+  const sample = meshVolumeCell(volume, position);
+  if (!sample) return { distance: volume.header.bandWidth, gradient: [0, 0, 0] as V3,
+    geometricNormal: [0, 0, 0] as V3, shadingNormal: [0, 0, 0] as V3, material: 0 };
+  const { local, brick } = sample, h = volume.header.cellSize;
   const field = sampleSolidNodes(brick.distance, local);
   const c = local.map(v => Math.min(7, Math.floor(v))), f = local.map((v, a) => v - c[a]!);
   const geometric = [0, 0, 0], shading = [0, 0, 0], votes = new Map<number, number>();

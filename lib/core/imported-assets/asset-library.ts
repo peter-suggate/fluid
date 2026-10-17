@@ -12,7 +12,7 @@ import coping from "./metadata/limestone-coping-volume.json";
 import copingCorner from "./metadata/limestone-coping-corner-volume.json";
 import waterline from "./metadata/ceramic-waterline-volume.json";
 import servingTable from "./metadata/teak-serving-table-volume.json";
-import { sampleMeshVolume, type MeshVolume, type MeshVolumeHeader } from "./mesh-volume";
+import { sampleMeshVolume, sampleMeshVolumeDistance, type MeshVolumeDistanceField, type MeshVolume, type MeshVolumeHeader } from "./mesh-volume";
 import { fetchMeshVolume } from "./mesh-volume-loader";
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
 import { walkSceneryNodes } from "../scenery-graph";
@@ -37,6 +37,7 @@ export const MESH_ASSETS: Readonly<Record<string, MeshVolumeHeader>> = {
 };
 export interface SampledVolumeField { readonly asset: string; readonly materialBase?: number }
 const volumes = new Map<string, MeshVolume>();
+const distanceFields = new Map<string, MeshVolumeDistanceField>();
 const pending = new Map<string, Promise<void>>();
 const packed = new WeakMap<MeshVolume, Uint32Array<ArrayBuffer>>();
 const occupancy = new WeakMap<MeshVolume, { sums: Uint32Array; dimensions: number[] }>();
@@ -45,14 +46,33 @@ export function meshAssetHeader(id: string): MeshVolumeHeader {
   if (!header) throw new Error(`Unknown mesh asset: ${id}`);
   return header;
 }
-export function registerMeshAsset(id: string, volume: MeshVolume): void {
+function validateAssetHeader(id: string, volume: MeshVolumeDistanceField): void {
   const expected = meshAssetHeader(id), h = volume.header;
   if (h.asset !== id || h.cellSize !== expected.cellSize || h.dimensions.join() !== expected.dimensions.join()
     || h.origin.join() !== expected.origin.join() || JSON.stringify(h.materials) !== JSON.stringify(expected.materials)
     || JSON.stringify(h.horizontalSlab) !== JSON.stringify(expected.horizontalSlab)) {
     throw new Error(`Mesh asset ${id} does not match its published metadata`);
   }
+}
+export function registerMeshAsset(id: string, volume: MeshVolume): void {
+  validateAssetHeader(id, volume);
   volumes.set(id, volume);
+  registerMeshAssetDistanceField(id, { header: volume.header, bricks: new Map(
+    [...volume.bricks].map(([key, { origin, distance }]) => [key, { origin, distance }])) });
+}
+export function registerMeshAssetDistanceField(id: string, field: MeshVolumeDistanceField): void {
+  validateAssetHeader(id, field);
+  distanceFields.set(id, field);
+}
+export function meshAssetDistanceField(id: string): MeshVolumeDistanceField {
+  const field = distanceFields.get(id);
+  if (!field) throw new Error(`Mesh asset ${id} has not loaded`);
+  return field;
+}
+export function sampleAssetDistance(field: SampledVolumeField, p: Vec3): number {
+  const h = meshAssetHeader(field.asset), e = sampledVolumeExtent(field);
+  return sampleMeshVolumeDistance(meshAssetDistanceField(field.asset), [p.x + h.origin[0] + e[0],
+    p.y + h.origin[1] + e[1], p.z + h.origin[2] + e[2]]);
 }
 export function meshAssetVolume(id: string): MeshVolume {
   const volume = volumes.get(id);
@@ -65,6 +85,17 @@ export function sceneMeshAssetIds(scene: SceneDescription): string[] {
     if (node.kind === "field-program" && node.program.sampledVolume) ids.add(node.program.sampledVolume.asset);
   }
   return [...ids];
+}
+/** An early draw can expose a catalog while asset/GPU initialization is still
+ * pending. Keep the catalog unpickable until all of its scalar fields exist. */
+export function loadedSceneMeshAssetDistanceFields(scene: SceneDescription) {
+  const fields: { id: string; field: MeshVolumeDistanceField }[] = [];
+  for (const id of sceneMeshAssetIds(scene)) {
+    const field = distanceFields.get(id);
+    if (!field) return undefined;
+    fields.push({ id, field });
+  }
+  return fields;
 }
 export async function ensureSceneMeshAssets(scene: SceneDescription, signal?: AbortSignal): Promise<void> {
   await Promise.all(sceneMeshAssetIds(scene).map(async id => {

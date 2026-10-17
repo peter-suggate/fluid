@@ -3,6 +3,7 @@
 // Composition root: installs the simulation methods this worker's renderer
 // looks up by id. Nothing else in the worker imports the method package.
 import "../methods/index";
+import { loadedSceneMeshAssetDistanceFields } from "./imported-assets/asset-library";
 import { cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, type EnvironmentProxyCatalog } from "./voxel-environments";
 import { documentDelta } from "./document-delta";
 import { successorEnvironmentCatalog } from "../svo/features/scene-publication/scene-environment-catalog";
@@ -21,6 +22,7 @@ import type {
 const scope = self as DedicatedWorkerGlobalScope;
 
 let needsSceneryCatalog = true;
+const sentMeshAssetDistances = new Set<string>();
 /** The catalog the window holds: the last one sent, whole or as changes. */
 let sentSceneryCatalog: EnvironmentProxyCatalog | undefined;
 
@@ -215,7 +217,18 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
         return;
       }
       const catalog = cachedEnvironmentProxyCatalog(renderScene.document);
-      if (catalog && needsSceneryCatalog) {
+      const assetFields = catalog && needsSceneryCatalog
+        ? loadedSceneMeshAssetDistanceFields(renderScene.document) : undefined;
+      if (catalog && assetFields) {
+        // Deliver geometry before the catalog makes these objects pickable.
+        // Isolated browsers share the decoder's immutable scalar buffer; the
+        // normal/material channels never leave the renderer. Non-isolated
+        // hosts clone only the scalar channel once per unique asset.
+        for (const { id, field } of assetFields) {
+          if (sentMeshAssetDistances.has(id)) continue;
+          post({ type: "mesh-asset-distance-field", id, field });
+          sentMeshAssetDistances.add(id);
+        }
         // Over the catalog the window was last sent: nothing when this is that
         // one, its changed parts when it is a later expansion of the same set.
         const changes = !sentSceneryCatalog ? undefined

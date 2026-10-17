@@ -357,9 +357,9 @@ interface SceneryPickTarget {
 const pickTargetCache = new WeakMap<object, readonly SceneryPickTarget[]>();
 
 /** Slab test, so the exact intersection is only asked of the few shapes near the ray. */
-function raySpansAabb(aabb: EnvironmentProxyPrimitive["aabb_m"], ray: EditorRay): boolean {
+function raySpansAabb(aabb: EnvironmentProxyPrimitive["aabb_m"], ray: EditorRay, maximumDistance = Infinity): boolean {
   let near = 0;
-  let far = Infinity;
+  let far = maximumDistance;
   for (const axis of ["x", "y", "z"] as const) {
     const direction = ray.direction[axis];
     if (Math.abs(direction) < 1e-12) {
@@ -460,9 +460,9 @@ export const sceneryEntity: EditorEntityDefinition = {
     let nearest: { nodeId: string; distance_m: number } | undefined;
     for (const target of pickTargets(context.scene)) {
       if (pickExcluded(exclude, "scenery", scenerySelectionId(target.nodeId))) continue;
-      if (!raySpansAabb(target.aabb_m, ray)) continue;
+      if (!raySpansAabb(target.aabb_m, ray, nearest?.distance_m)) continue;
       target.descriptor ??= svoDescriptorForEnvironmentProxy(target.primitive);
-      const hit = intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction });
+      const hit = intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction, tMax_m: nearest?.distance_m });
       if (hit && (!nearest || hit.t_m < nearest.distance_m)) nearest = { nodeId: target.nodeId, distance_m: hit.t_m };
     }
     return nearest && {

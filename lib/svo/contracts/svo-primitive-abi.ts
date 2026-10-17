@@ -2607,14 +2607,19 @@ function intersectMarchedLocal(
   let t_m = start;
   const iterations = descriptor.kind === "field-program" ? SVO_FIELD_PROGRAM_MARCH_ITERATIONS : SVO_PRIMITIVE_MARCH_ITERATIONS;
   for (let iteration = 0; iteration <= iterations; iteration += 1) {
-    const sample = marchedLocalSample(descriptor, {
+    const point = {
       x: origin.x + direction.x * t_m,
       y: origin.y + direction.y * t_m,
       z: origin.z + direction.z * t_m,
-    });
-    const distance = Math.abs(sample.signedDistance_m);
+    };
+    // A field-program normal takes six extra field evaluations. Like the GPU
+    // marcher, compute it only at the accepted surface, never at every step.
+    const sample = descriptor.kind === "field-program" ? undefined : marchedLocalSample(descriptor, point);
+    const distance = Math.abs(descriptor.kind === "field-program"
+      ? fieldProgramDistance_m(descriptor.program, point) : sample!.signedDistance_m);
     if (distance <= marchSurfaceEpsilon(t_m)) {
-      return sample.normal ? { t_m, normal: sample.normal, featureId: sample.featureId } : null;
+      const surface = sample ?? marchedLocalSample(descriptor, point);
+      return surface.normal ? { t_m, normal: surface.normal, featureId: surface.featureId } : null;
     }
     // The floor only guarantees progress; the acceptance band above is what
     // decides a hit, so it can never step across a surface it should have found.

@@ -1,3 +1,5 @@
+import { registerMeshAssetDistanceField } from "./imported-assets/asset-library";
+import type { MeshVolumeDistanceField } from "./imported-assets/mesh-volume";
 import { adoptEnvironmentProxyCatalog, useRemoteEnvironmentCatalogs, cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, markEnvironmentCatalogRemote, type EnvironmentProxyCatalog } from "./voxel-environments";
 import type { LiveFluidEdit, LiveFluidEditResult } from "./live-fluid-edit";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
@@ -108,6 +110,7 @@ export type WebGPURenderWorkerRequest =
   | { type: "shutdown"; requestId: number };
 
 export type WebGPURenderWorkerResponse =
+  | { type: "mesh-asset-distance-field"; id: string; field: MeshVolumeDistanceField }
   | { type: "scenery-catalog"; sceneRevision: number; catalog: EnvironmentProxyCatalog }
   /** The catalog of this revision over the last one sent: the parts that differ, or none when it is that catalog still. */
   | { type: "scenery-catalog-changes"; sceneRevision: number; entries: DocumentDeltaEntry[] }
@@ -564,6 +567,7 @@ export class WebGPURenderWorkerClient {
         adoptEnvironmentProxyCatalog(this.publishedRenderDocument, this.sceneryCatalog);
       }
     }
+    else if (message.type === "mesh-asset-distance-field") registerMeshAssetDistanceField(message.id, message.field);
     else if (message.type === "status") {
       const status = message.status.state === "initializing" && message.status.startedAt_ms !== undefined
         ? { ...message.status,

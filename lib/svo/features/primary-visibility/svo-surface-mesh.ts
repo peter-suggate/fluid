@@ -429,7 +429,7 @@ export function interpretSurfaceMeshState(words: ArrayLike<number>, context: { a
   return receipt;
 }
 
-export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false): string {
+export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false): string {
   const W = SVO_SURFACE_MESH_STATE;
   const F = SVO_SURFACE_MESH_FLAGS;
   const M = SVO_SURFACE_MESH_MODE;
@@ -764,6 +764,10 @@ var<private> meshEntry:u32;
 var<private> meshEmitBase:u32;
 var<private> meshEmitCount:u32;
 fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
+  // Native sampled surfaces replace these proxy faces at draw time. Reject in
+  // BOTH count and emit phases, before reserving arena space or paying culling,
+  // vertex and fragment work. Their voxel occupancy remains for lighting.
+  ${retainSampledShadowCasters ? "// Raster shadow maps still consume the proxy casters." : `if((dryMaterial(sceneIdentityMaterial(identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){return;}`}
   if(meshPhase==0u){atomicAdd(&meshWork[meshScratchAt(meshEntry)],1u);return;}
   let slot=atomicAdd(&meshWork[meshScratchAt(meshEntry)+1u],1u);
   // The two phases traverse the same published voxels; a mismatch is an

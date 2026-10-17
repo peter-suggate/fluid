@@ -522,6 +522,9 @@ export interface BuildFrameReportInput {
   readonly tracedPid?: number;
   /** Preferred once-per-frame Metal labels for non-simulation workloads. */
   readonly frameStartLabels?: readonly string[];
+  /** A clean profiling loop follows startup/warmup frames using the same labels.
+   * Keep only its final N semantic starts before clipping partial edge frames. */
+  readonly trailingFrameStarts?: number;
   /** Occupancy counter for the pipeline being measured. Compute workloads use
    * Compute Occupancy; render passes should use Fragment Occupancy. */
   readonly occupancyCounterName?: "Compute Occupancy" | "Fragment Occupancy";
@@ -722,7 +725,7 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
   // Shift each semantic gate boundary back to that nearest blit so time zero is
   // the first observed GPU activity of the advance, not the first compute row.
   const semanticFrameStart = GPU_FRAME_START_LABELS.some((label) => label === anchor);
-  const boundaries = semanticFrameStart ? detected.boundaries.map((gateStart, index) => {
+  const observedBoundaries = semanticFrameStart ? detected.boundaries.map((gateStart, index) => {
     if (literalFrameUsesCommandBufferCompletion && index === 1) return gateStart;
     let low = 0;
     let high = diagnosticBlits.length - 1;
@@ -736,6 +739,11 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     }
     return preceding;
   }) : detected.boundaries;
+  if (input.trailingFrameStarts !== undefined && (!Number.isSafeInteger(input.trailingFrameStarts) || input.trailingFrameStarts < 1)) {
+    throw new RangeError("trailingFrameStarts must be a positive integer");
+  }
+  const boundaries = input.trailingFrameStarts === undefined ? observedBoundaries
+    : observedBoundaries.slice(-input.trailingFrameStarts);
   // Clip the first and last anchors: those frames are cut by the recording and
   // would drag every per-frame average down.
   const completeBoundaries = boundaries.length >= 4 ? boundaries.slice(1, -1) : boundaries;

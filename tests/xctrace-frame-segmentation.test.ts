@@ -372,3 +372,15 @@ test("frames are retained in full so any of them can be redrawn", async () => {
       && interval.start < capture.durationUs));
   }
 });
+
+
+test("render timing excludes startup and warmup frames with the same recurring labels", async () => {
+  const tables = writeTrace({ frames: 20, frameUs: 50_000,
+    tasksForFrame: frame => frame < 12 ? [...TASKS, "Initial mesh extraction"] : TASKS });
+  const report = await buildFrameReport({ tables, lane: "svo-render", environment: {},
+    tracedPid: 4242, trailingFrameStarts: 8, traced: { steps: 8, simulationWall_ms: 400 } });
+  assert.equal(report.frames.count, 5, "only complete interior frames of the measured loop");
+  assert.ok(report.frames.samples.every(frame => frame.encoders === 3));
+  assert.ok(!report.passes.some(pass => pass.label.includes("Initial mesh extraction")));
+  assert.ok(report.frames.samples.every(frame => Math.abs(frame.durationMs-50) < .01));
+});

@@ -124,7 +124,7 @@ import {
   svoProceduralHashCell,
 } from "../materials/svo-procedural-material";
 import type { Vec3 } from "../../../core/model";
-import { MESH_ASSETS, meshAssetHeader, packMeshAsset, sampleAssetField, sampledVolumeExtent, type SampledVolumeField } from "../../../core/imported-assets/asset-library";
+import { MESH_ASSETS, meshAssetHeader, packMeshAsset, sampleAssetDistance, sampledVolumeExtent, type SampledVolumeField } from "../../../core/imported-assets/asset-library";
 import { meshVolumeWGSL } from "../../../core/imported-assets/mesh-volume.wgsl";
 
 const f32 = Math.fround;
@@ -1134,7 +1134,7 @@ export function evaluateValidatedSvoFieldProgram(
   localPoint: Vec3,
   samplingLength_m = 0,
 ): SvoFieldValue {
-  if (program.sampledVolume) return { distance_m: sampleAssetField(program.sampledVolume, localPoint).distance, lipschitz: 1.75 };
+  if (program.sampledVolume) return { distance_m: sampleAssetDistance(program.sampledVolume, localPoint), lipschitz: 1.75 };
   const points: Vec3[] = new Array(SVO_FIELD_PROGRAM_POINT_REGISTERS).fill(null).map(() => ({ x: 0, y: 0, z: 0 }));
   points[0] = { ...localPoint };
   // Lipschitz travels with the *point*: a warp inflates the true distance of
@@ -1969,7 +1969,7 @@ fn svoFieldUpFacing(point:vec3f,reference_m:f32)->f32{
 fn ${functionName}Banded(blockIndex:u32,localPoint:vec3f,samplingLength_m:f32)->SvoFieldValue{
   if(blockIndex>=(${capacityExpression})){return SvoFieldValue(1e20,1.0);}
   let base=(${baseWordExpression})+blockIndex*SVO_FIELD_PROGRAM_BLOCK_WORDS;
-  if(${loadWord}(base)==${SVO_SAMPLED_VOLUME_TAG}u){return SvoFieldValue(${functionName}Surface(blockIndex,localPoint).distance,1.75);}
+  if(${loadWord}(base)==${SVO_SAMPLED_VOLUME_TAG}u){return SvoFieldValue(${functionName}VolumeDistance((${baseWordExpression})+${loadWord}(base+1u),localPoint),1.75);}
   let opCount=min(${loadWord}(base),${SVO_FIELD_PROGRAM_MAXIMUM_OPS}u);
   let resultRegister=${loadWord}(base+1u);
 

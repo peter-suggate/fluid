@@ -456,6 +456,7 @@ const writeReport = async (
         ? {} : { FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT: String(refinement) }),
     },
     tracedPid,
+    trailingFrameStarts: result.frames,
     traced: { simulationWall_ms: result.renderWall_ms, steps: result.frames },
     counterExtraction: {
       sourceCounterCount: policy.sourceCounterCount,
