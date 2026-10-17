@@ -1,6 +1,6 @@
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
-import {UNIFORM_DETAIL_CANONICAL_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
+import {UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -9,6 +9,7 @@ import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surfac
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_BODY_FLUX_REACH } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_MIXED_ROOT_TILE_WORDS, uniformMixedRootMaskWords, uniformMixedRootTopologyBytes } from "./uniform-mixed-pressure-authority";
 
 interface CommonFields {
@@ -23,8 +24,11 @@ interface CommonFields {
  rootTopology?:GPUBufferBinding;
 }
 export interface UniformMixedPressureRhsFields extends CommonFields {
- /** Native geometric excess/deficit divergence, already in inverse seconds. */
- correction:GPUTexture;
+ /** The surface-only authorities' parameters (16 B); word 2 is the volume
+  * control rate (1/s). A liquid owner's correction is rate x capacity, the
+  * authority's own product: the RHS forms it instead of reading a field
+  * the authority would rewrite every frame. */
+ authorityParams:GPUBuffer;
  rhs:GPUBufferBinding;
  minimum:GPUBufferBinding;
  pressure:GPUBufferBinding;
@@ -79,7 +83,7 @@ export class UniformMixedPressureVelocity {
   const storage=(binding:number)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}});
   const uniform={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}};
   const topology=coarse?[texture(8),storage(9)]:solid?[{binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}}]:[];
-  this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,texture(4),storage(5),storage(6),storage(7),...topology]});
+  this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}},storage(5),storage(6),storage(7),...topology]});
   this.projectLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
    {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[]),...(rounding?[storage(12)]:[]),...(coarse?[storage(13)]:[])]});
  }
@@ -108,7 +112,7 @@ export class UniformMixedPressureVelocity {
   const count=uniformMixedPressureStorage(this.ownership.layout).count,topology=this.topology(f.topology);
   if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure RHS needs the simulation-ownership forced field, and only it");
   const faces=this.ownership.capacity.address.lowFaceKeys;
-  return uniformDetailGroup(this.device,{layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:f.correction},
+  return uniformDetailGroup(this.device,{layout:this.rhsLayout,entries:[...this.common(f),{binding:4,resource:{buffer:f.authorityParams,size:16}},
    ...[f.rhs,f.minimum,f.pressure].map((v,i)=>({binding:5+i,resource:this.scalar(v,count)})),...(topology?[{binding:8,resource:topology}]:[]),
    ...(f.fine?[{binding:8,resource:f.fine.velocity},{binding:9,resource:{buffer:f.fine.negative,size:4*faces}}]:[])]});
  }
@@ -159,7 +163,8 @@ fn umFaceVelocity(face:UMFace)->f32 {
 }
 `;
   const rhsSource=common+/* wgsl */`
-@group(1) @binding(4) var correction:texture_3d<f32>;
+// The authorities' parameters: z is the volume control rate (1/s).
+@group(1) @binding(4) var<uniform> authority:vec4f;
 @group(1) @binding(5) var<storage,read_write> rhs:array<f32>;
 @group(1) @binding(6) var<storage,read_write> minimum:array<f32>;
 @group(1) @binding(7) var<storage,read_write> pressures:array<f32>;
@@ -187,6 +192,8 @@ fn umCutMask(o:UMOwner,axis:u32,sign:i32)->u32{
 fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
  let origin=vec3i(umOrigin(o));let a=(axis+1u)%3u;let b=(axis+2u)%3u;var sum=0.0;
  let mask=umCutMask(o,axis,sign);
+ // No moving-wall flux past the body flux reach (UNIFORM_BODY_FLUX_REACH).
+ let bodies=umBodyCount()>0u&&umBodyPoseNearTile(o.tile,${UNIFORM_BODY_FLUX_REACH}u);
  for(var j=0;j<4;j++){for(var i=0;i<4;i++){
   if(((mask>>u32(i+4*j))&1u)==0u){continue;}
   var c=origin;c[a]+=i;c[b]+=j;c[axis]+=select(-1,3,sign>0);
@@ -200,7 +207,7 @@ fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->f32{
   if(umSolidEnabled()&&!umFaceLow(c,axis)){volume=umPatchFaceV(umTileAt(vec3u(c)/4u),c,axis);}
   else{volume=umPressureFaceV(c,axis);}sum+=volume*u;
   // A moving wall's (V_i - V) u_s, V_i the owner-side h cell (divergenceAtWithCapacity).
-  if(umBodyCount()>0u){var inner=c;if(sign<0){inner[axis]+=1;}let capacity=umCellOpen(inner);if(capacity!=volume){sum+=(capacity-volume)*umSolidFaceVelocity(c,axis);}}
+  if(bodies){var inner=c;if(sign<0){inner[axis]+=1;}let capacity=umCellOpen(inner);if(capacity!=volume){sum+=(capacity-volume)*umSolidFaceVelocity(c,axis);}}
  }}
  return sum;
 }
@@ -250,7 +257,11 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  }}}
  var value=0.0;
  if(liquid){let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
-  value=-params.policy.x*(divergence-${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(correction,vec3i(umOrigin(o)),0).x)/params.hDt.w;}
+  // Volume control: the surface-only authority's correction of a liquid
+  // owner (umAuthorityLiquid is umPressureLiquid on the same phi words),
+  // rate x its umCapacity, formed here bit for bit.
+  let capacity=${this.coarse?"topology.x":this.solid?"select(1.0,select(umTileOpen(o.tile),umCellOpen(vec3i(umOrigin(o))),o.width==1u),umSolidEnabled())":"1.0"};
+  value=-params.policy.x*(divergence-authority.z*capacity)/params.hDt.w;}
  rhs[o.index]=value;
  minimum[o.index]=${this.coarse?"select(-3.402823e38,0.0,topology.x<=1e-5)":this.solid?"select(-3.402823e38,0.0,o.width==1u&&umCellInsideSolid(vec3i(umOrigin(o))))":"-3.402823e38"};
  // The coarse root warm-starts from the caller's last pressure; air holds 0.

@@ -11,7 +11,10 @@ export function narrowBandReuseLayout(base:number,regions:number,capacity=region
  const nearestState=nearestValid+regions, nearestFlags=nearestState+158*capacity;
  const masks=nearestFlags+regions;
  const nearest=masks+128*capacity, metric=nearest+6144*capacity, plane=metric+8000*capacity, regionPlane=plane+384*capacity;
- return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,metric,plane,regionPlane,metadataWords:masks-base,words:regionPlane+8*capacity-base};
+ // The frame's region work tiers (UniformRegionHeat.tiers words [0, regions)),
+ // copied in before each stage that reads them (UniformNarrowBandFlip.syncTiers).
+ const tiers=regionPlane+8*capacity;
+ return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,metric,plane,regionPlane,tiers,metadataWords:masks-base,words:tiers+regions-base};
 }
 export type NarrowBandReuseLayout=ReturnType<typeof narrowBandReuseLayout>;
 export function narrowBandReuseWGSL(l:NarrowBandReuseLayout){return /* wgsl */`
@@ -24,6 +27,22 @@ const NB_REUSE_REGION_PLANE:u32=${l.regionPlane}u;
 const NB_REUSE_PLANE:u32=${l.plane}u;
 const NB_REUSE_METRIC_VALID:u32=${l.metricValid}u;const NB_REUSE_METRIC:u32=${l.metric}u;const NB_REUSE_METRIC_CAPACITY:u32=${l.capacity}u;
 const NB_REUSE_NEAREST_VALID:u32=${l.nearestValid}u;const NB_REUSE_NEAREST_STATE:u32=${l.nearestState}u;const NB_REUSE_NEAREST_FLAGS:u32=${l.nearestFlags}u;const NB_REUSE_NEAREST:u32=${l.nearest}u;
+// Region work tiers (UniformRegionHeat): COLD 0, WARM 1, HOT 2. A COLD
+// region's producers hold phi (no write, no revision bump) and its
+// consumers keep their retained outputs. A vertex is COLD when any stored
+// region holding it is (umVertexTier's lowest-tier rule), so a COLD
+// region's closure is never written.
+const NB_TIER:u32=${l.tiers}u;
+fn nbRegionCold(region:u32)->bool{return region<NB_REUSE_REGIONS&&atomicLoad(&bins[NB_TIER+region])==0u;}
+fn nbTileCold(tile:u32)->bool{return umKeyStored(tile)&&nbRegionCold(umPageOfTile(tile));}
+fn nbVertexCold(p:vec3u)->bool{
+ for(var k=0u;k<8u;k++){
+  let side=umCorner(k,2u);if(any((side!=vec3u(0u))&((p&vec3u(15u))!=vec3u(0u)))){continue;}
+  let tile=umTileKey((vec3i(p)-vec3i(side))>>vec3u(2u));if(!umKeyStored(tile)){continue;}
+  if(nbRegionCold(umPageOfTile(tile))){return true;}
+ }
+ return false;
+}
 fn nbReuseRegion(tile:u32)->u32{return 8u*(tile>>9u)+((tile>>2u)&1u)+2u*((tile>>5u)&1u)+4u*((tile>>8u)&1u);}
 fn nbReuseLocal(tile:u32)->u32{return (tile&3u)+4u*((tile>>3u)&3u)+16u*((tile>>6u)&3u);}
 fn nbReuseTile(region:u32,lane:u32)->u32{
@@ -38,11 +57,29 @@ var<workgroup> nbReuseClean:atomic<u32>;
 var<workgroup> nbCrossingLive:u32;
 // Called uniformly by one 64-lane group per 16h region, before any fine
 // crossing samples. A prior metadata bank is never written by this pass.
+// NB_REUSE_ALLOWED: 1 a region's retained results may be reused, 0 not, 2
+// not and free with its tile words cleared (they stay clear until it is live:
+// only listed, live tiles commit), so a free region's search writes no lanes.
 fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
- if(lane==0u){nbCrossingLive=select(0u,1u,umTileLive(tile));}
- if(workgroupUniformLoad(&nbCrossingLive)==0u){
+ if(lane==0u){
+  nbCrossingLive=select(0u,1u,umTileLive(tile))|select(0u,2u,umTileLive(tile)&&nbRegionCold(region)&&nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY);
+  if(nbCrossingLive==0u&&region<NB_REUSE_CAPACITY&&atomicLoad(&bins[NB_REUSE_ALLOWED+region])==2u){nbCrossingLive=4u;}
+ }
+ let live=workgroupUniformLoad(&nbCrossingLive);
+ // A COLD region's closure phi is held: its retained masks, nearest rows
+ // and metric stand without validation. Its history entry is left invalid
+ // (revision 0), so the first non-COLD search after it validates afresh.
+ if(live==3u){
+  if(lane==0u){atomicStore(&bins[nbReuseCurrent()+region],0u);atomicStore(&bins[NB_REUSE_ALLOWED+region],1u);}
+  storageBarrier();return true;
+ }
+ if(live==4u){
+  if(nbReuseCacheEnabled()&&lane==0u){atomicStore(&bins[nbReuseCurrent()+4u*NB_REUSE_REGIONS+region],0u);}
+  return false;
+ }
+ if(live==0u){
   if(nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){
-   if(lane==0u){atomicStore(&bins[nbReuseCurrent()+4u*NB_REUSE_REGIONS+region],0u);atomicStore(&bins[NB_REUSE_ALLOWED+region],0u);}
+   if(lane==0u){atomicStore(&bins[nbReuseCurrent()+4u*NB_REUSE_REGIONS+region],0u);atomicStore(&bins[NB_REUSE_ALLOWED+region],2u);}
    atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);
    atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);
    atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);
@@ -94,7 +131,7 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
 }
 fn nbCrossingReuse(tile:u32)->bool{
  let region=nbReuseRegion(tile);if(region>=NB_REUSE_CAPACITY){return false;}
- return nbReuseCacheEnabled()&&atomicLoad(&bins[NB_REUSE_ALLOWED+region])!=0u&&atomicLoad(&bins[NB_REUSE_VALID+64u*region+nbReuseLocal(tile)])!=0u;
+ return nbReuseCacheEnabled()&&atomicLoad(&bins[NB_REUSE_ALLOWED+region])==1u&&atomicLoad(&bins[NB_REUSE_VALID+64u*region+nbReuseLocal(tile)])!=0u;
 }
 fn nbCrossingCachedMask(tile:u32)->vec2u{
  let at=NB_REUSE_MASK+128u*nbReuseRegion(tile)+2u*nbReuseLocal(tile);
@@ -129,6 +166,7 @@ fn nbMarkPhiChanged(p:vec3u){
  }
 }
 fn nbStoreReconstructed(p:vec3i,value:f32,width:u32){
+ if(nbVertexCold(vec3u(p))){return;}
  if(nbReuseEnabled()){
   var old=0.0;if(width==4u){old=umLoadCorner(vec3u(p));}else{old=umLoadVertex(vec3u(p));}
   if(bitcast<u32>(old)!=bitcast<u32>(value)){nbMarkPhiChanged(vec3u(p));}
@@ -136,6 +174,7 @@ fn nbStoreReconstructed(p:vec3i,value:f32,width:u32){
  textureStore(outputPhi,p,vec4f(value));
 }
 fn nbStoreInPlace(p:vec3u,value:f32){
+ if(nbVertexCold(p)){return;}
  if(nbReuseEnabled()&&bitcast<u32>(textureLoad(outputPhi,vec3i(p)).x)!=bitcast<u32>(value)){nbMarkPhiChanged(p);}
  textureStore(outputPhi,vec3i(p),vec4f(value));
 }

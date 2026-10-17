@@ -61,7 +61,12 @@ fn nbAirTileWet(t:u32)->bool{
 }
 @compute @workgroup_size(64) fn airSeeds(@builtin(global_invocation_id) id:vec3u){
  for(var t=id.x;t<UM_TILES;t+=65536u){
-  var wet=false;if(umTileLive(t)){wet=nbAirTileWet(t);}
+  // A COLD tile's phi is held: its seed stands, joined by any sample.
+  var wet=false;
+  if(umTileLive(t)){
+   if(nbTileCold(t)){wet=atomicLoad(&bins[NB_AIR+t])!=0u||atomicLoad(&bins[NB_SURFACE_TILES+t])!=0u;}
+   else{wet=nbAirTileWet(t);}
+  }
   atomicStore(&bins[NB_AIR+t],u32(wet));
  }
 }
@@ -121,7 +126,7 @@ fn nbAirStore(p:vec3u){
 ${[1,4].map(width=>/* wgsl */`
 @compute @workgroup_size(64) fn airClear${width===1?"Fine":"Coarse"}(@builtin(global_invocation_id) id:vec3u){
  for(var t=id.x;t<UM_TILES;t+=65536u){
-  if(!umTileLive(t)||umTileWidth(t)!=${width}u){continue;}
+  if(!umTileLive(t)||umTileWidth(t)!=${width}u||nbTileCold(t)){continue;}
   if(atomicLoad(&bins[NB_AIR+t])!=0u){continue;}
   let width=${width}u;let origin=4u*umTileCoord(t);let side=4u/width+1u;
   let regular=umTileMinimumWidth(t)==width&&umTileMaximumWidth(t)==width;

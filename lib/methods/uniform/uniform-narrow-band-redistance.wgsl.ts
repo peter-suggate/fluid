@@ -20,6 +20,10 @@ var<workgroup> nbGeometryMask:vec2u;
 var<workgroup> nbMetricReuseFlag:u32;
 @compute @workgroup_size(64) fn depthGeometry(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let tile=atomicLoad(&bins[NB_BAND_SEARCH+group.x]);
+ // A tile whose metric is retained builds no distance: no geometry. Its map
+ // entry says so (capacity), and a reader gathers the cell itself.
+ if(lane==0u){nbMetricReuseFlag=u32(nbMetricReuseAvailable(tile));if(nbMetricReuseFlag!=0u){atomicStore(&bins[NB_BAND_CANDIDATES+tile],nbGeometryCapacity());}}
+ if(workgroupUniformLoad(&nbMetricReuseFlag)!=0u){return;}
  if(lane==0u){
   nbGeometryMask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*tile]),atomicLoad(&bins[NB_BAND_MASK+2u*tile+1u]));
   let count=countOneBits(nbGeometryMask.x)+countOneBits(nbGeometryMask.y);
@@ -308,7 +312,8 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
 }
 @compute @workgroup_size(128) fn redistanceFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=umTileCoord(owner.tile)*4u;
- if(lane>=125u){return;}
+ // Every vertex of a COLD region's tile is COLD: redistance holds it.
+ if(lane>=125u||nbTileCold(owner.tile)){return;}
  let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let p=origin+local;
  // A current SDF-defect bound includes any previously skipped drift. The
  // next current producer scan reopens work when that defect exceeds budget.
@@ -332,6 +337,7 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
 @compute @workgroup_size(64) fn depthCoarse(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<umCounts.y;i+=65536u){
   let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
+  if(nbTileCold(owner.tile)){continue;}
   let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
   // Keep the regular owner's low-wall rule. At seams the layout already
   // compiled the canonical coarse corners; no authority lookup is needed.
@@ -351,6 +357,7 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
 @compute @workgroup_size(64) fn redistanceCoarse(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<umCounts.y;i+=65536u){
   let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
+  if(nbTileCold(owner.tile)){continue;}
   let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
   // Keep the regular owner's low-wall rule. At seams the layout already
   // compiled the canonical coarse corners; no authority lookup is needed.

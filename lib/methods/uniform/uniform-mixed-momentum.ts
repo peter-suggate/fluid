@@ -8,6 +8,7 @@ import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sam
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
+import { UNIFORM_MOMENTUM_RESIDUAL_PARTS, UNIFORM_MOMENTUM_TIER_PASS, uniformMomentumFitGrid, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
 
 export interface UniformMixedMomentumFields {
   extended: GPUTexture;
@@ -44,6 +45,8 @@ fn umUnitMomentum(owner:UMOwner,face:UMFace)->f32 {
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
  if(umDropFace(face)){return 0.0;}
+ if(umMomentumRetained(owner)){return umRetainedMomentum(face);}
+ if(umMomentumAffine(owner)){return umAffineMomentum(owner,face);}
  let departure=umUnitDeparture(umFaceCenter(face),momentum.hDt.w,momentum.hDt.xyz);
  if(umUnitEscaped){return 0.0;}
  return umUnitSampleComponent(departure,face.axis);
@@ -55,9 +58,9 @@ var<workgroup> umUnitEscapes:array<atomic<u32>,2>;
 // is listed once with their mask; their texels are left to momentumDeferred.
 @compute @workgroup_size(192) fn momentumUnitStep(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let cell=lane%64u;let axis=lane/64u;
+ let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
  if(lane<2u){atomicStore(&umUnitEscapes[lane],0u);}
  workgroupBarrier();
- let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
  var value=0.0;umUnitEscaped=false;
  if(owner.width!=0u){
   let origin=umOrigin(owner);
@@ -153,6 +156,9 @@ export const UNIFORM_MIXED_MOMENTUM_LIMITS = 32 | (16 << 8);
 export class UniformMixedMomentum {
   readonly allocatedBytes: number;
   private readonly resources: GPUBindGroupLayout;
+  /** Per-region retain/affine/full decisions, made ahead of the launches. */
+  readonly tiers: UniformMixedMomentumTiers;
+  private tierGroup?: GPUBindGroup;
   /** Job counters of the claimed launches (regular 0, unit 1, merged 2, deferred 3). */
   readonly claims: GPUBuffer;
   /** Tiles of the general h list whose unit launch left cells to the general
@@ -163,8 +169,11 @@ export class UniformMixedMomentum {
   private regularPipeline?:GPUComputePipeline;
   private generalPipeline?:GPUComputePipeline;
   private deferredPipeline?:GPUComputePipeline;
+  private fitPipeline?:GPUComputePipeline;
+  private residualPipeline?:GPUComputePipeline;
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,
-    private readonly cullAir = false, private readonly hanging = false, private readonly sourceParams?: GPUBuffer) {
+    /** heat: the frame's region work tiers (UniformRegionHeat.tiers). */
+    heat: GPUBuffer, private readonly cullAir = false, private readonly hanging = false, private readonly sourceParams?: GPUBuffer) {
     // Far-air regular 4h owners (uniformMixedFarAirWGSL) are culled to zero,
     // so the merged launch skips them; forces supplies that zero itself.
     if(sourceParams&&!cullAir)throw new Error("Mixed momentum far-air skipping requires prediction culling");
@@ -179,11 +188,14 @@ export class UniformMixedMomentum {
       { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 14, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ...(sourceParams?[{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
+      { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 20, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
+    this.tiers=new UniformMixedMomentumTiers(device,ownership,heat);
     this.claims=device.createBuffer({label:"Uniform mixed momentum job claims",size:4*UNIFORM_MIXED_CLAIM_WORDS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     const deferredBytes=4*(4+3*ownership.capacity.tiles);
     this.deferred=device.createBuffer({label:"Uniform mixed momentum deferred tiles",size:deferredBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    this.allocatedBytes=4*UNIFORM_MIXED_CLAIM_WORDS+deferredBytes;
+    this.allocatedBytes=4*UNIFORM_MIXED_CLAIM_WORDS+deferredBytes+this.tiers.allocatedBytes;
   }
   bind(fields: UniformMixedMomentumFields): UniformDetailGroup {
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
@@ -199,6 +211,7 @@ export class UniformMixedMomentum {
     if (textures.includes(fields.output) || fields.negative === fields.outputNegative) throw new Error("Mixed momentum output must be disjoint from its inputs");
     for (const buffer of [fields.negative, fields.outputNegative])
       if (buffer.size < 4 * address.lowFaceKeys) throw new Error("Mixed momentum requires complete negative boundary planes");
+    this.tierGroup=this.tiers.bind(fields.params);
     return uniformDetailGroup(this.device,{ layout: this.resources, entries: [
       ...textures.map((texture, binding) => ({ binding, resource: texture })),
       { binding: 6, resource: { buffer: fields.negative } },
@@ -209,9 +222,11 @@ export class UniformMixedMomentum {
       ...(fields.unitVelocity&&fields.unitHalo?[{binding:16,resource:fields.unitVelocity},{binding:18,resource:fields.unitHalo}]:[]),
       {binding:13,resource:{buffer:this.claims}},{binding:14,resource:{buffer:this.deferred}},
       ...(this.sourceParams?[{binding:17,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
+      {binding:19,resource:{buffer:this.tiers.record}},{binding:20,resource:{buffer:this.tiers.models}},
     ] });
   }
   async initialize(): Promise<void> {
+    await this.tiers.initialize();
     const module = uniformDetailModule(this.device,{ label: "Uniform mixed momentum", code: uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var physical:texture_3d<f32>;
@@ -227,6 +242,7 @@ struct UMMomentumParams {hDt:vec4f,flags:vec4u}
 @group(1) @binding(13) var<storage,read_write> umClaims:array<atomic<u32>>;
 @group(1) @binding(14) var<storage,read_write> umDeferred:array<atomic<u32>>;
 ${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;\n@group(1) @binding(18) var unitHalo:texture_3d<f32>;":""}
+${uniformMomentumTierWGSL(19,20)}
 override umCullAir:bool=false;
 ${this.sourceParams?uniformMixedSourceWGSL(17)+uniformMixedFarAirWGSL("umSourceinflowStrength()>0.0"):""}
 ${uniformMixedFaceAddressWGSL}
@@ -246,6 +262,12 @@ fn umOriginalMomentum(face:UMFace)->f32 {
  // keeps only the ring (UNIFORM_DETAIL_RING_4H_LOAD).
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(physical,face.anchor,0)[face.axis];}
  return textureLoad(physical,face.anchor,0)[face.axis];
+}
+// A retained region's face (UniformMixedMomentumTiers): its own extended
+// value, within the region's bound of the trace it skips.
+fn umRetainedMomentum(face:UMFace)->f32 {
+ if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(extended,face.anchor,0)[face.axis];}
+ return textureLoad(extended,face.anchor,0)[face.axis];
 }
 fn umClosedPositive(face:UMFace)->bool {
  return umAcrossKind(face.anchor,face.axis,1)==UM_SOLID;
@@ -279,6 +301,8 @@ fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
  // not, so a D4-symmetric flow drifted off its symmetry at the walls.
  if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
  if(umDropFace(face)){return 0.0;}
+ if(umMomentumRetained(owner)){return umRetainedMomentum(face);}
+ if(umMomentumAffine(owner)){return umAffineMomentum(owner,face);}
  return umAdvectedMomentum(face,momentum.hDt.w);
 }
 // A certified unit stencil has one MAC patch per face. Keep its geometry
@@ -326,11 +350,23 @@ ${this.hanging?uniformMixedMomentumUnitWGSL:""}
         :compile("momentumStep",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1}),
       ...(this.hanging?[compile("momentumDeferred",{umClaimWord:3})]:[]),
     ]);
+    [this.fitPipeline,this.residualPipeline]=await Promise.all([compile("momentumAffineFit",{}),compile("momentumAffineResidual",{})]);
   }
-  destroy():void{this.claims.destroy();this.deferred.destroy();}
+  destroy():void{this.claims.destroy();this.deferred.destroy();this.tiers.destroy();}
   encode(encoder: GPUCommandEncoder, group: UniformDetailGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");
     encoder.clearBuffer(this.claims);encoder.clearBuffer(this.deferred,0,16);
+    if(!this.tierGroup)throw new Error("Mixed momentum is not bound");
+    const tiers=encoder.beginComputePass(UNIFORM_MOMENTUM_TIER_PASS);
+    this.tiers.encodeDecide(tiers,this.tierGroup);
+    tiers.setBindGroup(0, this.ownership.bindGroup); tiers.setBindGroup(1,group.group); if (this.hanging) tiers.setBindGroup(2, this.ownership.hangingGroup);
+    // The affine models of the regions the budget refused to retain: a
+    // workgroup a region, striding the pool (an unlisted region exits at once).
+    const regions=this.ownership.capacity.tiles/64;
+    tiers.setPipeline(this.fitPipeline!);tiers.dispatchWorkgroups(uniformMomentumFitGrid(regions,4));
+    tiers.setPipeline(this.residualPipeline!);tiers.dispatchWorkgroups(uniformMomentumFitGrid(regions,UNIFORM_MOMENTUM_RESIDUAL_PARTS));
+    this.tiers.encodeAffine(tiers,this.tierGroup);
+    tiers.end();
     const pass = encoder.beginComputePass(MOMENTUM_PASS);
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup);
     // Buffered direct grids: GPU claims consume the complete current queues.

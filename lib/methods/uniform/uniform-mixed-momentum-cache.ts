@@ -15,6 +15,10 @@ const CACHE_PASS:GPUComputePassDescriptor={label:"Uniform mixed 4h sampling cach
 export interface UniformMixedMomentumCacheFields {
   extended:GPUTexture;
   slots?:GPUBufferBinding;
+  /** With slots: a uniform whose first word is the live sample count
+   * (UniformNarrowBandFlip.liveGate). A slot fill feeds only the samples'
+   * old-epoch snapshot, so it does nothing at zero. */
+  gate?:GPUBuffer;
   negative:GPUBuffer;
   coarseExtended:GPUTexture;
 }
@@ -41,17 +45,18 @@ export class UniformMixedMomentumCache {
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
     ];this.resources=uniformDetailBindLayout(device,{entries});
-    if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+    if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
   }
   bind(f:UniformMixedMomentumCacheFields):UniformDetailGroup{
     const blocks=uniformCoarseCacheExtent(this.ownership.capacity.address);
     for(const [i,t] of [f.extended,f.coarseExtended].entries())
       if((i===0?uniformDetailClass(t)!=="face":uniformDetailExtent(t).some((n,a)=>n!==blocks[a]))||t.format!=="rgba32float")throw new Error("Mixed momentum cache requires native inputs and a 4h output of 10 texels a block");
     if(f.slots&&!this.slotResources)throw new Error("Slot snapshot is unsupported");
+    if(f.slots&&!f.gate)throw new Error("A slot fill needs the live sample gate");
     const group=uniformDetailGroup(this.device,{layout:f.slots?this.slotResources!:this.resources,entries:[
       {binding:0,resource:f.extended},
       {binding:1,resource:{buffer:f.negative}},
-      {binding:2,resource:f.coarseExtended},...(f.slots?[{binding:3,resource:f.slots}]:[]),
+      {binding:2,resource:f.coarseExtended},...(f.slots?[{binding:3,resource:f.slots},{binding:4,resource:{buffer:f.gate!,size:16}}]:[]),
     ]});if(f.slots)this.slotGroups.add(group);return group;
   }
   private initialization?:Promise<void>;
@@ -63,7 +68,7 @@ export class UniformMixedMomentumCache {
 @group(1) @binding(1) var<storage,read> negative:array<f32>;
 @group(1) @binding(2) var coarseExtended:texture_storage_3d<rgba32float,write>;
 ${uniformMixedFaceAddressWGSL}
-${slots?uniformMixedExtensionSnapshotWGSL(1,3):""}
+${slots?uniformMixedExtensionSnapshotWGSL(1,3)+"@group(1) @binding(4) var<uniform> umSlotGate:vec4u;":""}
 fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
  // The low-face table is keyed by the cell above the face.
  if(umFaceLow(anchor,axis)){var above=anchor;above[axis]+=1;return negative[umLowFaceIndex(vec3u(above),axis)];}
@@ -78,6 +83,7 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
 // low face of the page's first tile. A face with no stored cell on either
 // side is zero.
 @compute @workgroup_size(5,5,5) fn cache(@builtin(global_invocation_id) gid:vec3u){
+ ${slots?"if(umSlotGate.x==0u){return;}":""}
  let cell=gid/10u;if(any(cell>=UM_BLOCK_GRID)){return;}
  let b=cell.x|(cell.y<<UM_BLOCK_BITS)|(cell.z<<(2u*UM_BLOCK_BITS));
  if(!umBlockStored(b)||umBlockWord(b)==UM_FREE){return;}
@@ -121,6 +127,8 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
 export interface UniformMixedHangingTapFields {
   extended:GPUTexture;
   slots?:GPUBufferBinding;
+  /** With slots: the live sample gate (UniformMixedMomentumCacheFields.gate). */
+  gate?:GPUBuffer;
   negative:GPUBuffer;
   /** Current 4h sampling cache (coarseExtended). */
   coarse:GPUTexture;
@@ -168,7 +176,7 @@ export class UniformMixedHangingTaps {
       {binding:2,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
     ];this.resources=uniformDetailBindLayout(device,{entries});
-    if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+    if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
     // The halo fill: the taps read back (5), the halo written (3).
     this.haloResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:5,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]},[3]);
     const grid=ownership.capacity.address.blockGrid;this.haloBlockCount=grid[0]*grid[1]*grid[2];
@@ -194,9 +202,10 @@ export class UniformMixedHangingTaps {
     for(const [i,t] of [f.extended,f.coarse].entries())
       if((i===0?uniformDetailClass(t)!=="face":uniformDetailExtent(t).some((n,a)=>n!==blocks[a]))||t.format!=="rgba32float")throw new Error("Hanging taps require native velocity and the 4h sampling cache");
     if(f.slots&&!this.slotResources)throw new Error("Slot snapshot is unsupported");
+    if(f.slots&&!f.gate)throw new Error("A slot fill needs the live sample gate");
     const group=uniformDetailGroup(this.device,{layout:f.slots?this.slotResources!:this.resources,entries:[
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
-      {binding:3,resource:output},...(f.slots?[{binding:4,resource:f.slots}]:[]),
+      {binding:3,resource:output},...(f.slots?[{binding:4,resource:f.slots},{binding:5,resource:{buffer:f.gate!,size:16}}]:[]),
     ]});if(f.slots)this.slotGroups.add(group);
     // A slot fill (the paired snapshot's old-epoch taps) has no halo: the
     // slot snapshot reads its taps alone, and the update's own fill
@@ -324,7 +333,9 @@ fn umFillUnitHaloTexel(b:u32,tap:vec3i,l:vec3u,word:u32){
 @group(1) @binding(2) var coarse:texture_3d<f32>;
 @group(1) @binding(3) var unitVelocity:texture_storage_3d<rgba32float,write>;
 ${uniformMixedFaceAddressWGSL}
-${slots?uniformMixedExtensionSnapshotWGSL(1,4):""}
+${slots?uniformMixedExtensionSnapshotWGSL(1,4)+"@group(1) @binding(5) var<uniform> umSlotGate:vec4u;":""}
+// A slot fill launches no job without a live sample (a uniform).
+fn umSlotLive()->bool{return ${slots?"umSlotGate.x!=0u":"true"};}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  // The low-face table is keyed by the cell above the face.
  if(umFaceLow(anchor,axis)){var above=anchor;above[axis]+=1;return negative[umLowFaceIndex(vec3u(above),axis)];}
@@ -361,7 +372,7 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
   workgroupBarrier();
   if(tile!=UM_NO_SLOT&&lane<64u){textureStore(unitVelocity,vec3i(umTileCoord(tile)*4u+umCorner(lane,4u)),vec4f(unitTaps[lane],unitTaps[lane+64u],unitTaps[lane+128u],0.0));}
  }
-}`,["unitVelocityTaps"],"umUnitJobs()+umCoarseSlots().y-umCoarseSlots().x");
+}`,["unitVelocityTaps"],"select(0u,umUnitJobs()+umCoarseSlots().y-umCoarseSlots().x,umSlotLive())");
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,slots?this.slotResources!:this.resources,this.ownership.hangingLayout]});
     const module=uniformDetailModule(this.device,{label:"Uniform mixed hanging taps",code});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));

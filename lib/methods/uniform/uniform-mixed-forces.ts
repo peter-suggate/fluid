@@ -9,6 +9,7 @@ import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixed
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_FORCE_MODE, uniformRegionForceWGSL, type UniformMixedRegionDynamics } from "./uniform-mixed-region-dynamics";
 
 export const UNIFORM_NORMAL_ANCHOR_ERROR=0.01;
 export const UNIFORM_CAPILLARY_DISPLACEMENT_ERROR_H=0.0001;
@@ -28,9 +29,9 @@ export interface UniformMixedForceFields {
   /** h.xyz,dt; gravity,density,dynamic viscosity,surface tension;
    * noSlip,openTop,unused,dust threshold. All f32. */
   params: GPUBuffer;
-  /** Scratch dead until the following pressure authority writes phase. */
-  curvature?: GPUTexture;
-  /** Dead transport/sharpening arena, one vec4 per possible owner. */
+  /** Dead transport/sharpening arena, one vec4 per possible owner: an
+   * unretained owner's normal (xyz) and curvature (w), and a seam 4h
+   * owner's pressure slope (xyz). The forces write no field. */
   normals?: GPUBufferBinding;
   /** Persistent candidate, actual-normal, halo-work, topology planes. */
   normalDirty?:GPUBuffer;
@@ -62,6 +63,8 @@ export class UniformMixedForces {
   private pipeline?: GPUComputePipeline;
   private normalPipeline?: GPUComputePipeline;
   private curvaturePipeline?: GPUComputePipeline;
+  /** forceSlopes: seam 4h owners' capillary slopes into the normal scratch. */
+  private slopePipeline?: GPUComputePipeline;
   private curvatureRegionsPipeline?:GPUComputePipeline;
   private readonly pendingByGroup=new WeakMap<UniformDetailGroup,GPUBuffer>();
   private regularFinePipeline?: GPUComputePipeline;
@@ -69,8 +72,10 @@ export class UniformMixedForces {
   private regularFineFreePipeline?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
   private regularCoarsePipeline?: GPUComputePipeline;
-  /** vectorViscosity=false retains the scalar evaluator for differential validation. */
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false,private readonly vectorViscosity=true,private readonly retainedNormals=false,private readonly boundedNormals=true,private readonly zeroCurvatureSeams=true) {
+  /** vectorViscosity must be true: the fine owners' viscosity is the vector
+   * evaluator (the scalar one is the face kernels'). */
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false,private readonly vectorViscosity=true,private readonly retainedNormals=false,private readonly boundedNormals=true,private readonly zeroCurvatureSeams=true,private readonly dynamics?:UniformMixedRegionDynamics) {
+    if(!vectorViscosity)throw new Error("Mixed forces: the scalar fine viscosity evaluator was removed");
     this.resources = uniformDetailBindLayout(device,{ entries: [
       ...[1,2,3,10,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -78,8 +83,9 @@ export class UniformMixedForces {
       {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:8,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-      ...(cachedCurvature?[{binding:12,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write" as const,format:"r32float" as const,viewDimension:"3d" as const}},{binding:13,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
+      ...(cachedCurvature?[{binding:13,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
       ...(retainedNormals?[14,15].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})):[]),
+      ...(dynamics?[{binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
       ...(sourceParams?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
     ] });
   }
@@ -87,11 +93,10 @@ export class UniformMixedForces {
   static normalBytes(owners:number):number{return 16*owners;}
   bind(f: UniformMixedForceFields): UniformDetailGroup {
     if(this.cachedGeometry&&!f.centerPhi)throw new Error("Mixed forces require current center phi for cached geometry");
-    if(this.cachedCurvature!==!!f.curvature||this.cachedCurvature!==!!f.normals)throw new Error("Mixed force curvature scratch must match the pipeline");
+    if(this.cachedCurvature!==!!f.normals)throw new Error("Mixed force curvature scratch must match the pipeline");
     if(this.retainedNormals!==!!f.normalDirty||this.retainedNormals!==!!f.retainedNormals)throw new Error("Retained force normals require pending curvature evidence");
     const address=this.ownership.capacity.address,coarse=f.coarseVelocity,unit=f.unitVelocity;
     if(coarse.format!=="rgba32float"||uniformDetailExtent(coarse).some((n,a)=>n!==uniformCoarseCacheExtent(address)[a]))throw new Error("Mixed force viscosity requires the 4h velocity cache");
-    if(f.curvature&&(f.curvature.format!=="r32float"||uniformDetailClass(f.curvature)!=="cell"||[f.phi,f.volume,f.centerPhi].includes(f.curvature)))throw new Error("Mixed force curvature requires disjoint native scalar scratch");
     const normalBytes=UniformMixedForces.normalBytes(this.ownership.capacity.owners);
     if(f.normals&&(f.normals.size??f.normals.buffer.size-(f.normals.offset??0))<normalBytes)throw new Error("Mixed force normal scratch is too small");
     if(unit.format!=="rgba32float"||uniformDetailClass(unit)!=="face")throw new Error("Mixed force viscosity requires resolved h velocity taps");
@@ -108,8 +113,9 @@ export class UniformMixedForces {
       {binding:6,resource:{buffer:f.outputNegative}},{binding:7,resource:{buffer:f.params,size:48}},
       {binding:8,resource:f.centerPhi??f.volume},
       {binding:10,resource:coarse},{binding:11,resource:unit},
-      ...(f.curvature?[{binding:12,resource:f.curvature},{binding:13,resource:{...f.normals!,size:normalBytes}}]:[]),
+      ...(f.normals?[{binding:13,resource:{...f.normals,size:normalBytes}}]:[]),
       ...(f.normalDirty?[{binding:14,resource:{buffer:f.normalDirty}},{binding:15,resource:f.retainedNormals!}]:[]),
+      ...(this.dynamics?[{binding:16,resource:{buffer:this.dynamics.forceStore}}]:[]),
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
     ]});
     if(f.normalDirty)this.pendingByGroup.set(group,f.normalDirty);return group;
@@ -128,12 +134,18 @@ struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f}
 @group(1) @binding(8) var centerPhi:texture_3d<f32>;
 override umCachedGeometry:bool=false;
 override umForceCached:bool=false;
-override umVectorViscosity:bool=${this.vectorViscosity};
-${this.cachedCurvature?`@group(1) @binding(12) var curvature:texture_storage_3d<r32float,read_write>; @group(1) @binding(13) var<storage,read_write> normals:array<vec4f>;`:""}
+${this.cachedCurvature?`@group(1) @binding(13) var<storage,read_write> normals:array<vec4f>;`:""}
 ${this.retainedNormals?`@group(1) @binding(14) var<storage,read_write> normalDirty:array<atomic<u32>>; @group(1) @binding(15) var<storage,read_write> retained:array<f32>;
 fn umRetainedIndex(owner:UMOwner)->u32{let prefix=arrayLength(&retained)/4u-UM_TILES;if(owner.width==1u){return select(0xffffffffu,owner.index,owner.index<prefix);}return prefix+owner.tile;}`:""}
 const UM_H=vec3f(${h.map(n=>`${n}`).join(",")});
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
+${this.dynamics?uniformRegionForceWGSL(1,16,this.dynamics.regions,this.dynamics.forceFineSlots,this.ownership.capacity.tiles):`fn umForceMode(region:u32)->u32{return ${UNIFORM_FORCE_MODE.viscous}u;}
+fn umViscosityExact(owner:UMOwner)->bool{return true;}
+fn umForceRetain(owner:UMOwner)->vec3u{return vec3u(0u);}
+fn umForceRetainSeam(owner:UMOwner,seam:u32,part:u32)->vec3u{return vec3u(0u);}
+fn umForceKept(retain:vec3u)->vec3f{return vec3f(0);}
+fn umForceKeep(owner:UMOwner,retain:vec3u,axis:u32,drive:f32){}`}
+const UM_FORCE_REUSE:u32=${UNIFORM_FORCE_MODE.reuse}u;const UM_FORCE_NORMALS_EXACT:u32=${UNIFORM_FORCE_MODE.normalsExact}u;
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingSource("",false)}
@@ -149,6 +161,11 @@ fn umOwnerClosed(owner:UMOwner)->bool{
 @group(1) @binding(10) var coarseVelocity:texture_3d<f32>;
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
 fn umCellPhi(owner:UMOwner)->f32{if(umCachedGeometry){if(owner.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(centerPhi,vec3i(umOrigin(owner)),0).x;}return textureLoad(centerPhi,vec3i(umOrigin(owner)),0).x;}return umSampleVertex(vec3f(umOrigin(owner))+vec3f(0.5*f32(owner.width)));}
+// umOccupancy of the h owner at fine cell p.
+fn umFineOccupancy(p:vec3i)->f32 {
+ var phi=0.0;if(umCachedGeometry){phi=textureLoad(centerPhi,p,0).x;}else{phi=umSampleVertex(vec3f(p)+vec3f(0.5));}
+ return clamp(0.5-phi/(4.0*force.hDt.y*f32(1u)),0.0,1.0);
+}
 fn umOccupancy(owner:UMOwner)->f32 {
  if(owner.width==0u){return 0.0;}
  return clamp(0.5-umCellPhi(owner)/(4.0*force.hDt.y*f32(owner.width)),0.0,1.0);
@@ -178,17 +195,17 @@ fn umNormalRaw(owner:UMOwner)->vec3f {
 fn umNormal(owner:UMOwner)->vec3f{${this.cachedCurvature?`if(umForceCached){${this.retainedNormals?`let i=umRetainedIndex(owner);if(i!=0xffffffffu){let at=4u*i;return vec3f(retained[at],retained[at+1u],retained[at+2u]);}`:""}return normals[owner.index].xyz;}`:""}return umNormalRaw(owner);}
 ${this.cachedCurvature?`@compute @workgroup_size(64) fn cacheNormals(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width==0u){return;}
- ${this.retainedNormals?`let region=umPageOfTile(owner.tile);let i=umRetainedIndex(owner);let epsilon=umNormalAnchorTolerance();
- let candidate=atomicLoad(&normalDirty[region])!=0u;let topology=atomicLoad(&normalDirty[3u*UM_PAGES+region])!=0u;
+ ${this.retainedNormals?`let region=umPageOfTile(owner.tile);let i=umRetainedIndex(owner);let mode=umForceMode(region);
+ // The region's mode decides first (classify's umRdForce): a reusing COLD region
+ // keeps its retained normals; leaving reuse evaluates them all exactly;
+ // otherwise revised regions evaluate theirs against fixed anchors.
+ let exact=(mode&UM_FORCE_NORMALS_EXACT)!=0u;var epsilon=umNormalAnchorTolerance();if(exact){epsilon=0.0;}
+ let candidate=exact||atomicLoad(&normalDirty[region])!=0u;let topology=atomicLoad(&normalDirty[3u*UM_PAGES+region])!=0u;
  if(i!=0xffffffffu){
-  // The regional certificate is checked before any eight-corner normal
-  // gather or retained-value materialization. Clean outputs stay owned.
-  if(!candidate&&!topology&&epsilon>=0.0){return;}
-  let at=4u*i;let previous=vec3f(retained[at],retained[at+1u],retained[at+2u]);var value=previous;
-  if(candidate||topology||epsilon<0.0){let current=umNormalRaw(owner);
-   let changed=topology||(epsilon<=0.0&&any(bitcast<vec3u>(current)!=bitcast<vec3u>(previous)))||any(abs(current-previous)>vec3f(max(epsilon,0.0)))||!(all(abs(current)<=vec3f(3.402823e38))&&all(abs(previous)<=vec3f(3.402823e38)));
-   if(changed){value=current;retained[at]=value.x;retained[at+1u]=value.y;retained[at+2u]=value.z;atomicStore(&normalDirty[UM_PAGES+region],1u);}
-  }
+  if((mode&UM_FORCE_REUSE)!=0u||(!candidate&&!topology&&epsilon>=0.0)){return;}
+  let at=4u*i;let previous=vec3f(retained[at],retained[at+1u],retained[at+2u]);let current=umNormalRaw(owner);
+  let changed=topology||(epsilon<=0.0&&any(bitcast<vec3u>(current)!=bitcast<vec3u>(previous)))||any(abs(current-previous)>vec3f(max(epsilon,0.0)))||!(all(abs(current)<=vec3f(3.402823e38))&&all(abs(previous)<=vec3f(3.402823e38)));
+  if(changed){retained[at]=current.x;retained[at+1u]=current.y;retained[at+2u]=current.z;atomicStore(&normalDirty[UM_PAGES+region],1u);}
   return;
  }
  if(candidate||topology||epsilon<0.0){atomicStore(&normalDirty[UM_PAGES+region],1u);}`:""}
@@ -227,17 +244,31 @@ ${this.cachedCurvature?`@compute @workgroup_size(64) fn cacheCurvature(@builtin(
  let owner=umAllOwner(gid);if(owner.width==0u){return;}
  ${this.retainedNormals?`let i=umRetainedIndex(owner);
  if(i!=0xffffffffu){
-  if(atomicLoad(&normalDirty[2u*UM_PAGES+umPageOfTile(owner.tile)])==0u){return;}
+  let region=umPageOfTile(owner.tile);let mode=umForceMode(region);
+  if((mode&UM_FORCE_REUSE)!=0u||((mode&UM_FORCE_NORMALS_EXACT)==0u&&atomicLoad(&normalDirty[2u*UM_PAGES+region])==0u)){return;}
   retained[4u*i+3u]=umCurvature(owner);return;
  }
- textureStore(curvature,vec3i(umOrigin(owner)),vec4f(umCurvature(owner)));`:"textureStore(curvature,vec3i(umOrigin(owner)),vec4f(umCurvature(owner)));"}
+ normals[owner.index].w=umCurvature(owner);`:"normals[owner.index].w=umCurvature(owner);"}
 }`:""}
-fn umForceCurvature(owner:UMOwner)->f32{${this.cachedCurvature?`if(umForceCached){${this.retainedNormals?"let i=umRetainedIndex(owner);if(i!=0xffffffffu){return retained[4u*i+3u];}":""}return textureLoad(curvature,vec3i(umOrigin(owner))).x;}`:""}return umCurvature(owner);}
+fn umForceCurvature(owner:UMOwner)->f32{${this.cachedCurvature?`if(umForceCached){${this.retainedNormals?"let i=umRetainedIndex(owner);if(i!=0xffffffffu){return retained[4u*i+3u];}":""}return normals[owner.index].w;}`:""}return umCurvature(owner);}
 fn umPressure(owner:UMOwner)->f32{return umOccupancy(owner);}
-fn umPressureSlope(owner:UMOwner)->vec3f{return umReconstructPressureSlope(owner);}
+// With the cached curvature, forceSlopes left every seam 4h owner's slope
+// in the borrowed normal scratch; a slope is read only on an unequal face,
+// whose coarse side is such an owner.
+fn umPressureSlope(owner:UMOwner)->vec3f{${this.cachedCurvature?"if(umForceCached){return normals[owner.index].xyz;}":""}return umReconstructPressureSlope(owner);}
 // A closed neighbour has no occupancy: it lends the slope the owner's own.
 fn umForceSample(owner:UMOwner,neighbor:UMOwner)->f32{if(umOwnerClosed(neighbor)){return umPressure(owner);}return umPressure(neighbor);}
 ${uniformMixedPressureReconstructionSource(false,"umForceSample(owner,neighbor)")}
+${this.cachedCurvature?`// Each seam 4h owner's slope, reconstructed once after the curvature pass
+// consumed the normal scratch's xyz (its w, a curvature, is kept), instead of at each of its up to 96 finer
+// faces (a 4h face meets 16 h owners). A lane per seam 4h tile.
+@compute @workgroup_size(64) fn forceSlopes(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
+ let header=7u*UM_TILES+16u;let k=group.x*64u+l;
+ if(k>=umSupport[header+1u]){return;}
+ let fine=umSupport[header];let tile=umSupport[header+4u+fine+k];
+ let o=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
+ normals[o.index]=vec4f(umReconstructPressureSlope(o),normals[o.index].w);
+}`:""}
 // Viscosity reads the frame's extended-velocity snapshot at exact MAC sites
 // of the face's own width (the ungraded layout has widths 1 and 4 only): an
 // h site is one UniformMixedHangingTaps.unitVelocity texel, a 4h site one
@@ -300,38 +331,71 @@ fn umBedOwnFaceDrive(owner:UMOwner,own:vec2f,at:vec3i,axis:u32)->f32 {
  if(all(umBedSlope(next)==vec2f(0))){return own[axis>>1u];}
  return umBedFaceDrive(own,umFace(owner,axis,1,0u).neighbor,axis);
 }
-// The fine-owner caller shares one head-of-frame region proof across its
-// three faces. Its one-cell ring covers both face cells and every bed probe;
-// wall-face and viscosity handling remain independent of this interior proof.
-fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool)->f32 {
- if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
- var value=0.0;if(face.width==4u){value=${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(advected,face.anchor,0)[face.axis];}else{value=textureLoad(advected,face.anchor,0)[face.axis];}let dt=force.hDt.w;
- let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
- if(occupancy>0.0&&force.physical.z>0.0){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
- if(face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor))){value+=dt*force.physical.x;}
- if(face.axis!=1u&&!solidClear){value+=dt*force.physical.x*umBedFaceDrive(umBedDrive(owner),face.neighbor,face.axis);}
- if(force.physical.w>0.0&&face.neighbor.width!=0u&&(solidClear||(!umOwnerClosed(owner)&&!umOwnerClosed(face.neighbor)))){
-  // Unequal-width pressure correction reconstructs the coarse tangent slope.
-  // A zero cached curvature sum makes that whole contribution zero. Keep
-  // NaN sums and unsupported physical scales on the original evaluator.
-  var curvatureSum=0.0;let scale=dt*(force.physical.w/force.physical.y)*0.5;
-  let cachedSeam=${this.zeroCurvatureSeams?"umForceCached&&owner.width!=face.neighbor.width&&force.physical.y>0.0&&abs(scale)<=3.402823e38":"false"};
-  if(cachedSeam){curvatureSum=umForceCurvature(owner)+umForceCurvature(face.neighbor);}
-  if(!cachedSeam||curvatureSum!=0.0){
-   let gradient=umReconstructedPressureGradient(owner,face);
-   if(gradient!=0.0){if(!cachedSeam){curvatureSum=umForceCurvature(owner)+umForceCurvature(face.neighbor);}value+=dt*(force.physical.w/force.physical.y)*0.5*curvatureSum*gradient;}
-  }
+// The capillary term of a face: dt sigma/rho times the mean curvature of
+// its two owners times the reconstructed occupancy gradient across it.
+fn umCapillary(owner:UMOwner,face:UMFace,solidClear:bool)->f32 {
+ if(!(force.physical.w>0.0&&face.neighbor.width!=0u&&(solidClear||(!umOwnerClosed(owner)&&!umOwnerClosed(face.neighbor))))){return 0.0;}
+ // Unequal-width pressure correction reconstructs the coarse tangent slope.
+ // A zero cached curvature sum makes that whole contribution zero. Keep
+ // NaN sums and unsupported physical scales on the original evaluator.
+ let dt=force.hDt.w;var curvatureSum=0.0;let scale=dt*(force.physical.w/force.physical.y)*0.5;
+ let cachedSeam=${this.zeroCurvatureSeams?"umForceCached&&owner.width!=face.neighbor.width&&force.physical.y>0.0&&abs(scale)<=3.402823e38":"false"};
+ if(cachedSeam){curvatureSum=umForceCurvature(owner)+umForceCurvature(face.neighbor);}
+ if(!cachedSeam||curvatureSum!=0.0){
+  let gradient=umReconstructedPressureGradient(owner,face);
+  if(gradient!=0.0){if(!cachedSeam){curvatureSum=umForceCurvature(owner)+umForceCurvature(face.neighbor);}return dt*(force.physical.w/force.physical.y)*0.5*curvatureSum*gradient;}
  }
+ return 0.0;
+}
+// Inflow overrides a face's forced value with the swept source velocity
+// averaged over the face's fine texels.
+fn umInflow(face:UMFace,forced:f32)->f32 {
  ${this.sourceParams?`if(umSourceinflowStrength()>0.0){
   var sum=0.0;let u=(face.axis+1u)%3u;let v=(face.axis+2u)%3u;
   for(var j=0u;j<face.width;j++){for(var i=0u;i<face.width;i++){
    var q=face.anchor;q[u]+=i32(i);q[v]+=i32(j);
-   sum+=umSourceapplyInflowSweptVelocity(q,vec3f(value))[face.axis];
-  }}value=sum/f32(face.width*face.width);
+   sum+=umSourceapplyInflowSweptVelocity(q,vec3f(forced))[face.axis];
+  }}return sum/f32(face.width*face.width);
  }`:""}
- return value;
+ return forced;
 }
-fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32{return umForcedVelocityClear(owner,face,false);}
+// The fine-owner caller shares one head-of-frame region proof across its
+// three faces. Its one-cell ring covers both face cells and every bed probe;
+// wall-face and viscosity handling remain independent of this interior proof.
+// retain (umForceRetain, decided once per owner): the +face's drive
+// (viscosity, bed, capillarity) is kept (1) or reused (2); gravity and
+// inflow are applied fresh.
+fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool,retain:vec3u)->f32 {
+ if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
+ var value=0.0;if(face.width==4u){value=${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(advected,face.anchor,0)[face.axis];}else{value=textureLoad(advected,face.anchor,0)[face.axis];}let dt=force.hDt.w;
+ let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
+ let gravity=face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor));
+ let kept=face.sign>0&&retain.x!=0u;
+ if(kept&&retain.x==2u){
+  if(gravity){value+=dt*force.physical.x;}
+  value+=bitcast<f32>(umForceStore[retain.y+face.axis]);
+ }else{
+  let advected=value;
+  // A retaining region (UNIFORM_FORCE_TIER.retain) drops viscosity within its budget.
+  if(occupancy>0.0&&force.physical.z>0.0&&umViscosityExact(owner)){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
+  if(gravity){value+=dt*force.physical.x;}
+  if(face.axis!=1u&&!solidClear){value+=dt*force.physical.x*umBedFaceDrive(umBedDrive(owner),face.neighbor,face.axis);}
+  value+=umCapillary(owner,face,solidClear);
+  // The kept drive: the evaluation less the advected value and gravity.
+  if(kept){umForceKeep(owner,retain,face.axis,value-advected-select(0.0,dt*force.physical.x,gravity));}
+ }
+ return umInflow(face,value);
+}
+fn umForcedVelocity(owner:UMOwner,face:UMFace)->f32{return umForcedVelocityClear(owner,face,false,vec3u(0u));}
+// The fused seam launch: a seam 4h quad lane's patch (seam: its seam list
+// position) keeps its drive by patch; a 4h owner riding the launch whole
+// keeps by owner where its face is one patch.
+fn umForcedVelocityFused(owner:UMOwner,face:UMFace,seam:u32,part:u32)->f32{
+ // Only a +face keeps (umForcedVelocityClear), so a -face skips the lookup.
+ var retain=vec3u(0u);
+ if(face.sign>0){if(seam!=0xffffffffu){retain=umForceRetainSeam(owner,seam,part);}else if(face.count==1u){retain=umForceRetain(owner);}}
+ return umForcedVelocityClear(owner,face,false,retain);
+}
 // The viscosity Laplacian's centre and six taps. A tap in the owner's page
 // is a step from its texel (a stored page is never SOLID, so held is
 // itself); a tap across a page face is held out of SOLID pages, its
@@ -362,21 +426,47 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
  // Do not query retained solid evidence in the already solid-free twin.
  let solidClear=!umSolidEnabled()||umSolidRegionClearAtBuild(at);
  for(var axis=0u;axis<3u;axis++){if(low[axis]){let i=umLowFaceIndex(origin,axis);boundary[i]=negative[i];}}
- if(!umVectorViscosity||force.physical.w>0.0${this.sourceParams?"||umSourceinflowStrength()>0.0":""}){
-  var value=vec3f(0);for(var axis=0u;axis<3u;axis++){value[axis]=umForcedVelocityClear(owner,umFace(owner,axis,1,0u),solidClear);}
-  textureStore(output,at,vec4f(value,0));return;
- }
+ // The owner's three +faces share its texel (an h owner's +face is never a
+ // low face: its anchor is the owner's own stored cell). The drive
+ // (viscosity and the bed as a vector, capillarity per face) is kept or
+ // reused by a COLD region (umForceRetain); gravity and inflow are fresh.
  var value=textureLoad(advected,at,0).xyz;let occupancy=umOccupancy(owner);
- if(occupancy>0.0&&force.physical.z>0.0){
-  let terms=umViscosityTerms(at);
-  value+=force.hDt.w*(force.physical.z/force.physical.y)*((terms[0]+terms[1])+terms[2]);
- }
  let neighbor=umFace(owner,1u,1,0u).neighbor;
- if(occupancy>1e-5||umOccupancy(neighbor)>1e-5||umCoarseMass(neighbor)){value.y+=force.hDt.w*force.physical.x;}
- if(!solidClear){
-  let bed=umBedDrive(owner);
-  value.x+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,0u);
-  value.z+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,2u);
+ let gravity=occupancy>1e-5||umOccupancy(neighbor)>1e-5||umCoarseMass(neighbor);
+ let retain=umForceRetain(owner);
+ if(retain.x==2u){
+  if(gravity){value.y+=force.hDt.w*force.physical.x;}
+  value+=umForceKept(retain);
+ }else{
+  if(occupancy>0.0&&force.physical.z>0.0&&umViscosityExact(owner)){
+   let terms=umViscosityTerms(at);
+   value+=force.hDt.w*(force.physical.z/force.physical.y)*((terms[0]+terms[1])+terms[2]);
+  }
+  if(gravity){value.y+=force.hDt.w*force.physical.x;}
+  if(!solidClear){
+   let bed=umBedDrive(owner);
+   value.x+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,0u);
+   value.z+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,2u);
+  }
+  if(force.physical.w>0.0){
+   for(var axis=0u;axis<3u;axis++){
+    // A +face inside the owner's tile meets an h owner: its reconstructed
+    // gradient is the occupancy difference alone, so equal occupancies (deep
+    // liquid, open air) carry no capillary force, closed cells or not.
+    var next=at;next[axis]+=1;
+    if((at[axis]&3)<3&&umFineOccupancy(next)==occupancy){continue;}
+    value[axis]+=umCapillary(owner,umFace(owner,axis,1,0u),solidClear);
+   }
+  }
+  // The kept drive: the evaluation less the advected value and gravity
+  // (only a keeping region reloads the advected texel).
+  if(retain.x==1u){
+   var base=textureLoad(advected,at,0).xyz;if(gravity){base.y+=force.hDt.w*force.physical.x;}
+   let drive=value-base;for(var axis=0u;axis<3u;axis++){umForceKeep(owner,retain,axis,drive[axis]);}
+  }
+ }
+ if(${this.sourceParams?"umSourceinflowStrength()>0.0":"false"}){
+  for(var axis=0u;axis<3u;axis++){value[axis]=umInflow(umFace(owner,axis,1,0u),value[axis]);}
  }
  textureStore(output,at,vec4f(value,0));
 }
@@ -402,13 +492,13 @@ fn umForcesRegularCoarseOwner(gid:vec3u)->UMOwner{return umRegularCoarseOwner(gi
 // predicate and never stores them. Inflow may reach any face, so it takes
 // the general evaluation.
 ${uniformMixedFarAirWGSL(this.sourceParams?"umSourceinflowStrength()>0.0":"false")}
-fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool)->f32 {
- if(!far){return umForcedVelocity(owner,face);}
+fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool,retain:vec3u)->f32 {
+ if(!far){return umForcedVelocityClear(owner,face,false,retain);}
  return 0.0;
 }
-${patched(uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far)",false,"","umForcesRegularCoarseOwner"),"let origin=umOrigin(owner);","let origin=umOrigin(owner);let far=umFarAirOwner(owner);")}
-${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face)"),"if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
-`,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheCurvature","cacheNormals",...(this.retainedNormals?["curvatureRegions"]:[])]:[])])});
+${patched(uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far,retain)",false,"","umForcesRegularCoarseOwner"),"let origin=umOrigin(owner);","let origin=umOrigin(owner);let far=umFarAirOwner(owner);let retain=umForceRetain(owner);")}
+${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner,face,select(0xffffffffu,4u*(job-seamFour)+slot,quad),part)"),"if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
+`,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheCurvature","cacheNormals","forceSlopes",...(this.retainedNormals?["curvatureRegions"]:[])]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
     const compile=(entryPoint:string,constants:Record<string,number>)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{
@@ -421,6 +511,7 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face
       this.curvaturePipeline=await compile("cacheCurvature",{umCountedJobs:UNIFORM_MIXED_COUNTED.all});
       if(this.retainedNormals)this.curvatureRegionsPipeline=await compile("curvatureRegions",{});
       this.normalPipeline=await compile("cacheNormals",{umCountedJobs:UNIFORM_MIXED_COUNTED.all});
+      this.slopePipeline=await compile("forceSlopes",{umCountedJobs:UNIFORM_MIXED_COUNTED.hanging});
     }
     const skipFused=UNIFORM_MIXED_FUSED_GATE.skipFused;
     [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline,this.regularFineFreePipeline]=await Promise.all([
@@ -439,6 +530,7 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face
       this.ownership.dispatchAllCounted(pass,this.variant(this.normalPipeline!));
       if(this.curvatureRegionsPipeline){pass.setPipeline(this.variant(this.curvatureRegionsPipeline));pass.dispatchWorkgroups(Math.ceil(this.ownership.capacity.tiles/64/64));}
       this.ownership.dispatchAllCounted(pass,this.variant(this.curvaturePipeline));
+      this.ownership.dispatchBuffered(pass,this.variant(this.slopePipeline!),"seamCoarse",this.ownership.capacity.tiles,64);
     }
     const general=this.pipeline,fine=this.regularFinePipeline!,coarse=this.regularCoarsePipeline!;
     if(this.regularFineFreePipeline)this.ownership.dispatchCounted(pass,this.variant(this.regularFineFreePipeline),this.ownership.capacity.fineTiles,"fine");
@@ -452,6 +544,8 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocity(owner,face
     this.ownership.dispatchRegularCoarseCounted(pass,this.variant(coarse));
     if(based)pass.setBindGroup(1,group.group);
     this.ownership.dispatchFusedCounted(pass,this.variant(general));pass.end();
+    // Without capillarity the evidence accumulates for the normals' next
+    // pass (classify ignores topology then: the width keys hold it).
     if(capillarity&&this.retainedNormals){const pending=this.pendingByGroup.get(group);if(!pending)throw new Error("Missing retained curvature evidence");encoder.clearBuffer(pending,0,8*(this.ownership.capacity.tiles/64));encoder.clearBuffer(pending,12*(this.ownership.capacity.tiles/64),4*(this.ownership.capacity.tiles/64));}
   }
   private variant(p:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(this.solid?.select(p)??p);}

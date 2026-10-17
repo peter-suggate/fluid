@@ -6,6 +6,7 @@ import {uniformMixedTopologyNeighboursWGSL,uniformMixedTopologyWGSL} from "./uni
 import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
 import {UNIFORM_MIXED_THETA_MIN,uniformMixedPressureLiquidWGSL,uniformMixedSurfaceThetaWGSL} from "./uniform-mixed-pressure-surface.wgsl";
 import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
+import {UNIFORM_BODY_FLUX_REACH,UNIFORM_REGION_DYNAMICS,UNIFORM_REGION_DYNAMICS_WORDS} from "./uniform-mixed-region-dynamics";
 
 /** The band's local multigrid: V-cycles h -> 2h (2^3 aggregates per tile) ->
  * 4h (one aggregate per tile), red-black Gauss-Seidel at every level. */
@@ -70,6 +71,16 @@ const COARSE_SOLVE_LANES=1024,COARSE_SOLVE_SLOTS=4096;
  * the `2 coarseSweeps` launches are 5 to 12 microseconds each on the GPU and
  * 7 on the host, so they only win well past the register path's reach. */
 const COARSE_WIDE_SLOTS=8192;
+/** Threads a capacity cycle's stride launch starts at most. Cycles past
+ * the most the band ran in the last BAND_CYCLE_WINDOW receipted frames are
+ * capacity: closed (the initial measure converged) in all but a few frames,
+ * where each launch costs its fixed few microseconds plus the threads it
+ * starts, every one reading the convergence words and returning. A capacity
+ * cycle that does open still completes the same frame: every kernel strides
+ * the full live list from any width. */
+const BAND_CAPACITY_THREADS=16384;
+/** Receipted frames whose largest band cycle count keeps that many cycles wide. */
+const BAND_CYCLE_WINDOW=4;
 /** The band's passes, described once: the encode path constructs nothing. */
 /** ceil(count/per) of whole numbers in whole-number steps: a fractional
  * quotient is a heap number wherever the caller is not yet optimized. */
@@ -109,7 +120,10 @@ export interface UniformPressureBandFields {
  /** The coarse pressure phi (the split authority's, in pressure indexing),
   * read after the 4h projection. Absent: the split rewrote `phi` itself. */
  coarsePhi?:GPUBufferBinding;
- correction:GPUTexture;
+ /** The surface-only authorities' parameters (16 B); word 2 is the volume
+  * control rate (1/s). A liquid row's correction is rate x capacity, the
+  * simulation authority's own product, formed by the rows. */
+ authorityParams:GPUBuffer;
  vertexPhi:GPUTexture;
  /** The forced field u* in simulation ownership (before the split). */
  forced:{velocity:GPUTexture;negative:GPUBuffer};
@@ -136,6 +150,10 @@ export interface UniformPressureBandFields {
   * anew, so outside that span the buffer is the caller's to overwrite: the
   * frame lends its stage scratch. Absent: the band allocates its own. */
  rows?:GPUBuffer;
+ /** UniformMixedRegionDynamics.record: the initial measure publishes each
+  * region's largest predictor residual (1/s) into its pressureResidual
+  * word, which the frame head's classify cleared. */
+ dynamics?:GPUBuffer;
 }
 
 /** The h pressure band of the two-stage solve: the global solve runs on
@@ -174,6 +192,11 @@ export class UniformPressureBand {
  /** Each slot-list stride's launch width at workSlots (see dispatch), kept
   * with it: every launch of a frame reads one. */
  private cellGroups=1;private slotGroups=1;private middleGroups=1;private coarseGroups=1;
+ /** The last BAND_CYCLE_WINDOW receipted cycle counts (observeCycles), and
+  * the cycles launched wide: every encoded one until a window is full. */
+ private readonly recentCycles=new Uint32Array(BAND_CYCLE_WINDOW);
+ private recentCount=0;
+ private wideCycles=Number.POSITIVE_INFINITY;
  private budget(slots:number):void{
   this.workSlots=slots;
   this.cellGroups=Math.min(groupsOf(slots,CELL_BLOCK),CELL_GROUPS);this.slotGroups=Math.min(slots,SLOT_GROUPS);
@@ -182,6 +205,15 @@ export class UniformPressureBand {
  /** Fixed-lag evidence, applied once per encoded frame by the frame owner.
   * A smaller budget never limits admission, storage or solver iterations. */
  observeWork(tiles:number,reserve=0):void{this.budget(uniformBufferedWork(this.workSlots,tiles,this.capacity,reserve));}
+ /** Fixed-lag evidence: a receipted frame's band cycle count. Launch width
+  * only; forgetCycles (a relayout, a kick) launches every cycle wide again. */
+ observeCycles(cycles:number):void{
+  this.recentCycles[this.recentCount%BAND_CYCLE_WINDOW]=cycles;this.recentCount++;
+  if(this.recentCount<BAND_CYCLE_WINDOW){this.wideCycles=Number.POSITIVE_INFINITY;return;}
+  let most=0;for(let i=0;i<BAND_CYCLE_WINDOW;i++)most=Math.max(most,this.recentCycles[i]!);
+  this.wideCycles=most;
+ }
+ forgetCycles():void{this.recentCount=0;this.wideCycles=Number.POSITIVE_INFINITY;}
  /** Band tiles one frame can hold (fields.capacity). More is a fatal receipt
   * (the sticky bandCapacity failure), never a fallback. The shaders read it
   * from the params (BandParams.capacity), so resize compiles nothing. */
@@ -227,14 +259,16 @@ export class UniformPressureBand {
   const buffer=(binding:number,type:GPUBufferBindingType="storage")=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
   const params=buffer(0,"uniform");
   // At most six storage buffers here: topology and solids hold four.
-  const solver=[params,buffer(2),buffer(9,"read-only-storage"),buffer(10),buffer(18)];
+  const base=[params,buffer(2),buffer(9,"read-only-storage"),buffer(10),buffer(18)];
+  // The dynamics record (24) is the measure's: the projection has no storage to spare.
+  const solver=[...base,...(fields.dynamics?[buffer(24)]:[])];
   const entries:Record<string,GPUBindGroupLayoutEntry[]>={
    list:[params,buffer(2),buffer(3,"read-only-storage"),texture(6)],
    copy:[params,buffer(2),texture(22),{binding:23,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}],
-   prep:[params,buffer(2),buffer(3,"read-only-storage"),texture(4),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9),buffer(10)],
+   prep:[params,buffer(2),buffer(3,"read-only-storage"),buffer(4,"uniform"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9),buffer(10)],
    init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage")],
    solver,
-   project:[...solver,texture(15),{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},buffer(17),buffer(21)],
+   project:[...base,texture(15),{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},buffer(17),buffer(21)],
   };
   for(const [name,list] of Object.entries(entries))this.layouts.set(name,uniformDetailBindLayout(device,{label:`Uniform pressure band ${name}`,entries:list}));
   this.allocate();
@@ -275,14 +309,15 @@ export class UniformPressureBand {
   };
   const pressure=this.pressure,coarse=pressure.capacity.owners;
   const rowsView={buffer:this.rows,size:bytes.rows};
-  const P={0:{buffer:f.params,size:64}},solverResources={...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},18:{buffer:this.coarse}};
+  const P={0:{buffer:f.params,size:64}},solverResources:Record<number,GPUBindingResource>={...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},18:{buffer:this.coarse}};
+  if(f.dynamics)solverResources[24]={buffer:f.dynamics};
   const resources:Record<string,Record<number,GPUBindingResource>>={
    list:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),6:f.vertexPhi},
    copy:{...P,2:{buffer:this.index},22:f.velocity,23:f.copy},
-   prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:f.correction,6:f.vertexPhi,7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},9:rowsView,10:{buffer:this.solve}},
+   prep:{...P,2:{buffer:this.index},3:scalars(f.phi,cells),4:{buffer:f.authorityParams,size:16},6:f.vertexPhi,7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},9:rowsView,10:{buffer:this.solve}},
    init:{...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},11:f.velocity,12:scalars(f.coarsePressure,coarse),13:scalars(f.coarsePhi??f.phi,coarse)},
    solver:solverResources,
-   project:{...solverResources,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
+   project:{...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},18:{buffer:this.coarse},15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
   if(f.presentation.buffer.size<4*(f.presentation.word+64*this.capacity))throw new Error("The stage grids cannot hold the pressure band");
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure band ${name}`,layout:this.layouts.get(name)!,
@@ -651,7 +686,8 @@ const B_TOTALS=SLOTS+UM_TILES;
 @group(1) @binding(9) var<storage,read_write> rows:array<f32>;
 // The iterate holds each row's phi until init starts it.
 @group(1) @binding(10) var<storage,read_write> solve:array<f32>;
-@group(1) @binding(4) var correction:texture_3d<f32>;
+// The authorities' parameters: z is the volume control rate (1/s).
+@group(1) @binding(4) var<uniform> authority:vec4f;
 @group(1) @binding(7) var velocity:texture_3d<f32>;
 @group(1) @binding(8) var<storage,read> negative:array<f32>;
 fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
@@ -684,7 +720,10 @@ ${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
   var shut=false;var inside=false;if(!solidClear){shut=!umCellIsOpen(p);inside=umCellInsideSolid(p);}`:""}
   var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,inside)|select(0u,0x20000000u,shut)":""};var diagonal=0.0;var divergence=0.0;
   ${S?`// Native divergenceAtWithCapacity: V u + (V_i - V) u_s, u_s the moving wall's.
-  let bodies=liquid&&!solidClear&&umBodyCount()>0u;var capacity=0.0;
+  // A body's face velocity is zero past 2 hmax of its bounding sphere
+  // (umSolidFaceVelocity) and a face lies within 1h of its cell's region:
+  // a region whose pose reach exceeds 3h has no moving-wall flux.
+  let bodies=liquid&&!solidClear&&umBodyCount()>0u&&umBodyPoseNearTile(umTileKey(p>>vec3u(2u)),${UNIFORM_BODY_FLUX_REACH}u);var capacity=0.0;
   if(bodies||!bLocalSolidWork){capacity=bHeadCapacity(p);}`:""}
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];var q=p;q[axis]+=sign;
@@ -739,7 +778,11 @@ ${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
    ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN&&(!bLocalSolidWork||capacity!=fraction)){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
   }
-  rows[cell]=select(0.0,-params.policy.x*(divergence-textureLoad(correction,p,0).x)/params.hDt.w,liquid);
+  // Volume control: the simulation authority's correction of a liquid h
+  // owner (umAuthorityLiquid is bWet on the same phi words), rate x its
+  // umCapacity, formed here bit for bit.
+  let control=authority.z*${S?"select(1.0,umCellOpen(p),umSolidEnabled())":"1.0"};
+  rows[cell]=select(0.0,-params.policy.x*(divergence-control)/params.hDt.w,liquid);
   rows[N+cell]=diagonal;rows[2u*N+cell]=bitcast<f32>(kinds);solve[cell]=own;
  }
 }`,
@@ -1146,6 +1189,18 @@ override bCycles:u32=1u;
 override bInitial:bool=false;
 var<workgroup> worst:atomic<u32>;
 var<workgroup> bMeasureCount:u32;
+${this.fields.dynamics?`@group(1) @binding(24) var<storage,read_write> bDynamics:array<atomic<u32>>;
+var<workgroup> bTileWorst:atomic<u32>;
+// The predictor's residual by region (UNIFORM_REGION_DYNAMICS.pressureResidual):
+// the slot's largest, one atomic a tile.
+fn bPublishTile(s:u32,lane:u32,r:u32){
+ atomicMax(&bTileWorst,r);workgroupBarrier();
+ if(lane==0u){
+  let at=${UNIFORM_REGION_DYNAMICS_WORDS}u*umPageOfTile(umTileKey(vec3i(bTile(s))))+${UNIFORM_REGION_DYNAMICS.pressureResidual}u;
+  let worst=atomicExchange(&bTileWorst,0u);if(worst>atomicLoad(&bDynamics[at])){atomicMax(&bDynamics[at],worst);}
+ }
+ workgroupBarrier();
+}`:""}
 // The largest band row residual, in divergence units (1/s), over liquid rows,
 // into history word bCycles. A converged solve keeps its restriction's
 // residual (nothing moved since): the receipt takes that cycle and sets the
@@ -1159,7 +1214,8 @@ var<workgroup> bMeasureCount:u32;
  var largest=0u;
  for(var s=group.x;s<n;s+=groups.x){
   let l=bLocal(lane);let p=vec3i(bTile(s)*4u+l);let cell=s*64u+bRow(l);
-  let kinds=bKinds(cell);if(bLiquid(kinds)&&bDiagonal(cell)>0.0){largest=max(largest,bResidualMagnitude(bResidualNear(cell,s,l,p,kinds)*params.policy.z));}
+  let kinds=bKinds(cell);var r=0u;if(bLiquid(kinds)&&bDiagonal(cell)>0.0){r=bResidualMagnitude(bResidualNear(cell,s,l,p,kinds)*params.policy.z);}
+  largest=max(largest,r);${this.fields.dynamics?"if(bInitial){bPublishTile(s,lane,r);}":""}
  }
  atomicMax(&worst,largest);
  workgroupBarrier();
@@ -1315,7 +1371,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   * tile of its buffered evidence), or a slot-list stride (one 32-lane group
   * per slot colour, one group per slot, per 8 slots, per 64 slots) capped by
   * the buffered workload estimate and the saturation cap. */
- private dispatch(pass:GPUComputePassEncoder,name:string,launch:number|"tiles"|"cells"|"slots"|"middle"|"coarse"):void{
+ private dispatch(pass:GPUComputePassEncoder,name:string,launch:number|"tiles"|"cells"|"slots"|"middle"|"coarse",capacity=false):void{
   const bound=this.launches.get(name);if(!bound)throw new Error("Pressure band is not initialized");
   // Groups 0 and 2 are the same for every band launch: bind them once per
   // pass, and group 1 only when the launch's layout changes.
@@ -1324,17 +1380,20 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group.group);}
   if(launch==="tiles"){this.simulation.dispatchBuffered(pass,pipeline,"fine",LIST_GROUPS);return;}
   pass.setPipeline(uniformDetailPick(pipeline));
-  pass.dispatchWorkgroups(typeof launch==="number"?launch:launch==="cells"?this.cellGroups:launch==="slots"?this.slotGroups:launch==="middle"?this.middleGroups:this.coarseGroups);
+  let groups=typeof launch==="number"?launch:launch==="cells"?this.cellGroups:launch==="slots"?this.slotGroups:launch==="middle"?this.middleGroups:this.coarseGroups;
+  // A cells launch is 32 lanes a slot of CELL_BLOCK; the other strides are 64 lanes.
+  if(capacity&&typeof launch!=="number")groups=Math.min(groups,Math.floor(BAND_CAPACITY_THREADS/(launch==="cells"?32*CELL_BLOCK:64)));
+  pass.dispatchWorkgroups(groups);
  }
  /** `count` red-black sweeps: each colour's launch, colour 0 first. */
- private sweep(pass:GPUComputePassEncoder,colour0:string,colour1:string,launch:"cells"|"middle"|"coarse",count:number):void{
-  for(let i=0;i<count;i++){this.dispatch(pass,colour0,launch);this.dispatch(pass,colour1,launch);}
+ private sweep(pass:GPUComputePassEncoder,colour0:string,colour1:string,launch:"cells"|"middle"|"coarse",count:number,capacity:boolean):void{
+  for(let i=0;i<count;i++){this.dispatch(pass,colour0,launch,capacity);this.dispatch(pass,colour1,launch,capacity);}
  }
  /** The ownership holds no h tile (capacity 0, known to the host): the band
   * has no tile, and its launches (each a few microseconds empty) are not
   * encoded. The cleared header is the whole receipt. */
  private get empty():boolean{return this.simulation.capacity.fineTiles===0;}
- /** Before the split, with the simulation authority's phi and correction and
+ /** Before the split, with the simulation authority's phi and
   * the forced field in simulation ownership: list band tiles, assemble rows
   * and bake the aggregate operators. */
  encodePrepare(encoder:GPUCommandEncoder):void{
@@ -1360,15 +1419,17 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   // body fluxes. Projection still runs when no fine correction is necessary.
   this.dispatch(pass,"measureInitial","slots");
   for(let cycle=0;cycle<s.cycles;cycle++){
-   this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps);
-   this.dispatch(pass,this.restricts[cycle]!,"slots");
-   this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1);
-   this.dispatch(pass,"middleRestrict","middle");
-   if(wide)this.sweep(pass,"coarseSweep0","coarseSweep1","coarse",s.coarseSweeps);else this.dispatch(pass,"coarseSolve",1);
-   this.dispatch(pass,"middleSweepP","middle");this.dispatch(pass,"middleSweep1","middle");this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1);
-   this.dispatch(pass,"middleProlong","slots");this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps);
+   const c=cycle>=this.wideCycles;
+   this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps,c);
+   this.dispatch(pass,this.restricts[cycle]!,"slots",c);
+   this.dispatch(pass,"middleSweep1","middle",c);this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1,c);
+   this.dispatch(pass,"middleRestrict","middle",c);
+   if(wide)this.sweep(pass,"coarseSweep0","coarseSweep1","coarse",s.coarseSweeps,c);else this.dispatch(pass,"coarseSolve",1);
+   this.dispatch(pass,"middleSweepP","middle",c);this.dispatch(pass,"middleSweep1","middle",c);this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1,c);
+   this.dispatch(pass,"middleProlong","slots",c);this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps,c);
   }
-  this.dispatch(pass,"measure","slots");
+  // The final measure does work only after a cycle ran.
+  this.dispatch(pass,"measure","slots",s.cycles>this.wideCycles);
   pass.end();
   const project=encoder.beginComputePass(PROJECT_PASS);this.dispatch(project,"copy","slots");this.dispatch(project,"project","slots");project.end();
  }

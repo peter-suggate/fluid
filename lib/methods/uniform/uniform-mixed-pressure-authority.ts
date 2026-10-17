@@ -8,7 +8,8 @@ import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl
 import { uniformMixedPressureLiquidWGSL } from "./uniform-mixed-pressure-surface.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
-import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_REGION_HEAT_EPOCH_WORD } from "./uniform-region-heat";
+import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedPressureAuthorityFields {
  centerPhi:GPUTexture;volume:GPUTexture;targetFill:GPUTexture;
@@ -17,7 +18,8 @@ export interface UniformMixedPressureAuthorityFields {
  /** Phase flag for momentum's supported physical donor gather. */
  phase:GPUTexture;
  correction:GPUTexture;
- scratch:GPUBufferBinding;
+ /** The balance workspace; none in regional mode, which owns its retained cut fits. */
+ scratch?:GPUBufferBinding;
  /** dt, deficit balance (0 on, -1 off), unused, dust threshold. */
  params:GPUBuffer;
  /** Coarse mode only: the vertex phi in simulation ownership (the cut tiles
@@ -28,6 +30,13 @@ export interface UniformMixedPressureAuthorityFields {
   * holds at h, where V claims no row). */
  simulation?:GPUBufferBinding;
 }
+/** The simulation's live phi producer revisions, one word per 16h region
+ * (UniformSurfaceWorkControl.revisions: liveOffset in bytes), and the
+ * generation a host write of phi advances. */
+export interface UniformMixedPressureRevisions {readonly buffer:GPUBuffer;readonly liveOffset:number;readonly regions:number;readonly generation:()=>number;
+ /** UniformRegionHeat's tiers, copied each pass to tierOffset (bytes) in
+  * buffer, and their non-COLD epochs to epochOffset. */
+ readonly tiers?:GPUBuffer;readonly tierOffset?:number;readonly epochOffset?:number}
 /** The all-4h root's topology of one pressure solve: a vec4 per owner and halo
  * slot, in the static record's order (open, V+x, V+y, V+z). */
 export function uniformMixedRootTopologyBytes(layout:UniformMixedLayout):number{return 16*uniformMixedPressureStorage(layout).count;}
@@ -117,8 +126,28 @@ const PHASE_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure authori
  * with solid continuation but no independently conserved mass. Its one owner
  * pass writes phi, phase and a zero source; no balance kernels are compiled.
  * The shared cut-cell fit is geometry, not volume recovery. */
+/** Regional mode (the split's coarse, resident, surface-only authority):
+ * the cut fit and the root's wet topology are retained per 16h region. A
+ * stamp pass compares each region's inputs with the last pass's: its live
+ * phi producer revision (which covers the region's 17^3 vertex closure and
+ * is advanced by remaps of the simulation's widths and by page claims), its
+ * page coordinate in the window, and the eight block words its 3x3x3
+ * neighbourhood lies in (presence, kind and identity of every neighbour
+ * key); the swept-body mask (a region within UNIFORM_BODY_GEOMETRY_REACH h
+ * of this head's swept support) and any host invalidation mark it changed
+ * too. A cut fit reads its own tile's vertices and record: it is refit in a
+ * changed region. A wet face reads the rows and records of the next tile,
+ * and a row's phi its six neighbours': the wet pass rebuilds every region a
+ * changed region neighbours (27). The rows of a region not held (stamp bit
+ * 1: it and its neighbours quiet) are written every pass; the volume-control
+ * correction is its readers' (rate x capacity on a liquid row).
+ * The cut fits live in this stage's own buffer: the shared pressure
+ * workspace is not state between frames. Fixed launches; a region's exit
+ * is workgroup-uniform. */
+const STAMP_WORDS=16;
+const REGION_GRID=1024;
 export class UniformMixedPressureAuthority {
- readonly allocatedBytes=0;
+ readonly allocatedBytes:number;
  readonly scratchBytes:number;
  /** Owners this ownership can hold: the construction cellCount. */
  private readonly owners:number;
@@ -131,7 +160,18 @@ export class UniformMixedPressureAuthority {
  private readonly cutGroups:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly resident=false,readonly surfaceOnly=false){
+ /** Regional mode: the retained cut fits (the workspace's layout) and the stamps. */
+ private readonly regional:boolean;
+ private readonly retained?:{cut?:GPUBuffer;stamps:GPUBuffer};
+ /** The surface-only simulation authority's held mode (surfaceHeld). */
+ private readonly heldRegional:boolean;
+ /** Surface-only simulation authority with solids: a regional phase launch
+  * for a head whose only change is rigid bodies (encodeBodies). */
+ private readonly bodyRegional:boolean;
+ private forced=true;
+ private bodyHeads=0;
+ private seenGeneration=-1;
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly resident=false,readonly surfaceOnly=false,private readonly revisions?:UniformMixedPressureRevisions){
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure authority requires the all-4h solid record and all-4h ownership");
   // A capacity bound, read once: the unified frame reserves its simulation
   // ownership all-h (cellCount = 64 per tile) and pressure ownership is the
@@ -146,6 +186,21 @@ export class UniformMixedPressureAuthority {
   // Two vec2f words per partial; coarse: one vec2f cut-phi slot per owner
   // after the balance words.
   this.scratchBytes=8*(1+2*(this.groups+this.chunks)+(coarse?this.owners:0));
+  this.regional=coarse&&resident&&surfaceOnly;
+  // The simulation's surface-only authority holds quiet regions with the
+  // producer revisions and the work tiers (surfaceHeld).
+  this.heldRegional=!coarse&&!resident&&surfaceOnly&&!!revisions?.tiers;
+  if(this.regional?!revisions:!!revisions&&!this.heldRegional)throw new Error("Mixed pressure authority: the coarse resident surface authority is regional and needs the producer revisions; only it and the surface-only simulation authority (with work tiers) take them");
+  if(revisions&&(revisions.regions!==this.pages||revisions.liveOffset%4!==0))throw new Error(`Mixed pressure authority: ${revisions.regions} revision regions for ${this.pages} pages`);this.bodyRegional=!coarse&&!resident&&surfaceOnly&&!!solid;
+  const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC;
+  if(this.regional){
+   this.retained={cut:device.createBuffer({label:"Uniform mixed pressure authority retained cut fits",size:this.scratchBytes,usage}),
+    stamps:device.createBuffer({label:"Uniform mixed pressure authority region stamps",size:4*STAMP_WORDS*this.pages,usage})};
+  }
+  // Held mode: the stamps, then a word a tile, its owner base at the pass
+  // that last wrote it, plus one (a rank shift rewrites the tile).
+  if(this.heldRegional)this.retained={stamps:device.createBuffer({label:"Uniform mixed pressure authority region stamps and tile bases",size:4*(STAMP_WORDS*this.pages+ownership.capacity.tiles),usage})};
+  this.allocatedBytes=(this.retained?.cut?.size??0)+(this.retained?.stamps.size??0);
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    ...[3,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
@@ -154,10 +209,12 @@ export class UniformMixedPressureAuthority {
    ...(coarse?[8].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})):[]),
    ...(coarse?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
    ...(resident?[{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
+   ...(revisions?[{binding:11,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}},{binding:12,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
   ]});
  }
  bind(f:UniformMixedPressureAuthorityFields):UniformDetailGroup{
-  if((f.scratch.size??f.scratch.buffer.size-(f.scratch.offset??0))<this.scratchBytes)throw new Error("Mixed pressure authority scratch is too small");
+  if(this.regional!==!f.scratch)throw new Error("Mixed pressure authority: regional mode owns its workspace, and only it");
+  if(f.scratch&&(f.scratch.size??f.scratch.buffer.size-(f.scratch.offset??0))<this.scratchBytes)throw new Error("Mixed pressure authority scratch is too small");
   const address=this.ownership.capacity.address;
   for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||uniformDetailClass(t)!=="cell")throw new Error("Mixed pressure authority requires native scalar fields");
   if([f.centerPhi,f.volume,f.targetFill].some(t=>t===f.phase||t===f.correction)||f.phase===f.correction)throw new Error("Mixed pressure authority outputs must be disjoint");
@@ -170,9 +227,10 @@ export class UniformMixedPressureAuthority {
    ...[f.centerPhi,f.volume,f.targetFill].map((t,binding)=>({binding,resource:t})),
    {binding:3,resource:{...f.phi,size:4*(this.ownership.capacity.owners+(this.coarse?uniformMixedRootMaskWords(this.ownership.layout):0))}},
    {binding:4,resource:f.phase},{binding:5,resource:f.correction},
-   {binding:6,resource:{...f.scratch,size:this.scratchBytes}},{binding:7,resource:{buffer:f.params,size:16}},
+   {binding:6,resource:f.scratch?{...f.scratch,size:this.scratchBytes}:{buffer:this.retained!.cut!}},{binding:7,resource:{buffer:f.params,size:16}},
    ...(f.fine?[{binding:8,resource:f.fine.phi},{binding:10,resource:{...f.fine.topology,size:topologyBytes}}]:[]),
    ...(f.simulation?[{binding:9,resource:f.simulation}]:[]),
+   ...(this.revisions?[{binding:11,resource:{buffer:this.retained!.stamps}},{binding:12,resource:{buffer:this.revisions.buffer}}]:[]),
   ]});
  }
  async initialize():Promise<void>{
@@ -382,6 +440,98 @@ fn umWetTile(t:u32){
 }
 @compute @workgroup_size(64) fn wet(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
  for(var t=64u*group.x+l;t<UM_TILES;t+=64u*groups.x){if(umTileLive(t)){umWetTile(t);}}
+}
+${this.regional?`var<workgroup> umAuthorityRegionGate:u32;
+var<workgroup> umAuthorityRegionNear:atomic<u32>;
+// The cut fits of each changed region (cut's batches, a region a batch).
+@compute @workgroup_size(128) fn cutRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var region=group.x;region<UM_PAGES;region+=groups.x){
+  if(l==0u){atomicStore(&pcWorkCount,0u);umAuthorityRegionGate=stamps[UM_STAMP_WORDS*region+12u]&1u;}
+  if(workgroupUniformLoad(&umAuthorityRegionGate)==0u){continue;}
+  if(l<64u){let t=umPageTile(region,l);if(umTileLive(t)&&(umSolidCut(t)||(pcHeld&&umSolidFineTile(t)))){
+   let open=umSolidOpenCells(t);
+   if(!umSolidCut(t)){pcHeldFit(t);}
+   else if(all(open==vec2u(0u))){balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(2.0*UM_HMIN,0.0);}
+   else if(all(open==vec2u(0xffffffffu))){pcFullFit(t);}
+   else{let at=atomicAdd(&pcWorkCount,1u);pcTiles[at]=t;}
+  }}
+  workgroupBarrier();
+  if(l==0u){pcCount=atomicLoad(&pcWorkCount);}
+  let count=workgroupUniformLoad(&pcCount);
+  for(var j=0u;j<count;j+=4u){let at=j+(l>>5u);pcFitTile(pcTiles[min(at,count-1u)],at<count,l);}
+  workgroupBarrier();
+ }
+}
+// The wet topology of each tile whose reads reach a changed region: tile t
+// reads the rows and records of t and t+axis, and a closed row continues its
+// six neighbours', so t's reads lie in tiles t-1..t+2 of each axis. Bit
+// (dx+1)+3(dy+1)+9(dz+1) of the region's mask: neighbour (dx,dy,dz) changed.
+@compute @workgroup_size(64) fn wetRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var region=group.x;region<UM_PAGES;region+=groups.x){
+  if(l==0u){atomicStore(&umAuthorityRegionNear,0u);}
+  workgroupBarrier();
+  if(l<27u){
+   let q=4*(vec3i(umPageCoord(region))+vec3i(umCorner(l,3u))-vec3i(1));let key=umTileKey(q);
+   if(umKeyStored(key)&&(stamps[UM_STAMP_WORDS*umPageOfTile(key)+12u]&1u)!=0u){atomicOr(&umAuthorityRegionNear,1u<<l);}
+  }
+  workgroupBarrier();
+  if(l==0u){umAuthorityRegionGate=atomicLoad(&umAuthorityRegionNear);}
+  let near=workgroupUniformLoad(&umAuthorityRegionGate);if(near==0u){continue;}
+  let local=umCorner(l,4u);var reach=0u;
+  for(var k=0u;k<27u;k++){
+   let d=vec3i(umCorner(k,3u))-vec3i(1);
+   if(all((d>=vec3i(0))|(vec3i(local)==vec3i(0)))&&all((d<=vec3i(0))|(local>=vec3u(2u)))){reach|=1u<<k;}
+  }
+  let t=umPageTile(region,l);if((near&reach)!=0u&&umTileLive(t)){umWetTile(t);}
+ }
+}`:""}`:""}
+${this.revisions?`@group(1) @binding(11) var<storage,read_write> stamps:array<u32>;
+@group(1) @binding(12) var<storage,read> revisions:array<u32>;
+const UM_STAMP_WORDS:u32=${STAMP_WORDS}u;
+const UM_REVISION_LIVE:u32=${(this.revisions?.liveOffset??0)/4}u;
+// UniformRegionHeat's tiers and non-COLD epochs (copied before the pass);
+// none: every region HOT.
+fn umAuthorityTier(region:u32)->u32{${this.revisions?.tiers?`if(region>=UM_PAGES){return 2u;}return revisions[${(this.revisions.tierOffset??0)/4}u+region];`:"return 2u;"}}
+fn umAuthorityEpoch(region:u32)->u32{${this.revisions?.tiers?`return revisions[${(this.revisions.epochOffset??0)/4}u+region];`:"return 0u;"}}
+// Every region changed: the first pass and any host invalidation.
+override umStampForce:bool=false;
+// A region's inputs (words 0..11: its live phi revision, page coordinate,
+// and the block words of its 3x3x3 neighbourhood) against the last pass's;
+// word 12 is the region's changed flag for the passes after this one.
+// Words 13 and 14: the region's non-COLD epoch and whether it was COLD at
+// the last pass; word 15: quiet, COLD now and at the last pass with no
+// non-COLD frame between (its phi has not moved since that pass's read).
+@compute @workgroup_size(64) fn stamp(@builtin(global_invocation_id) gid:vec3u){
+ let region=gid.x;if(region>=UM_PAGES){return;}
+ let live=umTileLive(umPageTile(region,0u));let c=vec3i(umPageCoord(region));let low=(c-vec3i(1))>>vec3u(1u);
+ var words:array<u32,12>;let at=UM_STAMP_WORDS*region;
+ // A COLD region (UniformRegionHeat) holds its phi: its stamped revision
+ // stands, and no body reaches it. Its page words still decide.
+ let cold=!umStampForce&&live&&stamps[at]!=0u&&umAuthorityTier(region)==0u;
+ words[0]=select(select(0u,revisions[UM_REVISION_LIVE+region],live),stamps[at],cold);words[1]=u32(c.x);words[2]=u32(c.y);words[3]=u32(c.z);
+ for(var k=0u;k<8u;k++){words[4u+k]=umPageWord(low+vec3i(umCorner(k,2u)));}
+ // A saturated or unset revision is no evidence: rebuild.
+ // An absent region changes when it goes (its words do), not every frame.
+ var changed=umStampForce||(live&&!cold&&(words[0]==0u||words[0]>=0xfffffffeu||umBodySweptReach(region)<=${UNIFORM_BODY_GEOMETRY_REACH}u));
+ for(var k=0u;k<12u;k++){if(stamps[at+k]!=words[k]){changed=true;stamps[at+k]=words[k];}}
+ // An absent region keeps no evidence: whatever it later holds is new.
+ if(!live){stamps[at]=0u;}
+ let epoch=umAuthorityEpoch(region);
+ let quiet=cold&&!changed&&stamps[at+14u]!=0u&&stamps[at+13u]==epoch;
+ stamps[at+13u]=epoch;stamps[at+14u]=u32(cold);stamps[at+15u]=u32(quiet);
+ stamps[at+12u]=u32(changed);
+}
+// Bit 1 of word 12: the surface passes hold the region's owners (their phi
+// and phase are the last pass's): it and its 26 neighbours are quiet, so no
+// input of its owners' phi (a tile beyond their own at most) moved.
+@compute @workgroup_size(64) fn stampHeld(@builtin(global_invocation_id) gid:vec3u){
+ let region=gid.x;if(region>=UM_PAGES){return;}
+ let at=UM_STAMP_WORDS*region;var held=stamps[at+15u]!=0u;let c=vec3i(umPageCoord(region));
+ for(var k=0u;k<27u&&held;k++){
+  let key=umTileKey(4*(c+vec3i(umCorner(k,3u))-vec3i(1)));
+  if(umKeyStored(key)&&stamps[UM_STAMP_WORDS*umPageOfTile(key)+15u]==0u){held=false;}
+ }
+ stamps[at+12u]|=u32(held)<<1u;
 }`:""}
 fn umAuthority(o:UMOwner,v:f32)->f32{
  ${this.coarse?`let cap=umCapacity(o);if(cap>1e-5){return umOpenOwnerPhi(o,v,cap);}
@@ -428,16 +578,91 @@ var<workgroup> sums:array<vec4f,64>;
 }
 // NB-FLIP has one liquid authority: reconstructed phi. No mass claims,
 // detached-mass phase flags, balance reductions or recovery source. Its one
-// correction is volume control: the divergence the budget's gauge asks of
-// every liquid owner alike (params.z, 1/s), over the owner's open share.
-@compute @workgroup_size(64) fn surface(@builtin(global_invocation_id) gid:vec3u){
- let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width==0u){return;}
- let distance=umAuthority(o,0.0);let origin=vec3i(umOrigin(o));
- phi[o.index]=distance;
- ${this.resident?"":"textureStore(phase,origin,vec4f(umPhase(o,umAuthorityLiquid(o,distance))));"}
- var control=0.0;if(params.z!=0.0&&umAuthorityLiquid(o,distance)){control=params.z*umCapacity(o);}
- textureStore(correction,origin,vec4f(control));
+// correction, volume control (params.z x capacity on a liquid owner), is
+// computed by its readers (the root RHS and the band prep) from these phi
+// words and params: no correction texel is written.
+// held: the owner's phi (and phase) are the last pass's (stamp bit 1).
+fn umSurfaceOwner(o:UMOwner,held:bool){
+ if(held){return;}
+ let distance=umAuthority(o,0.0);phi[o.index]=distance;
+ ${this.resident?"":"textureStore(phase,vec3i(umOrigin(o)),vec4f(umPhase(o,umAuthorityLiquid(o,distance))));"}
 }
+@compute @workgroup_size(64) fn surface(@builtin(global_invocation_id) gid:vec3u){
+ let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width!=0u){umSurfaceOwner(o,${this.regional&&this.coarse?"(stamps[UM_STAMP_WORDS*umPageOfTile(o.tile)+12u]&2u)!=0u":"false"});}
+}
+${this.heldRegional?`// The held surface pass (a region a workgroup, fixed grid, strided): the
+// owners of every region the stamps did not hold, and of each tile of a
+// held region whose owner base moved (a relayout's rank shift elsewhere).
+// 4h tiles a lane each, then the h tiles one after another, their owners a
+// lane each. A held region's other owners keep the last pass's phi and
+// phase.
+const UM_TILE_BASE:u32=${STAMP_WORDS*this.pages}u;
+var<workgroup> umHeldGate:u32;
+var<workgroup> umHeldFine:array<atomic<u32>,2>;
+var<workgroup> umHeldFineTiles:vec2u;
+@compute @workgroup_size(64) fn surfaceHeld(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var region=group.x;region<UM_PAGES;region+=groups.x){
+  if(l==0u){umHeldGate=u32(umTileLive(umPageTile(region,0u)))|(stamps[UM_STAMP_WORDS*region+12u]&2u);atomicStore(&umHeldFine[0],0u);atomicStore(&umHeldFine[1],0u);}
+  let gate=workgroupUniformLoad(&umHeldGate);if((gate&1u)==0u){continue;}
+  let t=umPageTile(region,l);
+  if(umTileLive(t)){
+   let base=umTopology[t]&0x3fffffffu;
+   if((gate&2u)==0u||stamps[UM_TILE_BASE+t]!=base+1u){
+    stamps[UM_TILE_BASE+t]=base+1u;
+    if(umTileWidth(t)==1u){atomicOr(&umHeldFine[l>>5u],1u<<(l&31u));}
+    else{umSurfaceOwner(UMOwner(t,0u,4u,base),false);}
+   }
+  }
+  workgroupBarrier();
+  if(l==0u){umHeldFineTiles=vec2u(atomicLoad(&umHeldFine[0]),atomicLoad(&umHeldFine[1]));}
+  let fine=workgroupUniformLoad(&umHeldFineTiles);
+  for(var k=0u;k<64u;k++){
+   if(((fine[k>>5u]>>(k&31u))&1u)==0u){continue;}
+   let tile=umPageTile(region,k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
+  }
+ }
+}`:""}
+${this.bodyRegional?`// A head whose only change since the last authority is rigid bodies.
+// Record and geometry change only in regions within
+// UNIFORM_BODY_GEOMETRY_REACH h of the swept support, and an owner's phi
+// reads cells at most a tile beyond its own: a tile is rewritten when a
+// region its 3x3x3-tile box touches was reached. A 16h region a workgroup
+// (fixed grid, strided): bit (dx+1)+3(dy+1)+9(dz+1) of its mask for each
+// reached neighbour, then its 4h tiles a lane each and its h tiles one
+// after another, their owners a lane each.
+var<workgroup> umAuthorityBodyNear:atomic<u32>;
+var<workgroup> umAuthorityFine:array<atomic<u32>,2>;
+var<workgroup> umAuthorityBodyGate:u32;
+var<workgroup> umAuthorityFineTiles:vec2u;
+@compute @workgroup_size(64) fn surfaceRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var region=group.x;region<UM_PAGES;region+=groups.x){
+  if(l==0u){atomicStore(&umAuthorityBodyNear,0u);atomicStore(&umAuthorityFine[0],0u);atomicStore(&umAuthorityFine[1],0u);}
+  workgroupBarrier();
+  if(l<27u&&umTileLive(umPageTile(region,0u))){
+   let q=4*(vec3i(umPageCoord(region))+vec3i(umCorner(l,3u))-vec3i(1));let key=umTileKey(q);
+   if(umKeyStored(key)&&umBodySweptReach(umPageOfTile(key))<=${UNIFORM_BODY_GEOMETRY_REACH}u){atomicOr(&umAuthorityBodyNear,1u<<l);}
+  }
+  workgroupBarrier();
+  if(l==0u){umAuthorityBodyGate=atomicLoad(&umAuthorityBodyNear);}
+  let near=workgroupUniformLoad(&umAuthorityBodyGate);if(near==0u){continue;}
+  let t=umPageTile(region,l);let local=umCorner(l,4u);var reached=false;
+  for(var k=0u;k<27u;k++){
+   let d=vec3i(umCorner(k,3u))-vec3i(1);
+   reached=reached||(all((d>=vec3i(0))|(local==vec3u(0u)))&&all((d<=vec3i(0))|(local==vec3u(3u)))&&((near>>k)&1u)!=0u);
+  }
+  if(reached&&umTileLive(t)){
+   if(umTileWidth(t)==1u){atomicOr(&umAuthorityFine[l>>5u],1u<<(l&31u));}
+   else{umSurfaceOwner(UMOwner(t,0u,4u,umTopology[t]&0x3fffffffu),false);}
+  }
+  workgroupBarrier();
+  if(l==0u){umAuthorityFineTiles=vec2u(atomicLoad(&umAuthorityFine[0]),atomicLoad(&umAuthorityFine[1]));}
+  let fine=workgroupUniformLoad(&umAuthorityFineTiles);
+  for(var k=0u;k<64u;k++){
+   if(((fine[k>>5u]>>(k&31u))&1u)==0u){continue;}
+   let tile=umPageTile(region,k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
+  }
+ }
+}`:""}
 fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
 @compute @workgroup_size(64) fn build(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) group:vec3u){
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);var values=vec4f(0);
@@ -475,21 +700,37 @@ fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){i
  let amount=uvVolumeCorrectionAmountAt(v,umCapacity(o),params.x)-balance[0].x*umDeficit(o,v,distance)-balance[0].y*umBulkDeficit(o,v,distance);
  textureStore(correction,origin,vec4f(amount/max(params.x,1e-12)));
 }
-${this.resident?`// One group per page: the 4h owners of an absent page take the dense
-// build's phi (V=0 there).
-@compute @workgroup_size(64) fn absent(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) l:u32){
- let page=group.x;if(page>=UM_PAGES||umPageResident(page)){return;}
- // A tile with nothing stored is no key's owner: its row is UniformMixedRootOwners'.
- let tile=umPageTile(page,l);if(!umTileLive(tile)||umTileWidth(tile)!=4u){return;}
- let o=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);phi[o.index]=umAuthority(o,0.0);
+${this.resident?`// A group per page (fixed grid, strided): the 4h owners of an absent
+// page take the dense build's phi (V=0 there).
+@compute @workgroup_size(64) fn absent(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var page=group.x;page<UM_PAGES;page+=groups.x){
+  if(umPageResident(page)){continue;}
+  ${this.regional?`// A held region's rows stand (stamp bit 1).
+  if((stamps[UM_STAMP_WORDS*page+12u]&2u)!=0u){continue;}`:""}
+  // A tile with nothing stored is no key's owner: its row is UniformMixedRootOwners'.
+  let tile=umPageTile(page,l);if(!umTileLive(tile)||umTileWidth(tile)!=4u){continue;}
+  let o=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);phi[o.index]=umAuthority(o,0.0);
+ }
 }`:""}
 `,counted)});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
   const mode=this.resident?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all;
-  await Promise.all([...(this.surfaceOnly?["surface"]:["rows","build","chunks","reduce","resolve"]),...(this.coarse?["cut","wet"]:[]),...(this.resident?["absent"]:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:mode}:{}),...s}}})));}));
+  await Promise.all(this.entries().map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:mode}:{}),...s}}})));}));
+  if(this.revisions)this.pipelines.set("stampForce",await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"stamp",constants:{umDispatchX:this.ownership.dispatchX,umStampForce:1,...s}}})));
   if(!this.surfaceOnly)this.pipelines.set("phase",await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:mode,umAuthorityBalance:0,...s}}})));
  }
+ /** The entry points this mode builds (stampForce and phase are variants). */
+ private entries():string[]{
+  return [...(this.surfaceOnly?["surface"]:["rows","build","chunks","reduce","resolve"]),...(this.revisions?["stamp","stampHeld"]:[]),...(this.coarse&&!this.regional?["cut","wet"]:[]),...(this.regional?["cutRegions","wetRegions"]:[]),
+   ...(this.resident?["absent"]:[]),...(this.bodyRegional?["surfaceRegions"]:[]),...(this.heldRegional?["surfaceHeld"]:[])];
+ }
+ /** Every region's retained results are rebuilt by the next pass: a host
+  * write of phi, solids, volume or ownership (invalidateExtension). */
+ invalidate():void{this.forced=true;}
+ /** A frame head encoded rigid bodies: the swept-body mask is this head's.
+  * Two heads before one regional pass would lose the first's support. */
+ noteBodies():void{this.bodyHeads++;}
  /** balance=false writes phi and phase only: the extension's authority,
   * when this same stage (same ownership, same origin texels) rebuilds the
   * correction and its balance scratch before their readers (band rows, RHS). */
@@ -503,17 +744,62 @@ ${this.resident?`// One group per page: the 4h owners of an absent page take the
   * and the h vertices (the full group, as cut). */
  private encodeTopology(pass:GPUComputePassEncoder,group:UniformDetailGroup):void{
   if(!this.coarse)return;
-  pass.setBindGroup(1,group.group);pass.setPipeline(this.variant(this.pipelines.get("wet")!));pass.dispatchWorkgroups(this.cutGroups);
+  pass.setBindGroup(1,group.group);pass.setPipeline(this.variant(this.pipelines.get(this.regional?"wetRegions":"wet")!));pass.dispatchWorkgroups(this.regional?Math.min(REGION_GRID,this.pages):this.cutGroups);
+ }
+ /** The surface pass of a head whose only change since this authority's last
+  * pass is rigid bodies: the owners of the regions near their swept support
+  * (surfaceRegions). Every other owner's phi and phase are that pass's
+  * values on unchanged inputs. */
+ encodeBodies(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
+  const pipeline=this.pipelines.get("surfaceRegions");if(!pipeline)throw new Error("Mixed pressure authority has no regional body launch (surface-only simulation authority with solids)");
+  const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.solid!.tileGroup);
+  pass.setPipeline(this.variant(pipeline));pass.dispatchWorkgroups(Math.min(REGION_GRID,this.pages));pass.end();
+ }
+ /** The work tiers and their epochs beside the revisions (the group has no
+  * storage binding to spare). */
+ private copyTiers(encoder:GPUCommandEncoder):void{
+  const r=this.revisions;if(!r?.tiers)return;
+  encoder.copyBufferToBuffer(r.tiers,0,r.buffer,r.tierOffset!,4*this.pages);
+  encoder.copyBufferToBuffer(r.tiers,4*UNIFORM_REGION_HEAT_EPOCH_WORD(this.pages),r.buffer,r.epochOffset!,4*this.pages);
+ }
+ /** Host evidence the stamps cannot see: a write of phi (the revisions'
+  * generation), any invalidation, or a body head this pass did not follow. */
+ private stampForced():boolean{
+  const generation=this.revisions!.generation(),force=this.forced||this.bodyHeads>1||generation!==this.seenGeneration;
+  this.forced=false;this.bodyHeads=0;this.seenGeneration=generation;return force;
+ }
+ /** Held mode's pass: stamps, then the owners of every region not held. */
+ private encodeHeld(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
+  this.copyTiers(encoder);
+  const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+  pass.setPipeline(this.variant(this.pipelines.get(this.stampForced()?"stampForce":"stamp")!));pass.dispatchWorkgroups(Math.ceil(this.pages/64));
+  pass.setPipeline(this.variant(this.pipelines.get("stampHeld")!));pass.dispatchWorkgroups(Math.ceil(this.pages/64));
+  pass.setPipeline(this.variant(this.pipelines.get("surfaceHeld")!));pass.dispatchWorkgroups(Math.min(REGION_GRID,this.pages));pass.end();
+ }
+ /** Every owner, held or not (the surface-only pass without stamps): the
+  * restore after a stage that overwrote phase in held regions. */
+ encodeAll(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
+  if(!this.surfaceOnly||this.regional)throw new Error("Mixed pressure authority: encodeAll is the surface-only simulation authority's");
+  const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+  this.dispatchOwners(pass,this.variant(this.pipelines.get("surface")!));pass.end();
  }
  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,balance=true):void{
-  if(this.pipelines.size!==(this.surfaceOnly?1:6)+(this.coarse?2:0)+(this.resident?1:0))throw new Error("Mixed pressure authority is not initialized");
+  if(this.pipelines.size!==this.entries().length+(this.surfaceOnly?0:1)+(this.revisions?1:0))throw new Error("Mixed pressure authority is not initialized");
+  if(this.heldRegional){this.encodeHeld(encoder,group);return;}
+  // The stamps read the work tiers beside the revisions (the group has no storage binding to spare).
+  if(this.regional)this.copyTiers(encoder);
   const pass=encoder.beginComputePass(this.surfaceOnly?SURFACE_PASS:balance?BALANCE_PASS:PHASE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-  if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(this.cutGroups);}
+  if(this.regional){
+   const force=this.stampForced();
+   pass.setPipeline(this.variant(this.pipelines.get(force?"stampForce":"stamp")!));pass.dispatchWorkgroups(Math.ceil(this.pages/64));
+   pass.setPipeline(this.variant(this.pipelines.get("stampHeld")!));pass.dispatchWorkgroups(Math.ceil(this.pages/64));
+   pass.setPipeline(this.variant(this.pipelines.get("cutRegions")!));pass.dispatchWorkgroups(Math.min(REGION_GRID,this.pages));
+  }else if(this.coarse){pass.setPipeline(this.variant(this.pipelines.get("cut")!));pass.dispatchWorkgroups(this.cutGroups);}
   // The all-4h ownership's owners are tiles: every load and store below is
   // a tile origin, of the owner or of a face neighbour (cut alone reads h
   // vertices): the base blocks.
   if(this.resident)pass.setBindGroup(1,group.base);
-  if(this.resident){pass.setPipeline(this.variant(this.pipelines.get("absent")!));pass.dispatchWorkgroups(this.pages);}
+  if(this.resident){pass.setPipeline(this.variant(this.pipelines.get("absent")!));pass.dispatchWorkgroups(Math.min(REGION_GRID,this.pages));}
   if(this.surfaceOnly){this.dispatchOwners(pass,this.variant(this.pipelines.get("surface")!));this.encodeTopology(pass,group);pass.end();return;}
   this.dispatchOwners(pass,this.variant(this.pipelines.get("rows")!));
   if(!balance){this.dispatchOwners(pass,this.variant(this.pipelines.get("phase")!));this.encodeTopology(pass,group);pass.end();return;}

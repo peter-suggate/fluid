@@ -43,9 +43,15 @@ fn nbBandCrossing(c:vec3u)->bool{
 // corners), without the sampler: its bounds and owner search, which the cell
 // here already settles, cost a 4h candidate tile's 117 such vertices most of
 // depthSeeds.
+// Set on the reconstruct group's crossing search alone: its phi is the
+// scratch and its outputPhi the current field.
+override nbColdCurrentPhi:bool=false;
 fn nbCrossingVertex(tile:u32,origin:vec3u,p:vec3u)->f32{
- let cell=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));let width=umTileWidth(umTileAt(cell/4u));
- if(width==1u){return umLoadVertex(p);}
+ let cell=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));let key=umTileAt(cell/4u);let width=umTileWidth(key);
+ // Reconstruction's search (nbColdCurrentPhi): a COLD h vertex reads the
+ // current field (outputPhi, f.phi there), which transport leaves equal to
+ // its scratch, so a COLD region need not store that scratch.
+ if(width==1u){if(nbColdCurrentPhi&&nbTileCold(key)){return textureLoad(outputPhi,vec3i(p)).x;}return umLoadVertex(p);}
  if(all((p&vec3u(3u))==vec3u(0u))){return umLoadCorner(p);}
  let low=(cell/4u)*4u;let t=(vec3f(p)-vec3f(low))/4.0;
  {let zt=t==vec3f(0.0);if(u32(zt.x)+u32(zt.y)+u32(zt.z)>=2u){

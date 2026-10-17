@@ -629,3 +629,1137 @@ The splash's integrated vertical impulse changed from 494.732 to 494.457 N s (-0
 Validation: `npm run check:types` passed; `npm run test:unit` passed with 860 passing, 54 skipped, zero failed. Three targeted GPU tests passed: existing redistance behavior, crossing-cache dependency invalidation, and retained nearest results versus the full search including a changed crossing mask. Both production scenario runs completed.
 
 The 3x–5x goal remains unmet. Redistance still regresses by roughly 0.2 ms: per-vertex predictor coverage checks and retained metric traffic do not yet pay for themselves. The next cut should publish cheaper workgroup-level eligibility and preserve metric outputs with less copying/storage; a full-region validity claim must not replace the current partial-coverage proof. General bounded regional velocity extension also remains outstanding; the completed extension change removes redundant tail work without weakening its current numerical treatment. The persistent cache's 238.6 MB allocation should be reduced or mapped onto active regions before treating this design as scalable in memory.
+
+
+## Stream 2: local body dependencies
+
+A moving body no longer invalidates the frame head globally. Before this change, any frame with bodies called `invalidate(true)`, rebuilt the whole all-4h solid record, marked solid widths stale and dropped all derived geometry. Removing the airborne ball cut about 7.3 ms of profiled frame time before impact. The head now rebuilds only what the bodies' old-to-new swept support reaches. Rigid integration and coupling are unchanged: the tail still integrates the bodies and coupling still sees the total pressure impulse.
+
+What was built:
+
+- A swept-body region mask, one word per 16h work-control region (64 tiles; the region index is the existing `8*(t>>9)+((t>>2)&1)+2*((t>>5)&1)+4*((t>>8)&1)`). A fixed launch with one lane per region writes it at every `encodeCoarse`, ahead of the record build. The swept distance is the distance from the region's box to a capsule along each moved body's built-to-current centre segment, with radius equal to the larger of the two bounding spheres. The sphere covers rotation and the capsule covers translation. The pose distance uses every present body's current sphere. A body counts as moved when its presence differs, or its position, dimensions or orientation differ bitwise from the mirror taken at the last record build (`builtBodies`). A resting body therefore leaves its tiles authoritative.
+- Record rebuilds are gated by the mask. The cut and build passes test each tile with `umBodyTileDirty`: the region's swept reach must be at most 2, and the tile box must lie within 2h of a moved body at its old or new pose. The build exits workgroup-uniformly (lane-0 decision, `workgroupUniformLoad`) for clean tiles. `surfaceClear` exits for regions with swept reach above 8. Static solids are still built once, and an edit still rebuilds in full.
+- Widths no longer go stale for body rebuilds. The record build writes the tile's simulation width flag from the current topology, so the listed widths stay valid. The frame head no longer sets `solidWidthsStale` on body frames.
+- Geometry evidence is local. The geometry work-control finish marks a region dirty, with topology, only when a mask is pending and the region's swept reach is at most 3. The previous per-region body word and the 8h current-pose loop are deleted. After the geometry control pass the mask's pending word is cleared (`consumeBodyEvidence`), so the gather launch later in the frame does not redo body regions.
+- Solid helpers are body-local. `umCellOpen` reads the record for a stored tile unless a body touched the tile at build or a body's sphere is within half a cell diagonal. `umFaceOpen` and `umPressureFaceV` take the record or terrain boundary-box path unless a body is near the face. The old eight-sample loop in `umPressureFaceV` is deleted.
+- Frame head (`uniform-mixed-frame.ts`): `if(bodies){encodeBodies; invalidate(true); geometryCurrent=false; reusableExtension=false}`. `invalidate(true)` now means "rebuild the moved bodies' tiles", not the whole record. The extension token is left for stream 3 to replace.
+
+Mask layout (`UniformMixedSolid.bodyRegions` returns `{buffer, regions, headerWord}`):
+
+- Words `[0, regions)`: one word per region.
+  - Bits 0–7: swept reach, `floor(d/hmax)` saturating at 255. A reach of at most m means the region lies within m·hmax of the swept support.
+  - Bits 8–15: pose reach, defined the same way.
+  - Bit 16 (`UNIFORM_BODY_REGION_UNKNOWN`): the region's block is not live. Its reaches read 0, so a newly claimed or recycled page key is dirty and never inherits validity.
+- Header (`UNIFORM_BODY_REGION_HEADER_WORDS=4`), starting at word `regions`, in this order: the current body count, the body count at the last build, the moved-body bit mask, and an any-moved flag.
+- The record holds a mirror at `umBodyRegionBase()=count+22*tiles`, one vec4 per region: (swept reach, pose reach, unknown, 0). A pending vec4 follows it: (1, any moved, body count, 0). Consumers that already bind the record therefore need no new binding.
+- WGSL accessors on the record:
+  - `umBodySweptReach(region)` and `umBodyPoseReach(region)`
+  - `umBodySweptNearTile(tile, margin)` and `umBodyPoseNearTile(tile, margin)`, which return true for an unstored key
+  - `umBodyEvidencePending()` and `umBodyRegionOfTile(tile)`
+- `uniformBodyRegionsWGSL(name)` reads the raw buffer.
+- Stream 1 uses `umBodyPoseNearTile(tile, 3+stencil)` for body flux and `umBodySweptNearTile(tile, stencil+2)` for retained coefficients.
+
+Memory, allocated at construction: the mask buffer is `4*(regions+4)` bytes and the record grows by `16*(regions+1)` bytes. For the pool's 3,856 regions (482 blocks) that is 15,440 B plus 61,712 B, about 77 KB. The record buffer also gained `COPY_DST` so it can clear the pending word.
+
+Smoke (dt 1/60 s, 5 steps from frame 2, profiled, one run each, not an A/B): both scenarios completed without shader, validation or frame errors.
+
+- Settled: mean 42.06 ms. Solid record 0.57 ms, geometry work control 0.82 ms.
+- Pool-impact: mean 50.84 ms. Solid record 0.93 ms, geometry work control 0.84 ms. Body y went from 2.06 to 1.65 m and the impulse reached 157.9 N s by frame 5. Momentum error stayed below 1.5e-5 N s.
+- Gates: `npm run check:types` is clean. `npm run test:unit` gives 860 passing, 54 skipped and zero failed. No tests were deleted.
+
+Limitations:
+
+- No matched A/B was run, so the saving against the 7.3 ms global invalidation is not yet measured.
+- Body frames no longer run the full controlled geometry pass (see the addendum below).
+- Other body-global gates are outside this stream:
+  - The extension (`reusableExtension`, `phaseKeyed=!bodies`) belongs to stream 3.
+  - Band flux and the pressure-velocity gates belong to stream 1.
+  - Narrow-band FLIP, particle contact and the mixed-bodies passes were not touched.
+  - "Uniform mixed body forces" is the fluid force stage (gravity, viscosity, capillarity), not rigid-body work. Its cost was the same with and without the ball (see the addendum).
+- The tail's coupling moves bodies after this frame's mask was written. That motion appears in the next head's mask, which rebuilds against `builtBodies`, so no motion is lost.
+- Static solid edits are not covered by the mask. `editSolids` still rebuilds the record in full, and consumers invalidate on the host.
+- Face apertures in body scenes now come from the record or terrain path away from bodies, not from the old eight samples. Fluid away from a body therefore sees a slightly different, consistent aperture.
+- The capsule distance is a 24-step ternary search, a conservative lower bound rather than an exact distance.
+
+### Stream 2 addendum: body-frame record and geometry cost
+
+Two follow-ups remove most of what a body frame still paid in these files.
+
+Record build. The ball in the settled scene rolls slowly along its board, about 0.5 mm per frame, so it counts as moved every frame. A probe of the mask over frames 2–4 found no live region within 8h of its swept support. All 384 live regions had a swept reach above 8; the other 3,472 regions were free blocks (UNKNOWN). The 0.52 ms record cost was therefore dispatch overhead, not rebuilding:
+
+- The per-tile build launched one workgroup per tile key, about 247k of them. The first replacement, a fixed 8192-workgroup grid, still made each workgroup do about 30 serial read-and-barrier steps.
+- UNKNOWN regions read as reach 0, so they entered the per-tile path in every builder launch.
+
+Body frames now use two fixed region launches:
+
+- `cutsRegions`: up to 1024 workgroups stride the regions, with one lane per tile.
+- `buildRegions`: `64*ceil(regions/64)` workgroups. Workgroup w owns tile `w % 64` of 64 regions. Its lanes read those 64 region words in one parallel round into a workgroup bit mask, then build only the tiles of dirty regions. A workgroup with no dirty region exits after that one read. One region's tiles are spread over 64 workgroups.
+
+Builder launches treat UNKNOWN as not dirty, since a free block has no tile to build. `surfaceClear` exits for UNKNOWN regions too. The per-tile body variants are deleted, and full builds still use the per-tile launches.
+
+Geometry. A frame whose geometry was current until bodies moved no longer runs the controlled select/scan/finish pass. `UniformMixedSurfaceGeometry.encode(..., {bodies:true})` instead:
+
+- runs `compactBodies`, a fixed region grid that lists every live tile of each region with swept reach at most 3 through `gcList`, the same marking `compactChanged` uses: region dirty, topology, normals and snapshot stale;
+- runs `geometryChanged` on that list;
+- mirrors only the listed owners (`mirrorListed`);
+- takes the mask's evidence.
+
+The frame head records `geometryBodies` and `geometryBodiesOnly`, and `encodeGeometry` chooses the body launch when it is given no options. This launch requires that no adoption happened since the last encode, and it fails loudly otherwise. The relayout head then uses the generation's changed list after the remap whenever an encode has already taken the body regions, instead of a full pass. The tail gather recomputes the listed tiles' pressure outputs, because their snapshots were made stale.
+
+Rigid-body passes. `uniform-mixed-bodies.ts` and the particle contact were already local or cheap:
+
+- Rigid coupling cost 0.03–0.13 ms.
+- Integration and contacts cost 0.07 ms.
+- Body tile marking cost at most 0.02 ms.
+- Stream 3 gates the particle rigid contact per tile with `umBodyPoseNearTile`.
+
+I changed none of these.
+
+Smoke (dt 1/60 s, 5 steps from frame 2, profiled, one run each). Other streams' uncommitted work was in the tree, so whole-frame means are not comparable between runs. The pass deltas below are measured against a NO_BODY settled run on a near-identical tree:
+
+| Settled pass | Before addendum (body / no body) | After (body / no body) |
+| --- | ---: | ---: |
+| Solid record | 0.573 / 0.049 ms | 0.213 / 0.066 ms |
+| 16h geometry work control | 0.819 / 0.262 ms | 0.344 / 0.328 ms |
+| Geometric fill | 0.344 / 0.213 ms | 0.393 / 0.246 ms |
+
+Pool-impact completed without errors. Body y was 1.6487 m and impulseY 157.916 N s at frame 5, the same as before the addendum to about 1e-6. Momentum error was at most 1.46e-5 N s. `npm run check:types` is clean, and `npm run test:unit` gives 860 passing, 54 skipped and zero failed. No tests were deleted. No A/B was run.
+
+Remaining body-frame costs in settled come from passes owned by other streams:
+
+- extension, about +1.3 to +2.7 ms (stream 3)
+- pressure rhs and band rows, about +0.3 to +0.4 ms each (stream 1)
+- frame plan and surface pressure authority, about +0.2 to +0.5 ms each
+
+Also, about 0.15 ms of fixed launch cost remains in the record pass and in the geometric fill.
+
+### Stream 2 addendum: frame plan and surface pressure authority
+
+This follow-up covers the frame plan and the surface pressure authority. The authority lives in `uniform-mixed-pressure-authority.ts`, which stream 1 handed to stream 2.
+
+Body-frame overhead:
+
+- **Frame plan.** The frame heads no longer encode the plan when the surface is regional (`if(!regional)this.plan.encode(...)`). That removes the 0.26 ms launch the body head paid in settled. The plan launches that remain also run without a body.
+- **Phase authority on body-only frames.** A body-only frame is one where geometry was current until bodies moved, and the phase key is otherwise unchanged (`phaseBodiesOnly`). On such a frame the head runs `encodeBodies` instead of the full authority:
+  - `surfaceRegions` is a fixed launch of up to 1024 workgroups striding the regions.
+  - Its 27 lanes mark the neighbour regions whose swept reach is at most `UNIFORM_BODY_GEOMETRY_REACH`. The decision is workgroup-uniform.
+  - A 4h tile reached by a marked neighbour is recomputed in its lane.
+  - Reached h tiles go into a workgroup bit list and are recomputed one owner per lane after a `workgroupUniformLoad`.
+  - The old surface body is now `umSurfaceOwner`, so each entry has one call site.
+  - A first try that strided tile keys (4096 workgroups) cost about 0.33 ms and was dropped.
+
+Settled cost of the split authority (the root/coarse-cut instance, about 1.49 ms in the original baseline):
+
+- The authority is now regional. `stamp` uses one thread per region and writes 13 words:
+  - the region's live phi epoch from `surfaceWorkControl.revisions` (0 when the region is not live);
+  - its window-relative page coordinate;
+  - the eight block words of its 32h neighbourhood.
+- A region is changed when any of these hold:
+  - a word differs from the last pass;
+  - the epoch is unknown (0 or at least 0xfffffffe);
+  - the body mask's swept reach is at most 3;
+  - the pass is forced. Forcing happens on the first pass, on `invalidateExtension`, on a work-control generation bump, and when more than one body head ran since the last pass.
+- Page claims bump the neighbouring epochs, and the page coordinate and block words are compared exactly. A recycled page key therefore never inherits validity.
+- `cutRegions` refits only the changed regions' tiles. Its gate is one stamp word, so the exit is workgroup-uniform.
+- `wetRegions` recomputes the wet topology of any live tile whose reads (tiles t-1..t+2 on each axis) reach a changed neighbour region. It uses a 27-bit neighbour mask with a uniform exit.
+- Cut fits now persist in a retained buffer. They no longer go to shared frozen scratch.
+- An axis-parallel `wetRegions` was tried: 192 lanes, one face each. It gave no measurable gain (0.655 vs 0.59–0.65 ms), so it was reverted.
+
+Memory, allocated at construction:
+
+- retained cut fits: `scratchBytes`, `8*(1+2*(groups+chunks)+owners)` B;
+- stamps: `4*13*regions` B, which is 200,512 B for the pool's 3,856 regions.
+
+Both buffers have `COPY_SRC` for diagnostics.
+
+Smoke (dt 1/60 s, 5 steps from frame 2, profiled, one run each, not an A/B; other streams' work was in the tree; the GPU timer quantum is about 0.066 ms):
+
+| Pass | Before | After |
+| --- | ---: | ---: |
+| Settled body-head frame plan | 0.26 ms | not launched |
+| Settled body-head phase authority | 0.20–0.39 ms | 0.00–0.07 ms |
+| Settled split authority (coarse cut + wet) | 0.85–0.98 ms | 0.52–0.66 ms |
+| Pool-impact body-head phase authority | 0.13–0.20 ms | 0.20–0.26 ms |
+| Pool-impact split authority | 0.59–0.72 ms | 0.59–0.79 ms |
+
+Pool-impact ran clean: body y 1.64866 m, impulseY 157.926 N s, momentum error at most 1.56e-5 N s. `npm run check:types` is clean, and `npm run test:unit` gives 860 passing, 54 skipped and zero failed. No tests were deleted.
+
+Limitations:
+
+- **Settled saving is capped.** All 384 live regions lie in the surface band, and about 60 of them change their phi epoch each frame. With the dilation to neighbours, wet still covers a large share of the band. Most of what remains is `umWetFace`, with 75 loads per face, in changed and adjacent regions.
+- **Pool-impact phase authority is about break-even.** Many h tiles near the ball are processed serially within one region's workgroup.
+- **The frame plan's settled cost is not regional.** Its support words live in the shared `ownership.support` buffer, which the plan clears and other passes reuse. Its speed maximum also needs every owner. Retaining per-region results would need a private support buffer and a per-region speed reduction, which was not done.
+
+### Stream 2 addendum: region work heat and its surface consumers
+
+Peter's direction: exact-change revisions no longer decide whether non-pressure work runs. A per-16h-region work heat does, and as many regions as possible stay at 16h with no fine work.
+
+**The descriptor** is `lib/methods/uniform/uniform-region-heat.ts`, the `UniformRegionHeat` class. It is EXNB-style: dimensionless, set to 2 by a trigger, cooling at 2/0.5 s, and spread to the 26 neighbours at half weight. There is no speed threshold.
+
+One-frame triggers make the region and its neighbours HOT for this frame only. They add no heat:
+
+- a host invalidation (the work-control generation) or the first frame;
+- region identity (block word or window coordinate);
+- a page claim or remap (the work-control `publish` and `initialize` hooks call `rhPromote` on the region and its 26 neighbours);
+- unknown evidence (a saturated speed or an infinite dp).
+
+On the frame after a one-frame trigger, the pressure change is ignored, because its baseline was unknown. The first solve's dp is the whole hydrostatic field.
+
+Heat triggers:
+
+- body swept reach of at most `UNIFORM_BODY_GEOMETRY_REACH`, or an unknown body mask;
+- a source within (8√3+4)h;
+- the accumulated displacement exceeding 0.02 h. The accumulation is Σ dt·|u|max/h from the previous frame's region velocity extrema, plus dt²·|dp|/(ρh²) from stream 1's dynamics word 6. It resets whenever the region runs non-COLD.
+
+The NB particle activity heat (the maximum over the region's tiles) raises the heat directly.
+
+A region's tier is set from level = max(own, 0.5·neighbours), where a region's level is its heat, or 2 on a one-frame trigger:
+
+- HOT if level ≥ 1;
+- WARM if 0 < level < 1;
+- COLD if level is 0.
+
+The tiers are computed once in the frame head, right after the coarse bodies, by two fixed launches: `heat` (a region per workgroup, at most 1,024 workgroups, with free regions exiting) and `spread` (a thread per region).
+
+The accessors come from `uniformRegionHeatWGSL(group, binding, regions)`:
+
+- `umRegionTier`;
+- `umRegionTierAtTile`;
+- `umVertexTier`, the lowest tier among the stored regions holding a lattice vertex, so a COLD closure is never written;
+- `UM_TIER_*`.
+
+`uniformRegionTierWGSL(regions, load)` gives the same accessors over a copy for stages at their storage-binding limit.
+
+Memory, allocated upfront: tiers take 4·(regions+4) B and state takes 32·regions B, 138,864 B in total for the 3,856-region pool. The surface claims and the work-control surface buffer each gain one word per region for the tier copy, and `curvatureDirty` gains 32 KB of normal tags.
+
+**Consumers in stream 2's stages:**
+
+- **Surface transport** (`umAdvectStore`, `advectWalls`): `umHoldCold` stores the input phi into the scratch when a vertex is COLD. The bits are identical, so no revision moves, and no trace, cubic or deferred listing runs. The tiers reach this module through a per-frame copy into the surface claims buffer, because the stage is at its 10-storage-buffer limit. WARM runs the existing cheap tiers, the same as HOT.
+- **Work control:**
+  - the surface model of a COLD region stands, and its model epoch is not advanced;
+  - the geometry scan skips a COLD region unless its metadata or world changed, and its geometry epoch is not advanced. The geometric fill and normal candidates follow through the controller's dirty words.
+- **Split surface authority** (regional mode):
+  - the stamp of a COLD region keeps its stamped revision and ignores bodies, while page words still decide;
+  - stamp word 12 now carries bit 0 (changed) and bit 1 (held). Held means the region and all 26 neighbours are COLD and nothing changed;
+  - `surface` keeps the held owners' phi and phase (the root's owner index is the tile key, so it is stable) and rewrites only their correction, which follows this frame's gauge.
+  - The tiers are copied beside the revisions before the pass.
+- **Retained h normals, a rank-shift fix:** h owners' retained normals are indexed by owner rank. A relayout that adds or removes an h tile shifts every later tile's slot, but only the changed neighbourhoods were marked.
+  - A new geometry pass, `normalTags`, tags each of the 8,192 retained slots with its tile (key + 1).
+  - On a mismatch it takes over the slot and marks that region's normals as candidate- and topology-changed, so the force stage rewrites them.
+  - Stream 1 confirmed that REUSE never skips a region whose topology is set.
+
+The revision checks remain the exact test inside non-COLD regions. Nothing became dead.
+
+**Tiers** (`heat-probe`, dt 1/60 s, distance by the body mask's pose reach):
+
+- Settled: frame 1 has all 1,680 live-or-claimed regions HOT, from identity and pending triggers. From frame 2 on, all 384 regions are COLD. The largest held displacement is 8e-5 h at frame 12.
+- Pool-impact (ball at 8 m/s) never goes mostly COLD within 45 frames. The impact's wave keeps about 200 regions re-triggering on displacement each frame, and remaps promote 50–200 more.
+  - Every region with pose reach under 32h (0–1.6 m) is HOT throughout.
+  - Of the 32–95h band, 55–122 of 286 regions are WARM over frames 17–29, and the first COLD regions appear around frame 33 (8 at frame 33, 50 at frame 37).
+
+**Stage costs** (investigate tool, one run per arm, other streams' code in the tree). Before is a probe-only preload that forces every region HOT each frame:
+
+| Stage (mean ms) | Settled before | Settled after | Pool-impact before | Pool-impact after |
+| --- | ---: | ---: | ---: | ---: |
+| Frame | 34.7 | 24.7–25.1 | 93.5* | 52.0 |
+| Surface advect | 2.56 | 0.48 | 2.87 | 2.84 |
+| Surface advect, deferred | 1.43 | 0.07–0.09 | 13.6* | 6.77 |
+| Surface pressure authority | 1.08 | 0.57–0.58 | 2.29 | 1.47 |
+| NB crossing search (stream 3) | 0.93 | 0.58–0.62 | 1.88 | 1.91 |
+| NB surface reconstruction (stream 3) | 0.98 | 0.24–0.25 | 1.31 | 1.27 |
+| Surface work control | 0.57 | 0.44–0.52 | 0.84 | 0.88 |
+| Geometric fill | 0.30 | 0.21–0.23 | 0.81 | 0.77 |
+| Geometry work control | 0.28 | 0.22 | 0.41 | 0.36 |
+| Region heat | 0.04 | 0.01–0.03 | 0.04 | 0.00 |
+
+Settled was measured over frames 34–40 and pool-impact over frames 24–30. \*The pool-impact before run was taken after other streams had edited the tree (its first two attempts failed on another stream's mid-edit shader), so its deferred-advect and frame figures are not a clean comparison. Both pool-impact runs end with the body at y ≈ 1.369 m and volume drift 0.0066–0.0067.
+
+**Limitations:**
+
+- A COLD region does not catch up the displacement it held when it reheats. The error is bounded by the 0.02 h budget per COLD stretch.
+- The settled transport still launches over every vertex, loading and storing each COLD vertex: `advectFine` costs about 0.3 ms with everything COLD. Skipping COLD regions per workgroup would need the scratch phi to stay equal to phi without a store.
+- The held authority still visits every owner to rewrite its correction, about 0.58 ms in settled. The work-control surface pass still costs about 0.44 ms when everything is COLD.
+- Pool-impact gains little, because the impact keeps the pool HOT for the whole window.
+
+### Stream 2 addendum: pool-impact grading and COLD residues
+
+Peter's direction: give the splash full treatment and the rest of the pool progressively less. Displacement past the budget should refresh a region WARM, not HOT. HOT is kept for detail the cheap tiers cannot certify.
+
+**Heat grading** (`uniform-region-heat.ts`):
+
+- **Displacement over the 0.02 h budget** is now a one-frame WARM trigger (bit 64, level 0.75). It adds no heat and resets the accumulation.
+- **A new HOT heat trigger, the velocity span** (bit 128), is the transport's own certificate:
+  - the span condition is ½·dt·Σₐ(maxₐ − minₐ)/h > `UNIFORM_SURFACE_TRANSPORT_ERROR_H` (0.02 h), over the region's velocity extrema;
+  - the travel condition is dt·|u|max/h > ½.
+  - The span uses the interval width, not the speed.
+- The other heat triggers are unchanged: body reach, sources, and NB particle activity. So are the one-frame HOT triggers: invalidation, identity, claims, and unknown evidence.
+- **The spread falls off with distance:**
+  - HOT needs the region's own level ≥ 1;
+  - neighbours contribute 0.5 × their level, so they can only make a region WARM;
+  - a region beside a non-COLD region is at least WARM, so the tiers fall off one ring per level instead of saturating a 3×3×3 block.
+- **Promotion hooks:** pending now carries a tier, and `promoteWGSL` gives `rhPromote` (HOT) and `rhPromoteWarm` (WARM), both by `atomicMax`.
+  - Page claims still promote HOT.
+  - The remap `publish` now promotes only the remapped region, and only to WARM. Before, it promoted the region and 26 neighbours to HOT.
+  - The remap's changed-tile list is already the 3×3×3 tile dilation of each width change, so the extra 27-region promotion was a second dilation.
+  - A width change re-resolves the region's phi through the WARM paths; WARM momentum is the self-validating affine tier.
+- The probe found no identity-preserving remap that loses heat. The heat state is keyed by region slot and keeps its level across a publish. A one-frame identity trigger fires only when the block word or window coordinate actually changes.
+
+**Tiers by pose-reach ring** (`heat-probe`, pool-impact, dt 1/60 s; counts are COLD/WARM/HOT):
+
+| Frame | Ring | Before | After |
+| --- | --- | --- | --- |
+| 5 | 0h / 1–7h / 8–31h / 32–95h | 0/0/4, 0/0/8, 0/0/86, 0/0/286 | 0/0/4, 0/0/8, 0/84/2, 204/82/0 |
+| 15 | same | all 384 HOT | 0/0/4, 0/0/10, 0/37/47, 88/198/0 |
+| 25 | same | 0/0/4, 0/0/10, 0/0/84, 0/106/180 | 0/0/4, 0/0/10, 0/27/57, 101/171/14 |
+| 35 | same | 0/0/4, 0/0/10, 0/0/86, 8/59/249 | 0/0/4, 0/0/10, 0/26/60, 50/207/59 |
+| 45 | same | 0/0/4, 0/0/8, 0/0/92, 1/39/272 | 0/0/4, 0/0/8, 0/18/74, 31/205/92 |
+| | **Totals at 5 / 25 / 45** | 0/0/384, 0/106/278, 1/39/376 | 204/166/14, 101/198/85, 31/223/178 |
+
+- Per frame after the change: 55–213 displacement triggers (WARM), 12–140 span triggers (HOT), 0–37 WARM remap promotions, and 0–42 HOT claims.
+- Before, 54–208 displacement triggers and 60–204 remap promotions each made a 27-region HOT block.
+- HOT grows over the window (14 → 85 → 178) as the impact wave spreads span triggers outward.
+- Settled is unchanged: frame 1 is HOT/claimed, and all 384 regions are COLD from frame 2.
+
+**COLD residues:**
+
+- **Surface work control** (0.44–0.52 → 0.22 ms in settled):
+  - `selectSurface` now holds a COLD region that has a valid model, support coverage, and an unchanged window: one lane reads four words and the workgroup exits. Its first non-COLD frame compares the metadata stored before it went COLD, so any change refits.
+  - `summaries` skips held regions and keeps their support. Only a region's own transport reads its support, and its vertices are held.
+  - The surface model scan is a new kernel, `surfaceScan`. It launches a workgroup per eighth of a region, taking 8 tiles in turn, instead of a workgroup per tile capacity (246k launches, mostly empty). A reused region's 8 workgroups exit at once.
+  - The geometry `scan` lost its dead surface branches.
+- **Split authority:**
+  - The stamp no longer marks every absent region as changed each frame; an absent region's words change on the frame it goes.
+  - The `absent` kernel skips held pages, and it is now a strided fixed grid of 1,024 workgroups (it was a workgroup per page).
+  - The pass measured 0.58 → 0.56 ms. Most of this pass is not the split authority: stream 1 timed three `surface` dispatches of about 0.13 ms each. Two are the head authority (`this.authority`: non-regional, every simulation owner, the phase build, and the capillary re-encode), which has no held path.
+- **Lazy gauge correction is not done.** The correction is `params.z·capacity` on liquid owners, and `params.z` is the surface-volume controller's proportional rate, which changes every frame, so an equality test never fires.
+  - The per-region form would let the two readers compute it themselves: `uniform-mixed-pressure-velocity.ts` RHS line 256 and `uniform-pressure-band.ts` prep line 777, both stream 1's files. They would read the rate and the owner's capacity and phase.
+  - The authority would then stop writing the correction, and held owners would cost nothing.
+- **Transport deep-COLD exit is not done.** Stream 3 found that NB's reconstruct-group crossing search reads phiScratch at COLD vertices:
+  - `depthTiles` corner signs;
+  - the `depthSeeds` 125-vertex gather, whose committed mask is then retained unvalidated while the region stays COLD.
+  - So the scratch must still equal phi at COLD vertices, and `umHoldCold` keeps its store (`advectFine` ≈ 0.27 ms in settled).
+  - Stream 3 proposed the fix: reconstruct-group reads at COLD vertices go through `outputPhi` (= f.phi there, never written for COLD). Once that lands, the transport can exit uniformly for regions whose 27-region neighbourhood is COLD.
+
+**Stage costs** (investigate tool, one run per arm, other streams' work in the tree, so this is not an A/B):
+
+| Stage (mean ms) | Settled before | Settled after | Pool-impact before | Pool-impact after |
+| --- | ---: | ---: | ---: | ---: |
+| Frame | 25.07 | 21.83 | 52.00 | 48.23 |
+| Surface advect | 0.48 | 0.49 | 2.84 | 2.42 |
+| Surface advect, deferred | 0.09 | 0.07 | 6.77 | 5.56 |
+| Surface pressure authority | 0.58 | 0.56 | 1.47 | 1.47 |
+| NB crossing search (stream 3) | 0.58–0.62 | n/a | 1.91 | 1.60 |
+| NB surface reconstruction (stream 3) | 0.24 | 0.23 | 1.27 | 1.15 |
+| Surface work control | 0.52 | 0.23 | 0.88 | 0.63 |
+| Geometry work control | 0.22 | 0.22 | 0.36 | 0.34 |
+| Momentum (stream 3) | 0.78 | 0.32 | 1.69 | 1.58 |
+| Region heat | 0.01 | 0.04 | 0.00 | 0.04 |
+
+Settled is frames 34–40, and pool-impact frames 24–30. The before columns are the previous addendum's after runs. The settled momentum drop is stream 3's work.
+
+**Limitations:**
+
+- Span triggers dominate HOT late in the impact. The certificate is the transport's 0.02 h error budget, which is tight for a travelling wave. A looser HOT threshold would need the cheap tiers to certify more.
+- WARM regions still run the existing cheap transport tiers, the same as HOT. The tier split pays off in the stages that grade WARM separately (momentum's affine tier) and in COLD holds.
+
+## Stream 3: momentum, extension and lifetimes
+
+### What was built
+
+Particle lifetime gate. `UniformNarrowBandFlip.liveGate` is a 16-byte uniform buffer. After the particle count is committed, the frame copies this frame's GPU particle count into it with `copyBufferToBuffer(state → liveGate)`, with no CPU readback and no delayed count. Every particle consumer reads it up to `update` and exits immediately when the count is zero:
+
+- the NB-FLIP transfer,
+- the paired extension's companion seed, retain and snapshot entries (`ueParticlesLive`),
+- the cache and stage-tap builders.
+
+The grid publication and seeding still run. The extension's own pipelines bind an `alwaysLive` gate, a 16-byte buffer that is always 1.
+
+Particle advection body gate. Per particle, the body-global gate in the NB-FLIP advect is now `bodyNear = umBodyCount()>0 && umBodyPoseNearTile(tile, 2)`. A particle away from every body's posed support skips the body sampling and contact branch.
+
+Momentum tiers (`uniform-mixed-momentum-tiers.ts`, new). A `decide` kernel runs ahead of momentum in momentum's pass, with one lane per 16h region. It reads the plan's `regionVelocity` bounds over the 3×3×3 regions around the region, then retains the region when all of these hold:
+
+- the velocity span w is within the remaining budget, where the budget is `τ × hmin` of accumulated skipped error and τ is the h band's pressure residual target (see the addendum below);
+- the trace stays inside the neighbourhood: `dt·max|u| ≤ 8 hmin`;
+- no body swept within 24h (stream 2's mask);
+- no inflow or drop source is near;
+- the record's page key matches, so a recycled key starts in full.
+
+A retained region's faces keep their extended value (`umRetainedMomentum`) instead of tracing. Its error accumulates and resets on the next full region. A constant velocity has zero span, so its cost does not grow with speed until the travel bound is reached. The addendum below adds an affine tier between retain and full.
+
+Persistent extension slots. The slots live from the tail to the next head. (A first version gave the extension its own slot arrays. The addendum below moves them back into the `stageScratch` prefix.) With the slots kept across frames, a body-frame head can rebuild only the regions a body touched:
+
+- The frame no longer throws away the reusable extension on a body frame. `bodyExtension` remembers that only bodies changed, and both heads (`advance` and `encodeRelayoutHead`) call `extension.encode(..., regional)`.
+- Each swept encode first runs a marks pass (`Uniform mixed extension regions`):
+  - `stampRegions` compares each tile's key and support bit with the stamp from the last swept encode. A region is changed when a stamp differs, when the encode is in full mode, or when stream 2's body mask gives a swept reach within `UNIFORM_EXTENSION_BODY_REACH = UNIFORM_BODY_GEOMETRY_REACH + 1`.
+  - `classifyRegions` marks a region dirty when a changed region is within Chebyshev distance 1, and halo within distance 2. It writes the state into both slot arrays after the slots, plus one global "any dirty" word.
+  - A full mode is used whenever the retained slots are missing, the sweep parity differs, or new blocks were initialised (`invalidateRetained`). The settled scene runs `extensionSweeps = 1`, so parity matters.
+- How each stage treats the regions:
+  - Seed and sweep work only in dirty regions.
+  - Halo regions copy their retained final slots into the other array, so the sweeps read consistent neighbours.
+  - Restriction (`restrictBand`) skips clean tiles. They keep their root.down texels, because the last writer was the tail's current restriction of the same retained slots.
+  - When no region is dirty, every publish entry exits (the any-dirty word, read with `workgroupUniformLoad` where barriers exist), leaving the tail's publication of `velocityScratch` in place. This is the same reuse argument the non-body reuse path already relies on.
+  - Only the main restriction and publication use the `ueRegionalRetain` override. The companion, snapshot and replay variants are unchanged.
+- The hierarchy (not a stream 3 file) still runs globally.
+
+Exactness. A scratch twin (`probe-twin.mts`) ran a full encode straight after each regional head in the same frame and compared the final slots and the published `velocityScratch` texels bit for bit:
+
+| Scene | Frames | Differing slots | Differing texels |
+| --- | --- | ---: | ---: |
+| pool-impact | 2–6 | 0 | 0 |
+| settled | 2–6 | 0 | 0 |
+
+The comparisons covered about 4.3M live slots and 16.3M texels. On pool-impact, 72–80 of 384 live regions were dirty and 88–96 were halo. On settled, all 384 were clean.
+
+### Memory
+
+Everything is allocated up front.
+
+| Item | Size |
+| --- | --- |
+| Extension slots | `2 × (8 × extensionSlots(address, fineTiles) + regionBytes)`, where `regionBytes = ceil(8(pages+1)/256) × 256`. This is about 2 × 494 MB at pool capacity. It is the `stageScratch` prefix again (see the addendum), so it adds nothing. |
+| Region stamp | `4 × (2·tiles + 2·regions)` bytes |
+| Mark mode uniforms | 48 B |
+| Always-live gate | 16 B |
+| Momentum tier record | 16 B per 16h region |
+| Momentum affine models | 144 B per 16h region (36 words) |
+| Momentum tier tolerance | 16 B |
+| NB-FLIP live gate | 16 B |
+
+### Smoke
+
+Settings: dt 1/60 s, 30 steps from frame 2, profiled, one run per arm, under the GPU lock.
+
+The machine was running about 20–30% slow during these runs. Stream 1 saw the same thing, and untouched passes such as the pressure V-cycle doubled. Other streams' uncommitted work was also in the tree, so whole-frame means are not comparable with the baselines:
+
+- settled: 49.1 ms against base 39.3;
+- pool-impact: 68.1 ms against base 53.8.
+
+The extension pass results are better evidence:
+
+| Pass | Base | This tree |
+| --- | ---: | ---: |
+| Settled head extension | 1.270 ms | 0.753 ms + 0.086 ms marks |
+| Settled tail extension (marks, preparePair, snapshot, finish) | 0.757 / 0.581 / 0.506 ms | 0.036 / 1.087 / 0.497 / 0.628 ms |
+| Settled momentum | 1.521 ms | 1.085 ms |
+| Settled NB-FLIP transfer | 0.655 ms | 0.221 ms |
+| Settled NB-FLIP snapshot | 0.470 ms | 0.077 ms |
+
+On settled the tail extension passes are noise-level, with no stream 3 change in them beyond the marks. The settled head's remaining 0.75 ms is the global hierarchy plus fixed empty launches.
+
+On pool-impact the head extension costs 1.96 ms regional against 1.92 ms with regional forced off in the same tree, which is break-even. The dirty and halo regions around the impact hold most of the fine tiles, so skipping clean 4h regions saves little there.
+
+`npm run check:types` is clean, and `npm run test:unit` gives 860 passing, 54 skipped and zero failed. No tests were deleted. No A/B was run.
+
+### Limitations
+
+- The extension hierarchy, the plan and the phase authority still run globally on body frames. `phaseKeyed = !bodies` sits in stream 1's pressure authority and is unchanged.
+- The tail's paired extension (preparePair, snapshot, finishPair) is still full every frame. Retaining slots across pressure would leave stale fluid-face source velocities in the publication, and the companion payload is transient.
+- Halo regions keep retained finals at a dirty boundary. Their dirty neighbours therefore read converged values where a full encode reads the previous sweep. The twin showed no difference in either scene, but this is not proven in general.
+- The quiet publish skip and the clean-tile restriction both assume that nothing writes `velocityScratch` or root.down between the tail and the next head, which is the existing reuse contract.
+- The stale extension tools are deleted (see the addendum).
+
+### Stream 3 addendum: memory, tools, tail extension, affine tier
+
+#### Memory (measured on device)
+
+`probe-memory.mts` reads `frame.allocatedBytes`, the stage scratch, the slots and the frame's capacity list at pool capacity (fineTiles = poolTiles = 245760; 246784 tiles; 3856 16h regions).
+
+| | Persistent slots (first version) | Slots lent from `stageScratch` |
+| --- | ---: | ---: |
+| Frame allocation | 6,064,739,448 B | 4,576,182,080 B |
+| `stageScratch` | 1,101,004,800 B | 1,101,004,800 B |
+| Extension slots | 988,695,552 B (own buffer) | 0 (the `stageScratch` prefix) |
+| Extension own buffers | 988,633,600 B | 2,005,184 B |
+
+The first version added about 0.99 GB. The slots are now the `stageScratch` prefix again:
+- `UniformMixedExtension.useSlots(buffer)` takes the frame's stage scratch in `bindStage`.
+- `stageBytesAt` sizes the scratch to at least `slotBufferBytesAt(fineTiles)`.
+
+What is left over base:
+- the extension stamp and gates, 2.0 MB;
+- the momentum record, models and tolerance, under 1 MB.
+
+The frame allocation's other differences from base belong to the other streams.
+
+The slots are dead while other stage consumers use the prefix. Those consumers are surface, forces normals and band rows, and they run between the head extension and the tail. The frame therefore calls `extension.invalidateRetained()` right after the head extension. The tail's `preparePair` re-seeds the slots, and the next head runs regional from them. That is the only window the body-frame regional head needs.
+
+After lending, the twin (`probe-twin.mts`, pool-impact frames 2–6) still showed 0 differing slots and 0 differing texels.
+
+#### Deleted tools
+
+These files are deleted:
+- `tools/probe-paired-extension-full.ts`
+- `tools/probe-extension-direct-snapshot.ts`
+- `tools/probe-extension-retained-seed.ts`
+- `tools/extension-coarse-sweep.ts` and `tools/extension-retained-seed.ts`. These two were helpers only the deleted probes imported.
+
+Nothing else imports any of them. Only docs mention them.
+
+#### Tail paired extension: not done
+
+A payload-only regional tail gated on a per-region velocity-change record was not built, for three reasons:
+
+1. **Lifetime.** The tail's slots would have to outlive the stage consumers that reuse the `stageScratch` prefix between head and tail. That means separate slot arrays, the +0.99 GB the memory item removed.
+2. **Indexing.** The slots are indexed by the reservation, not by live tiles. Sizing them to the live fine-tile count needs an allocator remap.
+3. **No velocity record.** Stream 1's dynamics record (10 words a region) has dp and residual but no velocity-change word. Without one, a payload-only rebuild cannot prove a region's source velocities unchanged.
+
+Measured tail cost being left on the table (30 steps from frame 2, mean per frame):
+
+| Tail pass | settled | pool-impact |
+| --- | ---: | ---: |
+| preparePair (`Uniform mixed extension` #2) | 0.753 ms | 0.823 ms |
+| slot snapshot | 0.346 ms | 0.565 ms |
+| finishPair (`Uniform mixed extension` #3) | 0.511 ms | 0.522 ms |
+| marks (regions #2) | 0.036 ms | 0.027 ms |
+| Total | 1.65 ms | 1.94 ms |
+
+#### Affine momentum tier
+
+> Superseded by the heat-driven tiers below. The τ × hmin budget, `setTolerance` and per-region error accumulation are gone. The fit, residual and bound described here still apply to WARM regions.
+
+`UNIFORM_MOMENTUM_TIER` is now full, retain, affine and pending. Pending exists only inside the tier pass. The tiers run in their own pass, `Uniform mixed momentum tiers`, ahead of `Uniform mixed momentum`, in four steps:
+
+1. **`decide`**, one lane a region. Applies the retain test. A region the budget alone refused, with every forced-full condition false, becomes pending. Its 27-region speed and its budget left are stored in its model record.
+2. **`momentumAffineFit`** (momentum module), one 256-lane workgroup per (pending region, part).
+   - Parts 0–2 fit one velocity component each. That component's faces form a regular n³ grid (n = 16/width, spacing width). About the grid's own centre the normal equations are diagonal: c = mean v and g_j = Σ v x_j / Σ x_j². There is no solve and nothing can be singular.
+   - The parts also write the own-face RMS residual from Σv², a lower bound on the max residual.
+   - Part 3 checks eligibility: all 27 regions stored, every tile at the region's width, so the sampler holds no departure.
+3. **`momentumAffineResidual`** (momentum module), one workgroup per (candidate region, part), with 16 parts. It measures r = max |u − M| over every face the trace can read. Those are the region's own faces plus a halo of 3 cells of its width, all inside the 27 regions: a one-step departure moves at most 1.5 h, and the sampler reads faces within one cell of it. A candidate is pending, eligible, has RMS ≤ budget left, κ ≤ 1 and dt(speed + RMS) ≤ 1.5 hmin. The affine decision applies the same test, so a skipped region's stale residual is never read.
+4. **`affine`**, one lane a region. A pending region becomes affine if `acc + e ≤ budget`, otherwise full.
+
+Both fit kernels gather a workgroup's items lane-parallel (item = group + groups × lane) and exit at once when none are pending. Consecutive regions land in different workgroups.
+
+An affine face runs the momentum's own one midpoint step on M (`umAffineMomentum`) and returns M at the departure. It uses no sampler.
+
+**Budget, derived from velocity error.** One face off by e changes its cells' divergence by e/h. The projection already accepts the h band's residual target τ (1/s; 1e-4 at pool settings) as undetected divergence, so τ × hmin (5e-6 m/s at h = 0.05 m) is the velocity error a skipped face may add. Each region accumulates its tiers' per-step error bounds against that budget and resets on the next full step. `setTolerance` writes τ when the frame's key changes.
+
+The per-step bounds:
+- **Retain:** w, the 27-region span of `regionVelocity` plus 64 ulp of speed. Every sampler value there is a convex combination of those faces.
+- **Affine:** e = r(1 + κ(1+κ)e^{2κ}) + 64 ulp (speed + r), with κ = dt max_a Σ_b |G_ab| / hmin ≤ 1. The bound requires dt(speed + r) ≤ 1.5 hmin, so both traces take one substep. The sampler reproduces affine fields, so a step perturbed by r per sample moves the departure at most dt r (1+κ) e^{2κ} / h.
+
+**Measured** (`probe-affine.mts`: the same frame's momentum run again with the tolerance zeroed, which forces full, then the departure textures compared):
+
+| | settled frames 2–12 | pool-impact frames 2–12 |
+| --- | --- | --- |
+| Regions full / retain / affine (of 384) | 0–357 / 27–384 / 0–4 | 62–384 / 0–322 / 0 |
+| Fitted (eligible pending) | 0–6 | 2 |
+| r of fitted regions | 2.3e-6 to 6.8e-6 m/s | 1.6e-3 to 0.19 m/s |
+| Affine accepted | 4 regions in one frame | none |
+| Affine max face difference against full | 1.5e-7 m/s (step bound 4.6e-6) | none |
+
+At this budget the affine tier rarely qualifies. Settled velocities are about 1e-6 m/s, so a region's nonlinearity already uses up most of the 5e-6 budget. In pool-impact the residuals of the non-body regions are 1e-3 to 0.2 m/s.
+
+Cost (mean per frame, 30 steps from frame 2; KO = fit, residual and affine dispatches removed in the same tree):
+
+| | settled | pool-impact |
+| --- | ---: | ---: |
+| Tiers pass, KO | 0.027 ms | 0.029 ms |
+| Momentum, KO | 1.496 ms | 1.602 ms |
+| Tiers pass | 0.240 ms | 0.282 ms |
+| Momentum | 1.184 ms | 1.600 ms |
+| Sum, KO / with affine | 1.523 / 1.424 ms | 1.632 / 1.882 ms |
+
+The first versions were latency-bound:
+- One workgroup per region with a 4×4 Gauss-Jordan cost 2.3 ms in momentum.
+- The 256-lane diagonal fit cost +0.6 ms.
+- An unfiltered parallel residual cost +0.84 ms on pool-impact.
+
+The RMS prefilter brings the cost to +0.25 ms on pool-impact and −0.1 ms on settled.
+
+### Stream 3 addendum: heat-driven non-pressure work
+
+The narrow-band producers and consumers, momentum and the regional extension head now read the per-16h-region work heat (`UniformRegionHeat.tiers`: COLD, WARM, HOT). The heat is the only gate. The revision-keyed and body-region checks it supersedes are deleted.
+
+#### Momentum
+
+`UniformMixedMomentumTiers.decide` maps the heat one to one:
+- **COLD** retains every face.
+- **WARM** runs the affine fit and residual. It goes affine when dt·e ≤ `UNIFORM_REGION_HEAT_BUDGET_H` (0.02) h, the displacement a COLD region may hold back in one step, and full otherwise.
+- **HOT** runs full.
+
+The fit, the residual and the bound e are those of the affine section above. Only the budget and the gate changed.
+
+#### Narrow band: COLD means no fine work and no writes
+
+`UniformNarrowBandFlip.attachHeat(tiers)` binds the heat. `syncTiers` copies the tiers into the reuse `bins` (new block `tiers`, one word a region) at the start of `measureBand` and `clearAir`. It throws if no heat is attached.
+
+WGSL predicates (`uniform-narrow-band-reuse.wgsl.ts`):
+- `nbRegionCold(region)` is true when the region's tier is COLD.
+- `nbTileCold(tile)` is true when the tile is stored and its page is COLD. The reuse region of a tile is its page.
+- `nbVertexCold(p)` is true when any stored tile holding vertex p (up to 8 tiles at tile faces) lies in a COLD region. With this lowest-tier rule, a COLD region's closure is never written, even by a hotter neighbour.
+
+Gates:
+- **Producers.** `nbStoreReconstructed` and `nbStoreInPlace` return at once for a COLD vertex. Reconstruction, redistance and air clearing therefore write no phi in COLD regions and bump no revision.
+- **Prepare reuse.** A live, COLD, cached region marks itself clean (current revision 0, allowed 1) and exits before any fine work. The flag is folded into lane 0's workgroup value, so the exit is workgroup-uniform ahead of the barriers.
+- **Crossing search.** `surfaceCells` skips a COLD tile's interior cells (local 1–13 on every axis). `coupleFine` and `couple` exit for COLD owners.
+- **Redistance.** `depthGeometry` keeps a tile whose metric can be reused: it stores the geometry capacity and takes a uniform exit. `redistanceFine`, `depthCoarse` and `redistanceCoarse` skip COLD tiles.
+- **Air.** `airSeeds` keeps a COLD tile's previous seed, or marks it wet if it holds surface tiles. `airClearFine` and `airClearCoarse` skip COLD tiles.
+- **Metric.** `depthReuseSelect` no longer dirties a COLD region's metric because a neighbour key is unstored. A claim or remap promotes the region and its 26 neighbours to HOT (stream 2), so a COLD region's neighbourhood cannot change under it.
+
+Stream 2's surface advect holds COLD vertices (`umHoldCold`), so the input phi of a COLD region is also unchanged.
+
+#### Extension head
+
+- The mark pass binds the heat (binding 4) and stamps each region's tier (`MR_TIER`).
+- A region is re-extended when its topology or support stamp changed, the mode is full, or its tier or stamped tier is not COLD.
+- The block-word key check and the body-region reach are deleted, along with `UNIFORM_EXTENSION_BODY_REACH`, the `bodyRegions` constructor argument and its WGSL include. The heat already triggers on bodies, sources, identity and unknown evidence.
+- `UniformMixedFrame` passes `same` (not `regional`) to the head, so a COLD frame reuses the previous tail's final slots.
+
+#### Extension tail: still not retained
+
+The slots live in the `stageScratch` prefix, and forces and pressure overwrite it between the head and the tail. A COLD-only retained store would need the full slot set in the worst case, when every region is COLD. That is the same +0.99 GB as before, so the tail runs in full. Memory stays at base.
+
+#### Measured
+
+The settled scenario was run with SPLIT=1, profiled frames 36–44, all 384 regions COLD from frame 32. The figures are pass means per profiled frame.
+
+"Before" (h0) is HEAD 0a932ced plus the other streams' work in progress at the start. "After" (h2) also includes stream 2's surface advect hold, so the total GPU time is not stream 3 alone.
+
+| Pass | Before | After |
+| --- | ---: | ---: |
+| Total GPU | 27.11 ms | 21.20 ms |
+| Narrow-band redistance | 1.092 | 0.262 |
+| Narrow-band crossing search | 0.954 | 0.670 |
+| Narrow-band surface reconstruction | 0.881 | 0.269 |
+| Narrow-band retire empty air | 0.735 | 0.102 |
+| Narrow-band coarse retirement | 0.284 | 0.058 |
+| Uniform mixed momentum | 0.830 | 0.794 |
+| Uniform mixed extension (head + tail) | 1.959 | 1.937 |
+| Surface advect + deferred (stream 2) | 3.707 | 0.553 |
+
+Selected dispatches, before → after (ms):
+- buildDistance: 0.670 → 0.146
+- coupleFine: 0.575 → 0.080
+- couple: 0.146 → 0.022
+- redistanceFine: 0.269 → 0.029
+- depthSeeds: 0.291 → 0.087
+- depthGeometry: 0.124 → 0.058
+- depthTiles: 0.306 → 0.255
+- depthNearestZ: 0.146 → 0.117
+
+Exact-metric regions went from 120 to 384.
+
+The extension head went from 0.670 to 0.641 ms. 35 of 36 heads took the regional path, but the cost is the hierarchy dispatches, which run at fixed size. The tail went from 1.879 to 1.871 ms.
+
+**COLD writes.** `probe-cold-phi` diffs phi texels between consecutive frame ends. It found 0 changed texels on frames 32–42 (all COLD) and 4.6k–5.2k on the WARM frames 29–31.
+
+**Pool-impact** (frames 2–30, mostly HOT, so close to unchanged):
+
+| Pass | Earlier (pre-heat) | After |
+| --- | ---: | ---: |
+| GPU | | 43.57 ms |
+| Extension | 2.404 | 2.725 |
+| Crossing | 1.797 | 1.828 |
+| Momentum | 1.600 | 1.659 |
+| Redistance | 1.340 | 1.390 |
+| Reconstruction | 1.092 | 1.184 |
+| Retire air | | 0.655 |
+
+Single runs vary by 10–20%. maxMomentumError is 1.555e-5, the same as before, with 105,052 particles.
+
+**Memory.** The narrow-band bins grow by 384 words (1.5 KB): regional reuse is 238,624,716 B, against 238,609,292 B before. The extension stamp is the same size. Nothing else changed.
+
+**Gates.**
+- `npm run check:types` is clean. Every changed WGSL module compiles on Dawn.
+- `npm run test:unit`: 909 tests, 851 pass, 54 skipped, 4 fail. The failures are gpu-startup-mesh-memory, svo-gbuffer-normal-split, svo-surface-mesh-build-pacing and svo-surface-mesh-detail. All are `ReferenceError: Cannot access 'SVO_MATERIAL_FUNCTION_IDS' before initialization` in `lib/svo/features/materials/svo-procedural-material.ts`, from another session's SVO work.
+- No tests were added or deleted.
+
+### Stream 3 addendum: COLD exits in extension, momentum and crossing search
+
+**The tail cannot leave COLD output untouched.** The request was to skip the tail extension's seed, sweeps and restriction in COLD regions and leave their published values in place. That does not work, because the published field is `velocityScratch` and three stages overwrite it every frame in every region, COLD included:
+
+- forces write u* there;
+- the projection writes its output there;
+- the band copy writes there.
+
+After the projection, a COLD region's air faces hold u* built from the last extension plus g·dt, not extended values. Skipping their publication would let gravity build up in the air faces. It would also feed a wrong speed to the heat's displacement measure (`plan.encodeSpeed`), and to advection and G2P.
+
+Keeping the old extension would need either a persistent extended copy, a field-size texture (about 250 MB or more at this capacity), or forces and projection that leave COLD air faces alone (stream 1's files). So the current payload's tail stays full. What I built instead, by area:
+
+**Tail: old FLIP payload, regional (`uniform-mixed-extension.ts`).**
+- In a full encode, the mark pass now gives a region state 3 when it lies within one region (Chebyshev) of a hot region. A hot region is non-COLD, or one whose topology word or support bit moved.
+- Only state-3 regions publish the old payload:
+  - The snapshot restriction (`ueOldPayload`) restricts only state-3 tiles. Other tiles keep the last restriction's texels.
+  - `snapshotFine` skips its job with a workgroup-uniform exit. `snapshotCoarse` skips per lane.
+- The mark pass writes two work words: any dirty region, and any state-3 region.
+  - The snapshot's hierarchy runs under gate 2, so it exits when no region is state 3.
+  - The current payload's finish then replays the old selections (gate 2) or prolongs instead (gate 3, the complement).
+  - Where a region saved no tag, the publication replay already falls back to the current payload's own far value.
+- G2P (`uniform-narrow-band-flip.ts`) takes no FLIP delta at a COLD region's samples: `flip = velocity`, still blended toward the current PIC value. The snapshot does not write `before` there. Both read the same tier copy (`syncTiers` before snapshot and update).
+  - So no COLD sample reads the old payload.
+  - A non-COLD sample's taps lie within one cell of its region, which state 3 covers with a 16h margin.
+  - Old/new operator compatibility therefore holds wherever the delta is taken: the old and current payloads share selections in state-3 regions. Elsewhere, the current payload prolongs on its own and no delta is taken.
+- After the tail, nothing reads the slots except the next head's regional rebuild. That rebuild reads the final slots and region words, not the companion payload.
+
+**Head hierarchy (`webgpu-uniform-velocity-extrapolation*.ts`).**
+- Every hierarchy kernel (restrict, block sweep, prolong, replay) now starts with an immediate, workgroup-uniform exit. Lane 0 reads a work word (`heWork`, binding 8), and `workgroupUniformLoad` shares the result.
+- Pipelines are compiled per gate at attach, using the override `heGate`:
+  - 0: always run;
+  - 1: skip when no region is dirty;
+  - 2: skip when no region is state 3;
+  - 3: skip when one is.
+- A regional head with no dirty region runs no hierarchy.
+- The previous head mark (any non-COLD region was "changed") caused the pool-impact head regression of 1.14 → 1.45 ms. It is replaced by a body test: a region changes when a tile word or support bit moved, or when it is not COLD and a moved body's swept reach (`UniformMixedSolid.bodyRegions`) is within `UNIFORM_BODY_GEOMETRY_REACH + 1` h of it.
+  - A regional head runs only after bodies moved: the tail extended the same velocity, and G2P moves only particles.
+  - COLD regions beside a body are maintained at 16h only, as agreed.
+
+**Momentum in COLD (`uniform-mixed-momentum*.ts`, `uniform-mixed-face-dispatch.wgsl.ts`).**
+- A new tier, `hold`, applies to a region that was COLD at the last decide too.
+- The first COLD frame still retains: it writes its extended values into the departure.
+- After that, the region holds and writes nothing:
+  - `momentumUnitStep` and `momentumRegularStep` take a workgroup-uniform exit;
+  - `momentumStep` drops a held owner's faces before evaluation, through a new optional `skipOwner` argument, which forces does not pass.
+- Only momentum and the kick copy write the departure. A claim or recycle heats the region first, so a region never holds values it did not write.
+- In a COLD region, the departure is the extended velocity of the frame it went COLD. P2G falls back to it only at particle-less faces.
+
+**Crossing search (`uniform-narrow-band-reuse.wgsl.ts`, `-nearest.wgsl.ts`).**
+- 3,472 of the 3,856 pool regions are free in the settled scene. Every search (three a frame) cleared three words per lane for each of them.
+- `NB_REUSE_ALLOWED = 2` now marks "free, words already cleared". Those words stay clear until the region is live again, because only listed, live tiles commit.
+- The two readers now test `== 1`.
+- `depthNearestZ`'s COLD copy from the nearest cache is unchanged. Removing it would need every `NB_DEPTH_B` reader to read the cache and flags instead.
+
+**Settled** (frames 36–44, split timing, against `h2-split`; GPU 21.20 → 19.03 ms, which includes the other streams' concurrent edits):
+
+| Pass | Before | After |
+| --- | ---: | ---: |
+| Momentum | 0.794 | 0.320 |
+| ↳ momentumUnitStep | 0.510 | 0.124 |
+| ↳ momentumStep | 0.218 | 0.138 |
+| Extension slot snapshot | 0.415 | 0.189 |
+| Extension head | 0.641 | 0.517 |
+| Extension tail (retain, pair, finish) | 1.871 | 1.755 |
+| Crossing search | 0.670 | 0.619 |
+| ↳ depthTiles (×3) | 0.255 | 0.160 |
+| ↳ depthNearestZ (×3) | 0.117 | 0.124 |
+
+The settled scene has no state-3 region. The snapshot's hierarchy exits, and the current payload prolongs.
+
+**Pool-impact** (frames 2–30, not split, against s3l from before the heat work and h2 from the heat work):
+
+| Pass | s3l | h2 | Now |
+| --- | ---: | ---: | ---: |
+| GPU | 42.89 | 43.57 | 42.10 ms |
+| Extension head | 1.143 | 1.451 | 1.157 |
+| Extension tail | 2.050 | 2.059 | 2.158 |
+| Momentum | 1.600 | 1.659 | 1.605 |
+| Crossing | 1.797 | 1.828 | 1.625 |
+
+- The head regression is gone.
+- The tail's +0.1 ms is within the 10–20% run-to-run swing.
+- Two of the four impact runs were inflated two- to seven-fold by another GPU client (Chrome); those runs are discarded.
+- The simulation result is the same across repeats: 105,259 particles and 74 unsupported, against 105,052 and 57 before. That difference comes from the COLD G2P and momentum rules.
+- maxMomentumError is 1.76e-5 (1.56e-5 before).
+
+**Memory.**
+- The extension stamp loses its per-region tier word: −4 B a region, −15.4 KB here.
+- New buffers:
+  - the work words, 16 B;
+  - a no-body mask, 16 B;
+  - the hierarchy's always-run gate, 16 B.
+- Nothing else changed. Regional reuse is still 238,624,716 B.
+
+**Gates.**
+- `npm run check:types` is clean. Every changed WGSL module compiles on Dawn.
+- `npm run test:unit`: 926 tests, 873 pass, 53 skipped, 0 fail.
+- No tests were added or deleted.
+- One non-split pool-impact run ended with a validation error in another session's work: `Uniform mixed phi resolve held tiles` lacks `COPY_DST` for its `clearBuffer`.
+
+## Stream 1: incremental pressure
+
+### What was built
+
+Per-region dynamics record (`uniform-mixed-region-dynamics.ts`, new). One record of 10 words for each 16h region (`umPageOfTile(tile)`, 3856 regions at pool capacity), allocated once and never replaced:
+
+| Word | Content |
+| ---: | --- |
+| 0 | force tier this frame (`UNIFORM_FORCE_TIER`: retain, bounded, full) |
+| 1, 9 | own geometry key: block word and every tile's width bits |
+| 2, 8 | neighbourhood key over 27 regions, plus the force parameters and a host generation |
+| 3 | viscous velocity dropped since the last full evaluation (m/s) |
+| 4 | frame stamp of the last full evaluation |
+| 5 | 27-region speed bound used by the budget |
+| 6 | max \|Δp\| (Pa) of the accepted 4h root pressure over the region's 64 tiles; +Inf when unknown |
+| 7 | largest band predictor row residual (1/s) over the region's liquid band rows; 0 with no band row, +Inf for a free region |
+
+Readers bind it with `uniformMixedRegionDynamicsWGSL(group, binding)`, which provides `umRegionPressureChange` and `umRegionPredictorResidual`. The forces read the tiers through `uniformRegionTierWGSL`, a separate 2-word-per-region mirror. That keeps the forces' storage-buffer count unchanged.
+
+Two passes do the work:
+
+- `encodeClassify` runs before the forces with one lane per region:
+  - it hashes the keys;
+  - it marks a region full when the neighbourhood key changes or when a body's swept reach (stream 2's `bodyRegions` bits 0–7) is within `UNIFORM_FORCE_BODY_MARGIN = 18` h;
+  - otherwise it charges the viscous budget.
+- `encodePublish` runs after the band solve. It writes word 6 from a per-tile pressure history (8 B per tile), using a fixed 4096-group grid stride. Word 7 is written by the band's initial measure with a workgroup atomic max per tile. Classify clears it.
+
+Force tiers are viscosity only. A retain region drops the viscous term while the bound `dt·ν·4·vmax·Σ1/h²` accumulated since its last full evaluation stays within `UNIFORM_FORCE_RETAIN_BUDGET = 1e-6` m/s. vmax comes from the plan's `regionVelocity` bounds over the 27 regions, and the bound is independent of geometry. Bounded and full regions are evaluated exactly. Gravity, the bed and capillary terms are evaluated on every tier. The forces gate both viscosity sites (the cleared Laplacian and the `forcesFine` vector path) with `umViscosityExact(owner)`. `invalidate()` bumps the generation on solid edits, layout updates and coarse vertex phi publishes, which forces a full tier everywhere.
+
+Body flux gating:
+
+- In `umCutFlux` (pressure velocity) the moving-wall face velocity is evaluated only where `umBodyPoseNearTile(tile, UNIFORM_BODY_FLUX_REACH = 3)` holds.
+- The band prep's `bodies` flag has the same gate.
+
+This is exact. `umSolidFaceVelocity` is zero beyond 2·hmax of a body's bounding sphere, and a face lies within 1h of its region box.
+
+### Design item A: incremental pressure
+
+No new code was needed. The root solve already warm-starts from the previous accepted pressure, so it is already an incremental solve against p_ref, and quiet frames close their slots. On settled, word 6 shows the root pressure bitwise unchanged from frame 2 onwards (max |Δp| = 0; frame 1 was 13626 Pa).
+
+The remaining lever is that closed-slot V-cycle and full-cycle launches still cost about 1.2 ms each when the root pressure is unchanged. Exiting those launches early on `max |Δp| = 0` plus a converged residual is the next step. It was not done here.
+
+### Abandoned: per-face retained forces
+
+The first design retained the whole force increment F per face and validated each retained face against the occupancies and curvature it was evaluated with.
+
+Clean-state settled forces timings:
+
+| Variant | Forces |
+| --- | ---: |
+| Tiered | 3.69 ms |
+| Forced full | 4.30 ms |
+| Base | 3.59 ms |
+| All-retained upper bound | 2.26 ms |
+| Without viscosity | 2.90 ms |
+
+The per-face store and validation cost about 0.7 ms, which ate the saving. Revisions in the key made this worse: about 55 regions per frame changed their own key, which pushed about 280 regions to FULL through the 27-region neighbourhood. Revisions were therefore dropped from the key, and the tier was cut back to viscosity only. The saved variant is in the session scratchpad (`forces-retained-F.ts`).
+
+The record originally also published a per-owner velocity change and speed (words du and speed). Nothing consumes them: stream 3's momentum tiers read `regionVelocity` directly. They needed 32 B per owner slot, which is 502,005,760 B at pool capacity, plus a full owner pass every frame. They were removed.
+
+### Deferred
+
+- **Band A cache separated from the transient RHS.** The band consists of the surface tiles whose phi changes. Its slots are reassigned every frame, and its rows live in lent stage scratch. A persistent operator cache needs a stable tile→cache map and about 3 KB per band tile. Not built.
+- **Retained band fine correction.** The band runs 0 cycles on settled, so there was nothing to retain there.
+
+### Memory
+
+| Item | Size |
+| --- | ---: |
+| Record (10 words × 3856 regions) | 154,240 B |
+| Tier mirror | 30,848 B |
+| Params | 16 B |
+| Root pressure history (8 B × 246,784 tiles) | 1,974,272 B |
+| **Total, measured `allocatedBytes`** | **2,159,376 B** |
+
+### Smoke and measurements
+
+Settled, dt 1/60 s, under the GPU lock:
+
+- Frame 1 is all full.
+- From frame 2, all 384 stored regions retain viscosity, with budgets up to 4.8e-10 m/s after 4 frames.
+- Word 7 is filled on 192 regions, at 1e-4 to 1.9e-4 1/s.
+- Band residual histories match the base.
+
+The six-arm settled A/B ran with the machine in its slow state, with pass sums of 47–50 ms against about 33 ms normally. Arms were base, viscosity tiers, and viscosity forced full via `invalidate()` every frame, two runs each. They used the earlier 12-word record with the velocity publish, which was removed afterwards.
+
+| Stage | Base | Tiers | Forced full |
+| --- | --- | --- | --- |
+| Forces | 4.37 / 5.03 ms | 4.01 / 3.97 ms | 5.87 / 4.98 ms |
+| Pressure rhs (body flux gating) | 1.31 / 1.16 ms | 0.72 / 0.70 ms | — |
+| Band list and rows | 3.02 / 2.73 ms | 2.53 / 2.13 ms | — |
+| Frame mean | 55.9 / 58.25 ms | 57.04 / 62.44 ms | 57.02 / 56.92 ms |
+
+Stage times favour the change. The frame means are noise-dominated and do not show a whole-frame gain. The coordinator's A/B is the measurement to trust.
+
+`npm run check:types` is clean and `npm run test:unit` passes. No tests were deleted.
+
+### Stream 1 addendum: closed root launches and settled forces
+
+All numbers come from settled runs at dt 1/60 s, under the GPU lock, as medians of frames 3–8. The machine was in its slow state for these runs: about 34 ms wall clock with per-pass profiling, against about 28 ms of summed passes. Profiled timestamps are quantised at 0.0655 ms. Per-dispatch numbers (`SPLIT=1`) inflate fixed costs, so the whole-pass numbers are the ones to compare.
+
+#### Closed root slots
+
+The requested gate is already in place:
+
+- The schedule's gate pass before each slot decides from the checkpoint of the latest measure. That is the residual of the current system, not the previous frame's |Δp|, so an impact anywhere opens the slots in the same frame.
+- Every root kernel (smoothTiles, descend, ascend, coarse, measure, restrict) tests `umSlotClosed()` first, and the test is workgroup-uniform.
+- On settled, the lagged plan gives `expected = 0`, so all three floor slots (V, V, Full) already launch narrow at `ROOT_CAPACITY_THREADS`.
+
+What remains is fixed per-dispatch cost:
+
+- With 0 cycles executed, the closed V-cycle passes cost 1.245 ms and the closed full-cycle pass costs 0.918 ms, about 2.2 ms per frame.
+- Launching every root dispatch as a single workgroup (64 threads) left V at 1.245 ms and moved Full only to 0.786 ms.
+- So the cost is about 15 µs for each of the roughly 137 encoded dispatches. It is not threads, and no earlier exit inside the kernels can remove it.
+
+The levers left are fewer launches per slot (for example a tile-local multi-sweep smoother replacing the 18 smoothTiles launches of each V) or fewer floor slots (`UNIFORM_MIXED_SCHEDULE_FLOOR`, which impact frames rely on). Neither was done.
+
+The band's capacity-cycle narrowing from the earlier session stands: cycles past the window's largest executed count launch narrow. Band solve measured 1.38 / 1.31 ms narrow against 1.57 / 2.16 ms wide.
+
+#### Settled forces
+
+Revision churn feeds the normal pass:
+
+- With every phi revision producer knocked out, cacheNormals fell from 0.524 to 0 ms and cacheCurvature from 0.131 to 0.066 ms.
+- The producers are surface advect (about 50 regions per frame), NB-FLIP reconstruction (about 45), and redistance (4–19). Each one rewrites ulp-level phi changes into the same surface regions.
+- Stream 2 now owns stopping that churn. The forces already key normal and curvature retention on those revisions (`normalDirty`), so the 0.6 ms goes away when it lands, with no change here.
+
+forcesFine profile (per dispatch, settled):
+
+| Variant | forcesFine |
+| --- | ---: |
+| General per-face path (before) | 1.507 ms |
+| Vector path, per-face capillary | 1.18 ms |
+| No capillary code | 0.197 ms |
+| Equal-width capillary only | 0.459 ms |
+| Coarse slope forced to zero | 0.26 ms (seam owners); fused `forces` 0.79 → 0.33 ms |
+
+The cost is execution, not register pressure. Every unequal face rebuilt its coarse side's pressure-occupancy slope (`umReconstructPressureSlope`, six faces of up to 16 finer neighbours), so each seam 4h owner's slope was rebuilt up to 96 times.
+
+What was built:
+
+- `forceSlopes` reconstructs each seam 4h owner's slope once. It runs one lane per seam 4h tile, after cacheCurvature, into the forces' borrowed normal scratch. That scratch is dead after the curvature pass under the stage scratch contract.
+- `umPressureSlope` reads the slope from that scratch when the curvature is cached.
+- The fields are bit-identical to the previous code after 6 impact frames: 0 of 3,535,202 words differ.
+
+Tried and dropped:
+
+- An interior/seam split of forcesFine. The interior pipeline got a light equal-width capillary, and the seam pipeline ran over the seam h list. Before the slope cache it cost 0.52 + 0.72 ms against 1.18 ms unsplit. After the slope cache it cost 0.52 + 0.26 ms against 0.59 ms unsplit.
+- The in-tile quiet-face skip (`umFineOccupancy`) is exact but measured no gain. It is kept as the capillary loop's shortcut.
+
+Forces dispatches, before → after:
+
+| Dispatch | Before | After |
+| --- | ---: | ---: |
+| cacheNormals | 0.524 | 0.524 |
+| cacheCurvature | 0.131 | 0.131 |
+| forceSlopes | — | 0.131 |
+| forcesFine (two twins) | 1.25–1.31 | 0.59–0.66 |
+| forcesRegularCoarse | 0.13–0.20 | 0.13 |
+| forces (fused seam tiles) | 0.786 | 0.328 |
+| **Sum** | **≈ 2.9 ms** | **≈ 2.0 ms** |
+
+The whole-pass forces median after the change is 1.77 ms. Root residuals match the previous code in every arm.
+
+Memory: `forceSlopes` adds no bytes. It reuses the normal scratch (16 B × owners, which `bind` already checks), and it adds one pipeline compiled at attach. The band's cycle window is 16 B on the host. `npm run check:types` is clean and `npm run test:unit` passes (860 pass, 54 skipped). No tests were deleted.
+
+### Stream 1 addendum: forces follow the region work tier
+
+The forces, normals and curvature now read stream 2's per-region work tier (`uniform-region-heat.ts`: COLD, WARM or HOT for each 16h region, constant for the frame).
+
+**How the tier reaches the forces.** Classify copies `umRegionTier(region)` into the forces' mirror and sets each region's mode in the same lane (`umRdForce`). There is no separate forces-side pass. The inputs are:
+
+- the heat tier;
+- the dynamics tier (FULL when the 27-region key changed: neighbour widths, force parameters, host generation, or a body within the margin);
+- the geometry's topology plane (read only when capillarity is on).
+
+| Region | Mode | Fine and 4h faces | Retained normals and curvature |
+| --- | --- | --- | --- |
+| COLD, unchanged, primed | reuse | Kept drive plus fresh gravity and inflow; no viscosity, bed, capillary or normal gathers | Skipped |
+| COLD, unchanged, not primed | store | Evaluated in full, viscosity exact; drive kept | WARM rule |
+| COLD but changed, WARM, HOT | evaluate | Exactly as before the tier: the viscosity budget (`UNIFORM_FORCE_TIER.retain` drops it within 1e-6 m/s) | Exactly as before the tier: revision candidates against the fixed anchors; curvature from the dirty plane |
+
+The first frame after reuse evaluates every retained normal and curvature in the region exactly (`normalsExact`), because revisions and neighbour changes were not tracked during reuse. COLD reuse replaces the revision check entirely. Everywhere else it stays.
+
+**The kept drive.** For each owner's +faces it is viscosity + bed + capillarity as f32 velocity increments. A storing lane derives it as the evaluated value less the advected value and gravity. It is not summed in parallel, so evaluating lanes do no extra arithmetic. Gravity is a per-face add that needs only the two occupancies, so it is always applied fresh, and so is inflow. A dt change alters the force-parameter key, which ends reuse. The drive is kept in three places:
+
+- `forcesFine`: one lane per h owner, 3 components.
+- `forcesRegularCoarse`: one lane per 4h owner, 3 components, decided once before the face loop.
+- The fused seam launch: each seam 4h quad lane keeps its own (patch, axis) by seam-list position. A regular 4h owner riding the launch keeps by owner when its face is one patch.
+
+**Entries are tagged.** h owner indices are rank based and move on a relayout, so each entry carries a hash of the owner's tile, its width and the region's keeping stamp.
+
+- A mismatch in a reusing region evaluates that owner without keeping it, and unprimes the region. The region keeps again with a new stamp the next frame.
+- So no lane ever writes an entry that another lane may be reading.
+- An owner beyond the slots (h index ≥ 64·8192, or seam position ≥ 8192) always evaluates.
+
+**Topology plane.** Classify reads it only when capillarity is on, and the forces clear it only then, as before. Every geometry encode, including stream 2's rank-shift `normalTags`, runs before classify in the same frame. Without capillarity the bits accumulate. A surface tension change keys the neighbourhood, which gives a FULL dynamics tier.
+
+**Not reduced in COLD.** `forceSlopes` still runs for every seam 4h tile. Its scratch slope is read by any owner that evaluates (a tag mismatch, an owner beyond the slots), and the stage scratch holds stale data otherwise.
+
+#### Measurements
+
+Settled scene, dt 1/60 s, under the GPU lock. The machine was in its slow state (about 34 ms wall clock).
+
+| Arm | Forces pass median |
+| --- | ---: |
+| Before (previous addendum) | 1.769 ms |
+| Tier forced WARM | 1.769 ms |
+| Tier forced HOT (also the real heat for frames 2–8, startup) | 2.228 ms (first cut; fixed below) |
+| Tier forced COLD, owner retention only | 0.852 ms |
+| Tier forced COLD, with seam retention | 0.786 ms |
+| Real heat, frames 33–40 (the scene goes COLD from frame 31) | 0.72–0.79 ms per frame (one frame 1.05) |
+
+HOT costs about 0.46 ms more than before. The extra time is the exact normal pass (cacheNormals 0.66, cacheCurvature 0.26 ms per dispatch), which the revision filter used to skip.
+
+COLD per dispatch (`SPLIT=1`):
+
+| Dispatch | ms |
+| --- | ---: |
+| cacheNormals | 0.07 |
+| cacheCurvature | 0.07 |
+| forceSlopes | 0.13 |
+| forcesFine | 0.13–0.20 |
+| forcesRegularCoarse | 0.07–0.13 |
+| fused seam | 0.33 (was 0.39 before seam retention) |
+
+#### Accuracy
+
+Final fields after 6 settled frames:
+
+- COLD against HOT: velocity max |Δ| 3.3e-7 m/s, with max |u| 4.3e-6.
+- WARM against HOT: 4.6e-7 m/s, from the viscous budget.
+- phi, density and geometry: bit-identical in every arm.
+- Root and band residuals: unchanged.
+
+The forced COLD arm reuses the drive kept in frame 2 for frames 3–6 of a startup transient. Under the real heat, reuse begins only once a region has been quiet for about half a second.
+
+#### Memory
+
+The dynamics' tier mirror became the forces' store, bound read-write at the forces' existing binding 16, so no binding was added. With `forceFineSlots = 64·min(poolTiles, 8192)` = 524,288 on the settled scene:
+
+| Item | Bytes |
+| --- | ---: |
+| Mirror (6 words × 3856 regions) | 92,544 |
+| Owner entries (16 B × (524,288 h + 246,784 tile keys)) | 12,337,152 |
+| Seam entries (49 words × 8192) | 1,605,632 |
+| **Force store** | **14,035,328** |
+| Region dynamics total (with the record, params and pressure history) | 16,163,856 (was 2,159,376) |
+
+No pipeline was added. The mode decision lives in the existing classify kernel.
+
+#### Gates
+
+- `npm run check:types` is clean.
+- `npm run test:unit`: 851 pass, 54 skipped, 4 fail. The 4 failures are `gpu-startup-mesh-memory`, `svo-gbuffer-normal-split`, `svo-surface-mesh-build-pacing` and `svo-surface-mesh-detail`. All four fail with `Cannot access 'SVO_MATERIAL_FUNCTION_IDS' before initialization` in `lib/svo/features/materials/svo-procedural-material.ts`, from another session's in-progress SVO and material edits, and are not in this stream's files.
+- No tests were added or deleted.
+
+#### HOT fix (2026-10-18)
+
+The first cut made HOT "exact": bitwise normal tests, viscosity always on, and curvature always recomputed. That cost 2.23 ms against 1.77 ms before. It also did not match the pre-tier fields, because before was itself approximate: anchor tolerance ε = 0.01 and the 1e-6 m/s viscosity budget.
+
+Attribution on one tree:
+
+| Arm | Forces |
+| --- | ---: |
+| Before | 1.835 ms |
+| Exact HOT | 2.10 ms (velocity Δ 5.4e-7 m/s against before) |
+| Budget plus bitwise normals | 2.03 ms (Δ 2e-8) |
+| Budget plus anchors | 1.90 ms, bit-identical |
+
+**What changed:**
+
+- Every non-reusing region (HOT, WARM, changed COLD) now runs the pre-tier revision-filtered normal and curvature retention and the viscosity budget, unchanged. The one exception is the exact pass on the first frame after reuse.
+- `forceRegions` folded into classify.
+- The evaluation order restored.
+- The kept drive derived from the evaluated value.
+- The fused launch looks up retention only for +faces.
+
+**Result:** settled, dt 1/60 s, forces pass plus classify, frames 3–8, two runs per arm:
+
+| Arm | Medians | Minimums |
+| --- | --- | --- |
+| Before | 1.245, 1.311 ms | 1.180 ms |
+| HOT (forced) | 1.311, 1.311 ms | 1.245 ms |
+| COLD (forced) | 0.786–0.852 ms per frame | — |
+
+- HOT is within one 0.0655 ms timestamp quantum of before and well under 1.77 ms. The machine is faster today than for the 1.77 ms runs.
+- HOT final fields are bit-identical to before: 0 differing words in every field.
+- COLD against before: velocity max |Δ| 5.4e-7 m/s at max |u| 5.3e-6. Everything else is bit-identical.
+- Gates: `npm run check:types` reports only 2 errors, both in another session's untracked `lib/svo/features/construction/svo-buried-solid.test.ts`. `npm run test:unit` reports 872 pass, 0 fail, 54 skipped. No tests were added or deleted.
+
+### Stream 1 addendum: unowned passes in an all-COLD frame (2026-10-18)
+
+I profiled one settled, all-COLD frame per dispatch: SPLIT=1 with NB_SPLIT_ALL=1, dt 1/60 s. The figures are per-dispatch medians over frames 36–44, summed per label per frame. The timestamp quantum is 0.0655 ms. I then gave the unowned stages COLD exits that are uniform per workgroup.
+
+#### What changed
+
+- **Frame plan seed (`uniform-mixed-frame-plan.ts`).**
+  - Seed no longer computes the speed maximum. A per-tile `held` word (bit 31 marks it held) keeps a COLD tile's support flags: retaining encodes are a pipeline-override variant (`planRetain`), so a COLD tile with the bit set skips its flag scan. Any non-COLD or non-retaining seed rewrites the word.
+  - The frame speed comes from `localSpeed` instead. It reduces each workgroup's maximum in shared memory and makes one global `atomicMax`. `localSpeed` must stay current, because region heat reads `regionVelocity`.
+  - The separate tail speed seed (`SPEED_PASS`) is gone. `encodeTail` re-encodes the plan only when it is stale.
+  - The constructor drops the velocity and negative bindings.
+- **Region key (`uniform-mixed-region-dynamics.ts`).** `regionKey` now runs one 64-lane workgroup per region instead of a serial walk. It builds the same hash and exits early for regions with no tiles.
+- **Phi resolve (`uniform-mixed-phi-resolve.ts`).**
+  - Held variants of the full and gated launches skip a 4h tile whose 27-tile neighbourhood is entirely COLD and whose held marker is set.
+  - A non-held launch of the held field clears the markers.
+  - The scratch resolve stays unheld by design.
+
+#### Per pass, all-COLD frame (ms)
+
+| Pass | Before | After |
+| --- | ---: | ---: |
+| Frame plan seed (head + mid) | 0.393 | 0.066 |
+| Frame speed seed (tail) | 0.066 | removed |
+| regionKey | 0.328 | 0.066 |
+| Phi resolve, total | 0.524 | 0.328 |
+| Phi resolve, per dispatch | 0 / 0.131 / 0.131 / 0 / 0.131 / 0.131 | 0 / 0.131 / 0.066 / 0 / 0.066 / 0.066 |
+| Census, plan, certificate, resolve and regionKey combined | 2.359 | 1.507 |
+
+- The frame's pass sum went from 21.89 to 19.33 ms. Other streams changed the tree between the two runs, so only the per-pass rows above are attributable to this work.
+- Health counts were identical between the runs:
+  - bandResidual moved from 1.85e-5 to 9.6e-5;
+  - rootResidual moved from 6.7e-5 to 7.8e-5.
+- No A/B was run, so the residual change is not attributed.
+
+#### Left unchanged, with the reason
+
+- **Census `classify` / `classifyCoarse`.** Their velocity bounds feed decide, residency and the cube reach, so they can't be held exactly. Their depth samples read outside the region's closure. A knock-out of the error and depth samples saved one quantum each: classify 0.262 → 0.197 ms, classifyCoarse 0.197 → 0.131 ms.
+- **Census `pageSeed` and `pageRequest`.** pageSeed costs 0.066–0.131 ms and pageRequest 0.066 ms.
+- **`toPressureFine` (0.328 ms) and `toSimulationFine` (0.066–0.131 ms).** These carry this frame's forced and projected velocity. That velocity changes everywhere and sits on the pressure path.
+- **Passes in stream 2 and stream 3 files.** I sent their measurements to the owners instead of editing:
+  - Stream 2:
+    - surface work control: scan 0.328, summaries 0.131;
+    - geometry work control: scan 0.131;
+    - advectFine 0.262;
+    - NB-FLIP surface authority: 3 × 0.131;
+    - buildRegions 0.131.
+  - Stream 3:
+    - momentumUnitStep 0.524, momentumStep 0.262;
+    - extension: publishSeams 2 × 0.197, pair_sweepSeams 0.197 / 0.131, pair_seedSeams 0.131, pair_sweep 0.131;
+    - NB-FLIP: prepare, prefixTile and markParticleTiles 0.197 each, surfaceCells 0.131, buildDistance 0.131;
+    - update and hanging taps: 0.131 each.
+
+#### The COLD air-texel gate was not landed
+
+The proposal: forces, the projection and the band copy would leave COLD extension-owned air texels of `velocityScratch` untouched, so that the tail extension could skip them. Those mid-frame values are not dead.
+
+- **toPressure reads them.** `tFineToPressure` takes a plain 16-patch mean of each 4h face's h patches, read from the forced field. That mean is the coarse root's flux for `umPressureLiquid` owners.
+  - Take a surface 4h owner whose centre is liquid but whose top h row is fully air. Its +y flux is built from exactly the texels the gate would skip.
+  - Holding them replaces u* there with last tail's extrapolation: in a settled pool, a g·dt jump within one 4h face.
+  - The result is a spurious divergence at every surface 4h owner every frame.
+- **toSimulation reads the projection's output.** The projection writes `velocityScratch` in all-4h pressure ownership at canonical texels, and `toSimulation` reads those texels back.
+- **Band project reads the band copy.** Band project reads the band copy's seam texels.
+- **A phase-only predicate can't prove the skip exact.** That needs the pressure layout's liquid and detached flags.
+- **Forces see a different phase.** With surface tension, `cacheCurvature` overwrites `f.phase` before the face pass, and frame.ts restores it after forces. The projection and the band see the tail's phase.
+
+I proposed an exact alternative to stream 3, entirely on its side: keep a retained copy of the published air texels and restore it at a COLD-held tail. My stages stay untouched, and the cost is one face field of memory.
+
+#### Incident: missing COPY_DST
+
+The phi resolve's held buffer was briefly created without COPY_DST, which its clear needs. That raised a WebGPU validation error in the encoder "Uniform resolve remapped phi" during a pool-impact run. Adding COPY_DST fixed it. A settled smoke and a 6-frame pool-impact smoke then ran clean.
+
+#### Memory
+
+- Frame plan held flags: 987,136 B.
+- Phi resolve held markers: 987,136 B.
+- Dynamics and forces are unchanged.
+
+#### Deleted
+
+- `tests/uniform-region-velocity.test.ts`: it pinned the old frame-plan constructor.
+- `tools/probe-frame-plan-speed.ts`: a probe for the removed speed seed.
+- `tools/probe-nbflip-speed.ts` now calls `encodeTail`.
+
+#### Settled residual rise: momentum's COLD hold (2026-10-18)
+
+The settled residual rise comes entirely from momentum's COLD **hold** tier. The fix belongs to stream 3.
+
+| Arm | bandResidual | rootResidual |
+| --- | --- | --- |
+| Pre-tier run | ≤ 6.6e-5 after frame 4, oscillating; root cycles every other frame | down to ~1e-6 on alternate frames |
+| Current tree | 9.58e-5 from frame 2 onward; no band or root cycle ever runs | 3.67e-5, creeping to 7.8e-5 by frame 44 |
+
+The 9.58e-5 band residual sits just under the 1e-4 band gate.
+
+**Method.** Each arm was a probe-only build of the current tree with one heat consumer's tier reads forced HOT (not part of the code). Each arm ran the settled scene once, at dt 1/60 s, for 14 frames.
+
+| Arm | Result |
+| --- | --- |
+| All consumers HOT | Matches the pre-tier run |
+| Momentum HOT only | Bit-identical to the pre-tier run |
+| Forces HOT only | Still pinned |
+| NB-FLIP HOT only | Still pinned |
+| Surface transport HOT only | Still pinned |
+| Momentum's COLD tier always *retain* (hold removed), nothing else changed | Bit-identical to the pre-tier run |
+
+**Cause.** `decide` moves a region that was COLD at the last decide from retain to hold. In hold, momentum skips the departure store, so the departure keeps the extended velocity of the first COLD frame. Retain would copy the region's current extended velocity, which the projection corrects every frame. Under hold, that correction never feeds back, so every frame re-solves frame 2's pressure problem and keeps its residual. The root residual creeps with the volume gauge.
+
+**Fix.** The cheapest exact fix is to have COLD always retain. This costs momentum's retain store in COLD regions. A hold would need exact evidence that the region's extended values are unchanged. I sent the measurement to stream 3, which owns `uniform-mixed-momentum-tiers.ts`. My own files needed no change.

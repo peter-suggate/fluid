@@ -15,10 +15,12 @@ var<workgroup> nbReuseLive:u32;
   let tile=nbReuseTile(region,lane);
   // Pooled storage includes free 32h pages. Invalidate without touching
   // their masks, world mapping, or halo page tables.
-  if(lane==0u){nbReuseLive=select(0u,1u,umTileLive(tile));}
-  if(workgroupUniformLoad(&nbReuseLive)==0u){
+  // 2: free and its words cleared by this search's prepare or before (nbPrepareReuse).
+  if(lane==0u){nbReuseLive=select(select(0u,2u,atomicLoad(&bins[NB_REUSE_ALLOWED+region])==2u),1u,umTileLive(tile));}
+  let live=workgroupUniformLoad(&nbReuseLive);
+  if(live!=1u){
    if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);atomicStore(&bins[NB_REUSE_REGION_PLANE+8u*region+7u],0u);}
-   atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);continue;
+   if(live==0u){atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);}continue;
   }
   let origin=(umTileCoord(tile)/4u)*4u;
   let base=NB_REUSE_NEAREST_STATE+158u*region;
@@ -50,13 +52,15 @@ var<workgroup> nbMetricClean:atomic<u32>;
   if(lane<27u){
    let origin=vec3i((umTileCoord(tile)/4u)*4u);
    let key=umTileKey(origin+4*(vec3i(umCorner(lane,3u))-1));
-   if(!umKeyStored(key)){atomicStore(&nbMetricClean,0u);}
+   // An unstored neighbour may later be claimed. A claim promotes the
+   // regions beside it to HOT, so a COLD region's metric stands without it.
+   if(!umKeyStored(key)){if(!nbRegionCold(region)){atomicStore(&nbMetricClean,0u);}}
    else{
     let other=nbReuseRegion(key);
     if(other>=NB_REUSE_CAPACITY){atomicStore(&nbReuseClean,0u);atomicStore(&nbMetricClean,0u);}
     else{
      if((atomicLoad(&bins[NB_REUSE_NEAREST_VALID+other])&2u)==0u){atomicStore(&nbReuseClean,0u);}
-     if(atomicLoad(&bins[NB_REUSE_ALLOWED+other])==0u){atomicStore(&nbMetricClean,0u);}
+     if(atomicLoad(&bins[NB_REUSE_ALLOWED+other])!=1u){atomicStore(&nbMetricClean,0u);}
     }
    }
   }

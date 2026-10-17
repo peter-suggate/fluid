@@ -126,7 +126,7 @@ try {
     hook(g.band, "encodeSolve", "band.velocity", velocity);
     hook(g.narrowBandFlip, "update", "extended.velocity", velocity, true); hook(g.narrowBandFlip, "update", "extended.scratch", scratch, true);
     hook(g.narrowBandFlip, "update", "g2p.velocity", velocity); hook(g.narrowBandFlip, "update", "g2p.scratch", scratch);
-    hook(g.plan, "encodeSpeed", "tail.velocity", velocity); hook(g.plan, "encodeSpeed", "tail.scratch", scratch);
+    hook(g.plan, "encodeTail", "tail.velocity", velocity); hook(g.plan, "encodeTail", "tail.scratch", scratch);
   }
 
   let before = await readMixedTileWords(device, solver);

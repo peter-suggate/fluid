@@ -95,7 +95,8 @@ try {
  recordBuffer("negative", f.negative, f.negative.size ?? f.negative.buffer.size - (f.negative.offset ?? 0));
  recordBuffer("fineNegative", { buffer: f.fine.negative }, f.fine.negative.size);
  recordBuffer("parameters", { buffer: f.params }, 32);
- for (const [name, handle] of [["velocity", f.velocity], ["fineVelocity", f.fine.velocity], ["correction", f.correction]] as const) {
+ recordBuffer("authorityParameters", { buffer: f.authorityParams }, 16);
+ for (const [name, handle] of [["velocity", f.velocity], ["fineVelocity", f.fine.velocity]] as const) {
   const field = uniformDetailField(handle), textures = [...new Set(field ? [field.storage.physical(field.handle), field.storage.baseOf(field.handle)!] : [handle])];
   for (const [bank, texture] of textures.entries()) {
    const bytesPerTexel = texture.format === "rgba32float" ? 16 : 4, bytesPerRow = Math.ceil(texture.width * bytesPerTexel / 256) * 256;

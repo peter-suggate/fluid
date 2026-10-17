@@ -15,6 +15,7 @@ import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, uniformMixedVertexBuriedWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformFaceTileSlots, uniformKeyGroups, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformRegionTierWGSL } from "./uniform-region-heat";
 
 /** Head of the surface claim buffer: job counters, six wall reach words (a
  * face direction each) and two pad words; the reach of every tile of every
@@ -72,6 +73,8 @@ export class UniformMixedSurface {
   private readonly counterWord:number;
   private readonly regionCounterWord:number;
   private readonly revisionWord:number;
+  /** A copy of UniformRegionHeat's tiers (the stage is at its storage-buffer limit). */
+  private readonly tierWord:number;
   get regionCounters(){return {buffer:this.claims,offset:4*this.regionCounterWord,regions:this.workControl?.regions??0,wordsPerRegion:5,labels:["identity","affine","middle","fullLinear","fullCubic"] as const};}
   readonly workCounterWords=22;
   /** Trial diagnostics: admitted fast-fine attempts and direct/cubic-listed results. */
@@ -137,9 +140,10 @@ export class UniformMixedSurface {
     this.counterWord=this.supportWord+64*UNIFORM_SURFACE_SUPPORT_WORDS*(workControl?.regions??0);
     this.regionCounterWord=this.counterWord+this.workCounterWords;
     this.revisionWord=this.regionCounterWord+5*(workControl?.regions??0);
+    this.tierWord=this.revisionWord+(workControl?.regions??0);
     this.predictorFineCapacity=0;
     this.predictorCacheBytes=0;
-    this.allocatedBytes=this.evidenceBytes+(workControl?4*((21+64*UNIFORM_SURFACE_SUPPORT_WORDS)*workControl.regions+this.workCounterWords)+this.predictorCacheBytes:0);
+    this.allocatedBytes=this.evidenceBytes+(workControl?4*((22+64*UNIFORM_SURFACE_SUPPORT_WORDS)*workControl.regions+this.workCounterWords)+this.predictorCacheBytes:0);
     const claimsLimit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
     if(this.allocatedBytes>claimsLimit)throw new Error(`Uniform mixed surface claims and 16h support tables require ${this.allocatedBytes} bytes, exceeding the device buffer limit ${claimsLimit}; reduce scene capacity or resolution`);
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -207,6 +211,13 @@ struct UMDeferred { header:array<atomic<u32>,4>, data:array<u32> }
 @group(1) @binding(12) var<storage,read_write> umClaims:array<atomic<u32>>;
 @group(1) @binding(13) var<storage,read_write> nbState:array<atomic<u32>>;
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
+${this.workControl?.heat?uniformRegionTierWGSL(this.workControl.heat.regions,`atomicLoad(&umClaims[${this.tierWord}u+region])`):"const UM_TIER_COLD:u32=0u;fn umVertexTier(p:vec3u)->u32{return 2u;}"}
+// A vertex every incident region of which is COLD (UniformRegionHeat) holds
+// its input phi: the same bits, so no revision moves and the trace is not run.
+fn umHoldCold(vertex:vec3u,width:u32)->bool{
+ if(umVertexTier(vertex)!=UM_TIER_COLD){return false;}
+ umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return true;
+}
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner: the base block (UNIFORM_DETAIL_4H_LOAD).
@@ -984,6 +995,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  umLocalSolidAdmission=false;umTraceSeedValid=false;
  umFullCubic=false;umFullIdentity=false;
  if(params.hDt.w>0.0&&umWallPlane(vec3i(vertex))<6u){return;}
+ if(umHoldCold(vertex,width)){return;}
  {let far=umFarAir(vertex);if(far>=0.0){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,far);return;}}
  {let deep=umDeepAir(vertex,width);if(deep>=0.0){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,deep);return;}}
  {let early=umEarlyFarAdvected(vertex,width);if(early.y>0.0){umStoreSurface(vertex,width,early.x);return;}}
@@ -1094,8 +1106,10 @@ var<workgroup> wallBase:u32;
      let low=vec3i(umBlockPage(face/6u)<<vec3u(5u));let cell=vec3u(clamp(vertex,low,low+vec3i(31)));
      width=select(1u,4u,umCoarseIncident(umTileAt(cell/4u),vec3u(vertex)-(cell/4u)*4u)!=0u);
     }
-    let far=umFarAir(vec3u(vertex));
-    if(far>=0.0&&all(vec3u(vertex)%width==vec3u(0))){umRecordRegion(vec3u(vertex),0u);umStoreSurface(vec3u(vertex),width,far);}
+    let held=all(vec3u(vertex)%width==vec3u(0))&&umHoldCold(vec3u(vertex),width);
+    let far=select(umFarAir(vec3u(vertex)),-1.0,held);
+    if(held){}
+    else if(far>=0.0&&all(vec3u(vertex)%width==vec3u(0))){umRecordRegion(vec3u(vertex),0u);umStoreSurface(vec3u(vertex),width,far);}
     else if(all(vec3u(vertex)%width==vec3u(0))){
      slot=atomicAdd(&wallListed,1u);
      word=umVertexAt(vec3u(vertex))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
@@ -1309,6 +1323,7 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
     encoder.copyBufferToBuffer(this.ownership.speeds,tiles,this.claims,this.evidenceBytes-tiles,tiles);
     if(this.workControl){encoder.clearBuffer(this.claims,4*this.counterWord,4*(this.workCounterWords+5*this.workControl.regions));this.workControl.encode(encoder,"surface");
      encoder.copyBufferToBuffer(this.workControl.revisions.buffer,this.workControl.revisions.liveOffset,this.claims,4*this.revisionWord,4*this.workControl.regions);
+     if(this.workControl.heat)encoder.copyBufferToBuffer(this.workControl.heat.tiers,0,this.claims,4*this.tierWord,4*this.workControl.regions);
      encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.modelWordOffset,this.claims,4*this.modelWord,32*this.workControl.regions);
      encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.velocityWordOffset,this.claims,4*this.velocityWord,24*this.workControl.regions);
      encoder.copyBufferToBuffer(this.workControl.surface,4*this.workControl.supportWordOffset,this.claims,4*this.supportWord,256*UNIFORM_SURFACE_SUPPORT_WORDS*this.workControl.regions);}

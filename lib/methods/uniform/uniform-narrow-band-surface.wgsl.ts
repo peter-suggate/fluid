@@ -78,6 +78,8 @@ export const narrowBandTiledSurfaceWGSL=/* wgsl */`
  // Launched as a solid-free twin and a general pipeline (umSolidSkip).
  if(umSolidSkip()||lane>=125u){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0,0));let origin=vec3i(umTileCoord(owner.tile)*4u);
+ // Every vertex of a COLD region's tile is COLD: reconstruction holds it.
+ if(nbTileCold(owner.tile)){return;}
  let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let q=origin+vec3i(local);
  if(umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u){if(any(local==vec3u(0))&&!all((local>vec3u(0))|umLowOpen(origin))){return;}}
  else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){return;}}
@@ -98,6 +100,9 @@ fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
   if(!umTileLive(cell/64u)){continue;}
   if(nbSparseBins&&atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){continue;}
   if(atomicLoad(&bins[cell])==0u){continue;}
+  // A cell whose splat footprint (cell - 1 to cell + 2) lies in a COLD
+  // region's closure feeds only vertices reconstruction holds.
+  {let l=(4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u))&vec3u(15u);if(all((l>=vec3u(1u))&(l<=vec3u(13u)))&&nbTileCold(cell/64u)){continue;}}
   let slot=atomicAdd(&bins[NB_BAND+3u],1u);links[nbSurfaceCells()+slot]=cell;
  }
 }
@@ -136,7 +141,7 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
  if(key==0u){return 4.0;}return bitcast<f32>(~key);
 }
 @compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
- let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width!=4u){return;}
+ let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width!=4u||nbTileCold(owner.tile)){return;}
  let origin=umOrigin(owner);let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
  // A low corner is this tile's to write only where nothing is stored below it.
  let low=umLowOpen(vec3i(origin));
@@ -179,6 +184,8 @@ fn nbTransferTheta(local:vec3f)->vec2f{
 @compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32${subgroups?",@builtin(subgroup_invocation_id) subgroupLane:u32":""}){
  if(!nbTransferPropertiesFit()){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=4u*umTileCoord(owner.tile);
+ // No live sample (a uniform): no pair is listed and every cell keeps its velocity.
+ if(!nbParticlesLive()){let cell=origin+umCorner(lane,4u);textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
  for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(q)]));}
  if(lane<27u){
   let coord=vec3i(origin>>vec3u(2u));let t=vec3u(umTileNearFromPage(owner.tile>>9u,coord>>vec3u(3u),coord+vec3i(umCorner(lane,3u))-1));

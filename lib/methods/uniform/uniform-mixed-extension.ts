@@ -8,11 +8,18 @@ import type { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocit
 import { UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL,uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
+import { uniformRegionHeatWGSL } from "./uniform-region-heat";
+import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
 
 type Hierarchy=ReturnType<WebGPUUniformVelocityExtrapolator["prepareMixedContinuation"]>;
 interface Fields {
  physical:GPUTexture;phase:GPUTexture;negative:GPUBuffer;output:GPUTexture;outputNegative:GPUBuffer;
- scratch:GPUBufferBinding;params:GPUBuffer;
+ params:GPUBuffer;
+ /** A uniform whose first word is the frame's live sample count
+  * (UniformNarrowBandFlip.liveGate): the old epoch's retain and snapshot do
+  * nothing at zero, and publication then never replays its selections.
+  * Without one, samples are always taken as live. */
+ gate?:GPUBuffer;
  companion?:{scratch:GPUBuffer;physical:GPUTexture;negative:GPUBuffer};
  /** Existing FLIP fine-tap texture for finalized-slot publication. */
  snapshot?:GPUTexture;
@@ -69,20 +76,40 @@ export function extensionSlots(a:UniformLatticeAddress,fineTiles:number):number{
 const UE_PACK_TILES=2;
 /** Regular-bulk mode restricts physical source faces directly to the 4h
  * nearest-source hierarchy, then retains supported h faces on publication.
- * The legacy mode first performs Godunov sweeps on canonical mixed patches;
- * its two transient vec2f slot arrays borrow the caller's stage scratch. */
+ * The legacy mode first performs Godunov sweeps on canonical mixed patches
+ * in two vec2f slot arrays the extension owns: they persist from one swept
+ * encode to the next (the regional head rebuild reads the last one's). */
+/** A regional rebuild (the head after bodies moved) follows the frame's
+ * tail, which extended this same velocity: since then only a moved body
+ * rewrote phase or support (G2P moves particles alone; a page claim or remap
+ * ends the retention). A 16h region is changed where a tile's topology word
+ * or support bit moved, or where it is not COLD (UniformRegionHeat) and a
+ * body's swept support lies within UNIFORM_EXTENSION_BODY_REACH h of it
+ * (UniformMixedSolid.bodyRegions): a COLD region is maintained at 16h.
+ * A full encode marks, besides, the regions within one region of a non-COLD
+ * one (or one whose words moved): only there does the tail publish the old
+ * FLIP payload (state 3). G2P takes no FLIP delta at a COLD region's samples
+ * (they blend toward the current payload alone), so no COLD sample reads the
+ * old payload, and a non-COLD sample's taps lie within one cell of its region. */
+const UNIFORM_EXTENSION_BODY_REACH=UNIFORM_BODY_GEOMETRY_REACH+1;
 /** Per-frame pass descriptors, built once. */
-const EXTENSION_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension"},RETAIN_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension retain"},
+const EXTENSION_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension"},MARK_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension regions"},RETAIN_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension retain"},
  SNAPSHOT_PASS:GPUComputePassDescriptor={label:"Uniform mixed extension slot snapshot"};
 /** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
 const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 export class UniformMixedExtension {
- readonly allocatedBytes=0;
+ /** The topology stamp and the mark passes' mode words (the slots are the
+  * caller's: useSlots). */
+ get allocatedBytes():number{return this.stamp.size+16*this.modes.length+this.alwaysLive.size+this.work.size+this.noBodies.size+(this.held?.size??0);}
+ /** The held values' bytes at `fineTiles` h tiles: one f32 a slot (heldBytesAt). */
+ heldBytesAt(fineTiles:number):number{return Math.ceil(4*extensionSlots(this.address,fineTiles)/256)*256;}
  /** One slot array at `fineTiles` h tiles. */
  private slotBytesAt(fineTiles:number):number{return Math.ceil(8*extensionSlots(this.address,fineTiles)/256)*256;}
- /** bind()'s scratch at `fineTiles` h tiles: both slot arrays. bind() takes
-  * the ownership's capacity, so a capacity change binds again. */
- scratchBytesAt(fineTiles:number):number{return 2*this.slotBytesAt(fineTiles);}
+ /** The region states after one slot array: a vec2f a 16h region. */
+ private get regionBytes():number{return Math.ceil(8*(this.ownership.capacity.tiles/64+1)/256)*256;}
+ /** The slot buffer's prefix at `fineTiles` h tiles: both slot arrays,
+  * each followed by the region states (useSlots). */
+ slotBufferBytesAt(fineTiles:number):number{return 2*(this.slotBytesAt(fineTiles)+this.regionBytes);}
  /** One scalar companion per slot and epoch, borrowed until G2P resampling. */
  companionBytesAt(fineTiles:number):number{return 2*Math.ceil(this.slotBytesAt(fineTiles)/2/256)*256;}
  private readonly resources:GPUBindGroupLayout;
@@ -114,12 +141,62 @@ export class UniformMixedExtension {
  private readonly companionSeams=new Map<string,GPUComputePipeline>();
  private companionRestrict?:GPUComputePipeline;
  private readonly address:UniformLatticeAddress;
+ /** The gate of a bind without one: always live. */
+ private readonly alwaysLive:GPUBuffer;
+ /** The slot arrays (slotBufferBytesAt), created by bind() at the
+  * ownership's capacity. */
+ private slots?:GPUBuffer;
+ private slotArray=0;
+ /** Per tile key the topology word and extension support bit the last swept
+  * encode saw, per 16h region its work tier then and whether it changed. */
+ private readonly stamp:GPUBuffer;
+ /** The marks' work words (the hierarchy's heWork): [0] a region is dirty,
+  * [1] a region publishes the old FLIP payload. */
+ private readonly work:GPUBuffer;
+ /** The body mask of a frame without solids: no region near a body. */
+ private readonly noBodies:GPUBuffer;
+ private bodyRegions?:GPUBuffer;
+ /** The mark passes' modes: every region dirty, then regional with the
+  * final slots in array 0 or in array 1, then held (the tail's) likewise. */
+ private readonly modes:readonly GPUBuffer[];
+ private readonly markLayout:GPUBindGroupLayout;
+ private markGroups?:readonly GPUBindGroup[];
+ private markPipelines?:{stamp:GPUComputePipeline;classify:GPUComputePipeline};
+ /** The slot arrays hold the final slots of the last swept encode and the
+  * stamp its topology: a regional encode may keep the slots of its clean
+  * regions. Cleared by bind() and invalidateRetained(). */
+ private retained=false;
+ /** The array holding them: the last swept encode's sweep count's parity. */
+ private retainedParity=0;
+ /** Per canonical slot the value its last publication from swept slots
+  * stored (any publication but a held region's): what a held region
+  * publishes for its unknown faces. Allocated with the slots (useSlots). */
+ private held?:GPUBuffer;
+ /** A swept encode has marked every region since the slots were lent or
+  * bound: the tail may hold (every region's validity word is its own). */
+ private heldReady=false;
+ /** The last pair encode's marks held its quiet regions (finishPair's
+  * hierarchy then runs only with a dirty region). */
+ private heldTail=false;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false){
   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
   if(!directRestriction)throw new Error("Mixed extension restricts the face-plane anchors directly");
   this.address=ownership.capacity.address;
+  this.alwaysLive=device.createBuffer({label:"Uniform mixed extension live gate",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.alwaysLive,0,new Uint32Array([1,0,0,0]));
+  const tiles=ownership.capacity.tiles,regions=tiles/64;
+  this.stamp=device.createBuffer({label:"Uniform mixed extension topology stamp",size:4*(2*tiles+2*regions),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  this.work=device.createBuffer({label:"Uniform mixed extension work words",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.work,0,new Uint32Array([1,1,0,0]));
+  this.noBodies=device.createBuffer({label:"Uniform mixed extension no bodies",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.noBodies,0,new Uint32Array([~0,~0,~0,~0]));
+  this.modes=[[0,0],[1,0],[1,1],[2,0],[2,1]].map(([regional,parity])=>{const b=device.createBuffer({label:"Uniform mixed extension region mode",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,new Uint32Array([regional!,parity!,0,0]));return b;});
+  this.markLayout=device.createBindGroupLayout({label:"Uniform mixed extension regions",entries:[
+   ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
+   {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+   {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+  ]});
   // The hierarchy's kernels read the page pool's tail of the ownership's buffer.
-  hierarchy.attach(ownership.presentation.buffer,ownership.pageMirror.offset);
+  hierarchy.attach(ownership.presentation.buffer,ownership.pageMirror.offset,this.work);
   const entries:GPUBindGroupLayoutEntry[]=[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    ...[4,5,9].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -129,8 +206,11 @@ export class UniformMixedExtension {
    ...[8,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}})),
    {binding:12,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32uint",viewDimension:"3d"}},
    {binding:13,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+   {binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
   ];
-  this.resources=uniformDetailBindLayout(device,{entries});
+  // The held values: the main layout's alone (the paired and snapshot
+  // modules publish no current payload: their accessors are stubs).
+  this.resources=uniformDetailBindLayout(device,{entries:[...entries,{binding:18,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
   if(device.limits.maxStorageBuffersPerShaderStage>=9){const paired:GPUBindGroupLayoutEntry[]=[...entries,
    ...[2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    {binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
@@ -139,24 +219,59 @@ export class UniformMixedExtension {
    this.snapshotResources=uniformDetailBindLayout(device,{entries:[...paired,{binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}]},[16]);
   }
  }
+ /** Bind the slots to the prefix of `buffer` at the ownership's capacity.
+  * The caller lends a buffer other stages share, under one rule: between
+  * the closing swept encode of a frame (the tail's) and the next head's
+  * encode nothing else writes it, and the caller calls invalidateRetained
+  * where its other writers begin (a head's publication has been read by
+  * then: the slots are dead until the tail seeds them again). A new buffer
+  * or capacity retains nothing. */
+ private heatTiers?:GPUBuffer;
+ /** The frame's region work tiers (UniformRegionHeat.tiers) and, with
+  * solids, the swept-body region mask (UniformMixedSolid.bodyRegions), before useSlots. */
+ attachHeat(tiers:GPUBuffer,bodyRegions?:GPUBuffer):void{
+  if(tiers.size<this.ownership.capacity.tiles/16)throw new Error("Mixed extension: the work tiers hold fewer regions than the ownership");
+  if(bodyRegions&&bodyRegions.size<this.ownership.capacity.tiles/16)throw new Error("Mixed extension: the body mask holds fewer regions than the ownership");
+  this.heatTiers=tiers;this.bodyRegions=bodyRegions;
+ }
+ useSlots(buffer:GPUBuffer):void{
+  if(!this.heatTiers)throw new Error("Mixed extension: no region work tiers are attached (attachHeat)");
+  const bytes=this.slotBufferBytesAt(this.ownership.capacity.fineTiles);
+  if(buffer.size<bytes)throw new Error(`Mixed extension slots need ${bytes} bytes; the lent buffer holds ${buffer.size}`);
+  if(this.slots===buffer&&this.slotArray===bytes/2)return;
+  this.slots=buffer;this.slotArray=bytes/2;this.retained=false;this.heldReady=false;
+  const heldBytes=this.heldBytesAt(this.ownership.capacity.fineTiles);
+  if(this.held?.size!==heldBytes){this.held?.destroy();this.held=this.device.createBuffer({label:"Uniform mixed extension held values",size:heldBytes,usage:GPUBufferUsage.STORAGE});}
+  const array=this.slotArray;
+  this.markGroups=this.modes.map(mode=>this.device.createBindGroup({label:"Uniform mixed extension regions",layout:this.markLayout,entries:[
+   {binding:0,resource:{buffer,offset:0,size:array}},{binding:1,resource:{buffer,offset:array,size:array}},
+   {binding:2,resource:{buffer:this.stamp}},{binding:3,resource:{buffer:mode,size:16}},
+   {binding:4,resource:{buffer:this.heatTiers!}},{binding:5,resource:{buffer:this.bodyRegions??this.noBodies}},{binding:6,resource:{buffer:this.work}},
+  ]}));
+ }
+ /** The next swept encode rebuilds every region (pages were claimed or
+  * recycled since the last: a key's slots are never inherited). */
+ invalidateRetained():void{this.retained=false;}
  bind(f:Fields):readonly [UniformDetailGroup,UniformDetailGroup]{
   for(const [i,t] of [f.physical,f.phase,f.output].entries())if(t.format!==(i===1?"r32float":"rgba32float")||uniformDetailClass(t)!==(i===1?"cell":"face"))throw new Error("Mixed extension requires native canonical fields");
   if(f.physical===f.output||f.negative===f.outputNegative)throw new Error("Mixed extension outputs must be disjoint");
-  const size=this.slotBytesAt(this.ownership.capacity.fineTiles),offset=f.scratch.offset??0;
-  if((f.scratch.size??f.scratch.buffer.size-offset)<2*size)throw new Error("Mixed extension scratch is too small");
+  const slots=this.slots,size=this.slotArray;this.retained=false;this.heldReady=false;
+  if(!slots||size!==this.slotBufferBytesAt(this.ownership.capacity.fineTiles)/2)throw new Error("Mixed extension slots are not lent at this capacity (useSlots)");
   const companionSize=this.companionBytesAt(this.ownership.capacity.fineTiles)/2;
   if(f.companion&&!this.supportsPair)throw new Error("Paired extension is unsupported by this device or mode");
   if(f.companion&&f.companion.scratch.size<2*companionSize)throw new Error("Paired extension companion scratch is too small");
   if(f.snapshot&&!f.companion)throw new Error("Slot snapshot requires paired extension");
   return [0,1].map(parity=>uniformDetailGroup(this.device,{layout:f.snapshot?this.snapshotResources!:f.companion?this.pairedResources!:this.resources,entries:[
    ...(f.snapshot?[{binding:16,resource:f.snapshot}]:[]),
-   ...[parity,parity^1].map((slot,binding)=>({binding,resource:{buffer:f.scratch.buffer,offset:offset+slot*size,size}})),
+   ...[parity,parity^1].map((slot,binding)=>({binding,resource:{buffer:slots,offset:slot*size,size}})),
    {binding:4,resource:f.physical},{binding:5,resource:f.phase},
    {binding:6,resource:{buffer:f.negative}},{binding:7,resource:{buffer:f.params,size:16}},
    {binding:8,resource:f.output},{binding:9,resource:this.hierarchy.output},
    {binding:10,resource:this.hierarchy.outputOrigins},
    {binding:11,resource:this.hierarchy.input},{binding:12,resource:this.hierarchy.inputOrigins},
    {binding:13,resource:{buffer:f.outputNegative}},
+   {binding:17,resource:{buffer:f.gate??this.alwaysLive,size:16}},
+   ...(f.companion?[]:[{binding:18,resource:{buffer:this.held!}}]),
    ...(f.companion?[
     ...[parity,parity^1].map((slot,i)=>({binding:2+i,resource:{buffer:f.companion!.scratch,offset:slot*companionSize,size:companionSize}})),
     {binding:14,resource:f.companion.physical},{binding:15,resource:{buffer:f.companion.negative}},
@@ -169,7 +284,113 @@ export class UniformMixedExtension {
   if(buffer.size<2*size)throw new Error("Paired extension companion scratch is too small");
   return [{buffer,offset:0,size},{buffer,offset:size,size}];
  }
+ /** The mark passes ahead of a swept encode's seed: stamp, then classify. */
+ private async initializeMarks():Promise<void>{
+  const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+@group(1) @binding(0) var<storage,read_write> slots0:array<vec2f>;
+@group(1) @binding(1) var<storage,read_write> slots1:array<vec2f>;
+@group(1) @binding(2) var<storage,read_write> stamp:array<u32>;
+// x: 1 regional (this encode keeps clean regions), 0 every region dirty, 2
+// held (the tail's: clean regions publish their held values);
+// y: the array holding the final slots (the sweep count's parity).
+@group(1) @binding(3) var<uniform> mode:vec4u;
+${uniformRegionHeatWGSL(1,4,this.ownership.capacity.tiles/64)}
+@group(1) @binding(5) var<storage,read> bodyRegions:array<u32>;
+@group(1) @binding(6) var<storage,read_write> work:array<atomic<u32>>;
+// stamp: per tile key (topology word, extension support bit), then per
+// region bit 0 changed (the regional rebuild's) and bit 1 hot (not COLD, or
+// a word moved: the tail's old payload around it), then per region its
+// validity: bit 0 the held values hold its last publication from swept
+// slots, bit 1 its slots are the last swept encode's final ones.
+const MR_CHANGED:u32=2u*UM_TILES;
+const MR_VALID:u32=MR_CHANGED+UM_PAGES;
+var<workgroup> mrChanged:atomic<u32>;
+fn mrBodyNear(region:u32)->bool{return region<arrayLength(&bodyRegions)&&(bodyRegions[region]&0xffu)<=${UNIFORM_EXTENSION_BODY_REACH}u;}
+// A region changed when a tile word or support bit differs from the last
+// swept encode's, or it is not COLD and beside a moved body (see
+// UNIFORM_EXTENSION_BODY_REACH). The stamp then takes the current words.
+@compute @workgroup_size(64) fn stampRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ // A held encode always publishes (its quiet regions restore their held
+ // values over whatever the frame's stages left in the output).
+ if(group.x==0u&&lane==0u){let quiet=vec2f(select(0.0,1.0,mode.x==2u),0.0);slots0[arrayLength(&slots0)-1u]=quiet;slots1[arrayLength(&slots1)-1u]=quiet;atomicStore(&work[0],0u);atomicStore(&work[1],0u);}
+ for(var region=group.x;region<UM_PAGES;region+=groups.x){
+  if(lane==0u){atomicStore(&mrChanged,0u);}
+  workgroupBarrier();
+  let block=region>>3u;let stored=umBlockStored(block);let tile=umPageTile(region,lane);
+  var word=0xffffffffu;var support=0u;
+  if(stored){word=umTopology[tile];support=umTileSupport(tile)&2u;}
+  if(stamp[2u*tile]!=word||stamp[2u*tile+1u]!=support){atomicOr(&mrChanged,1u);}
+  stamp[2u*tile]=word;stamp[2u*tile+1u]=support;
+  workgroupBarrier();
+  if(lane==0u){
+   let cold=umRegionTier(region)==UM_TIER_COLD;let moved=atomicLoad(&mrChanged)!=0u;
+   // A region whose held values are not its last publication rebuilds; a
+   // held encode keeps only COLD regions away from bodies.
+   var changed=moved||mode.x==0u||(stamp[MR_VALID+region]&1u)==0u;
+   if(mode.x==1u){changed=changed||(!cold&&mrBodyNear(region));}
+   if(mode.x==2u){changed=changed||!cold||mrBodyNear(region);}
+   stamp[MR_CHANGED+region]=select(0u,1u,changed)|select(0u,2u,moved||!cold);
+  }
+  workgroupBarrier();
+ }
+}
+// A region within one region (Chebyshev) of a changed one is dirty: its
+// seeds or the slots its sweeps read (two sweeps reach 8h) changed. One
+// within two is a halo. A full encode's regions are dirty, and those within
+// one region of a hot one also publish the old payload (3), as do a held
+// encode's dirty ones. A clean or halo region is held (+8) where its slots
+// are not final (a held encode's all are not): it publishes its held values
+// for unknown faces, and a held halo seeds (its dirty neighbours' sweeps
+// read its seeds) instead of copying. The states follow each slot array's
+// slots, then whether any region is dirty; the work words say whether any
+// is dirty or publishes the old payload.
+@compute @workgroup_size(64) fn classifyRegions(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var region=gid.x;region<UM_PAGES;region+=64u*groups.x){
+  var state=2u;let origin=vec3i(4u*umPageCoord(region));
+  if(mode.x!=0u){
+   state=0u;let top=select(2u,3u,mode.x==2u);
+   for(var k=0u;k<125u&&state<top;k++){
+    let d=vec3i(i32(k%5u),i32((k/5u)%5u),i32(k/25u))-vec3i(2);
+    let t=umTileKey(origin+4*d);if(!umKeyStored(t)){continue;}
+    let bits=stamp[MR_CHANGED+umPageOfTile(t)];let near=all(abs(d)<=vec3i(1));
+    if((bits&1u)!=0u){state=max(state,select(1u,2u,near));}
+    if(mode.x==2u&&near&&(bits&2u)!=0u){state=3u;}
+   }
+  }else{
+   for(var k=0u;k<27u&&state<3u;k++){
+    let d=vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);
+    let t=umTileKey(origin+4*d);if(!umKeyStored(t)){continue;}
+    if((stamp[MR_CHANGED+umPageOfTile(t)]&2u)!=0u){state=3u;}
+   }
+  }
+  let valid=stamp[MR_VALID+region];let held=state<2u&&(mode.x==2u||(valid&2u)==0u);
+  stamp[MR_VALID+region]=select(select(valid,valid&1u,held),3u,state>=2u);
+  let value=vec2f(f32(state+select(0u,8u,held)),f32(mode.y));
+  slots0[arrayLength(&slots0)-UM_PAGES-1u+region]=value;slots1[arrayLength(&slots1)-UM_PAGES-1u+region]=value;
+  // Any dirty region: the head restricts and publishes (stampRegions cleared it).
+  if(state>=2u){slots0[arrayLength(&slots0)-1u]=vec2f(1.0,0.0);slots1[arrayLength(&slots1)-1u]=vec2f(1.0,0.0);atomicStore(&work[0],1u);}
+  if(state==3u){atomicStore(&work[1],1u);}
+ }
+}
+`;
+  const module=this.device.createShaderModule({label:"Uniform mixed extension regions",code});
+  const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.markLayout]});
+  const [stamp,classify]=await Promise.all(["stampRegions","classifyRegions"].map(entryPoint=>this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}})));
+  this.markPipelines={stamp:stamp!,classify:classify!};
+ }
+ /** Marks every region's state for this swept encode (regional: keep the
+  * clean ones) and stamps the topology it runs on. */
+ private encodeMarks(pass:GPUComputePassEncoder,mark:"full"|"regional"|"held",parity:number):void{
+  if(!this.markPipelines||!this.markGroups)throw new Error("Mixed extension regions are not initialized");
+  const regions=this.ownership.capacity.tiles/64;
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.markGroups[mark==="full"?0:mark==="regional"?1+parity:3+parity]!);
+  pass.setPipeline(this.markPipelines.stamp);pass.dispatchWorkgroups(Math.min(65535,regions));
+  pass.setPipeline(this.markPipelines.classify);pass.dispatchWorkgroups(Math.min(65535,ceilDiv(regions,64)));
+ }
+ destroy():void{this.held?.destroy();this.stamp.destroy();this.work.destroy();this.noBodies.destroy();for(const b of this.modes)b.destroy();this.alwaysLive.destroy();}
  async initialize():Promise<void>{
+  const marks=this.regularBulk?undefined:this.initializeMarks();
   const source=uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> stateIn:array<vec2f>;
 @group(1) @binding(1) var<storage,read_write> stateOut:array<vec2f>;
@@ -183,6 +404,9 @@ export class UniformMixedExtension {
 @group(1) @binding(11) var coarseOut:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(12) var originsOut:texture_storage_3d<rgba32uint,write>;
 @group(1) @binding(13) var<storage,read_write> boundary:array<f32>;
+@group(1) @binding(17) var<uniform> ueLiveGate:vec4u;
+// The frame's live sample count is nonzero (a uniform: barrier-safe exits).
+fn ueParticlesLive()->bool{return ueLiveGate.x!=0u;}
 ${uniformMixedFaceAddressWGSL}
 const UM_INF=1e20;
 // A closed positive domain wall (the cell across the face is SOLID) is the
@@ -239,9 +463,8 @@ fn umLoadMixedFace(p:vec3i,axis:u32)->f32{return stateIn[umSlot(p,axis,1u)].x;}
 // seed would be distance INF (a source face needs a liquid owner, which the
 // support dilates around), and a value beside an infinite distance is never
 // consumed. A slot is read only as the patch of that width at that anchor,
-// which its owner writes every pass. The arrays are the frame's stage
-// scratch: a slot no pass of this extension wrote holds another stage's
-// words.
+// which its owner writes every pass of a dirty region (ueRegionState). A
+// slot no pass wrote holds an earlier encode's words.
 fn umSlotState(anchor:vec3i,axis:u32,width:u32)->vec2f{
  let tile=umTileAt(vec3u(max(anchor,umWallLow()))/4u);
  // The support word loads beside the slot's address (a unit slot's tile word).
@@ -402,6 +625,59 @@ fn umSeedState(face:UMFace,owner:UMOwner)->vec2f{
 // never revisits a domain-wall patch (seed-only). Exact for any sweep count.
 fn ueSeedStore(slot:u32,value:vec2f){stateOut[slot]=value;stateIn[slot]=value;}
 fn ueSweepStore(slot:u32,value:vec2f){if(value.y<0.5*UM_INF&&value.y!=0.0){stateOut[slot]=value;}}
+// The regional rebuild (UniformMixedExtension's mark passes): each slot
+// array ends in a word per 16h region, 2 dirty (seeded and swept), 1 halo or
+// 0 clean (its slots stay the last swept encode's final ones).
+// A halo region is clean and within a region of a dirty one: its seed jobs
+// copy their tile's final slots into the other array, so a dirty tile's
+// sweeps read its neighbours' slots in either parity. Clean tiles do
+// nothing. A full encode marks every region dirty.
+// The word's y names the array holding the final slots (the sweep count's
+// parity): array 0 after an even count, array 1 after an odd one.
+fn ueRegionWord(tile:u32)->vec2f{return stateIn[arrayLength(&stateIn)-UM_PAGES-1u+umPageOfTile(tile)];}
+// The head's restriction and publication (only theirs: the companion,
+// snapshot and replay variants read other slots or write other fields) keep
+// what the last swept encode left where nothing is dirty. Their last writer
+// before a regional head is the tail's current restriction and publication
+// of these same retained slots (UniformMixedExtension.encode).
+override ueRegionalRetain:bool=false;
+// The tail's old-payload restriction: only the regions publishing it (3);
+// the rest keep their texels, the last restriction's.
+override ueOldPayload:bool=false;
+fn ueRestrictDirty(tile:u32)->bool{if(ueOldPayload){return ueRegionState(tile)>=3u;}return !ueRegionalRetain||ueRegionDirty(tile);}
+// No region is dirty: the last publication stands.
+fn ueQuiet()->bool{return ueRegionalRetain&&stateIn[arrayLength(&stateIn)-1u].x==0.0;}
+var<workgroup> ueQuietWord:u32;
+fn ueQuietUniform(lane:u32)->bool{if(lane==0u){ueQuietWord=select(0u,1u,ueQuiet());}return workgroupUniformLoad(&ueQuietWord)!=0u;}
+fn ueRegionState(tile:u32)->u32{return u32(ueRegionWord(tile).x)&7u;}
+// A held region (clean or halo, its slots not final: the marks' +8) publishes
+// its held values for unknown faces; a held halo (9) seeds.
+fn ueRegionHeld(tile:u32)->bool{return ${this.regularBulk?"false":"ueRegionWord(tile).x>=8.0"};}
+fn ueRegionSeedHeld(tile:u32)->bool{return ${this.regularBulk?"false":"ueRegionWord(tile).x==9.0"};}
+fn ueRegionDirty(tile:u32)->bool{return ueRegionState(tile)>=2u;}
+// A seed launch binds array 1 as stateIn and array 0 as stateOut: the final
+// slot into the other array.
+fn ueHaloMove(slot:u32,odd:bool){if(odd){stateOut[slot]=stateIn[slot];}else{stateIn[slot]=stateOut[slot];}}
+fn ueHaloCoarse(tile:u32){
+ let odd=ueRegionWord(tile).y!=0.0;
+ for(var axis=0u;axis<3u;axis++){ueHaloMove(UE_COARSE+axis*UE_TILES+tile,odd);}
+ ueHaloMove(UE_FLAGS+2u*tile,odd);ueHaloMove(UE_FLAGS+2u*tile+1u,odd);
+}
+// Every slot a tile's seed writes, a lane each: an h tile's 240 unit slots
+// (its own, and the 4h tiles' below it), a 4h tile's unit patches in the h
+// tiles above it, its width-4 patches and mask words. Domain-wall slots are
+// seeded into both arrays and never swept or tagged: they already agree.
+fn ueHaloTile(tile:u32,lane:u32){
+ let word=umTopology[tile];let odd=ueRegionWord(tile).y!=0.0;
+ if((word&0x80000000u)!=0u){
+  let base=UE_UNIT+15u*((word&0x3fffffffu)>>2u);
+  for(var i=lane;i<240u;i+=64u){ueHaloMove(base+i,odd);}
+ }else if(lane<48u){
+  let axis=lane/16u;var above=vec3i(umTileCoord(tile));above[axis]+=1;
+  if(umTilePresent(above)){let upper=umTopology[umTileAt(vec3u(above))];if((upper&0x80000000u)!=0u){ueHaloMove(UE_UNIT+15u*((upper&0x3fffffffu)>>2u)+192u+lane,odd);}}
+ }
+ if(lane==48u){ueHaloCoarse(tile);}
+}
 // Negative domain-wall patches are never swept: the seed writes them once.
 // Returns whether its distance is finite.
 fn umSeedWall(face:UMFace,owner:UMOwner)->bool{
@@ -506,8 +782,12 @@ fn ueCellLive(local:vec3u,edge:u32,flags:u32)->bool{
 // edge neighbour). A corner tile's mask reaches none of its faces.
 fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
  if(lane==0u){
+  // UM_TILES: no job; above it, a seed's halo tile (UM_TILES + 1 + tile).
   var index=UM_TILES;
-  if(owner.width!=0u&&(umTileSupport(owner.tile)&2u)!=0u&&(seed||ueOpen(owner.tile))){index=owner.tile;}
+  if(owner.width!=0u&&(umTileSupport(owner.tile)&2u)!=0u&&(seed||ueOpen(owner.tile))){
+   let region=ueRegionState(owner.tile);
+   if(region>=2u||(seed&&ueRegionSeedHeld(owner.tile))){index=owner.tile;}else if(seed&&region==1u){index=UM_TILES+1u+owner.tile;}
+  }
   ueJob=vec4u(umTileCoord(owner.tile),index);
   if(!seed&&(ueMixedJobs||ueSweepKind==1u)&&index<UM_TILES){ueJobRecipe=umTileStencil(index);}
   atomicStore(&ueLive,0u);atomicStore(&ueNew[0],0u);atomicStore(&ueNew[1],0u);
@@ -515,7 +795,7 @@ fn ueStage(owner:UMOwner,lane:u32,seed:bool,fine:bool)->bool{
  let job=workgroupUniformLoad(&ueJob);
  if(ueMixedJobs){uePick=vec4u(job.xyz,0u);ueRecipe=ueJobRecipe;}
  if(ueSweepKind==1u){ueRecipe=ueJobRecipe;}
- if(job.w>=UM_TILES){return false;}
+ if(job.w>=UM_TILES){if(job.w>UM_TILES){ueHaloTile(job.w-UM_TILES-1u,lane);}return false;}
  if(seed){return true;}
  if(lane<27u){
   let t=vec3i(job.xyz)+vec3i(umCorner(lane,3u))-vec3i(1);var width=0u;var mask=vec2u(0u);var word=0u;
@@ -724,12 +1004,14 @@ fn ueSeedOwner(owner:UMOwner)->vec3u{
 }
 @compute @workgroup_size(64) fn seedList(@builtin(global_invocation_id) gid:vec3u){
  let owner=ueOwner(gid);if(owner.width==0u||(umTileSupport(owner.tile)&2u)==0u){return;}
+ // A regular 4h owner's slots are its width-4 patches and mask words.
+ let region=ueRegionState(owner.tile);if(region<2u&&!ueRegionSeedHeld(owner.tile)){if(region==1u){ueHaloCoarse(owner.tile);}return;}
  let seeded=ueSeedOwner(owner);ueMaskOut(owner.tile,seeded.xy,true,seeded.z!=0u);
 }
 // A regular 4h owner's faces are single width-4 patches: every slot they
 // read lies in its tile or a face neighbour (ueFaceLive, width 4).
 fn ueSweepPack(owner:UMOwner){
- if(owner.width==0u||(umTileSupport(owner.tile)&2u)==0u||!ueOpen(owner.tile)){return;}
+ if(owner.width==0u||(umTileSupport(owner.tile)&2u)==0u||!ueOpen(owner.tile)||!ueRegionDirty(owner.tile)){return;}
  let t=vec3i(umTileCoord(owner.tile));let own=ueMaskIn(owner.tile);var live=any(own!=vec2u(0u));
  for(var n=0u;n<6u;n++){
   if(live){break;}
@@ -864,7 +1146,7 @@ fn ueSweepCoarsePack(first:u32,count:u32,lane:u32){
   var job=vec4u(0u,0u,0u,UM_TILES);
   if(first+lane<count){
    let owner=ueSeamCoarseJob(first+lane);
-   if(owner.width!=0u&&ueOpen(owner.tile)){job=vec4u(umTileCoord(owner.tile),owner.tile);}
+   if(owner.width!=0u&&ueOpen(owner.tile)&&ueRegionDirty(owner.tile)){job=vec4u(umTileCoord(owner.tile),owner.tile);}
   }
   if(job.w<UM_TILES){uePackRecipes[lane]=umTileStencil(job.w);}
   uePackJobs[lane]=job;atomicStore(&uePackLive[lane],0u);atomicStore(&uePackNew[2u*lane],0u);atomicStore(&uePackNew[2u*lane+1u],0u);
@@ -949,7 +1231,8 @@ var<workgroup> rbFlags:array<u32,192>;
 @compute @workgroup_size(64,3) fn restrictBand(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_id) id:vec3u){
  // A key that holds no page (a free block, a sentinel) restricts and stores nothing.
  let tile=64u*group.x+id.x;let component=id.y;let at=id.x+64u*component;
- let inside=umBlockStored(tile>>9u)&&umTileLive(tile);let gid=umTileCoord(tile);let origin=vec3i(gid)*4;
+ // A clean region keeps its texels of the last restriction (ueRegionalRetain).
+ let inside=umBlockStored(tile>>9u)&&umTileLive(tile)&&ueRestrictDirty(tile);let gid=umTileCoord(tile);let origin=vec3i(gid)*4;
  // Off the extension support every face keeps its seed distance, and a
  // source face needs a liquid owner, which the support dilates around: no
  // face here is finite, so the restriction is the empty one written below.
@@ -1025,10 +1308,24 @@ fn umFarValueStaged(face:UMFace)->f32{
 // the lanes, then read by all of them.
 var<workgroup> farAsked:atomic<u32>;
 var<workgroup> farRequired:u32;
+@group(1) @binding(18) var<storage,read_write> ueHeld:array<f32>;
+fn ueHeldLoad(slot:u32)->f32{return ueHeld[slot];}
+fn ueHeldStore(slot:u32,value:f32){ueHeld[slot]=value;}
+fn ueHeldKept(slot:u32,value:f32)->f32{ueHeldStore(slot,value);return value;}
+// A held region's face: its seed where it is a source (the physical value a
+// swept publication takes there too), else its held value.
+fn ueHeldFace(face:UMFace,owner:UMOwner,slot:u32)->f32{
+ if((umTileSupport(owner.tile)&2u)!=0u&&umSource(face,owner)){return umPhysical(face);}
+ return ueHeldLoad(slot);
+}
+fn ueHeldFine(owner:UMOwner,value:vec4f,held:bool){if(!held){for(var axis=0u;axis<3u;axis++){ueHeldStore(ueOwnSlot(owner,axis),value[axis]);}}}
 fn umPublished(face:UMFace)->f32{
  if(umFaceLow(face.anchor,face.axis)||umClosedWall(face)){return umPhysical(face);}
- ${this.regularBulk?"if(umSource(face,umOwnerAt(face.anchor))){return umPhysical(face);}":"let slot=umSlotState(face.anchor,face.axis,face.width);if(slot.y<0.5*UM_INF){return slot.x;}"}
- return umFarValue(face);
+ ${this.regularBulk?`if(umSource(face,umOwnerAt(face.anchor))){return umPhysical(face);}
+ return umFarValue(face);`:`let slotIndex=umSlot(face.anchor,face.axis,face.width);
+ if(ueRegionHeld(umTileAt(vec3u(face.anchor)/4u))){return ueHeldFace(face,umOwnerAt(face.anchor),slotIndex);}
+ let slot=umSlotState(face.anchor,face.axis,face.width);if(slot.y<0.5*UM_INF){return ueHeldKept(slotIndex,slot.x);}
+ return ueHeldKept(slotIndex,umFarValue(face));`}
 }
 fn uePublishFine(owner:UMOwner,lane:u32){
  if(lane==0u){farTile=select(UM_TILES,owner.tile,owner.width!=0u);atomicStore(&farAsked,0u);}
@@ -1037,10 +1334,13 @@ fn uePublishFine(owner:UMOwner,lane:u32){
  // Many h tiles already have every component: they publish these exact
  // values without loading or decoding the 27-cell fallback neighborhood.
  let origin=umOrigin(owner);let low=umLowOpen(vec3i(origin));var value=vec4f(0);var needsFar=0u;
+ // A job is one tile: held or not, its lanes agree.
+ let held=ueRegionHeld(farTile);
  for(var axis=0u;axis<3u;axis++){
   if(low[axis]){let face=umUnitExtensionFace(owner,axis,-1);boundary[umLowFaceIndex(origin,axis)]=umPhysical(face);}
   let face=umUnitExtensionFace(owner,axis,1);${this.regularBulk?"let slot=select(vec2f(0,UM_INF),vec2f(umPhysical(face),0),umSource(face,owner));":"let slot=select(vec2f(0.0,UM_INF),stateIn[ueOwnSlot(owner,axis)],(umTileSupport(owner.tile)&2u)!=0u);"}
   if(umClosedWall(face)){value[axis]=umPhysical(face);}
+  else if(held){value[axis]=ueHeldFace(face,owner,ueOwnSlot(owner,axis));}
   else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
   else{needsFar|=1u<<axis;}
  }
@@ -1048,7 +1348,7 @@ fn uePublishFine(owner:UMOwner,lane:u32){
  workgroupBarrier();
  if(lane==0u){farRequired=atomicLoad(&farAsked);atomicStore(&farAsked,0u);}
  let required=workgroupUniformLoad(&farRequired);
- if(required==0u){value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;}
+ if(required==0u){ueHeldFine(owner,value,held);value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;}
  if(lane<27u){
   let texel=umTileStoreTexel(vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1));farKnown[lane]=0u;
   if(texel.x>=0){let state=textureLoad(coarse,texel,0);farState[lane]=state;farKnown[lane]=u32(round(state.w))&7u;}
@@ -1058,9 +1358,10 @@ fn uePublishFine(owner:UMOwner,lane:u32){
   if((needsFar&(1u<<axis))==0u){continue;}
   let face=umUnitExtensionFace(owner,axis,1);value[axis]=umFarValueStaged(face);
  }
- value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);
+ ueHeldFine(owner,value,held);value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);
 }
 @compute @workgroup_size(64) fn publishFine(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(ueQuietUniform(lane)){return;}
  uePublishFine(umOwner(gid),lane);
 }
 var<workgroup> publishCoarseState:array<vec2f,192>;
@@ -1081,7 +1382,7 @@ fn uePublishCoarse(owner:UMOwner,lane:u32){
 // h seam owners publish through uePublishFine (the same values: umPublished
 // per unit face, with the staged far value); 4h seam tiles through uePublishCoarse.
 @compute @workgroup_size(64) fn publishSeams(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane==0u){ueLaunch=ueLaunchCounts();}
+ if(lane==0u){ueLaunch=select(ueLaunchCounts(),vec3u(0u),ueQuiet());}
  let counts=workgroupUniformLoad(&ueLaunch);
  for(var job=group.x;job<counts.x+counts.y;job+=groups.x){
   if(job<counts.x){uePublishFine(ueSeamFineJob(job,lane),lane);}
@@ -1090,6 +1391,7 @@ fn uePublishCoarse(owner:UMOwner,lane:u32){
  }
 }
 ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPublished(face)",false,"value.w=textureLoad(physical,ownedFace.anchor,0).w;","ueOwner"),"let origin=umOrigin(owner);",`let origin=umOrigin(owner);
+ if(ueQuiet()){return;}
  // A regular 4h owner (one-width 3x3x3 stencil) has one width-4 patch per
  // positive face, anchored at origin+3e_axis, and each of those texels holds
  // only that component (no other positive face shares the anchor). Its far
@@ -1100,15 +1402,17 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
  // general dispatch below, without the face search.
  if(ueRegularCoarseList){
   let cell=(umBlockCoord(owner.tile>>9u)<<vec3u(3u))|vec3i(umLocalTile(owner.tile));let state=textureLoad(coarse,cell,0);let mask=u32(round(state.w));
-  let low=umLowOpen(vec3i(origin));
+  let low=umLowOpen(vec3i(origin));let held=ueRegionHeld(owner.tile);
   for(var axis=0u;axis<3u;axis++){
    if(low[axis]){let i=umLowFaceIndex(origin,axis);boundary[i]=negative[i];}
    var anchor=vec3i(origin);anchor[axis]+=3;
-   let slot=umSlotState(anchor,axis,4u);let physicalAt=textureLoad(physical,anchor,0);var value=vec4f(0);
+   let slot=umSlotState(anchor,axis,4u);let physicalAt=textureLoad(physical,anchor,0);var value=vec4f(0);let slotIndex=umSlot(anchor,axis,4u);
    // umClosedWall: a closed positive domain wall publishes its physical value.
    if(umAcrossKind(anchor,axis,1)==UM_SOLID){value[axis]=physicalAt[axis];}
+   else if(held){value[axis]=ueHeldFace(umFace(owner,axis,1,0u),owner,slotIndex);}
    else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
    else if((mask&(1u<<axis))!=0u){value[axis]=state[axis];}
+   if(!held){ueHeldStore(slotIndex,value[axis]);}
    value.w=physicalAt.w;textureStore(output,anchor,value);
   }
   return;
@@ -1126,14 +1430,17 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   const module=uniformDetailModule(this.device,{label:"Uniform mixed extension",code:source});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  this.restrictPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX}}});
+  // Only the main restriction and publication retain clean regions (bulk never marks).
+  const regionalRetain=+!this.regularBulk;
+  this.restrictPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"restrictBand",constants:{umDispatchX:this.ownership.dispatchX,ueRegionalRetain:regionalRetain}}});
   await Promise.all((this.regularBulk?["publish"]:["seed","sweep","publish"]).map(async entryPoint=>{
-   const compile=(width:number,counted:number,name:string,list=false)=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:name,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:1,umRegularFine:+(width===1),ueRegularCoarseList:+list,umCountedJobs:counted,ueStagedTiles:+(entryPoint==="sweep"&&!list)}}});
+   const retain:Record<string,number>=entryPoint==="publish"?{ueRegionalRetain:regionalRetain}:{};
+   const compile=(width:number,counted:number,name:string,list=false)=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:name,constants:{umDispatchX:this.ownership.dispatchX,umCellWidth:width,umRegularTiles:1,umRegularFine:+(width===1),ueRegularCoarseList:+list,umCountedJobs:counted,ueStagedTiles:+(entryPoint==="sweep"&&!list),...retain}}});
    const C=UNIFORM_MIXED_COUNTED;
    this.regularPipelines.set(entryPoint,await compile(1,C.owners,entryPoint==="publish"?"publishFine":entryPoint));
    this.listPipelines.set(entryPoint,await compile(4,C.regularCoarse,`${entryPoint}List`,true));
    // The seam launch reads no launch constant; a sweep's tile jobs stage their tiles.
-   this.seamPipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:`${entryPoint}Seams`,constants:entryPoint==="sweep"?{ueStagedTiles:1,ueMixedJobs:1,ueSweepKind:2}:{}}}));
+   this.seamPipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:`${entryPoint}Seams`,constants:entryPoint==="sweep"?{ueStagedTiles:1,ueMixedJobs:1,ueSweepKind:2}:retain}}));
    if(entryPoint==="sweep")this.fineSeamSweep=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"sweepSeams",constants:{ueStagedTiles:1,ueMixedJobs:0,ueSweepKind:1,ueStagePack:1,ueCacheFineRequests:1}}});
   }));
   if(this.supportsPair){
@@ -1169,12 +1476,21 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
    const snapshot=uniformDetailModule(this.device,{label:"Uniform mixed extension slot snapshot",code:pairedSnapshotSource(pairedSource,true)});
    const snapshotErrors=(await snapshot.getCompilationInfo()).messages.filter(m=>m.type==="error");if(snapshotErrors.length)throw new Error(snapshotErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const snapshotLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.snapshotResources!]});
-   const make=(entryPoint:string)=>uniformDetailPipeline(this.device,this.ownership,{layout:snapshotLayout,compute:{module:snapshot,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,ueCompanionValues:1}}});
+   const make=(entryPoint:string)=>uniformDetailPipeline(this.device,this.ownership,{layout:snapshotLayout,compute:{module:snapshot,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,ueCompanionValues:1,ueOldPayload:1}}});
    const [restrict,fine,coarse]=await Promise.all([make("restrictBand"),make("snapshotFine"),make("snapshotCoarse")]);this.snapshotPipelines={restrict,fine,coarse};
   }
+  await marks;
  }
- encode(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2,replayHierarchy=false):void{
-  this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,replayHierarchy);
+ /** regional: seed and sweep only the changed regions (not COLD now or at
+  * the last swept encode, or a stamped topology word or support bit moved)
+  * and those beside them (dirty), keeping the final slots of the rest; the
+  * restriction and publication keep the rest's texels, the hierarchy stays
+  * whole. A full encode where the last one's slots are not retained or its
+  * sweep count's parity differs. The caller asks only where the last swept
+  * encode's velocity and parameters still hold (a frame's head after the
+  * last tail: phase moves only where phi did, in non-COLD regions). */
+ encode(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2,replayHierarchy=false,regional=false):void{
+  this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,replayHierarchy,undefined,false,regional);
  }
  /** Before forces/pressure, retain old canonical values in both companion
   * epochs. Their inactive particle bank stays untouched until G2P resampling.
@@ -1201,14 +1517,16 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
   const pass=encoder.beginComputePass(SNAPSHOT_PASS),p=this.snapshotPipelines,o=this.ownership;
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);pass.setPipeline(uniformDetailPick(p.restrict));
-  pass.dispatchWorkgroups(8*this.address.blocks);this.hierarchy.encode(pass,false);
+  // The old payload's hierarchy runs only where a region publishes it
+  // (gate 2); with none, the current one prolongs instead of replaying.
+  pass.dispatchWorkgroups(8*this.address.blocks);this.hierarchy.encode(pass,false,2);
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);
   // The fine publisher grid-strides its live tile list; cap empty launch groups.
   if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(p.fine));pass.dispatchWorkgroups(Math.min(8192,o.capacity.fineTiles));}
   const count=ceilDiv(3*o.capacity.tiles,64);pass.setPipeline(uniformDetailPick(p.coarse));pass.dispatchWorkgroups(Math.min(65535,count),ceilDiv(count,65535));pass.end();
   this.snapshotEncoder=encoder;this.snapshotSweeps=sweeps;
  }
- private encodeStages(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps:number,replayHierarchy:boolean,mode?:"pair"|"companion"|"current",replayPublication=false):void{
+ private encodeStages(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps:number,replayHierarchy:boolean,mode?:"pair"|"companion"|"current",replayPublication=false,regional=false):void{
   if(this.seamPipelines.size!==(this.regularBulk?1:3)||!this.restrictPipeline)throw new Error("Mixed extension is not initialized");
   if(!Number.isSafeInteger(sweeps)||sweeps<0)throw new Error("Invalid mixed extension sweep count");
   // Bulk extension uses only the regular hierarchy. Its restriction reads
@@ -1216,11 +1534,23 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   const swept=!this.regularBulk&&mode!=="companion"&&mode!=="current";
   if(mode==="pair"&&!swept)return;
   // One pass: seed, sweeps, restriction, the hierarchy continuation, publish.
+  if(swept){
+   // Final slots: groups[sweeps%2]'s stateIn, array sweeps%2.
+   // The tail's pair encode holds its quiet regions once every region's
+   // validity word is current (heldReady): their slots are not retained.
+   const parity=sweeps%2,marks=encoder.beginComputePass(MARK_PASS);regional=regional&&this.retained&&this.retainedParity===parity;
+   const held=mode==="pair"&&this.heldReady;this.encodeMarks(marks,held?"held":regional?"regional":"full",parity);marks.end();
+   this.retained=true;this.retainedParity=parity;this.heldReady=true;this.heldTail=held;
+  }
   const pass=encoder.beginComputePass(EXTENSION_PASS);pass.setBindGroup(0,this.ownership.bindGroup);
   if(swept){this.encodeStage(pass,"seed",groups[1],mode,replayPublication);for(let i=0;i<sweeps;i++)this.encodeStage(pass,"sweep",groups[i%2]!,mode,replayPublication);}
   if(mode==="pair"){pass.end();return;}
   const final=groups[sweeps%2]!;this.encodeStage(pass,"restrictBand",final,mode,replayPublication);
-  this.hierarchy.encode(pass,replayHierarchy);pass.setBindGroup(0,this.ownership.bindGroup);this.encodeStage(pass,"publish",final,mode,replayPublication);pass.end();
+  // A regional encode without a dirty region keeps the hierarchy (gate 1).
+  // The tail's current payload replays the old one's selections where the
+  // old payload was published (gate 2), else prolongs.
+  // A held tail's likewise.
+  this.hierarchy.encode(pass,replayHierarchy,(swept&&regional)||(mode==="current"&&this.heldTail)?1:0,mode==="current"&&replayHierarchy?2:0);pass.setBindGroup(0,this.ownership.bindGroup);this.encodeStage(pass,"publish",final,mode,replayPublication);pass.end();
  }
  /** One stage of encodeStages' pass. A method, not a closure there: a closure is a fresh object every frame. */
  private encodeStage(pass:GPUComputePassEncoder,entry:string,group:UniformDetailGroup,mode:"pair"|"companion"|"current"|undefined,replayPublication:boolean):void{

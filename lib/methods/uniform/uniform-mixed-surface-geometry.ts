@@ -6,7 +6,7 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformVolumeTargetWGSL } from "./uniform-volume.wgsl";
 import { uniformSurfacePlaneWGSL } from "./uniform-surface-plane.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
-import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 import type { UniformSurfaceWorkControl } from "./uniform-surface-work-control";
 
@@ -16,7 +16,11 @@ const CHANGED_GRID=4096;
 const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 const GEOMETRY_PASS:GPUComputePassDescriptor={label:"Uniform mixed geometric fill"};
 /** encode()'s options when none are given: a full launch of the simulation geometry. */
-const NO_OPTIONS:{readonly pressure?:boolean;readonly changed?:GPUBuffer}={};
+const NO_OPTIONS:{readonly pressure?:boolean;readonly changed?:GPUBuffer;readonly bodies?:boolean}={};
+/** Workgroups of the body launch's region grid at most (grid-stride). */
+const BODY_REGION_GRID=1024;
+/** Retained h-normal slots at most (normalBytesAt): one owner tag each. */
+const RETAINED_FINE_TILES=8192;
 
 /** The planar-exact fill rule on mixed owners (corner tetrahedra elsewhere). Target
  * fractions are intensive, phi is physical, and no fine cell is expanded.
@@ -55,7 +59,7 @@ export class UniformMixedSurfaceGeometry {
   get normalBinding():GPUBufferBinding{if(!this.normalBuffer)throw new Error("Persistent geometry normals require work control");return {buffer:this.normalBuffer};}
   /** Retain at most 8192 fine tiles; coarse records use physical tile keys.
    * Fine overflow is evaluated in the force stage's original borrowed scratch. */
-  normalBytesAt(fineTiles:number):number{return 16*(64*Math.min(fineTiles,8192)+this.ownership.capacity.tiles);}
+  normalBytesAt(fineTiles:number):number{return 16*(64*Math.min(fineTiles,RETAINED_FINE_TILES)+this.ownership.capacity.tiles);}
   /** Between frames; callers rebuild geometry and force groups when true. */
   reserveNormals(fineTiles:number):boolean{
     if(!this.workControl)return false;const bytes=this.normalBytesAt(fineTiles);if(this.normalBuffer?.size===bytes)return false;
@@ -68,14 +72,19 @@ export class UniformMixedSurfaceGeometry {
   get countersOffset():number{return 8;}
   private pipeline?:GPUComputePipeline;
   private normalCandidatesPipeline?:GPUComputePipeline;
+  private normalTagsPipeline?:GPUComputePipeline;
   private pressurePipeline?:GPUComputePipeline;
   /** Solid-free twins (umSolidFree) of the full launches, launched ahead of
    * them where the stage has a solid library: see umSolidSkip. */
   private freePipelines:GPUComputePipeline[]=[];
   private readonly changedPipelines:GPUComputePipeline[]=[];
+  /** compactBodies: the swept-body regions' tiles, listed for geometryChanged. */
+  private bodiesPipeline?:GPUComputePipeline;
   private readonly resources:GPUBindGroupLayout;
   private readonly mirrorResources:GPUBindGroupLayout;
   private mirrorPipeline?:GPUComputePipeline;
+  /** The body launch's mirror: its listed owners only. */
+  private mirrorListedPipeline?:GPUComputePipeline;
   private readonly mirrorGroups=new WeakMap<UniformDetailGroup,UniformDetailGroup>();
   /** [h count, 4h count, 2 unused, the marked h tiles, the marked 4h tiles]. */
   private readonly changes:GPUBuffer;
@@ -93,7 +102,9 @@ export class UniformMixedSurfaceGeometry {
     this.changes=device.createBuffer({label:"Uniform mixed geometry changed tiles",size:4*(4+2*tiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.listResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     if(workControl){
-      this.curvatureDirty=device.createBuffer({label:"Uniform pending 16h curvature changes",size:16*workControl.regions+4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+      // Behind the force stage's 4*regions+1 words: the retained h-normal
+      // slots' owner tags (normalTags).
+      this.curvatureDirty=device.createBuffer({label:"Uniform pending 16h curvature changes",size:16*workControl.regions+4+4*RETAINED_FINE_TILES,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
       this.reserveNormals(ownership.capacity.fineTiles);
     }
     this.resources=uniformDetailBindLayout(device,{entries:[
@@ -105,6 +116,7 @@ export class UniformMixedSurfaceGeometry {
     this.mirrorResources=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
+      {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
     ]});
   }
   bind(phi:GPUTexture,targetFill:GPUTexture,centerPhi:GPUTexture,pressure:{target:GPUTexture;centerPhi:GPUTexture},mirror:GPUTexture):UniformDetailGroup{
@@ -118,7 +130,7 @@ export class UniformMixedSurfaceGeometry {
       {binding:5,resource:{buffer:this.changes}},
       ...(this.workControl?[{binding:6,resource:{buffer:this.workControl.geometry}},{binding:7,resource:this.normalBinding},{binding:8,resource:{buffer:this.curvatureDirty!}}]:[]),
     ]});
-    this.mirrorGroups.set(group,uniformDetailGroup(this.device,{layout:this.mirrorResources,entries:[{binding:0,resource:targetFill},{binding:1,resource:mirror}]}));
+    this.mirrorGroups.set(group,uniformDetailGroup(this.device,{layout:this.mirrorResources,entries:[{binding:0,resource:targetFill},{binding:1,resource:mirror},{binding:2,resource:{buffer:this.changes}}]}));
     return group;
   }
   async initialize():Promise<void>{
@@ -201,6 +213,22 @@ ${this.workControl?`@compute @workgroup_size(64) fn normalCandidates(@builtin(gl
   candidate=candidate||atomicLoad(&gcWork[other])!=0u;topology=topology||atomicLoad(&gcWork[${this.workControl.topologyWordOffset}u+other])!=0u;
  }}}
  if(candidate){atomicStore(&gcNormalDirty[region],1u);}if(topology){atomicStore(&gcNormalDirty[3u*UM_PAGES+region],1u);}
+}
+// The retained h normals are indexed by owner rank (h tiles in ascending
+// key): a relayout adding or removing any h tile shifts every later tile's
+// slot, where only the changed tiles' neighbourhoods are marked. Each slot
+// is tagged with the tile (key + 1) whose normals it holds; a tile in a slot
+// tagged otherwise marks its region's normals topology-changed (the force
+// stage then re-evaluates and rewrites them) and takes the slot.
+const GC_NORMAL_TAGS:u32=4u*UM_PAGES+1u;
+@compute @workgroup_size(64) fn normalTags(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let count=min(umCounts.x,${RETAINED_FINE_TILES}u);
+ for(var j=gid.x;j<count;j+=64u*groups.x){
+  let tile=umTopology[UM_TILES+j];let slot=(umTopology[tile]&0x3fffffffu)/64u;
+  if(slot>=${RETAINED_FINE_TILES}u||atomicLoad(&gcNormalDirty[GC_NORMAL_TAGS+slot])==tile+1u){continue;}
+  atomicStore(&gcNormalDirty[GC_NORMAL_TAGS+slot],tile+1u);
+  let region=umPageOfTile(tile);atomicStore(&gcNormalDirty[region],1u);atomicStore(&gcNormalDirty[3u*UM_PAGES+region],1u);
+ }
 }`:""}
 fn gcOwner(owner:UMOwner,terms:bool){
  let origin=umOrigin(owner);
@@ -240,14 +268,18 @@ fn gcOwner(owner:UMOwner,terms:bool){
 // Changed tiles: the adopted generation's dilated list (each tile once),
 // split by width. One lane per entry over a grid of the list's bound.
 ${uniformMixedChangedTilesWGSL(tiles,this.solid?3:2,0)}
-@compute @workgroup_size(64) fn compactChanged(@builtin(global_invocation_id) gid:vec3u){
- let i=gid.x+umDispatchX*64u*gid.y;if(i>=umDilatedCount()){return;}
- let tile=umDilatedTile(i);
- // Changed geometry writes simulation outputs independently of the last full
- // certificate. Invalidate only these tiles; a zero-count list costs no reuse.
+// A listed tile: its region's controller words dirty and its snapshot
+// stale (the next full launch recomputes it), then split by width. Changed
+// geometry writes simulation outputs independently of the last full
+// certificate; a zero-count list costs no reuse.
+fn gcList(tile:u32){
  ${this.workControl?`let region=umPageOfTile(tile);atomicStore(&gcWork[region],1u);atomicStore(&gcWork[${this.workControl.topologyWordOffset}u+region],1u);atomicStore(&gcNormalDirty[region],1u);atomicStore(&gcNormalDirty[3u*UM_PAGES+region],1u);let mapped=atomicLoad(&gcWork[${this.workControl.mappingWordOffset}u+region]);if(mapped!=0u){let local=tile&511u;let lane=(local&3u)|((local>>1u)&12u)|((local>>2u)&48u);atomicStore(&gcWork[${this.workControl.snapshotOffset}u+132u*(64u*(mapped-1u)+lane)+131u],0u);}`:""}
  if(umTileWidth(tile)==1u){atomicStore(&changes[GC_FINE+atomicAdd(&changes[0],1u)],tile);}
  else{atomicStore(&changes[GC_COARSE+atomicAdd(&changes[1],1u)],tile);}
+}
+@compute @workgroup_size(64) fn compactChanged(@builtin(global_invocation_id) gid:vec3u){
+ let i=gid.x+umDispatchX*64u*gid.y;if(i>=umDilatedCount()){return;}
+ gcList(umDilatedTile(i));
 }
 // A job per marked h tile (a lane per owner), then 64 marked 4h tiles per job.
 var<workgroup> gcJobs:vec2u;
@@ -261,7 +293,18 @@ var<workgroup> gcJobs:vec2u;
    if(slot<atomicLoad(&changes[1])){let tile=atomicLoad(&changes[GC_COARSE+slot]);gcOwner(UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu),false);}
   }
  }
-}`,["geometry"])});
+}
+${this.solid?/* wgsl */`// Moved bodies ({bodies}): every live tile of a region the swept-body mask
+// reaches within ${UNIFORM_BODY_GEOMETRY_REACH}h. An owner's values read the solid through its own
+// open fractions alone, which a body changes only in tiles its swept support
+// reaches (umBodyTileDirty's 2h). A fixed grid strides the regions.
+var<workgroup> gcBodyRegion:u32;
+@compute @workgroup_size(64) fn compactBodies(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var region=group.x;region<UM_PAGES;region+=groups.x){
+  if(lane==0u){gcBodyRegion=u32(umBodySweptReach(region)<=${UNIFORM_BODY_GEOMETRY_REACH}u);}
+  if(workgroupUniformLoad(&gcBodyRegion)!=0u){let tile=umPageTile(region,lane);if(umTileLive(tile)){gcList(tile);}}
+ }
+}`:""}`,["geometry"])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const groups=[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])];
     const layout=this.device.createPipelineLayout({bindGroupLayouts:groups}),listed=this.device.createPipelineLayout({bindGroupLayouts:[...groups,this.listResources]});
@@ -282,29 +325,50 @@ var<workgroup> gcJobs:vec2u;
     const mirror=uniformDetailModule(this.device,{label:"Uniform mixed geometric fill mirror",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var outputVolume:texture_storage_3d<r32float,write>;
+@group(1) @binding(2) var<storage,read> listedTiles:array<u32>;
 @compute @workgroup_size(64) fn mirror(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width==0u){return;}
  let origin=vec3i(umOrigin(owner));textureStore(outputVolume,origin,vec4f(textureLoad(volume,origin,0).x));
+}
+// The body launch's owners alone (geometryChanged's jobs): nothing else
+// wrote a target or the mirror since the last launch's mirror.
+@compute @workgroup_size(64) fn mirrorListed(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let fine=listedTiles[0];let coarse=listedTiles[1];let jobs=fine+(coarse+63u)/64u;
+ for(var job=group.x;job<jobs;job+=groups.x){
+  var origin=vec3i(-1);
+  if(job<fine){let tile=listedTiles[4u+job];origin=vec3i(umOrigin(UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane)));}
+  else{let slot=(job-fine)*64u+lane;if(slot<coarse){let tile=listedTiles[4u+UM_TILES+slot];origin=vec3i(umOrigin(UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu)));}}
+  if(origin.x>=0){textureStore(outputVolume,origin,vec4f(textureLoad(volume,origin,0).x));}
+ }
 }`,["mirror"])});
     const mirrorErrors=(await mirror.getCompilationInfo()).messages.filter(m=>m.type==="error");if(mirrorErrors.length)throw new Error(mirrorErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-    this.mirrorPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.mirrorResources]}),compute:{module:mirror,entryPoint:"mirror",constants:{umDispatchX:this.ownership.dispatchX,...all}}});
-    if(this.workControl)this.normalCandidatesPipeline=await create("normalCandidates",{},layout);
+    const mirrorLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.mirrorResources]});
+    this.mirrorPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirror",constants:{umDispatchX:this.ownership.dispatchX,...all}}});
+    if(this.solid)this.mirrorListedPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirrorListed",constants:{umDispatchX:this.ownership.dispatchX}}});
+    if(this.workControl){this.normalCandidatesPipeline=await create("normalCandidates",{},layout);this.normalTagsPipeline=await create("normalTags",{},layout);}
     // The changed launch follows a GPU relayout's changed tiles (Dynamic).
     this.changedPipelines.push(...await Promise.all([create("compactChanged",{},listed),create("geometryChanged",{},layout)]));
+    if(this.solid)this.bodiesPipeline=await create("compactBodies",{},layout);
   }
   /** pressure: also write the all-4h pressure geometry (a full launch).
    * changed: the changed tiles (UniformMixedGenerationBuffers.changes) of the
    * generation the ownership adopted since the last encode: evaluate only
-   * their neighbourhoods (see the class comment for the caller's precondition). */
-  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,options:{pressure?:boolean;changed?:GPUBuffer}=NO_OPTIONS):void{
+   * their neighbourhoods (see the class comment for the caller's precondition).
+   * bodies: only rigid bodies moved since the last encode (no adoption, phi
+   * or other solid write): evaluate the tiles of the regions the solid
+   * record's swept-body mask reaches (UNIFORM_BODY_GEOMETRY_REACH) through the
+   * changed launch, and take the mask's evidence. */
+  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,options:{pressure?:boolean;changed?:GPUBuffer;bodies?:boolean}=NO_OPTIONS):void{
     if(!this.pipeline||!this.pressurePipeline||!this.mirrorPipeline)throw new Error("Mixed surface geometry is not initialized");
-    if(options.pressure&&options.changed)throw new Error("Mixed geometry writes pressure outputs only in a full launch");
+    if(options.pressure&&(options.changed||options.bodies))throw new Error("Mixed geometry writes pressure outputs only in a full launch");
+    if(options.bodies&&(options.changed||!this.bodiesPipeline))throw new Error(options.changed?"Mixed geometry's body launch takes no changed tiles":"Mixed geometry's body launch needs solids");
     const revision=this.ownership.revision;
     if(options.changed&&this.encodedRevision!==revision-1)throw new Error(`Mixed geometry's changed launch needs exactly one adoption since its last encode (revision ${this.encodedRevision} -> ${revision})`);
+    if(options.bodies&&this.encodedRevision!==revision)throw new Error(`Mixed geometry's body launch needs no adoption since its last encode (revision ${this.encodedRevision} -> ${revision})`);
     this.encodedRevision=revision;
-    if(!options.changed){encoder.clearBuffer(this.changes,0,16);this.workControl?.encode(encoder,"geometry");}
+    const listed=!!options.changed||!!options.bodies;
+    encoder.clearBuffer(this.changes,0,16);if(!listed)this.workControl?.encode(encoder,"geometry");
     if(options.changed){
-      encoder.clearBuffer(this.changes,0,16);
       if(this.listGroup?.changes!==options.changed)this.listGroup={changes:options.changed,group:uniformDetailGroup(this.device,{layout:this.listResources,entries:[{binding:0,resource:{buffer:options.changed}}]})};
     }
     const pass=encoder.beginComputePass(GEOMETRY_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
@@ -314,6 +378,11 @@ var<workgroup> gcJobs:vec2u;
       pass.setPipeline(this.variant(compact));pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
       pass.setPipeline(this.variant(changed));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
+    else if(options.bodies){
+      const tiles=this.ownership.capacity.tiles;
+      pass.setPipeline(this.variant(this.bodiesPipeline!));pass.dispatchWorkgroups(Math.min(BODY_REGION_GRID,tiles/64));
+      pass.setPipeline(this.variant(this.changedPipelines[1]!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
+    }
     else{
       // Both output families share one exact certificate. Keeping them coherent
       // here allows reuse across intermediate full geometry stages.
@@ -321,12 +390,17 @@ var<workgroup> gcJobs:vec2u;
       const free=this.freePipelines[pressure?1:0];if(free)this.ownership.dispatchAllCounted(pass,uniformDetailPick(free));
       this.ownership.dispatchAllCounted(pass,this.variant(pressure?this.pressurePipeline:this.pipeline));
     }
-    if(this.normalCandidatesPipeline){pass.setPipeline(this.variant(this.normalCandidatesPipeline));pass.dispatchWorkgroups(Math.ceil(this.workControl!.regions/64));}
+    if(this.normalCandidatesPipeline){pass.setPipeline(this.variant(this.normalCandidatesPipeline));pass.dispatchWorkgroups(Math.ceil(this.workControl!.regions/64));
+     pass.setPipeline(this.variant(this.normalTagsPipeline!));pass.dispatchWorkgroups(RETAINED_FINE_TILES/64);}
     // Every live owner, after a changed launch too: the mirror may have been
-    // remapped in tiles this launch did not evaluate.
+    // remapped in tiles this launch did not evaluate. The body launch follows
+    // a gather with no write since (no adoption): its listed owners alone.
     const mirror=this.mirrorGroups.get(group);if(!mirror)throw new Error("Mixed geometry group was not bound by this stage");
-    pass.setBindGroup(1,mirror.group);this.ownership.dispatchAllCounted(pass,uniformDetailPick(this.mirrorPipeline));
+    pass.setBindGroup(1,mirror.group);
+    if(options.bodies){pass.setPipeline(uniformDetailPick(this.mirrorListedPipeline!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,this.ownership.capacity.tiles));}
+    else this.ownership.dispatchAllCounted(pass,uniformDetailPick(this.mirrorPipeline));
     pass.end();
+    if(options.bodies)this.solid!.consumeBodyEvidence(encoder);
   }
   private variant(p:GPUComputePipeline):GPUComputePipeline{return uniformDetailPick(this.solid?.select(p)??p);}
   destroy():void{this.changes.destroy();this.normalBuffer?.destroy();this.curvatureDirty?.destroy();}

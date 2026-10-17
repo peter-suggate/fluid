@@ -8,6 +8,13 @@ const LEVEL_EDGES = [8, 4, 2, 1] as const;
 /** Cells a kernel workgroup covers (three component lanes each). */
 const GROUP_CELLS = 64;
 
+interface MixedPipelines { readonly restrict?: GPUComputePipeline; readonly sweep?: GPUComputePipeline; readonly prolong?: GPUComputePipeline; readonly replay?: GPUComputePipeline }
+/** A launch gate (the kernels' heGate) over the caller's work words: 0 always;
+ * 1 with a dirty region; 2 with an old-payload region; 3 without one. */
+export type UniformExtrapolationGate = 0 | 1 | 2 | 3;
+/** The gates each kernel compiles for (index: gate). */
+const GATED: readonly (readonly (keyof MixedPipelines)[])[] = [["restrict", "sweep", "prolong", "replay"], ["restrict", "sweep", "prolong"], ["restrict", "sweep", "prolong", "replay"], ["prolong"]];
+
 interface HierarchyLevel {
   readonly dims: Dims3;
   readonly down: GPUTexture;
@@ -45,7 +52,10 @@ export class WebGPUUniformVelocityExtrapolator {
   private replayGroups: GPUBindGroup[] = [];
   /** True where 4h cells tile the lattice exactly. */
   readonly coarseVelocityTableAvailable: boolean;
-  private mixedPipelines?: { readonly restrict: GPUComputePipeline; readonly sweep: GPUComputePipeline; readonly prolong: GPUComputePipeline; readonly replay: GPUComputePipeline };
+  /** Gated variants (heGate): per gate, the kernels that take it. */
+  private mixedPipelines?: readonly MixedPipelines[];
+  /** The work words of a caller without marks: every gate runs. */
+  private readonly alwaysRun: GPUBuffer;
 
   constructor(private readonly device: GPUDevice, private readonly address: UniformLatticeAddress, private readonly params: GPUBuffer) {
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
@@ -61,11 +71,14 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 5, visibility: GPUShaderStage.COMPUTE, texture: uint },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32uint", viewDimension: "3d" } },
       { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ];
     const layout = (kernel: string, bindings: readonly number[]) => device.createBindGroupLayout({
       label: `Uniform Sec. 3.3 extrapolation layout - ${kernel}`, entries: entries.filter(entry => bindings.includes(entry.binding)),
     });
-    this.layouts = { restrict: layout("restrict", [0, 1, 3, 4, 6, 7]), prolong: layout("prolong", [0, 1, 2, 3, 4, 5, 6, 7]), replay: layout("replay", [1, 2, 3, 5, 7]) };
+    this.layouts = { restrict: layout("restrict", [0, 1, 3, 4, 6, 7, 8]), prolong: layout("prolong", [0, 1, 2, 3, 4, 5, 6, 7, 8]), replay: layout("replay", [1, 2, 3, 5, 7, 8]) };
+    this.alwaysRun = device.createBuffer({ label: "Uniform Sec. 3.3 extrapolation work (always)", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(this.alwaysRun, 0, new Uint32Array([1, 1, 0, 0]));
 
     // CM11b Sec. 3.3.1 requires the reverse pass to leave every finest-grid
     // value known that a source reaches. A block's levels stop at its one
@@ -94,11 +107,11 @@ export class WebGPUUniformVelocityExtrapolator {
   /** Bind the levels to the page pool's tail: `topology` holds the page
    * table from word `pageTable` on, then the block records and the neighbour
    * rows. Called once the owner of that buffer exists. */
-  private attach(topology: GPUBuffer, pageTable: number): void {
+  private attach(topology: GPUBuffer, pageTable: number, work?: GPUBuffer): void {
     const device = this.device, levels = this.levels, count = levels.length, params = this.params;
     const offset = 4 * pageTable;
     if (offset % device.limits.minStorageBufferOffsetAlignment !== 0) throw new Error("Mixed extension hierarchy needs an aligned page table");
-    const pool = { binding: 7, resource: { buffer: topology, offset } };
+    const pool = { binding: 7, resource: { buffer: topology, offset } }, gate = { binding: 8, resource: { buffer: work ?? this.alwaysRun, size: 8 } };
     const view = (texture: GPUTexture) => texture.createView();
     const restrict = (source: GPUTexture, sourceOrigins: GPUTexture, target: GPUTexture, targetOrigins: GPUTexture) => device.createBindGroup({ layout: this.layouts.restrict, entries: [
       { binding: 0, resource: { buffer: params } },
@@ -106,7 +119,7 @@ export class WebGPUUniformVelocityExtrapolator {
       { binding: 3, resource: view(target) },
       { binding: 4, resource: view(sourceOrigins) },
       { binding: 6, resource: view(targetOrigins) },
-      pool,
+      pool, gate,
     ] });
     this.restrictGroups = []; this.sweepGroups = []; this.prolongGroups = []; this.replayGroups = [];
     for (let level = 1; level < count; level += 1) {
@@ -129,14 +142,14 @@ export class WebGPUUniformVelocityExtrapolator {
         { binding: 4, resource: view(below.originsUp) },
         { binding: 5, resource: view(fine.originsDown) },
         { binding: 6, resource: view(fine.originsUp) },
-        pool,
+        pool, gate,
       ] }));
       this.replayGroups.push(device.createBindGroup({ layout: this.layouts.replay, entries: [
         { binding: 1, resource: view(below.up) },
         { binding: 2, resource: view(fine.down) },
         { binding: 3, resource: view(fine.up) },
         { binding: 5, resource: view(fine.originsUp) },
-        pool,
+        pool, gate,
       ] }));
     }
   }
@@ -148,17 +161,31 @@ export class WebGPUUniformVelocityExtrapolator {
     const root=this.levels[0]!,mixed=this.mixedPipelines,counts=this.groupCounts,top=this.levels.length-1;
     if(!mixed)throw new Error("Mixed extension requires the resident 4h nearest-source hierarchy");
     return {input:root.down,inputOrigins:root.originsDown,output:root.up,outputOrigins:root.originsUp,
-      attach:(topology:GPUBuffer,pageTable:number)=>this.attach(topology,pageTable),
-      /** Encodes into the caller's compute pass; its group 0 is left rebound. */
-      encode:(pass:GPUComputePassEncoder,replay=false)=>{
-        const up=replay?this.replayGroups:this.prolongGroups;
-        if(up.length!==top)throw new Error("Mixed extension hierarchy is not attached to a page pool");
-        pass.setPipeline(mixed.restrict);
+      /** work: the caller's work words (heWork); without them every gate runs. */
+      attach:(topology:GPUBuffer,pageTable:number,work?:GPUBuffer)=>this.attach(topology,pageTable,work),
+      /** Encodes into the caller's compute pass; its group 0 is left rebound.
+       * gate: the restriction and sweeps' gate (and the fill's); replayGate,
+       * with replay: the replay's, and the prolongation then also runs under
+       * replayGate's complement (3) where the replay does not. */
+      encode:(pass:GPUComputePassEncoder,replay=false,gate:UniformExtrapolationGate=0,replayGate:UniformExtrapolationGate=0)=>{
+        if(this.prolongGroups.length!==top)throw new Error("Mixed extension hierarchy is not attached to a page pool");
+        const p=(g:UniformExtrapolationGate,kernel:keyof MixedPipelines)=>{const pipeline=mixed[g]![kernel];if(!pipeline)throw new Error(`Mixed extension hierarchy has no ${kernel} under gate ${g}`);return pipeline;};
+        pass.setPipeline(p(gate,"restrict"));
         for(let level=1;level<=top;level++){pass.setBindGroup(0,this.restrictGroups[level-1]!);pass.dispatchWorkgroups(counts[level]!);}
-        pass.setPipeline(mixed.sweep);
+        pass.setPipeline(p(gate,"sweep"));
         for(let sweep=0;sweep<UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS;sweep++){pass.setBindGroup(0,this.sweepGroups[sweep]!);pass.dispatchWorkgroups(counts[top]!);}
-        pass.setPipeline(replay?mixed.replay:mixed.prolong);
-        for(let level=top-1;level>=0;level--){pass.setBindGroup(0,up[level]!);pass.dispatchWorkgroups(counts[level]!);}
+        if(!replay){
+          pass.setPipeline(p(gate,"prolong"));
+          for(let level=top-1;level>=0;level--){pass.setBindGroup(0,this.prolongGroups[level]!);pass.dispatchWorkgroups(counts[level]!);}
+          return;
+        }
+        if(replayGate!==0&&replayGate!==2)throw new Error("Mixed extension hierarchy replays only ungated or under the old-payload gate");
+        // A level's replay and, where it is gated off, its prolongation: each
+        // level reads the one below it as one of them left it.
+        for(let level=top-1;level>=0;level--){
+          pass.setPipeline(p(replayGate,"replay"));pass.setBindGroup(0,this.replayGroups[level]!);pass.dispatchWorkgroups(counts[level]!);
+          if(replayGate===2){pass.setPipeline(p(3,"prolong"));pass.setBindGroup(0,this.prolongGroups[level]!);pass.dispatchWorkgroups(counts[level]!);}
+        }
       }};
   }
 
@@ -176,20 +203,20 @@ export class WebGPUUniformVelocityExtrapolator {
       label: "Uniform Sec. 3.3 extrapolation kernels",
       code: uniformVelocityExtrapolationShader(this.address.blocks, this.address.blockBits),
     });
-    const compile = (label: string, entryPoint: string, layout: GPUBindGroupLayout) => compiler.compileComputePipeline({
+    const compile = (label: string, entryPoint: string, layout: GPUBindGroupLayout, gate: number) => compiler.compileComputePipeline({
       label, layout: this.device.createPipelineLayout({ label: `${label} layout`, bindGroupLayouts: [layout] }),
-      compute: { module: shaderModule, entryPoint },
+      compute: { module: shaderModule, entryPoint, constants: { heGate: gate } },
     }, { priority: "critical", signal });
-    const [restrict, sweep, prolong, replay] = await Promise.all([
-      compile("Uniform mixed extension hierarchy restrict", "mixedRestrictKnownVelocity", this.layouts.restrict),
-      compile("Uniform mixed extension hierarchy block sweep", "mixedSweepBlocks", this.layouts.restrict),
-      compile("Uniform mixed extension hierarchy prolong", "mixedProlongUnknownVelocity", this.layouts.prolong),
-      compile("Uniform mixed extension hierarchy replay", "mixedReplayUnknownVelocity", this.layouts.replay),
-    ]);
-    this.mixedPipelines = { restrict, sweep, prolong, replay };
+    const kernels = { restrict: ["restrict", "mixedRestrictKnownVelocity", this.layouts.restrict], sweep: ["block sweep", "mixedSweepBlocks", this.layouts.restrict],
+      prolong: ["prolong", "mixedProlongUnknownVelocity", this.layouts.prolong], replay: ["replay", "mixedReplayUnknownVelocity", this.layouts.replay] } as const;
+    this.mixedPipelines = await Promise.all(GATED.map(async (names, gate) => Object.fromEntries(await Promise.all(names.map(async name => {
+      const [label, entryPoint, layout] = kernels[name];
+      return [name, await compile(`Uniform mixed extension hierarchy ${label}${gate ? ` (gate ${gate})` : ""}`, entryPoint, layout, gate)] as const;
+    }))) as MixedPipelines));
   }
 
   destroy(): void {
     this.levels.forEach((level) => { level.down.destroy(); level.up.destroy(); level.originsDown.destroy(); level.originsUp.destroy(); });
+    this.alwaysRun.destroy();
   }
 }

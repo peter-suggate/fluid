@@ -36,6 +36,19 @@ struct Params {
 // table words of the pages around its own).
 @group(0) @binding(7) var<storage,read> pagePool: array<u32>;
 
+// The caller's work words (UniformMixedExtension's marks): [0] some region
+// is dirty this encode, [1] some region publishes the old FLIP payload.
+@group(0) @binding(8) var<storage,read> heWork: array<u32>;
+// 0 every launch runs; 1 only with a dirty region; 2 only with an old-payload
+// region; 3 only without one. A launch that does not run leaves every texel
+// as the last run wrote it: its inputs are those of that run.
+override heGate:u32=0u;
+var<workgroup> heSkipWord:u32;
+fn heSkip(lane:u32)->bool{
+  if(lane==0u){var skip=false;if(heGate==1u){skip=heWork[0]==0u;}else if(heGate==2u){skip=heWork[1]==0u;}else if(heGate==3u){skip=heWork[1]!=0u;}heSkipWord=select(0u,1u,skip);}
+  return workgroupUniformLoad(&heSkipWord)!=0u;
+}
+
 const BLOCKS:u32=${blocks}u;
 const BLOCK_BITS:u32=${blockBits}u;
 const RECORDS:u32=${UNIFORM_PAGE_TABLE_WORDS}u;
@@ -226,6 +239,7 @@ fn mixedStoreValues(texel:vec3i,x:vec4u,y:vec4u,z:vec4u){
 // A level from the next finer one, whose cells are in the same block.
 @compute @workgroup_size(192)
 fn mixedRestrictKnownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(heSkip(lane)){return;}
   let component=lane/64u;let cell=lane%64u;
   let c=levelCell(wid.x,cell,textureDimensions(primaryOut).x>>BLOCK_BITS);
   var entry=vec4u(0u);
@@ -246,6 +260,7 @@ fn mixedRestrictKnownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_in
 // above 32h.
 @compute @workgroup_size(192)
 fn mixedSweepBlocks(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(heSkip(lane)){return;}
   let component=lane/64u;let cell=lane%64u;let c=levelCell(wid.x,cell,1u);
   var entry=vec4u(0u);
   if(c.held){
@@ -272,6 +287,7 @@ fn closedFace(c:LevelCell,component:u32)->bool{
 // page goes through the block's neighbour row.
 @compute @workgroup_size(192)
 fn mixedProlongUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(heSkip(lane)){return;}
   let component=lane/64u;let cell=lane%64u;
   let c=levelCell(wid.x,cell,textureDimensions(primaryOut).x>>BLOCK_BITS);
   var entry=vec4u(0u);
@@ -293,6 +309,7 @@ fn mixedProlongUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_i
 // The same fill from the taps a prolongation recorded in its origins.
 @compute @workgroup_size(192)
 fn mixedReplayUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(heSkip(lane)){return;}
  let component=lane/64u;let cell=lane%64u;
  let c=levelCell(wid.x,cell,textureDimensions(primaryOut).x>>BLOCK_BITS);var value=0.0;var mask=0u;
  if(c.held){

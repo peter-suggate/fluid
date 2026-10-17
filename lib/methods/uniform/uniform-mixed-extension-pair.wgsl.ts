@@ -108,12 +108,20 @@ export function pairedExtensionSource(source:string,retained=false):string{
  replaceFinish("let state=stateIn[umSlot(anchor,axis,width)];","let state=ueFinishState(umSlot(anchor,axis,width));");
  replaceFinish("let slot=stateIn[select(UE_COARSE+component*UE_TILES+tile,ueUnitSlotIn(word,upper,local,component),patchWidth==1u)];","let slot=ueFinishState(select(UE_COARSE+component*UE_TILES+tile,ueUnitSlotIn(word,upper,local,component),patchWidth==1u));");
  replaceFinish("stateIn[ueOwnSlot(owner,axis)],(umTileSupport(owner.tile)&2u)!=0u)","ueFinishState(ueOwnSlot(owner,axis)),(umTileSupport(owner.tile)&2u)!=0u)");
+ // Paired modules publish no current payload: no held values (their layout
+ // has none), and no region is held where they publish.
+ replaceFinish(`@group(1) @binding(18) var<storage,read_write> ueHeld:array<f32>;
+fn ueHeldLoad(slot:u32)->f32{return ueHeld[slot];}
+fn ueHeldStore(slot:u32,value:f32){ueHeld[slot]=value;}`,`fn ueHeldLoad(slot:u32)->f32{return 0.0;}
+fn ueHeldStore(slot:u32,value:f32){}`);
  return finish+swept.slice(source.length)+`
 @group(1) @binding(14) var departure:texture_3d<f32>;
 @group(1) @binding(15) var<storage,read> companionNegative:array<f32>;
 override ueCompanionValues:bool=false;
+// Without a live sample the old payload was never retained: the companion
+// restriction then carries the current values, which nothing reads.
 fn ueFinishState(slot:u32)->vec2f{
- let state=stateIn[slot];if(ueCompanionValues){return vec2f(pairIn[slot],state.y);}return state;
+ let state=stateIn[slot];if(ueCompanionValues&&ueParticlesLive()){return vec2f(pairIn[slot],state.y);}return state;
 }
 fn pairPhysical(face:UMFace)->f32{
  if(umFaceLow(face.anchor,face.axis)){return companionNegative[umLowFaceIndex(ueLowCell(face.anchor,face.axis),face.axis)];}
@@ -133,6 +141,7 @@ fn pair_ueSeedStore(slot:u32,value:UEPair){
 const retainedCanonicalWGSL=/* wgsl */`
 fn retainedStore(slot:u32,value:f32){pairIn[slot]=value;pairOut[slot]=value;}
 @compute @workgroup_size(64) fn retainFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(!ueParticlesLive()){return;}
  for(var job=group.x;job<umCounts.x;job+=groups.x){
   let tile=umTopology[UM_TILES+job];let origin=umTileCoord(tile)*4u+umCorner(lane,4u);let owner=umOwnerAt(vec3i(origin));
   let value=textureLoad(physical,vec3i(origin),0).xyz;let low=umLowOpen(vec3i(origin));
@@ -143,6 +152,7 @@ fn retainedStore(slot:u32,value:f32){pairIn[slot]=value;pairOut[slot]=value;}
  }
 }
 @compute @workgroup_size(64) fn retainCoarse(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(!ueParticlesLive()){return;}
  // These width-only lists partition every coarse tile, including unsupported
  // closed walls. The sweep's ueSeamCoarseJob support gate must not be used.
  let regular=umSupport[8u*UM_TILES+20u];let packs=(regular+63u)/64u;
@@ -185,9 +195,17 @@ fn ueSnapshotStore(owner:UMOwner,value:vec4f){
  textureStore(unitVelocityOut,vec3i(umOrigin(owner)),vec4f(value.xyz,0.0));
 }
 ${fine}
+// Only the regions that publish the old payload (UniformMixedExtension's
+// state 3): G2P reads it at no other region's samples, and the current
+// publication's replay takes its own selection where no tag was saved.
+var<workgroup> ueSnapshotSkip:u32;
 @compute @workgroup_size(64) fn snapshotFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(!ueParticlesLive()){return;}
  for(var job=group.x;job<umCounts.x;job+=groups.x){
-  let tile=umTopology[UM_TILES+job];let cell=vec3i(umTileCoord(tile)*4u+umCorner(lane,4u));
+  let tile=umTopology[UM_TILES+job];
+  if(lane==0u){ueSnapshotSkip=select(0u,1u,ueRegionState(tile)<3u);}
+  if(workgroupUniformLoad(&ueSnapshotSkip)!=0u){continue;}
+  let cell=vec3i(umTileCoord(tile)*4u+umCorner(lane,4u));
   ueSnapshotFineOwner(umOwnerAt(cell),lane);workgroupBarrier();
  }
 }
@@ -206,8 +224,9 @@ fn ueSnapshotPublished(face:UMFace)->f32{
 // Coarse owners' positive patches occupy either their component-major 4h
 // slots or the extra fine seam slots; neither overlaps an h owner's slots.
 @compute @workgroup_size(64) fn snapshotCoarse(@builtin(global_invocation_id) gid:vec3u){
+ if(!ueParticlesLive()){return;}
  let index=gid.x+65535u*64u*gid.y;let job=index/3u;let axis=index%3u;if(job>=umCounts.y){return;}
- let tile=umTopology[UM_TILES+umCounts.x+job];let owner=umOwnerAt(vec3i(umTileCoord(tile)*4u));let first=umFace(owner,axis,1,0u);
+ let tile=umTopology[UM_TILES+umCounts.x+job];if(ueRegionState(tile)<3u){return;}let owner=umOwnerAt(vec3i(umTileCoord(tile)*4u));let first=umFace(owner,axis,1,0u);
  for(var part=0u;part<first.count;part++){
   let face=umFacePatch(first,part);pairIn[umSlot(face.anchor,axis,face.width)]=ueSnapshotPublished(face);
  }
@@ -242,14 +261,14 @@ function rememberSnapshotSelection(source:string):string{
 
 export function replayedPublicationSource(source:string):string{
  let code=source;
- const originalPublished=functionSource(code,"umPublished");code=code.replace(originalPublished,replaceExact(originalPublished,"return umFarValue(face);","return publicationReplay(face,false);"));
+ const originalPublished=functionSource(code,"umPublished");code=code.replace(originalPublished,replaceExact(originalPublished,"return ueHeldKept(slotIndex,umFarValue(face));","return ueHeldKept(slotIndex,publicationReplay(face,false));"));
  const originalFine=functionSource(code,"uePublishFine");
  const stageMarker=" if(lane<27u){";
  if(originalFine.split(stageMarker).length!==2)throw new Error("Paired publication far staging changed");
  const start=originalFine.indexOf(stageMarker);
  if(start<=0)throw new Error("Paired publication far staging changed");
  const store=[...originalFine.matchAll(/(?:udStore_output\s*\(|textureStore\s*\(\s*output\s*,)[^;]*;/g)];if(store.length!==2)throw new Error("Paired publication exits changed");
- const finalStart=originalFine.lastIndexOf(" value.w=");if(finalStart<=start)throw new Error("Paired publication final store changed");
+ const finalStart=originalFine.lastIndexOf(" ueHeldFine(owner,value,held);value.w=");if(finalStart<=start)throw new Error("Paired publication final store changed");
  const fine=originalFine.slice(0,start)+/* wgsl */`
  // Values are the only per-cell data needed after old publication saved
  // each face's known taps. Preserve the same 27-cell neighborhood.
@@ -268,7 +287,9 @@ fn publicationLoad(p:vec3i)->vec4f{return textureLoad(coarse,umTileStoreTexel(p)
 fn publicationReplay(face:UMFace,staged:bool)->f32{
  let retained=stateOut[umSlot(face.anchor,face.axis,face.width)];
  // The explicit tag also keeps a safe original path for an uncached face.
- if(retained.y!=-1.0){return umFarValue(face);}
+ // Without a live sample the old snapshot saved no selection this frame:
+ // a tag there is an earlier frame's.
+ if(retained.y!=-1.0||!ueParticlesLive()){return umFarValue(face);}
  let selected=u32(retained.x);let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
  let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
  for(var k=0u;k<8u;k++){
