@@ -1,3 +1,4 @@
+import { importedSurfaceWGSL } from "../primary-visibility/imported-surface.wgsl";
 import { svoVoxelLightHashWGSL, SVO_VOXEL_LIGHT_CACHE_BYTES_PER_ENTRY } from "../lighting-visibility/svo-voxel-light-cache";
 import { rasterAoConsumerWGSL, rasterAoProducerWGSL } from "../lighting-visibility/svo-raster-ao";
 /** Fused SVO shading program and its packing ABI. The pipeline host owns
@@ -601,7 +602,7 @@ export type SvoDryShadingPath = "inline" | "split";
 export interface SvoDryOptimizationExperiments {
   /** Opt-in cached raster sun shadows and horizon AO; requires mesh split shading. */
   readonly rasterAo?: boolean;
-  /** Static-scene experiment: omit clean depth passes using host mesh receipts. */
+  /** Reuse clean shadow maps once the mesh is ready; false forces diagnostic redraws. */
   readonly rasterShadowPassReuse?: boolean;
   /** Compile a guarded opaque cone-only closure alongside the generic closure. */
   readonly specializedDeferredLighting?: boolean;
@@ -617,6 +618,8 @@ export interface SvoDryOptimizationExperiments {
   readonly surfaceMeshCulling?: boolean;
   /** Conservative single-sample rejection; false keeps the paired reference draw. */
   readonly surfaceMeshSampleCulling?: boolean;
+  /** Camera culling compaction using supported hardware subgroup scans. */
+  readonly surfaceMeshSubgroups?: boolean;
   /** Optional diagnostic budget; overflow retains exact ray rendering. */
   readonly surfaceMeshMaxBytes?: number;
   /** Persistent level-0 voxel visibility for directional light slot zero. */
@@ -5585,7 +5588,7 @@ ${experiments.opaqueRasterLighting ? "" : "  if(slot<0&&!cachedSun){return dryRe
 }
 fn dryContactVisibilitySolid(position:vec3f,normal:vec3f,feature:u32,owner:u32)->vec3f{return rasterContactVisibility();}
 ` + rasterAoProducerWGSL(backdropHooks) : ""}
-${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true, experiments.rasterAo === true, experiments.surfaceMeshSampleCulling !== false) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
+${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? importedSurfaceWGSL : ""}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true, experiments.rasterAo === true, experiments.surfaceMeshSampleCulling !== false, experiments.surfaceMeshSubgroups === true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
     traversalMode === "raster-primary" ? "raster" : "traced",
     {
       brickOccupancyMode,
@@ -5594,6 +5597,7 @@ ${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surface
       brickContourExitScope,
     },
   )) : ""}`;
+  if (experiments.surfaceMesh && experiments.surfaceMeshSubgroups) shader = `enable subgroups;\n${shader}`;
   if (experiments.dropGiPageCache) {
     shader = shader.replace("var<private> dryGiPageCache:DryNodeMipPageCache;", "");
     const loadStart = shader.indexOf("fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceConeSourceSample{");

@@ -5,7 +5,9 @@ import { withUniformDevice } from "./helpers/uniform-geometric";
 
 test("mesh stream arguments retain the diagnostic header and support both culling paths", () => {
   assert.ok(W.packedDraw >= W.hostPrimitiveMaterialBase + 1);
-  assert.equal(W.wordCount, W.packedDraw + 4);
+  assert.ok(W.geometryKey >= W.packedDraw + 4);
+  assert.ok(W.cullDispatch >= W.geometryKey + 16);
+  assert.ok(W.wordCount >= W.cullDispatch + 3);
   assert.equal(SVO_SURFACE_MESH_STATE_BYTES, W.wordCount * 4);
   for (const culling of [true,false]) {
     const shader=svoSurfaceMeshWGSL(3,128,culling,true);
@@ -55,4 +57,14 @@ fn vertex(corner:u32,record:u32)->V{
       } finally {read.destroy();texture.destroy();}
     }
   });
+});
+
+
+test("primary range caching never reuses camera visibility", () => {
+  const shader=svoSurfaceMeshWGSL(3,128,true,true,true);
+  const publication=shader.split("fn surfaceMeshPublish(){")[1]!.split("// Dirty boxes")[0]!;
+  assert.doesNotMatch(publication,/uniforms\.camera|uniforms\.viewport/);
+  assert.match(publication,new RegExp(`atomicStore\\(&meshState\\[${W.drawInstanceCount}\\],0u\\)`));
+  assert.match(shader,/let entry=id.x\+id.y\*65535u\*64u/);
+  assert.match(shader,/meshQuadVisible\(index\)/);
 });

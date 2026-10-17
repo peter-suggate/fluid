@@ -1209,6 +1209,16 @@ if (process.env.FLUID_SVO_DRY_FRAME_MESH_CENSUS === "1") {
   }))}`);
 }
 
+const profileGate = process.env.FLUID_SVO_DRY_FRAME_PROFILE_GATE;
+if (profileGate) {
+  writeFileSync(profileGate, "ready");
+  const deadline=performance.now()+60_000;
+  while (!existsSync(`${profileGate}.go`)) {
+    assert.ok(performance.now()<deadline,"timing gate was not released within a minute");
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }
+}
+
 const primaryPassTimings = [];
 if (process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING === "1") {
   const labels = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING_LABELS?.split(",")
@@ -1434,6 +1444,30 @@ if (profileSeconds > 0) {
       }
       assert.deepEqual(validationErrors, [], "GPU validation errors during mesh camera checks");
     }
+  }
+  if (process.env.FLUID_SVO_DRY_FRAME_PROFILE_RENDER_GPU === "1") {
+    for (const motion of ["stationary", "camera"] as const) {
+      const readings: GPUPassTimestampReading[] = [];
+      for (let frame = 0; frame < 28; frame++) {
+        activeCamera = motion === "camera" ? { ...camera, azimuth_rad: camera.azimuth_rad + .12 * Math.sin(frame * .13) } : camera;
+        device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count));
+        const encoder = device.createCommandEncoder({ label: `Complete dry render ${motion} ${frame}` });
+        const recorder = new GPUPassTimestampRecorder(device, 512, "Complete dry render");
+        encodeFrame(recorder.instrument(encoder));
+        assert.ok(recorder.resolve(encoder)); device.queue.submit([encoder.finish()]);
+        const reading = await recorder.read();
+        if (reading && frame >= 4) readings.push(reading);
+      }
+      assert.ok(readings.length >= 20, "complete render timestamps must resolve");
+      log(`Complete render GPU: ${JSON.stringify({ motion, scope: "all production dry render passes; excludes fluid simulation and water compositing", median_ms: median(readings.map(r => r.span_ms)), p95_ms: percentile95(readings.map(r => r.span_ms)), readings })}`);
+    }
+    assert.deepEqual(validationErrors, [], "GPU validation during complete render timing");
+  }
+  if (process.env.FLUID_SVO_DRY_FRAME_PROFILE_WATER === "1") {
+    const { benchmarkPoolRenderFrame } = await import("./benchmark-pool-render-frame");
+    await benchmarkPoolRenderFrame({ device, renderer, scene, camera, uniformBuffer, bodyBuffer, bodyCount: bodies.count,
+      width, height, environmentId, capturePath: configuredRawOutPath ? `${configuredRawOutPath}.water.rgba` : undefined });
+    assert.deepEqual(validationErrors, [], "GPU validation during complete pool render timing");
   }
   renderer.destroy();
   target.destroy();

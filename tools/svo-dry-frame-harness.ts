@@ -163,6 +163,7 @@ export async function createDawnRenderDevice(options: DawnRenderDeviceOptions = 
     label: options.label,
     requiredFeatures: [
       ...(timestampsSupported ? ["timestamp-query" as GPUFeatureName] : []),
+      ...(adapter.features.has("subgroups") ? ["subgroups" as GPUFeatureName] : []),
       ...(options.requireShaderF16 ? ["shader-f16" as GPUFeatureName] : []),
       // Mirrors `fluidExecutionDeviceFeatures`: without it the live radiance
       // atlas cannot use `rg11b10ufloat` storage and silently doubles, so this

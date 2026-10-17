@@ -682,8 +682,8 @@ export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freez
 /** The raster backend owns exclusive intervals under primary visibility. */
 export const SURFACE_MESH_TIMING_STAGES = [
   { stage: "surface-mesh-update", label: "Mesh update", detail: "Revision check, extraction when dirty, and publication. Cached frames retain the check and publication cost." },
-  { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Detail selection, then rejects shadow-only native proxies, back-facing and out-of-frustum records, and triangles that cannot cover a pixel sample before vertex processing. Fine geometry remains resident." },
-  { stage: "surface-mesh-draw", label: "Exact planes + mesh draw", detail: "One pass: exact planar boundaries (incomplete or invalid meshes withhold geometry and trace instead), then cached quad rasterization, and the periodic diagnostic copy. A withheld primary only clears the surface buffer." },
+  { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Traverses a cached compact stream of primary SVO records, then tests back faces, frustum and pixel sample coverage for the current camera on every frame. Fine geometry remains resident; there is no stationary-camera shortcut." },
+  { stage: "surface-mesh-draw", label: "Planes + voxel and imported mesh draw", detail: "One pass: exact planar boundaries (incomplete or invalid meshes withhold geometry and trace instead), then cached imported and voxel meshes, analytic rigid bodies, and the diagnostic copy. A withheld primary only clears the surface buffer." },
 ] as const satisfies readonly { stage: RenderFrameStageId; label: string; detail: string }[];
 
 /** Keep one primary visibility switch and set of plane taps across backends. */
@@ -693,10 +693,15 @@ export function renderPipelineNodeForContext(
   if (node.id === "scene-primitive" && context.surfaceMeshSelected) return {
     ...node, label: "Imported asset surfaces", toggleable: false, stage: undefined,
     collapseGroup: undefined,
-    tip: { summary: "Rasterizes imported assets from their native sampled fields, preserving their source resolution, normals and PBR materials. This runs after the cached mesh and contributes separately to Primary visibility.",
-      reads: "native distance fields · source normals · PBR material identities", writes: "surface buffers · depth", gate: "mesh primary with imported assets" },
+    tip: { summary: "Draws shared meshes extracted once from native sampled fields. Cached index levels use a quarter-pixel projected error budget; full native geometry remains available and source normals/PBR are sampled per fragment. Its draw cost is included in Primary rasterization because both share one render pass.",
+      reads: "cached native meshes · source normals · PBR material identities", writes: "surface buffers · depth", gate: "mesh primary with imported assets" },
     state: current => current.disabledStages.has("primary-traversal") ? "off" : current.rasterPrimaryActive ? "on" : "unavailable",
-    chip: () => "native sampled fields · PBR",
+    chip: () => "cached · drawn in primary rasterization",
+  };
+  if (node.id === "rigid-impostor" && context.surfaceMeshSelected) return {
+    ...node,
+    tip: { ...node.tip, summary: "Analytic rigid bodies write the complete primary surface in the shared raster pass. Their normal draw cost is included in Primary rasterization; inspecting identity planes retains the separate discovery and certificate bridge." },
+    chip: current => current.disabledStages.has("rigid-impostor") ? "withheld" : "drawn in primary rasterization",
   };
   if (node.id !== "primary-traversal") return node;
   const meshStages = new Set<RenderFrameStageId>(SURFACE_MESH_TIMING_STAGES.map(({ stage }) => stage));
@@ -712,7 +717,7 @@ export function renderPipelineNodeForContext(
     stages: node.stages.filter((stage) => meshStages.has(stage)),
     tip: {
       ...node.tip,
-      summary: "Primary rasterization fills the surface buffer using cached triangles: dual marching cubes for smooth surfaces, or the selected voxel mesher otherwise. Its timing is the sum of mesh update, mesh culling, and one pass that draws the exact planes and then the mesh. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
+      summary: "Primary rasterization fills the surface buffer using cached triangles: dual marching cubes for smooth surfaces, or the selected voxel mesher otherwise. Its timing is the sum of mesh update, mesh culling, and one pass that draws exact planes, imported meshes, voxel meshes and analytic rigid bodies. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
     },
     chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
       : current.surfaceMeshStatus?.state === "pending" && current.surfaceMeshStatus.drawn ? "mesh updating · edited bricks traced"

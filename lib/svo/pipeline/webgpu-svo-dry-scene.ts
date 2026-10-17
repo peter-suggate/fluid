@@ -1,3 +1,5 @@
+import { MESH_ASSETS, meshAssetVolume } from "../../core/imported-assets/asset-library";
+import { meshVolumeSurface, prepareMeshVolumeSurfaces } from "../../core/imported-assets/mesh-volume-surface";
 import { svoVoxelLightCacheShape } from "../features/lighting-visibility/svo-voxel-light-cache";
 import { SvoRasterAo, type RasterAoPipelines } from "../features/lighting-visibility/svo-raster-ao";
 import { canUseOpaqueConeLighting, canUseOpaqueRasterLighting } from "../features/shading/deferred-specialization";
@@ -1005,7 +1007,7 @@ interface SvoDrySplitPipelineBundle {
   readonly surfaceMesh?: {
     prepare: GPUComputePipeline; boxes: GPUComputePipeline; ingest: GPUComputePipeline; schedule: GPUComputePipeline;
     count: GPUComputePipeline; allocate: GPUComputePipeline; emit: GPUComputePipeline; publish: GPUComputePipeline;
-    select: GPUComputePipeline; cull: GPUComputePipeline; draw: GPURenderPipeline; background: GPURenderPipeline; planar: GPURenderPipeline;
+    select: GPUComputePipeline; cull: GPUComputePipeline; cullDispatch: GPUComputePipeline; candidates: GPUComputePipeline; draw: GPURenderPipeline; background: GPURenderPipeline; planar: GPURenderPipeline;
   };
   readonly brickBackground?: GPURenderPipeline;
   readonly brickRaster?: GPURenderPipeline;
@@ -1015,6 +1017,8 @@ interface SvoDrySplitPipelineBundle {
   readonly brickExactResolve?: GPURenderPipeline;
   readonly brickCoverageOverflow?: GPURenderPipeline;
   readonly scenePrimitiveRaster?: GPURenderPipeline;
+  readonly importedSurface?: GPURenderPipeline;
+  readonly importedSurfaceSelect?: GPUComputePipeline;
   readonly scenePrimitiveCoverage?: GPURenderPipeline;
   readonly scenePrimitiveLodResolve?: GPURenderPipeline;
   readonly scenePrimitiveComputeArgs?: GPUComputePipeline;
@@ -1066,6 +1070,7 @@ export class SparseVoxelDrySceneRenderer {
   private splitReconstructedLightingPipeline?: GPURenderPipeline;
   private splitSkyLightingPipeline?: GPURenderPipeline;
   private rasterRigidPipeline?: GPURenderPipeline;
+  private rasterRigidDirectPipeline?: GPURenderPipeline;
   private rasterRigidBridgePipeline?: GPURenderPipeline;
   private conePrepassResetPipeline?: GPUComputePipeline;
   private conePrepassCoherentPipeline?: GPUComputePipeline;
@@ -1226,6 +1231,7 @@ export class SparseVoxelDrySceneRenderer {
   private surfaceMeshBuildPresentations = 0;
   surfaceMeshStatus?: SvoSurfaceMeshStatus;
   private surfaceMeshState?: GPUBuffer;
+  private surfaceMeshCullIndirect?: GPUBuffer;
   /** The quad arena: sized while the scene's whole build runs, then fixed. */
   private surfaceMeshArena?: GPUBuffer;
   private surfaceMeshVisible?: GPUBuffer;
@@ -1240,6 +1246,14 @@ export class SparseVoxelDrySceneRenderer {
   private surfaceMeshComputeGroup?: GPUBindGroup;
   private surfaceMeshDrawGroup?: GPUBindGroup;
   private sampledVolumePrimitiveIndices: number[] = [];
+  private importedSurfacePipeline?: GPURenderPipeline;
+  private importedSurfaceSelectPipeline?: GPUComputePipeline;
+  private importedSurfaceLodLayout?: GPUBindGroupLayout;
+  private importedSurfaceLodGroup?: GPUBindGroup;
+  private importedSurfaceLodRecords?: GPUBuffer;
+  private importedSurfaceDrawArgs?: GPUBuffer;
+  private importedSurfaceMeshes = new Map<string, { volume: ReturnType<typeof meshAssetVolume>; vertices: GPUBuffer; indices: GPUBuffer; count: number; levels: ReturnType<typeof meshVolumeSurface>["levels"]; radius: number }>();
+  private importedSurfaceInstances: { index: number; asset: string }[] = [];
   private surfaceMeshPipelines?: SvoDrySplitPipelineBundle["surfaceMesh"];
   private readonly rasterPrimary: boolean;
   /**
@@ -1627,6 +1641,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   async initialize(progress?: (label: string, completed: number, total: number) => void): Promise<void> {
+    if (this.experiments.surfaceMesh) await prepareMeshVolumeSurfaces();
     const report = (completed: number) => progress?.(
       SVO_PRESENTATION_STARTUP_STAGES[completed]!, completed, SVO_PRESENTATION_STARTUP_STAGES.length,
     );
@@ -1783,6 +1798,8 @@ export class SparseVoxelDrySceneRenderer {
     this.brickExactResolvePipeline = bundle.brickExactResolve;
     this.brickCoverageOverflowPipeline = bundle.brickCoverageOverflow;
     this.scenePrimitiveRasterPipeline = bundle.scenePrimitiveRaster;
+    this.importedSurfacePipeline = bundle.importedSurface;
+    this.importedSurfaceSelectPipeline = bundle.importedSurfaceSelect;
     this.scenePrimitiveCoveragePipeline = bundle.scenePrimitiveCoverage;
     this.scenePrimitiveLodResolvePipeline = bundle.scenePrimitiveLodResolve;
     this.scenePrimitiveComputeArgsPipeline = bundle.scenePrimitiveComputeArgs;
@@ -1877,7 +1894,7 @@ export class SparseVoxelDrySceneRenderer {
     const module = await checkedModule(this.device, "Sparse voxel analytic rigid raster", svoRigidRasterShader);
     const renderPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.rasterRigidInputLayout] });
     const bridgePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.rasterRigidInputLayout, this.rasterRigidLayout] });
-    [this.rasterRigidPipeline, this.rasterRigidBridgePipeline] = await Promise.all([this.device.createRenderPipelineAsync({
+    [this.rasterRigidPipeline, this.rasterRigidBridgePipeline, this.rasterRigidDirectPipeline] = await Promise.all([this.device.createRenderPipelineAsync({
         label: "Sparse voxel analytic rigid primary discovery",
         layout: renderPipelineLayout,
         vertex: { module, entryPoint: "rigidRasterVertex" },
@@ -1901,6 +1918,17 @@ export class SparseVoxelDrySceneRenderer {
           { format: SVO_RIGID_RASTER_CONTRACT.identityFormat },
         ] },
         primitive: { topology: "triangle-list", cullMode: "none" },
+      }), this.device.createRenderPipelineAsync({
+        label: "Analytic rigid surfaces in primary pass", layout: renderPipelineLayout,
+        vertex: { module, entryPoint: "rigidRasterVertex" },
+        fragment: { module, entryPoint: "rigidDirectFragment", targets: [
+          { format: SVO_RIGID_RASTER_CONTRACT.packedSurfaceFormat },
+          { format: SVO_RIGID_RASTER_CONTRACT.identityMediaFormat },
+          { format: SVO_RIGID_RASTER_CONTRACT.geometryFormat },
+          { format: SVO_RIGID_RASTER_CONTRACT.identityFormat },
+        ] },
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: { format: SVO_RIGID_RASTER_CONTRACT.depthFormat, depthWriteEnabled: true, depthCompare: SVO_RIGID_RASTER_CONTRACT.depthCompare },
       })]);
     this.ensureSplitTargets();
   }
@@ -1918,6 +1946,8 @@ export class SparseVoxelDrySceneRenderer {
     this.surfaceMeshState = this.device.createBuffer({ label: "Voxel surface mesh publication",
       size: SVO_SURFACE_MESH_STATE_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.surfaceMeshCullIndirect = this.device.createBuffer({ label: "Voxel mesh cull dispatch", size: 12,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     const requestedBytes = this.experiments.surfaceMeshMaxBytes ?? this.device.limits.maxStorageBufferBindingSize;
     if (!Number.isSafeInteger(requestedBytes) || requestedBytes < 32) throw new RangeError("Surface mesh budget must be an integer of at least 32 bytes");
     this.surfaceMeshMaximumBytes = Math.floor(Math.min(requestedBytes, this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize) / 32) * 32;
@@ -1936,7 +1966,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 31, visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 35, visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 33, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 41, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+      { binding: 41, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
       { binding: 42, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
     this.ensureSurfaceMeshWork();
@@ -1950,7 +1980,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   private createSurfaceMeshVisible(arenaBytes: number): GPUBuffer {
-    return this.device.createBuffer({ label: "Visible voxel quad indices", size: arenaBytes / 8, usage: GPUBufferUsage.STORAGE });
+    return this.device.createBuffer({ label: "Camera and primary candidate voxel indices", size: arenaBytes / 4, usage: GPUBufferUsage.STORAGE });
   }
 
   /**
@@ -2134,12 +2164,17 @@ export class SparseVoxelDrySceneRenderer {
     const pipelines = this.surfaceMeshPipelines!;
     const state = this.surfaceMeshState!;
     const compute = (label: string, pipeline: GPUComputePipeline, groups = 1) => {
+      // Writable publication and indirect arguments cannot share a buffer in
+      // one compute pass, even when their byte ranges do not overlap.
+      const indirect = pipeline === pipelines.cull || pipeline === pipelines.candidates;
+      if (indirect) encoder.copyBufferToBuffer(state, (pipeline === pipelines.cull ? SVO_SURFACE_MESH_STATE.cullDispatch : SVO_SURFACE_MESH_STATE.candidateDispatch) * 4, this.surfaceMeshCullIndirect!, 0, 12);
       const pass = encoder.beginComputePass({ label });
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, this.bindGroup);
       if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
       pass.setBindGroup(group, this.surfaceMeshComputeGroup!);
-      pass.dispatchWorkgroups(Math.min(groups, 65535), Math.max(1, Math.ceil(groups / 65535)));
+      if (indirect) pass.dispatchWorkgroupsIndirect(this.surfaceMeshCullIndirect!, 0);
+      else pass.dispatchWorkgroups(Math.min(groups, 65535), Math.max(1, Math.ceil(groups / 65535)));
       pass.end();
     };
     const W = SVO_SURFACE_MESH_STATE;
@@ -2197,7 +2232,14 @@ export class SparseVoxelDrySceneRenderer {
     // A fixed direct dispatch over the arena's capacity; each thread reads the
     // drawable quad count publication stored and the rest return at once.
     if (this.experiments.surfaceMeshCulling !== false) {
+      compute("Voxel primary geometry compaction", pipelines.candidates);
+      compute("Voxel primary candidate dispatch", pipelines.cullDispatch);
       compute("Voxel mesh culling", pipelines.cull, Math.ceil(this.surfaceMeshArena!.size / 32 / 64));
+    }
+    if (this.importedSurfaceInstances.length && this.importedSurfacePipeline) {
+          const select = encoder.beginComputePass({ label: "Native asset screen-error selection" });
+          select.setPipeline(this.importedSurfaceSelectPipeline!);select.setBindGroup(0,this.bindGroup);select.setBindGroup(1,this.importedSurfaceLodGroup!);
+          select.dispatchWorkgroups(Math.ceil(this.importedSurfaceInstances.length/64));select.end();
     }
     tracePhase?.("surface-mesh-cull");
     const draw = encoder.beginRenderPass({ label: "Voxel surface mesh rasterization",
@@ -2211,7 +2253,30 @@ export class SparseVoxelDrySceneRenderer {
     // test only their covered pixels instead of scanning the entire catalogue.
     draw.setPipeline(pipelines.background); draw.draw(3);
     draw.setPipeline(pipelines.planar); draw.draw(4, this.source!.structural!.planarBoundaries.count);
-    draw.setPipeline(pipelines.draw); draw.drawIndirect(state, SVO_SURFACE_MESH_STATE.packedDraw * 4); draw.end();
+    // Keep native assets in the same tile pass: do not store and reload
+    // four full-resolution G-buffer attachments and hardware depth.
+    if (this.importedSurfaceInstances.length && this.importedSurfacePipeline) {
+          draw.setPipeline(this.importedSurfacePipeline);
+          draw.setBindGroup(0, this.bindGroup);
+          for (const [instance, { asset }] of this.importedSurfaceInstances.entries()) {
+            const mesh = this.importedSurfaceMeshes.get(asset)!;
+            draw.setVertexBuffer(0, mesh.vertices);
+            // Keep firstInstance zero: indirect-first-instance is optional.
+            draw.setVertexBuffer(1, this.importedSurfaceLodRecords!, instance * 128, 128);
+            draw.setIndexBuffer(mesh.indices, "uint32");
+            draw.drawIndexedIndirect(this.importedSurfaceDrawArgs!, instance * 20);
+          }
+    }
+    draw.setPipeline(pipelines.draw);
+    if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
+    draw.setBindGroup(group, this.surfaceMeshDrawGroup!);
+    draw.drawIndirect(state, SVO_SURFACE_MESH_STATE.packedDraw * 4);
+    if (this.rasterRigidActive && !this.disabledStages.has("rigid-impostor") && !this.identityPlanesInspected) {
+      draw.setPipeline(this.rasterRigidDirectPipeline!);
+      draw.setBindGroup(0, this.rasterRigidInputBindGroup!);
+      draw.draw(SVO_RIGID_RASTER_CONTRACT.verticesPerProxy, SVO_RIGID_RASTER_CONTRACT.maximumBodies);
+    }
+    draw.end();
     // Every presentation carries a receipt: a build the GPU started on its own
     // (a compaction, or a publication the host did not make) is noticed as
     // soon as the copy returns rather than at a periodic poll.
@@ -3541,9 +3606,10 @@ export class SparseVoxelDrySceneRenderer {
     }
     const layout = this.layout;
     const vertexModule = this.vertexModule;
-    const shaderExperimentsBase = scale === 1 && this.experiments.halfPrecisionLighting
-      ? { ...this.experiments, halfPrecisionLighting: false }
-      : this.experiments;
+    const shaderExperimentsBase = { ...this.experiments,
+      surfaceMeshSubgroups: this.device.features.has("subgroups"),
+      ...(scale === 1 ? { halfPrecisionLighting: false } : {}),
+    };
     const shaderExperimentsPruned = voxelLightCacheEnabled
       ? shaderExperimentsBase
       : { ...shaderExperimentsBase, voxelLightCache: false };
@@ -3923,9 +3989,9 @@ export class SparseVoxelDrySceneRenderer {
       if (this.experiments.surfaceMesh) {
         const computeLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.surfaceMeshComputeLayout!] });
         const drawLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.surfaceMeshDrawLayout!] });
-        const [prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull] = await Promise.all([
+        const [prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, cullDispatch, candidates] = await Promise.all([
           "surfaceMeshPrepare", "surfaceMeshBoxes", "surfaceMeshIngest", "surfaceMeshSchedule", "surfaceMeshCount",
-          "surfaceMeshAllocate", "surfaceMeshEmit", "surfaceMeshPublish", "surfaceMeshSelect", "surfaceMeshCull"].map((entryPoint) =>
+          "surfaceMeshAllocate", "surfaceMeshEmit", "surfaceMeshPublish", "surfaceMeshSelect", "surfaceMeshCull", "surfaceMeshCullDispatch", "surfaceMeshPrimaryCandidates"].map((entryPoint) =>
           this.device.createComputePipelineAsync({ label: entryPoint, layout: computeLayout, compute: { module, entryPoint } })));
         const depthStencil: GPUDepthStencilState = { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
           depthWriteEnabled: true, depthCompare: "greater" };
@@ -3938,7 +4004,7 @@ export class SparseVoxelDrySceneRenderer {
         const planar = await this.device.createRenderPipelineAsync({ label: "Projected exact planar slabs", layout: drawLayout,
           vertex: { module, entryPoint: "meshPlanarVertex" }, fragment: { module, entryPoint: "meshPlanarFragment", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-strip" }, depthStencil: { ...depthStencil, depthCompare: "greater-equal" } });
-        surfaceMesh = { prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, draw, background, planar };
+        surfaceMesh = { prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, cullDispatch, candidates, draw, background, planar };
       }
       // Compile only the expensive closure again. All visibility and cone work
       // shares the generic bundle; unsupported live publications switch back in
@@ -3965,8 +4031,23 @@ export class SparseVoxelDrySceneRenderer {
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, this.latticeKeyLayout!, this.splitLightingLayout!] }),
         compute: { module, entryPoint: "dryLatticeKeysMain" },
       }) : undefined;
+      if (this.experiments.surfaceMesh && !this.importedSurfaceLodLayout) this.importedSurfaceLodLayout = this.device.createBindGroupLayout({ entries: [
+        { binding: 80, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 81, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      ] });
+      const importedSurfaceSelect = this.experiments.surfaceMesh ? await this.device.createComputePipelineAsync({
+        label: "Native asset screen-error selection", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, this.importedSurfaceLodLayout!] }),
+        compute: { module, entryPoint: "importedSurfaceSelect" },
+      }) : undefined;
+      const importedSurface = this.experiments.surfaceMesh ? await this.device.createRenderPipelineAsync({
+        label: "Cached native asset surfaces", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        vertex: { module, entryPoint: "importedSurfaceVertex", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }, { arrayStride: 128, stepMode: "instance", attributes: [{ shaderLocation: 1, offset: 0, format: "uint32" }] }] },
+        fragment: { module, entryPoint: "importedSurfaceFragment", targets: rasterPrimaryTargets },
+        primitive: { topology: "triangle-list", cullMode: "back" },
+        depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
+      }) : undefined;
       const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!);
-      const bundle = { rasterAo, optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      const bundle = { rasterAo, importedSurface, importedSurfaceSelect, optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
@@ -5167,12 +5248,45 @@ export class SparseVoxelDrySceneRenderer {
     this.writeSurfaceMeshHostWords();
     this.primitiveCount = primitiveArena.primitiveCount;
     this.sampledVolumePrimitiveIndices = [];
+    this.importedSurfaceInstances = [];
     const fieldBase = SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4;
     for (let i = 0; i < scene.primitiveRecords.length / SVO_PRIMITIVE_RECORD_WORDS; i++) {
       const at = i * SVO_PRIMITIVE_RECORD_WORDS;
       if (scene.primitiveRecords[at + 3] !== SVO_PRIMITIVE_KINDS.fieldProgram) continue;
       const offset = scene.primitiveRecords[at + 13]! - fieldBase;
-      if (scene.fieldProgramBlocks?.[offset] === SVO_SAMPLED_VOLUME_TAG) this.sampledVolumePrimitiveIndices.push(i);
+      if (scene.fieldProgramBlocks?.[offset] === SVO_SAMPLED_VOLUME_TAG) {
+        this.sampledVolumePrimitiveIndices.push(i);
+        if (this.experiments.surfaceMesh) {
+          const asset = Object.keys(MESH_ASSETS)[scene.fieldProgramBlocks[offset + 3]! - 1]!;
+          const volume = meshAssetVolume(asset);
+          const held = this.importedSurfaceMeshes.get(asset);
+          if (held?.volume !== volume) {
+            held?.vertices.destroy(); held?.indices.destroy();
+            const surface = meshVolumeSurface(volume);
+            const vertices = this.device.createBuffer({ label: `${asset} native surface vertices`, size: Math.max(4, surface.positions.byteLength), usage: GPUBufferUsage.VERTEX, mappedAtCreation: true });
+            const indices = this.device.createBuffer({ label: `${asset} native surface indices`, size: Math.max(4, surface.indices.byteLength), usage: GPUBufferUsage.INDEX, mappedAtCreation: true });
+            new Float32Array(vertices.getMappedRange()).set(surface.positions); vertices.unmap();
+            new Uint32Array(indices.getMappedRange()).set(surface.indices); indices.unmap();
+            this.importedSurfaceMeshes.set(asset, { volume, vertices, indices, count: surface.levels[0]!.count, levels: surface.levels, radius: Math.hypot(...volume.header.dimensions.map(v => v * volume.header.cellSize / 2)) });
+          }
+          this.importedSurfaceInstances.push({ index: i, asset });
+        }
+      }
+    }
+    if (this.importedSurfaceInstances.length && this.importedSurfaceLodLayout) {
+      const words = new Uint32Array(this.importedSurfaceInstances.length * 32), floats = new Float32Array(words.buffer);
+      this.importedSurfaceInstances.forEach(({ index, asset }, i) => {
+        const mesh = this.importedSurfaceMeshes.get(asset)!;const at=i*32;
+        words[at]=index;words[at+1]=mesh.levels.length;floats[at+2]=mesh.radius;
+        mesh.levels.forEach((level,j)=>{const p=at+4+j*4;words[p]=level.first;words[p+1]=level.count;floats[p+2]=level.error;});
+      });
+      this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
+      this.importedSurfaceLodRecords = this.device.createBuffer({ size: words.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX, mappedAtCreation: true });
+      new Uint32Array(this.importedSurfaceLodRecords.getMappedRange()).set(words);this.importedSurfaceLodRecords.unmap();
+      this.importedSurfaceDrawArgs = this.device.createBuffer({ size: this.importedSurfaceInstances.length * 20, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+      this.importedSurfaceLodGroup = this.device.createBindGroup({ layout: this.importedSurfaceLodLayout, entries: [
+        {binding:80,resource:{buffer:this.importedSurfaceLodRecords}},{binding:81,resource:{buffer:this.importedSurfaceDrawArgs}},
+      ] });
     }
     if (this.shadingPath === "split" && (backdropTerrainBefore !== this.backdropTerrainRequested()
       || latticeBefore !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true))) {
@@ -6481,18 +6595,7 @@ export class SparseVoxelDrySceneRenderer {
         if (this.rasterPrimary && !this.experiments.surfaceMesh && !primaryWithheld && !this.disabledStages.has("scene-primitive")) {
           this.encodeScenePrimitivePrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
         }
-        if (this.rasterPrimary && this.experiments.surfaceMesh && !primaryWithheld
-          && this.sampledVolumePrimitiveIndices.length && this.scenePrimitiveRasterPipeline) {
-          const imported = encoder.beginRenderPass({ label: "Imported native voxel field surfaces",
-            colorAttachments: this.rasterPrimaryAttachments(gBufferViews, "load"),
-            depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthLoadOp: "load", depthStoreOp: "store" } });
-          imported.setPipeline(this.scenePrimitiveRasterPipeline);
-          imported.setBindGroup(0, this.bindGroup);
-          for (const index of this.sampledVolumePrimitiveIndices) imported.draw(SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, 1, 0, index);
-          imported.end();
-          tracePhase?.("scene-primitive-visibility");
-        }
-        if (rasterRigidEncoded && !primaryWithheld) {
+        if (rasterRigidEncoded && !primaryWithheld && (!this.experiments.surfaceMesh || this.identityPlanesInspected)) {
           const rigid = encoder.beginRenderPass({
             label: "Sparse voxel analytic rigid primary discovery",
             colorAttachments: [
@@ -6589,7 +6692,7 @@ export class SparseVoxelDrySceneRenderer {
         this.rasterAo.encode(encoder, this.rasterAoPipelines, this.bindGroup, this.surfaceMeshDrawGroup!,
           this.splitLightingBindGroup!, this.surfaceMeshState!, this.surfaceMeshArena!.size / 32, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
           () => tracePhase?.("raster-sun-shadows"), () => tracePhase?.("screen-contact-ao"),
-          this.experiments.rasterShadowPassReuse && this.surfaceMeshStatus?.state === "ready"
+          this.experiments.rasterShadowPassReuse !== false && this.surfaceMeshStatus?.state === "ready"
             ? `${this.source?.revision}:${this.scene?.renderRevision}:${this.surfaceMeshShadowReceipt}` : undefined);
       }
 
@@ -6881,6 +6984,12 @@ export class SparseVoxelDrySceneRenderer {
     this.brickCoverageWidth = 0;
     this.brickCoverageHeight = 0;
     this.scenePrimitiveRasterPipeline = undefined;
+    this.importedSurfacePipeline = undefined;
+    this.importedSurfaceSelectPipeline = undefined;
+    this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
+    this.importedSurfaceLodRecords = undefined; this.importedSurfaceDrawArgs = undefined; this.importedSurfaceLodGroup = undefined;
+    for (const mesh of this.importedSurfaceMeshes.values()) { mesh.vertices.destroy(); mesh.indices.destroy(); }
+    this.importedSurfaceMeshes.clear();
     this.scenePrimitiveCoveragePipeline = undefined;
     this.scenePrimitiveLodResolvePipeline = undefined;
     this.scenePrimitiveComputeArgsPipeline = undefined;
@@ -6941,6 +7050,7 @@ export class SparseVoxelDrySceneRenderer {
     this.splitReconstructedLightingPipeline = undefined;
     this.splitSkyLightingPipeline = undefined;
     this.rasterRigidPipeline = undefined;
+    this.rasterRigidDirectPipeline = undefined;
     this.rasterRigidBridgePipeline = undefined;
     this.conePrepassResetPipeline = undefined;
     this.conePrepassCoherentPipeline = undefined;
@@ -6979,6 +7089,7 @@ export class SparseVoxelDrySceneRenderer {
     this.surfaceMeshDisposed = true;
     this.surfaceMeshReadback?.destroy();
     this.surfaceMeshState?.destroy();
+    this.surfaceMeshCullIndirect?.destroy();
     this.surfaceMeshArena?.destroy();
     this.surfaceMeshEmptyMaintenance?.destroy();
     this.surfaceMeshWork?.destroy();

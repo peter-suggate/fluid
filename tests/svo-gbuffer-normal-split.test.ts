@@ -34,7 +34,7 @@ test("the mesh fragment is the one producer that publishes a face of its own", (
   const source = svoSurfaceMeshWGSL(3, 1 << 7, true);
   // Voxel quads retain their exact face; a sampled implicit surface uses its gradient.
   assert.match(source, /var receiverNormal=input\.geometricNormal;/);
-  assert.match(source, /normal=normalize\(input\.boundaryNormal\);receiverNormal=normal;/);
+  assert.match(source, /normal=normalize\(boundaryNormal\);receiverNormal=normal;/);
   assert.match(source, /dryRasterPrimaryFacedSurface\(hit,receiverNormal,camera\[0\],rd,camera\[1\],SVO_GBUFFER_PRODUCER_BRICK\)/);
   // The face -> baked blend and the shading-normal call are untouched by the split.
   assert.match(source, /var shading=dryShadingNormal\(input\.identity,normal\);/);

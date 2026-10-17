@@ -133,7 +133,7 @@ export const SVO_SURFACE_MESH_INITIAL_BYTES = 16 * 1024 * 1024;
 export const SVO_SURFACE_MESH_QUAD_BYTES = 32;
 export const SVO_SURFACE_MESH_HEADER_BYTES = 64;
 /** First 64 bytes retain the public draw/diagnostic ABI; tail is builder state. */
-export const SVO_SURFACE_MESH_STATE_BYTES = 336;
+export const SVO_SURFACE_MESH_STATE_BYTES = 512;
 /** Historical arena size used to preserve the edit-reserve contract. */
 export const SVO_SURFACE_MESH_MINIMUM_QUADS = SVO_SURFACE_MESH_BYTES / SVO_SURFACE_MESH_QUAD_BYTES;
 /**
@@ -157,9 +157,9 @@ export const SVO_SURFACE_MESH_BOX_SWEEP_ENTRIES = 4096;
  * Words per leaf: base, count | (depth + 1) << 27 (zero while the slot holds
  * no brick), key x/y, selected LOD, history valid, previous threshold,
  * previous cap, worklist claim (0 unlisted, 1 listed as touching a dirty
- * brick, 2 listed as dirty).
+ * brick, 2 listed as dirty), conservative primary-geometry presence flag.
  */
-export const SVO_SURFACE_MESH_TABLE_WORDS = 9;
+export const SVO_SURFACE_MESH_TABLE_WORDS = 10;
 /** Words per worklist entry scratch: pending count, emitted count, previous base, previous count word. */
 export const SVO_SURFACE_MESH_SCRATCH_WORDS = 4;
 export const SVO_SURFACE_MESH_COUNT_MASK = 0x07ff_ffff;
@@ -295,7 +295,13 @@ export const SVO_SURFACE_MESH_STATE = Object.freeze({
   /** Non-instanced triangle-list draw: vertices, one instance, first vertex, first instance.
    * Keep the original instanced header for diagnostics and shadow-map readers. */
   packedDraw: 80,
-  wordCount: 84,
+  /** Camera-independent stream of primary records, compacted on publication. */
+  primaryListReuse: 9,
+  primaryCandidateCount: 84,
+  geometryKey: 88,
+  cullDispatch: 120,
+  candidateDispatch: 124,
+  wordCount: 128,
 } as const);
 
 /**
@@ -443,7 +449,7 @@ fn meshStreamVertex(streamVertex:u32,trianglesOnly:bool)->vec2u{
 }
 `;
 
-export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false, sampleCulling = true): string {
+export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false, sampleCulling = true, subgroups = false): string {
   const W = SVO_SURFACE_MESH_STATE;
   const F = SVO_SURFACE_MESH_FLAGS;
   const M = SVO_SURFACE_MESH_MODE;
@@ -788,6 +794,10 @@ fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
   // extraction fault, reported rather than written past the brick's range.
   if(slot>=meshEmitCount){atomicOr(&meshState[${W.errorFlags}],2u);return;}
   meshArena[meshEmitBase+slot]=SurfaceQuad(origin,identity,extent,packedFace);
+  if((dryMaterial(sceneIdentityMaterial(identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)==0u){
+    let leaf=atomicLoad(&meshWork[meshListAt(meshEntry)]);
+    atomicOr(&meshWork[meshTableAt(leaf)+9u],1u);
+  }
 }
 ${contours ? svoContourMeshWGSL : ""}
 ${svoVoxelMeshWGSL(W.errorFlags, contours)}
@@ -936,9 +946,7 @@ fn meshClaimNeighbours(leaf:u32,direction:vec3i){
 // or skip a build.
 @compute @workgroup_size(1)
 fn surfaceMeshPrepare(){
-  for(var level=0u;level<8u;level+=1u){atomicStore(&meshState[${W.lodBricks}u+level],0u);}
   atomicStore(&meshState[${W.drawVertexCount}],4u);
-  atomicStore(&meshState[${W.packedDraw}],0u);
   atomicStore(&meshState[${W.packedDraw+1}],1u);
   atomicStore(&meshState[${W.packedDraw+2}],0u);
   atomicStore(&meshState[${W.packedDraw+3}],0u);
@@ -1190,6 +1198,24 @@ fn surfaceMeshPublish(){
   }
   let usable=atomicLoad(&meshState[${W.usable}])!=0u&&atomicLoad(&meshState[${W.withheld}])==0u&&(atomicLoad(&meshState[${W.errorFlags}])&2u)==0u;
   let quads=select(0u,atomicLoad(&meshState[${W.frontCursor}]),usable);
+  // This list is geometry membership, never camera visibility. Every frame
+  // reprojects and culls its triangles with the current camera.
+  let key=array<vec4u,4>(
+    vec4u(quads,select(0u,1u,usable),atomicLoad(&meshState[${W.rebuiltBricks}]),atomicLoad(&meshState[${W.builds}])),
+    vec4u(atomicLoad(&meshState[${W.journalCursor}]),atomicLoad(&meshState[${W.contourMode}]),dryPublicationWord(2u),dryPublicationWord(3u)),
+    vec4u(meshLeafCapacity(),arrayLength(&meshWork),arrayLength(&meshArena),atomicLoad(&meshState[${W.consumedMaintenanceRevision}])),
+    bitcast<vec4u>(dry.meshFilter));
+  var reuse=usable&&atomicLoad(&meshState[${W.building}])==0u&&atomicLoad(&meshState[${W.mode}])==0u;
+  for(var i=0u;i<16u;i+=1u){let v=key[i/4u][i%4u];reuse=reuse&&atomicLoad(&meshState[${W.geometryKey}u+i])==v;atomicStore(&meshState[${W.geometryKey}u+i],v);}
+  atomicStore(&meshState[${W.primaryListReuse}],select(0u,1u,reuse));
+  if(!reuse){atomicStore(&meshState[${W.primaryCandidateCount}],0u);}
+  let candidateGroups=select((quads+63u)/64u,0u,reuse);
+  atomicStore(&meshState[${W.candidateDispatch}],min(candidateGroups,65535u));
+  atomicStore(&meshState[${W.candidateDispatch+1}],max(1u,(candidateGroups+65534u)/65535u));
+  atomicStore(&meshState[${W.candidateDispatch+2}],1u);
+  if(!reuse||dryMeshLodPixels()>0.0){
+    for(var level=0u;level<8u;level+=1u){atomicStore(&meshState[${W.lodBricks}u+level],0u);}
+  }
   atomicStore(&meshState[${W.drawInstanceCount}],${culling ? "0u" : "quads"});
   atomicStore(&meshState[${W.packedDraw}],${culling ? "0u" : "quads*select(6u,3u,meshDmcEnabled())"});
   atomicStore(&meshState[${W.cullQuads}],quads);
@@ -1278,6 +1304,7 @@ fn meshSelectLevel(footprint:f32,threshold:f32,maximum:u32,previous:u32,valid:bo
 }
 @compute @workgroup_size(64)
 fn surfaceMeshSelect(@builtin(global_invocation_id) id:vec3u){
+  if(atomicLoad(&meshState[${W.primaryListReuse}])!=0u&&dryMeshLodPixels()<=0.0){return;}
   let leaf=id.x+id.y*65535u*64u;
   let flags=atomicLoad(&meshState[${W.flags}]);
   if(leaf==0u&&(flags&${F.markAll}u)!=0u){atomicOr(&meshState[${W.flags}],${F.scanned}u);}
@@ -1285,7 +1312,7 @@ fn surfaceMeshSelect(@builtin(global_invocation_id) id:vec3u){
   let table=meshTableAt(leaf);
   let current=meshLeafCurrent(leaf);
   if((flags&${F.markAll}u)!=0u){
-    atomicStore(&meshWork[table],0u);atomicStore(&meshWork[table+1u],0u);atomicStore(&meshWork[table+2u],0u);atomicStore(&meshWork[table+3u],0u);
+    atomicStore(&meshWork[table],0u);atomicStore(&meshWork[table+1u],0u);atomicStore(&meshWork[table+2u],0u);atomicStore(&meshWork[table+3u],0u);atomicStore(&meshWork[table+9u],0u);
     atomicStore(&meshWork[table+MESH_CLAIM_WORD],select(0u,MESH_CLAIM_TOUCHING,current));
     if(current){meshAppendWork(leaf);}
   }else if(atomicLoad(&meshWork[table+MESH_CLAIM_WORD])!=MESH_CLAIM_DIRTY){
@@ -1357,10 +1384,25 @@ fn meshQuadVisible(index:u32)->bool{
   if(index>=atomicLoad(&meshState[${W.frontCursor}])){return false;}
   let quad=meshArena[index];
   if(meshQuadDead(quad)){return false;}
-  // The shadow cache needs native-asset proxy triangles in the arena, but the
-  // camera fragment always discards them. Keep them out of its draw list.
-  ${retainSampledShadowCasters ? `if((dryMaterial(sceneIdentityMaterial(quad.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){return false;}` : ""}
   if(!meshQuadSelected(quad)){return false;}
+  ${contours && sampleCulling ? `// Triangle coverage already bounds the viewport. Avoid constructing a
+  // second world-space AABB and four frustum planes for every tiny triangle.
+  // Dirty regions keep the full masking path below.
+  if(meshTriangle(quad)&&!meshMaskActive()){
+    let a=meshTrianglePoint(quad,0u);let b=meshTrianglePoint(quad,1u);let c=meshTrianglePoint(quad,2u);
+    let lattice=vec3f(meshQuadOrigin(quad));let extent=vec3f(meshQuadExtent(quad));
+    let origin=dry.mapping.worldOrigin+lattice*dry.mapping.cellSize;
+    let camera=dryRasterPrimaryCamera();let axis=meshQuadFace(quad.face)/2u;
+    let n=cross((b-a)*dry.mapping.cellSize,(c-a)*dry.mapping.cellSize);
+    let facing=dot(camera[0]-(origin+a*extent*dry.mapping.cellSize),n)/max(length(n),1e-20);
+    let epsilon=max(1e-5,abs(origin[axis])*1e-6);
+    if(facing < -epsilon){return false;}
+    let ac=meshCoverageClip(dry.mapping.worldOrigin+(lattice+a*extent)*dry.mapping.cellSize,camera);
+    let bc=meshCoverageClip(dry.mapping.worldOrigin+(lattice+b*extent)*dry.mapping.cellSize,camera);
+    let cc=meshCoverageClip(dry.mapping.worldOrigin+(lattice+c*extent)*dry.mapping.cellSize,camera);
+    if(max(ac.w,max(bc.w,cc.w))<DRY_REVERSED_Z_NEAR_M-epsilon){return false;}
+    return meshTriangleMayCoverSample(ac,bc,cc,uniforms.viewport.xy);
+  }` : ""}
   // A dual triangle's vertices may lie up to four cells from its origin, so
   // its bounds are its own vertices rather than the record's nominal extent.
   var boundsLow=vec3f(0.0);var boundsHigh=vec3f(meshQuadExtent(quad));
@@ -1402,28 +1444,72 @@ fn meshQuadVisible(index:u32)->bool{
   }` : ""}
   return true;
 }
+// Geometry-only compaction, rebuilt on a mesh publication. Both lists share
+// one allocation: the first half is current camera visibility, the second is
+// the immutable primary candidate index stream. Shadow proxies stay resident.
 var<workgroup> meshCullCount:atomic<u32>;
 var<workgroup> meshCullBase:u32;
-@compute @workgroup_size(64)
-fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invocation_index) lane:u32){
-  if(lane==0u){atomicStore(&meshCullCount,0u);}
-  workgroupBarrier();
-  // A fixed direct dispatch over the arena's capacity: threads past the quads
-  // publication made drawable have nothing to test.
-  let index=id.x+id.y*65535u*64u;
-  let visible=index<atomicLoad(&meshState[${W.cullQuads}])&&meshQuadVisible(index);
+fn meshCompact(index:u32,visible:bool,candidates:bool){
+  let counter=select(${W.drawInstanceCount}u,${W.primaryCandidateCount}u,candidates);
+  let output=select(0u,arrayLength(&meshVisibleOutput)/2u,candidates);
+  ${subgroups ? `
+  let count=subgroupAdd(select(0u,1u,visible));
+  let rank=subgroupExclusiveAdd(select(0u,1u,visible));
+  var base=0u;
+  if(subgroupElect()&&count!=0u){
+    base=atomicAdd(&meshState[counter],count);
+    if(!candidates){atomicAdd(&meshState[${W.packedDraw}],count*select(6u,3u,meshDmcEnabled()));}
+  }
+  base=subgroupBroadcastFirst(base);
+  if(visible){meshVisibleOutput[output+base+rank]=index;}
+  ` : `
   var rank=0u;if(visible){rank=atomicAdd(&meshCullCount,1u);}
   workgroupBarrier();
-  if(lane==0u){
-    let count=atomicLoad(&meshCullCount);
-    meshCullBase=0u;if(count!=0u){
-      meshCullBase=atomicAdd(&meshState[${W.drawInstanceCount}],count);
-      atomicAdd(&meshState[${W.packedDraw}],count*select(6u,3u,meshDmcEnabled()));
-    }
-  }
-  workgroupBarrier();
-  if(visible){meshVisibleOutput[meshCullBase+rank]=index;}
+  // The caller initializes the count/base and lets invocation zero allocate.
+  `}
 }
+@compute @workgroup_size(64)
+fn surfaceMeshPrimaryCandidates(@builtin(global_invocation_id) id:vec3u,@builtin(local_invocation_index) lane:u32){
+  let index=id.x+id.y*65535u*64u;
+  var visible=false;
+  if(index<atomicLoad(&meshState[${W.cullQuads}])){
+    let quad=meshArena[index];
+    visible=!meshQuadDead(quad);
+    ${retainSampledShadowCasters ? `visible=visible&&(dryMaterial(sceneIdentityMaterial(quad.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)==0u;` : ""}
+  }
+  ${subgroups ? `meshCompact(index,visible,true);` : `
+  if(lane==0u){atomicStore(&meshCullCount,0u);}workgroupBarrier();
+  var rank=0u;if(visible){rank=atomicAdd(&meshCullCount,1u);}workgroupBarrier();
+  if(lane==0u){meshCullBase=atomicAdd(&meshState[${W.primaryCandidateCount}],atomicLoad(&meshCullCount));}workgroupBarrier();
+  if(visible){meshVisibleOutput[arrayLength(&meshVisibleOutput)/2u+meshCullBase+rank]=index;}
+  `}
+}
+@compute @workgroup_size(1)
+fn surfaceMeshCullDispatch(){
+  let groups=(atomicLoad(&meshState[${W.primaryCandidateCount}])+63u)/64u;
+  atomicStore(&meshState[${W.cullDispatch}],min(groups,65535u));
+  atomicStore(&meshState[${W.cullDispatch+1}],max(1u,(groups+65534u)/65535u));
+  atomicStore(&meshState[${W.cullDispatch+2}],1u);
+}
+@compute @workgroup_size(64)
+fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invocation_index) lane:u32){
+  let entry=id.x+id.y*65535u*64u;
+  var index=0u;var visible=false;
+  if(entry<atomicLoad(&meshState[${W.primaryCandidateCount}])){
+    index=meshVisibleOutput[arrayLength(&meshVisibleOutput)/2u+entry];
+    visible=meshQuadVisible(index);
+  }
+  ${subgroups ? `meshCompact(index,visible,false);` : `
+  if(lane==0u){atomicStore(&meshCullCount,0u);}workgroupBarrier();
+  var rank=0u;if(visible){rank=atomicAdd(&meshCullCount,1u);}workgroupBarrier();
+  if(lane==0u){
+    let count=atomicLoad(&meshCullCount);meshCullBase=atomicAdd(&meshState[${W.drawInstanceCount}],count);
+    atomicAdd(&meshState[${W.packedDraw}],count*select(6u,3u,meshDmcEnabled()));
+  }workgroupBarrier();
+  if(visible){meshVisibleOutput[meshCullBase+rank]=index;}
+  `}
+}
+
 ${proceduralSolidRenderWGSL(`meshHeader[${W.hostSolidBoundary}u]`, "meshMaintenance[index]",
   `bitcast<vec3f>(vec3u(meshHeader[${W.hostSolidBoundary+4}u],meshHeader[${W.hostSolidBoundary+5}u],meshHeader[${W.hostSolidBoundary+6}u]))`,
   `bitcast<vec3f>(vec3u(meshHeader[${W.hostSolidBoundary+1}u],meshHeader[${W.hostSolidBoundary+2}u],meshHeader[${W.hostSolidBoundary+3}u]))`, "meshBoundary")}
@@ -1437,7 +1523,6 @@ struct MeshVertexOut {
   @location(4) @interpolate(flat) agreement:f32,
   @location(5) @interpolate(flat) cellPixels:f32,
   @location(6) @interpolate(flat) geometricNormal:vec3f,
-  @location(7) boundaryNormal:vec3f,
 }
 ${surfaceMeshStreamVertexWGSL}
 @vertex fn surfaceMeshVertex(@builtin(vertex_index) streamVertex:u32)->MeshVertexOut{
@@ -1470,20 +1555,13 @@ ${surfaceMeshStreamVertexWGSL}
     let word=quad.origin[min(vertex,2u)]>>16u;
     if(word!=SCENE_IDENTITY_NO_NORMAL){normal=svoGBufferUnpackNormalOct8(word);}
   }` : ""}
-  var boundaryNormal=vec3f(0);
-  if(meshDcEnabled()&&meshHeader[${W.hostSolidBoundary}u]!=0u){
-    // Evaluate on the shared mesh vertex, not an interior fit's medial crease.
-    // Interpolation keeps normals continuous across both triangles and the
-    // sampled field's cell boundaries, including around a rounded rim.
-    let boundary=meshBoundarySample(world);
-    if(abs(boundary.w)<2.0*max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))){let g=meshBoundaryNormal(world,boundary);if(dot(g,g)>1e-12){boundaryNormal=normalize(g);}}
+  var cellPixels=0.0;
+  if(!meshDcEnabled()){
+    let brickLattice=dry.mapping.brickSize*(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));
+    cellPixels=meshCellFootprint(meshQuadBrickBase(quad),brickLattice);
   }
-  if(meshDcEnabled()&&dot(boundaryNormal,boundaryNormal)==0.0){
-    boundaryNormal=meshAuthoredSurfaceNormal(world,sceneIdentityMaterial(quad.identity),geometricNormal);
-  }
-  let brickLattice=dry.mapping.brickSize*(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));
   return MeshVertexOut(position,world,quad.identity,normal,meshQuadLevel(quad.face),f32((quad.face>>11u)&255u)/255.0,
-    meshCellFootprint(meshQuadBrickBase(quad),brickLattice),geometricNormal,boundaryNormal);
+    cellPixels,geometricNormal);
 }
 struct MeshSurfaceOut {
   @location(0) packedSurface:vec4u,@location(1) identityMedia:vec4u,
@@ -1505,7 +1583,17 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
   if((dryMaterial(sceneIdentityMaterial(input.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){discard;}
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);let t=length(input.world-camera[0]);
   var normal=normalize(input.normal);var receiverNormal=input.geometricNormal;
-  if(dot(input.boundaryNormal,input.boundaryNormal)>1e-12){normal=normalize(input.boundaryNormal);receiverNormal=normal;}
+  var boundaryNormal=vec3f(0);
+  if(meshDcEnabled()&&meshHeader[${W.hostSolidBoundary}u]!=0u){
+    // Evaluate the continuous source field once per visible fragment.
+    // Subpixel triangles no longer repeat boundary lookups at every vertex.
+    let boundary=meshBoundarySample(input.world);
+    if(abs(boundary.w)<2.0*max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))){let g=meshBoundaryNormal(input.world,boundary);if(dot(g,g)>1e-12){boundaryNormal=normalize(g);}}
+  }
+  if(meshDcEnabled()&&dot(boundaryNormal,boundaryNormal)==0.0){
+    boundaryNormal=meshAuthoredSurfaceNormal(input.world,sceneIdentityMaterial(input.identity),input.geometricNormal);
+  }
+  if(dot(boundaryNormal,boundaryNormal)>1e-12){normal=normalize(boundaryNormal);receiverNormal=normal;}
   if(!meshContoursEnabled()&&!meshDcEnabled()&&dry.meshFilter.x>0.5&&dry.meshFilterNormals.x>0.5&&dry.meshFilter.y>0.0){
     // Filtered detail shades the baked normal: a coarse quad carries its cells'
     // mean, an exact quad reads the voxel just behind its face. The surface

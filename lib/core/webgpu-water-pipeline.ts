@@ -201,7 +201,7 @@ export const EXTRACTION_WINDOW_WORKGROUPS = 4096;
  * Geometric 4h vertex base cannot prove empty and scans only those
  * (collectWindowsMain, extractWindowsMain). */
 export type WaterSurfaceClassify = "full" | "windows";
-const WATER_SURFACE_CLASSIFY_ENTRY: Record<WaterSurfaceClassify, string> = { full: "extractMain", windows: "extractWindowsMain" };
+const WATER_SURFACE_CLASSIFY_ENTRY: Record<WaterSurfaceClassify, string> = { full: "extractSharedMain", windows: "extractWindowsMain" };
 
 /** Window-list bound: the address window's full scan or 9^3 windows per
  * storable block, whichever is smaller. Callers use the 2048-cell address
@@ -816,6 +816,46 @@ fn polygoniseMain(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invo
 fn extractMain(@builtin(global_invocation_id) gid: vec3u) {
   udrInit();
   classifyCube(vec3i(gid));
+}
+
+// Adjacent dense cubes share their scalar corners. Load each of a 4^3
+// workgroup's 5^3 lattice values once; classification and polygonisation
+// retain exactly the same samples, arithmetic and surface cases.
+var<workgroup> denseClassifyValues:array<f32,125>;
+var<workgroup> denseNodalPhi:array<f32,216>;
+@compute @workgroup_size(4,4,4)
+fn extractSharedMain(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_id) local:vec3u,@builtin(local_invocation_index) lane:u32){
+  udrInit();
+  let dims=vec3u(u.gridInfo.xyz);
+  let nodal=!umPresentationEnabled()&&u.gridInfo.w<1.5&&all(textureDimensions(volume)==dims+1u);
+  if(nodal){
+    for(var slot=lane;slot<216u;slot+=64u){
+      let p=vec3u(slot%6u,(slot/6u)%6u,slot/36u);
+      denseNodalPhi[slot]=textureLoad(volume,vec3i(group*4u+p)-vec3i(1),0).x;
+    }
+  }
+  workgroupBarrier();
+  for(var slot=lane;slot<125u;slot+=64u){
+    let q=vec3u(slot%5u,(slot/5u)%5u,slot/25u);let p=group*4u+q;
+    var value=0.0;
+    if(nodal){
+      if(p.x>0u&&p.z>0u&&p.x<dims.x+1u&&p.z<dims.z+1u&&p.y<dims.y+1u){
+        var cell=q;if(p.y==0u){cell.y=1u;}
+        var phi=0.0;
+        for(var k=0u;k<8u;k++){let c=cell+vec3u(k&1u,(k>>1u)&1u,k>>2u);phi+=denseNodalPhi[c.x+6u*(c.y+6u*c.z)];}
+        value=0.5-0.125*phi/(u.container.y/u.gridInfo.y);
+      }
+    }else{value=latticeValue(vec3i(p));}
+    denseClassifyValues[slot]=value;
+  }
+  workgroupBarrier();
+  let base=group*4u+local;
+  if(!umPresentationEnabled()&&any(base>=vec3u(u.gridInfo.xyz)+1u)){return;}
+  let offsets=array<vec3u,8>(vec3u(0,0,0),vec3u(1,0,0),vec3u(1,1,0),vec3u(0,1,0),
+    vec3u(0,0,1),vec3u(1,0,1),vec3u(1,1,1),vec3u(0,1,1));
+  var value:array<f32,8>;
+  for(var i=0u;i<8u;i++){let p=local+offsets[i];value[i]=denseClassifyValues[p.x+5u*(p.y+5u*p.z)];}
+  classifyCubeValues(vec3i(base),1u,&value);
 }
 
 // Uniform Geometric: an exact test that a window of cubes holds no surface,
@@ -2284,7 +2324,7 @@ export class RasterWaterPipeline {
         accept(await this.device.createRenderPipelineAsync(descriptor));
       } });
 
-    compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractMain" } },pipeline=>{this.extractPipeline=pipeline;});
+    compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractSharedMain" } },pipeline=>{this.extractPipeline=pipeline;});
     compute("Listing liquid surface windows",{ label: "List liquid surface windows", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "collectWindowsMain" } },pipeline=>{this.collectWindowsPipeline=pipeline;});
     compute("Classifying liquid surface windows",{ label: "Classify listed liquid surface windows", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractWindowsMain" } },pipeline=>{this.extractWindowsPipeline=pipeline;});
     compute("Ordering the surface worklist",{ label: "Order the liquid surface worklist", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "orderSurfaceWorklistMain" } },pipeline=>{this.orderWorklistPipeline=pipeline;});

@@ -398,7 +398,7 @@ struct RigidRasterFragmentOut{
   @location(2) primaryGeometry:vec2u,
   @builtin(frag_depth) hardwareDepth:f32,
 }
-@fragment fn rigidRasterFragment(input:RigidRasterVertexOut)->RigidRasterFragmentOut{
+fn rigidRasterSurface(input:RigidRasterVertexOut)->RigidRasterFragmentOut{
   let bodyCount=min(u32(round(max(rigidUniforms.options.z,0.0))),min(RIGID_RASTER_MAX_BODIES,arrayLength(&rigidBodies)));
   if(input.bodyIndex>=bodyCount){discard;}
   let ray=rigidRasterRay(input.position.xy);let origin=ray[0];let direction=ray[1];let forward=normalize(rigidUniforms.cameraTarget.xyz-origin);
@@ -410,6 +410,27 @@ struct RigidRasterFragmentOut{
   let targets=svoGBufferSurface(vec3f(0.0),hit.t,hit.normal,hit.normal,vec4u(materialId,input.bodyIndex,media.x,media.y),motion.velocity_m_s,RIGID_RASTER_MOTION_RIGID,RIGID_RASTER_FIELD_ANALYTIC,motion.generation,flags,hit.featureId);
   let viewDepth=hit.t*max(dot(direction,forward),1e-6);return RigidRasterFragmentOut(targets.packedSurface,targets.identityMedia,
     vec2u(bitcast<u32>(hit.t),rigidPackPrimaryGeometryMetadata(hit.normal,input.bodyIndex,hit.featureId,motion.valid)),clamp(RIGID_RASTER_NEAR_M/viewDepth,0.0,1.0));
+}
+
+@fragment fn rigidRasterFragment(input:RigidRasterVertexOut)->RigidRasterFragmentOut{
+  return rigidRasterSurface(input);
+}
+struct RigidDirectFragmentOut{
+  @location(0) packedSurface:vec4u,
+  @location(1) identityMedia:vec4u,
+  @location(2) geometry:vec4f,
+  @location(3) identity:vec2u,
+  @builtin(frag_depth) hardwareDepth:f32,
+}
+// Same analytic hit and certificate as discovery + bridge, written together
+// while the primary G-buffer attachments are still resident in the tile.
+@fragment fn rigidDirectFragment(input:RigidRasterVertexOut)->RigidDirectFragmentOut{
+  let hit=rigidRasterSurface(input);let word=hit.primaryGeometry.y;
+  let owner=(word>>24u)&15u;let feature=(word>>28u)&7u;let motionValid=word>>31u;
+  let metadata=owner|(feature<<16u)|(RIGID_RASTER_FIELD_ANALYTIC<<20u)|(RIGID_RASTER_MOTION_RIGID<<24u)|(motionValid<<26u);
+  return RigidDirectFragmentOut(hit.packedSurface,hit.identityMedia,
+    vec4f(rigidUnpackPrimaryNormal(word),bitcast<f32>(hit.primaryGeometry.x)),
+    vec2u(0x80000000u|owner,metadata),hit.hardwareDepth);
 }
 
 struct RigidSplitBridgeFragmentOut{
