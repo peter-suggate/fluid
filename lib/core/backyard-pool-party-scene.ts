@@ -103,6 +103,25 @@ export function createBackyardPoolPartyScene(): SceneDescription {
   return scene;
 }
 
+export const BACKYARD_POOL_DRIFT_ID = "backyard-pool-drift";
+
+/** The same pool barely disturbed: the ball floats at its rest depth and
+ * drifts slowly across the water, and one small drip lands at the far end.
+ * Most of the pool stays close to settled while a gentle wake and weak
+ * ripples spread, so work should follow them rather than the whole pool. */
+export function createBackyardPoolDriftScene(): SceneDescription {
+  const scene = createBackyardPoolPartyScene();
+  scene.sceneId = BACKYARD_POOL_DRIFT_ID;
+  const ball = scene.rigidBodies[0]!, radius = ball.dimensions_m.x;
+  // A 650 kg/m3 sphere floats with 65% of its volume submerged: a cap
+  // 1.2 radii deep, so its centre sits 0.2 radii below the waterline.
+  Object.assign(ball, { position_m: { x: -2.6, y: POOL_PARTY_WATERLINE_M - 0.2 * radius, z: -0.6 },
+    linearVelocity_m_s: { x: 0.3, y: 0, z: 0.05 } });
+  scene.fluid.scheduledDrops = [{ time_s: 2, volume: { shape: "sphere",
+    center_m: { x: 2.8, y: POOL_PARTY_WATERLINE_M + 0.3, z: 1 }, radius_m: 0.04 } }];
+  return scene;
+}
+
 export const backyardPoolPartyCamera: Partial<CameraState> = {
   azimuth_rad: -0.65, elevation_rad: 0.55, distance_m: 25, tanHalfFov: 0.48,
   target_m: { x: -0.8, y: 2.4, z: 0 },

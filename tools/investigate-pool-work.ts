@@ -5,6 +5,7 @@
  * SCENARIO=settled (default): 120 frames, measure 61–120, authored rigid body.
  * SCENARIO=impact: localized sphere impact, 30 frames, impulse/depth/crown checks.
  * SCENARIO=pool-impact: same authored pool geometry, ball immediately above water.
+ * SCENARIO=drift: the gentle-drift pool (floating ball drifting slowly, one drip at 2 s); rows carry region tier counts.
  * IMPACT_SPEED=8 (downward m/s), IMPACT_X=0, IMPACT_Z=0 vary impact only.
  * GEO_SNAPSHOTS=0 disables geometry value snapshots (metadata-only ablation).
  * FROM filters wall and per-pass summaries to the same measured window.
@@ -21,7 +22,7 @@ import {measureCurrentPoolPhiVolume,type PoolVolumeFrame} from "./measure-pool-v
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { createBackyardPoolPartyScene } from "../lib/core/backyard-pool-party-scene";
+import { createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "../lib/core/backyard-pool-party-scene";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { createUniformSolver, withUniformDevice, readUniformFields } from "../tests/helpers/uniform-geometric";
@@ -33,8 +34,8 @@ import { UniformPressureBand } from "../lib/methods/uniform/uniform-pressure-ban
 import type { UniformMixedFrameParameters } from "../lib/methods/uniform/uniform-mixed-frame";
 
 const scenario=process.env.SCENARIO??"settled";
-assert.ok(["settled","impact","pool-impact"].includes(scenario));
-const impact=scenario!=="settled",miniImpact=scenario==="impact";
+assert.ok(["settled","impact","pool-impact","drift"].includes(scenario));
+const drift=scenario==="drift",impact=scenario!=="settled"&&!drift,miniImpact=scenario==="impact";
 const impactSpeed=Number(process.env.IMPACT_SPEED??8),impactX=Number(process.env.IMPACT_X??0),impactZ=Number(process.env.IMPACT_Z??0);
 assert.ok(Number.isFinite(impactSpeed)&&impactSpeed>=0&&Number.isFinite(impactX)&&Number.isFinite(impactZ));
 async function readWords(device:GPUDevice,source:GPUBuffer,offset:number,count:number){
@@ -105,7 +106,7 @@ paceDawnEventPolling();
 await withUniformDevice("pool work investigation",async raw=>{
  const profile=profiled?new GPUPassProfile(raw):undefined;
  const probe=split?new NarrowBandDispatchProbe(profile!.device):undefined;
- const scene=createBackyardPoolPartyScene();
+ const scene=drift?createBackyardPoolDriftScene():createBackyardPoolPartyScene();
  if(miniImpact){
   scene.container={...scene.container,width_m:3.2,height_m:4.8,depth_m:3.2};scene.solidBoundary=undefined;
   scene.solidVoxels=[[[0,0,0],[64,4,64]],[[0,0,0],[8,40,64]],[[56,0,0],[64,40,64]],[[8,0,0],[56,40,8]],[[8,0,56],[56,40,64]]].map(([minimum,maximumExclusive])=>({operation:"fill",minimum:minimum as [number,number,number],maximumExclusive:maximumExclusive as [number,number,number],materialId:1}));
@@ -129,7 +130,7 @@ await withUniformDevice("pool work investigation",async raw=>{
    raw.queue.writeBuffer(frameState.bandParams,0,frameState.words.band);return same;
   };
  }
- const inner=solver as unknown as {mixedFrame:{surfaceWorkControl?:{enabled:boolean;surface:GPUBuffer;geometry:GPUBuffer;countersOffset:number;regions:number;epochOffset?:number;cacheRegions:number;allocatedBytes:number;modelWordOffset?:number;velocityWordOffset?:number;collectGeometryStats?:boolean;geometrySnapshots?:boolean};narrowBandFlip?:{count:number;regionalCrossingReuseEnabled?:boolean;regionalReuseCapacity?:number;regionalReuseAllocatedBytes?:number;regionalReuseEvidence?:{buffer:GPUBuffer;regions:number;flagsOffset:number;planeOffset:number}};ownership:ProbeOwnership;surface?:ProbeSurface;geometry?:{countersBuffer:GPUBuffer;countersOffset:number;allocatedBytes?:number;curvatureDirty?:GPUBuffer;curvatureCountersOffset:number;curvatureWorkOffset?:number}};rigidSystem:{stateBuffer:GPUBuffer};rigidExchange:GPUBuffer};
+ const inner=solver as unknown as {mixedFrame:{surfaceWorkControl?:{enabled:boolean;surface:GPUBuffer;geometry:GPUBuffer;countersOffset:number;regions:number;epochOffset?:number;cacheRegions:number;allocatedBytes:number;modelWordOffset?:number;velocityWordOffset?:number;collectGeometryStats?:boolean;geometrySnapshots?:boolean};narrowBandFlip?:{count:number;regionalCrossingReuseEnabled?:boolean;regionalReuseCapacity?:number;regionalReuseAllocatedBytes?:number;regionalReuseEvidence?:{buffer:GPUBuffer;regions:number;flagsOffset:number;planeOffset:number}};ownership:ProbeOwnership;heat?:{counts:{buffer:GPUBuffer;offset:number}};surface?:ProbeSurface;geometry?:{countersBuffer:GPUBuffer;countersOffset:number;allocatedBytes?:number;curvatureDirty?:GPUBuffer;curvatureCountersOffset:number;curvatureWorkOffset?:number}};rigidSystem:{stateBuffer:GPUBuffer};rigidExchange:GPUBuffer};
  if(process.env.FORCE_FULL==="1"){
   if(inner.mixedFrame.surfaceWorkControl)inner.mixedFrame.surfaceWorkControl.enabled=false;
   if(inner.mixedFrame.narrowBandFlip)inner.mixedFrame.narrowBandFlip.regionalCrossingReuseEnabled=false;
@@ -151,6 +152,7 @@ await withUniformDevice("pool work investigation",async raw=>{
    if(profile&&frame>=from)profile.start();
    const start=performance.now();
    assert.ok(solver.advanceTo(frame*scene.numerics.fixedDt_s,bodies));
+   const encode_ms=performance.now()-start;
    await solver.awaitFrameCompletion();
    const wall_ms=performance.now()-start;
    assert.equal(solver.info.simulationPipelineError,undefined);
@@ -179,7 +181,8 @@ await withUniformDevice("pool work investigation",async raw=>{
     normalDirtyRegions:inner.mixedFrame.geometry?.curvatureDirty?(await readWords(raw,inner.mixedFrame.geometry.curvatureDirty,inner.mixedFrame.geometry.curvatureCountersOffset,1))[0]:undefined,
     geometryEvaluations:inner.mixedFrame.geometry?.countersBuffer?Array.from(await readWords(raw,inner.mixedFrame.geometry.countersBuffer,inner.mixedFrame.geometry.countersOffset,2)):undefined,
    }:undefined;
-   const row={frame,wall_ms,physical,work,...solver.narrowBandFlipInfo,...solver.workDomainInfo,
+   const heatCounts=inner.mixedFrame.heat?.counts,tiers=heatCounts?Array.from(await readWords(raw,heatCounts.buffer,heatCounts.offset,4)):undefined;
+   const row={frame,wall_ms,encode_ms,tiers,dispatches:passes?.reduce((n,p)=>n+p.dispatches,0),physical,work,...solver.narrowBandFlipInfo,...solver.workDomainInfo,
     bandTiles:solver.info.uniformPressureBandTiles,bandCycles:solver.info.uniformPressureBandCycles,
     bandResidual:solver.info.uniformPressureBandResidual,rootResidual:solver.info.uniformPressureAcceptedResidual,passes};
    rows.push(row);

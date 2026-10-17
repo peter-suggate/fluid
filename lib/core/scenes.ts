@@ -47,7 +47,7 @@ import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWav
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
-import { BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
+import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
@@ -1620,6 +1620,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     containerShell: "authored",
     presentationMode: "full-scene",
     build: createBackyardPoolPartyScene,
+    camera: backyardPoolPartyCamera,
+  }),
+  defineScene({
+    id: BACKYARD_POOL_DRIFT_ID,
+    name: "Backyard pool · gentle drift",
+    blurb: "The same backyard pool barely disturbed: the ball floats and drifts slowly across the water, and a single drip lands at the far end. A gentle wake and weak ripples spread over an otherwise still pool.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    build: createBackyardPoolDriftScene,
     camera: backyardPoolPartyCamera,
   }),
   defineScene({
