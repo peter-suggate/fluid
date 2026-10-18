@@ -133,7 +133,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
     {planeControls}
   </ToolstripRow>
   {shown("pages") && legend("Domain page states", "Current allocation. Resident pages may also support pressure and the interface. Air pages are hidden. 3D boxes show through the scene so the allocation remains visible.", PAGE_LEGEND)}
-  {shown("heat") && legend("Region work tiers", "Each 16h region's work tier this frame (the region heat). 3D boxes show through the scene; cold regions are faintest.", HEAT_LEGEND)}
+  {shown("heat") && legend("Region work tiers", "Each 16h region's work tier this frame (the region heat), labelled with the resolution it is computed at (h, 4h, or 16h for a frozen cold region) once the region is large enough on screen. 3D boxes show through the scene; cold regions are faintest.", HEAT_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
   {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
   </>;

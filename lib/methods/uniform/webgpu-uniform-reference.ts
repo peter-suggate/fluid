@@ -1170,7 +1170,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame.setLayoutViews(this.layoutViews);
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;this.watchMixedAllocation();
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
-    this.mixedPageSource={...this.mixedFrame.pagePool.volumePageSource!,frame:{buffer:this.params,size:48},tiers:{buffer:this.mixedFrame.heat.tiers,size:4*this.mixedFrame.heat.regions}};
+    this.mixedPageSource={...this.mixedFrame.pagePool.volumePageSource!,frame:{buffer:this.params,size:48},tiers:{buffer:this.mixedFrame.heat.tiers,size:4*this.mixedFrame.heat.regions,warmResolution:this.mixedFrame.nearSettled.warmResolution,coldRegions:this.narrowBandColdRegions}};
     this.mixedSource={vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedBlocks:this.address.blocks,mixedFrame:{buffer:this.params,size:48},mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
     for(let i=0;i<UNIFORM_MIXED_RELAYOUT_READS;i++)this.mixedRelayoutReads.give(this.device.createBuffer({label:`Uniform mixed relayout receipt read ${i}`,size:UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}));
     this.executionInfo.allocatedBytes+=UNIFORM_MIXED_RELAYOUT_READS*UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4;

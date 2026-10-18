@@ -87,7 +87,7 @@ const regions = 8 * pool.layout.blocks;
 const tierWords = new Uint32Array(regions).map((_, r) => r % 3);
 const tiers = device.createBuffer({ size: 4 * regions, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
 device.queue.writeBuffer(tiers, 0, tierWords);
-const heated = { ...pool.volumePageSource!, tiers: { buffer: tiers, size: 4 * regions } };
+const heated = { ...pool.volumePageSource!, tiers: { buffer: tiers, size: 4 * regions, warmResolution: "4h" as const, coldRegions: "frozen16h" as const } };
 // Hue census of the visible pixels: cold blue, warm amber, hot red.
 const hues = (pixels: Uint8Array) => {
   const n = { cold: 0, warm: 0, hot: 0 };
@@ -106,6 +106,12 @@ assert.ok(hs.visible > 1000 && hv.visible > 1000, "heat draws in both views");
 for (const n of [hsHues, hvHues]) assert.ok(n.cold > 0 && n.warm > 0 && n.hot > 0, "every tier is drawn");
 assert.equal((await render("heat-no-tiers", heatVolume)).visible, 0, "no tiers, no heat");
 assert.deepEqual((await render("heat-with-pages", visualLayers(["pages"]), heated)).pixels, a.pixels, "tiers leave the pages layer unchanged");
+// Close up, regions are large enough on screen for their resolution labels
+// (no topology is bound, so only the cold 16h and warm 4h ones can be named).
+device.queue.writeBuffer(uniform, 16, new Float32Array([2.1, 2.725, 2.45, 0.5]));
+const labelled = { slice: await render("heat-labels-slice", heatSlice, heated), volume: await render("heat-labels-3d", heatVolume, heated) };
+assert.ok(labelled.slice.visible > 1000 && labelled.volume.visible > 1000, "close-up heat draws");
+device.queue.writeBuffer(uniform, 16, new Float32Array([6, 5, 7, 0.5]));
 assert.deepEqual(errors, []);
 overlay.destroy(); pool.destroy(); uniform.destroy(); bodies.destroy(); read.destroy(); target.destroy(); empty.destroy(); tiers.destroy();
 textures.forEach(t => t.destroy());

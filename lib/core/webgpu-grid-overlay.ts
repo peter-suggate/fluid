@@ -37,11 +37,13 @@ const LAYER_PRESSURE_ORIGIN = 4 + 4 * LAYER_OPACITY_VEC4S;
 const LAYER_PAGE_VIEW = LAYER_PRESSURE_ORIGIN + 4;
 /** x: the importance layer's view, 0 = all criteria, else 1 + the criterion id. */
 const LAYER_IMPORTANCE = LAYER_PAGE_VIEW + 4;
-const LAYER_UNIFORM_FLOATS = LAYER_IMPORTANCE + 4;
+/** The heat labels' solver settings: x WARM regions computed at 4h, y COLD regions frozen at 16h. */
+const LAYER_HEAT = LAYER_IMPORTANCE + 4;
+const LAYER_UNIFORM_FLOATS = LAYER_HEAT + 4;
 
 export const gridOverlayViewRecordsWGSL = /* wgsl */ `
 ${visualLayerPaintWGSL}
-struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageView:vec4f, importance:vec4f, }
+struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageView:vec4f, importance:vec4f, heat:vec4f, }
 @group(0) @binding(24) var<uniform> layers:LayerUniforms;
 var<private> layerMode:i32;
 var<private> recordComposition:bool;
@@ -601,7 +603,15 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     let line=gridLinePaint(min(distances.x,distances.y),1.25);
     let color=domainHeatColor(tier);
     let fill=array<f32,3>(0.22,0.42,0.6)[tier];
-    return GridSample(sceneColor(mix(color*0.75,color,line)),mix(fill,0.95,line),line,false);
+    // The region's resolution label, in its rectangle's top-left corner.
+    let normal=3-firstPlaneAxis-secondPlaneAxis;
+    let eye=u.cameraPosition.xyz;let ahead=normalize(u.cameraTarget.xyz-eye);
+    var side=cross(ahead,vec3f(0,1,0));if(length(side)<1e-5){side=vec3f(1,0,0);}side=normalize(side);
+    let pixel=overlayFramebufferPixel(point,eye,ahead,side,normalize(cross(side,ahead))).xy;
+    let label=domainHeatLabel(vec3i(floor(pagePoint/half)),tier,pixel,normal,point[normal]);
+    let mark=max(label.x,label.y)*label.z;
+    let paint=mix(mix(color*0.75,color,line),select(DOMAIN_HEAT_CASING,domainHeatInk(tier),label.x>0.5),mark);
+    return GridSample(sceneColor(paint),max(mix(fill,0.95,line),mark),max(line,mark),false);
   }
   // Structure is the one view whose subject is the lattice, so it holds its
   // lines further into the distance than the field views, where the grid is
@@ -1617,7 +1627,10 @@ export class GridOverlayPipeline {
       values[3] = pages ? pageOffset / 4 : 0;
       const directoryBytes = pages ? (pages.directory.size ?? pages.directory.buffer.size - (pages.directory.offset ?? 0)) : 0;
       const tierOffset = pageOffset + pageBytes + directoryBytes;
-      if (heat) { values[LAYER_PAGE_VIEW + 2] = tierOffset / 4; values[LAYER_PAGE_VIEW + 3] = heat.size / 4; }
+      if (heat) {
+        values[LAYER_PAGE_VIEW + 2] = tierOffset / 4; values[LAYER_PAGE_VIEW + 3] = heat.size / 4;
+        values[LAYER_HEAT] = heat.warmResolution === "4h" ? 1 : 0; values[LAYER_HEAT + 1] = heat.coldRegions === "frozen16h" ? 1 : 0;
+      }
       const bytes = tierOffset + (heat?.size ?? 0);
       if (!this.layerRecords || this.layerRecords.size < bytes) {
         this.layerRecords?.destroy();
@@ -1642,6 +1655,8 @@ export class GridOverlayPipeline {
       layout: this.heatPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
+        // The labels read tile widths from the mixed topology.
+        { binding: 17, resource: this.denseLevelSetVolumeSource?.mixedOwnership ?? { buffer: this.dummyStorage } },
         { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.dummyStorage } },
         { binding: 24, resource: { buffer: this.layerUniform } },
       ],

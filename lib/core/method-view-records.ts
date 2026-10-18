@@ -65,9 +65,11 @@ export const SOLVE_WINDOW_RECORD_WORDS = SOLVE_WINDOW_HOST_GROUPS_WORD + 3;
  * cell size, live lattice origin), so metres = origin + h * 32 * (world - F).
  * Optional tiers are the work tier (0 cold, 1 warm, 2 hot) of each 16h
  * region, a word a region: region 8·block + the octant of the block it lies
- * in (x | y<<1 | z<<2); `size` bounds the region count. */
+ * in (x | y<<1 | z<<2); `size` bounds the region count. Their resolution
+ * settings (NB-FLIP warmResolution, coldRegions) name what each tier is
+ * computed at: the heat layer's labels. */
 export interface GPUFluidVolumePageSource extends GPUFluidViewRecords {
   readonly directory: GPUBufferBinding;
   readonly frame?: GPUBufferBinding;
-  readonly tiers?: GPUBufferBinding & { readonly size: number };
+  readonly tiers?: GPUBufferBinding & { readonly size: number; readonly warmResolution?: "4h" | "h"; readonly coldRegions?: "frozen16h" | "fine" };
 }
