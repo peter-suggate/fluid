@@ -785,10 +785,12 @@ export class DynamicGPUPerformanceTraceRecorder {
  * Stage boundaries carried by the frame's own passes.
  *
  * The recorders above buy each boundary with a whole extra compute pass. This
- * one buys it with nothing: through a proxy over the command encoder, every
+ * one attaches counters to existing work: through a proxy over the command encoder, every
  * compute pass carries an end-of-pass counter, and `completePhase` closes the
  * stage at the end of the last pass it encoded. The frame's first pass opens
  * the chain with its beginning counter.
+ * Each timed compute pass gets a four-byte blit before it so Metal cannot
+ * fold it into its predecessor and lose or accumulate its counter samples.
  *
  * A stage closes at the completion frontier of the passes encoded so far (see
  * `read`), never at its successor's first pass's beginning: Metal starts a
@@ -813,8 +815,7 @@ export class GPUStageTimestampRecorder {
   private readonly readBuffer: GPUBuffer;
   /** See DynamicGPUPerformanceTraceRecorder: Dawn/Metal folds adjacent compute
    * passes, and a folded pass never receives its counter sample. A 4-byte blit
-   * ahead of a boundary-carrying pass forces the encoder break that makes the
-   * sample observable. It is the only command this recorder adds per stage. */
+   * ahead of every timed pass keeps its counter on a distinct native encoder. */
   private readonly encoderBreakSource: GPUBuffer;
   private readonly encoderBreakTarget: GPUBuffer;
   private markerResources?: DynamicTraceMarkerResources;
@@ -1000,9 +1001,10 @@ export class GPUStageTimestampRecorder {
       this.finalPhaseClosesOnNextPass = false;
     }
     this.lastComputeEnd = compute ? endOfPassWriteIndex : undefined;
-    // A beginning counter needs its own encoder, or folding drops it; a
-    // stage-closing end counter gets its break when the next pass begins.
-    if (opens && !breaks) encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
+    // End-only counters need their own encoder too. Breaking only at stage
+    // boundaries lets Metal fold the intermediate timed passes: native runs
+    // lose samples, and Chromium can lose the device with command-buffer OOM.
+    if ((opens || compute) && !breaks) encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
     return {
       querySet: this.querySet,
       ...(beginningOfPassWriteIndex === undefined ? {} : { beginningOfPassWriteIndex }),
