@@ -1,18 +1,16 @@
 /** A cut owner's least-squares plane, evaluated at its tile centre.
- * Empty and fully open masks retain the original ordered result. Partial
- * masks use four 32-lane fits per workgroup, with four phi values per lane
- * instead of one thread retaining all 125. Only the sum order changes.
- * A wall no thicker than the tile leaves open cells on both of its sides, and
- * phi is not one field across it: the fit is through the liquid's side
- * (cutSide), or the bath's corner tiles, a sliver of deep liquid and the air
- * outside, fit to air and were a p=0 face at depth. With liquid on neither
- * side the fit is through the side nearer it, the one of the lower mean phi:
- * an air owner's phi is then the continuation of the liquid's beside it,
- * which is what that liquid's free-surface theta reads (through both sides
- * the host model of a resting tank puts a row under a dry wall tile up to
- * 6% of rho g 4h off hydrostatic). The slot's second word names the sides
- * the fit is through, 1 the side cutSide grows and 2 the rest, for the
- * root's wet faces (umWetSide).
+ * Empty and fully open masks retain the ordered result. Partial masks use
+ * four 32-lane fits per workgroup, with four phi values per lane.
+ * Where liquid is present, only negative samples adjacent to open cells
+ * enter the fit: positive
+ * distance bends around a voxel shoreline and includes air beyond the wall,
+ * which must not tilt the liquid's hydrostatic pressure plane. This uses
+ * the existing vertex loads and removes the connected-component flood fill.
+ * Wholly dry tiles retain their air fit for the free-surface distance ratio.
+ * Samples on a coordinate plane through the centre can determine its value
+ * without a perpendicular derivative. Other rank-deficient sets leave the
+ * root owner in air (2h), with the interface resolved by the fine pressure.
+ * The slot's second word is 0 for an empty mask and 1 otherwise.
  * Physics changes must also update the ordered cutTile reference in
  * uniform-mixed-pressure-authority.ts and its frozen comparison. */
 export const uniformMixedPressureCutWGSL=/* wgsl */`
@@ -25,32 +23,25 @@ var<workgroup> pcSecond:array<vec4f,128>;
 var<workgroup> pcThird:array<vec4f,128>;
 fn pcFitTile(t:u32,validTile:bool,l:u32){
  let origin=vec3i(4u*umTileCoord(t));let open=umSolidOpenCells(t);let lane=l&31u;let base=l&~31u;
- // The vertices of each side of the tile (cutSide), and whether it holds liquid.
- let side=cutSide(open);let other=open&~side;
- var values:array<f32,4>;var lives=0u;var others=0u;var first=vec4f(0);var total=0.0;var firstOther=vec4f(0);var totalOther=0.0;var wet=vec2f(0);
+ // Dry distance bends around the shoreline. Fit the liquid samples already
+ // loaded by this kernel; no neighbourhood reads or additional pass.
+ var values:array<f32,4>;var lives=0u;var allLives=0u;var first=vec4f(0);var total=0.0;var airFirst=vec4f(0);var airTotal=0.0;
  for(var k=0u;k<4u;k++){
-  let v=lane+32u*k;if(!validTile||v>=125u){continue;}
-  let own=cutLive(side,v);if(!own&&!cutLive(other,v)){continue;}
-  let value=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;values[k]=value;
-  let moment=vec4f(vec3f(vec3u(v%5u,(v/5u)%5u,v/25u))-2.0,1);
-  if(own){lives|=1u<<k;first+=moment;total+=value;if(value<0.0){wet.x=1.0;}}
-  else{others|=1u<<k;firstOther+=moment;totalOther+=value;if(value<0.0){wet.y=1.0;}}
+  let v=lane+32u*k;if(!validTile||v>=125u||!cutLive(open,v)){continue;}
+  let value=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;
+  values[k]=value;allLives|=1u<<k;let at=vec4f(vec3f(vec3u(v%5u,(v/5u)%5u,v/25u))-2.0,1);
+  if(value<0.0){lives|=1u<<k;first+=at;total+=value;}else{airFirst+=at;airTotal+=value;}
  }
- pcFirst[l]=first;pcSecond[l]=vec4f(total,totalOther,wet);pcThird[l]=firstOther;
+ pcFirst[l]=first;pcSecond[l]=vec4f(total,airTotal,0,0);pcThird[l]=airFirst;
  workgroupBarrier();
  for(var stride=16u;stride>0u;stride/=2u){
   if(lane<stride){pcFirst[l]+=pcFirst[l+stride];pcSecond[l]+=pcSecond[l+stride];pcThird[l]+=pcThird[l+stride];}
   workgroupBarrier();
  }
- // Liquid on one side alone: the fit is that side's. Liquid on neither: the
- // side nearer it, by its mean phi.
- let sums=pcSecond[base];let near=sums.x*pcThird[base].w<=sums.y*pcFirst[base].w;
- let keep=sums.z>0.0||(sums.w<=0.0&&near);let keepOther=sums.w>0.0||(sums.z<=0.0&&!near);
- var moments=vec4f(0);var sum=0.0;
- if(keep){moments+=pcFirst[base];sum+=sums.x;}
- if(keepOther){moments+=pcThird[base];sum+=sums.y;lives|=others;}
- if(!keep){lives=others;}
- let count=moments.w;let mean=moments.xyz/max(count,1.0);let level=sum/max(count,1.0);
+ // Entirely dry tiles still supply the air-side distance in free-surface theta.
+ let wet=pcFirst[base].w>0.0;let moments=select(pcThird[base],pcFirst[base],wet);
+ let count=moments.w;let mean=moments.xyz/max(count,1.0);let level=select(pcSecond[base].y,pcSecond[base].x,wet)/max(count,1.0);
+ if(!wet){lives=allLives;}
  workgroupBarrier();
  var diagonal=vec3f(0);var cross3=vec3f(0);var moment=vec3f(0);
  for(var k=0u;k<4u;k++){if((lives&(1u<<k))!=0u){
@@ -66,12 +57,18 @@ fn pcFitTile(t:u32,validTile:bool,l:u32){
  if(lane==0u&&validTile){
   var result=2.0*UM_HMIN;
   if(count>0.0){
-   let diagonal=pcFirst[base].xyz;let cross3=pcSecond[base].xyz;let moment=pcThird[base].xyz;
+   var diagonal=pcFirst[base].xyz;let cross3=pcSecond[base].xyz;let moment=pcThird[base].xyz;
+   // Samples on a coordinate plane through the centre still determine its
+   // value. The absent derivative is immaterial there, so fix it to zero.
+   diagonal=select(diagonal,vec3f(1.0),(diagonal==vec3f(0.0))&(mean==vec3f(0.0)));
    let c0=vec3f(diagonal.x,cross3.x,cross3.y);let c1=vec3f(cross3.x,diagonal.y,cross3.z);let c2=vec3f(cross3.y,cross3.z,diagonal.z);
-   let slope=vec3f(dot(moment,cross(c1,c2)),dot(c0,cross(moment,c2)),dot(c0,cross(c1,moment)))/dot(c0,cross(c1,c2));
-   result=level-dot(slope,mean);
+   let determinant=dot(c0,cross(c1,c2));let scale=diagonal.x+diagonal.y+diagonal.z;
+   if(determinant>0.000001*scale*scale*scale){
+    let slope=vec3f(dot(moment,cross(c1,c2)),dot(c0,cross(moment,c2)),dot(c0,cross(c1,moment)))/determinant;
+    result=level-dot(slope,mean);
+   }
   }
-  balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(result,select(0.0,1.0,keep)+select(0.0,2.0,keepOther));
+  balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(result,1.0);
  }
  workgroupBarrier();
 }

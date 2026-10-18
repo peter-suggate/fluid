@@ -182,7 +182,10 @@ fn umColdWall(face:UMFace)->bool{return face.neighbor.width==0u&&umFaceKind(face
 // What u* adds to a face's stored velocity: zero unless frozen.
 fn umColdAdd(o:UMOwner,face:UMFace,occupied:bool)->f32{
  if(!UM_COLD_FREEZE){return 0.0;}
- let low=umColdLow(o,face);var add=umColdForced(low,face.axis,o.width,0.0,occupied);
+ // Forces leave canonical negative boundary faces unchanged. Reconstruct
+ // the same u* when frozen: adding gravity there invents a bottom flux,
+ // especially where a cut tile also contains dry space outside a vessel.
+ let low=umColdLow(o,face);var add=umColdForced(low,face.axis,o.width,0.0,occupied&&!umFaceLow(face.anchor,face.axis));
  if(umColdWall(face)){add-=umColdFaceTerm(low,face.axis,o.width);}
  return add;
 }`:""}
@@ -210,7 +213,7 @@ fn umCoarseCut(o:UMOwner,axis:u32,sign:i32)->bool{
 fn umCutMask(o:UMOwner,axis:u32,sign:i32)->u32{
  var t=vec3i(umOrigin(o)/4u);var n=t;n[axis]+=sign;if(umTileKind(n)!=UM_RESIDENT){return 0xffffu;}
  if(sign<0){t=n;}
- return u32(phi[UM_ROOT_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*umTileAt(vec3u(t))+axis]);
+ return u32(phi[UM_ROOT_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*umTileAt(vec3u(t))+axis])&0xffffu;
 }
 // A cut 4h face's work word: the h faces the liquid's rows hold (umCutMask,
 // bits 0-15), and bit 16 where a body's moving wall can reach the tile.
@@ -393,7 +396,14 @@ fn umProject(o:UMOwner,face:UMFace)->f32{
  ${this.coarse?`let low=umColdLow(o,face);let cold=UM_COLD_FREEZE&&umFrozenFace(low,face.axis,o.width);
  let row=umProjectRow(o,face,cold);if(!cold){return row.x;}
  let raw=umFaceVelocity(face);
- if(face.sign>0){umColdCorrect(o.tile,face.axis,select(3.0e38,row.x-raw-umColdFaceTerm(low,face.axis,o.width),row.y>0.0&&!umColdWall(face)));}
+ if(face.sign>0){
+  // Wet topology already records voxel-wall normals. A constant frozen
+  // translation must remain tangent; carry its constraint in the existing
+  // correction slot instead of building another geometry mask or pass.
+  let wall=(u32(phi[${ownership.layout.cellCount}u+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*o.tile+face.axis])&0x10000u)!=0u;
+  let correction=select(3.0e38,row.x-raw-umColdFaceTerm(low,face.axis,o.width),row.y>0.0&&!umColdWall(face));
+  umColdCorrect(o.tile,face.axis,select(correction,-3.0e38,wall));
+ }
  return raw;`:"return umProjectRow(o,face,false).x;"}
 }
 fn umProjectWithSource(o:UMOwner,face:UMFace)->f32{

@@ -42,7 +42,8 @@ export interface UniformMixedPressureRevisions {readonly buffer:GPUBuffer;readon
 export function uniformMixedRootTopologyBytes(layout:UniformMixedLayout):number{return 16*uniformMixedPressureStorage(layout).count;}
 /** What follows the owners' phi in the root's phi words with coarse solids,
  * three floats a tile: its +x, +y and +z face masks (bit u+4v of an h face the
- * root's topology keeps). The RHS has no storage binding to spare. */
+ * root's topology keeps), plus bit 16 for a voxel wall normal to that axis.
+ * The RHS has no storage binding to spare. */
 export const UNIFORM_MIXED_ROOT_TILE_WORDS=3;
 export function uniformMixedRootMaskWords(layout:UniformMixedLayout):number{return UNIFORM_MIXED_ROOT_TILE_WORDS*layout.tiles.length;}
 /** One pressure interface for RHS, projection, momentum support and extension.
@@ -93,15 +94,12 @@ export function uniformMixedRootMaskWords(layout:UniformMixedLayout):number{retu
  * simulation holds at h keeps only the h faces the liquid's rows hold: an
  * open liquid h cell on one side, and across a closed h cell an owner that is
  * itself a row (an air owner's wall is the band's contact, not a surface).
- * Toward an owner that is not a row, a row's open h cells hold their faces
- * whether they are liquid or not, as a 4h tile's do: the free surface lies
- * inside the row's tile, and the face is its ghost-fluid term, the row's own
- * phi against its neighbour's. Only the cells on the side the row's phi was
- * fit through (umWetSide): the dry cells beyond a wall are not its surface.
- * Without those faces a row whose liquid stands under half a cell at its
- * face had none there, and a film on a tile's floor was a row with no face
- * or an island of rows with no free surface: singular, and with volume
- * control's source on its RHS a residual no cycle reduces.
+ * A coarse liquid row must not admit dry h faces just because they lie on
+ * the same connected open side. At a stepped shoreline those faces can
+ * meet an air row below the waterline, imposing p=0 sideways through the
+ * wall. This also drives the root's above-water velocity, which later
+ * disturbs the interface. The existing h wet predicate defines both the
+ * pressure aperture and the restricted flux.
  * The RHS sums the same h faces, so a resting liquid is one hydrostatic root
  * whatever its vessel.
  * Resident mode (the split's all-4h pressure ownership, whose support carries
@@ -314,19 +312,6 @@ fn cutLive(open:vec2u,v:u32)->bool{
   if(all(c>=vec3i(0))&&all(c<vec3i(4))){let i=u32(c.x+4*c.y+16*c.z);if(((open[i>>5u]>>(i&31u))&1u)!=0u){return true;}}}
  return false;
 }
-// One face-connected set of the tile's open h cells (bit x+4y+16z), grown from
-// its lowest: a wall through the tile leaves the rest on its other side.
-fn cutSide(open:vec2u)->vec2u{
- var side=vec2u(0u);
- if(open.x!=0u){side.x=open.x&(~open.x+1u);}else{side.y=open.y&(~open.y+1u);}
- for(var k=0u;k<64u;k++){
-  let x=((side<<vec2u(1u))&vec2u(0xeeeeeeeeu))|((side>>vec2u(1u))&vec2u(0x77777777u));
-  let y=((side<<vec2u(4u))&vec2u(0xfff0fff0u))|((side>>vec2u(4u))&vec2u(0x0fff0fffu));
-  let z=vec2u(side.x<<16u,(side.y<<16u)|(side.x>>16u))|vec2u((side.x>>16u)|(side.y<<16u),side.y>>16u);
-  let grown=(side|x|y|z)&open;if(all(grown==side)){break;}side=grown;
- }
- return side;
-}
 // Ordered reference for frozen shader replays; unreachable from production
 // entry points, so the shader compiler removes its private vertex array.
 // Keep physics edits in sync with uniform-mixed-pressure-cut.wgsl.ts.
@@ -334,25 +319,22 @@ fn cutTile(t:u32){
  let origin=vec3i(4u*umTileCoord(t));var sides=1.0;let open=umSolidOpenCells(t);
  // Empty/full masks preserve the ordered fit: no live vertices use 2h;
  // all 125 vertices have exactly zero centred mean, so only their mean
- // phi contributes at the tile centre. Partial masks keep the full fit.
+ // phi contributes at the tile centre. Partial masks fit liquid samples.
  if(all(open==vec2u(0u))){balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(2.0*UM_HMIN,0.0);return;}
  if(all(open==vec2u(0xffffffffu))){
   var count=0.0;var total=0.0;
   for(var v=0u;v<125u;v++){count+=1.0;total+=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;}
   balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(total/count,sides);return;
  }
- var cutVertex:array<f32,125>;var live=array<u32,4>(0u,0u,0u,0u);var rest=array<u32,4>(0u,0u,0u,0u);
- // Liquid on one side of a wall alone: the fit is that side's. Liquid on
- // neither: the side nearer it, by its mean phi (sum, count of each side).
- let side=cutSide(open);let other=open&~side;var wet=false;var wetRest=false;var own=vec2f(0);var far=vec2f(0);
- for(var v=0u;v<125u;v++){if(cutLive(open,v)){cutVertex[v]=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;
-  if(cutLive(side,v)){live[v>>5u]|=1u<<(v&31u);wet=wet||cutVertex[v]<0.0;own+=vec2f(cutVertex[v],1.0);}
-  else{rest[v>>5u]|=1u<<(v&31u);wetRest=wetRest||cutVertex[v]<0.0;far+=vec2f(cutVertex[v],1.0);}}}
- let near=own.x*far.y<=far.x*own.y;let keep=wet||(!wetRest&&near);let keepRest=wetRest||(!wet&&!near);
- for(var w=0u;w<4u;w++){live[w]=select(0u,live[w],keep)|select(0u,rest[w],keepRest);}
- sides=select(0.0,1.0,keep)+select(0.0,2.0,keepRest);
- // Centred normal equations in cell units about the tile centre: a live
- // vertex set holds a whole h cell, so the moment matrix is definite.
+ var cutVertex:array<f32,125>;var live=array<u32,4>(0u,0u,0u,0u);var allLive=array<u32,4>(0u,0u,0u,0u);var wet=false;
+ for(var v=0u;v<125u;v++){if(cutLive(open,v)){
+  cutVertex[v]=textureLoad(vertexPhi,origin+vec3i(vec3u(v%5u,(v/5u)%5u,v/25u)),0).x;
+  allLive[v>>5u]|=1u<<(v&31u);
+  if(cutVertex[v]<0.0){wet=true;live[v>>5u]|=1u<<(v&31u);}
+ }}
+ if(!wet){live=allLive;}
+ // Centred normal equations in cell units about the tile centre: live
+ // negative vertices must determine the value at the tile centre.
  var count=0.0;var first=vec3f(0);var total=0.0;
  for(var v=0u;v<125u;v++){if(((live[v>>5u]>>(v&31u))&1u)==0u){continue;}
   count+=1.0;first+=vec3f(vec3u(v%5u,(v/5u)%5u,v/25u))-2.0;total+=cutVertex[v];}
@@ -362,9 +344,13 @@ fn cutTile(t:u32){
   for(var v=0u;v<125u;v++){if(((live[v>>5u]>>(v&31u))&1u)==0u){continue;}
    let r=vec3f(vec3u(v%5u,(v/5u)%5u,v/25u))-2.0-mean;
    diagonal+=r*r;cross3+=r.xxy*r.yzz;moment+=r*(cutVertex[v]-level);}
+  diagonal=select(diagonal,vec3f(1.0),(diagonal==vec3f(0.0))&(mean==vec3f(0.0)));
   let c0=vec3f(diagonal.x,cross3.x,cross3.y);let c1=vec3f(cross3.x,diagonal.y,cross3.z);let c2=vec3f(cross3.y,cross3.z,diagonal.z);
-  let slope=vec3f(dot(moment,cross(c1,c2)),dot(c0,cross(moment,c2)),dot(c0,cross(c1,moment)))/dot(c0,cross(c1,c2));
-  value=level-dot(slope,mean);
+  let determinant=dot(c0,cross(c1,c2));let scale=diagonal.x+diagonal.y+diagonal.z;
+  if(determinant>0.000001*scale*scale*scale){
+   let slope=vec3f(dot(moment,cross(c1,c2)),dot(c0,cross(moment,c2)),dot(c0,cross(c1,moment)))/determinant;
+   value=level-dot(slope,mean);
+  }
  }
  balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)]=vec2f(value,sides);
 }
@@ -382,25 +368,22 @@ ${uniformMixedPressureBoundaryIndexWGSL()}
 // The tile's owner is a row: umPressureLiquid on the words just written.
 fn umWetRow(t:u32)->bool{return ${uniformMixedPressureLiquidWGSL("phi[umTopology[t]&0x3fffffffu]","4.0*UM_HMIN")};}
 fn umWetOpen(open:vec2u,l:vec3u)->bool{let i=l.x+4u*l.y+16u*l.z;return ((open[i>>5u]>>(i&31u))&1u)!=0u;}
-// The open h cells of tile t on the sides its owner's phi was fit through
-// (the cut fit's second word): all of them but for a wall through a cut tile.
-fn umWetSide(t:u32)->vec2u{
- let open=umSolidOpenCells(t);if(!umSolidCut(t)){return open;}
- let sides=u32(balance[UM_CUT_BASE+(umTopology[t]&0x3fffffffu)].y);let side=cutSide(open);
- return select(vec2u(0u),side,(sides&1u)!=0u)|select(vec2u(0u),open&~side,(sides&2u)!=0u);
+// Internal voxel-wall normals from the open-cell bits already loaded for
+// the face. No geometry scan: adjacent bits differ across a wall.
+fn umWetWallAxis(open:vec2u,axis:u32)->bool{
+ if(axis==0u){return (((open.x^(open.x>>1u))|(open.y^(open.y>>1u)))&0x77777777u)!=0u;}
+ if(axis==1u){return (((open.x^(open.x>>4u))|(open.y^(open.y>>4u)))&0x0fff0fffu)!=0u;}
+ return (((open.x^(open.x>>16u))|(open.y^(open.y>>16u))|((open.x>>16u)^open.y))&0xffffu)!=0u;
 }
 // The +axis face of tile t, toward tile n: (V, mask) of the h faces the
 // liquid's rows hold. An h cell of a tile the simulation holds at h is liquid
 // by its centre phi (the mean of its corners, summed here); a 4h tile's cells
-// follow their owner. Between a row and an owner that is not one, the row's
-// open cells on its fit's side hold their faces too: its free surface.
+// follow their owner. Dry h faces contribute no flux or pressure coupling,
+// even when their tile contains liquid elsewhere.
 fn umWetFace(t:u32,n:u32,origin:vec3i,axis:u32)->vec2f{
  let a=(axis+1u)%3u;let b=(axis+2u)%3u;
  let fineLow=umSolidFineTile(t);let fineHigh=umSolidFineTile(n);let rowLow=umWetRow(t);let rowHigh=umWetRow(n);
  let openLow=umSolidOpenCells(t);let openHigh=umSolidOpenCells(n);
- var sideLow=vec2u(0u);var sideHigh=vec2u(0u);
- if(rowLow&&!rowHigh){sideLow=umWetSide(t);}
- if(rowHigh&&!rowLow){sideHigh=umWetSide(n);}
  // The vertex planes of the two cell layers at the face; a 4h tile's own
  // plane is not state.
  var vertex:array<f32,75>;
@@ -409,16 +392,17 @@ fn umWetFace(t:u32,n:u32,origin:vec3i,axis:u32)->vec2f{
   var p=origin;p[a]+=i32(k%5u);p[b]+=i32((k/5u)%5u);p[axis]+=3+i32(plane);
   vertex[k]=textureLoad(vertexPhi,p,0).x;
  }
- var kept=0.0;var mask=0u;
+ var kept=0.0;var mask=select(0u,0x10000u,umWetWallAxis(openLow,axis)||umWetWallAxis(openHigh,axis));
  for(var j=0u;j<4u;j++){for(var i=0u;i<4u;i++){
   var id=origin;id[a]+=i32(i);id[b]+=i32(j);id[axis]+=3;
   let at=i+5u*j;let middle=(vertex[25u+at]+vertex[26u+at])+(vertex[30u+at]+vertex[31u+at]);
   let v=umPatchFaceV(t,id,axis);if(v<=0.0){continue;}
-  var l=vec3u(0u);l[a]=i;l[b]=j;l[axis]=3u;let low=umWetOpen(openLow,l);let ownLow=umWetOpen(sideLow,l);l[axis]=0u;let high=umWetOpen(openHigh,l);let ownHigh=umWetOpen(sideHigh,l);
+  var l=vec3u(0u);l[a]=i;l[b]=j;l[axis]=3u;let low=umWetOpen(openLow,l);l[axis]=0u;let high=umWetOpen(openHigh,l);
+  if(low!=high){mask|=0x10000u;}
   var wetLow=low&&rowLow;var wetHigh=high&&rowHigh;
   if(low&&fineLow){wetLow=middle+((vertex[at]+vertex[1u+at])+(vertex[5u+at]+vertex[6u+at]))<0.0;}
   if(high&&fineHigh){wetHigh=middle+((vertex[50u+at]+vertex[51u+at])+(vertex[55u+at]+vertex[56u+at]))<0.0;}
-  if(((wetLow||wetHigh)&&(low||rowLow)&&(high||rowHigh))||(ownLow&&high)||(ownHigh&&low)){kept+=v;mask|=1u<<(i+4u*j);}
+  if((wetLow||wetHigh)&&(low||rowLow)&&(high||rowHigh)){kept+=v;mask|=1u<<(i+4u*j);}
  }}
  return vec2f(kept/16.0,f32(mask));
 }

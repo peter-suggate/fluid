@@ -1,7 +1,7 @@
 /** Holds the pressure root's cut-tile kernels to their host emulation
  * (tools/root-wet-face-reference.ts) on fixtures, three pipelines and no
  * solver: the cooperative cut fit and its ordered reference (phi and the
- * sides word of the cut slot), and umWetFace (V and mask of a 4h face).
+ * diagnostic word of the cut slot), and umWetFace (V and mask of a 4h face).
  * The kernels are the production text, sliced from the authority's source;
  * the fixture stands in for the solid record and the vertex phi.
  *   node --import tsx tools/probe-root-wet-face.ts */
@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { uniformMixedPressureCutWGSL } from "../lib/methods/uniform/uniform-mixed-pressure-cut.wgsl";
-import { cutFit, cutLive, cutSide, wetFace, type OpenCells, type WetTile } from "./root-wet-face-reference";
+import { cutFit, cutLive, wetFace, type OpenCells, type WetTile } from "./root-wet-face-reference";
 
 const f = Math.fround;
 const cells = (open: (x: number, y: number, z: number) => boolean): [number, number] => {
@@ -131,21 +131,18 @@ async function run() {
     for (let t = 0; t < FIT_TILES; t++) fitTiles.set([...MASKS[t % MASKS.length]!, 3, 0], 4 * t);
     const fits = { cooperative: await dispatch("cut", fitTiles, new Float32Array(2 * FIT_TILES), Math.ceil(FIT_TILES / 64)), reference: await dispatch("reference", fitTiles, new Float32Array(2 * FIT_TILES), Math.ceil(FIT_TILES / 64)) };
     for (const [name, got] of Object.entries(fits)) {
-      let ties = 0, worst = 0, sided = [0, 0, 0, 0];
+      let worst = 0; const sided = [0, 0];
       for (let t = 0; t < FIT_TILES; t++) {
         const open = MASKS[t % MASKS.length]!, vertex = (v: number) => fitPhi(t, v), want = cutFit(open, vertex, 1), phi = got.balance[2 * t]!, sides = got.balance[2 * t + 1]!;
-        // Liquid on neither side and the two means within rounding of each other: either side is the nearer.
-        const side = cutSide(open); let wet = false, sum = 0, sumRest = 0, n = 0, nRest = 0, scale = 1;
-        for (let v = 0; v < 125; v++) if (cutLive(open, v)) { const value = vertex(v); wet ||= value < 0; scale = Math.max(scale, Math.abs(value)); if (cutLive(side, v)) { sum += value; n++; } else { sumRest += value; nRest++; } }
-        if (!wet && nRest > 0 && Math.abs(sum * nRest - sumRest * n) <= 1e-4 * scale * n * nRest) { ties++; assert.ok(sides === 1 || sides === 2, `${name} tile ${t}: a tie is through one side, not ${sides}`); continue; }
+        let scale=1;for(let v=0;v<125;v++)if(cutLive(open,v))scale=Math.max(scale,Math.abs(vertex(v)));
         assert.equal(sides, want.sides, `${name} tile ${t} (mask ${t % MASKS.length}, mode ${Math.floor(t / MASKS.length)}): sides`);
         assert.ok(Number.isFinite(phi), `${name} tile ${t}: phi ${phi}`);
         const error = Math.abs(phi - want.phi) / scale; worst = Math.max(worst, error); sided[sides]!++;
         assert.ok(error <= 2e-3, `${name} tile ${t} (mask ${t % MASKS.length}, mode ${Math.floor(t / MASKS.length)}): phi ${phi}, emulation ${want.phi}`);
       }
-      console.log(JSON.stringify({ kernel: `cut fit, ${name}`, tiles: FIT_TILES, ties, sides: { none: sided[0], grown: sided[1], rest: sided[2], both: sided[3] }, worstPhiError: worst }));
+      console.log(JSON.stringify({ kernel: `cut fit, ${name}`, tiles: FIT_TILES, masks: { empty: sided[0], nonempty: sided[1] }, worstPhiError: worst }));
     }
-    // The faces: pairs of tiles under every flag, the sides word as the fit would leave it.
+    // Faces under every flag; arbitrary legacy diagnostic words must not affect apertures.
     const pairTiles = new Uint32Array(8 * PAIRS), pairBalance = new Float32Array(4 * PAIRS), record: (WetTile & { open: OpenCells })[] = [];
     for (let t = 0; t < 2 * PAIRS; t++) {
       const open = MASKS[hash(t, 0) % 3 === 0 ? 129 : hash(t, 1) % MASKS.length]!, empty = open[0] === 0 && open[1] === 0;
@@ -160,7 +157,7 @@ async function run() {
       const want = wetFace(axis, low, high, (i, j) => 0.5 * (cell(low.open, i, j, 3) + cell(high.open, i, j, 0)),
         (plane, i, j) => { const p = [0, 0, 0]; p[a] = i; p[b] = j; p[axis] = 3 + plane; return facePhi(2 * pair, p); });
       assert.deepEqual({ v: got.faces[2 * (3 * pair + axis)], mask: got.faces[2 * (3 * pair + axis) + 1] }, want, `pair ${pair} axis ${axis}: ${JSON.stringify({ low, high })}`);
-      if (want.mask !== 0) kept++; if (low.row !== high.row && want.mask !== 0) surface++;
+      if ((want.mask & 0xffff) !== 0) kept++; if (low.row !== high.row && (want.mask & 0xffff) !== 0) surface++;
     }
     console.log(JSON.stringify({ kernel: "umWetFace", faces: 3 * PAIRS, kept, betweenRowAndAir: surface }));
     assert.deepEqual(errors, []);

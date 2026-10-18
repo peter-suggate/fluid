@@ -37,6 +37,8 @@ import type { UniformRegionHeat } from "./uniform-region-heat";
  * Corrections: an r32float 2D texture, texel 3*tile + axis (a 4h face:
  * tile key and axis), the projection's (write-only binding); 3e38 (NO_FACE)
  * for a frozen face that is no liquid row, and after the accumulate read it.
+ * -NO_FACE carries a voxel-wall normal from the existing wet-face mask;
+ * the uniform region translation must be zero along that axis.
  *
  * UNIFORM_COLD_FREEZE false compiles every accessor to live and binds nothing. */
 export const UNIFORM_COLD_FREEZE:boolean=true;
@@ -198,7 +200,9 @@ var<workgroup> frozen:u32;
 // One workgroup a region (a fixed grid striding them), a lane a tile: a
 // frozen region adds the mean correction of its own tiles' positive 4h
 // faces, per axis, to T, and resets each read correction to NO_FACE (a
-// face the projection skips next frame adds nothing).
+// face the projection skips next frame adds nothing). A wall uses a negative
+// count that dominates the at most 64 ordinary counts: reduce its constraint
+// with the same scratch and keep T tangent to every wall in the region.
 @compute @workgroup_size(64) fn accumulate(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umFrameFailed()){return;}
  for(var region=group.x;region<REGIONS;region+=groups.x){
@@ -208,7 +212,7 @@ var<workgroup> frozen:u32;
   if(umTileLive(tile)){
    for(var axis=0u;axis<3u;axis++){
     let i=3u*tile+axis;let at=vec2i(i32(i%${CORRECTION_WIDTH}u),i32(i/${CORRECTION_WIDTH}u));let c=textureLoad(corrections,at).x;
-    if(c<${NO_FACE/2}){sum[axis]=c;count[axis]=1.0;textureStore(corrections,at,vec4f(${NO_FACE}));}
+    if(c<${NO_FACE/2}){sum[axis]=select(c,0.0,c<-${NO_FACE/2});count[axis]=select(1.0,-1e20,c<-${NO_FACE/2});textureStore(corrections,at,vec4f(${NO_FACE}));}
    }
   }
   sums[lane]=sum;counts[lane]=count;
@@ -219,7 +223,7 @@ var<workgroup> frozen:u32;
   }
   if(lane==0u){
    var value=freeze[region];let s=sums[0];let n=counts[0];
-   for(var axis=0u;axis<3u;axis++){if(n[axis]>0.0){value[axis]+=s[axis]/n[axis];}}
+   for(var axis=0u;axis<3u;axis++){if(n[axis]<0.0){value[axis]=0.0;}else if(n[axis]>0.0){value[axis]+=s[axis]/n[axis];}}
    freeze[region]=value;
   }
   workgroupBarrier();

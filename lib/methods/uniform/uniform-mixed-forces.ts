@@ -313,39 +313,11 @@ fn umLaplacian(face:UMFace)->f32 {
  }
  return (terms.x+terms.y)+terms.z;
 }
-// The bed-slope term. A film on a voxel tread has a level bed under a level
-// surface, so nothing on the grid carries the fall of the ramp the treads
-// stand for: what is missing is -g times the bed's gradient (umBedSlope),
-// along the tread. It belongs to an h cell that holds its column's liquid
-// alone. It comes in over the cell's first quarter of depth, so a cell the
-// film has just reached does not jump, and goes out as the surface climbs
-// from the cell's top to the centre of the cell above: a cell under liquid
-// has none, and a pool standing on the treads stays still.
-fn umBedDrive(owner:UMOwner)->vec2f {
- if(owner.width!=1u){return vec2f(0);}
- let at=vec3i(umOrigin(owner));let slope=umBedSlope(at);
- if(all(slope==vec2f(0))){return vec2f(0);}
- let depth=clamp(16.0*umOccupancy(owner)-6.0,0.0,1.0);
- if(depth<=0.0){return vec2f(0);}
- let above=umOwnerAt(at+vec3i(0,1,0));var cover=1.0;
- if(above.width!=0u&&!umOwnerClosed(above)){cover=clamp(4.0-8.0*umOccupancy(above),0.0,1.0);}
- return slope*UM_H.y/UM_H.xz*(depth*cover);
-}
-// A face takes the larger of its two cells' terms, as it takes gravity from
-// either, and their sum where they oppose: its value is the same whichever
-// cell computes it, and a film cell's two faces along a tread carry the same
-// term up to the film's edge.
-fn umBedFaceDrive(own:vec2f,neighbor:UMOwner,axis:u32)->f32 {
- let part=axis>>1u;let a=own[part];let b=umBedDrive(neighbor)[part];
- return max(max(a,b),0.0)+min(min(a,b),0.0);
-}
-// The same for an h cell's own +x and +z faces. Only a cell with a bed slope
-// has a term, so the neighbour is looked up only where it has one.
-fn umBedOwnFaceDrive(owner:UMOwner,own:vec2f,at:vec3i,axis:u32)->f32 {
- var next=at;next[axis]+=1;
- if(all(umBedSlope(next)==vec2f(0))){return own[axis>>1u];}
- return umBedFaceDrive(own,umFace(owner,axis,1,0u).neighbor,axis);
-}
+// Gravity acts vertically on the same faces the pressure operator projects.
+// An extra horizontal bed-slope force is not balanced by hydrostatic pressure:
+// a shallow cell at a lake's shoreline is indistinguishable from a thin film
+// by depth alone. Voxel treads are resolved solid geometry, not a second
+// gravitational potential.
 // The capillary term of a face: dt sigma/rho times the mean curvature of
 // its two owners times the reconstructed occupancy gradient across it.
 fn umCapillary(owner:UMOwner,face:UMFace,solidClear:bool)->f32 {
@@ -375,10 +347,10 @@ fn umInflow(face:UMFace,forced:f32)->f32 {
  return forced;
 }
 // The fine-owner caller shares one head-of-frame region proof across its
-// three faces. Its one-cell ring covers both face cells and every bed probe;
+// three faces. Its one-cell ring covers both face cells;
 // wall-face and viscosity handling remain independent of this interior proof.
 // retain (umForceRetain, decided once per owner): the +face's drive
-// (viscosity, bed, capillarity) is kept (1) or reused (2); gravity and
+// (viscosity, capillarity) is kept (1) or reused (2); gravity and
 // inflow are applied fresh.
 fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool,retain:vec3u)->f32 {
  if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
@@ -395,7 +367,6 @@ fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool,retain:vec3u)
   // A retaining region (UNIFORM_FORCE_TIER.retain) drops viscosity within its budget.
   if(occupancy>0.0&&force.physical.z>0.0&&umViscosityExact(owner)){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
   if(gravity){value+=dt*force.physical.x;}
-  if(face.axis!=1u&&!solidClear){value+=dt*force.physical.x*umBedFaceDrive(umBedDrive(owner),face.neighbor,face.axis);}
   value+=umCapillary(owner,face,solidClear);
   // The kept drive: the evaluation less the advected value and gravity.
   if(kept){umForceKeep(owner,retain,face.axis,value-advected-select(0.0,dt*force.physical.x,gravity));}
@@ -444,7 +415,7 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
  for(var axis=0u;axis<3u;axis++){if(low[axis]){let i=umLowFaceIndex(origin,axis);boundary[i]=negative[i];}}
  // The owner's three +faces share its texel (an h owner's +face is never a
  // low face: its anchor is the owner's own stored cell). The drive
- // (viscosity and the bed as a vector, capillarity per face) is kept or
+ // (viscosity as a vector, capillarity per face) is kept or
  // reused by a COLD region (umForceRetain); gravity and inflow are fresh.
  var value=textureLoad(advected,at,0).xyz;let occupancy=umOccupancy(owner);
  let neighbor=umFace(owner,1u,1,0u).neighbor;
@@ -459,11 +430,6 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
    value+=force.hDt.w*(force.physical.z/force.physical.y)*((terms[0]+terms[1])+terms[2]);
   }
   if(gravity){value.y+=force.hDt.w*force.physical.x;}
-  if(!solidClear){
-   let bed=umBedDrive(owner);
-   value.x+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,0u);
-   value.z+=force.hDt.w*force.physical.x*umBedOwnFaceDrive(owner,bed,at,2u);
-  }
   if(force.physical.w>0.0){
    for(var axis=0u;axis<3u;axis++){
     // A +face inside the owner's tile meets an h owner: its reconstructed
