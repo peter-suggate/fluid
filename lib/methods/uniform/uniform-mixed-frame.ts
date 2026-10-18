@@ -940,7 +940,7 @@ export class UniformMixedFrame {
    // Where this frame's non-pressure work goes: after the swept-body mask, before every stage that reads the tiers.
    this.heat.encode(encoder,dt,p.density);
    // The freeze follows the final tiers: a relayout head's after its promotions (encodeRelayoutHead).
-   if(!relayout)this.freeze?.encodeHead(encoder,dt,gravity);
+   if(!relayout)this.freeze?.encodeHead(encoder,dt,gravity,this.frozenQuiet);
    // A host layout: a live solid edit, or the cells bodies entered, lands on
    // the live (host-promoted) ownership. A GPU relayout displaces after its
    // adopt, on the generation that promoted them (encodeRelayoutHead).
@@ -1454,7 +1454,7 @@ export class UniformMixedFrame {
   this.phiResolve.encode(encoder,this.phiResolveGroups.phi,this.phiResolved?changes:undefined);
   this.surfaceWorkControl.encodeRemapRevisions(encoder,changes);
   // Claims and remaps raised tiers: the deep COLD flags and epochs follow.
-  this.heat.encodeDeep(encoder);this.freeze?.encodeHead(encoder,dt,p.gravity);
+  this.heat.encodeDeep(encoder);this.freeze?.encodeHead(encoder,dt,p.gravity,this.frozenQuiet);
   // The patches the generation no longer needs return to the base.
   this.fields.detail?.encodeRetire(encoder);
   this.fields.detail?.encodeSettle(encoder,false);

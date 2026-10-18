@@ -31,8 +31,8 @@ import type { UniformRegionHeat } from "./uniform-region-heat";
  *   its producers fold T in once, umThawFaceTerm).
  * encodeHead sets it from the tiers once a frame, after the relayout head's
  * promotions (UniformRegionHeat.encodeDeep) and before every stage that
- * reads it, so freezing/frozen is exactly tier COLD for the rest of the
- * frame. The term the accumulate adds reaches the snapshot at the next head.
+ * reads it, so freezing/frozen is exactly tier COLD (every region in a
+ * quiet frame, encodeHead) for the rest of the frame. The term the accumulate adds reaches the snapshot at the next head.
  *
  * Corrections: an r32float 2D texture, texel 3*tile + axis (a 4h face:
  * tile key and axis), the projection's (write-only binding); 3e38 (NO_FACE)
@@ -175,7 +175,9 @@ fn texel(i:u32)->vec2i{return vec2i(i32(i%${REGION_WIDTH}u),i32(i/${REGION_WIDTH
  let region=gid.x;
  if(region==0u){textureStore(snapshot,texel(REGIONS),vec4f(params.x,0.0,0.0,0.0));}
  if(region>=REGIONS){return;}
- var value=freeze[region];let old=u32(value.w);let cold=tiers[region]==0u;
+ // A quiet frame (params.y, UniformColdFrame) encodes no stage that a
+ // thawed region needs, so every region holds frozen until a full frame.
+ var value=freeze[region];let old=u32(value.w);let cold=tiers[region]==0u||params.y!=0.0;
  let held=old==1u||old==2u;var state=0u;
  if(cold){state=select(1u,2u,held);}else{state=select(0u,3u,held);}
  if(state==1u||state==0u){value=vec4f(0.0);}
@@ -234,11 +236,13 @@ var<workgroup> frozen:u32;
   }
   /** After the frame head's tiers are final (the relayout head's encodeDeep),
    * before every stage that reads the freeze. dt, gravity: the frame's step
-   * and signed y gravity (m/s^2), for umColdForced. */
-  encodeHead(encoder:GPUCommandEncoder,dt:number,gravity:number):void{
+   * and signed y gravity (m/s^2), for umColdForced. quiet: the frame skips
+   * the frozen stages (UniformColdFrame, its lagged ceiling), so a region
+   * whose tier left COLD stays frozen until the first full frame thaws it. */
+  encodeHead(encoder:GPUCommandEncoder,dt:number,gravity:number,quiet:boolean):void{
     if(!UNIFORM_COLD_FREEZE)return;
     if(!this.headPipeline||!this.headGroup)throw new Error("Cold freeze is not initialized");
-    this.words[0]=dt*gravity;this.device.queue.writeBuffer(this.params,0,this.words);
+    this.words[0]=dt*gravity;this.words[1]=quiet?1:0;this.device.queue.writeBuffer(this.params,0,this.words);
     const pass=encoder.beginComputePass(PASS);pass.setBindGroup(0,this.headGroup);pass.setPipeline(this.headPipeline);
     pass.dispatchWorkgroups(Math.ceil((this.shape.regions+1)/64));pass.end();
   }
