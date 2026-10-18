@@ -2489,3 +2489,24 @@ What is left:
 - **The band.** It always runs 4 cycles in drift and never meets its tolerance. Fewer cycles would change results, so it needs a parameter.
 - **Closed root slots.** These cost about 0.5 ms. Schedule floor 3 is kept for safety.
 - **Fusion.** The per-region stage chains can still be fused.
+
+## Near-settled: band cycles param, `bandExit` (2026-10-18)
+
+In the drift scene, the h pressure band never reaches its 1e-4 1/s tolerance, so it runs all four V-cycles every frame. Its worst residual falls 11 → 3.1 → 0.19 → 0.03 → 0.007 → 0.003 1/s. The per-cycle reduction weakens from 0.06 to about 0.5. For comparison, the root solve accepts up to min(5, a tenth of its start).
+
+The new NB-FLIP param `bandExit` ("Fine pressure stop", update "solver") has two options:
+
+- **"returns" (default).** A full cycle stops the band when it cut the worst residual by less than 8× and the residual is at most 0.05 1/s. At h = 5 cm that is about 2.5 mm/s of velocity error in the worst cell. Only one cycle past the most the band used in its last four receipted frames is encoded.
+- **"strict".** This is the previous behaviour exactly.
+
+A bound relative to the band's own starting residual was rejected. The band's starting residual spikes to 1000–4000 1/s at single surface cells during the pool impact. With the relative bound, the impact stopped at 0.2 1/s and the ball sank 2 cm deeper.
+
+Results:
+
+- **Drift.** The band stops in cycle 2. The band solve pass dropped from 1.05 ms to 0.72 ms of GPU time, and from 98 to 75 dispatches.
+  - The ball and ripple numbers stay within the strict run's spread.
+  - Late frames seed about 30% more particles (14.1k vs 18.3k). The wall-time A/B was null at about 20.4 ms against 20.4 ms.
+- **Pool impact.** The band never stops early through the impact. Impulse is 494.6 N s, the deepest point 1.343 m, and the run is clean to frame 60.
+- **Settled.** Unchanged; the band is empty there.
+
+The lead is the extra particle seeding from a less-converged band. If those particles come from the strain or rotation triggers firing on band noise, those triggers need to be made robust to it. Until then the param saves GPU work in the band but no wall time in drift.

@@ -84,6 +84,16 @@ const COARSE_WIDE_SLOTS=8192;
 const BAND_CAPACITY_THREADS=16384;
 /** Receipted frames whose largest band cycle count keeps that many cycles wide. */
 const BAND_CYCLE_WINDOW=4;
+/** bandExit "returns": a full V-cycle that cuts the band's worst residual by
+ * less than 1/BAND_RETURNS_RATIO, once that residual is at most
+ * BAND_RETURNS_RESIDUAL (1/s, h-equivalent), ends the solve. Drifting pool
+ * (114 band tiles, h 5 cm, 1/60 s): 11 -> 3.1 -> 0.19 -> 0.03 -> 0.007 ->
+ * 0.003 1/s, cycle ratios 0.06, 0.13-0.21, 0.24-0.33, 0.38-0.56, never the
+ * 1e-4 floor; the root accepts up to 5 (or a tenth of its start). 0.05 1/s
+ * is a 2.5 mm/s worst-cell velocity error at h 5 cm. A bound relative to the
+ * band's start let the pool impact stop at 0.2 1/s (its starts spike to
+ * 4000 at single surface cells) and the ball sank 2 cm deeper. */
+const BAND_RETURNS_RATIO=0.125,BAND_RETURNS_RESIDUAL=0.05;
 /** The band's passes, described once: the encode path constructs nothing. */
 /** ceil(count/per) of whole numbers in whole-number steps: a fractional
  * quotient is a heap number wherever the caller is not yet optimized. */
@@ -170,6 +180,9 @@ export interface UniformPressureBandFields {
   * 4h interpolation the transfer to simulation wrote, and a band face to
   * one is Neumann at it (the projected 4h flux). */
  warmTiers?:GPUBuffer;
+ /** NB-FLIP bandExit "returns": the band stops at diminishing returns
+  * (bStop, BAND_RETURNS_RATIO); absent, only at the residual tolerance. */
+ returns?:boolean;
 }
 
 /** The h pressure band of the two-stage solve: the global solve runs on
@@ -415,7 +428,18 @@ fn bCount()->u32{return select(min(bIndex(0u),bCap()),0u,bIndex(${CLOSED_WORD}u)
 // Zero is a valid residual; zero tolerance disables stopping for diagnostics.
 fn bMet(word:u32,mask:u32)->bool{return (bIndex(VALID)&mask)!=0u&&params.solve.x>0.0&&bitcast<f32>(bIndex(word))<=params.solve.x;}
 fn bInitialMet()->bool{return bMet(INITIAL,INITIAL_BIT);}
-fn bConvergedBefore(k:u32)->bool{if(bInitialMet()){return true;}for(var j=0u;j<min(k,${HISTORY-1}u);j++){if(bMet(HISTORY+j,1u<<j)){return true;}}return false;}
+// History word j ends the band: it met the tolerance${this.fields.returns?`, or (bandExit
+// "returns") the full cycle before it cut the residual by less than
+// 1/BAND_RETURNS_RATIO while the residual is at most BAND_RETURNS_RESIDUAL:
+// the slowed cycles chase what the band cannot reach`:""}.
+fn bStop(j:u32)->bool{
+ if(bMet(HISTORY+j,1u<<j)){return true;}
+ ${this.fields.returns?`let both=(1u<<j)|(1u<<(j-1u));
+ if(j==0u||(bIndex(VALID)&both)!=both||params.solve.x<=0.0){return false;}
+ let r=bitcast<f32>(bIndex(HISTORY+j));
+ return r>${BAND_RETURNS_RATIO}*bitcast<f32>(bIndex(HISTORY+j-1u))&&r<=${BAND_RETURNS_RESIDUAL};`:"return false;"}
+}
+fn bConvergedBefore(k:u32)->bool{if(bInitialMet()){return true;}for(var j=0u;j<min(k,${HISTORY-1}u);j++){if(bStop(j)){return true;}}return false;}
 fn bConverged()->bool{return bConvergedBefore(${schedule.cycles}u);}
 // Converged launches stride zero slots: the same launches, no work.
 fn bLive()->u32{return select(bCount(),0u,bConverged());}
@@ -1255,7 +1279,7 @@ fn bPublishTile(s:u32,lane:u32,r:u32){
   else{atomicMax(&index[2],r);atomicMax(&index[HISTORY+bCycles],r);atomicOr(&index[VALID],1u<<bCycles);}
  }
  if(!bInitial&&group.x==0u&&lane==0u){
-  var cycle=bCycles;for(var j=bCycles;j>0u;j--){if(bMet(HISTORY+j-1u,1u<<(j-1u))){cycle=j-1u;}}
+  var cycle=bCycles;for(var j=bCycles;j>0u;j--){if(bStop(j-1u)){cycle=j-1u;}}
   if(bInitialMet()||bCount()==0u){cycle=0u;}
   atomicStore(&index[CYCLE],cycle);
   if(cycle<bCycles){atomicStore(&index[DONE],1u);atomicMax(&index[2],select(bIndex(HISTORY+cycle),bIndex(INITIAL),bInitialMet()));}
@@ -1450,7 +1474,12 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   // Test the current global pressure predictor, including today's forces and
   // body fluxes. Projection still runs when no fine correction is necessary.
   this.dispatch(pass,"measureInitial","slots");
-  for(let cycle=0;cycle<s.cycles;cycle++){
+  // bandExit "returns": one cycle past the most the band ran in the last
+  // BAND_CYCLE_WINDOW receipted frames is encoded. A frame that needs more
+  // ends at its last encoded cycle and receipts all of them (its measure
+  // finds no stop), so the next lagged frames encode every cycle again.
+  const cycles=this.fields.returns?Math.min(s.cycles,this.wideCycles+1):s.cycles;
+  for(let cycle=0;cycle<cycles;cycle++){
    const c=cycle>=this.wideCycles;
    this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps,c);
    this.dispatch(pass,this.restricts[cycle]!,"slots",c);
