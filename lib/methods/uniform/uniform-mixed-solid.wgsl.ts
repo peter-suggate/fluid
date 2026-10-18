@@ -433,11 +433,33 @@ fn umCutTile(t:u32){
 // (umBodyTileDirty's margin) exits whole, on a workgroup-uniform decision. A
 // free block's region (UNKNOWN) holds no tile to build.
 var<workgroup> regionReach:u32;
+var<workgroup> regionCuts:atomic<u32>;
 fn umBuilderRegionDirty(region:u32)->bool{return region<UM_REGIONS&&(bodyRegions[region]&0x100ffu)<=2u;}
+// An item is an eighth of a region: eight of its tiles, eight lanes a tile,
+// each lane a strided eighth of the tile's 216-cell ring (umCutTile's test,
+// any order). A lane a tile walked the whole ring: the few regions a body
+// reaches ran 216 serial cell tests, 0.35 ms of a drifting-ball frame.
 @compute @workgroup_size(64) fn cutsRegions(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var region=g.x;region<UM_REGIONS;region+=groups.x){
-  if(lane==0u){regionReach=u32(umBuilderRegionDirty(region));}
-  if(workgroupUniformLoad(&regionReach)!=0u){umCutTile(umSolidRegionTile(region,lane));}
+ for(var item=g.x;item<8u*UM_REGIONS;item+=groups.x){
+  let region=item>>3u;
+  if(lane==0u){regionReach=u32(umBuilderRegionDirty(region));atomicStore(&regionCuts,0u);}
+  if(workgroupUniformLoad(&regionReach)==0u){continue;}
+  let slot=lane>>3u;let t=umSolidRegionTile(region,8u*(item&7u)+slot);
+  var live=umTileLive(t);var tc=vec3u(0u);
+  if(live){tc=umTileCoord(t);live=!(umBodyTiles&&!umBodyTileDirty(t,tc));}
+  if(live){
+   for(var i=lane&7u;i<216u;i+=8u){
+    let q=vec3i(tc*4u)-vec3i(1)+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));
+    if(umSolidValid(q)&&umCellOpen(q)<1.0){atomicOr(&regionCuts,1u<<slot);break;}
+   }
+  }
+  workgroupBarrier();
+  if(live&&(lane&7u)==0u){
+   let cut=(atomicLoad(&regionCuts)>>slot)&1u;
+   record[umSolidCount()+t].x=f32(cut);
+   umSolidScratch[umSolidCutMap()+t]=cut;
+  }
+  workgroupBarrier();
  }
 }
 // The record of the tile at key t, one workgroup: nothing for a key that
@@ -699,7 +721,7 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
     pass.setPipeline(this.builder.cuts);pass.dispatchWorkgroups(gx,gy);
     pass.setPipeline(this.builder.pipeline);pass.dispatchWorkgroups(x,ceilDiv(keys,x));
    }else{
-    pass.setPipeline(this.builder.cutsBodies);pass.dispatchWorkgroups(Math.min(keys/64,BODY_REGION_GRID));
+    pass.setPipeline(this.builder.cutsBodies);pass.dispatchWorkgroups(Math.min(8*keys/64,BODY_REGION_GRID));
     const grid=64*ceilDiv(keys/64,64),bx=Math.min(grid,this.maxGroups);
     pass.setPipeline(this.builder.bodies!);pass.dispatchWorkgroups(bx,ceilDiv(grid,bx));
    }

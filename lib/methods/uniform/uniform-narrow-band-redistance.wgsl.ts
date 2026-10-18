@@ -334,25 +334,41 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
 // depends on heat alone, so it is identical in this pass and the store.
 // Compiled without the geometry
 // cache, which the fine band's metric builds after its own search.
+// A lane to a corner (eight an owner): a seam owner's corners each run a
+// search and trace, which held one lane behind eight of them.
 @compute @workgroup_size(64) fn depthCoarse(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<umCounts.y;i+=65536u){
-  let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
+ for(var i=gid.x;i<8u*umCounts.y;i+=65536u){
+  let owner=umAllOwner(vec3u(umCounts.x*64u+(i>>3u),0u,0u));let origin=umOrigin(owner);
   if(nbTileCold(owner.tile)){continue;}
   let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
   // Keep the regular owner's low-wall rule. At seams the layout already
   // compiled the canonical coarse corners; no authority lookup is needed.
-  var low=vec3<bool>(false);if(regular){low=umLowOpen(vec3i(origin));}
-  let corners=umCoarseCornerMask(owner.tile);
-  for(var k=0u;k<8u;k++){
-   let corner=umCorner(k,2u);let p=origin+corner*4u;
-   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
-   else if((corners&(1u<<k))==0u){continue;}
-   let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
-   if(umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
-   if(nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p)){continue;}
-   nbBuildDistance(p,c,nbBandTile(c));
-  }
+  let k=i&7u;let corner=umCorner(k,2u);let p=origin+corner*4u;
+  if(regular){if(!all((corner!=vec3u(0))|umLowOpen(vec3i(origin)))){continue;}}
+  else if((umCoarseCornerMask(owner.tile)&(1u<<k))==0u){continue;}
+  let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
+  if(umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
+  if(nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p)){continue;}
+  nbBuildDistance(p,c,nbBandTile(c));
+  nbBoundCoarseMetric(p);
  }
+}
+// A retiring corner's metric is no farther than the zero the represented
+// field has on each of its six 4h lattice edges: the search builds it from
+// the band's crossings, which miss a surface lying along a coarse tile's
+// own edges (calm water under an h tile a falling drop activated: the
+// corner took the distance to the drop and a 2.4 h hole opened beneath it).
+// The current field is this pass's input (redistanceCoarse stores later).
+fn nbBoundCoarseMetric(p:vec3u){
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));let at=NB_DEPTH_A+umVertexAt(p);
+ let d=bitcast<f32>(atomicLoad(&bins[at]));var v=0.0;var bound=abs(d);
+ for(var a=0u;a<7u;a++){
+  var q=vec3i(p);if(a>0u){q[(a-1u)>>1u]+=select(4,-4,((a-1u)&1u)!=0u);}
+  if(any(q<vec3i(0))){continue;}
+  let n=umSampleVertex(vec3f(q))/h;
+  if(a==0u){v=n;}else if(v*n<0.0){bound=min(bound,4.0*abs(v)/(abs(v)+abs(n)));}
+ }
+ atomicStore(&bins[at],bitcast<u32>(select(-bound,bound,d>=0.0)));
 }
 @compute @workgroup_size(64) fn redistanceCoarse(@builtin(global_invocation_id) gid:vec3u){
  for(var i=gid.x;i<umCounts.y;i+=65536u){

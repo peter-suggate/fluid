@@ -212,31 +212,40 @@ fn umCutMask(o:UMOwner,axis:u32,sign:i32)->u32{
  if(sign<0){t=n;}
  return u32(phi[UM_ROOT_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*umTileAt(vec3u(t))+axis]);
 }
-// sum(V_h u_h) over those h faces of one 4h face, from the h forced field,
-// plus each face's moving-wall term.
-// sum(V_h u_h) and sum(V_h): a frozen 4h face's added u* is uniform over its h faces.
-fn umCutFlux(o:UMOwner,axis:u32,sign:i32)->vec2f{
- let origin=vec3i(umOrigin(o));let a=(axis+1u)%3u;let b=(axis+2u)%3u;var sum=0.0;var weight=0.0;
- let mask=umCutMask(o,axis,sign);
+// A cut 4h face's work word: the h faces the liquid's rows hold (umCutMask,
+// bits 0-15), and bit 16 where a body's moving wall can reach the tile.
+fn umCutWord(o:UMOwner,axis:u32,sign:i32)->u32{
  // No moving-wall flux past the body flux reach (UNIFORM_BODY_FLUX_REACH).
  let bodies=umBodyCount()>0u&&umBodyPoseNearTile(o.tile,${UNIFORM_BODY_FLUX_REACH}u);
- for(var j=0;j<4;j++){for(var i=0;i<4;i++){
-  if(((mask>>u32(i+4*j))&1u)==0u){continue;}
-  var c=origin;c[a]+=i;c[b]+=j;c[axis]+=select(-1,3,sign>0);
-  var u=0.0;
-  if(umFaceLow(c,axis)){u=fineNegative[umLowFaceIndex(umLowFaceAbove(c,axis),axis)];}else{u=textureLoad(fineVelocity,c,0)[axis];}
-  // Every in-domain patch lies on a tile's positive plane, including the
-  // negative face owned by its neighbour. Reuse its exact cached fraction;
-  // uncached fractions fall back inside umPatchFaceV. Negative domain walls
-  // and the disabled-solid variant retain their original boundary rules.
-  var volume=0.0;
-  if(umSolidEnabled()&&!umFaceLow(c,axis)){volume=umPatchFaceV(umTileAt(vec3u(c)/4u),c,axis);}
-  else{volume=umPressureFaceV(c,axis);}sum+=volume*u;weight+=volume;
-  // A moving wall's (V_i - V) u_s, V_i the owner-side h cell (divergenceAtWithCapacity).
-  if(bodies){var inner=c;if(sign<0){inner[axis]+=1;}let capacity=umCellOpen(inner);if(capacity!=volume){sum+=(capacity-volume)*umSolidFaceVelocity(c,axis);}}
- }}
- return vec2f(sum,weight);
+ return umCutMask(o,axis,sign)|select(0u,0x10000u,bodies);
 }
+// h face k (i+4j) of a cut 4h face: V_h u_h (plus its moving-wall term) and
+// V_h, from the h forced field. The face's flux is the sum over its sixteen.
+fn umCutFace(o:UMOwner,axis:u32,sign:i32,k:u32,word:u32)->vec2f{
+ if(((word>>k)&1u)==0u){return vec2f(0.0);}
+ let a=(axis+1u)%3u;let b=(axis+2u)%3u;
+ var c=vec3i(umOrigin(o));c[a]+=i32(k&3u);c[b]+=i32(k>>2u);c[axis]+=select(-1,3,sign>0);
+ var u=0.0;
+ if(umFaceLow(c,axis)){u=fineNegative[umLowFaceIndex(umLowFaceAbove(c,axis),axis)];}else{u=textureLoad(fineVelocity,c,0)[axis];}
+ // Every in-domain patch lies on a tile's positive plane, including the
+ // negative face owned by its neighbour. Reuse its exact cached fraction;
+ // uncached fractions fall back inside umPatchFaceV. Negative domain walls
+ // and the disabled-solid variant retain their original boundary rules.
+ var volume=0.0;
+ if(umSolidEnabled()&&!umFaceLow(c,axis)){volume=umPatchFaceV(umTileAt(vec3u(c)/4u),c,axis);}
+ else{volume=umPressureFaceV(c,axis);}var sum=volume*u;
+ // A moving wall's (V_i - V) u_s, V_i the owner-side h cell (divergenceAtWithCapacity).
+ if((word&0x10000u)!=0u){var inner=c;if(sign<0){inner[axis]+=1;}let capacity=umCellOpen(inner);if(capacity!=volume){sum+=(capacity-volume)*umSolidFaceVelocity(c,axis);}}
+ return vec2f(sum,volume);
+}
+// A cut face's sixteen h faces are the workgroup's (buildRhs): a lane an h
+// face, four faces a round, so the few owners beside a wall or a body no
+// longer hold their workgroup behind 96 serial geometry evaluations. Each
+// listed face's sums land at 6 lane + face.
+var<workgroup> umCutCount:atomic<u32>;
+var<workgroup> umCutItem:array<u32,384>;var<workgroup> umCutBits:array<u32,384>;
+var<workgroup> umCutOwner:array<vec4u,64>;var<workgroup> umCutPart:array<vec2f,64>;
+var<workgroup> umCutSum:array<vec2f,384>;
 // The record V of a 4h face, the operator's own weight (W1): its low owner's
 // V+, or with nothing stored across it the wall slot's (1/2 of the wall's
 // open part) or air's 1.
@@ -245,14 +254,13 @@ fn umRecordV(o:UMOwner,face:UMFace)->f32{
  var low=o;if(face.sign<0){low=face.neighbor;}
  return umSolidCoarse(low.index)[face.axis+1u];
 }
-// A 4h face's flux. Either tile simulated at h and cut: the sum of its 16 h
-// faces'. Else the 4h face velocity through the record V: an uncut face's is
-// exactly 1 (1/2 at a wall), a cut 4h owner's the open part of its face.
-// Only a liquid owner forms its flux: every frozen face of it is occupied.
-fn umCoarseFlux(o:UMOwner,face:UMFace)->f32{
- var flux=vec2f(0.0);
- if(umCoarseCut(o,face.axis,face.sign)){flux=umCutFlux(o,face.axis,face.sign);}
- else{let weight=umRecordV(o,face)*f32(face.width*face.width);flux=vec2f(weight*umFaceVelocity(face),weight);}
+// A 4h face's flux. Either tile simulated at h and cut (cut): the sum of its
+// 16 h faces' (sums). Else the 4h face velocity through the record V: an
+// uncut face's is exactly 1 (1/2 at a wall), a cut 4h owner's the open part
+// of its face. Only a liquid owner forms its flux: every frozen face of it is occupied.
+fn umCoarseFlux(o:UMOwner,face:UMFace,cut:bool,sums:vec2f)->f32{
+ var flux=sums;
+ if(!cut){let weight=umRecordV(o,face)*f32(face.width*face.width);flux=vec2f(weight*umFaceVelocity(face),weight);}
  return flux.x+flux.y*umColdAdd(o,face,true);
 }`:this.solid?`@group(1) @binding(8) var topologyOut:texture_storage_3d<rgba32float,write>;
 // mgBuildFinestTopology on fine owners. Coarse owners never touch a solid
@@ -269,8 +277,26 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  if(o.width!=1u){return select(1.0,0.5*t.x,umLowOpen(vec3i(umOrigin(o)))[axis]);}
  var q=vec3i(umOrigin(o));q[axis]-=1;return umPressureFaceV(q,axis);
 }`:""}
-@compute @workgroup_size(64) fn buildRhs(@builtin(global_invocation_id) gid:vec3u){
- let o=umResidentAllOwner(gid);if(o.width==0u){return;}var terms:array<f32,6>;
+@compute @workgroup_size(64) fn buildRhs(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let o=umResidentAllOwner(gid);
+ ${this.coarse?`// A liquid owner's cut faces, listed for the workgroup (umCutSum).
+ if(lane==0u){atomicStore(&umCutCount,0u);}
+ umCutOwner[lane]=vec4u(o.tile,o.lane,o.width,o.index);
+ workgroupBarrier();
+ var cutFaces=0u;
+ if(o.width!=0u&&umPressureLiquid(o)){for(var f=0u;f<6u;f++){let axis=f>>1u;let sign=select(-1,1,(f&1u)==1u);
+  if(umCoarseCut(o,axis,sign)){cutFaces|=1u<<f;let i=atomicAdd(&umCutCount,1u);umCutItem[i]=lane|(f<<6u);umCutBits[i]=umCutWord(o,axis,sign);}
+ }}
+ let cuts=workgroupUniformLoad(&umCutCount);
+ for(var first=0u;first<cuts;first+=4u){
+  let item=first+lane/16u;var part=vec2f(0.0);
+  if(item<cuts){let w=umCutItem[item];let v=umCutOwner[w&63u];let f=w>>6u;
+   part=umCutFace(UMOwner(v.x,v.y,v.z,v.w),f>>1u,select(-1,1,(f&1u)==1u),lane&15u,umCutBits[item]);}
+  umCutPart[lane]=part;workgroupBarrier();
+  if(lane<4u&&first+lane<cuts){var sum=vec2f(0.0);for(var k=0u;k<16u;k++){sum+=umCutPart[16u*lane+k];}let w=umCutItem[first+lane];umCutSum[6u*(w&63u)+(w>>6u)]=sum;}
+  workgroupBarrier();
+ }`:""}
+ if(o.width==0u){return;}var terms:array<f32,6>;
  ${this.coarse?"let topology=umSolidCoarse(o.index);":this.solid?"let topology=umOwnerTopology(o);textureStore(topologyOut,vec3i(umOrigin(o)),topology);":""}
  // Only a liquid owner keeps its divergence: air skips the face loads.
  let liquid=umPressureLiquid(o);
@@ -280,7 +306,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
    let face=umFace(o,axis,sign,part);var fraction=1.0;
    ${this.coarse?"":"if(face.neighbor.width==0u&&umFaceKind(face)==UM_SOLID){fraction=0.5;}"}
    ${this.solid&&!this.coarse?"if(o.width==1u){fraction=select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0);}":""}
-   ${this.coarse?"flux+=umCoarseFlux(o,face);":"flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);"}
+   ${this.coarse?"flux+=umCoarseFlux(o,face,((cutFaces>>(2u*axis+side))&1u)!=0u,umCutSum[6u*lane+2u*axis+side]);":"flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);"}
   }
   terms[2u*axis+side]=f32(sign)*flux/(f32(o.width*o.width*o.width)*UM_H[axis]);
  }}}
@@ -296,7 +322,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  // The coarse root warm-starts from the caller's last pressure; air holds 0.
  pressures[o.index]=${this.coarse?"select(0.0,max(pressures[o.index],minimum[o.index]),liquid)":"0.0"};
  ${uniformMixedPressureBoundaryLoop(`let face=umFace(o,axis,sign,0u);
-  ${this.coarse?"// Only a cut owner's wall face loads its sixteen h faces (select would load them at every wall).\n  var wall=0.0;if(umCoarseCut(o,axis,sign)){let cut=umCutFlux(o,axis,sign);wall=(cut.x+cut.y*umColdAdd(o,face,true))/16.0;}else{wall=umSolidCoarse(halo).x*(umFaceVelocity(face)+umColdAdd(o,face,true));}":""}
+  ${this.coarse?"// A liquid cut owner's wall face takes its listed sums (an air owner's halo RHS is 0).\n  var wall=0.0;if(((cutFaces>>(2u*axis+side))&1u)!=0u){let cut=umCutSum[6u*lane+2u*axis+side];wall=(cut.x+cut.y*umColdAdd(o,face,true))/16.0;}else{wall=umSolidCoarse(halo).x*(umFaceVelocity(face)+umColdAdd(o,face,true));}":""}
   let b=f32(sign)*params.policy.x*${this.coarse?"wall":this.solid?"select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0)*umFaceVelocity(face)":"0.5*umFaceVelocity(face)"}/(f32(o.width)*UM_H[axis]*params.hDt.w);
   rhs[halo]=select(0.0,b,liquid);minimum[halo]=select(0.0,-3.402823e38,umWallHeld(o));pressures[halo]=${this.coarse?"select(0.0,max(pressures[halo],minimum[halo]),liquid)":"0.0"};`)}
 }

@@ -118,7 +118,9 @@ export class UniformMixedSurface {
    * their value (umFarAir). encode() copies it, and the frame plan's speed
    * certificate, behind the claim words (the stage's storage bindings are at
    * the per-stage limit). */
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly farGate?:{readonly buffer:GPUBuffer;readonly word:number},private readonly workControl?:UniformSurfaceWorkControl) {
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly farGate?:{readonly buffer:GPUBuffer;readonly word:number},private readonly workControl?:UniformSurfaceWorkControl,
+    /** warmResolution "4h": a WARM vertex deep in liquid or air keeps its value (umHoldWarmDeep). */
+    private readonly warmDeepHold=false) {
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -229,8 +231,22 @@ fn umVertexDeepCold(vertex:vec3u)->bool{
  let tile=umTileKey(vec3i(vertex)>>vec3u(2u));
  return umKeyStored(tile)&&umRegionDeepCold(umPageOfTile(tile));
 }
+${this.warmDeepHold&&this.workControl?.heat?/* wgsl */`// warmResolution "4h": a WARM region is represented at 4h, and a vertex
+// deep in its liquid or air (two widths and 2 h from the surface: beyond
+// every stencil that reads the surface, cubic and smoothing included) keeps
+// its phi. The error is the region's own surface travel while WARM, which
+// the heat bounds (HOT beyond its span and travel tolerances), far from the
+// surface's readers. It saves the solid traces of wall and floor vertices.
+fn umHoldWarmDeep(vertex:vec3u,width:u32)->bool{
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ let value=umLatticeLoad(vec3i(vertex),width);if(!(abs(value)>=(2.0+2.0*f32(width))*h)){return false;}
+ if(umReleasedMayChange(vec3f(vertex),value)){return false;}
+ ${this.sourceParams?"if(umSourceuvSourcePhi(vec3f(vertex),value)!=value){return false;}":""}
+ umRecordRegion(vertex,0u);umStoreSurface(vertex,width,value);return true;
+}`:""}
 fn umHoldCold(vertex:vec3u,width:u32)->bool{
- if(umVertexTier(vertex)!=UM_TIER_COLD){return false;}
+ let tier=umVertexTier(vertex);
+ if(tier!=UM_TIER_COLD){return ${this.warmDeepHold&&this.workControl?.heat?"tier==UM_TIER_WARM&&umHoldWarmDeep(vertex,width)":"false"};}
  umRecordRegion(vertex,0u);
  if(any((vertex&vec3u(3u))!=vec3u(0u))&&umVertexDeepCold(vertex)){return true;}
  umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return true;

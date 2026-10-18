@@ -50,6 +50,7 @@ import {UniformMixedSolid,type UniformMixedSolidResources} from "./uniform-mixed
 import {UNIFORM_PAGE_POOL_STATUS,UniformPagePool,uniformPagePoolFatalMessage,type UniformPagePoolMirror,type UniformPagePoolResidency} from "./uniform-page-pool";
 import {UniformPageInitialise,UniformPageTileWords,uniformPageTopology,type UniformPageInitBlocks} from "./uniform-page-initialise";
 import {UNIFORM_STAGE_GRID_HEADER_WORDS,UNIFORM_STAGE_VIEWS,uniformStageBandWords,uniformStageGridHeader,uniformStageGridWords,uniformStageViewWord} from "./uniform-stage-grids";
+import {uniformNearSettled,type UniformNearSettled} from "./uniform-near-settled";
 
 export interface UniformMixedFrameTrace {
  instrument(encoder:GPUCommandEncoder):GPUCommandEncoder;
@@ -237,9 +238,13 @@ export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;b
  /** COLD regions: "frozen16h" (default) freezes their fine velocity under a 16h coarse term (UniformColdFreeze); "fine" keeps the full fine treatment. */
  coldRegions?:"frozen16h"|"fine";
  /** Host cold-frame skip (UniformColdFrame): "on" (default) leaves out launches of stages with no work in the lagged region heat; "off" encodes every launch. */
- coldFrameSkip?:"on"|"off"}
+ coldFrameSkip?:"on"|"off";
+ /** NB-FLIP regionTiering, warmResolution, particleSeeding (default uniformNearSettled()). */
+ nearSettled?:UniformNearSettled}
 
 export class UniformMixedFrame {
+ /** The NB-FLIP near-settled settings, fixed for the frame's life. */
+ readonly nearSettled:UniformNearSettled;
  readonly ownership:UniformMixedOwnership;
  /** The page pool, seeded with the address's stored set and pinned with the
   * residency's pages. The simulation and pressure-root topologies and the
@@ -443,6 +448,7 @@ export class UniformMixedFrame {
   * tables hold AIR above the box and pressure is built on it (write). */
  constructor(private readonly device:GPUDevice,layout:UniformMixedLayout,capacity:UniformMixedFrameCapacity,private readonly fields:UniformMixedFrameFields,private readonly openTop:boolean,private readonly schedule:UniformCM11aSchedule=DEFAULT_UNIFORM_CM11A_SCHEDULE){
   const f=fields;
+  this.nearSettled=capacity.nearSettled??uniformNearSettled();
   this.liquidBand=capacity.liquidBand;this.byteBudget=capacity.byteBudget;this.queue=device.queue;this.cold=new UniformColdFrame(capacity.coldFrameSkip!=="off");
   const buffer=(label:string,size:number,usage:number)=>{const b=device.createBuffer({label,size,usage});this.owned.push(b);return b;};
   const uniform=(name:string,size:number)=>buffer(`Uniform ${name} parameters`,size,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
@@ -467,7 +473,7 @@ export class UniformMixedFrame {
     acceptance:new Float32Array([0,0,UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]),band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])])};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer);
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding);
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
   // The census extension crosses a relayout in these instead of being
@@ -518,7 +524,7 @@ export class UniformMixedFrame {
   this.surfaceWorkControl=new UniformSurfaceWorkControl(device,o,f.phi,solid,this.pagePool,this.heat);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
   this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
-  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord},this.surfaceWorkControl);
+  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h");
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,this.surfaceWorkControl);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
@@ -529,7 +535,7 @@ export class UniformMixedFrame {
   this.freeze=capacity.coldRegions==="fine"?undefined:new UniformColdFreeze(device,o,this.heat);
   this.narrowBandFlip.attachFreeze(this.freeze);
   this.heat.attach({dynamics:this.dynamics.record,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,sourceParams:f.sourceParams,
-   particleHeat:{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.activityHeatWord},coldFreeze:this.freeze,holdRises:capacity.coldFrameSkip!=="off"});
+   particleHeat:{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.activityHeatWord},coldFreeze:this.freeze,holdRises:capacity.coldFrameSkip!=="off",tiering:this.nearSettled.regionTiering});
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
   // Its tiers follow the region heat (UniformMixedMomentumTiers).
@@ -578,7 +584,7 @@ export class UniformMixedFrame {
   this.surfaceBand=new UniformPressureSurfaceBand(device,o,f.phi);
   this.band=new UniformPressureBand(device,o,p,{phi:{buffer:this.authorityPhi},coarsePhi:root.phi!,authorityParams:this.params.authority,vertexPhi:f.phi,
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
-   coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,rows:this.bandRows,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold},undefined,solid);
+   coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,rows:this.bandRows,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined},undefined,solid);
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
   this.acceptance=new UniformMixedPressureAcceptance(device,p);
   this.acceptanceGroup=this.acceptance.bind({residual:root.residual,state:this.state,params:this.params.acceptance});

@@ -1,11 +1,27 @@
 import { UNIFORM_STAGE_IMPORTANCE as I } from "./uniform-stage-grids";
+import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
 
 /** EXNB-style heat, driven by the existing resolution/error/contact census.
  * Heat is dimensionless; cooling is per second, not per accepted step. A
  * trigger starts at full influence. Erasure fades in the first half of the
  * retirement time; addition/velocity fade in the second, retaining support.
  * Separate passes publish local heat, its overlap collar, and particle heat:
- * none reads a neighbour that the same dispatch is writing. */
+ * none reads a neighbour that the same dispatch is writing.
+ * nbActivityTriggered (narrowBandActivityTriggerWGSL, in the including
+ * module) picks the triggered criteria that heat and seed. */
+/** fn nbActivityTriggered(t:u32,criteria:u32)->bool: whether tile key t's
+ * triggered criteria (bits in UNIFORM_DETAIL_CRITERIA order: shape, thin,
+ * strain, rotation, impact, approach) heat it. "activity": any. "need": thin,
+ * strain, rotation, impact or approach (what the h grid cannot hold), and
+ * shape only near a body (its waterline and wake). Shape elsewhere measures
+ * h-versus-4h surface error, which the h tiles it requires already carry:
+ * a ripple or a resting wall's meniscus needs h, not particles. */
+export function narrowBandActivityTriggerWGSL(seeding:"need"|"activity"):string{
+ if(seeding==="activity")return "fn nbActivityTriggered(t:u32,criteria:u32)->bool{return criteria!=0u;}";
+ return /* wgsl */`fn nbActivityTriggered(t:u32,criteria:u32)->bool{
+ if((criteria&0x3eu)!=0u){return true;}
+ return (criteria&1u)!=0u&&umBodyCount()>0u&&umBodyPoseNearTile(t,${UNIFORM_BODY_GEOMETRY_REACH}u);
+}`;}
 export const NARROW_BAND_ACTIVITY_WORDS_PER_TILE = 7;
 export const narrowBandActivityWGSL = /* wgsl */`
 const NB_ACTIVITY_SCORES=NB_BAND_SEAM+NB_BAND_TILES;
@@ -76,7 +92,7 @@ fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
  for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
   if(!umTileLive(t)){continue;}
   let flags=atomicLoad(&bins[NB_ACTIVITY_SCORES+2u*t+1u]);
-  let triggered=((flags>>${I.triggeredShift}u)&63u)!=0u&&(flags&${I.dropped}u)==0u;
+  let triggered=nbActivityTriggered(t,(flags>>${I.triggeredShift}u)&63u)&&(flags&${I.dropped}u)==0u;
   let q=4.0*vec3f(umTileCoord(t))+2.0;
   let source=nbSourcePhi(q,1e10)<4.0;
   let old=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_HEAT+t]));

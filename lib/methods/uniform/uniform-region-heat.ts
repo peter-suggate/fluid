@@ -154,6 +154,15 @@ export interface UniformRegionHeatSources {
    * frames (the NB-FLIP coldFrameSkip "on" setting; default true): host
    * skippers then see every rise while it stands. False holds none. */
   holdRises?:boolean;
+  /** NB-FLIP regionTiering. "error" (default): a region is HOT only for
+   * detail the 4h representation cannot carry (body or source reach, one-frame
+   * identity/unknown evidence, particle heat, a velocity span or step travel
+   * beyond the 4h error budget: 4x the h one, trigger bit 2048; bit 128, the
+   * h budget, is then a held one-frame WARM rise), motion within it is WARM, and
+   * only HOT regions warm their neighbours (a one-region halo). "motion":
+   * every velocity-span or travel trigger is HOT and every non-COLD region
+   * warms its neighbours (the ring a level). */
+  tiering?:"error"|"motion";
 }
 
 export class UniformRegionHeat {
@@ -207,7 +216,7 @@ export class UniformRegionHeat {
   invalidate():void{this.forced=true;}
   async initialize():Promise<void>{
     const s=this.sources;if(!s||!this.layout)throw new Error("Region heat initializes after its sources attach");
-    const h=Math.min(...this.ownership.capacity.lattice.cellSize_m);
+    const h=Math.min(...this.ownership.capacity.lattice.cellSize_m);const error=s.tiering!=="motion";
     const module=uniformDetailModule(this.device,{label:"Uniform region work heat",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> tiers:array<atomic<u32>>;
 @group(1) @binding(1) var<storage,read_write> state:array<u32>;
@@ -228,10 +237,10 @@ const RH_UNKNOWN:f32=3.0e38;
 // Force, identity, pending, unknown and a held HOT rise: HOT this frame, no heat.
 const RH_ONE_FRAME:u32=0x227u;
 // Displacement over budget, a WARM promotion, a held WARM rise: WARM this frame, no heat.
-const RH_WARM_FRAME:u32=0x540u;
+const RH_WARM_FRAME:u32=${error?"0x5c0u":"0x540u"};
 // The one-frame rises the host does not cause (all but force): held.
 const RH_HELD_HOT:u32=0x26u;
-const RH_HELD_WARM:u32=0x140u;
+const RH_HELD_WARM:u32=${error?"0x1c0u":"0x140u"};
 const RH_HOLD_FRAMES:u32=${s.holdRises===false?0:UNIFORM_REGION_HEAT_HOLD_FRAMES}u;
 const RH_SPAN_H:f32=${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
 // A region's level: its heat, at least 2 on a one-frame HOT trigger and
@@ -282,7 +291,8 @@ var<workgroup> rhParticle:atomic<u32>;
    {var span=0.0;
     for(var axis=0u;axis<3u;axis++){let hi=regionVelocity[6u*region+axis];let lo=regionVelocity[6u*region+3u+axis];
      if(hi!=0u&&lo!=0u&&hi!=0xffffffffu&&lo!=0xffffffffu){span+=max(0.0,rhSigned(hi)+rhSigned(lo));}}
-    if(0.5*rh.dt*span*rh.hInverse>RH_SPAN_H||rh.dt*speed*rh.hInverse>0.5){trigger|=128u;}}
+    if(0.5*rh.dt*span*rh.hInverse>RH_SPAN_H||rh.dt*speed*rh.hInverse>0.5){trigger|=128u;}
+    ${error?"if(0.5*rh.dt*span*rh.hInverse>4.0*RH_SPAN_H||rh.dt*speed*rh.hInverse>2.0){trigger|=2048u;}":""}}
    var dp=bitcast<f32>(dynamics[${UNIFORM_REGION_DYNAMICS_WORDS}u*region+${UNIFORM_REGION_DYNAMICS.pressureDelta}u]);
    // After a one-frame trigger the pressure change has no baseline.
    if((state[at+7u]&RH_ONE_FRAME)!=0u){dp=0.0;}
@@ -317,7 +327,7 @@ var<workgroup> rhParticle:atomic<u32>;
  for(var k=0u;k<27u;k++){
   if(k==13u){continue;}
   let key=umTileKey(4*(c+vec3i(umCorner(k,3u))-vec3i(1)));if(!umKeyStored(key)){continue;}
-  level=max(level,0.5*rhLevel(umPageOfTile(key)));
+  ${error?"{let n=rhLevel(umPageOfTile(key));if(n>=1.0){level=max(level,0.5*n);}}":"level=max(level,0.5*rhLevel(umPageOfTile(key)));"}
  }
  let tier=select(select(${UNIFORM_REGION_TIER.cold}u,${UNIFORM_REGION_TIER.warm}u,level>0.0),${UNIFORM_REGION_TIER.hot}u,own>=1.0);
  atomicStore(&tiers[region],tier);atomicAdd(&tiers[RH_REGIONS+tier],1u);

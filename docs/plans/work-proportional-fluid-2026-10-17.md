@@ -2343,3 +2343,118 @@ The remaining dispatches are the root pressure (V/Full cycles 137, setup 14, mea
 - **Phi resolve and surface advect.** They already hold deep-COLD vertices. In idle frames B now leaves them out entirely.
 - **C's section is out of date.** Its note that no other stage reads `cold.quiet` predates these gates.
 - **Timing.** The final arms each started from an idle GPU but ended contended. A fully clean before/after is left to the coordinator's integrated A/B.
+
+## Near-settled: phase 1, error-based region tiers (2026-10-18)
+
+The gently disturbed pool (`createBackyardPoolDriftScene`, a ball drifting at 0.3 m/s and one 4 cm drip) cost 54 ms a frame late on, as much as the pool-impact splash. The region heat measured whether anything moved, not whether the motion needed h:
+
+- a velocity span or travel over the h transport budget heated a region HOT;
+- every non-COLD region warmed its 26 neighbours, so millimetre ripples warmed the whole pool;
+- at frame 150, 240 of 480 non-COLD regions were WARM only by that ring.
+
+**Change.** NB-FLIP param `regionTiering`: "error" (default) or "motion" (the previous triggers, unchanged WGSL). Under "error":
+
+- a span or travel over the h budget is a held one-frame WARM rise;
+- HOT needs h-scale evidence: body or source reach, one-frame identity or unknown evidence, particle heat, or a span over 4x the budget (the same relative error at 4h) or travel over 2 cells;
+- only HOT regions warm their neighbours, a one-region halo.
+
+The setting flows from `narrowBandFlipValues` through `narrowBandNearSettled` to `UniformMixedFrameCapacity.nearSettled` and `UniformRegionHeatSources.tiering`.
+
+**Results, base to phase 1:**
+
+| Scene | Mean frame time | Regions COLD/WARM/HOT | Particles |
+| --- | --- | --- | --- |
+| Drift, frames 100–150 | 54.4 → 48.7 ms | 42/334/126 → 170/288/54 | 221k → 185k |
+| Pool-impact | 45.7 → 42.7 ms | | |
+| Settled | 5.9 → 5.4 ms | | |
+
+**Physics.** Pool-impact impulse 494.5 N s, deepest 1.343 m. The drift ball floats at 1.753 m, and the ripple still propagates: rms 4.5 mm, drip ring maximum 23–32 mm.
+
+**What remains.** WARM regions still run every stage at h. The next phases address that, and particle seeding.
+
+## Near-settled: coarse-metric fix, phase 2 (WARM at 4h) and phase 3 (seeding on need) (2026-10-18)
+
+**Redistance fix (no param).** A retiring adaptive coarse corner took its metric distance from the band's crossings. Those miss a surface that lies along a coarse tile's own 4h edges: the calm pool's waterline sits on a tile boundary.
+
+- When a drop activated the h tile above calm water, the calm corner took the distance to the drop, and a 2.4 h hole opened beneath it.
+- The bug was already on HEAD: a drop over calm water left a −112 mm hole.
+- `nbBoundCoarseMetric` (uniform-narrow-band-redistance.wgsl.ts) bounds the metric by the zero the represented field has on the corner's six 4h lattice edges.
+- Much of the drift scene's earlier ripple and splash was this artifact. With the fix alone, drift frames 100–150 cost 40.1 ms (from 54.4) with 18k particles (from 221k).
+
+**Phase 2, `warmResolution`.** Options are "4h" (default) or "h" (previous behaviour). Under "4h":
+
+- WARM tiles leave the h pressure band (`bCoarseWarm`), so their h velocity is the 4h solve's interpolant.
+- A WARM vertex deeper than (2 + 2 width) h in liquid or air keeps its phi (`umHoldWarmDeep`), which removes the wall and floor vertices' solid traces from the deferred advect list.
+
+**Phase 3, `particleSeeding`.** Options are "need" (default) or "activity" (previous behaviour).
+
+- Under "need", particles seed for thin, strain, rotation, impact and approach criteria, and for shape error only within body reach (the ball's waterline and wake).
+- Shape error elsewhere is h-versus-4h surface error, which the h tiles it requires already carry. A ripple needs h, not particles.
+
+**Results, base / fix only / all defaults:**
+
+| Scene | Mean frame time | Regions COLD/WARM/HOT | Particles |
+| --- | --- | --- | --- |
+| Drift, frames 100–150 | 54.4 / 40.1 / 31.2 ms | 42/334/126 → 268/106/10 | 221k / 18k / 19k |
+| Drift, frames 6–30 | 36.1 / – / 27.6 ms | | 35k → 0 |
+| Pool-impact | 45.7 / 47.8 / 36.1 ms | | 64k → 47k |
+| Settled | 5.9 / 5.3 / 5.2 ms | | |
+
+With every new param set to its old option, drift reproduces the fix-only run exactly.
+
+**Physics.**
+
+- Pool-impact impulse 494.3 N s, deepest 1.343 m.
+- Settled maxSpeed 3e-6.
+- The drift ball heaves between 1.744 and 1.763 m and keeps drifting (vx 0.043 m/s at frame 150, against 0.052 with the fix only).
+- The ripple's rms is 3.0 mm and the drip ring's maximum 47 mm at frame 150, matching the fix-only run.
+
+**What remains.** WARM regions still run the h stages: extension, forces, momentum, authority, census and the NB-FLIP band. The floor of 581 dispatches remains.
+
+## Near-settled: phase 2b (WARM regions meet solids at 4h) and phase 4a (latency-bound kernels) (2026-10-18)
+
+**Phase 2b.** Most of the calm pool's h footprint was liquid-conditional solid promotion: every cut tile beside liquid, plus its 26 neighbours, at h. Under `warmResolution` "4h":
+
+- A WARM region's cut tile is the root's 4h cut owner (record Omega and V) and promotes nothing.
+- A COLD region's cut tile keeps its width.
+- The census reads the frame's tiers (a fourth region section of its bounds words).
+- The layout's remap is the 4h↔h transfer.
+
+**Phase 4a.** A frame with any HOT region cost about 11 ms GPU more than an all-COLD frame, whatever the HOT count. The extra time is kernels whose duration is one lane's serial chain. These kernels now spread that chain over lanes. Results are identical up to f32 summation order, so there is no param.
+
+- **buildRhs:** each cut face's 16 h faces get a lane each, and the wall loop reuses the sums (1.25 → 0.32 ms).
+- **airSeeds / airClearFine:** h tiles get a workgroup each, from the h list (0.43 → 0.17 ms).
+- **depthCoarse:** a lane per corner.
+- **wetRegions:** a lane per cut face.
+
+| Scene | HEAD | After phases 1–3 + 2b | After phase 4a |
+| --- | --- | --- | --- |
+| Drift, frames 100–150 | 54.8 ms | 28.0 ms | 25.0 ms |
+| Drift, frames 6–30 | 38.3 ms | 25.9 ms | 23.2 ms |
+| Pool-impact | 47.6 ms | 27.5 ms | 26.6 ms |
+| Settled | 5.3 ms | 5.1 ms | 4.9 ms |
+
+Physics is unchanged:
+
+- Pool-impact impulse 494.7 N s, deepest 1.343 m.
+- Drift ripple rms 3.1 mm and drip ring 47.6 mm at frame 150.
+- The ball keeps drifting at its rest depth.
+
+## Near-settled: phase 4b and what is left (2026-10-18)
+
+The root lattice's `smoothTiles` jobs now use 256 lanes, like the deeper levels (64 before). Results are bit-identical. Drift frames 100–150 went from 24.95 ms to 24.84 ms. Settled is 4.80 ms. Pool-impact is 26.33 ms with an impulse of 494.7 N s.
+
+What is left for drift under 20 ms:
+
+- **The dispatch floor.** About 582 dispatches stay encoded on every frame that has a HOT region.
+- **Thinly spread kernels.** The rest of the late-frame GPU time (~22.9 ms) is spread across many kernels of 0.3–1 ms each:
+  - V smoothTiles;
+  - bandSweep;
+  - advectDeferred;
+  - remapFaces;
+  - buildDistance;
+  - cacheNormals;
+  - geometry;
+  - surfaceHeld.
+
+The next lever is structural. Encode stages by which tiers are present, and fuse the per-region stages to cut the dispatch floor. Tuning single kernels will not get there.

@@ -84,6 +84,7 @@ import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } fr
 import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
+import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
 import { UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
@@ -103,6 +104,8 @@ export interface WebGPUUniformReferenceOptions {
   narrowBandColdRegions?: "frozen16h" | "fine";
   /** NB-FLIP coldFrameSkip: "on" (default) leaves out launches the lagged region heat proves empty; "off" encodes every launch. */
   narrowBandColdFrameSkip?: "on" | "off";
+  /** NB-FLIP regionTiering, warmResolution, particleSeeding (default uniformNearSettled()). */
+  narrowBandNearSettled?: UniformNearSettled;
   /** NB-FLIP: the advected phi of h vertices is trilinear (4h vertices keep phiCubicAdvection). */
   phiFineTrilinear?: boolean;
   /** Independent dense vertex level set and conservative cell volume, advanced
@@ -327,6 +330,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly narrowBandColdCensus: "replay" | "full";
   private readonly narrowBandColdRegions: "frozen16h" | "fine";
   private readonly narrowBandColdFrameSkip: "on" | "off";
+  private readonly narrowBandNearSettled: UniformNearSettled;
   private phiFineTrilinear: boolean;
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
   get pagePoolInfo(){return this.mixedFrame?.pagePoolInfo;}
@@ -633,6 +637,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandColdCensus = options.narrowBandColdCensus ?? "replay";
     this.narrowBandColdRegions = options.narrowBandColdRegions ?? "frozen16h";
     this.narrowBandColdFrameSkip = options.narrowBandColdFrameSkip ?? "on";
+    this.narrowBandNearSettled = options.narrowBandNearSettled ?? uniformNearSettled();
     this.phiFineTrilinear = options.phiFineTrilinear === true;
     this.twoLevelVelocity = true;
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
@@ -1121,7 +1126,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // limits refuse a reservation (UniformMixedFrameCapacity).
     const tiles=this.address.poolTiles,gpuLayout=this.detail.policy==="dynamic";
     const solids=!this.solidVoxelsEmpty||sceneHasTerrain(this.scene),bodies=this.scene.rigidBodies.length;
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip},{
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
@@ -1137,7 +1142,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2],this.mixedFrame.solid!.coarse!);
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
-    if(this.narrowBandColdCensus==="replay")this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers);
+    // warmResolution "4h": WARM regions' cut tiles stay 4h (the census reads the tiers).
+    {const warmSolids=this.mixedFrame.nearSettled.warmResolution==="4h";
+     if(this.narrowBandColdCensus==="replay"||warmSolids)this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers,this.narrowBandColdCensus==="replay",warmSolids);}
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure});
     // The frame's forces and its samples read the bed-slope lane; the bake is

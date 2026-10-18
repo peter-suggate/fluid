@@ -985,7 +985,11 @@ ${uniformPressureHierarchyWGSL}`;
       variants[entry] ??= entry.startsWith("coarse") ? ["coarse", constants, [1, 1, 1]]
         : entry.startsWith("descend") ? ["descendTiles", constants, runs(constants.UM_TL! + 1)]
         : entry.startsWith("ascend") ? ["ascendTiles", constants, level ? runs(level) : root]
-        : ["smoothTiles", constants, level ? { jobs: this.blocks, lanes: this.tileLanes, listed: false } : root];
+        : ["smoothTiles", constants, level ? { jobs: this.blocks, lanes: this.tileLanes, listed: false }
+          // The root lattice's jobs take the deep levels' width too: a job's halo
+          // gather and its sweeps stride the lanes, so 64 lanes ran each serially
+          // four times longer (every cell is still one lane's, so results are bit-identical).
+          : { ...root, lanes: this.tileLanes }];
     };
     for (const end of [1, 2, 3] as const) this.cycle(0, 0, 0, end, add);
     this.opening(add);

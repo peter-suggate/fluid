@@ -466,6 +466,25 @@ var<workgroup> umAuthorityRegionNear:atomic<u32>;
 // reads the rows and records of t and t+axis, and a closed row continues its
 // six neighbours', so t's reads lie in tiles t-1..t+2 of each axis. Bit
 // (dx+1)+3(dy+1)+9(dz+1) of the region's mask: neighbour (dx,dy,dz) changed.
+// wetRegions' cut faces, a lane a face: a region's tiles beside a body
+// listed their three faces serially behind the rest.
+var<workgroup> umWetCount:atomic<u32>;var<workgroup> umWetItem:array<u32,192>;var<workgroup> umWetFaces:array<vec2f,192>;
+fn umWetTileListed(t:u32,l:u32){
+ let o=UMOwner(t,0u,4u,umTopology[t]&0x3fffffffu);let c=umTileCoord(t);
+ var topology=umSolidCoarse(o.index);var masks=vec3f(65535.0);
+ for(var axis=0u;axis<3u;axis++){
+  var q=c;q[axis]+=1u;
+  // Nothing stored across the face: V is 1 into AIR; a SOLID page's is its wall slot's.
+  if(!umTilePresent(vec3i(q))){if(umTileKind(vec3i(q))==UM_AIR){topology[axis+1u]=1.0;}continue;}
+  let n=umTileAt(q);
+  if(!umSolidCut(t)&&!umSolidCut(n)){continue;}
+  let face=umWetFaces[3u*l+axis];topology[axis+1u]=face.x;masks[axis]=face.y;
+ }
+ rootTopology[o.index]=topology;let words=UM_ROOT_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*t;
+ for(var axis=0u;axis<3u;axis++){phi[words+axis]=masks[axis];}
+ // A domain wall's slot keeps the record's V.
+ ${uniformMixedPressureBoundaryLoop("rootTopology[halo]=umSolidCoarse(halo);")}
+}
 @compute @workgroup_size(64) fn wetRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
  for(var region=group.x;region<UM_PAGES;region+=groups.x){
   if(l==0u){atomicStore(&umAuthorityRegionNear,0u);}
@@ -482,7 +501,23 @@ var<workgroup> umAuthorityRegionNear:atomic<u32>;
    let d=vec3i(umCorner(k,3u))-vec3i(1);
    if(all((d>=vec3i(0))|(vec3i(local)==vec3i(0)))&&all((d<=vec3i(0))|(local>=vec3u(2u)))){reach|=1u<<k;}
   }
-  let t=umPageTile(region,l);if((near&reach)!=0u&&umTileLive(t)){umWetTile(t);}
+  let t=umPageTile(region,l);let live=(near&reach)!=0u&&umTileLive(t);
+  if(l==0u){atomicStore(&umWetCount,0u);}
+  workgroupBarrier();
+  if(live){
+   let c=umTileCoord(t);
+   for(var axis=0u;axis<3u;axis++){
+    var q=c;q[axis]+=1u;if(!umTilePresent(vec3i(q))){continue;}
+    if(umSolidCut(t)||umSolidCut(umTileAt(q))){let i=atomicAdd(&umWetCount,1u);umWetItem[i]=l|(axis<<6u);}
+   }
+  }
+  let faces=workgroupUniformLoad(&umWetCount);
+  for(var i=l;i<faces;i+=64u){
+   let w=umWetItem[i];let s=umPageTile(region,w&63u);let axis=w>>6u;let c=umTileCoord(s);var q=c;q[axis]+=1u;
+   umWetFaces[3u*(w&63u)+axis]=umWetFace(s,umTileAt(q),vec3i(4u*c),axis);
+  }
+  workgroupBarrier();
+  if(live){umWetTileListed(t,l);}
  }
 }`:""}`:""}
 ${this.revisions?`@group(1) @binding(11) var<storage,read_write> stamps:array<u32>;
@@ -593,32 +628,37 @@ fn umSurfaceOwner(o:UMOwner,held:bool){
 ${this.heldRegional?`// The held surface pass (a region a workgroup, fixed grid, strided): the
 // owners of every region the stamps did not hold, and of each tile of a
 // held region whose owner base moved (a relayout's rank shift elsewhere).
-// 4h tiles a lane each, then the h tiles one after another, their owners a
-// lane each. A held region's other owners keep the last pass's phi and
-// phase.
+// An item is an eighth of a region (eight of its tiles): its 4h tiles a lane
+// each, then its h tiles one after another, their owners a lane each. A
+// region a workgroup ran up to 64 h tiles in series: the few regions a
+// moving body keeps changing were 0.4 ms of a drifting-ball frame. A held
+// region's other owners keep the last pass's phi and phase.
 const UM_TILE_BASE:u32=${STAMP_WORDS*this.pages}u;
 var<workgroup> umHeldGate:u32;
-var<workgroup> umHeldFine:array<atomic<u32>,2>;
-var<workgroup> umHeldFineTiles:vec2u;
+var<workgroup> umHeldFine:atomic<u32>;
+var<workgroup> umHeldFineTiles:u32;
 @compute @workgroup_size(64) fn surfaceHeld(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var region=group.x;region<UM_PAGES;region+=groups.x){
-  if(l==0u){umHeldGate=u32(umTileLive(umPageTile(region,0u)))|(stamps[UM_STAMP_WORDS*region+12u]&2u);atomicStore(&umHeldFine[0],0u);atomicStore(&umHeldFine[1],0u);}
+ for(var item=group.x;item<8u*UM_PAGES;item+=groups.x){
+  let region=item>>3u;let first=8u*(item&7u);
+  if(l==0u){umHeldGate=u32(umTileLive(umPageTile(region,0u)))|(stamps[UM_STAMP_WORDS*region+12u]&2u);atomicStore(&umHeldFine,0u);}
   let gate=workgroupUniformLoad(&umHeldGate);if((gate&1u)==0u){continue;}
-  let t=umPageTile(region,l);
-  if(umTileLive(t)){
-   let base=umTopology[t]&0x3fffffffu;
-   if((gate&2u)==0u||stamps[UM_TILE_BASE+t]!=base+1u){
-    stamps[UM_TILE_BASE+t]=base+1u;
-    if(umTileWidth(t)==1u){atomicOr(&umHeldFine[l>>5u],1u<<(l&31u));}
-    else{umSurfaceOwner(UMOwner(t,0u,4u,base),false);}
+  if(l<8u){
+   let t=umPageTile(region,first+l);
+   if(umTileLive(t)){
+    let base=umTopology[t]&0x3fffffffu;
+    if((gate&2u)==0u||stamps[UM_TILE_BASE+t]!=base+1u){
+     stamps[UM_TILE_BASE+t]=base+1u;
+     if(umTileWidth(t)==1u){atomicOr(&umHeldFine,1u<<l);}
+     else{umSurfaceOwner(UMOwner(t,0u,4u,base),false);}
+    }
    }
   }
   workgroupBarrier();
-  if(l==0u){umHeldFineTiles=vec2u(atomicLoad(&umHeldFine[0]),atomicLoad(&umHeldFine[1]));}
+  if(l==0u){umHeldFineTiles=atomicLoad(&umHeldFine);}
   let fine=workgroupUniformLoad(&umHeldFineTiles);
-  for(var k=0u;k<64u;k++){
-   if(((fine[k>>5u]>>(k&31u))&1u)==0u){continue;}
-   let tile=umPageTile(region,k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
+  for(var k=0u;k<8u;k++){
+   if(((fine>>k)&1u)==0u){continue;}
+   let tile=umPageTile(region,first+k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
   }
  }
 }`:""}
@@ -626,17 +666,19 @@ ${this.bodyRegional?`// A head whose only change since the last authority is rig
 // Record and geometry change only in regions within
 // UNIFORM_BODY_GEOMETRY_REACH h of the swept support, and an owner's phi
 // reads cells at most a tile beyond its own: a tile is rewritten when a
-// region its 3x3x3-tile box touches was reached. A 16h region a workgroup
-// (fixed grid, strided): bit (dx+1)+3(dy+1)+9(dz+1) of its mask for each
-// reached neighbour, then its 4h tiles a lane each and its h tiles one
-// after another, their owners a lane each.
+// region its 3x3x3-tile box touches was reached. An eighth of a 16h region
+// (eight of its tiles) a workgroup (fixed grid, strided): bit
+// (dx+1)+3(dy+1)+9(dz+1) of the region's mask for each reached neighbour,
+// then its 4h tiles a lane each and its h tiles one after another, their
+// owners a lane each (a region a workgroup ran 64 h tiles in series).
 var<workgroup> umAuthorityBodyNear:atomic<u32>;
-var<workgroup> umAuthorityFine:array<atomic<u32>,2>;
+var<workgroup> umAuthorityFine:atomic<u32>;
 var<workgroup> umAuthorityBodyGate:u32;
-var<workgroup> umAuthorityFineTiles:vec2u;
+var<workgroup> umAuthorityFineTiles:u32;
 @compute @workgroup_size(64) fn surfaceRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var region=group.x;region<UM_PAGES;region+=groups.x){
-  if(l==0u){atomicStore(&umAuthorityBodyNear,0u);atomicStore(&umAuthorityFine[0],0u);atomicStore(&umAuthorityFine[1],0u);}
+ for(var item=group.x;item<8u*UM_PAGES;item+=groups.x){
+  let region=item>>3u;let first=8u*(item&7u);
+  if(l==0u){atomicStore(&umAuthorityBodyNear,0u);atomicStore(&umAuthorityFine,0u);}
   workgroupBarrier();
   if(l<27u&&umTileLive(umPageTile(region,0u))){
    let q=4*(vec3i(umPageCoord(region))+vec3i(umCorner(l,3u))-vec3i(1));let key=umTileKey(q);
@@ -645,21 +687,23 @@ var<workgroup> umAuthorityFineTiles:vec2u;
   workgroupBarrier();
   if(l==0u){umAuthorityBodyGate=atomicLoad(&umAuthorityBodyNear);}
   let near=workgroupUniformLoad(&umAuthorityBodyGate);if(near==0u){continue;}
-  let t=umPageTile(region,l);let local=umCorner(l,4u);var reached=false;
-  for(var k=0u;k<27u;k++){
-   let d=vec3i(umCorner(k,3u))-vec3i(1);
-   reached=reached||(all((d>=vec3i(0))|(local==vec3u(0u)))&&all((d<=vec3i(0))|(local==vec3u(3u)))&&((near>>k)&1u)!=0u);
-  }
-  if(reached&&umTileLive(t)){
-   if(umTileWidth(t)==1u){atomicOr(&umAuthorityFine[l>>5u],1u<<(l&31u));}
-   else{umSurfaceOwner(UMOwner(t,0u,4u,umTopology[t]&0x3fffffffu),false);}
+  if(l<8u){
+   let t=umPageTile(region,first+l);let local=umCorner(first+l,4u);var reached=false;
+   for(var k=0u;k<27u;k++){
+    let d=vec3i(umCorner(k,3u))-vec3i(1);
+    reached=reached||(all((d>=vec3i(0))|(local==vec3u(0u)))&&all((d<=vec3i(0))|(local==vec3u(3u)))&&((near>>k)&1u)!=0u);
+   }
+   if(reached&&umTileLive(t)){
+    if(umTileWidth(t)==1u){atomicOr(&umAuthorityFine,1u<<l);}
+    else{umSurfaceOwner(UMOwner(t,0u,4u,umTopology[t]&0x3fffffffu),false);}
+   }
   }
   workgroupBarrier();
-  if(l==0u){umAuthorityFineTiles=vec2u(atomicLoad(&umAuthorityFine[0]),atomicLoad(&umAuthorityFine[1]));}
+  if(l==0u){umAuthorityFineTiles=atomicLoad(&umAuthorityFine);}
   let fine=workgroupUniformLoad(&umAuthorityFineTiles);
-  for(var k=0u;k<64u;k++){
-   if(((fine[k>>5u]>>(k&31u))&1u)==0u){continue;}
-   let tile=umPageTile(region,k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
+  for(var k=0u;k<8u;k++){
+   if(((fine>>k)&1u)==0u){continue;}
+   let tile=umPageTile(region,first+k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
   }
  }
 }`:""}
@@ -753,7 +797,7 @@ ${this.resident?`// A group per page (fixed grid, strided): the 4h owners of an 
  encodeBodies(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
   const pipeline=this.pipelines.get("surfaceRegions");if(!pipeline)throw new Error("Mixed pressure authority has no regional body launch (surface-only simulation authority with solids)");
   const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.solid!.tileGroup);
-  pass.setPipeline(this.variant(pipeline));pass.dispatchWorkgroups(Math.min(REGION_GRID,this.pages));pass.end();
+  pass.setPipeline(this.variant(pipeline));pass.dispatchWorkgroups(Math.min(REGION_GRID,8*this.pages));pass.end();
  }
  /** The work tiers and their epochs beside the revisions (the group has no
   * storage binding to spare). */
@@ -774,7 +818,7 @@ ${this.resident?`// A group per page (fixed grid, strided): the 4h owners of an 
   const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
   pass.setPipeline(this.variant(this.pipelines.get(this.stampForced()?"stampForce":"stamp")!));pass.dispatchWorkgroups(Math.ceil(this.pages/64));
   pass.setPipeline(this.variant(this.pipelines.get("stampHeld")!));pass.dispatchWorkgroups(Math.ceil(this.pages/64));
-  pass.setPipeline(this.variant(this.pipelines.get("surfaceHeld")!));pass.dispatchWorkgroups(Math.min(REGION_GRID,this.pages));pass.end();
+  pass.setPipeline(this.variant(this.pipelines.get("surfaceHeld")!));pass.dispatchWorkgroups(Math.min(REGION_GRID,8*this.pages));pass.end();
  }
  /** Every owner, held or not (the surface-only pass without stamps): the
   * restore after a stage that overwrote phase in held regions. */

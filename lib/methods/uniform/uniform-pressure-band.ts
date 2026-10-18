@@ -9,6 +9,7 @@ import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} 
 import {UNIFORM_BODY_FLUX_REACH,UNIFORM_REGION_DYNAMICS,UNIFORM_REGION_DYNAMICS_WORDS} from "./uniform-mixed-region-dynamics";
 import {UNIFORM_COLD_FREEZE,UniformColdFreeze} from "./uniform-cold-freeze";
 import type {UniformColdFrame} from "./uniform-cold-frame";
+import {uniformRegionHeatWGSL} from "./uniform-region-heat";
 
 /** The band's local multigrid: V-cycles h -> 2h (2^3 aggregates per tile) ->
  * 4h (one aggregate per tile), red-black Gauss-Seidel at every level. */
@@ -164,6 +165,11 @@ export interface UniformPressureBandFields {
   * region COLD, so frozen) lists no band tile, and the band's launches are
   * not encoded; the cleared header and slot map are its whole result. */
  coldFrame?:UniformColdFrame;
+ /** NB-FLIP warmResolution "4h": the region heat tiers (UniformRegionHeat.tiers).
+  * A WARM region's h tiles are then no band tiles: their velocity stays the
+  * 4h interpolation the transfer to simulation wrote, and a band face to
+  * one is Neumann at it (the projected 4h flux). */
+ warmTiers?:GPUBuffer;
 }
 
 /** The h pressure band of the two-stage solve: the global solve runs on
@@ -276,7 +282,7 @@ export class UniformPressureBand {
   const solver=[...base,...(fields.dynamics?[buffer(24)]:[])];
   const cold=UNIFORM_COLD_FREEZE&&fields.freeze?[{binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[];
   const entries:Record<string,GPUBindGroupLayoutEntry[]>={
-   list:[params,buffer(2),buffer(3,"read-only-storage"),texture(6),...cold],
+   list:[params,buffer(2),buffer(3,"read-only-storage"),texture(6),...cold,...(fields.warmTiers?[buffer(25,"read-only-storage")]:[])],
    copy:[params,buffer(2),texture(22),{binding:23,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}}],
    prep:[params,buffer(2),buffer(3,"read-only-storage"),buffer(4,"uniform"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(9),buffer(10),...cold],
    init:[params,buffer(2),buffer(9),buffer(10),texture(11),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),...cold],
@@ -333,6 +339,7 @@ export class UniformPressureBand {
    project:{...P,2:{buffer:this.index},9:rowsView,10:{buffer:this.solve},18:{buffer:this.coarse},15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
   const freeze=this.cold;if(freeze)for(const name of ["list","prep","init"])resources[name]![14]=freeze.regions;
+  if(f.warmTiers)resources.list![25]={buffer:f.warmTiers};
   if(f.presentation.buffer.size<4*(f.presentation.word+64*this.capacity))throw new Error("The stage grids cannot hold the pressure band");
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure band ${name}`,layout:this.layouts.get(name)!,
    entries:Object.entries(map).map(([binding,resource])=>({binding:+binding,resource}))}));
@@ -637,21 +644,22 @@ var<workgroup> bSweepCount:u32;
 }`;
   const coarseForms:[string,number,number,number][]=[["coarseSolve",lanes,held,shared]];
   const sources:Record<string,string>={
-   list:header+surface+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
+   list:header+surface+UniformColdFreeze.wgsl(this.cold,1,14)+(this.fields.warmTiers?uniformRegionHeatWGSL(1,25,this.simulation.capacity.tiles/64)+"fn bCoarseWarm(t:u32)->bool{return umRegionTierAtTile(t)==UM_TIER_WARM;}":"fn bCoarseWarm(t:u32)->bool{return false;}")+/* wgsl */`
 @group(1) @binding(0) var<uniform> params:BandParams;
 @group(1) @binding(2) var<storage,read_write> index:array<atomic<u32>>;
 var<workgroup> member:atomic<u32>;
 // Every h simulation tile with a liquid pressure row is a band tile: its
 // h velocity is divergence-free only after the h solve. A frozen region's
 // tile is not (UniformColdFreeze): its velocity holds, the root alone
-// answers there.
+// answers there. Nor, with warmTiers, is a WARM region's tile: its velocity
+// is the 4h interpolation (bCoarseWarm).
 @compute @workgroup_size(64) fn main(${slots}){
  for(var j=group.x;j<umCounts.x;j+=groups.x){
   let t=bHTile(j);
   if(lane==0u){atomicStore(&member,0u);}
   workgroupBarrier();
   if(bWet(bPhiH(vec3i(umTileCoord(t)*4u+bLocal(lane))),1.0)){atomicStore(&member,1u);}
-  if(workgroupUniformLoad(&member)!=0u&&lane==0u&&!umFrozenCell(vec3i(umTileCoord(t)*4u))){
+  if(workgroupUniformLoad(&member)!=0u&&lane==0u&&!umFrozenCell(vec3i(umTileCoord(t)*4u))&&!bCoarseWarm(t)){
    ${this.spatialOrder?"atomicStore(&index[SLOTS+t],1u);":`let slot=atomicAdd(&index[0],1u);
    if(slot<bCap()){atomicStore(&index[LIST+slot],t);atomicStore(&index[SLOTS+t],slot+1u);}else{atomicStore(&index[1],1u);}`}
   }
