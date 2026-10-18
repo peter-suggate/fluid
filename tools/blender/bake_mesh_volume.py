@@ -21,13 +21,14 @@ from mathutils.bvhtree import BVHTree
 
 ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser()
-parser.add_argument('--asset', default='all', choices=['all','teak-lounger','garden-parasol',
-    'insulated-cooler','refreshment-set','diving-board-ladder','pool-stainless-ladder',
-    'honed-travertine-paver','living-turf','cedar-fence-panel','stucco-window-bay',
-    'limestone-coping','limestone-coping-corner','ceramic-waterline','teak-serving-table'])
+parser.add_argument('--asset', default='all')
+parser.add_argument('--collection', default='pool-party', choices=['pool-party', 'hero-garden-blender'])
 parser.add_argument('--cell', type=float)
+parser.add_argument('--band-cells', type=float)
 args = parser.parse_args(sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else [])
-OUT = ROOT/'public/assets/pool-party'
+if args.band_cells is not None and (not math.isfinite(args.band_cells) or args.band_cells < 1):
+    parser.error('--band-cells must be at least one source cell')
+OUT = ROOT/'public/assets'/args.collection
 METADATA = ROOT/'lib/core/imported-assets/metadata'
 B = 8
 RAY = Vector((1, .371390676, .529113257)).normalized()
@@ -96,7 +97,7 @@ def texel(texture, uv):
             +texture[(iy+1)%th,ix%tw]*(1-fx)*fy+texture[(iy+1)%th,(ix+1)%tw]*fx*fy)
 
 
-def bake(name, h):
+def bake(name, h, band_cells=3):
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
     bpy.ops.import_scene.gltf(filepath=str(OUT/(name+'.glb')))
@@ -155,7 +156,7 @@ def bake(name, h):
                       'uvs':[tuple(mesh.uv_layers.active.data[i].uv.copy() for i in t.loops) for t in mesh.loop_triangles] if mesh.uv_layers.active else None,
                       'lo':bounds.min(axis=0),'hi':bounds.max(axis=0)})
         evaluated.to_mesh_clear()
-    band=3*h
+    band=band_cells*h
     lo=np.min([p['lo'] for p in parts],axis=0)
     hi=np.max([p['hi'] for p in parts],axis=0)
     origin=np.floor((lo-band)/h)*h
@@ -253,18 +254,20 @@ def bake(name, h):
             'brickCount':len(candidates),'brickCells':8,'nodeStrideBytes':16,'materials':materials,
             'sign':'negative-inside','texturePolicy':'Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained',
             'uniqueNodes':len(cache),'insideNodes':negative}
-    if name == 'honed-travertine-paver':
+    if name in ('honed-travertine-paver', 'hero-ground-tile'):
         # A proof over the sampled geometry, not an assumption from a material
         # name. Inset past the bevel and its interpolation apron. The source
         # shading normals may vary freely; the distance must remain a slab.
+        half_x, half_z, bottom, top = ((.45, .45, 0, .03) if name == 'honed-travertine-paver'
+                                     else (.8, .5, -.05, 0))
         for key, record in cache.items():
             p=origin+np.array(key)*h
-            if abs(p[0]) <= .45 and abs(p[2]) <= .45:
-                expected=max(-p[1],p[1]-.03)
+            if abs(p[0]) <= half_x and abs(p[2]) <= half_z:
+                expected=max(bottom-p[1],p[1]-top)
                 expected=max(-band,min(band,expected))
                 if abs(struct.unpack_from('<f',record)[0]-expected)>2e-6:
                     raise ValueError('Stone slab coarsening certificate does not match its geometry')
-        header['horizontalSlab']={'minimum':[-.45,0,-.45],'maximum':[.45,.03,.45]}
+        header['horizontalSlab']={'minimum':[-half_x,bottom,-half_z],'maximum':[half_x,top,half_z]}
     encoded=json.dumps(header,separators=(',',':')).encode()
     encoded+=b' '*((-len(encoded))%4)
     raw=b'FVX1'+struct.pack('<I',len(encoded))+encoded+data
@@ -275,10 +278,19 @@ def bake(name, h):
     print(f'{name}: {len(raw)/1e6:.1f} MB, {len(cache)} unique nodes, {negative} inside',flush=True)
 
 
-for name,h in [('teak-lounger',.01),('garden-parasol',.01),('insulated-cooler',.01),('refreshment-set',.005),
+presets = [('teak-lounger',.01),('garden-parasol',.01),('insulated-cooler',.01),('refreshment-set',.005),
                ('diving-board-ladder',.00625),('pool-stainless-ladder',.00625),
                ('honed-travertine-paver',.00625),('living-turf',.003125),
                ('cedar-fence-panel',.00625),('stucco-window-bay',.00625),
                ('limestone-coping',.00625),('limestone-coping-corner',.00625),
-               ('ceramic-waterline',.00625),('teak-serving-table',.00625)]:
-    if args.asset in ('all',name): bake(name,args.cell or h)
+               ('ceramic-waterline',.00625),('teak-serving-table',.00625)]
+bands = {}
+if args.collection != 'pool-party':
+    assets = json.loads((OUT/'manifest.json').read_text())['assets']
+    presets = [(a['id'], a['cellSize']) for a in assets]
+    bands = {a['id']: a.get('bandCells', 3) for a in assets}
+if args.asset != 'all' and args.asset not in dict(presets):
+    parser.error(f'Unknown asset {args.asset} in {args.collection}')
+for name,h in presets:
+    if args.asset in ('all',name): bake(name,args.cell or h,
+        args.band_cells if args.band_cells is not None else bands.get(name,3))

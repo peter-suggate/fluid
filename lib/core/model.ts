@@ -90,6 +90,8 @@ export interface SceneDescription {
   solidSurface?: { kind: "bath" } | SweptFlumeSurface;
   /** Optional image-free lighting grade consumed by the SVO renderer. */
   lighting?: {
+    /** Raster + AO only: contrast exponent for existing AO visibility. Default 1; no extra samples. */
+    rasterAoContrast?: number;
     /** Scene-linear directional key. Omitted fields retain the environment defaults. */
     directional?: {
       direction?: readonly [number, number, number];
@@ -568,6 +570,7 @@ export function validateScene(scene: SceneDescription): string[] {
     if (color.length !== 3 || !color.every((value) => Number.isFinite(value) && value >= 0)) errors.push("Scene directional-light color must contain three non-negative finite channels");
   }
   if (lighting?.directional?.intensity !== undefined && (!Number.isFinite(lighting.directional.intensity) || lighting.directional.intensity < 0)) errors.push("Scene directional-light intensity must be non-negative and finite");
+  if (lighting?.rasterAoContrast !== undefined && (!Number.isFinite(lighting.rasterAoContrast) || lighting.rasterAoContrast < 1 || lighting.rasterAoContrast > 4)) errors.push("Scene raster AO contrast must be between 1 and 4");
   if (lighting?.grade?.exposure !== undefined && (!Number.isFinite(lighting.grade.exposure) || lighting.grade.exposure <= 0)) errors.push("Scene grade exposure must be positive and finite");
   if (lighting?.grade?.toneCurve !== undefined && lighting.grade.toneCurve !== "reinhard" && lighting.grade.toneCurve !== "aces" && lighting.grade.toneCurve !== "agx") errors.push("Scene grade tone curve must be reinhard, aces or agx");
   if (lighting?.grade?.whiteBalance !== undefined) {

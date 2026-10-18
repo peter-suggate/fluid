@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-pond-and-ground",
+  "source": "hero-pond-and-ground.glb",
+  "origin": [
+    -0.9187500000000001,
+    0.08125,
+    -0.625
+  ],
+  "dimensions": [
+    296,
+    56,
+    200
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.018750000000000003,
+  "brickCount": 5313,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Sand glazed porcelain basin",
+      "baseColorLinear": [
+        0.5799999833106995,
+        0.33000001311302185,
+        0.14000000059604645
+      ],
+      "roughness": 0.27000001072883606,
+      "metallic": 0.0
+    },
+    {
+      "name": "Warm earth garden soil",
+      "baseColorLinear": [
+        0.2800000011920929,
+        0.17000000178813934,
+        0.08500000089406967
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Honey sandstone coping",
+      "baseColorLinear": [
+        0.5799999833106995,
+        0.33000001311302185,
+        0.14000000059604645
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 2813193,
+  "insideNodes": 1607966
+}

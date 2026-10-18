@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-hose-and-nozzle",
+  "source": "hero-hose-and-nozzle.glb",
+  "origin": [
+    0.2475,
+    0.2925,
+    0.18
+  ],
+  "dimensions": [
+    336,
+    56,
+    176
+  ],
+  "cellSize": 0.0025,
+  "bandWidth": 0.0075,
+  "brickCount": 484,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Forest green braided garden hose",
+      "baseColorLinear": [
+        0.012000000104308128,
+        0.07500000298023224,
+        0.03500000014901161
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Warm satin brass nozzle",
+      "baseColorLinear": [
+        0.6399999856948853,
+        0.3799999952316284,
+        0.11500000208616257
+      ],
+      "roughness": 0.2800000011920929,
+      "metallic": 0.8500000238418579
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 273817,
+  "insideNodes": 26425
+}

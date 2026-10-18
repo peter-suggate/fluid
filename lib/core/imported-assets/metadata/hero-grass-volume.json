@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-grass",
+  "source": "hero-grass.glb",
+  "origin": [
+    -0.045312500000000006,
+    -0.00625,
+    -0.035937500000000004
+  ],
+  "dimensions": [
+    56,
+    48,
+    56
+  ],
+  "cellSize": 0.0015625,
+  "bandWidth": 0.004687500000000001,
+  "brickCount": 161,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Garden leaf 0",
+      "baseColorLinear": [
+        0.04500000178813934,
+        0.1599999964237213,
+        0.02500000037252903
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 1",
+      "baseColorLinear": [
+        0.08500000089406967,
+        0.25999999046325684,
+        0.03500000014901161
+      ],
+      "roughness": 0.42500001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 2",
+      "baseColorLinear": [
+        0.1599999964237213,
+        0.3400000035762787,
+        0.054999999701976776
+      ],
+      "roughness": 0.4699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 3",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.2199999988079071,
+        0.09000000357627869
+      ],
+      "roughness": 0.5149999856948853,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 4",
+      "baseColorLinear": [
+        0.25,
+        0.38999998569488525,
+        0.08500000089406967
+      ],
+      "roughness": 0.5600000023841858,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 90001,
+  "insideNodes": 3362
+}

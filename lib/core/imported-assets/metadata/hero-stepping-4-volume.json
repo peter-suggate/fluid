@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-stepping-4",
+  "source": "hero-stepping-4.glb",
+  "origin": [
+    -0.046875,
+    -0.0125,
+    -0.046875
+  ],
+  "dimensions": [
+    32,
+    48,
+    32
+  ],
+  "cellSize": 0.003125,
+  "bandWidth": 0.009375000000000001,
+  "brickCount": 96,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Honed limestone 2",
+      "baseColorLinear": [
+        0.6399999856948853,
+        0.550000011920929,
+        0.4000000059604645
+      ],
+      "roughness": 0.6299999952316284,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 53361,
+  "insideNodes": 15107
+}

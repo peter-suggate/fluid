@@ -1,0 +1,1590 @@
+{
+  "hero-pond-and-ground": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-pond-and-ground",
+    "source": "hero-pond-and-ground.glb",
+    "origin": [
+      -0.9187500000000001,
+      0.08125,
+      -0.625
+    ],
+    "dimensions": [
+      296,
+      56,
+      200
+    ],
+    "cellSize": 0.00625,
+    "bandWidth": 0.018750000000000003,
+    "brickCount": 5313,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Sand glazed porcelain basin",
+        "baseColorLinear": [
+          0.5799999833106995,
+          0.33000001311302185,
+          0.14000000059604645
+        ],
+        "roughness": 0.27000001072883606,
+        "metallic": 0.0
+      },
+      {
+        "name": "Warm earth garden soil",
+        "baseColorLinear": [
+          0.2800000011920929,
+          0.17000000178813934,
+          0.08500000089406967
+        ],
+        "roughness": 0.8799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Honey sandstone coping",
+        "baseColorLinear": [
+          0.5799999833106995,
+          0.33000001311302185,
+          0.14000000059604645
+        ],
+        "roughness": 0.6200000047683716,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 2813193,
+    "insideNodes": 1607966
+  },
+  "hero-ground-tile": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-ground-tile",
+    "source": "hero-ground-tile.glb",
+    "origin": [
+      -0.9500000000000001,
+      -0.07500000000000001,
+      -0.6375000000000001
+    ],
+    "dimensions": [
+      152,
+      8,
+      104
+    ],
+    "cellSize": 0.0125,
+    "bandWidth": 0.0125,
+    "brickCount": 247,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm earth garden soil",
+        "baseColorLinear": [
+          0.2800000011920929,
+          0.17000000178813934,
+          0.08500000089406967
+        ],
+        "roughness": 0.8799999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 144585,
+    "insideNodes": 58004,
+    "horizontalSlab": {
+      "minimum": [
+        -0.8,
+        -0.05,
+        -0.5
+      ],
+      "maximum": [
+        0.8,
+        0,
+        0.5
+      ]
+    }
+  },
+  "hero-ground-surround": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-ground-surround",
+    "source": "hero-ground-surround.glb",
+    "origin": [
+      -4.525,
+      -0.1,
+      -3.0250000000000004
+    ],
+    "dimensions": [
+      368,
+      8,
+      248
+    ],
+    "cellSize": 0.025,
+    "bandWidth": 0.025,
+    "brickCount": 1398,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm earth garden soil",
+        "baseColorLinear": [
+          0.2800000011920929,
+          0.17000000178813934,
+          0.08500000089406967
+        ],
+        "roughness": 0.8799999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 811584,
+    "insideNodes": 159212
+  },
+  "hero-boulder-0": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-boulder-0",
+    "source": "hero-boulder-0.glb",
+    "origin": [
+      -0.10625000000000001,
+      -0.015625,
+      -0.09062500000000001
+    ],
+    "dimensions": [
+      72,
+      56,
+      64
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 310,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 0",
+        "baseColorLinear": [
+          0.3799999952316284,
+          0.3100000023841858,
+          0.2199999988079071
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      },
+      {
+        "name": "Honed limestone 1",
+        "baseColorLinear": [
+          0.5199999809265137,
+          0.41999998688697815,
+          0.28999999165534973
+        ],
+        "roughness": 0.5950000286102295,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 169865,
+    "insideNodes": 44478
+  },
+  "hero-boulder-1": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-boulder-1",
+    "source": "hero-boulder-1.glb",
+    "origin": [
+      -0.078125,
+      -0.015625,
+      -0.07187500000000001
+    ],
+    "dimensions": [
+      56,
+      48,
+      48
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 172,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 1",
+        "baseColorLinear": [
+          0.5199999809265137,
+          0.41999998688697815,
+          0.28999999165534973
+        ],
+        "roughness": 0.5950000286102295,
+        "metallic": 0.0
+      },
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 95129,
+    "insideNodes": 20506
+  },
+  "hero-boulder-2": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-boulder-2",
+    "source": "hero-boulder-2.glb",
+    "origin": [
+      -0.059375000000000004,
+      -0.0125,
+      -0.05625
+    ],
+    "dimensions": [
+      40,
+      40,
+      40
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 97,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Honed limestone 3",
+        "baseColorLinear": [
+          0.4000000059604645,
+          0.4300000071525574,
+          0.3799999952316284
+        ],
+        "roughness": 0.6650000214576721,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 54329,
+    "insideNodes": 8385
+  },
+  "hero-boulder-3": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-boulder-3",
+    "source": "hero-boulder-3.glb",
+    "origin": [
+      -0.043750000000000004,
+      -0.0125,
+      -0.040625
+    ],
+    "dimensions": [
+      32,
+      24,
+      32
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 41,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 3",
+        "baseColorLinear": [
+          0.4000000059604645,
+          0.4300000071525574,
+          0.3799999952316284
+        ],
+        "roughness": 0.6650000214576721,
+        "metallic": 0.0
+      },
+      {
+        "name": "Honed limestone 4",
+        "baseColorLinear": [
+          0.5699999928474426,
+          0.47999998927116394,
+          0.36000001430511475
+        ],
+        "roughness": 0.699999988079071,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 23577,
+    "insideNodes": 1749
+  },
+  "hero-stepping-0": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-stepping-0",
+    "source": "hero-stepping-0.glb",
+    "origin": [
+      -0.059375000000000004,
+      -0.0125,
+      -0.059375000000000004
+    ],
+    "dimensions": [
+      40,
+      48,
+      40
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 150,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 82369,
+    "insideNodes": 31327
+  },
+  "hero-stepping-1": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-stepping-1",
+    "source": "hero-stepping-1.glb",
+    "origin": [
+      -0.053125000000000006,
+      -0.0125,
+      -0.053125000000000006
+    ],
+    "dimensions": [
+      40,
+      40,
+      40
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 118,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 65273,
+    "insideNodes": 17610
+  },
+  "hero-stepping-2": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-stepping-2",
+    "source": "hero-stepping-2.glb",
+    "origin": [
+      -0.05,
+      -0.0125,
+      -0.05
+    ],
+    "dimensions": [
+      32,
+      48,
+      32
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 96,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 53361,
+    "insideNodes": 15137
+  },
+  "hero-stepping-3": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-stepping-3",
+    "source": "hero-stepping-3.glb",
+    "origin": [
+      -0.043750000000000004,
+      -0.0125,
+      -0.043750000000000004
+    ],
+    "dimensions": [
+      32,
+      48,
+      32
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 96,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 53361,
+    "insideNodes": 13910
+  },
+  "hero-stepping-4": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-stepping-4",
+    "source": "hero-stepping-4.glb",
+    "origin": [
+      -0.046875,
+      -0.0125,
+      -0.046875
+    ],
+    "dimensions": [
+      32,
+      48,
+      32
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 96,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 53361,
+    "insideNodes": 15107
+  },
+  "hero-pebble-0": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-pebble-0",
+    "source": "hero-pebble-0.glb",
+    "origin": [
+      -0.010937500000000001,
+      -0.00625,
+      -0.009375000000000001
+    ],
+    "dimensions": [
+      16,
+      16,
+      16
+    ],
+    "cellSize": 0.0015625,
+    "bandWidth": 0.004687500000000001,
+    "brickCount": 8,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 0",
+        "baseColorLinear": [
+          0.3799999952316284,
+          0.3100000023841858,
+          0.2199999988079071
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 4913,
+    "insideNodes": 113
+  },
+  "hero-pebble-1": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-pebble-1",
+    "source": "hero-pebble-1.glb",
+    "origin": [
+      -0.015625,
+      -0.00625,
+      -0.0125
+    ],
+    "dimensions": [
+      24,
+      16,
+      16
+    ],
+    "cellSize": 0.0015625,
+    "bandWidth": 0.004687500000000001,
+    "brickCount": 12,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 1",
+        "baseColorLinear": [
+          0.5199999809265137,
+          0.41999998688697815,
+          0.28999999165534973
+        ],
+        "roughness": 0.5950000286102295,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 7225,
+    "insideNodes": 484
+  },
+  "hero-pebble-2": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-pebble-2",
+    "source": "hero-pebble-2.glb",
+    "origin": [
+      -0.028125,
+      -0.0125,
+      -0.025
+    ],
+    "dimensions": [
+      24,
+      16,
+      16
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 12,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 2",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.550000011920929,
+          0.4000000059604645
+        ],
+        "roughness": 0.6299999952316284,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 7225,
+    "insideNodes": 362
+  },
+  "hero-pebble-3": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-pebble-3",
+    "source": "hero-pebble-3.glb",
+    "origin": [
+      -0.040625,
+      -0.0125,
+      -0.034375
+    ],
+    "dimensions": [
+      32,
+      24,
+      24
+    ],
+    "cellSize": 0.003125,
+    "bandWidth": 0.009375000000000001,
+    "brickCount": 33,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Honed limestone 3",
+        "baseColorLinear": [
+          0.4000000059604645,
+          0.4300000071525574,
+          0.3799999952316284
+        ],
+        "roughness": 0.6650000214576721,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 19025,
+    "insideNodes": 1637
+  },
+  "hero-oak": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-oak",
+    "source": "hero-oak.glb",
+    "origin": [
+      -0.61,
+      -0.0325,
+      -0.525
+    ],
+    "dimensions": [
+      504,
+      376,
+      400
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 30388,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Garden leaf 0",
+        "baseColorLinear": [
+          0.04500000178813934,
+          0.1599999964237213,
+          0.02500000037252903
+        ],
+        "roughness": 0.3799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 3",
+        "baseColorLinear": [
+          0.06499999761581421,
+          0.2199999988079071,
+          0.09000000357627869
+        ],
+        "roughness": 0.5149999856948853,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 4",
+        "baseColorLinear": [
+          0.25,
+          0.38999998569488525,
+          0.08500000089406967
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 1",
+        "baseColorLinear": [
+          0.08500000089406967,
+          0.25999999046325684,
+          0.03500000014901161
+        ],
+        "roughness": 0.42500001192092896,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 2",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3400000035762787,
+          0.054999999701976776
+        ],
+        "roughness": 0.4699999988079071,
+        "metallic": 0.0
+      },
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 16259453,
+    "insideNodes": 546223
+  },
+  "hero-birch": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-birch",
+    "source": "hero-birch.glb",
+    "origin": [
+      -0.14,
+      -0.01,
+      -0.12
+    ],
+    "dimensions": [
+      112,
+      96,
+      104
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 731,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 0",
+        "baseColorLinear": [
+          0.04500000178813934,
+          0.1599999964237213,
+          0.02500000037252903
+        ],
+        "roughness": 0.3799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 1",
+        "baseColorLinear": [
+          0.08500000089406967,
+          0.25999999046325684,
+          0.03500000014901161
+        ],
+        "roughness": 0.42500001192092896,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 2",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3400000035762787,
+          0.054999999701976776
+        ],
+        "roughness": 0.4699999988079071,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 3",
+        "baseColorLinear": [
+          0.06499999761581421,
+          0.2199999988079071,
+          0.09000000357627869
+        ],
+        "roughness": 0.5149999856948853,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 4",
+        "baseColorLinear": [
+          0.25,
+          0.38999998569488525,
+          0.08500000089406967
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 399577,
+    "insideNodes": 31453
+  },
+  "hero-pine": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-pine",
+    "source": "hero-pine.glb",
+    "origin": [
+      -0.1075,
+      -0.01,
+      -0.11750000000000001
+    ],
+    "dimensions": [
+      96,
+      120,
+      88
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 743,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 0",
+        "baseColorLinear": [
+          0.04500000178813934,
+          0.1599999964237213,
+          0.02500000037252903
+        ],
+        "roughness": 0.3799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 1",
+        "baseColorLinear": [
+          0.08500000089406967,
+          0.25999999046325684,
+          0.03500000014901161
+        ],
+        "roughness": 0.42500001192092896,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 2",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3400000035762787,
+          0.054999999701976776
+        ],
+        "roughness": 0.4699999988079071,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 3",
+        "baseColorLinear": [
+          0.06499999761581421,
+          0.2199999988079071,
+          0.09000000357627869
+        ],
+        "roughness": 0.5149999856948853,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 4",
+        "baseColorLinear": [
+          0.25,
+          0.38999998569488525,
+          0.08500000089406967
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 404217,
+    "insideNodes": 12513
+  },
+  "hero-willow": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-willow",
+    "source": "hero-willow.glb",
+    "origin": [
+      -0.1125,
+      -0.01,
+      -0.1125
+    ],
+    "dimensions": [
+      96,
+      72,
+      96
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 528,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 0",
+        "baseColorLinear": [
+          0.04500000178813934,
+          0.1599999964237213,
+          0.02500000037252903
+        ],
+        "roughness": 0.3799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 1",
+        "baseColorLinear": [
+          0.08500000089406967,
+          0.25999999046325684,
+          0.03500000014901161
+        ],
+        "roughness": 0.42500001192092896,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 2",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3400000035762787,
+          0.054999999701976776
+        ],
+        "roughness": 0.4699999988079071,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 3",
+        "baseColorLinear": [
+          0.06499999761581421,
+          0.2199999988079071,
+          0.09000000357627869
+        ],
+        "roughness": 0.5149999856948853,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 4",
+        "baseColorLinear": [
+          0.25,
+          0.38999998569488525,
+          0.08500000089406967
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 289616,
+    "insideNodes": 10201
+  },
+  "hero-azalea": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-azalea",
+    "source": "hero-azalea.glb",
+    "origin": [
+      -0.1375,
+      -0.01,
+      -0.14250000000000002
+    ],
+    "dimensions": [
+      112,
+      72,
+      112
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 643,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 0",
+        "baseColorLinear": [
+          0.04500000178813934,
+          0.1599999964237213,
+          0.02500000037252903
+        ],
+        "roughness": 0.3799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 1",
+        "baseColorLinear": [
+          0.08500000089406967,
+          0.25999999046325684,
+          0.03500000014901161
+        ],
+        "roughness": 0.42500001192092896,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 2",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3400000035762787,
+          0.054999999701976776
+        ],
+        "roughness": 0.4699999988079071,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 3",
+        "baseColorLinear": [
+          0.06499999761581421,
+          0.2199999988079071,
+          0.09000000357627869
+        ],
+        "roughness": 0.5149999856948853,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 4",
+        "baseColorLinear": [
+          0.25,
+          0.38999998569488525,
+          0.08500000089406967
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 353473,
+    "insideNodes": 23727
+  },
+  "hero-juniper": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-juniper",
+    "source": "hero-juniper.glb",
+    "origin": [
+      -0.1325,
+      -0.01,
+      -0.1275
+    ],
+    "dimensions": [
+      104,
+      72,
+      104
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 546,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 0",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3100000023841858,
+          0.23999999463558197
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 1",
+        "baseColorLinear": [
+          0.23999999463558197,
+          0.4000000059604645,
+          0.3100000023841858
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 2",
+        "baseColorLinear": [
+          0.28999999165534973,
+          0.4300000071525574,
+          0.33000001311302185
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 3",
+        "baseColorLinear": [
+          0.18000000715255737,
+          0.3400000035762787,
+          0.2800000011920929
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 4",
+        "baseColorLinear": [
+          0.36000001430511475,
+          0.49000000953674316,
+          0.3499999940395355
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 301329,
+    "insideNodes": 9467
+  },
+  "hero-boxwood": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-boxwood",
+    "source": "hero-boxwood.glb",
+    "origin": [
+      -0.16,
+      -0.01,
+      -0.15
+    ],
+    "dimensions": [
+      128,
+      80,
+      128
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 773,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 0",
+        "baseColorLinear": [
+          0.04500000178813934,
+          0.1599999964237213,
+          0.02500000037252903
+        ],
+        "roughness": 0.3799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 1",
+        "baseColorLinear": [
+          0.08500000089406967,
+          0.25999999046325684,
+          0.03500000014901161
+        ],
+        "roughness": 0.42500001192092896,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 2",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3400000035762787,
+          0.054999999701976776
+        ],
+        "roughness": 0.4699999988079071,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 3",
+        "baseColorLinear": [
+          0.06499999761581421,
+          0.2199999988079071,
+          0.09000000357627869
+        ],
+        "roughness": 0.5149999856948853,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 4",
+        "baseColorLinear": [
+          0.25,
+          0.38999998569488525,
+          0.08500000089406967
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 424241,
+    "insideNodes": 29639
+  },
+  "hero-hebe": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-hebe",
+    "source": "hero-hebe.glb",
+    "origin": [
+      -0.1375,
+      -0.01,
+      -0.1225
+    ],
+    "dimensions": [
+      112,
+      72,
+      104
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 625,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Warm brown textured bark",
+        "baseColorLinear": [
+          0.1899999976158142,
+          0.0820000022649765,
+          0.03200000151991844
+        ],
+        "roughness": 0.7799999713897705,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 0",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3100000023841858,
+          0.23999999463558197
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 1",
+        "baseColorLinear": [
+          0.23999999463558197,
+          0.4000000059604645,
+          0.3100000023841858
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 2",
+        "baseColorLinear": [
+          0.28999999165534973,
+          0.4300000071525574,
+          0.33000001311302185
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 3",
+        "baseColorLinear": [
+          0.18000000715255737,
+          0.3400000035762787,
+          0.2800000011920929
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 4",
+        "baseColorLinear": [
+          0.36000001430511475,
+          0.49000000953674316,
+          0.3499999940395355
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 343497,
+    "insideNodes": 23575
+  },
+  "hero-grass": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-grass",
+    "source": "hero-grass.glb",
+    "origin": [
+      -0.045312500000000006,
+      -0.00625,
+      -0.035937500000000004
+    ],
+    "dimensions": [
+      56,
+      48,
+      56
+    ],
+    "cellSize": 0.0015625,
+    "bandWidth": 0.004687500000000001,
+    "brickCount": 161,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Garden leaf 0",
+        "baseColorLinear": [
+          0.04500000178813934,
+          0.1599999964237213,
+          0.02500000037252903
+        ],
+        "roughness": 0.3799999952316284,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 1",
+        "baseColorLinear": [
+          0.08500000089406967,
+          0.25999999046325684,
+          0.03500000014901161
+        ],
+        "roughness": 0.42500001192092896,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 2",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3400000035762787,
+          0.054999999701976776
+        ],
+        "roughness": 0.4699999988079071,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 3",
+        "baseColorLinear": [
+          0.06499999761581421,
+          0.2199999988079071,
+          0.09000000357627869
+        ],
+        "roughness": 0.5149999856948853,
+        "metallic": 0.0
+      },
+      {
+        "name": "Garden leaf 4",
+        "baseColorLinear": [
+          0.25,
+          0.38999998569488525,
+          0.08500000089406967
+        ],
+        "roughness": 0.5600000023841858,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 90001,
+    "insideNodes": 3362
+  },
+  "hero-rosette": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-rosette",
+    "source": "hero-rosette.glb",
+    "origin": [
+      -0.040625,
+      -0.0078125,
+      -0.045312500000000006
+    ],
+    "dimensions": [
+      56,
+      40,
+      56
+    ],
+    "cellSize": 0.0015625,
+    "bandWidth": 0.004687500000000001,
+    "brickCount": 137,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Silver sage leaf 0",
+        "baseColorLinear": [
+          0.1599999964237213,
+          0.3100000023841858,
+          0.23999999463558197
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 1",
+        "baseColorLinear": [
+          0.23999999463558197,
+          0.4000000059604645,
+          0.3100000023841858
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 2",
+        "baseColorLinear": [
+          0.28999999165534973,
+          0.4300000071525574,
+          0.33000001311302185
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 3",
+        "baseColorLinear": [
+          0.18000000715255737,
+          0.3400000035762787,
+          0.2800000011920929
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      },
+      {
+        "name": "Silver sage leaf 4",
+        "baseColorLinear": [
+          0.36000001430511475,
+          0.49000000953674316,
+          0.3499999940395355
+        ],
+        "roughness": 0.47999998927116394,
+        "metallic": 0.0
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 77009,
+    "insideNodes": 5645
+  },
+  "hero-hose-and-nozzle": {
+    "version": 1,
+    "units": "metres",
+    "upAxis": "Y",
+    "asset": "hero-hose-and-nozzle",
+    "source": "hero-hose-and-nozzle.glb",
+    "origin": [
+      0.2475,
+      0.2925,
+      0.18
+    ],
+    "dimensions": [
+      336,
+      56,
+      176
+    ],
+    "cellSize": 0.0025,
+    "bandWidth": 0.0075,
+    "brickCount": 484,
+    "brickCells": 8,
+    "nodeStrideBytes": 16,
+    "materials": [
+      {
+        "name": "Forest green braided garden hose",
+        "baseColorLinear": [
+          0.012000000104308128,
+          0.07500000298023224,
+          0.03500000014901161
+        ],
+        "roughness": 0.6700000166893005,
+        "metallic": 0.0
+      },
+      {
+        "name": "Warm satin brass nozzle",
+        "baseColorLinear": [
+          0.6399999856948853,
+          0.3799999952316284,
+          0.11500000208616257
+        ],
+        "roughness": 0.2800000011920929,
+        "metallic": 0.8500000238418579
+      }
+    ],
+    "sign": "negative-inside",
+    "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+    "uniqueNodes": 273817,
+    "insideNodes": 26425
+  }
+}

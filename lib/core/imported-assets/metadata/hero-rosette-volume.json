@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-rosette",
+  "source": "hero-rosette.glb",
+  "origin": [
+    -0.040625,
+    -0.0078125,
+    -0.045312500000000006
+  ],
+  "dimensions": [
+    56,
+    40,
+    56
+  ],
+  "cellSize": 0.0015625,
+  "bandWidth": 0.004687500000000001,
+  "brickCount": 137,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Silver sage leaf 0",
+      "baseColorLinear": [
+        0.1599999964237213,
+        0.3100000023841858,
+        0.23999999463558197
+      ],
+      "roughness": 0.47999998927116394,
+      "metallic": 0.0
+    },
+    {
+      "name": "Silver sage leaf 1",
+      "baseColorLinear": [
+        0.23999999463558197,
+        0.4000000059604645,
+        0.3100000023841858
+      ],
+      "roughness": 0.47999998927116394,
+      "metallic": 0.0
+    },
+    {
+      "name": "Silver sage leaf 2",
+      "baseColorLinear": [
+        0.28999999165534973,
+        0.4300000071525574,
+        0.33000001311302185
+      ],
+      "roughness": 0.47999998927116394,
+      "metallic": 0.0
+    },
+    {
+      "name": "Silver sage leaf 3",
+      "baseColorLinear": [
+        0.18000000715255737,
+        0.3400000035762787,
+        0.2800000011920929
+      ],
+      "roughness": 0.47999998927116394,
+      "metallic": 0.0
+    },
+    {
+      "name": "Silver sage leaf 4",
+      "baseColorLinear": [
+        0.36000001430511475,
+        0.49000000953674316,
+        0.3499999940395355
+      ],
+      "roughness": 0.47999998927116394,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 77009,
+  "insideNodes": 5645
+}

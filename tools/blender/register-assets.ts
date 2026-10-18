@@ -1,9 +1,13 @@
 /** Node harness preload; browser/render workers load the same files via fetch. */
 import { readFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
-import { MESH_ASSETS, registerMeshAsset } from "../../lib/core/imported-assets/asset-library";
+import { meshAssetUrl, registerMeshAsset, sceneMeshAssetIds } from "../../lib/core/imported-assets/asset-library";
 import { decodeMeshVolume } from "../../lib/core/imported-assets/mesh-volume";
-await Promise.all(Object.keys(MESH_ASSETS).map(async id => {
-  const file = await readFile(new URL(`../../public/assets/pool-party/${id}.fvx.gz`, import.meta.url));
-  registerMeshAsset(id, decodeMeshVolume(gunzipSync(file)));
-}));
+import type { SceneDescription } from "../../lib/core/model";
+/** Load only this scene's assets, so unrelated collections cost no memory. */
+export async function registerSceneMeshAssets(scene: SceneDescription): Promise<void> {
+  await Promise.all(sceneMeshAssetIds(scene).map(async id => {
+    const file = await readFile(new URL(`../../public${meshAssetUrl(id)}`, import.meta.url));
+    registerMeshAsset(id, decodeMeshVolume(gunzipSync(file)));
+  }));
+}

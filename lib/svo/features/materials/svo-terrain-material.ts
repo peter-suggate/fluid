@@ -129,7 +129,7 @@ export function sceneSvoGroundPlane(
   // The open-air garden is the one set whose ground is meant to run to the
   // horizon. A sculpted slab elsewhere (the hillside dam) has an uneven edge
   // that a single level plane would half-bury.
-  if (scene.environment !== "garden") return undefined;
+  if (scene.environment !== "garden" || scene.scenery?.terrainSurface === "scenery") return undefined;
   const terrain = scene.terrain;
   if (!terrain) return undefined;
   let shell = false;

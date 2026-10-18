@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-pebble-3",
+  "source": "hero-pebble-3.glb",
+  "origin": [
+    -0.040625,
+    -0.0125,
+    -0.034375
+  ],
+  "dimensions": [
+    32,
+    24,
+    24
+  ],
+  "cellSize": 0.003125,
+  "bandWidth": 0.009375000000000001,
+  "brickCount": 33,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Honed limestone 3",
+      "baseColorLinear": [
+        0.4000000059604645,
+        0.4300000071525574,
+        0.3799999952316284
+      ],
+      "roughness": 0.6650000214576721,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 19025,
+  "insideNodes": 1637
+}

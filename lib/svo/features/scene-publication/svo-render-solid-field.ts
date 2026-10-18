@@ -27,11 +27,11 @@ export interface SvoRenderTerrainField {
 const terrainFields = createContentMemo<SvoRenderTerrainField>(2);
 
 export function* buildSvoRenderTerrainFieldSteps(
-  scene: Pick<SceneDescription, "container" | "terrain" | "voxelDomain" | "solidVoxels">,
+  scene: Pick<SceneDescription, "container" | "terrain" | "voxelDomain" | "solidVoxels" | "scenery">,
   cellSize_m: readonly [number, number, number],
   materialId: number,
 ): Generator<unknown, SvoRenderTerrainField | undefined, undefined> {
-  if (!scene.terrain) return undefined;
+  if (!scene.terrain || scene.scenery?.terrainSurface === "scenery") return undefined;
   const terrainContainer = terrainWorldContainer(scene);
   const nx = Math.max(1, Math.round(terrainContainer.width_m / cellSize_m[0]));
   const nz = Math.max(1, Math.round(terrainContainer.depth_m / cellSize_m[2]));

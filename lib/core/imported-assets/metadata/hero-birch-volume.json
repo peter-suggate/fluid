@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-birch",
+  "source": "hero-birch.glb",
+  "origin": [
+    -0.14,
+    -0.01,
+    -0.12
+  ],
+  "dimensions": [
+    112,
+    96,
+    104
+  ],
+  "cellSize": 0.0025,
+  "bandWidth": 0.0075,
+  "brickCount": 731,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Warm brown textured bark",
+      "baseColorLinear": [
+        0.1899999976158142,
+        0.0820000022649765,
+        0.03200000151991844
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 0",
+      "baseColorLinear": [
+        0.04500000178813934,
+        0.1599999964237213,
+        0.02500000037252903
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 1",
+      "baseColorLinear": [
+        0.08500000089406967,
+        0.25999999046325684,
+        0.03500000014901161
+      ],
+      "roughness": 0.42500001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 2",
+      "baseColorLinear": [
+        0.1599999964237213,
+        0.3400000035762787,
+        0.054999999701976776
+      ],
+      "roughness": 0.4699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 3",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.2199999988079071,
+        0.09000000357627869
+      ],
+      "roughness": 0.5149999856948853,
+      "metallic": 0.0
+    },
+    {
+      "name": "Garden leaf 4",
+      "baseColorLinear": [
+        0.25,
+        0.38999998569488525,
+        0.08500000089406967
+      ],
+      "roughness": 0.5600000023841858,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 399577,
+  "insideNodes": 31453
+}

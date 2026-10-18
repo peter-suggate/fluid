@@ -1687,7 +1687,11 @@ export class OctreeSparseBrickWorld {
     this.solidWorld = initialSolidWorld;
     this.solidWorldStamp = solidWorldContentStamp(scene);
     this.terrainFieldStamp = terrainFieldStamp(scene);
-    const solidWorldBounds = solidWorldPageBounds(scene, initialSolidWorld);
+    // A scenery-owned surface must not acquire render occupancy or refinement
+    // from the hidden collision heightfield. Physics retains initialSolidWorld.
+    const visibleSolidWorld = scene.scenery?.terrainSurface === "scenery"
+      ? svoRenderResidual(scene, initialSolidWorld).residual : initialSolidWorld;
+    const solidWorldBounds = solidWorldPageBounds(scene, visibleSolidWorld);
     /**
      * The backdrop ground (`scene.backdrop`): render-only terrain beyond the
      * set's footprint, out to the haze horizon. It is not octree content: the
@@ -1956,7 +1960,7 @@ export class OctreeSparseBrickWorld {
      */
     const wetCoarsening = !dryWorld && refinementDepth === 0;
     const coarseningRegions = wetCoarsening ? [
-      ...solidWorldTerrainSurfaceCoarseningRegions(scene, initialSolidWorld),
+      ...solidWorldTerrainSurfaceCoarseningRegions(scene, visibleSolidWorld),
       ...solidWorldVoxelPatchCoarseningRegions(scene, residualSolidWorld.patches),
     ] : [];
     const environmentCoarsening = wetCoarsening
@@ -2045,7 +2049,7 @@ export class OctreeSparseBrickWorld {
     const gpuNodeClassification = (options.surfaceDualContouring !== true && options.surfaceDualMarchingCubes !== true) && (refinementDepth > 0 || !dryWorld) && !surfaceRefinement
       ? options.classifyEnvironmentNodesGpu : undefined;
     const buried = options.surfaceDualMarchingCubes && (dryWorld || rendererOnly)
-      ? buriedSolidClassifier(initialSolidWorld, editPageLattice.origin_m, editPageLattice.cellSize_m,
+      ? buriedSolidClassifier(visibleSolidWorld, editPageLattice.origin_m, editPageLattice.cellSize_m,
         worldOrigin, nodeEdge_m, brickSize, [
           ...environmentPrimitives.map(p=>({minimum:[p.aabb_m.min.x,p.aabb_m.min.y,p.aabb_m.min.z] as const,maximum:[p.aabb_m.max.x,p.aabb_m.max.y,p.aabb_m.max.z] as const,
             axisAlignedBox:p.kind==="box"&&(!p.orientation||(Math.abs(p.orientation.x)+Math.abs(p.orientation.y)+Math.abs(p.orientation.z)<1e-8)),

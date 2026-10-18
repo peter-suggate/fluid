@@ -695,6 +695,9 @@ export type SceneryNode =
  * shell node is expected, and it may sit anywhere in the list.
  */
 export interface SceneryGraph {
+  /** Authored scenery supplies the visible ground. Keep the heightfield for
+   * physics, but omit its duplicate render surface and analytic horizon plane. */
+  readonly terrainSurface?: "scenery";
   readonly palettes: Readonly<Record<string, SceneryPalette>>;
   /**
    * Named plan vessels, referenced the way a material references a palette.
@@ -744,6 +747,8 @@ export function sceneryNodeGroup(node: SceneryNode, path: readonly string[]): st
 
 export function validateSceneryGraph(graph: SceneryGraph): string[] {
   const errors: string[] = [];
+  if (graph.terrainSurface !== undefined && graph.terrainSurface !== "scenery")
+    errors.push("Scenery terrainSurface must be scenery when replacing the terrain surface");
   const ids = new Set<string>();
   let shells = 0;
   for (const { node } of walkSceneryNodes(graph.nodes)) {

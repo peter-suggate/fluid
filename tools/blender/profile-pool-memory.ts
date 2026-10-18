@@ -1,9 +1,10 @@
 /** Record actual device buffer requests, including failures, at a visual rung. */
-import "./register-assets";
+import { registerSceneMeshAssets } from "./register-assets";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { getScenePreset } from "../../lib/core/scenes";
 import { WebGPULiveSvoScene } from "../../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import { createDawnRenderDevice } from "../svo-dry-frame-harness";
+await registerSceneMeshAssets(getScenePreset("backyard-pool-party").create());
 const { device, validationErrors } = await createDawnRenderDevice();
 const buffers: {label:string; bytes:number}[]=[];
 const directory="artifacts/pool-party-memory";mkdirSync(directory,{recursive:true});

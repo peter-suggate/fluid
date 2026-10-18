@@ -203,6 +203,7 @@ export function svoRenderScenePublication(
   const solidStamp = solidWorldContentStamp(scene);
   const held = previous?.data;
   const flatVoxelNormals = sceneUsesFlatVoxelNormals(scene);
+  const rasterAoContrast = scene.lighting?.rasterAoContrast;
   const geometryMoved = !previous || !held || previous.worldRevision !== worldRevision || previous.solidStamp !== solidStamp
     || primitives.packedRecords !== held.primitiveRecords || candidates !== held.primitiveCandidates
     || primitives.clusterBlocks !== held.clusterBlocks || primitives.fieldProgramBlocks !== held.fieldProgramBlocks
@@ -212,6 +213,7 @@ export function svoRenderScenePublication(
   // plane it had.
   const ground = held && previous.scene.terrain === scene.terrain && previous.scene.container === scene.container
     && previous.scene.backdrop === scene.backdrop && previous.scene.environment === scene.environment
+    && previous.scene.scenery?.terrainSurface === scene.scenery?.terrainSurface
     && primitives.descriptors === previous.primitives.descriptors
     ? held.groundPlane : sceneSvoGroundPlane(scene);
   const groundPlane = held && sameGroundPlane(ground, held.groundPlane) ? held.groundPlane : ground;
@@ -222,6 +224,7 @@ export function svoRenderScenePublication(
     : publishOpaqueSurfaceCapability(scene, materialRecords, primitives.packedRecords);
   const change: SvoRenderSceneChange = geometryMoved ? "geometry"
     : materialRecords === held.materialRecords && lighting === previous.lighting && groundPlane === held.groundPlane
+      && rasterAoContrast === held.rasterAoContrast
       && opaqueSurfaceOnly === held.opaqueSurfaceOnly && primitives.openShellOwnerId === held.skippedOwnerId ? "none" : "appearance";
   return {
     scene, worldRevision, catalog, primitives, terrainSurface, lighting, solidStamp, change,
@@ -244,6 +247,7 @@ export function svoRenderScenePublication(
       // resolved" and draws as nothing — the aggregate's failure one level up.
       fieldProgramBlocks: primitives.fieldProgramBlocks,
       ...lighting,
+      rasterAoContrast,
       flatVoxelNormals,
       groundPlane,
     },

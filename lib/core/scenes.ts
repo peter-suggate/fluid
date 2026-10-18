@@ -47,6 +47,7 @@ import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWav
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
+import { HERO_GARDEN_BLENDER_ID, createHeroGardenBlenderScene, heroGardenBlenderCamera } from "./hero-garden-blender-scene";
 import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
@@ -1697,6 +1698,19 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       pondTank: true,
     }),
     camera: heroGardenCamera,
+  }),
+  defineScene({
+    id: HERO_GARDEN_BLENDER_ID,
+    name: "Porcelain pond · Blender garden",
+    blurb: "A colorful Blender garden: green and silver sage planting, warm limestone, a porcelain pond and a brass hose nozzle around finely resolved living water.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    build: createHeroGardenBlenderScene,
+    buildAt: createHeroGardenBlenderScene,
+    camera: heroGardenBlenderCamera,
   }),
   defineScene({
     id: "garden-pond",

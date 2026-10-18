@@ -86,9 +86,10 @@ export function svoPlanarResidualSolidWorld(
     ? world.patches.filter((_, patchIndex) => !excluded.has(patchIndex))
     : world.patches;
   const cutaway = scene ? vesselCutawayPatches(scene, drawn) : [];
-  if (drawn === world.patches && cutaway.length === 0) return world;
+  const drawTerrain = scene?.scenery?.terrainSurface !== "scenery";
+  if (drawn === world.patches && cutaway.length === 0 && drawTerrain) return world;
   const patches = cutaway.length === 0 ? drawn : [...drawn, ...cutaway];
-  return scene?.terrain
+  return scene?.terrain && drawTerrain
     ? terrainSolidWorldWithPatches(scene, patches)
     : createSolidWorld(patches);
 }
@@ -112,7 +113,7 @@ export interface SvoRenderResidual {
 
 /** Everything but the patches that the drawn image is composed from. */
 const residualGroundKey = (scene: SceneDescription): string =>
-  `${terrainContentStamp(scene.terrain)}:${scene.container.width_m}:${scene.container.height_m}:`
+  `${scene.scenery?.terrainSurface ?? "terrain"}:${terrainContentStamp(scene.terrain)}:${scene.container.width_m}:${scene.container.height_m}:`
   + `${scene.container.depth_m}:${sceneLatticeDimensions(scene).join(":")}:`
   + `${scene.container.shape ?? "box"}:${scene.container.top ?? "open"}`;
 
@@ -156,14 +157,15 @@ export function svoRenderResidual(
   const excluded = canonicalShellPatches(shell).hidden;
   const firstAppended = world.patches.length - (appended?.length ?? 0);
   let drawn: SolidWorld;
-  if (excluded.size === 0) {
+  const drawTerrain = scene.scenery?.terrainSurface !== "scenery";
+  if (excluded.size === 0 && drawTerrain) {
     drawn = world;
   } else if (appended && sameHiddenBefore(previous!.excluded, excluded, firstAppended)) {
     drawn = withSolidWorldPatches(previous!.drawn,
       appended.filter((_, index) => !excluded.has(firstAppended + index)));
   } else {
     const patches = world.patches.filter((_, patchIndex) => !excluded.has(patchIndex));
-    drawn = scene.terrain ? terrainSolidWorldWithPatches(scene, patches) : createSolidWorld(patches);
+    drawn = scene.terrain && drawTerrain ? terrainSolidWorldWithPatches(scene, patches) : createSolidWorld(patches);
   }
   const cutaway = vesselCutawayPatches(scene, drawn.patches);
   const residual: SvoRenderResidual = { world, residual: withSolidWorldPatches(drawn, cutaway),

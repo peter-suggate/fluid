@@ -5627,6 +5627,7 @@ export class SparseVoxelDrySceneRenderer {
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
     const structural = source.structural!;
     this.rasterAo?.setCoarseAoStrength(this.renderTuning.rasterCoarseAoStrength);
+    this.rasterAo?.setAoContrast(scene.rasterAoContrast ?? 1);
     this.rasterAo?.update(structural.domain.worldOrigin_m,
       structural.domain.dimensionsCells.map((cells, axis) => cells * structural.domain.cellSize_m[axis]),
       structural.domain.cellSize_m,

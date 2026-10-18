@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-ground-tile",
+  "source": "hero-ground-tile.glb",
+  "origin": [
+    -0.9500000000000001,
+    -0.07500000000000001,
+    -0.6375000000000001
+  ],
+  "dimensions": [
+    152,
+    8,
+    104
+  ],
+  "cellSize": 0.0125,
+  "bandWidth": 0.0125,
+  "brickCount": 247,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Warm earth garden soil",
+      "baseColorLinear": [
+        0.2800000011920929,
+        0.17000000178813934,
+        0.08500000089406967
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 144585,
+  "insideNodes": 58004,
+  "horizontalSlab": {
+    "minimum": [
+      -0.8,
+      -0.05,
+      -0.5
+    ],
+    "maximum": [
+      0.8,
+      0,
+      0.5
+    ]
+  }
+}

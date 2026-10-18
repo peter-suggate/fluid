@@ -50,6 +50,8 @@ export interface SparseVoxelDrySceneData {
   environmentLightingCacheKey?: string;
   /** Scene capability gate for bounded indirect-diffuse contact visibility. */
   contactVisibilityEnabled?: boolean;
+  /** Contrast of existing raster AO visibility; omission preserves the default. */
+  rasterAoContrast?: number;
   /** Scene capability gate for shadow visibility; omission keeps shadows available. */
   shadowVisibilityEnabled?: boolean;
   /** Use the entered voxel face instead of sub-voxel tangent-surface reconstruction. */

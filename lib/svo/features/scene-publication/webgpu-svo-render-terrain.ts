@@ -12,6 +12,7 @@ function hashSigned(n:number){let h=Math.imul(n^0x9e3779b9,0x85ebca6b)>>>0;h=Mat
  * sample, including the procedural lattice's bilinear reconstruction, is GPU
  * work. The returned f32 field is also the CPU refinement oracle's input. */
 export function svoPondTerrainProgram(scene: SceneDescription,cellSize:readonly [number,number,number]) {
+  if(scene.scenery?.terrainSurface==="scenery")return undefined;
   const procedural=scene.terrain?.procedural;
   if(scene.terrain?.grid||procedural?.kind!=="pond-vessel")return undefined;
   const {spec,container,spacing_m}=procedural;

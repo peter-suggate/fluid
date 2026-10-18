@@ -292,6 +292,7 @@ export function buildSvoDrySceneAssembly(
     // every `field-program` record would name a zeroed block and draw nothing.
     fieldProgramBlocks: scenePrimitives.fieldProgramBlocks,
     ...lightingMirrors,
+    rasterAoContrast: scene.lighting?.rasterAoContrast,
     // Presentation policy is scene data too. Omitting this made every headless
     // fidelity frame silently exercise the default baked analytic normals even
     // when the product document requested voxel-flat surfaces.

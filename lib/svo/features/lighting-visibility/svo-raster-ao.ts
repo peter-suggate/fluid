@@ -186,7 +186,10 @@ fn rasterVisibilityAt(position:vec3f,normal:vec3f)->vec2f{
 }
 fn rasterContactVisibility()->vec3f{
   if((dry.materialPublication.w&1u)==0u){return vec3f(1);}
-  return vec3f(mix(1.0,rasterResolvedVisibility.x,dry.tuningRays0.w));
+  // Contrast the existing horizon/coarse result, without adding visibility
+  // work. Open sky stays at one, and the AO strength switch still wins.
+  let visibility=pow(clamp(rasterResolvedVisibility.x,0.0,1.0),max(1.0,rasterLighting.depthCell.z));
+  return vec3f(mix(1.0,visibility,dry.tuningRays0.w));
 }
 `;
 
@@ -480,6 +483,7 @@ export class SvoRasterAo {
   private generation = 0;
   private renderedSettledKey?: string;
   private coarseAoStrength = 0;
+  private aoContrast = 1;
   private shadowLayerCount = 2;
 
   constructor(private readonly device: GPUDevice) {
@@ -548,7 +552,7 @@ export class SvoRasterAo {
     for(let layer=0;layer<this.shadowLayerCount;layer++){
       const buffer=new ArrayBuffer(256),f=new Float32Array(buffer),u=new Uint32Array(buffer);
       u.set([this.generation,layer,spots.length,0]);f.set(origin.map((v,i)=>v+extent[i]*.5),4);f[7]=radius*1.02;
-      f[8]=radius*4;f[9]=Math.max(...cellSize);f.set(direction,12);f[15]=this.coarseAoStrength;
+      f[8]=radius*4;f[9]=Math.max(...cellSize);f[10]=this.aoContrast;f.set(direction,12);f[15]=this.coarseAoStrength;
       for(let slot=0;slot<spots.length;slot++){
         const spot=spots[slot]!,offset=16+slot*12;
         f.set([...spot.position,spot.near,...spot.direction,spot.tanHalfAngle,spot.far,spot.radius,spot.index,0],offset);
@@ -560,6 +564,11 @@ export class SvoRasterAo {
     if(strength===this.coarseAoStrength)return;
     this.coarseAoStrength=strength;
     for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*256+60,new Float32Array([strength]));
+  }
+  setAoContrast(contrast:number):void{
+    if(contrast===this.aoContrast)return;
+    this.aoContrast=contrast;
+    for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*256+40,new Float32Array([contrast]));
   }
   ensureSize(width:number,height:number):void{
     width=Math.ceil(width/2);height=Math.ceil(height/2);

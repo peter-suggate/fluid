@@ -12,6 +12,7 @@ import coping from "./metadata/limestone-coping-volume.json";
 import copingCorner from "./metadata/limestone-coping-corner-volume.json";
 import waterline from "./metadata/ceramic-waterline-volume.json";
 import servingTable from "./metadata/teak-serving-table-volume.json";
+import heroGarden from "./metadata/hero-garden-volumes.json";
 import { sampleMeshVolume, sampleMeshVolumeDistance, type MeshVolumeDistanceField, type MeshVolume, type MeshVolumeHeader } from "./mesh-volume";
 import { fetchMeshVolume } from "./mesh-volume-loader";
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
@@ -20,6 +21,7 @@ import { walkSceneryNodes } from "../scenery-graph";
 /** Documents contain small references; compressed sample data is loaded once
  * per render worker, shared by every instance, and never enters the solver. */
 export const MESH_ASSETS: Readonly<Record<string, MeshVolumeHeader>> = {
+  ...heroGarden as unknown as Record<string, MeshVolumeHeader>,
   "teak-lounger": lounger as unknown as MeshVolumeHeader,
   "garden-parasol": parasol as unknown as MeshVolumeHeader,
   "insulated-cooler": cooler as unknown as MeshVolumeHeader,
@@ -45,6 +47,12 @@ export function meshAssetHeader(id: string): MeshVolumeHeader {
   const header = MESH_ASSETS[id];
   if (!header) throw new Error(`Unknown mesh asset: ${id}`);
   return header;
+}
+/** The same asset URL is used by browser workers and Node preview harnesses. */
+export function meshAssetUrl(id: string): string {
+  meshAssetHeader(id);
+  const collection = Object.hasOwn(heroGarden, id) ? "hero-garden-blender" : "pool-party";
+  return `/assets/${collection}/${id}.fvx.gz`;
 }
 function validateAssetHeader(id: string, volume: MeshVolumeDistanceField): void {
   const expected = meshAssetHeader(id), h = volume.header;
@@ -106,7 +114,7 @@ export async function ensureSceneMeshAssets(scene: SceneDescription, signal?: Ab
         // Shared loads have their own lifetime: cancelling one scene must not
         // abort another scene awaiting the same immutable asset.
         task = (async () => {
-          registerMeshAsset(id, await fetchMeshVolume(`/assets/pool-party/${id}.fvx.gz`));
+          registerMeshAsset(id, await fetchMeshVolume(meshAssetUrl(id)));
         })();
         pending.set(id, task);
         void task.finally(() => pending.delete(id)).catch(() => {});

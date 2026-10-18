@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "hero-boulder-3",
+  "source": "hero-boulder-3.glb",
+  "origin": [
+    -0.043750000000000004,
+    -0.0125,
+    -0.040625
+  ],
+  "dimensions": [
+    32,
+    24,
+    32
+  ],
+  "cellSize": 0.003125,
+  "bandWidth": 0.009375000000000001,
+  "brickCount": 41,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Honed limestone 3",
+      "baseColorLinear": [
+        0.4000000059604645,
+        0.4300000071525574,
+        0.3799999952316284
+      ],
+      "roughness": 0.6650000214576721,
+      "metallic": 0.0
+    },
+    {
+      "name": "Honed limestone 4",
+      "baseColorLinear": [
+        0.5699999928474426,
+        0.47999998927116394,
+        0.36000001430511475
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 23577,
+  "insideNodes": 1749
+}

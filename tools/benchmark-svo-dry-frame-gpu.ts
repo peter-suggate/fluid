@@ -415,10 +415,10 @@ assert.ok(Number.isFinite(screenSpaceTerminationPixels) && screenSpaceTerminatio
 assert.ok(["cones", "raster-ao", "exact", "off"].includes(coneTracingModeRaw),
   "FLUID_SVO_DRY_FRAME_CONE_TRACING must be cones, raster-ao, exact, or off");
 // Withholding the cone stages removes the reduced-rate plane the A/B, image
-// comparison, and attribution lanes below are defined against. The external
-// profiler lane times whatever graph is configured, so restrict the switch to it.
-assert.ok(coneTracingModeRaw === "cones" || profileSeconds > 0,
-  "FLUID_SVO_DRY_FRAME_CONE_TRACING other than cones requires FLUID_SVO_DRY_FRAME_PROFILE_SECONDS");
+// comparison, and attribution lanes below are defined against. Raster AO can
+// use the full-rate capture lane, which never requests those cone planes.
+assert.ok(coneTracingModeRaw === "cones" || profileSeconds > 0 || (coneTracingModeRaw === "raster-ao" && coneScaleRaw === 1),
+  "Non-cone lighting requires full-rate raster AO or FLUID_SVO_DRY_FRAME_PROFILE_SECONDS");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
 const coneTracingMode = coneTracingModeRaw as SvoConeTracingMode;
 const radianceReconstruction = radianceReconstructionRaw as SvoConeRadianceReconstruction;
@@ -632,7 +632,7 @@ if (recordScaleMultipliers) {
       coneRadianceReconstruction: radianceReconstruction, maximumShadedLights });
     armRenderer.setLightingOptions({
       shadowsEnabled, ambientOcclusionEnabled, silhouetteRefinementEnabled,
-      coneLightingScale: coneScale, coneTracingMode, latticeVisibilityEnabled,
+      coneLightingScale: coneScale, coneTracingMode, globalIlluminationEnabled, latticeVisibilityEnabled,
     });
     if (coneTracingMode === "cones" && coneScale !== 1) await armRenderer.ensureConeLightingPrepass();
     armRenderer.setSource(armSource);
@@ -1112,6 +1112,7 @@ function applyLighting(
     silhouetteRefinementEnabled: silhouetteRefinement,
     coneLightingScale: scale,
     coneTracingMode,
+    globalIlluminationEnabled,
     worldGiCacheEnabled,
     latticeVisibilityEnabled,
   });
@@ -1189,12 +1190,14 @@ for (let index = 0; index < Math.max(1, warmups); index += 1) {
 // and an unawaited scale switch can otherwise replace it before xctrace starts.
 if (coneScale !== 1 && profileSeconds <= 0) {
   applyLighting(1);
+  await awaitPresentationBundle(renderer);
   for (let index = 0; index < Math.max(1, warmups); index += 1) {
     const encoder = device.createCommandEncoder({ label: `Bench reference warmup ${index}` });
     encodeFrame(encoder);
     device.queue.submit([encoder.finish()]);
   }
   applyLighting(coneScale);
+  await awaitPresentationBundle(renderer);
 }
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
@@ -1835,6 +1838,23 @@ applyLighting(1);
 // frames above ran without them, as the product does.
 renderer.setIdentityPlanesInspected(true);
 const referenceRows = await captureFrame("Bench fingerprint frame");
+// Compare the raster lighting path only; no cone GI or traced primary arm.
+const occlusionComparison: Array<{ label: string; contrast: number; median_ms: number; rows: Uint32Array }> = [];
+if (process.env.FLUID_SVO_DRY_FRAME_RASTER_AO_COMPARE === "1") {
+  assert.ok(optimizationExperiments.rasterAo && optimizationExperiments.surfaceMesh && traversalMode === "raster-primary" && !globalIlluminationEnabled,
+    "raster AO comparison requires mesh raster primary, raster-ao lighting and GI off");
+  for (const [label, enabled, contrast] of [["off", false, 1], ["before", true, 1], ["strong", true, 2]] as const) {
+    renderer.publishScene({ ...drySceneData, rasterAoContrast: contrast });
+    applyLighting(1, shadowsEnabled, enabled);
+    await awaitPresentationBundle(renderer);
+    await timeFrames(2, `Raster AO ${label} warmup`);
+    const median_ms = median(await timeFrames(4, `Raster AO ${label}`));
+    occlusionComparison.push({ label, contrast, median_ms, rows: await captureFrame(`Raster AO ${label}`) });
+  }
+  renderer.publishScene(drySceneData);
+  applyLighting(1);
+  assert.deepEqual(validationErrors, [], "GPU validation errors during raster AO comparison");
+}
 let surfaceMeshDiagnostics: Record<string, number> | undefined;
 if (optimizationExperiments.surfaceMesh) {
   const readback = device.createBuffer({ label: "Mesh publication receipt", size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -2019,6 +2039,18 @@ if (orbitStabilityEnabled) {
 // Reference frame (scale 1) carries the bit-exact fingerprint contract.
 const imageHash = fnv1a32(referenceRows);
 const referencePixels = decodePixels(referenceRows);
+if (occlusionComparison.length) {
+  const directory = path.join(path.dirname(outPath), "occlusion");
+  mkdirSync(directory, { recursive: true });
+  const report = occlusionComparison.map(({ label, contrast, median_ms, rows }) => {
+    const pixels = decodePixels(rows), rgb = new Uint8Array(width * height * 3);
+    for (let pixel = 0; pixel < width * height; pixel++) rgb.set(displayPixel(pixels, pixel), pixel * 3);
+    const file = path.join(directory, `raster-ao-${label}.png`);
+    writeFileSync(file, encodePng(width, height, rgb));
+    return { label, contrast, median_ms, file };
+  });
+  writeFileSync(path.join(directory, "comparison.json"), JSON.stringify(report, null, 2));
+}
 if (rawOutPath) {
   mkdirSync(path.dirname(rawOutPath), { recursive: true });
   writeFileSync(rawOutPath, new Uint8Array(referenceRows.buffer, referenceRows.byteOffset, referenceRows.byteLength));
