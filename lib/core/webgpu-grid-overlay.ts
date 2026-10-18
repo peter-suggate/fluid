@@ -1,7 +1,7 @@
 import { domainPagesWGSL, domainPages3DWGSL } from "./domain-pages.wgsl";
 import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { UNIFORM_DETAIL_CRITERIA, UNIFORM_STAGE_CERTIFICATE, UNIFORM_STAGE_IMPORTANCE, UNIFORM_STAGE_VIEWS, uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
-import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, pageView, type VisualLayerState } from "./visual-layers";
+import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, pageView, heatView, type VisualLayerState } from "./visual-layers";
 /**
  * Solver-grid cross-section rendered as an independent presentation layer.
  *
@@ -32,7 +32,8 @@ import {
 const LAYER_OPACITY_VEC4S = Math.ceil(VISUAL_LAYERS.length / 4);
 /** Float offsets in the layer uniform after the opacities. */
 const LAYER_PRESSURE_ORIGIN = 4 + 4 * LAYER_OPACITY_VEC4S;
-/** x: opacity of the pages 3D view (zero in slice mode). */
+/** x: opacity of the pages 3D view (zero in slice mode); y: the heat 3D
+ * view's; z: the word of the copied region tiers (0: none); w: their count. */
 const LAYER_PAGE_VIEW = LAYER_PRESSURE_ORIGIN + 4;
 /** x: the importance layer's view, 0 = all criteria, else 1 + the criterion id. */
 const LAYER_IMPORTANCE = LAYER_PAGE_VIEW + 4;
@@ -586,6 +587,21 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     let line=gridLinePaint(min(distances.x,distances.y),1.25);
     let color=domainPageColor(state);
     return GridSample(sceneColor(mix(color*0.75,color,line)),mix(0.28,0.95,line),line,state==2u);
+  }
+  // Work heat reads the same page records, then the region's copied tier.
+  if(fieldMode==30){
+    if(!domainPagesValid()){return GridSample(vec3f(0),0.0,0.0,false);}
+    let pagePoint=(point-domainPageFrameOrigin())/domainPageCellSize();
+    let half=0.5*f32(viewRecords[u32(layers.control.w)]);
+    let tier=domainHeatTier(vec3i(floor(pagePoint/half)));
+    if(tier>2u){return GridSample(vec3f(0),0.0,0.0,false);}
+    let plane=vec2f(pagePoint[firstPlaneAxis],pagePoint[secondPlaneAxis]);
+    let fraction=fract(plane/half);
+    let distances=min(fraction,1.0-fraction)*half/derivative;
+    let line=gridLinePaint(min(distances.x,distances.y),1.25);
+    let color=domainHeatColor(tier);
+    let fill=array<f32,3>(0.22,0.42,0.6)[tier];
+    return GridSample(sceneColor(mix(color*0.75,color,line)),mix(fill,0.95,line),line,false);
   }
   // Structure is the one view whose subject is the lattice, so it holds its
   // lines further into the distance than the field views, where the grid is
@@ -1445,11 +1461,14 @@ ${domainPages3DWGSL}
 export class GridOverlayPipeline {
   private readonly layerUniform: GPUBuffer;
   private layerRecords?: GPUBuffer;
-  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidVolumePageSource; pageOffset: number };
+  private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidVolumePageSource; pageOffset: number; tierOffset: number };
   private pipeline?: GPURenderPipeline;
   private pagesPipeline?: GPURenderPipeline;
   private pagesBindGroup?: GPUBindGroup;
   private pages3D = false;
+  private heatPipeline?: GPURenderPipeline;
+  private heatBindGroup?: GPUBindGroup;
+  private heat3D = false;
   private bindGroup?: GPUBindGroup;
   private volume?: GPUTexture;
   private columnBases?: GPUTexture;
@@ -1510,17 +1529,18 @@ export class GridOverlayPipeline {
       },
       primitive: { topology: "triangle-list" }
     });
-    // The 3D entry point only needs the camera, allocation records and layer
-    // selection; it shares the existing overlay lifecycle and copied records.
-    this.pagesPipeline = await this.device.createRenderPipelineAsync({
-      label: "Domain pages 3D",
+    // The 3D entry points only need the camera, allocation records and layer
+    // selection; they share the existing overlay lifecycle and copied records.
+    const boxes3D = (label: string, entryPoint: string) => this.device.createRenderPipelineAsync({
+      label,
       layout: "auto",
       vertex: { module: shaderModule, entryPoint: "vertexMain" },
-      fragment: { module: shaderModule, entryPoint: "fragmentPages3D", targets: [{ format: this.targetFormat,
+      fragment: { module: shaderModule, entryPoint, targets: [{ format: this.targetFormat,
         blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } },
       }] },
       primitive: { topology: "triangle-list" },
     });
+    [this.pagesPipeline, this.heatPipeline] = await Promise.all([boxes3D("Domain pages 3D", "fragmentPages3D"), boxes3D("Work heat 3D", "fragmentHeat3D")]);
     this.rebuildBindGroup();
   }
 
@@ -1567,18 +1587,25 @@ export class GridOverlayPipeline {
   setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding, pages?: GPUFluidVolumePageSource) {
     const values = new Float32Array(LAYER_UNIFORM_FLOATS);
     this.pages3D = Boolean(state?.visible && state.enabled.includes("pages") && pageView(state) === "3d" && pages);
+    this.heat3D = Boolean(state?.visible && state.enabled.includes("heat") && heatView(state) === "3d" && pages?.tiers);
     if (pressureOrigin) values.set(pressureOrigin, LAYER_PRESSURE_ORIGIN);
     if (state) {
       tiles = state.visible && state.enabled.includes("tiles") ? tiles : undefined;
       window = state.visible && state.enabled.includes("window") ? window : undefined;
       boundary = state.visible && state.enabled.includes("velocity") ? boundary : undefined;
-      pages = state.visible && state.enabled.includes("pages") ? pages : undefined;
+      // Heat addresses its regions through the page records.
+      const heat = state.visible && state.enabled.includes("heat") && pages?.tiers ? pages.tiers : undefined;
+      pages = state.visible && (state.enabled.includes("pages") || heat) ? pages : undefined;
       values[0] = 1; values[1] = window ? 1 : 0;
       // A layer without a slice mode (the particle spheres) is another pass's: zero here skips its plane pass.
       VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = layer.mode >= 0 && state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
       if (this.pages3D) {
         values[4 + VISUAL_LAYERS.findIndex(l => l.id === "pages")] = 0;
         values[LAYER_PAGE_VIEW] = layerOpacity(state, "pages");
+      }
+      if (this.heat3D) {
+        values[4 + VISUAL_LAYERS.findIndex(l => l.id === "heat")] = 0;
+        values[LAYER_PAGE_VIEW + 1] = layerOpacity(state, "heat");
       }
       values[LAYER_IMPORTANCE] = importanceViewCode(state);
       const tileBytes = tiles ? (tiles.records.size ?? tiles.records.buffer.size - (tiles.records.offset ?? 0)) : 0;
@@ -1589,12 +1616,14 @@ export class GridOverlayPipeline {
       const pageBytes = pages ? (pages.records.size ?? pages.records.buffer.size - (pages.records.offset ?? 0)) : 0;
       values[3] = pages ? pageOffset / 4 : 0;
       const directoryBytes = pages ? (pages.directory.size ?? pages.directory.buffer.size - (pages.directory.offset ?? 0)) : 0;
-      const bytes = pageOffset + pageBytes + directoryBytes;
+      const tierOffset = pageOffset + pageBytes + directoryBytes;
+      if (heat) { values[LAYER_PAGE_VIEW + 2] = tierOffset / 4; values[LAYER_PAGE_VIEW + 3] = heat.size / 4; }
+      const bytes = tierOffset + (heat?.size ?? 0);
       if (!this.layerRecords || this.layerRecords.size < bytes) {
         this.layerRecords?.destroy();
         this.layerRecords = this.device.createBuffer({ label: "Composed visual records", size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       }
-      this.layerSources = { tiles, window, boundary, boundaryOffset, pages, pageOffset };
+      this.layerSources = { tiles, window, boundary, boundaryOffset, pages, pageOffset, tierOffset: heat ? tierOffset : 0 };
       this.setViewRecords({ records: { buffer: this.layerRecords } });
     } else this.layerSources = undefined;
     this.device.queue.writeBuffer(this.layerUniform, 0, values);
@@ -1603,6 +1632,14 @@ export class GridOverlayPipeline {
   private rebuildBindGroup() {
     if (this.pagesPipeline) this.pagesBindGroup = this.device.createBindGroup({
       layout: this.pagesPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.dummyStorage } },
+        { binding: 24, resource: { buffer: this.layerUniform } },
+      ],
+    });
+    if (this.heatPipeline) this.heatBindGroup = this.device.createBindGroup({
+      layout: this.heatPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 23, resource: this.viewRecords?.records ?? { buffer: this.dummyStorage } },
@@ -1646,12 +1683,13 @@ export class GridOverlayPipeline {
   encode(encoder: GPUCommandEncoder, target: GPUTextureView): boolean {
     if (!this.pipeline || !this.bindGroup) return false;
     if (this.layerSources && this.layerRecords) {
-      const { tiles, window, boundary, boundaryOffset, pages, pageOffset } = this.layerSources;
+      const { tiles, window, boundary, boundaryOffset, pages, pageOffset, tierOffset } = this.layerSources;
       if (pages) {
         const bytes=pages.records.size ?? pages.records.buffer.size-(pages.records.offset ?? 0);
         encoder.copyBufferToBuffer(pages.records.buffer,pages.records.offset ?? 0,this.layerRecords,pageOffset,bytes);
         encoder.copyBufferToBuffer(pages.directory.buffer,pages.directory.offset ?? 0,this.layerRecords,pageOffset+bytes,pages.directory.size ?? pages.directory.buffer.size-(pages.directory.offset ?? 0));
         if(pages.frame)encoder.copyBufferToBuffer(pages.frame.buffer,pages.frame.offset ?? 0,this.layerRecords,pageOffset+32,48);
+        if(tierOffset&&pages.tiers)encoder.copyBufferToBuffer(pages.tiers.buffer,pages.tiers.offset ?? 0,this.layerRecords,tierOffset,pages.tiers.size);
       }
       if (boundary) encoder.copyBufferToBuffer(boundary.buffer, boundary.offset ?? 0, this.layerRecords, boundaryOffset, boundary.size ?? boundary.buffer.size - (boundary.offset ?? 0));
       if (window) encoder.copyBufferToBuffer(window.records.buffer, window.records.offset ?? 0, this.layerRecords, 0, SOLVE_WINDOW_RECORD_WORDS * 4);
@@ -1664,6 +1702,11 @@ export class GridOverlayPipeline {
     if (this.pages3D && this.pagesPipeline && this.pagesBindGroup) {
       pass.setPipeline(this.pagesPipeline);
       pass.setBindGroup(0, this.pagesBindGroup);
+      pass.draw(3);
+    }
+    if (this.heat3D && this.heatPipeline && this.heatBindGroup) {
+      pass.setPipeline(this.heatPipeline);
+      pass.setBindGroup(0, this.heatBindGroup);
       pass.draw(3);
     }
     pass.setPipeline(this.pipeline);

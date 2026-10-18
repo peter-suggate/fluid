@@ -7,8 +7,8 @@ import {
 } from "../../../components/toolstrip";
 import { Choice, ControlRow, Select, Slider, Value } from "../../../components/ui";
 import {
-  IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, VISUAL_LAYERS, importanceLegend, importanceView, isSliceLayer, layerOpacity,
-  setImportanceView, pageView, setPageView, toggleVisualLayer,
+  HEAT_LEGEND, IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, VISUAL_LAYERS, importanceLegend, importanceView, isSliceLayer, layerOpacity,
+  setImportanceView, pageView, setPageView, heatView, setHeatView, toggleVisualLayer,
   type ImportanceView, type PageView, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
 
@@ -32,7 +32,7 @@ interface VisualLayerRowsProps {
 
 /**
  * The same multi-select instrument in the 2D lab and 3D studio. It lists what
- * can be sampled on the slice plane (pages also offer 3D in the studio);
+ * can be sampled on the slice plane (pages and heat also offer 3D in the studio);
  * the particle display is a setting of its own
  * beside the surface mode (`SurfaceDisplayRow`).
  */
@@ -77,6 +77,12 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
           options={[{ value: "slice", label: "Slice" }, { value: "3d", label: "3D" }]}
           onChange={view => onChange(setPageView(state, view))}
         />}
+        {selected && plane && layer.id === "heat" && <Choice<PageView>
+          ariaLabel="Work heat view"
+          value={heatView(state)}
+          options={[{ value: "slice", label: "Slice" }, { value: "3d", label: "3D" }]}
+          onChange={view => onChange(setHeatView(state, view))}
+        />}
         {selected && layer.id === "importance" && <Select<ImportanceView>
           ariaLabel="Detail importance criterion"
           hint="What the importance layer shows: every tile's highest-scoring criterion, or one criterion's score as a heat map."
@@ -98,7 +104,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
         <i aria-hidden className={entry.wide ? "is-wide" : undefined} style={{ background: entry.color }} />{entry.label}
       </span>)}
     </div>;
-  const planeControls = plane && state.visible && layers.some(l => state.enabled.includes(l.id) && (l.id !== "pages" || pageView(state) === "slice")) ? <>
+  const planeControls = plane && state.visible && layers.some(l => state.enabled.includes(l.id) && (l.id !== "pages" || pageView(state) === "slice") && (l.id !== "heat" || heatView(state) === "slice")) ? <>
     <Choice<"x" | "y" | "z">
       ariaLabel="Field view plane"
       value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis as "x" | "y" | "z"}
@@ -127,6 +133,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
     {planeControls}
   </ToolstripRow>
   {shown("pages") && legend("Domain page states", "Current allocation. Resident pages may also support pressure and the interface. Air pages are hidden. 3D boxes show through the scene so the allocation remains visible.", PAGE_LEGEND)}
+  {shown("heat") && legend("Region work tiers", "Each 16h region's work tier this frame (the region heat). 3D boxes show through the scene; cold regions are faintest.", HEAT_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}
   {shown("importance") && legend("Mixed Uniform detail importance", "The frame head census's detail importance. Every score is its measure over its threshold: 1 triggers.", importanceLegend(importanceView(state)))}
   </>;

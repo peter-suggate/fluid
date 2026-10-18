@@ -10,6 +10,7 @@ export const VISUAL_LAYERS = [
   { id: "tiles", requires: ["tiles"], label: "Work tiles", color: "#3fae8f", opacity: 0.45, mode: 22, description: "Fine velocity tiles, extension shell, and transport reach where published. Mixed Uniform draws each tile's live h or 4h cells and colours every h tile by why it is h, the first rule the frame head's census fired: crossing, closure (shared vertices at dt = 0), travel within this frame's departure, source, host join, solid or body promotion, bulk importance (no surface, but an importance criterion requires it), or static (authored / host layout). 4h tiles the census traced without banding are tinted faintly; untinted 4h tiles were skipped by the O(1) reach test. Hatched h tiles take the general velocity sampler because a 4h tile lies inside their signed reach box (cross-hatched: reach saturated); unhatched h tiles are certified regular. A crossing tile held at 4h is magenta." },
   { id: "importance", requires: ["tiles"], label: "Detail importance", color: "#ee4a5a", opacity: 0.75, mode: 28, description: "Mixed Uniform under dynamic coarsening: the frame head census's detail importance of every tile holding liquid, h or 4h. Each criterion scores its measure over its threshold, so 1 triggers. All: each tile in its highest-scoring criterion's colour, faint below 1 and solid from 1; tiles the census requires at h for importance are outlined, hatched where only the hold still requires them, cross-hatched where a criterion triggered but the budget dropped the tile. One criterion: a heat map of its score, transparent at 0, its colour at 1 and warming toward white near 4, with triggered tiles outlined." },
   { id: "pages", requires: ["pages"], label: "Domain pages", color: "#b39bea", opacity: 0.65, mode: 27, description: "Allocated domain pages in purple, solid pages in grey; air pages are hidden. Residency includes liquid, pressure and interface support, so an allocated page need not contain water. Choose a slice or transparent 3D boxes in the studio." },
+  { id: "heat", requires: ["pages"], label: "Work heat", color: "#fab842", opacity: 0.6, mode: 30, description: "Mixed Uniform's per-16h-region work tier this frame, read on the GPU from the region heat: cold (blue) regions hold their non-pressure values and do no fine or 4h work, warm (amber) regions take the bounded cheap update, hot (red) regions run in full. Every region of an allocated page is drawn; outlines are region faces. Choose a slice or transparent 3D boxes in the studio." },
   { id: "window", requires: ["window"], label: "Working window", color: "#5fb4e6", opacity: 0.8, mode: 23, description: "Actual dispatched window, seed box, launch slack and clipping. Dense scheduling uses the whole domain." },
   { id: "surface", requires: ["phi"], label: "Liquid surface · φ = 0", color: "#ef9f35", opacity: 0.9, mode: 24, description: "Reconstructed liquid and its zero level-set interface. Mixed Uniform colours the interface by the velocity that advected it: teal where all three components were h velocity (h bulk, or retained and extended projected h velocity), amber where the 4h bulk sampler moved it, blended where only some components were h." },
   // The one layer that is not a slice: mode -1 keeps it out of the plane pass
@@ -35,6 +36,8 @@ export interface VisualLayerState {
   importance?: ImportanceView;
   /** Domain pages presentation; absent is the slice view. */
   pages?: PageView;
+  /** Work heat presentation; absent is the slice view. */
+  heat?: PageView;
   /** The particle layer's view; absent is "speed" (the canonical default). */
   particles?: ParticleView;
 }
@@ -70,7 +73,13 @@ export function setPageView(state: VisualLayerState, view: PageView): VisualLaye
   if (view === "slice") delete next.pages;
   return next;
 }
-/** Layers that support slices and appear in the field menu; pages can also draw in 3D. */
+export const heatView = (state: VisualLayerState): PageView => state.heat ?? "slice";
+export function setHeatView(state: VisualLayerState, view: PageView): VisualLayerState {
+  const next: VisualLayerState = { ...state, heat: view };
+  if (view === "slice") delete next.heat;
+  return next;
+}
+/** Layers that support slices and appear in the field menu; pages and heat can also draw in 3D. */
 export const isSliceLayer = (id: VisualLayerId): boolean => VISUAL_LAYERS.find(l => l.id === id)!.mode >= 0;
 /** The grid overlay has something to draw, including the pages 3D view. */
 export const sliceLayersShown = (state: VisualLayerState): boolean => state.visible && state.enabled.some(isSliceLayer);
@@ -115,6 +124,7 @@ export function readVisualLayers(raw: string | null, fallback = visualLayers()):
     const criterion = UNIFORM_DETAIL_CRITERIA.find(c => c === value.importance);
     if (criterion) state.importance = criterion;
     if (value.pages === "3d") state.pages = "3d";
+    if (value.heat === "3d") state.heat = "3d";
     if (value.particles === "motion") state.particles = "motion";
     return state;
   } catch { return fallback; }
@@ -139,6 +149,8 @@ export const LAYER_PALETTE = {
   importanceShape: [72, 204, 92], importanceThin: [28, 206, 214], importanceStrain: [246, 214, 48],
   importanceRotation: [206, 98, 240], importanceImpact: [238, 66, 74], importanceApproach: [98, 112, 255],
   importanceHot: [255, 244, 214], importanceOutline: [250, 248, 240], importanceHeld: [198, 202, 210], importanceDropped: [18, 22, 28],
+  // Region work tiers (heat layer).
+  heatCold: [64, 148, 240], heatWarm: [250, 184, 66], heatHot: [245, 71, 97],
   // Particle spheres by speed: at rest, half scale, full scale.
   particleSlow: [143, 140, 219], particleMid: [226, 222, 246], particleFast: [244, 158, 52],
   // Particle spheres in the Motion view: at rest and at full scale.
@@ -199,6 +211,12 @@ export function importanceLegend(view: ImportanceView): ReadonlyArray<{ color: s
     { color: outlineSwatch(rgb(LAYER_PALETTE.importanceOutline)), label: "Triggered", title: "This criterion's score reached 1 in the tile." },
   ];
 }
+/** The heat layer's key. Swatches are the WGSL colours (domainHeatColor). */
+export const HEAT_LEGEND = [
+  { color: rgb(LAYER_PALETTE.heatCold), label: "Cold", title: "Non-pressure producers hold their values; consumers retain their outputs. No fine or 4h work." },
+  { color: rgb(LAYER_PALETTE.heatWarm), label: "Warm", title: "A bounded cheap update: motion within the 4h error budget, a displacement over budget, a remap, or a hot neighbour." },
+  { color: rgb(LAYER_PALETTE.heatHot), label: "Hot", title: "Full work: body or source reach, identity or unknown evidence, particle heat, or velocity detail beyond the cheap transport." },
+] as const;
 export const LAYER_PRESSURE_SCALE = 10_000;
 export const LAYER_SPEED_SCALE = 1;
 /** Speed in m/s at which a particle sphere reaches the fast end of its ramp. */

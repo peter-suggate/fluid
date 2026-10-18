@@ -1,5 +1,6 @@
 /** Native GPU check of the real page overlay pipeline with signed origins,
- * AIR/SOLID/resident pages, missing records and both presentation modes.
+ * AIR/SOLID/resident pages, missing records and both presentation modes,
+ * and of the work heat layer over the same pages (both modes, all tiers).
  * Run: node --import tsx tools/probe-domain-pages.ts
  * Optional PPM previews: FLUID_PAGE_PREVIEW=/tmp/domain-pages */
 import assert from "node:assert/strict";
@@ -9,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { GridOverlayPipeline } from "../lib/core/webgpu-grid-overlay";
-import { setPageView, visualLayers, type VisualLayerState } from "../lib/core/visual-layers";
+import { setHeatView, setPageView, visualLayers, type VisualLayerState } from "../lib/core/visual-layers";
 import { UniformPagePool, uniformPagePoolSeed } from "../lib/methods/uniform/uniform-page-pool";
 
 const dawn = await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);
@@ -81,8 +82,32 @@ const empty = device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPU
 assert.equal((await render("missing", volume, { records: { buffer: empty }, directory: { buffer: empty } })).visible, 0);
 // The same coordinate must remain the same colour with a different view selection.
 assert.deepEqual((await render("slice-restored", slice)).pixels, a.pixels);
+// Work heat: region 8·block + octant at tier region % 3, through the same pages.
+const regions = 8 * pool.layout.blocks;
+const tierWords = new Uint32Array(regions).map((_, r) => r % 3);
+const tiers = device.createBuffer({ size: 4 * regions, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+device.queue.writeBuffer(tiers, 0, tierWords);
+const heated = { ...pool.volumePageSource!, tiers: { buffer: tiers, size: 4 * regions } };
+// Hue census of the visible pixels: cold blue, warm amber, hot red.
+const hues = (pixels: Uint8Array) => {
+  const n = { cold: 0, warm: 0, hot: 0 };
+  for (let i = 0; i < pixels.length; i += 4) {
+    const [r, g, b, a] = [pixels[i]!, pixels[i + 1]!, pixels[i + 2]!, pixels[i + 3]!];
+    if (!a) continue;
+    if (b > r && b > g) n.cold++; else if (r > b && g > 0.55 * r) n.warm++; else if (r > g && r > b) n.hot++;
+  }
+  return n;
+};
+const heatSlice = visualLayers(["heat"]), heatVolume = setHeatView(heatSlice, "3d");
+const hs = await render("heat-slice", heatSlice, heated), hv = await render("heat-3d", heatVolume, heated);
+const hsHues = hues(hs.pixels), hvHues = hues(hv.pixels);
+console.log("heat slice hues", hsHues, "heat 3d hues", hvHues);
+assert.ok(hs.visible > 1000 && hv.visible > 1000, "heat draws in both views");
+for (const n of [hsHues, hvHues]) assert.ok(n.cold > 0 && n.warm > 0 && n.hot > 0, "every tier is drawn");
+assert.equal((await render("heat-no-tiers", heatVolume)).visible, 0, "no tiers, no heat");
+assert.deepEqual((await render("heat-with-pages", visualLayers(["pages"]), heated)).pixels, a.pixels, "tiers leave the pages layer unchanged");
 assert.deepEqual(errors, []);
-overlay.destroy(); pool.destroy(); uniform.destroy(); bodies.destroy(); read.destroy(); target.destroy(); empty.destroy();
+overlay.destroy(); pool.destroy(); uniform.destroy(); bodies.destroy(); read.destroy(); target.destroy(); empty.destroy(); tiers.destroy();
 textures.forEach(t => t.destroy());
 device.destroy();
 console.log(`PASS domain pages: resident blocks ${residents.length}, slice pixels ${a.visible}, 3d pixels ${b.visible}, errors ${errors.length}`);

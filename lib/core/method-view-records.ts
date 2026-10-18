@@ -62,8 +62,12 @@ export const SOLVE_WINDOW_RECORD_WORDS = SOLVE_WINDOW_HOST_GROUPS_WORD + 3;
  * reader takes the lattice page as world - F, with F the directory header's
  * words 0..2 from the same copy; the directory slot of a world page is
  * world & (edge - 1). Optional frame is the live solver params prefix (grid,
- * cell size, live lattice origin), so metres = origin + h * 32 * (world - F). */
+ * cell size, live lattice origin), so metres = origin + h * 32 * (world - F).
+ * Optional tiers are the work tier (0 cold, 1 warm, 2 hot) of each 16h
+ * region, a word a region: region 8·block + the octant of the block it lies
+ * in (x | y<<1 | z<<2); `size` bounds the region count. */
 export interface GPUFluidVolumePageSource extends GPUFluidViewRecords {
   readonly directory: GPUBufferBinding;
   readonly frame?: GPUBufferBinding;
+  readonly tiers?: GPUBufferBinding & { readonly size: number };
 }
