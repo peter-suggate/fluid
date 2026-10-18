@@ -991,6 +991,17 @@ fn umReleasedMayChange(p:vec3f,value:f32)->bool{
 // umAdvected itself; a vertex on a wall (umWallPlane: the only vertices
 // umWallContact can change) is advectWalls'. Keeping the continuations'
 // sampler call sites out of this kernel is its cost.
+// Far air and buried solid vertices can carry the same positive sentinel.
+// A zero-velocity certificate permits retaining either, but does not permit
+// applying a source to both. In the solid-free launch, a changed source must
+// defer to the general launch; only that launch can establish owner capacity.
+fn umAirSource(vertex:vec3u,value:f32)->f32{
+ ${this.sourceParams?/* wgsl */`let source=umSourceuvSourcePhi(vec3f(vertex),value);
+ if(source==value){return value;}
+ ${this.solid?/* wgsl */`if(umSolidFree&&umSolidPresent()){return -1.0;}
+ if(!umSolidClear(vec3i(vertex))&&umBuried(vec3f(vertex))){return value;}`:""}
+ return source;`:"return value;"}
+}
 ${this.farGate?/* wgsl */`// A far-marker vertex (at least clearAir's 16 max h) of a tile the gate
 // leaves out keeps its value, the source's plug included: this step's clear
 // lifts whatever its advection gives there to the marker, so tracing it is
@@ -999,7 +1010,8 @@ fn umFarAir(vertex:vec3u)->f32{
  let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
  if(atomicLoad(&umClaims[${this.claimBytes/4}u+tile])!=0u){return -1.0;}
  let value=umLoadVertex(vertex);
- return select(-1.0,${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"},value>=16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z)));
+ if(value<16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z))){return -1.0;}
+ return umAirSource(vertex,value);
 }`:"fn umFarAir(vertex:vec3u)->f32{return -1.0;}"}
 // A deep air vertex of a still tile keeps its value (the source's plug
 // included): the tile's spread speed certificate (umReach: ceil(travel/4)+2
@@ -1018,7 +1030,7 @@ fn umDeepAir(vertex:vec3u,width:u32)->f32{
  let word=atomicLoad(&umClaims[${this.evidenceBytes/4-this.ownership.capacity.tiles}u+tile])&0x3fffffffu;
  let reach=max(vec3u(word&31u,(word>>5u)&31u,(word>>10u)&31u),vec3u((word>>15u)&31u,(word>>20u)&31u,(word>>25u)&31u));
  if(any(reach>vec3u(2u))||umReleasedMayChange(vec3f(vertex),value)){return -1.0;}
- return ${this.sourceParams?"umSourceuvSourcePhi(vec3f(vertex),value)":"value"};
+ return umAirSource(vertex,value);
 }
 override umDeferTraced:bool=false;
 override umCubicListed:bool=false;

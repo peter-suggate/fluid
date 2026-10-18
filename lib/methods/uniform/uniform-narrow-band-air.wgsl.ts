@@ -135,6 +135,18 @@ fn nbAirStore(p:vec3u){
  // liquid. Clear those even inside the wider numerical collar, otherwise
  // coarse handoff can lift a buried zero into open cells.
  if(nbAirProtected(p,select(3u,0u,value<=0.0))){return;}
+ // Refinement prolongs a 4h cell's trilinear field into its h vertices,
+ // including the solid side of a liquid contact. Cleanup must protect that
+ // same interpolation footprint: clearing a negative descendant while its
+ // coarse endpoints are retained moves the wall solely because it refined.
+ // Aligned vertices still use the physical-seed test above, so isolated
+ // buried fields retain no support and are retired normally.
+ if(value<=0.0&&any((p&vec3u(3u))!=vec3u(0u))){
+  let low=(p/4u)*4u;let high=((p+3u)/4u)*4u;
+  for(var k=0u;k<8u;k++){
+   if(nbAirProtected(select(low,high,umCorner(k,2u)!=vec3u(0u)),0u)){return;}
+  }
+ }
  // The frame plan/census use phi < 16*max(h) for coarse near support.
  // Six-cell redistance sentinels cannot certify far air for that predicate.
  let far=16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z));

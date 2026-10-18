@@ -293,6 +293,12 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
  // stencil first, then the eight heat words; this zero predicate needs no phi.
  let retiring=width==4u&&umTileMinimumWidth(umTileAt(c/4u))==1u&&!nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p);
  let normalize=(width==1u&&!nbInterfaceVertex(p))||retiring;
+ // A buried vertex is not a distance sample. In particular, padding past a
+ // non-page-aligned tank wall must keep its far marker: replacing it with
+ // the distance to the waterline pushes the interpolated wall contour into
+ // the solid on every retirement. Use owner capacity, so corners needed by
+ // partially open 4h owners still participate in the metric reconstruction.
+ if(normalize&&umVertexBuried(vec3i(p))){return;}
  // The metric replacement needs no sample of the old field. Keep its exact
  // multiply, and read phi only where the reconstructed value is consumed.
  if(normalize&&(nbBandReach(c)&2u)!=0u){
@@ -359,6 +365,17 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u,width:u32){
 // own edges (calm water under an h tile a falling drop activated: the
 // corner took the distance to the drop and a 2.4 h hole opened beneath it).
 // The current field is this pass's input (redistanceCoarse stores later).
+// A sign change into a buried far marker is a solid contact, not a free
+// surface. Match the crossing search's open-cell rule, including both sides
+// of an integer plane (the zero can lie exactly on a voxel wall or edge).
+fn nbMetricZeroOpen(p:vec3f)->bool{
+ let low=vec3i(ceil(p))-vec3i(1);let high=vec3i(floor(p));
+ for(var k=0u;k<8u;k++){
+  let cell=select(low,high,umCorner(k,2u)!=vec3u(0u));
+  if(umCellOpen(cell)>1e-5){return true;}
+ }
+ return false;
+}
 fn nbBoundCoarseMetric(p:vec3u){
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));let at=NB_DEPTH_A+umVertexAt(p);
  let d=bitcast<f32>(atomicLoad(&bins[at]));var v=0.0;var bound=abs(d);
@@ -366,7 +383,12 @@ fn nbBoundCoarseMetric(p:vec3u){
   var q=vec3i(p);if(a>0u){q[(a-1u)>>1u]+=select(4,-4,((a-1u)&1u)!=0u);}
   if(any(q<vec3i(0))){continue;}
   let n=umSampleVertex(vec3f(q))/h;
-  if(a==0u){v=n;}else if(v*n<0.0){bound=min(bound,4.0*abs(v)/(abs(v)+abs(n)));}
+  if(a==0u){v=n;}else if(v*n<0.0){
+   let t=abs(v)/(abs(v)+abs(n));
+   // Keep the two stationary coordinates exactly on their lattice planes.
+   let axis=(a-1u)>>1u;var zero=vec3f(p);zero[axis]=mix(f32(p[axis]),f32(q[axis]),t);
+   if(nbMetricZeroOpen(zero)){bound=min(bound,4.0*t);}
+  }
  }
  atomicStore(&bins[at],bitcast<u32>(select(-bound,bound,d>=0.0)));
 }

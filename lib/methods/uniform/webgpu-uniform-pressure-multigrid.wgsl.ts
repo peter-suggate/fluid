@@ -148,7 +148,9 @@ fn mgAirVanishes(lf:u32,F:UMLevel,b:u32,c:vec3i)->bool{
     if(near.kind==0u){other=native[L.phi.y+near.row];v=native[L.v+4u*near.row+1u+axis];}
     else if(near.kind==2u){other=mgSlotPhi(L,j);v=native[L.sv+umLSlot(L,b,n,vec3u(c))-L.cells];}
     if((n&1u)==1u){v=native[L.v+4u*j+1u+axis];}
-    a[n]=mgFace(l,axis,v,phi,other);if(mgLiquidPhi(l,other)){mask|=2u<<n;}
+    a[n]=mgFace(l,axis,v,phi,other);
+    if(l==0u&&near.kind==0u&&v>1e-6){let h=4.0*UM_H[axis];a[n]=v/(h*h*umTheta(j,near.row,axis,n&1u));}
+    if(mgLiquidPhi(l,other)){mask|=2u<<n;}
    }
   }
  }

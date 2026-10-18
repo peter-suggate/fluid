@@ -391,8 +391,10 @@ fn umTopo(i:u32)->vec4f{return umRecord[i];}` : ""}
 fn umSum6(v:array<f32,6>)->f32{return ((v[0]+v[1])+(v[4]+v[5]))+(v[2]+v[3]);}
 // umPressureSurfaceTheta / umPressureTheta of two 4h owners.
 fn umSurfaceTheta(liquidPhi:f32,airPhi:f32)->f32{return ${uniformMixedSurfaceThetaWGSL("liquidPhi", "airPhi")};}
-fn umTheta(a:u32,b:u32)->f32{
+fn umTheta(a:u32,b:u32,axis:u32,side:u32)->f32{
  let la=umLiquid(a);if(la==umLiquid(b)){return 1.0;}
+ ${solid?`let base=umLRows(umLevel(0u));let low=select(b,a,side==1u);
+ if(arrayLength(&umRecord)>base+low){let theta=umRecord[base+low][axis];if(theta>0.0){return theta;}}`:""}
  var liquid=a;var air=b;if(!la){liquid=b;air=a;}
  return umSurfaceTheta(phi[liquid],phi[air]);
 }
@@ -422,7 +424,7 @@ fn umRow(k:u32)->vec2f{
   }
   let distance=4.0*UM_H[axis];
   ${solid ? `let volume=select(umTopo(n)[axis+1u],umTopo(k)[axis+1u],side==1u);
-  let coefficient=select(volume/(distance*distance*umTheta(k,n)),0.0,volume<=1e-6);` : "let coefficient=1.0/(distance*distance*umTheta(k,n));"}
+  let coefficient=select(volume/(distance*distance*umTheta(k,n,axis,side)),0.0,volume<=1e-6);` : "let coefficient=1.0/(distance*distance*umTheta(k,n,axis,side));"}
   diagonal[at]=coefficient;values[at]=coefficient*select(own+rounding[k+1u].x,umDifference(k,n),umLiquid(n));
  }}
  return vec2f(umSum6(diagonal),umSum6(values));

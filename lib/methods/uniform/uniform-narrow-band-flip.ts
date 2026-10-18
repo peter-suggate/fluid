@@ -24,7 +24,7 @@ import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl"
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
-import { uniformMixedSolidWGSL, uniformMixedSolidPipeline, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedSolidWGSL, uniformMixedSolidPipeline, uniformMixedVertexBuriedWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UniformMixedMomentumCache, type UniformMixedHangingTaps } from "./uniform-mixed-momentum-cache";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformPagePoolWGSL, type UniformPagePoolLayout } from "./uniform-page-pool";
@@ -193,6 +193,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly cells:number;
  /** Bank A's words (NB_DEPTH_A to NB_DEPTH_B): a vertex key each, or the two packed nearest banks where those are longer. */
  private readonly vertices:number;
+ private readonly surfaceHotWord:number;
  private readonly tiles:number;
  /** Per-frame parameter records, filled in place. */
  private readonly stepWords=new Float32Array(8);
@@ -252,8 +253,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   const binWords=this.occupiedWord+4+address.tileKeys;
   const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
   const completeReuse=narrowBandReuseLayout(binWords,8*address.blocks);
-  this.reuse=4*(binWords+completeReuse.words)<=limit?completeReuse:narrowBandReuseLayout(binWords,8*address.blocks,0);
-  const binBytes=4*(binWords+this.reuse.words);
+  this.reuse=4*(binWords+completeReuse.words+address.vertexKeys)<=limit?completeReuse:narrowBandReuseLayout(binWords,8*address.blocks,0);
+  this.surfaceHotWord=binWords+this.reuse.words;
+  const binBytes=4*(this.surfaceHotWord+address.vertexKeys);
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
   this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
@@ -512,9 +514,11 @@ fn nbRun(a:vec3i,b:vec3i)->vec2u{
  let last=64u*tile+nbCellLocal(b);return vec2u(links[64u*tile+nbCellLocal(a)],links[last]+atomicLoad(&bins[last]));}
 fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 // Position and motion remain compact streams for the neighbor gathers.
-// After marking, position.w's heat is dead until the next marking rebuilds
-// it next frame. classify borrows its sign bit for mode, leaving three
+// Reconstruction reads position.w's heat to restrict erasure to its nearest
+// represented patch. classify borrows only its sign bit for mode, leaving three
 // full-precision motion floats per particle instead of a second vec4.
+const NB_SURFACE_HOT_NEAREST=${this.surfaceHotWord}u;
+fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[UM_CELL_KEYS+4u*i+3u]&0x7fffffffu)>1.0;}
 fn nbPosition(i:u32)->vec3f{let a=UM_CELL_KEYS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
 fn nbMotion(i:u32)->vec4f{let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let mode=links[UM_CELL_KEYS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}
 fn nbStoreMotion(i:u32,p:vec4f){let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let v=bitcast<vec3u>(p.xyz);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;let flag=UM_CELL_KEYS+4u*i+3u;links[flag]=(links[flag]&0x7fffffffu)|(u32(p.w)<<31u);}
@@ -539,6 +543,7 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 }
 ${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined,unitTaps&&!slots?"unitHalo":undefined)}
 ${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
+${uniformMixedVertexBuriedWGSL}
 ${narrowBandTerrainContactWGSL}
 ${narrowBandRigidContactWGSL}
 ${uniformMixedSourceWGSL(16)}
@@ -1402,6 +1407,7 @@ ${narrowBandSurfaceWGSL}
  }
  reconstruct(encoder:GPUCommandEncoder):void{if(this.idleNow)return;this.syncSurfaceRevisions(encoder,true);const b=this.compiled;this.bandCurrent=false;this.measureBand(encoder,b.searchReconstruct);if(this.measureTraces)this.run(encoder,b.diagnose);
   encoder.clearBuffer(this.bins,(2*this.cells+2*this.tiles)*4,this.vertices*4);
+  encoder.clearBuffer(this.bins,4*this.surfaceHotWord,4*this.address.vertexKeys);
   this.run(encoder,this.ownership.coarseOnly?b.reconstructCoarse:b.reconstruct);}
  transfer(encoder:GPUCommandEncoder):void{
   if(this.idleNow)return;

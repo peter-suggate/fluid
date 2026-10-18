@@ -1109,12 +1109,12 @@ fn planeCorner(p:vec3i,lane:u32){
 // corners' trilinear interpolant (a face or edge shared with another 4h
 // owner interpolates the same corners), evaluated as the old sampler's
 // regular branch does.
-// A corner the old layout buried (umVertexBuried: every incident tile closed
-// throughout) is not state. Its tile is closed, so every vertex it weights is
-// buried under the new layout too: that vertex takes the corner's value as it
-// is (the air sentinel of construction), never a blend of it with the plane.
+// Preserve the interpolant even in closed tiles. A wall-contact corner can
+// be negative while a buried corner holds a positive sentinel: replacing
+// their interpolated descendants by the sentinel moves the represented wall
+// on refinement. These values remain non-metric solid padding; reconstruction
+// and redistance must preserve them rather than treating them as liquid SDF.
 var<workgroup> tileCorners:array<f32,8>;
-var<workgroup> tileCornerBuried:array<u32,8>;
 var<workgroup> tileVertices:array<f32,125>;
 fn tileVertex(q:vec3u)->f32{return tileVertices[q.x+5u*(q.y+5u*q.z)];}
 // In place, on the live volume and phi. Cells: every cell loads its donor's
@@ -1154,7 +1154,6 @@ fn remapTileCells(group:vec3u,lane:u32){
  ${surfaceOnly?"":"var split=false;var donor:oldUMOwner;"}
  if(refine&&lane<8u){
   let corner=vec3i(base+umCorner(lane,2u)*4u);tileCorners[lane]=textureLoad(phi,corner).x;
-  tileCornerBuried[lane]=select(0u,1u,umSolidEnabled()&&oldBuried(corner));
  }
  // A tile handed to a cut 4h owner (workgroup-uniform): a closed h cell
  // leaves the tile's mean open fraction under 63/64.
@@ -1169,10 +1168,9 @@ fn remapTileCells(group:vec3u,lane:u32){
  workgroupBarrier();textureBarrier();
  if(refine){
   for(var v=lane;v<125u;v+=64u){
-   let t=vec3f(umCorner(v,5u))*0.25;var values:array<f32,8>;var dead=8u;
-   for(var k=0u;k<8u;k++){let w=select(vec3f(1)-t,t,umCorner(k,2u)!=vec3u(0));values[k]=tileCorners[k]*w.x*w.y*w.z;
-    if(dead==8u&&w.x*w.y*w.z!=0.0&&tileCornerBuried[k]!=0u){dead=k;}}
-   if(dead<8u){tileVertices[v]=tileCorners[dead];}else{tileVertices[v]=d4Sum8(values);}
+   let t=vec3f(umCorner(v,5u))*0.25;var values:array<f32,8>;
+   for(var k=0u;k<8u;k++){let w=select(vec3f(1)-t,t,umCorner(k,2u)!=vec3u(0));values[k]=tileCorners[k]*w.x*w.y*w.z;}
+   tileVertices[v]=d4Sum8(values);
   }
  }
  workgroupBarrier();

@@ -17,6 +17,10 @@ const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 // which particleSurfaceFinish reuses: a second inlined interpolation cost
 // coupleFine 0.46 of 3.2 ms in a late splash.
 fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec3f{
+ // Solid padding has no liquid metric. Preserve its transported sentinel
+ // before bulkDepth or a particle/source union can turn it into a nearby
+ // surface sample and move the wall contour as refinement changes.
+ if(umVertexBuried(q)){return vec3f(bandPhi(vec3f(q)),0.0,0.0);}
  let home=origin>>vec3u(2u);
  let theta=nbThetaFrom(home,vec3f(q));
  if(theta<=0.0){return vec3f(bandPhi(vec3f(q)),0.0,theta);}
@@ -67,7 +71,10 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32)->f32
  // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
  var theta=heat;
- if(particle>bulk){theta=nbSurfaceThetaFrom(home,vec3f(q));}
+ if(particle>bulk){
+  if(!nbCachedSurfaceErasure(q,nearest2)){return nbSourcePhi(vec3f(q),bulk);}
+  theta=nbSurfaceThetaFrom(home,vec3f(q));
+ }
  return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
 `;
@@ -111,13 +118,15 @@ fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
  let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
  let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
  if(!umVertexPresent(q)){return;}
- let start=links[cell];let end=start+atomicLoad(&bins[cell]);var nearest2=4.0;
- for(var i=start;i<end;i++){let d=vec3f(q)-nbPosition(i);nearest2=min(nearest2,dot(d,d));}
+ let start=links[cell];let end=start+atomicLoad(&bins[cell]);var nearest2=4.0;var hot2=4.0;
+ for(var i=start;i<end;i++){let d=vec3f(q)-nbPosition(i);nearest2=min(nearest2,dot(d,d));if(nbSurfaceParticleHot(i)){hot2=min(hot2,dot(d,d));}}
  if(nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))],~bitcast<u32>(nearest2));}
+ if(hot2<4.0){atomicMax(&bins[NB_SURFACE_HOT_NEAREST+umVertexAt(vec3u(q))],~bitcast<u32>(hot2));}
 }
 // All 64 vertices visit the same cell's particle stream. Load each position
 // once per workgroup, retaining the scalar gather order and all particles.
 var<workgroup> nbSurfacePositions:array<vec3f,64>;
+var<workgroup> nbSurfaceHot:array<u32,64>;
 var<workgroup> nbSurfaceRange:vec2u;
 @compute @workgroup_size(64) fn surfaceSplat(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
@@ -125,16 +134,23 @@ var<workgroup> nbSurfaceRange:vec2u;
  // One slot lookup serves the presence test and the depth key.
  let slot=umVertexSlot(q);let present=umBlockStored(slot.w);
  if(lane==0u){let start=links[cell];nbSurfaceRange=vec2u(start,start+atomicLoad(&bins[cell]));}
- let range=workgroupUniformLoad(&nbSurfaceRange);let start=range.x;let end=range.y;var nearest2=4.0;
+ let range=workgroupUniformLoad(&nbSurfaceRange);let start=range.x;let end=range.y;var nearest2=4.0;var hot2=4.0;
  for(var first=start;first<end;first+=64u){
   let count=min(64u,end-first);
-  if(lane<count){nbSurfacePositions[lane]=nbPosition(first+lane);}
+  if(lane<count){nbSurfacePositions[lane]=nbPosition(first+lane);nbSurfaceHot[lane]=u32(nbSurfaceParticleHot(first+lane));}
   workgroupBarrier();
-  if(present){for(var i=0u;i<count;i++){let d=vec3f(q)-nbSurfacePositions[i];nearest2=min(nearest2,dot(d,d));}}
+  if(present){for(var i=0u;i<count;i++){let d=vec3f(q)-nbSurfacePositions[i];nearest2=min(nearest2,dot(d,d));if(nbSurfaceHot[i]!=0u){hot2=min(hot2,dot(d,d));}}}
   workgroupBarrier();
  }
  // Positive float bit order: complement reverses it; zero is the empty key.
  if(present&&nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexSlotAt(slot)],~bitcast<u32>(nearest2));}
+ if(present&&hot2<4.0){atomicMax(&bins[NB_SURFACE_HOT_NEAREST+umVertexSlotAt(slot)],~bitcast<u32>(hot2));}
+}
+// Erasure belongs to the samples that represent this patch, not to hot
+// samples of another surface sharing its 4h heat-interpolation stencil.
+fn nbCachedSurfaceErasure(q:vec3i,nearest2:f32)->bool{
+ let key=atomicLoad(&bins[NB_SURFACE_HOT_NEAREST+umVertexAt(vec3u(q))]);
+ return key!=0u&&bitcast<f32>(~key)<=nearest2;
 }
 fn nbCachedSurfaceNearest(q:vec3i)->f32{
  let key=atomicLoad(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))]);

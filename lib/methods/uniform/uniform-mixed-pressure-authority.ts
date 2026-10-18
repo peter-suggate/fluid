@@ -37,9 +37,10 @@ export interface UniformMixedPressureRevisions {readonly buffer:GPUBuffer;readon
  /** UniformRegionHeat's tiers, copied each pass to tierOffset (bytes) in
   * buffer, and their non-COLD epochs to epochOffset. */
  readonly tiers?:GPUBuffer;readonly tierOffset?:number;readonly epochOffset?:number}
-/** The all-4h root's topology of one pressure solve: a vec4 per owner and halo
- * slot, in the static record's order (open, V+x, V+y, V+z). */
-export function uniformMixedRootTopologyBytes(layout:UniformMixedLayout):number{return 16*uniformMixedPressureStorage(layout).count;}
+/** The all-4h root's topology: a vec4 per owner and halo slot in the static
+ * record's order (open, V+x, V+y, V+z), then a vec4 per owner holding its
+ * +axis surface-crossing fractions. Zero fractions request the fitted fallback. */
+export function uniformMixedRootTopologyBytes(layout:UniformMixedLayout):number{return 16*(uniformMixedPressureStorage(layout).count+layout.cellCount);}
 /** What follows the owners' phi in the root's phi words with coarse solids,
  * three floats a tile: its +x, +y and +z face masks (bit u+4v of an h face the
  * root's topology keeps), plus bit 16 for a voxel wall normal to that axis.
@@ -364,6 +365,43 @@ fn umOpenOwnerPhi(o:UMOwner,v:f32,cap:f32)->f32{
 }
 @group(1) @binding(10) var<storage,read_write> rootTopology:array<vec4f>;
 const UM_ROOT_MASKS=${this.ownership.capacity.owners}u;
+const UM_ROOT_THETA=${uniformMixedPressureStorage(this.ownership.layout).count}u;
+// A centre distance can belong to a different disconnected surface. Locate
+// the first zero along each pressure face in the represented vertex field.
+// Store it separately from V: flux restriction still uses the physical aperture.
+fn umSurfaceVertex(p:vec3i)->f32{
+ var coarse=0xffffffffu;
+ for(var k=0u;k<8u;k++){
+  let c=p-vec3i(umCorner(k,2u));
+  let q=vec3i(floor(vec3f(c)/4.0));if(!umTilePresent(q)){continue;}let t=umTileAt(vec3u(q));
+  if(!umSolidFineTile(t)){coarse=min(coarse,t);}
+ }
+ if(coarse==0xffffffffu){return textureLoad(vertexPhi,p,0).x;}
+ let origin=vec3i(4u*umTileCoord(coarse));let f=vec3f(p-origin)/4.0;var value=0.0;
+ for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);let w=select(1.0-f,f,corner!=vec3u(0));value+=w.x*w.y*w.z*textureLoad(vertexPhi,origin+4*vec3i(corner),0).x;}
+ return value;
+}
+fn umFaceSurfaceTheta(t:u32,n:u32,axis:u32)->f32{
+ let a=phi[umTopology[t]&0x3fffffffu];let b=phi[umTopology[n]&0x3fffffffu];
+ let la=umWetRow(t);if(la==umWetRow(n)){return 1.0;}
+ var q=vec3i(4u*umTileCoord(select(n,t,la)))+vec3i(2);
+ var previous=umSurfaceVertex(q);let direction=select(-1,1,la);
+ if(previous<0.0){for(var j=1u;j<=4u;j++){
+  q[axis]+=direction;let next=umSurfaceVertex(q);
+  if(next>=0.0){return clamp((f32(j-1u)+previous/(previous-next))/4.0,0.001,1000.0);}
+  previous=next;
+ }}
+ // Closed continuation rows and unresolved crossings retain their fitted rule.
+ let liquid=select(b,a,la);let air=select(a,b,la);return clamp(-liquid/max(air-liquid,1e-30),0.001,1000.0);
+}
+fn umWriteSurfaceTheta(t:u32){
+ let c=umTileCoord(t);var theta=vec4f(0.0);
+ for(var axis=0u;axis<3u;axis++){
+  var q=c;q[axis]+=1u;if(!umTilePresent(vec3i(q))){continue;}
+  let n=umTileAt(q);if(umSolidCoarse(t).x>1e-5&&umSolidCoarse(n).x>1e-5){theta[axis]=umFaceSurfaceTheta(t,n,axis);}
+ }
+ rootTopology[UM_ROOT_THETA+t]=theta;
+}
 ${uniformMixedPressureBoundaryIndexWGSL()}
 // The tile's owner is a row: umPressureLiquid on the words just written.
 fn umWetRow(t:u32)->bool{return ${uniformMixedPressureLiquidWGSL("phi[umTopology[t]&0x3fffffffu]","4.0*UM_HMIN")};}
@@ -417,6 +455,7 @@ fn umWetTile(t:u32){
   if(!umSolidCut(t)&&!umSolidCut(n)){continue;}
   let face=umWetFace(t,n,vec3i(4u*c),axis);topology[axis+1u]=face.x;masks[axis]=face.y;
  }
+ umWriteSurfaceTheta(t);
  rootTopology[o.index]=topology;let words=UM_ROOT_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*t;
  for(var axis=0u;axis<3u;axis++){phi[words+axis]=masks[axis];}
  // A domain wall's slot keeps the record's V.
@@ -464,6 +503,7 @@ fn umWetTileListed(t:u32,l:u32){
   if(!umSolidCut(t)&&!umSolidCut(n)){continue;}
   let face=umWetFaces[3u*l+axis];topology[axis+1u]=face.x;masks[axis]=face.y;
  }
+ umWriteSurfaceTheta(t);
  rootTopology[o.index]=topology;let words=UM_ROOT_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*t;
  for(var axis=0u;axis<3u;axis++){phi[words+axis]=masks[axis];}
  // A domain wall's slot keeps the record's V.

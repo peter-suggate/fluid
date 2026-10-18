@@ -1,6 +1,8 @@
 /** CM11a pressure topology on mixed owners: (open, V+x, V+y, V+z), the native
  * mgVolumeIn record. Both all-4h levels use an arena vec4 per owner, then one
- * per halo slot whose x is that wall's V. Only built for scenes with static solids. */
+ * per halo slot whose x is that wall's V. The live root appends directional
+ * surface fractions (uniformMixedRootTopologyBytes); static records need no tail.
+ * Only built for scenes with static solids. */
 export type UniformMixedPressureTopology = {buffer:GPUBufferBinding};
 
 /** Requires the owner topology ABI (optionally namespaced by `prefix`), and

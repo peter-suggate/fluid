@@ -5,7 +5,7 @@ import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
-import { uniformMixedPressureSurfaceWGSL } from "./uniform-mixed-pressure-surface.wgsl";
+import { uniformMixedPressureSurfaceSource } from "./uniform-mixed-pressure-surface.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
@@ -150,8 +150,13 @@ struct UMProjectionParams {hDt:vec4f,policy:vec4f}
 \${COLD}
 ${uniformMixedFaceAddressWGSL}
 ${uniformMixedPressureBoundaryIndexWGSL()}
+${this.coarse?"@group(1) @binding(13) var<storage,read_write> rootTopology:array<vec4f>;":""}
 fn umPressurePhi(o:UMOwner)->f32{return phi[o.index];}
-${uniformMixedPressureSurfaceWGSL}
+${uniformMixedPressureSurfaceSource(this.coarse?`
+ let delta=vec3i(umOrigin(b))-vec3i(umOrigin(a));var axis=0u;if(delta.y!=0){axis=1u;}else if(delta.z!=0){axis=2u;}
+ let low=select(b.index,a.index,delta[axis]>0);let base=${uniformMixedPressureStorage(ownership.layout).count}u;
+ if(arrayLength(&rootTopology)>base+low){let theta=rootTopology[base+low][axis];if(theta>0.0){return theta;}}
+` : "")}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.coarse?this.solid!.coarse!.count:undefined)}
 // The kind of the cell across a face from its owner. Where nothing is stored
 // there, UM_SOLID is a wall, with a slot of its own (umBoundaryIndex), and
@@ -347,7 +352,7 @@ ${this.sourceParams?uniformMixedSourceWGSL(10):""}
 // The all-4h root has no seams: every reconstruction slope is zero.
 fn umPressureSlope(o:UMOwner)->vec3f{return vec3f(0);}
 ${uniformMixedPressureReconstructionSource(true,undefined,"umPressureDelta(owner,face.neighbor)")}
-${this.coarse?`@group(1) @binding(13) var<storage,read_write> rootTopology:array<vec4f>;
+${this.coarse?`
 // The root V of a 4h face: its low owner's V+, or with nothing stored across it the wall slot's or air's 1.
 fn umProjectV(o:UMOwner,face:UMFace)->f32{
  if(face.neighbor.width==0u){if(umFaceKind(face)==UM_AIR){return 1.0;}return umSolidCoarse(umBoundaryIndex(o,face.axis,face.sign)).x;}

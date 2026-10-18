@@ -14,8 +14,9 @@ export const uniformMixedPressureLiquidWGSL = (phi: string, spacing: string) => 
 export const uniformMixedSurfaceThetaWGSL = (liquidPhi: string, airPhi: string) => `clamp(-${liquidPhi}/max(${airPhi}-${liquidPhi},1e-30),${UNIFORM_MIXED_THETA_MIN},${(1 / UNIFORM_MIXED_THETA_MIN).toFixed(1)})`;
 
 /** Ghost-fluid theta plus nonorthogonal seam correction. The caller
- * provides owner phi, pressure and frozen pressure slopes. No added topology. */
-export const uniformMixedPressureSurfaceWGSL = createCm12NumericsWGSL() + /* wgsl */ `
+ * provides owner phi, pressure and frozen pressure slopes. An optional
+ * geometricTheta reads a shared directional crossing before the fitted fallback. */
+export function uniformMixedPressureSurfaceSource(geometricTheta=""):string{return createCm12NumericsWGSL() + /* wgsl */ `
 const UM_THETA_MIN:f32=${UNIFORM_MIXED_THETA_MIN};
 // An owner is liquid only where its centre lies deeper than theta_min of its
 // own centre spacing. With liquid at phi<0 and the depth floored at that
@@ -36,6 +37,7 @@ fn umPressureLiquid(o:UMOwner)->bool{return ${uniformMixedPressureLiquidWGSL("um
 fn umPressureTheta(a:UMOwner,b:UMOwner)->f32 {
  if(umPressureLiquid(a)==umPressureLiquid(b)){return 1.0;}
  var liquid=a;var air=b;if(!umPressureLiquid(a)){liquid=b;air=a;}
+ ${geometricTheta}
  return umPressureSurfaceTheta(umPressurePhi(liquid),umPressurePhi(air));
 }
 // The same rule for a liquid owner and an air phi (owner pairs above; the
@@ -59,4 +61,5 @@ fn umPressureGhostCorrection(owner:UMOwner,face:UMFace)->f32 {
  return -f32(face.sign)*dot(umPressureSlope(liquid),delta)
   /(0.5*f32(owner.width+face.neighbor.width)*UM_H[face.axis]);
 }
-`;
+`;}
+export const uniformMixedPressureSurfaceWGSL=uniformMixedPressureSurfaceSource();
