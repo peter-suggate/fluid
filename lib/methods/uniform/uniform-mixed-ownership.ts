@@ -263,7 +263,7 @@ export class UniformMixedOwnership {
     // The tail's last word locates the detail table (lib/core/uniform-detail-abi.ts).
     device.queue.writeBuffer(this.topology,this.topology.size-4,Uint32Array.of(this.detailBytes/4));
     this.counts = device.createBuffer({ label: "Uniform mixed work counts, geometry and window", size: 176,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.UNIFORM });
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE });
     device.queue.writeBuffer(this.counts,48,pages.subarray(64**3,64**3+32));
     device.queue.writeBuffer(this.counts, 16, new Uint32Array([...address.cells, n]));
     device.queue.writeBuffer(this.counts, 32, new Float32Array([...layout.lattice.cellSize_m, Math.min(...layout.lattice.cellSize_m)]));

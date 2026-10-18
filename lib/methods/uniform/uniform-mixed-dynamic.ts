@@ -1350,8 +1350,18 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
  if(umBit(${HEADER}u,tile)){return;}
  let p=vec3i(umTileCoord(tile));
  let a=umWindowTile(p-vec3i(1));let b=umWindowTile(p+vec3i(1));
+ ${this.warmSolids?`// warmResolution "4h": a COLD region keeps its widths. Its h tile stays h
+ // (with or without a cut of its own), and its tiles promote no neighbour:
+ // that relayout of the frozen pool warmed the region through the remap's
+ // mid-frame raise, whose 4h solids demoted the tiles again at the next
+ // census, a two-frame flicker along every COLD/WARM boundary.
+ let keep=bounds[CC_TIER+umPageOfTile(tile)]==${UNIFORM_REGION_TIER.cold}u&&umTileWidth(tile)==1u;`:"let keep=false;"}
  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
-  let t=umTileKey(vec3i(x,y,z));if(!umKeyStored(t)||!umBit(activeIndex(0u),t)){continue;}
+  let t=umTileKey(vec3i(x,y,z));
+  if(!keep){
+   if(!umKeyStored(t)||!umBit(activeIndex(0u),t)){continue;}
+   ${this.warmSolids?`if(t!=tile&&bounds[CC_TIER+umPageOfTile(t)]==${UNIFORM_REGION_TIER.cold}u){continue;}`:""}
+  }
   atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
   atomicAdd(&census[2],1u);atomicAdd(&census[19],1u);recordReason(tile,${REASON.solid}u);
   if(umTileWidth(tile)==1u){atomicSub(&census[5],1u);}else{atomicAdd(&census[4],1u);}

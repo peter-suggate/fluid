@@ -258,7 +258,7 @@ export class UniformMixedSolid {
   if(coarseLayout&&!resources.paramsWritten)throw new Error("The coarse solid record requires the host's parameter-block write receipt");
   this.paramsWritten=resources.paramsWritten;
   this.bodySource=resources.bodies;
-  this.bodies=device.createBuffer({label:"Uniform mixed solid body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  this.bodies=device.createBuffer({label:"Uniform mixed solid body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const bodies=this.bodies;
   const entries:GPUBindGroupLayoutEntry[]=[
    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
@@ -660,7 +660,7 @@ var<workgroup> cutAny:atomic<u32>;
   // The bodies-only rebuild is dispatched once a body has moved (needs).
   const build=(entryPoint:string,umBodyTiles:number)=>this.device.createComputePipelineAsync({layout:builderLayout,compute:{module,entryPoint,constants:{umDispatchX:dispatchX,umBodyTiles}}});
   const [pipeline,bodies,cuts,cutsBodies,claimed,cutsClaimed,surfaceClear,surfaceClearNew,surfaceClearBodies,bodyMask]=await Promise.all([build("build",0),build("buildRegions",1),build("cuts",0),build("cutsRegions",1),pool?build("buildNew",0):undefined,pool?build("cutsNew",0):undefined,build("surfaceClear",0),pool?build("surfaceClearNew",0):undefined,build("surfaceClear",1),build("bodyMask",0)]);
-  const built=this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const built=this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   this.builder={bodies,pipeline,claimed,cuts,cutsBodies,cutsClaimed,surfaceClear,surfaceClearBodies,surfaceClearNew,bodyMask,layout:output};
   const flagModule=this.device.createShaderModule({label:"Uniform mixed solid simulation widths",code:/* wgsl */`
 ${solidRecordRowsWGSL(layout.tiles.length)}

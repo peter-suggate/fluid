@@ -244,7 +244,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // is fatal to liquid a source or the initial band must add (noteReceipt).
   this.particleStride=narrowBandParticleStride(this.apic);const particleBytes=4*this.particleStride;
   this.capacity=Math.min(cells*8,Math.max(2_097_152,cells),Math.floor(device.limits.maxStorageBufferBindingSize/(this.apic?112:64)));
-  const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.particles=[buffer("particles A",this.capacity*particleBytes),buffer("particles B",this.capacity*particleBytes)];
   this.state=buffer("receipt and particle frame",64);
   // After the air planes: the occupied tile list (occupiedWord).

@@ -7,6 +7,7 @@ import {UNIFORM_DETAIL_POLICY} from "./uniform-detail-policy";
 import {UNIFORM_DETAIL_VIOLATION,type UniformDetailGroup,type UniformDetailStorage} from "./uniform-detail-fields";
 import {UniformPressureSurfaceBand} from "./uniform-pressure-surface-band";
 import {UniformPressureBand} from "./uniform-pressure-band";
+import {UniformComputeBlit} from "./uniform-compute-blit";
 import {UniformMixedFramePlan} from "./uniform-mixed-frame-plan";
 import {UniformMixedOwnershipTransfer,UniformMixedRemap} from "./uniform-mixed-remap";
 import {UniformMixedPhiResolve} from "./uniform-mixed-phi-resolve";
@@ -449,9 +450,10 @@ export class UniformMixedFrame {
  constructor(private readonly device:GPUDevice,layout:UniformMixedLayout,capacity:UniformMixedFrameCapacity,private readonly fields:UniformMixedFrameFields,private readonly openTop:boolean,private readonly schedule:UniformCM11aSchedule=DEFAULT_UNIFORM_CM11A_SCHEDULE){
   const f=fields;
   this.nearSettled=capacity.nearSettled??uniformNearSettled();
-  this.liquidBand=capacity.liquidBand;this.byteBudget=capacity.byteBudget;this.queue=device.queue;this.cold=new UniformColdFrame(capacity.coldFrameSkip!=="off");
+  this.liquidBand=capacity.liquidBand;this.byteBudget=capacity.byteBudget;this.queue=device.queue;this.blit=new UniformComputeBlit(device);this.cold=new UniformColdFrame(capacity.coldFrameSkip!=="off");
   const buffer=(label:string,size:number,usage:number)=>{const b=device.createBuffer({label,size,usage});this.owned.push(b);return b;};
-  const uniform=(name:string,size:number)=>buffer(`Uniform ${name} parameters`,size,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+  // STORAGE too: a copy into one is a compute launch (UniformComputeBlit).
+  const uniform=(name:string,size:number)=>buffer(`Uniform ${name} parameters`,size,GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST);
   this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",48),authority:uniform("authority",16),projection:uniform("projection",32),acceptance:uniform("acceptance",16)};
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.status=buffer("Uniform mixed frame status",4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
@@ -729,7 +731,7 @@ export class UniformMixedFrame {
   const tileWords=new UniformPageTileWords(this.device,this.pagePool,[uniformPageTopology(this.ownership)]);
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,this.surfaceWorkControl,...this.pageOwners]});
-  await settleGPUInitialization([this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
+  await settleGPUInitialization([this.blit,this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
    .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
   this.ready=true;
  }
@@ -1182,7 +1184,9 @@ export class UniformMixedFrame {
    return this.check(slot);
   }catch(error){trace?.abort();this.failed=true;throw error;}finally{for(let i=0;i<held;i++)this.releases[i]!();this.busy=false;}
  }
- private beginEncoder(trace?:UniformMixedFrameTrace):GPUCommandEncoder{const raw=this.device.createCommandEncoder(FRAME_ENCODER);return trace?.instrument(raw)??raw;}
+ /** The frame encoders' copies and clears run as compute launches (UniformComputeBlit). */
+ private readonly blit:UniformComputeBlit;
+ private beginEncoder(trace?:UniformMixedFrameTrace):GPUCommandEncoder{const raw=this.blit.adopt(this.device.createCommandEncoder(FRAME_ENCODER));return trace?.instrument(raw)??raw;}
  private submit(encoder:GPUCommandEncoder):void{this.commands[0]=encoder.finish();this.queue.submit(this.commands);}
  /** Submits the segment encoded so far; the frame goes on in the encoder returned. */
  private flush(encoder:GPUCommandEncoder,trace?:UniformMixedFrameTrace):GPUCommandEncoder{trace?.submit(encoder,this.fields.negative);this.submit(encoder);return this.beginEncoder(trace);}
@@ -1474,5 +1478,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{this.surfaceWorkControl.destroy();this.cycles.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{this.blit.destroy();this.surfaceWorkControl.destroy();this.cycles.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

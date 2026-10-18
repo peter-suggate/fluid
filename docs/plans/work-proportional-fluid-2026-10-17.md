@@ -2458,3 +2458,34 @@ What is left for drift under 20 ms:
   - surfaceHeld.
 
 The next lever is structural. Encode stages by which tiers are present, and fuse the per-region stages to cut the dispatch floor. Tuning single kernels will not get there.
+
+## Near-settled: phase 4c, copies and clears as compute launches (2026-10-18)
+
+On Dawn Metal, each switch from compute to a blit (a buffer copy or clear between compute passes) costs about 40 µs of GPU idle. Consecutive compute passes cost nothing extra. Drift late frames had 40 such switches per frame, from 66 copies and 50 clears.
+
+`UniformComputeBlit` (uniform-compute-blit.ts) now handles copies and clears on the frame encoders:
+
+- It batches copies and clears on storage buffers into one compute launch. A batch holds up to 15 records over up to 8 buffers, and it ends at any range hazard.
+- Bind groups and tables are cached, so a frame allocates nothing.
+- Uniform, solid-mirror and work-count buffers gained `STORAGE` usage so that their copies qualify.
+- Results are bit-identical, and a frame now has 2 switches.
+
+The `warmResolution: "4h"` solid promotion also changed. A COLD region now keeps its widths and promotes no neighbour. Before, a two-frame relayout flicker ran along every COLD/WARM edge.
+
+Results:
+
+| Scene | Before | After |
+|---|---|---|
+| Drift frames 100–150 | 24.8 ms | 19.6–20.1 ms (54.8 ms at 7a09d94a) |
+| Drift frames 6–30 | 23.0 ms | 19.5–19.7 ms |
+| Settled | – | 5.2 ms mean, 4.5 ms median |
+| Pool-impact (profiled) | – | 26.2 ms |
+
+Pool-impact physics is unchanged: impulse 494 N s and deepest point 1.343 m. It runs cleanly to frame 60.
+
+What is left:
+
+- **The dispatch floor.** About 582 dispatches remain, at about 5–8 µs each.
+- **The band.** It always runs 4 cycles in drift and never meets its tolerance. Fewer cycles would change results, so it needs a parameter.
+- **Closed root slots.** These cost about 0.5 ms. Schedule floor 3 is kept for safety.
+- **Fusion.** The per-region stage chains can still be fused.
