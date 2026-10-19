@@ -64,6 +64,8 @@ export class UniformMixedSurface {
   readonly predictorCacheBytes:number;
   private readonly claimBytes:number;
   private readonly resources: GPUBindGroupLayout;
+  /** umFastVelocity's linear filter (velocitySampler texture32). */
+  private readonly filter?:GPUSampler;
   /** Job counters and wall reach, cleared per frame. */
   readonly claims: GPUBuffer;
   private readonly evidenceBytes:number;
@@ -134,7 +136,11 @@ export class UniformMixedSurface {
     private readonly traceSubsteps:NarrowBandTraceSubsteps="gradient",
     /** wallTrace "clip": a wall-plane vertex traces in one step, and its wall
      * contact continuation moves the interior point by that trace (umWallContact). */
-    private readonly wallTrace:"clip"|"retrace"="clip") {
+    private readonly wallTrace:"clip"|"retrace"="clip",
+    /** surfaceVelocitySampler "texture32": umFastVelocity's unit interpolant is
+     * one filtered sample a component of the halo (float32-filterable). */
+    private readonly velocitySampler:"texture32"|"software"="software") {
+    if(velocitySampler==="texture32"&&!device.features.has("float32-filterable"))throw new Error("Mixed surface texture32 velocity sampling requires float32-filterable");
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -145,7 +151,10 @@ export class UniformMixedSurface {
       // The unit taps' halo: no detail field.
       ...(workControl?[{binding:15,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
       {binding:14,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
-    ]},[14]);
+      // velocitySampler texture32: binding 14's halo again, filterable, and its filter.
+      ...(velocitySampler==="texture32"?[{binding:22,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"float" as const,viewDimension:"3d" as const}},{binding:23,visibility:GPUShaderStage.COMPUTE,sampler:{type:"filtering" as const}}]:[]),
+    ]},[14,22]);
+    if(velocitySampler==="texture32")this.filter=device.createSampler({label:"Uniform mixed surface trace filter",magFilter:"linear",minFilter:"linear",addressModeU:"clamp-to-edge",addressModeV:"clamp-to-edge",addressModeW:"clamp-to-edge"});
     const address=this.address=ownership.capacity.address;
     // A deferred advect word holds a vertex key in 30 bits (all ones is no word): 29,878 pages of 33³ vertices.
     if(address.vertexKeys>0x3fffffff)throw new Error(`Mixed surface deferred advect packs a vertex key in 30 bits: ${address.vertexKeys} vertex keys exceed 1073741823 (29,878 pages of 35,937)`);
@@ -207,6 +216,7 @@ export class UniformMixedSurface {
       {binding:10,resource:{buffer:f.evidence.buffer,offset:f.evidence.offset??0,size:deferredOffset-(f.evidence.offset??0)+deferredBytes}},
       ...(this.sourceParams?[{binding:9,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
       {binding:11,resource:f.unitVelocity},{binding:14,resource:f.unitHalo},
+      ...(this.filter?[{binding:22,resource:f.unitHalo},{binding:23,resource:this.filter}]:[]),
       {binding:12,resource:{buffer:this.claims}},
       {binding:13,resource:{buffer:f.narrowBandState}},
       ...(this.workControl?[{binding:15,resource:{buffer:this.workControl.surface}}]:[]),
@@ -288,6 +298,7 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 }
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
 @group(1) @binding(14) var unitHalo:texture_3d<f32>;
+${this.filter?"@group(1) @binding(22) var unitHaloFiltered:texture_3d<f32>;\n@group(1) @binding(23) var umTraceFilter:sampler;":""}
 ${velocitySampling}
 ${narrowBandTraceWGSL("umSampleVelocity",this.traceSubsteps)}
 // p as a tap reaches it from the page: held inside it on an axis only where
@@ -337,9 +348,11 @@ fn umFastVelocity(p:vec3f)->vec3f{
    var offset=vec3f(0.5);offset[a]=1.0;
    let b=umHold;var lower=b.lo;lower[a]-=1.0;
    let q=clamp(p-offset,lower,b.hi-vec3f(1.0));
-   let base=vec3i(floor(q));var terms:array<f32,8>;
+${this.filter?`   // The same eight taps, filtered by the texture unit: texel centres sit
+   // at +0.5, so the filter's lower tap is floor(q), its weights fract(q).
+   value+=f*textureSampleLevel(unitHaloFiltered,umTraceFilter,(q+vec3f(home.xyz)+vec3f(0.5))/vec3f(textureDimensions(unitHaloFiltered)),0.0)[a];`:`   let base=vec3i(floor(q));var terms:array<f32,8>;
    for(var k=0u;k<8u;k++){terms[k]=textureLoad(unitHalo,base+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u))+home.xyz,0)[a];}
-   value+=f*umVelocityLerp8(terms,fract(q));
+   value+=f*umVelocityLerp8(terms,fract(q));`}
   }
   if(coarse>0.0){value+=coarse*umSampleVelocity4In(coarseHome,a);}
   v[a]=value;
