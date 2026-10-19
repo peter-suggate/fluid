@@ -9,6 +9,7 @@ import {uniformNarrowBandMethod} from "../../lib/methods/uniform/uniform-narrow-
 import {uniformTileKey, type UniformLatticeAddress} from "../../lib/methods/uniform/uniform-lattice-address";
 import type {WebGPUUniformReferenceSolver} from "../../lib/methods/uniform/webgpu-uniform-reference";
 import {uniformMixedSolidWGSL, type UniformMixedSolid} from "../../lib/methods/uniform/uniform-mixed-solid.wgsl";
+import {UNIFORM_PAGE_POOL_STATUS, type UniformPagePool} from "../../lib/methods/uniform/uniform-page-pool";
 import {readMixedTexture,readMixedTileWords} from "./uniform-mixed-native-fields";
 
 /** The production method, including its defaults and mixed ownership. */
@@ -37,14 +38,38 @@ export async function advanceUniform(solver:WebGPUUniformReferenceSolver,time:nu
  assert.equal(solver.info.simulationPipelineError,undefined);
 }
 
+/** The solver's address with its page directory as the GPU pool holds it
+ * now. The host address keeps the seed's directory, but a live pool claims
+ * and retires pages on the GPU (drops, splashes): a page claimed since reads
+ * as AIR through the seed, and a seed page whose block was reclaimed reads
+ * another page's texels. The solver's address is not changed. */
+export async function readUniformLiveAddress(device:GPUDevice,solver:WebGPUUniformReferenceSolver):Promise<UniformLatticeAddress>{
+ const address=(solver as unknown as {address:UniformLatticeAddress}).address;
+ const pool=(solver as unknown as {mixedFrame:{pagePool:UniformPagePool}}).mixedFrame.pagePool,l=pool.layout;
+ // uniformPageWord indexes a 64-page table, as the pool's default.
+ assert.equal(l.table,64,"The live directory read assumes a 64-page table");
+ const read=device.createBuffer({size:4*l.state.words,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+ try{
+  const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(pool.state,0,read,0,4*l.state.words);device.queue.submit([encoder.finish()]);
+  await read.mapAsync(GPUMapMode.READ);
+  const state=new Uint32Array(read.getMappedRange().slice(0));
+  const view=(at:number,words:number)=>state.subarray(at,at+words);
+  const seed={...address.seed,state,table:view(l.state.table,l.entries),blocks:view(l.state.blocks,l.blocks),tail:view(l.state.table,l.tail.words),
+   resident:view(l.state.resident,state[UNIFORM_PAGE_POOL_STATUS.resident]!)};
+  return {...address,seed};
+ }finally{if(read.mapState==="mapped")read.unmap();read.destroy();}
+}
+
 /** Expand owner averages only for diagnostics. Raw fine backing texels in a
  * coarse tile are not independent liquid cells and must not be summed. */
 export async function readUniformFields(device:GPUDevice,solver:WebGPUUniformReferenceSolver){
  await solver.awaitFrameCompletion();
- const [volume,tiles,phi,pressure]=await Promise.all([readMixedTexture(device,solver.volumeTexture),readMixedTileWords(device,solver),
-  readMixedTexture(device,solver.vertexPhiTexture!),readMixedTexture(device,solver.gridPressureTexture)]);
+ // Texels and tile keys placed by the live directory, not the seed's.
+ const address=await readUniformLiveAddress(device,solver);
+ const [volume,tiles,phi,pressure]=await Promise.all([readMixedTexture(device,solver.volumeTexture,address),readMixedTileWords(device,solver),
+  readMixedTexture(device,solver.vertexPhiTexture!,address),readMixedTexture(device,solver.gridPressureTexture,address)]);
  // Tile words are by tile key: a tile nothing stores reads a word of block 0, a 4h tile of owner 0.
- const {nx,ny,nz}=solver.info,address=(solver as unknown as {address:UniformLatticeAddress}).address;
+ const {nx,ny,nz}=solver.info;
  const wordAt=(x:number,y:number,z:number)=>tiles[uniformTileKey(address,x>>2,y>>2,z>>2)]!;
  const widthAt=(x:number,y:number,z:number)=>(wordAt(x,y,z)&0x80000000)?1:4;
  const density=new Float32Array(nx*ny*nz);

@@ -1,12 +1,24 @@
 import { uniformDetailExtent, uniformDetailField } from "../../lib/methods/uniform/uniform-detail-fields";
+import type { UniformLatticeAddress } from "../../lib/methods/uniform/uniform-lattice-address";
 /** A solver field's lattice extent; its texture may be a packed atlas. */
 export const mixedExtent = (texture: GPUTexture): [number, number, number] => uniformDetailExtent(texture);
 /** The texture holding a solver field's texels now, for raw whole-texture copies. */
 export const mixedPhysical = (texture: GPUTexture): GPUTexture => uniformDetailField(texture)?.storage.physical(texture) ?? texture;
-/** Tightly packed texture readback for transport-stage comparisons. */
-export async function readMixedTexture(device: GPUDevice, texture: GPUTexture): Promise<Float32Array> {
+/** Tightly packed texture readback for transport-stage comparisons.
+ * address: the residency to place a detail field's texels by, in place of
+ * its storage's (whose directory is the seed's: a live pool claims and
+ * retires pages on the GPU). The storage is not changed. */
+export async function readMixedTexture(device: GPUDevice, texture: GPUTexture, address?: UniformLatticeAddress): Promise<Float32Array> {
   const field = uniformDetailField(texture);
-  if (field) return field.storage.read(texture);
+  if (field) {
+    if (!address) return field.storage.read(texture);
+    // The storage seen through another layout address; its field identity
+    // checks (kindOf, physical) still run on the storage itself.
+    const storage = field.storage, layout = { ...storage.layout, address };
+    const view = new Proxy(storage, { get: (target, key, receiver) =>
+      key === "layout" ? layout : key === "kindOf" || key === "physical" ? (target[key] as (t: GPUTexture) => unknown).bind(target) : Reflect.get(target, key, receiver) });
+    return view.read(texture);
+  }
   const components = texture.format === "rgba32float" ? 4 : 1;
   const row = texture.width * components * 4, pitch = Math.ceil(row / 256) * 256;
   const staging = device.createBuffer({ size: pitch * texture.height * texture.depthOrArrayLayers, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
