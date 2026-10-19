@@ -1,19 +1,5 @@
 /** Occupied-cell surface scatter, shared by the listed and fused paths. */
 export const narrowBandSplatWGSL=/* wgsl */`
-// The nearest banks are scratch, but only mapped pages can be read or
-// splatted. Clear both banks over those pages, including their complete
-// 33^3 vertex halos. Free capacity needs no bandwidth; a newly mapped page
-// is cleared on its first reconstruction, regardless of its previous use.
-@compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var job=group.x;job<32u*(UM_TILES/512u);job+=groups.x){
-  let block=job/32u;if(block==0u||block+1u>=UM_TILES/512u||!umTileLive(512u*block)){continue;}
-  for(var i=64u*(job%32u)+lane;i<35937u;i+=2048u){
-   let key=35937u*block+i;
-   atomicStore(&bins[NB_DEPTH_A+key],0u);
-   atomicStore(&bins[NB_SURFACE_HOT_NEAREST+key],0u);
-  }
- }
-}
 // Before the deposit, the motion bank holds one word per occupied cell.
 // There can be no more occupied cells than sorted live particles.
 fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}

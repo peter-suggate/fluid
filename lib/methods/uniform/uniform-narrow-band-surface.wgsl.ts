@@ -1,4 +1,5 @@
 import { narrowBandSplatWGSL } from "./uniform-narrow-band-splat.wgsl";
+import { uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
 
 /** Particle geometry enters the canonical simulation phi before pressure. */
 export const NARROW_BAND_SURFACE_RADIUS=0.875;
@@ -113,27 +114,37 @@ fn nbCoupleTheta(v:vec3i,surface:bool)->f32{
  }
  return clamp(theta/select(1.0,max(covered,1e-20),surface),0.0,1.0);
 }
+// The vertices a fine tile's coupleFine job reconstructs, a lane and round
+// each (w 0: none). surfaceClear clears exactly these nearest words.
+struct NBCoupleFine{origin:vec3i,low:vec3<bool>,boundary:bool,regular:bool,wide:u32,tile:u32}
+fn nbCoupleFineTile(tile:u32)->NBCoupleFine{
+ let origin=vec3i(umTileCoord(tile)*4u);let pageLocal=(vec3u(origin)>>vec3u(2u))&vec3u(7u);
+ return NBCoupleFine(origin,umLowOpen(origin),any(pageLocal==vec3u(0))||any(pageLocal==vec3u(7)),
+  umTileMaximumWidth(tile)==1u&&umTileMinimumWidth(tile)==1u,umFineWideMask(tile),tile);
+}
+fn nbCoupleFineVertex(t:NBCoupleFine,lane:u32,round:u32)->vec4i{
+ var local=umCorner(lane,4u)+vec3u(1);
+ if(t.boundary){let i=lane+64u*round;if(i>=125u){return vec4i(0);}local=umCorner(i,5u);}
+ let q=t.origin+vec3i(local);
+ if(t.boundary){
+  if(t.regular){if(any(local==vec3u(0))&&!all((local>vec3u(0))|t.low)){return vec4i(0);}}
+  else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=t.tile){return vec4i(0);}}
+ }else{
+  if(!umFineOwnsPositiveVertex(local,t.wide)){return vec4i(0);}
+ }
+ // The store holds a shared COLD vertex too. Test before any geometry or
+ // particle gather, not just after computing the value it will discard.
+ if(nbVertexCold(vec3u(q))){return vec4i(0);}
+ return vec4i(q,1);
+}
 @compute @workgroup_size(64) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umSolidSkip()){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0,0));umLoadAddressPlan(owner.tile>>9u,lane);nbCoupleHeatLoad(owner.tile,lane);
  if(nbTileCold(owner.tile)){return;}
- let origin=vec3i(umTileCoord(owner.tile)*4u);let low=umLowOpen(origin);
- let pageLocal=(vec3u(origin)>>vec3u(2u))&vec3u(7u);
- let boundary=any(pageLocal==vec3u(0))||any(pageLocal==vec3u(7));let wide=umFineWideMask(owner.tile);
- let regular=umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u;
- for(var round=0u;round<select(1u,2u,boundary);round++){
-  var local=umCorner(lane,4u)+vec3u(1);
-  if(boundary){let i=lane+64u*round;if(i>=125u){continue;}local=umCorner(i,5u);}
-  let q=origin+vec3i(local);
-  if(boundary){
-   if(regular){if(any(local==vec3u(0))&&!all((local>vec3u(0))|low)){continue;}}
-   else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){continue;}}
-  }else{
-   if(!umFineOwnsPositiveVertex(local,wide)){continue;}
-  }
-  // The store holds a shared COLD vertex too. Test before any geometry or
-  // particle gather, not just after computing the value it will discard.
-  if(nbVertexCold(vec3u(q))){continue;}
+ let fine=nbCoupleFineTile(owner.tile);let origin=fine.origin;
+ for(var round=0u;round<select(1u,2u,fine.boundary);round++){
+  let vertex=nbCoupleFineVertex(fine,lane,round);if(vertex.w==0){continue;}
+  let q=vertex.xyz;
   let bulk=particleSurfaceBulk(owner.tile,origin,q,true);var value=bulk.x;
   if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z,true);}
   nbStoreReconstructed(q,value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),1u);
@@ -143,23 +154,53 @@ fn nbCoupleTheta(v:vec3i,surface:bool)->f32{
 
 /** Reconstruction first scatters occupied-cell distances into the expired
  * metric bank, then each canonical vertex reads one nearest-distance word. */
-export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+narrowBandSplatWGSL+/* wgsl */`
+export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+narrowBandSplatWGSL+uniformMixedCertifiedEntriesWGSL(/* wgsl */`
+// Whether couple reconstructs a 4h owner's corner k. A low corner is the
+// tile's to write only where nothing is stored below it.
+fn nbCoupleCorner(owner:UMOwner,origin:vec3u,regular:bool,low:vec3<bool>,k:u32)->bool{
+ let corner=umCorner(k,2u);let q=origin+4u*corner;
+ if(regular){if(!all((corner!=vec3u(0))|low)){return false;}}
+ else if(umVertexAuthority(q).index!=owner.index){return false;}
+ return !nbVertexCold(q);
+}
+// The splat's atomic minima need zeroed words, but only couple and
+// coupleFine read them (nbCachedSurfaceNearest, nbCachedSurfaceErasure).
+// Clear exactly the vertices those reconstruct, a fine tile's job then 64
+// 4h owners' a job, not every mapped page's 33^3 words. A word the splat
+// reaches but no reconstruction reads keeps whatever it held: bank A's
+// other readers (the redistance metric, the crossing rows) write their
+// words before they read them.
+@compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(group.x<umCounts.x){
+  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));umLoadAddressPlan(owner.tile>>9u,lane);
+  if(nbTileCold(owner.tile)){return;}
+  let fine=nbCoupleFineTile(owner.tile);
+  for(var round=0u;round<select(1u,2u,fine.boundary);round++){
+   let vertex=nbCoupleFineVertex(fine,lane,round);if(vertex.w==0){continue;}
+   let key=umVertexAt(vec3u(vertex.xyz));atomicStore(&bins[NB_DEPTH_A+key],0u);atomicStore(&bins[NB_SURFACE_HOT_NEAREST+key],0u);
+  }
+  return;
+ }
+ let owner=umAllOwner(vec3u(umCounts.x*64u+64u*(group.x-umCounts.x)+lane,0u,0u));if(owner.width!=4u||nbTileCold(owner.tile)){return;}
+ let origin=umOrigin(owner);let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
+ let low=umLowOpen(vec3i(origin));
+ for(var k=0u;k<8u;k++){
+  if(!nbCoupleCorner(owner,origin,regular,low,k)){continue;}
+  let key=umVertexAt(origin+4u*umCorner(k,2u));atomicStore(&bins[NB_DEPTH_A+key],0u);atomicStore(&bins[NB_SURFACE_HOT_NEAREST+key],0u);
+ }
+}
 @compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width!=4u||nbTileCold(owner.tile)){return;}
  let origin=umOrigin(owner);let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
- // A low corner is this tile's to write only where nothing is stored below it.
  let low=umLowOpen(vec3i(origin));
  for(var k=0u;k<8u;k++){
-  let corner=umCorner(k,2u);let q=origin+4u*corner;
-  if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
-  else if(umVertexAuthority(q).index!=owner.index){continue;}
-  if(nbVertexCold(q)){continue;}
+  let q=origin+4u*umCorner(k,2u);if(!nbCoupleCorner(owner,origin,regular,low,k)){continue;}
   let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q),false);var value=bulk.x;
   if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)),bulk.z,false);}
   nbStoreReconstructed(vec3i(q),value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),4u);
  }
 }
-`;
+`,["surfaceClear"],"umCounts.x+(umCounts.y+63u)/64u");
 
 /** FIN: each fine tile the deposit reached (its NB_DEPOSITED flag) prepares
  * its face blend once, sharing the 5³ metric vertices, and finishes its
