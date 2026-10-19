@@ -27,6 +27,10 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  * - traceSubsteps: "gradient" sizes the level-set backtrace's substeps by
  *   the velocity gradient along the step; "travel" takes one a cell of travel.
  *   Particles take one RK3 step either way.
+ * - wallTrace: "clip" traces a wall-plane vertex in one RK3 step and takes
+ *   its wall contact continuation from the interior point moved by that
+ *   trace, clipped into the domain (no second trace); "retrace" substeps it
+ *   (traceSubsteps) and traces the interior point again.
  * - redistanceSearch: "shared" lets redistance reuse the crossing search that
  *   retirement ran just before it; "fresh" searches again after retirement
  *   (which can move a hanging zero at a coarse seam).
@@ -38,7 +42,7 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  *   "texture32" also filters the particle trace's halo samples in the
  *   texture unit; the other values keep its eight loads.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly traceSubsteps:"gradient"|"travel";readonly redistanceSearch:"shared"|"fresh";readonly particleOrder:"scheduled"|"canonical";readonly momentumSampler:UniformMomentumSampler}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly redistanceSearch:"shared"|"fresh";readonly particleOrder:"scheduled"|"canonical";readonly momentumSampler:UniformMomentumSampler}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -52,6 +56,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  rootReserve:values.rootReserve==="parallel"?"parallel":"fused",
  bandCycles:typeof values.bandCycles==="number"&&Number.isInteger(values.bandCycles)?Math.min(8,Math.max(1,values.bandCycles)):4,
  traceSubsteps:values.traceSubsteps==="travel"?"travel":"gradient",
+ wallTrace:values.wallTrace==="retrace"?"retrace":"clip",
  redistanceSearch:values.redistanceSearch==="fresh"?"fresh":"shared",
  particleOrder:values.particleOrder==="canonical"?"canonical":"scheduled",
  momentumSampler:values.momentumSampler==="software"||values.momentumSampler==="texture16"?values.momentumSampler:"texture32",

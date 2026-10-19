@@ -131,7 +131,10 @@ export class UniformMixedSurface {
     /** warmResolution "4h": a WARM vertex deep in liquid or air keeps its value (umHoldWarmDeep). */
     private readonly warmDeepHold=false,
     /** traceSubsteps: how the backtrace sizes its substeps (narrowBandTraceWGSL). */
-    private readonly traceSubsteps:NarrowBandTraceSubsteps="gradient") {
+    private readonly traceSubsteps:NarrowBandTraceSubsteps="gradient",
+    /** wallTrace "clip": a wall-plane vertex traces in one step, and its wall
+     * contact continuation moves the interior point by that trace (umWallContact). */
+    private readonly wallTrace:"clip"|"retrace"="clip") {
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -357,6 +360,12 @@ var<private> umTraceSeedVelocity:vec3f;
 var<private> umReachLo:vec3f;
 var<private> umReachHi:vec3f;
 fn umReachInclude(x:vec3f){umReachLo=min(umReachLo,x);umReachHi=max(umReachHi,x);}
+// wallTrace "clip": a wall-plane vertex's trace (umAdvected sets
+// umOneStep) is one RK3 step of any length, and umVertexTrace keeps its
+// travel (umLastTravel) for umWallContact.
+const UM_WALL_CLIP:bool=${this.wallTrace==="clip"};
+var<private> umOneStep:bool=false;
+var<private> umLastTravel:vec3f=vec3f(0.0);
 fn umSurfaceTrace(p:vec3f)->vec3f{
  let h=params.hDt.xyz;
  let useSeed=umSurfaceTraceSeed&&umFastSurface&&umTraceSeedValid&&all(umTraceSeedPoint==p);
@@ -378,6 +387,7 @@ fn umSurfaceTrace(p:vec3f)->vec3f{
    k1=k;
    if(i==0u){
     steps=nbTraceSteps(k1,params.hDt.w);
+    if(umOneStep){steps=1u;}
     if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&nbState[3],1u);return p;}
     travel=steps;if(NB_TRACE_GRADIENT&&steps>1u){steps=1u;probe=true;}
     base=-params.hDt.w/f32(steps);
@@ -690,7 +700,12 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   if(inward*speed>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;
  }
- if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}let continued=umSampleVertex(umTrace(interior));
+ if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}
+ // "clip": the interior point moved by the vertex's own trace, held in the
+ // domain (umPointFrom) and walked against solids; "retrace": its own trace.
+ var start=vec3f(0.0);
+ if(UM_WALL_CLIP){start=umPointFrom(interior,interior+umLastTravel);${this.solid?"start=umWalk(interior,start).q;":""}}else{start=umTrace(interior);}
+ let continued=umSampleVertex(start);
  return select(value,min(value,continued),continued<0.0);
 }
 // The six wall reach words (UM_WALL_REACH, a face direction each) are final
@@ -862,7 +877,7 @@ fn umVertexFoot(vertex:vec3u,width:u32)->UMFoot{
 // by its shift (within two widths of where the trace ended, reached from
 // there). One trace (one call site of umSurfaceTrace).
 fn umVertexTrace(foot:UMFoot)->vec3f{
- let end=umSurfaceTrace(foot.foot);if(all(foot.shift==vec3f(0.0))){return end;}
+ let end=umSurfaceTrace(foot.foot);umLastTravel=end-foot.foot;if(all(foot.shift==vec3f(0.0))){return end;}
  let shifted=umPointFrom(end,end+foot.shift);umReachInclude(shifted);return shifted;
 }
 var<private> umFullCubic:bool=false;
@@ -873,6 +888,7 @@ var<private> umCubicQueued:bool=false;
 // reuse its words: advectCubic consumed advectFine's in an earlier launch.
 const UM_CUBIC_ENTRIES=${this.cubicEntries}u;
 fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
+ umOneStep=UM_WALL_CLIP&&umWallPlane(vec3i(p))<6u;
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){umFullIdentity=true;return umLoadVertex(vec3u(p));}
  let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
