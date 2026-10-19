@@ -48,27 +48,48 @@ var<workgroup> nbSurfaceRange:vec2u;
 }
 // Fuse occupied-cell selection and its splat. The sort already maintains
 // every occupied tile; no whole-lattice scan, temporary cell list or atomic
-// append is needed. Fixed direct groups stride the current GPU count.
+// append is needed. Fixed direct groups stride the current GPU count. Each
+// tile's samples scatter in parallel into a shared 7^3 vertex window (cells
+// -1 to 5): unsigned minima of nonnegative distances are order independent,
+// so one flush a touched vertex gives the per-cell scalar gather's bits.
 var<workgroup> nbSurfaceJobs:u32;
 var<workgroup> nbSurfaceTile:u32;
-var<workgroup> nbSurfaceMask:array<atomic<u32>,2>;
-@compute @workgroup_size(64) fn surfaceSplatOccupied(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+var<workgroup> nbSurfaceWindow:array<atomic<u32>,343>;
+var<workgroup> nbSurfaceWindowHot:array<atomic<u32>,343>;
+const NB_SURFACE_FAR:u32=0x40800000u;
+@compute @workgroup_size(128) fn surfaceSplatOccupied(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane==0u){nbSurfaceJobs=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);}
  let count=workgroupUniformLoad(&nbSurfaceJobs);
  for(var job=group.x;job<count;job+=groups.x){
   workgroupBarrier();
-  if(lane<2u){atomicStore(&nbSurfaceMask[lane],0u);}
+  for(var k=lane;k<343u;k+=128u){atomicStore(&nbSurfaceWindow[k],NB_SURFACE_FAR);atomicStore(&nbSurfaceWindowHot[k],NB_SURFACE_FAR);}
   if(lane==0u){nbSurfaceTile=atomicLoad(&bins[NB_OCCUPIED+4u+job]);}
-  let tile=workgroupUniformLoad(&nbSurfaceTile);umLoadAddressPlan(tile>>9u,lane);let cell=64u*tile+lane;
-  var eligible=umTileLive(tile)&&atomicLoad(&bins[cell])!=0u;
-  if(eligible){let local=(4u*umTileCoord(tile)+umCorner(lane,4u))&vec3u(15u);eligible=!(all((local>=vec3u(1u))&(local<=vec3u(13u)))&&nbTileCold(tile));}
-  if(eligible){atomicOr(&nbSurfaceMask[lane/32u],1u<<(lane%32u));}
-  // Selection is one parallel tile scan. Empty cells cost no splat barrier.
-  for(var word=0u;word<2u;word++){
-   var mask=workgroupUniformLoad(&nbSurfaceMask[word]);
-   while(mask!=0u){
-    let cell=64u*tile+32u*word+firstTrailingBit(mask);nbSurfaceSplatCell(cell,lane);mask&=mask-1u;
+  let tile=workgroupUniformLoad(&nbSurfaceTile);
+  if(!umTileLive(tile)){continue;}
+  umLoadAddressPlan(tile>>9u,lane);
+  let origin=4u*umTileCoord(tile);let cold=nbTileCold(tile);
+  let start=links[64u*tile];let end=links[64u*tile+63u]+atomicLoad(&bins[64u*tile+63u]);
+  for(var i=start+lane;i<end;i+=128u){
+   // The sort's cell: positions relative to a tile origin are exact.
+   let p=nbPosition(i)-vec3f(origin);let c=clamp(vec3i(floor(p)),vec3i(0),vec3i(3));
+   // A cell whose splat footprint (cell - 1 to cell + 2) lies in a COLD
+   // region's closure feeds only vertices reconstruction holds.
+   let l=(origin+vec3u(c))&vec3u(15u);if(cold&&all((l>=vec3u(1u))&(l<=vec3u(13u)))){continue;}
+   let hot=nbSurfaceParticleHot(i);
+   for(var k=0u;k<64u;k++){
+    let v=c+vec3i(umCorner(k,4u))-1;let d=vec3f(v)-p;let d2=dot(d,d);
+    if(d2<4.0){let w=u32(v.x+1+7*(v.y+1)+49*(v.z+1));atomicMin(&nbSurfaceWindow[w],bitcast<u32>(d2));if(hot){atomicMin(&nbSurfaceWindowHot[w],bitcast<u32>(d2));}}
    }
+  }
+  workgroupBarrier();
+  for(var k=lane;k<343u;k+=128u){
+   let nearest=atomicLoad(&nbSurfaceWindow[k]);if(nearest==NB_SURFACE_FAR){continue;}
+   let q=vec3i(origin)+vec3i(umCorner(k,7u))-1;
+   // One slot lookup serves the presence test and the depth key.
+   let slot=umVertexSlot(q);if(!umBlockStored(slot.w)){continue;}
+   // Positive float bit order: complement reverses it; zero is the empty key.
+   atomicMax(&bins[NB_DEPTH_A+umVertexSlotAt(slot)],~nearest);
+   let hot=atomicLoad(&nbSurfaceWindowHot[k]);if(hot!=NB_SURFACE_FAR){atomicMax(&bins[NB_SURFACE_HOT_NEAREST+umVertexSlotAt(slot)],~hot);}
   }
  }
 }
