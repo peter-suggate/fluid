@@ -48,7 +48,7 @@ type Words = RootLevelsFacts["words"];
 interface Launch { tiles: number }
 interface Range { buffer: GPUBuffer; offset?: number; size?: number }
 interface Cycles {
-  pipelines: Map<string, Launch>; traversals: Record<"setup" | "measure" | "vCycle" | "fullCycle", Launch[]>;
+  pipelines: Map<string, Launch>; traversals: Record<"setup" | "setupFull" | "measure" | "vCycle" | "fullCycle", Launch[]>;
   dispatch(passes: UniformMixedPressurePasses, launch: Launch, capacity: boolean): void;
   resourceEntries: { binding: number; resource: Range }[]; list: GPUBuffer; rounding: GPUBuffer; words: Words; tiled: number; listed: boolean;
 }
@@ -115,7 +115,7 @@ try {
     gpuDevice.queue.writeBuffer(mixedRange.buffer, at(cycles.words.p), p); gpuDevice.queue.writeBuffer(mixedRange.buffer, at(cycles.words.b0), b); gpuDevice.queue.writeBuffer(mixedRange.buffer, at(cycles.words.m0), m);
     // The pressure schedule's gate (support 9n+24), open.
     gpuDevice.queue.writeBuffer(root.support, 4 * (9 * keys + 24), new Uint32Array([0]));
-    const encoder = gpuDevice.createCommandEncoder(); encoder.clearBuffer(cycles.rounding); encoder.clearBuffer(cycles.list, 0, 4); gpuDevice.queue.submit([encoder.finish()]);
+    const encoder = gpuDevice.createCommandEncoder(); encoder.clearBuffer(cycles.rounding); encoder.clearBuffer(cycles.list, 0, 4); encoder.clearBuffer(cycles.list, cycles.list.size - 4 * (2 * N + 1), 4); gpuDevice.queue.submit([encoder.finish()]);
   }
   const state = async (): Promise<RootLevelsState> => ({
     mixed: new Float32Array(await read(mixedRange.buffer, mixedRange.offset ?? 0, mixedRange.size!)), native: new Float32Array(await read(nativeRange.buffer, nativeRange.offset ?? 0, nativeRange.size!)),
@@ -170,7 +170,7 @@ try {
   };
 
   const names = new Map<Launch, string>(); for (const [name, launch] of cycles.pipelines) names.set(launch, name);
-  const t = cycles.traversals, sequence = [...t.setup, ...t.measure, ...t.vCycle, ...t.measure, ...t.fullCycle, ...t.measure];
+  const t = cycles.traversals, sequence = [...t.setupFull, ...t.measure, ...t.vCycle, ...t.measure, ...t.fullCycle, ...t.measure];
   const passes = new UniformMixedPressurePasses(undefined, "Root levels probe");
   let before = await state(), firstDeviation: string | undefined, deviations = 0;
   for (let i = 0; i < sequence.length; i++) {
@@ -178,7 +178,7 @@ try {
     const encoder = gpuDevice.createCommandEncoder(); passes.begin(encoder); cycles.dispatch(passes, launch, false); passes.finish(); gpuDevice.queue.submit([encoder.finish()]);
     const after = await state();
     const expected: RootLevelsState = { mixed: before.mixed.slice(), native: before.native.slice(), rounding: before.rounding.slice(), list: before.list.slice() };
-    reference.run(name, expected);
+    reference.run(name.replace(/\.full$/, ""), expected);
     const { lines, wrote } = compare(before, expected, after);
     if (lines.length) { deviations++; firstDeviation ??= `launch ${i + 1} (${name})`; console.log(`DEVIATES ${i + 1} ${name}\n  ${lines.join("\n  ")}`); }
     else console.log(`ok   ${i + 1} ${name} (${wrote} words, list ${after.list[0]})`);

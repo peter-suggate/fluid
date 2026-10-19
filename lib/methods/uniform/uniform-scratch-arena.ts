@@ -1,6 +1,8 @@
 /** Shared f32 backing of the pressure solve: the mixed pressure root, then
  * the levels its correction is solved on. Both follow the page pool: rows a
- * block. Persistent/published textures remain ordinary textures.
+ * block. Hierarchy geometry/coefficient ranges are retained derived state;
+ * only pressure setup writes them. Iterates, RHS and bounds remain scratch.
+ * Persistent/published textures remain ordinary textures.
  *
  * The scratch the non-pressure stages overlap follows the h-tile capacity
  * and is the mixed frame's own buffer (UniformMixedFrame.stageBytesAt). */

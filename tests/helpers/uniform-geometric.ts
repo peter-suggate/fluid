@@ -18,11 +18,11 @@ export async function createUniformSolver(device:GPUDevice,scene:SceneDescriptio
   resolveMethodValues(uniformNarrowBandMethod,"balanced",{...uniformNarrowBandMethod.appDefaults,timeStep:"scene",...values}),undefined,()=>{}) as WebGPUUniformReferenceSolver;
 }
 
-export async function withUniformDevice(label:string,run:(device:GPUDevice)=>Promise<void>,features:readonly GPUFeatureName[]=[]){
+export async function withUniformDevice(label:string,run:(device:GPUDevice)=>Promise<void>,features:readonly GPUFeatureName[]=[],dawnOptions:readonly string[]=[]){
  let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
-  const adapter=await createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`]).requestAdapter();assert.ok(adapter);
+  const adapter=await createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`,...dawnOptions]).requestAdapter();assert.ok(adapter);
   device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:features.filter(f=>adapter.features.has(f)),requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   await run(device);await device.queue.onSubmittedWorkDone();assert.deepEqual(errors,[]);

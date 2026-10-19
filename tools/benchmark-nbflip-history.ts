@@ -1,6 +1,7 @@
 /** Compare historical NB-FLIP implementations, including changed defaults and policies.
  * This is a historical comparison, NOT a physics-equivalence test. Records both resolved settings.
  * --transfer=flip matches transfer choice; --profile=true adds diagnostic pass timestamps.
+ * --kernels=true splits dispatches into timed passes (diagnostic only; changes overhead).
  * --baseline-values=JSON and --candidate-values=JSON override a single arm.
  * --sync=N runs both arms from the same GPU state from frame N on: before every frame >= N
  * every copyable buffer and texture of one arm is copied into the other (the source arm
@@ -30,13 +31,15 @@ import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
-for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|from|scene|scene-file|out|transfer|profile|baseline-values|candidate-values|sync)=.+$/);
+for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|from|scene|scene-file|out|transfer|profile|baseline-values|candidate-values|baseline-plans|candidate-plans|sync|kernels)=.+$/);
 const steps = Number(option("steps") ?? 240), from = Number(option("from") ?? 13);
 assert.ok(Number.isInteger(steps) && Number.isInteger(from) && from > 0 && steps >= from);
 const roots = [option("baseline"), option("candidate")]; assert.ok(roots.every(Boolean));
 assert.ok(!option("transfer") || ["flip", "apic"].includes(option("transfer")!));
 assert.ok(!option("profile") || ["true", "false"].includes(option("profile")!));
-const profiled = option("profile") === "true";
+assert.ok(!option("kernels") || ["true", "false"].includes(option("kernels")!));
+const kernels = option("kernels") === "true";
+const profiled = option("profile") === "true" || kernels;
 const syncFrom = option("sync") ? Number(option("sync")) : Infinity;
 assert.ok(syncFrom === Infinity || (Number.isInteger(syncFrom) && syncFrom > 1 && syncFrom <= from));
 let profile: GPUPassProfile | undefined;
@@ -51,10 +54,10 @@ let raw: GPUDevice | undefined;
 try {
   const dawn = await import(pathToFileURL(resolve("node_modules/webgpu/index.js")).href);
   Object.assign(globalThis, dawn.globals);
-  const gpu = createProcessRetainedDawnGPU(dawn, ["backend=metal"]), adapter = await gpu.requestAdapter(); assert.ok(adapter);
+  const gpu = createProcessRetainedDawnGPU(dawn, ["backend=metal", ...(profiled ? ["disable-dawn-features=timestamp_quantization"] : [])]), adapter = await gpu.requestAdapter(); assert.ok(adapter);
   raw = await adapter.requestDevice({ requiredFeatures: ["timestamp-query", ...(adapter.features.has("subgroups") ? ["subgroups" as const] : [])], requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
   raw.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
-  if (profiled) profile = new GPUPassProfile(raw);
+  if (profiled) profile = new GPUPassProfile(raw, 4096, kernels);
   // Resources each arm creates, in creation order, for --sync. Map-usage buffers are host staging: skipped.
   type Tracked = { buffer?: GPUBuffer; texture?: GPUTexture; key: string; dead: boolean };
   const owned: Tracked[][] = [[], []]; let owner = -1;
@@ -114,11 +117,27 @@ try {
     dt = step; assert.ok(steps * dt <= scene.duration_s + 1e-9);
     const hash = createHash("sha256"), directory = resolve(cwd, "lib/methods/uniform");
     for (const f of readdirSync(directory).filter(f => f.endsWith(".ts")).sort()) { hash.update(f); hash.update(readFileSync(resolve(directory, f))); }
+    // Compile-time stage ablation: the data layout and rebuild remain identical.
+    // Use separate source roots so the module-local sets cannot affect the other arm.
+    const requestedPlans=option(index ? "candidate-plans" : "baseline-plans");
+    let addressPlans:string[]|undefined;
+    const planModulePath="lib/methods/uniform/uniform-address-plan.ts";
+    if(existsSync(resolve(cwd,planModulePath))){
+      const {UNIFORM_ADDRESS_PLAN_ENTRIES: entries,UNIFORM_ADDRESS_PLAN_CANDIDATES: candidates}=await load(planModulePath) as {UNIFORM_ADDRESS_PLAN_ENTRIES:Set<string>;UNIFORM_ADDRESS_PLAN_CANDIDATES?:readonly string[]};
+      addressPlans=[...entries];
+      if(requestedPlans!==undefined){
+        assert.notEqual(resolve(roots[0]!),resolve(roots[1]!),"plan ablation needs distinct roots");
+        const supported=new Set(candidates??entries);
+        addressPlans=requestedPlans==="none"?[]:requestedPlans==="all"?[...supported]:requestedPlans.split(",");
+        for(const entry of addressPlans)assert.ok(supported.has(entry),`unknown address-plan stage ${entry}`);
+        entries.clear();for(const entry of addressPlans)entries.add(entry);
+      }
+    }else assert.equal(requestedPlans,undefined,"this source snapshot has no address-plan integration");
     const start = performance.now();
     owner = index;
     solvers.push(await typed.createSolverAsync!(managedGPUDevice(device, { requireWorkerRealm: false }), scene, quality, values, undefined, () => {}) as WebGPUUniformReferenceSolver);
     await raw.queue.onSubmittedWorkDone();
-    snapshots.push({ root: cwd, note: existsSync(resolve(cwd,"benchmark-snapshot-note.json")) ? JSON.parse(readFileSync(resolve(cwd,"benchmark-snapshot-note.json"),"utf8")) : undefined, sourceHash: hash.digest("hex"), adaptivePolicyHash, quality, values, scene, dt, construction_ms: performance.now() - start });
+    snapshots.push({ root: cwd, addressPlans, note: existsSync(resolve(cwd,"benchmark-snapshot-note.json")) ? JSON.parse(readFileSync(resolve(cwd,"benchmark-snapshot-note.json"),"utf8")) : undefined, sourceHash: hash.digest("hex"), adaptivePolicyHash, quality, values, scene, dt, construction_ms: performance.now() - start });
     console.log(JSON.stringify({ phase: "constructed", variant: index ? "candidate" : "baseline", ...snapshots[index], scene: undefined }));
   }
   for (let frame = 1; frame <= steps; frame++) {
@@ -167,18 +186,22 @@ try {
   });
   const certificates = [];
   for (const solver of solvers) {
+    const band = (solver as unknown as {mixedFrame:{narrowBandFlip:{bins:GPUBuffer;cells:number;vertices:number;tiles:number}}}).mixedFrame.narrowBandFlip;
+    const bandRead=raw.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+    const bandEncoder=raw.createCommandEncoder();bandEncoder.copyBufferToBuffer(band.bins,4*(3*band.cells+band.vertices+2*band.tiles),bandRead,0,16);raw.queue.submit([bandEncoder.finish()]);
+    await bandRead.mapAsync(GPUMapMode.READ);const bandCounts=new Uint32Array(bandRead.getMappedRange()).slice(0,3);bandRead.unmap();bandRead.destroy();
     const o = (solver as unknown as {mixedFrame:{ownership:{speeds:GPUBuffer;capacity:{tiles:number}}}}).mixedFrame.ownership;
     const n=o.capacity.tiles, read=raw.createBuffer({size:4*n,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
     const e=raw.createCommandEncoder();e.copyBufferToBuffer(o.speeds,4*n,read,0,4*n);raw.queue.submit([e.finish()]);
     await read.mapAsync(GPUMapMode.READ);const histogram=[0,0,0,0];
     for(const w of new Uint32Array(read.getMappedRange()))histogram[w>>>30]!++;
-    certificates.push({tileKeys:n,unclassified:histogram[0],regular:histogram[1],coarseInReach:histogram[2],saturated:histogram[3]});read.unmap();read.destroy();
+    certificates.push({tileKeys:n,unclassified:histogram[0],regular:histogram[1],coarseInReach:histogram[2],saturated:histogram[3],crossingCandidates:bandCounts[0],nearestTiles:bandCounts[1],metricTiles:bandCounts[2]});read.unmap();read.destroy();
   }
   const physics = [];
   for (const solver of solvers) {
     const s = await solver.readStats(); physics.push({ maxSpeed_m_s: s.maxSpeed_m_s, volumeCellSum: s.volumeCellSum, representedVolumeCellSum: s.representedVolumeCellSum, volumeDrift: s.volumeDrift, front_m: s.front_m, pressureResidual: s.uniformPressureAcceptedResidual, bandResidual: s.uniformPressureBandResidual });
   }
-  writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), host: { cpu: cpus()[0]?.model, memory: totalmem(), release: release(), node: process.version }, sceneId, scope: "alternating simulation advance and completion on one device; excludes construction and renderer", snapshots, profiled, summary, passMeans, certificates, physics, rows, errors }, null, 2) + "\n");
+  writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), host: { cpu: cpus()[0]?.model, memory: totalmem(), release: release(), node: process.version }, sceneId, scope: kernels ? "diagnostic split-dispatch timestamps; whole-frame time includes added pass overhead" : "alternating simulation advance and completion on one device; excludes construction and renderer", snapshots, profiled, summary, passMeans, certificates, physics, rows, errors }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", summary }));
 } catch (error) {
   writeFileSync(`${out}/${name}-failed.json`, JSON.stringify({ snapshots, rows, errors, error: String(error) }, null, 2) + "\n"); throw error;

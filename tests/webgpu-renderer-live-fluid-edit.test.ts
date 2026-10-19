@@ -8,10 +8,61 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import {
   FluidLabRenderer,
   gpuSceneSolverKey,
+  gpuSceneStructuralKey,
   gpuSceneUniformKey,
   sceneEditRequiresReset,
   type SimulationRunConfig,
 } from "../lib/core/webgpu-renderer";
+import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
+
+test("draws wait for an in-place reset before considering another GPU allocation", async () => {
+  const config: SimulationRunConfig = { methodId: "uniform-volume", quality: "balanced", values: {}, simulationEpoch: 1 };
+  let finish!: (value: boolean) => void;
+  let rebuilds = 0;
+  const solver = { info: {}, reseed: () => new Promise<boolean>(resolve => { finish = resolve; }) };
+  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
+    device: {}, gpuFluid: solver, gpuFluidKey: "old", gpuFluidRequestGeneration: 0,
+    gpuFluidGeneration: 0, attachedPresentationMode: "fluid-only",
+    attachedStructuralKey: gpuSceneStructuralKey(defaultScene, config),
+    attachedSolverDocumentKey: "old", pausedPresentationRevision: 0,
+    onStatus: () => {}, resetGPUQueueTracking: () => {},
+    beginGPUFluidInitialization: () => { rebuilds++; },
+  });
+  renderer.currentGPUFluid(defaultScene, config, "fluid-only");
+  assert.equal(renderer.reseedInFlight, true);
+  renderer.currentGPUFluid(defaultScene, config, "fluid-only");
+  renderer.currentGPUFluid(defaultScene, { ...config, simulationEpoch: 2 }, "fluid-only");
+  assert.equal(rebuilds, 0, "even a newer edit must wait for the reset's allocation work");
+  finish(false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rebuilds, 1, "a declined reset can rebuild after it has settled");
+});
+
+test("a superseding reset drains the previous GPU world before allocation", async (t) => {
+  const scene = cloneScene(defaultScene);
+  scene.systems = { ...scene.systems, fluid: false };
+  const events: string[] = [];
+  let drain!: () => void;
+  const drained = new Promise<void>(resolve => { drain = resolve; });
+  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
+    device: { queue: { onSubmittedWorkDone: () => drained } },
+    gpuFluid: { destroy: () => { events.push("destroy solver"); } },
+    svoSceneSidecar: { destroy: () => { events.push("destroy sidecar"); } },
+    gpuFluidRequestGeneration: 0, timelineResetPending: true,
+    onStatus: () => {}, updateRenderSources: () => {}, resetGPUQueueTracking: () => {},
+  });
+  t.mock.method(WebGPULiveSvoScene, "create", async () => {
+    events.push("allocate");
+    throw new Error("Stop after verifying allocation order");
+  });
+  const config: SimulationRunConfig = { methodId: "uniform-volume", quality: "balanced", values: {} };
+  renderer.beginGPUFluidInitialization(scene, config, "first", "full-scene");
+  renderer.beginGPUFluidInitialization(scene, config, "second", "full-scene");
+  drain();
+  await renderer.gpuFluidPending;
+  assert.deepEqual(events, ["destroy solver", "destroy sidecar", "allocate"]);
+  assert.equal(renderer.timelineResetPending, false);
+});
 
 test("Sparse CM12 refinement regions are a live policy edit", () => {
   const before = createMinimalPowerDamBreak64Scene();

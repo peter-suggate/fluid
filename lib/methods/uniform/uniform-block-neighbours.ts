@@ -33,6 +33,7 @@ export function uniformBlockNeighboursWGSL(blocks: number, table: number): strin
 @group(0) @binding(0) var<storage,read_write> bnTail:array<u32>;
 const BN_BLOCKS:u32=${blocks}u;const BN_TABLE:u32=${table}u;
 const BN_RECORD:u32=${table + UNIFORM_PAGE_TABLE_WORDS}u;const BN_ROWS:u32=${table + l.rows}u;const BN_WALL_COUNT:u32=${table + l.wallCount}u;const BN_WALLS:u32=${table + l.walls}u;
+const BN_HOMES:u32=${table + l.homes}u;
 const BN_FREE:u32=0xffffffffu;const BN_SOLID:u32=0xffffffffu;
 ${uniformWindowAddressWGSL("bnTail","BN_TABLE","BN_BLOCKS")}
 @compute @workgroup_size(64) fn bnRows(@builtin(global_invocation_id) gid:vec3u){
@@ -45,6 +46,22 @@ ${uniformWindowAddressWGSL("bnTail","BN_TABLE","BN_BLOCKS")}
   let q=page+vec3i(vec3u(i%3u,(i/3u)%3u,i/9u))-vec3i(1);
   let word=umPageWord(q);
   bnTail[row+i]=word;
+ }
+ // Canonical homes for the page's 27 interior/face/edge/corner families.
+ // This lane owns its row, so no inter-workgroup dependency is introduced.
+ for(var f=0u;f<27u;f++){
+  let side=vec3u(f%3u,(f/3u)%3u,f/9u);let own=select(vec3i(0),vec3i(-1),side==vec3u(0));
+  var result=0u;
+  for(var k=0u;k<8u;k++){
+   let step=vec3u(k&1u,(k>>1u)&1u,k>>2u);
+   if(any((step!=vec3u(0))&(side==vec3u(1)))){continue;}
+   let d=own+vec3i(step);let home=bnTail[row+u32(d.x+3*d.y+9*d.z+13)];
+   if(home>0u&&home<BN_BLOCKS-1u){
+    let code=select(vec3u(d),vec3u(2u),d==vec3i(-1));
+    result=home|(code.x<<26u)|(code.y<<28u)|(code.z<<30u);break;
+   }
+  }
+  bnTail[BN_HOMES+27u*b+f]=result;
  }
 }
 const BN_LANES:u32=256u;const BN_PER:u32=${Math.ceil(blocks / 256)}u;

@@ -1,5 +1,7 @@
 "use client";
 
+import { PerformanceControls, PerformanceLegend } from "../spatial-performance/ui";
+import { DEFAULT_PERFORMANCE_VIEW } from "../spatial-performance/view";
 import { useState } from "react";
 import { Eye } from "lucide-react";
 import {
@@ -71,6 +73,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
           />
           <Value value={`${Math.round(layerOpacity(state, layer.id) * 100)}%`} />
         </ControlRow>}
+        {selected && layer.id === "performance" && <PerformanceControls state={state} onChange={onChange} plane={Boolean(plane)} />}
         {selected && plane && layer.id === "pages" && <Choice<PageView>
           ariaLabel="Domain pages view"
           value={pageView(state)}
@@ -104,7 +107,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
         <i aria-hidden className={entry.wide ? "is-wide" : undefined} style={{ background: entry.color }} />{entry.label}
       </span>)}
     </div>;
-  const planeControls = plane && state.visible && layers.some(l => state.enabled.includes(l.id) && (l.id !== "pages" || pageView(state) === "slice") && (l.id !== "heat" || heatView(state) === "slice")) ? <>
+  const planeControls = plane && state.visible && layers.some(l => state.enabled.includes(l.id) && (l.id !== "pages" || pageView(state) === "slice") && (l.id !== "heat" || heatView(state) === "slice") && (l.id !== "performance" || (state.performance ?? DEFAULT_PERFORMANCE_VIEW).dimension === "slice")) ? <>
     <Choice<"x" | "y" | "z">
       ariaLabel="Field view plane"
       value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis as "x" | "y" | "z"}
@@ -132,6 +135,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
   >
     {planeControls}
   </ToolstripRow>
+  {shown("performance") && <PerformanceLegend state={state} />}
   {shown("pages") && legend("Domain page states", "Current allocation. Resident pages may also support pressure and the interface. Air pages are hidden. 3D boxes show through the scene so the allocation remains visible.", PAGE_LEGEND)}
   {shown("heat") && legend("Region work tiers", "Each 16h region's work tier this frame (the region heat), labelled with the resolution it is computed at (h, 4h, or 16h for a frozen cold region) once the region is large enough on screen. 3D boxes show through the scene; cold regions are faintest.", HEAT_LEGEND)}
   {shown("tiles") && legend("Mixed Uniform tile reasons", "Why each h tile is h (the frame head's census), and which velocity sampler it took.", MIXED_TILE_LEGEND)}

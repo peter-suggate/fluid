@@ -1,8 +1,13 @@
+import {gpuCompilationManagerFor} from "../lib/core/gpu-compilation-manager";
 /** Production-solver investigation. Overrides apply only in this probe process.
  * WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/investigate-pool-work.ts
  * PROFILE=1 adds pass timings; SPLIT=1 splits dispatches (diagnostic overhead).
+ * TIMESTAMPS=1 measures the production UI stages instead, with subgroups when available.
+ * CONTINUOUS_TIMING=1 samples each frame without idling between frames.
+ * SURFACE_ALTERNATE=1 alternates the retained proof ordering and its old-order reference.
  * NO_BODY=1 is a controlled comparison, not the authored scene.
- * SCENARIO=settled (default): 120 frames, measure 61–120, authored rigid body.
+ * SCENARIO=settled (default): authored rigid body; default 120 frames is before impact.
+ * Use STEPS=912 FROM=895 to measure the landed ball, around simulation time 15 s.
  * SCENARIO=impact: localized sphere impact, 30 frames, impulse/depth/crown checks.
  * SCENARIO=pool-impact: same authored pool geometry, ball immediately above water.
  * SCENARIO=drift: the gentle-drift pool (floating ball drifting slowly, one drip at 2 s); rows carry region tier counts.
@@ -13,6 +18,7 @@
  * CURRENT_VOLUME=1 measures current phi mass after timing, without a time step.
  * FIELDS_OUT also enables current volume QA and saves final authoritative fields; WORK_COUNTERS=1 instruments vertex work (diagnostic overhead).
  * Run under /usr/bin/lockf /private/tmp/claude-501/fluid-gpu.lock to share the GPU.
+ * METHOD_VALUES is a JSON object of method overrides, recorded in the output.
  * BAND_TOLERANCE sets a probe-only band residual tolerance in 1/s.
  * Zero disables stopping to compare the same launches with full numerical work.
  */
@@ -21,12 +27,14 @@ import {samplePoolVelocity} from "./sample-pool-velocity";
 import {measureCurrentPoolPhiVolume,type PoolVolumeFrame} from "./measure-pool-volume";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "../lib/core/backyard-pool-party-scene";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { createUniformSolver, withUniformDevice, readUniformFields } from "../tests/helpers/uniform-geometric";
 import { GPUPassProfile } from "./gpu-pass-profile";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { NarrowBandDispatchProbe } from "./narrow-band-dispatch-probe";
 import { readMixedBuffer, readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
 import { UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_CELLS } from "../lib/methods/uniform/uniform-lattice-address";
@@ -90,16 +98,20 @@ async function readSurfaceCounters(device:GPUDevice,surface:ProbeSurface|undefin
 const steps=Number(process.env.STEPS??(impact?30:120)),from=Number(process.env.FROM??(impact?1:61));
 assert.ok(Number.isInteger(steps)&&Number.isInteger(from)&&from>0&&steps>=from);
 const profiled=process.env.PROFILE==="1",split=process.env.SPLIT==="1",noBody=process.env.NO_BODY==="1";
+const timestamps=process.env.TIMESTAMPS==="1";
+assert.ok(!timestamps||!profiled,"Choose production stage timing or diagnostic pass timing");
 assert.ok(!split||profiled);
 const out=process.env.OUT??"/tmp/pool-work.json";
+const methodValues=JSON.parse(process.env.METHOD_VALUES??"{}");
 const bandTolerance=process.env.BAND_TOLERANCE===undefined?undefined:Number(process.env.BAND_TOLERANCE);
 if(bandTolerance!==undefined)assert.ok(Number.isFinite(bandTolerance)&&bandTolerance>=0);
 const hash=createHash("sha256");
-for(const file of readdirSync("lib/methods/uniform").filter(f=>f.endsWith(".ts")).sort()){
- hash.update(file);hash.update(readFileSync(`lib/methods/uniform/${file}`));
+const sourceRoot=fileURLToPath(new URL("../",import.meta.url));
+for(const file of readdirSync(resolve(sourceRoot,"lib/methods/uniform")).filter(f=>f.endsWith(".ts")).sort()){
+ hash.update(file);hash.update(readFileSync(resolve(sourceRoot,`lib/methods/uniform/${file}`)));
 }
 const sourceHash=hash.digest("hex");
-const probeHash=createHash("sha256");for(const file of ["tools/investigate-pool-work.ts","tools/sample-pool-velocity.ts","tools/gpu-pass-profile.ts","tools/narrow-band-dispatch-probe.ts","tools/measure-pool-volume.ts"]){probeHash.update(file);probeHash.update(readFileSync(file));}
+const probeHash=createHash("sha256");for(const file of ["tools/investigate-pool-work.ts","tools/sample-pool-velocity.ts","tools/gpu-pass-profile.ts","tools/narrow-band-dispatch-probe.ts","tools/measure-pool-volume.ts"]){probeHash.update(file);probeHash.update(readFileSync(resolve(sourceRoot,file)));}
 const probeSourceHash=probeHash.digest("hex");
 console.log(JSON.stringify({phase:"starting",sourceHash,scenario,steps,from,profiled,workCounters:process.env.WORK_COUNTERS==="1"}));
 paceDawnEventPolling();
@@ -121,7 +133,18 @@ await withUniformDevice("pool work investigation",async raw=>{
  const sceneGeometryHash=createHash("sha256").update(JSON.stringify({...scene,rigidBodies:scene.rigidBodies.map(({position_m:_position,linearVelocity_m_s:_velocity,...body})=>body)})).digest("hex");
  assert.ok(steps*scene.numerics.fixedDt_s<=scene.duration_s);
  const bodies=initializeRigidBodies(scene.rigidBodies),start=performance.now();
- const solver=await createUniformSolver(probe?.device??profile?.device??raw,scene);
+ const alternateSurface=process.env.SURFACE_ALTERNATE==="1";
+ const manager=gpuCompilationManagerFor(raw),compile=manager.compileComputePipeline.bind(manager);
+ const surfaceDescriptors=new Map<GPUComputePipeline,GPUComputePipelineDescriptor>();
+ if(alternateSurface)manager.compileComputePipeline=async(descriptor,options)=>{
+  const pipeline=await compile(descriptor,options),c=descriptor.compute.constants;
+  if(descriptor.compute.entryPoint==="advectDeferred"&&c?.umMergedTiles&&!c.umFastSurface&&!c.umRegularFine)surfaceDescriptors.set(pipeline,descriptor);
+  return pipeline;
+ };
+ const solver=await createUniformSolver(probe?.device??profile?.device??raw,scene,methodValues);
+ manager.compileComputePipeline=compile;
+ const referenceSurface=new Map<GPUComputePipeline,GPUComputePipeline>();
+ if(alternateSurface)for(const [pipeline,descriptor] of surfaceDescriptors)referenceSurface.set(pipeline,await compile({...descriptor,compute:{...descriptor.compute,constants:{...descriptor.compute.constants,umSurfaceModelBeforeSolid:0}}}));
  const frameState=(solver as unknown as {mixedFrame:{words:{band:Float32Array<ArrayBuffer>};band:{index:GPUBuffer};bandParams:GPUBuffer;write(p:UniformMixedFrameParameters,dt:number,gravity:number):boolean}}).mixedFrame;
  if(bandTolerance!==undefined){
   const write=frameState.write.bind(frameState);
@@ -145,9 +168,28 @@ await withUniformDevice("pool work investigation",async raw=>{
  }
  const construction_ms=performance.now()-start;
  console.log(JSON.stringify({phase:"constructed",construction_ms,profiled,split,noBody,sourceHash,regionalReuseCapacity:inner.mixedFrame.narrowBandFlip?.regionalReuseCapacity,regionalReuseAllocatedBytes:inner.mixedFrame.narrowBandFlip?.regionalReuseAllocatedBytes}));
- const rows=[];let finalRegionRecords:unknown;let previousSurfaceEpochs:Uint32Array|undefined;
+ // Select only the affected native pipelines after the production layout
+ // selector, preserving its binding/layout variants and all current fields.
+ const surfaceTwin=inner.mixedFrame.surface as unknown as {variant:(pipeline:GPUComputePipeline)=>GPUComputePipeline};
+ let referenceSurfaceEnabled=false;let referenceSurfaceSwaps=0;
+ if(alternateSurface){
+  assert.ok(referenceSurface.size>0,"Surface reference pipeline missing");
+  const pick=surfaceTwin.variant.bind(surfaceTwin);
+  surfaceTwin.variant=pipeline=>{const native=pick(pipeline);const reference=referenceSurfaceEnabled?referenceSurface.get(native):undefined;if(reference)referenceSurfaceSwaps++;return reference??native;};
+ }
+ const rows=[];let finalRegionRecords:unknown;let previousSurfaceEpochs:Uint32Array|undefined;let previousTraceId=-1;
  try{
   for(let frame=1;frame<=steps;frame++){
+   const surfaceVariant=alternateSurface&&frame>=from?(frame%2===0?"candidate":"reference"):undefined;
+   referenceSurfaceEnabled=surfaceVariant==="reference";
+   if(timestamps&&frame>=from){
+    usePerformanceInstrumentationStore.getState().setEnabled(true);
+    // The interactive app advances untimed frames between samples. A tight
+    // benchmark must bypass only the sampling cadence to keep the GPU busy,
+    // rather than idling the entire simulation between every measurement.
+    if(process.env.CONTINUOUS_TIMING==="1")(solver as unknown as {lastPhysicsTraceAt_ms:number}).lastPhysicsTraceAt_ms=-Infinity;
+    else await new Promise(resolve=>setTimeout(resolve,360));
+   }
    if(probe)probe.enabled=frame>=from;
    if(profile&&frame>=from)profile.start();
    const start=performance.now();
@@ -156,6 +198,12 @@ await withUniformDevice("pool work investigation",async raw=>{
    await solver.awaitFrameCompletion();
    const wall_ms=performance.now()-start;
    assert.equal(solver.info.simulationPipelineError,undefined);
+   if(timestamps&&frame>=from){
+    for(let poll=0;poll<100&&(solver as unknown as {physicsTracePending:boolean}).physicsTracePending;poll++)await new Promise(resolve=>setTimeout(resolve,5));
+    assert.ok(solver.info.physicsTrace,solver.info.physicsTraceUnavailable??"Missing production timing");
+    assert.notEqual(solver.info.physicsTrace.sampleId,previousTraceId,"Production trace must be from this advance");
+    previousTraceId=solver.info.physicsTrace.sampleId;
+   }
    const passes=profile&&frame>=from?await profile.finish():undefined;
    let physical:Record<string,number>|undefined;
    if(impact&&bodies.length){
@@ -182,14 +230,17 @@ await withUniformDevice("pool work investigation",async raw=>{
     geometryEvaluations:inner.mixedFrame.geometry?.countersBuffer?Array.from(await readWords(raw,inner.mixedFrame.geometry.countersBuffer,inner.mixedFrame.geometry.countersOffset,2)):undefined,
    }:undefined;
    const heatCounts=inner.mixedFrame.heat?.counts,tiers=heatCounts?Array.from(await readWords(raw,heatCounts.buffer,heatCounts.offset,4)):undefined;
-   const row={frame,wall_ms,encode_ms,tiers,dispatches:passes?.reduce((n,p)=>n+p.dispatches,0),physical,work,...solver.narrowBandFlipInfo,...solver.workDomainInfo,
+   const row={frame,surfaceVariant,referenceSurfaceSwaps,wall_ms,encode_ms,tiers,dispatches:passes?.reduce((n,p)=>n+p.dispatches,0),physical,work,...solver.narrowBandFlipInfo,...solver.workDomainInfo,
     bandTiles:solver.info.uniformPressureBandTiles,bandCycles:solver.info.uniformPressureBandCycles,
-    bandResidual:solver.info.uniformPressureBandResidual,rootResidual:solver.info.uniformPressureAcceptedResidual,passes};
+    bandResidual:solver.info.uniformPressureBandResidual,rootResidual:solver.info.uniformPressureAcceptedResidual,passes,
+    trace:timestamps&&frame>=from?solver.info.physicsTrace:undefined};
    rows.push(row);
    if(frame===1||frame%12===0||frame===steps)console.log(JSON.stringify({...row,passes:undefined}));
   }
   const measured=rows.filter(r=>r.frame>=from),passMeans:Record<string,number>={};
   for(const row of measured)for(const p of row.passes??[])passMeans[p.label]=(passMeans[p.label]??0)+p.ms/measured.length;
+  const nativeStageMeans:Record<string,number>={};
+  for(const row of measured)for(const phase of row.trace?.phases??[])nativeStageMeans[phase.label]=(nativeStageMeans[phase.label]??0)+phase.duration_ms/measured.length;
   const walls=measured.map(r=>r.wall_ms).sort((a,b)=>a-b);
   const warmedWalls=measured.filter(r=>r.frame>1).map(r=>r.wall_ms).sort((a,b)=>a-b);
   const currentVolumeMeasured=process.env.CURRENT_VOLUME==="1"||Boolean(process.env.FIELDS_OUT);
@@ -270,15 +321,16 @@ await withUniformDevice("pool work investigation",async raw=>{
   }
   const summary={regionalReuse,correctness,volumeTelemetry,finalBodyPosition_m,regionModels,geometryEvaluations,normalDirtyRegions,geometryAllocatedBytes:geometry?.allocatedBytes,workEvidence,surfaceVertices,surfaceTransport:finalSurfaceCounts?.wholeTransport,surfaceTransportTier1:finalSurfaceCounts?.tier1Transport,surfaceTier1Rejections:finalSurfaceCounts?.tier1Rejections,surfaceRawCounters:finalSurfaceCounts?.rawCounters,surfaceEarlyFarAccepted:finalSurfaceCounts?.earlyFarAcceptedEvaluations,surfaceFarCellAccepted:finalSurfaceCounts?.farCellAcceptedEvaluations,surfaceAllocatedBytes:surface?.allocatedBytes,surfaceCacheBytes:surface?.predictorCacheBytes,predictorFineCapacity:surface?.predictorFineCapacity,workControlAllocatedBytes:control?.allocatedBytes,cacheRegions:control?.cacheRegions,mean_ms:walls.reduce((a,b)=>a+b,0)/walls.length,median_ms:walls[Math.floor(walls.length/2)],excludingFirstFrameMean_ms:warmedWalls.length?warmedWalls.reduce((a,b)=>a+b,0)/warmedWalls.length:undefined,excludingFirstFrameMedian_ms:warmedWalls[Math.floor(warmedWalls.length/2)],
    passMeans_ms:Object.fromEntries(Object.entries(passMeans).sort((a,b)=>b[1]-a[1])),
+   nativeStageMeans_ms:timestamps?nativeStageMeans:undefined,
    maxSpeed_m_s:stats.maxSpeed_m_s,volumeDrift:stats.volumeDrift,
    bandTolerance:frameState.words.band[8],bandResidualHistory:Array.from(bandIndex.slice(8,13)),
    bandInitialResidual:bandIndex[UniformPressureBand.initialResidualWord],
    bandResidualValidity:new Uint32Array(bandIndex.buffer)[UniformPressureBand.residualValidityWord]};
   mkdirSync(dirname(out),{recursive:true});
-  writeFileSync(out,JSON.stringify({date:new Date().toISOString(),sourceHash,probeSourceHash,scenario,workCounters:process.env.WORK_COUNTERS==="1",forceFull:process.env.FORCE_FULL==="1",forceFullScope:process.env.FORCE_FULL==="1"?"transport/geometry/crossing diagnostic; retained normal anchors remain enabled":undefined,profiled,split,noBody,steps,from,bandToleranceOverride:bandTolerance,
-   configuration:{sceneGeometryHash,waterline_m:waterline,bodyRadius_m:scene.rigidBodies[0]?.shape==="sphere"?scene.rigidBodies[0].dimensions_m.x:undefined,origin_m:(solver as unknown as {frame:ProbeFrame}).frame.origin_m,geometrySnapshots:process.env.GEO_SNAPSHOTS!=="0",impact:impact?{speed_m_s:impactSpeed,positionXZ_m:[impactX,impactZ]}:undefined,fixedDt_s:scene.numerics.fixedDt_s,cellSize_m:(solver as unknown as {frame:ProbeFrame}).frame.cellSize_m,container:[scene.container.width_m,scene.container.height_m,scene.container.depth_m],pagingEdge_h:UNIFORM_PAGE_CELLS,workRegionEdge_h:16},
+  writeFileSync(out,JSON.stringify({date:new Date().toISOString(),sourceRoot,sourceHash,probeSourceHash,scenario,timestamps,workCounters:process.env.WORK_COUNTERS==="1",forceFull:process.env.FORCE_FULL==="1",forceFullScope:process.env.FORCE_FULL==="1"?"transport/geometry/crossing diagnostic; retained normal anchors remain enabled":undefined,profiled,split,noBody,steps,from,bandToleranceOverride:bandTolerance,
+   configuration:{methodValues,sceneGeometryHash,waterline_m:waterline,bodyRadius_m:scene.rigidBodies[0]?.shape==="sphere"?scene.rigidBodies[0].dimensions_m.x:undefined,origin_m:(solver as unknown as {frame:ProbeFrame}).frame.origin_m,geometrySnapshots:process.env.GEO_SNAPSHOTS!=="0",impact:impact?{speed_m_s:impactSpeed,positionXZ_m:[impactX,impactZ]}:undefined,fixedDt_s:scene.numerics.fixedDt_s,cellSize_m:(solver as unknown as {frame:ProbeFrame}).frame.cellSize_m,container:[scene.container.width_m,scene.container.height_m,scene.container.depth_m],pagingEdge_h:UNIFORM_PAGE_CELLS,workRegionEdge_h:16},
    scope:"Balanced production method, scene timestep, app defaults; simulation only; no renderer. Split timings include pass-splitting overhead.",
    construction_ms,summary,rows},null,2)+"\n");
   console.log(JSON.stringify({phase:"complete",out,summary}));
- }finally{solver.destroy();profile?.destroy();}
-},profiled?["timestamp-query"]:[]);
+ }finally{solver.destroy();profile?.destroy();usePerformanceInstrumentationStore.getState().setEnabled(false);}
+},timestamps?["timestamp-query","subgroups"]:profiled?["timestamp-query"]:[]);

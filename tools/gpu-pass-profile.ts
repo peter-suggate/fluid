@@ -7,15 +7,54 @@ export class GPUPassProfile {
   private active = false;
   private rows: { label: string; dispatches: number }[] = [];
   private readonly queries: GPUQuerySet;
-  constructor(private readonly raw: GPUDevice, private readonly capacity = 4096) {
+  private readonly pipelineNames = new WeakMap<GPUComputePipeline, string>();
+  /** splitDispatches is diagnostic only: additional pass boundaries change
+   * dispatch overhead, so its whole-frame time is not a performance result. */
+  constructor(private readonly raw: GPUDevice, private readonly capacity = 4096, private readonly splitDispatches = false) {
     this.queries = raw.createQuerySet({ type: "timestamp", count: capacity });
     this.device = new Proxy(raw, { get: (target, key) => {
+      if (key === "createComputePipeline") return (descriptor: GPUComputePipelineDescriptor) => {
+        const pipeline = target.createComputePipeline(descriptor);
+        this.pipelineNames.set(pipeline, descriptor.compute.entryPoint ?? descriptor.label ?? "unnamed");
+        return pipeline;
+      };
+      if (key === "createComputePipelineAsync") return async (descriptor: GPUComputePipelineDescriptor) => {
+        const pipeline = await target.createComputePipelineAsync(descriptor);
+        this.pipelineNames.set(pipeline, descriptor.compute.entryPoint ?? descriptor.label ?? "unnamed");
+        return pipeline;
+      };
       if (key === "createCommandEncoder") return (descriptor?: GPUCommandEncoderDescriptor) => {
         const encoder = target.createCommandEncoder(descriptor);
         return new Proxy(encoder, { get: (e, property) => {
           if (property === "beginComputePass") return (d?: GPUComputePassDescriptor) => {
             if (!this.active) return e.beginComputePass(d);
             if (d?.timestampWrites) throw new Error("Disable other timestamp instrumentation");
+            if (this.splitDispatches) {
+              let pipeline: GPUComputePipeline | undefined;
+              const bindings = new Map<number, { group: GPUBindGroup | null | undefined; offsets?: number[] }>();
+              const dispatch = (indirect: boolean, args: number[] | [GPUBuffer, number]) => {
+                if (!pipeline) throw new Error("Dispatch without a pipeline");
+                const index = this.rows.length * 2;
+                if (index + 1 >= capacity) throw new Error("Kernel timestamp capacity exceeded");
+                this.rows.push({ label: `${d?.label ?? "unlabelled"} / ${this.pipelineNames.get(pipeline) ?? pipeline.label}`, dispatches: 1 });
+                const pass = e.beginComputePass({ ...d, timestampWrites: { querySet: this.queries,
+                  beginningOfPassWriteIndex: index, endOfPassWriteIndex: index + 1 } });
+                pass.setPipeline(pipeline);
+                for (const [index, binding] of bindings) pass.setBindGroup(index, binding.group, binding.offsets);
+                Reflect.apply(indirect ? pass.dispatchWorkgroupsIndirect : pass.dispatchWorkgroups, pass, args);
+                pass.end();
+              };
+              return {
+                setPipeline: (value: GPUComputePipeline) => { pipeline = value; },
+                setBindGroup: (index: number, group: GPUBindGroup | null | undefined, offsets?: Iterable<number>, start?: number, length?: number) => {
+                  const values = offsets === undefined ? undefined : Array.from(offsets);
+                  bindings.set(index, { group, offsets: start === undefined ? values : values?.slice(start, start + length!) });
+                },
+                dispatchWorkgroups: (...args: number[]) => dispatch(false, args),
+                dispatchWorkgroupsIndirect: (buffer: GPUBuffer, offset: number) => dispatch(true, [buffer, offset]),
+                insertDebugMarker() {}, pushDebugGroup() {}, popDebugGroup() {}, end() {},
+              };
+            }
             const index = this.rows.length * 2;
             if (index + 1 >= capacity) throw new Error("Pass timestamp capacity exceeded");
             const row = { label: d?.label ?? "unlabelled", dispatches: 0 }; this.rows.push(row);

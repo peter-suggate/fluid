@@ -71,12 +71,15 @@ fn mgAirVanishes(lf:u32,F:UMLevel,b:u32,c:vec3i)->bool{
 // its air children instead. Its open fraction is the children's average, a
 // face's the average of the four child faces on it; a wall slot's fraction is
 // the average of the four slots it covers.
-@compute @workgroup_size(64) fn mgDownsample(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u){
+@compute @workgroup_size(64) fn mgDownsample(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u,@builtin(local_invocation_index) lane:u32){
  let lf=UM_SL-1u;let C=umLevel(UM_SL);let F=umLevel(lf);let j=gid.x+64u*launched.x*gid.y;
- if(j>=umLRows(C)){return;}let b=umLBlock(C,j);if(!umStored(b)){return;}
+ var rebuild=true;if(UM_RETAIN){rebuild=mgGroupChanged(C,lf,j,lane,false,false);}
+ if(j>=umLRows(C)){return;}let b=umLBlock(C,j);if(!umStored(b)||!rebuild){return;}
+ if(j==umLCell(C,b,vec3u(0))){atomicAdd(&umList[1],1u);}
  if(j>=C.cells){
   let s=j-C.cells;let at=F.sv+(s/(C.side*C.side))*F.side*F.side+2u*(s%C.side)+F.side*2u*((s/C.side)%C.side);
-  native[C.sv+s]=((native[at]+native[at+F.side+1u])+(native[at+1u]+native[at+F.side]))/4.0;return;
+  let value=((native[at]+native[at+F.side+1u])+(native[at+1u]+native[at+F.side]))/4.0;
+  if(UM_RETAIN&&mgDifferent(native[C.sv+s],value)){mgMarkChanged(UM_SL,b,false);}native[C.sv+s]=value;return;
  }
  let c=umLLocal(C,j);
  var topologyTerms:array<vec4f,8>;var phiTerms:array<f32,8>;var openTerms:array<f32,8>;var openFlags:array<f32,8>;
@@ -96,14 +99,20 @@ fn mgAirVanishes(lf:u32,F:UMLevel,b:u32,c:vec3i)->bool{
  var phi=phiSum/8.0;
  if(airCount>0.0&&umSum8(liquidFlags)>0.0&&mgLiquidPhi(lf,phi)&&mgAirVanishes(lf,F,b,vec3i(c))){phi=umSum8(airTerms)/max(airCount,1.0);}
  let fv=mgSum8Vec4(faceTerms);let topology=vec4f(mgSum8Vec4(topologyTerms).x,fv.y,fv.z,fv.w)/8.0;
- native[C.phi.x+j]=phi;for(var i=0u;i<4u;i++){native[C.v+4u*j+i]=topology[i];}
+ var changed=UM_RETAIN&&mgDifferent(native[C.phi.x+j],phi);native[C.phi.x+j]=phi;
+ for(var i=0u;i<4u;i++){let at=C.v+4u*j+i;changed=changed||(UM_RETAIN&&mgDifferent(native[at],topology[i]));native[at]=topology[i];}
+ if(changed){mgMarkChanged(UM_SL,b,false);}
 }
 // Level UM_SL's phi continued one cell into its closed cells: the average of
 // the open neighbours below the surface, by their open fraction. It never
 // feeds a coarsening.
-@compute @workgroup_size(64) fn mgExtend(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u){
- let L=umLevel(UM_SL);let j=gid.x+64u*launched.x*gid.y;
- if(j>=L.cells){return;}let b=umLBlock(L,j);if(!umStored(b)){return;}
+fn mgExtendRow(l:u32,j:u32,lane:u32){
+ let L=umLevel(l);
+ let b=umLBlock(L,j);var changed=true;
+ if(UM_RETAIN){changed=mgGroupChanged(L,l,j,lane,false,true);}
+ if(j>=L.cells||!umStored(b)){return;}
+ if(!changed){return;}
+ if(j==umLCell(L,b,vec3u(0))){atomicAdd(&umList[2],1u);}
  var phi=native[L.phi.x+j];
  if(native[L.v+4u*j]<=1e-5){
   let c=vec3i(umLLocal(L,j));var terms:array<f32,6>;var weights:array<f32,6>;
@@ -114,7 +123,7 @@ fn mgAirVanishes(lf:u32,F:UMLevel,b:u32,c:vec3i)->bool{
   }
   let weight=umSum6(weights);phi=select(phi,umSum6(terms)/max(weight,1e-9),weight>0.0);
  }
- native[L.phi.y+j]=phi;
+ if(UM_RETAIN&&mgDifferent(native[L.phi.y+j],phi)){mgMarkChanged(l,b,true);}native[L.phi.y+j]=phi;
 }
 // Level UM_SL's rows: the six face coefficients and the mask (UM_ROW: a row
 // of the solve; bit 0 the row is liquid, bits 1..6 its -x,+x,-y,+y,-z,+z
@@ -122,9 +131,13 @@ fn mgAirVanishes(lf:u32,F:UMLevel,b:u32,c:vec3i)->bool{
 // not liquid has no coefficients. A wall slot couples to its cell alone,
 // through the wall face's fraction; a slot with no SOLID page across its
 // face is no row.
-@compute @workgroup_size(64) fn mgBake(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u){
- let l=UM_SL;let L=umLevel(l);let j=gid.x+64u*launched.x*gid.y;
- if(j>=umLRows(L)){return;}let b=umLBlock(L,j);let at=L.c+7u*j;
+fn mgBakeRow(l:u32,j:u32,lane:u32){
+ let L=umLevel(l);
+ let b=umLBlock(L,j);var changed=true;
+ if(UM_RETAIN){changed=mgGroupChanged(L,l,j,lane,true,false);}
+ if(j>=umLRows(L)){return;}let at=L.c+7u*j;
+ if(!changed){return;}
+ if(j==umLCell(L,b,vec3u(0))){atomicAdd(&umList[3],1u);}
  if(!umStored(b)){native[at+6u]=0.0;return;}
  var a:array<f32,6>;var mask=UM_ROW;
  // A page's colour is its coordinates' parity, a wall slot's the other one: the two rows of a face differ.
@@ -155,6 +168,30 @@ fn mgAirVanishes(lf:u32,F:UMLevel,b:u32,c:vec3i)->bool{
   }
  }
  for(var n=0u;n<6u;n++){native[at+n]=a[n];}native[at+6u]=f32(mask|(odd*UM_ODD));
+}
+// Levels are independent after raw downsampling. Pack whole workgroups from
+// each level into a single launch, retaining one barrier between continuation
+// and baking. Padding is at most 63 lanes per level, not a root-sized grid per
+// coarse level. The level and row base are uniform throughout each workgroup.
+fn mgBatchRow(group:u32,lane:u32,cellsOnly:bool)->vec2u{
+ var g=group;
+ for(var l=0u;l<=UM_LAST;l++){
+  let L=umLevel(l);let n=(select(umLRows(L),L.cells,cellsOnly)+63u)/64u;
+  if(g<n){return vec2u(l,64u*g+lane);}g-=n;
+ }
+ return vec2u(UM_LAST,0xffffffffu);
+}
+@compute @workgroup_size(64) fn mgExtend(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u,@builtin(local_invocation_index) lane:u32){
+ mgExtendRow(UM_SL,gid.x+64u*launched.x*gid.y,lane);
+}
+@compute @workgroup_size(64) fn mgBake(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u,@builtin(local_invocation_index) lane:u32){
+ mgBakeRow(UM_SL,gid.x+64u*launched.x*gid.y,lane);
+}
+@compute @workgroup_size(64) fn mgExtendAll(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) launched:vec3u,@builtin(local_invocation_index) lane:u32){
+ let row=mgBatchRow(g.x+launched.x*g.y,lane,true);mgExtendRow(row.x,row.y,lane);
+}
+@compute @workgroup_size(64) fn mgBakeAll(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) launched:vec3u,@builtin(local_invocation_index) lane:u32){
+ let row=mgBatchRow(g.x+launched.x*g.y,lane,false);mgBakeRow(row.x,row.y,lane);
 }
 // The root lattice's jobs, classified: bit 0 a row of the job is liquid, bit
 // 1 one is bounded (the seeded bound: a wall slot's, or a closed tile's).
@@ -188,6 +225,6 @@ var<workgroup> mgLive:atomic<u32>;var<workgroup> mgBound:atomic<u32>;
   let c=vec3u(q-2*d);listed=(atomicLoad(&umList[classes+8u*word+(c.x|(c.y<<1u)|(c.z<<2u))])&1u)!=0u;
  }
  if(!listed){return;}
- let slot=atomicAdd(&umList[0],1u);atomicStore(&umList[4u+slot],job);
+ let slot=atomicAdd(&umList[0],1u);atomicStore(&umList[4u+slot],job);atomicOr(&umList[classes+job],4u);
 }
 `;

@@ -1,3 +1,5 @@
+import { narrowBandSplatWGSL } from "./uniform-narrow-band-splat.wgsl";
+
 /** Particle geometry enters the canonical simulation phi before pressure. */
 export const NARROW_BAND_SURFACE_RADIUS=0.875;
 // A quarter-cell lattice has two tangential offsets of h/4 at a vertex.
@@ -17,13 +19,15 @@ const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 // which particleSurfaceFinish reuses: a second inlined interpolation cost
 // coupleFine 0.46 of 3.2 ms in a late splash.
 fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec3f{
+ let home=origin>>vec3u(2u);
+ let theta=nbThetaFrom(home,vec3f(q));
+ // Outside particle support the result is the transported field even at a
+ // buried vertex. Avoid the incident solid-owner walk for that common case.
+ if(theta<=0.0){return vec3f(bandPhi(vec3f(q)),0.0,theta);}
  // Solid padding has no liquid metric. Preserve its transported sentinel
  // before bulkDepth or a particle/source union can turn it into a nearby
  // surface sample and move the wall contour as refinement changes.
  if(umVertexBuried(q)){return vec3f(bandPhi(vec3f(q)),0.0,0.0);}
- let home=origin>>vec3u(2u);
- let theta=nbThetaFrom(home,vec3f(q));
- if(theta<=0.0){return vec3f(bandPhi(vec3f(q)),0.0,theta);}
  let c=vec3u(umCellNearFromPage(own>>9u,origin>>vec3u(5u),q));
  let bulk=bulkDepth(c,vec3f(q));let tile=umTileAt(c/4u);
  // Deeper than this the shrunk level set wins the union whatever the samples
@@ -78,84 +82,41 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32)->f32
  return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
 `;
-/** A fine tile's canonical vertices, one lane each: a low one is the tile's
- * only where nothing is stored below it. */
+/** Enumerate the 64 positive vertices directly with the compiled incidence
+ * mask. On page boundary tiles, preserve the full authority walk: diagonal AIR
+ * holes can expose coarse owners that a positive-only recipe cannot name. */
 export const narrowBandTiledSurfaceWGSL=/* wgsl */`
-@compute @workgroup_size(128) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- // Launched as a solid-free twin and a general pipeline (umSolidSkip).
- if(umSolidSkip()||lane>=125u){return;}
- let owner=umAllOwner(vec3u(group.x*64u,0,0));let origin=vec3i(umTileCoord(owner.tile)*4u);
- // Every vertex of a COLD region's tile is COLD: reconstruction holds it.
+@compute @workgroup_size(64) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(umSolidSkip()){return;}
+ let owner=umAllOwner(vec3u(group.x*64u,0,0));umLoadAddressPlan(owner.tile>>9u,lane);
  if(nbTileCold(owner.tile)){return;}
- let local=vec3u(lane%5u,(lane/5u)%5u,lane/25u);let q=origin+vec3i(local);
- if(umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u){if(any(local==vec3u(0))&&!all((local>vec3u(0))|umLowOpen(origin))){return;}}
- else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){return;}}
- let bulk=particleSurfaceBulk(owner.tile,origin,q);var value=bulk.x;
- if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z);}
- nbStoreReconstructed(q,value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),1u);
+ let origin=vec3i(umTileCoord(owner.tile)*4u);let low=umLowOpen(origin);
+ let pageLocal=(vec3u(origin)>>vec3u(2u))&vec3u(7u);
+ let boundary=any(pageLocal==vec3u(0))||any(pageLocal==vec3u(7));let wide=umFineWideMask(owner.tile);
+ let regular=umTileMaximumWidth(owner.tile)==1u&&umTileMinimumWidth(owner.tile)==1u;
+ for(var round=0u;round<select(1u,2u,boundary);round++){
+  var local=umCorner(lane,4u)+vec3u(1);
+  if(boundary){let i=lane+64u*round;if(i>=125u){continue;}local=umCorner(i,5u);}
+  let q=origin+vec3i(local);
+  if(boundary){
+   if(regular){if(any(local==vec3u(0))&&!all((local>vec3u(0))|low)){continue;}}
+   else{let authority=umVertexAuthority(vec3u(q));if(authority.width!=1u||authority.tile!=owner.tile){continue;}}
+  }else{
+   if(!umFineOwnsPositiveVertex(local,wide)){continue;}
+  }
+  // The store holds a shared COLD vertex too. Test before any geometry or
+  // particle gather, not just after computing the value it will discard.
+  if(nbVertexCold(vec3u(q))){continue;}
+  let bulk=particleSurfaceBulk(owner.tile,origin,q);var value=bulk.x;
+  if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z);}
+  nbStoreReconstructed(q,value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),1u);
+ }
 }
 `;
 
 /** Reconstruction first scatters occupied-cell distances into the expired
  * metric bank, then each canonical vertex reads one nearest-distance word. */
-export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+/* wgsl */`
-// Before classify, the motion bank holds one word per occupied cell.
-// There can be no more occupied cells than sorted live particles.
-fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
-@compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
- for(var cell=gid.x;cell<UM_CELL_KEYS;cell+=65536u){
-  if(!umTileLive(cell/64u)){continue;}
-  if(nbSparseBins&&atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){continue;}
-  if(atomicLoad(&bins[cell])==0u){continue;}
-  // A cell whose splat footprint (cell - 1 to cell + 2) lies in a COLD
-  // region's closure feeds only vertices reconstruction holds.
-  {let l=(4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u))&vec3u(15u);if(all((l>=vec3u(1u))&(l<=vec3u(13u)))&&nbTileCold(cell/64u)){continue;}}
-  let slot=atomicAdd(&bins[NB_BAND+3u],1u);links[nbSurfaceCells()+slot]=cell;
- }
-}
-// Probe-only scalar reference; production compiles surfaceSplat alone.
-@compute @workgroup_size(64) fn surfaceSplatReference(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
- let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
- if(!umVertexPresent(q)){return;}
- let start=links[cell];let end=start+atomicLoad(&bins[cell]);var nearest2=4.0;var hot2=4.0;
- for(var i=start;i<end;i++){let d=vec3f(q)-nbPosition(i);nearest2=min(nearest2,dot(d,d));if(nbSurfaceParticleHot(i)){hot2=min(hot2,dot(d,d));}}
- if(nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))],~bitcast<u32>(nearest2));}
- if(hot2<4.0){atomicMax(&bins[NB_SURFACE_HOT_NEAREST+umVertexAt(vec3u(q))],~bitcast<u32>(hot2));}
-}
-// All 64 vertices visit the same cell's particle stream. Load each position
-// once per workgroup, retaining the scalar gather order and all particles.
-var<workgroup> nbSurfacePositions:array<vec3f,64>;
-var<workgroup> nbSurfaceHot:array<u32,64>;
-var<workgroup> nbSurfaceRange:vec2u;
-@compute @workgroup_size(64) fn surfaceSplat(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
- let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
- // One slot lookup serves the presence test and the depth key.
- let slot=umVertexSlot(q);let present=umBlockStored(slot.w);
- if(lane==0u){let start=links[cell];nbSurfaceRange=vec2u(start,start+atomicLoad(&bins[cell]));}
- let range=workgroupUniformLoad(&nbSurfaceRange);let start=range.x;let end=range.y;var nearest2=4.0;var hot2=4.0;
- for(var first=start;first<end;first+=64u){
-  let count=min(64u,end-first);
-  if(lane<count){nbSurfacePositions[lane]=nbPosition(first+lane);nbSurfaceHot[lane]=u32(nbSurfaceParticleHot(first+lane));}
-  workgroupBarrier();
-  if(present){for(var i=0u;i<count;i++){let d=vec3f(q)-nbSurfacePositions[i];nearest2=min(nearest2,dot(d,d));if(nbSurfaceHot[i]!=0u){hot2=min(hot2,dot(d,d));}}}
-  workgroupBarrier();
- }
- // Positive float bit order: complement reverses it; zero is the empty key.
- if(present&&nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexSlotAt(slot)],~bitcast<u32>(nearest2));}
- if(present&&hot2<4.0){atomicMax(&bins[NB_SURFACE_HOT_NEAREST+umVertexSlotAt(slot)],~bitcast<u32>(hot2));}
-}
-// Erasure belongs to the samples that represent this patch, not to hot
-// samples of another surface sharing its 4h heat-interpolation stencil.
-fn nbCachedSurfaceErasure(q:vec3i,nearest2:f32)->bool{
- let key=atomicLoad(&bins[NB_SURFACE_HOT_NEAREST+umVertexAt(vec3u(q))]);
- return key!=0u&&bitcast<f32>(~key)<=nearest2;
-}
-fn nbCachedSurfaceNearest(q:vec3i)->f32{
- let key=atomicLoad(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))]);
- if(key==0u){return 4.0;}return bitcast<f32>(~key);
-}
+export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+narrowBandSplatWGSL+/* wgsl */`
 @compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(vec3u(umCounts.x*64u+gid.x,0,0));if(owner.width!=4u||nbTileCold(owner.tile)){return;}
  let origin=umOrigin(owner);let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
@@ -165,6 +126,7 @@ fn nbCachedSurfaceNearest(q:vec3i)->f32{
   let corner=umCorner(k,2u);let q=origin+4u*corner;
   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
   else if(umVertexAuthority(q).index!=owner.index){continue;}
+  if(nbVertexCold(q)){continue;}
   let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q));var value=bulk.x;
   if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)),bulk.z);}
   nbStoreReconstructed(vec3i(q),value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),4u);
@@ -199,9 +161,9 @@ fn nbTransferTheta(local:vec3f)->vec2f{
 }
 @compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32${subgroups?",@builtin(subgroup_invocation_id) subgroupLane:u32":""}){
  if(!nbTransferPropertiesFit()){return;}
- let owner=umAllOwner(vec3u(group.x*64u,0u,0u));let origin=4u*umTileCoord(owner.tile);
+ let owner=umAllOwner(vec3u(group.x*64u,0u,0u));umLoadAddressPlan(owner.tile>>9u,lane);let origin=4u*umTileCoord(owner.tile);
  // A frozen tile (UniformColdFreeze) keeps every texel: f.velocity holds F.
- if(umFrozenCell(vec3i(origin))){return;}
+ if(umFrozenRegion(umPageOfTile(owner.tile))){return;}
  // No live sample (a uniform): no pair is listed and every cell keeps its velocity.
  if(!nbParticlesLive()){let cell=origin+umCorner(lane,4u);textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
  for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(q)]));}

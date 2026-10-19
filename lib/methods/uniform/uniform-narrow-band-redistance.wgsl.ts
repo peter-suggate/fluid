@@ -19,7 +19,7 @@ var<workgroup> nbGeometryBase:u32;
 var<workgroup> nbGeometryMask:vec2u;
 var<workgroup> nbMetricReuseFlag:u32;
 @compute @workgroup_size(64) fn depthGeometry(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=atomicLoad(&bins[NB_BAND_SEARCH+group.x]);
+ let tile=atomicLoad(&bins[NB_BAND_SEARCH+group.x]);umLoadAddressPlan(tile>>9u,lane);
  // A tile whose metric is retained builds no distance: no geometry. Its map
  // entry says so (capacity), and a reader gathers the cell itself.
  if(lane==0u){nbMetricReuseFlag=u32(nbMetricReuseAvailable(tile));if(nbMetricReuseFlag!=0u){atomicStore(&bins[NB_BAND_CANDIDATES+tile],nbGeometryCapacity());}}
@@ -224,7 +224,7 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
 // pipeline (umSolidSkip); the others test nothing here.
 @compute @workgroup_size(64) fn buildDistance(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umSolidSkip()){return;}
- let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);let origin=4u*umTileCoord(tile);
+ let tile=atomicLoad(&bins[NB_BAND_DISTANCE+group.x]);umLoadAddressPlan(tile>>9u,lane);let origin=4u*umTileCoord(tile);
  // The 16h producer certificate covers the whole metric dependency halo.
  // A retained tile restores the borrowed metric bank before any phi/solid
  // gathers or zero-set iterations. Cache validity survives scratch reuse.

@@ -1,3 +1,4 @@
+import { uniformAddressHome } from "./uniform-address-plan";
 /** Lattice addressing for the Uniform solver: where a cell, vertex or tile
  * coordinate is stored, which coordinates are stored at all, and what lies
  * where nothing is stored. Kernels and host code keep their coordinate
@@ -131,6 +132,7 @@ export interface UniformLatticeAddressSource {
    * umFramePage): where the SOLID pages are exactly those outside that box
    * the walls fold to it (umFixedBox, umBoxWalls). */
   readonly world?: boolean;
+  readonly addressPlan?: boolean;
 }
 
 /** A page: 32³ cells, 8³ tiles. The page table and block records are the
@@ -229,6 +231,7 @@ ${box ? `// Present: stored. Texel: where a vertex texture stores the vertex of
 // StoreTexel: that texel of a stored vertex, negative of any other (a store
 // there is dropped).`}
 fn umVertexSlot(v:vec3i)->vec4u{
+ ${source.addressPlan ? "let plan=umPlannedVertexSlot(v,5u);if(plan.w!=0xffffffffu){return plan;}" : ""}
  let c=(v-vec3i(1));let page=c>>vec3u(5u);let own=vec3u(c&vec3i(31))+vec3u(1u);
  let b=umPageWord(page);if(umBlockStored(b)){return vec4u(own,b);}
  let plane=(v&vec3i(31))==vec3i(0);
@@ -245,6 +248,7 @@ fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(${vertexQ});let c=umBloc
 fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 // Vertices of the 4h lattice (tile corners), in tile units: 9³ blocks.
 fn umWideVertexSlot(v:vec3i)->vec4u{
+ ${source.addressPlan ? "let plan=umPlannedVertexSlot(v,3u);if(plan.w!=0xffffffffu){return plan;}" : ""}
  let c=(v-vec3i(1));let page=c>>vec3u(3u);let own=vec3u(c&vec3i(7))+vec3u(1u);
  let b=umPageWord(page);if(umBlockStored(b)){return vec4u(own,b);}
  let plane=(v&vec3i(7))==vec3i(0);
@@ -610,15 +614,16 @@ fn umFaceLevel(b:u32,f:u32,level:u32,l:vec3u)->u32{let m=8u>>level;let uv=umFace
 /** Where the block neighbour rows, the wall-face count and the wall-face
  * list lie, in words from the page table's first word (a page pool mirror's
  * offset): after the table and the block records. words: what they add to
- * the tail, 33 a block and the count. */
-export function uniformBlockNeighbourLayout(blocks: number): { readonly rows: number; readonly wallCount: number; readonly walls: number; readonly words: number; readonly end: number } {
+ * the tail, 60 a block (including 27 canonical homes) and the count. */
+export function uniformBlockNeighbourLayout(blocks: number): { readonly rows: number; readonly wallCount: number; readonly walls: number; readonly homes: number; readonly words: number; readonly end: number } {
   const rows = UNIFORM_PAGE_TABLE_WORDS + blocks, wallCount = rows + 27 * blocks;
-  return { rows, wallCount, walls: wallCount + 1, words: 33 * blocks + 1, end: wallCount + 1 + 6 * blocks };
+  const homes = wallCount + 1 + 6 * blocks;
+  return { rows, wallCount, walls: wallCount + 1, homes, words: 60 * blocks + 1, end: homes + 27 * blocks };
 }
 /** The rows, the count and the list for a page table and its block records
  * (records.length blocks): what UniformBlockNeighbours writes, on the host. */
 export function uniformBlockNeighbourWords(table: ArrayLike<number>, records: ArrayLike<number>): Uint32Array<ArrayBuffer> {
-  const blocks = records.length, words = new Uint32Array(33 * blocks + 1), w = UNIFORM_PAGE_WINDOW;
+  const blocks = records.length, words = new Uint32Array(60 * blocks + 1), w = UNIFORM_PAGE_WINDOW;
   let walls = 0;
   for (let b = 0; b < blocks; b++) {
     const r = records[b]!, row = 27 * b;
@@ -632,6 +637,9 @@ export function uniformBlockNeighbourWords(table: ArrayLike<number>, records: Ar
     for (let f = 0; f < 6; f++) if (words[row + uniformBlockFaceNeighbour(f)] === 0xffffffff) words[27 * blocks + 1 + walls++] = 6 * b + f;
   }
   words[27 * blocks] = walls;
+  for (let b = 1; b < blocks - 1; b++) if (records[b] !== UNIFORM_PAGE_POOL_FREE) {
+    for (let f = 0; f < 27; f++) words[33 * blocks + 1 + 27 * b + f] = uniformAddressHome(words, blocks, b, f);
+  }
   return words;
 }
 /** The row word across face f = 2 axis + side: 13 - or + 1, 3, 9. */

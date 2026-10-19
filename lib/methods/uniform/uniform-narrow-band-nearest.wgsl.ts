@@ -6,13 +6,18 @@
 export const narrowBandNearestControlEntries = ["depthReuseSnapshot", "depthReuseSelect"] as const;
 export const narrowBandNearestEntries = ["depthNearestX", "depthNearestY", "depthNearestZ"] as const;
 export const narrowBandNearestWGSL=/* wgsl */`
+override nbListWithSnapshot:bool=false;
+override nbXWithSelect:bool=false;
 var<workgroup> nbReuseLive:u32;
 // Compare the masks actually consumed by this search, rather than phi
 // revisions: continuous surface motion inside the same crossing cells does
 // not change these integer minima. One group owns each 16h control region.
-@compute @workgroup_size(64) fn depthReuseSnapshot(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var region=group.x;region<NB_REUSE_CAPACITY;region+=1024u){
+@compute @workgroup_size(64) fn depthReuseSnapshot(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let regions=select(NB_REUSE_CAPACITY,nbPlanRegions(lane),nbListWithSnapshot);
+ for(var slot=group.x;slot<regions;slot+=groups.x){
+  let region=nbPlanRegion(slot,lane);
   let tile=nbReuseTile(region,lane);
+  if(nbListWithSnapshot){nbDepthList(tile);}if(region>=NB_REUSE_CAPACITY){continue;}
   // Pooled storage includes free 32h pages. Invalidate without touching
   // their masks, world mapping, or halo page tables.
   // 2: free and its words cleared by this search's prepare or before (nbPrepareReuse).
@@ -42,8 +47,11 @@ var<workgroup> nbReuseLive:u32;
  }
 }
 var<workgroup> nbMetricClean:atomic<u32>;
-@compute @workgroup_size(64) fn depthReuseSelect(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var region=group.x;region<NB_REUSE_CAPACITY;region+=1024u){
+@compute @workgroup_size(64) fn depthReuseSelect(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let regions=nbPlanRegions(lane);
+ for(var slot=group.x;slot<regions;slot+=groups.x){
+  let region=nbPlanRegion(slot,lane);
+  if(region<NB_REUSE_CAPACITY){
   let tile=nbReuseTile(region,lane);
   if(lane==0u){nbReuseLive=select(0u,1u,umTileLive(tile));}
   if(workgroupUniformLoad(&nbReuseLive)==0u){continue;}
@@ -70,6 +78,17 @@ var<workgroup> nbMetricClean:atomic<u32>;
   // Clear omitted tiles too: neighbor changes cannot age back into hits.
   if(!metric){atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);}
   workgroupBarrier();
+  }
+  if(nbXWithSelect){
+   // Selection publishes this region's cache flags. X consumes only those
+   // flags and the already-complete crossing masks: no other region's X.
+   storageBarrier();
+   for(var row=lane;row<1024u;row+=64u){
+    let tile=nbReuseTile(region,row/16u);
+    if((atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){nbNearestXRow(tile,row%16u);}
+   }
+   workgroupBarrier();
+  }
  }
 }
 fn nbGlobalNearestRow(p:vec3i,axis:u32)->u32{
@@ -82,11 +101,36 @@ fn nbGlobalNearestRow(p:vec3i,axis:u32)->u32{
  if(nbNearestReusable(tile)){return atomicLoad(&bins[nbNearestCacheAt(tile,axis,local.y+4u*local.z)]);}
  return atomicLoad(&bins[NB_DEPTH_A+axis*(UM_CELL_KEYS/4u)+16u*tile+local.y+4u*local.z]);
 }
-@compute @workgroup_size(64) fn depthNearestX(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=4u*group.x+lane/16u;if(job>=atomicLoad(&bins[NB_BAND+1u])){return;}
- let tile=atomicLoad(&bins[NB_BAND_SEARCH+job]);let coord=umTileCoord(tile);
- let p=vec3i(4u*coord+vec3u(0u,lane%4u,(lane%16u)/4u));
- let row=lane%16u;
+// Five neighboring tile rows cover every lane's eleven-row support.
+// Compile their final storage bases once per tile job. The payload is only
+// twenty words for the four jobs in this group, including cache selection.
+var<workgroup> nbNearestRowBases:array<u32,20>;
+fn nbCompileNearestRows(coord:vec3u,axis:u32,lane:u32,jobLive:bool){
+ let member=lane%16u;let team=lane/16u;
+ if(member<5u){
+  var base=0xffffffffu;
+  if(jobLive){
+   var q=vec3i(coord);q[axis+1u]+=i32(member)-2;
+   let tile=umTileKey(q);
+   if(tile<UM_TILES&&(atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u){
+    base=NB_DEPTH_A+axis*(UM_CELL_KEYS/4u)+16u*tile;
+    if(nbNearestReusable(tile)){base=nbNearestCacheAt(tile,axis,0u);}
+   }
+  }
+  nbNearestRowBases[5u*team+member]=base;
+ }
+ workgroupBarrier();
+}
+fn nbPlannedNearestRow(p:vec3i,coord:vec3u,axis:u32,team:u32)->u32{
+ let which=(p[axis+1u]>>2)-i32(coord[axis+1u])+2;
+ let base=nbNearestRowBases[5u*team+u32(which)];
+ if(base==0xffffffffu){return 0xffffffffu;}
+ let local=vec3u(p)&vec3u(3u);
+ return atomicLoad(&bins[base+local.y+4u*local.z]);
+}
+fn nbNearestXRow(tile:u32,row:u32){
+ let coord=umTileCoord(tile);
+ let p=vec3i(4u*coord+vec3u(0u,row%4u,(row)/4u));
  if(nbNearestReusable(tile)){return;}
  let bits=nbBandRow(coord,p.y,p.z);var packed=0xffffffffu;
  if(bits!=0u){
@@ -98,17 +142,22 @@ fn nbGlobalNearestRow(p:vec3i,axis:u32)->u32{
    packed|=code<<(8u*x);
   }
  }
- atomicStore(&bins[NB_DEPTH_A+16u*tile+lane%16u],packed);
- if(nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY){atomicStore(&bins[nbNearestCacheAt(tile,0u,lane%16u)],packed);}
+ atomicStore(&bins[NB_DEPTH_A+16u*tile+row],packed);
+ if(nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY){atomicStore(&bins[nbNearestCacheAt(tile,0u,row)],packed);}
+}
+@compute @workgroup_size(64) fn depthNearestX(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let job=4u*group.x+lane/16u;if(job>=atomicLoad(&bins[NB_BAND+1u])){return;}
+ nbNearestXRow(atomicLoad(&bins[NB_BAND_SEARCH+job]),lane%16u);
 }
 @compute @workgroup_size(64) fn depthNearestY(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=4u*group.x+lane/16u;if(job>=atomicLoad(&bins[NB_BAND+1u])){return;}
- let tile=atomicLoad(&bins[NB_BAND_SEARCH+job]);let coord=umTileCoord(tile);
+ let job=4u*group.x+lane/16u;let jobLive=job<atomicLoad(&bins[NB_BAND+1u]);
+ var tile=0u;if(jobLive){tile=atomicLoad(&bins[NB_BAND_SEARCH+job]);}let coord=umTileCoord(tile);
+ nbCompileNearestRows(coord,0u,lane,jobLive);if(!jobLive){return;}
  let p=vec3i(4u*coord+vec3u(0u,lane%4u,(lane%16u)/4u));
  if(nbNearestReusable(tile)){return;}
  var best=vec4u(255u);var distance=vec4i(1000);
  for(var o=-5;o<=5;o++){
-  let row=nbGlobalNearestRow(p+vec3i(0,o,0),0u);let code=(vec4u(row)>>vec4u(0u,8u,16u,24u))&vec4u(255u);
+  let row=nbPlannedNearestRow(p+vec3i(0,o,0),coord,0u,lane/16u);let code=(vec4u(row)>>vec4u(0u,8u,16u,24u))&vec4u(255u);
   let dx=vec4i(code)-5;let d=dx*dx+o*o;let closer=(code!=vec4u(255u))&(d<distance);
   best=select(best,code|vec4u(u32(o+5)<<4u),closer);distance=select(distance,d,closer);
  }
@@ -117,23 +166,27 @@ fn nbGlobalNearestRow(p:vec3i,axis:u32)->u32{
  if(nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY){atomicStore(&bins[nbNearestCacheAt(tile,1u,lane%16u)],packed);}
 }
 @compute @workgroup_size(64) fn depthNearestZ(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=4u*group.x+lane/16u;if(job>=atomicLoad(&bins[NB_BAND+1u])){return;}
- let tile=atomicLoad(&bins[NB_BAND_SEARCH+job]);let coord=umTileCoord(tile);
- let p=vec3i(4u*coord+vec3u(0u,lane%4u,(lane%16u)/4u));var nearest=vec4u(NB_NO_SURFACE);var distance=vec4i(1000);
+ let job=4u*group.x+lane/16u;let jobLive=job<atomicLoad(&bins[NB_BAND+1u]);
+ var tile=0u;if(jobLive){tile=atomicLoad(&bins[NB_BAND_SEARCH+job]);}let coord=umTileCoord(tile);
+ nbCompileNearestRows(coord,1u,lane,jobLive);if(!jobLive){return;}
+ let p=vec3i(4u*coord+vec3u(0u,lane%4u,(lane%16u)/4u));var nearest=vec4u(NB_NO_SURFACE);var distance=vec4i(1000);var bestX=vec4i(0);var bestY=vec4i(0);var bestZ=vec4i(0);
  if(nbNearestReusable(tile)){
   let destination=NB_DEPTH_B+umCellAt(vec3u(p));let cached=nbNearestFinalAt(tile,lane%16u);
   for(var k=0u;k<4u;k++){atomicStore(&bins[destination+k],atomicLoad(&bins[cached+k]));}return;
  }
  for(var o=-5;o<=5;o++){
-  let row=nbGlobalNearestRow(p+vec3i(0,0,o),1u);let code=(vec4u(row)>>vec4u(0u,8u,16u,24u))&vec4u(255u);
+  let row=nbPlannedNearestRow(p+vec3i(0,0,o),coord,1u,lane/16u);let code=(vec4u(row)>>vec4u(0u,8u,16u,24u))&vec4u(255u);
   let dx=vec4i(code&vec4u(15u))-5;let dy=vec4i(code>>vec4u(4u))-5;let d=dx*dx+dy*dy+o*o;
   let closer=(code!=vec4u(255u))&(d<distance);
-  // A missing or losing row cannot change any nearest key. In particular,
-  // avoid four page-table lookups for its discarded coordinates.
+  // Preserve the strict comparison and traversal order that break ties.
+  // Resolve physical cell keys only after all candidates have been compared.
   if(!any(closer)){continue;}
-  let x=vec4u(vec4i(p.x)+vec4i(0,1,2,3)+dx);let y=vec4u(vec4i(p.y)+dy);let z=u32(p.z+o);
-  let at=vec4u(umCellAt(vec3u(x.x,y.x,z)),umCellAt(vec3u(x.y,y.y,z)),umCellAt(vec3u(x.z,y.z,z)),umCellAt(vec3u(x.w,y.w,z)));
-  nearest=select(nearest,at,closer);distance=select(distance,d,closer);
+  bestX=select(bestX,vec4i(p.x)+vec4i(0,1,2,3)+dx,closer);
+  bestY=select(bestY,vec4i(p.y)+dy,closer);bestZ=select(bestZ,vec4i(p.z+o),closer);
+  distance=select(distance,d,closer);
+ }
+ for(var k=0u;k<4u;k++){
+  if(distance[k]<1000){nearest[k]=umCellAt(vec3u(vec3i(bestX[k],bestY[k],bestZ[k])));}
  }
  let at=NB_DEPTH_B+umCellAt(vec3u(p));
  if(nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY){

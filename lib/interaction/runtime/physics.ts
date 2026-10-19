@@ -23,6 +23,8 @@ export interface FluidStepRequest extends TickIdentity {
 export interface InteractionFluidDriver {
   /** An attached driver can still be compiling or rebuilding its solver. */
   isReady?(): boolean;
+  /** A terminal adapter failure, as distinct from initialization in progress. */
+  failureReason?(): string | undefined;
   subscribeReadiness?(changed: () => void): () => void;
   step(request: FluidStepRequest): Promise<readonly FluidExchange[]>;
 }

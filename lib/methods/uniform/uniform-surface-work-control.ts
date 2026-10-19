@@ -6,6 +6,7 @@ import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidWGSL, type UniformMixedSo
 import { uniformPagePoolWGSL, type UniformPagePool } from "./uniform-page-pool";
 import { uniformPageInitBlocksWGSL, uniformPageInitGroups } from "./uniform-page-initialise";
 import { UNIFORM_SURFACE_SUPPORT_WORDS } from "./uniform-surface-transport.wgsl";
+import { UniformRegionalFramePlan } from "./uniform-regional-frame-plan";
 import { uniformRegionHeatWGSL, type UniformRegionHeat } from "./uniform-region-heat";
 
 /** Shared current surface models and exact derived-geometry evidence on a
@@ -46,6 +47,7 @@ export class UniformSurfaceWorkControl {
   readonly topologyWordOffset:number;
   readonly liveEpochWordOffset:number;
   readonly scratchEpochWordOffset:number;
+  readonly topologyEpochWordOffset:number;
   private readonly modelEpochWordOffset:number;
   private readonly modelReuseWordOffset:number;
   private readonly modelMetadataWordOffset:number;
@@ -62,12 +64,15 @@ export class UniformSurfaceWorkControl {
   /** The live and scratch phi revisions, and (with region heat) a word a
    * region its consumers copy the work tiers into (tierOffset, bytes) and
    * one their non-COLD epochs (epochOffset, bytes). */
-  get revisions(){return {buffer:this.surface,liveOffset:4*this.liveEpochWordOffset,scratchOffset:4*this.scratchEpochWordOffset,regions:this.regions,tiers:this.heat?.tiers,tierOffset:4*this.tierWordOffset,epochOffset:4*(this.tierWordOffset+this.regions)};}
+  get revisions(){return {buffer:this.surface,liveOffset:4*this.liveEpochWordOffset,scratchOffset:4*this.scratchEpochWordOffset,topologyOffset:4*this.topologyEpochWordOffset,regions:this.regions,tiers:this.heat?.tiers,tierOffset:4*this.tierWordOffset,epochOffset:4*(this.tierWordOffset+this.regions)};}
   readonly surface:GPUBuffer;
   readonly geometry:GPUBuffer;
   readonly allocatedBytes:number;
+  readonly framePlan:UniformRegionalFramePlan;
   /** Diagnostic full-work control: same scans/launches, no reuse or plane model. */
   enabled=true;
+  /** Diagnostic ablation of the sealed-plan geometry setup. */
+  regionalGeometrySetup=true;
   private snapshotGeometry=true;
   /** Diagnostic ablation: retain topology evidence but always evaluate current geometry. */
   get geometrySnapshots():boolean{return this.snapshotGeometry;}
@@ -106,17 +111,23 @@ export class UniformSurfaceWorkControl {
     this.geometryRemapWordOffset=this.geometryEpochWordOffset+this.regions;
     this.tierWordOffset=this.modelMetadataWordOffset+3*tiles;
     // With heat: a copy slot for the tiers, then one for their non-COLD epochs.
-    const surfaceBytes=4*(this.tierWordOffset+(heat?2*this.regions:0)),geometryBytes=4*(this.geometryRemapWordOffset+this.regions);
+    this.topologyEpochWordOffset=this.tierWordOffset+(heat?2*this.regions:0);
+    const surfaceBytes=4*(this.topologyEpochWordOffset+this.regions),geometryBytes=4*(this.geometryRemapWordOffset+this.regions);
     const make=(stage:string,size:number)=>device.createBuffer({label:`Uniform 16h ${stage} work evidence`,size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-    this.surface=make("surface",surfaceBytes);this.geometry=make("geometry",geometryBytes);this.allocatedBytes=surfaceBytes+geometryBytes;
+    this.surface=make("surface",surfaceBytes);this.geometry=make("geometry",geometryBytes);
+    this.framePlan=new UniformRegionalFramePlan(device,ownership,this.revisions,heat?.tiers,()=>this.generation,{buffer:this.geometry,mapping:this.mappingWordOffset,owners:3*this.regions+4,remap:this.geometryRemapWordOffset,regions:this.cacheRegions});
+    this.allocatedBytes=surfaceBytes+geometryBytes+this.framePlan.allocatedBytes;
+    device.queue.writeBuffer(this.surface,4*this.topologyEpochWordOffset,new Uint32Array(this.regions).fill(1));
     device.queue.writeBuffer(this.surface,4*this.liveEpochWordOffset,new Uint32Array(2*this.regions).fill(1));
     this.layout=uniformDetailBindLayout(device,{entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+      {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+      {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       ...(heat?[{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
     ]});
-    this.groups=[this.surface,this.geometry].map(buffer=>uniformDetailGroup(device,{layout:this.layout,entries:[{binding:0,resource:phi},{binding:1,resource:{buffer}},{binding:2,resource:{buffer:ownership.regionVelocity}},...(heat?[{binding:3,resource:{buffer:heat.tiers}}]:[])]}));
+    this.groups=[this.surface,this.geometry].map(buffer=>uniformDetailGroup(device,{layout:this.layout,entries:[{binding:5,resource:{buffer:buffer===this.geometry?this.surface:ownership.regionVelocity}},{binding:4,resource:{buffer:this.framePlan.buffer}},{binding:0,resource:phi},{binding:1,resource:{buffer}},{binding:2,resource:{buffer:ownership.regionVelocity}},...(heat?[{binding:3,resource:{buffer:heat.tiers}}]:[])]}));
     const jobs=64*this.cacheRegions,x=Math.min(jobs,ownership.dispatchX);this.grids=[x,Math.ceil(jobs/x)];
     const supportX=Math.min(this.regions,ownership.dispatchX);this.supportGrids=[supportX,Math.ceil(this.regions/supportX)];
     // The model scan: a workgroup per eighth of a region (8 tiles in turn).
@@ -128,12 +139,20 @@ export class UniformSurfaceWorkControl {
   get countersOffset():number{return 12*this.regions;}
   invalidate():void{this.forced[0]=this.forced[1]=true;this.revisionGeneration++;}
   /** An intervening writer changed geometry outputs outside this snapshot. */
+  get geometryRefreshRequired():boolean{return this.forced[1]||!this.enabled;}
   invalidateGeometry():void{this.forced[1]=true;}
   async initialize():Promise<void>{
+    await this.framePlan.initialize();
     const module=uniformDetailModule(this.device,{label:"Uniform 16h surface work control",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read_write> wc:array<atomic<u32>>;
 @group(1) @binding(2) var<storage,read> wcVelocity:array<u32>;
+@group(1) @binding(5) var<storage,read> wcRevisions:array<u32>;
+${this.framePlan.wgsl(1,4)}
+var<workgroup> wcRegionalCount:u32;
+var<workgroup> wcRegionalRegion:u32;
+fn wcRegionCount(channel:u32,lane:u32)->u32{if(lane==0u){wcRegionalCount=regionalCount(channel);}return workgroupUniformLoad(&wcRegionalCount);}
+fn wcRegionAt(channel:u32,slot:u32,lane:u32)->u32{workgroupBarrier();if(lane==0u){wcRegionalRegion=regionalAt(channel,slot);}return workgroupUniformLoad(&wcRegionalRegion);}
 ${this.heat?uniformRegionHeatWGSL(1,3,this.heat.regions):"const UM_TIER_COLD:u32=0u;fn umRegionTier(region:u32)->u32{return 2u;}"}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 override wcForce:bool=false;
@@ -194,14 +213,17 @@ fn wcDecode(word:u32)->f32{return bitcast<f32>(select(~word,word^0x80000000u,(wo
 var<workgroup> wcSelectLive:u32;
 var<workgroup> wcSelectChanged:atomic<u32>;
 var<workgroup> wcSelectClosed:atomic<u32>;
-@compute @workgroup_size(64) fn selectSurface(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let region=group.x+umDispatchX*group.y;if(region>=UM_PAGES){return;}
+@compute @workgroup_size(64) fn selectSurface(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=wcRegionCount(3u,lane);
+ for(var job=group.x+groups.x*group.y;job<count*1u;job+=groups.x*groups.y){
+ let region=wcRegionAt(3u,job/1u,lane);
+
  if(lane==0u){
   let block=region>>3u;wcSelectLive=u32(umBlockStored(block)&&umBlockWord(block)!=0xffffffffu);
   atomicStore(&wcSelectChanged,0u);atomicStore(&wcSelectClosed,0u);
  }
  if(workgroupUniformLoad(&wcSelectLive)==0u){
-  if(lane==0u){atomicStore(&wc[region],0u);atomicStore(&wc[WC_MODEL_REUSE+region],0u);atomicStore(&wc[WC_MODEL+8u*region+5u],0u);atomicStore(&wc[WC_MODEL+8u*region+7u],0u);atomicStore(&wc[WC_MODEL_EPOCH+region],0u);}return;
+  if(lane==0u){atomicStore(&wc[region],0u);atomicStore(&wc[WC_MODEL_REUSE+region],0u);atomicStore(&wc[WC_MODEL+8u*region+5u],0u);atomicStore(&wc[WC_MODEL+8u*region+7u],0u);atomicStore(&wc[WC_MODEL_EPOCH+region],0u);}continue;
  }
  // A COLD region at the same world with a valid model holds its model,
  // metadata, closed flag and support (summaries skips it too). Its first
@@ -213,7 +235,7 @@ var<workgroup> wcSelectClosed:atomic<u32>;
    &&atomicLoad(&wc[m])==world.x&&atomicLoad(&wc[m+1u])==world.y&&atomicLoad(&wc[m+2u])==world.z;
   wcSelectLive=select(1u,2u,hold);
  }
- if(workgroupUniformLoad(&wcSelectLive)==2u){if(lane==0u){atomicStore(&wc[WC_MODEL_REUSE+region],1u);}return;}
+ if(workgroupUniformLoad(&wcSelectLive)==2u){if(lane==0u){atomicStore(&wc[WC_MODEL_REUSE+region],1u);}continue;}
  if(lane==0u){
   let epoch=atomicLoad(&wc[WC_LIVE+region]);
   // A COLD region's phi is held (UniformRegionHeat): its model stands
@@ -236,6 +258,9 @@ var<workgroup> wcSelectClosed:atomic<u32>;
   let same=atomicLoad(&wcSelectChanged)==0u;
   atomicStore(&wc[region],atomicLoad(&wcSelectClosed));atomicStore(&wc[WC_MODEL+8u*region+5u],0u);
   atomicStore(&wc[WC_MODEL_REUSE+region],u32(same));if(!same){wcFit(region);}
+ }
+
+ workgroupBarrier();
  }
 }
 var<workgroup> wcChanged:atomic<u32>;
@@ -281,56 +306,110 @@ var<workgroup> wcSlope:array<atomic<u32>,3>;
   if(lane==0u){atomicStore(&wc[umPageOfTile(tile)],1u);}
  }
 }
-// The surface model's residual and slopes over one tile (a lane a vertex).
-fn wcSurfaceTile(region:u32,tile:u32,lane:u32){
- let base=4u*umTileCoord(tile);
- if(lane==0u){
-  let m=WC_MODEL+8u*region;wcPlane=bitcast<vec4f>(vec4u(atomicLoad(&wc[m]),atomicLoad(&wc[m+1u]),atomicLoad(&wc[m+2u]),atomicLoad(&wc[m+3u])));atomicStore(&wcResidual,0u);
-  for(var axis=0u;axis<3u;axis++){atomicStore(&wcSlope[axis],0u);}
+// Once the frame is sealed the cache mapping cannot change. One group
+// owns each selected region: lanes compare its tiles, then publish its
+// certificate together. This removes mapping selection, revision copies,
+// global clears and a separate region finish dispatch from the active path.
+var<workgroup> wcRegionalChanges:atomic<u32>;
+@compute @workgroup_size(64) fn geometryRegional(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=wcRegionCount(3u,lane);
+ if(group.x==0u&&lane==0u){atomicStore(&wc[3u*UM_PAGES+2u],u32(wcEnabled)+2u*u32(wcGeometryStats));}
+ for(var job=group.x;job<count;job+=groups.x){
+  let region=wcRegionAt(3u,job,lane);
+  let mapped=atomicLoad(&wc[WC_MAPPING+region]);let miss=mapped==0u;
+  let remapped=atomicLoad(&wc[WC_GEOMETRY_REMAP+region])!=0u;
+  let epoch=wcRevisions[WC_LIVE+region];
+  if(lane==0u){atomicStore(&wcRegionalChanges,select(0u,3u,miss||remapped));}workgroupBarrier();
+  // Producer topology revisions include page identity and the remap halo.
+  // A held region needs no tile metadata scan or texture access at all.
+  let topologyPossible=regionalHas(4u,region)||remapped;
+  let regionHeld=!topologyPossible&&(umRegionTier(region)==UM_TIER_COLD||(epoch>0u&&epoch<0xfffffffeu&&epoch==atomicLoad(&wc[WC_GEOMETRY_EPOCH+region])));
+  if(!miss&&!regionHeld){
+   let tile=umPageTile(region,lane);let base=4u*umTileCoord(tile);
+   let at=WC_SNAPSHOT+132u*(64u*(mapped-1u)+lane);let stencil=umTileStencil(tile);
+   let metadata=array<u32,7>(umTopology[tile],stencil.x,stencil.y,base.x,base.y,base.z,1u);
+   var topology=remapped;
+   if(topologyPossible){for(var k=0u;k<7u;k++){let value=metadata[k];topology=topology||atomicLoad(&wc[at+125u+k])!=value;atomicStore(&wc[at+125u+k],value);}}
+   var dirty=topology;
+   let held=!topology&&(umRegionTier(region)==UM_TIER_COLD||(epoch>0u&&epoch<0xfffffffeu&&epoch==atomicLoad(&wc[WC_GEOMETRY_EPOCH+region])));
+   if(!held){
+    let width=umTileMinimumWidth(tile);let dense=width<4u;let side=4u/width+1u;let vertices=select(8u,side*side*side,dense);
+    for(var k=0u;k<vertices;k++){
+     var value=0.0;
+     if(dense){value=textureLoad(phi,vec3i(base+width*umCorner(k,side)),0).x;}
+     else{value=${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(base+4u*umCorner(k,2u)),0).x;}
+     let bits=bitcast<u32>(value);let previous=atomicLoad(&wc[at+k]);
+     dirty=dirty||bits!=previous||!(abs(value)<=3.402823e38&&abs(bitcast<f32>(previous))<=3.402823e38);
+     atomicStore(&wc[at+k],bits);
+    }
+   }
+   atomicOr(&wcRegionalChanges,u32(dirty)|(2u*u32(topology)));
+  }
+  workgroupBarrier();
+  if(lane==0u){
+   let body=${this.solid?`umBodyEvidencePending()&&umBodySweptReach(region)<=${GEOMETRY_BODY_REACH}u`:"false"};
+   let changes=atomicLoad(&wcRegionalChanges)|select(0u,3u,body);let dirty=(changes&1u)!=0u;
+   atomicStore(&wc[region],u32(dirty));atomicStore(&wc[WC_TOPOLOGY+region],u32((changes&2u)!=0u));
+   atomicStore(&wc[WC_GEOMETRY_REMAP+region],0u);
+   if(umRegionTier(region)!=UM_TIER_COLD){atomicStore(&wc[WC_GEOMETRY_EPOCH+region],epoch);}
+   let before=atomicLoad(&wc[UM_PAGES+region]);atomicStore(&wc[UM_PAGES+region],min(0x1fffffffu,before+u32(dirty||before==0u)));
+   atomicAdd(&wc[3u*UM_PAGES],1u);if(miss){atomicAdd(&wc[3u*UM_PAGES+3u],1u);}if(dirty){atomicAdd(&wc[3u*UM_PAGES+1u],1u);}
+  }
+  workgroupBarrier();
  }
- workgroupBarrier();
- let width=umTileMinimumWidth(tile);let dense=width<4u;
- let side=4u/width+1u;let count=select(8u,side*side*side,dense);
- var residual=0.0;
- for(var k=lane;k<count;k+=64u){
-  var value=0.0;
-  if(dense){value=textureLoad(phi,vec3i(base+width*umCorner(k,side)),0).x;}
-  else{value=${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(base+4u*umCorner(k,2u)),0).x;}
-  wcInputs[k]=bitcast<u32>(value);
-  let point=base+width*umCorner(k,side);var error=abs(value-(wcPlane.w+dot(wcPlane.xyz,vec3f(point)-vec3f(16u*umPageCoord(region)+vec3u(8u)))));
-  if(!(abs(value)<=3.402823e38&&error<=3.402823e38)){error=3.402823e38;}
-  residual=max(residual,error);
- }
- atomicMax(&wcResidual,bitcast<u32>(residual));
- workgroupBarrier();
- // Every derivative of a trilinear cell is a convex combination of its
- // four parallel edge slopes. Include resolved hanging vertices: native
- // coarse edges are sums of these shorter edges at mixed boundaries.
- let n=select(2u,side,dense);let step=select(4.0,f32(width),dense);var slopes=vec3f(0);
- for(var k=lane;k<count;k+=64u){
-  let q=umCorner(k,n);let a=bitcast<f32>(wcInputs[k]);
-  for(var axis=0u;axis<3u;axis++){
-   if(q[axis]+1u>=n){continue;}
-   let stride=select(select(1u,n,axis==1u),n*n,axis==2u);let b=bitcast<f32>(wcInputs[k+stride]);
-   var bound=(abs(b-a)+4.0*1.1920929e-7*(abs(a)+abs(b)))/step;
-   if(!(abs(a)<=3.402823e38&&abs(b)<=3.402823e38&&bound<=3.402823e38)){bound=3.402823e38;}
-   slopes[axis]=max(slopes[axis],bound);
+}
+// An eighth of a region shares one plane. Stage its eight tile lattices
+// together, then reduce directly across the whole job. Maxima associate
+// exactly; no tile-local reduction or per-tile reset is needed.
+var<workgroup> wcSurfaceInputs:array<u32,${125*64/WC_SCAN_PARTS}>;
+fn wcSurfacePart(region:u32,first:u32,lane:u32){
+ let m=WC_MODEL+8u*region;
+ let plane=bitcast<vec4f>(vec4u(atomicLoad(&wc[m]),atomicLoad(&wc[m+1u]),atomicLoad(&wc[m+2u]),atomicLoad(&wc[m+3u])));
+ let centre=vec3f(16u*umPageCoord(region)+vec3u(8u));var residual=0.0;
+ for(var part=0u;part<${64/WC_SCAN_PARTS}u;part++){
+  let tile=umPageTile(region,first+part);if(tile>=UM_TILES||!umTileLive(tile)){continue;}
+  let base=4u*umTileCoord(tile);let width=umTileMinimumWidth(tile);let dense=width<4u;
+  let side=4u/width+1u;let count=select(8u,side*side*side,dense);
+  for(var k=lane;k<count;k+=64u){
+   var value=0.0;
+   if(dense){value=textureLoad(phi,vec3i(base+width*umCorner(k,side)),0).x;}
+   else{value=${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,vec3i(base+4u*umCorner(k,2u)),0).x;}
+   wcSurfaceInputs[125u*part+k]=bitcast<u32>(value);
+   let point=base+width*umCorner(k,side);var error=abs(value-(plane.w+dot(plane.xyz,vec3f(point)-centre)));
+   if(!(abs(value)<=3.402823e38&&error<=3.402823e38)){error=3.402823e38;}
+   residual=max(residual,error);
   }
  }
- for(var axis=0u;axis<3u;axis++){atomicMax(&wcSlope[axis],bitcast<u32>(slopes[axis]));}
- workgroupBarrier();
- if(lane==0u){atomicMax(&wc[WC_MODEL+8u*region+6u],atomicLoad(&wcResidual));for(var axis=0u;axis<3u;axis++){atomicMax(&wc[WC_SLOPE+3u*region+axis],atomicLoad(&wcSlope[axis]));}}
- // The next tile resets the workgroup's plane and maxima.
- workgroupBarrier();
-}
-// The surface model scan: a workgroup per eighth of a region, its 8 tiles in
-// turn; a reused region's workgroups exit at once.
-@compute @workgroup_size(64) fn surfaceScan(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
- let job=g.x+umDispatchX*g.y;let region=job/${WC_SCAN_PARTS}u;if(region>=UM_PAGES){return;}
- if(lane==0u){wcSkip=atomicLoad(&wc[WC_MODEL_REUSE+region]);}if(workgroupUniformLoad(&wcSkip)!=0u){return;}
+ workgroupBarrier();var slopes=vec3f(0);
  for(var part=0u;part<${64/WC_SCAN_PARTS}u;part++){
-  let tile=umPageTile(region,${64/WC_SCAN_PARTS}u*(job%${WC_SCAN_PARTS}u)+part);if(tile>=UM_TILES||!umTileLive(tile)){continue;}
-  wcSurfaceTile(region,tile,lane);
+  let tile=umPageTile(region,first+part);if(tile>=UM_TILES||!umTileLive(tile)){continue;}
+  let width=umTileMinimumWidth(tile);let dense=width<4u;let side=4u/width+1u;
+  let count=select(8u,side*side*side,dense);let n=select(2u,side,dense);let step=select(4.0,f32(width),dense);
+  for(var k=lane;k<count;k+=64u){
+   let q=umCorner(k,n);let a=bitcast<f32>(wcSurfaceInputs[125u*part+k]);
+   for(var axis=0u;axis<3u;axis++){
+    if(q[axis]+1u>=n){continue;}
+    let stride=select(select(1u,n,axis==1u),n*n,axis==2u);let b=bitcast<f32>(wcSurfaceInputs[125u*part+k+stride]);
+    var bound=(abs(b-a)+4.0*1.1920929e-7*(abs(a)+abs(b)))/step;
+    if(!(abs(a)<=3.402823e38&&abs(b)<=3.402823e38&&bound<=3.402823e38)){bound=3.402823e38;}
+    slopes[axis]=max(slopes[axis],bound);
+   }
+  }
+ }
+ atomicMax(&wc[WC_MODEL+8u*region+6u],bitcast<u32>(residual));
+ for(var axis=0u;axis<3u;axis++){atomicMax(&wc[WC_SLOPE+3u*region+axis],bitcast<u32>(slopes[axis]));}
+}
+// The surface model scan: a workgroup per eighth of a region. Its tiles
+// share one staged lattice; a reused region's workgroups exit at once.
+@compute @workgroup_size(64) fn surfaceScan(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=wcRegionCount(3u,lane);
+ for(var job=g.x+groups.x*g.y;job<count*8u;job+=groups.x*groups.y){
+ let region=wcRegionAt(3u,job/8u,lane);
+
+ if(lane==0u){wcSkip=atomicLoad(&wc[WC_MODEL_REUSE+region]);}if(workgroupUniformLoad(&wcSkip)!=0u){continue;}
+ wcSurfacePart(region,${64/WC_SCAN_PARTS}u*(job%${WC_SCAN_PARTS}u),lane);
+
+ workgroupBarrier();
  }
 }
 // Metadata-only ablation: one lane per tile, no phi reads or collective
@@ -352,11 +431,15 @@ var<workgroup> wcSupportSlope:array<vec4f,27>;
 fn wcSupportContains(code:u32,offset:i32)->bool{
  return offset==0||(offset<0&&(code&1u)!=0u)||(offset>0&&(code&2u)!=0u);
 }
-@compute @workgroup_size(64) fn summaries(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let region=group.x+umDispatchX*group.y;if(region>=UM_PAGES){return;}
+@compute @workgroup_size(64) fn summaries(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=wcRegionCount(6u,lane);
+ if(all(group==vec3u(0))&&lane==0u){atomicStore(&wc[3u*UM_PAGES+2u],u32(wcEnabled));}
+ for(var job=group.x+groups.x*group.y;job<count*1u;job+=groups.x*groups.y){
+ let region=wcRegionAt(6u,job/1u,lane);
+
  // A region selectSurface held (COLD, model reused) keeps its support.
  if(lane==0u){wcSupportLive=u32(umRegionTier(region)==UM_TIER_COLD&&atomicLoad(&wc[WC_MODEL_REUSE+region])!=0u);if(region==0u){atomicStore(&wc[3u*UM_PAGES+2u],u32(wcEnabled));}}
- if(workgroupUniformLoad(&wcSupportLive)!=0u){if(lane==0u){atomicAdd(&wc[3u*UM_PAGES],1u);}return;}
+ if(workgroupUniformLoad(&wcSupportLive)!=0u){if(lane==0u){atomicAdd(&wc[3u*UM_PAGES],1u);}continue;}
  let output=WC_SUPPORT+${UNIFORM_SURFACE_SUPPORT_WORDS}u*(64u*region+lane);atomicStore(&wc[output+7u],0u);
  if(lane==0u){
   // A COLD region's model keeps the revision it was fit at: the first
@@ -366,7 +449,7 @@ fn wcSupportContains(code:u32,offset:i32)->bool{
   wcSupportLive=u32(umBlockStored(region>>3u)&&umBlockWord(region>>3u)!=0xffffffffu);
   let home=WC_MODEL+8u*region;wcSupportHome=bitcast<vec4f>(vec4u(atomicLoad(&wc[home]),atomicLoad(&wc[home+1u]),atomicLoad(&wc[home+2u]),atomicLoad(&wc[home+3u])));
  }
- if(workgroupUniformLoad(&wcSupportLive)==0u){return;}
+ if(workgroupUniformLoad(&wcSupportLive)==0u){continue;}
  let origin=16u*umPageCoord(region);let g=wcSupportHome.xyz;let c=wcSupportHome.w;
  if(lane<27u){
   let delta=vec3i(i32(lane%3u)-1,i32((lane/3u)%3u)-1,i32(lane/9u)-1);
@@ -414,6 +497,9 @@ fn wcSupportContains(code:u32,offset:i32)->bool{
   }
   atomicAdd(&wc[3u*UM_PAGES],1u);
  }
+
+ workgroupBarrier();
+ }
 }
 // Separate launch: every scan's dirty word is complete before it is read.
 @compute @workgroup_size(64) fn finish(@builtin(global_invocation_id) gid:vec3u){
@@ -444,6 +530,10 @@ fn wcSupportContains(code:u32,offset:i32)->bool{
       ["metadata","metadata",{}],["metadataForce","metadata",{wcForce:1}],["geometryCurrent","finish",{wcMetadataOnly:1}],["geometryCurrentStats","finish",{wcMetadataOnly:1,wcGeometryStats:1}],["geometryCurrentDisabled","finish",{wcMetadataOnly:1,wcEnabled:0}],
       ["select","selectRegions",{}],["selectSurface","selectSurface",{wcSurface:1}],["selectSurfaceForce","selectSurface",{wcSurface:1,wcForce:1}],["scan","scan",{}],["force","scan",{wcForce:1}],["modelScan","surfaceScan",{wcSurface:1}],["surface","summaries",{wcSurface:1}],["surfaceDisabled","summaries",{wcSurface:1,wcEnabled:0}],["geometry","finish",{}],["geometryStats","finish",{wcGeometryStats:1}],["geometryDisabled","finish",{wcEnabled:0}],
     ] as const)this.pipelines.set(name,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:entryPoint==="summaries"||entryPoint==="selectSurface"?this.supportGrids[0]:name==="modelScan"?this.surfaceGrids[0]:this.grids[0],...constants}}}));
+    for(const [name,entryPoint] of [["selectSurfaceListed","selectSurface"],["modelScanListed","surfaceScan"],["surfaceListed","summaries"]]){
+      this.pipelines.set(name!,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:entryPoint!,constants:{wcSurface:1,regionalListed:1}}}));
+    }
+    for(const stats of [false,true])this.pipelines.set(stats?"geometryRegionalStats":"geometryRegional",await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"geometryRegional",constants:{regionalListed:1,wcGeometryStats:+stats}}}));
     const remap=this.device.createShaderModule({label:"Uniform16h remap producer revisions",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+`
 @group(1) @binding(0) var<storage,read> changes:array<u32>;
 @group(1) @binding(1) var<storage,read_write> surface:array<atomic<u32>>;
@@ -457,6 +547,7 @@ var<workgroup> changed:atomic<u32>;
  if(umTileLive(tile)&&(changes[76u+tile]&16u)!=0u){atomicOr(&changed,1u);}workgroupBarrier();
  if(lane==0u&&atomicLoad(&changed)!=0u){
   let at=${this.liveEpochWordOffset}u+region;let before=atomicLoad(&surface[at]);atomicStore(&surface[at],select(min(before,0xfffffffeu)+1u,0xfffffffeu,before>=0xfffffffdu));
+  let topology=${this.topologyEpochWordOffset}u+region;atomicStore(&surface[topology],min(atomicLoad(&surface[topology]),0xfffffffdu)+1u);
   atomicStore(&surface[${this.modelEpochWordOffset}u+region],0u);atomicStore(&geometry[${this.geometryRemapWordOffset}u+region],1u);
   // A width change re-resolves the region's phi: it runs at least WARM
   // from here (UniformRegionHeat). The listed tiles include their halo, so
@@ -479,7 +570,7 @@ if(local<8u){let home=2*upPageOf(block)+vec3i(i32(local&1u),i32((local>>1u)&1u),
   let bits=vec3u(q)&vec3u(1u);let other=8u*neighbor+bits.x+2u*bits.y+4u*bits.z;
   atomicStore(&surface[${this.modelEpochWordOffset}u+other],0u);atomicStore(&geometry[${this.geometryRemapWordOffset}u+other],1u);rhPromote(other);
   // Epoch increments saturate without wrapping, even for overlapping claims.
-  for(var plane=0u;plane<2u;plane++){let ep=${this.liveEpochWordOffset}u+plane*${this.regions}u+other;
+  for(var plane=0u;plane<3u;plane++){let ep=select(${this.liveEpochWordOffset}u+plane*${this.regions}u,${this.topologyEpochWordOffset}u,plane==2u)+other;
    var before=atomicLoad(&surface[ep]);loop{let next=select(before+1u,0xfffffffeu,before>=0xfffffffdu);let result=atomicCompareExchangeWeak(&surface[ep],before,next);if(result.exchanged){break;}before=result.old_value;}
   }
  }}}
@@ -500,20 +591,39 @@ if(local<8u){let home=2*upPageOf(block)+vec3i(i32(local&1u),i32((local>>1u)&1u),
     if(!this.pool||!this.initPipeline||!this.initGroup)throw new Error("Work control has no initialized page pool");
     const pass=encoder.beginComputePass({label:"Uniform 16h work evidence page claims"});pass.setPipeline(this.initPipeline);pass.setBindGroup(0,this.initGroup);pass.dispatchWorkgroups(uniformPageInitGroups(this.pool.layout));pass.end();
   }
+  /** The shared head has maintained the cache mapping on the current pages. */
+  get regionalGeometryReady():boolean{return this.regionalGeometrySetup&&this.framePlan.retainGeometryCache&&this.framePlan.active&&!this.geometryRefreshRequired&&this.geometrySnapshots;}
+  /** Same dispatch in a consumer's compute pass. Dispatch ordering preserves
+   * the snapshot-to-geometry dependency without another pass boundary. The
+   * caller clears the 16-byte counters before the pass and consumes body
+   * evidence after it. */
+  encodeRegionalGeometry(pass:GPUComputePassEncoder):void{
+    if(!this.regionalGeometryReady)throw new Error("Regional geometry needs a sealed frame plan and retained snapshots");
+    pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[1]!.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
+    pass.setPipeline(uniformDetailPick(this.pipelines.get(this.collectGeometryStats?"geometryRegionalStats":"geometryRegional")!));pass.dispatchWorkgroups(this.framePlan.groups);
+  }
   encode(encoder:GPUCommandEncoder,stage:"surface"|"geometry"):void{
+    if(stage==="geometry"&&this.regionalGeometryReady){
+      encoder.clearBuffer(this.geometry,this.countersOffset,16);
+      const pass=encoder.beginComputePass({label:"Uniform regional geometry work control"});
+      this.encodeRegionalGeometry(pass);pass.end();
+      this.solid?.consumeBodyEvidence(encoder);return;
+    }
     const bank=stage==="surface"?0:1,buffer=bank===0?this.surface:this.geometry;
     if(stage==="geometry"){encoder.clearBuffer(buffer,0,4*this.regions);encoder.clearBuffer(buffer,4*this.topologyWordOffset,4*this.regions);encoder.clearBuffer(buffer,4*this.mappingWordOffset,4*this.regions);}encoder.clearBuffer(buffer,this.countersOffset,16);
     if(stage==="geometry")encoder.copyBufferToBuffer(this.surface,4*this.liveEpochWordOffset,this.geometry,4*this.geometryLiveWordOffset,4*this.regions);
     const force=this.forced[bank]||!this.enabled;
+    const listed=stage==="surface"&&this.framePlan.active&&!force;
+
     const pass=encoder.beginComputePass({label:`Uniform 16h ${stage} work control`});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[bank]!.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-    pass.setPipeline(uniformDetailPick(this.pipelines.get(stage==="surface"?(force?"selectSurfaceForce":"selectSurface"):"select")!));if(stage==="surface")pass.dispatchWorkgroups(...this.supportGrids);else pass.dispatchWorkgroups(Math.ceil(this.cacheRegions/64));
+    pass.setPipeline(uniformDetailPick(this.pipelines.get(stage==="surface"?(listed?"selectSurfaceListed":force?"selectSurfaceForce":"selectSurface"):"select")!));if(stage==="surface"){if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else pass.dispatchWorkgroups(...this.supportGrids);}else pass.dispatchWorkgroups(Math.ceil(this.cacheRegions/64));
     const metadataOnly=stage==="geometry"&&!this.geometrySnapshots;
-    pass.setPipeline(uniformDetailPick(this.pipelines.get(stage==="surface"?"modelScan":metadataOnly?(force?"metadataForce":"metadata"):(force?"force":"scan"))!));
-    if(metadataOnly)pass.dispatchWorkgroups(this.cacheRegions);else pass.dispatchWorkgroups(...(stage==="surface"?this.surfaceGrids:this.grids));
+    pass.setPipeline(uniformDetailPick(this.pipelines.get(stage==="surface"?(listed?"modelScanListed":"modelScan"):metadataOnly?(force?"metadataForce":"metadata"):(force?"force":"scan"))!));
+    if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else if(metadataOnly)pass.dispatchWorkgroups(this.cacheRegions);else pass.dispatchWorkgroups(...(stage==="surface"?this.surfaceGrids:this.grids));
     const finish=metadataOnly?(!this.enabled?"geometryCurrentDisabled":this.collectGeometryStats?"geometryCurrentStats":"geometryCurrent"):!this.enabled?`${stage}Disabled`:stage==="geometry"&&this.collectGeometryStats?"geometryStats":stage;
-    pass.setPipeline(uniformDetailPick(this.pipelines.get(finish)!));if(stage==="surface")pass.dispatchWorkgroups(...this.supportGrids);else pass.dispatchWorkgroups(Math.ceil(this.regions/64));pass.end();this.forced[bank]=false;
-    if(stage==="geometry")this.solid?.consumeBodyEvidence(encoder);
+    pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"surfaceListed":finish)!));if(stage==="surface"){if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else pass.dispatchWorkgroups(...this.supportGrids);}else pass.dispatchWorkgroups(Math.ceil(this.regions/64));pass.end();this.forced[bank]=false;
+    if(stage==="geometry"){this.solid?.consumeBodyEvidence(encoder);}
   }
-  destroy():void{this.surface.destroy();this.geometry.destroy();}
+  destroy():void{this.framePlan.destroy();this.surface.destroy();this.geometry.destroy();}
 }

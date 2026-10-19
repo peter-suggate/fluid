@@ -334,6 +334,8 @@ export function decodeGPUTimestampPartition(input: {
   capturedAt_ms?: number;
   timestamps: ArrayLike<bigint>;
   phases: readonly GPUTimestampPhase[];
+  /** A fully skipped submission can have equal, valid nonzero boundaries. */
+  allowZeroDuration?: boolean;
 }): PerformanceTrace | undefined {
   if (input.timestamps.length !== input.phases.length + 1 || input.phases.length === 0) {
     return undefined;
@@ -355,7 +357,7 @@ export function decodeGPUTimestampPartition(input: {
     previous = next;
   }
   const total_ms = Number(previous - origin) / 1e6;
-  if (!Number.isFinite(total_ms) || total_ms <= 0 || total_ms >= 10_000) return undefined;
+  if (!Number.isFinite(total_ms) || total_ms < 0 || (total_ms === 0 && !input.allowZeroDuration) || total_ms >= 10_000) return undefined;
   return partitionPerformanceTrace({
     sampleId: input.sampleId,
     domain: "gpu",
@@ -1058,7 +1060,7 @@ export class GPUStageTimestampRecorder {
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
   }
 
-  async read(): Promise<PerformanceTrace | undefined> {
+  async read(allowZeroDuration = false): Promise<PerformanceTrace | undefined> {
     try {
       if (!this.resolved || this.overflowed) return undefined;
       const bytes = this.queryCount * 8;
@@ -1092,6 +1094,7 @@ export class GPUStageTimestampRecorder {
         capturedAt_ms: performance.now(),
         timestamps: this.boundarySlots.map((slot) => frontier[slot] ?? 0n),
         phases: this.phases,
+        allowZeroDuration,
       });
     } finally {
       if (this.readBuffer.mapState === "mapped") this.readBuffer.unmap();

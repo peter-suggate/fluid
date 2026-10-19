@@ -8,9 +8,29 @@
 export const NARROW_BAND_TRACE_BEND=0.125;
 /** Base substeps past which a trajectory is rejected: 128 cells of travel. */
 export const NARROW_BAND_TRACE_LIMIT=128;
-export function narrowBandTraceWGSL(sample:string):string{return /* wgsl */`
+/** traceSubsteps "gradient": the field's turn a substep may span, dt|grad u|. */
+export const NARROW_BAND_TRACE_TURN=0.25;
+/** Substeps of a trace: "gradient" (default) as many as keep each substep's
+ * dt|grad u| within NARROW_BAND_TRACE_TURN, "travel" one a cell of travel. */
+export type NarrowBandTraceSubsteps="gradient"|"travel";
+export function narrowBandTraceWGSL(sample:string,substeps:NarrowBandTraceSubsteps="travel"):string{return /* wgsl */`
 // Base substeps for a start speed in cells a second over the step dt.
 fn nbTraceSteps(speed:vec3f,dt:f32)->u32{return max(1u,u32(ceil(dt*max(abs(speed.x),max(abs(speed.y),abs(speed.z))))));}
+// traceSubsteps: with gradient substeps a trace first tries the whole step
+// (the travel substeps still bound it and reject a runaway trajectory). Its
+// second stage, a whole step ahead, measures the field's turn over that
+// span against its speed over at least a cell, dt|grad u|; the trace then
+// restarts in as many substeps as keep that within NB_TRACE_TURN each, never
+// more than the travel substeps, and never fewer than keep each within 32
+// cells of travel: a span then crosses at most one page face an axis, as the
+// page-face stops of its callers assume. The probe is that stage's own sample.
+const NB_TRACE_GRADIENT:bool=${substeps==="gradient"};
+const NB_TRACE_TURN:f32=${NARROW_BAND_TRACE_TURN};
+fn nbTraceGradientSteps(k1:vec3f,k2:vec3f,dt:f32,travel:u32)->u32{
+ let turn=abs(k2-k1);let speed=max(max(abs(k1.x),max(abs(k1.y),abs(k1.z))),1.0/abs(dt));
+ let n=ceil(max(turn.x,max(turn.y,turn.z))/(speed*NB_TRACE_TURN));
+ return select(travel,clamp(u32(n),max(1u,(travel+31u)/32u),travel),n<=f32(travel));
+}
 // One step from p, where k1 is the field in cells a second: the end, and in
 // w the base substeps (signed duration \`base\`) it spanned, two where \`most\`
 // allows. The field one base substep ahead is the midpoint stage of Kutta's

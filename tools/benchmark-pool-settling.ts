@@ -86,6 +86,8 @@ await withUniformDevice("pool settling benchmark",async device=>{
    const row={frame,ms,encode_ms,bodyPosition:Array.from(body.slice(0,3)),bodyVelocity:previous,
     tiers:Array.from(tierWords.slice(f.heat.regions,f.heat.regions+3)),particles:solver.narrowBandFlipInfo?.particles,
     bandTiles:solver.info.uniformPressureBandTiles,rootResidual:solver.info.uniformPressureAcceptedResidual,bandResidual:solver.info.uniformPressureBandResidual};
+   // Reuse the diagnostic read above to measure per-region tier chatter.
+   if(frame>=from)Object.assign(row,{regionTiers:Array.from(tierWords.subarray(0,f.heat.regions))});
    if(process.env.AUDIT==="1"&&(frame===360||frame===600||frame>=840&&frame%30===0)){const audit=await auditPoolRegions(device,f);Object.assign(row,{audit});console.log(JSON.stringify({frame,auditTotals:audit.totals}));}
    if([270,285,300,330,360,480].includes(frame)){
     const heights=await surfaceProbe.measure(row.bodyPosition);

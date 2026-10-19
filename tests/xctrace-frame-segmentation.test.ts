@@ -384,3 +384,10 @@ test("render timing excludes startup and warmup frames with the same recurring l
   assert.ok(!report.passes.some(pass => pass.label.includes("Initial mesh extraction")));
   assert.ok(report.frames.samples.every(frame => Math.abs(frame.durationMs-50) < .01));
 });
+
+test('paged NB-FLIP capture starts at the solid-record head, not repeated heat or crossing work',async()=>{
+ const anchor='Uniform mixed all-4h solid record';
+ const report=await buildFrameReport({tables:writeTrace({frames:3,frameUs:50_000,tasks:[anchor,'Uniform region work heat','Narrow-band FLIP crossing search','Uniform region work heat','Narrow-band FLIP crossing search','Narrow-band FLIP update']}),lane:'letters',environment:{FLUID_GPU_ISOLATE_PASS_LABELS:'1'},tracedPid:4242,firstFrame:true,frameLimit:1});
+ assert.equal(report.frames.anchor,anchor);assert.equal(report.frames.count,1);
+ assert.equal(report.frames.samples[0]!.durationMs,50);
+});

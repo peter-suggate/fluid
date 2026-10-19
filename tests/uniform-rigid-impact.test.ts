@@ -68,7 +68,10 @@ test("pool sphere impact responds to the solved pressure impulse without extra m
    assert.ok(deepest<1.37,"the ball must penetrate before buoyancy reverses its motion");
    const fields=await readUniformFields(device,solver);let crest=1.8;
    for(let z=12;z<52;z++)for(let x=12;x<52;x++)for(let y=37;y<56;y++){
-    if(fields.vertex(x,y,z)<-.005)crest=Math.max(crest,y*.05);
+    // Measure the zero crossing, not its lower lattice sample: a crown
+    // between 2.10 and 2.15 m must not be rounded down to the 2.10 m limit.
+    const low=fields.vertex(x,y,z),high=fields.vertex(x,y+1,z);
+    if(low<=0&&high>0)crest=Math.max(crest,.05*(y-low/(high-low)));
    }
    t.diagnostic(`pressure impulse ${impulseY.toFixed(2)} N s; minimum centre ${deepest.toFixed(3)} m; crest ${(crest-1.8).toFixed(3)} m above pool`);
    assert.ok(crest>2.1,"the impact must displace a visible crown above the pool");

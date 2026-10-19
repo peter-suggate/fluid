@@ -44,3 +44,17 @@ test("the geometry struct follows leading directives", () => {
   const rewritten = uniformSceneConstantsWGSL("enable subgroups;\n" + shader(32, 0.05));
   assert.match(rewritten, /^enable subgroups;\s*struct UMSceneCounts/);
 });
+
+test("paged capacities and their derived offsets use each ownership's uniform", () => {
+  const paged = (tiles: number, prefix = "") => `
+var<uniform> ${prefix}umCounts:vec4u;
+const ${prefix}UM_TILES:u32=${tiles}u;
+const ${prefix}UM_RESIDENCY:u32=9u*${prefix}UM_TILES+28u;
+fn ${prefix}read()->u32{return ${prefix}UM_RESIDENCY+${prefix}umCounts.x;}`;
+  const small = uniformSceneConstantsWGSL(paged(1536) + paged(2048, "old"));
+  assert.equal(small, uniformSceneConstantsWGSL(paged(8192) + paged(4096, "old")));
+  assert.match(small, /fn UM_TILES\(\)->u32\{return umCounts.dimensions.w;\}/);
+  assert.match(small, /fn oldUM_TILES\(\)->u32\{return oldumCounts.dimensions.w;\}/);
+  const fixed = paged(1536) + "var<workgroup> table:array<u32,UM_TILES>;";
+  assert.equal(uniformSceneConstantsWGSL(fixed), fixed);
+});

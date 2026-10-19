@@ -110,6 +110,32 @@ test('rebuilding a moving platform keeps its active behavior and progress',async
  }finally{await h.dispose();}
 });
 
+test('a failed fluid adapter reports its cause and stops character control', async () => {
+  const scene = createInteractivePlayground(true);
+  scene.scenery = undefined;
+  let failure: string | undefined;
+  let changed = () => {};
+  const host = new SceneInteractionHost(scene, { fluid: {
+    isReady: () => !failure,
+    failureReason: () => failure,
+    subscribeReadiness: listener => { changed = listener; return () => {}; },
+    step: async () => [],
+  } });
+  try {
+    await host.ready;
+    await accepted(host, { kind: 'possess', entityId: 'player' });
+    await accepted(host, { kind: 'transport', action: 'play' });
+    failure = 'GPU device lost: Insufficient Memory';
+    changed();
+    assert.equal(host.getView().running, false);
+    assert.deepEqual(host.getView().readiness, { state: 'failed', reasons: [failure] });
+    assert.equal((await send(host, { kind: 'transport', action: 'play' })).accepted, false);
+    failure = undefined;
+    changed();
+    assert.equal(host.getView().readiness.state, 'failed', 'device failure cannot silently resume');
+  } finally { await host.dispose(); }
+});
+
 test('wet play waits for the attached fluid driver to finish preparing and unsubscribes on disposal', async () => {
   const scene = createInteractivePlayground(true);
   scene.scenery = undefined;

@@ -1,3 +1,4 @@
+import { uniformComputePassEpoch } from "./uniform-compute-blit";
 import type { WebGPUUniformPressureMultigrid } from "./webgpu-uniform-pressure-multigrid";
 import { uniformPressureHierarchyWGSL } from "./webgpu-uniform-pressure-multigrid.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -10,6 +11,9 @@ import { uniformMixedPressureLiquidWGSL, uniformMixedSurfaceThetaWGSL } from "./
 import type { UniformMixedPressureTopology } from "./uniform-mixed-pressure-topology.wgsl";
 import { UNIFORM_MIXED_ROOT_FAR_CELLS } from "./uniform-mixed-root-owners";
 import { UNIFORM_PRESSURE_PAGE_LEVELS } from "./pressure-plan";
+import { uniformPressurePageSmoothingWGSL } from "./uniform-pressure-page-smoothing.wgsl";
+import { uniformPressureReserveWGSL } from "./uniform-pressure-reserve.wgsl";
+import { uniformPressureRetainedSetupWGSL } from "./uniform-pressure-retained-setup.wgsl";
 
 type Continuation = ReturnType<WebGPUUniformPressureMultigrid["prepareMixedContinuation"]>;
 
@@ -44,7 +48,7 @@ const ROOT_COARSE_LANES = 1024;
 const ROOT_LEVELS = UNIFORM_PRESSURE_PAGE_LEVELS;
 const ROOT_CONFIG_WORDS = 16 + 12 * ROOT_LEVELS;
 const ROOT_LAUNCH_KEYS = ["UM_RHS", "UM_MIN", "UM_FULL", "UM_BL", "UM_BRHS", "UM_BSRC", "UM_BFIRST", "UM_BCOUNT", "UM_BEND",
-  "UM_CRHS", "UM_CFULL", "UM_TL", "UM_TSRC", "UM_TRHS", "UM_TFULL", "UM_PL", "UM_PSRC", "UM_PTO", "UM_PCOARSE", "UM_PADD", "UM_SL"] as const;
+  "UM_CRHS", "UM_CFULL", "UM_TL", "UM_TSRC", "UM_TRHS", "UM_TFULL", "UM_PL", "UM_PSRC", "UM_PTO", "UM_PCOARSE", "UM_PADD", "UM_SL", "UM_RETAIN"] as const;
 const ROOT_LAUNCH_BYTES = 4 * ROOT_LAUNCH_KEYS.length;
 /** A level of more rows than this is run a block to a workgroup; the rest
  * share the one-workgroup launch (a workgroup is one core's worth of the
@@ -108,7 +112,7 @@ export class UniformMixedPressurePasses {
  * record's dynamic offset, as setBindGroup takes it. */
 interface RootLaunch { pipeline: GPUComputePipeline; groups?: readonly [number, number, number]; tiles: number; lanes: number; listed: boolean; offset: number; offsets: number[] }
 /** Every traversal's launches in encode order. */
-interface RootTraversals { setup: readonly RootLaunch[]; measure: readonly RootLaunch[]; vCycle: readonly RootLaunch[]; fullCycle: readonly RootLaunch[] }
+interface RootTraversals { setupBatched: readonly RootLaunch[]; setupBatchedFull: readonly RootLaunch[]; setup: readonly RootLaunch[]; setupFull: readonly RootLaunch[]; setupHeld: readonly RootLaunch[]; measure: readonly RootLaunch[]; vCycle: readonly RootLaunch[]; fullCycle: readonly RootLaunch[]; reserveV: readonly RootLaunch[]; reserveFull: readonly RootLaunch[] }
 
 /** How a root-lattice smoothing launch stores its last iterate: in the other
  * parity of the level, or straight into the mixed pressure (added, assigned,
@@ -133,9 +137,11 @@ type RootEnd = 0 | 1 | 2 | 3;
  * other and a page table's AIR and SOLID mean the same on every level.
  * Level 0's row is the mixed row itself (the tile key, or the wall slot).
  *
- * The setup (level 0's geometry here, then the continuation's pyramid, baked
- * coefficients and cycle list, uniformPressureHierarchyWGSL) runs once a
- * solve, a lane to a row over the whole pool. A row's baked mask says
+ * Setup refreshes the solve's scratch and job list every solve. Geometry and
+ * coefficients remain in the pressure-only arena: exact changed inputs
+ * propagate through the hierarchy and rebuild their neighbour closure.
+ * Launches cover the pool but unchanged blocks skip the geometry work.
+ * A row's baked mask says
  * whether it is a row of the solve at all: a block that holds no page has
  * none, so a lane on one returns after that load.
  *
@@ -176,6 +182,16 @@ type RootEnd = 0 | 1 | 2 | 3;
  * pressure fields are borrowed; low rounding words and the cycle list are
  * owned here. Convergence validation and publication remain the frame's job. */
 export class UniformMixedPressureCycles {
+  /** Diagnostic ablation: rebuild identical operators without regional reuse. */
+  retainSetup = true;
+  /** Independent hierarchy levels share continuation and bake launches. */
+  batchSetup = true;
+  /** Experimental regional rebuilds. Exact, but measured active-step latency
+   * still regresses; default reuse requires the producer's held-input proof. */
+  retainRegionalSetup = false;
+  private setupInitialized = false;
+  /** Diagnostic counts: downsampled, extended and baked blocks this solve. */
+  get setupWork(): GPUBufferBinding { return { buffer: this.list, offset: 4, size: 12 }; }
   readonly rounding:GPUBuffer;
   private readonly configuration: GPUBuffer;
   private launches?: GPUBuffer;
@@ -207,6 +223,7 @@ export class UniformMixedPressureCycles {
   private readonly visit: { first: number; count: number }[];
   private readonly tileLanes: number;
   private boundPass?: GPUComputePassEncoder;
+  private boundEpoch=-1;
   private readonly lanes: number;
   private readonly blocks: number;
   /** Level 0's jobs (an octant of each block): the listed launches' widest. */
@@ -218,7 +235,7 @@ export class UniformMixedPressureCycles {
   private work?: number;
   private readonly words: Record<"p" | "b0" | "b1" | "m0" | "m1" | "backup" | "residual", number>;
   private readonly solid: boolean;
-  constructor(private readonly device: GPUDevice, readonly level: UniformMixedPressureCycleLevel, backup: GPUBufferBinding, native: Continuation) {
+  constructor(private readonly device: GPUDevice, readonly level: UniformMixedPressureCycleLevel, backup: GPUBufferBinding, native: Continuation, private readonly fusedReserve = false, private readonly fusedCoarse = false, private readonly pageSmoothing = false) {
     const layout = level.ownership.layout, address = layout.address, blocks = address.blocks;
     // A row a tile key: an owner's index is its tile's key.
     if (layout.tiles.some(word => mixedCellWidth(word) !== 4) || layout.tiles.length !== address.tileKeys || layout.cellCount !== address.tileKeys)
@@ -254,10 +271,10 @@ export class UniformMixedPressureCycles {
     // one scalar (Tint pads each variable to 16 bytes).
     const rows = this.levelRows;
     const single = rows.findIndex(n => n <= Math.min(ROOT_SINGLE_MAX_ROWS, this.lanes));
-    this.tiled = Math.max(1, single < 0 ? last : single);
+    this.tiled = Math.max(1, Math.min(this.fusedCoarse ? 2 : last, single < 0 ? last : single));
     this.rows = 4 * Math.floor((device.limits.maxComputeWorkgroupStorageSize - 16) / 16);
     const visits = Math.max(0, ...rows.slice(this.tiled, last));
-    if (visits > this.lanes) throw new Error(`Mixed pressure root: a ${visits}-row level does not fit one workgroup of ${this.lanes} lanes`);
+    if (!this.fusedCoarse && visits > this.lanes) throw new Error(`Mixed pressure root: a ${visits}-row level does not fit one workgroup of ${this.lanes} lanes`);
     // A visit keeps two iterates of ROOT_COARSE_LANES rows there.
     if (this.rows < 2 * ROOT_COARSE_LANES) throw new Error(`Mixed pressure root: one workgroup's memory holds ${this.rows} rows, fewer than the ${2 * ROOT_COARSE_LANES} a visit's two iterates take`);
     const perBlock = rows[last]! / blocks;
@@ -273,7 +290,7 @@ export class UniformMixedPressureCycles {
     this.solid = !!topology;
     this.maxWorkgroups = device.limits.maxComputeWorkgroupsPerDimension;
     this.listed = native.listed;
-    this.list = device.createBuffer({ label: "Uniform root pressure job list", size: 4 * (4 + 2 * this.rootJobs),
+    this.list = device.createBuffer({ label: "Uniform root pressure jobs and retained setup evidence", size: 4 * (5 + 2 * this.rootJobs + (31 + 2 * ROOT_LEVELS) * blocks),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.configuration = device.createBuffer({ label: "Uniform root pressure hierarchy", size: 4 * ROOT_CONFIG_WORDS,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -327,6 +344,7 @@ const UM_NONE=0xffffffffu;
 // A row's mask beyond its liquid bits: a row of the solve; odd by colour (the coarsest level's).
 const UM_ROW=256u;const UM_ODD=128u;
 const UM_LAST=${ROOT_LEVELS - 1}u;
+const UM_COMPACT=${4 + 2 * this.rootJobs + (29 + 2 * ROOT_LEVELS) * this.blocks}u;
 `;
     const body = /* wgsl */ `
 // A tiled launch's jobs. Level 0's are the octants of the blocks, 4^3 tiles
@@ -509,7 +527,7 @@ fn umLResidual(L:UMLevel,row:u32,par:u32,rhs:u32)->f32{
 // own; a wall slot's fraction is the wall face's (V=1/2 on a closed domain
 // face without a solid record).
 @compute @workgroup_size(64) fn setup(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u){
- let L=umLevel(0u);let j=gid.x+64u*launched.x*gid.y;if(j>=umLRows(L)){return;}
+ let L=umLevel(0u);let j=gid.x+64u*launched.x*gid.y;if(j<UM_BLOCKS){mgCheckTopology(j);if(umStored(j)){let rank=atomicAdd(&umList[UM_COMPACT],1u);atomicStore(&umList[UM_COMPACT+1u+rank],j);atomicStore(&umList[UM_COMPACT+1u+UM_BLOCKS+j],rank);}}if(j>=umLRows(L)){return;}
  let b=umLBlock(L,j);if(!umStored(b)){return;}
  let cell=j<L.cells;var k=j;var row=true;
  if(!cell){k=umLOwner(L,j);let face=umLFace(L,j);row=umAcross(b,face>>1u,face&1u)>=UM_BLOCKS-1u;}
@@ -523,11 +541,25 @@ fn umLResidual(L:UMLevel,row:u32,par:u32,rhs:u32)->f32{
   ${solid ? "else if(umTopo(k).x<=1e-5){bound=0.0;}" : ""}
   mixed[UM_P+j]=0.0;mixed[UM_B0+j]=0.0;mixed[UM_M0+j]=bound;
  }
+ var changed=false;
  if(cell){
   ${solid ? "let topology=umTopo(j);" : `var topology=vec4f(1.0);
   for(var axis=0u;axis<3u;axis++){if(((j>>(3u*axis))&7u)==7u&&umAcross(b,axis,1u)>=UM_BLOCKS-1u){topology[axis+1u]=0.5;}}`}
-  native[L.phi.x+j]=phi[j];for(var component=0u;component<4u;component++){native[L.v+4u*j+component]=topology[component];}
- }else{native[L.sv+j-L.cells]=${solid ? "umTopo(j).x" : "0.5"};}
+  changed=UM_RETAIN&&mgDifferent(native[L.phi.x+j],phi[j]);native[L.phi.x+j]=phi[j];
+  for(var component=0u;component<4u;component++){let at=L.v+4u*j+component;changed=changed||(UM_RETAIN&&mgDifferent(native[at],topology[component]));native[at]=topology[component];}
+ }else{let at=L.sv+j-L.cells;let value=${solid ? "umTopo(j).x" : "0.5"};changed=UM_RETAIN&&mgDifferent(native[at],value);native[at]=value;}
+ // The nodal crossing can change without changing the fitted centre phi.
+ // Include the actual face coefficients in retained setup's evidence.
+ ${solid?`if(UM_RETAIN&&cell&&!changed&&umLiquid(j)&&arrayLength(&umRecord)>umLRows(L)+j){
+  let c=vec3i(umLLocal(L,j));
+  for(var n=0u;n<6u;n++){
+   let axis=n>>1u;let near=mgCellAt(L,b,c+umStep(n));if(near.kind!=0u){continue;}
+   let low=select(near.row,j,(n&1u)==1u);let v=umTopo(low)[axis+1u];let h=4.0*UM_H[axis];
+   let coefficient=select(0.0,v/(h*h*umTheta(j,near.row,axis,n&1u)),v>1e-6);
+   changed=changed||mgDifferent(native[L.c+7u*j+n],coefficient);
+  }
+ }`:""}
+ if(changed){mgMarkChanged(0u,b,false);}
  if(UM_LISTED){
   // The far-field seeds of the listed cycle kernels: every value a dense
   // cycle leaves at a row outside the list that anything listed reads. Air
@@ -689,6 +721,7 @@ fn umRegionRow(L:UMLevel,reach:i32,q:vec3i)->u32{
 // ---- The small levels (UM_SINGLE and below), in one workgroup. Each helper
 // is a former pass, ended by a storage barrier.
 const UM_ROWS=${ROOT_COARSE_LANES}u;
+const UM_CACHED_ROWS=${Math.min(2*this.lanes,Math.floor(this.rows/2))}u;
 override UM_LANES:u32=256u;
 // A visit from parity start; the parity it ends on. A lane owns one row: it
 // reads the row's coefficients, RHS and bound once, the iterates pass between
@@ -696,7 +729,9 @@ override UM_LANES:u32=256u;
 var<workgroup> umIterate:array<f32,${this.rows}>;
 const UM_HALVES=${2 * ROOT_PAGE_SWEEPS}u;const UM_OMEGA=${ROOT_PAGE_RELAXATION.toFixed(7)};
 fn umLSmooth(l:u32,start:u32,rhs:u32,low:u32,lane:u32)->u32{
- let L=umLevel(l);var mask=0u;if(lane<umLRows(L)){mask=umLMask(L,lane);}
+ let L=umLevel(l);
+ if(umLRows(L)>UM_LANES){return reserveCachedSmooth(l,start,rhs,low,lane);}
+ var mask=0u;if(lane<umLRows(L)){mask=umLMask(L,lane);}
  let own=(mask&UM_ROW)!=0u;
  var old=0.0;var minimum=0.0;var b=0.0;var diagonal=0.0;
  var a:array<f32,6>;var at:array<u32,6>;
@@ -940,6 +975,9 @@ fn umLV(a:u32,rhsA:u32,lowA:u32,start:u32,lane:u32)->u32{
   let L=umLevel(UM_SINGLE);let top=umLV(UM_SINGLE,L.b[UM_CRHS],L.m[UM_CRHS],0u,lane);
  }
 }
+${uniformPressurePageSmoothingWGSL(this.lanes)}
+${uniformPressureReserveWGSL}
+${uniformPressureRetainedSetupWGSL}
 ${uniformPressureHierarchyWGSL}`;
     const aliases: Record<string, string> = {
       UM_H: "umConfig.h.xyz", UM_MIN_H: "min(umConfig.h.x,min(umConfig.h.y,umConfig.h.z))", UM_FAR: "umConfig.h.w",
@@ -949,8 +987,9 @@ ${uniformPressureHierarchyWGSL}`;
       MG_P: "umConfig.levels[0].pb.x", MG_B: "umConfig.levels[0].pb.z", MG_MIN: "umConfig.levels[0].mc.x",
       UM_SINGLE: "umConfig.flags.y", UM_LISTED: "(umConfig.flags.w!=0u)",
       UM_KEYS: "umConfig.flags.x", UM_BLOCKS: "(umConfig.flags.x/512u)", UM_RESIDENCY: "(9u*umConfig.flags.x+28u)",
+      UM_PAGE_WORDS: `${UNIFORM_PAGE_TABLE_WORDS}u`,
     };
-    for (const key of ROOT_LAUNCH_KEYS) aliases[key] = ["UM_FULL", "UM_CFULL", "UM_TFULL", "UM_PADD"].includes(key) ? `(umLaunch.${key}!=0u)` : `umLaunch.${key}`;
+    for (const key of ROOT_LAUNCH_KEYS) aliases[key] = ["UM_FULL", "UM_CFULL", "UM_TFULL", "UM_PADD", "UM_RETAIN"].includes(key) ? `(umLaunch.${key}!=0u)` : `umLaunch.${key}`;
     const code = declarations + body.replace(/\b(?:UM|MG)_[A-Z0-9_]+\b/g, key => aliases[key] ?? key);
     const module = this.device.createShaderModule({ label: "Uniform mixed pressure root", code });
     const info = await module.getCompilationInfo(), errors = info.messages.filter(m => m.type === "error");
@@ -965,6 +1004,7 @@ ${uniformPressureHierarchyWGSL}`;
     const lanes = (items: number) => grid(Math.ceil(items / 64));
     const root = { jobs: this.rootJobs, lanes: 64, listed }, runs = (level: number) => ({ jobs: Math.ceil(rows[level]! / 64), lanes: 64, listed: false });
     const variants: Record<string, Variant> = {
+      reserveV: ["reserveTraversal", {}, [1, 1, 1]], reserveFull: ["reserveTraversal", { UM_FULL: 1 }, [1, 1, 1]],
       setup: ["setup", {}, lanes(rows[0]!)], measure: ["measure", {}, root],
       restrictV: ["restrictRoot", {}, root], restrictInner: ["restrictRoot", { UM_RHS: w.b1, UM_MIN: w.m1 }, root], restrictFull: ["restrictRoot", { UM_FULL: 1 }, root],
     };
@@ -981,12 +1021,23 @@ ${uniformPressureHierarchyWGSL}`;
         setup.push("classify", "list");
       }
     }
+    variants["extend.all"] = ["mgExtendAll", {}, grid(this.levelCells.reduce((n, rows) => n + Math.ceil(rows / 64), 0))];
+    variants["bake.all"] = ["mgBakeAll", {}, grid(rows.reduce((n, rows) => n + Math.ceil(rows / 64), 0))];
+    const setupBatched = ["setup", ...Array.from({ length: ROOT_LEVELS - 1 }, (_, l) => `down.${l + 1}`),
+      "extend.all", "bake.all", ...(listed ? ["classify", "list"] : [])];
+    for (const entry of new Set([...setup, ...setupBatched])) {
+      const [point, parameters, shape] = variants[entry]!;
+      variants[`${entry}.full`] = [point, parameters, shape];
+      variants[entry] = [point, { ...parameters, UM_RETAIN: 1 }, shape];
+    }
+    const setupFull = setup.map(entry => `${entry}.full`);
     // Every launch the traversals issue (see cycle() and opening()).
     const add = (entry: string, constants: Record<string, number>) => {
       const level = constants.UM_BL ?? constants.UM_PL ?? 0;
       variants[entry] ??= entry.startsWith("coarse") ? ["coarse", constants, [1, 1, 1]]
         : entry.startsWith("descend") ? ["descendTiles", constants, runs(constants.UM_TL! + 1)]
         : entry.startsWith("ascend") ? ["ascendTiles", constants, level ? runs(level) : root]
+        : this.pageSmoothing && this.device.limits.maxComputeWorkgroupStorageSize >= 32768 && level === 0 ? ["smoothPages", constants, { jobs: Math.min(this.blocks, 64), lanes: this.lanes, listed: false }]
         : ["smoothTiles", constants, level ? { jobs: this.blocks, lanes: this.tileLanes, listed: false }
           // The root lattice's jobs take the deep levels' width too: a job's halo
           // gather and its sweeps stride the lanes, so 64 lanes ran each serially
@@ -1012,7 +1063,7 @@ ${uniformPressureHierarchyWGSL}`;
       const defaults: Record<string, number> = { UM_RHS: w.b0, UM_MIN: w.m0, UM_BCOUNT: M, UM_PADD: 1, ...parameters };
       ROOT_LAUNCH_KEYS.forEach((key, k) => { launchWords[i * stride / 4 + k] = defaults[key] ?? 0; });
       const constants: Record<string, number> = {};
-      if (entryPoint === "coarse") constants.UM_LANES = this.lanes;
+      if (entryPoint === "coarse" || entryPoint === "reserveTraversal") constants.UM_LANES = this.lanes;
       if (entryPoint === "smoothTiles") constants.UM_BLANES = "jobs" in shape ? shape.lanes : 64;
       const key = `${entryPoint}:${JSON.stringify(constants)}`;
       let compilation = shared.get(key);
@@ -1034,7 +1085,10 @@ ${uniformPressureHierarchyWGSL}`;
     const traversal = (body: (launch: (entry: string) => void) => void) => {
       const launches: RootLaunch[] = []; body(entry => launches.push(resolve(entry))); return launches;
     };
-    this.traversals = { setup: setup.map(resolve), measure: [resolve("measure")],
+    this.traversals = { setup: setup.map(resolve), setupFull: setupFull.map(resolve),
+      setupBatched: setupBatched.map(resolve), setupBatchedFull: setupBatched.map(entry => resolve(`${entry}.full`)),
+      reserveV: [resolve("reserveV")], reserveFull: [resolve("reserveFull")],
+      setupHeld: [resolve("setup"), ...(listed ? [resolve("classify"), resolve("list")] : [])], measure: [resolve("measure")],
       vCycle: traversal(launch => { launch("restrictV"); this.cycle(0, 0, 0, 1, launch); }),
       // Algorithm 3 at the root: the Full-Cycle on the residual under the
       // shifted bound, a closing V-cycle, then the saved pressure added back.
@@ -1090,7 +1144,7 @@ ${uniformPressureHierarchyWGSL}`;
   private dispatch(passes: UniformMixedPressurePasses, launch: RootLaunch, capacity: boolean): void {
     const pass = passes.pass;
     pass.setPipeline(launch.pipeline);
-    if (this.boundPass !== pass) { this.boundPass = pass; pass.setBindGroup(0, this.level.ownership.bindGroup); }
+    if (this.boundPass !== pass || this.boundEpoch !== uniformComputePassEpoch(pass)) { this.boundPass = pass; this.boundEpoch=uniformComputePassEpoch(pass); pass.setBindGroup(0, this.level.ownership.bindGroup); }
     pass.setBindGroup(1, this.group, launch.offsets);
     const groups = launch.groups;
     if (groups) { pass.dispatchWorkgroups(groups[0], groups[1], groups[2]); return; }
@@ -1121,18 +1175,25 @@ ${uniformPressureHierarchyWGSL}`;
     if (!this.traversals) throw new Error("Mixed pressure root is not initialized");
     return this.traversals;
   }
-  /** Per solve, after RHS assembly and before the initial measure: every
-   * level's geometry and coefficients, and the cycle list. Ungated. */
-  encodeSetup(encoder: GPUCommandEncoder): void {
+  /** After RHS assembly: fresh scratch/list and exact regional geometry
+   * invalidation. geometryHeld certifies that the frame held both surface
+   * and topology producers; a heat estimate alone is not sufficient. */
+  encodeSetup(encoder: GPUCommandEncoder, geometryHeld = false): void {
     encoder.clearBuffer(this.rounding);
-    // The list's count; the setup's last launch appends to it.
-    if (this.listed) encoder.clearBuffer(this.list, 0, 4);
-    this.replay(this.setupPasses, encoder, this.resolved.setup, false);
+    encoder.clearBuffer(this.list, 4 * (4 + 2 * this.rootJobs + (29 + 2 * ROOT_LEVELS) * this.blocks), 4);
+    // Per-solve evidence is cleared, retained topology and geometry are not.
+    encoder.clearBuffer(this.list, 0, 16);
+    encoder.clearBuffer(this.list, 4 * (4 + 2 * this.rootJobs), 4 * (1 + 2 * ROOT_LEVELS) * this.blocks);
+    const reuse = this.setupInitialized && this.retainSetup;
+    this.replay(this.setupPasses, encoder, reuse && geometryHeld ? this.resolved.setupHeld
+      : reuse && this.retainRegionalSetup ? (this.batchSetup ? this.resolved.setupBatched : this.resolved.setup)
+      : this.batchSetup ? this.resolved.setupBatchedFull : this.resolved.setupFull, false);
+    this.setupInitialized = true;
   }
   /** capacity (here and on the cycles): the slot is one the plan holds in
    * reserve, launched narrow. */
   encodeMeasure(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.measurePasses, encoder, this.resolved.measure, capacity); }
-  encodeVCycle(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.vCyclePasses, encoder, this.resolved.vCycle, capacity); }
+  encodeVCycle(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.vCyclePasses, encoder, capacity && this.fusedReserve ? this.resolved.reserveV : this.resolved.vCycle, capacity); }
   /** Algorithm 3 at the root (see initialize). */
-  encodeFullCycle(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.fullCyclePasses, encoder, this.resolved.fullCycle, capacity); }
+  encodeFullCycle(encoder: GPUCommandEncoder, capacity = false): void { this.replay(this.fullCyclePasses, encoder, capacity && this.fusedReserve ? this.resolved.reserveFull : this.resolved.fullCycle, capacity); }
 }

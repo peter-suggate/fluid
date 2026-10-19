@@ -65,6 +65,7 @@ var<workgroup> umUnitEscapes:array<atomic<u32>,2>;
 @compute @workgroup_size(192) fn momentumUnitStep(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let cell=lane%64u;let axis=lane/64u;
  let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
+ umLoadAddressPlan(owner.tile>>9u,lane);
  if(lane<2u){atomicStore(&umUnitEscapes[lane],0u);}
  workgroupBarrier();
  var value=0.0;umUnitEscaped=false;
@@ -239,7 +240,7 @@ export class UniformMixedMomentum {
   }
   async initialize(): Promise<void> {
     await this.tiers.initialize();
-    const module = uniformDetailModule(this.device,{ label: "Uniform mixed momentum", code: uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
+    const module = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed momentum", code: uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var physical:texture_3d<f32>;
 @group(1) @binding(2) var phase:texture_3d<f32>;
@@ -362,6 +363,7 @@ var<workgroup> umMomentumComponents:array<f32,192>;
 @compute @workgroup_size(192) fn momentumRegularStep(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let cell=lane%64u;let axis=lane/64u;
  let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
+ umLoadAddressPlan(owner.tile>>9u,lane);
  var value=0.0;
  let live=owner.width!=0u&&!umOwnerFrozen(owner);
  if(live){

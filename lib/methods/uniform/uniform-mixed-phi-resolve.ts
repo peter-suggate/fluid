@@ -143,8 +143,8 @@ ${job}${held}
 ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertexSum8")}
  if(bitcast<u32>(value)!=bitcast<u32>(${UNIFORM_DETAIL_GUARD_LOAD}textureLoad(field,vec3i(p)).x)){textureStore(field,vec3i(p),vec4f(value));}
 }`, [entry], entry === "resolve" ? undefined : "umDilatedCount()", "umCounts.x==0u");
-    const module = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve", code: source("resolve", header) });
-    const listModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (listed)", code: source("resolveListed", listed, uniformMixedChangedTilesWGSL(this.ownership.capacity.tiles, 2, 0)) });
+    const module = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve", code: source("resolve", header) });
+    const listModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve (listed)", code: source("resolveListed", listed, uniformMixedChangedTilesWGSL(this.ownership.capacity.tiles, 2, 0)) });
     // The gate is a uniform: every group of a launch takes the same branch.
     // Lane 0 reads the gate word; workgroupUniformLoad makes the test uniform.
     const gateWGSL = `
@@ -152,9 +152,9 @@ ${uniformCompiledVertexResolveWGSL("umResolveLattice","umVertexWeight","umVertex
 var<workgroup> umResolveOpen:u32;`, gateTest = `
  if(lane==0u){umResolveOpen=umResolveGate[${this.gateWord}u];}
  if(workgroupUniformLoad(&umResolveOpen)==0u){return;}`;
-    const gateModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (gated)", code: source("resolve", header, gateWGSL, gateTest) });
-    const heldModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (held)", code: source("resolve", header, heldWGSL(2), "", heldTest) });
-    const heldGateModule = uniformDetailModule(this.device,{ label: "Uniform mixed phi resolve (gated, held)", code: source("resolve", header, gateWGSL + heldWGSL(3), gateTest, heldTest) });
+    const gateModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve (gated)", code: source("resolve", header, gateWGSL, gateTest) });
+    const heldModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve (held)", code: source("resolve", header, heldWGSL(2), "", heldTest) });
+    const heldGateModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve (gated, held)", code: source("resolve", header, gateWGSL + heldWGSL(3), gateTest, heldTest) });
     const errors = [...(await module.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages, ...(await gateModule.getCompilationInfo()).messages,
       ...(await heldModule.getCompilationInfo()).messages, ...(await heldGateModule.getCompilationInfo()).messages].filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));

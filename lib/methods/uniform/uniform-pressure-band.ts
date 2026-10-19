@@ -1,3 +1,4 @@
+import { uniformComputePassEpoch } from "./uniform-compute-blit";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformBufferedWork } from "./uniform-buffered-work";
 import {uniformBlockFaceWGSL,uniformFaceCellSlots} from "./uniform-lattice-address";
@@ -9,7 +10,8 @@ import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} 
 import {UNIFORM_BODY_FLUX_REACH,UNIFORM_REGION_DYNAMICS,UNIFORM_REGION_DYNAMICS_WORDS} from "./uniform-mixed-region-dynamics";
 import {UNIFORM_COLD_FREEZE,UniformColdFreeze} from "./uniform-cold-freeze";
 import type {UniformColdFrame} from "./uniform-cold-frame";
-import {uniformRegionHeatWGSL} from "./uniform-region-heat";
+import {UNIFORM_REGION_TIER,uniformRegionHeatWGSL} from "./uniform-region-heat";
+import {uniformPressureBandMiddleWGSL} from "./uniform-pressure-band-middle.wgsl";
 
 /** The band's local multigrid: V-cycles h -> 2h (2^3 aggregates per tile) ->
  * 4h (one aggregate per tile), red-black Gauss-Seidel at every level. */
@@ -49,8 +51,6 @@ const SLOT_GROUPS=4096,MIDDLE_GROUPS=1024,COARSE_GROUPS=256;
 /** An h half-sweep group holds four slots, 32 cells of the swept colour each. */
 const CELL_BLOCK=4;
 const CELL_GROUPS=2048;
-/** Slots the one group of a fused h launch relaxes at once: 256 lanes, the
- * workgroup size every WebGPU device has. */
 /** The single-workgroup 4h aggregate solve: up to this many lanes (the
  * device's workgroup limit), and the aggregates it solves from registers
  * (fig-9's band holds 3582; a device with less workgroup memory holds
@@ -127,6 +127,8 @@ const MIDDLE_FIELDS=9,COARSE_FIELDS=23;
 const HEADER=27,CLOSED_WORD=5,HISTORY_WORD=8,HISTORY=16,RED_WORD=24,BLACK_WORD=25,INITIAL_WORD=26,VALID_WORD=7;
 
 export interface UniformPressureBandFields {
+ /** Fuse a small band's 2h smoothing visits; false keeps separate colours. */
+ fusedMiddle?:boolean;
  /** Simulation-indexed pressure phi (the simulation authority's output),
   * read by the list and the rows before the split. */
  phi:GPUBufferBinding;
@@ -226,6 +228,8 @@ export class UniformPressureBand {
  private readonly recentCycles=new Uint32Array(BAND_CYCLE_WINDOW);
  private recentCount=0;
  private wideCycles=Number.POSITIVE_INFINITY;
+ private middleFusedSlots=0;
+ private observedMiddleSlots=Number.POSITIVE_INFINITY;
  private budget(slots:number):void{
   this.workSlots=slots;
   this.cellGroups=Math.min(groupsOf(slots,CELL_BLOCK),CELL_GROUPS);this.slotGroups=Math.min(slots,SLOT_GROUPS);
@@ -233,7 +237,7 @@ export class UniformPressureBand {
  }
  /** Fixed-lag evidence, applied once per encoded frame by the frame owner.
   * A smaller budget never limits admission, storage or solver iterations. */
- observeWork(tiles:number,reserve=0):void{this.budget(uniformBufferedWork(this.workSlots,tiles,this.capacity,reserve));}
+ observeWork(tiles:number,reserve=0):void{this.observedMiddleSlots=tiles;this.budget(uniformBufferedWork(this.workSlots,tiles,this.capacity,reserve));}
  /** Fixed-lag evidence: a receipted frame's band cycle count. Launch width
   * only; forgetCycles (a relayout, a kick) launches every cycle wide again. */
  observeCycles(cycles:number):void{
@@ -371,6 +375,7 @@ export class UniformPressureBand {
   // beside its four scalars (Tint pads each to 16 bytes), never fewer than
   // the register path's, whose positions per lane that memory bounds.
   const limits=this.device.limits,lanes=Math.min(COARSE_SOLVE_LANES,limits.maxComputeInvocationsPerWorkgroup,limits.maxComputeWorkgroupSizeX);
+  this.middleFusedSlots=Math.floor(lanes/8);
   const memory=4*Math.floor((limits.maxComputeWorkgroupStorageSize-128)/16),held=Math.max(1,Math.floor(Math.min(COARSE_SOLVE_SLOTS,memory)/lanes));
   // Not the band's capacity: that is a run-time word, and the kernel
   // already keeps corrections past SHARED in storage.
@@ -1089,6 +1094,8 @@ var<workgroup> bCellResidual:array<f32,64>;
    // With bProlong (red only), the 4h correction is prolonged on the fly: a
    // red update never reads its own value, and black values are prolonged
    // before any black update reads them.
+   middleDownFused:band+uniformPressureBandMiddleWGSL(lanes,2*schedule.middleSweeps-1,1,false),
+   middleUpFused:band+uniformPressureBandMiddleWGSL(lanes,2*schedule.middleSweeps,0,true),
    middleSweep:band+/* wgsl */`
 override bColour:u32=0u;
 override bProlong:bool=false;
@@ -1419,6 +1426,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
  }
  /** The pass the band's static groups were last bound in, and its group 1. */
  private boundPass?:GPUComputePassEncoder;
+ private boundEpoch=-1;
  private boundGroup?:UniformDetailGroup;
  private layoutOf(name:string):string{const base=name.replace(/([01PDUF]|@\d+)$/,"");if(base==="rebase")return "init";if(base.startsWith("list"))return "list";return ["list","copy","prep","init","project"].includes(base)?base:"solver";}
  /** launch: a fixed group count, the simulation's h tiles (one group per
@@ -1429,7 +1437,7 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   const bound=this.launches.get(name);if(!bound)throw new Error("Pressure band is not initialized");
   // Groups 0 and 2 are the same for every band launch: bind them once per
   // pass, and group 1 only when the launch's layout changes.
-  if(this.boundPass!==pass){this.boundPass=pass;this.boundGroup=undefined;pass.setBindGroup(0,this.simulation.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.coarse!.bindGroup);}
+  if(this.boundPass!==pass||this.boundEpoch!==uniformComputePassEpoch(pass)){this.boundPass=pass;this.boundEpoch=uniformComputePassEpoch(pass);this.boundGroup=undefined;pass.setBindGroup(0,this.simulation.bindGroup);if(this.solid)pass.setBindGroup(2,this.solid.coarse!.bindGroup);}
   const pipeline=this.solid?.select(bound.pipeline)??bound.pipeline;
   if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group.group);}
   if(launch==="tiles"){this.simulation.dispatchBuffered(pass,pipeline,"fine",LIST_GROUPS);return;}
@@ -1447,8 +1455,16 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   * has no tile, and its launches (each a few microseconds empty) are not
   * encoded. The cleared header is the whole receipt. Likewise a quiet frame
   * under the freeze (UniformPressureBandFields.coldFrame): its frozen
-  * regions list no tile. */
- private get empty():boolean{return this.simulation.capacity.fineTiles===0||(this.cold!==undefined&&this.fields.coldFrame?.quiet===true);}
+  * regions list no tile. With coarse WARM treatment the same holds up to
+  * WARM: frozen COLD tiles and coarse WARM tiles both fail the list predicate.
+  * The cold-frame ceiling already handles host triggers, particle evidence
+  * and lagged GPU promotions; an unknown ceiling must still run the band. */
+ private get empty():boolean{
+  if(this.simulation.capacity.fineTiles===0)return true;
+  const ceiling=this.fields.coldFrame?.ceiling;
+  return this.cold!==undefined&&ceiling!==undefined&&
+   ceiling<(this.fields.warmTiers?UNIFORM_REGION_TIER.hot:UNIFORM_REGION_TIER.warm);
+ }
  /** Before the split, with the simulation authority's phi and
   * the forced field in simulation ownership: list band tiles, assemble rows
   * and bake the aggregate operators. */
@@ -1468,6 +1484,9 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
   if(this.empty)return;
   const s=this.schedule;const pass=encoder.beginComputePass(SOLVE_PASS);
   const wide=this.workSlots>COARSE_WIDE_SLOTS;
+  // The broad relayout reserve sizes parallel grids, not this choice. A
+  // fused visit has its own complete strided fallback if the list grows.
+  const fusedMiddle=this.fields.fusedMiddle!==false&&this.observedMiddleSlots<=this.middleFusedSlots;
   this.dispatch(pass,"init","slots");this.dispatch(pass,"rebase","slots");
   // Shut rows exist only beside a solid.
   if(this.solid?.present){this.dispatch(pass,"sweepS0","cells");this.dispatch(pass,"sweepS1","cells");}
@@ -1483,10 +1502,12 @@ fn bReleased(cell:u32,p:vec3i,f:u32,value:f32)->bool{
    const c=cycle>=this.wideCycles;
    this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps,c);
    this.dispatch(pass,this.restricts[cycle]!,"slots",c);
-   this.dispatch(pass,"middleSweep1","middle",c);this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1,c);
+   if(fusedMiddle)this.dispatch(pass,"middleDownFused",1);
+   else{this.dispatch(pass,"middleSweep1","middle",c);this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1,c);}
    this.dispatch(pass,"middleRestrict","middle",c);
    if(wide)this.sweep(pass,"coarseSweep0","coarseSweep1","coarse",s.coarseSweeps,c);else this.dispatch(pass,"coarseSolve",1);
-   this.dispatch(pass,"middleSweepP","middle",c);this.dispatch(pass,"middleSweep1","middle",c);this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1,c);
+   if(fusedMiddle)this.dispatch(pass,"middleUpFused",1);
+   else{this.dispatch(pass,"middleSweepP","middle",c);this.dispatch(pass,"middleSweep1","middle",c);this.sweep(pass,"middleSweep0","middleSweep1","middle",s.middleSweeps-1,c);}
    this.dispatch(pass,"middleProlong","slots",c);this.sweep(pass,"sweep0","sweep1","cells",s.fineSweeps,c);
   }
   // The final measure does work only after a cycle ran.

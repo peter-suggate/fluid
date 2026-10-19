@@ -38,7 +38,7 @@ export class ParticleBinScan {
   private pipelines!: Record<string, GPUComputePipeline>;
   private constructor(private readonly device: GPUDevice) {}
   /** The counts and their offsets may each be a range of a larger buffer. */
-  static async create(device: GPUDevice, count: number, input: GPUBuffer | GPUBufferBinding, output: GPUBuffer | GPUBufferBinding, scalars: GPUBuffer, signal?: AbortSignal) {
+  static async create(device: GPUDevice, count: number, input: GPUBuffer | GPUBufferBinding, output: GPUBuffer | GPUBufferBinding, scalars: GPUBuffer, signal?: AbortSignal, firstParentOutput?: GPUBufferBinding) {
     const result = new ParticleBinScan(device);
     try {
       const bundle = await gpuCompilationManagerFor(device).acquire({ id: "apic-bin-scan", revision: 1,
@@ -52,7 +52,7 @@ export class ParticleBinScan {
         device.queue.writeBuffer(params, 0, new Uint32Array([count, 0, 0, 0]));
         resources.push({ count, params, input, output, sums });
         if (groups === 1) break;
-        count = groups; input = sums; output = result.buffer(count * 4);
+        count = groups; input = sums; output = resources.length === 1 && firstParentOutput ? firstParentOutput : result.buffer(count * 4);
       }
       result.levels = resources.map((r, i) => ({ count: r.count,
         scan: device.createBindGroup({ layout: bundle.compute.scan.getBindGroupLayout(0), entries:
@@ -69,11 +69,13 @@ export class ParticleBinScan {
       usage: (uniform ? GPUBufferUsage.UNIFORM : GPUBufferUsage.STORAGE) | GPUBufferUsage.COPY_DST });
     this.owned.push(buffer); this.allocatedBytes += size; return buffer;
   }
-  encode(encoder: GPUCommandEncoder): void {
-    const pass = encoder.beginComputePass(SCAN_PASS), levels = this.levels;
+  /** A listed consumer can add the finest block offset itself, avoiding a
+   * whole-domain add pass. firstParentOutput exposes those offsets to it. */
+  encode(encoder: GPUCommandEncoder, deferFirstAdd = false, shared?: GPUComputePassEncoder): void {
+    const pass = shared ?? encoder.beginComputePass(SCAN_PASS), levels = this.levels;
     for (let i = 0; i < levels.length; i++) this.run(pass, this.pipelines.scan, levels[i].count, levels[i].scan);
-    for (let i = levels.length - 2; i >= 0; i--) this.run(pass, this.pipelines.add, levels[i].count, levels[i].add!);
-    pass.end();
+    for (let i = levels.length - 2; i >= (deferFirstAdd ? 1 : 0); i--) this.run(pass, this.pipelines.add, levels[i].count, levels[i].add!);
+    if (!shared) pass.end();
   }
   private run(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, count: number, group: GPUBindGroup): void {
     const groups = ceilDiv(count, 128); pass.setPipeline(pipeline); pass.setBindGroup(0, group);

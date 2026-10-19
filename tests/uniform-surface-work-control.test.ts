@@ -18,6 +18,24 @@ async function words(device:GPUDevice,buffer:GPUBuffer,count:number,offset=0){
  finally{if(read.mapState==="mapped")read.unmap();read.destroy();}
 }
 
+/** Run both production controllers from precisely the same retained bank.
+ * No numerical tolerances: compare certificates and every snapshot word. */
+async function compareRegionalGeometry(device:GPUDevice,control:UniformSurfaceWorkControl){
+ const backup=device.createBuffer({size:control.geometry.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+ try{
+  control.framePlan.beginFrame();const head=device.createCommandEncoder();control.framePlan.encode(head);head.copyBufferToBuffer(control.geometry,0,backup,0,backup.size);device.queue.submit([head.finish()]);
+  assert.equal(control.regionalGeometryReady,true);
+  control.regionalGeometrySetup=false;const full=device.createCommandEncoder();control.encode(full,"geometry");device.queue.submit([full.finish()]);
+  const expected=await words(device,control.geometry,control.geometry.size/4);
+  const restore=device.createCommandEncoder();restore.copyBufferToBuffer(backup,0,control.geometry,0,backup.size);device.queue.submit([restore.finish()]);
+  control.regionalGeometrySetup=true;const regional=device.createCommandEncoder();control.encode(regional,"geometry");device.queue.submit([regional.finish()]);
+  const actual=await words(device,control.geometry,control.geometry.size/4),r=control.regions;
+  assert.deepEqual(actual.slice(0,2*r),expected.slice(0,2*r),"exact dirty certificates and retained geometry epochs");
+  assert.deepEqual(actual.slice(3*r+4,control.topologyWordOffset+r),expected.slice(3*r+4,control.topologyWordOffset+r),"mapping, exact tile snapshots and topology flags");
+  assert.deepEqual(actual.slice(control.topologyWordOffset+2*r),expected.slice(control.topologyWordOffset+2*r),"committed producer epochs and remap consumption");
+ }finally{control.framePlan.beginFrame();control.regionalGeometrySetup=true;backup.destroy();}
+}
+
 test("production 16h current models and retained geometry handle coverage, collisions, and page claims",gpu,async()=>{
  await withUniformDevice("16h evidence regression",async device=>{
   // 75 stored blocks give 600 live regions: collisions exceed the bounded
@@ -45,7 +63,7 @@ test("production 16h current models and retained geometry handle coverage, colli
    device.queue.writeBuffer(ownership.regionVelocity,0,new Uint32Array(6*control.regions).fill(0x80000000));
    const first=await capture(),r=control.regions;
    assert.equal(control.cacheRegions,512);assert.ok(control.geometry.size<18*1024*1024);
-   assert.equal(control.epochOffset,undefined);assert.equal(control.surface.size,4*(control.liveEpochWordOffset+7*control.regions+3*ownership.capacity.tiles),"surface bank retains producer revisions and compact identity metadata, not phi snapshots");
+   assert.equal(control.epochOffset,undefined);assert.equal(control.surface.size,4*(control.liveEpochWordOffset+8*control.regions+3*ownership.capacity.tiles),"surface bank retains producer revisions and compact identity metadata, not phi snapshots");
    const models=await words(device,control.surface,8*control.regions,4*control.modelWordOffset);
    assert.equal(models[8*256+5],0x7ffffff,"interior current model is valid");
    assert.equal(models[8*529+5],0x7ffffff,"current model remains valid outside temporal snapshot cache");
@@ -77,6 +95,10 @@ test("production 16h current models and retained geometry handle coverage, colli
    assert.equal((await words(device,control.geometry,1,4*(control.topologyWordOffset+520)))[0],1,"uncached geometry conservatively invalidates topology-dependent curvature");
    fill(1.00121);const exactChanged=await capture("geometry");assert.equal(exactChanged[8],1,"geometry notices small current phi changes");
    assert.equal(exactFirst[8],1);
+   await compareRegionalGeometry(device,control); // includes cache overflow
+   fill(1.00122);await compareRegionalGeometry(device,control);
+   device.queue.writeBuffer(control.surface,control.revisions.liveOffset,new Uint32Array(r).fill(0xfffffffe));
+   await compareRegionalGeometry(device,control); // saturated revisions cannot authorize reuse
    // Supply the production page-claim hook a one-block new-list fixture.
    // No phi/topology change: the metadata invalidation alone must refresh.
    await capture("geometry");
@@ -195,14 +217,22 @@ test("production 16h current models and retained geometry handle coverage, colli
    assert.ok(zero.every(value=>value===0),"zero intervals remain exactly zero");
    // Physical allocation holes must not create direct-map conflicts when
    // fewer live regions remain than the bounded cache can hold.
+   const retainedSlot=(await words(device,control.geometry,1,4*(control.mappingWordOffset+8)))[0];
    const mirror=ownership.pageMirror,blockAt=mirror.offset+address.seed.layout.tail.blocks;
    for(let block=2;block<address.blocks-1;block+=2)device.queue.writeBuffer(mirror.buffer,4*(blockAt+block),new Uint32Array([0xffffffff]));
    await capture();const retiredSupports=await words(device,control.surface,64*S,4*(control.supportWordOffset+64*S*16));
    for(let box=0;box<64;box++)assert.equal(retiredSupports[S*box+7],0,"retired physical region cannot expose stale valid support");
+   control.framePlan.beginFrame();const sparse=device.createCommandEncoder();control.framePlan.encode(sparse);control.encode(sparse,"geometry");device.queue.submit([sparse.finish()]);
+   assert.equal((await words(device,control.geometry,1,4*(control.mappingWordOffset+8)))[0],retainedSlot,"shared plan preserves surviving cache slots across page retirement");
+   assert.equal((await words(device,control.geometry,1,4*(control.mappingWordOffset+16)))[0],0,"shared plan frees retired mappings");
+   assert.ok((await words(device,control.geometry,1,4*(control.mappingWordOffset+520)))[0]!>0,"shared plan fills vacancies with sparse high physical blocks");
+   assert.equal((await capture("geometry"))[520],0,"newly assigned snapshots become reusable on the next launch");
+   control.framePlan.beginFrame();
    await capture("geometry");const compact=await capture("geometry");
    assert.equal(compact[3*r+3],0,"compact ranks cache every live sparse region below capacity");
    assert.equal(compact[520],0,"previously colliding live region now reuses exact geometry");
    assert.ok((await words(device,control.geometry,1,4*(control.mappingWordOffset+520)))[0]!>0,"sparse high block has a recorded snapshot slot");
+   await compareRegionalGeometry(device,control); // sparse high physical slots retain their compact mapping
    control.geometrySnapshots=false;await capture("geometry");const current=await capture("geometry");
    assert.equal(current[520],1,"metadata-only mode always evaluates current geometry");
    assert.equal((await words(device,control.geometry,1,4*(control.topologyWordOffset+520)))[0],0,"unchanged metadata does not force exact normal anchors");
@@ -238,6 +268,10 @@ test("current slope evidence encloses native trilinear derivatives through resol
    const pipeline=await uniformDetailPipeline(device,ownership,{layout:device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resources]}),compute:{module,entryPoint:"writePhi"}}),group=uniformDetailGroup(device,{layout:resources,entries:[{binding:0,resource:phi}]});
    device.queue.writeBuffer(ownership.regionVelocity,0,new Uint32Array(6*control.regions).fill(0x80000000));
    const e=device.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(uniformDetailPick(pipeline));pass.setBindGroup(0,ownership.bindGroup);pass.setBindGroup(1,group.group);pass.dispatchWorkgroups(562);pass.end();resolve.encode(e,resolved);control.invalidate();control.encode(e,"surface");device.queue.submit([e.finish()]);
+   const geometry=device.createCommandEncoder();control.encode(geometry,"geometry");device.queue.submit([geometry.finish()]);
+   await compareRegionalGeometry(device,control);
+   device.queue.writeBuffer(control.surface,control.revisions.liveOffset,new Uint32Array(control.regions).fill(2));
+   await compareRegionalGeometry(device,control); // exact 125-vertex closures at h/4h seams
    const values=await storage.read(phi),slopes=new Float32Array((await words(device,control.surface,3*control.regions,4*control.slopeWordOffset)).buffer);
    const v=(q:number[])=>values[q[0]!+33*(q[1]!+33*q[2]!)]!;let checked=0;
    for(const tile of [...layout.coarseTiles,...layout.fineTiles]){

@@ -35,10 +35,19 @@ test("empty-air retirement clears buried phi and preserves bulk, particles and s
 @group(0) @binding(2) var<storage,read_write> bins:array<atomic<u32>>;
 @group(0) @binding(3) var<storage,read_write> result:array<f32>;
 const UM_TILES=${tiles}u;const NB_SURFACE_TILES=0u;const NB_ACTIVITY_SURFACE_HEAT=UM_TILES;
+// Supply the current dispatch ABI; the regional kernels are compiled but
+// this fixture exercises the dense seed/propagate/clear path.
+const NB_FRAME_PLAN=0u;const NB_REUSE_REGIONS=0u;
 const umCounts=vec4u(${width===1?tiles:0}u,0u,0u,0u);
 const umTopology=array<u32,${2*tiles}>(${Array.from({length:2*tiles},(_,i)=>`${i%tiles}u`).join(",")});
 var<workgroup> state:array<atomic<u32>,16>;
 fn nbTileCold(t:u32)->bool{return false;}
+fn nbReuseTile(region:u32,lane:u32)->u32{return 64u*region+lane;}
+fn umPageCoord(region:u32)->vec3u{return vec3u(region,0,0);}
+fn umPageOfTile(tile:u32)->u32{return tile/64u;}
+fn nbVertexCold(p:vec3u)->bool{return false;}
+fn nbReuseEnabled()->bool{return false;}
+fn nbMarkPhiChanged(p:vec3u){}
 fn nbStoreInPlace(p:vec3u,value:f32){textureStore(outputPhi,vec3i(p),vec4f(value));}
 struct Params{hDt:vec4f} const params=Params(vec4f(0.02,0.04,0.01,0.016666667));
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}

@@ -327,6 +327,10 @@ const findSpan = (spans: readonly { start: number; end: number }[], time: number
  * frame timeline starts at the frame's work rather than merely having the
  * correct period. */
 export const GPU_FRAME_START_LABELS = [
+  // Paged NB-FLIP publishes the swept-body mask before heat/census. The
+  // all-4h record head runs once per advance even when the static record
+  // itself is retained. Interior heat and crossing labels can repeat.
+  "Uniform mixed all-4h solid record",
   // Sparse CM12 exposes its resident stage partition when diagnostic label
   // isolation is requested. Frame control and velocity extension are the first
   // recurring stage; unlike presentation labels this occurs exactly once at

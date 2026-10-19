@@ -4,7 +4,7 @@
  * compute passes is a blit encoder between two compute encoders, and that
  * switch drains the GPU: ~40 us per blit run (600 dependent launches on an
  * M1 Max, 104 passes, one copy between each: 6.8 ms against 2.3 ms with no
- * copy; consecutive compute passes cost nothing, a dependent launch ~5 us).
+ * copy; consecutive passes share a Metal encoder, a dependent launch ~5 us).
  * A NB-FLIP frame issued 40 such runs. A copy or clear whose buffers can be
  * bound as storage is instead a word-for-word copy (or zero fill) in a
  * compute launch: the same bytes, so results are bit-identical. Everything
@@ -22,7 +22,15 @@
  * immutable and made at first sight: a bind group per buffer tuple, a
  * 512-byte record table in a uniform buffer read at a dynamic offset,
  * matched word for word. A steady frame allocates nothing; a full table
- * store leaves the batch to native blits. */
+ * store leaves the batch to native blits.
+ *
+ * After the regional frame plan is sealed, logical stages may share one
+ * WebGPU compute pass too: dispatch ordering and its resource barriers stay
+ * intact, while per-pass validation/encoding and redundant binding resets
+ * disappear. Native commands, explicit timestamps and submission close it. */
+const passEpochs=new WeakMap<GPUComputePassEncoder,number>();
+/** Binding caches must distinguish logical stages sharing a native pass. */
+export function uniformComputePassEpoch(pass:GPUComputePassEncoder):number{return passEpochs.get(pass)??0;}
 const TABLES=1024;
 const TABLE_BYTES=512;
 const BATCH_RECORDS=15;
@@ -47,6 +55,40 @@ type Native={
 interface Node{next:WeakMap<GPUBuffer,Node>;group?:GPUBindGroup;tables:{words:Uint32Array;offset:number}[]}
 
 export class UniformComputeBlit {
+ /** Enabled only for the sealed frame schedule. Dispatch boundaries still
+  * synchronize dependent storage; native commands and timestamped passes fence. */
+ private sharing=false;
+ private pass?:GPUComputePassEncoder;
+ private passEncoder?:GPUCommandEncoder;
+ private endPass?:()=>void;
+ private boundMask=0;
+ private pendingMask=0;
+ setSharedSchedule(enabled:boolean):void{if(this.sharing!==enabled){this.closePass();this.sharing=enabled;}}
+ private closePass():void{this.endPass?.();this.pass=undefined;this.passEncoder=undefined;this.endPass=undefined;this.boundMask=0;this.pendingMask=0;}
+ private compute(encoder:GPUCommandEncoder,descriptor?:GPUComputePassDescriptor):GPUComputePassEncoder{
+  if(!this.sharing||descriptor?.timestampWrites){this.closePass();return this.native!.beginComputePass.call(encoder,descriptor);}
+  if(this.passEncoder!==encoder)this.closePass();
+  if(!this.pass){
+   const pass=this.native!.beginComputePass.call(encoder,{label:"Uniform shared frame schedule"});
+   this.endPass=pass.end.bind(pass);pass.end=()=>{};this.pass=pass;this.passEncoder=encoder;
+   const setGroup=pass.setBindGroup.bind(pass),dispatch=pass.dispatchWorkgroups.bind(pass);
+   // Reset only resources the next stage does not replace. Clearing every
+   // slot at every stage adds hundreds of host/driver commands per frame.
+   pass.setBindGroup=((index:number,group:GPUBindGroup|null,offsets?:Iterable<number>|Uint32Array,start?:number,length?:number)=>{
+    const bit=1<<index;this.pendingMask&=~bit;
+    if(group)this.boundMask|=bit;else this.boundMask&=~bit;
+    if(start===undefined)setGroup(index,group,offsets as number[]|undefined);
+    else setGroup(index,group,offsets as Uint32Array,start,length!);
+   }) as GPUComputePassEncoder["setBindGroup"];
+   pass.dispatchWorkgroups=(x:number,y?:number,z?:number)=>{
+    for(let bits=this.pendingMask;bits;bits&=bits-1){const index=31-Math.clz32(bits&-bits);setGroup(index,null);}
+    this.boundMask&=~this.pendingMask;this.pendingMask=0;dispatch(x,y,z);
+   };
+  }
+  passEpochs.set(this.pass,(passEpochs.get(this.pass)??0)+1);
+  this.pendingMask=this.boundMask;
+  return this.pass;
+ }
  private readonly buffers:number;
  private readonly tables:GPUBuffer;
  private tableCount=0;
@@ -58,6 +100,7 @@ export class UniformComputeBlit {
  private readonly root:Node={next:new WeakMap(),tables:[]};
  private readonly dynamic=[0];
  private native?:Native;
+ private rawNative?:Native;
  // The queue: kind, source (COPY), word ranges, target.
  private readonly kind=new Uint8Array(QUEUE);
  private readonly source:(GPUBuffer|undefined)[]=new Array(QUEUE).fill(undefined);
@@ -88,13 +131,13 @@ export class UniformComputeBlit {
   this.forms={
    copyBufferToBuffer:function(this:GPUCommandEncoder,s:GPUBuffer,so:number,d:GPUBuffer,dO:number,n:number){blit.encodeCopy(this,s,so,d,dO,n);},
    clearBuffer:function(this:GPUCommandEncoder,b:GPUBuffer,o?:number,n?:number){blit.encodeClear(this,b,o,n);},
-   beginComputePass:function(this:GPUCommandEncoder,d?:GPUComputePassDescriptor){blit.flush(this);return blit.native!.beginComputePass.call(this,d);},
-   beginRenderPass:function(this:GPUCommandEncoder,d:GPURenderPassDescriptor){blit.flush(this);return blit.native!.beginRenderPass.call(this,d);},
-   finish:function(this:GPUCommandEncoder,d?:GPUCommandBufferDescriptor){blit.flush(this);return blit.native!.finish.call(this,d);},
-   resolveQuerySet:function(this:GPUCommandEncoder,q:GPUQuerySet,f:number,c:number,d:GPUBuffer,o:number){blit.flush(this);blit.native!.resolveQuerySet.call(this,q,f,c,d,o);},
-   copyBufferToTexture:function(this:GPUCommandEncoder,a:unknown,b:unknown,c:unknown){blit.flush(this);blit.native!.copyBufferToTexture.call(this,a,b,c);},
-   copyTextureToBuffer:function(this:GPUCommandEncoder,a:unknown,b:unknown,c:unknown){blit.flush(this);blit.native!.copyTextureToBuffer.call(this,a,b,c);},
-   copyTextureToTexture:function(this:GPUCommandEncoder,a:unknown,b:unknown,c:unknown){blit.flush(this);blit.native!.copyTextureToTexture.call(this,a,b,c);},
+   beginComputePass:function(this:GPUCommandEncoder,d?:GPUComputePassDescriptor){blit.flush(this);return blit.compute(this,d);},
+   beginRenderPass:function(this:GPUCommandEncoder,d:GPURenderPassDescriptor){blit.flush(this);blit.closePass();return blit.native!.beginRenderPass.call(this,d);},
+   finish:function(this:GPUCommandEncoder,d?:GPUCommandBufferDescriptor){blit.flush(this);blit.closePass();return blit.native!.finish.call(this,d);},
+   resolveQuerySet:function(this:GPUCommandEncoder,q:GPUQuerySet,f:number,c:number,d:GPUBuffer,o:number){blit.flush(this);blit.closePass();blit.native!.resolveQuerySet.call(this,q,f,c,d,o);},
+   copyBufferToTexture:function(this:GPUCommandEncoder,a:unknown,b:unknown,c:unknown){blit.flush(this);blit.closePass();blit.native!.copyBufferToTexture.call(this,a,b,c);},
+   copyTextureToBuffer:function(this:GPUCommandEncoder,a:unknown,b:unknown,c:unknown){blit.flush(this);blit.closePass();blit.native!.copyTextureToBuffer.call(this,a,b,c);},
+   copyTextureToTexture:function(this:GPUCommandEncoder,a:unknown,b:unknown,c:unknown){blit.flush(this);blit.closePass();blit.native!.copyTextureToTexture.call(this,a,b,c);},
   };
  }
  async initialize():Promise<void>{
@@ -122,17 +165,35 @@ fn blitStore(slot:u32,i:u32,v:u32){switch slot{${cases(i=>`blit${i}[i]=v;`)}}}
  }
  /** Install the compute forms on `encoder`, the frame's one open encoder.
   * Before initialize() completes the encoder keeps its native forms. */
- adopt(encoder:GPUCommandEncoder):GPUCommandEncoder{
-  if(!this.pipeline||encoder.finish===this.forms.finish)return encoder;
-  if(!this.native){
+ adopt(encoder:GPUCommandEncoder,instrument?:(encoder:GPUCommandEncoder)=>GPUCommandEncoder):GPUCommandEncoder{
+  if(encoder.finish===this.forms.finish)return encoder;
+  if(!this.pipeline)return instrument?.(encoder)??encoder;
+  if(!this.rawNative){
    const proto=Object.getPrototypeOf(encoder) as Record<string,unknown>,native:Record<string,unknown>={};
    for(const key of Object.keys(this.forms)){const f=proto[key];if(typeof f!=="function")throw new Error(`Uniform compute blit: the encoder has no ${key}`);native[key]=f;}
-   this.native=native as unknown as Native;
+   this.rawNative=native as unknown as Native;
+  }
+  this.native=this.rawNative;
+  if(instrument){
+   // Instrument physical passes after scheduling. A recorder outside this
+   // layer timestamps each logical pass and disables sharing. Keep a stable
+   // view of the native methods so its encoder-break copies cannot recurse
+   // into the forms installed below or become deferred compute copies.
+   const native=this.rawNative;
+   const view=new Proxy(encoder,{get(target,key){
+    const value=key in native?native[key as keyof Native]:Reflect.get(target,key,target);
+    return typeof value==="function"?value.bind(target):value;
+   }});
+   const measured=instrument(view),methods:Record<string,unknown>={};
+   for(const key of Object.keys(this.forms))methods[key]=measured[key as keyof Native].bind(measured);
+   this.native=methods as unknown as Native;
   }
   const target=encoder as unknown as Record<string,unknown>;
   for(const key in this.forms)target[key]=this.forms[key as keyof Native];
   return encoder;
  }
+ /** Close physical work before a timing boundary; never split untimed stages. */
+ finishStage(encoder:GPUCommandEncoder):void{this.flush(encoder);this.closePass();}
  private bindable(buffer:GPUBuffer):boolean{return (buffer.usage&GPUBufferUsage.STORAGE)!==0&&buffer.size<=this.limit&&buffer.size%4===0;}
  private enqueue(encoder:GPUCommandEncoder,kind:number,source:GPUBuffer|undefined,from:number,target:GPUBuffer,to:number,words:number):void{
   if(this.queued>0&&this.queuedOn!==encoder)throw new Error("Uniform compute blit: copies queued on another encoder");
@@ -143,12 +204,12 @@ fn blitStore(slot:u32,i:u32,v:u32){switch slot{${cases(i=>`blit${i}[i]=v;`)}}}
  private encodeCopy(encoder:GPUCommandEncoder,source:GPUBuffer,sourceOffset:number,destination:GPUBuffer,destinationOffset:number,size:number):void{
   if(size===0)return;
   if(sourceOffset%4===0&&destinationOffset%4===0&&size%4===0&&this.bindable(source)&&this.bindable(destination)){this.enqueue(encoder,COPY,source,sourceOffset/4,destination,destinationOffset/4,size/4);return;}
-  this.flush(encoder);this.nativeCount++;this.native!.copyBufferToBuffer.call(encoder,source,sourceOffset,destination,destinationOffset,size);
+  this.flush(encoder);this.closePass();this.nativeCount++;this.native!.copyBufferToBuffer.call(encoder,source,sourceOffset,destination,destinationOffset,size);
  }
  private encodeClear(encoder:GPUCommandEncoder,buffer:GPUBuffer,offset=0,size?:number):void{
   const bytes=size??buffer.size-offset;if(bytes===0)return;
   if(offset%4===0&&bytes%4===0&&this.bindable(buffer)){this.enqueue(encoder,FILL,undefined,0,buffer,offset/4,bytes/4);return;}
-  this.flush(encoder);this.nativeCount++;this.native!.clearBuffer.call(encoder,buffer,offset,size);
+  this.flush(encoder);this.closePass();this.nativeCount++;this.native!.clearBuffer.call(encoder,buffer,offset,size);
  }
  /** Whether record k's ranges meet record j's write (or k's write meets j's read). */
  private conflicts(k:number,j:number):boolean{
@@ -195,6 +256,7 @@ fn blitStore(slot:u32,i:u32,v:u32){switch slot{${cases(i=>`blit${i}[i]=v;`)}}}
   }
   if(offset<0){
    if(this.tableCount===TABLES){
+    this.closePass();
     // No table left: these records as the native blits they were.
     for(let k=first;k<end;k++){this.nativeCount++;if(this.kind[k]===FILL)this.native!.clearBuffer.call(encoder,this.target[k]!,4*this.to[k]!,4*this.words[k]!);else this.native!.copyBufferToBuffer.call(encoder,this.source[k]!,4*this.from[k]!,this.target[k]!,4*this.to[k]!,4*this.words[k]!);}
     return;
@@ -203,7 +265,7 @@ fn blitStore(slot:u32,i:u32,v:u32){switch slot{${cases(i=>`blit${i}[i]=v;`)}}}
    const words=this.table.slice(0,length);node.tables.push({words,offset});
    this.device.queue.writeBuffer(this.tables,offset,words);
   }
-  const pass=this.native!.beginComputePass.call(encoder,PASS);pass.setPipeline(this.pipeline!);this.dynamic[0]=offset;pass.setBindGroup(0,node.group,this.dynamic);
+  const pass=this.compute(encoder,PASS);pass.setPipeline(this.pipeline!);this.dynamic[0]=offset;pass.setBindGroup(0,node.group,this.dynamic);
   pass.dispatchWorkgroups(Math.min(MAX_GROUPS,Math.ceil(total/LANES)));pass.end();
   this.launched+=end-first;this.batches++;
  }

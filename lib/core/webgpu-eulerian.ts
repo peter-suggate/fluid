@@ -1,3 +1,4 @@
+import type { SpatialPerformanceReport } from "./spatial-performance";
 import type { SimulationFailure } from "./simulation-failure";
 import type { PerformanceTrace } from "./performance-trace";
 import type { GPUQuality } from "./gpu-quality";
@@ -387,6 +388,9 @@ export interface GPUEulerianInfo {
   };
   /** Latest exhaustive, exclusive GPU physics partition. */
   physicsTrace?: PerformanceTrace;
+  spatialPerformance?: SpatialPerformanceReport;
+  spatialPerformanceStages?: readonly { id: string; label: string }[];
+  spatialPerformanceError?: string;
   physicsTraceUnavailable?: string;
   /** Main-thread command-encoding partition captured under the exact same
    * sample ID and context as `physicsTrace`. It deliberately excludes the

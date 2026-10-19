@@ -1,5 +1,5 @@
-/** Keep physical spacing and work counts in the ownership uniform. Integer
- * grid dimensions remain specialized: constant division and addressing are
+/** Keep physical spacing, work counts and paged pool capacity in the
+ * ownership uniform. Boxed grid dimensions remain specialized: constant division and addressing are
  * substantially cheaper than runtime integer division in the mixed kernels.
  * The first sixteen bytes are GPU-updated counts; geometry survives adoption
  * of a new ownership generation. */
@@ -24,7 +24,7 @@ export function uniformRuntimeConstantsWGSL(code: string, roots: Readonly<Record
   return replace(code) + [...replacements].map(([key, definition]) => `\nfn ${key}()->${definition.type}{return ${replace(definition.value)};}\n`).join("");
 }
 
-export function uniformSceneConstantsWGSL(code: string): string {
+export function uniformSceneConstantsWGSL(code: string, specializeWorldGeometry = false): string {
   const counts = [...code.matchAll(/var<uniform>\s+(\w*umCounts)\s*:\s*vec4u\s*;/g)];
   for (const [, name] of counts) {
     const prefix = name!.slice(0, -"umCounts".length);
@@ -34,7 +34,9 @@ export function uniformSceneConstantsWGSL(code: string): string {
     }
     const replacements = new Map<string, { type: string; value: string }>();
     if (definitions.has(`${prefix}UM_D`)) replacements.set(`${prefix}UM_D`, { type: "vec3u", value: definitions.get(`${prefix}UM_D`)!.value });
-    if (definitions.has(`${prefix}UM_TILES`)) replacements.set(`${prefix}UM_TILES`, { type: "u32", value: definitions.get(`${prefix}UM_TILES`)!.value });
+    // Paged kernels divide by fixed page edges, not by the pool capacity.
+    // The existing ownership header carries capacity in dimensions.w.
+    if (definitions.has(`${prefix}UM_TILES`)) replacements.set(`${prefix}UM_TILES`, { type: "u32", value: definitions.has(`${prefix}UM_D`) ? definitions.get(`${prefix}UM_TILES`)!.value : `${name}.dimensions.w` });
     if (definitions.has(`${prefix}UM_H`)) {
       const scalar = definitions.get(`${prefix}UM_H`)!.type === "f32";
       replacements.set(`${prefix}UM_H`, { type: scalar ? "f32" : "vec3f", value: `${name}.spacing.${scalar ? "w" : "xyz"}` });
@@ -73,13 +75,13 @@ export function uniformSceneConstantsWGSL(code: string): string {
     const directives = /^(?:\s*(?:enable|requires|diagnostic)\b[^;]*;)*\s*/.exec(code)![0];
     code = directives + declaration + code.slice(directives.length) + helpers + `\nfn ${prefix}umSceneSpacing()->vec3f{return ${name}.spacing.xyz;}\nfn ${prefix}umSceneMinimumSpacing()->f32{return ${name}.spacing.w;}\nfn ${prefix}umSceneMaximumSpacing()->f32{return max(${name}.spacing.x,max(${name}.spacing.y,${name}.spacing.z));}\n`;
   }
-  return uniformWindowCountsWGSL(code);
+  return uniformWindowCountsWGSL(code, specializeWorldGeometry);
 }
 
 /** Window metadata shares each owning topology's existing uniform.
  * Generation targets which delegate their addresses have no matching reads,
  * and retain their original 48-byte binding. Other buffers retain storage reads. */
-function uniformWindowCountsWGSL(code:string):string {
+function uniformWindowCountsWGSL(code:string,specializeWorldGeometry:boolean):string {
  const counts=[...code.matchAll(/var<uniform>\s+(\w*umCounts)\s*:\s*(\w+)\s*;/g)];
  for(const [,name,type] of counts){
   const prefix=name!.slice(0,-"umCounts".length);
@@ -97,6 +99,13 @@ function uniformWindowCountsWGSL(code:string):string {
    code=code.replace(declaration,`struct ${type}{${match[1]},window:array<vec4u,8>}`);
   }
   code=code.replace(pattern,(_read,index:string)=>{const word=Number(index)-262144;return `${name}.window[${word>>2}u][${word&3}u]`;});
+  if(specializeWorldGeometry)continue;
+  // Keep the fixed-world promise (SolidIsBox), but read each scene's bounds
+  // and frame from its uniform. Coordinates must not split pipeline keys.
+  const windowPrefix=`${prefix}um`;
+  code=code.replace(new RegExp(`select\\((${name}\\.window\\[\\d+u\\]\\[\\d+u\\]),${windowPrefix}WindowWord\\d+,${windowPrefix}(?:FixedWorldGeometry|FixedFrame)\\)`,"g"),"$1");
+  code=code.replace(new RegExp(`override ${windowPrefix}WindowWord\\d+:u32=0u;`,"g"),"");
+  code=code.replace(`override ${windowPrefix}FixedFrame:bool=false;`,"");
  }
  return code;
 }

@@ -3,7 +3,7 @@ import test from "node:test";
 import { createBackyardPoolPartyScene } from "../lib/core/backyard-pool-party-scene";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
 import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
-import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geometric";
+import { createUniformSolver, withUniformDevice, readUniformFields } from "./helpers/uniform-geometric";
 import { readMixedTexture,readMixedTileWords } from "./helpers/uniform-mixed-native-fields";
 
 test("a hydrostatic voxel pool does not seed wall particles or develop edge flow", {skip:!process.env.WEBGPU_NODE_MODULE}, async t=>{
@@ -29,7 +29,7 @@ test("a hydrostatic voxel pool does not seed wall particles or develop edge flow
  });
 });
 
-test("solid-aware refinement still seeds a real curved liquid surface", {skip:!process.env.WEBGPU_NODE_MODULE}, async()=>{
+test("curved free-falling liquid retains fine shape and follows gravity", {skip:!process.env.WEBGPU_NODE_MODULE}, async t=>{
  await withUniformDevice("voxel pool with a falling drop",async device=>{
   const scene=createBackyardPoolPartyScene();
   scene.container={...scene.container,width_m:3.2,height_m:3.2,depth_m:3.2};
@@ -42,13 +42,26 @@ test("solid-aware refinement still seeds a real curved liquid surface", {skip:!p
    {shape:"sphere",center_m:{x:0,y:2.4,z:0},radius_m:0.2},
   ];
   const solver=await createUniformSolver(device,scene);
-  const {mixedFrame:frame}=solver as unknown as {mixedFrame:UniformMixedFrame};
   try{
    for(let step=1;step<=10;step++){
     assert.ok(solver.advanceTo(step/60,[]));await solver.awaitFrameCompletion();
     assert.equal(solver.info.simulationPipelineError,undefined);
    }
-   assert.ok(frame.narrowBandFlip!.count>0,"the curved drop must retain particle detail");
+   // Smooth translation can use fine Eulerian transport without particles.
+   // Check the physical interface instead of requiring a particular carrier.
+   const fields=await readUniformFields(device,solver),crossings:number[]=[];
+   const {nx,ny,nz}=solver.info,x=nx>>1,z=nz>>1,h=.05;
+   for(let y=1;y<=ny;y++){
+    const low=fields.vertex(x,y-1,z),high=fields.vertex(x,y,z);
+    if((low<0)!==(high<0))crossings.push(h*(y-1+low/(low-high)));
+   }
+   assert.equal(crossings.length,2,"the drop must retain a closed liquid interval");
+   const centre=(crossings[0]!+crossings[1]!)/2,radius=(crossings[1]!-crossings[0]!)/2;
+   const expected=2.4+.5*scene.fluid.gravity_m_s2.y*(10/60)**2;
+   assert.ok(Math.abs(centre-expected)<.5*h,`free fall centre ${centre} m vs ${expected} m`);
+   assert.ok(Math.abs(radius-.2)<.5*h,`the translating drop changed radius to ${radius} m`);
+   for(const y of crossings)assert.equal(fields.widthAt(x,Math.min(ny-1,Math.floor(y/h)),z),1,"the curved interface must retain h tiles");
+   t.diagnostic(`drop centre ${centre} m; radius ${radius} m`);
    const velocity=await readMixedTexture(device,solver.velocityTexture);
    let peak=0;for(let i=1;i<velocity.length;i+=4)peak=Math.max(peak,Math.abs(velocity[i]!));
    assert.ok(peak>0.1,"gravity must still accelerate the drop");

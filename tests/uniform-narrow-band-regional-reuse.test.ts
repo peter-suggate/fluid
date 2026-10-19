@@ -10,7 +10,7 @@ test("regional crossing cache restores exact masks before gathers and rejects ch
   const T=4096,R=64,L=narrowBandReuseLayout(30000,R),tile=292;
   const maskWord=8204,reachWord=16400,candidateWord=20500;
   const helper=narrowBandReuseWGSL(L).split("fn nbStoreReconstructed(")[0]!;
-  const seeds=narrowBandMembershipWGSL.slice(narrowBandMembershipWGSL.indexOf("var<workgroup> nbBandVertices:"),narrowBandMembershipWGSL.indexOf("@compute @workgroup_size(64) fn depthLists("));
+  const seeds=narrowBandMembershipWGSL.slice(narrowBandMembershipWGSL.indexOf("var<workgroup> nbBandVertices:"),narrowBandMembershipWGSL.indexOf("fn nbDepthList("));
   const bins=device.createBuffer({size:4*(L.base+L.words),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const topology=device.createBuffer({size:4*T,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(topology,0,new Uint32Array(T).fill(1));
   const module=device.createShaderModule({code:`
@@ -23,6 +23,7 @@ fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
 fn umTileCoord(t:u32)->vec3u{let b=t>>9u;let q=t&511u;return vec3u(q&7u,(q>>3u)&7u,q>>6u)+8u*vec3u(b&1u,(b>>1u)&1u,b>>2u)+vec3u(atomicLoad(&bins[29996u]),0,0);}
 fn umTileKey(q:vec3i)->u32{let p=q-vec3i(i32(atomicLoad(&bins[29996u])),0,0);if(any(p<vec3i(0))||any(p>=vec3i(16))){return 0xffffffffu;}let u=vec3u(p);let b=u>>vec3u(3u);let l=u&vec3u(7u);return 512u*(b.x+2u*b.y+4u*b.z)+l.x+8u*(l.y+8u*l.z);}
 fn umTileKind(q:vec3i)->u32{return select(2u,0u,umTileKey(q)<UM_TILES);}
+fn umPageOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
 fn umKeyStored(t:u32)->bool{return t<UM_TILES;}
 fn umTileLive(t:u32)->bool{return t<UM_TILES;}
 fn umSolidRegionClearAtBuild(p:vec3i)->bool{return true;}
@@ -34,7 +35,15 @@ fn umBodyNear(i:u32,p:vec3f,margin:f32)->bool{return false;}
 fn umCellOpen(p:vec3i)->f32{return 1.0;}
 fn nbCrossingVertex(t:u32,origin:vec3u,p:vec3u)->f32{atomicAdd(&bins[29998u],1u);if(atomicLoad(&bins[29994u])!=0u){return bitcast<f32>(atomicLoad(&bins[29994u]));}return f32(p.y)-17.5;}
 ${helper}
-${seeds}
+const nbColdCurrentPhi:bool=false;
+fn umLoadAddressPlan(block:u32,lane:u32){}
+fn umCellNearFromPage(block:u32,page:vec3i,p:vec3i)->vec3i{return p;}
+fn umTileAt(p:vec3u)->u32{return umTileKey(vec3i(p));}
+fn umTileWidth(tile:u32)->u32{return 1u;}
+fn umLoadCorner(p:vec3u)->f32{return f32(p.y)-17.5;}
+fn umLoadVertex(p:vec3u)->f32{return nbCrossingVertex(0u,vec3u(0),p);}
+fn umVertexSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
+${seeds.replaceAll("textureLoad(outputPhi,vec3i(p)).x","umLoadVertex(p)")}
 @compute @workgroup_size(64) fn prepare(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){let t=nbReuseTile(g.x,lane);nbPrepareReuse(g.x,lane,t);}
 @compute @workgroup_size(1) fn markBoundary(){nbMarkPhiChanged(vec3u(16));}
 @compute @workgroup_size(1) fn markInterior(){nbMarkPhiChanged(vec3u(17,18,19));}
@@ -45,7 +54,7 @@ ${seeds}
   const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
   const pipelines=await Promise.all(entries.map(entryPoint=>device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
   const group=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:bins}},{binding:1,resource:{buffer:topology}}]});
-  const read=async(offset:number,count:number)=>{const b=device.createBuffer({size:4*count,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=device.createCommandEncoder();e.copyBufferToBuffer(bins,4*offset,b,0,b.size);device.queue.submit([e.finish()]);await b.mapAsync(GPUMapMode.READ);return new Uint32Array(b.getMappedRange()).slice();}finally{if(b.mapState==="mapped")b.unmap();b.destroy();}};
+  const read=async(offset:number,count:number)=>{if(count===0)return new Uint32Array();const b=device.createBuffer({size:4*count,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=device.createCommandEncoder();e.copyBufferToBuffer(bins,4*offset,b,0,b.size);device.queue.submit([e.finish()]);await b.mapAsync(GPUMapMode.READ);return new Uint32Array(b.getMappedRange()).slice();}finally{if(b.mapState==="mapped")b.unmap();b.destroy();}};
   const dispatch=async(index:number,n=1)=>{const e=device.createCommandEncoder(),p=e.beginComputePass();p.setPipeline(pipelines[index]!);p.setBindGroup(0,group);p.dispatchWorkgroups(n);p.end();device.queue.submit([e.finish()]);await device.queue.onSubmittedWorkDone();};
   let parity=0;
   const crossing=async()=>{
@@ -55,6 +64,7 @@ ${seeds}
    return {calls:(await read(29998,1))[0]!,mask:await read(maskWord+2*tile,2)};
   };
   try{
+   device.queue.writeBuffer(bins,4*L.tiers,new Uint32Array(R).fill(2));
    device.queue.writeBuffer(bins,4*L.live,new Uint32Array(R).fill(1));device.queue.writeBuffer(bins,4*candidateWord,new Uint32Array([tile]));
    const first=await crossing();assert.equal(first.calls,125);assert.ok(first.mask.some(v=>v!==0));
    const reused=await crossing();assert.equal(reused.calls,0);assert.deepEqual(reused.mask,first.mask);
@@ -80,12 +90,12 @@ ${seeds}
 test("retained XYZ nearest minima match full search and crossing changes invalidate metric payloads",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("retained nearest minima",async device=>{
   const T=4096,R=64,C=64*T,A=0,B=C/2,band=B+C,mask=band+4,reach=mask+2*T,search=reach+2*T;
-  const L=narrowBandReuseLayout(search+T,R),helper=narrowBandReuseWGSL(L).split("fn nbStoreReconstructed(")[0]!;
+  const L=narrowBandReuseLayout(search+2*T,R),helper=narrowBandReuseWGSL(L).split("fn nbStoreReconstructed(")[0]!;
   const row=narrowBandMembershipWGSL.slice(narrowBandMembershipWGSL.indexOf("fn nbBandRow("),narrowBandMembershipWGSL.indexOf(narrowBandNearestWGSL));
   const bins=device.createBuffer({size:4*(L.base+L.words),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const module=device.createShaderModule({code:`
 const UM_TILES:u32=${T}u;const UM_CELL_KEYS:u32=${C}u;const NB_DEPTH_A:u32=${A}u;const NB_DEPTH_B:u32=${B}u;
-const NB_BAND:u32=${band}u;const NB_BAND_MASK:u32=${mask}u;const NB_BAND_REACH:u32=${reach}u;const NB_BAND_SEARCH:u32=${search}u;const NB_NO_SURFACE:u32=0xffffffffu;
+const NB_BAND_TILES:u32=${T}u;const NB_BAND_DISTANCE:u32=${search+T}u;const NB_BAND:u32=${band}u;const NB_BAND_MASK:u32=${mask}u;const NB_BAND_REACH:u32=${reach}u;const NB_BAND_SEARCH:u32=${search}u;const NB_NO_SURFACE:u32=0xffffffffu;
 @group(0) @binding(0) var<storage,read_write> bins:array<atomic<u32>>;
 var<private> umTopology:array<u32,4096>;
 struct Params{hDt:vec4f};var<private> params:Params=Params(vec4f(1));
@@ -95,6 +105,7 @@ fn umTileKey(p:vec3i)->u32{if(any(p<vec3i(0))||any(p>=vec3i(16))){return 0xfffff
 fn umCellPresent(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(64));}
 fn umCellAt(p:vec3u)->u32{return 64u*umTileKey(vec3i(p/4u))+(p.x&3u)+4u*(p.y&3u)+16u*(p.z&3u);}
 fn umTileKind(q:vec3i)->u32{return select(2u,0u,umTileKey(q)<UM_TILES);}
+fn umPageOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
 fn umKeyStored(t:u32)->bool{return t<UM_TILES;}
 fn umTileLive(t:u32)->bool{return t<UM_TILES;}
 fn umSolidRegionClearAtBuild(p:vec3i)->bool{return true;}
@@ -106,6 +117,7 @@ fn umBodyNear(i:u32,p:vec3f,margin:f32)->bool{return false;}
 ${helper}
 ${row}
 fn nbAggregateMetricPlane(region:u32,lane:u32){}
+${narrowBandMembershipWGSL.slice(narrowBandMembershipWGSL.indexOf("fn nbDepthList("),narrowBandMembershipWGSL.indexOf("// The crossings of one x row"))}
 ${narrowBandNearestWGSL}
 `});
   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
@@ -115,9 +127,10 @@ ${narrowBandNearestWGSL}
   const pipelines=await Promise.all(names.map(entryPoint=>device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
   const group=device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:bins}}]});
   const run=()=>{const e=device.createCommandEncoder(),p=e.beginComputePass();p.setBindGroup(0,group);for(const pipeline of pipelines){p.setPipeline(pipeline);p.dispatchWorkgroups(1024);}p.end();device.queue.submit([e.finish()]);};
-  const read=async(offset:number,count:number)=>{const b=device.createBuffer({size:4*count,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=device.createCommandEncoder();e.copyBufferToBuffer(bins,4*offset,b,0,b.size);device.queue.submit([e.finish()]);await b.mapAsync(GPUMapMode.READ);return new Uint32Array(b.getMappedRange()).slice();}finally{if(b.mapState==="mapped")b.unmap();b.destroy();}};
+  const read=async(offset:number,count:number)=>{if(count===0)return new Uint32Array();const b=device.createBuffer({size:4*count,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=device.createCommandEncoder();e.copyBufferToBuffer(bins,4*offset,b,0,b.size);device.queue.submit([e.finish()]);await b.mapAsync(GPUMapMode.READ);return new Uint32Array(b.getMappedRange()).slice();}finally{if(b.mapState==="mapped")b.unmap();b.destroy();}};
   const outputs=()=>read(B,C);
   try{
+   device.queue.writeBuffer(bins,4*L.tiers,new Uint32Array(R).fill(2));
    device.queue.writeBuffer(bins,4*L.control,new Uint32Array([0,1,1]));
    device.queue.writeBuffer(bins,4*(band+1),new Uint32Array([T]));
    device.queue.writeBuffer(bins,4*search,Uint32Array.from({length:T},(_,i)=>i));

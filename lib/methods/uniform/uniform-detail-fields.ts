@@ -1,3 +1,4 @@
+import { UNIFORM_ADDRESS_PLAN_ENTRIES } from "./uniform-address-plan";
 import { UNIFORM_WINDOW_HEADER, uniformWindowAddressWGSL, uniformWindowFixedFrame } from "./uniform-window-address";
 import { uniformSceneConstantsWGSL } from "./uniform-scene-constants";
 /** Detail fields hold a tile-resolution base block and, when fine ownership
@@ -1321,7 +1322,9 @@ export function uniformDetailShader(code:string,device?:GPUDevice):string{
   for(const [name,{kind,type}] of kinds)if((based.has(name)||(kind!=="atlas"&&type.startsWith("texture_storage")))&&!twins.has(name))throw new Error(`Uniform detail rewrite: ${name} is not declared as @group(g) @binding(b) var, so its twin has no binding`);
   // A remap stores the fields of the generation it adopts: the unprefixed topology beside the one it leaves.
   const target=pf&&/var<storage,\s*read>\s*umTopology\s*:/.test(code)?"":pf;
-  return calls+declarations+detailDomainWGSL(kinds,`${pf}umSupport[${pf}UM_DETAIL_VIOLATION]`,atomic,false,hOnly,twins,based,{pf,target,sites},either,new Set([...kinds.keys()].filter(name=>calls.includes(`udLoadG_${name}(`))),asked);
+  let rewritten=calls+declarations+detailDomainWGSL(kinds,`${pf}umSupport[${pf}UM_DETAIL_VIOLATION]`,atomic,false,hOnly,twins,based,{pf,target,sites},either,new Set([...kinds.keys()].filter(name=>calls.includes(`udLoadG_${name}(`))),asked);
+  if(code.includes(`fn ${pf}umPlannedVertexSlot(`))rewritten=rewritten.replace("fn udVertexSlot(v:vec3i,bits:u32)->vec4u{",`fn udVertexSlot(v:vec3i,bits:u32)->vec4u{let plan=${pf}umPlannedVertexSlot(v,bits);if(plan.w!=0xffffffffu){return plan;}`);
+  return rewritten;
  }
 
 }
@@ -1339,18 +1342,32 @@ export function uniformDetailDenseShader(code:string,classes:Readonly<Record<str
 }
 // The window overrides declared by each rewritten module. The opt-in lives
 // on a solver ownership, never on a GPU device shared by several scenes.
+const addressPlanPrefixes=new WeakMap<GPUShaderModule,readonly string[]>();
 const fixedWorldPrefixes=new WeakMap<GPUShaderModule,readonly string[]>();
-/** createShaderModule through the central rewrite. */
-export function uniformDetailModule(device:GPUDevice,descriptor:GPUShaderModuleDescriptor):GPUShaderModule{
- const code=uniformSceneConstantsWGSL(uniformDetailShader(descriptor.code,device));
- const module=device.createShaderModule({...descriptor,code});
+const runtimeWorldPrefixes=new WeakMap<GPUShaderModule,ReadonlySet<string>>();
+/** createShaderModule through the central rewrite. Hot sampling modules can
+ * retain immutable world/frame overrides: specialization removes repeated
+ * bounds/address branches. The ownership must still promise fixed geometry;
+ * moving frames and mutable worlds retain their runtime paths. */
+export function uniformDetailModule(device:GPUDevice,descriptor:GPUShaderModuleDescriptor & {specializeWorldGeometry?:boolean}):GPUShaderModule{
+ const {specializeWorldGeometry=false,...shader}=descriptor;
+ const code=uniformSceneConstantsWGSL(uniformDetailShader(shader.code,device),specializeWorldGeometry);
+ const module=device.createShaderModule({...shader,code});
+ addressPlanPrefixes.set(module,[...code.matchAll(/\boverride (\w*)UseAddressPlan:bool=false;/g)].map(match=>match[1]!));
  const prefixes=[...code.matchAll(/\boverride (\w*)FixedWorldGeometry:bool=false;/g)].map(match=>match[1]!);
- if(prefixes.length)fixedWorldPrefixes.set(module,prefixes);
+ if(prefixes.length){
+  fixedWorldPrefixes.set(module,prefixes);
+  runtimeWorldPrefixes.set(module,new Set(prefixes.filter(prefix=>!code.includes(`override ${prefix}WindowWord24:`))));
+ }
  return module;
 }
 const storageOf=new WeakMap<UniformMixedOwnership,UniformDetailStorage>();
 /** Every pipeline is compiled once. */
 export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwnership,descriptor:GPUComputePipelineDescriptor):Promise<GPUComputePipeline>{
+ if(UNIFORM_ADDRESS_PLAN_ENTRIES.has(descriptor.compute.entryPoint??"")){
+  const constants:Record<string,number>={};for(const prefix of addressPlanPrefixes.get(descriptor.compute.module)??[])constants[`${prefix}UseAddressPlan`]=1;
+  descriptor={...descriptor,compute:{...descriptor.compute,constants:{...constants,...descriptor.compute.constants}}};
+ }
  const prefixes=ownership.fixedWorldGeometry?fixedWorldPrefixes.get(descriptor.compute.module):undefined;
  if(prefixes?.length){
   const seed=ownership.capacity.address.seed,at=seed.layout.tail.window,frame=uniformWindowFixedFrame(seed.tail[at+UNIFORM_WINDOW_HEADER.policy]!);
@@ -1359,6 +1376,7 @@ export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwn
   const constants:Record<string,number>={};
   for(const prefix of prefixes){
    constants[`${prefix}FixedWorldGeometry`]=1;
+   if(runtimeWorldPrefixes.get(descriptor.compute.module)?.has(prefix))continue;
    for(let i=24;i<32;i++)constants[`${prefix}WindowWord${i}`]=seed.tail[at+i]!;
    if(frame){
     constants[`${prefix}FixedFrame`]=1;for(let i=0;i<3;i++)constants[`${prefix}WindowWord${i}`]=seed.tail[at+UNIFORM_WINDOW_HEADER.frame+i]!;

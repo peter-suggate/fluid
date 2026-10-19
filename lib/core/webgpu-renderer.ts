@@ -1970,7 +1970,8 @@ export class FluidLabRenderer {
     const retainSimulation = !rendererOnlyScene && Boolean(previous && previousSidecar)
       && !drainPreviousForReset && this.attachedPresentationMode === presentationMode
       && this.attachedSolverDocumentKey === gpuSceneSolverKey(scene, config);
-    this.timelineResetPending=false;
+    // Keep the drain obligation until preparation finishes. A superseding
+    // request must still retire the old allocations before building its own.
     this.pendingLiveSvoPresentation=undefined;
     // The active solver remains attached for presentation throughout the
     // transaction. Only the warmed candidate is allowed to replace it.
@@ -1982,7 +1983,7 @@ export class FluidLabRenderer {
     const prepare=async()=>{
       if(supersededBuild)await supersededBuild.catch(()=>{});
       if(abort.signal.aborted||this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
-      if(!drainPreviousForReset||!previous)return;
+      if(!drainPreviousForReset||!previous){this.timelineResetPending=false;return;}
       report({phase:"drain",taskId:"solver.drain",label:"Drain previous GPU work",completed:0,total:1});
       await device.queue.onSubmittedWorkDone();
       if(abort.signal.aborted||this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
@@ -2000,6 +2001,7 @@ export class FluidLabRenderer {
         previousSidecar.destroy();previousSidecarDestroyedForReset=true;
       }
       this.resetGPUQueueTracking();
+      this.timelineResetPending=false;
       report({phase:"drain",taskId:"solver.drain",label:"Previous GPU work drained",completed:1,total:1});
     };
     const create:Promise<{solver:GPUSolverInstance;sidecar?:WebGPULiveSvoScene}>=prepare().then(async ()=>{
@@ -2434,6 +2436,10 @@ export class FluidLabRenderer {
     if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
     const key=this.solverKey(scene,config,presentationMode);
     if(!this.gpuFluid||key!==this.gpuFluidKey){
+      // A warm reset owns the attached solver until it settles. Starting a
+      // replacement on the next draw would overlap its resources and invalidate
+      // its completion. Re-evaluate the latest document after it finishes.
+      if(this.reseedInFlight)return undefined;
       // A change confined to the seed tier can re-seed the live solver instead
       // of rebuilding it. The attempt is fire-and-forget against a generation
       // guard; if it declines or the solver moved on, the ordinary rebuild
@@ -2873,6 +2879,8 @@ export class FluidLabRenderer {
     const uniformLayers = composesLayers ? gridOverlay?.layers : undefined;
     this.gpuFluid?.setLayoutViewsEnabled?.(Boolean(gridOverlay?.axis !== "off" && uniformLayers?.visible
       && uniformLayers.enabled.some(id => id === "tiles" || id === "importance" || id === "grid" || id === "pressure")));
+    this.gpuFluid?.setSpatialPerformanceEnabled?.(Boolean(gridOverlay?.axis !== "off" && uniformLayers?.visible && uniformLayers.enabled.includes("performance")), uniformLayers?.performance?.sampling === "diagnostic");
+    this.gridOverlayPipeline?.setPerformance(this.gpuFluid?.spatialPerformanceSnapshot, uniformLayers, this.presentationTexture.width, this.presentationTexture.height);
     this.gridOverlayPipeline?.setLayers(uniformLayers, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary, this.gpuFluid?.volumePageSource);
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);}
     cpuTrace?.transition({ id: "scene-upload", label: "Scene and field uploads" });

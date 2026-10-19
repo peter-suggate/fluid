@@ -102,6 +102,13 @@ export class SceneInteractionHost implements InteractionHost {
   }
   private updateReadiness(recoverSceneEdit = false) {
     if (!this.world || this.disposed || (this.view.readiness.state === 'failed' && !recoverSceneEdit)) return;
+    const failure = this.scene.systems?.fluid !== false ? this.options.fluid?.failureReason?.() : undefined;
+    if (failure) {
+      this.clearInput();
+      this.publish({ running: false, readiness: { state: 'failed', reasons: [failure] } });
+      this.options.transport?.('pause');
+      return;
+    }
     const missing = this.scene.systems?.fluid !== false && (!this.options.fluid || this.options.fluid.isReady?.() === false);
     const readiness: InteractionView['readiness'] = missing
       ? { state: 'preparing', reasons: ['Waiting for fluid adapter to be ready'] }

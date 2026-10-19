@@ -282,7 +282,7 @@ export function rootLevelsReference(f: RootLevelsFacts) {
           if (!(word >= 1 && word <= N - 2)) continue;
           const c = q.map((x, i) => x - 2 * d[i]!); listed = (classOf(8 * word + (c[0]! | (c[1]! << 1) | (c[2]! << 2))) & 1) !== 0;
         }
-        if (listed) { S.list[4 + S.list[0]!] = job; S.list[0]!++; }
+        if (listed) { S.list[4 + S.list[0]!] = job; S.list[0]!++; S.list[4 + 8 * N + job]! |= 4; }
       }
     } else if (kind === "restrictV" || kind === "restrictInner" || kind === "restrictFull") {
       const rhs = kind === "restrictInner" ? w.b1 : w.b0, minimum = kind === "restrictInner" ? w.m1 : w.m0, full = kind === "restrictFull", V = L[0]!;

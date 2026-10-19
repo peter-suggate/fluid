@@ -97,6 +97,14 @@ fn umCoarseIncident(t:u32,local:vec3u)->u32{
  let required=u32(local.x!=0u)|(u32(local.y!=0u)<<1u)|(u32(local.z!=0u)<<2u);
  return ((umVertexRecipe(t)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u)&UM_VERTEX_INCIDENT[required];
 }
+// Positive corner k is incident exactly when all its axes lie on a high
+// face of the vertex. This eight-byte logical table replaces seven tests
+// in each fine vertex consumer (WGSL uniform indexing uses u32 entries).
+const UM_POSITIVE_INCIDENT:array<u32,8>=array<u32,8>(1u,3u,5u,15u,17u,51u,85u,255u);
+fn umFineOwnsPositiveVertex(local:vec3u,wide:u32)->bool{
+ let high=u32(local.x==4u)|(u32(local.y==4u)<<1u)|(u32(local.z==4u)<<2u);
+ return (wide&UM_POSITIVE_INCIDENT[high])==0u;
+}
 // Window tile offsets -1..+2 are eight 2³ octants. Their widths already
 // exist in eight neighboring 3³ stencils: no per-tile word reads or atomics.
 fn umWindowFineOctant(tile:vec3u,octant:u32)->u32{

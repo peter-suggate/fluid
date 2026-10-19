@@ -229,7 +229,20 @@ export interface OctreeTechniqueDebugSource {
  *     grows or goes.
  * Without `mixedOwnership` (and under identity storage) the accessors are the
  * raw loads. */
+/** Fixed geometric support of a liquid level set. These are the solver's
+ * obstacle resources, independent of fluid h/4h ownership. */
+export interface LevelSetSolidBoundarySource {
+  readonly params: GPUBufferBinding;
+  readonly mask: GPUBufferBinding;
+  readonly terrain: GPUTexture;
+  readonly bodies: GPUBufferBinding;
+  readonly analyticTerrain: GPUBufferBinding;
+}
+
 export interface DenseLevelSetVolumeConsumerSource {
+  /** Liquid phi is continued through obstacles for cut-cell pressure. The
+   * physical liquid is its intersection with this independent open domain. */
+  readonly solidBoundary?: LevelSetSolidBoundarySource;
   /** Optional canonical h/4h ownership; no materialized fine expansion. Its
    * tail is the detail table of the packed fields. */
   readonly mixedOwnership?: GPUBufferBinding;

@@ -1,3 +1,4 @@
+import type { SpatialCostSnapshot } from "./spatial-performance";
 import type { FluidStepRequest } from "../interaction/runtime/physics";
 import type { FluidExchange } from "../interaction/contracts";
 import type { LiveFluidEdit, LiveFluidEditResult } from "./live-fluid-edit";
@@ -259,6 +260,8 @@ export interface GPUSolverInstance {
    * the view: off, the solver copies and records none of them.
    */
   setLayoutViewsEnabled?(enabled: boolean): void;
+  setSpatialPerformanceEnabled?(enabled: boolean, diagnostic?: boolean): void;
+  readonly spatialPerformanceSnapshot?: SpatialCostSnapshot;
   /** Actual transient geometric volume page table (header, flags, slots). */
   readonly volumePageSource?: GPUFluidVolumePageSource;
   /**

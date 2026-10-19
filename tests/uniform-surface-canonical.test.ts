@@ -1,3 +1,4 @@
+import {uniformCompiledTopologyWGSL} from "../lib/methods/uniform/uniform-compiled-topology";
 import {readFileSync} from "node:fs";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -12,6 +13,7 @@ test("production fine listing covers positive seam masks and rectangular low wal
    const module=device.createShaderModule({code:`
 @group(0) @binding(0) var<storage,read_write> out:array<vec4f>;
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
+${uniformCompiledTopologyWGSL.slice(uniformCompiledTopologyWGSL.indexOf("const UM_POSITIVE_INCIDENT"),uniformCompiledTopologyWGSL.indexOf("// Window tile offsets"))}
 ${listing}
 @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3u){let wide=(id.x%128u)<<1u;let low=umCorner(id.x/128u,2u)!=vec3u(0);let tile=vec3u(2);var seen:array<u32,125>;var invalid=0u;var returned=0u;var expected=0u;
  for(var round=0u;round<3u;round++){for(var lane=0u;lane<64u;lane++){

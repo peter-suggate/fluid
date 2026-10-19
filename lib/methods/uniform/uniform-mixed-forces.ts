@@ -127,7 +127,7 @@ export class UniformMixedForces {
   }
   async initialize():Promise<void>{
     const h=this.ownership.capacity.lattice.cellSize_m;
-    const module=uniformDetailModule(this.device,{label:"Uniform mixed forces",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+    const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed forces",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(1) var advected:texture_3d<f32>;
 @group(1) @binding(2) var phi:texture_3d<f32>;
 @group(1) @binding(3) var volume:texture_3d<f32>;

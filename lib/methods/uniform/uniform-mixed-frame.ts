@@ -272,6 +272,14 @@ export class UniformMixedFrame {
  private stageGridWord:number;
  private readonly stageBandWord:number;
  /** Accepted fine pressure and its slot map, including after storage growth. */
+ /** Existing band slots, copied only by the opt-in spatial performance sampler. */
+ /** Extra producer counters only on explicitly sampled calibration frames. */
+ performanceDiagnostics=false;
+ get performancePressureCycles():GPUBufferBinding{return {buffer:this.state,offset:28,size:4};}
+ get performanceBandCycles():GPUBufferBinding{return {buffer:this.band.index,offset:16,size:4};}
+ get performanceIdle():boolean{return this.narrowBandFlip.idle;}
+ get performanceSurfaceCounters(){return this.surface.regionCounters;}
+ get performanceBandSlots():GPUBufferBinding{return {buffer:this.band.index,offset:this.band.slotMapOffset,size:4*this.ownership.capacity.tiles};}
  get rigidPressure():{buffer:GPUBuffer;word:number}{return {buffer:this.presentation.phi.buffer,word:this.stageBandWord};}
  private stageBandTiles:number;
  private readonly split:{
@@ -475,7 +483,7 @@ export class UniformMixedFrame {
     acceptance:new Float32Array([0,0,UNIFORM_PRESSURE_RELATIVE_REDUCTION,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE]),band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])])};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.sourceSeeding);
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.traceSubsteps,this.nearSettled.redistanceSearch);
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -525,9 +533,10 @@ export class UniformMixedFrame {
   this.hangingGroup=this.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:caches[0]!});
   this.heat=new UniformRegionHeat(device,o,()=>this.surfaceWorkControl.generation);this.plan.attachHeat(this.heat.tiers);this.phiResolve.attachHeat(this.heat.tiers);
   this.surfaceWorkControl=new UniformSurfaceWorkControl(device,o,f.phi,solid,this.pagePool,this.heat);
+  this.narrowBandFlip.attachFramePlan(this.surfaceWorkControl.framePlan);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
   this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
-  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h");
+  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps);
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,this.surfaceWorkControl);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
@@ -550,7 +559,7 @@ export class UniformMixedFrame {
   // Held mode: quiet regions (UniformRegionHeat) keep their owners' values.
   this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,true,{...this.surfaceWorkControl.revisions,generation:()=>this.surfaceWorkControl.generation});this.authorityGroup=this.bindAuthority();
   // Pressure couples the all-4h owners through the static coarse record.
-  this.cycles=new UniformMixedPressureCycles(device,root,view(memory.backup),f.pressure);
+  this.cycles=new UniformMixedPressureCycles(device,root,view(memory.backup),f.pressure,this.nearSettled.rootReserve!=="parallel",this.nearSettled.rootCoarse!=="tiled",this.nearSettled.rootTiles!=="octant");
   const coarseSolid=!!solid;
   this.projection=new UniformMixedPressureVelocity(device,p,f.sourceParams,solid,coarseSolid,this.cycles.rounding,this.freeze);
   // A cut 4h face's flux sums its h faces of the forced field, which the split
@@ -585,7 +594,7 @@ export class UniformMixedFrame {
   }
   this.bandParams=uniform("pressure band",64);
   this.surfaceBand=new UniformPressureSurfaceBand(device,o,f.phi);
-  this.band=new UniformPressureBand(device,o,p,{phi:{buffer:this.authorityPhi},coarsePhi:root.phi!,authorityParams:this.params.authority,vertexPhi:f.phi,
+  this.band=new UniformPressureBand(device,o,p,{fusedMiddle:this.nearSettled.bandSmoothing!=="separate",phi:{buffer:this.authorityPhi},coarsePhi:root.phi!,authorityParams:this.params.authority,vertexPhi:f.phi,
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
    coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,rows:this.bandRows,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined,returns:this.nearSettled.bandExit==="returns"},undefined,solid);
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
@@ -810,7 +819,7 @@ export class UniformMixedFrame {
   const density=p.density,viscosity=p.viscosity,tension=p.surfaceTension,tolerance=p.pressureTolerance,open=+p.openTop,step=dt/density,target=tolerance>0?tolerance:UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
   const w=this.words,q=this.queue,to=this.params,forces=w.forces,projection=w.projection,band=w.band;
   w.extension[3]=open;q.writeBuffer(to.extension,0,w.extension);
-  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineTrilinear?2:1):0;q.writeBuffer(to.surface,16,w.surfaceFlags);
+  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineTrilinear?2:1):0;w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
   w.momentum[3]=dt;q.writeBuffer(to.momentum,0,w.momentum);w.momentumFlags[0]=open;q.writeBuffer(to.momentum,16,w.momentumFlags);
   forces[3]=dt;forces[4]=gravity;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;q.writeBuffer(to.forces,0,forces);
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
@@ -878,6 +887,7 @@ export class UniformMixedFrame {
   * rejects naming its frame and fails the frame for every later advance.
   * kick: kick()'s encode, ahead of a frame of this step; it takes no frame index. */
  advance(p:UniformMixedFrameParameters,trace?:UniformMixedFrameTrace,extendTail=false,bodies?:UniformMixedFrameBodies,kick=0):Promise<UniformMixedFrameReceipt>{
+  if(trace){const measured=trace;trace={...measured,phase:(encoder,phase)=>{this.blit.finishStage(encoder);measured.phase(encoder,phase);}};}
   if(bodies&&!this.solid)throw new Error("This mixed frame was built without solids; rigid bodies need the solid library");
   if(!this.ready||this.busy||this.failed)throw new Error("Unified frame is not ready for an advance");
   let slot:ReceiptSlot|undefined;
@@ -914,12 +924,12 @@ export class UniformMixedFrame {
    if(!relayout&&this.fields.residency.live)throw new Error("Uniform mixed frame: an advance without a census on a live page pool");
    for(let i=0;i<this.frameOwnerships.length;i++){this.releases[held]=this.frameOwnerships[i]!.acquireFrame();held++;}
    // same: p's extension key is the last advance's.
-   const dt=p.dt,gravity=p.gravity,same=this.write(p,dt,gravity);let encoder=this.beginEncoder(trace);
+   const dt=p.dt,gravity=p.gravity,same=this.write(p,dt,gravity);this.blit.setSharedSchedule(false);let encoder=this.beginEncoder(trace);
    {const generation=this.surfaceWorkControl.generation,moved=generation!==this.coldGeneration;this.coldGeneration=generation;
     this.cold.begin(frame,frame-UNIFORM_MIXED_RECEIPT_RING,work?.heat,kick>0||!same||moved||edit!==undefined||firstCensus||(p.addedVolumeCells??0)!==0);
     this.frozenQuiet=this.freeze!==undefined&&this.cold.quiet;
     // NB-FLIP's idle advance (no live sample, every region frozen and COLD) leaves its stages out.
-    this.narrowBandFlip.beginAdvance(this.cold);this.extensionIdle=this.frozenQuiet&&this.narrowBandFlip.idle;}
+    this.surfaceWorkControl.framePlan.beginFrame();this.narrowBandFlip.beginAdvance(this.cold);this.extensionIdle=this.frozenQuiet&&this.narrowBandFlip.idle;}
    // An idle advance (NB-FLIP idle: quiet with the freeze this advance and
    // the last, no live sample) runs no census. Everything it reads is held:
    // phi, every region frozen, no sample, and no host trigger (each host
@@ -992,7 +1002,10 @@ export class UniformMixedFrame {
    // inputs: the extension (extensionIdle), the plan's support, ownership and
    // dt (a dt change breaks idle). Its words and region velocities stand.
    const idle=this.narrowBandFlip.idle;
-   if(!idle)this.plan.encodeCertificate(encoder,dt);if(this.layoutViews){const certificate=this.plan.certificate;this.recordStageView(encoder,certificate.buffer,certificate.offset,"certificate");}
+   if(!idle)this.plan.encodeCertificate(encoder,dt);
+   this.surfaceWorkControl.framePlan.encode(encoder,idle&&this.geometryCurrent);
+   this.blit.setSharedSchedule(this.surfaceWorkControl.framePlan.active&&this.surfaceWorkControl.framePlan.scheduleStages&&this.surfaceWorkControl.framePlan.coalescePasses);
+   if(this.layoutViews){const certificate=this.plan.certificate;this.recordStageView(encoder,certificate.buffer,certificate.offset,"certificate");}
    if(!this.frozenQuiet){this.cache.encode(encoder,this.cacheGroup);if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);}
    trace?.phase(encoder,V.transportReach);
    {
@@ -1046,12 +1059,14 @@ export class UniformMixedFrame {
    {if(this.narrowBandVolumeProbe){this.narrowBandVolumeProbe=false;this.surfaceVolume!.encode(encoder,this.surfaceVolumeGroup,1,false);}}
    // Nothing after this pass writes phi: the next advance starts from it,
    // and the renderer's 4h vertex base is published from it.
-   this.coarsePhi.encode(encoder);
+   if(!this.surfaceWorkControl.framePlan.retainsGeometry)this.coarsePhi.encode(encoder);
    this.phiResolved=true;
    }
 
    // Nothing below writes phi before the split reads the pressure geometry.
-   {const options=this.geometryOptions;options.pressure=true;options.changed=undefined;this.encodeGeometry(encoder,options);}this.geometryCurrent=true;
+   // The sealed frame plan retains both geometry families and their
+   // measured-volume mirror only when no producer ran since the last gather.
+   if(!this.surfaceWorkControl.framePlan.retainsGeometry){const options=this.geometryOptions;options.pressure=true;options.changed=undefined;this.encodeGeometry(encoder,options);}this.geometryCurrent=true;
    trace?.phase(encoder,V.gather);
 
    // A kick forces the stored field where it stands.
@@ -1098,7 +1113,12 @@ export class UniformMixedFrame {
    // transport diluted its V into a layer above phi, and the floor's lost
    // volume later surfaced as a growing cavity.
    {const to=this.levels[0]!.pressure;encoder.copyBufferToBuffer(this.presentation.pressure.buffer,0,to.buffer,to.offset??0,4*this.pressureWords);}
-   this.projection.encode(encoder,"rhs",split.rhsGroup);this.cycles.encodeSetup(encoder);
+   this.projection.encode(encoder,"rhs",split.rhsGroup);
+   // Idle explicitly holds phi and suppresses census/remap. With no moved
+   // body or kick, pressure geometry is the previous solve's; only its RHS,
+   // bounds and work list need refreshing. Any producer wakeup restores a
+   // full rebuild (or exact regional propagation when enabled for diagnosis).
+   this.cycles.encodeSetup(encoder,this.narrowBandFlip.idle&&!bodies&&!kick);
    this.cycles.encodeMeasure(encoder);this.acceptance.encode(encoder,this.acceptanceGroup,this.state,"initial");
    trace?.phase(encoder,A.pressureSetup);
    // The conservative schedule is encoded whole; GPU gates run only the
@@ -1187,7 +1207,7 @@ export class UniformMixedFrame {
  }
  /** The frame encoders' copies and clears run as compute launches (UniformComputeBlit). */
  private readonly blit:UniformComputeBlit;
- private beginEncoder(trace?:UniformMixedFrameTrace):GPUCommandEncoder{const raw=this.blit.adopt(this.device.createCommandEncoder(FRAME_ENCODER));return trace?.instrument(raw)??raw;}
+ private beginEncoder(trace?:UniformMixedFrameTrace):GPUCommandEncoder{return this.blit.adopt(this.device.createCommandEncoder(FRAME_ENCODER),trace?encoder=>trace.instrument(encoder):undefined);}
  private submit(encoder:GPUCommandEncoder):void{this.commands[0]=encoder.finish();this.queue.submit(this.commands);}
  /** Submits the segment encoded so far; the frame goes on in the encoder returned. */
  private flush(encoder:GPUCommandEncoder,trace?:UniformMixedFrameTrace):GPUCommandEncoder{trace?.submit(encoder,this.fields.negative);this.submit(encoder);return this.beginEncoder(trace);}

@@ -958,6 +958,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     });
     const detachInteractionFluid = simulation.attachInteractionFluid(paneId, {
       isReady: () => session.diagnostics.getState().gpuStatus.state === 'ready',
+      failureReason: () => {
+        const status = session.diagnostics.getState().gpuStatus;
+        return status.state === 'lost' || status.state === 'unavailable' ? status.label : undefined;
+      },
       subscribeReadiness: changed => session.diagnostics.subscribe((state, previous) => {
         if (state.gpuStatus !== previous.gpuStatus) changed();
       }),
@@ -1443,7 +1447,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * took it away would make watching a scene mean losing the way to ask what it
    * costs. Pointing at the room is not pointing at anything in it, so nothing
    * here is inconsistent with LOOK touching nothing: the wedges that place
-   * water are gone with the target, and what is left is about the document.
+   * water are gone with the target. Explicit interactive placement is offered
+   * in both modes, so any scene can receive a playable character.
    */
   const openRadialMenuAt = (event: React.MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
@@ -1471,10 +1476,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // LOOK has no target by construction, so the room answers from the point
       // the ray reaches rather than from a thing.
       : sceneActionsAt(context.scene, roomPointForRay(context.scene, ray), undefined, { placement: false, methodId: context.methodId });
-    // A surface that is not an object can take an interactive entity, when the
-    // pane has an interaction binding; the wedge lists the catalog's kinds.
-    const interactive = target && target.kind !== "entity"
-      ? interactivePlacementWedge(paneId, target.point_m, targetSurfaceNormal(context.scene, target)) : undefined;
+    // Placement is an explicit authoring action in either viewport mode.
+    // Resolve its surface independently of LOOK's document-only menu, keeping
+    // the preview on the scene geometry rather than the fallback room plane.
+    const placementTarget = target ?? targetAtRay(context, ray);
+    const interactive = interactivePlacementWedge(
+      paneId, placementTarget.point_m, targetSurfaceNormal(context.scene, placementTarget));
     if (interactive) actions = [...actions, interactive];
     if (actions.length === 0) { session.ui.getState().closeRadialMenu(); return; }
     // Client coordinates: the ring is a fixed-position layer over the window,

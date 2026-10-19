@@ -688,7 +688,7 @@ function UniformRun({ session }: { session: PaneSession }) {
       <div className={css.layout}>
         <section className={css.viewport} aria-label="Narrow-band FLIP simulation">
           <div className={css.tools}>
-            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages", "importance"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
+            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages", "importance", "performance"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
             <button onClick={() => setCamera(fit)}>Fit</button>
           </div>
           <canvas

@@ -1,9 +1,11 @@
+import { readPerformanceView, type PerformanceView } from "../features/spatial-performance/view";
 import {
   UNIFORM_DETAIL_CRITERIA, UNIFORM_STAGE_REASON as R, type UniformDetailCriterion,
 } from "../methods/uniform/uniform-stage-grids";
 
 /** Shared semantic catalog. Order is the composition order, never click order. */
 export const VISUAL_LAYERS = [
+  { id: "performance", requires: ["tiles"], label: "Performance", color: "#77c8a4", opacity: 1, mode: 29, description: "Sampled simulation wall time attributed to cells, 4h tiles or 16h regions. Cost is normalized to the frame's average share; tier outlines independently show cold (blue), warm (amber), hot (red). Hatched estimates have not passed held-out frame validation. Shared and unmodelled time remains outside the spatial map." },
   { id: "phi", requires: ["phi"], label: "Signed distance", color: "#ed7829", opacity: 0.65, mode: 3, description: "Signed distance in cell widths: blue liquid, white interface, orange air. Mixed Uniform keeps it at owner resolution: h vertices in h tiles, 4h corners under 4h owners (interpolated between), as in an all-4h run." },
   { id: "volume", requires: ["volume"], label: "Liquid volume", color: "#4f9ae0", opacity: 0.7, mode: 21, description: "Transported volume over the open capacity of each cell (the cell volume where no capacity is published): dilute residue on a log ramp from purple to green, liquid blue, overfull cells red. Opacity follows fullness with a floor so residue stays visible. Mixed Uniform draws the h and 4h bulk cells the volume lives on, with orange resolution seams." },
   { id: "pressure", requires: ["pressure"], label: "Pressure", color: "#7e9ee5", opacity: 0.65, mode: 5, description: "Signed pressure (blue positive, amber negative; full intensity at 10 kPa) on the exact cells the last solve ran on. Mixed Uniform draws each pressure cell at its own size: h cells (the two-stage h band re-solved over the 4h solve, with the band's own pressure) are tinted green, 4h cells untinted, with resolution seams in lilac. Tiles where the level set crosses zero are outlined in yellow; under dynamic coarsening every such tile should be green, so one held at 4h (a surface the head census missed) is outlined in magenta." },
@@ -29,6 +31,7 @@ export type ImportanceView = "all" | UniformDetailCriterion;
 export type ParticleView = "speed" | "motion";
 export type PageView = "slice" | "3d";
 export interface VisualLayerState {
+  performance?: PerformanceView;
   enabled: VisualLayerId[];
   visible: boolean;
   opacity: Partial<Record<VisualLayerId, number>>;
@@ -123,6 +126,7 @@ export function readVisualLayers(raw: string | null, fallback = visualLayers()):
     }
     const criterion = UNIFORM_DETAIL_CRITERIA.find(c => c === value.importance);
     if (criterion) state.importance = criterion;
+    if (value.performance) state.performance = readPerformanceView(value.performance);
     if (value.pages === "3d") state.pages = "3d";
     if (value.heat === "3d") state.heat = "3d";
     if (value.particles === "motion") state.particles = "motion";

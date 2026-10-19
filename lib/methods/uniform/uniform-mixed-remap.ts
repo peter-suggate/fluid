@@ -115,7 +115,7 @@ export class UniformMixedRemap {
   // the solid library for the face and cell kernels (twinned, see select).
   const modules=new Map<RemapPart,Promise<GPUShaderModule>>(),moduleOf=(part:RemapPart)=>{
    let module=modules.get(part);
-   if(!module)modules.set(part,module=(async()=>{const m=uniformDetailModule(this.device,{label:`Uniform mixed remap ${part}`,code:uniformMixedRemapWGSL(this.ownership.layout,part,this.solid,this.surfaceOnly)});
+   if(!module)modules.set(part,module=(async()=>{const m=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform mixed remap ${part}`,code:uniformMixedRemapWGSL(this.ownership.layout,part,this.solid,this.surfaceOnly)});
     const errors=(await m.getCompilationInfo()).messages.filter(e=>e.type==="error");if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}: ${e.message}`).join("\n"));return m;})());
    return module;
   };
@@ -303,7 +303,7 @@ export class UniformMixedOwnershipTransfer {
   ]});
  }
  async initialize():Promise<void>{
-  const module=uniformDetailModule(this.device,{label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout,this.solid,this.freeze)});
+  const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout,this.solid,this.freeze)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   // Only the transfer to pressure reads the solid library (the patch weights).
   const weighted=(entryPoint:string)=>!!this.solid&&entryPoint.startsWith("toPressure");

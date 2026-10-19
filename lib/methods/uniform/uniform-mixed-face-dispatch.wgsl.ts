@@ -16,8 +16,8 @@ fn umPositiveFaceAtAnchor(owner:UMOwner,axis:u32,anchor:vec3i)->UMFace {
  * tier or all-width traversal (the live remap visits a changed-tile list). */
 export function uniformMixedFaceDispatchWGSL(entry: string, evaluate: string, allWidths = false, metadata = "", owner?: string): string {
   return /* wgsl */ `
-@compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u){
- let owner=${owner ?? (allWidths ? "umAllOwner" : "umOwner")}(gid);if(owner.width==0u){return;}
+@compute @workgroup_size(64) fn ${entry}(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+ let owner=${owner ?? (allWidths ? "umAllOwner" : "umOwner")}(gid);umLoadAddressPlan(owner.tile>>9u,lane);if(owner.width==0u){return;}
  let origin=umOrigin(owner);
  // Keep the boundary values for metadata (projection's release flags).
  // Low and positive faces share one evaluator site: Metal otherwise clones
@@ -110,6 +110,10 @@ var<workgroup> ${entry}Components:array<vec2f,192>;
  let quad=umMergedTiles&&job>=seamFour&&job<seamFour+quads;
  let tileJob=select(job,job+fours-quads,umMergedTiles&&job>=seamFour+quads);
  let packed=umMergedTiles&&!umFusedJobs&&tileJob>=umMergedTileJobs();
+ var planTile=UM_TILES;
+ if(quad){let index=4u*(job-seamFour);if(index<fours){planTile=umSupport[header+4u+umSupport[header]+index];}}
+ else{planTile=umOwner(vec3u(select(tileJob*cells,tileJob*64u,packed),0,0)).tile;}
+ umLoadAddressPlan(planTile>>9u,lane);
  let slot=lane/48u;let part=(lane%48u)/3u;let faceAxis=lane%3u;
  var owner=UMOwner();var anchor=vec3i(0);var result=vec2f(0);
  // The faces this lane evaluates: a low boundary face (low, at lowIndex) and

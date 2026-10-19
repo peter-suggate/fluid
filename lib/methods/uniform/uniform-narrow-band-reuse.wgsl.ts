@@ -14,11 +14,28 @@ export function narrowBandReuseLayout(base:number,regions:number,capacity=region
  // The frame's region work tiers (UniformRegionHeat.tiers words [0, regions)),
  // copied in before each stage that reads them (UniformNarrowBandFlip.syncTiers).
  const tiers=regionPlane+8*capacity;
- return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,metric,plane,regionPlane,tiers,metadataWords:masks-base,words:tiers+regions-base};
+ const framePlan=tiers+regions;
+ return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,metric,plane,regionPlane,tiers,framePlan,metadataWords:masks-base,words:framePlan+5+7*regions-base};
 }
 export type NarrowBandReuseLayout=ReturnType<typeof narrowBandReuseLayout>;
 export function narrowBandReuseWGSL(l:NarrowBandReuseLayout){return /* wgsl */`
 override nbMetricPlanes:bool=true;
+// A domain of the shared frame plan, kept in this arena to fit the storage
+// binding budget. Header: enabled, region count; flags, request masks, list.
+const NB_FRAME_PLAN:u32=${l.framePlan}u;
+fn nbPlanned()->bool{return atomicLoad(&bins[NB_FRAME_PLAN])!=0u;}
+var<workgroup> nbPlanCount:u32;
+var<workgroup> nbPlanIndex:u32;
+fn nbPlanRegions(lane:u32)->u32{
+ if(lane==0u){nbPlanCount=NB_REUSE_REGIONS;if(nbPlanned()){nbPlanCount=atomicLoad(&bins[NB_FRAME_PLAN+1u]);}}
+ return workgroupUniformLoad(&nbPlanCount);
+}
+fn nbPlanRegion(slot:u32,lane:u32)->u32{
+ if(lane==0u){nbPlanIndex=slot;if(nbPlanned()){nbPlanIndex=atomicLoad(&bins[NB_FRAME_PLAN+4u+3u*NB_REUSE_REGIONS+slot]);}}
+ return workgroupUniformLoad(&nbPlanIndex);
+}
+fn nbPlanHas(region:u32)->bool{return !nbPlanned()||(atomicLoad(&bins[NB_FRAME_PLAN+4u+region])&2u)!=0u;}
+
 const NB_REUSE_REGIONS:u32=${l.regions}u;const NB_REUSE_CAPACITY:u32=${l.capacity}u;
 const NB_REUSE_LIVE:u32=${l.live}u;const NB_REUSE_CONTROL:u32=${l.control}u;
 const NB_REUSE_HISTORY:u32=${l.history}u;const NB_REUSE_HISTORY_WORDS:u32=${l.historyWords}u;
@@ -36,8 +53,11 @@ const NB_TIER:u32=${l.tiers}u;
 fn nbRegionCold(region:u32)->bool{return region<NB_REUSE_REGIONS&&atomicLoad(&bins[NB_TIER+region])==0u;}
 fn nbTileCold(tile:u32)->bool{return umKeyStored(tile)&&nbRegionCold(umPageOfTile(tile));}
 fn nbVertexCold(p:vec3u)->bool{
- for(var k=0u;k<8u;k++){
-  let side=umCorner(k,2u);if(any((side!=vec3u(0u))&((p&vec3u(15u))!=vec3u(0u)))){continue;}
+ let boundary=(p&vec3u(15u))==vec3u(0u);
+ let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
+ // Enumerate only incident regions: interior vertices have one, not eight.
+ for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
+  let side=umCorner(k,2u);
   let tile=umTileKey((vec3i(p)-vec3i(side))>>vec3u(2u));if(!umKeyStored(tile)){continue;}
   if(nbRegionCold(umPageOfTile(tile))){return true;}
  }
@@ -101,6 +121,15 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
    for(var a=0u;a<3u;a++){valid=valid&&atomicLoad(&bins[previous+NB_REUSE_REGIONS*(1u+a)+region])==origin[a];}
    if(!valid){atomicStore(&nbReuseClean,0u);}
   }
+  // Ownership and solid-open geometry are sealed by the shared frame plan.
+  // Validate them once and publish to both history banks. Later phi epochs
+  // compare revisions alone; they neither gather nor copy this closure.
+  let metadataHeld=nbPlanned()&&(atomicLoad(&bins[NB_FRAME_PLAN+4u+region])&4u)!=0u;
+  if(!metadataHeld){
+  if(nbPlanned()&&lane==0u){
+   for(var a=0u;a<3u;a++){atomicStore(&bins[previous+NB_REUSE_REGIONS*(1u+a)+region],origin[a]);}
+   atomicStore(&bins[previous+4u*NB_REUSE_REGIONS+region],1u);
+  }
   // Both operators consume only the exact binary >1e-5 open predicate;
   // fractional solid geometry is not a dependency of these numerical results.
   var open=vec2u(0xffffffffu);if(umSolidEnabled()){open=umSolidOpenCells(tile);}
@@ -108,6 +137,7 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
    let at=130u*NB_REUSE_REGIONS+128u*region+2u*lane+word;
    if(open[word]!=atomicLoad(&bins[previous+at])){atomicStore(&nbReuseClean,0u);}
    atomicStore(&bins[current+at],open[word]);
+   if(nbPlanned()){atomicStore(&bins[previous+at],open[word]);}
   }
   // A crossing cell uses this region's17^3 phi closure. Its positive-side
   // sampler may choose the tile just above an upper face, hence precisely
@@ -120,9 +150,13 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
    let at=5u*NB_REUSE_REGIONS+125u*region+k;
    if(topology!=atomicLoad(&bins[previous+at])){atomicStore(&nbReuseClean,0u);}
    atomicStore(&bins[current+at],topology);
+   if(nbPlanned()){atomicStore(&bins[previous+at],topology);}
+  }
   }
  }
- workgroupBarrier();let clean=atomicLoad(&nbReuseClean)!=0u;
+ workgroupBarrier();
+ if(nbPlanned()&&lane==0u&&nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){atomicOr(&bins[NB_FRAME_PLAN+4u+region],4u);}
+ let clean=atomicLoad(&nbReuseClean)!=0u;
  if(nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){
   if(lane==0u){atomicStore(&bins[NB_REUSE_ALLOWED+region],select(0u,1u,clean));}
   if(!clean){atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);}
@@ -158,8 +192,11 @@ fn nbNearestFinalAt(tile:u32,row:u32)->u32{
 }
 fn nbMarkPhiChanged(p:vec3u){
  if(!nbReuseEnabled()){return;}
- for(var k=0u;k<8u;k++){
-  let side=umCorner(k,2u);if(any((side!=vec3u(0u))&((p&vec3u(15u))!=vec3u(0u)))){continue;}
+ let boundary=(p&vec3u(15u))==vec3u(0u);
+ let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
+ // Enumerate only incident regions: interior vertices have one, not eight.
+ for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
+  let side=umCorner(k,2u);
   let cell=vec3i(p)-vec3i(side);let tile=umTileKey(cell>>vec3u(2u));if(!umKeyStored(tile)){continue;}
   let at=NB_REUSE_LIVE+nbReuseRegion(tile);let old=atomicLoad(&bins[at]);
   if(old>0u){atomicMax(&bins[at],min(old,0xfffffffdu)+1u);}

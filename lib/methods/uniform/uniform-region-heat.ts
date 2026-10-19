@@ -133,8 +133,11 @@ fn umRegionTier(region:u32)->u32{if(region>=UM_TIER_REGIONS){return UM_TIER_HOT;
 fn umRegionTierAtTile(tile:u32)->u32{if(!umKeyStored(tile)){return UM_TIER_HOT;}return umRegionTier(umPageOfTile(tile));}
 fn umVertexTier(p:vec3u)->u32{
  var tier=UM_TIER_HOT+1u;
- for(var k=0u;k<8u;k++){
-  let side=umCorner(k,2u);if(any((side!=vec3u(0u))&((p&vec3u(15u))!=vec3u(0u)))){continue;}
+ let boundary=(p&vec3u(15u))==vec3u(0u);
+ let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
+ // Enumerate only incident regions: interior vertices have one, not eight.
+ for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
+  let side=umCorner(k,2u);
   let tile=umTileKey((vec3i(p)-vec3i(side))>>vec3u(2u));if(!umKeyStored(tile)){continue;}
   tier=min(tier,umRegionTier(umPageOfTile(tile)));
  }

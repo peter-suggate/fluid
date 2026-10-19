@@ -1,3 +1,5 @@
+import {uniformSolidContourWGSL} from "../methods/uniform/uniform-solid-contour.wgsl";
+import {UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES} from "../methods/uniform/uniform-open-world-terrain";
 import { uniformMixedPresentationWGSL } from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourWGSL } from "../methods/uniform/uniform-lattice-address";
 import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
@@ -283,6 +285,7 @@ struct SurfaceFrame { grid:vec4f, cell:vec4f, origin:vec4f }
 // the solver holds no h-tile capacity: no h tile exists then).
 @group(0) @binding(15) var coarseVertexPhi: texture_3d<f32>;
 ${uniformMixedPresentationWGSL(14,"denseVertexPhi","coarseVertexPhi",undefined,SURFACE_EXTRACTION_VERTEX_CACHE)}
+${uniformSolidContourWGSL}
 // The block neighbour rows of the same topology, after its page table and
 // block records: the window list strides the blocks and asks them for walls.
 fn umBlockNeighbourWord(b:u32,i:u32)->u32{return umTopology[5u*umTileCount()+${UNIFORM_PAGE_TABLE_WORDS}u+udrBlocks+27u*b+i];}
@@ -308,7 +311,7 @@ fn occupancyFromPhi(phi: f32) -> f32 {
   return clamp(0.5 - phi / band, 0.0, 1.0);
 }
 
-fn fieldCell(cell: vec3i) -> f32 {
+fn freeFieldCell(cell: vec3i) -> f32 {
   if(umPresentationEnabled()){return 0.5-umSampleVertex(vec3f(cell)+vec3f(0.5))/(u.container.y/u.gridInfo.y);}
   let dims = vec3i(u.gridInfo.xyz);
   if (any(cell < vec3i(0)) || any(cell >= dims)) { return 0.0; }
@@ -337,7 +340,7 @@ fn fieldCell(cell: vec3i) -> f32 {
 // though the solver and the surface-density diagnostic both classify it as
 // liquid. Marching cubes owns interpolation between these cell-centred nodes.
 fn presentationFieldCell(cell:vec3i)->f32{
-  return fieldCell(cell);
+  return surfaceClipValue(cell,freeFieldCell(cell));
 }
 
 // Cell-centred contour halo: SOLID closes side/high faces. A low y face
@@ -628,14 +631,34 @@ fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
   return select(fallback,normalize(gradient),weightSum>1e-8&&length(gradient)>1e-8);
 }
 
-// The cube's corner values travel by pointer because WGSL passes arrays by
-// value. Lorensen--Cline interpolation is the unmodified linear 0.5 crossing;
-// in particular, crossings at cube corners must not be displaced inward.
+// Liquid and obstacle constraints retain independent linear edge crossings.
+// The cube arrays travel by pointer because WGSL passes arrays by value.
 fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f32, cubeValue: ptr<function, array<f32, 8>>, dims:vec3f) -> SurfaceVertex {
   let denominator = vb - va;
   var t = 0.5;
   if (abs(denominator) > 1e-20) { t = clamp((0.5 - va) / denominator, 0.0, 1.0); }
+  var contact=false;
+  var solidValues:array<f32,8>;
+  if(surfaceHasSolids()){
+    let ca=uniformSurfaceCell(vec3i(a));let cb=uniformSurfaceCell(vec3i(b));
+    let sa=surfaceSolidClearance(vec3f(ca)+0.5);let sb=surfaceSolidClearance(vec3f(cb)+0.5);
+    var la=0.5-freeFieldCell(ca);var lb=0.5-freeFieldCell(cb);
+    // A wholly closed cell has no liquid state. Continue from the open end
+    // of the edge, not from its arbitrary buried padding sentinel.
+    if(sa<0.0&&umCellOpen(ca)<=1e-5){la=lb;}
+    if(sb<0.0&&umCellOpen(cb)<=1e-5){lb=la;}
+    let range=surfaceEdgeInterval(-sa,-sb,surfaceEdgeInterval(la,lb,vec2f(0,1)));
+    t=select(range.x,range.y,va>=0.5);
+    contact=(sa<=0.0||sb<=0.0)&&abs(mix(sa,sb,t))<1e-5*(u.container.y/u.gridInfo.y);
+    if(contact){
+      let offsets=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+      for(var i=0u;i<umPresentationLoopBound();i++){
+        solidValues[i]=surfaceSolidClearance(vec3f(uniformSurfaceCell(vec3i(cubeBase)+offsets[i]*i32(cubeScale)))+0.5);
+      }
+    }
+  }
   let lattice = mix(a, b, t);
+  if(contact){return SurfaceVertex(vec4f(latticeWorld(lattice,dims),1),vec4f(surfaceNormal(lattice,cubeBase,cubeScale,&solidValues,dims),0));}
   return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0),
     vec4f(uniformPhiNormal(lattice,surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims)), 0.0));
 }
@@ -881,6 +904,7 @@ fn extractSharedMain(@builtin(workgroup_id) group:vec3u,@builtin(local_invocatio
 // window 8, so its union is seven samples wide (six on the low half).
 var<workgroup> collectedCoarsePhi: array<f32, 343>;
 fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u, cacheOrigin: vec3i) -> bool {
+  if(surfaceWindowHasSolid(vec3i(g))){return false;}
   // Only SOLID pages close the contour; AIR and resident pages stay open.
   let low = vec3i(g) - vec3i(1);
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
@@ -1189,7 +1213,7 @@ fn uniformWindowCellsFine(g: vec3i, lane: u32) {
         let pair = low + high.yxwz;
         value = 0.5 - ((pair.x + pair.y) + (pair.z + pair.w)) / (u.container.y / u.gridInfo.y);
       }
-      windowCell[slot] = value;
+      windowCell[slot] = surfaceClipValue(cell,value);
     }
   }
 }
@@ -1221,7 +1245,7 @@ fn uniformWindowCells(g: vec3i, header: vec4u, lane: u32) {
         x[k] = windowBase[c.x + 3u * (c.y + 3u * c.z)];
       }
     }
-    windowCell[slot] = uniformCellValue(cell, kind, x);
+    windowCell[slot] = surfaceClipValue(cell,uniformCellValue(cell, kind, x));
   }
 }
 // A fixed launch shares the window list out: workgroup w takes the slots
@@ -1252,7 +1276,7 @@ fn extractWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgrou
     if (header.w != 0u) {
       let signs = atomicLoad(&windowSigns);
       // Air, or liquid with no corner in the wall halo.
-      quiet = (signs & 1u) == 0u || ((signs & 2u) == 0u && uniformWindowInterior(g));
+      quiet = !surfaceWindowHasSolid(g)&&((signs & 1u) == 0u || ((signs & 2u) == 0u && uniformWindowInterior(g)));
     }
     if (header.w != 0u && !quiet) {
       if (header.w == 1u) { uniformWindowCellsFine(g, index); }
@@ -2046,6 +2070,8 @@ export class RasterWaterPipeline {
   private levelSetSource?: DenseLevelSetVolumeConsumerSource;
   /** A 1^3 field for a 3D texture binding the bound source never loads. */
   private fallbackField?: GPUTexture;
+  private fallbackSolidTerrain?: GPUTexture;
+  private fallbackSolidUniform?: GPUBuffer;
   private prepareBindGroup?: GPUBindGroup;
   private causticBindGroup?: GPUBindGroup;
   private surfaceBindGroup?: GPUBindGroup;
@@ -2251,9 +2277,13 @@ export class RasterWaterPipeline {
       ,{ binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
       ,{ binding: 14, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
       ,{ binding: 15, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }
-      // The tenth storage buffer of the stage: the ceiling browsers report here.
       ,{ binding: 16, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
       ,{ binding: 17, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      ,{ binding: 18, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      ,{ binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+      ,{ binding: 20, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } }
+      ,{ binding: 21, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      ,{ binding: 22, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
     ] });
     this.prepareLayout = this.device.createBindGroupLayout({ label: "Water extraction prepare bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -2368,6 +2398,8 @@ export class RasterWaterPipeline {
     await Promise.all(Array.from({ length: Math.min(3, total) }, () => compileWorker()));
     this.sampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.fallbackSparseControl = this.device.createBuffer({ label: "Water disabled storage binding", size: WATER_DISABLED_STORAGE_BYTES, usage: GPUBufferUsage.STORAGE });
+    this.fallbackSolidTerrain=this.device.createTexture({label:"Water unread solid terrain",size:[1,1],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING});
+    this.fallbackSolidUniform=this.device.createBuffer({label:"Water disabled solid uniforms",size:Math.max(1536,UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES),usage:GPUBufferUsage.UNIFORM});
     this.fallbackField = this.device.createTexture({ label: "Water unread field binding", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING });
     this.waterSceneOpticsBuffer = this.device.createBuffer({ label: "Water scene optics and caustic receiver", size: WATER_SCENE_OPTICS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     // Allocated unconditionally: the composite declares the receiver whether or
@@ -2407,7 +2439,7 @@ export class RasterWaterPipeline {
    * vertex field raw. */
   private adoptLevelSetSource(source: DenseLevelSetVolumeConsumerSource | undefined): boolean {
     if (source === this.levelSetSource) return false;
-    const contourChanged = this.levelSetSource?.contourVertexPhi !== source?.contourVertexPhi;
+    const contourChanged = this.levelSetSource?.contourVertexPhi !== source?.contourVertexPhi || this.levelSetSource?.solidBoundary !== source?.solidBoundary;
     this.levelSetSource = source;
     const mixed = source?.mixedOwnership && source.coarseVertexPhi ? source : undefined;
     const detail = mixed ? mixed.detailVertexPhi : source?.vertexPhi, ownership = mixed?.mixedOwnership, coarse = mixed?.coarseVertexPhi;
@@ -2750,9 +2782,9 @@ export class RasterWaterPipeline {
   private rebuildBindGroups() {
     this.compositeBindGroups = new WeakMap();
     this.wireframeSceneBindGroups = new WeakMap();
-    // The mixed presentation contours the nodal phi alone: the 4h base, and
-    // the detail field while the solver names one. Its extraction binds no
-    // cell field, and no h-sized texture at all while no tile can be at h.
+    // Mixed liquid uses the 4h base and optional h detail, intersected with
+    // the independent solid domain. No dense h liquid expansion is needed
+    // when all fluid owners are coarse.
     const mixedSurface = Boolean(this.mixedOwnership && this.coarseVertexPhi);
     const contourField = this.levelSetSource?.contourVertexPhi ? this.levelSetSource.vertexPhi : this.volume;
     if (this.extractLayout && this.volume && this.vertexBuffer && this.indirectBuffer && this.activeCubeBuffer && this.fallbackSparseControl && this.fallbackField && this.surfaceWindows) this.extractBindGroup = this.device.createBindGroup({ layout: this.extractLayout, entries: [
@@ -2761,7 +2793,12 @@ export class RasterWaterPipeline {
       { binding: 14, resource: this.mixedOwnership ?? { buffer: this.fallbackSparseControl, size: 4 } },
       { binding: 15, resource: (this.coarseVertexPhi ?? this.fallbackField).createView({ dimension: "3d" }) },
       { binding: 16, resource: { buffer: this.surfaceWindows } },
-      { binding: 17, resource: this.mixedFrame ?? { buffer: this.uniformBuffer, size: 48 } }
+      { binding: 17, resource: this.mixedFrame ?? { buffer: this.uniformBuffer, size: 48 } },
+      { binding: 18, resource: this.levelSetSource?.solidBoundary?.params ?? {buffer:this.fallbackSolidUniform!} },
+      { binding: 19, resource: this.levelSetSource?.solidBoundary?.mask ?? {buffer:this.fallbackSparseControl,size:4} },
+      { binding: 20, resource: (this.levelSetSource?.solidBoundary?.terrain ?? this.fallbackSolidTerrain!).createView() },
+      { binding: 21, resource: this.levelSetSource?.solidBoundary?.bodies ?? {buffer:this.fallbackSolidUniform!} },
+      { binding: 22, resource: this.levelSetSource?.solidBoundary?.analyticTerrain ?? {buffer:this.fallbackSolidUniform!} }
     ] });
     if (this.prepareLayout && this.indirectBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
@@ -3010,6 +3047,6 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

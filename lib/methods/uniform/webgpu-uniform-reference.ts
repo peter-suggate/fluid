@@ -1,3 +1,4 @@
+import { UniformSpatialPerformance, UNIFORM_SPATIAL_PERFORMANCE } from "./uniform-spatial-performance";
 import type { FluidStepRequest } from "../../interaction/runtime/physics";
 import type { FluidExchange } from "../../interaction/contracts";
 import { proceduralSolidField, proceduralSolidKey, PROCEDURAL_SOLID_MAGIC } from "../../core/procedural-solid";
@@ -316,7 +317,7 @@ const UNIFORM_MIXED_PARAMETER_RING=UNIFORM_MIXED_RECEIPT_RING+6;
 const UNIFORM_MIXED_ALLOCATION_WATCH=8;
 export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly executionInfo: GPUEulerianInfo;
-  get info(): GPUEulerianInfo { if(this.mixedAllocationDue())this.refreshMixedAllocation();return this.executionInfo; }
+  get info(): GPUEulerianInfo { this.executionInfo.spatialPerformanceStages = UNIFORM_SPATIAL_PERFORMANCE.stages; this.executionInfo.spatialPerformance = this.spatialPerformance?.snapshot?.report; this.executionInfo.spatialPerformanceError = this.spatialPerformance?.error; if(this.mixedAllocationDue())this.refreshMixedAllocation();return this.executionInfo; }
   get simulationCellScale(): 1 { return 1; }
 
 
@@ -1013,7 +1014,26 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   private mixedFrame?: UniformMixedFrame;
+  private spatialPerformance?: UniformSpatialPerformance;
+  private spatialAdvanceStart = 0;
+  setSpatialPerformanceEnabled(enabled: boolean, diagnostic = false): void {
+    if (enabled && this.mixedFrame && !this.spatialPerformance) this.spatialPerformance = new UniformSpatialPerformance(this.device, this.mixedFrame, trace => {
+      if (this.disposed || !usePerformanceInstrumentationStore.getState().enabled) return;
+      this.executionInfo.physicsTrace = trace;
+      this.executionInfo.physicsTraceUnavailable = undefined;
+      this.executionInfo.physicsCaptureIdentity = { sampleId: trace.sampleId, context: trace.context, frameId: gpuPhysicsPerformanceActivityFrameId(trace) };
+    });
+    if (!enabled && this.mixedFrame) this.mixedFrame.performanceDiagnostics = false;
+    if (this.spatialPerformance) { this.spatialPerformance.enabled = enabled; this.spatialPerformance.diagnostic = diagnostic; }
+  }
+  get spatialPerformanceProfile() { return this.spatialPerformance?.profile; }
+  get spatialPerformanceSnapshot() { return this.spatialPerformance?.snapshot; }
+
   private mixedFrameTrace(): UniformMixedFrameTrace | undefined {
+    if (this.spatialPerformance?.enabled) {
+      const o = this.frame.origin_m;
+      return this.spatialPerformance.begin(this.executionInfo.encodedSteps ?? 0, o, this.spatialAdvanceStart);
+    }
     const instrumentation=usePerformanceInstrumentationStore.getState();
     // The clock is read only for a trace that may start (its reading is a heap number).
     if(!instrumentation.enabled||this.physicsTracePending)return undefined;
@@ -1171,7 +1191,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedAccountedBytes=this.mixedFrame.allocatedBytes;this.watchMixedAllocation();
     this.executionInfo.allocatedBytes+=this.mixedAccountedBytes+this.mixedDynamic.allocatedBytes+this.mixedBuilder.allocatedBytes+(this.mixedBodies?.allocatedBytes??0);
     this.mixedPageSource={...this.mixedFrame.pagePool.volumePageSource!,frame:{buffer:this.params,size:48},tiers:{buffer:this.mixedFrame.heat.tiers,size:4*this.mixedFrame.heat.regions,warmResolution:this.mixedFrame.nearSettled.warmResolution,coldRegions:this.narrowBandColdRegions}};
-    this.mixedSource={vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedBlocks:this.address.blocks,mixedFrame:{buffer:this.params,size:48},mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
+    this.mixedSource={solidBoundary:this.mixedFrame.solid?.surfaceBoundary,vertexPhi:this.vertexPhiField,coarseVertexPhi:this.mixedFrame.coarseVertexPhi,detailVertexPhi:this.mixedFrame.ownership.capacity.fineTiles>0?this.vertexPhiField:undefined,openFraction:this.gammaB,cellSize_m:fine.lattice.cellSize_m,mixedOwnership:this.mixedFrame.ownership.presentation,mixedBlocks:this.address.blocks,mixedFrame:{buffer:this.params,size:48},mixedPressure:this.mixedFrame.presentation.pressure,mixedPressurePhi:this.mixedFrame.presentation.phi,mixedSupport:{buffer:this.mixedFrame.ownership.support}};
     for(let i=0;i<UNIFORM_MIXED_RELAYOUT_READS;i++)this.mixedRelayoutReads.give(this.device.createBuffer({label:`Uniform mixed relayout receipt read ${i}`,size:UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}));
     this.executionInfo.allocatedBytes+=UNIFORM_MIXED_RELAYOUT_READS*UNIFORM_MIXED_RELAYOUT_RECEIPT.words*4;
     // The initial layout is the host's (authored regions, solids and bodies
@@ -1952,6 +1972,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private failMixedFrame(error:unknown):void{
     if(this.disposed||this.pressureFrameFailure)return;
     this.pressureFrameFailure=error instanceof Error?error:new Error(String(error));
+    this.spatialPerformance?.invalidate("Simulation frame failed: " + this.pressureFrameFailure.message);
     this.executionInfo.simulationPipelineError=this.pressureFrameFailure.message;this.watchMixedAllocation();
   }
   private assertMixedOptions(): void {
@@ -2553,6 +2574,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []): boolean {
+    if (this.spatialPerformance?.enabled) this.spatialAdvanceStart = performance.now();
     if(this.disposed)return false;
     if (this.framePending || this.pressureFrameFailure) return false;
     if(this.mixedFrame){
@@ -2755,6 +2777,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** A frame's receipt was accepted: its counters, and the clock it completed. */
   private acceptMixedFrame(time_s:number,receipt:UniformMixedFrameReceipt):void{
     if(this.disposed)return;
+    this.executionInfo.spatialPerformance = this.spatialPerformance?.snapshot?.report;
+    this.executionInfo.spatialPerformanceError = this.spatialPerformance?.error;
     const info=this.executionInfo as UniformPublishedInfo,flip=this.mixedFrame?.narrowBandFlip;
     info.narrowBandFlipParticles=flip?.count;info.narrowBandFlipReseedClipped=flip?.reseedClipped;info.narrowBandFlipUnsupportedParticles=flip?.diagnostics.unsupported;info.narrowBandFlipMaxSurfaceDistance=flip?.diagnostics.afterMaxOutside;
     info.simulatedTime_s=time_s;info.completedTime_s=time_s;
@@ -2931,6 +2955,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readRigidBodyPoses() { return this.rigidSystem.readPoses(); }
 
   destroy(): void {
+    this.spatialPerformance?.destroy();
     if (this.disposed) return;
     this.disposed = true;
     this.mixedFrame?.destroy();this.mixedPressureGeometry?.target.destroy();this.mixedPressureGeometry?.centerPhi.destroy();

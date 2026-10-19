@@ -19,7 +19,14 @@
  *
  *   --lane=mini|large               narrow-band dam size (default mini)
  *   --scene=ID                       override the scene
- *   --first-frame                    capture literal advance 1 (--frames=1)
+ *   --warmup-steps=N                 advance before the attach gate (default 0)
+ *   --time-step=S                    fixed simulation step in seconds
+ *   --transfer=flip|apic              override particle transfer
+ *   --source-root=DIR                solver source snapshot (same capture harness)
+ *   --frame-labels                   embed physical frame numbers; export tables
+ *                                    for xctrace-hardware-limiters instead of
+ *                                    the recurring-stage frame report
+ *   --first-frame                    capture first advance after warmup (--frames=1)
  *   --frames=N                       adjacent advances retained (default 2)
  *   --counter-start-gate             gate before advance 1 only until the
  *                                    counter recorder is live, then reduce a
@@ -361,9 +368,22 @@ const laneSteps = sizingPlan?.steps ?? steps;
  * are what distort the frame, and Instruments replaces them from outside.
  */
 const laneEnvironment = narrowBandDamLaneWithSteps(lane, laneSteps ?? requestedSteps);
-if (flag("scene")) laneEnvironment.FLUID_SCENE = flag("scene")!;
+if (flag("scene")) {laneEnvironment.FLUID_SCENE = flag("scene")!;delete laneEnvironment.FLUID_EXPECT_GRID;}
+const warmupSteps=Number(flag("warmup-steps")??0);
+if(!Number.isInteger(warmupSteps)||warmupSteps<0)throw new Error("--warmup-steps must be a nonnegative integer");
+laneEnvironment.FLUID_PROFILE_WARMUP_STEPS=String(warmupSteps);
+if(flag("time-step")){
+ const dt=Number(flag("time-step"));if(!Number.isFinite(dt)||dt<=0)throw new Error("--time-step must be positive");
+ laneEnvironment.FLUID_MAX_DT=String(dt);
+}
+if(flag("transfer")){
+ if(!["flip","apic"].includes(flag("transfer")!))throw new Error("--transfer must be flip or apic");
+ laneEnvironment.FLUID_PROFILE_TRANSFER=flag("transfer")!;
+}
 
 const profileEnvironment: Record<string, string> = {
+  FLUID_PROFILE_SOURCE_ROOT: resolve(flag("source-root") ?? root),
+  FLUID_PROFILE_FRAME_LABELS: process.argv.includes("--frame-labels") ? "1" : "0",
   WEBGPU_NODE_MODULE: `${root}node_modules/webgpu/index.js`,
   FLUID_WEBGPU_BACKEND: "metal",
   FLUID_WEBGPU_ADAPTER: "Apple M1 Max",
@@ -941,7 +961,7 @@ const main = async (): Promise<void> => {
     }
     console.log(profileGate
       ? `launching solver behind a pre-advance gate; the ${counterSeconds} s counter`
-        + ` window will warm for ${(counterGateWarmupMs / 1_000).toFixed(1)} s before advance 1 is released${firstFrame
+        + ` window will warm for ${(counterGateWarmupMs / 1_000).toFixed(1)} s before the first captured advance is released${firstFrame
           ? " and selected" : "; a later recurring advance will be selected"}...`
       : `launching solver, attaching GPU counters at`
       + ` ${plan.spawnDelaySeconds.toFixed(1)} s so recording starts`
@@ -1155,6 +1175,17 @@ const main = async (): Promise<void> => {
       }
       console.log(`    ${mine} of them from the traced process`);
     }
+  }
+
+  if (process.argv.includes("--frame-labels")) {
+    // Frame labels deliberately do not match recurring semantic stage names.
+    // This mode retains raw evidence for a specified physical frame; it does
+    // not bypass the ordinary frame report's attribution validation.
+    await writeCaptureManifest("complete");
+    await writeTempInfo("complete");
+    console.log(`frame-labelled capture exported for node (${tracedPid}) at ${outputDirectory}`);
+    console.log("analyze with tools/xctrace-hardware-limiters.ts --artifact=DIR --pid=PID --frame=N");
+    return;
   }
 
   console.log("reducing to a frame report...");

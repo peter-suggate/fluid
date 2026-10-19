@@ -1433,7 +1433,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;
  }`)).join("\n")}
 `,["seed","sweep","seedList","sweepList","publishList","publishFine"]);
-  const module=uniformDetailModule(this.device,{label:"Uniform mixed extension",code:source});
+  const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed extension",code:source});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   // Only the main restriction and publication retain clean regions (bulk never marks).
@@ -1451,7 +1451,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   }));
   if(this.supportsPair){
    const pairedSource=pairedExtensionSource(source,true);
-   const paired=uniformDetailModule(this.device,{label:"Uniform mixed paired extension",code:pairedSource});
+   const paired=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed paired extension",code:pairedSource});
    const messages=(await paired.getCompilationInfo()).messages.filter(m=>m.type==="error");if(messages.length)throw new Error(messages.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const pairLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.pairedResources!]});
    const compile=(entryPoint:string,constants:Record<string,number>={})=>uniformDetailPipeline(this.device,this.ownership,{layout:pairLayout,compute:{module:paired,entryPoint,constants}});
@@ -1469,7 +1469,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
    this.companionSeams.set("publish",await compile("publishSeams",{ueCompanionValues:1}));
    // Old publication retains geometric source selections in the dead epoch.
    // The current payload reuses them only after a matching old snapshot.
-   const replay=uniformDetailModule(this.device,{label:"Uniform mixed extension publication replay",code:replayedPublicationSource(source)});
+   const replay=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed extension publication replay",code:replayedPublicationSource(source)});
    const replayErrors=(await replay.getCompilationInfo()).messages.filter(m=>m.type==="error");if(replayErrors.length)throw new Error(replayErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const replayPipeline=(entryPoint:string,constants:Record<string,number>)=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module:replay,entryPoint,constants}});
    const C=UNIFORM_MIXED_COUNTED;
@@ -1479,7 +1479,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
     replayPipeline("publishSeams",{}),
    ]);
    this.replayPublishers={regular:new Map([["publish",replayEntries[0]!]]),list:new Map([["publish",replayEntries[1]!]]),seams:new Map([["publish",replayEntries[2]!]])};
-   const snapshot=uniformDetailModule(this.device,{label:"Uniform mixed extension slot snapshot",code:pairedSnapshotSource(pairedSource,true)});
+   const snapshot=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed extension slot snapshot",code:pairedSnapshotSource(pairedSource,true)});
    const snapshotErrors=(await snapshot.getCompilationInfo()).messages.filter(m=>m.type==="error");if(snapshotErrors.length)throw new Error(snapshotErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const snapshotLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.snapshotResources!]});
    const make=(entryPoint:string)=>uniformDetailPipeline(this.device,this.ownership,{layout:snapshotLayout,compute:{module:snapshot,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,ueCompanionValues:1,ueOldPayload:1}}});

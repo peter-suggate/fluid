@@ -68,6 +68,11 @@ const UM_CELL_KEYS=512u;const UM_RESIDENT=1u;const umCounts=vec4u(8,0,0,1);
 fn umAllOwner(id:vec3u)->UMOwner{return UMOwner(id.x,select(0u,1u,id.x<512u),0);}
 fn umOrigin(o:UMOwner)->vec3u{return vec3u(o.index%8u,(o.index/8u)%8u,o.index/64u);}
 fn nbTransferPropertiesFit()->bool{return false;}
+const nbTransferTwin:u32=0u;
+fn nbTransferFits()->bool{return false;}
+fn umFrozenFace(p:vec3i,axis:u32,width:u32)->bool{return false;}
+fn umFrozenCell(p:vec3i)->bool{return false;}
+fn nbThaw(p:vec3u)->vec3f{return vec3f(0);}
 fn umAcrossKind(p:vec3i,a:u32,s:i32)->u32{return 1u;}
 fn particleDepth(p:vec3f)->f32{return -1.0;}
 fn nbTheta(p:vec3f)->f32{return 1.0;}

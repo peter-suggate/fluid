@@ -1,3 +1,4 @@
+import type { LevelSetSolidBoundarySource } from "../../core/levelset-consumer-abi";
 import { uniformTerrainSamplingWGSL } from "./uniform-terrain-sampling.wgsl";
 /** Embedded solids for fine mixed owners: the paged voxel mask
  * (SolidOccupancyMask's image, the host's active scratch, with the bed-slope lane in it), the terrain
@@ -204,6 +205,7 @@ const NEW_BLOCK_GRID=8;
 const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 
 export class UniformMixedSolid {
+ readonly surfaceBoundary:LevelSetSolidBoundarySource;
  readonly bindLayout:GPUBindGroupLayout;
  readonly bindGroup:GPUBindGroup;
  readonly coupledTiles:number;
@@ -260,6 +262,8 @@ export class UniformMixedSolid {
   this.bodySource=resources.bodies;
   this.bodies=device.createBuffer({label:"Uniform mixed solid body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const bodies=this.bodies;
+  this.surfaceBoundary={params:{buffer:resources.params,size:272},mask:{buffer:resources.scratch},terrain:resources.terrain,
+   bodies:{buffer:bodies},analyticTerrain:{buffer:this.analyticTerrain}};
   const entries:GPUBindGroupLayoutEntry[]=[
    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},

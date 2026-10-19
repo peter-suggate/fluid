@@ -1,3 +1,6 @@
+import { SpatialPerformanceOverlay } from "../features/spatial-performance/overlay";
+import { DEFAULT_PERFORMANCE_VIEW } from "../features/spatial-performance/view";
+import type { SpatialCostSnapshot } from "./spatial-performance";
 import { domainPagesWGSL, domainPages3DWGSL } from "./domain-pages.wgsl";
 import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { UNIFORM_DETAIL_CRITERIA, UNIFORM_STAGE_CERTIFICATE, UNIFORM_STAGE_IMPORTANCE, UNIFORM_STAGE_VIEWS, uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
@@ -1517,7 +1520,14 @@ export class GridOverlayPipeline {
     });
   }
 
+  private performanceOverlay?: SpatialPerformanceOverlay;
+  setPerformance(snapshot: SpatialCostSnapshot | undefined, state: VisualLayerState | undefined, width: number, height: number): void {
+    this.performanceOverlay?.set(snapshot, state?.performance ?? DEFAULT_PERFORMANCE_VIEW,
+      state?.visible && state.enabled.includes("performance") ? layerOpacity(state, "performance") : 0, width, height);
+  }
   async initialize() {
+    this.performanceOverlay = new SpatialPerformanceOverlay(this.device, this.targetFormat, this.uniformBuffer);
+    await this.performanceOverlay.initialize();
     const shaderModule = this.device.createShaderModule({ label: "Solver grid overlay", code: gridOverlayShader });
     const compilation = await shaderModule.getCompilationInfo();
     const errors = compilation.messages.filter((message) => message.type === "error");
@@ -1608,7 +1618,7 @@ export class GridOverlayPipeline {
       pages = state.visible && (state.enabled.includes("pages") || heat) ? pages : undefined;
       values[0] = 1; values[1] = window ? 1 : 0;
       // A layer without a slice mode (the particle spheres) is another pass's: zero here skips its plane pass.
-      VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = layer.mode >= 0 && state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
+      VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = layer.mode >= 0 && layer.id !== "performance" && state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
       if (this.pages3D) {
         values[4 + VISUAL_LAYERS.findIndex(l => l.id === "pages")] = 0;
         values[LAYER_PAGE_VIEW] = layerOpacity(state, "pages");
@@ -1728,10 +1738,12 @@ export class GridOverlayPipeline {
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3);
     pass.end();
+    this.performanceOverlay?.encode(encoder, target);
     return true;
   }
 
   destroy() {
+    this.performanceOverlay?.destroy();
     this.layerUniform.destroy();
     this.layerRecords?.destroy();
     this.levelSetVolumeParams.destroy();

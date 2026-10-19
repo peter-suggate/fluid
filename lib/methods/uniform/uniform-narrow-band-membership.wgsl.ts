@@ -65,12 +65,81 @@ fn nbCrossingVertex(tile:u32,origin:vec3u,p:vec3u)->f32{
 // A 4h tile among 4h tiles interpolates its corners throughout: it holds a
 // crossing only if they straddle zero. Beside an h tile its upper faces may
 // be stored h vertices, so it is listed with the h tiles and decided there.
+// Eligibility depends on ownership, moved-particle support and activity,
+// all immutable for the three phi epochs of this frame. Build it once.
+fn nbCrossingRequested(t:u32)->bool{
+ return umTileLive(t)&&(umTileMinimumWidth(t)!=4u||atomicLoad(&bins[NB_SURFACE_TILES+t])!=0u||!(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]))<=0.0));
+}
+var<workgroup> nbPlanMask:array<atomic<u32>,2>;
+@compute @workgroup_size(64) fn depthPlanSeed(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var region=group.x;region<NB_REUSE_REGIONS;region+=groups.x){
+  if(lane<2u){atomicStore(&nbPlanMask[lane],0u);}workgroupBarrier();
+  let tile=nbReuseTile(region,lane);
+  if(nbCrossingRequested(tile)){atomicOr(&nbPlanMask[lane>>5u],1u<<(lane&31u));}
+  // Clear once for the whole frame; subsequent searches clear only this
+  // plan's halo. Retired requests cannot leave stale masks or reach behind.
+  atomicStore(&bins[NB_BAND_MASK+2u*tile],0u);atomicStore(&bins[NB_BAND_MASK+2u*tile+1u],0u);atomicStore(&bins[NB_BAND_REACH+tile],0u);
+  workgroupBarrier();
+  if(lane<2u){atomicStore(&bins[NB_FRAME_PLAN+4u+NB_REUSE_REGIONS+2u*region+lane],atomicLoad(&nbPlanMask[lane]));}
+  if(lane==0u){
+   atomicStore(&bins[NB_FRAME_PLAN+4u+region],u32((atomicLoad(&nbPlanMask[0])|atomicLoad(&nbPlanMask[1]))!=0u));
+   atomicAdd(&bins[NB_FRAME_PLAN+2u],countOneBits(atomicLoad(&nbPlanMask[0]))+countOneBits(atomicLoad(&nbPlanMask[1])));
+  }
+  workgroupBarrier();
+ }
+}
+var<workgroup> nbPlanHalo:atomic<u32>;
+var<workgroup> nbAirPlanHalo:atomic<u32>;
+@compute @workgroup_size(64) fn depthPlanExpand(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var region=group.x;region<NB_REUSE_REGIONS;region+=groups.x){
+  if(lane==0u){atomicStore(&nbPlanHalo,0u);atomicStore(&nbAirPlanHalo,0u);}workgroupBarrier();
+  let tile=nbReuseTile(region,lane);
+  if(lane<27u&&umTileLive(tile)){
+   let q=vec3i(umPageCoord(region))+vec3i(umCorner(lane,3u))-1;
+   let key=umTileKey(4*q);if(umKeyStored(key)){atomicOr(&nbPlanHalo,atomicLoad(&bins[NB_FRAME_PLAN+4u+umPageOfTile(key)])&1u);}
+  }
+  // Air support reads up to five tiles from a changed seed. SurfaceHalo
+  // includes phi closure changes; particle requests include cold arrivals.
+  if(umTileLive(tile)){for(var k=lane;k<125u;k+=64u){
+   let q=vec3i(umPageCoord(region))+vec3i(umCorner(k,5u))-2;let key=umTileKey(4*q);
+   if(umKeyStored(key)){let r=umPageOfTile(key);
+    let changed=(atomicLoad(&bins[NB_FRAME_PLAN+4u+4u*NB_REUSE_REGIONS+r])&8u)!=0u;
+    let requested=(atomicLoad(&bins[NB_FRAME_PLAN+4u+r])&1u)!=0u;
+    if(changed||requested){atomicStore(&nbAirPlanHalo,1u);}
+   }
+  }}
+  workgroupBarrier();let included=atomicLoad(&nbPlanHalo)!=0u;
+  if(lane==0u&&umTileLive(tile)&&((atomicLoad(&bins[NB_FRAME_PLAN+4u+4u*NB_REUSE_REGIONS+region])&8u)!=0u||(atomicLoad(&bins[NB_FRAME_PLAN+4u+region])&1u)!=0u)){
+   let rank=atomicAdd(&bins[NB_FRAME_PLAN+4u+6u*NB_REUSE_REGIONS],1u);atomicStore(&bins[NB_FRAME_PLAN+5u+6u*NB_REUSE_REGIONS+rank],region);
+  }
+  if(lane==0u&&atomicLoad(&nbAirPlanHalo)!=0u){let rank=atomicAdd(&bins[NB_FRAME_PLAN+3u],1u);atomicStore(&bins[NB_FRAME_PLAN+4u+5u*NB_REUSE_REGIONS+rank],region);}
+  if(lane==0u){
+   if(included){
+    atomicOr(&bins[NB_FRAME_PLAN+4u+region],2u);
+    let rank=atomicAdd(&bins[NB_FRAME_PLAN+1u],1u);atomicStore(&bins[NB_FRAME_PLAN+4u+3u*NB_REUSE_REGIONS+rank],region);
+   }else if(region<NB_REUSE_CAPACITY){
+    // An omitted region cannot supply an old nearest/metric certificate
+    // after its request set or world mapping changed.
+    atomicStore(&bins[NB_REUSE_ALLOWED+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);
+    atomicStore(&bins[NB_REUSE_REGION_PLANE+8u*region+7u],0u);
+   }
+  }
+  if(!included&&region<NB_REUSE_CAPACITY){
+   atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);
+  }
+  workgroupBarrier();
+ }
+ if(group.x==0u&&lane==0u){atomicStore(&bins[NB_FRAME_PLAN],1u);}
+}
 fn nbDepthTile(t:u32){
   if(!umTileLive(t)){return;}
   // Pure 4h Eulerian surfaces neither reconstruct particles nor redistance
   // h vertices. Search only where fine geometry or live/activating samples
   // need it; the existing reach dilation supplies the inner overlap collar.
-  if(umTileMinimumWidth(t)==4u&&atomicLoad(&bins[NB_SURFACE_TILES+t])==0u&&bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]))<=0.0){return;}
+  if(nbPlanned()){
+   let region=nbReuseRegion(t);let lane=nbReuseLocal(t);
+   if((atomicLoad(&bins[NB_FRAME_PLAN+4u+NB_REUSE_REGIONS+2u*region+(lane>>5u)])&(1u<<(lane&31u)))==0u){return;}
+  }else if(!nbCrossingRequested(t)){return;}
   var candidate=true;
   if(nbCrossingReuse(t)){
    let mask=nbCrossingCachedMask(t);if((mask.x|mask.y)==0u&&!nbMetricPlaneMissing(t)){return;}
@@ -82,13 +151,51 @@ fn nbDepthTile(t:u32){
   }
   if(candidate){let slot=atomicAdd(&bins[NB_BAND],1u);atomicStore(&bins[NB_BAND_CANDIDATES+slot],t);}
 }
-@compute @workgroup_size(64) fn depthTiles(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var region=group.x;region<NB_REUSE_REGIONS;region+=1024u){
-  let tile=nbReuseTile(region,lane);nbPrepareReuse(region,lane,tile);nbDepthTile(tile);
+@compute @workgroup_size(64) fn depthTiles(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let regions=nbPlanRegions(lane);
+ for(var slot=group.x;slot<regions;slot+=groups.x){
+  let region=nbPlanRegion(slot,lane);let tile=nbReuseTile(region,lane);
+  if(nbPlanned()){atomicStore(&bins[NB_BAND_MASK+2u*tile],0u);atomicStore(&bins[NB_BAND_MASK+2u*tile+1u],0u);atomicStore(&bins[NB_BAND_REACH+tile],0u);}
+  nbPrepareReuse(region,lane,tile);nbDepthTile(tile);
   workgroupBarrier();
  }
 }
 var<workgroup> nbBandVertices:array<f32,125>;
+// A tile's 125 samples select only eight positive-side owners. Resolve each
+// owner once, including a page's high-wall clamp, and share the 3³ coarse
+// corners covering their interpolation stencils. Fine and COLD-current reads
+// retain their original homes; interpolation keeps nbCrossingVertex's sums.
+var<workgroup> nbSeedOwner:array<vec4u,8>;
+var<workgroup> nbSeedCold:array<u32,8>;
+var<workgroup> nbSeedCorners:array<f32,27>;
+fn nbSeedCorner(p:vec3u)->f32{return nbSeedCorners[p.x+3u*(p.y+3u*p.z)];}
+fn nbGatherCrossing(tile:u32,origin:vec3u,lane:u32){
+ if(lane<8u){
+  let c=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(origin+4u*umCorner(lane,2u))));
+  let key=umTileAt(c/4u);nbSeedOwner[lane]=vec4u((c/4u)*4u,umTileWidth(key));nbSeedCold[lane]=u32(nbColdCurrentPhi&&nbTileCold(key));
+ }
+ if(lane<27u){nbSeedCorners[lane]=umLoadCorner(origin+4u*umCorner(lane,3u));}
+ workgroupBarrier();
+ if(lane<125u){
+  let local=umCorner(lane,5u);let p=origin+local;let high=vec3u(local==vec3u(4u));let owner=nbSeedOwner[high.x+2u*high.y+4u*high.z];var value=0.0;
+  if(owner.w==1u){
+   if(nbSeedCold[high.x+2u*high.y+4u*high.z]!=0u){value=textureLoad(outputPhi,vec3i(p)).x;}else{value=umLoadVertex(p);}
+  }else if(all((p&vec3u(3u))==vec3u(0u))){value=nbSeedCorner(local/4u);}
+  else{
+   let low=owner.xyz;let base=(low-origin)/4u;let t=(vec3f(p)-vec3f(low))/4.0;let zero=t==vec3f(0);
+   if(u32(zero.x)+u32(zero.y)+u32(zero.z)>=2u){
+    let a=select(select(2u,1u,!zero.y),0u,!zero.x);var e=vec3u(0);e[a]=1u;
+    value=nbSeedCorner(base)*(1.0-t[a])+nbSeedCorner(base+e)*t[a];
+   }else{
+    var terms:array<f32,8>;
+    for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));terms[k]=nbSeedCorner(base+corner)*w.x*w.y*w.z;}
+    value=umVertexSum8(terms);
+   }
+  }
+  nbBandVertices[lane]=value;if((bitcast<u32>(value)&0x7fffffffu)>=0x7f800000u){atomicStore(&nbCrossingFinite,0u);}
+ }
+ workgroupBarrier();
+}
 fn nbMetricPlaneMissing(tile:u32)->bool{
  if(!nbMetricPlanes||!nbReuseCacheEnabled()||nbReuseRegion(tile)>=NB_REUSE_METRIC_CAPACITY){return false;}
  return atomicLoad(&bins[NB_REUSE_PLANE+384u*nbReuseRegion(tile)+6u*nbReuseLocal(tile)+5u])==0u;
@@ -193,7 +300,7 @@ fn nbAggregateMetricPlane(region:u32,lane:u32){
  workgroupBarrier();
 }
 @compute @workgroup_size(128) fn depthSeeds(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=atomicLoad(&bins[NB_BAND_CANDIDATES+group.x]);let coord=umTileCoord(tile);let origin=4u*coord;
+ let tile=atomicLoad(&bins[NB_BAND_CANDIDATES+group.x]);umLoadAddressPlan(tile>>9u,lane);let coord=umTileCoord(tile);let origin=4u*coord;
  if(lane==0u){
   let reuse=nbCrossingReuse(tile);
   nbSeedReuse=u32(reuse)|select(0u,2u,!reuse||nbMetricPlaneMissing(tile));
@@ -203,8 +310,7 @@ fn nbAggregateMetricPlane(region:u32,lane:u32){
  let gather=(decision&2u)!=0u;
  if(cached){if(lane<2u){atomicStore(&nbBandMask[lane],nbCrossingCachedMask(tile)[lane]);}}
  if(gather){
-  if(lane<125u){let value=nbCrossingVertex(tile,origin,origin+umCorner(lane,5u));nbBandVertices[lane]=value;if((bitcast<u32>(value)&0x7fffffffu)>=0x7f800000u){atomicStore(&nbCrossingFinite,0u);}}
-  workgroupBarrier();
+  nbGatherCrossing(tile,origin,lane);
   nbCaptureMetricPlane(tile,lane);
  }
  if(!cached){
@@ -229,13 +335,14 @@ fn nbAggregateMetricPlane(region:u32,lane:u32){
   atomicOr(&bins[NB_BAND_REACH+key],select(3u,2u,any(abs(o)>vec3i(2))));
  }
 }
+fn nbDepthList(t:u32){
+ if(!umTileLive(t)){return;}
+ let reach=atomicLoad(&bins[NB_BAND_REACH+t]);
+ if((reach&1u)!=0u){let slot=atomicAdd(&bins[NB_BAND+1u],1u);atomicStore(&bins[NB_BAND_SEARCH+slot],t);}
+ if((reach&2u)!=0u){let slot=atomicAdd(&bins[NB_BAND+2u],1u);atomicStore(&bins[NB_BAND_DISTANCE+slot],t);}
+}
 @compute @workgroup_size(64) fn depthLists(@builtin(global_invocation_id) gid:vec3u){
- for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
-  if(!umTileLive(t)){continue;}
-  let reach=atomicLoad(&bins[NB_BAND_REACH+t]);
-  if((reach&1u)!=0u){let slot=atomicAdd(&bins[NB_BAND+1u],1u);atomicStore(&bins[NB_BAND_SEARCH+slot],t);}
-  if((reach&2u)!=0u){let slot=atomicAdd(&bins[NB_BAND+2u],1u);atomicStore(&bins[NB_BAND_DISTANCE+slot],t);}
- }
+ for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){nbDepthList(t);}
 }
 // The crossings of one x row, 14 cells from five below the tile: its own
 // four and five either side, read from the masks of the five tiles across.
