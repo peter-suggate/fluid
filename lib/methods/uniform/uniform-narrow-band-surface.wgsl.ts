@@ -18,9 +18,11 @@ const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
 // page where a wall lies across a face. z: the vertex's heat (nbThetaFrom),
 // which particleSurfaceFinish reuses: a second inlined interpolation cost
 // coupleFine 0.46 of 3.2 ms in a late splash.
-fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec3f{
+// tiled: q is a vertex of the tile at origin, whose workgroup holds its
+// 27 neighbour tiles' heat (nbCoupleHeatLoad).
+fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i,tiled:bool)->vec3f{
  let home=origin>>vec3u(2u);
- let theta=nbThetaFrom(home,vec3f(q));
+ var theta=0.0;if(tiled){theta=nbCoupleTheta(q-origin,false);}else{theta=nbThetaFrom(home,vec3f(q));}
  // Outside particle support the result is the transported field even at a
  // buried vertex. Avoid the incident solid-owner walk for that common case.
  if(theta<=0.0){return vec3f(bandPhi(vec3f(q)),0.0,theta);}
@@ -36,7 +38,7 @@ fn particleSurfaceBulk(own:u32,origin:vec3i,q:vec3i)->vec3f{
  return vec3f(bulk,select(0.0,1.0,gather),theta);
 }
 // home: the tile q is reached from; heat: particleSurfaceBulk's z.
-fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32)->f32{
+fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32,tiled:bool)->f32{
  // An empty gather has no particle surface to blend; never erode a cold
  // or newly activated region before its surface samples exist.
  if(nearest2>=4.0){return nbSourcePhi(vec3f(q),bulk);}
@@ -77,7 +79,7 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32)->f32
  var theta=heat;
  if(particle>bulk){
   if(!nbCachedSurfaceErasure(q,nearest2)){return nbSourcePhi(vec3f(q),bulk);}
-  theta=nbSurfaceThetaFrom(home,vec3f(q));
+  if(tiled){theta=nbCoupleTheta(q-4*home,true);}else{theta=nbSurfaceThetaFrom(home,vec3f(q));}
  }
  return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
@@ -86,9 +88,34 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32)->f32
  * mask. On page boundary tiles, preserve the full authority walk: diagonal AIR
  * holes can expose coarse owners that a positive-only recipe cannot name. */
 export const narrowBandTiledSurfaceWGSL=/* wgsl */`
+// The heat raster of a fine tile's 27 neighbour tiles, as nbInterpolatedHeat
+// reads it (the clamp of transferProperties): theta, then the surface heat
+// past the collar, negative for the cold air nbSurfaceTheta leaves out.
+var<workgroup> nbCoupleHeat:array<f32,27>;
+var<workgroup> nbCoupleHot:array<f32,27>;
+fn nbCoupleHeatLoad(tile:u32,lane:u32){
+ if(lane<27u){
+  let coord=vec3i(umTileCoord(tile));let t=vec3u(umTileNearFromPage(tile>>9u,coord>>vec3u(3u),coord+vec3i(umCorner(lane,3u))-1));let key=umTileAt(t);
+  nbCoupleHeat[lane]=clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+key])),0.0,1.0);
+  let own=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_SURFACE_HEAT+key]));
+  nbCoupleHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0);
+ }
+ workgroupBarrier();
+}
+// nbInterpolatedHeat at local vertex v (0 to 4) of the loaded tile: the same
+// corner weights, order and clamps.
+fn nbCoupleTheta(v:vec3i,surface:bool)->f32{
+ let q=vec3f(v)/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;var covered=0.0;
+ for(var k=0u;k<8u;k++){
+  let bit=umCorner(k,2u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));let weight=w.x*w.y*w.z;let tile=at.x+3u*(at.y+3u*at.z);
+  if(surface){let hot=nbCoupleHot[tile];if(hot<0.0){continue;}covered+=weight;theta+=weight*hot;}
+  else{theta+=weight*nbCoupleHeat[tile];}
+ }
+ return clamp(theta/select(1.0,max(covered,1e-20),surface),0.0,1.0);
+}
 @compute @workgroup_size(64) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umSolidSkip()){return;}
- let owner=umAllOwner(vec3u(group.x*64u,0,0));umLoadAddressPlan(owner.tile>>9u,lane);
+ let owner=umAllOwner(vec3u(group.x*64u,0,0));umLoadAddressPlan(owner.tile>>9u,lane);nbCoupleHeatLoad(owner.tile,lane);
  if(nbTileCold(owner.tile)){return;}
  let origin=vec3i(umTileCoord(owner.tile)*4u);let low=umLowOpen(origin);
  let pageLocal=(vec3u(origin)>>vec3u(2u))&vec3u(7u);
@@ -107,8 +134,8 @@ export const narrowBandTiledSurfaceWGSL=/* wgsl */`
   // The store holds a shared COLD vertex too. Test before any geometry or
   // particle gather, not just after computing the value it will discard.
   if(nbVertexCold(vec3u(q))){continue;}
-  let bulk=particleSurfaceBulk(owner.tile,origin,q);var value=bulk.x;
-  if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z);}
+  let bulk=particleSurfaceBulk(owner.tile,origin,q,true);var value=bulk.x;
+  if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z,true);}
   nbStoreReconstructed(q,value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),1u);
  }
 }
@@ -127,8 +154,8 @@ export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiled
   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
   else if(umVertexAuthority(q).index!=owner.index){continue;}
   if(nbVertexCold(q)){continue;}
-  let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q));var value=bulk.x;
-  if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)),bulk.z);}
+  let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q),false);var value=bulk.x;
+  if(bulk.y>0.0){value=particleSurfaceFinish(vec3i(origin>>vec3u(2u)),vec3i(q),bulk.x,nbCachedSurfaceNearest(vec3i(q)),bulk.z,false);}
   nbStoreReconstructed(vec3i(q),value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),4u);
  }
 }
