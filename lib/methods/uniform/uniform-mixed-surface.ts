@@ -427,11 +427,11 @@ fn umSolidClear(p:vec3i)->bool{
 // and the samplers are solid-free.
 // The tile certificate (umSolidClear's word, read ungated) covers its tile
 // and four cells around it: tiles three apart along each axis tile the box.
-// Present bodies, terrain or a procedural boundary (whose fractional cells
-// the certificate counts open) leave every vertex to the general twin.
+// A cell the procedural field cuts fails it as a closed cell does. Present bodies
+// or terrain leave every vertex to the general twin.
 override umReachAdmission:bool=true;
 fn umReachSolidClear(cubic:bool,stencil:bool,vertex:vec3i)->bool{
- if(!umReachAdmission||round(umSolidParams.boundary.z)>0.0||umSolidHasTerrain()||umBoundaryBase()!=0u){return false;}
+ if(!umReachAdmission||round(umSolidParams.boundary.z)>0.0||umSolidHasTerrain()){return false;}
  let lo=vec3i(floor(umReachLo));let hi=vec3i(floor(umReachHi));
  var a=lo-vec3i(select(1,2,cubic));var b=hi+vec3i(select(0,2,cubic));
  // Where the margin crosses a page face into a page the lattice walls off,
@@ -469,15 +469,16 @@ fn umReachSolidClear(cubic:bool,stencil:bool,vertex:vec3i)->bool{
  }
  return true;
 }
-${this.solid.coarse?/* wgsl */`// The same proof cell by cell where a tile certificate fails (a closed cell
-// within four of a tile, as along a glass floor): the record's open-cell
-// bits (umSolidOpenCells) of the box's tiles, at most four an axis, each
+${this.solid.coarse?/* wgsl */`// The same proof cell by cell where a tile certificate fails (a closed or
+// cut cell within four of a tile, as along a glass floor): the record's
+// open-cell bits less its field-cut cells (umSolidOpenCells,
+// umSolidFieldCut) of the box's tiles, at most four an axis, each
 // stored (umReachSolidClear checked their pages).
 fn umReachCellsOpen(a:vec3i,b:vec3i)->bool{
  let first=a>>vec3u(2u);let last=b>>vec3u(2u);
  if(any(last-first>vec3i(3))){return false;}
  for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
-  let t=vec3i(x,y,z);let open=umSolidOpenCells(umTileKey(t));if(all(open==vec2u(0xffffffffu))){continue;}
+  let t=vec3i(x,y,z);let key=umTileKey(t);let open=umSolidOpenCells(key)&~umSolidFieldCut(key);if(all(open==vec2u(0xffffffffu))){continue;}
   // The box's cells of this tile: bit x+4y+16z.
   let lo=vec3u(max(a-4*t,vec3i(0)));let hi=vec3u(min(b-4*t,vec3i(3)));
   let row=((2u<<hi.x)-1u)&~((1u<<lo.x)-1u);var box=vec2u(0u);

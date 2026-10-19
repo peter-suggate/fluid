@@ -96,8 +96,10 @@ fn nbBoundaryHit(start:vec3f,end:vec3f)->f32{
    let face=f32(c[a])+select(0.0,1.0,delta[a]>0.0);
    let crossing=(face-start[a])/delta[a];if(crossing>t+1e-7){stop=min(stop,crossing);}
   }
+  // Along a line a cell's trilinear value is a cubic bounded by its corners:
+  // in a cell the field does not cut it is positive throughout, no hit.
   let record=umBoundaryRecord(c);
-  if(record!=0u){
+  if(record!=0u&&umSolidFieldCutAt(c)){
    let p=mix(start,end,t);let d=(stop-t)*delta;
    let f0=umBoundarySampleAt(p,c,record).w;let f1=umBoundarySampleAt(p+d/3.0,c,record).w;
    let f2=umBoundarySampleAt(p+2.0*d/3.0,c,record).w;let f3=umBoundarySampleAt(p+d,c,record).w;

@@ -15,6 +15,10 @@ export interface ProceduralSolidBoundary {
   readonly patchCount: number;
   readonly patchesKey: string;
   readonly bricks: readonly { readonly origin: V3; readonly values: readonly number[] }[];
+  /** "voxels": the fluid collides with the generated voxel prefix, a partly
+   * solid cell solid from half solid, and the field is drawn only. Absent:
+   * the fluid collides with the field. */
+  readonly collision?: "voxels";
 }
 
 const B = 8, N = 9, NODES = N ** 3;
@@ -96,7 +100,8 @@ export function bakeProceduralSolid(dimensions: V3, cellSize_m: V3, sample: (p: 
 export function validateProceduralSolid(boundary: ProceduralSolidBoundary): void {
   if (boundary.version !== 1 || boundary.dimensions?.length !== 3 || !boundary.dimensions.every(v => Number.isSafeInteger(v) && v > 0 && v % 8 === 0)
     || boundary.cellSize_m?.length !== 3 || !boundary.cellSize_m.every(v => Number.isFinite(v) && v > 0) || !Number.isSafeInteger(boundary.patchCount) || boundary.patchCount < 0
-    || typeof boundary.patchesKey !== "string" || !Array.isArray(boundary.bricks)) throw new RangeError("Invalid procedural solid boundary");
+    || typeof boundary.patchesKey !== "string" || !Array.isArray(boundary.bricks)
+    || (boundary.collision !== undefined && boundary.collision !== "voxels")) throw new RangeError("Invalid procedural solid boundary");
   const seen = new Set<string>();
   for (const b of boundary.bricks) {
     if (b.origin.length !== 3 || !b.origin.every((v: number, a: number) => Number.isSafeInteger(v) && v >= 0 && v % 8 === 0 && v < boundary.dimensions[a]!)
@@ -182,7 +187,7 @@ export function proceduralSolidKey(boundary: ProceduralSolidBoundary | undefined
   let hash=2166136261; const bits=new Uint32Array(1), value=new Float32Array(bits.buffer);
   const word=(n:number)=>{hash=Math.imul(hash^n,16777619)>>>0;};
   for(const b of boundary.bricks){b.origin.forEach(word);for(const v of b.values){value[0]=v;word(bits[0]!);}}
-  const key=`${boundary.version}:${boundary.dimensions}:${boundary.cellSize_m}:${boundary.patchCount}:${boundary.patchesKey}:${hash}`;
+  const key=`${boundary.version}:${boundary.dimensions}:${boundary.cellSize_m}:${boundary.patchCount}:${boundary.patchesKey}:${hash}:${boundary.collision ?? "field"}`;
   boundaryKeys.set(boundary,key);return key;
 }
 

@@ -52,6 +52,9 @@ export function solidOccupancyMaskLayout(tileKeys: number, slots: number, laneWo
 export interface SolidOccupancyMaskPages {
   /** A solver with a separate terrain heightfield must not close its cut cells here. */
   readonly separateTerrain?: boolean;
+  /** A partly solid cell is solid from half solid rather than from any
+   * fraction: a procedural solid the fluid takes as voxels keeps its face. */
+  readonly halfSolid?: boolean;
   /** The lattice's page table as seeded, 64³ words: a page whose word is 0xffffffff is walled off for good. */
   readonly table: ArrayLike<number>;
   /** Tile keys of the page pool: the cut map's words. */
@@ -142,6 +145,7 @@ const popcount = (value: number): number => {
  */
 export class SolidOccupancyMask {
   private readonly separateTerrain: boolean;
+  private readonly occupies: (fraction: number) => boolean;
   /** pages.origin, and the same in cells. */
   private readonly origin: readonly [number, number, number];
   readonly originCell: readonly [number, number, number];
@@ -160,6 +164,7 @@ export class SolidOccupancyMask {
 
   constructor(pages: SolidOccupancyMaskPages) {
     this.separateTerrain = pages.separateTerrain ?? false;
+    this.occupies = pages.halfSolid ? fraction => fraction >= 128 : solidFractionOccupies;
     const origin = this.origin = pages.origin ?? [0, 0, 0];
     this.originCell = [origin[0] * SOLID_MASK_PAGE_CELLS, origin[1] * SOLID_MASK_PAGE_CELLS, origin[2] * SOLID_MASK_PAGE_CELLS];
     if (pages.table.length !== SOLID_MASK_DIRECTORY_WORDS) throw new RangeError(`A solid mask takes the lattice's ${SOLID_MASK_DIRECTORY_WORDS}-word page table; it was given ${pages.table.length} words`);
@@ -333,7 +338,7 @@ export class SolidOccupancyMask {
             const cell = local + x;
             const authored = !this.separateTerrain || !ground
               || (written.authored !== undefined && (written.authored[cell >>> 3]! & (1 << (cell & 7))) !== 0);
-            if (authored && solidFractionOccupies(fraction[cell]!)) bits |= 1 << x;
+            if (authored && this.occupies(fraction[cell]!)) bits |= 1 << x;
           }
           page[row] = (page[row]! & clear) | (bits << shift);
         }

@@ -824,33 +824,35 @@ fn nbMarkTile(tile:u32,lane:u32){
 ${narrowBandTraceWGSL("sampleVelocity",this.traceSubsteps)}
 override nbAdvectScalarCollision:bool=false;
 // With a static solid in the scene the fast launch (umSolidFree) still
-// advects a sample whose trace has no closed cell in its box (every stage
-// and end it reaches) while the scene holds no rigid body, terrain or
-// procedural boundary: every cell is then whole or closed, the walk moves
-// only through cells inside that box, and the general launch's collision
-// walk blocks nothing there. The proof is the record's open-cell bits
-// (umSolidOpenCells) of the box's tiles, all stored. Any other sample is
-// listed slow, untouched. nbSolidRouting off restores the general launch
+// advects a sample whose trace has no closed cell and no cell the
+// procedural field cuts in its box (every stage and end it reaches) while the scene
+// holds no rigid body or terrain: every other cell is whole or closed, the
+// walk moves only through cells inside that box, the general launch's
+// collision walk blocks nothing there and the field's contact finds no hit
+// (its value is positive throughout every other cell). The proof is the
+// record's open-cell and field-cut bits (umSolidOpenCells, umSolidFieldCut) of the
+// box's tiles, all stored. Any other sample is listed slow, untouched. nbSolidRouting off restores the general launch
 // for every sample.
 override nbSolidRouting:bool=true;
 var<private> nbHullLo:vec3f;
 var<private> nbHullHi:vec3f;
 fn nbHullInclude(x:vec3f){nbHullLo=min(nbHullLo,x);nbHullHi=max(nbHullHi,x);}
-fn nbFastSolid()->bool{return ${this.solid.coarse?"nbSolidRouting&&round(umSolidParams.boundary.z)<0.5&&!umSolidHasTerrain()&&umBoundaryBase()==0u":"false"};}
+fn nbFastSolid()->bool{return ${this.solid.coarse?"nbSolidRouting&&round(umSolidParams.boundary.z)<0.5&&!umSolidHasTerrain()":"false"};}
 fn nbHullUncut()->bool{
  ${this.solid.coarse?/* wgsl */`let a=vec3i(floor(nbHullLo-vec3f(0.001)));let b=vec3i(floor(nbHullHi+vec3f(0.001)));
  let first=a>>vec3u(2u);let last=b>>vec3u(2u);
  if(any(a<vec3i(0))||any(last-first>vec3i(2))){return false;}
  for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
   let t=vec3i(x,y,z);let key=umTileKey(t);if(!umKeyStored(key)){return false;}
-  let open=umSolidOpenCells(key);if(all(open==vec2u(0xffffffffu))){continue;}
+  let open=umSolidOpenCells(key);let field=umSolidFieldCut(key);
+  if(all(open==vec2u(0xffffffffu))&&all(field==vec2u(0u))){continue;}
   // The box's cells of this tile: bit x+4y+16z.
   let lo=vec3u(max(a-4*t,vec3i(0)));let hi=vec3u(min(b-4*t,vec3i(3)));
   let row=((2u<<hi.x)-1u)&~((1u<<lo.x)-1u);var box=vec2u(0u);
   for(var cz=lo.z;cz<=hi.z;cz++){for(var cy=lo.y;cy<=hi.y;cy++){
    let bits=row<<(4u*cy+16u*(cz&1u));if(cz<2u){box.x|=bits;}else{box.y|=bits;}
   }}
-  if(any((open&box)!=box)){return false;}
+  if(any((open&~field&box)!=box)){return false;}
  }}}
  return true;`:"return false;"}
 }

@@ -38,7 +38,7 @@ fn umSolidTiles()->u32{return ${keys}u;}
 fn umSolidCount()->u32{return ${keys+uniformFaceTileSlots(keys/512)}u;}
 // The swept-body region mask's mirror (UniformMixedSolid.bodyRegions): a vec4
 // per 16h region after the 22 per-tile rows, then the pending/count header.
-fn umBodyRegionBase()->u32{return umSolidCount()+22u*umSolidTiles();}
+fn umBodyRegionBase()->u32{return umSolidCount()+23u*umSolidTiles();}
 `;}
 /** The page pool a frame claims blocks from: its state buffer (bound
  * read-only, for the list of blocks its last commit claimed) and layout. */
@@ -87,10 +87,10 @@ export function uniformSolidScratchLayout(cells:readonly [number,number,number])
  * pages partly solid than that is refused by the mask. The mask's world is
  * the box's: its cell (0,0,0) is the box's low cell, at the window's page
  * address.boxPage. */
-export function uniformSolidMaskPages(address:UniformLatticeAddress):SolidOccupancyMaskPages{
+export function uniformSolidMaskPages(address:UniformLatticeAddress,halfSolid=false):SolidOccupancyMaskPages{
  const [x,y,z]=address.pages;
  return {table:address.seed.table,tileKeys:address.tileKeys,slots:x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0),
-  laneWords:uniformSolidScratchLayout(address.cells).bedSlopeWords,separateTerrain:true,origin:address.boxPage};
+  laneWords:uniformSolidScratchLayout(address.cells).bedSlopeWords,separateTerrain:true,halfSolid,origin:address.boxPage};
 }
 /** A bed slope as its lane entry: 16 bits, x in the low byte, each rounded
  * half away from zero as the bake rounds (uniform-bed-slope-bake). */
@@ -289,8 +289,8 @@ export class UniformMixedSolid {
    const writable=device.createBindGroupLayout({label:"Uniform mixed static solids of the record build",entries:entries.map(entry=>entry.binding===1?{...entry,buffer:{type:"storage" as const}}:entry)});
    this.recordSolids={layout:writable,group:device.createBindGroup({layout:writable,entries:resourcesOf()})};
    const count=uniformMixedPressureStorage(coarseLayout).count;
-   // 22 vec4 rows per tile, then the body mask mirror: a vec4 per 16h region and its header.
-   const recordBytes=16*(count+22*tiles+tiles/64+1);this.bodyPendingByte=16*(count+22*tiles+tiles/64);
+   // 23 vec4 rows per tile, then the body mask mirror: a vec4 per 16h region and its header.
+   const recordBytes=16*(count+23*tiles+tiles/64+1);this.bodyPendingByte=16*(count+23*tiles+tiles/64);
    this.bodyMask=device.createBuffer({label:"Uniform mixed swept-body region mask",size:4*(tiles/64+UNIFORM_BODY_REGION_HEADER_WORDS),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    if(recordBytes>device.limits.maxStorageBufferBindingSize)throw new RangeError(`Solid cell-fraction record needs ${recordBytes} bytes, above this device's storage binding limit ${device.limits.maxStorageBufferBindingSize}`);
    const record=device.createBuffer({label:"Uniform mixed all-4h solid record",size:recordBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -411,6 +411,10 @@ var<workgroup> lows:array<vec4f,64>;
 var<workgroup> openCells:array<atomic<u32>,2>;
 var<workgroup> patchCodes:array<atomic<u32>,8>;
 var<workgroup> boundaryCells:array<u32,64>;
+// The tile's cells the procedural field cuts: a boundary cell with a node at
+// or inside the surface. Elsewhere its trilinear value is positive throughout
+// (bounded by the corners), so no contact or crossing can occur there.
+var<workgroup> fieldCut:array<atomic<u32>,2>;
 ${solidRecordRowsWGSL(layout.tiles.length)}
 ${uniformBlockFaceWGSL}
 // umBoundaryIndex of the all-4h layout: the wall slot of tile key t on face 2 axis + side of its block.
@@ -481,7 +485,7 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  // The mask is read_write storage here: decide on one lane, exit uniformly.
  if(umBodyTiles){if(lane==0u){buildDirty=u32(umBodyTileDirty(t,tc));}if(workgroupUniformLoad(&buildDirty)==0u){return;}}
  let l=vec3u(lane%4u,(lane/4u)%4u,lane/16u);let c=vec3i(tc*4u+l);
- if(lane==0u){for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}}
+ if(lane==0u){for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);atomicStore(&fieldCut[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}}
  var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);
  // A low face feeds only the halo of a tile on its block's low side.
  for(var axis=0u;axis<3u;axis++){
@@ -490,12 +494,18 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  }
  workgroupBarrier();
  if(own.x>1e-5){atomicOr(&openCells[lane>>5u],1u<<(lane&31u));}
+ let fieldRecord=umBoundaryRecord(c);
+ if(fieldRecord!=0u){
+  let n=vec3u(c)&vec3u(7u);var lowest=1e30;
+  for(var k=0u;k<8u;k++){let m=n+vec3u(k&1u,(k>>1u)&1u,k>>2u);lowest=min(lowest,bitcast<f32>(umSolidScratch[fieldRecord+m.x+9u*(m.y+9u*m.z)]));}
+  if(lowest<=0.0){atomicOr(&fieldCut[lane>>5u],1u<<(lane&31u));}
+ }
  for(var axis=0u;axis<3u;axis++){
   let eighths=8.0*own[axis+1u];if(l[axis]!=3u||eighths!=floor(eighths)||eighths<0.0||eighths>8.0){continue;}
   let slot=16u*axis+l[(axis+1u)%3u]+4u*l[(axis+2u)%3u];
   atomicOr(&patchCodes[slot/6u],(u32(eighths)+1u)<<(4u*(slot%6u)));
  }
- sums[lane]=own;lows[lane]=low;boundaryCells[lane]=umBoundaryRecord(c);
+ sums[lane]=own;lows[lane]=low;boundaryCells[lane]=fieldRecord;
  workgroupBarrier();
  // Preserve the exact h-cell fractions before the all-4h reduction consumes
  // the shared rows. This record rebuilds with edits, bodies and page claims.
@@ -520,6 +530,8 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
   let bh=umSolidParams.cellGravity.xyz;let blo=umSolidWorldCell(vec3i(tc*4u))-0.5*bh;let bhi=blo+4.0*bh;var touched=0u;
   for(var i=0u;i<umBodyCount();i++){if(umBodyTileNear(umSolidBodies[i],blo,bhi,max(bh.x,max(bh.y,bh.z)))){touched=1u;}}
   record[boundaryRow+1u]=vec4f(vec4u(valid.y&65535u,valid.y>>16u,touched,0u));
+  let cut=vec2u(atomicLoad(&fieldCut[0]),atomicLoad(&fieldCut[1]));
+  record[umSolidCount()+22u*umSolidTiles()+t]=vec4f(vec4u(cut.x&65535u,cut.x>>16u,cut.y&65535u,cut.y>>16u));
   let s=sums[0];let lo=lows[0];
   record[row]=vec4f(s.x/64.0,s.y/16.0,s.z/16.0,s.w/16.0);
   record[umSolidCount()+row].y=select(0.0,select(0.0,1.0,(topology[t]&0x80000000u)!=0u),widths);
@@ -558,7 +570,9 @@ var<workgroup> jobMask:vec2u;
  }
 }
 // Persistent certificate in the cut flag's unused z lane. A true bit proves
-// the exact 27-tile predicate surface advection previously rebuilt each step.
+// the exact 27-tile predicate surface advection previously rebuilt each step:
+// every cell whole (open, and none the procedural field cuts: the open bits
+// count a cut cell's fraction open).
 fn umBuildSurfaceClear(t:u32){
  if(!umTileLive(t)){return;}
  let p=vec3i(umTileCoord(t));var clear=true;
@@ -566,7 +580,8 @@ fn umBuildSurfaceClear(t:u32){
   let q=p+vec3i(vec3u(k%3u,(k/3u)%3u,k/9u))-vec3i(1);let n=umTileKey(q);
   if(!umKeyStored(n)){continue;}
   let mask=vec4u(record[umSolidCount()+umSolidTiles()+3u*n]);
-  clear=clear&&all(mask==vec4u(65535u));
+  let cut=vec4u(record[umSolidCount()+22u*umSolidTiles()+n]);
+  clear=clear&&all(mask==vec4u(65535u))&&all(cut==vec4u(0u));
  }
  record[umSolidCount()+t].z=select(0.0,1.0,clear);
 }
@@ -1038,7 +1053,24 @@ fn umBoundaryRecord(p:vec3i)->u32{
  if((mask&(1u<<(cell&31u)))==0u){return 0u;}
  return a.x|(a.y<<16u);
 }
-`:uniformSolidBoundaryWGSL}
+// The cells of stored tile t the procedural field cuts (the record build's
+// fieldCut): bit x+4y+16z. Its other cells are whole or the open bits' closed.
+fn umSolidFieldCut(t:u32)->vec2u{
+ if(umBoundaryBase()==0u){return vec2u(0u);}
+ let r=vec4u(umSolidRecord[umSolidCount()+22u*umSolidTiles()+t]);
+ return vec2u(r.x|(r.y<<16u),r.z|(r.w<<16u));
+}
+// Cell p's field-cut bit; a cell of a tile no page stores may be cut.
+fn umSolidFieldCutAt(p:vec3i)->bool{
+ let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return true;}
+ let m=umSolidFieldCut(t);let l=vec3u(p)&vec3u(3u);let cell=l.x+4u*(l.y+4u*l.z);
+ return (select(m.x,m.y,cell>=32u)&(1u<<(cell&31u)))!=0u;
+}
+`:uniformSolidBoundaryWGSL+/* wgsl */`
+// No record: every cell of a scene with a boundary may be cut.
+fn umSolidFieldCut(t:u32)->vec2u{return select(vec2u(0xffffffffu),vec2u(0u),umBoundaryBase()==0u);}
+fn umSolidFieldCutAt(p:vec3i)->bool{return true;}
+`}
 // Integrate four local planes. Exact on a planar heightfield; subdivision
 // resolves the column-centre patch boundaries instead of quantizing a face
 // aperture to quarters. Zero normal width evaluates a face's area fraction.

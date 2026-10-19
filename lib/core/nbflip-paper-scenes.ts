@@ -602,16 +602,16 @@ export function createNbflipPour(): SceneDescription {
   const grid = NBFLIP_POUR_GRID, [nx, ny, nz] = grid, h = NBFLIP_POUR_CELL_SIZE_M;
   const scene = createNbflipPourPreview();
   const inner = NBFLIP_POUR_GLASS_RADIUS * nx;
-  // Share the continuous glass wall between rendering and fluid collisions,
-  // including its inner bore, outer face and level rim. The container floor
-  // is its base: a face of its own there would push contacts at the wall's
-  // foot down through the floor and soften the bottom row.
+  // The glass is drawn from its continuous field (inner bore, outer face and
+  // level rim) and the fluid collides with its voxels, half-solid cells solid:
+  // the field's particle contact cost five times the voxel walk. The
+  // container floor is its base.
   const geometry = pourGeometry ??= bakeProceduralSolid(grid, [h, h, h], ([x, y, z]) => {
     const radius = Math.hypot(x - nx / 2, z - nz / 2);
     return Math.max(inner - radius, radius - inner - NBFLIP_POUR_GLASS_WALL_CELLS, y - NBFLIP_POUR_GLASS_RIM * ny);
   }, VOXEL_MATERIAL_IDS.container);
   scene.solidVoxels = [...geometry.solidVoxels];
-  scene.solidBoundary = geometry.solidBoundary;
+  scene.solidBoundary = { ...geometry.solidBoundary, collision: "voxels" };
   return scene;
 }
 

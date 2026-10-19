@@ -526,6 +526,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly pages: GPUBuffer;
   private readonly activeScratch: GPUBuffer;
   private readonly solidBoundaryCapacity: number;
+  private readonly voxelCollision: boolean;
   /** Writes the scratch's bed-slope lane from its voxel mask: whole at build, around an edit after it. */
   private bedSlopeBake?: UniformBedSlopeBake;
   /** An open world's ground: the window's terrain columns and the census's solid tiles past the box (UniformOpenWorldTerrain). */
@@ -771,7 +772,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: lazyMac ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
 
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.solidMask = new SolidOccupancyMask(uniformSolidMaskPages(address));
+    // A procedural solid with voxel collision is drawn smooth and collides as
+    // its generated voxels: the fluid reads no field.
+    this.voxelCollision = scene.solidBoundary?.collision === "voxels";
+    this.solidMask = new SolidOccupancyMask(uniformSolidMaskPages(address, this.voxelCollision));
     this.solidMask.update(solidWorldForFluidLattice(scene));
     // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
     this.solidVoxelsEmpty = this.solidMask.empty;
@@ -788,7 +792,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const solidScratch = uniformSolidScratchLayout([nx, ny, nz]);
     this.solidBedSlopeBaseWord = solidScratch.bedSlopeBaseWord;
     this.solidBedSlopeWords = solidScratch.bedSlopeWords;
-    const boundaryField = proceduralSolidField(scene), boundaryImage = boundaryField?.pack();
+    const boundaryField = this.voxelCollision ? undefined : proceduralSolidField(scene), boundaryImage = boundaryField?.pack();
     if (boundaryField && (boundaryField.source.dimensions.some((v,a)=>v!==this.containerCells[a])
       || boundaryField.source.cellSize_m.some((v,a)=>Math.abs(v-[scene.container.width_m/this.containerCells[0],scene.container.height_m/this.containerCells[1],scene.container.depth_m/this.containerCells[2]][a]!)>1e-9)))
       throw new Error("Procedural boundary lattice changed; regenerate the procedural solid at this resolution");
@@ -2890,7 +2894,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame?.invalidateExtension();
     this.appliedRuntimeValues = undefined;
     if (this.mixedFrameInFlight) { this.deferredFrameScene = scene; return; }
-    const boundaryImage = proceduralSolidField(scene)?.pack();
+    if ((scene.solidBoundary?.collision === "voxels") !== this.voxelCollision) throw new Error("Procedural collision changed; reset the scene to apply it");
+    const boundaryImage = this.voxelCollision ? undefined : proceduralSolidField(scene)?.pack();
     if ((boundaryImage?.length ?? 0) > this.solidBoundaryCapacity) throw new Error("Procedural boundary capacity changed; reset the scene to apply it");
     const boundaryChanged = scene.solidBoundary !== undefined || this.scene.solidBoundary !== undefined;
     if (boundaryChanged) {
