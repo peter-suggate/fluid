@@ -1170,7 +1170,6 @@ export class UniformMixedFrame {
      this.narrowBandFlip.snapshot(encoder,pairedExtension.snapshots[(p.extensionSweeps??2)%2]!);
      this.extension.finishPair(encoder,this.extensionGroups,p.extensionSweeps??2,false);
     }else this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,true);
-    this.narrowBandFlip.update(encoder);
    }
    const root=this.levels[0]!,rootPressure=root.pressure,rootPhi=root.phi!;
    // Present the live all-4h words only: level 0 keeps the simulation
@@ -1202,7 +1201,8 @@ export class UniformMixedFrame {
    // That next head explicitly invalidates/rebuilds before census or transport.
    if(!kick){
     // Phi and ownership have not changed since encodeParticleMomentum's
-    // full plan. G2P changed only particles: those support planes and the
+    // full plan, nor particles since the move (whose G2P takes this
+    // projection at the next head): those support planes and the
     // post-pressure extension stand (the certificate takes its speed from it).
     this.plan.encodeTail(encoder,p.supportPolicy);this.reusableExtension=true;
     trace?.phase(encoder,V.extension);
