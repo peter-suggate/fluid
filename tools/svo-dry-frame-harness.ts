@@ -1,3 +1,4 @@
+import { BUB_RENDER_SHAPE, robotRenderExtent, robotRenderRadius } from '../lib/interaction/features/robot/render';
 import { markSampledVolumeOwnerMaterials, sampledVolumeMaterialRecords } from "../lib/svo/features/materials/svo-sampled-materials";
 import { publishOpaqueSurfaceCapability } from "../lib/svo/features/shading/deferred-specialization";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
@@ -57,7 +58,7 @@ import { svoPrimitiveCandidateBounds } from "../lib/svo/features/scene-publicati
 import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/features/scene-publication/svo-scene-primitives";
 import { sceneSvoGroundPlane, sceneTerrainSurfaceModel } from "../lib/svo/features/materials/svo-terrain-material";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { SVO_CAMERA_CHANGING_FRAME } from "../lib/core/webgpu-renderer";
+import { SVO_CAMERA_CHANGING_FRAME, svoDryRigidBounds } from "../lib/core/webgpu-renderer";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
 } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
@@ -225,20 +226,21 @@ export function packSvoDryViewUniforms(inputs: SvoDryViewUniformInputs): Float32
 }
 
 /** Mirror of the FluidLabRenderer CPU rigid-body packing (webgpu-renderer.ts). */
-export function packSvoDryRigidBodies(scene: SceneDescription): { data: Float32Array<ArrayBuffer>; count: number } {
+export function packSvoDryRigidBodies(scene: SceneDescription) {
   const bodies = initializeRigidBodies(scene.rigidBodies);
   const bodyData = new Float32Array(12 * 16);
   bodies.slice(0, 12).forEach((body, index) => {
     const offset = index * 16;
     const shape = body.description.shape;
-    const half = sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
+    const robotExtent = robotRenderExtent(body);
+    const half = robotExtent ?? sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
     const color = SCENE_SHAPE_PALETTE_LINEAR[sceneShapeCode(shape)];
-    bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
-    bodyData.set([half[0], half[1], half[2], sceneShapeCode(shape)], offset + 4);
+    bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, robotRenderRadius(body) ?? boundingRadius(body)], offset);
+    bodyData.set([half[0], half[1], half[2], robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape)], offset + 4);
     bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
     bodyData.set([color[0], color[1], color[2], 0], offset + 12);
   });
-  return { data: bodyData, count: bodies.length };
+  return { data: bodyData, count: bodies.length, bounds: svoDryRigidBounds(bodies) };
 }
 
 // ---------------------------------------------------------------------------

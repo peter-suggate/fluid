@@ -1614,7 +1614,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: BACKYARD_POOL_PARTY_ID,
     name: "Backyard pool party",
-    blurb: "A sunlit backyard pool with loungers, refreshments and friends. A ball rolls from rest down a tall, gently sloping diving board and splashes into the pool.",
+    blurb: "A sunlit backyard pool with Bub, a little controllable robot. Explore the patio, hold Space at the ladder to climb, then run and somersault off the diving board with F.",
     audience: "explore",
     shelf: "Garden",
     environment: "garden",

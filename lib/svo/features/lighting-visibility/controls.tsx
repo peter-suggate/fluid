@@ -31,7 +31,7 @@ export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updat
         hint="Water attenuates the light and contact shadow it stands in. Off compiles the water march out of the lighting shader; solid shadows are unaffected. Switching rebuilds the renderer." />
       {rasterAo && <RangeField label="Coarse voxel AO" unit="%" value={tuning.rasterCoarseAoStrength * 100} min={0} max={100} step={5} digits={0}
         onChange={(value) => updateTuning("rasterCoarseAoStrength", value / 100)} modified={modified("rasterCoarseAoStrength")} onReset={resetTuning("rasterCoarseAoStrength")}
-        hint="Experimental: eight coarse world-opacity samples add broad occlusion from hidden geometry. Zero keeps screen-space contact AO only." />}
+        hint="World-space samples add nearby hidden contacts and broad canopy occlusion. Zero keeps screen-space contact AO only." />}
       <ChoiceField label="Cone prepass rate" value={String(tuning.coneLightingScale)} disabled={svoConeTracingMode !== "cones"}
         onChange={(value) => updateTuning("coneLightingScale", Number(value) as SvoRenderTuning["coneLightingScale"])}
         options={[{ value: "1", label: "FULL" }, { value: "0.5", label: "2×2" }, { value: "0.25", label: "4×4" }, { value: "0.125", label: "8×8" }]} />

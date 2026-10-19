@@ -163,6 +163,17 @@ export function createInteractionCatalog(input: {
   function inspectDocument(raw: unknown): DocumentInspection {
     assertJson(raw);
     requireValue(object(raw) && raw.schemaVersion === 1 && Array.isArray(raw.entities) && Array.isArray(raw.connections), "Invalid interaction document schema");
+    if (raw.ladders !== undefined) {
+      requireValue(Array.isArray(raw.ladders), "Invalid ladders");
+      for (const ladder of raw.ladders) {
+        requireValue(object(ladder), "Invalid ladder"); id(ladder.id);
+        for (const point of [ladder.bottom_m, ladder.top_m]) requireValue(object(point)
+          && [point.x, point.y, point.z].every(n => typeof n === 'number' && Number.isFinite(n)), "Invalid ladder endpoint");
+        const bottom = ladder.bottom_m as Record<string, number>, top = ladder.top_m as Record<string, number>;
+        requireValue(top.y > bottom.y && typeof ladder.width_m === 'number' && ladder.width_m > 0 && ladder.width_m <= 4, "Invalid ladder dimensions");
+      }
+      unique(raw.ladders as { id: string }[], ladder => ladder.id, "ladder");
+    }
     // Validate the structural envelope even for missing plugins.
     for (const entity of raw.entities) {
       requireValue(object(entity), "Invalid entity record");

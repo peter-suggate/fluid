@@ -4,6 +4,7 @@ import { quaternionInverseRotate, quaternionRotate } from "./rigid-body";
 import { solidVoxelPatchesKey } from "./solid-world";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import { backyardPoolPartyScenery } from "./backyard-pool-party-scenery";
+import { interactionCatalog } from "../interaction/installed";
 
 export const BACKYARD_POOL_PARTY_ID = "backyard-pool-party";
 export const POOL_PARTY_CELL_M = 0.05;
@@ -45,8 +46,7 @@ export function poolPartyBoardGeometry() {
   } };
 }
 
-/** A real-scale 8 × 4 m basin. Only the ball is a rigid body;
- * the watertight basin is SolidWorld geometry, and the party is scenery. */
+/** A real-scale 8 × 4 m basin with a controllable poolside robot. */
 export function createBackyardPoolPartyScene(): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = BACKYARD_POOL_PARTY_ID;
@@ -89,16 +89,33 @@ export function createBackyardPoolPartyScene(): SceneDescription {
       orientation: { w: 1, x: 0, y: 0, z: 0 }, ...structuredClone(atRest) },
   ];
   scene.scenery = backyardPoolPartyScenery();
+  // These match the eleven stainless treads authored in Blender. The narrow
+  // ladder uses a climb assist; the board and treads remain physical solids.
+  for (let i = 1; i <= 11; i++) {
+    const t = i / 11, x = -4.1 - 2.95 + t * 1.05, y = 2.1 + t * 3.25;
+    scene.solidVoxels.push({ operation: 'fill',
+      minimum: [Math.floor((x - .095 + 8) / .05), Math.floor((y - .0225) / .05), 112],
+      maximumExclusive: [Math.ceil((x + .095 + 8) / .05), Math.ceil((y + .04) / .05), 128],
+      materialId: VOXEL_MATERIAL_IDS.white });
+  }
+  scene.interaction = { schemaVersion: 1, connections: [],
+    entities: [interactionCatalog.createEntity({ kind: 'fluid.robot', id: 'pool-robot', name: 'Bub',
+      transform: { position_m: { x: -7.35, y: 2.52, z: 1.1 },
+        orientation: { w: Math.SQRT1_2, x: 0, y: Math.SQRT1_2, z: 0 } } })],
+    ladders: [{ id: 'diving-ladder', bottom_m: { x: -7.05, y: 2, z: 0 },
+      top_m: { x: -5.85, y: 5.4, z: 0 }, width_m: .8 }],
+  };
   scene.surfaceStyle = "smooth";
   // The asset reference uses AgX under a 38-degree afternoon sun. Strong
   // direct daylight, cool sky and warm terrace bounce retain pale textiles
   // and warm teak without baking illumination into their PBR base colours.
   scene.lighting = {
+    rasterAoContrast: 2,
     directional: { direction: [-0.452, 0.616, -0.646], colorLinear: [1, 0.96, 0.90], intensity: 10.0 },
     environment: { diffuseScale: 1.0, specularScale: 1.0,
       lowerRadianceLinear: [0.80, 0.72, 0.60], upperRadianceLinear: [0.82, 0.95, 1.12],
       accentRadianceLinear: [0.8, 0.85, 0.9] },
-    grade: { toneCurve: "agx", exposure: 2.0, whiteBalance: [1, 1, 1] },
+    grade: { toneCurve: "agx", exposure: 1.25, whiteBalance: [1, 1, 1] },
   };
   return scene;
 }
@@ -112,6 +129,8 @@ export const BACKYARD_POOL_DRIFT_ID = "backyard-pool-drift";
 export function createBackyardPoolDriftScene(): SceneDescription {
   const scene = createBackyardPoolPartyScene();
   scene.sceneId = BACKYARD_POOL_DRIFT_ID;
+  // Keep the quiet fluid benchmark independent of character input/authority.
+  scene.interaction = undefined;
   const ball = scene.rigidBodies[0]!, radius = ball.dimensions_m.x;
   // A 650 kg/m3 sphere floats with 65% of its volume submerged: a cap
   // 1.2 radii deep, so its centre sits 0.2 radii below the waterline.

@@ -1,3 +1,4 @@
+import { robotShaderLibrary } from '../../../interaction/features/robot/render';
 import { importedSurfaceWGSL } from "../primary-visibility/imported-surface.wgsl";
 import { svoVoxelLightHashWGSL, SVO_VOXEL_LIGHT_CACHE_BYTES_PER_ENTRY } from "../lighting-visibility/svo-voxel-light-cache";
 import { rasterAoConsumerWGSL, rasterAoProducerWGSL } from "../lighting-visibility/svo-raster-ao";
@@ -21,7 +22,7 @@ import { createWebgpuSvoCompactTraversalWGSL } from "../construction/webgpu-svo-
 import { createWebgpuSvoWideFanoutTraversalWGSL } from "../construction/webgpu-svo-wide-fanout";
 import { type SvoPixelTracePrimaryMode } from "../diagnostics/svo-pixel-trace";
 import { createSvoPixelTraceProbeWGSL,type SvoPixelTraceProbeOptions } from "../diagnostics/webgpu-svo-pixel-trace";
-import { SVO_CONTACT_VISIBILITY_CONTRACT } from "../lighting-visibility/svo-contact-visibility";
+import { SVO_CONTACT_VISIBILITY_CONTRACT, svoSpecularVisibilityWGSL } from "../lighting-visibility/svo-contact-visibility";
 import { createSvoScreenSpaceTraversalWGSL,SVO_SCREEN_SPACE_TERMINATION_CONTRACT,svoLodDescentWGSL } from "../lighting-visibility/svo-screen-space-termination";
 import { SVO_VISIBILITY_LIMITS,svoVisibilityRaysWGSL } from "../lighting-visibility/svo-visibility-rays";
 import { SVO_LATTICE_VISIBILITY_CONTRACT,svoLatticeKeyWGSL } from "../lighting-visibility/webgpu-svo-cone-fanout";
@@ -3485,7 +3486,7 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
     }
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,opaque.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(opaque.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);
-  let diffuseVisibility=dryDiffuseMultiBounceVisibility(dryPrepassData0.x,diffuseColor);let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,opaque.normal)*diffuseVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;
+  let diffuseVisibility=dryDiffuseMultiBounceVisibility(dryPrepassData0.x,diffuseColor);let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,opaque.normal)*diffuseVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf*drySpecularVisibility(dryPrepassData0.x,max(dot(opaque.normal,viewDirection),0.0),surface.roughness);
   return dryBackdropHaze(opaque,position,rd,max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*dry.giLighting.w,vec3f(0.0)));
 }
 @fragment fn dryPrepassShadeMain(input:VertexOut)->@location(0) vec4f{
@@ -4399,6 +4400,7 @@ fn dryGlobalIlluminationFaced(position:vec3f,normal:vec3f,geometricNormal:vec3f,
   let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u)!=0u);
   return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength),1u);`}
 }
+${svoSpecularVisibilityWGSL}
 fn dryDiffuseMultiBounceVisibility(visibilityIn:f32,albedoIn:vec3f)->vec3f{
   let visibility=clamp(visibilityIn,0.0,1.0);let albedo=clamp(albedoIn,vec3f(0.0),vec3f(1.0));
   let a=2.0404*albedo-vec3f(0.3324);let b=-4.7951*albedo+vec3f(0.6417);let c=2.7552*albedo+vec3f(0.6903);
@@ -4582,11 +4584,13 @@ fn dryDirectionalRayLeavesDomain(maximumDistance:f32)->bool{return !(maximumDist
 // surface, not the ground. Editor hover resolves authored terrain separately;
 // that document query is not part of this renderer.
 
+${robotShaderLibrary}
 fn bodyHit(ro:vec3f,rd:vec3f,body:BodyGPU)->DryHit {
   let localOrigin=qinvWxyz(body.orientation,ro-body.positionRadius.xyz);
   let localDirection=qinvWxyz(body.orientation,rd);
   let shape=i32(round(body.halfSizeShape.w)); var t=DRY_MISS; var normal=vec3f(0.0,1.0,0.0);var featureId=SVO_FEATURE_SMOOTH;
-  if (shape==0) {
+  if(shape==5){let robot=bubHit(localOrigin,localDirection,body.halfSizeShape.xyz);t=select(DRY_MISS,robot.t,robot.t<1e19);normal=robot.normal;}
+  else if (shape==0) {
     let radius=body.halfSizeShape.x; let b=dot(localOrigin,localDirection); let discriminant=b*b-dot(localOrigin,localOrigin)+radius*radius;
     if (discriminant>=0.0) { let root=sqrt(discriminant); t=-b-root; if(t<=1e-4){t=-b+root;} if(t>1e-4){normal=normalize(localOrigin+localDirection*t);}else{t=DRY_MISS;} }
   } else if (shape==1) {
@@ -5395,7 +5399,7 @@ fn dryPublishedMaterialValid(material:SvoMaterialRecord,index:u32)->bool{
 // record is authored, and read back through a 96-byte record by index.
 fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   var materialId=dryResolvedMaterialId(hit);var baseOverride=vec3f(0.0);var useBaseOverride=false;var selectedEmission=vec3f(0.0);
-  if((hit.materialId&0x80000000u)!=0u){let body=bodies[hit.materialId&0x7fffffffu];baseOverride=body.colorSelected.xyz;useBaseOverride=true;selectedEmission=body.colorSelected.w*vec3f(.12,.42,.32);}
+  if((hit.materialId&0x80000000u)!=0u){let body=bodies[hit.materialId&0x7fffffffu];baseOverride=body.colorSelected.xyz;if(i32(round(body.halfSizeShape.w))==5){baseOverride=bubColor(qinvWxyz(body.orientation,position-body.positionRadius.xyz),body.halfSizeShape.xyz);}useBaseOverride=true;selectedEmission=body.colorSelected.w*vec3f(.12,.42,.32);}
   if(materialId>=dry.materialPublication.x){return dryInvalidSurfaceMaterial();}let material=dryMaterial(materialId);if(!dryPublishedMaterialValid(material,materialId)){return dryInvalidSurfaceMaterial();}
   var base=select(material.baseColorOpacity.xyz,baseOverride,useBaseOverride);var roughness=material.emissiveRoughness.w;var regionId=DRY_SURFACE_REGION_NONE;var variationFlags=0u;
   ${neutralSurfaceAlbedo ? /* wgsl */ `
@@ -5524,7 +5528,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
     if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
-  let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,hit.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;
+  let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,hit.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf*drySpecularVisibility(dot(contactVisibility,vec3f(1.0/3.0))*gi.visibility,max(dot(hit.normal,viewDirection),0.0),surface.roughness);let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
   shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t,hit.fieldSource);
   return dryBackdropHaze(hit,position,rd,shaded);

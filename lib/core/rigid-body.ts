@@ -31,6 +31,8 @@ export interface RigidBodyState {
   held?: boolean;
   position_m: Vec3;
   orientation: Quaternion;
+  /** Character animation must not rotate its upright collision capsule. */
+  renderOrientation?: Quaternion;
   linearVelocity_m_s: Vec3;
   angularVelocity_rad_s: Vec3;
   angularMomentum_kg_m2_s: Vec3;

@@ -22,6 +22,8 @@ export interface InteractionDocument {
   readonly schemaVersion: 1;
   readonly entities: readonly EntityRecord[];
   readonly connections: readonly Connection[];
+  /** Climb assists follow authored ladders; endpoints are foot positions. */
+  readonly ladders?: readonly { readonly id: string; readonly bottom_m: Vec3; readonly top_m: Vec3; readonly width_m: number }[];
 }
 export interface ConfigSchema {
   readonly version: number;
@@ -154,7 +156,7 @@ export type PhysicsCommand =
   | { readonly kind: "grab"; readonly entityId: string; readonly active: boolean; readonly target_m: Vec3 }
   | { readonly kind: "impulse"; readonly bodyId: string; readonly bodyGeneration: number; readonly linear_N_s: Vec3; readonly angular_N_m_s: Vec3 }
   | { readonly kind: "kinematic-target"; readonly bodyId: string; readonly bodyGeneration: number; readonly transform: Transform }
-  | { readonly kind: "character-move"; readonly entityId: string; readonly velocity_m_s: Vec3; readonly jump: boolean };
+  | { readonly kind: "character-move"; readonly entityId: string; readonly velocity_m_s: Vec3; readonly jump: boolean; readonly climb?: boolean; readonly somersault?: boolean };
 export interface BehaviorEvent extends TickIdentity {
   readonly connectionId: string;
   readonly source: Endpoint;

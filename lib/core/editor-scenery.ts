@@ -1,6 +1,7 @@
 import { oakTreeControlGroups, OAK_MATERIALS } from "./oak-tree-controls";
 import { planOakV2 } from "./voxel-scenery/oak-v2";
 import { add, sub } from "./math";
+import { meshAssetDistanceFieldReady } from "./imported-assets/asset-library";
 import {
   boxCenter,
   boxHandles,
@@ -462,6 +463,11 @@ export const sceneryEntity: EditorEntityDefinition = {
       if (pickExcluded(exclude, "scenery", scenerySelectionId(target.nodeId))) continue;
       if (!raySpansAabb(target.aabb_m, ray, nearest?.distance_m)) continue;
       target.descriptor ??= svoDescriptorForEnvironmentProxy(target.primitive);
+      // The catalog can outlive its asset handoff (including during hot
+      // reload). Check readiness on every pick, not when caching targets, so
+      // zoom/hover keep working and exact picking resumes as data arrives.
+      const asset = target.descriptor.kind === "field-program" ? target.descriptor.program?.sampledVolume?.asset : undefined;
+      if (asset && !meshAssetDistanceFieldReady(asset)) continue;
       const hit = intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction, tMax_m: nearest?.distance_m });
       if (hit && (!nearest || hit.t_m < nearest.distance_m)) nearest = { nodeId: target.nodeId, distance_m: hit.t_m };
     }

@@ -16,14 +16,18 @@ export const characterMotor: BehaviorPlugin = {
     { id: 'move', label: 'Move', kind: 'axis2', bindings: [
       { device: 'keyboard', code: 'KeyW', value: [0, -1] }, { device: 'keyboard', code: 'KeyS', value: [0, 1] },
       { device: 'keyboard', code: 'KeyA', value: [-1, 0] }, { device: 'keyboard', code: 'KeyD', value: [1, 0] },
+      { device: 'keyboard', code: 'ArrowUp', value: [0, -1] }, { device: 'keyboard', code: 'ArrowDown', value: [0, 1] },
+      { device: 'keyboard', code: 'ArrowLeft', value: [-1, 0] }, { device: 'keyboard', code: 'ArrowRight', value: [1, 0] },
     ] },
     { id: 'jump', label: 'Jump', kind: 'button', bindings: [{ device: 'keyboard', code: 'Space', value: true }] },
     { id: 'run', label: 'Run', kind: 'button', bindings: [{ device: 'keyboard', code: 'ShiftLeft', value: true }] },
+    { id: 'somersault', label: 'Somersault', kind: 'button', bindings: [{ device: 'keyboard', code: 'KeyF', value: true }] },
   ],
 };
 export const characterRuntime: PhysicsBehaviorFactory = {
   type: characterMotor.id,
   body: e => ({ shape: character.preview(e.config), motion: 'dynamic', density: scalar(e, 'density'), friction: .15,
+    ...(e.kind === 'fluid.robot' ? { appearance: 'bub' as const } : {}),
     character: { speed: scalar(e, 'speed'), jumpHeight: scalar(e, 'jumpHeight'), acceleration: scalar(e, 'acceleration'), maxSlope: scalar(e, 'maxSlope'), stepHeight: scalar(e, 'stepHeight') } }),
   create: () => ({ tick: (_phase, ctx) => {
     const actions = ctx.input.actions.filter(a => a.entityId === ctx.entity.id && a.behaviorId === ctx.behavior.id);
@@ -33,6 +37,6 @@ export const characterRuntime: PhysicsBehaviorFactory = {
     const speed = scalar(ctx.entity, 'speed') * (run ? scalar(ctx.entity, 'runMultiplier') : 1) / Math.max(1, Math.hypot(x, z));
     const forward = ctx.viewDirection ?? { x: 0, y: 0, z: -1 }, length = Math.max(1e-9, Math.hypot(forward.x, forward.z));
     const fx = forward.x / length, fz = forward.z / length;
-    ctx.enqueue({ kind: 'character-move', entityId: ctx.entity.id, velocity_m_s: { x: (-fz * x - fx * z) * speed, y: 0, z: (fx * x - fz * z) * speed }, jump: actions.some(a => a.actionId === 'jump' && a.edge === 'pressed') });
+    ctx.enqueue({ kind: 'character-move', entityId: ctx.entity.id, velocity_m_s: { x: (-fz * x - fx * z) * speed, y: 0, z: (fx * x - fz * z) * speed }, jump: actions.some(a => a.actionId === 'jump' && a.edge === 'pressed'), climb: actions.some(a => a.actionId === 'jump' && a.value === true), somersault: actions.some(a => a.actionId === 'somersault' && a.edge === 'pressed') });
   }, dispose() {} }),
 };

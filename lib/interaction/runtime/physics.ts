@@ -7,6 +7,7 @@ export interface BodyRecipe {
   friction: number;
   restitution?: number;
   sensor?: boolean;
+  appearance?: 'bub';
   character?: { speed: number; jumpHeight: number; acceleration: number; maxSlope: number; stepHeight: number };
 }
 export interface PhysicsBehaviorFactory extends BehaviorRuntimeFactory {
@@ -43,6 +44,7 @@ export function shapeDescription(entity: EntityRecord, recipe: BodyRecipe): Rigi
     density_kg_m3: recipe.density, friction: recipe.friction, restitution: recipe.restitution ?? 0,
     linearVelocity_m_s: { ...ZERO }, angularVelocity_rad_s: { ...ZERO },
     motion: recipe.motion === 'static' || recipe.sensor ? 'static' : 'dynamic',
+    ...(recipe.appearance ? { appearance: recipe.appearance } : {}),
   };
 }
 export function assertFiniteSnapshot(body: BodySnapshot) {

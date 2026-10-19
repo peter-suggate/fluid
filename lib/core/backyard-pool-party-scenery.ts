@@ -83,7 +83,7 @@ export function backyardPoolPartyScenery(): SceneryGraph {
       "limestone-coping-corner", [side * 4.15, 2, end * 2.15]));
   }
   // Blender assembly follows the original board's 4.5° slope and encloses
-  // its unchanged simulation collider; all steelwork remains render detail.
+  // its simulation collider; the ladder treads also have SolidWorld support.
   nodes.push(imported("diving/assembly", "diving-board-ladder", [-4.1, 2, 0]),
     imported("pool/stainless-ladder", "pool-stainless-ladder", [4, 2, 0]));
   nodes.push(imported("lounger/one", "teak-lounger", [-.8, 2.03, -3.65], Math.PI),

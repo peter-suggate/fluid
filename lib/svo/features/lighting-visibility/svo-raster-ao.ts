@@ -226,47 +226,51 @@ fn rasterHorizonVisibility(pixel:vec2f,position:vec3f,normal:vec3f)->f32{
 }
 `;
 
-/** Eight bounded opacity lookups, with no cone march or temporal history. */
+/** Bounded world-opacity lookups, with no screen dependency or temporal history. */
 export const rasterCoarseAoWGSL = /* wgsl */ `
 fn rasterCoarseVisibility(position:vec3f,normal:vec3f)->f32{
   let strength=rasterLighting.sun.w;
   if(strength<=0.0||!dryNodeMipReady()){return 1.0;}
   let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
-  let radius=max(cell*4.0,dryContactVisibilityRadius()*2.0);
+  let minimumVoxel=cell*exp2(f32(dryNodeMipOpacityLevelFloor()));
+  let radius=max(minimumVoxel*4.0,dryContactVisibilityRadius());
   let helper=select(vec3f(0,1,0),vec3f(1,0,0),abs(normal.y)>.9);
   let tangent=normalize(cross(helper,normal));let bitangent=cross(normal,tangent);
   let origin=position+normal*cell*.5;
   var visibility=0.0;
-  for(var direction=0u;direction<4u;direction++){
-    let angle=(f32(direction)+.5)*1.57079632679;
-    let ray=normalize(normal+(tangent*cos(angle)+bitangent*sin(angle))*.85);
+  for(var direction=0u;direction<3u;direction++){
+    let angle=(f32(direction)+.5)*2.09439510239;
+    let ray=normalize(normal+(tangent*cos(angle)+bitangent*sin(angle))*1.25);
     var transmission=1.0;
-    var maximumDensity=0.0;
+    var nearbyVisibility=1.0;
     var cache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
     for(var shell=0u;shell<2u;shell++){
-      let distance=radius*exp2(f32(shell));
+      // Use six of the former eight lookups: one nearby contact sample and one
+      // broad canopy sample per azimuth, rather than adding another AO pass.
+      let distance=radius*select(2.0,2.0/3.0,shell==0u);
       // A trilinear opacity lookup includes whole mip voxels, extending up to
       // 1.5 voxel widths from the query point on each axis. Keep that support
       // in front of the receiver plane, including on diagonal walls.
       let clearance=dot(normal,ray)*distance+cell*.5;
       let diameter=min(distance*.8,clearance*.9/(1.5*dot(abs(normal),vec3f(1))));
       let lod=max(0.0,floor(log2(diameter/cell)));
-      if(cell*exp2(f32(dryNodeMipOpacityLevelFloor()))>diameter){continue;}
+      if(minimumVoxel>diameter){continue;}
       let sample=dryNodeMipAt(origin+ray*distance,lod,&cache);
       if(sample.valid==0u){return 1.0;}
       // Mean occupancy retains the gaps between leaves. Max occupancy would
       // turn a sparse canopy into an opaque shell.
       let density=clamp(sample.sample.solidMean,0.0,1.0);
-      maximumDensity=max(maximumDensity,density);
-      transmission*=exp(-density*distance/(cell*exp2(lod))*2.0);
+      if(shell==0u){nearbyVisibility=1.0-density*(2.0/3.0);}
+      else{
+        // Distant dense surfaces cannot supply a reliable horizon from one
+        // volume tap. Keep the broad term for sparse canopy only.
+        let sparseWeight=1.0-smoothstep(.15,.5,density);
+        transmission=mix(1.0,exp(-density*distance/(cell*exp2(lod))*2.0),sparseWeight);
+      }
     }
-    // Two shells resolve sparse canopy density, but cannot locate the horizon
-    // of a solid floor: treating it as volume creates broad bands on walls.
-    // Hand dense blockers back to screen-space contact AO, with a smooth fade.
-    let sparseWeight=1.0-smoothstep(.15,.5,maximumDensity);
-    visibility+=mix(1.0,transmission,sparseWeight);
+    visibility+=min(nearbyVisibility,transmission);
   }
-  return mix(1.0,visibility*.25,strength);
+  return mix(1.0,visibility/3.0,strength);
 }
 `;
 

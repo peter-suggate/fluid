@@ -657,6 +657,8 @@ function PlayHud({ pane, view, locked, onLock, onRelease }: {
   const chosen = candidates.find((candidate) => candidate.entityId === selectedEntityId) ?? candidates[0];
   const blocked = view.controlCandidates.find((candidate) => candidate.entityId === selectedEntityId && !candidate.availability.available);
   const controlledName = view.document.entities.find((entity) => entity.id === view.controlledEntityId)?.name;
+  const controlledEntity = view.document.entities.find((entity) => entity.id === view.controlledEntityId);
+  const controlActions = controlledEntity?.behaviors.flatMap(behavior => pane.catalog.behaviorType(behavior.type)?.actions ?? []) ?? [];
   const controlHint = chosen ? `Play as ${view.document.entities.find((entity) => entity.id === chosen.entityId)?.name}`
     : blocked && !blocked.availability.available ? blocked.availability.reason
     : view.controlCandidates.length ? "Nothing can be controlled right now" : "Place something that can be controlled first";
@@ -702,6 +704,11 @@ function PlayHud({ pane, view, locked, onLock, onRelease }: {
         catch (error) { pane.reportError(`Could not read ${chosenFile.name}: ${error instanceof Error ? error.message : String(error)}`); }
       }} />
     </div>
+    {view.context === 'play' && <p className="interactive-notice is-info" data-testid="interactive-controls-help">
+      {controlActions.map(action => `${action.id === 'move' ? 'WASD / arrows' : bindingLabel(action) ?? action.label} · ${action.label}`).join('   ·   ')}
+      {view.document.ladders?.length ? ' · Hold Space beside the ladder to climb onto the board' : ''}
+      {' · Drag to look · Esc releases'}
+    </p>}
     {view.readiness.state !== "ready" && view.readiness.reasons.length > 0 && <ul className={`interactive-reasons is-${view.readiness.state}`} data-testid="interactive-reasons">
       {view.readiness.reasons.map((reason) => <li key={reason}>{reason}</li>)}
     </ul>}

@@ -60,6 +60,8 @@ export interface RigidBodyDescription {
   restitution: number;
   friction: number;
   motion?: "dynamic" | "static";
+  /** Presentation skin; physics and fluid displacement still use shape. */
+  appearance?: "bub";
 }
 
 export interface SceneDescription {
@@ -855,6 +857,7 @@ export function validateScene(scene: SceneDescription): string[] {
       if (!body.id || ids.has(body.id)) errors.push("Rigid body IDs must be unique and non-empty");
       ids.add(body.id);
       if (!SCENE_SHAPES_BY_CODE.some(shape => shape.name === body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
+      if (body.appearance !== undefined && (body.appearance !== 'bub' || body.shape !== 'capsule')) errors.push(`Unsupported appearance for body ${body.id}`);
       if (!(body.dimensions_m.x > 0) || !(body.dimensions_m.y > 0) || !(body.dimensions_m.z > 0)) errors.push(`Body ${body.id} dimensions must be positive`);
       if (!(body.density_kg_m3 > 0)) errors.push(`Body ${body.id} density must be positive`);
       if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);

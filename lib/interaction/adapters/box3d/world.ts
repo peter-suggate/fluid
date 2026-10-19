@@ -1,12 +1,13 @@
 import { assertNoSolidOverlap } from "../solid-world/overlap";
+import { fluidSolidWorldForScene } from '../../../core/solid-world';
 import type { RigidBodyDescription, SceneDescription, Vec3 } from '../../../core/model';
-import { boundingRadius, initializeRigidBody, primitiveVolume, type RigidBodyState } from '../../../core/rigid-body';
+import { boundingRadius, initializeRigidBody, primitiveVolume, quaternionMultiply, type RigidBodyState } from '../../../core/rigid-body';
 import { cupWallThickness_m } from '../../../core/scene-shape';
 import type { BodySnapshot, EntityRecord, FluidExchange, PhysicsCommand, TickIdentity } from '../../contracts';
 import { assertFiniteSnapshot, shapeDescription, type BodyRecipe, type SensorContact } from '../../runtime/physics';
 import { compileSolidChunks } from '../solid-world/collision';
 import { loadBox3D, type B3Body, type B3Joint, type B3Ray, type B3Shape, type B3World } from './api';
-export interface WorldBody { entityId: string; generation: number; description: RigidBodyDescription; recipe?: BodyRecipe; native: B3Body; tag: number; grounded: boolean; coyote: number; jumpBuffer: number; submerged: number }
+export interface WorldBody { entityId: string; generation: number; description: RigidBodyDescription; recipe?: BodyRecipe; native: B3Body; tag: number; grounded: boolean; coyote: number; jumpBuffer: number; submerged: number; facing?: number; flipTime?: number; flipped?: boolean; climbing?: string }
 const zero = () => ({ x: 0, y: 0, z: 0 });
 export class Box3DWorld {
   readonly bodies = new Map<string, WorldBody>();
@@ -101,9 +102,14 @@ export class Box3DWorld {
     try {
       for (const chunk of next) {
         if (this.chunks.get(chunk.key)?.signature === chunk.signature) continue;
-        const body = this.world.createBody({ type: 'static' }); staged.set(chunk.key, { signature: chunk.signature, body });
+        // Native hull construction uses floats. Keep small sampled features
+        // close to the body's origin instead of baking world offsets into them.
+        const first = chunk.shapes[0];
+        const origin = first.kind === 'box' ? first.center : first.points[0];
+        const local = (p: Vec3) => ({ x: p.x - origin.x, y: p.y - origin.y, z: p.z - origin.z });
+        const body = this.world.createBody({ type: 'static', position: origin }); staged.set(chunk.key, { signature: chunk.signature, body });
         for (const shape of chunk.shapes) {
-          const handle = shape.kind === 'box' ? body.createBox({ halfExtents: shape.half, offset: shape.center, friction: .7 }) : body.createHull({ points: shape.points, friction: .7 });
+          const handle = shape.kind === 'box' ? body.createBox({ halfExtents: shape.half, offset: local(shape.center), friction: .7 }) : body.createHull({ points: shape.points.map(local), friction: .7 });
           if (!handle.isValid()) { handle.delete(); throw new Error(`Invalid solid collision hull at ${chunk.key}`); }
           handle.delete();
         }
@@ -116,6 +122,10 @@ export class Box3DWorld {
     this.coverage = new Map([...this.bodies].map(([id, b]) => [id, b.native.getPosition()]));
   }
   ensureCoverage() {
+    // Finite authored solids were all compiled at admission. Only procedural
+    // ground needs a moving neighbourhood; rebuilding the whole pool every
+    // metre otherwise stalls steering and climbing.
+    if (!fluidSolidWorldForScene(this.scene).ground) return;
     if ([...this.bodies].some(([id, b]) => { const p = b.native.getPosition(), old = this.coverage.get(id); return !old || Math.hypot(p.x-old.x,p.y-old.y,p.z-old.z) > 1; })) this.updateSolids(this.scene);
   }
   ray(origin: Vec3, direction: Vec3, distance: number, maskBits = 5): { entityId?: string; point: Vec3; normal: Vec3; distance: number } | undefined {
@@ -138,19 +148,56 @@ export class Box3DWorld {
       this.grab!.anchor.setTargetTransform({ position: command.target_m, rotation: body.native.getRotation() }, dt, true);
       return;
     }
-    if (command.kind === 'character-move') { const body = this.bodies.get(command.entityId); if (body?.recipe?.character) this.moveCharacter(body, command.velocity_m_s, command.jump, dt); return; }
+    if (command.kind === 'character-move') { const body = this.bodies.get(command.entityId); if (body?.recipe?.character) this.moveCharacter(body, command.velocity_m_s, command.jump, dt, command.somersault, command.climb); return; }
     const body = [...this.bodies.values()].find(b => b.description.id === command.bodyId);
     if (!body || command.bodyGeneration !== body.generation) throw new Error('Stale physics body command');
     if (command.kind === 'impulse') { body.native.applyLinearImpulseToCenter(command.linear_N_s, true); body.native.applyAngularImpulse(command.angular_N_m_s, true); }
     else body.native.setTargetTransform({ position: command.transform.position_m, rotation: command.transform.orientation }, dt, true);
   }
-  private moveCharacter(body: WorldBody, target: Vec3, jump: boolean, dt: number) {
+  private moveCharacter(body: WorldBody, target: Vec3, jump: boolean, dt: number, somersault = false, climb = false) {
     const motor = body.recipe!.character!, pos = body.native.getPosition(), velocity = body.native.getLinearVelocity();
     const d = body.description.dimensions_m, height = d.y + 2 * d.x;
     const hit = this.ray(pos, { x: 0, y: -1, z: 0 }, height / 2 + .12, 1);
     body.grounded = Boolean(hit && hit.normal.y >= Math.cos(motor.maxSlope * Math.PI / 180) && velocity.y < 1);
     body.coyote = body.grounded ? .1 : Math.max(0, body.coyote - dt);
     body.jumpBuffer = jump ? .12 : Math.max(0, body.jumpBuffer - dt);
+    if (body.grounded) body.flipped = false;
+    if ((body.flipTime ?? 0) > 0) body.flipTime = Math.max(0, body.flipTime! - dt);
+    const targetSpeed = Math.hypot(target.x, target.z);
+    if (targetSpeed > .05 && !body.flipTime) {
+      const desired = Math.atan2(target.x, target.z), current = body.facing ?? desired;
+      body.facing = current + Math.atan2(Math.sin(desired - current), Math.cos(desired - current)) * Math.min(1, dt * 14);
+    }
+    // Hold jump beside an authored ladder to climb its outside face, then
+    // step onto the landing after the capsule's feet clear the board. Native
+    // collision still decides the resulting pose; there are no teleports.
+    if (!climb || somersault) body.climbing = undefined;
+    const footY = pos.y - height / 2;
+    const ladders = this.scene.interaction?.ladders ?? [];
+    const ladder = ladders.find(l => l.id === body.climbing) ?? (jump ? ladders.find(l =>
+      Math.hypot(pos.x - l.bottom_m.x, pos.z - l.bottom_m.z) < l.width_m / 2 + d.x + .25
+      && footY >= l.bottom_m.y - .15 && footY < l.bottom_m.y + .65) : undefined);
+    if (ladder && climb && !somersault) {
+      body.climbing = ladder.id;
+      const bottom = ladder.bottom_m, top = ladder.top_m;
+      const length = Math.max(.001, Math.hypot(top.x - bottom.x, top.z - bottom.z));
+      const dx = (top.x - bottom.x) / length, dz = (top.z - bottom.z) / length;
+      const t = Math.max(0, Math.min(1, (footY - bottom.y) / (top.y - bottom.y)));
+      const cleared = footY >= top.y + .12;
+      const offset = cleared ? 0 : d.x + .16;
+      const goal = { x: bottom.x + (top.x - bottom.x) * t - dx * offset,
+        y: top.y + height / 2 + .24, z: bottom.z + (top.z - bottom.z) * t - dz * offset };
+      const vx = Math.max(-1.5, Math.min(1.5, (goal.x - pos.x) * 8));
+      const vz = Math.max(-1.5, Math.min(1.5, (goal.z - pos.z) * 8));
+      const vy = Math.min(2.4, (goal.y - pos.y) * 8);
+      const mass = body.native.getMass();
+      body.native.applyLinearImpulseToCenter({ x: (vx - velocity.x) * mass,
+        y: (vy - velocity.y - this.scene.fluid.gravity_m_s2.y * dt) * mass,
+        z: (vz - velocity.z) * mass }, true);
+      body.facing = Math.atan2(dx, dz); body.jumpBuffer = 0; body.coyote = 0;
+      if (cleared && Math.hypot(pos.x - top.x, pos.z - top.z) < .08) body.climbing = undefined;
+      return;
+    }
     const support = hit?.entityId ? this.bodies.get(hit.entityId)?.native.getLinearVelocity() : undefined;
     const swimming = body.submerged > .6;
     const wetSpeed = 1 - .45 * body.submerged;
@@ -165,6 +212,10 @@ export class Box3DWorld {
     const scale = Math.min(1, maxChange / Math.max(1e-9, Math.hypot(dx, dz)));
     const mass = body.native.getMass();
     let dy = 0;
+    if (somersault && !body.flipped && !body.flipTime && !swimming) {
+      body.flipTime = .8; body.flipped = true;
+      if (body.coyote > 0) body.jumpBuffer = .12;
+    }
     if (body.jumpBuffer > 0 && (body.coyote > 0 || swimming)) { dy = Math.sqrt(2 * Math.abs(this.scene.fluid.gravity_m_s2.y) * motor.jumpHeight) + (support?.y ?? 0) - velocity.y; body.jumpBuffer = 0; body.coyote = 0; }
     // Small step-up, only when grounded and the upper ray has clearance.
     const speed = Math.hypot(target.x, target.z);
@@ -224,6 +275,12 @@ export class Box3DWorld {
       const state = initializeRigidBody(body.description);
       state.position_m = body.native.getPosition(); state.orientation = body.native.getRotation();
       state.linearVelocity_m_s = body.native.getLinearVelocity(); state.angularVelocity_rad_s = body.native.getAngularVelocity();
+      if (body.recipe?.character) {
+        const yaw = body.facing ?? 2 * Math.atan2(body.description.orientation.y, body.description.orientation.w);
+        const pitch = body.flipTime ? (1 - body.flipTime / .8) * Math.PI * 2 : 0;
+        state.renderOrientation = quaternionMultiply({ w: Math.cos(yaw / 2), x: 0, y: Math.sin(yaw / 2), z: 0 },
+          { w: Math.cos(pitch / 2), x: Math.sin(pitch / 2), y: 0, z: 0 });
+      }
       return state;
     });
   }

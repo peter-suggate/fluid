@@ -1,3 +1,4 @@
+import { robotShaderLibrary } from '../interaction/features/robot/render';
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { unifiedLightingShaderLibrary, waterSceneOpticsShaderLibrary } from "./webgpu-lighting";
@@ -18,6 +19,7 @@ import { unifiedLightingShaderLibrary, waterSceneOpticsShaderLibrary } from "./w
  * wants the slab test for its own tank bounds gets it from the same include.
  */
 export const rigidBodyRaymarchShaderLibrary = /* wgsl */ `
+${robotShaderLibrary}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
 fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
 fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
@@ -47,6 +49,7 @@ fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU)->RigidHit{
     if(t>1e-4&&interval.x<=interval.y){let p=o+d*t;let q=abs(p/max(body.halfSizeShape.xyz,vec3f(1e-5)));var n=vec3f(0,0,sign(p.z));
       if(q.x>=q.y&&q.x>=q.z){n=vec3f(sign(p.x),0,0);}else if(q.y>=q.z){n=vec3f(0,sign(p.y),0);}hit=RigidHit(t,n);}}
   else if(shape==2){hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,false);let upper=sphereRigidHit(o,d,vec3f(0,body.halfSizeShape.y,0),body.halfSizeShape.x);let lower=sphereRigidHit(o,d,vec3f(0,-body.halfSizeShape.y,0),body.halfSizeShape.x);if(upper.t<hit.t){hit=upper;}if(lower.t<hit.t){hit=lower;}}
+  else if(shape==5){let robot=bubHit(o,d,body.halfSizeShape.xyz);hit=RigidHit(robot.t,robot.normal);}
   else{hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,true);}
   return RigidHit(hit.t,normalize(qrot(body.orientation,hit.n)));
 }
@@ -126,7 +129,8 @@ struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
   if(pick.t>=${RIGID_SCENE_MISS_DISTANCE_M.toExponential()}){discard;}
   let body=bodies[pick.index];
   let position=ro+rd*pick.t;
-  let base=clamp(body.colorSelected.xyz,vec3f(0.0),vec3f(1.0));
+  var base=clamp(body.colorSelected.xyz,vec3f(0.0),vec3f(1.0));
+  if(i32(round(body.halfSizeShape.w))==5){base=bubColor(qinv(body.orientation,position-body.positionRadius.xyz),body.halfSizeShape.xyz);}
   let emissive=body.colorSelected.w*vec3f(${RIGID_SCENE_SURFACE.selectionEmission.join(",")});
   let f0=vec3f(${RIGID_SCENE_SURFACE.dielectricF0});
   let material=unifiedMaterial(base,${RIGID_SCENE_SURFACE.roughness},emissive,0.0,f0,1.0,vec3f(0.0),0.0);

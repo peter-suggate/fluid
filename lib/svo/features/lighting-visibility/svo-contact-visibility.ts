@@ -24,6 +24,16 @@ export const SVO_CONTACT_VISIBILITY_CONTRACT = Object.freeze({
   maximumSceneRadiusFraction: 0.06,
 } as const);
 
+/** Approximate environment visibility from diffuse AO, view angle and lobe
+ * roughness, instead of darkening every reflection equally. This is a scalar
+ * approximation, not a traced reflection. Open visibility is exactly one. */
+export const svoSpecularVisibilityWGSL = /* wgsl */ `
+fn drySpecularVisibility(visibility:f32,nDotV:f32,roughness:f32)->f32{
+  let ao=clamp(visibility,0.0,1.0);
+  return clamp(pow(clamp(nDotV,0.0,1.0)+ao,exp2(-16.0*clamp(roughness,0.0,1.0)-1.0))-1.0+ao,0.0,1.0);
+}
+`;
+
 /**
  * Cheap albedo-aware approximation of diffuse interreflection lost by a
  * single visibility/cone pass. This is the fitted GTAO multi-bounce curve:

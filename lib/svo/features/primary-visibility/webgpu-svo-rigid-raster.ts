@@ -1,3 +1,4 @@
+import { robotShaderLibrary } from '../../../interaction/features/robot/render';
 import { SVO_GBUFFER_FIELD_SOURCES, SVO_GBUFFER_MOTION_KINDS, svoGBufferWGSL } from "../../contracts/svo-gbuffer";
 import { cameraApertureShaderLibrary } from "../../../core/webgpu-camera";
 import { svoPrimitiveMotionWGSL } from "../scene-publication/svo-primitive-motion";
@@ -236,6 +237,7 @@ const RIGID_RASTER_MATERIAL_BOX:u32=${VOXEL_MATERIAL_IDS.box}u;
 const RIGID_RASTER_MATERIAL_CAPSULE:u32=${VOXEL_MATERIAL_IDS.capsule}u;
 const RIGID_RASTER_MATERIAL_CYLINDER:u32=${VOXEL_MATERIAL_IDS.cylinder}u;
 
+${robotShaderLibrary}
 ${svoPrimitiveMotionWGSL}
 ${svoGBufferWGSL}
 
@@ -377,6 +379,7 @@ fn rigidBodyHit(origin:vec3f,direction:vec3f,body:BodyGPU)->RigidRasterHit{
   else if(shape==1){hit=rigidBoxHit(localOrigin,localDirection,max(body.halfSizeShape.xyz,vec3f(1e-6)));}
   else if(shape==2){hit=rigidCapsuleHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6),max(body.halfSizeShape.y,0.0));}
   else if(shape==3){hit=rigidCylinderHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6),max(body.halfSizeShape.y,1e-6));}
+  else if(shape==5){let robot=bubHit(localOrigin,localDirection,body.halfSizeShape.xyz);hit=RigidRasterHit(robot.t,robot.normal,0u,select(0u,1u,robot.t<1e19));}
   if(hit.valid!=0u){hit.normal=normalize(rigidQrot(body.orientation,hit.normal));}return hit;
 }
 

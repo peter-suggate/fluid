@@ -4,6 +4,57 @@ import { createEmptyScene } from '../../core/empty-scene';
 import { bakeProceduralSolid } from '../../core/procedural-solid';
 import { Box3DWorld } from '../adapters/box3d/world';
 import { compileSolidChunks } from '../adapters/solid-world/collision';
+import { createBackyardPoolPartyScene, POOL_PARTY_BOARD } from '../../core/backyard-pool-party-scene';
+import { quaternionInverseRotate } from '../../core/rigid-body';
+import { SceneInteractionHost } from '../runtime/host';
+
+test('Party Pool ball stays supported while rolling to the board tip, including off-centre paths', async () => {
+ for (const z of [0, -.2, .2]) {
+  const scene = createBackyardPoolPartyScene();
+  scene.systems = { fluid: false }; scene.scenery = undefined;
+  scene.rigidBodies[0].position_m.z = z;
+  const host = new SceneInteractionHost(scene);
+  try {
+   await host.ready;
+   let reachedTip = false, fellBeyondTip = false;
+   const dt = z === .2 ? 1 / 30 : 1 / 60;
+   for (let time = 0; time < 4.5; time += dt) {
+    await host.advance(dt);
+    const ball = host.currentBodies()[0];
+    const p = quaternionInverseRotate(POOL_PARTY_BOARD.orientation, {
+     x: ball.position_m.x - POOL_PARTY_BOARD.position.x,
+     y: ball.position_m.y - POOL_PARTY_BOARD.position.y,
+     z: ball.position_m.z - POOL_PARTY_BOARD.position.z,
+    });
+    if (p.x < 1.9) {
+     assert.ok(Math.abs(p.y - .32) < .01, `board support at z=${z}: ${JSON.stringify(p)}`);
+     assert.ok(Math.abs(p.z - z) < .025, 'flat board must not deflect a rolling sphere sideways');
+    } else reachedTip = true;
+    if (reachedTip && p.x > 2.25 && p.y < .15) fellBeyondTip = true;
+   }
+   assert.ok(reachedTip, 'sphere rolls the length of the board');
+   assert.ok(fellBeyondTip, 'sphere falls freely after leaving the board');
+  } finally { await host.dispose(); }
+ }
+});
+
+test('merged procedural collision respects a later cut and restores on undo', async () => {
+ const scene = createEmptyScene({ extents_m: { x: 2, y: 2, z: 2 }, finestCellSize_m: .25 });
+ scene.scenery = undefined;
+ const baked = bakeProceduralSolid([8, 8, 8], [.25, .25, .25], p => p[1] - 2.5 - p[0] * .2);
+ scene.solidVoxels = baked.solidVoxels; scene.solidBoundary = baked.solidBoundary;
+ const world = await Box3DWorld.create(scene, [], 1);
+ const ray = () => world.ray({ x: -.125, y: 1.8, z: -.125 }, { x: 0, y: -1, z: 0 }, 1.7);
+ try {
+  assert.ok(ray(), 'original ramp supports contact');
+  const cut = structuredClone(scene);
+  cut.solidVoxels.push({ operation: 'clear', minimum: [3, 0, 3], maximumExclusive: [4, 8, 4] });
+  world.updateSolids(cut);
+  assert.equal(ray(), undefined, 'convex merging cannot bridge an edited hole');
+  world.updateSolids(scene);
+  assert.ok(ray(), 'undo restores the ramp');
+ } finally { world.destroy(); }
+});
 test('continuous ramp yields native collision with sloped normals and a preserved cavity',async()=>{
  const s=createEmptyScene({extents_m:{x:2,y:2,z:2},finestCellSize_m:.25});s.scenery=undefined;
  const baked=bakeProceduralSolid([8,8,8],[.25,.25,.25],p=> Math.max(p[1]-1-p[0]*.3, .65-Math.hypot(p[0]-4,p[2]-4)));

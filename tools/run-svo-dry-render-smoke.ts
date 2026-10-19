@@ -842,7 +842,7 @@ const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuff
   rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
   rasterArms, true, experiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
-renderer.setRigidBodyCount(bodies.count);
+renderer.setRigidBodyCount(bodies.count, bodies.bounds);
 // Level of detail, swept from the environment rather than by editing a default.
 //
 // The threshold reaches the shader through the render-tuning uniform now, so
@@ -991,7 +991,7 @@ if (pairArm !== "none") {
     rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
     rasterArms, true, pairExperiments);
   await pairRenderer.initialize();
-  pairRenderer.setRigidBodyCount(bodies.count);
+  pairRenderer.setRigidBodyCount(bodies.count, bodies.bounds);
   pairRenderer.setRenderTuning({
     ...baseTuning, coneLightingScale: coneScale,
     lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel, surfaceMeshLodPixels: meshLodPixels, surfaceMeshFilteringEnabled: process.env.FLUID_SVO_MESH_LOD_PIXELS !== undefined ? meshLodPixels > 0 : DEFAULT_SVO_RENDER_TUNING.surfaceMeshFilteringEnabled,

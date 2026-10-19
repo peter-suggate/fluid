@@ -627,7 +627,7 @@ if (recordScaleMultipliers) {
       traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels,
       rasterRigidDiscovery, coneFanout, optimizationExperiments);
     await armRenderer.initialize();
-    armRenderer.setRigidBodyCount(armBodies.count);
+    armRenderer.setRigidBodyCount(armBodies.count, armBodies.bounds);
     armRenderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
       coneRadianceReconstruction: radianceReconstruction, maximumShadedLights });
     armRenderer.setLightingOptions({
@@ -1074,7 +1074,7 @@ const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuff
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
-renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count);
+renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count, bodies.bounds);
 // FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS: the voxel-mesh "Filtered detail" threshold
 // (0 = off, the shipped default). This is the only lane that can enable the
 // surface mesh, so it is the only one that can price the toggle.

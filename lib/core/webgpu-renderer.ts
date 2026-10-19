@@ -1,3 +1,4 @@
+import { BUB_RENDER_SHAPE, robotRenderExtent, robotRenderRadius } from '../interaction/features/robot/render';
 import { interactionScene } from "../interaction/adapters/scene";
 import type { FluidStepRequest } from "../interaction/runtime/physics";
 import type { FluidExchange } from "../interaction/contracts";
@@ -683,7 +684,7 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigi
   const low = [Infinity, Infinity, Infinity];
   const high = [-Infinity, -Infinity, -Infinity];
   for (const body of bodies) {
-    const radius = boundingRadius(body);
+    const radius = robotRenderRadius(body) ?? boundingRadius(body);
     const position = [body.position_m.x, body.position_m.y, body.position_m.z];
     for (let axis = 0; axis < 3; axis += 1) {
       low[axis] = Math.min(low[axis], position[axis] - radius);
@@ -695,7 +696,7 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigi
   for (const body of bodies) {
     const position = [body.position_m.x, body.position_m.y, body.position_m.z];
     radius = Math.max(radius, Math.hypot(...[0, 1, 2].map((axis) => position[axis] - centre[axis]))
-      + boundingRadius(body));
+      + (robotRenderRadius(body) ?? boundingRadius(body)));
   }
   return { centre_m: centre, radius_m: radius };
 }
@@ -2932,7 +2933,9 @@ export class FluidLabRenderer {
     // system uploads only changed commands/roster entries, preserving GPU-owned
     // poses for all other bodies without spending a simulation step.
     if (!this.simulationRunning || this.currentInteractionScene) this.gpuFluid?.syncRigidBodies?.(bodies);
-    const residentRigidBuffer = this.gpuFluid?.rigidRenderBuffer;
+    // Interactive poses are CPU-owned; presentation may animate independently
+    // of the capsule uploaded to the fluid solver.
+    const residentRigidBuffer = this.currentInteractionScene ? undefined : this.gpuFluid?.rigidRenderBuffer;
     if (residentRigidBuffer) {
       this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));
     } else {
@@ -2940,11 +2943,13 @@ export class FluidLabRenderer {
       bodies.slice(0, 12).forEach((body, index) => {
         const offset = index * 16;
         const shape = body.description.shape;
-        const half = sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
+        const robotExtent = robotRenderExtent(body);
+        const half = robotExtent ?? sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
+        const orientation = body.renderOrientation ?? body.orientation;
         const color = SCENE_SHAPE_PALETTE_LINEAR[sceneShapeCode(shape)];
-        bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
-        bodyData.set([half[0], half[1], half[2], sceneShapeCode(shape)], offset + 4);
-        bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
+        bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, robotRenderRadius(body) ?? boundingRadius(body)], offset);
+        bodyData.set([half[0], half[1], half[2], robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape)], offset + 4);
+        bodyData.set([orientation.w, orientation.x, orientation.y, orientation.z], offset + 8);
         bodyData.set([color[0], color[1], color[2], body.description.id === selectedBodyId ? 1 : 0], offset + 12);
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);

@@ -77,6 +77,10 @@ export function meshAssetDistanceField(id: string): MeshVolumeDistanceField {
   if (!field) throw new Error(`Mesh asset ${id} has not loaded`);
   return field;
 }
+/** Input events may run before the render worker hands off scalar geometry. */
+export function meshAssetDistanceFieldReady(id: string): boolean {
+  return distanceFields.has(id);
+}
 export function sampleAssetDistance(field: SampledVolumeField, p: Vec3): number {
   const h = meshAssetHeader(field.asset), e = sampledVolumeExtent(field);
   return sampleMeshVolumeDistance(meshAssetDistanceField(field.asset), [p.x + h.origin[0] + e[0],
