@@ -1049,7 +1049,7 @@ export class UniformMixedFrame {
    // Off a kick the reconstruction's resolve already covers this layout, so
    // only clearAir's own 4h-lattice writes can change a hanging value.
    this.narrowBandFlip.clearAir(encoder);if(kick)this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);else if(!idle)this.phiResolve.encodeGated(encoder,this.phiResolveGroups.phi,this.narrowBandFlip.state,true);
-   if(p.redistance!==false&&!idle){if(this.narrowBandFlip.retire(encoder))this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);}
+   if(p.redistance!==false&&!idle){this.narrowBandFlip.retire(encoder);this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);}
    // Surface producers publish exact changes once; derived geometry and the
    // next surface model consume these revisions instead of rescanning phi.
    this.narrowBandFlip.exportSurfaceRevisions(encoder);

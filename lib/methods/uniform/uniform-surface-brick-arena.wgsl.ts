@@ -1,0 +1,342 @@
+/** The surface brick arena (docs/plans/surface-brick-arena-2026-10-19.md),
+ * phase 1: the end-step crossing search and fine redistance on dense 8³-cell
+ * bricks of the shared brick table (uniform-brick-table.ts). A brick's
+ * window is its 9³ represented vertices (8g .. 8g+8 an axis: every corner of
+ * its cells), gathered once from paged phi into the links buffer from
+ * NB_ARENA, slot·729.
+ *
+ * arenaMark: a thread a tile; a crossing candidate (depthTiles' rule) marks
+ * its brick arena core; the table build rings it (class arena).
+ * arenaGather (G): paged phi → the window, the value nbCrossingVertex gives
+ * each vertex from its positive-side cell's owner. @derived after retire:
+ * only what the coarse stores move (4h corners, interpolated and hanging
+ * vertices, by the resolve's formula), so no phi resolve runs between.
+ * arenaCross (X): core bricks; the crossing masks of their candidate tiles
+ * from the window in workgroup memory, and the reach of their crossing tiles.
+ * depthLists then lists the search and distance tiles as before.
+ * arenaNearest: the exact nearest crossing cell of each cell (bank B) of a
+ * reach-1 tile, separable in workgroup memory with depthNearest*'s ties.
+ * arenaDistance (R): bank A of the vertices whose cell lies in the brick, in
+ * a reach-2 tile: the nearest represented zero of the nearest crossing cells
+ * of its eight incident cells, from their bricks' windows.
+ * arenaFar: bank A of reach-2 tiles outside the arena (eight cells or more
+ * from any crossing candidate): today's no-crossing value.
+ * arenaStore (W): the fine redistance store; changed values only. */
+export const narrowBandArenaWGSL=/* wgsl */`
+override nbArenaDerived:bool=false;
+const NB_ARENA_WINDOW:u32=729u;
+var<workgroup> nbArenaWord:u32;
+// lane 0's value, uniform to every lane.
+fn nbArenaUniform(value:u32,lane:u32)->u32{workgroupBarrier();if(lane==0u){nbArenaWord=value;}return workgroupUniformLoad(&nbArenaWord);}
+// The arena: windows in the links buffer from NB_ARENA.
+fn nbArenaLoad(i:u32)->f32{return bitcast<f32>(links[NB_ARENA+i]);}
+fn nbArenaH()->f32{return min(params.hDt.x,min(params.hDt.y,params.hDt.z));}
+@compute @workgroup_size(64) fn arenaMark(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var t=gid.x;t<UM_TILES;t+=64u*groups.x){
+  if(!nbCrossingRequested(t)){continue;}
+  // A 4h tile among 4h tiles holds a crossing only if its corners straddle zero.
+  if(umTileMinimumWidth(t)==4u){
+   let origin=4u*umTileCoord(t);var low=3.0e38;var high=-3.0e38;
+   for(var k=0u;k<8u;k++){let value=nbCrossingVertex(t,origin,origin+4u*umCorner(k,2u));low=min(low,value);high=max(high,value);}
+   if(!(low<=0.0&&high>=0.0)){continue;}
+  }
+  ubMark(ubBrickOfTile(t),UB_ARENA_CORE);
+ }
+}
+// G. Workgroup: the 27 tiles of the window's cells (key, width | seam<<8) and the 5³ 4h corners from the tile below.
+var<workgroup> nbArenaTile:array<vec2u,27>;
+var<workgroup> nbArenaCorner:array<f32,125>;
+fn nbArenaCornerAt(q:vec3u,t0:vec3u)->f32{let n=q+1u-t0;return nbArenaCorner[n.x+5u*(n.y+5u*n.z)];}
+@compute @workgroup_size(256) fn arenaGather(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
+  let id=ubBrick(slot);let block=id>>6u;let origin=ubBrickOrigin(id);let page=vec3i(origin>>vec3u(5u));let t0=origin/4u;
+  umLoadAddressPlan(block,lane);
+  if(lane<27u){let t=umTileAt(t0+umCorner(lane,3u));nbArenaTile[lane]=vec2u(t,umTileWidth(t)|select(0u,256u,umTileMaximumWidth(t)!=umTileMinimumWidth(t)));}
+  if(lane<125u){let q=vec3i(t0)+vec3i(umCorner(lane,5u))-1;nbArenaCorner[lane]=select(0.0,umLoadCorner(vec3u(4*q)),all(q>=vec3i(0)));}
+  workgroupBarrier();
+  // The h texel of the brick's local 0: an owned vertex (every index 1..8) is that plus its index.
+  let texel=33*umBlockCoord(block)+vec3i(origin&vec3u(31u));
+  for(var k=lane;k<NB_ARENA_WINDOW;k+=256u){
+   let l=umCorner(k,9u);let p=origin+l;
+   var c=p;if(any(l==vec3u(8u))){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
+   let tc=c/4u;let r=tc-t0;let info=nbArenaTile[r.x+3u*(r.y+3u*r.z)];
+   let aligned=all((p&vec3u(3u))==vec3u(0u));var value=0.0;var write=true;
+   if((info.y&255u)==1u){
+    if(nbArenaDerived){
+     // A hanging vertex of a seam tile: the phi resolve's sum of its 4h corners.
+     var incident=0u;if((info.y&256u)!=0u&&!aligned){incident=umCoarseIncident(info.x,p-4u*tc);}
+     if(incident!=0u){
+      let at=umCorner(firstTrailingBit(incident),2u);let local=p-4u*tc;
+      let t=vec3f(local+(vec3u(1)-at)*4u)/4.0;var values:array<f32,8>;
+      for(var j=0u;j<8u;j++){
+       let corner=umCorner(j,2u);let w=umVertexWeight(t,corner);let m=at+corner;
+       if(w>0.0){values[j]=w*nbArenaCornerAt(tc+m-1u,t0);}
+      }
+      value=umVertexSum8(values);
+     }else if(aligned){value=umLoadVertex(p);}else{write=false;}
+    }else if(all(l!=vec3u(0u))){value=udTexel_phi(texel+vec3i(l)).x;}
+    else{value=umLoadVertex(p);}
+   }else if(aligned){value=nbArenaCornerAt(p/4u,t0);}
+   else{
+    // nbCrossingVertex's 4h arithmetic, from the cached corners.
+    let low=tc*4u;let t=(vec3f(p)-vec3f(low))/4.0;let zero=t==vec3f(0.0);
+    if(u32(zero.x)+u32(zero.y)+u32(zero.z)>=2u){
+     let a=select(select(2u,1u,!zero.y),0u,!zero.x);var e=vec3u(0);e[a]=1u;
+     value=nbArenaCornerAt(tc,t0)*(1.0-t[a])+nbArenaCornerAt(tc+e,t0)*t[a];
+    }else{
+     var values:array<f32,8>;
+     for(var j=0u;j<8u;j++){let corner=umCorner(j,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));values[j]=nbArenaCornerAt(tc+corner,t0)*w.x*w.y*w.z;}
+     value=umVertexSum8(values);
+    }
+   }
+   if(write){links[NB_ARENA+NB_ARENA_WINDOW*slot+k]=bitcast<u32>(value);}
+  }
+ }
+}
+// X and R stage the window.
+var<workgroup> nbArenaWindow:array<f32,729>;
+fn nbArenaVertex(l:vec3u)->f32{return nbArenaWindow[l.x+9u*(l.y+9u*l.z)];}
+var<workgroup> nbArenaMask:array<atomic<u32>,16>;
+var<workgroup> nbArenaCandidate:array<u32,8>;
+var<workgroup> nbArenaCrossed:atomic<u32>;
+@compute @workgroup_size(256) fn arenaCross(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA_CORE)==0u){continue;}
+  let id=ubBrick(slot);let origin=ubBrickOrigin(id);let t0=origin/4u;
+  for(var k=lane;k<NB_ARENA_WINDOW;k+=256u){nbArenaWindow[k]=nbArenaLoad(NB_ARENA_WINDOW*slot+k);}
+  if(lane<16u){atomicStore(&nbArenaMask[lane],0u);}if(lane==0u){atomicStore(&nbArenaCrossed,0u);}
+  workgroupBarrier();
+  if(lane<8u){
+   let t=umTileAt(t0+umCorner(lane,2u));var candidate=nbCrossingRequested(t);
+   if(candidate&&umTileMinimumWidth(t)==4u){
+    var low=3.0e38;var high=-3.0e38;
+    for(var k=0u;k<8u;k++){let value=nbArenaVertex(4u*(umCorner(lane,2u)+umCorner(k,2u)));low=min(low,value);high=max(high,value);}
+    candidate=low<=0.0&&high>=0.0;
+   }
+   nbArenaCandidate[lane]=select(UM_TILES,t,candidate);
+  }
+  workgroupBarrier();
+  for(var k=lane;k<512u;k+=256u){
+   let l=umCorner(k,8u);let r=l/4u;let tile=r.x|(r.y<<1u)|(r.z<<2u);
+   if(nbArenaCandidate[tile]==UM_TILES){continue;}
+   var low=3.0e38;var high=-3.0e38;
+   for(var j=0u;j<8u;j++){let value=nbArenaVertex(l+umCorner(j,2u));low=min(low,value);high=max(high,value);}
+   // Exact zero belongs to either incident cell; flat plateaus and walls do not.
+   let m=l&vec3u(3u);
+   if(low<=0.0&&high>=0.0&&low<high&&umCellOpen(vec3i(origin+l))>1e-5){atomicOr(&nbArenaMask[2u*tile+(m.z>>1u)],1u<<(m.x+4u*m.y+16u*(m.z&1u)));}
+  }
+  workgroupBarrier();
+  if(lane<8u){
+   let t=nbArenaCandidate[lane];let mask=vec2u(atomicLoad(&nbArenaMask[2u*lane]),atomicLoad(&nbArenaMask[2u*lane+1u]));
+   if(t!=UM_TILES&&(mask.x|mask.y)!=0u){
+    atomicStore(&bins[NB_BAND_MASK+2u*t],mask.x);atomicStore(&bins[NB_BAND_MASK+2u*t+1u],mask.y);atomicOr(&nbArenaCrossed,1u<<lane);
+   }
+  }
+  workgroupBarrier();
+  // The reach of the brick's crossing tiles, a target tile once: 3 within two tiles of one, 2 at three.
+  let crossed=atomicLoad(&nbArenaCrossed);
+  if(crossed!=0u){for(var k=lane;k<512u;k+=256u){
+   let r=vec3i(umCorner(k,8u))-3;var reach=0u;
+   for(var j=0u;j<8u;j++){
+    if((crossed&(1u<<j))==0u){continue;}
+    let o=abs(r-vec3i(umCorner(j,2u)));let d=max(o.x,max(o.y,o.z));
+    if(d<=2){reach=3u;}else if(d==3){reach|=2u;}
+   }
+   if(reach==0u){continue;}
+   let key=umTileKey(vec3i(t0)+r);if(key>=UM_TILES){continue;}
+   if((atomicLoad(&bins[NB_BAND_REACH+key])&reach)!=reach){atomicOr(&bins[NB_BAND_REACH+key],reach);}
+  }}
+ }
+}
+// Nearest crossing cell (bank B). Rows: the 18×18 (y,z) rows from five
+// cells below the brick; masks of the 6³ tiles from two below.
+var<workgroup> nbArenaKey:array<u32,216>;
+var<workgroup> nbArenaMasks:array<vec2u,216>;
+var<workgroup> nbArenaX:array<u32,648>;
+var<workgroup> nbArenaY:array<u32,288>;
+fn nbArenaCode(words:u32,x:u32)->u32{return (words>>(8u*(x&3u)))&255u;}
+@compute @workgroup_size(256) fn arenaNearest(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
+  let id=ubBrick(slot);let origin=ubBrickOrigin(id);let t0=origin/4u;
+  if(lane<216u){
+   let key=umTileKey(vec3i(t0)+vec3i(umCorner(lane,6u))-2);nbArenaKey[lane]=key;var mask=vec2u(0u);
+   if(key<UM_TILES){mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));}
+   nbArenaMasks[lane]=mask;
+  }
+  workgroupBarrier();
+  // X: the nearest crossing along x within five, ties to the left (depthNearestX).
+  for(var row=lane;row<324u;row+=256u){
+   let ry=i32(row%18u)-5;let rz=i32(row/18u)-5;let ty=u32(2+(ry>>2u));let tz=u32(2+(rz>>2u));
+   let shift=4u*u32(ry&3)+16u*u32(rz&1);let word=u32(rz&3)>>1u;
+   // The row's cells from eight below the brick: bit i, cell origin.x - 8 + i.
+   var bits=0u;
+   if(nbArenaKey[2u+6u*ty+36u*tz]<UM_TILES){for(var tx=0u;tx<6u;tx++){bits|=((nbArenaMasks[tx+6u*ty+36u*tz][word]>>shift)&15u)<<(4u*tx);}}
+   var packed=vec2u(0xffffffffu);
+   if(bits!=0u){
+    packed=vec2u(0u);
+    for(var x=0u;x<8u;x++){
+     let centre=x+8u;let left=bits&((1u<<(centre+1u))-1u);let right=bits>>centre;
+     let dl=select(255u,centre-firstLeadingBit(left),left!=0u);let dr=select(255u,firstTrailingBit(right),right!=0u);
+     let delta=min(dl,dr);let code=select(255u,select(5u+dr,5u-dl,dl<=dr),delta<=5u);
+     packed[x>>2u]|=code<<(8u*(x&3u));
+    }
+   }
+   nbArenaX[2u*row]=packed.x;nbArenaX[2u*row+1u]=packed.y;
+  }
+  workgroupBarrier();
+  // Y: the brick's 8 rows of y, every z; strict, lower offsets first (depthNearestY).
+  for(var job=lane;job<288u;job+=256u){
+   let half=job&1u;let row=job>>1u;let yi=row%8u;let rz=row/8u;var packed=0u;
+   for(var x=4u*half;x<4u*half+4u;x++){
+    var best=255u;var distance=1000;
+    for(var o=-5;o<=5;o++){
+     let code=nbArenaCode(nbArenaX[2u*(u32(i32(yi)+5+o)+18u*rz)+half],x);
+     let dx=i32(code)-5;let d=dx*dx+o*o;
+     if(code!=255u&&d<distance){best=code|(u32(o+5)<<4u);distance=d;}
+    }
+    packed|=best<<(8u*(x&3u));
+   }
+   nbArenaY[job]=packed;
+  }
+  workgroupBarrier();
+  // Z: every cell of the brick in a reach-1 tile (depthNearestZ).
+  for(var k=lane;k<512u;k+=256u){
+   let l=umCorner(k,8u);let cell=origin+l;let r=l/4u+2u;let tile=nbArenaKey[r.x+6u*r.y+36u*r.z];
+   if(tile>=UM_TILES||(atomicLoad(&bins[NB_BAND_REACH+tile])&1u)==0u){continue;}
+   var distance=1000;var best=vec3i(0);
+   for(var o=-5;o<=5;o++){
+    let code=nbArenaCode(nbArenaY[2u*(l.y+8u*u32(i32(l.z)+5+o))+(l.x>>2u)],l.x);
+    if(code==255u){continue;}
+    let dx=i32(code&15u)-5;let dy=i32(code>>4u)-5;let d=dx*dx+dy*dy+o*o;
+    if(d<distance){distance=d;best=vec3i(cell)+vec3i(dx,dy,o);}
+   }
+   var nearest=NB_NO_SURFACE;if(distance<1000){nearest=umCellAt(vec3u(best));}
+   atomicStore(&bins[NB_DEPTH_B+64u*tile+((l.x&3u)|((l.y&3u)<<2u)|((l.z&3u)<<4u))],nearest);
+  }
+ }
+}
+// R. Workgroup: the window, the record, the 4³ tiles from one below (key,
+// reach) and bank B of the 10³ cells from one below (none outside reach 1).
+var<workgroup> nbArenaRecord:array<u32,27>;
+var<workgroup> nbArenaReach:array<vec2u,64>;
+var<workgroup> nbArenaNearestCell:array<u32,1000>;
+@compute @workgroup_size(256) fn arenaDistance(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);let h=nbArenaH();
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
+  let id=ubBrick(slot);let block=id>>6u;let origin=ubBrickOrigin(id);let page=vec3i(origin>>vec3u(5u));let t0=vec3i(origin/4u);
+  umLoadAddressPlan(block,lane);
+  for(var k=lane;k<NB_ARENA_WINDOW;k+=256u){nbArenaWindow[k]=nbArenaLoad(NB_ARENA_WINDOW*slot+k);}
+  if(lane<27u){nbArenaRecord[lane]=ubNeighbour(slot,lane);}
+  if(lane<64u){let key=umTileKey(t0+vec3i(umCorner(lane,4u))-1);nbArenaReach[lane]=vec2u(key,select(0u,atomicLoad(&bins[NB_BAND_REACH+key]),key<UM_TILES));}
+  workgroupBarrier();
+  for(var k=lane;k<1000u;k+=256u){
+   let c=vec3i(origin)+vec3i(umCorner(k,10u))-1;let r=vec3u((c>>vec3u(2u))-t0+1);let tile=nbArenaReach[r.x+4u*(r.y+4u*r.z)];
+   var nearest=NB_NO_SURFACE;
+   if(tile.x<UM_TILES&&(tile.y&1u)!=0u){nearest=atomicLoad(&bins[NB_DEPTH_B+64u*tile.x+u32((c.x&3)|((c.y&3)<<2u)|((c.z&3)<<4u))]);}
+   nbArenaNearestCell[k]=nearest;
+  }
+  workgroupBarrier();
+  for(var k=lane;k<NB_ARENA_WINDOW;k+=256u){
+   let l=umCorner(k,9u);let p=origin+l;
+   // A vertex is the brick's whose cell (held in the page where a wall lies across a high face) lies in it.
+   var c=p;if(any(l==vec3u(8u))){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
+   if(any(c>=origin+8u)){continue;}
+   let r=c/4u-vec3u(t0)+1u;if((nbArenaReach[r.x+4u*(r.y+4u*r.z)].y&2u)==0u){continue;}
+   let initial=nbArenaWindow[k];var value=initial/h;
+   if(abs(initial)>1e-8){
+    // With no crossing cell within five of an incident cell the level set stands, no nearer than five cells.
+    var distance=max(abs(value),5.0);var found=3.402823e38;var seen:array<u32,8>;
+    for(var e=0u;e<8u;e++){
+     let cell=umCorner(e,2u);let n=nbArenaNearestCell[(l.x+1u-cell.x)+10u*((l.y+1u-cell.y)+10u*(l.z+1u-cell.z))];seen[e]=n;
+     if(n==NB_NO_SURFACE){continue;}
+     var repeat=false;for(var j=0u;j<e;j++){if(seen[j]==n){repeat=true;}}if(repeat){continue;}
+     let at=umCellCoord(n);let b=vec3i(at>>vec3u(3u))-vec3i(origin>>vec3u(3u))+1;
+     if(any(b<vec3i(0))||any(b>vec3i(2))){continue;}
+     let s=nbArenaRecord[u32(b.x+3*b.y+9*b.z)];if(s==UB_NONE){continue;}
+     // The cell's box bounds its zero's distance from below: a candidate no nearer than the best is skipped.
+     let q=vec3f(p)-vec3f(at);if(length(max(max(-q,q-vec3f(1.0)),vec3f(0.0)))>=found){continue;}
+     // The brick's own cells read the staged window; a neighbour's, its window in the arena.
+     let w=at&vec3u(7u);let own=all(b==vec3i(1));let base=NB_ARENA_WINDOW*s+w.x+9u*(w.y+9u*w.z);var v:array<f32,8>;
+     for(var j=0u;j<8u;j++){let corner=umCorner(j,2u);let i=w+corner;v[j]=select(nbArenaLoad(base+corner.x+9u*(corner.y+9u*corner.z)),nbArenaWindow[i.x+9u*(i.y+9u*i.z)],own)/h;}
+     let d=nbCellDistance(vec3f(p)-vec3f(at),v);if(d>=0.0){found=min(found,d);}
+    }
+    if(found<3.402823e38){distance=found;}
+    value=sign(initial)*max(distance,1e-8/h);
+   }
+   atomicStore(&bins[NB_DEPTH_A+umVertexAt(p)],bitcast<u32>(value));
+  }
+ }
+}
+// Bank A of a distance tile outside the arena: no crossing cell lies within
+// eight of its vertices, so none within five of their cells.
+@compute @workgroup_size(128) fn arenaFar(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let h=nbArenaH();
+ for(var j=group.x;j<atomicLoad(&bins[NB_BAND+2u]);j+=groups.x){
+  let tile=atomicLoad(&bins[NB_BAND_DISTANCE+j]);let s=ubSlot(ubBrickOfTile(tile));
+  if(lane>=125u||(s!=UB_NONE&&(ubClass(s)&UB_ARENA)!=0u)){continue;}
+  let origin=4u*umTileCoord(tile);let p=origin+umCorner(lane,5u);
+  let c=vec3u(umCellNearFromPage(tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));if(any(c/4u!=origin/4u)){continue;}
+  let initial=umSampleVertex(vec3f(p));var value=initial/h;
+  if(abs(initial)>1e-8){value=sign(initial)*max(abs(value),5.0);}
+  atomicStore(&bins[NB_DEPTH_A+umVertexAt(p)],bitcast<u32>(value));
+ }
+}
+// The fine tile redistanceFine wrote p from: a regular h tile its high
+// corners and the low faces nothing is stored below, any other h tile the
+// vertices it is the authority of. xyz its tile coordinate, w its key (UB_NONE: none).
+fn nbArenaWriter(p:vec3u)->vec4u{
+ let plane=(p&vec3u(3u))==vec3u(0u);let sides=u32(plane.x)|(u32(plane.y)<<1u)|(u32(plane.z)<<2u);
+ for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
+  let q=vec3i(p>>vec3u(2u))-vec3i(umCorner(k,2u));let key=umTileKey(q);
+  if(!umKeyStored(key)||umTileWidth(key)!=1u){continue;}
+  let local=vec3u(vec3i(p)-4*q);
+  if(umTileMaximumWidth(key)==1u&&umTileMinimumWidth(key)==1u){if(any(local==vec3u(0u))&&!all((local>vec3u(0u))|umLowOpen(4*q))){continue;}}
+  else{let a=umVertexAuthority(p);if(a.width!=1u||a.tile!=key){continue;}}
+  return vec4u(vec3u(q),key);
+ }
+ return vec4u(0u,0u,0u,UB_NONE);
+}
+var<workgroup> nbArenaFine:atomic<u32>;
+@compute @workgroup_size(256) fn arenaStore(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);let h=nbArenaH();
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
+  let id=ubBrick(slot);let block=id>>6u;let origin=ubBrickOrigin(id);let t0=origin/4u;
+  if(lane==0u){atomicStore(&nbArenaFine,0u);}
+  umLoadAddressPlan(block,lane);workgroupBarrier();
+  if(lane<8u&&umTileWidth(umTileAt(t0+umCorner(lane,2u)))==1u){atomicOr(&nbArenaFine,1u<<lane);}
+  // Only h tiles write: fine, bit x+2y+4z of the brick's h tiles.
+  let fine=nbArenaUniform(atomicLoad(&nbArenaFine),lane);if(fine==0u){continue;}
+  let page=vec3i(origin>>vec3u(5u));
+  for(var k=lane;k<NB_ARENA_WINDOW;k+=256u){
+   let l=umCorner(k,9u);let p=origin+l;
+   // The brick's tiles holding p (an axis: tile 0 at 0..4, tile 1 at 4..8); none an h tile, no writer.
+   let a=select(vec3u(1u),vec3u(3u),l==vec3u(4u))<<select(vec3u(0u),vec3u(1u),l>vec3u(4u));
+   var held=0u;for(var j=0u;j<8u;j++){let q=umCorner(j,2u);if(all(((a>>q)&vec3u(1u))!=vec3u(0u))){held|=1u<<j;}}
+   if((held&fine)==0u){continue;}
+   let writer=nbArenaWriter(p);
+   if(writer.w==UB_NONE||any(writer.xyz<t0)||any(writer.xyz>t0+1u)){continue;}
+   // Every vertex of a COLD region's tile is COLD: redistance holds it.
+   if(nbTileCold(writer.w)||nbVertexCold(p)){continue;}
+   // An interface vertex's magnitude places its zero; a buried one is no distance sample.
+   if(nbInterfaceVertex(p)||umVertexBuried(vec3i(p))){continue;}
+   // A writer tile lies in the brick, so its page is the brick's.
+   var c=p;if(any(l==vec3u(8u))){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
+   // The window holds the h texel wherever the vertex's cell is an h tile's.
+   var old=0.0;if(umTileWidth(umTileAt(c/4u))==1u){old=nbArenaLoad(NB_ARENA_WINDOW*slot+k);}else{old=textureLoad(outputPhi,vec3i(p)).x;}
+   var value=old;
+   if((nbBandReach(c)&2u)!=0u){value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(p)]))*h;}
+   // Past reach: the old sign, at least six cells.
+   else if(abs(old)>1e-8&&abs(old)<6.0*h){value=sign(old)*6.0*h;}
+   if(bitcast<u32>(value)==bitcast<u32>(old)){continue;}
+   nbMarkPhiChanged(p);textureStore(outputPhi,vec3i(p),vec4f(value));
+  }
+ }
+}
+`;

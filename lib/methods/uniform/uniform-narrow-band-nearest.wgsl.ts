@@ -43,7 +43,6 @@ var<workgroup> nbReuseLive:u32;
   workgroupBarrier();
   if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],select(1u,3u,atomicLoad(&nbReuseClean)!=0u)|select(0u,4u,umTileLive(tile)));}
   workgroupBarrier();
-  nbAggregateMetricPlane(region,lane);
  }
 }
 var<workgroup> nbMetricClean:atomic<u32>;

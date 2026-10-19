@@ -19,7 +19,6 @@ export function narrowBandReuseLayout(base:number,regions:number,capacity=region
 }
 export type NarrowBandReuseLayout=ReturnType<typeof narrowBandReuseLayout>;
 export function narrowBandReuseWGSL(l:NarrowBandReuseLayout){return /* wgsl */`
-override nbMetricPlanes:bool=true;
 // A domain of the shared frame plan, kept in this arena to fit the storage
 // binding budget. Header: enabled, region count; flags, request masks, list.
 const NB_FRAME_PLAN:u32=${l.framePlan}u;
@@ -175,11 +174,6 @@ fn nbCommitCrossing(tile:u32,mask:vec2u){
  let region=nbReuseRegion(tile);if(!nbReuseCacheEnabled()||region>=NB_REUSE_CAPACITY){return;}
  let local=nbReuseLocal(tile);let at=NB_REUSE_MASK+128u*region+2u*local;
  atomicStore(&bins[at],mask.x);atomicStore(&bins[at+1u],mask.y);atomicStore(&bins[NB_REUSE_VALID+64u*region+local],1u);
-}
-// A metric query and its geometry/trace support fit inside the adjacent
-// 16h regions. Exact producer revisions include their positive phi closure.
-fn nbMetricRegionReusable(tile:u32)->bool{
- let r=nbReuseRegion(tile);return nbReuseCacheEnabled()&&r<NB_REUSE_CAPACITY&&(atomicLoad(&bins[NB_REUSE_NEAREST_FLAGS+r])&2u)!=0u;
 }
 fn nbNearestReusable(tile:u32)->bool{
  let r=nbReuseRegion(tile);return nbReuseCacheEnabled()&&r<NB_REUSE_CAPACITY&&(atomicLoad(&bins[NB_REUSE_NEAREST_FLAGS+r])&1u)!=0u;

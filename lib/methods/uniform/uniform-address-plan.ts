@@ -74,7 +74,7 @@ fn umPlannedVertexSlot(v:vec3i,bits:u32)->vec4u{
 
 /** Every integrated consumer, used by the benchmark's per-stage ablations. */
 export const UNIFORM_ADDRESS_PLAN_CANDIDATES = [
-  "depthSeeds", "depthGeometry", "buildDistance", "surfaceSplatOccupied",
+  "depthSeeds", "surfaceSplatOccupied",
   "coupleFine", "transferProperties", "advectFine", "momentumFine",
   "forcesRegular", "forcesRegularCoarse", "forces", "momentumStep", "project", "publishList",
 ] as const;
