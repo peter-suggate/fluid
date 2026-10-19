@@ -179,3 +179,32 @@ A brick-apron layout replaces those three pieces and the bindings
   
   This is the gap between 0.87 and 0.26 ms.
 - Remap, geometric fill and forces, following the phase-0 stage design.
+
+## Phase 2, part 1 (2026-10-20, 972bf9de): classify, then trace a list
+
+`momentumFine` is now two lean launches.
+
+**Classify** (`momentumFine`) resolves the tile's context once:
+- its six sides (`uniformTileContextSidesWGSL`: key, width, page kind);
+- the cold states and the tier;
+- the liveness of the tile's 64 cells and of the 48 cells across its positive sides.
+
+It then makes the freeze, retained, cull, wall, drop and affine tests from workgroup memory:
+- a cell with no traced face stores its texel there;
+- a cell with a traced face is listed with its partial values.
+
+**Trace** (`momentumTrace`) strides that list on a fixed grid, a lane per component, with one `umUnitTrace` call site. The list is sized at the h-tile capacity upfront.
+
+**Measured** on the pour, frames 94–100 (geo1 and m2a are similar states):
+
+| Pass | geo1 | m2a |
+|---|---|---|
+| h tiles | 6342 | 6148 |
+| momentumFine | 0.721 ms | 0.346 ms (classify) |
+| momentumTrace | – | 0.197 ms |
+
+The letters at 1/60 s match HEAD: f53 yMax 128, liquid 1,264,909 against 1,264,895, occupancy L1 0.2–0.3%.
+
+The bound is 0.36 ms for `momentumFine` (see Speed of light). The pair now runs at 0.54 ms, which is 66% of the bound.
+
+**Paused (2026-10-20).** Part 2 (remap, fill, forces and atlas) moves into the brick-arena plan; see `pressure-rfe-speed-of-light-2026-10-20.md`.
