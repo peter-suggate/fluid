@@ -901,13 +901,27 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
   // end 0.01 cell inside that face. An AIR page or a stored one does not.
   let endpoint=nbPointNearIn(vec3i(floor(q)),end,0.01);
   nbHullInclude(endpoint);
+  // A trace box the fast launch cannot prove uncut: with no body in the
+  // scene its walk alone is left (advectWalk), else the general launch
+  // redoes the sample from its record.
+  if(routed&&!nbHullUncut()){
+   if(umBodyCount()==0u){nbListWalk(i,p,q,end);return NbMoved(p,1u);}
+   return NbMoved(p,2u);
+  }
+  return nbFinish(p,q,end,endpoint,ballistic,nbFastSolid()&&umBodyCount()==0u&&nbHullUncut());
+}
+// The trace's end: the solid walk from start to endpoint (end held inside
+// a SOLID page's face), the arrival and its heat. uncut: the box is proven
+// open, so the walk would block nothing.
+fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,uncut:bool)->NbMoved{
+  var p=record;var q=start;
   // With no embedded solids the segment stays inside the convex container
   // after endpoint clamping. There are no voxel crossings to test; retaining
   // the RK3 endpoint also avoids accumulating rounded collision increments.
   // Nor are there where the solid's record proves the trace's box open and
   // uncut (nbHullUncut) in a scene with no body or terrain: the walk would
   // block nothing and the field's contact find no hit.
-  if(!umSolidEnabled()||(nbFastSolid()&&umBodyCount()==0u&&nbHullUncut())){q=endpoint;}else{
+  if(!umSolidEnabled()||uncut){q=endpoint;}else{
    // The long lane walks the chord in strides of at most half a cell an axis.
    let travel=endpoint-q;let walk=max(1u,u32(ceil(2.0*max(abs(travel.x),max(abs(travel.y),abs(travel.z))))));
    // A voxel face stops a particle as a container wall does: the crossing
@@ -965,7 +979,6 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    }
   }
   for(var axis=0u;axis<3u;axis++){if(endpoint[axis]!=end[axis]){p.velocity[axis]=0.0;}}
-  if(routed&&!nbHullUncut()){return NbMoved(p,2u);}
   // A sample that ends in a page that holds no storage is fatal; it is not
   // appended.
   if(!umPointPresent(q)){nbArrived(q);return NbMoved(p,1u);}
@@ -977,6 +990,28 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
   var heat=p.position.w;
   if(!ballistic){let arrived=nbTargetHeat(q);if(arrived>0.0){heat=min(heat,max(arrived,1.0));}}
   p.position=vec4f(q,heat);return NbMoved(p,0u);
+}
+// The walk list: an index a record in the dead compact stream past the slow
+// list (both hold at most a bank's records), the record (its trace's start
+// in position) back in its current-bank slot, its end in its motion words
+// (the seed list's, consumed before the move; the deposit writes them next).
+const NB_WALK_PARTICLES:u32=23u;
+fn nbWalkList()->u32{return UM_CELL_KEYS+2u*arrayLength(&particles);}
+fn nbListWalk(i:u32,p:Particle,start:vec3f,end:vec3f){
+ let j=atomicAdd(&state[NB_WALK_PARTICLES],1u);links[nbWalkList()+j]=i;
+ var r=p;r.position=vec4f(start,p.position.w);particles[i]=r;
+ let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let e=bitcast<vec3u>(end);links[a]=e.x;links[a+1u]=e.y;links[a+2u]=e.z;
+}
+// The walk lane: a listed sample's solid walk and arrival, without the
+// trace's samplers. It appends as the flat lane does.
+@compute @workgroup_size(64) fn advectWalk(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let n=atomicLoad(&state[NB_WALK_PARTICLES]);
+ for(var j=gid.x;j<n;j+=64u*groups.x){
+  let i=links[nbWalkList()+j];let p=particles[i];let start=p.position.xyz;
+  let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let end=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));
+  let r=nbFinish(p,start,end,nbPointNearIn(vec3i(floor(start)),end,0.01),nbParticleMode(p)==1.0,false);
+  if(r.status==0u){nbMoveAppend(r.p);}
+ }
 }
 // The move: a workgroup a job of the row (NARROW_BAND_PARTICLE_GRID). A job
 // is 64 records of an input slab (last move's current slabs: a dense brick
@@ -1270,9 +1305,9 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","depthCoarse","redistanceCoarse",
+  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit"].map(async name=>{
-   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","seed","seedSources"].includes(entryPoint)?1:0]!;
+   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources"].includes(entryPoint)?1:0]!;
    const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
@@ -1286,7 +1321,7 @@ ${narrowBandSurfaceWGSL}
   this.crossingDomain=this.compile(["depthPlanSeed","depthPlanExpand"],"surface","shared frame crossing domain");
   const search=["depthTiles","depthSeeds",...narrowBandNearestControlEntries,...narrowBandNearestEntries];
   this.batches={
-   advect:this.compile(["advectParticles","advectParticlesDeferred"],"advectParticles","advectParticles"),
+   advect:this.compile(["advectParticles","advectParticlesDeferred","advectWalk"],"advectParticles","advectParticles"),
    // The slabs (uniform-particle-slab.wgsl): last move's slabs and the
    // spills mark their bricks, the shared table lists them and their ring,
    // one workgroup sizes the scratch slabs. After the move one workgroup
@@ -1367,8 +1402,8 @@ ${narrowBandSurfaceWGSL}
   const b=this.compiled;
   this.crossingCanPlan=false;this.crossingIsPlanned=false;this.framePlan?.invalidateDomain(this);
   this.writeStep(dt,+openTop,gravity);
-  // Words 4 to 10 are the step's (10: advect's slow samples); word 11, the arrival fatal's page, stays.
-  encoder.clearBuffer(this.state,16,28);
+  // Words 4 to 10 are the step's (10: advect's slow samples) and 23 (its walk list); word 11, the arrival fatal's page, stays.
+  encoder.clearBuffer(this.state,16,28);encoder.clearBuffer(this.state,4*23,4);
   this.bootstrap(encoder);
   // G2P reads the samples' depth from the last step's band (its tiers
   // too: the snapshot's, so a COLD sample takes no delta from either).

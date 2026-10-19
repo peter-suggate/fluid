@@ -28,7 +28,8 @@
  *   [17] the move serial; [18] the scratch extent; [19] the input entries;
  *   [20] the output entries (slabs); [21] the current spill reserve's
  *   records (word 15 is the air pass's change gate); [22] the move's slab
- *   jobs (64-record chunks of the input entries).
+ *   jobs (64-record chunks of the input entries); [23] the walk list's
+ *   records (the fast launch's samples whose trace box a solid cuts).
  * - From NB_SLAB_RECORD, 12 words a brick id: [0] scratch base, [1] scratch
  *   cap (after slabPlace: the overflow cursor), [2] scratch cursor (after
  *   slabPlace: the appends), [3] stamp (the serial of the move that sized
