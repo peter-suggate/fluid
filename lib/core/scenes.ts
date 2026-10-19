@@ -7,7 +7,7 @@ import {
   NBFLIP_DAM_CYLINDERS, NBFLIP_DAM_GRID, NBFLIP_DAM_SCENE_ID, NBFLIP_SIMPLE_DAM_GRID, NBFLIP_SIMPLE_DAM_SCENE_ID,
   NBFLIP_POUR_GRID, NBFLIP_POUR_SCENE_ID, NBFLIP_POUR_STREAM_FRAMES,
   NBFLIP_TEASER_CYLINDER_COUNT, NBFLIP_TEASER_GRID, NBFLIP_TEASER_SCENE_ID, NBFLIP_WAVES_GRID, NBFLIP_WAVES_SCENE_ID,
-  createNbflipDam, createNbflipLetters, createNbflipPour, createNbflipSimpleDam, createNbflipTeaser, createNbflipWaves,
+  createNbflipDam, createNbflipLetters, createNbflipPour, createNbflipPourPreview, createNbflipSimpleDam, createNbflipTeaser, createNbflipWaves,
   nbflipDamCamera, nbflipLettersCamera, nbflipPourCamera, nbflipSimpleDamCamera, nbflipTeaserCamera, nbflipWavesCamera,
 } from "./nbflip-paper-scenes";
 import {
@@ -1863,6 +1863,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     environment: "stage",
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipPour,
+    preview: createNbflipPourPreview,
     camera: nbflipPourCamera(),
   }),
   defineScene({

@@ -119,7 +119,7 @@ export function validateProceduralSolid(boundary: ProceduralSolidBoundary): void
  * geometry. Undo recompiles from the immutable source and restores validity. */
 export class ProceduralSolidField {
   readonly bricks = new Map<string, { values: readonly number[]; valid: Uint32Array }>();
-  constructor(readonly source: ProceduralSolidBoundary, edits: readonly SolidWorldVoxelPatch[]) {
+  constructor(readonly source: ProceduralSolidBoundary, private readonly edits: readonly SolidWorldVoxelPatch[]) {
     const rasterizers = edits.map(e => e.operation === "paint" ? undefined : solidPatchKinds.get(e).rasterizer(e));
     const row = createSolidPatchRowBuffer(B);
     for (const b of source.bricks) {
@@ -140,6 +140,10 @@ export class ProceduralSolidField {
       }
       this.bricks.set(b.origin.map(v => v / 8).join(), { values: b.values, valid });
     }
+  }
+  /** A presentation-only edit mask; the source field and solver mask stay intact. */
+  withEdits(edits: readonly SolidWorldVoxelPatch[]): ProceduralSolidField {
+    return edits.length ? new ProceduralSolidField(this.source, [...this.edits, ...edits]) : this;
   }
   at(p: V3) {
     const c = p.map(Math.floor), b = this.bricks.get(c.map(v => v >> 3).join());

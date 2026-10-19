@@ -1,5 +1,6 @@
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type InitialLiquidVolume, type SceneDescription, type ScheduledLiquidDrop } from "./model";
 import { cameraPosition } from "./math";
+import { bakeProceduralSolid } from "./procedural-solid";
 import type { LiquidExtrusion } from "./liquid-extrusion";
 import type { MethodProfile } from "./method-contract";
 import type { SolidWorldVoxelPatch } from "./solid-world";
@@ -159,25 +160,6 @@ function cylinderVoxels(centreX: number, centreZ: number, radius: number, top: n
     const half = Math.sqrt(radius ** 2 - (z + 0.5 - centreZ) ** 2);
     const from = Math.ceil(centreX - half - 0.5), to = Math.floor(centreX + half - 0.5) + 1;
     if (to > from) runs.push({ operation: "fill", minimum: [from, 0, z], maximumExclusive: [to, height, z + 1], materialId: VOXEL_MATERIAL_IDS.cylinder });
-  }
-  return runs;
-}
-
-/**
- * An upright tube standing on the floor, as voxel runs: every cell whose
- * centre lies between its two radii. In lattice cells.
- */
-function tubeVoxels(centreX: number, centreZ: number, inner: number, outer: number, top: number): SolidWorldVoxelPatch[] {
-  const runs: SolidWorldVoxelPatch[] = [], height = Math.round(top);
-  const chord = (radius: number, z: number): readonly [from: number, to: number] => {
-    const half = Math.sqrt(Math.max(0, radius ** 2 - (z + 0.5 - centreZ) ** 2));
-    return [Math.ceil(centreX - half - 0.5), Math.floor(centreX + half - 0.5) + 1];
-  };
-  for (let z = Math.floor(centreZ - outer); z < centreZ + outer; z++) {
-    const [from, to] = chord(outer, z), [hollowFrom, hollowTo] = Math.abs(z + 0.5 - centreZ) < inner ? chord(inner, z) : [to, to];
-    for (const [minimum, maximumExclusive] of [[from, hollowFrom], [hollowTo, to]] as const) {
-      if (maximumExclusive > minimum) runs.push({ operation: "fill", minimum: [minimum, 0, z], maximumExclusive: [maximumExclusive, height, z + 1], materialId: VOXEL_MATERIAL_IDS.container });
-    }
   }
   return runs;
 }
@@ -614,11 +596,29 @@ export const NBFLIP_POUR_STREAM_FRAMES = 126;
 export const NBFLIP_POUR_FRAMES = 250;
 export const NBFLIP_POUR_SCENE_ID = "nbflip-figure-7-pour";
 
+let pourGeometry: ReturnType<typeof bakeProceduralSolid> | undefined;
+
 export function createNbflipPour(): SceneDescription {
-  const grid = NBFLIP_POUR_GRID, [nx, ny, nz] = grid, h = NBFLIP_POUR_CELL_SIZE_M, dt = 1 / NBFLIP_FRAME_RATE_HZ;
-  const scene = nbflipDomain(NBFLIP_POUR_SCENE_ID, grid, h, NBFLIP_POUR_FRAMES, 0);
+  const grid = NBFLIP_POUR_GRID, [nx, ny, nz] = grid, h = NBFLIP_POUR_CELL_SIZE_M;
+  const scene = createNbflipPourPreview();
   const inner = NBFLIP_POUR_GLASS_RADIUS * nx;
-  scene.solidVoxels.push(...tubeVoxels(nx / 2, nz / 2, inner, inner + NBFLIP_POUR_GLASS_WALL_CELLS, NBFLIP_POUR_GLASS_RIM * ny));
+  // Share the continuous glass wall between rendering and fluid collisions,
+  // including its inner bore, outer face and level rim. The container floor
+  // is its base: a face of its own there would push contacts at the wall's
+  // foot down through the floor and soften the bottom row.
+  const geometry = pourGeometry ??= bakeProceduralSolid(grid, [h, h, h], ([x, y, z]) => {
+    const radius = Math.hypot(x - nx / 2, z - nz / 2);
+    return Math.max(inner - radius, radius - inner - NBFLIP_POUR_GLASS_WALL_CELLS, y - NBFLIP_POUR_GLASS_RIM * ny);
+  }, VOXEL_MATERIAL_IDS.container);
+  scene.solidVoxels = [...geometry.solidVoxels];
+  scene.solidBoundary = geometry.solidBoundary;
+  return scene;
+}
+
+/** Library thumbnails need the stream and camera without baking the glass. */
+export function createNbflipPourPreview(): SceneDescription {
+  const grid = NBFLIP_POUR_GRID, [nx, , nz] = grid, h = NBFLIP_POUR_CELL_SIZE_M, dt = 1 / NBFLIP_FRAME_RATE_HZ;
+  const scene = nbflipDomain(NBFLIP_POUR_SCENE_ID, grid, h, NBFLIP_POUR_FRAMES, 0);
   // The footage draws the glass cut open toward its camera.
   scene.cutaway = { eye_m: footageEye(nbflipPourCamera()) };
   const [x, y] = NBFLIP_POUR_RELEASE_CELLS, [u, v] = NBFLIP_POUR_STREAM_CELLS_PER_FRAME;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import "../lib/methods";
+import { proceduralSolidField } from "../lib/core/procedural-solid";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { parseScene, serializeScene, validateScene, type SceneDescription } from "../lib/core/model";
@@ -32,8 +33,11 @@ const lattice = (scene: SceneDescription): Cells => {
 };
 /** The fall, in cells per solver frame squared. */
 const fall = (scene: SceneDescription) => -scene.fluid.gravity_m_s2.y * scene.numerics.fixedDt_s! ** 2 / scene.voxelDomain.finestCellSize_m;
-const solid = (scene: SceneDescription, cell: Cells) => scene.solidVoxels!.some((patch) =>
-  patch.operation === "fill" && cell.every((value, axis) => value >= patch.minimum[axis]! && value < patch.maximumExclusive[axis]!));
+const solid = (scene: SceneDescription, cell: Cells) => {
+  const sample = proceduralSolidField(scene)?.sample([cell[0] + 0.5, cell[1] + 0.5, cell[2] + 0.5]);
+  return sample ? sample[3] < 0 : scene.solidVoxels.some((patch) =>
+    patch.operation === "fill" && cell.every((value, axis) => value >= patch.minimum[axis]! && value < patch.maximumExclusive[axis]!));
+};
 /** A point given in cells from the lattice's minimum corner, in metres. */
 const cells = (scene: SceneDescription, point_m: { x: number; y: number; z: number }): Cells => {
   const h = scene.voxelDomain.finestCellSize_m, [nx, , nz] = lattice(scene);
@@ -119,6 +123,21 @@ test("NB-FLIP Figure 7 pours the measured stream into a watertight glass", () =>
   assert.ok(Math.abs(fall(scene) - 0.768) < 1e-12, "mantaflow: 0.003 x 256");
   assert.equal(scene.container.fillFraction, 0);
   assert.equal(scene.fluid.initialLiquidVolumes, undefined);
+  const restored = parseScene(serializeScene(scene));
+  assert.ok(scene.solidBoundary, "the glass publishes a continuous solid boundary");
+  assert.equal(JSON.stringify(restored.solidBoundary), JSON.stringify(scene.solidBoundary));
+  const field = proceduralSolidField(restored);
+  assert.ok(field, "the registered and serialized scene preserves boundary provenance");
+  for (let i = 0; i < 32; i++) {
+    const angle = (i + 0.37) * 2 * Math.PI / 32, dx = Math.cos(angle), dz = Math.sin(angle);
+    for (const [radius, sign] of [[51.2, -1], [53.8, 1]] as const) {
+      const sample = field.sample([64 + radius * dx, 100, 64 + radius * dz]);
+      assert.ok(sample, "both glass faces carry continuous boundary nodes");
+      assert.ok(Math.abs(sample[3]) < 0.025, "the sampled wall follows the measured radius");
+      const alignment = sign * (sample[0] * dx + sample[2] * dz) / Math.hypot(...sample.slice(0, 3));
+      assert.ok(alignment > 0.998, `glass normal follows the circle: ${alignment}`);
+    }
+  }
   // The glass: open inside four tenths of the grid, solid just outside it, to three quarters of the height.
   for (const y of [0, 100, 191]) {
     assert.ok(!solid(scene, [64 + 50, y, 64]) && solid(scene, [64 + 52, y, 64]) && !solid(scene, [64 + 55, y, 64]), `rim row ${y}`);

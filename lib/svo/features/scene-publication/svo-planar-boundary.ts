@@ -5,6 +5,7 @@ import {
 } from "../../../core/planar-boundary";
 import type { EnvironmentBoxProxy, EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import type { SceneDescription } from "../../../core/model";
+import { proceduralSolidField, type ProceduralSolidField } from "../../../core/procedural-solid";
 import { sceneLatticeDimensions, solidVoxelShellForScene } from "../../../core/scene-lattice";
 import { appendedSolidPatches } from "../../../core/solid-patch-list";
 import { terrainContentStamp } from "../../../core/terrain";
@@ -103,6 +104,8 @@ export interface SvoRenderResidual {
   readonly world: SolidWorld;
   /** What is drawn: `world` without its hidden shell and with the cutaway cut. */
   readonly residual: SolidWorld;
+  /** Smooth geometry with the same render-only cutaway as the voxel residual. */
+  readonly solidBoundary: ProceduralSolidField | undefined;
   /** `residual` before the cutaway; the image a later stroke is laid over. */
   readonly drawn: SolidWorld;
   readonly shell: CanonicalShellSources;
@@ -150,7 +153,8 @@ export function svoRenderResidual(
   const eye = scene.cutaway?.eye_m;
   const cutawayKey = eye ? `${eye.x}:${eye.y}:${eye.z}` : "";
   const known = residualBySnapshot.get(world);
-  if (known && known.groundKey === groundKey && known.cutawayKey === cutawayKey) return known;
+  if (known && known.groundKey === groundKey && known.cutawayKey === cutawayKey
+    && known.solidBoundary?.source === scene.solidBoundary) return known;
   const appended = previous && previous.groundKey === groundKey
     ? appendedSolidPatches(previous.world.patches, world.patches) : undefined;
   const shell = canonicalShellSources(scene, world.patches, appended ? previous!.shell : undefined);
@@ -169,6 +173,7 @@ export function svoRenderResidual(
   }
   const cutaway = vesselCutawayPatches(scene, drawn.patches);
   const residual: SvoRenderResidual = { world, residual: withSolidWorldPatches(drawn, cutaway),
+    solidBoundary: proceduralSolidField(scene)?.withEdits(cutaway),
     drawn, shell, excluded, groundKey, cutawayKey };
   residualBySnapshot.set(world, residual);
   return residual;

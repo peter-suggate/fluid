@@ -950,6 +950,9 @@ fn nbAdvect(i:u32){
      }else if(umSolidHasTerrain()||bodyNear||umBoundaryRecord(vec3i(floor(point)))!=0u){
       blocked=nbVoxelBlocked(point);
      }else{blocked=umCellOpen(vec3i(point))<0.5;}
+     // A SOLID page (the lattice's walls) stops it as a voxel does; only a
+     // step that leaves its page reads the page table.
+     if(!blocked&&any((vec3i(floor(point))>>vec3u(5u))!=(vec3i(floor(q))>>vec3u(5u)))){blocked=umPointKind(point)==UM_SOLID;}
      if(blocked){
       let cell=floor(q[axis]);point[axis]=select(cell+0.01,cell+0.99,stride[axis]>0.0);
       if(axis==1u&&stride.y<0.0){landed=true;floorCell=vec3i(q);}else{p.velocity[axis]=0.0;free[axis]=0.0;}

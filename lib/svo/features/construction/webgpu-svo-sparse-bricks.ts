@@ -1,6 +1,5 @@
 import { SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS } from "../../../core/webgpu-sparse-scene-proxies";
 import { buriedSolidClassifier } from "./svo-buried-solid";
-import { proceduralSolidField } from "../../../core/procedural-solid";
 import { meshAssetHeader, sampledVolumeExtraWords, sampledVolumeHorizontalSlab, sampledVolumeSupport } from "../../../core/imported-assets/asset-library";
 import { sampledVolumeMaterialRecords } from "../materials/svo-sampled-materials";
 import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
@@ -2532,7 +2531,7 @@ export class OctreeSparseBrickWorld {
           -0.5 * scene.container.depth_m],
         cellSize_m: sceneCellSizes_m(scene),
       },
-      solidBoundary: proceduralSolidField(scene),
+      solidBoundary: this.renderResidual.solidBoundary,
       solidSurface: scene.solidSurface?.kind === "swept-flume" ? sweptFlumeSurfaceWGSL(scene.solidSurface)
         : scene.solidSurface && BATH_SOLID_DISTANCE_WGSL,
       renderTerrain,
@@ -3217,7 +3216,7 @@ export class OctreeSparseBrickWorld {
         if (!listed) admitted = missing;
       }
       if (solidWorldChanged && !initialPublication) {
-        this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld, proceduralSolidField(scene));
+        this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld, nextRenderResidual?.solidBoundary);
       }
       this.solidWorld = nextSolidWorld;
       this.renderSolidWorld = nextResidualSolidWorld;

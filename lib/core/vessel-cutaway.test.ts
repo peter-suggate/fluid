@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene, type SceneDescription } from "./model";
+import { proceduralSolidField } from "./procedural-solid";
 import { createNbflipPour } from "./nbflip-paper-scenes";
 import { createSolidWorld, sampleSolidWorld, solidWorldForScene, type SolidWorldVoxelPatch } from "./solid-world";
 import { vesselCutawayPatches } from "./vessel-cutaway";
-import { buildSvoSolidWorldPlanarBoundaryCatalog, svoPlanarResidualSolidWorld } from "../svo/features/scene-publication/svo-planar-boundary";
+import { buildSvoSolidWorldPlanarBoundaryCatalog, svoPlanarResidualSolidWorld, svoRenderResidual } from "../svo/features/scene-publication/svo-planar-boundary";
 
 /** A 32-cell lattice holding `solidVoxels`, viewed from in front (+z) and above. */
 function sceneWith(solidVoxels: SolidWorldVoxelPatch[]): SceneDescription {
@@ -32,7 +33,19 @@ test("the pour's glass is drawn without the half that faces the footage camera",
   assert.notEqual(sampleSolidWorld(world, near).materialId, 0, "the solver keeps the near wall");
   assert.equal(sampleSolidWorld(residual, near).materialId, 0, "the near wall is not drawn");
   assert.notEqual(sampleSolidWorld(residual, far).materialId, 0, "the far wall is drawn");
+  const smooth = svoRenderResidual(scene, world).solidBoundary;
+  const collision = proceduralSolidField(scene);
+  assert.ok(smooth && collision);
+  for (const radius of [51.3, 52.5, 53.7]) {
+    const front = [64.5, 100.5, 64 + radius] as const;
+    const back = [64.5, 100.5, 64 - radius] as const;
+    assert.equal(smooth.sample(front), undefined, "smooth rendering cannot restore the cut front wall");
+    assert.ok(collision.sample(front)![3] < 0, "fluid still collides with the full front wall");
+    assert.deepEqual(smooth.sample(back), collision.sample(back), "the back wall keeps its smooth boundary");
+  }
+  assert.equal(smooth.pack().length, collision.pack().length, "render edits preserve GPU boundary capacity");
   delete scene.cutaway;
+  assert.equal(svoRenderResidual(scene, world).solidBoundary, collision, "removing the cutaway restores the full smooth wall");
   assert.equal(svoPlanarResidualSolidWorld(world,
     buildSvoSolidWorldPlanarBoundaryCatalog(scene, world.patches, 0, { promoteEditablePatches: false }), scene), world);
 });
