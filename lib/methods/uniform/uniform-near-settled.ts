@@ -25,8 +25,9 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  *   uses one workgroup per octant. Both perform the same iterations.
  * - surfaceSplat: "fused" selects occupied cells during surface scatter;
  *   "separate" builds a cell list with a full-grid scan first.
- * - traceSubsteps: "gradient" sizes particle and level-set trace substeps by
+ * - traceSubsteps: "gradient" sizes the level-set backtrace's substeps by
  *   the velocity gradient along the step; "travel" takes one a cell of travel.
+ *   Particles take one RK3 step either way.
  * - redistanceSearch: "shared" lets redistance reuse the crossing search that
  *   retirement ran just before it; "fresh" searches again after retirement
  *   (which can move a hanging zero at a coarse seam).

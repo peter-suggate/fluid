@@ -13,7 +13,6 @@ import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl"
 import { narrowBandArenaWGSL } from "./uniform-surface-brick-arena.wgsl";
 import { UNIFORM_BRICK_TABLE_ENTRIES, uniformBrickTableClear, uniformBrickTableWGSL, uniformBrickTableWords } from "./uniform-brick-table";
 import { narrowBandNearestEntries, narrowBandNearestControlEntries } from "./uniform-narrow-band-nearest.wgsl";
-import { NARROW_BAND_TRACE_LIMIT, narrowBandTraceWGSL, type NarrowBandTraceSubsteps } from "./uniform-narrow-band-advection.wgsl";
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
 import { narrowBandTerrainContactWGSL, narrowBandRigidContactWGSL } from "./uniform-particle-contact.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
@@ -44,6 +43,9 @@ export const NARROW_BAND_PARTICLE_GRID=4096;
 /** The row of a frame whose lagged heat holds no HOT region: still complete
  * at any count, every kernel strides the actual GPU count. */
 export const NARROW_BAND_QUIET_PARTICLE_GRID=64;
+/** A particle's one-step trace past this many cells an axis, the lattice's
+ * extent (64 pages of 32 cells), is fatal: it arrives nowhere. */
+const NARROW_BAND_TRACE_REACH=2048;
 /** How a batch step launches: a fixed 1024-group stride, the ownership's
  * counted launch, one group, or the fixed row that strides the live
  * samples or the occupied tiles (NARROW_BAND_PARTICLE_GRID). */
@@ -281,7 +283,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private initPipeline?:GPUComputePipeline;
  private initGroup?:GPUBindGroup;
  /** pool: the page pool whose commits claim this lattice's blocks (its state buffer and layout); without one no block is ever claimed. */
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly traceSubsteps:NarrowBandTraceSubsteps="gradient",readonly redistanceSearch:"shared"|"fresh"="shared",readonly particleDeposit:"tiled"|"gathered"="tiled",readonly particleOrder:"scheduled"|"canonical"="scheduled"){
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly redistanceSearch:"shared"|"fresh"="shared",readonly particleDeposit:"tiled"|"gathered"="tiled",readonly particleOrder:"scheduled"|"canonical"="scheduled"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
   this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;
@@ -751,7 +753,6 @@ fn markSurfaceTiles(position:vec3f,heat:f32){
  }}}
 }
 ${particleSlabWGSL(this.capacity-this.spill,this.spill)}
-${narrowBandTraceWGSL("sampleVelocity",this.traceSubsteps)}
 override nbAdvectScalarCollision:bool=false;
 // With a static solid in the scene the fast launch (umSolidFree) still
 // advects a sample whose trace has no closed cell and no cell the
@@ -794,7 +795,7 @@ struct NbMoved{p:Particle,status:u32}
 fn nbAdvect(record:Particle)->NbMoved{
   nbSlow=false;var p=record;var q=p.position.xyz-nbHeldShift();
   let routed=nbFastSample&&umSolidPresent();
-  if(routed){nbHullLo=q;nbHullHi=q;if(!nbHullUncut()){return NbMoved(p,2u);}}
+  nbHullLo=q;nbHullHi=q;if(routed&&!nbHullUncut()){return NbMoved(p,2u);}
   // Bodies advance at the previous fluid step's tail. Push samples they
   // overtook out to the moving surface before the static-solid rejection.
   let rigidStart=nbRigidContact(q,p.velocity.xyz);q=rigidStart.position;p.velocity=vec4f(rigidStart.velocity,p.velocity.w);
@@ -810,55 +811,41 @@ fn nbAdvect(record:Particle)->NbMoved{
   if(p.position.w<=0.0){return NbMoved(p,1u);}
   // Uniform stores velocity half a step ahead of position. Ballistic drift
   // uses that midpoint velocity; update supplies the next full gravity kick.
-  // nbTraceSpan's steps, every field sample of the trace at one call site
-  // (Metal inlines each call of the field): stage 0 the field at q (k1; the
-  // first sets the substeps), 1 one base substep ahead (k2), 2 the third
-  // point, after which the span ends. Ballistic drift samples nothing.
-  let h=params.hDt.xyz;
-  var steps=1u;var base=0.0;var s=0u;var x=q;var stage=0u;var k1=vec3f(0.0);var k2=vec3f(0.0);var two=false;var probe=false;var travel=1u;
-  for(var n=0u;n<${3*NARROW_BAND_TRACE_LIMIT+3}u;n++){
-   var end=q;var units=1u;
-   if(!ballistic){
-    if(routed){nbHullInclude(x);}
+  // One step of Shu and Osher's third-order rule over the whole dt, every
+  // field sample at one call site (Metal inlines each call of the field):
+  // stage 0 the field at q (k1), 1 a whole step ahead (k2), 2 at the
+  // midpoint q + dt(k1 + k2)/4 (k3). Nothing limits the step: a stage the
+  // field does not hold is the field's own sample to bound. Ballistic drift
+  // is one straight step and samples nothing.
+  let h=params.hDt.xyz;let dt=params.hDt.w;
+  var end=q+dt*p.velocity.xyz/h;
+  if(!ballistic){
+   var x=q;var k1=vec3f(0.0);var k2=vec3f(0.0);
+   for(var stage=0u;stage<3u;stage++){
+    nbHullInclude(x);
     let k=sampleVelocity(x)/h;
     // Nothing of this sample is stored yet: the general launch redoes it.
     if(nbFastSample&&nbSlow){return NbMoved(p,2u);}
-    if(stage==0u){
-     k1=k;
-     if(s==0u){
-      steps=nbTraceSteps(k1,params.hDt.w);
-      // Trajectory refinement leaves the global pressure timestep unchanged.
-      if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);return NbMoved(p,1u);}
-      travel=steps;if(NB_TRACE_GRADIENT&&steps>1u){steps=1u;probe=true;}
-      base=params.hDt.w/f32(steps);
-     }
-     x=q+base*k1;stage=1u;continue;
-    }
-    if(stage==1u){
-     if(probe){probe=false;let m=nbTraceGradientSteps(k1,k,params.hDt.w,travel);if(m>1u){steps=m;base=params.hDt.w/f32(m);x=q+base*k1;continue;}}
-     k2=k;two=nbTraceTwo(base,k1,k2,steps-s);x=nbTraceThird(q,base,k1,k2,two);stage=2u;continue;
-    }
-    let span=nbTraceEnd(q,base,k1,k2,k,two);end=span.xyz;units=u32(span.w);stage=0u;
-   }else{
-    if(s==0u){
-     steps=nbTraceSteps(p.velocity.xyz/h,params.hDt.w);
-     if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&state[3],1u);return NbMoved(p,1u);}
-     // Drift is straight: gradient substeps take only the 32-cell spans.
-     if(NB_TRACE_GRADIENT){steps=(steps+31u)/32u;}
-     base=params.hDt.w/f32(steps);
-    }
-    end=q+base*p.velocity.xyz/h;
+    if(stage==0u){k1=k;x=q+dt*k1;}else if(stage==1u){k2=k;x=q+0.25*dt*(k1+k2);}else{end=q+dt*(k1+k2+4.0*k)/6.0;}
    }
-   // A SOLID page across a face of the page the span starts in stops the
-   // end 0.01 cell inside that face. An AIR page or a stored one does not.
-   let endpoint=nbPointNearIn(vec3i(floor(q)),end,0.01);
-   if(routed){nbHullInclude(endpoint);}
-   // With no embedded solids the segment stays inside the convex container
-   // after endpoint clamping. There are no voxel crossings to test; retaining
-   // the RK3 endpoint also avoids accumulating rounded collision increments.
-   if(!umSolidEnabled()){q=endpoint;}else{
+  }
+  // A trajectory longer than the lattice's extent arrives nowhere: fatal
+  // (this also takes a nonfinite one).
+  let reach=abs(end-q);
+  if(!(max(reach.x,max(reach.y,reach.z))<${NARROW_BAND_TRACE_REACH}.0)){atomicStore(&state[3],1u);return NbMoved(p,1u);}
+  // A SOLID page across a face of the page the trace starts in stops the
+  // end 0.01 cell inside that face. An AIR page or a stored one does not.
+  let endpoint=nbPointNearIn(vec3i(floor(q)),end,0.01);
+  nbHullInclude(endpoint);
+  // With no embedded solids the segment stays inside the convex container
+  // after endpoint clamping. There are no voxel crossings to test; retaining
+  // the RK3 endpoint also avoids accumulating rounded collision increments.
+  // Nor are there where the solid's record proves the trace's box open and
+  // uncut (nbHullUncut) in a scene with no body or terrain: the walk would
+  // block nothing and the field's contact find no hit.
+  if(!umSolidEnabled()||(nbFastSolid()&&umBodyCount()==0u&&nbHullUncut())){q=endpoint;}else{
+   // The long lane walks the chord in strides of at most half a cell an axis.
    let travel=endpoint-q;let walk=max(1u,u32(ceil(2.0*max(abs(travel.x),max(abs(travel.y),abs(travel.z))))));
-   if(walk>256u){atomicStore(&state[3],1u);break;}
    // A voxel face stops a particle as a container wall does: the crossing
    // axis ends at the face and loses its velocity, the others carry on.
    // A floor is the exception where its tread stands for a sloped bed
@@ -868,10 +855,9 @@ fn nbAdvect(record:Particle)->NbMoved{
    let stride=travel/f32(walk);var landed=false;var floorCell=vec3i(0);var free=vec3f(1);
    for(var j=1u;j<=walk;j++){
     let start=q;
-    // A step at most half a cell an axis: bodies matter only where a present
-    // body's pose lies within two cells of the start's 16h region (the head's
-    // body region mask). Elsewhere the voxel, terrain and boundary walls
-    // alone can block it.
+    // Bodies matter only where a present body's pose lies within two cells
+    // of the start's 16h region (the head's body region mask). Elsewhere the
+    // voxel, terrain and boundary walls alone can block it.
     let bodyNear=umBodyCount()>0u&&umBodyPoseNearTile(umTileKey(vec3i(floor(start))>>vec3u(2u)),2u);
     for(var axis=0u;axis<3u;axis++){
      var point=q;point[axis]+=stride[axis];
@@ -913,11 +899,8 @@ fn nbAdvect(record:Particle)->NbMoved{
      p.velocity=vec4f((p.velocity.xyz-dot(p.velocity.xyz,normal)*normal)*free,p.velocity.w);
     }
    }
-   }
-   for(var axis=0u;axis<3u;axis++){if(endpoint[axis]!=end[axis]){p.velocity[axis]=0.0;}}
-   s+=units;if(s>=steps){break;}
-   x=q;
   }
+  for(var axis=0u;axis<3u;axis++){if(endpoint[axis]!=end[axis]){p.velocity[axis]=0.0;}}
   if(routed&&!nbHullUncut()){return NbMoved(p,2u);}
   // A sample that ends in a page that holds no storage is fatal; it is not
   // appended.
@@ -1571,7 +1554,7 @@ ${narrowBandSurfaceWGSL}
   // is deferred (reseedClipped); never destroy a surface to make room for it.
   // Liquid a source or the initial band must add has no such deferral.
   if(words[3]===4){const p=words[11]!;throw new Error(`Narrow-band FLIP: a particle arrived in page (${p&63},${(p>>>6)&63},${(p>>>12)&63}), which holds no storage; the residency closure is too small`);}
-  if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory exceeded ${NARROW_BAND_TRACE_LIMIT} cells`:words[3]===2?"nonfinite velocity"
+  if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory longer than the lattice (${NARROW_BAND_TRACE_REACH} cells an axis)`:words[3]===2?"nonfinite velocity"
    :words[3]===5?`particle spill reserve is full: bricks refused more samples than their slabs and the ${this.spill}-record reserve hold`
    :words[3]===6?`particle slabs exceed the pool: ${words[0]} records sized of ${this.capacity-this.spill} before the spill reserve (${words[1]} live)`
    :`unknown particle fatal ${words[3]}`}`);
