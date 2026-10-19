@@ -13,15 +13,16 @@ import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
  * omitted-physics estimate fits its depth-dependent budget (in h). Per-tile evidence bounds
  * normal surface transport and momentum advection; the root pressure
  * gradient change and the frozen pressure response's discarded variation
- * also consume this budget. Fully submerged regions allow 0.08h instead
- * of the surface budget of 0.002h, and do not charge already represented
+ * also consume this budget. Surface regions use the transport tolerance of
+ * their finest physical owner (0.02h for h, 0.08h for 4h). Fully submerged
+ * regions allow 0.08h and do not charge already represented
  * uniform pressure motion as omitted transport. Pressure still solves globally.
  *
  * HOT means body/source contact, live particle detail, a tile reconstruction
  * error above the detailed-update budget, excessive characteristic travel,
  * or invalid evidence. Spatial curvature alone never makes a region HOT.
  * WARM means the freeze budget was exhausted, a spatial remap needs refreshing,
- * or a surface reader shares the dependency closure of a HOT region. WARM
+ * or a fine surface reader shares the dependency closure of a HOT region. WARM
  * uses the spatial resolution selected by the geometry census by default.
  * Empty extrapolated air and solid interiors are not physical readers.
  *
@@ -33,9 +34,9 @@ import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
  * available for comparison.
  *
  * Shared vertices/pressure faces incident to COLD regions remain frozen.
- * A one-region closure around HOT stays WARM for surface readers. Certified
- * deep bulk supplies F+T at these interfaces instead; its local omission
- * budget decides when it must thaw, rather than the neighbour's activity.
+ * A one-region closure around HOT stays WARM for fine surface readers.
+ * Coarse and deep readers supply F+T at these interfaces instead; their
+ * local omission budgets decide when to thaw, not neighbour activity alone.
  *
  * Buffer `tiers` (bind read-only through uniformRegionHeatWGSL):
  *   words [0, regions): the region's tier this frame (UNIFORM_REGION_TIER);
@@ -73,21 +74,25 @@ export const UNIFORM_REGION_HEAT_FADE_SECONDS=0.5;
  * UNIFORM_MIXED_RECEIPT_RING (2) frames, so a region a host skipper left
  * out at the rise is still non-COLD when the host sees it. */
 export const UNIFORM_REGION_HEAT_HOLD_FRAMES=2;
-/** Accumulated freeze error in h. Tighter than one live transport step
- * because omitted updates are not recovered when a region wakes. */
-export const UNIFORM_REGION_HEAT_BUDGET_H=0.002;
+/** Accumulated freeze error in h, scaled to the actual transport owner.
+ * The old 0.002h threshold was ten times smaller than even an h transport
+ * step's approximation tolerance, making almost every ripple stay WARM. */
+export const UNIFORM_REGION_HEAT_FINE_BUDGET_H=UNIFORM_SURFACE_TRANSPORT_ERROR_H;
+export const UNIFORM_REGION_HEAT_BUDGET_H=4*UNIFORM_REGION_HEAT_FINE_BUDGET_H;
 /** Deep bulk water has no nearby interface to transport. Permit 0.08h of
  * accumulated omission error (0.5% of the 16h update cell), rather than the
- * surface's 0.002h. Pressure continues to solve across the whole domain. */
+ * fine surface's 0.02h. Pressure continues to solve across the whole domain. */
 export const UNIFORM_REGION_HEAT_SUBMERGED_BUDGET_H=0.08;
 export const uniformRegionFreezeBudgetWGSL=/* wgsl */`
-fn rhFreezeBudget(submerged:bool)->f32{return select(${UNIFORM_REGION_HEAT_BUDGET_H},${UNIFORM_REGION_HEAT_SUBMERGED_BUDGET_H},submerged);}
+fn rhFreezeBudget(submerged:bool,fine:bool)->f32{
+ return select(select(${UNIFORM_REGION_HEAT_BUDGET_H},${UNIFORM_REGION_HEAT_FINE_BUDGET_H},fine),${UNIFORM_REGION_HEAT_SUBMERGED_BUDGET_H},submerged);
+}
 fn rhFrozenErrorSpeed(submerged:bool,representedSpeed:f32,discardedSpeed:f32)->f32{
  // T is already applied by the frozen momentum/pressure model. Its motion
  // matters for interface transport, but is not omitted bulk momentum.
  return discardedSpeed+select(representedSpeed,0.0,submerged);
 }
-fn rhHotHaloRequired(reader:bool,submerged:bool)->bool{return reader&&!submerged;}
+fn rhHotHaloRequired(reader:bool,submerged:bool,fine:bool)->bool{return reader&&!submerged&&fine;}
 fn rhBulkAcceleration(acceleration:f32,gradient:f32,representedSpeed:f32)->f32{
  // The pressure translation itself is represented, but its advection of
  // nonuniform frozen velocity is not. Uniform flow (gradient=0) stays free.
@@ -100,7 +105,7 @@ fn rhBulkAcceleration(acceleration:f32,gradient:f32,representedSpeed:f32)->f32{
  * evidence: surface, momentum, pressure-gradient and frozen-response errors
  * (h), detailed-update error (h), physical tile count (u32), incoming debt (h).
  * Trigger bit 12 records a physical reader; bit 13 certifies all physical
- * readers submerged, independently of activity bits. */
+ * readers submerged; bit 14 records a physical h owner. */
 export const UNIFORM_REGION_HEAT_STATE_WORDS=16;
 const STATE_WORDS=UNIFORM_REGION_HEAT_STATE_WORDS;
 const HEAT_GRID=1024;
@@ -263,11 +268,12 @@ var<workgroup> rhNormal:atomic<u32>;
 var<workgroup> rhAcceleration:atomic<u32>;
 var<workgroup> rhRelevant:atomic<u32>;
 var<workgroup> rhReaderClass:atomic<u32>;
+var<workgroup> rhFine:atomic<u32>;
 // One workgroup a region (a fixed grid striding them): a lane a tile reads
 // the particle heat, lane 0 updates the region's heat and displacement.
 @compute @workgroup_size(64) fn heat(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
  for(var region=group.x;region<RH_REGIONS;region+=groups.x){
-  if(l==0u){rhLive=u32(umTileLive(umPageTile(region,0u)));atomicStore(&rhParticle,0u);atomicStore(&rhError,0u);atomicStore(&rhNormal,0u);atomicStore(&rhAcceleration,0u);atomicStore(&rhRelevant,0u);atomicStore(&rhReaderClass,0u);}
+  if(l==0u){rhLive=u32(umTileLive(umPageTile(region,0u)));atomicStore(&rhParticle,0u);atomicStore(&rhError,0u);atomicStore(&rhNormal,0u);atomicStore(&rhAcceleration,0u);atomicStore(&rhRelevant,0u);atomicStore(&rhReaderClass,0u);atomicStore(&rhFine,0u);}
   let live=workgroupUniformLoad(&rhLive);
   let at=RH_STATE*region;
   if(live==0u){
@@ -276,10 +282,11 @@ var<workgroup> rhReaderClass:atomic<u32>;
    continue;
   }
   ${s.particleHeat?`{let t=umPageTile(region,l);if(umTileLive(t)){atomicMax(&rhParticle,particleHeat[RH_PARTICLE+t]);}}`:""}
-  ${s.updateErrors?`{let t=umPageTile(region,l);if(umTileLive(t)){atomicMax(&rhError,bitcast<u32>(tuError(t)));let physical=tuPhysical(t);atomicMax(&rhNormal,bitcast<u32>(physical.x));let acceleration=rhBulkAcceleration(physical.y,physical.w,select(0.0,rhColdSpeed(region),physical.z==1.0));atomicMax(&rhAcceleration,bitcast<u32>(acceleration));atomicAdd(&rhRelevant,u32(physical.z>0.0));atomicMax(&rhReaderClass,u32(physical.z));}}`:""}
+  ${s.updateErrors?`{let t=umPageTile(region,l);if(umTileLive(t)){atomicMax(&rhError,bitcast<u32>(tuError(t)));let physical=tuPhysical(t);atomicMax(&rhNormal,bitcast<u32>(physical.x));let acceleration=rhBulkAcceleration(physical.y,physical.w,select(0.0,rhColdSpeed(region),physical.z==1.0));atomicMax(&rhAcceleration,bitcast<u32>(acceleration));atomicAdd(&rhRelevant,u32(physical.z>0.0));atomicMax(&rhReaderClass,u32(physical.z));if(physical.z>0.0&&umTileWidth(t)==1u){atomicStore(&rhFine,1u);}}}`:""}
   workgroupBarrier();
   if(l==0u){
    let submerged=${error&&s.updateErrors?"atomicLoad(&rhReaderClass)==1u":"false"};
+   let fine=atomicLoad(&rhFine)!=0u;
    var trigger=0u;for(var k=9u;k<RH_STATE;k++){state[at+k]=0u;}
    if(rh.force!=0u){trigger|=1u;}
    let block=umPageTile(region,0u)>>9u;let word=umBlockWord(block);let c=umPageCoord(region);
@@ -316,7 +323,7 @@ var<workgroup> rhReaderClass:atomic<u32>;
      state[at+9u]=bitcast<u32>(surface);state[at+10u]=bitcast<u32>(momentum);state[at+11u]=bitcast<u32>(pressure);state[at+12u]=bitcast<u32>(frozen);
      displacement+=surface+momentum+pressure+frozen;
     }`:"displacement+=rh.dt*(speed+rhColdSpeed(region))*rh.hInverse+rh.pressure*dp;"}
-    if(displacement>rhFreezeBudget(submerged)){trigger|=64u;}
+    if(displacement>${error?"rhFreezeBudget(submerged,fine)":"0.002"}){trigger|=64u;}
    }
    // A rise the host does not cause holds RH_HOLD_FRAMES frames more
    // (bit 9 a held HOT, bit 10 a held WARM): the host's evidence lags
@@ -327,12 +334,12 @@ var<workgroup> rhReaderClass:atomic<u32>;
    if((trigger&~(RH_ONE_FRAME|RH_WARM_FRAME))!=0u){value=2.0;}
    ${s.particleHeat?"value=max(value,bitcast<f32>(atomicLoad(&rhParticle)));":""}
    ${error&&s.updateErrors?"if(atomicLoad(&rhRelevant)==0u&&(trigger&24u)==0u){value=0.0;}":""}
-   state[at]=bitcast<u32>(value);state[at+1u]=bitcast<u32>(displacement);state[at+7u]=trigger|select(0u,4096u,atomicLoad(&rhRelevant)!=0u)|select(0u,8192u,submerged);
+   state[at]=bitcast<u32>(value);state[at+1u]=bitcast<u32>(displacement);state[at+7u]=trigger|select(0u,4096u,atomicLoad(&rhRelevant)!=0u)|select(0u,8192u,submerged)|select(0u,16384u,fine);
   }
  }
 }
-// HOT from own evidence; surface readers additionally retain a WARM collar.
-// Deep submerged readers keep their own error budget at the interface.
+// HOT from own evidence; fine surface readers retain a WARM collar.
+// Coarse and deep readers keep their own error budget at the interface.
 @compute @workgroup_size(64) fn spread(@builtin(global_invocation_id) gid:vec3u){
  let region=gid.x;if(region>=RH_REGIONS){return;}
  if(!umTileLive(umPageTile(region,0u))){atomicStore(&tiers[region],${UNIFORM_REGION_TIER.hot}u);atomicAdd(&tiers[RH_REGIONS+3u],1u);return;}
@@ -340,7 +347,7 @@ var<workgroup> rhReaderClass:atomic<u32>;
  for(var k=0u;k<27u;k++){
   if(k==13u){continue;}
   let key=umTileKey(4*(c+vec3i(umCorner(k,3u))-vec3i(1)));if(!umKeyStored(key)){continue;}
-  ${error?`{let n=rhLevel(umPageOfTile(key));if(n>=1.0${s.updateErrors?"&&rhHotHaloRequired((state[RH_STATE*region+7u]&4096u)!=0u,(state[RH_STATE*region+7u]&8192u)!=0u)":""}){level=max(level,0.5*n);}}`:"level=max(level,0.5*rhLevel(umPageOfTile(key)));"}
+  ${error?`{let n=rhLevel(umPageOfTile(key));if(n>=1.0${s.updateErrors?"&&rhHotHaloRequired((state[RH_STATE*region+7u]&4096u)!=0u,(state[RH_STATE*region+7u]&8192u)!=0u,(state[RH_STATE*region+7u]&16384u)!=0u)":""}){level=max(level,0.5*n);}}`:"level=max(level,0.5*rhLevel(umPageOfTile(key)));"}
  }
  let tier=select(select(${UNIFORM_REGION_TIER.cold}u,${UNIFORM_REGION_TIER.warm}u,level>0.0),${UNIFORM_REGION_TIER.hot}u,own>=1.0);
  atomicStore(&tiers[region],tier);atomicAdd(&tiers[RH_REGIONS+tier],1u);

@@ -124,7 +124,7 @@ test("submerged freeze budget requires depth evidence and charges only omitted p
  const {uniformTileSurfaceRateWGSL}=await import("../lib/methods/uniform/uniform-tile-update-error");
  const {uniformRegionFreezeBudgetWGSL}=await import("../lib/methods/uniform/uniform-region-heat");
  await withUniformDevice("submerged freeze error",async device=>{
-  const output=device.createBuffer({size:72,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  const output=device.createBuffer({size:84,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
   try{
    const module=device.createShaderModule({code:`
 @group(0) @binding(0) var<storage,read_write> result:array<f32>;
@@ -139,18 +139,19 @@ ${uniformRegionFreezeBudgetWGSL}
  bulk[7]=0.0;result[4]=tuReaderClass(bulk,.05,1.0/60.0,0.0,true);
  bulk[7]=1.0;result[5]=tuReaderClass(bulk,.05,1.0/60.0,0.0,true);
  bulk[7]=3.402823e38;result[6]=tuReaderClass(bulk,.05,1.0/60.0,0.0,true);
- result[7]=rhFreezeBudget(true);result[8]=rhFreezeBudget(false);
+ result[7]=rhFreezeBudget(true,false);result[8]=rhFreezeBudget(false,false);
  result[9]=rhFrozenErrorSpeed(true,2.0,.03);result[10]=rhFrozenErrorSpeed(false,2.0,.03);
- result[11]=f32(.01<rhFreezeBudget(true)&&.01>rhFreezeBudget(false));
- result[12]=f32(rhHotHaloRequired(true,false));result[13]=f32(rhHotHaloRequired(true,true));
- result[14]=f32(rhHotHaloRequired(false,false));result[15]=f32(rhHotHaloRequired(false,true));
+ result[11]=f32(.03<rhFreezeBudget(false,false)&&.03>rhFreezeBudget(false,true));
+ result[12]=f32(rhHotHaloRequired(true,false,true));result[13]=f32(rhHotHaloRequired(true,true,true));
+ result[14]=f32(rhHotHaloRequired(false,false,true));result[15]=f32(rhHotHaloRequired(false,true,true));
  result[16]=rhBulkAcceleration(.1,0.0,2.0);result[17]=rhBulkAcceleration(0.0,.3,2.0);
+ result[18]=rhFreezeBudget(false,true);result[19]=rhFreezeBudget(true,true);result[20]=f32(rhHotHaloRequired(true,false,false));
 }`});
    assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
    const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
    const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
    const e=device.createCommandEncoder(),p=e.beginComputePass();p.setPipeline(pipeline);p.setBindGroup(0,group);p.dispatchWorkgroups(1);p.end();device.queue.submit([e.finish()]);
-   const values=await readMixedBuffer(device,output),expected=[1,2,0,2,2,2,2,.08,.002,.03,2.03,1,1,0,0,0,.1,.6];
+   const values=await readMixedBuffer(device,output),expected=[1,2,0,2,2,2,2,.08,.08,.03,2.03,1,1,0,0,0,.1,.6,.02,.08,0];
    for(let i=0;i<expected.length;i++)assert.ok(Math.abs(values[i]!-expected[i]!)<1e-6,`case ${i}: ${values[i]} vs ${expected[i]}`);
   }finally{output.destroy();}
  });

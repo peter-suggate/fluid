@@ -1,4 +1,4 @@
-import {UNIFORM_REGION_HEAT_STATE_WORDS as S,UNIFORM_REGION_HEAT_BUDGET_H as budget,UNIFORM_REGION_HEAT_SUBMERGED_BUDGET_H as submergedBudget} from "../lib/methods/uniform/uniform-region-heat";
+import {UNIFORM_REGION_HEAT_STATE_WORDS as S,UNIFORM_REGION_HEAT_BUDGET_H as budget,UNIFORM_REGION_HEAT_SUBMERGED_BUDGET_H as submergedBudget,UNIFORM_REGION_HEAT_FINE_BUDGET_H as fineBudget} from "../lib/methods/uniform/uniform-region-heat";
 /** Post-frame diagnostics only: no runtime readback or scheduling policy. */
 import {readMixedBuffer} from "../tests/helpers/uniform-mixed-native-fields";
 import type {UniformMixedFrame} from "../lib/methods/uniform/uniform-mixed-frame";
@@ -27,8 +27,8 @@ export async function auditPoolRegions(device:GPUDevice,frame:UniformMixedFrame)
   const total=totals[t]!;total.count++;
   const reasons=names.filter((_,k)=>bits&(1<<k));for(const name of reasons)total.reasons[name]=(total.reasons[name]??0)+1;
   if(particle>=1)total.particle++;if(heat>0&&!bits&&particle===0)total.cooling++;if(t===1&&!bits&&heat===0)total.halo++;
-  const submerged=(s[S*r+7]!&8192)!==0;
-  regions.push({decision:{submerged,budget:submerged?submergedBudget:budget,surface:state![S*r+9],momentum:state![S*r+10],pressure:state![S*r+11],frozen:state![S*r+12],hotError:state![S*r+13],physicalTiles:s[S*r+14],debt:state![S*r+15]},r,tier:t,c,bits,reasons,heat,pending:s[S*r+6],held:s[S*r+8],displacement:state![S*r+1],speed,span,error,normal,acceleration,physicalTiles,particle,criteria,fine,pressureDelta:dynamics![10*r+6],pressureResidual:dynamics![10*r+7],swept:m[r]!&255,pose:(m[r]!>>8)&255});
+  const submerged=(s[S*r+7]!&8192)!==0,fineReader=(s[S*r+7]!&16384)!==0;
+  regions.push({decision:{submerged,fineReader,budget:submerged?submergedBudget:fineReader?fineBudget:budget,surface:state![S*r+9],momentum:state![S*r+10],pressure:state![S*r+11],frozen:state![S*r+12],hotError:state![S*r+13],physicalTiles:s[S*r+14],debt:state![S*r+15]},r,tier:t,c,bits,reasons,heat,pending:s[S*r+6],held:s[S*r+8],displacement:state![S*r+1],speed,span,error,normal,acceleration,physicalTiles,particle,criteria,fine,pressureDelta:dynamics![10*r+6],pressureResidual:dynamics![10*r+7],swept:m[r]!&255,pose:(m[r]!>>8)&255});
  }
  const byCoordinate=new Map(regions.map(r=>[r.c.join(","),r]));
  const unexplained:number[]=[],invalidBudget:number[]=[];
@@ -47,7 +47,7 @@ export async function auditPoolRegions(device:GPUDevice,frame:UniformMixedFrame)
    if(r.bits&1024)reasons.push("warm-hold");
    if(r.bits&256||r.pending===1)reasons.push("spatial-remap");
    if(r.heat>0)reasons.push("bounded-detail-hysteresis");
-   if(!reasons.length&&r.tier===1&&r.decision.physicalTiles!>0){
+   if(!reasons.length&&r.tier===1&&r.decision.physicalTiles!>0&&r.decision.fineReader&&!r.decision.submerged){
     for(let z=-1;z<=1;z++)for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++){
      const n=byCoordinate.get([r.c[0]!+x,r.c[1]!+y,r.c[2]!+z].join(","));
      if(n&&(n.heat>=1||(n.bits&0x227)!==0))reasons.push("physical-dependency");
