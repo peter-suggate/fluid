@@ -96,6 +96,8 @@ export class UniformMixedSurface {
    * dispatch, launched first: it retires the entries it evaluates. The
    * regular dispatch has no halo homes (umUnitHaloHome), so no fast twin. */
   private fastDeferredPipeline?:GPUComputePipeline;
+  /** advectCubicDeferred: the merged twins' listed cubics, launched after them. */
+  private cubicDeferredPipeline?:GPUComputePipeline;
   /** Workgroups of advectCubic: its list's bound (cubicEntries), capped
    * where the GPU is saturated. */
   private readonly cubicGrid:number;
@@ -181,7 +183,8 @@ export class UniformMixedSurface {
     // The solid closed and clear tile words.
     const evidenceBytes=this.solid?8*this.ownership.capacity.tiles:0;
     // The deferred advect list follows, a separate binding: its count, the
-    // cubic list's count, two unused words, then at most one word per
+    // cubic list's count, advectDeferred's cubic count (umCubicDeferred,
+    // reusing the cubic list's words), an unused word, then at most one word per
     // lattice vertex, then the cubic list (deferredBytes).
     const deferredOffset=Math.ceil(((f.evidence.offset??0)+evidenceBytes)/256)*256,deferredBytes=this.deferredBytes;
     if((f.evidence.size??f.evidence.buffer.size-(f.evidence.offset??0))<deferredOffset-(f.evidence.offset??0)+deferredBytes)throw new Error("Mixed surface evidence scratch is too small");
@@ -600,26 +603,42 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
  // A weighted buried tap returns the cell's value, whichever tap it is:
  // test them ahead of the taps at one umBuried site (inlined per site, a
  // test inside the unrolled taps compiled 64 of them per width).
- ${this.solid?`var openBits=array<u32,4>(0u,0u,0u,0u);var masked=false;
- ${this.solid.coarse?/* wgsl */`// The 5^3 cells under the taps (base-2..base+2) from the open masks of the
- // at most eight tiles holding them, where all are stored at h: a tap is
- // then buried exactly when its eight cells' bits are clear, umBuried's
- // predicate (one read a tile instead of a page, tile and record walk a tap).
+ ${this.solid?`var masked=false;var buriedWeighted=false;
+ ${this.solid.coarse?/* wgsl */`// The 5^3 cells under the taps (base-2..base+2, two tiles an axis) from
+ // the open masks of the eight tiles holding them, where all are stored at
+ // h: a tap is then buried exactly when its eight cells' bits are clear,
+ // umBuried's predicate (one read a tile instead of a page, tile and record
+ // walk a tap). The box is five layers of 25 bits (x+5y), a row of five
+ // cells from two tiles' row nibbles; a tap's cells are bits 0x63 at x+5y
+ // of its two layers, so a layer pair tests all its sixteen taps at once
+ // against the weighted ones.
  if(!tapsClear&&(umRegularFine||cell.width==1u)){
-  let lo=base-vec3i(2);let t0=lo>>vec3u(2u);let t1=(base+vec3i(2))>>vec3u(2u);
-  masked=all(lo>=vec3i(0));var masks:array<vec2u,8>;
-  for(var k=0u;k<8u;k++){let key=umTileKey(min(t0+vec3i(umCorner(k,2u)),t1));if(!umKeyStored(key)||umTileWidth(key)!=1u){masked=false;}else{masks[k]=umSolidOpenCells(key);}}
-  if(masked){for(var i=0u;i<125u;i++){
-   let c=lo+vec3i(i32(i%5u),i32((i/5u)%5u),i32(i/25u));let d=vec3u((c>>vec3u(2u))-t0);let l=vec3u(c&vec3i(3));let lane=l.x+4u*(l.y+4u*l.z);
-   let m=masks[d.x+2u*d.y+4u*d.z];if(((select(m.x,m.y,lane>=32u)>>(lane&31u))&1u)!=0u){openBits[i>>5u]|=1u<<(i&31u);}
-  }}
+  let lo=base-vec3i(2);let t0=lo>>vec3u(2u);let l=vec3u(lo&vec3i(3));
+  masked=all(lo>=vec3i(0));var m:array<vec2u,8>;
+  for(var k=0u;k<8u;k++){let key=umTileKey(t0+vec3i(umCorner(k,2u)));if(!umKeyStored(key)||umTileWidth(key)!=1u){masked=false;}else{m[k]=umSolidOpenCells(key);}}
+  if(masked){
+   var layer=array<u32,5>(0u,0u,0u,0u,0u);
+   for(var z=0u;z<5u;z++){
+    let cz=l.z+z;let hz=cz>=4u;let rz=cz&3u;
+    for(var y=0u;y<5u;y++){
+     let cy=l.y+y;let hy=cy>=4u;let shift=4u*(cy&3u)+16u*(rz&1u);
+     let a=select(select(m[0],m[2],hy),select(m[4],m[6],hy),hz);let b=select(select(m[1],m[3],hy),select(m[5],m[7],hy),hz);
+     let ra=(select(a.x,a.y,rz>=2u)>>shift)&15u;let rb=(select(b.x,b.y,rz>=2u)>>shift)&15u;
+     layer[z]|=(((ra>>l.x)|(rb<<(4u-l.x)))&31u)<<(5u*y);
+    }
+   }
+   for(var z=0u;z<4u;z++){
+    var weighted=0u;
+    for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){if(wx[x]*wy[y]*wz[z]!=0.0){weighted|=1u<<(x+5u*y);}}}
+    let d=layer[z]|layer[z+1u];let open=d|(d>>1u)|(d>>5u)|(d>>6u);
+    if((weighted&~open)!=0u){buriedWeighted=true;}
+   }
+  }
  }`:""}
- for(var k=0u;k<select(64u,0u,tapsClear);k++){
+ if(buriedWeighted){return cell.value;}
+ for(var k=0u;k<select(64u,0u,tapsClear||masked);k++){
   let x=k&3u;let y=(k>>2u)&3u;let z=k>>4u;if(wx[x]*wy[y]*wz[z]==0.0){continue;}
-  var buried=masked;
-  if(masked){for(var j=0u;j<8u;j++){let i=x+(j&1u)+5u*(y+((j>>1u)&1u))+25u*(z+(j>>2u));if(((openBits[i>>5u]>>(i&31u))&1u)!=0u){buried=false;}}}
-  else{buried=umBuried(vec3f(umVertexNearFromPage(home,page,base+(vec3i(vec3u(x,y,z))-vec3i(1))*width)));}
-  if(buried){return cell.value;}
+  if(umBuried(vec3f(umVertexNearFromPage(home,page,base+(vec3i(vec3u(x,y,z))-vec3i(1))*width)))){return cell.value;}
  }`:""}
  // Where no tap is held (all 64 in the owner's page) one run resolve gives
  // every h tap's texel: the run's plus the tap's offset, the texels the
@@ -800,7 +819,26 @@ fn umVertexFoot(vertex:vec3u,width:u32)->UMFoot{
  // near high, far low, far high). The nine tests share one call site.
  var closed=0u;
  ${this.solid?/* wgsl */`if(umSolidEnabled()&&!solidFootClear){
+  // umSurfaceSmoothing reads an axis's closed bits only where all its taps
+  // are distances (its span test), and is zero unless such an axis holds a
+  // tap of the other sign. Test only those axes' taps, and the vertex where
+  // any is: the other bits cannot change it. Most stencils beside a solid
+  // are single-phase, and each test resolves up to eight cells.
+  var need=0u;
+  {let sign=bitcast<u32>(c);let hh=params.hDt.xyz;var crossing=0u;
+   for(var axis=0u;axis<3u;axis+=2u){
+    var valid=true;var different=0u;
+    for(var k=0u;k<4u;k++){
+     let s=t[select(2u*axis+k,6u+axis+k-2u,k>1u)];let span=select(w,2.0*w,k>1u);
+     if(abs(s-c)>1.5*span*hh[axis]){valid=false;}
+     different|=bitcast<u32>(s)^sign;
+    }
+    if(valid){need|=15u<<(1u+2u*axis);crossing|=different;}
+   }
+   if((crossing&0x80000000u)==0u){need=0u;}else{need|=1u;}
+  }
   for(var j=0u;j<9u;j++){
+   if(((need>>j)&1u)==0u){continue;}
    var q=vec3i(vertex);if(j>0u){let k=(j-1u)&3u;q[select(0u,2u,j>4u)]+=select(wi,2*wi,(k&2u)!=0u)*select(-1,1,(k&1u)!=0u);}
    if(!umSmoothOpen(q,wi)){closed|=1u<<j;}
   }
@@ -818,11 +856,28 @@ fn umVertexTrace(foot:UMFoot)->vec3f{
 }
 var<private> umFullCubic:bool=false;
 var<private> umFullIdentity:bool=false;
+override umCubicDeferred:bool=false;
+var<private> umCubicQueued:bool=false;
+// The cubic list's bound (cubicEntries). advectDeferred's listed cubics
+// reuse its words: advectCubic consumed advectFine's in an earlier launch.
+const UM_CUBIC_ENTRIES=${this.cubicEntries}u;
 fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){umFullIdentity=true;return umLoadVertex(vec3u(p));}
  let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){umFullCubic=true;value=umCubicPhi(q,cell);}
+ if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){
+  // umCubicDeferred (the merged twins): a cubic whose only continuation
+  // is the released walls (no solid hit; off every wall plane, where
+  // umWallContact is the identity) is listed with its end and smoothing
+  // for advectCubicDeferred, which finishes it as below. A third of the
+  // list's lanes take the cubic: evaluated here it held every SIMD group.
+  // Past the list's bound the cubic stays here.
+  if(umCubicDeferred&&${this.solid?"!walk.hit&&":""}umWallPlane(vec3i(p))==6u){
+   let j=atomicAdd(&deferred.header[2],1u);
+   if(j<UM_CUBIC_ENTRIES){let b=UM_CUBIC_BASE+5u*j;deferred.data[b]=umVertexAt(vec3u(p))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);deferred.data[b+1u]=bitcast<u32>(q.x);deferred.data[b+2u]=bitcast<u32>(q.y);deferred.data[b+3u]=bitcast<u32>(q.z);deferred.data[b+4u]=bitcast<u32>(foot.smoothing);umCubicQueued=true;return 0.0;}
+  }
+  umFullCubic=true;value=umCubicPhi(q,cell);
+ }
  ${this.solid?"value=umWallContact(p,value,width);if(walk.hit){value=umEmbeddedAir(p,end,value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"}
  return ${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
 }
@@ -1078,7 +1133,10 @@ fn umEulerAdvected(vertex:vec3u,width:u32,foot:UMFoot)->vec2f{
  ${this.solid?"let walk=umWalk(p,end);if(walk.hit&&!endpointIdentity){return umEulerRejected(7u);}let q=walk.q;":"let q=end;"}
  var value=foot.center;if(!endpointIdentity){if(useLocalCell){value=localCell.value;}else{value=umVertexCell(q).value;}}
  if(!endpointIdentity&&umReleasedMayChange(p,value-bound.x)){return umEulerRejected(7u);}
- ${this.solid?"value=umWallContact(p,value,width);":"value=umWallContact(p,value,width);"}
+ // No umWallContact: this transport rejected every wall vertex above
+ // (umWallPlane<6), and off a wall plane no umWallBlock answers, so the
+ // contact is the identity. Its call held a second trace, walk and vertex
+ // sampler in every pipeline with this transport.
  value=umReleasedWalls(p,value);
  ${this.sourceParams?"value=umSourceuvSourcePhi(p,value);":""}
  if(params.flags.z!=0u){if(useLocalCell){atomicAdd(&umClaims[${this.counterWord+1}u],1u);}if(far){atomicAdd(&umClaims[${this.counterWord+11}u],1u);}atomicAdd(&umClaims[${this.counterWord+8}u],1u);umRecordRegion(vertex,2u);atomicMax(&umClaims[${this.counterWord+10}u],bitcast<u32>(bound.x));}
@@ -1267,7 +1325,8 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   ${this.workControl?`if(localSolidTwin&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+20}u],1u);}`:""}
   umFullCubic=false;umFullIdentity=false;umSlow=false;let foot=umVertexFoot(vertex,width);
   let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){if(umFastSurface){deferred.data[i]=0xffffffffu;}${this.workControl?`if(localSolidTwin&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}umStoreSurface(vertex,width,euler.x);continue;}
-  umSlow=false;let value=umAdvected(vec3f(vertex),width,foot)+foot.smoothing;
+  umSlow=false;umCubicQueued=false;let value=umAdvected(vec3f(vertex),width,foot)+foot.smoothing;
+  if(umCubicQueued){continue;}
   // The fast twin leaves a vertex with a slow sample to the general launch
   // and retires the rest from the list.
   if(umFastSurface){if(umSlow){continue;}deferred.data[i]=0xffffffffu;}
@@ -1347,7 +1406,7 @@ fn umSampleClosed(q:vec3f)->bool{
 const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
 const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
 @compute @workgroup_size(64) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);}
+ if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);atomicStore(&deferred.header[2],0u);}
  let h=params.hDt.xyz;let dt=params.hDt.w;let faces=umWallFaceCount();
  for(var i=group.x;i<faces;i+=groups.x){
   let face=umWallFace(i);let f=face%6u;let axis=f>>1u;let upper=(f&1u)!=0u;let inward=select(1.0,-1.0,upper);
@@ -1422,6 +1481,23 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
   if(umReleasedMayChange(p,value)){let k=atomicAdd(&deferred.header[0],1u);deferred.data[k]=key;continue;}
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
   umRecordRegion(vertex,4u);umStoreSurface(vertex,1u,value+smoothing);
+ }
+}
+// advectDeferred's listed cubics (umCubicDeferred; count header[2]): each
+// entry's deferred word, trace end and smoothing, finished as umAdvected
+// would: the cubic at the end, the released walls and the source. Compiled
+// with the merged twins' constants; with no solid present its solid tests
+// answer as the free twin's (umSolidEnabled).
+@compute @workgroup_size(64) fn advectCubicDeferred(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ umStagePlaneReach(lane);
+ let count=min(atomicLoad(&deferred.header[2]),UM_CUBIC_ENTRIES);
+ for(var i=gid.x;i<count;i+=64u*groups.x){
+  let b=UM_CUBIC_BASE+5u*i;let word=deferred.data[b];let code=word>>30u;
+  let vertex=umVertexCoord(word&0x3fffffffu);let width=select(1u<<code,1u,code==3u);let p=vec3f(vertex);
+  let q=bitcast<vec3f>(vec3u(deferred.data[b+1u],deferred.data[b+2u],deferred.data[b+3u]));let smoothing=bitcast<f32>(deferred.data[b+4u]);
+  var value=umReleasedWalls(p,umCubicPhi(q,umVertexCell(q)));
+  value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
+  umRecordRegion(vertex,4u);umStoreSurface(vertex,width,value+smoothing);
  }
 }
 @compute @workgroup_size(64) fn advectFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -1507,8 +1583,10 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
       // The fast trace (umFastSurface), solid-free: with a solid present it lists every traced vertex.
       keyed("advectFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1,...UNIFORM_DETAIL_H_STORE,umFastSurface:1,umCubicListed:1,...free}),
       keyed("advectCubic",{umCellWidth:1,...UNIFORM_DETAIL_H_STORE,...free}),
-      Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
-      ...(this.solid?[Promise.all([compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,...free}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...free})]).then(twins=>{this.freeDeferredPipelines.push(...twins);})]:[]),
+      Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umCubicDeferred:1,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
+      ...(this.solid?[Promise.all([compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umCubicDeferred:1,...free}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...free})]).then(twins=>{this.freeDeferredPipelines.push(...twins);})]:[]),
+      // The merged twins' listed cubics: one launch for both (no twin gate).
+      compile("advectCubicDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS}).then(cubic=>{this.cubicDeferredPipeline=cubic;}),
       compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umFastSurface:1,...free}).then(fast=>{this.fastDeferredPipeline=fast;}),
       keyed("advectOwners",{...regular,umCertifiedJobs:1,umClaimWord:0,...UNIFORM_DETAIL_H_STORE}),
     ]);
@@ -1550,6 +1628,7 @@ fn umFineVertex(tile:vec3u,lane:u32,round:u32,wide:u32,low:vec3<bool>)->vec3u{
       if(i===1&&this.fastDeferredPipeline){deferred.setPipeline(this.variant(this.fastDeferredPipeline));deferred.dispatchWorkgroups(this.deferredGrid);}
       const twin=this.freeDeferredPipelines[i-1];if(twin){deferred.setPipeline(this.variant(twin));deferred.dispatchWorkgroups(this.deferredGrid);}
       deferred.setPipeline(this.variant(this.deferredPipelines[i]!));deferred.dispatchWorkgroups(this.deferredGrid);
+      if(i===1&&this.cubicDeferredPipeline){deferred.setPipeline(this.variant(this.cubicDeferredPipeline));deferred.dispatchWorkgroups(this.cubicGrid);}
     }
     deferred.end();
     if(this.workControl)encoder.copyBufferToBuffer(this.claims,4*this.revisionWord,this.workControl.revisions.buffer,this.workControl.revisions.scratchOffset,4*this.workControl.regions);
