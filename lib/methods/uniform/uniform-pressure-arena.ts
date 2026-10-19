@@ -47,9 +47,11 @@ const LIST_GROUPS=4096;
 /** Brick, tile and page launches stride their lists from at most this many groups. */
 const BRICK_GROUPS=2048,TILE_GROUPS=4096,PAGE_GROUPS=1024,TABLE_GROUPS=1024;
 /** Fine slots: a share of the lattice's bricks (at least ARENA_SLOTS_MIN). The
- * band's bricks hug the surface; a frame needing more is the fatal overflow
- * (header word 1 = SLOT_OVERFLOW), never growth. */
-const ARENA_SLOT_SHARE=0.25,ARENA_SLOTS_MIN=2048,SLOT_OVERFLOW=3;
+ * band's bricks hug the surface: the pour at 1/60 s peaks at 2310 of 8320
+ * (0.28, frame 410), letters at 1228 of 12416; 0.45 holds the pour with 1.6x
+ * headroom. A frame needing more is the fatal overflow (header word 1 =
+ * SLOT_OVERFLOW), never growth. */
+const ARENA_SLOT_SHARE=0.45,ARENA_SLOTS_MIN=2048,SLOT_OVERFLOW=3;
 /** Brick kernels: a lane a cell of the brick (and of each colour of its box). */
 const WG=512;
 /** Level 0's tile kernels: a lane a cell of a band tile (half sweeps: of two tiles' cells of one colour). */
