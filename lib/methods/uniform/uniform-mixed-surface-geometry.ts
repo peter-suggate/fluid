@@ -12,6 +12,10 @@ import type { UniformSurfaceWorkControl } from "./uniform-surface-work-control";
 
 /** Workgroups of the changed-tile geometry launch at most (grid-stride). */
 const CHANGED_GRID=4096;
+/** Workgroups of the regional launch and its mirror (grid-stride over the
+ * plan's jobs: a job per h tile, one per 64 4h tiles). The plan's own grid
+ * (a workgroup per few regions) left each workgroup tens of jobs in series. */
+const REGIONAL_GRID=4096;
 /** ceil(jobs/per) in whole steps: a fractional quotient is a heap number until its caller is optimized. */
 const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 const GEOMETRY_PASS:GPUComputePassDescriptor={label:"Uniform mixed geometric fill"};
@@ -456,7 +460,7 @@ ${this.workControl?`@group(1) @binding(3) var<storage,read> mirrorPlan:array<u32
       pass.setPipeline(this.variant(this.bodiesPipeline!));pass.dispatchWorkgroups(Math.min(BODY_REGION_GRID,tiles/64));
       pass.setPipeline(this.variant(changedMaintenance?this.changedMaintenancePipeline!:this.changedPipelines[1]!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
-    else if(regional){pass.setPipeline(this.variant(sharedSetup?this.regionalMaintenancePipeline!:this.regionalPipeline!));pass.dispatchWorkgroups(Math.min(256,this.workControl!.framePlan.groups));}
+    else if(regional){pass.setPipeline(this.variant(sharedSetup?this.regionalMaintenancePipeline!:this.regionalPipeline!));pass.dispatchWorkgroups(Math.min(REGIONAL_GRID,this.ownership.capacity.tiles));}
     else{
       // Both output families share one exact certificate. Keeping them coherent
       // here allows reuse across intermediate full geometry stages.
@@ -472,7 +476,7 @@ ${this.workControl?`@group(1) @binding(3) var<storage,read> mirrorPlan:array<u32
     const mirror=this.mirrorGroups.get(group);if(!mirror)throw new Error("Mixed geometry group was not bound by this stage");
     pass.setBindGroup(1,mirror.group);
     if(options.bodies){pass.setPipeline(uniformDetailPick(this.mirrorListedPipeline!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,this.ownership.capacity.tiles));}
-    else if(sharedSetup){pass.setPipeline(uniformDetailPick(this.mirrorRegionalPipeline!));pass.dispatchWorkgroups(this.workControl!.framePlan.groups);}
+    else if(sharedSetup){pass.setPipeline(uniformDetailPick(this.mirrorRegionalPipeline!));pass.dispatchWorkgroups(Math.min(REGIONAL_GRID,this.ownership.capacity.tiles));}
     else this.ownership.dispatchAllCounted(pass,uniformDetailPick(this.mirrorPipeline));
     pass.end();
     if(options.bodies||sharedSetup)this.solid?.consumeBodyEvidence(encoder);
