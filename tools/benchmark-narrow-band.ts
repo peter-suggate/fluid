@@ -37,7 +37,7 @@ assert.ok(Number.isInteger(statsEvery)&&statsEvery>=0);
 const name=process.argv[2]??'current';
 assert.match(name,/^[a-z0-9-]+$/);
 const hash=createHash('sha256');
-for(const file of ['uniform-narrow-band-flip.ts','uniform-narrow-band-activity.wgsl.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-order.ts','uniform-narrow-band-surface.wgsl.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
+for(const file of ['uniform-narrow-band-flip.ts','uniform-particle-slab.wgsl.ts','uniform-narrow-band-activity.wgsl.ts','uniform-narrow-band-advection.wgsl.ts','uniform-narrow-band-membership.wgsl.ts','uniform-narrow-band-redistance.wgsl.ts','uniform-narrow-band-surface.wgsl.ts','uniform-mixed-surface-volume.ts','uniform-narrow-band-method.ts','webgpu-uniform-reference.ts','uniform-mixed-frame.ts','uniform-mixed-frame-plan.ts','uniform-mixed-remap.ts','uniform-mixed-surface.ts','uniform-mixed-dynamic.ts','uniform-mixed-pressure-authority.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
 for(const file of ['uniform-narrow-band-budget.wgsl.ts','uniform-narrow-band-controls.ts'])hash.update(readFileSync(`lib/methods/uniform/${file}`));
 const sourceHash=hash.digest('hex');
 const values={...method.appDefaults,timeStep:'scene',fineGridPadding,adaptiveBudgetPercent,adaptiveFadeSeconds};
