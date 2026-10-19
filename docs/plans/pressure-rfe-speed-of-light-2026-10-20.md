@@ -37,7 +37,7 @@ It was produced read-only from code and the profiled pour run `part2h`, with no 
 
 | Stage | Today (part2h) | Bound: today's algorithms | Bound: minimum work | Arena projection | Arena vs minimum-work bound |
 |---|---|---|---|---|---|
-| Pressure | 8.24 ms (155 dispatches) | 1.5 ms | **0.26 ms** | 0.40–0.50 ms | 1.5–1.9× |
+| Pressure | 8.24 ms (155 dispatches) | 1.5 ms | **0.26 ms** (2 cycles); **0.41 ms** at 4 cycles, see §1.6 | 0.40–0.50 ms; ≈0.6 ms after §1.6 | 1.5× of the 4-cycle bound |
 | RFE | 8.71 ms (58 dispatches); 8.3 after b7c3f514 | 0.6 ms | **0.18 ms** | 0.30–0.35 ms | 1.7–1.9× |
 
 The umbrella plan's rough bounds were pressure ≈0.6 ms and RFE ≈0.3 ms. With real counts they are 0.26 ms and 0.18 ms. Those figures assume the minimum-work algorithms in §1.4 and §2.4.
@@ -244,6 +244,54 @@ Every kernel is one workgroup per brick on a direct grid-stride over the arena's
 - Workgroup-memory occupancy: a brick at 4 KB plus rows in registers is fine.
 - The convergence factor of the Schwarz-type smoother.
 - The p ≥ 0 projection on inside rows, which MG transfers must not break. Today's root already runs projected Jacobi with the same constraint.
+
+### 1.6 Measured: MG de-risk at frame 94 (2026-10-20)
+
+The minimum-work bound in §1.4 assumed **2–3 cycles**. The measurement below shows that this projected, nonlinear system needs **4–6**. The algorithmic cycle count is the real floor, so the bound is restated at 4 cycles.
+
+**Capture** (the pour at 1/60 s, frame 94; scratchpad `MG/capture.mts`):
+- 2.5–2.7k band slots, 92–97k liquid rows, 636 fine 8³ bricks (4.2 of 8 tiles occupied a brick), h = 2.2 cm.
+- Today's band runs its cap of 4 V(3,3) cycles on every frame. The residual history in s⁻¹ is 30.6k → 1862 → 61 → 3.7 → 0.79 → 0.36. Another run ended at 0.69.
+- **Today never reaches the 0.05 s⁻¹ "returns" threshold on the pour.** The tolerance word is 1e-4.
+- A CPU twin of the band operator reproduces the GPU's start and final residuals to four digits. It includes the nonlinear wall halos and the p ≥ 0 bound.
+
+**Cycles to 0.05 s⁻¹** on the captured system (CPU bench `MG/mg2.mjs`; levels h … 32h; trilinear prolongation). The two figures are from the 4h start and from a warm start with frame 93's p.
+
+| Smoother and coarse operator | Cycles |
+|---|---|
+| Exact red-black GS V(2,2), rediscretised (aggregation × 0.5) | 5 / 5 |
+| Exact GS V(2,2), Galerkin (27-point coarse) | 4 / 4 |
+| Brick-resident halo 1, two sweeps a load (as proposed in §1.4) | 8 / 8 |
+| Brick halo 1, partitions alternating with a 4-cell shift | 6 / 6 |
+| Shifted halo 1, Galerkin, V(3,3) | – / 4 |
+| Today's aggregation (constant prolongation, × 0.6), under GS | 7 |
+
+Notes on the table:
+- Block-Jacobi at the brick faces costs about 3 cycles. More sweeps per load make it worse.
+- Shifting alternate partitions by 4 cells recovers most of that loss at no extra staging.
+- **MG-preconditioned CG does not help.** With the p ≥ 0 active set (≈865 rows at the bound) and the wall clamps frozen, a V(2,2) preconditioner reduces the residual about 3.7× an iteration. A plain projected V-cycle reduces it 7–10×. CG also plateaus whenever the active set moves.
+
+**Per-cycle cost** (Dawn microbench `MG/mgbench2.mts`; real brick topology at 603/157/42/12/2 bricks; 27-neighbour staging; rows in registers):
+- Fine pDown 67 µs, pUp 64 µs.
+- Coarser levels: 8–25 µs a dispatch, latency-bound.
+- One V(2,2) cycle: **0.29 ms**. At twice the bricks (the 6k-tile case) it is 0.44 ms.
+- Knock-outs on the fine pDown: a floor of 23 µs (barriers, restrict, store), staging 20 µs, row loads 30 µs, sweeps 17 µs.
+
+**Restated bound.** At 4 cycles (6004 slots, as in §1.4):
+
+| Piece | Bound |
+|---|---|
+| Rows | 0.05 ms |
+| 4 × (52 µs fine + 8 µs coarse + 18 µs passes) | 0.31 ms |
+| Projection and measure | 0.05 ms |
+| **Pressure** | **≈0.41 ms** |
+
+**Design adopted:**
+- Smoother: brick halo 1 with shifted alternate partitions, V(3,3) with three sweeps a load.
+- Coarse operators: Galerkin at ℓ1 and below. Prolongation: trilinear. Warm start from the persistent p.
+- Default: early exit at 0.05 s⁻¹, with a cap of 4 cycles (method param).
+- The coarse tail is fused: ℓ3 and below run as one resident kernel; ℓ2 is one dispatch a direction. The fine pDown floor and the projection fold into neighbouring kernels.
+- Target: ≤ 0.15 ms a cycle, i.e. band pressure ≈ 0.6 ms for 4 cycles, 1.5× of the restated bound.
 
 ## 2. RFE: remap, geometric fill, body forces, extension
 
