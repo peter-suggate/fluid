@@ -13,6 +13,16 @@ Sources:
 - Bound at the pour's counts: **≈0.40 ms** (§1.2). §5 revises this: staging does not pay in the thin band, advect's gather-rate floor is ≈0.9 ms, and the pass-by-pass persistence projection is ≈5.4 ms (0.90 per kT) against today's 15.0.
 - Arena projection: **≈0.92 ms** in about 10 passes. That meets the ≤1 ms φ target and the ≤1.2 ms stage target, and is 2.3× the tighter bound. What holds it above 2× is the exact redistance's ALU (§1.3).
 
+**Element counts (§6, 2026-10-20).** Every surface pass runs near its per-element rate, so the levers are fewer elements and cheaper elements:
+- advect's taps through the texture unit, ≈0.9 ms;
+- an advect band of k cells, ≈1.6 ms, but it misses fast fronts early in the pour;
+- a coarse band, ≈0.95 ms;
+- particle-free copy tiles in coupleFine, ≤0.5 ms;
+- fineGridPadding 0, ≈0.7 ms;
+- redistance reach of one tile, ≈0.3 ms.
+
+The ranked list with params is §6.9. §5.5 corrects §5: P0 is null, Newton is 14% of R, P1 is ≈1 ms and shelved, and P3 is void.
+
 **Lifetime: persistent, not step-authoritative.** Bricks keep their slots and values across steps, and the paged h store becomes cold storage.
 - A step-authoritative copy costs 0.9–1.3 ms a step on its own, measured. That is about half of the three stages' combined 2× budget (≈2.05 ms).
 - The persistent arena copies only bricks that enter or leave, which comes to ≈0.02–0.04 ms.
@@ -615,3 +625,304 @@ Not counted above, and outside (a): the pressure authority (surfaceHeld, wetRegi
 | **P1** | Fine φ persistent. advect and couple stores also write the arena bank (dual write, ≈0.2 ms). R, X and nearest read the bank; fine crossing candidates fold into arenaCross; R gets the Newton warm start. The store rules become class bits. Write-through feeds paged φ. Gathers, arenaFar and phi resolve go. | Letters A/B | ≈3.4 ms |
 | **P2** | Advect on the arena sampler. advectFine becomes persistent masks; seams and slow samples leave the deferred list; solid cubic becomes bit tests. Needs the u channel over core and ring (the core-velocity channel extended to the ring). | Letters A/B | ≈2.4 ms |
 | **P3** | sSplat on the particle slabs (particle agent) | Letters A/B | ≈2.3 ms |
+
+### 5.5 Corrections after the knock-outs (2026-10-20)
+
+§5.2–5.4 projected before the kernels were knocked out. The knock-outs and counter runs since then change five rows.
+
+- **P0, the advect certificate: null.** It assumed |u| bounds how fast the zero can reach a vertex. At frame 100, 92% of the 332k traced h vertices have s·dt ≥ 1h from the vertex's own |u|, an optimistic stand-in for the 27-brick bound. So it certifies 17.5k (5%) at best, under 0.15 ms. Even with no speed cap (c > 2 + 2·s·dt) it reaches only 20%. Not built. Advect's 2.41 ms projection becomes ≈3.4 ms on the arena route.
+- **R's Newton is 14% of R.** Split by knock-out: per-target setup ≈0.85 ms, edge sweeps ≈0.49 ms, Newton ≈0.21 ms. So the warm start saves ≤0.2 ms, not 0.92.
+- **phi resolve stays** while paged readers of φ exist. It disappears only with persistence, and P1 is shelved.
+- **depth\* is not a duplicate.** It is a separate crossing search at reconstruct time, on the advected φ, for coupling and membership. The end-step arena search runs on the coupled φ. Folding fine candidates into arenaCross does not apply.
+- **The splat was already workgroup-atomic**: a 7³ window, then one device atomicMax a word. P3's lever is void.
+- **P1 is ≈1.0 ms, not 3.4: shelved.** Gathers ≈0.25 net, store ≈0.5, Newton ≈0.2, for a large build (persistent fine φ, dirty tracking on topology change, fail-fast capacity).
+- **The store's capacity rule is ≈0.1 ms, not 0.5.** §4's table already showed it: "no capacity" is 0.72 against 0.79–0.85. Staging capacity a tile at a time (exact, patch `store-capacity-2026-10-20.patch`) measured 0.880 ms at 6420 fine tiles against 0.871 at 6067: 4% per kT, inside run-to-run spread. Dropped. True per-brick caching is not available, because the brick table is rebuilt every step and its slots move. The ≈0.4 ms that "no capacity, writer, cold or interface" removes is in the per-vertex rule chain, which only persistence replaces.
+- **The targeted surfaceClear landed:** 0.309 → 0.169 ms. It clears only the vertices coupleFine and couple read, instead of every mapped page's 33³ words.
+- **The core (u, u\*) face channel is deleted** (a4149615). Nothing used it. The patch `core-velocity-2026-10-20.patch` restores it.
+
+## 6. Element counts: what each pass processes, what the physics needs (2026-10-20)
+
+Every surface pass already runs near its measured per-element rate (§5.2). So the levers left are processing fewer elements, or a cheaper element: the texture unit, which nothing on the surface uses yet. Sources:
+- the pour at 1/60 s, frames 94–100: `sc1` (after the targeted clear, 6067 fine tiles, 53.3k coarse tiles, surface 14.39 ms, 2.37 per kT);
+- counter runs `band1`–`band3`;
+- knock-outs `reach2`, `reach1` and `pad0`.
+
+Runs vary by ±6% in fine tiles from run to run, so per-pass deltas under ≈0.03 ms are noise.
+
+### 6.1 Priors: what broke, and what still stands
+
+The rule: a measurement more than 2× off its speed-of-light figure means the priors behind both the bound and the design get reassessed, and a different approach is tried. Four projections failed that test.
+
+| Projection | Projected | Measured | The prior that broke |
+|---|---|---|---|
+| sAdvect: staged advect | 2.4 → ≈0.3 ms | 4.22 ms | **Reads can be staged.** The band is thin: ≈103 of a brick window's 125 tiles are 4h, so a staged window loads mostly texels nobody advects. |
+| The advect certificate (P0) | −1.0 ms at 45% | ≤−0.15 ms at 5% | **|u|·dt is the front speed.** 92% of traced vertices move ≥1h a step, yet only ≈5% of them flip sign. The velocity is mostly tangential, or the fluid moves with the surface; it is not the zero's normal speed. |
+| Newton warm start | −0.92 ms | ≤−0.2 ms | **Newton dominates R.** R is setup 0.85, edge sweeps 0.49 and Newton only 0.21. |
+| sSplat | −2.3 ms | void | **The splat used device atomics.** It was already workgroup-atomic. |
+| advect floor | 0.9 ms | — | **Advect taps run at the gather rate.** They are trilinear and could run on the texture unit (§6.2). This prior was never tested. |
+
+**Priors still unchallenged**, with where this section challenges each:
+1. Every vertex in the fine band is advected every step, whatever its distance from the zero (§6.3).
+2. The redistance reaches three tiles past a crossing tile (§6.4).
+3. The fine band is as thick as particle joins plus one cell of padding make it (§6.5).
+4. The coarse level visits every 4h tile of every mapped page (§6.6).
+5. Reconstruction runs the particle gather at every band vertex, including those no particle reaches (§6.7).
+6. arenaNearest's 282 ns a brick is "lean". It was never compared with a bound at the workgroup-memory rate. Not challenged here.
+7. The brick table is rebuilt every step, so nothing can be cached per brick. This stands while P1 is shelved.
+
+### 6.2 The texture unit: advect's taps are filtering
+
+**The prior.** "Advect taps run at the gather rate, so the floor is ≈0.9 ms." That assumed every tap is a load. But both of advect's interpolants are exactly what texture filtering computes:
+- the trace's velocity is a trilinear blend of eight halo texels a component;
+- the walk's φ is a trilinear blend of eight vertices;
+- the cubic is a separable Catmull-Rom of 64 vertices.
+
+The texture unit filters rgba32f at 13.5 G samples/s, against ≈22 G loads/s for the coherent gathers advect reaches today. One filtered sample replaces 8 loads, so per interpolant the unit is ≈5× faster.
+
+**It is already proven in this codebase.**
+- Momentum traces through `unitHaloFiltered` (`momentumSampler` texture32, the default).
+- The particle trace does the same (5929ca1d): `advectParticles` 1.48 → 0.90 ms.
+
+The surface module already binds `unitHalo` (binding 14), the same rgba32f atlas, and builds it each step before the surface stage. So the surface trace needs only:
+- a second, filterable binding of that texture;
+- a linear clamp sampler;
+- a copy of the particle sampler's three lines in `umFastVelocity`.
+
+**Velocity: what it saves.** Samples are counted per vertex. With the trace seed, advectFine's Euler sample is stage 0, and advectTrace takes stages 1 and 2.
+
+| Pass | Velocity samples | Loads today | ms in loads at 22 G/s | Filtered at 13.5 G/s | Saves |
+|---|---|---|---|---|---|
+| advectTrace (0.730) | 331k × 2 | 15.9M | 0.72, so the pass is its loads | 2.0M: 0.15 | ≈0.55 |
+| advectFine (1.198) | ≈362k × 1 | 8.7M | 0.40 | 1.1M: 0.08 | ≈0.30 |
+| advectDeferred fast twin | ≈35k × 3 | 2.5M | 0.11 | 0.3M: 0.02 | ≈0.09 |
+| **Total** | | | | | **≈0.9** |
+
+Keeping it current costs nothing. unitHalo is already built every step for momentum and particles, with no copy and no new texture.
+
+Coverage:
+- unitHalo holds the halo blocks of h pages. A sample with fine weight f > 0 and a halo home takes it.
+- A sample in a 4h-only region keeps the coarse cache's loads (umSampleVelocity4In). `coarseFiltered` (momentum's) could take those too, but they are a small share of the band.
+- A sample with no halo home already ends the fast trace (umSlow) and is unchanged.
+
+**φ through the texture unit.** φ is a paged atlas of 33³ vertex blocks with skirts.
+- For an h cell, umVertexCell's eight vertices all lie inside one block, so one filtered r32f sample replaces them.
+- For the cubic, taps −1..+2 lie inside the block for cell-local 1..30, which is 82% of cells. Catmull-Rom has negative outer weights, so only the middle pair of each axis merges into one bilinear-trick sample. That gives 3 samples an axis, 27 in 3D, against 64 taps.
+- A 4h cell's corners are 4 vertices apart, so they cannot be filtered. Held, buried and solid-aware taps keep the loads.
+
+| Pass | Taps today | Filtered | Saves |
+|---|---|---|---|
+| advectFinish walk (1.095) | 331k × 8 = 2.6M loads, ≈0.12 ms | 331k samples: 0.03 ms. But the cubic reuses the eight corners where it routes (≈30%), so those vertices reload them. | ≈0.07 |
+| advectCubic, solid-free (0.281) | 57.5k × 64 = 3.7M, ≈0.17 ms | 82%: 27 samples; the rest taps. ≈0.10 ms | ≈0.08 |
+| advectCubic, solid-aware (0.749) | the per-tap solid walk dominates, not the taps | — | ≈0 |
+
+Keeping φ filterable costs nothing for the trilinear walk, since each vertex block already holds its cell's eight vertices. The cubic's 18% boundary cells fall back to taps rather than paying for an apron atlas, which would cost ≈0.15–0.2 ms a step to keep current and would cancel the gain.
+
+**Precision.** The texture unit rounds filter weights to about 1/256 of a texel.
+- For velocity, that is a trace endpoint error up to ≈|u|·dt/256 ≈ 0.06h at 15 cells a step. Momentum and particles already accept it.
+- For φ, the trilinear error is ≈|∇φ|·h/512 ≈ 0.002h.
+- The bilinear-trick cubic multiplies that error by the merged weights' ratio, so it is the riskiest of the three.
+
+Each goes behind a param, on by default only if the letters A/B passes.
+
+**The floor, restated.** At filtered rates:
+- the trace's floor is 331k × 6 samples / 13.5 G/s ≈ 0.15 ms;
+- the cubic's floor is 97k × 27 / 13.5 G/s ≈ 0.19 ms.
+
+So advect's interpolation floor is ≈0.35 ms, not 0.9. What then dominates advect is per-vertex control: ownership walks, routing, the store and the wall twin. That is §5.2's persistent-mask lever, unchanged.
+
+### 6.3 Advect band width k
+
+**Today.** Every h vertex the band holds is advected: 364k stores a step at frame 100, of which 331k fail the Euler test and are traced. Let c = |φ_old|/h. The distribution, with sign flips counted per step (`band1`, frames 94–100):
+
+| c | Vertices | Sign flips | New \|φ\| < 1.5h |
+|---|---|---|---|
+| < 1 | 64.4k | 14184 | 53.8k |
+| 1–2 | 50.7k | 4867 | 25.5k |
+| 2–3 | 49.6k | 466 | 5.7k |
+| 3–4 | 40.8k | 15 | 1186 |
+| 4–6 | 65.9k | 1 | 1028 |
+| 6–9 | 40.4k | 0 | 251 |
+| 9–15 | 7.1k | 0 | 11 |
+| ≥ 15 | 45.3k | 0 | 3 |
+
+**What the physics needs.** A vertex further than k cells from the zero needs its sign, not its value:
+- the redistance overwrites its magnitude in reach (§5.5);
+- past reach it is clamped to sign·6h.
+
+So a band of width k holds φ_old beyond c ≥ k and advects the rest. The trace chain costs ≈11.9 ns per traced vertex (trace, finish, both cubics and the deferred twin over 331k).
+
+| k | Vertices advected | Traced vertices removed | Saves | Missed flips a step, late (f100) | Missed flips a step, early (f50) |
+|---|---|---|---|---|---|
+| 3 | 165k (45%) | ≈177k | ≈2.1 ms | 8 | 688 |
+| 4 | 206k (56%) | ≈133k | ≈1.6 ms | 2 | 409 |
+| 6 | 271k (74%) | ≈71k | ≈0.85 ms | 0 | 186 |
+
+**What breaks.** Missed flips are fast fronts. Early in the pour (f40–f70), droplets and the falling column move at up to ≈15 cells a frame and cross vertices 4–15 cells from the old zero in one step:
+- At f40, 457 flips a step occur at c ≥ 3: 152 of them at 4–6 cells, 27 at ≥15 cells.
+- Late (f100), flips at c ≥ 3 drop to 18 a step.
+
+A missed flip leaves a stale sign behind or ahead of the front:
+- **Air → liquid** (fluid arriving): couple's min(φ', φ_p) repairs it wherever particles arrive.
+- **Liquid → air** (draining or detaching): only the redistance repairs it. The stale vertex now borders the true zero, gains a small |φ|, and is advected properly the next step. That is a one-step phantom fragment.
+
+Thin sheets and droplets are where liquid → air happens fastest, so they carry the risk.
+
+**A velocity-aware band** (also advect when |u|dt/h ≥ c − k) does not fix the early misses. At f40–f70 it misses 31–185 flips a step whether k is 3, 4 or 6, because the front reaches slow vertices: the vertex's own speed underestimates the trace that arrives there. Late, it keeps 66.7k extra vertices at k = 4 and saves ≈1.0 ms, against 1.6 blind.
+
+**Recommendation.** A param `surfaceAdvectBand` (cells; 0 = all, today's behaviour), default 0. On by default only if the letters A/B passes at k = 4 or 6. The fronts the letters scene exercises are exactly the early-pour ones.
+
+### 6.4 Redistance reach
+
+**Today.** arenaCross gives:
+- reach 3 (bits 1 and 2) to tiles within two tiles of a crossing tile;
+- reach 2 (R only) to tiles at three tiles.
+
+R evaluates 1.47M (target, crossing) pairs. The store writes exact distances in reach and sign·6h past it.
+
+**What the consumers read.** All of them read bit 1 (the reach-1 ring):
+
+| Consumer | Window |
+|---|---|
+| transfer | depth in [−2, 1.5] |
+| particleDepth | seeds in [−4, 0], cells in (−4.5, 0.9) |
+| particle kill | below −4 |
+| census | retire below −4h |
+| couple | the vertices near particles |
+
+The pressure band reads the interface cells and the sign. A tile one tile from a crossing tile holds every cell within 4h of a crossing. So the consumers need reach 1 plus the boundary cases at exactly 4h, which the sign·6h clamp reads the same way (below −4 either way).
+
+| Arm | arenaDistance | arenaFar | depthCoarse | redistanceCoarse | Saves |
+|---|---|---|---|---|---|
+| today (`sc1`, reach to 3 tiles) | 1.554 | 0.131 | 0.431 | 0.140 | — |
+| `reach2` (drop the three-tile ring) | 1.554 | 0.075 | 0.421 | 0.140 | ≈0.06 |
+| `reach1` (one tile only) | 1.404 | 0.066 | 0.365 | 0.122 | ≈0.30 |
+
+arenaNearest and arenaStore do not move: the store still visits every vertex of its windows.
+
+**What breaks.** Past reach, |φ| clamps to 6h, so true distances of 4–8h read as 6h. That changes:
+- advect's φ_old there (harmless while §6.3's band is off; with a band of k ≥ 4 those vertices are held anyway);
+- the advect band criterion itself;
+- coarse retirement's metric at 4h corners near the band. depthCoarse builds only for reach-bit-2 corners (≈6k of 27k visited), so reach 1 builds fewer of them, and their metric bound changes.
+
+A half-tile reach (6h, cell-level) would land near ≈0.2 ms.
+
+**Recommendation.** A param `surfaceRedistanceReach` (tiles: 1, 2, 3; default 3). Set the default to 1 if the letters A/B passes.
+
+### 6.5 The h band's thickness
+
+**What sets the ≈6k fine tiles.** A tile is fine when it is joined, a source, required or traced. Particle joins dominate: each particle's box of ±0.875h, swept over the step's travel, plus `fineGridPadding` (default 1h), floored to tiles. Census criteria add tiles where the shape (0.5h), a thin feature (4h), strain (0.1), impact (1h a step) or approach (2 steps) asks, within a 50% budget. A fine tile retires below −4h depth after a 0.5 s heat fade.
+
+**Is the ring wider than the physics needs?**
+- Consumers need φ to 4.5h on the liquid side (§6.4).
+- Particles live to −4h, so the liquid side of the band is set by particles, and particles are the fluid.
+- The air side needs the zero and its advect reach.
+- One cell of padding, floored to 4-cell tiles, adds up to one tile ring wherever a particle box sits near a tile face.
+
+**Measured (`pad0`, fineGridPadding 0, same frames):**
+
+| | `sc1` (padding 1) | `pad0` (padding 0) |
+|---|---|---|
+| fine tiles | 6067 | 5052 (−17%) |
+| coarse tiles | 53.3k | 55.9k |
+| surface | 14.39 ms (2.37 per kT) | 13.72 ms (2.71 per kT) |
+| RFE, pressure, momentum | 8.28, 8.34, 0.92 | 8.01, 8.27, 0.86 |
+| GPU frame | 44.3 ms | 43.3 ms |
+
+The fine passes shrink with the tile count:
+
+| Pass | `sc1` | `pad0` |
+|---|---|---|
+| advectFine | 1.198 | 1.077 |
+| advectTrace | 0.730 | 0.599 |
+| advectFinish | 1.095 | 0.918 |
+| coupleFine | 1.311 | 1.123 |
+| arenaStore | 0.871 | 0.777 |
+
+The 4h passes grow: advectCubic 0.749 → 0.824, couple 0.374 → 0.421. So the stage saves ≈0.7 ms and the frame ≈1.0 ms.
+
+The padding ring is ≈1000 tiles (17%). What it buys is margin: a particle within a cell of a tile face still samples, deposits and transfers at h, not across a hanging seam into 4h. Without it, more particles sit next to 4h tiles, and more of advect's work takes the coarse paths. That is a physics change, and it already has a param.
+
+### 6.6 The coarse level (1.22 ms)
+
+**Today.** The coarse level processes every 4h tile of every mapped page: 53.3k coarse tiles, ≈57.5k coarse cells and corners. Only the ones near the surface need it.
+
+| Pass | ms | Elements today | What the physics needs (`band3`, per step) | ns per element |
+|---|---|---|---|---|
+| couple (coarse) | 0.374 | 57.5k corners | ≈3.5k corners have particle bulk; the rest copy φ' | 6.5 |
+| depthCoarse | 0.431 | 57.5k corners visited | ≈6.0k distance builds (reach bit 2) | 7.5 per visit, 72 per build |
+| redistanceCoarse | 0.140 | ≈27k corners | ≈6.0k in reach bit 2 | 5.2 |
+| advect on the 4h lattice (twins, owners, wallReach) | 0.28 | 61.3k 4h vertices | the 4h vertices within the band (unmeasured; see below) | 4.6 |
+
+**Elements the physics needs.**
+- **Seam coarse tiles:** 5310, next to fine tiles.
+- **Coarse corners near a crossing:** the ≈6k that depthCoarse builds.
+- **Deep 4h corners:** retired. Sign only.
+- **Air 4h corners far from fluid:** no particles reach them, and the fine band follows the fluid (particle joins), so their φ stays clamped.
+
+So the need is ≈6–8k of 57.5k corners, about 12%.
+
+**Projected**, at each pass's measured rate on the needed elements:
+
+| Pass | ms | Projected |
+|---|---|---|
+| couple | 0.374 | ≈0.05 |
+| depthCoarse | 0.431 | ≈0.10 (the visits go; the builds stay) |
+| redistanceCoarse | 0.140 | ≈0.03 |
+| advect on the 4h lattice | 0.28 | ≈0.05 |
+
+That is ≈0.98 ms saved of 1.22.
+
+**What breaks.** Holding a 4h corner's φ beyond N coarse widths of a crossing is §6.3's band at 4h, where a coarse cell is 4h. With N = 2 (8h), a front moving 15 cells a step could cross it. Deep-liquid and far-air corners change sign only when a free surface reaches them, and a surface arriving at h is fine-banded first. The risk is a 4h-only surface, a calm surface far from the action, moving more than 8h in a step.
+
+**Recommendation.** The list of coarse corners within N coarse widths of a crossing, built in the crossing search, feeds all four passes. A param `surfaceCoarseBand` (coarse widths; 0 = all, today's behaviour). One counter run first: the 4h vertices advect visits, by c, as `band1` did at h.
+
+### 6.7 Reconstruction without particles
+
+coupleFine visits 342k h vertices a step and gathers particles at each (3.8 ns a vertex). 190k of them (56%) find particle bulk; the other 152k store φ' unchanged into the new bank. Air-side tiles of the band have no particle in reach. If the splat marked tiles with any particle within its reach, coupleFine's particle-free tiles would take a copy path at ≈0.5 ns a vertex. That is exact, with no physics change.
+
+The saving is up to ≈0.5 ms if the 152k cluster in whole tiles. They likely do, because the band extends ≈2–3 tiles on the air side, but this is unmeasured. A one-counter run settles it: particle-free fine tiles a step. couple (coarse) is §6.6's lever.
+
+### 6.8 Per pass: elements today, elements needed, projected ms
+
+Each row uses the pass's measured per-element rate (`sc1`). "Needed" is what §6.2–6.7 argue the physics reads.
+
+| Pass | ms | Elements today | Elements needed | Projected ms | Lever |
+|---|---|---|---|---|---|
+| advectFine | 1.198 | 424k vertices (362k h + 61k 4h) | same visits; velocity filtered | 0.90 | §6.2 |
+| advectTrace | 0.730 | 331k traced | k = 4: ≈198k; filtered | 0.09 (0.18 filtered only; 0.44 band only) | §6.2, §6.3 |
+| advectFinish | 1.095 | 331k | k = 4: ≈198k | 0.66 | §6.3 |
+| advectCubic, free | 0.281 | 57.5k | mostly c < 2: kept; filtered | 0.20 | §6.2 |
+| advectCubic, solid-aware | 0.749 | 40.1k | mostly kept | 0.70 | — |
+| advectDeferred, twinned | 1.545 | 35k | k = 4: ≈60%; filtered fast twin | 0.85 | §6.2, §6.3 |
+| advect on the 4h lattice | 0.28 | 61.3k | ≈12% | 0.05 | §6.6 |
+| surfaceClear | 0.169 | reconstructed vertices | same | 0.169 | done |
+| surfaceSplatOccupied | 0.524 | 590k particles | same | 0.524 | — |
+| coupleFine | 1.311 | 342k vertices | 190k with particles, plus a copy of the rest | ≈0.8 | §6.7 |
+| couple | 0.374 | 57.5k corners | ≈6–8k | 0.05 | §6.6 |
+| arenaGather ×2, arenaCross, arenaMark | 0.69 | ≈3.1k slots | same | 0.69 | — |
+| arenaNearest | 0.477 | 1793 core bricks | same | 0.477 | — |
+| arenaDistance | 1.554 | 1.47M pairs | reach 1 | 1.40 | §6.4 |
+| arenaStore | 0.871 | 247k stored | same | 0.87 | — |
+| arenaFar | 0.131 | | reach 1 | 0.066 | §6.4 |
+| depth\* (seeds, nearest, reuse, tiles) | 0.90 | candidate tiles | same | 0.90 | — |
+| depthCoarse | 0.431 | 57.5k visits | ≈6k builds | 0.10 | §6.6 |
+| redistanceCoarse | 0.140 | 27k | ≈6k | 0.03 | §6.6 |
+| phi resolve | 0.749 | | same | 0.749 | — |
+
+### 6.9 Ranked levers
+
+Physics changes go behind NB-FLIP method params (update "solver"). Each is on by default only if the letters A/B passes.
+
+| Rank | Lever | Saves | Physics risk | Param |
+|---|---|---|---|---|
+| 1 | Velocity through the texture unit in advectFine, advectTrace and the deferred fast twin (§6.2): a copy of 5929ca1d | ≈0.9 ms | Low. Weight rounding ≈1/256 texel, already accepted for momentum and particles. | `surfaceVelocitySampler`: texture32 / software |
+| 2 | Advect band k = 4 (§6.3) | ≈1.6 ms (≈1.4 after rank 1, since the trace gets cheaper) | Medium-high. ≈400 flips a step missed early in the pour; liquid → air ones leave one-step phantom fragments. | `surfaceAdvectBand`: cells, 0 = all |
+| 3 | Coarse band: couple, depthCoarse, redistanceCoarse and 4h advect only within N coarse widths of a crossing (§6.6) | ≈0.95 ms | Medium. A 4h-only surface moving more than 8h a step. Needs a 4h counter run first. | `surfaceCoarseBand`: coarse widths, 0 = all |
+| 4 | Particle-free tiles take a copy path in coupleFine (§6.7) | ≤0.5 ms | None (exact). Needs a tile-occupancy counter first. | none needed |
+| 5 | fineGridPadding 0 (§6.5) | ≈0.7 ms surface, ≈1.0 ms frame | Medium. Particles within a cell of a tile face meet hanging seams and 4h; letters A/B not run. | `fineGridPadding` (exists) |
+| 6 | Redistance reach one tile (§6.4) | ≈0.30 ms | Low-medium. True 4–8h read as 6h; coarse retirement builds fewer corners. | `surfaceRedistanceReach`: tiles 1–3 |
+| 7 | φ through the texture unit: trilinear walk and 27-sample cubic (§6.2) | ≈0.15 ms | Low for trilinear, medium for the bilinear-trick cubic | `surfacePhiSampler`: texture32 / software |
+
+Ranks 1–4 and 6 together project ≈4.0 ms of the stage's 14.4 (2.37 → ≈1.7 per kT at today's tile count); rank 5 changes the tile count itself and adds ≈0.7. The 0.15 per kT target still needs persistence and the per-vertex control levers of §5.2.
+
+**Next surface lead: the coarse level** (rank 3). Rank 1 comes first: it is the cheapest certain win, a copy of a measured change.
