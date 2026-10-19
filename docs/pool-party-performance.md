@@ -176,3 +176,116 @@ The candidate list requires a second index stream: at the current 2 GiB mesh are
 The dense water fallback shares scalar samples within each workgroup. GPU parity tests compare its complete triangle and normal output against the original extractor, including nodal fields and walls. The live mixed-window extractor is unchanged.
 
 The optional `FLUID_SVO_DRY_FRAME_PROFILE_WATER=1` benchmark currently uses a synthetic dense initial water field. Its forced-update modes measure dense fallback extraction, not the production solver's mixed surface windows. These results must not be used to infer a live water regression. With the latest M1 Max 1000×720 run, camera-motion rendering including this water field measured 7.27 ms median; forcing dense extraction raised it to 9.96 ms. These measurements do not establish the earlier requested sub-6 ms full-frame target. Per-pass intervals can overlap and must not be summed.
+
+## Primary timing and host allocation audit (2026-10-19)
+
+The previous **Primary rasterization** row combined three distinct stages. The
+panel now gives **Mesh maintenance**, **Mesh culling**, and **Primary
+rasterization** their own rows, each owning its existing GPU stage measurement.
+Meshing settings and build status live under maintenance; the current draw count
+lives under culling. Imported meshes and rigid bodies still share the raster
+pass, so their rows describe that shared cost rather than inventing independent
+GPU durations. Band totals count every stage once.
+
+The audit found both real GPU work and avoidable host churn:
+
+- The culler loaded the same immutable state words atomically for every
+  candidate triangle. It now loads them once per 64-thread workgroup and shares
+  them after a barrier. It still recomputes visibility for the current camera
+  every frame and uses the same geometry, clipping and sample-coverage tests.
+- Hundreds of imported draws were encoded from JavaScript every frame. A render
+  bundle now retains those commands. Camera, poses, LOD and indirect draw counts
+  are still read live from GPU buffers. Pipeline, binding, instance-list and
+  rigid-mode changes rebuild the bundle; resize replaces attachment descriptors.
+- Mesh status copied and mapped every frame, allocating copied buffers, promise
+  chains and status objects. Pending builds still request prompt receipts; ready
+  meshes poll status every 250 ms. Known maintenance starts extraction immediately,
+  independently of a receipt. Unannounced GPU publication changes are discovered
+  by the bounded poll. No primary encode waits for a map or queue completion.
+- Moving rigid bounds rebuilt the entire scene parameter block and shadow-light
+  metadata. They now update only their 16-byte block, keeping the parameter memo
+  consistent. View/body upload storage, bounds scratch, tuning resolution,
+  attachment descriptors, light-capability checks and command descriptors are
+  reused on unchanged frames.
+
+On the M1 Max at 1000×720, 6.25 mm visual cells, 50 mm fluid cells, smooth DMC
+geometry and Raster + AO, the initial paired isolated GPU samples measured
+culling **2.294 → 1.966 ms** (14% reduction). The shared draw remained **2.687 ms**.
+Each arm used four warmups and sixteen samples. The complete overview capture
+was bit-identical in all four half-float channels, including depth, with no GPU
+validation errors. The roughly five milliseconds previously grouped into one
+row therefore was not all raster drawing, nor a CPU timer masquerading as GPU
+work.
+
+A separate V8 sampling audit initially attributed approximately **81 KB/frame**
+to application source before the changes and **4 KB/frame** after the first
+optimization pass. These are sampled allocations, including native API wrappers
+at application call sites, not an exact allocation census. The largest eliminated
+site was primary command encoding. Follow-up cleanup also retains compute and
+lighting descriptors and avoids rebuilding light-eligibility collections.
+
+This does **not** establish zero allocations throughout the browser and solver.
+WebGPU creates command/pass objects, completion uses promises, and sampled
+telemetry still creates results. The Node Dawn binding's event polling also
+allocates heavily. V8 allocation profiling itself increased GC pauses, so its
+frame times are excluded from performance claims. It now runs after the clean
+wall/timestamp measurements when `FLUID_SVO_DRY_FRAME_HOST_PROFILE` is set.
+Likewise, a full scene's GPU completion timeline can vary with simulation,
+desktop GPU contention and instrumentation; reducing host churn does not imply
+that every fluctuation in a hardware timestamp was caused by GC.
+
+Reproduction uses the existing dry-render benchmark and the settings above:
+
+```sh
+export WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js"
+export FLUID_WEBGPU_BACKEND=metal
+export FLUID_SVO_DRY_FRAME_SCENE=backyard-pool-party
+export FLUID_SVO_DRY_FRAME_SCENE_MODULE=tools/preview/pool-party-live.ts
+export FLUID_SVO_DRY_FRAME_WIDTH=1000 FLUID_SVO_DRY_FRAME_HEIGHT=720
+export FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT=3
+export FLUID_SVO_DRY_FRAME_TRAVERSAL=raster-primary
+export FLUID_SVO_DRY_FRAME_SURFACE_MESH=1
+export FLUID_SVO_DRY_FRAME_MESHER=dual-marching-cubes
+export FLUID_SVO_DRY_FRAME_SPECIALIZED_LIGHTING=1
+export FLUID_SVO_DRY_FRAME_CONE_TRACING=raster-ao
+export FLUID_SVO_DRY_FRAME_CONE_FANOUT=0 FLUID_SVO_DRY_FRAME_CONE_SCALE=1
+export FLUID_SVO_DRY_FRAME_PROFILE_SECONDS=8
+export FLUID_SVO_DRY_FRAME_PRIMARY_TIMING=1
+export FLUID_SVO_DRY_FRAME_PRIMARY_TIMING_LABELS='Voxel mesh culling,Voxel surface mesh rasterization'
+export FLUID_SVO_DRY_FRAME_HOST_PROFILE=artifacts/pool-raster-host/audit
+node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
+```
+
+The optional host audit writes `.heapprofile`, `.cpuprofile`, and `.gc.json`
+files after 512 warmed frames. These are dry rendering measurements, excluding
+fluid simulation and water compositing. Local evidence lives in
+`artifacts/pool-raster-host/`; the initial tiny-pass timing attempt rejected
+unsampled/quantized timestamps and is not used as evidence.
+
+
+Final verification retained the culling result (**1.966 ms median, 2.032 ms
+95th percentile**) and draw result (**2.687 ms median, 2.818 ms 95th
+percentile**). Overview, orbit, close and return captures are all bit-identical
+in color and depth; see `artifacts/pool-raster-host/comparison.json`. Final host
+sampling attributed **1,971 bytes/frame** to application call sites, about
+**97.6% less** than the initial 80,935-byte sample. Remaining primary allocations
+are predominantly WebGPU pass/command wrappers and occasional telemetry;
+source-level reuse tests cover descriptors, bundles, upload buffers and tuning.
+
+The final unprofiled loop recorded **0.270 ms median / 0.384 ms p95** JavaScript
+encoding. Its submit/finish-to-completion median was 7.274 ms, but its maximum
+was 609.864 ms, outside the encoding interval (maximum encoding: 2.897 ms).
+That tail is not presented as solved or attributed conclusively to GC. Native
+queue callbacks, initialization cleanup and competing desktop work remain
+possible contributors. The separate allocation audit observes substantial Node
+Dawn event-polling churn; this does not establish the browser's GC behavior.
+The clean reference run overlapped CPU unit-test activity, so it is excluded
+from end-to-end speedup claims; its images remain valid comparison inputs.
+
+`npm run check:types` passes. `npm run test:unit` passes with 991 passing and
+89 skipped tests. Focused regressions cover row ownership, no double counting,
+mutable tuning inputs, partial rigid-bounds uploads, retained commands,
+attachment changes, immediate edit extraction, and asynchronous status polling.
+
+The explicit Metal GPU suite passes all seven coverage, mesh-stream and raster-AO
+checks with no skips or validation errors.

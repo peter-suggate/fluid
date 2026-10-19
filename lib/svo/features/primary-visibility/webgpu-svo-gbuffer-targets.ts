@@ -45,6 +45,7 @@ export class SparseVoxelGBufferTargetArena {
   private packedSurfaceView?: GPUTextureView;
   private identityMediaView?: GPUTextureView;
   private hardwareDepthView?: GPUTextureView;
+  private cachedViews?: SparseVoxelGBufferViews;
   private width = 0;
   private height = 0;
 
@@ -79,6 +80,7 @@ export class SparseVoxelGBufferTargetArena {
     this.packedSurfaceView = this.packedSurface.createView();
     this.identityMediaView = this.identityMedia.createView();
     this.hardwareDepthView = this.hardwareDepth.createView();
+    this.cachedViews = { packedSurface: this.packedSurfaceView, identityMedia: this.identityMediaView, hardwareDepth: this.hardwareDepthView };
     this.width = width;
     this.height = height;
     return true;
@@ -97,12 +99,7 @@ export class SparseVoxelGBufferTargetArena {
   }
 
   get views(): SparseVoxelGBufferViews | undefined {
-    if (!this.packedSurfaceView || !this.identityMediaView || !this.hardwareDepthView) return undefined;
-    return {
-      packedSurface: this.packedSurfaceView,
-      identityMedia: this.identityMediaView,
-      hardwareDepth: this.hardwareDepthView,
-    };
+    return this.cachedViews;
   }
 
   destroy(): void {
@@ -119,6 +116,7 @@ export class SparseVoxelGBufferTargetArena {
     this.packedSurfaceView = undefined;
     this.identityMediaView = undefined;
     this.hardwareDepthView = undefined;
+    this.cachedViews = undefined;
     this.width = 0;
     this.height = 0;
   }

@@ -66,5 +66,5 @@ test("primary range caching never reuses camera visibility", () => {
   assert.doesNotMatch(publication,/uniforms\.camera|uniforms\.viewport/);
   assert.match(publication,new RegExp(`atomicStore\\(&meshState\\[${W.drawInstanceCount}\\],0u\\)`));
   assert.match(shader,/let entry=id.x\+id.y\*65535u\*64u/);
-  assert.match(shader,/meshQuadVisible\(index\)/);
+  assert.match(shader,/meshQuadVisible\(index,meshCullHeader.x,meshCullHeader.z!=0u\)/);
 });

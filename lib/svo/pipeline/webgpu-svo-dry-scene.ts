@@ -1198,6 +1198,20 @@ export class SparseVoxelDrySceneRenderer {
   private rasterRigidActive: boolean;
   /** Raster-assisted primary visibility (traversal mode `raster-primary`). */
   private surfaceMeshDisposed = false;
+  private surfaceMeshDrawCache?: ReturnType<SparseVoxelDrySceneRenderer["createSurfaceMeshDrawBundle"]>;
+  private surfaceMeshPass?: GPURenderPassDescriptor;
+  private deferredLightingPass?: GPURenderPassDescriptor;
+  private encodeResult?: { readonly encoded: true; readonly sampledTargetView: GPUTextureView };
+  private static readonly readyBundleStatus = Object.freeze({ state: "ready" } as const);
+  private readonly rasterLightingCapability = { coneMode: "", globalIllumination: false };
+  private rasterAoTrace?: RenderFrameSeam<"svo">;
+  private completeRasterShadows?: () => void;
+  private completeRasterAo?: () => void;
+  private shadowReuseSourceRevision?: number;
+  private shadowReuseSceneRevision?: number;
+  private shadowReuseReceipt?: string;
+  private shadowReuseKey?: string;
+  private readonly importedSurfaceSelectDescriptor: GPUComputePassDescriptor = { label: "Native asset screen-error selection" };
   private surfaceMeshMaximumBytes = 0;
   private surfaceMeshReadback?: GPUBuffer;
   private surfaceMeshReadbackPending = false;
@@ -1227,6 +1241,8 @@ export class SparseVoxelDrySceneRenderer {
   private surfaceMeshArenaAllocations = 0;
   private surfaceMeshRebinds = 0;
   private readonly surfaceMeshBatchWords = new Uint32Array(2);
+  private surfaceMeshReadbackAt_ms = -Infinity;
+  private readonly surfaceMeshReceiptWords = new Uint32Array(SVO_SURFACE_MESH_STATE_BYTES / 4);
   /** Consecutive presentations the current build has spent pending; paces the brick ramp. */
   private surfaceMeshBuildPresentations = 0;
   surfaceMeshStatus?: SvoSurfaceMeshStatus;
@@ -1454,6 +1470,8 @@ export class SparseVoxelDrySceneRenderer {
   private rigidMotionSource?: GPUBuffer;
   /** xyz centre, w radius of one sphere over every body; negative radius = none. */
   private rigidBounds: [number, number, number, number] = [0, 0, 0, -1];
+  private readonly rigidBoundsUpload = new Float32Array(4);
+  private readonly rigidBoundsUploadWords = new Uint32Array(this.rigidBoundsUpload.buffer);
   private readonly gBufferTargets: SparseVoxelGBufferTargetArena;
   private readonly pickingReadback: SparseVoxelGpuPickingReadbackRing;
   private lastPickingTarget?: GPUTexture;
@@ -1841,16 +1859,20 @@ export class SparseVoxelDrySceneRenderer {
     // they read a body, so it is republished whenever bodies move even though
     // the count has not changed. An empty scene publishes a negative radius,
     // which retires the body loop outright rather than shrinking it.
-    const published: [number, number, number, number] = bodyCount > 0 && bounds
-      ? [bounds.centre_m[0], bounds.centre_m[1], bounds.centre_m[2], Math.max(bounds.radius_m, 0)]
-      : [0, 0, 0, -1];
-    // writeParams rebuilds the entire parameter block, so a still scene must not
-    // pay for it every frame just to restate a sphere that has not moved.
-    if (published.some((value, axis) => value !== this.rigidBounds[axis])) {
-      this.rigidBounds = published;
-      if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) {
-        this.writeParams(this.source, this.scene);
-      }
+    const hasBounds = bodyCount > 0 && bounds !== undefined;
+    const x = hasBounds ? bounds.centre_m[0] : 0;
+    const y = hasBounds ? bounds.centre_m[1] : 0;
+    const z = hasBounds ? bounds.centre_m[2] : 0;
+    const radius = hasBounds ? Math.max(bounds.radius_m, 0) : -1;
+    if (x !== this.rigidBounds[0] || y !== this.rigidBounds[1]
+      || z !== this.rigidBounds[2] || radius !== this.rigidBounds[3]) {
+      this.rigidBounds[0] = x; this.rigidBounds[1] = y;
+      this.rigidBounds[2] = z; this.rigidBounds[3] = radius;
+      // Motion changes only this sphere. Repacking all scene parameters here
+      // also rebuilt shadow-light metadata and allocated several arrays/frame.
+      this.rigidBoundsUpload.set(this.rigidBounds);
+      this.device.queue.writeBuffer(this.paramsBuffer, SVO_DRY_SCENE_PARAMS_LAYOUT.rigidBoundsWordOffset * 4, this.rigidBoundsUpload);
+      this.paramsWords?.set(this.rigidBoundsUploadWords, SVO_DRY_SCENE_PARAMS_LAYOUT.rigidBoundsWordOffset);
     }
     // The coverage resolve carries an analytic body loop of its own (W1's
     // impostor fold), so raster-primary no longer needs the twelve-instance
@@ -2032,6 +2054,7 @@ export class SparseVoxelDrySceneRenderer {
   private resetSurfaceMeshState(): void {
     if (!this.surfaceMeshState) return;
     this.surfaceMeshEpoch += 1;
+    this.surfaceMeshBatchWords.fill(0);
     this.device.queue.writeBuffer(this.surfaceMeshState, 0, new Uint32Array(SVO_SURFACE_MESH_STATE_BYTES / 4));
     this.writeSurfaceMeshHostWords();
     this.surfaceMeshBuildPresentations = 0;
@@ -2144,6 +2167,31 @@ export class SparseVoxelDrySceneRenderer {
     return true;
   }
 
+  private static readonly meshComputeDescriptors = new Map<string, GPUComputePassDescriptor>();
+
+  private encodeSurfaceMeshCompute(encoder: GPUCommandEncoder, usePrepass: boolean, group: number,
+    label: string, pipeline: GPUComputePipeline, groups = 1): void {
+    const pipelines = this.surfaceMeshPipelines!;
+    const state = this.surfaceMeshState!;
+    const indirect = pipeline === pipelines.cull || pipeline === pipelines.candidates;
+    if (indirect) encoder.copyBufferToBuffer(state,
+      (pipeline === pipelines.cull ? SVO_SURFACE_MESH_STATE.cullDispatch : SVO_SURFACE_MESH_STATE.candidateDispatch) * 4,
+      this.surfaceMeshCullIndirect!, 0, 12);
+    let descriptor = SparseVoxelDrySceneRenderer.meshComputeDescriptors.get(label);
+    if (!descriptor) {
+      descriptor = { label };
+      SparseVoxelDrySceneRenderer.meshComputeDescriptors.set(label, descriptor);
+    }
+    const pass = encoder.beginComputePass(descriptor);
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.bindGroup);
+    if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
+    pass.setBindGroup(group, this.surfaceMeshComputeGroup!);
+    if (indirect) pass.dispatchWorkgroupsIndirect(this.surfaceMeshCullIndirect!, 0);
+    else pass.dispatchWorkgroups(Math.min(groups, 65535), Math.max(1, Math.ceil(groups / 65535)));
+    pass.end();
+  }
+
   private encodeSurfaceMesh(encoder: GPUCommandEncoder, views: SparseVoxelGBufferViews,
     usePrepass: boolean, group: number, tracePhase?: RenderFrameSeam<"svo">): void {
     this.ensureSurfaceMeshWork();
@@ -2155,7 +2203,8 @@ export class SparseVoxelDrySceneRenderer {
       const epoch = this.surfaceMeshReceiptEpoch;
       const presentation = this.surfaceMeshReceiptPresentation;
       void staging.mapAsync(GPUMapMode.READ).then(() => {
-        const words = new Uint32Array(staging.getMappedRange().slice(0)); staging.unmap();
+        const words = this.surfaceMeshReceiptWords;
+        words.set(new Uint32Array(staging.getMappedRange())); staging.unmap();
         if (this.surfaceMeshDisposed) return;
         this.applySurfaceMeshReceipt(words, arenaBytes, epoch, presentation);
       }).catch(() => { /* Destruction or device loss cancels the diagnostic. */ })
@@ -2163,20 +2212,6 @@ export class SparseVoxelDrySceneRenderer {
     }
     const pipelines = this.surfaceMeshPipelines!;
     const state = this.surfaceMeshState!;
-    const compute = (label: string, pipeline: GPUComputePipeline, groups = 1) => {
-      // Writable publication and indirect arguments cannot share a buffer in
-      // one compute pass, even when their byte ranges do not overlap.
-      const indirect = pipeline === pipelines.cull || pipeline === pipelines.candidates;
-      if (indirect) encoder.copyBufferToBuffer(state, (pipeline === pipelines.cull ? SVO_SURFACE_MESH_STATE.cullDispatch : SVO_SURFACE_MESH_STATE.candidateDispatch) * 4, this.surfaceMeshCullIndirect!, 0, 12);
-      const pass = encoder.beginComputePass({ label });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.bindGroup);
-      if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
-      pass.setBindGroup(group, this.surfaceMeshComputeGroup!);
-      if (indirect) pass.dispatchWorkgroupsIndirect(this.surfaceMeshCullIndirect!, 0);
-      else pass.dispatchWorkgroups(Math.min(groups, 65535), Math.max(1, Math.ceil(groups / 65535)));
-      pass.end();
-    };
     const W = SVO_SURFACE_MESH_STATE;
     // The voxelizer says, without a readback, that it encoded maintenance
     // this frame: bricks may have been finalized, so the build passes are
@@ -2197,7 +2232,7 @@ export class SparseVoxelDrySceneRenderer {
     // edit's re-extraction is a cheap presentation, and climbs while a build
     // stays pending. While the drawn mesh is complete the build passes are
     // left out: a build the GPU starts on its own (a publication the host did
-    // not make) waits the two frames its receipt takes.
+    // not make) is discovered by the bounded status poll.
     const pending = this.surfaceMeshStatus?.state !== "ready";
     const drawn = this.surfaceMeshStatus?.drawn === true;
     const bricks = pending ? surfaceMeshBuildBricks(this.surfaceMeshBuildPresentations, drawn) : SVO_SURFACE_MESH_BUILD_BRICKS_INITIAL;
@@ -2206,18 +2241,20 @@ export class SparseVoxelDrySceneRenderer {
     // threads read the batch's real span from the state and stride over it.
     const jobs = bricks * surfaceMeshJobsPerBrick(this.source?.structural?.domain.brickSize ?? 8, this.renderTuning.surfaceMeshing === "dual-marching-cubes");
     const extractGroups = Math.min(65535, Math.ceil(jobs / 64));
-    this.surfaceMeshBatchWords[0] = extractGroups * 64;
-    this.surfaceMeshBatchWords[1] = bricks;
-    this.device.queue.writeBuffer(state, W.hostExtractThreads * 4, this.surfaceMeshBatchWords);
-    compute("Voxel surface mesh revision check", pipelines.prepare);
-    if (pending) {
-      compute("Voxel surface mesh dirty journal ingestion", pipelines.ingest, SVO_SURFACE_MESH_INGEST_GROUPS);
-      compute("Voxel surface mesh batch schedule", pipelines.schedule);
-      compute("Voxel surface mesh quad count", pipelines.count, extractGroups);
-      compute("Voxel surface mesh range allocation", pipelines.allocate, Math.ceil(bricks / 64));
-      compute("Voxel surface mesh quad emission", pipelines.emit, extractGroups);
+    if (this.surfaceMeshBatchWords[0] !== extractGroups * 64 || this.surfaceMeshBatchWords[1] !== bricks) {
+      this.surfaceMeshBatchWords[0] = extractGroups * 64;
+      this.surfaceMeshBatchWords[1] = bricks;
+      this.device.queue.writeBuffer(state, W.hostExtractThreads * 4, this.surfaceMeshBatchWords);
     }
-    compute("Voxel surface mesh publication", pipelines.publish);
+    this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh revision check", pipelines.prepare);
+    if (pending) {
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh dirty journal ingestion", pipelines.ingest, SVO_SURFACE_MESH_INGEST_GROUPS);
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh batch schedule", pipelines.schedule);
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh quad count", pipelines.count, extractGroups);
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh range allocation", pipelines.allocate, Math.ceil(bricks / 64));
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh quad emission", pipelines.emit, extractGroups);
+    }
+    this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh publication", pipelines.publish);
     tracePhase?.("surface-mesh-update");
     // Selection and culling run before the exact planes rather than between
     // them and the mesh, so the two draws share one render pass. Neither
@@ -2225,27 +2262,76 @@ export class SparseVoxelDrySceneRenderer {
     // wrote and the dirty boxes written after selection); they only fill the
     // leaf table and the indirect draw. Two passes stored all four primary
     // planes and depth (52 B/px) and loaded them straight back.
-    compute("Voxel mesh detail selection", pipelines.select, Math.ceil(this.surfaceMeshWorkLeafCapacity / 64));
+    this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel mesh detail selection", pipelines.select, Math.ceil(this.surfaceMeshWorkLeafCapacity / 64));
     // The dirty boxes mask exactly the bricks still pending after this
     // presentation's batch and the leaf scan selection may have run.
-    if (pending) compute("Voxel surface mesh dirty boxes", pipelines.boxes);
+    if (pending) this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel surface mesh dirty boxes", pipelines.boxes);
     // A fixed direct dispatch over the arena's capacity; each thread reads the
     // drawable quad count publication stored and the rest return at once.
     if (this.experiments.surfaceMeshCulling !== false) {
-      compute("Voxel primary geometry compaction", pipelines.candidates);
-      compute("Voxel primary candidate dispatch", pipelines.cullDispatch);
-      compute("Voxel mesh culling", pipelines.cull, Math.ceil(this.surfaceMeshArena!.size / 32 / 64));
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel primary geometry compaction", pipelines.candidates);
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel primary candidate dispatch", pipelines.cullDispatch);
+      this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel mesh culling", pipelines.cull, Math.ceil(this.surfaceMeshArena!.size / 32 / 64));
     }
     if (this.importedSurfaceInstances.length && this.importedSurfacePipeline) {
-          const select = encoder.beginComputePass({ label: "Native asset screen-error selection" });
+          const select = encoder.beginComputePass(this.importedSurfaceSelectDescriptor);
           select.setPipeline(this.importedSurfaceSelectPipeline!);select.setBindGroup(0,this.bindGroup);select.setBindGroup(1,this.importedSurfaceLodGroup!);
           select.dispatchWorkgroups(Math.ceil(this.importedSurfaceInstances.length/64));select.end();
     }
     tracePhase?.("surface-mesh-cull");
-    const draw = encoder.beginRenderPass({ label: "Voxel surface mesh rasterization",
-      colorAttachments: this.rasterPrimaryAttachments(views, "clear",
-        this.identityPlanesInspected || this.rigidBodyCount > 0 ? "store" : "discard"),
-      depthStencilAttachment: { view: views.hardwareDepth, depthLoadOp: "clear", depthStoreOp: "store", depthClearValue: 0 } });
+    const identityStore = this.identityPlanesInspected || this.rigidBodyCount > 0 ? "store" : "discard";
+    const previous = this.surfaceMeshPass;
+    const attachments = previous?.colorAttachments as GPURenderPassColorAttachment[] | undefined;
+    if (!previous || previous.depthStencilAttachment?.view !== views.hardwareDepth
+      || attachments![0]!.view !== views.packedSurface || attachments![1]!.view !== views.identityMedia
+      || attachments![2]!.view !== this.splitGeometryView || attachments![3]!.view !== this.splitOpaqueIdentityView
+      || attachments![0]!.storeOp !== identityStore) {
+      this.surfaceMeshPass = { label: "Voxel surface mesh rasterization",
+        colorAttachments: this.rasterPrimaryAttachments(views, "clear", identityStore),
+        depthStencilAttachment: { view: views.hardwareDepth, depthLoadOp: "clear", depthStoreOp: "store", depthClearValue: 0 } };
+    }
+    const rigid = this.rasterRigidActive && !this.disabledStages.has("rigid-impostor") && !this.identityPlanesInspected;
+    const cached = this.surfaceMeshDrawCache;
+    if (!cached || cached.main !== this.bindGroup || cached.pipelines !== pipelines
+      || cached.mesh !== this.surfaceMeshDrawGroup || cached.prepass !== (usePrepass ? this.conePrepassBindGroup : undefined)
+      || cached.group !== group || cached.planes !== this.source!.structural!.planarBoundaries.count
+      || cached.instances !== this.importedSurfaceInstances || cached.imported !== this.importedSurfacePipeline
+      || cached.records !== this.importedSurfaceLodRecords || cached.args !== this.importedSurfaceDrawArgs
+      || cached.rigid !== rigid || cached.rigidPipeline !== this.rasterRigidDirectPipeline
+      || cached.rigidGroup !== this.rasterRigidInputBindGroup) {
+      this.surfaceMeshDrawCache = this.createSurfaceMeshDrawBundle(usePrepass, group);
+    }
+    const draw = encoder.beginRenderPass(this.surfaceMeshPass!);
+    draw.executeBundles(this.surfaceMeshDrawCache!.bundles);
+    draw.end();
+    // Build receipts remain prompt. Once ready, status is telemetry: the GPU
+    // still checks revisions and culls the current camera every frame, while
+    // host-only/unknown publications are discovered by a bounded 250 ms poll.
+    // Known maintenance above marks pending immediately, so edits never wait
+    // for this telemetry cadence to begin extraction.
+    const receiptNow = performance.now();
+    if (!this.surfaceMeshReadbackPending && !this.surfaceMeshReadbackCopied
+      && (pending || receiptNow - this.surfaceMeshReadbackAt_ms >= 250)) {
+      this.surfaceMeshReadbackAt_ms = receiptNow;
+      encoder.copyBufferToBuffer(state, 0, this.surfaceMeshReadback!, 0, SVO_SURFACE_MESH_STATE_BYTES);
+      this.surfaceMeshReceiptArenaBytes = this.surfaceMeshArena!.size;
+      this.surfaceMeshReceiptEpoch = this.surfaceMeshEpoch;
+      this.surfaceMeshReceiptPresentation = this.surfaceMeshPresentation;
+      this.surfaceMeshReadbackCopied = true;
+    }
+    this.surfaceMeshPresentation += 1;
+    tracePhase?.("surface-mesh-draw");
+  }
+
+  /** Commands and bindings are immutable until a publication/variant changes.
+   * Camera, body poses, LOD and visible draw counts remain GPU buffer contents,
+   * so replaying these commands never caches visibility or skips a fresh draw. */
+  private createSurfaceMeshDrawBundle(usePrepass: boolean, group: number) {
+    const pipelines = this.surfaceMeshPipelines!;
+    const state = this.surfaceMeshState!;
+    const draw = this.device.createRenderBundleEncoder({ label: "Cached primary draw commands",
+      colorFormats: rasterPrimaryTargets.map(target => target.format),
+      depthStencilFormat: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat });
     draw.setBindGroup(0, this.bindGroup);
     if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
     draw.setBindGroup(group, this.surfaceMeshDrawGroup!);
@@ -2258,8 +2344,8 @@ export class SparseVoxelDrySceneRenderer {
     if (this.importedSurfaceInstances.length && this.importedSurfacePipeline) {
           draw.setPipeline(this.importedSurfacePipeline);
           draw.setBindGroup(0, this.bindGroup);
-          for (const [instance, { asset }] of this.importedSurfaceInstances.entries()) {
-            const mesh = this.importedSurfaceMeshes.get(asset)!;
+          for (let instance = 0; instance < this.importedSurfaceInstances.length; instance++) {
+            const mesh = this.importedSurfaceMeshes.get(this.importedSurfaceInstances[instance]!.asset)!;
             draw.setVertexBuffer(0, mesh.vertices);
             // Keep firstInstance zero: indirect-first-instance is optional.
             draw.setVertexBuffer(1, this.importedSurfaceLodRecords!, instance * 128, 128);
@@ -2276,19 +2362,12 @@ export class SparseVoxelDrySceneRenderer {
       draw.setBindGroup(0, this.rasterRigidInputBindGroup!);
       draw.draw(SVO_RIGID_RASTER_CONTRACT.verticesPerProxy, SVO_RIGID_RASTER_CONTRACT.maximumBodies);
     }
-    draw.end();
-    // Every presentation carries a receipt: a build the GPU started on its own
-    // (a compaction, or a publication the host did not make) is noticed as
-    // soon as the copy returns rather than at a periodic poll.
-    if (!this.surfaceMeshReadbackPending && !this.surfaceMeshReadbackCopied) {
-      encoder.copyBufferToBuffer(state, 0, this.surfaceMeshReadback!, 0, SVO_SURFACE_MESH_STATE_BYTES);
-      this.surfaceMeshReceiptArenaBytes = this.surfaceMeshArena!.size;
-      this.surfaceMeshReceiptEpoch = this.surfaceMeshEpoch;
-      this.surfaceMeshReceiptPresentation = this.surfaceMeshPresentation;
-      this.surfaceMeshReadbackCopied = true;
-    }
-    this.surfaceMeshPresentation += 1;
-    tracePhase?.("surface-mesh-draw");
+    return { bundles: [draw.finish()], main: this.bindGroup, pipelines, mesh: this.surfaceMeshDrawGroup,
+      prepass: usePrepass ? this.conePrepassBindGroup : undefined, group,
+      planes: this.source!.structural!.planarBoundaries.count, instances: this.importedSurfaceInstances,
+      imported: this.importedSurfacePipeline, records: this.importedSurfaceLodRecords, args: this.importedSurfaceDrawArgs,
+      rigid: this.rasterRigidActive && !this.disabledStages.has("rigid-impostor") && !this.identityPlanesInspected,
+      rigidPipeline: this.rasterRigidDirectPipeline, rigidGroup: this.rasterRigidInputBindGroup };
   }
 
   private async ensureBrickCullPipelines(): Promise<void> {
@@ -4608,7 +4687,7 @@ export class SparseVoxelDrySceneRenderer {
     if (this.shadingPath === "split" && this.splitPipelineScale !== this.coneScale) {
       return { state: "compiling", detail: `Compiling requested SVO split bundle at scale ${this.coneScale}` };
     }
-    return { state: "ready" };
+    return SparseVoxelDrySceneRenderer.readyBundleStatus;
   }
 
   /**
@@ -5535,6 +5614,14 @@ export class SparseVoxelDrySceneRenderer {
 
   /** Update bounded shader work budgets without rebuilding scene resources. */
   setRenderTuning(tuning: SvoRenderTuning, retainSurfaceMeshing = false): void {
+    // Already-normalized live controls are overwhelmingly unchanged. Compare
+    // scalars before normalization/composition allocates a second full object.
+    let unchanged = true;
+    for (const key in tuning) {
+      if (retainSurfaceMeshing && (key === "surfaceMeshing" || key === "surfaceMeshContours" || key === "surfaceMeshContourInflation")) continue;
+      if (tuning[key as keyof SvoRenderTuning] !== this.renderTuning[key as keyof SvoRenderTuning]) { unchanged = false; break; }
+    }
+    if (unchanged) return;
     resolveSvoPipelineComposition({ coneRadianceReconstruction: tuning.coneRadianceReconstruction, coneTracingMode: this.lightingOptions.coneTracingMode });
     // During a producer replacement the current attachment still belongs to
     // the old mesher. Changing the extraction mode early invalidates its ready
@@ -6690,11 +6777,22 @@ export class SparseVoxelDrySceneRenderer {
       }
 
       if (this.rasterAo && this.rasterAoPipelines) {
+        const sourceRevision = this.source?.revision, sceneRevision = this.scene?.renderRevision;
+        if (this.shadowReuseKey === undefined || this.shadowReuseSourceRevision !== sourceRevision
+          || this.shadowReuseSceneRevision !== sceneRevision || this.shadowReuseReceipt !== this.surfaceMeshShadowReceipt) {
+          this.shadowReuseSourceRevision = sourceRevision; this.shadowReuseSceneRevision = sceneRevision;
+          this.shadowReuseReceipt = this.surfaceMeshShadowReceipt;
+          this.shadowReuseKey = `${sourceRevision}:${sceneRevision}:${this.surfaceMeshShadowReceipt}`;
+        }
+        this.rasterAoTrace = tracePhase;
+        this.completeRasterShadows ??= () => this.rasterAoTrace?.("raster-sun-shadows");
+        this.completeRasterAo ??= () => this.rasterAoTrace?.("screen-contact-ao");
         this.rasterAo.encode(encoder, this.rasterAoPipelines, this.bindGroup, this.surfaceMeshDrawGroup!,
           this.splitLightingBindGroup!, this.surfaceMeshState!, this.surfaceMeshArena!.size / 32, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
-          () => tracePhase?.("raster-sun-shadows"), () => tracePhase?.("screen-contact-ao"),
+          this.completeRasterShadows, this.completeRasterAo,
           this.experiments.rasterShadowPassReuse !== false && this.surfaceMeshStatus?.state === "ready"
-            ? `${this.source?.revision}:${this.scene?.renderRevision}:${this.surfaceMeshShadowReceipt}` : undefined);
+            ? this.shadowReuseKey : undefined);
+        this.rasterAoTrace = undefined;
       }
 
       // Encode follows the ACTIVE bundle, never the requested option: its
@@ -6848,14 +6946,16 @@ export class SparseVoxelDrySceneRenderer {
       // attachment (~0.5 ms at 3456×1744 on a tiler) to price a draw that is
       // mostly the clear it already pays for. Sky's switch still withholds its
       // draw; its time now reads inside deferred lighting.
-      const lighting = encoder.beginRenderPass({
-        label: "Sparse voxel deferred dry lighting",
-        colorAttachments: [{ view: targetView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
-        // Read-only: both draws classify pixels by the depth primary visibility
-        // already established and never contribute to it, so the attachment
-        // costs a tile load and no store.
-        depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthReadOnly: true },
-      });
+      const cachedLighting = this.deferredLightingPass;
+      if (!cachedLighting || cachedLighting.depthStencilAttachment?.view !== gBufferViews.hardwareDepth
+        || (cachedLighting.colorAttachments as GPURenderPassColorAttachment[])[0]!.view !== targetView) {
+        this.deferredLightingPass = {
+          label: "Sparse voxel deferred dry lighting",
+          colorAttachments: [{ view: targetView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+          depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthReadOnly: true },
+        };
+      }
+      const lighting = encoder.beginRenderPass(this.deferredLightingPass!);
       const skyEnabled = !this.disabledStages.has("sky-lighting");
       const surfacesEnabled = !this.disabledStages.has("deferred-lighting");
       if (skyEnabled || surfacesEnabled) {
@@ -6879,10 +6979,9 @@ export class SparseVoxelDrySceneRenderer {
           lighting.setPipeline(this.splitReconstructedLightingPipeline!);
           lighting.draw(3);
         }
-        lighting.setPipeline(this.splitOptimizedLightingPipeline && (canUseOpaqueRasterLighting(this.scene, {
-            coneMode: this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
-            globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,
-          }) || usePrepass && canUseOpaqueConeLighting(this.scene, {
+        this.rasterLightingCapability.coneMode = this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode;
+        this.rasterLightingCapability.globalIllumination = this.lightingOptions.globalIlluminationEnabled === true;
+        lighting.setPipeline(this.splitOptimizedLightingPipeline && (canUseOpaqueRasterLighting(this.scene, this.rasterLightingCapability) || usePrepass && canUseOpaqueConeLighting(this.scene, {
             coneMode: this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
             hierarchyReady: this.derivedLightingReady(),
             globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,
@@ -6927,8 +7026,8 @@ export class SparseVoxelDrySceneRenderer {
       if (bandPartitioner) encoder = bandPartitioner.boundary("svo-primary");
     }
     this.lastPickingTarget = targetTexture;
-    const result = { encoded: true, sampledTargetView: targetView } as const;
-    return result;
+    if (this.encodeResult?.sampledTargetView !== targetView) this.encodeResult = { encoded: true, sampledTargetView: targetView };
+    return this.encodeResult;
   }
 
   destroy(): void {
@@ -7088,6 +7187,10 @@ export class SparseVoxelDrySceneRenderer {
     this.sceneArenaBuffer.destroy();
     this.paramsBuffer.destroy();
     this.surfaceMeshDisposed = true;
+    this.surfaceMeshDrawCache = undefined;
+    this.surfaceMeshPass = undefined;
+    this.deferredLightingPass = undefined;
+    this.encodeResult = undefined;
     this.surfaceMeshReadback?.destroy();
     this.surfaceMeshState?.destroy();
     this.surfaceMeshCullIndirect?.destroy();

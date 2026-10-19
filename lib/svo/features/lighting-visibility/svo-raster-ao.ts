@@ -583,10 +583,13 @@ export class SvoRasterAo {
     this.aoGroup=this.device.createBindGroup({layout:this.aoLayout,entries:[{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:4,resource:view},{binding:6,resource:shadowView}]});
     this.consumer=this.device.createBindGroup({layout:this.consumerLayout,entries:[{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:3,resource:view},{binding:5,resource:shadowView}]});
   }
+  private readonly aoPassDescriptor: GPUComputePassDescriptor = { label: "Half-resolution sun visibility and horizon AO" };
+  private renderedSettledGeneration = -1;
+
   encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,arenaQuads:number,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void,settledMeshKey?:string):void{
     if(state!==this.meshState){this.renderedSettledKey=undefined;this.meshState=state;this.cacheGroup=this.device.createBindGroup({layout:this.cacheLayout,entries:[{binding:0,resource:{buffer:state}},{binding:1,resource:{buffer:this.params,offset:0,size:64}},{binding:2,resource:{buffer:this.cache}},{binding:3,resource:{buffer:this.redraw}}]});}
-    const settledKey=settledMeshKey===undefined?undefined:`${this.generation}:${settledMeshKey}`;
-    const reuse=settledKey!==undefined&&settledKey===this.renderedSettledKey;
+    const settledKey=settledMeshKey;
+    const reuse=settledKey!==undefined&&settledKey===this.renderedSettledKey&&this.renderedSettledGeneration===this.generation;
     if(!shadowsEnabled)this.renderedSettledKey=undefined;
     if(shadowsEnabled&&!reuse){
     const invalidation=encoder.beginComputePass({label:"Raster shadow cache check"});invalidation.setPipeline(this.cachePipeline!);invalidation.setBindGroup(0,this.cacheGroup!);invalidation.dispatchWorkgroups(1);invalidation.end();
@@ -598,13 +601,13 @@ export class SvoRasterAo {
       const pass=encoder.beginRenderPass({label:layer<2?`Cached sun shadow ${layer}`:`Cached spot shadow ${layer-2}`,colorAttachments:[],depthStencilAttachment:{view:this.shadowViews[layer],depthLoadOp:"load",depthStoreOp:"store"}});
       pass.setBindGroup(0,scene);pass.setBindGroup(1,mesh);pass.setBindGroup(2,this.shadowGroups[layer]);pass.setPipeline(pipelines.terrain);pass.drawIndirect(this.cache,0);pass.setPipeline(pipelines.shadow);pass.drawIndirect(this.cache,16);pass.end();
     }
-    this.renderedSettledKey=settledKey;
+    this.renderedSettledKey=settledKey;this.renderedSettledGeneration=this.generation;
     shadowComplete?.();
     }else if(shadowsEnabled){
       encoder.clearBuffer(this.cache,0,32);
       shadowComplete?.();
     }
-    if(aoEnabled||shadowsEnabled){const ao=encoder.beginComputePass({label:"Half-resolution sun visibility and horizon AO"});ao.setPipeline(pipelines.ao);ao.setBindGroup(0,scene);ao.setBindGroup(1,split);ao.setBindGroup(2,this.aoGroup!);ao.dispatchWorkgroups(Math.ceil(this.ao!.width/8),Math.ceil(this.ao!.height/8));ao.end();aoComplete?.();}
+    if(aoEnabled||shadowsEnabled){const ao=encoder.beginComputePass(this.aoPassDescriptor);ao.setPipeline(pipelines.ao);ao.setBindGroup(0,scene);ao.setBindGroup(1,split);ao.setBindGroup(2,this.aoGroup!);ao.dispatchWorkgroups(Math.ceil(this.ao!.width/8),Math.ceil(this.ao!.height/8));ao.end();aoComplete?.();}
   }
   destroy():void{this.params.destroy();this.cache.destroy();this.redraw.destroy();this.casters.destroy();this.shadow.destroy();this.ao?.destroy();this.shadowVisibility?.destroy();}
 }

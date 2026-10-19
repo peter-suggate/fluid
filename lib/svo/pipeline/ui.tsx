@@ -7,7 +7,7 @@ import { renderFilteredDetailControls,renderPrimaryTraversalControls,renderSeamC
 import { renderGiCompositionControls,renderReducedShadeControls } from "../features/radiance/controls";
 
 import { useEffect,useMemo,useState } from "react";
-import { Button, Choice, FieldList, Switch, SwitchField } from "../../../components/ui";
+import { Button, Choice, Facts, FieldList, Switch, SwitchField } from "../../../components/ui";
 import {
 PipelineGraph,
 formatPipelineDuration,
@@ -312,7 +312,9 @@ export function RenderPipelineOverlay() {
 
     "filtered-detail": renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEnabled, tuning, updateTuning, effectiveRendererStatus, svoStageView, setSvoStageView }),
 
-    "primary-traversal": renderPrimaryTraversalControls({ resolvedPrimary, partitioned, disabledStages, durations, effectiveRendererStatus, smoothSurfaceEnabled, svoMaximumTraversalDepth, setSvoMaximumTraversalDepth, svoMaximumNodeVisits, setSvoMaximumNodeVisits, tuning, updateTuning, modified, resetTuning }),
+    [resolvedPrimary === "mesh" ? "surface-mesh-update" : "primary-traversal"]: renderPrimaryTraversalControls({ resolvedPrimary, effectiveRendererStatus, smoothSurfaceEnabled, svoMaximumTraversalDepth, setSvoMaximumTraversalDepth, svoMaximumNodeVisits, setSvoMaximumNodeVisits, tuning, updateTuning, modified, resetTuning }),
+
+    "surface-mesh-cull": { readouts: 1, node: <Facts items={[{ label: "Drawn mesh records", value: effectiveRendererStatus.surfaceMesh?.quads?.toLocaleString() ?? "—", hint: "Records surviving current-camera culling. Updated asynchronously." }]} /> },
 
     "seam-closure": renderSeamClosureControls({ silhouetteRefinementStatus }),
 
@@ -331,7 +333,8 @@ export function RenderPipelineOverlay() {
 
   const bands: readonly PipelineBand[] = RENDER_PIPELINE_BANDS.map((band): PipelineBand => {
     const bandCost = measureRenderPipelineBand(band.id, durations, graphTotal_ms);
-    const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id)
+    const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id
+      && (context.surfaceMeshSelected || (node.id !== "surface-mesh-update" && node.id !== "surface-mesh-cull")))
       .map((node) => renderPipelineNodeForContext(node, context));
     const entries = nodes.map((node) => {
       const state = node.state(context);

@@ -1,4 +1,4 @@
-import { rasterSpotLights } from "../lighting-visibility/raster-spot-lights";
+import { rasterLightValues, rasterSpotLightEligible, RASTER_MAX_SPOT_LIGHTS } from "../lighting-visibility/raster-spot-lights";
 import { SVO_LIGHT_RECORD_WORDS, SVO_LIGHT_KINDS } from "../../contracts/svo-light-abi";
 import type { SceneDescription } from "../../../core/model";
 import { solidWorldForScene, type SolidWorld } from "../../../core/solid-world";
@@ -62,13 +62,13 @@ export function canUseOpaqueRasterLighting(
   const lights = scene?.lightRecords;
   if (!scene?.opaqueSurfaceOnly || options.coneMode !== "raster-ao"
     || options.globalIllumination || !lights?.length || lights.length % SVO_LIGHT_RECORD_WORDS) return false;
-  const spots = new Set(rasterSpotLights(lights).map(spot => spot.index));
-  const values = new Float32Array(lights.buffer, lights.byteOffset, lights.length);
+  const values = rasterLightValues(lights);
+  let spots = 0;
   for (let offset = 0; offset < lights.length; offset += SVO_LIGHT_RECORD_WORDS) {
-    if (spots.has(offset / SVO_LIGHT_RECORD_WORDS)) continue;
+    if (spots < RASTER_MAX_SPOT_LIGHTS && rasterSpotLightEligible(lights, values, offset)) { spots++; continue; }
     if (offset !== 0 || lights[24] !== SVO_LIGHT_KINDS.directional) return false;
-    const direction = [values[4], values[5], values[6]];
-    if (!direction.every(Number.isFinite) || Math.hypot(...direction) <= 1e-6) return false;
+    const x = values[4]!, y = values[5]!, z = values[6]!;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || Math.hypot(x, y, z) <= 1e-6) return false;
   }
   return true;
 }

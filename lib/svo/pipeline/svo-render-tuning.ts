@@ -685,3 +685,24 @@ export function resolveSvoSurfaceTuning(value: SvoRenderTuning, smoothRaster: bo
     surfaceMeshMaxCoarsening: 0,
   } : value);
 }
+
+/** Per-renderer cache; scalar snapshots also detect callers mutating a tuning object. */
+export class SvoSurfaceTuningCache {
+  private input?: SvoRenderTuning;
+  private smooth?: boolean;
+  private result?: SvoRenderTuning;
+  key = "";
+
+  resolve(value: SvoRenderTuning, smooth: boolean): SvoRenderTuning {
+    let same = this.input !== undefined && this.smooth === smooth;
+    if (same) for (const key in value) {
+      if (value[key as keyof SvoRenderTuning] !== this.input![key as keyof SvoRenderTuning]) { same = false; break; }
+    }
+    if (same) return this.result!;
+    this.input = { ...value };
+    this.smooth = smooth;
+    this.result = resolveSvoSurfaceTuning(value, smooth);
+    this.key = svoRenderTuningKey(this.result);
+    return this.result;
+  }
+}

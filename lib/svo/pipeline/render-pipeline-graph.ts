@@ -321,16 +321,40 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
         : "leaf proxies · seeds tMin"),
   },
   {
+    id: "surface-mesh-update",
+    band: "primary",
+    side: "left",
+    label: "Mesh maintenance",
+    taps: [],
+    toggleable: false,
+    tip: { summary: "Checks geometry revisions, extracts dirty bricks and publishes the mesh. Cached frames retain only revision and publication work. Edits keep unaffected cached geometry visible while changed bricks are rebuilt.", feeds: "primary rasterization", gate: "mesh primary" },
+    state: context => !context.surfaceMeshSelected ? "unavailable"
+      : context.disabledStages.has("primary-traversal") ? "off" : "on",
+    chip: () => "revision check · incremental extraction",
+  },
+  {
+    id: "surface-mesh-cull",
+    band: "primary",
+    side: "left",
+    label: "Mesh culling",
+    taps: [],
+    toggleable: false,
+    tip: { summary: "Selects mesh detail, compacts geometry after publication, and tests back faces, frustum and pixel sample coverage against the current camera. Includes imported mesh screen-error selection.", feeds: "primary rasterization", gate: "mesh primary" },
+    state: context => !context.surfaceMeshSelected ? "unavailable"
+      : context.disabledStages.has("primary-traversal") ? "off" : "on",
+    chip: () => "current camera · sample coverage",
+  },
+  {
     id: "filtered-detail",
     band: "primary",
     side: "right",
     label: "Filtered detail",
     switchedBy: "surfaceMeshFilteringEnabled",
-    costInsideNode: "primary-traversal",
+    costInsideNode: "surface-mesh-cull",
     taps: ["mesh-lod"],
     toggleable: true,
     tip: {
-      summary: "Selects a cached detail level for each voxel brick. Higher thresholds allow coarser cells on screen. Off restores native mesh detail. Smooth surface uses a uniform dual grid and disables voxel coarsening. Its work runs inside mesh culling and drawing; the shared timing belongs to Primary rasterization.",
+      summary: "Selects a cached detail level for each voxel brick. Higher thresholds allow coarser cells on screen. Off restores native mesh detail. Smooth surface uses a uniform dual grid and disables voxel coarsening. Its work runs inside mesh culling and drawing; detail selection is measured under Mesh culling and shading under Primary rasterization.",
       reads: "cached voxel mesh levels · camera · baked normals",
       feeds: "primary rasterization",
       gate: "rasterized primary with Smooth surface off",
@@ -681,7 +705,7 @@ export const RENDER_PIPELINE_NODES: readonly RenderPipelineNode[] = Object.freez
 
 /** The raster backend owns exclusive intervals under primary visibility. */
 export const SURFACE_MESH_TIMING_STAGES = [
-  { stage: "surface-mesh-update", label: "Mesh update", detail: "Revision check, extraction when dirty, and publication. Cached frames retain the check and publication cost." },
+  { stage: "surface-mesh-update", label: "Mesh maintenance", detail: "Revision check, extraction when dirty, and publication. Cached frames retain the check and publication cost." },
   { stage: "surface-mesh-cull", label: "Mesh culling", detail: "Traverses a cached compact stream of primary SVO records, then tests back faces, frustum and pixel sample coverage for the current camera on every frame. Fine geometry remains resident; there is no stationary-camera shortcut." },
   { stage: "surface-mesh-draw", label: "Planes + voxel and imported mesh draw", detail: "One pass: exact planar boundaries (incomplete or invalid meshes withhold geometry and trace instead), then cached imported and voxel meshes, analytic rigid bodies, and the diagnostic copy. A withheld primary only clears the surface buffer." },
 ] as const satisfies readonly { stage: RenderFrameStageId; label: string; detail: string }[];
@@ -717,7 +741,7 @@ export function renderPipelineNodeForContext(
     stages: node.stages.filter((stage) => meshStages.has(stage)),
     tip: {
       ...node.tip,
-      summary: "Primary rasterization fills the surface buffer using cached triangles: dual marching cubes for smooth surfaces, or the selected voxel mesher otherwise. Its timing is the sum of mesh update, mesh culling, and one pass that draws exact planes, imported meshes, voxel meshes and analytic rigid bodies. Mesh update includes revision checks on cached frames and, on a changed publication, re-extraction of the bricks that publication rewrote into the cached mesh in place. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
+      summary: "Primary rasterization fills the surface buffer using cached triangles: dual marching cubes for smooth surfaces, or the selected voxel mesher otherwise. Its timing covers the shared draw of exact planes, imported meshes, voxel meshes and analytic rigid bodies. Mesh maintenance and Mesh culling have their own measured rows. While that runs the cached mesh stays drawn and only the pixels whose rays cross the edited bricks are traced; before the first build, exact traversal shows the whole current voxel scene. Off clears the surface buffer to sky.",
     },
     chip: (current) => current.disabledStages.has("primary-traversal") ? "withheld · clears only"
       : current.surfaceMeshStatus?.state === "pending" && current.surfaceMeshStatus.drawn ? "mesh updating · edited bricks traced"

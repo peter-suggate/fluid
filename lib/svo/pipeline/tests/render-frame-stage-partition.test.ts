@@ -60,7 +60,7 @@ const OWNER_SOURCE: Record<RenderFrameStageOwner, string> = {
 /** Stage ids closed in one encoder, in the order the source closes them. */
 const seamsClosedIn = (path: string): readonly string[] => {
   const source = readFileSync(new URL(`../../../../${path}`, import.meta.url), "utf8");
-  return [...source.matchAll(/(?:closeStage|seam\?\.|tracePhase\?\.)\("([a-z0-9-]+)"/g)]
+  return [...source.matchAll(/(?:closeStage|seam\?\.|tracePhase\?\.|rasterAoTrace\?\.)\("([a-z0-9-]+)"/g)]
     .map((match) => match[1]);
 };
 
@@ -305,3 +305,19 @@ const fakeEncoder = (): GPUCommandEncoder => ({
   beginRenderPass: () => ({}),
   finish: () => ({}),
 } as unknown as GPUCommandEncoder);
+
+test('mesh maintenance, culling and drawing own separate measured rows without double counting', () => {
+  const context = { surfaceMeshSelected: true, rasterPrimaryActive: true, disabledStages: new Set(),
+    coneTracingMode: 'raster-ao', tuning: DEFAULT_SVO_RENDER_TUNING } as unknown as RenderPipelineContext;
+  const durations = new Map<RenderFrameStageId, { expected_ms: number; encodedFraction: number }>([
+    ['surface-mesh-update', { expected_ms: .2, encodedFraction: 1 }],
+    ['surface-mesh-cull', { expected_ms: 2.3, encodedFraction: 1 }],
+    ['surface-mesh-draw', { expected_ms: 2.7, encodedFraction: 1 }],
+  ]);
+  for (const [id, cost] of [['surface-mesh-update', .2], ['surface-mesh-cull', 2.3], ['primary-traversal', 2.7]] as const) {
+    const resolved = renderPipelineNodeForContext(RENDER_PIPELINE_NODES.find(n => n.id === id)!, context);
+    assert.equal(measureRenderPipelineNode(resolved, durations, 10, resolved.state(context)).duration_ms, cost);
+  }
+  assert.equal(measureRenderPipelineBand('primary', durations, 10).duration_ms, 5.2);
+  assert.equal(RENDER_PIPELINE_NODES.find(n => n.id === 'surface-mesh-update')!.state({ ...context, surfaceMeshSelected: false }), 'unavailable');
+});

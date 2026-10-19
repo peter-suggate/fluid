@@ -106,6 +106,8 @@ export type RenderPipelineNodeId =
   | "rigid-pose-mirror"
   | "primary-entry-prepass"
   | "filtered-detail"
+  | "surface-mesh-update"
+  | "surface-mesh-cull"
   | "primary-traversal"
   | "scene-primitive"
   | "rigid-impostor"
@@ -213,12 +215,12 @@ export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
   },
   "surface-mesh-update": {
     owner: "svo",
-    node: "primary-traversal",
+    node: "surface-mesh-update",
     phase: { id: "svo-primary", label: "Voxel surface mesh update" },
   },
   "surface-mesh-cull": {
     owner: "svo",
-    node: "primary-traversal",
+    node: "surface-mesh-cull",
     phase: { id: "svo-primary", label: "Voxel surface mesh culling" },
   },
   "surface-mesh-draw": {

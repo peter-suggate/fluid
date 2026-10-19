@@ -2,14 +2,12 @@
 
 import { SVO_MESHING_PLUGINS } from "../meshing/plugins";
 import { Button, ChoiceField, Facts, FieldActions, FieldList, RangeField, Readout, SelectField, SwitchField } from "../../../../components/ui";
-import { formatPipelineDuration } from "../../../../components/PipelineGraph";
 import { WorkProgress } from "../../../../components/WorkProgress";
 import type { SvoFeatureControlContext, SvoStageControls } from "../../pipeline/control-context";
-import { SURFACE_MESH_TIMING_STAGES } from "../../pipeline/render-pipeline-graph";
 import { SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT, SVO_SURFACE_MESH_LOD_PIXELS_DEFAULT, SVO_SURFACE_MESH_LOD_PIXELS_MAXIMUM } from "../../pipeline/svo-render-tuning";
 import { surfaceMeshProgress } from "./svo-surface-mesh";
 
-export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, disabledStages, durations, effectiveRendererStatus, smoothSurfaceEnabled, svoMaximumTraversalDepth, setSvoMaximumTraversalDepth, svoMaximumNodeVisits, setSvoMaximumNodeVisits, tuning, updateTuning, modified, resetTuning }: Pick<SvoFeatureControlContext, "resolvedPrimary" | "partitioned" | "disabledStages" | "durations" | "effectiveRendererStatus" | "smoothSurfaceEnabled" | "svoMaximumTraversalDepth" | "setSvoMaximumTraversalDepth" | "svoMaximumNodeVisits" | "setSvoMaximumNodeVisits" | "tuning" | "updateTuning" | "modified" | "resetTuning">): SvoStageControls {
+export function renderPrimaryTraversalControls({ resolvedPrimary, effectiveRendererStatus, smoothSurfaceEnabled, svoMaximumTraversalDepth, setSvoMaximumTraversalDepth, svoMaximumNodeVisits, setSvoMaximumNodeVisits, tuning, updateTuning, modified, resetTuning }: Pick<SvoFeatureControlContext, "resolvedPrimary" | "effectiveRendererStatus" | "smoothSurfaceEnabled" | "svoMaximumTraversalDepth" | "setSvoMaximumTraversalDepth" | "svoMaximumNodeVisits" | "setSvoMaximumNodeVisits" | "tuning" | "updateTuning" | "modified" | "resetTuning">): SvoStageControls {
   if (resolvedPrimary !== "mesh") return { settings: 3, node: <FieldList>
       <RangeField label="Maximum traversal depth" unit="levels" value={svoMaximumTraversalDepth}
         min={1} max={21} step={1} digits={0} onChange={setSvoMaximumTraversalDepth}
@@ -27,18 +25,12 @@ export function renderPrimaryTraversalControls({ resolvedPrimary, partitioned, d
   // measured: settings on the rail, the figures as facts under it.
   const mesh = effectiveRendererStatus.surfaceMesh;
   const facts = [
-    ...SURFACE_MESH_TIMING_STAGES.map(({ stage, label, detail }) => {
-      const duration = !partitioned ? undefined : disabledStages.has("primary-traversal")
-        ? 0 : durations.get(stage)?.expected_ms;
-      return { label, hint: detail, value: duration === undefined ? "—" : formatPipelineDuration(duration) };
-    }),
     ...(mesh?.allocatedBytes !== undefined ? [
       { label: "Required mesh records", value: `${mesh.requirementComplete === false ? "≥ " : ""}${mesh.requiredQuads?.toLocaleString() ?? "—"}` },
       { label: "Capacity", value: `${mesh.capacityQuads?.toLocaleString() ?? "—"} records` },
       { label: "Mesh memory", value: `${(mesh.allocatedBytes / (1024 * 1024)).toFixed(1)} / ${((mesh.maximumBytes ?? 0) / (1024 * 1024)).toFixed(1)} MiB` },
       { label: "Mesh builds", value: mesh.builds ?? "—" },
     ] : []),
-    ...(mesh?.state === "ready" ? [{ label: "Drawn mesh records", value: mesh.quads?.toLocaleString() ?? "—" }] : []),
   ];
   return { settings: 2, readouts: facts.length, node: <>
     <FieldList>

@@ -634,7 +634,6 @@ fn meshBoxStore(box:u32,minimum:vec3u,maximum:vec3u){
   atomicStore(&meshWork[base],minimum.x);atomicStore(&meshWork[base+1u],minimum.y);atomicStore(&meshWork[base+2u],minimum.z);
   atomicStore(&meshWork[base+4u],maximum.x);atomicStore(&meshWork[base+5u],maximum.y);atomicStore(&meshWork[base+6u],maximum.z);
 }
-fn meshMaskActive()->bool{return atomicLoad(&meshState[${W.boxCount}])!=0u;}
 // Whether a quad lies wholly inside a dirty box. Only such quads yield to the
 // trace: every ray that could hit one touches the box and is traced, while a
 // quad that merely touches a box keeps drawing, its untouched part being
@@ -1380,15 +1379,15 @@ fn meshCoverageClip(world:vec3f,camera:mat4x3f)->vec4f{
 // No size/area LOD: subpixel geometry that can cover a sample is retained.
 // While a build is pending, quads inside its dirty boxes yield to the traced
 // background so the edited region is exact before its bricks are re-extracted.
-fn meshQuadVisible(index:u32)->bool{
-  if(index>=atomicLoad(&meshState[${W.frontCursor}])){return false;}
+fn meshQuadVisible(index:u32,front:u32,maskActive:bool)->bool{
+  if(index>=front){return false;}
   let quad=meshArena[index];
   if(meshQuadDead(quad)){return false;}
   if(!meshQuadSelected(quad)){return false;}
   ${contours && sampleCulling ? `// Triangle coverage already bounds the viewport. Avoid constructing a
   // second world-space AABB and four frustum planes for every tiny triangle.
   // Dirty regions keep the full masking path below.
-  if(meshTriangle(quad)&&!meshMaskActive()){
+  if(meshTriangle(quad)&&!maskActive){
     let a=meshTrianglePoint(quad,0u);let b=meshTrianglePoint(quad,1u);let c=meshTrianglePoint(quad,2u);
     let lattice=vec3f(meshQuadOrigin(quad));let extent=vec3f(meshQuadExtent(quad));
     let origin=dry.mapping.worldOrigin+lattice*dry.mapping.cellSize;
@@ -1410,7 +1409,7 @@ fn meshQuadVisible(index:u32)->bool{
     let a=meshTrianglePoint(quad,0u);let b=meshTrianglePoint(quad,1u);let c=meshTrianglePoint(quad,2u);
     boundsLow=min(a,min(b,c))*boundsHigh;boundsHigh=max(a,max(b,c))*boundsHigh;
   }` : ""}
-  if(meshMaskActive()&&meshBoxesContain(meshQuadOrigin(quad)+vec3u(floor(boundsLow)),meshQuadOrigin(quad)+vec3u(ceil(boundsHigh)))){return false;}
+  if(maskActive&&meshBoxesContain(meshQuadOrigin(quad)+vec3u(floor(boundsLow)),meshQuadOrigin(quad)+vec3u(ceil(boundsHigh)))){return false;}
   let face=meshQuadFace(quad.face);let axis=face/2u;
   let origin=dry.mapping.worldOrigin+vec3f(meshQuadOrigin(quad))*dry.mapping.cellSize;
   let camera=dryRasterPrimaryCamera();
@@ -1449,6 +1448,9 @@ fn meshQuadVisible(index:u32)->bool{
 // the immutable primary candidate index stream. Shadow proxies stay resident.
 var<workgroup> meshCullCount:atomic<u32>;
 var<workgroup> meshCullBase:u32;
+// These words are immutable during culling. Fetch once per workgroup instead
+// of issuing the same storage atomics for every candidate triangle.
+var<workgroup> meshCullHeader:vec3u;
 fn meshCompact(index:u32,visible:bool,candidates:bool){
   let counter=select(${W.drawInstanceCount}u,${W.primaryCandidateCount}u,candidates);
   let output=select(0u,arrayLength(&meshVisibleOutput)/2u,candidates);
@@ -1493,11 +1495,14 @@ fn surfaceMeshCullDispatch(){
 }
 @compute @workgroup_size(64)
 fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invocation_index) lane:u32){
+  if(lane==0u){meshCullHeader=vec3u(atomicLoad(&meshState[${W.frontCursor}]),
+    atomicLoad(&meshState[${W.primaryCandidateCount}]),atomicLoad(&meshState[${W.boxCount}]));}
+  workgroupBarrier();
   let entry=id.x+id.y*65535u*64u;
   var index=0u;var visible=false;
-  if(entry<atomicLoad(&meshState[${W.primaryCandidateCount}])){
+  if(entry<meshCullHeader.y){
     index=meshVisibleOutput[arrayLength(&meshVisibleOutput)/2u+entry];
-    visible=meshQuadVisible(index);
+    visible=meshQuadVisible(index,meshCullHeader.x,meshCullHeader.z!=0u);
   }
   ${subgroups ? `meshCompact(index,visible,false);` : `
   if(lane==0u){atomicStore(&meshCullCount,0u);}workgroupBarrier();

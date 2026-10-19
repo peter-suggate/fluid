@@ -77,7 +77,7 @@ import {
   type SvoRenderDiagnostics,
 } from "../svo/features/diagnostics/svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "../svo/features/diagnostics/webgpu-svo-stage-overlay";
-import { DEFAULT_SVO_RENDER_TUNING, resolveSvoSurfaceTuning, svoRenderTuningKey, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
+import { DEFAULT_SVO_RENDER_TUNING, SvoSurfaceTuningCache, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/features/lighting-visibility/svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import {
@@ -679,26 +679,28 @@ export function gpuSceneSolverKey(scene: SceneDescription, config: SimulationRun
  * Returns undefined for an empty scene so the caller publishes "no bodies"
  * instead of a degenerate sphere at the origin.
  */
-export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigidBounds | undefined {
+export function svoDryRigidBounds(bodies: readonly RigidBodyState[], output?: { centre_m: [number, number, number]; radius_m: number }): SvoDryRigidBounds | undefined {
   if (bodies.length === 0) return undefined;
-  const low = [Infinity, Infinity, Infinity];
-  const high = [-Infinity, -Infinity, -Infinity];
+  let lx = Infinity, ly = Infinity, lz = Infinity;
+  let hx = -Infinity, hy = -Infinity, hz = -Infinity;
   for (const body of bodies) {
     const radius = robotRenderRadius(body) ?? boundingRadius(body);
-    const position = [body.position_m.x, body.position_m.y, body.position_m.z];
-    for (let axis = 0; axis < 3; axis += 1) {
-      low[axis] = Math.min(low[axis], position[axis] - radius);
-      high[axis] = Math.max(high[axis], position[axis] + radius);
-    }
+    const p = body.position_m;
+    lx = Math.min(lx, p.x - radius); hx = Math.max(hx, p.x + radius);
+    ly = Math.min(ly, p.y - radius); hy = Math.max(hy, p.y + radius);
+    lz = Math.min(lz, p.z - radius); hz = Math.max(hz, p.z + radius);
   }
-  const centre = [0, 1, 2].map((axis) => (low[axis] + high[axis]) / 2) as [number, number, number];
+  const x = (lx + hx) / 2, y = (ly + hy) / 2, z = (lz + hz) / 2;
   let radius = 0;
   for (const body of bodies) {
-    const position = [body.position_m.x, body.position_m.y, body.position_m.z];
-    radius = Math.max(radius, Math.hypot(...[0, 1, 2].map((axis) => position[axis] - centre[axis]))
+    const p = body.position_m;
+    radius = Math.max(radius, Math.hypot(p.x - x, p.y - y, p.z - z)
       + (robotRenderRadius(body) ?? boundingRadius(body)));
   }
-  return { centre_m: centre, radius_m: radius };
+  const result = output ?? { centre_m: [0, 0, 0] as [number, number, number], radius_m: 0 };
+  result.centre_m[0] = x; result.centre_m[1] = y; result.centre_m[2] = z;
+  result.radius_m = radius;
+  return result;
 }
 
 export interface RendererFrameMetrics {
@@ -944,7 +946,10 @@ export class FluidLabRenderer {
   private svoMaterialsSupported = true;
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
-  private svoCameraStabilityKey = "";
+  private readonly surfaceTuningCache = new SvoSurfaceTuningCache();
+  private readonly viewUniformWords = new Float32Array(104);
+  private readonly bodyUploadWords = new Float32Array(12 * 16);
+  private readonly rigidBoundsScratch: { centre_m: [number, number, number]; radius_m: number } = { centre_m: [0, 0, 0], radius_m: 0 };
   /**
    * Owner range of the object under the editor cursor, for the hover rim.
    *
@@ -2673,13 +2678,13 @@ export class FluidLabRenderer {
     const smoothRaster = !sceneUsesFlatVoxelNormals(scene)
       && !svoRenderStageUsesPrimaryWorkMap(svoDiagnostics.stageView)
       && resolveSvoPrimaryTraversal(svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal) === "mesh";
-    const activeSvoTuning = resolveSvoSurfaceTuning(svoTuning, smoothRaster);
+    const activeSvoTuning = this.surfaceTuningCache.resolve(svoTuning, smoothRaster);
     this.resize(activeSvoTuning.resolutionScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
     const activeSvoDiagnostics = requestedSvoDiagnostics;
     const primaryWorkMapRequested = svoRenderStageUsesPrimaryWorkMap(activeSvoDiagnostics.stageView);
-    const tuningKey = svoRenderTuningKey(activeSvoTuning);
+    const tuningKey = this.surfaceTuningCache.key;
     // Most stage views are read-only presentation choices. Primary-work views
     // are the named exception: they compile one counter-plane write into traced
     // visibility, so the trace key and frame context both separate their cost.
@@ -2885,49 +2890,58 @@ export class FluidLabRenderer {
     this.gridOverlayPipeline?.setLayers(uniformLayers, this.gpuFluid?.tileClassSource, this.gpuFluid?.solveWindowSource, this.gpuFluid?.gridPressureOrigin, this.gpuFluid?.gridVelocityBoundary, this.gpuFluid?.volumePageSource);
     if (gpuInfo && this.gpuFluid && this.columnBaseTexture && this.gridCellTexture && this.velocityFallbackTexture && this.pressureSamplesFallbackTexture && this.scalarFallbackTexture) {this.gridOverlayPipeline?.setVolume(this.gpuFluid.surfaceFieldTexture??this.gpuFluid.volumeTexture, this.gpuFluid.columnBaseTexture ?? this.columnBaseTexture, this.gpuFluid.gridCellTexture ?? this.gridCellTexture, this.gpuFluid.velocityTexture ?? this.velocityFallbackTexture, this.gpuFluid.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture, this.gpuFluid.gridDivergenceTexture ?? this.scalarFallbackTexture, this.gpuFluid.gridPressureTexture ?? this.scalarFallbackTexture, this.gpuFluid.volumeTexture);}
     cpuTrace?.transition({ id: "scene-upload", label: "Scene and field uploads" });
-    const cameraStabilityKey = [
-      basis.position.x, basis.position.y, basis.position.z,
-      basis.forward.x, basis.forward.y, basis.forward.z,
-      basis.right.x, basis.right.y, basis.right.z,
-      basis.up.x, basis.up.y, basis.up.z,
-    ].join("|");
-    const cameraChanging = cameraStabilityKey !== this.svoCameraStabilityKey;
-    this.svoCameraStabilityKey = cameraStabilityKey;
+    const packed = this.viewUniformWords;
+    const cameraChanging = packed[4] !== Math.fround(position.x) || packed[5] !== Math.fround(position.y)
+      || packed[6] !== Math.fround(position.z) || packed[7] !== Math.fround(cameraTanHalfFov(camera))
+      || packed[8] !== Math.fround(camera.target_m.x) || packed[9] !== Math.fround(camera.target_m.y)
+      || packed[10] !== Math.fround(camera.target_m.z);
     const composedLayers = gridOverlay ? composedVisualLayers(gridOverlay) : undefined;
     const particlesVisible = gridOverlay?.axis !== "off" && (composedLayers
       ? particleLayerShown(composedLayers) : gridOverlay?.mode === "particles");
     // Particle spheres read what the step already keeps. The source is re-read
     // every frame: a solver may alternate two particle buffers.
     if (particlesVisible) this.particleOverlayPipeline?.setSource(this.gpuFluid?.particleSource);
-    const uniform = new Float32Array([
-      this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
-      // cameraPosition.w is the aperture, tan(fov/2). It was padding until the
-      // lens became a scene property; see CAMERA_APERTURE_UNIFORM_LANE for why
-      // it rides here rather than in a field of its own.
-      position.x, position.y, position.z, cameraTanHalfFov(camera),
-      // cameraTarget.w is presentation pixels per CSS pixel, so text the grid
-      // overlay writes (the volume + level-set readout) keeps the lab's size
-      // on a high-density display. Geometry comes from SolidWorld rather than
-      // an analytic container-shape/top mode encoded in the camera uniform.
-      camera.target_m.x, camera.target_m.y, camera.target_m.z, this.presentationPixelRatio,
-      scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-      // options.w carries the largest represented adaptive pressure-cell
-      // width. The grid overlay uses it to normalize its categorical scale
-      // palette to the hierarchy that can actually exist in this solver.
-      activeSvoDiagnostics.maximumTraversalDepth * 512 + activeSvoDiagnostics.maximumNodeVisits, scene.voxelDomain.finestCellSize_m, Math.min(bodies.length, 12), gpuInfo?.quadtreeMaximumFluidScale ?? 1,
-      // Field mode: 1 = raw occupancy, 3 = uniform-layout level set.
-      gpuInfo?.tankCells?.[0] ?? gpuInfo?.nx ?? 1, gpuInfo?.tankCells?.[1] ?? gpuInfo?.ny ?? 1, gpuInfo?.tankCells?.[2] ?? gpuInfo?.nz ?? 1, gpuInfo ? (gpuInfo.gridKind === "octree" ? 3 : 1) : 0,
-      gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : gridOverlay?.axis === "volume" ? 4 : 0, gridOverlay?.position ?? 0.5, gpuInfo?.gridKind === "octree" ? 1 : 0,
-      (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : gridOverlay?.mode === "volume-levelset" ? VOLUME_LEVELSET_OVERLAY_MODE_CODE : gridOverlay?.mode === "fine-tiles" ? FINE_TILES_OVERLAY_MODE_CODE : gridOverlay?.mode === "solve-window" ? SOLVE_WINDOW_OVERLAY_MODE_CODE : 0),
-      environmentIndex(environmentId), gpuInfo?.lastDt_s ?? 0, gpuInfo?.maxSpeed_m_s ?? 0,
-      0
-    ]);
-    const packed = new Float32Array(104);
-    packed.set(uniform, 0);
+    packed[0] = this.presentationTexture.width;
+    packed[1] = this.presentationTexture.height;
+    packed[2] = time_s;
+    packed[3] = cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1;
+    packed[4] = position.x;
+    packed[5] = position.y;
+    packed[6] = position.z;
+    // cameraPosition.w stores tan(fov/2); cameraTarget.w is pixels per CSS pixel.
+    packed[7] = cameraTanHalfFov(camera);
+    packed[8] = camera.target_m.x;
+    packed[9] = camera.target_m.y;
+    packed[10] = camera.target_m.z;
+    packed[11] = this.presentationPixelRatio;
+    packed[12] = scene.container.width_m;
+    packed[13] = scene.container.height_m;
+    packed[14] = scene.container.depth_m;
+    packed[15] = scene.container.height_m * scene.container.fillFraction;
+    packed[16] = activeSvoDiagnostics.maximumTraversalDepth * 512 + activeSvoDiagnostics.maximumNodeVisits;
+    packed[17] = scene.voxelDomain.finestCellSize_m;
+    packed[18] = Math.min(bodies.length, 12);
+    // Largest represented pressure-cell width, for the grid overlay palette.
+    packed[19] = gpuInfo?.quadtreeMaximumFluidScale ?? 1;
+    packed[20] = gpuInfo?.tankCells?.[0] ?? gpuInfo?.nx ?? 1;
+    packed[21] = gpuInfo?.tankCells?.[1] ?? gpuInfo?.ny ?? 1;
+    packed[22] = gpuInfo?.tankCells?.[2] ?? gpuInfo?.nz ?? 1;
+    // Field mode: 1 = raw occupancy, 3 = uniform-layout level set.
+    packed[23] = gpuInfo ? (gpuInfo.gridKind === "octree" ? 3 : 1) : 0;
+    packed[24] = gridOverlay?.axis === "z" ? 1 : gridOverlay?.axis === "x" ? 2 : gridOverlay?.axis === "y" ? 3 : gridOverlay?.axis === "volume" ? 4 : 0;
+    packed[25] = gridOverlay?.position ?? 0.5;
+    packed[26] = gpuInfo?.gridKind === "octree" ? 1 : 0;
+    packed[27] = (gridOverlay?.mode === "cfl" ? 1 : gridOverlay?.mode === "speed" ? 2 : gridOverlay?.mode === "phi" ? 3 : gridOverlay?.mode === "divergence" ? 4 : gridOverlay?.mode === "pressure" ? 5 : gridOverlay?.mode === "representation" ? 6 : gridOverlay?.mode === "optical" ? 7 : gridOverlay?.mode === "projection" && gpuInfo?.gridKind === "octree" ? 8 : gridOverlay?.mode === "resolution" && gpuInfo?.gridKind === "octree" ? 9 : gridOverlay?.mode === "density" ? 10 : gridOverlay?.mode === "volume-levelset" ? VOLUME_LEVELSET_OVERLAY_MODE_CODE : gridOverlay?.mode === "fine-tiles" ? FINE_TILES_OVERLAY_MODE_CODE : gridOverlay?.mode === "solve-window" ? SOLVE_WINDOW_OVERLAY_MODE_CODE : 0);
+    packed[28] = environmentIndex(environmentId);
+    packed[29] = gpuInfo?.lastDt_s ?? 0;
+    packed[30] = gpuInfo?.maxSpeed_m_s ?? 0;
+    packed[31] = 0;
+
     // Lanes 100..103 are the hover rim: the owner range under the cursor, its
     // strength, and the falloff exponent. Appended at the end so every other
     // shader's view of this buffer is byte-identical.
-    if (this.hoverHighlight) packed.set([this.hoverHighlight.first, this.hoverHighlight.last, .45, 2.6], 100);
+    packed[100] = this.hoverHighlight?.first ?? 0; packed[101] = this.hoverHighlight?.last ?? 0;
+    packed[102] = this.hoverHighlight ? .45 : 0; packed[103] = this.hoverHighlight ? 2.6 : 0;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
     // A paused placement or carry still needs fresh render records. The rigid
     // system uploads only changed commands/roster entries, preserving GPU-owned
@@ -2939,7 +2953,8 @@ export class FluidLabRenderer {
     if (residentRigidBuffer) {
       this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));
     } else {
-      const bodyData = new Float32Array(12 * 16);
+      const bodyData = this.bodyUploadWords;
+      bodyData.fill(0);
       bodies.slice(0, 12).forEach((body, index) => {
         const offset = index * 16;
         const shape = body.description.shape;
@@ -2954,7 +2969,7 @@ export class FluidLabRenderer {
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
-    if (sparsePresentationRequired) this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies));
+    if (sparsePresentationRequired) this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies, this.rigidBoundsScratch));
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
     if (sparsePresentationRequired) {

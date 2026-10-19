@@ -1413,6 +1413,8 @@ if (profileSeconds > 0) {
     minimumFrame_ms: sorted[0] ?? 0,
     maximumFrame_ms: sorted[sorted.length - 1] ?? 0,
     medianJsEncode_ms: median(encode_ms),
+    p95JsEncode_ms: percentile95(encode_ms),
+    maximumJsEncode_ms: Math.max(...encode_ms),
     medianCommandBufferFinish_ms: median(finish_ms),
     medianSubmitToFence_ms: median(fence_ms),
     resolution: { width, height },
@@ -1443,7 +1445,17 @@ if (profileSeconds > 0) {
         }
         writeFileSync(`${configuredRawOutPath}.${name}`, await captureTextureBytes(target, 8, `Mesh ${name} capture`));
         const timing = await benchmarkSvoPrimaryPass(device, encodeFrame, warmups, cycles, "Voxel surface mesh rasterization");
-        log(`Mesh camera check: ${JSON.stringify({ name, camera: view, drawnRecords: renderer.surfaceMeshStatus?.quads, timing })}`);
+        // UI receipts are throttled; offline census must read this camera's draw.
+        const meshReceipt = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        let drawnRecords: number | undefined;
+        try {
+          const receiptEncoder = device.createCommandEncoder();
+          if (renderer.copySurfaceMeshDiagnostics(receiptEncoder, meshReceipt)) {
+            device.queue.submit([receiptEncoder.finish()]); await meshReceipt.mapAsync(GPUMapMode.READ);
+            drawnRecords = new Uint32Array(meshReceipt.getMappedRange())[1]; meshReceipt.unmap();
+          }
+        } finally { meshReceipt.destroy(); }
+        log(`Mesh camera check: ${JSON.stringify({ name, camera: view, drawnRecords, timing })}`);
       }
       assert.deepEqual(validationErrors, [], "GPU validation errors during mesh camera checks");
     }
@@ -1471,6 +1483,12 @@ if (profileSeconds > 0) {
     await benchmarkPoolRenderFrame({ device, renderer, scene, camera, uniformBuffer, bodyBuffer, bodyCount: bodies.count,
       width, height, environmentId, capturePath: configuredRawOutPath ? `${configuredRawOutPath}.water.rgba` : undefined });
     assert.deepEqual(validationErrors, [], "GPU validation during complete pool render timing");
+  }
+  // Allocation sampling changes GC and CPU costs: keep it outside both the
+  // clean wall loop and GPU timing samples above.
+  if (process.env.FLUID_SVO_DRY_FRAME_HOST_PROFILE) {
+    const { auditRenderHost } = await import("./profile-render-host");
+    await auditRenderHost(device, encodeFrame, process.env.FLUID_SVO_DRY_FRAME_HOST_PROFILE);
   }
   renderer.destroy();
   target.destroy();
