@@ -1547,6 +1547,10 @@ ${surfaceMeshStreamVertexWGSL}
     world=dry.mapping.worldOrigin+(vec3f(meshQuadOrigin(quad))+p*vec3f(meshQuadExtent(quad)))*dry.mapping.cellSize;
   }` : ""}
   var position=meshCoverageClip(world,dryRasterPrimaryCamera());
+  // Native assets draw their own surface. Cull any retained shadow-only proxy
+  // before rasterization, including the unculled benchmark arm. Keeping this
+  // out of the fragment entry point lets the tile GPU treat the mesh as opaque.
+  if((dryMaterial(sceneIdentityMaterial(quad.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){position=vec4f(0.0,0.0,0.0,1.0);}
   ${culling ? "" : "// Without the cull pass, an unselected or freed quad collapses to a zero-area strip.\n  if(meshQuadDead(quad)||!meshQuadSelectedRead(quad)){position=vec4f(0.0,0.0,0.0,1.0);}"}
   var normal=vec3f(0.0);normal[axis]=select(-1.0,1.0,(face&1u)!=0u);
   ${contours ? `if(meshTriangle(quad)){
@@ -1583,9 +1587,6 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
   return normalize(mix(face,baked,strength));
 }
 @fragment fn surfaceMeshFragment(input:MeshVertexOut)->MeshSurfaceOut{
-  // Imported volumes keep their native lattice. This coarse derivative serves
-  // lighting/occlusion; the source field's depth-tested proxy draws its surface.
-  if((dryMaterial(sceneIdentityMaterial(input.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){discard;}
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);let t=length(input.world-camera[0]);
   var normal=normalize(input.normal);var receiverNormal=input.geometricNormal;
   var boundaryNormal=vec3f(0);

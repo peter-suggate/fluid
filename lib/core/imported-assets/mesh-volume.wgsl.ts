@@ -27,11 +27,14 @@ fn ${distanceOnly ? `${name}Distance` : name}(base:u32,p:vec3f)->${distanceOnly 
     if(m!=0u){normal+=w*${name}Normal(identity);}`}
   }
   ${distanceOnly ? "return value;" : `var best=-1.0;
-  for(var i=0u;i<8u;i++){
-    if(ids[i]==0u){continue;}var vote=0.0;
-    for(var j=0u;j<8u;j++){if(ids[j]==ids[i]){vote+=votes[j];}}
-    if(vote>best){best=vote;result.material=ids[i];}
-  }
+  // Constant indices avoid dynamic local-array access in material election.
+  // Preserve the original corner order, addition order and first-wins ties.
+  ${Array.from({ length: 8 }, (_, i) => `
+  if(ids[${i}]!=0u){
+    var vote=0.0;
+    ${Array.from({ length: 8 }, (_, j) => `if(ids[${j}]==ids[${i}]){vote+=votes[${j}];}`).join("\n    ")}
+    if(vote>best){best=vote;result.material=ids[${i}];}
+  }`).join("\n")}
   result.distance=value;if(dot(normal,normal)>1e-12){result.normal=normalize(normal);}return result;`}
 }
 `;

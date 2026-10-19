@@ -1071,7 +1071,9 @@ async function awaitPresentationBundle(target: SparseVoxelDrySceneRenderer): Pro
   assert.equal(target.presentationBundleStatus.state, "ready", JSON.stringify(target.presentationBundleStatus));
 }
 
-const primaryAblation = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION === "1" ? primaryDrawAblation(device) : undefined;
+const primaryReferencePath = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_REFERENCE;
+const primaryAblation = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION === "1" || primaryReferencePath
+  ? primaryDrawAblation(device, primaryReferencePath ? JSON.parse(readFileSync(primaryReferencePath, 'utf8')) : undefined) : undefined;
 const renderer = new SparseVoxelDrySceneRenderer(primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
@@ -1225,7 +1227,21 @@ if (profileGate) {
 }
 
 const primaryPassTimings = [];
-if (primaryAblation) {
+if (primaryAblation && primaryReferencePath) {
+  let frame = 0;
+  const paired = await benchmarkSvoPrimaryPass(device, encoder => {
+    // ABBA balances order and short-term clock/load changes on the same device.
+    const slot = frame++ % 4;
+    encodeFrame(slot === 0 || slot === 3 ? primaryAblation.omit(encoder, '@reference') : encoder);
+  }, 16, 256, "Voxel surface mesh rasterization");
+  for (const arm of ['reference', 'candidate'] as const) {
+    const samples = paired.samples_ms.filter((_, i) => ((i % 4 === 0 || i % 4 === 3) ? 'reference' : 'candidate') === arm).sort((a,b)=>a-b);
+    console.log(`Paired primary shader: ${JSON.stringify({ arm,
+      median_ms: samples[Math.floor(samples.length / 2)],
+      p95_ms: samples[Math.ceil(samples.length * .95) - 1], samples_ms: samples })}`);
+  }
+}
+if (primaryAblation && !primaryReferencePath) {
   for (const omitted of ['', ...primaryAblation.labels, '']) {
     const timing = await benchmarkSvoPrimaryPass(device,
       encoder => encodeFrame(omitted ? primaryAblation.omit(encoder, omitted) : encoder),

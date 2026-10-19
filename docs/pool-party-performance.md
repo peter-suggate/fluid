@@ -340,3 +340,61 @@ removing geometry changes occlusion, so they must not be summed as a partition.
 `FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION=1` records the production render bundle once,
 then replays alternatives that omit only draws using the named pipeline. It does
 not add production passes or change the shipped renderer.
+
+### Primary shader follow-up
+
+Two exact shader changes reduce the remaining primary cost:
+
+- Imported volume material election uses constant array indices. The eight-corner
+  weights, summation order, empty-material handling and first-wins tie rule stay
+  unchanged. This avoids dynamically indexed local-array access in the nested
+  voting loop. Register placement is a compiler decision, not a measured counter.
+- Shadow-only imported voxel proxies now collapse to zero-area triangles in the
+  vertex shader. Previously a material-dependent fragment `discard` rejected
+  them, even though the normal culling path already filters these records. The
+  vertex guard also covers unculled draws and removes that discard from the
+  opaque fragment entry point. Better opaque-surface handling is the rationale;
+  no hardware counter attribution is claimed.
+
+Both were checked with interleaved ABBA reference/candidate draws on the same
+Metal device, attachments and warmed scene resources: 16 warmups, 256 samples
+(128 per arm), isolated production-pass GPU timestamps. The reference replaces
+only the relevant shader pipeline; geometry, bindings and draw order stay fixed.
+
+| Change | Reference median / p95 | Candidate median / p95 |
+| --- | ---: | ---: |
+| Constant-index material voting | 4.784 / 4.915 ms | 4.588 / 4.719 ms |
+| Vertex rejection, with voting optimization in both arms | 4.522 / 4.784 ms | 4.325 / 4.522 ms |
+
+Each change saves approximately 4% in its paired run. Different-run medians must
+not be used to claim a combined speedup. An initial noisy vertex-rejection run
+had 6.816/6.554 ms medians and worse candidate p95; the repeat above resolved the
+median difference under steadier load. Oscillation and long-tail stalls are not
+claimed eliminated. A uniform-material fast branch was tested and removed because
+it did not improve performance.
+
+Overview, orbit, close and return raw RGBA16F captures remain byte-identical to
+before either shader change. A native GPU sampler regression checks 190 queries
+covering mixed/repeated IDs, empty cells, ties, cell boundaries, distances and
+normals. Logs and comparisons are under `artifacts/pool-cadence/`:
+`sampler-paired.log`, `opaque-repeat.log`, and `opaque-comparison.json`.
+
+For shader comparisons, set `FLUID_SVO_DRY_FRAME_PRIMARY_REFERENCE` to a JSON file
+with `{ "pipeline": "exact pipeline label", "search": "candidate WGSL snippet",
+"replacement": "reference WGSL snippet" }`. The benchmark builds both pipelines
+and switches retained bundles in ABBA order. It rejects an unmatched shader or
+undrawn reference pipeline. This instrumentation is confined to the benchmark.
+Use the scene settings above with width 3456, height 1882 and refinement 1 for
+this comparison. Local reference files and `run.sh` retain the exact experiments.
+
+The panel now labels its total as **ms GPU** (or **ms queue** for the fallback),
+rather than **ms/frame**. The tooltip explains why GPU span and presentation FPS
+are not reciprocals. The earlier host audit still has a small measured allocation
+remainder; neither these changes nor the cadence fix establish zero allocations
+across browser/driver wrappers and telemetry.
+
+Final follow-up validation: `npm run check:types` passes; `npm run test:unit`
+passes with 996 passing, 90 skipped and zero failing tests. The explicit Metal
+suite passes all 10 native sampler, imported-surface, mesh-stream, sample-coverage
+and raster-AO tests with no skips. The mesh contract now checks proxy rejection
+in both culling modes while retaining the separate LOD selection invariant.

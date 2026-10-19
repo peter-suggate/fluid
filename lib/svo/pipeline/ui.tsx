@@ -240,14 +240,14 @@ export function RenderPipelineOverlay() {
   const partitioned = liveTiming && stageTrace !== undefined;
   const timingLabel = !liveTiming ? "timing off"
     : !measured ? "awaiting trace"
-    : `${total_ms.toFixed(2)} ms/frame`;
+    : `${total_ms.toFixed(2)} ms ${trace?.measurementSource === "gpu-queue-wall" ? "queue" : "GPU"}`;
   const timingHint = !liveTiming
     ? "Live frame timing is off. Turn it on to sample the presentation boundary chain."
     : !measured
       ? "No presentation trace has arrived yet."
-      : partitioned
-        ? `One exclusive timing per stage, cut at the same plug-in seam that owns it in code. Overlapped work is charged once, to the stage that advances GPU completion. ${TRACE_WINDOW}-sample mean.`
-        : "The frame total is ready; this device has not supplied a detailed stage sample.";
+      : trace?.measurementSource === "gpu-queue-wall"
+        ? "Queue completion wall time includes backlog and callback delivery. It overlaps host and GPU work. FPS measures completed presentation cadence, not the reciprocal of this span."
+        : `GPU execution span, excluding host work, worker message latency and display pacing. ${partitioned ? `One exclusive timing per stage; overlapped work is charged once, to the stage that advances GPU completion. ${TRACE_WINDOW}-sample mean.` : "Detailed stage timings are not available yet."} FPS measures completed presentation cadence, not the reciprocal of this span.`;
 
   const disabledStages = useMemo(
     () => disabledRenderStagesFrom(disabledRenderStages), [disabledRenderStages]);
