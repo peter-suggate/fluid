@@ -334,12 +334,40 @@ Per kernel (arena, ms a frame): pUp0 1.48, pRows 1.43, pSmooth0 1.23, pProject 0
 
 **The target is not met.** A cycle costs about 1 ms, not ≤ 0.15 ms. The arena converges further than the old band, but it is 3.5 ms slower on the pour. Level 0 dominates: pUp0 and pSmooth0 stage a halo-2 box for each brick, and pRows, pInit and pProject run per brick, not per tile.
 
+### 1.8 Parity: the band at the old band's cost (2026-10-20)
+
+The commit after 9c73e56e brings the band back to the old band's cost on the pour and bounds the arena's memory.
+
+**Changes:**
+- **Level 0 smooths in place over the band's tile list**, with no boxes. pMark lists the band tiles by presentation slot. pRows rewrites each entry as brick slot << 3 | tile bit. In a sweep, one workgroup takes two tiles and each lane relaxes one red cell, then one black cell (`storageBarrier` between). A tile's black cells see its own fresh red cells. Across tiles they see whatever red values the neighbours hold. On letters this costs about 20% per cycle in convergence and saves half the level-0 dispatches. Exact two-dispatch sweeps converge 0.040 / 0.080 over the first two cycles; the fused sweeps converge 0.049 / 0.093.
+- **pRows, pInit, pRebase and pProject run per tile** (64 lanes) over the list. pRebase bakes the tile's 2³ level-1 cells. The brick's first band tile zeroes the level-1 cells of the brick's dead tiles. pProject presents at 64·slot + lane.
+- **Level 2 (4h) is the coarsest level.** Two box passes of 6 sweeps each solve it: pDownB from zero, then pUpB from that iterate, neighbours' values included. The 8h–32h tail is gone: pTail, pUpT, and their ten level-2 planes. So is the ℓ5 overflow (mapped[23] = 2). The CPU model on band94 matches the full ladder: 4h coarsest with two unshifted halo-2 box passes of 6 sweeps gives the same history. The 32h sweep count did not matter (40 vs 4).
+- **The coarse launches are sized from the receipt.** Header words 6 and 7 carry level 1's and level 2's brick counts. DONE and VALID move to words 24 and 25.
+- **Memory**: the fine slots are max(2048, ⌈bricks/4⌉). More band bricks than slots is fatal: the table's refusal sets mapped[23] = 3 and the frame throws. On letters this is 3104 slots, down from 12416. The pool drops from 886 MB to about 224 MB.
+
+**Pour** (1/60 s, 100 steps, measured from frame 94; band = every arena kernel):
+
+| | Old band (walk1) | 9c73e56e | This (run 1) | This (run 2) |
+|---|---|---|---|---|
+| Fine tiles | 6393 | 6718 | 6345 | 6363 |
+| **Band total** | **4.33 ms** | **6.14 ms** | **4.38 ms** | **4.33 ms** |
+| Pressure per k fine tiles | 1.34 | 1.56 | 1.34 | 1.32 |
+
+Per kernel (run 2, ms a frame): pRelax 1.16, pRows 1.03, pUpA 0.37, pProject 0.37, pDownA 0.35, pInit 0.25, pRestrict0 0.21, pUpB 0.18, pDownB 0.17, pProlong0 0.12, pRebase 0.11.
+
+**Letters A/B** (60 steps): volume drift −1.66% vs −1.72%; occupancy L1 difference 0.8% at f60. The trajectories split near frame 16, as they do for any solver change, so the hard frames (34–36, 55–57) are not the same states.
+
+**Not met: the cycle target.** A cycle costs about 0.7 ms: level 0 0.31, level 1 0.19, level 2 0.09, restrict and prolong 0.08. Fixed costs are 1.8 ms: pRows alone is 1.0 ms, the same as the old bandPrep.
+
+Tried and dropped:
+- In-place sweeps on levels 1 and 2, as separate red/black dispatches: 12 dispatches a level a cycle at about 17 µs each, so 1.5 ms.
+- The same sweeps fused into the down and up kernels: chaotic seams mix pre- and post-correction values, and the residual stalls at 1–8.
+- Fusing level 0 alongside in-place coarse levels.
+
 Next:
 - P2: retire the root solve, its transfers and project, the band velocity copy, the coarse bakes and the triplicated authority classification (≈ 3–4 ms on the pour).
-- Fuse pUp0 with the next cycle's pSmooth0.
-- Stage less of the halo.
-- Run prepare, init and project per tile in 64-lane groups.
-- Bound the fine capacity by the band, not by every brick.
+- pRows: a lean split (the solid queries only where solids are near).
+- Level-1 box cost: about 90 µs a dispatch, bound by latency per workgroup, not by launch width. Sizing it from the receipt did not change it.
 
 ## 2. RFE: remap, geometric fill, body forces, extension
 

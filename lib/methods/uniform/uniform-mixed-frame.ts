@@ -219,7 +219,7 @@ interface ReceiptSlot{
  readonly accept:()=>UniformMixedFrameReceipt;readonly reject:(error:unknown)=>never;
 }
 /** A checked frame's planner output and work counts; frame -1 holds none. */
-interface LaggedPlan{frame:number;vCycles:number;fullCycles:number;bandTiles:number;bandBricks:number;bandCycles:number;readonly work:Uint32Array;listed:number;rootListed:number;readonly heat:Uint32Array}
+interface LaggedPlan{frame:number;vCycles:number;fullCycles:number;bandTiles:number;bandBricks:number;bandLevel1:number;bandLevel2:number;bandCycles:number;readonly work:Uint32Array;listed:number;rootListed:number;readonly heat:Uint32Array}
 /** The mixed solve's residual target. Tolerance 0 is the fixed-budget
  * control: no user stopping tolerance, so the solve is done at the
  * hierarchy's absolute accuracy (as the native mgCheckCycleConvergence
@@ -408,7 +408,7 @@ export class UniformMixedFrame {
   * frame N reuse that frame's buffer, so its receipt is always checked.
   * A ring by frame: frame N's is taken by frame N+UNIFORM_MIXED_RECEIPT_RING's
   * encode, before that frame's own receipt can write the slot. */
- private readonly lagged:readonly LaggedPlan[]=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},()=>({frame:-1,vCycles:0,fullCycles:0,bandTiles:0,bandBricks:0,bandCycles:0,work:new Uint32Array(UNIFORM_WORK_RECEIPT_WORDS),listed:0,rootListed:0,heat:new Uint32Array(UNIFORM_COLD_FRAME_EVIDENCE_WORDS)}));
+ private readonly lagged:readonly LaggedPlan[]=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},()=>({frame:-1,vCycles:0,fullCycles:0,bandTiles:0,bandBricks:0,bandLevel1:0,bandLevel2:0,bandCycles:0,work:new Uint32Array(UNIFORM_WORK_RECEIPT_WORDS),listed:0,rootListed:0,heat:new Uint32Array(UNIFORM_COLD_FRAME_EVIDENCE_WORDS)}));
  private laggedOf(frame:number):LaggedPlan|undefined{const plan=this.lagged[frame%UNIFORM_MIXED_RECEIPT_RING];return plan&&plan.frame===frame?plan:undefined;}
  private readonly reductions:GPUBuffer;
  private pressureSchedule!:UniformMixedPressureSchedule;
@@ -927,7 +927,7 @@ export class UniformMixedFrame {
    // A counted edit's build admits none but its own.
    const reserve=relayout&&!edit?UNIFORM_WORK_RELAYOUT_RESERVE:0;
    // The band's tiles are wet h tiles: an edit adds its own at most.
-   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);this.remap.observeWork(work.listed,reserve,edited?.reach);this.cycles.observeWork(work.rootListed);}
+   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0),work.bandLevel1+(edited?.tiles??0),work.bandLevel2+(edited?.tiles??0));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);this.remap.observeWork(work.listed,reserve,edited?.reach);this.cycles.observeWork(work.rootListed);}
    // Only a census certifies residency: a frame without one must not skip a page the last one did.
    if(!kick||relayout){if(!relayout&&this.censused)this.ownership.resetResidency();this.censused=!!relayout;}
    // Only a census asks the pool for the liquid's pages: without one a live pool would advance into pages it never claimed.
@@ -1287,13 +1287,13 @@ export class UniformMixedFrame {
    if(mapped[4]!==0||mapped[5]===0||!Number.isFinite(residual)||residual<0||residual>target){
     throw new Error(`Uniform mixed pressure ${mapped[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${floats[0]}, accepted ${residual}, tolerance ${target}, ${count} cycles; projection withheld${""}`);
    }
-   if(mapped[23]===UniformPressureArena.coarsestOverflow)throw new Error(`Uniform pressure band reaches more than ${UniformPressureArena.coarsestPages} pages at its coarsest level; projection is incomplete`);
+   if(mapped[23]===UniformPressureArena.slotOverflow)throw new Error(`Uniform pressure band needs more than the arena's ${this.band.slotCapacity} brick slots; projection is incomplete`);
    if(mapped[23]!==0)throw new Error(`Uniform pressure band needs ${mapped[22]} tiles, over its capacity; projection is incomplete`);
    const bandTiles=mapped[22]!,bandResidual=floats[24]!;
    this.bandTiles=bandTiles;this.bandResidual=bandResidual;
    // Only an accepted solve plans; a failed one threw above. Frame
    // frame+UNIFORM_MIXED_RECEIPT_RING encodes it, whenever this resolves.
-   if(!kick){const plan=this.lagged[frame%UNIFORM_MIXED_RECEIPT_RING]!;plan.frame=frame;plan.vCycles=mapped[20]!;plan.fullCycles=mapped[21]!;plan.bandTiles=bandTiles;plan.bandBricks=mapped[25]!;plan.bandCycles=mapped[26]!;plan.work.set(slot.work);plan.listed=mapped[REMAP_WORK_RECEIPT/4]!;plan.rootListed=mapped[ROOT_WORK_RECEIPT/4]!;for(let w=0;w<UNIFORM_COLD_FRAME_HEAT_WORDS;w++)plan.heat[w]=mapped[HEAT_RECEIPT/4+w]!;plan.heat[UNIFORM_COLD_FRAME_HEAT_WORDS]=slot.flip[0]!;}
+   if(!kick){const plan=this.lagged[frame%UNIFORM_MIXED_RECEIPT_RING]!;plan.frame=frame;plan.vCycles=mapped[20]!;plan.fullCycles=mapped[21]!;plan.bandTiles=bandTiles;plan.bandBricks=mapped[25]!;plan.bandLevel1=mapped[28]!;plan.bandLevel2=mapped[29]!;plan.bandCycles=mapped[26]!;plan.work.set(slot.work);plan.listed=mapped[REMAP_WORK_RECEIPT/4]!;plan.rootListed=mapped[ROOT_WORK_RECEIPT/4]!;for(let w=0;w<UNIFORM_COLD_FRAME_HEAT_WORDS;w++)plan.heat[w]=mapped[HEAT_RECEIPT/4+w]!;plan.heat[UNIFORM_COLD_FRAME_HEAT_WORDS]=slot.flip[0]!;}
    const receipt=slot.receipt;
    receipt.cycles=count;receipt.encoded=slot.encoded;receipt.residual=residual;receipt.dustOwners=mapped[13]!+mapped[18]!;receipt.orphanDustOwners=mapped[18]!;
    receipt.bandTiles=bandTiles;receipt.bandCycles=mapped[26]!;receipt.bandResidual=bandResidual;
