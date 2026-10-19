@@ -53,6 +53,7 @@ import {UNIFORM_PAGE_POOL_STATUS,UniformPagePool,uniformPagePoolFatalMessage,typ
 import {UniformPageInitialise,UniformPageTileWords,uniformPageTopology,type UniformPageInitBlocks} from "./uniform-page-initialise";
 import {UNIFORM_STAGE_GRID_HEADER_WORDS,UNIFORM_STAGE_VIEWS,uniformStageBandWords,uniformStageGridHeader,uniformStageGridWords,uniformStageViewWord} from "./uniform-stage-grids";
 import {uniformNearSettled,type UniformNearSettled} from "./uniform-near-settled";
+import {UniformCoreVelocity} from "./uniform-core-velocity";
 
 export interface UniformMixedFrameTrace {
  instrument(encoder:GPUCommandEncoder):GPUCommandEncoder;
@@ -133,7 +134,13 @@ const FLIP_RECEIPT=ROOT_WORK_RECEIPT+4;
 const POOL_RECEIPT=FLIP_RECEIPT+48;
 // The region heat header (UniformColdFrame's evidence).
 const HEAT_RECEIPT=POOL_RECEIPT+4*UNIFORM_PAGE_POOL_STATUS.words;
-const TRACE_RECEIPT=HEAT_RECEIPT+4*UNIFORM_COLD_FRAME_HEAT_WORDS;
+// The core velocity arena's fatal word (UniformCoreVelocity).
+const CORE_RECEIPT=HEAT_RECEIPT+4*UNIFORM_COLD_FRAME_HEAT_WORDS;
+const TRACE_RECEIPT=CORE_RECEIPT+4;
+/** The core's (u, u*) face channel (UniformCoreVelocity): off until its
+ * consumers switch over. Its slots: live particle bricks and their ring,
+ * every brick of the lattice allocated upfront (124 MB on the pour). */
+export const UNIFORM_CORE_VELOCITY=false;
 // A source's added volume is the scalar budget's alone (beginStep): the
 // source itself writes liquid after the head, inside the frame it is due in,
 // so a frame with a drop starts from the last tail's extension like any other.
@@ -336,6 +343,9 @@ export class UniformMixedFrame {
  private readonly hanging:UniformMixedHangingTaps;
  private readonly hangingGroup:UniformDetailGroup;
  private readonly surface:UniformMixedSurface;
+ /** The core's velocity pair, built only under UNIFORM_CORE_VELOCITY. */
+ readonly coreVelocity?:UniformCoreVelocity;
+ private coreVelocityGroup!:UniformDetailGroup;
  readonly surfaceWorkControl:UniformSurfaceWorkControl;
  private readonly surfaceVolume?:UniformMixedSurfaceVolume;
  private readonly geometry:UniformMixedSurfaceGeometry;
@@ -537,6 +547,7 @@ export class UniformMixedFrame {
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
   this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
   this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps);
+  if(UNIFORM_CORE_VELOCITY)this.coreVelocity=new UniformCoreVelocity(device,o);
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,this.surfaceWorkControl);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
@@ -637,6 +648,8 @@ export class UniformMixedFrame {
    });
   }
   this.surfaceGroup=this.surface.bind({narrowBandState:this.narrowBandFlip.state,unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),velocity:f.velocityScratch,coarseVelocity:this.coarseCache,negative:f.negativeScratch,params:this.params.surface,evidence:stage,phi:f.phi,outputPhi:f.phiScratch});
+  // The same extended field the move's G2P and the surface stage sample.
+  if(this.coreVelocity)this.coreVelocityGroup=this.coreVelocity.bind({unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),velocity:f.velocityScratch,coarseVelocity:this.coarseCache,negative:f.negativeScratch});
   if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.target,stage);
   // NB-FLIP's transfer leaves the advected field in the stored velocity (a
   // kick forces that field where it stands), under momentum's walls.
@@ -738,7 +751,7 @@ export class UniformMixedFrame {
   const tileWords=new UniformPageTileWords(this.device,this.pagePool,[uniformPageTopology(this.ownership)]);
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,this.surfaceWorkControl,...this.pageOwners]});
-  await settleGPUInitialization([this.blit,this.solid,this.tileContext,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
+  await settleGPUInitialization([this.blit,this.solid,this.tileContext,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.coreVelocity,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.cycles,this.acceptance,this.split.transfer,this.split.authority,this.pressureSchedule,this.surfaceBand,this.band,this.narrowBandFlip]
    .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
   this.ready=true;
  }
@@ -1018,6 +1031,9 @@ export class UniformMixedFrame {
    // host encodes the surface stages behind it.
    // The move closes its own share of the phi stage: passes after a
    // submission's last mark are in no stage's time.
+   // The core's u at the slots the last step's table holds, then its marks
+   // and counts cleared for this step's markers (the move's, after SORT).
+   if(this.coreVelocity){this.coreVelocity.encodeFill(encoder,this.coreVelocityGroup);this.coreVelocity.encodeClear(encoder);}
    {this.narrowBandFlip.move(encoder,dt,p.openTop,gravity);trace?.phase(encoder,V.phi);encoder=this.flush(encoder,trace);}
    // Idle: the advected scratch's only readers (reconstruct, redistance) do
    // not run, and phi is unchanged, so no resolve has a texel to change.
@@ -1043,6 +1059,8 @@ export class UniformMixedFrame {
    // Surface producers publish exact changes once; derived geometry and the
    // next surface model consume these revisions instead of rescanning phi.
    this.narrowBandFlip.exportSurfaceRevisions(encoder);
+   // The core's table for the rest of this step and the next move.
+   this.coreVelocity?.encodeUpdate(encoder,this.coreVelocityGroup);
    trace?.phase(encoder,V.phi);encoder=this.flush(encoder,trace);
 
    trace?.phase(encoder,V.coupling);
@@ -1183,6 +1201,7 @@ export class UniformMixedFrame {
    this.remap.encodeWorkReceipt(encoder,readback,REMAP_WORK_RECEIPT);this.cycles.encodeWorkReceipt(encoder,readback,ROOT_WORK_RECEIPT);
    encoder.copyBufferToBuffer(this.narrowBandFlip.state,0,readback,FLIP_RECEIPT,48);this.pagePool.encodeReceipt(encoder,readback,POOL_RECEIPT);
    encoder.copyBufferToBuffer(this.heat.tiers,4*this.heat.regions,readback,HEAT_RECEIPT,4*UNIFORM_COLD_FRAME_HEAT_WORDS);
+   if(this.coreVelocity)encoder.copyBufferToBuffer(this.coreVelocity.buffer,this.coreVelocity.fatalOffset,readback,CORE_RECEIPT,4);
    // The next head's census and advection read this extension: it is the
    // frame's velocity extension, priced there, not the census's.
    // Rigid integration changes body state, not the canonical fluid inputs
@@ -1254,6 +1273,7 @@ export class UniformMixedFrame {
     d.pressureListedOctants=mapped[ROOT_WORK_RECEIPT/4]!;d.remapJobs=mapped[REMAP_WORK_RECEIPT/4]!;d.transferPairs=slot.flip[9]!;}
    // The page pool's sticky fatal explains every later failure: a page the frame needed was never stored.
    const pool=uniformPagePoolFatalMessage(this.pagePool.layout,mapped,POOL_RECEIPT/4);if(pool)throw new Error(pool);
+   const core=this.coreVelocity?mapped[CORE_RECEIPT/4]!:0;if(core)throw new Error(`Core velocity arena is full: brick ${core&0x7fffffff} refused one of its ${this.coreVelocity!.arena.fineCapacity} slots`);
    // The GPU's own verdict first: it names the first failing frame.
    const failure=describeUniformMixedFrameStatus(slot.status);
    // A detail-storage violation explains every later failure.
@@ -1497,5 +1517,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{this.blit.destroy();this.surfaceWorkControl.destroy();this.cycles.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.tileContext.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{this.blit.destroy();this.coreVelocity?.destroy();this.surfaceWorkControl.destroy();this.cycles.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.tileContext.destroy();this.pressureSchedule?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

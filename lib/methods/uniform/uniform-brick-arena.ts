@@ -311,9 +311,38 @@ fn ubaSlot1(key:u32)->u32{let s=atomicLoad(&${table}[UBA_TABLE1+key]);return sel
 }
 `;}
 
- /** Channel bases and the pool accessors. pool: an array<u32> the module binds. */
- poolWGSL(pool:string):string{
-  const constants=[...this.bases].map(([key,base])=>{const [name,level,component,bank]=key.split("/");return `const UBA_${name!.toUpperCase()}_L${level}_${component}_${bank}:u32=${base}u;`;}).join("");
+ /** A pass that only reads the table, or marks it, from another module:
+  * plain loads of a buffer the module binds as array<u32> (read or
+  * read_write), the table at word base. ubrSlotOf: a brick id's live slot
+  * (UB_NONE_ID: none); ubrRecord: record word k of a level 0 slot; the
+  * live list. The table is stable between one build and the next. */
+ readerWGSL(buffer:string,base:number):string{
+  const l=this.layout,count=(k:number)=>base+UBA_COUNTS+k;
+  return /* wgsl */`
+const UBR_NONE:u32=0xffffffffu;
+const UBR_SEAM:u32=0x80000000u;
+const UBR_CAPACITY:u32=${this.fineCapacity}u;
+fn ubrBrickAt(c:vec3i)->u32{let b=umPageWord(c>>vec3u(5u));if(!umBlockStored(b)){return UBR_NONE;}let l=(vec3u(c)>>vec3u(3u))&vec3u(3u);return 64u*b+(l.x|(l.y<<2u)|(l.z<<4u));}
+fn ubrOrigin(id:u32)->vec3u{let l=id&63u;return (umBlockPage(id>>6u)<<vec3u(5u))+8u*vec3u(l&3u,(l>>2u)&3u,l>>4u);}
+fn ubrSlotOf(id:u32)->u32{if(id==UBR_NONE){return UBR_NONE;}return ${buffer}[${base+l.table}u+id];}
+fn ubrBrick(slot:u32)->u32{return ${buffer}[${base+l.brick}u+slot];}
+fn ubrClass(slot:u32)->u32{return ${buffer}[${base+l.klass}u+slot];}
+fn ubrRecord(slot:u32,k:u32)->u32{return ${buffer}[${base+l.record}u+${UBA_RECORD}u*slot+k];}
+fn ubrLiveCount()->u32{return min(${buffer}[${count(2)}u],UBR_CAPACITY);}
+fn ubrLiveSlot(e:u32)->u32{return ${buffer}[${base+l.live}u+e];}
+`;}
+ /** A marker in another module: the table's mark words in a buffer the
+  * module binds as array<atomic<u32>> read_write, the table at word base.
+  * Marks land between the step clear and the table build. */
+ markWGSL(buffer:string,base:number):string{
+  const c=UNIFORM_ARENA_CLASS;
+  return /* wgsl */`
+${Object.entries(c).filter(([name])=>name!=="entering"&&name!=="leaving").map(([name,bit])=>`const UBA_${name.replace(/[A-Z]/g,ch=>`_${ch}`).toUpperCase()}:u32=${bit}u;`).join("")}
+fn ubaMark(id:u32,bits:u32){let at=${base+this.layout.mark}u+id;if((atomicLoad(&${buffer}[at])&bits)!=bits){atomicOr(&${buffer}[at],bits);}}
+`;}
+ /** Channel bases (from pool word base) and the pool accessors. pool: an array<u32> the module binds. */
+ poolWGSL(pool:string,base=0):string{
+  const constants=[...this.bases].map(([key,word])=>{const [name,level,component,bank]=key.split("/");return `const UBA_${name!.toUpperCase()}_L${level}_${component}_${bank}:u32=${base+word}u;`;}).join("");
   const banks=[...this.bankWords].map(([name,j])=>`const UBA_BANK_${name.toUpperCase()}:u32=${j}u;`).join("");
   return /* wgsl */`
 const UBA_STRIDE:u32=${UBA_STRIDE}u;
