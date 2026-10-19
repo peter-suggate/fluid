@@ -10,7 +10,7 @@ Sources:
 
 **Surface.**
 - Today: 18.16 ms over 40 pass entries, about 55 dispatches. After 01769825 the store is 0.86 ms rather than 2.06, which puts the stage at about 17 ms.
-- Bound at the pour's counts: **≈0.40 ms** (§1.2).
+- Bound at the pour's counts: **≈0.40 ms** (§1.2). §5 revises this: staging does not pay in the thin band, advect's gather-rate floor is ≈0.9 ms, and the pass-by-pass persistence projection is ≈5.4 ms (0.90 per kT) against today's 15.0.
 - Arena projection: **≈0.92 ms** in about 10 passes. That meets the ≤1 ms φ target and the ≤1.2 ms stage target, and is 2.3× the tighter bound. What holds it above 2× is the exact redistance's ALU (§1.3).
 
 **Lifetime: persistent, not step-authoritative.** Bricks keep their slots and values across steps, and the paged h store becomes cold storage.
@@ -522,3 +522,96 @@ Agreed with the pressure agent, 2026-10-20, from its CPU twin of the frame-94 ba
 3. **sAdvect, sSplat** (with the momentum agent's u channel), then work control → aTable, and phi resolve deleted.
 
 Judge each step by surface per thousand fine tiles (`fam.js`): 3.03 on part2h, 2.76 on hm2. The target is 0.15 per kT (≈0.92 ms).
+
+## 5. Persistence design (a), pass by pass (revised 2026-10-20, after sAdvect)
+
+### 5.1 What this session measured
+
+- **sAdvect: a loss.** Built at near-exact answers, then dropped (patch `sadvect-2026-10-20.patch`). It cost 4.22 ms against the 2.4 ms of advect it replaced. The band is thin: about 103 of the 125 tiles in a brick's staged window are 4h, so staging a window loads mostly texels nobody advects. **Texel loads are not the bottleneck.** advectTrace already runs at the measured coherent-gather rate (below), so moving loads into workgroup memory gains nothing.
+- **Lean 4h path: exact, but null.** 21542 values equal at frame 100, 18 differing by at most 1e-7, none missed. Net gain 0.06 ms. Dropped (patch `coarse-lean-2026-10-20.patch`).
+- **Wall trace "clip" (402a3221).** One RK3 step plus an analytic contact clip, behind the `wallTrace` param. General deferred 1.432 → 1.123 ms; advect 6.10 → 5.85 ms. Letters within the perturbation floor.
+- **List sizes at frame 100** (counters in umAdvectStore and the deferred headers):
+
+| List | Entries |
+|---|---|
+| h vertices into umAdvectStore | 362.5k |
+| 4h vertices into umAdvectStore | 61.3k |
+| Euler fails, so the vertex goes to the trace list | 331.3k (91% of h) |
+| cubic, solid-free | 57.5k |
+| cubic, solid-aware | 40.1k |
+| cubic, deferred (4h) | 5.8k |
+| general deferred, twinned | 35.0k: 13.3k wall-plane, 21.7k other |
+
+- **The §1.2 bound of ≈0.40 ms assumed staged reads**, at the 719 G/s workgroup rate. The thin band rules that out for advect. At the 22 G/s gather rate that advectTrace reaches, advect's own floor is about 0.9 ms: ≈200k vertices × 48 trace taps, plus ≈97k × 64 cubic taps.
+
+### 5.2 Per pass: today, what replaces it, projected
+
+Today is the clip build at frames 94–100 (split-all profile `wcb`). ns is ms over the element count named. Projections use the element rates measured on today's lean kernels, not staging rates. **Keeps** means the pass keeps its current structure.
+
+The design has three structural levers. None of them is staging.
+
+1. **The advect certificate: the vertex disappears.**
+   - Every non-interface, non-COLD vertex in reach has its value replaced by the redistance store (`arenaStore`: exact distance, or sign·6h). So only the advected sign survives.
+   - If |φ_old(p)| > s·dt + 1.5h, where s is the speed bound over p's 27-brick neighbourhood, the sign cannot flip and p cannot become an interface vertex. Its advect can be skipped, keeping φ_old.
+   - The exception is particle coupling. There, min(φ'+h, φ_p) can differ when φ_p falls between the kept and the advected values, which is rare. So the certificate goes behind an NB-FLIP param (update "solver").
+   - It does not apply in COLD regions, where redistance holds advected values.
+   - **Unmeasured:** what fraction of vertices it certifies. The projections assume 45% of h vertices (≈200k still advected). One counter run settles it.
+2. **The persistent arena is the authority for fine φ.**
+   - Gathers become churn.
+   - Hanging texels are filled when written, so phi resolve is gone and no sampler carries a width, held or seam predicate.
+   - Store rules become per-brick class bits plus one compare per texel.
+   - Paged φ is fed by write-through (≈0.12 ms) until its readers move.
+3. **Workgroup-memory atomics for the splat** (218 G/s, against 5.7 G/s for device atomics), on the particle brick slabs.
+
+| Pass | ms | Elements | ns/element | Replacement | Projected ms |
+|---|---|---|---|---|---|
+| **Advect** | **5.85** | | | | **2.41** |
+| advectFine | 1.208 | 424k vertices | 2.85 | Persistent per-brick vertex masks replace the ownership and burial walks. The certificate early-outs. No Euler attempt (it fails 91%). | 0.35 |
+| advectTrace | 0.721 | 331k | 2.18 | **Keeps.** Arena-record sampler; ≈200k entries | 0.30 |
+| advectFinish | 1.086 | 331k | 3.28 | Walk skip and cubic routing kept. The paged store (umStoreSurface, umRecordRegion) becomes a bank write. | 0.30 |
+| advectCubic (solid-free) | 0.281 | 57.5k | 4.9 | **Keeps.** Arena sampler | 0.20 |
+| advectCubic (solid-aware) | 0.721 | 40.1k | 18.0 | Per-tap solid-record walk becomes one bit test on the record's open mask; otherwise the free kernel | 0.24 |
+| advectCubicDeferred | 0.272 | 5.8k | 47 | **Keeps** (4h) | 0.27 |
+| advectDeferred, twinned | 1.123 | 35.0k | 32 | Slow samples and seams (≈21.7k) disappear on the arena sampler. Walls (13.3k) stay in the general twin: no lean wall kernel, per the coordinator. | 0.45 |
+| advectWalls | 0.131 | 13.5k walls | 9.7 | Persistent wall list per brick (walls do not move) | 0.02 |
+| advect, fast and regular twins, owners, wallReach | 0.28 | 61.3k 4h | — | **Keeps** (4h lattice); wallReach and owners go to aTable | 0.28 |
+| **Reconstruction** | **3.03** | | | | **0.68** |
+| surfaceClear | 0.318 | mapped pages | — | **Disappears.** φ_p lives in sSplat's workgroup memory. | 0 |
+| surfaceSplatOccupied | 0.543 | 590k particles | 0.92 | sSplat: a workgroup per particle brick. Reads the 27 neighbour slabs' particles within r (≈2× reads) and does workgroup atomic-min. | 0.15 |
+| coupleFine (both twins) | 1.338 | 362.5k h vertices | 3.7 | sSplat's tail: min with φ' on the brick's owned texels, into the new bank. Heat and solid-owner walks become record bits. | 0.10 |
+| transferRefine | 0.449 | 590k | 0.76 | Rides on sSplat's particle read | 0.05 |
+| couple (coarse) | 0.384 | 57.5k coarse cells | 6.7 | **Keeps** | 0.38 |
+| **Crossings** | **1.78** | | | | **0.84** |
+| arenaGather (search) | 0.225 | 3159 slots | 71 | **Disappears.** aEnter of ≈47 entering bricks | 0.01 |
+| arenaCross | 0.150 | 1793 core bricks | 84 | **Keeps.** Reads the channel | 0.10 |
+| arenaNearest | 0.506 | 1793 | 282 | **Keeps.** No per-element win named. | 0.45 |
+| depthSeeds, depthNearest\*, depthReuseSelect, depthTiles | 0.825 | candidate tiles | — | Fine candidates fold into arenaCross; 4h candidates and the reuse plan stay. **Split not yet counted.** | 0.25 |
+| arenaMark, brickTable\* | 0.075 | | | aTable | 0.03 |
+| **Redistance and store** | **2.86** | | | | **0.81** |
+| arenaGather (metric) | 0.253 | 3159 slots | 80 | **Disappears** (persistent) | 0.01 |
+| arenaDistance | 1.582 | 1.47M evaluations | 1.08 | **Keeps** (one lean kernel). Newton warm-started from a closest-point seed computed once per crossing cell, cutting ≈5 steps to 1–2 | 0.66 |
+| arenaStore | 0.889 | 247k stored | 3.6 | The rule chain collapses. COLD becomes a brick class (the brick leaves the list). Writer becomes the record's static owned mask. Interface becomes R's crossing mask, already in hand. Capacity becomes a record bit. Then write-through. | 0.12 |
+| arenaFar | 0.131 | | | Only for entering and leaving bricks | 0.02 |
+| **Coarse retirement** (depthCoarse, redistanceCoarse) | **0.56** | 57.5k coarse cells | 9.8 | **Keeps.** No per-element win named. | 0.56 |
+| **phi resolve** (resolve, resolveListed) | **0.80** | | | **Disappears.** Write-through writes resolved hanging texels. | 0 |
+| **Volume** (measureInitial, clearBand, solve) | **0.13** | | | **Keeps** | 0.13 |
+| **Surface** | **15.01** (2.50 per kT, 6004 fine tiles) | | | | **5.43** (0.90 per kT) |
+
+Not counted above, and outside (a): the pressure authority (surfaceHeld, wetRegions, cutRegions, stamp; 1.45 ms). It is pressure's interface consumer of φ and keeps its structure.
+
+### 5.3 What keeps the stage above the 0.15 per kT target
+
+| What | ms | Why |
+|---|---|---|
+| Advect | 2.41 | Gather-bound per vertex. The floor at the gather rate is ≈0.9 ms. The rest is the wall twin (0.45) and the 4h passes (0.55). |
+| The coarse level: couple, coarse retirement, 4h advect | 1.22 | Off the fine arena. The arena's 4h level (§3.1) could take it, but no per-element win is named. |
+| arenaNearest and arenaDistance | 1.11 | Already lean. Only the Newton warm start is named. |
+
+### 5.4 Build order: certain wins first, each behind a param where physics changes
+
+| Phase | What | Gate | Saves |
+|---|---|---|---|
+| **P0** | Advect certificate on today's kernels, no arena. One counter run first: what share it certifies. | Letters A/B | ≈1.0 ms at 45% |
+| **P1** | Fine φ persistent. advect and couple stores also write the arena bank (dual write, ≈0.2 ms). R, X and nearest read the bank; fine crossing candidates fold into arenaCross; R gets the Newton warm start. The store rules become class bits. Write-through feeds paged φ. Gathers, arenaFar and phi resolve go. | Letters A/B | ≈3.4 ms |
+| **P2** | Advect on the arena sampler. advectFine becomes persistent masks; seams and slow samples leave the deferred list; solid cubic becomes bit tests. Needs the u channel over core and ring (the core-velocity channel extended to the ring). | Letters A/B | ≈2.4 ms |
+| **P3** | sSplat on the particle slabs (particle agent) | Letters A/B | ≈2.3 ms |
