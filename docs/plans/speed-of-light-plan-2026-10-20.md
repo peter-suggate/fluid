@@ -114,6 +114,7 @@ Each section must give, per kernel: the irreducible work at pour counts, the bou
 - **Fixed state.** Capture one pour state (frame 94) and time every change against it, at the same particle and tile counts.
 - **Per unit.** Report µs per thousand fine tiles and ms per million particles alongside frame totals.
 - **Physics.** Run the letters A/B (`scratchpad/L/lp.mts`; φ read through the live GPU page table since d32345b5) before every commit. Gates: particle counts, volume drift and occupancy within repeat noise (about 0.2% at f60, about 2% at f120).
+- **Reassess priors outside 2×.** When a measurement lands more than 2× off its bound, name the priors behind both the bound and the design (tap rates, element counts, which work is needed, data layout, algorithm), find the one that broke, and try a different approach. Never accept the gap as the per-element rate of today's design, and never retune the same approach.
 - **GPU discipline.** All GPU runs go under the lock: one run per arm, a repeat only to settle noise.
 
 ## 7. Order of work
