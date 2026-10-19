@@ -1737,7 +1737,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const held=this.mixedImportance(this.address.boxTiles),importance=held.importance;
       // The build's counters clear in the census's blit run.
       builder.encodeClear(encoder);
-      if(this.detail.policy==="dynamic")this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),dt,this.narrowBandFinePadding);
+      if(this.detail.policy==="dynamic")this.mixedFrame?.narrowBandFlip?.refine(encoder,dynamic.joinTarget(),this.narrowBandFinePadding);
       // One policy record, rewritten for each census (the census keeps none of it).
       // (The scene's gravity when it is applied, the settings' numbers when they are replaced: read each step, each is a heap number.)
       const gravity=this.mixedCensusGravity,applied=this.mixedCensusSceneRevision!==this.sceneRevision;

@@ -1,3 +1,6 @@
+import { particleResidencyTravelWGSL } from "./uniform-local-residency";
+import { NARROW_BAND_SURFACE_RADIUS } from "./uniform-narrow-band-surface.wgsl";
+import { UNIFORM_PAGE_WINDOW } from "./uniform-lattice-address";
 /** DEPB, the particle deposit (NB-FLIP transfer): a workgroup an occupied
  * tile. It classifies each sample once (grid support at its new position:
  * the mode bit the move and snapshot read, its motion words for the seam
@@ -14,8 +17,90 @@
  * Window: a node j along axis a is the positive a face of cell j. A sample in
  * a tile's cells [0,4) reaches nodes -2..4 along a and -1..4 across it. */
 export const PARTICLE_DEPOSIT_WORDS_PER_CELL = 6;
-export function particleBrickDepositWGSL(apic: boolean): string {
+/** The refinement prediction transferRefine writes after DEPB, for the next census (refine):
+ * a join bit a tile key (joins words), then PARTICLE_RESIDENCY_WORDS a page
+ * (allocation support masks and travel bounds), at these bins words. */
+export interface ParticleRefineWords {readonly joins:number;readonly allocation:number}
+export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords): string {
   return /* wgsl */`
+${particleResidencyTravelWGSL}
+// Refinement prediction (the census's particle inputs), from the tile's
+// sorted samples after classify: what the census reads is exactly these
+// records (the move's before, DEPB's mode, the band's nearest crossing).
+// A tile's samples join 5³ tiles around it and support the 2³ pages
+// (residency regions) about it: workgroup words, flushed once a tile.
+const NB_REFINE_JOINS:u32=${refine.joins}u;const NB_REFINE_ALLOCATION:u32=${refine.allocation}u;
+const NB_REFINE_WINDOW:i32=${8 * UNIFORM_PAGE_WINDOW - 1};
+// A tile's samples reach 5³ join tiles about it (a 25-bit x+5y slice a z)
+// and, by the half of the tile they sit in along each axis, one of 8 support
+// blocks of 2³ tiles (pbHalves bits, their travel maxima in pbTravel).
+var<workgroup> pbJoin:array<atomic<u32>,5>;
+var<workgroup> pbHalves:atomic<u32>;
+var<workgroup> pbTravel:array<atomic<u32>,48>;
+// The tiles a sample's surface reconstruction can request, swept over its
+// travel: interior samples ask their crossing cell, not their collar. reach:
+// the home tile's reach bit (the nearest-crossing bank holds a tile only
+// within two tiles of a crossing).
+struct NbRefineBox{low:vec3i,high:vec3i}
+fn nbRefineBox(s:Particle,ballistic:bool,home:u32,reach:bool)->NbRefineBox{
+ let start=s.position.xyz;let motion=select(s.before.xyz,s.velocity.xyz,ballistic);
+ let travel=params.hDt.w*motion/params.hDt.xyz;let c=vec3u(start);
+ var low=start-${NARROW_BAND_SURFACE_RADIUS};var high=start+${NARROW_BAND_SURFACE_RADIUS};
+ if(reach&&s.velocity.w<=0.0){
+  let nearest=atomicLoad(&bins[NB_DEPTH_B+64u*home+((c.x&3u)|((c.y&3u)<<2u)|((c.z&3u)<<4u))]);
+  if(nearest!=0xffffffffu){low=vec3f(umCellCoord(nearest));high=low+1.0;}
+ }
+ // No wall clamps the box: a tile that holds no storage has no key and takes no mark.
+ let padding=params.activity.z;
+ let lo=clamp(vec3i(floor((low+min(travel,vec3f(0))-padding)/4.0)),vec3i(0),vec3i(NB_REFINE_WINDOW));
+ let hi=clamp(vec3i(floor((high+max(travel,vec3f(0))+padding-1e-5)/4.0)),vec3i(0),vec3i(NB_REFINE_WINDOW));
+ return NbRefineBox(lo,max(lo,hi));
+}
+fn nbRefineJoin(t:vec3i){
+ let key=umTileKey(t);if(!umKeyStored(key)){return;}
+ let bit=1u<<(key%32u);let at=NB_REFINE_JOINS+key/32u;
+ if((atomicLoad(&bins[at])&bit)==0u){atomicOr(&bins[at],bit);}
+}
+// A residency page's word: masks OR, travel bounds (positive) take the max.
+// The words only grow until the census copies them: a stale read costs one
+// redundant atomic at most.
+fn nbRefinePage(region:vec3i,k:u32,value:u32){
+ let tile=umTileKey(4*region);if(!umKeyStored(tile)){return;}
+ let octant=vec3u(region)&vec3u(1u);let at=NB_REFINE_ALLOCATION+8u*(8u*(tile>>9u)+octant.x+2u*octant.y+4u*octant.z)+k;
+ if(k<2u){if((atomicLoad(&bins[at])&value)!=value){atomicOr(&bins[at],value);}}
+ else if(atomicLoad(&bins[at])<value){atomicMax(&bins[at],value);}
+}
+// Support block low tiles .. low+1 on the page at region: its mask word k
+// (k<2: 4x4x4 tile bits x+4y+16z), or 0 when the block misses the page.
+fn nbRefineMask(low:vec3i,region:vec3i,k:u32)->u32{
+ let origin=4*region;let a=max(low-origin,vec3i(0));let b=min(low+1-origin,vec3i(3));
+ if(any(a>b)){return 0u;}
+ let row=((2u<<u32(b.x-a.x))-1u)<<u32(a.x);var mask=0u;
+ for(var z=max(a.z,2*i32(k));z<=min(b.z,2*i32(k)+1);z++){for(var y=a.y;y<=b.y;y++){mask|=row<<u32(4*y+16*(z&1));}}
+ return mask;
+}
+fn nbRefineTravel(travel:array<vec3f,2>,k:u32)->u32{
+ let v=select(travel[1][(k-5u)%3u],travel[0][(k-2u)%3u],k<5u);
+ return select(0u,bitcast<u32>(v),v>0.0);
+}
+// A spilled sample (not in a tile's run) moves next step too: its two-cell
+// support (as seeds), travel bounds and swept surface tiles go to the bins directly.
+fn nbRefineDirect(s:Particle){
+ let ballistic=nbParticleMode(s)==1.0;
+ let travel=lrParticleTravel(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz);
+ let low=vec3i(floor((s.position.xyz-2.0)/4.0));let first=low>>vec3u(2u);let last=(low+1)>>vec3u(2u);
+ for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
+  let region=vec3i(x,y,z);
+  for(var k=0u;k<8u;k++){
+   let value=select(nbRefineTravel(travel,k),nbRefineMask(low,region,k),k<2u);
+   if(value!=0u){nbRefinePage(region,k,value);}
+  }
+ }}}
+ if(s.velocity.w < -1.0||ballistic){return;}
+ let home=umTileAt(vec3u(s.position.xyz)/4u);
+ let box=nbRefineBox(s,ballistic,home,(atomicLoad(&bins[NB_BAND_REACH+home])&1u)!=0u);
+ for(var z=box.low.z;z<=box.high.z;z++){for(var y=box.low.y;y<=box.high.y;y++){for(var x=box.low.x;x<=box.high.x;x++){nbRefineJoin(vec3i(x,y,z));}}}
+}
 const PB_ALONG:i32=7;const PB_ACROSS:i32=6;const PB_WINDOW:u32=252u;const PB_NODES:u32=756u;const PB_LANES:u32=192u;
 // Momentum in 1/8192 of the velocity unit, weight in 1/65536: an i32 node sum
 // holds weight 32768 and momentum 262144 (velocity times weight).
@@ -114,6 +199,64 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
  }
  atomicMax(&state[5],bitcast<u32>(outside));
  for(var k=0u;k<3u;k++){if(counts[k]!=0u){atomicAdd(&state[6u+k],counts[k]);}}
+}
+// The census's prediction, a lean pass after DEPB (whose classify wrote the
+// mode it reads): a workgroup an occupied tile, its sorted samples' support
+// and swept surface tiles into workgroup words, flushed once a tile; then the
+// spill reserve's samples (state[21]), which no tile lists, directly.
+@compute @workgroup_size(64) fn transferRefine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(!nbParticlesLive()){return;}
+ if(lane==0u){pbJobs=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);}
+ let count=workgroupUniformLoad(&pbJobs);
+ for(var job=group.x;job<count;job+=groups.x){
+  workgroupBarrier();
+  if(lane<5u){atomicStore(&pbJoin[lane],0u);}
+  if(lane==5u){atomicStore(&pbHalves,0u);}
+  if(lane<48u){atomicStore(&pbTravel[lane],0u);}
+  if(lane==0u){pbTile=atomicLoad(&bins[NB_OCCUPIED+4u+job]);}
+  let tile=workgroupUniformLoad(&pbTile);
+  if(!umTileLive(tile)){continue;}
+  let at=vec3i(umTileCoord(tile));let reach=(atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u;
+  let start=links[64u*tile];let end=links[64u*tile+63u]+atomicLoad(&bins[64u*tile+63u]);
+  for(var i=start+lane;i<end;i+=64u){
+   let s=particles[i];let ballistic=nbParticleMode(s)==1.0;
+   // Support: the 2³ tiles from floor((p-2)/4), i.e. which half of the tile p sits in.
+   let half=vec3u(clamp(vec3i(floor((s.position.xyz-2.0)/4.0))-at+1,vec3i(0),vec3i(1)));
+   let o=half.x+2u*half.y+4u*half.z;
+   atomicOr(&pbHalves,1u<<o);
+   let travel=lrParticleTravel(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz);
+   for(var axis=0u;axis<3u;axis++){
+    if(travel[0][axis]>0.0){atomicMax(&pbTravel[6u*o+axis],bitcast<u32>(travel[0][axis]));}
+    if(travel[1][axis]>0.0){atomicMax(&pbTravel[6u*o+3u+axis],bitcast<u32>(travel[1][axis]));}
+   }
+   if(ballistic||s.velocity.w < -1.0){continue;}
+   let box=nbRefineBox(s,false,tile,reach);
+   if(all(box.low>=at-2)&&all(box.high<=at+2)){
+    let lo=vec3u(box.low-at+2);let hi=vec3u(box.high-at+2);
+    let row=((2u<<(hi.x-lo.x))-1u)<<lo.x;var slice=0u;
+    for(var y=lo.y;y<=hi.y;y++){slice|=row<<(5u*y);}
+    for(var z=lo.z;z<=hi.z;z++){atomicOr(&pbJoin[z],slice);}
+   }else{
+    for(var z=box.low.z;z<=box.high.z;z++){for(var y=box.low.y;y<=box.high.y;y++){for(var x=box.low.x;x<=box.high.x;x++){nbRefineJoin(vec3i(x,y,z));}}}
+   }
+  }
+  workgroupBarrier();
+  for(var n=lane;n<125u;n+=64u){if((atomicLoad(&pbJoin[n/25u])&(1u<<(n%25u)))!=0u){nbRefineJoin(at-2+vec3i(i32(n%5u),i32((n/5u)%5u),i32(n/25u)));}}
+  // A lane a page word: the 2³ pages about the tile, word lane%8.
+  let halves=atomicLoad(&pbHalves);let r=lane/8u;let k=lane%8u;
+  let region=((at-1)>>vec3u(2u))+vec3i(i32(r&1u),i32((r>>1u)&1u),i32(r>>2u));
+  var value=0u;
+  for(var o=0u;o<8u;o++){
+   if((halves&(1u<<o))==0u){continue;}
+   let low=at-1+vec3i(i32(o&1u),i32((o>>1u)&1u),i32(o>>2u));
+   let mask=nbRefineMask(low,region,min(k,1u));
+   if(k<2u){value|=mask;}
+   else if((mask|nbRefineMask(low,region,0u))!=0u){value=max(value,atomicLoad(&pbTravel[6u*o+k-2u]));}
+  }
+  if(value!=0u){nbRefinePage(region,k,value);}
+ }
+ let spilled=min(atomicLoad(&state[21u]),NB_SPILL);
+ for(var j=group.x*64u+lane;j<spilled;j+=groups.x*64u){let s=particles[NB_SLAB_LIMIT+j];if(s.position.w>0.0){nbRefineDirect(s);}}
 }
 `;
 }

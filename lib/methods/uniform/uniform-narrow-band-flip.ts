@@ -71,7 +71,6 @@ interface NarrowBandBatches{
  readonly snapshot:NarrowBandBatch;readonly retire:NarrowBandBatch;
  readonly seed:NarrowBandBatch;readonly clearAir:NarrowBandBatch;
 }
-const NB_REFINEMENT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP surface refinement"};
 const NB_SNAPSHOT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP snapshot"};
 const NB_INIT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP page words"};
 
@@ -111,7 +110,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get allocatedBytes():number{return this.baseAllocatedBytes;}
  /** A word per tile key from word `offset` of the buffer: non-zero where a sample's support reached at its last move (slabSort). */
  get particleTiles():{buffer:GPUBuffer;offset:number;allocation:GPUBuffer}{return {buffer:this.bins,offset:2*this.cells+this.tiles,allocation:this.particleAllocation};}
- /** Current particle occupancy and signed travel, rebuilt by refine before the census. */
+ /** Particle occupancy and signed travel for the census: transferRefine writes them, refine copies them here. */
  private readonly particleAllocation:GPUBuffer;
  count=0;
  reseedClipped=0;
@@ -224,6 +223,12 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly arenaWord:number;
  /** The shared brick table's first bins word (uniform-brick-table.ts). */
  private readonly brickWord:number;
+ /** transferRefine's prediction for the next census (refine): a join bit a
+  * tile key, then PARTICLE_RESIDENCY_WORDS a page, after the brick table. */
+ private readonly refineWord:number;
+ private readonly refineJoinWords:number;
+ /** The census's fine padding (refine), transferRefine's box margin (params.activity.z). */
+ private refinePadding=1;
  private readonly params:GPUBuffer;
  private resources:GPUBindGroupLayout;
  /** The COLD freeze (attachFreeze): the transfer leaves frozen cells and faces. */
@@ -241,7 +246,6 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  /** Per-frame parameter records, filled in place. */
  private readonly stepWords=new Float32Array(8);
  private readonly activityWords=new Float32Array(4);
- private readonly refinementWords=new Float32Array(8);
  private readonly receiptBits=new Uint32Array(2);
  private readonly receiptDistances=new Float32Array(this.receiptBits.buffer);
  /** The groups' bank order: binding 0 the scratch bank, binding 1 the current. */
@@ -268,10 +272,6 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private updateErrors?:GPUBuffer;
  /** Bind tile update evidence separately from the shape/refinement census. */
  attachUpdateErrors(buffer:GPUBuffer):void{this.updateErrors=buffer;}
- private refinementPipeline?:GPUComputePipeline;
- private refinementLayout?:GPUBindGroupLayout;
- private readonly refinementGroups:({particles:GPUBuffer;target:GPUBuffer;wordOffset:number;size:number;group:GPUBindGroup}|undefined)[]=[];
- private readonly refinementParams:GPUBuffer;
  private readonly coarseVelocity:GPUTexture;
  private cacheGroups:Record<string,UniformDetailGroup>={};
  private slotSnapshotResources?:GPUBindGroupLayout;
@@ -314,7 +314,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.surfaceHotWord=binWords+this.reuse.words;
   // The shared brick table (uniform-brick-table.ts) persists after the surface-hot words.
   this.brickWord=this.surfaceHotWord+address.vertexKeys;
-  const binBytes=4*(this.brickWord+uniformBrickTableWords(address.blocks));
+  this.refineWord=this.brickWord+uniformBrickTableWords(address.blocks);this.refineJoinWords=Math.ceil(address.tileKeys/32);
+  const binBytes=4*(this.refineWord+this.refineJoinWords+8*address.blocks*PARTICLE_RESIDENCY_WORDS);
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
   this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
@@ -323,10 +324,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.next=buffer("cell starts, compact neighbor samples and surface brick arena windows",4*(this.arenaWord+729*64*address.blocks));this.params=buffer("parameters",64,true);
   this.liveGate=buffer("live sample gate",16,true);device.queue.writeBuffer(this.liveGate,0,new Uint32Array([1,0,0,0]));
   this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
-  this.refinementParams=buffer("refinement prediction",48,true);device.queue.writeBuffer(this.refinementParams,32,new Uint32Array([address.blocks,0,0,0]));
   const size=uniformCoarseCacheExtent(address);
   this.coarseVelocity=device.createTexture({label:"Narrow-band FLIP stage sampling cache",size,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
-  this.baseAllocatedBytes=[...this.particles,this.state,this.bins,this.next,this.params,this.liveGate,this.particleAllocation,this.refinementParams,this.reuseControls].reduce((n,b)=>n+b.size,0)+size.reduce((n,v)=>n*v,16);
+  this.baseAllocatedBytes=[...this.particles,this.state,this.bins,this.next,this.params,this.liveGate,this.particleAllocation,this.reuseControls].reduce((n,b)=>n+b.size,0)+size.reduce((n,v)=>n*v,16);
   if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotSnapshotResources=uniformDetailBindLayout(device,{entries:[
    ...[1,2,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    ...[5,17].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
@@ -434,109 +434,6 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  async initialize():Promise<void>{
   const subgroups=this.device.features.has("subgroups")&&(this.device.adapterInfo.subgroupMinSize??0)>=32;
   await this.cache.initialize();
-  this.refinementLayout=this.device.createBindGroupLayout({entries:[
-   {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-   {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-   {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
-   {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-   {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-   {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
-   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
-  ]});
-  const refine=this.device.createShaderModule({label:"FLIP surface refinement prediction",code:/* wgsl */`
-${narrowBandParticleWGSL(this.apic)}
-@group(0) @binding(0) var<storage,read> samples:array<Particle>;
-@group(0) @binding(1) var<storage,read> count:array<u32>;
-@group(0) @binding(2) var<storage,read_write> joins:array<atomic<u32>>;
-// blocks.x: the pool's blocks.
-struct Params{dimsDt:vec4f,h:vec4f,blocks:vec4u}
-@group(0) @binding(3) var<uniform> p:Params;
-@group(0) @binding(4) var<storage,read> bins:array<u32>;
-// The box and the blocks are this module's uniform, the pages the
-// simulation topology's tail: the address functions read them.
-@group(0) @binding(5) var<storage,read> nbRefineTopology:array<u32>;
-@group(0) @binding(6) var<storage,read_write> allocation:array<atomic<u32>>;
-fn nbRefineCells()->vec3u{return vec3u(p.dimsDt.xyz);}
-fn nbRefineTiles()->u32{return 512u*p.blocks.x;}
-${uniformWindowAddressWGSL("nbRefineTopology","5u*nbRefineTiles()","p.blocks.x")}
-${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"p.blocks.x"}})}
-// The swept tiles of a sample, and its own tile's key.
-struct Box{low:vec3i,high:vec3i,home:u32}
-fn sweptSurface(sample:Particle)->Box{
- let start=sample.position.xyz;let motion=select(sample.before.xyz,sample.velocity.xyz,nbParticleMode(sample)>0.5);
- let travel=p.dimsDt.w*motion/p.h.xyz;
- // A live sample lies in a stored cell: its tile's key is one table read, and its cell's key follows from it.
- let c=vec3u(start);let home=umTileAt(c/4u);
- let bank=2u*UM_CELL_KEYS()+2u*nbRefineTiles()+max(UM_VERTEX_KEYS(),UM_CELL_KEYS()/2u);
- // The nearest-crossing bank holds a tile only within two tiles of a crossing (its reach bit).
- let reach=bins[bank+UM_CELL_KEYS()+4u+2u*nbRefineTiles()+home];
- var nearest=0xffffffffu;if((reach&1u)!=0u){nearest=bins[bank+64u*home+((c.x&3u)|((c.y&3u)<<2u)|((c.z&3u)<<4u))];}
- var low=start-${NARROW_BAND_SURFACE_RADIUS};var high=start+${NARROW_BAND_SURFACE_RADIUS};
- // Interior samples request the actual crossing cell, not their 4h collar.
- // Escaped samples still request their own swept support for reconstruction.
- if(sample.velocity.w<=0.0&&nearest!=0xffffffffu){
-  low=vec3f(umCellCoord(nearest));high=low+1.0;
- }
- // No wall clamps the box: a tile that holds no storage has no key and takes
- // no mark (refine). It is kept in the page table's window, which the keys wrap.
- let lo=clamp(vec3i(floor((low+min(travel,vec3f(0))-p.h.w)/4.0)),vec3i(0),vec3i(${8*UNIFORM_PAGE_WINDOW-1}));
- let hi=clamp(vec3i(floor((high+max(travel,vec3f(0))+p.h.w-1e-5)/4.0)),vec3i(0),vec3i(${8*UNIFORM_PAGE_WINDOW-1}));
- return Box(lo,max(lo,hi),home);
-}
-${particleResidencyTravelWGSL}
-// Include newly seeded and ballistic particles, not just last move's tile
-// marks. Their own velocities need not be bounded by the extended grid.
-fn allocationParticle(sample:Particle){
- let travel=lrParticleTravel(sample.velocity.xyz,sample.before.xyz,nbParticleMode(sample)==1.0,p.dimsDt.w/p.h.xyz);
- let low=travel[0];let high=travel[1];
- // Preserve the particle's two-cell gather/reconstruction support as seeds,
- // exactly as slabSort does. Each stage expands this footprint
- // independently; particle travel must not expand unrelated near-air seeds.
- let lo=vec3i(floor((sample.position.xyz-2.0)/4.0));let hi=vec3i(floor((sample.position.xyz+2.0)/4.0));
- let first=lo>>vec3u(2u);let last=hi>>vec3u(2u);
- for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
-  let region=vec3i(x,y,z);let origin=4*region;let tile=umTileKey(origin);if(!umKeyStored(tile)){continue;}
-  let octant=vec3u(region)&vec3u(1u);let page=8u*(tile>>9u)+octant.x+2u*octant.y+4u*octant.z;
-  let a=vec3u(max(lo-origin,vec3i(0)));let b=vec3u(min(hi-origin,vec3i(3)));
-  let row=((2u<<(b.x-a.x))-1u)<<a.x;var mask=vec2u(0u);
-  for(var cz=a.z;cz<=b.z;cz++){for(var cy=a.y;cy<=b.y;cy++){let bit=4u*cy+16u*cz;mask[bit>>5u]|=row<<(bit&31u);}}
-  // These words only grow during this dispatch. Avoid serializing the many
-  // samples that publish an already-covered region. A stale read can only
-  // cause a redundant atomic; every missing bit or larger bound still joins.
-  for(var k=0u;k<2u;k++){if(mask[k]!=0u&&(atomicLoad(&allocation[8u*page+k])&mask[k])!=mask[k]){atomicOr(&allocation[8u*page+k],mask[k]);}}
-  for(var axis=0u;axis<3u;axis++){
-   if(low[axis]>0.0&&atomicLoad(&allocation[8u*page+2u+axis])<bitcast<u32>(low[axis])){atomicMax(&allocation[8u*page+2u+axis],bitcast<u32>(low[axis]));}
-   if(high[axis]>0.0&&atomicLoad(&allocation[8u*page+5u+axis])<bitcast<u32>(high[axis])){atomicMax(&allocation[8u*page+5u+axis],bitcast<u32>(high[axis]));}
-  }
- }}}
-
-}
-// The slabs' records (count[0], holes dead), then the spill reserve's
-// (count[21], from ${this.capacity-this.spill}): a spilled sample moves next step too.
-@compute @workgroup_size(64) fn refine(@builtin(global_invocation_id) gid:vec3u){
- let slabs=min(count[0],${this.capacity-this.spill}u);let total=slabs+min(count[21],${this.spill}u);
- for(var j=gid.x;j<total;j+=65536u){
-  let i=select(${this.capacity-this.spill}u+j-slabs,j,j<slabs);
-  let sample=samples[i];if(!(sample.position.w>0.0)){continue;}
-  allocationParticle(sample);if(sample.velocity.w < -1.0||nbParticleMode(sample)==1.0){continue;}
-  let box=sweptSurface(sample);let page=vec3i(vec3u(sample.position.xyz)>>vec3u(5u));
-  // A slab's samples are in cell order: a superset sweep of the next one
-  // can mark for both, regardless of their order.
-  if(j+1u<slabs){
-   let other=samples[i+1u];
-   if(other.position.w>0.0&&other.velocity.w>=-1.0&&nbParticleMode(other)!=1.0){let b=sweptSurface(other);if(all(b.low<=box.low)&&all(b.high>=box.high)){continue;}}
-  }
-  for(var z=box.low.z;z<=box.high.z;z++){for(var y=box.low.y;y<=box.high.y;y++){for(var x=box.low.x;x<=box.high.x;x++){
-   // A bit a tile key. A tile of the sample's page shares its block; another asks the table.
-   let t=vec3i(x,y,z);var tile=(box.home&~511u)|umTileLocal(vec3u(t));
-   if(any((t>>vec3u(3u))!=page)){tile=umTileKey(t);if(!umKeyStored(tile)){continue;}}
-   atomicOr(&joins[tile/32u],1u<<(tile%32u));
-  }}}
- }
-}`});
-  const refineErrors=(await refine.getCompilationInfo()).messages.filter(m=>m.type==="error");
-  if(refineErrors.length)throw new Error(refineErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-  this.refinementPipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.refinementLayout]}),compute:{module:refine,entryPoint:"refine"}}).catch(e=>{throw new Error(`Refinement pipeline: ${e.message} ${e.reason}`,{cause:e});});
   if(this.pool){
    // The activity heat and target are the two words a tile key carries from step to step: a claimed block's keys take 0, a tile never active.
    const heat=this.activityWord+2*this.tiles,module=this.device.createShaderModule({label:"Narrow-band FLIP page words",code:/* wgsl */`${uniformPagePoolWGSL(this.pool.layout,0,0)}
@@ -1225,7 +1122,7 @@ fn transferFace(face:UMFace)->f32{
 }
 ${narrowBandTransferPropertiesSource()}
 ${narrowBandFineTransferSource(subgroups,this.apic)}
-${particleBrickDepositWGSL(this.apic)}
+${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords})}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one
 // patch a face, and a face centred in a tile past the reach lies more than
 // two cells from the surface: it keeps its velocity without a gather. The
@@ -1306,7 +1203,7 @@ ${narrowBandSurfaceWGSL}
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
   await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","depthCoarse","redistanceCoarse",
-   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit"].map(async name=>{
+   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine"].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources"].includes(entryPoint)?1:0]!;
    const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
@@ -1348,7 +1245,7 @@ ${narrowBandSurfaceWGSL}
    // cells it reached. Transfer loads canonical face texels directly in both
    // mixed and all-4h modes; nothing samples a cache. The general gather
    // (transfer) serves the layouts the deposit's words do not fit.
-   transfer:this.compile(["transferDeposit","transferProperties","transfer","transferOwners","transferSeams"],"transfer","transfer"),
+   transfer:this.compile(["transferDeposit","transferRefine","transferProperties","transfer","transferOwners","transferSeams"],"transfer","transfer"),
    snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    clearAir:this.compile(["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
@@ -1449,29 +1346,17 @@ ${narrowBandSurfaceWGSL}
  }
  /** Called only for enabled automatic refinement. Explicit Requested/Full
   * layouts keep their authored semantics; particle lifetime is independent. */
- refine(encoder:GPUCommandEncoder,target:{buffer:GPUBuffer;wordOffset:number;words?:number},dt:number,padding=1):void{
+ refine(encoder:GPUCommandEncoder,target:{buffer:GPUBuffer;wordOffset:number;words?:number},padding=1):void{
   if(this.idleNow)return;
-  const lattice=this.ownership.capacity.lattice;
-  const w=this.refinementWords,d=this.address.cells,h=lattice.cellSize_m;
-  w[0]=d[0]!;w[1]=d[1]!;w[2]=d[2]!;w[3]=dt;w[4]=h[0]!;w[5]=h[1]!;w[6]=h[2]!;w[7]=padding;
-  this.device.queue.writeBuffer(this.refinementParams,0,w);
-  // One group per particle bank: the bank alternates every step, the census's target does not.
-  const particles=this.activeParticles,size=4*Math.ceil(this.address.tileKeys/32);
-  let held=this.refinementGroups[this.parity];
-  if(held?.particles!==particles||held.target!==target.buffer||held.wordOffset!==target.wordOffset||held.size!==size){
-   // The marks are a bit a tile key: a plane of any other length is read by another index.
-   if(target.words!==size/4)throw new Error(`The refinement join plane holds ${target.words??"an unstated number of"} words; a bit per tile key needs ${size/4}.`);
-   held=this.refinementGroups[this.parity]={particles,target:target.buffer,wordOffset:target.wordOffset,size,group:this.device.createBindGroup({layout:this.refinementLayout!,entries:[
-    {binding:0,resource:{buffer:particles}},{binding:1,resource:{buffer:this.state}},
-    {binding:2,resource:{buffer:target.buffer,offset:target.wordOffset*4,size}},
-    {binding:3,resource:{buffer:this.refinementParams}},
-    {binding:4,resource:{buffer:this.bins}},{binding:5,resource:{buffer:this.ownership.presentation.buffer}},
-    {binding:6,resource:{buffer:this.particleAllocation}},
-   ]})};
-  }
-  const group=held.group;
-  encoder.clearBuffer(this.particleAllocation);
-  const pass=encoder.beginComputePass(NB_REFINEMENT_PASS);pass.setPipeline(this.refinementPipeline!);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1024);pass.end();
+  // transferRefine wrote the census's prediction from the last step's
+  // samples (the move's accepted grid motion, DEPB's mode, the band's nearest
+  // crossing): copy it to the census's planes, then clear it for the next.
+  this.refinePadding=padding;
+  if(target.words!==this.refineJoinWords)throw new Error(`The refinement join plane holds ${target.words??"an unstated number of"} words; a bit per tile key needs ${this.refineJoinWords}.`);
+  const joins=4*this.refineJoinWords,allocation=this.particleAllocation.size;
+  encoder.copyBufferToBuffer(this.bins,4*this.refineWord,target.buffer,4*target.wordOffset,joins);
+  encoder.copyBufferToBuffer(this.bins,4*this.refineWord+joins,this.particleAllocation,0,allocation);
+  encoder.clearBuffer(this.bins,4*this.refineWord,joins+allocation);
  }
  /** The page initialise's hook, after the pool's commit and before activity:
   * the heat and target of every tile key of the blocks that commit claimed
@@ -1483,7 +1368,7 @@ ${narrowBandSurfaceWGSL}
  /** The head census runs before remapping and advection. Copy its scores
   * into the existing arena, then publish heat in separate neighbour passes. */
  activity(encoder:GPUCommandEncoder,importance:{buffer:GPUBuffer;offset:number},dt:number,fadeSeconds=0.5,sparseSeconds=2):void{
-  const w=this.activityWords;w[0]=2/Math.max(0.05,fadeSeconds);w[1]=sparseSeconds;w[2]=0;w[3]=0;
+  const w=this.activityWords;w[0]=2/Math.max(0.05,fadeSeconds);w[1]=sparseSeconds;w[2]=this.refinePadding;w[3]=0;
   this.device.queue.writeBuffer(this.params,32,w);
   this.writeStep(dt,0,0);
   if(this.updateErrors)encoder.copyBufferToBuffer(this.updateErrors,32*this.tiles,this.bins,4*(this.activityWord+7*this.tiles),16*this.tiles);
@@ -1592,5 +1477,5 @@ ${narrowBandSurfaceWGSL}
    :words[3]===7?`seed candidates exceed their list (${3*this.capacity} cells)`
    :`unknown particle fatal ${words[3]}`}`);
  }
- destroy():void{this.reuseControls.destroy();this.coarseVelocity.destroy();this.refinementParams.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
+ destroy():void{this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
 }
