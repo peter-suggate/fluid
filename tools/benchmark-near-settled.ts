@@ -2,7 +2,7 @@
  * Run under lockf /private/tmp/claude-501/fluid-gpu.lock.
  * SCENARIO=drift STEPS=150 FROM=100 REPEATS=2 OUT=/tmp/paired.json
  * Defaults compare all retained fusions with their separate paths.
- * ARMS='[{"bandSmoothing":"separate"},{"bandSmoothing":"fused"}]'
+ * ARMS='[{"bandCycles":3},{"bandCycles":4}]'
  * To check band noise, use ARMS='[{"bandExit":"strict"},{"bandExit":"returns"}]'.
  * Timings include encoding and GPU completion, exclude all diagnostic reads.
  * A source fingerprint is checked at the end; use a frozen source copy when
@@ -23,7 +23,7 @@ import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-fra
 const scenario=process.env.SCENARIO??"drift",steps=Number(process.env.STEPS??150),from=Number(process.env.FROM??100),repeats=Number(process.env.REPEATS??2);
 assert.ok(["drift","pool-impact","settled"].includes(scenario));
 assert.ok(Number.isInteger(steps)&&Number.isInteger(from)&&from>0&&steps>=from&&Number.isInteger(repeats)&&repeats>0);
-const arms:MethodParamValues[]=JSON.parse(process.env.ARMS??'[{"bandSmoothing":"separate","rootReserve":"parallel","rootCoarse":"tiled","rootTiles":"octant","surfaceSplat":"separate"},{}]');
+const arms:MethodParamValues[]=JSON.parse(process.env.ARMS??'[{"rootReserve":"parallel","rootCoarse":"tiled","rootTiles":"octant","surfaceSplat":"separate"},{}]');
 assert.equal(arms.length,2);
 const out=resolve(process.env.OUT??"/tmp/near-settled-paired.json");
 process.env.WEBGPU_NODE_MODULE??=resolve("node_modules/webgpu/index.js");

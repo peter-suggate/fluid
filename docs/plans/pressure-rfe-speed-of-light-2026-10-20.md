@@ -286,12 +286,60 @@ Notes on the table:
 | Projection and measure | 0.05 ms |
 | **Pressure** | **≈0.41 ms** |
 
-**Design adopted:**
+**Design planned** (before implementation):
 - Smoother: brick halo 1 with shifted alternate partitions, V(3,3) with three sweeps a load.
 - Coarse operators: Galerkin at ℓ1 and below. Prolongation: trilinear. Warm start from the persistent p.
 - Default: early exit at 0.05 s⁻¹, with a cap of 4 cycles (method param).
-- The coarse tail is fused: ℓ3 and below run as one resident kernel; ℓ2 is one dispatch a direction. The fine pDown floor and the projection fold into neighbouring kernels.
+- The coarse tail is fused: ℓ3 and below run as one resident kernel; ℓ2 is one dispatch a direction.
 - Target: ≤ 0.15 ms a cycle, i.e. band pressure ≈ 0.6 ms for 4 cycles, 1.5× of the restated bound.
+
+### 1.7 Built: the h band on the brick arena (UniformPressureArena)
+
+`lib/methods/uniform/uniform-pressure-arena.ts` replaces `UniformPressureBand`. It owns a `UniformBrickArena` (one `fine` list, ℓ1 built from it) and solves the h band's liquid rows in 8³ bricks.
+
+**Design as built** (changes from the plan in bold):
+- **Smoother: a halo-2 box per brick**, three red-black sweeps a load, staged in workgroup memory. Halo 2 removes the brick-face Jacobi loss without the shifted partitions.
+- **Restriction: piecewise constant** (8 children sum to the parent); prolongation trilinear.
+- **Coarse operator: rediscretised, aggregation × 0.5.** Galerkin is rejected: with trilinear prolongation its coarse stencil is 125-point, and staging and registers for it cost more than the cycle it saves.
+- Warm start from the persistent p (warm := base + x after projection); the 4h trilinear carry seeds bricks without one.
+- **Coarse tail**: ℓ2 is one dispatch a direction, from zero. ℓ3 and ℓ4 are page-local sweeps from zero. ℓ5 (≤ 496 pages) is staged in shared memory and runs 40 red-black sweeps in one 256-lane workgroup. A serial ℓ3–ℓ5 tail cost 5.4 ms; the split costs 0.38 ms in all.
+- **Up kernels ping-pong** between two iterate channels: one channel read and written in place double-added the correction at brick seams.
+- Stop rule: the residual history word of the cycle (exact pairwise residual at each restriction). Encoded cycles = min(cap, last wide count + 1).
+- Default stop 0.05 s⁻¹ ("returns"), cap 4 cycles, `bandCycles` (1..8, update:"solver"). "strict" keeps the 1e-4 tolerance.
+- Overflow is fatal: the band's tile capacity (mapped[23] = 1) and the ℓ5 page bound (mapped[23] = 2).
+
+**Memory**: the letters scene with solids allocates 890 MB to the arena (194 blocks, 12416 bricks; fine capacity is every brick). The frame totals 3.03 GB.
+
+**Letters A/B** (1/60 s, 120 steps, old band vs arena):
+
+| | Old band | Arena |
+|---|---|---|
+| Volume drift at f120 | −1.31% | −1.32% |
+| Liquid cells at f120 | 1284241 | 1284224 |
+| yMean / yMax at f120 | 20.12 / 128 | 20.13 / 133 |
+| Occupancy L1 difference | | 0.4% (f60), 1.7% (f120) |
+| Final residual | cap 4, does not reach 0.05 | 0.02–0.10 s⁻¹ at 3–4 cycles |
+
+**Pour** (1/60 s; GPU stage means from the same frames):
+
+| | Old band | Arena |
+|---|---|---|
+| Band solve | 2.91 ms | 6.36 ms |
+| Band list/marks and rows | 1.12 ms | 1.51 ms |
+| Band projection | 0.29 ms | (in the solve) |
+| **Band total** | **4.32 ms** | **7.87 ms** |
+| Pressure per k fine tiles | 1.34 | 1.85 |
+
+Per kernel (arena, ms a frame): pUp0 1.48, pRows 1.43, pSmooth0 1.23, pProject 0.75, pInit 0.49, pDownA 0.41, pRestrict0 0.38, pTail 0.38, pRebase 0.34, pDownB 0.31, pUpA 0.31, pUpB 0.15, pUpT 0.13.
+
+**The target is not met.** A cycle costs about 1 ms, not ≤ 0.15 ms. The arena converges further than the old band, but it is 3.5 ms slower on the pour. Level 0 dominates: pUp0 and pSmooth0 stage a halo-2 box for each brick, and pRows, pInit and pProject run per brick, not per tile.
+
+Next:
+- P2: retire the root solve, its transfers and project, the band velocity copy, the coarse bakes and the triplicated authority classification (≈ 3–4 ms on the pour).
+- Fuse pUp0 with the next cycle's pSmooth0.
+- Stage less of the halo.
+- Run prepare, init and project per tile in 64-lane groups.
+- Bound the fine capacity by the band, not by every brick.
 
 ## 2. RFE: remap, geometric fill, body forces, extension
 

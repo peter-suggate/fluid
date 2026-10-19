@@ -38,7 +38,7 @@ import { usePerformanceInstrumentationStore } from "../lib/core/stores/performan
 import { NarrowBandDispatchProbe } from "./narrow-band-dispatch-probe";
 import { readMixedBuffer, readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
 import { UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_CELLS } from "../lib/methods/uniform/uniform-lattice-address";
-import { UniformPressureBand } from "../lib/methods/uniform/uniform-pressure-band";
+import { UniformPressureArena as UniformPressureBand } from "../lib/methods/uniform/uniform-pressure-arena";
 import type { UniformMixedFrameParameters } from "../lib/methods/uniform/uniform-mixed-frame";
 
 const scenario=process.env.SCENARIO??"settled";

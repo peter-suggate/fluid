@@ -6,7 +6,7 @@ import {uniformMixedHangingBytes} from "./uniform-mixed-velocity-sampling.wgsl";
 import {UNIFORM_DETAIL_POLICY} from "./uniform-detail-policy";
 import {UNIFORM_DETAIL_VIOLATION,type UniformDetailGroup,type UniformDetailStorage} from "./uniform-detail-fields";
 import {UniformPressureSurfaceBand} from "./uniform-pressure-surface-band";
-import {UniformPressureBand} from "./uniform-pressure-band";
+import {UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL,UNIFORM_PRESSURE_ARENA_SCHEDULE,UniformPressureArena} from "./uniform-pressure-arena";
 import {UniformComputeBlit} from "./uniform-compute-blit";
 import {UniformMixedFramePlan} from "./uniform-mixed-frame-plan";
 import {UniformMixedOwnershipTransfer,UniformMixedRemap} from "./uniform-mixed-remap";
@@ -154,12 +154,6 @@ const FRAME_ENCODER:GPUCommandEncoderDescriptor={label:"Uniform owner-driven fra
 const AUTHORITY_WORDS=new Float32Array([0,-1,0,0]);
 /** Frames whose receipts may be unchecked at once: the host's frames-ahead cap. */
 export const UNIFORM_MIXED_RECEIPT_RING=2;
-/** QA only (probes, before they build a solver): the pressure band keeps its
- * rows in a buffer of its own, so a probe that captures and replays the
- * band reads them after the frame. In production they are in the stage
- * scratch, which the closing extension overwrites (UniformMixedFrame.stageScratch). */
-let qaBandRows=false;
-export function setUniformMixedBandRowsRetainedForQA(retained=true):void{qaBandRows=retained;}
 /** Rigid bodies this frame (the solid library reads their GPU state):
  * their cut cells move, so the all-4h record, cut widths and geometry are
  * rebuilt and entered cells displaced at the head. couple, when coupling is
@@ -218,7 +212,7 @@ interface ReceiptSlot{
  readonly accept:()=>UniformMixedFrameReceipt;readonly reject:(error:unknown)=>never;
 }
 /** A checked frame's planner output and work counts; frame -1 holds none. */
-interface LaggedPlan{frame:number;vCycles:number;fullCycles:number;bandTiles:number;bandCycles:number;readonly work:Uint32Array;listed:number;rootListed:number;readonly heat:Uint32Array}
+interface LaggedPlan{frame:number;vCycles:number;fullCycles:number;bandTiles:number;bandBricks:number;bandCycles:number;readonly work:Uint32Array;listed:number;rootListed:number;readonly heat:Uint32Array}
 /** The mixed solve's residual target. Tolerance 0 is the fixed-budget
  * control: no user stopping tolerance, so the solve is done at the
  * hierarchy's absolute accuracy (as the native mgCheckCycleConvergence
@@ -289,8 +283,8 @@ export class UniformMixedFrame {
   rhsGroup:UniformDetailGroup;projectionGroup:UniformDetailGroup;
  };
  /** Two-stage pressure: every pressure level is all-4h and
-  * UniformPressureBand re-solves the h surface band after it. */
- private readonly band:UniformPressureBand;
+  * UniformPressureArena re-solves the h surface band after it. */
+ private readonly band:UniformPressureArena;
  private readonly bandParams:GPUBuffer;
  /** Band tiles of the last accepted advance. */
  bandTiles?:number;
@@ -404,7 +398,7 @@ export class UniformMixedFrame {
   * frame N reuse that frame's buffer, so its receipt is always checked.
   * A ring by frame: frame N's is taken by frame N+UNIFORM_MIXED_RECEIPT_RING's
   * encode, before that frame's own receipt can write the slot. */
- private readonly lagged:readonly LaggedPlan[]=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},()=>({frame:-1,vCycles:0,fullCycles:0,bandTiles:0,bandCycles:0,work:new Uint32Array(UNIFORM_WORK_RECEIPT_WORDS),listed:0,rootListed:0,heat:new Uint32Array(UNIFORM_COLD_FRAME_EVIDENCE_WORDS)}));
+ private readonly lagged:readonly LaggedPlan[]=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},()=>({frame:-1,vCycles:0,fullCycles:0,bandTiles:0,bandBricks:0,bandCycles:0,work:new Uint32Array(UNIFORM_WORK_RECEIPT_WORDS),listed:0,rootListed:0,heat:new Uint32Array(UNIFORM_COLD_FRAME_EVIDENCE_WORDS)}));
  private laggedOf(frame:number):LaggedPlan|undefined{const plan=this.lagged[frame%UNIFORM_MIXED_RECEIPT_RING];return plan&&plan.frame===frame?plan:undefined;}
  private readonly reductions:GPUBuffer;
  private pressureSchedule!:UniformMixedPressureSchedule;
@@ -562,7 +556,7 @@ export class UniformMixedFrame {
    unitHaloHalf:sampler==="texture16"?this.hanging.halfHaloOf(this.hanging.unitVelocity):undefined,extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true,true,true,true,true,this.dynamics,this.freeze);
   this.stageBandTiles=this.bandTilesAt(o.capacity.fineTiles,capacity.liquidBand);
-  this.stageScratch=buffer(qaBandRows?"Uniform mixed stage scratch":"Uniform mixed stage scratch and pressure band rows",this.stageBytesAt(o.capacity.fineTiles,this.stageBandTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
+  this.stageScratch=buffer("Uniform mixed stage scratch",this.stageBytesAt(o.capacity.fineTiles,this.stageBandTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
   // Held mode: quiet regions (UniformRegionHeat) keep their owners' values.
   this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,true,{...this.surfaceWorkControl.revisions,generation:()=>this.surfaceWorkControl.generation});this.authorityGroup=this.bindAuthority();
   // Pressure couples the all-4h owners through the static coarse record.
@@ -601,9 +595,9 @@ export class UniformMixedFrame {
   }
   this.bandParams=uniform("pressure band",64);
   this.surfaceBand=new UniformPressureSurfaceBand(device,o,f.phi);
-  this.band=new UniformPressureBand(device,o,p,{fusedMiddle:this.nearSettled.bandSmoothing!=="separate",phi:{buffer:this.authorityPhi},coarsePhi:root.phi!,authorityParams:this.params.authority,vertexPhi:f.phi,
+  this.band=new UniformPressureArena(device,o,p,{phi:{buffer:this.authorityPhi},coarsePhi:root.phi!,authorityParams:this.params.authority,vertexPhi:f.phi,
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
-   coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,rows:this.bandRows,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined,returns:this.nearSettled.bandExit==="returns"},undefined,solid);
+   coarsePressure:root.pressure,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles},solid);
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
   this.acceptance=new UniformMixedPressureAcceptance(device,p);
   this.acceptanceGroup=this.acceptance.bind({residual:root.residual,state:this.state,params:this.params.acceptance});
@@ -616,11 +610,8 @@ export class UniformMixedFrame {
   // The extension's slots are its prefix: they hold from the tail's
   // extension to the next head's, when no other consumer runs (useSlots).
   return Math.ceil(Math.max(this.extension.slotBufferBytesAt(fineTiles),this.surface.scratchBytes,
-   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n),
-   qaBandRows?0:UniformPressureBand.rowBytes(bandTiles,!!this.solid))/256)*256;
+   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
  }
- /** The band's rows: the stage scratch (QA: undefined, the band's own buffer). */
- private get bandRows():GPUBuffer|undefined{return qaBandRows?undefined:this.stageScratch;}
  /** Every group over the stage scratch (reserveFine binds them again). */
  private bindStage():void{
   // Share taps only when the paired path fits at every possible reservation.
@@ -658,14 +649,13 @@ export class UniformMixedFrame {
  private bandTilesAt(fineTiles:number,liquidBand:boolean):number{
   // Particle spray can put a wet pressure row in every admitted fine tile.
   // The geometric method's half-domain liquid bound does not bound that set.
-  return false?UniformPressureBand.capacityOf(this.ownership.capacity.tiles,fineTiles):Math.max(1,fineTiles);
+  return Math.max(1,fineTiles);
  }
  /** Every buffer the h-tile capacity sizes, at `fineTiles` h tiles and
   * `bandTiles` band tiles: label and bytes. Each is one storage binding. */
  private capacityBuffers(fineTiles:number,bandTiles:number):[string,number][]{
-  const n=this.ownership.capacity.tiles,owners=63*fineTiles+this.ownership.capacity.address.boxTiles,band=this.band.bytesAt(bandTiles);
-  return [[qaBandRows?"stage scratch":"stage scratch and pressure band rows",this.stageBytesAt(fineTiles,bandTiles)],["retained normals and curvature",this.geometry.normalBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
-   ...(qaBandRows?[["pressure band rows",band.rows] as [string,number]]:[]),["pressure band aggregates",band.aggregates],["pressure band iterate",band.iterate],
+  const n=this.ownership.capacity.tiles,owners=63*fineTiles+this.ownership.capacity.address.boxTiles;
+  return [["stage scratch",this.stageBytesAt(fineTiles,bandTiles)],["retained normals and curvature",this.geometry.normalBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
    ["presented pressure phi",4*(this.stageBandWord+uniformStageBandWords(n,bandTiles)+uniformStageGridWords(n))]];
  }
  /** The capacity reserveFine(need) would adopt, or why the device cannot
@@ -733,7 +723,7 @@ export class UniformMixedFrame {
    this.device.queue.submit([e.finish()]);this.device.queue.writeBuffer(next,4*(this.stageGridWord+4),Uint32Array.of(r.bandTiles));
    this.presentation.phi={buffer:next};
   }
-  this.band.resize({phi:{buffer:this.authorityPhi},presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+n},capacity:r.bandTiles,rows:this.bandRows});
+  this.band.resize({phi:{buffer:this.authorityPhi},presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+n},capacity:r.bandTiles});
   for(const b of retired)b.destroy();
   return undefined;
  }
@@ -743,7 +733,7 @@ export class UniformMixedFrame {
  async initialize():Promise<void>{
   const root=this.pressureOwnership;
   this.pressureSchedule=new UniformMixedPressureSchedule(this.device,this.schedule,this.state,
-   {fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureBand.closedWord,acceptance:this.params.acceptance});
+   {fine:root.support,supportWord:9*root.layout.tiles.length+24,status:this.status,band:this.band.index,bandClosedWord:UniformPressureArena.closedWord,acceptance:this.params.acceptance});
   // Every field of the detail storage exists by now: a later one is fatal at the first page initialise.
   const tileWords=new UniformPageTileWords(this.device,this.pagePool,[uniformPageTopology(this.ownership)]);
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
@@ -832,7 +822,7 @@ export class UniformMixedFrame {
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
   projection[3]=dt;projection[4]=density;projection[5]=open;q.writeBuffer(to.projection,0,projection);
   w.acceptance[0]=step;w.acceptance[1]=target;q.writeBuffer(to.acceptance,0,w.acceptance);
-  band[3]=dt;band[4]=density;band[5]=open;band[6]=step;band[8]=Math.min(target,UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
+  band[3]=dt;band[4]=density;band[5]=open;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
   const views=this.layoutViews?(this.relayout?UNIFORM_STAGE_VIEWS.previous|UNIFORM_STAGE_VIEWS.reasons|UNIFORM_STAGE_VIEWS.importance:0)|UNIFORM_STAGE_VIEWS.certificate|UNIFORM_STAGE_VIEWS.band:0;
   q.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
   this.pressureTarget=target;
@@ -924,7 +914,7 @@ export class UniformMixedFrame {
    // A counted edit's build admits none but its own.
    const reserve=relayout&&!edit?UNIFORM_WORK_RELAYOUT_RESERVE:0;
    // The band's tiles are wet h tiles: an edit adds its own at most.
-   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve);this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);this.remap.observeWork(work.listed,reserve,edited?.reach);this.cycles.observeWork(work.rootListed);}
+   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);this.remap.observeWork(work.listed,reserve,edited?.reach);this.cycles.observeWork(work.rootListed);}
    // Only a census certifies residency: a frame without one must not skip a page the last one did.
    if(!kick||relayout){if(!relayout&&this.censused)this.ownership.resetResidency();this.censused=!!relayout;}
    // Only a census asks the pool for the liquid's pages: without one a live pool would advance into pages it never claimed.
@@ -1277,12 +1267,13 @@ export class UniformMixedFrame {
    if(mapped[4]!==0||mapped[5]===0||!Number.isFinite(residual)||residual<0||residual>target){
     throw new Error(`Uniform mixed pressure ${mapped[4]!==0?"rejected a non-improving cycle":"did not converge"}: candidate ${floats[0]}, accepted ${residual}, tolerance ${target}, ${count} cycles; projection withheld${""}`);
    }
+   if(mapped[23]===UniformPressureArena.coarsestOverflow)throw new Error(`Uniform pressure band reaches more than ${UniformPressureArena.coarsestPages} pages at its coarsest level; projection is incomplete`);
    if(mapped[23]!==0)throw new Error(`Uniform pressure band needs ${mapped[22]} tiles, over its capacity; projection is incomplete`);
    const bandTiles=mapped[22]!,bandResidual=floats[24]!;
    this.bandTiles=bandTiles;this.bandResidual=bandResidual;
    // Only an accepted solve plans; a failed one threw above. Frame
    // frame+UNIFORM_MIXED_RECEIPT_RING encodes it, whenever this resolves.
-   if(!kick){const plan=this.lagged[frame%UNIFORM_MIXED_RECEIPT_RING]!;plan.frame=frame;plan.vCycles=mapped[20]!;plan.fullCycles=mapped[21]!;plan.bandTiles=bandTiles;plan.bandCycles=mapped[26]!;plan.work.set(slot.work);plan.listed=mapped[REMAP_WORK_RECEIPT/4]!;plan.rootListed=mapped[ROOT_WORK_RECEIPT/4]!;for(let w=0;w<UNIFORM_COLD_FRAME_HEAT_WORDS;w++)plan.heat[w]=mapped[HEAT_RECEIPT/4+w]!;plan.heat[UNIFORM_COLD_FRAME_HEAT_WORDS]=slot.flip[0]!;}
+   if(!kick){const plan=this.lagged[frame%UNIFORM_MIXED_RECEIPT_RING]!;plan.frame=frame;plan.vCycles=mapped[20]!;plan.fullCycles=mapped[21]!;plan.bandTiles=bandTiles;plan.bandBricks=mapped[25]!;plan.bandCycles=mapped[26]!;plan.work.set(slot.work);plan.listed=mapped[REMAP_WORK_RECEIPT/4]!;plan.rootListed=mapped[ROOT_WORK_RECEIPT/4]!;for(let w=0;w<UNIFORM_COLD_FRAME_HEAT_WORDS;w++)plan.heat[w]=mapped[HEAT_RECEIPT/4+w]!;plan.heat[UNIFORM_COLD_FRAME_HEAT_WORDS]=slot.flip[0]!;}
    const receipt=slot.receipt;
    receipt.cycles=count;receipt.encoded=slot.encoded;receipt.residual=residual;receipt.dustOwners=mapped[13]!+mapped[18]!;receipt.orphanDustOwners=mapped[18]!;
    receipt.bandTiles=bandTiles;receipt.bandCycles=mapped[26]!;receipt.bandResidual=bandResidual;
