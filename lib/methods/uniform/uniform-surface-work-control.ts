@@ -69,6 +69,10 @@ export class UniformSurfaceWorkControl {
   readonly geometry:GPUBuffer;
   readonly allocatedBytes:number;
   readonly framePlan:UniformRegionalFramePlan;
+  /** The 16h surface models and supports for advect's affine and identity
+   * shortcuts. Off by default: on the pour the stage cost 1.25 ms and the
+   * shortcuts made advect 0.6 ms slower, not faster. */
+  surfaceEvidence=false;
   /** Diagnostic full-work control: same scans/launches, no reuse or plane model. */
   enabled=true;
   /** Diagnostic ablation of the sealed-plan geometry setup. */
@@ -609,6 +613,8 @@ if(local<8u){let home=2*upPageOf(block)+vec3i(i32(local&1u),i32((local>>1u)&1u),
       this.encodeRegionalGeometry(pass);pass.end();
       this.solid?.consumeBodyEvidence(encoder);return;
     }
+    // The surface model evidence is off: its words stay zero (no coverage, no valid support), so advect takes its full paths.
+    if(stage==="surface"&&!this.surfaceEvidence)return;
     const bank=stage==="surface"?0:1,buffer=bank===0?this.surface:this.geometry;
     if(stage==="geometry"){encoder.clearBuffer(buffer,0,4*this.regions);encoder.clearBuffer(buffer,4*this.topologyWordOffset,4*this.regions);encoder.clearBuffer(buffer,4*this.mappingWordOffset,4*this.regions);}encoder.clearBuffer(buffer,this.countersOffset,16);
     if(stage==="geometry")encoder.copyBufferToBuffer(this.surface,4*this.liveEpochWordOffset,this.geometry,4*this.geometryLiveWordOffset,4*this.regions);
