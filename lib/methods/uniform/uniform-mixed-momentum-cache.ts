@@ -104,10 +104,16 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
    width=umFace(owner,axis,sign,0u).width;
   }
   let side=4u/width;var value=0.0;
-  // A whole 4h face is its tile's +face anchor: the base block.
-  if(width==4u&&!umFaceLow(anchor,axis)){e[axis]=${slots?"ueSnapshotKnown(anchor,axis,4u)":`${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,anchor,0)[axis]`};continue;}
+  // A whole 4h face is its tile's +face anchor: the base block.${slots?`
+  // A regular tile's slot is its key's: anchor lies in tile near.
+  if(width==4u&&!umFaceLow(anchor,axis)){if(regular&&tile[axis]>=low[axis]){e[axis]=ueSnapshotSlots[UE_COARSE+axis*UE_TILES+key];}else{e[axis]=ueSnapshotKnown(anchor,axis,4u);}continue;}
+  // Every sub-face lies in anchor's tile, so its page, low-wall test and
+  // tile word are the anchor's: an h tile's faces are direct unit slots.
+  var unit=UE_NONE;
+  if(!umFaceLow(anchor,axis)&&umCellPresent(anchor)){let word=umTopology[umTileAt(vec3u(anchor)/4u)];if((word&0x80000000u)!=0u){unit=UE_UNIT+15u*((word&0x3fffffffu)>>2u)+axis*64u;}}`:`
+  if(width==4u&&!umFaceLow(anchor,axis)){e[axis]=${UNIFORM_DETAIL_4H_LOAD}textureLoad(extended,anchor,0)[axis];continue;}`}
   for(var y=0u;y<side;y++){for(var x=0u;x<side;x++){
-   var q=anchor;q[u]+=i32(x*width);q[v]+=i32(y*width);value+=umCacheExtended(q,axis);
+   var q=anchor;q[u]+=i32(x*width);q[v]+=i32(y*width);${slots?"if(unit!=UE_NONE){let l=vec3u(q)%4u;value+=ueSnapshotSlots[unit+l.x+4u*(l.y+4u*l.z)];}else{value+=umCacheExtended(q,axis);}":"value+=umCacheExtended(q,axis);"}
   }}e[axis]=value/f32(side*side);
  }
  textureStore(coarseExtended,vec3i(gid),e);
