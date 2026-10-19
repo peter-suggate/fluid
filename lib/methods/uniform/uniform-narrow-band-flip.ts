@@ -282,6 +282,10 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private stageTaps?:{builder:UniformMixedHangingTaps;group:UniformDetailGroup;unit:GPUTexture};
  /** The fast trace's linear filter (particleSampler texture32). */
  private filter?:GPUSampler;
+ /** update ran since the last move: its before.xyz is the next trace's k1
+  * (parameter word 13). */
+ private k1Held=false;
+ private readonly k1Word=new Uint32Array(1);
  private initPipeline?:GPUComputePipeline;
  private initGroup?:GPUBindGroup;
  /** pool: the page pool whose commits claim this lattice's blocks (its state buffer and layout); without one no block is ever claimed. */
@@ -638,9 +642,12 @@ ${uniformMixedSourceWGSL(16)}
 // else marks the particle slow: it is listed, untouched, for the general
 // launch (advectParticlesDeferred), which advects it from the same record.
 override nbFastSample:bool=false;
+// update's samples (nbHaloFirst) take the same halo interpolant where a fine
+// tile's halo holds it, and umSampleVelocity elsewhere: one value either way.
+override nbHaloFirst:bool=false;
 var<private> nbSlow:bool=false;
 fn sampleVelocity(p:vec3f)->vec3f{
- ${unitTaps&&!slots?`if(nbFastSample){
+ ${unitTaps&&!slots?`if(nbFastSample||nbHaloFirst){
   let s=umSampleTile(p);
   if(!umRegularFine&&umCachedFineTile(s.key)){
    umUnitHome=umUnitHaloHome(s);
@@ -659,7 +666,7 @@ ${this.particleSampler==="texture32"?`     // The same eight taps, filtered by t
     return v;
    }
   }
-  nbSlow=true;return vec3f(0.0);
+  if(nbFastSample){nbSlow=true;return vec3f(0.0);}
  }`:""}
  return umSampleVelocity(p);
 }
@@ -836,8 +843,11 @@ fn nbAdvect(record:Particle)->NbMoved{
   let h=params.hDt.xyz;let dt=params.hDt.w;
   var end=q+dt*p.velocity.xyz/h;
   if(!ballistic){
-   var x=q;var k1=vec3f(0.0);
-   for(var stage=0u;stage<3u;stage++){
+   // k1 is update's sample of this field at q (before.xyz) when the host
+   // holds it (params.live.y: update ran since the last move).
+   var x=q;var k1=vec3f(0.0);var first=0u;
+   if(params.live.y!=0u){k1=p.before.xyz/h;x=q+dt*k1/3.0;first=1u;}
+   for(var stage=first;stage<3u;stage++){
     nbHullInclude(x);
     let k=sampleVelocity(x)/h;
     // Nothing of this sample is stored yet: the general launch redoes it.
@@ -1293,7 +1303,7 @@ ${narrowBandSurfaceWGSL}
   await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","retireParticles","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),this.particleDeposit==="tiled"?"transferDeposit":"transfer@fit"].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(entryPoint==="update"?{nbHaloFirst:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.slotSnapshotResources){
@@ -1387,6 +1397,7 @@ ${narrowBandSurfaceWGSL}
   const b=this.compiled;
   this.bandCurrent=false;this.crossingCanPlan=false;this.crossingIsPlanned=false;this.framePlan?.invalidateDomain(this);
   this.writeStep(dt,+openTop,gravity);
+  this.k1Word[0]=+this.k1Held;this.k1Held=false;this.device.queue.writeBuffer(this.params,52,this.k1Word);
   // Words 4 to 10 are the step's (10: advect's slow samples); word 11, the arrival fatal's page, stays.
   encoder.clearBuffer(this.state,16,28);
   this.bootstrap(encoder);
@@ -1555,7 +1566,7 @@ ${narrowBandSurfaceWGSL}
   if(!this.bandCurrent){this.arenaSearch(encoder);this.run(encoder,b.arenaMetric);}this.bandCurrent=false;
   this.syncTiers(encoder);const pass=encoder.beginComputePass(NB_UPDATE_PASS);
   this.cache.encode(encoder,this.cacheGroups.update!,pass);this.encodeStageTaps(encoder,pass);
-  this.run(encoder,b.update,pass);pass.end();
+  this.run(encoder,b.update,pass);pass.end();this.k1Held=true;
   // Retirement dead-marks in place; the bins keep the counts for the seeding.
   this.run(encoder,this.quiet?b.retireKeep:b.retireSeed);
  }
