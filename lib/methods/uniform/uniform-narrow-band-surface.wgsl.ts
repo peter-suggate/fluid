@@ -138,12 +138,14 @@ export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiled
  * The expired scatter cursors fit six words per fine cell at sparse layouts:
  * a face's theta and its samples' own heat over the collar's (nbTheta and
  * nbSurfaceTheta, sixteen bits each), then its expected weight. */
-export function narrowBandTransferPropertiesSource(subgroups:boolean):string{return /* wgsl */`
+export function narrowBandTransferPropertiesSource(subgroups:boolean,tiled=false):string{return /* wgsl */`
 // transfer is compiled twice: the fit twin (1) runs only while the
 // properties fit, the general pipeline (2) launched beside it only while
 // they do not, so each folds the other's path. 0: one pipeline, tested here.
 override nbTransferTwin:u32=0u;
-fn nbTransferFits()->bool{return 416u*umCounts.x<=UM_CELL_KEYS;}
+// Tiled deposit (particleDeposit): six accumulator words a fine cell; the
+// gather: six property words a fine cell, then its pair list.
+fn nbTransferFits()->bool{return ${tiled?384:416}u*umCounts.x<=UM_CELL_KEYS;}
 fn nbTransferPropertiesFit()->bool{return select(select(nbTransferFits(),true,nbTransferTwin==1u),false,nbTransferTwin==2u);}
 var<workgroup> nbTransferDepth:array<f32,125>;
 var<workgroup> nbTransferActive:array<u32,64>;
@@ -188,7 +190,23 @@ fn nbTransferTheta(local:vec3f)->vec2f{
   needed=needed||near.x>0.0;
   properties[axis]=vec3f(near,expected);
  }
- nbTransferActive[lane]=u32(needed);workgroupBarrier();
+ ${tiled?/* wgsl */`// The tiled deposit left this cell's momentum and weight in its words.
+ {
+  let original=textureLoad(velocity,vec3i(cell),0);
+  if(!needed){textureStore(output,vec3i(cell),original);return;}
+  // A frozen cell keeps its texel; a thawing region's deposits take its term.
+  if(umFrozenCell(vec3i(cell))){return;}
+  let thaw=nbThaw(cell);var value=original.xyz;
+  for(var axis=0u;axis<3u;axis++){
+   let mass=f32(atomicLoad(&bins[at+2u*axis+1u]))/PB_WEIGHT;
+   if(mass<1e-5){continue;}
+   let momentum=f32(bitcast<i32>(atomicLoad(&bins[at+2u*axis])))/PB_MOMENTUM;
+   let near=properties[axis];let transition=near.x*mix(min(1.0,mass/near.z),1.0,near.y);
+   value[axis]=mix(original[axis],momentum/mass+thaw[axis],transition);
+  }
+  textureStore(output,vec3i(cell),vec4f(value,original.w));
+ }
+ `:/* wgsl */`nbTransferActive[lane]=u32(needed);workgroupBarrier();
  let neededPair=(nbTransferActive[lane&~1u]|nbTransferActive[lane|1u])!=0u;
  let emit=neededPair&&lane%2u==0u;
  ${subgroups?`// Reserve each subgroup's tile-local pairs together, retaining locality
@@ -198,7 +216,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  if(emit){atomicStore(&bins[UM_CELL_KEYS+384u*umCounts.x+first+rank],32u*group.x+lane/2u);}`:`
  if(emit){let slot=atomicAdd(&state[9],1u);atomicStore(&bins[UM_CELL_KEYS+384u*umCounts.x+slot],32u*group.x+lane/2u);}`}
  if(!neededPair){textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
- for(var axis=0u;axis<3u;axis++){atomicStore(&bins[at+2u*axis],pack2x16unorm(properties[axis].xy));atomicStore(&bins[at+2u*axis+1u],bitcast<u32>(properties[axis].z));}
+ for(var axis=0u;axis<3u;axis++){atomicStore(&bins[at+2u*axis],pack2x16unorm(properties[axis].xy));atomicStore(&bins[at+2u*axis+1u],bitcast<u32>(properties[axis].z));}`}
 }
 `;}
 /** Adjacent fine cells share their particle reads. Each sixteen-lane team

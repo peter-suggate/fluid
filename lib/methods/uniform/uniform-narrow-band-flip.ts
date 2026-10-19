@@ -17,6 +17,7 @@ import { narrowBandTerrainContactWGSL, narrowBandRigidContactWGSL } from "./unif
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { NARROW_BAND_PARTICLE_GRID, NARROW_BAND_QUIET_PARTICLE_GRID, UniformNarrowBandOrder } from "./uniform-narrow-band-order";
 import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
+import { particleBrickDepositWGSL } from "./uniform-particle-brick.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { UNIFORM_DETAIL_H_STORE, UNIFORM_DETAIL_MERGED_SLOTS, uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformMixedTopologyWGSL, uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
@@ -267,7 +268,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private initPipeline?:GPUComputePipeline;
  private initGroup?:GPUBindGroup;
  /** pool: the page pool whose commits claim this lattice's blocks (its state buffer and layout); without one no block is ever claimed. */
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly traceSubsteps:NarrowBandTraceSubsteps="travel",readonly redistanceSearch:"shared"|"fresh"="fresh"){
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly traceSubsteps:NarrowBandTraceSubsteps="travel",readonly redistanceSearch:"shared"|"fresh"="fresh",readonly particleDeposit:"tiled"|"gathered"="tiled"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
   this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;
@@ -1206,6 +1207,8 @@ fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-
 @compute @workgroup_size(64) fn classify(@builtin(global_invocation_id) gid:vec3u){
  var outside=0.0;var counts=vec3u(0);let census=params.settings.w!=0.0;
  if(gid.x==0u){atomicStore(&bins[NB_BAND+3u],0u);atomicStore(&state[9],0u);}
+ ${this.particleDeposit==="tiled"?`// The tiled deposit's fine accumulators (transferDeposit).
+ if(nbTransferFits()){for(var j=gid.x;j<384u*umCounts.x;j+=65536u){atomicStore(&bins[UM_CELL_KEYS+j],0u);}}`:""}
  for(var i=gid.x;i<min(atomicLoad(&state[1]),arrayLength(&particles));i+=65536u){
   let q=particles[i].position.xyz;let supported=gridSupported(q);counts.y+=u32(!supported);
   if(census){let d=bandPhi(q);outside=max(outside,d);counts+=vec3u(u32(d>0.5),0u,u32(particleDepth(q)<-4.0));}
@@ -1236,8 +1239,9 @@ fn transferFace(face:UMFace)->f32{
  }}}
  if(total<1e-5){return original;}return mix(original,momentum/total+umThawFaceTerm(face.anchor,face.axis,face.width),blend*nbTransferBlend(q,depth,total));
 }
-${narrowBandTransferPropertiesSource(subgroups)}
+${narrowBandTransferPropertiesSource(subgroups,this.particleDeposit==="tiled")}
 ${narrowBandFineTransferSource(subgroups,this.apic)}
+${this.particleDeposit==="tiled"?particleBrickDepositWGSL(this.apic):""}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one
 // patch a face, and a face centred in a tile past the reach lies more than
 // two cells from the surface: it keeps its velocity without a gather. The
@@ -1348,7 +1352,7 @@ ${narrowBandSurfaceWGSL}
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@noplanes","depthSeeds@noplanes","depthReuseSnapshot@noplanes","depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`),...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transfer@fit"].map(async name=>{
+  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","markParticleTiles","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","update","couple","coupleFine","commitCount","resampleCount","resamplePrefix","resample","diagnoseBefore","buildDistance","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@noplanes","depthSeeds@noplanes","depthReuseSnapshot@noplanes","depthGeometry","depthCoarse","redistanceFine","redistanceCoarse","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_H_TWIN_ENTRIES.map(entry=>`${entry}@h`),...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),this.particleDeposit==="tiled"?"transferDeposit":"transfer@fit"].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","update","seed","seedSources"].includes(entryPoint)?1:0]!;
    const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(entryPoint==="depthCoarse"?{nbCachedGeometry:0}:{}),...(name.endsWith("@noplanes")?{nbMetricPlanes:0,...(entryPoint==="depthReuseSnapshot"?{}:{nbColdCurrentPhi:1})}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)||name.includes("@h")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
@@ -1373,7 +1377,8 @@ ${narrowBandSurfaceWGSL}
    reconstructCoarse:this.compile(["surfaceClear",...(this.fusedSurface?["surfaceSplatOccupied"]:["surfaceCells","surfaceSplat"]),"couple"],"reconstruct","surface reconstruction"),
    // Classification reads phase and phi. Transfer loads canonical face
    // texels directly in both mixed and all-4h modes; neither samples a cache.
-   transfer:this.compile(["classify","transferProperties","transfer@fit","transfer","transferOwners","transferSeams"],"transfer","transfer"),
+   // The tiled deposit leaves the gather pipeline the layouts it does not fit.
+   transfer:this.compile(["classify",...(this.particleDeposit==="tiled"?["transferDeposit","transferProperties"]:["transferProperties","transfer@fit"]),"transfer","transferOwners","transferSeams"],"transfer","transfer"),
    snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    clearAir:this.compile(["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
