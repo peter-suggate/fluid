@@ -126,6 +126,11 @@ export class UniformBrickArena{
  }
  /** The byte range each step clears before its markers: the counts, the marks and the level 1 table. */
  stepClear(base:number):{offset:number;size:number}{return {offset:4*(base+UBA_COUNTS),size:4*(this.layout.table-UBA_COUNTS)};}
+ /** stepClear in two parts, for a table whose live list is read between
+  * the markers and the build: the marks and the level 1 table (before the
+  * markers), and the counts (just before the build). */
+ markClear(base:number):{offset:number;size:number}{return {offset:4*(base+UBA_HEADER),size:4*(this.layout.table-UBA_HEADER)};}
+ countClear(base:number):{offset:number;size:number}{return {offset:4*(base+UBA_COUNTS),size:4*(UBA_HEADER-UBA_COUNTS)};}
  /** The byte offset of the fatal word (0, or UBA_SEAM | the brick id refused a slot). */
  fatalOffset(base:number):number{return 4*base;}
 

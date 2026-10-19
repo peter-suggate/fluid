@@ -546,8 +546,10 @@ export class UniformMixedFrame {
   this.narrowBandFlip.attachFramePlan(this.surfaceWorkControl.framePlan);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
   this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
+  // The core takes the surface arena's crossing bricks from NB-FLIP's brick
+  // table.
+  if(UNIFORM_CORE_VELOCITY)this.coreVelocity=new UniformCoreVelocity(device,o,this.narrowBandFlip.brickTable);
   this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps);
-  if(UNIFORM_CORE_VELOCITY)this.coreVelocity=new UniformCoreVelocity(device,o);
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,this.surfaceWorkControl);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);

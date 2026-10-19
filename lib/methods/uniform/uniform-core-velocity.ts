@@ -26,12 +26,16 @@
  *    the move: u at every live slot's faces and planes (dense copies of the
  *    page's unit halo), the tile words, and the 4h store (the cache's
  *    blocks).
- * 2. encodeClear: the marks and counts (the slot table and records stand,
- *    so the move's G2P still resolves through them).
+ * 2. encodeClear: the marks (the slot table, records, live list and counts
+ *    stand, so the move's G2P and the surface advect still resolve through
+ *    them; the counts are cleared just before the build).
  * 3. The markers: NB-FLIP marks every brick with a current slab and every
  *    spill record's brick UBA_PARTICLES_CORE after SORT (markWGSL).
- * 4. encodeUpdate, after the phi stage: the table build (particle cores
- *    dilate into their one-brick ring), then the leaving slots released.
+ * 4. encodeUpdate, after the phi stage: the surface arena's crossing bricks
+ *    (NB-FLIP's brick table marks, UB_ARENA_CORE, of this step's
+ *    redistance) marked UBA_ARENA_CORE, the table build (cores dilate into
+ *    their one-brick ring), then the leaving slots released. The next
+ *    step's consumers (the move's G2P) find those slots in that table.
  * 5. The snapshot writes uStar (velocityWGSL's ucStore, ucStorePlane and
  *    ucStoreCoarse, star = true).
  * Both fields then stand until the next move's G2P reads them (ucPair).
@@ -43,12 +47,15 @@ import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, unifo
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformUnitHaloWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
+import { UNIFORM_BRICK_CLASS } from "./uniform-brick-table";
 import { UNIFORM_COARSE_CACHE_EDGE, UNIFORM_COARSE_CACHE_REACH, uniformCoarseCacheWGSL } from "./uniform-coarse-velocity-cache";
 
 const CORE_FILL_PASS:GPUComputePassDescriptor={label:"Core velocity fill"},CORE_TABLE_PASS:GPUComputePassDescriptor={label:"Core velocity table"};
 /** Workgroups of a grid-stride launch. */
 const CORE_GRID=1024;
 
+/** NB-FLIP's brick table (uniform-brick-table.ts): its buffer and first word. */
+export interface UniformCoreSurfaceMarks{readonly buffer:GPUBuffer;readonly word:number}
 export interface UniformCoreVelocityFields{velocity:GPUTexture;coarseVelocity:GPUTexture;negative:GPUBuffer;unitVelocity:GPUTexture;unitHalo:GPUTexture}
 
 export class UniformCoreVelocity{
@@ -67,8 +74,11 @@ export class UniformCoreVelocity{
  private readonly slotGroups:number;
  private readonly recordGroups:number;
  private readonly coarseGroups:number;
- /** capacity: level 0 slots (default every brick of the lattice: no overflow). */
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,capacity?:number){
+ private readonly markGroups:number;
+ /** surfaceMarks: the surface arena's brick marks, copied into the table
+  * each step (encodeUpdate). capacity: level 0 slots (default every brick
+  * of the lattice: no overflow). */
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly surfaceMarks:UniformCoreSurfaceMarks,capacity?:number){
   const blocks=ownership.capacity.address.blocks;
   this.arena=new UniformBrickArena({blocks,fineCapacity:capacity===undefined?undefined:Math.min(capacity,64*blocks),lists:[],channels:[
    {name:"u",levels:[0],layout:"face"},{name:"ustar",levels:[0],layout:"face"},{name:"uplane",levels:[0],layout:"cell"},
@@ -84,10 +94,12 @@ export class UniformCoreVelocity{
   this.slotGroups=Math.min(CORE_GRID,Math.ceil(Math.max(cap,blocks)/64));
   this.recordGroups=Math.min(CORE_GRID,Math.ceil(32*(2*cap+blocks)/64));
   this.coarseGroups=Math.min(CORE_GRID,Math.ceil(UNIFORM_COARSE_CACHE_EDGE**3*blocks/64));
+  this.markGroups=this.brickGroups;
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[2,3,11,14].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    {binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+   {binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]},[14]);
  }
  /** Bytes of the buffer, for a consumer's binding (offset 0, whole buffer). */
@@ -221,14 +233,22 @@ ${writable?`fn ucStoreCoarse(block:u32,t:vec3i,axis:u32,star:bool,value:f32){${n
  bind(f:UniformCoreVelocityFields):UniformDetailGroup{
   return uniformDetailGroup(this.device,{layout:this.resources,entries:[
    {binding:2,resource:f.velocity},{binding:3,resource:f.coarseVelocity},{binding:11,resource:f.unitVelocity},{binding:14,resource:f.unitHalo},
-   {binding:5,resource:{buffer:f.negative}},{binding:16,resource:{buffer:this.buffer}},
+   {binding:5,resource:{buffer:f.negative}},{binding:16,resource:{buffer:this.buffer}},{binding:17,resource:{buffer:this.surfaceMarks.buffer}},
   ]});
  }
  async initialize():Promise<void>{
   const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0);
   const tableModule=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Core velocity table",code:topology+/* wgsl */`
 @group(1) @binding(16) var<storage,read_write> ucTable:array<atomic<u32>>;
+@group(1) @binding(17) var<storage,read> ucSurfaceMarks:array<u32>;
 ${this.arena.tableWGSL("ucTable","0u")}
+// A thread a brick: the surface arena's crossing bricks (the brick table's
+// marks, UB_ARENA_CORE) are arena cores here too.
+@compute @workgroup_size(64) fn ucMarkSurface(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var id=gid.x;id<UBA_BRICKS;id+=64u*groups.x){
+  if((ucSurfaceMarks[${this.surfaceMarks.word+4}u+id]&${UNIFORM_BRICK_CLASS.arenaCore}u)!=0u){ubaMark(id,${UNIFORM_ARENA_CLASS.arenaCore}u);}
+ }
+}
 `});
   const fillModule=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Core velocity fill",code:topology+/* wgsl */`
 @group(1) @binding(3) var coarseVelocity:texture_3d<f32>;
@@ -298,7 +318,7 @@ var<workgroup> ucFillNeed:array<u32,27>;
   const tableLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   const fillLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   const constants={umDispatchX:this.ownership.dispatchX};
-  const entries=[...UNIFORM_ARENA_TABLE_ENTRIES.filter(entry=>entry!=="ubaLevel1"),UNIFORM_ARENA_RELEASE_ENTRY];
+  const entries=["ucMarkSurface",...UNIFORM_ARENA_TABLE_ENTRIES.filter(entry=>entry!=="ubaLevel1"),UNIFORM_ARENA_RELEASE_ENTRY];
   const table=await Promise.all(entries.map(entryPoint=>uniformDetailPipeline(this.device,this.ownership,{layout:tableLayout,compute:{module:tableModule,entryPoint,constants}})));
   this.table=new Map(entries.map((entry,i)=>[entry,table[i]!]));
   [this.fill,this.fillCoarse]=await Promise.all(["ucFill","ucFillCoarse"].map(entryPoint=>uniformDetailPipeline(this.device,this.ownership,{layout:fillLayout,compute:{module:fillModule,entryPoint,constants}})));
@@ -311,15 +331,17 @@ var<workgroup> ucFillNeed:array<u32,27>;
   pass.setPipeline(this.fill);pass.dispatchWorkgroups(Math.min(CORE_GRID,this.arena.fineCapacity));
   pass.setPipeline(this.fillCoarse!);pass.dispatchWorkgroups(this.coarseGroups);pass.end();
  }
- /** The marks and counts, before the step's markers. */
- encodeClear(encoder:GPUCommandEncoder):void{const range=this.arena.stepClear(0);encoder.clearBuffer(this.buffer,range.offset,range.size);}
- /** The table build after the markers, then the leaving slots released. */
+ /** The marks, before the step's markers. The counts stand until the
+  * build (encodeUpdate): the live list serves the step's readers. */
+ encodeClear(encoder:GPUCommandEncoder):void{const range=this.arena.markClear(0);encoder.clearBuffer(this.buffer,range.offset,range.size);}
+ /** The surface marks, the table build after the markers, then the leaving slots released. */
  encodeUpdate(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
   const table=this.table;if(!table)throw new Error("Core velocity is not initialized");
+  const counts=this.arena.countClear(0);encoder.clearBuffer(this.buffer,counts.offset,counts.size);
   const pass=encoder.beginComputePass(CORE_TABLE_PASS);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);
   const run=(entry:string,groups:number)=>{pass.setPipeline(table.get(entry)!);pass.dispatchWorkgroups(groups);};
-  run("ubaUpdate",this.brickGroups);run("ubaLists",this.slotGroups);run("ubaRecord",this.recordGroups);run(UNIFORM_ARENA_RELEASE_ENTRY,this.slotGroups);
+  run("ucMarkSurface",this.markGroups);run("ubaUpdate",this.brickGroups);run("ubaLists",this.slotGroups);run("ubaRecord",this.recordGroups);run(UNIFORM_ARENA_RELEASE_ENTRY,this.slotGroups);
   pass.end();
  }
  destroy():void{this.buffer.destroy();}

@@ -265,6 +265,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get airGateWord():number{return this.activityWord+(NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_GATE_PLANE)*this.tiles;}
  /** The bins, which hold the gate plane at airGateWord. */
  get airGateBuffer():GPUBuffer{return this.bins;}
+ /** The brick table (uniform-brick-table.ts) in the bins: its first word. */
+ get brickTable():{readonly buffer:GPUBuffer;readonly word:number}{return {buffer:this.bins,word:this.brickWord};}
  /** Existing particle-bin coverage, for opt-in spatial cost sampling. */
  get performanceTileCounts():GPUBufferBinding{return {buffer:this.bins,offset:8*this.cells,size:4*this.tiles};}
  /** The particle activity heat plane (f32 a tile key, NB_ACTIVITY_HEAT) in airGateBuffer: the region heat's particle evidence. */
