@@ -98,7 +98,7 @@ These are the target set. Each kernel is one workgroup per brick on a direct gri
 | Kernel | Replaces (part2h ms) | Projected ms | Limiter |
 |---|---|---|---|
 | **aTable**: three passes (update, records, class lists) | work control 1.21, lists 0.27, wallReach and owners 0.08: **1.56** | 0.03 | Pass floor; table reads per brick. |
-| **aEnter**: gather entering bricks | arenaGather ×2: **0.42** | 0.02 | Latency: few bricks (churn estimated at 150–300). |
+| **aEnter**: gather entering bricks | arenaGather ×2: **0.42** | 0.02 | Latency: few bricks (churn measured at 29–73 a step, §2.3). |
 | **sAdvect**: stage u faces (halo 1), trace feet into registers; restage the old φ bank (halo 3) into the same memory, then cubic, wall/solid rules and source; write the new φ bank. A foot leaving the staged box goes on a compact list. | all advect: **6.47** | 0.25 | Staging: 4 channel visits over ≈1800 surface bricks. Measured 0.118 ms per channel at 3240 bricks (scalar), so 0.26 at most and ≈0.13 with vec4 core rows. |
 | **sLong**: lean trace over the long-foot list, sampling through records | (part of deferred) | 0.02 | Global gathers. The list is a few percent of vertices. Never a step limit. |
 | **sSplat**: per particle brick (the brick-keyed particle slabs): spheres into φ_p in workgroup memory (halo 1) with workgroup atomic-min, then the union into the new φ bank. The refinement prediction rides on the same particle read. | clear, splat, coupleFine, couple, refinement: **3.18** | 0.20 | Workgroup atomics and slab reads. |
@@ -177,15 +177,33 @@ A brick keeps its slot and channel values while it stays marked. The paged h sto
 
 | | Per step |
 |---|---|
-| Churn gather: entering bricks, estimated 150–300 of 3240, all channels they carry | ≈0.01–0.02 ms |
-| Churn scatter: leaving bricks, the same count | ≈0.01–0.02 ms |
+| Churn gather: entering bricks, measured 29–73 of 3100–3340 (M1), all channels they carry | ≈0.005 ms plus the pass floor |
+| Churn scatter: leaving bricks, measured 16–49 | ≈0.005 ms plus the pass floor |
 | Slot allocation (§3.2): a free stack instead of a rebuild | +1 pass, ≈5 µs |
 | Write-through, transition only: changed bricks of channels still read from the paged store | ≈0.12 ms per channel (the full-scatter rate, since skipping values saves nothing) |
 
 **Churn estimate.**
 - The surface moves less than a cell per step on the pour at 1/60 s, so the arena's shell shifts at most ⅛ brick a step.
-- Entering bricks ≈ ring bricks × ⅛ ≈ 150–300.
-- This is the core's first measured number (§4, M1). If churn were 100%, persistence would degrade to step-authoritative and never cost more.
+- Entering bricks ≈ ring bricks × ⅛ ≈ 150–300 was the estimate.
+- **Measured (M1, 2026-10-20).** The pour, frames 94–104 at 1/60 s, reading the brick table after each step:
+
+| Frame | Slots | Core | Enter | Leave | Core enter | Core leave |
+|---|---|---|---|---|---|---|
+| 95 | 3107 | 1745 | 34 | 48 | 42 | 33 |
+| 96 | 3150 | 1767 | 66 | 23 | 49 | 27 |
+| 97 | 3188 | 1797 | 57 | 19 | 56 | 26 |
+| 98 | 3215 | 1825 | 44 | 17 | 47 | 19 |
+| 99 | 3243 | 1851 | 48 | 20 | 47 | 21 |
+| 100 | 3276 | 1887 | 73 | 40 | 67 | 31 |
+| 101 | 3309 | 1897 | 52 | 19 | 39 | 29 |
+| 102 | 3317 | 1913 | 36 | 28 | 45 | 29 |
+| 103 | 3335 | 1920 | 34 | 16 | 37 | 30 |
+| 104 | 3315 | 1915 | 29 | 49 | 37 | 42 |
+
+  - Churn is 1.5% entering and 0.9% leaving a step: 47 and 28 bricks on average, 3–6× below the estimate.
+  - So a persistent arena moves about 2% of the bytes a step-authoritative one would.
+  - The pour is still filling, so the slot count grows by about 20 a step. Capacity is set from the run's peak, which is fail-fast (§3.2).
+  - If churn were 100%, persistence would degrade to step-authoritative and never cost more.
 
 **Correctness requirement.** Every writer of a persistent channel must write the arena, not the paged store, while the brick is live.
 - Transition: a stage still on the paged store marks the bricks it wrote dirty. aTable then re-gathers them, which goes through the churn path.
@@ -478,12 +496,28 @@ Agreed with the pressure agent, 2026-10-20, from its CPU twin of the frame-94 ba
 4. aEnter, aLeave, aMirror.
 
 **Measurements, at the fixed frame-94 state with the replay harness:**
-- **M1:** live counts per class (fine, surface, particles) and churn per step: enter/leave over 10 steps. This sets capacity and the persistence gain.
+- **M1:** live counts per class (fine, surface, particles) and churn per step: enter/leave over 10 steps. This sets capacity and the persistence gain. *Done (§2.3): 47 in and 28 out a step, of ≈3200.*
 - **M2:** staging rate on the real arena: one channel at halo 1 and halo 3, against the `brick_halo` bench.
 - **M3:** aMirror for φ against today's W.
 
 **Surface switch-overs.** Each is one short edit, then the letters A/B (`lp.mts`) and the pour, then a commit:
 1. **Redistance on core channels.** X, nearest, R and far read the φ vertex channel through the staging helper instead of 9³ windows. The store becomes aMirror. Gather becomes the step's aEnter with every brick entering, since this is not yet persistent. Expected: W 0.86 → ≈0.15; G about the same.
+   - **Revised after the W knock-outs (2026-10-20): expect about zero.** W's cost is not the layout. It is the paged store's write rules, which decide which redistanced values are physics: the writer tile, COLD regions held, interface magnitudes kept, capacity. At frame 94 (≈3100 slots, replay minimums, 0.065 ms timer steps):
+
+| Arm | ms |
+|---|---|
+| arenaStore | 0.79–0.85 |
+| no capacity | 0.72 |
+| no capacity, writer, cold or interface | 0.33 |
+| staging only | 0.20 |
+| no wall-page authority walk | 0.79 |
+| also no near-cell walk at x/y/z = 8 | 0.72 |
+| regular fast path: owned-high writer when all 64 tiles from one below are stored, h, regular and not COLD | 0.85 |
+
+   - The fast path is exact. With every eligible vertex forced to a sentinel, the plain and fast arms store the identical 247,144 vertices. It is still null, because few bricks have a fully stored, regular neighbourhood: the core holds ≈3.3 fine tiles of a brick's 8.
+   - aMirror keeps all of those rules while paged φ stays authoritative. So it costs what W costs, and G, X, nearest and R read the same bytes through staging as through windows.
+   - W's rules go away only once φ is persistent (switch-over 2): then the arena is the authority, and the store is the write-through scatter of changed bricks, about 0.12 ms.
+   - So switch-over 1 is infrastructure with no expected gain. It is worth landing together with 2, not alone.
 2. **Persistence for the redistance's φ** once advect writes the arena. G → churn.
 3. **sAdvect, sSplat** (with the momentum agent's u channel), then work control → aTable, and phi resolve deleted.
 
