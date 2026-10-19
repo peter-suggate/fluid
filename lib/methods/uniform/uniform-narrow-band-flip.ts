@@ -717,6 +717,10 @@ struct NbMoved{p:Particle,status:u32}
 //   stage is G2P's grid sample.
 fn nbAdvect(record:Particle,i:u32)->NbMoved{
   nbSlow=false;var p=record;var q=p.position.xyz-nbHeldShift();
+  // A seed's first move (its age nbSeedFirst): age 0, and G2P gives
+  // it the grid's velocity, as the tail seeds sampled the step's final field.
+  let first=bitcast<u32>(nbParticleAge(record))==NB_SEED_FIRST;
+  if(first){${this.apic?"p.lifetime.x=0.0;":"p.before.w=nbParticleState(0.0,nbParticleMode(record));"}}
   let routed=nbFastSample&&umSolidPresent();
   nbHullLo=q;nbHullHi=q;if(routed&&!nbHullUncut()){return NbMoved(p,2u);}
   let mode=nbParticleMode(p);
@@ -749,7 +753,7 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    // G2P.
    var v=p.velocity.xyz;
    if(mode!=1.0){
-    ${this.apic?"p=nbApicSample(p);v=p.velocity.xyz;":"var flip=v;if(!nbSampleCold(q)){flip+=pic-p.before.xyz;}v=mix(pic,flip,params.settings.x);"}
+    ${this.apic?"p=nbApicSample(p);v=p.velocity.xyz;":"var flip=v;if(!nbSampleCold(q)){flip+=pic-p.before.xyz;}v=select(mix(pic,flip,params.settings.x),pic,first);"}
    }else{
     ${this.apic?"p.cx=vec4f(0);p.cy=vec4f(0);p.cz=vec4f(0);":""}
     v+=vec3f(0,params.settings.z*dt,0);
@@ -1078,11 +1082,16 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
  let heat=nbTargetHeat(vec3f(c)+0.5);
  return nbSeedParticle(site,heat);
 }
-// A seed joins its brick's slab in the current bank, after the slab's
-// sorted records; the move that follows takes it. No room: a source seed
+// The step's seeds act from the next step, as the tail seeds did before
+// the fused move: seeded at the transfer's head (the step's band, phi and
+// counts), a seed joins its brick's slab in the current bank after the
+// records SORT filed, which no transfer, splat or seam gather reads (only
+// transferRefine, for the census's prediction); the next move's G2P gives
+// it the grid's velocity (nbSeedFirst) and files it. No room: a source seed
 // spills, an overlap reseed is clipped (its cell is short again next step).
 fn storeSeedCandidate(p:Particle,mandatory:bool){
- if(p.position.x>=0.0){_=nbSeedAppend(p,mandatory);}
+ var s=p;${this.apic?"s.lifetime.x=nbSeedFirst();":"s.before.w=nbParticleState(nbSeedFirst(),0.0);"}
+ if(p.position.x>=0.0){_=nbSeedAppend(s,mandatory);}
 }
 @compute @workgroup_size(64) fn seedSources(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  storeSeedCandidate(seedCandidate(group,lane,true),true);
@@ -1249,7 +1258,7 @@ ${narrowBandSurfaceWGSL}
    snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    clearAir:this.compile(["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
-   // The move's seeds, into the current slabs' holes.
+   // The step's seeds, into the current slabs' holes at the transfer's head.
    seed:this.compile(["seedCells","seedSources","seed"],"advectParticles","seed"),
   };
   const listedSearch=search.filter(n=>n!=="depthNearestX").map(n=>n==="depthReuseSelect"?"depthReuseSelect@withX":n);
@@ -1311,11 +1320,6 @@ ${narrowBandSurfaceWGSL}
   // and marks the tiles they reach.
   encoder.clearBuffer(this.state,4,8);
   encoder.clearBuffer(this.bins,this.cells*8+this.tiles*4,this.tiles*4);
-  // The step's seeds (none in a quiet frame) join the current slabs'
-  // holes against the last step's band and counts, sampling the field the
-  // move samples; the move takes them with the rest. The candidate count
-  // is NB_BAND+3.
-  if(!this.quiet){encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles+3)*4,4);this.run(encoder,b.seed);}
   this.clearBrickTable(encoder);this.run(encoder,b.allocate);
   this.run(encoder,b.advect);
   this.sort(encoder);this.crossingCanPlan=true;
@@ -1382,6 +1386,10 @@ ${narrowBandSurfaceWGSL}
   // Clearing a buried zero invalidates the crossing/metric banks as well
   // as phi. The caller resolved phi before momentum or membership reads it.
   if(!this.bandCurrent){this.arenaSearch(encoder);this.run(encoder,this.compiled.arenaMetric);this.bandCurrent=true;}
+  // The step's seeds (none in a quiet frame) join the holes past the
+  // sorted runs against this step's band, phi and counts, sampling the
+  // field the move sampled (storeSeedCandidate). Their candidate count is NB_BAND+3.
+  if(!this.quiet){encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles+3)*4,4);this.run(encoder,this.compiled.seed);}
   // The seam list's length (NB_BAND+3), which transferOwners counts.
   encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles+3)*4,4);
   this.run(encoder,this.compiled.transfer);

@@ -83,12 +83,11 @@ fn nbRefineTravel(travel:array<vec3f,2>,k:u32)->u32{
  let v=select(travel[1][(k-5u)%3u],travel[0][(k-2u)%3u],k<5u);
  return select(0u,bitcast<u32>(v),v>0.0);
 }
-// A spilled sample (not in a tile's run) moves next step too: its two-cell
-// support (as seeds), travel bounds and swept surface tiles go to the bins directly.
-fn nbRefineDirect(s:Particle){
- let ballistic=nbParticleMode(s)==1.0;
- let travel=lrParticleTravel(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz);
- let low=vec3i(floor((s.position.xyz-2.0)/4.0));let first=low>>vec3u(2u);let last=(low+1)>>vec3u(2u);
+// Samples outside the tiles' runs (the step's seeds, the spill reserve):
+// a support block's pages (low tiles .. low+1, its travel maxima) and a
+// swept box's joins straight to the bins.
+fn nbRefinePages(low:vec3i,travel:array<vec3f,2>){
+ let first=low>>vec3u(2u);let last=(low+1)>>vec3u(2u);
  for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
   let region=vec3i(x,y,z);
   for(var k=0u;k<8u;k++){
@@ -96,10 +95,18 @@ fn nbRefineDirect(s:Particle){
    if(value!=0u){nbRefinePage(region,k,value);}
   }
  }}}
+}
+fn nbRefineJoins(box:NbRefineBox){
+ for(var z=box.low.z;z<=box.high.z;z++){for(var y=box.low.y;y<=box.high.y;y++){for(var x=box.low.x;x<=box.high.x;x++){nbRefineJoin(vec3i(x,y,z));}}}
+}
+// A seed or a spilled sample (in no tile's run) moves next step too: its
+// two-cell support, travel bounds and swept surface tiles.
+fn nbRefineDirect(s:Particle){
+ let ballistic=nbParticleMode(s)==1.0;
+ nbRefinePages(vec3i(floor((s.position.xyz-2.0)/4.0)),lrParticleTravel(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz));
  if(s.velocity.w < -1.0||ballistic){return;}
  let home=umTileAt(vec3u(s.position.xyz)/4u);
- let box=nbRefineBox(s,ballistic,home,(atomicLoad(&bins[NB_BAND_REACH+home])&1u)!=0u);
- for(var z=box.low.z;z<=box.high.z;z++){for(var y=box.low.y;y<=box.high.y;y++){for(var x=box.low.x;x<=box.high.x;x++){nbRefineJoin(vec3i(x,y,z));}}}
+ nbRefineJoins(nbRefineBox(s,ballistic,home,(atomicLoad(&bins[NB_BAND_REACH+home])&1u)!=0u));
 }
 const PB_ALONG:i32=7;const PB_ACROSS:i32=6;const PB_WINDOW:u32=252u;const PB_NODES:u32=756u;const PB_LANES:u32=192u;
 // Momentum in 1/8192 of the velocity unit, weight in 1/65536: an i32 node sum
@@ -203,10 +210,11 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
 // The census's prediction, a lean pass after DEPB (whose classify wrote the
 // mode it reads): a workgroup an occupied tile, its sorted samples' support
 // and swept surface tiles into workgroup words, flushed once a tile; then the
-// spill reserve's samples (state[21]), which no tile lists, directly.
+// samples no tile lists, directly: each current slab's seeds (past the
+// records SORT filed, slab word 11), then the spill reserve's (state[21]).
 @compute @workgroup_size(64) fn transferRefine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(!nbParticlesLive()){return;}
- if(lane==0u){pbJobs=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);}
+ // No live sample: no tile job, but the step's first seeds still predict.
+ if(lane==0u){pbJobs=select(0u,min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES),nbParticlesLive());}
  let count=workgroupUniformLoad(&pbJobs);
  for(var job=group.x;job<count;job+=groups.x){
   workgroupBarrier();
@@ -255,8 +263,15 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
   }
   if(value!=0u){nbRefinePage(region,k,value);}
  }
- let spilled=min(atomicLoad(&state[21u]),NB_SPILL);
- for(var j=group.x*64u+lane;j<spilled;j+=groups.x*64u){let s=particles[NB_SLAB_LIMIT+j];if(s.position.w>0.0){nbRefineDirect(s);}}
+ let slabs=min(atomicLoad(&state[20u]),UB_BRICKS);let spilled=min(atomicLoad(&state[21u]),NB_SPILL);
+ for(var job=group.x;job<slabs+(spilled+63u)/64u;job+=groups.x){
+  var first=NB_SLAB_LIMIT+64u*(job-slabs);var n=min(64u,spilled-min(64u*(job-slabs),spilled));
+  if(job<slabs){
+   let id=atomicLoad(&state[NB_SLAB_OUT+job]);let filed=atomicLoad(&state[nbSlab(id,11u)]);
+   first=atomicLoad(&state[nbSlab(id,5u)])+filed;n=nbSlabCount(id)-min(filed,nbSlabCount(id));
+  }
+  for(var k=lane;k<n;k+=64u){let s=particles[first+k];if(s.position.w>0.0){nbRefineDirect(s);}}
+ }
 }
 `;
 }

@@ -34,7 +34,8 @@
  *   cap (after slabPlace: the overflow cursor), [2] scratch cursor (after
  *   slabPlace: the appends), [3] stamp (the serial of the move that sized
  *   it), [4] overflow, [5] current base, [6] current cap, [7] current
- *   cursor, [8] seeds refused, [9] overflow base, [10] initial demand.
+ *   cursor, [8] seeds refused, [9] overflow base, [10] initial demand,
+ *   [11] the records SORT filed (the step's seeds follow them).
  * - From NB_SLAB_IN, 4 words an input entry (last move's slabs): id, current
  *   base, count, first job.
  * - From NB_SLAB_OUT, one word a slab: its brick id, in slot order. */
@@ -56,6 +57,10 @@ fn nbSlab(id:u32,k:u32)->u32{return NB_SLAB_RECORD+12u*id+k;}
 // The records every flat pass strides: the current slabs, never the spill reserve.
 fn nbExtent()->u32{return min(atomicLoad(&state[0]),NB_SLAB_LIMIT);}
 fn nbLive(p:Particle)->bool{return p.position.w>0.0;}
+// A deferred step seed's age until its first move (the largest finite f32
+// less one ulp: no age reaches it, ages are capped at the sparse lifetime).
+const NB_SEED_FIRST:u32=0x7f7ffffeu;
+fn nbSeedFirst()->f32{return bitcast<f32>(NB_SEED_FIRST);}
 fn nbDead()->Particle{var p=Particle();p.position=vec4f(-1.0,0.0,0.0,0.0);return p;}
 // The brick has slabs this move.
 fn nbSlabCurrent(id:u32)->bool{return id!=UB_NONE&&atomicLoad(&state[nbSlab(id,3u)])==atomicLoad(&state[17u]);}
@@ -326,7 +331,7 @@ fn nbSortInput(job:vec4u,k:u32)->u32{return select(job.w+k-job.z,job.y+k,k<job.z
     if(nbSortStrays(p.xyz,origin,nbSortCell(p.xyz,origin))){markSurfaceTiles(p.xyz,max(0.0,p.w));}
    }
   }
-  if(lane==0u){atomicAdd(&state[1],n);}
+  if(lane==0u){atomicAdd(&state[1],n);atomicStore(&state[nbSlab(id,11u)],n);}
   workgroupBarrier();
  }
 }
