@@ -24,7 +24,7 @@
  * The slab words are words of the receipt buffer (`state`), kept by brick
  * id, because table slots do not outlive the move. Words:
  * - [0] the current extent (every current slab's records: what flat passes
- *   stride); [1] the live records; [16] the scratch tail's records;
+ *   stride); [1] the live records, the spill reserve's included; [16] the scratch tail's records;
  *   [17] the move serial; [18] the scratch extent; [19] the input entries;
  *   [20] the output entries (slabs); [21] the current spill reserve's
  *   records (word 15 is the air pass's change gate); [22] the move's slab
@@ -62,10 +62,12 @@ fn nbSlabCurrent(id:u32)->bool{return id!=UB_NONE&&atomicLoad(&state[nbSlab(id,3
 // or the current bank's. A full reserve stops the run (state[3] = 5) unless
 // the record is optional (an overlap reseed: it is clipped and its cell is
 // short again next step).
-fn nbSpill(p:Particle,scratch:bool,mandatory:bool){
+// Whether the record was kept.
+fn nbSpill(p:Particle,scratch:bool,mandatory:bool)->bool{
  let k=atomicAdd(&state[select(21u,16u,scratch)],1u);
- if(k>=NB_SPILL){if(mandatory){atomicStore(&state[3],5u);}else{atomicAdd(&state[2],1u);}return;}
+ if(k>=NB_SPILL){if(mandatory){atomicStore(&state[3],5u);}else{atomicAdd(&state[2],1u);}return false;}
  if(scratch){source[NB_SLAB_LIMIT+k]=p;}else{particles[NB_SLAB_LIMIT+k]=p;}
+ return true;
 }
 // The move's append of a record to its brick's scratch slab: one device
 // atomic. A full slab counts the record as its overflow.
@@ -76,12 +78,12 @@ fn nbMoveAppend(p:Particle){
   if(k<atomicLoad(&state[nbSlab(id,1u)])){source[atomicLoad(&state[nbSlab(id,0u)])+k]=p;return;}
   atomicAdd(&state[nbSlab(id,4u)],1u);
  }
- nbSpill(p,true,true);
+ _=nbSpill(p,true,true);
 }
 // A seed joins its brick's current slab after the sorted records. A refused
 // seed raises the brick's slack at the next placement and joins the spill
 // reserve (the next move takes it first; nothing reads it before). Only a
-// full reserve clips an overlap reseed.
+// full reserve clips an overlap reseed. Whether the seed was kept.
 fn nbSeedAppend(p:Particle,mandatory:bool)->bool{
  let id=ubBrickAt(vec3i(floor(p.position.xyz)));
  if(nbSlabCurrent(id)){
@@ -89,8 +91,7 @@ fn nbSeedAppend(p:Particle,mandatory:bool)->bool{
   if(k<atomicLoad(&state[nbSlab(id,6u)])){particles[atomicLoad(&state[nbSlab(id,5u)])+k]=p;return true;}
   atomicAdd(&state[nbSlab(id,8u)],1u);
  }
- nbSpill(p,false,mandatory);
- return false;
+ return nbSpill(p,false,mandatory);
 }
 // The frame page the current bank's positions are in (the move shifts them
 // into the current one).
@@ -198,7 +199,8 @@ fn nbCurrentCap(id:u32)->vec2u{
  let spilled=min(atomicLoad(&state[16u]),NB_SPILL);
  for(var k=gid.x;k<spilled;k+=64u*groups.x){
   let p=source[NB_SLAB_LIMIT+k];let id=ubBrickAt(vec3i(floor(p.position.xyz)));
-  if(!nbSlabCurrent(id)){nbSpill(p,false,true);continue;}
+  // A live record: it counts with the slabs' (state[1]).
+  if(!nbSlabCurrent(id)){if(nbSpill(p,false,true)){atomicAdd(&state[1],1u);}continue;}
   let at=atomicAdd(&state[nbSlab(id,1u)],1u);let to=atomicLoad(&state[nbSlab(id,9u)])+at;
   if(at<atomicLoad(&state[nbSlab(id,4u)])&&to<NB_SLAB_LIMIT){source[to]=p;}else{atomicStore(&state[3],6u);}
  }

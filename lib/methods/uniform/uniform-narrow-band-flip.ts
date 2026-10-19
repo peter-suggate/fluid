@@ -811,22 +811,25 @@ fn nbAdvect(record:Particle)->NbMoved{
   if(p.position.w<=0.0){return NbMoved(p,1u);}
   // Uniform stores velocity half a step ahead of position. Ballistic drift
   // uses that midpoint velocity; update supplies the next full gravity kick.
-  // One step of Shu and Osher's third-order rule over the whole dt, every
-  // field sample at one call site (Metal inlines each call of the field):
-  // stage 0 the field at q (k1), 1 a whole step ahead (k2), 2 at the
-  // midpoint q + dt(k1 + k2)/4 (k3). Nothing limits the step: a stage the
-  // field does not hold is the field's own sample to bound. Ballistic drift
-  // is one straight step and samples nothing.
+  // One step of Heun's third-order rule over the whole dt, every field
+  // sample at one call site (Metal inlines each call of the field): stage 0
+  // the field at q (k1), 1 a third of the step along it (k2), 2 two thirds
+  // along k2 (k3); the end is q + dt(k1 + 3k3)/4. Its stages stay inside the
+  // step, so a trace into a sharp turn (liquid striking the pool) bends with
+  // it as the old substeps did; a stage a whole step ahead (Shu and Osher's)
+  // overshot there and the band lost a tenth of its samples. Nothing limits
+  // the step: a stage the field does not hold is the field's own sample to
+  // bound. Ballistic drift is one straight step and samples nothing.
   let h=params.hDt.xyz;let dt=params.hDt.w;
   var end=q+dt*p.velocity.xyz/h;
   if(!ballistic){
-   var x=q;var k1=vec3f(0.0);var k2=vec3f(0.0);
+   var x=q;var k1=vec3f(0.0);
    for(var stage=0u;stage<3u;stage++){
     nbHullInclude(x);
     let k=sampleVelocity(x)/h;
     // Nothing of this sample is stored yet: the general launch redoes it.
     if(nbFastSample&&nbSlow){return NbMoved(p,2u);}
-    if(stage==0u){k1=k;x=q+dt*k1;}else if(stage==1u){k2=k;x=q+0.25*dt*(k1+k2);}else{end=q+dt*(k1+k2+4.0*k)/6.0;}
+    if(stage==0u){k1=k;x=q+dt*k1/3.0;}else if(stage==1u){x=q+2.0*dt*k/3.0;}else{end=q+0.25*dt*(k1+3.0*k);}
    }
   }
   // A trajectory longer than the lattice's extent arrives nowhere: fatal
@@ -958,7 +961,7 @@ fn nbMoveTurn(r:NbMoved,job:vec4u,lane:u32){
  if(k<brick.z){source[brick.y+k]=r.p;return;}
  // A full slab counts its overflow; a brick with no slab counts nothing.
  if(brick.x!=UB_NONE){atomicAdd(&state[nbSlab(brick.x,4u)],1u);}
- nbSpill(r.p,true,true);
+ _=nbSpill(r.p,true,true);
 }
 fn nbMove(group:u32,groups:u32,lane:u32){
  if(lane==0u){
