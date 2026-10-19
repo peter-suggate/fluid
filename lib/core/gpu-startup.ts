@@ -126,7 +126,10 @@ export function fluidExecutionDeviceFeatures(
   // 16 B/texel instead of 32, which is 16 000 of the 36 000 bytes every
   // node-mip page costs. Never assumed — `liveSvoRadianceAtlasFormat` reads the
   // granted device features and falls back to rgba16float without it.
-  for (const feature of ["shader-f16", "subgroups", "texture-formats-tier1"] as const) {
+  // `float32-filterable` lets NB-FLIP momentum filter its rgba32float velocity
+  // halo in the texture unit (momentumSampler texture32); without it the
+  // solver falls back to an rgba16float copy.
+  for (const feature of ["shader-f16", "subgroups", "texture-formats-tier1", "float32-filterable"] as const) {
     if (features.has(feature)) requested.push(feature as GPUFeatureName);
   }
   return requested;

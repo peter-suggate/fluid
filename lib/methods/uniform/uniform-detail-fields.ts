@@ -904,7 +904,7 @@ const CLASS_BY_NAME:Record<string,UniformDetailClass>={
  phi:"vertex",outputPhi:"vertex",vertexPhi:"vertex",bodyPhi:"vertex",
  unitVelocity:"atlas",unitVelocityOut:"atlas",
 };
-const RAW_NAMES=new Set(["coarse","coarseOut","coarseExtended","coarseVelocity","origins","originsOut","surfacePhi","surfaceOpen","unitHalo","unitHaloOut"]);
+const RAW_NAMES=new Set(["coarse","coarseOut","coarseExtended","coarseVelocity","origins","originsOut","surfacePhi","surfaceOpen","unitHalo","unitHaloOut","unitHaloFiltered","coarseFiltered","unitHaloHalfOut"]);
 function classify(name:string,type:string):UniformDetailClass|undefined{
  if(RAW_NAMES.has(name))return undefined;
  if(name==="output")return type.includes("rgba")?"face":"cell";

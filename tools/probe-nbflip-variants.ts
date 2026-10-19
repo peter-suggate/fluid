@@ -361,7 +361,8 @@ probeVariants.bdcache=code=>{
  c=replaceOnce(c,'     let sample=nbPhiGradient(vec3u(cell),q);','     let at=vec3u(cell);let width=umTileWidth(umTileAt(at/4u));let origin=(at/width)*width;\n     if(width!=loadedWidth||any(origin!=loadedOrigin)){if(width==4u){corners=umLoadCorner8(origin,4u);}else{corners=umLoadVertex8(origin,width);}loadedWidth=width;loadedOrigin=origin;}\n     let sample=nbPhiGradient(corners,width,origin,q);');
  return c;
 };
-probeVariants.mkoDep=code=>replaceFn(code,'umUnitDeparture','fn umUnitDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f{return position;}');
-probeVariants.mkoFinal=code=>replaceOnce(code,' return umUnitSampleComponent(departure,face.axis);\n',' return departure.x;\n');
+// Momentum's unit trace (uniformCachedMomentumSamplingWGSL): no departure, or no final sample.
+probeVariants.mkoDep=code=>replaceOnce(code,'  at=umClampMomentum(position-select(0.5,1.0,stage==1u)*v*dt/h);\n','  at=position;\n');
+probeVariants.mkoFinal=code=>replaceOnce(code,'  let last=stage==2u;\n','  let last=stage==2u;if(last){return at.x;}\n');
 // No unit halo home: every unit interpolant through its original loads (the halo's A/B).
 probeVariants.nohalo=code=>replaceFn(code,'umUnitHaloHome','fn umUnitHaloHome(s:UMSampleTile)->vec4i {return vec4i(-1);}');

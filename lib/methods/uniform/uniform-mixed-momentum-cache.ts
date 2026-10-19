@@ -141,10 +141,18 @@ export interface UniformMixedHangingTapFields {
 export class UniformMixedHangingTaps {
   /** The taps are detail fields: their bytes are the storage's. Their halos
    * (haloOf) are not. */
-  get allocatedBytes():number{let bytes=this.haloBlocks.size;for(const t of this.halos.values())bytes+=16*t.width*t.height*t.depthOrArrayLayers;return bytes;}
+  get allocatedBytes():number{
+    let bytes=this.haloBlocks.size;for(const t of this.halos.values())bytes+=16*t.width*t.height*t.depthOrArrayLayers;
+    for(const t of this.halfHalos.values())bytes+=8*t.width*t.height*t.depthOrArrayLayers;return bytes;
+  }
   /** Each taps texture's haloed copy by block (UNIFORM_UNIT_HALO_EDGE),
    * refilled by every encode that fills the taps but a slot fill. */
   private readonly halos=new Map<GPUTexture,GPUTexture>();
+  /** A halo's rgba16float copy, written by the same fill, where a taps
+   * texture asked for one (momentum's texture16 sampler filters it). */
+  private readonly halfHalos=new Map<GPUTexture,GPUTexture>();
+  /** The halo fill's stand-in where a taps texture has no half copy. */
+  private readonly halfStandIn:GPUTexture;
   private readonly haloGroups=new WeakMap<UniformDetailGroup,UniformDetailGroup>();
   private readonly haloResources:GPUBindGroupLayout;
   private haloPipeline?:GPUComputePipeline;
@@ -169,7 +177,9 @@ export class UniformMixedHangingTaps {
   /** detail: the solver's detail storage. The taps are read atlas-only (no
    * tile outside resident patches is ever a hanging tap), but the texture is
    * face-class: the remap borrows it as the census extension's face scratch. */
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly detail:UniformDetailStorage){
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly detail:UniformDetailStorage,
+    /** unitVelocity's halo also gets its rgba16float copy (halfHaloOf). */
+    halfHalo=false){
     const entries:GPUBindGroupLayoutEntry[]=[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -177,25 +187,31 @@ export class UniformMixedHangingTaps {
       {binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},
     ];this.resources=uniformDetailBindLayout(device,{entries});
     if(device.limits.maxStorageBuffersPerShaderStage>=9)this.slotResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
-    // The halo fill: the taps read back (5), the halo written (3).
-    this.haloResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:5,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]},[3]);
+    // The halo fill: the taps read back (5), the halo written (3) with its
+    // half copy (7).
+    this.haloResources=uniformDetailBindLayout(device,{entries:[...entries,{binding:5,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      {binding:7,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float",viewDimension:"3d"}}]},[3]);
+    this.halfStandIn=device.createTexture({label:"Uniform mixed unit halo half stand-in",size:[1,1,1],dimension:"3d",format:"rgba16float",usage:GPUTextureUsage.STORAGE_BINDING});
     const grid=ownership.capacity.address.blockGrid;this.haloBlockCount=grid[0]*grid[1]*grid[2];
     if(this.haloBlockCount>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Unit halo marking launches a workgroup a block: ${this.haloBlockCount} blocks exceed ${device.limits.maxComputeWorkgroupsPerDimension}`);
     this.haloBlocks=device.createBuffer({label:"Uniform mixed unit halo blocks",size:64*this.haloBlockCount,usage:GPUBufferUsage.STORAGE});
-    this.unitVelocity=this.createTaps("Uniform mixed unit velocity taps");
+    this.unitVelocity=this.createTaps("Uniform mixed unit velocity taps",halfHalo);
   }
   /** Another texture this fill can write: the unit taps of a second field,
    * kept beside unitVelocity (the caller destroys it; its halo is this
    * builder's). */
-  createTaps(label:string):GPUTexture{
+  createTaps(label:string,half=false):GPUTexture{
     const taps=this.detail.createField(label,"atlas","rgba32float");
     // No fine tile: no sample has unit weight, and a stand-in disables the halo.
     const size=this.ownership.capacity.fineTiles>0?uniformUnitHaloExtent(this.ownership.capacity.address):[1,1,1];
     this.halos.set(taps,this.device.createTexture({label:`${label} halo`,size,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING}));
+    if(half)this.halfHalos.set(taps,this.device.createTexture({label:`${label} half halo`,size,dimension:"3d",format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING}));
     return taps;
   }
   /** The haloed copy of a createTaps texture (or of unitVelocity). */
   haloOf(taps:GPUTexture):GPUTexture{const halo=this.halos.get(taps);if(!halo)throw new Error("Unit taps without a halo");return halo;}
+  /** The halo's rgba16float copy, of a taps texture created with one. */
+  halfHaloOf(taps:GPUTexture):GPUTexture{const half=this.halfHalos.get(taps);if(!half)throw new Error("Unit taps without a half halo");return half;}
   /** output: a createTaps texture to fill in place of unitVelocity. */
   bind(f:UniformMixedHangingTapFields,output=this.unitVelocity):UniformDetailGroup{
     const blocks=uniformCoarseCacheExtent(this.ownership.capacity.address);
@@ -213,6 +229,7 @@ export class UniformMixedHangingTaps {
     if(!f.slots)this.haloGroups.set(group,uniformDetailGroup(this.device,{layout:this.haloResources,entries:[
       {binding:0,resource:f.extended},{binding:1,resource:{buffer:f.negative}},{binding:2,resource:f.coarse},
       {binding:3,resource:this.haloOf(output)},{binding:5,resource:output},{binding:6,resource:{buffer:this.haloBlocks}},
+      {binding:7,resource:this.halfHalos.get(output)??this.halfStandIn},
     ]}));
     return group;
   }
@@ -228,6 +245,7 @@ export class UniformMixedHangingTaps {
 @group(1) @binding(3) var unitHaloOut:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(5) var unitVelocity:texture_3d<f32>;
 @group(1) @binding(6) var<storage,read_write> haloBlocks:array<u32>;
+@group(1) @binding(7) var unitHaloHalfOut:texture_storage_3d<rgba16float,write>;
 ${uniformMixedFaceAddressWGSL}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(umFaceLow(anchor,axis)){var above=anchor;above[axis]+=1;return negative[umLowFaceIndex(vec3u(above),axis)];}
@@ -314,7 +332,10 @@ fn umFillUnitHaloTexel(b:u32,tap:vec3i,l:vec3u,word:u32){
    else{value[axis]=umCompiledVelocityTap(tile,vec3u(anchor&vec3i(3)),axis,true);}
   }
  }
- textureStore(unitHaloOut,${UNIFORM_UNIT_HALO_EDGE}*umBlockCoord(b)+vec3i(l),value);
+ let texel=${UNIFORM_UNIT_HALO_EDGE}*umBlockCoord(b)+vec3i(l);
+ textureStore(unitHaloOut,texel,value);
+ // The half copy, where the fill binds one (not the 1³ stand-in).
+ if(textureDimensions(unitHaloHalfOut).x>1u){textureStore(unitHaloHalfOut,texel,value);}
 }`;
     const module=uniformDetailModule(this.device,{label:"Uniform mixed unit tap halo",code});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
@@ -397,5 +418,5 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
     }
     if(!shared)pass.end();
   }
-  destroy():void{this.unitVelocity.destroy();for(const halo of this.halos.values())halo.destroy();this.haloBlocks.destroy();}
+  destroy():void{this.unitVelocity.destroy();for(const halo of [...this.halos.values(),...this.halfHalos.values()])halo.destroy();this.halfStandIn.destroy();this.haloBlocks.destroy();}
 }

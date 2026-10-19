@@ -496,7 +496,9 @@ export class UniformMixedFrame {
   // is rewritten by hanging/unitFaces before the first sampler, and nothing
   // reads them from the previous frame's forces until then.
   if(!f.detail)throw new Error("The mixed frame's unit taps are fields of its detail storage");
-  this.hanging=new UniformMixedHangingTaps(device,o,f.detail);
+  // Momentum's unit sampler: texture32 needs float32-filterable, else texture16.
+  const sampler=this.nearSettled.momentumSampler==="texture32"&&!device.features.has("float32-filterable")?"texture16":this.nearSettled.momentumSampler;
+  this.hanging=new UniformMixedHangingTaps(device,o,f.detail,sampler==="texture16");
   this.remap.bindExtension({volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{velocity:this.hanging.unitVelocity,negative:this.extensionWalls=buffer("Uniform mixed remapped extension walls",f.negativeScratch.size,GPUBufferUsage.STORAGE)});
   this.phiResolve=new UniformMixedPhiResolve(device,o,NARROW_BAND_AIR_CHANGED_WORD);this.phiResolveGroups={phi:this.phiResolve.bindHeld(f.phi),scratch:this.phiResolve.bind(f.phiScratch)};
   this.coarsePhi=new UniformCoarseVertexPhi(device,o,f.phi);
@@ -555,8 +557,9 @@ export class UniformMixedFrame {
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
   // Its tiers follow the region heat (UniformMixedMomentumTiers).
-  this.momentum=new UniformMixedMomentum(device,o,this.heat.tiers,true,true,f.sourceParams,this.freeze);
-  this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
+  this.momentum=new UniformMixedMomentum(device,o,this.heat.tiers,true,true,f.sourceParams,this.freeze,sampler);
+  this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),
+   unitHaloHalf:sampler==="texture16"?this.hanging.halfHaloOf(this.hanging.unitVelocity):undefined,extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true,true,true,true,true,this.dynamics,this.freeze);
   this.stageBandTiles=this.bandTilesAt(o.capacity.fineTiles,capacity.liquidBand);
   this.stageScratch=buffer(qaBandRows?"Uniform mixed stage scratch":"Uniform mixed stage scratch and pressure band rows",this.stageBytesAt(o.capacity.fineTiles,this.stageBandTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();

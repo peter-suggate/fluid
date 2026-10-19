@@ -23,7 +23,9 @@ export async function withUniformDevice(label:string,run:(device:GPUDevice)=>Pro
  try{
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
   const adapter=await createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`,...dawnOptions]).requestAdapter();assert.ok(adapter);
-  device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:features.filter(f=>adapter.features.has(f)),requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
+  // float32-filterable as the product requests it (fluidExecutionDeviceFeatures):
+  // NB-FLIP momentum's default texture32 sampler needs it.
+  device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:[...new Set<GPUFeatureName>([...features,"float32-filterable"])].filter(f=>adapter.features.has(f)),requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
   await run(device);await device.queue.onSubmittedWorkDone();assert.deepEqual(errors,[]);
  }finally{device?.destroy();}
