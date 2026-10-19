@@ -39,6 +39,8 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  * - momentumSampler: how grid momentum's unit sampler interpolates
  *   (UniformMomentumSampler); "texture32" falls back to "texture16" on a
  *   device without float32-filterable.
+ *   "texture32" also filters the particle trace's halo samples in the
+ *   texture unit; the other values keep its eight loads.
  */
 export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandSmoothing:"fused"|"separate";readonly traceSubsteps:"gradient"|"travel";readonly redistanceSearch:"shared"|"fresh";readonly particleDeposit:"tiled"|"gathered";readonly particleOrder:"scheduled"|"canonical";readonly momentumSampler:UniformMomentumSampler}
 

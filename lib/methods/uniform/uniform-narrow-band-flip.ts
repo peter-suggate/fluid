@@ -280,10 +280,16 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private snapshotInput?:{raw:GPUTexture;negative:GPUBuffer};
  get snapshotUnitVelocity():GPUTexture{if(!this.stageTaps)throw new Error("FLIP is not bound");return this.stageTaps.unit;}
  private stageTaps?:{builder:UniformMixedHangingTaps;group:UniformDetailGroup;unit:GPUTexture};
+ /** The fast trace's linear filter (particleSampler texture32). */
+ private filter?:GPUSampler;
  private initPipeline?:GPUComputePipeline;
  private initGroup?:GPUBindGroup;
  /** pool: the page pool whose commits claim this lattice's blocks (its state buffer and layout); without one no block is ever claimed. */
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly redistanceSearch:"shared"|"fresh"="shared",readonly particleDeposit:"tiled"|"gathered"="tiled",readonly particleOrder:"scheduled"|"canonical"="scheduled"){
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly redistanceSearch:"shared"|"fresh"="shared",readonly particleDeposit:"tiled"|"gathered"="tiled",readonly particleOrder:"scheduled"|"canonical"="scheduled",
+  /** The fast trace's halo interpolant: "texture32" filters the rgba32float
+   * halo in the texture unit (float32-filterable), "software" takes its eight loads. */
+  readonly particleSampler:"texture32"|"software"="software"){
+  if(particleSampler==="texture32"&&!device.features.has("float32-filterable"))throw new Error("Narrow-band FLIP texture32 particle sampling requires float32-filterable");
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
   this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;
@@ -342,7 +348,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    {binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    // The haloed copy of binding 11's taps (UniformMixedHangingTaps.haloOf): no detail field.
    {binding:12,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
-  ]},[12]);
+   // particleSampler texture32: binding 12's halo again, filterable, and its filter.
+   ...(this.particleSampler==="texture32"?[{binding:22,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"float" as const,viewDimension:"3d" as const}},{binding:23,visibility:GPUShaderStage.COMPUTE,sampler:{type:"filtering" as const}}]:[]),
+  ]},[12,22]);
  }
  /** The COLD freeze (UniformColdFreeze; coldRegions "frozen16h"), before
   * bind and initialize: the transfer writes no texel of a frozen cell and
@@ -392,6 +400,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // One texture for the solver's life: a detail field is created before the
   // first layout, and the frame binds its stages again when capacity grows.
   const unit=this.stageTaps?.unit??f.sharedStageUnit??f.hanging.createTaps("Narrow-band FLIP stage unit taps");
+  if(this.particleSampler==="texture32")this.filter??=this.device.createSampler({label:"Narrow-band FLIP trace filter",magFilter:"linear",minFilter:"linear",addressModeU:"clamp-to-edge",addressModeV:"clamp-to-edge",addressModeW:"clamp-to-edge"});
   this.stageTaps={builder:f.hanging,unit,group:f.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:this.coarseVelocity},unit)};
   for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["seed",f.departure,f.negativeDeparture,f.velocityScratch],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure],["update",f.velocityScratch,f.negativeScratch,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
@@ -404,6 +413,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
     {binding:11,resource:name==="snapshot"||name==="update"?unit:f.unitExtended},{binding:12,resource:f.hanging.haloOf(name==="snapshot"||name==="update"?unit:f.unitExtended)},{binding:14,resource:name==="reconstruct"||name==="redistanceStore"?f.phi:f.phiScratch},
     {binding:15,resource:f.phase},
     {binding:16,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}},
+    ...(this.filter?[{binding:22,resource:f.hanging.haloOf(name==="snapshot"||name==="update"?unit:f.unitExtended)},{binding:23,resource:this.filter}]:[]),
     ...(this.freeze?[{binding:18,resource:this.freeze.regions.createView()}]:[]),
    ]})) as [UniformDetailGroup,UniformDetailGroup];
   }
@@ -559,6 +569,7 @@ fn nbParticlesLive()->bool{return params.live.x!=0u;}
 @group(1) @binding(10) var coarseVelocity:texture_3d<f32>;
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
 ${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
+${unitTaps&&!slots&&this.particleSampler==="texture32"?"@group(1) @binding(22) var unitHaloFiltered:texture_3d<f32>;\n@group(1) @binding(23) var nbTraceFilter:sampler;":""}
 const NB_ARENA:u32=${this.arenaWord}u;
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
@@ -639,9 +650,11 @@ fn sampleVelocity(p:vec3f)->vec3f{
      var offset=vec3f(0.5);offset[a]=1.0;
      let b=umHold;var lower=b.lo;lower[a]-=1.0;
      let q=clamp(p-offset,lower,b.hi-vec3f(1.0));
-     let base=vec3i(floor(q));var terms:array<f32,8>;
+${this.particleSampler==="texture32"?`     // The same eight taps, filtered by the texture unit: texel centres sit
+     // at +0.5, so the filter's lower tap is floor(q), its weights fract(q).
+     v[a]=textureSampleLevel(unitHaloFiltered,nbTraceFilter,(q+vec3f(umUnitHome.xyz)+vec3f(0.5))/vec3f(textureDimensions(unitHaloFiltered)),0.0)[a];`:`     let base=vec3i(floor(q));var terms:array<f32,8>;
      for(var k=0u;k<8u;k++){terms[k]=textureLoad(unitHalo,base+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u))+umUnitHome.xyz,0)[a];}
-     v[a]=0.0+1.0*umVelocityLerp8(terms,fract(q));
+     v[a]=0.0+1.0*umVelocityLerp8(terms,fract(q));`}
     }
     return v;
    }
