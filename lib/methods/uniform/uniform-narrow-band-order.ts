@@ -79,7 +79,12 @@ export class UniformNarrowBandOrder {
  * occupied: the bins word of the occupied tile list (its length, entries
  * from 4 words on), which every tile with coverage is on: prepare and the
  * cell offsets stride it on a fixed grid, and prepare empties it. */
- constructor(private readonly device:GPUDevice,private readonly address:UniformLatticeAddress,private readonly topology:GPUBuffer,private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,private readonly occupied:number,readonly sparse=!UniformNarrowBandOrder.legacyScanDevices.has(gpuCompilationManagerFor(device))||address.cellKeys>=4_194_304,private readonly apic=false){
+ constructor(private readonly device:GPUDevice,private readonly address:UniformLatticeAddress,private readonly topology:GPUBuffer,private readonly particles:readonly [GPUBuffer,GPUBuffer],private readonly bins:GPUBuffer,private readonly links:GPUBuffer,private readonly state:GPUBuffer,private readonly occupied:number,readonly sparse=!UniformNarrowBandOrder.legacyScanDevices.has(gpuCompilationManagerFor(device))||address.cellKeys>=4_194_304,private readonly apic=false,
+  /** false (NB-FLIP particleOrder "scheduled"): pack scatters each record
+   * straight to its cell's run, in the order its cursor hands out slots; no
+   * canonical sort, merge or key scratch. Within a cell the order then
+   * depends on scheduling. */
+  readonly canonical=true){
   this.cells=address.cellKeys;
   const capacity=Math.floor(particles[0].size/(4*narrowBandParticleStride(apic)));
   this.mergeLevels=Math.max(0,Math.ceil(Math.log2(capacity/128)));
@@ -92,7 +97,7 @@ export class UniformNarrowBandOrder {
    const base=next;next+=2*(Math.ceil(capacity/256)+Math.floor(capacity/(128*2**level+1)));return base;
   });
   this.scratchKeys=next;
-  this.orderScratch=device.createBuffer({label:"FLIP canonical merge keys",size:4*(next+4*capacity),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  this.orderScratch=device.createBuffer({label:"FLIP canonical merge keys",size:canonical?4*(next+4*capacity):4*(next+4),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   // Shared APIC scan's activation record: no failure and an active step.
   // This immutable record makes our sort unconditional, including bootstrap.
   this.dimensions=device.createBuffer({label:"FLIP spatial order dimensions",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -195,10 +200,11 @@ var<workgroup> packCount:u32;
   workgroupBarrier();
   if(key!=0xffffffffu){
    var first=lane;while(first>0u&&packKeys[first-1u]==key){first--;}
-   // A sort key, not yet the record: position and source slot.
    let next=packStarts[first]+lane-first;
+   ${this.canonical?`// A sort key, not yet the record: position and source slot.
    let a=UM_CELL_KEYS()+4u*next;let bits=bitcast<vec4u>(position);
-   links[a]=bits.x;links[a+1u]=bits.y;links[a+2u]=bits.z;links[a+3u]=i;
+   links[a]=bits.x;links[a+1u]=bits.y;links[a+2u]=bits.z;links[a+3u]=i;`:`// The record itself: its cell's run in cursor order.
+   output[next]=input[i];`}
   }
   workgroupBarrier();
  }
@@ -263,8 +269,11 @@ ${narrowBandMergeWGSL(this.scratchKeys,this.headerWords,this.mergeQueues)}
 `});
   const layout=this.device.createBindGroupLayout({entries:[{binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},...(this.sparse?[0,1,2,3,4,6,5,8]:[0,1,2,3,4,6,8]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:binding===0||binding===5||binding===6?"read-only-storage" as const:"storage" as const}}))]});
   const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
-  [this.pipeline,this.canonicalPipeline,this.legacyPipeline,this.preparePipeline,this.prefixPipeline]=await Promise.all((this.sparse?["pack","canonical","canonicalLegacy","prepare","prefixTile"]:["pack","canonical","canonicalLegacy"]).map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
-  this.mergePipelines=await Promise.all(Array.from({length:this.mergeLevels},(_,level)=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:"canonicalMerge",constants:{ORDER_MERGE_WIDTH:128*2**level,ORDER_MERGE_BANK:1-level%2,ORDER_MERGE_LEVEL:level}}})));
+  const canonical=this.canonical?["canonical","canonicalLegacy"]:[];
+  const pipelines=await Promise.all([...(this.sparse?["pack","prepare","prefixTile"]:["pack"]),...canonical].map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
+  [this.pipeline]=pipelines;if(this.sparse)[this.preparePipeline,this.prefixPipeline]=pipelines.slice(1);
+  if(this.canonical)[this.canonicalPipeline,this.legacyPipeline]=pipelines.slice(-2);
+  this.mergePipelines=!this.canonical?[]:await Promise.all(Array.from({length:this.mergeLevels},(_,level)=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:"canonicalMerge",constants:{ORDER_MERGE_WIDTH:128*2**level,ORDER_MERGE_BANK:1-level%2,ORDER_MERGE_LEVEL:level}}})));
   this.groups=[0,1].map(parity=>this.device.createBindGroup({layout,entries:[{binding:8,resource:{buffer:this.orderScratch}},{binding:7,resource:{buffer:this.dimensions}},{binding:6,resource:{buffer:this.topology}},...[this.particles[1-parity]!,this.particles[parity]!,this.bins,this.links,this.state,...(this.sparse?[this.tileOffsets!]:[])].map((buffer,binding)=>({binding,resource:{buffer}}))]})) as [GPUBindGroup,GPUBindGroup];
  }
  prepare(encoder:GPUCommandEncoder,parity:number):void{
@@ -282,9 +291,10 @@ ${narrowBandMergeWGSL(this.scratchKeys,this.headerWords,this.mergeQueues)}
   }else this.scan.encode(encoder);
  }
  encode(encoder:GPUCommandEncoder,parity:number):void{
-  if(!this.legacyCanonical){encoder.clearBuffer(this.orderScratch,0,16*(this.mergeLevels+1));}
+  if(this.canonical&&!this.legacyCanonical){encoder.clearBuffer(this.orderScratch,0,16*(this.mergeLevels+1));}
   this.encodeOffsets(encoder,parity);
   const pass=encoder.beginComputePass(PACK_PASS);pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.groups[parity]!);pass.dispatchWorkgroups(this.workgroups);pass.end();
+  if(!this.canonical)return;
   const canonical=encoder.beginComputePass(CANONICAL_PASS);canonical.setPipeline(this.legacyCanonical?this.legacyPipeline:this.canonicalPipeline);canonical.setBindGroup(0,this.groups[parity]!);canonical.dispatchWorkgroups(this.workgroups);canonical.end();
   if(!this.legacyCanonical){const crowded=encoder.beginComputePass(CROWDED_PASS);crowded.setBindGroup(0,this.groups[parity]!);for(let level=0;level<this.mergePipelines.length;level++){crowded.setPipeline(this.mergePipelines[level]);crowded.dispatchWorkgroups(Math.min(256,this.workgroups));}crowded.end();}
  }

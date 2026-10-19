@@ -32,8 +32,10 @@ import type { MethodParamValues } from "../../core/method-contract";
  * - particleDeposit: "tiled" scatters each occupied tile's particle momentum
  *   into shared fixed-point sums flushed once; "gathered" gathers each fine
  *   cell's particle neighbourhood (the same result to fixed-point rounding).
+ * - particleOrder: "scheduled" files samples into their cells in slot order;
+ *   "canonical" sorts each cell too (bit-reproducible runs).
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandSmoothing:"fused"|"separate";readonly traceSubsteps:"gradient"|"travel";readonly redistanceSearch:"shared"|"fresh";readonly particleDeposit:"tiled"|"gathered"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandSmoothing:"fused"|"separate";readonly traceSubsteps:"gradient"|"travel";readonly redistanceSearch:"shared"|"fresh";readonly particleDeposit:"tiled"|"gathered";readonly particleOrder:"scheduled"|"canonical"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -49,4 +51,5 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  traceSubsteps:values.traceSubsteps==="travel"?"travel":"gradient",
  redistanceSearch:values.redistanceSearch==="fresh"?"fresh":"shared",
  particleDeposit:values.particleDeposit==="gathered"?"gathered":"tiled",
+ particleOrder:values.particleOrder==="canonical"?"canonical":"scheduled",
 });
