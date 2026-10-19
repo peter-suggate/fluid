@@ -240,13 +240,14 @@ A level-ℓ brick is 8³ cells of width 2^ℓ h. All three levels use the page l
 
 ### 3.2 Slots: persistent, fixed capacity, fail-fast
 
-- Capacity: `fineCapacity` ℓ0 slots and `fineCapacity/4` ℓ1 slots, set at construction.
+- Capacity: `fineCapacity` slots at ℓ0 and at ℓ1, set at construction. ℓ1 never exceeds the ℓ0 list it is built from.
   - The default is 64·UM_BLOCKS, as today's table, which cannot overflow.
   - A smaller configured capacity bounds memory: 2 KB per brick per f32 channel.
-- Each level has a **free stack**: a count word plus capacity words, filled 0..cap−1 at attach.
+- ℓ0 has a **free stack**: a count word plus capacity words, filled 0..cap−1 at attach.
+- ℓ1 is scratch, rebuilt each step. `ubaLevel1` gives the parent of every brick on one ℓ0 list (`level1From`, e.g. `fine`) a slot by atomic claim on a per-step table of ℓ1 keys. ℓ2 slots are blocks, listed in the page list.
 - **Fail-fast.** A pop from an empty stack sets the table's fatal word (with the brick id and level) and leaves the brick unslotted. The existing frame diagnostics read it and throw at the first rejection. There is no recovery path and no growth.
 
-Per step, replacing today's clear-and-rebuild:
+Per step, replacing today's clear-and-rebuild (entries as built in `uniform-brick-arena.ts`: ubaUpdate, ubaLists, ubaLevel1, ubaRecord, then ubaRelease after the scatter):
 1. Clear the marks only. The markers run as today, and classes OR in.
 2. **brickTableUpdate** (a thread per brick id; the dilation as today):
    - live now, unslotted: pop a slot, append to the enter list;
@@ -318,20 +319,23 @@ The slot stride is 520 words, not 512: 8 spare words per slot. A power-of-two st
 
 Every channel holds 512 values per brick (520 words of stride): no 9³ duplication, unlike today's windows.
 
-**Declaration.** A stage declares the channels it reads and writes:
+**Declaration.** Channels are declared at construction, each at the levels it lives on:
 ```ts
-arena.channel({ name: "phi", level: 0, layout: "vertex", type: "f32", banks: 2, outside: "far", seam: "coarse-vertex", mirror: "phi" });
-arena.channel({ name: "u", level: 0, layout: "face", type: "f32", banks: 1, outside: "zero", seam: "coarse-face", mirror: "velocity" });
-arena.channel({ name: "p", level: [0, 1, 2], layout: "cell", type: "f32", outside: "zero", seam: "coarse-cell" });
+new UniformBrickArena({ blocks, channels: [
+  { name: "phi", levels: [0, 2], layout: "vertex", banks: 2 },
+  { name: "u", levels: [0, 2], layout: "face" },
+  { name: "p", levels: [0, 1, 2], layout: "cell" },
+  { name: "coef", levels: [0, 1, 2], layout: "face" },
+  { name: "flux", levels: [2], layout: "face" },
+], lists: [{ name: "fine", any: 128 }, { name: "liquid", any: 512 }], level1From: "fine" });
 ```
 
 Fields:
 - `layout: "face"` declares the three components.
-- `banks: 2` gives the double buffer a stage swaps by a uniform word, with no copy.
-- `seam` and `outside` are the staging rules (§3.6).
-- `mirror` names the paged field for churn gather, scatter and write-through.
+- `banks: 2` gives the double buffer. The current bank is a GPU word that a stage flips from one lane of a later pass, with no copy.
+- Seam values are per staging (§3.6). Gather and scatter formulas are per copy entry (§3.7).
 
-Memory is allocated at attach for the union of declared channels. `arena.wgsl(stage)` emits that stage's offsets and the `uba` accessors for its channels only.
+Memory is allocated at attach for every declared channel. In WGSL, bases are `UBA_<NAME>_L<level>_<component>_<bank>`, with `ubaLoad(base, slot, i)` and `ubaStore(base, slot, i, v)`. u32 data is bitcast. Persistence is not a property of a channel: a channel persists unless a stage overwrites it, and ℓ1 channels are scratch because ℓ1 slots are rebuilt every step.
 
 **Initial channel set, agreed by need:**
 
@@ -351,17 +355,24 @@ Memory is allocated at attach for the union of declared channels. `arena.wgsl(st
 
 ### 3.6 Halo staging: one helper, one call site
 
-The generator emits one staging function per kernel:
+The generator emits one staging function per kernel. Each channel has its own halo; pressure's smoother takes p at halo 2 and the row channels at halo 1 in one call:
 ```ts
-arena.stageWGSL("pDown", { level: 0, channels: ["p"], halo: 1, region: "brick" /* or "octant" */ })
+arena.stageWGSL("pDown", { level: 0, region: "brick" /* or "octant" */, workgroup: 256, channels: [
+  { name: "p", halo: 2, seam: "pSeam" }, { name: "rhs", halo: 1, seam: "zeroSeam" }, { name: "coef", component: 0, halo: 1, seam: "coefSeam" } ] })
 ```
 
 It emits:
 ```wgsl
-var<workgroup> ubaW_pDown: array<f32, E*E*E*nChannels>;  // E = n + 2·halo, n = 8 (brick) or 4 (octant)
-fn ubaStage_pDown(slot: u32, lane: u32, origin: vec3i);  // origin: the box's first owned index
-fn ubaAt_pDown(c: vec3i, k: u32) -> u32;                  // index of (c, channel k) in ubaW_pDown, c ∈ [−halo, n+halo)
+var<workgroup> ubaW_pDown: array<f32, Σ_j E_j³>;    // E_j = n + 2·halo_j, n = 8 (brick) or 4 (octant)
+fn ubaStage_pDown(slot: u32, lane: u32, octant: u32); // octant: the region's octant ("octant" only)
+fn ubaAt_pDown(c: vec3i, j: u32) -> u32;              // channel j at c ∈ [−halo_j, n+halo_j), relative to the region
 ```
+
+A seam function is `fn(p: vec3i, word: u32) -> f32`:
+- p is the absolute owned index in the level's cells;
+- word is `UB_NONE`, `UBA_SEAM | block`, or a live slot whose tile or octant is dead.
+
+At ℓ1 the mask is the live-child octants: a dead octant is a seam to ℓ2, by the same code as a dead tile at ℓ0.
 
 Each kernel calls its stage function exactly once, following the one-call-site rule for heavy functions. The kernel may then loop sweeps over workgroup memory.
 
@@ -411,7 +422,7 @@ Levels are brick lists. Every transfer is a workgroup per child brick, with no a
 
 **Indices:**
 - `ubaParent(level, slot) -> vec2u(parentSlot, octant)`;
-- `ubaChild(level, slot, octant) -> slot or UB_NONE`, from the child mask and a 2³ child record in the ℓ1 and ℓ2 records' spare words. The child record needs 8 words; ℓ1 and ℓ2 records extend to 40 words.
+- `ubaChild(level, slot, octant) -> slot or UB_NONE`, read from the ℓ0 table (ℓ1 → ℓ0) or the per-step ℓ1 key table (ℓ2 → ℓ1). Records stay 32 words.
 - `ubaOctantCell(octant, c) = 4·octant + (c >> 1)`: the parent cell of child cell c.
 
 **Restrict (child → parent):**
@@ -451,9 +462,12 @@ Levels are brick lists. Every transfer is a workgroup per child brick, with no a
 | rForces | fused into momentum's u writer | u | — | |
 | rExtend | extend | u, uSnap, known | one component, halo 2–3 | Far faces from ℓ2 |
 
-Open points for the agreement:
-- whether `row` and `coef` are per level or rediscretised on the fly at ℓ1;
-- whether p's ℓ1 slots need persistence. Proposed: no, ℓ1 is scratch between cycles.
+Agreed with the pressure agent, 2026-10-20, from its CPU twin of the frame-94 band (97.5k rows, 636 fine bricks):
+- **Coarse operators are rediscretised:** piecewise-constant aggregation × 0.5, giving a 7-point stencil at every level. Galerkin bought only 0–1 cycle. `row`, `diag` and `coef` are per level, and pDown writes the parent's while it restricts.
+- **ℓ1 and sub-ℓ2 are scratch.** p persists at ℓ0, and at ℓ2 on coarse rows.
+- **The smoother stages p at halo 2 and the row channels at halo 1.** Halo 1 frozen across 2 sweeps needed 8 V(2,2) cycles. Halo 2, with the first sweep updating ring 1, is exact and needs 5–6.
+- **Reflux into a declared ℓ2 face channel,** `flux`.
+- **Lists:** `fine` and `liquid` at ℓ0, ℓ1 from `fine`, and the ℓ2 page list. All counts come from the GPU.
 
 ## 4. Build order and measurements
 
