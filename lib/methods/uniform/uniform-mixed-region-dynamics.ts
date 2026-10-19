@@ -18,8 +18,8 @@ import { UNIFORM_REGION_TIER, uniformRegionHeatWGSL } from "./uniform-region-hea
  *                evaluation (m/s), bounded by UNIFORM_FORCE_RETAIN_BUDGET.
  *   4 lastFull   the frame stamp of the last full forces evaluation.
  *   5 vmax       f32: the 27-region extended speed bound the viscous budget used.
- *   6 dp         f32: max |p^{n+1} - p^n| (Pa) of the accepted 4h root
- *                pressure over the region's 64 tiles, published after the
+ *   6 dp         f32: h times the change in root pressure gradient (Pa),
+ *                bounded over the region's 64 tiles, published after the
  *                band's projection (+Inf where unknown: a tile not published
  *                the frame before, a free region). Current from the publish
  *                to the next frame's publish: a frame-head consumer reads
@@ -180,6 +180,7 @@ export class UniformMixedRegionDynamics {
   private decidePipeline?:GPUComputePipeline;
   private beginPipeline?:GPUComputePipeline;
   private pressurePipeline?:GPUComputePipeline;
+  private rememberPressurePipeline?:GPUComputePipeline;
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sources:UniformRegionDynamicsSources){
     this.regions=ownership.capacity.tiles/64;
     if(!Number.isInteger(this.regions))throw new Error(`Region dynamics: ${ownership.capacity.tiles} tiles are not whole regions`);
@@ -325,7 +326,7 @@ fn umRdDecode(word:u32)->f32{
  umRdForce(region,true);
 }
 `;
-    const publish=common+/* wgsl */`
+    const publish=common+uniformPressureGradientChangeWGSL+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> record:array<atomic<u32>>;
 @compute @workgroup_size(64) fn publishBegin(@builtin(global_invocation_id) gid:vec3u){
  let region=gid.x;if(region>=UM_RD_REGIONS){return;}
@@ -344,11 +345,32 @@ fn umRdDecode(word:u32)->f32{
 }
 fn umRdPressure(t:u32,region:u32){
  let now=pressure[t];let previous=select(rd.stamp-1u,0x0fffffffu,rd.stamp<=1u);
- let known=pressureHistory[2u*t+1u]==previous;let delta=abs(now-bitcast<f32>(pressureHistory[2u*t]));
- pressureHistory[2u*t]=bitcast<u32>(now);pressureHistory[2u*t+1u]=rd.stamp;
+ var known=pressureHistory[2u*t+1u]==previous;var delta=0.0;
+ let change=now-bitcast<f32>(pressureHistory[2u*t]);let c=vec3i(umTileCoord(t));
+ // Pressure offsets are a gauge, not acceleration. Bound the change of
+ // face pressure gradients; root neighbours are four base cells apart.
+ for(var axis=0u;axis<3u;axis++){
+  var edge=0.0;
+  for(var side=0u;side<2u;side++){
+   var d=vec3i(0);d[axis]=select(-1,1,side!=0u);let n=umTileKey(c+d);
+   if(!umKeyStored(n)){continue;}
+   known=known&&pressureHistory[2u*n+1u]==previous;
+   let neighbour=pressure[n]-bitcast<f32>(pressureHistory[2u*n]);
+   edge=max(edge,umPressureGradientChange(change,neighbour));
+  }
+  delta+=edge;
+ }
  let bits=select(0x7f800000u,bitcast<u32>(delta),known&&delta<=3.402823e38);
  let at=${W}u*region+${R.pressureDelta}u;
  if(bits>atomicLoad(&record[at])){atomicMax(&record[at],bits);}
+}
+// A separate dispatch is essential: every gradient above must see the same
+// old pressure, including across workgroups and region boundaries.
+@compute @workgroup_size(64) fn rememberPressure(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var t=64u*group.x+lane;t<UM_TILES;t+=64u*groups.x){
+  if(!umRdStored(umPageOfTile(t))){continue;}
+  pressureHistory[2u*t]=bitcast<u32>(pressure[t]);pressureHistory[2u*t+1u]=rd.stamp;
+ }
 }
 `;
     const classifyModule=uniformDetailModule(this.device,{label:"Uniform region dynamics classify",code:classify});
@@ -357,9 +379,9 @@ fn umRdPressure(t:u32,region:u32){
     const classifyLayout=this.device.createPipelineLayout({bindGroupLayouts:[o.bindLayout,this.classifyLayout]});
     const publishLayout=this.device.createPipelineLayout({bindGroupLayouts:[o.bindLayout,this.publishLayout]});
     const compile=(module:GPUShaderModule,layout:GPUPipelineLayout,entryPoint:string,constants:Record<string,number>={})=>uniformDetailPipeline(this.device,o,{layout,compute:{module,entryPoint,constants:{umDispatchX:o.dispatchX,...constants}}});
-    [this.keyPipeline,this.decidePipeline,this.beginPipeline,this.pressurePipeline]=await Promise.all([
+    [this.keyPipeline,this.decidePipeline,this.beginPipeline,this.pressurePipeline,this.rememberPressurePipeline]=await Promise.all([
       compile(classifyModule,classifyLayout,"regionKey"),compile(classifyModule,classifyLayout,"regionDecide"),
-      compile(publishModule,publishLayout,"publishBegin"),compile(publishModule,publishLayout,"publishPressure")]);
+      compile(publishModule,publishLayout,"publishBegin"),compile(publishModule,publishLayout,"publishPressure"),compile(publishModule,publishLayout,"rememberPressure")]);
   }
   private groups():{classify:GPUBindGroup;publish:GPUBindGroup}{
     const s=this.sources;
@@ -394,6 +416,12 @@ fn umRdPressure(t:u32,region:u32){
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups().publish);
     pass.setPipeline(uniformDetailPick(this.beginPipeline!));pass.dispatchWorkgroups(Math.ceil(this.regions/64));
     pass.setPipeline(uniformDetailPick(this.pressurePipeline));pass.dispatchWorkgroups(Math.min(PRESSURE_GROUPS,this.ownership.capacity.tiles/64));
+    pass.setPipeline(uniformDetailPick(this.rememberPressurePipeline!));pass.dispatchWorkgroups(Math.min(PRESSURE_GROUPS,this.ownership.capacity.tiles/64));
     pass.end();
   }
 }
+
+/** Base-cell pressure equivalent of a change across a four-cell root face. */
+export const uniformPressureGradientChangeWGSL=/* wgsl */`
+fn umPressureGradientChange(change:f32,neighbour:f32)->f32{return abs(change-neighbour)*0.25;}
+`;

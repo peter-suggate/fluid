@@ -2,12 +2,12 @@ import type { MethodParamValues } from "../../core/method-contract";
 
 /** The NB-FLIP near-settled settings (method params regionTiering,
  * warmResolution, particleSeeding, bandExit), fixed for a solver's life (update
- * "solver": pipeline variants are chosen at attach). Each default is the
- * resolution-proportional behaviour; the other option is the motion-driven
- * treatment before it, kept as a maintained path.
- * - regionTiering: "error" tiers a 16h region by the resolution its motion
- *   needs (UniformRegionHeatSources.tiering); "motion" by any motion.
- * - warmResolution: "4h" computes WARM regions at 4h; "h" at h.
+ * "solver": pipeline variants are chosen at attach). Defaults use error-driven update activity and independently selected
+ * spatial resolution; comparison options remain available.
+ * - regionTiering: "error" bounds omitted transport, momentum and pressure
+ *   response; "motion" wakes on any motion.
+ * - warmResolution: "h" preserves spatially selected detail (default); "4h"
+ *   forcibly coarsens WARM pressure and solid geometry.
  * - particleSeeding: "need" seeds particles only where the grid under-resolves
  *   the flow; "activity" wherever the activity heat spreads.
  * - bandExit: "returns" ends the h band's V-cycles at diminishing returns
@@ -16,7 +16,7 @@ export interface UniformNearSettled{readonly regionTiering:"error"|"motion";read
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
- warmResolution:values.warmResolution==="h"?"h":"4h",
+ warmResolution:values.warmResolution==="4h"?"4h":"h",
  particleSeeding:values.particleSeeding==="activity"?"activity":"need",
  bandExit:values.bandExit==="strict"?"strict":"returns",
 });

@@ -219,6 +219,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get airGateBuffer():GPUBuffer{return this.bins;}
  /** The particle activity heat plane (f32 a tile key, NB_ACTIVITY_HEAT) in airGateBuffer: the region heat's particle evidence. */
  get activityHeatWord():number{return this.activityWord+2*this.tiles;}
+ private updateErrors?:GPUBuffer;
+ /** Bind tile update evidence separately from the shape/refinement census. */
+ attachUpdateErrors(buffer:GPUBuffer):void{this.updateErrors=buffer;}
  private refinementPipeline?:GPUComputePipeline;
  private refinementLayout?:GPUBindGroupLayout;
  private readonly refinementGroups:({particles:GPUBuffer;target:GPUBuffer;wordOffset:number;size:number;group:GPUBindGroup}|undefined)[]=[];
@@ -498,6 +501,13 @@ ${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
 ${slots?UniformColdFreeze.wgsl(undefined,1,18):UniformColdFreeze.wgsl(this.freeze,1,18)}
+${this.updateErrors?`// Packed certificate copy: reuse the bins binding (the full FLIP layout is at its buffer limit).
+const NB_UPDATE_ERRORS:u32=${this.activityWord+7*this.tiles}u;
+fn tuSpeed(t:u32)->f32{
+ let at=NB_UPDATE_ERRORS+4u*t;
+ if(!umKeyStored(t)||atomicLoad(&bins[at+2u])!=umBlockWord(t>>9u)||bitcast<f32>(atomicLoad(&bins[at+3u]))<=0.0){return 3.402823e38;}
+ return bitcast<f32>(atomicLoad(&bins[at]));
+}`:"fn tuSpeed(t:u32)->f32{return 3.402823e38;}"}
 // A thawing region's coarse term on an h cell's three positive faces.
 fn nbThaw(cell:vec3u)->vec3f{return vec3f(umThawFaceTerm(vec3i(cell),0u,1u),umThawFaceTerm(vec3i(cell),1u,1u),umThawFaceTerm(vec3i(cell),2u,1u));}
 // The spatial order leaves the samples sorted by cell key, a tile's 64 cells
@@ -1402,6 +1412,7 @@ ${narrowBandSurfaceWGSL}
   const w=this.activityWords;w[0]=2/Math.max(0.05,fadeSeconds);w[1]=sparseSeconds;w[2]=0;w[3]=0;
   this.device.queue.writeBuffer(this.params,32,w);
   this.writeStep(dt,0,0);
+  if(this.updateErrors)encoder.copyBufferToBuffer(this.updateErrors,32*this.tiles,this.bins,4*(this.activityWord+7*this.tiles),16*this.tiles);
   encoder.copyBufferToBuffer(importance.buffer,importance.offset,this.bins,this.activityWord*4,this.tiles*8);
   this.run(encoder,this.compiled.activity);
  }

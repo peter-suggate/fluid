@@ -34,6 +34,10 @@ import type { UniformRegionHeat } from "./uniform-region-heat";
  * reads it, so freezing/frozen is exactly tier COLD (every region in a
  * quiet frame, encodeHead) for the rest of the frame. The term the accumulate adds reaches the snapshot at the next head.
  *
+ * The snapshot's second bank (R+1 through 2R) holds the accumulated
+ * per-axis velocity error discarded by the regional mean. The next heat
+ * decision charges it to the freeze budget; thawing resets it.
+ *
  * Corrections: an r32float 2D texture, texel 3*tile + axis (a 4h face:
  * tile key and axis), the projection's (write-only binding); 3e38 (NO_FACE)
  * for a frozen face that is no liquid row, and after the accumulate read it.
@@ -74,6 +78,7 @@ export function uniformColdFreezeWGSL(group:number,regionsBinding:number,correct
  if(!UNIFORM_COLD_FREEZE||!shape)return /* wgsl */`
 const UM_COLD_FREEZE:bool=false;
 fn umColdState(region:u32)->u32{return 0u;}
+fn umColdError(region:u32)->f32{return 0.0;}
 fn umFrozenRegion(region:u32)->bool{return false;}
 fn umColdTermOf(region:u32,axis:u32)->f32{return 0.0;}
 fn umFrozenCell(cell:vec3i)->bool{return false;}
@@ -89,6 +94,7 @@ ${correctionsBinding!==undefined?`@group(${group}) @binding(${correctionsBinding
 const UM_COLD_FREEZE:bool=true;
 const UM_COLD_REGIONS:u32=${shape.regions}u;
 fn umColdTexel(region:u32)->vec4f{return textureLoad(umColdRegions,vec2i(i32(region%${REGION_WIDTH}u),i32(region/${REGION_WIDTH}u)),0);}
+fn umColdError(region:u32)->f32{if(region>=UM_COLD_REGIONS){return 0.0;}let e=umColdTexel(UM_COLD_REGIONS+1u+region).xyz;return e.x+e.y+e.z;}
 fn umColdState(region:u32)->u32{if(region>=UM_COLD_REGIONS){return 0u;}return u32(umColdTexel(region).x);}
 fn umFrozenRegion(region:u32)->bool{let s=umColdState(region);return s==1u||s==2u;}
 fn umColdTermOf(region:u32,axis:u32)->f32{if(region>=UM_COLD_REGIONS){return 0.0;}return umColdTexel(region)[axis+1u];}
@@ -123,7 +129,7 @@ ${correctionsBinding!==undefined?`fn umColdCorrect(tile:u32,axis:u32,value:f32){
 /** Region freeze state, term and corrections (see the file comment). */
 export class UniformColdFreeze {
   readonly shape:UniformColdFreezeShape;
-  /** Canonical T and state, 4 f32 a region. */
+  /** T.xyz/state, followed by accumulated discarded pressure correction xyz. */
   readonly buffer:GPUBuffer;
   /** The frame's snapshot (sampled by every stage). */
   readonly regions:GPUTexture;
@@ -139,8 +145,8 @@ export class UniformColdFreeze {
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly heat:UniformRegionHeat){
     const regions=heat.regions,tiles=ownership.capacity.tiles;this.shape={regions,tiles};
     // Zero: every region live with no term until the first head.
-    this.buffer=device.createBuffer({label:"Uniform cold freeze",size:16*regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
-    const rows=Math.ceil((regions+1)/REGION_WIDTH),faces=3*tiles,faceRows=Math.ceil(faces/CORRECTION_WIDTH);
+    this.buffer=device.createBuffer({label:"Uniform cold freeze",size:32*regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    const rows=Math.ceil((2*regions+1)/REGION_WIDTH),faces=3*tiles,faceRows=Math.ceil(faces/CORRECTION_WIDTH);
     if(faceRows>device.limits.maxTextureDimension2D)throw new Error(`Cold freeze: ${faces} face corrections exceed the 2D texture limit`);
     this.regions=device.createTexture({label:"Uniform cold freeze regions",dimension:"2d",format:"rgba32float",size:[REGION_WIDTH,rows],usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
     this.corrections=device.createTexture({label:"Uniform cold freeze corrections",dimension:"2d",format:"r32float",size:[CORRECTION_WIDTH,faceRows],usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_DST});
@@ -182,21 +188,26 @@ fn texel(i:u32)->vec2i{return vec2i(i32(i%${REGION_WIDTH}u),i32(i/${REGION_WIDTH
  var value=freeze[region];let old=u32(value.w);let cold=tiers[region]==0u||params.y!=0.0;
  let held=old==1u||old==2u;var state=0u;
  if(cold){state=select(1u,2u,held);}else{state=select(0u,3u,held);}
- if(state==1u||state==0u){value=vec4f(0.0);}
+ if(state==1u||state==0u){value=vec4f(0.0);freeze[REGIONS+region]=vec4f(0.0);}
  value.w=f32(state);freeze[region]=value;
  textureStore(snapshot,texel(region),vec4f(value.w,value.xyz));
+ textureStore(snapshot,texel(REGIONS+1u+region),freeze[REGIONS+region]);
 }
 `});
     const accumulateLayout=device.createBindGroupLayout({label:"Uniform cold freeze accumulate",entries:[buffer(0,"storage"),
-      {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"2d"}},buffer(2,"read-only-storage")]});
+      {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"2d"}},buffer(2,"read-only-storage"),{binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"2d"}}]});
     const accumulate=uniformDetailModule(device,{label:"Uniform cold freeze accumulate",code:uniformMixedTopologyWGSL(o.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> freeze:array<vec4f>;
 @group(1) @binding(1) var corrections:texture_storage_2d<r32float,read_write>;
+@group(1) @binding(3) var snapshot:texture_storage_2d<rgba32float,write>;
 ${uniformMixedFrameStatusWGSL(1,2,"read")}
 const REGIONS:u32=${R}u;
 var<workgroup> sums:array<vec4f,64>;
 var<workgroup> counts:array<vec4f,64>;
 var<workgroup> frozen:u32;
+${uniformColdProjectionDefectWGSL}
+var<workgroup> correctionLo:array<vec3f,64>;
+var<workgroup> correctionHi:array<vec3f,64>;
 // One workgroup a region (a fixed grid striding them), a lane a tile: a
 // frozen region adds the mean correction of its own tiles' positive 4h
 // faces, per axis, to T, and resets each read correction to NO_FACE (a
@@ -216,15 +227,22 @@ var<workgroup> frozen:u32;
    }
   }
   sums[lane]=sum;counts[lane]=count;
+  correctionLo[lane]=select(vec3f(3.0e38),sum.xyz,count.xyz>vec3f(0.0));correctionHi[lane]=select(vec3f(-3.0e38),sum.xyz,count.xyz>vec3f(0.0));
   workgroupBarrier();
   for(var stride=32u;stride>0u;stride>>=1u){
-   if(lane<stride){sums[lane]+=sums[lane+stride];counts[lane]+=counts[lane+stride];}
+   if(lane<stride){sums[lane]+=sums[lane+stride];counts[lane]+=counts[lane+stride];correctionLo[lane]=min(correctionLo[lane],correctionLo[lane+stride]);correctionHi[lane]=max(correctionHi[lane],correctionHi[lane+stride]);}
    workgroupBarrier();
   }
   if(lane==0u){
-   var value=freeze[region];let s=sums[0];let n=counts[0];
+   var value=freeze[region];let old=value.xyz;let s=sums[0];let n=counts[0];
    for(var axis=0u;axis<3u;axis++){if(n[axis]<0.0){value[axis]=0.0;}else if(n[axis]>0.0){value[axis]+=s[axis]/n[axis];}}
    freeze[region]=value;
+   // The regional mean discards non-uniform pressure response. Accumulate
+   // its velocity error until thaw, rather than certifying the frozen F
+   // field against itself indefinitely.
+   let error=umColdProjectionDefect(correctionLo[0],correctionHi[0],value.xyz-old);
+   let accumulated=freeze[REGIONS+region]+vec4f(error,0.0);freeze[REGIONS+region]=accumulated;
+   let at=REGIONS+1u+region;textureStore(snapshot,vec2i(i32(at%${REGION_WIDTH}u),i32(at/${REGION_WIDTH}u)),accumulated);
   }
   workgroupBarrier();
  }
@@ -236,7 +254,7 @@ var<workgroup> frozen:u32;
       uniformDetailPipeline(device,o,{layout:device.createPipelineLayout({bindGroupLayouts:[o.bindLayout,accumulateLayout]}),compute:{module:accumulate,entryPoint:"accumulate",constants:{umDispatchX:o.dispatchX}}}),
     ]);
     this.headGroup=device.createBindGroup({label:"Uniform cold freeze head",layout:headLayout,entries:[{binding:0,resource:{buffer:this.heat.tiers,size:4*R}},{binding:1,resource:{buffer:this.buffer}},{binding:2,resource:this.regions.createView()},{binding:3,resource:{buffer:this.params}}]});
-    this.accumulateGroup=device.createBindGroup({label:"Uniform cold freeze accumulate",layout:accumulateLayout,entries:[{binding:0,resource:{buffer:this.buffer}},{binding:1,resource:this.corrections.createView()},{binding:2,resource:{buffer:status}}]});
+    this.accumulateGroup=device.createBindGroup({label:"Uniform cold freeze accumulate",layout:accumulateLayout,entries:[{binding:0,resource:{buffer:this.buffer}},{binding:1,resource:this.corrections.createView()},{binding:2,resource:{buffer:status}},{binding:3,resource:this.regions.createView()}]});
   }
   /** After the frame head's tiers are final (the relayout head's encodeDeep),
    * before every stage that reads the freeze. dt, gravity: the frame's step
@@ -259,3 +277,13 @@ var<workgroup> frozen:u32;
   }
   destroy():void{this.buffer.destroy();this.regions.destroy();this.corrections.destroy();this.params.destroy();}
 }
+
+/** Velocity omitted when replacing the face corrections by a region term.
+ * The sum of per-axis bounds also bounds normal transport for unit normals. */
+export const uniformColdProjectionDefectWGSL=/* wgsl */`
+fn umColdProjectionDefect(lo:vec3f,hi:vec3f,applied:vec3f)->vec3f{
+ var error=vec3f(0.0);
+ for(var axis=0u;axis<3u;axis++){if(lo[axis]<=hi[axis]){error[axis]=max(abs(lo[axis]-applied[axis]),abs(hi[axis]-applied[axis]));}}
+ return error;
+}
+`;

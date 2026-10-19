@@ -1,3 +1,4 @@
+import {NARROW_BAND_ACTIVITY_WORDS_PER_TILE} from "./uniform-narrow-band-activity.wgsl";
 /** Retire stale far-field phi without changing vertices used by physical liquid.
  * Four tile planes: physical seeds, then a separable protected-region dilation.
  * The 16-cell collar covers the distance/volume readers' four-owner band.
@@ -14,7 +15,7 @@ export const NARROW_BAND_AIR_GATE_PLANE=4;
  * gated launch skips it). */
 export const NARROW_BAND_AIR_CHANGED_WORD=15;
 export const narrowBandAirWGSL=/* wgsl */`
-const NB_AIR=NB_ACTIVITY_SURFACE_HEAT+UM_TILES;
+const NB_AIR=NB_ACTIVITY_SURFACE_HEAT+${NARROW_BAND_ACTIVITY_WORDS_PER_TILE-6}u*UM_TILES;
 // A trilinear field attains its extrema on a box at its corners. Restrict
 // the box to a conservative superset of the cell's open part. In particular,
 // negative corners buried under a heightfield are not physical liquid.

@@ -21,11 +21,11 @@ test("empty-air retirement clears buried phi and preserves bulk, particles and s
    }
    const input=device.createTexture({size:[nx+1,ny+1,nz+1],dimension:"3d",format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
    const output=device.createTexture({size:[nx+1,ny+1,nz+1],dimension:"3d",format:"r32float",usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_DST});
-   const bins=device.createBuffer({size:4*6*tiles,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+   const bins=device.createBuffer({size:4*11*tiles,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
    const read=device.createBuffer({size:4*vertices,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
    // An isolated ballistic sample in positive air at x=48, across a page
    // boundary from its protected halo. It must retain support without phi.
-   const particleTile=12+32*(1+2*1),mask=new Uint32Array(6*tiles);mask[particleTile]=1;
+   const particleTile=12+32*(1+2*1),mask=new Uint32Array(11*tiles);mask[particleTile]=1;
    device.queue.writeBuffer(bins,0,mask);
    for(const texture of [input,output])device.queue.writeTexture({texture},values,{bytesPerRow:4*(nx+1),rowsPerImage:ny+1},[nx+1,ny+1,nz+1]);
    try{
@@ -35,6 +35,11 @@ test("empty-air retirement clears buried phi and preserves bulk, particles and s
 @group(0) @binding(2) var<storage,read_write> bins:array<atomic<u32>>;
 @group(0) @binding(3) var<storage,read_write> result:array<f32>;
 const UM_TILES=${tiles}u;const NB_SURFACE_TILES=0u;const NB_ACTIVITY_SURFACE_HEAT=UM_TILES;
+const umCounts=vec4u(${width===1?tiles:0}u,0u,0u,0u);
+const umTopology=array<u32,${2*tiles}>(${Array.from({length:2*tiles},(_,i)=>`${i%tiles}u`).join(",")});
+var<workgroup> state:array<atomic<u32>,16>;
+fn nbTileCold(t:u32)->bool{return false;}
+fn nbStoreInPlace(p:vec3u,value:f32){textureStore(outputPhi,vec3i(p),vec4f(value));}
 struct Params{hDt:vec4f} const params=Params(vec4f(0.02,0.04,0.01,0.016666667));
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
 fn umTileCoord(t:u32)->vec3u{return vec3u(t%32u,(t/32u)%2u,t/64u);}
@@ -63,7 +68,7 @@ ${narrowBandAirWGSL}
      ...[2,3].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
     ]});
     const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
-    const entries=["airSeeds","airSpread0","airSpread1","airSpread2","airClearFine","airClearCoarse","read"];
+    const entries=["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airClearFine","airClearCoarse","read"];
     const pipelines=await Promise.all(entries.map(entryPoint=>device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
     const group=device.createBindGroup({layout,entries:[{binding:0,resource:input.createView()},{binding:1,resource:output.createView()},{binding:2,resource:{buffer:bins}},{binding:3,resource:{buffer:read}}]});
     const e=device.createCommandEncoder();
@@ -76,9 +81,9 @@ ${narrowBandAirWGSL}
      if(x>=96&&x<=112)assert.equal(after[index],values[index],`Eulerian bulk/halo changed at ${[x,y,z]} width ${width}`);
      if(x>=32&&x<=68)assert.equal(after[index],values[index],`ballistic support changed at ${[x,y,z]} width ${width}`);
     }
-    assert.equal(words[2*tiles+particleTile],1,"ballistic tile seeds support");
-    assert.equal(words[2*tiles],0,"buried liquid must not seed support");
-    assert.equal(words[2*tiles+26+32*(1+2*1)],1,"Eulerian liquid must seed without particles");
+    assert.equal(words[6*tiles+particleTile],1,"ballistic tile seeds support");
+    assert.equal(words[6*tiles],0,"buried liquid must not seed support");
+    assert.equal(words[6*tiles+26+32*(1+2*1)],1,"Eulerian liquid must seed without particles");
    }finally{input.destroy();output.destroy();bins.destroy();read.destroy();}
   }
  });

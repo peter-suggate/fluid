@@ -1,3 +1,4 @@
+import {UNIFORM_SURFACE_TRANSPORT_ERROR_H} from "./uniform-surface-transport.wgsl";
 import { UNIFORM_STAGE_IMPORTANCE as I } from "./uniform-stage-grids";
 import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
 
@@ -11,18 +12,24 @@ import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
  * module) picks the triggered criteria that heat and seed. */
 /** fn nbActivityTriggered(t:u32,criteria:u32)->bool: whether tile key t's
  * triggered criteria (bits in UNIFORM_DETAIL_CRITERIA order: shape, thin,
- * strain, rotation, impact, approach) heat it. "activity": any. "need": thin,
- * strain, rotation, impact or approach (what the h grid cannot hold), and
- * shape only near a body (its waterline and wake). Shape elsewhere measures
+ * strain, rotation, impact, approach) heat it. "activity": any. "need":
+ * strain, rotation, impact or approach; thin geometry and shape near a body
+ * also require per-tile motion above the transport budget. Static shape
+ * remains spatially refined without refreshing particle heat. Shape elsewhere measures
  * h-versus-4h surface error, which the h tiles it requires already carry:
  * a ripple or a resting wall's meniscus needs h, not particles. */
 export function narrowBandActivityTriggerWGSL(seeding:"need"|"activity"):string{
  if(seeding==="activity")return "fn nbActivityTriggered(t:u32,criteria:u32)->bool{return criteria!=0u;}";
  return /* wgsl */`fn nbActivityTriggered(t:u32,criteria:u32)->bool{
- if((criteria&0x3eu)!=0u){return true;}
- return (criteria&1u)!=0u&&umBodyCount()>0u&&umBodyPoseNearTile(t,${UNIFORM_BODY_GEOMETRY_REACH}u);
+ // Strain, rotation, impact and approach already measure evolution.
+ if((criteria&0x3cu)!=0u){return true;}
+ // Thin/curved geometry still requests h in the census. It requests particles
+ // only when motion can change that shape by more than the transport budget.
+ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+ let changing=params.hDt.w*tuSpeed(t)/h>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
+ return changing&&((criteria&2u)!=0u||((criteria&1u)!=0u&&umBodyCount()>0u&&umBodyPoseNearTile(t,${UNIFORM_BODY_GEOMETRY_REACH}u)));
 }`;}
-export const NARROW_BAND_ACTIVITY_WORDS_PER_TILE = 7;
+export const NARROW_BAND_ACTIVITY_WORDS_PER_TILE = 11;
 export const narrowBandActivityWGSL = /* wgsl */`
 const NB_ACTIVITY_SCORES=NB_BAND_SEAM+NB_BAND_TILES;
 const NB_ACTIVITY_HEAT=NB_ACTIVITY_SCORES+2u*NB_BAND_TILES;

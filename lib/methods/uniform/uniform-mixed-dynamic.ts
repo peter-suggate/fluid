@@ -1,3 +1,4 @@
+import {uniformSolidRefinementWGSL} from "./uniform-solid-refinement";
 import { STAGE_RESIDENCY_WORDS, RESIDENCY_STAGES, RESIDENCY_STENCIL_TILES, localResidencyWGSL, localResidencyRequestWGSL, localResidencyMarkWGSL } from "./uniform-local-residency";
 import { narrowBandBudgetWGSL, narrowBandBudgetWords, NARROW_BAND_BUDGET_ENTRIES } from "./uniform-narrow-band-budget.wgsl";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
@@ -664,6 +665,7 @@ fn umSolidAt(q:vec3i)->bool{
  return umHostSolid(q);
 }
 fn umSolidTile(p:vec3u)->bool{return umSolidAt(vec3i(p));}
+${uniformSolidRefinementWGSL(this.solidGeometry.count)}
 // Tiles between tile t and the closed wall of its page across direction k
 // (-x,-y,-z,+x,+y,+z): the SOLID page there. NO_WALL where that page is
 // stored or AIR: past every tile scan.
@@ -1339,6 +1341,7 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
 @compute @workgroup_size(64) fn solidActive(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
  if(!umSolidTile(umTileCoord(tile))){return;}
+ if(umSolidGeometryExact(tile)){return;}
  ${this.warmSolids?`// warmResolution "4h": a WARM region's cut tile is the root's 4h cut owner
  // (record Omega and V) and promotes nothing; a COLD one keeps its width.
  {let tier=bounds[CC_TIER+umPageOfTile(tile)];

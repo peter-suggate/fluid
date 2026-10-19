@@ -963,7 +963,15 @@ fn umBodyPoseReach(region:u32)->u32{if(!umSolidEnabled()){return 255u;}if(region
 // Tile key t's region is within margin h of the swept/pose support; a key no
 // page stores answers true.
 fn umBodySweptNearTile(t:u32,margin:u32)->bool{if(!umSolidEnabled()){return false;}if(!umKeyStored(t)){return true;}return umBodySweptReach(umBodyRegionOfTile(t))<=margin;}
-fn umBodyPoseNearTile(t:u32,margin:u32)->bool{if(!umSolidEnabled()){return false;}if(!umKeyStored(t)){return true;}return umBodyPoseReach(umBodyRegionOfTile(t))<=margin;}
+fn umBodyPoseNearTile(t:u32,margin:u32)->bool{
+ if(!umSolidEnabled()){return false;}if(!umKeyStored(t)){return true;}
+ if(umBodyPoseReach(umBodyRegionOfTile(t))>margin){return false;}
+ // Region reach is a broad phase only: a body must reach this tile itself.
+ let h=umSolidParams.cellGravity.xyz;let lo=umSolidWorldCell(vec3i(4u*umTileCoord(t)))-.5*h;let hi=lo+4.0*h;
+ for(var i=0u;i<umBodyCount();i++){let b=umSolidBodies[i];if(b.dimensions.w<=0.0){continue;}
+  if(distance(clamp(b.positionShape.xyz,lo,hi),b.positionShape.xyz)<=b.dimensions.w+f32(margin)*max(h.x,max(h.y,h.z))){return true;}}
+ return false;
+}
 // This head's swept evidence has not been taken by a derived-geometry launch yet.
 fn umBodyEvidencePending()->bool{return umSolidEnabled()&&umSolidRecord[umBodyRegionBase()+umSolidTiles()/64u].x>0.5;}
 // A body of the record's build mirror reached within a cell of tile t.
