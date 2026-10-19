@@ -828,14 +828,18 @@ export function uniformMixedSolidPipeline(_solid:UniformMixedSolid|undefined,cre
  * every h cell around them is closed: its plane is read at them. A box tile
  * no page stores counts as a 4h owner. */
 export const uniformMixedVertexBuriedWGSL=/* wgsl */`
+// The capacity of one incident cell at its owner's width; t: the key of its tile.
+fn umVertexCellCapacity(cell:vec3i,t:u32)->bool{
+ if(!umSolidValid(cell)){return false;}
+ if(!umKeyStored(t)){return umTileOpenAt(cell>>vec3u(2u))>1e-5;}
+ if(umTileWidth(t)==4u){return umTileOpen(t)>1e-5;}
+ return umCellIsOpen(cell);
+}
 fn umVertexBuried(p:vec3i)->bool{
  let base=p-vec3i(1);
  for(var k=0u;k<8u;k++){
-  let cell=base+vec3i(umCorner(k,2u));if(!umSolidValid(cell)){continue;}
-  let tile=cell>>vec3u(2u);let t=umTileKey(tile);
-  if(!umKeyStored(t)){if(umTileOpenAt(tile)>1e-5){return false;}}
-  else if(umTileWidth(t)==4u){if(umTileOpen(t)>1e-5){return false;}}
-  else if(umCellIsOpen(cell)){return false;}
+  let cell=base+vec3i(umCorner(k,2u));
+  if(umVertexCellCapacity(cell,umTileKey(cell>>vec3u(2u)))){return false;}
  }
  return true;
 }`;
