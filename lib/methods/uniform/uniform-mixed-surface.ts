@@ -122,7 +122,7 @@ export class UniformMixedSurface {
     /** warmResolution "4h": a WARM vertex deep in liquid or air keeps its value (umHoldWarmDeep). */
     private readonly warmDeepHold=false,
     /** traceSubsteps: how the backtrace sizes its substeps (narrowBandTraceWGSL). */
-    private readonly traceSubsteps:NarrowBandTraceSubsteps="travel") {
+    private readonly traceSubsteps:NarrowBandTraceSubsteps="gradient") {
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
