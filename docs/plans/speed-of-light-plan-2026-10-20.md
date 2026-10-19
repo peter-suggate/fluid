@@ -23,6 +23,7 @@ Pour run part2h (HEAD at 99d4a0ef plus particle work; frames 94–100):
 
 Notes:
 - **Idle time.** The frame also carries about 7.2 ms of GPU idle between passes, outside the pass sum. The 331 passes' own floor is about 0.76 ms. The idle is its own lever: copies, clears and dependency bubbles.
+- **Surface bound restated (2026-10-20).** The ~0.6 ms bound assumed taps served from staged workgroup windows. The h band is too thin for that: about 103 of every 125 window tiles are 4h, and the staged sAdvect lost (9.64 ms against 6.05 ms for advect). Advect taps run at the gather rate (about 22 G/s, 2.18 ns per 48-tap trace), which puts advect's floor alone at about 0.9 ms. The surface design (`brick-arena-core-2026-10-20.md` §5) projects 15.0 → 5.4 ms (0.90 per k fine tiles) through a sign certificate, persistent fine φ and a workgroup-atomic splat. That is not window staging. The coarse level (1.22 ms) has no named win yet.
 - **Counts vary between runs.** Pour state differs a lot from run to run (580k–1.1M particles, 5.6k–7.7k fine tiles). Every claim below is per unit of work, and wins are timed against one captured state (§6).
 
 If the three stages reach their 2× targets (≤3 ms together, against 35 ms today) and particles reach their measured design (2.4 ms), the pass sum is about 48.8 − 35.1 + 3.0 − 4.1 ≈ **12.6 ms**. That leaves room for idle and the untouched rest inside 17 ms.
