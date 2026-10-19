@@ -53,6 +53,35 @@ test("worker progress keeps one document-clock start time for an activity", asyn
   }
 });
 
+test("worker clock origins translate shared frame traces once without changing durations", async () => {
+  const statuses: GPUStatus[] = [];
+  await withClient(async (client, worker) => {
+    worker.emit({ type: "attached", timeOrigin_ms: performance.timeOrigin + 10_000 });
+    worker.emit({ type: "status", workerNow_ms: 50_000, status: {
+      state: "initializing", label: "Building scene", startedAt_ms: 20,
+      resource: webGPUPlatformResourcePlugin,
+    } });
+    const trace = { sampleId: 1, domain: "gpu" as const, lane: "presentation" as const,
+      context: "test", capturedAt_ms: 100, total_ms: 10, phases: [] };
+    // A worker sample can be both the primary trace and its semantic partition.
+    const metrics = { context: "test", methodId: "test", presentationSubmitted: true,
+      presentation: trace, presentationStages: trace, presentationQueue: { ...trace, total_ms: 12 } };
+    worker.emit({ type: "frame", frameId: 1, metrics, snapshot: {
+      presentationRevision: 0, presentationResolution: "100×100", completedPresentationCount: 1,
+      latestPixelTrace: undefined, pixelTraceRevision: 0, pixelTraceAvailable: false,
+      pixelTraceStatus: "path-inactive", pixelTraceAnswersRequest: false, pixelTraceStale: false,
+      rigidBodyPoses: [], rigidBodyPoseRevision: 0,
+    } });
+    assert.equal(trace.capturedAt_ms, 10_100);
+    assert.equal(metrics.presentationQueue.capturedAt_ms, 10_100);
+    assert.equal(trace.total_ms, 10);
+    assert.equal(metrics.presentationQueue.total_ms, 12);
+    assert.equal(client.completedPresentationCount, 1);
+  }, status => statuses.push(status));
+  assert.equal(statuses[0].state === 'initializing' && statuses[0].startedAt_ms, 10_020,
+    'message latency must not enter the clock translation');
+});
+
 test("shutdown rejects outstanding validation and rejects any later edit immediately", async () => {
   await withClient(async (client, worker) => {
     const pending = client.validateLiveSolidEdit(defaultScene, defaultScene);

@@ -120,7 +120,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       (time_s) => post({ type: "advance-completed", time_s }),
       (status) => post({ type: "effective-renderer-status", status }),
     );
-    post({ type: "attached" });
+    post({ type: "attached", timeOrigin_ms: performance.timeOrigin });
     return;
   }
   const runtime = renderer;

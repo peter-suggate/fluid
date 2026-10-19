@@ -289,3 +289,54 @@ attachment changes, immediate edit extraction, and asynchronous status polling.
 
 The explicit Metal GPU suite passes all seven coverage, mesh-stream and raster-AO
 checks with no skips or validation errors.
+
+### Interactive worker cadence (2026-10-19)
+
+The dry-render audit above missed the interactive document adapter used by the
+browser. `interactionScene` retained a derived document but dropped its revision
+stamp. `FluidLabRenderer.publishRenderScene` therefore took its external-document
+fallback on every draw: recursively sort, copy and stringify the entire scene.
+Pool Party's canonical document is 3,213,094 characters. A standalone 120-call
+check measured 58.2 ms median / 75.1 ms p95 for that fallback (Node); the browser's
+full worker CPU reading was 24.47 ms. This was real work outside the GPU total.
+
+Derived application documents now receive their own stable revision once, retain
+identity across draws, and receive a new revision after an authored replacement.
+Unversioned external documents retain their content-checking fallback. Both normal
+and unsupported-interaction adapter paths preserve this contract.
+
+Worker and window `performance.now()` clocks also had different origins. Frame
+and physics traces were passed straight to the window, whose freshness filter
+compared them against its own instrumentation start time. The attach handshake
+now supplies `performance.timeOrigin`; the client translates each distinct cloned
+trace once, including aliased presentation/stage traces. Durations are unchanged,
+and message-delivery latency cannot change the clock offset.
+
+A direct Chrome comparison used paused interactive Pool Party, refinement depth 1,
+smooth surfaces, Raster + AO, and a 3456×1882 render surface:
+
+| Reading | Before revision fix | After revision fix |
+| --- | ---: | ---: |
+| Completed-presentation FPS | 40.0 | approximately 60 (58.3–61.0 sampled) |
+| CPU | 24.47 ms | 0.49–0.53 ms |
+| GPU frame span | 11.37 ms | 13.10–13.53 ms |
+| Primary rasterization | 4.98 ms | 5.61–5.65 ms |
+| Queue wall | 24.73 ms | 31.67–31.71 ms |
+
+These are live panel observations, not a controlled GPU speedup claim. Removing
+the CPU bottleneck increases GPU submission throughput; queue wall includes two
+in-flight presentations and callback delivery, so it is neither an additive GPU
+stage nor the reciprocal of FPS. Completed-frame sampling can straddle batched
+callbacks around the 60 Hz cadence. Browser evidence is saved locally under
+`artifacts/pool-cadence/`, including the after screenshot. The remaining primary
+GPU cost is investigated separately with draw-command ablations.
+
+At the same resolution and refinement, isolated draw ablations measured the
+shared pass at 4.784 ms median before and after the experiment. Omitting imported
+asset draws reduced it to 2.228 ms; omitting voxel triangles reduced it to
+3.604 ms; omitting the background reduced it to 4.588 ms. Planar/rigid omission
+made no measurable difference in this view. These differences are marginal costs:
+removing geometry changes occlusion, so they must not be summed as a partition.
+`FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION=1` records the production render bundle once,
+then replays alternatives that omit only draws using the named pipeline. It does
+not add production passes or change the shipped renderer.

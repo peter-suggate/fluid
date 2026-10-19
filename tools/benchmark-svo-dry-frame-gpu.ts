@@ -119,6 +119,7 @@ import type { RenderFrameSeam } from "../lib/core/render-frame-stages";
 import "../lib/methods";
 import assert from "node:assert/strict";
 import { benchmarkSvoPrimaryPass } from "./benchmark-svo-primary-pass";
+import { primaryDrawAblation } from "./primary-draw-ablation";
 import { capturePrimaryComputeInputs } from "./probe-svo-primary-compute";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -1070,7 +1071,8 @@ async function awaitPresentationBundle(target: SparseVoxelDrySceneRenderer): Pro
   assert.equal(target.presentationBundleStatus.state, "ready", JSON.stringify(target.presentationBundleStatus));
 }
 
-const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
+const primaryAblation = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION === "1" ? primaryDrawAblation(device) : undefined;
+const renderer = new SparseVoxelDrySceneRenderer(primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
@@ -1223,6 +1225,14 @@ if (profileGate) {
 }
 
 const primaryPassTimings = [];
+if (primaryAblation) {
+  for (const omitted of ['', ...primaryAblation.labels, '']) {
+    const timing = await benchmarkSvoPrimaryPass(device,
+      encoder => encodeFrame(omitted ? primaryAblation.omit(encoder, omitted) : encoder),
+      warmups, cycles, "Voxel surface mesh rasterization");
+    console.log(`Primary draw ablation: ${JSON.stringify({ omitted: omitted || 'nothing', ...timing })}`);
+  }
+}
 if (process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING === "1") {
   const labels = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_TIMING_LABELS?.split(",")
     ?? [optimizationExperiments.surfaceMesh ? "Voxel surface mesh rasterization" : "Sparse voxel primary visibility"];

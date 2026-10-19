@@ -117,7 +117,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "scenery-catalog"; sceneRevision: number; catalog: EnvironmentProxyCatalog }
   /** The catalog of this revision over the last one sent: the parts that differ, or none when it is that catalog still. */
   | { type: "scenery-catalog-changes"; sceneRevision: number; entries: DocumentDeltaEntry[] }
-  | { type: "attached" }
+  | { type: "attached"; timeOrigin_ms: number }
   | { type: "status"; status: GPUStatus; workerNow_ms: number }
   | { type: "gpu-info"; info: GPUEulerianInfo }
   | { type: "rigid-loads"; loads: GPURigidLoad[] }
@@ -555,7 +555,12 @@ export class WebGPURenderWorkerClient {
   }
 
   private receive(message: WebGPURenderWorkerResponse): void {
-    if (message.type === "scenery-catalog" || message.type === "scenery-catalog-changes") {
+    if (message.type === "attached") {
+      // Translate clocks using their actual origins, not message delivery time:
+      // a busy worker/window adds latency, not a change of clock origin.
+      this.workerClockOffset_ms = message.timeOrigin_ms - performance.timeOrigin;
+    }
+    else if (message.type === "scenery-catalog" || message.type === "scenery-catalog-changes") {
       // Kept whether or not its document is still the published one: the next changes are over this catalog.
       if (message.type === "scenery-catalog") this.sceneryCatalog = message.catalog;
       else {
@@ -603,7 +608,14 @@ export class WebGPURenderWorkerClient {
       this.lastRuntimeStatus = status;
       this.callbacks.onStatus(status);
     }
-    else if (message.type === "gpu-info") this.callbacks.onGPUInfo?.(message.info);
+    else if (message.type === "gpu-info") {
+      const offset = this.workerClockOffset_ms ?? 0;
+      if (message.info.physicsTrace) message.info.physicsTrace.capturedAt_ms += offset;
+      if (message.info.physicsCPUTrace && message.info.physicsCPUTrace !== message.info.physicsTrace) {
+        message.info.physicsCPUTrace.capturedAt_ms += offset;
+      }
+      this.callbacks.onGPUInfo?.(message.info);
+    }
     else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
     else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);
     else if (message.type === "effective-renderer-status") this.callbacks.onEffectiveRendererStatus?.(message.status);
@@ -622,6 +634,14 @@ export class WebGPURenderWorkerClient {
       this.sendQueuedPreview();
     }
     else if (message.type === "frame") {
+      // postMessage gives this realm ownership of these cloned samples. Convert
+      // each distinct trace once; presentation and stages may alias one object.
+      const { cpu, presentation, presentationStages, presentationQueue } = message.metrics;
+      const offset = this.workerClockOffset_ms ?? 0;
+      if (cpu) cpu.capturedAt_ms += offset;
+      if (presentation && presentation !== cpu) presentation.capturedAt_ms += offset;
+      if (presentationStages && presentationStages !== cpu && presentationStages !== presentation) presentationStages.capturedAt_ms += offset;
+      if (presentationQueue && presentationQueue !== cpu && presentationQueue !== presentation && presentationQueue !== presentationStages) presentationQueue.capturedAt_ms += offset;
       this.snapshot = message.snapshot;
       this.completedMetrics = message.metrics;
       this.frameInFlight = false;
