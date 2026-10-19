@@ -10,13 +10,16 @@ import type { MethodParamValues } from "../../core/method-contract";
  *   forcibly coarsens WARM pressure and solid geometry.
  * - particleSeeding: "need" seeds particles only where the grid under-resolves
  *   the flow; "activity" wherever the activity heat spreads.
+ * - sourceSeeding: "need" heats a source's tiles only where the census
+ *   triggers, like any other liquid; "always" keeps every source tile hot.
  * - bandExit: "returns" ends the h band's V-cycles at diminishing returns
  *   (UniformPressureBandFields.returns); "strict" only at its 1e-4 1/s tolerance. */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly bandExit:"returns"|"strict"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
  warmResolution:values.warmResolution==="4h"?"4h":"h",
  particleSeeding:values.particleSeeding==="activity"?"activity":"need",
+ sourceSeeding:values.sourceSeeding==="always"?"always":"need",
  bandExit:values.bandExit==="strict"?"strict":"returns",
 });

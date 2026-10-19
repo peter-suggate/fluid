@@ -18,9 +18,15 @@ import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
  * remains spatially refined without refreshing particle heat. Shape elsewhere measures
  * h-versus-4h surface error, which the h tiles it requires already carry:
  * a ripple or a resting wall's meniscus needs h, not particles. */
-export function narrowBandActivityTriggerWGSL(seeding:"need"|"activity"):string{
- if(seeding==="activity")return "fn nbActivityTriggered(t:u32,criteria:u32)->bool{return criteria!=0u;}";
- return /* wgsl */`fn nbActivityTriggered(t:u32,criteria:u32)->bool{
+/** fn nbSourceHeats(q:vec3f)->bool: whether a source at tile centre q heats
+ * its tile regardless of the census. "need": never; a smooth stream is held
+ * by the grid and heats where it thins, impacts or shears. "always": every
+ * tile within 4h of a source. */
+export function narrowBandActivityTriggerWGSL(seeding:"need"|"activity",sources:"need"|"always"="need"):string{
+ const source=sources==="always"?"fn nbSourceHeats(q:vec3f)->bool{return nbSourcePhi(q,1e10)<4.0;}":"fn nbSourceHeats(q:vec3f)->bool{return false;}";
+ if(seeding==="activity")return `${source}\nfn nbActivityTriggered(t:u32,criteria:u32)->bool{return criteria!=0u;}`;
+ return /* wgsl */`${source}
+fn nbActivityTriggered(t:u32,criteria:u32)->bool{
  // Strain, rotation, impact and approach already measure evolution.
  if((criteria&0x3cu)!=0u){return true;}
  // Thin/curved geometry still requests h in the census. It requests particles
@@ -101,7 +107,7 @@ fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
   let flags=atomicLoad(&bins[NB_ACTIVITY_SCORES+2u*t+1u]);
   let triggered=nbActivityTriggered(t,(flags>>${I.triggeredShift}u)&63u)&&(flags&${I.dropped}u)==0u;
   let q=4.0*vec3f(umTileCoord(t))+2.0;
-  let source=nbSourcePhi(q,1e10)<4.0;
+  let source=nbSourceHeats(q);
   let old=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_HEAT+t]));
   let heat=max(max(0.0,old-nbCooling()*params.hDt.w),select(0.0,2.0,triggered||source));
   atomicStore(&bins[NB_ACTIVITY_HEAT+t],bitcast<u32>(heat));

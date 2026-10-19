@@ -236,7 +236,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private initPipeline?:GPUComputePipeline;
  private initGroup?:GPUBindGroup;
  /** pool: the page pool whose commits claim this lattice's blocks (its state buffer and layout); without one no block is ever claimed. */
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need"){
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly sourceSeeding:"need"|"always"="need"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
   this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;
@@ -636,7 +636,7 @@ ${narrowBandNearWGSL}
 ${narrowBandReuseWGSL(this.reuse)}
 ${narrowBandMembershipWGSL}
 ${narrowBandRedistanceWGSL}
-${narrowBandActivityTriggerWGSL(this.seeding)}
+${narrowBandActivityTriggerWGSL(this.seeding,this.sourceSeeding)}
 ${narrowBandActivityWGSL}
 ${narrowBandAirWGSL}
 ${narrowBandSparseWGSL}
