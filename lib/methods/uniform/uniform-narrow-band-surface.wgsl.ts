@@ -161,21 +161,17 @@ export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiled
 }
 `;
 
-/** Each fine tile prepares its face blend once, sharing the 5³ metric vertices.
- * The expired scatter cursors fit six words per fine cell at sparse layouts:
- * a face's theta and its samples' own heat over the collar's (nbTheta and
- * nbSurfaceTheta, sixteen bits each), then its expected weight. */
-export function narrowBandTransferPropertiesSource(subgroups:boolean,tiled=false):string{return /* wgsl */`
-// transfer is compiled twice: the fit twin (1) runs only while the
-// properties fit, the general pipeline (2) launched beside it only while
-// they do not, so each folds the other's path. 0: one pipeline, tested here.
-override nbTransferTwin:u32=0u;
-// Tiled deposit (particleDeposit): six accumulator words a fine cell; the
-// gather: six property words a fine cell, then its pair list.
-fn nbTransferFits()->bool{return ${tiled?384:416}u*umCounts.x<=UM_CELL_KEYS;}
-fn nbTransferPropertiesFit()->bool{return select(select(nbTransferFits(),true,nbTransferTwin==1u),false,nbTransferTwin==2u);}
+/** FIN: each fine tile the deposit reached (its NB_DEPOSITED flag) prepares
+ * its face blend once, sharing the 5³ metric vertices, and finishes its
+ * cells from their six deposit words; any other tile copies its velocity.
+ * FIN zeroes the words and flag it read, ready for the next deposit. */
+export function narrowBandTransferPropertiesSource():string{return /* wgsl */`
+// The deposit's six words a fine cell and a flag a fine tile, in the
+// expired scatter cursors. A layout past them takes the general gather
+// (transfer).
+fn nbTransferFits()->bool{return 385u*umCounts.x<=UM_CELL_KEYS;}
+var<workgroup> nbTransferFlag:u32;
 var<workgroup> nbTransferDepth:array<f32,125>;
-var<workgroup> nbTransferActive:array<u32,64>;
 var<workgroup> nbTransferHeat:array<f32,27>;
 // Negative for cold air, which nbSurfaceTheta leaves out.
 var<workgroup> nbTransferHot:array<f32,27>;
@@ -188,13 +184,25 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  }
  return clamp(vec2f(theta,hot/max(covered,1e-20)),vec2f(0.0),vec2f(1.0));
 }
-@compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32${subgroups?",@builtin(subgroup_invocation_id) subgroupLane:u32":""}){
- if(!nbTransferPropertiesFit()){return;}
+@compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(!nbTransferFits()){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));umLoadAddressPlan(owner.tile>>9u,lane);let origin=4u*umTileCoord(owner.tile);
+ // Read and zero this tile's deposit words, whatever happens below.
+ let flag=UM_CELL_KEYS+384u*umCounts.x+group.x;let at=UM_CELL_KEYS+6u*(64u*group.x+lane);
+ if(lane==0u){nbTransferFlag=atomicLoad(&bins[flag]);}
+ let deposited=workgroupUniformLoad(&nbTransferFlag)!=0u;
+ // Vectors, not a private array: an array indexed by axis would live in memory.
+ var momenta=vec3u(0u);var weights=vec3u(0u);
+ if(deposited){
+  momenta=vec3u(atomicLoad(&bins[at]),atomicLoad(&bins[at+2u]),atomicLoad(&bins[at+4u]));
+  weights=vec3u(atomicLoad(&bins[at+1u]),atomicLoad(&bins[at+3u]),atomicLoad(&bins[at+5u]));
+  for(var k=0u;k<6u;k++){atomicStore(&bins[at+k],0u);}
+  if(lane==0u){atomicStore(&bins[flag],0u);}
+ }
  // A frozen tile (UniformColdFreeze) keeps every texel: f.velocity holds F.
  if(umFrozenRegion(umPageOfTile(owner.tile))){return;}
- // No live sample (a uniform): no pair is listed and every cell keeps its velocity.
- if(!nbParticlesLive()){let cell=origin+umCorner(lane,4u);textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
+ // No live sample (a uniform), or no deposit in reach: every cell keeps its velocity.
+ if(!nbParticlesLive()||!deposited){let cell=origin+umCorner(lane,4u);textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
  for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(q)]));}
  if(lane<27u){
   let coord=vec3i(origin>>vec3u(2u));let t=vec3u(umTileNearFromPage(owner.tile>>9u,coord>>vec3u(3u),coord+vec3i(umCorner(lane,3u))-1));
@@ -203,7 +211,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
   nbTransferHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0);
  }
  workgroupBarrier();
- let local=umCorner(lane,4u);let cell=origin+local;let at=UM_CELL_KEYS+6u*(64u*group.x+lane);var needed=false;var properties:array<vec3f,3>;
+ let local=umCorner(lane,4u);let cell=origin+local;var needed=false;var properties:array<vec3f,3>;
  for(var axis=0u;axis<3u;axis++){
   var near=vec2f(0.0);var expected=1.0;var low=local;low[axis]+=1u;
   // A face beside a frozen cell keeps the departure (F there).
@@ -217,7 +225,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
   needed=needed||near.x>0.0;
   properties[axis]=vec3f(near,expected);
  }
- ${tiled?/* wgsl */`// The tiled deposit left this cell's momentum and weight in its words.
+ // The deposit left this cell's momentum and weight in its words.
  {
   let original=textureLoad(velocity,vec3i(cell),0);
   if(!needed){textureStore(output,vec3i(cell),original);return;}
@@ -225,25 +233,14 @@ fn nbTransferTheta(local:vec3f)->vec2f{
   if(umFrozenCell(vec3i(cell))){return;}
   let thaw=nbThaw(cell);var value=original.xyz;
   for(var axis=0u;axis<3u;axis++){
-   let mass=f32(atomicLoad(&bins[at+2u*axis+1u]))/PB_WEIGHT;
+   let mass=f32(weights[axis])/PB_WEIGHT;
    if(mass<1e-5){continue;}
-   let momentum=f32(bitcast<i32>(atomicLoad(&bins[at+2u*axis])))/PB_MOMENTUM;
+   let momentum=f32(bitcast<i32>(momenta[axis]))/PB_MOMENTUM;
    let near=properties[axis];let transition=near.x*mix(min(1.0,mass/near.z),1.0,near.y);
    value[axis]=mix(original[axis],momentum/mass+thaw[axis],transition);
   }
   textureStore(output,vec3i(cell),vec4f(value,original.w));
  }
- `:/* wgsl */`nbTransferActive[lane]=u32(needed);workgroupBarrier();
- let neededPair=(nbTransferActive[lane&~1u]|nbTransferActive[lane|1u])!=0u;
- let emit=neededPair&&lane%2u==0u;
- ${subgroups?`// Reserve each subgroup's tile-local pairs together, retaining locality
- // without relying on a mapping between local and subgroup lane indices.
- let rank=subgroupExclusiveAdd(u32(emit));let count=subgroupAdd(u32(emit));var first=0u;
- if(subgroupLane==0u&&count!=0u){first=atomicAdd(&state[9],count);}first=subgroupBroadcastFirst(first);
- if(emit){atomicStore(&bins[UM_CELL_KEYS+384u*umCounts.x+first+rank],32u*group.x+lane/2u);}`:`
- if(emit){let slot=atomicAdd(&state[9],1u);atomicStore(&bins[UM_CELL_KEYS+384u*umCounts.x+slot],32u*group.x+lane/2u);}`}
- if(!neededPair){textureStore(output,vec3i(cell),textureLoad(velocity,vec3i(cell),0));return;}
- for(var axis=0u;axis<3u;axis++){atomicStore(&bins[at+2u*axis],pack2x16unorm(properties[axis].xy));atomicStore(&bins[at+2u*axis+1u],bitcast<u32>(properties[axis].z));}`}
 }
 `;}
 /** Adjacent fine cells share their particle reads. Each sixteen-lane team
@@ -260,25 +257,21 @@ var<workgroup> nbHot:array<f32,24>;
 var<workgroup> nbExpected:array<f32,24>;
 var<workgroup> nbRuns:array<vec2u,128>;
 @compute @workgroup_size(${subgroups?32:64}) fn transfer(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) ${subgroups?"localLane:u32,@builtin(subgroup_invocation_id) subgroupLane:u32":"lane:u32"}){
- // umCounts is a uniform: the twin's choice is uniform control flow.
- if(select(nbTransferTwin==2u&&nbTransferFits(),!nbTransferFits(),nbTransferTwin==1u)){return;}
+ // umCounts is a uniform: uniform control flow. The deposit serves a layout that fits.
+ if(nbTransferFits()){return;}
  ${subgroups?/* wgsl */`
  // The 32-lane workgroup is one subgroup (the adapter minimum is 32).
  // Assign logical lanes directly, independent of local invocation order.
  let lane=subgroupLane;
  `:""}
- let pair=(gid.x/${subgroups?32:64}u)*${subgroups?2:4}u+lane/16u;var first=2u*pair;var valid=true;
- if(nbTransferPropertiesFit()){valid=pair<atomicLoad(&state[9]);first=2u*atomicLoad(&bins[UM_CELL_KEYS+384u*umCounts.x+pair]);}
+ let pair=(gid.x/${subgroups?32:64}u)*${subgroups?2:4}u+lane/16u;let first=2u*pair;
  let owner=umAllOwner(vec3u(first,0,0));let origin=umOrigin(owner);
  let next=umAllOwner(vec3u(first+1u,0,0));let nextOrigin=umOrigin(next);
  let team=lane/16u;let member=lane%16u;let centre=vec3f(origin)+0.5;
  if(member<6u){
   let axis=member%3u;let o=select(origin,nextOrigin,member>=3u);let width=select(owner.width,next.width,member>=3u);
   var near=vec2f(0.0);var expected=1.0;
-  if(nbTransferPropertiesFit()){
-   let at=UM_CELL_KEYS+6u*(first+u32(member>=3u))+2u*axis;
-   near=select(vec2f(0.0),unpack2x16unorm(atomicLoad(&bins[at])),valid);expected=bitcast<f32>(atomicLoad(&bins[at+1u]));
-  }else if(width==1u&&umAcrossKind(vec3i(o),axis,1)==UM_RESIDENT&&!umFrozenFace(vec3i(o),axis,1u)){
+  if(width==1u&&umAcrossKind(vec3i(o),axis,1)==UM_RESIDENT&&!umFrozenFace(vec3i(o),axis,1u)){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
    if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
   }
@@ -338,14 +331,14 @@ var<workgroup> nbRuns:array<vec2u,128>;
  momentum=nbMomentum[lane];total=nbMass[lane];momentumNext=nbMomentumNext[lane];totalNext=nbMassNext[lane];
  `}
  // A frozen cell keeps its texel; a thawing region's deposits take its term.
- if(valid&&member==0u&&owner.width==1u&&!umFrozenCell(vec3i(origin))){
+ if(member==0u&&owner.width==1u&&!umFrozenCell(vec3i(origin))){
   let original=textureLoad(velocity,vec3i(origin),0);let mass=total;
   var transition=blend;
   for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+a]),1.0,nbHot[6u*team+a]);}
   let value=mix(original.xyz,momentum/max(mass,vec3f(1e-30))+nbThaw(origin),select(vec3f(0),transition,mass>=vec3f(1e-5)));
   textureStore(output,vec3i(origin),vec4f(value,original.w));
  }
- if(valid&&member==0u&&next.width==1u&&!umFrozenCell(vec3i(nextOrigin))){
+ if(member==0u&&next.width==1u&&!umFrozenCell(vec3i(nextOrigin))){
   let original=textureLoad(velocity,vec3i(nextOrigin),0);let mass=totalNext;
   var transition=nextBlend;
   for(var a=0u;a<3u;a++){transition[a]*=mix(min(1.0,mass[a]/nbExpected[6u*team+3u+a]),1.0,nbHot[6u*team+3u+a]);}

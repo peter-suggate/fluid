@@ -31,9 +31,6 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  * - redistanceSearch: "shared" lets redistance reuse the crossing search that
  *   retirement ran just before it; "fresh" searches again after retirement
  *   (which can move a hanging zero at a coarse seam).
- * - particleDeposit: "tiled" scatters each occupied tile's particle momentum
- *   into shared fixed-point sums flushed once; "gathered" gathers each fine
- *   cell's particle neighbourhood (the same result to fixed-point rounding).
  * - particleOrder: "scheduled" files samples into their cells in slot order;
  *   "canonical" sorts each cell too (bit-reproducible runs).
  * - momentumSampler: how grid momentum's unit sampler interpolates
@@ -42,7 +39,7 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  *   "texture32" also filters the particle trace's halo samples in the
  *   texture unit; the other values keep its eight loads.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandSmoothing:"fused"|"separate";readonly traceSubsteps:"gradient"|"travel";readonly redistanceSearch:"shared"|"fresh";readonly particleDeposit:"tiled"|"gathered";readonly particleOrder:"scheduled"|"canonical";readonly momentumSampler:UniformMomentumSampler}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandSmoothing:"fused"|"separate";readonly traceSubsteps:"gradient"|"travel";readonly redistanceSearch:"shared"|"fresh";readonly particleOrder:"scheduled"|"canonical";readonly momentumSampler:UniformMomentumSampler}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -57,7 +54,6 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  bandSmoothing:values.bandSmoothing==="separate"?"separate":"fused",
  traceSubsteps:values.traceSubsteps==="travel"?"travel":"gradient",
  redistanceSearch:values.redistanceSearch==="fresh"?"fresh":"shared",
- particleDeposit:values.particleDeposit==="gathered"?"gathered":"tiled",
  particleOrder:values.particleOrder==="canonical"?"canonical":"scheduled",
  momentumSampler:values.momentumSampler==="software"||values.momentumSampler==="texture16"?values.momentumSampler:"texture32",
 });

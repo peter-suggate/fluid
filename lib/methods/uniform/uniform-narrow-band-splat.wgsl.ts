@@ -14,7 +14,7 @@ export const narrowBandSplatWGSL=/* wgsl */`
   }
  }
 }
-// Before classify, the motion bank holds one word per occupied cell.
+// Before the deposit, the motion bank holds one word per occupied cell.
 // There can be no more occupied cells than sorted live particles.
 fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){

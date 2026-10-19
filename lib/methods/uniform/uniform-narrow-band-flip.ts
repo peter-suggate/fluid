@@ -284,7 +284,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private initPipeline?:GPUComputePipeline;
  private initGroup?:GPUBindGroup;
  /** pool: the page pool whose commits claim this lattice's blocks (its state buffer and layout); without one no block is ever claimed. */
- constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly redistanceSearch:"shared"|"fresh"="shared",readonly particleDeposit:"tiled"|"gathered"="tiled",readonly particleOrder:"scheduled"|"canonical"="scheduled",
+ constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly sourceParams:GPUBuffer,private readonly cache:UniformMixedMomentumCache,private readonly pool?:{readonly state:GPUBuffer;readonly layout:UniformPagePoolLayout},readonly transferMode:NarrowBandTransfer="flip",readonly seeding:"need"|"activity"="need",readonly fusedSurface=false,readonly sourceSeeding:"need"|"always"="need",readonly redistanceSearch:"shared"|"fresh"="shared",readonly particleOrder:"scheduled"|"canonical"="scheduled",
   /** The fast trace's halo interpolant: "texture32" filters the rgba32float
    * halo in the texture unit (float32-filterable), "software" takes its eight loads. */
   readonly particleSampler:"texture32"|"software"="software"){
@@ -597,13 +597,12 @@ fn nbRun(a:vec3i,b:vec3i)->vec2u{
 fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 // Position and motion remain compact streams for the neighbor gathers.
 // Reconstruction reads position.w's heat to restrict erasure to its nearest
-// represented patch. classify borrows only its sign bit for mode, leaving three
-// full-precision motion floats per particle instead of a second vec4.
+// represented patch. The deposit (DEPB) borrows only its sign bit for mode,
+// leaving three full-precision motion floats per particle instead of a second vec4.
 const NB_SURFACE_HOT_NEAREST=${this.surfaceHotWord}u;
 fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[UM_CELL_KEYS+4u*i+3u]&0x7fffffffu)>1.0;}
 fn nbPosition(i:u32)->vec3f{let a=UM_CELL_KEYS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
 fn nbMotion(i:u32)->vec4f{let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let mode=links[UM_CELL_KEYS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}
-fn nbStoreMotion(i:u32,p:vec4f){let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let v=bitcast<vec3u>(p.xyz);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;let flag=UM_CELL_KEYS+4u*i+3u;links[flag]=(links[flag]&0x7fffffffu)|(u32(p.w)<<31u);}
 // Live particle counts per tile drive sparse cell-bin clearing.
 const NB_COVERAGE:u32=2u*UM_CELL_KEYS;
 const NB_SURFACE_TILES:u32=NB_COVERAGE+UM_TILES;
@@ -725,10 +724,13 @@ fn gridSupported(p:vec3f)->bool{
  for(var k=0u;k<8u;k++){
   let bit=umCorner(k,2u);let w=select(vec3f(1)-fraction,fraction,bit!=vec3u(0));
   if(w.x*w.y*w.z<=1e-6){continue;}
-  let c=umCellNearFromPage(home,page,base+vec3i(bit));let owner=umOwnerAt(c);
-  if(textureLoad(phase,vec3i(umOrigin(owner)),0).x>0.5){return true;}
+  if(gridLiquidCell(home,page,base+vec3i(bit))){return true;}
  }
  return false;
+}
+// Whether cell c, read from a sample in page, lies in a liquid owner.
+fn gridLiquidCell(home:u32,page:vec3i,c:vec3i)->bool{
+ let owner=umOwnerAt(umCellNearFromPage(home,page,c));return textureLoad(phase,vec3i(umOrigin(owner)),0).x>0.5;
 }
 // Liquid a source makes this step, in h cells: the minimum of \`value\` and
 // the source's own distance. The source writes the level set after advection;
@@ -1120,7 +1122,7 @@ fn nbSeedCell(group:vec3u,lane:u32)->vec3u{
 // predicate partitions both passes so a source cell is never seeded twice.
 fn nbSourceCell(c:vec3u)->bool{return nbSourcePhi(vec3f(c)+0.5,1.0)<1.0;}
 // The cells needing candidates: a list in the motion words, which nothing
-// reads from the transfer to the next classify (the move reads the cell
+// reads from the transfer to the next deposit (the move reads the cell
 // starts). A list past them stops the run (state[3] = 7).
 fn nbSeedList()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn seedCells(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -1165,26 +1167,6 @@ fn storeSeedCandidate(p:Particle,mandatory:bool){
  for(var i=gid.x;i<UM_CELL_KEYS;i+=65536u){if(!umCellLive(i)){continue;}let c=umCellCoord(i);seedCell(c,true);}
 }
 fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-a);return 0.5*b*b;}
-// Also the receipt's census of the samples: the unsupported count always;
-// against the surface they made (the largest distance outside it, the
-// samples past half a cell outside, the samples deeper than four) only while
-// traces are measured (settings.w): it is diagnostics, and its two surface
-// queries a sample were most of this pass.
-@compute @workgroup_size(64) fn classify(@builtin(global_invocation_id) gid:vec3u){
- var outside=0.0;var counts=vec3u(0);let census=params.settings.w!=0.0;
- if(gid.x==0u){atomicStore(&bins[NB_BAND+3u],0u);atomicStore(&state[9],0u);}
- ${this.particleDeposit==="tiled"?`// The tiled deposit's fine accumulators (transferDeposit).
- if(nbTransferFits()){for(var j=gid.x;j<384u*umCounts.x;j+=65536u){atomicStore(&bins[UM_CELL_KEYS+j],0u);}}`:""}
- for(var i=gid.x;i<nbExtent();i+=65536u){
-  if(!nbLive(particles[i])){continue;}
-  let q=particles[i].position.xyz;let supported=gridSupported(q);counts.y+=u32(!supported);
-  if(census){let d=bandPhi(q);outside=max(outside,d);counts+=vec3u(u32(d>0.5),0u,u32(particleDepth(q)<-4.0));}
-  particles[i].before.w=nbParticleState(nbParticleAge(particles[i]),select(1.0,0.0,supported));
-  nbStoreMotion(i,vec4f(particles[i].velocity.xyz,nbParticleMode(particles[i])));
- }
- atomicMax(&state[5],bitcast<u32>(outside));
- for(var k=0u;k<3u;k++){if(counts[k]!=0u){atomicAdd(&state[6u+k],counts[k]);}}
-}
 fn transferFace(face:UMFace)->f32{
  let original=umLoadMixedFace(face.anchor,face.axis);
  // A face beside a frozen cell keeps the departure (F there).
@@ -1206,9 +1188,9 @@ fn transferFace(face:UMFace)->f32{
  }}}
  if(total<1e-5){return original;}return mix(original,momentum/total+umThawFaceTerm(face.anchor,face.axis,face.width),blend*nbTransferBlend(q,depth,total));
 }
-${narrowBandTransferPropertiesSource(subgroups,this.particleDeposit==="tiled")}
+${narrowBandTransferPropertiesSource()}
 ${narrowBandFineTransferSource(subgroups,this.apic)}
-${this.particleDeposit==="tiled"?particleBrickDepositWGSL(this.apic):""}
+${particleBrickDepositWGSL(this.apic)}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one
 // patch a face, and a face centred in a tile past the reach lies more than
 // two cells from the surface: it keeps its velocity without a gather. The
@@ -1282,16 +1264,16 @@ ${narrowBandSurfaceWGSL}
   // prepared (the move's G2P and seeds sample them too); snapshot fills its own from the field it
   // sample (stageTaps). The other stages read their own fresh 4h cache and
   // resolve fine seam taps in place.
-  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),narrowBandNearestEntries,"(atomicLoad(&bins[NB_BAND+1u])+3u)/4u"),["surfaceSplat"],"atomicLoad(&bins[NB_BAND+3u])"),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["seed","seedSources"],"(atomicLoad(&bins[NB_BAND+3u])+7u)/8u"),["transferProperties"],"umCounts.x"),["transfer"],subgroups?"select(16u*umCounts.x,(atomicLoad(&state[9])+1u)/2u,nbTransferPropertiesFit())":"select(8u*umCounts.x,(atomicLoad(&state[9])+3u)/4u,nbTransferPropertiesFit())"),["transferOwners"],"(umCounts.y+63u)/64u"),["transferSeams"],"atomicLoad(&bins[NB_BAND+3u])"),["couple"],"(umCounts.y+63u)/64u"),["coupleFine"],"umCounts.x"),["seedCells"],"atomicLoad(&bins[NB_BAND+1u])")}));
+  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),narrowBandNearestEntries,"(atomicLoad(&bins[NB_BAND+1u])+3u)/4u"),["surfaceSplat"],"atomicLoad(&bins[NB_BAND+3u])"),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["seed","seedSources"],"(atomicLoad(&bins[NB_BAND+3u])+7u)/8u"),["transferProperties"],"umCounts.x"),["transfer"],subgroups?"select(16u*umCounts.x,0u,nbTransferFits())":"select(8u*umCounts.x,0u,nbTransferFits())"),["transferOwners"],"(umCounts.y+63u)/64u"),["transferSeams"],"atomicLoad(&bins[NB_BAND+3u])"),["couple"],"(umCounts.y+63u)/64u"),["coupleFine"],"umCounts.x"),["seedCells"],"atomicLoad(&bins[NB_BAND+1u])")}));
   for(const module of modules){
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","classify","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","depthCoarse","redistanceCoarse",
-   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),this.particleDeposit==="tiled"?"transferDeposit":"transfer@fit"].map(async name=>{
+  await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","depthCoarse","redistanceCoarse",
+   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit"].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...(entryPoint==="transfer"?{nbTransferTwin:name.endsWith("@fit")?1:2}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:(entryPoint==="couple"||entryPoint==="transfer")?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.slotSnapshotResources){
@@ -1327,10 +1309,11 @@ ${narrowBandSurfaceWGSL}
    diagnose:this.compile(["diagnoseBefore"],"reconstruct","diagnoseBefore"),
    reconstruct:this.compile(["surfaceClear",...(this.fusedSurface?["surfaceSplatOccupied"]:["surfaceCells","surfaceSplat"]),"coupleFine@free","coupleFine","couple"],"reconstruct","surface reconstruction"),
    reconstructCoarse:this.compile(["surfaceClear",...(this.fusedSurface?["surfaceSplatOccupied"]:["surfaceCells","surfaceSplat"]),"couple"],"reconstruct","surface reconstruction"),
-   // Classification reads phase and phi. Transfer loads canonical face
-   // texels directly in both mixed and all-4h modes; neither samples a cache.
-   // The tiled deposit leaves the gather pipeline the layouts it does not fit.
-   transfer:this.compile(["classify",...(this.particleDeposit==="tiled"?["transferDeposit","transferProperties"]:["transferProperties","transfer@fit"]),"transfer","transferOwners","transferSeams"],"transfer","transfer"),
+   // The deposit (DEPB) classifies against phase; FIN finishes the fine
+   // cells it reached. Transfer loads canonical face texels directly in both
+   // mixed and all-4h modes; nothing samples a cache. The general gather
+   // (transfer) serves the layouts the deposit's words do not fit.
+   transfer:this.compile(["transferDeposit","transferProperties","transfer","transferOwners","transferSeams"],"transfer","transfer"),
    snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    clearAir:this.compile(["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
@@ -1344,7 +1327,7 @@ ${narrowBandSurfaceWGSL}
   return {pass:{label:`Narrow-band FLIP ${label}`},steps:entries.map(name=>{
    const selected=this.pipelines.get(name),entry=name.split("@")[0]!;if(!selected)throw new Error(`Narrow-band FLIP ${name} is not initialized`);
    return {
-    groups:groupName??((entry.startsWith("airClear")||name==="airPlanPropagate@fused")?"redistanceStore":entry.startsWith("air")?"surface":entry.startsWith("redistance")?"redistanceStore":entry==="surfaceCells"||entry==="surfaceSplat"||entry==="diagnoseBefore"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")||entry==="classify"?"transfer":entry==="couple"||entry==="coupleFine"?"surface":entry),
+    groups:groupName??((entry.startsWith("airClear")||name==="airPlanPropagate@fused")?"redistanceStore":entry.startsWith("air")?"surface":entry.startsWith("redistance")?"redistanceStore":entry==="surfaceCells"||entry==="surfaceSplat"||entry==="diagnoseBefore"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")?"transfer":entry==="couple"||entry==="coupleFine"?"surface":entry),
     // In-place redistance reads its own canonical texel: coarse vertices
     // always read the base home, including those outside the resident h ring.
     base:entry==="redistanceCoarse"||entry==="airClearCoarse",pipeline:uniformDetailPick(this.solid.select(selected)),
@@ -1479,6 +1462,8 @@ ${narrowBandSurfaceWGSL}
   // Clearing a buried zero invalidates the crossing/metric banks as well
   // as phi. The caller resolved phi before momentum or membership reads it.
   if(!this.bandCurrent){this.arenaSearch(encoder);this.run(encoder,this.compiled.arenaMetric);this.bandCurrent=true;}
+  // The seam list's length (NB_BAND+3), which transferOwners counts.
+  encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles+3)*4,4);
   this.run(encoder,this.compiled.transfer);
  }
  snapshot(encoder:GPUCommandEncoder,slots?:UniformNarrowBandSlotSnapshot):void{
@@ -1560,7 +1545,7 @@ ${narrowBandSurfaceWGSL}
   const bits=this.receiptBits,distances=this.receiptDistances,d=this.diagnostics;
   bits[0]=words[4]!;bits[1]=words[5]!;
   d.beforeMaxOutside=this.measureTraces?distances[0]!:NaN;d.unsupported=words[7]!;
-  // The surface census runs while traces are measured (classify).
+  // The surface census runs while traces are measured (the deposit's).
   d.afterMaxOutside=this.measureTraces?distances[1]!:NaN;d.outsideSurface=this.measureTraces?words[6]!:NaN;d.deepInterior=this.measureTraces?words[8]!:NaN;
   // Persistent samples own the budget first. At capacity optional reseeding
   // is deferred (reseedClipped); never destroy a surface to make room for it.
