@@ -122,6 +122,9 @@ fn nbProceduralContact(start:vec3f,end:vec3f,velocity:vec3f)->NBTerrainContact{
   let depth=0.001*min(params.hDt.x,min(params.hDt.y,params.hDt.z))-sample.w/lengthG;
   if(depth<=0.0){break;}q+=depth*normal/params.hDt.xyz;v-=min(dot(v,normal),0.0)*normal;
  }
+ // A field face on a container wall would push the sample out of storage;
+ // it stops at the hit instead.
+ if(!umPointPresent(q)){return NBTerrainContact(at,v);}
  return NBTerrainContact(q,v);
 }
 `;
