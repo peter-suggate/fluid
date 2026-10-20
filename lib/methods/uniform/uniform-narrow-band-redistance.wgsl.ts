@@ -157,21 +157,35 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u){
 // redistanceCoarse reads it: one writer each. Every corner beside an h owner
 // is built only if its heat can retire: the corner's zero-heat predicate
 // depends on heat alone, so it is identical in this pass and the store.
-// A lane to a corner (eight an owner): a seam owner's corners each run a
-// search and trace, which held one lane behind eight of them.
+// coarseBuilds lists the retirement corners (the coarse list's flag 8; the
+// low-wall and seam rules were applied there) that pass this predicate, in
+// the build list after the corner entries; depthCoarse then runs a lane a
+// build: a search and trace held a lane behind every other visit before.
+fn nbCoarseBuild(entry:u32)->vec4u{
+ let owner=nbCoarseOwner(entry);let origin=umOrigin(owner);let p=origin+4u*umCorner(entry&7u,2u);
+ let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
+ return vec4u(c,select(0u,1u,umTileMinimumWidth(umTileAt(c/4u))==1u&&(nbBandReach(c)&2u)!=0u&&!nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p)));
+}
+@compute @workgroup_size(64) fn coarseBuilds(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){nbCoarseBase=nbCoarseEntries();}
+ let n=workgroupUniformLoad(&nbCoarseBase);
+ for(var base=64u*group.x;base<n;base+=65536u){
+  let j=base+lane;var entry=0u;var m=0u;
+  if(j<n){entry=nbCoarseEntry(j);if((entry&8u)!=0u&&nbCoarseBuild(entry).w!=0u){m=1u;}}
+  if(lane==0u){atomicStore(&nbCoarseCount,0u);}
+  workgroupBarrier();
+  let local=atomicAdd(&nbCoarseCount,m);
+  workgroupBarrier();
+  if(lane==0u){nbCoarseBase=atomicAdd(&bins[NB_COARSE_LIST+1u],atomicLoad(&nbCoarseCount));}
+  let at=workgroupUniformLoad(&nbCoarseBase)+local;
+  if(m!=0u&&at<NB_COARSE_CAP){atomicStore(&bins[NB_COARSE_LIST+4u+NB_COARSE_CAP+at],entry);}
+ }
+}
 @compute @workgroup_size(64) fn depthCoarse(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<8u*umCounts.y;i+=65536u){
-  let owner=umAllOwner(vec3u(umCounts.x*64u+(i>>3u),0u,0u));let origin=umOrigin(owner);
-  if(nbTileCold(owner.tile)){continue;}
-  let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
-  // Keep the regular owner's low-wall rule. At seams the layout already
-  // compiled the canonical coarse corners; no authority lookup is needed.
-  let k=i&7u;let corner=umCorner(k,2u);let p=origin+corner*4u;
-  if(regular){if(!all((corner!=vec3u(0))|umLowOpen(vec3i(origin)))){continue;}}
-  else if((umCoarseCornerMask(owner.tile)&(1u<<k))==0u){continue;}
-  let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
-  if(umTileMinimumWidth(umTileAt(c/4u))!=1u||(nbBandReach(c)&2u)==0u){continue;}
-  if(nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p)){continue;}
+ let n=min(atomicLoad(&bins[NB_COARSE_LIST+1u]),NB_COARSE_CAP);
+ for(var j=gid.x;j<n;j+=65536u){
+  let entry=atomicLoad(&bins[NB_COARSE_LIST+4u+NB_COARSE_CAP+j]);
+  let p=umOrigin(nbCoarseOwner(entry))+4u*umCorner(entry&7u,2u);let c=nbCoarseBuild(entry).xyz;
   nbBuildDistance(p,c,nbBandTile(c));
   nbBoundCoarseMetric(p);
  }
@@ -209,21 +223,13 @@ fn nbBoundCoarseMetric(p:vec3u){
  }
  atomicStore(&bins[at],bitcast<u32>(select(-bound,bound,d>=0.0)));
 }
+// A lane to a listed retirement corner (flag 8).
 @compute @workgroup_size(64) fn redistanceCoarse(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<umCounts.y;i+=65536u){
-  let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));let origin=umOrigin(owner);
-  if(nbTileCold(owner.tile)){continue;}
-  let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
-  // Keep the regular owner's low-wall rule. At seams the layout already
-  // compiled the canonical coarse corners; no authority lookup is needed.
-  var low=vec3<bool>(false);if(regular){low=umLowOpen(vec3i(origin));}
-  let corners=umCoarseCornerMask(owner.tile);
-  for(var k=0u;k<8u;k++){
-   let corner=umCorner(k,2u);let p=origin+corner*4u;
-   if(regular){if(!all((corner!=vec3u(0))|low)){continue;}}
-   else if((corners&(1u<<k))==0u){continue;}
-   nbRedistanceVertex(owner.tile,origin,p);
-  }
+ let n=nbCoarseEntries();
+ for(var j=gid.x;j<n;j+=65536u){
+  let entry=nbCoarseEntry(j);if((entry&8u)==0u){continue;}
+  let owner=nbCoarseOwner(entry);let origin=umOrigin(owner);
+  nbRedistanceVertex(owner.tile,origin,origin+4u*umCorner(entry&7u,2u));
  }
 }
 `;
