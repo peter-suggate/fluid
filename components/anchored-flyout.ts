@@ -21,9 +21,8 @@ export const FLYOUT_EDGE_MARGIN_PX = 10;
 export const FLYOUT_TRANSPORT_KEEPOUT_PX = 90;
 
 /**
- * The band along the top edge the scene header, mode toggle and frame meter sit
- * in. A panel clamped against the shell's own top edge ran over the EDIT toggle
- * — the one control that leaves the mode the panel belongs to.
+ * The band along the top edge the scene header sits in. A panel clamped
+ * against the shell's own top edge ran over it.
  */
 export const FLYOUT_TOP_KEEPOUT_PX = 50;
 

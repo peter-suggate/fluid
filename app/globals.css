@@ -711,21 +711,8 @@ button.card[data-active] { border-color: var(--accent); }
 .gpu-canvas[data-voxel-aim="camera"]:active { cursor: grabbing; }
 .gpu-canvas[data-pixel-trace="live"] { cursor: crosshair; }
 .gpu-canvas[data-pixel-trace="live"]:active { cursor: grabbing; }
-/* The top-right corner: what the frame costs, and the way into the readings
-   that say where it went. The number is quiet by default — it is a glance, not
-   a control — and the instrument tags are quieter still: absent until the
-   pointer is in the viewport, dim until it is on them, lit only for the one
-   that is open. They reserve their width at rest so revealing them never nudges
-   the number, and they sit left of it so the digits keep the corner. */
-.fps-cluster { position: absolute; z-index: 6; top: 15px; right: 16px; display: flex; align-items: center; gap: 6px; pointer-events: none; transition: right .2s ease; }
-/* "Quiet" here is a token, not an opacity. At `.62` these digits measured
-   2.5:1 — a readout nobody could take the glance off. `--dim` to `--ink` is
-   the same two-step reveal, at contrast the whole way. */
-.fps-meter { min-width: 68px; height: 26px; padding: 0 9px; display: grid; place-items: center; border: 1px solid var(--line); background: var(--overlay); color: var(--dim); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); pointer-events: none; backdrop-filter: var(--frost); transition: color .2s ease; }
-.viewport-shell:hover .fps-meter { color: var(--ink); }
-/* Look, or edit. The one control in this corner that is fully lit at rest: the
-   rest of the cluster is a glance you can go and find, and this is the reason
-   the pointer does or does not reach the scene. Quiet in LOOK, accent in EDIT —
+/* Look, or edit. The one control on the transport bar that is fully lit at
+   rest: it is the reason the pointer does or does not reach the scene. Quiet in LOOK, accent in EDIT —
    the loud state is deliberately the one where a click changes something. */
 .viewport-mode-toggle { height: 26px; padding: 0 8px 0 7px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); background: var(--overlay); color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); pointer-events: auto; backdrop-filter: var(--frost); cursor: pointer; transition: color .18s ease, border-color .18s ease, background .18s ease; }
 .viewport-mode-toggle svg { flex: none; opacity: .85; }
@@ -742,19 +729,6 @@ button.card[data-active] { border-color: var(--accent); }
 .viewport-mode-toggle[data-viewport-mode="interact"] { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
 .viewport-mode-toggle[data-viewport-mode="interact"]:hover { background: var(--accent); color: var(--on-accent); }
 @media (prefers-reduced-motion: reduce) { .viewport-mode-toggle, .viewport-mode-toggle em { transition: none; } }
-.fps-instruments { display: flex; align-items: center; gap: 4px; }
-/* Opacity here is presence — absent, or on the screen. Once a tag is on the
-   screen it is a word to read, so the "dim until the pointer is on them" step
-   is `--dim` to `--ink` rather than half an alpha. */
-.fps-instruments button { height: 26px; padding: 0 8px; border: 1px solid var(--line); background: var(--overlay); color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); opacity: 0; pointer-events: none; backdrop-filter: var(--frost); cursor: pointer; transition: opacity .2s ease, color .2s ease, border-color .2s ease, background .2s ease; }
-.viewport-shell:hover .fps-instruments button { opacity: 1; pointer-events: auto; }
-.fps-instruments:hover button, .fps-instruments:focus-within button, .fps-instruments button[aria-pressed="true"] { color: var(--ink); }
-.fps-instruments button:hover { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
-.fps-instruments button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-/* An open pane takes this corner, and a tag under it can neither be read nor
-   clicked — which would make switching instruments a close-then-reopen. So the
-   cluster steps aside exactly as the probe docks do, to the same berth. */
-.viewport-shell:has(.scene-instrument) .fps-cluster { right: calc(14px + min(420px, 100% - 28px) + 12px); }
 .viewport-topline { position: absolute; inset: 15px 16px auto; display: flex; align-items: start; justify-content: space-between; gap: 12px; pointer-events: none; }
 .viewport-topline > * { pointer-events: auto; }
 .gpu-badge { min-width: 230px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: var(--frost); }
@@ -937,8 +911,6 @@ button.card[data-active] { border-color: var(--accent); }
      whole arrangement — so it takes the bottom half instead of the right edge
      and the picture keeps the top. */
   .scene-instrument { top: auto; left: 14px; right: 14px; bottom: 62px; width: auto; max-height: 56%; }
-  /* A bottom sheet leaves the corner alone, so the cluster keeps it. */
-  .viewport-shell:has(.scene-instrument) .fps-cluster { right: 16px; }
 }
 
 /* The status band: a live dot, what is running, whether the figures are live,
@@ -1046,15 +1018,34 @@ button.card[data-active] { border-color: var(--accent); }
    it: the same box as STEP and RESET, with the glyph two steps up from their
    tag type because a triangle at 11px was still a speck. */
 .transport-cluster .transport-main { width: 48px; padding: 0; border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); font-size: var(--size-5); }
-/* An explicit width, because the label cycles ● REC / ■ STOP / WAIT and those
-   are different lengths: the widest sets the box, and the box never moves. */
-.transport-cluster .record-button { width: 62px; padding: 0; color: var(--red); }
+.transport-cluster .record-button { color: var(--red); }
 .transport-cluster .record-button.active { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
-/* Reserved whether or not a recording exists — visibility, not display, so the
-   slot holds its width and the row never reflows when a recording finishes. */
-.transport-cluster .playback-button { width: 26px; min-width: 26px; padding: 0; font-size: var(--size-4); }
-.transport-cluster .playback-button[data-armed="false"] { visibility: hidden; }
 .transport-cluster .stop-gpu-button { border-color: var(--amber-line); color: var(--amber); }
+/* The mode is a chip, not a verb, so it keeps its box on the bar where the
+   verbs beside it have none; a hairline separates it from the clock. */
+.transport-cluster .viewport-mode-toggle { min-width: 0; margin-right: 4px; backdrop-filter: none; }
+.transport-cluster .viewport-mode-toggle:not([data-viewport-mode="interact"]) { border-color: var(--line-strong); }
+/* What the frame costs: quiet, a glance rather than a control. `--dim` to
+   `--ink` on hover, at contrast the whole way. */
+.transport-fps { min-width: 68px; padding: 0 6px; color: var(--dim); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); text-align: right; transition: color .2s ease; }
+.transport-cluster:hover .transport-fps { color: var(--ink); }
+/* Why the interactive entities hold the run. Only on the bar while it applies. */
+.transport-hold { max-width: 220px; padding: 2px 7px; overflow: hidden; border: 1px solid var(--amber-line); border-radius: var(--radius-s); background: var(--amber-wash); color: var(--amber); font: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; cursor: help; }
+.transport-hold[data-state="failed"], .transport-hold[data-state="unavailable"] { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
+/* The overflow menu opens upward from the trigger and right-aligned to it, so
+   it never covers the clock it sits beside. */
+.transport-menu { position: relative; display: flex; }
+.transport-cluster .transport-more { min-width: 30px; padding: 0 6px; font-size: var(--size-4); }
+.transport-cluster .transport-more[aria-expanded="true"] { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
+.transport-menu-panel { position: absolute; right: -8px; bottom: calc(100% + 12px); width: max-content; min-width: 240px; max-width: min(340px, calc(100vw - 32px)); padding: 8px; display: grid; gap: 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--chrome); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); }
+.transport-menu-section { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.transport-menu-section + .transport-menu-section { padding-top: 8px; border-top: 1px solid var(--line); }
+.transport-menu-section > small { flex-basis: 100%; color: var(--dim); font: var(--text-micro); }
+.transport-menu-panel .transport-step { margin: 0; padding: 0; border: 0; }
+.transport-menu-instruments { display: flex; gap: 4px; }
+.transport-menu-instruments button { display: inline-flex; align-items: center; gap: 6px; }
+.transport-menu-instruments kbd { padding: 0 4px; border: 1px solid currentColor; border-radius: 4px; font: 600 9px/1.3 var(--mono); opacity: .55; }
+.transport-cluster .transport-menu-instruments button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 /* The step, between the buttons and the clock it paces: a pair of nudge
    buttons narrower than the transport's verbs, around a number that is typed
    into as readily as it is nudged. */
@@ -2107,7 +2098,7 @@ button.card[data-active] { border-color: var(--accent); }
    --------------------------------------------------------------------------- */
 .lab-shell button, .lab-shell input, .lab-shell select, .lab-shell .metric-card { border-radius: var(--radius-s); }
 
-.gpu-badge, .health-chip, .fps-meter, .fps-instruments button, .camera-toolbar, .scene-overlay,
+.gpu-badge, .health-chip, .camera-toolbar, .scene-overlay,
 .transport-cluster, .scene-scale-overlay,
 .entity-hover-chip, .editor-hover-chip, .shape-readout, .shape-axis-lock,
 .editor-fill-handle, .toolstrip-pane, .toolstrip-tip,
@@ -2122,7 +2113,7 @@ button.card[data-active] { border-color: var(--accent); }
 /* The chips, the bar and the tags: one plate, the rail's. Stated after the
    rules that draw each of them and at their own specificity, so every lit
    state — armed, pressed, alert, hovered — still outranks it. */
-.gpu-badge, .health-chip, .fps-meter, .fps-instruments button, .viewport-mode-toggle,
+.gpu-badge, .health-chip, .viewport-mode-toggle,
 .scene-overlay, .transport-cluster, .transport-notice, .scene-scale-overlay,
 .mode-chip, .editor-hover-chip, .pane-tag {
   border-color: var(--line);
@@ -2702,26 +2693,11 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .interactive-label.is-note { fill: var(--amber); }
 .interactive-crosshair circle { fill: var(--ink); stroke: color-mix(in srgb, var(--bg) 70%, transparent); stroke-width: 2; }
 
-/* The HUD: top centre of the pane, clear of the mode chip and the activity mark. */
-.interactive-hud-stack { position: absolute; top: 13px; left: 50%; transform: translateX(-50%); display: grid; justify-items: center; gap: 5px; max-width: calc(100% - 32px); pointer-events: none; }
-.interactive-hud { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); pointer-events: auto; }
-.interactive-badge { padding: 2px 6px; border: 1px dashed var(--amber); border-radius: var(--radius-s); color: var(--amber); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; cursor: help; }
-.interactive-context, .interactive-readiness { padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
-/* Edit, observe and play are three states, so three marks: outline, tint, solid. */
-.interactive-context.is-edit { color: var(--muted); }
-.interactive-context.is-observe { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent); }
-.interactive-context.is-play { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
-.interactive-readiness.is-ready { color: var(--muted); }
-.interactive-readiness.is-preparing { border-color: var(--amber-line); background: var(--amber-wash); color: var(--amber); }
-.interactive-readiness.is-unavailable, .interactive-readiness.is-failed { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
-.interactive-history { color: var(--dim); font: var(--text-micro); cursor: help; }
-.interactive-reasons { margin: 0; padding: 4px 10px 4px 22px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost-chip); font: var(--text-micro); max-width: 520px; pointer-events: auto; }
-.interactive-reasons.is-unavailable, .interactive-reasons.is-failed { border-color: var(--red-line); color: var(--red); }
-.interactive-reasons.is-preparing { border-color: var(--amber-line); color: var(--amber); }
-.interactive-missing-summary { margin: 0; padding: 4px 9px; border: 1px dashed var(--red-line); border-radius: var(--radius-s); background: var(--overlay); color: var(--red); font: var(--text-micro); max-width: 520px; pointer-events: auto; }
-.interactive-notice { margin: 0; display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost-chip); box-shadow: var(--shadow-card); font: var(--text-micro); max-width: 520px; pointer-events: auto; }
-.interactive-notice.is-error { border-color: var(--red-line); color: var(--red); }
-.interactive-notice button { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; padding: 0 4px; }
+/* While in control: just above the transport bar, so possession reads as part
+   of the one bar rather than a second one. Clear of the notice line above it. */
+.interactive-control-strip { position: absolute; left: 50%; bottom: 82px; transform: translateX(-50%); display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; max-width: calc(100% - 32px); padding: 4px 6px 4px 10px; border: 1px solid var(--accent-line); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); font: var(--text-micro); pointer-events: auto; }
+.interactive-control-strip strong { color: var(--accent); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.interactive-control-keys { color: var(--muted); white-space: pre-wrap; }
 
 /* Prompts sit under the crosshair, where the eye already is. */
 .interactive-prompts { position: absolute; left: 50%; top: calc(50% + 26px); transform: translateX(-50%); display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--overlay); backdrop-filter: var(--frost-chip); font: var(--text-micro); pointer-events: none; }

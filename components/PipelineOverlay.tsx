@@ -68,25 +68,21 @@ export function PipelineOverlay() {
 }
 
 /**
- * The way in that is always on screen: three tags beside the frame rate.
+ * The three instruments as toggles, in the transport's overflow menu.
  *
  * The ring is still the route for everything you do *to* the scene, but an
- * instrument is not a verb on an object — it is a reading of the whole run, and
- * making it cost a right-click that has to land on the water meant the question
- * "why is this frame slow" could only be asked of a scene you could hit. This
- * sits where the number it explains already is, so the corner reads as one
- * thing: what it costs, and where the cost went.
- *
- * Quiet by construction — invisible until the pointer is in the viewport at
- * all, dim until it is on them, and lit only for the one that is open. The
- * keys in `SCENE_INSTRUMENTS` do the same job with no chrome, and each tag
- * names its own key in the tooltip so the cluster is where they are learned.
+ * instrument is not a verb on an object — it is a reading of the whole run, so
+ * it needs a route that does not depend on a right-click landing on the water.
+ * These used to sit permanently beside the frame rate in the top-right corner,
+ * which made that corner a third bar. They are occasional, so they live in the
+ * menu now. The keys in `SCENE_INSTRUMENTS` do the same job with no chrome, and
+ * each toggle shows its key so the menu is where people learn them.
  */
 export function SceneInstrumentTags() {
   const session = useSession();
   const overlay = session.ui((state) => state.sceneOverlay);
   const setSceneOverlay = session.ui((state) => state.setSceneOverlay);
-  return <div className="fps-instruments" data-testid="scene-instrument-tags">
+  return <div className="transport-menu-instruments" role="group" aria-label="Scene instruments" data-testid="scene-instrument-tags">
     {SCENE_INSTRUMENT_ORDER.map((instrument) => {
       const open = overlay === instrument.id;
       return <button
@@ -97,7 +93,7 @@ export function SceneInstrumentTags() {
         aria-label={`${open ? "Close" : "Open"} ${instrument.label.toLowerCase()}`}
         title={`${instrument.hint} · ${instrument.shortcut.toUpperCase()}`}
         onClick={() => setSceneOverlay(open ? null : instrument.id)}
-      >{instrument.tag}</button>;
+      >{instrument.tag}<kbd>{instrument.shortcut.toUpperCase()}</kbd></button>;
     })}
   </div>;
 }

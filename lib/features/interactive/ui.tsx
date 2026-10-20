@@ -8,6 +8,7 @@ import { viewportProjector, viewportRayForPointer } from "../../core/webgpu-came
 import { editorEntityContext } from "../../core/editor-entity-catalog";
 import { targetAtRay, targetSurfaceNormal } from "../../core/editor-probe-catalog";
 import { useSession } from "../../core/session/session-context";
+import { simulation } from "../../core/simulation/controller";
 import type { PaneSession } from "../../core/session/session";
 import type {
   ActionDefinition,
@@ -38,7 +39,7 @@ import { interactiveEntityActions } from "./ring";
 /**
  * The interactive UI: a toolstrip row that arms placement, an overlay that
  * draws entities, drafts and targets over the canvas, the pointer and keyboard
- * routing for placement, editing and play, a play HUD, and an inspector built
+ * routing for placement, editing and play, a strip shown while in control, and an inspector built
  * from the catalog's controls.
  *
  * Mounted per pane and inert unless the pane has an interaction binding
@@ -249,6 +250,7 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
   const camera = session.ui((state) => state.camera);
   const viewportMode = session.ui((state) => state.viewportMode);
   const state = useStore(pane.store, (current) => current);
+  useForwardedNotices(pane);
   const { view, draft, selectedEntityId } = state;
   const project = useProjector(camera, box);
   const [movePose, setMovePoseState] = useState<{ entityId: string; transform: Transform }>();
@@ -568,7 +570,7 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
         <circle cx={box.canvasLeft + box.canvasWidth / 2} cy={box.canvasTop + box.canvasHeight / 2} r={2.5} />
       </g>}
     </svg>}
-    <PlayHud pane={pane} view={view} locked={locked} onLock={() => canvas()?.requestPointerLock()} onRelease={() => void releaseControl()} />
+    {view.context === "play" && <ControlStrip pane={pane} view={view} locked={locked} onLock={() => canvas()?.requestPointerLock()} onRelease={() => void releaseControl()} />}
     {(view.context === "play" || view.running) && view.target && <Prompts pane={pane} view={view} />}
     {selected && selectedAnchor && !draft && view.context !== "play" && <Inspector key={selected.id} pane={pane} entity={selected} view={view} anchor={selectedAnchor} />}
   </div>;
@@ -594,9 +596,51 @@ function Prompts({ pane, view }: { pane: InteractionPane; view: InteractionView 
   </div>;
 }
 
-// ---- the HUD ------------------------------------------------------------------------
+// ---- while in control ---------------------------------------------------------------
 
-const CONTEXT_LABEL: Record<InteractionView["context"], string> = { edit: "Edit", observe: "Observe", play: "Play" };
+/**
+ * What playing as an entity adds to the screen, for as long as it lasts.
+ *
+ * This used to be a permanent HUD bar at the top of the pane. Most of it said
+ * things that already had a home: Play and Reset drive the same clock as the
+ * transport, Control is on the entity's inspector and ring, and the mode chip
+ * contradicted the LOOK/EDIT toggle beside it. Readiness, the edit count and
+ * export/import moved to the transport bar and its menu. What is left is the
+ * possession itself: who you are, which keys drive it, and the way out. It
+ * sits just above the transport so the screen still has one place to look.
+ */
+function ControlStrip({ pane, view, locked, onLock, onRelease }: {
+  pane: InteractionPane; view: InteractionView; locked: boolean; onLock: () => void; onRelease: () => void;
+}) {
+  const entity = view.document.entities.find((candidate) => candidate.id === view.controlledEntityId);
+  const actions = entity?.behaviors.flatMap((behavior) => pane.catalog.behaviorType(behavior.type)?.actions ?? []) ?? [];
+  const keys = [
+    ...actions.map((action) => action.id === "move" ? "W/S ↑/↓ · Walk   ·   A/D ←/→ · Turn" : `${bindingLabel(action) ?? action.label} · ${action.label}`),
+    ...(view.document.ladders?.length ? ["Hold Space beside the ladder to climb onto the board"] : []),
+    "Drag to orbit the view",
+  ];
+  return <div className="interactive-control-strip" role="toolbar" aria-label={`Playing as ${entity?.name ?? "an entity"}`} data-testid="interactive-control-strip">
+    <strong data-testid="interactive-context">{entity?.name ?? "Playing"}{view.running ? "" : " · paused"}</strong>
+    <span className="interactive-control-keys" data-testid="interactive-controls-help">{keys.join("   ·   ")}</span>
+    <Button hint="Mouse turns the view without holding a button; Esc releases" testId="interactive-lock"
+      disabled={locked} onClick={onLock}>{locked ? "Pointer locked" : "Lock pointer"}</Button>
+    <Button tone="accent" hint="Hand the keyboard back to the editor (Esc)" testId="interactive-release" onClick={onRelease}>Release</Button>
+  </div>;
+}
+
+/**
+ * Sends the pane's notices to the studio's one feedback channel, the line
+ * above the transport bar, rather than stacking a second notice area at the
+ * top of the pane. The line belongs to the host session, as the bar does.
+ */
+function useForwardedNotices(pane: InteractionPane) {
+  const notice = useStore(pane.store, (state) => state.notice);
+  useEffect(() => {
+    if (!notice) return;
+    simulation.session().runtime.getState().setNotice(notice.text, notice.tone === "error" ? "warn" : "info");
+    pane.dismissNotice();
+  }, [notice, pane]);
+}
 
 function download(name: string, text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
@@ -605,81 +649,31 @@ function download(name: string, text: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function PlayHud({ pane, view, locked, onLock, onRelease }: {
-  pane: InteractionPane; view: InteractionView; locked: boolean; onLock: () => void; onRelease: () => void;
-}) {
-  const selectedEntityId = useStore(pane.store, (state) => state.selectedEntityId);
-  const notice = useStore(pane.store, (state) => state.notice);
-  const busy = useStore(pane.store, (state) => state.busy);
-  const missing = useStore(pane.store, (state) => state.inspection.unavailable);
+/**
+ * The interactive document's file actions, as a section of the transport
+ * bar's overflow menu. They are occasional and are about the document, not
+ * the clock, so they do not get a permanent place on screen. The edit count
+ * comes with them as the section's caption, with the history in its tooltip.
+ */
+export function InteractiveDocumentActions({ pane }: { pane: InteractionPane }) {
+  const view = useStore(pane.store, (state) => state.view);
   const file = useRef<HTMLInputElement>(null);
   const history = pane.binding.history?.() ?? [];
-  const ready = view.readiness.state === "ready";
-  const candidates = view.controlCandidates.filter((candidate) => candidate.availability.available);
-  const chosen = candidates.find((candidate) => candidate.entityId === selectedEntityId) ?? candidates[0];
-  const blocked = view.controlCandidates.find((candidate) => candidate.entityId === selectedEntityId && !candidate.availability.available);
-  const controlledName = view.document.entities.find((entity) => entity.id === view.controlledEntityId)?.name;
-  const controlledEntity = view.document.entities.find((entity) => entity.id === view.controlledEntityId);
-  const controlActions = controlledEntity?.behaviors.flatMap(behavior => pane.catalog.behaviorType(behavior.type)?.actions ?? []) ?? [];
-  const controlHint = chosen ? `Play as ${view.document.entities.find((entity) => entity.id === chosen.entityId)?.name}`
-    : blocked && !blocked.availability.available ? blocked.availability.reason
-    : view.controlCandidates.length ? "Nothing can be controlled right now" : "Place something that can be controlled first";
-
-  useEffect(() => {
-    if (notice?.tone !== "info") return;
-    const timer = setTimeout(() => pane.dismissNotice(), 2500);
-    return () => clearTimeout(timer);
-  }, [notice, pane]);
-
-  return <div className="interactive-hud-stack">
-    <div className="interactive-hud" role="toolbar" aria-label="Interactive simulation" data-testid="interactive-hud">
-      {pane.binding.hostLabel && <span className="interactive-badge" title={pane.binding.hostNote}>{pane.binding.hostLabel}</span>}
-      <span className={`interactive-context is-${view.context}`} data-testid="interactive-context">
-        {CONTEXT_LABEL[view.context]}{controlledName ? ` · ${controlledName}` : ""}{view.context === "play" && !view.running ? " · paused" : ""}
-      </span>
-      <span className={`interactive-readiness is-${view.readiness.state}`} title={view.readiness.reasons.join("\n") || undefined} data-testid="interactive-readiness">
-        {view.readiness.state}
-      </span>
-      <Button tone={view.running ? "default" : "accent"} disabled={!view.running && !ready}
-        hint={view.running ? "Pause the interactive simulation; held input is let go" : ready ? "Run the interactive simulation" : view.readiness.reasons[0]}
-        testId="interactive-play" onClick={() => void pane.transport(view.running ? "pause" : "play")}>
-        {view.running ? "Pause" : "Play"}
-      </Button>
-      <Button hint="Back to the authored spawn state, paused" testId="interactive-reset" onClick={() => void pane.transport("reset")}>Reset</Button>
-      {view.context === "play"
-        ? <Button tone="accent" hint="Hand the keyboard back to the editor (Esc)" testId="interactive-release" onClick={onRelease}>Release</Button>
-        : <Button disabled={!chosen || busy} hint={controlHint} testId="interactive-control" onClick={() => chosen && void pane.control(chosen.entityId)}>Control</Button>}
-      {view.context === "play" && <Button hint="Mouse turns the view without holding a button; Esc releases" testId="interactive-lock"
-        disabled={locked} onClick={onLock}>{locked ? "Pointer locked" : "Lock pointer"}</Button>}
-      <span className="interactive-history" title={history.map((entry) => `${entry.revision}. ${entry.label}`).join("\n") || "No edits yet"}>
-        {history.length} edit{history.length === 1 ? "" : "s"}
-      </span>
-      <Button hint="Download the interactive entities as JSON" testId="interactive-export"
-        onClick={() => download("interactive-entities.json", JSON.stringify(view.document, null, 2))}>Export</Button>
-      <Button hint={pane.binding.load ? "Load interactive entities from JSON" : "This host imports through the scene"} disabled={!pane.binding.load || view.running}
-        testId="interactive-import" onClick={() => file.current?.click()}>Import</Button>
-      <input ref={file} type="file" accept="application/json,.json" hidden onChange={async (event) => {
-        const chosenFile = event.currentTarget.files?.[0];
-        event.currentTarget.value = "";
-        if (!chosenFile) return;
-        try { await pane.load(JSON.parse(await chosenFile.text())); }
-        catch (error) { pane.reportError(`Could not read ${chosenFile.name}: ${error instanceof Error ? error.message : String(error)}`); }
-      }} />
-    </div>
-    {view.context === 'play' && <p className="interactive-notice is-info" data-testid="interactive-controls-help">
-      {controlActions.map(action => action.id === 'move' ? 'W/S ↑/↓ · Walk   ·   A/D ←/→ · Turn' : `${bindingLabel(action) ?? action.label} · ${action.label}`).join('   ·   ')}
-      {view.document.ladders?.length ? ' · Hold Space beside the ladder to climb onto the board' : ''}
-      {' · Drag to orbit the view · Esc releases'}
-    </p>}
-    {view.readiness.state !== "ready" && view.readiness.reasons.length > 0 && <ul className={`interactive-reasons is-${view.readiness.state}`} data-testid="interactive-reasons">
-      {view.readiness.reasons.map((reason) => <li key={reason}>{reason}</li>)}
-    </ul>}
-    {missing.length > 0 && <p className="interactive-missing-summary">
-      {new Set(missing.map((item) => item.entityId)).size} entit{new Set(missing.map((item) => item.entityId)).size === 1 ? "y needs" : "ies need"} a plugin that is not installed. Their settings are kept; simulation is blocked.
-    </p>}
-    {notice && <p className={`interactive-notice is-${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} data-testid="interactive-notice">
-      <span>{notice.text}</span><button type="button" aria-label="Dismiss" onClick={() => pane.dismissNotice()}>×</button>
-    </p>}
+  return <div className="transport-menu-section" role="group" aria-label="Interactive entities" data-testid="interactive-document-actions">
+    <small title={[pane.binding.hostNote, ...history.map((entry) => `${entry.revision}. ${entry.label}`)].filter(Boolean).join("\n") || "No edits yet"}>
+      Entities{pane.binding.hostLabel ? ` · ${pane.binding.hostLabel}` : ""} · {history.length} edit{history.length === 1 ? "" : "s"}
+    </small>
+    <button type="button" title="Download the interactive entities as JSON" data-testid="interactive-export"
+      onClick={() => download("interactive-entities.json", JSON.stringify(view.document, null, 2))}>Export…</button>
+    <button type="button" title={pane.binding.load ? view.running ? "Pause before importing" : "Load interactive entities from JSON" : "This host imports through the scene"}
+      disabled={!pane.binding.load || view.running} data-testid="interactive-import" onClick={() => file.current?.click()}>Import…</button>
+    <input ref={file} type="file" accept="application/json,.json" hidden onChange={async (event) => {
+      const chosenFile = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (!chosenFile) return;
+      try { await pane.load(JSON.parse(await chosenFile.text())); }
+      catch (error) { pane.reportError(`Could not read ${chosenFile.name}: ${error instanceof Error ? error.message : String(error)}`); }
+    }} />
   </div>;
 }
 

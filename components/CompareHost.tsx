@@ -188,7 +188,7 @@ export function CompareHost() {
         </div>
       </div>
       <SimulationStopPanel sessions={active ? [sessionA, sessionB] : [sessionA]} message={transportFailure} />
-      <TransportBar hostBlockReason={transportBlock} />
+      <TransportBar hostBlockReason={transportBlock} viewSession={active && compare.focusedPane === "b" ? sessionB : sessionA} />
       <RecordingPlaybackModal />
     </main>
   );

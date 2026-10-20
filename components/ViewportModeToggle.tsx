@@ -5,7 +5,7 @@ import { toggledViewportMode, VIEWPORT_MODES } from "../lib/core/editor-viewport
 import { useSession } from "../lib/core/session/session-context";
 
 /**
- * The one permanent control in the top-right: look, or edit.
+ * Look, or edit: the first control on the transport bar.
  *
  * It earns a fixed place where the tool strip did not, because it is not a verb
  * — it reports and changes the single fact that decides whether *any* pointer

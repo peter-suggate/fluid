@@ -103,8 +103,7 @@ import {
   type TerrainHandleKind,
 } from "../lib/core/editor-terrain";
 import { ContainerToolstrip, EntityToolstrip } from "./SceneToolstrip";
-import { SceneInstrumentTags } from "./PipelineOverlay";
-import { ViewportModeToggle } from "./ViewportModeToggle";
+import { publishFrameRate } from "../lib/core/frame-rate-readout";
 import { applySceneDraft, displaySceneSnapshot, useDisplayScene, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { createDetailFocusCoalescer } from "../lib/core/solver-detail";
@@ -274,7 +273,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   // through it, so a second pane authors and reports its own experiment.
   const session = useSession();
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fpsRef = useRef<HTMLOutputElement>(null);
   const rendererRef = useRef<FluidLabRendererHandle | null>(null);
   const gpuLifecycleRef = useRef<GPUViewportLifecycle | null>(null);
   const camera = session.ui((state) => state.camera);
@@ -875,9 +873,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const lifecycleWindow = window as GPUViewportWindow;
     const lifecycles = gpuViewportLifecycles(lifecycleWindow);
     const renderBinding: GPUViewportRenderBinding = {
-      publishFrameRate: (fps) => {
-        if (fpsRef.current) fpsRef.current.textContent = fps === undefined ? "— FPS" : `${fps.toFixed(1)} FPS`;
-      },
+      publishFrameRate: (fps) => publishFrameRate(paneId, fps),
       pixelTraceDrawConfig,
       publishPixelTrace,
     publishBodyPoses,
@@ -2753,24 +2749,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       }}
       onContextMenu={openRadialMenuAt}
     />
-    {/* What the frame costs, and the three readings that say where it went.
-        Pick mode moved to the contextual ring on a fluid cell — the shortcut
-        (`C`) is unchanged. The tags sit to the *left* of the number so the
-        number never moves when they reveal. */}
-    <div className="fps-cluster" data-testid="fps-cluster">
-      {/* First in the corner, and the one thing here that never fades: it is
-          the answer to "why did my click do nothing", so it cannot itself be
-          discovered by hovering. */}
-      <ViewportModeToggle />
-      <SceneInstrumentTags />
-      <output
-        ref={fpsRef}
-        className="fps-meter"
-        data-testid="fps-meter"
-        aria-label="Presentation frame rate"
-        title="WebGPU presentations per second · rolling mean of the latest 5 frame intervals"
-      >— FPS</output>
-    </div>
     {fillHandle?.visible && <div
       className="editor-fill-handle"
       data-testid="editor-fill-handle"

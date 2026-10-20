@@ -5,7 +5,7 @@ import type { SceneOverlay } from "./stores/ui-store";
  * The three instruments, declared once.
  *
  * An instrument is reachable from four places — the ring on the water, the ring
- * on empty space, a key, and the cluster beside the frame rate — and each of
+ * on empty space, a key, and the transport bar's menu — and each of
  * those used to spell out its own name, icon and hint. Two of them had already
  * drifted into copies of the same sentence about the frame graph, which is the
  * failure mode: a wedge and a button that open the same pane should not be able
@@ -26,7 +26,7 @@ export interface SceneInstrument {
   readonly label: string;
   /** The word on a ring wedge, where the full title does not fit and Title Case is the house style. */
   readonly wedge: string;
-  /** Short name in the frame-rate cluster, which is set in the tag font beside the number. */
+  /** Short name on the toggle in the transport bar's menu, set in the tag font. */
   readonly tag: string;
   /**
    * The unmodified key that raises it.
