@@ -139,7 +139,9 @@ export class UniformMixedSurface {
     private readonly wallTrace:"clip"|"retrace"="clip",
     /** surfaceVelocitySampler "texture32": umFastVelocity's unit interpolant is
      * one filtered sample a component of the halo (float32-filterable). */
-    private readonly velocitySampler:"texture32"|"software"="software") {
+    private readonly velocitySampler:"texture32"|"software"="software",
+    /** surfaceTraceSubsteps "off": every surface trace is one step (UM_SURFACE_ONE_STEP). */
+    private readonly oneStepTrace=false) {
     if(velocitySampler==="texture32"&&!device.features.has("float32-filterable"))throw new Error("Mixed surface texture32 velocity sampling requires float32-filterable");
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -366,6 +368,10 @@ override umSurfaceStationaryTrace:bool=true;
 // Fast candidates and full fallback read the same frozen velocity field.
 // Only a successful exact fast sample may seed the next trace's first stage.
 override umSurfaceTraceSeed:bool=true;
+// surfaceTraceSubsteps "off": one RK3 step of any length, split only so a
+// span crosses at most one page face an axis (32 cells of travel), as
+// umPointFrom assumes. No gradient or travel substeps.
+const UM_SURFACE_ONE_STEP:bool=${this.oneStepTrace};
 var<private> umTraceSeedValid:bool=false;
 var<private> umTraceSeedPoint:vec3f;
 var<private> umTraceSeedVelocity:vec3f;
@@ -402,7 +408,9 @@ fn umSurfaceTrace(p:vec3f)->vec3f{
     steps=nbTraceSteps(k1,params.hDt.w);
     if(umOneStep){steps=1u;}
     if(steps>${NARROW_BAND_TRACE_LIMIT}u){atomicStore(&nbState[3],1u);return p;}
-    travel=steps;if(NB_TRACE_GRADIENT&&steps>1u){steps=1u;probe=true;}
+    travel=steps;
+    if(UM_SURFACE_ONE_STEP){steps=(travel+31u)/32u;}
+    else if(NB_TRACE_GRADIENT&&steps>1u){steps=1u;probe=true;}
     base=-params.hDt.w/f32(steps);
    }
    x=q+base*k1;stage=1u;continue;
