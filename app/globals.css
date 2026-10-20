@@ -1205,6 +1205,10 @@ button.card[data-active] { border-color: var(--accent); }
 .rp-tap:hover { border-color: var(--line-strong); color: var(--ink); }
 .rp-tap.is-active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 .rp-node-controls { margin: 4px 0 0 16px; display: grid; gap: 3px; }
+.rp-breakdown { margin: 5px 0 1px 16px; color: var(--micro); font: 400 var(--size-2)/1.5 var(--sans); }
+.rp-breakdown > div { display: flex; justify-content: space-between; gap: 12px; }
+.rp-breakdown dt { min-width: 0; }
+.rp-breakdown dd { margin: 0; flex: none; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 /* A folded card: its name is the disclosure. Closed, the head says how much is
    inside, so a reader can tell a stage with one switch from one with nine
    without opening either; open, the card is framed and its fields sit under a

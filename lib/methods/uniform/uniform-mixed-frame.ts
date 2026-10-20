@@ -44,7 +44,7 @@ import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
 import {DEFAULT_UNIFORM_CM11A_SCHEDULE,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE,type UniformCM11aSchedule} from "./pressure-policy";
 import type {GPUTimestampPhase} from "../../core/performance-trace";
 import {UNIFORM_ADVANCE_PHASE as A} from "./uniform-stages";
-import {UNIFORM_VOLUME_PHASE as V} from "./uniform-volume-stages";
+import {UNIFORM_VOLUME_PHASE as V,NARROW_BAND_SURFACE_PHASE as S} from "./uniform-volume-stages";
 import {UniformMixedSolid,type UniformMixedSolidResources} from "./uniform-mixed-solid.wgsl";
 import {UniformTileContext} from "./uniform-tile-context";
 import {UNIFORM_PAGE_POOL_STATUS,UniformPagePool,uniformPagePoolFatalMessage,type UniformPagePoolMirror,type UniformPagePoolResidency} from "./uniform-page-pool";
@@ -1021,10 +1021,11 @@ export class UniformMixedFrame {
    // host encodes the surface stages behind it.
    // The move closes its own share of the phi stage: passes after a
    // submission's last mark are in no stage's time.
-   {this.narrowBandFlip.move(encoder,dt,p.openTop,gravity);trace?.phase(encoder,V.phi);encoder=this.flush(encoder,trace);}
+   {this.narrowBandFlip.move(encoder,dt,p.openTop,gravity);trace?.phase(encoder,S.move);encoder=this.flush(encoder,trace);}
    // Idle: the advected scratch's only readers (reconstruct, redistance) do
    // not run, and phi is unchanged, so no resolve has a texel to change.
    if(!idle){this.surface.encode(encoder,this.surfaceGroup);this.phiResolve.encode(encoder,this.phiResolveGroups.scratch);}
+   trace?.phase(encoder,S.advect);
    // Cell departures feed conservative volume transport only. NB-FLIP
    // measures volume from phi, and momentum writes this scratch field later.
    {
@@ -1035,6 +1036,7 @@ export class UniformMixedFrame {
     this.narrowBandFlip.reconstruct(encoder);
     if(!idle)this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);
    }
+   trace?.phase(encoder,S.reconstruct);
    // Retire buried phantom surfaces and stale near-air distances only outside
    // the physical support collar. Resolve shared vertices before all readers.
    // Before redistance: its crossing search and metric then describe the
@@ -1042,11 +1044,13 @@ export class UniformMixedFrame {
    // Off a kick the reconstruction's resolve already covers this layout, so
    // only clearAir's own 4h-lattice writes can change a hanging value.
    this.narrowBandFlip.clearAir(encoder);if(kick)this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);else if(!idle)this.phiResolve.encodeGated(encoder,this.phiResolveGroups.phi,this.narrowBandFlip.state,true);
-   if(p.redistance!==false&&!idle){this.narrowBandFlip.retire(encoder);this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);}
+   if(p.redistance!==false&&!idle)this.narrowBandFlip.retire(encoder);
+   trace?.phase(encoder,S.retire);
+   if(p.redistance!==false&&!idle){this.narrowBandFlip.redistance(encoder);this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);}
    // Surface producers publish exact changes once; derived geometry and the
    // next surface model consume these revisions instead of rescanning phi.
    this.narrowBandFlip.exportSurfaceRevisions(encoder);
-   trace?.phase(encoder,V.phi);encoder=this.flush(encoder,trace);
+   trace?.phase(encoder,S.distance);encoder=this.flush(encoder,trace);
 
    trace?.phase(encoder,V.coupling);
    // Apply shifts canonical vertices only; resolved readers below and the

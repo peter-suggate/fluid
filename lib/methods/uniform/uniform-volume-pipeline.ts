@@ -1,7 +1,7 @@
 import type { FluidPipelineGraph, FluidPipelineStage, FluidPipelineContext, FluidStageControl } from "../../core/fluid-pipeline";
 import { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
 import { UNIFORM_ADVANCE_PHASE as A } from "./uniform-stages";
-import { UNIFORM_VOLUME_PHASE as P } from "./uniform-volume-stages";
+import { UNIFORM_VOLUME_PHASE as P, NARROW_BAND_SURFACE_PHASE } from "./uniform-volume-stages";
 import { UNIFORM_GEOMETRIC_PARAMS, UNIFORM_GEOMETRIC_SHARPENING_DISTANCE, UNIFORM_GEOMETRIC_SPLASH_HINTS, uniformGeometricSharpeningSweeps, uniformGeometricSurfaceVolumeRounds } from "./uniform-geometric-parameters";
 
 /**
@@ -112,7 +112,7 @@ const stages: FluidPipelineStage[] = [
   },
   {
     id:"uniform-volume-phi", band:"surface", side:"right", label:"Vertex level set",
-    phaseLabels:[P.phi.label],
+    phaseLabels:[P.phi.label,...Object.values(NARROW_BAND_SURFACE_PHASE).map(phase=>phase.label)],
     tip:{summary:"RK2 vertex characteristics with hanging vertices resolved, cell traces for volume transport, then bounded closest-point redistancing and a second resolve.",
       reads:"phi, sampling caches", writes:"phi, cell traces", feeds:"volume coupling"},
     controls:[

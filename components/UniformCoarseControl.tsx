@@ -1,26 +1,19 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { useState } from "react";
 import { useSession } from "../lib/core/session/session-context";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { simulation } from "../lib/core/simulation/controller";
-import { refinementRegionLattice } from "../lib/core/refinement-regions";
 import type { MethodParamValue } from "../lib/core/method-contract";
-import { UNIFORM_DETAIL_CONTROL_DEFAULTS, UNIFORM_DETAIL_CRITERION_PARAMS, UNIFORM_DETAIL_RANGES, uniformDetailSettings, uniformDetailValues,
-  type UniformDetailShapeMetric } from "../lib/methods/uniform/uniform-detail-policy";
+import { UNIFORM_DETAIL_CRITERION_PARAMS, UNIFORM_DETAIL_RANGES, uniformDetailSettings, uniformDetailValues } from "../lib/methods/uniform/uniform-detail-policy";
 import { UNIFORM_DETAIL_CRITERIA, type UniformDetailCriterion } from "../lib/methods/uniform/uniform-stage-grids";
 import { IMPORTANCE_LEGEND, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
-import { uniformDetailDomain, uniformDetailFocusRadius_m, uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
+import { uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
 import { NARROW_BAND_ACTIVITY_CONTROLS, narrowBandControlValues } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { Grid3X3 } from "lucide-react";
 import { ToolstripMenuButton, ToolstripMenuItem, ToolstripMenuRule, ToolstripRow, useToolstripSection } from "./toolstrip";
-import { ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, SwitchField, ToggleButton } from "./ui";
+import { Facts, Field, FieldList, FieldNote, NumberInput, RangeField, ToggleButton } from "./ui";
 
-/** What the shape threshold bounds (UniformDetailShapeMetric). */
-const SHAPE_METRICS = [
-  { value: "value", label: "Value", hint: "The largest gap between phi and the trilinear phi of a tile's 4h corners, within 2h of the surface." },
-  { value: "displacement", label: "Displacement", hint: "How far the surface itself moves when a tile is carried by its 4h corners. About half the h tiles at the same threshold." },
-] as const satisfies ReadonlyArray<{ value: UniformDetailShapeMetric; label: string; hint: string }>;
 const SHAPE_DISPLACEMENT_HINT = "Shape measures how far the surface moves at 4h, not the error in phi beside it. Off: value error.";
 const SURFACE_DISTANCE_HINT = "Allowed tile layers around surface-crossing tiles, including diagonals. 0 keeps only crossing tiles. This permits existing refinement; it does not request more.";
 const SURFACE_ONLY_HINT = "Only tiles within the Surface distance of a surface-crossing tile are eligible for automatic detail. Filters the existing selection, including margin and hold; never adds fine tiles. Explicit requests and required solid contact remain.";
@@ -65,8 +58,8 @@ const thresholdOf = (values: Record<string, unknown>, key: keyof typeof UNIFORM_
  * on one row and, for Dynamic, a Tune dropdown beside it holding the criteria.
  * Each criterion is a check item in its layer colour with its threshold beside
  * it while it is on; the shaping dials follow under a rule. A menu because the
- * rows stood three wide over the water. The same live method parameters as the
- * panel below, so either surface tunes a running simulation.
+ * rows stood three wide over the water. Changes tune the running simulation;
+ * the panel below reports the accepted layout.
  */
 export function UniformDetailRow() {
   const session = useSession();
@@ -159,7 +152,8 @@ export function UniformDetailRow() {
 
 /**
  * Simulation detail: where the Uniform Geometric solver runs h on its 4h base.
- * Every control is live; the accepted frame, not this panel, says what holds.
+ * Keep this panel focused on accepted coverage and status; tuning lives in
+ * the scene toolstrip.
  */
 export function UniformCoarseControl() {
   const session = useSession();
@@ -167,9 +161,6 @@ export function UniformCoarseControl() {
   const scene = session.scene(state => state.scene);
   const info = session.diagnostics(state => state.gpuInfo);
   const values = resolvedMethodValues(method), settings = uniformDetailSettings(values);
-  const set = (key: string, value: MethodParamValue) => simulation.setMethodParam(method.methodId, key, value, session.id);
-  const reset = (key: string) => simulation.resetMethodParam(method.methodId, key, session.id);
-  const overrides = method.overrides[method.methodId] ?? {};
   const narrowBand = true;
   const adaptive = narrowBand && values.adaptiveSurface === "on";
   const activityValues = narrowBandControlValues(values);
@@ -179,45 +170,8 @@ export function UniformCoarseControl() {
   const ready = detail !== undefined && fine !== undefined;
   // The accepted layout answers a policy and region set; anything else is still on its way.
   const pending = ready && detail.requestKey !== uniformDetailRequestKey(settings.policy, regions);
-  const radius_m = uniformDetailFocusRadius_m(uniformDetailDomain(refinementRegionLattice(scene)), settings.focusRadiusPercent);
-  const dynamic = settings.policy === "dynamic";
   const tiles = (fine ?? 0) + (coarse ?? 0);
   return <FieldList testId="uniform-resolution-control">
-    <FieldNote>Automatic candidates use the existing criterion scores. The adaptive budget keeps the highest scores; cooling particles retain support until they retire.</FieldNote>
-    {dynamic && <>
-      {adaptive && NARROW_BAND_ACTIVITY_CONTROLS.map(c => <RangeField key={c.key} label={c.label} value={activityValues[c.key]}
-        min={c.min} max={c.max} step={c.step} digits={c.digits} unit={c.unit} editable defaultValue={c.default}
-        modified={overrides[c.key] !== undefined} onReset={() => reset(c.key)} hint={c.hint}
-        onInput={value => set(c.key, value)} onChange={value => set(c.key, value)} />)}
-      <SwitchField label="Surface" checked={settings.surfaceOnly} hint={SURFACE_ONLY_HINT}
-        onChange={on => set("detailSurface", on ? "on" : "off")} />
-      <RangeField label="Surface distance" value={settings.surfaceDistance} min={0} max={3} step={1} digits={0} unit="tiles"
-        disabled={!settings.surfaceOnly} hint={SURFACE_DISTANCE_HINT} onChange={value => set("detailSurfaceDistance", value)} />
-      <SwitchField label="Near focus" checked={settings.nearFocus} onChange={on => set("detailNearFocus", on ? "on" : "off")}
-        hint="Hold h around the camera's orbit target, with or without liquid there. The focus is never saved." />
-      <RangeField label="Focus radius" value={settings.focusRadiusPercent} min={1} max={100} step={1} unit="%"
-        defaultValue={UNIFORM_DETAIL_CONTROL_DEFAULTS.detailFocusRadiusPercent} disabled={!settings.nearFocus}
-        modified={overrides.detailFocusRadiusPercent !== undefined} onReset={() => reset("detailFocusRadiusPercent")}
-        hint={`Half-extent of the focus box, as a share of the domain's longest side: ${radius_m.toFixed(2)} m.`}
-        onChange={value => set("detailFocusRadiusPercent", value)} />
-      {UNIFORM_DETAIL_CRITERIA.map(id => { const c = CRITERIA[id], keys = UNIFORM_DETAIL_CRITERION_PARAMS[id], [min, max, step, digits] = UNIFORM_DETAIL_RANGES[keys.threshold];
-        return <Fragment key={id}>
-          <SwitchField label={c.name} checked={settings.criteria[id]} hint={c.hint} onChange={on => set(keys.toggle, on ? "on" : "off")} />
-          <RangeField label={`${c.label} threshold`} value={thresholdOf(values, keys.threshold)} min={min} max={max} step={step} digits={digits} unit={c.unit}
-            editable defaultValue={UNIFORM_DETAIL_CONTROL_DEFAULTS[keys.threshold]} disabled={!settings.criteria[id]}
-            modified={overrides[keys.threshold] !== undefined} onReset={() => reset(keys.threshold)}
-            hint={c.thresholdHint} onChange={value => set(keys.threshold, value)} />
-          {id === "shape" && <ChoiceField<UniformDetailShapeMetric> label="Shape metric" value={settings.shapeMetric} options={SHAPE_METRICS}
-            hint="What the shape threshold bounds on an h tile." disabled={!settings.criteria.shape} onChange={value => set("detailShapeMetric", value)} />}
-        </Fragment>; })}
-      <SwitchField label="Bulk liquid" checked={settings.bulk} onChange={on => set("detailBulk", on ? "on" : "off")}
-        hint="Deformation and rotation also judge liquid tiles with no surface in them. Off: surface tiles only." />
-      {SHAPING.filter(c => !adaptive || c.key !== "detailBudgetPercent").map(control => { const [min, max, step, digits] = UNIFORM_DETAIL_RANGES[control.key];
-        return <RangeField key={control.key} label={control.label} value={thresholdOf(values, control.key)} min={min} max={max} step={step} digits={digits}
-          unit={control.unit || undefined} defaultValue={UNIFORM_DETAIL_CONTROL_DEFAULTS[control.key]}
-          modified={overrides[control.key] !== undefined} onReset={() => reset(control.key)}
-          hint={control.hint} onChange={value => set(control.key, value)} />; })}
-    </>}
     <Field label="Coverage" className="is-readout"
       hint="Tiles of 4×4×4 h cells in the accepted layout. Enabled solid-contact refinement also requests h.">
       <output className="ui-value" data-testid="uniform-detail-coverage">
@@ -232,13 +186,10 @@ export function UniformCoarseControl() {
       {`Request refused; the layout above keeps running. ${detail.rejected}.`}</span></FieldNote>}
     {ready && detail.preparing && <FieldNote><span data-testid="uniform-detail-preparing">
       {`Compiling ${detail.preparing} pipelines for the latest change; the simulation above keeps running until they are ready.`}</span></FieldNote>}
-    <FieldNote>{settings.policy === "full" ? "Every tile runs h; Fine and Coarse regions are kept for later."
-      : regions.length ? "Draw, move or remove regions with the Region tool; Fine regions run h. Edits keep the running simulation."
-      : dynamic ? "The importance criteria choose h and 4h tiles as the water moves; turn on the Detail importance layer to see their scores."
-      : "No Fine regions: 4h throughout unless solid-contact refinement is enabled. Use the Region tool to draw areas needing finer simulation."}</FieldNote>
     {ready && <details className="instrument-drawer" data-testid="uniform-detail-diagnostics">
-      <summary><span>Detail plan</span><small>{detail.mapping}</small></summary>
+      <summary><span>Detail plan</span><small>Accepted layout</small></summary>
       <Facts items={[
+        { label: "Mapping", value: detail.mapping },
         { label: "Requests", value: `${detail.reasons.region.toLocaleString()} region · ${detail.reasons.full.toLocaleString()} full · ${detail.reasons.focus.toLocaleString()} focus · ${detail.reasons.activity.toLocaleString()} activity tiles` },
         { label: "Support overhead", value: `${detail.supportTiles.toLocaleString()} tiles (${percent(detail.supportTiles, detail.admittedTiles + detail.supportTiles)})`,
           hint: "Tiles around admitted h tiles that a patch store must also hold." },

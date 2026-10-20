@@ -108,6 +108,12 @@ export interface FluidPipelineStage {
   readonly label: string;
   /** Trace seam labels this stage owns. Summed for its measured cost. */
   readonly phaseLabels: readonly string[];
+  /** Exclusive parts of this stage; shown together below its total. */
+  readonly breakdown?: readonly {
+    readonly label: string;
+    readonly phaseLabels: readonly string[];
+    readonly hint: string;
+  }[];
   /**
    * Set when this stage's work is a term inside another stage's passes rather
    * than a seam of its own, naming the stage that owns the passes.
@@ -196,7 +202,7 @@ export function fluidPipelinePhaseCosts(trace: PerformanceTrace | undefined): Re
   return costs;
 }
 
-function measureLabels(
+export function measureFluidPipelineLabels(
   phaseLabels: readonly string[],
   costs: ReadonlyMap<string, FluidPhaseCost>,
   total_ms: number,
@@ -217,7 +223,8 @@ function measureLabels(
     kind: "measured",
     duration_ms,
     share: total_ms > 0 ? Math.min(1, duration_ms / total_ms) : 0,
-    ...(encodedFraction < 1 ? { encodedFraction } : {}),
+    // Marginal frequencies cannot tell us how often a union of phases ran.
+    ...(phaseLabels.length === 1 && encodedFraction < 1 ? { encodedFraction } : {}),
   };
 }
 
@@ -241,11 +248,11 @@ export function measureFluidPipelineStage(
   if ((state === "off" || state === "unavailable") && costs.size > 0) {
     return { kind: "withheld", duration_ms: 0, share: 0 };
   }
-  const own = measureLabels(stage.phaseLabels, costs, total_ms);
+  const own = measureFluidPipelineLabels(stage.phaseLabels, costs, total_ms);
   if (own.kind === "measured") return own;
   if (stage.costInsideStage) {
     const host = stages.find((candidate) => candidate.id === stage.costInsideStage);
-    const hostCost = host ? measureLabels(host.phaseLabels, costs, total_ms) : UNMEASURED;
+    const hostCost = host ? measureFluidPipelineLabels(host.phaseLabels, costs, total_ms) : UNMEASURED;
     if (hostCost.kind === "measured") {
       return { ...hostCost, kind: "shared", insideStage: stage.costInsideStage };
     }
@@ -266,7 +273,7 @@ export function measureFluidPipelineBand(
   const labels = graph.stages
     .filter((stage) => stage.band === bandId)
     .flatMap((stage) => stage.phaseLabels);
-  return measureLabels(labels, costs, total_ms);
+  return measureFluidPipelineLabels(labels, costs, total_ms);
 }
 
 /** The hover tip as one string, in the tip's declared order. */

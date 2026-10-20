@@ -3,7 +3,7 @@ import { fitCost, SpatialCostModel, type CostFit, type SpatialCostSnapshot, type
 import type { UniformMixedFrame, UniformMixedFrameTrace } from "./uniform-mixed-frame";
 import { UNIFORM_PAGE_TABLE_WORDS } from "./uniform-lattice-address";
 import { UNIFORM_ADVANCE_PHASE as A } from "./uniform-stages";
-import { UNIFORM_VOLUME_PHASE as V } from "./uniform-volume-stages";
+import { UNIFORM_VOLUME_PHASE as V, NARROW_BAND_SURFACE_PHASE } from "./uniform-volume-stages";
 
 /** This is the only solver-specific cost vocabulary. Add a producer's existing
  * cheap evidence here and in decode; timing/accounting/drawing remain generic.
@@ -12,7 +12,7 @@ export const UNIFORM_SPATIAL_PERFORMANCE: SpatialPerformancePlugin = {
   id: "uniform-mixed", revision: 1, stages: [
     { id: "layout", label: "Layout + solids", phases: [A.resolutionCensus.label, V.solids.label], features: ["layoutTiles", "fine"] },
     { id: "support", label: "Support + extension", phases: [V.support.label, V.extension.label, V.transportReach.label], features: ["warm", "hot", "particles"] },
-    { id: "surface", label: "Surface transport", phases: [V.phi.label, V.coupling.label, V.sharpen.label], features: ["identityVertices", "affineVertices", "middleVertices", "fullLinearVertices", "fullCubicVertices", "particles"] },
+    { id: "surface", label: "Surface transport", phases: [V.phi.label, ...Object.values(NARROW_BAND_SURFACE_PHASE).map(phase=>phase.label), V.coupling.label, V.sharpen.label], features: ["identityVertices", "affineVertices", "middleVertices", "fullLinearVertices", "fullCubicVertices", "particles"] },
     { id: "geometry", label: "Geometry + volume", phases: [V.gather.label], features: ["active", "fine"] },
     { id: "momentum", label: "Momentum + forces", phases: [A.advectionCorrection.label], features: ["warm", "hot", "particles"] },
     { id: "pressure", label: "Global pressure", phases: [A.pressureSetup.label, A.pressureFullCycles.label, A.pressureVCycles.label, A.pressureFinish.label, A.pressureProjection.label], features: ["tiles", "liquid", "pressureWork"] },

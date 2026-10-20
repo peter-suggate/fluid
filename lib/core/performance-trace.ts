@@ -391,8 +391,17 @@ export function averagePerformanceTraces(traces: readonly PerformanceTrace[]): P
   const latest = observations[observations.length - 1];
   const totals = new Map<string, PerformancePhaseSample & { count: number }>();
   for (const trace of observations) {
+    // A semantic stage can occur in several submitted segments (for example,
+    // extension at the head and tail). Sum those occurrences in this advance
+    // before counting whether the stage was encoded in the observation.
+    const perAdvance = new Map<string, PerformancePhaseSample>();
     for (const phase of trace.phases) {
       const key = `${phase.id}\0${phase.label}`;
+      const current = perAdvance.get(key);
+      if (current) current.duration_ms += phase.duration_ms;
+      else perAdvance.set(key, { ...phase });
+    }
+    for (const [key, phase] of perAdvance) {
       const current = totals.get(key);
       if (current) {
         current.duration_ms += phase.duration_ms;

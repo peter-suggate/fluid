@@ -16,6 +16,7 @@ import {
   fluidPipelineTipText,
   measureFluidPipelineBand,
   measureFluidPipelineStage,
+  measureFluidPipelineLabels,
   type FluidPipelineContext,
   type FluidPipelineGraph,
   type FluidPipelineMeasurement,
@@ -45,6 +46,7 @@ const TRACE_WINDOW = 12;
 function usePhysicsTiming(methodId: string): {
   readonly total?: PerformanceTrace;
   readonly stages?: PerformanceTrace;
+  readonly samples?: number;
 } {
   const session = useSession();
   const reports = session.diagnostics((state) => state.performanceReports);
@@ -53,9 +55,17 @@ function usePhysicsTiming(methodId: string): {
     if(unavailable)return {};
     const newest = reports.findLast((report) => report.methodId === methodId && report.physics);
     if (!newest) return {};
+    // Reports can repeat one completed GPU sample while the next is in flight.
+    // Pick unique advances before limiting the window, not twelve UI reports.
+    const seen = new Set<string>();
     const recent = reports
-      .filter((report) => report.methodId === methodId && report.context === newest.context)
-      .slice(-TRACE_WINDOW);
+      .filter((report) => report.methodId === methodId && report.context === newest.context && report.physics)
+      .filter((report) => {
+        const trace = report.physics!;
+        const key = JSON.stringify([trace.context, trace.sampleId, trace.capturedAt_ms, trace.measurementSource]);
+        if (seen.has(key)) return false;
+        seen.add(key); return true;
+      }).slice(-TRACE_WINDOW);
     const physics = recent.map((report) => report.physics)
       .filter((trace): trace is PerformanceTrace => trace !== undefined);
     const latest = physics.at(-1);
@@ -66,12 +76,12 @@ function usePhysicsTiming(methodId: string): {
       : [];
     const physicsMean = averagePerformanceTraces(matching);
     if (physicsMean?.measurementSource === "gpu-hardware-timestamp") {
-      return { total: physicsMean, stages: physicsMean };
+      return { total: physicsMean, stages: physicsMean, samples: matching.length };
     }
 
     // Uniform Geometric only publishes measured GPU stages. Old reports
     // cannot reintroduce a CPU or queue-wall substitute after a scene edit.
-    if(methodId === "uniform-volume")return {};
+    if(methodId === "uniform-volume" || methodId === "uniform-narrow-band-flip")return {};
 
     // `performanceReportCPUTrace` only admits a CPU trace here when its sample,
     // context and stable capture frame all match this completed physics trace.
@@ -92,8 +102,8 @@ function usePhysicsTiming(methodId: string): {
     });
     const cpuMean = averagePerformanceTraces(cpu);
     return cpuMean
-      ? { total: cpuMean, stages: cpuMean }
-      : { total: physicsMean, stages: undefined };
+      ? { total: cpuMean, stages: cpuMean, samples: cpu.length }
+      : { total: physicsMean, stages: undefined, samples: matching.length };
   }, [reports, methodId, unavailable]);
 }
 
@@ -385,6 +395,20 @@ export function SimPipelineOverlay() {
               encodedFraction: cost.encodedFraction,
               explanation: `${stage.label}\n\n${costExplanation(cost, measurementDomain, methodId === "uniform-volume" && values.volumeStorage !== "dense" && info?.uniformMixedGeneration === undefined)}`,
             },
+            breakdown: stage.breakdown?.map(part => {
+              const measuredPart = measureFluidPipelineLabels(part.phaseLabels, costs, total_ms);
+              // Zero-duration seams are omitted by the recorder. A trace with
+              // the new vocabulary proves a missing sibling was skipped; an
+              // older parent-only trace cannot tell us its children's costs.
+              const hasBreakdown = stage.breakdown!.some(child => child.phaseLabels.some(label => costs.has(label)));
+              const partCost = measuredPart.kind === "unmeasured" && hasBreakdown
+                ? { kind: "idle" as const, duration_ms: 0, share: 0 }
+                : measuredPart;
+              return { label: part.label, cost: {
+                ...partCost,
+                explanation: `${part.hint}\n\n${costExplanation(partCost, measurementDomain)} Included in the stage total above.`,
+              } };
+            }),
             lamp: {
               // A stage the advance always encodes is a status, not a control:
               // it reports, takes no click and offers no switch semantics.
@@ -412,7 +436,7 @@ export function SimPipelineOverlay() {
   const sourceLabel = !totalTrace
     ? info?.physicsTraceUnavailable ?? "Waiting for a sampled advance."
     : totalTrace.measurementSource === "gpu-hardware-timestamp"
-      ? `Hardware timestamp boundary chain: an exact, exclusive partition of the advance, so the trunk figures sum to the total. ${TRACE_WINDOW}-sample mean.`
+      ? `Hardware timestamp boundary chain: an exclusive partition of the sampled advance. Mean of ${timing.samples ?? 0} distinct advances (up to ${TRACE_WINDOW}). Substage times are included in their parent total. Sampling closes GPU passes at stage boundaries and adds timestamp/readback overhead; unsampled frames keep their normal schedule.`
       : totalTrace.measurementSource === "cpu-active-wall"
         ? `Authoritative CPU boundary chain: an exact, exclusive partition of the host solve, so the trunk figures sum to the total. ${TRACE_WINDOW}-sample mean.`
         : `GPU queue-wall observation: the whole advance is timed but no semantic boundary partition is available, so the trunk stays unmeasured. ${TRACE_WINDOW}-sample mean.`;
@@ -437,7 +461,7 @@ export function SimPipelineOverlay() {
       <span className={running && info ? "online" : ""} />
       <strong data-testid="fluid-pipeline-method">{method.badge ?? method.label}</strong>
       <Switch label="Live" checked={liveTiming} onChange={setLiveTiming}
-        hint={`Samples the method-owned advance boundary chain on a cadence without changing its algorithmic schedule.\n\n${sourceLabel}`} />
+        hint={`Samples GPU stages periodically while this panel is open. Extra timing boundaries apply only to sampled advances.\n\n${sourceLabel}`} />
       <code data-testid="fluid-advance-cost" title={sourceLabel}>{advanceLabel}</code>
     </div>
 

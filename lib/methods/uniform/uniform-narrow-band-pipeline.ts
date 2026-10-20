@@ -2,19 +2,27 @@ import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_FINE_ADVECTION as FINE, NARR
 import type { FluidPipelineGraph, FluidPipelineContext } from "../../core/fluid-pipeline";
 import { UNIFORM_VOLUME_PIPELINE } from "./uniform-volume-pipeline";
 import { uniformNarrowBandMethod } from "./uniform-narrow-band-method";
+import { NARROW_BAND_SURFACE_PHASE as S } from "./uniform-volume-stages";
 
 const particles=(context:FluidPipelineContext)=>(context.info as unknown as {narrowBandFlipParticles?:number}|null)?.narrowBandFlipParticles;
 const clipped=(c:FluidPipelineContext)=>(c.info as unknown as {narrowBandFlipReseedClipped?:number}|null)?.narrowBandFlipReseedClipped??0;
 const unsupported=(c:FluidPipelineContext)=>(c.info as unknown as {narrowBandFlipUnsupportedParticles?:number}|null)?.narrowBandFlipUnsupportedParticles??0;
 const coarseParticles=(c:FluidPipelineContext)=>c.values.coarseParticleMode==="on";
 const declared=new Set(uniformNarrowBandMethod.params!.map(p=>p.key));
-/** These stages include the new work inside the existing timestamp seams. */
+/** Surface parts partition the parent total; only sampled frames close these seams. */
 export const UNIFORM_NARROW_BAND_PIPELINE:FluidPipelineGraph={
  ...UNIFORM_VOLUME_PIPELINE,methodId:"uniform-narrow-band-flip",
  stages:UNIFORM_VOLUME_PIPELINE.stages.map(original=>{
   const stage={...original,controls:original.controls?.filter(c=>!("param" in c)||declared.has(c.param))};
   if(stage.id==="uniform-volume-support")return {...stage,chip:(c:FluidPipelineContext)=>(c.info?.uniformMixedFineTiles??0)===0?"4h support · no h tiles":stage.chip?.(c)};
   if(stage.id==="uniform-volume-phi")return {...stage,label:"Level set + particle surface",
+   breakdown:[
+    {label:"Particle movement",phaseLabels:[S.move.label],hint:"Prepare the scalar volume budget, update and advect particles, and rebuild their spatial ordering."},
+    {label:"Grid surface advection",phaseLabels:[S.advect.label],hint:"Advect the interior level set and resolve its shared vertices."},
+    {label:"Particle surface union",phaseLabels:[S.reconstruct.label],hint:"Build particle support, unite the particle surface with the advected grid, and resolve shared vertices."},
+    {label:"Crossings + retirement",phaseLabels:[S.retire.label],hint:"Clear unsupported air, resolve changed vertices, search surface crossings, and retire coarse surfaces."},
+    {label:"Distance + publication",phaseLabels:[S.distance.label],hint:"Reinitialize surface distance, resolve shared vertices, and publish surface revisions. Any fresh-search fallback is included here."},
+   ],
    controls:[...(stage.controls??[]),{kind:"param-choice" as const,param:FINE.key,label:FINE.label,options:FINE.options,hint:FINE.hint,enabled:(c:FluidPipelineContext)=>c.values.phiCubicAdvection==="on"},{kind:"param-choice",param:"adaptiveSurface",label:"Surface tracking",options:[{value:"off",label:"Fixed particle band"},{value:"on",label:"Activity transition"}]},...NARROW_BAND_ACTIVITY_CONTROLS.map(c=>({kind:"param-range" as const,param:c.key,label:c.label,live:true,unit:c.unit,min:c.min,max:c.max,step:c.step,digits:c.digits,hint:c.hint,enabled:(c:FluidPipelineContext)=>c.values.adaptiveSurface==="on"&&c.values.detailPolicy==="dynamic"}))],
    tip:{...stage.tip,summary:"Advect particles and the interior level set with matching substepped RK4 traces and solid collision checks. Unite the advected level set, shrunk by one cell, with the surface of the particles (Ferstl et al. 2016, Eq. 4): particles overrule the grid surface, so the sheets and droplets they carry are liquid. Reinitialize distance before pressure. Preserve the outer h layer and reseed the inner band after the projected velocity update; liquid a source adds gets its whole band that step. At the particle budget, defer new seeds while preserving existing samples. With Activity transition and Dynamic detail, resolution error, thin features, deformation and approaching contact heat the particle band. Cooling blends the surface back to the advected level set, stops seeding and releases particles and fine tiles. Automatic refinement follows active swept surface-crossing cells with independent grid padding. Requested regions control grid resolution; the 4h particle band survives on either resolution."},
    chip:(c:FluidPipelineContext)=>`${particles(c)?.toLocaleString()??"—"} particles · ${c.values.adaptiveSurface==="on"&&c.values.detailPolicy==="dynamic"?`activity transition · ${c.values.adaptiveBudgetPercent??50}% budget`:coarseParticles(c)?"4h seed band":"inner 4h band"}${unsupported(c)?` · ${unsupported(c).toLocaleString()} unresolved`:""}${clipped(c)?" · reseeding limited by particle budget":""}`};

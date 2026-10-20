@@ -107,6 +107,8 @@ export interface PipelineRow {
   /** The short factual line under the label. Never a description. */
   readonly chip?: string;
   readonly cost?: PipelineCost;
+  /** Exclusive child measurements, already included in the row's total. */
+  readonly breakdown?: readonly { readonly label: string; readonly cost: PipelineCost }[];
   readonly lamp: PipelineLamp;
   /** The ◨ affordance beside the name: present this row's primary plane. */
   readonly tap?: PipelineTap;
@@ -328,6 +330,12 @@ function RowCard({ row, graphId }: { row: PipelineRow; graphId: string }) {
       {row.tap ? <TapButton tap={row.tap} variant="head" /> : folded && <span className="rp-tap-slot" />}
     </div>
     {row.chip && <small className="rp-node-chip" title={row.tip}>{row.chip}</small>}
+    {row.breakdown && <dl className="rp-breakdown" aria-label={`${row.label} timing breakdown`}>
+      {row.breakdown.map(part => <div key={part.label} title={part.cost.explanation}>
+        <dt>{part.label}</dt>
+        <dd>{part.cost.duration_ms === undefined ? "—" : formatPipelineDuration(part.cost.duration_ms)}</dd>
+      </div>)}
+    </dl>}
     {row.notice}
     {hasControls && (!folded || open) && <RowControls row={row} id={folded ? panelId : undefined} />}
   </div>;

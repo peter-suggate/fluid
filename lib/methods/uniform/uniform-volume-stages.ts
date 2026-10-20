@@ -15,3 +15,12 @@ export const UNIFORM_VOLUME_PHASE = {
   band: {id:"velocity-projection",label:"h pressure band solve + projection"},
   surface: {id:"surface-extraction",label:"Phi surface publication"},
 } as const satisfies Record<string,GPUTimestampPhase>;
+
+/** Exclusive parts of the NB-FLIP surface stage, in execution order. */
+export const NARROW_BAND_SURFACE_PHASE = {
+  move: {id:"fine-sdf-advection",label:"Particle movement + volume budget"},
+  advect: {id:"fine-sdf-advection",label:"Grid surface advection"},
+  reconstruct: {id:"fine-sdf-advection",label:"Particle surface union"},
+  retire: {id:"fine-sdf-redistance",label:"Crossing search + surface retirement"},
+  distance: {id:"fine-sdf-redistance",label:"Surface distance + revision publication"},
+} as const satisfies Record<string,GPUTimestampPhase>;
