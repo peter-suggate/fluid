@@ -122,7 +122,19 @@ The same umOwnerAt/umFace walks (uniform-mixed-faces.wgsl.ts:17–60) feed remap
 
 ## Dropped (inputs differ between the two "duplicates")
 
-- **Crossing search vs arena search:** advected vs coupled phi.
+- **Crossing search vs arena search:** advected vs coupled phi. But see "Reconstruct crossing search" below: its outputs may be read only by couple's bulkDepth before the arena rebuilds them.
+- **Surface advect vs the arena redistance** (the advect's ~6.2 ms against arenaStore's rewrite):
+  - arenaStore replaces the advected magnitude with sign·distance only at non-interface h vertices of arena bricks.
+  - Interface vertices, every 4h canonical corner, h vertices outside the arena and values ≥6h past reach remain advected state.
+  - The sign alone needs the departure point, so every vertex within travel plus stencil of the zero must be traced anyway. That is 56% of h vertices at f100 (brick-arena-core §6.3).
+  - The exact cut left is a certified-sign hold of deep vertices: same-sign data over the tile's signed reach box (localSpeed plus spread), min|φ| ≥ 16·max h for every threshold reader. That is about −0.4 ms, or about −0.85 ms with a 6h floor behind a param.
+  - Kept as a minor lever.
+
+### Reconstruct crossing search: −1.0 to −1.2 ms, behind a param (under audit)
+
+**What duplicates it.** The batch (depthTiles, depthSeeds, reuse, depthNearestY/Z, depthLists) finds each cell's nearest crossing on the advected phi. Its bank B, masks and reach bits appear to be read only by couple's bulkDepth before the arena search rebuilds them on the coupled phi. bulkDepth deepens negative bulk values: `min(phi, -distance to the nearest crossing box)`.
+
+**Candidate replacement.** Take bulkDepth from the previous step's arena outputs (reach bits and bank B, the nearest crossing of the last final phi), shortened by the tile's travel this step.
 - **geometryChanged vs geometryRegional:** the surface stages write phi in between.
 - **The two authority runs:** phi changes between them.
 - **The five phi-resolve runs:** each follows a different writer.
