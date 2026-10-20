@@ -38,6 +38,9 @@ test('Bub climbs the actual pool ladder, walks the board, flips once and falls i
   try {
     await host.ready; await steps(host, 20); await possess(host);
     input = new InteractionInputRouter(host);
+    // Bub spawns facing +x beside the ladder: a quarter turn left faces it at the ladder's foot.
+    input.key('ArrowLeft', true); await input.settled(); await steps(host, 36);
+    input.key('ArrowLeft', false); await input.settled();
     input.key('ArrowUp', true); await input.settled(); await steps(host, 25);
     input.key('ArrowUp', false); await input.settled(); await steps(host, 15);
     assert.ok(Math.abs(body().transform.position_m.z) < .5, JSON.stringify(body().transform.position_m));
@@ -45,7 +48,8 @@ test('Bub climbs the actual pool ladder, walks the board, flips once and falls i
     input.key('Space', false); await input.settled(); await steps(host, 35);
     assert.ok(body().transform.position_m.y > 5.8, `ladder landing: ${JSON.stringify(body().transform.position_m)}`);
     assert.ok(body().grounded, 'lands on the actual board');
-    input.key('ArrowRight', true); await input.settled(); await steps(host, 82);
+    // The ladder leaves Bub facing along the board.
+    input.key('ArrowUp', true); await input.settled(); await steps(host, 82);
     const takeoff = body().transform.position_m;
     assert.ok(takeoff.x > -3.4 && takeoff.x < -2.5, JSON.stringify(takeoff));
     input.key('KeyF', true); await input.settled(); await steps(host, 12);

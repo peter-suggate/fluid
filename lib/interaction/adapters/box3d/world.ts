@@ -148,13 +148,14 @@ export class Box3DWorld {
       this.grab!.anchor.setTargetTransform({ position: command.target_m, rotation: body.native.getRotation() }, dt, true);
       return;
     }
-    if (command.kind === 'character-move') { const body = this.bodies.get(command.entityId); if (body?.recipe?.character) this.moveCharacter(body, command.velocity_m_s, command.jump, dt, command.somersault, command.climb); return; }
+    if (command.kind === 'character-move') { const body = this.bodies.get(command.entityId); if (body?.recipe?.character) this.moveCharacter(body, command.velocity_m_s, command.jump, dt, command.somersault, command.climb, command.turn_rad_s); return; }
     const body = [...this.bodies.values()].find(b => b.description.id === command.bodyId);
     if (!body || command.bodyGeneration !== body.generation) throw new Error('Stale physics body command');
     if (command.kind === 'impulse') { body.native.applyLinearImpulseToCenter(command.linear_N_s, true); body.native.applyAngularImpulse(command.angular_N_m_s, true); }
     else body.native.setTargetTransform({ position: command.transform.position_m, rotation: command.transform.orientation }, dt, true);
   }
-  private moveCharacter(body: WorldBody, target: Vec3, jump: boolean, dt: number, somersault = false, climb = false) {
+  private facing(body: WorldBody) { return body.facing ?? 2 * Math.atan2(body.description.orientation.y, body.description.orientation.w); }
+  private moveCharacter(body: WorldBody, target: Vec3, jump: boolean, dt: number, somersault = false, climb = false, turn?: number) {
     const motor = body.recipe!.character!, pos = body.native.getPosition(), velocity = body.native.getLinearVelocity();
     const d = body.description.dimensions_m, height = d.y + 2 * d.x;
     const hit = this.ray(pos, { x: 0, y: -1, z: 0 }, height / 2 + .12, 1);
@@ -163,8 +164,14 @@ export class Box3DWorld {
     body.jumpBuffer = jump ? .12 : Math.max(0, body.jumpBuffer - dt);
     if (body.grounded) body.flipped = false;
     if ((body.flipTime ?? 0) > 0) body.flipTime = Math.max(0, body.flipTime! - dt);
+    if (turn !== undefined) {
+      // A body-frame command: turn the facing, then carry the velocity into the world.
+      body.facing = this.facing(body) + turn * dt;
+      const c = Math.cos(body.facing), s = Math.sin(body.facing);
+      target = { x: target.x * c + target.z * s, y: target.y, z: target.z * c - target.x * s };
+    }
     const targetSpeed = Math.hypot(target.x, target.z);
-    if (targetSpeed > .05 && !body.flipTime) {
+    if (turn === undefined && targetSpeed > .05 && !body.flipTime) {
       const desired = Math.atan2(target.x, target.z), current = body.facing ?? desired;
       body.facing = current + Math.atan2(Math.sin(desired - current), Math.cos(desired - current)) * Math.min(1, dt * 14);
     }
@@ -276,7 +283,7 @@ export class Box3DWorld {
       state.position_m = body.native.getPosition(); state.orientation = body.native.getRotation();
       state.linearVelocity_m_s = body.native.getLinearVelocity(); state.angularVelocity_rad_s = body.native.getAngularVelocity();
       if (body.recipe?.character) {
-        const yaw = body.facing ?? 2 * Math.atan2(body.description.orientation.y, body.description.orientation.w);
+        const yaw = this.facing(body);
         const pitch = body.flipTime ? (1 - body.flipTime / .8) * Math.PI * 2 : 0;
         state.renderOrientation = quaternionMultiply({ w: Math.cos(yaw / 2), x: 0, y: Math.sin(yaw / 2), z: 0 },
           { w: Math.cos(pitch / 2), x: Math.sin(pitch / 2), y: 0, z: 0 });
@@ -289,7 +296,8 @@ export class Box3DWorld {
       const position = body.native.getPosition(), radius = boundingRadius(body.description);
       const value: BodySnapshot = { entityId: body.entityId, bodyId: body.description.id, bodyGeneration: body.generation,
         authority: body.recipe?.character ? 'character' : body.recipe?.motion === 'kinematic' ? 'kinematic' : (body.recipe?.motion ?? body.description.motion) === 'static' ? 'static' : 'dynamic',
-        transform: { position_m: position, orientation: body.native.getRotation() }, linearVelocity_m_s: body.native.getLinearVelocity(), angularVelocity_rad_s: body.native.getAngularVelocity(), shapeId: body.description.shape,
+        // A character's capsule never rotates; its orientation is the way it faces.
+        transform: { position_m: position, orientation: body.recipe?.character ? { w: Math.cos(this.facing(body) / 2), x: 0, y: Math.sin(this.facing(body) / 2), z: 0 } : body.native.getRotation() }, linearVelocity_m_s: body.native.getLinearVelocity(), angularVelocity_rad_s: body.native.getAngularVelocity(), shapeId: body.description.shape,
         grounded: body.grounded, submergedFraction: body.submerged,
         bounds_m: { min: { x: position.x - radius, y: position.y - radius, z: position.z - radius }, max: { x: position.x + radius, y: position.y + radius, z: position.z + radius } } };
       assertFiniteSnapshot(value); return value;

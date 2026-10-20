@@ -9,5 +9,5 @@ export const robot: EntityKindPlugin = {
     radius: .38, height: 1, speed: 2.2, runMultiplier: 1.5, jumpHeight: .85,
     density: 650, acceleration: 22, stepHeight: .32 } },
   editor: { ...character.editor, label: 'Bub · pool robot', order: 1,
-    hint: 'A little poolside droid. WASD / arrows move, Space hops, hold Space at a ladder to climb, F somersaults.' },
+    hint: 'A little poolside droid. W/S walk, A/D turn, Space hops, hold Space at a ladder to climb, F somersaults.' },
 };

@@ -3,6 +3,7 @@ import type { PhysicsBehaviorFactory } from '../../runtime/physics';
 import { behavior, controls, instance, metadata, numbers, scalar } from '../shared';
 const schema = numbers({ radius: .3, height: 1.7, speed: 3, runMultiplier: 1.6, jumpHeight: .6, density: 800, acceleration: 18, maxSlope: 50, stepHeight: .2 }, { maxSlope: [0, 80], stepHeight: [0, .6], jumpHeight: [0, 5] });
 const validate = schema.validate;
+const TURN_RATE_RAD_S = 2.6;
 export const character: EntityKindPlugin = {
   id: 'fluid.character', schema: { ...schema, validate: c => [...validate(c), ...(Number(c.height) < Number(c.radius) * 2 ? ['height must be at least twice radius'] : [])] },
   editor: { ...metadata('Character', 'Characters', 0), controls: controls(schema, {speed:'live',runMultiplier:'live',jumpHeight:'live',acceleration:'live',maxSlope:'live',stepHeight:'live',density:'rebuild',radius:'rebuild',height:'rebuild'}) },
@@ -34,9 +35,9 @@ export const characterRuntime: PhysicsBehaviorFactory = {
     const move = actions.find(a => a.actionId === 'move')?.value;
     const [x, z] = Array.isArray(move) ? move : [0, 0];
     const run = actions.some(a => a.actionId === 'run' && a.value === true);
-    const speed = scalar(ctx.entity, 'speed') * (run ? scalar(ctx.entity, 'runMultiplier') : 1) / Math.max(1, Math.hypot(x, z));
-    const forward = ctx.viewDirection ?? { x: 0, y: 0, z: -1 }, length = Math.max(1e-9, Math.hypot(forward.x, forward.z));
-    const fx = forward.x / length, fz = forward.z / length;
-    ctx.enqueue({ kind: 'character-move', entityId: ctx.entity.id, velocity_m_s: { x: (-fz * x - fx * z) * speed, y: 0, z: (fx * x - fz * z) * speed }, jump: actions.some(a => a.actionId === 'jump' && a.edge === 'pressed'), climb: actions.some(a => a.actionId === 'jump' && a.value === true), somersault: actions.some(a => a.actionId === 'somersault' && a.edge === 'pressed') });
+    const speed = scalar(ctx.entity, 'speed') * (run ? scalar(ctx.entity, 'runMultiplier') : 1);
+    // Steered in the character's own frame: W/S walk along its facing, A/D turn it.
+    const ahead = Math.max(-1, Math.min(1, -z)), turn = -Math.max(-1, Math.min(1, x)) * TURN_RATE_RAD_S;
+    ctx.enqueue({ kind: 'character-move', entityId: ctx.entity.id, velocity_m_s: { x: 0, y: 0, z: ahead * speed }, turn_rad_s: turn, jump: actions.some(a => a.actionId === 'jump' && a.edge === 'pressed'), climb: actions.some(a => a.actionId === 'jump' && a.value === true), somersault: actions.some(a => a.actionId === 'somersault' && a.edge === 'pressed') });
   }, dispose() {} }),
 };

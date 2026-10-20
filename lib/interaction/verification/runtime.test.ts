@@ -8,17 +8,19 @@ import { SceneInteractionHost } from '../runtime/host';
 import { InteractionInputRouter } from '../runtime/input';
 import type { InteractionCommand, EntityRecord } from '../contracts';
 const transform = (x: number, y: number, z: number) => ({ position_m: { x, y, z }, orientation: { x: 0, y: 0, z: 0, w: 1 } });
+/** Upright, facing +x. */
+const facingX = (x: number, y: number, z: number) => ({ position_m: { x, y, z }, orientation: { x: 0, y: Math.SQRT1_2, z: 0, w: Math.SQRT1_2 } });
 function entity(kind: string, id: string, x=0,y=1,z=0): EntityRecord { return interactionCatalog.createEntity({ kind, id, name:id, transform:transform(x,y,z) }); }
 function scene(entities: EntityRecord[]) { const s = createEmptyScene({ extents_m:{x:8,y:4,z:8}, finestCellSize_m:.25 }); s.scenery=undefined; s.interaction={schemaVersion:1,entities,connections:[]}; return s; }
 let seq=0;
 async function send(h:SceneInteractionHost,command:InteractionCommand) { const v=h.getView(); const r=await h.dispatch({id:`test:${++seq}`,generation:v.generation,documentRevision:v.documentRevision,command}); assert.equal(r.accepted,true,JSON.stringify(r)); }
 const step = async (h:SceneInteractionHost,n:number) => {for(let i=0;i<n;i++) await h.advance(1/60);};
 const body = (h:SceneInteractionHost,id='hero')=>h.getView().snapshot!.bodies.find(b=>b.entityId===id)!;
-test('real Box3D character falls, walks camera-relative, jumps once, stops on focus loss and resets',async()=>{
+test('real Box3D character falls, walks along its facing, jumps once, stops on focus loss and resets',async()=>{
  const s=scene([entity('fluid.character','hero',0,1.5)]),h=new SceneInteractionHost(s);try{
  await h.ready;await step(h,90);assert.ok(body(h).grounded);assert.ok(Math.abs(body(h).transform.position_m.y-.85)<.03);
  await send(h,{kind:'possess',entityId:'hero'});const input=new InteractionInputRouter(h);
- assert.equal(input.key('KeyW',true),true);await input.settled();await step(h,30);assert.ok(body(h).transform.position_m.z<-.8);
+ assert.equal(input.key('KeyW',true),true);await input.settled();await step(h,30);assert.ok(body(h).transform.position_m.z>.8);
  input.key('Space',true);await input.settled();await step(h,12);assert.ok(body(h).transform.position_m.y>1.1);
  await step(h,90);assert.ok(body(h).grounded,'held jump must not retrigger');
  input.reset();await step(h,40);assert.ok(Math.abs(body(h).linearVelocity_m_s.z)<.05);assert.equal(h.getView().controlledEntityId,undefined);
@@ -83,16 +85,16 @@ test('queued input cannot survive focus loss or a reset generation',async()=>{
 test('a fresh input router can reacquire the same host after unmount',async()=>{
  const h=new SceneInteractionHost(scene([entity('fluid.character','hero',0,1.5)]));try{await h.ready;await send(h,{kind:'possess',entityId:'hero'});
  const first=new InteractionInputRouter(h);first.key('KeyW',true);await first.settled();await step(h,10);first.dispose();
- await send(h,{kind:'possess',entityId:'hero'});const next=new InteractionInputRouter(h);next.key('KeyD',true);await next.settled();await step(h,20);assert.ok(body(h).transform.position_m.x>.05);next.dispose();
+ await send(h,{kind:'possess',entityId:'hero'});const next=new InteractionInputRouter(h);next.key('KeyD',true);await next.settled();await step(h,20);assert.ok(body(h).transform.orientation.y<-.2,'D turns the character right');next.dispose();
  }finally{await h.dispose();}
 });
 test('character rides an activated platform and collides with a wall without tunneling',async()=>{
- const s=scene([entity('fluid.character','hero',2,1.2,0),entity('fluid.switch','switch',0,1,0),entity('fluid.platform','lift',2,.2,0)]);
+ const s=scene([{...entity('fluid.character','hero'),transform:facingX(2,1.2,0)},entity('fluid.switch','switch',0,1,0),entity('fluid.platform','lift',2,.2,0)]);
  s.solidVoxels.push({operation:'fill',minimum:[32,0,0],maximumExclusive:[33,16,32],materialId:1});
  s.interaction={...s.interaction!,connections:[{id:'wire',source:{entity:'switch',behavior:'main',port:'active'},target:{entity:'lift',behavior:'main',port:'active'}}]};
  const h=new SceneInteractionHost(s);try{await h.ready;await step(h,30);const y=body(h).transform.position_m.y;await send(h,{kind:'possess',entityId:'hero'});
  await send(h,{kind:'aim',origin_m:{x:0,y:1,z:2},direction:{x:0,y:0,z:-1}});await send(h,{kind:'action',action:{entityId:'switch',behaviorId:'main',actionId:'use',value:true,edge:'pressed',sequence:1}});await step(h,60);assert.ok(body(h).transform.position_m.y>y+.4);
- const input=new InteractionInputRouter(h);input.key('KeyD',true);await input.settled();await step(h,120);assert.ok(body(h).transform.position_m.x<3.75);input.dispose();
+ const input=new InteractionInputRouter(h);input.key('KeyW',true);await input.settled();await step(h,120);assert.ok(body(h).transform.position_m.x<3.75);input.dispose();
  }finally{await h.dispose();}
 });
 
@@ -112,11 +114,11 @@ test('a switch behavior composes onto a crate without adding a second physics bo
 });
 
 test('character clears an allowed step and camera clearance stops before a solid wall',async()=>{
- const hero=interactionCatalog.createEntity({kind:'fluid.character',id:'hero',transform:transform(-1,1,0),config:{...interactionCatalog.entityKind('fluid.character')!.schema.defaults,stepHeight:.3}});
+ const hero=interactionCatalog.createEntity({kind:'fluid.character',id:'hero',transform:facingX(-1,1,0),config:{...interactionCatalog.entityKind('fluid.character')!.schema.defaults,stepHeight:.3}});
  const s=scene([hero]);s.solidVoxels.push({operation:'fill',minimum:[16,0,0],maximumExclusive:[32,1,32],materialId:1});
  const h=new SceneInteractionHost(s);try{
   await h.ready;await step(h,30);await send(h,{kind:'possess',entityId:'hero'});
-  const input=new InteractionInputRouter(h);input.key('KeyD',true);await input.settled();await step(h,45);input.reset();await step(h,30);
+  const input=new InteractionInputRouter(h);input.key('KeyW',true);await input.settled();await step(h,45);input.reset();await step(h,30);
   assert.ok(body(h).transform.position_m.x>.5,'motor crosses the step');assert.ok(body(h).transform.position_m.y>1.05,'capsule stands on the raised floor');input.dispose();
   const wall=structuredClone(s);wall.solidVoxels.push({operation:'fill',minimum:[24,0,0],maximumExclusive:[25,12,32],materialId:1});await h.replaceScene(wall);
   const camera=h.cameraPosition({x:0,y:2,z:0},{x:3,y:2,z:0});assert.ok(camera.x<1.95&&camera.x>1.5,'camera remains on the near side');

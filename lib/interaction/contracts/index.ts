@@ -156,7 +156,8 @@ export type PhysicsCommand =
   | { readonly kind: "grab"; readonly entityId: string; readonly active: boolean; readonly target_m: Vec3 }
   | { readonly kind: "impulse"; readonly bodyId: string; readonly bodyGeneration: number; readonly linear_N_s: Vec3; readonly angular_N_m_s: Vec3 }
   | { readonly kind: "kinematic-target"; readonly bodyId: string; readonly bodyGeneration: number; readonly transform: Transform }
-  | { readonly kind: "character-move"; readonly entityId: string; readonly velocity_m_s: Vec3; readonly jump: boolean; readonly climb?: boolean; readonly somersault?: boolean };
+  /** With `turn_rad_s` the host turns the body's facing at that rate and `velocity_m_s` is in the body's own frame (+z ahead); without it the velocity is world-space and the body turns toward it. */
+  | { readonly kind: "character-move"; readonly entityId: string; readonly velocity_m_s: Vec3; readonly jump: boolean; readonly climb?: boolean; readonly somersault?: boolean; readonly turn_rad_s?: number };
 export interface BehaviorEvent extends TickIdentity {
   readonly connectionId: string;
   readonly source: Endpoint;

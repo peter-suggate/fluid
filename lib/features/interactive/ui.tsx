@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useStore } from "zustand";
 import type { CameraState, Vec3 } from "../../core/model";
-import { add, cameraBasis, orbit, scale } from "../../core/math";
+import { add, orbit, scale } from "../../core/math";
 import { viewportProjector, viewportRayForPointer } from "../../core/webgpu-camera";
 import { editorEntityContext } from "../../core/editor-entity-catalog";
 import { targetAtRay, targetSurfaceNormal } from "../../core/editor-probe-catalog";
@@ -49,7 +49,6 @@ import { interactiveEntityActions } from "./ring";
 
 const ROTATE_STEP_RAD = Math.PI / 12;
 const DRAG_THRESHOLD_PX = 4;
-const LOOK_RATE_RAD_PX = 0.007;
 const UP: Vec3 = { x: 0, y: 1, z: 0 };
 
 // ---- hooks ------------------------------------------------------------------
@@ -243,8 +242,6 @@ interface PressState {
   readonly origin?: Transform;
 }
 
-interface FollowState { distance_m: number; elevation_rad: number; azimuth_rad: number; saved?: CameraState }
-
 function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focused: boolean }) {
   const session = useSession();
   const layer = useRef<HTMLDivElement>(null);
@@ -260,7 +257,6 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
   const setMovePose = (pose: { entityId: string; transform: Transform } | undefined) => { movePoseRef.current = pose; setMovePoseState(pose); };
   const [locked, setLocked] = useState(false);
   const press = useRef<PressState | undefined>(undefined);
-  const follow = useRef<FollowState>({ distance_m: 4, elevation_rad: 0.32, azimuth_rad: 0 });
   const pointerRay = useRef<Ray | undefined>(undefined);
   const live = useRef({ focused, viewportMode });
   live.current = { focused, viewportMode };
@@ -370,12 +366,6 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
       }
     };
 
-    const wheel = (event: WheelEvent) => {
-      if (pane.state.view.context !== "play" || !onCanvas(event)) return;
-      claim(event);
-      follow.current.distance_m = Math.max(1.2, Math.min(14, follow.current.distance_m * Math.exp(event.deltaY * 0.0015)));
-    };
-
     const context = (event: MouseEvent) => {
       if (!onCanvas(event)) return;
       const current = pane.state;
@@ -389,24 +379,21 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
       if (actions.length) session.ui.getState().openRadialMenu({ x: event.clientX, y: event.clientY, title: hit.entity.name, actions });
     };
 
+    // The camera does not follow the character: a motor that turns by look takes the motion, otherwise it orbits the view.
     function look(dx: number, dy: number) {
-      if (pane.router.claimsMotion()) pane.router.move(dx, dy);
-      else follow.current.azimuth_rad -= dx * LOOK_RATE_RAD_PX;
-      follow.current.elevation_rad = Math.max(-0.25, Math.min(1.25, follow.current.elevation_rad + dy * LOOK_RATE_RAD_PX));
+      if (!pane.router.move(dx, dy)) session.ui.getState().setCamera((cam) => orbit(cam, dx, dy));
     }
 
     shell.addEventListener("pointerdown", down, true);
     shell.addEventListener("pointermove", move, true);
     shell.addEventListener("pointerup", up, true);
     shell.addEventListener("pointercancel", up, true);
-    shell.addEventListener("wheel", wheel, { capture: true, passive: false });
     shell.addEventListener("contextmenu", context, true);
     return () => {
       shell.removeEventListener("pointerdown", down, true);
       shell.removeEventListener("pointermove", move, true);
       shell.removeEventListener("pointerup", up, true);
       shell.removeEventListener("pointercancel", up, true);
-      shell.removeEventListener("wheel", wheel, true);
       shell.removeEventListener("contextmenu", context, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -475,19 +462,10 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pane]);
 
-  // ---- control: camera handover ---------------------------------------------------------
+  // ---- control: the camera stays where it is ---------------------------------------------
   const controlled = view.controlledEntityId;
   useEffect(() => {
-    const ui = session.ui.getState();
-    if (controlled) {
-      follow.current.saved ??= ui.camera;
-      follow.current.azimuth_rad = ui.camera.azimuth_rad;
-      ui.setViewportMode("camera");
-      return;
-    }
-    const saved = follow.current.saved;
-    follow.current.saved = undefined;
-    if (saved) ui.setCamera(saved);
+    if (controlled) { session.ui.getState().setViewportMode("camera"); return; }
     if (document.pointerLockElement && document.pointerLockElement === canvas()) document.exitPointerLock();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controlled, session]);
@@ -497,7 +475,7 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
     await pane.release();
   }
 
-  // ---- the running loop: input, aim and the follow camera, once per frame ------------------
+  // ---- the running loop: input and aim, once per frame -------------------------------------
   useEffect(() => {
     if (!view.running) return;
     let frame = 0;
@@ -506,25 +484,9 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
       pane.pumpInput();
       const body = current.controlledEntityId ? current.snapshot?.bodies.find((candidate) => candidate.entityId === current.controlledEntityId) : undefined;
       if (body) {
-        const f = follow.current;
-        const top = body.bounds_m.max.y;
-        const target_m = { x: body.transform.position_m.x, y: top - 0.15, z: body.transform.position_m.z };
-        // A motor that turns the body by look puts the camera behind it; otherwise the drag orbits freely.
-        if (pane.router.claimsMotion()) {
-          const facing = rotateVector(body.transform.orientation, { x: 0, y: 0, z: 1 });
-          f.azimuth_rad = Math.atan2(-facing.x, -facing.z);
-        }
-        let next: CameraState = { ...session.ui.getState().camera, target_m, azimuth_rad: f.azimuth_rad, elevation_rad: f.elevation_rad, distance_m: f.distance_m };
-        const basis = cameraBasis(next);
-        // A host that can query collision pulls the camera in front of a wall rather than through it.
-        const clear = pane.binding.cameraPosition?.(target_m, basis.position, 0.15);
-        if (clear) {
-          const distance_m = Math.hypot(clear.x - target_m.x, clear.y - target_m.y, clear.z - target_m.z);
-          if (distance_m < f.distance_m - 1e-3) next = { ...next, distance_m: Math.max(0.3, distance_m) };
-        }
-        session.ui.getState().setCamera(next);
-        // Aimed from the character's eye along the view, so the host's reach is measured from the body, not the camera.
-        pane.aim(target_m, basis.forward);
+        const eye_m = { x: body.transform.position_m.x, y: body.bounds_m.max.y - 0.15, z: body.transform.position_m.z };
+        // Aimed from the character's eye the way it faces, so its reach goes with the body, not the camera.
+        pane.aim(eye_m, rotateVector(body.transform.orientation, { x: 0, y: 0, z: 1 }));
       } else if (pointerRay.current) {
         pane.aim(pointerRay.current.origin, pointerRay.current.direction);
       }
@@ -705,9 +667,9 @@ function PlayHud({ pane, view, locked, onLock, onRelease }: {
       }} />
     </div>
     {view.context === 'play' && <p className="interactive-notice is-info" data-testid="interactive-controls-help">
-      {controlActions.map(action => `${action.id === 'move' ? 'WASD / arrows' : bindingLabel(action) ?? action.label} · ${action.label}`).join('   ·   ')}
+      {controlActions.map(action => action.id === 'move' ? 'W/S ↑/↓ · Walk   ·   A/D ←/→ · Turn' : `${bindingLabel(action) ?? action.label} · ${action.label}`).join('   ·   ')}
       {view.document.ladders?.length ? ' · Hold Space beside the ladder to climb onto the board' : ''}
-      {' · Drag to look · Esc releases'}
+      {' · Drag to orbit the view · Esc releases'}
     </p>}
     {view.readiness.state !== "ready" && view.readiness.reasons.length > 0 && <ul className={`interactive-reasons is-${view.readiness.state}`} data-testid="interactive-reasons">
       {view.readiness.reasons.map((reason) => <li key={reason}>{reason}</li>)}
