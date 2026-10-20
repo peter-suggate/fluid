@@ -926,3 +926,61 @@ Physics changes go behind NB-FLIP method params (update "solver"). Each is on by
 Ranks 1–4 and 6 together project ≈4.0 ms of the stage's 14.4 (2.37 → ≈1.7 per kT at today's tile count); rank 5 changes the tile count itself and adds ≈0.7. The 0.15 per kT target still needs persistence and the per-vertex control levers of §5.2.
 
 **Next surface lead: the coarse level** (rank 3). Rank 1 comes first: it is the cheapest certain win, a copy of a measured change.
+
+### 6.10 Measured, and re-ranked at the pour's late frames (f200–212)
+
+The target moved to the churn case: pour f200–212 at 1/60 s, 9–10k fine tiles, 1.2–1.4M particles, surface ≈16.8 ms (1.87 per kT, coordinator's `late1`). The counts of §6.6–6.7 were re-taken there (`L4`, `Locc`).
+
+**Rank 1, velocity through the texture unit (843802bd, default on).** Measured at f94–100: advectTrace 0.740 → 0.599 ms, advect 0.909 → 0.882 per kT. Letters A/B within the repeat spread. The ≈0.9 ms projection was more than 2× off, and two priors broke:
+- **"Two velocity samples a trace."** advectTrace runs with no seed (umTraceSeedValid false), so a trace takes 3.95 samples: 1.24 RK spans, with ≈20% gradient-substepped.
+- **"The eight loads run at the gather rate, 22 G/s."** They ran at ≈42 G/s, because they are cache-coherent.
+
+The trace's texture floor is ≈0.29 ms against 0.60 measured. The rest of advect is per-vertex control, not interpolation. Two follow-ups:
+- **Seed the trace.** Pass advectFine's Euler k1 into the trace list as the seed. This is exact and removes ≈25% of samples.
+- **Drop the surface trace's gradient substeps.** Peter's rule allows no trace substeps, so this is a physics param.
+
+**Rank 3, the coarse level: built exact, not as a band (8688c808).** At f200 the 4h level is much as it was at f94:
+
+| Count a step | f94–100 | f200–212 |
+|---|---|---|
+| 4h owners | 55k | 48k |
+| outside COLD regions | 24k | 25k |
+| canonical corners | 25k | 28k |
+| θ > 0 | 7.4k | 6.4k |
+| gathers | 4.5k | 2.5k |
+| \|bulk\| < 8h | 5.6k | 8.2k |
+
+Visit twins split the cost. A twin is a copy of a pass's visit-and-selection loop that writes nothing, added to the pass; its cost is the twin's increment.
+- depthCoarse: visits and selection 0.16–0.18 of 0.45 ms.
+- couple: selection 0.03–0.05; particleSurfaceBulk ≈0.12; finish plus store the rest.
+
+So the visits and the 8-corner loops were most of the waste. A physics band was not needed to remove them. coarseCorners now lists the step's canonical corners once, and couple, surfaceClear's 4h part and redistanceCoarse run a lane a corner. coarseBuilds lists the build corners, and depthCoarse runs a lane a build. At f200–212 the coarse passes went 1.01 → 0.40 ms and surfaceClear 0.25 → 0.18, a total of −0.68 ms. Letters A/B within the spread. A 4h band behind surfaceCoarseBand could now save at most ≈0.25 ms more, against medium physics risk, so it is not worth building.
+
+**Rank 4, the particle-free-tile copy in coupleFine: null at both states.** At f200 coupleFine visits ≈575k h vertices a step:
+- 24% (136k) have θ ≤ 0 and already take the cheap bandPhi exit. Particle-free tiles are a subset of these.
+- 49% (≈280k) gather particles.
+- 28% (≈165k) take bulkDepth without a gather.
+
+coupleFine's 2.1 ms is the gather and the finish, not the copy. A lever for it has to make the gather cheaper; skipping the gather where no particle reaches cannot help. Not built.
+
+**Rank 6, redistance reach (39b6f25b, param surfaceRedistanceReach, default 3).** Reach 1 at f200–212:
+- arenaDistance −10% per kT, arenaFar 0.136 → 0.086, depthCoarse −0.02: ≈−0.27 ms at 10k fine tiles.
+
+Letters A/B, two repeats an arm:
+- Occupancy L1 stays within the spread.
+- f240 drift goes from −0.009 to +0.004…+0.007, liquid cells +1.6%, particles at f120 +6–8%.
+
+That shift is systematic, past the within-arm spread, and the extra particles cost the particle stage more than the metric saves. The default stays 3.
+
+**Re-ranked at f200–212** (surface ≈16.8 ms):
+
+| Rank | Lever | Saves | State |
+|---|---|---|---|
+| 1 | Seed advectTrace with advectFine's k1 | ≈0.15 (≈25% of trace samples, exact) | not built |
+| 2 | Advect band k (§6.3) | largest left on advect, ≈1+ ms | parked: physics risk |
+| 3 | Surface trace without gradient substeps (param) | ≈20% of traces substep | not built: physics param |
+| 4 | coupleFine's gather (49% of vertices at f200) | unmeasured | needs its own analysis |
+| — | Coarse band (physics) | ≤0.25 after 8688c808 | dropped |
+| — | Particle-free coupleFine copy | ≤0.1 | null |
+| — | Redistance reach 1 | ≈0.27 | param, off: A/B failed |
+
