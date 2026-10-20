@@ -28,6 +28,23 @@ Notes:
 
 If the three stages reach their 2× targets (≤3 ms together, against 35 ms today) and particles reach their measured design (2.4 ms), the pass sum is about 48.8 − 35.1 + 3.0 − 4.1 ≈ **12.6 ms**. That leaves room for idle and the untouched rest inside 17 ms.
 
+### Late frames: the churn case, now the focus (2026-10-20)
+
+Peter: "we need to be focusing our efforts on the churn case (later frames). focus on the stages that bring the most time there".
+
+Profile `scratchpad/P/late1.json`: clean HEAD 843802bd, pour frames 200–212, 1.2M particles, 8981 fine tiles. GPU pass time is 54.9 ms, plus 7.1 ms of idle.
+
+| Stage | ms | Per unit | Largest passes |
+|---|---|---|---|
+| Surface | 16.8 | 1.87 / kT | arenaDistance 1.84, coupleFine 1.83, advectFine 1.63, deferred 1.44, advectFinish 1.22, arenaStore 1.16, phi resolve 0.98 |
+| Pressure | 10.3 | 1.14 / kT | pRelax 1.89, pRows 1.74, authority 1.54, project 0.74 |
+| Particles | 10.2 | 8.42 / Mp | advectParticles 3.33, transferDeposit 1.51, sort 0.70, refine 0.67, seed 0.63 |
+| RFE | 10.0 | 1.12 / kT | remap 2.89, extension 2.42 + snapshot 1.06, geometric fill 1.75, body forces 1.46 |
+| Other | 6.4 | | ownership census 2.19, local speed certificate 1.25 |
+| Momentum | 1.3 | | |
+
+Particle churn defines these frames: about 7% of particles are replaced per frame, and about half the seeds spill. Seeding fills down to depth −4 and the move retires at −4.0, with no hysteresis between the two. RFE now has its own owner. Every stage measures at f200–212.
+
 ## 2. Bounds: the irreducible job at the pour's counts
 
 The ceilings are measured (`scratchpad/ceil/ceilings.json`):
