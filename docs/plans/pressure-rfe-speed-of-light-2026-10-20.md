@@ -451,6 +451,56 @@ The minimum-work bound is 0.18 ms:
 
 **Total projection:** 0.30–0.35 ms against the 0.18 ms bound (1.7–1.9×), in about 12 dispatches instead of 58.
 
+### 2.5 Late frames: the pour at f200–212 (2026-10-20)
+
+The churn case is now the target. Three probe runs on HEAD 843802bd, in archive trees:
+- **rfe-c1:** GPU counters in the remap and geometry kernels, plus one pass per dispatch. RFE is 10.6 ms of 59.2 ms.
+- **rfe-ko1 and rfe-ko2:** knock-outs that change from frame to frame. A knock-out frame alternates with a base frame. Each delta below is against the same run's base frames, because counts drift during a run. For example, listed remap tiles rise from 1500 to 3300 between f200 and f215.
+
+Each knock-out removes one piece of work for one frame. Knock-outs in different passes share a frame.
+
+**Counts per frame (rfe-c1):**
+- 10.1k fine tiles (648k h owners) and 48.5k coarse tiles.
+- **Remap:** 1600 listed tiles. Of these:
+  - 510 leave at once;
+  - 270 refine;
+  - 250 coarsen;
+  - 570 are same-width h tiles taking over a vertex.
+- **Remap planes:** 11 plane tiles and 3.4 plane corners.
+- **Remap faces:** 1380 jobs per launch with face bits.
+- **Geometry:**
+  - 10.1k fine jobs, all needed, and 41.6k listed coarse owners, of which 32.6k are needed;
+  - 785k full umSurfaceTarget evaluations;
+  - the changed list holds 3150 fine and 2900 coarse tiles.
+
+The frame's `workDomainInfo` counts were stale in late1: 8981 fine tiles held constant, against about 10.1k on the GPU. The per-kT figures for late1 in the speed-of-light plan use that stale denominator.
+
+| Pass | ms (c1) | Elements | Per element | Knock-outs | Limiter | Change that closes it | Projected ms |
+|---|---|---|---|---|---|---|---|
+| remapCells | 1.32 | 1600 jobs, of which 1090 work | 0.8 µs per job | Plane corners off: 1.63 → 0.20. Return at entry: 0.03. Vertex loop off: no drop. | **One job's tail.** planeCorner runs one lane per tile: 64 cells × 9 loads (576) in a row on each lane, and the corners of a tile one after another. About 3 corners a frame set the pass at 1.4 ms. | Plane corners get their own launch: one 256-lane job per (listed tile, corner), each lane over a 16-cell layer. Corners run side by side. | 0.20 + ≈0.1 |
+| remapFaces ×2 (extension, velocity) | 1.36 + 0.09 free | 1380 jobs per launch | 0.5 µs per job per launch | Return after the list: 0.07–0.13. Beside and slope off: −0.34 per launch (base 0.93). remapSample, value loop, remapReleased and low wall each off: no change. | **Address chains and occupancy, not values.** oldumOwnerAt, umOwnerAt, umPositiveFaceAtAnchor and the page walks under a fat 192-lane job (6.5 KB of workgroup memory). | One paired launch for both fields: the address resolution once, two value loads per tap. Beside and slope only for old-4h entries. | 0.8 |
+| remap publish (copyFaces ×2) | 0.22 | 2 × listed tiles | — | — | Launch floor | Paired with the faces | 0.12 |
+| geometry kernel (geometryRegional, 2nd dispatch) | 1.18 (1.29–1.34 in the ko runs) | 648k h owners and 32.6k coarse | 1.8 ns per h owner | Lane 0's 4h turn off: −0.41/−0.43. umSurfaceTarget off: −0.48. Exact same-sign certificate: −0.23, and full evaluations fall from 760k to 137k. | **Lane 0's second turn doubles every job's critical path.** The certificate alone cannot shorten a job whose lane 0 still evaluates its tile's 4h owner. | The certificate plus the second turn moved into coarse-job lanes. Cut tiles keep their in-job turn, since it reads the job's gcTerms. | 0.55–0.65 |
+| work control geometryRegional (1st dispatch) | 0.46–0.58 | 10.1k tiles × 125 vertices | — | — | Snapshot compare with atomics | Work control's own pass; not taken here | — |
+| geometryChanged | 0.23 | 3150 fine and 2900 coarse | — | — | Same evaluation as the geometry kernel | Takes the certificate | 0.15 |
+| forcesFine | 0.54 + 0.05 free | 648k owners | 0.9 ns per owner | Inflow off: −0.10. Viscosity off: −0.10. | **Gathers:** about 13 per owner, about 15 G/s, the 4 MB gather ceiling. Inflow is active until 5.25 s, so every face pays 3 umFace walks and source tests, and far air is off. | An exact inflow reach test: owners beyond the swept inflow plug skip umInflow. | 0.45 |
+| forces, fused seam launch | 0.76 (0.92–0.96 in the ko runs) | Seam 4h quads, small tiers, empty h seam jobs | — | Whole launch off: 0.13. h-tile jobs skipped: −0.07. Inflow off: −0.13. Viscosity off: −0.18. Gravity, frozen and retain off: −0.04 to −0.07. | Per-patch umFace and address walks. About 0.6 ms remains with every term removed. | Inflow reach test (−0.13). The core needs its own analysis. | 0.65 |
+| forcesRegularCoarse | 0.20 | Regular 4h owners | — | Inflow off: −0.03 | — | Inflow reach test | 0.17 |
+| Extension: pair seeds and sweeps | 1.57 | Air-band faces | — | — | Already paired (two channels) | — | 1.57 |
+| Extension: main pyramid and publish | 0.35 + 0.81 (publishSeams 0.57) | — | — | — | publishSeams stages a 27-cell far neighbourhood per seam tile | — | — |
+| Extension: snapshot pyramid and publish | 1.13 (snapshotFine 0.41, snapshotCoarse 0.24, prolong 0.20) | — | — | — | A second pyramid and publish for the snapshot field | Snapshot pyramid and publish as the pair's second channel | 0.4–0.6 |
+| Extension retain | 0.25 | — | — | — | — | — | 0.25 |
+
+**Ranked list (late frames, projected saving at measured rates):**
+1. **Plane corners in their own launch:** −1.2 to −1.4 ms. Exact up to summation order. The knock-out bounds it: remapCells without corners is 0.20.
+2. **Paired remap faces and publish:** −0.6 to −0.8 ms. This holds only if the launches are bound by address chains. Every value-side knock-out leaves the time unchanged, which supports that.
+3. **Geometry, second turn into coarse lanes plus the exact same-sign certificate:** −0.6 to −0.7 ms. Measured separately at −0.43 and −0.23. The two compound, because the certificate's saving is capped by lane 0's turn.
+4. **Snapshot pyramid and publish as pair channels:** −0.5 to −0.7 ms. This needs knock-outs first: no extension pass was knocked out here.
+5. **Exact inflow reach test in forces:** −0.25 ms (fine 0.10, fused 0.13, coarse 0.03). Momentum shares the far-air predicate.
+6. **Forces fused core:** about 0.6 ms with every term removed. No change is named yet.
+
+Items 1–3 together take RFE from about 10.6 to about 7.8 ms at f200–212.
+
 ## 3. Levers, in order of yield
 
 | Lever | Pressure ms | RFE ms | Notes |
