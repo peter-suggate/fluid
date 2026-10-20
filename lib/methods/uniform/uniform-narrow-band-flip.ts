@@ -10,7 +10,7 @@ import { narrowBandActivityTriggerWGSL, narrowBandActivityWGSL, NARROW_BAND_ACTI
 import {narrowBandReuseLayout,narrowBandReuseWGSL,type NarrowBandReuseLayout} from "./uniform-narrow-band-reuse.wgsl";
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
 import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl";
-import { narrowBandArenaWGSL } from "./uniform-surface-brick-arena.wgsl";
+import { narrowBandArenaWGSL, narrowBandArenaCanonicalWGSL } from "./uniform-surface-brick-arena.wgsl";
 import { UNIFORM_BRICK_TABLE_ENTRIES, uniformBrickTableClear, uniformBrickTableWGSL, uniformBrickTableWords } from "./uniform-brick-table";
 import { narrowBandNearestEntries, narrowBandNearestControlEntries } from "./uniform-narrow-band-nearest.wgsl";
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
@@ -43,6 +43,8 @@ export const NARROW_BAND_PARTICLE_GRID=4096;
 /** The row of a frame whose lagged heat holds no HOT region: still complete
  * at any count, every kernel strides the actual GPU count. */
 export const NARROW_BAND_QUIET_PARTICLE_GRID=64;
+const NB_CANONICAL_SURFACE_ENTRIES=["arenaDistanceCanonical","arenaPublishFinish"] as const;
+
 /** A particle's one-step trace past this many cells an axis, the lattice's
  * extent (64 pages of 32 cells), is fatal: it arrives nowhere. */
 const NARROW_BAND_TRACE_REACH=2048;
@@ -52,7 +54,7 @@ const NARROW_BAND_TRACE_REACH=2048;
 // Entries of fine-only batches (reconstruct, the arena's gather and store:
 // encoded only while the h-tile capacity is non-zero) on the h side of their
 // group. The arena gather's all-4h twin is arenaGather@base.
-const NB_H_STORE_ENTRIES=new Set(["coupleFine","arenaGather","arenaStore"]);
+const NB_H_STORE_ENTRIES=new Set<string>(["coupleFine","arenaGather","arenaStore",...NB_CANONICAL_SURFACE_ENTRIES]);
 // Pipelines (by name) launched as a solid-free twin (name@free, umSolidFree)
 // beside the general pipeline (umSolidTwinned): umSolidSkip leaves the step
 // to one.
@@ -340,6 +342,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  private groups:Record<string,readonly [UniformDetailGroup,UniformDetailGroup]>={};
  private batches?:NarrowBandBatches;
+ private canonicalSurface?:{gather:NarrowBandBatch;far:NarrowBandBatch;publish:NarrowBandBatch;search:NarrowBandBatch};
  /** The lattice's addressing; its cell, vertex and tile keys are the bins' bank offsets. */
  private readonly address:UniformLatticeAddress;
  private readonly cells:number;
@@ -776,6 +779,7 @@ ${narrowBandMembershipWGSL}
 ${narrowBandRedistanceWGSL}
 ${uniformBrickTableWGSL("bins",`${this.brickWord}u`)}
 ${narrowBandArenaWGSL}
+${this.solid.coarse?narrowBandArenaCanonicalWGSL:""}
 ${narrowBandActivityTriggerWGSL(this.seeding,this.sourceSeeding)}
 ${narrowBandActivityWGSL}
 ${narrowBandAirWGSL}
@@ -1359,7 +1363,28 @@ ${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refi
   }
  }
  if(!far){atomicStore(&bins[NB_BAND_SEAM+atomicAdd(&bins[NB_BAND+3u],1u)],owner.tile);return;}
+ // Without live samples an owner beside h tiles keeps its velocity too: a
+ // face toward them is sixteen unit patches, a texel each, and every one
+ // keeps its departure (one writer a texel, as transferSeams). Left out,
+ // they held the last frame's field: zero where that was air, under every
+ // h front the stream advanced into.
+ let hanging=umTileMinimumWidth(owner.tile)==1u;
  for(var axis=0u;axis<3u;axis++){
+  if(hanging){
+   let first=umFace(owner,axis,1,0u);
+   if(first.count>1u){
+    for(var part=0u;part<first.count;part++){
+     let at=umFacePatch(first,part).anchor;let original=textureLoad(velocity,at,0);
+     var value=vec4f(0,0,0,original.w);var writer=true;
+     for(var other=0u;other<3u;other++){
+      if(other!=axis&&umPositiveFaceAtAnchor(owner,other,at).width==0u){continue;}
+      if(other<axis){writer=false;}value[other]=original[other];
+     }
+     if(writer){textureStore(output,at,value);}
+    }
+    continue;
+   }
+  }
   var anchor=vec3i(origin);anchor[axis]+=3;let original=textureLoad(velocity,anchor,0);
   var value=vec4f(0,0,0,original.w);value[axis]=original[axis];textureStore(output,anchor,value);
  }
@@ -1420,9 +1445,9 @@ ${narrowBandSurfaceWGSL}
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
   await Promise.all(["activity","activitySpread","advectParticles","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
-   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore","airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine"].map(async name=>{
+   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine"].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(entryPoint==="advectParticles"?{nbFastSample:1,umSolidFree:1}:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.deltaResources){
@@ -1475,6 +1500,14 @@ ${narrowBandSurfaceWGSL}
    clearAir:this.compile(["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
    // The step's seeds, into the current slabs' holes at the transfer's head.
    seed:this.compile(["seedCells","seedSources","seed"],"advectParticles","seed"),
+  };
+  // The mask view requires the solid tile record. Other solvers keep the
+  // baseline chain, which also remains available for metric-only work.
+  if(this.solid.coarse)this.canonicalSurface={
+   gather:this.compile(["arenaGather@publication@derived"],"redistance","surface canonical view"),
+   far:this.compile(["arenaFar"],"redistance","surface canonical far metric"),
+   publish:this.compile(["arenaDistanceCanonical","arenaPublishFinish"],"redistanceStore","surface canonical metric and publication"),
+   search:this.compile(["arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather@publication","arenaCross","depthLists","arenaNearest"],"redistance","surface canonical search"),
   };
   const listedSearch=search.filter(n=>n!=="depthNearestX").map(n=>n==="depthReuseSelect"?"depthReuseSelect@withX":n);
   this.crossingSearches.set(this.batches.searchReconstruct,this.compile(listedSearch.map(n=>n==="depthTiles"||n==="depthSeeds"?`${n}@cold`:n),"reconstruct","crossing search"));
@@ -1645,20 +1678,30 @@ ${narrowBandSurfaceWGSL}
   const b=this.compiled;
   // Shared: retirement's search stands (it only stores coarse corners);
   // the derived gather refreshes the windows' hanging vertices.
-  if(this.redistanceSearch==="fresh"||!this.retireSearched){this.arenaSearch(encoder);this.run(encoder,b.arenaMetric);}
-  else this.run(encoder,b.arenaMetricDerived);
-  if(!this.ownership.coarseOnly)this.run(encoder,b.arenaStore);
+  if(this.canonicalSurface&&!this.ownership.coarseOnly){
+   const shared=this.redistanceSearch!=="fresh"&&this.retireSearched;
+   if(!shared)this.arenaSearch(encoder,true);
+   // Search already gathered a fresh view. Retirement instead needs the
+   // derived view of the coarse corners it changed before metric queries.
+   if(shared)this.run(encoder,this.canonicalSurface.gather);
+   this.run(encoder,this.canonicalSurface.far);
+   this.run(encoder,this.canonicalSurface.publish);
+  }else{
+   if(this.redistanceSearch==="fresh"||!this.retireSearched){this.arenaSearch(encoder);this.run(encoder,b.arenaMetric);}
+   else this.run(encoder,b.arenaMetricDerived);
+   if(!this.ownership.coarseOnly)this.run(encoder,b.arenaStore);
+  }
   this.retireSearched=false;this.bandCurrent=true;
  }
  /** retire() ran the arena search and no other search has run since. */
  private retireSearched=false;
  /** The surface brick arena's search: the brick table, the windows, the
   * band's masks, reach and lists, and bank B (uniform-surface-brick-arena.wgsl). */
- private arenaSearch(encoder:GPUCommandEncoder):void{
+ private arenaSearch(encoder:GPUCommandEncoder,publication=false):void{
   this.retireSearched=false;this.syncSurfaceRevisions(encoder);this.syncTiers(encoder);
   encoder.clearBuffer(this.bins,this.bandWord*4,(4+3*this.tiles)*4);
   const table=uniformBrickTableClear(this.brickWord,this.address.blocks);encoder.clearBuffer(this.bins,table.offset,table.size);
-  this.run(encoder,this.ownership.coarseOnly?this.compiled.arenaSearchCoarse:this.compiled.arenaSearch);
+  this.run(encoder,this.ownership.coarseOnly?this.compiled.arenaSearchCoarse:publication&&this.canonicalSurface?.search?this.canonicalSurface.search:this.compiled.arenaSearch);
  }
  /** Clear only the certified empty field outside physical liquid/particle support.
   * It sets state word NARROW_BAND_AIR_CHANGED_WORD where it changes a 4h-lattice vertex. */
