@@ -14,10 +14,10 @@
 export const UNIFORM_MIXED_STATUS_WORDS=16;
 export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8,residencyAudit:9} as const;
 /** Latched causes. The final pressure schedule gate latches 1-4 (its verdict);
- * 6-8 are for the layout and transport stages. 5 is retired. */
-export const UNIFORM_MIXED_FAILURE={pressureRejected:1,pressureUnconverged:2,pressureNonfinite:3,bandCapacity:4,layoutCapacity:6,invalidSupport:7,transportCapacity:8} as const;
+ * 6-9 are for the layout and transport stages. 5 is retired. */
+export const UNIFORM_MIXED_FAILURE={pressureRejected:1,pressureUnconverged:2,pressureNonfinite:3,bandCapacity:4,layoutCapacity:6,invalidSupport:7,transportCapacity:8,planeCapacity:9} as const;
 const CAUSE_NAMES:Record<number,string>={1:"pressure rejected a non-improving cycle",2:"pressure did not converge",3:"pressure went nonfinite",4:"pressure band over capacity",
- 6:"layout or hanging-tap capacity exceeded",7:"invalid support",8:"transport capacity exceeded"};
+ 6:"layout or hanging-tap capacity exceeded",7:"invalid support",8:"transport capacity exceeded",9:"remap plane corners over capacity"};
 
 /** WGSL for the record at @group(group) @binding(binding). "read" gives
  * umFrameFailed(); "read_write" also gives umLatchFailure(cause, a, b), which
@@ -50,7 +50,7 @@ export function describeUniformMixedFrameStatus(words:Uint32Array):string|undefi
 }
 function describeFailure(words:Uint32Array,cause:number):string{
  const f=new Float32Array(words.buffer,words.byteOffset,words.length);
- const detail=cause===1||cause===3?`candidate ${f[3]}, accepted ${f[4]}`:cause===2?`accepted ${f[3]} after ${words[4]} cycles`:cause===4?`${words[3]} tiles`:cause===6||cause===7?relayoutDetail(words[3]!,words[4]!):`detail ${words[3]} ${words[4]}`;
+ const detail=cause===1||cause===3?`candidate ${f[3]}, accepted ${f[4]}`:cause===2?`accepted ${f[3]} after ${words[4]} cycles`:cause===4?`${words[3]} tiles`:cause===6||cause===7?relayoutDetail(words[3]!,words[4]!):cause===9?`${words[3]} corners, ${words[4]} held`:`detail ${words[3]} ${words[4]}`;
  const all=Array.from({length:31},(_,i)=>i+1).filter(i=>words[5]!&(1<<i)&&i!==cause).map(i=>CAUSE_NAMES[i]??`cause ${i}`);
  return `GPU failure record: ${CAUSE_NAMES[cause]??`cause ${cause}`} (${detail}) at frame ${words[1]}, layout generation ${words[2]}; last accepted frame ${words[6]}${all.length?`; also ${all.join(", ")}`:""}`;
 }

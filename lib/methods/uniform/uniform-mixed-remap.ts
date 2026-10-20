@@ -17,6 +17,12 @@ import {uniformKeyGroups} from "./uniform-lattice-address";
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
 /** Workgroups of each remap launch (see applyGpu). */
 const REMAP_GRID=4096;
+/** The cells launches: the remap, then the corner planes it hands to cut 4h owners. */
+const PLANE_STEPS:readonly string[]=["remapCells","planeList","planeSums","planeFinish"];
+/** Plane corners a remap holds (planeList): more latch frame failure planeCapacity. */
+const PLANE_CAPACITY=1024;
+/** Worklist words after the tile list: the corner list, then sixteen 32-word partials a corner. */
+const PLANE_WORDS=PLANE_CAPACITY*(1+16*32);
 // Face kernels launched as a solid-free twin beside the general pipeline.
 const REMAP_FREE_TWINS:readonly string[]=["remapFaces"];
 /** Conservative edit-boundary remap. Volume and phi are remapped in place on
@@ -39,15 +45,16 @@ export class UniformMixedRemap {
  private targetGroup?:{readonly topology:GPUBuffer;readonly group:UniformDetailGroup};
  private readonly resources:GPUBindGroupLayout;
  private readonly groups:readonly [UniformDetailGroup,UniformDetailGroup];
- /** The in-place cells remap: the live volume and phi read_write, and the
-  * worklist. */
+ /** The in-place cells remap: the live volume and phi read_write, the
+  * worklist, and the frame status (planeList's capacity). */
  private readonly cellsResources:GPUBindGroupLayout;
- private readonly cellsGroup:UniformDetailGroup;
+ private cellsGroup:UniformDetailGroup;
  /** The census extension (scratch velocity and negative walls) remapped
   * through its own fields, before the velocity remap reuses the scratch. */
  private extensionGroups?:readonly [UniformDetailGroup,UniformDetailGroup];
  private readonly pipelines=new Map<string,GPUComputePipeline>();
- /** [unused x3, count, tiles...]: the changed-tile worklist. */
+ /** [plane corners, unused x2, count, tiles..., plane corners and
+  * partials (PLANE_WORDS)]: the changed-tile worklist. */
  private readonly worklist:GPUBuffer;
  /** Group 3: the frame status record (uniform-mixed-frame-status), bound
   * read_write. markChanged latches a builder fatal into it and lists nothing
@@ -65,7 +72,7 @@ export class UniformMixedRemap {
  private readonly listResources:GPUBindGroupLayout;
  private listGroup?:{readonly changes:GPUBuffer;readonly receipt:GPUBuffer;readonly group:UniformDetailGroup};
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields,private readonly solid?:UniformMixedSolid,private readonly surfaceOnly=false){
-  this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.capacity.tiles)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  this.worklist=device.createBuffer({label:"Uniform mixed remap worklist",size:(4+ownership.capacity.tiles+PLANE_WORDS)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.tiles=ownership.capacity.tiles;
   // A worklist entry is a tile key in 26 bits below six flags: 131,072 pages of 512 tiles.
   if(this.tiles>0x04000000)throw new Error(`Remap worklist entries pack a tile key in 26 bits: ${this.tiles} tile keys exceed 67108864 (131,072 pages of 512)`);
@@ -88,19 +95,21 @@ export class UniformMixedRemap {
   ]});
   this.cellsResources=uniformDetailBindLayout(device,{entries:[
    ...[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write" as const,format:"r32float" as const,viewDimension:"3d" as const}})),
-   {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+   {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
   ]});
-  this.cellsGroup=uniformDetailGroup(device,{layout:this.cellsResources,entries:[
-   {binding:0,resource:input.volume},{binding:1,resource:input.phi},{binding:2,resource:{buffer:this.worklist}},
-  ]});
+  this.cellFields=input;
   this.bind=bind;this.scratchFields=scratch;
   this.statusLayout=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
   this.idleStatus=device.createBuffer({label:"Uniform mixed remap idle status",size:UNIFORM_MIXED_STATUS_WORDS*4,usage:GPUBufferUsage.STORAGE});
-  this.statusGroup=this.bindStatusGroup(this.idleStatus);
+  this.statusGroup=this.bindStatusGroup(this.idleStatus);this.cellsGroup=this.bindCellsGroup(this.idleStatus);
  }
  private bindStatusGroup(status:GPUBuffer):UniformDetailGroup{return uniformDetailGroup(this.device,{layout:this.statusLayout,entries:[{binding:0,resource:{buffer:status,size:UNIFORM_MIXED_STATUS_WORDS*4}}]});}
+ private bindCellsGroup(status:GPUBuffer):UniformDetailGroup{return uniformDetailGroup(this.device,{layout:this.cellsResources,entries:[
+  {binding:0,resource:this.cellFields.volume},{binding:1,resource:this.cellFields.phi},{binding:2,resource:{buffer:this.worklist}},{binding:3,resource:{buffer:status,size:UNIFORM_MIXED_STATUS_WORDS*4}},
+ ]});}
+ private readonly cellFields:Fields;
  /** The frame's status record (UniformMixedFrame.status). */
- bindStatus(status:GPUBuffer):void{this.statusGroup=this.bindStatusGroup(status);}
+ bindStatus(status:GPUBuffer):void{this.statusGroup=this.bindStatusGroup(status);this.cellsGroup=this.bindCellsGroup(status);}
  private readonly bind:(a:Fields,b:Fields)=>UniformDetailGroup;
  private readonly scratchFields:Fields;
  /** Extension fields: the scratch velocity and negative walls are remapped
@@ -115,7 +124,7 @@ export class UniformMixedRemap {
   // the solid library for the face and cell kernels (twinned, see select).
   const modules=new Map<RemapPart,Promise<GPUShaderModule>>(),moduleOf=(part:RemapPart)=>{
    let module=modules.get(part);
-   if(!module)modules.set(part,module=(async()=>{const m=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform mixed remap ${part}`,code:uniformMixedRemapWGSL(this.ownership.layout,part,this.solid,this.surfaceOnly)});
+   if(!module)modules.set(part,module=(async()=>{const m=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform mixed remap ${part}`,code:uniformMixedRemapWGSL(this.ownership.layout,part,this.solid,this.surfaceOnly,4+this.tiles)});
     const errors=(await m.getCompilationInfo()).messages.filter(e=>e.type==="error");if(errors.length)throw new Error(errors.map(e=>`${e.lineNum}: ${e.message}`).join("\n"));return m;})());
    return module;
   };
@@ -128,12 +137,12 @@ export class UniformMixedRemap {
    await Promise.all(names.map(async name=>{const entryPoint=name.split("@")[0]!,twin:Record<string,number>=solid&&REMAP_FREE_TWINS.includes(entryPoint)?name.endsWith("@free")?{umSolidFree:1}:{umSolidTwinned:1}:{};
     this.pipelines.set(name,await uniformMixedSolidPipeline(solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...twin,...s}}})));}));
   };
-  await Promise.all([compile("list",this.resources,["markChanged"]),compile("faces",this.resources,["remapFaces","copyFaces"]),compile("list",this.listResources,["markListed"]),compile("cells",this.cellsResources,["remapCells"])]);
+  await Promise.all([compile("list",this.resources,["markChanged"]),compile("faces",this.resources,["remapFaces","copyFaces"]),compile("list",this.listResources,["markListed"]),compile("cells",this.cellsResources,["remapCells","planeList","planeSums","planeFinish"])]);
  }
  /** before: encoded ahead of the remap pass with the target's topology
   * (tile words from word 0): the detail storage's patch admission. */
  apply(layout:UniformMixedLayout,before?:(encoder:GPUCommandEncoder,target:GPUBuffer)=>void):void{
-  if(this.pipelines.size!==5+(this.solid?REMAP_FREE_TWINS.length:0))throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==8+(this.solid?REMAP_FREE_TWINS.length:0))throw new Error("Live remap has not been initialized");
   this.ownership.assertHolds(layout);
   // A transient target: host layouts are rare (authored regions, the initial layout).
   const target=new UniformMixedOwnership(this.device,layout,false,layout.address.poolTiles,this.ownership.fixedWorldGeometry);
@@ -163,7 +172,7 @@ export class UniformMixedRemap {
   * adopted: encoded right after the live ownership adopts (in that blit
   * run, between the remap and publish passes). */
  applyGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers,receipt:{readonly buffer:GPUBuffer;readonly offset:number},extension=false,adopted?:(encoder:GPUCommandEncoder)=>void):void{
-  if(this.pipelines.size!==5+(this.solid?REMAP_FREE_TWINS.length:0))throw new Error("Live remap has not been initialized");
+  if(this.pipelines.size!==8+(this.solid?REMAP_FREE_TWINS.length:0))throw new Error("Live remap has not been initialized");
   if(extension&&!this.extensionGroups)throw new Error("Remap has no extension fields");
   if(!this.cleared)throw new Error("Live remap encoded without encodeClear");
   this.cleared=false;
@@ -214,7 +223,7 @@ export class UniformMixedRemap {
   // writes it, and returns after the velocity publish read it.
   if(extension&&!copy)this.encodeFaces(pass,this.extensionGroups![0],"remapFaces",gx,gy);
   // Cells run in place before the faces, which read neither volume nor phi.
-  if(!copy)this.encodeFaces(pass,this.cellsGroup,"remapCells",gx,gy);
+  if(!copy)for(const name of PLANE_STEPS)this.encodeFaces(pass,this.cellsGroup,name,gx,gy);
   this.encodeFaces(pass,this.groups[copy?1:0],copy?"copyFaces":"remapFaces",gx,gy);
   if(extension&&copy)this.encodeFaces(pass,this.extensionGroups![1],"copyFaces",gx,gy);
   pass.end();
@@ -542,7 +551,8 @@ fn tFineToSimulation(tile:u32,lane:u32){
  * their publish. Cells (group 2 = cellsResources): volume and phi remapped
  * in place on the live fields. NB only remaps phi; geometry regenerates V. */
 type RemapPart="list"|"faces"|"cells";
-function uniformMixedRemapWGSL(layout:UniformMixedLayout,part:RemapPart,solid?:UniformMixedSolid,surfaceOnly=false):string{
+/** planeList: the worklist word after the tile list (4 + tiles). */
+function uniformMixedRemapWGSL(layout:UniformMixedLayout,part:RemapPart,solid?:UniformMixedSolid,surfaceOnly=false,planeList=0):string{
  // The target may be a builder's tile words alone: its page table is the live ownership's.
  const topology=uniformMixedTopologyWGSL(layout,0,"old")+uniformMixedTopologyWGSL(layout,1,"","old");
  // A statically cut tile's h faces are weighted by their V.
@@ -925,6 +935,8 @@ ${solid?uniformMixedSolidWGSL(3,solid.coarse?.count):uniformMixedSolidWGSL()}
 @group(2) @binding(0) var volume:texture_storage_3d<r32float,read_write>;
 @group(2) @binding(1) var phi:texture_storage_3d<r32float,read_write>;
 @group(2) @binding(2) var<storage,read_write> worklist:array<atomic<u32>>;
+${uniformMixedFrameStatusWGSL(2,3,"read_write")}
+const PLANE_CAPACITY:u32=${PLANE_CAPACITY}u;const PLANE_LIST:u32=${planeList}u;const PLANE_PARTIALS:u32=PLANE_LIST+PLANE_CAPACITY;
 const LISTED_TILE:u32=0x03ffffffu;
 // One workgroup job per listed tile; a fixed grid strides over the list. Lanes are the tile's cells (and, for faces,
 // cell and axis), so a coarse owner's footprint loops run side by side
@@ -1035,73 +1047,61 @@ fn planeOldStored(t:vec3i)->bool{
  for(var k=0u;k<27u;k++){if(!umTilePresent(t+vec3i(umCorner(k,3u))-vec3i(1))){return false;}}
  return true;
 }
-// The sums are split over the workgroup: lane i takes tile i of the corner's
-// 4^3 tiles and lane 0 adds the lanes' partials in tile order (one lane over
-// all 4096 cells, twice, held the frame for tens of milliseconds). One scan
-// takes both vertex sets' raw sums: offsets are whole numbers of cells (at
-// most 8), so their first and second moments are exact in f32 and centring
-// them afterwards is the centred sum's; only the value moments round.
-var<workgroup> planeA:array<vec4f,64>;
-var<workgroup> planeB:array<vec4f,64>;
-var<workgroup> planeC:array<vec4f,64>;
-var<workgroup> planeD:array<vec4f,64>;
-// (1: through crossing cells' vertices, 0: through every vertex, -1: no vertex, low, high).
-var<workgroup> planeHead:vec4f;
-// The listed tile's corners that take a plane, a bit each.
-var<workgroup> planeCorners:u32;
+// A plane corner's sums in three launches over the step's corner list
+// (planeList, planeSums, planeFinish below). One lane per tile's 64 cells
+// (576 loads in a row) set the remap's tail at 1.4 ms for three corners a
+// frame; sixteen cells a lane in one workgroup a corner, 0.6 ms. Now a lane
+// takes one cell. One scan takes both vertex sets' raw sums: offsets are
+// whole numbers of cells (at most 8), so their first and second moments are
+// exact in f32 and centring them afterwards is the centred sum's; only the
+// value moments round.
 struct PlaneSums{count:f32,first:vec3f,square:vec3f,cross3:vec3f,total:f32,moment:vec3f}
 fn planeAdd(s:ptr<function,PlaneSums>,r:vec3f,v:f32){
  (*s).count+=1.0;(*s).first+=r;(*s).square+=r*r;(*s).cross3+=r.xxy*r.yzz;(*s).total+=v;(*s).moment+=r*v;
 }
-fn planeCorner(p:vec3i,lane:u32){
- let t=p/4-vec3i(2)+vec3i(umCorner(lane,4u));let fine=planeOldFine(t);
- // Offsets from p; every: every stored vertex, crossed: those of crossing cells.
- var every=PlaneSums();var crossed=PlaneSums();
- var low=1e30;var high=-1e30;
- if(fine){
-  let stored=planeOldStored(t);
-  for(var j=0u;j<64u;j++){
-   let cell=t*4+vec3i(umCorner(j,4u));let c=planeCell(cell,stored);if(c.count==0u){continue;}
-   let crossing=planeCrossing(c);
-   for(var k=0u;k<8u;k++){if((c.count&(1u<<k))==0u){continue;}
-    let r=vec3f(cell+vec3i(umCorner(k,2u))-p);let v=c.value[k];
-    planeAdd(&every,r,v);low=min(low,v);high=max(high,v);
-    if(crossing){planeAdd(&crossed,r,v);}
-   }
+// A job's lanes' sums, added pairwise in lane order into lane 0: (first,
+// count), (square, total), (cross3, low), (moment, high); low and high take
+// the minimum and maximum.
+var<workgroup> planeA:array<vec4f,256>;
+var<workgroup> planeB:array<vec4f,256>;
+var<workgroup> planeC:array<vec4f,256>;
+var<workgroup> planeD:array<vec4f,256>;
+fn planeReduce(s:PlaneSums,low:f32,high:f32,lane:u32){
+ planeA[lane]=vec4f(s.first,s.count);planeB[lane]=vec4f(s.square,s.total);planeC[lane]=vec4f(s.cross3,low);planeD[lane]=vec4f(s.moment,high);
+ for(var stride=128u;stride>0u;stride>>=1u){
+  workgroupBarrier();
+  if(lane<stride){
+   let o=lane+stride;planeA[lane]+=planeA[o];planeB[lane]+=planeB[o];
+   planeC[lane]=vec4f(planeC[lane].xyz+planeC[o].xyz,min(planeC[lane].w,planeC[o].w));
+   planeD[lane]=vec4f(planeD[lane].xyz+planeD[o].xyz,max(planeD[lane].w,planeD[o].w));
   }
  }
- planeA[lane]=vec4f(every.count,crossed.count,low,high);
  workgroupBarrier();
- if(lane==0u){
-  var counts=vec2f(0);var limits=vec2f(1e30,-1e30);
-  for(var i=0u;i<64u;i++){counts+=planeA[i].xy;limits=vec2f(min(limits.x,planeA[i].z),max(limits.y,planeA[i].w));}
-  planeHead=vec4f(select(select(0.0,1.0,counts.y!=0.0),-1.0,counts.x==0.0),limits,0.0);
+}
+// The reduced job sums into its partial's words at w.
+fn planeWrite(w:u32){
+ for(var i=0u;i<4u;i++){atomicStore(&worklist[w+i],bitcast<u32>(planeA[0][i]));atomicStore(&worklist[w+4u+i],bitcast<u32>(planeB[0][i]));atomicStore(&worklist[w+8u+i],bitcast<u32>(planeC[0][i]));atomicStore(&worklist[w+12u+i],bitcast<u32>(planeD[0][i]));}
+}
+fn planeRead(w:u32)->vec4f{return vec4f(bitcast<f32>(atomicLoad(&worklist[w])),bitcast<f32>(atomicLoad(&worklist[w+1u])),bitcast<f32>(atomicLoad(&worklist[w+2u])),bitcast<f32>(atomicLoad(&worklist[w+3u])));}
+// The plane through the summed vertices of p's neighbourhood (head: 1 the
+// crossing cells' vertices, 0 every vertex, kept on their side: low, high).
+fn planeSolve(p:vec3i,sum:PlaneSums,head:f32,low:f32,high:f32){
+ let mean=sum.first/sum.count;
+ // Centred sums: offsets about the mean sum to zero, so the moment needs no level term.
+ let diagonal=sum.square-mean*sum.first;let cross3=sum.cross3-mean.xxy*sum.first.yzz;let moment=sum.moment-mean*sum.total;
+ // The shifted solve is refined once on the unshifted residual, which removes
+ // the diagonal shift's bias on the slope (1e-6 of it: 1e-5 cells here).
+ let level=sum.total/sum.count;
+ let shift=1e-6*max(diagonal.x+diagonal.y+diagonal.z,1.0);
+ let c0=vec3f(diagonal.x+shift,cross3.x,cross3.y);let c1=vec3f(cross3.x,diagonal.y+shift,cross3.z);let c2=vec3f(cross3.y,cross3.z,diagonal.z+shift);
+ let det=dot(c0,cross(c1,c2));var slope=vec3f(0);
+ for(var fit=0u;fit<2u;fit++){
+  let rest=moment-vec3f(dot(vec3f(diagonal.x,cross3.x,cross3.y),slope),dot(vec3f(cross3.x,diagonal.y,cross3.z),slope),dot(vec3f(cross3.y,cross3.z,diagonal.z),slope));
+  slope+=vec3f(dot(rest,cross(c1,c2)),dot(c0,cross(rest,c2)),dot(c0,cross(c1,rest)))/det;
  }
- let head=workgroupUniformLoad(&planeHead);
- var s=every;if(head.x>0.5){s=crossed;}
- planeA[lane]=vec4f(s.first,s.count);planeB[lane]=vec4f(s.square,s.total);planeC[lane]=vec4f(s.cross3,0.0);planeD[lane]=vec4f(s.moment,0.0);
- workgroupBarrier();
- if(lane==0u&&head.x>=0.0){
-  var sum=PlaneSums();
-  for(var i=0u;i<64u;i++){sum.first+=planeA[i].xyz;sum.count+=planeA[i].w;sum.square+=planeB[i].xyz;sum.total+=planeB[i].w;sum.cross3+=planeC[i].xyz;sum.moment+=planeD[i].xyz;}
-  let mean=sum.first/sum.count;
-  // Centred sums: offsets about the mean sum to zero, so the moment needs no level term.
-  let diagonal=sum.square-mean*sum.first;let cross3=sum.cross3-mean.xxy*sum.first.yzz;let moment=sum.moment-mean*sum.total;
-  // The shifted solve is refined once on the unshifted residual, which removes
-  // the diagonal shift's bias on the slope (1e-6 of it: 1e-5 cells here).
-  let level=sum.total/sum.count;low=head.y;high=head.z;
-  let shift=1e-6*max(diagonal.x+diagonal.y+diagonal.z,1.0);
-  let c0=vec3f(diagonal.x+shift,cross3.x,cross3.y);let c1=vec3f(cross3.x,diagonal.y+shift,cross3.z);let c2=vec3f(cross3.y,cross3.z,diagonal.z+shift);
-  let det=dot(c0,cross(c1,c2));var slope=vec3f(0);
-  for(var fit=0u;fit<2u;fit++){
-   let rest=moment-vec3f(dot(vec3f(diagonal.x,cross3.x,cross3.y),slope),dot(vec3f(cross3.x,diagonal.y,cross3.z),slope),dot(vec3f(cross3.y,cross3.z,diagonal.z),slope));
-   slope+=vec3f(dot(rest,cross(c1,c2)),dot(c0,cross(rest,c2)),dot(c0,cross(c1,rest)))/det;
-  }
-  var value=level-dot(slope,mean);
-  if(head.x<0.5){if(low>=0.0){value=max(value,low);}else if(high<0.0){value=min(value,high);}}
-  textureStore(phi,p,vec4f(value));
- }
- workgroupBarrier();
+ var value=level-dot(slope,mean);
+ if(head<0.5){if(low>=0.0){value=max(value,low);}else if(high<0.0){value=min(value,high);}}
+ textureStore(phi,p,vec4f(value));
 }
 // The old layout's phi at a refining tile's 5x5x5 closure: every new owner
 // corner and every vertex it writes. The widest incident owner holds a
@@ -1155,9 +1155,6 @@ fn remapTileCells(group:vec3u,lane:u32){
  if(refine&&lane<8u){
   let corner=vec3i(base+umCorner(lane,2u)*4u);tileCorners[lane]=textureLoad(phi,corner).x;
  }
- // A tile handed to a cut 4h owner (workgroup-uniform): a closed h cell
- // leaves the tile's mean open fraction under 63/64.
- let plane=!same&&!refine&&umSolidEnabled()&&planeTile(tile)&&umTileOpen(tile)<0.99;
  ${surfaceOnly?"":` if(!same){
   donor=oldumOwnerAt(vec3i(cell));
   tileVolume[lane]=textureLoad(volume,vec3i(oldumOrigin(donor))).x;
@@ -1187,15 +1184,6 @@ fn remapTileCells(group:vec3u,lane:u32){
   tileCapacity[lane]=open;tileFill[lane]=umSurfaceTarget(o,vertices)*open;
  }
 `}
- // The tile's corners that take a plane, one at a time across the workgroup.
- if(lane==0u){
-  var wanted=0u;
-  if(plane){for(var k=0u;k<8u;k++){let corner=vec3i(base+umCorner(k,2u)*4u);if(planeWriter(corner)==tile&&oldBuried(corner)){wanted|=1u<<k;}}}
-  planeCorners=wanted;
- }
- let corners=workgroupUniformLoad(&planeCorners);
- for(var k=0u;k<8u;k++){if((corners&(1u<<k))!=0u){planeCorner(vec3i(base+umCorner(k,2u)*4u),lane);}}
- workgroupBarrier();
  ${surfaceOnly?"":` // A split donor is wider than one cell, so it lies inside this tile.
  if(split){
   let local=oldumOrigin(donor)-base;let n=donor.width*donor.width*donor.width;var fill=0.0;var capacity=0.0;
@@ -1232,6 +1220,85 @@ fn remapTileCells(group:vec3u,lane:u32){
 }
 @compute @workgroup_size(64) fn remapCells(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let jobs=listedJobCount(lane);for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){remapTileCells(vec3u(job,0u,0u),lane);workgroupBarrier();}
+}
+// Plane corners, after remapCells. A tile handed to a cut 4h owner (a
+// closed h cell leaves the tile's mean open fraction under 63/64) takes the
+// plane at each corner it writes (planeWriter) that the old layout buried. A
+// plane corner is a stored vertex of both layouts, so no remapCells vertex
+// write touches it, and it reads only vertices of open cells the old layout
+// stored, which remapCells leaves alone (nor is a buried corner one of them).
+// The corner list: worklist words from PLANE_LIST, tile key | corner << 26,
+// counted in word 0 (cleared with the header). Over PLANE_CAPACITY latches
+// frame failure planeCapacity; the rest are dropped.
+// planeList: a lane per listed tile and corner.
+@compute @workgroup_size(64) fn planeList(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let jobs=8u*atomicLoad(&worklist[3]);
+ for(var job=64u*(group.x+groups.x*group.y)+lane;job<jobs;job+=64u*groups.x*groups.y){
+  let entry=atomicLoad(&worklist[4u+job/8u]);let tile=entry&LISTED_TILE;
+  let same=(entry&(1u<<31u))==0u;let refine=(entry&(1u<<30u))!=0u;
+  if(same||refine||!umSolidEnabled()||!planeTile(tile)||umTileOpen(tile)>=0.99){continue;}
+  let corner=vec3i(umTileCoord(tile)*4u+umCorner(job%8u,2u)*4u);
+  if(planeWriter(corner)!=tile||!oldBuried(corner)){continue;}
+  let slot=atomicAdd(&worklist[0],1u);
+  if(slot<PLANE_CAPACITY){atomicStore(&worklist[PLANE_LIST+slot],tile|((job%8u)<<26u));}
+  else{umLatchFailure(${UNIFORM_MIXED_FAILURE.planeCapacity}u,slot+1u,PLANE_CAPACITY);}
+ }
+}
+fn planeCornerAt(entry:u32)->vec3i{return vec3i(umTileCoord(entry&LISTED_TILE)*4u+umCorner(entry>>26u,2u)*4u);}
+var<workgroup> planeCount:u32;
+fn planeCorners(lane:u32)->u32{
+ if(lane==0u){planeCount=min(atomicLoad(&worklist[0]),PLANE_CAPACITY);}
+ return workgroupUniformLoad(&planeCount);
+}
+// planeSums: sixteen jobs a corner, job c%16 the corner's tiles 4(c%16) to
+// 4(c%16)+3 of its 4^3 from two tiles below, a lane a cell.
+var<workgroup> planeTiles:array<vec2u,4>;
+@compute @workgroup_size(256) fn planeSums(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let jobs=16u*planeCorners(lane);
+ for(var job=group.x+groups.x*group.y;job<jobs;job+=groups.x*groups.y){
+  let p=planeCornerAt(atomicLoad(&worklist[PLANE_LIST+job/16u]));
+  let t=p/4-vec3i(2)+vec3i(umCorner(4u*(job%16u)+lane/64u,4u));
+  if(lane%64u==0u){let fine=planeOldFine(t);planeTiles[lane/64u]=vec2u(select(0u,1u,fine),select(0u,1u,fine&&planeOldStored(t)));}
+  workgroupBarrier();
+  // Offsets from p; every: every stored vertex, crossed: those of crossing cells.
+  var every=PlaneSums();var crossed=PlaneSums();
+  var low=1e30;var high=-1e30;
+  let tile=planeTiles[lane/64u];
+  if(tile.x!=0u){
+   let cell=t*4+vec3i(umCorner(lane%64u,4u));let c=planeCell(cell,tile.y!=0u);
+   if(c.count!=0u){
+    let crossing=planeCrossing(c);
+    for(var k=0u;k<8u;k++){if((c.count&(1u<<k))==0u){continue;}
+     let r=vec3f(cell+vec3i(umCorner(k,2u))-p);let v=c.value[k];
+     planeAdd(&every,r,v);low=min(low,v);high=max(high,v);
+     if(crossing){planeAdd(&crossed,r,v);}
+    }
+   }
+  }
+  let w=PLANE_PARTIALS+32u*job;
+  planeReduce(every,low,high,lane);
+  if(lane==0u){planeWrite(w);}
+  planeReduce(crossed,0.0,0.0,lane);
+  if(lane==0u){planeWrite(w+16u);}
+ }
+}
+// planeFinish: a lane a corner adds its sixteen partials in order and solves.
+@compute @workgroup_size(64) fn planeFinish(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let corners=min(atomicLoad(&worklist[0]),PLANE_CAPACITY);
+ for(var i=64u*(group.x+groups.x*group.y)+lane;i<corners;i+=64u*groups.x*groups.y){
+  var every=PlaneSums();var crossed=PlaneSums();var low=1e30;var high=-1e30;
+  for(var c=0u;c<16u;c++){
+   let w=PLANE_PARTIALS+32u*(16u*i+c);
+   var a=planeRead(w);every.first+=a.xyz;every.count+=a.w;a=planeRead(w+4u);every.square+=a.xyz;every.total+=a.w;
+   a=planeRead(w+8u);every.cross3+=a.xyz;low=min(low,a.w);a=planeRead(w+12u);every.moment+=a.xyz;high=max(high,a.w);
+   a=planeRead(w+16u);crossed.first+=a.xyz;crossed.count+=a.w;a=planeRead(w+20u);crossed.square+=a.xyz;crossed.total+=a.w;
+   a=planeRead(w+24u);crossed.cross3+=a.xyz;a=planeRead(w+28u);crossed.moment+=a.xyz;
+  }
+  // (1: through crossing cells' vertices, 0: through every vertex, -1: no vertex).
+  if(every.count==0.0){continue;}
+  var head=0.0;var sum=every;if(crossed.count!=0.0){head=1.0;sum=crossed;}
+  planeSolve(planeCornerAt(atomicLoad(&worklist[PLANE_LIST+i])),sum,head,low,high);
+ }
 }
 `;
 }
