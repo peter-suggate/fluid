@@ -26,7 +26,9 @@ import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority"
  * across is a native liquid row is a seam (K_SEAM): coupled to that 4h row
  * over 2.5h, V/(2.5 h^2), the native row taking the sum of its 16 h faces.
  * Level 0 smooths in place, red-black sweeps over the band's tiles (a
- * workgroup two tiles, a lane a red cell then a black one; neighbours across
+ * workgroup two tiles, a lane a red cell then a black one; a sweep reads
+ * one iterate plane and writes the other, so neighbours in other tiles are
+ * the last sweep's; neighbours across
  * a brick face through the brick's record). Levels 1 and 2 smooth with an
  * overlapping box: a brick stages its cells two deep around it, red-black
  * sweeps all but the outer ring and keeps its own 8^3. Native rows take the
@@ -199,7 +201,7 @@ export class UniformPressureArena {
   // Level 2's band channels contiguous: one clear empties them each frame.
   // The native rows' channels (n*) are written whole by pNative; the tail's
   // (8h at word 0, 16h at 64, 32h at 72 of a page) by pDownB's bake.
-  const channels=[...["x","diag","base","warm","rhs","kinds"].map(name=>cell(name,0)),...six("c",0),...six("u",0),...(solid?six("v",0):[]),
+  const channels=[...["x","x1","diag","base","warm","rhs","kinds"].map(name=>cell(name,0)),...six("c",0),...six("u",0),...(solid?six("v",0):[]),
    ...["xa","ya","ra","da"].map(name=>cell(name,1)),...six("ka",1),
    ...["xb","yb","rb","db"].map(name=>cell(name,2)),...six("kb",2),
    ...["nx","nb","nr","nd","nm"].map(name=>cell(name,2)),...six("nk",2),...six("nl",2),
@@ -303,7 +305,7 @@ const SLOTS:u32=${HEADER}u;const MASK:u32=${this.maskWord}u;const TLIST:u32=${th
 const INITIAL:u32=${INITIAL_WORD}u;const VALID:u32=${VALID_WORD}u;const INITIAL_BIT:u32=1u<<${HISTORY}u;const CYCLES:u32=${schedule.cycles}u;
 const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u;const K_NEUMANN:u32=4u;const K_CLOSED:u32=5u;
 const P_ACTIVE:u32=${ACTIVE_BIT}u;const P_WARM:u32=${WARM_BIT}u;const P_FINE:u32=${UNIFORM_ARENA_CLASS.fine}u;
-const P_X:u32=${C("x")}u;const P_DIAG:u32=${C("diag")}u;const P_BASE:u32=${C("base")}u;const P_WARMP:u32=${C("warm")}u;const P_RHS:u32=${C("rhs")}u;const P_KINDS:u32=${C("kinds")}u;
+const P_X:u32=${C("x")}u;const P_X1:u32=${C("x1")}u;const P_DIAG:u32=${C("diag")}u;const P_BASE:u32=${C("base")}u;const P_WARMP:u32=${C("warm")}u;const P_RHS:u32=${C("rhs")}u;const P_KINDS:u32=${C("kinds")}u;
 const P_C:u32=${C("c0")}u;const P_U:u32=${C("u0")}u;${S?`const P_V:u32=${C("v0")}u;`:""}const PLANE:u32=${plane0}u;
 const PA_X:u32=${C("xa",1)}u;const PA_Y:u32=${C("ya",1)}u;const PA_R:u32=${C("ra",1)}u;const PA_D:u32=${C("da",1)}u;const PA_K:u32=${C("ka0",1)}u;
 const PB_X:u32=${C("xb",2)}u;const PB_Y:u32=${C("yb",2)}u;const PB_R:u32=${C("rb",2)}u;const PB_D:u32=${C("db",2)}u;const PB_K:u32=${C("kb0",2)}u;const PLANE2:u32=${plane2}u;
@@ -525,13 +527,25 @@ fn gCoarseChild(i:u32,l:vec3u,at:u32,d:f32,K:u32,PL:u32){
   // ---- level 0 rows, in place (nonlinear rows: walls follow, inside rows clamp).
   const relaxRow=/* wgsl */`
 var<workgroup> rN:u32;
+// The iterate plane a sweep reads (X or X1); it writes the other. A row
+// reads the last sweep's plane except a black row's red neighbours in its own
+// tile (this sweep's, written by its own workgroup), never a plane another
+// workgroup is writing, so a sweep's result does not depend on the order
+// workgroups run.
+override pSrc:u32=0u;
+fn pPlane(h:u32)->u32{return select(P_X,P_X1,h==1u);}
+fn pNeighbourX(at:u32,slot:u32,lb:vec3u,f:u32,black:bool)->f32{
+ let axis=f/2u;let m=i32(lb[axis])+bSign(f);
+ let own=m>=0&&m<8&&(u32(m)>>2u)==(lb[axis]>>2u);
+ return pF(pPlane(select(pSrc,1u-pSrc,black&&own)),pNear0(at,slot,lb,f));
+}
 // UniformPressureBand's relaxation of a row from its neighbours' iterate; a
 // row with walls solves its own halos' clamps exactly (four active-set passes).
-fn pRelaxRow(at:u32,slot:u32,lb:vec3u,kinds:u32)->f32{
+fn pRelaxRow(at:u32,slot:u32,lb:vec3u,kinds:u32,black:bool)->f32{
  var off=pF(P_RHS,at);var walls=false;
  for(var f=0u;f<6u;f++){
   let kind=bFaceKind(kinds,f);
-  if(kind==K_BAND){off+=pCoefficient(at,kinds,f)*pF(P_X,pNear0(at,slot,lb,f));}
+  if(kind==K_BAND){off+=pCoefficient(at,kinds,f)*pNeighbourX(at,slot,lb,f,black);}
   else if(kind==K_SEAM){off+=pF(P_C+f*PLANE,at)*pF(PN_X,nAcross(vec3i(ubaOrigin(ubaBrick(slot))+lb),f));}
   else if(kind==K_WALL){walls=true;}
  }
@@ -765,7 +779,7 @@ ${zero}
  for(var j=group.x;j<n;j+=groups.x){
   let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);
   let p=vec3i(ubaOrigin(ubaBrick(slot))+lb);let kinds=pool[P_KINDS+at];
-  if(!bLiquid(kinds)){pSet(P_X,at,0.0);pSet(P_BASE,at,0.0);continue;}
+  if(!bLiquid(kinds)){pSet(P_X,at,0.0);pSet(P_X1,at,0.0);pSet(P_BASE,at,0.0);continue;}
   var start=0.0;
   if((kinds&P_WARM)!=0u){start=pF(P_WARMP,at);}
   else{
@@ -786,7 +800,7 @@ ${zero}
    }
   }
   if(bInside(kinds)){start=max(start,0.0);}
-  pSet(P_BASE,at,start);pSet(P_X,at,0.0);
+  pSet(P_BASE,at,start);pSet(P_X,at,0.0);pSet(P_X1,at,0.0);
   var rhs=pF(P_RHS,at);
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);
@@ -1236,9 +1250,10 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
 }`,
    // A red-black sweep of level 0, in place: a workgroup relaxes two band
    // tiles, a lane one red cell and then one black. A tile's black rows see
-   // its own red rows of this sweep; across tiles, whichever red values
-   // their neighbours hold. pSettle: the shut rows alone (the first cycle's
-   // settle sweep under solids).
+   // its own red rows of this sweep; across tiles, the last sweep's values
+   // (plane pSrc). An active row writes the other plane; the rest hold 0 in
+   // both from pInit. pSettle: the shut rows alone, the other active rows
+   // carried across (the first cycle's settle sweep under solids).
    relax:header()+poolWGSL+relaxRow+/* wgsl */`
 override pSettle:bool=false;
 @compute @workgroup_size(${TILE_WG}) fn pRelax(${lanes}){
@@ -1251,7 +1266,10 @@ override pSettle:bool=false;
    if(j<n){
     let l=vec3u(2u*(i&1u)+((y+z+colour)&1u),y,z);
     let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);let kinds=pool[P_KINDS+at];
-    if(pActive(kinds)&&(!pSettle||bShut(kinds))){pSet(P_X,at,pRelaxRow(at,slot,lb,kinds));}
+    if(pActive(kinds)){
+     var x:f32;if(!pSettle||bShut(kinds)){x=pRelaxRow(at,slot,lb,kinds,colour==1u);}else{x=pF(pPlane(pSrc),at);}
+     pSet(pPlane(1u-pSrc),at,x);
+    }
    }
    storageBarrier();
   }
@@ -1689,6 +1707,8 @@ fn p1At(slot1:u32,r:vec3i)->u32{
  if(((ubaLevelRecord(1u,s,28u)>>(o.x|(o.y<<1u)|(o.z<<2u)))&1u)==0u){return UB_NONE_ID;}
  return pAddr(s,l);
 }
+// pDst: the plane the corrected iterate goes to (the post-smoothing's first read).
+override pDst:u32=0u;
 @compute @workgroup_size(${TILE_WG}) fn pProlong0(${lanes}){
  if(lane==0u){rN=pTileLive();}
  let n=workgroupUniformLoad(&rN);
@@ -1710,7 +1730,7 @@ fn p1At(slot1:u32,r:vec3i)->u32{
    }
    var x=pF(P_X,at);if(total>0.0){x+=sum/total;}
    if(bInside(kinds)){x=max(x,-pF(P_BASE,at));}
-   pSet(P_X,at,x);
+   pSet(select(P_X,P_X1,pDst==1u),at,x);
   }
   workgroupBarrier();
  }
@@ -1793,7 +1813,7 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
    rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
-   pRelax:[["",{}],["S",{pSettle:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
+   pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
    pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],
    pDownA:[["",{}],["@0",{pBake:1}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
   };
@@ -1901,15 +1921,22 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   this.dispatch(pass,"pInit",this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);this.dispatch(pass,"pRebase",this.tileGroups);
   // One cycle past the most the solve ran lately; a frame needing more ends at its last.
   const cycles=Math.min(s.cycles,this.wideCycles+1);
-  const sweeps=(settle:boolean)=>{for(let k=settle?-1:0;k<s.sweeps;k++)this.dispatch(pass,k<0?"pRelaxS":"pRelax",this.relaxGroups);};
+  // Level 0 ping-pongs X and X1 (pInit zeroes both); a leg of n sweeps from
+  // plane src ends in src^(n&1). A pre-smoothing starts from plane n&1 and
+  // ends in X for the residual and restriction. The prolongation writes X in
+  // place, so a post-smoothing ends where the next pre-smoothing starts,
+  // except the last cycle's: it writes plane n&1, and the solve ends in X for
+  // the final measure and the projection (as it does when it converges early).
+  const odd=s.sweeps&1;
+  const sweeps=(settle:boolean,from:number)=>{let src=from;for(let k=settle?-1:0;k<s.sweeps;k++){this.dispatch(pass,(k<0?"pRelaxS":"pRelax")+src,this.relaxGroups);src^=1;}};
   for(let cycle=0;cycle<cycles;cycle++){
    const first=cycle===0;
-   sweeps(first&&!!this.solid?.present);
+   const settle=first&&!!this.solid?.present;sweeps(settle,(s.sweeps+(settle?1:0))&1);
    this.dispatch(pass,this.residuals[cycle]!,pages);this.dispatch(pass,this.restricts[cycle]!,this.tileGroups);
    this.dispatch(pass,first?"pDownA@0":"pDownA",g);this.dispatch(pass,first?"pDownB@0":"pDownB",pages);this.dispatch(pass,"pDown2",pages);
    for(let m=0;m<s.tailCycles;m++){const y=m%2===1?"Y":"";this.dispatch(pass,"pDown3"+y,pages);this.dispatch(pass,"pDown4",pages);this.dispatch(pass,"pTail",1);this.dispatch(pass,"pUp4",pages);this.dispatch(pass,"pUp3"+y,pages);}
    this.dispatch(pass,"pUpB",pages);this.dispatch(pass,"pUpA",g);
-   this.dispatch(pass,"pProlong0",this.tileGroups);sweeps(false);
+   const post=cycle===cycles-1?odd:0;this.dispatch(pass,"pProlong0"+post,this.tileGroups);sweeps(false,post);
   }
   this.dispatch(pass,"pResidual2F",pages);this.dispatch(pass,"pFinal",this.tileGroups);this.dispatch(pass,"pWrite",pages);
   pass.end();
