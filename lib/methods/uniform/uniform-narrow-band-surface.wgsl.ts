@@ -247,10 +247,10 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
  * cells from their six deposit words; any other tile copies its velocity.
  * FIN zeroes the words and flag it read, ready for the next deposit. */
 export function narrowBandTransferPropertiesSource():string{return /* wgsl */`
-// The deposit's six words a fine cell and a flag a fine tile, in the
-// expired scatter cursors. A layout past them takes the general gather
-// (transfer).
-fn nbTransferFits()->bool{return 385u*umCounts.x<=UM_CELL_KEYS;}
+// The deposit's six words a fine cell and a flag a fine tile (NB_DEPOSIT),
+// sized for every h tile the pool stores. A layout past them (a device whose
+// buffer limit holds fewer) takes the general gather (transfer).
+fn nbTransferFits()->bool{return umCounts.x<=NB_DEPOSIT_TILES;}
 var<workgroup> nbTransferFlag:u32;
 var<workgroup> nbTransferDepth:array<f32,125>;
 var<workgroup> nbTransferHeat:array<f32,27>;
@@ -269,7 +269,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  if(!nbTransferFits()){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));umLoadAddressPlan(owner.tile>>9u,lane);let origin=4u*umTileCoord(owner.tile);
  // Read and zero this tile's deposit words, whatever happens below.
- let flag=UM_CELL_KEYS+384u*umCounts.x+group.x;let at=UM_CELL_KEYS+6u*(64u*group.x+lane);
+ let flag=NB_DEPOSIT+384u*umCounts.x+group.x;let at=NB_DEPOSIT+6u*(64u*group.x+lane);
  if(lane==0u){nbTransferFlag=atomicLoad(&bins[flag]);}
  let deposited=workgroupUniformLoad(&nbTransferFlag)!=0u;
  // Vectors, not a private array: an array indexed by axis would live in memory.

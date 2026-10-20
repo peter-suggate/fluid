@@ -227,6 +227,13 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   * tile key, then PARTICLE_RESIDENCY_WORDS a page, after the brick table. */
  private readonly refineWord:number;
  private readonly refineJoinWords:number;
+ /** DEPB's words, after the coarse list: six a fine cell (momentum, then
+  * weight, an axis), then a flag a fine tile (uniform-particle-brick.wgsl),
+  * for depositTiles fine tiles: every h tile the pool can store unless the
+  * device's buffer limit holds fewer. A layout past them takes the general
+  * gather (transfer). */
+ private readonly depositWord:number;
+ private readonly depositTiles:number;
  /** The step's coarse corner list (after the refine words): a count, a
   * build count and two spare words, then coarseListCapacity corner entries
   * and as many build entries. couple, depthCoarse and redistanceCoarse
@@ -328,7 +335,12 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // A canonical 4h corner has one owner: a block's 9³ coarse vertices bound
   // them, twice over for a corner the two rules (couple's, retirement's) see.
   this.coarseListWord=this.refineWord+this.refineJoinWords+8*address.blocks*PARTICLE_RESIDENCY_WORDS;this.coarseListCapacity=2*729*address.blocks;
-  const binBytes=4*(this.coarseListWord+4+2*this.coarseListCapacity);
+  // The fine-tile capacity can grow between frames up to the pool's tiles
+  // (reserveFine), and the pour's late frames hold over 12k: the deposit's
+  // words are sized for the pool, so no layout leaves the fast deposit.
+  this.depositWord=this.coarseListWord+4+2*this.coarseListCapacity;
+  this.depositTiles=Math.max(0,Math.min(address.poolTiles,Math.floor((limit/4-this.depositWord)/(6*64+1))));
+  const binBytes=4*(this.depositWord+(6*64+1)*this.depositTiles);
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
   this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
@@ -511,6 +523,7 @@ fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 // leaving three full-precision motion floats per particle instead of a second vec4.
 const NB_SURFACE_HOT_NEAREST=${this.surfaceHotWord}u;
 const NB_COARSE_LIST:u32=${this.coarseListWord}u;const NB_COARSE_CAP:u32=${this.coarseListCapacity}u;
+const NB_DEPOSIT:u32=${this.depositWord}u;const NB_DEPOSIT_TILES:u32=${this.depositTiles}u;
 fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[UM_CELL_KEYS+4u*i+3u]&0x7fffffffu)>1.0;}
 fn nbPosition(i:u32)->vec3f{let a=UM_CELL_KEYS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
 fn nbMotion(i:u32)->vec4f{let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let mode=links[UM_CELL_KEYS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}

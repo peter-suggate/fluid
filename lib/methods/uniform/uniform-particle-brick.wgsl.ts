@@ -6,7 +6,7 @@ import { UNIFORM_PAGE_WINDOW } from "./uniform-lattice-address";
  * the mode bit the move and snapshot read, its motion words for the seam
  * gather, the receipt's census), then deposits the tile's quadratic MAC
  * momentum and weight into workgroup fixed-point accumulators, flushed once
- * to the fine owners' six words (UM_CELL_KEYS + 6 owner: momentum, then
+ * to the fine owners' six words (NB_DEPOSIT + 6 owner: momentum, then
  * weight, an axis). Fixed-point sums are order independent.
  *
  * The flush also flags each fine tile it reached (NB_DEPOSITED, one word a
@@ -123,7 +123,7 @@ var<workgroup> pbTouched:array<atomic<u32>,27>;
 // (gridSupported's eight corners of every sample in it).
 var<workgroup> pbWords:array<u32,27>;
 var<workgroup> pbLiquid:array<u32,216>;
-fn nbDeposited()->u32{return UM_CELL_KEYS+384u*umCounts.x;}
+fn nbDeposited()->u32{return NB_DEPOSIT+384u*umCounts.x;}
 fn pbExtent(axis:u32)->vec3i{var d=vec3i(PB_ACROSS);d[axis]=PB_ALONG;return d;}
 fn pbLow(axis:u32)->vec3i{var d=vec3i(-1);d[axis]=-2;return d;}
 fn pbSlot(axis:u32,node:vec3i)->u32{let d=pbExtent(axis);let r=node-pbLow(axis);return axis*PB_WINDOW+u32((r.z*d.y+r.y)*d.x+r.x);}
@@ -197,7 +197,7 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
    let cell=origin+pbNode(slot);let t=vec3u((cell>>vec3u(2u))-(origin>>vec3u(2u))+1);let n=t.x+3u*t.y+9u*t.z;
    let word=pbWords[n];if(word==0u){continue;}
    let local=vec3u(cell&vec3i(3));let base=word&0x3fffffffu;let owner=base+local.x+4u*local.y+16u*local.z;
-   let at=UM_CELL_KEYS+6u*owner+2u*(slot/PB_WINDOW);
+   let at=NB_DEPOSIT+6u*owner+2u*(slot/PB_WINDOW);
    atomicAdd(&bins[at],bitcast<u32>(atomicLoad(&pbMomentum[slot])));atomicAdd(&bins[at+1u],w);
    atomicStore(&pbTouched[n],1u);
   }
