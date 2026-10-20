@@ -1241,6 +1241,7 @@ export class UniformMixedFrame {
    // Words 0-7 are the acceptance state, 8-19 the dust accounting.
    // The composite solve's residual and cycles; a residual over target is not fatal (its verdict latches a non-finite one).
    const residual=floats[1]!,count=mapped[7]!;
+   if(mapped[23]===UniformPressureArena.staleApertures)throw new Error("Uniform pressure band rows read the solid record's apertures before their build (a claim or a solid edit the record missed)");
    if(mapped[23]===UniformPressureArena.slotOverflow)throw new Error(`Uniform pressure band needs more than the arena's ${this.band.slotCapacity} brick slots; projection is incomplete`);
    if(mapped[23]!==0)throw new Error(`Uniform pressure band needs ${mapped[22]} tiles, over its capacity; projection is incomplete`);
    const bandTiles=mapped[22]!,bandResidual=floats[24]!;
