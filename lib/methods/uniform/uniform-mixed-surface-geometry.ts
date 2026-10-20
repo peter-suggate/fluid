@@ -188,6 +188,28 @@ fn gcShare(owner:UMOwner){
  gcTerms[owner.lane]=umSurfaceTargetOpenTerm(corners,vec3i(base),owner.lane);
 }
 fn gcSharedFill()->f32{var fill=0.0;for(var s=0u;s<64u;s++){fill+=gcTerms[s];}return fill/64.0;}
+// Whether umSurfaceTarget returns exactly 0 (all corners above 1e-20) or 1
+// (all below -1e-20) for these corners. Its tetrahedra then take one sign
+// each: 0 or 1 exactly. Its plane, where it takes one, fits the eight
+// quarter probes within r <= 1e-4(1 + M) (M the largest |corner|, which
+// bounds every probe), and at box corner s is 2 plane(probe s) - centre >=
+// 2 sample(s) - centre - 2r. sample(s) weighs corner s 27/64, its three
+// neighbours 9/64, the next three 3/64 and the opposite 1/64, and centre is
+// the corners' mean, so 2 sample(s) - centre is (46a + 10B - 2C - 6d)/64.
+// Where that clears 3e-4(1 + M) at every corner the plane keeps its sign
+// over the box by 1e-4(1 + M), far past rounding, and its box fraction is the
+// same literal.
+fn gcSameSign(v:array<f32,8>,positive:bool,negative:bool)->bool{
+ if(!positive&&!negative){return false;}
+ var m=0.0;for(var k=0u;k<8u;k++){m=max(m,abs(v[k]));}
+ let margin=3e-4*(1.0+m);
+ for(var s=0u;s<8u;s++){
+  let bound=(46.0*v[s]+10.0*(v[s^1u]+v[s^2u]+v[s^4u])-2.0*(v[s^3u]+v[s^5u]+v[s^6u])-6.0*v[s^7u])/64.0;
+  if(positive&&!(bound>margin)){return false;}
+  if(negative&&!(bound< -margin)){return false;}
+ }
+ return true;
+}
 // (fill, centre phi) from an owner's eight corner values. open: the open
 // fraction of a 4h owner's tile; 1 for an h owner, whose caller scales by its
 // cell's. The fill is absolute: an uncut owner's fraction times open, a cut
@@ -210,7 +232,9 @@ fn gcEvaluate(owner:UMOwner,vertices:array<f32,8>,open:f32,terms:bool)->vec2f{
  else if(!(positive&&4.0*(high-low)<=low)){
   if(open>=0.99999){
    var plane=vec2f(-1.0,0.0);if(gcPlaneEnabled()){plane=gcCurrentPlane(vertices);}
-   if(plane.x>=0.0){gcCount(true);fraction=plane.x*open;}else{gcCount(false);fraction=umSurfaceTarget(owner,vertices)*open;}
+   if(plane.x>=0.0){gcCount(true);fraction=plane.x*open;}
+   else if(gcSameSign(vertices,positive,negative)){gcCount(true);fraction=select(0.0,open,negative);}
+   else{gcCount(false);fraction=umSurfaceTarget(owner,vertices)*open;}
   }else if(terms){gcCount(false);fraction=gcSharedFill();}else{gcCount(false);fraction=umSurfaceTargetOpen(vertices,vec3i(umOrigin(owner)));}
  }
  // umSampleVertex at the owner centre: all eight weights are exactly 1/8 of
@@ -241,14 +265,19 @@ const GC_NORMAL_TAGS:u32=4u*UM_PAGES+1u;
   let region=umPageOfTile(tile);atomicStore(&gcNormalDirty[region],1u);atomicStore(&gcNormalDirty[3u*UM_PAGES+region],1u);
  }
 }`:""}
-fn gcOwner(owner:UMOwner,terms:bool){
+// mode 0: the owner, and on an h tile's lane 0 of the pressure variant its
+// tile's all-4h owner too. 1 (gcSplitTurn): that second turn only where the
+// tile is cut (it reads the job's gcTerms); 2: an uncut h tile's all-4h
+// owner alone (owner = UMOwner(tile, 0, 4, 0)), its pressure outputs only,
+// on a lane of its own instead of lane 0's second turn.
+fn gcOwner(owner:UMOwner,terms:bool,mode:u32){
  let origin=umOrigin(owner);
  // select eagerly evaluates its operands: coarse owners must not evaluate
  // discarded fractional h-cell geometry (the tile fraction is in value.x).
  var cellOpen=1.0;if(owner.width==1u){cellOpen=umCellOpen(vec3i(origin));}
  // gcEvaluate has one call site (Metal inlines it whole): turn 0 is this
  // owner, turn 1 the pressure variant's lane-0 tile owner of an h tile.
- let turns=select(1u,2u,geometryPressure&&owner.lane==0u&&owner.width!=4u);
+ let turns=select(1u,2u,geometryPressure&&owner.lane==0u&&owner.width!=4u&&(mode!=1u||umTileOpen(owner.tile)<0.99999));
  var value=vec2f(0.0);
  for(var r=0u;r<turns;r++){
   // An owner's corners are width-aligned vertices of its tile closure. Their
@@ -263,10 +292,10 @@ fn gcOwner(owner:UMOwner,terms:bool){
   value=gcEvaluate(job,vertices,open,terms&&r!=0u);
   // Native uvTarget scales by the open fraction; a 4h owner's fill is already
   // over its tile's open cells.
-  if(r==0u){textureStore(targetFill,vec3i(origin),vec4f(value.x*cellOpen));
+  if(r==0u&&mode!=2u){textureStore(targetFill,vec3i(origin),vec4f(value.x*cellOpen));
    textureStore(centerPhi,vec3i(origin),vec4f(value.y));}
  }
- if(geometryPressure&&owner.lane==0u){
+ if(geometryPressure&&owner.lane==0u&&(owner.width==4u||turns==2u)){
   textureStore(pressureTarget,vec3i(origin),vec4f(value.x));textureStore(pressureCenterPhi,vec3i(origin),vec4f(value.y));
  }
 }
@@ -274,7 +303,7 @@ fn gcOwner(owner:UMOwner,terms:bool){
  if(umSolidSkip()){return;}
  let owner=umAllOwner(gid);
  if(geometryPressure){if(owner.width!=0u&&gcNeeds(owner)){gcShare(owner);}workgroupBarrier();}
- if(owner.width==0u||!gcNeeds(owner)){return;}gcOwner(owner,geometryPressure);
+ if(owner.width==0u||!gcNeeds(owner)){return;}gcOwner(owner,geometryPressure,0u);
 }
 // Changed tiles: the adopted generation's dilated list (each tile once),
 // split by width. One lane per entry over a grid of the list's bound.
@@ -312,15 +341,16 @@ fn gcChangedNormals(tile:u32){
  if(lane==0u){let fine=atomicLoad(&changes[0]);gcJobs=vec2u(fine,fine+(atomicLoad(&changes[1])+63u)/64u);}
  let jobs=workgroupUniformLoad(&gcJobs);
  for(var job=group.x;job<jobs.y;job+=groups.x){
-  if(job<jobs.x){let tile=atomicLoad(&changes[GC_FINE+job]);if(lane==0u){gcChangedNormals(tile);}gcOwner(UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane),false);}
+  if(job<jobs.x){let tile=atomicLoad(&changes[GC_FINE+job]);if(lane==0u){gcChangedNormals(tile);}gcOwner(UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane),false,0u);}
   else{
    let slot=(job-jobs.x)*64u+lane;
-   if(slot<atomicLoad(&changes[1])){let tile=atomicLoad(&changes[GC_COARSE+slot]);gcChangedNormals(tile);gcOwner(UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu),false);}
+   if(slot<atomicLoad(&changes[1])){let tile=atomicLoad(&changes[GC_COARSE+slot]);gcChangedNormals(tile);gcOwner(UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu),false,0u);}
   }
  }
 }
 ${this.workControl?/* wgsl */`
 override geometryRegionalMaintenance:bool=false;
+var<workgroup> gcRegionalJobs:vec3u;
 // The frame plan supplies one shared tile domain. Exact producer revisions
 // still decide which retained outputs need evaluation inside that domain.
 @compute @workgroup_size(64) fn geometryRegional(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -339,15 +369,19 @@ override geometryRegionalMaintenance:bool=false;
    }
   }
  }
- if(lane==0u){let fine=regionalPlan[7u];gcJobs=vec2u(fine,fine+(regionalPlan[8u]+63u)/64u);}
- let jobs=workgroupUniformLoad(&gcJobs);
- for(var job=group.x;job<jobs.y;job+=groups.x){
-  var owner=UMOwner(0u,0u,0u,0u);
+ // Jobs: an h tile each (a lane per owner), 64 4h tiles each, then 64 h
+ // tiles' all-4h owners each (gcOwner mode 2, uncut tiles; a cut tile's
+ // takes its job's lane 0, which holds its gcTerms).
+ if(lane==0u){let fine=regionalPlan[7u];let coarse=fine+(regionalPlan[8u]+63u)/64u;gcRegionalJobs=vec3u(fine,coarse,coarse+(fine+63u)/64u);}
+ let jobs=workgroupUniformLoad(&gcRegionalJobs);
+ for(var job=group.x;job<jobs.z;job+=groups.x){
+  var owner=UMOwner(0u,0u,0u,0u);var mode=1u;
   if(job<jobs.x){let tile=regionalPlan[${this.workControl.framePlan.layout.fine}u+job];owner=UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane);}
-  else{let slot=(job-jobs.x)*64u+lane;if(slot<regionalPlan[8u]){let tile=regionalPlan[${this.workControl.framePlan.layout.coarse}u+slot];owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);}}
+  else if(job<jobs.y){let slot=(job-jobs.x)*64u+lane;if(slot<regionalPlan[8u]){let tile=regionalPlan[${this.workControl.framePlan.layout.coarse}u+slot];owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);}}
+  else{let slot=(job-jobs.y)*64u+lane;mode=2u;if(slot<jobs.x){let tile=regionalPlan[${this.workControl.framePlan.layout.fine}u+slot];if(umTileOpen(tile)>=0.99999){owner=UMOwner(tile,0u,4u,0u);}}}
   let needed=owner.width!=0u&&gcNeeds(owner);
-  if(needed){gcShare(owner);}workgroupBarrier();
-  if(needed){gcOwner(owner,true);}workgroupBarrier();
+  if(needed&&mode!=2u){gcShare(owner);}workgroupBarrier();
+  if(needed){gcOwner(owner,true,mode);}workgroupBarrier();
  }
 }`:""}
 ${this.solid?/* wgsl */`// Moved bodies ({bodies}): every live tile of a region the swept-body mask
