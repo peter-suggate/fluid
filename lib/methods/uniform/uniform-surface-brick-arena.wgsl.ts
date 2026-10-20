@@ -25,6 +25,8 @@
 import { UNIFORM_COMPILED_TOPOLOGY } from "./uniform-compiled-topology";
 export const narrowBandArenaWGSL=/* wgsl */`
 override nbArenaDerived:bool=false;
+// The redistance's reach in tiles from a crossing tile (surfaceRedistanceReach): reach 3 (bits 1 and 2) to tiles within min(2, it), reach 2 at three.
+override nbReachTiles:u32=3u;
 const NB_ARENA_WINDOW:u32=729u;
 var<workgroup> nbArenaWord:u32;
 // lane 0's value, uniform to every lane.
@@ -143,14 +145,14 @@ var<workgroup> nbArenaCrossed:atomic<u32>;
    }
   }
   workgroupBarrier();
-  // The reach of the brick's crossing tiles, a target tile once: 3 within two tiles of one, 2 at three.
+  // The reach of the brick's crossing tiles, a target tile once: 3 within two tiles of one (nbReachTiles 1: one), 2 at three (nbReachTiles 3).
   let crossed=atomicLoad(&nbArenaCrossed);
   if(crossed!=0u){for(var k=lane;k<512u;k+=256u){
    let r=vec3i(umCorner(k,8u))-3;var reach=0u;
    for(var j=0u;j<8u;j++){
     if((crossed&(1u<<j))==0u){continue;}
     let o=abs(r-vec3i(umCorner(j,2u)));let d=max(o.x,max(o.y,o.z));
-    if(d<=2){reach=3u;}else if(d==3){reach|=2u;}
+    if(d<=min(2,i32(nbReachTiles))){reach=3u;}else if(d==3&&nbReachTiles==3u){reach|=2u;}
    }
    if(reach==0u){continue;}
    let key=umTileKey(vec3i(t0)+r);if(key>=UM_TILES){continue;}

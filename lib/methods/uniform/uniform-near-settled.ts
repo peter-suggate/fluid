@@ -36,6 +36,9 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  *   twin) in the texture unit, from the same rgba32float halo; "software"
  *   keeps their eight loads. "texture32" needs float32-filterable and falls
  *   back to "software" without it.
+ * - surfaceRedistanceReach: tiles from a crossing tile the redistance
+ *   writes exact distances to (1, 2 or 3); past it a vertex keeps its sign
+ *   at six cells. Every consumer reads the reach-1 ring.
  * - redistanceSearch: "shared" lets redistance reuse the crossing search that
  *   retirement ran just before it; "fresh" searches again after retirement
  *   (which can move a hanging zero at a coarse seam).
@@ -47,7 +50,7 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  *   "texture32" also filters the particle trace's halo samples in the
  *   texture unit; the other values keep its eight loads.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly redistanceSearch:"shared"|"fresh";readonly particleOrder:"scheduled"|"canonical";readonly momentumSampler:UniformMomentumSampler}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly redistanceSearch:"shared"|"fresh";readonly particleOrder:"scheduled"|"canonical";readonly momentumSampler:UniformMomentumSampler}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -63,6 +66,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  traceSubsteps:values.traceSubsteps==="travel"?"travel":"gradient",
  wallTrace:values.wallTrace==="retrace"?"retrace":"clip",
  surfaceVelocitySampler:values.surfaceVelocitySampler==="software"?"software":"texture32",
+ surfaceRedistanceReach:values.surfaceRedistanceReach===1||values.surfaceRedistanceReach===2||values.surfaceRedistanceReach===3?values.surfaceRedistanceReach:3,
  redistanceSearch:values.redistanceSearch==="fresh"?"fresh":"shared",
  particleOrder:values.particleOrder==="canonical"?"canonical":"scheduled",
  momentumSampler:values.momentumSampler==="software"||values.momentumSampler==="texture16"?values.momentumSampler:"texture32",
