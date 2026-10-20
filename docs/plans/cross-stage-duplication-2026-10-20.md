@@ -32,6 +32,14 @@ The certificate in cbb2cf03 was checked bit for bit against umSurfaceTarget: abo
   | solid blocked test | 0.10 |
 
   No single piece dominates; G2P, the record traffic and the appends make up the other 2 ms.
+- **transferRefine folded into transferDeposit (#5 below)**, the refine's per-sample body run in deposit's classify loop on the record already loaded and its flush after each tile:
+
+  | Pass | Before (ms) | After (ms) |
+  |---|---|---|
+  | transferDeposit | 1.60 | 3.05 |
+  | transferRefine | 0.68 | (deleted) |
+
+  Net +0.76 ms. The refine code in the scatter loop costs the 192-lane deposit its occupancy. This is the fat-kernel rule again (lean split kernels over compact lists beat fat merged ones): a cross-stage merge has to delete work, with lean kernels reading a compact product, not fuse two kernels' bodies. The same rule rules out merging classify with localSpeed (#3) into one kernel.
 
 ## Ranked merges
 
@@ -97,7 +105,7 @@ The certificate in cbb2cf03 was checked bit for bit against umSurfaceTarget: abo
 - The two launches (about 0.65 each) walk the same listed tiles and the same addresses.
 - The extension launch reads the scratch velocity that the velocity launch writes. Pairing them needs the velocity remap's output kept apart from the extension's input for the duration of the launch.
 
-### 5. transferRefine folded into transferDeposit: exact, −0.4 to −0.55 ms
+### 5. transferRefine folded into transferDeposit: measured +0.76 ms (null, see Nulls)
 
 transferRefine (0.67–0.75) walks deposit's occupied-tile list and record ranges again (uniform-particle-brick.wgsl.ts:173 vs :228). Deposit would append refine's inputs to a compact list instead.
 
