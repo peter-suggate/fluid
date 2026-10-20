@@ -14,10 +14,11 @@
 export const UNIFORM_MIXED_STATUS_WORDS=16;
 export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8,residencyAudit:9} as const;
 /** Latched causes. The final pressure schedule gate latches 1-4 (its verdict);
- * 6-9 are for the layout and transport stages. 5 is retired. */
-export const UNIFORM_MIXED_FAILURE={pressureRejected:1,pressureUnconverged:2,pressureNonfinite:3,bandCapacity:4,layoutCapacity:6,invalidSupport:7,transportCapacity:8,planeCapacity:9} as const;
+ * 6-9 are for the layout and transport stages; 10 is a stage reading the
+ * solid record's apertures before their build. 5 is retired. */
+export const UNIFORM_MIXED_FAILURE={pressureRejected:1,pressureUnconverged:2,pressureNonfinite:3,bandCapacity:4,layoutCapacity:6,invalidSupport:7,transportCapacity:8,planeCapacity:9,staleApertures:10} as const;
 const CAUSE_NAMES:Record<number,string>={1:"pressure rejected a non-improving cycle",2:"pressure did not converge",3:"pressure went nonfinite",4:"pressure band over capacity",
- 6:"layout or hanging-tap capacity exceeded",7:"invalid support",8:"transport capacity exceeded",9:"remap plane corners over capacity"};
+ 6:"layout or hanging-tap capacity exceeded",7:"invalid support",8:"transport capacity exceeded",9:"remap plane corners over capacity",10:"solid aperture record read before its build"};
 
 /** WGSL for the record at @group(group) @binding(binding). "read" gives
  * umFrameFailed(); "read_write" also gives umLatchFailure(cause, a, b), which

@@ -39,6 +39,14 @@ fn umSolidCount()->u32{return ${keys+uniformFaceTileSlots(keys/512)}u;}
 // The swept-body region mask's mirror (UniformMixedSolid.bodyRegions): a vec4
 // per 16h region after the 22 per-tile rows, then the pending/count header.
 fn umBodyRegionBase()->u32{return umSolidCount()+23u*umSolidTiles();}
+// The h face apertures (umPressureFaceV's value of each cell's +x, +y and +z
+// face, four cells a vec4 in x+4y+16z order, 16 rows an axis), a stamp row
+// (the tile's coordinate and the build epoch), then the tile's low faces (4
+// rows an axis, the face's cell at l[axis+1]+4l[axis+2]: a face whose low
+// cell no page stores reads them), 61 rows a key after the body mask's
+// header; the epoch the host advances with every solid edit last.
+fn umSolidApertureRow(t:u32)->u32{return umBodyRegionBase()+umSolidTiles()/64u+1u+61u*t;}
+fn umSolidApertureEpochRow()->u32{return umBodyRegionBase()+umSolidTiles()/64u+1u+61u*umSolidTiles();}
 `;}
 /** The page pool a frame claims blocks from: its state buffer (bound
  * read-only, for the list of blocks its last commit claimed) and layout. */
@@ -230,6 +238,8 @@ export class UniformMixedSolid {
  }
  /** Byte offset in coarse.record of the mask's pending word (consumeBodyEvidence). */
  private bodyPendingByte=0;
+ /** The aperture rows' epoch (umSolidApertureEpochRow): its byte, and the host's copy. */
+ private epochByte=0;private readonly epoch=new Float32Array(4);
  /** The library's group as the record builder binds it: the mask image writable, for the tile cut map. */
  private readonly recordSolids?:{readonly layout:GPUBindGroupLayout;readonly group:GPUBindGroup};
  private readonly pool?:UniformMixedSolidPool;
@@ -290,10 +300,13 @@ export class UniformMixedSolid {
    this.recordSolids={layout:writable,group:device.createBindGroup({layout:writable,entries:resourcesOf()})};
    const count=uniformMixedPressureStorage(coarseLayout).count;
    // 23 vec4 rows per tile, then the body mask mirror: a vec4 per 16h region and its header.
-   const recordBytes=16*(count+23*tiles+tiles/64+1);this.bodyPendingByte=16*(count+23*tiles+tiles/64);
+   // Then 61 aperture rows a tile and the epoch row (umSolidApertureRow).
+   const recordBytes=16*(count+23*tiles+tiles/64+1+61*tiles+1);this.bodyPendingByte=16*(count+23*tiles+tiles/64);this.epochByte=16*(count+23*tiles+tiles/64+1+61*tiles);
    this.bodyMask=device.createBuffer({label:"Uniform mixed swept-body region mask",size:4*(tiles/64+UNIFORM_BODY_REGION_HEADER_WORDS),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    if(recordBytes>device.limits.maxStorageBufferBindingSize)throw new RangeError(`Solid cell-fraction record needs ${recordBytes} bytes, above this device's storage binding limit ${device.limits.maxStorageBufferBindingSize}`);
    const record=device.createBuffer({label:"Uniform mixed all-4h solid record",size:recordBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+   // Epoch 1 (a zeroed stamp never matches): a key's aperture rows hold only from its build.
+   this.epoch[0]=1;device.queue.writeBuffer(record,this.epochByte,this.epoch);
    const bindLayout=device.createBindGroupLayout({label:"Uniform mixed static solids with the all-4h record",entries:[...entries,
     {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
    this.coarse={bindLayout,record,count,bindGroup:device.createBindGroup({layout:bindLayout,entries:[...resourcesOf(),{binding:3,resource:{buffer:record}}]})};
@@ -479,6 +492,8 @@ fn umBuilderRegionDirty(region:u32)->bool{return region<UM_REGIONS&&(bodyRegions
 // whose topology is the live ownership); a claimed block's tiles read 4h
 // until encodeSimulation.
 var<workgroup> buildDirty:u32;
+var<workgroup> apertures:array<vec3f,64>;
+var<workgroup> lowApertures:array<vec3f,64>;
 fn umBuildTile(t:u32,lane:u32,widths:bool){
  if(!umTileLive(t)){return;}
  let tc=umTileCoord(t);let row=t;
@@ -486,12 +501,17 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  if(umBodyTiles){if(lane==0u){buildDirty=u32(umBodyTileDirty(t,tc));}if(workgroupUniformLoad(&buildDirty)==0u){return;}}
  let l=vec3u(lane%4u,(lane/4u)%4u,lane/16u);let c=vec3i(tc*4u+l);
  if(lane==0u){for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);atomicStore(&fieldCut[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}}
- var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);
- // A low face feeds only the halo of a tile on its block's low side.
- for(var axis=0u;axis<3u;axis++){
-  let below=l[axis]==0u&&(tc[axis]&7u)==0u;
-  if(l[axis]==3u||below){var q=c;if(below){q[axis]-=1;}let v=umPressureFaceV(q,axis);if(below){low[axis+1u]=v;}else{own[axis+1u]=v;}}
+ var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);var face=vec3f(0.0);var lowFace=vec3f(0.0);
+ // Every cell's +faces (the aperture rows; a tile's own +faces also feed its
+ // sums and patch codes), then the tile's low faces (its low aperture rows;
+ // on its block's low side they feed the halo too).
+ for(var k=0u;k<6u;k++){
+  let axis=k%3u;let edge=l[axis]==0u;let below=edge&&(tc[axis]&7u)==0u;
+  if(k>=3u&&!edge){continue;}
+  var q=c;if(k>=3u){q[axis]-=1;}let v=umPressureFaceV(q,axis);
+  if(k>=3u){lowFace[axis]=v;if(below){low[axis+1u]=v;}}else{face[axis]=v;if(l[axis]==3u){own[axis+1u]=v;}}
  }
+ apertures[lane]=face;lowApertures[lane]=lowFace;
  workgroupBarrier();
  if(own.x>1e-5){atomicOr(&openCells[lane>>5u],1u<<(lane&31u));}
  let fieldRecord=umBoundaryRecord(c);
@@ -512,6 +532,16 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  if(lane<16u){
   let first=4u*lane;
   record[umSolidCount()+4u*umSolidTiles()+16u*t+lane]=vec4f(sums[first].x,sums[first+1u].x,sums[first+2u].x,sums[first+3u].x);
+ }
+ if(lane<48u){
+  let axis=lane/16u;let first=4u*(lane%16u);
+  record[umSolidApertureRow(t)+lane]=vec4f(apertures[first][axis],apertures[first+1u][axis],apertures[first+2u][axis],apertures[first+3u][axis]);
+ }
+ if(lane==48u){record[umSolidApertureRow(t)+48u]=vec4f(vec3f(tc),record[umSolidApertureEpochRow()].x);}
+ if(lane>48u&&lane<61u){
+  let axis=(lane-49u)/4u;var v=vec4f(0.0);
+  for(var j=0u;j<4u;j++){let slot=4u*((lane-49u)%4u)+j;var m=vec3u(0u);m[(axis+1u)%3u]=slot%4u;m[(axis+2u)%3u]=slot/4u;v[j]=lowApertures[m.x+4u*(m.y+4u*m.z)][axis];}
+  record[umSolidApertureRow(t)+lane]=v;
  }
  workgroupBarrier();
  for(var stride=32u;stride>0u;stride/=2u){if(lane<stride){sums[lane]+=sums[lane+stride];lows[lane]+=lows[lane+stride];}workgroupBarrier();}
@@ -790,7 +820,11 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
  get recordStale():boolean{return !!this.coarseLayout&&!this.built;}
  /** A live voxel edit changed the mask (every tile), or only bodies moved
   * (the tiles near them): rebuild the all-4h record. */
- invalidate(bodiesOnly=false):void{this.built=false;if(!bodiesOnly)this.full=true;}
+ invalidate(bodiesOnly=false):void{
+  this.built=false;if(bodiesOnly)return;
+  // An edit: every key's aperture rows are stale until the full build restamps them.
+  this.full=true;if(this.coarse){this.epoch[0]++;this.device.queue.writeBuffer(this.coarse.record,this.epochByte,this.epoch);}
+ }
  /** Records which tiles the simulation holds at h (the record's y), from
   * its tile words. Encode after encodeCoarse and after every relayout,
   * before the all-4h levels read umSolidCut. changes: the changed tiles
@@ -873,6 +907,12 @@ fn umCellIsOpen(p:vec3i)->bool{return umSolidValid(p);}
 fn umCellInsideSolid(p:vec3i)->bool{return false;}
 fn umFaceOpen(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umPressureFaceV(id:vec3i,axis:u32)->f32{return 1.0;}
+fn umPressureFaceVRecorded(id:vec3i,axis:u32)->f32{return 1.0;}
+fn umSolidAperturesServe(p:vec3i)->u32{return 0u;}
+fn umSolidApertureCell(id:vec3i,axis:u32)->vec3i{return id;}
+fn umSolidApertureRows(id:vec3i,axis:u32)->u32{return 0u;}
+fn umSolidApertureAt(rows:u32,id:vec3i,axis:u32)->f32{return 1.0;}
+fn umSolidApertureRecord(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umSolidAtWorldCell(p:vec3f)->bool{return false;}
 fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{return 0.0;}
 fn umBodyCount()->u32{return 0u;}
@@ -1299,6 +1339,69 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
  // Gravity then creates velocity through the body even while it is fixed.
  if(bodyNear){return umFaceOpen(id,axis);}
  return umTerrainBoxOpen(q,vec3f(1));
+}
+// The cell whose tile's aperture rows hold the face of cell id normal to
+// axis on its high side: id, or where no page stores id's tile (a domain or
+// lattice wall below the face) the cell across the face, whose low rows do.
+fn umSolidApertureCell(id:vec3i,axis:u32)->vec3i{
+ ${coarse!==undefined&&gated?`if(umKeyStored(umTileKey(id>>vec3u(2u)))){return id;}
+ var high=id;high[axis]+=1;return high;`:"return id;"}
+}
+// Whether the record's aperture rows of cell p's tile are good (call it with
+// umSolidApertureCell's cell; umSolidApertureRecord reads them, a lean read
+// with no geometry inlined): 0 they are; 1 the geometry must serve their
+// faces (no page stores the tile, no record is bound, or a body reached the
+// tile at its build or reaches its region now); 2 the rows are stale (a claim
+// or an edit the record missed): the caller latches its stage's fatal.
+fn umSolidAperturesServe(p:vec3i)->u32{
+ ${coarse!==undefined&&gated?`if(!umSolidEnabled()){return 0u;}
+ let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return 1u;}
+ let stamp=umSolidRecord[umSolidApertureRow(t)+48u];
+ if(any(vec3u(stamp.xyz)!=umTileCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return 2u;}
+ if(umBodyCount()>0u&&(umSolidBodyBuilt(t)||umBodyPoseNearTile(t,2u))){return 1u;}
+ return 0u;`:"return select(0u,1u,umSolidEnabled());"}
+}
+// The record row (x) and component (y) holding the face of cell id normal to
+// axis on its high side, in the tile of umSolidApertureCell(id,axis) = rowCell.
+// The aperture rows of the face of cell id normal to axis on its high side
+// (umSolidApertureCell's tile; its low rows flagged in the top bit), for
+// umSolidApertureAt: one per tile and axis side, so a kernel that reads a
+// tile's faces looks its four up once.
+fn umSolidApertureRows(id:vec3i,axis:u32)->u32{
+ ${coarse!==undefined&&gated?`let rowCell=umSolidApertureCell(id,axis);
+ return umSolidApertureRow(umTileKey(rowCell>>vec3u(2u)))|select(0u,0x80000000u,any(rowCell!=id));`:"return 0u;"}
+}
+// The aperture of that face from its rows (umSolidApertureRows of any cell
+// whose face reads the same tile's same rows).
+fn umSolidApertureAt(rows:u32,id:vec3i,axis:u32)->f32{
+ ${coarse!==undefined&&gated?`let l=vec3u(id)&vec3u(3u);
+ if(rows<0x80000000u){let cell=l.x+4u*(l.y+4u*l.z);return umSolidRecord[rows+16u*axis+(cell>>2u)][cell&3u];}
+ let slot=l[(axis+1u)%3u]+4u*l[(axis+2u)%3u];return umSolidRecord[(rows&0x7fffffffu)+49u+4u*axis+(slot>>2u)][slot&3u];`:"return 1.0;"}
+}
+// umPressureFaceV of the face of cell id normal to axis on its high side,
+// from the aperture rows: only where umSolidAperturesServe of
+// umSolidApertureCell(id,axis) is 0.
+fn umSolidApertureRecord(id:vec3i,axis:u32)->f32{
+ ${coarse!==undefined&&gated?`return umSolidApertureAt(umSolidApertureRows(id,axis),id,axis);`:"return -1.0;"}
+}
+// umPressureFaceV from the record's aperture rows where they hold it: a
+// stored tile no body reached at its build and none reaches now (umCellOpen's
+// rule). A stored tile whose stamp is not its coordinate at the current epoch
+// (a claim or an edit the record missed) answers -1: the caller latches its
+// stage's fatal. Elsewhere, and without the record, the geometry. Call it at
+// one site a kernel: it inlines umPressureFaceV.
+fn umPressureFaceVRecorded(id:vec3i,axis:u32)->f32{
+ ${coarse!==undefined&&gated?`if(umSolidEnabled()){
+  let rowCell=umSolidApertureCell(id,axis);let t=umTileKey(rowCell>>vec3u(2u));
+  if(umKeyStored(t)){
+   let stamp=umSolidRecord[umSolidApertureRow(t)+48u];
+   if(any(vec3u(stamp.xyz)!=umTileCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return -1.0;}
+   if(umBodyCount()==0u||(!umSolidBodyBuilt(t)&&!umAnyBodyNear(umSolidFaceWorld(id,axis),length(0.5*umSolidParams.cellGravity.xyz)))){
+    return umSolidApertureAt(umSolidApertureRow(t)|select(0u,0x80000000u,any(rowCell!=id)),id,axis);
+   }
+  }
+ }`:""}
+ return umPressureFaceV(id,axis);
 }
 `;
 }

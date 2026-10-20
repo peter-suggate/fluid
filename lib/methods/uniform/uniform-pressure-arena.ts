@@ -67,6 +67,8 @@ const BRICK_GROUPS=2048,TILE_GROUPS=4096,PAGE_GROUPS=1024,TABLE_GROUPS=1024;
  * headroom. A frame needing more is the fatal overflow (header word 1 =
  * SLOT_OVERFLOW), never growth. */
 const ARENA_SLOT_SHARE=0.45,ARENA_SLOTS_MIN=2048,SLOT_OVERFLOW=3;
+/** Header word 1 when a row read a stale solid aperture record (umPressureFaceVRecorded's -1): fatal. */
+const STALE_APERTURES=4;
 /** Brick kernels: a lane a cell of the brick (and of each colour of its box). */
 const WG=512;
 /** Level 0's tile kernels: a lane a cell of a band tile (half sweeps: of two tiles' cells of one colour). */
@@ -88,6 +90,8 @@ const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena proje
 const HEADER=37,HISTORY_WORD=8,HISTORY=16,INITIAL_WORD=26,VALID_WORD=25,DONE_WORD=24,BRICKS_WORD=3,LEVEL1_WORD=6,LEVEL2_WORD=7;
 /** Header words 27 and 28: the native rows' largest initial and final residual (diagnostics). */
 const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29,NATIVE_FROZEN_WORD=5;
+/** Header word 33: the tiles pRows routed to its geometry variant. */
+const GEOMETRY_WORD=33;
 /** Kinds bits beyond the band's: an active row (liquid, positive diagonal) and a warm one (its slot held a liquid row last frame). */
 const ACTIVE_BIT=1<<27,WARM_BIT=1<<28;
 /** The coarsest (32h) rows, one a page, are one workgroup's: a lattice of
@@ -138,6 +142,8 @@ export class UniformPressureArena {
  private readonly tiles:number;
  private readonly maskWord:number;
  private readonly tileListWord:number;
+ /** The tiles pRows leaves to its geometry variant (their tile list indices; the count in header word GEOMETRY_WORD). */
+ private readonly geometryListWord:number;
  private readonly tableWord:number;
  private readonly level2Clear:{offset:number;size:number};
  private slots=0;
@@ -200,7 +206,7 @@ export class UniformPressureArena {
   }
   const first=a.base("xb",2),last=a.base("kb5",2)+UBA_STRIDE*blocks;
   this.level2Clear={offset:4*first,size:4*(last-first)};
-  this.maskWord=HEADER+this.tiles;this.tileListWord=this.maskWord+a.bricks;this.tableWord=this.tileListWord+this.tiles;
+  this.maskWord=HEADER+this.tiles;this.tileListWord=this.maskWord+a.bricks;this.geometryListWord=this.tileListWord+this.tiles;this.tableWord=this.geometryListWord+this.tiles;
   const limit=device.limits.maxStorageBufferBindingSize;
   if(4*a.poolWords>limit)throw new Error(`Pressure arena pool (${4*a.poolWords} bytes) exceeds the storage binding limit ${limit}`);
   this.index=device.createBuffer({label:"Uniform pressure arena state",size:4*(this.tableWord+a.tableWords),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -284,7 +290,7 @@ export class UniformPressureArena {
   const C=(name:string,level:0|1|2=0)=>a.base(name,level);
   const tableWGSL=a.tableWGSL("state",`${this.tableWord}u`,`atomicLoad(&state[MASK+id])`);
   const constants=/* wgsl */`
-const SLOTS:u32=${HEADER}u;const MASK:u32=${this.maskWord}u;const TLIST:u32=${this.tileListWord}u;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=${DONE_WORD}u;const BRICKS:u32=${BRICKS_WORD}u;
+const SLOTS:u32=${HEADER}u;const MASK:u32=${this.maskWord}u;const TLIST:u32=${this.tileListWord}u;const GLIST:u32=${this.geometryListWord}u;const GCOUNT:u32=${GEOMETRY_WORD}u;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=${DONE_WORD}u;const BRICKS:u32=${BRICKS_WORD}u;
 const INITIAL:u32=${INITIAL_WORD}u;const VALID:u32=${VALID_WORD}u;const INITIAL_BIT:u32=1u<<${HISTORY}u;const CYCLES:u32=${schedule.cycles}u;
 const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u;const K_NEUMANN:u32=4u;const K_CLOSED:u32=5u;
 const P_ACTIVE:u32=${ACTIVE_BIT}u;const P_WARM:u32=${WARM_BIT}u;const P_FINE:u32=${UNIFORM_ARENA_CLASS.fine}u;
@@ -621,16 +627,40 @@ ${zero}
 // and its list entry (from the brick id to the brick's slot). The cell's phi waits in
 // the iterate for the start. A row whose slot held a liquid row last frame
 // (and did not just enter) is warm.
+// Two variants: pRows reads solid face apertures from the solid record only
+// (no geometry inlined: the kernel stays lean) and leaves a tile whose
+// apertures the record does not serve (umSolidAperturesServe) to pRowsG,
+// which evaluates them, over that list.
+const pGeometry:bool=false;
+var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup> pApertureRows:array<u32,4>;
 @compute @workgroup_size(${TILE_WG}) fn pRows(${lanes}){
- if(lane==0u){pN=min(pIndex(0u),params.capacity.x);if(group.x==0u&&pIndex(UBA_FATAL)!=0u){atomicStore(&state[1],${SLOT_OVERFLOW}u);}}
+ if(lane==0u){pN=select(min(pIndex(0u),params.capacity.x),pIndex(GCOUNT),pGeometry);if(!pGeometry&&group.x==0u&&pIndex(UBA_FATAL)!=0u){atomicStore(&state[1],${SLOT_OVERFLOW}u);}}
  let n=workgroupUniformLoad(&pN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
  for(var j=group.x;j<n;j+=groups.x){
-  let entry=pIndex(TLIST+j);let id=entry>>3u;let bit=entry&7u;let slot=ubaSlot(id);let mask=pIndex(MASK+id);
+  let k=select(j,pIndex(GLIST+j),pGeometry);
+  let entry=pIndex(TLIST+k);let id=entry>>3u;let bit=entry&7u;let slot=ubaSlot(id);let mask=pIndex(MASK+id);
   // The brick's first band tile clears its other tiles' kinds: a tile is
   // warm only where it held a liquid row last frame.
+  if(lane==0u){atomicStore(&pRoute,0u);atomicStore(&pNeed,0u);}
   if((mask&((1u<<bit)-1u))==0u){for(var d=0u;d<8u;d++){if(((mask>>d)&1u)==0u){pool[P_KINDS+pAddr(slot,pTileCell(d,l))]=0u;}}}
-  workgroupBarrier();
-  if(lane==0u){atomicStore(&state[TLIST+j],(slot<<3u)|bit);}
+  workgroupBarrier();${S?`
+  if(!pGeometry){
+   // The tiles whose aperture rows its faces read (bit 0 its own, 1 + axis
+   // the one below it on that axis), then each one's verdict on four lanes.
+   let o=vec3i(ubaOrigin(id)+pTileCell(bit,vec3u(0u)));let c=o+vec3i(l);let clear=bLocalSolidWork&&umSolidRegionClearAtBuild(c);var need=0u;
+   for(var f=0u;f<6u;f++){let axis=f/2u;var low=c;if(bSign(f)<0){low[axis]-=1;}var high=low;high[axis]+=1;
+    if(!clear||!umSolidValid(low)||!umSolidValid(high)){need|=select(1u,2u<<axis,bSign(f)<0&&l[axis]==0u);}}
+   if(need!=0u){atomicOr(&pNeed,need);}
+   workgroupBarrier();
+   if(lane<4u){var t=o;var axis=0u;if(lane>0u){axis=lane-1u;t[axis]-=1;}pApertureRows[lane]=umSolidApertureRows(t,axis);
+    if(((atomicLoad(&pNeed)>>lane)&1u)!=0u){let serve=umSolidAperturesServe(umSolidApertureCell(t,axis));if(serve!=0u){atomicMax(&pRoute,serve);}}}
+   let route=workgroupUniformLoad(&pRoute);
+   if(route!=0u){
+    if(lane==0u){if(route==2u){atomicStore(&state[1],${STALE_APERTURES}u);}else{atomicStore(&state[GLIST+atomicAdd(&state[GCOUNT],1u)],k);}}
+    continue;
+   }
+  }`:""}
+  if(lane==0u){atomicStore(&state[TLIST+k],(slot<<3u)|bit);}
   let lb=pTileCell(bit,l);let at=pAddr(slot,lb);
   let warm=(ubaClass(slot)&UBA_ENTERING)==0u&&bLiquid(pool[P_KINDS+at]);
   let p=vec3i(ubaOrigin(id)+lb);
@@ -644,7 +674,7 @@ ${zero}
    let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];var q=p;q[axis]+=sign;
    let forced=bForcedField(p,axis,sign);var kind=K_GHOST;var coefficient=0.0;var fraction=1.0;
    ${S?`var low=p;if(sign<0){low[axis]-=1;}var high=low;high[axis]+=1;
-   var volume=1.0;if(!solidClear||!umSolidValid(low)||!umSolidValid(high)){volume=umPressureFaceV(low,axis);}var sealed=false;`:""}
+   var volume=1.0;if(!solidClear||!umSolidValid(low)||!umSolidValid(high)){if(pGeometry){volume=umPressureFaceVRecorded(low,axis);if(volume<0.0){atomicStore(&state[1],${STALE_APERTURES}u);volume=0.0;}}else{volume=umSolidApertureAt(pApertureRows[select(0u,1u+axis,sign<0&&l[axis]==0u)],low,axis);}}var sealed=false;`:""}
    var across=UM_RESIDENT;if(l[axis]==select(0u,3u,sign>0)){across=umCellKind(q);}
    if(across!=UM_RESIDENT){
     if(across==UM_AIR){kind=K_OPEN;coefficient=1.0/(h*h*bTheta(own,0.5*params.policy.w));}
@@ -1604,8 +1634,9 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
  }
 }`,
   };
-  const layoutOf:Record<string,string>={table:"table",mark:"mark",rows:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
-  const entryOf:Record<string,string[]>={table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],init:["pInit"],copy:["pCopy"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
+  sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
+  const layoutOf:Record<string,string>={table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
+  const entryOf:Record<string,string[]>={table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
    rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
@@ -1657,7 +1688,8 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  atomicStore(&state[CYCLE],cycle);atomicStore(&state[2],residual);
  if(!umFrameFailed()){
   if(residual>=0x7f800000u){umLatchFailure(${FAIL.pressureNonfinite}u,residual,0u);}
-  if(pIndex(1u)!=0u){umLatchFailure(${FAIL.bandCapacity}u,pIndex(0u),pIndex(1u));}
+  if(pIndex(1u)==${STALE_APERTURES}u){umLatchFailure(${FAIL.staleApertures}u,pIndex(0u),0u);}
+  else if(pIndex(1u)!=0u){umLatchFailure(${FAIL.bandCapacity}u,pIndex(0u),pIndex(1u));}
  }
  let open=!umFrameFailed();
  support[SUPPORT]=u32(!open);
@@ -1705,7 +1737,7 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   this.dispatch(pass,"ubaLists",Math.min(groupsOf(Math.max(cap,blocks),64),TABLE_GROUPS));
   this.dispatch(pass,"ubaLevel1",Math.min(groupsOf(this.workBricks,64),TABLE_GROUPS));
   this.dispatch(pass,"ubaRecord",Math.min(groupsOf(32*(2*this.workBricks+blocks),64),4*TABLE_GROUPS));
-  if(band)this.dispatch(pass,"pRows",this.tileGroups);
+  if(band){this.dispatch(pass,"pRows",this.tileGroups);this.dispatch(pass,"pRowsG",this.tileGroups);}
   pass.end();
  }
  /** Before the 4h projection: the composite solve (start, native rows,
@@ -1750,6 +1782,8 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  static readonly level2Word=LEVEL2_WORD;
  /** The overflow word's value when the band's bricks outnumber the arena's fine slots. */
  static readonly slotOverflow=SLOT_OVERFLOW;
+ /** The overflow word's value when a row read a stale solid aperture record. */
+ static readonly staleApertures=STALE_APERTURES;
  get slotCapacity():number{return this.arena.fineCapacity;}
  destroy():void{this.index.destroy();this.pool.destroy();}
 }

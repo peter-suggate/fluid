@@ -392,6 +392,49 @@ Next:
 
 **Physics change.** Letters occupancy moves 0.9% at f60 and 3.6% at f120 from the revert. Revert-to-revert noise is 0.3% and 2.0%. f120 also has about 18% more particles. The unconverged composite sits within 0.2% of the fixed one, so the shift comes from the coupling, not from convergence. The seam formula is kept in one helper so a param can switch it if it needs gating.
 
+#### pRows: the solid aperture cache (2026-10-20)
+
+pRows costs 1.77–1.84 ms at pour f200–206. That is 64 lanes a band tile, about 5700 band tiles.
+
+**The census ruled out dirty-skipping.** Each frame, 49% of band tiles flip a cell wet/dry and 4% change only a coefficient. Only 37% are unchanged, too few to pay for a skip.
+
+**Knock-ins priced the parts.** Each part was run a second time behind a runtime zero, and the table shows the added pRows time:
+
+| Part duplicated | Added ms |
+|---|---|
+| A: owner chains and face phi | ≈0 |
+| B: forced velocity | +0.20 |
+| C: band and native lookups | +0.07 |
+| D: solid apertures plus cell open/inside | +0.60 |
+| E: umCellInsideSolid alone | ≈0 |
+
+The cost is the solid apertures. 60% of band tiles are not solid-clear, which comes to about 1.23 M umPressureFaceV evaluations a frame.
+
+**Why the cache, and not the alternatives:**
+- Tile-context staging would only save A and C, which together are under 0.1 ms.
+- Classify-once ownership would only save C.
+- A static solid's apertures are the same every frame. The solid record's build already evaluates every one of them.
+
+**The cache.** The record keeps 61 rows a tile key:
+- every cell's +x, +y and +z aperture (48 rows);
+- a stamp row holding the tile coordinate and the build epoch;
+- the tile's low faces (12 rows), which serve faces whose low cell no page stores (domain and lattice walls).
+
+The host bumps the epoch on every solid edit. Claims rebuild their tiles' rows. A tile a body reached at its build, or reaches now, goes to the geometry (umCellOpen's rule).
+
+**Two pipelines.** The cached read with the geometry fallback still inlined ran at 1.57 ms. Removing the fallback, which never executed, brought it to 1.31 ms: inlining alone cost 0.26 ms of occupancy. So the fallback lives in its own pipeline:
+- pRows reads the record only. Four lanes look up the tile's four row bases and verdicts (umSolidApertureRows, umSolidAperturesServe).
+- pRowsG evaluates the geometry, over the tiles pRows hands it.
+- A stale stamp latches failure cause 10 (staleApertures).
+
+**Results:**
+- pRows went from 1.77/1.84 to 1.31/1.38 ms (min/median, split profile, f200–206).
+- pRowsG is empty in the pour: 0 tiles routed.
+- In a whole-frame profile, the marks-and-rows pass dropped 0.26 ms, while every other pass ran about 5% slow in that run.
+- Letters band p90 was 0.054 and 0.059 against 0.054 and 0.062.
+- Two clean f250 pours: band p50 0.052 and 0.047, p90 0.26 and 0.64 over f140–160. A pour on the parent commit gave 0.094 and 0.31.
+- Letters frames 1–3 match bit for bit. From frame 4 the runs diverge at the 1e-3 level, but two runs of the same code diverge just as much, so any difference is ULP-level and inside the solve's own run-to-run noise.
+
 ## 2. RFE: remap, geometric fill, body forces, extension
 
 ### 2.1 Per pass
