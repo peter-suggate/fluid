@@ -28,7 +28,7 @@
  *   [17] the move serial; [18] the scratch extent; [19] the input entries;
  *   [20] the output entries (slabs); [21] the current spill reserve's
  *   records (word 15 is the air pass's change gate); [22] the move's slab
- *   jobs (64-record chunks of the input entries); [23] the walk list's
+ *   jobs (NB_MOVE_CHUNK-record chunks of the input entries); [23] the walk list's
  *   records (the fast launch's samples whose trace box a solid cuts).
  * - From NB_SLAB_RECORD, 12 words a brick id: [0] scratch base, [1] scratch
  *   cap (after slabPlace: the overflow cursor), [2] scratch cursor (after
@@ -145,7 +145,10 @@ fn nbScratchCap(slot:u32,serial:u32)->u32{
 }
 // One workgroup, before the move: the scratch slabs in slot order (slabs
 // past the limit stop the run, state[3] = 6, and are cut to fit), and the
-// move's jobs: 64-record chunks of the input entries.
+// move's jobs: NB_MOVE_CHUNK-record chunks of the input entries. A job
+// stages its brick's context once (nbWinStage): over 256 records that
+// costs a lane a tile per four records a lane.
+const NB_MOVE_CHUNK:u32=256u;
 @compute @workgroup_size(256) fn slabAllocate(@builtin(local_invocation_index) lane:u32){
  let slots=ubCount();let serial=atomicLoad(&state[17u]);
  let span=(slots+255u)/256u;let first=lane*span;let end=min(slots,first+span);
@@ -163,9 +166,9 @@ fn nbScratchCap(slot:u32,serial:u32)->u32{
  if(lane==255u){nbSlabTotal.x=base;}
  let entries=min(atomicLoad(&state[19u]),UB_BRICKS);
  let espan=(entries+255u)/256u;let efirst=lane*espan;let eend=min(entries,efirst+espan);
- var jobs=0u;for(var e=efirst;e<eend;e++){jobs+=(atomicLoad(&state[NB_SLAB_IN+4u*e+2u])+63u)/64u;}
+ var jobs=0u;for(var e=efirst;e<eend;e++){jobs+=(atomicLoad(&state[NB_SLAB_IN+4u*e+2u])+NB_MOVE_CHUNK-1u)/NB_MOVE_CHUNK;}
  var job=nbSlabPrefix(lane,vec2u(jobs,0u)).x;
- for(var e=efirst;e<eend;e++){atomicStore(&state[NB_SLAB_IN+4u*e+3u],job);job+=(atomicLoad(&state[NB_SLAB_IN+4u*e+2u])+63u)/64u;}
+ for(var e=efirst;e<eend;e++){atomicStore(&state[NB_SLAB_IN+4u*e+3u],job);job+=(atomicLoad(&state[NB_SLAB_IN+4u*e+2u])+NB_MOVE_CHUNK-1u)/NB_MOVE_CHUNK;}
  if(lane==255u){
   atomicStore(&state[18u],min(nbSlabTotal.x,NB_SLAB_LIMIT));atomicStore(&state[22u],job);
   atomicStore(&state[1],0u);atomicStore(&state[16u],0u);

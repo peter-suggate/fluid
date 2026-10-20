@@ -562,10 +562,18 @@ ${uniformMixedSourceWGSL(16)}
 override nbFastSample:bool=false;
 var<private> nbSlow:bool=false;
 fn sampleVelocity(p:vec3f)->vec3f{
+ return umSampleVelocity(p);
+}
+// The move's sample: the fast launch's unit interpolant, else the sampler.
+fn nbMoveSample(p:vec3f)->vec3f{
  ${unitTaps&&!slots?`if(nbFastSample){
-  let s=umSampleTile(p);
-  if(!umRegularFine&&umCachedFineTile(s.key)){
-   umUnitHome=umUnitHaloHome(s);
+  // umSampleTile's tile; its key's classification and halo home from the
+  // job's brick context where the window holds the tile.
+  umHold=umPointBounds(p,8.0);let tile=umBoundedCell(clamp(p,umHold.lo,umHold.hi),umHold)>>vec3u(2u);
+  let w=nbWinIndex(tile);var fine:bool;
+  if(w<64u){fine=(nbWinFlags[w]&NB_WIN_FINE)!=0u;umUnitHome=nbWinHome[w];}
+  else{let key=umTileAt(vec3u(tile));fine=umCachedFineTile(key);if(fine){umUnitHome=umUnitHaloHome(UMSampleTile(vec3f(0.0),tile,key));}}
+  if(!umRegularFine&&fine){
    if(umUnitHome.w>=0){
     var v=vec3f(0.0);
     for(var a=0u;a<3u;a++){
@@ -583,7 +591,8 @@ ${this.particleSampler==="texture32"?`     // The same eight taps, filtered by t
   }
   nbSlow=true;return vec3f(0.0);
  }`:""}
- return umSampleVelocity(p);
+
+ return sampleVelocity(p);
 }
 ${this.apic?/* wgsl */`
 // Extend the velocity at domain walls without changing the quadratic moments.
@@ -712,7 +721,11 @@ fn nbHullUncut()->bool{
  let first=a>>vec3u(2u);let last=b>>vec3u(2u);
  if(any(a<vec3i(0))||any(last-first>vec3i(2))){return false;}
  for(var z=first.z;z<=last.z;z++){for(var y=first.y;y<=last.y;y++){for(var x=first.x;x<=last.x;x++){
-  let t=vec3i(x,y,z);let key=umTileKey(t);if(!umKeyStored(key)){return false;}
+  let t=vec3i(x,y,z);
+  // The window's proof of the tile (stored; open and uncut) where it holds it.
+  let w=nbWinIndex(t);
+  if(w<64u){let f=nbWinFlags[w];if((f&NB_WIN_STORED)==0u){return false;}if((f&NB_WIN_UNCUT)!=0u){continue;}}
+  let key=umTileKey(t);if(!umKeyStored(key)){return false;}
   let open=umSolidOpenCells(key);let field=umSolidFieldCut(key);
   if(all(open==vec2u(0xffffffffu))&&all(field==vec2u(0u))){continue;}
   // The box's cells of this tile: bit x+4y+16z.
@@ -724,6 +737,39 @@ fn nbHullUncut()->bool{
   if(any((open&~field&box)!=box)){return false;}
  }}}
  return true;`:"return false;"}
+}
+// The move's brick context: a slab job stages its brick's 4³-tile window
+// (the brick's 2³ tiles and a tile around them), a lane a tile, with what
+// the move's per-sample lookups read through the page table: the sampler's
+// tile class and halo home, the hull proof, the depth's reach, the target
+// heat and G2P's cold tier. A sample's tile inside the window reads them
+// from workgroup memory; outside it, or in a flat job, from the device.
+// Both are the same functions of the same tile.
+const NB_WIN_FINE:u32=1u;const NB_WIN_STORED:u32=2u;const NB_WIN_UNCUT:u32=4u;const NB_WIN_COLD:u32=8u;const NB_WIN_REACH:u32=16u;
+var<workgroup> nbWinFlags:array<u32,64>;
+var<workgroup> nbWinHeat:array<f32,64>;
+${unitTaps&&!slots?"var<workgroup> nbWinHome:array<vec4i,64>;":""}
+var<private> nbWinLo:vec3i;
+var<private> nbWinOn:bool=false;
+fn nbWinIndex(t:vec3i)->u32{let l=t-nbWinLo;if(!nbWinOn||any(l<vec3i(0))||any(l>vec3i(3))){return 64u;}return u32(l.x+4*l.y+16*l.z);}
+fn nbWinStage(lane:u32){
+ let t=nbWinLo+vec3i(umCorner(lane,4u));let at=umTileAt(vec3u(t));let key=umTileKey(t);var flags=0u;
+ ${unitTaps&&!slots?"if(umCachedFineTile(at)){flags|=NB_WIN_FINE;}nbWinHome[lane]=umUnitHaloHome(UMSampleTile(vec3f(0.0),t,at));":""}
+ if(umKeyStored(key)){
+  flags|=NB_WIN_STORED;
+  ${this.solid.coarse?"if(all(umSolidOpenCells(key)==vec2u(0xffffffffu))&&all(umSolidFieldCut(key)==vec2u(0u))){flags|=NB_WIN_UNCUT;}":""}
+ }
+ if(nbTileCold(key)){flags|=NB_WIN_COLD;}
+ if((atomicLoad(&bins[NB_BAND_REACH+at])&1u)!=0u){flags|=NB_WIN_REACH;}
+ nbWinFlags[lane]=flags;nbWinHeat[lane]=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+at]));
+}
+// nbTargetHeat, nbSampleCold and the depth's reach, through the window.
+fn nbMoveHeat(p:vec3f)->f32{let t=vec3u(p/4.0);let w=nbWinIndex(vec3i(t));if(w<64u){return nbWinHeat[w];}return bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+umTileAt(t)]));}
+fn nbMoveCold(q:vec3f)->bool{let t=vec3i(floor(q))>>vec3u(2u);let w=nbWinIndex(t);if(w<64u){return (nbWinFlags[w]&NB_WIN_COLD)!=0u;}return nbTileCold(umTileKey(t));}
+fn nbMoveDepth(p:vec3f)->f32{
+ let t=vec3u(p)/4u;let w=nbWinIndex(vec3i(t));var reached:bool;
+ if(w<64u){reached=(nbWinFlags[w]&NB_WIN_REACH)!=0u;}else{reached=(atomicLoad(&bins[NB_BAND_REACH+umTileAt(t)])&1u)!=0u;}
+ return particleDepthIn(p,reached);
 }
 fn nbListSlow(i:u32){let j=atomicAdd(&state[NB_SLOW_PARTICLES],1u);links[UM_CELL_KEYS+j]=i;}
 // A moved record: status 0 live, 1 retired (or past a fatal), 2 slow (the
@@ -770,7 +816,7 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
   loop{
    if(stage<3u){
     nbHullInclude(x);
-    let k=sampleVelocity(x);
+    let k=nbMoveSample(x);
     // Nothing of this sample is stored yet: the general launch redoes it.
     if(nbFastSample&&nbSlow){return NbMoved(record,2u);}
     if(stage==1u){x=q+2.0*dt*k/(3.0*h);stage=2u;continue;}
@@ -780,7 +826,7 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    // G2P.
    var v=p.velocity.xyz;
    if(mode!=1.0){
-    ${this.apic?"p=nbApicSample(p);v=p.velocity.xyz;":"var flip=v;if(!nbSampleCold(q)){flip+=pic-p.before.xyz;}v=select(mix(pic,flip,params.settings.x),pic,first);"}
+    ${this.apic?"p=nbApicSample(p);v=p.velocity.xyz;":"var flip=v;if(!nbMoveCold(q)){flip+=pic-p.before.xyz;}v=select(mix(pic,flip,params.settings.x),pic,first);"}
    }else{
     ${this.apic?"p.cx=vec4f(0);p.cy=vec4f(0);p.cz=vec4f(0);":""}
     v+=vec3f(0,params.settings.z*dt,0);
@@ -793,9 +839,9 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    }
    ${this.apic?"if(!all(abs(p.cx.xyz)<vec3f(1e10))||!all(abs(p.cy.xyz)<vec3f(1e10))||!all(abs(p.cz.xyz)<vec3f(1e10))){atomicStore(&state[3],2u);return NbMoved(p,1u);}":""}
    if(!all(abs(v)<vec3f(1e10))){atomicStore(&state[3],2u);return NbMoved(p,1u);}
-   let age=nbSparseAge(i,q,nbParticleAge(p));let depth=particleDepth(q);
+   let age=nbSparseAge(i,q,nbParticleAge(p));let depth=nbMoveDepth(q);
    ${this.apic?"p.lifetime.x=age;":"p.before.w=nbParticleState(age,mode);"}
-   p.velocity=vec4f(v,depth);p.position.w=max(p.position.w,nbTargetHeat(q));
+   p.velocity=vec4f(v,depth);p.position.w=max(p.position.w,nbMoveHeat(q));
    // The accepted grid motion: the next head's residency prediction.
    // FLIP's residual velocity transfers momentum but traces no position.
    p.before=vec4f(pic,p.before.w);
@@ -814,7 +860,7 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    // A sample takes erasure heat (over 1) at G2P, with its tile's new
    // collar seeded: a collar tile the census triggered eroded the unseeded
    // tiles beside it that same step.
-   let tileHeat=nbTargetHeat(q);
+   let tileHeat=nbMoveHeat(q);
    p.position.w=max(select(min(tileHeat,1.0),tileHeat,p.position.w>1.0),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
    if(p.position.w<=0.0){return NbMoved(p,1u);}
    end=q+dt*p.velocity.xyz/h;
@@ -836,7 +882,8 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    if(umBodyCount()==0u){nbListWalk(i,p,q,end);return NbMoved(p,1u);}
    return NbMoved(p,2u);
   }
-  return nbFinish(p,q,end,endpoint,ballistic,nbFastSolid()&&umBodyCount()==0u&&nbHullUncut());
+  // A routed record's box was proven just above (routed implies nbFastSolid).
+  return nbFinish(p,q,end,endpoint,ballistic,nbFastSolid()&&umBodyCount()==0u&&(routed||nbHullUncut()));
 }
 // The trace's end: the solid walk from start to endpoint (end held inside
 // a SOLID page's face), the arrival and its heat. uncut: the box is proven
@@ -916,7 +963,7 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   // sample that carried its heat into the collar eroded the unseeded liquid
   // beside it. Spray keeps its heat: nothing else erases what it leaves.
   var heat=p.position.w;
-  if(!ballistic){let arrived=nbTargetHeat(q);if(arrived>0.0){heat=min(heat,max(arrived,1.0));}}
+  if(!ballistic){let arrived=nbMoveHeat(q);if(arrived>0.0){heat=min(heat,max(arrived,1.0));}}
   p.position=vec4f(q,heat);return NbMoved(p,0u);
 }
 // The walk list: an index a record in the dead compact stream past the slow
@@ -942,7 +989,7 @@ fn nbListWalk(i:u32,p:Particle,start:vec3f,end:vec3f){
  }
 }
 // The move: a workgroup a job of the row (NARROW_BAND_PARTICLE_GRID). A job
-// is 64 records of an input slab (last move's current slabs: a dense brick
+// is NB_MOVE_CHUNK records of an input slab (last move's current slabs: a dense brick
 // is many jobs, so no workgroup serializes one) or 64 entries of the flat lane (the samples the fast launch listed, then the spill reserve).
 // Every record goes through the one nbAdvect site (Metal inlines every
 // call) and appends to its brick's slab in the scratch bank. A slab job's
@@ -963,8 +1010,8 @@ var<workgroup> nbMoveBrick:array<vec3u,27>;
 fn nbSlabJob(j:u32)->vec4u{
  var lo=0u;var hi=min(atomicLoad(&state[19u]),UB_BRICKS);
  while(hi-lo>1u){let mid=(lo+hi)/2u;if(atomicLoad(&state[NB_SLAB_IN+4u*mid+3u])<=j){lo=mid;}else{hi=mid;}}
- let at=NB_SLAB_IN+4u*lo;let chunk=64u*(j-atomicLoad(&state[at+3u]));
- return vec4u(0u,atomicLoad(&state[at+1u])+chunk,min(64u,atomicLoad(&state[at+2u])-min(chunk,atomicLoad(&state[at+2u]))),atomicLoad(&state[at]));
+ let at=NB_SLAB_IN+4u*lo;let chunk=NB_MOVE_CHUNK*(j-atomicLoad(&state[at+3u]));
+ return vec4u(0u,atomicLoad(&state[at+1u])+chunk,min(NB_MOVE_CHUNK,atomicLoad(&state[at+2u])-min(chunk,atomicLoad(&state[at+2u]))),atomicLoad(&state[at]));
 }
 fn nbMoveTurn(r:NbMoved,job:vec4u,lane:u32){
  var n=27u;var rank=0u;
@@ -1003,6 +1050,8 @@ fn nbMove(group:u32,groups:u32,lane:u32){
    else{let k=64u*(j-jobs.x);nbMoveJob=vec4u(1u,k,min(64u,jobs.z-k),0u);}
   }
   let job=workgroupUniformLoad(&nbMoveJob);
+  nbWinOn=job.x==0u;nbWinLo=(vec3i(ubBrickOrigin(job.w))>>vec3u(2u))-1;
+  if(nbWinOn){nbWinStage(lane);}
   if(job.x==0u&&lane<27u){
    let id=ubBrickAt(vec3i(ubBrickOrigin(job.w))+8*(vec3i(umCorner(lane,3u))-1));
    var brick=vec3u(UB_NONE,0u,0u);

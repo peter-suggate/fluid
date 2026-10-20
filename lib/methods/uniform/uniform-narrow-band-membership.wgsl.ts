@@ -273,9 +273,11 @@ fn bulkDepth(c:vec3u,p:vec3f)->f32{
 // at least six cells away. p: a point of a cell of a page that is not SOLID
 // (a sample's position, a point of a stored cell, the centre of a stored
 // face), read in that cell.
-fn particleDepth(p:vec3f)->f32{
+fn particleDepth(p:vec3f)->f32{return particleDepthIn(p,(nbBandReach(vec3u(p))&1u)!=0u);}
+// reached: the reach bit of p's tile (the move reads it from its brick context).
+fn particleDepthIn(p:vec3f,reached:bool)->f32{
  let c=vec3u(p);let f=p-vec3f(c);
- if((nbBandReach(c)&1u)==0u){let far=bandPhi(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
+ if(!reached){let far=bandPhi(p);return select(max(far,6.0),min(far,-6.0),far<0.0);}
  var value=0.0;
  // The eight vertex keys: where one block holds them (umVertexRun) the first's plus 1, 33 and 1089 a step, by one
  // page-table read. Where the vertices' own pages (the pages of the cells below them) span two pages on one axis
