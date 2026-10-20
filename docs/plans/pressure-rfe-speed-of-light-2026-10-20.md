@@ -369,6 +369,29 @@ Next:
 - pRows: a lean split (the solid queries only where solids are near).
 - Level-1 box cost: about 90 µs a dispatch, bound by latency per workgroup, not by launch width. Sizing it from the receipt did not change it.
 
+### 1.9 The composite cycle: root rows inside the band (2026-10-20)
+
+55c16a3a solved the root's 4h rows inside the band's composite cycle and retired the root solve. Letters' band p90 rose from 0.21 to 0.56, so b7a78b68 reverted it. 3e1db823 re-lands it with three seam fixes. A seam is a band h face toward a native 4h row, coupled at c = 1/(2.5h²θ).
+
+**Broken priors** (found with a CPU band twin, then confirmed on the GPU with seam-ratio counters):
+- **Seams were coarsened like faces.** Couplings scale by P_SCALE = 0.5 a level, but a seam's row stays 2.5h away at every level. At 4h the band aggregate coupled to its native at a quarter of what the native coupled back. Seams now keep c unscaled, in the diagonal and across, in pRebase (level 1) and in the pDownA bake (level 2). Twin rate per cycle: 0.5 → 0.13–0.2.
+- **Seam detection missed dry level-1 cells.** The bake and the up-smoothing treated "no level-1 row across" as a seam. A level-1 cell can exist with no diagonal (dry or partial), so 315 of 444 seams at letters f34 stayed asymmetric. Both now test the diagonal. Up-smoothing reads the native's level-2 correction across the seam instead of zero. Frozen natives carry no correction.
+- **Deep natives need a stronger tail.** The tail now runs three cycles at 0.75 scale (twin: 0.5 → 0.15 per cycle).
+
+**Results**, each against b7a78b68:
+
+| | b7a78b68 (two runs) | 3e1db823 (two runs) |
+|---|---|---|
+| Letters band p50 | 0.037 / 0.039 | 0.032 / 0.033 |
+| Letters band p90 | 0.198 / 0.216 | 0.054 / 0.062 |
+| Letters p90 without the top six impact frames | 0.098 / 0.108 | 0.048 / 0.051 |
+| Letters max | 2.84 / 1.98 | 0.24 / 0.24 |
+| Pour band p50, f140–160 | 0.25 / 0.34 | 0.043 / 0.044 |
+| Pour band p90, f140–160 | 0.72 / 2.04 | 0.13 / 0.44 |
+| Pour pressure ms, f200–212 (profiled) | 10.59 | 10.18 |
+
+**Physics change.** Letters occupancy moves 0.9% at f60 and 3.6% at f120 from the revert. Revert-to-revert noise is 0.3% and 2.0%. f120 also has about 18% more particles. The unconverged composite sits within 0.2% of the fixed one, so the shift comes from the coupling, not from convergence. The seam formula is kept in one helper so a param can switch it if it needs gating.
+
 ## 2. RFE: remap, geometric fill, body forces, extension
 
 ### 2.1 Per pass

@@ -294,6 +294,11 @@ const PA_X:u32=${C("xa",1)}u;const PA_Y:u32=${C("ya",1)}u;const PA_R:u32=${C("ra
 const PB_X:u32=${C("xb",2)}u;const PB_Y:u32=${C("yb",2)}u;const PB_R:u32=${C("rb",2)}u;const PB_D:u32=${C("db",2)}u;const PB_K:u32=${C("kb0",2)}u;const PLANE2:u32=${plane2}u;
 const P_SCALE:f32=${schedule.coarseScale};const T_SCALE:f32=${schedule.tailScale};
 const K_SEAM:u32=6u;
+// The composite's seam coupling on the coarse levels, its one definition. A
+// seam's native row stays 2.5h away at every level, so its coupling k never
+// coarsens: (the diagonal part, the cross coupling) a child adds before the
+// P_SCALE sum leaves k unscaled in both.
+fn seamCoarse(k:f32)->vec2f{return vec2f(k*(1.0/P_SCALE-1.0),k/P_SCALE);}
 const PN_X:u32=${C("nx",2)}u;const PN_B:u32=${C("nb",2)}u;const PN_R:u32=${C("nr",2)}u;const PN_D:u32=${C("nd",2)}u;const PN_M:u32=${C("nm",2)}u;const PN_K:u32=${C("nk0",2)}u;const PN_L:u32=${C("nl0",2)}u;
 const PT_X:u32=${C("xt",2)}u;const PT_Y:u32=${C("yt",2)}u;const PT_R:u32=${C("rt",2)}u;const PT_D:u32=${C("dt",2)}u;const PT_K:u32=${C("kt0",2)}u;
 const N_KEYS:u32=${512*blocks}u;const N_THETA:u32=${896*blocks}u;const N_SENTINEL:u32=${blocks-1}u;
@@ -1007,10 +1012,8 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
      else if(kind==K_SEAM){
       // A seam: the native row's start; out of the aggregate (a tile face)
       // toward an active native row, its level 2 cell.
-      // A seam never coarsens (its row 2.5h away at every level): its
-      // coupling, in the diagonal and across, stays unscaled.
-      let m=nAcross(p,f);w[side]=c;d[side]=pF(PN_B,m)-own;part+=c*(1.0/P_SCALE-1.0);
-      if((pool[PN_M+m]&N_ACTIVE)!=0u){cross[axis]=c/P_SCALE;}
+      let m=nAcross(p,f);w[side]=c;d[side]=pF(PN_B,m)-own;let sc=seamCoarse(c);part+=sc.x;
+      if((pool[PN_M+m]&N_ACTIVE)!=0u){cross[axis]=sc.y;}
      }
      else if(kind==K_GHOST||kind==K_OPEN){open+=c;}
      else if(kind==K_WALL){walls+=c;lifted+=c*max(pLift(at,f),-own);}
@@ -1134,8 +1137,8 @@ override pBake:bool=false;
   if(pBake){
    gCoarseChild(lane,vec3u(c),at,d,CK,CPL);
    // An outward coupling to no level 1 row (none there, or one with no
-   // diagonal) is a seam: unscaled.
-   if(d>0.0){for(var axis=0u;axis<3u;axis++){let f=2u*axis+(u32(c[axis])&1u);var q=c;q[axis]+=bSign(f);let k=core.k[f];if(k>0.0&&cDiag(cAddr(q))<=0.0){gPart[lane]+=k*(1.0/P_SCALE-1.0);gCross[512u*axis+lane]=k/P_SCALE;}}}
+   // diagonal) is a seam.
+   if(d>0.0){for(var axis=0u;axis<3u;axis++){let f=2u*axis+(u32(c[axis])&1u);var q=c;q[axis]+=bSign(f);let k=core.k[f];if(k>0.0&&cDiag(cAddr(q))<=0.0){let sc=seamCoarse(k);gPart[lane]+=sc.x;gCross[512u*axis+lane]=sc.y;}}}
   }
   workgroupBarrier();
   if(lane<64u){
