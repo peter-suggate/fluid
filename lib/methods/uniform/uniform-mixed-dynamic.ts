@@ -145,7 +145,10 @@ export interface UniformMixedDynamicImportance {
  /** NB-only quota over requesting tiles; absent/100 admits every candidate. */
  activityBudget?:{percent:number};
  /** A tile this frame's drop or inflow plug can fill is band (absent: it
-  * is). Off under a census of requests only: a source is not a request. */
+  * is). Off under a census of requests only: a source is not a request; and
+  * off for NB-FLIP, whose 4h owners carry the plug's phi and inflow like any
+  * surface's (a smooth stream stays 4h). The page seed keeps a source's
+  * tiles resident either way. */
  sources?:boolean;
  /** What shape measures on an h tile (UniformDetailShapeMetric; absent:
   * "value"). "displacement": umSurfaceDisplacement. */
@@ -958,6 +961,14 @@ fn umTileTravel(t:u32,k:u32)->f32{
  if(k<3u){return max(-orderValue(atomicLoad(&census[boundIndex(t,a)])),0.0)*policy.step.x/H[a];}
  return max(orderValue(atomicLoad(&census[boundIndex(t,3u+a)])),0.0)*policy.step.x/H[a];
 }
+// Signed speed toward a tile moving along k of tile t beyond it on that side,
+// in h per step: its fastest face that way. Negative recedes: the edge of a
+// falling stream reads its own liquid a tile below across a sliver of air.
+fn umTileToward(t:u32,k:u32)->f32{
+ let a=k%3u;
+ if(k<3u){return orderValue(atomicLoad(&census[boundIndex(t,3u+a)]))*policy.step.x/H[a];}
+ return -orderValue(atomicLoad(&census[boundIndex(t,a)]))*policy.step.x/H[a];
+}
 fn umTileSpeed(t:u32)->f32{
  var speed=0.0;
  for(var a=0u;a<3u;a++){speed=max(speed,max(abs(orderValue(atomicLoad(&census[boundIndex(t,a)]))),abs(orderValue(atomicLoad(&census[boundIndex(t,3u+a)]))))*policy.step.x/H[a]);}
@@ -990,7 +1001,8 @@ fn umFlowActivity(p:vec3u,tile:u32)->vec2f{
 // Approaching contact: the horizon over the steps until the surface in tile
 // p closes the air ahead of it. Per direction it moves in, with air on that
 // face of the tile (liquid there is already across it): march the tiles
-// ahead to a solid tile, liquid beyond air (closing at both travels) or a
+// ahead to a solid tile, liquid beyond air (closing at the relative speed:
+// liquid falling away as fast closes nothing) or a
 // closed wall. The distance is whole tiles plus the cells from the face to
 // the tile's nearest crossing owner; under a cell is contact, the impact
 // rule's.
@@ -1022,7 +1034,7 @@ fn umApproach(p:vec3u,tile:u32)->f32{
    let t=512u*w+umTileLocal(vec3u(q));
    if(!umTileWet(t)){air=true;continue;}
    // Liquid with no air before it is this surface's own.
-   if(air){gapCells=4.0*f32(n-1u)+gap;closing+=umTileTravel(t,(k+3u)%6u);}
+   if(air){gapCells=4.0*f32(n-1u)+gap;closing+=umTileToward(t,k);}
    break;
   }
   if(gapCells>=1.0){best=max(best,horizon*closing/gapCells);}
@@ -1068,6 +1080,10 @@ fn umScoreByte(w0:u32,w1:u32,k:u32)->u32{
    if(criterionOn(k)){top=max(top,byte);}
   }
   w1|=winner<<${IMPORTANCE.winnerShift}u;
+  // A tile the source can fill is the source's to author again each step: a
+  // 4h error there never accumulates (the plug's back rim is a right angle
+  // no 4h tile carries). It scores for the layer and requires nothing.
+  if(((w1>>${IMPORTANCE.triggeredShift}u)&63u)!=0u&&umSourceTile(vec3i(p))){w1&=~(63u<<${IMPORTANCE.triggeredShift}u);}
   let triggered=((w1>>${IMPORTANCE.triggeredShift}u)&63u)!=0u;
   var kept=triggered;
 
@@ -1220,17 +1236,19 @@ fn departureMeetsSurface(home:u32,lo:vec3f,hi:vec3f)->bool{
  }}
  return false;
 }
-// A joined tile (joinTarget, join) is band whatever the trace finds; so is
-// a tile this frame's drop or inflow plug can fill: the source phi (a lower
-// bound on the distance to its ball or plug) at the tile centre within half
-// the tile diagonal, plus two cells for the aperture edge and the donor
-// layer upstream of the nozzle face. Liquid-conditional solid promotion then
-// treats either as band.
+// A joined tile (joinTarget, join) is band whatever the trace finds; so,
+// with sources on (umSourceBand), is a tile this frame's drop or inflow plug
+// can fill (umSourceTile): the source phi (a lower bound on the distance to
+// its ball or plug) at the tile centre within half the tile diagonal, plus
+// two cells for the aperture edge and the donor layer upstream of the
+// nozzle face. Liquid-conditional solid promotion then treats either as
+// band. Off, a source tile is decided like any other, and the page seed
+// still keeps it resident.
 fn umJoined(t:u32)->bool{
  return ((joinTiles[t/32u]>>(t%32u))&1u)!=0u||umHostJoined(vec3i(umTileCoord(t)));
 }
+fn umSourceBand()->bool{return (policy.shaping.x&512u)!=0u;}
 fn umSourceTile(p:vec3i)->bool{
- if((policy.shaping.x&512u)==0u){return false;}
  if(umSourceParams.drop.w<=0.0&&umSourceinflowStrength()<=0.0){return false;}
  let centre=4.0*vec3f(p)+vec3f(2.0);
  return umSourceuvSourcePhi(centre,3.0e38)<=0.5*length(4.0*H)+2.0*MAX_H;
@@ -1254,7 +1272,7 @@ fn surfaceAllowed(tile:u32,p:vec3i)->bool{
  // asks; solidPromote may still add one.
  let decided=CC_DECIDED+tile/32u;let bit=1u<<(tile%32u);
  if((umRegionsAt(vec3u(p))&3u)==2u){atomicAnd(&census[decided],~bit);if(umTileWidth(tile)==1u){atomicAdd(&census[5],1u);}recordReason(tile,${REASON.skipped}u);return;}
- let hostJoined=umJoined(tile);let source=!hostJoined&&umSourceTile(p);
+ let hostJoined=umJoined(tile);let source=!hostJoined&&umSourceBand()&&umSourceTile(p);
  // A deep COLD tile keeps the last census's decision: nothing around it
  // moved since (joins and sources still band it). Solid promotion may still
  // refine it: the band certificate needs that.
@@ -1400,12 +1418,13 @@ fn umStaticFine(t:u32)->bool{return (umRegionsAt(umTileCoord(t))&1u)!=0u;}
   let t=umPageTile(page,lane);if(!umTileLive(t)){continue;}
   let near=umBit(nearIndex(0u),t);let authored=umStaticFine(t);let own=umBit(${HEADER}u,t)||(near&&!authored);
   let sample=((particle[lane>>5u]>>(lane&31u))&1u)!=0u;
-  if(!near&&!own&&!authored&&!sample){continue;}
-  let c=umCorner(lane,4u);lo=min(lo,c);hi=max(hi,c);found=true;liquid=liquid||own||sample;
+  // A source tile seeds whether or not decide made it band (umSourceBand).
+  let source=umSourceTile(vec3i(umTileCoord(t)));
+  if(!near&&!own&&!authored&&!sample&&!source){continue;}
+  let c=umCorner(lane,4u);lo=min(lo,c);hi=max(hi,c);found=true;liquid=liquid||own||sample||source;
   let band=umBit(${HEADER}u,t);
   let wet=umBit(wetIndex(0u),t);
   let crossing=(atomicLoad(&census[importanceIndex(t,1u)])&${IMPORTANCE.crossing}u)!=0u;
-  let source=umSourceTile(vec3i(umTileCoord(t)));
   // Sources and particle reconstruction can create a new surface this frame.
   // Budget admission may omit a crossing: read the physical census flag,
   // never the refinement-only crossing mask that importance can clear.

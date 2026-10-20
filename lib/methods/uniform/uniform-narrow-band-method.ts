@@ -21,9 +21,12 @@ export const narrowBandFixedDetail:MethodParamValues={detailPolicy:"dynamic",det
  detailShape:"on",detailShapeTolerance:0,detailShapeMetric:"value",detailThin:"off",detailStrain:"off",detailRotation:"off",detailImpact:"off",detailApproach:"off",
  detailNearFocus:"off",detailBulk:"off",detailMarginTiles:0,detailHoldSteps:0};
 /** The app's adaptive profile. Particle heat supplies the hold in physical
- * time, so the tile census needs no additional step-count hold. */
+ * time, so the tile census needs no additional step-count hold. Strain is
+ * off: dt·‖sym ∇u‖ is an affine field's, which 4h carries exactly, and any
+ * falling stream has dt·g/|u| of it (0.15 per 1/24 s step on the pour's
+ * spout, every tile of it h, its particles seeded and their joins h). */
 export const narrowBandAdaptiveDetail:MethodParamValues={...narrowBandFixedDetail,...narrowBandControlValues(),adaptiveSurface:"on",
- detailShapeTolerance:0.5,detailShapeMetric:"displacement",detailThin:"on",detailStrain:"on",detailImpact:"on",detailApproach:"on"};
+ detailShapeTolerance:0.5,detailShapeMetric:"displacement",detailThin:"on",detailImpact:"on",detailApproach:"on"};
 export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  ...resolveUniformGeometricValues({...narrowBandAdaptiveDetail,...values}),...narrowBandControlValues(values),...fixed,
  fineGridPadding:Math.max(0,Math.min(4,Number.isFinite(Number(values.fineGridPadding))?Number(values.fineGridPadding):0)),

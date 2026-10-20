@@ -64,9 +64,13 @@ fn isInflowSweptVelocityCell(q:vec3i)->bool{
 fn applyInflowVelocity(q:vec3i,inputVelocity:vec3f)->vec3f{
   let strength=inflowStrength();if(strength<=0.0){return inputVelocity;}let axis=inflowAxis();let receiver=inflowReceiverIndex(axis);if(!isInflowVelocityCell(q)){return inputVelocity;}var desiredVelocity=params.inflowVelocityLength.xyz*strength;desiredVelocity[axis]*=params.inflowVelocityLength.w;var velocity=inputVelocity;if(q[axis]==receiver){velocity=desiredVelocity;}velocity[axis]=desiredVelocity[axis];return velocity;
 }
+// The swept plug's own velocity, unscaled: the plug's geometry already sets
+// its volume to pi r^2 |u| dt, and the aperture scale (a face flux
+// correction) on its dominant axis carried each step's liquid past the end
+// of the next step's plug, leaving an air seam between them.
 fn applyInflowSweptVelocity(q:vec3i,inputVelocity:vec3f)->vec3f{
   let strength=inflowStrength();if(strength<=0.0||!isInflowSweptVelocityCell(q)){return inputVelocity;}
-  var desiredVelocity=params.inflowVelocityLength.xyz*strength;let axis=inflowAxis();desiredVelocity[axis]*=params.inflowVelocityLength.w;return desiredVelocity;
+  return params.inflowVelocityLength.xyz*strength;
 }
 `;
 

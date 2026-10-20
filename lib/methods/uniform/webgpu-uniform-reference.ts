@@ -33,9 +33,10 @@ import {
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
 import { uniformLatticeFarPhi, uniformLatticeInitialPhi, uniformLatticeInitialVolume } from "./uniform-volume-initial";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
+import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
 import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, LIQUID_EXTRUSION_MAX_EDGES, type LiquidExtrusion } from "../../core/liquid-extrusion";
-import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES } from "./uniform-source.wgsl";
+import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES, UNIFORM_SOURCE_PLUG_OVERLAP_CELLS } from "./uniform-source.wgsl";
 import { planUniformHostAllocation } from "./uniform-host-allocation";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
@@ -201,7 +202,8 @@ function uniformInjectedDrop(ball: InjectedLiquidBall): UniformLiquidDrop {
 }
 
 /** The cell boxes the scene's sources write liquid in every step: the
- * nozzle's plug over a step of `step_s`. A live page pool pins their pages.
+ * nozzle's plug over a step of `step_s` and its overlap past it
+ * (UNIFORM_SOURCE_PLUG_OVERLAP_CELLS). A live page pool pins their pages.
  * A drop, scheduled or injected, is not one: its pages are asked for around
  * its own step (requestDropPages). */
 export function uniformPageSources(scene: SceneDescription, plug: InflowGridBoundary | undefined, step_s: number): UniformPagePoolCellBox[] {
@@ -211,7 +213,7 @@ export function uniformPageSources(scene: SceneDescription, plug: InflowGridBoun
     high: [0, 1, 2].map(k => Math.ceil(fluidFrameCell(frame, k, Math.max(centre[k]!, end[k]!) + radius_m))) as [number, number, number] });
   const sources: UniformPagePoolCellBox[] = [], inflow = scene.fluid.inflow;
   if (inflow && plug) {
-    const o = plug.outletCenter_m, d = plug.direction, reach = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z) * step_s;
+    const o = plug.outletCenter_m, d = plug.direction, reach = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z) * step_s + UNIFORM_SOURCE_PLUG_OVERLAP_CELLS * Math.min(...frame.size_m.map((size, k) => size / frame.cells[k]!));
     sources.push(box([o.x, o.y, o.z], [o.x + reach * d.x, o.y + reach * d.y, o.z + reach * d.z], inflow.radius_m));
   }
   return sources;
@@ -1777,7 +1779,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
   private mixedImportanceFor(detail:UniformDetailSettings,tiles:number){
     const budget={percent:this.narrowBandAdaptiveBudgetPercent};
-    const importance={...uniformDetailImportance(detail,tiles),surfaceAuthority:true,
+    // A source asks for nothing at h: the criteria decide its tiles like any surface's.
+    const importance={...uniformDetailImportance(detail,tiles),surfaceAuthority:true,sources:false,
       ...(detail.policy==="dynamic"?{budgetTiles:undefined,activityBudget:budget}:{})};
     return {detail,tiles,importance,budget,criteria:Object.values(importance.criteria).some(Boolean)};
   }
@@ -2088,7 +2091,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private paramsSceneRevision = 0;
   /** writeParams' head words (the Float32Array the queue copies). */
   private readonly paramsWords = new Float32Array(72);
-  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: UniformLiquidDrop, volumeCells = this.referenceVolumeCells): void {
+  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: UniformLiquidDrop, volumeCells = this.referenceVolumeCells, inflowContinues = false): void {
     const c = this.scene.container;
     this.paramsWritten = true;
     // The head's words in a scratch the queue copies: one lane per line.
@@ -2130,9 +2133,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     f[11] = sceneHasTerrain(this.scene) ? 1 : 0;
     // The mixed frame's fine reach in 4h tiles, or -1 with two-level off: the
     // two-level branch in sampleVelocityComponent is then never taken.
-    // w: the retired V-claims-pressure-rows lane, always zero.
+    // w: 1 where the nozzle ran at the step's start, so last step's plug lies
+    // past this one's front (uvSourcePhi).
     f[14] = this.twoLevelEnabled ? UNIFORM_TWO_LEVEL_FINE_REACH : -1;
-    f[15] = 0;
+    f[15] = inflowContinues ? 1 : 0;
     f[17] = c.fluidWallMode === "no-slip" ? 1 : 0;
     f[18] = activeBodyCount;
     f[19] = this.address.openTop ? 1 : 0;
@@ -2663,7 +2667,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       try{this.syncMixedLayout(activeBodies,dt,true);}catch(error){this.failMixedFrame(error);return true;}
     }
     this.movingWindowStep++;
-    this.writeParams(dt, activeBodies.length, strength, drop, volumeCells);
+    // The nozzle ran before this step (not first at its start): last step's plug lies past this one's front.
+    const continues = !!inflow && inflow.enabled !== false && stepEnd_s - dt > inflow.start_s + 0.5 * dt && inflowStrengthAt(stepEnd_s - dt, inflow.start_s, inflow.end_s, inflow.ramp_s) > 0;
+    this.writeParams(dt, activeBodies.length, strength, drop, volumeCells, continues);
     if(this.mixedFrame){
       const frame=this.mixedFrame;
       // Dynamic coarsening: the frame's head classifies the state it starts

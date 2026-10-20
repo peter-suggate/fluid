@@ -64,6 +64,24 @@ fn dropSource(q:vec3i)->f32{
   return covered;
 }
 `;
+/** Cells the inflow plug reaches past its step's sweep, into the liquid the
+ * last step's plug left there. The minimum of two abutting plugs' distances
+ * is zero on the face they share: each step left an internal surface in the
+ * stream, which redistance kept and the census refined (a 19-cell-radius
+ * pour read as a stack of 2h slabs). Overlapping liquid that is already
+ * there adds no volume; only a stream's first step reaches this much further. */
+export const UNIFORM_SOURCE_PLUG_OVERLAP_CELLS = 2;
+/** The plug's distance across its axial span is the stream's: to its side
+ * only. Its caps are no surface (the stream runs on through both), and a
+ * capped distance is at most half the plug's few-cell length: every 4h
+ * vertex it wrote read about -2h deep on a 19-cell-radius pour, and no
+ * redistance of 4h vertices deepens them, so the stream's interior met its
+ * band in a kink that scored as 4h shape error. Beyond the span the capped
+ * distance stands: a lower bound for tiles the plug can fill.
+ * The front is a surface on the stream's first step (physical.w zero: the
+ * nozzle had not run), when no plug lies past it: there the side distance
+ * met air in one 4h cell (-18h beside +1h), and the stream's tip carried
+ * that cliff down, the cubic advection denting it into h tiles. */
 export const uniformSourcePhiWGSL = /* wgsl */ `
 fn uvSourcePhi(p:vec3f,phi:f32)->f32{
   var result=phi;
@@ -71,8 +89,10 @@ fn uvSourcePhi(p:vec3f,phi:f32)->f32{
   let speed=length(params.inflowVelocityLength.xyz)*inflowStrength();
   if(speed>1e-6){let direction=normalize(params.inflowVelocityLength.xyz);
     let delta=traceWorld(p)-params.inflowPositionRadius.xyz;let axial=dot(delta,direction);
-    let plug=max(length(delta-axial*direction)-params.inflowPositionRadius.w,
-      max(-axial,axial-speed*params.dimsDt.w));result=min(result,plug);}
+    let h=params.cellGravity.xyz;let overlap=${UNIFORM_SOURCE_PLUG_OVERLAP_CELLS}.0*min(h.x,min(h.y,h.z));
+    let side=length(delta-axial*direction)-params.inflowPositionRadius.w;
+    let front=axial-speed*params.dimsDt.w-overlap;let cap=max(-axial,front);
+    result=min(result,select(max(side,cap),select(max(side,front),side,params.physical.w>0.0),cap<=0.0));}
   return result;
 }
 `;
