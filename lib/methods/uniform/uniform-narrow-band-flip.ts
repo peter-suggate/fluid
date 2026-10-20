@@ -375,6 +375,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get performanceTileCounts():GPUBufferBinding{return {buffer:this.bins,offset:8*this.cells,size:4*this.tiles};}
  /** The particle activity heat plane (f32 a tile key, NB_ACTIVITY_HEAT) in airGateBuffer: the region heat's particle evidence. */
  get activityHeatWord():number{return this.activityWord+2*this.tiles;}
+ /** The surface heat plane (f32 a tile key, NB_ACTIVITY_SURFACE_HEAT) in airGateBuffer: this step's sort writes it before the surface advect. */
+ get surfaceHeatWord():number{return this.activityWord+6*this.tiles;}
  private updateErrors?:GPUBuffer;
  /** Bind tile update evidence separately from the shape/refinement census. */
  attachUpdateErrors(buffer:GPUBuffer):void{this.updateErrors=buffer;}

@@ -128,8 +128,10 @@ export class UniformMixedSurface {
    * tile far air beyond its collar's edge: its far-marker vertices keep
    * their value (umFarAir). encode() copies it, and the frame plan's speed
    * certificate, behind the claim words (the stage's storage bindings are at
-   * the per-stage limit). */
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly farGate?:{readonly buffer:GPUBuffer;readonly word:number},private readonly workControl?:UniformSurfaceWorkControl,
+   * the per-stage limit). heatWord: the surface heat plane
+   * (NB_ACTIVITY_SURFACE_HEAT) of the same buffer, copied behind the gate,
+   * for phiFineAdvection "adaptive" (umCubicAt). */
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly farGate?:{readonly buffer:GPUBuffer;readonly word:number;readonly heatWord:number},private readonly workControl?:UniformSurfaceWorkControl,
     /** warmResolution "4h": a WARM vertex deep in liquid or air keeps its value (umHoldWarmDeep). */
     private readonly warmDeepHold=false,
     /** traceSubsteps: how the backtrace sizes its substeps (narrowBandTraceWGSL). */
@@ -161,8 +163,8 @@ export class UniformMixedSurface {
     // A deferred advect word holds a vertex key in 30 bits (all ones is no word): 29,878 pages of 33³ vertices.
     if(address.vertexKeys>0x3fffffff)throw new Error(`Mixed surface deferred advect packs a vertex key in 30 bits: ${address.vertexKeys} vertex keys exceed 1073741823 (29,878 pages of 35,937)`);
     this.claimBytes=4*surfaceClaimWords(address);
-    // Behind the claims: the far gate's words, then the certificate's (umDeepAir).
-    this.evidenceBytes=this.claimBytes+4*ownership.capacity.tiles*(farGate?2:1);
+    // Behind the claims: the far gate's words, the surface heat's, then the certificate's (umDeepAir).
+    this.evidenceBytes=this.claimBytes+4*ownership.capacity.tiles*(farGate?3:1);
     this.modelWord=workControl?.modelWordOffset??0;
     this.velocityWord=workControl?.velocityWordOffset??0;
     this.supportWord=workControl?.supportWordOffset??0;
@@ -913,7 +915,7 @@ fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){umFullIdentity=true;return umLoadVertex(vec3u(p));}
  let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){
+ if(params.flags.y!=0u&&abs(value)<2.0*h&&umCubicAt(vec3u(p),width)){
   // umCubicDeferred (the merged twins): a cubic whose only continuation
   // is the released walls (no solid hit; off every wall plane, where
   // umWallContact is the identity) is listed with its end and smoothing
@@ -1245,6 +1247,15 @@ fn umFarAir(vertex:vec3u)->f32{
  if(value<16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z))){return -1.0;}
  return umAirSource(vertex,value);
 }`:"fn umFarAir(vertex:vec3u)->f32{return -1.0;}"}
+// The cubic at a vertex of width (flags.y 1: every vertex; 2: 4h only;
+// 3, adaptive: 4h, and h of a tile whose own particles do not pin the
+// surface, its surface heat at most 1.5: the couple's theta at most 0.5).
+fn umCubicAt(vertex:vec3u,width:u32)->bool{
+ if(width>1u||params.flags.y==1u){return true;}
+ if(params.flags.y!=3u){return false;}
+ ${this.farGate?`let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
+ return bitcast<f32>(atomicLoad(&umClaims[${this.claimBytes/4+this.ownership.capacity.tiles}u+tile]))<=1.5;`:"return true;"}
+}
 // A deep air vertex of a still tile keeps its value (the source's plug
 // included): the tile's spread speed certificate (umReach: ceil(travel/4)+2
 // tiles a direction) is 2 on every axis only where no velocity a departure
@@ -1338,7 +1349,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){umStoreSurface(vertex,width,euler.x);return;}smoothing=foot.smoothing;let q=umVertexTrace(foot);defer=umSlow;if(!defer){`}
   let cell=umVertexCell(q);value=cell.value;
   let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
-  ${this.solid?"if(reachProof&&!umReachSolidClear(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u),abs(foot.center)<2.0*h,vec3i(vertex))){defer=true;}else ":""}if(params.flags.y!=0u&&abs(value)<2.0*h&&(params.flags.y==1u||width>1u)){
+  ${this.solid?"if(reachProof&&!umReachSolidClear(params.flags.y!=0u&&abs(value)<2.0*h&&umCubicAt(vertex,width),abs(foot.center)<2.0*h,vec3i(vertex))){defer=true;}else ":""}if(params.flags.y!=0u&&abs(value)<2.0*h&&umCubicAt(vertex,width)){
    umFullCubic=true;value=umCubicPhi(q,cell);
   }
   defer=defer||umReleasedMayChange(p,value);
@@ -1608,7 +1619,7 @@ override umCubicSolidList:bool=false;
   if(!(all(abs(end-p)<vec3f(3.99))&&all((lo>>vec3u(5u))==(hi>>vec3u(5u)))&&umKeyStored(umTileKey(lo>>vec3u(2u)))&&umSolidClear(vec3i(p)))){walk=umWalk(p,end);}
   let q=walk.q;let hit=walk.hit;`:"let q=end;let hit=false;"}
   let cell=umVertexCell(q);var value=cell.value;var cubic=false;
-  if(params.flags.y==1u&&abs(value)<2.0*min(params.hDt.x,min(params.hDt.y,params.hDt.z))){
+  if(params.flags.y!=0u&&abs(value)<2.0*min(params.hDt.x,min(params.hDt.y,params.hDt.z))&&umCubicAt(vertex,1u)){
    if(!hit){
     // umCubicPhi's tapsClear, less its canonical support form.
     let clear=${this.solid?"!umSolidEnabled()||(cell.width==1u&&umSolidClear(vec3i(cell.origin)))":"true"};
@@ -1725,7 +1736,7 @@ override umCubicSolidList:bool=false;
     const pipeline=this.pipelines.get("advect");if(!pipeline)throw new Error("Mixed surface stage is not initialized");
     encoder.clearBuffer(this.claims,0,this.claimBytes);
     const tiles=4*this.ownership.capacity.tiles;
-    if(this.farGate)encoder.copyBufferToBuffer(this.farGate.buffer,4*this.farGate.word,this.claims,this.claimBytes,tiles);
+    if(this.farGate){encoder.copyBufferToBuffer(this.farGate.buffer,4*this.farGate.word,this.claims,this.claimBytes,tiles);encoder.copyBufferToBuffer(this.farGate.buffer,4*this.farGate.heatWord,this.claims,this.claimBytes+tiles,tiles);}
     encoder.copyBufferToBuffer(this.ownership.speeds,tiles,this.claims,this.evidenceBytes-tiles,tiles);
     if(this.workControl){encoder.clearBuffer(this.claims,4*this.counterWord,4*(this.workCounterWords+5*this.workControl.regions));this.workControl.encode(encoder,"surface");
      encoder.copyBufferToBuffer(this.workControl.revisions.buffer,this.workControl.revisions.liveOffset,this.claims,4*this.revisionWord,4*this.workControl.regions);

@@ -1,4 +1,4 @@
-import { NARROW_BAND_FINE_ADVECTION, narrowBandControlParams, narrowBandControlValues } from "./uniform-narrow-band-controls";
+import { NARROW_BAND_FINE_ADVECTION, narrowBandControlParams, narrowBandControlValues, narrowBandFineAdvection } from "./uniform-narrow-band-controls";
 import type { MethodParamValues, SimulationMethod } from "../../core/method-contract";
 import { UNIFORM_GEOMETRIC_PARAMS } from "./uniform-geometric-parameters";
 import { composeFeatures } from "../../framework/composition";
@@ -33,7 +33,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  particleTransfer:values.particleTransfer==="apic"?"apic":"flip",
  adaptiveSurface:"on",
  coarseParticleMode:"off",
- phiFineAdvection:values.phiFineAdvection==="cubic"?"cubic":"trilinear",
+ phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),
  coldCensus:values.coldCensus==="full"?"full":"replay",
  coldRegions:values.coldRegions==="fine"?"fine":"frozen16h",
  coldFrameSkip:values.coldFrameSkip==="off"?"off":"on",
@@ -109,6 +109,6 @@ export const uniformNarrowBandMethod:SimulationMethod={
  appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:0,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
-  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineTrilinear:values.phiFineAdvection!=="cubic",narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
+  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

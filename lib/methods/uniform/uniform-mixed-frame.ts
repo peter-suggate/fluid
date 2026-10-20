@@ -96,8 +96,8 @@ export interface UniformMixedFrameFields {
 export interface UniformMixedFrameParameters {
  dt:number;gravity:number;density:number;viscosity:number;surfaceTension:number;
  openTop:boolean;noSlip:boolean;cubic:boolean;
- /** With cubic: h vertices advect phi trilinearly, 4h vertices keep the cubic. */
- fineTrilinear?:boolean;
+ /** With cubic: how h vertices advect phi (4h vertices keep the cubic). Trilinear; cubic (the default); adaptive, trilinear in a tile whose particles pin the surface. */
+ fineAdvection?:"cubic"|"trilinear"|"adaptive";
  /** Encode the existing maximum slot envelope; convergence still stops execution. */
  fullPressureEnvelope?:boolean;
  /** Extra slots beyond the lagged planner's existing spare; bounded by the configured maximum. */
@@ -141,7 +141,7 @@ const TRACE_RECEIPT=HEAT_RECEIPT+4*UNIFORM_COLD_FRAME_HEAT_WORDS;
  * by each load until its reader is optimized, where one that held anything
  * else keeps the number by reference. */
 type ExtensionKey={-readonly [K in Exclude<keyof UniformMixedFrameParameters,"dt"|"addedVolumeCells">]:UniformMixedFrameParameters[K]|undefined};
-const extensionKey=():ExtensionKey=>({gravity:undefined,density:undefined,viscosity:undefined,surfaceTension:undefined,openTop:undefined,noSlip:undefined,cubic:undefined,fineTrilinear:undefined,
+const extensionKey=():ExtensionKey=>({gravity:undefined,density:undefined,viscosity:undefined,surfaceTension:undefined,openTop:undefined,noSlip:undefined,cubic:undefined,fineAdvection:undefined,
  fullPressureEnvelope:undefined,pressureReserve:undefined,volumeControlSeconds:undefined,
  redistance:undefined,extensionSweeps:undefined,supportPolicy:undefined,pressureTolerance:undefined});
 /** Two key values agree (NaN is itself). */
@@ -537,7 +537,7 @@ export class UniformMixedFrame {
   this.narrowBandFlip.attachFramePlan(this.surfaceWorkControl.framePlan);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
   this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
-  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps,this.nearSettled.wallTrace,this.nearSettled.surfaceVelocitySampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceTraceSubsteps==="off");
+  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord,heatWord:this.narrowBandFlip.surfaceHeatWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps,this.nearSettled.wallTrace,this.nearSettled.surfaceVelocitySampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceTraceSubsteps==="off");
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,this.surfaceWorkControl);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
@@ -818,7 +818,7 @@ export class UniformMixedFrame {
   const density=p.density,viscosity=p.viscosity,tension=p.surfaceTension,tolerance=p.pressureTolerance,open=+p.openTop,step=dt/density,target=tolerance>0?tolerance:UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
   const w=this.words,q=this.queue,to=this.params,forces=w.forces,projection=w.projection,band=w.band;
   w.extension[3]=open;q.writeBuffer(to.extension,0,w.extension);
-  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineTrilinear?2:1):0;w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
+  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineAdvection==="trilinear"?2:p.fineAdvection==="adaptive"?3:1):0;w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
   w.momentum[3]=dt;q.writeBuffer(to.momentum,0,w.momentum);w.momentumFlags[0]=open;q.writeBuffer(to.momentum,16,w.momentumFlags);
   forces[3]=dt;forces[4]=gravity;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;q.writeBuffer(to.forces,0,forces);
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
@@ -830,11 +830,11 @@ export class UniformMixedFrame {
   q.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
   this.pressureTarget=target;
   const k=this.key,held=k.supportPolicy,policy=p.supportPolicy,reserve=p.pressureReserve,seconds=p.volumeControlSeconds,sweeps=p.extensionSweeps;
-  const same=this.keyed&&agree(k.gravity,gravity)&&agree(k.density,density)&&agree(k.viscosity,viscosity)&&agree(k.surfaceTension,tension)&&k.openTop===p.openTop&&k.noSlip===p.noSlip&&k.cubic===p.cubic&&k.fineTrilinear===p.fineTrilinear
+  const same=this.keyed&&agree(k.gravity,gravity)&&agree(k.density,density)&&agree(k.viscosity,viscosity)&&agree(k.surfaceTension,tension)&&k.openTop===p.openTop&&k.noSlip===p.noSlip&&k.cubic===p.cubic&&k.fineAdvection===p.fineAdvection
    &&k.fullPressureEnvelope===p.fullPressureEnvelope&&agree(k.pressureReserve,reserve)&&agree(k.volumeControlSeconds,seconds)
    &&k.redistance===p.redistance&&agree(k.extensionSweeps,sweeps)&&agree(k.pressureTolerance,tolerance)
    &&(policy?!!held&&agree(held.fineReach,policy.fineReach)&&agree(held.shellReach,policy.shellReach)&&held.twoLevel===policy.twoLevel&&held.shellOnly===policy.shellOnly:!held);
-  k.gravity=gravity;k.density=density;k.viscosity=viscosity;k.surfaceTension=tension;k.openTop=p.openTop;k.noSlip=p.noSlip;k.cubic=p.cubic;k.fineTrilinear=p.fineTrilinear;
+  k.gravity=gravity;k.density=density;k.viscosity=viscosity;k.surfaceTension=tension;k.openTop=p.openTop;k.noSlip=p.noSlip;k.cubic=p.cubic;k.fineAdvection=p.fineAdvection;
   k.fullPressureEnvelope=p.fullPressureEnvelope;k.pressureReserve=reserve;k.volumeControlSeconds=seconds;
   k.redistance=p.redistance;k.extensionSweeps=sweeps;k.pressureTolerance=tolerance;
   if(policy){const own=this.keyPolicy;own.fineReach=policy.fineReach;own.shellReach=policy.shellReach;own.twoLevel=policy.twoLevel;own.shellOnly=policy.shellOnly;k.supportPolicy=own;}else k.supportPolicy=undefined;
