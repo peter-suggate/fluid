@@ -11,7 +11,8 @@ Peter, 2026-10-20: "make sure we're taking big swings with the goal of cutting o
 | 81e94cb3 | The level set traced back in one step of any length | advectTrace | 0.74 | 0.47 |
 | 41d214c1 | Plane corners in three lean launches | remapCells plus the plane launches | 1.43 | 0.31 |
 | cbb2cf03 | Geometry's 4h turns in lanes of their own; exact same-sign certificate | geometryRegional | 1.63 | 1.31 |
-| (this commit) | No reconstruct crossing search: bulkDepth from the last arena search, shortened by this step's travel (`crossingGuard`, default "previous") | the crossing search batch | 1.17 | 0 |
+| b8caf63d | No reconstruct crossing search: bulkDepth from the last arena search, shortened by this step's travel (`crossingGuard`, default "previous") | the crossing search batch | 1.17 | 0 |
+| (this commit) | FLIP's delta from the paired extension's sweeps (`flipDelta`, default "swept"): no old-field publication or snapshot | the snapshot chain (see #2) | 3.45 | 0.97 |
 
 The certificate in cbb2cf03 was checked bit for bit against umSurfaceTarget: about 530k certified owners a frame, no mismatch.
 
@@ -76,7 +77,35 @@ The crossing guard took Surface from 16.20 to 15.16 ms (geo9 vs guard10). couple
 - freeze;
 - whether presentation and warm start read root pressure.
 
-### 2. The snapshot chain: −1.7 to −2.2 ms
+### 2. The snapshot chain: landed as the swept delta, −1.6 ms
+
+**Landed** (`flipDelta: "swept"`, behind the NB-FLIP param):
+- After the pair sweeps, one lean pass, recordDelta, does what the old field's hierarchy, publication, snapshot cache, taps and record pass did. It runs a workgroup per occupied tile, like the deposit:
+  - It stages the 540 faces of the tile's samples' MAC stencils once: the current minus the old payload, read straight from the final slots wherever the sweeps reached.
+  - It interpolates them at each sample, renormalised over faces with a value, into before.xyz.
+- An axis with no face (and every COLD, seed or spilled sample) gets a sentinel, and G2P takes PIC on that axis.
+- G2P adds the delta to the sample's velocity. The current payload's hierarchy prolongs instead of replaying the old one's selections.
+
+**Pour f200–212, the touched passes (guard10 against delta12, ms):**
+
+| Pass | Before | After |
+|---|---|---|
+| NB snapshot record, cache, taps | 1.43 | 0 |
+| old-field restrictBand, restrict, sweep, prolong | 0.50 | 0 |
+| snapshotFine, snapshotCoarse | 0.62 | 0 |
+| current hierarchy: replay + prolong | 0.09 | 0.27 |
+| recordDelta | 0 | 0.71 |
+
+Every extension and snapshot pass together: 5.28 → 3.71 ms. The delta run carried 8% more particles (1.395M against 1.287M), so its other stages are not comparable frame for frame.
+
+**Letters A/B** (two repeats an arm, against geo9 and guard10):
+- volume drift at f240: −0.97% in both repeats, against −0.77% to −1.08%;
+- occupancy L1: 3.1% and 3.6%, against 3.4–3.9%;
+- particles at f240: 1588k and 1604k, against 1478k–1606k.
+
+recordDelta is about 2× its bandwidth figure (0.4 ms: the face window plus one record read and write a sample). That makes it a candidate if the particle stage needs it.
+
+**The original analysis:**
 
 - **(a) The old field as a second channel of the pair's hierarchy and publish: exact, −0.5 to −0.7 ms.**
   - The slot snapshot builds its own hierarchy (restrictBand 0.12, restrict 0.09, sweep 0.12, prolong 0.22) and publish (snapshotFine 0.38, snapshotCoarse 0.21).

@@ -1513,9 +1513,15 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
  preparePair(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2):void{this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,false,"pair");}
  /** Publish either payload; snapshot consumes the old one before the new
   * publication reuses the same output field. */
- finishPair(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2,companion=false):void{
+ finishPair(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2,companion=false,replayHierarchy=true):void{
   const replay=!companion&&this.snapshotEncoder===encoder&&this.snapshotSweeps===sweeps;
-  this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,!companion,companion?"companion":"current",replay);
+  this.snapshotEncoder=undefined;this.encodeStages(encoder,groups,sweeps,!companion&&replayHierarchy,companion?"companion":"current",replay);
+ }
+ /** One epoch's slot array (the final states after sweeps with that
+  * parity): its states, then the region words. */
+ finalSlots(epoch:number):GPUBufferBinding{
+  if(!this.slots)throw new Error("Mixed extension slots are not lent (useSlots)");
+  return {buffer:this.slots,offset:(epoch%2)*this.slotArray,size:this.slotArray};
  }
  /** Finalize old canonical slots and fine taps without materializing RGBA. */
  finishSnapshot(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps=2):void{

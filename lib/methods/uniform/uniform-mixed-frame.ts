@@ -352,7 +352,7 @@ export class UniformMixedFrame {
  private readonly projection:UniformMixedPressureVelocity;
  private extensionGroups!:readonly [UniformDetailGroup,UniformDetailGroup];
  private flipSnapshotExtensionGroups?:readonly [UniformDetailGroup,UniformDetailGroup];
- private pairedExtensionGroups=new Map<GPUBuffer,{retain:readonly [UniformDetailGroup,UniformDetailGroup];current:readonly [UniformDetailGroup,UniformDetailGroup];old:readonly [UniformDetailGroup,UniformDetailGroup];snapshots:readonly ReturnType<UniformNarrowBandFlip["bindSnapshotSlots"]>[]}>();
+ private pairedExtensionGroups=new Map<GPUBuffer,{retain:readonly [UniformDetailGroup,UniformDetailGroup];current:readonly [UniformDetailGroup,UniformDetailGroup];old:readonly [UniformDetailGroup,UniformDetailGroup];snapshots:readonly ReturnType<UniformNarrowBandFlip["bindSnapshotSlots"]>[];deltas:readonly UniformDetailGroup[]}>();
  private readonly cacheGroup:UniformDetailGroup;
  private surfaceGroup!:UniformDetailGroup;
  private surfaceVolumeGroup!:UniformDetailGroup;
@@ -482,7 +482,7 @@ export class UniformMixedFrame {
     band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.particleOrder,this.nearSettled.momentumSampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous");
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.particleOrder,this.nearSettled.momentumSampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept");
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -633,9 +633,13 @@ export class UniformMixedFrame {
     retain:this.extension.bind({...common,physical:f.velocity,negative:f.negativeDeparture}),
     current:this.extension.bind({...common,physical:f.velocity,negative:f.negative}),
     old:this.extension.bind({...common,physical:f.departure,negative:f.negativeDeparture,snapshot:this.narrowBandFlip.snapshotUnitVelocity}),
-    snapshots:this.extension.companionBindings(scratch).map(slots=>this.narrowBandFlip.bindSnapshotSlots(slots)),
+    // flipDelta "swept": an epoch's final current states beside its old payload.
+    snapshots:this.narrowBandFlip.sweptDelta?[]:this.extension.companionBindings(scratch).map(slots=>this.narrowBandFlip.bindSnapshotSlots(slots)),
+    deltas:this.narrowBandFlip.sweptDelta?this.extension.companionBindings(scratch).map((old,epoch)=>this.narrowBandFlip.bindDeltaSlots(this.extension.finalSlots(epoch),old)):[],
    });
   }
+  // The swept delta has no unpaired form: G2P reads before.xyz as the delta.
+  if(this.narrowBandFlip.sweptDelta&&!this.pairedExtensionGroups.has(this.narrowBandFlip.extensionScratch))throw new Error("NB-FLIP flipDelta \"swept\" needs the paired extension (this device or capacity has none): choose \"extended\"");
   this.surfaceGroup=this.surface.bind({narrowBandState:this.narrowBandFlip.state,unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),velocity:f.velocityScratch,coarseVelocity:this.coarseCache,negative:f.negativeScratch,params:this.params.surface,evidence:stage,phi:f.phi,outputPhi:f.phiScratch});
   if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.target,stage);
   // NB-FLIP's transfer leaves the advected field in the stored velocity (a
@@ -1132,9 +1136,16 @@ export class UniformMixedFrame {
      // The old hierarchy finishes
      // into snapshot slots/taps; the current hierarchy then reuses its geometry.
      this.extension.preparePair(encoder,pairedExtension.current,p.extensionSweeps??2);
-     this.extension.finishSnapshot(encoder,pairedExtension.old,p.extensionSweeps??2);
-     this.narrowBandFlip.snapshot(encoder,pairedExtension.snapshots[(p.extensionSweeps??2)%2]!);
-     this.extension.finishPair(encoder,this.extensionGroups,p.extensionSweeps??2,false);
+     if(this.narrowBandFlip.sweptDelta){
+      // The delta straight from the final slots; the current hierarchy
+      // prolongs (no old hierarchy ran to replay).
+      this.narrowBandFlip.recordDelta(encoder,pairedExtension.deltas[(p.extensionSweeps??2)%2]!);
+      this.extension.finishPair(encoder,this.extensionGroups,p.extensionSweeps??2,false,false);
+     }else{
+      this.extension.finishSnapshot(encoder,pairedExtension.old,p.extensionSweeps??2);
+      this.narrowBandFlip.snapshot(encoder,pairedExtension.snapshots[(p.extensionSweeps??2)%2]!);
+      this.extension.finishPair(encoder,this.extensionGroups,p.extensionSweeps??2,false);
+     }
     }else this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,true);
    }
    const root=this.levels[0]!,rootPressure=root.pressure,rootPhi=root.phi!;
