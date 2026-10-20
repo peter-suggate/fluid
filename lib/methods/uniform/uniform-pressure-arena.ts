@@ -12,6 +12,8 @@ import type {UniformColdFrame} from "./uniform-cold-frame";
 import {UNIFORM_REGION_TIER,uniformRegionHeatWGSL} from "./uniform-region-heat";
 import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTRIES,UBA_STRIDE,UniformBrickArena,type UniformArenaChannel} from "./uniform-brick-arena";
 import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
+import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
+import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -56,6 +58,10 @@ export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycle
  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
  * the 4h root accepts up to 5. */
 export const UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL=0.05;
+/** The native rows form their own RHS from the simulation's u* (pRhs, ahead
+ * of pNative) in place of the root buildRhs's: the all-4h mirror's
+ * retirement, step 1 (plan §1.10). Off: the root's rows. */
+export const UNIFORM_PRESSURE_ARENA_NATIVE_RHS:boolean=false;
 
 /** Workgroups of the band-tile mark at most (the simulation's buffered h tiles). */
 const LIST_GROUPS=4096;
@@ -225,6 +231,7 @@ export class UniformPressureArena {
    init:[params,buffer(2),buffer(9),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),...cold],
    copy:[params,buffer(2),buffer(9),texture(11),write(23)],
    native:[params,buffer(2),buffer(9),buffer(26),buffer(29,"read-only-storage"),...(solid?[buffer(30,"read-only-storage")]:[])],
+   ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:[params,buffer(2),buffer(4,"uniform"),texture(7),buffer(8,"read-only-storage"),buffer(26),buffer(29,"read-only-storage"),...cold]}:{}),
    solver:[params,buffer(2),buffer(9),...(fields.dynamics?[buffer(24)]:[])],
    project:[params,buffer(2),buffer(9),texture(15),write(16),buffer(17),buffer(21)],
   };
@@ -250,12 +257,14 @@ export class UniformPressureArena {
    init:{...P,...S,...Q,12:scalars(f.root.pressure,coarse),13:scalars(f.root.phi,coarse)},
    copy:{...P,...S,...Q,11:f.velocity,23:f.copy},
    native:{...P,...S,...Q,26:this.rootSpan.binding,29:scalars(f.root.phi,coarse)},
+   // The root's cut face masks follow its owners' phi words.
+   ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:{...P,...S,4:{buffer:f.authorityParams,size:16},7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},26:this.rootSpan.binding,29:f.root.phi}}:{}),
    solver:{...P,...S,...Q},
    project:{...P,...S,...Q,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
   if(f.dynamics)resources.solver![24]={buffer:f.dynamics};
   if(f.root.topology)resources.native![30]=f.root.topology;
-  const freeze=this.cold;if(freeze)for(const name of ["mark","rows","init"])resources[name]![14]=freeze.regions;
+  const freeze=this.cold;if(freeze)for(const name of ["mark","rows","init",...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?["nrhs"]:[])])resources[name]![14]=freeze.regions;
   if(f.warmTiers)resources.mark![25]={buffer:f.warmTiers};
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure arena ${name}`,layout:this.layouts.get(name)!,
    entries:Object.entries(map).map(([binding,resource])=>({binding:+binding,resource}))}));
@@ -919,6 +928,148 @@ fn nSeamFirst(t:u32,g:u32)->u32{
    }
   }
   workgroupBarrier();
+ }
+}`,
+   // The native rows' RHS from the simulation's u* (UNIFORM_PRESSURE_ARENA_NATIVE_RHS),
+   // a workgroup a page, a lane a row: the root buildRhs's rows in its order
+   // (ULP level: the compilers round its divisions apart), for the liquid
+   // rows outside the band only. A face's
+   // velocity is the transfer to pressure's of its low tile's +face (the 4h
+   // anchor, or the mean of its sixteen plane faces against an h tile) or of
+   // the row's negative domain wall; a cut face's flux, and a statically cut
+   // tile's V-weighted mean, sum sixteen h faces, the workgroup's (a lane an
+   // h face), a face direction at a time. Writes each row's RHS, bound and
+   // clamped start, its wall slots', and zeroes the air rows' starts.
+   nrhs:header(true)+wet+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
+@group(1) @binding(4) var<uniform> authority:vec4f;
+@group(1) @binding(7) var velocity:texture_3d<f32>;
+@group(1) @binding(8) var<storage,read> negative:array<f32>;
+@group(1) @binding(26) var<storage,read_write> rootArena:array<f32>;
+@group(1) @binding(29) var<storage,read> rootPhi:array<f32>;
+const N_MASKS:u32=${this.pressure.layout.cellCount}u;
+const N_H=vec3f(${this.simulation.layout.lattice.cellSize_m.join(",")});
+const N_LISTED:u32=0x40000u;const N_WEIGHTED:u32=0x20000u;
+var<workgroup> nN:u32;
+var<workgroup> nCount:atomic<u32>;
+var<workgroup> nItem:array<u32,${WG}>;var<workgroup> nWord:array<u32,${WG}>;
+var<workgroup> nPart:array<vec2f,${WG}>;var<workgroup> nSum:array<vec2f,${WG}>;
+fn nLiquid(k:u32)->bool{return bWet(rootPhi[k],4.0);}
+// How the transfer to pressure forms tile T's +face on axis a: 0 the 4h
+// anchor, 1 the mean of its sixteen plane faces (an h tile, or a 4h tile
+// below an h one), 2 their V-weighted mean (a statically cut tile).
+fn nFaceMode(T:vec3u,a:u32)->u32{
+ let t=umTileAt(T);let cut=umSolidEnabled()&&umSolidStaticCut(t);
+ if(umTileWidth(t)==1u){return select(1u,2u,cut);}
+ var n=vec3i(T);n[a]+=1;
+ if(!umTilePresent(n)||umTileWidth(umTileAt(vec3u(n)))!=1u){return 0u;}
+ return select(1u,2u,cut);
+}
+fn nAnchor(q:vec3i,a:u32)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,q,0)[a];}
+// Sixteen faces summed in the transfer's order (tMean): tile T's +plane, or (wall) its negative domain wall.
+fn nMean(T:vec3u,a:u32,wall:bool)->f32{
+ let u=(a+1u)%3u;let v=(a+2u)%3u;var value=0.0;
+ for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){
+  var q=T*4u;q[u]+=x;q[v]+=y;
+  if(wall){value+=negative[umLowFaceIndex(q,a)];}else{q[a]+=3u;value+=textureLoad(velocity,vec3i(q),0)[a];}
+ }}
+ return value/16.0;
+}
+// h face j (i+4j) of row k's face f: V_h u_h (plus a moving wall's term)
+// and V_h, the root's umCutFace; a weighted mean's part with the mask whole.
+fn nPart16(k:u32,f:u32,j:u32,word:u32)->vec2f{
+ if(((word>>j)&1u)==0u){return vec2f(0.0);}
+ let axis=f/2u;let sign=bSign(f);let a=(axis+1u)%3u;let b=(axis+2u)%3u;
+ var c=vec3i(umTileCoord(k)*4u);c[a]+=i32(j&3u);c[b]+=i32(j>>2u);c[axis]+=select(-1,3,sign>0);
+ let low=umFaceLow(c,axis);
+ var u=0.0;if(low){u=negative[umLowFaceIndex(umLowFaceAbove(c,axis),axis)];}else{u=textureLoad(velocity,c,0)[axis];}
+ var volume=0.0;
+ if(umSolidEnabled()&&!low){volume=umPatchFaceV(umTileAt(vec3u(c)/4u),c,axis);}else{volume=umPressureFaceV(c,axis);}
+ var sum=volume*u;
+ if((word&0x10000u)!=0u){var inner=c;if(sign<0){inner[axis]+=1;}let capacity=umCellOpen(inner);if(capacity!=volume){sum+=(capacity-volume)*umSolidFaceVelocity(c,axis);}}
+ return vec2f(sum,volume);
+}
+@compute @workgroup_size(${WG}) fn pRhs(${lanes}){
+ if(lane==0u){nN=ubaLevelCount(2u);}
+ let count=workgroupUniformLoad(&nN);
+ let l=vec3u(lane&7u,(lane>>3u)&7u,lane>>6u);
+ let held=-4.0*min(N_H.x,min(N_H.y,N_H.z));
+ for(var e=group.x;e<count;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);let k=512u*block+lane;
+  let T=umTileCoord(k);let O=vec3i(T*4u);
+  let liquid=nLiquid(k);let row=liquid&&pIndex(SLOTS+k)==0u;
+  // Each face: its velocity, or its sixteen listed (N_LISTED; N_WEIGHTED a weighted mean's).
+  var words:array<u32,6>;var velocities:array<f32,6>;
+  if(row){for(var f=0u;f<6u;f++){
+   let axis=f/2u;let sign=bSign(f);var n=vec3i(T);n[axis]+=sign;let kind=umTileKind(n);
+   var cut=umSolidCut(k);if(!cut&&umTilePresent(n)){cut=umSolidCut(umTileAt(vec3u(n)));}
+   var word=0u;var source=T;
+   if(cut){
+    var t=vec3i(T);if(sign<0){t=n;}
+    var mask=0xffffu;if(kind==UM_RESIDENT){mask=u32(rootPhi[N_MASKS+${UNIFORM_MIXED_ROOT_TILE_WORDS}u*umTileAt(vec3u(t))+axis])&0xffffu;}
+    word=N_LISTED|mask|select(0u,0x10000u,umBodyCount()>0u&&umBodyPoseNearTile(k,${UNIFORM_BODY_FLUX_REACH}u));
+   }else if(sign>0||kind==UM_RESIDENT){
+    if(sign<0){source=vec3u(n);}
+    let mode=nFaceMode(source,axis);var q=vec3i(source*4u);q[axis]+=3;
+    if(mode==2u){word=N_LISTED|N_WEIGHTED|0xffffu;}else if(mode==1u){velocities[f]=nMean(source,axis,false);}else{velocities[f]=nAnchor(q,axis);}
+   }else if(kind==UM_SOLID){
+    if(umTileWidth(k)==4u){velocities[f]=negative[umLowFaceIndex(T*4u,axis)];}
+    else if(umSolidEnabled()&&umSolidStaticCut(k)){word=N_LISTED|N_WEIGHTED|0xffffu;}
+    else{velocities[f]=nMean(T,axis,true);}
+   }else{
+    // An AIR page below: the root's anchor texel there.
+    var q=O;q[axis]-=1;velocities[f]=nAnchor(q,axis);
+   }
+   words[f]=word;
+  }}
+  var sums:array<vec2f,6>;
+  for(var f=0u;f<6u;f++){
+   workgroupBarrier();
+   if(lane==0u){atomicStore(&nCount,0u);}
+   workgroupBarrier();
+   if(row&&words[f]!=0u){let i=atomicAdd(&nCount,1u);nItem[i]=lane;nWord[i]=words[f];}
+   let listed=workgroupUniformLoad(&nCount);
+   for(var first=0u;first<listed;first+=${WG/16}u){
+    let item=first+lane/16u;var part=vec2f(0.0);
+    if(item<listed){part=nPart16(512u*block+nItem[item],f,lane&15u,nWord[item]);}
+    nPart[lane]=part;workgroupBarrier();
+    if(lane<${WG/16}u&&first+lane<listed){var sum=vec2f(0.0);for(var j=0u;j<16u;j++){sum+=nPart[16u*lane+j];}nSum[nItem[first+lane]]=sum;}
+    workgroupBarrier();
+   }
+   if(row&&words[f]!=0u){sums[f]=nSum[lane];}
+  }
+  if(row){
+   var terms:array<f32,6>;
+   for(var f=0u;f<6u;f++){
+    let axis=f/2u;let sign=bSign(f);var n=vec3i(T);n[axis]+=sign;let kind=umTileKind(n);
+    // COLD freeze: what u* adds to the stored face (the root's umColdAdd).
+    var low=O;if(sign<0){low[axis]-=4;}
+    var anchor=O;anchor[axis]+=select(-1,3,sign>0);
+    var add=umColdForced(low,axis,4u,0.0,!umFaceLow(anchor,axis));
+    if(kind==UM_SOLID){add-=umColdFaceTerm(low,axis,4u);}
+    if(!UM_COLD_FREEZE){add=0.0;}
+    let w=words[f];let cut=(w&(N_LISTED|N_WEIGHTED))==N_LISTED;let halo=N_KEYS+umFaceTile(block,f,l);
+    var face=velocities[f];if((w&N_WEIGHTED)!=0u){let s=sums[f];face=s.x;if(s.y>0.0){face=s.x/s.y;}}
+    var flux=sums[f];
+    if(!cut){
+     var recordV=1.0;
+     if(kind==UM_SOLID){recordV=umSolidCoarse(halo).x;}else if(kind==UM_RESIDENT){recordV=umSolidCoarse(select(umTileAt(vec3u(n)),k,sign>0))[axis+1u];}
+     let weight=recordV*16.0;flux=vec2f(weight*face,weight);
+    }
+    var total=0.0;total+=flux.x+flux.y*add;
+    terms[f]=f32(sign)*total/(64.0*N_H[axis]);
+    if(kind==UM_SOLID){
+     // The wall slot: its one-cell halo's RHS, bound and start.
+     var wall=0.0;if(cut){wall=(flux.x+flux.y*add)/16.0;}else{wall=umSolidCoarse(halo).x*(face+add);}
+     let b=f32(sign)*params.policy.x*wall/(4.0*N_H[axis]*params.hDt.w);let bound=select(0.0,-3.402823e38,rootPhi[k]<held);
+     rootArena[R_RHS+halo]=b;rootArena[R_MINIMUM+halo]=bound;rootArena[R_PRESSURE+halo]=max(rootArena[R_PRESSURE+halo],bound);
+    }
+   }
+   let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
+   let topology=umSolidCoarse(k);
+   let value=-params.policy.x*(divergence-authority.z*topology.x)/params.hDt.w;
+   let minimum=select(-3.402823e38,0.0,topology.x<=1e-5);
+   rootArena[R_RHS+k]=value;rootArena[R_MINIMUM+k]=minimum;rootArena[R_PRESSURE+k]=max(rootArena[R_PRESSURE+k],minimum);
+  }else if(!liquid){rootArena[R_PRESSURE+k]=0.0;}
  }
 }`,
    // A native row's composite residual: each cycle's after the band's
@@ -1634,9 +1785,11 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
  }
 }`,
   };
+  if(!UNIFORM_PRESSURE_ARENA_NATIVE_RHS)delete sources.nrhs;
+  else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
-  const layoutOf:Record<string,string>={table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
-  const entryOf:Record<string,string[]>={table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
+  const layoutOf:Record<string,string>={nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
+  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
    rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
@@ -1745,7 +1898,7 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  encodeSolve(encoder:GPUCommandEncoder):void{
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,PAGE_GROUPS),g=this.level1Groups;
   const pass=encoder.beginComputePass(SOLVE_PASS);
-  this.dispatch(pass,"pInit",this.tileGroups);this.dispatch(pass,"pNative",pages);this.dispatch(pass,"pRebase",this.tileGroups);
+  this.dispatch(pass,"pInit",this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);this.dispatch(pass,"pRebase",this.tileGroups);
   // One cycle past the most the solve ran lately; a frame needing more ends at its last.
   const cycles=Math.min(s.cycles,this.wideCycles+1);
   const sweeps=(settle:boolean)=>{for(let k=settle?-1:0;k<s.sweeps;k++)this.dispatch(pass,k<0?"pRelaxS":"pRelax",this.relaxGroups);};
