@@ -50,7 +50,7 @@ export function describeUniformMixedFrameStatus(words:Uint32Array):string|undefi
 }
 function describeFailure(words:Uint32Array,cause:number):string{
  const f=new Float32Array(words.buffer,words.byteOffset,words.length);
- const detail=cause===1||cause===3?`candidate ${f[3]}, accepted ${f[4]}`:cause===2?`accepted ${f[3]} after ${words[4]} cycles`:cause===4?(words[4]===3?`${words[3]} tiles, the brick slots full`:`${words[3]} tiles`):cause===6||cause===7?relayoutDetail(words[3]!,words[4]!):`detail ${words[3]} ${words[4]}`;
+ const detail=cause===1||cause===3?`candidate ${f[3]}, accepted ${f[4]}`:cause===2?`accepted ${f[3]} after ${words[4]} cycles`:cause===4?`${words[3]} tiles`:cause===6||cause===7?relayoutDetail(words[3]!,words[4]!):`detail ${words[3]} ${words[4]}`;
  const all=Array.from({length:31},(_,i)=>i+1).filter(i=>words[5]!&(1<<i)&&i!==cause).map(i=>CAUSE_NAMES[i]??`cause ${i}`);
  return `GPU failure record: ${CAUSE_NAMES[cause]??`cause ${cause}`} (${detail}) at frame ${words[1]}, layout generation ${words[2]}; last accepted frame ${words[6]}${all.length?`; also ${all.join(", ")}`:""}`;
 }
