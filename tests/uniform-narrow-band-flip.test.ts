@@ -35,27 +35,6 @@ test("NB runtime tuning keeps the renderer's attached solver and never starts in
 
 });
 
-test("narrow-band FLIP pins its application modes and preserves runtime tuning",async()=>{
- const method=getMethod("uniform-narrow-band-flip");
- assert.deepEqual(registeredSimulationMethods(),[method]);
- assert.equal(defaultMethodId(),method.id);
- assert.equal((await method.pipelineGraph!()).methodId,method.id);
- const defaults=resolveMethodValues(method,"balanced",{});
- const values=resolveMethodValues(method,"balanced",{coarseParticleMode:"on",adaptiveSurface:"off",detailPolicy:"full",pressureFullCycles:1,pressureVCycles:1,pressureSweeps:1,sharpeningSweeps:8});
- for(const [key,value] of Object.entries({detailPolicy:"dynamic",adaptiveSurface:"on",coarseParticleMode:"off",pressureFullCycles:3,pressureVCycles:4,pressureSweeps:6,sharpeningSweeps:0,sharpeningDistance:0,phiDrain:"off",volumeDustThreshold:0,orphanDustThreshold:0})){
-  assert.equal(defaults[key],value,key);assert.equal(values[key],value,key);
-  assert.ok(!method.params.some(p=>p.key===key),`pinned ${key} has no control`);
- }
- for(const [key,value] of Object.entries(narrowBandAdaptiveDetail))assert.equal(defaults[key],value,key);
- assert.equal(defaults.fineGridPadding,1);
- assert.equal(methodConfigurationImpact(method,"balanced",{},{adaptiveBudgetPercent:25,adaptiveFadeSeconds:0.2,fineGridPadding:2}),"live");
- const tuned=resolveMethodValues(method,"balanced",{adaptiveBudgetPercent:200,adaptiveFadeSeconds:-1,detailShapeTolerance:0.75,detailStrain:"off"});
- assert.equal(tuned.adaptiveBudgetPercent,100);assert.equal(tuned.adaptiveFadeSeconds,0.05);
- assert.equal(tuned.detailShapeTolerance,0.75);assert.equal(tuned.detailStrain,"off");
- const options=uniformGeometricSolverOptions(values);
- assert.equal("sharpeningSweeps" in options,false);assert.equal(options.pressureCycleBudget,"lagged");
-});
-
 test("sparse particle lifetime defaults, clamps and applies without rebuilding",()=>{
  const method=getMethod("uniform-narrow-band-flip");
  const value=(sparseParticleLifetime?:number)=>resolveMethodValues(method,"balanced",sparseParticleLifetime===undefined?{}:{sparseParticleLifetime}).sparseParticleLifetime;

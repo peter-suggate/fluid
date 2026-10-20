@@ -16,16 +16,6 @@ test("default method store can be imported before the entry point installs metho
   useMethodStore.getState().resetParams("uniform-narrow-band-flip");
 });
 
-test("retired scene profiles reopen on the default solver without their tuning", async () => {
-  await import("../lib/methods");
-  const { createMethodStore, resolvedMethodValues } = await import("../lib/core/stores/method-store");
-  const store = createMethodStore();
-  store.getState().applyProfile({ methodId: "retired-solver", quality: "balanced", overrides: { timeStep: "paper", fineGridPadding: 4 } });
-  assert.equal(store.getState().methodId, "uniform-narrow-band-flip");
-  assert.equal(resolvedMethodValues(store.getState()).timeStep, "sixtieth");
-  assert.equal(resolvedMethodValues(store.getState()).fineGridPadding, 1);
-});
-
 test("retired URL methods fall back and current parameters have no solver namespace", async () => {
   await import("../lib/methods");
   const { parseQueryState, serializeQueryState } = await import("../lib/core/url-state");

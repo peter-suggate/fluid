@@ -15,7 +15,7 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  *   triggers, like any other liquid; "always" keeps every source tile hot.
  * - bandExit: "returns" ends the h band's V-cycles at 0.05 1/s
  *   (UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL); "strict" only at its 1e-4 1/s tolerance.
- * - bandCycles: the h band's V-cycles at most (1..8, default 4).
+ * - bandCycles: the h band's V-cycles at most (1..8, default 3).
  * - rootReserve: "fused" runs a reserve traversal in one workgroup;
  *   "parallel" retains the ordinary traversal in every safety slot.
  * - rootCoarse: "fused" joins the 16h and 32h levels in one workgroup;
@@ -75,7 +75,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  rootTiles:values.rootTiles==="octant"?"octant":"page",
  rootCoarse:values.rootCoarse==="tiled"?"tiled":"fused",
  rootReserve:values.rootReserve==="parallel"?"parallel":"fused",
- bandCycles:typeof values.bandCycles==="number"&&Number.isInteger(values.bandCycles)?Math.min(8,Math.max(1,values.bandCycles)):4,
+ bandCycles:typeof values.bandCycles==="number"&&Number.isInteger(values.bandCycles)?Math.min(8,Math.max(1,values.bandCycles)):3,
  traceSubsteps:values.traceSubsteps==="travel"?"travel":"gradient",
  wallTrace:values.wallTrace==="retrace"?"retrace":"clip",
  surfaceVelocitySampler:values.surfaceVelocitySampler==="software"?"software":"texture32",

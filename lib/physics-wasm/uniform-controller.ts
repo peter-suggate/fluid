@@ -30,7 +30,7 @@ export const UNIFORM_LAB_VALUES = Object.freeze({
   pressureFullCycles: 3,
   pressureVCycles: 4,
   pressureSweeps: 6,
-  fineGridPadding: 1,
+  fineGridPadding: 0,
   phiFineAdvection: NARROW_BAND_FINE_ADVECTION.default as "cubic" | "trilinear",
   volumeControlSeconds: narrowBandControlValues().volumeControlSeconds,
 });

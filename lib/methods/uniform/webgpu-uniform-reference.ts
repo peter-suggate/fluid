@@ -634,13 +634,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandSparseParticleLifetime = Math.max(0,Math.min(10,options.narrowBandSparseParticleLifetime??2));
     this.narrowBandVolumeControlSeconds = Math.max(0,Math.min(2,options.narrowBandVolumeControlSeconds??0.1));
 
-    this.narrowBandFinePadding = options.narrowBandFinePadding ?? 1;
+    this.narrowBandFinePadding = options.narrowBandFinePadding ?? 0;
     this.narrowBandTransfer = options.narrowBandTransfer ?? "flip";
     this.narrowBandColdCensus = options.narrowBandColdCensus ?? "replay";
     this.narrowBandColdRegions = options.narrowBandColdRegions ?? "frozen16h";
     this.narrowBandColdFrameSkip = options.narrowBandColdFrameSkip ?? "on";
     this.narrowBandNearSettled = options.narrowBandNearSettled ?? uniformNearSettled();
-    this.phiFineTrilinear = options.phiFineTrilinear === true;
+    this.phiFineTrilinear = options.phiFineTrilinear !== false;
     this.twoLevelVelocity = true;
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
     this.retainStageDiagnosticsForQA=options.retainStageDiagnosticsForQA===true;
