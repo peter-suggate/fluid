@@ -62,6 +62,7 @@
 - **Fat per-brick kernels.**
 - **A per-cell shared velocity channel.** At 0.19 particles per cell, filling it costs as much as the per-particle path it replaced.
 - **Projections from notes rather than code.**
+- **Reading a knock-out's delta as memory latency.** Removing code also frees registers and raises occupancy. In the particle move, the knocked-out lookups promised −1.0 ns/p. Serving 99% of those lookups from a staged window saved only 0.23. Confirm with counters, and treat a large knock-out delta as a sign the kernel is fat, which calls for a lean split kernel.
 - **Retiring the root solve (55c16a3a).** The band's coarse correction through the shared tail stalls on letters: residual p90 0.56 against 0.11 before. Recommended: `git revert` it, then re-land it after a band-twin analysis.
 
 ## Rules
