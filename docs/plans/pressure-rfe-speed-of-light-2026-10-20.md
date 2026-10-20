@@ -435,6 +435,86 @@ The host bumps the epoch on every solid edit. Claims rebuild their tiles' rows. 
 - Two clean f250 pours: band p50 0.052 and 0.047, p90 0.26 and 0.64 over f140–160. A pour on the parent commit gave 0.094 and 0.31.
 - Letters frames 1–3 match bit for bit. From frame 4 the runs diverge at the 1e-3 level, but two runs of the same code diverge just as much, so any difference is ULP-level and inside the solve's own run-to-run noise.
 
+### 1.10 Retiring the all-4h pressure mirror: sizing (2026-10-20)
+
+The pressure step keeps a second ownership: the root's all-4h layout. Each frame it:
+- copies u* into that layout (the transfer to pressure);
+- recomputes phi, V and theta on it (the split authority);
+- builds an RHS and projects over every 4h owner;
+- copies the result back (the transfer to simulation).
+
+All numbers below are pour f200–206, split profile, min/median.
+
+**What the mirror costs:**
+
+| Pass | ms |
+|---|---|
+| Split authority (knocked out: the authority pass went from 1.51/1.57 to 0.72/0.79) | 0.79 |
+| Transfer to pressure | 0.39/0.46 |
+| Root RHS | 0.20 |
+| Root project | 0.72 |
+| Transfer to simulation | 0.20/0.26 |
+| Root owners | ≈0.03 |
+| Geometry's pressure mirror | ≈0.05 |
+| **Total** | **≈2.4** |
+
+**What the solve actually needs from it (census, from a pNative counter):**
+- About 2,400 native rows a frame: 2,323 at f200 and 2,420 at f203.
+- Only 2–7 of those sit on h tiles outside the band. The rest are 4h simulation tiles.
+- Band tiles number about 5,700 of the roughly 10,000 h tiles. The other ~4,300 h tiles are dry, frozen or coarse-WARM, and hold almost no liquid root rows.
+
+So the root RHS forms about 49,000 owners' divergence for 2,400 rows. The project, though, does real work on every face: it zeroes air faces that have no detached mass beside them. The transfer back interpolates every h tile, and the band's pProject then overwrites the band tiles.
+
+**Checks:**
+- **Do the two authorities cut 4h tiles by the same rule?** Yes, on resident pages. A scratch twin read both phi buffers after each frame. On 48,489 and 48,475 4h tiles held by both, the phi words were bit-identical, with the same wet sets (2,263 and 2,264).
+- **Absent pages differ.** About 6,600 simulation 4h tiles sit on pages the residency certificate marks absent. The root writes its far-air constant there. The simulation's words differ, and 900–1,600 of them are negative.
+  - These look like stale retained words: an absent page is certified far air, with corner phi of at least 16h.
+  - A replacement must keep the root's residency test for any neighbour row it reads.
+- **Wall slots.** Natives read wall slots at N_KEYS + umFaceTile, in the root's key layout, through:
+  - rootArena RHS, minimum and pressure;
+  - rootTopology[s].x.
+  A simulation-owned native buffer should keep that tile-keyed layout: tile keys, then wall slots. Then pWrite, presentation and the warm start need no remapping.
+- **Freeze.** The root RHS adds u*'s frozen term (umColdAdd). The root project keeps F on frozen faces and writes UniformColdFreeze's corrections (umColdCorrect). Both transfers skip frozen regions. A replacement has to carry all of it.
+- **Presentation and warm start.** Both read root pressure:
+  - The frame copies presented pressure into the root iterate. pNative starts from R_PRESSURE.
+  - The grid overlay and the reference's mixedPressure present it.
+  - Bodies read only the band's h pressures.
+  A tile-keyed native buffer keeps all of these working.
+
+**The replacement:**
+1. **pNative forms its own RHS** from the simulation field. This covers about 2,400 rows, not 49,000 owners:
+   - 4h faces at their anchors through the static record's V;
+   - split faces as the mean of their 16 h patches;
+   - wall slots;
+   - frozen terms;
+   - volume control.
+
+   Liquid status comes from the simulation authority's words on resident pages. Theta toward air comes from a lean per-native crossing fraction. A face toward a cut h tile that is not in the band, which is rare, needs the root's h-face mask. That face goes to a separate list, like pRowsG.
+2. **One in-place project over the simulation's 4h tiles** writes the simulation velocity directly from native pressures. It writes split planes as tCoarseToSimulation does, with release bits, the detached-mass carry, frozen corrections and inflow. This replaces the root project and the coarse transfer back.
+3. **A lean pass over non-band h tiles only.** These are mostly air, which gets zero or the detached-mass carry, plus the few native ones. This replaces the fine transfers. Band tiles take nothing; pProject writes them.
+4. **Delete:**
+   - the split authority;
+   - the root RHS and project;
+   - both transfers;
+   - root owners, if the native buffer's sentinel rows move into it;
+   - geometry's pressure outputs.
+
+   pFinal's band means stay. They are the projection's coupling at seams.
+
+**Projected saving.** About 2.4 ms is removed. Items 1–3 add back about 0.5–0.9 ms:
+- the in-place project over about 49,000 4h tiles still writes every face, about 0.4–0.6 ms;
+- the non-band h tiles, about 0.1–0.2 ms;
+- the natives' inline RHS and theta, about 0.05–0.1 ms.
+
+Net: −1.5 to −1.9 ms. fluid-d9's estimate was −2.5 to −2.8.
+
+**What could make it inexact:**
+- detached mass reads the restricted volume, so h tiles need a lean restriction of volume only;
+- split-face means must be summed in the transfer's order;
+- the cut-face masks of the cut h tiles held at h.
+
+The gate is letters, two clean f250 pours, and pressure plus frame total at f200–212. Summation-order differences are expected; physics changes are not.
+
 ## 2. RFE: remap, geometric fill, body forces, extension
 
 ### 2.1 Per pass
