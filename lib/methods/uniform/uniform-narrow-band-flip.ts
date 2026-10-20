@@ -254,6 +254,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  /** The lattice's addressing; its cell, vertex and tile keys are the bins' bank offsets. */
  private readonly address:UniformLatticeAddress;
  private readonly cells:number;
+ /** NB_BAND's word: the search's counters, then masks, reach and lists (uniform-narrow-band-membership.wgsl). */
+ private readonly bandWord:number;
  /** Bank A's words (NB_DEPTH_A to NB_DEPTH_B): a vertex key each, or the two packed nearest banks where those are longer. */
  private readonly vertices:number;
  private readonly surfaceHotWord:number;
@@ -304,11 +306,15 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    * halo in the texture unit (float32-filterable), "software" takes its eight loads. */
   readonly particleSampler:"texture32"|"software"="software",
   /** Tiles from a crossing tile the arena's redistance reaches (arenaCross's nbReachTiles). */
-  readonly redistanceReach:1|2|3=3){
+  readonly redistanceReach:1|2|3=3,
+  /** bulkDepth's guard from the last arena search (crossingGuard "previous"):
+   * no reconstruct crossing search; the spread reach is copied into the
+   * candidate list's words for it (measureBand). */
+  readonly previousCrossings=false){
   if(particleSampler==="texture32"&&!device.features.has("float32-filterable"))throw new Error("Narrow-band FLIP texture32 particle sampling requires float32-filterable");
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
-  this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;
+  this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;this.bandWord=3*cells+vertices+2*this.tiles;
   // The band is a surface, but what a scene's surface grows to is not known
   // here. Budget one sample per domain cell, with a two-million floor: twice
   // the previous allocation, still capped by full-domain seeding and the
@@ -463,7 +469,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    // The activity heat and target are the two words a tile key carries from step to step: a claimed block's keys take 0, a tile never active.
    const heat=this.activityWord+2*this.tiles,module=this.device.createShaderModule({label:"Narrow-band FLIP page words",code:/* wgsl */`${uniformPagePoolWGSL(this.pool.layout,0,0)}
 @group(0) @binding(1) var<storage,read_write> bins:array<u32>;
-${uniformPageInitBlocksWGSL(this.pool.layout,"nbInitBlocks",512,`bins[${heat}u+key]=0u;bins[${heat+this.tiles}u+key]=0u;bins[${this.airGateWord}u+key]=1u;`)}`});
+${uniformPageInitBlocksWGSL(this.pool.layout,"nbInitBlocks",512,`bins[${heat}u+key]=0u;bins[${heat+this.tiles}u+key]=0u;bins[${this.airGateWord}u+key]=1u;${this.previousCrossings?`bins[${this.bandWord+4+2*this.tiles}u+key]=0u;bins[${this.bandWord+4}u+2u*key]=0u;bins[${this.bandWord+5}u+2u*key]=0u;`:""}`)}`});
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
    const layout=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
@@ -472,6 +478,7 @@ ${uniformPageInitBlocksWGSL(this.pool.layout,"nbInitBlocks",512,`bins[${heat}u+k
   }
   const sourceCode=(unitTaps:boolean,slots=false)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 const nbSparseBins:bool=true;
+const NB_PREVIOUS_CROSSINGS:bool=${this.previousCrossings};
 ${narrowBandParticleWGSL(this.apic)}
 @group(1) @binding(0) var<storage,read_write> source:array<Particle>;
 @group(1) @binding(1) var<storage,read_write> particles:array<Particle>;
@@ -1519,7 +1526,7 @@ ${narrowBandSurfaceWGSL}
   * band's masks, reach and lists, and bank B (uniform-surface-brick-arena.wgsl). */
  private arenaSearch(encoder:GPUCommandEncoder):void{
   this.retireSearched=false;this.syncSurfaceRevisions(encoder);this.syncTiers(encoder);
-  encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles)*4,(4+3*this.tiles)*4);
+  encoder.clearBuffer(this.bins,this.bandWord*4,(4+3*this.tiles)*4);
   const table=uniformBrickTableClear(this.brickWord,this.address.blocks);encoder.clearBuffer(this.bins,table.offset,table.size);
   this.run(encoder,this.ownership.coarseOnly?this.compiled.arenaSearchCoarse:this.compiled.arenaSearch);
  }
@@ -1545,11 +1552,15 @@ ${narrowBandSurfaceWGSL}
   const wanted=this.crossingCanPlan&&this.regionalCrossingPlanEnabled&&this.framePlan?.active;
   // Clear counters with the domain's other setup, before opening its pass.
   // The producer and its first consumer then share one compute pass.
-  encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles)*4,(wanted?4:4+3*this.tiles)*4);
+  // Under previousCrossings the masks and reach are the last arena search's:
+  // only the counters are cleared, and bulkDepth reads the spread reach
+  // (ownership.speeds' second half) from the candidate list's words.
+  encoder.clearBuffer(this.bins,this.bandWord*4,(wanted||this.previousCrossings?4:4+3*this.tiles)*4);
+  if(this.previousCrossings)encoder.copyBufferToBuffer(this.ownership.speeds,4*this.tiles,this.bins,4*(this.bandWord+4+3*this.tiles),4*this.tiles);
   const planned=wanted&&this.framePlan!.encodeDomain(encoder,this,this.encodeCrossingDomain);
   this.crossingIsPlanned=!!planned;this.crossingPlanSerial=planned?this.framePlan!.serial:-1;
   if(!planned)encoder.clearBuffer(this.bins,4*this.reuse.framePlan,4);
-  this.run(encoder,planned?this.crossingSearches.get(batch)??batch:batch,this.crossingPass);
+  if(!this.previousCrossings)this.run(encoder,planned?this.crossingSearches.get(batch)??batch:batch,this.crossingPass);
   this.crossingPass?.end();this.crossingPass=undefined;
  }
  noteReceipt(words:Uint32Array):void{

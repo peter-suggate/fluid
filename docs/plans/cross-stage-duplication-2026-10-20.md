@@ -11,8 +11,14 @@ Peter, 2026-10-20: "make sure we're taking big swings with the goal of cutting o
 | 81e94cb3 | The level set traced back in one step of any length | advectTrace | 0.74 | 0.47 |
 | 41d214c1 | Plane corners in three lean launches | remapCells plus the plane launches | 1.43 | 0.31 |
 | cbb2cf03 | Geometry's 4h turns in lanes of their own; exact same-sign certificate | geometryRegional | 1.63 | 1.31 |
+| (this commit) | No reconstruct crossing search: bulkDepth from the last arena search, shortened by this step's travel (`crossingGuard`, default "previous") | the crossing search batch | 1.17 | 0 |
 
 The certificate in cbb2cf03 was checked bit for bit against umSurfaceTarget: about 530k certified owners a frame, no mismatch.
+
+The crossing guard took Surface from 16.20 to 15.16 ms (geo9 vs guard10). coupleFine rose 0.12 ms, from more gathers under the shallower bound. The letters A/B (two repeats an arm, against geo9) stayed in repeat noise:
+- volume drift at f240 −0.82% against −1.04%;
+- occupancy L1 3.6–3.9% against 3.4% between HEAD repeats;
+- particles at f240 1606k in both repeats, against 1478k and 1548k; HEAD-family runs this session span 1462k–1595k, so this is the top edge of the band.
 
 ## Nulls (don't retry)
 
@@ -122,7 +128,11 @@ The same umOwnerAt/umFace walks (uniform-mixed-faces.wgsl.ts:17–60) feed remap
 
 ## Dropped (inputs differ between the two "duplicates")
 
-- **Crossing search vs arena search:** advected vs coupled phi. But see "Reconstruct crossing search" below: its outputs may be read only by couple's bulkDepth before the arena rebuilds them.
+- **Crossing search vs arena search:** advected vs coupled phi. The reconstruct search's outputs were read only by couple's bulkDepth, so it was cut instead (see "Reconstruct crossing search" below).
+- **geometryChanged vs geometryRegional:** the surface stages write phi in between.
+- **The two authority runs:** phi changes between them.
+- **The five phi-resolve runs:** each follows a different writer.
+- **Surface advect vs particle move:** they sample different points and already share the cache and taps.
 - **Surface advect vs the arena redistance** (the advect's ~6.2 ms against arenaStore's rewrite):
   - arenaStore replaces the advected magnitude with sign·distance only at non-interface h vertices of arena bricks.
   - Interface vertices, every 4h canonical corner, h vertices outside the arena and values ≥6h past reach remain advected state.
@@ -130,15 +140,16 @@ The same umOwnerAt/umFace walks (uniform-mixed-faces.wgsl.ts:17–60) feed remap
   - The exact cut left is a certified-sign hold of deep vertices: same-sign data over the tile's signed reach box (localSpeed plus spread), min|φ| ≥ 16·max h for every threshold reader. That is about −0.4 ms, or about −0.85 ms with a 6h floor behind a param.
   - Kept as a minor lever.
 
-### Reconstruct crossing search: −1.0 to −1.2 ms, behind a param (under audit)
+### Reconstruct crossing search: landed, −1.04 ms Surface
 
-**What duplicates it.** The batch (depthTiles, depthSeeds, reuse, depthNearestY/Z, depthLists) finds each cell's nearest crossing on the advected phi. Its bank B, masks and reach bits appear to be read only by couple's bulkDepth before the arena search rebuilds them on the coupled phi. bulkDepth deepens negative bulk values: `min(phi, -distance to the nearest crossing box)`.
+**What duplicated it.** The batch (depthTiles, depthSeeds, reuse, depthNearestY/Z, depthLists) found each cell's nearest crossing on the advected phi. Its bank B, masks and reach bits were read only by couple's bulkDepth before the arena search rebuilt them on the coupled phi. bulkDepth deepens negative bulk values: `min(phi, -distance to the nearest crossing box)`.
 
-**Candidate replacement.** Take bulkDepth from the previous step's arena outputs (reach bits and bank B, the nearest crossing of the last final phi), shortened by the tile's travel this step.
-- **geometryChanged vs geometryRegional:** the surface stages write phi in between.
-- **The two authority runs:** phi changes between them.
-- **The five phi-resolve runs:** each follows a different writer.
-- **Surface advect vs particle move:** they sample different points and already share the cache and taps.
+**Replacement** (`crossingGuard: "previous"`, behind the NB-FLIP param):
+- The crossing domain (depthPlanSeed/Expand) still runs, because the air update needs it.
+- depthPlanSeed and measureBand no longer clear the masks and reach. The last arena search's reach bits and bank B survive to couple, and nbInitBlocks zeroes them for newly claimed tiles.
+- measureBand copies the spread reach (`ownership.speeds`' second half) into the candidate list's words, which nothing else writes before the arena search.
+- bulkDepth keeps the old bound D (8, 5 or the box distance to the last crossing). When the tile moves (T > 0), it uses `max(D − T − 2, 0)`, where `T = 4·|max(reach±−2, 0)|` per axis. A saturated reach gives bulk = phi.
+- A tile that the surface reaches this step has reach ≥ 3, so it gets bulk = phi. Still tiles keep the old rule exactly.
 
 ## Owners
 

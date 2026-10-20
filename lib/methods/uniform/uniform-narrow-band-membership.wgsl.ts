@@ -78,7 +78,8 @@ var<workgroup> nbPlanMask:array<atomic<u32>,2>;
   if(nbCrossingRequested(tile)){atomicOr(&nbPlanMask[lane>>5u],1u<<(lane&31u));}
   // Clear once for the whole frame; subsequent searches clear only this
   // plan's halo. Retired requests cannot leave stale masks or reach behind.
-  atomicStore(&bins[NB_BAND_MASK+2u*tile],0u);atomicStore(&bins[NB_BAND_MASK+2u*tile+1u],0u);atomicStore(&bins[NB_BAND_REACH+tile],0u);
+  // Under NB_PREVIOUS_CROSSINGS they hold the last arena search's for bulkDepth.
+  if(!NB_PREVIOUS_CROSSINGS){atomicStore(&bins[NB_BAND_MASK+2u*tile],0u);atomicStore(&bins[NB_BAND_MASK+2u*tile+1u],0u);atomicStore(&bins[NB_BAND_REACH+tile],0u);}
   workgroupBarrier();
   if(lane<2u){atomicStore(&bins[NB_FRAME_PLAN+4u+NB_REUSE_REGIONS+2u*region+lane],atomicLoad(&nbPlanMask[lane]));}
   if(lane==0u){
@@ -255,17 +256,35 @@ fn nbBandRow(coord:vec3u,y:i32,z:i32)->u32{
  return bits&0x3fffu;
 }
 ${narrowBandNearestWGSL}
+// Travel this step from tile t, in cells: the spread reach (UniformMixedFramePlan's
+// speeds, ceil(travel/4)+2 tiles an axis, 31 unbounded) measureBand copies
+// into the candidate list's words under NB_PREVIOUS_CROSSINGS.
+fn nbCrossingTravel(t:u32)->f32{
+ let w=atomicLoad(&bins[NB_BAND_CANDIDATES+t]);var travel=vec3f(0);
+ for(var a=0u;a<3u;a++){
+  let reach=max((w>>(5u*a))&31u,(w>>(15u+5u*a))&31u);
+  if(reach>=31u){return 3.0e38;}
+  travel[a]=4.0*f32(max(reach,2u)-2u);
+ }
+ return length(travel);
+}
 // c: the cell p is read in, the caller's clamp of it.
 fn bulkDepth(c:vec3u,p:vec3f)->f32{
  let phiValue=bandPhi(p);if(phiValue>=0.0){return phiValue;}
- if((nbBandReach(c)&1u)==0u){return min(phiValue,-8.0);}
- let nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(c)]);
- // No crossing cell within five of this one: its box is five cells off or
- // more, six only from below. A deeper bound sank the resting bath's phi
- // from seven cells down, under the 4h owners that read it.
- if(nearest==NB_NO_SURFACE){return min(phiValue,-5.0);}
- let low=vec3f(umCellCoord(nearest));let delta=max(max(low-p,p-(low+1.0)),vec3f(0));
- return min(phiValue,-length(delta));
+ var depth=8.0;
+ if((nbBandReach(c)&1u)!=0u){
+  let nearest=atomicLoad(&bins[NB_DEPTH_B+umCellAt(c)]);
+  // No crossing cell within five of this one: its box is five cells off or
+  // more, six only from below. A deeper bound sank the resting bath's phi
+  // from seven cells down, under the 4h owners that read it.
+  depth=5.0;
+  if(nearest!=NB_NO_SURFACE){let low=vec3f(umCellCoord(nearest));let delta=max(max(low-p,p-(low+1.0)),vec3f(0));depth=length(delta);}
+ }
+ // The last step's crossings: the advected zero lies within this step's
+ // travel of them, and two cells more for smoothing and the 4h hand-off.
+ // Only ever deeper than phi, so no sign changes.
+ if(NB_PREVIOUS_CROSSINGS){let travel=nbCrossingTravel(nbBandTile(c));if(travel>0.0){depth=max(depth-travel-2.0,0.0);}}
+ return min(phiValue,-depth);
 }
 // Bank A is the nodal metric field redistance leaves on the reached tiles.
 // Particle membership does not depend on the resolution of simulation owners.
