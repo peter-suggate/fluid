@@ -1,7 +1,7 @@
 import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer, particleView, setParticleView, pageView, setPageView, sliceLayersShown, withParticleDisplay } from "../lib/core/visual-layers";
+import { VISUAL_LAYERS, visualLayers, readVisualLayers, writeVisualLayers, legacyVisualLayers, toggleVisualLayer, particleView, setParticleView, pageView, setPageView, sliceLayersShown, withParticleDisplay, layerView, setLayerView } from "../lib/core/visual-layers";
 import { uniformLabQuery } from "../advance-lab/uniform-lab-state";
 import { createUIStore } from "../lib/core/stores/ui-store";
 import { parseQueryState, serializeQueryState } from "../lib/core/url-state";
@@ -63,4 +63,27 @@ test("3D domain pages persist with other layers, opacity and the visibility swit
   state.ui.visualLayers = pages;
   const query = serializeQueryState("", { presetId: state.presetId, scene: state.scene }, state, state.ui);
   assert.deepEqual(parseQueryState(query).ui.visualLayers, pages);
+});
+
+
+test("every layer supports an independent persisted 3D view", () => {
+  const ids = VISUAL_LAYERS.map(l => l.id);
+  let all = visualLayers(ids);
+  for (const id of ids) {
+    all = setLayerView(all, id, "3d");
+    assert.equal(layerView(all, id), "3d");
+  }
+  assert.deepEqual(readVisualLayers(writeVisualLayers(all)), all);
+  assert.deepEqual(withParticleDisplay(all, "off").views, all.views);
+  for (const id of ids.filter(id => id !== "particles")) {
+    const slice = setLayerView(all, id, "slice");
+    assert.equal(layerView(slice, id), "slice");
+    for (const other of ids.filter(other => other !== id)) assert.equal(layerView(slice, other), "3d");
+  }
+  const state = parseQueryState("method=uniform-volume&grid=z");
+  state.ui.visualLayers = all;
+  const query = serializeQueryState("", { presetId: state.presetId, scene: state.scene }, state, state.ui);
+  assert.deepEqual(parseQueryState(query).ui.visualLayers, all);
+  assert.deepEqual(setLayerView(setLayerView(visualLayers(), "phi", "3d"), "phi", "slice"), visualLayers());
+  assert.deepEqual(readVisualLayers('{"enabled":["phi"],"views":{"phi":"bad","unknown":"3d"}}'), visualLayers(["phi"]));
 });

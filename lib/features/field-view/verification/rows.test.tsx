@@ -2,7 +2,7 @@ import "../../../methods";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { VisualLayerRows } from "../layers-ui";
-import { visualLayers, setPageView } from "../../../core/visual-layers";
+import { visualLayers, setPageView, VISUAL_LAYERS, setLayerView } from "../../../core/visual-layers";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -169,4 +169,19 @@ test("3D pages use the visual layer row and only slice layers expose plane contr
   assert.match(mixed, /Field slice/);
   const slice = draw(<VisualLayerRows state={setPageView(pages, "slice")} onChange={() => {}} plane={plane} />);
   assert.match(slice, /Field view plane/);
+});
+
+
+test("every 3D layer hides slice controls until combined with a slice", () => {
+  const plane = { axis: "x", slice: 0.25, setAxis: () => {}, setSlice: () => {} };
+  for (const { id } of VISUAL_LAYERS.filter(layer => layer.mode >= 0)) {
+    const state = setLayerView(visualLayers([id]), id, "3d");
+    const volume = draw(<VisualLayerRows state={state} onChange={() => {}} plane={plane} />);
+    assert.doesNotMatch(volume, /Field slice|Field view plane/, id);
+    const slice = draw(<VisualLayerRows state={setLayerView(state, id, "slice")} onChange={() => {}} plane={plane} />);
+    assert.match(slice, /Field slice/, id);
+    const other = id === "phi" ? "volume" : "phi";
+    const mixed = draw(<VisualLayerRows state={{ ...state, enabled: [id, other] }} onChange={() => {}} plane={plane} />);
+    assert.match(mixed, /Field view plane/, id);
+  }
 });

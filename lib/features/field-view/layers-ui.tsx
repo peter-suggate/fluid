@@ -1,7 +1,6 @@
 "use client";
 
 import { PerformanceControls, PerformanceLegend } from "../spatial-performance/ui";
-import { DEFAULT_PERFORMANCE_VIEW } from "../spatial-performance/view";
 import { useState } from "react";
 import { Eye } from "lucide-react";
 import {
@@ -10,8 +9,8 @@ import {
 import { Choice, ControlRow, Select, Slider, Value } from "../../../components/ui";
 import {
   HEAT_LEGEND, IMPORTANCE_VIEW_OPTIONS, MIXED_TILE_LEGEND, VISUAL_LAYERS, importanceLegend, importanceView, isSliceLayer, layerOpacity,
-  setImportanceView, pageView, setPageView, heatView, setHeatView, toggleVisualLayer,
-  type ImportanceView, type PageView, type VisualLayerId, type VisualLayerState,
+  setImportanceView, layerView, setLayerView, toggleVisualLayer,
+  type ImportanceView, type LayerView, type VisualLayerId, type VisualLayerState,
 } from "../../core/visual-layers";
 
 const PAGE_LEGEND = [
@@ -34,7 +33,7 @@ interface VisualLayerRowsProps {
 
 /**
  * The same multi-select instrument in the 2D lab and 3D studio. It lists what
- * can be sampled on the slice plane (pages and heat also offer 3D in the studio);
+ * can be sampled on a slice plane or throughout the volume in the studio;
  * the particle display is a setting of its own
  * beside the surface mode (`SurfaceDisplayRow`).
  */
@@ -73,18 +72,12 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
           />
           <Value value={`${Math.round(layerOpacity(state, layer.id) * 100)}%`} />
         </ControlRow>}
-        {selected && layer.id === "performance" && <PerformanceControls state={state} onChange={onChange} plane={Boolean(plane)} />}
-        {selected && plane && layer.id === "pages" && <Choice<PageView>
-          ariaLabel="Domain pages view"
-          value={pageView(state)}
+        {selected && layer.id === "performance" && <PerformanceControls state={state} onChange={onChange} />}
+        {selected && plane && <Choice<LayerView>
+          ariaLabel={`${layer.label} view`}
+          value={layerView(state, layer.id)}
           options={[{ value: "slice", label: "Slice" }, { value: "3d", label: "3D" }]}
-          onChange={view => onChange(setPageView(state, view))}
-        />}
-        {selected && plane && layer.id === "heat" && <Choice<PageView>
-          ariaLabel="Work heat view"
-          value={heatView(state)}
-          options={[{ value: "slice", label: "Slice" }, { value: "3d", label: "3D" }]}
-          onChange={view => onChange(setHeatView(state, view))}
+          onChange={view => onChange(setLayerView(state, layer.id, view))}
         />}
         {selected && layer.id === "importance" && <Select<ImportanceView>
           ariaLabel="Detail importance criterion"
@@ -107,7 +100,7 @@ export function VisualLayerRows({ state, onChange, plane, hidden = [] }: VisualL
         <i aria-hidden className={entry.wide ? "is-wide" : undefined} style={{ background: entry.color }} />{entry.label}
       </span>)}
     </div>;
-  const planeControls = plane && state.visible && layers.some(l => state.enabled.includes(l.id) && (l.id !== "pages" || pageView(state) === "slice") && (l.id !== "heat" || heatView(state) === "slice") && (l.id !== "performance" || (state.performance ?? DEFAULT_PERFORMANCE_VIEW).dimension === "slice")) ? <>
+  const planeControls = plane && state.visible && layers.some(l => state.enabled.includes(l.id) && layerView(state, l.id) === "slice") ? <>
     <Choice<"x" | "y" | "z">
       ariaLabel="Field view plane"
       value={plane.axis === "off" || plane.axis === "volume" ? "z" : plane.axis as "x" | "y" | "z"}

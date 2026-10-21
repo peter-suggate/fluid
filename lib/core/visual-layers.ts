@@ -1,4 +1,4 @@
-import { readPerformanceView, type PerformanceView } from "../features/spatial-performance/view";
+import { DEFAULT_PERFORMANCE_VIEW, readPerformanceView, type PerformanceView } from "../features/spatial-performance/view";
 import {
   UNIFORM_DETAIL_CRITERIA, UNIFORM_STAGE_REASON as R, type UniformDetailCriterion,
 } from "../methods/uniform/uniform-stage-grids";
@@ -20,7 +20,7 @@ export const VISUAL_LAYERS = [
   // liquid, switched by the particle display (withParticleDisplay).
   { id: "particles", requires: ["particles"], label: "Particles", color: "#8f8cdb", opacity: 1, mode: -1, description: "The method's own particles as shaded spheres through the whole liquid, coloured by speed (full scale at 2 m/s). Under the Simple surface they sit in the water: fogged by the liquid in front of them and hidden once it is deep enough. Narrow-band FLIP draws its velocity samples: the 4h surface band only, none in the Eulerian interior. The Motion view draws them as soft overlapping footprints instead, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at 0.125 J/kg, a difference of 0.5 m/s), counted in full through the top two cells of the band and fading out below. Liquid falling, sliding or streaming as one body stays transparent however fast it goes; liquid colliding, shearing or breaking lights up. A droplet no grid cell carries is measured by its own kinetic energy without the speed it has along gravity (full scale at 2 m/s)." },
   { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h and 4h bulk owners with orange resolution seams, and hatches the tiles this frame's head relayout changed: orange refined to h, blue coarsened to 4h (a host relayout after the last transport hatches orange)." },
-  { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s. Mixed Uniform draws one arrow per h or 4h bulk owner, the grid momentum is advected on." },
+  { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and direction (projected onto the plane in Slice mode); full scale at 1 m/s. Mixed Uniform draws one arrow per h or 4h bulk owner, the grid momentum is advected on." },
   { id: "release", requires: ["releasedFaces"], label: "Released faces", color: "#f5be52", opacity: 1, mode: 25, description: "Solid faces released by the pressure projection." },
 ] as const;
 export type VisualLayerId = typeof VISUAL_LAYERS[number]["id"];
@@ -29,8 +29,11 @@ export type ImportanceView = "all" | UniformDetailCriterion;
 /** How the particle layer paints a sphere: opaque on the speed ramp, or
  * translucent with agitation as its opacity and whiteness. */
 export type ParticleView = "speed" | "motion";
-export type PageView = "slice" | "3d";
+export type LayerView = "slice" | "3d";
+export type PageView = LayerView;
 export interface VisualLayerState {
+  /** Per-layer presentation in the studio; absent entries use a slice. */
+  views?: Partial<Record<VisualLayerId, LayerView>>;
   performance?: PerformanceView;
   enabled: VisualLayerId[];
   visible: boolean;
@@ -82,9 +85,30 @@ export function setHeatView(state: VisualLayerState, view: PageView): VisualLaye
   if (view === "slice") delete next.heat;
   return next;
 }
-/** Layers that support slices and appear in the field menu; pages and heat can also draw in 3D. */
+/** All field layers share a presentation choice. Keep the existing page,
+ * heat and performance fields readable so saved links retain their views. */
+export function layerView(state: VisualLayerState, id: VisualLayerId): LayerView {
+  if (id === "particles") return "3d";
+  if (id === "pages") return pageView(state);
+  if (id === "heat") return heatView(state);
+  if (id === "performance") return (state.performance ?? DEFAULT_PERFORMANCE_VIEW).dimension;
+  return state.views?.[id] ?? "slice";
+}
+export function setLayerView(state: VisualLayerState, id: VisualLayerId, view: LayerView): VisualLayerState {
+  if (id === "particles") return state;
+  if (id === "pages") return setPageView(state, view);
+  if (id === "heat") return setHeatView(state, view);
+  if (id === "performance") return { ...state, performance: { ...(state.performance ?? DEFAULT_PERFORMANCE_VIEW), dimension: view } };
+  const views = { ...state.views };
+  if (view === "3d") views[id] = view;
+  else delete views[id];
+  const next: VisualLayerState = { ...state, views };
+  if (!Object.keys(views).length) delete next.views;
+  return next;
+}
+/** Layers that support slices and appear in the field menu. */
 export const isSliceLayer = (id: VisualLayerId): boolean => VISUAL_LAYERS.find(l => l.id === id)!.mode >= 0;
-/** The grid overlay has something to draw, including the pages 3D view. */
+/** The grid overlay has something to draw, in either presentation. */
 export const sliceLayersShown = (state: VisualLayerState): boolean => state.visible && state.enabled.some(isSliceLayer);
 export const particleLayerShown = (state: VisualLayerState): boolean => state.visible && state.enabled.includes("particles");
 /** The liquid's own particle display: a setting beside the surface mode, not a layer the menu lists. */
@@ -118,7 +142,7 @@ export function readVisualLayers(raw: string | null, fallback = visualLayers()):
   try {
     const value = JSON.parse(raw);
     if (!Array.isArray(value.enabled)) return fallback;
-    const state = visualLayers(value.enabled);
+    let state = visualLayers(value.enabled);
     state.visible = value.visible !== false;
     for (const layer of VISUAL_LAYERS) {
       const n = value.opacity?.[layer.id];
@@ -130,6 +154,9 @@ export function readVisualLayers(raw: string | null, fallback = visualLayers()):
     if (value.pages === "3d") state.pages = "3d";
     if (value.heat === "3d") state.heat = "3d";
     if (value.particles === "motion") state.particles = "motion";
+    for (const layer of VISUAL_LAYERS) {
+      if (value.views?.[layer.id] === "3d") state = setLayerView(state, layer.id, "3d");
+    }
     return state;
   } catch { return fallback; }
 }

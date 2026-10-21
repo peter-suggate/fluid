@@ -1,12 +1,13 @@
+import { gridStructure3DWGSL } from "./grid-structure-3d.wgsl";
 import { SpatialPerformanceOverlay } from "../features/spatial-performance/overlay";
 import { DEFAULT_PERFORMANCE_VIEW } from "../features/spatial-performance/view";
 import type { SpatialCostSnapshot } from "./spatial-performance";
 import { domainPagesWGSL, domainPages3DWGSL } from "./domain-pages.wgsl";
 import {uniformMixedPresentationVelocityWGSL} from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { UNIFORM_DETAIL_CRITERIA, UNIFORM_STAGE_CERTIFICATE, UNIFORM_STAGE_IMPORTANCE, UNIFORM_STAGE_VIEWS, uniformStageGridsWGSL } from "../methods/uniform/uniform-stage-grids";
-import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, pageView, heatView, type VisualLayerState } from "./visual-layers";
+import { VISUAL_LAYERS, visualLayerPaintWGSL, importanceViewCode, layerOpacity, layerView, pageView, heatView, type VisualLayerState } from "./visual-layers";
 /**
- * Solver-grid cross-section rendered as an independent presentation layer.
+ * Solver-grid slices and volumes rendered as independent presentation layers.
  *
  * Keeping this out of both water renderers lets the same scientific overlay
  * compose over raster optics. The shared view
@@ -42,13 +43,19 @@ const LAYER_PAGE_VIEW = LAYER_PRESSURE_ORIGIN + 4;
 const LAYER_IMPORTANCE = LAYER_PAGE_VIEW + 4;
 /** The heat labels' solver settings: x WARM regions computed at 4h, y COLD regions frozen at 16h. */
 const LAYER_HEAT = LAYER_IMPORTANCE + 4;
-const LAYER_UNIFORM_FLOATS = LAYER_HEAT + 4;
+const LAYER_VOLUME_OPACITY = LAYER_HEAT + 4;
+/** Active slice/volume counts and the dedicated 3D grid's opacity. */
+const LAYER_SELECTION = LAYER_VOLUME_OPACITY + 4 * LAYER_OPACITY_VEC4S;
+const LAYER_ACTIVE_SLICES = LAYER_SELECTION + 4;
+const LAYER_ACTIVE_VOLUMES = LAYER_ACTIVE_SLICES + 4 * LAYER_OPACITY_VEC4S;
+const LAYER_UNIFORM_FLOATS = LAYER_ACTIVE_VOLUMES + 4 * LAYER_OPACITY_VEC4S;
 
 export const gridOverlayViewRecordsWGSL = /* wgsl */ `
 ${visualLayerPaintWGSL}
-struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageView:vec4f, importance:vec4f, heat:vec4f, }
+struct LayerUniforms { control:vec4f, opacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, pressureOrigin:vec4f, pageView:vec4f, importance:vec4f, heat:vec4f, volumeOpacity:array<vec4f,${LAYER_OPACITY_VEC4S}>, selection:vec4f, activeSlices:array<vec4f,${LAYER_OPACITY_VEC4S}>, activeVolumes:array<vec4f,${LAYER_OPACITY_VEC4S}>, }
 @group(0) @binding(24) var<uniform> layers:LayerUniforms;
 var<private> layerMode:i32;
+var<private> layerVolume:bool;
 var<private> recordComposition:bool;
 var<private> recordWindowPresent:bool;
 var<private> recordTilesPresent:bool;
@@ -556,6 +563,15 @@ fn umSurfaceVelocityComponents(stage:u32,cell:vec3i)->u32{
   return select(0u,3u,umStageTileWidth(stage,UM_STAGE_TRANSPORT,cell/4)==1u);
 }
 
+// Distance to a box edge (two nearby faces), rather than an extruded
+// slice line. The third coordinate must remain inside the box.
+fn volumeBoxEdgePixels(point:vec3f,lower:vec3f,upper:vec3f,pixel:vec3f)->f32{
+  let d=abs(min(point-lower,upper-point))/max(pixel,vec3f(1e-5));
+  let edge=min(max(d.x,d.y),min(max(d.y,d.z),max(d.z,d.x)));
+  let outside=max(max(lower-point,point-upper),vec3f(0.0))/max(pixel,vec3f(1e-5));
+  return max(edge,max(outside.x,max(outside.y,outside.z)));
+}
+
 fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   dims:vec3i, axis: i32, footprint: f32) -> GridSample {
   let local3 = clamp((point - boundsMin) / size, vec3f(0.0), vec3f(0.99999)) * vec3f(dims);
@@ -635,6 +651,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
   let pressureGrid = mixedLattice && stage != 0xffffffffu && fieldMode == 5;
   let hGrid = mixedLattice && fieldMode == 3;
   let planePoint = samplePosition + vec2f(f32(fineOrigin[firstPlaneAxis]), f32(fineOrigin[secondPlaneAxis]));
+  var latticePosition3 = fract(local3);
   var latticeFraction = fract(samplePosition);
   var latticeWidth = 1.0;
   if (mixedLattice && !hGrid && !unstored) {
@@ -642,9 +659,11 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     if (pressureGrid) { owner = umStageOwner(stage, UM_STAGE_PRESSURE, cell); }
     let ownerOrigin = vec3f(umOrigin(owner));
     latticeWidth = f32(max(owner.width, 1u));
+    latticePosition3=clamp((vec3f(cell-localCell)+local3-ownerOrigin)/latticeWidth,vec3f(0),vec3f(1));
     latticeFraction = clamp((planePoint - vec2f(ownerOrigin[firstPlaneAxis], ownerOrigin[secondPlaneAxis])) / latticeWidth,
       vec2f(0.0), vec2f(1.0));
   }
+  var latticeDerivative3=max(vec3f(footprint)*vec3f(dims)/size/latticeWidth,vec3f(1e-5));
   let latticeDerivative = derivative / latticeWidth;
   let pixelsPerLatticeCell = pixelsPerCell * latticeWidth;
   let dotFade = smoothstep(9.0, 18.0, pixelsPerLatticeCell);
@@ -941,8 +960,9 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // cell, since that is the scale it is read at. Far air draws it quieter,
       // so the edge of the fine region is the line that reads first.
       let tileFraction = fract(samplePosition * 0.25);
-      let tileDistance = min(min(tileFraction.x, 1.0 - tileFraction.x) * 4.0 / derivative.x,
+      var tileDistance = min(min(tileFraction.x, 1.0 - tileFraction.x) * 4.0 / derivative.x,
         min(tileFraction.y, 1.0 - tileFraction.y) * 4.0 / derivative.y);
+      if(layerVolume){tileDistance=volumeBoxEdgePixels(fract((vec3f(fineOrigin)+local3)/4.0),vec3f(0),vec3f(1),vec3f(footprint)*vec3f(dims)/size/4.0);}
       viewBoundary = gridLinePaint(tileDistance, 1.0) * smoothstep(4.0, 9.0, 4.0 * pixelsPerCell)
         * select(0.75, 1.0, fine || shell);
       // The level set locates the liquid the classes were seeded from.
@@ -963,14 +983,16 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // The finest lattice is drawn only where the step touched it.
       lineStrength = select(0.0, 0.3, inWindow && launched);
       let planePoint = samplePosition + vec2f(f32(fineOrigin[firstPlaneAxis]), f32(fineOrigin[secondPlaneAxis]));
-      let windowEdge = sliceBoxEdgePixels(planePoint, derivative, cell,
+      var windowEdge = sliceBoxEdgePixels(planePoint, derivative, cell,
         window.minimum, window.maximum, firstPlaneAxis, secondPlaneAxis);
+      if(layerVolume){windowEdge=volumeBoxEdgePixels(vec3f(fineOrigin)+local3,vec3f(window.minimum),vec3f(window.maximum),vec3f(footprint)*vec3f(dims)/size);}
       viewBoundary = gridLinePaint(windowEdge, 1.5);
       viewCasing = gridLinePaint(windowEdge, 2.5);
       // This step's own box, narrower and on top: where it meets the window
       // the cased line carries its colour down the middle.
       viewAccent = gridLinePaint(sliceBoxEdgePixels(planePoint, derivative, cell,
         window.seedMinimum, window.seedMaximum, firstPlaneAxis, secondPlaneAxis), 0.75);
+      if(layerVolume){viewAccent=gridLinePaint(volumeBoxEdgePixels(vec3f(fineOrigin)+local3,vec3f(window.seedMinimum),vec3f(window.seedMaximum),vec3f(footprint)*vec3f(dims)/size),0.75);}
       viewAccentColor = sceneColor(WINDOW_SEED_DISPLAY);
       liquidContour = zeroContour;
     } else if (fieldMode == 10) {
@@ -1035,6 +1057,12 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       // the zoom that makes the dilute phase legible.
       sampleDot = 0.0;
     }
+  }
+  let cellBounds=representedCell(cell,dims,fineOrigin,boundsMin,size,adaptiveGrid,tallGrid);
+  if(layerVolume && !mixedLattice && (adaptiveGrid || tallGrid)){
+    let extent=max(cellBounds.upper-cellBounds.lower,vec3f(1e-9));
+    latticePosition3=clamp((point-cellBounds.lower)/extent,vec3f(0),vec3f(1));
+    latticeDerivative3=max(vec3f(footprint)/extent,vec3f(1e-5));
   }
   if (layers.control.x > 0.5) {
     // Atomic layers never inherit another view's grid, dots or contour.
@@ -1123,7 +1151,8 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     // Each layer draws the lattice of the stage that computed it (see
     // mixedLattice above); on a dense lattice only the grid layer and the two
     // layout layers, whose subject is the lattice, draw it.
-    let cellLines=max(firstGridLine,secondGridLine);
+    var cellLines=max(firstGridLine,secondGridLine);
+    if(layerVolume){cellLines=gridLinePaint(volumeBoxEdgePixels(latticePosition3,vec3f(0),vec3f(1),latticeDerivative3),lineHalfWidth);}
     line=select(0.0,cellLines,fieldMode==0||(fieldMode==22&&mixedLattice)||importanceRecorded
       ||(mixedLattice&&(fieldMode==3||fieldMode==5||fieldMode==21||fieldMode==26)));
     lineStrength=select(1.0,0.4,fieldMode!=0);
@@ -1182,6 +1211,13 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       if((bits & (1u<<u32(secondPlaneAxis)))!=0u){face=max(face,gridLinePaint((1.0-f.y)*width/derivative.y,1.2));}
       if((bits & (1u<<u32(firstPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.x*width/derivative.x,1.2));}
       if((bits & (1u<<u32(secondPlaneAxis+3)))!=0u){face=max(face,gridLinePaint(f.y*width/derivative.y,1.2));}
+      if(layerVolume){
+        face=0.0;
+        for(var a=0u;a<3u;a+=1u){
+          if((bits&(1u<<a))!=0u){face=max(face,gridLinePaint((1.0-latticePosition3[a])/latticeDerivative3[a],1.2));}
+          if((bits&(1u<<(a+3u)))!=0u){face=max(face,gridLinePaint(latticePosition3[a]/latticeDerivative3[a],1.2));}
+        }
+      }
       fill=vec3f(0.95,0.65,0.2);alpha=face;
     }
     if(fieldMode==26){
@@ -1190,14 +1226,18 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
       let vector=vec2f(v[firstPlaneAxis],v[secondPlaneAxis])/scale*0.4;
       let p=latticeFraction-vec2f(0.5);
       let t=clamp(dot(p,vector)/max(dot(vector,vector),1e-8),0.0,1.0);
-      let stroke=(1.0-smoothstep(0.6,1.6,length((p-vector*t)/latticeDerivative)))*smoothstep(5.0,10.0,pixelsPerLatticeCell);
+      var stroke=(1.0-smoothstep(0.6,1.6,length((p-vector*t)/latticeDerivative)))*smoothstep(5.0,10.0,pixelsPerLatticeCell);
+      if(layerVolume){
+        let vector3=v/scale*0.4;let p3=latticePosition3-vec3f(0.5);
+        let t3=clamp(dot(p3,vector3)/max(dot(vector3,vector3),1e-8),0.0,1.0);
+        stroke=(1.0-smoothstep(0.6,1.6,length((p3-vector3*t3)/latticeDerivative3)))*smoothstep(5.0,10.0,pixelsPerLatticeCell);
+      }
       fill=mix(sceneColor(FRACTION_LIQUID_DISPLAY),vec3f(0.9),stroke);
       alpha=max(clamp(length(v)/scale,0.0,1.0)*0.25,stroke*select(0.0,1.0,length(v)>1e-7));
     }
   }
   line *= lineFade * lineStrength;
-  let gridBody = gridBodySample(representedCell(cell,dims,fineOrigin,
-    boundsMin,size,adaptiveGrid,tallGrid));
+  let gridBody = gridBodySample(cellBounds);
   if (gridBody.occupied && layers.control.x > 0.5) { return GridSample(vec3f(0.0),0.0,0.0,true); }
   if (gridBody.occupied) {
     fill = mix(vec3f(0.96, 0.43, 0.12), vec3f(1.0, 0.78, 0.38), 0.18 * gridBody.selected);
@@ -1350,7 +1390,9 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
   let sliceOnlyMode = i32(round(u.debug.w)) >= 21 && i32(round(u.debug.w)) <= 23;
   let axis = select(requestedAxis, 1, requestedAxis == 4 && sliceOnlyMode);
   if (axis <= 0 || u.gridInfo.w <= 0.5) { discard; }
-  let volume = axis == 4;
+  let volume = axis == 4 && !recordComposition;
+  let volumeCount=u32(layers.selection.y);
+  let volumeLayers=volumeCount>0u;
   let ndc = input.uv * 2.0 - 1.0;
   let origin = u.cameraPosition.xyz;
   let forward = normalize(u.cameraTarget.xyz - origin);
@@ -1369,7 +1411,8 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
   var marchStart = 0.0;
   var marchStep = 0.0;
   var marchSteps = 0u;
-  if (volume) {
+  var sliceValid = false;
+  if (volume || volumeLayers) {
     let interval=boxIntersection(origin,direction,boundsMin,boundsMax);
     if(interval.y<=max(interval.x,0.0)){discard;}
     marchStart=max(interval.x,0.0);
@@ -1377,7 +1420,8 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
     marchSteps=u32(clamp(ceil(fineTravel.x+fineTravel.y+fineTravel.z+1.0),1.0,512.0));
     marchStep=(interval.y-marchStart)/f32(marchSteps);
     footprint=max(marchStep*0.20,1e-5);
-  } else {
+  }
+  if (!volume) {
     var denominator = direction.z;
     var rayOrigin = origin.z;
     var planeCoordinate = 0.0;
@@ -1395,56 +1439,87 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
       denominator = direction.y;
       rayOrigin = origin.y;
     }
-    if (abs(denominator) <= 1e-5) { discard; }
-    distance = (planeCoordinate - rayOrigin) / denominator;
+    distance = (planeCoordinate - rayOrigin) / select(1e-5,denominator,abs(denominator)>1e-5);
     point = origin + direction * distance;
     let inside = all(point >= boundsMin - vec3f(1e-4)) && all(point <= boundsMax + vec3f(1e-4));
-    if (distance <= 0.0 || !inside) { discard; }
+    sliceValid=abs(denominator)>1e-5 && distance>0.0 && inside;
+    if (!sliceValid && !volumeLayers) { discard; }
     footprint = distance * 1.44 / max(u.viewport.y, 1.0);
     sliceHatchFootprint = dot(point - origin, forward) * 1.44 / max(u.viewport.y, 1.0);
   }
   var overlay=GridSample(vec3f(0),0.0,0.0,false);
-  // One gridSample site serves the volume march, the composed layers and the
-  // single legacy view, with a pass count the compiler cannot see. gridSample
-  // is large and Metal compiles every inlined or unrolled copy in full: a
-  // second site for the march alone more than doubled pipeline creation.
-  let layered=layers.control.x>0.5 && !volume;
+  // Keep a single gridSample call site: Metal inlines its large mixed-grid
+  // readers. The first visits compose slices; remaining visits sample every
+  // enabled volume layer front-to-back through the domain.
+  let layered=recordComposition;
   var accumulated=vec4f(0.0);
+  var volumePaint=vec4f(0.0);
   let modes=array<i32,${VISUAL_LAYERS.length}>(${VISUAL_LAYERS.map(l => l.mode).join(",")});
   let volumeOpacity=clamp(u.debug.y,0.05,1.0);
   let adaptiveGrid=u.debug.z>0.5;
   var previous=vec2u(0xffffffffu);
-  let passes=select(select(1u,${VISUAL_LAYERS.length}u,layered),marchSteps,volume);
+  let slicePasses=select(1u,u32(layers.selection.x),layered);
+  let passes=select(slicePasses+marchSteps*volumeCount,marchSteps,volume);
+  // Use the camera-facing projection for glyphs, independently of the slice
+  // selection. Scalar values are sampled at their full XYZ position.
+  let facing=abs(direction);
+  let volumeAxis=select(select(1,2,facing.x>facing.z),3,facing.y>max(facing.x,facing.z));
+  let cellTravel=length(direction*marchStep*dims/size);
   for(var index=0u;index<passes;index+=1u){
     var samplePoint=point;var sampleAxis=axis;var opacity=1.0;
-    if(volume){
-      if(accumulated.a>0.985){break;}
-      samplePoint=origin+direction*(marchStart+(f32(index)+0.5)*marchStep);
-      let local=clamp((samplePoint-boundsMin)/size,vec3f(0.0),vec3f(0.99999))*dims;
-      let localCell=clamp(vec3i(floor(local)),vec3i(0),frame.dimensions-vec3i(1));
-      let linear=u32(localCell.x)+u32(dims.x)*(u32(localCell.y)+u32(dims.y)*u32(localCell.z));
-      var key=vec2u(linear,0u);
-      if(adaptiveGrid){key=adaptiveCellKey(frame.minimumFine+localCell,vec3i(dims));}
-      if(all(key==previous)){continue;}
-      previous=key;sampleAxis=1;
+    layerVolume=volume || index>=slicePasses;
+    if(layerVolume){
+      if(volumePaint.a>0.985){break;}
+      var step=index;
+      if(layered){
+        step=(index-slicePasses)/volumeCount;
+        // Later catalog layers sit on top at each depth, as they do on slices.
+        let slot=volumeCount-1u-(index-slicePasses)%volumeCount;
+        let layer=u32(layers.activeVolumes[slot/4u][slot%4u]);
+        opacity=layers.volumeOpacity[layer/4u][layer%4u];
+        if(opacity<=0.0){continue;}
+        layerMode=modes[layer];
+      }
+      samplePoint=origin+direction*(marchStart+(f32(step)+0.5)*marchStep);
+      sampleAxis=1;
+      if(layered){
+        sampleAxis=volumeAxis;
+        footprint=max((marchStart+(f32(step)+0.5)*marchStep)*1.44/max(u.viewport.y,1.0),marchStep*0.2);
+        sliceHatchFootprint=dot(samplePoint-origin,forward)*1.44/max(u.viewport.y,1.0);
+      }
+      // Legacy volume views sampled each adaptive cell once. Composed views
+      // integrate over distance, including coarse cells, without opacity
+      // depending on the number of ray steps or the slice slider.
+      if(!layered){
+        let local=clamp((samplePoint-boundsMin)/size,vec3f(0.0),vec3f(0.99999))*dims;
+        let localCell=clamp(vec3i(floor(local)),vec3i(0),frame.dimensions-vec3i(1));
+        let linear=u32(localCell.x)+u32(dims.x)*(u32(localCell.y)+u32(dims.y)*u32(localCell.z));
+        var key=vec2u(linear,0u);
+        if(adaptiveGrid){key=adaptiveCellKey(frame.minimumFine+localCell,vec3i(dims));}
+        if(all(key==previous)){continue;}
+        previous=key;
+      }
     } else if(layered){
-      opacity=layers.opacity[index/4u][index%4u];
-      if(opacity<=0.0){continue;}
-      layerMode=modes[index];
+      if(!sliceValid){continue;}
+      let layer=u32(layers.activeSlices[index/4u][index%4u]);
+      opacity=layers.opacity[layer/4u][layer%4u];
+      layerMode=modes[layer];
     }
     let sample=gridSample(samplePoint,boundsMin,size,frame.minimumFine,frame.dimensions,sampleAxis,footprint);
-    if(volume){accumulated=volumeComposite(accumulated,sample.color,sample.alpha*volumeOpacity*0.16);continue;}
+    if(layerVolume){
+      let a=select(sample.alpha*volumeOpacity*0.16,
+        1.0-exp(-max(sample.alpha*opacity,0.0)*cellTravel*0.16),layered);
+      volumePaint=volumeComposite(volumePaint,sample.color,a);continue;
+    }
     if(!layered){overlay=sample;break;}
     let a=clamp(sample.alpha*opacity,0.0,1.0);
     accumulated=vec4f(sample.color*a+accumulated.rgb*(1.0-a),a+accumulated.a*(1.0-a));
   }
-  if(volume){
+  if(volume || layered){
+    if(!sliceValid || distance>=nearestBodyDistance(origin,direction)){accumulated=vec4f(0.0);}
+    accumulated=vec4f(accumulated.rgb+volumePaint.rgb*(1.0-accumulated.a),accumulated.a+volumePaint.a*(1.0-accumulated.a));
     if(accumulated.a<=0.001){discard;}
     return vec4f(displayColor(accumulated.rgb/max(accumulated.a,1e-6)),accumulated.a);
-  }
-  if(layered){
-    if(accumulated.a<=0.001 || distance>=nearestBodyDistance(origin,direction)){discard;}
-    return vec4f(displayColor(accumulated.rgb/accumulated.a),accumulated.a);
   }
   if (distance >= nearestBodyDistance(origin, direction) && !overlay.solid) { discard; }
   let horizontalEdgeDistance = min(min(point.x - boundsMin.x, boundsMax.x - point.x), min(point.z - boundsMin.z, boundsMax.z - point.z));
@@ -1469,6 +1544,7 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
     max(overlay.alpha * select(SLICE_OPACITY, 0.94, i32(round(u.debug.w)) == 21), overlay.lattice * 0.92));
 }
 ${domainPages3DWGSL}
+${gridStructure3DWGSL}
 `;
 
 export class GridOverlayPipeline {
@@ -1476,6 +1552,10 @@ export class GridOverlayPipeline {
   private layerRecords?: GPUBuffer;
   private layerSources?: { tiles?: GPUFluidViewRecords; window?: GPUFluidViewRecords; boundary?: GPUBufferBinding; boundaryOffset: number; pages?: GPUFluidVolumePageSource; pageOffset: number; tierOffset: number };
   private pipeline?: GPURenderPipeline;
+  private fieldsShown = true;
+  private gridPipeline?: GPURenderPipeline;
+  private gridBindGroup?: GPUBindGroup;
+  private grid3D = false;
   private pagesPipeline?: GPURenderPipeline;
   private pagesBindGroup?: GPUBindGroup;
   private pages3D = false;
@@ -1549,8 +1629,8 @@ export class GridOverlayPipeline {
       },
       primitive: { topology: "triangle-list" }
     });
-    // The 3D entry points only need the camera, allocation records and layer
-    // selection; they share the existing overlay lifecycle and copied records.
+    // Dedicated 3D entry points share the overlay lifecycle. Grid structure
+    // binds topology and stage metadata without the expensive field samplers.
     const boxes3D = (label: string, entryPoint: string) => this.device.createRenderPipelineAsync({
       label,
       layout: "auto",
@@ -1560,7 +1640,7 @@ export class GridOverlayPipeline {
       }] },
       primitive: { topology: "triangle-list" },
     });
-    [this.pagesPipeline, this.heatPipeline] = await Promise.all([boxes3D("Domain pages 3D", "fragmentPages3D"), boxes3D("Work heat 3D", "fragmentHeat3D")]);
+    [this.pagesPipeline, this.heatPipeline, this.gridPipeline] = await Promise.all([boxes3D("Domain pages 3D", "fragmentPages3D"), boxes3D("Work heat 3D", "fragmentHeat3D"), boxes3D("Grid structure 3D", "fragmentGrid3D")]);
     this.rebuildBindGroup();
   }
 
@@ -1606,6 +1686,8 @@ export class GridOverlayPipeline {
 
   setLayers(state: VisualLayerState | undefined, tiles?: GPUFluidViewRecords, window?: GPUFluidViewRecords, pressureOrigin?: readonly [number, number, number], boundary?: GPUBufferBinding, pages?: GPUFluidVolumePageSource) {
     const values = new Float32Array(LAYER_UNIFORM_FLOATS);
+    this.grid3D = Boolean(state?.visible && state.enabled.includes("grid") && layerView(state, "grid") === "3d" && layerOpacity(state, "grid") > 0);
+    this.fieldsShown = !state;
     this.pages3D = Boolean(state?.visible && state.enabled.includes("pages") && pageView(state) === "3d" && pages);
     this.heat3D = Boolean(state?.visible && state.enabled.includes("heat") && heatView(state) === "3d" && pages?.tiers);
     if (pressureOrigin) values.set(pressureOrigin, LAYER_PRESSURE_ORIGIN);
@@ -1618,7 +1700,23 @@ export class GridOverlayPipeline {
       pages = state.visible && (state.enabled.includes("pages") || heat) ? pages : undefined;
       values[0] = 1; values[1] = window ? 1 : 0;
       // A layer without a slice mode (the particle spheres) is another pass's: zero here skips its plane pass.
-      VISUAL_LAYERS.forEach((layer, i) => { values[4 + i] = layer.mode >= 0 && layer.id !== "performance" && state.visible && state.enabled.includes(layer.id) ? layerOpacity(state, layer.id) : 0; });
+      let sliceCount = 0, volumeCount = 0;
+      VISUAL_LAYERS.forEach((layer, i) => {
+        if (layer.mode < 0 || layer.id === "performance" || !state.visible || !state.enabled.includes(layer.id)) return;
+        const volume = layerView(state, layer.id) === "3d";
+        // Structure reads topology directly; it never enters the field march.
+        if (volume && layer.id === "grid") { values[LAYER_SELECTION + 2] = layerOpacity(state, "grid"); return; }
+        // Pages, heat and performance retain their dedicated box renderers.
+        if (volume && (layer.id === "pages" || layer.id === "heat")) return;
+        const opacity = layerOpacity(state, layer.id);
+        if (opacity <= 0) return;
+        values[(volume ? LAYER_VOLUME_OPACITY : 4) + i] = opacity;
+        if (volume) values[LAYER_ACTIVE_VOLUMES + volumeCount++] = i;
+        else values[LAYER_ACTIVE_SLICES + sliceCount++] = i;
+      });
+      values[LAYER_SELECTION] = sliceCount;
+      values[LAYER_SELECTION + 1] = volumeCount;
+      this.fieldsShown = sliceCount + volumeCount > 0;
       if (this.pages3D) {
         values[4 + VISUAL_LAYERS.findIndex(l => l.id === "pages")] = 0;
         values[LAYER_PAGE_VIEW] = layerOpacity(state, "pages");
@@ -1653,6 +1751,19 @@ export class GridOverlayPipeline {
   }
 
   private rebuildBindGroup() {
+    if (this.gridPipeline && this.columnBases && this.adaptiveCells) this.gridBindGroup = this.device.createBindGroup({
+      layout: this.gridPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } },
+        { binding: 1, resource: { buffer: this.bodyBuffer } },
+        { binding: 3, resource: this.columnBases.createView() },
+        { binding: 4, resource: this.adaptiveCells.createView({ dimension: "3d" }) },
+        { binding: 13, resource: this.denseLevelSetVolumeSource?.mixedPressurePhi ?? { buffer: this.dummyStorage } },
+        { binding: 17, resource: this.denseLevelSetVolumeSource?.mixedOwnership ?? { buffer: this.dummyStorage } },
+        { binding: 20, resource: { buffer: this.levelSetVolumeParams } },
+        { binding: 24, resource: { buffer: this.layerUniform } },
+      ],
+    });
     if (this.pagesPipeline) this.pagesBindGroup = this.device.createBindGroup({
       layout: this.pagesPipeline.getBindGroupLayout(0),
       entries: [
@@ -1734,9 +1845,16 @@ export class GridOverlayPipeline {
       pass.setBindGroup(0, this.heatBindGroup);
       pass.draw(3);
     }
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup);
-    pass.draw(3);
+    if (this.fieldsShown) {
+      pass.setPipeline(this.pipeline);
+      pass.setBindGroup(0, this.bindGroup);
+      pass.draw(3);
+    }
+    if (this.grid3D && this.gridPipeline && this.gridBindGroup) {
+      pass.setPipeline(this.gridPipeline);
+      pass.setBindGroup(0, this.gridBindGroup);
+      pass.draw(3);
+    }
     pass.end();
     this.performanceOverlay?.encode(encoder, target);
     return true;

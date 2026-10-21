@@ -3,7 +3,7 @@ import { Choice, Select } from "../../../components/ui";
 import { useSession } from "../../core/session/session-context";
 import { DEFAULT_PERFORMANCE_VIEW, PERFORMANCE_RAMP, type PerformanceView } from "./view";
 import type { VisualLayerState } from "../../core/visual-layers";
-export function PerformanceControls({ state, onChange, plane }: { state: VisualLayerState; onChange: (s: VisualLayerState) => void; plane: boolean }) {
+export function PerformanceControls({ state, onChange }: { state: VisualLayerState; onChange: (s: VisualLayerState) => void }) {
   const session = useSession();
   const report = session.diagnostics(s => s.gpuInfo?.spatialPerformance);
   const stages = session.diagnostics(s => s.gpuInfo?.spatialPerformanceStages);
@@ -18,8 +18,6 @@ export function PerformanceControls({ state, onChange, plane }: { state: VisualL
       options={[{ value: "cell", label: "Cells" }, { value: "tile", label: "4h tiles" }, { value: "region", label: "16h regions" }]} />
     <Choice<PerformanceView["paint"]> ariaLabel="Performance colour" value={view.paint} onChange={paint => change({ paint })}
       options={[{ value: "cost", label: "Frame cost" }, { value: "tiers", label: "Work tiers" }]} />
-    {plane && <Choice<PerformanceView["dimension"]> ariaLabel="Performance view" value={view.dimension} onChange={dimension => change({ dimension })}
-      options={[{ value: "slice", label: "Slice" }, { value: "3d", label: "3D" }]} />}
   </div>;
 }
 const ms = (value: number) => `${value.toFixed(2)} ms`;
