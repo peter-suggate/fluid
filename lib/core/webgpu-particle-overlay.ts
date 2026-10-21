@@ -23,9 +23,12 @@ import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterf
  * outright is dropped in the vertex stage and costs no fragments.
  *
  * The Motion view paints energy as opacity instead of speed as colour: a calm
- * sample is transparent, one at full scale white and opaque, so the
- * picture is of where the liquid would be white. Speed does not make water
- * white, and no whitewater model takes it to: Ihmsen et al. 2012 count the
+ * sample is transparent, one at full scale white, so the picture is of where
+ * the liquid would be white. Whitewater has an onset, so energy under a
+ * quarter of full scale adds nothing and the rest rises steeply; foam is
+ * surface foam, so a sample fades out a couple of cells under the level set;
+ * and however thick a cloud gets, some of the surface it lies on shows through.
+ * Speed does not make water white, and no whitewater model takes it to: Ihmsen et al. 2012 count the
  * velocity a sample has relative to its neighbours, Wretborn et al. 2022 the
  * Reynolds stress of its fluctuation about the local mean near the surface. A
  * FLIP record carries that fluctuation, its own velocity less the grid's, and
@@ -78,8 +81,8 @@ export interface GPUFluidParticleSource {
    * Where a record also keeps the grid's side of the sample, as float offsets:
    * the grid's velocity at it (m/s, three floats), its signed depth in position
    * units (negative inside the liquid), and a float that is one while no grid
-   * cell carries it. A sample counts in full down to `surfaceDepth`, in whole
-   * position units, and fades out over as much again. Absent: no sample has a
+   * cell carries it. A sample counts in full at the surface and fades out by
+   * `surfaceDepth` whole position units under it. Absent: no sample has a
    * grid to differ from.
    */
   readonly grid?: {
@@ -192,6 +195,8 @@ ${paletteWGSL("PARTICLE_STILL", LAYER_PALETTE.particleStill)}
 ${paletteWGSL("PARTICLE_RUSHING", LAYER_PALETTE.particleRushing)}
 // The most one Motion sample can cover: its optical depth has to stay finite.
 const PARTICLE_MOTION_OPAQUE:f32=0.98;
+// The fraction of full-scale energy under which a Motion sample adds nothing.
+const PARTICLE_MOTION_ONSET:f32=0.25;
 // A Motion sample is drawn this many sphere radii wide. A sphere's radius is a
 // little under half the seed spacing, so this reaches past the neighbouring samples.
 const PARTICLE_MOTION_REACH:f32=${PARTICLE_MOTION_REACH};
@@ -221,24 +226,23 @@ fn particleAgitation(at:u32,velocity:vec3f)->f32 {
     }
     let full=max(overlay.gravity.w,1e-6);
     let reach=f32(overlay.grid.w);
-    let surface=clamp(2.0+particles[at+overlay.grid.y]/reach,0.0,1.0);
-    return clamp(energy/(full*full),0.0,1.0)*surface;
+    let surface=clamp(1.0+particles[at+overlay.grid.y]/reach,0.0,1.0);
+    return smoothstep(PARTICLE_MOTION_ONSET,1.0,energy/(full*full))*surface;
   }
   // Kinetic energy as a fraction of the full-scale speed's, without the
   // speed a sample has along gravity: that much it got by dropping.
   let scale=max(overlay.scale.w,1e-6);
   let fall=max(dot(velocity,overlay.gravity.xyz),0.0);
-  return clamp((dot(velocity,velocity)-fall*fall)/(scale*scale),0.0,1.0);
+  return smoothstep(PARTICLE_MOTION_ONSET,1.0,(dot(velocity,velocity)-fall*fall)/(scale*scale));
 }
 
 fn particleColor(at:u32,velocity:vec3f)->vec4f {
   let scale=max(overlay.scale.w,1e-6);
   if (overlay.records.z==1u) {
     let t=particleAgitation(at,velocity);
-    // Suppress the low-energy tint that reveals particle residency. Keep the
-    // original colour ramp and full-energy opacity, so energetic fluid still
-    // builds into bright opaque whitewater through the optical-depth sum.
-    return vec4f(mix(PARTICLE_STILL,PARTICLE_RUSHING,t),t*t*t);
+    // Suppress the low-energy tint that reveals particle residency: past the
+    // onset, opacity still rises steeply, and only full energy is opaque.
+    return vec4f(mix(PARTICLE_STILL,PARTICLE_RUSHING,t),t*t);
   }
   let t=clamp(length(velocity)/scale,0.0,1.0);
   return vec4f(mix(mix(PARTICLE_SLOW,PARTICLE_MID,clamp(2.0*t,0.0,1.0)),PARTICLE_FAST,clamp(2.0*t-1.0,0.0,1.0)),1.0);
@@ -391,6 +395,9 @@ export const particleMotionCompositeShader = /* wgsl */ `
 ${particleOverlayUniformsWGSL}
 @group(0) @binding(0) var<uniform> overlay:ParticleOverlayUniforms;
 @group(0) @binding(1) var accumulated:texture_2d<f32>;
+// The most of the frame a Motion cloud covers however thick it is: foam lies on
+// the liquid's surface, and keeps some of that surface's own shading.
+const PARTICLE_MOTION_COVER:f32=0.8;
 
 @vertex fn vertexMain(@builtin(vertex_index) vertexIndex:u32)->@builtin(position) vec4f {
   var corners=array<vec2f,3>(vec2f(-1.0,-1.0),vec2f(3.0,-1.0),vec2f(-1.0,3.0));
@@ -400,7 +407,7 @@ ${particleOverlayUniformsWGSL}
 @fragment fn fragmentMain(@builtin(position) position:vec4f)->@location(0) vec4f {
   let sum=textureLoad(accumulated,vec2u(position.xy),0);
   if (!(sum.a>0.0)) { discard; }
-  return vec4f(sum.rgb/sum.a,(1.0-exp(-sum.a))*clamp(overlay.cameraRight.w,0.0,1.0));
+  return vec4f(sum.rgb/sum.a,PARTICLE_MOTION_COVER*(1.0-exp(-sum.a))*clamp(overlay.cameraRight.w,0.0,1.0));
 }
 `;
 

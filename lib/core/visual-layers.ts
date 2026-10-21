@@ -257,13 +257,13 @@ export const PARTICLE_LEGEND = [
   { color: `linear-gradient(90deg,${rgb(LAYER_PALETTE.particleSlow)},${rgb(LAYER_PALETTE.particleMid)},${rgb(LAYER_PALETTE.particleFast)})`, label: `Speed 0 · ${LAYER_PARTICLE_SPEED_SCALE / 2} · ${LAYER_PARTICLE_SPEED_SCALE} m/s`, title: "Each sphere is one particle, coloured by its own speed.", wide: true },
 ] as const;
 /** Speed in m/s, about the grid's, at which a Motion sample is white and opaque. */
-export const LAYER_PARTICLE_AGITATION_SCALE = 0.5;
+export const LAYER_PARTICLE_AGITATION_SCALE = 0.75;
 /** That speed's specific kinetic energy in J/kg: the Motion view's full scale. */
 export const LAYER_PARTICLE_ENERGY_SCALE = 0.5 * LAYER_PARTICLE_AGITATION_SCALE ** 2;
 /** The particle display's selector: off, energy as opacity, or the speed ramp. */
 export const PARTICLE_DISPLAY_OPTIONS: ReadonlyArray<{ value: ParticleDisplay; label: string; hint: string }> = [
   { value: "off", label: "Off", hint: "Draw no particles." },
-  { value: "motion", label: "Motion", hint: `Soft overlapping samples, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at ${LAYER_PARTICLE_ENERGY_SCALE} J/kg, a difference of ${LAYER_PARTICLE_AGITATION_SCALE} m/s). Liquid moving as one body stays transparent however fast it goes; low energy fades in gently, while strongly colliding, shearing or breaking liquid stays bright and opaque.` },
+  { value: "motion", label: "Motion", hint: `Soft overlapping samples, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at ${LAYER_PARTICLE_ENERGY_SCALE} J/kg, a difference of ${LAYER_PARTICLE_AGITATION_SCALE} m/s). Liquid moving as one body stays transparent however fast it goes; below a quarter of full scale nothing shows and the rest whitens steeply, fading out just under the surface. Even a thick cloud of strongly colliding, shearing or breaking liquid lets some of the surface show through.` },
   { value: "speed", label: "Speed", hint: `Opaque spheres, coloured by each particle's own speed: violet at rest, pale at ${LAYER_PARTICLE_SPEED_SCALE / 2} m/s, orange from ${LAYER_PARTICLE_SPEED_SCALE} m/s.` },
 ];
 export function scalarLayerPaint(id: VisualLayerId, value: number): { color: readonly number[]; alpha: number } {
