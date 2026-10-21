@@ -1,8 +1,9 @@
 "use client";
 
 import { Fragment } from "react";
-import { MousePointer2 } from "lucide-react";
+import { MousePointer2, RotateCcw } from "lucide-react";
 import { VOXEL_RAIL_CONTROLS, voxelToolRail } from "../lib/core/editor-voxel-tool-actions";
+import { simulation } from "../lib/core/simulation/controller";
 import { useSession } from "../lib/core/session/session-context";
 import { SHARED_TOOL_VALUES_ID, adjustableControl, controlValueOwner, controlValues, storedControlValues,
   storedToolValues, toolValues, type ToolChoiceControl, type ToolControl, type ToolNumberControl,
@@ -241,6 +242,19 @@ export function VoxelToolRail() {
         <ToolOptions plugin={guest} />
       </div>
     </>}
+    {/* Last, apart from the tools: it ends every edit rather than making one.
+        Document edits never enter the link, so the overrides chip cannot do
+        this; it is one undo step (`revertScene`). */}
+    <i className="tool-rail-rule" aria-hidden />
+    <div className="tool-rail-slot">
+      <button type="button" className="tool-rail-key" aria-label="Revert scene" disabled={pending}
+        data-testid="voxel-tool-rail-revert" onMouseDown={keepFocus}
+        onClick={() => simulation.revertScene(session.id)}>
+        <RotateCcw width={15} height={15} strokeWidth={1.7} aria-hidden />
+      </button>
+      <span className="tool-rail-tip"><strong>Revert scene</strong>
+        <small>Discard every edit and reopen the scene as authored. Camera and solver settings stay; undo brings the edits back.</small></span>
+    </div>
     {pending && <p className="tool-rail-pending" role="status">Applying…</p>}
   </nav>;
 }
