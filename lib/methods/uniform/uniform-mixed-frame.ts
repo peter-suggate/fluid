@@ -481,8 +481,8 @@ export class UniformMixedFrame {
     momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
     band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
-  this.cache=new UniformMixedMomentumCache(device,o);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.particleOrder,this.nearSettled.momentumSampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept");
+  this.cache=new UniformMixedMomentumCache(device,o,solid);
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept");
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -493,7 +493,7 @@ export class UniformMixedFrame {
   if(!f.detail)throw new Error("The mixed frame's unit taps are fields of its detail storage");
   // Momentum's unit sampler: texture32 needs float32-filterable, else texture16.
   const sampler=this.nearSettled.momentumSampler==="texture32"&&!device.features.has("float32-filterable")?"texture16":this.nearSettled.momentumSampler;
-  this.hanging=new UniformMixedHangingTaps(device,o,f.detail,sampler==="texture16");
+  this.hanging=new UniformMixedHangingTaps(device,o,f.detail,sampler==="texture16",solid);
   this.remap.bindExtension({volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{velocity:this.hanging.unitVelocity,negative:this.extensionWalls=buffer("Uniform mixed remapped extension walls",f.negativeScratch.size,GPUBufferUsage.STORAGE)});
   this.phiResolve=new UniformMixedPhiResolve(device,o,NARROW_BAND_AIR_CHANGED_WORD);this.phiResolveGroups={phi:this.phiResolve.bindHeld(f.phi),scratch:this.phiResolve.bind(f.phiScratch)};
   this.coarsePhi=new UniformCoarseVertexPhi(device,o,f.phi);

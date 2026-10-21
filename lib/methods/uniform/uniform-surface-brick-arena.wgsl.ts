@@ -423,12 +423,12 @@ fn nbStoreAuthority(p:vec3u,t0:vec3i,key:u32)->bool{
  let below=nbStoreAt((vec3i(p)-1)>>vec3u(2u),t0);
  return (below.y&(NB_STORE_STORED|NB_STORE_H))==(NB_STORE_STORED|NB_STORE_H)&&below.x==key;
 }
-// nbVertexCold: a COLD region incident to p (only those of its 16-cell planes).
+// The same physical incident-cell rule as nbVertexCold; staged cold bits
+// alone include solid padding, which must not pin a moving liquid surface.
 fn nbStoreCold(p:vec3u,t0:vec3i)->bool{
- let boundary=(p&vec3u(15u))==vec3u(0u);let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
- for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
-  let tile=nbStoreAt((vec3i(p)-vec3i(umCorner(k,2u)))>>vec3u(2u),t0);
-  if((tile.y&(NB_STORE_STORED|NB_STORE_COLD))==(NB_STORE_STORED|NB_STORE_COLD)){return true;}
+ for(var k=0u;k<8u;k++){
+  let cell=vec3i(p)-vec3i(umCorner(k,2u));let tile=nbStoreAt(cell>>vec3u(2u),t0);
+  if((tile.y&(NB_STORE_STORED|NB_STORE_COLD))==(NB_STORE_STORED|NB_STORE_COLD)&&umVertexCellCapacity(cell,tile.x)){return true;}
  }
  return false;
 }

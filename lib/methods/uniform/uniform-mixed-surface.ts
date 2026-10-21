@@ -1,3 +1,4 @@
+import { uniformSolidPointCellWGSL,uniformSolidSlideStartWGSL,uniformSolidPointOpenWGSL, uniformSolidSampleClosedWGSL } from "./uniform-solid-point-open.wgsl";
 import { uniformSurfaceFarCellWGSL } from "./uniform-surface-far-cell.wgsl";
 import { UNIFORM_SURFACE_SUPPORT_WORDS, UNIFORM_SURFACE_VELOCITY_REACH_H, uniformSurfaceTransportWGSL } from "./uniform-surface-transport.wgsl";
 import { uniformSurfaceSmoothingWGSL } from "./uniform-surface-smoothing.wgsl";
@@ -248,8 +249,8 @@ struct UMDeferred { ${this.solid?`evidence:array<u32,${2*this.ownership.capacity
 @group(1) @binding(13) var<storage,read_write> nbState:array<atomic<u32>>;
 ${this.workControl?"@group(1) @binding(15) var<storage,read> umSurfaceEvidence:array<u32>;":""}
 ${this.sourceParams?uniformMixedSourceWGSL(9):""}
-${this.workControl?.heat?uniformRegionTierWGSL(this.workControl.heat.regions,`atomicLoad(&umClaims[${this.tierWord}u+region])`,`atomicLoad(&umClaims[${this.deepWord}u+region])`):"const UM_TIER_COLD:u32=0u;fn umVertexTier(p:vec3u)->u32{return 2u;} fn umRegionDeepCold(region:u32)->bool{return false;}"}
-// A vertex every incident region of which is COLD (UniformRegionHeat) holds
+${this.workControl?.heat?uniformRegionTierWGSL(this.workControl.heat.regions,`atomicLoad(&umClaims[${this.tierWord}u+region])`,`atomicLoad(&umClaims[${this.deepWord}u+region])`,this.solid?"umVertexCellCapacity(cell,tile)":undefined):"const UM_TIER_COLD:u32=0u;fn umVertexTier(p:vec3u)->u32{return 2u;} fn umRegionDeepCold(region:u32)->bool{return false;}"}
+// A vertex incident to a COLD region with open capacity holds
 // its input phi: the same bits, so no revision moves and the trace is not run.
 // Deep COLD (the vertex's tile's region and its 26 neighbours COLD): an h
 // vertex is not stored at all. Its scratch texel is then whatever was last
@@ -430,16 +431,20 @@ fn umSurfaceTrace(p:vec3f)->vec3f{
 }
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 ${this.solid?/* wgsl */`${uniformMixedVertexBuriedWGSL}
-// Every caller needs only the open predicate; the coarse record caches it.
-fn umOpenAt(q:vec3f)->bool{return umCellIsOpen(umPointCell(q));}
+${uniformSolidPointOpenWGSL}
+${uniformSolidSlideStartWGSL}
+${uniformSolidPointCellWGSL}
 // uvTrace: walk every crossed half-cell so no characteristic tunnels a wall.
 struct UMWalk{q:vec3f,hit:bool}
-fn umWalk(p:vec3f,end:vec3f)->UMWalk{
- if(!umSolidEnabled()){return UMWalk(end,false);}
+fn umWalk(p:vec3f,destination:vec3f)->UMWalk{
+ if(!umSolidEnabled()){return UMWalk(destination,false);}
+ let end=umSlideStart(p,destination);
  let steps=max(1u,u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))));
  var previous=p;
  for(var s=1u;s<=steps;s++){let q=mix(p,end,f32(s)/f32(steps));if(!umOpenAt(q)){return UMWalk(previous,true);}previous=q;}
- return UMWalk(end,false);
+ // Sliding is still a wall hit: the released-wall air continuation must
+ // see the original outward trace even when tangential motion completed.
+ return UMWalk(end,any(end!=destination));
 }
 fn umTrace(p:vec3f)->vec3f{return umWalk(p,umSurfaceTrace(p)).q;}
 // solidClosed/solidClear: no in-domain closed cell within four cells of the
@@ -607,7 +612,7 @@ fn umHeldWeights(w:vec4f,low:bool,high:bool)->vec4f{
 // values in umCorner order (the same loads, weights and D4 sum).
 struct UMVertexCell {origin:vec3u,width:u32,corners:array<f32,8>,value:f32}
 fn umVertexCell(p:vec3f)->UMVertexCell{
- var c:UMVertexCell;var t=vec3f(0);let cell=vec3u(umPointCell(p));
+ var c:UMVertexCell;var t=vec3f(0);let cell=vec3u(${this.solid?"umOpenPointCell(p)":"umPointCell(p)"});
  if(umRegularFine){c.origin=cell;c.width=1u;t=p-vec3f(c.origin);}
  else{c.width=umTileWidth(umTileAt(cell/4u));c.origin=(cell/c.width)*c.width;t=(p-vec3f(c.origin))/f32(c.width);}
  var values:array<f32,8>;
@@ -642,7 +647,22 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
  // tap stands for the line through the two inner taps on its axis: its
  // weight moves onto them. An axis has at most one end tap past the page.
  let at=base&vec3i(31);let past=vec3i(at+vec3i(2*width)>vec3i(32))-vec3i(at<vec3i(width));
- let held=umBlockHeld(home,page,past);let lowHeld=held&(past<vec3i(0));let highHeld=held&(past>vec3i(0));
+ let held=umBlockHeld(home,page,past);var lowHeld=held&(past<vec3i(0));var highHeld=held&(past>vec3i(0));
+ ${this.solid?`// Embedded whole-cell walls use the same linear continuation as page
+ // walls. Otherwise a tiny nonzero normal departure gives a buried outer
+ // cubic tap weight and drops interpolation to trilinear in every axis.
+ if(umSolidEnabled()){
+  let own=umTileKey(base>>vec3u(2u));var capacity=0.0;
+  if(umKeyStored(own)){if(width==4){capacity=umTileOpen(own);}else{capacity=umCellOpen(base);}}
+  if(capacity==1.0){
+   for(var k=0u;k<6u;k++){
+    let axis=k/2u;var neighbour=base;neighbour[axis]+=select(-width,width,(k&1u)!=0u);
+    let tile=umTileKey(neighbour>>vec3u(2u));if(!umKeyStored(tile)){continue;}
+    var open=1.0;if(width==4){open=umTileOpen(tile);}else{open=umCellOpen(neighbour);}
+    if(open==0.0){if((k&1u)==0u){lowHeld[axis]=true;}else{highHeld[axis]=true;}}
+   }
+  }
+ }`:""}
  let wx=umHeldWeights(umCatmull(fraction.x),lowHeld.x,highHeld.x);let wy=umHeldWeights(umCatmull(fraction.y),lowHeld.y,highHeld.y);let wz=umHeldWeights(umCatmull(fraction.z),lowHeld.z,highHeld.z);
  // A weighted buried tap returns the cell's value, whichever tap it is:
  // test them ahead of the taps at one umBuried site (inlined per site, a
@@ -710,14 +730,28 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
 }
 ${uniformMixedWallVertexWGSL}
 ${uniformMixedWallAheadWGSL}
-// A vertex on a wall (a face of a stored page with a SOLID page across it;
-// an AIR page across is none) whose liquid one width inside moves onto the
+// Transport must not select a different integration or approximation rule
+// solely because an aligned wall is embedded in a padded page.
+fn umSurfaceWallVertex(p:vec3u)->bool{
+ if(umWallPlane(vec3i(p))<6u){return true;}
+ ${this.solid?`if(umSolidEnabled()&&!umSolidClear(vec3i(p))){
+  for(var k=0u;k<8u;k++){if(!umCellIsOpen(vec3i(p)-vec3i(umCorner(k,2u)))){return true;}}
+ }`:""}
+ return false;
+}
+// A vertex on a page wall or an aligned embedded wall whose liquid one
+// width inside moves onto the
 // wall takes the phi carried to that inside point, where it is liquid.
 fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
  if(params.hDt.w<=0.0){return value;}var interior=p;var contact=false;
  for(var k=0u;k<6u;k++){
-  if(umWallBlock(vec3i(p),k)==0u){continue;}
   let axis=k>>1u;let inward=select(1.0,-1.0,(k&1u)!=0u);
+  var contactWall=umWallBlock(vec3i(p),k)!=0u;
+  ${this.solid?`if(!contactWall&&p[axis]==floor(p[axis])){
+   var step=vec3f(0);step[axis]=0.25*inward;
+   contactWall=!umOpenAt(p-step)&&umOpenAt(p+step);
+  }`:""}
+  if(!contactWall){continue;}
   var probe=p;probe[axis]+=inward*f32(width);
   var speed=0.0;if(umFastSurface){speed=umFastVelocity(probe)[axis];}else{speed=umSampleVelocity(probe)[axis];}
   if(inward*speed>=-1e-6){continue;}
@@ -785,12 +819,12 @@ fn umReleasedWalls(p:vec3f,value:f32)->f32{
   if(probes>0u&&whole>0.0){result=max(result,whole-depth);}
  }return result;
 }
-${this.solid?`// Every cell at vertex q is open (an h vertex), or its tile is clear of solids.
+${this.solid?`// A wall-contact vertex remains surface state on its open side. Test each
+// stencil tap independently: tangential smoothing remains available while
+// taps buried beyond the wall reject the normal stencil.
 fn umSmoothOpen(q:vec3i,w:i32)->bool{
  if(umSolidClear(q)){return true;}
- if(w!=1){return false;}
- for(var k=0u;k<8u;k++){let cell=q-vec3i(1)+vec3i(umCorner(k,2u));if(!umSolidValid(cell)||!umCellIsOpen(cell)){return false;}}
- return true;
+ return !umSampleClosed(vec3f(q));
 }`:""}
 // A width-aligned lattice vertex, loaded directly: an h vertex from the h
 // store (an h vertex's neighbours are stored or, in a seam tile, resolved),
@@ -813,7 +847,8 @@ fn umLatticeLoad(q:vec3i,width:u32)->f32{if(width==4u){return umLoadCorner(vec3u
 // (uniform-trough-settled-tank: the wet vertex 0.93 h under the surface
 // 2e-2 h off its distance in 240 steps). The foot's gradient is the central
 // difference a width either side (taps 0..5: -x +x -y +y -z +z), held at a
-// wall (the tap is p) and, at a 4h vertex, at a closed quarter-width point.
+// wall (the tap is p), including a closed quarter-width point beside an
+// embedded wall at either resolution.
 // Off a seam that is the trilinear difference a quarter width either side,
 // in exact arithmetic; a 4h vertex at a seam takes its 4h neighbours.
 //
@@ -844,7 +879,7 @@ fn umVertexFoot(vertex:vec3u,width:u32)->UMFoot{
  for(var axis=0u;axis<3u;axis++){
   var delta=vec3f(0);delta[axis]=w;
   at[2u*axis]=umPointFromPage(page,p-delta);at[2u*axis+1u]=umPointFromPage(page,p+delta);
-  ${this.solid?/* wgsl */`if(width>1u&&!solidFootClear){
+  ${this.solid?/* wgsl */`if(!solidFootClear){
    var quarter=vec3f(0);quarter[axis]=0.25*w;
    if(umSampleClosed(umPointFromPage(page,p-quarter))){at[2u*axis]=p;}
    if(umSampleClosed(umPointFromPage(page,p+quarter))){at[2u*axis+1u]=p;}
@@ -860,7 +895,7 @@ fn umVertexFoot(vertex:vec3u,width:u32)->UMFoot{
  let g2=dot(g,g);
  if(g2>=1e-6*h*h){
   var offset=-c*g/g2;let reach=length(offset);if(reach>2.0*w){offset*=2.0*w/reach;}
-  let foot=umPointFrom(p,p+offset);
+  var foot=umPointFrom(p,p+offset);${this.solid?"if(!solidFootClear){foot=umSlideStart(p,foot);}":""}
   if(${this.solid?"solidFootClear||umOpenAt(foot)":"true"}){result.foot=foot;result.shift=p-foot;}
  }
  let eps=min(${UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S.toExponential(8)}*params.hDt.w,0.03125);if(!(eps>0.0)){return result;}
@@ -926,7 +961,7 @@ var<private> umCubicQueued:bool=false;
 const UM_CUBIC_ENTRIES=${this.cubicEntries}u;
 // The advected value with its smoothing (umMovedSmoothing).
 fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
- umOneStep=UM_WALL_CLIP&&umWallPlane(vec3i(p))<6u;
+ umOneStep=UM_WALL_CLIP&&umSurfaceWallVertex(vec3u(p));
  ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){umFullIdentity=true;return umLoadVertex(vec3u(p))+foot.smoothing;}
  let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let smoothing=umMovedSmoothing(foot.smoothing,p,q,width);
@@ -938,7 +973,7 @@ fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
   // for advectCubicDeferred, which finishes it as below. A third of the
   // list's lanes take the cubic: evaluated here it held every SIMD group.
   // Past the list's bound the cubic stays here.
-  if(umCubicDeferred&&${this.solid?"!walk.hit&&":""}umWallPlane(vec3i(p))==6u){
+  if(umCubicDeferred&&${this.solid?"!walk.hit&&":""}!umSurfaceWallVertex(vec3u(p))){
    let j=atomicAdd(&deferred.header[2],1u);
    if(j<UM_CUBIC_ENTRIES){let b=UM_CUBIC_BASE+5u*j;deferred.data[b]=umVertexAt(vec3u(p))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);deferred.data[b+1u]=bitcast<u32>(q.x);deferred.data[b+2u]=bitcast<u32>(q.y);deferred.data[b+3u]=bitcast<u32>(q.z);deferred.data[b+4u]=bitcast<u32>(smoothing);umCubicQueued=true;return 0.0;}
   }
@@ -1065,7 +1100,7 @@ fn umCheapAdvected(vertex:vec3u,width:u32)->vec2f{
  // Reject an insufficient numerical bound before querying the eight solid footprints.
  var result=vec4f(0.0);
  if(umSurfaceModelBeforeSolid){result=umSurfaceTransport(c,g,rho,lo,hi,h,dt,eps,p,f32(width));if(result.w==0.0){return umTransportRejected(0u);}}
- if(umWallPlane(vec3i(vertex))<6u){return umTransportRejected(2u);}
+ if(umSurfaceWallVertex(vertex)){return umTransportRejected(2u);}
  // The validated phi support rectangle consists only of stored pages.
  // Every crossed face/diagonal umBlockHeld probe is therefore stored too:
  // page projection is identity.
@@ -1097,7 +1132,7 @@ fn umEarlyFarAdvected(vertex:vec3u,width:u32)->vec2f{
  // Low-wall rounds require a missing page and cannot pass stored support;
  // merged/owner/wall lists choose their authority upstream.
  let h=params.hDt.xyz;let dt=params.hDt.w;let c=umLatticeLoad(vec3i(vertex),width);
- if(!(abs(c)>=2.0*f32(width)*min(h.x,min(h.y,h.z)))||umWallPlane(vec3i(vertex))<6u){return vec2f(0.0);}
+ if(!(abs(c)>=2.0*f32(width)*min(h.x,min(h.y,h.z)))||umSurfaceWallVertex(vertex)){return vec2f(0.0);}
  let p=vec3f(vertex);let slot=umVertexSlot(vec3i(vertex));let local=min(slot.xyz,vec3u(31u))>>vec3u(4u);
  let region=8u*slot.w+local.x+2u*local.y+4u*local.z;
  let coverage=umSurfaceEvidence[${this.modelWord}u+8u*region+5u];
@@ -1138,7 +1173,7 @@ fn umEulerAdvected(vertex:vec3u,width:u32,foot:UMFoot)->vec2f{
  let low=vec3i(floor((p-reach-origin)/16.0));let high=vec3i(floor((p+reach-origin)/16.0));
  if(any(low<vec3i(-1))||any(high>vec3i(1))){return umEulerRejected(1u);}
  var required=0u;for(var z=low.z;z<=high.z;z++){for(var y=low.y;y<=high.y;y++){for(var x=low.x;x<=high.x;x++){required|=1u<<u32((x+1)+3*(y+1)+9*(z+1));}}}
- if((coverage&required)!=required||umWallPlane(vec3i(vertex))<6u){return umEulerRejected(1u);}
+ if((coverage&required)!=required||umSurfaceWallVertex(vertex)){return umEulerRejected(1u);}
  var g=vec3f(0.0);var rho=0.0;var velocities=umHaloVelocity(region);var lo=velocities.lo;var hi=velocities.hi;var tightVelocity=false;
  if(!umVelocityCovered(region,p,select(2.0*f32(width)+${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},${UNIFORM_SURFACE_VELOCITY_REACH_H.toFixed(1)},far),coverage)){return umEulerRejected(1u);}
  let h=params.hDt.xyz;let dt=params.hDt.w;
@@ -1264,13 +1299,22 @@ fn umFarAir(vertex:vec3u)->f32{
  return umAirSource(vertex,value);
 }`:"fn umFarAir(vertex:vec3u)->f32{return -1.0;}"}
 // The cubic at a vertex of width (flags.y 1: every vertex; 2: 4h only;
-// 3, adaptive: 4h, and h of a tile whose own particles do not pin the
-// surface, its surface heat at most 1.5: the couple's theta at most 0.5).
+// 3, adaptive: 4h, and h where no incident liquid tile has surface heat
+// above 1.5 (strong particle authority).
 fn umCubicAt(vertex:vec3u,width:u32)->bool{
  if(width>1u||params.flags.y==1u){return true;}
  if(params.flags.y!=3u){return false;}
- ${this.farGate?`let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
- return bitcast<f32>(atomicLoad(&umClaims[${this.claimBytes/4+this.ownership.capacity.tiles}u+tile]))<=1.5;`:"return true;"}
+ ${this.farGate?`// A shared vertex has no preferred incident tile. Use the strongest
+ // particle authority touching it; choosing the positive-side tile makes
+ // the cubic/linear switch direction-dependent at interior heat seams too.
+ var heat=0.0;
+ for(var k=0u;k<8u;k++){
+  let cell=vec3i(vertex)-vec3i(umCorner(k,2u));
+  ${this.solid?"if(!umCellIsOpen(cell)){continue;}":""}
+  let tile=umTileKey(cell>>vec3u(2u));if(!umKeyStored(tile)){continue;}
+  heat=max(heat,bitcast<f32>(atomicLoad(&umClaims[${this.claimBytes/4+this.ownership.capacity.tiles}u+tile])));
+ }
+ return heat<=1.5;`:"return true;"}
 }
 // A deep air vertex of a still tile keeps its value (the source's plug
 // included): the tile's spread speed certificate (umReach: ceil(travel/4)+2
@@ -1330,6 +1374,13 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  umLocalSolidAdmission=false;umTraceSeedValid=false;
  umFullCubic=false;umFullIdentity=false;
  if(params.hDt.w>0.0&&umWallPlane(vec3i(vertex))<6u){return;}
+ // Embedded wall vertices need the same full trace as page-wall vertices.
+ // In particular the split fine trace has no wall integration/contact step.
+ if(params.hDt.w>0.0&&umSurfaceWallVertex(vertex)){
+  if(umHoldCold(vertex,width)){return;}
+  let far=umFarAir(vertex);if(far>=0.0){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,far);return;}
+  umQueueVertex(vertex,width);return;
+ }
  // Coarse ownership covers the whole basin. Keep its enumeration kernel
  // small: cold vertices copy directly; other vertices join the compact
  // queue before any transport proof, solid walk or characteristic work.
@@ -1404,7 +1455,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   umLocalSolidAdmission=false;umTraceSeedValid=false;
   // At zero dt the owner enumerator also supplies wall vertices; only
   // positive-dt wall jobs have already applied the wall-specific preflight.
-  let coarsePreflight=code==2u&&(params.hDt.w<=0.0||umWallPlane(vec3i(vertex))==6u);
+  let coarsePreflight=code==2u&&(params.hDt.w<=0.0||!umSurfaceWallVertex(vertex));
   if(coarsePreflight){
    if(umHoldCold(vertex,width)){continue;}
    let far=umFarAir(vertex);if(far>=0.0){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,far);continue;}
@@ -1480,13 +1531,8 @@ ${this.solid?/* wgsl */`// A closed owner's corners are not all state (umVertexB
 // owner's, and a closed h cell's beside an h seam, whose buried corners hold
 // the air sentinel. A search from the seam's 4h corner found that sentinel's
 // zero a tenth of a cell away, sixteen cells under the surface.
-fn umSampleClosed(q:vec3f)->bool{
- if(!umSolidEnabled()){return false;}
- let c=umPointCell(q);let tile=c>>vec3u(2u);let t=umTileKey(tile);
- if(!umKeyStored(t)){return umTileOpenAt(tile)<=1e-5;}
- if(umTileWidth(t)==4u){return umTileOpen(t)<=1e-5;}
- return !umCellIsOpen(c);
-}`:""}
+${uniformSolidSampleClosedWGSL}
+`:""}
 // Each face direction's (2*axis+side) largest dt*away over the wall faces
 // umReleasedWalls can probe that pass its release test, as f32 bits
 // (positive floats order as u32), in umClaims[UM_WALL_REACH+direction]

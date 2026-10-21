@@ -668,6 +668,13 @@ fn umSolidAt(q:vec3i)->bool{
  return umHostSolid(q);
 }
 fn umSolidTile(p:vec3u)->bool{return umSolidAt(vec3i(p));}
+// Coupled tiles include fully open neighbours of a wall. They need solid
+// geometry support, but are not obstacles to tangential flow. Impact and
+// approach use the baked capacity instead of that support mask.
+fn umObstacleAt(q:vec3i)->bool{
+ let t=umTileKey(q);if(umKeyStored(t)){return solidRecord[t].x<1.0;}
+ return umSolidAt(q);
+}
 ${uniformSolidRefinementWGSL(this.solidGeometry.count)}
 // Tiles between tile t and the closed wall of its page across direction k
 // (-x,-y,-z,+x,+y,+z): the SOLID page there. NO_WALL where that page is
@@ -710,7 +717,7 @@ fn umBoundary(tile:u32,p:vec3u,width:u32,c:TileClass)->Boundary{
   var met=4.0*f32(beyond)<=reach;
   for(var n=1u;!met&&n<=min(beyond,CAP)&&4.0*f32(n-1u)<=reach;n++){
    var q=vec3i(p);q[a]+=select(-i32(n),i32(n),high);
-   met=umSolidAt(q);
+   met=umObstacleAt(q);
   }
   if(!met){continue;}
   result.score=max(result.score,travel[k]/threshold);
@@ -1030,7 +1037,7 @@ fn umApproach(p:vec3u,tile:u32)->f32{
    if(n>limit){break;}
    // An AIR page is air.
    if(w==0u){air=true;continue;}
-   if(umSolidAt(q)){gapCells=4.0*f32(n-1u)+gap;break;}
+   if(umObstacleAt(q)){gapCells=4.0*f32(n-1u)+gap;break;}
    let t=512u*w+umTileLocal(vec3u(q));
    if(!umTileWet(t)){air=true;continue;}
    // Liquid with no air before it is this surface's own.
@@ -1371,6 +1378,16 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
  if(umBit(${HEADER}u,tile)){return;}
  let p=vec3i(umTileCoord(tile));
  let a=umWindowTile(p-vec3i(1));let b=umWindowTile(p+vec3i(1));
+ // Mirror the nearest open tile's resolution into closed padding. A
+ // diagonal fine neighbour must not widen the fine band along a flat wall
+ // when the tile directly across that wall is coarse.
+ var wallDistance=4;
+ if(solidRecord[tile].x==0.0){
+  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
+   let q=vec3i(x,y,z);let t=umTileKey(q);
+   if(umKeyStored(t)&&solidRecord[t].x>1e-5){let d=abs(q-p);wallDistance=min(wallDistance,d.x+d.y+d.z);}
+  }}}
+ }
  ${this.warmSolids?`// warmResolution "4h": a COLD region keeps its widths. Its h tile stays h
  // (with or without a cut of its own), and its tiles promote no neighbour:
  // that relayout of the frozen pool warmed the region through the remap's
@@ -1380,8 +1397,16 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
   let t=umTileKey(vec3i(x,y,z));
   if(!keep){
-   if(!umKeyStored(t)||!umBit(activeIndex(0u),t)){continue;}
-   ${this.warmSolids?`if(t!=tile&&bounds[CC_TIER+umPageOfTile(t)]==${UNIFORM_REGION_TIER.cold}u){continue;}`:""}
+   if(!umKeyStored(t)){continue;}
+   // A closed coarse tile must not impose 4h hanging vertices on an h
+   // liquid wall. Exterior SOLID pages have no such vertex authority;
+   // give embedded padding the open neighbour's boundary resolution.
+   // Read decide's frozen bits, not this pass's band writes: promotion
+   // cannot race or recursively spread through the padding.
+   let d=abs(vec3i(x,y,z)-p);
+   let wallSupport=solidRecord[tile].x==0.0&&d.x+d.y+d.z==wallDistance&&solidRecord[t].x>1e-5&&(umBit(CC_DECIDED,t)||umStaticFine(t));
+   if(!wallSupport&&!umBit(activeIndex(0u),t)){continue;}
+   ${this.warmSolids?`if(!wallSupport&&t!=tile&&bounds[CC_TIER+umPageOfTile(t)]==${UNIFORM_REGION_TIER.cold}u){continue;}`:""}
   }
   atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
   atomicAdd(&census[2],1u);atomicAdd(&census[19],1u);recordReason(tile,${REASON.solid}u);
@@ -1619,7 +1644,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
    if(entry==="classify")return {pipeline,when,x:Math.min(CENSUS_TILE_GRID,tiles),y:0};
    if(entry==="boundCubes")return {pipeline,when,x:blocks,y:0};
    if(entry==="interfaceBlocks")return {pipeline,when,x:Math.ceil(blocks/64),y:0};
-   if(entry==="activityCutoff"||entry==="activityTiePrefix")return {pipeline,when,x:1,y:0};
+   if(entry==="activityCutoff")return {pipeline,when,x:1,y:0};
    return {pipeline,when,x:gx,y:gy};
   };
   return [launch("classify",0),launch("classifyCoarse",0),launch("importance",1),...NARROW_BAND_BUDGET_ENTRIES.map(entry=>launch(entry,2)),

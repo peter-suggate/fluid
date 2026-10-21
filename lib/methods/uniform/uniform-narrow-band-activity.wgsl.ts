@@ -60,6 +60,9 @@ fn nbInterpolatedHeat(home:vec3i,p:vec3f,surface:bool)->f32{
  let page=home>>vec3u(3u);let block=nbHomeBlock(page,base>>vec3u(3u),(base+1)>>vec3u(3u));
  for(var k=0u;k<8u;k++){
   let bit=umCorner(k,2u);let c=umTileNearFromPage(block,page,base+vec3i(bit));let t=umTileAt(vec3u(c));
+  // Solid padding is not cold liquid. Extrapolate the open-side heat
+  // through the wall, as the page boundary clamp already does.
+  if(umTileOpen(t)<=1e-5){continue;}
   let w=select(1.0-f,f,bit!=vec3u(0));
   let offset=select(NB_ACTIVITY_THETA,NB_ACTIVITY_SURFACE_HEAT,surface);
   let heat=bitcast<f32>(atomicLoad(&bins[offset+t]));
@@ -70,7 +73,7 @@ fn nbInterpolatedHeat(home:vec3i,p:vec3f,surface:bool)->f32{
   let weight=w.x*w.y*w.z;coveredWeight+=weight;
   theta+=weight*clamp(heat-select(0.0,1.0,surface),0.0,1.0);
  }
- return clamp(theta/select(1.0,max(coveredWeight,1e-20),surface),0.0,1.0);
+ return clamp(theta/max(coveredWeight,1e-20),0.0,1.0);
 }
 // A point inside a cell of a page that is not SOLID is reached from its own
 // tile. A vertex, which may lie on a wall, names the tile that asks (From).

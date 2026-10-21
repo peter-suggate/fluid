@@ -87,7 +87,7 @@ import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
-import { narrowBandFineAdvection } from "./uniform-narrow-band-controls";
+import { narrowBandFineAdvection, narrowBandParticleCellCap } from "./uniform-narrow-band-controls";
 import { UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
@@ -97,6 +97,7 @@ export interface WebGPUUniformReferenceOptions {
   narrowBandAdaptiveBudgetPercent?: number;
   narrowBandAdaptiveFadeSeconds?: number;
   narrowBandSparseParticleLifetime?: number;
+  narrowBandParticleCellCap?: number;
   /** Seconds over which NB-FLIP closes its gap to the volume budget; zero for no volume control. */
   narrowBandVolumeControlSeconds?: number;
   narrowBandFinePadding?: number;
@@ -327,6 +328,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private narrowBandAdaptiveBudgetPercent: number;
   private narrowBandAdaptiveFadeSeconds: number;
   private narrowBandSparseParticleLifetime: number;
+  private narrowBandParticleCellCap: number;
   private narrowBandVolumeControlSeconds: number;
 
   private narrowBandFinePadding: number;
@@ -343,12 +345,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const stage=this.mixedFrame?.narrowBandFlip;if(!stage)return undefined;
     // One record, rewritten by each read: the values are the stage's at the read.
     const info=this.narrowBandFlipRecord??=this.narrowBandFlipInfoOf(stage),d=stage.diagnostics;
-    info.adaptiveBudgetPercent=this.narrowBandAdaptiveBudgetPercent;info.adaptiveFadeSeconds=this.narrowBandAdaptiveFadeSeconds;info.sparseParticleLifetime=this.narrowBandSparseParticleLifetime;
+    info.adaptiveBudgetPercent=this.narrowBandAdaptiveBudgetPercent;info.adaptiveFadeSeconds=this.narrowBandAdaptiveFadeSeconds;info.sparseParticleLifetime=this.narrowBandSparseParticleLifetime;info.particleCellCap=this.narrowBandParticleCellCap;
     info.particles=stage.count;info.capacity=stage.capacity;info.reseedClipped=stage.reseedClipped;info.fineGridPadding=this.narrowBandFinePadding;
     let key:keyof typeof d;for(key in d)info[key]=d[key];
     return info;
   }
-  private narrowBandFlipInfoOf(stage:UniformMixedFrame["narrowBandFlip"]){return {adaptiveBudgetPercent:this.narrowBandAdaptiveBudgetPercent,adaptiveFadeSeconds:this.narrowBandAdaptiveFadeSeconds,sparseParticleLifetime:this.narrowBandSparseParticleLifetime,particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,transfer:stage.transferMode,flipRatio:stage.transferMode==="apic"?0:0.95,...stage.diagnostics};}
+  private narrowBandFlipInfoOf(stage:UniformMixedFrame["narrowBandFlip"]){return {adaptiveBudgetPercent:this.narrowBandAdaptiveBudgetPercent,adaptiveFadeSeconds:this.narrowBandAdaptiveFadeSeconds,sparseParticleLifetime:this.narrowBandSparseParticleLifetime,particleCellCap:this.narrowBandParticleCellCap,particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,transfer:stage.transferMode,flipRatio:stage.transferMode==="apic"?0:0.95,...stage.diagnostics};}
   private narrowBandFlipRecord?:ReturnType<WebGPUUniformReferenceSolver["narrowBandFlipInfoOf"]>;
   private appliedRuntimeValues?: MethodParamValues;
   /** Two-level velocity sampling; off when the lattice has no 4h table. */
@@ -632,9 +634,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   ) {
 
 
-    this.narrowBandAdaptiveBudgetPercent = Math.max(0,Math.min(100,options.narrowBandAdaptiveBudgetPercent??50));
+    this.narrowBandAdaptiveBudgetPercent = Math.max(0,Math.min(100,options.narrowBandAdaptiveBudgetPercent??100));
     this.narrowBandAdaptiveFadeSeconds = Math.max(0.05,Math.min(2,options.narrowBandAdaptiveFadeSeconds??0.5));
     this.narrowBandSparseParticleLifetime = Math.max(0,Math.min(10,options.narrowBandSparseParticleLifetime??2));
+    this.narrowBandParticleCellCap=narrowBandParticleCellCap(options.narrowBandParticleCellCap);
     this.narrowBandVolumeControlSeconds = Math.max(0,Math.min(2,options.narrowBandVolumeControlSeconds??0.1));
 
     this.narrowBandFinePadding = options.narrowBandFinePadding ?? 0;
@@ -1163,6 +1166,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
     },this.address.openTop,this.pressureSchedule);
+    this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
@@ -2312,6 +2316,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandAdaptiveBudgetPercent=finite("adaptiveBudgetPercent",this.narrowBandAdaptiveBudgetPercent,0,100);
     this.narrowBandAdaptiveFadeSeconds=finite("adaptiveFadeSeconds",this.narrowBandAdaptiveFadeSeconds,0.05,2);
     this.narrowBandSparseParticleLifetime=finite("sparseParticleLifetime",this.narrowBandSparseParticleLifetime,0,10);
+    this.narrowBandParticleCellCap=narrowBandParticleCellCap(values.particleCellCap,this.narrowBandParticleCellCap);
+    if(this.mixedFrame)this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;
     this.narrowBandVolumeControlSeconds=finite("volumeControlSeconds",this.narrowBandVolumeControlSeconds,0,2);
     this.pressureMultigrid.setResidualTolerance(finite("pressureResidualTolerance", UNIFORM_PRESSURE_RESIDUAL_TOLERANCE, 0, 100));
     // Switching to "fixed" mid-run restores the full encoded schedule on the

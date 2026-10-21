@@ -9,7 +9,7 @@ import { UNIFORM_DETAIL_CRITERION_PARAMS, UNIFORM_DETAIL_RANGES, uniformDetailSe
 import { UNIFORM_DETAIL_CRITERIA, type UniformDetailCriterion } from "../lib/methods/uniform/uniform-stage-grids";
 import { IMPORTANCE_LEGEND, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
 import { uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
-import { NARROW_BAND_ACTIVITY_CONTROLS, narrowBandControlValues } from "../lib/methods/uniform/uniform-narrow-band-controls";
+import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP, narrowBandControlValues } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { Grid3X3 } from "lucide-react";
 import { ToolstripMenuButton, ToolstripMenuItem, ToolstripMenuRule, ToolstripRow, useToolstripSection } from "./toolstrip";
 import { Facts, Field, FieldList, FieldNote, NumberInput, RangeField, ToggleButton } from "./ui";
@@ -104,8 +104,10 @@ export function UniformDetailRow() {
       {NARROW_BAND_ACTIVITY_CONTROLS.map(c => <RangeField key={c.key} label={c.label} value={activityValues[c.key]}
         min={c.min} max={c.max} step={c.step} digits={c.digits} unit={c.unit} hint={c.hint}
         onInput={value => set(c.key, value)} onChange={value => set(c.key, value)} />)}
-      <ToolstripMenuRule />
     </>}
+    <RangeField label={CAP.label} value={activityValues[CAP.key]} min={CAP.min} max={CAP.max} step={CAP.step} digits={CAP.digits}
+      hint={CAP.hint} onInput={value => set(CAP.key, value)} onChange={value => set(CAP.key, value)} />
+    <ToolstripMenuRule />
     <ToolstripMenuItem multiple label="Surface" title={SURFACE_ONLY_HINT} active={settings.surfaceOnly}
       testId="scene-detail-surface" onClick={() => set("detailSurface", settings.surfaceOnly ? "off" : "on")} />
     {settings.surfaceOnly && <RangeField label="Surface distance" value={settings.surfaceDistance} min={0} max={3} step={1} digits={0} unit="tiles"

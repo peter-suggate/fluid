@@ -23,6 +23,15 @@ fn umCoarseSolidFaceExact(t:u32,axis:u32)->bool{
   default:{return (second.y>>8u)==(expected&0xffffu)&&second.z==expected&&second.w==expected;}
  }
 }
+// A closed page has no tile record. The adjacent stored tile owns all
+// sixteen low-face apertures, so absence of a neighbour is not absence of
+// geometric evidence. Unknown/air pages still cannot certify a wall.
+fn umCoarseSolidLowFaceExact(t:u32,axis:u32)->bool{
+ let row=${recordCount}u+23u*UM_TILES+UM_TILES/64u+1u+61u*t+49u+4u*axis;
+ let face=solidRecord[row].x;if(face!=0.0&&face!=0.5&&face!=1.0){return false;}
+ for(var i=0u;i<4u;i++){if(any(solidRecord[row+i]!=vec4f(face))){return false;}}
+ return true;
+}
 fn umSolidGeometryExact(t:u32)->bool{
  let capacity=solidRecord[t].x;if(capacity!=0.0&&capacity!=1.0){return false;}
  let bodyRow=${recordCount}u+20u*UM_TILES+2u*t+1u;
@@ -30,8 +39,12 @@ fn umSolidGeometryExact(t:u32)->bool{
  let c=vec3i(umTileCoord(t));
  for(var a=0u;a<3u;a++){
   var d=vec3i(0);d[a]=1;let n=umTileKey(c-d);
-  if(!umKeyStored(n)){return false;}
-  if(!umCoarseSolidFaceExact(t,a)||!umCoarseSolidFaceExact(n,a)){return false;}
+  if(!umCoarseSolidFaceExact(t,a)){return false;}
+  if(!umKeyStored(n)){
+   if(umTileKind(c-d)!=UM_SOLID||!umCoarseSolidLowFaceExact(t,a)){return false;}
+   continue;
+  }
+  if(!umCoarseSolidFaceExact(n,a)){return false;}
   if(solidRecord[${recordCount}u+20u*UM_TILES+2u*n+1u].z>0.5){return false;}
  }
  return true;

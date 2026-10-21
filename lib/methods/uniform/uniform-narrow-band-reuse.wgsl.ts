@@ -46,19 +46,18 @@ const NB_REUSE_NEAREST_VALID:u32=${l.nearestValid}u;const NB_REUSE_NEAREST_STATE
 // Region work tiers (UniformRegionHeat): COLD 0, WARM 1, HOT 2. A COLD
 // region's producers hold phi (no write, no revision bump) and its
 // consumers keep their retained outputs. A vertex is COLD when any stored
-// region holding it is (umVertexTier's lowest-tier rule), so a COLD
+// region with open capacity holding it is (umVertexTier), so a COLD
 // region's closure is never written.
 const NB_TIER:u32=${l.tiers}u;
 fn nbRegionCold(region:u32)->bool{return region<NB_REUSE_REGIONS&&atomicLoad(&bins[NB_TIER+region])==0u;}
 fn nbTileCold(tile:u32)->bool{return umKeyStored(tile)&&nbRegionCold(umPageOfTile(tile));}
 fn nbVertexCold(p:vec3u)->bool{
- let boundary=(p&vec3u(15u))==vec3u(0u);
- let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
- // Enumerate only incident regions: interior vertices have one, not eight.
- for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
-  let side=umCorner(k,2u);
-  let tile=umTileKey((vec3i(p)-vec3i(side))>>vec3u(2u));if(!umKeyStored(tile)){continue;}
-  if(nbRegionCold(umPageOfTile(tile))){return true;}
+ // Cold solid padding is not liquid state and cannot freeze the shared
+ // surface. Enumerate cells, including both sides of an embedded wall.
+ for(var k=0u;k<8u;k++){
+  let cell=vec3i(p)-vec3i(umCorner(k,2u));let tile=umTileKey(cell>>vec3u(2u));
+  if(!umKeyStored(tile)||!nbRegionCold(umPageOfTile(tile))){continue;}
+  if(umVertexCellCapacity(cell,tile)){return true;}
  }
  return false;
 }

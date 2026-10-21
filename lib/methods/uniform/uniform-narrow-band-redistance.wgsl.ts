@@ -93,7 +93,7 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
    if(abs(value)<4.5){
     // The trace moves a cell and a half at most a turn: its cell is asked
     // again from the cell it has reached, and a wall holds both.
-    var q=vec3f(p);var cell=vec3i(c);
+    var q=vec3f(p);var cell=umOpenPointCell(q);
     for(var iteration=0u;iteration<5u;iteration++){
      // A solid's phi is not the liquid's: traced into a wall, the vertices on
      // it found the wall for a surface, and no samples were seeded beside it.
@@ -101,7 +101,7 @@ fn nbBuildDistance(p:vec3u,c:vec3u,tile:u32){
      let sample=nbPhiGradient(vec3u(cell),q);let f=sample.w;if(abs(f)<1e-5){distance=min(distance,length(q-vec3f(p)));break;}
      let g=sample.xyz;
      let g2=dot(g,g);if(g2<1e-8){break;}
-     q=nbPointNear(cell,q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2));cell=nbCellNear(cell,vec3i(floor(q)));
+     q=umSlideStart(q,nbPointNear(cell,q-clamp(f/sqrt(g2),-1.5,1.5)*g*inverseSqrt(g2)));cell=nbCellNear(cell,umOpenPointCell(q));
     }
    }
    value=sign(initial)*max(distance,1e-8/h);

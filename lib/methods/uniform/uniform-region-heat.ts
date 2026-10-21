@@ -125,7 +125,7 @@ ${uniformRegionTierWGSL(regions,"umWorkTier[region]",`umWorkTier[${UNIFORM_REGIO
 /** The same accessors over a copy of the tiers the module already binds:
  * load reads region's tier (a WGSL expression in region); deepLoad, when
  * given, its deep COLD word (umRegionDeepCold). */
-export function uniformRegionTierWGSL(regions:number,load:string,deepLoad?:string):string{return /* wgsl */`
+export function uniformRegionTierWGSL(regions:number,load:string,deepLoad?:string,vertexCapacity?:string):string{return /* wgsl */`
 ${deepLoad?`fn umRegionDeepCold(region:u32)->bool{if(region>=${regions}u){return false;}return ${deepLoad}!=0u;}`:""}
 const UM_TIER_COLD:u32=0u;const UM_TIER_WARM:u32=1u;const UM_TIER_HOT:u32=2u;
 const UM_TIER_REGIONS:u32=${regions}u;
@@ -133,12 +133,14 @@ fn umRegionTier(region:u32)->u32{if(region>=UM_TIER_REGIONS){return UM_TIER_HOT;
 fn umRegionTierAtTile(tile:u32)->u32{if(!umKeyStored(tile)){return UM_TIER_HOT;}return umRegionTier(umPageOfTile(tile));}
 fn umVertexTier(p:vec3u)->u32{
  var tier=UM_TIER_HOT+1u;
- let boundary=(p&vec3u(15u))==vec3u(0u);
+ let boundary=${vertexCapacity?"vec3<bool>(true)":"(p&vec3u(15u))==vec3u(0u)"};
  let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
- // Enumerate only incident regions: interior vertices have one, not eight.
+ // Without geometry, enumerate incident regions. With geometry, visit each
+ // incident cell: a cold solid interior must not freeze its liquid wall.
  for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
   let side=umCorner(k,2u);
-  let tile=umTileKey((vec3i(p)-vec3i(side))>>vec3u(2u));if(!umKeyStored(tile)){continue;}
+  let cell=vec3i(p)-vec3i(side);let tile=umTileKey(cell>>vec3u(2u));if(!umKeyStored(tile)){continue;}
+  ${vertexCapacity?`if(!(${vertexCapacity})){continue;}`:""}
   tier=min(tier,umRegionTier(umPageOfTile(tile)));
  }
  return select(tier,UM_TIER_HOT,tier>UM_TIER_HOT);

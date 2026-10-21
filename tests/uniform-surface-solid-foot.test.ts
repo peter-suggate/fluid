@@ -1,8 +1,74 @@
+import {uniformSolidSlideStartWGSL} from "../lib/methods/uniform/uniform-solid-point-open.wgsl";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {readFileSync} from "node:fs";
 import {uniformSurfaceSmoothingWGSL} from "../lib/methods/uniform/uniform-surface-smoothing.wgsl";
 import {withUniformDevice} from "./helpers/uniform-geometric";
+
+test("fine and coarse surface feet keep tangential slopes at both aligned walls",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+ await withUniformDevice("wall surface foot",async device=>{
+  const source=readFileSync(new URL("../lib/methods/uniform/uniform-mixed-surface.ts",import.meta.url),"utf8");
+  const raw=source.slice(source.indexOf("struct UMFoot {"),source.indexOf("// The departure of a vertex from its foot:"));
+  const foot=Function("UNIFORM_MIXED_VERTEX_SMOOTHING_PER_S","return `"+raw+"`;").call({solid:{coarse:{}},workControl:{}},.5) as string;
+  const contactRaw=source.slice(source.indexOf("// A vertex on a page wall"),source.indexOf("// The six wall reach words"));
+  const contact=Function("return `"+contactRaw+"`;").call({solid:true}) as string;
+  const output=device.createBuffer({size:4*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  const module=device.createShaderModule({code:`
+struct Params {hDt:vec4f};var<private> params:Params;
+@group(0) @binding(0) var<storage,read_write> output:array<vec4f>;
+fn umPointCell(p:vec3f)->vec3u{return vec3u(floor(p));}
+// Low wall is a page boundary; high wall is embedded padding.
+fn umPointFromPage(page:vec3u,p:vec3f)->vec3f{return max(p,vec3f(0));}
+fn umPointFrom(p:vec3f,q:vec3f)->vec3f{return max(q,vec3f(0));}
+fn umCanonicalSupportAt(p:vec3f,reach:f32)->bool{return false;}
+fn umSolidEnabled()->bool{return true;}
+fn umSampleClosed(p:vec3f)->bool{return p.z>32.0||p.z<0.0;}
+fn umOpenAt(p:vec3f)->bool{return !umSampleClosed(p);}
+fn umSmoothOpen(p:vec3i,w:i32)->bool{return umOpenAt(vec3f(p));}
+fn umLatticeLoad(p:vec3i,w:u32)->f32{
+ if(p.z>32){return 16.0;}
+ return .25+.2*(f32(p.x)-16.0)+.3*(f32(p.y)-16.0);
+}
+fn umLoadCorner(p:vec3u)->f32{return umLatticeLoad(vec3i(p),4u);}
+fn umLoadVertex(p:vec3u)->f32{return umLatticeLoad(vec3i(p),1u);}
+fn umWallWithin(p:vec3i,axis:u32,reach:i32)->bool{return false;}
+${uniformSurfaceSmoothingWGSL}
+${uniformSolidSlideStartWGSL}
+${foot}
+const umFastSurface=false;const UM_WALL_CLIP=true;
+var<private> umLastTravel:vec3f;
+fn umWallBlock(p:vec3i,k:u32)->u32{return select(0u,1u,k==4u&&p.z==0);}
+fn umSampleVelocity(p:vec3f)->vec3f{return vec3f(0,0,.01*(p.z-16.0));}
+fn umFastVelocity(p:vec3f)->vec3f{return umSampleVelocity(p);}
+struct Walk {q:vec3f}
+fn umWalk(p:vec3f,q:vec3f)->Walk{return Walk(q);}
+fn umTrace(p:vec3f)->vec3f{return p;}
+fn umSampleVertex(p:vec3f)->f32{return -.25+.001*(p.z-16.0)*(p.z-16.0);}
+${contact}
+@compute @workgroup_size(4) fn main(@builtin(local_invocation_index) i:u32){
+ params.hDt=vec4f(1,1,1,0);
+ let p=vec3u(16,16,select(0u,32u,(i&1u)!=0u));
+ let result=umVertexFoot(p,select(1u,4u,i>=2u));
+ params.hDt.w=1.0/60.0;
+ output[i]=vec4f(result.foot,umWallContact(vec3f(p),.5,select(1u,4u,i>=2u)));
+}`});
+  assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
+  const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
+  const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
+  const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try{
+   const e=device.createCommandEncoder(),p=e.beginComputePass();p.setPipeline(pipeline);p.setBindGroup(0,group);p.dispatchWorkgroups(1);p.end();e.copyBufferToBuffer(output,0,read,0,output.size);device.queue.submit([e.finish()]);
+   await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange());
+   for(let i=0;i<4;i++){
+    assert.ok(Math.abs(values[4*i]!-(16-.25*.2/.13))<1e-5,`case ${i}: x foot`);
+    assert.ok(Math.abs(values[4*i+1]!-(16-.25*.3/.13))<1e-5,`case ${i}: y foot`);
+    assert.equal(values[4*i+2],i%2?32:0,"normal foot stays on the wall");
+    const inside=16-(i>=2?4:1);
+    assert.ok(Math.abs(values[4*i+3]!-(-.25+.001*inside*inside))<1e-6,"contact continuation matches at either wall");
+   }
+  }finally{if(read.mapState==="mapped")read.unmap();read.destroy();output.destroy();}
+ });
+});
 
 // Actual source operator comparison without duplicated foot or smoothing code.
 test("exact regional foot clearance preserves curved moving and cut-solid feet",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
@@ -29,6 +95,7 @@ fn umLoadCorner(p:vec3u)->f32{return umLatticeLoad(vec3i(p),4u);}
 fn umLoadVertex(p:vec3u)->f32{return umLatticeLoad(vec3i(p),1u);}
 fn umWallWithin(p:vec3i,axis:u32,reach:i32)->bool{return false;}
 ${uniformSurfaceSmoothingWGSL}
+${uniformSolidSlideStartWGSL}
 ${foot}
 @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id:vec3u){
  let i=id.x;if(i>=128u){return;}mode=(i/2u)%3u;moving=(f32(i%17u)-8.0)*.013;
@@ -39,7 +106,7 @@ ${foot}
  output[a+6u]=bitcast<u32>(result.smoothing);output[a+7u]=bitcast<u32>(result.center);
  output[a+8u]=u32(umSlow);output[a+9u]=u32(umHold);output[a+10u]=calls;
 }`});
-  assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
+  assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
   const run=async(enabled:boolean)=>{
    const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main",constants:{umExactSolidSupport:Number(enabled)}}});
    const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
@@ -80,7 +147,7 @@ test("actual regional helper rejects tagged pages and boxes outside its 27-regio
   const output=device.createBuffer({size:4*cases.length,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
   const module=device.createShaderModule({code:`
 @group(0) @binding(0) var<storage,read> input:array<vec4u>;
-@group(0) @binding(1) var<storage,read_write> umClaims:array<atomic<u32>>;
+@group(0) @binding(1) var<storage,read> umSurfaceEvidence:array<u32>;
 @group(0) @binding(2) var<storage,read_write> output:array<u32>;
 var<private> slotWord:u32;
 fn umVertexSlot(p:vec3i)->vec4u{return vec4u(0,0,0,slotWord);}
@@ -92,7 +159,7 @@ ${rendered}
  if(id.x>=${cases.length}u){return;}let row=input[id.x];slotWord=row.x;
  output[id.x]=u32(umCanonicalSupportAt(vec3f(bitcast<f32>(row.y)),bitcast<f32>(row.z)));
 }`});
-  assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
+  assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
   const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
   const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[input,claims,output].map((buffer,binding)=>({binding,resource:{buffer}}))});
   const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});

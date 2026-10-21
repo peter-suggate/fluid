@@ -1,3 +1,5 @@
+import { particleCanonicalWGSL } from "./uniform-particle-canonical.wgsl";
+
 /** NB-FLIP particle brick slabs (docs/plans/particle-brick-slabs-2026-10-19.md).
  *
  * Every brick the move lists in the shared brick table (uniform-brick-table.ts)
@@ -45,7 +47,8 @@ export function particleSlabWords(blocks:number):number{return NB_SLAB_HEADER_WO
 /** Minimum tail headroom: slab sizing leaves this much of each bank free. */
 export function particleSlabSpill(capacity:number):number{return Math.max(4096,Math.floor(capacity/16));}
 /** limit: the slabs' bound; spill: minimum tail headroom. Unused slab space also spills. */
-export function particleSlabWGSL(limit:number,spill:number):string{return /* wgsl */`
+export function particleSlabWGSL(limit:number,spill:number,apic=false):string{return /* wgsl */`
+${particleCanonicalWGSL(apic)}
 const NB_SLAB_LIMIT:u32=${limit}u;
 const NB_PARTICLE_CAPACITY:u32=${limit+spill}u;
 const NB_SLAB_MIN:u32=32u;
@@ -310,11 +313,20 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
   for(var k=lane;k<n;k+=256u){
    let p=source[nbSortInput(input,k)];let lc=nbSortCell(p.position.xyz,origin);
    let at=base+nbSortStart[lc]+atomicAdd(&nbSortCount[lc],1u);
-   particles[at]=p;let bits=bitcast<vec4u>(p.position);let c=UM_CELL_KEYS+4u*at;
-   links[c]=bits.x;links[c+1u]=bits.y;links[c+2u]=bits.z;links[c+3u]=bits.w;
+   particles[at]=p;
   }
   for(var k=n+lane;k<output.z;k+=256u){particles[base+k]=nbDead();}
-  workgroupBarrier();
+  // Atomic append order must never reach floating reductions or retirement.
+  // Each lane sorts disjoint cell runs; storage barriers publish the scatter
+  // before sorting and the sorted records before rebuilding compact positions.
+  storageBarrier();workgroupBarrier();
+  for(var k=lane;k<512u;k+=256u){nbCanonicalCell(base+nbSortStart[k],atomicLoad(&nbSortCount[k]));}
+  storageBarrier();
+  for(var k=lane;k<n;k+=256u){
+   let at=base+k;let bits=bitcast<vec4u>(particles[at].position);let c=UM_CELL_KEYS+4u*at;
+   links[c]=bits.x;links[c+1u]=bits.y;links[c+2u]=bits.z;links[c+3u]=bits.w;
+  }
+  storageBarrier();workgroupBarrier();
   // Tiles: coverage, the occupied list and their own heat.
   if(lane<8u){
    let first=64u*lane;let population=nbSortStart[first+63u]+atomicLoad(&nbSortCount[first+63u])-nbSortStart[first];

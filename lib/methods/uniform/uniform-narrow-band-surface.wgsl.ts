@@ -97,9 +97,10 @@ var<workgroup> nbCoupleHot:array<f32,27>;
 fn nbCoupleHeatLoad(tile:u32,lane:u32){
  if(lane<27u){
   let coord=vec3i(umTileCoord(tile));let t=vec3u(umTileNearFromPage(tile>>9u,coord>>vec3u(3u),coord+vec3i(umCorner(lane,3u))-1));let key=umTileAt(t);
-  nbCoupleHeat[lane]=clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+key])),0.0,1.0);
+  let closed=umTileOpen(key)<=1e-5;
+  nbCoupleHeat[lane]=select(clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+key])),0.0,1.0),-1.0,closed);
   let own=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_SURFACE_HEAT+key]));
-  nbCoupleHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0);
+  nbCoupleHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,closed||(own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0));
  }
  workgroupBarrier();
 }
@@ -110,9 +111,9 @@ fn nbCoupleTheta(v:vec3i,surface:bool)->f32{
  for(var k=0u;k<8u;k++){
   let bit=umCorner(k,2u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));let weight=w.x*w.y*w.z;let tile=at.x+3u*(at.y+3u*at.z);
   if(surface){let hot=nbCoupleHot[tile];if(hot<0.0){continue;}covered+=weight;theta+=weight*hot;}
-  else{theta+=weight*nbCoupleHeat[tile];}
+  else{let heat=nbCoupleHeat[tile];if(heat<0.0){continue;}covered+=weight;theta+=weight*heat;}
  }
- return clamp(theta/select(1.0,max(covered,1e-20),surface),0.0,1.0);
+ return clamp(theta/max(covered,1e-20),0.0,1.0);
 }
 // The vertices a fine tile's coupleFine job reconstructs, a lane and round
 // each (w 0: none). surfaceClear clears exactly these nearest words.
@@ -257,13 +258,13 @@ var<workgroup> nbTransferHeat:array<f32,27>;
 // Negative for cold air, which nbSurfaceTheta leaves out.
 var<workgroup> nbTransferHot:array<f32,27>;
 fn nbTransferTheta(local:vec3f)->vec2f{
- let q=local/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;var hot=0.0;var covered=0.0;
+ let q=local/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;var hot=0.0;var covered=0.0;var openWeight=0.0;
  for(var k=0u;k<8u;k++){
   let bit=umCorner(k,2u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));let share=w.x*w.y*w.z;let tile=at.x+3u*(at.y+3u*at.z);
-  theta+=share*nbTransferHeat[tile];
+  if(nbTransferHeat[tile]>=0.0){openWeight+=share;theta+=share*nbTransferHeat[tile];}
   if(nbTransferHot[tile]>=0.0){covered+=share;hot+=share*nbTransferHot[tile];}
  }
- return clamp(vec2f(theta,hot/max(covered,1e-20)),vec2f(0.0),vec2f(1.0));
+ return clamp(vec2f(theta/max(openWeight,1e-20),hot/max(covered,1e-20)),vec2f(0.0),vec2f(1.0));
 }
 @compute @workgroup_size(64) fn transferProperties(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(!nbTransferFits()){return;}
@@ -287,9 +288,10 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  for(var k=lane;k<125u;k+=64u){let q=origin+umCorner(k,5u);nbTransferDepth[k]=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(q)]));}
  if(lane<27u){
   let coord=vec3i(origin>>vec3u(2u));let t=vec3u(umTileNearFromPage(owner.tile>>9u,coord>>vec3u(3u),coord+vec3i(umCorner(lane,3u))-1));
-  nbTransferHeat[lane]=clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+umTileAt(t)])),0.0,1.0);
+  let closed=umTileOpen(umTileAt(t))<=1e-5;
+  nbTransferHeat[lane]=select(clamp(bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_THETA+umTileAt(t)])),0.0,1.0),-1.0,closed);
   let own=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_SURFACE_HEAT+umTileAt(t)]));
-  nbTransferHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0);
+  nbTransferHot[lane]=select(clamp(own-1.0,0.0,1.0),-1.0,closed||(own<=0.0&&bandPhi(4.0*vec3f(t)+2.0)>=0.0));
  }
  workgroupBarrier();
  let local=umCorner(lane,4u);let cell=origin+local;var needed=false;var properties:array<vec3f,3>;
