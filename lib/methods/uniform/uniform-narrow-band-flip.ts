@@ -1,4 +1,5 @@
 import type { UniformRegionalFramePlan } from "./uniform-regional-frame-plan";
+import { GPUFluidParticleMotion } from "../../core/webgpu-particle-motion";
 import { narrowBandSparseWGSL } from "./uniform-narrow-band-sparse.wgsl";
 import { narrowBandAirWGSL, NARROW_BAND_AIR_CHANGED_WORD, NARROW_BAND_AIR_GATE_PLANE, NARROW_BAND_AIR_WORDS_PER_TILE } from "./uniform-narrow-band-air.wgsl";
 import { narrowBandParticleStride, narrowBandParticleWGSL, narrowBandApicMomentWGSL, type NarrowBandTransfer } from "./uniform-narrow-band-apic.wgsl";
@@ -191,6 +192,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private get apic():boolean{return this.transferMode==="apic";}
  readonly particles:readonly [GPUBuffer,GPUBuffer];
  readonly state:GPUBuffer;
+ private readonly displayMotion?:GPUFluidParticleMotion;
  /** The current frame's live sample count (state word 0 after move()'s
   * commit) as a uniform's first word: the particle consumers after the move
   * (transfer, snapshot, extension retain and old-epoch snapshot)
@@ -198,7 +200,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   * word is params word 12 for this module's own kernels. */
  readonly liveGate:GPUBuffer;
  private readonly baseAllocatedBytes:number;
- get allocatedBytes():number{return this.baseAllocatedBytes;}
+ get allocatedBytes():number{return this.baseAllocatedBytes+(this.displayMotion?.energy.size??0);}
  /** A word per tile key from word `offset` of the buffer: non-zero where a sample's support reached at its last move (slabSort). */
  get particleTiles():{buffer:GPUBuffer;offset:number;allocation:GPUBuffer}{return {buffer:this.bins,offset:2*this.cells+this.tiles,allocation:this.particleAllocation};}
  /** Particle occupancy and signed travel for the census: transferRefine writes them, refine copies them here. */
@@ -230,7 +232,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get particleSource():GPUFluidParticleSource{
   const h=this.ownership.capacity.lattice.cellSize_m;
   return {buffer:this.activeParticles,strideFloats:this.particleStride,capacity:this.capacity,positionScale_m:[h[0]!,h[1]!,h[2]!],
-   frame:{buffer:this.sourceParams,size:48},radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},
+   frame:{buffer:this.sourceParams,size:48},radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},motionEnergy:this.displayMotion?.energy,
    grid:{velocityFloat:8,depthFloat:7,ballisticFloat:11,ballisticSignBit:!this.apic,surfaceDepth:2}};
  }
  private readonly bins:GPUBuffer;
@@ -428,6 +430,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.particles=[buffer("particles A",this.capacity*particleBytes),buffer("particles B",this.capacity*particleBytes)];
   // The receipt, then the slab records (uniform-particle-slab.wgsl).
   this.state=buffer("receipt, particle frame and brick slabs",4*particleSlabWords(address.blocks));
+  if(sweptDelta)this.displayMotion=new GPUFluidParticleMotion(device,this.activeParticles,this.state,this.particleStride,this.capacity);
   this.spill=particleSlabSpill(this.capacity);
   // After the air planes: the occupied tile list (occupiedWord).
   this.occupiedWord=3*cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
@@ -570,6 +573,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  recordDelta(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
   if(this.idleNow)return;
   if(!this.deltaPipeline)throw new Error("Swept FLIP delta is not initialized");
+  // The move/seeds still carry their accepted grid velocity here. Preserve
+  // its display energy before before.xyz becomes a delta (or sentinel).
+  this.displayMotion?.capture(encoder);
   // recordDelta and the next move's G2P read the same tiers (nbSampleCold).
   this.syncTiers(encoder);const pass=encoder.beginComputePass(NB_SNAPSHOT_PASS);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setPipeline(uniformDetailPick(this.deltaPipeline));
@@ -590,6 +596,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   };
  }
  async initialize():Promise<void>{
+  await this.displayMotion?.initialize();
   const subgroups=this.device.features.has("subgroups")&&(this.device.adapterInfo.subgroupMinSize??0)>=32;
   await this.cache.initialize();
   if(this.pool){
@@ -1754,5 +1761,5 @@ ${narrowBandSurfaceWGSL}
    :words[3]===8?`coarse corners exceed their list (${this.coarseListCapacity} entries)`
    :`unknown particle fatal ${words[3]}`}`);
  }
- destroy():void{this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
+ destroy():void{this.displayMotion?.destroy();this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
 }

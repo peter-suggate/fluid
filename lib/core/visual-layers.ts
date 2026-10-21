@@ -18,7 +18,7 @@ export const VISUAL_LAYERS = [
   // The one layer that is not a slice: mode -1 keeps it out of the plane pass
   // and out of the layer menu. The particle overlay draws it over the whole
   // liquid, switched by the particle display (withParticleDisplay).
-  { id: "particles", requires: ["particles"], label: "Particles", color: "#8f8cdb", opacity: 1, mode: -1, description: "The method's own particles as shaded spheres through the whole liquid, coloured by speed (full scale at 2 m/s). Under the Simple surface they sit in the water: fogged by the liquid in front of them and hidden once it is deep enough. Narrow-band FLIP draws its velocity samples: the 4h surface band only, none in the Eulerian interior. The Motion view draws them as soft overlapping footprints instead, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at 0.125 J/kg, a difference of 0.5 m/s), counted in full through the top two cells of the band and fading out below. Liquid falling, sliding or streaming as one body stays dark however fast it goes; liquid colliding, shearing or breaking lights up. A droplet no grid cell carries is measured by its own kinetic energy without the speed it has along gravity (full scale at 2 m/s)." },
+  { id: "particles", requires: ["particles"], label: "Particles", color: "#8f8cdb", opacity: 1, mode: -1, description: "The method's own particles as shaded spheres through the whole liquid, coloured by speed (full scale at 2 m/s). Under the Simple surface they sit in the water: fogged by the liquid in front of them and hidden once it is deep enough. Narrow-band FLIP draws its velocity samples: the 4h surface band only, none in the Eulerian interior. The Motion view draws them as soft overlapping footprints instead, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at 0.125 J/kg, a difference of 0.5 m/s), counted in full through the top two cells of the band and fading out below. Liquid falling, sliding or streaming as one body stays transparent however fast it goes; liquid colliding, shearing or breaking lights up. A droplet no grid cell carries is measured by its own kinetic energy without the speed it has along gravity (full scale at 2 m/s)." },
   { id: "grid", requires: ["dimensions"], label: "Grid", color: "#a8c7d8", opacity: 0.7, mode: 0, description: "Represented cell boundaries, independently of field fills. Mixed Uniform draws its live h and 4h bulk owners with orange resolution seams, and hatches the tiles this frame's head relayout changed: orange refined to h, blue coarsened to 4h (a host relayout after the last transport hatches orange)." },
   { id: "velocity", requires: ["velocity"], label: "Velocity", color: "#dce9ee", opacity: 0.9, mode: 26, description: "Cell velocity magnitude and in-plane direction; full scale at 1 m/s. Mixed Uniform draws one arrow per h or 4h bulk owner, the grid momentum is advected on." },
   { id: "release", requires: ["releasedFaces"], label: "Released faces", color: "#f5be52", opacity: 1, mode: 25, description: "Solid faces released by the pressure projection." },
@@ -27,7 +27,7 @@ export type VisualLayerId = typeof VISUAL_LAYERS[number]["id"];
 /** What the importance layer shows: every criterion's winner, or one criterion's score. */
 export type ImportanceView = "all" | UniformDetailCriterion;
 /** How the particle layer paints a sphere: opaque on the speed ramp, or
- * translucent with speed as its opacity and whiteness. */
+ * translucent with agitation as its opacity and whiteness. */
 export type ParticleView = "speed" | "motion";
 export type PageView = "slice" | "3d";
 export interface VisualLayerState {
@@ -233,12 +233,10 @@ export const PARTICLE_LEGEND = [
 export const LAYER_PARTICLE_AGITATION_SCALE = 0.5;
 /** That speed's specific kinetic energy in J/kg: the Motion view's full scale. */
 export const LAYER_PARTICLE_ENERGY_SCALE = 0.5 * LAYER_PARTICLE_AGITATION_SCALE ** 2;
-/** Opacity of a particle at rest in the Motion view: nearly, not fully, transparent. */
-export const LAYER_PARTICLE_MOTION_FLOOR = 0.02;
 /** The particle display's selector: off, energy as opacity, or the speed ramp. */
 export const PARTICLE_DISPLAY_OPTIONS: ReadonlyArray<{ value: ParticleDisplay; label: string; hint: string }> = [
   { value: "off", label: "Off", hint: "Draw no particles." },
-  { value: "motion", label: "Motion", hint: `Soft overlapping samples, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at ${LAYER_PARTICLE_ENERGY_SCALE} J/kg, a difference of ${LAYER_PARTICLE_AGITATION_SCALE} m/s). Liquid moving as one body stays nearly transparent however fast it goes; liquid colliding, shearing or breaking lights up.` },
+  { value: "motion", label: "Motion", hint: `Soft overlapping samples, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at ${LAYER_PARTICLE_ENERGY_SCALE} J/kg, a difference of ${LAYER_PARTICLE_AGITATION_SCALE} m/s). Liquid moving as one body stays transparent however fast it goes; low energy fades in gently, while strongly colliding, shearing or breaking liquid stays bright and opaque.` },
   { value: "speed", label: "Speed", hint: `Opaque spheres, coloured by each particle's own speed: violet at rest, pale at ${LAYER_PARTICLE_SPEED_SCALE / 2} m/s, orange from ${LAYER_PARTICLE_SPEED_SCALE} m/s.` },
 ];
 export function scalarLayerPaint(id: VisualLayerId, value: number): { color: readonly number[]; alpha: number } {

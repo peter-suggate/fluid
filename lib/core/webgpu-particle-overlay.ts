@@ -1,6 +1,6 @@
 import { fieldVisualization, type Visualization } from "./visualization-registry";
 import {
-  LAYER_PALETTE, LAYER_PARTICLE_AGITATION_SCALE, LAYER_PARTICLE_MOTION_FLOOR, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND,
+  LAYER_PALETTE, LAYER_PARTICLE_AGITATION_SCALE, LAYER_PARTICLE_SPEED_SCALE, PARTICLE_LEGEND,
   type ParticleView,
 } from "./visual-layers";
 import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterfaces } from "./simple-water-shading";
@@ -23,7 +23,7 @@ import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterf
  * outright is dropped in the vertex stage and costs no fragments.
  *
  * The Motion view paints energy as opacity instead of speed as colour: a calm
- * sample is nearly transparent, one at full scale white and opaque, so the
+ * sample is transparent, one at full scale white and opaque, so the
  * picture is of where the liquid would be white. Speed does not make water
  * white, and no whitewater model takes it to: Ihmsen et al. 2012 count the
  * velocity a sample has relative to its neighbours, Wretborn et al. 2022 the
@@ -57,6 +57,9 @@ export interface GPUFluidParticleSource {
    * a positive float 3 while the record is live, velocity (m/s) in 4..6.
    */
   readonly buffer: GPUBuffer;
+  /** Optional squared velocity fluctuation (m²/s²), one float per record.
+   * Solvers that reuse their grid-velocity scratch publish this before reuse. */
+  readonly motionEnergy?: GPUBuffer;
   readonly strideFloats: number;
   /** Records the buffer holds. The draw never reads past it. */
   readonly capacity: number;
@@ -163,6 +166,7 @@ ${particleOverlayUniformsWGSL}
 @group(0) @binding(7) var waterFrontNormal:texture_2d<f32>;
 struct ParticleFrame{dims:vec4f,h:vec4f,origin:vec4f}
 @group(0) @binding(8) var<uniform> particleFrame:ParticleFrame;
+@group(0) @binding(9) var<storage,read> motionEnergy:array<f32>;
 
 struct VertexOut {
   @builtin(position) position:vec4f,
@@ -186,7 +190,6 @@ ${paletteWGSL("PARTICLE_MID", LAYER_PALETTE.particleMid)}
 ${paletteWGSL("PARTICLE_FAST", LAYER_PALETTE.particleFast)}
 ${paletteWGSL("PARTICLE_STILL", LAYER_PALETTE.particleStill)}
 ${paletteWGSL("PARTICLE_RUSHING", LAYER_PALETTE.particleRushing)}
-const PARTICLE_MOTION_FLOOR:f32=${LAYER_PARTICLE_MOTION_FLOOR};
 // The most one Motion sample can cover: its optical depth has to stay finite.
 const PARTICLE_MOTION_OPAQUE:f32=0.98;
 // A Motion sample is drawn this many sphere radii wide. A sphere's radius is a
@@ -208,12 +211,18 @@ fn particleAgitation(at:u32,velocity:vec3f)->f32 {
     // The energy of the sample's velocity about the grid's, which is the mean
     // of the samples around it. Entrainment happens at the surface, so a
     // sample counts less the deeper it sits.
-    let mean=vec3f(particles[at+overlay.grid.x],particles[at+overlay.grid.x+1u],particles[at+overlay.grid.x+2u]);
-    let fluctuation=velocity-mean;
+    var energy=0.0;
+    if (overlay.records.w!=0u) {
+      energy=motionEnergy[at/overlay.records.x];
+    } else {
+      let mean=vec3f(particles[at+overlay.grid.x],particles[at+overlay.grid.x+1u],particles[at+overlay.grid.x+2u]);
+      let fluctuation=velocity-mean;
+      energy=dot(fluctuation,fluctuation);
+    }
     let full=max(overlay.gravity.w,1e-6);
     let reach=f32(overlay.grid.w);
     let surface=clamp(2.0+particles[at+overlay.grid.y]/reach,0.0,1.0);
-    return clamp(dot(fluctuation,fluctuation)/(full*full),0.0,1.0)*surface;
+    return clamp(energy/(full*full),0.0,1.0)*surface;
   }
   // Kinetic energy as a fraction of the full-scale speed's, without the
   // speed a sample has along gravity: that much it got by dropping.
@@ -226,7 +235,10 @@ fn particleColor(at:u32,velocity:vec3f)->vec4f {
   let scale=max(overlay.scale.w,1e-6);
   if (overlay.records.z==1u) {
     let t=particleAgitation(at,velocity);
-    return vec4f(mix(PARTICLE_STILL,PARTICLE_RUSHING,t),mix(PARTICLE_MOTION_FLOOR,1.0,t));
+    // Suppress the low-energy tint that reveals particle residency. Keep the
+    // original colour ramp and full-energy opacity, so energetic fluid still
+    // builds into bright opaque whitewater through the optical-depth sum.
+    return vec4f(mix(PARTICLE_STILL,PARTICLE_RUSHING,t),t*t*t);
   }
   let t=clamp(length(velocity)/scale,0.0,1.0);
   return vec4f(mix(mix(PARTICLE_SLOW,PARTICLE_MID,clamp(2.0*t,0.0,1.0)),PARTICLE_FAST,clamp(2.0*t-1.0,0.0,1.0)),1.0);
@@ -487,6 +499,7 @@ export class ParticleOverlay {
         { binding: 6, visibility: GPUShaderStage.VERTEX, texture: interfaceTexture },
         { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: interfaceTexture },
         { binding: 8, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 9, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
       ],
     });
     this.compositeLayout = this.device.createBindGroupLayout({
@@ -533,7 +546,7 @@ export class ParticleOverlay {
   }
 
   setSource(source: GPUFluidParticleSource | undefined): void {
-    if(this.source?.frame?.buffer!==source?.frame?.buffer)this.bindGroups.clear();
+    if(this.source?.frame?.buffer!==source?.frame?.buffer || this.source?.motionEnergy!==source?.motionEnergy)this.bindGroups.clear();
     this.source = source;
   }
 
@@ -562,6 +575,7 @@ export class ParticleOverlay {
           { binding: 6, resource: water.rearBackPosition },
           { binding: 7, resource: water.frontNormal },
           { binding: 8, resource: this.source?.frame ?? { buffer: this.uniforms!, size: 48 } },
+          { binding: 9, resource: { buffer: this.source?.motionEnergy ?? buffer } },
         ],
       });
       this.bindGroups.set(buffer, group);
@@ -626,7 +640,7 @@ export class ParticleOverlay {
     const gravity = frame.gravity_m_s2 ?? [0, 0, 0], pull = Math.hypot(...gravity) || 1;
     f.set([gravity[0] / pull, gravity[1] / pull, gravity[2] / pull, LAYER_PARTICLE_AGITATION_SCALE], 32);
     const motion = frame.view === "motion", grid = source.grid;
-    u.set([source.strideFloats, source.capacity, motion ? 1 : 0, 0], 36);
+    u.set([source.strideFloats, source.capacity, motion ? 1 : 0, source.motionEnergy ? 1 : 0], 36);
     u.set(grid ? [grid.velocityFloat, grid.depthFloat, grid.ballisticFloat+(grid.ballisticSignBit?0x80000000:0), grid.surfaceDepth] : [0, 0, 0, 0], 40);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
