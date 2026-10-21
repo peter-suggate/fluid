@@ -1748,6 +1748,9 @@ export class FluidLabRenderer {
       if(!reseeded){this.beginGPUFluidInitialization(scene,config,key,presentationMode);return;}
       this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
       this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();
+      // Re-seeding can retain both texture identity and surface revision zero.
+      // The retained mesh still belongs to the previous seed in that case.
+      this.waterPipeline?.invalidateSurface();
       if(presentationMode === "full-scene")this.attachSparsePresentationSource(
         solver,requestGeneration,performance.now(),solver.sparseVoxelSceneSource);
       solver.info.initialRasterSurfaceReady=true;
@@ -2749,6 +2752,15 @@ export class FluidLabRenderer {
     const readyGPUFluid = gpuSceneSourceRequired
       ? this.currentGPUFluid(this.simulationScene ? interactionScene(this.simulationScene) : scene, sceneConfig, presentationMode)
       : undefined;
+    // A reset/rebuild leaves the previous water bindings attached until the
+    // replacement is ready. Extracting now would read that field with the
+    // fallback 1³ grid and shrink its mesh to the minimum allocation. Mixed
+    // fields scan their page pool regardless of that grid, overflowing it.
+    // Keep the last submitted image until field, dimensions and revision all
+    // belong to the ready source (also avoids reading an in-place reseed).
+    if (gpuSceneSourceRequired && !readyGPUFluid) {
+      return this.currentFrameMetrics(config.methodId, presentationContext, false, cpuTrace?.finish());
+    }
     const fluidSource = readyGPUFluid ?? this.gpuFluid;
     const sparseSceneProducer = sparsePresentationRequired ? this.sparseSceneProducer(fluidSource) : undefined;
     // Full scenes publish their room/terrain shell. Fluid-only scenes do not
