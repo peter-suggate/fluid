@@ -263,9 +263,9 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
   }
   if(value!=0u){nbRefinePage(region,k,value);}
  }
- let slabs=min(atomicLoad(&state[20u]),UB_BRICKS);let spilled=min(atomicLoad(&state[21u]),NB_SPILL);
+ let slabs=min(atomicLoad(&state[20u]),UB_BRICKS);let spilled=nbSpillCount(false);
  for(var job=group.x;job<slabs+(spilled+63u)/64u;job+=groups.x){
-  var first=NB_SLAB_LIMIT+64u*(job-slabs);var n=min(64u,spilled-min(64u*(job-slabs),spilled));
+  var first=nbSpillBase(false)+64u*(job-slabs);var n=min(64u,spilled-min(64u*(job-slabs),spilled));
   if(job<slabs){
    let id=atomicLoad(&state[NB_SLAB_OUT+job]);let filed=atomicLoad(&state[nbSlab(id,11u)]);
    first=atomicLoad(&state[nbSlab(id,5u)])+filed;n=nbSlabCount(id)-min(filed,nbSlabCount(id));

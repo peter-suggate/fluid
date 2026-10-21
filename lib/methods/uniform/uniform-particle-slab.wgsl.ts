@@ -9,13 +9,13 @@
  * - slabAllocate sizes the scratch slabs before the move: last move's count
  *   and a quarter more, at least NB_SLAB_MIN.
  * - An append that finds its scratch slab full goes to the scratch tail
- *   (past NB_SLAB_LIMIT) and is counted against its brick (overflow).
+ *   (past the scratch extent) and is counted against its brick (overflow).
  * - slabPlace sizes the current slabs after the move from the exact counts:
  *   the appends, the overflow, and slack for the step's seeds (more where
  *   seeds were refused last step).
- * - slabOverflow files the tail into per-brick overflow runs after the
- *   scratch slabs, where SORT reads them with the slab. No sample misses a
- *   step's transfer for want of room.
+ * - slabOverflow indexes the tail into per-brick overflow runs in the
+ *   expired motion workspace, where SORT reads them with the slab. No sample
+ *   misses a step's transfer for want of room.
  * - Holes in a current slab hold dead records (heat 0).
  * - A record whose brick has no slab at all, or a seed refused by a full
  *   current slab, joins the current bank's spill reserve. The next move
@@ -34,7 +34,7 @@
  *   cap (after slabPlace: the overflow cursor), [2] scratch cursor (after
  *   slabPlace: the appends), [3] stamp (the serial of the move that sized
  *   it), [4] overflow, [5] current base, [6] current cap, [7] current
- *   cursor, [8] seeds refused, [9] overflow base, [10] initial demand,
+ *   cursor, [8] seeds refused, [9] overflow index base, [10] initial demand,
  *   [11] the records SORT filed (the step's seeds follow them).
  * - From NB_SLAB_IN, 4 words an input entry (last move's slabs): id, current
  *   base, count, first job.
@@ -42,12 +42,12 @@
 export const NB_SLAB_HEADER_WORDS=32;
 /** Receipt-buffer words for a lattice of `blocks` blocks. */
 export function particleSlabWords(blocks:number):number{return NB_SLAB_HEADER_WORDS+17*64*blocks;}
-/** The spill reserve of a bank of `capacity` records. */
+/** Minimum tail headroom: slab sizing leaves this much of each bank free. */
 export function particleSlabSpill(capacity:number):number{return Math.max(4096,Math.floor(capacity/16));}
-/** limit: the first spill record (the slabs' bound); spill: the reserve. */
+/** limit: the slabs' bound; spill: minimum tail headroom. Unused slab space also spills. */
 export function particleSlabWGSL(limit:number,spill:number):string{return /* wgsl */`
 const NB_SLAB_LIMIT:u32=${limit}u;
-const NB_SPILL:u32=${spill}u;
+const NB_PARTICLE_CAPACITY:u32=${limit+spill}u;
 const NB_SLAB_MIN:u32=32u;
 const NB_SLAB_SEED_MIN:u32=16u;
 const NB_SLAB_RECORD:u32=${NB_SLAB_HEADER_WORDS}u;
@@ -64,6 +64,14 @@ fn nbSeedFirst()->f32{return bitcast<f32>(NB_SEED_FIRST);}
 fn nbDead()->Particle{var p=Particle();p.position=vec4f(-1.0,0.0,0.0,0.0);return p;}
 // The brick has slabs this move.
 fn nbSlabCurrent(id:u32)->bool{return id!=UB_NONE&&atomicLoad(&state[nbSlab(id,3u)])==atomicLoad(&state[17u]);}
+// Spill storage starts at each bank's actual slab extent, so a moving front
+// can use all remaining records instead of exhausting a fixed tail partition.
+fn nbSpillBase(scratch:bool)->u32{return min(atomicLoad(&state[select(0u,18u,scratch)]),NB_SLAB_LIMIT);}
+fn nbSpillCount(scratch:bool)->u32{return min(atomicLoad(&state[select(21u,16u,scratch)]),NB_PARTICLE_CAPACITY-nbSpillBase(scratch));}
+// The move's endpoint workspace is dead after advectWalk. SORT writes only
+// compact positions (the preceding 4*capacity words), so these indices stay
+// live until every brick has read its overflow. No particle is copied twice.
+fn nbOverflowIndex(k:u32)->u32{return UM_CELL_KEYS+4u*NB_PARTICLE_CAPACITY+k;}
 // A record with no room: the spill reserve of the scratch bank (the move's)
 // or the current bank's. A full reserve stops the run (state[3] = 5) unless
 // the record is optional (an overlap reseed: it is clipped and its cell is
@@ -71,8 +79,9 @@ fn nbSlabCurrent(id:u32)->bool{return id!=UB_NONE&&atomicLoad(&state[nbSlab(id,3
 // Whether the record was kept.
 fn nbSpill(p:Particle,scratch:bool,mandatory:bool)->bool{
  let k=atomicAdd(&state[select(21u,16u,scratch)],1u);
- if(k>=NB_SPILL){if(mandatory){atomicStore(&state[3],5u);}else{atomicAdd(&state[2],1u);}return false;}
- if(scratch){source[NB_SLAB_LIMIT+k]=p;}else{particles[NB_SLAB_LIMIT+k]=p;}
+ let base=nbSpillBase(scratch);
+ if(k>=NB_PARTICLE_CAPACITY-base){if(mandatory){atomicStore(&state[3],5u);}else{atomicAdd(&state[2],1u);}return false;}
+ if(scratch){source[base+k]=p;}else{particles[base+k]=p;}
  return true;
 }
 // The move's append of a record to its brick's scratch slab: one device
@@ -119,9 +128,9 @@ fn nbSlabCount(id:u32)->u32{return min(atomicLoad(&state[nbSlab(id,7u)]),atomicL
   atomicStore(&state[at],id);atomicStore(&state[at+1u],atomicLoad(&state[nbSlab(id,5u)]));atomicStore(&state[at+2u],n);
   if(n!=0u){ubMark(id,UB_PARTICLES_CORE);}
  }
- let spilled=min(atomicLoad(&state[21u]),NB_SPILL);let shift=nbHeldShift();
+ let spilled=nbSpillCount(false);let shift=nbHeldShift();
  for(var k=gid.x;k<spilled;k+=64u*groups.x){
-  let id=ubBrickAt(vec3i(floor(particles[NB_SLAB_LIMIT+k].position.xyz-shift)));
+  let id=ubBrickAt(vec3i(floor(particles[nbSpillBase(false)+k].position.xyz-shift)));
   if(id!=UB_NONE){ubMark(id,UB_PARTICLES_CORE);}
  }
 }
@@ -176,22 +185,22 @@ const NB_MOVE_CHUNK:u32=256u;
  }
 }
 // One workgroup, after the move: the current slabs from the exact counts
-// (appends and overflow) and the seeds' slack, and the overflow runs after
-// the scratch slabs. Slabs past the limit stop the run (state[3] = 6).
+// (appends and overflow) and the seeds' slack, and the overflow index runs.
+// Slabs past the limit stop the run (state[3] = 6).
 fn nbCurrentCap(id:u32)->vec2u{
  let n=min(atomicLoad(&state[nbSlab(id,2u)]),atomicLoad(&state[nbSlab(id,1u)]));let over=atomicLoad(&state[nbSlab(id,4u)]);
  let count=n+over;
  return vec2u(count+max(NB_SLAB_SEED_MIN,count/8u)+atomicLoad(&state[nbSlab(id,8u)]),over);
 }
 @compute @workgroup_size(256) fn slabPlace(@builtin(local_invocation_index) lane:u32){
- let slots=min(atomicLoad(&state[20u]),UB_BRICKS);let scratch=atomicLoad(&state[18u]);
+ let slots=min(atomicLoad(&state[20u]),UB_BRICKS);
  let span=(slots+255u)/256u;let first=lane*span;let end=min(slots,first+span);
  var total=vec2u(0u);for(var s=first;s<end;s++){total+=nbCurrentCap(atomicLoad(&state[NB_SLAB_OUT+s]));}
- var at=nbSlabPrefix(lane,total);at.y+=scratch;
+ var at=nbSlabPrefix(lane,total);
  for(var s=first;s<end;s++){
   let id=atomicLoad(&state[NB_SLAB_OUT+s]);let size=nbCurrentCap(id);
   let n=min(atomicLoad(&state[nbSlab(id,2u)]),atomicLoad(&state[nbSlab(id,1u)]));var cap=size.x;
-  if(at.x+cap>NB_SLAB_LIMIT||at.y+size.y>NB_SLAB_LIMIT){atomicStore(&state[3],6u);cap=select(0u,NB_SLAB_LIMIT-at.x,at.x<NB_SLAB_LIMIT);}
+  if(at.x+cap>NB_SLAB_LIMIT||at.y+size.y>NB_PARTICLE_CAPACITY){atomicStore(&state[3],6u);cap=select(0u,NB_SLAB_LIMIT-at.x,at.x<NB_SLAB_LIMIT);}
   atomicStore(&state[nbSlab(id,2u)],n);atomicStore(&state[nbSlab(id,1u)],0u);
   atomicStore(&state[nbSlab(id,5u)],at.x);atomicStore(&state[nbSlab(id,6u)],cap);atomicStore(&state[nbSlab(id,7u)],min(n+size.y,cap));
   atomicStore(&state[nbSlab(id,8u)],0u);atomicStore(&state[nbSlab(id,9u)],at.y);
@@ -202,16 +211,16 @@ fn nbCurrentCap(id:u32)->vec2u{
   let f=bitcast<vec3u>(umFramePage());for(var a=0u;a<3u;a++){atomicStore(&state[12u+a],f[a]);}
  }
 }
-// The scratch tail: a full slab's records to its brick's overflow run; a
+// The scratch tail: index a full slab's records in its brick's overflow run; a
 // record whose brick has no slab to the current spill reserve.
 @compute @workgroup_size(64) fn slabOverflow(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- let spilled=min(atomicLoad(&state[16u]),NB_SPILL);
+ let spilled=nbSpillCount(true);
  for(var k=gid.x;k<spilled;k+=64u*groups.x){
-  let p=source[NB_SLAB_LIMIT+k];let id=ubBrickAt(vec3i(floor(p.position.xyz)));
+  let input=nbSpillBase(true)+k;let p=source[input];let id=ubBrickAt(vec3i(floor(p.position.xyz)));
   // A live record: it counts with the slabs' (state[1]).
   if(!nbSlabCurrent(id)){if(nbSpill(p,false,true)){atomicAdd(&state[1],1u);}continue;}
   let at=atomicAdd(&state[nbSlab(id,1u)],1u);let to=atomicLoad(&state[nbSlab(id,9u)])+at;
-  if(at<atomicLoad(&state[nbSlab(id,4u)])&&to<NB_SLAB_LIMIT){source[to]=p;}else{atomicStore(&state[3],6u);}
+  if(at<atomicLoad(&state[nbSlab(id,4u)])&&to<NB_PARTICLE_CAPACITY){links[nbOverflowIndex(to)]=input;}else{atomicStore(&state[3],6u);}
  }
 }
 // The occupied tiles of the last epoch hold its cell counts: clear them
@@ -239,7 +248,7 @@ var<workgroup> nbSortWindow:array<atomic<u32>,64>;
 var<workgroup> nbSortMask:array<atomic<u32>,2>;
 var<workgroup> nbSortScan:array<u32,256>;
 var<workgroup> nbSortStray:atomic<u32>;
-// id, scratch base, appends, overflow base; current base, count, cap.
+// id, scratch base, appends, overflow index base; current base, count, cap.
 var<workgroup> nbSortJob:array<vec4u,2>;
 var<workgroup> nbSortJobs:u32;
 fn nbSortCell(q:vec3f,origin:vec3i)->u32{
@@ -255,7 +264,10 @@ fn nbSortStrays(q:vec3f,origin:vec3i,lc:u32)->bool{
  let lo=vec3i(floor((q-2.0)/4.0));let hi=vec3i(floor((q+2.0)/4.0));
  return any(lo!=rl)||any(hi!=rh);
 }
-fn nbSortInput(job:vec4u,k:u32)->u32{return select(job.w+k-job.z,job.y+k,k<job.z);}
+fn nbSortInput(job:vec4u,k:u32)->u32{
+ if(k<job.z){return job.y+k;}
+ return links[nbOverflowIndex(job.w+k-job.z)];
+}
 @compute @workgroup_size(256) fn slabSort(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane==0u){nbSortJobs=min(atomicLoad(&state[20u]),UB_BRICKS);}
  let jobs=workgroupUniformLoad(&nbSortJobs);

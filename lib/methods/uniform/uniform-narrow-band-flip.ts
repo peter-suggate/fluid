@@ -153,9 +153,9 @@ fn ndSample(p:vec3f)->vec3f{
   }
  }
  // The samples in no tile's run: each current slab's seeds, then the spill reserve.
- let slabs=min(atomicLoad(&state[20u]),UB_BRICKS);let spilled=min(atomicLoad(&state[21u]),NB_SPILL);
+ let slabs=min(atomicLoad(&state[20u]),UB_BRICKS);let spilled=nbSpillCount(false);
  for(var job=group.x;job<slabs+(spilled+ND_LANES-1u)/ND_LANES;job+=groups.x){
-  var first=NB_SLAB_LIMIT+ND_LANES*(job-slabs);var n=min(ND_LANES,spilled-min(ND_LANES*(job-slabs),spilled));
+  var first=nbSpillBase(false)+ND_LANES*(job-slabs);var n=min(ND_LANES,spilled-min(ND_LANES*(job-slabs),spilled));
   if(job<slabs){
    let id=atomicLoad(&state[NB_SLAB_OUT+job]);let filed=atomicLoad(&state[nbSlab(id,11u)]);
    first=atomicLoad(&state[nbSlab(id,5u)])+filed;n=nbSlabCount(id)-min(filed,nbSlabCount(id));
@@ -236,7 +236,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    grid:{velocityFloat:8,depthFloat:7,ballisticFloat:11,ballisticSignBit:!this.apic,surfaceDepth:2}};
  }
  private readonly bins:GPUBuffer;
- /** The spill reserve at each bank's tail (particleSlabSpill): slabs end before it. */
+ /** Minimum spill headroom; each bank also lends its unused slab space to spills. */
  private readonly spill:number;
  private readonly reuse:NarrowBandReuseLayout;
  private readonly reuseControls:GPUBuffer;
@@ -1010,13 +1010,13 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    if(ballistic){break;}
    k1=pic/h;x=q+dt*k1/3.0;stage=1u;
   }
-  // A trajectory longer than the lattice's extent arrives nowhere: fatal
-  // (this also takes a nonfinite one).
-  let reach=abs(end-q);
+  // Reject nonfinite traces before the wall clamp can hide them. The
+  // lattice reach applies to the actual collision-bounded trajectory:
+  // a far endpoint behind a tank wall still stops at that wall.
+  if(!all(abs(end)<vec3f(1e30))){atomicStore(&state[3],2u);return NbMoved(p,1u);}
+  let endpoint=nbTraceEndpoint(vec3i(floor(q)),end);
+  let reach=abs(endpoint-q);
   if(!(max(reach.x,max(reach.y,reach.z))<${NARROW_BAND_TRACE_REACH}.0)){atomicStore(&state[3],1u);return NbMoved(p,1u);}
-  // A SOLID page across a face of the page the trace starts in stops the
-  // end 0.01 cell inside that face. An AIR page or a stored one does not.
-  let endpoint=nbPointNearIn(vec3i(floor(q)),end,0.01);
   nbHullInclude(endpoint);
   // A trace box the fast launch cannot prove uncut: with no body in the
   // scene its walk alone is left (advectWalk), else the general launch
@@ -1127,7 +1127,7 @@ fn nbListWalk(i:u32,p:Particle,start:vec3f,end:vec3f){
  for(var j=gid.x;j<n;j+=64u*groups.x){
   let i=links[nbWalkList()+j];let p=particles[i];let start=p.position.xyz;
   let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let end=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));
-  let r=nbFinish(p,start,end,nbPointNearIn(vec3i(floor(start)),end,0.01),nbParticleMode(p)==1.0,false);
+  let r=nbFinish(p,start,end,nbTraceEndpoint(vec3i(floor(start)),end),nbParticleMode(p)==1.0,false);
   if(r.status==0u){nbMoveAppend(r.p);}
  }
 }
@@ -1183,7 +1183,7 @@ fn nbMove(group:u32,groups:u32,lane:u32){
   // Off: the fast launch, with a solid it cannot route.
   let off=nbFastSample&&all;
   let entries=select(0u,atomicLoad(&state[22u]),!off&&(nbFastSample||all));
-  var flat=0u;if(!nbFastSample){flat=select(atomicLoad(&state[NB_SLOW_PARTICLES]),0u,all)+min(atomicLoad(&state[21u]),NB_SPILL);}
+  var flat=0u;if(!nbFastSample){flat=select(atomicLoad(&state[NB_SLOW_PARTICLES]),0u,all)+nbSpillCount(false);}
   nbMoveJobs=vec4u(entries,(flat+63u)/64u,flat,select(atomicLoad(&state[NB_SLOW_PARTICLES]),0u,all));
  }
  let jobs=workgroupUniformLoad(&nbMoveJobs);
@@ -1206,7 +1206,7 @@ fn nbMove(group:u32,groups:u32,lane:u32){
    let k=off+lane;var r=NbMoved();r.status=1u;
    if(k<job.z){
     var i=job.y+k;
-    if(job.x==1u){i=select(NB_SLAB_LIMIT+i-jobs.w,links[UM_CELL_KEYS+i],i<jobs.w);}
+    if(job.x==1u){i=select(nbSpillBase(false)+i-jobs.w,links[UM_CELL_KEYS+i],i<jobs.w);}
     let record=particles[i];
     if(nbLive(record)){r=nbAdvect(record,i);if(r.status==2u){nbListSlow(i);r.status=1u;}}
    }
@@ -1755,7 +1755,7 @@ ${narrowBandSurfaceWGSL}
   // Liquid a source or the initial band must add has no such deferral.
   if(words[3]===4){const p=words[11]!;throw new Error(`Narrow-band FLIP: a particle arrived in page (${p&63},${(p>>>6)&63},${(p>>>12)&63}), which holds no storage; the residency closure is too small`);}
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory longer than the lattice (${NARROW_BAND_TRACE_REACH} cells an axis)`:words[3]===2?"nonfinite velocity"
-   :words[3]===5?`particle spill reserve is full: bricks refused more samples than their slabs and the ${this.spill}-record reserve hold`
+   :words[3]===5?`particle bank is full: brick overflow exhausted the free tail of the ${this.capacity}-record pool`
    :words[3]===6?`particle slabs exceed the pool: ${words[0]} records sized of ${this.capacity-this.spill} before the spill reserve (${words[1]} live)`
    :words[3]===7?`seed candidates exceed their list (${3*this.capacity} cells)`
    :words[3]===8?`coarse corners exceed their list (${this.coarseListCapacity} entries)`

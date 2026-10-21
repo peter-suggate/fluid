@@ -38,6 +38,15 @@ fn nbPointNearIn(home:vec3i,p:vec3f,inset:f32)->vec3f{
  return select(p,clamp(p,low,high),umBlockHeld(umBlockOf(page),page,d));
 }
 fn nbPointNear(home:vec3i,p:vec3f)->vec3f{return nbPointNearIn(home,p,0.0);}
+// A particle trace can cross many pages in one step. The stencil clamp
+// above only inspects home's immediate neighbours and cannot see a box
+// wall beyond them. Fixed world walls are launch constants: clamp directly
+// to those planes, preserving the full travel along every unblocked axis.
+// Open axes retain umBoxWalls' unbounded extent; residency still owns them.
+fn nbTraceEndpoint(home:vec3i,p:vec3f)->vec3f{
+ if(umFixedBox()){let walls=umBoxWalls();return clamp(p,walls.lo+vec3f(0.01),walls.hi-vec3f(0.01));}
+ return nbPointNearIn(home,p,0.01);
+}
 `;
 
 const held: [boolean, boolean, boolean] = [false, false, false], step: [number, number, number] = [0, 0, 0], page: [number, number, number] = [0, 0, 0];
