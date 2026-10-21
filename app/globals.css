@@ -759,6 +759,8 @@ button.card[data-active] { border-color: var(--accent); }
 @media (hover: none) { .scene-overlay { opacity: 1; } }
 .scene-overlay-action { flex: none; height: 31px; padding: 0 11px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--accent-line); background: var(--accent-wash); color: var(--accent); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
 .scene-overlay-action:hover { border-color: var(--accent-line); background: var(--accent-wash); }
+.scene-overlay-action.revert { border-color: var(--line-strong); background: var(--overlay); color: var(--muted); }
+.scene-overlay-action.revert:hover { border-color: var(--amber-line); background: var(--amber-wash); color: var(--amber-ink); }
 .scene-overlay-action i { width: 9px; height: 9px; border: 1px solid currentColor; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--shadow-tint); }
 
 /* Link overrides. Amber throughout, because amber is already what this product

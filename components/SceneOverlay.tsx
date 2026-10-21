@@ -91,6 +91,18 @@ export function SceneOverlay() {
           looking at, and it is part of what saving would keep. Renders nothing
           at all when the link is clean. */}
       <SceneOverridesChip />
+      {/* The way out of document edits, which the chip cannot offer: a moved
+          prop or sculpted terrain never enters the link. One undo step. */}
+      <button
+        type="button"
+        className="scene-overlay-action revert"
+        disabled={strokePending}
+        onClick={() => simulation.revertScene(session.id)}
+        data-testid="revert-scene"
+        title={`Discard every edit and reopen ${definition?.name ?? scene.sceneId} as authored · camera and solver settings stay · undo brings the edits back`}
+      >
+        ↺ REVERT
+      </button>
       {/* Saving is the one thing the library route cannot do for you: it lists
           what is in this browser's storage, and only the studio knows what the
           open document has become. Configuration is not here any more — it is on

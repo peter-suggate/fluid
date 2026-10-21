@@ -956,6 +956,40 @@ export class SimulationController {
   }
 
   /**
+   * Throw away every edit to the open document: the scene its factory (or
+   * starter) authored, reopened in place.
+   *
+   * A document edit is not a link override, so the overrides chip cannot reach
+   * it — a moved prop, sculpted terrain or added scenery never enters the URL.
+   * This is the selector's own reopen (`retainConfiguration`), so the solver,
+   * its tuning and the raised instrument stay, and it is one undo step. The
+   * camera stays too: the reader is looking at what they are reverting.
+   */
+  revertScene(paneId: PaneId = PRIMARY_PANE_ID): boolean {
+    const { presetId } = this.session(paneId).scene.getState();
+    const definition = findSceneDefinition(presetId);
+    const starter = SCENE_STARTERS.find((candidate) => `starter:${candidate.id}` === presetId);
+    const card = definition ? sceneCardForDefinition(definition) : starter ? {
+      id: presetId,
+      source: "starter" as const,
+      name: starter.name,
+      blurb: starter.blurb,
+      shelf: "Start from empty",
+      open: () => ({ scene: starter.create(), presetId }),
+    } : undefined;
+    const runtime = this.session(paneId).runtime.getState();
+    if (!card) {
+      runtime.setNotice(`${presetId} has no authored scene in this build to revert to`, "warn");
+      return false;
+    }
+    const camera = this.session(paneId).ui.getState().camera;
+    if (!this.openSceneCard(card, paneId, { retainConfiguration: true })) return false;
+    this.session(paneId).ui.setState({ camera });
+    runtime.setNotice(`${card.name} reverted to as authored · undo restores your edits`);
+    return true;
+  }
+
+  /**
    * Create a fresh document and enter the studio.
    *
    * The scene is fluid-free, which is the whole point: `planSceneRuntime` sees
