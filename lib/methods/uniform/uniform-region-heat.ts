@@ -137,12 +137,20 @@ fn umVertexTier(p:vec3u)->u32{
  let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
  // Without geometry, enumerate incident regions. With geometry, visit each
  // incident cell: a cold solid interior must not freeze its liquid wall.
+ ${vertexCapacity?"var open=false;":""}
  for(var k=0u;k<=sides;k=select((k-sides)&sides,8u,k==sides)){
   let side=umCorner(k,2u);
-  let cell=vec3i(p)-vec3i(side);let tile=umTileKey(cell>>vec3u(2u));if(!umKeyStored(tile)){continue;}
-  ${vertexCapacity?`if(!(${vertexCapacity})){continue;}`:""}
+  let cell=vec3i(p)-vec3i(side);let tile=umTileKey(cell>>vec3u(2u));
+  // An unstored cell holds no state (as nbVertexCold), and its capacity
+  // would cost a solid evaluation per h cell (umTileOpenAt).
+  if(!umKeyStored(tile)){continue;}
+  ${vertexCapacity?`if(!(${vertexCapacity})){continue;}open=true;`:""}
   tier=min(tier,umRegionTier(umPageOfTile(tile)));
  }
+ ${vertexCapacity?`// Buried (no stored incident cell has capacity, as umVertexBuried): phi
+ // there is not state, so the vertex holds it in every tier. Without this it
+ // read as HOT, and every buried wall and floor vertex took the full transport.
+ if(!open){return UM_TIER_COLD;}`:""}
  return select(tier,UM_TIER_HOT,tier>UM_TIER_HOT);
 }
 `;}
