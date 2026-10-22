@@ -62,6 +62,10 @@ const NB_H_STORE_ENTRIES=new Set<string>(["coupleFine","arenaGather","arenaStore
 // to one.
 const NB_FREE_TWIN_ENTRIES=["coupleFine"];
 const NB_LAUNCH={grid:0,counted:1,one:3,particles:4,regions:5} as const;
+/** Workgroups of a region launch (a workgroup a region, striding the list):
+ * 128 held each ~21 of 2744 regions in series (airPlanSeeds and
+ * airPlanPropagate 0.2 ms each in an all-4h frame). */
+const NB_REGION_GROUPS=1024;
 /** One launch of a batch, resolved once at initialization: its bind groups
  * by name (bind() replaces the groups), its pipeline and its launch. */
 interface NarrowBandStep{readonly groups:string;readonly base:boolean;readonly pipeline:GPUComputePipeline;readonly launch:number}
@@ -1527,7 +1531,7 @@ ${narrowBandSurfaceWGSL}
    pass.setPipeline(step.pipeline);
    if(step.launch===NB_LAUNCH.one)pass.dispatchWorkgroups(1);
    else if(step.launch===NB_LAUNCH.particles)pass.dispatchWorkgroups(this.particleGroups);
-   else if(step.launch===NB_LAUNCH.regions)pass.dispatchWorkgroups(Math.min(128,this.reuse.regions));
+   else if(step.launch===NB_LAUNCH.regions)pass.dispatchWorkgroups(Math.min(NB_REGION_GROUPS,this.reuse.regions));
    else pass.dispatchWorkgroups(1024);
   }
   if(!shared)pass.end();

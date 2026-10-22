@@ -105,6 +105,9 @@ const ACTIVE_BIT=1<<27,WARM_BIT=1<<28;
 /** The coarsest (32h) rows, one a page, are one workgroup's: a lattice of
  * more pages is refused at construction. */
 const TAIL_ROWS=4096,TAIL_LANES=256,TAIL_SWEEPS=32;
+/** pTail's lanes: enough that every page's row stays in a lane's registers
+ * (a reloaded row walks its six neighbour records each half sweep). */
+const tailLanes=(blocks:number,limit:number):number=>{let n=TAIL_LANES;while(n<blocks&&2*n<=limit)n*=2;return n;};
 
 export interface UniformPressureArenaFields {
  phi:GPUBufferBinding;
@@ -297,7 +300,7 @@ export class UniformPressureArena {
  async initialize():Promise<void>{
   const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule,a=this.arena;
   const cap=a.fineCapacity,blocks=this.simulation.capacity.address.blocks;
-  const plane0=520*cap,plane2=520*blocks;
+  const plane0=520*cap,plane2=520*blocks,lanesTail=tailLanes(blocks,this.device.limits.maxComputeInvocationsPerWorkgroup);
   const C=(name:string,level:0|1|2=0)=>a.base(name,level);
   const tableWGSL=a.tableWGSL("state",`${this.tableWord}u`,`atomicLoad(&state[MASK+id])`);
   const constants=/* wgsl */`
@@ -502,7 +505,10 @@ fn cCell(at:u32)->CCell{
 fn cBoxRow(col:u32,lane:u32)->CCell{if(lane>=500u){return cCell(UB_NONE_ID);}return cCell(cAddr(cBoxCell(col,lane)));}
 fn cOff(c:vec3i,cell:CCell)->f32{
  var off=0.0;
- for(var f=0u;f<6u;f++){if(cell.k[f]!=0.0){var q=c;q[f/2u]+=bSign(f);off+=cell.k[f]*cX[cBox(q)];}}
+ // A select, not a branch: a branch a face serialises the six workgroup
+ // loads (twice the sweep's time); a face with no coupling may read a
+ // non-row's stale value, which the select drops (0 * NaN would not).
+ for(var f=0u;f<6u;f++){var q=c;q[f/2u]+=bSign(f);off+=select(0.0,cell.k[f]*cX[cBox(q)],cell.k[f]!=0.0);}
  return off;
 }
 // The box sweeps: lane < 500 holds one cell of each colour.
@@ -1565,10 +1571,11 @@ var<workgroup> dN:u32;
  }
 }`,
    // 32h, the coarsest level (a row a page with rows): one workgroup solves
-   // them by red-black sweeps, row e the page list's e-th page; a lane keeps
-   // its first row in registers and reloads the others.
+   // them by red-black sweeps, row e the page list's e-th page at sX[e+1]
+   // (sX[0] stays zero: a missing neighbour's, so the six loads take no
+   // branch); a lane keeps its first row in registers and reloads the others.
    tail:header()+poolWGSL+tail+/* wgsl */`
-var<workgroup> sX:array<f32,${TAIL_ROWS}>;
+var<workgroup> sX:array<f32,${TAIL_ROWS+1}>;
 var<workgroup> tN:u32;
 // The row (staged index + 1, 0: none) across face f of page block's.
 fn sNear(block:u32,f:u32)->u32{
@@ -1578,14 +1585,15 @@ fn sNear(block:u32,f:u32)->u32{
 fn sColour(block:u32)->u32{let page=umBlockPage(block);return (page.x+page.y+page.z)&1u;}
 // Row e's update: (r + sum k x_n) / d.
 fn sRow(block:u32,at:u32,d:f32)->f32{
- var off=pF(PT_R,at);for(var f=0u;f<6u;f++){let j=sNear(block,f);if(j!=0u){off+=pF(PT_K+f*PLANE2,at)*sX[j-1u];}}
+ var off=pF(PT_R,at);for(var f=0u;f<6u;f++){off+=pF(PT_K+f*PLANE2,at)*sX[sNear(block,f)];}
  return off/d;
 }
-@compute @workgroup_size(${TAIL_LANES}) fn pTail(@builtin(local_invocation_index) lane:u32){
+@compute @workgroup_size(${lanesTail}) fn pTail(@builtin(local_invocation_index) lane:u32){
  if(lane==0u){tN=select(ubaLevelCount(2u),0u,bConverged());}
  let P=workgroupUniformLoad(&tN);if(P==0u){return;}
  // A row's staged index + 1, in its page's spare 32h word of the 8h up channel.
- for(var e=lane;e<P;e+=${TAIL_LANES}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;pool[PT_Y+at]=select(0u,e+1u,pF(PT_D,at)>0.0);sX[e]=0.0;}
+ for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;pool[PT_Y+at]=select(0u,e+1u,pF(PT_D,at)>0.0);sX[e+1u]=0.0;}
+ if(lane==0u){sX[0]=0.0;}
  storageBarrier();workgroupBarrier();
  var d0=0.0;var r0=0.0;var k0=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);var n0=array<u32,6>(0u,0u,0u,0u,0u,0u);var c0=0u;
  if(lane<P){
@@ -1594,15 +1602,15 @@ fn sRow(block:u32,at:u32,d:f32)->f32{
  }
  for(var sweep=0u;sweep<${TAIL_SWEEPS}u;sweep++){
   for(var col=0u;col<2u;col++){
-   if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){if(n0[f]!=0u){off+=k0[f]*sX[n0[f]-1u];}}sX[lane]=off/d0;}
-   for(var e=lane+${TAIL_LANES}u;e<P;e+=${TAIL_LANES}u){
+   if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){off+=k0[f]*sX[n0[f]];}sX[lane+1u]=off/d0;}
+   for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){
     let block=ubaLevelSlot(2u,e);let at=UBA_STRIDE*block+72u;let d=pF(PT_D,at);
-    if(d>0.0&&sColour(block)==col){sX[e]=sRow(block,at,d);}
+    if(d>0.0&&sColour(block)==col){sX[e+1u]=sRow(block,at,d);}
    }
    workgroupBarrier();
   }
  }
- for(var e=lane;e<P;e+=${TAIL_LANES}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;if(pF(PT_D,at)>0.0){pSet(PT_X,at,sX[e]);}}
+ for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;if(pF(PT_D,at)>0.0){pSet(PT_X,at,sX[e+1u]);}}
 }`,
    // 16h up (a page a group): the 32h correction prolonged into the page's
    // 16h rows and their ring (two deep: the neighbours' rows plus their own

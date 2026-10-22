@@ -1537,16 +1537,18 @@ var<workgroup> compactCounts:array<u32,256>;
  /** The page request: a module of its own beside the census's, which binds
   * the census words read-only and the page pool's state and work. */
  private async initializeRequest():Promise<void>{
-  const device=this.device,groups=Math.min(Math.ceil(this.pages/64),PAGE_REQUEST_GROUPS),tiles=this.ownership.capacity.tiles;
+  const device=this.device,groups=Math.min(Math.ceil(RESIDENCY_STAGES.length*this.pages/64),PAGE_REQUEST_GROUPS),tiles=this.ownership.capacity.tiles;
   const module=uniformDetailModule(device,{label:"Uniform dynamic ownership page request",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read> census:array<u32>;
 ${uniformPagePoolWGSL(this.pool.layout,1,1,2)}
 ${localResidencyWGSL}
 fn lrRecord(page:u32,stage:u32)->vec4u{let i=${this.localOffset}u+4u*(stage*UM_PAGES+page);return vec4u(census[i],census[i+1u],census[i+2u],census[i+3u]);}
 ${localResidencyRequestWGSL}
-// Union only after each stage dilates its own exact occupancy and signed travel.
+// Union only after each stage dilates its own exact occupancy and signed
+// travel. A lane a (page, stage): a lane a page held the six stages' boxes
+// in series (0.16 ms over 43 workgroups in an all-4h frame).
 @compute @workgroup_size(64) fn pageRequest(@builtin(global_invocation_id) gid:vec3u){
- for(var page=gid.x;page<UM_PAGES;page+=${64*groups}u){for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){lrAsk(page,stage);}}
+ for(var item=gid.x;item<${RESIDENCY_STAGES.length}u*UM_PAGES;item+=${64*groups}u){lrAsk(item%UM_PAGES,item/UM_PAGES);}
 }
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");

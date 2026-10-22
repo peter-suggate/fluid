@@ -36,10 +36,16 @@ fn ${name}(region:u32,dt:f32,hmin:f32)->bool{
  let g=vec3f(abs(${models}[b+4u])+abs(${models}[b+5u])+abs(${models}[b+6u]),abs(${models}[b+7u])+abs(${models}[b+8u])+abs(${models}[b+9u]),abs(${models}[b+10u])+abs(${models}[b+11u])+abs(${models}[b+12u]));
  return ${models}[b+13u]==1.0&&rms<=${affineBudgetWGSL("dt","hmin")}&&dt*max(g.x,max(g.y,g.z))<=hmin&&dt*(${models}[b+14u]+rms)<=1.5*hmin;
 }`;}
-/** The momentum's affine fit and residual grids: a lane tests one (region,
- * part) item, so an idle frame costs each workgroup one gather; consecutive
- * regions land in different workgroups. */
-export function uniformMomentumFitGrid(regions:number,parts:number):number{return Math.min(65535,Math.ceil(parts*regions/256));}
+/** (region, part) items a fit or residual workgroup gathers a round. A
+ * workgroup evaluates its pending items one after another (a load and a
+ * reduction each); 256 a round left 44 workgroups ~250 serial fits each
+ * in an all-pending frame (0.34 ms). */
+const UNIFORM_MOMENTUM_FIT_ITEMS=8;
+/** The momentum's affine fit and residual grids: a lane of the first
+ * UNIFORM_MOMENTUM_FIT_ITEMS tests one (region, part) item, so an idle frame
+ * costs each workgroup one gather; consecutive regions land in different
+ * workgroups. */
+export function uniformMomentumFitGrid(regions:number,parts:number):number{return Math.min(65535,Math.ceil(parts*regions/UNIFORM_MOMENTUM_FIT_ITEMS));}
 /** The tiers' own pass (decide, the momentum's fit, affine). */
 export const UNIFORM_MOMENTUM_TIER_PASS:GPUComputePassDescriptor={label:"Uniform mixed momentum tiers"};
 
@@ -203,13 +209,15 @@ fn umFitFace(cell:vec3i,axis:u32,width:u32,centre:vec3f)->vec4f{
  var p=vec3f(cell)+vec3f(0.5);p[axis]=f32(cell[axis]+1);
  return vec4f(p-centre,textureLoad(extended,cell,0)[axis]);
 }
-// The (region, part) items of pending regions among a workgroup's 256: item
-// = group + groups x (lane + 256 round), region = item % pages.
+// The (region, part) items of pending regions among a workgroup's
+// UM_FIT_ITEMS: item = group + groups x (lane + UM_FIT_ITEMS round),
+// region = item % pages.
+const UM_FIT_ITEMS:u32=${UNIFORM_MOMENTUM_FIT_ITEMS}u;
 fn umFitGather(round:u32,group:u32,groups:u32,lane:u32,parts:u32,modelled:bool)->u32{
  if(lane==0u){atomicStore(&umFitCount,0u);}
  workgroupBarrier();
- let item=group+groups*(lane+256u*round);
- if(item<parts*UM_PAGES&&umTiers[item%UM_PAGES]==${T.pending}u){
+ let item=group+groups*(lane+UM_FIT_ITEMS*round);
+ if(lane<UM_FIT_ITEMS&&item<parts*UM_PAGES&&umTiers[item%UM_PAGES]==${T.pending}u){
   let h=momentum.hDt.xyz;
   if(!modelled||umAffineCandidate(item%UM_PAGES,momentum.hDt.w,min(h.x,min(h.y,h.z)))){umFitList[atomicAdd(&umFitCount,1u)]=item;}
  }
@@ -224,7 +232,7 @@ fn umFitRegion(region:u32)->vec3u{let origin=16u*umPageCoord(region);return vec3
 // about the grid's own centre the least squares normal equations are
 // diagonal: c = mean v, g_j = sum v x_j / sum x_j^2.
 @compute @workgroup_size(256) fn momentumAffineFit(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var round=0u;256u*groups.x*round<4u*UM_PAGES;round++){
+ for(var round=0u;UM_FIT_ITEMS*groups.x*round<4u*UM_PAGES;round++){
   let count=umFitGather(round,group.x,groups.x,lane,4u,false);
   for(var j=0u;j<count;j++){
    let item=workgroupUniformLoad(&umFitList[j]);let region=item%UM_PAGES;let part=item/UM_PAGES;
@@ -274,7 +282,7 @@ fn umFitRegion(region:u32)->vec3u{let origin=16u*umPageCoord(region);return vec3
 // regions), a workgroup per (region, part) of those faces.
 @compute @workgroup_size(256) fn momentumAffineResidual(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  const parts=${UNIFORM_MOMENTUM_RESIDUAL_PARTS}u;
- for(var round=0u;256u*groups.x*round<parts*UM_PAGES;round++){
+ for(var round=0u;UM_FIT_ITEMS*groups.x*round<parts*UM_PAGES;round++){
   let count=umFitGather(round,group.x,groups.x,lane,parts,true);
   for(var j=0u;j<count;j++){
    let item=workgroupUniformLoad(&umFitList[j]);let region=item%UM_PAGES;let part=item/UM_PAGES;
