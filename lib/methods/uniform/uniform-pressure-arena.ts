@@ -53,8 +53,12 @@ export interface UniformPressureArenaSchedule {
   * iterate alternates channels and level 2's up leg reads Y. One leaves the
   * natives at a twin's 0.5 a cycle; three at 0.15. */
  tailCycles:number;
+ /** NB-FLIP surfaceImpulse: "energy" bounds the speed a liquid face leaves
+  * into air by its pressure's work, |u| <= sqrt(u0^2+2p/rho); "full" applies
+  * the whole step's impulse dt*p/(rho*theta*h). */
+ surfaceImpulse:"energy"|"full";
 }
-export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3};
+export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,surfaceImpulse:"energy"};
 /** bandExit "returns": the band's residual target (1/s, h-equivalent). The
  * band stops at it or at the cycle cap; the strict exit keeps the frame's
  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
@@ -1797,6 +1801,17 @@ override pDst:u32=0u;
 @group(1) @binding(16) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(17) var<storage,read_write> boundary:array<f32>;
 @group(1) @binding(21) var<storage,read_write> presented:array<f32>;
+// A free-surface face's projected velocity: out is the unit direction from
+// its liquid side into air, drop the pressure across it.${schedule.surfaceImpulse==="energy"?/* wgsl */`
+// A free surface does no work but p's: a parcel leaving into air gains at
+// most 2p/rho of squared speed. One step's impulse dt*p/(rho*theta*h) is the
+// ghost-fluid limit only while the face stays open; an impact's kPa across a
+// thin cut (theta << 1) would launch it at tens of m/s. A resting surface
+// never meets the bound: its impulse only cancels gravity's inflow.
+fn bSurface(value:f32,forced:f32,out:f32,drop:f32)->f32{
+ let u=out*forced;return out*min(out*value,sqrt(max(u,0.0)*max(u,0.0)+2.0*max(drop,0.0)/params.policy.x));
+}`:/* wgsl */`
+fn bSurface(value:f32,forced:f32,out:f32,drop:f32)->f32{return value;}`}
 // UniformPressureBand's umProject on face f of band cell 'at' at p.
 fn bFace(at:u32,p:vec3i,f:u32)->f32{
  let kinds=pool[P_KINDS+at];let kind=bFaceKind(kinds,f);
@@ -1809,12 +1824,14 @@ fn bFace(at:u32,p:vec3i,f:u32)->f32{
  ${S?"if(kind==K_CLOSED){var low=p;if(sign<0){low[axis]-=1;}return umSolidFaceVelocity(low,axis);}":""}
  let forced=pForced(at,f);let coefficient=pF(P_C+f*PLANE,at)${S?"/pVolume(at,f)":""};let own=pF(P_X,at);let base=pF(P_BASE,at);let scale=params.policy.z;
  if(kind==K_WALL){if(!liquid){return forced;}return forced-scale*f32(sign)*(max(own+pLift(at,f),-base)-own)/h;}
- if(kind==K_OPEN){if(!liquid){return forced;}return forced+scale*f32(sign)*(base+own)*coefficient*h;}
+ if(kind==K_OPEN){if(!liquid){return forced;}return bSurface(forced+scale*f32(sign)*(base+own)*coefficient*h,forced,f32(sign),base+own);}
  var other=0.0;var otherBase=0.0;var otherLiquid=false;
  if(kind==K_BAND){let m=pNear(at,p,f);other=pF(P_X,m);otherBase=pF(P_BASE,m);otherLiquid=bLiquid(pool[P_KINDS+m]);}
  else if(kind==K_SEAM){let m=nAcross(p,f);other=pF(PN_X,m);otherBase=pF(PN_B,m)+bSeamHead(at,f);otherLiquid=true;}
  if(!liquid&&!otherLiquid){return 0.0;}
- return forced-scale*f32(sign)*((otherBase-base)+(other-own))*coefficient*h;
+ let value=forced-scale*f32(sign)*((otherBase-base)+(other-own))*coefficient*h;
+ if(liquid!=otherLiquid){let drop=(base+own)-(otherBase+other);return bSurface(value,forced,select(-1.0,1.0,liquid)*f32(sign),select(-drop,drop,liquid));}
+ return value;
 }
 // The composite solve couples a native row to the individual h faces.
 // Restrict those same projected fluxes, rather than differentiating the
