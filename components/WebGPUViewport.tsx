@@ -1101,7 +1101,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
               inFlightDepth: simulation.inFlightDepth(),
               detailFocus: detailFocus(ui.camera.target_m),
             },
-            { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, layers: ui.visualLayers, particles: ui.fluidParticleDisplay },
+            {
+              axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, layers: ui.visualLayers, particles: ui.fluidParticleDisplay,
+              particleSurface: {
+                greed: ui.fineSurfaceGreed, smoothing: ui.fineSurfaceSmoothing, thickness: ui.fineSurfaceThickness,
+                spraySize: ui.fineSpraySize, sprayOpacity: ui.fineSprayOpacity,
+              },
+            },
             scenePreset.background,
             scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
             ui.fluidSurfaceRenderMode,

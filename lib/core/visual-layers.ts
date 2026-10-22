@@ -26,9 +26,10 @@ export const VISUAL_LAYERS = [
 export type VisualLayerId = typeof VISUAL_LAYERS[number]["id"];
 /** What the importance layer shows: every criterion's winner, or one criterion's score. */
 export type ImportanceView = "all" | UniformDetailCriterion;
-/** How the particle layer paints a sphere: opaque on the speed ramp, or
- * translucent with agitation as its opacity and whiteness. */
-export type ParticleView = "speed" | "motion";
+/** How the particle layer paints a sphere: opaque on the speed ramp,
+ * translucent with agitation as its opacity and whiteness, or as the fine
+ * particle surface's spray (the skin itself is drawn by the water). */
+export type ParticleView = "speed" | "motion" | "fine";
 export type LayerView = "slice" | "3d";
 export type PageView = LayerView;
 export interface VisualLayerState {
@@ -265,6 +266,7 @@ export const PARTICLE_DISPLAY_OPTIONS: ReadonlyArray<{ value: ParticleDisplay; l
   { value: "off", label: "Off", hint: "Draw no particles." },
   { value: "motion", label: "Motion", hint: `Soft overlapping samples, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at ${LAYER_PARTICLE_ENERGY_SCALE} J/kg, a difference of ${LAYER_PARTICLE_AGITATION_SCALE} m/s). Liquid moving as one body stays transparent however fast it goes; below a quarter of full scale nothing shows and the rest whitens steeply, fading out just under the surface. Even a thick cloud of strongly colliding, shearing or breaking liquid lets some of the surface show through.` },
   { value: "speed", label: "Speed", hint: `Opaque spheres, coloured by each particle's own speed: violet at rest, pale at ${LAYER_PARTICLE_SPEED_SCALE / 2} m/s, orange from ${LAYER_PARTICLE_SPEED_SCALE} m/s.` },
+  { value: "fine", label: "Fine", hint: "A fine liquid skin meshed from the particles every frame, at half a cell, drawn with the surface beside the level set. Where particles cluster densely they are liquid; what the skin does not enclose is spray, drawn as small translucent droplets. Presentation only." },
 ];
 export function scalarLayerPaint(id: VisualLayerId, value: number): { color: readonly number[]; alpha: number } {
   const p = LAYER_PALETTE;

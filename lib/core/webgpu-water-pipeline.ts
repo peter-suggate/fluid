@@ -2120,6 +2120,8 @@ export class RasterWaterPipeline {
   private dryInterfaceClearsEncoded = false;
   private disabledStages: DisabledRenderStages = NO_DISABLED_RENDER_STAGES;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
+  /** A cosmetic mesh in the same SurfaceVertex layout, drawn after the level set's in every interface pass. */
+  private extraSurface?: { group: GPUBindGroup; vertices: GPUBuffer; indirect: GPUBuffer; offset: number };
   private fluidDomain?: FluidDomain;
   private fallbackSparseControl?: GPUBuffer;
   private surfaceDiagnosticReadback?: GPUBuffer;
@@ -2737,6 +2739,30 @@ export class RasterWaterPipeline {
   get simpleWaterInterfaces(): SimpleWaterInterfaces | undefined { return this.interfaceViews; }
 
   /**
+   * A second mesh the interfaces take beside the level set's: the Fine particle
+   * surface. The nearest front and back faces win, so it adds detail wherever it
+   * lies on or above the body and every surface mode shades it. Absent draws
+   * the level set alone.
+   */
+  setExtraSurface(geometry: { vertices: GPUBuffer; indirect: GPUBuffer; indirectOffset: number } | undefined) {
+    if (!geometry || !this.surfaceLayout) { this.extraSurface = undefined; return; }
+    const current = this.extraSurface;
+    if (current?.vertices === geometry.vertices && current.indirect === geometry.indirect && current.offset === geometry.indirectOffset) return;
+    this.extraSurface = {
+      group: this.device.createBindGroup({ label: "Water extra surface", layout: this.surfaceLayout, entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: geometry.vertices } }] }),
+      vertices: geometry.vertices, indirect: geometry.indirect, offset: geometry.indirectOffset,
+    };
+  }
+
+  private drawExtraSurface(pass: GPURenderPassEncoder) {
+    const extra = this.extraSurface;
+    if (!extra) return;
+    pass.setBindGroup(0, extra.group);
+    pass.drawIndirect(extra.indirect, extra.offset);
+  }
+
+  /**
    * Scene-level fact from the runtime plan. A fluid-less scene has no water
    * geometry to draw, so the per-frame front/back interface passes reduce to
    * their clears; those are encoded once and the passes skipped thereafter.
@@ -2993,7 +3019,7 @@ export class RasterWaterPipeline {
     // Water and spray target the same interface attachments and depth state.
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);}pass.end();};
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.drawExtraSurface(pass);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);}pass.end();};
     // Withheld, a fluid scene takes the same once-only clears a dry one does:
     // the compositor reads these attachments unconditionally, so leaving them
     // holding the last drawn interface would keep compositing water that this
@@ -3041,6 +3067,7 @@ export class RasterWaterPipeline {
       wireframePass.setBindGroup(0,this.surfaceBindGroup);
       wireframePass.setBindGroup(1,wireframeSceneBindGroup);
       wireframePass.drawIndirect(this.indirectBuffer,0);
+      this.drawExtraSurface(wireframePass);
       wireframePass.end();
     }
     tracePhase?.("optical-composite");return { surfaceUpdated: updateSurface, surfaceDiagnosticsCaptured };

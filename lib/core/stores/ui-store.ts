@@ -49,7 +49,7 @@ import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoRende
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../../svo/pipeline/svo-render-tuning";
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/features/diagnostics/svo-pixel-trace";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
-import type { FluidParticleDisplay, FluidSurfaceRenderMode } from "../../features/surface-display/definition";
+import type { FineSurfaceState, FluidParticleDisplay, FluidSurfaceRenderMode, SurfaceDisplayState } from "../../features/surface-display/definition";
 
 /**
  * The object currently in the user's hand.
@@ -130,7 +130,7 @@ export interface TracePinRequest {
 }
 
 /** Viewport state: camera, selection, and debug controls. */
-interface UIStore {
+interface UIStore extends FineSurfaceState {
   /** Includes the final asynchronous preflight after pointer release. */
   voxelStrokePending: boolean;
   voxelToolId?: string;
@@ -317,6 +317,8 @@ interface UIStore {
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setFluidSurfaceRenderMode: (mode: FluidSurfaceRenderMode) => void;
   setFluidParticleDisplay: (display: FluidParticleDisplay) => void;
+  /** Merge into the Fine display's sliders. */
+  setFineSurface: (patch: Partial<FineSurfaceState>) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
@@ -506,12 +508,17 @@ export const createUIStore = () => create<UIStore>((set) => ({
     visualLayers: undefined,
   })),
   setFluidSurfaceRenderMode: (fluidSurfaceRenderMode) => set(state => {
-    surfaceDisplayQuery.write(new URLSearchParams(), { fluidSurfaceRenderMode, fluidParticleDisplay: state.fluidParticleDisplay });
+    surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), fluidSurfaceRenderMode });
     return { fluidSurfaceRenderMode };
   }),
   setFluidParticleDisplay: (fluidParticleDisplay) => set(state => {
-    surfaceDisplayQuery.write(new URLSearchParams(), { fluidSurfaceRenderMode: state.fluidSurfaceRenderMode, fluidParticleDisplay });
+    surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), fluidParticleDisplay });
     return { fluidParticleDisplay };
+  }),
+  setFineSurface: (patch) => set(state => {
+    // Validates the values against their query ranges before they are kept.
+    surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), ...patch });
+    return patch;
   }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
@@ -605,3 +612,11 @@ export type UIStoreHook = ReturnType<typeof createUIStore>;
  * have not yet been threaded a session resolve to.
  */
 export const useUIStore = createUIStore();
+
+function surfaceDisplayState(state: UIStore): SurfaceDisplayState {
+  return {
+    fluidSurfaceRenderMode: state.fluidSurfaceRenderMode, fluidParticleDisplay: state.fluidParticleDisplay,
+    fineSurfaceGreed: state.fineSurfaceGreed, fineSurfaceSmoothing: state.fineSurfaceSmoothing,
+    fineSurfaceThickness: state.fineSurfaceThickness, fineSpraySize: state.fineSpraySize, fineSprayOpacity: state.fineSprayOpacity,
+  };
+}

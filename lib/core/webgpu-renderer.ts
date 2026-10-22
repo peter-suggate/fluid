@@ -40,6 +40,7 @@ import {
 } from "../svo/features/diagnostics/svo-pixel-trace";
 import { DecorationOverlay } from "./webgpu-decoration-overlay";
 import { ParticleOverlay } from "./webgpu-particle-overlay";
+import { DEFAULT_PARTICLE_SURFACE_SETTINGS, ParticleSurface, type ParticleSurfaceSettings } from "./webgpu-particle-surface";
 import { VISUALIZATION_CATALOG } from "./visualization-catalog";
 import { FINE_TILES_OVERLAY_MODE_CODE, SOLVE_WINDOW_OVERLAY_MODE_CODE, VOLUME_LEVELSET_OVERLAY_MODE_CODE } from "./grid-overlay-visualizations";
 import {
@@ -299,11 +300,13 @@ export interface GridOverlayConfig {
    * draws with the slice layers hidden; absent leaves `layers` as given.
    */
   particles?: ParticleDisplay;
+  /** The Fine particle display's skin and spray settings; absent uses the defaults. */
+  particleSurface?: ParticleSurfaceSettings;
   /** Scrubber position within the selected lens's phases. */
   lensPhase?: number;
 }
 
-export type OptionalRendererPipeline = "grid-overlay" | "svo-dry-scene" | "decoration-overlay" | "particle-overlay" | "svo-stage-overlay";
+export type OptionalRendererPipeline = "grid-overlay" | "svo-dry-scene" | "decoration-overlay" | "particle-overlay" | "particle-surface" | "svo-stage-overlay";
 
 /**
  * Live pixel-trace diagnostic state.
@@ -399,6 +402,7 @@ export function optionalRendererPipelineRequests(
   if (gridOverlay && gridOverlay.axis !== "off") {
     const layers = composedVisualLayers(gridOverlay);
     if (gridOverlay.mode === "particles" || (layers && particleLayerShown(layers))) requested.push("particle-overlay");
+    if (layers && particleLayerShown(layers) && particleView(layers) === "fine") requested.push("particle-surface");
     if (gridOverlay.mode !== "particles" && (!layers || sliceLayersShown(layers))) requested.push("grid-overlay");
   }
   if (sparsePresentationRequired) requested.push("svo-dry-scene");
@@ -845,6 +849,7 @@ export class FluidLabRenderer {
   /** Registered by the running method; core never names an overlay module. */
   private decorationOverlayPipeline?: DecorationOverlay;
   private particleOverlayPipeline?: ParticleOverlay;
+  private particleSurfacePipeline?: ParticleSurface;
   private svoStageOverlay?: SparseVoxelRenderStageOverlay;
   /** Latest decoded trace, and a revision the UI polls instead of a callback. */
   private latestPixelTraceValue?: SvoPixelTrace;
@@ -1289,6 +1294,13 @@ export class FluidLabRenderer {
         this.particleOverlayPipeline = pipeline;
         pipeline.setSource(this.gpuFluid?.particleSource);
       },
+      (pipeline) => pipeline.destroy(),
+    );
+    if (wants.has("particle-surface")) this.ensureOptionalPipeline(
+      "particle-surface", this.particleSurfacePipeline,
+      (device) => new ParticleSurface(device),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => { this.particleSurfacePipeline = pipeline; },
       (pipeline) => pipeline.destroy(),
     );
 
@@ -2913,6 +2925,7 @@ export class FluidLabRenderer {
     // Particle spheres read what the step already keeps. The source is re-read
     // every frame: a solver may alternate two particle buffers.
     if (particlesVisible) this.particleOverlayPipeline?.setSource(this.gpuFluid?.particleSource);
+    const fineSource = particlesVisible && composedLayers && particleView(composedLayers) === "fine" ? this.gpuFluid?.particleSource : undefined;
     packed[0] = this.presentationTexture.width;
     packed[1] = this.presentationTexture.height;
     packed[2] = time_s;
@@ -3098,6 +3111,14 @@ export class FluidLabRenderer {
       }
       return replacementResult;
     };
+    // The Fine view's skin: rebuilt from the particles before the water draws
+    // its interfaces, which take it beside the level set.
+    const fineSurface = fineSource && this.particleSurfacePipeline?.encode(encoder, fineSource, {
+      container_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
+      settings: gridOverlay?.particleSurface ?? DEFAULT_PARTICLE_SURFACE_SETTINGS,
+      revision: gpuInfo?.surfaceRevision ?? gpuInfo?.encodedSteps ?? 0,
+    }) ? this.particleSurfacePipeline : undefined;
+    this.waterPipeline.setExtraSurface(fineSurface?.geometry);
     this.waterPipeline.setSceneHasFluid(Boolean(sceneRuntime.fluidSolver));
     // Who draws the bodies. A full-scene presentation rasters them into the SVO
     // dry G-buffer; a fluid-only one runs no dry scene at all, so the water
@@ -3259,6 +3280,12 @@ export class FluidLabRenderer {
           // Simple water is a murky body the spheres sit in, not a surface
           // they are drawn over.
           water: fluidSurfaceRenderMode === "simple" ? this.waterPipeline.simpleWaterInterfaces : undefined,
+          waterFront: this.waterPipeline.simpleWaterInterfaces,
+          spray: fineSurface?.particleField ? {
+            field: fineSurface.particleField,
+            radiusScale: (gridOverlay.particleSurface ?? DEFAULT_PARTICLE_SURFACE_SETTINGS).spraySize,
+            opacity: (gridOverlay.particleSurface ?? DEFAULT_PARTICLE_SURFACE_SETTINGS).sprayOpacity,
+          } : undefined,
         });
       }
       // Generic texture fields and compact paper publications each own both
@@ -3319,6 +3346,7 @@ export class FluidLabRenderer {
     const presentationCommands = encoder.finish();
     presentationQueueTrace?.begin();
     this.device.queue.submit([presentationCommands]);
+    this.particleSurfacePipeline?.pumpStats();
     if (readyGPUFluid) this.presentedStateTimes.set(readyGPUFluid, readyGPUFluid.info.submittedTime_s ?? 0);
     if (readyGPUFluid?.deferredFramePublication) {
       // The image carries the newest submitted state, not the newest receipt.
@@ -3434,6 +3462,7 @@ export class FluidLabRenderer {
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.gridOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.particleOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.particleSurfacePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseStaging.map((slot) => slot.buffer)]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }

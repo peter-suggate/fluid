@@ -47,6 +47,13 @@ import { simpleWaterMurkLength_m, simpleWaterShadingWGSL, type SimpleWaterInterf
  * carries the seed lattice across the pixels: each is a wide smooth footprint
  * that overlaps its neighbours', so a sheet of samples reads as a sheet.
  *
+ * The Fine view draws what the fine particle surface (webgpu-particle-surface)
+ * left out: a record that skin does not enclose is spray, drawn as a smaller lit
+ * droplet at the Spray opacity and summed the way Motion's samples are, so the
+ * picture does not depend on the order the solver keeps them in. A droplet the
+ * water's front interface lies in front of is dropped in every surface mode: the
+ * skin is drawn by the water now, so it hides what is behind it.
+ *
  * Records are read straight out of the solver's particle buffer. There is no
  * readback and no staging copy. A solver whose live count exists only on the
  * GPU publishes where that word is, and it is copied into this pass's indirect
@@ -124,6 +131,19 @@ export interface ParticleOverlayFrame {
   readonly gravity_m_s2?: readonly [number, number, number];
   /** Present when Simple water was composited into the target this frame. */
   readonly water?: SimpleWaterInterfaces;
+  /** The water's interfaces in any surface mode: the Fine view hides spray behind the front one. */
+  readonly waterFront?: SimpleWaterInterfaces;
+  /** The Fine view's spray. Absent there, nothing is drawn. */
+  readonly spray?: ParticleSpray;
+}
+
+export interface ParticleSpray {
+  /** φ per record from the fine particle surface; zero or more is outside its skin. */
+  readonly field: GPUBuffer;
+  /** Droplet radius as a fraction of the sphere's. */
+  readonly radiusScale: number;
+  /** Droplet opacity at its centre. */
+  readonly opacity: number;
 }
 
 const paletteWGSL = (name: string, rgb: readonly number[]) =>
@@ -145,11 +165,13 @@ struct ParticleOverlayUniforms {
   scale:vec4f,
   // xyz world position of the tank's minimum corner
   origin:vec4f,
-  // x Simple water's murk length in metres, zero when there is none to be under
+  // x Simple water's murk length in metres, zero when there is none to be under;
+  // y the spray's radius scale, z its opacity, w one when spray hides behind the water front
   water:vec4f,
   // xyz the unit direction of gravity, zero where there is none, w full-scale fluctuation in m/s
   gravity:vec4f,
-  // x record stride in floats, y record capacity, z one in the Motion view
+  // x record stride in floats, y record capacity, z one in the Motion view, two
+  // in the Fine view's spray; w one when binding 9 holds Motion energy
   records:vec4u,
   // Float offsets into a record: x the grid's velocity, y depth, z the ballistic
   // flag; w the depth a sample counts to in full, zero where records keep none
@@ -169,6 +191,7 @@ ${particleOverlayUniformsWGSL}
 @group(0) @binding(7) var waterFrontNormal:texture_2d<f32>;
 struct ParticleFrame{dims:vec4f,h:vec4f,origin:vec4f}
 @group(0) @binding(8) var<uniform> particleFrame:ParticleFrame;
+// Motion energy per record, or in the Fine view the fine skin's φ at it.
 @group(0) @binding(9) var<storage,read> motionEnergy:array<f32>;
 
 struct VertexOut {
@@ -238,6 +261,7 @@ fn particleAgitation(at:u32,velocity:vec3f)->f32 {
 
 fn particleColor(at:u32,velocity:vec3f)->vec4f {
   let scale=max(overlay.scale.w,1e-6);
+  if (overlay.records.z==2u) { return vec4f(PARTICLE_RUSHING,clamp(overlay.water.z,0.0,1.0)); }
   if (overlay.records.z==1u) {
     let t=particleAgitation(at,velocity);
     // Suppress the low-energy tint that reveals particle residency: past the
@@ -269,6 +293,9 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   if (instance>=overlay.records.y) { return output; }
   let at=overlay.records.x*instance;
   if (!(particles[at+3u]>0.0)) { return output; }
+  let spray=overlay.records.z==2u;
+  // The fine skin encloses it: it is drawn as liquid, not as a droplet.
+  if (spray && !(motionEnergy[instance]>=0.0)) { return output; }
   let local=vec3f(particles[at],particles[at+1u],particles[at+2u]);
   let velocity=vec3f(particles[at+4u],particles[at+5u],particles[at+6u]);
   let origin=select(overlay.origin.xyz,particleFrame.origin.xyz,overlay.origin.w>0.5);
@@ -280,19 +307,23 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   let tangent=max(overlay.cameraPosition.w,1e-4);
   let viewport=max(overlay.viewport.xy,vec2f(1.0));
   let pixelsPerMetre=0.5*viewport.y/(max(view.z,near)*tangent);
-  let reach=select(1.0,PARTICLE_MOTION_REACH,overlay.records.z==1u);
+  let reach=select(select(1.0,overlay.water.y,spray),PARTICLE_MOTION_REACH,overlay.records.z==1u);
   let radius=max(overlay.cameraUp.w*reach,PARTICLE_MINIMUM_PIXELS/pixelsPerMetre);
   // The whole sphere stays in front of the near plane, so its depth is valid.
   if (!(view.z-radius>near)) { return output; }
   let perspective=1.0/(view.z*tangent);
   let aspect=max(overlay.cameraForward.w,1e-4);
-  if (overlay.water.x>0.0) {
-    // One lookup per sphere, at its centre: the liquid in front of it barely
-    // changes across a footprint that is a few pixels wide.
-    let uv=vec2f(0.5+0.5*view.x*perspective/aspect,0.5-0.5*view.y*perspective);
-    let pixel=vec2i(clamp(uv,vec2f(0.0),vec2f(0.9999))*vec2f(textureDimensions(waterFront)));
+  // One lookup per sphere, at its centre: the liquid in front of it barely
+  // changes across a footprint that is a few pixels wide.
+  let uv=vec2f(0.5+0.5*view.x*perspective/aspect,0.5-0.5*view.y*perspective);
+  let pixel=vec2i(clamp(uv,vec2f(0.0),vec2f(0.9999))*vec2f(textureDimensions(waterFront)));
+  let centre=length(relative);
+  if (overlay.water.w>0.5) {
     let front=waterInterfaceDistance(waterFront,pixel);
-    let centre=length(relative);
+    if (front>0.0 && centre-radius>front) { return output; }
+  }
+  if (overlay.water.x>0.0) {
+    let front=waterInterfaceDistance(waterFront,pixel);
     if (front>0.0 && centre>front) {
       let back=waterInterfaceDistance(waterBack,pixel);
       var path=centre-front;
@@ -384,8 +415,11 @@ fn sphereSample(input:VertexOut)->SphereSample {
 @fragment fn fragmentMotion(input:VertexOut)->@location(0) vec4f {
   let sphere=sphereSample(input);
   let footprint=sphere.towardCamera*sphere.towardCamera;
-  let depth=-log(1.0-min(input.color.a,PARTICLE_MOTION_OPAQUE))
-    *(2.0/(PARTICLE_MOTION_REACH*PARTICLE_MOTION_REACH))*footprint*footprint;
+  let opaque=-log(1.0-min(input.color.a,PARTICLE_MOTION_OPAQUE));
+  // A spray droplet is its own sphere, not a wide footprint: its centre takes
+  // the full opacity and its rim fades.
+  let depth=select(opaque*(2.0/(PARTICLE_MOTION_REACH*PARTICLE_MOTION_REACH))*footprint*footprint,
+    opaque*sphere.towardCamera,overlay.records.z==2u);
   return vec4f(sphere.color*depth,depth);
 }
 `;
@@ -407,7 +441,9 @@ const PARTICLE_MOTION_COVER:f32=0.8;
 @fragment fn fragmentMain(@builtin(position) position:vec4f)->@location(0) vec4f {
   let sum=textureLoad(accumulated,vec2u(position.xy),0);
   if (!(sum.a>0.0)) { discard; }
-  return vec4f(sum.rgb/sum.a,PARTICLE_MOTION_COVER*(1.0-exp(-sum.a))*clamp(overlay.cameraRight.w,0.0,1.0));
+  // Spray is droplets, not foam over the surface: it may cover the frame entirely.
+  let cover=select(PARTICLE_MOTION_COVER,1.0,overlay.records.z==2u);
+  return vec4f(sum.rgb/sum.a,cover*(1.0-exp(-sum.a))*clamp(overlay.cameraRight.w,0.0,1.0));
 }
 `;
 
@@ -434,6 +470,8 @@ export class ParticleOverlay {
   private readonly bindGroups = new Map<GPUBuffer, GPUBindGroup>();
   private boundSceneDepth?: GPUTextureView;
   private boundWater?: SimpleWaterInterfaces;
+  /** What binding 9 holds in the cached groups: Motion energy, or the Fine view's φ. */
+  private boundPerRecord?: GPUBuffer;
   private source?: GPUFluidParticleSource;
   private destroyed = false;
   private readonly uniformData = new ArrayBuffer(PARTICLE_OVERLAY_UNIFORM_BYTES);
@@ -559,11 +597,12 @@ export class ParticleOverlay {
 
   private bindGroupFor(
     buffer: GPUBuffer, sceneDepth: GPUTextureView | undefined, frameWater: SimpleWaterInterfaces | undefined,
+    perRecord: GPUBuffer | undefined,
   ): GPUBindGroup {
     const view = sceneDepth ?? this.fallbackDepthView!;
     const water = frameWater ?? this.fallbackWaterViews!;
-    if (view !== this.boundSceneDepth || water !== this.boundWater) {
-      this.bindGroups.clear(); this.boundSceneDepth = view; this.boundWater = water;
+    if (view !== this.boundSceneDepth || water !== this.boundWater || perRecord !== this.boundPerRecord) {
+      this.bindGroups.clear(); this.boundSceneDepth = view; this.boundWater = water; this.boundPerRecord = perRecord;
     }
     let group = this.bindGroups.get(buffer);
     if (!group) {
@@ -582,7 +621,7 @@ export class ParticleOverlay {
           { binding: 6, resource: water.rearBackPosition },
           { binding: 7, resource: water.frontNormal },
           { binding: 8, resource: this.source?.frame ?? { buffer: this.uniforms!, size: 48 } },
-          { binding: 9, resource: { buffer: this.source?.motionEnergy ?? buffer } },
+          { binding: 9, resource: { buffer: perRecord ?? buffer } },
         ],
       });
       this.bindGroups.set(buffer, group);
@@ -632,6 +671,8 @@ export class ParticleOverlay {
   ): boolean {
     const source = this.source;
     if (!this.ready || !source || source.capacity === 0) return false;
+    const spray = frame.view === "fine" ? frame.spray : undefined;
+    if (frame.view === "fine" && !spray) return false;
     const { camera } = frame;
     const width = Math.max(1, Math.round(frame.viewportWidth));
     const height = Math.max(1, Math.round(frame.viewportHeight));
@@ -643,11 +684,14 @@ export class ParticleOverlay {
     f.set([width, height, Math.max(1e-6, frame.depthNear_m), sceneDepth ? 1 : 0], 16);
     f.set([...source.positionScale_m, LAYER_PARTICLE_SPEED_SCALE], 20);
     f.set([-0.5 * frame.container_m[0], 0, -0.5 * frame.container_m[2], source.frame ? 1 : 0], 24);
-    f.set([frame.water ? simpleWaterMurkLength_m(frame.container_m) : 0, 0, 0, 0], 28);
+    f.set([frame.water ? simpleWaterMurkLength_m(frame.container_m) : 0, spray?.radiusScale ?? 1, spray?.opacity ?? 1,
+      spray && frame.waterFront ? 1 : 0], 28);
     const gravity = frame.gravity_m_s2 ?? [0, 0, 0], pull = Math.hypot(...gravity) || 1;
     f.set([gravity[0] / pull, gravity[1] / pull, gravity[2] / pull, LAYER_PARTICLE_AGITATION_SCALE], 32);
-    const motion = frame.view === "motion", grid = source.grid;
-    u.set([source.strideFloats, source.capacity, motion ? 1 : 0, source.motionEnergy ? 1 : 0], 36);
+    // Spray sums as Motion's samples do: the accumulation and the composite.
+    const motion = frame.view === "motion" || spray !== undefined, grid = source.grid;
+    const perRecord = spray ? spray.field : source.motionEnergy;
+    u.set([source.strideFloats, source.capacity, spray ? 2 : frame.view === "motion" ? 1 : 0, !spray && source.motionEnergy ? 1 : 0], 36);
     u.set(grid ? [grid.velocityFloat, grid.depthFloat, grid.ballisticFloat+(grid.ballisticSignBit?0x80000000:0), grid.surfaceDepth] : [0, 0, 0, 0], 40);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
@@ -667,7 +711,7 @@ export class ParticleOverlay {
       },
     });
     pass.setPipeline(motion ? this.motionPipeline! : this.pipeline!);
-    pass.setBindGroup(0, this.bindGroupFor(source.buffer, sceneDepth, frame.water));
+    pass.setBindGroup(0, this.bindGroupFor(source.buffer, sceneDepth, frame.water ?? (spray ? frame.waterFront : undefined), perRecord));
     if (source.liveCount) pass.drawIndirect(this.indirect!, 0);
     else pass.draw(4, source.capacity);
     pass.end();
