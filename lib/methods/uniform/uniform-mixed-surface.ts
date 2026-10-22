@@ -1,3 +1,4 @@
+import { uniformMixedSurfaceCapacity } from "./uniform-mixed-surface-capacity";
 import { uniformSolidPointCellWGSL,uniformSolidSlideStartWGSL,uniformSolidPointOpenWGSL, uniformSolidSampleClosedWGSL } from "./uniform-solid-point-open.wgsl";
 import { uniformSurfaceFarCellWGSL } from "./uniform-surface-far-cell.wgsl";
 import { UNIFORM_SURFACE_SUPPORT_WORDS, UNIFORM_SURFACE_VELOCITY_REACH_H, uniformSurfaceTransportWGSL } from "./uniform-surface-transport.wgsl";
@@ -184,9 +185,10 @@ export class UniformMixedSurface {
     if(this.allocatedBytes>claimsLimit)throw new Error(`Uniform mixed surface claims and 16h support tables require ${this.allocatedBytes} bytes, exceeding the device buffer limit ${claimsLimit}; reduce scene capacity or resolution`);
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
     this.deferredGrid=Math.min(1024,Math.ceil(address.vertexKeys/64));
-    this.cubicEntries=125*ownership.capacity.fineTiles;
+    const staging=uniformMixedSurfaceCapacity(ownership.capacity.fineTiles);
+    this.cubicEntries=staging.cubicEntries;
     this.cubicGrid=Math.max(1,Math.min(1024,Math.ceil(this.cubicEntries/64)));
-    this.traceEntries=64*ownership.capacity.fineTiles;
+    this.traceEntries=staging.traceEntries;
     this.traceGrid=Math.max(1,Math.min(1024,Math.ceil(this.traceEntries/64)));
     this.wallGroups=Math.min(WALL_REACH_GRID,wallFaces(address));
     this.deferredWallGroups=Math.min(WALL_VERTEX_GRID,Math.ceil(1089*wallFaces(address)/64));
@@ -1523,19 +1525,22 @@ var<workgroup> wallBase:u32;
   let i=first+gid.x;var word=0xffffffffu;var slot=0u;
   if(i<lanes){
    let face=umWallFace(i/1089u);let vertex=umWallFaceVertex(face,i%1089u);
-   if(umWallPlane(vertex)==face%6u&&umWallBlock(vertex,face%6u)==face/6u){
-    var width=1u;
-    if(!umRegularFine){
-     let low=vec3i(umBlockPage(face/6u)<<vec3u(5u));let cell=vec3u(clamp(vertex,low,low+vec3i(31)));
-     width=select(1u,4u,umCoarseIncident(umTileAt(cell/4u),vec3u(vertex)-(cell/4u)*4u)!=0u);
-    }
-    let held=all(vec3u(vertex)%width==vec3u(0))&&umHoldCold(vec3u(vertex),width);
-    let far=select(umFarAir(vec3u(vertex)),-1.0,held);
-    if(held){}
-    else if(far>=0.0&&all(vec3u(vertex)%width==vec3u(0))){umRecordRegion(vec3u(vertex),0u);umStoreSurface(vec3u(vertex),width,far);}
-    else if(all(vec3u(vertex)%width==vec3u(0))){
-     slot=atomicAdd(&wallListed,1u);
-     word=umVertexAt(vec3u(vertex))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
+   var width=1u;
+   if(!umRegularFine){
+    let low=vec3i(umBlockPage(face/6u)<<vec3u(5u));let cell=vec3u(clamp(vertex,low,low+vec3i(31)));
+    width=select(1u,4u,umCoarseIncident(umTileAt(cell/4u),vec3u(vertex)-(cell/4u)*4u)!=0u);
+   }
+   // A coarse wall retains only its 4-aligned vertices. Reject its other
+   // fifteen lanes before page/plane ownership and far-air certification.
+   // The width uses this same face's cell, exactly as the owner path did.
+   if(all(vec3u(vertex)%width==vec3u(0))&&umWallPlane(vertex)==face%6u&&umWallBlock(vertex,face%6u)==face/6u){
+    if(!umHoldCold(vec3u(vertex),width)){
+     let far=umFarAir(vec3u(vertex));
+     if(far>=0.0){umRecordRegion(vec3u(vertex),0u);umStoreSurface(vec3u(vertex),width,far);}
+     else{
+      slot=atomicAdd(&wallListed,1u);
+      word=umVertexAt(vec3u(vertex))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
+     }
     }
    }
   }
@@ -1706,6 +1711,10 @@ override umCubicSolidList:bool=false;
    if(!hit){
     // umCubicPhi's tapsClear, less its canonical support form.
     let clear=${this.solid?"!umSolidEnabled()||(cell.width==1u&&umSolidClear(vec3i(cell.origin)))":"true"};
+    // Each admitted trace emits at most one cubic. Their two lists grow
+    // from opposite ends, and UM_CUBIC_ENTRIES >= UM_TRACE_ENTRIES, so
+    // even an all-cubic batch cannot overlap. Overflow traces were sent
+    // to advectDeferred before reaching this stage.
     let j=atomicAdd(&deferred.header[select(4u,1u,clear)],1u);let c=UM_CUBIC_BASE+5u*select(UM_CUBIC_ENTRIES-1u-j,j,clear);
     deferred.data[c]=key;deferred.data[c+1u]=bitcast<u32>(q.x);deferred.data[c+2u]=bitcast<u32>(q.y);deferred.data[c+3u]=bitcast<u32>(q.z);deferred.data[c+4u]=bitcast<u32>(moved);
     continue;

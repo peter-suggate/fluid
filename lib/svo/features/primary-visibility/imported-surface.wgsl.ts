@@ -2,9 +2,17 @@
  * fragment performs one source normal/PBR lookup, never a field ray march. */
 export const importedSurfaceWGSL = /* wgsl */ `
 @group(1) @binding(80) var<storage,read> importedLodRecords:array<vec4u>;
-@group(1) @binding(81) var<storage,read_write> importedDrawArgs:array<u32>;
-@compute @workgroup_size(64) fn importedSurfaceSelect(@builtin(global_invocation_id) id:vec3u){
-  let instance=id.x;if(instance>=arrayLength(&importedLodRecords)/8u){return;}
+@group(1) @binding(81) var<storage,read_write> importedDrawArgs:array<atomic<u32>>;
+@group(1) @binding(82) var<storage,read_write> importedInstanceIds:array<u32>;
+@group(1) @binding(83) var<storage,read> importedGroups:array<vec4u>;
+@compute @workgroup_size(64) fn importedSurfaceResetGroups(@builtin(global_invocation_id) id:vec3u){
+  if(id.x>=arrayLength(&importedGroups)){return;}
+  let group=importedGroups[id.x];let at=id.x*5u;
+  atomicStore(&importedDrawArgs[at],group.x);atomicStore(&importedDrawArgs[at+1u],0u);
+  atomicStore(&importedDrawArgs[at+2u],group.y);atomicStore(&importedDrawArgs[at+3u],0u);atomicStore(&importedDrawArgs[at+4u],0u);
+}
+fn importedSurfaceSelectInstance(instance:u32,batched:bool){
+  if(instance>=arrayLength(&importedLodRecords)/8u){return;}
   let base=instance*8u;let header=importedLodRecords[base];let primitive=header.x;
   let record=dryPrimitive(primitive);let camera=dryRasterPrimaryCamera();
   let centre=svoPrimitiveCenter_m(record);let radius=bitcast<f32>(header.z);
@@ -14,11 +22,21 @@ export const importedSurfaceWGSL = /* wgsl */ `
     &&abs(dot(relative,camera[3]))<=z*ty+radius*sqrt(1.0+ty*ty);
   let depth=max(dot(centre-camera[0],camera[1])-radius,DRY_REVERSED_Z_NEAR_M);
   let pixelsPerMetre=uniforms.viewport.y/(2.0*cameraTanHalfFov()*depth);
-  var selected=importedLodRecords[base+1u];
-  for(var i=1u;i<header.y;i+=1u){let candidate=importedLodRecords[base+1u+i];if(bitcast<f32>(candidate.z)*pixelsPerMetre<=0.25){selected=candidate;}}
-  let at=instance*5u;importedDrawArgs[at]=select(0u,selected.y,visible);importedDrawArgs[at+1u]=1u;
-  importedDrawArgs[at+2u]=selected.x;importedDrawArgs[at+3u]=0u;importedDrawArgs[at+4u]=0u;
+  var selected=importedLodRecords[base+1u];var level=0u;
+  for(var i=1u;i<header.y;i+=1u){let candidate=importedLodRecords[base+1u+i];if(bitcast<f32>(candidate.z)*pixelsPerMetre<=0.25){selected=candidate;level=i;}}
+  if(batched){
+    if(!visible){return;}
+    let groupId=header.w+level;let group=importedGroups[groupId];
+    let slot=atomicAdd(&importedDrawArgs[groupId*5u+1u],1u);
+    importedInstanceIds[group.z+slot]=primitive;
+  }else{
+    let at=instance*5u;atomicStore(&importedDrawArgs[at],select(0u,selected.y,visible));atomicStore(&importedDrawArgs[at+1u],1u);
+    atomicStore(&importedDrawArgs[at+2u],selected.x);atomicStore(&importedDrawArgs[at+3u],0u);atomicStore(&importedDrawArgs[at+4u],0u);
+    importedInstanceIds[instance]=primitive;
+  }
 }
+@compute @workgroup_size(64) fn importedSurfaceSelect(@builtin(global_invocation_id) id:vec3u){importedSurfaceSelectInstance(id.x,false);}
+@compute @workgroup_size(64) fn importedSurfaceSelectBatched(@builtin(global_invocation_id) id:vec3u){importedSurfaceSelectInstance(id.x,true);}
 struct ImportedSurfaceVertex {
   @builtin(position) position:vec4f,
   @location(0) local:vec3f,

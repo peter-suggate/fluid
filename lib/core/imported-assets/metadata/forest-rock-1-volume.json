@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-rock-1",
+  "source": "forest-rock-1.glb",
+  "origin": [
+    -0.72,
+    -0.4,
+    -0.44
+  ],
+  "dimensions": [
+    40,
+    24,
+    24
+  ],
+  "cellSize": 0.04,
+  "bandWidth": 0.04,
+  "brickCount": 43,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime mineral grain and moss 1",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.07500000298023224,
+        0.05999999865889549
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime mineral grain and moss 2",
+      "baseColorLinear": [
+        0.10000000149011612,
+        0.11500000208616257,
+        0.09200000017881393
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime mineral grain and moss 3",
+      "baseColorLinear": [
+        0.15000000596046448,
+        0.16500000655651093,
+        0.12999999523162842
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime mineral grain and moss 4",
+      "baseColorLinear": [
+        0.20000000298023224,
+        0.2150000035762787,
+        0.17000000178813934
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime mineral grain and moss 6",
+      "baseColorLinear": [
+        0.03200000151991844,
+        0.07500000298023224,
+        0.012000000104308128
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime mineral grain and moss 7",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.11999999731779099,
+        0.01899999938905239
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime mineral grain and moss 8",
+      "baseColorLinear": [
+        0.10000000149011612,
+        0.17000000178813934,
+        0.027000000700354576
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime mineral grain and moss 9",
+      "baseColorLinear": [
+        0.15000000596046448,
+        0.2199999988079071,
+        0.039000000804662704
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 24601,
+  "insideNodes": 4910
+}

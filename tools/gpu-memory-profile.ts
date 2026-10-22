@@ -1,3 +1,31 @@
+/** Logical texture payload bytes, excluding driver tiling/alignment. Depth24
+ * formats use a four-byte depth plane estimate; physical storage is opaque. */
+export function gpuTexturePayloadBytes(t: Pick<GPUTexture, "format" | "width" | "height" | "depthOrArrayLayers" | "dimension" | "mipLevelCount" | "sampleCount">): number {
+  let blockWidth = 1, blockHeight = 1, blockBytes: number;
+  const scalar = /^(r|rg|rgba)(8|16|32)(?:unorm|snorm|uint|sint|float)(?:-srgb)?$/.exec(t.format);
+  if (scalar) blockBytes = ({ r: 1, rg: 2, rgba: 4 }[scalar[1]!]!) * Number(scalar[2]) / 8;
+  else if (/^(?:bgra8unorm(?:-srgb)?|rgb10a2(?:uint|unorm)|rg11b10ufloat|rgb9e5ufloat|depth24plus|depth32float)$/.test(t.format)) blockBytes = 4;
+  else if (t.format === "stencil8") blockBytes = 1;
+  else if (t.format === "depth16unorm") blockBytes = 2;
+  else if (t.format === "depth24plus-stencil8" || t.format === "depth32float-stencil8") blockBytes = 8;
+  else if (/^(?:bc|etc2|eac)/.test(t.format)) {
+    blockWidth = blockHeight = 4;
+    blockBytes = /^(?:bc1-|bc4-|etc2-rgb8|etc2-rgb8a1|eac-r11)/.test(t.format) ? 8 : 16;
+  } else {
+    const astc = /^astc-(\d+)x(\d+)-/.exec(t.format);
+    if (!astc) throw new Error(`Memory profile needs byte size for ${t.format}`);
+    blockWidth = Number(astc[1]); blockHeight = Number(astc[2]); blockBytes = 16;
+  }
+  let bytes = 0;
+  for (let mip = 0; mip < t.mipLevelCount; mip++) {
+    const width = Math.max(1, Math.floor(t.width / 2 ** mip));
+    const height = Math.max(1, Math.floor(t.height / 2 ** mip));
+    const depth = t.dimension === "3d" ? Math.max(1, Math.floor(t.depthOrArrayLayers / 2 ** mip)) : t.depthOrArrayLayers;
+    bytes += Math.ceil(width / blockWidth) * Math.ceil(height / blockHeight) * depth * blockBytes * t.sampleCount;
+  }
+  return bytes;
+}
+
 /** Requested GPU resource bytes, excluding driver tiling/alignment and caches.
  * Tracks explicit destruction without wrapping resource identities passed to Dawn. */
 export class GPUMemoryProfile {
@@ -12,12 +40,7 @@ export class GPUMemoryProfile {
       };
       if (key === "createTexture") return (d: GPUTextureDescriptor) => {
         const t = target.createTexture(d);
-        const components = t.format.startsWith("rgba") ? 4 : t.format.startsWith("rg") ? 2 : 1;
-        const bits = /(?:rgba|rg|r)(8|16|32)/.exec(t.format)?.[1];
-        if (!bits) throw new Error(`Memory profile needs byte size for ${t.format}`);
-        let texels = 0;
-        for (let m = 0; m < t.mipLevelCount; m++) texels += Math.max(1, t.width >> m) * Math.max(1, t.height >> m) * (t.dimension === "3d" ? Math.max(1, t.depthOrArrayLayers >> m) : t.depthOrArrayLayers);
-        this.track(t, "texture", texels * components * Number(bits) / 8 * t.sampleCount); return t;
+        this.track(t, "texture", gpuTexturePayloadBytes(t)); return t;
       };
       const v = Reflect.get(target, key, target); return typeof v === "function" ? v.bind(target) : v;
     } });
@@ -30,6 +53,9 @@ export class GPUMemoryProfile {
   }
   get allocatedBytes(): number { return this.bytes; }
   snapshot() {
-    return { bytes: this.bytes, peakBytes: this.peakBytes, resources: [...this.live.values()].sort((a, b) => b.bytes - a.bytes) };
+    const resources = [...this.live.values()].sort((a, b) => b.bytes - a.bytes);
+    const bufferBytes = resources.reduce((sum, r) => sum + (r.kind === "buffer" ? r.bytes : 0), 0);
+    return { bytes: this.bytes, peakBytes: this.peakBytes, bufferBytes, textureBytes: this.bytes - bufferBytes,
+      resources };
   }
 }

@@ -22,8 +22,10 @@ import type { SvoVec3 } from "../primary-visibility/webgpu-svo-traversal";
  * Selecting it is a scene decision, made once by the terrain shell node, so the
  * ground the water rests in and the ground the camera sees cannot disagree
  * about which one it is.
+ * `forest-terrain` instead publishes distinct moss/soil/rock PBR records and
+ * selects their identities during voxelization; it has no per-pixel policy.
  */
-export type SvoTerrainSurfaceModel = "garden-terrain" | "porcelain";
+export type SvoTerrainSurfaceModel = "garden-terrain" | "porcelain" | "forest-terrain";
 
 /**
  * Unglazed white porcelain, in scene-linear.
@@ -52,9 +54,71 @@ export function sceneTerrainSurfaceModel(
   scene: Pick<SceneDescription, "scenery">,
 ): SvoTerrainSurfaceModel {
   for (const { node } of walkSceneryNodes(scene.scenery?.nodes ?? [])) {
-    if (node.kind === "terrain-shell") return node.materialModel === "porcelain" ? "porcelain" : "garden-terrain";
+    if (node.kind === "terrain-shell") return node.materialModel;
   }
   return "garden-terrain";
+}
+
+/** Render-only slots below the built-in rigid materials (16) and scenery (32). */
+// Keep these ABI literals independent of voxel-scene's scene-factory imports.
+export const SVO_FOREST_TERRAIN_MATERIAL_IDS = Object.freeze({ moss: 2, soil: 4, rock: 5, wetRock: 6 });
+export const SVO_FOREST_TERRAIN_PALETTE = Object.freeze({
+  mossLinear: [0.075, 0.12, 0.028] as LinearRgb,
+  soilLinear: [0.095, 0.055, 0.027] as LinearRgb,
+  rockLinear: [0.16, 0.18, 0.14] as LinearRgb,
+  wetRockLinear: [0.07, 0.085, 0.065] as LinearRgb,
+});
+
+export interface SvoForestTerrainMaterialMetadata {
+  readonly baseHeight_m: number;
+  readonly waterline_m: number;
+}
+
+/** Explicit shore elevation supports scenes whose liquid is authored as volumes. */
+export function sceneForestTerrainMaterial(
+  scene: Pick<SceneDescription, "scenery" | "terrain" | "container">,
+): SvoForestTerrainMaterialMetadata | undefined {
+  for (const { node } of walkSceneryNodes(scene.scenery?.nodes ?? [])) {
+    if (node.kind !== "terrain-shell") continue;
+    if (node.materialModel !== "forest-terrain") return undefined;
+    return {
+      baseHeight_m: finite(scene.terrain?.baseHeight_m ?? 0, "Forest terrain base height"),
+      waterline_m: finite(node.waterline_m ?? scene.container.height_m * scene.container.fillFraction, "Forest terrain waterline"),
+    };
+  }
+  return undefined;
+}
+
+/** Reference for the voxel-time classifier; no view-dependent color policy. */
+export function sampleForestTerrainMaterialId(
+  metadata: SvoForestTerrainMaterialMetadata, position: SvoVec3, normal: SvoVec3,
+): number {
+  const [x, y, z] = position;
+  const variation = Math.sin(x * 1.17 + z * 0.73) * Math.sin(z * 1.31 - x * 0.39);
+  const up = Math.max(0, normal[1] / Math.max(1e-8, Math.hypot(...normal)));
+  const ids = SVO_FOREST_TERRAIN_MATERIAL_IDS;
+  if (y < metadata.waterline_m - 0.12 + variation * 0.06) return ids.wetRock;
+  if (up < 0.66 + variation * 0.07) return ids.rock;
+  if (y < Math.max(metadata.waterline_m + 0.28, metadata.baseHeight_m) + variation * 0.14 || up < 0.82 + variation * 0.06) return ids.soil;
+  return ids.moss;
+}
+
+/**
+ * Assign terrain PBR identities once while voxelizing. Every visibility path,
+ * including secondary rays, then reads the same ordinary material record.
+ */
+export function forestTerrainMaterialWGSL(metadata: SvoForestTerrainMaterialMetadata): string {
+  const waterline = finite(metadata.waterline_m, "Forest terrain waterline");
+  const shore = Math.max(waterline + 0.28, finite(metadata.baseHeight_m, "Forest terrain base height"));
+  const ids = SVO_FOREST_TERRAIN_MATERIAL_IDS;
+  return `fn terrainSurfaceMaterial(world:vec3f,normal:vec3f)->u32{
+  let variation=sin(world.x*1.17+world.z*.73)*sin(world.z*1.31-world.x*.39);
+  let up=max(0.,normal.y/max(1e-8,length(normal)));
+  if(world.y<${(waterline - 0.12).toFixed(8)}+variation*.06){return ${ids.wetRock}u;}
+  if(up<.66+variation*.07){return ${ids.rock}u;}
+  if(world.y<${shore.toFixed(8)}+variation*.14||up<.82+variation*.06){return ${ids.soil}u;}
+  return ${ids.moss}u;
+}`;
 }
 
 /**

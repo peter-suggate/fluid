@@ -1,3 +1,5 @@
+import { svoDerivedRadianceRequired } from "../svo/features/lighting-visibility/derived-lighting-demand";
+import { sceneRenderTuning } from "./scene-render-profile";
 import { BUB_RENDER_SHAPE, robotRenderExtent, robotRenderRadius } from '../interaction/features/robot/render';
 import { interactionScene } from "../interaction/adapters/scene";
 import type { FluidStepRequest } from "../interaction/runtime/physics";
@@ -78,7 +80,7 @@ import {
   type SvoRenderDiagnostics,
 } from "../svo/features/diagnostics/svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "../svo/features/diagnostics/webgpu-svo-stage-overlay";
-import { DEFAULT_SVO_RENDER_TUNING, SvoSurfaceTuningCache, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
+import { SvoSurfaceTuningCache, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/features/lighting-visibility/svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import {
@@ -444,7 +446,7 @@ export interface SimulationRunConfig {
 const RENDER_SOURCE_VALUE_KEYS: ReadonlySet<string> = new Set([
   "svoMeshContours", "svoMeshDualContouring", "svoMeshDualMarchingCubes",
   "svoEnvironmentRefinementDepth", "svoEnvironmentBrickRefinementLevels",
-  "svoEnvironmentPlanarRefinementExemption", "svoBackdropRefinedRings",
+  "svoEnvironmentPlanarRefinementExemption", "svoBackdropRefinedRings", "svoDerivedRadiance",
 ]);
 
 export function structuralMethodValues(config: SimulationRunConfig): MethodParamValues {
@@ -1728,6 +1730,7 @@ export class FluidLabRenderer {
   private solverKey(scene:SceneDescription,config:SimulationRunConfig,presentationMode:ScenePresentationMode){
     return `${gpuSceneSolverKey(scene,config)}:presentation-${presentationMode}`
       + (presentationMode === "full-scene" ? `:scenery-${sceneryConstructionKey(scene)}:contours-${config.values.svoMeshContours === true}${config.values.svoMeshDualContouring === true ? ":dual-contouring" : ""}${config.values.svoMeshDualMarchingCubes === true ? ":dual-marching-cubes" : ""}`
+        + `:derived-radiance-${config.values.svoDerivedRadiance !== false}`
         + `:solid-surface-${JSON.stringify(scene.solidSurface ?? null)}`
         + `:refinement-${String(config.values.svoEnvironmentRefinementDepth ?? 0)}/${String(config.values.svoEnvironmentBrickRefinementLevels ?? "")}/${config.values.svoEnvironmentPlanarRefinementExemption === true}/backdrop-${String(config.values.svoBackdropRefinedRings ?? 0)}` : "");
   }
@@ -2033,6 +2036,7 @@ export class FluidLabRenderer {
         const refinement = config.values.svoEnvironmentBrickRefinementLevels;
         const depth = config.values.svoEnvironmentRefinementDepth;
         solver=await WebGPULiveSvoScene.create(device, scene, config.quality, report, abort.signal, {
+          derivedRadiance: config.values.svoDerivedRadiance !== false,
           environmentBrickRefinementLevels: typeof refinement === "number" ? refinement : undefined,
           surfaceContours: config.values.svoMeshContours === true,
           surfaceDualContouring: config.values.svoMeshDualContouring === true,
@@ -2053,6 +2057,7 @@ export class FluidLabRenderer {
         const refinement=config.values.svoEnvironmentBrickRefinementLevels;
         const depth=config.values.svoEnvironmentRefinementDepth;
         const sidecar=await WebGPULiveSvoScene.create(device,scene,config.quality,report,abort.signal,{
+          derivedRadiance:config.values.svoDerivedRadiance!==false,
           environmentBrickRefinementLevels:typeof refinement==="number"?refinement:undefined,
           surfaceContours:config.values.svoMeshContours===true,
           surfaceDualContouring:config.values.svoMeshDualContouring===true,
@@ -2664,7 +2669,7 @@ export class FluidLabRenderer {
     this.hoverHighlight = range && range.last >= range.first ? range : undefined;
   }
 
-  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning: SvoRenderTuning = DEFAULT_SVO_RENDER_TUNING, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
+  draw(time_s: number, scene: SceneDescription, camera: CameraState, bodies: RigidBodyState[], selectedBodyId: string | undefined, config: SimulationRunConfig, gridOverlay?: GridOverlayConfig, environmentId: EnvironmentId = defaultEnvironmentId, presentationMode: ScenePresentationMode = "full-scene", fluidSurfaceRenderMode: FluidSurfaceRenderMode = "shaded", svoLightingOptions: SvoLightingOptions = DEFAULT_SVO_LIGHTING_OPTIONS, svoDiagnostics: SvoRenderDiagnostics = DEFAULT_SVO_RENDER_DIAGNOSTICS, svoTuning?: SvoRenderTuning, pixelTrace?: PixelTraceConfig): RendererFrameMetrics {
     this.currentInteractionScene = Boolean(scene.interaction?.entities.length);
     scene = interactionScene(scene);
     // A method declares that its field views compose as layers; every other
@@ -2693,7 +2698,7 @@ export class FluidLabRenderer {
     const smoothRaster = !sceneUsesFlatVoxelNormals(scene)
       && !svoRenderStageUsesPrimaryWorkMap(svoDiagnostics.stageView)
       && resolveSvoPrimaryTraversal(svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal) === "mesh";
-    const activeSvoTuning = this.surfaceTuningCache.resolve(svoTuning, smoothRaster);
+    const activeSvoTuning = this.surfaceTuningCache.resolve(sceneRenderTuning(scene.renderProfile, svoTuning), smoothRaster);
     this.resize(activeSvoTuning.resolutionScale);
     if (!this.presentationTexture || !this.upscalePipeline || !this.upscaleBindGroup) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const requestedSvoDiagnostics = normalizeSvoRenderDiagnostics(svoDiagnostics);
@@ -2748,6 +2753,7 @@ export class FluidLabRenderer {
       ...config,
       values: {
         ...config.values,
+        svoDerivedRadiance: svoDerivedRadianceRequired(svoLightingOptions),
         svoEnvironmentBrickRefinementLevels: activeSvoTuning.environmentBrickRefinementLevels,
         svoMeshContours: activeSvoTuning.surfaceMeshContours,
         svoMeshDualContouring: activeSvoTuning.surfaceMeshing === "dual-contouring",

@@ -36,7 +36,7 @@ import {
 } from "../../contracts/svo-material-abi";
 import { successorEnvironmentCatalog } from "../scene-publication/scene-environment-catalog";
 import { uploadChangedWords } from "../scene-publication/svo-table-upload";
-import { sceneTerrainSurfaceModel, type SvoTerrainSurfaceModel } from "../materials/svo-terrain-material";
+import { sceneTerrainSurfaceModel, sceneForestTerrainMaterial, forestTerrainMaterialWGSL, type SvoTerrainSurfaceModel } from "../materials/svo-terrain-material";
 import { sceneCellSizes_m } from "../../../core/scene-lattice";
 import { solidWorldChangeBounds, type SolidWorldChangeBounds } from "../../../core/solid-world-change-bounds";
 import {
@@ -265,6 +265,8 @@ export interface OctreeSparseBrickWorldOptions {
   bulkResidency?: boolean;
   /** Temporally amortized diffuse-radiance feedback; on by default. */
   radianceFeedback?: boolean;
+  /** Renderer opacity-only mode; changing this requires a source rebuild. */
+  derivedRadiance?: boolean;
   /** Velocity-swept residency support plus downstream neighbor activation. */
   brickPreActivation?: boolean;
   /**
@@ -1674,6 +1676,7 @@ export class OctreeSparseBrickWorld {
     this.surfaceModel = sceneTerrainSurfaceModel(scene);
     const dryWorld = scene.systems?.fluid === false;
     const rendererOnly = options.rendererOnly === true;
+    this.radianceEnabled = options.derivedRadiance !== false;
     // A renderer-only world is a disposable sidecar: the solver beside it
     // keeps its own lattice and SolidWorld, so the sidecar may descend below
     // it. A world the solver itself draws from cannot (see `maximumDepth`).
@@ -1692,7 +1695,7 @@ export class OctreeSparseBrickWorld {
     this.terrainFieldStamp = terrainFieldStamp(scene);
     // A scenery-owned surface must not acquire render occupancy or refinement
     // from the hidden collision heightfield. Physics retains initialSolidWorld.
-    const visibleSolidWorld = scene.scenery?.terrainSurface === "scenery"
+    const visibleSolidWorld = scene.scenery?.terrainSurface === "scenery" || scene.scenery?.solidBoundarySurface === "scenery"
       ? svoRenderResidual(scene, initialSolidWorld).residual : initialSolidWorld;
     const solidWorldBounds = solidWorldPageBounds(scene, visibleSolidWorld);
     /**
@@ -2517,6 +2520,7 @@ export class OctreeSparseBrickWorld {
     // finer cell here — a solver leaf at `solverLevel` then measures exactly what
     // it always did. The residency above deliberately keeps the solver's own.
     this.cellSize = renderCellSize;
+    const forestTerrainMaterial = sceneForestTerrainMaterial(scene);
     this.proxyVoxelizer = new SparseSceneProxyVoxelizer(device, this.tree, {
       surfaceContours: options.surfaceContours,
       surfaceDualContouring: options.surfaceDualContouring,
@@ -2542,6 +2546,7 @@ export class OctreeSparseBrickWorld {
       solidSurface: scene.solidSurface?.kind === "swept-flume" ? sweptFlumeSurfaceWGSL(scene.solidSurface)
         : scene.solidSurface && BATH_SOLID_DISTANCE_WGSL,
       renderTerrain,
+      terrainMaterial: forestTerrainMaterial && forestTerrainMaterialWGSL(forestTerrainMaterial),
       backdropDetail: backdropDetail && backdropTerrainTable
         ? backdropDetailVoxelizerWGSL(backdropTerrainTable, backdropDetail, options.surfaceDualMarchingCubes === true) : undefined,
       // The coarse record index and the per-frame budget. Both are what turn
@@ -2689,6 +2694,7 @@ export class OctreeSparseBrickWorld {
           slotOffset: addressPlan.radianceSlotOffset,
           radianceFloorLevel: addressPlan.radianceFloorLevel,
           label: "Unified live SVO radiance",
+          storageEnabled: options.derivedRadiance !== false,
         });
         const nodeTarget = nodeMipPyramid.prepareGpuUpdate(mipPlan);
         const radianceTarget = tetrahedralRadiance.prepareGpuUpdate(mipPlan, addressPlan.radianceSlotOffset);
@@ -2700,7 +2706,7 @@ export class OctreeSparseBrickWorld {
         const sceneBrickBudget = octreeLiveSceneBrickBudget();
         this.liveDerivedChunkSeedBound = sceneBrickBudget > 0
           ? Math.min(sceneBrickBudget, sceneMaintenance.dirtyBrickCapacity) : sceneMaintenance.dirtyBrickCapacity;
-        const liveDerivedRadianceFeedback = options.radianceFeedback ?? LIVE_SVO_RADIANCE_FEEDBACK.enabledByDefault;
+        const liveDerivedRadianceFeedback = options.derivedRadiance !== false && (options.radianceFeedback ?? LIVE_SVO_RADIANCE_FEEDBACK.enabledByDefault);
         const liveDerivedGenerationSource = {
           buffer: this.structuralPublicationState,
           offsetBytes: this.tree.structuralPublicationOffsetBytes
@@ -2781,7 +2787,7 @@ export class OctreeSparseBrickWorld {
           // The radiance scratch was sized like the opacity scratch — one 16 kB
           // staging page per level-zero page, as much memory as the atlas it
           // stages into. Above the floor a level holds hundreds of pages.
-          radianceScratchCapacity: addressPlan.radiancePageCapacityPerLevel,
+          radianceScratchCapacity: options.derivedRadiance === false ? 1 : addressPlan.radiancePageCapacityPerLevel,
           label: "Unified live SVO derived-page builder",
         });
         nodeMipPyramid.acceptGpuUpdate(mipPlan.generation);
@@ -4159,6 +4165,9 @@ export class OctreeSparseBrickWorld {
 
   /** Withdraw radiance immediately; restoring it requires a complete ordered rebuild. */
   setRadianceEnabled(enabled: boolean): void {
+    // A raster-only source cannot publish radiance: the app first replaces
+    // this disposable sidecar when GI/cone demand changes, retaining fluid.
+    if (enabled && this.tetrahedralRadiance?.storageEnabled === false) return;
     if (enabled === this.radianceEnabled) return;
     this.radianceEnabled = enabled;
     // Withdrawn here and restored by the rebuild's frame: the same object both

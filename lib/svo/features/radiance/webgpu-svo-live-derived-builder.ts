@@ -1857,6 +1857,7 @@ export class WebGpuLiveSvoDerivedBuilder {
    */
   encodeRound(pass: GPUComputePassEncoder, includeRadiance = true): void {
     if (this.destroyed) return;
+    if (includeRadiance && this.options.radiance.storageEnabled === false) throw new Error("Radiance dispatch requires allocated radiance storage; rebuild the presentation source first");
     const state = this.pipelineState;
     if (!state) throw new Error("Live SVO derived builder pipelines are not initialized");
     const groups = LIVE_SVO_DERIVED_BUDGET.buildWorkgroups;

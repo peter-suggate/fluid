@@ -5,7 +5,7 @@ import {
 } from "../../../core/planar-boundary";
 import type { EnvironmentBoxProxy, EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import type { SceneDescription } from "../../../core/model";
-import { proceduralSolidField, type ProceduralSolidField } from "../../../core/procedural-solid";
+import { proceduralSolidField, type ProceduralSolidBoundary, type ProceduralSolidField } from "../../../core/procedural-solid";
 import { sceneLatticeDimensions, solidVoxelShellForScene } from "../../../core/scene-lattice";
 import { appendedSolidPatches } from "../../../core/solid-patch-list";
 import { terrainContentStamp } from "../../../core/terrain";
@@ -14,6 +14,7 @@ import {
   createSolidWorld,
   planarBoundaryForSolidWorldVoxelPatch,
   solidWorldVoxelPatchBounds_m,
+  solidVoxelPatchesKey,
   terrainSolidWorldWithPatches,
   withSolidWorldPatches,
   type SolidWorld,
@@ -106,6 +107,8 @@ export interface SvoRenderResidual {
   readonly residual: SolidWorld;
   /** Smooth geometry with the same render-only cutaway as the voxel residual. */
   readonly solidBoundary: ProceduralSolidField | undefined;
+  /** Collision source identity even when scenery owns its render surface. */
+  readonly boundarySource: ProceduralSolidBoundary | undefined;
   /** `residual` before the cutaway; the image a later stroke is laid over. */
   readonly drawn: SolidWorld;
   readonly shell: CanonicalShellSources;
@@ -116,7 +119,7 @@ export interface SvoRenderResidual {
 
 /** Everything but the patches that the drawn image is composed from. */
 const residualGroundKey = (scene: SceneDescription): string =>
-  `${scene.scenery?.terrainSurface ?? "terrain"}:${terrainContentStamp(scene.terrain)}:${scene.container.width_m}:${scene.container.height_m}:`
+  `${scene.scenery?.terrainSurface ?? "terrain"}:${scene.scenery?.solidBoundarySurface ?? "boundary"}:${terrainContentStamp(scene.terrain)}:${scene.container.width_m}:${scene.container.height_m}:`
   + `${scene.container.depth_m}:${sceneLatticeDimensions(scene).join(":")}:`
   + `${scene.container.shape ?? "box"}:${scene.container.top ?? "open"}`;
 
@@ -127,6 +130,17 @@ const residualGroundKey = (scene: SceneDescription): string =>
  * still holds, so they take those residuals back rather than replay a document.
  */
 const residualBySnapshot = new WeakMap<SolidWorld, SvoRenderResidual>();
+
+/** Only the intact generated prefix may be replaced by authored scenery.
+ * Later edits remain visible; stale/reordered source patches stay ordinary
+ * voxel geometry rather than being hidden under an unrelated boundary. */
+function sceneryBoundaryPatchCount(scene: SceneDescription, patches: readonly SolidWorldVoxelPatch[]): number {
+  if (scene.scenery?.solidBoundarySurface !== "scenery" || !proceduralSolidField(scene)) return 0;
+  const boundary = scene.solidBoundary!;
+  return patches.length >= boundary.patchCount
+    && solidVoxelPatchesKey(patches.slice(0, boundary.patchCount)) === boundary.patchesKey
+    ? boundary.patchCount : 0;
+}
 
 /**
  * The render residual of `world`, the snapshot `scene` publishes.
@@ -154,11 +168,13 @@ export function svoRenderResidual(
   const cutawayKey = eye ? `${eye.x}:${eye.y}:${eye.z}` : "";
   const known = residualBySnapshot.get(world);
   if (known && known.groundKey === groundKey && known.cutawayKey === cutawayKey
-    && known.solidBoundary?.source === scene.solidBoundary) return known;
+    && known.boundarySource === scene.solidBoundary) return known;
   const appended = previous && previous.groundKey === groundKey
     ? appendedSolidPatches(previous.world.patches, world.patches) : undefined;
   const shell = canonicalShellSources(scene, world.patches, appended ? previous!.shell : undefined);
   const excluded = canonicalShellPatches(shell).hidden;
+  const sceneryBoundaryCount = sceneryBoundaryPatchCount(scene, world.patches);
+  for (let index = 0; index < sceneryBoundaryCount; index++) excluded.add(index);
   const firstAppended = world.patches.length - (appended?.length ?? 0);
   let drawn: SolidWorld;
   const drawTerrain = scene.scenery?.terrainSurface !== "scenery";
@@ -173,7 +189,8 @@ export function svoRenderResidual(
   }
   const cutaway = vesselCutawayPatches(scene, drawn.patches);
   const residual: SvoRenderResidual = { world, residual: withSolidWorldPatches(drawn, cutaway),
-    solidBoundary: proceduralSolidField(scene)?.withEdits(cutaway),
+    solidBoundary: sceneryBoundaryCount > 0 ? undefined : proceduralSolidField(scene)?.withEdits(cutaway),
+    boundarySource: scene.solidBoundary,
     drawn, shell, excluded, groundKey, cutawayKey };
   residualBySnapshot.set(world, residual);
   return residual;
@@ -426,12 +443,14 @@ export function buildSvoSolidWorldPlanarBoundaryCatalog(
   // authority, but remove every unedited wall from the render residual. The
   // vessel outline supplies the visual cue.
   const residualExcludedPatchIndices = new Set<number>(canonicalTankShell);
+  const sceneryBoundaryCount = sceneryBoundaryPatchCount(scene, patches);
+  for (let index = 0; index < sceneryBoundaryCount; index++) residualExcludedPatchIndices.add(index);
   patches.forEach((voxelPatch, patchIndex) => {
     // The canonical vessel shell is physical SolidWorld authority for the
     // solver. Presentation omits it from the ray field, and edited shell pieces
     // remain visible as ordinary voxel geometry. Neither case may promote it to an
     // opaque embedded-plane hit, which caused the black tank floor.
-    if (canonicalTankShellSources.has(patchIndex)) return;
+    if (canonicalTankShellSources.has(patchIndex) || patchIndex < sceneryBoundaryCount) return;
     if (options.promoteEditablePatches === false) return;
     const patch = planarBoundaryForSolidWorldVoxelPatch(scene, voxelPatch);
     if (!patch) return;

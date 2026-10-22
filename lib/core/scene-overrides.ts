@@ -1,3 +1,4 @@
+import { sceneRenderTuning } from "./scene-render-profile";
 import {
   COMPARE_ABSENT,
   COMPARE_ACTIVE_KEY,
@@ -331,6 +332,7 @@ export function sceneOverrideClearPlan(
     }
     if (key.startsWith("camera.")) { ui.camera = cameraForPreset(preset); continue; }
     switch (key) {
+      case "svoRefinementDepth": svoRenderTuning.environmentRefinementDepth = sceneRenderTuning(preset.renderProfile).environmentRefinementDepth; break;
       case "overlay": ui.sceneOverlay = initialUI.sceneOverlay; break;
       case "grid": ui.gridOverlayAxis = initialUI.gridOverlayAxis; break;
       case "gridSlice": ui.gridOverlaySlice = initialUI.gridOverlaySlice; break;

@@ -1,3 +1,4 @@
+import { particleDepositStorage } from "./uniform-particle-deposit-storage";
 import {uniformSolidPointOpenWGSL,uniformSolidSlideStartWGSL,uniformSolidPointCellWGSL} from "./uniform-solid-point-open.wgsl";
 import type { UniformRegionalFramePlan } from "./uniform-regional-frame-plan";
 import { GPUFluidParticleMotion } from "../../core/webgpu-particle-motion";
@@ -327,13 +328,15 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   * tile key, then PARTICLE_RESIDENCY_WORDS a page, after the brick table. */
  private readonly refineWord:number;
  private readonly refineJoinWords:number;
- /** DEPB's words, after the coarse list: six a fine cell (momentum, then
+ /** DEPB's words, in the consumed particle bank when it fits, otherwise
+  * after the coarse list: six a fine cell (momentum, then
   * weight, an axis), then a flag a fine tile (uniform-particle-brick.wgsl),
   * for depositTiles fine tiles: every h tile the pool can store unless the
   * device's buffer limit holds fewer. A layout past them takes the general
   * gather (transfer). */
  private readonly depositWord:number;
  private readonly depositTiles:number;
+ private readonly sharedDeposit:boolean;
  /** The step's coarse corner list (after the refine words): a count, a
   * build count and two spare words, then coarseListCapacity corner entries
   * and as many build entries. couple, depthCoarse and redistanceCoarse
@@ -459,9 +462,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // The fine-tile capacity can grow between frames up to the pool's tiles
   // (reserveFine), and the pour's late frames hold over 12k: the deposit's
   // words are sized for the pool, so no layout leaves the fast deposit.
-  this.depositWord=this.coarseListWord+4+2*this.coarseListCapacity;
-  this.depositTiles=Math.max(0,Math.min(address.poolTiles,Math.floor((limit/4-this.depositWord)/(6*64+1))));
-  const binBytes=4*(this.depositWord+(6*64+1)*this.depositTiles);
+  const deposit=particleDepositStorage(this.coarseListWord+4+2*this.coarseListCapacity,address.poolTiles,limit,this.particles[0].size);
+  this.depositWord=deposit.offsetWords;this.depositTiles=deposit.tiles;this.sharedDeposit=deposit.shared;
+  const binBytes=deposit.binsBytes;
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
   this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
@@ -622,6 +625,9 @@ const nbSparseBins:bool=true;
 const NB_PREVIOUS_CROSSINGS:bool=${this.previousCrossings};
 ${narrowBandParticleWGSL(this.apic)}
 @group(1) @binding(0) var<storage,read_write> source:array<Particle>;
+// Disjoint entry points alias binding 0: only transferClear/Deposit/Properties
+// access the atomic view, after SORT consumed source and before tail extension.
+${this.sharedDeposit?"@group(1) @binding(0) var<storage,read_write> depositScratch:array<atomic<u32>>;":""}
 @group(1) @binding(1) var<storage,read_write> particles:array<Particle>;
 @group(1) @binding(2) var<storage,read_write> bins:array<atomic<u32>>;
 @group(1) @binding(3) var<storage,read_write> links:array<u32>;
@@ -1331,9 +1337,9 @@ fn transferFace(face:UMFace)->f32{
  }}}
  if(total<1e-5){return original;}return mix(original,momentum/total+umThawFaceTerm(face.anchor,face.axis,face.width),blend*nbTransferBlend(q,depth,total));
 }
-${narrowBandTransferPropertiesSource(this.gradedDensity)}
+${narrowBandTransferPropertiesSource(this.gradedDensity,this.sharedDeposit?"depositScratch":"bins")}
 ${narrowBandFineTransferSource(subgroups,this.apic,this.gradedDensity)}
-${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords})}
+${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords},this.sharedDeposit?"depositScratch":"bins")}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one
 // patch a face, and a face centred in a tile past the reach lies more than
 // two cells from the surface: it keeps its velocity without a gather. The
@@ -1437,7 +1443,7 @@ ${narrowBandSurfaceWGSL}
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
   await Promise.all(["activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
-   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine"].map(async name=>{
+   "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine",...(this.sharedDeposit?["transferClear"]:[])].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources"].includes(entryPoint)?1:0]!;
    const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
@@ -1484,7 +1490,7 @@ ${narrowBandSurfaceWGSL}
    // cells it reached. Transfer loads canonical face texels directly in both
    // mixed and all-4h modes; nothing samples a cache. The general gather
    // (transfer) serves the layouts the deposit's words do not fit.
-   transfer:this.compile(["transferDeposit","transferRefine","transferProperties","transfer","transferOwners","transferSeams"],"transfer","transfer"),
+   transfer:this.compile([...(this.sharedDeposit?["transferClear"]:[]),"transferDeposit","transferRefine","transferProperties","transfer","transferOwners","transferSeams"],"transfer","transfer"),
    snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["coarseBuilds","depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    // A retirement whose step built no coarse list (a standalone call) lists the corners itself.

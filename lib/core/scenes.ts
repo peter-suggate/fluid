@@ -1,4 +1,5 @@
 import { createInteractivePlayground } from "../interaction/playground";
+import type { SceneRenderProfile } from "./scene-render-profile";
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
@@ -50,6 +51,7 @@ import { CHURNING_TANK_SCENE_ID, createChurningTankScene } from "./churning-tank
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { HERO_GARDEN_BLENDER_ID, createHeroGardenBlenderScene, heroGardenBlenderCamera } from "./hero-garden-blender-scene";
 import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
+import { FOREST_WATERFALL_ID, createForestWaterfallScene, forestWaterfallCamera } from "./forest-waterfall-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
@@ -100,6 +102,7 @@ export interface ScenePreset {
   background: EnvironmentId;
   /** Whether the authored dry world is presented behind the raster water. */
   presentationMode: ScenePresentationMode;
+  renderProfile?: SceneRenderProfile;
 }
 
 /**
@@ -1635,6 +1638,20 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: backyardPoolPartyCamera,
   }),
   defineScene({
+    id: FOREST_WATERFALL_ID,
+    name: "Stillwater Grove · forest waterfall",
+    blurb: "A nineteen-metre waterfall cascades over mossy rock ledges into a broad forest pool. Living water and splashes come from the narrow-band FLIP solver, surrounded by Blender-authored woodland.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    renderProfile: { environmentRefinementDepth: 0 },
+    build: createForestWaterfallScene,
+    camera: forestWaterfallCamera,
+  }),
+  defineScene({
     id: BACKYARD_POOL_DRIFT_ID,
     name: "Backyard pool · gentle drift",
     blurb: "The same backyard pool barely disturbed: the ball floats and drifts slowly across the water, and a single drip lands at the far end. A gentle wake and weak ripples spread over an otherwise still pool.",
@@ -2504,6 +2521,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((defin
       return resolved ??= presentationModeForScene(definition, sceneDocument(definition));
     },
     camera: definition.camera,
+    renderProfile: definition.renderProfile,
     create: () => sceneDocument(definition),
   };
 });

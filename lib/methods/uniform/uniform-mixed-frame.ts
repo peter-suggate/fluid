@@ -357,7 +357,7 @@ export class UniformMixedFrame {
  private surfaceGroup!:UniformDetailGroup;
  private surfaceVolumeGroup!:UniformDetailGroup;
  private geometryGroup:UniformDetailGroup;
- private readonly momentumGroup:UniformDetailGroup;
+ private momentumGroup!:UniformDetailGroup;
  private forceGroup!:UniformDetailGroup;
  /** Per-16h-region force tiers and the projected field's change (stream 1). */
  readonly dynamics:UniformMixedRegionDynamics;
@@ -552,9 +552,7 @@ export class UniformMixedFrame {
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
   // Its tiers follow the region heat (UniformMixedMomentumTiers).
-  this.momentum=new UniformMixedMomentum(device,o,this.heat.tiers,true,true,f.sourceParams,this.freeze,sampler);
-  this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),
-   unitHaloHalf:sampler==="texture16"?this.hanging.halfHaloOf(this.hanging.unitVelocity):undefined,extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,...cacheFields});
+  this.momentum=new UniformMixedMomentum(device,o,this.heat.tiers,true,true,f.sourceParams,this.freeze,sampler,"shared");
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true,true,true,true,true,this.dynamics,this.freeze);
   this.stageBandTiles=this.bandTilesAt(o.capacity.fineTiles,capacity.liquidBand);
   this.stageScratch=buffer("Uniform mixed stage scratch",this.stageBytesAt(o.capacity.fineTiles,this.stageBandTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
@@ -613,7 +611,7 @@ export class UniformMixedFrame {
   // The extension's slots are its prefix: they hold from the tail's
   // extension to the next head's, when no other consumer runs (useSlots).
   return Math.ceil(Math.max(this.extension.slotBufferBytesAt(fineTiles),this.surface.scratchBytes,
-   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
+   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedMomentum.traceBytesAt(fineTiles),UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
  }
  /** Every group over the stage scratch (reserveFine binds them again). */
  private bindStage():void{
@@ -622,6 +620,13 @@ export class UniformMixedFrame {
   const shareUnit=this.extension.supportsPair&&this.narrowBandFlip.particles.every(b=>b.size>=this.extension.companionBytesAt(this.ownership.capacity.address.poolTiles));
   this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging,sharedStageUnit:shareUnit?this.hanging.unitVelocity:undefined});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
+  // The retained extension slots expire before surface transport. Surface and
+  // volume finish before momentum; forces and the next extension run after it.
+  // Its trace list can use this same arena without changing admission capacity.
+  this.momentumGroup=this.momentum.bind({traceScratch:stage,unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),
+   unitHaloHalf:this.momentum.sampler==="texture16"?this.hanging.halfHaloOf(this.hanging.unitVelocity):undefined,
+   extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,
+   output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,coarseExtended:this.coarseCache});
   this.extension.useSlots(this.stageScratch);
   this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension,gate:this.narrowBandFlip.liveGate});
   this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension});

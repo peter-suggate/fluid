@@ -1,4 +1,5 @@
 import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
+import { sceneRenderProfileErrors, type SceneRenderProfile } from "./scene-render-profile";
 import sharedDefaultScene from "./default-scene.json";
 import type { InitialLiquidHeightField } from "./initial-height-field";
 import { liquidExtrusionBounds, liquidExtrusionRefusal, type LiquidExtrusion } from "./liquid-extrusion";
@@ -100,6 +101,8 @@ export interface SceneDescription {
   environment?: EnvironmentId;
   /** Surface style: continuous dual-grid raster meshes, tangent reconstruction when traced. Omitted defaults to voxel-flat. */
   surfaceStyle?: "smooth" | "voxel-flat";
+  /** Renderer defaults travel with saved scenes and worker publications; no solver effect. */
+  renderProfile?: SceneRenderProfile;
   /**
    * Presentation only: vessel walls of `solidVoxels` that stand between this
    * eye and the cavity they hold are left out of the drawn solids, so the
@@ -571,6 +574,7 @@ export function parseScene(input: string): SceneDescription {
 
 export function validateScene(scene: SceneDescription): string[] {
   const errors: string[] = [];
+  if (scene.renderProfile !== undefined) errors.push(...sceneRenderProfileErrors(scene.renderProfile));
   if (scene.interaction !== undefined) {
     try { interactionCatalog.inspectDocument(scene.interaction); }
     catch (error) { errors.push(`Interactive scene: ${error instanceof Error ? error.message : String(error)}`); }

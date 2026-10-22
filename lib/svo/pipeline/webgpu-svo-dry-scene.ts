@@ -1,3 +1,5 @@
+import { planImportedSurfaceGroups, type ImportedSurfaceGroup } from "../features/primary-visibility/imported-surface-groups";
+import { importedSurfaceShadowInstances, type ImportedSurfaceShadowGroup } from "../features/lighting-visibility/imported-surface-shadow";
 import { MESH_ASSETS, meshAssetVolume } from "../../core/imported-assets/asset-library";
 import { meshVolumeSurface, prepareMeshVolumeSurfaces } from "../../core/imported-assets/mesh-volume-surface";
 import { svoVoxelLightCacheShape } from "../features/lighting-visibility/svo-voxel-light-cache";
@@ -1019,6 +1021,7 @@ interface SvoDrySplitPipelineBundle {
   readonly scenePrimitiveRaster?: GPURenderPipeline;
   readonly importedSurface?: GPURenderPipeline;
   readonly importedSurfaceSelect?: GPUComputePipeline;
+  readonly importedSurfaceReset?: GPUComputePipeline;
   readonly scenePrimitiveCoverage?: GPURenderPipeline;
   readonly scenePrimitiveLodResolve?: GPURenderPipeline;
   readonly scenePrimitiveComputeArgs?: GPUComputePipeline;
@@ -1264,10 +1267,28 @@ export class SparseVoxelDrySceneRenderer {
   private sampledVolumePrimitiveIndices: number[] = [];
   private importedSurfacePipeline?: GPURenderPipeline;
   private importedSurfaceSelectPipeline?: GPUComputePipeline;
+  private importedSurfaceResetPipeline?: GPUComputePipeline;
+  private importedSurfaceInstanceIds?: GPUBuffer;
+  private importedSurfaceGroupRecords?: GPUBuffer;
+  private importedSurfaceGroups: readonly ImportedSurfaceGroup[] = [];
+  private importedShadowInstances?: GPUBuffer;
+  private importedShadowGroups: readonly ImportedSurfaceShadowGroup[] = [];
   private importedSurfaceLodLayout?: GPUBindGroupLayout;
   private importedSurfaceLodGroup?: GPUBindGroup;
   private importedSurfaceLodRecords?: GPUBuffer;
   private importedSurfaceDrawArgs?: GPUBuffer;
+  /** Command counts for profiling; selection and visible instance counts remain GPU-owned. */
+  get importedSurfaceDrawStatus() {
+    return { instances: this.importedSurfaceInstances.length, assets: new Set(this.importedSurfaceInstances.map(instance => instance.asset)).size,
+      groups: this.importedSurfaceGroups.length, batched: this.experiments.importedSurfaceBatching !== false,
+      drawCalls: this.experiments.importedSurfaceBatching !== false ? this.importedSurfaceGroups.length : this.importedSurfaceInstances.length,
+      instanceBytes: this.importedSurfaceInstanceIds?.size ?? 0,
+      argumentBytes: this.importedSurfaceDrawArgs?.size ?? 0,
+      nativeShadowGroups: this.importedShadowGroups.length,
+      nativeShadowInstanceBytes: this.importedShadowInstances?.size ?? 0,
+      finestTrianglesAcrossInstances: this.importedSurfaceInstances.reduce((sum,instance)=>sum+(this.importedSurfaceMeshes.get(instance.asset)?.count??0)/3,0),
+      sharedNativeMeshBytes: [...this.importedSurfaceMeshes.values()].reduce((sum,mesh)=>sum+mesh.vertices.size+mesh.indices.size,0) };
+  }
   private importedSurfaceMeshes = new Map<string, { volume: ReturnType<typeof meshAssetVolume>; vertices: GPUBuffer; indices: GPUBuffer; count: number; levels: ReturnType<typeof meshVolumeSurface>["levels"]; radius: number }>();
   private importedSurfaceInstances: { index: number; asset: string }[] = [];
   private surfaceMeshPipelines?: SvoDrySplitPipelineBundle["surfaceMesh"];
@@ -1819,6 +1840,7 @@ export class SparseVoxelDrySceneRenderer {
     this.scenePrimitiveRasterPipeline = bundle.scenePrimitiveRaster;
     this.importedSurfacePipeline = bundle.importedSurface;
     this.importedSurfaceSelectPipeline = bundle.importedSurfaceSelect;
+    this.importedSurfaceResetPipeline = bundle.importedSurfaceReset;
     this.scenePrimitiveCoveragePipeline = bundle.scenePrimitiveCoverage;
     this.scenePrimitiveLodResolvePipeline = bundle.scenePrimitiveLodResolve;
     this.scenePrimitiveComputeArgsPipeline = bundle.scenePrimitiveComputeArgs;
@@ -2275,6 +2297,12 @@ export class SparseVoxelDrySceneRenderer {
       this.encodeSurfaceMeshCompute(encoder, usePrepass, group, "Voxel mesh culling", pipelines.cull, Math.ceil(this.surfaceMeshArena!.size / 32 / 64));
     }
     if (this.importedSurfaceInstances.length && this.importedSurfacePipeline) {
+          if (this.experiments.importedSurfaceBatching !== false) {
+            const reset = encoder.beginComputePass({ label: "Native asset draw-group reset" });
+            reset.setPipeline(this.importedSurfaceResetPipeline!);
+            reset.setBindGroup(0, this.bindGroup); reset.setBindGroup(1, this.importedSurfaceLodGroup!);
+            reset.dispatchWorkgroups(Math.ceil(this.importedSurfaceGroups.length / 64)); reset.end();
+          }
           const select = encoder.beginComputePass(this.importedSurfaceSelectDescriptor);
           select.setPipeline(this.importedSurfaceSelectPipeline!);select.setBindGroup(0,this.bindGroup);select.setBindGroup(1,this.importedSurfaceLodGroup!);
           select.dispatchWorkgroups(Math.ceil(this.importedSurfaceInstances.length/64));select.end();
@@ -2345,13 +2373,24 @@ export class SparseVoxelDrySceneRenderer {
     if (this.importedSurfaceInstances.length && this.importedSurfacePipeline) {
           draw.setPipeline(this.importedSurfacePipeline);
           draw.setBindGroup(0, this.bindGroup);
-          for (let instance = 0; instance < this.importedSurfaceInstances.length; instance++) {
-            const mesh = this.importedSurfaceMeshes.get(this.importedSurfaceInstances[instance]!.asset)!;
-            draw.setVertexBuffer(0, mesh.vertices);
-            // Keep firstInstance zero: indirect-first-instance is optional.
-            draw.setVertexBuffer(1, this.importedSurfaceLodRecords!, instance * 128, 128);
-            draw.setIndexBuffer(mesh.indices, "uint32");
-            draw.drawIndexedIndirect(this.importedSurfaceDrawArgs!, instance * 20);
+          if (this.experiments.importedSurfaceBatching !== false) {
+            this.importedSurfaceGroups.forEach((batch, index) => {
+              const mesh = this.importedSurfaceMeshes.get(batch.asset)!;
+              draw.setVertexBuffer(0, mesh.vertices);
+              // Each asset/LOD owns a bounded compact instance-ID segment.
+              // firstInstance stays zero; no optional device feature is needed.
+              draw.setVertexBuffer(1, this.importedSurfaceInstanceIds!, batch.instanceOffset * 4, batch.capacity * 4);
+              draw.setIndexBuffer(mesh.indices, "uint32");
+              draw.drawIndexedIndirect(this.importedSurfaceDrawArgs!, index * 20);
+            });
+          } else {
+            for (let instance = 0; instance < this.importedSurfaceInstances.length; instance++) {
+              const mesh = this.importedSurfaceMeshes.get(this.importedSurfaceInstances[instance]!.asset)!;
+              draw.setVertexBuffer(0, mesh.vertices);
+              draw.setVertexBuffer(1, this.importedSurfaceInstanceIds!, instance * 4, 4);
+              draw.setIndexBuffer(mesh.indices, "uint32");
+              draw.drawIndexedIndirect(this.importedSurfaceDrawArgs!, instance * 20);
+            }
           }
     }
     draw.setPipeline(pipelines.draw);
@@ -4114,20 +4153,26 @@ export class SparseVoxelDrySceneRenderer {
       if (this.experiments.surfaceMesh && !this.importedSurfaceLodLayout) this.importedSurfaceLodLayout = this.device.createBindGroupLayout({ entries: [
         { binding: 80, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
         { binding: 81, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 82, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 83, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       ] });
       const importedSurfaceSelect = this.experiments.surfaceMesh ? await this.device.createComputePipelineAsync({
         label: "Native asset screen-error selection", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, this.importedSurfaceLodLayout!] }),
-        compute: { module, entryPoint: "importedSurfaceSelect" },
+        compute: { module, entryPoint: this.experiments.importedSurfaceBatching !== false ? "importedSurfaceSelectBatched" : "importedSurfaceSelect" },
+      }) : undefined;
+      const importedSurfaceReset = this.experiments.surfaceMesh && this.experiments.importedSurfaceBatching !== false ? await this.device.createComputePipelineAsync({
+        label: "Native asset draw-group reset", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, this.importedSurfaceLodLayout!] }),
+        compute: { module, entryPoint: "importedSurfaceResetGroups" },
       }) : undefined;
       const importedSurface = this.experiments.surfaceMesh ? await this.device.createRenderPipelineAsync({
         label: "Cached native asset surfaces", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        vertex: { module, entryPoint: "importedSurfaceVertex", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }, { arrayStride: 128, stepMode: "instance", attributes: [{ shaderLocation: 1, offset: 0, format: "uint32" }] }] },
+        vertex: { module, entryPoint: "importedSurfaceVertex", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }, { arrayStride: 4, stepMode: "instance", attributes: [{ shaderLocation: 1, offset: 0, format: "uint32" }] }] },
         fragment: { module, entryPoint: "importedSurfaceFragment", targets: rasterPrimaryTargets },
         primitive: { topology: "triangle-list", cullMode: "back" },
         depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
       }) : undefined;
-      const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!);
-      const bundle = { rasterAo, importedSurface, importedSurfaceSelect, optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!, this.experiments.nativeAssetShadows !== false);
+      const bundle = { rasterAo, importedSurface, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
@@ -5271,28 +5316,70 @@ export class SparseVoxelDrySceneRenderer {
     if (!geometryChanged && !membershipChanged
       && (!instances.length || !this.importedSurfaceLodLayout || this.importedSurfaceLodGroup)) return;
     this.importedSurfaceInstances = instances;
+    this.importedShadowInstances?.destroy();this.importedShadowInstances=undefined;this.importedShadowGroups=[];
+    if(this.rasterAo&&this.experiments.nativeAssetShadows!==false){
+      this.rasterAo.invalidateNativeGeometry();
+      this.rasterAo.setNativeDrawArguments(new Uint32Array());
+      if(instances.length){
+        const shadows=importedSurfaceShadowInstances(instances,asset=>this.importedSurfaceMeshes.get(asset)!.radius);
+        this.importedShadowGroups=shadows.groups;
+        this.importedShadowInstances=this.device.createBuffer({label:"Native shadow full-detail instance records",size:shadows.records.byteLength,usage:GPUBufferUsage.VERTEX,mappedAtCreation:true});
+        new Uint32Array(this.importedShadowInstances.getMappedRange()).set(shadows.records);this.importedShadowInstances.unmap();
+        const args=new Uint32Array(shadows.groups.length*6);
+        shadows.groups.forEach((group,index)=>{
+          const level=this.importedSurfaceMeshes.get(group.asset)!.levels[0]!;
+          args.set([level.count,0,level.first,0,0,group.instanceCount],index*6);
+        });
+        this.rasterAo.setNativeDrawArguments(args);
+      }
+    }
     if (!instances.length) {
       this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
+      this.importedSurfaceInstanceIds?.destroy(); this.importedSurfaceGroupRecords?.destroy();
       this.importedSurfaceLodRecords = undefined; this.importedSurfaceDrawArgs = undefined;
       this.importedSurfaceLodGroup = undefined;
+      this.importedSurfaceInstanceIds = undefined; this.importedSurfaceGroupRecords = undefined;
+      this.importedSurfaceGroups = [];
       return;
     }
     if (this.importedSurfaceLodLayout) {
+      const plan = planImportedSurfaceGroups(this.importedSurfaceInstances, asset => this.importedSurfaceMeshes.get(asset)!.levels);
+      this.importedSurfaceGroups = plan.groups;
       const words = new Uint32Array(this.importedSurfaceInstances.length * 32), floats = new Float32Array(words.buffer);
       this.importedSurfaceInstances.forEach(({ index, asset }, i) => {
         const mesh = this.importedSurfaceMeshes.get(asset)!;const at=i*32;
-        words[at]=index;words[at+1]=mesh.levels.length;floats[at+2]=mesh.radius;
+        words[at]=index;words[at+1]=mesh.levels.length;floats[at+2]=mesh.radius;words[at+3]=plan.firstGroupByAsset.get(asset)!;
         mesh.levels.forEach((level,j)=>{const p=at+4+j*4;words[p]=level.first;words[p+1]=level.count;floats[p+2]=level.error;});
       });
       this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
+      this.importedSurfaceInstanceIds?.destroy(); this.importedSurfaceGroupRecords?.destroy();
       this.importedSurfaceLodRecords = this.device.createBuffer({ size: words.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX, mappedAtCreation: true });
       new Uint32Array(this.importedSurfaceLodRecords.getMappedRange()).set(words);this.importedSurfaceLodRecords.unmap();
-      this.importedSurfaceDrawArgs = this.device.createBuffer({ size: this.importedSurfaceInstances.length * 20, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+      const batched = this.experiments.importedSurfaceBatching !== false;
+      this.importedSurfaceDrawArgs = this.device.createBuffer({ label: "Native asset draw-group arguments", size: (batched ? plan.groups.length : instances.length) * 20, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+      this.importedSurfaceInstanceIds = this.device.createBuffer({ label: "Native asset compact instance IDs", size: (batched ? plan.instanceCapacity : instances.length) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX });
+      const groupWords = new Uint32Array(plan.groups.length * 4);
+      plan.groups.forEach((batch, i) => groupWords.set([batch.count, batch.first, batch.instanceOffset, batch.capacity], i * 4));
+      this.importedSurfaceGroupRecords = this.device.createBuffer({ label: "Native asset immutable draw groups", size: groupWords.byteLength, usage: GPUBufferUsage.STORAGE, mappedAtCreation: true });
+      new Uint32Array(this.importedSurfaceGroupRecords.getMappedRange()).set(groupWords); this.importedSurfaceGroupRecords.unmap();
       this.importedSurfaceLodGroup = this.device.createBindGroup({ layout: this.importedSurfaceLodLayout, entries: [
         {binding:80,resource:{buffer:this.importedSurfaceLodRecords}},{binding:81,resource:{buffer:this.importedSurfaceDrawArgs}},
+        {binding:82,resource:{buffer:this.importedSurfaceInstanceIds}},{binding:83,resource:{buffer:this.importedSurfaceGroupRecords}},
       ] });
     }
   }
+
+  /** Finest asset meshes cast independently of the camera's compact LOD list. */
+  private readonly drawImportedShadows = (pass: GPURenderPassEncoder): void => {
+    if (!this.importedShadowInstances) return;
+    for (const [index,group] of this.importedShadowGroups.entries()) {
+      const mesh=this.importedSurfaceMeshes.get(group.asset)!;
+      pass.setVertexBuffer(0,mesh.vertices);
+      pass.setVertexBuffer(1,this.importedShadowInstances,group.firstInstance*8,group.instanceCount*8);
+      pass.setIndexBuffer(mesh.indices,"uint32");
+      pass.drawIndexedIndirect(this.rasterAo!.nativeDrawArguments!,index*24);
+    }
+  };
 
   /**
    * Publish one complete renderer generation into fixed-capacity arenas.
@@ -6820,7 +6907,7 @@ export class SparseVoxelDrySceneRenderer {
           this.splitLightingBindGroup!, this.surfaceMeshState!, this.surfaceMeshArena!.size / 32, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
           this.completeRasterShadows, this.completeRasterAo,
           this.experiments.rasterShadowPassReuse !== false && this.surfaceMeshStatus?.state === "ready"
-            ? this.shadowReuseKey : undefined);
+            ? this.shadowReuseKey : undefined, this.drawImportedShadows);
         this.rasterAoTrace = undefined;
       }
 
@@ -7116,7 +7203,10 @@ export class SparseVoxelDrySceneRenderer {
     this.importedSurfacePipeline = undefined;
     this.importedSurfaceSelectPipeline = undefined;
     this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
+      this.importedSurfaceInstanceIds?.destroy(); this.importedSurfaceGroupRecords?.destroy();
     this.importedSurfaceLodRecords = undefined; this.importedSurfaceDrawArgs = undefined; this.importedSurfaceLodGroup = undefined;
+    this.importedShadowInstances?.destroy(); this.importedShadowInstances = undefined;
+    this.importedShadowGroups = [];
     for (const mesh of this.importedSurfaceMeshes.values()) { mesh.vertices.destroy(); mesh.indices.destroy(); }
     this.importedSurfaceMeshes.clear();
     this.scenePrimitiveCoveragePipeline = undefined;

@@ -661,10 +661,14 @@ export interface SceneryRoomShellNode extends SceneryNodeBase {
  * horizon — which is what a formed vessel needs: on a moulded rim every one of
  * the lawn's variations reads as dirt on the casting rather than as ground
  * cover, and the height bands cut a tide line across a surface that has none.
+ * `forest-terrain` assigns moss, soil and stone material identities at voxel
+ * construction, using the terrain slope and the shell's authored shoreline.
  */
 export interface SceneryTerrainShellNode extends SceneryNodeBase {
   readonly kind: "terrain-shell";
-  readonly materialModel: "garden-terrain" | "porcelain";
+  readonly materialModel: "garden-terrain" | "porcelain" | "forest-terrain";
+  /** Authored shoreline for forest material bands; presentation only, never a fluid level. */
+  readonly waterline_m?: number;
 }
 
 export type SceneryPrimitiveNode =
@@ -698,6 +702,10 @@ export interface SceneryGraph {
   /** Authored scenery supplies the visible ground. Keep the heightfield for
    * physics, but omit its duplicate render surface and analytic horizon plane. */
   readonly terrainSurface?: "scenery";
+  /** Authored scenery supplies the visible surface of the procedural solid
+   * boundary. Keep that boundary and its generated voxel prefix for physics;
+   * draw only subsequent voxel edits alongside the replacement scenery. */
+  readonly solidBoundarySurface?: "scenery";
   readonly palettes: Readonly<Record<string, SceneryPalette>>;
   /**
    * Named plan vessels, referenced the way a material references a palette.
@@ -749,6 +757,8 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
   const errors: string[] = [];
   if (graph.terrainSurface !== undefined && graph.terrainSurface !== "scenery")
     errors.push("Scenery terrainSurface must be scenery when replacing the terrain surface");
+  if (graph.solidBoundarySurface !== undefined && graph.solidBoundarySurface !== "scenery")
+    errors.push("Scenery solidBoundarySurface must be scenery when replacing the sampled boundary surface");
   const ids = new Set<string>();
   let shells = 0;
   for (const { node } of walkSceneryNodes(graph.nodes)) {

@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-tree-0",
+  "source": "forest-tree-0.glb",
+  "origin": [
+    -5.92,
+    -0.24,
+    -6.48
+  ],
+  "dimensions": [
+    160,
+    168,
+    168
+  ],
+  "cellSize": 0.08,
+  "bandWidth": 0.08,
+  "brickCount": 2557,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Trunk broadleaf grain 0",
+      "baseColorLinear": [
+        0.026000000536441803,
+        0.01600000075995922,
+        0.008999999612569809
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk broadleaf grain 1",
+      "baseColorLinear": [
+        0.041999999433755875,
+        0.026000000536441803,
+        0.014000000432133675
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk broadleaf grain 2",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.03999999910593033,
+        0.023000000044703484
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk broadleaf grain 3",
+      "baseColorLinear": [
+        0.09000000357627869,
+        0.057999998331069946,
+        0.032999999821186066
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk broadleaf grain 4",
+      "baseColorLinear": [
+        0.11999999731779099,
+        0.07500000298023224,
+        0.041999999433755875
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk broadleaf grain 5",
+      "baseColorLinear": [
+        0.15000000596046448,
+        0.0949999988079071,
+        0.054999999701976776
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk broadleaf grain 6",
+      "baseColorLinear": [
+        0.04500000178813934,
+        0.05999999865889549,
+        0.024000000208616257
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk broadleaf grain 7",
+      "baseColorLinear": [
+        0.07500000298023224,
+        0.09000000357627869,
+        0.03500000014901161
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 0",
+      "baseColorLinear": [
+        0.026000000536441803,
+        0.08500000089406967,
+        0.008999999612569809
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 1",
+      "baseColorLinear": [
+        0.04100000113248825,
+        0.12999999523162842,
+        0.014000000432133675
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 2",
+      "baseColorLinear": [
+        0.06199999898672104,
+        0.1899999976158142,
+        0.02199999988079071
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 3",
+      "baseColorLinear": [
+        0.10499999672174454,
+        0.25,
+        0.03500000014901161
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 4",
+      "baseColorLinear": [
+        0.1599999964237213,
+        0.28999999165534973,
+        0.04699999839067459
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 5",
+      "baseColorLinear": [
+        0.05400000140070915,
+        0.15000000596046448,
+        0.06300000101327896
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 1368212,
+  "insideNodes": 112806
+}

@@ -254,11 +254,17 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
  * its face blend once, sharing the 5³ metric vertices, and finishes its
  * cells from their six deposit words; any other tile copies its velocity.
  * FIN zeroes the words and flag it read, ready for the next deposit. */
-export function narrowBandTransferPropertiesSource(graded=false):string{return /* wgsl */`
+export function narrowBandTransferPropertiesSource(graded=false,deposit="bins"):string{return /* wgsl */`
 // The deposit's six words a fine cell and a flag a fine tile (NB_DEPOSIT),
 // sized for every h tile the pool stores. A layout past them (a device whose
 // buffer limit holds fewer) takes the general gather (transfer).
 fn nbTransferFits()->bool{return umCounts.x<=NB_DEPOSIT_TILES;}
+// The shared bank still contains the move's records. Clear only the live
+// fine-owner range, including flags; never sweep the reserved pool capacity.
+@compute @workgroup_size(256) fn transferClear(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(!nbTransferFits()){return;}
+ for(var i=gid.x;i<385u*umCounts.x;i+=256u*groups.x){atomicStore(&${deposit}[NB_DEPOSIT+i],0u);}
+}
 var<workgroup> nbTransferFlag:u32;
 var<workgroup> nbTransferDepth:array<f32,125>;
 var<workgroup> nbTransferHeat:array<f32,27>;
@@ -278,15 +284,15 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  let owner=umAllOwner(vec3u(group.x*64u,0u,0u));umLoadAddressPlan(owner.tile>>9u,lane);let origin=4u*umTileCoord(owner.tile);
  // Read and zero this tile's deposit words, whatever happens below.
  let flag=NB_DEPOSIT+384u*umCounts.x+group.x;let at=NB_DEPOSIT+6u*(64u*group.x+lane);
- if(lane==0u){nbTransferFlag=atomicLoad(&bins[flag]);}
+ if(lane==0u){nbTransferFlag=atomicLoad(&${deposit}[flag]);}
  let deposited=workgroupUniformLoad(&nbTransferFlag)!=0u;
  // Vectors, not a private array: an array indexed by axis would live in memory.
  var momenta=vec3u(0u);var weights=vec3u(0u);
  if(deposited){
-  momenta=vec3u(atomicLoad(&bins[at]),atomicLoad(&bins[at+2u]),atomicLoad(&bins[at+4u]));
-  weights=vec3u(atomicLoad(&bins[at+1u]),atomicLoad(&bins[at+3u]),atomicLoad(&bins[at+5u]));
-  for(var k=0u;k<6u;k++){atomicStore(&bins[at+k],0u);}
-  if(lane==0u){atomicStore(&bins[flag],0u);}
+  momenta=vec3u(atomicLoad(&${deposit}[at]),atomicLoad(&${deposit}[at+2u]),atomicLoad(&${deposit}[at+4u]));
+  weights=vec3u(atomicLoad(&${deposit}[at+1u]),atomicLoad(&${deposit}[at+3u]),atomicLoad(&${deposit}[at+5u]));
+  for(var k=0u;k<6u;k++){atomicStore(&${deposit}[at+k],0u);}
+  if(lane==0u){atomicStore(&${deposit}[flag],0u);}
  }
  // A frozen tile (UniformColdFreeze) keeps every texel: f.velocity holds F.
  if(umFrozenRegion(umPageOfTile(owner.tile))){return;}

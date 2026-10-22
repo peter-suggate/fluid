@@ -21,7 +21,7 @@ export const PARTICLE_DEPOSIT_WORDS_PER_CELL = 6;
  * a join bit a tile key (joins words), then PARTICLE_RESIDENCY_WORDS a page
  * (allocation support masks and travel bounds), at these bins words. */
 export interface ParticleRefineWords {readonly joins:number;readonly allocation:number}
-export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords): string {
+export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords, deposit = "bins"): string {
   return /* wgsl */`
 ${particleResidencyTravelWGSL}
 // Coupled samples need only accepted motion; avoid their unused velocity norm.
@@ -204,11 +204,11 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
    let word=pbWords[n];if(word==0u){continue;}
    let local=vec3u(cell&vec3i(3));let base=word&0x3fffffffu;let owner=base+local.x+4u*local.y+16u*local.z;
    let at=NB_DEPOSIT+6u*owner+2u*(slot/PB_WINDOW);
-   atomicAdd(&bins[at],bitcast<u32>(atomicLoad(&pbMomentum[slot])));atomicAdd(&bins[at+1u],w);
+   atomicAdd(&${deposit}[at],bitcast<u32>(atomicLoad(&pbMomentum[slot])));atomicAdd(&${deposit}[at+1u],w);
    atomicStore(&pbTouched[n],1u);
   }
   workgroupBarrier();
-  if(lane<27u&&atomicLoad(&pbTouched[lane])!=0u){atomicStore(&bins[nbDeposited()+(pbWords[lane]&0x3fffffffu)/64u],1u);}
+  if(lane<27u&&atomicLoad(&pbTouched[lane])!=0u){atomicStore(&${deposit}[nbDeposited()+(pbWords[lane]&0x3fffffffu)/64u],1u);}
  }
  atomicMax(&state[5],bitcast<u32>(outside));
  for(var k=0u;k<3u;k++){if(counts[k]!=0u){atomicAdd(&state[6u+k],counts[k]);}}

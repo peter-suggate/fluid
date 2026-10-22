@@ -1,6 +1,8 @@
 import {
   SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR,
   SVO_PORCELAIN_TERRAIN_ROUGHNESS,
+  SVO_FOREST_TERRAIN_MATERIAL_IDS,
+  SVO_FOREST_TERRAIN_PALETTE,
   type SvoTerrainSurfaceModel,
 } from "../features/materials/svo-terrain-material";
 import { WATER_OPTICS, type LinearRgb } from "../../core/webgpu-lighting";
@@ -220,7 +222,7 @@ export function canonicalSvoMaterialRecord(input: SvoMaterialRecord): SvoMateria
  * albedo across it reads as untextured geometry rather than as fired clay.
  */
 export interface SvoVoxelMaterialOptions {
-  readonly terrainSurface?: "garden-terrain" | "porcelain";
+  readonly terrainSurface?: SvoTerrainSurfaceModel;
 }
 
 export function svoMaterialFromVoxelMaterial(
@@ -231,6 +233,7 @@ export function svoMaterialFromVoxelMaterial(
   const isWater = material.id === VOXEL_MATERIAL_IDS.fluid;
   const isTerrain = material.id === VOXEL_MATERIAL_IDS.terrain;
   const isPorcelainTerrain = isTerrain && options.terrainSurface === "porcelain";
+  const isForestTerrain = isTerrain && options.terrainSurface === "forest-terrain";
   return canonicalSvoMaterialRecord({
     materialId: material.id,
     revision,
@@ -244,11 +247,12 @@ export function svoMaterialFromVoxelMaterial(
       ? SVO_MATERIAL_FUNCTION_IDS.none
       : isPorcelainTerrain
         ? SVO_MATERIAL_FUNCTION_IDS.plaster
-        : SVO_MATERIAL_FUNCTION_IDS.gardenTerrain,
+        : isForestTerrain ? SVO_MATERIAL_FUNCTION_IDS.none : SVO_MATERIAL_FUNCTION_IDS.gardenTerrain,
     flags: material.closure === "opaque"
       ? SVO_MATERIAL_FLAGS.opaque
       : SVO_MATERIAL_FLAGS.dielectric,
-    baseColorLinear: isPorcelainTerrain ? SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR : material.baseColorLinear,
+    baseColorLinear: isPorcelainTerrain ? SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR
+      : isForestTerrain ? SVO_FOREST_TERRAIN_PALETTE.mossLinear : material.baseColorLinear,
     opacity: 1,
     emissiveLinear: material.emissiveLinear,
     roughness: isPorcelainTerrain ? SVO_PORCELAIN_TERRAIN_ROUGHNESS : material.roughness,
@@ -299,7 +303,17 @@ export function buildDefaultSvoMaterialRecords(
   revision = 1,
   options: SvoVoxelMaterialOptions = {},
 ): readonly SvoMaterialRecord[] {
-  return VOXEL_MATERIALS.map((material) => svoMaterialFromVoxelMaterial(material, revision, options));
+  const records = VOXEL_MATERIALS.map((material) => svoMaterialFromVoxelMaterial(material, revision, options));
+  if (options.terrainSurface === "forest-terrain") {
+    const base = records.find(record => record.materialId === VOXEL_MATERIAL_IDS.terrain)!;
+    const ids = SVO_FOREST_TERRAIN_MATERIAL_IDS, palette = SVO_FOREST_TERRAIN_PALETTE;
+    for (const [materialId, baseColorLinear, roughness] of [
+      [ids.soil, palette.soilLinear, 0.96],
+      [ids.rock, palette.rockLinear, 0.85],
+      [ids.wetRock, palette.wetRockLinear, 0.48],
+    ] as const) records.push(canonicalSvoMaterialRecord({ ...base, materialId, baseColorLinear, roughness }));
+  }
+  return records;
 }
 
 /** Dense direct-index table. Slot zero is empty and unassigned slots are inert. */

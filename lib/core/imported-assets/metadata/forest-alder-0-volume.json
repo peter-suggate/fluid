@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-alder-0",
+  "source": "forest-alder-0.glb",
+  "origin": [
+    -3.68,
+    -0.24,
+    -3.92
+  ],
+  "dimensions": [
+    96,
+    176,
+    104
+  ],
+  "cellSize": 0.08,
+  "bandWidth": 0.08,
+  "brickCount": 1558,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Trunk alder grain 0",
+      "baseColorLinear": [
+        0.17100000381469727,
+        0.1671999990940094,
+        0.14249999821186066
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk alder grain 1",
+      "baseColorLinear": [
+        0.22499999403953552,
+        0.2199999988079071,
+        0.1875
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk alder grain 2",
+      "baseColorLinear": [
+        0.27900001406669617,
+        0.2727999985218048,
+        0.23250000178813934
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk alder grain 3",
+      "baseColorLinear": [
+        0.34200000762939453,
+        0.3343999981880188,
+        0.2849999964237213
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk alder grain 4",
+      "baseColorLinear": [
+        0.414000004529953,
+        0.4047999978065491,
+        0.3449999988079071
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk alder grain 5",
+      "baseColorLinear": [
+        0.46799999475479126,
+        0.4575999975204468,
+        0.38999998569488525
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk alder grain 6",
+      "baseColorLinear": [
+        0.03500000014901161,
+        0.03999999910593033,
+        0.029999999329447746
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk alder grain 7",
+      "baseColorLinear": [
+        0.07000000029802322,
+        0.07500000298023224,
+        0.05999999865889549
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime alder foliage 0",
+      "baseColorLinear": [
+        0.042249999940395355,
+        0.10400000214576721,
+        0.018200000748038292
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime alder foliage 1",
+      "baseColorLinear": [
+        0.052650000900030136,
+        0.12960000336170197,
+        0.022679999470710754
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime alder foliage 2",
+      "baseColorLinear": [
+        0.06305000185966492,
+        0.15520000457763672,
+        0.027160000056028366
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime alder foliage 3",
+      "baseColorLinear": [
+        0.0734499990940094,
+        0.18080000579357147,
+        0.03164000064134598
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime alder foliage 4",
+      "baseColorLinear": [
+        0.08384999632835388,
+        0.20640000700950623,
+        0.03612000122666359
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime alder foliage 5",
+      "baseColorLinear": [
+        0.09425000101327896,
+        0.23199999332427979,
+        0.0406000018119812
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 836522,
+  "insideNodes": 63109
+}

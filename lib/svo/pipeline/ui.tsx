@@ -1,5 +1,6 @@
 "use client";
 
+import { sceneRenderTuning } from "../../core/scene-render-profile";
 import { renderSparseWorldBuildControls } from "../features/construction/controls";
 import { renderConeVisibilityControls } from "../features/lighting-visibility/controls";
 import { renderPresentControls } from "../features/presentation/controls";
@@ -159,6 +160,10 @@ export function RenderPipelineOverlay() {
   const svoMaximumNodeVisits = session.ui((state) => state.svoMaximumNodeVisits);
   const setSvoMaximumNodeVisits = session.ui((state) => state.setSvoMaximumNodeVisits);
   const tuning = session.ui((state) => state.svoRenderTuning);
+  const renderProfile = session.scene((state) => state.scene.renderProfile);
+  const sceneTuningDefaults = renderProfile ? { ...SVO_RENDER_TUNING_PRESETS.balanced,
+    environmentRefinementDepth: sceneRenderTuning(renderProfile).environmentRefinementDepth,
+  } : SVO_RENDER_TUNING_PRESETS.balanced;
   const setTuning = session.ui((state) => state.setSvoRenderTuning);
 
   // The scene facts the build node has to state for itself: what a leaf
@@ -218,9 +223,9 @@ export function RenderPipelineOverlay() {
       ...(key === "stableAreaLightSamples" ? { movingAreaLightSamples: value as number } : {}),
       ...(key === "stableAoSamples" ? { movingAoSamples: value as number } : {}),
     }));
-  const modified = <K extends keyof SvoRenderTuning>(key: K) => tuning[key] !== SVO_RENDER_TUNING_PRESETS.balanced[key];
+  const modified = <K extends keyof SvoRenderTuning>(key: K) => tuning[key] !== sceneTuningDefaults[key];
   const resetTuning = <K extends keyof SvoRenderTuning>(key: K) => () =>
-    updateTuning(key, SVO_RENDER_TUNING_PRESETS.balanced[key]);
+    updateTuning(key, sceneTuningDefaults[key]);
 
   const tuningKey = svoRenderTuningKey(tuning);
   // A rung is the pair, so the match is on the pair. `quality` and `reference`

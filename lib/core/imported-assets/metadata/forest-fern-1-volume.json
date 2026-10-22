@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-fern-1",
+  "source": "forest-fern-1.glb",
+  "origin": [
+    -1.61,
+    -0.035,
+    -1.61
+  ],
+  "dimensions": [
+    88,
+    32,
+    88
+  ],
+  "cellSize": 0.035,
+  "bandWidth": 0.035,
+  "brickCount": 221,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Forest \u2022 fern leaflet 0",
+      "baseColorLinear": [
+        0.029999999329447746,
+        0.11999999731779099,
+        0.012000000104308128
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 fern leaflet 1",
+      "baseColorLinear": [
+        0.052000001072883606,
+        0.18000000715255737,
+        0.019999999552965164
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 fern leaflet 2",
+      "baseColorLinear": [
+        0.09000000357627869,
+        0.23999999463558197,
+        0.027000000700354576
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 fern leaflet 3",
+      "baseColorLinear": [
+        0.15000000596046448,
+        0.2800000011920929,
+        0.032999999821186066
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 fern rachis and living stems",
+      "baseColorLinear": [
+        0.07999999821186066,
+        0.14000000059604645,
+        0.017999999225139618
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 126001,
+  "insideNodes": 2533
+}

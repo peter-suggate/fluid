@@ -34,6 +34,9 @@ export interface UniformMixedMomentumFields {
    * layout matches the other mixed stages' parameter blocks, and fixed
    * limits must be UNIFORM_MIXED_MOMENTUM_LIMITS. */
   params: GPUBuffer;
+  /** Exclusive scratch for this momentum stage; required with shared storage.
+   * No value survives momentumTrace. The caller retains buffer ownership. */
+  traceScratch?: GPUBufferBinding;
 }
 
 const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum" };
@@ -43,6 +46,17 @@ const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum
 const TRACE_COUNT_WORD=3;
 /** Bytes of a trace list entry (UMTraceEntry). */
 const TRACE_ENTRY_BYTES=20;
+
+/** Bind only the admitted trace range; a reservation must replace insufficient
+ * scratch before any frame can dispatch. This borrows without taking ownership. */
+export function uniformMomentumTraceBinding(fineTiles:number,scratch:GPUBufferBinding|undefined):GPUBufferBinding {
+  const bytes=TRACE_ENTRY_BYTES*Math.max(1,64*fineTiles);
+  const offset=scratch?.offset??0;
+  if(!scratch||offset<0||offset+bytes>scratch.buffer.size||(scratch.size??scratch.buffer.size-offset)<bytes)
+    throw new Error("Mixed momentum requires a trace entry for every admitted h owner");
+  return {...scratch,size:bytes};
+}
+
 
 /** Momentum through the unit sampler (uniformCachedMomentumSamplingWGSL),
  * the h tiles of the general list in two lean launches. momentumFine, a
@@ -247,7 +261,8 @@ export class UniformMixedMomentum {
     private readonly freeze?: UniformColdFreeze,
     /** The unit sampler's interpolation (hanging taps only): texture32
      * requires float32-filterable. */
-    readonly sampler: UniformMomentumSampler = "software") {
+    readonly sampler: UniformMomentumSampler = "software",
+    private readonly traceStorage: "owned" | "shared" = "owned") {
     // Far-air regular 4h owners (uniformMixedFarAirWGSL) are culled to zero,
     // so the merged launch skips them; forces supplies that zero itself.
     if(sourceParams&&!cullAir)throw new Error("Mixed momentum far-air skipping requires prediction culling");
@@ -274,12 +289,17 @@ export class UniformMixedMomentum {
     if(filtered.length)this.filter=device.createSampler({label:"Uniform mixed momentum filter",magFilter:"linear",minFilter:"linear",addressModeU:"clamp-to-edge",addressModeV:"clamp-to-edge",addressModeW:"clamp-to-edge"});
     this.tiers=new UniformMixedMomentumTiers(device,ownership,heat);
     this.claims=device.createBuffer({label:"Uniform mixed momentum job claims",size:4*UNIFORM_MIXED_CLAIM_WORDS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-    const entries=64*ownership.capacity.fineTiles;
     this.traceGrid=Math.max(1,Math.min(1024,ownership.capacity.fineTiles));
-    if(hanging)this.traceList=device.createBuffer({label:"Uniform mixed momentum trace list",size:TRACE_ENTRY_BYTES*Math.max(1,entries),usage:GPUBufferUsage.STORAGE});
-    this.allocatedBytes=4*UNIFORM_MIXED_CLAIM_WORDS+this.tiers.allocatedBytes+(hanging?TRACE_ENTRY_BYTES*Math.max(1,entries):0);
+    if(hanging&&traceStorage==="owned")this.traceList=device.createBuffer({label:"Uniform mixed momentum trace list",size:UniformMixedMomentum.traceBytesAt(ownership.capacity.fineTiles),usage:GPUBufferUsage.STORAGE});
+    this.allocatedBytes=4*UNIFORM_MIXED_CLAIM_WORDS+this.tiers.allocatedBytes+(this.traceList?.size??0);
   }
+  static traceBytesAt(fineTiles:number):number{return TRACE_ENTRY_BYTES*Math.max(1,64*fineTiles);}
   bind(fields: UniformMixedMomentumFields): UniformDetailGroup {
+    let trace:GPUBufferBinding|undefined;
+    if(this.hanging){
+      trace=uniformMomentumTraceBinding(this.ownership.capacity.fineTiles,
+        this.traceStorage==="shared"?fields.traceScratch:{buffer:this.traceList!});
+    }
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
     if(this.hanging!==(fields.unitVelocity!==undefined)||this.hanging!==(fields.unitHalo!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture and its halo");
     if((this.sampler==="texture16")!==(fields.unitHaloHalf!==undefined)||(fields.unitHaloHalf&&fields.unitHaloHalf.format!=="rgba16float"))throw new Error("Mixed momentum texture16 sampling requires the halo's rgba16float copy");
@@ -310,7 +330,7 @@ export class UniformMixedMomentum {
       {binding:19,resource:{buffer:this.tiers.record}},{binding:20,resource:{buffer:this.tiers.models}},
       ...(this.freeze?[{binding:21,resource:this.freeze.regions.createView()}]:[]),
       ...filtered,...(this.filter?[{binding:23,resource:this.filter}]:[]),
-      ...(this.traceList?[{binding:25,resource:{buffer:this.traceList}}]:[]),
+      ...(trace?[{binding:25,resource:trace}]:[]),
     ] });
   }
   async initialize(): Promise<void> {

@@ -1,5 +1,6 @@
 import { DUAL_GRID_WORDS_PER_VOXEL, dualGridPointWGSL } from "../svo/features/meshing/dual-grid-layout";
 import type { ProceduralSolidField } from "./procedural-solid";
+import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import { ProceduralSolidPublication } from "./procedural-solid-upload";
 import { SCENE_ENVIRONMENT_OWNER_BASE } from "./webgpu-rigid-body";
 import { packSvoSculptCuts, SVO_SCULPT_CUT_ARENA_WORDS, svoSculptCutsWGSL, intersectsSvoSculptPrimitiveBounds, SVO_SCULPT_MATERIAL_OFFSET, SVO_SCULPT_OWNER_MASK_OFFSET_WORDS, SVO_SCULPT_OWNER_MASK_WORDS } from "../svo/features/scene-publication/svo-sculpt-cuts";
@@ -527,6 +528,8 @@ export interface SparseSceneProxyVoxelizerOptions {
     heights_m: Float32Array<ArrayBuffer>;
     materialId: number;
   }>;
+  /** Optional voxel-time terrain PBR selector: fn terrainSurfaceMaterial(world,normal)->u32. */
+  terrainMaterial?: string;
   /** Maximum topology level. */
   finestLevel?: number;
   /** WGSL defining `sampleBackdropDetail` (`backdropDetailVoxelizerWGSL`), unioned into static solids. */
@@ -2163,6 +2166,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   solidBoundaryBaseWords?: number,
   fieldProgramExtraWords = 0,
   sculptCutOffsetWords?: number,
+  terrainMaterial?: string,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -2269,6 +2273,7 @@ ${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
 ${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout, backdropDetail, solidSurface, undefined, deferCentreNormals)}
+${terrainMaterial ?? ""}
 ${solidBoundaryBaseWords === undefined ? "" : proceduralSolidRenderWGSL(solidBoundaryBaseWords)}
 ${sculptCutOffsetWords === undefined ? "" : `fn sceneSculptCutLoad(word:u32)->u32{return atomicLoad(&maintenance[${sculptCutOffsetWords}u+word]);}
 ${svoSculptCutsWGSL("sceneSculptCutLoad")}
@@ -3157,6 +3162,9 @@ ${dual && dualMarchingCubes ? `
   // The scene lane is exclusively owned by this transaction. Fluid and
   // velocity live in disjoint payload lanes, so every material ID—including
   // terrain and rigid-body IDs below the scenery range—can update atomically.
+  ${terrainMaterial ? `if(bestMaterial==${VOXEL_MATERIAL_IDS.terrain}u&&bestPrimitive==INVALID_INDEX){
+    bestMaterial=terrainSurfaceMaterial(${dual ? "world-.5*cellExtent+fitted.point*cellExtent" : "world"},bestNormal);
+  }` : ""}
 ${sceneGeometryStore}
 ${occupancyStore}
   ${writePayload("materialOffset",
@@ -4001,7 +4009,7 @@ export class SparseSceneProxyVoxelizer {
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
         this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true,
-        this.options.backdropDetail, this.options.solidSurface, this.solidBoundaryBaseWords, this.options.fieldProgramExtraWords ?? 0, this.sculptCutOffsetWords),
+        this.options.backdropDetail, this.options.solidSurface, this.solidBoundaryBaseWords, this.options.fieldProgramExtraWords ?? 0, this.sculptCutOffsetWords, this.options.terrainMaterial),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,

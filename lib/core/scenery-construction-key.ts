@@ -11,6 +11,8 @@ import type { SceneryGraph } from "./scenery-graph";
  * `ceiling` and a tree's `bark` and `leaf` are colours under other names.
  */
 function sceneryAppearanceField(holder: object, key: string): boolean {
+  // Forest bands are assigned to voxel material IDs at construction time.
+  if (key === "materialModel" && (holder as { materialModel?: string }).materialModel === "forest-terrain") return false;
   if (key === "material" || key === "oak" || key === "materialModel" || key === "palettes") return true;
   const kind = (holder as { readonly kind?: unknown }).kind;
   if (kind === "room-shell") return key === "floor" || key === "wall" || key === "ceiling";
@@ -42,7 +44,8 @@ function scenerySubtreeChange(previous: unknown, next: unknown, appearance: bool
     const value = a[key];
     if (value === undefined) continue;
     fields += 1;
-    change = Math.max(change, scenerySubtreeChange(value, b[key], appearance || sceneryAppearanceField(a, key)));
+    change = Math.max(change, scenerySubtreeChange(value, b[key], appearance ||
+      (sceneryAppearanceField(a, key) && sceneryAppearanceField(b, key))));
     if (change === GEOMETRY) return GEOMETRY;
   }
   for (const key in b) if (b[key] !== undefined) fields -= 1;

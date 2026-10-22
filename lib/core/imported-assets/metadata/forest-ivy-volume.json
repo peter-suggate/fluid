@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-ivy",
+  "source": "forest-ivy.glb",
+  "origin": [
+    -0.5950000000000001,
+    -4.130000000000001,
+    -0.21000000000000002
+  ],
+  "dimensions": [
+    40,
+    120,
+    16
+  ],
+  "cellSize": 0.035,
+  "bandWidth": 0.035,
+  "brickCount": 107,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 0",
+      "baseColorLinear": [
+        0.026000000536441803,
+        0.08500000089406967,
+        0.008999999612569809
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 1",
+      "baseColorLinear": [
+        0.04100000113248825,
+        0.12999999523162842,
+        0.014000000432133675
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 2",
+      "baseColorLinear": [
+        0.06199999898672104,
+        0.1899999976158142,
+        0.02199999988079071
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 canopy leaf 3",
+      "baseColorLinear": [
+        0.10499999672174454,
+        0.25,
+        0.03500000014901161
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 fern rachis and living stems",
+      "baseColorLinear": [
+        0.07999999821186066,
+        0.14000000059604645,
+        0.017999999225139618
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 61577,
+  "insideNodes": 1232
+}

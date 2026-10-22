@@ -166,7 +166,7 @@ export interface EnvironmentProxyShell {
   readonly bounds_m: EnvironmentProxyAabb;
   /** Shell faces suitable for voxel/debug publication. Open worlds have no inferred floor geometry. */
   readonly primitives: readonly EnvironmentBoxProxy[];
-  readonly materialModel: "conservatory" | "courtyard" | "night-lab" | "gallery" | "bathhouse" | "station" | "room" | "garden-terrain" | "porcelain";
+  readonly materialModel: "conservatory" | "courtyard" | "night-lab" | "gallery" | "bathhouse" | "station" | "room" | "garden-terrain" | "porcelain" | "forest-terrain";
 }
 
 export const V = (x: number, y: number, z: number): Vec3 => ({ x, y, z });

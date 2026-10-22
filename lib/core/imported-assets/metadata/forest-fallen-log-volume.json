@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-fallen-log",
+  "source": "forest-fallen-log.glb",
+  "origin": [
+    -2.52,
+    -0.6,
+    -5.22
+  ],
+  "dimensions": [
+    120,
+    32,
+    160
+  ],
+  "cellSize": 0.06,
+  "bandWidth": 0.06,
+  "brickCount": 203,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Fallen timber | aged chestnut heartwood",
+      "baseColorLinear": [
+        0.11999999731779099,
+        0.07500000298023224,
+        0.026000000536441803
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 116025,
+  "insideNodes": 7099
+}

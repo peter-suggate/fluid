@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-broadleaf-1",
+  "source": "forest-broadleaf-1.glb",
+  "origin": [
+    -1.76,
+    -0.08,
+    -1.28
+  ],
+  "dimensions": [
+    80,
+    32,
+    72
+  ],
+  "cellSize": 0.04,
+  "bandWidth": 0.04,
+  "brickCount": 173,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Forest \u2022 waxy bank leaf 0",
+      "baseColorLinear": [
+        0.017999999225139618,
+        0.09000000357627869,
+        0.027000000700354576
+      ],
+      "roughness": 0.3199999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 waxy bank leaf 1",
+      "baseColorLinear": [
+        0.02800000086426735,
+        0.14000000059604645,
+        0.03700000047683716
+      ],
+      "roughness": 0.3199999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 waxy bank leaf 2",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.20000000298023224,
+        0.0430000014603138
+      ],
+      "roughness": 0.3199999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Forest \u2022 fern rachis and living stems",
+      "baseColorLinear": [
+        0.07999999821186066,
+        0.14000000059604645,
+        0.017999999225139618
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 98585,
+  "insideNodes": 2268
+}

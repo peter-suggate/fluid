@@ -343,6 +343,8 @@ export class WebGpuSvoTetrahedralRadiance {
 }
 
 export interface WebGpuLiveSvoTetrahedralRadianceOptions {
+  /** False owns only inert pipeline bindings; no radiance generation is published. */
+  storageEnabled?: boolean;
   /**
    * Slot *index* space, shared with the opacity pyramid.
    *
@@ -369,6 +371,8 @@ export interface WebGpuLiveSvoTetrahedralRadianceVisibleGeneration extends WebGp
 }
 
 export interface WebGpuLiveSvoTetrahedralRadianceGpuTarget {
+  /** False targets must never receive a radiance build or copy dispatch. */
+  storageEnabled?: boolean;
   textures: readonly [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
   pageValidity: LiveSvoDerivedPageValidityBinding;
   atlasPages: readonly [number, number, number];
@@ -390,6 +394,7 @@ export interface WebGpuLiveSvoTetrahedralRadianceGpuTarget {
 
 /** Fixed-capacity live radiance atlas sharing node-mip physical page slots. */
 export class WebGpuLiveSvoTetrahedralRadiance {
+  readonly storageEnabled: boolean;
   readonly pageState: WebGpuLiveSvoDerivedPageState;
   readonly allocatedBytes: number;
   /** Chosen from device features once, then carried on every GPU target. */
@@ -422,13 +427,15 @@ export class WebGpuLiveSvoTetrahedralRadiance {
       throw new RangeError("Live radiance atlas must be page-aligned and contain its declared capacity");
     }
     const label = options.label ?? "Live SVO tetrahedral radiance";
+    this.storageEnabled = options.storageEnabled !== false;
+    const allocatedTexels = this.storageEnabled ? options.atlasTexels : [1, 1, 1] as const;
     this.format = options.format ?? liveSvoRadianceAtlasFormat(device.features);
     this.textures = [0, 1, 2, 3].map((direction) => device.createTexture({ label: `${label} lobe ${direction}`,
-      size: options.atlasTexels, dimension: "3d", format: this.format,
+      size: allocatedTexels, dimension: "3d", format: this.format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST })) as [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
     this.views = this.textures.map((texture) => texture.createView({ dimension: "3d" })) as [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
     this.pageState = new WebGpuLiveSvoDerivedPageState(device, options.pageCapacity, label);
-    this.allocatedBytes = options.atlasTexels.reduce((a, b) => a * b, 4 * liveSvoRadianceBytesPerTexel(this.format))
+    this.allocatedBytes = allocatedTexels.reduce((a, b) => a * b, 4 * liveSvoRadianceBytesPerTexel(this.format))
       + this.pageState.allocatedBytes;
   }
 
@@ -454,14 +461,14 @@ export class WebGpuLiveSvoTetrahedralRadiance {
 
   gpuTarget(): WebGpuLiveSvoTetrahedralRadianceGpuTarget {
     const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
-    return { textures: this.textures, pageValidity: this.pageState.validity,
+    return { textures: this.textures, pageValidity: this.pageState.validity, storageEnabled: this.storageEnabled,
       atlasPages: this.options.atlasTexels.map((value) => Math.floor(value / physical)) as [number, number, number],
       pageCapacity: this.options.pageCapacity, atlasPageCapacity: this.atlasPageCapacity,
       slotOffset: this.slotOffset, format: this.format };
   }
 
   visibleGeneration(): WebGpuLiveSvoTetrahedralRadianceVisibleGeneration | undefined {
-    if (!this.plan) return undefined;
+    if (!this.plan || !this.storageEnabled) return undefined;
     return { generation: this.plan.generation, plan: this.plan, textures: this.textures, views: this.views,
       blackSlots: this.blackSlots, pageValidity: this.pageState.validity,
       radianceFloorLevel: this.options.radianceFloorLevel ?? 0, slotOffset: this.slotOffset };

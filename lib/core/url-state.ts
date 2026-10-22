@@ -1,4 +1,6 @@
 import { readVisualLayers, writeVisualLayers, type VisualLayerState } from "./visual-layers";
+import { sceneRenderTuning } from "./scene-render-profile";
+import { SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "../svo/pipeline/svo-render-tuning";
 import { managedQueryKey } from "../framework/persistence";
 import { uiFeatureQuery, type FeatureUIQueryState } from "../features/persistence";
 import { GRAVITY_QUERY_PATHS, isGravityVector } from "../features/gravity/state";
@@ -606,6 +608,12 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
   const parsedGridAxis = grid === "off" || grid === "x" || grid === "y" || grid === "z" || grid === "volume"
     ? grid : initialUI.gridOverlayAxis;
   const sliceOnlyVolume = parsedGridAxis === "volume" && isSliceOnlyGridOverlayMode(parsedGridMode);
+  const features = uiFeatureQuery.read(query);
+  if (preset.renderProfile) {
+    features.svoRenderTuning = { ...features.svoRenderTuning, environmentRefinementDepth: Math.trunc(numberParam(
+      query, "svoRefinementDepth", sceneRenderTuning(preset.renderProfile).environmentRefinementDepth,
+      0, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM)) };
+  }
   return {
     camera: {
       azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
@@ -636,7 +644,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     // Only the lens knows how many phases it has, so the ceiling is the
     // overlay's to enforce; a link can only be stopped from naming a
     // fractional or negative one.
-    ...uiFeatureQuery.read(query),
+    ...features,
   };
 }
 
@@ -730,6 +738,13 @@ export function serializeQueryState(
   // scene should not also have to say that it is not the shelf it came from.
   if (shellState.view === "library") query.set("view", "library");
   uiFeatureQuery.write(query, uiState);
+  const renderProfile = getScenePreset(sceneState.presetId).renderProfile;
+  if (renderProfile) {
+    // The generic codec omits global defaults. A scene may use another default,
+    // so an explicit global value must survive a shared-link round trip too.
+    if (uiState.svoRenderTuning.environmentRefinementDepth === sceneRenderTuning(renderProfile).environmentRefinementDepth) query.delete("svoRefinementDepth");
+    else query.set("svoRefinementDepth", String(uiState.svoRenderTuning.environmentRefinementDepth));
+  }
   // Only when one is up: a closed instrument is the absence of the key, so an
   // ordinary scene link does not have to say which panels it is not showing.
   if (uiState.sceneOverlay) query.set(OVERLAY_QUERY_KEY, uiState.sceneOverlay);

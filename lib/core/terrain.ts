@@ -1069,5 +1069,22 @@ export function validateTerrain(
 export function terrainWorldContainer(
   scene: Pick<SceneDescription, "terrain" | "container">,
 ): Pick<SceneDescription["container"], "width_m" | "height_m" | "depth_m"> {
-  return scene.terrain?.procedural?.container ?? scene.container;
+  if (scene.terrain?.procedural && !scene.terrain.grid) return scene.terrain.procedural.container;
+  const grid = scene.terrain?.grid;
+  if (!grid) return scene.container;
+  // A sampled environment can extend beyond the physical pool just as a
+  // procedural vessel can. This is the render footprint only: the solver's
+  // lattice still comes from scene.container. Include both ends because an
+  // authored grid need not be centred on the simulation domain.
+  const halfX = Math.max(Math.abs(grid.origin_m.x),
+    Math.abs(grid.origin_m.x + (grid.size.nx - 1) * grid.spacing_m));
+  const halfZ = Math.max(Math.abs(grid.origin_m.z),
+    Math.abs(grid.origin_m.z + (grid.size.nz - 1) * grid.spacing_m));
+  let height_m = scene.container.height_m;
+  for (const height of grid.heights_m) height_m = Math.max(height_m, height);
+  return {
+    width_m: Math.max(scene.container.width_m, 2 * halfX),
+    height_m,
+    depth_m: Math.max(scene.container.depth_m, 2 * halfZ),
+  };
 }

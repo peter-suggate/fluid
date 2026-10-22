@@ -3,6 +3,7 @@
  * node --import tsx tools/benchmark-nbflip-ui.ts NAME [--steps=120]
  *   [--scene=nbflip-figure-9-teaser] [--profile] [--dispatch-probe]
  *   [--heap] [--cpu] [--unpaced] [--memory]
+ *   [--dispatch-labels="Pass label|Other pass"] (with --dispatch-probe)
  * Plain wall time includes encoding, submissions and completion receipts;
  * excludes construction, renderer and diagnostic timestamp readback.
  * The summary reports the measured window's collections (count and pause
@@ -36,7 +37,7 @@ const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`)
 const name = process.argv[2] ?? "current";
 assert.match(name, /^[a-z0-9-]+$/);
 for (const argument of process.argv.slice(3)) {
-  assert.ok(/^(--(?:steps|from|scene|out)=.+|--profile|--dispatch-probe|--heap|--cpu|--unpaced|--memory)$/.test(argument), `Unknown option: ${argument}`);
+  assert.ok(/^(--(?:steps|from|scene|out|dispatch-labels)=.+|--profile|--dispatch-probe|--heap|--cpu|--unpaced|--memory)$/.test(argument), `Unknown option: ${argument}`);
 }
 const steps = Number(option("steps") ?? 120), from = Number(option("from") ?? 13);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(from) && from > 0 && from <= steps);
@@ -48,6 +49,8 @@ const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 assert.ok(steps * dt <= scene.duration_s + 1e-9, "Stay within the authored take");
 const profiled = process.argv.includes("--profile"), split = process.argv.includes("--dispatch-probe");
+const dispatchLabels=option("dispatch-labels")?.split("|");
+assert.ok(!dispatchLabels || split, "--dispatch-labels requires --dispatch-probe");
 const heap = process.argv.includes("--heap"), paced = !process.argv.includes("--unpaced");
 const cpu = process.argv.includes("--cpu");
 if (paced) paceDawnEventPolling();
@@ -83,15 +86,19 @@ try {
   Object.assign(globalThis, dawn.globals);
   const gpu = createProcessRetainedDawnGPU(dawn, ["backend=metal"]);
   const adapter = await gpu.requestAdapter(); assert.ok(adapter);
-  const raw = await adapter.requestDevice({ requiredFeatures: ["timestamp-query", ...(adapter.features.has("subgroups") ? ["subgroups" as const] : [])], requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+  const raw = await adapter.requestDevice({ requiredFeatures: ["timestamp-query",
+    ...(["subgroups", "float32-filterable"] as const).filter(feature => adapter.features.has(feature))],
+    requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
   if (profiled) profile = new GPUPassProfile(raw);
-  const probe = split ? new NarrowBandDispatchProbe(profile!.device) : undefined;
+  const probe = split ? new NarrowBandDispatchProbe(profile!.device,dispatchLabels?new Set(dispatchLabels):undefined) : undefined;
   if (process.argv.includes("--memory")) memory = new GPUMemoryProfile(probe?.device ?? profile?.device ?? raw);
   device = managedGPUDevice(memory?.device ?? probe?.device ?? profile?.device ?? raw, { requireWorkerRealm: false });
   device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
   const start = performance.now();
   solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {}) as WebGPUUniformReferenceSolver;
   const construction_ms = performance.now() - start;
+  const constructionMemory = memory?.snapshot();
+  if (constructionMemory) writeFileSync(`${out}/${name}-construction-memory.json`, JSON.stringify(constructionMemory, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "constructed", construction_ms, dt, values, grid: [solver.info.nx, solver.info.ny, solver.info.nz], features: [...raw.features], host: metadata.host }));
   for (let frame = 1; frame <= steps; frame++) {
     activeFrame=frame;activePhase="advance";
@@ -199,7 +206,7 @@ try {
   // particle/grid state hash and cannot establish full physical equivalence.
   const finalPhysicsSignature = { kind: "aggregate-diagnostics-sha256", version: 1,
     hash: createHash("sha256").update(JSON.stringify(finalPhysics)).digest("hex") };
-  writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, adapter: adapterInfo, memory: memory?.snapshot(), construction_ms, summary, scaling, allocations, finalPhysics, finalPhysicsSignature, rows, errors }, null, 2) + "\n");
+  writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, adapter: adapterInfo, memory: memory?.snapshot(), constructionMemory, construction_ms, summary, scaling, allocations, finalPhysics, finalPhysicsSignature, rows, errors }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", summary, scaling, finalPhysics, finalPhysicsSignature }));
 } catch (error) {
   const measured=rows.filter(row=>Number(row.frame)>=from);

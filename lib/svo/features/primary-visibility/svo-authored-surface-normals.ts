@@ -1,3 +1,5 @@
+import { SVO_FOREST_TERRAIN_MATERIAL_IDS } from "../materials/svo-terrain-material";
+
 /** Surface normals for continuous terrain and swept tubes. Geometry, occupancy
  * and materials remain the published voxel mesh's; unrelated props keep their
  * fitted normals. Sampling at shared vertices makes interpolation continuous. */
@@ -46,7 +48,8 @@ fn meshTerrainEdited(world:vec3f)->bool{
 }
 fn meshAuthoredTerrainNormal(world:vec3f,material:u32,face:vec3f)->vec3f{
   let base=meshHeader[${terrainWord}u];if(base==0u){return vec3f(0);}
-  if(material!=meshMaintenance[base+6u]){return vec3f(0);}
+  // Forest bands own distinct PBR slots but the same continuous heightfield.
+  if(material!=meshMaintenance[base+6u]&&material!=${SVO_FOREST_TERRAIN_MATERIAL_IDS.soil}u&&material!=${SVO_FOREST_TERRAIN_MATERIAL_IDS.rock}u&&material!=${SVO_FOREST_TERRAIN_MATERIAL_IDS.wetRock}u){return vec3f(0);}
   let origin=vec2f(meshTerrainFloat(base),meshTerrainFloat(base+1u));
   let pitch=vec2f(meshTerrainFloat(base+2u),meshTerrainFloat(base+3u));
   let size=vec2f(f32(meshMaintenance[base+4u]),f32(meshMaintenance[base+5u]));

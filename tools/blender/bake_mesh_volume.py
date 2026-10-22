@@ -22,7 +22,7 @@ from mathutils.bvhtree import BVHTree
 ROOT = Path(__file__).resolve().parents[2]
 parser = argparse.ArgumentParser()
 parser.add_argument('--asset', default='all')
-parser.add_argument('--collection', default='pool-party', choices=['pool-party', 'hero-garden-blender'])
+parser.add_argument('--collection', default='pool-party', choices=['pool-party', 'hero-garden-blender', 'forest-waterfall'])
 parser.add_argument('--cell', type=float)
 parser.add_argument('--band-cells', type=float)
 args = parser.parse_args(sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else [])
@@ -43,12 +43,42 @@ def oct16(n):
     return int(round((x*.5+.5)*65535)) | (int(round((y*.5+.5)*65535)) << 16)
 
 
-def inside(bvh, point, epsilon):
+def inside(bvh, point, epsilon, bounds=None):
     # Odd/even intersections classify concave closed components, including cup
     # interiors. A fixed oblique ray avoids axis-aligned edges in authored props.
     # BVH coordinates are float32. Sub-ULP advances can hit the same triangle
     # indefinitely, especially at the canopy's 3 m elevation.
     epsilon = max(epsilon, 1e-5)
+    if bounds is not None:
+        # Dense forest crowns can intersect many independent closed leaves.
+        # Bound the walk by the ray's exit from the actual component AABB,
+        # not an arbitrary intersection count or an unbounded retry loop.
+        lo, hi = bounds
+        exit_distance = min((float(hi[a])-point[a])/RAY[a] for a in range(3))
+        if exit_distance < 0: return False
+        epsilon = max(epsilon, max(abs(v) for v in point)*2e-6)
+        travelled = 0.0
+        count = 0
+        seen = set()
+        stalled = 0
+        while travelled <= exit_distance + epsilon:
+            p = point + RAY*travelled
+            hit, _, tri, distance = bvh.ray_cast(p, RAY, exit_distance-travelled+epsilon)
+            if hit is None: return count % 2 == 1
+            if tri not in seen:
+                count += 1; seen.add(tri); stalled = 0
+            else:
+                # A straight ray cannot cross one planar triangle twice.
+                # Grazing float32 hits occasionally return that triangle again;
+                # do not count it twice, and advance monotonically from the
+                # original origin rather than accumulating rounded hit vectors.
+                stalled += 1
+            step = epsilon * (2 ** min(stalled, 8))
+            hit_distance = max(0.0, (hit-point).dot(RAY))
+            travelled = max(travelled+step, hit_distance+step)
+            if len(seen) > 65536:
+                raise ValueError('Bounded dense-mesh parity exceeded 65536 distinct triangles')
+        return count % 2 == 1
     p = point.copy()
     count = 0
     for _ in range(256):
@@ -180,7 +210,7 @@ def bake(name, h, band_cells=3):
                     c=Vector(origin+(np.array([x,y,z])*B+B/2)*h)
                     nearest,_,_,d=part['bvh'].find_nearest(c)
                     if nearest is None: continue
-                    if d > math.sqrt(3)*B*h/2+band and not inside(part['bvh'],c,h*1e-5): continue
+                    if d > math.sqrt(3)*B*h/2+band and not inside(part['bvh'],c,h*1e-5,(part['lo'],part['hi']) if args.collection=='forest-waterfall' else None): continue
                     candidates.setdefault((x*B,y*B,z*B),[]).append(pi)
     data=bytearray()
     # Cache integer lattice coordinates, including shared brick faces. The exact
@@ -203,7 +233,7 @@ def bake(name, h, band_cells=3):
                             if any(p[a]<part['lo'][a]-band or p[a]>part['hi'][a]+band for a in range(3)): continue
                             nearest,normal,tri,d=part['bvh'].find_nearest(p)
                             if nearest is None: continue
-                            sign=-1 if inside(part['bvh'],p,h*1e-5) else 1
+                            sign=-1 if inside(part['bvh'],p,h*1e-5,(part['lo'],part['hi']) if args.collection=='forest-waterfall' else None) else 1
                             signed=sign*d
                             if signed >= best: continue
                             best=signed

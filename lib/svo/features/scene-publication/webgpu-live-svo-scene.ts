@@ -63,6 +63,8 @@ export interface LiveSvoSceneOptions {
   environmentPlanarRefinementExemption?: boolean;
   /** Experimental in-place diffuse feedback; disabled in production. */
   radianceFeedback?: boolean;
+  /** Allocate exitant-radiance storage; false retains the complete opacity pyramid. */
+  derivedRadiance?: boolean;
   /**
    * Build the compact hierarchy and the wide-fanout snapshot. See
    * `OctreeSparseBrickWorldOptions`' option of the same name; off by default
@@ -206,6 +208,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
       backdropRefinedRings: options.backdropRefinedRings,
       environmentPlanarRefinementExemption: options.environmentPlanarRefinementExemption,
       radianceFeedback: options.radianceFeedback,
+      derivedRadiance: options.derivedRadiance,
       derivedTraversalStructures: options.derivedTraversalStructures,
       progress: reportStage,
       sceneSolids,

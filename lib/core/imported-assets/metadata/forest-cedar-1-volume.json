@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "forest-cedar-1",
+  "source": "forest-cedar-1.glb",
+  "origin": [
+    -3.12,
+    -0.18,
+    -3.12
+  ],
+  "dimensions": [
+    112,
+    184,
+    112
+  ],
+  "cellSize": 0.06,
+  "bandWidth": 0.06,
+  "brickCount": 1583,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Trunk cedar grain 0",
+      "baseColorLinear": [
+        0.026000000536441803,
+        0.01600000075995922,
+        0.008999999612569809
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk cedar grain 1",
+      "baseColorLinear": [
+        0.041999999433755875,
+        0.026000000536441803,
+        0.014000000432133675
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk cedar grain 2",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.03999999910593033,
+        0.023000000044703484
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk cedar grain 3",
+      "baseColorLinear": [
+        0.09000000357627869,
+        0.057999998331069946,
+        0.032999999821186066
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk cedar grain 4",
+      "baseColorLinear": [
+        0.11999999731779099,
+        0.07500000298023224,
+        0.041999999433755875
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk cedar grain 5",
+      "baseColorLinear": [
+        0.15000000596046448,
+        0.0949999988079071,
+        0.054999999701976776
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk cedar grain 6",
+      "baseColorLinear": [
+        0.04500000178813934,
+        0.05999999865889549,
+        0.024000000208616257
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Trunk cedar grain 7",
+      "baseColorLinear": [
+        0.07500000298023224,
+        0.09000000357627869,
+        0.03500000014901161
+      ],
+      "roughness": 0.9100000262260437,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime cedar foliage 0",
+      "baseColorLinear": [
+        0.016249999403953552,
+        0.04874999821186066,
+        0.029249999672174454
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime cedar foliage 1",
+      "baseColorLinear": [
+        0.020250000059604645,
+        0.060750000178813934,
+        0.03644999861717224
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime cedar foliage 2",
+      "baseColorLinear": [
+        0.024250000715255737,
+        0.07275000214576721,
+        0.04365000128746033
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime cedar foliage 3",
+      "baseColorLinear": [
+        0.02824999950826168,
+        0.08474999666213989,
+        0.050850000232458115
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime cedar foliage 4",
+      "baseColorLinear": [
+        0.032249998301267624,
+        0.09674999862909317,
+        0.0580499991774559
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Runtime cedar foliage 5",
+      "baseColorLinear": [
+        0.036249998956918716,
+        0.10875000059604645,
+        0.06525000184774399
+      ],
+      "roughness": 0.6200000047683716,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 852787,
+  "insideNodes": 42766
+}

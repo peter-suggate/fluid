@@ -1,3 +1,4 @@
+import { sceneRenderTuning } from "../scene-render-profile";
 import { SceneInteractionHost } from "../../interaction/runtime/host";
 import type { InteractionFluidDriver } from "../../interaction/runtime/physics";
 import { sceneEqualExcept } from "../scene-comparison";
@@ -933,6 +934,7 @@ export class SimulationController {
       selectionControlsOpen: false,
     } : {
       ...this.session(paneId).ui.getInitialState(),
+      svoRenderTuning: sceneRenderTuning(opening.scene.renderProfile),
       // Absent only for a saved document whose origin scene this build no
       // longer has; there the camera the reader already had is the better answer.
       camera: opening.camera ?? previousCamera,

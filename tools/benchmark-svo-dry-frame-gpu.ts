@@ -149,6 +149,8 @@ import { type SvoConeRadianceReconstruction } from "../lib/svo/features/radiance
 import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/features/lighting-visibility/svo-screen-space-termination";
 import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/svo/features/radiance/webgpu-svo-live-derived-builder";
+import { GPUMemoryProfile } from "./gpu-memory-profile";
+import { svoDerivedRadianceRequired } from "../lib/svo/features/lighting-visibility/derived-lighting-demand";
 import {
   buildSvoDrySceneAssembly,
   createDawnRenderDevice,
@@ -308,6 +310,8 @@ const readVoxelLightCounters = process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_COUNT
 const optimizationExperiments: SvoDryOptimizationExperiments = {
   rasterAo: coneTracingModeRaw === "raster-ao",
   surfaceMesh: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH === "1",
+  importedSurfaceBatching: process.env.FLUID_SVO_DRY_FRAME_IMPORTED_BATCHING !== "0",
+  nativeAssetShadows: process.env.FLUID_SVO_DRY_FRAME_NATIVE_SHADOWS !== "0",
   surfaceMeshCulling: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_CULLING !== "0",
   surfaceMeshSampleCulling: process.env.FLUID_SVO_DRY_FRAME_MESH_SAMPLE_CULLING !== "0",
   surfaceMeshMaxBytes: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES ? Number(process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES) : undefined,
@@ -422,6 +426,8 @@ assert.ok(coneTracingModeRaw === "cones" || profileSeconds > 0 || (coneTracingMo
   "Non-cone lighting requires full-rate raster AO or FLUID_SVO_DRY_FRAME_PROFILE_SECONDS");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
 const coneTracingMode = coneTracingModeRaw as SvoConeTracingMode;
+const derivedRadiance = process.env.FLUID_SVO_DRY_FRAME_DERIVED_RADIANCE === "1"
+  || svoDerivedRadianceRequired({coneTracingMode,globalIlluminationEnabled});
 const radianceReconstruction = radianceReconstructionRaw as SvoConeRadianceReconstruction;
 const traversalMode = traversalModeRaw as SvoDryTraversalMode;
 // The world builds the compact hierarchy and the wide-fanout snapshot only for
@@ -544,7 +550,7 @@ function packViewUniforms(
 // GPU bring-up on Dawn/Metal.
 // ---------------------------------------------------------------------------
 const f16Requested = optimizationExperiments.halfPrecisionLighting === true;
-const { adapterInfo, device, timestampsSupported, validationErrors } = await createDawnRenderDevice({
+const { adapterInfo, device: unprofiledDevice, timestampsSupported, validationErrors } = await createDawnRenderDevice({
   modulePath,
   dawnFeatures: (process.env.FLUID_WEBGPU_DAWN_FEATURES ?? "").split(","),
   // FLUID_SVO_DRY_FRAME_TIMING=gpu asked for hardware timestamps, so a wall-time
@@ -554,6 +560,8 @@ const { adapterInfo, device, timestampsSupported, validationErrors } = await cre
   requireTimestampQuery: timingMode === "gpu" || recordScaleMultipliers !== undefined,
   requireShaderF16: f16Requested,
 });
+const memoryProfile = new GPUMemoryProfile(unprofiledDevice);
+const device = memoryProfile.device;
 log(`Adapter: ${JSON.stringify(adapterInfo)} timestamps=${timestampsSupported}`);
 const primaryComputeProbe = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_COMPUTE_PROBE === "1"
   ? capturePrimaryComputeInputs(device) : undefined;
@@ -977,6 +985,7 @@ const solver = await WebGPULiveSvoScene.create(
     environmentRefinementDepth,
     backdropRefinedRings,
     radianceFeedback: radianceFeedbackEnabled,
+    derivedRadiance,
     derivedTraversalStructures,
   },
 );
@@ -1023,9 +1032,9 @@ if (radianceFeedbackEnabled && radianceFeedbackFrames >= LIVE_SVO_RADIANCE_FEEDB
     "a static live scene must stop encoding feedback after its convergence window");
 }
 const worldBuild_ms = performance.now() - worldBuildStarted_ms;
-// The published source as the app attaches it. Withholding the radiance atlas
-// when GI is off failed `derivedLightingReady` and measured the exact-visibility
-// fallback instead of the cone path the app renders.
+// The published source as the app attaches it. Cone lighting retains both
+// hierarchies even with GI off: withdrawing radiance there would select exact
+// visibility. Raster AO retains opacity but needs no radiance unless GI is on.
 const source = solver.sparseVoxelSceneSource;
 assert.ok(source?.structural, "live SVO scene did not publish a structural scene source");
 const contourLanes = source.structural.scenePayloadLanes;
@@ -1884,6 +1893,17 @@ renderer.setIdentityPlanesInspected(true);
 const referenceRows = await captureFrame("Bench fingerprint frame");
 // Compare the raster lighting path only; no cone GI or traced primary arm.
 const occlusionComparison: Array<{ label: string; contrast: number; median_ms: number; rows: Uint32Array }> = [];
+let nativeShadowInvalidation: {settled_ms:number[];invalidated_ms:number[]}|undefined;
+if(process.env.FLUID_SVO_DRY_FRAME_NATIVE_SHADOW_TIMING==="1"){
+  const shadows=(renderer as unknown as {rasterAo?:{invalidateNativeGeometry():void}}).rasterAo;
+  assert.ok(shadows,"Native shadow timing requires raster-AO lighting");
+  nativeShadowInvalidation={settled_ms:[],invalidated_ms:[]};
+  for(let i=0;i<6;i++){
+    nativeShadowInvalidation.settled_ms.push(...await timeFrames(1,"Settled shadow cache"));
+    shadows.invalidateNativeGeometry();
+    nativeShadowInvalidation.invalidated_ms.push(...await timeFrames(1,"Invalidated whole shadow maps"));
+  }
+}
 if (process.env.FLUID_SVO_DRY_FRAME_RASTER_AO_COMPARE === "1") {
   assert.ok(optimizationExperiments.rasterAo && optimizationExperiments.surfaceMesh && traversalMode === "raster-primary" && !globalIlluminationEnabled,
     "raster AO comparison requires mesh raster primary, raster-ao lighting and GI off");
@@ -2374,6 +2394,9 @@ if (movingTierTiming) {
 // ---------------------------------------------------------------------------
 const result = {
   phase: "svo-dry-frame-gpu-benchmark",
+  memory: memoryProfile.snapshot(),
+  nativeShadowInvalidation,
+  derivedRadiance,
   source: sourceProvenance(),
   adapter: adapterInfo,
   validationErrors: [...validationErrors],
@@ -2481,6 +2504,7 @@ const result = {
     environment: environmentId,
     quality: "balanced",
     surfaceMeshDiagnostics,
+    importedSurfaceDraws: renderer.importedSurfaceDrawStatus,
     rasterRigidDiscovery,
     rasterRigidForced,
     rigidPrimaryStrategy: svoDryRigidPrimaryStrategy(rasterRigidForced ? 12 : bodies.count, rasterRigidDiscovery),

@@ -1,3 +1,4 @@
+import { sceneRenderProfileErrors, type SceneRenderProfile } from "./scene-render-profile";
 import { rebaseProceduralSolid } from "./procedural-solid";
 import type { CameraState, SceneDescription } from "./model";
 import { defaultCamera } from "./model";
@@ -154,6 +155,8 @@ export interface SceneDefinition {
    * overrides them.
    */
   readonly methodProfile?: MethodProfile;
+  /** Scene presentation defaults; explicit user renderer tuning takes precedence. */
+  readonly renderProfile?: SceneRenderProfile;
   /** The document body, without environment or scenery. */
   readonly build: () => SceneDescription;
   /**
@@ -205,6 +208,10 @@ const ENVIRONMENT_IDS: ReadonlySet<string> = new Set(environmentIds);
  */
 export function defineScene(definition: SceneDefinition): SceneDefinition {
   const { id } = definition;
+  if (definition.renderProfile) {
+    const errors = sceneRenderProfileErrors(definition.renderProfile);
+    if (errors.length) throw new Error(`Scene ${id}: ${errors.join("; ")}`);
+  }
   if (!id.trim()) throw new Error("A scene definition needs a non-empty id");
   if (!definition.name.trim()) throw new Error(`Scene ${id} needs a name`);
   if (!definition.blurb.trim()) throw new Error(`Scene ${id} needs a blurb`);
@@ -330,6 +337,7 @@ function finishSceneDocument(
     throw new Error(`Scene ${definition.id} has no variant ${variantId}`);
   }
   const scene = variant ? variant.apply(body) : body;
+  if (definition.renderProfile) scene.renderProfile = { ...definition.renderProfile };
   const previousSolids = scene.solidVoxels;
   const authoredEdits = solidVoxelEditsForScene(scene);
   if (definition.environment === "garden") {

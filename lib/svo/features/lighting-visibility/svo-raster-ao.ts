@@ -1,4 +1,5 @@
 import { RASTER_MAX_SPOT_LIGHTS, rasterSpotLights } from "./raster-spot-lights";
+import { importedSurfaceShadowWGSL, importedSurfaceShadowGateWGSL } from "./imported-surface-shadow";
 import { SVO_SURFACE_MESH_MODE, SVO_SURFACE_MESH_STATE as M } from "../primary-visibility/svo-surface-mesh";
 
 /** Preview backend. Fixed world-space coverage is deliberately independent of the camera. */
@@ -15,6 +16,7 @@ const REDRAW = Object.freeze({ nothing: 0, whole: 1, listed: 2, tested: 3 } as c
 const CACHE = Object.freeze({ clearDraw: 0, casterDraw: 4, revisions: 8, listed: 16, overflowed: 17, bytes: 128 } as const);
 export interface RasterAoPipelines {
   shadow: GPURenderPipeline;
+  nativeShadow?: GPURenderPipeline;
   terrain: GPURenderPipeline;
   casters: GPUComputePipeline;
   ao: GPUComputePipeline;
@@ -397,6 +399,7 @@ fn rasterShadowCastersMain(@builtin(global_invocation_id) id:vec3u,@builtin(loca
   if(hit.t>=0.0){return clamp(hit.t/rasterLighting.depthCell.x,0.0,1.0);}` : ""}
   return 1.0;
 }
+${importedSurfaceShadowWGSL}
 ${rasterHorizonWGSL}
 ${rasterCoarseAoWGSL}
 @compute @workgroup_size(8,8) fn rasterContactMain(@builtin(global_invocation_id) id:vec3u){
@@ -489,6 +492,11 @@ export class SvoRasterAo {
   private coarseAoStrength = 0;
   private aoContrast = 1;
   private shadowLayerCount = 2;
+  /** One indexed indirect record plus its immutable instance capacity per asset. */
+  nativeDrawArguments?: GPUBuffer;
+  private nativeArgumentGroup?: GPUBindGroup;
+  private nativeArgumentPipeline?: GPUComputePipeline;
+  private nativeArgumentLayout?: GPUBindGroupLayout;
 
   constructor(private readonly device: GPUDevice) {
     this.params=device.createBuffer({label:"Raster lighting parameters",size:(2+RASTER_MAX_SPOT_LIGHTS)*256,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -520,7 +528,17 @@ export class SvoRasterAo {
     this.shadowGroups=Array.from({length:2+RASTER_MAX_SPOT_LIGHTS},(_,i)=>i).map(layer=>device.createBindGroup({layout:this.shadowLayout,entries:[{binding:0,resource:{buffer:this.params,offset:layer*256,size:256}},{binding:7,resource:{buffer:this.redraw}},{binding:10,resource:{buffer:this.casters}}]}));
     this.sampler=device.createSampler({compare:"less-equal",magFilter:"linear",minFilter:"linear"});
   }
-  async compile(module:GPUShaderModule,scene:GPUBindGroupLayout,mesh:GPUBindGroupLayout,split:GPUBindGroupLayout):Promise<RasterAoPipelines>{
+  async compile(module:GPUShaderModule,scene:GPUBindGroupLayout,mesh:GPUBindGroupLayout,split:GPUBindGroupLayout,nativeShadows=true):Promise<RasterAoPipelines>{
+    if(nativeShadows){
+      this.nativeArgumentLayout ??= this.device.createBindGroupLayout({entries:[
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+        {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+      ]});
+      this.nativeArgumentPipeline ??= await this.device.createComputePipelineAsync({label:"Native shadow cached draw gate",
+        layout:this.device.createPipelineLayout({bindGroupLayouts:[this.nativeArgumentLayout]}),compute:{entryPoint:"main",
+          module:this.device.createShaderModule({code:importedSurfaceShadowGateWGSL})}});
+      this.bindNativeDrawArguments();
+    }
     const cacheModule=()=>this.device.createShaderModule({code:cacheWGSL});
     const cacheLayout=()=>this.device.createPipelineLayout({bindGroupLayouts:[this.cacheLayout]});
     this.cacheCompile ??= (()=>{const module=cacheModule(),layout=cacheLayout();return Promise.all([
@@ -528,12 +546,35 @@ export class SvoRasterAo {
       this.device.createComputePipelineAsync({label:"Raster shadow caster count",layout,compute:{module,entryPoint:"resolve"}})]);})();
     [this.cachePipeline,this.resolvePipeline] = await this.cacheCompile;
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[scene,mesh,this.shadowLayout]});
-    const [shadow,terrain,casters,ao]=await Promise.all([
+    const [shadow,terrain,casters,ao,nativeShadow]=await Promise.all([
       this.device.createRenderPipelineAsync({label:"Raster shadow casters",layout,vertex:{module,entryPoint:"rasterShadowVertex"},primitive:{topology:"triangle-strip",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}}),
       this.device.createRenderPipelineAsync({label:"Raster shadow terrain and clear",layout,vertex:{module,entryPoint:"rasterShadowClearVertex"},fragment:{module,entryPoint:"rasterShadowTerrain",targets:[]},primitive:{topology:"triangle-list"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"always"}}),
       this.device.createComputePipelineAsync({label:"Raster shadow redraw casters",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,mesh,this.casterLayout]}),compute:{module,entryPoint:"rasterShadowCastersMain"}}),
       this.device.createComputePipelineAsync({label:"Horizon contact AO",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.aoLayout]}),compute:{module,entryPoint:"rasterContactMain"}}),
-    ]);return {shadow,terrain,casters,ao};
+      nativeShadows ? this.device.createRenderPipelineAsync({label:"Native asset full-detail shadow casters",layout,
+        vertex:{module,entryPoint:"rasterNativeShadowVertex",buffers:[
+          {arrayStride:12,attributes:[{shaderLocation:0,offset:0,format:"float32x3"}]},
+          {arrayStride:8,stepMode:"instance",attributes:[{shaderLocation:1,offset:0,format:"uint32"},{shaderLocation:2,offset:4,format:"float32"}]},
+        ]},primitive:{topology:"triangle-list",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}}) : undefined,
+    ]);return {shadow,terrain,casters,ao,nativeShadow};
+  }
+  /** Membership/asset changes alter caster geometry even when the camera does not move. */
+  invalidateNativeGeometry():void{
+    this.generation++;this.renderedSettledKey=undefined;
+    for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*256,new Uint32Array([this.generation]));
+  }
+  setNativeDrawArguments(records:Uint32Array<ArrayBuffer>):void{
+    this.nativeDrawArguments?.destroy();this.nativeDrawArguments=undefined;this.nativeArgumentGroup=undefined;
+    if(!records.length)return;
+    this.nativeDrawArguments=this.device.createBuffer({label:"Native shadow cached indexed arguments",size:records.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT,mappedAtCreation:true});
+    new Uint32Array(this.nativeDrawArguments.getMappedRange()).set(records);this.nativeDrawArguments.unmap();
+    this.bindNativeDrawArguments();
+  }
+  private bindNativeDrawArguments():void{
+    if(!this.nativeArgumentLayout||!this.nativeDrawArguments)return;
+    this.nativeArgumentGroup=this.device.createBindGroup({layout:this.nativeArgumentLayout,entries:[
+      {binding:0,resource:{buffer:this.redraw}},{binding:1,resource:{buffer:this.nativeDrawArguments}},
+    ]});
   }
   /**
    * The views the maps are drawn from. A map is redrawn whole only when its
@@ -586,20 +627,24 @@ export class SvoRasterAo {
   private readonly aoPassDescriptor: GPUComputePassDescriptor = { label: "Half-resolution sun visibility and horizon AO" };
   private renderedSettledGeneration = -1;
 
-  encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,arenaQuads:number,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void,settledMeshKey?:string):void{
+  encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,arenaQuads:number,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void,settledMeshKey?:string,drawNative?:(pass:GPURenderPassEncoder)=>void):void{
     if(state!==this.meshState){this.renderedSettledKey=undefined;this.meshState=state;this.cacheGroup=this.device.createBindGroup({layout:this.cacheLayout,entries:[{binding:0,resource:{buffer:state}},{binding:1,resource:{buffer:this.params,offset:0,size:64}},{binding:2,resource:{buffer:this.cache}},{binding:3,resource:{buffer:this.redraw}}]});}
     const settledKey=settledMeshKey;
     const reuse=settledKey!==undefined&&settledKey===this.renderedSettledKey&&this.renderedSettledGeneration===this.generation;
     if(!shadowsEnabled)this.renderedSettledKey=undefined;
     if(shadowsEnabled&&!reuse){
     const invalidation=encoder.beginComputePass({label:"Raster shadow cache check"});invalidation.setPipeline(this.cachePipeline!);invalidation.setBindGroup(0,this.cacheGroup!);invalidation.dispatchWorkgroups(1);invalidation.end();
+    if(this.nativeArgumentPipeline&&this.nativeArgumentGroup){
+      const gate=encoder.beginComputePass({label:"Native shadow cached draw gate"});gate.setPipeline(this.nativeArgumentPipeline);gate.setBindGroup(0,this.nativeArgumentGroup);gate.dispatchWorkgroups(Math.ceil(this.nativeDrawArguments!.size/24/64));gate.end();
+    }
     // The casters of a partial redraw, then their count for the draws below.
     const groups=Math.ceil(arenaQuads/64);
     const list=encoder.beginComputePass({label:"Raster shadow redraw casters"});list.setPipeline(pipelines.casters);list.setBindGroup(0,scene);list.setBindGroup(1,mesh);list.setBindGroup(2,this.casterGroup);list.dispatchWorkgroups(Math.min(groups,65535),Math.max(1,Math.ceil(groups/65535)));list.end();
     const counted=encoder.beginComputePass({label:"Raster shadow caster count"});counted.setPipeline(this.resolvePipeline!);counted.setBindGroup(0,this.cacheGroup!);counted.dispatchWorkgroups(1);counted.end();
     for(let layer=0;layer<this.shadowLayerCount;layer++){
       const pass=encoder.beginRenderPass({label:layer<2?`Cached sun shadow ${layer}`:`Cached spot shadow ${layer-2}`,colorAttachments:[],depthStencilAttachment:{view:this.shadowViews[layer],depthLoadOp:"load",depthStoreOp:"store"}});
-      pass.setBindGroup(0,scene);pass.setBindGroup(1,mesh);pass.setBindGroup(2,this.shadowGroups[layer]);pass.setPipeline(pipelines.terrain);pass.drawIndirect(this.cache,0);pass.setPipeline(pipelines.shadow);pass.drawIndirect(this.cache,16);pass.end();
+      pass.setBindGroup(0,scene);pass.setBindGroup(1,mesh);pass.setBindGroup(2,this.shadowGroups[layer]);pass.setPipeline(pipelines.terrain);pass.drawIndirect(this.cache,0);pass.setPipeline(pipelines.shadow);pass.drawIndirect(this.cache,16);
+      if(pipelines.nativeShadow&&drawNative){pass.setPipeline(pipelines.nativeShadow);drawNative(pass);}pass.end();
     }
     this.renderedSettledKey=settledKey;this.renderedSettledGeneration=this.generation;
     shadowComplete?.();
@@ -609,5 +654,5 @@ export class SvoRasterAo {
     }
     if(aoEnabled||shadowsEnabled){const ao=encoder.beginComputePass(this.aoPassDescriptor);ao.setPipeline(pipelines.ao);ao.setBindGroup(0,scene);ao.setBindGroup(1,split);ao.setBindGroup(2,this.aoGroup!);ao.dispatchWorkgroups(Math.ceil(this.ao!.width/8),Math.ceil(this.ao!.height/8));ao.end();aoComplete?.();}
   }
-  destroy():void{this.params.destroy();this.cache.destroy();this.redraw.destroy();this.casters.destroy();this.shadow.destroy();this.ao?.destroy();this.shadowVisibility?.destroy();}
+  destroy():void{this.nativeDrawArguments?.destroy();this.params.destroy();this.cache.destroy();this.redraw.destroy();this.casters.destroy();this.shadow.destroy();this.ao?.destroy();this.shadowVisibility?.destroy();}
 }

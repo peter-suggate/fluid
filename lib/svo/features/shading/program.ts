@@ -621,6 +621,10 @@ export interface SvoDryOptimizationExperiments {
   readonly surfaceMesh?: boolean;
   /** Disable only for paired performance/image comparisons. */
   readonly surfaceMeshCulling?: boolean;
+  /** Group repeated native assets by surface LOD. False retains the reference draws for A/B profiling. */
+  readonly importedSurfaceBatching?: boolean;
+  /** Full-detail native asset casters replace duplicate voxel shadow meshes; false is the profiling reference. */
+  readonly nativeAssetShadows?: boolean;
   /** Conservative single-sample rejection; false keeps the paired reference draw. */
   readonly surfaceMeshSampleCulling?: boolean;
   /** Camera culling compaction using supported hardware subgroup scans. */
@@ -5626,7 +5630,7 @@ ${experiments.opaqueRasterLighting ? "" : "  if(slot<0&&!cachedSun){return dryRe
 }
 fn dryContactVisibilitySolid(position:vec3f,normal:vec3f,feature:u32,owner:u32)->vec3f{return rasterContactVisibility();}
 ` + rasterAoProducerWGSL(backdropHooks) : ""}
-${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? importedSurfaceWGSL : ""}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true, experiments.rasterAo === true, experiments.surfaceMeshSampleCulling !== false, experiments.surfaceMeshSubgroups === true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
+${splitEntryWGSL}${rasterPrimaryEntryWGSL}${rasterPrimary && experiments.surfaceMesh ? importedSurfaceWGSL : ""}${rasterPrimary && experiments.surfaceMesh ? svoSurfaceMeshWGSL(splitGroup, SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals, experiments.surfaceMeshCulling !== false, true, experiments.rasterAo === true && experiments.nativeAssetShadows === false, experiments.surfaceMeshSampleCulling !== false, experiments.surfaceMeshSubgroups === true) : ""}${prepassEntryWGSL}${prepassFromPrimaryEntryWGSL}${latticeVisibilityWGSL}${pixelProbe ? createSvoPixelTraceProbeWGSL(svoDryScenePixelProbeOptions(
     traversalMode === "raster-primary" ? "raster" : "traced",
     {
       brickOccupancyMode,
