@@ -384,6 +384,7 @@ if(flag("transfer")){
 const profileEnvironment: Record<string, string> = {
   FLUID_PROFILE_SOURCE_ROOT: resolve(flag("source-root") ?? root),
   FLUID_PROFILE_FRAME_LABELS: process.argv.includes("--frame-labels") ? "1" : "0",
+  FLUID_PROFILE_SPLIT_DISPATCHES: process.argv.includes("--split-dispatches") ? "1" : "0",
   WEBGPU_NODE_MODULE: `${root}node_modules/webgpu/index.js`,
   FLUID_WEBGPU_BACKEND: "metal",
   FLUID_WEBGPU_ADAPTER: "Apple M1 Max",

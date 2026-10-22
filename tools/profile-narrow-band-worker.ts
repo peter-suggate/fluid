@@ -1,4 +1,5 @@
 /** Instruments worker: app-default narrow-band FLIP, with an optional attach gate. */
+import { NarrowBandDispatchProbe } from "./narrow-band-dispatch-probe";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -60,7 +61,12 @@ const wrapped = scratch || labelFrames ? new Proxy(raw, { get(target, key) {
   const value = Reflect.get(target, key, target);
   return typeof value === "function" ? value.bind(target) : value;
 } }) : raw;
-const device = managedGPUDevice(wrapped, { requireWorkerRealm: false });
+// FLUID_PROFILE_SPLIT_DISPATCHES=1: one labelled pass per dispatch (the
+// dispatch probe over every pass), so counters attribute to single kernels.
+// Splitting serialises the passes: read occupancy and limiters, not frame time.
+const probe = process.env.FLUID_PROFILE_SPLIT_DISPATCHES === "1" ? new NarrowBandDispatchProbe(wrapped) : undefined;
+if (probe) { process.env.NB_SPLIT_ALL = "1"; probe.enabled = true; }
+const device = managedGPUDevice(probe?.device ?? wrapped, { requireWorkerRealm: false });
 const scene = structuredClone(sceneDocument(getSceneDefinition(process.env.FLUID_SCENE ?? "minimal-power-dam-break-64")));
 const dt = Number(process.env.FLUID_MAX_DT ?? .017);
 const steps = Number(process.env.FLUID_ORACLE_STEPS ?? 120);
@@ -80,6 +86,8 @@ scene.numerics = { ...scene.numerics, fixedDt_s: dt, maxDt_s: dt };
 const started = performance.now();
 const solver = await uniformNarrowBandMethod.createSolverAsync!(device, scene, "balanced",
   { ...uniformNarrowBandMethod.appDefaults, timeStep: "scene",...(transfer?{particleTransfer:transfer}:{}) }, undefined, () => {});
+// The sealed schedule shares one native pass across stages, past the probe.
+if (probe) { const plan = (solver as unknown as { mixedFrame: { surfaceWorkControl?: { framePlan: { coalescePasses: boolean } } } }).mixedFrame.surfaceWorkControl?.framePlan; if (plan) plan.coalescePasses = false; }
 try {
   const construction_ms = performance.now() - started;
   const expected = process.env.FLUID_EXPECT_GRID?.split(",").map(Number);
