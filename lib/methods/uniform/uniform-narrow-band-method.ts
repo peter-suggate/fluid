@@ -108,10 +108,7 @@ export const uniformNarrowBandMethod:SimulationMethod={
  capabilities:{adoptsRigidRosterShape:true,visualLayers:{hidden:["window","release"]}},
  params,
  runtimeParamKeys:params.filter(p=>p.update==="runtime").map(p=>p.key),
- // Trilinear phi advection: the teaser (frames 5-120) ran 11-13% less GPU
- // a frame than with the cubic, with less grid volume loss (-0.8% against
- // -1.1% at frame 120). "Cubic phi advection" turns it back on.
- appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:0,coarseParticleMode:"off",phiCubicAdvection:"off"},
+ appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:0,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
   {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
