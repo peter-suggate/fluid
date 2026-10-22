@@ -49,8 +49,8 @@ function FineSurfaceRows() {
       {slider("fineSurfaceThickness", "Thick", ...PARTICLE_SURFACE_THICKNESS_RANGE, 0.05, "How far the skin stands off the particles' weighted centre, in cells. Larger fills gaps and thickens sheets.")}
     </ToolstripRow>
     <ToolstripRow name="Spray" hint="Particles the fine skin does not enclose, drawn as droplets." testId="fine-spray-row" icon={<Droplets width={14} height={14} />}>
-      {slider("fineSpraySize", "Size", 0.1, 1, 0.05, "Droplet radius as a fraction of the particle sphere's.")}
-      {slider("fineSprayOpacity", "Opacity", 0, 1, 0.05, "Droplet opacity at its centre.")}
+      {slider("fineSpraySize", "Size", 0.1, 1, 0.05, "Spray footprint radius as a fraction of a Motion sample's.")}
+      {slider("fineSprayOpacity", "Opacity", 0, 1, 0.05, "Scales the spray's Motion opacity.")}
     </ToolstripRow>
   </>;
 }

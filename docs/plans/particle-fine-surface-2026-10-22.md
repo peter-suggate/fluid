@@ -76,10 +76,11 @@ skin goes through the interface passes, Shade (refraction), Simple (murk) and
 Wire all apply to it unchanged.
 
 **Spray.** In the Fine view the particle overlay reads φ at each particle and
-draws only particles outside the skin (φ > 0). Each is a dot at the Spray size,
-as a fraction of the sphere radius, accumulated order-independently like
-Motion. It is translucent at the Spray opacity. Spray behind the water front
-is hidden in every surface mode.
+draws only particles outside the skin (φ ≥ 0). Each is drawn exactly as a Motion
+sample: the same energy, white tint and unlit footprint, and the same
+order-independent sum and composite. Its footprint is the Spray size times
+Motion's (2/3 by default) and its opacity is scaled by Spray opacity (1 by
+default). Spray behind the water front is hidden in every surface mode.
 
 **Controls** (the Fine row, URL-persisted, live, uniforms only):
 Greed, Smooth (kernel radius, 0.5–1.5 h), Thick (surface radius), Spray size,

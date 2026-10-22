@@ -43,14 +43,14 @@ export interface ParticleSurfaceSettings {
   readonly smoothing: number;
   /** Surface radius about the weighted mean, in cells (h). */
   readonly thickness: number;
-  /** Spray dot radius as a fraction of the particle sphere's. */
+  /** Spray footprint radius as a fraction of a Motion sample's. */
   readonly spraySize: number;
-  /** Spray dot opacity at its centre. */
+  /** Scales the spray's Motion opacity. */
   readonly sprayOpacity: number;
 }
 
 export const DEFAULT_PARTICLE_SURFACE_SETTINGS: ParticleSurfaceSettings = Object.freeze({
-  greed: 0.5, smoothing: 1, thickness: 0.5, spraySize: 0.6, sprayOpacity: 0.5,
+  greed: 0.5, smoothing: 1, thickness: 0.5, spraySize: 2 / 3, sprayOpacity: 1,
 });
 export const PARTICLE_SURFACE_SMOOTHING_RANGE = [0.5, 1.5] as const;
 export const PARTICLE_SURFACE_THICKNESS_RANGE = [0.2, 1] as const;
