@@ -26,11 +26,16 @@ import type { GPUFluidParticleSource } from "./webgpu-particle-overlay";
  * own SurfaceVertex layout. The water draws them in its interface passes beside
  * the level-set mesh, so Shade, Simple and Wire all apply to the skin.
  *
- * A narrow band keeps particles only near the surface, so the skin is a shell
- * whose floor lies inside the level-set body. That floor would be the first
- * exit along every ray through the liquid. An edge whose shallowest particle is
- * deeper than the band's cull depth is therefore not emitted, and the body's
- * own mesh closes the liquid below.
+ * Particles exist only in a narrow band, and only where the grid keeps them (an
+ * h tile, not a 4h one), so no particles is not the same as air. Each record
+ * carries its depth under the level set. Their weighted mean gives each sample
+ * an estimate of the level set's distance, and φ is the union of the particles'
+ * field with it. The band's floor, voids between sparse particles, and the wall
+ * where particle tiles end are liquid in that estimate, so none of them becomes
+ * a back face for the water's interface passes. The estimate reaches only as far
+ * as the particles' support. An edge leaving the support from a sample that is
+ * liquid by the estimate alone is the edge of what the particles cover, not of
+ * the liquid, so it is not emitted.
  *
  * Every pass is a fixed direct dispatch that grid-strides over its GPU list.
  */
@@ -69,7 +74,7 @@ export const PARTICLE_SURFACE_VERTEX_CAPACITY = 6 * 349_525;
 const SURFACE_VERTEX_BYTES = 32;
 const PARTICLE_WORKGROUPS = 512;
 const BRICK_WORKGROUPS = 1024;
-/** acc 16000 + shallow 4000 + phi 4000 + cell vertices and normals 5832 + neighbour lists 324 + scalars. */
+/** acc 16000 + depth 4000 + phi 4000 + cell vertices and normals 5832 + neighbour lists 324 + scalars. */
 export const PARTICLE_SURFACE_WORKGROUP_BYTES = 30_188;
 /** Mesh workgroup width; 512 beat 256 and 1024 on M1 Max (1.86 vs 2.29 and 2.42 ms). */
 export const PARTICLE_SURFACE_MESH_LANES = 512;
@@ -88,7 +93,7 @@ struct Params {
   // xyz world position of the tank's minimum corner, w one when the frame's origin is live
   origin:vec4f,
   // x kernel radius, y surface radius, z the weight under which the radius is gated off (fine units),
-  // w the cull depth in position units
+  // w unused
   kernel:vec4f,
   // x record stride in floats, y record capacity, z ballistic float offset (top bit: the flag
   // is the sign bit), w depth float offset or 0xffffffff where records keep none
@@ -111,7 +116,7 @@ struct SurfaceVertex { position:vec4f, normal:vec4f }
 @group(0) @binding(5) var<storage,read_write> bricks:array<atomic<u32>>;
 // Per record: home slot | rank << 16; then per sorted particle: its record.
 @group(0) @binding(6) var<storage,read_write> work:array<u32>;
-// Brick-ordered particles: fine position, and the depth the cull reads.
+// Brick-ordered particles: fine position, and the depth under the level set in fine units.
 @group(0) @binding(7) var<storage,read_write> sorted:array<vec4f>;
 // φ at each record in fine units: zero or more outside the skin.
 @group(0) @binding(8) var<storage,read_write> field:array<f32>;
@@ -125,9 +130,10 @@ const BRICK:i32=8;
 const SPAN:i32=10;
 const CELLS:i32=9;
 const FIXED:f32=65536.0;
-const DEPTH_FIXED:f32=1024.0;
-const SHALLOW_NONE:i32=-2147483647;
-const NEVER_CULLED:f32=1e6;
+// The depth a record lends the level-set estimate, in fine units: a band's
+// worth under the surface at most, and a ballistic record is in the air.
+const DEPTH_FLOOR:f32=-8.0;
+const DEPTH_AIR:f32=4.0;
 
 fn finePosition(at:u32)->vec3f { return vec3f(particles[at],particles[at+1u],particles[at+2u])*params.scale.w; }
 fn liveRecords()->u32 { return min(atomicLoad(&counters[0]),params.records.y); }
@@ -260,15 +266,15 @@ var<workgroup> partial:array<u32,256>;
   }
 }
 
-// The depth the cull compares: how far under the level set the record sits,
-// in position units. A ballistic record no grid carries is never culled.
-fn cullDepth(at:u32)->f32 {
-  if(params.records.w==NONE){return NEVER_CULLED;}
+// The record's signed distance to the level set in fine units, negative under
+// it. Records that keep no depth, and ballistic ones, are in the air.
+fn levelDepth(at:u32)->f32 {
+  if(params.records.w==NONE){return DEPTH_AIR;}
   let flagAt=params.records.z&0x7fffffffu;
   let flag=particles[at+flagAt];
   let ballistic=select(flag==1.0,(bitcast<u32>(flag)>>31u)!=0u,(params.records.z&0x80000000u)!=0u);
-  if(ballistic){return NEVER_CULLED;}
-  return particles[at+params.records.w];
+  if(ballistic){return DEPTH_AIR;}
+  return clamp(particles[at+params.records.w]*params.scale.w,DEPTH_FLOOR,DEPTH_AIR);
 }
 
 @compute @workgroup_size(256) fn scatterMain(@builtin(global_invocation_id) id:vec3u,@builtin(num_workgroups) groups:vec3u) {
@@ -279,7 +285,7 @@ fn cullDepth(at:u32)->f32 {
     let slot=home&0xffffu;
     let destination=atomicLoad(&bricks[2u*params.pool.x+slot])+(home>>16u);
     let at=i*params.records.x;
-    sorted[destination]=vec4f(finePosition(at),cullDepth(at));
+    sorted[destination]=vec4f(finePosition(at),levelDepth(at));
     work[params.pool.w+destination]=i;
   }
 }
@@ -288,7 +294,8 @@ fn cullDepth(at:u32)->f32 {
 // atomics and the 30 KB window allows one workgroup per core.
 const MESH_LANES=${PARTICLE_SURFACE_MESH_LANES}u;
 var<workgroup> acc:array<atomic<i32>,4000>;
-var<workgroup> shallow:array<atomic<i32>,1000>;
+// Σ w·depth: with acc's weight, the level set's distance near each sample.
+var<workgroup> depthSum:array<atomic<i32>,1000>;
 var<workgroup> phi:array<f32,1000>;
 var<workgroup> cellVertex:array<u32,729>;
 var<workgroup> cellNormalPacked:array<u32,729>;
@@ -302,6 +309,41 @@ fn sampleIndex(s:vec3i)->i32 { return s.x+SPAN*(s.y+SPAN*s.z); }
 fn cellIndex(c:vec3i)->i32 { return c.x+CELLS*(c.y+CELLS*c.z); }
 
 // φ at a window position, trilinear.
+fn supported(s:i32)->bool { return atomicLoad(&acc[4*s])>0; }
+fn meanOffset(s:i32)->vec3f {
+  return vec3f(f32(atomicLoad(&acc[4*s+1])),f32(atomicLoad(&acc[4*s+2])),f32(atomicLoad(&acc[4*s+3])))/f32(atomicLoad(&acc[4*s]));
+}
+fn meanDepth(s:i32)->f32 { return f32(atomicLoad(&depthSum[s]))/f32(atomicLoad(&acc[4*s])); }
+
+// Zhu–Bridson: the distance to the particles' weighted mean, less a radius
+// that is gated off where too little weight gathers. Supported samples only.
+fn particlePhi(s:i32)->f32 {
+  let gate=params.kernel.z;
+  let radius=params.kernel.y*smoothstep(0.5*gate,gate,f32(atomicLoad(&acc[4*s]))/FIXED);
+  return length(meanOffset(s))-radius;
+}
+
+// The level set's distance at a supported sample. The mean depth is its value at
+// the particles' weighted mean, so it is carried back along the normal, which is
+// the depth's gradient, over the offset to that mean.
+fn levelPhi(c:vec3i)->f32 {
+  let s=sampleIndex(c);
+  let depth=meanDepth(s);
+  var gradient=vec3f(0.0);
+  for(var axis=0;axis<3;axis+=1){
+    let e=axisUnit(axis);
+    let lo=c-e;
+    let hi=c+e;
+    let hasLo=all(lo>=vec3i(0))&&supported(sampleIndex(lo));
+    let hasHi=all(hi<vec3i(SPAN))&&supported(sampleIndex(hi));
+    if(hasLo&&hasHi){gradient[axis]=0.5*(meanDepth(sampleIndex(hi))-meanDepth(sampleIndex(lo)));}
+    else if(hasHi){gradient[axis]=meanDepth(sampleIndex(hi))-depth;}
+    else if(hasLo){gradient[axis]=depth-meanDepth(sampleIndex(lo));}
+  }
+  if(dot(gradient,gradient)<1e-8){return depth;}
+  return depth-dot(meanOffset(s),normalize(gradient));
+}
+
 fn phiAt(local:vec3f)->f32 {
   let x=clamp(local,vec3f(0.0),vec3f(f32(SPAN-1)-1e-3));
   let c=vec3i(floor(x));
@@ -348,11 +390,14 @@ fn worldOf(fine:vec3f)->vec3f {
   return fine/params.scale.w*params.scale.xyz+origin;
 }
 
-fn crossesAndKept(q:vec3i,axis:i32,cull:i32)->bool {
+fn crossesAndKept(q:vec3i,axis:i32)->bool {
   let a=sampleIndex(q);
   let b=sampleIndex(q+axisUnit(axis));
-  if((phi[a]<0.0)==(phi[b]<0.0)){return false;}
-  return max(atomicLoad(&shallow[a]),atomicLoad(&shallow[b]))>=cull;
+  let aInside=phi[a]<0.0;
+  if(aInside==(phi[b]<0.0)){return false;}
+  let outside=select(a,b,aInside);
+  if(supported(outside)){return true;}
+  return particlePhi(select(b,a,aInside))<0.0;
 }
 
 // The q-th edge a lane owns: a sample of the brick's own 8³ and an axis.
@@ -397,7 +442,7 @@ fn meshBrick(slot:u32,lane:u32) {
   // Window sample 0 is brick sample -1.
   let window=brick*BRICK-vec3i(1);
   for(var s=lane;s<4000u;s+=MESH_LANES){atomicStore(&acc[s],0);}
-  for(var s=lane;s<1000u;s+=MESH_LANES){atomicStore(&shallow[s],SHALLOW_NONE);}
+  for(var s=lane;s<1000u;s+=MESH_LANES){atomicStore(&depthSum[s],0);}
   if(lane==0u){atomicStore(&quadTotal,0u);}
   if(lane<27u){
     let d=vec3i(i32(lane%3u),i32((lane/3u)%3u),i32(lane/9u))-vec3i(1);
@@ -429,7 +474,6 @@ fn meshBrick(slot:u32,lane:u32) {
       let lo=max(vec3i(ceil(local-vec3f(reach))),vec3i(0));
       let hi=min(vec3i(floor(local+vec3f(reach))),vec3i(SPAN-1));
       if(any(lo>hi)){continue;}
-      let depth=i32(clamp(particle.w,-1e5,1e5)*DEPTH_FIXED);
       // Only the samples inside the kernel's sphere: each row's span is solved
       // for, so lanes do not idle through the corners of the box.
       for(var z=lo.z;z<=hi.z;z+=1){
@@ -452,19 +496,18 @@ fn meshBrick(slot:u32,lane:u32) {
         atomicAdd(&acc[4*s+1],i32(round(w*offset.x*FIXED)));
         atomicAdd(&acc[4*s+2],i32(round(w*offset.y*FIXED)));
         atomicAdd(&acc[4*s+3],i32(round(w*offset.z*FIXED)));
-        atomicMax(&shallow[s],depth);
+        atomicAdd(&depthSum[s],i32(round(w*particle.w*FIXED)));
       }}}
     }
   }
   workgroupBarrier();
 
-  let gate=params.kernel.z;
   for(var s=lane;s<1000u;s+=MESH_LANES){
-    let weight=atomicLoad(&acc[4u*s]);
-    if(weight<=0){phi[s]=reach;continue;}
-    let mean=vec3f(f32(atomicLoad(&acc[4u*s+1u])),f32(atomicLoad(&acc[4u*s+2u])),f32(atomicLoad(&acc[4u*s+3u])))/f32(weight);
-    let radius=params.kernel.y*smoothstep(0.5*gate,gate,f32(weight)/FIXED);
-    phi[s]=length(mean)-radius;
+    let c=vec3i(i32(s%10u),i32((s/10u)%10u),i32(s/100u));
+    let at=sampleIndex(c);
+    // Outside the particles' support nothing is known: air, but see crossesAndKept.
+    if(!supported(at)){phi[s]=reach;continue;}
+    phi[s]=min(particlePhi(at),levelPhi(c));
   }
   workgroupBarrier();
 
@@ -500,11 +543,10 @@ fn meshBrick(slot:u32,lane:u32) {
   }
   workgroupBarrier();
 
-  let cull=i32(-params.kernel.w*DEPTH_FIXED);
   var mine=0u;
   for(var index=lane;index<1536u;index+=MESH_LANES){
     let edge=ownedEdge(index);
-    if(crossesAndKept(edge.xyz,edge.w,cull)){mine+=1u;}
+    if(crossesAndKept(edge.xyz,edge.w)){mine+=1u;}
   }
   let first=atomicAdd(&quadTotal,mine);
   workgroupBarrier();
@@ -516,7 +558,7 @@ fn meshBrick(slot:u32,lane:u32) {
   var written=0u;
   for(var index=lane;index<1536u;index+=MESH_LANES){
     let edge=ownedEdge(index);
-    if(!crossesAndKept(edge.xyz,edge.w,cull)){continue;}
+    if(!crossesAndKept(edge.xyz,edge.w)){continue;}
     let at=base+6u*(first+written);
     written+=1u;
     if(at+6u>params.pool.z){atomicOr(&counters[3],${PARTICLE_SURFACE_OVERFLOW.vertices}u);continue;}
@@ -719,9 +761,7 @@ export class ParticleSurface {
     f[8] = reach;
     f[9] = clamp(settings.thickness, ...PARTICLE_SURFACE_THICKNESS_RANGE) * FINE_PER_CELL;
     f[10] = bulk * (0.8 + (0.05 - 0.8) * greed);
-    // The band's floor sits about twice the Motion fade depth down: an edge
-    // that only particles under the fade reach is that floor.
-    f[11] = grid ? grid.surfaceDepth : 0;
+    f[11] = 0;
     u[12] = source.strideFloats; u[13] = source.capacity;
     u[14] = grid ? grid.ballisticFloat + (grid.ballisticSignBit ? 0x80000000 : 0) : 0;
     u[15] = grid ? grid.depthFloat : 0xffffffff;

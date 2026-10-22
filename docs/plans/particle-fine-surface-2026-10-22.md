@@ -50,7 +50,7 @@ grid-strides over its GPU list, so there are no indirect launches.
 5. *scatter*: particles go into brick order as (fine position, depth key) plus
    the record index.
 6. *mesh*: one workgroup per brick. It gathers its 27 neighbour lists and splats
-   W, ΣwΔx and the deepest contribution into 10³ samples with workgroup atomics
+   W, ΣwΔx and Σw·depth into 10³ samples with workgroup atomics
    (fixed point, so the sum is the same in any order and seams are exact). It
    then forms φ, places one surface-nets vertex per cell over −1…7 and emits
    the quads of the edges it owns. A quad goes out as two non-indexed triangles
@@ -64,16 +64,34 @@ the radius is gated by the summed kernel weight W:
 r_eff = r · smoothstep(W_min/2, W_min, W). W_min falls as Greed rises. Clusters
 below W_min become spray instead of blobs.
 
-**Union with the body.** NB-FLIP keeps particles only in the 4h band, so the
-particle skin is a shell, and its underside lies inside the level-set body.
+**Union with the body.** NB-FLIP keeps particles only in the 4h band, and in
+Mixed Uniform only in h tiles. So a lack of particles does not mean air. A
+particle-only skin is a shell with a floor, voids between sparse particles, and
+a stair-stepped wall where h tiles meet 4h. Every one of those surfaces is a
+back face inside the body. It became the back interface, which cut the Simple
+murk path to almost nothing: the skin region looked pale. The wall's top was
+also a visible step (2026-10-22 screenshot).
+
+Each record carries its depth under the level set (float 7; ballistic records
+count as 2 h in the air). The splat sums Σw·depth, so D = Σw·depth / W is the
+level set's value at the particles' weighted mean. Carried back to the sample
+along n = ∇D/|∇D|, this gives φ_L = D − m·n, with m the mean offset. The field is
+φ = min(φ_particles, φ_L), so the floor, the voids and the region under the tile
+wall are liquid. The estimate exists only within the particles' support. An edge
+that leaves the support from a sample that is liquid by φ_L alone is the edge of
+the particle coverage, so it is not emitted. A genuine particle surface at the
+support's edge is still kept. On the synthetic slab, side faces went from 908
+(a wall from 3.25 to 6.1 cells) to 64 (the rim above 5.6), with no floor
+faces. The top skin sits 0.15 h above the level set, inside the default Merge.
+∇D is one-sided at the window's border, so two bricks can place a shared vertex
+slightly differently where φ_L decides it. That happens only where the skin meets
+the level set, which Merge hides.
+
 The skin is drawn *in addition to* the level-set mesh, in the same front, back
 and rear interface passes. The nearest front face wins, so the skin replaces the
-smooth surface wherever it lies on or above it. Edges whose shallowest
-contributing particle is deeper than the cull depth are not emitted, so the
-shell's floor never becomes a spurious exit. The cull uses the per-record depth
-float that NB-FLIP already keeps; ballistic records never cull. Because the
-skin goes through the interface passes, Shade (refraction), Simple (murk) and
-Wire all apply to it unchanged.
+smooth surface wherever it lies on or above it. Because the skin goes through
+the interface passes, Shade (refraction), Simple (murk) and Wire all apply to it
+unchanged.
 
 **Merge.** Where the skin hugs the level set it adds only lumps and z-fighting.
 Each skin vertex carries the Merge distance (in cells, default 0.5 h) as
@@ -113,7 +131,8 @@ Synthetic band on M1 Max: 131k band particles plus 20k spray, 2,257 bricks,
 | emission reads a per-cell packed vertex and normal, with no dynamic local arrays | 2.95 ms (emission 0.08) |
 | splat walks only the sphere's row spans | 2.94 ms |
 | the 27 neighbour lists are one flat range (one list kept about 70 of 256 lanes busy) | 2.29 ms |
-| mesh workgroup widened to 512 lanes (1024: 2.42 ms) | **1.88 ms** |
+| mesh workgroup widened to 512 lanes (1024: 2.42 ms) | 1.88 ms |
+| union with the depth-record level-set estimate (∇D at every sample) | **2.15 ms** |
 
 Knock-outs at 2.96 ms: removing the splat's atomics left 0.60 ms, so the splat
 was about 2.35 ms. Spreading the lanes so that they hit different addresses
