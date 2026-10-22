@@ -80,7 +80,8 @@ export class UniformMixedPressureVelocity {
   * F + T + gravity (umColdForced), and the projection keeps F there and
   * stores its correction instead. */
  private readonly cold?:UniformColdFreeze;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer,freeze?:UniformColdFreeze){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer,freeze?:UniformColdFreeze,readonly skipBandRootRhs=false){
+  if(skipBandRootRhs&&!coarse)throw new Error("Skipping band root RHS requires the all-4h coupled pressure root");
   this.cold=coarse&&UNIFORM_COLD_FREEZE?freeze:undefined;
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure coupling requires the all-4h solid record and all-4h ownership");
   this.pages=uniformMixedPageCount(ownership.capacity.tiles);
@@ -287,13 +288,16 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
 }`:""}
 @compute @workgroup_size(64) fn buildRhs(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let o=umResidentAllOwner(gid);
+ ${this.skipBandRootRhs?`// The caller copied the current slot map into owner RHS words. A band
+ // row's divergence has no reader: pNative assembles only non-band rows.
+ var bandOwner=false;if(o.width!=0u){bandOwner=bitcast<u32>(rhs[o.index])!=0u;}`:""}
  ${this.coarse?`// A liquid owner's cut faces, listed for the workgroup (umCutSum).
  if(lane==0u){atomicStore(&umCutCount,0u);}
  umCutOwner[lane]=vec4u(o.tile,o.lane,o.width,o.index);
  workgroupBarrier();
  var cutFaces=0u;
  if(o.width!=0u&&umPressureLiquid(o)){for(var f=0u;f<6u;f++){let axis=f>>1u;let sign=select(-1,1,(f&1u)==1u);
-  if(umCoarseCut(o,axis,sign)){cutFaces|=1u<<f;let i=atomicAdd(&umCutCount,1u);umCutItem[i]=lane|(f<<6u);umCutBits[i]=umCutWord(o,axis,sign);}
+  if(${this.skipBandRootRhs?"(!bandOwner||umAcrossKind(vec3i(umOrigin(o)),axis,select(-1,i32(o.width),sign>0))==UM_SOLID)&&":""}umCoarseCut(o,axis,sign)){cutFaces|=1u<<f;let i=atomicAdd(&umCutCount,1u);umCutItem[i]=lane|(f<<6u);umCutBits[i]=umCutWord(o,axis,sign);}
  }}
  let cuts=workgroupUniformLoad(&umCutCount);
  for(var first=0u;first<cuts;first+=4u){
@@ -308,7 +312,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  ${this.coarse?"let topology=umSolidCoarse(o.index);":this.solid?"let topology=umOwnerTopology(o);textureStore(topologyOut,vec3i(umOrigin(o)),topology);":""}
  // Only a liquid owner keeps its divergence: air skips the face loads.
  let liquid=umPressureLiquid(o);
- if(liquid){for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
+ if(liquid${this.skipBandRootRhs?"&&!bandOwner":""}){for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);var flux=0.0;
   for(var part=0u;part<first.count;part++){
    let face=umFace(o,axis,sign,part);var fraction=1.0;
@@ -319,7 +323,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
   terms[2u*axis+side]=f32(sign)*flux/(f32(o.width*o.width*o.width)*UM_H[axis]);
  }}}
  var value=0.0;
- if(liquid){let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
+ if(liquid${this.skipBandRootRhs?"&&!bandOwner":""}){let divergence=(terms[0]+terms[1])+(terms[4]+terms[5])+(terms[2]+terms[3]);
   // Volume control: the surface-only authority's correction of a liquid
   // owner (umAuthorityLiquid is umPressureLiquid on the same phi words),
   // rate x its umCapacity, formed here bit for bit.

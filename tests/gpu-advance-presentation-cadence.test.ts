@@ -10,6 +10,8 @@ import {
 } from "../lib/core/webgpu-renderer";
 import type { GPUSolverInstance } from "../lib/core/method-contract";
 import { PaneClockHost } from "../lib/core/simulation/pane-clock";
+import { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import { UNIFORM_MIXED_RECEIPT_RING } from "../lib/methods/uniform/uniform-mixed-frame";
 
 const DT = 1 / 30;
 const RAF_S = 1 / 60;
@@ -214,4 +216,30 @@ test("a failed pressure receipt rejects the request without presenting it", asyn
   f.solver.awaitFrameCompletion = () => Promise.reject(failure);
   await assert.rejects(f.renderer.drawWithDeferredPresentation(f.args), failure);
   assert.equal(f.draws(), 1);
+});
+
+test("NB-FLIP receipt backpressure does not defer an already-submitted image or drain the worker", async () => {
+  // Use the production admission/publication getters without constructing GPU
+  // resources. A full ring has submitted every frame, including its final
+  // fields; only admission of a further advance must wait for a receipt.
+  const solver = Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype), {
+    mixedFrame: {}, mixedFramesInFlight: UNIFORM_MIXED_RECEIPT_RING,
+    executionInfo: { submittedTime_s: 2 * DT, completedTime_s: 0 },
+    awaitFrameCompletion: () => { throw new Error("must not drain submitted frames for presentation"); },
+  }) as WebGPUUniformReferenceSolver;
+  assert.equal(solver.framePending, true, "the next simulation advance remains blocked");
+  assert.equal(solver.presentationPending, false, "its image can follow the final submission on the same queue");
+  assert.equal(presentationHeldByPendingFrame(solver.framePending, true), false);
+  const metrics = { context: "test", methodId: "uniform-narrow-band-flip", presentationSubmitted: false };
+  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
+    gpuFluid: solver, draw: () => metrics,
+  }) as FluidLabRenderer;
+  assert.equal(await renderer.drawWithDeferredPresentation([] as unknown as Parameters<FluidLabRenderer["draw"]>), metrics,
+    "a later request at the full-ring gate returns instead of awaiting the entire queue");
+  Object.assign(solver, { mixedFramesInFlight: UNIFORM_MIXED_RECEIPT_RING - 1 });
+  assert.equal(solver.framePending, false, "one receipt is enough to admit the next advance");
+  Object.assign(solver, { deferredFrameValues: {} });
+  assert.equal(solver.framePending, true, "an edit still drains outstanding advances before being applied");
+  Object.assign(solver, { pressureFrameFailure: new Error("failed frame") });
+  assert.equal(solver.presentationPending, true, "failed frames remain withheld");
 });

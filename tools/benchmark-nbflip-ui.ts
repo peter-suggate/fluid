@@ -2,14 +2,15 @@
  * the UI. No method, scene, time-step, or quality overrides are accepted.
  * node --import tsx tools/benchmark-nbflip-ui.ts NAME [--steps=120]
  *   [--scene=nbflip-figure-9-teaser] [--profile] [--dispatch-probe]
- *   [--heap] [--unpaced] [--memory]
+ *   [--heap] [--cpu] [--unpaced] [--memory]
  * Plain wall time includes encoding, submissions and completion receipts;
  * excludes construction, renderer and diagnostic timestamp readback.
  * The summary reports the measured window's collections (count and pause
  * time) beside its frame times. --heap samples host allocations over the
  * same window and lists the sites, in bytes a frame. --unpaced restores the
  * Dawn binding's own event polling (paceDawnEventPolling), whose garbage
- * otherwise dominates both.
+ * otherwise dominates both. --cpu writes a DevTools CPU profile for the
+ * measured frames only (construction and final diagnostics are excluded).
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -35,7 +36,7 @@ const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`)
 const name = process.argv[2] ?? "current";
 assert.match(name, /^[a-z0-9-]+$/);
 for (const argument of process.argv.slice(3)) {
-  assert.ok(/^(--(?:steps|from|scene|out)=.+|--profile|--dispatch-probe|--heap|--unpaced|--memory)$/.test(argument), `Unknown option: ${argument}`);
+  assert.ok(/^(--(?:steps|from|scene|out)=.+|--profile|--dispatch-probe|--heap|--cpu|--unpaced|--memory)$/.test(argument), `Unknown option: ${argument}`);
 }
 const steps = Number(option("steps") ?? 120), from = Number(option("from") ?? 13);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(from) && from > 0 && from <= steps);
@@ -48,6 +49,7 @@ const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 assert.ok(steps * dt <= scene.duration_s + 1e-9, "Stay within the authored take");
 const profiled = process.argv.includes("--profile"), split = process.argv.includes("--dispatch-probe");
 const heap = process.argv.includes("--heap"), paced = !process.argv.includes("--unpaced");
+const cpu = process.argv.includes("--cpu");
 if (paced) paceDawnEventPolling();
 /** Collections that end inside the measured window. */
 const collections: { kind: string; ms: number; frame: number }[] = [];
@@ -58,7 +60,7 @@ const collector = new PerformanceObserver(list => {
   if (measuring) for (const e of list.getEntries()) collections.push({ kind: collectionKinds[(e as unknown as { detail: { kind: number } }).detail.kind] ?? "other", ms: e.duration, frame: measuring });
 });
 collector.observe({ entryTypes: ["gc"] });
-const inspector = heap ? new Session() : undefined; inspector?.connect();
+const inspector = heap || cpu ? new Session() : undefined; inspector?.connect();
 const inspect = <T>(method: string, parameters?: object) => new Promise<T>((done, fail) => inspector!.post(method, parameters, (error, result) => error ? fail(error) : done(result as T)));
 interface HeapNode { callFrame: { functionName: string; url: string; lineNumber: number }; selfSize: number; children?: HeapNode[] }
 assert.ok(!split || profiled, "Dispatch probes require --profile");
@@ -95,7 +97,8 @@ try {
     activeFrame=frame;activePhase="advance";
     if (probe) probe.enabled = frame >= from;
     if (profile && frame >= from) profile.start();
-    if (frame === from && inspector) await inspect("HeapProfiler.startSampling", { samplingInterval: 4096, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
+    if (frame === from && heap) await inspect("HeapProfiler.startSampling", { samplingInterval: 4096, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
+    if (frame === from && cpu) { await inspect("Profiler.enable"); await inspect("Profiler.start"); }
     if (frame >= from) measuring = frame;
     const start = performance.now();
     assert.ok(solver.advanceTo(frame * dt, []));
@@ -117,8 +120,12 @@ try {
     if (frame % 12 === 0 || frame === steps) console.log(JSON.stringify({ ...row, passes: undefined }));
   }
   measuring = 0; collector.disconnect();
+  if (cpu) {
+    const { profile: sampled } = await inspect<{ profile: unknown }>("Profiler.stop");
+    writeFileSync(`${out}/${name}.cpuprofile`, JSON.stringify(sampled) + "\n");
+  }
   let allocations: { bytesPerFrame: number; sites: Record<string, number> } | undefined;
-  if (inspector) {
+  if (heap) {
     const { profile: sampled } = await inspect<{ profile: { head: HeapNode } }>("HeapProfiler.stopSampling");
     const sites: Record<string, number> = {}, frames = steps - from + 1; let bytes = 0;
     const walk = (node: HeapNode) => {
@@ -210,5 +217,6 @@ try {
     scaling:{partial:true,windows:partialWindows},rows,errors,error:String(error) }, null, 2) + "\n");
   throw error;
 } finally {
+  inspector?.disconnect();
   solver?.destroy(); await device?.queue.onSubmittedWorkDone(); profile?.destroy(); device?.destroy();
 }

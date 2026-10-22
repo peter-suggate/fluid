@@ -83,6 +83,17 @@ export const UNIFORM_SOURCE_PLUG_OVERLAP_CELLS = 2;
  * met air in one 4h cell (-18h beside +1h), and the stream's tip carried
  * that cliff down, the cubic advection denting it into h tiles. */
 export const uniformSourcePhiWGSL = /* wgsl */ `
+// A thin swept plug can sit entirely between 4h vertices. Its own source
+// rule must request h before any liquid exists for the surface census to see.
+// Use the coarse cell's axial projection, including oblique nozzles; a
+// narrow aperture also needs h even when its sweep is long enough.
+fn inflowNeedsFine()->bool{
+ let speed=length(params.inflowVelocityLength.xyz)*inflowStrength();
+ if(speed<=1e-6){return false;}
+ let h=params.cellGravity.xyz;let direction=normalize(params.inflowVelocityLength.xyz);
+ let span=speed*params.dimsDt.w+${UNIFORM_SOURCE_PLUG_OVERLAP_CELLS}.0*min(h.x,min(h.y,h.z));
+ return params.inflowPositionRadius.w<=4.0*max(h.x,max(h.y,h.z))||span<=4.0*dot(abs(direction),h);
+}
 fn uvSourcePhi(p:vec3f,phi:f32)->f32{
   var result=phi;
   if(params.drop.w>0.0){result=min(result,dropDistance(traceWorld(p),result));}

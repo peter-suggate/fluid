@@ -146,10 +146,10 @@ export interface UniformMixedDynamicImportance {
  activityBudget?:{percent:number};
  /** A tile this frame's drop or inflow plug can fill is band (absent: it
   * is). Off under a census of requests only: a source is not a request; and
-  * off for NB-FLIP, whose 4h owners carry the plug's phi and inflow like any
-  * surface's (a smooth stream stays 4h). The page seed keeps a source's
+  * "unresolved" for NB-FLIP: only plugs too thin for 4h require h before
+  * the surface census can see them. Resolved streams stay 4h. The page seed keeps a source's
   * tiles resident either way. */
- sources?:boolean;
+ sources?:boolean|"unresolved";
  /** What shape measures on an h tile (UniformDetailShapeMetric; absent:
   * "value"). "displacement": umSurfaceDisplacement. */
  shapeMetric?:"value"|"displacement";
@@ -1087,10 +1087,10 @@ fn umScoreByte(w0:u32,w1:u32,k:u32)->u32{
    if(criterionOn(k)){top=max(top,byte);}
   }
   w1|=winner<<${IMPORTANCE.winnerShift}u;
-  // A tile the source can fill is the source's to author again each step: a
-  // 4h error there never accumulates (the plug's back rim is a right angle
-  // no 4h tile carries). It scores for the layer and requires nothing.
-  if(((w1>>${IMPORTANCE.triggeredShift}u)&63u)!=0u&&umSourceTile(vec3i(p))){w1&=~(63u<<${IMPORTANCE.triggeredShift}u);}
+  // A resolved source authors its tiles again each step: its back rim
+  // need not request h. Unresolved inflows retain their criteria so thin
+  // moving liquid can also heat and seed particles.
+  if(((w1>>${IMPORTANCE.triggeredShift}u)&63u)!=0u&&!umSourceinflowNeedsFine()&&umSourceTile(vec3i(p))){w1&=~(63u<<${IMPORTANCE.triggeredShift}u);}
   let triggered=((w1>>${IMPORTANCE.triggeredShift}u)&63u)!=0u;
   var kept=triggered;
 
@@ -1254,7 +1254,7 @@ fn departureMeetsSurface(home:u32,lo:vec3f,hi:vec3f)->bool{
 fn umJoined(t:u32)->bool{
  return ((joinTiles[t/32u]>>(t%32u))&1u)!=0u||umHostJoined(vec3i(umTileCoord(t)));
 }
-fn umSourceBand()->bool{return (policy.shaping.x&512u)!=0u;}
+fn umSourceBand()->bool{return (policy.shaping.x&512u)!=0u||((policy.shaping.x&65536u)!=0u&&umSourceinflowNeedsFine());}
 fn umSourceTile(p:vec3i)->bool{
  if(umSourceParams.drop.w<=0.0&&umSourceinflowStrength()<=0.0){return false;}
  let centre=4.0*vec3f(p)+vec3f(2.0);
@@ -1703,7 +1703,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   // solids and bodies remain) requires no tile: decide then reads no table.
   let criteria=0;for(let k=0;k<UNIFORM_DETAIL_CRITERIA.length;k++)if(importance.criteria[UNIFORM_DETAIL_CRITERIA[k]!])criteria|=1<<k;
   const seeded=!!policy.reasons||fastTravel>0||holdSteps>0||criteria!==0;
-  U[20]=(importance.bulk?256:0)|(importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)|(importance.surfaceAuthority?32768:0)|criteria;
+  U[20]=(importance.bulk?256:0)|(importance.sources==="unresolved"?65536:importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)|(importance.surfaceAuthority?32768:0)|criteria;
   U[21]=holdSteps;U[22]=0xffffffff;U[23]=Math.min(255,Math.floor(retireRatio*IMPORTANCE.scoreOne));
   // Any change of the policy (word 6 aside) retires every replay record.
   {const last=this.policyLast;let changed=false;for(let i=0;i<28;i++)if(i!==6&&last[i]!==U[i]){last[i]=U[i]!;changed=true;}if(changed)this.policyGeneration=(this.policyGeneration%0xfffffffe)+1;}

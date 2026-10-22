@@ -46,15 +46,18 @@ test("pool sphere impact responds to the solved pressure impulse without extra m
   // Same ball, water and h as the backyard scene; a smaller basin shortens
   // the test. Start just above impact to avoid simulating the board traverse.
   const scene=createBackyardPoolPartyScene();
+  // This test reads the GPU-owned body's motion. The preset's robot opts
+  // into Box3D ownership, whose host is exercised by check-pool-party-splash.
+  scene.interaction=undefined;
   scene.container={...scene.container,width_m:3.2,height_m:4.8,depth_m:3.2};scene.solidBoundary=undefined;
   scene.solidVoxels=[[[0,0,0],[64,4,64]],[[0,0,0],[8,40,64]],[[56,0,0],[64,40,64]],[[8,0,0],[56,40,8]],[[8,0,56],[56,40,64]]].map(([minimum,maximumExclusive])=>({operation:"fill",minimum:minimum as [number,number,number],maximumExclusive:maximumExclusive as [number,number,number],materialId:1}));
   scene.fluid.initialLiquidVolumes=[{shape:"box",min_m:{x:-1.2,y:.2,z:-1.2},max_m:{x:1.2,y:1.8,z:1.2}}];
   Object.assign(scene.rigidBodies[0]!,{position_m:{x:0,y:2.2,z:0},linearVelocity_m_s:{x:0,y:-8,z:0}});
   const bodies=initializeRigidBodies(scene.rigidBodies),mass=bodies[0]!.mass_kg,solver=await createUniformSolver(device,scene);
   const inner=solver as unknown as {mixedFrame:UniformMixedFrame;rigidSystem:{stateBuffer:GPUBuffer};rigidExchange:GPUBuffer};
-  const dt=1/60;let previous=[0,-8,0],impulseY=0,deepest=2.2;
+  const dt=1/60;let previous=[0,-8,0],impulseY=0,deepest=2.2,crest=1.8;
   try{
-   for(let step=1;step<=30;step++){
+   for(let step=1;step<=60;step++){
     assert.ok(solver.advanceTo(step*dt,bodies));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);
     const state=await readMixedBuffer(device,inner.rigidSystem.stateBuffer),exchange=new Int32Array((await readMixedBuffer(device,inner.rigidExchange)).buffer);
     for(let axis=0;axis<3;axis++){
@@ -63,16 +66,18 @@ test("pool sphere impact responds to the solved pressure impulse without extra m
      assert.ok(Math.abs(momentumChange-pressureImpulse)<.002,`frame ${step}, axis ${axis}: ${momentumChange} N s body change vs ${pressureImpulse} N s pressure impulse`);
     }
     previous=Array.from(state.slice(12,15));impulseY+=exchange[1]!*1e-6;deepest=Math.min(deepest,state[1]!);
+    // Follow the crown through a full second of impact and rebound. Its
+    // peak need not coincide with the final snapshot.
+    if(step%5===0){
+     const fields=await readUniformFields(device,solver);
+     for(let z=12;z<52;z++)for(let x=12;x<52;x++)for(let y=37;y<56;y++){
+      const low=fields.vertex(x,y,z),high=fields.vertex(x,y+1,z);
+      if(low<=0&&high>0)crest=Math.max(crest,.05*(y-low/(high-low)));
+     }
+    }
    }
    assert.ok(impulseY>200,"water must receive a substantial impact reaction");
    assert.ok(deepest<1.37,"the ball must penetrate before buoyancy reverses its motion");
-   const fields=await readUniformFields(device,solver);let crest=1.8;
-   for(let z=12;z<52;z++)for(let x=12;x<52;x++)for(let y=37;y<56;y++){
-    // Measure the zero crossing, not its lower lattice sample: a crown
-    // between 2.10 and 2.15 m must not be rounded down to the 2.10 m limit.
-    const low=fields.vertex(x,y,z),high=fields.vertex(x,y+1,z);
-    if(low<=0&&high>0)crest=Math.max(crest,.05*(y-low/(high-low)));
-   }
    t.diagnostic(`pressure impulse ${impulseY.toFixed(2)} N s; minimum centre ${deepest.toFixed(3)} m; crest ${(crest-1.8).toFixed(3)} m above pool`);
    assert.ok(crest>2.1,"the impact must displace a visible crown above the pool");
    assert.ok(inner.mixedFrame.narrowBandFlip!.count>0,"impact must create detailed surface particles");

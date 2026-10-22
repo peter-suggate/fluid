@@ -1311,12 +1311,14 @@ fn overlayGridFrame()->OverlayGridFrame{
   let authoredDimensions=max(vec3i(u.gridInfo.xyz),vec3i(1));
   let authoredSize=u.container.xyz;
   let authoredMinimum=vec3f(-0.5*authoredSize.x,0.0,-0.5*authoredSize.z);
-  let cellSize=authoredSize/vec3f(authoredDimensions);
-  var minimumFine=vec3i(0);var maximumFine=authoredDimensions;
-
-  let dimensions=max(maximumFine-minimumFine,vec3i(1));
-  return OverlayGridFrame(minimumFine,dimensions,
-    authoredMinimum+vec3f(minimumFine)*cellSize,vec3f(dimensions)*cellSize);
+  // The ray box stays in authored world space, but ownership and fields are
+  // addressed relative to the live storage window. Its first recenter moves
+  // those addresses even though the represented cells have not moved.
+  var minimumFine=vec3i(0);
+  if(sliceLsvP.global.x==2u && umPresentationEnabled()){
+    minimumFine=-32*umFramePage();
+  }
+  return OverlayGridFrame(minimumFine,authoredDimensions,authoredMinimum,authoredSize);
 }
 
 // Where a world point lands in the framebuffer (y down), and its depth along

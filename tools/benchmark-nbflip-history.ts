@@ -70,13 +70,15 @@ try {
   const base = profile?.device ?? raw;
   const device = syncFrom === Infinity ? base : new Proxy(base, { get(target, key) {
     if (key === "createBuffer") return (d: GPUBufferDescriptor) => {
-      if (d.usage & mapped) return target.createBuffer(d);
+      // These instruction records use offsets cached in arm-local CPU objects.
+      // Copying them without that cache would change the destination program.
+      if (d.usage & mapped || d.label === "Uniform compute blit tables") return target.createBuffer(d);
       const buffer = target.createBuffer({ ...d, usage: d.usage | copyable });
-      track({ buffer, key: `b ${d.size} ${d.usage}`, dead: false }, buffer); return buffer;
+      track({ buffer, key: `b ${d.label ?? ""} ${d.size} ${d.usage}`, dead: false }, buffer); return buffer;
     };
     if (key === "createTexture") return (d: GPUTextureDescriptor) => {
       const texture = target.createTexture({ ...d, usage: d.usage | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
-      if ((d.sampleCount ?? 1) === 1) track({ texture, key: `t ${d.format} ${JSON.stringify(d.size)} ${d.dimension} ${d.mipLevelCount ?? 1}`, dead: false }, texture);
+      if ((d.sampleCount ?? 1) === 1) track({ texture, key: `t ${d.label ?? ""} ${d.format} ${JSON.stringify(d.size)} ${d.dimension} ${d.mipLevelCount ?? 1}`, dead: false }, texture);
       return texture;
     };
     const value = Reflect.get(target, key, target); return typeof value === "function" ? value.bind(target) : value;
@@ -96,6 +98,21 @@ try {
       }
     }
     raw!.queue.submit([e.finish()]); await raw!.queue.onSubmittedWorkDone();
+    // The pressure schedule is part of the simulation state: copying only
+    // GPU bytes can leave identical arms executing different cycle counts.
+    type BandHistory = { recentCycles: Uint32Array } & Record<string, unknown>;
+    type FrameHistory = { band: BandHistory; ownership: {work: Record<string, number>}; pressureOwnership: {work: Record<string, number>} };
+    const frameOf = (i: number) => (solvers[i] as unknown as {mixedFrame: FrameHistory}).mixedFrame;
+    const a = frameOf(source), b = frameOf(1-source);
+    b.band.recentCycles.set(a.band.recentCycles);
+    for (const key of ["recentCount", "wideCycles", "workBricks", "workLevel1", "level1Groups", "workLevel2", "level2Groups", "workTiles", "tileGroups", "relaxGroups"]) {
+      assert.equal(typeof a.band[key], "number", `sync: missing pressure history ${key}`);
+      b.band[key] = a.band[key];
+    }
+    for (const key of ["ownership", "pressureOwnership"] as const) {
+      for (const kind of Object.keys(b[key].work)) delete b[key].work[kind];
+      Object.assign(b[key].work, a[key].work);
+    }
   };
   let dt = 0;
   for (const [index, root] of roots.entries()) {
@@ -201,7 +218,7 @@ try {
   for (const solver of solvers) {
     const s = await solver.readStats(); physics.push({ maxSpeed_m_s: s.maxSpeed_m_s, volumeCellSum: s.volumeCellSum, representedVolumeCellSum: s.representedVolumeCellSum, volumeDrift: s.volumeDrift, front_m: s.front_m, pressureResidual: s.uniformPressureAcceptedResidual, bandResidual: s.uniformPressureBandResidual });
   }
-  writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), host: { cpu: cpus()[0]?.model, memory: totalmem(), release: release(), node: process.version }, sceneId, scope: kernels ? "diagnostic split-dispatch timestamps; whole-frame time includes added pass overhead" : "alternating simulation advance and completion on one device; excludes construction and renderer", snapshots, profiled, summary, passMeans, certificates, physics, rows, errors }, null, 2) + "\n");
+  writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), host: { cpu: cpus()[0]?.model, memory: totalmem(), release: release(), node: process.version }, sceneId, scope: kernels ? "diagnostic split-dispatch timestamps; whole-frame time includes added pass overhead" : "alternating simulation advance and completion on one device; excludes construction and renderer", snapshots, syncCpuState: ["pressure cycle history", "pressure launch history", "simulation and pressure ownership work hints"], syncExclusions: ["Uniform compute blit tables (immutable command records with arm-local CPU offsets)"], profiled, summary, passMeans, certificates, physics, rows, errors }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", summary }));
 } catch (error) {
   writeFileSync(`${out}/${name}-failed.json`, JSON.stringify({ snapshots, rows, errors, error: String(error) }, null, 2) + "\n"); throw error;

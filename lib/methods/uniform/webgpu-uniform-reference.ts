@@ -1785,8 +1785,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
   private mixedImportanceFor(detail:UniformDetailSettings,tiles:number){
     const budget={percent:this.narrowBandAdaptiveBudgetPercent};
-    // A source asks for nothing at h: the criteria decide its tiles like any surface's.
-    const importance={...uniformDetailImportance(detail,tiles),surfaceAuthority:true,sources:false,
+    // Bootstrap inflows that 4h cannot sample; resolved streams use the surface criteria.
+    const importance={...uniformDetailImportance(detail,tiles),surfaceAuthority:true,sources:detail.policy==="dynamic"?"unresolved" as const:false,
       ...(detail.policy==="dynamic"?{budgetTiles:undefined,activityBudget:budget}:{})};
     return {detail,tiles,importance,budget,criteria:Object.values(importance.criteria).some(Boolean)};
   }
@@ -2542,10 +2542,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private get deferredFrameEdit(): boolean {
     return this.deferredFrameScene !== undefined || this.deferredFrameValues !== undefined || this.deferredFrameBodies !== undefined;
   }
-  get deferredFramePublication(): boolean {
-    return !!this.mixedFrame;
-  }
-  get presentationPending(): boolean { return this.framePending || this.pressureFrameFailure !== undefined; }
+  // advance() submits the complete frame before returning. Its receipt ring
+  // limits admission of another advance, not presentation of this one: a
+  // draw queued behind it sees the final fields by WebGPU queue ordering.
+  // Treating a full ring as deferred publication drains both frames before
+  // submitting the second image and repeatedly starves the GPU pipeline.
+  get deferredFramePublication(): boolean { return false; }
+  get presentationPending(): boolean { return this.pressureFrameFailure !== undefined; }
   async awaitFrameCompletion(): Promise<void> {
    
     await this.mixedFrameChain;
@@ -2620,7 +2623,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const dt = advance.dt_s, stepEnd_s = advance.nextTime_s;
     this.lastTime = stepEnd_s;
     this.executionInfo.submittedTime_s = stepEnd_s;
-    if (!this.deferredFramePublication) this.executionInfo.simulatedTime_s = stepEnd_s;
+    // Submitted state can be drawn immediately; the simulation clock remains
+    // receipt-owned and is published by acceptMixedFrame.
     this.executionInfo.simulationLag_s = advance.lag_s;
     this.executionInfo.lastDt_s = dt;
     this.executionInfo.lastSubsteps = 1;

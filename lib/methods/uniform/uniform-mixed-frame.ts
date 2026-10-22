@@ -562,7 +562,7 @@ export class UniformMixedFrame {
   this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,true,{...this.surfaceWorkControl.revisions,generation:()=>this.surfaceWorkControl.generation});this.authorityGroup=this.bindAuthority();
   // Pressure couples the all-4h owners through the static coarse record.
   const coarseSolid=!!solid;
-  this.projection=new UniformMixedPressureVelocity(device,p,f.sourceParams,solid,coarseSolid,undefined,this.freeze);
+  this.projection=new UniformMixedPressureVelocity(device,p,f.sourceParams,solid,coarseSolid,undefined,this.freeze,coarseSolid);
   // A cut 4h face's flux sums its h faces of the forced field, which the split
   // leaves in simulation ownership in the scratch pair.
   const fine=coarseSolid?{velocity:f.velocityScratch,negative:f.negativeScratch}:undefined;
@@ -600,6 +600,9 @@ export class UniformMixedFrame {
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
    root:{rhs:root.rhs[0],minimum:root.minimum[0],pressure:root.pressure,phi:root.phi!,topology:rootTopology,support:root.ownership.support,supportWord:9*p.layout.tiles.length+24},
    status:this.status,acceptance:this.state,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles},solid);
+  // The next full band projection overwrites these tile faces; its copy
+  // stage preserves only non-band texels. No reader needs their 4h return.
+  this.split.transfer.attachProjectedBand(this.band.index,this.band.slotMapOffset);
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
  }
  /** The stage scratch at `fineTiles` h tiles and `bandTiles` band tiles: the
@@ -1119,10 +1122,20 @@ export class UniformMixedFrame {
    // transport diluted its V into a layer above phi, and the floor's lost
    // volume later surfaced as a growing cavity.
    {const to=this.levels[0]!.pressure;encoder.copyBufferToBuffer(this.presentation.pressure.buffer,0,to.buffer,to.offset??0,4*this.pressureWords);}
+   if(this.projection.skipBandRootRhs){
+    // Prepare reads authority, topology and forced faces, not root RHS,
+    // pressure or minima. Its slot map identifies exactly the owner RHS
+    // values pNative never reads. Reuse those write-before-read words as the
+    // map input; buildRhs still writes every resident owner's warm/bound state
+    // and every domain-wall row before solve initialization consumes them.
+    this.band.encodePrepare(encoder);
+    const rhs=this.levels[0]!.rhs[0];
+    encoder.copyBufferToBuffer(this.band.index,this.band.slotMapOffset,rhs.buffer,rhs.offset??0,4*this.pressureOwnership.layout.cellCount);
+   }
    this.projection.encode(encoder,"rhs",split.rhsGroup);
    // One composite solve: the band's h rows and every other liquid root row
    // as native 4h rows. Its verdict gates the 4h projection on the GPU.
-   this.band.encodePrepare(encoder);
+   if(!this.projection.skipBandRootRhs)this.band.encodePrepare(encoder);
    trace?.phase(encoder,A.pressureSetup);
    this.band.encodeSolve(encoder);
    trace?.phase(encoder,A.pressureVCycles);

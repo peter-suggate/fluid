@@ -24,6 +24,12 @@ export interface ParticleRefineWords {readonly joins:number;readonly allocation:
 export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords): string {
   return /* wgsl */`
 ${particleResidencyTravelWGSL}
+// Coupled samples need only accepted motion; avoid their unused velocity norm.
+// Keep ballistic length and scaling together to preserve backend rounding.
+fn lrParticleTravelConditional(velocity:vec3f,accepted:vec3f,ballistic:bool,scale:vec3f)->array<vec3f,2>{
+ if(ballistic){return lrParticleTravel(velocity,accepted,ballistic,scale);}
+ return array<vec3f,2>(max(-accepted,vec3f(0))*scale,max(accepted,vec3f(0))*scale);
+}
 // Refinement prediction (the census's particle inputs), from the tile's
 // sorted samples after classify: what the census reads is exactly these
 // records (the move's before, DEPB's mode, the band's nearest crossing).
@@ -232,7 +238,7 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
    let half=vec3u(clamp(vec3i(floor((s.position.xyz-2.0)/4.0))-at+1,vec3i(0),vec3i(1)));
    let o=half.x+2u*half.y+4u*half.z;
    atomicOr(&pbHalves,1u<<o);
-   let travel=lrParticleTravel(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz);
+   let travel=lrParticleTravelConditional(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz);
    for(var axis=0u;axis<3u;axis++){
     if(travel[0][axis]>0.0){atomicMax(&pbTravel[6u*o+axis],bitcast<u32>(travel[0][axis]));}
     if(travel[1][axis]>0.0){atomicMax(&pbTravel[6u*o+3u+axis],bitcast<u32>(travel[1][axis]));}

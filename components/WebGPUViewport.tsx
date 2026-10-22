@@ -18,6 +18,7 @@ import { placementBodyDescription, placementDimensionsForRadius } from "../lib/c
 import type { RigidBodyDescription } from "../lib/core/model";
 import { resourceInteractionGates } from "../lib/core/resource-readiness";
 import { PRIMARY_PANE_ID, simulation } from "../lib/core/simulation/controller";
+import { createInteractionFluidDriver } from "../lib/core/simulation/interaction-fluid-driver";
 import { simulationRecording } from "../lib/core/simulation/recording";
 import { cameraTanHalfFov, projectToViewport, viewportRayForPointer, viewportWorldPerPixel } from "../lib/core/webgpu-camera";
 import { gesturePivot, WHEEL_GESTURE_GAP_MS, WHEEL_GESTURE_TRAVEL_PX } from "../lib/core/camera-pivot";
@@ -952,17 +953,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s, paneId),
       onEffectiveRendererStatus: (effectiveRendererStatus) => session.diagnostics.getState().set({ effectiveRendererStatus }),
     });
-    const detachInteractionFluid = simulation.attachInteractionFluid(paneId, {
-      isReady: () => session.diagnostics.getState().gpuStatus.state === 'ready',
-      failureReason: () => {
-        const status = session.diagnostics.getState().gpuStatus;
-        return status.state === 'lost' || status.state === 'unavailable' ? status.label : undefined;
-      },
-      subscribeReadiness: changed => session.diagnostics.subscribe((state, previous) => {
-        if (state.gpuStatus !== previous.gpuStatus) changed();
-      }),
-      step: request => renderer.advanceInteractionFluid(request),
-    });
+    const detachInteractionFluid = simulation.attachInteractionFluid(paneId,
+      createInteractionFluidDriver(session.diagnostics, request => renderer.advanceInteractionFluid(request)));
     let safeSimulationEpoch: number | undefined;
     // This pane's orbit target as a transient detail focus: a new revision
     // only when it moves, never written to the document or the address.

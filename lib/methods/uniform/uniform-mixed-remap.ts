@@ -276,6 +276,11 @@ export class UniformMixedOwnershipTransfer {
  readonly allocatedBytes=0;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
+ /** Only callers that immediately run a full band projection attach this.
+  * The projection replaces every band tile's faces before any reader. */
+ private projectedBand?:{slotWord:number;layout:GPUBindGroupLayout;group:GPUBindGroup};
+ /** Benchmark control: false retains the complete return transformation. */
+ skipProjectedBandReturns=true;
  /** Fixed grids: lanes over the 4h list, workgroup jobs over the h list. */
  private readonly fineGroups:number;
  /** Resident pages bound the coarse launches (one job per page). */
@@ -311,24 +316,38 @@ export class UniformMixedOwnershipTransfer {
    ...(this.freeze?[{binding:7,resource:this.freeze.regions}]:[]),
   ]});
  }
+ /** Attach the current-frame band tile map before initialize. pCopy only
+  * reads non-band texels; pProject rewrites each band tile's full texels and
+  * negative domain faces. The coarse return and frozen/failure gates stay.
+  * A separate group keeps ordinary ownership-transfer bindings unchanged. */
+ attachProjectedBand(index:GPUBuffer,slotMapOffset:number):void{
+  if(this.projectedBand||this.pipelines.size)throw new Error("Projected band must attach once, before ownership transfer initialization");
+  if(!Number.isInteger(slotMapOffset)||slotMapOffset<0||slotMapOffset%4||slotMapOffset+4*this.simulation.capacity.tiles>index.size)throw new Error("Projected band slot map does not cover the simulation tiles");
+  // Group 2 also houses solids in the shared module, but the return entry
+  // never reads those bindings; the distinct binding avoids a declaration alias.
+  const layout=this.device.createBindGroupLayout({entries:[{binding:99,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+  this.projectedBand={slotWord:slotMapOffset/4,layout,group:this.device.createBindGroup({layout,entries:[{binding:99,resource:{buffer:index}}]})};
+ }
  async initialize():Promise<void>{
-  const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout,this.solid,this.freeze)});
+  const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Uniform mixed ownership transfer",code:uniformMixedOwnershipTransferWGSL(this.simulation.layout,this.solid,this.freeze,this.projectedBand?.slotWord)});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   // Only the transfer to pressure reads the solid library (the patch weights).
   const weighted=(entryPoint:string)=>!!this.solid&&entryPoint.startsWith("toPressure");
-  const layoutOf=(entryPoint:string)=>this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.resources,...(weighted(entryPoint)?[this.solid!.tileLayout]:[])]});
-  await Promise.all(["toPressureCoarse","toPressureFine","toSimulationCoarse","toSimulationFine"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(weighted(entryPoint)?this.solid:undefined,s=>uniformDetailPipeline(this.device,this.simulation,{layout:layoutOf(entryPoint),compute:{module,entryPoint,
-   constants:{umDispatchX:this.simulation.dispatchX,...(entryPoint.endsWith("Coarse")?{umCountedJobs:UNIFORM_MIXED_COUNTED.residentPages}:{}),...s}}})));}));
+  const layoutOf=(entryPoint:string)=>this.device.createPipelineLayout({bindGroupLayouts:[this.simulation.bindLayout,this.resources,...(weighted(entryPoint)?[this.solid!.tileLayout]:entryPoint==="toSimulationFine"&&this.projectedBand?[this.projectedBand.layout]:[])]});
+  const entries=["toPressureCoarse","toPressureFine","toSimulationCoarse","toSimulationFine",...(this.projectedBand?["toSimulationFineAll"]:[])];
+  await Promise.all(entries.map(async name=>{const entryPoint=name==="toSimulationFineAll"?"toSimulationFine":name;this.pipelines.set(name,await uniformMixedSolidPipeline(weighted(entryPoint)?this.solid:undefined,s=>uniformDetailPipeline(this.device,this.simulation,{layout:layoutOf(entryPoint),compute:{module,entryPoint,
+   constants:{umDispatchX:this.simulation.dispatchX,...(entryPoint.endsWith("Coarse")?{umCountedJobs:UNIFORM_MIXED_COUNTED.residentPages}:{}),...(name==="toSimulationFineAll"?{umSkipProjectedBand:0}:{}),...s}}})));}));
  }
  /** Both launches write disjoint tiles and read only the source fields. */
  private encode(e:GPUCommandEncoder,entry:"toPressure"|"toSimulation",group:UniformDetailGroup):void{
-  const coarse=this.pipelines.get(entry==="toPressure"?"toPressureCoarse":"toSimulationCoarse"),fine=this.pipelines.get(entry==="toPressure"?"toPressureFine":"toSimulationFine");if(!coarse||!fine)throw new Error("Ownership transfer has not been initialized");
+  const coarse=this.pipelines.get(entry==="toPressure"?"toPressureCoarse":"toSimulationCoarse"),fine=this.pipelines.get(entry==="toPressure"?"toPressureFine":this.projectedBand&&!this.skipProjectedBandReturns?"toSimulationFineAll":"toSimulationFine");if(!coarse||!fine)throw new Error("Ownership transfer has not been initialized");
   const pass=e.beginComputePass(entry==="toPressure"?TRANSFER_TO_PRESSURE_PASS:TRANSFER_TO_SIMULATION_PASS);
   pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,group.group);
   const weighted=!!this.solid&&entry==="toPressure";if(weighted)pass.setBindGroup(2,this.solid!.tileGroup);
   this.simulation.dispatchCounted(pass,weighted?this.solid!.select(coarse):coarse,this.pages);
   // A grid-stride over the h tiles (umCounts.x): sized by them, and not
   // issued while the simulation holds no h-tile capacity.
+  if(entry==="toSimulation"&&this.projectedBand)pass.setBindGroup(2,this.projectedBand.group);
   this.simulation.dispatchBuffered(pass,weighted?this.solid!.select(fine):fine,"fine",this.fineGroups);
   pass.end();
  }
@@ -347,7 +366,7 @@ export class UniformMixedOwnershipTransfer {
 
 /** The transfer's kernels (UniformMixedOwnershipTransfer). Group 0 is the
  * simulation ownership in both directions; the pressure side is all-4h. */
-function uniformMixedOwnershipTransferWGSL(layout:UniformMixedLayout,solid?:UniformMixedSolid,freeze?:UniformColdFreeze):string{
+function uniformMixedOwnershipTransferWGSL(layout:UniformMixedLayout,solid?:UniformMixedSolid,freeze?:UniformColdFreeze,projectedBandWord?:number):string{
  // A statically cut tile's patches are weighted by their V.
  const cut=(tile:string)=>solid?.coarse?`umSolidEnabled()&&umSolidStaticCut(${tile})`:"false";
  // A +face patch's V: the record's where it holds it (umPatchFaceV).
@@ -362,6 +381,8 @@ ${solid?uniformMixedSolidWGSL(2,solid.coarse?.count):""}
 @group(1) @binding(5) var<storage,read_write> boundary:array<f32>;
 ${uniformMixedFrameStatusWGSL(1,6,"read")}
 ${UniformColdFreeze.wgsl(freeze,1,7)}
+${projectedBandWord===undefined?"":`@group(2) @binding(99) var<storage,read> tProjectedBand:array<u32>;
+override umSkipProjectedBand:bool=true;`}
 fn tBits(texel:vec4f)->u32{return u32(round(texel.w));}
 // A tile's freeze state (UniformColdFreeze): to pressure, a frozen tile
 // (after its freezing frame) keeps its pressure-side faces, which hold its
@@ -538,7 +559,7 @@ fn tFineToSimulation(tile:u32,lane:u32){
 }
 @compute @workgroup_size(64) fn toSimulationFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umFrameFailed()){return;}
- for(var job=group.x;job<umCounts.x;job+=groups.x){let tile=tFineTile(job);if(!umFrozenRegion(umPageOfTile(tile))){tFineToSimulation(tile,lane);}}
+ for(var job=group.x;job<umCounts.x;job+=groups.x){let tile=tFineTile(job);if(!umFrozenRegion(umPageOfTile(tile))){${projectedBandWord===undefined?"":`if(umSkipProjectedBand&&tProjectedBand[${projectedBandWord}u+tile]!=0u){continue;}`}tFineToSimulation(tile,lane);}}
 }
 `,["toPressureCoarse","toSimulationCoarse"]);
 }
