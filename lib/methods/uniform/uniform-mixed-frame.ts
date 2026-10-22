@@ -33,7 +33,7 @@ import {UniformMixedMomentum,UNIFORM_MIXED_MOMENTUM_LIMITS} from "./uniform-mixe
 import {UniformMixedForces} from "./uniform-mixed-forces";
 import { UniformMixedRegionDynamics } from "./uniform-mixed-region-dynamics";
 import { UniformRegionHeat } from "./uniform-region-heat";
-import { UniformColdFreeze } from "./uniform-cold-freeze";
+import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { UNIFORM_COLD_FRAME_EVIDENCE_WORDS, UNIFORM_COLD_FRAME_HEAT_WORDS, UniformColdFrame } from "./uniform-cold-frame";
 import {UniformMixedPressureAuthority,uniformMixedRootMaskWords,uniformMixedRootTopologyBytes} from "./uniform-mixed-pressure-authority";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
@@ -537,7 +537,7 @@ export class UniformMixedFrame {
   this.narrowBandFlip.attachFramePlan(this.surfaceWorkControl.framePlan);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
   this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
-  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord,heatWord:this.narrowBandFlip.surfaceHeatWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps,this.nearSettled.wallTrace,this.nearSettled.surfaceVelocitySampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceTraceSubsteps==="off");
+  this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord,heatWord:this.narrowBandFlip.surfaceHeatWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps,this.nearSettled.wallTrace,this.nearSettled.surfaceVelocitySampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceTraceSubsteps==="off",UNIFORM_COLD_FREEZE&&capacity.coldRegions!=="fine");
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,this.surfaceWorkControl);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);

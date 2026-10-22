@@ -144,7 +144,10 @@ export class UniformMixedSurface {
      * one filtered sample a component of the halo (float32-filterable). */
     private readonly velocitySampler:"texture32"|"software"="software",
     /** surfaceTraceSubsteps "off": every surface trace is one step (UM_SURFACE_ONE_STEP). */
-    private readonly oneStepTrace=false) {
+    private readonly oneStepTrace=false,
+    /** A COLD freeze holds deep-COLD regions: advect enumerates the active
+     * regions' regular 4h owners only (umActiveCoarse). */
+    private readonly activeCoarse=false) {
     if(velocitySampler==="texture32"&&!device.features.has("float32-filterable"))throw new Error("Mixed surface texture32 velocity sampling requires float32-filterable");
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -1776,7 +1779,7 @@ override umCubicSolidList:bool=false;
       // Dispatched only under solids (encode: solid.present): no solid-free twin.
       ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(entryPoint,{},true)),
       keyed("wallReach"),
-      keyed("advect",{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2,umDeferTraced:1}),
+      keyed("advect",{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2,umDeferTraced:1,umActiveCoarse:+this.activeCoarse}),
       // Solid-aware (umSplitTrace): its traces run in advectTrace, the rest of
       // umAdvected in advectFinish, and a solid's cubic taps in advectCubic.
       keyed("advectFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1,...UNIFORM_DETAIL_H_STORE,umFastSurface:1,umSplitTrace:1}),

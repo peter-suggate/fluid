@@ -51,8 +51,11 @@ export const uniformMixedPageCount=(tiles:number)=>tiles/64;
 /** Sticky detail-storage violation bits (uniform-detail-fields.ts): set by
  * a store a non-resident tile cannot hold; the frame receipt makes it fatal. */
 export const uniformMixedDetailViolationWord=(tiles:number)=>uniformMixedResidencyWord(tiles)+4+2*uniformMixedPageCount(tiles);
+/** The active regions (UniformRegionHeat.encode, umActiveCoarse): a count,
+ * then the live regions that are not deep COLD this frame, unordered. */
+export const uniformMixedActiveWord=(tiles:number)=>uniformMixedDetailViolationWord(tiles)+4;
 /** Support words an ownership of `tiles` tile keys allocates. */
-export const uniformMixedSupportWords=(tiles:number)=>uniformMixedDetailViolationWord(tiles)+4;
+export const uniformMixedSupportWords=(tiles:number)=>uniformMixedActiveWord(tiles)+1+uniformMixedPageCount(tiles);
 
 /** One packed topology buffer: tile records, h/4h worklists, then frozen stencil masks,
  * then the page table and the block words (UM_PAGE_TABLE, UM_BLOCK_RECORD):
@@ -113,6 +116,22 @@ const UM_RESIDENCY:u32=9u*UM_TILES+28u;
 // Detail storage (uniform-detail-fields.ts): its violation bits follow the
 // residency region.
 const UM_DETAIL_VIOLATION:u32=UM_RESIDENCY+4u+2u*UM_PAGES;
+// Active regions (uniformMixedActiveWord): the heat's live regions that are
+// not deep COLD, a count then the list. With umActiveCoarse the regular 4h
+// owners are their tiles instead of the regular list: a deep COLD region
+// (it and every neighbour COLD, so frozen) has no vertex or face to move.
+override umActiveCoarse:bool=false;
+const UM_ACTIVE:u32=UM_DETAIL_VIOLATION+4u;
+fn umActiveRegionCount()->u32{return umSupport[UM_ACTIVE];}
+// The 4h owner of active slot (a region a 64 slots, a tile a lane), or
+// none; regular: only a tile whose stencil has one width.
+fn umActiveCoarseOwner(slot:u32,regular:bool)->UMOwner {
+ if(slot>=64u*umActiveRegionCount()){return UMOwner();}
+ let tile=umPageTile(umSupport[UM_ACTIVE+1u+slot/64u],slot%64u);
+ if(!umTileLive(tile)||umTileWidth(tile)!=4u){return UMOwner();}
+ if(regular&&umTileMaximumWidth(tile)!=umTileMinimumWidth(tile)){return UMOwner();}
+ return UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
+}
 fn umResidentPageCount()->u32{return umSupport[UM_RESIDENCY];}
 fn umPageOfTile(t:u32)->u32{return 8u*(t>>9u)+(((t>>2u)&1u)|(((t>>5u)&1u)<<1u)|(((t>>8u)&1u)<<2u));}
 // A page's 16-cell page coordinate in the window.
@@ -171,7 +190,10 @@ fn umResidentAllOwner(gid:vec3u)->UMOwner {
 }
 // Regular 4h owner s: tiles whose 3x3x3 stencil has one width, listed by the
 // ownership (support 8n+20: count, three zero words, then the list).
+// umActiveCoarse: the active regions' regular 4h tiles, 64 slots a region.
+fn umRegularCoarseCount()->u32{if(umActiveCoarse){return 64u*umActiveRegionCount();}return umSupport[8u*UM_TILES+20u];}
 fn umRegularCoarseOwner(slot:u32)->UMOwner {
+ if(umActiveCoarse){return umActiveCoarseOwner(slot,true);}
  let base=8u*UM_TILES+20u;if(slot>=umSupport[base]){return UMOwner();}
  let tile=umSupport[base+4u+slot];return UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);
 }
@@ -258,7 +280,7 @@ fn umTileJobOwner(group:vec3u)->UMOwner {
 // 4h owners per job.
 fn umCertifiedJobCount()->u32 {
  if(umCertifiedJobs==1u){return umSupport[4u*UM_TILES+umPlannedFine];}
- let merged=umMergedTileJobs()+(umSupport[8u*UM_TILES+20u]+63u)/64u;
+ let merged=umMergedTileJobs()+(umRegularCoarseCount()+63u)/64u;
  if(umCertifiedJobs==2u){return merged;}
  let fours=umSupport[7u*UM_TILES+17u];return merged-fours+(fours+3u)/4u;
 }
@@ -285,7 +307,7 @@ fn umCountedJobCount()->u32 {
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.all}u){return umCounts.x+(umCounts.y+63u)/64u;}
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.residentAll}u){return umCounts.x+umResidentPageCount();}
  if(umCountedJobs==${UNIFORM_MIXED_COUNTED.residentPages}u){return umResidentPageCount();}
- if(umCountedJobs==${UNIFORM_MIXED_COUNTED.regularCoarse}u){if(!umFusedGateOpen(1u)){return 0u;}return (umSupport[8u*UM_TILES+20u]+63u)/64u;}
+ if(umCountedJobs==${UNIFORM_MIXED_COUNTED.regularCoarse}u){if(!umFusedGateOpen(1u)){return 0u;}return (umRegularCoarseCount()+63u)/64u;}
  let fine=umSupport[header];let fours=umSupport[header+1u];
  // The cache's own modules bound their slots by umHangingSlots(); the
  // builder leaves slots past it unslotted and flags UM_OVERFLOW_HANGING.

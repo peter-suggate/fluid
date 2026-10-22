@@ -1,7 +1,7 @@
 import { uniformMixedHangingBytes, uniformMixedHangingSlotCapacity } from "./uniform-mixed-velocity-sampling.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import type { RefinementRegionLattice } from "../../core/refinement-regions";
-import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedPageCount, uniformMixedResidencyWord, uniformMixedSupportWords } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedActiveWord, uniformMixedPageCount, uniformMixedResidencyWord, uniformMixedSupportWords } from "./uniform-mixed-topology.wgsl";
 import { uniformDetailPick, uniformDetailSupportWords, uniformDetailTableWords } from "./uniform-detail-fields";
 import { uniformBufferedWork, type UniformWorkEdit } from "./uniform-buffered-work";
 import { uniformBlockNeighbourWords, type UniformLatticeAddress } from "./uniform-lattice-address";
@@ -57,6 +57,8 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
   // 8n+20: the regular 4h count, three zero words, then its list.
   writes.push(["support",(8*n+20)*4,new Uint32Array([regularCoarse.length,0,0,0,...regularCoarse])]);
   writes.push(["support",uniformMixedResidencyWord(n)*4,allResident(n)]);
+  // Every region active until a region heat publishes its list (umActiveCoarse).
+  writes.push(["support",uniformMixedActiveWord(n)*4,allActive(n)]);
   const slotted=[...new Set([...seamLists[0]!,...seamLists[1]!])];
   const slots=new Uint32Array(2*n).fill(0xffffffff);slotted.forEach((tile,slot)=>{slots[tile]=slot;slots[n+slot]=tile;});
   const derivation={dispatchX,writes,seamCounts,hangingSlots:slotted.length,slots};
@@ -71,6 +73,12 @@ function deriveOwnership(layout:UniformMixedLayout,dispatchX:number):OwnershipDe
  * other; the list is the pages of the blocks that can hold one, and its
  * reader skips a block that holds none (umTileLive). */
 const residentRegions=new Map<number,Uint32Array<ArrayBuffer>>();
+const activeRegions=new Map<number,Uint32Array<ArrayBuffer>>();
+function allActive(tiles:number):Uint32Array<ArrayBuffer>{
+  let words=activeRegions.get(tiles);
+  if(!words){const pages=uniformMixedPageCount(tiles);words=new Uint32Array(1+pages);words[0]=pages;for(let p=0;p<pages;p++)words[1+p]=p;activeRegions.set(tiles,words);}
+  return words;
+}
 function allResident(tiles:number):Uint32Array<ArrayBuffer>{
   let words=residentRegions.get(tiles);
   if(!words){const pages=uniformMixedPageCount(tiles),held=pages-16;words=new Uint32Array(4+2*pages);words[0]=held;words.fill(1,4,4+pages);for(let p=0;p<held;p++)words[4+pages+p]=8+p;residentRegions.set(tiles,words);}

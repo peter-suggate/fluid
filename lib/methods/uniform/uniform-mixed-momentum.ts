@@ -8,7 +8,7 @@ import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sam
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
-import { UniformColdFreeze } from "./uniform-cold-freeze";
+import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { uniformTileContextSidesWGSL } from "./uniform-tile-context";
 import { UNIFORM_MOMENTUM_RESIDUAL_PARTS, UNIFORM_MOMENTUM_TIER, UNIFORM_MOMENTUM_TIER_PASS, uniformMomentumFitGrid, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
 
@@ -465,7 +465,8 @@ ${this.hanging?uniformMixedMomentumUnitWGSL(this.sampler):""}
     // with the hanging tap cache, the unit kernel; merged jobs hold seam and
     // regular 4h only, through the unit sampler too.
     [this.pipeline,this.regularPipeline,this.generalPipeline]=await Promise.all([
-      compile("momentumStep",{umMergedTiles:1,umMergedCoarse:1,umCertifiedJobs:3,umClaimWord:2}),
+      // Deep-COLD owners are frozen (no writes): enumerate the active regions only.
+      compile("momentumStep",{umMergedTiles:1,umMergedCoarse:1,umCertifiedJobs:3,umClaimWord:2,umActiveCoarse:+(UNIFORM_COLD_FREEZE&&!!this.freeze)}),
       compile("momentumRegularStep",{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umCertifiedJobs:1,umClaimWord:0}),
       this.hanging?compile("momentumFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1})
         :compile("momentumStep",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1}),

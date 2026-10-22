@@ -10,7 +10,7 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_FORCE_MODE, uniformRegionForceWGSL, type UniformMixedRegionDynamics } from "./uniform-mixed-region-dynamics";
-import { UniformColdFreeze } from "./uniform-cold-freeze";
+import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 
 export const UNIFORM_NORMAL_ANCHOR_ERROR=0.01;
 export const UNIFORM_CAPILLARY_DISPLACEMENT_ERROR_H=0.0001;
@@ -508,7 +508,7 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner
     [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline,this.regularFineFreePipeline]=await Promise.all([
       compile("forces",{umMergedTiles:1,umFusedJobs:1,umCountedJobs:UNIFORM_MIXED_COUNTED.fusedQuad}),
       compile("forcesFine",{umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles,...(this.solid?{umSolidTwinned:1}:{})}),
-      compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused}),
+      compile("forcesRegularCoarse",{umCellWidth:4,umCountedJobs:UNIFORM_MIXED_COUNTED.regularCoarse,umFusedRegularGate:skipFused,umActiveCoarse:+(UNIFORM_COLD_FREEZE&&!!this.freeze)}),
       this.solid?compile("forcesFine",{umCountedJobs:UNIFORM_MIXED_COUNTED.fineTiles,umSolidFree:1}):undefined]);
 
   }

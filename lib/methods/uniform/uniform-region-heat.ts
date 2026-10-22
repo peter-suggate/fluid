@@ -1,7 +1,7 @@
 import {uniformTileUpdateWGSL,uniformTierHoldWGSL,UNIFORM_TILE_UPDATE_BUDGET_H} from "./uniform-tile-update-error";
 import { uniformDetailModule, uniformDetailPick, uniformDetailPipeline } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedActiveWord, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "./uniform-surface-transport.wgsl";
@@ -55,8 +55,13 @@ import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
  *     or one of its stored neighbours non-COLD (or the region free): a
  *     consumer that cached a result while the region was deep COLD at this
  *     epoch has seen nothing change in the region's 27-region neighbourhood.
- * The deep words and epochs follow the tiers as encode leaves them; after a
- * relayout's claims and remaps raise tiers, encodeDeep recomputes them.
+ *   word 4R+8 (UNIFORM_REGION_HEAT_ACTIVE_WORD), then R words: the active
+ *     regions, live and not deep COLD, a count then the list (unordered);
+ *     every deep pass rebuilds it and publishes it to the ownership's
+ *     support (uniformMixedActiveWord, umActiveCoarse).
+ * The deep words, epochs and active list follow the tiers as encode leaves
+ * them; after a relayout's claims and remaps raise tiers, encodeDeep
+ * recomputes them.
  * The buffer is fixed for the frame's lifetime (never replaced). */
 export const UNIFORM_REGION_TIER={cold:0,warm:1,hot:2} as const;
 export const UNIFORM_REGION_HEAT_HEADER_WORDS=8;
@@ -66,6 +71,7 @@ export const UNIFORM_REGION_HEAT_PROMOTED_WORD=(regions:number):number=>regions+
 export const UNIFORM_REGION_HEAT_DEEP_WORD=(regions:number):number=>regions+UNIFORM_REGION_HEAT_HEADER_WORDS;
 export const UNIFORM_REGION_HEAT_EPOCH_WORD=(regions:number):number=>2*regions+UNIFORM_REGION_HEAT_HEADER_WORDS;
 export const UNIFORM_REGION_HEAT_DEEP_EPOCH_WORD=(regions:number):number=>3*regions+UNIFORM_REGION_HEAT_HEADER_WORDS;
+export const UNIFORM_REGION_HEAT_ACTIVE_WORD=(regions:number):number=>4*regions+UNIFORM_REGION_HEAT_HEADER_WORDS;
 /** Retirement time of a trigger's heat, s (the NB-FLIP default). */
 export const UNIFORM_REGION_HEAT_FADE_SECONDS=0.5;
 /** Frames a GPU-raised one-frame tier (identity, pending claim or remap,
@@ -206,7 +212,7 @@ export class UniformRegionHeat {
     if(!Number.isInteger(this.regions))throw new Error(`Region heat: ${ownership.capacity.tiles} tiles are not whole regions`);
     const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
     // Every region reads HOT (and not deep COLD) until the first encode.
-    this.tiers=device.createBuffer({label:"Uniform region work tiers",size:4*UNIFORM_REGION_HEAT_DEEP_EPOCH_WORD(this.regions)+4*this.regions,usage,mappedAtCreation:true});
+    this.tiers=device.createBuffer({label:"Uniform region work tiers",size:4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions)+4*(1+this.regions),usage,mappedAtCreation:true});
     new Uint32Array(this.tiers.getMappedRange()).fill(UNIFORM_REGION_TIER.hot,0,this.regions);this.tiers.unmap();
     this.state=device.createBuffer({label:"Uniform region work heat state",size:4*STATE_WORDS*this.regions,usage});
     this.params=device.createBuffer({label:"Uniform region work heat params",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -248,6 +254,7 @@ ${s.updateErrors?uniformTileUpdateWGSL(1,9):""}
 // A frozen region's coarse term: its speed bound, m/s (0 when not frozen).
 fn rhColdSpeed(region:u32)->f32{if(!umFrozenRegion(region)){return 0.0;}return max(abs(umColdTermOf(region,0u)),max(abs(umColdTermOf(region,1u)),abs(umColdTermOf(region,2u))));}
 const RH_REGIONS:u32=${this.regions}u;
+const RH_ACTIVE:u32=${UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions)}u;
 const RH_STATE:u32=${STATE_WORDS}u;
 ${uniformRegionFreezeBudgetWGSL}
 const RH_UNKNOWN:f32=3.0e38;
@@ -379,6 +386,7 @@ var<workgroup> rhFine:atomic<u32>;
  }
  atomicStore(&tiers[${UNIFORM_REGION_HEAT_DEEP_WORD(this.regions)}u+region],u32(cold));
  if(!cold){atomicAdd(&tiers[${UNIFORM_REGION_HEAT_DEEP_EPOCH_WORD(this.regions)}u+region],1u);}
+ if(!cold&&umTileLive(umPageTile(region,0u))){atomicStore(&tiers[RH_ACTIVE+1u+atomicAdd(&tiers[RH_ACTIVE],1u)],region);}
 }
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
@@ -403,18 +411,25 @@ var<workgroup> rhFine:atomic<u32>;
     const w=this.words;w[0]=dt;w[1]=2/UNIFORM_REGION_HEAT_FADE_SECONDS;w[2]=dt*dt*this.hInverse*this.hInverse/Math.max(density,1e-30);w[3]=this.hInverse;this.bits[4]=+force;
     this.device.queue.writeBuffer(this.params,0,this.words);
     encoder.clearBuffer(this.tiers,4*this.regions,4*UNIFORM_REGION_HEAT_HEADER_WORDS);
+    encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);
     const pass=encoder.beginComputePass(PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
     pass.setPipeline(uniformDetailPick(this.heatPipeline));pass.dispatchWorkgroups(Math.min(HEAT_GRID,this.regions));
     pass.setPipeline(uniformDetailPick(this.spreadPipeline));pass.dispatchWorkgroups(Math.ceil(this.regions/64));
     pass.setPipeline(uniformDetailPick(this.deepPipeline!));pass.dispatchWorkgroups(Math.ceil(this.regions/64));
-    pass.end();
+    pass.end();this.publishActive(encoder);
   }
   /** The deep COLD flags and epochs again, after a relayout's claims and
    * remaps raised tiers (promoteWGSL): before any stage that reads them. */
   encodeDeep(encoder:GPUCommandEncoder):void{
     if(!this.deepPipeline||!this.group)throw new Error("Region heat is not initialized");
+    encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);
     const pass=encoder.beginComputePass(PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
-    pass.setPipeline(uniformDetailPick(this.deepPipeline));pass.dispatchWorkgroups(Math.ceil(this.regions/64));pass.end();
+    pass.setPipeline(uniformDetailPick(this.deepPipeline));pass.dispatchWorkgroups(Math.ceil(this.regions/64));pass.end();this.publishActive(encoder);
+  }
+  /** The deep pass's active list to the ownership's support, where every
+   * stage binds it (umActiveCoarse). */
+  private publishActive(encoder:GPUCommandEncoder):void{
+    encoder.copyBufferToBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),this.ownership.support,4*uniformMixedActiveWord(this.ownership.capacity.tiles),4*(1+this.regions));
   }
   /** WGSL for hooks that raise a region's tier now and promote it again at
    * the next encode (a one-frame trigger): tiers and state bound read-write
