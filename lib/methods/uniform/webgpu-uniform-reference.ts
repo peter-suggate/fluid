@@ -1171,7 +1171,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
-    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2],this.mixedFrame.solid!.coarse!);
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2],this.mixedFrame.solid!.coarse!,this.mixedFrame.nearSettled.solidContact==="surface");
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
     // warmResolution "4h": WARM regions' cut tiles stay 4h (the census reads the tiers).

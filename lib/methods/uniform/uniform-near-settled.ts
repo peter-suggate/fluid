@@ -55,11 +55,20 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  *   the sweeps reached), with no old-field publication or snapshot;
  *   "extended" publishes the old field and samples it, and G2P subtracts
  *   that sample from the next step's PIC.
+ * - particleBandDepth: cells below the surface the particle band reaches
+ *   (seeding fills it, the move retires samples past it); 2 to 4.
+ * - particleDensity: "uniform" seeds eight sites a cell through the band;
+ *   "graded" four in cells deeper than 1.5 cells, caps crowding there at
+ *   six, and lets faces below a cell expect half the mass.
+ * - solidContact: "liquid" holds a static solid's cut tiles, and their
+ *   neighbours, at h wherever liquid can meet them; "surface" only where the
+ *   surface census already holds the cut tile at h (submerged cut tiles run
+ *   as cut 4h owners), and their ring only where it is wet.
  * - momentumSampler: how grid momentum's unit sampler interpolates
  *   (UniformMomentumSampler); "texture32" falls back to "texture16" on a
  *   device without float32-filterable.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -81,4 +90,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  crossingGuard:values.crossingGuard==="search"?"search":"previous",
  flipDelta:values.flipDelta==="extended"?"extended":"swept",
  momentumSampler:values.momentumSampler==="software"||values.momentumSampler==="texture16"?values.momentumSampler:"texture32",
+ solidContact:values.solidContact==="liquid"?"liquid":"surface",
+ particleBandDepth:typeof values.particleBandDepth==="number"&&Number.isFinite(values.particleBandDepth)?Math.min(4,Math.max(2,values.particleBandDepth)):3,
+ particleDensity:values.particleDensity==="uniform"?"uniform":"graded",
 });

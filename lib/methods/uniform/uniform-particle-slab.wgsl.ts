@@ -310,18 +310,25 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
    links[key]=base+nbSortStart[k];atomicStore(&bins[key],atomicExchange(&nbSortCount[k],0u));
   }
   workgroupBarrier();
+  // The scatter files each record's source index and position bits in its
+  // slot's compact-position words, in atomic order.
   for(var k=lane;k<n;k+=256u){
-   let p=source[nbSortInput(input,k)];let lc=nbSortCell(p.position.xyz,origin);
+   let i=nbSortInput(input,k);let q=source[i].position.xyz;let lc=nbSortCell(q,origin);
    let at=base+nbSortStart[lc]+atomicAdd(&nbSortCount[lc],1u);
-   particles[at]=p;
+   let c=UM_CELL_KEYS+4u*at;let bits=bitcast<vec3u>(q);links[c]=i;links[c+1u]=bits.x;links[c+2u]=bits.y;links[c+3u]=bits.z;
   }
   for(var k=n+lane;k<output.z;k+=256u){particles[base+k]=nbDead();}
-  // Atomic append order must never reach floating reductions or retirement.
-  // Each lane sorts disjoint cell runs; storage barriers publish the scatter
-  // before sorting and the sorted records before rebuilding compact positions.
+  // Atomic append order must never reach floating reductions or retirement:
+  // every record goes to its canonical rank in its cell's run. Storage
+  // barriers publish the scatter before ranking and the ranked records
+  // before rebuilding compact positions over the scatter's words.
   storageBarrier();workgroupBarrier();
-  for(var k=lane;k<512u;k+=256u){nbCanonicalCell(base+nbSortStart[k],atomicLoad(&nbSortCount[k]));}
-  storageBarrier();
+  for(var k=lane;k<n;k+=256u){
+   let at=base+k;let c=UM_CELL_KEYS+4u*at;let i=links[c];let key=vec3u(links[c+1u],links[c+2u],links[c+3u]);
+   let lc=nbSortCell(bitcast<vec3f>(key),origin);let start=base+nbSortStart[lc];
+   particles[start+nbParticleRank(at,start,atomicLoad(&nbSortCount[lc]),i,key)]=source[i];
+  }
+  storageBarrier();workgroupBarrier();
   for(var k=lane;k<n;k+=256u){
    let at=base+k;let bits=bitcast<vec4u>(particles[at].position);let c=UM_CELL_KEYS+4u*at;
    links[c]=bits.x;links[c+1u]=bits.y;links[c+2u]=bits.z;links[c+3u]=bits.w;

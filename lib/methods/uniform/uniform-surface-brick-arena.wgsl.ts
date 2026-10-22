@@ -714,6 +714,57 @@ fn nbArenaCanonicalPublish(p:vec3u,l:vec3u,t0:vec3i,block:u32,page:vec3i,slot:u3
   }
  }
 }
+// arenaDistanceCanonical's publication alone, after arenaDistance stored
+// the metric (bank A) of every vertex it would have published: the same
+// writers, values and routed regions from a lean kernel, which the metric's
+// windows and queues do not hold to one workgroup a core.
+@compute @workgroup_size(256) fn arenaPublishCanonical(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);let h=nbArenaH();
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
+  let id=ubBrick(slot);let block=id>>6u;let origin=ubBrickOrigin(id);let page=vec3i(origin>>vec3u(5u));let t0=vec3i(origin/4u);
+  umLoadAddressPlan(block,lane);
+  if(lane<27u){atomicStore(&nbCanonicalRegions[lane],0u);}
+  if(lane==0u){atomicStore(&nbCanonicalFine,0u);}workgroupBarrier();
+  let q=t0+vec3i(umCorner(lane&63u,4u))-1;var key=UM_TILES;
+  if(lane<64u){key=umTileKey(q);if(umKeyStored(key)&&umTileWidth(key)==1u){atomicOr(&nbCanonicalFine,1u);}}
+  // Only an incident fine writer publishes.
+  if(nbArenaUniform(atomicLoad(&nbCanonicalFine),lane)==0u){continue;}
+  if(lane<64u){
+   var bits=0u;var mask=vec2u(0u);var incident=0u;
+   if(umKeyStored(key)){
+    bits=NB_STORE_STORED|(atomicLoad(&bins[NB_BAND_REACH+key])<<8u);
+    if(umTileWidth(key)==1u){bits|=NB_STORE_H;}
+    if(umTileMaximumWidth(key)==1u&&umTileMinimumWidth(key)==1u){let low=umLowOpen(4*q);bits|=NB_STORE_REGULAR|(8u*u32(low.x))|(16u*u32(low.y))|(32u*u32(low.z));}
+    if(nbRegionCold(umPageOfTile(key))){bits|=NB_STORE_COLD;}
+    mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));
+    incident=(umVertexRecipe(key)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u;
+   }
+   if(umTileKind(q)==UM_SOLID){bits|=NB_STORE_WALL;}
+   nbStoreTile[lane]=vec4u(key,bits,mask);nbStoreIncident[lane]=incident;
+   nbCapacityTileMask[lane]=nbCapacityMaskAt(q,key);
+  }
+  if(lane<27u){nbArenaRecord[lane]=ubNeighbour(slot,lane);}
+  workgroupBarrier();
+  let reuse=nbReuseEnabled();
+  let vertices=512u+select(0u,217u,any((origin&vec3u(31u))==vec3u(24u)));
+  for(var k=lane;k<vertices;k+=256u){
+   let l=nbArenaVertexOf(k);let p=origin+l;
+   var c=p;if(k>=512u){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
+   if(!all(c<origin+8u)){continue;}
+   let writer=nbArenaCanonicalWriter(p,t0);if(writer.w==UB_NONE){continue;}
+   // arenaDistance wrote bank A wherever the vertex's cell lies in a reach-2 tile.
+   var metric=0.0;
+   if(((nbStoreAt(vec3i(c>>vec3u(2u)),t0).y>>8u)&2u)!=0u){metric=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbArenaVertexKey(p,block,page)]));}
+   nbArenaCanonicalPublish(p,l,t0,block,page,slot,h,metric,reuse,writer);
+  }
+  workgroupBarrier();
+  if(lane<27u){
+   let changed=atomicLoad(&nbCanonicalRegions[lane]);let writerSlot=nbArenaRecord[lane];
+   if(changed!=0u&&writerSlot!=UB_NONE){atomicOr(&bins[UB_MARK+ubBrick(writerSlot)],changed);}
+  }
+ }
+}
 // Only a missing positive-side neighbour can leave a writer's high-face
 // vertex outside the canonical arena-owner domain.
 fn nbArenaBoundaryMissing(slot:u32)->u32{

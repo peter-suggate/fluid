@@ -1828,17 +1828,20 @@ fn bRootFace(p:vec3i,axis:u32,sign:i32)->f32{
 var<workgroup> bRootValues:array<f32,6>;
 var<workgroup> bRootBits:array<u32,3>;
 var<workgroup> bRootCount:u32;
-var<workgroup> bRootSkip:u32;
+var<workgroup> bRootTests:atomic<u32>;
 @compute @workgroup_size(${TILE_WG}) fn pProjectNative(${lanes}){
  if(lane==0u){bRootCount=ubaLevelCount(2u)*512u;}
  let n=workgroupUniformLoad(&bRootCount);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
  for(var j=group.x;j<n;j+=groups.x){
   let tile=512u*ubaLevelSlot(2u,j>>9u)+(j&511u);let p=vec3i(4u*umTileCoord(tile));
-  if(lane==0u){
-   var near=false;for(var f=0u;f<6u;f++){var q=p;q[f/2u]+=4*bSign(f);near=near||pBandCell(q);}
-   bRootSkip=u32(pIndex(SLOTS+tile)!=0u||umFrozenCell(p)||!near);
-  }
-  if(workgroupUniformLoad(&bRootSkip)!=0u){continue;}
+  // The skip's seven tests a lane each: bit f a band cell across face f, bit 6 a held or frozen tile.
+  if(lane==0u){atomicStore(&bRootTests,0u);}
+  workgroupBarrier();
+  if(lane<6u){var q=p;q[lane/2u]+=4*bSign(lane);if(pBandCell(q)){atomicOr(&bRootTests,1u<<lane);}}
+  else if(lane==6u){if(pIndex(SLOTS+tile)!=0u||umFrozenCell(p)){atomicOr(&bRootTests,64u);}}
+  workgroupBarrier();
+  if(lane==0u){let tests=atomicLoad(&bRootTests);bRootCount=u32((tests&64u)!=0u||(tests&63u)==0u);}
+  if(workgroupUniformLoad(&bRootCount)!=0u){continue;}
   if(lane<6u){bRootValues[lane]=bRootFace(p,lane/2u,bSign(lane));}
   if(lane<3u){var q=p;q[lane]+=3;bRootBits[lane]=u32(max(0.0,/*4h*/textureLoad(field,q,0).w));}
   workgroupBarrier();
