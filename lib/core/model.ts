@@ -47,6 +47,21 @@ export interface Quaternion {
  */
 export type RigidShape = "sphere" | "box" | "capsule" | "cylinder" | "cup";
 
+/** Simulation-time orbit with smooth acceleration, a steady run and a stop. */
+export interface PrescribedOrbitMotion {
+  kind: "orbit";
+  center_m: Vec3;
+  radius_m: number;
+  phase_rad: number;
+  angularSpeed_rad_s: number;
+  startTime_s: number;
+  rampUp_s: number;
+  steady_s: number;
+  rampDown_s: number;
+  /** Rotate about world Y with the orbit, relative to the authored orientation. */
+  rotateWithOrbit?: boolean;
+}
+
 export interface RigidBodyDescription {
   id: string;
   name: string;
@@ -60,8 +75,15 @@ export interface RigidBodyDescription {
   restitution: number;
   friction: number;
   motion?: "dynamic" | "static";
+  /** Motor-driven static body; the fluid receives its moving boundary velocity. */
+  prescribedMotion?: PrescribedOrbitMotion;
   /** Presentation skin; physics and fluid displacement still use shape. */
   appearance?: "bub";
+}
+
+/** A motor resists forces like a static body, but its geometry moves each frame. */
+export function rigidBodyHasFixedPose(body: RigidBodyDescription): boolean {
+  return body.motion === "static" && !body.prescribedMotion;
 }
 
 export interface SceneDescription {
@@ -863,6 +885,17 @@ export function validateScene(scene: SceneDescription): string[] {
       if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);
       if (body.friction < 0) errors.push(`Body ${body.id} friction cannot be negative`);
       if (body.motion && !["dynamic", "static"].includes(body.motion)) errors.push(`Unsupported motion type for body ${body.id}`);
+      const orbit = body.prescribedMotion;
+      if (orbit !== undefined) {
+        if (orbit.kind !== "orbit" || body.motion !== "static") errors.push(`Body ${body.id} prescribed motion needs a static orbit body`);
+        if (orbit.rotateWithOrbit !== undefined && typeof orbit.rotateWithOrbit !== "boolean") errors.push(`Body ${body.id} orbit rotation must be boolean`);
+        if (!["x", "y", "z"].every(axis => Number.isFinite(orbit.center_m?.[axis as keyof Vec3]))
+          || !Number.isFinite(orbit.phase_rad) || !Number.isFinite(orbit.angularSpeed_rad_s)
+          || !Number.isFinite(orbit.radius_m) || !(orbit.radius_m > 0)) errors.push(`Body ${body.id} orbit needs finite geometry and speed`);
+        if (![orbit.startTime_s, orbit.steady_s].every(value => Number.isFinite(value) && value >= 0)
+          || ![orbit.rampUp_s, orbit.rampDown_s].every(value => Number.isFinite(value) && value > 0)) errors.push(`Body ${body.id} orbit needs nonnegative timing and positive ramps`);
+        if (scene.interaction?.entities.length) errors.push(`Body ${body.id} prescribed motion cannot share interactive physics authority`);
+      }
     }
   }
   return errors;

@@ -1,11 +1,13 @@
 import type { RigidBodyState } from "../../core/rigid-body";
+import { samplePrescribedRigidBody } from "../../core/prescribed-rigid-motion";
 
 type Pose = Pick<RigidBodyState, "position_m" | "orientation" | "held"> & { fixed: boolean; sample: number };
 type Derived = { readonly body: RigidBodyState; readonly linear: RigidBodyState["linearVelocity_m_s"]; readonly angular: RigidBodyState["angularVelocity_rad_s"] };
 
 /** Pose commands are sampled at simulation advances, not pointer-event rate.
  * Only prescribed bodies are differentiated: free bodies are GPU-owned.
- * A sample builds nothing once its roster has been seen: the poses of the
+ * Authored motors are evaluated at absolute simulation time. Other pose
+ * samples build nothing once their roster has been seen: the poses of the
  * sample before last, the differentiated bodies and the returned roster are
  * rewritten in place, so a result is valid until the next sample. */
 export class UniformPrescribedSolidMotion {
@@ -17,7 +19,7 @@ export class UniformPrescribedSolidMotion {
   /** Drops a pose its roster no longer names (the sample that left it is two back). */
   private readonly expire = (pose: Pose, id: string, poses: Map<string, Pose>): void => { if (pose.sample !== this.samples) poses.delete(id); };
 
-  sample(bodies: readonly RigidBodyState[], dt: number): RigidBodyState[] {
+  sample(bodies: readonly RigidBodyState[], dt: number, time_s = 0): RigidBodyState[] {
     const next = this.spare, result = this.result, sample = ++this.samples;
     result.length = bodies.length;
     for (let i = 0; i < bodies.length; i++) {
@@ -31,6 +33,10 @@ export class UniformPrescribedSolidMotion {
       o.w = body.orientation.w; o.x = body.orientation.x; o.y = body.orientation.y; o.z = body.orientation.z;
       pose.held = body.held; pose.fixed = fixed; pose.sample = sample;
       result[i] = body;
+      if (body.description.prescribedMotion && fixed) {
+        result[i] = samplePrescribedRigidBody(body, time_s, dt);
+        continue;
+      }
       // Starting a grab may follow a long GPU simulation whose CPU roster
       // has stale poses. Use the explicit initial command at that transition.
       if (!(dt > 0) || !old || !(fixed || (body.held && old.held))) continue;

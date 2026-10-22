@@ -88,7 +88,7 @@ const SOLVE_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena solve"}
 const VERDICT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena verdict"};
 const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena projection"};
 /** Header words: band tiles, overflow, final residual, live bricks, completed
- * cycles, closed (the schedule's verdict), level 1's and level 2's bricks
+ * cycles, reserved, level 1's and level 2's bricks
  * (the receipt's first 8 words end there), the residual after each cycle's
  * pre-smoothing (and after the last cycle) in HISTORY words, converged,
  * valid residual bits (history in bits 0..15, initial in bit 16), then the
@@ -97,7 +97,7 @@ const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena proje
  * brick slot << 3 | tile bit, from the rows) and the arena table follow. */
 const HEADER=37,HISTORY_WORD=8,HISTORY=16,INITIAL_WORD=26,VALID_WORD=25,DONE_WORD=24,BRICKS_WORD=3,LEVEL1_WORD=6,LEVEL2_WORD=7;
 /** Header words 27 and 28: the native rows' largest initial and final residual (diagnostics). */
-const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29,NATIVE_FROZEN_WORD=5;
+const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29;
 /** Header word 33: the tiles pRows routed to its geometry variant. */
 const GEOMETRY_WORD=33;
 /** Kinds bits beyond the band's: an active row (liquid, positive diagonal) and a warm one (its slot held a liquid row last frame). */
@@ -122,7 +122,7 @@ export interface UniformPressureArenaFields {
   support:GPUBuffer;supportWord:number};
  /** The frame status record (uniform-mixed-frame-status) and the acceptance state (8 words) the verdict writes. */
  status:GPUBuffer;acceptance:GPUBuffer;
- /** As the band's (64 bytes): h.xyz, dt; density, openTop, dt/density, min
+ /** As the band's (64 bytes): h.xyz, dt; density, rho*gravityY, dt/density, min
   * h; the residual target, then 1/h^2 per axis; four u32 the arena writes:
   * the presentation capacity, two spare, the presentation word. */
  params:GPUBuffer;
@@ -235,7 +235,7 @@ export class UniformPressureArena {
    native:[params,buffer(2),buffer(9),buffer(26),buffer(29,"read-only-storage"),...(solid?[buffer(30,"read-only-storage")]:[])],
    ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:[params,buffer(2),buffer(4,"uniform"),texture(7),buffer(8,"read-only-storage"),buffer(26),buffer(29,"read-only-storage"),...cold]}:{}),
    solver:[params,buffer(2),buffer(9),...(fields.dynamics?[buffer(24)]:[])],
-   project:[params,buffer(2),buffer(9),texture(15),write(16),buffer(17),buffer(21)],
+   project:[params,buffer(2),buffer(9),texture(7),texture(15),write(16),buffer(17),buffer(21),...cold],
   };
   for(const [name,list] of Object.entries(entries))this.layouts.set(name,uniformDetailBindLayout(device,{label:`Uniform pressure arena ${name}`,entries:list}));
   this.bind();
@@ -262,11 +262,11 @@ export class UniformPressureArena {
    // The root's cut face masks follow its owners' phi words.
    ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:{...P,...S,4:{buffer:f.authorityParams,size:16},7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},26:this.rootSpan.binding,29:f.root.phi}}:{}),
    solver:{...P,...S,...Q},
-   project:{...P,...S,...Q,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
+   project:{...P,...S,...Q,7:f.forced.velocity,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
   };
   if(f.dynamics)resources.solver![24]={buffer:f.dynamics};
   if(f.root.topology)resources.native![30]=f.root.topology;
-  const freeze=this.cold;if(freeze)for(const name of ["mark","rows","init",...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?["nrhs"]:[])])resources[name]![14]=freeze.regions;
+  const freeze=this.cold;if(freeze)for(const name of ["mark","rows","init","project",...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?["nrhs"]:[])])resources[name]![14]=freeze.regions;
   if(f.warmTiers)resources.mark![25]={buffer:f.warmTiers};
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure arena ${name}`,layout:this.layouts.get(name)!,
    entries:Object.entries(map).map(([binding,resource])=>({binding:+binding,resource}))}));
@@ -321,12 +321,10 @@ const PT_X:u32=${C("xt",2)}u;const PT_Y:u32=${C("yt",2)}u;const PT_R:u32=${C("rt
 const N_KEYS:u32=${512*blocks}u;const N_THETA:u32=${896*blocks}u;const N_SENTINEL:u32=${blocks-1}u;
 const N_NONE:u32=0u;const N_NATIVE:u32=1u;const N_SEAM:u32=2u;const N_GHOST:u32=3u;const N_WALL:u32=4u;const N_HELD:u32=5u;
 const N_ACTIVE:u32=${1<<20}u;const N_CLOSED:u32=${1<<21}u;
-const NATIVE_INITIAL:u32=${NATIVE_INITIAL_WORD}u;const NATIVE_FINAL:u32=${NATIVE_FINAL_WORD}u;const NATIVE_HISTORY:u32=${NATIVE_HISTORY_WORD}u;const NATIVE_FROZEN:u32=${NATIVE_FROZEN_WORD}u;
-// The native rows hold still from the cycle their residual meets the root's
-// bound (its target, at most a tenth of their initial residual; scaled to
-// the band's): that cycle's levels take them as fixed values, so the band's
-// last cycles converge against them as against a solved root.
-fn nFrozen()->bool{return pIndex(NATIVE_FROZEN)!=0u;}
+const NATIVE_INITIAL:u32=${NATIVE_INITIAL_WORD}u;const NATIVE_FINAL:u32=${NATIVE_FINAL_WORD}u;const NATIVE_HISTORY:u32=${NATIVE_HISTORY_WORD}u;
+// Native and band rows are one coupled system. A native-only early exit
+// removes rows from the aggregate while their neighbours retain links to
+// them, breaking reciprocity. Only the composite residual may stop it.
 // The root's acceptance, band-scaled: its target, and a tenth of the native
 // rows' initial residual down to an absolute floor (the old root's bound).
 fn nFloor()->f32{return 1e-4*bitcast<f32>(params.capacity.y);}
@@ -381,6 +379,22 @@ ${a.poolWGSL("pool")}
 fn pF(base:u32,at:u32)->f32{return bitcast<f32>(pool[base+at]);}
 fn pSet(base:u32,at:u32,value:f32){pool[base+at]=bitcast<u32>(value);}
 fn pAddr(slot:u32,l:vec3u)->u32{return UBA_STRIDE*slot+l.x+8u*(l.y+8u*l.z);}
+// The h face and its native 4h row differ tangentially by up to 1.5h.
+// Compare the hydrostatic part at the h face's height, leaving the dynamic
+// pressure as the solved unknown. Otherwise a vertical h/4h interface
+// turns a resting pressure column into horizontal flow from the first kick.
+// Native and band RHS use opposite offsets, and projection uses the same
+// offset: one pressure difference for both incident cells and their flux.
+fn bSeamHead(at:u32,f:u32)->f32{
+ // An air-side row is the zero-pressure free-surface boundary, not a
+ // pressure sample at the fine cell centre. Its ghost-fluid coefficient
+ // already locates that boundary. A hydrostatic offset here imposes a
+ // different nonzero air pressure on each subface; a tiny theta amplifies
+ // that incompatible boundary data into opposing jets.
+ if(!bLiquid(pool[P_KINDS+at])){return 0.0;}
+ let y=f32(((at%UBA_STRIDE)/8u)&3u)-1.5;
+ return select(params.policy.y*params.hDt.y*y,0.0,f/2u==1u);
+}
 // The pool offset of band cell q (UB_NONE_ID: no band cell).
 fn pAt(q:vec3i)->u32{if(!pBandCell(q)){return UB_NONE_ID;}return pAddr(ubaSlot(ubaBrickAt(q)),vec3u(q)&vec3u(7u));}
 // The band cell across face f of band cell 'at' (brick slot, brick-local
@@ -480,7 +494,7 @@ fn cDiag(at:u32)->f32{if(at==UB_NONE_ID){return 0.0;}return pF(CD,at);}
 // A coarse row, held by its lane: diagonal (0: none), RHS, couplings.
 struct CCell {d:f32,r:f32,k:array<f32,6>}
 fn cCell(at:u32)->CCell{
- var cell:CCell;if(at==UB_NONE_ID){return cell;}${L===2?"if(nFrozen()&&(pool[PN_M+at]&N_ACTIVE)!=0u){return cell;}":""}
+ var cell:CCell;if(at==UB_NONE_ID){return cell;}
  let d=pF(CD,at);if(d<=0.0){return cell;}
  cell.d=d;cell.r=pF(CRH,at);for(var f=0u;f<6u;f++){cell.k[f]=pF(CK+f*CPL,at);}
  return cell;
@@ -518,7 +532,15 @@ fn gCoarseChild(i:u32,l:vec3u,at:u32,d:f32,K:u32,PL:u32){
  var part=0.0;var cross=vec3f(0.0);
  if(at!=UB_NONE_ID&&d>0.0){
   part=d;
-  for(var axis=0u;axis<3u;axis++){let bit=l[axis]&1u;part-=pF(K+(2u*axis+1u-bit)*PL,at);cross[axis]=pF(K+(2u*axis+bit)*PL,at);}
+  for(var axis=0u;axis<3u;axis++){
+   let bit=l[axis]&1u;let inner=2u*axis+1u-bit;let outer=2u*axis+bit;
+   var qi=vec3i(l);qi[axis]+=bSign(inner);var qo=vec3i(l);qo[axis]+=bSign(outer);
+   // A missing correction row is fixed at zero. Its coefficient remains
+   // on the diagonal; it must neither cancel inside this aggregate nor
+   // become a link to unrelated live children in the next aggregate.
+   if(cDiag(cAddr(qi))>0.0){part-=pF(K+inner*PL,at);}
+   if(cDiag(cAddr(qo))>0.0){cross[axis]=pF(K+outer*PL,at);}
+  }
  }
  gPart[i]=part;gCross[i]=cross.x;gCross[512u+i]=cross.y;gCross[1024u+i]=cross.z;
 }
@@ -631,7 +653,13 @@ fn bNative(q:vec3i)->bool{return bWet(rootPhi[umTileAt(vec3u(q)/4u)],4.0);}
 fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
  var a=p;if(sign<0){a[axis]-=1;}
  if(umFaceLow(a,axis)){return negative[umLowFaceIndex(vec3u(p),axis)];}
- return textureLoad(velocity,a,0)[axis];
+ let raw=textureLoad(velocity,a,0)[axis];
+ if(!umFrozenFace(a,axis,1u)){return raw;}
+ // Forces retain F on frozen faces. The native RHS reconstructs F+T+g dt;
+ // the band must use the same forced flux at their shared pressure seam.
+ var q=p;q[axis]+=sign;var wet=bWet(bPhiH(p),1.0);
+ if(umCellPresent(q)){wet=wet||bNeighbour(q).wet;}
+ return umColdForced(a,axis,1u,raw,wet);
 }
 override bLocalSolidWork:bool=true;
 ${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
@@ -703,7 +731,9 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
     if(across==UM_AIR){kind=K_OPEN;coefficient=1.0/(h*h*bTheta(own,0.5*params.policy.w));}
     else{kind=K_WALL;coefficient=0.5/(h*h);fraction=0.5;}
    }
-   else if(l[axis]==select(0u,3u,sign>0)&&umFrozenCell(q)){kind=K_NEUMANN;}
+   // Frozen liquid still has native pressure rows. Keep their reciprocal
+   // seam links: a Neumann face here also removes the native row's link
+   // in pNative, disconnecting its gravity RHS from the live surface.
    else{
     let n=bNeighbour(q);
     var theta=1.0;
@@ -817,6 +847,17 @@ ${zero}
    copy:header()+poolWGSL+zero+/* wgsl */`
 @group(1) @binding(11) var velocity:texture_3d<f32>;
 @group(1) @binding(23) var copied:texture_storage_3d<rgba32float,write>;
+// Snapshot the projected field before the native seam return rewrites it.
+// The return must retain projection on its other faces, not read u*.
+@compute @workgroup_size(${TILE_WG}) fn pCopyNative(${lanes}){
+ if(lane==0u){pN=ubaLevelCount(2u)*512u;}
+ let n=workgroupUniformLoad(&pN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+ for(var j=group.x;j<n;j+=groups.x){
+  let tile=512u*ubaLevelSlot(2u,j>>9u)+(j&511u);let p=vec3i(4u*umTileCoord(tile));
+  if(umTileWidth(tile)==1u){let q=p+vec3i(l);textureStore(copied,q,textureLoad(velocity,q,0));}
+  else if(lane<3u){var q=p;q[lane]+=3;textureStore(copied,q,/*4h*/textureLoad(velocity,q,0));}
+ }
+}
 @compute @workgroup_size(${TILE_WG}) fn pCopy(${lanes}){
  if(lane==0u){pN=pTileCount();}
  let n=workgroupUniformLoad(&pN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
@@ -893,9 +934,14 @@ fn nSeamFirst(t:u32,g:u32)->u32{
        let u=nStride((axis+1u)%3u);let v=nStride((axis+2u)%3u);
        for(var j=0u;j<16u;j++){
         let at=first+(j&3u)*u+(j>>2u)*v;
-        if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){let ch=pF(P_C+g*PLANE,at);c+=ch;rhs+=ch*(pF(P_BASE,at)-start);}
+        if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){
+         let ch=pF(P_C+g*PLANE,at);c+=ch;rhs+=ch*(pF(P_BASE,at)-bSeamHead(at,g)-start);
+         // An air subface contributes a zero-pressure boundary to the
+         // diagonal, not a coupling to the band's liquid aggregate.
+         if(pActive(pool[P_KINDS+at])){level2+=ch;}
+        }
        }
-       diagonal+=c;level2=c;
+       diagonal+=c;
       }else if(nLiquid(n)){kind=N_NATIVE;c=64.0*volume/(h4*h4);diagonal+=c;level2=c;rhs+=c*(rootArena[R_PRESSURE+n]-start);link=UBA_STRIDE*(n>>9u)+(n&511u);}
       else{kind=N_GHOST;c=64.0*volume/(h4*h4*nTheta(k,n,axis,side));diagonal+=c;rhs-=c*start;}
      }
@@ -1207,7 +1253,7 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
      else if(kind==K_SEAM){
       // A seam: the native row's start; out of the aggregate (a tile face)
       // toward an active native row, its level 2 cell.
-      let m=nAcross(p,f);w[side]=c;d[side]=pF(PN_B,m)-own;let sc=seamCoarse(c);part+=sc.x;
+      let m=nAcross(p,f);w[side]=c;d[side]=pF(PN_B,m)+bSeamHead(at,f)-own;let sc=seamCoarse(c);part+=sc.x;
       if((pool[PN_M+m]&N_ACTIVE)!=0u){cross[axis]=sc.y;}
      }
      else if(kind==K_GHOST||kind==K_OPEN){open+=c;}
@@ -1284,9 +1330,6 @@ var<workgroup> worst:atomic<u32>;
 var<workgroup> rRes:array<f32,64>;
 @compute @workgroup_size(${TILE_WG}) fn pRestrict0(${lanes}){
  if(lane==0u){atomicStore(&worst,0u);rN=select(pTileCount(),0u,bConvergedBefore(pCycle));}
- if(group.x==0u&&lane==0u&&pIndex(NATIVE_FROZEN)==0u){
-  if(bitcast<f32>(pIndex(NATIVE_HISTORY+pCycle))<=nBound()){atomicStore(&state[NATIVE_FROZEN],1u);}
- }
  let n=workgroupUniformLoad(&rN);
  let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
  for(var j=group.x;j<n;j+=groups.x){
@@ -1335,9 +1378,14 @@ override pBake:bool=false;
   gRes[lane]=r;
   if(pBake){
    gCoarseChild(lane,vec3u(c),at,d,CK,CPL);
-   // An outward coupling to no level 1 row (none there, or one with no
-   // diagonal) is a seam.
-   if(d>0.0){for(var axis=0u;axis<3u;axis++){let f=2u*axis+(u32(c[axis])&1u);var q=c;q[axis]+=bSign(f);let k=core.k[f];if(k>0.0&&cDiag(cAddr(q))<=0.0){let sc=seamCoarse(k);gPart[lane]+=sc.x;gCross[512u*axis+lane]=sc.y;}}}
+   // Restore a missing level 1 link only when it crosses a real native
+   // seam. An absent liquid correction row remains a fixed-zero boundary.
+   if(d>0.0){for(var axis=0u;axis<3u;axis++){let f=2u*axis+(u32(c[axis])&1u);var q=c;q[axis]+=bSign(f);let k=core.k[f];if(k>0.0&&cDiag(cAddr(q))<=0.0){
+     let hq=2*(vec3i(ubaLevelOrigin(1u,ubaLevelRecord(1u,slot,29u)))+q);
+     if(umCellPresent(hq)){let tile=umTileKey(hq/4);let native=UBA_STRIDE*(tile>>9u)+(tile&511u);
+      if((pool[PN_M+native]&N_ACTIVE)!=0u){let sc=seamCoarse(k);gPart[lane]+=sc.x;gCross[512u*axis+lane]=sc.y;}
+     }
+    }}}
   }
   workgroupBarrier();
   if(lane<64u){
@@ -1665,11 +1713,11 @@ fn tBox(q:vec3i)->u32{let u=vec3u(q+2);return u.x+8u*(u.y+8u*u.z);}
   let red=cBoxCell(0u,lane);let black=cBoxCell(1u,lane);let cR0=cBoxRow(0u,lane);let cB0=cBoxRow(1u,lane);
   workgroupBarrier();
   cSweeps(red,cR0,black,cB0);
-  // A native row takes its correction (a closed row stays at or above 0);
-  // frozen, it has none.
+  // Every native row takes the coupled correction; a closed row stays
+  // at or above zero. A native-only stop would invalidate the hierarchy.
   let at2=UBA_STRIDE*slot+lane;let m=pool[PN_M+at2];
-  let y=select(cX[cBox(cCore(lane))],0.0,nFrozen()&&(m&N_ACTIVE)!=0u);ubaStore(CY,slot,lane,y);
-  if((m&N_ACTIVE)!=0u&&!nFrozen()){var x=pF(PN_X,at2)+y;if((m&N_CLOSED)!=0u){x=max(x,-pF(PN_B,at2));}pSet(PN_X,at2,x);}
+  let y=cX[cBox(cCore(lane))];ubaStore(CY,slot,lane,y);
+  if((m&N_ACTIVE)!=0u){var x=pF(PN_X,at2)+y;if((m&N_CLOSED)!=0u){x=max(x,-pF(PN_B,at2));}pSet(PN_X,at2,x);}
   workgroupBarrier();
  }
 }`,
@@ -1735,7 +1783,8 @@ override pDst:u32=0u;
   workgroupBarrier();
  }
 }`,
-   project:header()+poolWGSL+zero+/* wgsl */`
+   project:header()+poolWGSL+zero+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
+@group(1) @binding(7) var velocity:texture_3d<f32>;
 @group(1) @binding(15) var field:texture_3d<f32>;
 @group(1) @binding(16) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(17) var<storage,read_write> boundary:array<f32>;
@@ -1745,15 +1794,67 @@ fn bFace(at:u32,p:vec3i,f:u32)->f32{
  let kinds=pool[P_KINDS+at];let kind=bFaceKind(kinds,f);
  if(kind==K_NEUMANN){return pForced(at,f);}
  let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];let liquid=bLiquid(kinds);
+ var anchor=p;if(sign<0){anchor[axis]-=1;}
+ // The regional correction owns frozen F+T. Do not bake a second pressure
+ // correction (or T) into its stored F when publishing a live band's face.
+ if(!umFaceLow(anchor,axis)&&umFrozenFace(anchor,axis,1u)){return textureLoad(velocity,anchor,0)[axis];}
  ${S?"if(kind==K_CLOSED){var low=p;if(sign<0){low[axis]-=1;}return umSolidFaceVelocity(low,axis);}":""}
  let forced=pForced(at,f);let coefficient=pF(P_C+f*PLANE,at)${S?"/pVolume(at,f)":""};let own=pF(P_X,at);let base=pF(P_BASE,at);let scale=params.policy.z;
  if(kind==K_WALL){if(!liquid){return forced;}return forced-scale*f32(sign)*(max(own+pLift(at,f),-base)-own)/h;}
  if(kind==K_OPEN){if(!liquid){return forced;}return forced+scale*f32(sign)*(base+own)*coefficient*h;}
  var other=0.0;var otherBase=0.0;var otherLiquid=false;
  if(kind==K_BAND){let m=pNear(at,p,f);other=pF(P_X,m);otherBase=pF(P_BASE,m);otherLiquid=bLiquid(pool[P_KINDS+m]);}
- else if(kind==K_SEAM){let m=nAcross(p,f);other=pF(PN_X,m);otherBase=pF(PN_B,m);otherLiquid=true;}
+ else if(kind==K_SEAM){let m=nAcross(p,f);other=pF(PN_X,m);otherBase=pF(PN_B,m)+bSeamHead(at,f);otherLiquid=true;}
  if(!liquid&&!otherLiquid){return 0.0;}
  return forced-scale*f32(sign)*((otherBase-base)+(other-own))*coefficient*h;
+}
+// The composite solve couples a native row to the individual h faces.
+// Restrict those same projected fluxes, rather than differentiating the
+// presentation-only mean pressure of the band tile with a second theta.
+fn bRootFace(p:vec3i,axis:u32,sign:i32)->f32{
+ var other=p;other[axis]+=4*sign;var anchor=p;anchor[axis]+=select(-1,3,sign>0);
+ if(!pBandCell(other)){
+  if(umFaceLow(anchor,axis)){return boundary[umLowFaceIndex(vec3u(p),axis)];}
+  return /*4h*/textureLoad(field,anchor,0)[axis];
+ }
+ var sum=0.0;var weight=0.0;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+ let f=2u*axis+select(1u,0u,sign>0);
+ for(var j=0u;j<16u;j++){
+  var q=other;q[axis]+=select(3,0,sign>0);q[u]+=i32(j&3u);q[v]+=i32(j>>2u);
+  let at=pAt(q);let w=pVolume(at,f);sum+=w*bFace(at,q,f);weight+=w;
+ }
+ return select(0.0,sum/max(weight,1e-30),weight>1e-6);
+}
+var<workgroup> bRootValues:array<f32,6>;
+var<workgroup> bRootBits:array<u32,3>;
+var<workgroup> bRootCount:u32;
+var<workgroup> bRootSkip:u32;
+@compute @workgroup_size(${TILE_WG}) fn pProjectNative(${lanes}){
+ if(lane==0u){bRootCount=ubaLevelCount(2u)*512u;}
+ let n=workgroupUniformLoad(&bRootCount);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+ for(var j=group.x;j<n;j+=groups.x){
+  let tile=512u*ubaLevelSlot(2u,j>>9u)+(j&511u);let p=vec3i(4u*umTileCoord(tile));
+  if(lane==0u){
+   var near=false;for(var f=0u;f<6u;f++){var q=p;q[f/2u]+=4*bSign(f);near=near||pBandCell(q);}
+   bRootSkip=u32(pIndex(SLOTS+tile)!=0u||umFrozenCell(p)||!near);
+  }
+  if(workgroupUniformLoad(&bRootSkip)!=0u){continue;}
+  if(lane<6u){bRootValues[lane]=bRootFace(p,lane/2u,bSign(lane));}
+  if(lane<3u){var q=p;q[lane]+=3;bRootBits[lane]=u32(max(0.0,/*4h*/textureLoad(field,q,0).w));}
+  workgroupBarrier();
+  if(umTileWidth(tile)==1u){
+   var value=vec4f(0.0);var bits=0u;
+   for(var axis=0u;axis<3u;axis++){
+    value[axis]=mix(bRootValues[2u*axis],bRootValues[2u*axis+1u],f32(l[axis]+1u)/4.0);
+    if(l[axis]==3u){bits|=bRootBits[axis]&(1u<<axis);}
+    if(l[axis]==0u){bits|=bRootBits[axis]&(1u<<(axis+3u));}
+   }
+   value.w=f32(bits);textureStore(output,p+vec3i(l),value);
+  }else if(lane<3u){
+   var q=p;q[lane]+=3;var value=vec4f(0.0);value[lane]=bRootValues[2u*lane+1u];value.w=f32(bRootBits[lane]);textureStore(output,q,value);
+  }
+  workgroupBarrier();
+ }
 }
 fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
  let axis=f/2u;let sign=bSign(f);let kinds=pool[P_KINDS+at];
@@ -1809,8 +1910,8 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
   else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
-  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
-   rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject"]};
+  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
+   rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
@@ -1947,6 +2048,8 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   * into the velocity, then leaving slots back to the stack. */
  encodeProject(encoder:GPUCommandEncoder):void{
   const pass=encoder.beginComputePass(PROJECT_PASS);
+  this.dispatch(pass,"pCopyNative",this.tileGroups);
+  this.dispatch(pass,"pProjectNative",this.tileGroups);
   this.dispatch(pass,"pCopy",this.tileGroups);this.dispatch(pass,"pProject",this.tileGroups);
   // Leaving slots return to the stack (after every reader of this frame).
   this.dispatch(pass,"ubaRelease",Math.min(groupsOf(this.arena.fineCapacity,64),TABLE_GROUPS));

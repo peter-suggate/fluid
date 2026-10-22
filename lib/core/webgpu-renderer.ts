@@ -12,7 +12,7 @@ import type { SparseVoxelDrySceneData } from "../svo/contracts/scene-publication
 import { SimulationFailureError } from "./simulation-failure";
 import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
-import { canonicalScene, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
+import { canonicalScene, rigidBodyHasFixedPose, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
 import { SCENE_SHAPE_PALETTE_LINEAR, sceneShapeCode, sceneShapeRenderHalfExtent_m } from "./scene-shape";
 import { svoSceneLighting } from "../svo/features/lighting-visibility/svo-dry-scene-lighting";
 import {
@@ -569,7 +569,7 @@ function rigidAllocationKey(scene: SceneDescription, methodId: string): string {
   // first body dropped onto a landscape restart an octree solve that would have
   // allocated exactly the same thing either way.
   const presence = sceneHasTerrain(scene) ? "terrain" : `${bodies.length > 0}`;
-  return `${presence}:${bodies.some((body) => body.motion !== "static")}`;
+  return `${presence}:${bodies.some((body) => !rigidBodyHasFixedPose(body))}`;
 }
 
 /** The roster itself, which a live solver re-uploads rather than rebuilds for. */

@@ -46,6 +46,7 @@ import { studioStageCamera, studioStageSceneryGraph } from "./studio-stage-scene
 import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWaveScene } from "./analytic-motion-scenes";
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
+import { CHURNING_TANK_SCENE_ID, createChurningTankScene } from "./churning-tank-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { HERO_GARDEN_BLENDER_ID, createHeroGardenBlenderScene, heroGardenBlenderCamera } from "./hero-garden-blender-scene";
 import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
@@ -1450,6 +1451,16 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       return scene;
     },
     camera: studioStageCamera,
+  }),
+  defineScene({
+    id: CHURNING_TANK_SCENE_ID,
+    name: "Churning tank",
+    blurb: "A broad spatula vigorously churns a square tank of water, circling every two seconds with its blade facing into the flow. Water resolves at 2.5 cm. Watch a full 20-second session: one second at rest, two seconds accelerating, ten seconds churning, three seconds slowing down, and four seconds settling. Press Play to start.",
+    audience: "explore", shelf: "Tanks", environment: "stage",
+    build: createChurningTankScene,
+    camera: { distance_m: 5.2, target_m: { x: 0, y: 0.65, z: 0 }, elevation_rad: 0.62, azimuth_rad: 0.7 },
+    methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
+      overrides: { rigidCoupling: "on" } },
   }),
   ...([false, true] as const).map(wet => defineScene({
     id: wet ? "interactive-pool" : "interactive-playground",

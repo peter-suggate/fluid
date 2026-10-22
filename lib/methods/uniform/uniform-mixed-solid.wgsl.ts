@@ -41,12 +41,15 @@ fn umSolidCount()->u32{return ${keys+uniformFaceTileSlots(keys/512)}u;}
 fn umBodyRegionBase()->u32{return umSolidCount()+23u*umSolidTiles();}
 // The h face apertures (umPressureFaceV's value of each cell's +x, +y and +z
 // face, four cells a vec4 in x+4y+16z order, 16 rows an axis), a stamp row
-// (the tile's coordinate and the build epoch), then the tile's low faces (4
+// (the tile's world coordinate and the build epoch), then the tile's low faces (4
 // rows an axis, the face's cell at l[axis+1]+4l[axis+2]: a face whose low
 // cell no page stores reads them), 61 rows a key after the body mask's
 // header; the epoch the host advances with every solid edit last.
 fn umSolidApertureRow(t:u32)->u32{return umBodyRegionBase()+umSolidTiles()/64u+1u+61u*t;}
 fn umSolidApertureEpochRow()->u32{return umBodyRegionBase()+umSolidTiles()/64u+1u+61u*umSolidTiles();}
+// A window move preserves a resident page's geometry. Stamp its world tile,
+// not its changing position in the window; a reused key still changes identity.
+fn umSolidApertureCoord(t:u32)->vec3i{return vec3i(umTileCoord(t))+8*umFramePage();}
 `;}
 /** The page pool a frame claims blocks from: its state buffer (bound
  * read-only, for the list of blocks its last commit claimed) and layout. */
@@ -537,7 +540,7 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
   let axis=lane/16u;let first=4u*(lane%16u);
   record[umSolidApertureRow(t)+lane]=vec4f(apertures[first][axis],apertures[first+1u][axis],apertures[first+2u][axis],apertures[first+3u][axis]);
  }
- if(lane==48u){record[umSolidApertureRow(t)+48u]=vec4f(vec3f(tc),record[umSolidApertureEpochRow()].x);}
+ if(lane==48u){record[umSolidApertureRow(t)+48u]=vec4f(vec3f(umSolidApertureCoord(t)),record[umSolidApertureEpochRow()].x);}
  if(lane>48u&&lane<61u){
   let axis=(lane-49u)/4u;var v=vec4f(0.0);
   for(var j=0u;j<4u;j++){let slot=4u*((lane-49u)%4u)+j;var m=vec3u(0u);m[(axis+1u)%3u]=slot%4u;m[(axis+2u)%3u]=slot/4u;v[j]=lowApertures[m.x+4u*(m.y+4u*m.z)][axis];}
@@ -1357,7 +1360,7 @@ fn umSolidAperturesServe(p:vec3i)->u32{
  ${coarse!==undefined&&gated?`if(!umSolidEnabled()){return 0u;}
  let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return 1u;}
  let stamp=umSolidRecord[umSolidApertureRow(t)+48u];
- if(any(vec3u(stamp.xyz)!=umTileCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return 2u;}
+ if(any(vec3i(stamp.xyz)!=umSolidApertureCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return 2u;}
  if(umBodyCount()>0u&&(umSolidBodyBuilt(t)||umBodyPoseNearTile(t,2u))){return 1u;}
  return 0u;`:"return select(0u,1u,umSolidEnabled());"}
 }
@@ -1386,7 +1389,7 @@ fn umSolidApertureRecord(id:vec3i,axis:u32)->f32{
 }
 // umPressureFaceV from the record's aperture rows where they hold it: a
 // stored tile no body reached at its build and none reaches now (umCellOpen's
-// rule). A stored tile whose stamp is not its coordinate at the current epoch
+// rule). A stored tile whose stamp is not its world coordinate at the current epoch
 // (a claim or an edit the record missed) answers -1: the caller latches its
 // stage's fatal. Elsewhere, and without the record, the geometry. Call it at
 // one site a kernel: it inlines umPressureFaceV.
@@ -1395,7 +1398,7 @@ fn umPressureFaceVRecorded(id:vec3i,axis:u32)->f32{
   let rowCell=umSolidApertureCell(id,axis);let t=umTileKey(rowCell>>vec3u(2u));
   if(umKeyStored(t)){
    let stamp=umSolidRecord[umSolidApertureRow(t)+48u];
-   if(any(vec3u(stamp.xyz)!=umTileCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return -1.0;}
+   if(any(vec3i(stamp.xyz)!=umSolidApertureCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return -1.0;}
    if(umBodyCount()==0u||(!umSolidBodyBuilt(t)&&!umAnyBodyNear(umSolidFaceWorld(id,axis),length(0.5*umSolidParams.cellGravity.xyz)))){
     return umSolidApertureAt(umSolidApertureRow(t)|select(0u,0x80000000u,any(rowCell!=id)),id,axis);
    }

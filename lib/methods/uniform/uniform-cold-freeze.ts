@@ -20,8 +20,11 @@ import type { UniformRegionHeat } from "./uniform-region-heat";
  * the projection writes no velocity there and stores its correction
  * (projected - F - T) a face (umColdCorrect). encodeAccumulate adds each
  * frozen region's mean correction over its own anchor faces to T: a
- * constant field, no divergence inside the region. The band treats frozen
- * faces as Neumann at F + T.
+ * constant field, no divergence inside the region. The band retains its
+ * pressure links to frozen native rows and uses the same F + T + gravity
+ * forced flux. Publication preserves F there; the regional term owns the
+ * frozen correction. Removing the links disconnects the native gravity
+ * RHS from the live free surface when a region first freezes.
  *
  * Region state: the canonical buffer (4 f32 a region: T.xyz in m/s, state)
  * and its per-frame snapshot `regions`, a sampled rgba32float 2D texture

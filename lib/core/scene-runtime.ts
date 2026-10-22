@@ -1,4 +1,4 @@
-import type { SceneDescription } from "./model";
+import { rigidBodyHasFixedPose, type SceneDescription } from "./model";
 
 export interface SceneRuntimeContent {
   /** Explicit subsystem ownership. Omission remains enabled for legacy scenes. */
@@ -52,7 +52,7 @@ export function planSceneRuntime(
   // Do not infer this from fillFraction. Legacy scenes that intentionally
   // start empty still own a solver, while an explicit false is authoritative.
   const fluidEnabled = scene.systems?.fluid !== false;
-  const dynamicRigidBodyCount = scene.rigidBodies.filter(({ motion }) => motion !== "static").length;
+  const dynamicRigidBodyCount = scene.rigidBodies.filter(body => !rigidBodyHasFixedPose(body)).length;
   const rigidDynamics = dynamicRigidBodyCount > 0 || Boolean(scene.interaction?.entities.length);
   const rigidCoupling = fluidEnabled && rigidDynamics;
   const sparseVoxelPresentation = true;

@@ -194,7 +194,7 @@ function describedBody(description: RigidBodyDescription): string {
     description.shape, description.dimensions_m, description.density_kg_m3,
     description.position_m, quaternionNormalize(description.orientation),
     description.linearVelocity_m_s, description.angularVelocity_rad_s,
-    description.restitution, description.friction, description.motion,
+    description.restitution, description.friction, description.motion, description.prescribedMotion,
   ]);
 }
 

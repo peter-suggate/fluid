@@ -7,7 +7,7 @@ import { REGIONS_QUERY_KEY } from "../features/refinement-region/persistence";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
 import { CAMERA_DISTANCE_RANGE } from "./math";
 import { defaultMethodId, getMethod, registeredSimulationMethods } from "./method-registry";
-import type { MethodParamValue, MethodParamValues } from "./method-contract";
+import { resolveMethodValues, type MethodParamValue, type MethodParamValues } from "./method-contract";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
@@ -425,9 +425,13 @@ function numberParam(query: URLSearchParams, key: string, fallback: number, min 
 /** Parameters and quality for the retained solver, shared with compare mode. */
 function methodQueryState(query: URLSearchParams): SerializableMethodState {
   const methodId = defaultMethodId(), method = getMethod(methodId);
+  const authored = findSceneDefinition(exactPreset(query.get("scene"))?.id ?? defaultScenePresetId)?.methodProfile;
+  const profile = authored?.methodId === methodId ? authored : undefined;
   const qualityCandidate = query.get("quality") as GPUQuality | null;
-  const quality = qualityCandidate && qualities.includes(qualityCandidate) ? qualityCandidate : "balanced";
-  const values: MethodParamValues = {};
+  const quality = qualityCandidate && qualities.includes(qualityCandidate) ? qualityCandidate : profile?.quality ?? "balanced";
+  // Direct links need the same authored solver settings as opening a card.
+  // Explicit query values still take precedence over the scene profile.
+  const values: MethodParamValues = { ...profile?.overrides };
   for (const spec of method.params) {
     // Existing narrow-band links remain readable; canonical links carry no method namespace.
     const raw = query.get(`param.${spec.key}`) ?? query.get(`param.${methodId}.${spec.key}`);
@@ -719,7 +723,8 @@ export function serializeQueryState(
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
 
   query.set("scene", sceneState.presetId);
-  const baselineQuality = "balanced";
+  const authoredProfile = findSceneDefinition(sceneState.presetId)?.methodProfile;
+  const baselineQuality = authoredProfile?.methodId === methodState.methodId ? authoredProfile.quality : "balanced";
   if (methodState.quality !== baselineQuality) query.set("quality", methodState.quality);
   // The studio is the absence of the layer, not a second value: a link to a
   // scene should not also have to say that it is not the shelf it came from.
@@ -744,8 +749,13 @@ export function serializeQueryState(
 
   for (const method of registeredSimulationMethods()) {
     const values = methodState.overrides[method.id] ?? {};
+    const profileValues = authoredProfile?.methodId === method.id ? authoredProfile.overrides ?? {} : {};
+    const effective = resolveMethodValues(method, methodState.quality, { ...method.appDefaults, ...values });
     for (const spec of method.params) {
-      const value = values[spec.key];
+      // Profile values belong to the scene, not to its override chip. A
+      // reset to app defaults must still round-trip against that profile.
+      const value = profileValues[spec.key] === undefined ? values[spec.key]
+        : effective[spec.key] === profileValues[spec.key] ? undefined : effective[spec.key];
       if (value !== undefined) {
         query.set(`param.${spec.key}`, String(value));
       }

@@ -512,6 +512,7 @@ export function sceneCardForDefinition(definition: SceneDefinition): SceneCard {
       scene: sceneDocument(definition),
       presetId: definition.id,
       camera: sceneDefinitionCamera(definition),
+      methodProfile: definition.methodProfile,
     }),
     preview: definition.preview && (() => scenePreviewDocument(definition)),
   };

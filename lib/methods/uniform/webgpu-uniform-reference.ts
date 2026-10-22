@@ -43,6 +43,7 @@ import { UniformMixedBodies } from "./uniform-mixed-bodies";
 import { UniformBedSlopeBake } from "./uniform-bed-slope-bake";
 import { UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UniformOpenWorldTerrain } from "./uniform-open-world-terrain";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
+import { samplePrescribedRigidBody } from "../../core/prescribed-rigid-motion";
 import { fluidFrameCell, sceneFluidBoxPage, sceneFluidFrame, sceneFluidLatticeDimensions, sceneLatticeDimensions, type SceneFluidFrame } from "../../core/scene-lattice";
 import { planGPUAdvanceInto, type GPUAdvancePlan } from "../../core/tall-cell-diagnostics";
 import type { GPUQuality } from "../../core/gpu-quality";
@@ -2628,7 +2629,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const roster = this.advanceRoster, rostered = Math.min(12, bodies.length);
     for (let i = 0; i < rostered; i++) roster[i] = bodies[i]!;
     if (roster.length !== rostered) roster.length = rostered;
-    const activeBodies = this.scene.interaction?.entities.length ? roster : this.prescribedSolidMotion.sample(roster, dt);
+    const activeBodies = this.scene.interaction?.entities.length ? roster : this.prescribedSolidMotion.sample(roster, dt, stepEnd_s);
     this.rigidSystem.syncBodies(activeBodies);
     const c = this.scene.container;
     const volumeBeforeSources=this.referenceVolumeCells;let volumeCells=volumeBeforeSources;
@@ -2964,7 +2965,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   syncRigidBodies(bodies: readonly RigidBodyState[]): void {
     this.mixedFrame?.invalidateExtension();
     if (this.mixedFrameInFlight) { this.deferredFrameBodies = structuredClone([...bodies]); return; }
-    this.rigidSystem.syncBodies(bodies);
+    this.rigidSystem.syncBodies(bodies.some(body => body.description.prescribedMotion)
+      ? bodies.map(body => samplePrescribedRigidBody(body, this.lastTime, 0)) : bodies);
   }
   get rigidRenderBuffer(): GPUBuffer { return this.rigidSystem.renderBuffer; }
   get rigidMotionBuffer(): GPUBuffer { return this.rigidSystem.motionBuffer; }

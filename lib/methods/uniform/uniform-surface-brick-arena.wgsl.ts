@@ -25,6 +25,8 @@
 import { UNIFORM_COMPILED_TOPOLOGY } from "./uniform-compiled-topology";
 export const narrowBandArenaWGSL=/* wgsl */`
 override nbArenaDerived:bool=false;
+// The brick list is complete; publication can reuse its dead mark words.
+override nbArenaClearPublication:bool=false;
 // The redistance's reach in tiles from a crossing tile (surfaceRedistanceReach): reach 3 (bits 1 and 2) to tiles within min(2, it), reach 2 at three.
 override nbReachTiles:u32=3u;
 const NB_ARENA_WINDOW:u32=729u;
@@ -60,7 +62,9 @@ fn nbArenaCornerAt(q:vec3u,t0:vec3u)->f32{let n=q+1u-t0;return nbArenaCorner[n.x
  let count=nbArenaUniform(ubCount(),lane);
  for(var slot=group.x;slot<count;slot+=groups.x){
   if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
-  let id=ubBrick(slot);let block=id>>6u;let origin=ubBrickOrigin(id);let page=vec3i(origin>>vec3u(5u));let t0=origin/4u;
+  let id=ubBrick(slot);
+  if(nbArenaClearPublication&&lane==0u){atomicStore(&bins[UB_MARK+id],0u);}
+  let block=id>>6u;let origin=ubBrickOrigin(id);let page=vec3i(origin>>vec3u(5u));let t0=origin/4u;
   umLoadAddressPlan(block,lane);
   if(lane<27u){let t=umTileAt(t0+umCorner(lane,3u));nbArenaTile[lane]=vec2u(t,umTileWidth(t)|select(0u,256u,umTileMaximumWidth(t)!=umTileMinimumWidth(t)));}
   if(lane<125u){let q=vec3i(t0)+vec3i(umCorner(lane,5u))-1;nbArenaCorner[lane]=select(0.0,umLoadCorner(vec3u(4*q)),all(q>=vec3i(0)));}
@@ -522,4 +526,280 @@ fn nbStoreInterface(p:vec3u,t0:vec3i)->bool{
   }
  }
 }
+`;
+
+/** Publish through the metric's canonical vertex owner. Keep capacity in its
+ * native 64-bit tile masks, and route revision bits to the original writer.
+ * Gather initializes marks; Finish handles missing owners and commits once
+ * per writer brick. Requires the solid tile record (umSolidOpenCells).
+ */
+export const narrowBandArenaCanonicalWGSL=/* wgsl */`
+var<workgroup> nbCapacityTileMask:array<vec2u,64>;
+// Exactly umVertexCellCapacity for all64 cells of a4³ tile, kept in the
+// solid record's existing bit representation instead of expanded scalars.
+// umSolidValid is page-constant, and a4³ tile never crosses a32³ page.
+fn nbCapacityMaskAt(q:vec3i,key:u32)->vec2u{
+ if(!umSolidValid(4*q)){return vec2u(0u);}
+ if(!umKeyStored(key)){return select(vec2u(0u),vec2u(0xffffffffu),umTileOpenAt(q)>1e-5);}
+ if(umTileWidth(key)==4u){return select(vec2u(0u),vec2u(0xffffffffu),umTileOpen(key)>1e-5);}
+ if(!umSolidEnabled()){return vec2u(0xffffffffu);}
+ return umSolidOpenCells(key);
+}
+fn nbCapacityOpen(p:vec3u,t0:vec3i)->u32{
+ for(var j=0u;j<8u;j++){
+  let c=vec3i(p)+vec3i(umCorner(j,2u))-1;let r=(c>>vec3u(2u))-t0+1;
+  let mask=nbCapacityTileMask[u32(r.x+4*r.y+16*r.z)];let m=vec3u(c)&vec3u(3u);let bit=m.x+4u*m.y+16u*m.z;
+  if((mask[bit>>5u]&(1u<<(bit&31u)))!=0u){return 1u;}
+ }
+ return 0u;
+}
+
+var<workgroup> nbCanonicalFine:atomic<u32>;
+var<workgroup> nbCanonicalRegions:array<atomic<u32>,27>;
+// UB_MARK is dead after brickTableList/Record and every later table build
+// clears it. Reuse one word per physical brick for the original writer's
+// eight incident-region change bits. No live table keys/classes are changed.
+fn nbArenaCanonicalWriter(p:vec3u,t0:vec3i)->vec4u{
+   let writer=nbStoreWriter(p,t0);
+   if(writer.w==UB_NONE){return vec4u(0u,0u,0u,UB_NONE);}
+
+    let offset=vec3i(writer.xyz>>vec3u(1u))-(t0>>vec3u(1u))+1;
+    let writerSlot=nbArenaRecord[u32(offset.x+3*offset.y+9*offset.z)];
+    if(writerSlot==UB_NONE||(ubClass(writerSlot)&UB_ARENA)==0u){return vec4u(0u,0u,0u,UB_NONE);}
+
+   // Every vertex of a COLD region's tile is COLD: redistance holds it.
+   if((nbStoreAt(vec3i(writer.xyz),t0).y&NB_STORE_COLD)!=0u||nbStoreCold(p,t0)){return vec4u(0u,0u,0u,UB_NONE);}
+   // An interface vertex's magnitude places its zero; a buried one (no incident capacity) is no distance sample.
+   if(nbStoreInterface(p,t0)){return vec4u(0u,0u,0u,UB_NONE);}
+   if(nbCapacityOpen(p,t0)==0u){return vec4u(0u,0u,0u,UB_NONE);}
+ return writer;
+}
+fn nbArenaCanonicalPublish(p:vec3u,l:vec3u,t0:vec3i,block:u32,page:vec3i,slot:u32,h:f32,metric:f32,reuse:bool,writer:vec4u){
+ let k=l.x+9u*(l.y+9u*l.z);
+   // A writer tile lies in the brick, so its page is the brick's.
+   var c=p;if(any(l==vec3u(8u))){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
+   let tile=nbStoreAt(vec3i(c>>vec3u(2u)),t0).y;
+   // The window holds the h texel wherever the vertex's cell is an h tile's.
+   var old=0.0;if((tile&NB_STORE_H)!=0u){old=nbArenaLoad(NB_ARENA_WINDOW*slot+k);}else{old=textureLoad(outputPhi,vec3i(p)).x;}
+   var value=old;
+   if(((tile>>8u)&2u)!=0u){value=metric*h;}
+   // Past reach: the old sign, at least six cells.
+   else if(abs(old)>1e-8&&abs(old)<6.0*h){value=sign(old)*6.0*h;}
+   if(bitcast<u32>(value)==bitcast<u32>(old)){return;}
+   // nbMarkPhiChanged once a brick: the regions of p's incident cells (those across its 16-cell planes).
+   if(reuse){
+    let writerT0=vec3i(writer.xyz&~vec3u(1u));let regions=(writerT0-1)>>vec3u(2u);
+    let offset=(writerT0>>vec3u(1u))-(t0>>vec3u(1u))+1;let route=u32(offset.x+3*offset.y+9*offset.z);
+    let boundary=(p&vec3u(15u))==vec3u(0u);let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
+    for(var j=0u;j<=sides;j=select((j-sides)&sides,8u,j==sides)){
+     let q=(vec3i(p)-vec3i(umCorner(j,2u)))>>vec3u(2u);if((nbStoreAt(q,t0).y&NB_STORE_STORED)==0u){continue;}
+     let r=vec3u((q>>vec3u(2u))-regions);atomicOr(&nbCanonicalRegions[route],1u<<(r.x|(r.y<<1u)|(r.z<<2u)));
+    }
+   }
+   textureStore(outputPhi,vec3i(p),vec4f(value));
+}
+@compute @workgroup_size(256) fn arenaDistanceCanonical(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);let h=nbArenaH();let inverse=1.0/h;
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
+  let id=ubBrick(slot);let block=id>>6u;let origin=ubBrickOrigin(id);let page=vec3i(origin>>vec3u(5u));let t0=vec3i(origin/4u);
+  umLoadAddressPlan(block,lane);
+  if(lane<27u){atomicStore(&nbCanonicalRegions[lane],0u);}
+   if(lane==0u){atomicStore(&nbCanonicalFine,0u);}workgroupBarrier();
+   // Metric always needs key/reach. Fine publication needs the larger
+   // descriptor and cell capacities only if an incident writer is fine.
+   if(lane<64u){
+    let key=umTileKey(t0+vec3i(umCorner(lane,4u))-1);var reach=0u;
+    if(umKeyStored(key)){reach=atomicLoad(&bins[NB_BAND_REACH+key]);if(umTileWidth(key)==1u){atomicOr(&nbCanonicalFine,1u);}}
+    nbArenaReach[lane]=vec2u(key,reach);
+   }
+   workgroupBarrier();let publishFine=nbArenaUniform(atomicLoad(&nbCanonicalFine),lane)!=0u;
+
+  if(publishFine&&lane<64u){
+   let q=t0+vec3i(umCorner(lane,4u))-1;let key=nbArenaReach[lane].x;
+   var bits=0u;var mask=vec2u(0u);var incident=0u;
+   if(umKeyStored(key)){
+    let reach=nbArenaReach[lane].y;
+    bits=NB_STORE_STORED|(reach<<8u);
+    if(umTileWidth(key)==1u){bits|=NB_STORE_H;}
+    if(umTileMaximumWidth(key)==1u&&umTileMinimumWidth(key)==1u){let low=umLowOpen(4*q);bits|=NB_STORE_REGULAR|(8u*u32(low.x))|(16u*u32(low.y))|(32u*u32(low.z));}
+    if(nbRegionCold(umPageOfTile(key))){bits|=NB_STORE_COLD;}
+    mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));
+    incident=(umVertexRecipe(key)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u;
+   }
+   if(umTileKind(q)==UM_SOLID){bits|=NB_STORE_WALL;}
+   nbStoreTile[lane]=vec4u(key,bits,mask);nbStoreIncident[lane]=incident;
+   nbCapacityTileMask[lane]=nbCapacityMaskAt(q,key);
+  }
+  workgroupBarrier();
+  let reuse=nbReuseEnabled();
+  for(var k=lane;k<NB_ARENA_WINDOW;k+=256u){nbArenaWindow[k]=nbArenaLoad(NB_ARENA_WINDOW*slot+k);}
+  if(lane<27u){nbArenaRecord[lane]=ubNeighbour(slot,lane);}
+  workgroupBarrier();
+  for(var k=lane;k<1000u;k+=256u){
+   let c=vec3i(origin)+vec3i(umCorner(k,10u))-1;let r=vec3u((c>>vec3u(2u))-t0+1);let tile=nbArenaReach[r.x+4u*(r.y+4u*r.z)];
+   var nearest=NB_ARENA_NONE;
+   if(tile.x<UM_TILES&&(tile.y&1u)!=0u){
+    let n=atomicLoad(&bins[NB_DEPTH_B+64u*tile.x+u32((c.x&3)|((c.y&3)<<2u)|((c.z&3)<<4u))]);
+    if(n!=NB_NO_SURFACE){nearest=nbArenaPack(vec3i(umCellCoord(n))-vec3i(origin));}
+   }
+   nbArenaNearestCell[k]=nearest;
+  }
+  let metricVertices=512u+select(0u,217u,any((origin&vec3u(31u))==vec3u(24u)));
+  let vertices=nbArenaUniform(metricVertices,lane);
+  for(var base=0u;base<vertices;base+=256u){
+   workgroupBarrier();
+   if(lane<2u){atomicStore(&nbArenaQueued[lane],0u);}
+   atomicStore(&nbArenaFound[lane],0x7f7fffffu);
+   workgroupBarrier();
+   // The round's vertex: one whose cell lies in the brick, in a reach-2 tile, and its pairs.
+   let k=base+lane;let l=nbArenaVertexOf(k);let p=origin+l;var write=false;var metricWrite=false;var initial=0.0;
+   var writer=vec4u(0u,0u,0u,UB_NONE);
+   if(k<vertices){
+    var c=p;if(k>=512u){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
+    let r=c/4u-vec3u(t0)+1u;
+    let reached=(nbArenaReach[r.x+4u*(r.y+4u*r.z)].y&2u)!=0u;
+    let owned=all(c<origin+8u);
+    if(owned&&publishFine){writer=nbArenaCanonicalWriter(p,t0);}
+    metricWrite=owned&&reached;
+    if(metricWrite){
+     write=true;initial=nbArenaWindow[l.x+9u*(l.y+9u*l.z)];
+     if(abs(initial)>1e-8){
+      var best=8u;var gap=3.402823e38;
+      for(var e=0u;e<8u;e++){let n=nbArenaIncident(l,e);if(n==NB_ARENA_NONE){continue;}let g=nbArenaGap(l,nbArenaUnpack(n));if(g<gap){gap=g;best=e;}}
+      if(best<8u){
+       let first=nbArenaIncident(l,best);
+       for(var e=0u;e<8u;e++){
+        let n=nbArenaIncident(l,e);if(n==NB_ARENA_NONE){continue;}
+        if(e!=best){var repeat=n==first;for(var j=0u;j<e;j++){if(nbArenaIncident(l,j)==n){repeat=true;}}if(repeat){continue;}}
+        let b=(nbArenaUnpack(n)>>vec3u(3u))+1;if(any(b<vec3i(0))||any(b>vec3i(2))||nbArenaRecord[u32(b.x+3*b.y+9*b.z)]==UB_NONE){continue;}
+        if(e==best){nbArenaQueue[atomicAdd(&nbArenaQueued[0],1u)]=lane|(n<<8u);}
+        else{nbArenaQueue[256u+atomicAdd(&nbArenaQueued[1],1u)]=lane|(n<<8u);}
+       }
+      }
+     }
+    }
+   }
+   // The nearest boxes, then the rest: a box no nearer than the vertex's best zero is skipped.
+   for(var queue=0u;queue<2u;queue++){
+    // Lane 0 reads the count once every lane's appends have landed.
+    workgroupBarrier();let n=nbArenaUniform(atomicLoad(&nbArenaQueued[queue]),lane);
+    for(var i=lane;i<n;i+=256u){
+     let entry=nbArenaQueue[select(256u+i,i,queue==0u)];let v=entry&255u;let at=nbArenaUnpack(entry>>8u);let lv=nbArenaVertexOf(base+v);
+     if(nbArenaGap(lv,at)>=bitcast<f32>(atomicLoad(&nbArenaFound[v]))){continue;}
+     let b=(at>>vec3u(3u))+1;let s=nbArenaRecord[u32(b.x+3*b.y+9*b.z)];
+     let o=vec3u(at-8*(b-1));let wo=o.x+9u*(o.y+9u*o.z);var values:array<f32,8>;
+     if(all(b==vec3i(1))){for(var j=0u;j<8u;j++){let corner=umCorner(j,2u);values[j]=nbArenaWindow[wo+corner.x+9u*(corner.y+9u*corner.z)]*inverse;}}
+     else{let at0=NB_ARENA_WINDOW*s+wo;for(var j=0u;j<8u;j++){let corner=umCorner(j,2u);values[j]=nbArenaLoad(at0+corner.x+9u*(corner.y+9u*corner.z))*inverse;}}
+     let d=nbArenaCellDistance(vec3f(lv)-vec3f(at),values);if(d>=0.0){atomicMin(&nbArenaFound[v],bitcast<u32>(d));}
+    }
+   }
+   workgroupBarrier();
+   if(write){
+    var value=initial/h;
+    if(abs(initial)>1e-8){
+     // With no crossing cell within five of an incident cell the level set stands, no nearer than five cells.
+     let found=bitcast<f32>(atomicLoad(&nbArenaFound[lane]));var distance=max(abs(value),5.0);if(found<3.402823e38){distance=found;}
+     value=sign(initial)*max(distance,1e-8/h);
+    }
+    if(metricWrite){atomicStore(&bins[NB_DEPTH_A+nbArenaVertexKey(p,block,page)],bitcast<u32>(value));}
+    if(writer.w!=UB_NONE){nbArenaCanonicalPublish(p,l,t0,block,page,slot,h,value,reuse,writer);}
+   }else if(writer.w!=UB_NONE){nbArenaCanonicalPublish(p,l,t0,block,page,slot,h,0.0,reuse,writer);}
+  }
+  workgroupBarrier();
+  // Aggregate once per original writer brick, not once per vertex.
+  if(lane<27u){
+   let changed=atomicLoad(&nbCanonicalRegions[lane]);let writerSlot=nbArenaRecord[lane];
+   if(changed!=0u&&writerSlot!=UB_NONE){atomicOr(&bins[UB_MARK+ubBrick(writerSlot)],changed);}
+  }
+ }
+}
+// Only a missing positive-side neighbour can leave a writer's high-face
+// vertex outside the canonical arena-owner domain.
+fn nbArenaBoundaryMissing(slot:u32)->u32{
+ for(var k=1u;k<8u;k++){
+  let q=umCorner(k,2u)+1u;let other=ubNeighbour(slot,q.x+3u*(q.y+3u*q.z));
+  if(other==UB_NONE||(ubClass(other)&UB_ARENA)==0u){return 1u;}
+ }
+ return 0u;
+}
+// Canonical publication has finished globally. This workgroup owns the
+// original writer brick, so its boundary changes and routed changes can
+// commit together without another mask materialization/table traversal.
+fn nbArenaFinishCommit(t0:vec3i,changed:u32,lane:u32){
+ if(lane>=8u||(changed&(1u<<lane))==0u){return;}
+ let regions=(t0-1)>>vec3u(2u);let key=umTileKey(max(t0-1,4*(regions+vec3i(umCorner(lane,2u)))));
+ if(umKeyStored(key)){
+  let at=NB_REUSE_LIVE+nbReuseRegion(key);let old=atomicLoad(&bins[at]);
+  if(old>0u){atomicMax(&bins[at],min(old,0xfffffffdu)+1u);}
+ }
+}
+@compute @workgroup_size(256) fn arenaPublishFinish(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let count=nbArenaUniform(ubCount(),lane);let h=nbArenaH();
+ for(var slot=group.x;slot<count;slot+=groups.x){
+  if((nbArenaUniform(ubClass(slot),lane)&UB_ARENA)==0u){continue;}
+  let id=ubBrick(slot);let block=id>>6u;let origin=ubBrickOrigin(id);let t0=vec3i(origin/4u);
+  let routed=nbArenaUniform(atomicLoad(&bins[UB_MARK+id]),lane);
+  if(nbArenaUniform(nbArenaBoundaryMissing(slot),lane)==0u){nbArenaFinishCommit(t0,routed,lane);continue;}
+  if(lane==0u){atomicStore(&nbArenaFine,0u);atomicStore(&nbStoreRegions,0u);}
+  umLoadAddressPlan(block,lane);workgroupBarrier();
+  if(lane<8u&&umTileWidth(umTileAt(vec3u(t0)+umCorner(lane,2u)))==1u){atomicOr(&nbArenaFine,1u<<lane);}
+  // Only h tiles write: fine, bit x+2y+4z of the brick's h tiles.
+  workgroupBarrier();let fine=nbArenaUniform(atomicLoad(&nbArenaFine),lane);if(fine==0u){nbArenaFinishCommit(t0,routed,lane);continue;}
+  if(lane<64u){
+   let q=t0+vec3i(umCorner(lane,4u))-1;let key=umTileKey(q);var bits=0u;var mask=vec2u(0u);var incident=0u;
+   if(umKeyStored(key)){
+    bits=NB_STORE_STORED|(atomicLoad(&bins[NB_BAND_REACH+key])<<8u);
+    if(umTileWidth(key)==1u){bits|=NB_STORE_H;}
+    if(umTileMaximumWidth(key)==1u&&umTileMinimumWidth(key)==1u){let low=umLowOpen(4*q);bits|=NB_STORE_REGULAR|(8u*u32(low.x))|(16u*u32(low.y))|(32u*u32(low.z));}
+    if(nbRegionCold(umPageOfTile(key))){bits|=NB_STORE_COLD;}
+    mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));
+    incident=(umVertexRecipe(key)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u;
+   }
+   if(umTileKind(q)==UM_SOLID){bits|=NB_STORE_WALL;}
+   nbStoreTile[lane]=vec4u(key,bits,mask);nbStoreIncident[lane]=incident;
+   nbCapacityTileMask[lane]=nbCapacityMaskAt(q,key);
+  }
+  workgroupBarrier();
+  let page=vec3i(origin>>vec3u(5u));let reuse=nbReuseEnabled();let regions=(t0-1)>>vec3u(2u);
+  for(var face=lane;face<217u;face+=256u){
+   let l=nbArenaFace(face);let p=origin+l;let k=l.x+9u*(l.y+9u*l.z);
+   let ownerCell=umCellNearFromPage(block,page,vec3i(p));let ownerId=ubBrickAt(ownerCell);
+   if(ownerId!=UB_NONE){let ownerSlot=ubSlot(ownerId);if(ownerSlot!=UB_NONE&&(ubClass(ownerSlot)&UB_ARENA)!=0u){continue;}}
+   // The brick's tiles holding p (an axis: tile 0 at 0..4, tile 1 at 4..8); none an h tile, no writer.
+   let a=select(vec3u(1u),vec3u(3u),l==vec3u(4u))<<select(vec3u(0u),vec3u(1u),l>vec3u(4u));
+   var held=0u;for(var j=0u;j<8u;j++){let q=umCorner(j,2u);if(all(((a>>q)&vec3u(1u))!=vec3u(0u))){held|=1u<<j;}}
+   if((held&fine)==0u){continue;}
+   let writer=nbStoreWriter(p,t0);
+   if(writer.w==UB_NONE||any(vec3i(writer.xyz)<t0)||any(vec3i(writer.xyz)>t0+1)){continue;}
+   // Every vertex of a COLD region's tile is COLD: redistance holds it.
+   if((nbStoreAt(vec3i(writer.xyz),t0).y&NB_STORE_COLD)!=0u||nbStoreCold(p,t0)){continue;}
+   // An interface vertex's magnitude places its zero; a buried one (no incident capacity) is no distance sample.
+   if(nbStoreInterface(p,t0)){continue;}
+   if(nbCapacityOpen(p,t0)==0u){continue;}
+   // A writer tile lies in the brick, so its page is the brick's.
+   var c=p;if(any(l==vec3u(8u))){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
+   let tile=nbStoreAt(vec3i(c>>vec3u(2u)),t0).y;
+   // The window holds the h texel wherever the vertex's cell is an h tile's.
+   var old=0.0;if((tile&NB_STORE_H)!=0u){old=nbArenaLoad(NB_ARENA_WINDOW*slot+k);}else{old=textureLoad(outputPhi,vec3i(p)).x;}
+   var value=old;
+   if(((tile>>8u)&2u)!=0u){value=bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+nbArenaVertexKey(p,block,page)]))*h;}
+   // Past reach: the old sign, at least six cells.
+   else if(abs(old)>1e-8&&abs(old)<6.0*h){value=sign(old)*6.0*h;}
+   if(bitcast<u32>(value)==bitcast<u32>(old)){continue;}
+   // nbMarkPhiChanged once a brick: the regions of p's incident cells (those across its 16-cell planes).
+   if(reuse){
+    let boundary=(p&vec3u(15u))==vec3u(0u);let sides=u32(boundary.x)|(2u*u32(boundary.y))|(4u*u32(boundary.z));
+    for(var j=0u;j<=sides;j=select((j-sides)&sides,8u,j==sides)){
+     let q=(vec3i(p)-vec3i(umCorner(j,2u)))>>vec3u(2u);if((nbStoreAt(q,t0).y&NB_STORE_STORED)==0u){continue;}
+     let r=vec3u((q>>vec3u(2u))-regions);atomicOr(&nbStoreRegions,1u<<(r.x|(r.y<<1u)|(r.z<<2u)));
+    }
+   }
+   textureStore(outputPhi,vec3i(p),vec4f(value));
+  }
+  workgroupBarrier();
+  nbArenaFinishCommit(t0,routed|atomicLoad(&nbStoreRegions),lane);
+ }
+}
+
 `;

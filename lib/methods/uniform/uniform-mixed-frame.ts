@@ -823,7 +823,9 @@ export class UniformMixedFrame {
   forces[3]=dt;forces[4]=gravity;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;q.writeBuffer(to.forces,0,forces);
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
   projection[3]=dt;projection[4]=density;projection[5]=open;q.writeBuffer(to.projection,0,projection);
-  band[3]=dt;band[4]=density;band[5]=open;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
+  // The composite seam compares pressures at a common height. policy.y
+  // carries the hydrostatic gradient (previously unused by the band).
+  band[3]=dt;band[4]=density;band[5]=density*gravity;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
   // The composite's native 4h rows stop at the root's target, the band's h rows at band[8]: native residuals scale by their ratio.
   w.bandNative[0]=band[8]!/target;q.writeBuffer(this.bandParams,52,w.bandNative);
   const views=this.layoutViews?(this.relayout?UNIFORM_STAGE_VIEWS.previous|UNIFORM_STAGE_VIEWS.reasons|UNIFORM_STAGE_VIEWS.importance:0)|UNIFORM_STAGE_VIEWS.certificate|UNIFORM_STAGE_VIEWS.band:0;

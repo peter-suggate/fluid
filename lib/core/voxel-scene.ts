@@ -1,4 +1,4 @@
-import { canonicalScene, type Quaternion, type RigidBodyDescription, type RigidShape, type SceneDescription, type Vec3 } from "./model";
+import { canonicalScene, rigidBodyHasFixedPose, type Quaternion, type RigidBodyDescription, type RigidShape, type SceneDescription, type Vec3 } from "./model";
 import { solidWorldForScene, type SolidWorldVoxelPatch } from
   "./solid-world";
 
@@ -383,7 +383,7 @@ function bodyPrimitive(body: RigidBodyDescription): VoxelRigidPrimitive {
 function rigidSource(body: RigidBodyDescription, layout: SparseBrickLayoutPlan): VoxelRigidSource {
   const primitive = bodyPrimitive(body);
   const transform = { position_m: cloneVec3(body.position_m), orientation: { ...body.orientation } };
-  const updateClass = body.motion === "static" ? "scene" : "frame";
+  const updateClass = rigidBodyHasFixedPose(body) ? "scene" : "frame";
   const topologyRevisionHash = hashValue({
     bodyId: body.id,
     primitive,
