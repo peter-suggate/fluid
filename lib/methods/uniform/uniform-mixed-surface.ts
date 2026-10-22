@@ -1042,7 +1042,8 @@ fn umRequiredLipschitz(region:u32,required:u32)->vec3f{
  if(umSurfaceEvidence[at+7u]==0u){return vec3f(3.402823e38);}
  return bitcast<vec3f>(vec3u(umSurfaceEvidence[at+8u],umSurfaceEvidence[at+9u],umSurfaceEvidence[at+10u]));
 }
-fn umTransportRejected(reason:u32)->vec2f{
+`:"fn umRecordRegion(vertex:vec3u,tier:u32){}"}
+${this.workControl?.surfaceEvidence?/* wgsl */`fn umTransportRejected(reason:u32)->vec2f{
  if(params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+3}u],1u);atomicAdd(&umClaims[${this.counterWord+5}u+reason],1u);}
  return vec2f(0.0);
 }
@@ -1246,7 +1247,13 @@ fn umEulerAdvected(vertex:vec3u,width:u32,foot:UMFoot)->vec2f{
  if(params.flags.z!=0u){if(useLocalCell){atomicAdd(&umClaims[${this.counterWord+1}u],1u);}if(far){atomicAdd(&umClaims[${this.counterWord+11}u],1u);}atomicAdd(&umClaims[${this.counterWord+8}u],1u);umRecordRegion(vertex,2u);atomicMax(&umClaims[${this.counterWord+10}u],bitcast<u32>(bound.x));}
  return vec2f(value+foot.smoothing,1.0);
 }
-`:"fn umEarlyFarAdvected(vertex:vec3u,width:u32)->vec2f{return vec2f(0.0);} fn umRecordRegion(vertex:vec3u,tier:u32){} fn umCheapAdvected(vertex:vec3u,width:u32)->vec2f{return vec2f(0.0); } fn umEulerAdvected(vertex:vec3u,width:u32,foot:UMFoot)->vec2f{return vec2f(0.0);}"}
+`:/* wgsl */`// Without the 16h surface model evidence (UniformSurfaceWorkControl's
+// surfaceEvidence) every model word is zero: no coverage, no valid support,
+// so these three transports reject every vertex. Compiled in, they held a
+// region lookup and its loads ahead of every full path, in every pipeline.
+fn umEarlyFarAdvected(vertex:vec3u,width:u32)->vec2f{return vec2f(0.0);}
+fn umCheapAdvected(vertex:vec3u,width:u32)->vec2f{return vec2f(0.0);}
+fn umEulerAdvected(vertex:vec3u,width:u32,foot:UMFoot)->vec2f{return vec2f(0.0);}`}
 // Whether umReleasedWalls can change value at p: a direction's reach clears
 // its own skip test at the wall umWallAhead finds. Accepted continuations
 // only raise result, so testing the entry value probes a superset of its
