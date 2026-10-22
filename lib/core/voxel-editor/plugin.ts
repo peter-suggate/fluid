@@ -109,7 +109,8 @@ export type ToolAction = { readonly kind: "fluid"; readonly edit: LiveFluidEdit 
 export interface ToolUpdate {
   /** A transient action is previewed during the gesture and executed once on release. */
   readonly action?: ToolAction;
-  /** Complete proposal for this stroke, relative to its immutable base. */
+  /** Complete proposal for this stroke, relative to its immutable base.
+   * Live gestures append to this list; accepted prefixes must not change. */
   readonly patches: readonly SolidWorldVoxelPatch[];
   /**
    * The cells this gesture selects. Like the patches it is a proposal until
@@ -152,9 +153,11 @@ export interface VoxelToolPlugin {
   /**
    * What release does. `"author"` (the default) appends the previewed patches
    * to the scene document once; `"release"` executes the previewed transient
-   * action and authors nothing. Neither touches the document during the drag.
+   * action and authors nothing. These modes leave the document untouched during
+   * the drag. `"live"` publishes appended patches while dragging, groups the
+   * whole stroke into one undo entry, and rolls it back on cancellation.
    */
-  readonly execution?: "author" | "release";
+  readonly execution?: "author" | "release" | "live";
   readonly ui: {
     readonly label: string;
     readonly hint: string;
@@ -301,7 +304,7 @@ export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[]) {
       throw new Error(`Duplicate, empty or reserved voxel tool id: ${plugin.id}`);
     }
     ids.add(plugin.id);
-    if ((plugin.execution !== undefined && plugin.execution !== "author" && plugin.execution !== "release")
+    if ((plugin.execution !== undefined && plugin.execution !== "author" && plugin.execution !== "release" && plugin.execution !== "live")
       || plugin.version !== 1 || !plugin.ui.label.trim() || !plugin.ui.group.trim()
       || !plugin.ui.icon.trim() || !Number.isFinite(plugin.ui.order)
       || (plugin.defaults !== undefined && typeof plugin.defaults !== "function")

@@ -32,12 +32,23 @@
  *
  * Run `--help` for the options and the budgets.
  */
-import { writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join, resolve } from "node:path";
+import { encodeRgbPng } from "../lib/core/png-codec";
+import { meshVolumeWGSL } from "../lib/core/imported-assets/mesh-volume.wgsl";
+import { registerSceneMeshAssets } from "./blender/register-assets";
 
 import { applyDocumentDelta, documentDelta } from "../lib/core/document-delta";
 import { resolvedSun, sunAngles, sunDirection, withSun } from "../lib/core/editor-sun";
 import { sceneryLightFixture, withSceneryLightColor, withSceneryLightStrength } from "../lib/core/scenery-lights";
 import { createEmptyScene } from "../lib/core/empty-scene";
+import type { EditorRay } from "../lib/core/editor-entity";
+import { scenerySurfaceAt } from "../lib/core/editor-scenery";
+import { buildEnvironmentProxyCatalog } from "../lib/core/voxel-environments";
+import { penTool } from "../lib/core/voxel-editor/plugins/pen";
+import { toolValues } from "../lib/core/voxel-editor/plugin";
+import { beginToolTransaction } from "../lib/core/voxel-editor/transaction";
 import type { GPUStatus } from "../lib/core/gpu-status";
 import { defaultCamera, type CameraState, type SceneDescription } from "../lib/core/model";
 import type { EffectiveRendererStatus } from "../lib/core/renderer-status";
@@ -68,11 +79,24 @@ Options
   --fluid=off|scene    off (default): the document's fluid system is switched off, so the renderer owns
                        the live sparse scene directly — the display path. scene: as authored, which also
                        builds the method's solver and its solid-edit path.
+  --simulation-steps=N opt-in advancing smoke (default 0, paused clock): requires Dawn and --fluid=scene.
+                       Advance N baseline/before/after/undo checkpoint steps and one per pen sample;
+                       verify production completion receipts. Interaction scenes use Box3D coupling;
+                       other scenes keep rigid-body poses fixed. Not a timing run.
   --size=WxH           viewport in CSS pixels at device pixel ratio 1 (default 480x270).
   --site=x,z           metres; where solid edits land (default: the scene centre, 0,0).
+  --pen-node=<text>[,..]
+                       restrict pen target to matching node id or asset; a list cycles per stroke.
+  --pen-size=N         pen diameter in voxels (default 3, range 1–64).
+  --pen-samples=N      samples per pen stroke (default 16, range 2–512); travel grows up to the prop width.
+  --pen-camera=<view>  benchmark (default), or close for a closer view of the edited surface.
+  --sample-cache=<arm> product (default), or reference to compile the prior uncached imported sampler.
+  --pen-images=<dir>   Dawn only: save settled baseline, edited, and undo PNGs outside sample timing.
   --max-frames=N       frame cap per edit (default 600; 240 with --device=dawn).
   --json=<path>        write everything the tables are made from.
   --help
+
+Set FLUID_EDIT_PROBE_PROGRESS=1 to print build status changes on stderr.
 
 Edits
   none            an equal document under a new identity: what any document change costs before its
@@ -87,6 +111,8 @@ Edits
   node-material   one scenery node's material record.
   fluid-optics    the fluid's absorption.
   material-model  one scenery node's materialModel.
+  pen-draw        16 samples of the live Pen tool on a nearby imported paver/lounger, then undo.
+  pen-carve       the same live stroke with Carve, including imported scenery, then undo.
   "all" runs them in that order over one world build, returning to the base document between edits.
   If the renderer stops, the edits left are listed with the command that runs them from a fresh world.
 
@@ -122,7 +148,7 @@ The world build is timed separately and is never part of an edit's numbers.`;
 
 const EDIT_NAMES = ["none", "voxel", "erase", "voxel-inside", "sphere", "slab", "undo",
   "palette-tint", "node-material", "fluid-optics", "material-model", "lamp-colour", "lamp-strength",
-  "sun-colour", "sun-strength", "sun-direction"] as const;
+  "sun-colour", "sun-strength", "sun-direction", "pen-draw", "pen-carve"] as const;
 type EditName = typeof EDIT_NAMES[number];
 
 interface Options {
@@ -130,10 +156,17 @@ interface Options {
   scene: string;
   edits: EditName[];
   fluid: "off" | "scene";
+  simulationSteps: number;
   width: number;
   height: number;
   site: readonly [number, number];
   maxFrames: number;
+  penNode?: string;
+  penSize: number;
+  penSamples: number;
+  penCamera: "benchmark" | "close";
+  sampleCache: "product" | "reference";
+  penImages?: string;
   json?: string;
 }
 
@@ -164,12 +197,23 @@ function parseOptions(argv: readonly string[]): Options {
   const maxFrames = Number(take("max-frames") ?? (device === "dawn" ? 240 : 600));
   if (!Number.isInteger(maxFrames) || maxFrames < 8) throw new Error("--max-frames must be an integer of at least 8.");
   const options: Options = {
-    device, fluid, edits, maxFrames,
+    device, fluid, edits, maxFrames, simulationSteps: Number(take("simulation-steps") ?? 0),
     scene: take("scene") ?? "hero-garden-hose-x10",
     width: Number(size[1]), height: Number(size[2]),
     site: [site[0]!, site[1]!],
     json: take("json"),
+    penNode: take("pen-node"), penSize: Number(take("pen-size") ?? 3), penImages: take("pen-images"),
+    penSamples: Number(take("pen-samples") ?? 16), penCamera: (take("pen-camera") ?? "benchmark") as Options["penCamera"],
+    sampleCache: (take("sample-cache") ?? "product") as Options["sampleCache"],
   };
+  if (!Number.isInteger(options.penSize) || options.penSize < 1 || options.penSize > 64) throw new Error("--pen-size must be an integer from 1 to 64.");
+  if (!Number.isInteger(options.penSamples) || options.penSamples < 2 || options.penSamples > 512) throw new Error("--pen-samples must be an integer from 2 to 512.");
+  if (options.penCamera !== "benchmark" && options.penCamera !== "close") throw new Error("--pen-camera must be benchmark or close.");
+  if (options.sampleCache !== "product" && options.sampleCache !== "reference") throw new Error("--sample-cache must be product or reference.");
+  if (options.penImages && device !== "dawn") throw new Error("--pen-images requires --device=dawn.");
+  if (!Number.isInteger(options.simulationSteps) || options.simulationSteps < 0 || options.simulationSteps > 64) throw new Error("--simulation-steps must be an integer from 0 to 64.");
+  if (options.simulationSteps && (device !== "dawn" || fluid !== "scene")) throw new Error("--simulation-steps requires --device=dawn --fluid=scene.");
+  if (options.simulationSteps && edits.some(edit => edit !== "pen-draw" && edit !== "pen-carve" && edit !== "none")) throw new Error("Advancing smoke supports --edit=pen-draw,pen-carve or none.");
   if (values.size > 0) throw new Error(`Unrecognised option --${[...values.keys()][0]}. Run with --help.`);
   return options;
 }
@@ -210,10 +254,20 @@ interface StageTally {
 const CREATED_LABEL_CAP = 48;
 /** Passes the probe can time between two reads. */
 const PASS_TIMING_CAPACITY = 2048;
+interface GpuPassTimeline {
+  /** First recorded beginning to last recorded end; excludes waiting before the first GPU pass. */
+  span_ms: number;
+  /** Union of pass intervals, avoiding double-counting overlapping backend timestamps. */
+  covered_ms: number;
+  sum_ms: number;
+  intervals: { label: string; begin_ms: number; end_ms: number }[];
+}
 const emptyTally = (): GpuTally => ({ uploadBytes: 0, uploads: {}, passes: {}, directDispatches: 0, indirectDispatches: 0,
   renderPasses: 0, directDraws: 0, indirectDraws: 0, copies: 0, clears: 0, submits: 0, creations: {}, created: [] });
 
 class Recorder {
+  referenceSampleCache = false;
+  sampleCacheReplacements = 0;
   readonly bufferMemory = { liveBytes: 0, peakBytes: 0, byLabel: {} as Record<string, number> };
   /** Texel storage the product asked for: every mip and layer, block-compressed formats not modelled. */
   readonly textureMemory = { liveBytes: 0, peakBytes: 0, byLabel: {} as Record<string, number> };
@@ -226,6 +280,7 @@ class Recorder {
   private readonly pipelines = new WeakMap<object, string>();
   /** Timestamp queries the probe writes around every pass the product begins. A real device only. */
   private timing?: { device: GPUDevice; querySet: GPUQuerySet; resolved: GPUBuffer; read: GPUBuffer; labels: string[]; untimed: number };
+  lastPassTimeline?: GpuPassTimeline;
 
   /** Time every pass on `device` from here on. */
   timePasses(device: GPUDevice): void {
@@ -248,6 +303,7 @@ class Recorder {
 
   /** GPU time inside each pass begun since the last call, summed by label. */
   async takePassTimes(): Promise<Record<string, number> | undefined> {
+    this.lastPassTimeline = undefined;
     const timing = this.timing;
     if (!timing) return undefined;
     const labels = timing.labels, times: Record<string, number> = {};
@@ -260,6 +316,22 @@ class Recorder {
     timing.device.queue.submit([encoder.finish()]);
     await timing.read.mapAsync(GPUMapMode.READ, 0, labels.length * 16);
     const stamps = new BigUint64Array(timing.read.getMappedRange(0, labels.length * 16));
+    const valid = labels.flatMap((label, slot) => {
+      const begin = stamps[slot * 2]!, end = stamps[slot * 2 + 1]!;
+      return end > begin ? [{ label, begin, end }] : [];
+    });
+    if (valid.length) {
+      const origin = valid.reduce((minimum, interval) => interval.begin < minimum ? interval.begin : minimum, valid[0]!.begin);
+      const intervals = valid.map(({ label, begin, end }) => ({ label,
+        begin_ms: Number(begin - origin) / 1e6, end_ms: Number(end - origin) / 1e6 }));
+      let covered = 0, until = 0;
+      for (const interval of [...intervals].sort((a, b) => a.begin_ms - b.begin_ms)) {
+        covered += Math.max(0, interval.end_ms - Math.max(until, interval.begin_ms));
+        until = Math.max(until, interval.end_ms);
+      }
+      this.lastPassTimeline = { span_ms: until, covered_ms: covered,
+        sum_ms: intervals.reduce((sum, interval) => sum + interval.end_ms - interval.begin_ms, 0), intervals };
+    }
     labels.forEach((label, slot) => {
       const began = stamps[slot * 2]!, ended = stamps[slot * 2 + 1]!;
       if (ended > began) times[label] = (times[label] ?? 0) + Number(ended - began) / 1e6;
@@ -459,11 +531,35 @@ function recordingDevice(raw: GPUDevice, recorder: Recorder): GPUDevice {
       },
     });
   };
+  const bundleDraws = new WeakMap<GPURenderBundle, { direct: number; indirect: number }>();
+  const renderBundle = (pass: GPURenderBundleEncoder) => {
+    const tally = { direct: 0, indirect: 0 };
+    const drawn = (counter: "direct" | "indirect", method: unknown) => (...args: unknown[]) => {
+      tally[counter] += 1; return forward(pass, method, args);
+    };
+    return overlay(pass, {
+      draw: drawn("direct", pass.draw), drawIndexed: drawn("direct", pass.drawIndexed),
+      drawIndirect: drawn("indirect", pass.drawIndirect), drawIndexedIndirect: drawn("indirect", pass.drawIndexedIndirect),
+      finish(...args: unknown[]) {
+        const bundle = forward(pass, pass.finish, args) as GPURenderBundle;
+        bundleDraws.set(bundle, tally); return bundle;
+      },
+    });
+  };
   const renderPass = (pass: GPURenderPassEncoder) => {
     const drawn = (counter: "directDraws" | "indirectDraws", method: unknown) => (...args: unknown[]) => { recorder.gpu[counter] += 1; return forward(pass, method, args); };
     return overlay(pass, {
       draw: drawn("directDraws", pass.draw), drawIndexed: drawn("directDraws", pass.drawIndexed),
       drawIndirect: drawn("indirectDraws", pass.drawIndirect), drawIndexedIndirect: drawn("indirectDraws", pass.drawIndexedIndirect),
+      executeBundles(bundles: Iterable<GPURenderBundle>) {
+        const list = [...bundles];
+        for (const bundle of list) {
+          const tally = bundleDraws.get(bundle);
+          recorder.gpu.directDraws += tally?.direct ?? 0;
+          recorder.gpu.indirectDraws += tally?.indirect ?? 0;
+        }
+        return pass.executeBundles(list);
+      },
     });
   };
   const encoder = (inner: GPUCommandEncoder) => {
@@ -501,13 +597,25 @@ function recordingDevice(raw: GPUDevice, recorder: Recorder): GPUDevice {
     createBindGroupLayout: create("bind group layout", raw.createBindGroupLayout),
     createPipelineLayout: create("pipeline layout", raw.createPipelineLayout),
     createSampler: create("sampler", raw.createSampler),
-    createShaderModule: create("shader module", raw.createShaderModule),
+    createShaderModule: (descriptor: GPUShaderModuleDescriptor) => {
+      let code = descriptor.code;
+      if (recorder.referenceSampleCache) {
+        const cached = meshVolumeWGSL("sceneFieldProgramBlockVolume", "loadArenaWord", true);
+        if (code.includes(cached)) {
+          code = code.replace(cached, meshVolumeWGSL("sceneFieldProgramBlockVolume", "loadArenaWord", false));
+          recorder.sampleCacheReplacements++;
+        }
+      }
+      recorder.created("shader module", descriptor.label);
+      return raw.createShaderModule({ ...descriptor, code });
+    },
     createQuerySet: create("query set", raw.createQuerySet),
     createComputePipeline: pipeline("compute pipeline", raw.createComputePipeline),
     createComputePipelineAsync: pipeline("compute pipeline", raw.createComputePipelineAsync),
     createRenderPipeline: pipeline("render pipeline", raw.createRenderPipeline),
     createRenderPipelineAsync: pipeline("render pipeline", raw.createRenderPipelineAsync),
     createCommandEncoder: (...args: unknown[]) => encoder(forward(raw, raw.createCommandEncoder, args) as GPUCommandEncoder),
+    createRenderBundleEncoder: (...args: unknown[]) => renderBundle(forward(raw, raw.createRenderBundleEncoder, args) as GPURenderBundleEncoder),
   });
 }
 
@@ -562,6 +670,7 @@ function createFakeGpu(): GPU {
     createShaderModule: (descriptor: GPUShaderModuleDescriptor) => ({ label: descriptor?.label, getCompilationInfo: () => Promise.resolve({ messages: [] }) }),
     createQuerySet: () => ({ destroy() {} }),
     createCommandEncoder: () => anything(),
+    createRenderBundleEncoder: () => anything(),
     createComputePipeline: pipeline, createRenderPipeline: pipeline,
     createComputePipelineAsync: (descriptor: { label?: string }) => Promise.resolve(pipeline(descriptor)),
     createRenderPipelineAsync: (descriptor: { label?: string }) => Promise.resolve(pipeline(descriptor)),
@@ -588,6 +697,16 @@ function createFakeGpu(): GPU {
 const SWAP_FORMAT: GPUTextureFormat = "bgra8unorm";
 
 interface FrameImage { width: number; height: number; pixels: Uint8Array }
+
+function saveCanvasPng(path: string, frame: FrameImage): void {
+  const rgb = new Uint8Array(frame.width * frame.height * 3);
+  for (let i = 0; i < frame.width * frame.height; i++) {
+    rgb[3 * i] = frame.pixels[4 * i + 2]!;
+    rgb[3 * i + 1] = frame.pixels[4 * i + 1]!;
+    rgb[3 * i + 2] = frame.pixels[4 * i]!;
+  }
+  writeFileSync(path, encodeRgbPng({ width: frame.width, height: frame.height, rgb }));
+}
 
 /** What crossed between the client and its worker, and what handling it cost. */
 interface Traffic {
@@ -620,6 +739,9 @@ class BrowserHost {
   readonly statuses: GPUStatus[] = [];
   readonly builds: BuildRecord[] = [];
   readonly validationErrors: string[] = [];
+  gpuInfo?: Extract<WebGPURenderWorkerResponse, { type: "gpu-info" }>["info"];
+  readonly advanceCompletions_s: number[] = [];
+  readonly simulationErrors: string[] = [];
   effectiveStatus?: EffectiveRendererStatus;
   failure?: string;
   /** The device the renderer was granted, without the recording layer. */
@@ -731,9 +853,33 @@ class BrowserHost {
   }
 
   private observe(message: WebGPURenderWorkerResponse): void {
+    if (message.type === "gpu-info") {
+      this.gpuInfo = message.info;
+      for (const failure of [message.info.simulationPipelineError, message.info.topologyGenerationError,
+        message.info.simulationFailure && JSON.stringify(message.info.simulationFailure)]) {
+        if (failure && !this.simulationErrors.includes(failure)) this.simulationErrors.push(failure);
+      }
+    }
+    if (message.type === "advance-completed") this.advanceCompletions_s.push(message.time_s);
     if (message.type === "effective-renderer-status") this.effectiveStatus = message.status;
+    // Renderer-only worlds announce source readiness before compiling their
+    // presentation. That optional compilation need not emit another lifecycle
+    // "ready" status, so use the actual submitted, active presentation as its
+    // completion receipt. Otherwise the probe can keep calling settled frames
+    // a build forever. Native mesh convergence is still checked in settle().
+    if (message.type === "frame" && message.metrics.presentationSubmitted
+      && this.effectiveStatus?.state === "active" && this.buildStarted_ms !== undefined) {
+      this.builds.push({ kind: this.buildKind, ms: performance.now() - this.buildStarted_ms,
+        label: "Active sparse presentation submitted" });
+      this.buildStarted_ms = undefined;
+    }
     if (message.type !== "status") return;
     const status = message.status;
+    const previous = this.statuses.at(-1);
+    if (process.env.FLUID_EDIT_PROBE_PROGRESS === "1"
+      && (previous?.state !== status.state || previous.label !== status.label)) {
+      console.error(`probe status ${status.state}: ${status.label}`);
+    }
     this.statuses.push(status);
     // Only a solver or scene build carries a kind; renderer start-up does not.
     const kind = (status as { kind?: string }).kind;
@@ -816,6 +962,8 @@ async function optionalExport(path: string, name: string): Promise<unknown> {
 
 const LIVE_SCENE_PATH = "../lib/svo/features/scene-publication/webgpu-live-svo-scene.ts";
 const STAGES: readonly { owner: string; path: string; methods: readonly string[] }[] = [
+  { owner: "SceneInteractionHost", path: "../lib/interaction/runtime/host.ts", methods: ["validateSolidEdit", "replaceScene"] },
+  { owner: "Box3DWorld", path: "../lib/interaction/adapters/box3d/world.ts", methods: ["validateSolidEdit", "updateSolids"] },
   { owner: "FluidLabRenderer", path: "../lib/core/webgpu-renderer.ts",
     methods: ["acceptLiveSolidEdit", "validateLiveSolidEdit", "previewLiveSolidEdit", "publishRenderScene", "draw"] },
   { owner: "WebGPULiveSvoScene", path: LIVE_SCENE_PATH,
@@ -859,6 +1007,48 @@ function createScene(id: string): { scene: SceneDescription; camera: CameraState
 
 type Cell = [number, number, number];
 interface SolidEdit { patches: SolidWorldVoxelPatch[]; note: string; bounds: { minimum: Cell; maximumExclusive: Cell } }
+
+/** A reproducible pointer sweep on actual imported scenery, not fabricated patches. */
+function planPenStroke(scene: SceneDescription, site: readonly [number, number], carve: boolean, diameter = 3, requestedNode?: string, samples = 16) {
+  const catalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
+  const owner = new Map<number, string>();
+  for (const span of catalog.spans) for (let i = span.from; i < span.to; i++) owner.set(i, span.nodeId);
+  const candidates = catalog.primitives.flatMap((primitive, index) => {
+    if (primitive.kind !== "field-program" || !primitive.program.sampledVolume || primitive.tags.includes("shell")) return [];
+    if (requestedNode && !owner.get(index)?.includes(requestedNode) && !primitive.program.sampledVolume.asset.includes(requestedNode)) return [];
+    const box = primitive.aabb_m;
+    const x = .5 * (box.min.x + box.max.x), z = .5 * (box.min.z + box.max.z);
+    return [{ primitive, nodeId: owner.get(index), distance: Math.hypot(x - site[0], z - site[1]),
+      preferred: /paver|lounger/.test(primitive.program.sampledVolume.asset) }];
+  }).sort((a, b) => Number(b.preferred) - Number(a.preferred) || a.distance - b.distance);
+  const values = toolValues(penTool, { size: diameter, mode: carve ? 1 : 0 });
+  const cells = sceneCellSizes_m(scene);
+  for (const candidate of candidates.slice(0, 64)) {
+    if (!candidate.nodeId) continue;
+    const box = candidate.primitive.aabb_m;
+    const axis = box.max.x - box.min.x >= box.max.z - box.min.z ? "x" : "z";
+    const extent = box.max[axis] - box.min[axis];
+    const width = Math.min(extent * .6, (samples - 1) * cells[axis === "x" ? 0 : 2]);
+    const rays: EditorRay[] = Array.from({ length: samples }, (_, i) => ({ origin: {
+      x: .5 * (box.min.x + box.max.x) + (axis === "x" ? (i / (samples - 1) - .5) * width : 0),
+      y: box.max.y + .25,
+      z: .5 * (box.min.z + box.max.z) + (axis === "z" ? (i / (samples - 1) - .5) * width : 0),
+    }, direction: { x: 0, y: -1, z: 0 } }));
+    if (!rays.every(ray => scenerySurfaceAt(scene, ray)?.nodeId === candidate.nodeId)) continue;
+    const gesture = penTool.begin({ scene, ray: rays[0]!, values });
+    if (!gesture) continue;
+    let patches: readonly SolidWorldVoxelPatch[] = [];
+    for (const ray of rays) patches = gesture.update(ray)?.patches ?? patches;
+    if (!patches.length) continue;
+    const bounds = {
+      minimum: [0, 1, 2].map(a => Math.min(...patches.map(p => p.minimum[a]!))) as Cell,
+      maximumExclusive: [0, 1, 2].map(a => Math.max(...patches.map(p => p.maximumExclusive[a]!))) as Cell,
+    };
+    return { rays, values, nodeId: candidate.nodeId, solid: { patches: [...patches], bounds,
+      note: `${samples} live Pen ${carve ? "Carve" : "Draw"} samples on ${candidate.nodeId}, diameter ${diameter} voxels, then one undo` } };
+  }
+  return undefined;
+}
 
 /**
  * Where the solid edits land, in the signed patch lattice.
@@ -1085,6 +1275,7 @@ interface FrameRecord {
   wall_ms?: number;
   /** GPU time inside each pass of the frame, by label. Dawn only. */
   gpuPasses_ms?: Record<string, number>;
+  gpuTimeline?: GpuPassTimeline;
   submitted: boolean;
   gpu: GpuTally;
   stages: Record<string, StageTally>;
@@ -1102,6 +1293,22 @@ interface BudgetRow { measure: string; value: string; budget: string; verdict: "
 interface EditReport {
   edit: EditName;
   description: string;
+  pen?: {
+    nodeId: string;
+    planning_ms: number;
+    samples: { geometry_ms: number; acceptance_ms: number; update_ms: number; patches: number;
+      published: boolean; frameHost_ms: number; frameWall_ms?: number; gpuPasses_ms?: Record<string, number>; gpuTimeline?: GpuPassTimeline;
+      dirtyBuildPlan?: Record<string, number | boolean>;
+      /** Inclusive host stages across acceptance and the immediately following frame. */
+      stages: Record<string, StageTally> }[];
+    publications: number;
+    transactionFinishes: number;
+    pipelineWarmup_ms?: number;
+    images?: { baseline: string; edited: string; undo: string; changedPixels: number; undoChangedPixels: number };
+    pipelineVariants?: { beforeWarmup: { cached: string[]; pending: string[] };
+      before: { cached: string[]; pending: string[] }; after: { cached: string[]; pending: string[] } };
+    undo?: { acceptance_ms: number; frames: number; restoredPatchCount: number; mesh?: Mutable };
+  };
   refused?: string;
   skipped?: string;
   accept?: { reply_ms: number; gpu: GpuTally; stages: Record<string, StageTally> };
@@ -1201,6 +1408,17 @@ class Probe {
   private idle = { host_ms: 0, uploadBytes: 0, voxelizationDispatches: 0 };
   private voxelDocument?: SceneDescription;
   private phase = "";
+  private penStrokeIndex = 0;
+  private simulationTime_s = 0;
+  private interactionHost?: import("../lib/interaction/runtime/host").SceneInteractionHost;
+  private readonly externalCompletions_s: number[] = [];
+  readonly simulation = {
+    mode: "advancing fluid with fixed rigid-body poses",
+    bodyIds: [] as string[],
+    methodConfig: undefined as Mutable | undefined,
+    checkpoints: [] as { phase: string; requestedSteps: number; completedReceipts: number; before_s: number; after_s: number }[],
+    error: undefined as string | undefined,
+  };
   /** How the world build chose its bricks. */
   brickSelection = "the GPU's selection, read back";
   worldBuild?: { ms: number; frames: number; builds: BuildRecord[]; creations: Record<string, number>; uploadBytes: number; settleFrames: number };
@@ -1215,9 +1433,11 @@ class Probe {
   /** Hand `next` to the client as the edit of the drawn document, and draw it from the next frame on. */
   private async accept(next: SceneDescription): Promise<number> {
     const started = performance.now();
+    this.interactionHost?.validateSolidEdit(next);
     const answered = this.client.validateLiveSolidEdit(next, this.document);
     const caller_ms = performance.now() - started;
     await answered;
+    await this.interactionHost?.replaceScene(next);
     this.document = next;
     return caller_ms;
   }
@@ -1226,22 +1446,105 @@ class Probe {
   private async frame(readImage: boolean): Promise<FrameRecord> {
     const answered = this.host.waitFor<FrameResponse>((message) => message.type === "frame");
     const started = performance.now();
-    this.client.draw(0, this.document, this.camera, ...this.drawTail);
+    this.client.draw(this.simulationTime_s, this.document, this.camera, ...this.drawTail);
     const caller_ms = performance.now() - started;
-    const response = await answered;
+    const response = await this.boundedSimulationWait(answered, "worker frame");
     const host_ms = performance.now() - started;
-    await this.host.idle();
+    await this.boundedSimulationWait(this.host.idle(), "GPU frame completion");
     const wall_ms = this.options.device === "dawn" ? performance.now() - started : undefined;
     const gpuPasses_ms = await this.recorder.takePassTimes();
     const image = readImage ? await this.host.readCanvas() : undefined;
     const taken = this.recorder.take();
     const revision = this.sourceRevision();
-    return { host_ms, caller_ms, traffic: this.host.takeTraffic(), wall_ms, gpuPasses_ms, submitted: response.metrics.presentationSubmitted, gpu: taken.gpu, stages: taken.stages,
+    return { host_ms, caller_ms, traffic: this.host.takeTraffic(), wall_ms, gpuPasses_ms, gpuTimeline: this.recorder.lastPassTimeline,
+      submitted: response.metrics.presentationSubmitted, gpu: taken.gpu, stages: taken.stages,
       maintenance: taken.stages[MAINTENANCE_STAGE] && Boolean(taken.stages[MAINTENANCE_STAGE]!.returnedTrue),
       voxelizationDispatches: taken.stages[VOXELIZATION_STAGE]?.dispatches,
       revision,
       buildInFlight: this.host.buildInFlight,
       meshPending: this.options.device === "dawn" && this.surfaceMesh()?.state === "pending", image };
+  }
+
+  private async boundedSimulationWait<T>(promise: Promise<T>, operation: string): Promise<T> {
+    if (!this.options.simulationSteps) return promise;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([promise, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Simulation ${operation} stalled for 120 seconds.`)), 120_000);
+      })]);
+    } finally { if (timer !== undefined) clearTimeout(timer); }
+  }
+
+  private assertSimulationHealthy(): void {
+    if (this.host.failure || this.host.simulationErrors.length || this.host.validationErrors.length) {
+      throw new Error(`Advancing simulation failed: ${this.host.failure ?? [...this.host.simulationErrors, ...this.host.validationErrors].join("; ")}`);
+    }
+  }
+
+  private simulationCompletedTime(): number { return this.externalCompletions_s.at(-1) ?? this.host.advanceCompletions_s.at(-1) ?? 0; }
+  private simulationReceiptCount(): number { return this.externalCompletions_s.length + this.host.advanceCompletions_s.length; }
+  simulationReport() {
+    return { ...this.simulation, completedReceipts: this.simulationReceiptCount(), completedTime_s: this.simulationCompletedTime(),
+      clockAdvanceReceipts: this.host.advanceCompletions_s.length, externalFluidResponses: this.externalCompletions_s.length,
+      interaction: this.interactionHost ? { readiness: this.interactionHost.getView().readiness,
+        snapshot: this.interactionHost.getView().snapshot } : undefined,
+      finalGpuInfo: this.host.gpuInfo, errors: this.host.simulationErrors };
+  }
+
+  /** Wait for the production GPU completion receipt, not merely an encoded frame. */
+  private async advancingFrame(): Promise<FrameRecord> {
+    if (this.interactionHost) {
+      const before = this.simulationCompletedTime(), tick = this.interactionHost.getView().snapshot?.tick ?? 0;
+      await this.interactionHost.advance(1 / 60);
+      const view = this.interactionHost.getView();
+      if (view.readiness.state !== "ready" || view.snapshot?.tick !== tick + 1 || this.simulationCompletedTime() <= before) {
+        throw new Error("Box3D/fluid shared-clock step did not complete with a ready host and advancing tick.");
+      }
+      this.drawTail[0] = this.interactionHost.currentBodies();
+      for (const body of this.drawTail[0]) if (![body.position_m, body.orientation, body.linearVelocity_m_s, body.angularVelocity_rad_s]
+        .every(value => Object.values(value).every(Number.isFinite))) throw new Error(`Non-finite coupled body state: ${body.description.id}`);
+      this.simulationTime_s = view.snapshot.time_s;
+      const frame = await this.frame(false);
+      this.assertSimulationHealthy();
+      return frame;
+    }
+    const before = this.host.advanceCompletions_s.at(-1) ?? 0;
+    this.simulationTime_s = Math.max(this.simulationTime_s, this.host.gpuInfo?.submittedTime_s ?? 0) + 1 / 30;
+    const deadline = performance.now() + 120_000;
+    do {
+      const frame = await this.frame(false);
+      this.assertSimulationHealthy();
+      const completed = this.host.advanceCompletions_s.at(-1) ?? 0;
+      if (completed > before) {
+        const info = this.host.gpuInfo;
+        if (!info || info.simulationPipelinesReady === false || (info.completedTime_s ?? 0) < completed) {
+          throw new Error("Advance receipt lacks a ready solver and matching gpu-info completed time.");
+        }
+        // Do not leave an owed target-clock step running during the paused
+        // image/mesh settling that follows a smoke checkpoint.
+        this.simulationTime_s = info.submittedTime_s ?? completed;
+        return frame;
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 8));
+    } while (performance.now() < deadline);
+    throw new Error(`Simulation made no completed progress in 120 seconds (solver ${this.host.gpuInfo ? "present" : "missing"}, pipelines ready ${this.host.gpuInfo?.simulationPipelinesReady}, submitted ${this.host.gpuInfo?.submittedTime_s}, completed ${this.host.gpuInfo?.completedTime_s}).`);
+  }
+
+  private async simulationCheckpoint(phase: string): Promise<void> {
+    if (!this.options.simulationSteps) return;
+    const before_s = this.simulationCompletedTime(), beforeCount = this.simulationReceiptCount();
+    await this.client.setSimulationRunning(true);
+    this.interactionHost?.setRunning(true);
+    try {
+      for (let i = 0; i < this.options.simulationSteps; i++) await this.advancingFrame();
+      const after_s = this.simulationCompletedTime();
+      this.simulation.checkpoints.push({ phase, requestedSteps: this.options.simulationSteps,
+        completedReceipts: this.simulationReceiptCount() - beforeCount, before_s, after_s });
+      console.log(`simulation ${phase}: completed ${before_s.toFixed(6)} → ${after_s.toFixed(6)} s; healthy GPU receipts`);
+    } catch (error) {
+      this.simulation.error = error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally { this.interactionHost?.setRunning(false); await this.client.setSimulationRunning(false); }
   }
 
   /** The published sparse scene's revision word, which moves when its topology is republished. */
@@ -1291,6 +1594,7 @@ class Probe {
     }
     if (options.device === "fake") await this.selectBricksOnTheHost();
     await this.client.initialize();
+    if (this.options.simulationSteps) await this.client.setSimulationRunning(false);
     if (this.host.failure) throw new Error(`The renderer did not start: ${this.host.failure}`);
     await this.loadDrawArguments();
     await this.loadKeyFunctions();
@@ -1298,6 +1602,28 @@ class Probe {
     const scene = options.fluid === "off"
       ? { ...this.authored.scene, systems: { ...this.authored.scene.systems, fluid: false } } as SceneDescription
       : this.authored.scene;
+    if (options.simulationSteps) {
+      if (scene.interaction?.entities.length) {
+        const { SceneInteractionHost } = await import("../lib/interaction/runtime/host");
+        this.interactionHost = new SceneInteractionHost(scene, { fluid: {
+          failureReason: () => this.host.failure ?? this.host.simulationErrors[0],
+          step: async request => {
+          const result = await this.boundedSimulationWait(this.client.advanceInteractionFluid(request), "external fluid response");
+          this.assertSimulationHealthy();
+          const info = this.host.gpuInfo;
+          if (!info || !Number.isFinite(info.completedTime_s) || Math.abs((info.completedTime_s ?? 0) - request.time_s) > 1e-7
+            || request.time_s <= this.simulationCompletedTime()) {
+            throw new Error(`External fluid response lacks matching gpu-info completion: requested ${request.time_s}, completed ${info?.completedTime_s}.`);
+          }
+          this.externalCompletions_s.push(request.time_s);
+          return result;
+        } } });
+        await this.interactionHost.ready;
+        this.drawTail[0] = this.interactionHost.currentBodies();
+        this.simulation.mode = "authored SceneInteractionHost Box3D + worker NB-FLIP external steps";
+      }
+      this.simulation.bodyIds = this.drawTail[0].map(body => body.description.id);
+    }
     this.baseDocument = this.document = scene;
     this.recorder.take();
     const started = performance.now();
@@ -1329,6 +1655,7 @@ class Probe {
       frames: built + 1, builds: this.host.builds.splice(0), creations, uploadBytes, settleFrames: frames.length - built - 1 };
     this.sites = new EditSites(scene, options.site, this.recorder.instances.get("OctreeSparseBrickWorld"));
     this.host.takeTraffic();
+    await this.simulationCheckpoint("baseline");
   }
 
   /**
@@ -1356,10 +1683,26 @@ class Probe {
     const resolved = await optionalExport("../lib/core/stores/method-store.ts", "resolvedMethodValues") as ((state: Mutable) => unknown) | undefined;
     const uiStore = await optionalExport("../lib/core/stores/ui-store.ts", "createUIStore") as (() => { getState(): Mutable }) | undefined;
     if (!methodStore || !resolved) throw new Error("lib/core/stores/method-store no longer exports createMethodStore and resolvedMethodValues; the probe cannot form the product's run configuration.");
-    const method = methodStore().getState();
+    const store = methodStore();
+    if (this.options.simulationSteps && this.options.scene !== "hall") {
+      const { getSceneDefinition } = await import("../lib/core/scenes");
+      const profile = getSceneDefinition(this.options.scene).methodProfile;
+      if (profile) {
+        const applyProfile = store.getState().applyProfile;
+        if (typeof applyProfile !== "function") throw new Error("The method store cannot apply the authored scene profile.");
+        applyProfile(profile);
+      }
+    }
+    const method = store.getState();
     const ui = uiStore?.().getState();
     this.methodId = method.methodId;
     this.runConfig = { methodId: method.methodId, quality: method.quality, values: resolved(method), simulationEpoch: 0, inFlightDepth: 1 };
+    if (this.options.simulationSteps) {
+      if (this.options.scene === "backyard-pool-party" && this.methodId !== "uniform-narrow-band-flip") {
+        throw new Error(`Pool Party smoke requires its NB-FLIP method; resolved ${this.methodId}.`);
+      }
+      this.simulation.methodConfig = structuredClone(this.runConfig);
+    }
     const lighting = ui && {
       shadowsEnabled: ui.svoShadowsEnabled, ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
       silhouetteRefinementEnabled: ui.silhouetteRefinementEnabled, coneTracingMode: ui.svoConeTracingMode,
@@ -1442,12 +1785,162 @@ class Probe {
     if (this.host.failure) { report.skipped = `not run: the renderer had stopped (${this.host.failure}).`; return report; }
     this.phase = "preparing the edit";
     try {
-      await this.run(report, edit);
+      if (edit === "pen-draw" || edit === "pen-carve") await this.runPen(report, edit === "pen-carve");
+      else await this.run(report, edit);
     } catch (error) {
       report.refused = `${error instanceof Error ? error.message : String(error)} — while ${this.phase}`;
+      if (this.options.simulationSteps) this.simulation.error = report.refused;
       this.recorder.take();
     }
     return report;
+  }
+
+  /** Real plugin + live transaction + worker acceptance, one presented frame per pointer sample. */
+  private async runPen(report: EditReport, carve: boolean): Promise<void> {
+    await this.restoreBase();
+    await this.simulationCheckpoint(`before ${report.edit}`);
+    const base = this.document, planningStart = performance.now();
+    const requestedNodes = this.options.penNode?.split(",");
+    const requestedNode = requestedNodes?.[this.penStrokeIndex % requestedNodes.length];
+    const plan = planPenStroke(base, this.options.site, carve, this.options.penSize, requestedNode, this.options.penSamples);
+    if (!plan) { this.penStrokeIndex++; report.skipped = `No accessible imported surface ${requestedNode ? `matching ${requestedNode}` : "near the requested site"}.`; return; }
+    const pen = report.pen = { nodeId: plan.nodeId, planning_ms: performance.now() - planningStart,
+      samples: [] as NonNullable<EditReport["pen"]>["samples"], publications: 0, transactionFinishes: 0 } as NonNullable<EditReport["pen"]>;
+    report.description = plan.solid.note;
+    this.aim(plan.solid);
+    if (this.options.penCamera === "close") this.camera = { ...this.camera, distance_m: this.camera.distance_m * .45, elevation_rad: 1.0 };
+    await this.settle(this.options.maxFrames, false);
+    const renderer = this.recorder.instances.get("SparseVoxelDrySceneRenderer");
+    const pipelineVariants = () => {
+      const keys = (field: string) => { const map = peek(renderer, field); return map instanceof Map ? [...map.keys()].map(String) : []; };
+      return { cached: keys("splitPipelineBundles"), pending: keys("splitPipelineCompiles") };
+    };
+    const beforeWarmup = pipelineVariants(), warmupStart = performance.now();
+    // Startup can present a compatible generic bundle while the scene's
+    // specialized variant compiles (and can prewarm a body-capable twin).
+    // Exclude those async creates from the first edit that runs beside them.
+    const pending = peek(renderer, "splitPipelineCompiles");
+    if (pending instanceof Map && pending.size) {
+      this.phase = "waiting for background pipeline warmup";
+      console.log(`pen startup: waiting for ${pending.size} background pipeline variant(s); excluded from edit timings`);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([Promise.all([...pending.values()]), new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Background pipeline warmup exceeded 120 seconds.")), 120_000);
+        })]);
+      } finally { if (timer !== undefined) clearTimeout(timer); }
+    }
+    pen.pipelineWarmup_ms = performance.now() - warmupStart;
+    const idle = await this.settle(this.options.maxFrames, false);
+    const idleHost = median(idle.slice(-IDLE_FRAMES).map(frame => frame.host_ms));
+    const meshBefore = this.surfaceMesh();
+    const variantsBefore = pipelineVariants();
+    if (variantsBefore.pending.length) throw new Error("Background pipeline variants are still compiling after warmup.");
+    this.penStrokeIndex++;
+    const imageDirectory = this.options.penImages ? resolve(this.options.penImages) : undefined;
+    if (imageDirectory) mkdirSync(imageDirectory, { recursive: true });
+    const imagePath = (phase: string) => join(imageDirectory!, `${this.penStrokeIndex}-${report.edit}-${phase}.png`);
+    const baselineImage = imageDirectory ? await this.host.readCanvas() : undefined;
+    if (baselineImage) saveCanvasPng(imagePath("baseline"), baselineImage);
+    this.host.builds.length = 0; this.host.takeTraffic(); this.recorder.take();
+    const frames: FrameRecord[] = [];
+    let acceptance_ms = 0;
+    const transaction = beginToolTransaction(penTool, {
+      scene: () => this.document,
+      begin: () => {},
+      publish: async (next, previous) => {
+        if (this.document !== previous) throw new Error("Live probe received a stale pen document.");
+        const start = performance.now(); await this.accept(next); acceptance_ms += performance.now() - start;
+        pen.publications++;
+      },
+      finish: () => { pen.transactionFinishes++; },
+      cancel: async () => { if (this.document !== base) await this.accept(base); },
+    }, plan.rays[0]!, plan.values);
+    if (!transaction) throw new Error("The pen lost its planned surface before the stroke began.");
+    const simulationBefore = this.simulationCompletedTime();
+    const simulationReceiptCount = this.simulationReceiptCount();
+    if (this.options.simulationSteps) await this.client.setSimulationRunning(true);
+    if (this.options.simulationSteps) this.interactionHost?.setRunning(true);
+    try {
+      for (const ray of plan.rays) {
+        this.phase = `accepting pen sample ${pen.samples.length + 1}`;
+        acceptance_ms = 0;
+        const publications = pen.publications, start = performance.now();
+        const accepted = transaction.update(ray), geometry_ms = performance.now() - start;
+        const update = await accepted, update_ms = performance.now() - start;
+        const frame = this.options.simulationSteps ? await this.advancingFrame() : await this.frame(false); frames.push(frame);
+        // Publication occurs inside draw; inspect the plan after that frame,
+        // otherwise this reports the preceding pointer sample's dirty region.
+        const proxy = this.recorder.instances.get("SparseSceneProxyVoxelizer");
+        const dirtyBuildPlan = Object.fromEntries(["pending", "drainChunks", "plannedChunks", "chunksRemaining",
+          "plannedChunkBricks", "lastRegionCellCount", "primitiveCount"].flatMap(key => {
+          const value = peek(proxy, key); return typeof value === "number" || typeof value === "boolean" ? [[key, value]] : [];
+        })) as Record<string, number | boolean>;
+        pen.samples.push({ geometry_ms, acceptance_ms, update_ms, patches: update?.patches.length ?? 0,
+          published: pen.publications !== publications, frameHost_ms: frame.host_ms, frameWall_ms: frame.wall_ms,
+          gpuPasses_ms: frame.gpuPasses_ms, gpuTimeline: frame.gpuTimeline, dirtyBuildPlan, stages: frame.stages });
+      }
+      await transaction.finish();
+    } catch (error) { await transaction.finish(true); throw error; }
+    finally { if (this.options.simulationSteps) { this.interactionHost?.setRunning(false); await this.client.setSimulationRunning(false); } }
+    if (this.options.simulationSteps) this.simulation.checkpoints.push({ phase: `during ${report.edit}`, requestedSteps: plan.rays.length,
+      completedReceipts: this.simulationReceiptCount() - simulationReceiptCount,
+      before_s: simulationBefore, after_s: this.simulationCompletedTime() });
+    await this.simulationCheckpoint(`after ${report.edit}`);
+    this.phase = "settling the completed pen stroke";
+    const settled = await this.settle(this.options.maxFrames, false); frames.push(...settled);
+    report.surfaceMesh = { before: meshBefore, after: this.surfaceMesh() };
+    pen.pipelineVariants = { beforeWarmup, before: variantsBefore, after: pipelineVariants() };
+    const editedImage = imageDirectory ? await this.host.readCanvas() : undefined;
+    if (editedImage) saveCanvasPng(imagePath("edited"), editedImage);
+    report.frames = frames.length;
+    report.hostFrames_ms = frames.map(frame => frame.host_ms);
+    report.wallFrames_ms = this.options.device === "dawn" ? frames.map(frame => frame.wall_ms ?? 0) : undefined;
+    report.gpuPassFrames_ms = this.options.device === "dawn" ? frames.map(frame => frame.gpuPasses_ms ?? {}) : undefined;
+    report.frameCapReached = !this.quiet(settled[settled.length - 1]!, settled[settled.length - 2]);
+    // Duplicate pointer hits do not publish an edit. Including their zero
+    // acceptance cost would hide slow edits on densely sampled strokes.
+    report.editHost_ms = median(pen.samples.filter(sample => sample.published).map(sample => sample.acceptance_ms));
+    report.idleFrameHost_ms = idleHost;
+    report.dirtyBricks = this.sites.dirtyBricks(plan.solid.bounds);
+    let uploads = 0;
+    for (const frame of frames) {
+      uploads += frame.gpu.uploadBytes;
+      for (const [name, stage] of Object.entries(frame.stages)) {
+        const total = report.stages[name] ??= { calls: 0, ms: 0, dispatches: 0, uploadBytes: 0 };
+        total.calls += stage.calls; total.ms += stage.ms; total.dispatches += stage.dispatches; total.uploadBytes += stage.uploadBytes;
+        if (stage.settled_ms !== undefined) total.settled_ms = (total.settled_ms ?? 0) + stage.settled_ms;
+      }
+      for (const [kind, count] of Object.entries(frame.gpu.creations)) report.creations[kind] = (report.creations[kind] ?? 0) + count;
+      for (const label of frame.gpu.created) if (report.created.length < CREATED_LABEL_CAP) report.created.push(label);
+      for (const [name, pass] of Object.entries(frame.gpu.passes)) {
+        const total = report.passes[name] ??= { direct: 0, indirect: 0, workgroups: 0 };
+        total.direct += pass.direct; total.indirect += pass.indirect; total.workgroups += pass.workgroups;
+      }
+      report.draws.renderPasses += frame.gpu.renderPasses;
+      report.draws.direct += frame.gpu.directDraws; report.draws.indirect += frame.gpu.indirectDraws;
+      report.directDispatches += frame.gpu.directDispatches; report.indirectDispatches += frame.gpu.indirectDispatches;
+    }
+    this.phase = "undoing the live pen stroke";
+    const undoStart = performance.now(); await this.accept(base);
+    const undoAccept = performance.now() - undoStart, undone = await this.settle(this.options.maxFrames, false);
+    pen.undo = { acceptance_ms: undoAccept, frames: undone.length, restoredPatchCount: this.document.solidVoxels.length, mesh: this.surfaceMesh() };
+    await this.simulationCheckpoint(`after ${report.edit} undo`);
+    const undoImage = imageDirectory ? await this.host.readCanvas() : undefined;
+    if (undoImage) saveCanvasPng(imagePath("undo"), undoImage);
+    if (baselineImage && editedImage && undoImage) pen.images = {
+      baseline: imagePath("baseline"), edited: imagePath("edited"), undo: imagePath("undo"),
+      changedPixels: changedPixels(baselineImage, editedImage), undoChangedPixels: changedPixels(baselineImage, undoImage),
+    };
+    report.rebuilds = this.host.builds.splice(0);
+    report.budget = [
+      { measure: "host accept", value: `${ms(report.editHost_ms)} median/accepted prefix`, budget: "< 5 ms/accepted prefix", verdict: report.editHost_ms < 5 ? "pass" : "FAIL" },
+      { measure: "uploads", value: `${bytes(uploads)} including frame traffic`, budget: "reported for whole stroke", verdict: "" },
+      { measure: "live transaction", value: `${pen.samples.length} samples, ${pen.publications} accepted suffixes, ${pen.transactionFinishes} finish`,
+        budget: `${this.options.penSamples} samples, one finish`, verdict: pen.samples.length === this.options.penSamples && pen.transactionFinishes === 1 ? "pass" : "FAIL" },
+      { measure: "rebuild", value: report.rebuilds.length ? "world rebuilt" : "none", budget: "none", verdict: report.rebuilds.length ? "FAIL" : "pass" },
+      { measure: "undo", value: `${ms(undoAccept)}, ${undone.length} settling frames`, budget: "restore base patches", verdict: this.document === base ? "pass" : "FAIL" },
+    ];
   }
 
   private async run(report: EditReport, edit: EditName): Promise<void> {
@@ -1730,6 +2223,24 @@ function printEdit(report: EditReport): void {
   console.log(`\n== ${report.edit}${report.description ? ` — ${report.description}` : ""}`);
   if (report.skipped) { console.log(`   skipped: ${report.skipped}`); return; }
   if (report.refused) { console.log(`   ${outcome(report)} by the product: ${report.refused}`); return; }
+  if (report.pen) {
+    const active = report.pen.samples.filter(sample => sample.published);
+    const p95 = (values: number[]) => values.sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
+    console.log(table([["measure", "value", "budget", "verdict"], ...report.budget.map(row => [row.measure, row.value, row.budget, row.verdict])]));
+    console.log(`   pointer geometry median ${ms(median(report.pen.samples.map(sample => sample.geometry_ms)))}; accepted-prefix frame host median ${ms(median(active.map(sample => sample.frameHost_ms)))}; planning ${ms(report.pen.planning_ms)} excluded.`);
+    console.log(`   background pipeline warmup ${ms(report.pen.pipelineWarmup_ms ?? 0)} excluded; steady edit timing does not include initial startup.`);
+    const timed = active.filter(sample => sample.gpuTimeline);
+    if (timed.length) console.log(`   accepted-prefix GPU timestamp span median/p95 ${ms(median(timed.map(sample => sample.gpuTimeline!.span_ms)))}/${ms(p95(timed.map(sample => sample.gpuTimeline!.span_ms)))}; interval union median ${ms(median(timed.map(sample => sample.gpuTimeline!.covered_ms)))}; serial frame GPU-complete median/p95 ${ms(median(timed.map(sample => sample.frameWall_ms ?? 0)))}/${ms(p95(timed.map(sample => sample.frameWall_ms ?? 0)))}. No-op, settling and undo frames excluded; not browser presentation latency.`);
+    console.log(`   ${report.frameCapReached ? "WARNING: settling frame cap reached" : "stroke settled"}; ${Object.values(report.creations).reduce((sum, count) => sum + count, 0)} GPU objects created during stroke; ${report.pen.images ? `images saved (${report.pen.images.changedPixels} changed pixels; ${report.pen.images.undoChangedPixels} after undo)` : "images not captured"}.`);
+    console.log(table([["sample", "geometry ms", "acceptance ms", "update ms", "patches", "published", "frame ms"],
+      ...report.pen.samples.map((sample, i) => [String(i + 1), ms(sample.geometry_ms), ms(sample.acceptance_ms), ms(sample.update_ms), String(sample.patches), String(sample.published), ms(sample.frameWall_ms ?? sample.frameHost_ms)])]));
+    const stages = Object.entries(report.stages).sort((a, b) => b[1].ms - a[1].ms);
+    if (stages.length) {
+      console.log("   host stages (inclusive; acceptance and stroke/settling frames):");
+      console.log(table(stages.map(([name, stage]) => [`     ${name}`, ms(stage.ms), `x${stage.calls}`])));
+    }
+    return;
+  }
   const accept = report.accept!;
   const rows: string[][] = [["measure", "value", "budget", "verdict"]];
   for (const row of report.budget) rows.push([row.measure, row.value, row.budget, row.verdict]);
@@ -1777,15 +2288,40 @@ function printEdit(report: EditReport): void {
 
 /** The command line that runs `edits` on the same scene and device from a fresh world. */
 function rerunCommand(options: Options, edits: readonly EditName[]): string {
-  return `${options.device === "dawn" ? "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js " : ""}node --import tsx tools/probe-edit-latency.ts`
-    + ` --device=${options.device} --scene=${options.scene} --edit=${edits.join(",")} --fluid=${options.fluid} --size=${options.width}x${options.height}`
-    + ` --site=${options.site.join(",")}`;
+  const quote = (value: string) => /^[a-zA-Z0-9_./,:=+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+  const arguments_ = ["node", "--import", "tsx", "tools/probe-edit-latency.ts", `--device=${options.device}`,
+    `--scene=${options.scene}`, `--edit=${edits.join(",")}`, `--fluid=${options.fluid}`, `--size=${options.width}x${options.height}`,
+    `--site=${options.site.join(",")}`, `--max-frames=${options.maxFrames}`, `--pen-size=${options.penSize}`, `--simulation-steps=${options.simulationSteps}`,
+    `--pen-samples=${options.penSamples}`, `--pen-camera=${options.penCamera}`, `--sample-cache=${options.sampleCache}`,
+    ...(options.penNode ? [`--pen-node=${options.penNode}`] : []), ...(options.penImages ? [`--pen-images=${options.penImages}`] : [])];
+  return `${options.device === "dawn" ? "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js " : ""}${arguments_.map(quote).join(" ")}`;
 }
 
 async function main(): Promise<void> {
   const options = parseOptions(process.argv.slice(2));
+  const sourcePaths = ["tools/probe-edit-latency.ts", "lib/core/webgpu-renderer.ts", "lib/core/webgpu-sparse-scene-proxies.ts",
+    "lib/core/webgpu-render-worker.ts", "lib/core/webgpu-render-worker-client.ts", "lib/interaction/runtime/host.ts",
+    "lib/interaction/adapters/box3d/world.ts", "lib/methods/uniform/webgpu-uniform-reference.ts",
+    "lib/interaction/adapters/solid-world/collision.ts", "lib/interaction/adapters/solid-world/overlap.ts",
+    "lib/core/imported-assets/mesh-volume.wgsl.ts", "lib/svo/features/scene-publication/svo-field-program.ts",
+    "lib/svo/pipeline/webgpu-svo-dry-scene.ts", "lib/svo/features/construction/webgpu-svo-sparse-bricks.ts",
+    "lib/svo/features/radiance/webgpu-svo-live-derived-builder.ts", "lib/svo/features/scene-publication/svo-sculpt-cuts.ts",
+    "lib/svo/features/scene-publication/svo-sculpt-instances.ts", "lib/svo/features/scene-publication/svo-sculpt-change-bounds.ts",
+    "lib/svo/features/primary-visibility/svo-surface-mesh.ts", "lib/svo/features/shading/program.ts"];
+  const sourceHashes = () => Object.fromEntries(sourcePaths.map(path => {
+    try { return [path, createHash("sha256").update(readFileSync(new URL(`../${path}`, import.meta.url))).digest("hex")]; }
+    catch { return [path, "unavailable"]; }
+  }));
+  const sourcesAtStart = sourceHashes();
   const authored = createScene(options.scene);
+  // The worker runs in this Node realm, where browser-relative asset URLs
+  // cannot be fetched. Preload the exact scene assets from public/ as the
+  // other native rendering harnesses do; report their cost separately.
+  const assetStart = performance.now();
+  await registerSceneMeshAssets(authored.scene);
+  const assetLoadMs = performance.now() - assetStart;
   const recorder = new Recorder();
+  recorder.referenceSampleCache = options.sampleCache === "reference";
   let gpu: GPU;
   let adapterLabel = "recording stand-in device (nothing executed)";
   if (options.device === "dawn") {
@@ -1805,7 +2341,9 @@ async function main(): Promise<void> {
   const validationErrors = host.validationErrors;
   const probe = new Probe(options, recorder, host, authored);
   console.log(`probe-edit-latency: scene ${options.scene}, device ${options.device} (${adapterLabel}), fluid ${options.fluid}, ${options.width}x${options.height}`);
+  console.log(`scene asset preload: ${ms(assetLoadMs)} (excluded from world build and edit timings)`);
   await probe.start();
+  if (recorder.referenceSampleCache && recorder.sampleCacheReplacements === 0) throw new Error("Sampler reference requested but no cached production shader was replaced.");
   const build = probe.worldBuild!;
   console.log(`world build: ${ms(build.ms)} (${build.builds.map((entry) => `${entry.kind}: ${entry.label}`).join("; ") || "no build status seen"}); `
     + `${Object.entries(build.creations).map(([kind, count]) => `${count} ${kind}s`).join(", ")}; ${bytes(build.uploadBytes)} uploaded; `
@@ -1845,14 +2383,21 @@ async function main(): Promise<void> {
     console.log(`\nThe renderer stopped: ${host.failure}. Not run: ${notRun.join(", ")}. A fresh world runs them:\n  ${rerunCommand(options, notRun)}`);
   }
   if (validationErrors.length > 0) console.log(`\nWebGPU validation errors (${validationErrors.length}):\n${validationErrors.slice(0, 12).join("\n")}`);
+  const simulation = options.simulationSteps ? probe.simulationReport() : undefined;
+  const simulationPassed = simulation && !simulation.error && !simulation.errors.length && !host.failure && !validationErrors.length
+    && !reports.some(report => report.refused || report.skipped)
+    && simulation.checkpoints.every(checkpoint => checkpoint.after_s > checkpoint.before_s
+      && checkpoint.completedReceipts >= checkpoint.requestedSteps);
+  if (simulation) console.log(`\nsimulation ${simulationPassed ? "passed" : "FAILED"}: ${simulation.completedReceipts} completed receipts, ${simulation.completedTime_s.toFixed(6)} s; ${simulation.mode}. Edit timing budgets are reported separately.`);
 
   if (options.json) {
-    writeFileSync(options.json, JSON.stringify({ options, adapter: adapterLabel, worldBuild: build, bufferMemory: recorder.bufferMemory, textureMemory: recorder.textureMemory, brickSelection: probe.brickSelection,
-      stagesTimed: recorder.instrumented, stagesNotReported: recorder.notInstrumented, edits: reports, validationErrors }, null, 2));
+    writeFileSync(options.json, JSON.stringify({ options, sampleCacheReplacements: recorder.sampleCacheReplacements, sourceHashes: { start: sourcesAtStart, end: sourceHashes() }, adapter: adapterLabel, assetLoadMs, worldBuild: build, bufferMemory: recorder.bufferMemory, textureMemory: recorder.textureMemory, brickSelection: probe.brickSelection,
+      stagesTimed: recorder.instrumented, stagesNotReported: recorder.notInstrumented, edits: reports, validationErrors,
+      simulation: simulation ? { ...simulation, passed: simulationPassed } : undefined }, null, 2));
     console.log(`\nwrote ${options.json}`);
   }
   // The renderer keeps timers and a never-settling device-lost promise alive.
-  process.exit(validationErrors.length > 0 || host.failure ? 1 : 0);
+  process.exit(validationErrors.length > 0 || host.failure || (simulation && !simulationPassed) ? 1 : 0);
 }
 
 // An await the worker never answers leaves nothing on the event loop, and Node

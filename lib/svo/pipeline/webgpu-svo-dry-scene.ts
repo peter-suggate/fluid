@@ -1439,6 +1439,7 @@ export class SparseVoxelDrySceneRenderer {
   private primitiveCount = 0;
   private primitiveCandidateArena?: SvoPrimitiveCandidateArena;
   /** Host copies of the regions a publication diffs against before it writes. */
+  private readonly publishedSculptCuts = new PublishedWords();
   private readonly publishedMaterials = new PublishedWords();
   private readonly publishedClusters = new PublishedWords();
   private readonly publishedFieldPrograms = new PublishedWords();
@@ -5229,6 +5230,70 @@ export class SparseVoxelDrySceneRenderer {
     this.rebuild();
   }
 
+  /** Refresh imported draw resources only when their membership or source changes. */
+  private publishImportedSurfaces(scene: SparseVoxelDrySceneData): void {
+    this.sampledVolumePrimitiveIndices = [];
+    const instances: typeof this.importedSurfaceInstances = [];
+    const sculpted = new Set(scene.sculptedPrimitiveIndices);
+    let geometryChanged = false;
+    const fieldBase = SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4;
+    for (let i = 0; i < scene.primitiveRecords.length / SVO_PRIMITIVE_RECORD_WORDS; i++) {
+      const at = i * SVO_PRIMITIVE_RECORD_WORDS;
+      if (scene.primitiveRecords[at + 3] !== SVO_PRIMITIVE_KINDS.fieldProgram) continue;
+      const offset = scene.primitiveRecords[at + 13]! - fieldBase;
+      if (scene.fieldProgramBlocks?.[offset] === SVO_SAMPLED_VOLUME_TAG) {
+        if (sculpted.has(i)) continue;
+        this.sampledVolumePrimitiveIndices.push(i);
+        if (this.experiments.surfaceMesh) {
+          const asset = Object.keys(MESH_ASSETS)[scene.fieldProgramBlocks[offset + 3]! - 1]!;
+          const volume = meshAssetVolume(asset);
+          const held = this.importedSurfaceMeshes.get(asset);
+          if (held?.volume !== volume) {
+            geometryChanged = true;
+            held?.vertices.destroy(); held?.indices.destroy();
+            const surface = meshVolumeSurface(volume);
+            const vertices = this.device.createBuffer({ label: `${asset} native surface vertices`, size: Math.max(4, surface.positions.byteLength), usage: GPUBufferUsage.VERTEX, mappedAtCreation: true });
+            const indices = this.device.createBuffer({ label: `${asset} native surface indices`, size: Math.max(4, surface.indices.byteLength), usage: GPUBufferUsage.INDEX, mappedAtCreation: true });
+            new Float32Array(vertices.getMappedRange()).set(surface.positions); vertices.unmap();
+            new Uint32Array(indices.getMappedRange()).set(surface.indices); indices.unmap();
+            this.importedSurfaceMeshes.set(asset, { volume, vertices, indices, count: surface.levels[0]!.count, levels: surface.levels, radius: Math.hypot(...volume.header.dimensions.map(v => v * volume.header.cellSize / 2)) });
+          }
+          instances.push({ index: i, asset });
+        }
+      }
+    }
+    // Poses and materials live in the scene arena. These records depend only
+    // on primitive membership and immutable source geometry, so edits to the
+    // rest of the scene keep the buffers, bind group and draw bundle intact.
+    const membershipChanged = instances.length !== this.importedSurfaceInstances.length
+      || instances.some((instance, i) => instance.index !== this.importedSurfaceInstances[i]!.index
+        || instance.asset !== this.importedSurfaceInstances[i]!.asset);
+    if (!geometryChanged && !membershipChanged
+      && (!instances.length || !this.importedSurfaceLodLayout || this.importedSurfaceLodGroup)) return;
+    this.importedSurfaceInstances = instances;
+    if (!instances.length) {
+      this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
+      this.importedSurfaceLodRecords = undefined; this.importedSurfaceDrawArgs = undefined;
+      this.importedSurfaceLodGroup = undefined;
+      return;
+    }
+    if (this.importedSurfaceLodLayout) {
+      const words = new Uint32Array(this.importedSurfaceInstances.length * 32), floats = new Float32Array(words.buffer);
+      this.importedSurfaceInstances.forEach(({ index, asset }, i) => {
+        const mesh = this.importedSurfaceMeshes.get(asset)!;const at=i*32;
+        words[at]=index;words[at+1]=mesh.levels.length;floats[at+2]=mesh.radius;
+        mesh.levels.forEach((level,j)=>{const p=at+4+j*4;words[p]=level.first;words[p+1]=level.count;floats[p+2]=level.error;});
+      });
+      this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
+      this.importedSurfaceLodRecords = this.device.createBuffer({ size: words.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX, mappedAtCreation: true });
+      new Uint32Array(this.importedSurfaceLodRecords.getMappedRange()).set(words);this.importedSurfaceLodRecords.unmap();
+      this.importedSurfaceDrawArgs = this.device.createBuffer({ size: this.importedSurfaceInstances.length * 20, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+      this.importedSurfaceLodGroup = this.device.createBindGroup({ layout: this.importedSurfaceLodLayout, entries: [
+        {binding:80,resource:{buffer:this.importedSurfaceLodRecords}},{binding:81,resource:{buffer:this.importedSurfaceDrawArgs}},
+      ] });
+    }
+  }
+
   /**
    * Publish one complete renderer generation into fixed-capacity arenas.
    * Validation happens before the first queue write, so overflow or malformed
@@ -5300,6 +5365,10 @@ export class SparseVoxelDrySceneRenderer {
       analyticBytes += this.publishedFieldPrograms.publish(queue, this.sceneArenaBuffer,
         SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes, scene.fieldProgramBlocks ?? NO_PUBLISHED_WORDS);
     }
+    if (!previous || scene.sculptCuts !== previous.sculptCuts) {
+      analyticBytes += this.publishedSculptCuts.publish(queue, this.sceneArenaBuffer,
+        SVO_DRY_SCENE_ARENA_LAYOUT.sculptCutOffsetBytes, scene.sculptCuts ?? NO_PUBLISHED_WORDS);
+    }
     if (lightingArena) this.publishedLighting.publish(queue, this.lightingBuffer, 0, lightingArena);
 
     const solidsMoved = !previous || scene.voxelGeometryRevision === undefined
@@ -5326,47 +5395,7 @@ export class SparseVoxelDrySceneRenderer {
     this.scene = scene;
     this.writeSurfaceMeshHostWords();
     this.primitiveCount = primitiveArena.primitiveCount;
-    this.sampledVolumePrimitiveIndices = [];
-    this.importedSurfaceInstances = [];
-    const fieldBase = SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4;
-    for (let i = 0; i < scene.primitiveRecords.length / SVO_PRIMITIVE_RECORD_WORDS; i++) {
-      const at = i * SVO_PRIMITIVE_RECORD_WORDS;
-      if (scene.primitiveRecords[at + 3] !== SVO_PRIMITIVE_KINDS.fieldProgram) continue;
-      const offset = scene.primitiveRecords[at + 13]! - fieldBase;
-      if (scene.fieldProgramBlocks?.[offset] === SVO_SAMPLED_VOLUME_TAG) {
-        this.sampledVolumePrimitiveIndices.push(i);
-        if (this.experiments.surfaceMesh) {
-          const asset = Object.keys(MESH_ASSETS)[scene.fieldProgramBlocks[offset + 3]! - 1]!;
-          const volume = meshAssetVolume(asset);
-          const held = this.importedSurfaceMeshes.get(asset);
-          if (held?.volume !== volume) {
-            held?.vertices.destroy(); held?.indices.destroy();
-            const surface = meshVolumeSurface(volume);
-            const vertices = this.device.createBuffer({ label: `${asset} native surface vertices`, size: Math.max(4, surface.positions.byteLength), usage: GPUBufferUsage.VERTEX, mappedAtCreation: true });
-            const indices = this.device.createBuffer({ label: `${asset} native surface indices`, size: Math.max(4, surface.indices.byteLength), usage: GPUBufferUsage.INDEX, mappedAtCreation: true });
-            new Float32Array(vertices.getMappedRange()).set(surface.positions); vertices.unmap();
-            new Uint32Array(indices.getMappedRange()).set(surface.indices); indices.unmap();
-            this.importedSurfaceMeshes.set(asset, { volume, vertices, indices, count: surface.levels[0]!.count, levels: surface.levels, radius: Math.hypot(...volume.header.dimensions.map(v => v * volume.header.cellSize / 2)) });
-          }
-          this.importedSurfaceInstances.push({ index: i, asset });
-        }
-      }
-    }
-    if (this.importedSurfaceInstances.length && this.importedSurfaceLodLayout) {
-      const words = new Uint32Array(this.importedSurfaceInstances.length * 32), floats = new Float32Array(words.buffer);
-      this.importedSurfaceInstances.forEach(({ index, asset }, i) => {
-        const mesh = this.importedSurfaceMeshes.get(asset)!;const at=i*32;
-        words[at]=index;words[at+1]=mesh.levels.length;floats[at+2]=mesh.radius;
-        mesh.levels.forEach((level,j)=>{const p=at+4+j*4;words[p]=level.first;words[p+1]=level.count;floats[p+2]=level.error;});
-      });
-      this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
-      this.importedSurfaceLodRecords = this.device.createBuffer({ size: words.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX, mappedAtCreation: true });
-      new Uint32Array(this.importedSurfaceLodRecords.getMappedRange()).set(words);this.importedSurfaceLodRecords.unmap();
-      this.importedSurfaceDrawArgs = this.device.createBuffer({ size: this.importedSurfaceInstances.length * 20, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
-      this.importedSurfaceLodGroup = this.device.createBindGroup({ layout: this.importedSurfaceLodLayout, entries: [
-        {binding:80,resource:{buffer:this.importedSurfaceLodRecords}},{binding:81,resource:{buffer:this.importedSurfaceDrawArgs}},
-      ] });
-    }
+    this.publishImportedSurfaces(scene);
     if (this.shadingPath === "split" && (backdropTerrainBefore !== this.backdropTerrainRequested()
       || latticeBefore !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true))) {
       this.requestSpecializedSplitVariant();

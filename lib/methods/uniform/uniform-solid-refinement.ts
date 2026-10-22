@@ -32,10 +32,24 @@ fn umCoarseSolidLowFaceExact(t:u32,axis:u32)->bool{
  for(var i=0u;i<4u;i++){if(any(solidRecord[row+i]!=vec4f(face))){return false;}}
  return true;
 }
+fn umSolidBodyContact(t:u32)->bool{
+ return solidRecord[${recordCount}u+20u*UM_TILES+2u*t+1u].z>0.5;
+}
+// Static detail policies may coarsen submerged geometry. Rigid traction and
+// displaced-volume exchange only exist on h owners, including at rest.
+// A dry body outside the predicted liquid band still needs no fine owners.
+fn umSolidContactActive(t:u32,wet:bool,band:bool,surfaceOnly:bool,coarseHeat:bool)->bool{
+ if(umSolidBodyContact(t)){return wet||band;}
+ return !coarseHeat&&!umSolidGeometryExact(t)&&(band||(!surfaceOnly&&wet));
+}
+// The body's full neighbouring stencil must be h even on its dry side;
+// otherwise coarse hanging vertices can erase the fine traction boundary.
+fn umSolidContactRing(t:u32,wet:bool,surfaceOnly:bool,coldNeighbour:bool)->bool{
+ return umSolidBodyContact(t)||((!surfaceOnly||wet)&&!coldNeighbour);
+}
 fn umSolidGeometryExact(t:u32)->bool{
  let capacity=solidRecord[t].x;if(capacity!=0.0&&capacity!=1.0){return false;}
- let bodyRow=${recordCount}u+20u*UM_TILES+2u*t+1u;
- if(solidRecord[bodyRow].z>0.5){return false;}
+ if(umSolidBodyContact(t)){return false;}
  let c=vec3i(umTileCoord(t));
  for(var a=0u;a<3u;a++){
   var d=vec3i(0);d[a]=1;let n=umTileKey(c-d);

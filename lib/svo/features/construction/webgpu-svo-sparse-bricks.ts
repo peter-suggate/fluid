@@ -185,6 +185,8 @@ import {
   type SvoRenderResidual,
 } from "../scene-publication/svo-planar-boundary";
 
+import { sceneSculptCuts, sceneryPrimitiveAffectedBySculptCuts, svoSculptChangeBounds } from "../scene-publication/svo-sculpt-change-bounds";
+
 export interface OctreeSparseBrickWorldOptions {
   surfaceContours?: boolean;
   surfaceDualContouring?: boolean;
@@ -1484,6 +1486,8 @@ export class OctreeSparseBrickWorld {
   /** The last pair of snapshots compared, so validating and staging one edit compares once. */
   private solidChangeMemo?: { readonly previous: SolidWorld; readonly next: SolidWorld;
     readonly changes: SolidWorldChangeBounds };
+  private sculptChangeMemo?: { readonly previous: SceneDescription | undefined; readonly next: SceneDescription;
+    readonly primitives: readonly EnvironmentProxyPrimitive[]; readonly changes: ReturnType<typeof svoSculptChangeBounds> };
   private solidWorldStamp = "";
   private terrainFieldStamp = "";
   /** Catalog expansion input, retained exactly for subsequent live publications. */
@@ -1814,6 +1818,7 @@ export class OctreeSparseBrickWorld {
         .then(field => { renderTerrain = field; });
       renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
     }
+    const initialCuts = sceneSculptCuts(scene, scene.solidVoxels);
     const planarCatalog = buildSvoPlanarBoundaryCatalog(environmentPrimitives, (primitive) => ({
         materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
         ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
@@ -1866,7 +1871,8 @@ export class OctreeSparseBrickWorld {
             primitive.aabb_m.min.z] as const,
           maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
             primitive.aabb_m.max.z] as const,
-          planarSourceIndex: planarCatalog.patchIndexByOwner.get(primitive.ownerIndex),
+          planarSourceIndex: sceneryPrimitiveAffectedBySculptCuts(initialCuts, primitive)
+            ? undefined : planarCatalog.patchIndexByOwner.get(primitive.ownerIndex),
         })),
         // Terrain lives in pages, so its blockers are the pages of what is
         // drawn: the residual, which no longer holds the physics-only shell.
@@ -2526,6 +2532,7 @@ export class OctreeSparseBrickWorld {
       fieldProgramCapacity: OCTREE_LIVE_SCENE_FIELD_PROGRAM_CAPACITY,
       fieldProgramExtraWords: sampledVolumeExtraWords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : [])),
       solidWorld: residualSolidWorld,
+      sculptCuts: scene.solidVoxels,
       solidWorldLattice: {
         origin_m: [-0.5 * scene.container.width_m, 0,
           -0.5 * scene.container.depth_m],
@@ -3098,6 +3105,14 @@ export class OctreeSparseBrickWorld {
     return changes;
   }
 
+  private sculptChangesBetween(scene: SceneDescription, primitives: readonly EnvironmentProxyPrimitive[]) {
+    const memo = this.sculptChangeMemo;
+    if (memo?.previous === this.stagedDocument && memo?.next === scene && memo.primitives === primitives) return memo.changes;
+    const changes = svoSculptChangeBounds(scene, this.stagedDocument?.solidVoxels ?? [], scene.solidVoxels, primitives);
+    this.sculptChangeMemo = { previous: this.stagedDocument, next: scene, primitives, changes };
+    return changes;
+  }
+
   validateLiveSolidEdit(scene: SceneDescription): void {
     if (this.destroyed) throw new Error("Sparse scene has been destroyed");
     if (terrainFieldStamp(scene) !== this.terrainFieldStamp) {
@@ -3107,18 +3122,22 @@ export class OctreeSparseBrickWorld {
     // Capacity is the display's, so it is asked of what the display is sent:
     // the residual, not the physical world with its shell still on.
     this.proxyVoxelizer.validateSolidWorld(this.renderResidualFor(scene, world).residual);
+    this.proxyVoxelizer.validateSculptCuts(scene.solidVoxels);
     // The ground was just shown to be this world's own, so an appended stroke
     // is compared over its own pages.
     const changes = this.solidChangesBetween(scene, this.solidWorld, world, true);
-    const bounds = scene.terrain ? changes.dirtyBounds : changes.addedBounds;
-    for (const bound of bounds) {
+    const sculpt = this.sculptChangesBetween(scene, this.stagedAuthored);
+    const bounds = [...(scene.terrain ? changes.dirtyBounds : changes.addedBounds), ...sculpt.dirtyBounds];
+    // Existing scenery may extend beyond the editable domain. Only the new
+    // stroke itself must fit; topology pricing clips existing owner bounds.
+    for (const bound of [...(scene.terrain ? changes.dirtyBounds : changes.addedBounds), ...sculpt.cutBounds]) {
       if (bound.minimum.some((value, axis) => value < this.sceneWorldOrigin[axis]! - 1e-6)
         || bound.maximum.some((value, axis) => value > this.sceneWorldOrigin[axis]!
           + this.sceneBrickDimensions[axis]! * this.brickSize * this.cellSize[axis]! + 1e-6)) {
         throw new RangeError("Edit exceeds this scene's live world bounds. Use a scene with a larger authored domain.");
       }
     }
-    this.assertLiveTopologyCapacity(bounds, [world, this.renderResidualFor(scene, world).residual]);
+    this.assertLiveTopologyCapacity(bounds, [world, this.renderResidualFor(scene, world).residual], sculpt.addedPrimitiveBounds);
   }
 
   /**
@@ -3161,6 +3180,9 @@ export class OctreeSparseBrickWorld {
     // the rest is not read.
     const catalog = successorEnvironmentCatalog(this.stagedDocument, scene, this.environmentDetailCellSize_m || undefined);
     const authored = catalog === this.stagedCatalog ? this.stagedAuthored : environmentProxyPrimitives(catalog, true);
+    const sculpt = solidWorldChanged && !initialPublication
+      ? this.sculptChangesBetween(scene, authored)
+      : { changed: false, dirtyBounds: [], addedPrimitiveBounds: [], relistPlanar: false };
     const stagedAuthored = this.stagedAuthored;
     let authoredMoved = authored.length !== stagedAuthored.length;
     const recoloured: EnvironmentProxyPrimitive[] = [];
@@ -3177,7 +3199,7 @@ export class OctreeSparseBrickWorld {
     const primitivesMoved = authoredMoved || staticBodies !== this.stagedStaticBodies;
     // A keyed update left the live list ahead of its document, and the next
     // document is the authority again.
-    const relist = primitivesMoved || this.stagedScene === undefined;
+    const relist = primitivesMoved || sculpt.relistPlanar || this.stagedScene === undefined;
     const nextRenderResidual = solidWorldChanged
       ? this.renderResidualFor(scene, nextSolidWorld) : this.renderResidual;
     const nextResidualSolidWorld = nextRenderResidual?.residual ?? this.renderSolidWorld;
@@ -3197,11 +3219,12 @@ export class OctreeSparseBrickWorld {
           primitive.aabb_m.max.z] as const,
       })) : []),
       ...dirtySolidBounds,
+      ...sculpt.dirtyBounds,
       ...renderChanges.dirtyBounds,
       ...(initialPublication && this.backdropDetailBounds ? [this.backdropDetailBounds] : []),
     ];
     const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds,
-      ...renderChanges.addedBounds];
+      ...renderChanges.addedBounds, ...sculpt.dirtyBounds];
     const listed = relist ? this.listLivePrimitives(scene, authored, dirtyRegions, newBounds) : undefined;
     if (relist && ENVIRONMENT_VOXEL_MATERIAL_BASE + authored.length > OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) {
       throw new RangeError(`Live scene needs ${ENVIRONMENT_VOXEL_MATERIAL_BASE + authored.length} materials but the fixed arena holds ${OCTREE_LIVE_SCENE_MATERIAL_CAPACITY}`);
@@ -3212,11 +3235,16 @@ export class OctreeSparseBrickWorld {
     let admitted: SparseBrickCoordinate[] | undefined;
     if (dirtyRegions.length > 0) {
       if (!initialPublication) {
-        const missing = this.assertLiveTopologyCapacity(newBounds, [nextSolidWorld, nextResidualSolidWorld]);
+        const missing = this.assertLiveTopologyCapacity(newBounds, [nextSolidWorld, nextResidualSolidWorld], sculpt.addedPrimitiveBounds);
         if (!listed) admitted = missing;
       }
-      if (solidWorldChanged && !initialPublication) {
+    }
+    // Patch history can change without changing any occupied static page.
+    // Adopt the snapshot and its explicit scenery cuts in that case as well.
+    if (solidWorldChanged) {
+      if (!initialPublication) {
         this.proxyVoxelizer.setSolidWorld(nextResidualSolidWorld, nextRenderResidual?.solidBoundary);
+        this.proxyVoxelizer.setSculptCuts(scene.solidVoxels);
       }
       this.solidWorld = nextSolidWorld;
       this.renderSolidWorld = nextResidualSolidWorld;
@@ -3254,7 +3282,9 @@ export class OctreeSparseBrickWorld {
     dirtyRegions: SparseSceneAxisAlignedBounds[],
     newBounds: SparseSceneAxisAlignedBounds[],
   ): { primitives: Map<string, LiveScenePrimitiveEntry>; states: Map<string, LiveScenePrimitiveState>; changed: boolean } {
-    const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, primitive => ({
+    const cuts = sceneSculptCuts(scene, scene.solidVoxels);
+    const planarCatalog = buildSvoPlanarBoundaryCatalog(authored.filter(primitive =>
+      !sceneryPrimitiveAffectedBySculptCuts(cuts, primitive)), primitive => ({
       materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
       ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
     }));
@@ -3337,10 +3367,16 @@ export class OctreeSparseBrickWorld {
     recoloured: readonly EnvironmentProxyPrimitive[],
     relist: boolean,
   ): boolean {
-    const queue = this.device.queue;
     const initial = this.pbrMaterialRecords.length === 0;
-    const surfaceModel = sceneTerrainSurfaceModel(scene);
     const staged = this.stagedDocument;
+    // A voxel stroke preserves every appearance input. In large imported
+    // scenes even finding the terrain closure walks thousands of graph nodes;
+    // none of that work is needed for an unchanged immutable appearance.
+    if (!initial && !relist && recoloured.length === 0 && staged
+      && scene.scenery === staged.scenery && scene.lighting === staged.lighting
+      && scene.environment === staged.environment && scene.systems === staged.systems) return false;
+    const queue = this.device.queue;
+    const surfaceModel = sceneTerrainSurfaceModel(scene);
     let written = 0;
     if (initial) {
       // What construction uploaded, which the first document is diffed against.
@@ -3470,6 +3506,7 @@ export class OctreeSparseBrickWorld {
    * terminals the voxelizer samples again. A second stroke starts a new count.
    */
   private terrainResamplingBounds(bounds: readonly SparseSceneAxisAlignedBounds[]): SparseSceneAxisAlignedBounds[] {
+    bounds = bounds.filter(bound => !bound.identityOnly);
     const result: SparseSceneAxisAlignedBounds[] = [];
     if (!this.sampledTerrainNodes?.size) return result;
     let touched = 0;
@@ -3509,9 +3546,12 @@ export class OctreeSparseBrickWorld {
   private assertLiveTopologyCapacity(
     bounds: readonly SparseSceneAxisAlignedBounds[],
     worlds: readonly SolidWorld[] = [this.solidWorld, this.renderSolidWorld],
+    addedPrimitiveBounds: readonly SparseSceneAxisAlignedBounds[] = [],
   ): SparseBrickCoordinate[] {
     this.terrainResamplingBounds(bounds);
-    const missing = this.liveBricksToActivate(bounds, worlds);
+    const missing = this.liveBricksToActivate(bounds, worlds, addedPrimitiveBounds);
+    const activatedGeometry = this.activatedGeometryBounds(bounds, missing);
+    if (activatedGeometry.length) this.terrainResamplingBounds([...bounds, ...activatedGeometry]);
     // Net demand, from the host's own tree: what the new bricks take, against
     // what is free and what the publication takes back before it activates.
     // The second is counted only by an edit that needs it.
@@ -3555,6 +3595,18 @@ export class OctreeSparseBrickWorld {
       Math.floor(coordinate.z * pagesPerBrick)];
   }
 
+  /** Shared by preflight and staging: fresh leaves cannot reuse an old surface. */
+  private activatedGeometryBounds(regions: readonly SparseSceneAxisAlignedBounds[],
+    missing: readonly SparseBrickCoordinate[]): SparseSceneAxisAlignedBounds[] {
+    if (!regions.some(region => region.identityOnly)) return [];
+    return missing.map(coordinate => {
+      const grid = [coordinate.x, coordinate.y, coordinate.z];
+      const minimum = grid.map((value, axis) => this.sceneWorldOrigin[axis]!
+        + value * this.brickSize * this.cellSize[axis]!) as [number, number, number];
+      return { minimum, maximum: minimum.map((value, axis) => value + this.brickSize * this.cellSize[axis]!) as [number, number, number] };
+    });
+  }
+
   private stagePrimitivePublication(
     revision: number,
     dirtyRegions: readonly SparseSceneAxisAlignedBounds[],
@@ -3563,7 +3615,12 @@ export class OctreeSparseBrickWorld {
     admitted?: readonly SparseBrickCoordinate[],
   ): void {
     const missing = initialPublication ? [] : admitted ?? this.assertLiveTopologyCapacity(newBounds);
-    const coalescedDirty = coalesceDirtyRegions([...dirtyRegions, ...(!initialPublication ? this.terrainResamplingBounds(newBounds) : [])], initialPublication ? 1 : OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY);
+    // A fresh/recycled leaf has no source surface to preserve during a palette
+    // transition. Reconstruct it even when only an identity region reaches it.
+    const activatedGeometry = this.activatedGeometryBounds(dirtyRegions, missing);
+    const coalescedDirty = coalesceDirtyRegions([...dirtyRegions, ...activatedGeometry,
+      ...(!initialPublication ? this.terrainResamplingBounds(activatedGeometry.length
+        ? [...newBounds, ...activatedGeometry] : newBounds) : [])], initialPublication ? 1 : OCTREE_LIVE_SCENE_DIRTY_REGION_CAPACITY);
     this.pendingScenePublication = {
       // The same array until a primitive in it changes, which is how the
       // voxelizer knows its record tables already hold this list.
@@ -3700,6 +3757,7 @@ export class OctreeSparseBrickWorld {
   private liveBricksToActivate(
     bounds: readonly SparseSceneAxisAlignedBounds[],
     worlds: readonly SolidWorld[] = [this.solidWorld, this.renderSolidWorld],
+    addedPrimitiveBounds: readonly SparseSceneAxisAlignedBounds[] = [],
   ): SparseBrickCoordinate[] {
     const { spans } = this.liveBrickSpans(bounds);
     const [width, height] = this.sceneBrickDimensions;
@@ -3712,7 +3770,7 @@ export class OctreeSparseBrickWorld {
       const coordinate = { x, y, z };
       if (!this.sceneBrickCovered(coordinate)) missing.push(coordinate);
     });
-    const primitives = this.livePrimitiveBoundsNear(missing);
+    const primitives = [...this.livePrimitiveBoundsNear(missing), ...addedPrimitiveBounds];
     return missing.filter(coordinate => this.liveBrickClaimed(coordinate, primitives, worlds));
   }
 

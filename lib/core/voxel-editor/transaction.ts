@@ -1,5 +1,6 @@
 import type { EditorRay } from "../editor-entity";
 import type { SceneDescription } from "../model";
+import { solidPatchListExtends } from "../solid-patch-list";
 import { sceneWithSolidStroke, solidVoxelPatchesKey, type SolidWorldVoxelPatch } from "../solid-world";
 import { toolValues, type ToolAction, type ToolGesture, type ToolUpdate, type ToolValues, type VoxelToolPlugin } from "./plugin";
 import type { VoxelClipboard } from "./verb";
@@ -29,9 +30,10 @@ export interface ToolHost {
   select?(region: VoxelRegion, mode?: "replace" | "add" | "subtract"): void;
   /** The voxels last copied off a selection, for the tool that stamps them. */
   clipboard?(): VoxelClipboard | undefined;
-  begin(label: string): void;
+  begin(label: string, options?: { readonly live?: boolean }): void;
   finish(): void;
-  cancel(): void;
+  /** Live hosts roll accepted samples back before this resolves. */
+  cancel(): void | Promise<void>;
 }
 /**
  * Commit one complete proposal over its immutable base — the only way solid
@@ -56,11 +58,13 @@ export async function publishSolidPatches(host: ToolHost, base: SceneDescription
 /**
  * Generic transaction lifecycle, independent of both UI and the chosen plugin.
  *
- * A stroke is a proposal until release. Samples recompute the plugin's
+ * An authoring stroke is a proposal until release. Samples recompute the plugin's
  * preview and hand its patches to the host's display; the scene document —
  * which is the runtime's publication identity — is written exactly once, when
  * the pointer lets go. Cancelling has no document to roll back: it takes the
  * preview down.
+ * Live tools instead publish append-only suffixes during the drag, with one
+ * history entry on release and a validated rollback on cancellation.
  *
  * `begun` is the gesture a caller already opened to ask where the press landed,
  * over this host's scene and with these values; the plugin is not asked twice.
@@ -71,6 +75,7 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
   const gesture = begun ?? plugin.begin({ scene: base, ray, values: toolValues(plugin, values, base), invert,
     clipboard: host.clipboard?.() });
   if (!gesture) return undefined;
+  if (plugin.execution === "live") return beginLiveToolTransaction(plugin, host, base, gesture);
   let closed = false;
   let finishing = false;
   let cancellationRequested = false;
@@ -150,6 +155,82 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
         // rejected or superseded edit leaves no selection standing over it.
         if (selection && (published || preview.patches.length === 0)) host.select!(selection, preview.selectionMode);
       });
+      return completion;
+    },
+  };
+}
+
+/** One accepted suffix at a time, with one coalesced proposal waiting behind it. */
+function beginLiveToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
+  base: SceneDescription, gesture: ToolGesture) {
+  let current = base, proposed: SceneDescription | undefined;
+  let accepted: readonly SolidWorldVoxelPatch[] = [];
+  let latest: ToolUpdate | undefined;
+  let pending: Promise<void> | undefined;
+  let completion: Promise<void> | undefined;
+  let finishing = false, cancelled = false, closed = false;
+  let failure: unknown;
+  const ownsDocument = () => host.scene() === current || host.scene() === proposed;
+  host.begin(plugin.ui.label, { live: true });
+  const drain = (): Promise<void> => {
+    if (pending) return pending;
+    const operation = Promise.resolve().then(async () => {
+      while (latest && !cancelled && !closed) {
+        if (!ownsDocument()) throw new Error("Scene changed during the stroke.");
+        const update = latest;
+        latest = undefined;
+        if (!solidPatchListExtends(accepted, update.patches)) {
+          throw new Error("A live tool must append patches to its accepted stroke.");
+        }
+        const suffix = update.patches.slice(accepted.length);
+        if (!suffix.length) continue;
+        proposed = sceneWithSolidStroke(current, suffix);
+        await host.publish(proposed, current);
+        current = proposed;
+        proposed = undefined;
+        accepted = update.patches;
+      }
+    }).catch(async (error: unknown) => {
+      failure = error; closed = true; latest = undefined;
+      try { await host.cancel(); }
+      catch (rollbackError) {
+        failure = new AggregateError([error, rollbackError], "The live stroke failed and could not be rolled back.");
+      }
+      throw failure;
+    });
+    pending = operation.finally(() => { pending = undefined; });
+    // A drag may be released after its last update's caller disappeared.
+    void pending.catch(() => {});
+    return pending;
+  };
+  return {
+    update(input: EditorRay): Promise<ToolUpdate | undefined> {
+      if (failure) return Promise.reject(failure);
+      if (closed || finishing) return Promise.resolve(undefined);
+      if (!ownsDocument()) {
+        latest = undefined;
+        return this.finish(true).then(() => undefined);
+      }
+      let update: ToolUpdate | undefined;
+      try { update = gesture.update(input); } catch (error) { return Promise.reject(error); }
+      if (!update) return Promise.resolve(undefined);
+      latest = update;
+      return drain().then(() => update);
+    },
+    advance(): Promise<boolean> { return Promise.resolve(false); },
+    finish(abort = false): Promise<void> {
+      cancelled ||= abort;
+      if (cancelled) latest = undefined;
+      if (completion) return completion;
+      finishing = true;
+      completion = (async () => {
+        if (pending) await pending;
+        if (failure) throw failure;
+        if (closed) return;
+        closed = true;
+        if (cancelled || !ownsDocument() || accepted.length === 0) await host.cancel();
+        else host.finish();
+      })();
       return completion;
     },
   };

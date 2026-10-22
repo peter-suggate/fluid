@@ -1,3 +1,7 @@
+import { sceneCellSizes_m } from "../../../core/scene-lattice-dimensions";
+import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
+import { packSvoSculptCuts, SVO_SCULPT_MATERIAL_OFFSET } from "./svo-sculpt-cuts";
+import { classifySvoSculptInstances } from "./svo-sculpt-instances";
 import { sceneUsesFlatVoxelNormals, type SceneDescription } from "../../../core/model";
 import { solidWorldContentStamp } from "../../../core/solid-world";
 import type { EnvironmentProxyCatalog } from "../../../core/voxel-environments";
@@ -45,6 +49,8 @@ export interface SvoRenderScenePublication {
   readonly scene: SceneDescription;
   /** The sparse world's revision when the document was published. */
   readonly worldRevision: number;
+  /** Unmirrored authored records; edits reuse the cached PBR mirror. */
+  readonly baseMaterialRecords: Uint32Array<ArrayBuffer>;
   readonly catalog: EnvironmentProxyCatalog;
   readonly primitives: SvoScenePrimitiveBuild;
   readonly terrainSurface: SvoTerrainSurfaceModel;
@@ -97,14 +103,14 @@ function materialTable(
 ): Uint32Array<ArrayBuffer> {
   const metadata = primitives.metadata;
   if (primitives.fieldPrograms.some(p => p.sampledVolume)) {
-    if (previous?.primitives === primitives && previous.terrainSurface === terrainSurface) return previous.data.materialRecords;
+    if (previous?.primitives === primitives && previous.terrainSurface === terrainSurface) return previous.baseMaterialRecords;
     return markSampledVolumeOwnerMaterials(packSvoMaterialTable([...buildDefaultSvoMaterialRecords(RENDER_SCENE_TABLE_REVISION, { terrainSurface }),
       ...metadata.map(p => environmentMaterialRecord(p, terrainSurface)),
       ...sampledVolumeMaterialRecords(primitives.fieldPrograms, RENDER_SCENE_TABLE_REVISION)]), primitives.descriptors);
   }
   const published = previous?.primitives.metadata;
   if (previous && published && published.length === metadata.length) {
-    const held = previous.data.materialRecords;
+    const held = previous.baseMaterialRecords;
     const sameSurface = previous.terrainSurface === terrainSurface;
     if (published === metadata && sameSurface) return held;
     let table: Uint32Array<ArrayBuffer> | undefined = held.slice();
@@ -132,6 +138,26 @@ function materialTable(
     ...buildDefaultSvoMaterialRecords(RENDER_SCENE_TABLE_REVISION, { terrainSurface }),
     ...metadata.map((primitive) => environmentMaterialRecord(primitive, terrainSurface)),
   ]);
+}
+
+const sculptMaterialMirrors = new WeakMap<Uint32Array, Uint32Array<ArrayBuffer>>();
+/** Independent palette identities let an edited instance use the SVO mesh
+ * while other instances of the same asset keep their original native mesh. */
+export function sculptMaterialTable(base: Uint32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> {
+  const cached = sculptMaterialMirrors.get(base); if (cached) return cached;
+  const count = base.length / SVO_MATERIAL_RECORD_WORDS;
+  if (count > SVO_SCULPT_MATERIAL_OFFSET) throw new RangeError("Scenery sculpt material palette capacity exceeded");
+  const table = new Uint32Array((SVO_SCULPT_MATERIAL_OFFSET + count) * SVO_MATERIAL_RECORD_WORDS);
+  table.set(base);
+  for (let id = 1; id < count; id++) {
+    const from = id * SVO_MATERIAL_RECORD_WORDS;
+    if (!(base[from + 23]! & SVO_MATERIAL_FLAGS.sampledVolume)) continue;
+    const to = (id + SVO_SCULPT_MATERIAL_OFFSET) * SVO_MATERIAL_RECORD_WORDS;
+    table.set(base.subarray(from, from + SVO_MATERIAL_RECORD_WORDS), to);
+    table[to + 20] = id + SVO_SCULPT_MATERIAL_OFFSET;
+    table[to + 23]! &= ~SVO_MATERIAL_FLAGS.sampledVolume;
+  }
+  sculptMaterialMirrors.set(base, table); return table;
 }
 
 function sameWords(a: Uint32Array | undefined, b: Uint32Array | undefined): boolean {
@@ -196,8 +222,22 @@ export function svoRenderScenePublication(
   const catalog = successorEnvironmentCatalog(previous?.scene, scene);
   const primitives = buildSvoScenePrimitives(scene);
   const candidates = primitiveCandidates(primitives);
-  const terrainSurface = sceneTerrainSurfaceModel(scene);
-  const materialRecords = materialTable(previous, primitives, terrainSurface);
+  const terrainSurface = previous && previous.scene.scenery === scene.scenery
+    ? previous.terrainSurface : sceneTerrainSurfaceModel(scene);
+  const baseMaterialRecords = materialTable(previous, primitives, terrainSurface);
+  const cuts = previous && previous.scene.solidVoxels === scene.solidVoxels
+    && previous.scene.container === scene.container && previous.scene.voxelDomain === scene.voxelDomain
+    ? previous.data.sculptCuts! : packSvoSculptCuts(scene.solidVoxels ?? [], {
+      origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2], cellSize_m: sceneCellSizes_m(scene),
+    });
+  const sculptCuts = previous && sameWords(cuts, previous.data.sculptCuts) ? previous.data.sculptCuts! : cuts;
+  const sculptedPrimitiveIndices = classifySvoSculptInstances(primitives.descriptors, sculptCuts, previous?.data.sculptCuts
+    ? { primitives: previous.primitives.descriptors, cuts: previous.data.sculptCuts, indices: previous.data.sculptedPrimitiveIndices ?? [] }
+    : undefined);
+  // Reserve the sculpt palette at scene load. The first pen sample then
+  // changes only cut words and instance membership, not a megabyte of PBR data.
+  const materialRecords = primitives.fieldPrograms.some(p => p.sampledVolume)
+    ? sculptMaterialTable(baseMaterialRecords) : baseMaterialRecords;
   const lighting = lightingMirrors(previous, scene, catalog);
   if (!lighting) return undefined;
   const solidStamp = solidWorldContentStamp(scene);
@@ -227,12 +267,14 @@ export function svoRenderScenePublication(
       && rasterAoContrast === held.rasterAoContrast
       && opaqueSurfaceOnly === held.opaqueSurfaceOnly && primitives.openShellOwnerId === held.skippedOwnerId ? "none" : "appearance";
   return {
-    scene, worldRevision, catalog, primitives, terrainSurface, lighting, solidStamp, change,
+    scene, worldRevision, baseMaterialRecords, catalog, primitives, terrainSurface, lighting, solidStamp, change,
     data: change === "none" ? held! : {
       voxelGeometryRevision: geometryMoved ? ((held?.voxelGeometryRevision ?? 0) % 0xffff_fffe) + 1 : held.voxelGeometryRevision,
       primitiveRecords: primitives.packedRecords,
       primitiveCandidates: candidates,
       materialRecords,
+      sculptCuts,
+      sculptedPrimitiveIndices,
       opaqueSurfaceOnly,
       materialRevision: RENDER_SCENE_TABLE_REVISION,
       ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,

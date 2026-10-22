@@ -5,7 +5,7 @@ import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "../../../c
 import type { SvoFieldProgram } from "./svo-field-program";
 import {
   packSvoPrimitiveRecords,
-  sampleSvoPrimitive,
+  prepareSvoPrimitiveDistance,
   type SvoFinitePrimitiveDescriptor,
   type SvoPrimitiveDescriptor,
   type SvoSmoothUnionClusterPacking,
@@ -527,13 +527,20 @@ export function svoScenePrimitiveSolidReach(build: SvoScenePrimitiveBuild): Spar
   return build.metadata.map((entry) => {
     const descriptor = build.descriptors[entry.primitiveIndex];
     const { min, max } = entry.coverageBounds.conservative_m;
+    let distance: ReturnType<typeof prepareSvoPrimitiveDistance>;
+    try {
+      distance = prepareSvoPrimitiveDistance(descriptor, clusterResolver);
+    } catch {
+      // Unresolved geometry must conservatively keep all candidate bricks.
+      distance = () => Number.NEGATIVE_INFINITY;
+    }
     return {
       minimum: [min.x, min.y, min.z] as const,
       maximum: [max.x, max.y, max.z] as const,
       distance_m: (x: number, y: number, z: number): number => {
         try {
-          const sample = sampleSvoPrimitive(descriptor, { x, y, z }, clusterResolver);
-          return Number.isFinite(sample.signedDistance_m) ? sample.signedDistance_m : Number.NEGATIVE_INFINITY;
+          const value = distance({ x, y, z });
+          return Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
         } catch {
           return Number.NEGATIVE_INFINITY;
         }

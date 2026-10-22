@@ -398,3 +398,384 @@ passes with 996 passing, 90 skipped and zero failing tests. The explicit Metal
 suite passes all 10 native sampler, imported-surface, mesh-stream, sample-coverage
 and raster-AO tests with no skips. The mesh contract now checks proxy rejection
 in both culling modes while retaining the separate LOD selection invariant.
+
+## SVO construction and edit publication follow-up
+
+The October 22 build/edit investigation retained these changes:
+
+- Interaction-derived render scenes retain the accepted solid-world snapshot.
+  Pool Party's robot adds bodies to a derived document but does not change voxel
+  solids. Losing that cache caused each pen sample to replay all solid patches
+  (59–152 ms in the traced run) and rescan all 6,458 pages (33–87 ms more).
+  The derivative now shares the existing image in either direction, without
+  triggering eager compilation on the input thread.
+- Imported surface publication compares primitive membership and immutable source
+  geometry before replacing instance buffers, indirect arguments and their bind
+  group. Voxel, pose, material and lighting edits with unchanged membership keep
+  these resources and the cached draw bundle. Selection still runs each frame;
+  transforms and materials remain reads from the current scene arena. Reindexing,
+  replacing an asset or removing the final instance invalidates the resources.
+- Sampled solid-boundary publication compares only the 16 validity words per
+  brick when its immutable source is unchanged. It no longer repacks or uploads
+  the 729 distance samples alongside every mask edit. Changed source ordering,
+  lost provenance and undo after provenance loss use a full-image diff.
+- Surface mesh counting accumulates each extraction job's face count privately
+  and adds it to the brick's scratch counter once. Emission and range allocation
+  retain their existing contracts. In modes that omit sampled shadow casters,
+  voxel meshing also rejects those proxy faces before exposure/contour work;
+  neighbouring occupancy and raster shadow-map casters remain intact.
+- Opaque-surface publication keeps the set of material IDs per immutable solid
+  page. An edit rescans touched pages and rechecks the current material table;
+  it no longer scans all 3.3 million material cells on each accepted sample.
+- CPU fallback solid-reach queries prepare primitive descriptors once and skip
+  field-gradient evaluation when only distance is required. Default GPU brick
+  selection and DMC construction bypass this filter, so this is a fallback
+  improvement rather than a measured default-build speedup.
+
+### Isolated measurements
+
+These measure the named work, not total build time or input-to-frame latency.
+CPU samples ran alongside other checks and should be reproduced on an idle host
+before using their absolute times as a budget.
+
+| Work | Before | After |
+| --- | ---: | ---: |
+| Pool Party boundary, bytes per one-cell mask edit/undo | 154,044 | 4 |
+| Pool Party opaque capability publication, median | 26.608 ms | 0.708 ms |
+| Pool Party CPU fallback, 423,424 distance queries, median | 1,608.63 ms | 183.46 ms |
+| GPU face-count overhead, 8 faces/job, median | 0.918 ms | 0.131 ms |
+| GPU face-count overhead, 64 faces/job, median | 8.454 ms | 0.131 ms |
+
+The boundary fixture is the actual 51-brick Pool Party diving board. An edit
+outside that boundary uploads zero mask bytes. The distance fixture covers all
+3,308 Pool Party primitives with 128 points per primitive and checks exact
+reference parity before timing. GPU counting uses the production append helper
+on 8,192 synthetic bricks with 48 jobs each, in paired ABBA order on Metal;
+geometry traversal is excluded. At one face/job both paths measure 0.197 ms.
+GPU timestamps here have 65.536-microsecond resolution.
+
+Reproduce from the repository root:
+
+```sh
+node --import tsx tools/benchmark-svo-boundary-edits.ts
+node --import tsx tools/benchmark-svo-solid-reach.ts
+node --import tsx tools/benchmark-svo-opaque-publication.ts
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx tools/benchmark-svo-mesh-count.ts
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx --test tests/svo-mesh-proxy-extraction.test.ts
+```
+
+The edit-latency probe now preloads the scene's real imported assets from disk,
+reports their loading time separately, and records replayed render-bundle draws.
+Its fake device supports bundles as well. Set `FLUID_EDIT_PROBE_PROGRESS=1` for
+startup status logging. Raw component measurements and validation logs for this
+investigation are under `artifacts/svo-build-edit/`.
+
+### Live surface pen
+
+Select **Pen** in the sculpt rail, choose **Draw** or **Carve**, and drag over a
+surface. Diameter is adjustable from 1 to 64 voxels, including with brackets.
+The pen publishes accepted samples during the drag, without a region selection;
+release makes one undo entry, and Escape rolls the whole stroke back. It picks
+and interpolates against the document at the start of the stroke so it does not
+climb its own new geometry. A later stroke picks the newly edited surface.
+Leaving the surface breaks the stroke rather than drawing across empty space.
+
+Scenery carving is explicitly tagged in the saved patch history. Old voxel
+clears retain their original meaning. The GPU subtracts rounded or box brush
+records from scenery distances during occupancy, contour and DMC construction.
+Cuts also affect analytic visibility. Affected imported instances use their
+edited SVO mesh at the scene's voxel resolution; untouched instances keep their
+native mesh. Independent mirrored material IDs preserve each imported PBR
+palette without exposing the unedited proxies. The palette is prepared at scene
+load, avoiding a large material upload on the first cut. The cut arena is fixed
+capacity (4,096 stamps) and is diff-uploaded, including undo. Capacity refusal
+happens before publication.
+
+The live transaction holds one acceptance in flight and coalesces pending
+proposals. CPU work still owns picking, the authored voxel-page edits used by
+Draw/terrain Carve, validation, history and scene publication. Imported scenery
+CSG and mesh reconstruction execute on the GPU. This is not yet a fully
+GPU-resident brush editor.
+
+The reproducible pen workloads send 16 surface samples through the actual pen
+plugin and live transaction, render each accepted prefix, and validate undo:
+
+```sh
+FLUID_EDIT_PROBE_PROGRESS=1 WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx tools/probe-edit-latency.ts --device=dawn \
+  --scene=backyard-pool-party --edit=pen-draw,pen-carve --size=160x90 \
+  --json=artifacts/svo-build-edit/pen-native.json
+```
+
+The report separates pointer geometry, acceptance, per-frame CPU stages and GPU
+work. It checks one transaction finish and restoration to the starting patch
+history, but does not capture images or assert first-visible-pixel latency.
+Native regressions additionally execute imported-paver voxelization, verify cut
+occupancy and normals, retain PBR materials and compare undo payloads byte for
+byte. They also exercise ray hits on cut caps from inside a cavity.
+
+The final native Pool Party run excluded 23.62 seconds of startup shader
+specialization and produced these medians:
+
+| Pen stage | Draw | Carve |
+| --- | ---: | ---: |
+| Scene publication | 3.91 ms | 3.48 ms |
+| Acceptance | 6.35 ms | 5.96 ms |
+| Frame host time | 9.52 ms | 8.64 ms |
+| GPU completion | 99.96 ms | 121.43 ms |
+
+Each stroke accepted 14 prefixes from 16 samples, finished once, and restored
+the original 51 patches on undo. All builds were incremental, with zero GPU
+validation errors and zero shader pipelines created during editing. Draw kept
+all GPU objects; Carve replaced eight instance buffers and four bind groups as
+affected props switched from native meshes to edited SVO meshes. No source
+vertex or index geometry was reuploaded.
+
+These are diagnostic measurements, not a controlled before/after comparison:
+startup handling changed and CPU tests ran concurrently. GPU completion remains
+too high to establish smooth realtime interaction, even though CPU publication
+no longer replays the whole world. Raw results are in
+`artifacts/svo-build-edit/pen-native-final.{json,log}`.
+
+Validation for this follow-up: `npm run check:types` passes and
+`npm run test:unit` passes with 1,074 passing, 106 skipped and zero failing tests.
+Explicit native runs additionally pass all five sculpt-cut tests, two production
+imported-renderer shader tests and three mesh extraction/counting tests without
+skips. The live pen probe also completes on native Metal with no validation errors.
+
+## Pen GPU latency investigation
+
+The earlier 100–121 ms completion medians were measured under substantial
+external contention. A subsequent quiet run at 160×90 measured 25.49 ms for
+Draw and 30.65 ms for Carve, including host encoding and queue completion.
+Actual dirty-payload GPU passes dominated at 9.67/11.89 ms; derived lighting was
+3.01/3.08 ms. The first carve's payload pass still took 202.18 ms. These numbers
+are from `artifacts/svo-build-edit/pen-gpu-baseline.json` and do not imply a
+100-to-25 ms code speedup.
+
+The probe now retains raw timestamp intervals and reports their enclosing span
+and covered union. Summing per-pass timestamps overcounts overlapping GPU work.
+It also records source-file hashes, the dirty-build plan, viewport dimensions,
+and optional baseline/edited/undo image captures. Startup compilation and image
+readback are excluded from stroke timings. Measurements at 800×450 provide a
+more representative rendering workload than the original small profiling target.
+
+The retained fixes target work that the traces identified:
+
+- Native-instance cut classification uses a padded, quaternion-rotated box
+  instead of a sphere-sized cube. A small ground cut no longer withdraws distant
+  or vertically separated native geometry. Renderer publication, voxelization
+  and dirty-region planning share this classification.
+- GPU primitive evaluation reuses the cut-union distance for repeated queries
+  at the same point, avoiding a fresh traversal of the stroke history for every
+  candidate primitive.
+- The DMC imported-volume sampler caches eight immutable scalar corners while
+  consecutive probes remain in the same trilinear cell. It recomputes each
+  point's interpolation weights and leaves material/normal sampling unchanged.
+  Native scalar parity is bounded to four float32 ULPs; compiler reassociation
+  means this scalar comparison is not bit-exact.
+- DMC reconstruction omits source-centre normals that its fitted normal replaces.
+  For authored page cells this avoids six neighbouring SDF reads and sometimes
+  a 9³ Gaussian stencil. The terrain far shortcut, contour modes and later
+  fitted-point/material normal overrides retain their original behavior.
+  Native tests compare complete payload and fitted-vertex bytes against a
+  shader using the prior normal route.
+- Solid-only CPU publications reuse the terrain material model and bypass
+  appearance-table work when scenery and lighting are unchanged.
+- Appended cut samples retain the affected-instance classification and test
+  only the new cuts against the remaining imported props. Undo, replacement
+  and scenery changes recompute the classification.
+- The first cut on an imported prop separates representation changes from
+  geometry changes. Outside the brush's reconstruction halo, an initialized
+  brick with one source primitive and no static terrain can preserve its
+  geometry, fitted vertices, normals and baked palette while updating the
+  sculpt material flag. Overlapping sources and fresh bricks take the full
+  reconstruction path. Geometry invalidation always takes priority. Splitting
+  a sampled terrain terminal also rebuilds its siblings, and preflight checks
+  that work before adopting the edited document.
+- Superseding a partially rebuilt revision retains its unfinished dirty bounds.
+  They are stored without a sampling halo, so repeated interruptions do not
+  expand the region indefinitely; capacity collapse remains conservative.
+
+An experiment sizing derived-lighting dispatches indirectly on the GPU passed
+native coverage checks but did not measurably reduce the roughly 3 ms stage.
+It was removed. Moving the authoritative CPU patch/page model to GPU storage
+would introduce synchronization for picking, physics and undo without addressing
+the measured payload-reconstruction bottleneck. Canonical edits remain on the
+CPU; voxel occupancy, brush CSG and surface reconstruction execute on the GPU.
+
+A reverse-order sampler comparison used identical source hashes and the same
+800×450 workload, with two 16-sample Draw strokes and two Carve strokes. The
+reference arm replaces only the generated cached sampler with its uncached
+equivalent. Active payload medians fell from 9.80 to 8.16 ms for Draw (16.7%)
+and 11.01 to 9.37 ms for Carve (14.9%); derived lighting was 3.01 ms in both
+arms. This supports retaining the cache. An earlier comparison had different
+lighting timings despite unchanged lighting shaders, so it was inconclusive
+because of possible scheduling, clock or overlapping-work differences.
+
+The final first-Carve payload passes measured 17.69 and 17.89 ms, with total
+frame completion of 34.58 and 33.32 ms. Earlier 800×450 investigative runs
+measured 216.07 ms before tighter owner bounds, then 49.74 ms before geometry
+reuse and sampler/normal improvements. Those staged runs are useful diagnostics,
+not isolated ablations of every individual optimization.
+
+Final accepted-prefix frames only (28 per mode; no no-op, settling or undo
+frames) measured:
+
+| 800×450 native probe | Draw median / p95 | Carve median / p95 |
+| --- | ---: | ---: |
+| Host encoding plus GPU completion | 21.47 / 23.24 ms | 23.00 / 33.32 ms |
+| GPU timestamp span | 17.92 / 19.73 ms | 19.04 / 28.57 ms |
+| Dirty payload pass | 8.16 / 9.11 ms | 9.37 / 17.69 ms |
+
+These are serialized native completion timings, not browser pointer-to-photon
+measurements. They do not establish sustained 60 fps. The final product and
+reverse-reference runs have stable matching source hashes, zero GPU validation
+errors, no full rebuild and passing transaction/undo checks. Raw reports are
+`artifacts/svo-build-edit/pen-gpu-final-{product,reference}-800.json`;
+active-frame comparison is `pen-gpu-final-active-comparison.json` in that folder.
+
+```sh
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx tools/probe-edit-latency.ts --device=dawn \
+  --scene=backyard-pool-party --size=800x450 --fluid=off --max-frames=48 \
+  --edit=pen-draw,pen-carve,pen-draw,pen-carve --sample-cache=product \
+  --json=artifacts/svo-build-edit/pen-gpu-final-product-800.json
+```
+
+Run the same command with `--sample-cache=reference` and a different output
+filename for the sampler counterfactual. Run timing probes without simultaneous
+tests, shader compilation or other GPU benchmarks.
+
+A larger-brush stress test used `lounger/one`, a close camera, 64 pointer
+samples and an eight-voxel diameter. Grid-hit deduplication produced 30 accepted
+stamps per stroke. Accepted-frame Draw median/p95 was 28.97/34.13 ms and Carve
+35.19/40.53 ms. First Carve took 60.27 ms total, including 39.65 ms of payload
+work over 504 planned bricks. Carve payload grew from a 12.94 ms median over
+the first ten accepted samples to 19.10 ms over the last ten: cut-history cost
+is still measurable and is not constant-time. The current pen therefore remains
+below a sustained 60 fps target, especially for large brushes and longer cuts.
+
+Both strokes finished as one transaction without rebuilding the scene or GPU
+validation errors. Captures show a continuous rounded ridge and a trench through
+the imported cushion; baseline-versus-undo comparison is exactly zero changed
+pixels for both. Results are in `artifacts/svo-build-edit/pen-gpu-lounger-800.json`
+and `pen-gpu-lounger-active-summary.json`; images are in `pen-gpu-lounger-images/`.
+Acceptance budgets use accepted prefixes, excluding duplicate no-op samples.
+
+```sh
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx tools/probe-edit-latency.ts --device=dawn \
+  --scene=backyard-pool-party --size=800x450 --fluid=off --max-frames=96 \
+  --edit=pen-draw,pen-carve --pen-node=lounger/one --pen-size=8 \
+  --pen-samples=64 --pen-camera=close \
+  --pen-images=artifacts/svo-build-edit/pen-gpu-lounger-images \
+  --json=artifacts/svo-build-edit/pen-gpu-lounger-800.json
+```
+
+Validation for the GPU-latency changes: `npm run check:types` passes;
+`npm run test:unit` passes with 1,096 passing, 109 skipped and zero failing
+tests. Explicit native runs cover terrain Draw/Carve, imported sculpting,
+overlapping-source election, sampler parity, preserved DMC vertices and exact
+undo/redo. The prior-normal and optimized-normal shader routes produce identical
+tested payload and DMC bytes. `git diff --check` passes.
+
+## Advancing simulation verification (2026-10-22)
+
+The rendering measurements above do not exercise a running simulation. Even
+`--fluid=scene` previously drew at time zero. The edit probe now accepts
+`--simulation-steps=2`, which advances the authored `SceneInteractionHost`,
+Box3D and the worker's NB-FLIP solver before, during and after Draw/Carve and
+their undos. It checks completed GPU time against the interaction tick, finite
+body poses, readiness, pipeline failures and GPU validation errors. Simulation
+health and edit timing budgets are reported separately.
+
+The first 160×90 coupled smoke completed 22 steps (0.366667 seconds), including four
+accepted samples of each pen mode and both undos, with no runtime or GPU errors.
+It also exposed roughly two-second accepted-prefix latency with physics enabled;
+the earlier rendering-only timings must not be presented as coupled pen latency.
+The report is `artifacts/svo-build-edit/pen-coupled-fluid-summary.json`.
+
+CPU attribution found that Box3D regenerated every collision chunk before
+checking its signature. The collision compiler now retains chunks whose immutable
+pages, sampled source nodes and edit-validity masks are unchanged. Changes to
+terrain, collider regions, lattice coordinates or coverage invalidate the relevant
+cache. Overlap preflight skips remote edits only after comparing the source pages
+under each body's current bounds; it does not reuse a stale body pose. Nearby
+fills and undo still run penetration checks.
+
+In the CPU-only four-prefix fixture, collision updates fell from 1,636–1,699 ms
+to 7.8–9.3 ms. Preflight fell from 27–45 ms to 1.8–3.6 ms; commit validation is
+0.24–0.51 ms. Initial collision construction remains about 1.5 seconds. These
+are collision-stage timings, not full pen or render times. Cache tests compare
+against uncached compilation through edits, removal, undo, sampled-field changes,
+terrain changes, moving coverage and collider-region changes. Reproduce with
+`node --import tsx tools/benchmark-box3d-solid-edits.ts`; evidence is in
+`box3d-cpu-before.json` and `box3d-cpu-final.json` in the artifact directory.
+
+The final combined 160×90 smoke, with collision reuse and the body-contact fix,
+again completes all 22 synchronized steps through Draw, Carve and both undos,
+with zero runtime/GPU errors and no full rebuild. Accepted-prefix medians are
+186.4 ms for Draw and 143.8 ms for Carve, versus approximately two seconds in
+the first coupled check. Both still fail the 5 ms acceptance budget; these changes
+do not yet make the coupled pen realtime. The final report is
+`artifacts/svo-build-edit/pen-coupled-fluid-final.json`.
+
+The full splash checker now runs 960 coupled steps (16 simulated seconds) and
+checks represented water volume using live mixed ownership, rather than treating
+particle retirement as water loss. It samples water outside the ball and compares
+wetness with the actual displaced-volume exchange. Its initial run retained at
+least 99.66% of the water and had no runtime errors, but correctly failed because
+buoyancy disappeared when the wet body contact region became coarse. Runtime
+health alone is therefore insufficient to establish physical correctness.
+
+The fix distinguishes rigid-body contact from static solid detail. Wet body
+contact tiles and their neighbouring traction stencil remain at native `h`
+resolution, even with surface-only static contact or coarse warm-region policies.
+Dry body contact outside the predicted liquid band can still retire. The corrected
+960-step run passes with zero coupling anomalies or GPU/pipeline errors. The ball
+bottoms out at a centre height of 0.8731 m and returns to 1.7435 m near the 1.8 m
+waterline; its final upward fluid impulse is 6.56 N·s. Minimum retained water is
+99.218% and final retention is 99.261%. This verifies the authored splash and
+settling interval, not indefinite volume conservation. Before/after reports are
+`pool-party-splash-coupling-before.json` and `pool-party-splash.json`.
+
+Native regression coverage also holds a sphere submerged after motion settles,
+verifies real displaced-volume and pressure exchange, then moves it back into
+air and verifies that fine contact ownership retires and displaced volume returns
+to zero. An initially dry body remains coarse and seeds no particles. The policy
+matrix and existing static-geometry tests pass on Dawn/Metal.
+
+The existing native hydrostatic test also fails its unchanged 0.0001 m/s
+threshold: its first frame reaches 0.000762446667 m/s. An isolated clean checkout
+of commit `56ff3a510700f502ead2ff8cb351e4dd445fd529`, using the same Node 22.22.1
+runtime and Dawn dependencies, fails with exactly the same value. This predates
+the uncommitted pen changes. A 120-step diagnostic found no GPU errors, a
+0.00491% volume increase and at most 85.45 micrometres of waterline error at the
+end; switching the pressure-band schedule back to strict produced identical
+results. The native rest assertion remains a known failure, with no tolerance
+change. Evidence is in `pool-rest-head-native.{log,json}` and
+`pool-hydrostatic.{log,json}` under `artifacts/svo-build-edit/`.
+
+```sh
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx tools/probe-edit-latency.ts --device=dawn \
+  --scene=backyard-pool-party --size=160x90 --fluid=scene \
+  --simulation-steps=2 --edit=pen-draw,pen-carve --pen-samples=4 \
+  --max-frames=48 --json=artifacts/svo-build-edit/pen-coupled-fluid-smoke.json
+
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx tools/check-pool-party-splash.ts
+```
+
+Repository checks after the simulation and collision fixes:
+`npm run check:types` passes; `npm run test:unit` reports 1,116 passing,
+115 skipped and zero failing tests. GPU-gated tests are run separately as
+described above; the pre-existing native hydrostatic assertion is not included
+in that unit-suite pass. `git diff --check` passes.
+
+Before committing, the isolated task snapshot (excluding concurrent forest,
+rendering and fluid-memory changes) also passed `npm run check:types` and
+`npm run test:unit`: 1,076 passing, 111 skipped and zero failing tests.

@@ -1,13 +1,25 @@
 import { rasterLightValues, rasterSpotLightEligible, RASTER_MAX_SPOT_LIGHTS } from "../lighting-visibility/raster-spot-lights";
 import { SVO_LIGHT_RECORD_WORDS, SVO_LIGHT_KINDS } from "../../contracts/svo-light-abi";
 import type { SceneDescription } from "../../../core/model";
-import { solidWorldForScene, type SolidWorld } from "../../../core/solid-world";
+import { solidWorldForScene, type SolidWorld, type SolidWorldPage } from "../../../core/solid-world";
 import { materialIdForRigidShape, VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
 import type { SparseVoxelDrySceneData } from "../../contracts/scene-publication";
 import { SVO_MATERIAL_FLAGS, SVO_MATERIAL_RECORD_WORDS } from "../../contracts/svo-material-abi";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../../contracts/svo-primitive-abi";
 
 const solidMaterials = new WeakMap<SolidWorld, ReadonlySet<number>>();
+const pageMaterials = new WeakMap<SolidWorldPage, ReadonlySet<number>>();
+
+function materialsInPage(page: SolidWorldPage): ReadonlySet<number> {
+  let ids = pageMaterials.get(page);
+  if (!ids) {
+    const used = new Set<number>();
+    for (const id of page.materialId) if (id) used.add(id);
+    ids = used;
+    pageMaterials.set(page, ids);
+  }
+  return ids;
+}
 
 /** Inspect the canonical published solid snapshot, including live material edits.
  * Cache by snapshot identity, never by scene name or light/material revision. */
@@ -18,7 +30,10 @@ export function publishOpaqueSurfaceCapability(
   let ids = solidMaterials.get(world);
   if (!ids) {
     const used = new Set<number>();
-    for (const page of world.pages) for (const id of page.materialId) if (id) used.add(id);
+    // Solid edits copy only touched pages. Their material sets change, while
+    // all other pages keep the proof established for the previous snapshot.
+    // Keep IDs, not opacity: a new material table must still be checked below.
+    for (const page of world.pages) for (const id of materialsInPage(page)) used.add(id);
     for (const patch of [...world.patches, ...(world.regions ?? [])]) {
       if (patch.operation === "fill") used.add(patch.materialId ?? VOXEL_MATERIAL_IDS.container);
     }

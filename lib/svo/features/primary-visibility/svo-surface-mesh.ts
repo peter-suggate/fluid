@@ -779,6 +779,7 @@ fn meshFaceIdentity(payload:u32,cell:vec3u,level:u32,n:u32,face:u32)->u32 {
 // sizes the brick's range, the emit phase fills it. These privates carry the
 // phase and the brick's worklist entry through the shared emitters.
 var<private> meshPhase:u32;
+var<private> meshJobCount:u32;
 var<private> meshEntry:u32;
 var<private> meshEmitBase:u32;
 var<private> meshEmitCount:u32;
@@ -787,7 +788,7 @@ fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
   // BOTH count and emit phases, before reserving arena space or paying culling,
   // vertex and fragment work. Their voxel occupancy remains for lighting.
   ${retainSampledShadowCasters ? "// Raster shadow maps still consume the proxy casters." : `if((dryMaterial(sceneIdentityMaterial(identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){return;}`}
-  if(meshPhase==0u){atomicAdd(&meshWork[meshScratchAt(meshEntry)],1u);return;}
+  if(meshPhase==0u){meshJobCount+=1u;return;}
   let slot=atomicAdd(&meshWork[meshScratchAt(meshEntry)+1u],1u);
   // The two phases traverse the same published voxels; a mismatch is an
   // extraction fault, reported rather than written past the brick's range.
@@ -799,7 +800,7 @@ fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
   }
 }
 ${contours ? svoContourMeshWGSL : ""}
-${svoVoxelMeshWGSL(W.errorFlags, contours)}
+${svoVoxelMeshWGSL(W.errorFlags, contours, retainSampledShadowCasters)}
 ${contours ? `// A dual cell graded past what a triangle record holds is an extraction fault.
 fn meshDmcUnsupported(){atomicOr(&meshState[${W.errorFlags}],2u);}
 fn meshDmcPackNormal(normal:vec3f)->u32{return svoGBufferPackNormalOct8(normal);}
@@ -1066,8 +1067,11 @@ fn surfaceMeshCount(@builtin(global_invocation_id) id:vec3u){
     let slot=meshEntrySlot(begin+job/jobsPerBrick);
     let leaf=atomicLoad(&meshWork[meshListAt(slot)]);
     if(!meshLeafCurrent(leaf)){continue;}
-    meshPhase=0u;meshEntry=slot;
+    meshPhase=0u;meshEntry=slot;meshJobCount=0u;
     meshExtractJob(leaf,job%jobsPerBrick);
+    // Every face of this job shares one brick counter. Accumulate privately
+    // rather than contending on it once per quad or dual-grid triangle.
+    if(meshJobCount!=0u){atomicAdd(&meshWork[meshScratchAt(slot)],meshJobCount);}
   }
 }
 // Allocate phase, one thread per batch brick: reserve the brick's new range

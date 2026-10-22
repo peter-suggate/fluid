@@ -40,6 +40,10 @@ export interface SparseVoxelDrySceneData {
    * a new scene's record and grow somebody else's shape.
    */
   fieldProgramBlocks?: Uint32Array<ArrayBuffer>;
+  /** Explicit prop carving CSG; fixed-capacity region shared with the voxelizer. */
+  sculptCuts?: Uint32Array<ArrayBuffer>;
+  /** Imported instances rendered from their edited SVO surface instead of their source mesh. */
+  sculptedPrimitiveIndices?: readonly number[];
   /** CPU-built mirror of the producer's bounded 112-byte light publication. */
   lightRecords?: Uint32Array<ArrayBuffer>;
   /** CPU-built mirror revision; must equal the authoritative source publication. */

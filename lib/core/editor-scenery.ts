@@ -10,6 +10,7 @@ import {
   moveHandles,
   positionFields,
   pickExcluded,
+  intersectBox,
   type BoxExtent,
   type EditorEntity,
   type EditorEntityContext,
@@ -17,6 +18,7 @@ import {
   type EditorRay,
 } from "./editor-entity";
 import type { EditorActionIcon } from "./editor-action";
+import type { EditorSelection } from "./editor-tools";
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription, Vec3 } from "./model";
 import {
@@ -31,7 +33,12 @@ import {
 import type { SceneryNode, SceneryPlacement } from "./scenery-graph";
 import { sceneryLightFixture, withSceneryLightColor, withSceneryLightStrength } from "./scenery-lights";
 import { kelvinToLinear } from "./light-color";
-import { intersectSvoPrimitive, type SvoFinitePrimitiveDescriptor } from "../svo/contracts/svo-primitive-abi";
+import { intersectSvoPrimitive, prepareSvoPrimitiveDistance, sampleSvoPrimitive,
+  type SvoFinitePrimitiveDescriptor, type SvoPrimitiveRayHit } from "../svo/contracts/svo-primitive-abi";
+import { SVO_PRIMITIVE_KIND_TABLE } from "../svo/contracts/svo-primitive-kinds";
+import { sceneCellSizes_m } from "./scene-lattice";
+import { packSvoSculptCuts, sampleSvoSculptCuts, SVO_SCULPT_CUT_HEADER_WORDS,
+  SVO_SCULPT_CUT_RECORD_WORDS } from "../svo/features/scene-publication/svo-sculpt-cuts";
 import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "../svo/features/scene-publication/svo-scene-primitives";
 import type { SceneryPropKind } from "./stores/ui-store";
 import {
@@ -351,11 +358,105 @@ interface SceneryPickTarget {
   readonly nodeId: string;
   readonly primitive: EnvironmentProxyPrimitive;
   descriptor?: SvoFinitePrimitiveDescriptor;
+  distance?: (point_m: Vec3) => number;
   /** Bounds the descriptor exactly, so a ray that misses it cannot hit the shape. */
   readonly aabb_m: EnvironmentProxyPrimitive["aabb_m"];
 }
 
 const pickTargetCache = new WeakMap<object, readonly SceneryPickTarget[]>();
+interface SceneryCutQuery { readonly words: Uint32Array; readonly distance: (point_m: Vec3) => number }
+interface SceneryPickCuts {
+  readonly document: readonly unknown[];
+  readonly words: Uint32Array;
+  readonly targets: Map<SceneryPickTarget, SceneryCutQuery | null>;
+}
+const sculptPickCache = new WeakMap<SceneDescription, SceneryPickCuts>();
+
+function sceneryPickCuts(scene: SceneDescription): SceneryPickCuts {
+  const cellSize_m = sceneCellSizes_m(scene);
+  const document = [scene.solidVoxels, scene.solidVoxels.length, ...cellSize_m, scene.container.width_m, scene.container.depth_m];
+  const previous = sculptPickCache.get(scene);
+  if (previous && document.every((value, index) => value === previous.document[index])) return previous;
+  const words = packSvoSculptCuts(scene.solidVoxels, {
+    origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2], cellSize_m,
+  });
+  const prepared = { document, words, targets: new Map<SceneryPickTarget, SceneryCutQuery | null>() };
+  sculptPickCache.set(scene, prepared);
+  return prepared;
+}
+
+/** Prepare only overlapping cuts and avoid per-cut scratch allocations while marching. */
+function cutsForTarget(cuts: SceneryPickCuts, target: SceneryPickTarget): SceneryCutQuery | null {
+  if (!cuts.words[0]) return null;
+  if (cuts.targets.has(target)) return cuts.targets.get(target)!;
+  const f = new Float32Array(cuts.words.buffer, cuts.words.byteOffset, cuts.words.length), selected: number[] = [];
+  for (let i = 0; i < cuts.words[0]!; i++) {
+    const at = SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS;
+    if (target.aabb_m.max.x >= f[at]! && target.aabb_m.min.x <= f[at + 4]!
+      && target.aabb_m.max.y >= f[at + 1]! && target.aabb_m.min.y <= f[at + 5]!
+      && target.aabb_m.max.z >= f[at + 2]! && target.aabb_m.min.z <= f[at + 6]!) selected.push(at);
+  }
+  if (!selected.length) { cuts.targets.set(target, null); return null; }
+  const words = new Uint32Array(SVO_SCULPT_CUT_HEADER_WORDS + selected.length * SVO_SCULPT_CUT_RECORD_WORDS);
+  words[0] = selected.length;
+  const prepared = new Float64Array(selected.length * 7);
+  selected.forEach((at, i) => {
+    words.set(cuts.words.subarray(at, at + SVO_SCULPT_CUT_RECORD_WORDS), SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS);
+    for (let a = 0; a < 3; a++) {
+      prepared[7 * i + a] = .5 * (f[at + a]! + f[at + 4 + a]!);
+      prepared[7 * i + 3 + a] = .5 * (f[at + 4 + a]! - f[at + a]!);
+    }
+    prepared[7 * i + 6] = cuts.words[at + 3]!;
+  });
+  const query: SceneryCutQuery = { words, distance: point => {
+    let nearest = 1e20;
+    for (let i = 0; i < prepared.length; i += 7) {
+      const x = point.x - prepared[i]!, y = point.y - prepared[i + 1]!, z = point.z - prepared[i + 2]!;
+      const rx = prepared[i + 3]!, ry = prepared[i + 4]!, rz = prepared[i + 5]!;
+      let distance: number;
+      if (prepared[i + 6] === 2) distance = (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz);
+      else {
+        const qx = Math.abs(x) - rx, qy = Math.abs(y) - ry, qz = Math.abs(z) - rz;
+        distance = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0);
+      }
+      nearest = Math.min(nearest, distance);
+    }
+    return nearest;
+  } };
+  cuts.targets.set(target, query);
+  return query;
+}
+
+/** Trace the retained CSG field, including cut walls behind an erased original face. */
+function intersectSculptedTarget(target: SceneryPickTarget, cuts: SceneryCutQuery, ray: EditorRay,
+  maximumDistance_m: number): SvoPrimitiveRayHit | undefined {
+  const descriptor = target.descriptor!;
+  const span = intersectBox(ray, target.aabb_m);
+  if (!span) return undefined;
+  const end = Math.min(span.far_m, maximumDistance_m);
+  let distance_m = Math.max(0, span.near_m);
+  target.distance ??= prepareSvoPrimitiveDistance(descriptor);
+  for (let step = 0; step < 512 && distance_m <= end; step++) {
+    const point = { x: ray.origin.x + ray.direction.x * distance_m,
+      y: ray.origin.y + ray.direction.y * distance_m, z: ray.origin.z + ray.direction.z * distance_m };
+    const original = target.distance(point), cutDistance = cuts.distance(point);
+    const retained = Math.max(original, -cutDistance);
+    const epsilon = Math.max(1e-6, Math.abs(distance_m) * 1e-5);
+    if (Math.abs(retained) <= epsilon) {
+      const cutSurface = -cutDistance >= original;
+      const cut = cutSurface ? sampleSvoSculptCuts(cuts.words, [point.x, point.y, point.z]) : undefined;
+      const sampled = cutSurface ? undefined : sampleSvoPrimitive(descriptor, point);
+      const normal = cut ? { x: -cut.normal[0], y: -cut.normal[1], z: -cut.normal[2] } : sampled?.normal;
+      if (!normal) return undefined;
+      return { t_m: distance_m, position_m: point, normal,
+        normalPolicy: cutSurface ? "smooth" : SVO_PRIMITIVE_KIND_TABLE[descriptor.kind].normalPolicy,
+        featureId: sampled?.featureId ?? 0, primitiveKind: descriptor.kind,
+        primitiveId: descriptor.primitiveId, materialId: descriptor.materialId, ownerId: descriptor.ownerId ?? 0xffff };
+    }
+    distance_m += Math.max(Math.abs(retained), 1e-7);
+  }
+  return undefined;
+}
 
 /** Slab test, so the exact intersection is only asked of the few shapes near the ray. */
 function raySpansAabb(aabb: EnvironmentProxyPrimitive["aabb_m"], ray: EditorRay, maximumDistance = Infinity): boolean {
@@ -398,6 +499,32 @@ function pickTargets(scene: SceneDescription) {
   });
   pickTargetCache.set(catalog, targets);
   return targets;
+}
+
+/** Exact scenery surface for tools that follow it, using the same cached picks as selection. */
+export function scenerySurfaceAt(scene: SceneDescription, input: EditorRay, maximumDistance_m = Infinity,
+  exclude?: EditorSelection): (SvoPrimitiveRayHit & { readonly nodeId: string }) | undefined {
+  const length = Math.hypot(input.direction.x, input.direction.y, input.direction.z);
+  if (!(length > 0) || !Number.isFinite(length)) return undefined;
+  const ray = { origin: input.origin, direction: {
+    x: input.direction.x / length, y: input.direction.y / length, z: input.direction.z / length,
+  } };
+  const cuts = sceneryPickCuts(scene);
+  let nearest: (SvoPrimitiveRayHit & { readonly nodeId: string }) | undefined;
+  for (const target of pickTargets(scene)) {
+    if (pickExcluded(exclude, "scenery", scenerySelectionId(target.nodeId))) continue;
+    const maximum = nearest?.t_m ?? maximumDistance_m;
+    if (!raySpansAabb(target.aabb_m, ray, maximum)) continue;
+    target.descriptor ??= svoDescriptorForEnvironmentProxy(target.primitive);
+    // Readiness can change after the catalog was cached, including hot reload.
+    const asset = target.descriptor.kind === "field-program" ? target.descriptor.program?.sampledVolume?.asset : undefined;
+    if (asset && !meshAssetDistanceFieldReady(asset)) continue;
+    const targetCuts = cutsForTarget(cuts, target);
+    const hit = targetCuts ? intersectSculptedTarget(target, targetCuts, ray, maximum)
+      : intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction, tMax_m: maximum });
+    if (hit && hit.t_m < maximum) nearest = { ...hit, nodeId: target.nodeId };
+  }
+  return nearest;
 }
 
 /**
@@ -458,22 +585,10 @@ export const sceneryEntity: EditorEntityDefinition = {
     })),
   }],
   pick: (context, ray, exclude) => {
-    let nearest: { nodeId: string; distance_m: number } | undefined;
-    for (const target of pickTargets(context.scene)) {
-      if (pickExcluded(exclude, "scenery", scenerySelectionId(target.nodeId))) continue;
-      if (!raySpansAabb(target.aabb_m, ray, nearest?.distance_m)) continue;
-      target.descriptor ??= svoDescriptorForEnvironmentProxy(target.primitive);
-      // The catalog can outlive its asset handoff (including during hot
-      // reload). Check readiness on every pick, not when caching targets, so
-      // zoom/hover keep working and exact picking resumes as data arrives.
-      const asset = target.descriptor.kind === "field-program" ? target.descriptor.program?.sampledVolume?.asset : undefined;
-      if (asset && !meshAssetDistanceFieldReady(asset)) continue;
-      const hit = intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction, tMax_m: nearest?.distance_m });
-      if (hit && (!nearest || hit.t_m < nearest.distance_m)) nearest = { nodeId: target.nodeId, distance_m: hit.t_m };
-    }
+    const nearest = scenerySurfaceAt(context.scene, ray, Infinity, exclude);
     return nearest && {
       selection: { kind: "scenery", id: scenerySelectionId(nearest.nodeId) },
-      distance_m: nearest.distance_m,
+      distance_m: nearest.t_m,
     };
   },
 };

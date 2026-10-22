@@ -1,3 +1,4 @@
+import { SVO_SCULPT_CUT_ARENA_WORDS, svoSculptCutsWGSL } from "../scene-publication/svo-sculpt-cuts";
 import { robotShaderLibrary } from '../../../interaction/features/robot/render';
 import { importedSurfaceWGSL } from "../primary-visibility/imported-surface.wgsl";
 import { svoVoxelLightHashWGSL, SVO_VOXEL_LIGHT_CACHE_BYTES_PER_ENTRY } from "../lighting-visibility/svo-voxel-light-cache";
@@ -54,7 +55,8 @@ import { svoScenePrimitiveBandReadWGSL } from "../scene-publication/svo-scene-pr
  * next rung that would cross it is roughly 16x the hero, and the authored record
  * ceiling (16 384) fires first.
  */
-export const SVO_DRY_SCENE_MATERIAL_CAPACITY = 8_192;
+// Upper half mirrors imported PBR palettes for instances sculpted into the SVO mesh.
+export const SVO_DRY_SCENE_MATERIAL_CAPACITY = 16_384;
 
 export const SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES =
   SVO_DRY_SCENE_MATERIAL_CAPACITY * SVO_MATERIAL_RECORD_STRIDE_BYTES;
@@ -130,15 +132,17 @@ export const drySceneArenaRegions = (() => {
   const materialOffsetBytes = region(SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES);
   const primitiveOffsetBytes = region(SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES);
   const clusterOffsetBytes = region(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES);
+  const sculptCutOffsetBytes = region(SVO_SCULPT_CUT_ARENA_WORDS * 4);
   const fieldProgramOffsetBytes = region(SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES);
   return {
-    materialOffsetBytes, primitiveOffsetBytes, clusterOffsetBytes, fieldProgramOffsetBytes,
+    materialOffsetBytes, primitiveOffsetBytes, clusterOffsetBytes, sculptCutOffsetBytes, fieldProgramOffsetBytes,
     sizeBytes: offsetBytes,
   };
 })();
 
 
 export const SVO_DRY_SCENE_ARENA_LAYOUT = Object.freeze({
+  sculptCutOffsetBytes: drySceneArenaRegions.sculptCutOffsetBytes,
   materialOffsetBytes: drySceneArenaRegions.materialOffsetBytes,
   primitiveOffsetBytes: drySceneArenaRegions.primitiveOffsetBytes,
   /** Fixed-capacity aggregate parameter blocks, addressed by a record's word-13 reference. */
@@ -1877,6 +1881,7 @@ fn dryPrimaryLeafProxyHit(ro:vec3f,rd:vec3f,nodeIndex:u32,proxyBounds:mat2x3f,tE
   return dryPrimaryVoxelProxyHit(ro,rd,proxyBounds,max(tEnter,0.0),identity);
 }
 fn dryPrimaryPrimitiveProxyHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,span:vec2f)->DryHit{
+  if(svoSculptCutCount()>0u){return primitiveHit(record,ro,rd,span.x,span.y);}
   let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
   let extent=dryScenePrimitiveWorldExtent(localExtent,record.orientation);let centre=svoPrimitiveCenter_m(record);
   let bounds=mat2x3f(centre-extent,centre+extent);let t=mix(span.x,span.y,0.5);
@@ -4214,6 +4219,8 @@ fn dryClusterPacking(record:SvoPrimitiveRecord)->SvoClusterPacking{
     bitcast<f32>(head[${CLUSTER_BLOCK_SMOOTH_RADIUS_WORD}]),shape.x,shape.y,shape.z,shape.w,
     placement.x,placement.y,placement.z,points);
 }
+fn drySculptCutWord(index:u32)->u32{return drySceneArena[${SVO_DRY_SCENE_ARENA_LAYOUT.sculptCutOffsetBytes / 4}u+index];}
+${svoSculptCutsWGSL("drySculptCutWord")}
 fn drySceneWord(offset:u32)->u32{return drySceneArena[offset];}
 ${svoFieldProgramWGSL({
   functionName: "dryFieldProgramBlock",
@@ -4643,17 +4650,44 @@ fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->
   // the bounded closest-point distance evaluator merely to recover an
   // ellipsoid normal after the ray quadratic has already found the surface.
   let exact=svoIntersectPrimitiveExact(record,ro,rd,max(tMin,1e-4),tMax,dryClusterPacking(record));
-  if(exact.status!=SVO_PRIMITIVE_RAY_HIT){return missHit();}
-  var normal=exact.normal.xyz;var material=svoPrimitiveMaterialId(record);
+  // A segment starting inside the source can meet a cut cap before the
+  // original exit (from either the cavity or retained solid), even when that
+  // exit is beyond tMax. Trace the retained field from the segment origin.
+  let start=max(tMin,1e-4);let startPoint=ro+rd*start;
+  var startsInsideSource=false;
+  if(svoSculptCutCount()>0u){
+    startsInsideSource=svoPrimitiveDistance_m(record,startPoint,dryClusterPacking(record))<=0.;
+  }
+  if(exact.status!=SVO_PRIMITIVE_RAY_HIT&&!startsInsideSource){return missHit();}
+  var t=select(exact.t_m,start,startsInsideSource);var normal=exact.normal.xyz;var material=svoPrimitiveMaterialId(record);
+  var cutSurface=false;
+  // Keep exact analytic intersections when untouched. A removed first hit
+  // marches the retained field to its next surface, including the cut's cap.
+  if(startsInsideSource||(svoSculptCutCount()>0u&&svoSculptCutDistance(ro+rd*t)<0.)){
+    if(t>tMax){return missHit();}
+    var found=false;
+    for(var step=0u;step<512u;step+=1u){
+      let point=ro+rd*t;let cut=svoSculptCutSample(point);
+      let source=svoPrimitiveDistance_m(record,point,dryClusterPacking(record));
+      let distance=max(source,-cut.distance);
+      if(abs(distance)<1e-5){
+        cutSurface=-cut.distance>=source;
+        normal=select(svoEvaluatePrimitive(record,point,dryClusterPacking(record)).normal.xyz,-cut.normal,cutSurface);
+        found=true;break;
+      }
+      t+=max(abs(distance),1e-5);if(t>tMax){break;}
+    }
+    if(!found){return missHit();}
+  }
   if(svoPrimitiveKind(record)==SVO_KIND_FIELD_PROGRAM){
     let reference=svoPrimitiveFieldProgramReference(record);
     if(reference>=DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET){
       let offset=reference-DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET;
-      let surface=dryFieldProgramBlockSurface(offset/DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS,svoPrimitiveLocalPoint(record,ro+rd*exact.t_m));
-      if(surface.material!=0u){material=surface.material;normal=svoQuaternionRotate(record.orientation,surface.normal);}
+      let surface=dryFieldProgramBlockSurface(offset/DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS,svoPrimitiveLocalPoint(record,ro+rd*t));
+      if(surface.material!=0u){material=surface.material;if(!cutSurface){normal=svoQuaternionRotate(record.orientation,surface.normal);}}
     }
   }
-  return DryHit(exact.t_m,normal,material,svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+  return DryHit(t,normal,material,svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
 
 // The patch half of a planar terminal: one exact finite slab out of the
@@ -4670,7 +4704,7 @@ fn dryPlanarPatchHit(ro:vec3f,rd:vec3f,patchIndex:u32,tEnter:f32,tExit:f32)->Dry
     ||patchIndex>=dry.planarBoundaries.x||patchIndex>=arrayLength(&dryPlanarBoundaries)){return missHit();}
   let boundary=dryPlanarBoundaries[patchIndex];
   let exact=intersectPlanarBoundary(boundary,ro,rd,max(tEnter,1e-4),tExit);
-  if(exact.valid==0u){return missHit();}
+  if(exact.valid==0u||svoSculptCutDistance(ro+rd*exact.tHit)<0.){return missHit();}
   let identity=planarBoundaryIdentity(boundary);
   return DryHit(exact.tHit,exact.normal,identity&0xffffu,identity>>16u,
     SVO_FEATURE_BOX_X+exact.featureAxis,DRY_GBUFFER_FIELD_ANALYTIC,
@@ -4702,7 +4736,7 @@ fn dryPlanarCatalogHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
     ${primaryWorkMap ? "dryPrimaryWorkPlanarTests+=1u;" : ""}
     let boundary=dryPlanarBoundaries[boundaryIndex];
     let exact=intersectPlanarBoundary(boundary,ro,rd,max(tMin,1e-4),best.t);
-    if(exact.valid==0u){continue;}
+    if(exact.valid==0u||svoSculptCutDistance(ro+rd*exact.tHit)<0.){continue;}
     let identity=planarBoundaryIdentity(boundary);
     let owner=identity>>16u;
     if(dryOpaqueOwnerSuppressed(owner)){continue;}

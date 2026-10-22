@@ -1841,6 +1841,8 @@ export interface SvoFieldProgramWGSLOptions {
   readonly baseWordExpression: string;
   /** WGSL expression for the number of blocks the arena holds. */
   readonly capacityExpression: string;
+  /** Reuse immutable scalar corners across nearby DMC gradient probes. */
+  readonly cacheSampledDistance?: boolean;
 }
 
 export function svoFieldProgramWGSL(options: SvoFieldProgramWGSLOptions): string {
@@ -1859,7 +1861,7 @@ const SVO_FIELD_UNBOUNDED_DISTANCE_M:f32=${UNBOUNDED_DISTANCE_M.toExponential()}
 // A distance and the Lipschitz constant of the field that produced it. The
 // tracer steps distance/lipschitz; see §2.4 of the fidelity handoff.
 struct SvoFieldValue{distance_m:f32,lipschitz:f32}
-${meshVolumeWGSL(`${functionName}Volume`, loadWord)}
+${meshVolumeWGSL(`${functionName}Volume`, loadWord, options.cacheSampledDistance)}
 fn ${functionName}Surface(blockIndex:u32,localPoint:vec3f)->${functionName}VolumeValue{
   var missing=${functionName}VolumeValue(1e20,vec3f(0),0u);
   if(blockIndex>=(${capacityExpression})){return missing;}

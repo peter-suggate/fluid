@@ -26,6 +26,9 @@ import { combinedRegion } from "./voxel-grid";
  *   edit's label, in the same step that writes the edit.
  * - `preview` shows a gesture's proposal through the display alone; nothing is
  *   written, recorded or handed to the simulation.
+ * - a live gesture publishes accepted samples throughout its drag, recording
+ *   the starting document once on finish. Cancel validates a rollback before
+ *   releasing the hold and leaves both history stacks unchanged.
  * - `voxelStrokePending` is up from `begin` until the edit has been written or
  *   refused, which is what keeps undo, import and a save out meanwhile.
  */
@@ -36,16 +39,25 @@ export function sessionToolHost(session: PaneSession,
   const queue = solidEditQueue(session);
   let label: string | undefined;
   let close: (() => void) | undefined;
+  let live: { base: SceneDescription; latest: SceneDescription; presetId: string; label: string } | undefined;
+  const release = () => { close?.(); close = undefined; label = undefined; live = undefined; };
+  const recordLive = () => {
+    if (live && live.latest !== live.base) session.history.getState().record({
+      label: live.label, scene: live.base, presetId: live.presetId,
+    });
+  };
   return {
     scene: () => queue.head(),
     publish: (next, base) => {
       const recorded = label;
+      const stroke = live;
       if (recorded === undefined) return Promise.reject(new Error("A solid edit was published without having begun."));
       return queue.submit({ base, next, commit: () => {
         const store = session.scene.getState();
         const presetId = store.presetId;
         store.setScene(next);
-        session.history.getState().record({ label: recorded, scene: base, presetId });
+        if (stroke) stroke.latest = next;
+        else session.history.getState().record({ label: recorded, scene: base, presetId });
       } }, validate);
     },
     preview,
@@ -58,8 +70,26 @@ export function sessionToolHost(session: PaneSession,
       ui.selectVoxelRegion(combinedRegion(standing, region, mode));
     },
     clipboard: () => session.ui.getState().voxelClipboard,
-    begin: (edit) => { label = edit; close ??= queue.hold(); },
-    finish: () => { close?.(); close = undefined; },
-    cancel: () => { close?.(); close = undefined; },
+    begin: (edit, options) => {
+      label = edit; close ??= queue.hold();
+      if (options?.live) live = { base: queue.head(), latest: queue.head(),
+        presetId: session.scene.getState().presetId, label: edit };
+    },
+    finish: () => { recordLive(); release(); },
+    cancel: async () => {
+      try {
+        // Never replace an unrelated document changed by another editor.
+        if (live && live.latest !== live.base && queue.head() === live.latest) {
+          const stroke = live;
+          await queue.submit({ base: stroke.latest, next: stroke.base,
+            commit: () => { session.scene.getState().setScene(stroke.base, stroke.presetId); } }, validate);
+        }
+      } catch (error) {
+        // A lost runtime may refuse rollback. Keep the accepted stroke undoable
+        // rather than leaving changed solids with no history entry.
+        recordLive();
+        throw error;
+      } finally { release(); }
+    },
   };
 }

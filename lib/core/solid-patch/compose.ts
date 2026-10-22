@@ -38,6 +38,12 @@ export function validateSolidPatch(patch: SolidWorldVoxelPatch): void {
   if (patch.operation !== "fill" && patch.operation !== "clear" && patch.operation !== "paint") {
     throw new RangeError(`Unsupported solid patch operation "${String(patch.operation)}"`);
   }
+  if (patch.affectsScenery !== undefined && typeof patch.affectsScenery !== "boolean") {
+    throw new RangeError("SolidWorld scenery-cut flag must be boolean");
+  }
+  if (patch.affectsScenery === true && patch.operation !== "clear") {
+    throw new RangeError("Only clear patches can affect scenery");
+  }
   if (!isCoordinate(patch.minimum) || !isCoordinate(patch.maximumExclusive)
     || patch.minimum.some((value, axis) => value >= patch.maximumExclusive[axis]!)) {
     throw new RangeError("SolidWorld voxel patch must be a non-empty integer box");

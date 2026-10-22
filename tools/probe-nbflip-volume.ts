@@ -13,6 +13,7 @@ export async function createNbflipVolumeProbe(device:GPUDevice,solver:WebGPUUnif
  device=(solver as unknown as {device:GPUDevice}).device;
  const frame=(solver as unknown as {mixedFrame:{ownership:UniformMixedOwnership;solid:UniformMixedSolid;fields:{phi:GPUTexture}}}).mixedFrame;
  const o=frame.ownership,solid=frame.solid,{nx,ny,nz}=solver.info;
+ const jobs=Math.ceil(nx*ny*nz/64),gridX=Math.min(jobs,device.limits.maxComputeWorkgroupsPerDimension),gridY=Math.ceil(jobs/gridX);
  const output=device.createBuffer({size:4*nx*ny*nz,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
  const layout=uniformDetailBindLayout(device,{entries:[
   {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
@@ -23,8 +24,8 @@ export async function createNbflipVolumeProbe(device:GPUDevice,solver:WebGPUUnif
 @group(1) @binding(1) var<storage,read_write> result:array<f32>;
 ${uniformMixedSolidWGSL(2,solid.coarse?.count)}
 ${levelSetFillWGSL}
-@compute @workgroup_size(64) fn measure(@builtin(global_invocation_id) gid:vec3u){
- let i=gid.x; if(i>=${nx*ny*nz}u){return;}result[i]=0.0;
+@compute @workgroup_size(64) fn measure(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let i=64u*(group.x+${gridX}u*group.y)+lane; if(i>=${nx*ny*nz}u){return;}result[i]=0.0;
  let c=vec3i(vec3u(i%${nx}u,(i/${nx}u)%${ny}u,i/${nx*ny}u))+umWallLow();
  if(!umCellPresent(c)){return;}let owner=umOwnerAt(c);let origin=umOrigin(owner);
  if(any(vec3i(origin)!=c)){return;}
@@ -56,6 +57,6 @@ ${levelSetFillWGSL}
  const pipeline=await uniformDetailPipeline(device,o,{layout:device.createPipelineLayout({bindGroupLayouts:[o.bindLayout,layout,solid.tileLayout]}),compute:{module,entryPoint:"measure",constants:{umDispatchX:65535}}});
  const group=uniformDetailGroup(device,{layout,entries:[{binding:0,resource:frame.fields.phi},{binding:1,resource:{buffer:output}}]});
  return {async read(){
-  const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(uniformDetailPick(pipeline));pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,solid.tileGroup);pass.dispatchWorkgroups(Math.ceil(nx*ny*nz/64));pass.end();device.queue.submit([encoder.finish()]);return readMixedBuffer(device,output);
+  const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(uniformDetailPick(pipeline));pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,solid.tileGroup);pass.dispatchWorkgroups(gridX,gridY);pass.end();device.queue.submit([encoder.finish()]);return readMixedBuffer(device,output);
  },destroy(){output.destroy();}};
 }

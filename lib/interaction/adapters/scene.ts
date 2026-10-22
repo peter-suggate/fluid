@@ -1,4 +1,5 @@
 import { markSceneRevision, sceneRevision, type SceneDescription } from '../../core/model';
+import { reuseSolidWorld } from '../../core/solid-world';
 import { interactionCatalog, interactionRuntimes } from '../installed';
 import { shapeDescription } from '../runtime/physics';
 const compiled = new WeakMap<SceneDescription, SceneDescription>();
@@ -9,6 +10,10 @@ function retainDerivedScene(source: SceneDescription, result: SceneDescription):
   // every draw (megabytes for Pool Party). External unversioned inputs retain
   // the renderer's content-checking fallback.
   if (sceneRevision(source) !== undefined) markSceneRevision(result);
+  // Interaction adds bodies, not voxel solids. Keep the accepted snapshot so
+  // render capability checks retain untouched pages instead of replaying edits.
+  // This only transfers an existing cache entry; it never composes an image.
+  reuseSolidWorld(source, result);
   compiled.set(source, result);
   compiled.set(result, result);
   return result;
@@ -16,7 +21,14 @@ function retainDerivedScene(source: SceneDescription, result: SceneDescription):
 /** Disposable representation; never write generated bodies back to the document. */
 export function interactionScene(scene: SceneDescription): SceneDescription {
   if (!scene.interaction?.entities.length) return scene;
-  const cached = compiled.get(scene); if (cached) return cached;
+  const cached = compiled.get(scene);
+  if (cached) {
+    // Construction may have compiled the derivative after it was retained.
+    // Share that image back with the authored document before its next stroke.
+    reuseSolidWorld(scene, cached);
+    reuseSolidWorld(cached, scene);
+    return cached;
+  }
   // Unsupported content remains serializable/editable without passing an
   // unknown schema to physical shape constructors. The host owns the reason.
   let entities;

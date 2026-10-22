@@ -1,7 +1,7 @@
 /** Sampler shared by every host of the field-program arena. Pointers within a
  * volume are relative to its header, so the same image works in both arenas.
  * Marching uses the scalar entry point; only an accepted surface decodes PBR. */
-export function meshVolumeWGSL(name: string, load: string): string {
+export function meshVolumeWGSL(name: string, load: string, cacheDistance = false): string {
   const sampler = (distanceOnly: boolean) => /* wgsl */ `
 fn ${distanceOnly ? `${name}Distance` : name}(base:u32,p:vec3f)->${distanceOnly ? "f32" : `${name}Value`}{
   let origin=vec3f(bitcast<f32>(${load}(base)),bitcast<f32>(${load}(base+1u)),bitcast<f32>(${load}(base+2u)));
@@ -16,16 +16,18 @@ fn ${distanceOnly ? `${name}Distance` : name}(base:u32,p:vec3f)->${distanceOnly 
   let directory=base+16u+2u*(b.x+bd.x*(b.y+bd.y*b.z));
   let relative=${load}(directory);
   if(relative==0u){${distanceOnly ? "return" : "result.distance="} bitcast<f32>(${load}(directory+1u));${distanceOnly ? "" : "return result;"}}
+  ${distanceOnly && cacheDistance ? `let reuse=${name}DistanceHeld&&${name}DistanceBase==base&&all(${name}DistanceCell==cell);` : ""}
   let c=cell&vec3u(7);let f=q-vec3f(cell);var value=0.0;${distanceOnly ? "" : "var normal=vec3f(0);var ids:array<u32,8>;var votes:array<f32,8>;"}
   for(var i=0u;i<8u;i++){
     let corner=vec3u(i&1u,(i>>1u)&1u,i>>2u);let n=c+corner;
     let at=base+relative+2u*(n.x+9u*(n.y+9u*n.z));
-    let d=bitcast<f32>(${load}(at));${distanceOnly ? "" : `let identity=${load}(at+1u);let m=identity>>16u;`}
+    ${distanceOnly && cacheDistance ? `var d=0.;if(reuse){d=${name}DistanceCorners[i];}else{d=bitcast<f32>(${load}(at));${name}DistanceCorners[i]=d;}` : `let d=bitcast<f32>(${load}(at));`}${distanceOnly ? "" : `let identity=${load}(at+1u);let m=identity>>16u;`}
     let weights=select(vec3f(1)-f,f,corner!=vec3u(0));let w=weights.x*weights.y*weights.z;
     value+=w*d;
     ${distanceOnly ? "" : `ids[i]=m;votes[i]=w;
     if(m!=0u){normal+=w*${name}Normal(identity);}`}
   }
+  ${distanceOnly && cacheDistance ? `${name}DistanceHeld=true;${name}DistanceBase=base;${name}DistanceCell=cell;` : ""}
   ${distanceOnly ? "return value;" : `var best=-1.0;
   // Constant indices avoid dynamic local-array access in material election.
   // Preserve the original corner order, addition order and first-wins ties.
@@ -40,6 +42,12 @@ fn ${distanceOnly ? `${name}Distance` : name}(base:u32,p:vec3f)->${distanceOnly 
 `;
   return /* wgsl */ `
 struct ${name}Value { distance:f32, normal:vec3f, material:u32 }
+${cacheDistance ? `// Consecutive finite-difference probes usually share one trilinear cell.
+// Cache only its immutable scalar corners; recompute weights for each point.
+var<private> ${name}DistanceHeld:bool;
+var<private> ${name}DistanceBase:u32;
+var<private> ${name}DistanceCell:vec3u;
+var<private> ${name}DistanceCorners:array<f32,8>;` : ""}
 fn ${name}Normal(word:u32)->vec3f{
   let p=vec2f(f32(word&255u),f32((word>>8u)&255u))/255.0*2.0-1.0;
   var n=vec3f(p,1.0-abs(p.x)-abs(p.y));

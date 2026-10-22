@@ -1,10 +1,34 @@
-import { fluidSolidWorldForScene, sampleSolidWorld } from '../../../core/solid-world';
+import { fluidSolidWorldForScene, sampleSolidWorld, type SolidWorld, type SolidWorldPage } from '../../../core/solid-world';
 import { proceduralSolidField, sampleSolidNodes } from '../../../core/procedural-solid';
 import { sceneCellSizes_m } from '../../../core/scene-lattice-dimensions';
 import type { SceneDescription, Vec3 } from '../../../core/model';
 export type CollisionShape = { kind: 'box'; center: Vec3; half: Vec3 } | { kind: 'hull'; points: Vec3[] };
 type HullShape = Extract<CollisionShape, { kind: 'hull' }>;
 export interface CollisionChunk { key: string; signature: string; shapes: CollisionShape[] }
+type SampledBrick = { values: readonly number[]; valid: Uint32Array };
+type CachedChunk = { page?: SolidWorldPage; values?: readonly number[]; valid?: Uint32Array; chunk?: CollisionChunk };
+/** Owned by one physics world. Reuse only immutable source pages and identical
+ * sampled validity; an edited hole must never retain its former convex hull. */
+export class SolidCollisionCache {
+  private context = '';
+  private ground?: SolidWorld['ground'];
+  private entries = new Map<string, CachedChunk>();
+  prepare(context: string, ground: SolidWorld['ground']) {
+    if (context !== this.context || ground !== this.ground) this.entries.clear();
+    this.context = context; this.ground = ground;
+  }
+  get(key: string, page: SolidWorldPage | undefined, sampled: SampledBrick | undefined): CachedChunk | undefined {
+    const entry = this.entries.get(key);
+    if (!entry || entry.page !== page || entry.values !== sampled?.values
+      || Boolean(entry.valid) !== Boolean(sampled?.valid)) return;
+    if (entry.valid && sampled && entry.valid.some((word, index) => word !== sampled.valid[index])) return;
+    return entry;
+  }
+  set(key: string, page: SolidWorldPage | undefined, sampled: SampledBrick | undefined, chunk?: CollisionChunk) {
+    this.entries.set(key, { page, values: sampled?.values, valid: sampled?.valid.slice(), chunk });
+  }
+  retain(keys: ReadonlySet<string>) { for (const key of this.entries.keys()) if (!keys.has(key)) this.entries.delete(key); }
+}
 const corners = Array.from({ length: 8 }, (_, i) => [i & 1, (i >> 1) & 1, (i >> 2) & 1]);
 const tetrahedra = [[0, 1, 3, 7], [0, 3, 2, 7], [0, 2, 6, 7], [0, 6, 4, 7], [0, 4, 5, 7], [0, 5, 1, 7]];
 type Plane = { point: Vec3; normal: Vec3 };
@@ -21,9 +45,11 @@ function mergeConvexSlice(shapes: HullShape[], planes: Plane[]): HullShape[] {
   return [{ kind: 'hull', points }];
 }
 /** Fixed-resolution physics geometry. Never samples camera-dependent SVO meshes. */
-export function compileSolidChunks(scene: SceneDescription, positions: readonly Vec3[] = []): CollisionChunk[] {
+export function compileSolidChunks(scene: SceneDescription, positions: readonly Vec3[] = [], cache?: SolidCollisionCache): CollisionChunk[] {
   const world = fluidSolidWorldForScene(scene), field = proceduralSolidField(scene), h = sceneCellSizes_m(scene);
   const origin = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
+  cache?.prepare(JSON.stringify([origin, h, world.regions]), world.ground);
+  const sourcePages = cache ? new Map(world.pages.map(page => [page.coordinate.join(','), page])) : undefined;
   const pages = new Set<string>(world.pages.map(page => page.coordinate.join(',')));
   for (const brick of scene.solidBoundary?.bricks ?? []) pages.add(brick.origin.map(v => Math.floor(v / 8)).join(','));
   const addBox = (lo: readonly number[], hi: readonly number[]) => {
@@ -41,6 +67,8 @@ export function compileSolidChunks(scene: SceneDescription, positions: readonly 
   const point = (p: readonly number[]): Vec3 => ({ x: origin[0] + p[0] * h[0], y: origin[1] + p[1] * h[1], z: origin[2] + p[2] * h[2] });
   const result: CollisionChunk[] = [];
   for (const key of [...pages].sort()) {
+    const page = sourcePages?.get(key), sampled = field?.bricks.get(key), retained = cache?.get(key, page, sampled);
+    if (retained) { if (retained.chunk) result.push(retained.chunk); continue; }
     const base = key.split(',').map(v => Number(v) * 8), full = new Uint8Array(512), shapes: CollisionShape[] = [];
     // Keep edge strips separate: interpolated SDF corners need not be convex,
     // even when the broad face between them is planar. One-cell slices let us
@@ -97,7 +125,10 @@ export function compileSolidChunks(scene: SceneDescription, positions: readonly 
       shapes.push({ kind: 'box', center: point([base[0] + (x + X) / 2, base[1] + (y + Y) / 2, base[2] + (z + Z) / 2]), half: { x: (X - x) * h[0] / 2, y: (Y - y) * h[1] / 2, z: (Z - z) * h[2] / 2 } });
     }
     for (const slice of slices) shapes.push(...(slice.complete ? mergeConvexSlice(slice.shapes, slice.planes) : slice.shapes));
-    if (shapes.length) result.push({ key, shapes, signature: JSON.stringify(shapes) });
+    const chunk = shapes.length ? { key, shapes, signature: JSON.stringify(shapes) } : undefined;
+    if (chunk) result.push(chunk);
+    cache?.set(key, page, sampled, chunk);
   }
+  cache?.retain(pages);
   return result;
 }

@@ -1,5 +1,14 @@
+import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
+
 /** Greedy voxel faces and voxel LOD, with an optional clipped-cell hook. */
-export function svoVoxelMeshWGSL(errorFlags:number, contours:boolean):string { return /* wgsl */ `
+export function svoVoxelMeshWGSL(errorFlags:number, contours:boolean, retainSampledShadowCasters = true):string {
+  // A sampled volume's proxy never reaches the primary mesh. Reject its own
+  // faces before neighbour traversal, but leave its occupancy in the cell
+  // table so adjacent ordinary materials still hide behind it. Shadow maps
+  // need these proxies and compile without the early rejection.
+  const rejectSampled = (material: string) => retainSampledShadowCasters ? ""
+    : `if((dryMaterial(${material}).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){continue;}`;
+  return /* wgsl */ `
 // Greedy rectangles over one face layer's exposed-cell mask. \`m\` cells per
 // side, each \`cell\` lattice units wide; the mask is consumed as it is merged.
 fn meshEmitMask(mask:ptr<function,array<u32,64>>,m:u32,base:vec3u,cell:u32,face:u32,layer:u32,packedFace:u32){
@@ -58,6 +67,7 @@ fn meshBuildLevel(payload:u32,base:vec3u,scale:u32,depth:u32,level:u32,n:u32){
       for(var y=0u;y<m;y+=1u){for(var x=0u;x<m;x+=1u){
         let index=x+y*m;mask[index]=0u;var c=vec3u(0u);c[axis]=layer;c[u]=x;c[v]=y;
         if(cells[c.x+c.y*m+c.z*m*m]==0u){continue;}
+        ${rejectSampled("cells[c.x+c.y*m+c.z*m*m]")}
         let boundary=select(layer==0u,layer==m-1u,positive);
         var exposed=false;
         if(boundary){
@@ -93,6 +103,7 @@ fn meshVoxelExtractJob(leafIndex:u32,local:u32){
     let m=x+y*n;mask[m]=0u;var c=vec3u(0u);c[axis]=layer;c[u]=x;c[v]=y;
     let voxel=svoBrickVoxelIndex(leaf.y,c,n);if(voxel>=dryVoxelCapacity()){continue;}
     let identity=meshMergeIdentity(sceneIdentityAt(voxel));if(!sceneIdentitySolid(identity)){continue;}
+    ${rejectSampled("sceneIdentityMaterial(identity)")}
     ${contours ? `let code=meshContourCode(voxel);
     if(code!=0u){
       // The first face job for this cell emits its entire closed clipped cube.

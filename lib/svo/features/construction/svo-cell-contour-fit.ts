@@ -1,5 +1,5 @@
 /** Producer-only support fitting against the voxelizer's authored fields. */
-export function svoCellContourFitWGSL(renderTerrain: boolean, solidWorld: boolean): string {
+export function svoCellContourFitWGSL(renderTerrain: boolean, solidWorld: boolean, sculptCuts = false): string {
   const staticBound = renderTerrain ? /* wgsl */ `fn contourStaticMayOccupy(minimum:vec3f,maximum:vec3f)->bool{
   // Edits can replace the heightfield with exact voxel boxes. Keep their cubes.
   if(rtEditMayOccupy(minimum,maximum)){return true;}
@@ -28,7 +28,9 @@ fn contourStaticMayOccupy(minimum:vec3f,maximum:vec3f)->bool{
 fn contourPrimitiveLowerBound(p:ScenePrimitive,world:vec3f)->f32{
   if(scenePrimitiveType(p)==3u){
     let q=inverseRotate(world-p.centerType.xyz,p.rotation);let r=p.extentIdentity.xyz;
-    return (length(q/r)-1.0)*min(r.x,min(r.y,r.z));
+    let distance=(length(q/r)-1.0)*min(r.x,min(r.y,r.z));
+    ${sculptCuts ? "if(primitiveReceivesSculptCuts(p)){return svoSculptApplyDistance(distance,world);}" : ""}
+    return distance;
   }
   return primitiveDistance(p,world);
 }

@@ -1371,12 +1371,11 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
 @compute @workgroup_size(64) fn solidActive(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
  if(!umSolidTile(umTileCoord(tile))){return;}
- if(umSolidGeometryExact(tile)){return;}
- ${this.warmSolids?`// warmResolution "4h": a WARM region's cut tile is the root's 4h cut owner
- // (record Omega and V) and promotes nothing; a COLD one keeps its width.
- {let tier=bounds[CC_TIER+umPageOfTile(tile)];
-  if(tier==${UNIFORM_REGION_TIER.warm}u||(tier==${UNIFORM_REGION_TIER.cold}u&&umTileWidth(tile)!=1u)){return;}}`:""}
- if(${this.solidSurfaceOnly?"":"umBit(wetIndex(0u),tile)||"}umBit(${HEADER}u,tile)){atomicOr(&census[activeIndex(tile/32u)],1u<<(tile%32u));}
+ ${this.warmSolids?`let tier=bounds[CC_TIER+umPageOfTile(tile)];
+ let coarseHeat=tier==${UNIFORM_REGION_TIER.warm}u||(tier==${UNIFORM_REGION_TIER.cold}u&&umTileWidth(tile)!=1u);`:"let coarseHeat=false;"}
+ if(umSolidContactActive(tile,umBit(wetIndex(0u),tile),umBit(${HEADER}u,tile),${this.solidSurfaceOnly},coarseHeat)){
+  atomicOr(&census[activeIndex(tile/32u)],1u<<(tile%32u));
+ }
 }
 @compute @workgroup_size(64) fn solidPromote(@builtin(global_invocation_id) gid:vec3u){
  let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
@@ -1399,9 +1398,9 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
  // mid-frame raise, whose 4h solids demoted the tiles again at the next
  // census, a two-frame flicker along every COLD/WARM boundary.
  let keep=bounds[CC_TIER+umPageOfTile(tile)]==${UNIFORM_REGION_TIER.cold}u&&umTileWidth(tile)==1u;`:"let keep=false;"}
- ${this.solidSurfaceOnly?`// solidContact "surface": the ring holds liquid only where the tile is wet;
- // a dry tile off the band meets no liquid this frame.
- let wet=umBit(wetIndex(0u),tile);`:""}
+ // Static surface-only rings need wet neighbours; a wet body's active
+ // tile always retains its complete traction/interpolation stencil.
+ let wet=umBit(wetIndex(0u),tile);
  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
   let t=umTileKey(vec3i(x,y,z));
   if(!keep){
@@ -1413,8 +1412,8 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
    // cannot race or recursively spread through the padding.
    let d=abs(vec3i(x,y,z)-p);
    let wallSupport=solidRecord[tile].x==0.0&&d.x+d.y+d.z==wallDistance&&solidRecord[t].x>1e-5&&(umBit(CC_DECIDED,t)||umStaticFine(t));
-   if(!wallSupport&&(!umBit(activeIndex(0u),t)${this.solidSurfaceOnly?"||!wet":""})){continue;}
-   ${this.warmSolids?`if(!wallSupport&&t!=tile&&bounds[CC_TIER+umPageOfTile(t)]==${UNIFORM_REGION_TIER.cold}u){continue;}`:""}
+   ${this.warmSolids?`let coldNeighbour=t!=tile&&bounds[CC_TIER+umPageOfTile(t)]==${UNIFORM_REGION_TIER.cold}u;`:"let coldNeighbour=false;"}
+   if(!wallSupport&&(!umBit(activeIndex(0u),t)||!umSolidContactRing(t,wet,${this.solidSurfaceOnly},coldNeighbour))){continue;}
   }
   atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
   atomicAdd(&census[2],1u);atomicAdd(&census[19],1u);recordReason(tile,${REASON.solid}u);

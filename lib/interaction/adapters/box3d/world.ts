@@ -5,7 +5,7 @@ import { boundingRadius, initializeRigidBody, primitiveVolume, quaternionMultipl
 import { cupWallThickness_m } from '../../../core/scene-shape';
 import type { BodySnapshot, EntityRecord, FluidExchange, PhysicsCommand, TickIdentity } from '../../contracts';
 import { assertFiniteSnapshot, shapeDescription, type BodyRecipe, type SensorContact } from '../../runtime/physics';
-import { compileSolidChunks } from '../solid-world/collision';
+import { compileSolidChunks, SolidCollisionCache } from '../solid-world/collision';
 import { loadBox3D, type B3Body, type B3Joint, type B3Ray, type B3Shape, type B3World } from './api';
 export interface WorldBody { entityId: string; generation: number; description: RigidBodyDescription; recipe?: BodyRecipe; native: B3Body; tag: number; grounded: boolean; coyote: number; jumpBuffer: number; submerged: number; facing?: number; flipTime?: number; flipped?: boolean; climbing?: string }
 const zero = () => ({ x: 0, y: 0, z: 0 });
@@ -15,6 +15,7 @@ export class Box3DWorld {
   private shapeEntities = new Map<number, string>();
   private sensorPairs = new Map<string, Set<string>>();
   private chunks = new Map<string, { signature: string; body: B3Body }>();
+  private collisionCache = new SolidCollisionCache();
   private disposed = false;
   private coverage = new Map<string, Vec3>();
   private lastFluidTick = -1;
@@ -97,7 +98,7 @@ export class Box3DWorld {
     for(const key of this.sensorPairs.keys())if(key.split('/').includes(entity.id))this.sensorPairs.delete(key);
   }
   updateSolids(scene: SceneDescription) {
-    const next = compileSolidChunks(scene, [...this.bodies.values()].map(b => b.native.getPosition()));
+    const next = compileSolidChunks(scene, [...this.bodies.values()].map(b => b.native.getPosition()), this.collisionCache);
     const staged = new Map<string, { signature: string; body: B3Body }>();
     try {
       for (const chunk of next) {

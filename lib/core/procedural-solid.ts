@@ -22,6 +22,8 @@ export interface ProceduralSolidBoundary {
 }
 
 const B = 8, N = 9, NODES = N ** 3;
+export const PROCEDURAL_SOLID_VALIDITY_WORDS = 16;
+export const PROCEDURAL_SOLID_RECORD_WORDS = PROCEDURAL_SOLID_VALIDITY_WORDS + NODES;
 export const PROCEDURAL_SOLID_MAGIC = 0x50534231;
 const hash = (x: number, y: number, z: number) =>
   (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) >>> 0;
@@ -160,7 +162,7 @@ export class ProceduralSolidField {
   /** Relative pointers so the image can be appended to the existing solid buffer. */
   pack(): Uint32Array<ArrayBuffer> {
     let slots = 1; while (slots < 2 * this.bricks.size) slots *= 2;
-    const stride = 16 + NODES, image = new Uint32Array(4 + slots * 4 + this.bricks.size * stride), floats = new Float32Array(image.buffer);
+    const stride = PROCEDURAL_SOLID_RECORD_WORDS, image = new Uint32Array(4 + slots * 4 + this.bricks.size * stride), floats = new Float32Array(image.buffer);
     image[0] = slots - 1; let record = 4 + slots * 4;
     const minimum=[Infinity,Infinity,Infinity],maximum=[-Infinity,-Infinity,-Infinity];
     for (const [key, b] of this.bricks) {

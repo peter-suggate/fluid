@@ -1,5 +1,8 @@
 import { DUAL_GRID_WORDS_PER_VOXEL, dualGridPointWGSL } from "../svo/features/meshing/dual-grid-layout";
 import type { ProceduralSolidField } from "./procedural-solid";
+import { ProceduralSolidPublication } from "./procedural-solid-upload";
+import { SCENE_ENVIRONMENT_OWNER_BASE } from "./webgpu-rigid-body";
+import { packSvoSculptCuts, SVO_SCULPT_CUT_ARENA_WORDS, svoSculptCutsWGSL, intersectsSvoSculptPrimitiveBounds, SVO_SCULPT_MATERIAL_OFFSET, SVO_SCULPT_OWNER_MASK_OFFSET_WORDS, SVO_SCULPT_OWNER_MASK_WORDS } from "../svo/features/scene-publication/svo-sculpt-cuts";
 import { proceduralSolidRenderWGSL } from "./procedural-solid-render.wgsl";
 import { svoDualMarchingCubesCachedFitWGSL } from "../svo/features/meshing/dual-marching-cubes";
 import { svoDualContouringFitWGSL } from "../svo/features/meshing/dual-contouring";
@@ -42,7 +45,7 @@ import {
 import { PublishedWords } from "../svo/features/scene-publication/svo-table-upload";
 import { svoProceduralNoiseWGSL } from "../svo/features/materials/svo-procedural-material";
 import { cupWallThickness_m } from "./scene-shape";
-import { materializedSolidWorldPages, type SolidWorld } from "./solid-world";
+import { materializedSolidWorldPages, type SolidWorld, type SolidWorldVoxelPatch } from "./solid-world";
 import {
   WEBGPU_SOLID_WORLD_DISPLAY_BUDGET_BYTES,
   WEBGPU_SOLID_WORLD_ENTRY_WORDS,
@@ -498,6 +501,8 @@ export interface SparseSceneProxyVoxelizerOptions {
   worldOrigin?: SparseSceneVector3;
   /** Canonical static-solid pages sampled directly by the rebuild shader. */
   solidWorld?: SolidWorld;
+  /** Original authored cut history; unlike the static residual, includes scenery-only strokes. */
+  sculptCuts?: readonly SolidWorldVoxelPatch[];
   /** Physical lattice of the canonical SolidWorld voxels. */
   solidWorldLattice?: Readonly<{
     origin_m: SparseSceneVector3;
@@ -597,6 +602,8 @@ export interface SparseSceneRecordIndexOptions {
 export interface SparseSceneAxisAlignedBounds {
   minimum: SparseSceneVector3;
   maximum: SparseSceneVector3;
+  /** Only imported/native material ownership changed; retained geometry is valid. */
+  identityOnly?: boolean;
 }
 
 export interface SparseScenePublication {
@@ -681,6 +688,7 @@ export const SPARSE_SCENE_MAINTENANCE_FLAGS = Object.freeze({
   indexedInvalidation: 1,
   /** Binning reads the coarse record grid, not every record. */
   indexedBinning: 2,
+  identityRegions: 4,
 } as const);
 
 /**
@@ -1859,11 +1867,13 @@ export function solidWorldProxyWGSL(
   solidSurface?: string,
   /** Where a page keeps its authored bits, for a page image that has them. */
   authoredWords?: number,
+  /** DMC replaces centre normals after fitting, except its far-terrain shortcut. */
+  deferCentreNormals = false,
 ): string {
   // A backdrop's stored detail rings (backdrop-detail.ts) are unioned into
   // every static-solid sample; they lie outside the set's footprint, so the
   // union never changes a voxel the set owns.
-  if (backdropDetail) return solidWorldProxyWGSL(layout, renderTerrainLayout, undefined, solidSurface)
+  if (backdropDetail) return solidWorldProxyWGSL(layout, renderTerrainLayout, undefined, solidSurface, authoredWords, deferCentreNormals)
     .replace("fn sampleSolidWorld(", "fn sampleSolidWorldBase(") + /* wgsl */ `
 ${backdropDetail}
 fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
@@ -1875,7 +1885,7 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
   // A terrain scene carries the page image too, for its authored edits. The
   // one shader holds both and is never rebuilt for an edit.
   if (renderTerrainLayout) return solidWorldProxyWGSL(renderTerrainLayout.editPages, undefined, undefined, undefined,
-    WEBGPU_SOLID_WORLD_RENDER_PAGE_WORDS)
+    WEBGPU_SOLID_WORLD_RENDER_PAGE_WORDS, deferCentreNormals)
     .replace("fn sampleSolidWorld(", "fn sampleSolidWorldPages(") + /* wgsl */ `
 ${renderTerrainProxyWGSL(renderTerrainLayout)}
 fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{
@@ -1888,6 +1898,7 @@ fn sampleSolidWorld(_world:vec3f,_cellExtent:vec3f)->SolidWorldSample{
   const reach = SOLID_WORLD_PAGE_SMOOTH_REACH_CELLS;
   const falloff = 2 / (reach * reach), cutoff = Math.exp(-falloff * (reach + 0.5) ** 2);
   return /* wgsl */ `
+${deferCentreNormals ? "var<private> swSkipCentreNormal:bool;" : ""}
 const SW_BASE:u32=${layout.baseWords}u;
 const SW_DIRECTORY_CAPACITY:u32=${layout.directoryCapacity}u;
 const SW_DIRECTORY_MASK:u32=${layout.directoryCapacity - 1}u;
@@ -1931,10 +1942,6 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{let cell=max
   let latticePoint=(world-swOrigin())/cell;let q=vec3i(floor(latticePoint));
   let fractionQ8=swFractionQ8(q);let fraction=f32(fractionQ8)/255.0;
   let sdfDistance=f32(swSdfQ8(q))*min(cell.x,min(cell.y,cell.z))/256.0;
-  let g=vec3f(f32(swSdfQ8(q+vec3i(1,0,0))-swSdfQ8(q-vec3i(1,0,0)))/cell.x,
-    f32(swSdfQ8(q+vec3i(0,1,0))-swSdfQ8(q-vec3i(0,1,0)))/cell.y,
-    f32(swSdfQ8(q+vec3i(0,0,1))-swSdfQ8(q-vec3i(0,0,1)))/cell.z);
-  let sdfNormal=select(vec3f(0.0),normalize(g),dot(g,g)>1e-8);
   // A full voxel is the exact cell AABB. Its centre SDF cannot distinguish
   // opposite faces (an isolated voxel has symmetric empty neighbours), so use
   // the same fraction lane to select its nearest face without introducing a
@@ -1949,8 +1956,15 @@ fn sampleSolidWorld(world:vec3f,cellExtent:vec3f)->SolidWorldSample{let cell=max
   // At a cell centre its axis is decided by floating-point roundoff, producing
   // alternating dark bands on a continuous wall. Shade from the union's
   // boundary gradient; an interior cell has no surface normal to publish.
-  var normal=sdfNormal;
+  var normal=vec3f(0.0);
+  ${deferCentreNormals ? "if(!swSkipCentreNormal){" : ""}
+  let g=vec3f(f32(swSdfQ8(q+vec3i(1,0,0))-swSdfQ8(q-vec3i(1,0,0)))/cell.x,
+    f32(swSdfQ8(q+vec3i(0,1,0))-swSdfQ8(q-vec3i(0,1,0)))/cell.y,
+    f32(swSdfQ8(q+vec3i(0,0,1))-swSdfQ8(q-vec3i(0,0,1)))/cell.z);
+  let sdfNormal=select(vec3f(0.0),normalize(g),dot(g,g)>1e-8);
+  normal=sdfNormal;
   if(full&&dot(g,g)>1e-8){normal=swSmoothNormal(world);}
+  ${deferCentreNormals ? "}" : ""}
   return SolidWorldSample(fraction,distance,swMaterial(q),normal);}
 // Continuous reconstructions of the page fractions for function-fitted
 // surfaces. A stencil at most nine cells wide touches two pages an axis, so
@@ -2148,6 +2162,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   solidSurface?: string,
   solidBoundaryBaseWords?: number,
   fieldProgramExtraWords = 0,
+  sculptCutOffsetWords?: number,
 ): string {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
@@ -2156,6 +2171,7 @@ export function sparseSceneProxyVoxelizationShaderFor(
   // Solids published as SolidWorld pages rather than as the render terrain.
   const pageSolids = Boolean(solidWorldLayout) && !renderTerrainLayout;
   const contours = surfaceContours && dry && format === "f16-unorm8";
+  const deferCentreNormals = dual && dualMarchingCubes && !contours;
   // A payload word shared by more than one invocation of this dispatch needs an
   // atomic binding. Atomicity used to be keyed on the geometry format as well,
   // which was sound only while a two-voxels-a-word geometry lane existed; the
@@ -2252,8 +2268,29 @@ ${SVO_GBUFFER_NORMAL_OCT8_WGSL}
 ${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
-${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout, backdropDetail, solidSurface)}
+${solidWorldProxyWGSL(solidWorldLayout, renderTerrainLayout, backdropDetail, solidSurface, undefined, deferCentreNormals)}
 ${solidBoundaryBaseWords === undefined ? "" : proceduralSolidRenderWGSL(solidBoundaryBaseWords)}
+${sculptCutOffsetWords === undefined ? "" : `fn sceneSculptCutLoad(word:u32)->u32{return atomicLoad(&maintenance[${sculptCutOffsetWords}u+word]);}
+${svoSculptCutsWGSL("sceneSculptCutLoad")}
+// A DMC field evaluates every candidate at one point before moving to its
+// gradient probes. Their cut union is identical; scan it once per point.
+var<private> sceneSculptDistanceHeld:bool;
+var<private> sceneSculptDistancePoint:vec3f;
+var<private> sceneSculptDistanceValue:f32;
+fn sceneSculptApplyDistance(distance:f32,world:vec3f)->f32{
+  if(!sceneSculptDistanceHeld||any(world!=sceneSculptDistancePoint)){
+    sceneSculptDistancePoint=world;sceneSculptDistanceValue=svoSculptCutDistance(world);sceneSculptDistanceHeld=true;
+  }
+  return max(distance,-sceneSculptDistanceValue);
+}
+fn primitiveReceivesSculptCuts(primitive:ScenePrimitive)->bool{
+  let owner=bitcast<u32>(primitive.extentIdentity.w)>>16u;
+  return owner>=${SCENE_ENVIRONMENT_OWNER_BASE}u&&owner!=65535u;
+}
+fn primitiveHasSculptedNativeSurface(primitive:ScenePrimitive)->bool{
+  let owner=bitcast<u32>(primitive.extentIdentity.w)>>16u;
+  return owner!=65535u&&((sceneSculptCutLoad(${SVO_SCULPT_OWNER_MASK_OFFSET_WORDS}u+(owner>>5u))>>(owner&31u))&1u)!=0u;
+}`}
 
 const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
 const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
@@ -2428,6 +2465,7 @@ fn chunkEnd()->u32{return atomicLoad(&maintenance[stateOffset()+CHUNK_END]);}
 // field-program hook has to be declared before it.
 ${svoProceduralNoiseWGSL}
 ${svoFieldProgramWGSL({
+  cacheSampledDistance: dual && dualMarchingCubes,
   functionName: "sceneFieldProgramBlock",
   loadWord: "loadArenaWord",
   baseWordExpression: "fieldProgramArenaOffset()",
@@ -2542,7 +2580,7 @@ fn scenePrimitiveAbiRecord(primitive: ScenePrimitive, kind: u32) -> SvoPrimitive
     primitive.rotation,
     vec4u(0u, scenePrimitiveArenaSlot(primitive), 0u, 0u));
 }
-fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
+fn primitiveUncutDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
   let primitiveType = scenePrimitiveType(primitive);
   let offset = world - primitive.centerType.xyz;
   let local = inverseRotate(offset, primitive.rotation);
@@ -2578,6 +2616,10 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
       svoInvalidClusterPacking());
   }
   return 1e20;
+}
+fn primitiveDistance(primitive:ScenePrimitive,world:vec3f)->f32{
+  let distance=primitiveUncutDistance(primitive,world);
+  ${sculptCutOffsetWords === undefined ? "return distance;" : "if(primitiveReceivesSculptCuts(primitive)){return sceneSculptApplyDistance(distance,world);}return distance;"}
 }
 /**
  * The smallest solid this primitive draws, in metres, or a large number when
@@ -2692,6 +2734,10 @@ ${(Object.entries(SPARSE_SCENE_PRIMITIVE_TYPES) as [keyof typeof SPARSE_SCENE_PR
  * rather than shading from whatever direction a normalize of zero produced.
  */
 fn primitiveSurfaceNormal(primitive: ScenePrimitive, world: vec3f) -> vec3f {
+  ${sculptCutOffsetWords === undefined ? "" : `if(primitiveReceivesSculptCuts(primitive)){
+    let cut=svoSculptCutSample(world);
+    if(-cut.distance>primitiveUncutDistance(primitive,world)){return -cut.normal;}
+  }`}
   let kind = scenePrimitiveAbiKind(scenePrimitiveType(primitive));
   if (kind == 0u) { return vec3f(0.0); }
   let record = scenePrimitiveAbiRecord(primitive, kind);
@@ -2702,7 +2748,7 @@ fn primitiveSurfaceNormal(primitive: ScenePrimitive, world: vec3f) -> vec3f {
   if (!(magnitude > 1e-8)) { return vec3f(0.0); }
   return svoQuaternionRotate(record.orientation, local.xyz / magnitude);
 }
-${contours ? svoCellContourFitWGSL(Boolean(renderTerrainLayout), Boolean(solidWorldLayout)) : ""}
+${contours ? svoCellContourFitWGSL(Boolean(renderTerrainLayout), Boolean(solidWorldLayout), sculptCutOffsetWords !== undefined) : ""}
 fn linearIndex64(gid:vec3u,groups:vec3u)->u32{
   return gid.x+gid.y*groups.x*64u+gid.z*groups.x*groups.y*64u;
 }
@@ -2903,6 +2949,20 @@ fn binDirtyBrickCandidatesIndexed(
   }
 }
 
+// Geometry changes (including their reconstruction halo) take precedence over
+// representation-only changes. The latter reuse the already voxelized source.
+fn dirtyBrickIdentityOnly(leafIndex:u32,dirtyIndex:u32)->bool{
+  if((maintenanceFlags()&${SPARSE_SCENE_MAINTENANCE_FLAGS.identityRegions}u)==0u){return false;}
+  // With competing source owners, a new cut can change the centre election
+  // even outside its geometric extent. Rebuild those bricks normally.
+  if(atomicLoad(&maintenance[dirtyBrickOffset()+dirtyIndex*4u+1u])!=1u){return false;}
+  let bounds=leafBounds(leafIndex);
+  for(var i=0u;i<dirtyRegionCount();i+=1u){let at=dirtyRegionOffset()+i*8u;
+    if(atomicLoad(&maintenance[at+3u])==0u&&boundsOverlap(bounds,arenaBounds(at))){return false;}
+  }
+  return true;
+}
+${dual && dualMarchingCubes ? "var<workgroup> dmcIdentityOnly:bool;var<workgroup> dmcIdentityOccupied:atomic<u32>;" : ""}
 @compute @workgroup_size(${dual && dualMarchingCubes ? 64 : 256})
 fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
   let index=${dual && dualMarchingCubes ? "gid.x+gid.y*groups.x*64u+gid.z*groups.x*groups.y*64u" : "linearIndex256(gid,groups)"};
@@ -2935,6 +2995,11 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   // derived builder differentiates it for radiance normals, while coverage may
   // read a nearer sample elsewhere in the cell.
   let cellExtent = params.cell.xyz * f32(scale);
+  ${dual && dualMarchingCubes ? `var identityOnly=false;
+  if((maintenanceFlags()&4u)!=0u){
+    if(lane==0u){dmcIdentityOnly=fitActive&&dirtyBrickIdentityOnly(leafIndex,dirtyIndex);atomicStore(&dmcIdentityOccupied,0u);}
+    workgroupBarrier();identityOnly=dmcIdentityOnly;
+  }` : "let staticSolid=sampleSolidWorld(world,cellExtent);let identityOnly=dirtyBrickIdentityOnly(leafIndex,dirtyIndex)&&staticSolid.fraction<=0.;"}
   ${dual && dualMarchingCubes ? `let fitCandidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
   dmcCandidatesCached=fitActive&&tiled&&fitCandidateCount<=64u;
   if(dmcCandidatesCached&&lane<fitCandidateCount){dmcCandidateIndices[lane]=atomicLoad(&maintenance[candidateBase(dirtyIndex)+lane]);}
@@ -2952,7 +3017,13 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   let farEdge=(RT_FAR_CELLS+1.0)*max(cellExtent.x,max(cellExtent.y,cellExtent.z))+4.25*min(params.cell.x,params.cell.z);
   if(any(tileWorld.xz-backdropFootprintMinimum()<vec2f(farEdge))
     ||any(backdropFootprintMaximum()-tileWorld.xz-4.0*cellExtent.xz<vec2f(farEdge))){far=0;}` : ""}` : ""}
-  dmcCacheSamples(tileWorld,cellExtent,dirtyIndex,fitCandidateCount,lane,fitActive&&tiled&&far==0);
+  ${deferCentreNormals && (solidWorldLayout || renderTerrainLayout?.editPages) ? "swSkipCentreNormal=far==0;" : ""}
+  let staticSolid=sampleSolidWorld(world,cellExtent);
+  if((maintenanceFlags()&4u)!=0u){
+    if(identityOnly&&staticSolid.fraction>0.){atomicOr(&dmcIdentityOccupied,1u);}
+    workgroupBarrier();identityOnly=identityOnly&&atomicLoad(&dmcIdentityOccupied)==0u;
+  }
+  dmcCacheSamples(tileWorld,cellExtent,dirtyIndex,fitCandidateCount,lane,fitActive&&tiled&&far==0&&!identityOnly);
   if(!fitActive){return;}` : ""}
   let cellRadius = 0.5 * length(cellExtent);
   var bestDistance = 1e20;
@@ -2963,7 +3034,6 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   // marched kind's normal is the most expensive thing in this loop.
   var bestPrimitive = INVALID_INDEX;
   var bestNormal = vec3f(0.0);
-  let staticSolid=sampleSolidWorld(world,cellExtent);
   if(staticSolid.fraction>0.0){
     bestDistance=staticSolid.distance;
     bestCoverage=cellRadius*(1.0-2.0*staticSolid.fraction);
@@ -2985,12 +3055,26 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
       primitiveCellCoverageDistance(primitive, world, cellExtent, candidate),
       select(cellRadius, -cellRadius, candidate < 0.0),
       primitiveUsesThresholdOccupancy(primitive));
-    if (coverage < bestCoverage) {
+    if (coverage < bestCoverage || (coverage == bestCoverage && bestPrimitive != INVALID_INDEX && primitiveIndex < bestPrimitive)) {
       bestCoverage = coverage;
       bestMaterial = bitcast<u32>(primitive.extentIdentity.w) & 0xffffu;
       bestPrimitive = primitiveIndex;
     }
   }
+  let output = voxelOffset + localIndex;
+  let materialOffset = sceneMaterialOffset() + output;
+  ${sculptCutOffsetWords === undefined ? "" : `if(identityOnly){
+    // Owner identity is not stored in the packed surface lane, so repeat only
+    // the original centre/coverage election above. Keep its chosen baked PBR
+    // palette, normal, distance, coverage and dual vertex completely intact.
+    let previous=${readPayload("materialOffset")};let oldMaterial=previous&0xffffu;
+    if(oldMaterial!=0u){
+      var material=oldMaterial%${SVO_SCULPT_MATERIAL_OFFSET}u;
+      if(bestPrimitive!=INVALID_INDEX&&primitiveHasSculptedNativeSurface(primitives[bestPrimitive])){material+=${SVO_SCULPT_MATERIAL_OFFSET}u;}
+      ${writePayload("materialOffset", "(previous&0xffff0000u)|material")}
+    }
+    return;
+  }`}
   // The normal is evaluated at the voxel *centre*, which is not where the
   // surface is: the centre is up to a cell radius off it. That is the same
   // half-cell the coverage fraction already carries and it is what the primary
@@ -2998,13 +3082,13 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   // the error is in the sample position rather than in the law, so it varies
   // smoothly across the surface and reads as a slightly softened feature rather
   // than as the six-way quantisation the face normal produced.
-  if (bestPrimitive != INVALID_INDEX) {
+  var primitiveFraction = clamp(0.5 - bestCoverage / (2.0 * cellRadius), 0.0, 1.0);
+  // An occupied DMC cell always takes its fitted normal below. Empty cells
+  // retain the centre evaluation, as do contours and the other fitting modes.
+  if (bestPrimitive != INVALID_INDEX${deferCentreNormals ? " && primitiveFraction<=0.0" : ""}) {
     bestNormal = primitiveSurfaceNormal(primitives[bestPrimitive], world);
   }
 
-  let output = voxelOffset + localIndex;
-  let materialOffset = sceneMaterialOffset() + output;
-  var primitiveFraction = clamp(0.5 - bestCoverage / (2.0 * cellRadius), 0.0, 1.0);
 ${contours ? `  var contourCode=fitSceneContour(world,cellExtent,bestNormal,primitiveFraction,dirtyIndex,candidateCount);
   // Distinguish a proved-empty cell from an unsupported/full-cube contour.
   // Clear all occupancy consumers together, including identity and band masks.
@@ -3060,10 +3144,16 @@ ${dual && dualMarchingCubes ? `
       let sampled=sceneFieldProgramBlockSurface(scenePrimitiveArenaSlot(primitive),local);
       if(sampled.material!=0u){
         bestMaterial=sampled.material;
-        bestNormal=inverseRotate(sampled.normal,vec4f(-primitive.rotation.xyz,primitive.rotation.w));
+        ${sculptCutOffsetWords === undefined ? "bestNormal=inverseRotate(sampled.normal,vec4f(-primitive.rotation.xyz,primitive.rotation.w));" : `let cut=svoSculptCutSample(surfacePoint);
+        if(primitiveReceivesSculptCuts(primitive)&&-cut.distance>primitiveUncutDistance(primitive,surfacePoint)){
+          bestNormal=-cut.normal;
+        }else{bestNormal=inverseRotate(sampled.normal,vec4f(-primitive.rotation.xyz,primitive.rotation.w));}`}
       }
     }
   }
+  ${sculptCutOffsetWords === undefined ? "" : `if(bestPrimitive!=INVALID_INDEX&&primitiveHasSculptedNativeSurface(primitives[bestPrimitive])){
+    bestMaterial+=${SVO_SCULPT_MATERIAL_OFFSET}u;
+  }`}
   // The scene lane is exclusively owned by this transaction. Fluid and
   // velocity live in disjoint payload lanes, so every material ID—including
   // terrain and rigid-body IDs below the scenery range—can update atomically.
@@ -3483,6 +3573,7 @@ function packBounds(bounds: readonly SparseSceneAxisAlignedBounds[]): Uint32Arra
     validateBounds(bound, `Bounds ${index}`);
     floats.set(bound.minimum, index * 8);
     floats.set(bound.maximum, index * 8 + 4);
+    words[index * 8 + 3] = bound.identityOnly ? 1 : 0;
   });
   return words;
 }
@@ -3595,6 +3686,11 @@ export class SparseSceneProxyVoxelizer {
   private readonly solidWorldLayout?: WebgpuSolidWorldPageLayout;
   private readonly solidBoundaryBaseWords?: number;
   private readonly solidBoundaryWords: number;
+  private readonly solidBoundaryPublication?: ProceduralSolidPublication;
+  private readonly sculptCutOffsetWords: number;
+  private readonly publishedSculptCuts = new PublishedWords();
+  private readonly publishedSculptOwners = new PublishedWords();
+  private sculptCutRecords: Uint32Array<ArrayBuffer> = new Uint32Array(4);
   /** The page image on the device, whichever arm draws it: every page, or a terrain scene's edits. */
   private readonly solidWorldPages?: WebgpuSolidWorldPageWriter;
   /** A terrain scene's choice of pages to draw over its ground. */
@@ -3649,6 +3745,8 @@ export class SparseSceneProxyVoxelizer {
    * `completedRevision`, and a publication that never completes is the black slab.
    */
   private chunksRemaining = 0;
+  /** Unexpanded bounds still owed by a budgeted revision, including superseded edits. */
+  private unfinishedDirtyRegions: readonly SparseSceneAxisAlignedBounds[] = [];
   private plannedChunks = 0;
   /** Dirty bricks one chunk frame can hold: the same bound, capped by the budget. Sizes the chunk passes' direct dispatches. */
   private plannedChunkBricks = 1;
@@ -3775,7 +3873,7 @@ export class SparseSceneProxyVoxelizer {
         + options.renderTerrain.heights_m.length, "Render terrain field");
       // The page image follows the heightfield and is fixed here for the session.
       const budget = terrainEditPageBudget(options, worldOrigin, builtEditPages,
-        device.limits.maxStorageBufferBindingSize - 4 * (editPagesBaseWords + fitWords));
+        device.limits.maxStorageBufferBindingSize - 4 * (editPagesBaseWords + fitWords + SVO_SCULPT_CUT_ARENA_WORDS));
       const editPages = createWebgpuSolidWorldPageLayout({
         baseWords: editPagesBaseWords, authoredPageCount: builtEditPages, pageCapacity: budget.pageCapacity,
         includesMaterial: true, includesAuthored: true, maximumBytes: budget.maximumBytes,
@@ -3797,7 +3895,8 @@ export class SparseSceneProxyVoxelizer {
     if (boundaryImage && (!this.solidWorldLayout || options.renderTerrain)) throw new RangeError("A sampled boundary needs the static solid page lattice");
     this.solidBoundaryBaseWords = boundaryImage ? boundaryBaseWords : undefined;
     this.solidBoundaryWords = boundaryImage?.length ?? 0;
-    const baseArenaWords = checkedArenaWords(boundaryBaseWords + this.solidBoundaryWords, "Procedural boundary arena");
+    this.sculptCutOffsetWords = checkedArenaWords(boundaryBaseWords + this.solidBoundaryWords, "Procedural boundary arena");
+    const baseArenaWords = checkedArenaWords(this.sculptCutOffsetWords + SVO_SCULPT_CUT_ARENA_WORDS, "Scenery sculpt arena");
     this.dualOffsetWords = (options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? baseArenaWords : 0;
     const arenaWords = baseArenaWords + ((options.surfaceDualContouring || options.surfaceDualMarchingCubes) ? tree.voxelCapacity * DUAL_GRID_WORDS_PER_VOXEL : 0);
     if(arenaWords * 4 > device.limits.maxStorageBufferBindingSize) throw new RangeError("Meshing construction arena exceeds GPU storage limit; reduce render grid resolution");
@@ -3815,7 +3914,12 @@ export class SparseSceneProxyVoxelizer {
       label: `${label} fixed maintenance arena`, size: arenaWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    if (boundaryImage) device.queue.writeBuffer(this.maintenanceArena, boundaryBaseWords * 4, boundaryImage);
+    if (boundaryImage) {
+      device.queue.writeBuffer(this.maintenanceArena, boundaryBaseWords * 4, boundaryImage);
+      this.solidBoundaryPublication = new ProceduralSolidPublication(device.queue,
+        this.maintenanceArena, boundaryBaseWords * 4, options.solidBoundary!, boundaryImage);
+    }
+    this.setSculptCuts(options.sculptCuts ?? options.solidWorld?.patches ?? []);
     const pageLayout = this.renderTerrainLayout?.editPages ?? this.solidWorldLayout;
     if (pageLayout && options.solidWorldLattice) {
       this.solidWorldPages = new WebgpuSolidWorldPageWriter(device.queue, this.maintenanceArena,
@@ -3897,7 +4001,7 @@ export class SparseSceneProxyVoxelizer {
         this.tree.payloadProfile, this.tree.sceneGeometryFormat,
         this.tree.leafPayloadMode, this.solidWorldLayout,
         this.renderTerrainLayout, this.options.surfaceContours === true, this.dualOffsetWords, this.options.surfaceDualMarchingCubes === true,
-        this.options.backdropDetail, this.options.solidSurface, this.solidBoundaryBaseWords, this.options.fieldProgramExtraWords ?? 0),
+        this.options.backdropDetail, this.options.solidSurface, this.solidBoundaryBaseWords, this.options.fieldProgramExtraWords ?? 0, this.sculptCutOffsetWords),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
@@ -3927,6 +4031,37 @@ export class SparseSceneProxyVoxelizer {
     };
   }
 
+  validateSculptCuts(patches: readonly SolidWorldVoxelPatch[]): void {
+    if (!this.options.solidWorldLattice) {
+      if (patches.some(p => p.operation === "clear" && p.affectsScenery)) throw new RangeError("Scenery sculpt needs its physical lattice");
+      return;
+    }
+    packSvoSculptCuts(patches, this.options.solidWorldLattice);
+  }
+
+  setSculptCuts(patches: readonly SolidWorldVoxelPatch[]): void {
+    this.validateSculptCuts(patches);
+    this.sculptCutRecords = this.options.solidWorldLattice
+      ? packSvoSculptCuts(patches, this.options.solidWorldLattice) : new Uint32Array(4);
+    this.publishedSculptCuts.publish(this.device.queue, this.maintenanceArena,
+      this.sculptCutOffsetWords * 4, this.sculptCutRecords);
+    this.publishSculptedOwners(this.publishedPrimitives ?? []);
+  }
+
+  private publishSculptedOwners(primitives: readonly SparseScenePrimitive[]): void {
+    const owners = new Uint32Array(SVO_SCULPT_OWNER_MASK_WORDS);
+    if (this.sculptCutRecords[0]) for (const primitive of primitives) {
+      const owner = primitive.ownerId;
+      if (primitive.kind !== "field-program" || !primitive.program.sampledVolume
+        || owner === undefined || owner < SCENE_ENVIRONMENT_OWNER_BASE || owner === SPARSE_BRICK_NO_OWNER) continue;
+      if (intersectsSvoSculptPrimitiveBounds(this.sculptCutRecords, primitive.center, primitive.envelopeRadii, primitive.orientation)) {
+        owners[owner >>> 5]! |= 1 << (owner & 31);
+      }
+    }
+    this.publishedSculptOwners.publish(this.device.queue, this.maintenanceArena,
+      (this.sculptCutOffsetWords + SVO_SCULPT_OWNER_MASK_OFFSET_WORDS) * 4, owners);
+  }
+
   /** Replace the canonical static-solid image without allocating a host mirror. */
   validateSolidWorld(world: SolidWorld): void {
     // A terrain scene draws only the pages its edits shaped; any other draws them all.
@@ -3941,13 +4076,7 @@ export class SparseSceneProxyVoxelizer {
 
   setSolidWorld(world: SolidWorld, boundary?: ProceduralSolidField): void {
     this.validateSolidWorld(world);
-    if (this.solidBoundaryBaseWords !== undefined) {
-      // Edits only change validity bits; replacing the authored field rebuilds
-      // the scene. Clearing the image retires a boundary whose provenance broke.
-      const image = boundary?.pack() ?? new Uint32Array(this.solidBoundaryWords);
-      if (image.length !== this.solidBoundaryWords) throw new RangeError("Procedural boundary changed; rebuild the renderer");
-      this.device.queue.writeBuffer(this.maintenanceArena, this.solidBoundaryBaseWords * 4, image);
-    }
+    this.solidBoundaryPublication?.publish(boundary);
     const pages = this.solidWorldPages;
     if (!pages) {
       if (world.pages.length > 0 || world.ground) throw new Error("This voxelizer has no SolidWorld capacity");
@@ -3984,6 +4113,8 @@ export class SparseSceneProxyVoxelizer {
     if (publication.primitives.length > this.options.primitiveCapacity) throw new RangeError("Live scene primitive capacity exceeded");
     if (publication.dirtyRegions.length === 0) throw new RangeError("A scene publication must cover its old/new dirty bounds");
     if (publication.dirtyRegions.length > this.options.dirtyRegionCapacity) throw new RangeError("Live scene dirty-region capacity exceeded");
+    // Validate before coalescing owed work: a union could hide reversed input bounds.
+    publication.dirtyRegions.forEach((bounds, index) => validateBounds(bounds, `Dirty region ${index}`));
     // A revision that only moved the solid world carries the list already
     // published, and none of the tables packed from it is packed or sent.
     const listed = publication.primitives !== this.publishedPrimitives;
@@ -4013,6 +4144,7 @@ export class SparseSceneProxyVoxelizer {
     // Expand both candidate indexing and edit invalidation, never the SDF.
     const halo=this.options.surfaceDualMarchingCubes ? Math.max(...this.options.cellSize) : 0;
     const samplingBounds=(bounds:SparseSceneAxisAlignedBounds):SparseSceneAxisAlignedBounds=>halo===0 ? bounds : ({
+      ...bounds,
       minimum:bounds.minimum.map(v=>v-halo) as unknown as SparseSceneVector3,
       maximum:bounds.maximum.map(v=>v+halo) as unknown as SparseSceneVector3,
     });
@@ -4024,7 +4156,16 @@ export class SparseSceneProxyVoxelizer {
       ? SOLID_WORLD_PAGE_SMOOTH_REACH_CELLS*Math.max(...this.options.solidWorldLattice.cellSize_m)
       : this.dualOffsetWords&&this.terrainEdits&&this.options.solidWorldLattice
         ? 2*Math.max(...this.options.solidWorldLattice.cellSize_m) : 0;
-    const dirtyRegions=publication.dirtyRegions.map(samplingBounds).map(region=>pageReach===0 ? region : ({
+    // A newer revision resets the GPU dirty-list cursor. Carry all regions of
+    // the interrupted revision: without a readback we cannot know which leaves
+    // its completed chunks repaired. Keep raw bounds so repeated interruption
+    // never grows the sampling halo. Collapse only when the fixed arena fills.
+    let owedRegions = [...this.unfinishedDirtyRegions, ...publication.dirtyRegions];
+    if (owedRegions.length > this.options.dirtyRegionCapacity) owedRegions = [{
+      minimum: [0, 1, 2].map(a => Math.min(...owedRegions.map(r => r.minimum[a]!))) as unknown as SparseSceneVector3,
+      maximum: [0, 1, 2].map(a => Math.max(...owedRegions.map(r => r.maximum[a]!))) as unknown as SparseSceneVector3,
+    }];
+    const dirtyRegions=owedRegions.map(samplingBounds).map(region=>pageReach===0||region.identityOnly ? region : ({
       minimum:region.minimum.map(v=>v-pageReach) as unknown as SparseSceneVector3,
       maximum:region.maximum.map(v=>v+pageReach) as unknown as SparseSceneVector3,
     }));
@@ -4061,6 +4202,7 @@ export class SparseSceneProxyVoxelizer {
     if (fieldProgramArena) {
       this.publishedFieldPrograms.publish(queue, this.maintenanceArena, this.fieldProgramOffsetWords * 4, fieldProgramArena);
     }
+    if (listed) this.publishSculptedOwners(publication.primitives);
     if (primitiveBounds) this.publishedPrimitiveBounds.publish(queue, this.maintenanceArena, this.primitiveBoundsOffsetWords * 4, primitiveBounds);
     queue.writeBuffer(this.maintenanceArena, this.dirtyRegionOffsetWords * 4, dirtyBounds);
     if (index && regionCells) this.writeRecordIndex(index, listed ? bounds : undefined, regionCells, worldOrigin);
@@ -4072,8 +4214,9 @@ export class SparseSceneProxyVoxelizer {
     floats.set(worldOrigin, 0);
     floats.set(this.options.cellSize, 4);
     uints[3] = chunkBudget;
-    uints[7] = index ? SPARSE_SCENE_MAINTENANCE_FLAGS.indexedBinning : 0;
-    uints.set([publication.primitives.length, publication.dirtyRegions.length, this.options.finestLevel ?? 0xffffffff, publication.revision], 8);
+    uints[7] = (index ? SPARSE_SCENE_MAINTENANCE_FLAGS.indexedBinning : 0)
+      | (dirtyRegions.some(r => r.identityOnly) ? SPARSE_SCENE_MAINTENANCE_FLAGS.identityRegions : 0);
+    uints.set([publication.primitives.length, dirtyRegions.length, this.options.finestLevel ?? 0xffffffff, publication.revision], 8);
     uints.set([this.options.dirtyBrickCapacity, this.options.candidatesPerDirtyBrick, this.primitiveBoundsOffsetWords, this.dirtyRegionOffsetWords], 12);
     uints.set([this.dirtyBrickOffsetWords, this.candidateOffsetWords, this.stateOffsetWords, this.clusterOffsetWords], 16);
     uints.set([
@@ -4096,6 +4239,7 @@ export class SparseSceneProxyVoxelizer {
     this.device.queue.writeBuffer(this.paramsBuffer, 0, parameterData);
     this.primitiveCount = publication.primitives.length;
     this.sceneRevision = publication.revision;
+    this.unfinishedDirtyRegions = owedRegions;
     this.pending = true;
   }
 
@@ -4211,6 +4355,7 @@ export class SparseSceneProxyVoxelizer {
     this.chunksRemaining -= 1;
     writeTimestamps = false;
     } while (this.drainChunks && this.chunksRemaining > 0);
+    if (this.chunksRemaining === 0) this.unfinishedDirtyRegions = [];
     this.encodedFrames += 1;
     return true;
   }

@@ -166,7 +166,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
       }
     } catch (error) {
       if (stroke.releaseOnly) outline(stroke, null);
-      // Retain the last accepted geometry and history if a sample was rejected.
+      // Author tools retain their last proposal. Live validation failures
+      // roll the stroke back; a failed rollback keeps its accepted prefix undoable.
       notice(error);
     }
     stroke.busy = false;

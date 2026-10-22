@@ -2,7 +2,9 @@ import type { Quaternion, RigidBodyDescription, Vec3 } from "../../core/model";
 import { packMaterialOwner, SPARSE_BRICK_NO_OWNER, unpackMaterialOwner } from "../features/construction/sparse-brick-octree";
 import {
   evaluateSvoFieldProgram,
+  evaluateValidatedSvoFieldProgram,
   svoFieldProgramExtent_m,
+  validateSvoFieldProgram,
   type SvoFieldProgram,
 } from "../features/scene-publication/svo-field-program";
 import {
@@ -2791,6 +2793,48 @@ export function sampleSvoPrimitive(
 ): SvoPrimitiveSample {
   const descriptor = canonicalSvoPrimitive(input);
   const { point, orientation } = localPoint(descriptor, worldPoint_m);
+  return sampleLocalSvoPrimitive(descriptor, point, orientation, clusterResolver, fieldProgramResolver);
+}
+
+/**
+ * Prepare repeated distance queries against one immutable primitive. Solid
+ * reach needs neither a shading normal nor a new descriptor validation at
+ * every brick. In particular, a field normal would evaluate its tape six
+ * additional times. Keep the same distance and local transform as the sampler.
+ */
+export function prepareSvoPrimitiveDistance(
+  input: SvoPrimitiveDescriptor,
+  clusterResolver?: SvoClusterResolver,
+  fieldProgramResolver?: SvoFieldProgramResolver,
+): (worldPoint_m: Vec3) => number {
+  const canonical = canonicalSvoPrimitive(input);
+  const descriptor = canonical.kind === "field-program" ? resolveFieldProgram(canonical, fieldProgramResolver)
+    : canonical.kind === "smooth-union-cluster" ? resolveCluster(canonical, clusterResolver) : canonical;
+  if (descriptor.kind === "field-program") validateSvoFieldProgram(descriptor.program!);
+  const orientation = descriptorOrientation(descriptor);
+  return worldPoint_m => {
+    finiteVec3(worldPoint_m, "Primitive query point");
+    const point = inverseRotate(orientation, {
+      x: worldPoint_m.x - descriptor.center_m.x,
+      y: worldPoint_m.y - descriptor.center_m.y,
+      z: worldPoint_m.z - descriptor.center_m.z,
+    });
+    if (descriptor.kind === "field-program") {
+      const value = evaluateValidatedSvoFieldProgram(descriptor.program!, point);
+      return value.distance_m / Math.max(1, value.lipschitz);
+    }
+    if (descriptor.kind === "smooth-union-cluster") return clusterDistance(point, descriptor.lobeRadii_m, descriptor.packing!);
+    return sampleLocalSvoPrimitive(descriptor, point, orientation).signedDistance_m;
+  };
+}
+
+function sampleLocalSvoPrimitive(
+  descriptor: SvoPrimitiveDescriptor,
+  point: Vec3,
+  orientation: Quaternion,
+  clusterResolver?: SvoClusterResolver,
+  fieldProgramResolver?: SvoFieldProgramResolver,
+): SvoPrimitiveSample {
   if (descriptor.kind === "sphere") {
     const length = Math.hypot(point.x, point.y, point.z);
     return { signedDistance_m: length - descriptor.radius_m, normal: worldNormal(orientation, normalize(point)), featureId: SVO_PRIMITIVE_FEATURES.smooth };

@@ -62,6 +62,8 @@ export interface SolidWorldVoxelPatch {
   readonly minimum: SolidWorldCoordinate;
   readonly maximumExclusive: SolidWorldCoordinate;
   readonly materialId?: number;
+  /** Clear this volume from authored scenery as well as voxel solids. Absent/false keeps legacy voxel-only clears. */
+  readonly affectsScenery?: boolean;
   /** Registered patch kind id. Absent means `"box"`. */
   readonly kind?: string;
   /** The axis a kind with one is aligned to (a cylinder's). Absent means 1, up. */
@@ -689,6 +691,8 @@ function solidVoxelPatchFold(patches: readonly SolidWorldVoxelPatch[], from?: Pa
     for (const value of patch.minimum) foldWord(value | 0);
     for (const value of patch.maximumExclusive) foldWord(value | 0);
     foldWord(patch.materialId ?? 1);
+    // Preserve every legacy stamp; only explicit scenery cuts add this tag.
+    if (patch.affectsScenery === true) foldWord(0x5343_5554);
     const kindId = solidPatchKindId(patch);
     if (kindId === SOLID_PATCH_BOX_KIND) continue;
     for (let character = 0; character < kindId.length; character += 1) foldWord(kindId.charCodeAt(character));
