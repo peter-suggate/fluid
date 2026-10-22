@@ -36,6 +36,7 @@
  */
 import type { Quaternion, Vec3 } from "../lib/core/model";
 import type { TerrainGrid } from "../lib/core/terrain";
+import { sampleMeshVolume, sampleMeshVolumeDistance, type MeshVolume } from "../lib/core/imported-assets/mesh-volume";
 import {
   canonicalSvoPrimitive,
   intersectSvoPrimitive,
@@ -158,6 +159,41 @@ export interface PreparedRecord {
   readonly distance: (point: Vec3) => number;
   /** Central-difference step for the marched kinds' normal. */
   readonly normalStep: number;
+  readonly maxSteps?: number;
+  readonly hitTolerance?: number;
+  readonly surface?: (point: Vec3) => { normal: Vec3; colorLinear: readonly [number, number, number] };
+  readonly halfSize?: readonly number[];
+}
+
+/** Inspect the published Blender field with the same sampler used by the app.
+ * Keep a single volume in the lab worker; no scene or per-worker copies. */
+export function prepareShapeLabAsset(volume: MeshVolume): ShapeLabScene {
+  const { header } = volume;
+  const halfSize = header.dimensions.map((cells) => cells * header.cellSize / 2);
+  const local = (point: Vec3): [number, number, number] => [
+    point.x + header.origin[0] + halfSize[0],
+    point.y + header.origin[1] + halfSize[1],
+    point.z + header.origin[2] + halfSize[2],
+  ];
+  const radius = Math.hypot(...halfSize);
+  return { ceiling: 0, records: [{
+    descriptor: { kind: "sphere", primitiveId: 0, materialId: 1, center_m: { x: 0, y: 0, z: 0 }, radius_m: radius },
+    centre: { x: 0, y: 0, z: 0 }, radius, halfSize, exact: false,
+    colorLinear: [0.8, 0.8, 0.8], normalStep: header.cellSize / 2,
+    // FVX is a narrow-band distance field. A long ray must be allowed to
+    // cross the whole bounds even where its distances saturate at the band.
+    maxSteps: Math.ceil(2 * radius / header.bandWidth) + 1024,
+    hitTolerance: header.cellSize * 0.08,
+    distance: (point) => sampleMeshVolumeDistance(volume, local(point)),
+    surface: (point) => {
+      const sample = sampleMeshVolume(volume, local(point));
+      const normal = sample.shadingNormal;
+      return {
+        normal: { x: normal[0], y: normal[1], z: normal[2] },
+        colorLinear: header.materials[sample.material - 1]?.baseColorLinear ?? [0.8, 0.8, 0.8],
+      };
+    },
+  }] };
 }
 
 function prepare(
@@ -201,6 +237,18 @@ function marchedNormal(record: PreparedRecord, point: Vec3): Vec3 {
 
 /** Entry and exit parameters of the record's bounding sphere, or null on a miss. */
 function boundsAlongRay(record: PreparedRecord, origin: Vec3, direction: Vec3): [number, number] | null {
+  if (record.halfSize) {
+    let enter = 0, exit = Infinity;
+    for (const [axis, key] of (["x", "y", "z"] as const).entries()) {
+      const p = origin[key] - record.centre[key], d = direction[key], half = record.halfSize[axis];
+      if (Math.abs(d) < 1e-12) { if (Math.abs(p) > half) return null; continue; }
+      const a = (-half - p) / d, b = (half - p) / d;
+      enter = Math.max(enter, Math.min(a, b));
+      exit = Math.min(exit, Math.max(a, b));
+      if (enter > exit) return null;
+    }
+    return [enter, exit];
+  }
   const offset = sub(origin, record.centre);
   const b = dot(offset, direction);
   const c = dot(offset, offset) - record.radius * record.radius;
@@ -363,9 +411,9 @@ interface SurfaceHit {
 /** Sphere-trace a marched kind on distance alone; the normal is taken once, at the hit. */
 function traceMarched(record: PreparedRecord, origin: Vec3, direction: Vec3, from: number, to: number, epsilon: (t: number) => number): number | null {
   let t = from;
-  for (let iteration = 0; iteration <= 3 * SVO_PRIMITIVE_MARCH_ITERATIONS; iteration += 1) {
+  for (let iteration = 0; iteration <= (record.maxSteps ?? 3 * SVO_PRIMITIVE_MARCH_ITERATIONS); iteration += 1) {
     const d = Math.abs(record.distance(add(origin, scale(direction, t))));
-    if (d <= epsilon(t)) return t;
+    if (d <= Math.min(epsilon(t), record.hitTolerance ?? Infinity)) return t;
     t += Math.max(d, 1e-7);
     if (t > to) return null;
   }
@@ -612,13 +660,20 @@ export function traceShapeLabTile(scene: ShapeLabScene, input: ShapeLabTraceOpti
           }
           const t = traceMarched(record, frame.eye, direction, from, to, epsilon);
           if (t !== null && (!best || t < best.t)) {
-            best = { t, normal: marchedNormal(record, add(frame.eye, scale(direction, t))), colorLinear: record.colorLinear };
+            const point = add(frame.eye, scale(direction, t));
+            best = { t, ...(record.surface?.(point)
+              ?? { normal: marchedNormal(record, point), colorLinear: record.colorLinear }) };
           }
           continue;
         }
         const voxel = traceVoxels(record, frame.eye, direction, from, to, input.leaf_m);
         if (voxel && (!best || voxel.t < best.t)) {
-          best = { t: voxel.t, normal: voxel.normal, colorLinear: record.colorLinear };
+          const point = add(frame.eye, scale(direction, voxel.t + 1e-8));
+          // Material belongs to the occupied cell's centre in voxel mode.
+          const cell = input.leaf_m;
+          const centre = { x: (Math.floor(point.x / cell) + 0.5) * cell,
+            y: (Math.floor(point.y / cell) + 0.5) * cell, z: (Math.floor(point.z / cell) + 0.5) * cell };
+          best = { t: voxel.t, normal: voxel.normal, colorLinear: record.surface?.(centre).colorLinear ?? record.colorLinear };
         }
       }
       if (ground) {

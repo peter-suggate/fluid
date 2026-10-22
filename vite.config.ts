@@ -2,6 +2,7 @@ import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
+import { assetCatalog } from "./build/asset-catalog-vite-plugin";
 
 const { d1, r2 } = hostingConfig;
 
@@ -27,6 +28,7 @@ export default defineConfig(async () => {
       },
     },
     plugins: [
+      assetCatalog(),
       vinext(),
       sites(),
       cloudflare({

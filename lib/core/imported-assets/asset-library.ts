@@ -1,42 +1,15 @@
-import lounger from "./metadata/teak-lounger-volume.json";
-import parasol from "./metadata/garden-parasol-volume.json";
-import cooler from "./metadata/insulated-cooler-volume.json";
-import refreshments from "./metadata/refreshment-set-volume.json";
-import diving from "./metadata/diving-board-ladder-volume.json";
-import ladder from "./metadata/pool-stainless-ladder-volume.json";
-import paver from "./metadata/honed-travertine-paver-volume.json";
-import turf from "./metadata/living-turf-volume.json";
-import fence from "./metadata/cedar-fence-panel-volume.json";
-import windowBay from "./metadata/stucco-window-bay-volume.json";
-import coping from "./metadata/limestone-coping-volume.json";
-import copingCorner from "./metadata/limestone-coping-corner-volume.json";
-import waterline from "./metadata/ceramic-waterline-volume.json";
-import servingTable from "./metadata/teak-serving-table-volume.json";
-import heroGarden from "./metadata/hero-garden-volumes.json";
+import { assetRegistry } from "./asset-catalog";
 import { sampleMeshVolume, sampleMeshVolumeDistance, type MeshVolumeDistanceField, type MeshVolume, type MeshVolumeHeader } from "./mesh-volume";
 import { fetchMeshVolume } from "./mesh-volume-loader";
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
 import { walkSceneryNodes } from "../scenery-graph";
 
-/** Documents contain small references; compressed sample data is loaded once
- * per render worker, shared by every instance, and never enters the solver. */
-export const MESH_ASSETS: Readonly<Record<string, MeshVolumeHeader>> = {
-  ...heroGarden as unknown as Record<string, MeshVolumeHeader>,
-  "teak-lounger": lounger as unknown as MeshVolumeHeader,
-  "garden-parasol": parasol as unknown as MeshVolumeHeader,
-  "insulated-cooler": cooler as unknown as MeshVolumeHeader,
-  "refreshment-set": refreshments as unknown as MeshVolumeHeader,
-  "diving-board-ladder": diving as unknown as MeshVolumeHeader,
-  "pool-stainless-ladder": ladder as unknown as MeshVolumeHeader,
-  "honed-travertine-paver": paver as unknown as MeshVolumeHeader,
-  "living-turf": turf as unknown as MeshVolumeHeader,
-  "cedar-fence-panel": fence as unknown as MeshVolumeHeader,
-  "stucco-window-bay": windowBay as unknown as MeshVolumeHeader,
-  "limestone-coping": coping as unknown as MeshVolumeHeader,
-  "limestone-coping-corner": copingCorner as unknown as MeshVolumeHeader,
-  "ceramic-waterline": waterline as unknown as MeshVolumeHeader,
-  "teak-serving-table": servingTable as unknown as MeshVolumeHeader,
-};
+/** Compatibility view for the sampled-volume ABI. Every consumer derives the
+ * same deterministic ordinal order from the shared plugin catalog. Compressed
+ * sample data is still loaded once per render worker and shared by instances. */
+export const MESH_ASSETS: Readonly<Record<string, MeshVolumeHeader>> = Object.freeze(Object.fromEntries(
+  assetRegistry.assets.flatMap((asset) => asset.volume ? [[asset.id, asset.volume.header]] : []),
+));
 export interface SampledVolumeField { readonly asset: string; readonly materialBase?: number }
 const volumes = new Map<string, MeshVolume>();
 const distanceFields = new Map<string, MeshVolumeDistanceField>();
@@ -44,15 +17,15 @@ const pending = new Map<string, Promise<void>>();
 const packed = new WeakMap<MeshVolume, Uint32Array<ArrayBuffer>>();
 const occupancy = new WeakMap<MeshVolume, { sums: Uint32Array; dimensions: number[] }>();
 export function meshAssetHeader(id: string): MeshVolumeHeader {
-  const header = MESH_ASSETS[id];
-  if (!header) throw new Error(`Unknown mesh asset: ${id}`);
-  return header;
+  const asset = assetRegistry.get(id);
+  if (!asset.volume) throw new Error(`Mesh asset ${id} has no published volume bake`);
+  return asset.volume.header;
 }
-/** The same asset URL is used by browser workers and Node preview harnesses. */
+/** Resolve the file declared by its plugin, without collection-specific paths. */
 export function meshAssetUrl(id: string): string {
-  meshAssetHeader(id);
-  const collection = Object.hasOwn(heroGarden, id) ? "hero-garden-blender" : "pool-party";
-  return `/assets/${collection}/${id}.fvx.gz`;
+  const asset = assetRegistry.get(id);
+  if (!asset.volume) throw new Error(`Mesh asset ${id} has no published volume bake`);
+  return asset.volume.url;
 }
 function validateAssetHeader(id: string, volume: MeshVolumeDistanceField): void {
   const expected = meshAssetHeader(id), h = volume.header;

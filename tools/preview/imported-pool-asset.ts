@@ -5,12 +5,11 @@ import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import type { CameraState } from "../../lib/core/model";
 import { decodeMeshVolume } from "../../lib/core/imported-assets/mesh-volume";
-import { MESH_ASSETS, registerMeshAsset } from "../../lib/core/imported-assets/asset-library";
+import { meshAssetUrl, registerMeshAsset } from "../../lib/core/imported-assets/asset-library";
 import { getScenePreset } from "../../lib/core/scenes";
 
 const id = process.env.FLUID_POOL_ASSET ?? "teak-lounger";
-if (!Object.hasOwn(MESH_ASSETS, id)) throw new Error("Unknown pool asset");
-const volume = decodeMeshVolume(gunzipSync(readFileSync(new URL(`../../public/assets/pool-party/${id}.fvx.gz`, import.meta.url))));
+const volume = decodeMeshVolume(gunzipSync(readFileSync(new URL(`../../public${meshAssetUrl(id)}`, import.meta.url))));
 registerMeshAsset(id, volume);
 const h = volume.header.cellSize, [nx, ny, nz] = volume.header.dimensions;
 export function createScene() {

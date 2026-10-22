@@ -18,14 +18,17 @@
  */
 import type { SvoPrimitiveDescriptor } from "../lib/svo/contracts/svo-primitive-abi";
 import type { TerrainGrid } from "../lib/core/terrain";
+import { fetchMeshVolume } from "../lib/core/imported-assets/mesh-volume-loader";
 import {
   prepareShapeLabScene,
+  prepareShapeLabAsset,
   traceShapeLabTile,
   type ShapeLabScene,
   type ShapeLabTraceOptions,
 } from "./trace";
 
 export interface ShapeLabSceneMessage {
+  readonly assetUrl?: string;
   readonly type: "scene";
   readonly sceneId: string;
   readonly descriptors: readonly SvoPrimitiveDescriptor[];
@@ -67,19 +70,36 @@ export type ShapeLabResponse = ShapeLabTileResult | ShapeLabDropped | ShapeLabFa
 
 let scene: ShapeLabScene | undefined;
 let sceneId = "";
+let ready: Promise<void> = Promise.resolve();
+let loadError: unknown;
+let loadRevision = 0;
 
 const reply = (message: ShapeLabResponse, transfer: Transferable[] = []): void => {
   (self as unknown as Worker).postMessage(message, transfer);
 };
 
-self.addEventListener("message", (event: MessageEvent<ShapeLabRequest>) => {
+self.addEventListener("message", async (event: MessageEvent<ShapeLabRequest>) => {
   const message = event.data;
   try {
     if (message.type === "scene") {
-      scene = prepareShapeLabScene(message.descriptors, message.colors, message.ground);
+      const revision = ++loadRevision;
       sceneId = message.sceneId;
+      scene = undefined;
+      loadError = undefined;
+      ready = (async () => {
+        try {
+          const prepared = message.assetUrl
+            ? prepareShapeLabAsset(await fetchMeshVolume(message.assetUrl))
+            : prepareShapeLabScene(message.descriptors, message.colors, message.ground);
+          if (loadRevision === revision) scene = prepared;
+        } catch (error) {
+          if (loadRevision === revision) loadError = error;
+        }
+      })();
       return;
     }
+    await ready;
+    if (sceneId === message.sceneId && loadError) throw loadError;
     if (!scene || sceneId !== message.sceneId) {
       reply({ type: "dropped", generation: message.generation });
       return;

@@ -71,7 +71,9 @@
     "check:uniform-geometric-contract": "node --import tsx tools/wasm/generate-uniform-geometric-contract.ts --check",
     "test:uniform-lab:inflow": "node --import tsx tools/wasm/uniform-lab-inflow.ts",
     "test:uniform-lab:scenes": "node --import tsx tools/wasm/uniform-lab-scenes.ts",
-    "test:uniform-pressure:2d": "node --import tsx tools/wasm/uniform-pressure-stability.ts"
+    "test:uniform-pressure:2d": "node --import tsx tools/wasm/uniform-pressure-stability.ts",
+    "generate:assets": "node --import tsx tools/asset-catalog.ts",
+    "check:assets": "node --import tsx tools/asset-catalog.ts --check"
   },
   "dependencies": {
     "box3d-wasm": "0.2.0",

@@ -24,6 +24,7 @@ import type { ShapeLabCamera, ShapeLabShading } from "./trace";
 import type { ShapeLabRequest, ShapeLabResponse } from "./worker";
 
 export interface ShapeLabRenderRequest {
+  readonly assetUrl?: string;
   /** Identity of the specimen, so a camera move does not re-send it. */
   readonly sceneId: string;
   readonly descriptors: readonly SvoPrimitiveDescriptor[];
@@ -127,6 +128,7 @@ export class ShapeLabPool {
         sceneId: request.sceneId,
         descriptors: request.descriptors,
         colors: request.colors,
+        ...(request.assetUrl ? { assetUrl: request.assetUrl } : {}),
         ...(request.ground ? { ground: request.ground } : {}),
       };
       for (const worker of this.workers) worker.postMessage(scene);
@@ -164,6 +166,7 @@ export class ShapeLabPool {
     }
     this.queue = pending;
     this.total = pending.length;
+    this.onProgress({ done: 0, total: this.total, elapsedMs: 0, complete: false });
     this.pump();
   }
 
@@ -185,6 +188,7 @@ export class ShapeLabPool {
     this.idle.push(worker);
     if (response.generation === this.generation) {
       if (response.type === "failed") {
+        this.queue = [];
         this.onError(response.message);
       } else if (response.type === "tile") {
         this.done += 1;
