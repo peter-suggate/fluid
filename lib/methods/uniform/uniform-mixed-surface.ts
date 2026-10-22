@@ -1348,9 +1348,18 @@ fn umDeepAir(vertex:vec3u,width:u32)->f32{
 override umDeferTraced:bool=false;
 // The cubic list's first word in deferred.data: past a word per lattice vertex.
 const UM_CUBIC_BASE=${this.address.vertexKeys}u;
+// A vertex two widths from the surface (umVertexFoot's own test: no foot,
+// smoothing or cubic) is listed from the list's end (header[5]), every
+// other from its start (header[0]): a SIMD group of advectDeferred then
+// holds one path, where a mixed one held the deep vertices behind the
+// near ones' (skipping every deep vertex saved only a fifth of the
+// general twin). Both ends together hold at most every vertex.
 fn umQueueVertex(vertex:vec3u,width:u32){
- let i=atomicAdd(&deferred.header[0],1u);
- deferred.data[i]=umVertexAt(vertex)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
+ let word=umVertexAt(vertex)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
+ if(abs(umLatticeLoad(vec3i(vertex),width))>=2.0*f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z))){
+  deferred.data[UM_CUBIC_BASE-1u-atomicAdd(&deferred.header[5],1u)]=word;return;
+ }
+ deferred.data[atomicAdd(&deferred.header[0],1u)]=word;
 }
 // umSplitTrace (advectFine): a vertex past the cold, far, deep, early and
 // cheap exits is evaluated in three launches, each kernel only its own part
@@ -1452,8 +1461,10 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  let localSolidTwin=umExactLocalSolidTransport&&umFastSurface&&umSolidFree&&umSolidPresent();
  if(umSolidSkip()&&!localSolidTwin){return;}
  umStagePlaneReach(lane);
- let count=atomicLoad(&deferred.header[0]);
- for(var i=gid.x;i<count;i+=64u*groups.x){
+ // The near entries, then the deep ones from the list's end (umQueueVertex).
+ let near=atomicLoad(&deferred.header[0]);let count=near+atomicLoad(&deferred.header[5]);
+ for(var n=gid.x;n<count;n+=64u*groups.x){
+  let i=select(UM_CUBIC_BASE-1u-(n-near),n,n<near);
   let word=deferred.data[i];if(word==0xffffffffu){continue;}let code=word>>30u;
   if((code==3u)!=umRegularFine){continue;}
   let vertex=umVertexCoord(word&0x3fffffffu);
@@ -1558,7 +1569,7 @@ ${uniformSolidSampleClosedWGSL}
 const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
 const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
 @compute @workgroup_size(64) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);atomicStore(&deferred.header[2],0u);atomicStore(&deferred.header[3],0u);atomicStore(&deferred.header[4],0u);}
+ if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);atomicStore(&deferred.header[2],0u);atomicStore(&deferred.header[3],0u);atomicStore(&deferred.header[4],0u);atomicStore(&deferred.header[5],0u);}
  let h=params.hDt.xyz;let dt=params.hDt.w;let faces=umWallFaceCount();
  for(var i=group.x;i<faces;i+=groups.x){
   let face=umWallFace(i);let f=face%6u;let axis=f>>1u;let upper=(f&1u)!=0u;let inward=select(1.0,-1.0,upper);
