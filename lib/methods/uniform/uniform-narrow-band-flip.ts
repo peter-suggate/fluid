@@ -224,6 +224,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  measureTraces=false;
  /** Runtime deep-overlap retirement cap; zero disables crowded-cell retirement. */
  particleCellCap=20;
+ /** Runtime sparse-retirement threshold (params.live.y); zero disables sparse retirement. */
+ sparseNeighbours=16;
  /** Completed frame samples, exposed for transfer/conservation verification.
   * Each brick slab is in cell order up to its seeds, appended after it;
   * holes and retired samples are dead records (heat 0). */
@@ -367,6 +369,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  /** Per-frame parameter records, filled in place. */
  private readonly stepWords=new Float32Array(12);
  private readonly activityWords=this.stepWords.subarray(8,12);
+ // params.live.y: live.x is the state's live word, copied in by the GPU.
+ private readonly sparseWords=new Uint32Array(1);
  private readonly receiptBits=new Uint32Array(2);
  private readonly receiptDistances=new Float32Array(this.receiptBits.buffer);
  /** The groups' bank order: binding 0 the scratch bank, binding 1 the current. */
@@ -1553,6 +1557,7 @@ ${narrowBandSurfaceWGSL}
   w[0]=h[0]!;w[1]=h[1]!;w[2]=h[2]!;w[3]=dt;w[4]=this.apic?0:0.95;w[5]=openTop;w[6]=gravity;w[7]=+this.measureTraces;
   w[11]=this.particleCellCap;
   this.device.queue.writeBuffer(this.params,0,w);
+  this.sparseWords[0]=this.sparseNeighbours;this.device.queue.writeBuffer(this.params,52,this.sparseWords);
  }
  move(encoder:GPUCommandEncoder,dt:number,openTop:boolean,gravity=0):void{
   if(this.idleNow)return;

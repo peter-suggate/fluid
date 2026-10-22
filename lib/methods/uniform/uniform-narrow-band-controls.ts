@@ -10,16 +10,22 @@ export const NARROW_BAND_ACTIVITY_CONTROLS = [
 export const NARROW_BAND_VOLUME_CONTROL = {key:"volumeControlSeconds",label:"Volume control time",unit:"s",min:0,max:2,step:0.05,digits:2,default:0.1,
   hint:"Time over which the liquid's measured gap to its volume budget is closed, as a uniform divergence in the pressure solve that carries the particles and the surface together. Shorter holds the volume tighter and moves the liquid more. A gap under 1% of the budget is left alone, so liquid at rest stays at rest. 0 turns volume control off."} as const;
 export const NARROW_BAND_SPARSE_CONTROL = {key:"sparseParticleLifetime",label:"Sparse particle lifetime",unit:"s",min:0,max:10,step:0.1,digits:1,default:2,
-  hint:"Retire a particle after this many continuous seconds with fewer than eight neighbours in the 3×3×3 grid cells around it. Neighbours returning reset its timer. Applies to coupled and ballistic particles; dense sheets and droplets retain their support. 0 disables sparse retirement."} as const;
+  hint:"Retire a particle after this many continuous seconds with fewer than Sparse neighbours in the 3×3×3 grid cells around it. Neighbours returning reset its timer. Applies to coupled and ballistic particles; dense sheets and droplets retain their support. 0 disables sparse retirement."} as const;
+/** Sparse retirement's threshold: a full h cell seeds eight samples, so 8 is about one cell's worth across the 27-cell block. */
+export const NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL = {key:"sparseNeighbours",label:"Sparse neighbours",unit:"",min:0,max:64,step:1,digits:0,default:16,
+  hint:"A particle with fewer than this many other particles in the 3×3×3 grid cells around it is sparse and retires after Sparse particle lifetime. A full cell seeds eight, so 8 keeps any clump of about a cell; 16 or 32 also retires small clumps of spray. 0 disables sparse retirement."} as const;
 export const NARROW_BAND_PARTICLE_CAP_CONTROL = {key:"particleCellCap",label:"Particles per cell",unit:"",min:0,max:128,step:1,digits:0,default:20,
   hint:"Limits crowding more than one cell beneath the surface. Lower values reduce particle work. Surface particles are preserved; newly seeded particles may temporarily exceed this limit. 0 disables the cap."} as const;
 export function narrowBandParticleCellCap(value:unknown,fallback=20):number{
  const n=Number(value);return Number.isFinite(n)?Math.floor(Math.min(128,Math.max(0,n))):fallback;
 }
-const controls=[...NARROW_BAND_ACTIVITY_CONTROLS,NARROW_BAND_VOLUME_CONTROL,NARROW_BAND_SPARSE_CONTROL,NARROW_BAND_PARTICLE_CAP_CONTROL] as const;
+export function narrowBandSparseNeighbours(value:unknown,fallback=16):number{
+ const n=Number(value);return Number.isFinite(n)?Math.round(Math.min(64,Math.max(0,n))):fallback;
+}
+const controls=[...NARROW_BAND_ACTIVITY_CONTROLS,NARROW_BAND_VOLUME_CONTROL,NARROW_BAND_SPARSE_CONTROL,NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL,NARROW_BAND_PARTICLE_CAP_CONTROL] as const;
 export const narrowBandControlValues = (values:MethodParamValues={}) => Object.fromEntries(controls.map(c=>{
  const raw=Number(values[c.key]);
- return [c.key,c.key==="particleCellCap"?narrowBandParticleCellCap(raw):Number.isFinite(raw)?Math.min(c.max,Math.max(c.min,raw)):c.default];
+ return [c.key,c.key==="particleCellCap"?narrowBandParticleCellCap(raw):c.key==="sparseNeighbours"?narrowBandSparseNeighbours(raw):Number.isFinite(raw)?Math.min(c.max,Math.max(c.min,raw)):c.default];
 })) as Record<(typeof controls)[number]["key"],number>;
 /** The level-set advect at h vertices. The particles carry the surface there and the advected one is blended in wherever heat is below 1.
  * Adaptive: trilinear where incident open tiles have particles that pin the surface (surface heat over 1.5, the couple's theta over 0.5), cubic elsewhere. */
