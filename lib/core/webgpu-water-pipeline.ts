@@ -1389,6 +1389,10 @@ fn project(world:vec3f)->vec4f {
 }
 @vertex fn surfaceVertex(@builtin(vertex_index) index:u32)->Out {
   let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);o.world=v.position.xyz;o.normal=normalize(v.normal.xyz);o.film=v.normal.w;
+  // The fine particle skin (w <= 0) is pushed back -w metres along its view
+  // ray: it covers the same pixels, and the level set wins wherever the skin
+  // stands less than that in front of it. The stored position stays true.
+  if(v.position.w<=0.0){o.clip=project(v.position.xyz-v.position.w*normalize(v.position.xyz-u.cameraPosition.xyz));}
   // A closed liquid/wall silhouette is shared by a front-facing free-surface
   // triangle and a back-facing wall triangle. The raster top-left rule can
   // otherwise give their exact shared edge to the back pass alone at one

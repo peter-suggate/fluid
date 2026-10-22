@@ -618,5 +618,6 @@ function surfaceDisplayState(state: UIStore): SurfaceDisplayState {
     fluidSurfaceRenderMode: state.fluidSurfaceRenderMode, fluidParticleDisplay: state.fluidParticleDisplay,
     fineSurfaceGreed: state.fineSurfaceGreed, fineSurfaceSmoothing: state.fineSurfaceSmoothing,
     fineSurfaceThickness: state.fineSurfaceThickness, fineSpraySize: state.fineSpraySize, fineSprayOpacity: state.fineSprayOpacity,
+    fineSurfaceMerge: state.fineSurfaceMerge,
   };
 }

@@ -1105,7 +1105,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
               axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, layers: ui.visualLayers, particles: ui.fluidParticleDisplay,
               particleSurface: {
                 greed: ui.fineSurfaceGreed, smoothing: ui.fineSurfaceSmoothing, thickness: ui.fineSurfaceThickness,
-                spraySize: ui.fineSpraySize, sprayOpacity: ui.fineSprayOpacity,
+                spraySize: ui.fineSpraySize, sprayOpacity: ui.fineSprayOpacity, merge: ui.fineSurfaceMerge,
               },
             },
             scenePreset.background,

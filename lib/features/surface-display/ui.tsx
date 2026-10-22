@@ -8,7 +8,7 @@ import { simulation } from "../../core/simulation/controller";
 import { resolveWaterOptics, WATER_ROUGHNESS_MIN } from "../../core/webgpu-lighting";
 import { ToolstripRow } from "../../../components/toolstrip";
 import { Choice, Slider, Value } from "../../../components/ui";
-import { PARTICLE_SURFACE_SMOOTHING_RANGE, PARTICLE_SURFACE_THICKNESS_RANGE } from "../../core/webgpu-particle-surface";
+import { PARTICLE_SURFACE_MERGE_RANGE, PARTICLE_SURFACE_SMOOTHING_RANGE, PARTICLE_SURFACE_THICKNESS_RANGE } from "../../core/webgpu-particle-surface";
 import { surfaceDisplayFeature, type FineSurfaceState, type FluidParticleDisplay, type FluidSurfaceRenderMode } from "./definition";
 export function SurfaceDisplayRow() {
   const session = useSession();
@@ -47,6 +47,7 @@ function FineSurfaceRows() {
       {slider("fineSurfaceGreed", "Greed", 0, 1, 0.01, "How few neighbours a particle needs to be liquid. Low meshes only bulk liquid and leaves thin sheets and clusters as spray; high meshes nearly every pair.")}
       {slider("fineSurfaceSmoothing", "Smooth", ...PARTICLE_SURFACE_SMOOTHING_RANGE, 0.05, "Kernel radius in cells. Larger merges particles into smoother liquid; smaller keeps ripples and separate droplets.")}
       {slider("fineSurfaceThickness", "Thick", ...PARTICLE_SURFACE_THICKNESS_RANGE, 0.05, "How far the skin stands off the particles' weighted centre, in cells. Larger fills gaps and thickens sheets.")}
+      {slider("fineSurfaceMerge", "Merge", ...PARTICLE_SURFACE_MERGE_RANGE, 0.05, "How far, in cells, the skin must stand in front of the level-set surface to be drawn. Closer than that, the smooth surface shows instead; 0 draws the skin wherever it is nearer.")}
     </ToolstripRow>
     <ToolstripRow name="Spray" hint="Particles the fine skin does not enclose, drawn as droplets." testId="fine-spray-row" icon={<Droplets width={14} height={14} />}>
       {slider("fineSpraySize", "Size", 0.1, 1, 0.05, "Spray footprint radius as a fraction of a Motion sample's.")}

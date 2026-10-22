@@ -47,13 +47,16 @@ export interface ParticleSurfaceSettings {
   readonly spraySize: number;
   /** Scales the spray's Motion opacity. */
   readonly sprayOpacity: number;
+  /** In cells (h): the skin shows only where it stands this far in front of the level set. */
+  readonly merge: number;
 }
 
 export const DEFAULT_PARTICLE_SURFACE_SETTINGS: ParticleSurfaceSettings = Object.freeze({
-  greed: 0.5, smoothing: 1, thickness: 0.5, spraySize: 2 / 3, sprayOpacity: 1,
+  greed: 0.5, smoothing: 1, thickness: 0.5, spraySize: 2 / 3, sprayOpacity: 1, merge: 0.5,
 });
 export const PARTICLE_SURFACE_SMOOTHING_RANGE = [0.5, 1.5] as const;
 export const PARTICLE_SURFACE_THICKNESS_RANGE = [0.2, 1] as const;
+export const PARTICLE_SURFACE_MERGE_RANGE = [0, 2] as const;
 
 /** Fine samples per cell. NB-FLIP seeds 2³ per cell, so this is its spacing. */
 const FINE_PER_CELL = 2;
@@ -70,7 +73,7 @@ const BRICK_WORKGROUPS = 1024;
 export const PARTICLE_SURFACE_WORKGROUP_BYTES = 30_188;
 /** Mesh workgroup width; 512 beat 256 and 1024 on M1 Max (1.86 vs 2.29 and 2.42 ms). */
 export const PARTICLE_SURFACE_MESH_LANES = 512;
-const UNIFORM_BYTES = 80;
+const UNIFORM_BYTES = 96;
 /** Counter words: live, bricks, vertices, overflow; then the indirect draw at word 8. */
 const COUNTER_BYTES = 48;
 export const PARTICLE_SURFACE_INDIRECT_OFFSET = 32;
@@ -92,6 +95,8 @@ struct Params {
   records:vec4u,
   // x brick capacity, y hash size, z vertex capacity, w particle capacity
   pool:vec4u,
+  // x the merge distance in metres, carried by every skin vertex as -position.w
+  skin:vec4f,
 }
 struct ParticleFrame{dims:vec4f,h:vec4f,origin:vec4f}
 struct SurfaceVertex { position:vec4f, normal:vec4f }
@@ -365,7 +370,9 @@ fn quadCell(q:vec3i,axis:i32,k:i32)->vec3i {
 fn quadVertex(window:vec3i,cell:vec3i)->SurfaceVertex {
   let index=cellIndex(cell);
   let fine=vec3f(window+cell)+unpack10(cellVertex[index]);
-  return SurfaceVertex(vec4f(worldOf(fine),1.0),vec4f(unpack10(cellNormalPacked[index])*2.0-1.0,0.0));
+  // position.w is 1 on the level set's vertices. A skin vertex carries minus the
+  // merge distance, which the water's raster pushes it back along its view ray.
+  return SurfaceVertex(vec4f(worldOf(fine),-params.skin.x),vec4f(unpack10(cellNormalPacked[index])*2.0-1.0,0.0));
 }
 
 // The quad's cells and normals were placed once per cell; this only orders
@@ -578,7 +585,7 @@ export class ParticleSurface {
   private group?: GPUBindGroup;
   private groupKey?: { particles: GPUBuffer; frame: GPUBuffer | undefined };
   /** What the pool was last built from: revision, greed, smoothing, thickness, container x, z. */
-  private readonly built = new Float64Array(6).fill(NaN);
+  private readonly built = new Float64Array(7).fill(NaN);
   private readonly liveWord = new Uint32Array(1);
   private statsReadback?: GPUBuffer;
   private statsPending = false;
@@ -695,9 +702,10 @@ export class ParticleSurface {
     const built = this.built;
     if (built[0] === frame.revision && built[1] === settings.greed && built[2] === settings.smoothing
       && built[3] === settings.thickness && built[4] === frame.container_m[0] && built[5] === frame.container_m[2]
-      && this.groupKey?.particles === source.buffer) return true;
+      && built[6] === settings.merge && this.groupKey?.particles === source.buffer) return true;
     built[0] = frame.revision; built[1] = settings.greed; built[2] = settings.smoothing;
     built[3] = settings.thickness; built[4] = frame.container_m[0]; built[5] = frame.container_m[2];
+    built[6] = settings.merge;
     this.ensureParticleCapacity(source.capacity);
     const f = this.uniformF32, u = this.uniformU32;
     const reach = clamp(settings.smoothing, ...PARTICLE_SURFACE_SMOOTHING_RANGE) * FINE_PER_CELL;
@@ -718,6 +726,7 @@ export class ParticleSurface {
     u[14] = grid ? grid.ballisticFloat + (grid.ballisticSignBit ? 0x80000000 : 0) : 0;
     u[15] = grid ? grid.depthFloat : 0xffffffff;
     u[16] = PARTICLE_SURFACE_BRICK_CAPACITY; u[17] = HASH_SIZE; u[18] = PARTICLE_SURFACE_VERTEX_CAPACITY; u[19] = this.particleCapacity;
+    f[20] = clamp(settings.merge, ...PARTICLE_SURFACE_MERGE_RANGE) * Math.min(scale[0], scale[1], scale[2]);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     // Word 0 is the live count: copied on the queue, or written ahead of this
     // submit where the source has no GPU count, so the clear starts past it.

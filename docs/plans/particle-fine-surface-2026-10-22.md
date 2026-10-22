@@ -75,6 +75,16 @@ float that NB-FLIP already keeps; ballistic records never cull. Because the
 skin goes through the interface passes, Shade (refraction), Simple (murk) and
 Wire all apply to it unchanged.
 
+**Merge.** Where the skin hugs the level set it adds only lumps and z-fighting.
+Each skin vertex carries the Merge distance (in cells, default 0.5 h) as
+−position.w; level-set vertices carry 1. The water's surface raster moves a skin
+vertex that far back along its own view ray. Pixel coverage is unchanged, but its
+depth grows by exactly that much, because the projection is linear in view depth.
+So the level set wins the depth test wherever the skin stands less than Merge in
+front of it, and the skin shows only where it protrudes: sheets, crowns and the
+front. It costs no extra work. The stored position and normal stay true, so
+shading is unchanged. The wireframe draws the whole skin.
+
 **Spray.** In the Fine view the particle overlay reads φ at each particle and
 draws only particles outside the skin (φ ≥ 0). Each is drawn exactly as a Motion
 sample: the same energy, white tint and unlit footprint, and the same
@@ -83,7 +93,7 @@ Motion's (2/3 by default) and its opacity is scaled by Spray opacity (1 by
 default). Spray behind the water front is hidden in every surface mode.
 
 **Controls** (the Fine row, URL-persisted, live, uniforms only):
-Greed, Smooth (kernel radius, 0.5–1.5 h), Thick (surface radius), Spray size,
+Greed, Smooth (kernel radius, 0.5–1.5 h), Thick (surface radius), Merge (0–2 h), Spray size,
 Spray opacity.
 
 **Memory.** This is allocated once when Fine is first chosen, never per frame:

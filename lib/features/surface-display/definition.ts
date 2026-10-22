@@ -1,13 +1,13 @@
 import type { FeatureDefinition } from "../../framework/composition";
 import { choiceQuery, numberQuery, queryRecord } from "../../framework/persistence";
-import { DEFAULT_PARTICLE_SURFACE_SETTINGS as FINE, PARTICLE_SURFACE_SMOOTHING_RANGE, PARTICLE_SURFACE_THICKNESS_RANGE } from "../../core/webgpu-particle-surface";
+import { DEFAULT_PARTICLE_SURFACE_SETTINGS as FINE, PARTICLE_SURFACE_MERGE_RANGE, PARTICLE_SURFACE_SMOOTHING_RANGE, PARTICLE_SURFACE_THICKNESS_RANGE } from "../../core/webgpu-particle-surface";
 export type FluidSurfaceRenderMode = "shaded" | "wireframe" | "simple";
 /** The liquid's own particles over the surface (core/visual-layers ParticleDisplay). */
 export type FluidParticleDisplay = "off" | "motion" | "speed" | "fine";
 /** The Fine display's sliders (core/webgpu-particle-surface ParticleSurfaceSettings). */
 export interface FineSurfaceState {
   fineSurfaceGreed: number; fineSurfaceSmoothing: number; fineSurfaceThickness: number;
-  fineSpraySize: number; fineSprayOpacity: number;
+  fineSpraySize: number; fineSprayOpacity: number; fineSurfaceMerge: number;
 }
 export interface SurfaceDisplayState extends FineSurfaceState { fluidSurfaceRenderMode: FluidSurfaceRenderMode; fluidParticleDisplay: FluidParticleDisplay }
 export const SURFACE_DISPLAY_OPTIONS = [{ value: "shaded", label: "Shade" }, { value: "wireframe", label: "Wire" }, { value: "simple", label: "Simple" }] as const;
@@ -20,6 +20,7 @@ export const surfaceDisplayQuery = queryRecord<SurfaceDisplayState>({
   fineSurfaceThickness: numberQuery("fineThick", FINE.thickness, ...PARTICLE_SURFACE_THICKNESS_RANGE),
   fineSpraySize: numberQuery("spraySize", FINE.spraySize, 0.1, 1),
   fineSprayOpacity: numberQuery("sprayOpacity", FINE.sprayOpacity, 0, 1),
+  fineSurfaceMerge: numberQuery("fineMerge", FINE.merge, ...PARTICLE_SURFACE_MERGE_RANGE),
 });
 export const surfaceDisplayFeature = {
   id: "presentation.surface-display", controls: [{ id: "mode", label: "Fluid surface", kind: "choice", update: "live", setting: "fluidSurfaceRenderMode",
