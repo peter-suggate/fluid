@@ -1254,7 +1254,6 @@ export class UniformMixedFrame {
   try{mapped.set(new Uint32Array(slot.readback.getMappedRange(),0,TRACE_RECEIPT/4));slot.readback.unmap();}
   catch(error){this.failed=true;throw error;}finally{slot.unchecked=false;}
   try{
-   this.narrowBandFlip.noteReceipt(slot.flip);
    const page=this.pagePoolInfo,base=POOL_RECEIPT/4,status=UNIFORM_PAGE_POOL_STATUS;
    // Receipts can finish out of order with multiple frames in flight.
    if(frame>=page.frame){page.frame=frame;page.generation=mapped[base+status.generation]!;
@@ -1264,7 +1263,10 @@ export class UniformMixedFrame {
     d.fineTiles=w[0]!;d.coarseTiles=w[1]!;d.seamFineTiles=w[4]!;d.seamCoarseTiles=w[5]!;d.regularCoarseTiles=w[6]!;d.dependencyRegions16=w[7]!;
     d.pressureListedOctants=0;d.remapJobs=mapped[REMAP_WORK_RECEIPT/4]!;d.transferPairs=slot.flip[9]!;}
    // The page pool's sticky fatal explains every later failure: a page the frame needed was never stored.
+   // It precedes the particles' verdict: a capped closure strands samples
+   // in pages it never claimed, which FLIP then reports as an arrival.
    const pool=uniformPagePoolFatalMessage(this.pagePool.layout,mapped,POOL_RECEIPT/4);if(pool)throw new Error(pool);
+   this.narrowBandFlip.noteReceipt(slot.flip);
    // The GPU's own verdict first: it names the first failing frame.
    const failure=describeUniformMixedFrameStatus(slot.status);
    // A detail-storage violation explains every later failure.

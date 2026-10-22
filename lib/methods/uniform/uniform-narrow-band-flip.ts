@@ -994,7 +994,11 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    let tileHeat=nbMoveHeat(q);
    p.position.w=max(select(min(tileHeat,1.0),tileHeat,p.position.w>1.0),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
    if(p.position.w<=0.0){return NbMoved(p,1u);}
-   end=q+dt*p.velocity.xyz/h;
+   // A record its transfer left coupled was bounded by the grid flow alone
+   // (its travel record is the accepted grid motion): found unsupported here,
+   // it drifts this step by that grid sample. Its FLIP velocity is momentum,
+   // and drifts from the next step, whose census reads its speed.
+   end=q+dt*select(p.velocity.xyz,pic,mode!=1.0)/h;
    if(ballistic){break;}
    k1=pic/h;x=q+dt*k1/3.0;stage=1u;
   }
