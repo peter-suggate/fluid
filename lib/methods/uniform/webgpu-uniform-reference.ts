@@ -2973,7 +2973,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   syncRigidBodies(bodies: readonly RigidBodyState[]): void {
     this.mixedFrame?.invalidateExtension();
     if (this.mixedFrameInFlight) { this.deferredFrameBodies = structuredClone([...bodies]); return; }
-    this.rigidSystem.syncBodies(bodies.some(body => body.description.prescribedMotion)
+    this.rigidSystem.syncBodies(bodies.some(body => body.description.prescribedMotion || body.description.poseTrack)
       ? bodies.map(body => samplePrescribedRigidBody(body, this.lastTime, 0)) : bodies);
   }
   get rigidRenderBuffer(): GPUBuffer { return this.rigidSystem.renderBuffer; }

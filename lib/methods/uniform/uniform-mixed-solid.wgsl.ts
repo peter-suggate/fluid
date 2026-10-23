@@ -1,4 +1,6 @@
+import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
 import type { LevelSetSolidBoundarySource } from "../../core/levelset-consumer-abi";
+import { uniformRigidCoverageWGSL } from "./uniform-rigid-coverage.wgsl";
 import { uniformTerrainSamplingWGSL } from "./uniform-terrain-sampling.wgsl";
 /** Embedded solids for fine mixed owners: the paged voxel mask
  * (SolidOccupancyMask's image, the host's active scratch, with the bed-slope lane in it), the terrain
@@ -1154,9 +1156,10 @@ fn umSolidTileClear(p:vec3i)->bool{
 // asks the page across it.
 fn umSolidFaceClear(id:vec3i,neighbor:vec3i,axis:u32)->bool{return umSolidTileClear(id)&&((id[axis]&31)!=31||umSolidValid(neighbor));}
 // Rigid bodies: the native RigidBody helpers over the shape table. Every
-// body query first rejects on the body's bounding sphere (state dimensions.w,
-// boundingRadius), so cells away from every body pay one distance per body.
+// obstacle query first rejects on its bounding sphere. A closed fluid
+// interior has an unbounded solid exterior and cannot take that rejection.
 ${sceneShapeWgsl()}
+${fluidRigidBoundaryWGSL}
 fn umBodyCount()->u32{if(!umSolidEnabled()){return 0u;}return min(u32(max(round(umSolidParams.boundary.z),0.0)),12u);}
 fn umBodyRegionOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
 // Any present body's bounding sphere within margin of a world point: every
@@ -1167,32 +1170,16 @@ fn umAnyBodyNear(world:vec3f,margin:f32)->bool{
 }
 fn umQuatRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
 fn umBodyLocal(i:u32,world:vec3f)->vec3f{let b=umSolidBodies[i];return umQuatRotate(vec4f(b.orientation.x,-b.orientation.yzw),world-b.positionShape.xyz);}
-fn umBodyNear(i:u32,world:vec3f,margin:f32)->bool{let b=umSolidBodies[i];return distance(world,b.positionShape.xyz)<=b.dimensions.w+margin;}
-fn umInsideBody(i:u32,world:vec3f)->bool{let b=umSolidBodies[i];return umBodyNear(i,world,0.0)&&rigidShapeInside(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}
-fn umBodyDistance(i:u32,world:vec3f)->f32{let b=umSolidBodies[i];return rigidShapeDistance(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}
+fn umBodyNear(i:u32,world:vec3f,margin:f32)->bool{let b=umSolidBodies[i];return b.positionShape.w<0.0||distance(world,b.positionShape.xyz)<=b.dimensions.w+margin;}
+fn umInsideBody(i:u32,world:vec3f)->bool{let b=umSolidBodies[i];return umBodyNear(i,world,0.0)&&fluidRigidInside(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}
+fn umBodyDistance(i:u32,world:vec3f)->f32{let b=umSolidBodies[i];return fluidRigidDistance(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}
 fn umBodyVelocity(i:u32,world:vec3f)->vec3f{let b=umSolidBodies[i];return b.linearVelocity.xyz+cross(b.angularVelocity.xyz,world-b.positionShape.xyz);}
 // rigidBodyIndexAt: the first body containing the point, -1 for none.
 fn umBodyAt(world:vec3f)->i32{
  for(var i=0u;i<umBodyCount();i++){if(umInsideBody(i,world)){return i32(i);}}
  return -1;
 }
-// bodySolidFraction: the CPU voxelizer's eight sub-cell samples.
-fn umBodyFraction(i:u32,p:vec3i)->f32{
- let h=umSolidParams.cellGravity.xyz;let centre=umSolidWorldCell(p);
- if(!umBodyNear(i,centre,length(0.4*h))){return 0.0;}
- var inside=0.0;
- for(var corner=0u;corner<8u;corner++){
-  let offset=vec3f(select(-0.4,0.4,(corner&1u)!=0u),select(-0.4,0.4,(corner&2u)!=0u),select(-0.4,0.4,(corner&4u)!=0u));
-  if(umInsideBody(i,centre+offset*h)){inside+=1.0;}
- }
- return inside/8.0;
-}
-// bodySolidFractionAt: the largest body coverage of the cell.
-fn umCellBodyFraction(p:vec3i)->f32{
- var fraction=0.0;
- for(var i=0u;i<umBodyCount();i++){fraction=max(fraction,umBodyFraction(i,p));}
- return fraction;
-}
+${uniformRigidCoverageWGSL}
 // cellOpenFraction.
 fn umCellOpenGeometry(p:vec3i)->f32{
  if(!umSolidEnabled()){return select(0.0,1.0,umSolidValid(p));}

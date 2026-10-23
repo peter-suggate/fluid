@@ -27,6 +27,8 @@
  * a lab tab does the same to the studio; whoever owns the current path writes.
  */
 
+import { queryLocationUrl, readLocationQuery } from "./location-query";
+
 export interface HostQueryStateSync {
   /** The route this host owns. `/x` and `/x/…` are both this host. */
   readonly path: string;
@@ -56,7 +58,7 @@ export interface HostQueryStateSync {
  * changed nothing costs no history entry at all.
  */
 export function replaceLocationSearch(search: string): void {
-  const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
+  const next = queryLocationUrl(window.location.pathname, search, window.location.hash);
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next !== current) window.history.replaceState(window.history.state, "", next);
 }
@@ -72,12 +74,14 @@ export function startHostQueryStateSync(sync: HostQueryStateSync): () => void {
   let active = true;
   let queued = false;
   let applyingUrl = false;
+  let mirroredSearch = readLocationQuery();
   const onPath = () => window.location.pathname === sync.path
     || window.location.pathname.startsWith(`${sync.path}/`);
 
   const writeUrl = () => {
     if (!active || applyingUrl || !onPath()) return;
-    replaceLocationSearch(sync.serialize(window.location.search));
+    replaceLocationSearch(sync.serialize(readLocationQuery()));
+    mirroredSearch = readLocationQuery();
   };
 
   const scheduleWrite = () => {
@@ -88,7 +92,7 @@ export function startHostQueryStateSync(sync: HostQueryStateSync): () => void {
 
   const hydrate = () => {
     applyingUrl = true;
-    sync.hydrate(window.location.search);
+    sync.hydrate(readLocationQuery());
     applyingUrl = false;
     // Immediately, not on a microtask: what a reader typed is not yet canonical,
     // and a link carrying a retired key has to lose it before anything reads the
@@ -100,11 +104,16 @@ export function startHostQueryStateSync(sync: HostQueryStateSync): () => void {
   else hydrate();
   const stops = sync.sources.map((source) => source(scheduleWrite));
   const hydrateOwnPath = () => { if (onPath()) hydrate(); };
+  // Back/forward may emit both events; ordinary anchor changes do not change
+  // scene state and must not restart the simulation.
+  const hydrateFragment = () => { if (readLocationQuery() !== mirroredSearch) hydrateOwnPath(); };
   window.addEventListener("popstate", hydrateOwnPath);
+  window.addEventListener("hashchange", hydrateFragment);
 
   return () => {
     active = false;
     for (const stop of stops) stop();
     window.removeEventListener("popstate", hydrateOwnPath);
+    window.removeEventListener("hashchange", hydrateFragment);
   };
 }

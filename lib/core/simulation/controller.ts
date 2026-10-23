@@ -935,6 +935,8 @@ export class SimulationController {
     } : {
       ...this.session(paneId).ui.getInitialState(),
       svoRenderTuning: sceneRenderTuning(opening.scene.renderProfile),
+      fluidSurfaceRenderMode: opening.scene.renderProfile?.fluidSurfaceRenderMode ?? this.session(paneId).ui.getInitialState().fluidSurfaceRenderMode,
+      fluidParticleDisplay: opening.scene.renderProfile?.fluidParticleDisplay ?? this.session(paneId).ui.getInitialState().fluidParticleDisplay,
       // Absent only for a saved document whose origin scene this build no
       // longer has; there the camera the reader already had is the better answer.
       camera: opening.camera ?? previousCamera,

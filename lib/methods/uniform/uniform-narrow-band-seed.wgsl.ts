@@ -19,7 +19,10 @@ fn seedShell(lattice:vec3f,distance:f32)->vec4f{
    var open=array<bool,2>(false,false);var depth=array<f32,2>(d,d);
    for(var side=0u;side<select(2u,1u,stepping);side++){
     var x=next;if(!stepping){x=q+select(-e,e,side==1u);}
-    open[side]=stepping||!nbParticleBlocked(x);
+    // Fitting a surface seed is transport too: never step through a wall
+    // and reappear on its far side during a later fitting iteration.
+    open[side]=!nbParticleBlocked(x);
+    if(stepping&&!open[side]){return vec4f(q,d);}
     if(open[side]){depth[side]=particleDepth(x);}
    }
    if(stepping){

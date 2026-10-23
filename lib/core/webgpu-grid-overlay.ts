@@ -172,6 +172,7 @@ fn quatRotate(q: vec4f, v: vec3f) -> vec3f {
 fn quatInverseRotate(q: vec4f, v: vec3f) -> vec3f { return quatRotate(vec4f(q.x, -q.yzw), v); }
 
 fn bodyDistance(ro: vec3f, rd: vec3f, body: BodyGPU) -> f32 {
+  if(body.colorSelected.w<0.0){return 1e20;}
   let origin = quatInverseRotate(body.orientation, ro - body.positionRadius.xyz);
   let direction = quatInverseRotate(body.orientation, rd);
   let shape = i32(round(body.halfSizeShape.w));
@@ -469,6 +470,7 @@ fn gridBodySample(cellBounds: RepresentedCell) -> GridBodySample {
     // analytic primitive. This conservative voxelization keeps small bodies
     // visible and, for adaptive grids, fills the complete quadtree leaf rather
     // than leaking the hidden dense backing-grid resolution into the view.
+    if(bodies[index].colorSelected.w<0.0){continue;}
     let closest = clamp(bodies[index].positionRadius.xyz, cellBounds.lower, cellBounds.upper);
     let sphereDistance = length(closest - bodies[index].positionRadius.xyz) - bodies[index].positionRadius.w;
     let shapeDistance = bodySignedDistance(center, bodies[index]) - cellRadius;

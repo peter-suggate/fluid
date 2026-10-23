@@ -43,6 +43,7 @@ fn cylinderRigidHit(ro:vec3f,rd:vec3f,radius:f32,halfHeight:f32,capped:bool)->Ri
   return best;
 }
 fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU)->RigidHit{
+  if(body.colorSelected.w<0.0){return RigidHit(1e20,vec3f(0,1,0));}
   let o=qinv(body.orientation,ro-body.positionRadius.xyz);let d=qinv(body.orientation,rd);let shape=i32(round(body.halfSizeShape.w));var hit=RigidHit(1e20,vec3f(0,1,0));
   if(shape==0){hit=sphereRigidHit(o,d,vec3f(0),body.halfSizeShape.x);}
   else if(shape==1){let interval=boxHit(o,d,-body.halfSizeShape.xyz,body.halfSizeShape.xyz);var t=interval.x;if(t<=1e-4){t=interval.y;}

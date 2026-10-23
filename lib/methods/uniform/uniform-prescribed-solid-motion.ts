@@ -33,7 +33,7 @@ export class UniformPrescribedSolidMotion {
       o.w = body.orientation.w; o.x = body.orientation.x; o.y = body.orientation.y; o.z = body.orientation.z;
       pose.held = body.held; pose.fixed = fixed; pose.sample = sample;
       result[i] = body;
-      if (body.description.prescribedMotion && fixed) {
+      if ((body.description.prescribedMotion || body.description.poseTrack) && fixed) {
         result[i] = samplePrescribedRigidBody(body, time_s, dt);
         continue;
       }

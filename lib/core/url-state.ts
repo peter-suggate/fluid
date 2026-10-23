@@ -16,6 +16,7 @@ import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-def
 import { solidVoxelsOnMovedLattice } from "./scene-lattice";
 import { resolveSession, type PaneSession } from "./session/session";
 import { replaceLocationSearch, startHostQueryStateSync } from "./query-state-sync";
+import { queryLocationUrl, readLocationQuery } from "./location-query";
 import {
   compareQueryEntries,
   INITIAL_COMPARE_STATE,
@@ -501,7 +502,20 @@ export function parseQueryState(search: string): QueryState {
     }
   })();
   const patched = cloneScene(baseScene);
+  // Retired stair-cube links carried animated static panels and a water source
+  // above their open top. Restore the physical sealed vessel and its contained
+  // water together, so an old bookmark cannot resurrect the scripted descent.
+  let legacyStairAnimation = false;
+  if (preset.id === "nbflip-stair-cube") {
+    try {
+      const bodies: unknown = JSON.parse(query.get("scene.rigidBodies") ?? "null");
+      legacyStairAnimation = Array.isArray(bodies) && bodies.some(body =>
+        body && typeof body.id === "string" && body.id.startsWith("stair-vessel-")
+        && (body.poseTrack || body.prescribedMotion));
+    } catch { /* Malformed overrides are handled below. */ }
+  }
   for (const path of sceneQueryPaths) {
+    if (legacyStairAnimation && (path === "rigidBodies" || path === "fluid.initialLiquidVolumes")) continue;
     const raw = query.get(`scene.${path}`);
     if (raw === null) continue;
     if (raw === deletedValue && (path === "fluid.inflow" || path === "fluid.optics" || path === "surfaceStyle")) {
@@ -610,6 +624,13 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
   const sliceOnlyVolume = parsedGridAxis === "volume" && isSliceOnlyGridOverlayMode(parsedGridMode);
   const features = uiFeatureQuery.read(query);
   if (preset.renderProfile) {
+    if (preset.renderProfile.fluidParticleDisplay && !["off", "motion", "speed", "fine"].includes(query.get("fluidParticles") ?? "")) {
+      features.fluidParticleDisplay = preset.renderProfile.fluidParticleDisplay;
+    }
+    const surface = query.get("fluidSurface");
+    if (preset.renderProfile.fluidSurfaceRenderMode && !["shaded", "wireframe", "simple"].includes(surface ?? "")) {
+      features.fluidSurfaceRenderMode = preset.renderProfile.fluidSurfaceRenderMode;
+    }
     features.svoRenderTuning = { ...features.svoRenderTuning, environmentRefinementDepth: Math.trunc(numberParam(
       query, "svoRefinementDepth", sceneRenderTuning(preset.renderProfile).environmentRefinementDepth,
       0, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM)) };
@@ -740,6 +761,14 @@ export function serializeQueryState(
   uiFeatureQuery.write(query, uiState);
   const renderProfile = getScenePreset(sceneState.presetId).renderProfile;
   if (renderProfile) {
+    if (renderProfile.fluidParticleDisplay) {
+      if (uiState.fluidParticleDisplay === renderProfile.fluidParticleDisplay) query.delete("fluidParticles");
+      else query.set("fluidParticles", uiState.fluidParticleDisplay);
+    }
+    if (renderProfile.fluidSurfaceRenderMode) {
+      if (uiState.fluidSurfaceRenderMode === renderProfile.fluidSurfaceRenderMode) query.delete("fluidSurface");
+      else query.set("fluidSurface", uiState.fluidSurfaceRenderMode);
+    }
     // The generic codec omits global defaults. A scene may use another default,
     // so an explicit global value must survive a shared-link round trip too.
     if (uiState.svoRenderTuning.environmentRefinementDepth === sceneRenderTuning(renderProfile).environmentRefinementDepth) query.delete("svoRefinementDepth");
@@ -817,7 +846,7 @@ export function replaceQueryStateUrl(
   // `b.*` diff beside it. Today there is one pane and it is A.
   session: PaneSession = resolveSession(),
 ) {
-  replaceLocationSearch(studioQuerySearch(window.location.search, session, preparedSceneEntries));
+  replaceLocationSearch(studioQuerySearch(readLocationQuery(), session, preparedSceneEntries));
 }
 
 /** Pane A, pane B and the shell as one canonical query. The studio's `serialize`. */
@@ -833,8 +862,8 @@ function studioQuerySearch(
 
 /** The canonical location for the document currently held by the stores. */
 export function currentScenePageUrl(session: PaneSession = resolveSession()): string {
-  const search = serializeQueryState(window.location.search, session.scene.getState(), session.method.getState(), session.ui.getState(), { view: "studio" }, undefined, session.runtime.getState());
-  return `/scene${search ? `?${search}` : ""}`;
+  const search = serializeQueryState(readLocationQuery(), session.scene.getState(), session.method.getState(), session.ui.getState(), { view: "studio" }, undefined, session.runtime.getState());
+  return queryLocationUrl("/scene", search);
 }
 
 /**

@@ -3,11 +3,15 @@ import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, SVO_ENVIRONMENT_RE
 /** Authored presentation defaults, independent of the fluid lattice and solver profile. */
 export interface SceneRenderProfile {
   readonly environmentRefinementDepth?: number;
+  readonly fluidSurfaceRenderMode?: "shaded" | "wireframe" | "simple";
+  readonly fluidParticleDisplay?: "off" | "motion" | "speed" | "fine";
 }
 
 export function sceneRenderProfileErrors(profile: SceneRenderProfile): string[] {
   if (!profile || typeof profile !== "object" || Array.isArray(profile)) return ["Scene render profile must be an object"];
   const depth = profile.environmentRefinementDepth;
+  if (profile.fluidParticleDisplay !== undefined && !["off", "motion", "speed", "fine"].includes(profile.fluidParticleDisplay)) return ["Scene fluid particle display must be off, motion, speed or fine"];
+  if (profile.fluidSurfaceRenderMode !== undefined && !["shaded", "wireframe", "simple"].includes(profile.fluidSurfaceRenderMode)) return ["Scene fluid surface render mode must be shaded, wireframe or simple"];
   return depth !== undefined && (!Number.isInteger(depth) || depth < 0 || depth > SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM)
     ? [`Scene environment refinement depth must be an integer from 0 to ${SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM}`] : [];
 }

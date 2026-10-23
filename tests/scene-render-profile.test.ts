@@ -58,3 +58,28 @@ test("malformed authored renderer profiles fail definition and scene validation"
     assert.ok(validateScene(scene).some(error => error.includes("refinement depth")));
   }
 });
+
+test("authored shaded water preserves explicit surface overrides and restores its scene default", () => {
+  const stair = getSceneDefinition("nbflip-stair-cube"), scene = sceneDocument(stair);
+  assert.equal(parseUIQueryState("", stair.id).fluidSurfaceRenderMode, "shaded");
+  assert.equal(parseUIQueryState("", stair.id).fluidParticleDisplay, "off");
+  for (const display of ["off", "motion", "speed", "fine"] as const) {
+    const ui = parseUIQueryState(`fluidParticles=${display}`, stair.id);
+    const query = serializeQueryState("", { scene, presetId: stair.id }, parseMethodQueryState(""), ui);
+    assert.equal(new URLSearchParams(query).get("fluidParticles"), display === "off" ? null : display);
+    assert.equal(parseUIQueryState(query, stair.id).fluidParticleDisplay, display);
+  }
+  assert.equal(sceneOverrideClearPlan(["fluidParticles"], { scene, presetId: stair.id }).ui.fluidParticleDisplay, "off");
+  assert.equal(parseUIQueryState("fluidSurface=invalid", stair.id).fluidSurfaceRenderMode, "shaded");
+  assert.equal(parseUIQueryState("", definition.id).fluidSurfaceRenderMode, "simple");
+  for (const mode of ["shaded", "wireframe", "simple"] as const) {
+    const ui = parseUIQueryState(`fluidSurface=${mode}`, stair.id);
+    const query = serializeQueryState("", { scene, presetId: stair.id }, parseMethodQueryState(""), ui);
+    assert.equal(new URLSearchParams(query).get("fluidSurface"), mode === "shaded" ? null : mode);
+    assert.equal(parseUIQueryState(query, stair.id).fluidSurfaceRenderMode, mode);
+  }
+  const reset = sceneOverrideClearPlan(["fluidSurface"], { scene, presetId: stair.id });
+  assert.equal(reset.ui.fluidSurfaceRenderMode, "shaded");
+  assert.deepEqual(reset.reload, []);
+  assert.throws(() => parseScene(JSON.stringify({ ...scene, renderProfile: { fluidSurfaceRenderMode: "invalid" } })), /surface render mode/);
+});

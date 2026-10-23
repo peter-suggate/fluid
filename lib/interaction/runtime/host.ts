@@ -288,7 +288,7 @@ export class SceneInteractionHost implements InteractionHost {
         world.ensureCoverage();
         run('intent'); run('before-physics'); for (const command of commands) world.command(command, dt_s); commands.length = 0;
         if (this.scene.systems?.fluid !== false) {
-          const exchange = await this.options.fluid!.step({ ...identity, time_s, dt_s, bodies: world.renderBodies(), bodyGenerations:Object.fromEntries(world.snapshots().map(b=>[b.bodyId,b.bodyGeneration])) });
+          const exchange = await this.options.fluid!.step({ ...identity, time_s, dt_s, bodies: world.renderBodies(), bodyGenerations:world.fluidBodyGenerations() });
           world.applyFluid(exchange, identity);
         }
         this.sensors = world.step(dt_s); this.publishSnapshot(tick, time_s); run('after-physics');

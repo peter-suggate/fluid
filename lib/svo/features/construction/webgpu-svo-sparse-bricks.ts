@@ -4,7 +4,7 @@ import { meshAssetHeader, sampledVolumeExtraWords, sampledVolumeHorizontalSlab, 
 import { sampledVolumeMaterialRecords } from "../materials/svo-sampled-materials";
 import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
 import { TerrainEditPages, terrainEditSurfacePages, terrainFieldStamp } from "../../../core/live-terrain-overlay";
-import { rigidBodyHasFixedPose, type RigidBodyDescription, type SceneDescription } from "../../../core/model";
+import { rigidBodyHasVisibleFixedPose, type RigidBodyDescription, type SceneDescription } from "../../../core/model";
 import type { RenderFrameSeam } from "../../../core/render-frame-stages";
 import { svoSceneLighting } from "../lighting-visibility/svo-dry-scene-lighting";
 import {
@@ -769,8 +769,8 @@ function sameAuthoredGeometry(a: EnvironmentProxyPrimitive, b: EnvironmentProxyP
 
 /** The bodies a live scene voxelizes, as one comparable value. */
 function staticRigidBodiesStamp(bodies: SceneDescription["rigidBodies"]): string {
-  return bodies.some((body) => rigidBodyHasFixedPose(body))
-    ? JSON.stringify(bodies.map((body, ownerId) => rigidBodyHasFixedPose(body) ? sparseScenePrimitiveForRigidBody(body, ownerId) : 0))
+  return bodies.some((body) => rigidBodyHasVisibleFixedPose(body))
+    ? JSON.stringify(bodies.map((body, ownerId) => rigidBodyHasVisibleFixedPose(body) ? sparseScenePrimitiveForRigidBody(body, ownerId) : 0))
     : "";
 }
 
@@ -1888,7 +1888,7 @@ export class OctreeSparseBrickWorld {
           : svoPlanarSolidWorldBlockers(scene, initialSolidWorld.patches,
             solidPlanarCatalog)),
         ...scene.rigidBodies.flatMap((body, ownerId) => {
-          if (!rigidBodyHasFixedPose(body)) return [];
+          if (!rigidBodyHasVisibleFixedPose(body)) return [];
           const bounds = sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId));
           return [{ minimum: bounds.minimum, maximum: bounds.maximum }];
         }),
@@ -1934,7 +1934,7 @@ export class OctreeSparseBrickWorld {
       ? createSvoEnvironmentRefinement({
         primitives: environmentPrimitives, descriptorFor: environmentDescriptorFor,
         additionalSurfaces: scene.rigidBodies.flatMap((body, ownerId) => {
-          if (!rigidBodyHasFixedPose(body)) return [];
+          if (!rigidBodyHasVisibleFixedPose(body)) return [];
           const bounds = sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId));
           return [{
             aabb_m: {
@@ -1996,7 +1996,7 @@ export class OctreeSparseBrickWorld {
         regions: environmentPrimitives.map(primitive => ({minimum:[primitive.aabb_m.min.x,primitive.aabb_m.min.y,primitive.aabb_m.min.z],
           maximum:[primitive.aabb_m.max.x,primitive.aabb_m.max.y,primitive.aabb_m.max.z]})),
         brickRanges: refinementDepth === 0 ? sceneDomain.proxyBrickRanges.slice(0, environmentPrimitives.length) : undefined,
-        retainedRegions: [...solidWorldBounds, ...scene.rigidBodies.flatMap((body, ownerId) => rigidBodyHasFixedPose(body)
+        retainedRegions: [...solidWorldBounds, ...scene.rigidBodies.flatMap((body, ownerId) => rigidBodyHasVisibleFixedPose(body)
           ? [sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId))] : [])],
         worldOrigin, cellSize:renderCellSize, brickSize, brickDimensions:refinedBrickDimensions, maximumDepth,
         haloCells: options.surfaceDualMarchingCubes ? 1 : 0,
@@ -2029,7 +2029,7 @@ export class OctreeSparseBrickWorld {
      * are already covered and adding them would change a shipped plan.
      */
     const rigidBodyBricks = claimsContainer || gpuOccupancy ? [] : yield* liveSceneBrickCoordinatesForRegionsSteps(
-      scene.rigidBodies.flatMap((body, ownerId) => rigidBodyHasFixedPose(body)
+      scene.rigidBodies.flatMap((body, ownerId) => rigidBodyHasVisibleFixedPose(body)
         ? [sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body, ownerId))] : []),
       worldOrigin, renderCellSize, brickSize, refinedBrickDimensions);
     /**
@@ -2067,7 +2067,7 @@ export class OctreeSparseBrickWorld {
               ?sampledVolumeHorizontalSlab(p.program.sampledVolume,p.center_m,p.orientation):undefined,
             intersectsSupport:p.kind==="field-program"&&p.program.sampledVolume&&!p.sway
               ?sampledVolumeSupport(p.program.sampledVolume,p.center_m,p.orientation):undefined})),
-          ...scene.rigidBodies.flatMap((body,ownerId)=>rigidBodyHasFixedPose(body)?[sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body,ownerId))]:[]),
+          ...scene.rigidBodies.flatMap((body,ownerId)=>rigidBodyHasVisibleFixedPose(body)?[sparseScenePrimitiveBounds(sparseScenePrimitiveForRigidBody(body,ownerId))]:[]),
         ]) : undefined;
     // The backdrop's tile plan, on the final origin. With detail rings its
     // centre snaps to the outermost ring's bricks, so every ring boundary is a
@@ -3310,7 +3310,7 @@ export class OctreeSparseBrickWorld {
       // `flatMap` rather than filter-then-map: `ownerId` is the body's roster
       // index, and the analytic side (`rigidMotion[hit.ownerId]`) resolves the
       // same index, so a filtered body must not shift its neighbours' ids.
-      ...scene.rigidBodies.flatMap((body, ownerId) => rigidBodyHasFixedPose(body) ? [{
+      ...scene.rigidBodies.flatMap((body, ownerId) => rigidBodyHasVisibleFixedPose(body) ? [{
         key: `rigid:${body.id}`,
         primitive: sparseScenePrimitiveForRigidBody(body, ownerId),
       }] : []),

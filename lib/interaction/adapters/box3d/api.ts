@@ -11,6 +11,7 @@ export interface B3Body extends B3Handle {
   applyLinearImpulseToCenter(value: Vec3, wake: boolean): void;
   applyAngularImpulse(value: Vec3, wake: boolean): void;
   getMass(): number; getUserData(): number;
+  getWorldCenterOfMass(): Vec3; getShapeCount(): number;
   createBox(options: Record<string, unknown>): B3Shape;
   createSphere(options: Record<string, unknown>): B3Shape;
   createCapsule(options: Record<string, unknown>): B3Shape;

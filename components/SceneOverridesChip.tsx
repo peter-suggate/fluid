@@ -27,6 +27,7 @@ import { cameraForPreset, getScenePreset } from "../lib/core/scenes";
 import type { UIStoreHook } from "../lib/core/stores/ui-store";
 import { createSceneQueryLayerCache, linkCarriesCamera, replaceQueryStateUrl, serializeQueryState } from "../lib/core/url-state";
 import { ResetButton } from "./ui";
+import { queryLocationUrl, readLocationQuery } from "../lib/core/location-query";
 
 /**
  * One cache for the process, matching `startQueryStateSync`'s own: the scene
@@ -61,10 +62,10 @@ const GROUP_LABELS: Readonly<Record<SceneOverrideGroup, string>> = {
  */
 function reloadWithout(keys: readonly string[], session: PaneSession) {
   replaceQueryStateUrl(undefined, session);
-  const query = new URLSearchParams(window.location.search);
+  const query = new URLSearchParams(readLocationQuery());
   for (const key of keys) query.delete(key);
   const search = query.toString();
-  window.location.replace(`${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`);
+  window.location.replace(queryLocationUrl(window.location.pathname, search, window.location.hash));
 }
 
 /** Retire `b.*` rows: an override leaves the diff, a padlock re-locks, `b` closes. */
@@ -157,7 +158,7 @@ export function SceneOverridesChip() {
 
   if (!mounted) return null;
   const search = serializeQueryState(
-    window.location.search,
+    readLocationQuery(),
     { presetId, scene },
     methodState,
     { ...uiState, camera },

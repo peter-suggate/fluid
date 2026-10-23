@@ -4,7 +4,7 @@ import type { RigidBodyDescription, SceneDescription, Vec3 } from '../../../core
 import { boundingRadius, initializeRigidBody, primitiveVolume, quaternionMultiply, type RigidBodyState } from '../../../core/rigid-body';
 import { cupWallThickness_m } from '../../../core/scene-shape';
 import type { BodySnapshot, EntityRecord, FluidExchange, PhysicsCommand, TickIdentity } from '../../contracts';
-import { assertFiniteSnapshot, shapeDescription, type BodyRecipe, type SensorContact } from '../../runtime/physics';
+import { assertFiniteSnapshot, shapeDescription, fluidBodyParts, type BodyRecipe, type SensorContact } from '../../runtime/physics';
 import { compileSolidChunks, SolidCollisionCache } from '../solid-world/collision';
 import { loadBox3D, type B3Body, type B3Joint, type B3Ray, type B3Shape, type B3World } from './api';
 export interface WorldBody { entityId: string; generation: number; description: RigidBodyDescription; recipe?: BodyRecipe; native: B3Body; tag: number; grounded: boolean; coyote: number; jumpBuffer: number; submerged: number; facing?: number; flipTime?: number; flipped?: boolean; climbing?: string }
@@ -43,7 +43,10 @@ export class Box3DWorld {
     const material = { density: description.density_kg_m3, friction: description.friction, restitution: description.restitution, isSensor: recipe?.sensor ?? false, enableSensorEvents: true, filter: { categoryBits: recipe?.sensor ? 2 : recipe?.character ? 4 : 1, maskBits: 7 } };
     const keep = (shape: B3Shape) => { if (!shape.isValid()) { shape.delete(); throw new Error(`Invalid collision shape for ${entityId}`); } this.shapeEntities.set(shape.getUserData(), entityId); shape.delete(); };
     const d = description.dimensions_m;
-    if (description.shape === 'box') keep(native.createBox({ ...material, halfExtents: { x: d.x / 2, y: d.y / 2, z: d.z / 2 } }));
+    if (recipe?.colliders) {
+      for (const part of recipe.colliders) keep(native.createBox({ ...material, offset: part.offset_m,
+        halfExtents: { x: part.dimensions_m.x/2, y: part.dimensions_m.y/2, z: part.dimensions_m.z/2 } }));
+    } else if (description.shape === 'box') keep(native.createBox({ ...material, halfExtents: { x: d.x / 2, y: d.y / 2, z: d.z / 2 } }));
     else if (description.shape === 'sphere') keep(native.createSphere({ ...material, radius: d.x }));
     else if (description.shape === 'capsule') keep(native.createCapsule({ ...material, radius: d.x, height: d.y }));
     else if (description.shape === 'cylinder') {
@@ -64,8 +67,8 @@ export class Box3DWorld {
   validatePlacement(entityId: string) {
     const body = this.bodies.get(entityId);
     if (!body || body.recipe?.sensor) return;
-    const all = this.renderBodies(), placed = all.filter(b => b.description.id === body.description.id);
-    assertNoSolidOverlap(this.scene, placed, undefined, all);
+    const bindings = this.fluidBindings(false), placed = bindings.filter(b => b.body === body).map(b => b.state);
+    assertNoSolidOverlap(this.scene, placed, undefined, bindings.filter(b => b.body !== body).map(b => b.state));
   }
   /** Prepare a replacement before retiring the old native body. Other bodies,
    * contacts, poses and the world clock survive an entity rebuild. */
@@ -80,7 +83,7 @@ export class Box3DWorld {
       old.recipe=recipe;old.description=description;return;
     }
     const current={...description,position_m:old.native.getPosition(),orientation:old.native.getRotation(),linearVelocity_m_s:old.native.getLinearVelocity(),angularVelocity_rad_s:old.native.getAngularVelocity()};
-    if(!recipe.sensor)assertNoSolidOverlap(this.scene,[initializeRigidBody(current)],undefined,this.renderBodies().filter(b=>b.description.id!==description.id));
+    if(!recipe.sensor)assertNoSolidOverlap(this.scene,fluidBodyParts(initializeRigidBody(current),recipe,false),undefined,this.fluidBindings(false).filter(b=>b.body!==old).map(b=>b.state));
     const previousShapes=new Set(this.shapeEntities.keys());
     this.bodies.delete(entity.id);
     try { this.add(entity.id,current,recipe); }
@@ -241,24 +244,38 @@ export class Box3DWorld {
   }
   applyFluid(exchanges: readonly FluidExchange[], identity: TickIdentity) {
     if (identity.tick <= this.lastFluidTick) throw new Error("Fluid exchange already applied");
-    const validated: { body: WorldBody; packet: FluidExchange }[] = [];
+    const bindings = this.fluidBindings(), byId = new Map(bindings.map(b => [b.state.description.id, b]));
+    const validated: { body: WorldBody; state: RigidBodyState; packet: FluidExchange }[] = [];
     const seen = new Set<string>();
     for (const packet of exchanges) {
       if (packet.generation !== identity.generation || packet.tick !== identity.tick || packet.solidRevision !== identity.solidRevision || seen.has(packet.bodyId)) throw new Error('Stale or duplicate fluid exchange');
       seen.add(packet.bodyId);
-      const body = [...this.bodies.values()].find(b => b.description.id === packet.bodyId);
-      if (!body || body.generation !== packet.bodyGeneration) throw new Error('Fluid exchange references a stale body');
+      const binding = byId.get(packet.bodyId);
+      if (!binding || binding.body.generation !== packet.bodyGeneration) throw new Error('Fluid exchange references a stale body');
       const numbers = [...Object.values(packet.linearImpulse_N_s), ...Object.values(packet.angularImpulse_N_m_s), packet.displacedVolume_m3, ...Object.values(packet.fluidVelocity_m_s)];
       if (!numbers.every(Number.isFinite) || packet.displacedVolume_m3 < 0) throw new Error('Invalid fluid exchange');
-      validated.push({ body, packet });
+      validated.push({ ...binding, packet });
     }
-    const expected = [...this.bodies.values()].filter(b => !b.recipe?.sensor);
-    if (seen.size !== expected.length || expected.some(b => !seen.has(b.description.id))) throw new Error('Incomplete fluid exchange roster');
-    for (const {body, packet} of validated) {
-      body.submerged = Math.min(1, packet.displacedVolume_m3 / Math.max(1e-9, primitiveVolume(body.description.shape, body.description.dimensions_m)));
+    if (seen.size !== bindings.length || bindings.some(b => !seen.has(b.state.description.id))) throw new Error('Incomplete fluid exchange roster');
+    const totals = new Map<WorldBody, { linear: Vec3; angular: Vec3; volume: number; materialVolume: number }>();
+    for (const {body, state, packet} of validated) {
+      let sum = totals.get(body);
+      if (!sum) totals.set(body, sum = { linear: zero(), angular: zero(), volume: 0, materialVolume: 0 });
+      const center = body.native.getWorldCenterOfMass(), p = state.position_m;
+      const r = { x: p.x-center.x, y: p.y-center.y, z: p.z-center.z }, j = packet.linearImpulse_N_s;
+      sum.linear.x += j.x; sum.linear.y += j.y; sum.linear.z += j.z;
+      // GPU pressure torque is about the panel centre. Transfer it to the native COM.
+      sum.angular.x += packet.angularImpulse_N_m_s.x + r.y*j.z-r.z*j.y;
+      sum.angular.y += packet.angularImpulse_N_m_s.y + r.z*j.x-r.x*j.z;
+      sum.angular.z += packet.angularImpulse_N_m_s.z + r.x*j.y-r.y*j.x;
+      sum.volume += packet.displacedVolume_m3;
+      sum.materialVolume += primitiveVolume(state.description.shape, state.description.dimensions_m);
+    }
+    for (const [body, sum] of totals) {
+      body.submerged = Math.min(1, sum.volume / Math.max(1e-9, sum.materialVolume));
       if ((body.recipe?.motion ?? body.description.motion ?? 'dynamic') === 'dynamic') {
-        body.native.applyLinearImpulseToCenter(packet.linearImpulse_N_s, true);
-        body.native.applyAngularImpulse(packet.angularImpulse_N_m_s, true);
+        body.native.applyLinearImpulseToCenter(sum.linear, true);
+        body.native.applyAngularImpulse(sum.angular, true);
       }
     }
     this.lastFluidTick = identity.tick;
@@ -278,11 +295,14 @@ export class Box3DWorld {
       return before !== (pairs.size > 0) ? [{ sensorEntityId, visitorEntityId, entered: pairs.size > 0 }] : [];
     }));
   }
-  renderBodies(): RigidBodyState[] {
-    return [...this.bodies.values()].filter(b => !b.recipe?.sensor).map(body => {
+  private bodyState(body: WorldBody): RigidBodyState {
       const state = initializeRigidBody(body.description);
       state.position_m = body.native.getPosition(); state.orientation = body.native.getRotation();
       state.linearVelocity_m_s = body.native.getLinearVelocity(); state.angularVelocity_rad_s = body.native.getAngularVelocity();
+      const center = body.native.getWorldCenterOfMass(), p = state.position_m, w = state.angularVelocity_rad_s;
+      const r = { x: p.x-center.x, y: p.y-center.y, z: p.z-center.z };
+      state.linearVelocity_m_s = { x: state.linearVelocity_m_s.x+w.y*r.z-w.z*r.y,
+        y: state.linearVelocity_m_s.y+w.z*r.x-w.x*r.z, z: state.linearVelocity_m_s.z+w.x*r.y-w.y*r.x };
       if (body.recipe?.character) {
         const yaw = this.facing(body);
         const pitch = body.flipTime ? (1 - body.flipTime / .8) * Math.PI * 2 : 0;
@@ -290,7 +310,14 @@ export class Box3DWorld {
           { w: Math.cos(pitch / 2), x: Math.sin(pitch / 2), y: 0, z: 0 });
       }
       return state;
-    });
+  }
+  private fluidBindings(boundary = true) {
+    return [...this.bodies.values()].filter(body => !body.recipe?.sensor)
+      .flatMap(body => fluidBodyParts(this.bodyState(body), body.recipe, boundary).map(state => ({ body, state })));
+  }
+  renderBodies(): RigidBodyState[] { return this.fluidBindings().map(b => b.state); }
+  fluidBodyGenerations(): Readonly<Record<string, number>> {
+    return Object.fromEntries(this.fluidBindings().map(b => [b.state.description.id, b.body.generation]));
   }
   snapshots(): BodySnapshot[] {
     return [...this.bodies.values()].map(body => {

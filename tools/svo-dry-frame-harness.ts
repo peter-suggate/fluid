@@ -238,7 +238,7 @@ export function packSvoDryRigidBodies(scene: SceneDescription) {
     bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, robotRenderRadius(body) ?? boundingRadius(body)], offset);
     bodyData.set([half[0], half[1], half[2], robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape)], offset + 4);
     bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
-    bodyData.set([color[0], color[1], color[2], 0], offset + 12);
+    bodyData.set([color[0], color[1], color[2], body.description.renderHidden ? -1 : 0], offset + 12);
   });
   return { data: bodyData, count: bodies.length, bounds: svoDryRigidBounds(bodies) };
 }

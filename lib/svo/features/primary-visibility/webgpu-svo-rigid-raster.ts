@@ -314,6 +314,7 @@ struct RigidRasterVertexOut{
   let bodyCount=min(u32(round(max(rigidUniforms.options.z,0.0))),min(RIGID_RASTER_MAX_BODIES,arrayLength(&rigidBodies)));
   if(instanceIndex>=bodyCount||vertexIndex>=RIGID_RASTER_VERTEX_COUNT){output.position=vec4f(2.0,2.0,0.0,1.0);return output;}
   let body=rigidBodies[instanceIndex];
+  if(body.colorSelected.w<0.0){output.position=vec4f(2.0,2.0,0.0,1.0);return output;}
   let local=rigidProxyCorner(vertexIndex)*rigidProxyExtent(body);
   let world=body.positionRadius.xyz+rigidQrot(body.orientation,local);
   let camera=rigidUniforms.cameraPosition.xyz;let forward=normalize(rigidUniforms.cameraTarget.xyz-camera);

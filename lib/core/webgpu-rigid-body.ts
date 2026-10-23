@@ -545,6 +545,7 @@ fn pickRigidBody(@builtin(global_invocation_id) id: vec3u) {
   for(var index=0u;index<12u;index++){
     if(index>=count){break;}
     let body=bodies[index];
+    if(body.material.w<0.0){continue;}
     let relative=origin-body.positionShape.xyz;
     let projected=dot(relative,direction);
     let discriminant=projected*projected-(dot(relative,relative)-body.dimensions.w*body.dimensions.w);
@@ -641,6 +642,7 @@ export class WebGPURigidBodySystem {
   private commandSignatures: string[] = [];
   private bodyCount = 0;
   private selectedIndex = -1;
+  private hiddenBodies: boolean[] = [];
   private motionGenerations: number[] = [];
   private solidWorldCollisionSource?: GPURigidSolidWorldCollisionSource;
   private proceduralCollisionSource?: GPURigidProceduralCollisionSource;
@@ -829,11 +831,12 @@ export class WebGPURigidBodySystem {
   private uploadBodies(bodies: readonly RigidBodyState[]) {
     const active = bodies.slice(0, GPU_RIGID_BODY_CAPACITY);
     const ids = active.map((body) => body.description.id);
-    const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion]));
+    const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion,body.description.renderHidden,body.description.fluidBoundary]));
     const authored = active.map((body) => JSON.stringify([body.description.position_m,body.description.orientation,body.description.linearVelocity_m_s,body.description.angularVelocity_rad_s]));
     const commands = active.map((body) => JSON.stringify([body.position_m,body.orientation,body.linearVelocity_m_s,body.angularVelocity_rad_s,Boolean(body.held)]));
     if (JSON.stringify([ids,structural,authored,commands]) === JSON.stringify([this.bodyIds,this.structuralSignatures,this.authoredTransformSignatures,this.commandSignatures])) return;
     this.bodyCount = active.length;
+    this.hiddenBodies = active.map(body => Boolean(body.description.renderHidden));
     const stateStorage = new ArrayBuffer(GPU_RIGID_STATE_BYTES), state = new Float32Array(stateStorage), stateWords = new Uint32Array(stateStorage);
     const render = new Float32Array(GPU_RIGID_BODY_CAPACITY * GPU_RIGID_RENDER_FLOATS);
     const immersed = new Float32Array(GPU_RIGID_BODY_CAPACITY);
@@ -861,6 +864,8 @@ export class WebGPURigidBodySystem {
       // fell through to the capsule's radius for anything it did not name, so a
       // cup was packed with a bounding sphere it does not have.
       const radius = boundingRadius(body.description);
+      // The render-only selection lane uses -1 for invisible collision bodies.
+      const selection = body.description.renderHidden ? -1 : index === this.selectedIndex ? 1 : 0;
       // A held body is immovable rather than weightless: zero inverse mass and
       // inertia is what makes `planeContact` return early and `applyImpulse` a
       // no-op, so a wall or a neighbouring crate cannot push the thing in the
@@ -869,10 +874,13 @@ export class WebGPURigidBodySystem {
       const inverseInertia = body.held
         ? { x: 0, y: 0, z: 0 }
         : { x: body.inverseInertiaBody_kg_m2.x*rho, y: body.inverseInertiaBody_kg_m2.y*rho, z: body.inverseInertiaBody_kg_m2.z*rho };
-      state.set([body.position_m.x,body.position_m.y,body.position_m.z,shape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,inverseMass,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,inverseMass,inverseInertia.x,inverseInertia.y,inverseInertia.z,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,rigidMotionLane(body),0],o);
+      // Negative shape codes are fluid-only interior boundaries. Native Box3D
+      // owns their integration; presentation keeps the ordinary shape code.
+      const fluidShape = body.description.fluidBoundary === "interior" ? -shape-1 : shape;
+      state.set([body.position_m.x,body.position_m.y,body.position_m.z,fluidShape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,inverseMass,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,inverseMass,inverseInertia.x,inverseInertia.y,inverseInertia.z,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,rigidMotionLane(body),selection],o);
       stateWords[o+29]=nextMotionGenerations[index];
       const half = sceneShapeRenderHalfExtent_m(body.description.shape, d);
-      render.set([body.position_m.x,body.position_m.y,body.position_m.z,state[o+7],half[0],half[1],half[2],shape,q.w,q.x,q.y,q.z,...palette[shape],0],index*GPU_RIGID_RENDER_FLOATS);
+      render.set([body.position_m.x,body.position_m.y,body.position_m.z,state[o+7],half[0],half[1],half[2],shape,q.w,q.x,q.y,q.z,...palette[shape],selection],index*GPU_RIGID_RENDER_FLOATS);
       const volume = primitiveVolume(body.description.shape, body.description.dimensions_m);
       const waterline = this.scene.container.fillFraction * this.scene.container.height_m;
       if (body.description.shape === "sphere") {
@@ -906,9 +914,9 @@ export class WebGPURigidBodySystem {
           this.device.queue.writeBuffer(this.stateBuffer,(stateOffset+3)*4,state.subarray(stateOffset+3,stateOffset+8));
           this.device.queue.writeBuffer(this.stateBuffer,(stateOffset+15)*4,state.subarray(stateOffset+15,stateOffset+16));
           this.device.queue.writeBuffer(this.stateBuffer,(stateOffset+19)*4,state.subarray(stateOffset+19,stateOffset+24));
-          this.device.queue.writeBuffer(this.stateBuffer,(stateOffset+27)*4,state.subarray(stateOffset+27,stateOffset+31));
+          this.device.queue.writeBuffer(this.stateBuffer,(stateOffset+27)*4,state.subarray(stateOffset+27,stateOffset+32));
           this.device.queue.writeBuffer(this.renderBuffer,(renderOffset+3)*4,render.subarray(renderOffset+3,renderOffset+8));
-          this.device.queue.writeBuffer(this.renderBuffer,(renderOffset+12)*4,render.subarray(renderOffset+12,renderOffset+15));
+          this.device.queue.writeBuffer(this.renderBuffer,(renderOffset+12)*4,render.subarray(renderOffset+12,renderOffset+16));
         }
       });
     }
@@ -916,9 +924,9 @@ export class WebGPURigidBodySystem {
   }
 
   setSelectedIndex(index: number) {
-    const next = index >= 0 && index < this.bodyCount ? index : -1;
+    const next = index >= 0 && index < this.bodyCount && !this.hiddenBodies[index] ? index : -1;
     if (next === this.selectedIndex) return;
-    const write = (bodyIndex: number, selected: number) => { if (bodyIndex < 0) return; this.device.queue.writeBuffer(this.stateBuffer, bodyIndex * GPU_RIGID_STATE_FLOATS * 4 + 31 * 4, new Float32Array([selected])); this.device.queue.writeBuffer(this.renderBuffer, bodyIndex * GPU_RIGID_RENDER_FLOATS * 4 + 15 * 4, new Float32Array([selected])); };
+    const write = (bodyIndex: number, selected: number) => { if (bodyIndex < 0) return; selected = this.hiddenBodies[bodyIndex] ? -1 : selected; this.device.queue.writeBuffer(this.stateBuffer, bodyIndex * GPU_RIGID_STATE_FLOATS * 4 + 31 * 4, new Float32Array([selected])); this.device.queue.writeBuffer(this.renderBuffer, bodyIndex * GPU_RIGID_RENDER_FLOATS * 4 + 15 * 4, new Float32Array([selected])); };
     write(this.selectedIndex,0);write(next,1);this.selectedIndex=next;
   }
 

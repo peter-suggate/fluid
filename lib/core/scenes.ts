@@ -48,6 +48,7 @@ import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWav
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
 import { CHURNING_TANK_SCENE_ID, createChurningTankScene } from "./churning-tank-scene";
+import { NBFLIP_STAIR_CUBE_ID, createNbflipStairCube, nbflipStairCubeCamera } from "./nbflip-stair-cube-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { HERO_GARDEN_BLENDER_ID, createHeroGardenBlenderScene, heroGardenBlenderCamera } from "./hero-garden-blender-scene";
 import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
@@ -1937,6 +1938,15 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: NBFLIP_METHOD_PROFILE,
     build: createNbflipSimpleDam,
     camera: nbflipSimpleDamCamera(),
+  }),
+  defineScene({
+    id: NBFLIP_STAIR_CUBE_ID,
+    name: "NB-FLIP · Stair Cube",
+    blurb: "Clear water sloshes inside an invisible sealed vessel as it tips down three charcoal beams onto a gridded floor. An eight-second reconstruction of Ballistic Simulations’ APIC test.",
+    audience: "explore", shelf: "Tanks", environment: "stage",
+    renderProfile: { fluidSurfaceRenderMode: "shaded", fluidParticleDisplay: "off" },
+    methodProfile: { ...NBFLIP_METHOD_PROFILE, overrides: { ...NBFLIP_METHOD_PROFILE.overrides, rigidCoupling: "on" } },
+    build: createNbflipStairCube, camera: nbflipStairCubeCamera,
   }),
   // Not a paper scene: the same closed box and method, with liquid that starts
   // as nothing and grows. See lib/core/nbflip-water-slide-scene.ts.

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { queryLocationUrl, readLocationQuery } from "../location-query";
 
 import {
   replaceLocationSearch, startHostQueryStateSync, type HostQueryStateSync,
@@ -246,5 +247,40 @@ test("replaceLocationSearch keeps the path and the hash", async () => {
     assert.deepEqual(win.history.entries, ["/scene?v=two#water"]);
     replaceLocationSearch("");
     assert.equal(win.history.entries[1], "/scene#water");
+  });
+});
+
+test("large state hydrates from a shared fragment and follows history and fragment changes", async () => {
+  const value = "animation".repeat(3000);
+  const win = fakeWindow("/scene");
+  win.history.replaceState(null, "", queryLocationUrl("/scene", `v=${value}`));
+  const page = host();
+  await withWindow(win, async () => {
+    const stop = startHostQueryStateSync(page.sync);
+    assert.equal(page.state.value, value);
+    assert.equal(win.location.search, "");
+    page.change(0);
+    await tick();
+    assert.equal(new URLSearchParams(readLocationQuery()).get("v"), value);
+    win.history.replaceState(null, "", queryLocationUrl("/scene", `v=${value}back`));
+    win.fire("popstate");
+    assert.equal(page.state.value, `${value}back`);
+    const hydrationCount = page.hydrated.length;
+    win.fire("hashchange");
+    assert.equal(page.hydrated.length, hydrationCount, 'the second history event must not reset the scene again');
+    win.history.replaceState(null, "", queryLocationUrl("/scene", `v=${value}hash`));
+    win.fire("hashchange");
+    assert.equal(page.state.value, `${value}hash`);
+    page.state.value = "small";
+    page.change(0);
+    await tick();
+    assert.equal(win.location.search, "?v=small");
+    assert.equal(win.location.hash, "");
+    const count = page.hydrated.length;
+    win.location.hash = "#water";
+    win.fire("hashchange");
+    assert.equal(page.hydrated.length, count, 'ordinary anchors do not reset the simulation');
+    stop();
+    assert.equal(win.listeners.get("hashchange")?.size, 0);
   });
 });

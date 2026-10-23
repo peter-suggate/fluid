@@ -1,7 +1,8 @@
 import { markSceneRevision, sceneRevision, type SceneDescription } from '../../core/model';
 import { reuseSolidWorld } from '../../core/solid-world';
 import { interactionCatalog, interactionRuntimes } from '../installed';
-import { shapeDescription } from '../runtime/physics';
+import { shapeDescription, fluidBodyParts } from '../runtime/physics';
+import { initializeRigidBody } from '../../core/rigid-body';
 const compiled = new WeakMap<SceneDescription, SceneDescription>();
 function retainDerivedScene(source: SceneDescription, result: SceneDescription): SceneDescription {
   // Application documents are immutable and versioned. Their retained render
@@ -36,7 +37,7 @@ export function interactionScene(scene: SceneDescription): SceneDescription {
   catch { return retainDerivedScene(scene, { ...scene, rigidBodies: [...scene.rigidBodies] }); }
   const bodies = entities.flatMap(entity => entity.behaviors.flatMap(behavior => {
     const recipe = interactionRuntimes.find(f => f.type === behavior.type)?.body?.(entity);
-    return recipe && !recipe.sensor ? [shapeDescription(entity, recipe)] : [];
+    return recipe && !recipe.sensor ? fluidBodyParts(initializeRigidBody(shapeDescription(entity, recipe)), recipe).map(body => body.description) : [];
   }));
   const result = { ...scene, rigidBodies: [...scene.rigidBodies, ...bodies] };
   return retainDerivedScene(scene, result);

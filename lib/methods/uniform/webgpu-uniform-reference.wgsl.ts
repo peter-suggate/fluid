@@ -1,3 +1,4 @@
+import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { solidOccupancyMaskWGSL } from "../../core/solid-occupancy-mask";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddressWGSL } from "./uniform-lattice-address";
@@ -274,14 +275,15 @@ fn rigidLocalPoint(body:RigidBody,world:vec3f)->vec3f{
   return quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);
 }
 
+${fluidRigidBoundaryWGSL}
 fn rigidShapeTag(body:RigidBody)->i32{return i32(round(body.positionShape.w));}
 
 fn insideRigid(body:RigidBody,world:vec3f)->bool{
-  return rigidShapeInside(rigidShapeTag(body),body.dimensions.xyz,rigidLocalPoint(body,world));
+  return fluidRigidInside(rigidShapeTag(body),body.dimensions.xyz,rigidLocalPoint(body,world));
 }
 
 fn rigidSignedDistance(body:RigidBody,world:vec3f)->f32{
-  return rigidShapeDistance(rigidShapeTag(body),body.dimensions.xyz,rigidLocalPoint(body,world));
+  return fluidRigidDistance(rigidShapeTag(body),body.dimensions.xyz,rigidLocalPoint(body,world));
 }
 
 fn rigidBodyIndexAt(world:vec3f)->i32{

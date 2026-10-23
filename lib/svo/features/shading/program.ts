@@ -4597,6 +4597,7 @@ fn dryDirectionalRayLeavesDomain(maximumDistance:f32)->bool{return !(maximumDist
 
 ${robotShaderLibrary}
 fn bodyHit(ro:vec3f,rd:vec3f,body:BodyGPU)->DryHit {
+  if(body.colorSelected.w<0.0){return missHit();}
   let localOrigin=qinvWxyz(body.orientation,ro-body.positionRadius.xyz);
   let localDirection=qinvWxyz(body.orientation,rd);
   let shape=i32(round(body.halfSizeShape.w)); var t=DRY_MISS; var normal=vec3f(0.0,1.0,0.0);var featureId=SVO_FEATURE_SMOOTH;
@@ -4638,6 +4639,7 @@ fn svoRigidBoundsIntersect(ro:vec3f,rd:vec3f,tMax:f32)->bool{
 }
 
 fn bodyBoundingSphereVisible(ro:vec3f,rd:vec3f,body:BodyGPU,tMin:f32,tMax:f32)->bool{
+  if(body.colorSelected.w<0.0){return false;}
   let offset=body.positionRadius.xyz-ro;let projected=clamp(dot(offset,rd),tMin,tMax);let closest=ro+rd*projected;let radius=max(body.positionRadius.w,0.0)+1e-5;
   return dot(closest-body.positionRadius.xyz,closest-body.positionRadius.xyz)<=radius*radius;
 }

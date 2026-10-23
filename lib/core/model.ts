@@ -78,13 +78,29 @@ export interface RigidBodyDescription {
   motion?: "dynamic" | "static";
   /** Motor-driven static body; the fluid receives its moving boundary velocity. */
   prescribedMotion?: PrescribedOrbitMotion;
+  /** Absolute-time rigid pose track. localOffset_m attaches pieces to one moving pivot. */
+  poseTrack?: RigidPoseTrack;
+  /** Invisible collision geometry: retained by physics, omitted from all shaded views. */
+  renderHidden?: boolean;
+  /** Closed fluid domain: the box interior is fluid space, its exterior solid.
+   * Only an externally integrated enclosure may own this boundary. */
+  fluidBoundary?: "interior";
   /** Presentation skin; physics and fluid displacement still use shape. */
   appearance?: "bub";
 }
 
+export interface RigidPoseTrack {
+  localOffset_m?: Vec3;
+  keyframes: { time_s: number; position_m: Vec3; orientation: Quaternion }[];
+}
+
 /** A motor resists forces like a static body, but its geometry moves each frame. */
 export function rigidBodyHasFixedPose(body: RigidBodyDescription): boolean {
-  return body.motion === "static" && !body.prescribedMotion;
+  return body.motion === "static" && !body.prescribedMotion && !body.poseTrack;
+}
+
+export function rigidBodyHasVisibleFixedPose(body: RigidBodyDescription): boolean {
+  return !body.renderHidden && rigidBodyHasFixedPose(body);
 }
 
 export interface SceneDescription {
@@ -879,6 +895,7 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!Array.isArray(scene.rigidBodies)) errors.push("Rigid bodies must be an array");
   else {
     const ids = new Set<string>();
+    if (scene.rigidBodies.filter(body => body.fluidBoundary === "interior").length > 1) errors.push("A fluid domain may have only one closed interior boundary");
     for (const body of scene.rigidBodies) {
       if (!body.id || ids.has(body.id)) errors.push("Rigid body IDs must be unique and non-empty");
       ids.add(body.id);
@@ -889,6 +906,23 @@ export function validateScene(scene: SceneDescription): string[] {
       if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);
       if (body.friction < 0) errors.push(`Body ${body.id} friction cannot be negative`);
       if (body.motion && !["dynamic", "static"].includes(body.motion)) errors.push(`Unsupported motion type for body ${body.id}`);
+      if (body.fluidBoundary !== undefined && (body.fluidBoundary !== "interior" || body.shape !== "box" || !body.renderHidden || !scene.interaction?.entities.length)) errors.push(`Body ${body.id} interior fluid boundary requires a hidden interactive box`);
+      if (body.renderHidden !== undefined && typeof body.renderHidden !== "boolean") errors.push(`Body ${body.id} renderHidden must be boolean`);
+      if (body.poseTrack !== undefined) {
+        const track = body.poseTrack;
+        if (body.motion !== "static" || body.prescribedMotion) errors.push(`Body ${body.id} pose track needs a static body with no orbit`);
+        if (scene.interaction?.entities.length) errors.push(`Body ${body.id} pose track cannot share interactive physics authority`);
+        if (track.localOffset_m && ![track.localOffset_m.x, track.localOffset_m.y, track.localOffset_m.z].every(Number.isFinite)) errors.push(`Body ${body.id} pose offset must be finite`);
+        if (!Array.isArray(track.keyframes) || track.keyframes.length < 2) errors.push(`Body ${body.id} pose track needs at least two keyframes`);
+        let previous = -1;
+        for (const frame of Array.isArray(track.keyframes) ? track.keyframes : []) {
+          if (!Number.isFinite(frame.time_s) || frame.time_s < 0 || frame.time_s <= previous) errors.push(`Body ${body.id} pose times must be nonnegative and strictly increasing`);
+          previous = frame.time_s;
+          const p = frame.position_m, q = frame.orientation;
+          if (!p || !q || ![p.x, p.y, p.z, q.w, q.x, q.y, q.z].every(Number.isFinite)
+            || Math.abs(Math.hypot(q.w, q.x, q.y, q.z) - 1) > 1e-6) errors.push(`Body ${body.id} pose needs a finite position and unit quaternion`);
+        }
+      }
       const orbit = body.prescribedMotion;
       if (orbit !== undefined) {
         if (orbit.kind !== "orbit" || body.motion !== "static") errors.push(`Body ${body.id} prescribed motion needs a static orbit body`);

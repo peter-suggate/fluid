@@ -5,5 +5,6 @@ import { rigidProp, rigidBody, rigidRuntime } from './features/rigid-prop/defini
 import { sceneSwitch, switchToggle, switchRuntime, staticBody, staticBodyRuntime } from './features/switch/definition';
 import { movingPlatform, platformMotion, platformRuntime } from './features/moving-platform/definition';
 import { triggerVolume, triggerSensor, triggerRuntime } from './features/trigger-volume/definition';
-export const interactionCatalog = createInteractionCatalog({ entities: [character, robot, rigidProp, sceneSwitch, movingPlatform, triggerVolume], behaviors: [characterMotor, rigidBody, staticBody, switchToggle, platformMotion, triggerSensor] });
-export const interactionRuntimes = [characterRuntime, rigidRuntime, staticBodyRuntime, switchRuntime, platformRuntime, triggerRuntime];
+import { sealedVessel, compoundVessel, vesselRuntime } from './features/sealed-vessel/definition';
+export const interactionCatalog = createInteractionCatalog({ entities: [character, robot, rigidProp, sealedVessel, sceneSwitch, movingPlatform, triggerVolume], behaviors: [characterMotor, rigidBody, compoundVessel, staticBody, switchToggle, platformMotion, triggerSensor] });
+export const interactionRuntimes = [characterRuntime, rigidRuntime, vesselRuntime, staticBodyRuntime, switchRuntime, platformRuntime, triggerRuntime];
