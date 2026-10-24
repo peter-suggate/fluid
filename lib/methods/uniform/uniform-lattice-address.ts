@@ -815,6 +815,15 @@ export interface UniformLatticeAddress extends UniformLatticeBox {
   readonly world: boolean;
 }
 
+/** The box of a lattice the page table's window holds: the table entry past
+ * the box on each axis, and the one a coordinate of -1 wraps to, must not be
+ * a box page. Host passes over the box's cells call it first. */
+export function uniformLatticeWindowBox(cells: readonly number[]): UniformLatticeBox {
+  const box = uniformLatticeBox(cells);
+  if (box.pages.some(n => n > UNIFORM_PAGE_WINDOW - 2)) throw new RangeError(`Uniform lattice ${box.cells.join("x")} exceeds ${UNIFORM_PAGE_WINDOW - 2} pages of ${UNIFORM_PAGE_CELLS} cells on an axis`);
+  return box;
+}
+
 /** Window pages below the frame's floor: the entries a coordinate below the
  * box wraps to on y, SOLID under an open top as under a closed one. */
 export const UNIFORM_FRAME_FLOOR_PAGES = 8;
@@ -838,9 +847,7 @@ export const UNIFORM_FRAME_FLOOR_PAGES = 8;
  * for each page of the layer above the box, which the residency closure
  * asks for when the liquid nears the top. */
 export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}, world?: { readonly boxPage: readonly number[] }): UniformLatticeAddress {
-  const box = uniformLatticeBox(cells), [px, py, pz] = box.pages;
-  // The table entry past the box on each axis, and the one a coordinate of -1 wraps to, must not be a box page.
-  if (box.pages.some(n => n > UNIFORM_PAGE_WINDOW - 2)) throw new RangeError(`Uniform lattice ${box.cells.join("x")} exceeds ${UNIFORM_PAGE_WINDOW - 2} pages of ${UNIFORM_PAGE_CELLS} cells on an axis`);
+  const box = uniformLatticeWindowBox(cells), [px, py, pz] = box.pages;
   if (world && !openTop) throw new RangeError("Uniform lattice: an open world has an open top");
   const boxPage: Extent = world ? [world.boxPage[0]!, world.boxPage[1]!, world.boxPage[2]!] : [0, 0, 0];
   // Every page the box covers lies in the window above its floor, and no coordinate of a box page wraps.
