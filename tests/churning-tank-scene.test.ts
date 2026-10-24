@@ -21,7 +21,7 @@ import { uniformTileKey } from "../lib/methods/uniform/uniform-lattice-address";
  * aggregate links, destabilising the tail solve. */
 async function assertReciprocalPressureLevels(device: GPUDevice, solver: unknown) {
   const band = (solver as {mixedFrame: {band: any}}).mixedFrame.band;
-  const [pool, index] = await Promise.all([readMixedBuffer(device, band.pool), readMixedBuffer(device, band.index)]);
+  const [pool, index] = await Promise.all([readMixedBuffer(device, band.poolB), readMixedBuffer(device, band.index)]);
   const words = new Uint32Array(index.buffer), arena = band.arena;
   const record = band.tableWord + arena.layout.record2;
   const pageStart = band.tableWord + arena.layout.pages;
