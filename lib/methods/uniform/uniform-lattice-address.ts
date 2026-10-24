@@ -723,13 +723,12 @@ ${run("WideVertex", 3)}`;
 /** A lattice is a whole number of pages on every axis: its walls, its floor
  * and its top are page faces. A scene's lattice is its container's cells
  * rounded up to one (sceneFluidLatticeDimensions), so any other box is a
- * caller's error and is refused here. */
+ * caller's error and is refused here. A box has no size limit of its own:
+ * the page table's window is the address's (uniformLatticeAddress). */
 export function uniformLatticeBox(cells: readonly number[]): UniformLatticeBox {
   if (cells.length !== 3 || cells.some(n => !Number.isSafeInteger(n) || n < UNIFORM_PAGE_CELLS || n % UNIFORM_PAGE_CELLS !== 0)) throw new RangeError(`Uniform lattice ${cells.join("x")} is refused: a lattice is a whole number of ${UNIFORM_PAGE_CELLS}-cell pages on every axis, so each dimension must be a positive multiple of ${UNIFORM_PAGE_CELLS} cells`);
   const box: Extent = [cells[0]!, cells[1]!, cells[2]!], tiles: Extent = [box[0] / 4, box[1] / 4, box[2] / 4];
   const pages: Extent = [box[0] / UNIFORM_PAGE_CELLS, box[1] / UNIFORM_PAGE_CELLS, box[2] / UNIFORM_PAGE_CELLS];
-  // The table entry past the box on each axis, and the one a coordinate of -1 wraps to, must not be a box page.
-  if (pages.some(n => n > UNIFORM_PAGE_WINDOW - 2)) throw new RangeError(`Uniform lattice ${box.join("x")} exceeds ${UNIFORM_PAGE_WINDOW - 2} pages of ${UNIFORM_PAGE_CELLS} cells on an axis`);
   return {
     cells: box, tiles, boxTiles: tiles[0] * tiles[1] * tiles[2], boxCells: box[0] * box[1] * box[2],
     vertexBox: [box[0] + 1, box[1] + 1, box[2] + 1], wideVertexBox: [tiles[0] + 1, tiles[1] + 1, tiles[2] + 1],
@@ -837,6 +836,8 @@ export const UNIFORM_FRAME_FLOOR_PAGES = 8;
  * asks for when the liquid nears the top. */
 export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}, world?: { readonly boxPage: readonly number[] }): UniformLatticeAddress {
   const box = uniformLatticeBox(cells), [px, py, pz] = box.pages;
+  // The table entry past the box on each axis, and the one a coordinate of -1 wraps to, must not be a box page.
+  if (box.pages.some(n => n > UNIFORM_PAGE_WINDOW - 2)) throw new RangeError(`Uniform lattice ${box.cells.join("x")} exceeds ${UNIFORM_PAGE_WINDOW - 2} pages of ${UNIFORM_PAGE_CELLS} cells on an axis`);
   if (world && !openTop) throw new RangeError("Uniform lattice: an open world has an open top");
   const boxPage: Extent = world ? [world.boxPage[0]!, world.boxPage[1]!, world.boxPage[2]!] : [0, 0, 0];
   // Every page the box covers lies in the window above its floor, and no coordinate of a box page wraps.
