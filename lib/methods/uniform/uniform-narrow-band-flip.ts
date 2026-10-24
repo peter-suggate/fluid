@@ -690,9 +690,11 @@ const NB_ARENA:u32=${this.arenaWord}u;
 const NB_LINKS:u32=${this.binSlots?`${this.binCells}u`:"UM_CELL_KEYS"};const NB_NO_BIN:u32=0xffffffffu;
 ${this.binSlots?`const NB_SLOT_MAP:u32=${this.binCells}u;
 fn nbBinTile(tile:u32)->u32{return 512u*atomicLoad(&bins[NB_SLOT_MAP+ubBrickOfTile(tile)])+64u*((tile&1u)|(((tile>>3u)&1u)<<1u)|(((tile>>6u)&1u)<<2u));}
-fn nbBinCell(cell:u32)->u32{if(atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){return NB_NO_BIN;}return nbBinTile(cell/64u)+cell%64u;}`
+fn nbBinCell(cell:u32)->u32{if(atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){return NB_NO_BIN;}return nbBinTile(cell/64u)+cell%64u;}
+fn nbBinCount(cell:u32)->u32{let bin=nbBinCell(cell);if(bin==NB_NO_BIN){return 0u;}return atomicLoad(&bins[bin]);}`
 :`fn nbBinTile(tile:u32)->u32{return 64u*tile;}
-fn nbBinCell(cell:u32)->u32{return cell;}`}
+fn nbBinCell(cell:u32)->u32{return cell;}
+fn nbBinCount(cell:u32)->u32{return atomicLoad(&bins[cell]);}`}
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
 ${slots?UniformColdFreeze.wgsl(undefined,1,18):UniformColdFreeze.wgsl(this.freeze,1,18)}
@@ -1329,7 +1331,7 @@ fn nbSeedList()->u32{return NB_LINKS+4u*arrayLength(&particles);}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
  if(!nbParticleCellOpen(vec3i(c))){return;}
  let depth=particleDepth(vec3f(c)+0.5);if(depth>0.9||depth< -NB_BAND_DEPTH-0.5){return;}
- if(atomicLoad(&bins[umCellAt(c)])>=nbSeedTarget(depth)){return;}
+ if(nbBinCount(umCellAt(c))>=nbSeedTarget(depth)){return;}
  let slot=atomicAdd(&bins[NB_BAND+3u],1u);
  if(slot>=3u*arrayLength(&particles)){atomicStore(&state[3],7u);return;}
  // Bit 31 a source cell, bit 30 a graded band's deep cell (nbSeedTarget 4).
@@ -1340,7 +1342,7 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
  let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))){return empty;}
  let entry=links[nbSeedList()+slot];if(((entry&0x80000000u)!=0u)!=sourcePass){return empty;}
  let c=umCellCoord(entry&0x3fffffffu);let j=lane%8u;let deep=(entry&0x40000000u)!=0u;
- if(j<atomicLoad(&bins[umCellAt(c)])||j>=select(8u,4u,deep)){return empty;}
+ if(j<nbBinCount(umCellAt(c))||j>=select(8u,4u,deep)){return empty;}
  let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
  let site=seedSite(c,select(j,array<u32,4>(0u,3u,5u,6u)[j&3u],deep),false,activated);if(site.x<0.0){return empty;}
  let heat=nbTargetHeat(vec3f(c)+0.5);
