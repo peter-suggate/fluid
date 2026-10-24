@@ -175,6 +175,38 @@ Remaining losses, located but not fixed:
 - **Dam-break front** 12.8% behind Martin & Moyce (limit 12%), likely the same
   front volume loss.
 
+### Round 4
+
+11. **Full gravity vector and initial velocity** (`92379820`). Forces, the
+    COLD freeze, the band seam head, the particle kick and the region-dynamics
+    hash take g.xyz; the census lift uses the dominant axis of -g.
+    `initialVelocity_m_s` is uploaded at t = 0 (scenes that set it were
+    silently still before: gentle-moving-blob, analytic-motion translation,
+    geometric-translation). New cases tilted-free-fall and translation: the
+    motion is exact (centroid 0.33h, velocity error < 0.007 m/s, no internal
+    KE), the surface is not (drift 5.6% and up to 9.4%). Rotation is not added:
+    a per-cell w x r upload at t = 0 needs the initial 4h layout.
+12. **Symmetric bound on the 4h cubic resample** (`17c7a76d`,
+    `umCubicPhi`). On a cell-plane departure (lattice-axis motion) the 8-corner
+    clamp covered the +1 plane but not the -1, so the cubic's corner-sharpening
+    undershoot survived on one side of a body and was clamped on the other. The
+    bound is now the 27 taps about the vertex nearest the departure. Falling
+    block, volume control off: 3.0% -> 1.7% lost in 10 frames.
+
+What a resample cannot fix (shown with CPU twins):
+
+- A trilinear lattice under-represents off-lattice convex corners by about
+  (L^2/12) times the integral of curvature: an exact SDF sampled at 4h dips up
+  to 4.8% as a block moves off the lattice.
+- Dam-break and mound lose volume at advect from the velocity varying on the
+  4h scale (a CPU replica with the new limiter loses -5.3 cells/slice/step
+  where fill * div * dt predicts +0.6). Keeping moving corners at h, or volume
+  control, are the levers.
+
+Found, not yet fixed: uniform translation makes 10-24 of 32 regions HOT and
+seeds ~29k particles, contrary to Sato's translation-insensitive heat; the
+trigger is not isolated.
+
 ## Results
 
 Full suite, HEAD b26e0e02, default parameters, 1/60 s:
