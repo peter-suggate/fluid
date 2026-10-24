@@ -1184,7 +1184,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // warmResolution "4h": WARM regions' cut tiles stay 4h (the census reads the tiers).
     {const warmSolids=this.mixedFrame.nearSettled.warmResolution==="4h";
      if(this.narrowBandColdCensus==="replay"||warmSolids)this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers,this.narrowBandColdCensus==="replay",warmSolids);}
-    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
+    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership,this.mixedFrame.pagePool);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure});
     // The frame's forces and its samples read the bed-slope lane; the bake is
     // its only writer. Built with the frame whether or not the scene has a
