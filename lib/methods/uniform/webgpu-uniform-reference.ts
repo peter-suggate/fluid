@@ -38,7 +38,7 @@ import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, 
 import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES, UNIFORM_SOURCE_PLUG_OVERLAP_CELLS } from "./uniform-source.wgsl";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
-import { UniformBedSlopeBake } from "./uniform-bed-slope-bake";
+import { UNIFORM_BED_SLOPE_LAYERS, UniformBedSlopeBake, uniformBedSlopeBakeCapacity, uniformBedSlopePartialColumns } from "./uniform-bed-slope-bake";
 import { UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UniformOpenWorldTerrain } from "./uniform-open-world-terrain";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
 import { samplePrescribedRigidBody } from "../../core/prescribed-rigid-motion";
@@ -487,9 +487,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Stable pool publication plus the live GPU frame; no per-frame allocation. */
   private mixedPageSource?: import("../../core/method-view-records").GPUFluidVolumePageSource;
   get volumePageSource() { return this.mixedPageSource; }
-  /** The bed-slope lane of the solid scratch (uniformSolidScratchLayout): `words` u32 from word `baseWord` of `buffer`. The bake writes it; a probe reads it back or zeroes it. */
-  get solidBedSlopeLane(): { buffer: GPUBuffer; baseWord: number; words: number } {
-    return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords };
+  /** The bed-slope lane of the solid scratch (uniformSolidScratchLayout): its directory, `words` u32 from word `baseWord` of `buffer`, and its slots,
+   * all within the buffer's first `extentWords` (uniformSolidBedSlopeAt reads a copy of those). The bake writes it; a probe reads it back or zeroes its directory. */
+  get solidBedSlopeLane(): { buffer: GPUBuffer; baseWord: number; words: number; extentWords: number } {
+    return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords, extentWords: this.solidBedSlopeSlots.word + this.solidBedSlopeSlots.count * 1024 * UNIFORM_BED_SLOPE_LAYERS };
   }
   get physicsFieldsForQA(): {pressure:GPUTexture;gamma:GPUTexture;latticeOrigin:[number,number,number];latticeDimensions:[number,number,number]} {
     return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.live(this.gammaA),
@@ -528,6 +529,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly params: GPUBuffer;
   private readonly solidBedSlopeBaseWord: number;
   private readonly solidBedSlopeWords: number;
+  /** The bed-slope lane's slots (past the procedural boundary) and the bake's window slots, sized by the build's partly solid page columns. */
+  private readonly solidBedSlopeSlots: { word: number; count: number; window: number };
   private readonly reductions: GPUBuffer;
   private readonly conditioningScratch: GPUBuffer;
   /** The page table and block words the native kernels address through: a
@@ -785,14 +788,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.pages, 0, address.seed.tail);
     // The solid mask's image whole (SolidOccupancyMask): the page directory,
-    // the bed-slope lane (two bytes a haloed cell, zero until the frame's bake
-    // writes it at its build: every bed level; see bedSlopeBake), the mixed
+    // the bed-slope lane's directory (zero until the frame's bake places and
+    // writes the lane at its build: every bed level; see bedSlopeBake), the mixed
     // solid library's tile cut map, one word per tile key and all cut until
     // built, and the page slots. uniformSolidScratchLayout has the lane's and
-    // the cut map's offsets, as umBedSlope and umSolidCutMap derive them. Sized
-    // once; a voxel edit uploads the directory words and the slots it rewrote,
-    // so the lane keeps its place and its size.
-    const solidScratch = uniformSolidScratchLayout([nx, ny, nz]);
+    // the cut map's offsets, as umBedSlope and umSolidCutMap derive them. Then
+    // the procedural boundary and the lane's slots, a page column near a
+    // partly solid page each. Sized once; a voxel edit uploads the directory
+    // words and the slots it rewrote, so the lane keeps its place and its size.
+    const solidScratch = uniformSolidScratchLayout();
+    const bedSlopeSlots = uniformBedSlopeBakeCapacity([nx, ny, nz], uniformBedSlopePartialColumns(this.solidMask.words, [nx, ny, nz], address.boxPage.map(p => 32 * p) as [number, number, number]));
     this.solidBedSlopeBaseWord = solidScratch.bedSlopeBaseWord;
     this.solidBedSlopeWords = solidScratch.bedSlopeWords;
     const boundaryField = this.voxelCollision ? undefined : proceduralSolidField(scene), boundaryImage = boundaryField?.pack();
@@ -800,9 +805,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       || boundaryField.source.cellSize_m.some((v,a)=>Math.abs(v-[scene.container.width_m/this.containerCells[0],scene.container.height_m/this.containerCells[1],scene.container.depth_m/this.containerCells[2]][a]!)>1e-9)))
       throw new Error("Procedural boundary lattice changed; regenerate the procedural solid at this resolution");
     this.solidBoundaryCapacity = boundaryImage?.length ?? 0;
+    this.solidBedSlopeSlots = { word: this.solidMask.words.length + this.solidBoundaryCapacity, count: bedSlopeSlots.laneSlots, window: bedSlopeSlots.windowSlots };
     this.activeScratch = device.createBuffer({
       label: "Uniform reference solid page mask, bed-slope lane and tile cut map",
-      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + 2),
+      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + bedSlopeSlots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS + 2),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     // Around the lane: the buffer's zeros are the lane's until the bake, and
@@ -976,6 +982,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       Object.entries(this.symmetryStageAuditFields).map(([name,field])=>[name,field]),
     )) as NonNullable<WebGPUUniformReferenceSolver["symmetryStageAuditTextures"]>;
     this.initializeVolumeAndTerrain();
+  }
+
+  /** The page columns of the box with a partly solid page in the host's mask: what the bed-slope bake places its lane and window by (plan). */
+  private bedSlopePartialColumns(): Uint8Array {
+    return uniformBedSlopePartialColumns(this.solidMask.words, [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz], this.address.boxPage.map(p => 32 * p) as [number, number, number]);
   }
 
   /** Bound staging just as field-page initialization does. Native Dawn aborts
@@ -1183,7 +1194,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The frame's forces and its samples read the bed-slope lane; the bake is
     // its only writer. Built with the frame whether or not the scene has a
     // voxel yet: an edit may add the first.
-    const bedSlopeBake=new UniformBedSlopeBake(this.device,this.activeScratch,{size:[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz],laneBaseWord:this.solidBedSlopeBaseWord,origin:this.frame.boxCell});
+    const bedSlopeBake=new UniformBedSlopeBake(this.device,this.activeScratch,{size:[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz],laneBaseWord:this.solidBedSlopeBaseWord,origin:this.frame.boxCell,
+      laneSlotBaseWord:this.solidBedSlopeSlots.word,laneSlots:this.solidBedSlopeSlots.count,windowSlots:this.solidBedSlopeSlots.window});
     // One concurrent compile: serial stages left a first load waiting on
     // each uncached pipeline in turn.
     const dynamic=this.mixedDynamic,builder=this.mixedBuilder,mixedBodies=this.mixedBodies;
@@ -1193,7 +1205,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // it. An edit taken up while the pipelines compiled is in that mask; one
     // from here on re-bakes around itself (applySceneUniforms).
     const bedSlope=this.device.createCommandEncoder({label:"Uniform bed-slope bake"});
-    bedSlopeBake.encode(bedSlope);
+    bedSlopeBake.plan(this.bedSlopePartialColumns());bedSlopeBake.encode(bedSlope);
     // An open world's ground, before the first layout builds the solid record and cut map from it.
     if(this.openWorldTerrain){const f=this.frame;this.openWorldTerrain.encodeBake(bedSlope,this.scene.terrain!,[f.origin_m[0],f.origin_m[2]],[f.cellSize_m[0],f.cellSize_m[2]],f.cellSize_m[1]);
       this.executionInfo.allocatedBytes+=this.openWorldTerrain.allocatedBytes;}
@@ -2948,10 +2960,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The directory words and the page slots the edit rewrote; the buffer is never resized.
     if (dirty) for (const range of dirty) this.device.queue.writeBuffer(this.activeScratch, range.firstWord * 4, this.solidMask.words, range.firstWord, range.wordCount);
     // The bed-slope lane again around the edit, from the mask just uploaded:
-    // one region bake to a submit.
+    // one region bake to a submit, or a full one where the edit moved the lane's page columns.
     if (dirty && this.bedSlopeBake && x1 >= x0) {
       const encoder = this.device.createCommandEncoder({ label: "Uniform bed-slope re-bake" });
-      this.bedSlopeBake.encodeRegion(encoder, { minimum: [x0, -1, z0], maximumExclusive: [x1 + 1, this.executionInfo.ny + 1, z1 + 1] });
+      if (this.bedSlopeBake.plan(this.bedSlopePartialColumns())) this.bedSlopeBake.encode(encoder);
+      else this.bedSlopeBake.encodeRegion(encoder, { minimum: [x0, -1, z0], maximumExclusive: [x1 + 1, this.executionInfo.ny + 1, z1 + 1] });
       this.device.queue.submit([encoder.finish()]); this.bedSlopeBake.submitted();
     }
     // The plug is a walk over a whole face of the lattice and a function of
