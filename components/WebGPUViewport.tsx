@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState , useMemo} from "react";
+import { createBrowserFrameBenchmark } from "../lib/core/browser-frame-benchmark";
 import { useVoxelToolGesture } from "./useVoxelToolGesture";
 import type { PixelTraceConfig, PixelTraceStatus } from "../lib/core/webgpu-renderer";
 import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
@@ -984,6 +985,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     });
     rendererRef.current = renderer;
     let frame = 0;
+    const frameBenchmark = createBrowserFrameBenchmark();
     let alive = true;
     let activeBinding = renderBinding;
     const frameRate = new SmoothedFrameRate(5);
@@ -1079,9 +1081,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         // browser animation frame; the renderer's double buffer bounds latency
         // without changing cadence for camera motion or simulation state.
         let metrics;
+        const drawStarted = frameBenchmark ? performance.now() : 0;
         try {
           metrics = renderer.draw(
-            simulation.time(), presentationScene, ui.camera, state.bodies, ui.selectedBodyId,
+            simulation.time(), presentationScene, frameBenchmark?.camera(ui.camera) ?? ui.camera, state.bodies, ui.selectedBodyId,
             {
               methodId: method.methodId,
               quality: method.quality,
@@ -1128,6 +1131,16 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
           return;
         }
         activeBinding.publishBodyPoses(renderer);
+        frameBenchmark?.sample(renderer.completedPresentationCount, performance.now() - drawStarted, metrics, renderer.presentationResolution, {
+          scene: sceneState.presetId, runState: runtime.runState, camera: ui.camera,
+          shadows: ui.svoShadowsEnabled, ao: ui.svoAmbientOcclusionEnabled, gi: ui.svoGlobalIlluminationEnabled,
+          lighting: ui.svoConeTracingMode, primary: ui.svoPrimaryTraversal, water: ui.fluidSurfaceRenderMode,
+          disabledStages: ui.disabledRenderStages, tuning: ui.svoRenderTuning,
+          effectiveRenderer: state.effectiveRendererStatus,
+        }, state.effectiveRendererStatus.state === "active"
+          && (ui.svoPrimaryTraversal !== "mesh" || state.effectiveRendererStatus.surfaceMesh?.state === "ready")
+          && state.effectiveRendererStatus.lightingVisibility?.state === ui.svoConeTracingMode
+          && state.gpuStatus.state === "ready");
         activeBinding.publishPixelTrace(renderer);
         simulation.recordFrame(metrics, renderer.presentationResolution, paneId);
         activeBinding.publishFrameRate(frameRate.sampleCompleted(renderer.completedPresentationCount, performance.now()));
@@ -1174,6 +1187,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const cleanupImmediately = (): Promise<void> => {
       if (cleanupCompleted) return stopPromise!;
       cleanupCompleted = true;
+      frameBenchmark?.dispose();
       if (cleanupTimer !== undefined) window.clearTimeout(cleanupTimer);
       cleanupTimer = undefined;
       alive = false;

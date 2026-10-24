@@ -1,3 +1,4 @@
+import { rasterVisibilityLayers } from "../features/lighting-visibility/raster-light-visibility";
 import { planImportedSurfaceGroups, type ImportedSurfaceGroup } from "../features/primary-visibility/imported-surface-groups";
 import { importedSurfaceShadowInstances, type ImportedSurfaceShadowGroup } from "../features/lighting-visibility/imported-surface-shadow";
 import { MESH_ASSETS, meshAssetVolume } from "../../core/imported-assets/asset-library";
@@ -1003,6 +1004,7 @@ interface SvoDrySplitPipelineBundle {
   readonly primarySeamClosure: GPURenderPipeline;
   readonly lighting: GPURenderPipeline;
   readonly optimizedLighting?: GPURenderPipeline;
+  readonly precomputedLighting?: GPURenderPipeline;
   readonly reconstructedLighting?: GPURenderPipeline;
   /** Complement of `lighting`: the pixels primary visibility left as a miss. */
   readonly skyLighting: GPURenderPipeline;
@@ -1069,6 +1071,7 @@ export class SparseVoxelDrySceneRenderer {
   private splitRasterRigidVisibilityPipeline?: GPURenderPipeline;
   private primarySeamClosurePipeline?: GPURenderPipeline;
   private splitOptimizedLightingPipeline?: GPURenderPipeline;
+  private splitPrecomputedLightingPipeline?: GPURenderPipeline;
   private splitLightingPipeline?: GPURenderPipeline;
   private splitReconstructedLightingPipeline?: GPURenderPipeline;
   private splitSkyLightingPipeline?: GPURenderPipeline;
@@ -1206,7 +1209,7 @@ export class SparseVoxelDrySceneRenderer {
   private deferredLightingPass?: GPURenderPassDescriptor;
   private encodeResult?: { readonly encoded: true; readonly sampledTargetView: GPUTextureView };
   private static readonly readyBundleStatus = Object.freeze({ state: "ready" } as const);
-  private readonly rasterLightingCapability = { coneMode: "", globalIllumination: false };
+  private readonly rasterLightingCapability = { coneMode: "", globalIllumination: false, precomputedVisibility: false };
   private rasterAoTrace?: RenderFrameSeam<"svo">;
   private completeRasterShadows?: () => void;
   private completeRasterAo?: () => void;
@@ -1820,6 +1823,7 @@ export class SparseVoxelDrySceneRenderer {
     this.primarySeamClosurePipeline = bundle.primarySeamClosure;
     this.splitLightingPipeline = bundle.lighting;
     this.splitOptimizedLightingPipeline = bundle.optimizedLighting;
+    this.splitPrecomputedLightingPipeline = bundle.precomputedLighting;
     this.splitReconstructedLightingPipeline = bundle.reconstructedLighting;
     this.splitSkyLightingPipeline = bundle.skyLighting;
     this.conePrepassResetPipeline = bundle.prepassReset;
@@ -4129,19 +4133,24 @@ export class SparseVoxelDrySceneRenderer {
       // shares the generic bundle; unsupported live publications switch back in
       // the same draw, with no asynchronous capability transition.
       let optimizedLighting: GPURenderPipeline | undefined;
+      let precomputedLighting: GPURenderPipeline | undefined;
       if ((scale !== 1 || this.experiments.rasterAo) && !globalIlluminationCapable && this.experiments.specializedDeferredLighting) {
-        const optimizedModule = await checkedModule(this.device, "Specialized opaque deferred lighting",
-          createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split",
-            this.screenSpaceTerminationPixels, false, false,
-            this.coneFanout, { ...shaderExperiments, opaqueConeLighting: !this.experiments.rasterAo, opaqueRasterLighting: this.experiments.rasterAo }));
-        optimizedLighting = await this.device.createRenderPipelineAsync({
-          label: "Specialized opaque deferred lighting",
-          layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
-          vertex: { module: vertexModule, entryPoint: "vertexMain" },
-          fragment: { module: optimizedModule, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
-          primitive: { topology: "triangle-list" },
-          depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: false, depthCompare: "less" },
-        });
+        for (const precomputedRasterVisibility of this.experiments.rasterAo ? [false, true] : [false]) {
+          const optimizedModule = await checkedModule(this.device, "Specialized opaque deferred lighting",
+            createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split",
+              this.screenSpaceTerminationPixels, false, false,
+              this.coneFanout, { ...shaderExperiments, opaqueConeLighting: !this.experiments.rasterAo, opaqueRasterLighting: this.experiments.rasterAo, precomputedRasterVisibility }));
+          const pipeline = await this.device.createRenderPipelineAsync({
+            label: "Specialized opaque deferred lighting",
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
+            vertex: { module: vertexModule, entryPoint: "vertexMain" },
+            fragment: { module: optimizedModule, entryPoint: "dryLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
+            primitive: { topology: "triangle-list" },
+            depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: false, depthCompare: "less" },
+          });
+          if (precomputedRasterVisibility) precomputedLighting = pipeline;
+          else optimizedLighting = pipeline;
+        }
       }
       // The key pass shares the lighting module so it derives each pixel's cell
       // with the very functions the lookup uses.
@@ -4172,7 +4181,7 @@ export class SparseVoxelDrySceneRenderer {
         depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
       }) : undefined;
       const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!, this.experiments.nativeAssetShadows !== false);
-      const bundle = { rasterAo, importedSurface, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      const bundle = { rasterAo, importedSurface, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, precomputedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
@@ -5257,6 +5266,7 @@ export class SparseVoxelDrySceneRenderer {
     this.lastPickingTarget = undefined;
     this.worldGiCacheDirty = true;
     this.latticeGeneration = (this.latticeGeneration + 1) >>> 0;
+    this.rasterAo?.invalidateVisibility();
     const oldStructural = this.source?.structural;
     const newStructural = source?.structural;
     const structuralChanged = oldStructural?.structure.buffer !== newStructural?.structure.buffer
@@ -5474,6 +5484,7 @@ export class SparseVoxelDrySceneRenderer {
     }
     // A publication that reaches here differs from the last in something the
     // cones read: a solid, a light, a light count or a published record.
+    this.rasterAo?.invalidateVisibility();
     this.worldGiCacheDirty = true;
     this.latticeGeneration = (this.latticeGeneration + 1) >>> 0;
     this.primitiveDirtyBounds = [];
@@ -5728,6 +5739,27 @@ export class SparseVoxelDrySceneRenderer {
     return { state: "enabled" };
   }
 
+  private visibilityView?: Float32Array;
+  private visibilityViewRevision = 0;
+  private visibilityInputsRevision = 0;
+  private visibilityViewValid = false;
+  /** The caller supplies the entire view uniform, or withdraws reuse. This is
+   * opt-in: benchmarks and other consumers without a key always render fresh. */
+  setRasterVisibilityView(view:Float32Array|undefined):void {
+    if(!view){this.visibilityViewValid=false;this.rasterAo?.invalidateVisibility();return;}
+    if(!this.visibilityView||this.visibilityView.length!==view.length){this.visibilityView=new Float32Array(view);this.visibilityViewRevision++;}
+    else if(!view.every((value,index)=>Object.is(value,this.visibilityView![index]))){this.visibilityView.set(view);this.visibilityViewRevision++;}
+    this.visibilityViewValid=true;
+  }
+  private rasterLightVisibilityRequested = true;
+  /** Diagnostic reference switch: scene, quality and light budget are unchanged. */
+  setRasterVisibilityQueueEnabled(enabled:boolean):void { if(this.rasterAo)this.rasterAo.visibilityQueueEnabled=enabled; }
+  setRasterVisibilityTilingEnabled(enabled: boolean): void { this.rasterAo?.setVisibilityTilingEnabled(enabled); }
+  setRasterLightVisibilityEnabled(enabled: boolean): void {
+    this.rasterLightVisibilityRequested = enabled;
+    this.rasterAo?.setVisibilityEnabled(enabled && this.scene?.opaqueSurfaceOnly === true && this.lightingOptions.globalIlluminationEnabled !== true);
+  }
+
   /** Update bounded shader work budgets without rebuilding scene resources. */
   setRenderTuning(tuning: SvoRenderTuning, retainSurfaceMeshing = false): void {
     // Already-normalized live controls are overwhelmingly unchanged. Compare
@@ -5829,6 +5861,8 @@ export class SparseVoxelDrySceneRenderer {
 
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
     const structural = source.structural!;
+    this.rasterAo?.setVisibilityEnabled(this.rasterLightVisibilityRequested && scene.opaqueSurfaceOnly === true && this.lightingOptions.globalIlluminationEnabled !== true);
+    this.rasterAo?.setVisibilityLayers(rasterVisibilityLayers(scene.lightRecords, this.renderTuning.maximumShadedLights, Math.max(this.renderTuning.stableAreaLightSamples, this.renderTuning.movingAreaLightSamples), this.lightingOptions.globalIlluminationEnabled === true));
     this.rasterAo?.setCoarseAoStrength(this.renderTuning.rasterCoarseAoStrength);
     this.rasterAo?.setAoContrast(scene.rasterAoContrast ?? 1);
     this.rasterAo?.update(structural.domain.worldOrigin_m,
@@ -5969,6 +6003,7 @@ export class SparseVoxelDrySceneRenderer {
     if (this.latticeParamsChanged(this.paramsWords, words)) this.latticeGeneration = (this.latticeGeneration + 1) >>> 0;
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
     this.paramsWords = Uint32Array.from(words);
+    this.visibilityInputsRevision++;
   }
 
   /**
@@ -6907,7 +6942,9 @@ export class SparseVoxelDrySceneRenderer {
           this.splitLightingBindGroup!, this.surfaceMeshState!, this.surfaceMeshArena!.size / 32, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
           this.completeRasterShadows, this.completeRasterAo,
           this.experiments.rasterShadowPassReuse !== false && this.surfaceMeshStatus?.state === "ready"
-            ? this.shadowReuseKey : undefined, this.drawImportedShadows);
+            ? this.shadowReuseKey : undefined, this.drawImportedShadows,
+          this.visibilityViewValid && !this.experiments.waterShadows && this.disabledStages.size===0 && !this.rigidBodiesRequested()
+            ? `${this.visibilityViewRevision}:${this.visibilityInputsRevision}` : undefined);
         this.rasterAoTrace = undefined;
       }
 
@@ -7097,7 +7134,8 @@ export class SparseVoxelDrySceneRenderer {
         }
         this.rasterLightingCapability.coneMode = this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode;
         this.rasterLightingCapability.globalIllumination = this.lightingOptions.globalIlluminationEnabled === true;
-        lighting.setPipeline(this.splitOptimizedLightingPipeline && (canUseOpaqueRasterLighting(this.scene, this.rasterLightingCapability) || usePrepass && canUseOpaqueConeLighting(this.scene, {
+        this.rasterLightingCapability.precomputedVisibility = this.rasterAo?.visibilityEnabled === true;
+        lighting.setPipeline(this.splitPrecomputedLightingPipeline && this.rasterLightingCapability.precomputedVisibility && canUseOpaqueRasterLighting(this.scene, this.rasterLightingCapability) ? this.splitPrecomputedLightingPipeline : this.splitOptimizedLightingPipeline && (canUseOpaqueRasterLighting(this.scene, this.rasterLightingCapability) || usePrepass && canUseOpaqueConeLighting(this.scene, {
             coneMode: this.lightingOptions.coneTracingMode ?? DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
             hierarchyReady: this.derivedLightingReady(),
             globalIllumination: this.lightingOptions.globalIlluminationEnabled === true,
@@ -7266,6 +7304,7 @@ export class SparseVoxelDrySceneRenderer {
     this.primarySeamClosurePipeline = undefined;
     this.splitLightingPipeline = undefined;
     this.splitOptimizedLightingPipeline = undefined;
+    this.splitPrecomputedLightingPipeline = undefined;
     this.splitReconstructedLightingPipeline = undefined;
     this.splitSkyLightingPipeline = undefined;
     this.rasterRigidPipeline = undefined;
