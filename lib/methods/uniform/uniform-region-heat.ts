@@ -30,6 +30,9 @@ import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
  * two-frame HOT/WARM holds, matching the host receipt latency: a WARM rise
  * cannot renew a HOT deadline. Body/source/detail heat decays over 0.5 s;
  * non-reader regions discard heat once the source/body trigger is gone.
+ * Unknown evidence (no certificate yet) is a held one-frame HOT, not heat.
+ * Budget exhaustion thaws a COLD region; it refreezes only once its current
+ * omission rate fits the budget over that 0.5 s horizon (hysteresis).
  * In motion mode the older absolute-speed and velocity-span policy remains
  * available for comparison.
  *
@@ -242,7 +245,7 @@ export class UniformRegionHeat {
     const module=uniformDetailModule(this.device,{label:"Uniform region work heat",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> tiers:array<atomic<u32>>;
 @group(1) @binding(1) var<storage,read_write> state:array<u32>;
-struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,pad0:u32,pad1:u32,pad2:u32}
+struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,horizon:f32,pad1:u32,pad2:u32}
 @group(1) @binding(2) var<uniform> rh:RHParams;
 @group(1) @binding(3) var<storage,read> regionVelocity:array<u32>;
 @group(1) @binding(4) var<storage,read> dynamics:array<u32>;
@@ -316,8 +319,11 @@ var<workgroup> rhFine:atomic<u32>;
    ${s.bodyRegions?`if((bodyMask[region]&0x10000u)!=0u||(bodyMask[region]&0xffu)<=${UNIFORM_BODY_GEOMETRY_REACH}u){trigger|=8u;}`:""}
    ${s.sourceParams?`{let centre=16.0*vec3f(c)+vec3f(8.0);let reach=(8.0*1.7320508+4.0)/rh.hInverse;if(umSourceuvSourcePhi(centre,1e30)<reach){trigger|=16u;}}`:""}
    // A region that ran non-COLD last frame was refreshed then.
-   var displacement=bitcast<f32>(state[at+1u]);if(atomicLoad(&tiers[region])!=0u){displacement=0.0;}
+   let refreshed=atomicLoad(&tiers[region])!=0u;
+   var displacement=bitcast<f32>(state[at+1u]);if(refreshed){displacement=0.0;}
    var speed=0.0;for(var k=0u;k<6u;k++){speed=max(speed,rhSpeed(regionVelocity[6u*region+k]));}
+   // The detail trigger's excess over its budget (1: at the budget).
+   var detail=2.0;
    // Detail the cheap transport tiers do not certify: the velocity span
    // (umSurfaceTransport's velocityError against its error budget) or a
    // step's travel beyond half a cell.
@@ -325,12 +331,17 @@ var<workgroup> rhFine:atomic<u32>;
     for(var axis=0u;axis<3u;axis++){let hi=regionVelocity[6u*region+axis];let lo=regionVelocity[6u*region+3u+axis];
      if(hi!=0u&&lo!=0u&&hi!=0xffffffffu&&lo!=0xffffffffu){span+=max(0.0,rhSigned(hi)+rhSigned(lo));}}
     ${error&&s.updateErrors?"":"if(0.5*rh.dt*span*rh.hInverse>RH_SPAN_H||rh.dt*speed*rh.hInverse>0.5){trigger|=128u;}"}
-    ${error?(s.updateErrors?`let error=bitcast<f32>(atomicLoad(&rhError));state[at+13u]=bitcast<u32>(rh.dt*error*rh.hInverse);if(!(error<RH_UNKNOWN)||rh.dt*error*rh.hInverse>${UNIFORM_TILE_UPDATE_BUDGET_H}||rh.dt*speed*rh.hInverse>2.0){trigger|=2048u;}`:"if(0.5*rh.dt*span*rh.hInverse>4.0*RH_SPAN_H||rh.dt*speed*rh.hInverse>2.0){trigger|=2048u;}"):""}}
+    ${error?(s.updateErrors?`let error=bitcast<f32>(atomicLoad(&rhError));state[at+13u]=bitcast<u32>(rh.dt*error*rh.hInverse);
+    // No certificate yet (the first frame, a recycled tile): HOT while it
+    // stands and its holds, but no heat. Heat retires measured detail; an
+    // absent measurement seeded 0.5 s of HOT/WARM in a pool at rest.
+    if(!(error<RH_UNKNOWN)){trigger|=32u;}else{detail=max(rh.dt*error*rh.hInverse/${UNIFORM_TILE_UPDATE_BUDGET_H},0.5*rh.dt*speed*rh.hInverse);if(detail>1.0){trigger|=2048u;}}`:"if(0.5*rh.dt*span*rh.hInverse>4.0*RH_SPAN_H||rh.dt*speed*rh.hInverse>2.0){trigger|=2048u;}"):""}}
    var dp=bitcast<f32>(dynamics[${UNIFORM_REGION_DYNAMICS_WORDS}u*region+${UNIFORM_REGION_DYNAMICS.pressureDelta}u]);
    // After a one-frame trigger the pressure change has no baseline.
    if((state[at+7u]&RH_ONE_FRAME)!=0u){dp=0.0;}
    if(!(speed<=RH_UNKNOWN)||!(dp<=RH_UNKNOWN)){${error&&s.updateErrors?"if(atomicLoad(&rhRelevant)!=0u)":""}{trigger|=32u;}}
    else{
+    var projected=0.0;
     ${error&&s.updateErrors?`
     let normal=bitcast<f32>(atomicLoad(&rhNormal));let acceleration=bitcast<f32>(atomicLoad(&rhAcceleration));
     state[at+14u]=atomicLoad(&rhRelevant);state[at+15u]=bitcast<u32>(displacement);
@@ -342,8 +353,13 @@ var<workgroup> rhFine:atomic<u32>;
      let pressure=rh.pressure*dp;let frozen=rh.dt*rhFrozenErrorSpeed(submerged,rhColdSpeed(region),umColdError(region))*rh.hInverse;
      state[at+9u]=bitcast<u32>(surface);state[at+10u]=bitcast<u32>(momentum);state[at+11u]=bitcast<u32>(pressure);state[at+12u]=bitcast<u32>(frozen);
      displacement+=surface+momentum+pressure+frozen;
+     // Hysteresis: a refreshed region refreezes only when its omission
+     // would stay within budget for the heat's retirement horizon (N
+     // frames; the momentum term grows as N^2/2 from rest). Otherwise a
+     // smooth wave thaws, refreshes, refreezes and thaws every few frames.
+     if(refreshed){let n=rh.horizon;projected=n*(surface+pressure+frozen)+0.5*n*n*momentum;}
     }`:"displacement+=rh.dt*(speed+rhColdSpeed(region))*rh.hInverse+rh.pressure*dp;"}
-    if(displacement>${error?"rhFreezeBudget(submerged,fine)":"0.002"}){trigger|=64u;}
+    if(max(displacement,projected)>${error?"rhFreezeBudget(submerged,fine)":"0.002"}){trigger|=64u;}
    }
    // A rise the host does not cause holds RH_HOLD_FRAMES frames more
    // (bit 9 a held HOT, bit 10 a held WARM): the host's evidence lags
@@ -351,7 +367,10 @@ var<workgroup> rhFine:atomic<u32>;
    {${uniformTierHoldWGSL}}
    if(trigger!=0u){displacement=0.0;}
    var value=max(0.0,bitcast<f32>(state[at])-rh.cooling*rh.dt);
-   if((trigger&~(RH_ONE_FRAME|RH_WARM_FRAME))!=0u){value=2.0;}
+   if((trigger&24u)!=0u){value=2.0;}
+   // Detail heat grows with its excess, as Sato et al. 2018 Eq. (5)
+   // (A_u = 5): a marginal crossing holds HOT a few frames, not 0.25 s.
+   if((trigger&2048u)!=0u){value=max(value,min(2.0,1.0+5.0*(detail-1.0)));}
    ${s.particleHeat?"value=max(value,bitcast<f32>(atomicLoad(&rhParticle)));":""}
    ${error&&s.updateErrors?"if(atomicLoad(&rhRelevant)==0u&&(trigger&24u)==0u){value=0.0;}":""}
    state[at]=bitcast<u32>(value);state[at+1u]=bitcast<u32>(displacement);state[at+7u]=trigger|select(0u,4096u,atomicLoad(&rhRelevant)!=0u)|select(0u,8192u,submerged)|select(0u,16384u,fine);
@@ -408,7 +427,7 @@ var<workgroup> rhFine:atomic<u32>;
   encode(encoder:GPUCommandEncoder,dt:number,density:number):void{
     if(!this.heatPipeline||!this.spreadPipeline||!this.group)throw new Error("Region heat is not initialized");
     const generation=this.generation();const force=this.forced||generation!==this.seenGeneration;this.forced=false;this.seenGeneration=generation;
-    const w=this.words;w[0]=dt;w[1]=2/UNIFORM_REGION_HEAT_FADE_SECONDS;w[2]=dt*dt*this.hInverse*this.hInverse/Math.max(density,1e-30);w[3]=this.hInverse;this.bits[4]=+force;
+    const w=this.words;w[0]=dt;w[1]=2/UNIFORM_REGION_HEAT_FADE_SECONDS;w[2]=dt*dt*this.hInverse*this.hInverse/Math.max(density,1e-30);w[3]=this.hInverse;this.bits[4]=+force;w[5]=UNIFORM_REGION_HEAT_FADE_SECONDS/Math.max(dt,1e-30);
     this.device.queue.writeBuffer(this.params,0,this.words);
     encoder.clearBuffer(this.tiers,4*this.regions,4*UNIFORM_REGION_HEAT_HEADER_WORDS);
     encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);
