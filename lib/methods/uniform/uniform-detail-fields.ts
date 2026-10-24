@@ -8,6 +8,8 @@ import { uniformSceneConstantsWGSL } from "./uniform-scene-constants";
  * read the base at canonical texels and keep both homes current inside the
  * detail ring. */
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import type { UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_LIVE_KEY_GROUPS, uniformLiveListsWGSL } from "./uniform-live-lists";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformMixedDetailViolationWord, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
@@ -23,10 +25,11 @@ const MIN_PATCH_EDGE=16;
 const HEADER=UNIFORM_DETAIL_HEADER_WORDS;
 /** Sticky bits in umSupport[UM_DETAIL_VIOLATION], one per class. */
 export const UNIFORM_DETAIL_VIOLATION={cell:1,face:2,vertex:4,atlas:8} as const;
-/** Words the topology tail reserves: the table for the smallest patch edge,
- * then the locator (the table's first word index: a consumer that does not
- * know the lattice finds the table from the buffer's last word). */
-export function uniformDetailTableWords(dims:readonly number[]):number{return HEADER+dims.reduce((n,d)=>n*Math.ceil(d/MIN_PATCH_EDGE),1)+1;}
+/** Words the topology tail reserves: the table (table(): the header and the
+ * one directory word of packed storage, whatever the lattice), then the
+ * locator (the table's first word index: a consumer that does not know the
+ * lattice finds the table from the buffer's last word). */
+export function uniformDetailTableWords():number{return HEADER+2;}
 
 export interface UniformDetailClassLayout{
  /** Atlas slot pitch: P, or P+1 for packed vertex slots. */
@@ -429,10 +432,11 @@ export class UniformDetailStorage{
  /** Whole-field upload of logical values (tight, x fastest, vec4 for
   * faces), as a raw texture would hold them: resident patches take every
   * texel, a non-resident tile its canonical texels' values. Packed uploads
-  * before the first layout stay pending: install() deposits them. */
- upload(texture:GPUTexture,values:Float32Array):void{
+  * before the first layout stay pending: install() deposits them. No values:
+  * the field's empty value throughout, with no lattice-sized array. */
+ upload(texture:GPUTexture,values?:Float32Array):void{
   const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1;this.kindOf(texture);
-  if(values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
+  if(values&&values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
 
   if(!this.installed){this.pending.set(texture,values);return;}
   this.write(texture,this.image(texture,values));
@@ -443,7 +447,7 @@ export class UniformDetailStorage{
  /** Domain: the field's h generation is resident, its base a second texture. */
  private twinned(texture:GPUTexture):boolean{return this.resident&&!this.pinned.has(fields.get(texture)!.handle);}
  private installed=false;
- private readonly pending=new Map<GPUTexture,Float32Array>();
+ private readonly pending=new Map<GPUTexture,Float32Array|undefined>();
  get settled():boolean{return this.installed;}
  private image(texture:GPUTexture,values?:Float32Array,base=false):Float32Array<ArrayBuffer>{
   const kind=this.kindOf(texture),[lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,t=base?this.bases.get(fields.get(texture)!.handle)!:this.physical(texture),W=t.width,H=t.height;
@@ -503,8 +507,8 @@ export class UniformDetailStorage{
   if(this.pending.has(live.velocityScratch))throw new Error("The scratch velocity has no initial upload");
   for(const [texture,values] of this.pending){
    const image=this.image(texture,values);
-   if(!all&&texture===live.volume)this.coarsenCells(layout,values,image,texture);
-   if(!all&&texture===live.velocity){
+   if(!all&&values&&texture===live.volume)this.coarsenCells(layout,values,image,texture);
+   if(!all&&values&&texture===live.velocity){
     this.coarsenFaces(layout,values,image,texture);
     const scratch=this.image(live.velocityScratch);this.coarsenFaces(layout,values,scratch,live.velocityScratch);this.write(live.velocityScratch,scratch);
    }
@@ -548,6 +552,8 @@ export class UniformDetailStorage{
  private resident=false;
  /** The ownership whose h-tile capacity residency follows (prepare). */
  private simulation?:UniformMixedOwnership;
+ /** The page pool whose blocks the ring kernels visit (prepare; none: every tile key). */
+ private pool?:UniformPagePool;
  private transfers?:DomainKernels;
  /** The capacity is zero under a resident generation: the remap that
   * coarsens its last h tiles still reads it (encodeRetire). */
@@ -640,27 +646,30 @@ export class UniformDetailStorage{
   if(!ring)throw new Error("Uniform detail storage: no ring kernels (the storage is not prepared)");
   const first=this.physicals.get(ring.batches[0]!.handles[0]!)!;let bound=this.ringGroups.get(target);
   if(!bound||bound.key!==first)bound=this.bindRing(ring,first,held,target);
-  const groups=(this.layout.address.tileKeys+63)>>>6,pass=encoder.beginComputePass(RING_ENTER_PASS);
+  const groups=this.ringGroupCount(),pass=encoder.beginComputePass(RING_ENTER_PASS);
   for(let n=0;n<ring.batches.length;n++){const p=ring.batches[n]!.enter;if(!p)throw new Error("Uniform detail storage: Uniform detail ring enter is not compiled");pass.setPipeline(p);pass.setBindGroup(0,bound.groups[n]!);pass.dispatchWorkgroups(groups);}
   pass.end();
  }
+
+ /** The ring kernels' grid: fixed over a pool's blocks, else a lane per tile key. */
+ private ringGroupCount():number{const groups=(this.layout.address.tileKeys+63)>>>6;return this.pool?Math.min(UNIFORM_LIVE_KEY_GROUPS,groups):groups;}
 
  /** encodeRing's groups over the fields' textures now (apart from it: a closure there would cost every encode a context). */
  private bindRing(ring:NonNullable<DomainKernels["ring"]>,first:GPUTexture,held:GPUBuffer,target:GPUBuffer){
   const other=this.other().presentation.buffer;
   const bound={key:first,groups:ring.batches.map((b,n)=>this.device.createBindGroup({label:"Uniform detail ring",layout:b.layout,entries:[
    ...b.handles.flatMap((h,i)=>[{binding:i,resource:this.bases.get(h)!.createView()},{binding:BATCH+i,resource:this.physicals.get(h)!.createView()}]),
-   {binding:2*BATCH,resource:{buffer:held}},{binding:2*BATCH+1,resource:{buffer:target}},{binding:2*BATCH+4,resource:{buffer:this.ringDimensions}},...(n===0?[{binding:2*BATCH+2,resource:{buffer:other}}]:[])]}))};
+   {binding:2*BATCH,resource:{buffer:held}},{binding:2*BATCH+1,resource:{buffer:target}},{binding:2*BATCH+4,resource:{buffer:this.ringDimensions}},...(n===0?[{binding:2*BATCH+2,resource:{buffer:other}}]:[]),...(this.pool?[{binding:2*BATCH+5,resource:{buffer:this.pool.state}}]:[])]}))};
   this.ringGroups.set(target,bound);return bound;
  }
 
  encodeSettle(encoder:GPUCommandEncoder,share:boolean):void{
 
   if(share){
-   const ring=this.kernelsOfDomain().ring!,tiles=this.layout.address.tileKeys;
+   const ring=this.kernelsOfDomain().ring!;
    const pass=encoder.beginComputePass(RING_SHARE_PASS);pass.setPipeline(ring.share);
-   pass.setBindGroup(0,this.shareGroup??=this.device.createBindGroup({label:"Uniform detail ring share",layout:ring.shareLayout,entries:[{binding:2,resource:{buffer:this.ringDimensions}},{binding:0,resource:{buffer:this.simulation!.presentation.buffer}},{binding:1,resource:{buffer:this.other().presentation.buffer}}]}));
-   pass.dispatchWorkgroups((tiles+63)>>>6);pass.end();
+   pass.setBindGroup(0,this.shareGroup??=this.device.createBindGroup({label:"Uniform detail ring share",layout:ring.shareLayout,entries:[{binding:2,resource:{buffer:this.ringDimensions}},{binding:0,resource:{buffer:this.simulation!.presentation.buffer}},{binding:1,resource:{buffer:this.other().presentation.buffer}},...(this.pool?[{binding:3,resource:{buffer:this.pool.state}}]:[])]}));
+   pass.dispatchWorkgroups(this.ringGroupCount());pass.end();
   }
 
  }
@@ -731,7 +740,7 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
   * The first batch also hands the target's ring bit to the other ownership
   * (the all-4h pressure root, whose kernels store these fields too). */
  private async compileRing(domain:UniformDetailDomain):Promise<DomainKernels["ring"]>{
-  const device=this.device,C=GPUShaderStage.COMPUTE,N=this.layout.address.tileKeys,compiler=gpuCompilationManagerFor(device);
+  const device=this.device,C=GPUShaderStage.COMPUTE,N=this.layout.address.tileKeys,compiler=gpuCompilationManagerFor(device),pool=this.pool;
   if(Math.ceil(N/64)>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Uniform detail storage: the ring kernels launch ${Math.ceil(N/64)} workgroups, past one dispatch dimension`);
   const following=this.following,sets:GPUTexture[][]=[];
   // The ring kernels' lattice is their uniform's (the box in tiles, the
@@ -744,17 +753,29 @@ ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"}})}`;
 @group(0) @binding(${2*BATCH+4}) var<uniform> drDimensions:vec4u;
 fn drTiles()->vec3u{return drDimensions.xyz;}
 fn drCount()->u32{return 512u*drDimensions.w;}
-${seam("drNextWords")}
+// The pages from the held topology: a GPU generation's buffer is its tile
+// words alone (no page tail), and no relayout moves a page.
+${seam("drHeldWords")}
 fn drHeld(t:u32)->bool{return (drHeldWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 fn drNext(t:u32)->bool{return (drNextWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 `;
+  // With a pool, a fixed grid strides the blocks a tile key can be live in
+  // (uniform-live-lists.ts: the resident and latest retired, the sentinels);
+  // else a lane per tile key. visit(fn, binding): the entry point's body.
+  const lists=(binding:number)=>pool?uniformLiveListsWGSL(0,binding,pool.layout):"";
+  const visit=(fn:string)=>pool
+   ?`@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var k=gid.x;k<512u*ulVisitCount(false);k+=64u*groups.x){${fn}(512u*ulVisitBlock(k>>9u,false)+(k&511u));}
+}`
+   :`@builtin(global_invocation_id) gid:vec3u){${fn}(gid.x);}`;
+  const poolEntry=(binding:number)=>pool?[{binding,visibility:C,buffer:{type:"read-only-storage" as const}}]:[];
   const batches=await Promise.all(sets.map(async(handles,n):Promise<RingBatch>=>{
    const format=handles[0]!.format as "r32float"|"rgba32float";
    const layout=device.createBindGroupLayout({label:`Uniform detail ring ${n}`,entries:[
     ...handles.flatMap((_,i)=>[{binding:i,visibility:C,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}},{binding:BATCH+i,visibility:C,storageTexture:{access:"write-only" as const,format,viewDimension:"3d" as const}}]),
     {binding:2*BATCH+4,visibility:C,buffer:{type:"uniform" as const}},
     {binding:2*BATCH,visibility:C,buffer:{type:"read-only-storage" as const}},{binding:2*BATCH+1,visibility:C,buffer:{type:"read-only-storage" as const}},
-    ...(n===0?[{binding:2*BATCH+2,visibility:C,buffer:{type:"storage" as const}}]:[])]});
+    ...(n===0?[{binding:2*BATCH+2,visibility:C,buffer:{type:"storage" as const}}]:[]),...poolEntry(2*BATCH+5)]});
    let seed="";
    handles.forEach((h,i)=>{
     const kind=fields.get(h)!.kind;
@@ -769,9 +790,10 @@ fn drNext(t:u32)->bool{return (drNextWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
     }
    });
    const code=handles.map((_,i)=>`@group(0) @binding(${i}) var src${i}:texture_3d<f32>;\n@group(0) @binding(${BATCH+i}) var dst${i}:texture_storage_3d<${format},write>;\n`).join("")+head
-    +(n===0?`@group(0) @binding(${2*BATCH+2}) var<storage,read_write> drShared:array<u32>;\n`:"")+`
-@compute @workgroup_size(64) fn enter(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(!umTileLive(t)){return;}
+    +(n===0?`@group(0) @binding(${2*BATCH+2}) var<storage,read_write> drShared:array<u32>;\n`:"")+`${lists(2*BATCH+5)}
+@compute @workgroup_size(64) fn enter(${visit("drEnter")}
+fn drEnter(t:u32){
+ if(!umTileLive(t)){return;}
  let near=drNext(t);
 ${n===0?` let word=2u*drCount()+2u*t+1u;let w=drShared[word];let m=(w&0xfffffffeu)|u32(near);if(m!=w){drShared[word]=m;}
 `:""} if(!near||drHeld(t)){return;}
@@ -783,21 +805,24 @@ ${seed}}
    const pipeline=(entryPoint:string)=>compiler.compileComputePipeline({label:`Uniform detail ring ${entryPoint} ${n}`,layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint}},{priority:"visible"});
    return {handles,layout,enter:await pipeline("enter")};
   }));
-  const shareLayout=device.createBindGroupLayout({label:"Uniform detail ring share",entries:[{binding:2,visibility:C,buffer:{type:"uniform"}},{binding:0,visibility:C,buffer:{type:"read-only-storage"}},{binding:1,visibility:C,buffer:{type:"storage"}}]});
+  const shareLayout=device.createBindGroupLayout({label:"Uniform detail ring share",entries:[{binding:2,visibility:C,buffer:{type:"uniform"}},{binding:0,visibility:C,buffer:{type:"read-only-storage"}},{binding:1,visibility:C,buffer:{type:"storage"}},...poolEntry(3)]});
   const share=await compiler.compileComputePipeline({label:"Uniform detail ring share",layout:device.createPipelineLayout({bindGroupLayouts:[shareLayout]}),compute:{module:device.createShaderModule({label:"Uniform detail ring share",code:`
 @group(0) @binding(2) var<uniform> drDimensions:vec4u;
 @group(0) @binding(0) var<storage,read> drFrom:array<u32>;
 @group(0) @binding(1) var<storage,read_write> drTo:array<u32>;
 fn drCount()->u32{return 512u*drDimensions.w;}
 ${seam("drFrom")}
-@compute @workgroup_size(64) fn share(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(!umTileLive(t)){return;}
+${lists(3)}
+@compute @workgroup_size(64) fn share(${visit("drShare")}
+fn drShare(t:u32){
+ if(!umTileLive(t)){return;}
  let word=2u*drCount()+2u*t+1u;let w=drTo[word];let m=(w&0xfffffffeu)|(drFrom[word]&1u);if(m!=w){drTo[word]=m;}
 }`}),entryPoint:"share"}},{priority:"visible"});
   return {batches,shareLayout,share};
  }
 
- async prepare(ownership:UniformMixedOwnership):Promise<void>{if(this.transfers)return;this.simulation=ownership;this.transfers=await this.compileDomain(this.layout.domain!);}
+ /** pool: the page pool whose blocks the ring kernels visit (none: every tile key). */
+ async prepare(ownership:UniformMixedOwnership,pool?:UniformPagePool):Promise<void>{if(this.transfers)return;this.simulation=ownership;this.pool=pool;this.transfers=await this.compileDomain(this.layout.domain!);}
  /** Before a remap, in its encoder: the tiles the target generation
   * (target: its topology) brings into the detail ring take their canonical
   * texels from the bases. */

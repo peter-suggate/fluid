@@ -32,6 +32,9 @@ fn umTileKind(p:vec3i)->u32{
 }
 fn umTileKey(p:vec3i)->u32{if(umTileKind(p)!=0u){return 0xffffffffu;}return u32(p.x+32*(p.y+32*p.z));}
 fn umKeyStored(t:u32)->bool{return t<UM_TILES;}
+// The live lists (uniform-live-lists): every 512-key block resident.
+fn ulResidentCount()->u32{return ${T / 512}u;}
+fn ulResidentBlock(i:u32)->u32{return i;}
 fn umTileLive(t:u32)->bool{return t<UM_TILES&&umTileKind(vec3i(umTileCoord(t)))==0u;}
 fn umPackReach(p:vec3u,m:vec3u)->u32{return p.x|(p.y<<5u)|(p.z<<10u)|(m.x<<15u)|(m.y<<20u)|(m.z<<25u);}
 fn umReachPlus(w:u32)->vec3u{return vec3u(w&31u,(w>>5u)&31u,(w>>10u)&31u);}

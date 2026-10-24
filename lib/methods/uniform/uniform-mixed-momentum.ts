@@ -10,7 +10,7 @@ import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-so
 import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { uniformTileContextSidesWGSL } from "./uniform-tile-context";
-import { UNIFORM_MOMENTUM_RESIDUAL_PARTS, UNIFORM_MOMENTUM_TIER, UNIFORM_MOMENTUM_TIER_PASS, uniformMomentumFitGrid, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
+import { UNIFORM_MOMENTUM_RESIDUAL_PARTS, UNIFORM_MOMENTUM_TIER, UNIFORM_MOMENTUM_TIER_PASS, UNIFORM_MOMENTUM_FIT_GRID, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
 
 export interface UniformMixedMomentumFields {
   extended: GPUTexture;
@@ -505,10 +505,9 @@ ${this.hanging?uniformMixedMomentumUnitWGSL(this.sampler,this.trace):""}
     this.tiers.encodeDecide(tiers,this.tierGroup);
     tiers.setBindGroup(0, this.ownership.bindGroup); tiers.setBindGroup(1,group.group); if (this.hanging) tiers.setBindGroup(2, this.ownership.hangingGroup);
     // The affine models of the regions the budget refused to retain: a
-    // workgroup a region, striding the pool (an unlisted region exits at once).
-    const regions=this.ownership.capacity.tiles/64;
-    tiers.setPipeline(this.fitPipeline!);tiers.dispatchWorkgroups(uniformMomentumFitGrid(regions,4));
-    tiers.setPipeline(this.residualPipeline!);tiers.dispatchWorkgroups(uniformMomentumFitGrid(regions,UNIFORM_MOMENTUM_RESIDUAL_PARTS));
+    // workgroup a region, a fixed grid striding the held regions (umHeldPage).
+    tiers.setPipeline(this.fitPipeline!);tiers.dispatchWorkgroups(UNIFORM_MOMENTUM_FIT_GRID);
+    tiers.setPipeline(this.residualPipeline!);tiers.dispatchWorkgroups(UNIFORM_MOMENTUM_FIT_GRID);
     this.tiers.encodeAffine(tiers,this.tierGroup);
     tiers.end();
     const pass = encoder.beginComputePass(MOMENTUM_PASS);

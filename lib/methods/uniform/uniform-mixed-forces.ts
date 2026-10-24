@@ -11,6 +11,8 @@ import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressu
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_FORCE_MODE, uniformRegionForceWGSL, type UniformMixedRegionDynamics } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
+import { UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 
 export const UNIFORM_NORMAL_ANCHOR_ERROR=0.01;
 export const UNIFORM_CAPILLARY_DISPLACEMENT_ERROR_H=0.0001;
@@ -245,15 +247,17 @@ fn umCurvature(owner:UMOwner)->f32 {
 // Geometry is unchanged between this owner pass and the face pass. A seam
 // owner can supply many faces: compute its curvature once, using exactly
 // the same stencil and reduction order as the inline evaluation.
-${this.retainedNormals?`@compute @workgroup_size(64) fn curvatureRegions(@builtin(global_invocation_id) gid:vec3u){
- let region=gid.x;if(region>=UM_PAGES){return;}let origin=16u*umPageCoord(region);var dirty=false;
- if(umBlockStored(region>>3u)&&umBlockWord(region>>3u)!=0xffffffffu){
+${this.retainedNormals?`${uniformStageListsWGSL}
+// A held region a lane (fixed grid, strided): only a live owner reads its word.
+@compute @workgroup_size(64) fn curvatureRegions(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var j=gid.x;j<umHeldPageCount();j+=64u*groups.x){
+  let region=umHeldPage(j);let origin=16u*umPageCoord(region);var dirty=false;
   for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
    let tile=umTileKey(vec3i(origin/4u)+4*vec3i(x,y,z));if(umKeyStored(tile)){dirty=dirty||atomicLoad(&normalDirty[UM_PAGES+umPageOfTile(tile)])!=0u;}
   }}}
+  atomicStore(&normalDirty[2u*UM_PAGES+region],u32(dirty));
+  if(dirty){atomicAdd(&normalDirty[4u*UM_PAGES],1u);}
  }
- atomicStore(&normalDirty[2u*UM_PAGES+region],u32(dirty));
- if(dirty){atomicAdd(&normalDirty[4u*UM_PAGES],1u);}
 }`:""}
 ${this.cachedCurvature?`@compute @workgroup_size(64) fn cacheCurvature(@builtin(global_invocation_id) gid:vec3u){
  let owner=umAllOwner(gid);if(owner.width==0u){return;}
@@ -495,7 +499,7 @@ fn umForcedVelocityFar(owner:UMOwner,face:UMFace,far:bool,retain:vec3u)->f32 {
 }
 ${patched(uniformMixedFaceDispatchWGSL("forcesRegularCoarse","umForcedVelocityFar(owner,face,far,retain)",false,"","umForcesRegularCoarseOwner"),"let origin=umOrigin(owner);","let origin=umOrigin(owner);if(umOwnerFrozen(owner)){return;}let far=umFarAirOwner(owner);let retain=umForceRetain(owner);")}
 ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner,face,select(0xffffffffu,4u*(job-seamFour)+slot,quad),part)",undefined,undefined,"umOwnerFrozen"),"if(firstOwner.width!=0u)","if(firstOwner.width>1u)")}
-`,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheCurvature","cacheNormals","forceSlopes",...(this.retainedNormals?["curvatureRegions"]:[])]:[])])});
+`,["forcesFine","forcesRegular","forcesRegularCoarse","forces",...(this.cachedCurvature?["cacheCurvature","cacheNormals","forceSlopes"]:[])])});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
     const compile=(entryPoint:string,constants:Record<string,number>)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{
@@ -525,7 +529,7 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
     if(capillarity&&this.curvaturePipeline){
       this.ownership.dispatchAllCounted(pass,this.variant(this.normalPipeline!));
-      if(this.curvatureRegionsPipeline){pass.setPipeline(this.variant(this.curvatureRegionsPipeline));pass.dispatchWorkgroups(Math.ceil(this.ownership.capacity.tiles/64/64));}
+      if(this.curvatureRegionsPipeline){pass.setPipeline(this.variant(this.curvatureRegionsPipeline));pass.dispatchWorkgroups(UNIFORM_LIVE_LANE_GROUPS);}
       this.ownership.dispatchAllCounted(pass,this.variant(this.curvaturePipeline));
       this.ownership.dispatchBuffered(pass,this.variant(this.slopePipeline!),"seamCoarse",this.ownership.capacity.tiles,64);
     }

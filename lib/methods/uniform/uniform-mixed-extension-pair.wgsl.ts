@@ -223,12 +223,15 @@ fn ueSnapshotPublished(face:UMFace)->f32{
 }
 // Coarse owners' positive patches occupy either their component-major 4h
 // slots or the extra fine seam slots; neither overlaps an h owner's slots.
-@compute @workgroup_size(64) fn snapshotCoarse(@builtin(global_invocation_id) gid:vec3u){
+// A lane per (4h tile, axis), striding the 4h list from a fixed grid.
+@compute @workgroup_size(64) fn snapshotCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  if(!ueParticlesLive()){return;}
- let index=gid.x+65535u*64u*gid.y;let job=index/3u;let axis=index%3u;if(job>=umCounts.y){return;}
- let tile=umTopology[UM_TILES+umCounts.x+job];if(ueRegionState(tile)<3u){return;}let owner=umOwnerAt(vec3i(umTileCoord(tile)*4u));let first=umFace(owner,axis,1,0u);
- for(var part=0u;part<first.count;part++){
-  let face=umFacePatch(first,part);pairIn[umSlot(face.anchor,axis,face.width)]=ueSnapshotPublished(face);
+ for(var index=gid.x;index<3u*umCounts.y;index+=64u*groups.x){
+  let job=index/3u;let axis=index%3u;
+  let tile=umTopology[UM_TILES+umCounts.x+job];if(ueRegionState(tile)<3u){continue;}let owner=umOwnerAt(vec3i(umTileCoord(tile)*4u));let first=umFace(owner,axis,1,0u);
+  for(var part=0u;part<first.count;part++){
+   let face=umFacePatch(first,part);pairIn[umSlot(face.anchor,axis,face.width)]=ueSnapshotPublished(face);
+  }
  }
 }
 `);

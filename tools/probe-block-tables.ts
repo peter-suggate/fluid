@@ -29,6 +29,7 @@ import {
 } from "../lib/methods/uniform/uniform-block-tables";
 import { UNIFORM_PAGE_TABLE_WORDS as TABLE, uniformBlockNeighbourWords, uniformLatticeAddressWGSL } from "../lib/methods/uniform/uniform-lattice-address";
 import { UNIFORM_PAGE_POOL_FREE as FREE, UNIFORM_PAGE_POOL_KIND as KIND, uniformPagePoolLayout, uniformPagePoolSeed } from "../lib/methods/uniform/uniform-page-pool";
+import { UNIFORM_WINDOW_HEADER_WORDS } from "../lib/methods/uniform/uniform-window-address";
 
 type Page = readonly [number, number, number];
 const errors: string[] = [], started = performance.now();
@@ -42,7 +43,8 @@ const seed = uniformPagePoolSeed(uniformPagePoolLayout({ table: 64, blocks: BLOC
   return (y >= 2 && x <= 2 && z <= 1) || x > 8 || y > 8 || z > 8 ? KIND.air : KIND.solid;
 });
 const table = new Uint32Array(seed.table), records = new Uint32Array(seed.blocks);
-assert.equal(table.length, TABLE);assert.equal(records.length, BLOCKS);
+// The table words are the window entries, then the window header (UNIFORM_WINDOW_HEADER_WORDS, zero here).
+assert.equal(table.length + UNIFORM_WINDOW_HEADER_WORDS, TABLE);assert.equal(records.length, BLOCKS);
 const hash = (x: number, y: number, z: number, salt: number) => (Math.imul(x + 1, 73856093) ^ Math.imul(y + 1, 19349663) ^ Math.imul(z + 1, 83492791) ^ Math.imul(salt + 1, 2654435761)) >>> 0;
 /** Flags and keys by tile key: values of the key itself, so a block's page changes nothing of them. */
 const flags = new Uint32Array(KEYS), keys = new Uint32Array(6 * KEYS);
@@ -75,6 +77,9 @@ const UM_D=vec3u(2048u);const UM_T=UM_D/4u;const UM_TILES:u32=${KEYS}u;
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return tailWords[e.x|(e.y<<6u)|(e.z<<12u)];}
 fn umBlockWord(b:u32)->u32{return tailWords[${TABLE}u+b];}
 fn umBlockNeighbourWord(b:u32,i:u32)->u32{return tailWords[${TABLE + BLOCKS}u+27u*b+i];}
+// The live lists (uniform-live-lists): every block resident, ascending.
+fn ulResidentCount()->u32{return ${BLOCKS}u;}
+fn ulResidentBlock(i:u32)->u32{return i;}
 ${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged: { blocks: `${BLOCKS}u` } })}
 struct Ask{home:u32,low:vec3i,high:vec3i}
 fn ask(i:u32)->Ask{let a=8u+8u*i;return Ask(u32(script[a+1u]),vec3i(script[a+2u],script[a+3u],script[a+4u]),vec3i(script[a+5u],script[a+6u],script[a+7u]));}`;
@@ -131,8 +136,9 @@ function run(launches: readonly (readonly [string, number, number])[]): void {
   for (const [name, x, y] of launches) { const pass = encoder.beginComputePass();pass.setPipeline(pipelines.get(name)!);pass.setBindGroup(0, group);pass.dispatchWorkgroups(x, y);pass.end(); }
   device.queue.submit([encoder.finish()]);
 }
-const slabs = Math.ceil(KEYS / 64), BUILD = [["census.interfaceBits", DISPATCH_X, Math.ceil(slabs / DISPATCH_X)], ["plan.coarseBits", DISPATCH_X, Math.ceil(slabs / DISPATCH_X)],
-  ["census.interfaceBlocks", Math.ceil(BLOCKS / 64), 1], ["plan.coarseBlocks", Math.ceil(BLOCKS / 64), 1], ["census.boundCubes", BLOCKS, 1]] as const;
+// Fixed grids smaller than the work: the builds stride the resident blocks.
+const slabs = Math.ceil(KEYS / 64), BUILD = [["census.interfaceBits", Math.ceil(slabs / 3), 1], ["plan.coarseBits", Math.ceil(slabs / 3), 1],
+  ["census.interfaceBlocks", 1, 1], ["plan.coarseBlocks", 1, 1], ["census.boundCubes", Math.ceil(BLOCKS / 3), 1]] as const;
 const ASK = [["census.evaluate", QUERIES / 64, 1], ["plan.evaluate", QUERIES / 64, 1]] as const;
 
 async function round(label: string): Promise<void> {

@@ -14,7 +14,7 @@ struct Particle {position:vec4f,velocity:vec4f,before:vec4f}
 @group(0) @binding(3) var<storage,read_write> links:array<u32>;
 @group(0) @binding(4) var<storage,read_write> bins:array<atomic<u32>>;
 const UB_BRICKS:u32=64u;const UB_NONE:u32=0xffffffffu;const UB_PARTICLES_CORE:u32=1u;
-const UM_CELL_KEYS:u32=${cells}u;const UM_TILES:u32=512u;
+const UM_CELL_KEYS:u32=${cells}u;const UM_TILES:u32=512u;const NB_LINKS:u32=UM_CELL_KEYS;
 const NB_OCCUPIED:u32=32768u;const NB_COVERAGE:u32=33300u;
 const NB_SURFACE_TILES:u32=33812u;const NB_ACTIVITY_SURFACE_HEAT:u32=34324u;const NB_ACTIVITY_THETA:u32=34836u;
 fn ubCount()->u32{return 3u;}

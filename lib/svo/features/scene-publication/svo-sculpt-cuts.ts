@@ -1,4 +1,5 @@
 import type { SolidWorldVoxelPatch } from "../../../core/solid-world";
+import { ellipsoidBounds } from "../../../core/solid-patch/ellipsoid-bounds";
 import { solidPatchKindId, SOLID_PATCH_BOX_KIND, SOLID_PATCH_ELLIPSOID_KIND } from "../../../core/solid-patch/kind";
 
 type V3 = readonly [number, number, number];
@@ -22,9 +23,10 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
     const kind = solidPatchKindId(patch);
     if (kind !== SOLID_PATCH_BOX_KIND && kind !== SOLID_PATCH_ELLIPSOID_KIND) throw new RangeError(`Scenery sculpt does not support ${kind} cuts`);
     const at = SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS;
+    const bounds = kind === SOLID_PATCH_ELLIPSOID_KIND ? ellipsoidBounds(patch) : patch;
     for (let a = 0; a < 3; a++) {
-      const lo = lattice.origin_m[a]! + patch.minimum[a]! * lattice.cellSize_m[a]!;
-      const hi = lattice.origin_m[a]! + patch.maximumExclusive[a]! * lattice.cellSize_m[a]!;
+      const lo = lattice.origin_m[a]! + bounds.minimum[a]! * lattice.cellSize_m[a]!;
+      const hi = lattice.origin_m[a]! + bounds.maximumExclusive[a]! * lattice.cellSize_m[a]!;
       if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo) || !(Math.fround(hi) > Math.fround(lo))) throw new RangeError("Scenery sculpt bounds must be finite and nonempty");
       floats[at + a] = lo; floats[at + 4 + a] = hi;
     }
@@ -67,29 +69,37 @@ export function intersectsSvoSculptPrimitiveBounds(words: Uint32Array, center: V
 /** Distance to the cut union; its negation is the retained-solid field. */
 export function sampleSvoSculptCuts(words: Uint32Array, point: V3): { distance: number; normal: V3 } {
   const f = new Float32Array(words.buffer, words.byteOffset, words.length);
-  let distance = 1e20, normal: V3 = [0, 0, 0];
+  let distance = 1e20, nearest = -1;
+  // Only the winning cut needs a normal. Avoid array allocation and normal
+  // normalization for every historical stamp at every accepted ray hit.
   for (let i = 0; i < words[0]!; i++) {
     const at = SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS;
-    const r = [0, 1, 2].map(a => (f[at + 4 + a]! - f[at + a]!) * .5);
-    const p = [0, 1, 2].map(a => point[a]! - (f[at + 4 + a]! + f[at + a]!) * .5);
-    let d: number, n: number[];
-    if (words[at + 3] === 2) {
-      d = (Math.hypot(...p.map((v, a) => v / r[a]!)) - 1) * Math.min(...r);
-      n = p.map((v, a) => v / (r[a]! * r[a]!));
-    } else {
-      const q = p.map((v, a) => Math.abs(v) - r[a]!);
-      const outside = q.map(v => Math.max(v, 0)), length = Math.hypot(...outside);
-      d = length + Math.min(Math.max(...q), 0);
-      const axis = q[0]! >= q[1]! && q[0]! >= q[2]! ? 0 : q[1]! >= q[2]! ? 1 : 2;
-      n = length > 0 ? outside.map((v, a) => v * (p[a]! < 0 ? -1 : 1))
-        : p.map((v, a) => a === axis ? (v < 0 ? -1 : 1) : 0);
+    const rx = (f[at + 4]! - f[at]!) * .5, ry = (f[at + 5]! - f[at + 1]!) * .5, rz = (f[at + 6]! - f[at + 2]!) * .5;
+    const x = point[0] - (f[at + 4]! + f[at]!) * .5;
+    const y = point[1] - (f[at + 5]! + f[at + 1]!) * .5;
+    const z = point[2] - (f[at + 6]! + f[at + 2]!) * .5;
+    let d: number;
+    if (words[at + 3] === 2) d = (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz);
+    else {
+      const qx = Math.abs(x) - rx, qy = Math.abs(y) - ry, qz = Math.abs(z) - rz;
+      d = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0);
     }
-    if (d < distance) {
-      distance = d; const magnitude = Math.hypot(...n);
-      normal = magnitude > 1e-12 ? n.map(v => v / magnitude) as unknown as V3 : [0, 0, 0];
-    }
+    if (d < distance) { distance = d; nearest = at; }
   }
-  return { distance, normal };
+  if (nearest < 0) return { distance, normal: [0, 0, 0] };
+  const r = [0, 1, 2].map(a => (f[nearest + 4 + a]! - f[nearest + a]!) * .5);
+  const p = [0, 1, 2].map(a => point[a]! - (f[nearest + 4 + a]! + f[nearest + a]!) * .5);
+  let n: number[];
+  if (words[nearest + 3] === 2) n = p.map((v, a) => v / (r[a]! * r[a]!));
+  else {
+    const q = p.map((v, a) => Math.abs(v) - r[a]!);
+    const outside = q.map(v => Math.max(v, 0));
+    const axis = q[0]! >= q[1]! && q[0]! >= q[2]! ? 0 : q[1]! >= q[2]! ? 1 : 2;
+    n = Math.hypot(...outside) > 0 ? outside.map((v, a) => v * (p[a]! < 0 ? -1 : 1))
+      : p.map((v, a) => a === axis ? (v < 0 ? -1 : 1) : 0);
+  }
+  const magnitude = Math.hypot(...n);
+  return { distance, normal: magnitude > 1e-12 ? n.map(v => v / magnitude) as unknown as V3 : [0, 0, 0] };
 }
 
 /** `load` reads an arena-relative u32. No bindings are introduced here. */

@@ -16,14 +16,11 @@ export class UniformScratchLayout {
   /** The mixed pressure root's range (planUniformMixedPressureMemory). */
   readonly rootOffset: number;
   readonly rootBytes: number;
-  readonly edgeBytes: number;
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
   /** The correction's levels, 4h first: arena words (planUniformPressureLevels). */
   readonly levels: readonly UniformPressureLevelWords[];
-  constructor(readonly address: UniformLatticeAddress, edgeBytes: number, retainDiagnostics=false, rootBytes=0) {
-    if (!Number.isSafeInteger(edgeBytes) || edgeBytes < 0 || edgeBytes % 4 !== 0)
-      throw new RangeError("Uniform scratch edge bytes must be a nonnegative multiple of four");
+  constructor(readonly address: UniformLatticeAddress, retainDiagnostics=false, rootBytes=0) {
     const tiles=address.tileKeys;
     this.sharpenBaseWords=Math.ceil((6*tiles+3)/4)*4;
     // The tile stages' prefix; balance/page records remain beyond it. No
@@ -32,8 +29,6 @@ export class UniformScratchLayout {
     this.conditioningBytes=Math.ceil((this.sharpenBaseWords+8+tiles)/4)*16;
     if (!Number.isSafeInteger(rootBytes) || rootBytes < 0)
       throw new RangeError("Uniform scratch root bytes must be a nonnegative safe integer");
-    // The dense receiver-stencil bytes of the lattice: reported, not allocated.
-    this.edgeBytes=edgeBytes;
     this.rootOffset=0;this.rootBytes=Math.ceil(rootBytes/256)*256;
     const plan=planUniformPressureLevels(address.blocks,(this.rootOffset+this.rootBytes)/4);
     this.levels=plan.levels;this.byteLength=plan.end*4;
@@ -52,9 +47,9 @@ export class UniformScratchLayout {
 export class UniformScratchArena extends UniformScratchLayout {
   readonly buffer: GPUBuffer;
   private readonly ownsBuffer: boolean;
-  constructor(device: GPUDevice, address: UniformLatticeAddress, edgeBytes: number,
+  constructor(device: GPUDevice, address: UniformLatticeAddress,
     retainDiagnostics=false, backing?: GPUBuffer, rootBytes=0) {
-    super(address, edgeBytes, retainDiagnostics, rootBytes);
+    super(address, retainDiagnostics, rootBytes);
     const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
     if (backing && (backing.size < this.byteLength || (backing.usage & usage) !== usage))
       throw new RangeError("Shared uniform scratch backing has insufficient capacity or usage");
