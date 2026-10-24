@@ -137,6 +137,12 @@ fn nbInterfaceVertex(p:vec3u)->bool{
 // magnitudes; inheriting those magnitudes as a 4h chord moves a flat surface.
 // Only a vertex whose tile has an h neighbour can retire. Test its stencil
 // first, then the eight heat words; this zero predicate needs no phi.
+// No incident h cell open: umVertexBuried read at h widths, whatever the owners.
+fn nbVertexClosed(p:vec3i)->bool{
+ let base=p-vec3i(1);
+ for(var k=0u;k<8u;k++){let cell=base+vec3i(umCorner(k,2u));if(umSolidValid(cell)&&umCellIsOpen(cell)){return false;}}
+ return true;
+}
 fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u){
  let c=vec3u(umCellNearFromPage(own>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
@@ -144,9 +150,14 @@ fn nbRedistanceVertex(own:u32,origin:vec3u,p:vec3u){
  // A buried vertex is not a distance sample. In particular, padding past a
  // non-page-aligned tank wall must keep its far marker: replacing it with
  // the distance to the waterline pushes the interpolated wall contour into
- // the solid on every retirement. Use owner capacity, so corners needed by
- // partially open 4h owners still participate in the metric reconstruction.
- if(umVertexBuried(vec3i(p))){return;}
+ // the solid on every retirement. Nor is a corner whose eight h cells are
+ // all closed, though a cut 4h owner reads it: there it holds that owner's
+ // surface plane continued into the solid (the remap's plane, the
+ // extension of phi along the wall), and the metric measures through the
+ // solid to the contact line instead. A level pool beside a pier took
+ // -2h at the corner 2h inside it, bent the owner's surface up the wall
+ // and closed the free surface's pressure face (rest-step, frame 22).
+ if(nbVertexClosed(vec3i(p))){return;}
  if((nbBandReach(c)&2u)!=0u){nbStoreInPlace(p,bitcast<f32>(atomicLoad(&bins[NB_DEPTH_A+umVertexAt(p)]))*h);return;}
  // Past reach, preserve the old field's sign and its minimum six-cell
  // magnitude. Every dispatched vertex is canonical and has one writer.
