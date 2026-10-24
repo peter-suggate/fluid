@@ -783,6 +783,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.voxelCollision = scene.solidBoundary?.collision === "voxels";
     this.solidMask = new SolidOccupancyMask(uniformSolidMaskPages(address, this.voxelCollision));
     this.solidMask.update(solidWorldForFluidLattice(scene));
+    // Slots for the pages partly solid now, and as many again and one a block
+    // the pool stores, for edits: never one a page of the box.
+    this.solidMask.seal(Math.min(this.solidMask.layout.slots, 2 * this.solidMask.slotsHeld + Math.max(64, address.blocks - 2)));
     // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
     this.solidVoxelsEmpty = this.solidMask.empty;
     this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });

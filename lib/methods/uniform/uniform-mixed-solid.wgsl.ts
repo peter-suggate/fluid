@@ -21,7 +21,7 @@ import {UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES,uniformOpenWorldTerrainSampleWGS
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {sceneShapeWgsl} from "../../core/scene-shape";
-import {SOLID_MASK_DIRECTORY_WORDS,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
+import {SOLID_MASK_DIRECTORY_WORDS,SOLID_MASK_FULL,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
 import {UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS,UNIFORM_BED_SLOPE_LAYERS} from "./uniform-bed-slope-bake";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
@@ -97,17 +97,19 @@ export function uniformSolidScratchLayout():{bedSlopeBaseWord:number;bedSlopeWor
  return {bedSlopeBaseWord:SOLID_MASK_DIRECTORY_WORDS,bedSlopeWords,cutMapOffsetWords:SOLID_MASK_DIRECTORY_WORDS+bedSlopeWords};
 }
 /** What the solver sizes its solid mask by (SolidOccupancyMask): the
- * lattice's page table and tile keys, the bed-slope lane's directory, and a slot for
- * every page of the box and of the first layer of pages above an open top,
- * and in an open world one for each block the pool can store a page in. No
- * edit inside the tank can then run out of slots; one that makes more
+ * lattice's page table and tile keys, the bed-slope lane's directory, and
+ * at most a slot for every page of the box and of the first layer of pages
+ * above an open top, and in an open world one for each block the pool can
+ * store a page in, as many as a directory word can name. The solver seals
+ * the mask at fewer once it holds the scene (seal); an edit that makes more
  * pages partly solid than that is refused by the mask. The mask's world is
  * the box's: its cell (0,0,0) is the box's low cell, at the window's page
  * address.boxPage. */
 export function uniformSolidMaskPages(address:UniformLatticeAddress,halfSolid=false):SolidOccupancyMaskPages{
  const [x,y,z]=address.pages;
- return {table:address.seed.table,tileKeys:address.tileKeys,slots:x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0),
-  laneWords:uniformSolidScratchLayout().bedSlopeWords,separateTerrain:true,halfSolid,origin:address.boxPage};
+ const laneWords=uniformSolidScratchLayout().bedSlopeWords,firstSlot=Math.ceil((SOLID_MASK_DIRECTORY_WORDS+laneWords+address.tileKeys)/1024);
+ return {table:address.seed.table,tileKeys:address.tileKeys,slots:Math.max(0,Math.min(SOLID_MASK_FULL-firstSlot,x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0))),
+  laneWords,separateTerrain:true,halfSolid,origin:address.boxPage};
 }
 /** A bed slope as its lane entry: 16 bits, x in the low byte, each rounded
  * half away from zero as the bake rounds (uniform-bed-slope-bake). */
