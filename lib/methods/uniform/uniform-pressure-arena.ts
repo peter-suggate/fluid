@@ -15,6 +15,7 @@ import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
 import {planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
+import {uniformStageListGroups,uniformStageListsWGSL} from "./uniform-stage-lists";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -174,7 +175,11 @@ export class UniformPressureArena {
  /** The tiles pRows leaves to its geometry variant (their tile list indices; the count in header word GEOMETRY_WORD). */
  private readonly geometryListWord:number;
  private readonly tableWord:number;
- private readonly level2Clear:{offset:number;size:number};
+ /** Level 2's band channels (pool words first.., a level 2 slot a block):
+  * pClear2 zeroes the held blocks' slots each frame, a workgroup a (block,
+  * channel). A free block's slot is no live neighbour's (its records' words
+  * are UB_NONE or a seam), so no stage reads it. */
+ private readonly level2Clear:{first:number;channels:number};
  private slots=0;
  get capacity():number{return this.slots;}
  /** The 32h rows' correction goes through the super-block levels (schedule.tail). */
@@ -239,7 +244,9 @@ export class UniformPressureArena {
    for(let f=0;f<6;f++)if(a.base(`${prefix}${f}`,level)!==a.base(`${prefix}0`,level)+f*UBA_STRIDE*a.capacity(level))throw new Error(`Pressure arena: channel ${prefix} is not contiguous`);
   }
   const first=a.base("xb",2),last=a.base("kb5",2)+UBA_STRIDE*blocks;
-  this.level2Clear={offset:4*first,size:4*(last-first)};
+  const level2=(last-first)/(UBA_STRIDE*blocks);
+  if(!Number.isInteger(level2))throw new Error("Pressure arena: level 2's band channels are not whole slots");
+  this.level2Clear={first,channels:level2};
   this.maskWord=HEADER+this.tiles;this.tileListWord=this.maskWord+a.bricks;this.geometryListWord=this.tileListWord+this.tiles;this.tableWord=this.geometryListWord+this.tiles;
   const limit=device.limits.maxStorageBufferBindingSize;
   // The super-block tail's lists and maps follow the arena table; its rows the arena's pool.
@@ -328,7 +335,7 @@ export class UniformPressureArena {
   const cap=a.fineCapacity,blocks=this.simulation.capacity.address.blocks;
   const plane0=520*cap,plane2=520*blocks,lanesTail=tailLanes(blocks,this.device.limits.maxComputeInvocationsPerWorkgroup);
   const C=(name:string,level:0|1|2=0)=>a.base(name,level);
-  const tableWGSL=a.tableWGSL("state",`${this.tableWord}u`,`atomicLoad(&state[MASK+id])`);
+  const tableWGSL=uniformStageListsWGSL+a.tableWGSL("state",`${this.tableWord}u`,`atomicLoad(&state[MASK+id])`);
   const constants=/* wgsl */`
 const SLOTS:u32=${HEADER}u;const MASK:u32=${this.maskWord}u;const TLIST:u32=${this.tileListWord}u;const GLIST:u32=${this.geometryListWord}u;const GCOUNT:u32=${GEOMETRY_WORD}u;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=${DONE_WORD}u;const BRICKS:u32=${BRICKS_WORD}u;
 const INITIAL:u32=${INITIAL_WORD}u;const VALID:u32=${VALID_WORD}u;const INITIAL_BIT:u32=1u<<${HISTORY}u;const CYCLES:u32=${schedule.cycles}u;
@@ -1658,6 +1665,17 @@ var<workgroup> dN:u32;
   workgroupBarrier();
  }
 }`,
+   // Level 2's band channels of the held blocks, a workgroup a (block, channel).
+   clear2:header()+poolWGSL+/* wgsl */`
+const P2_FIRST:u32=${this.level2Clear.first}u;const P2_CHANNELS:u32=${this.level2Clear.channels}u;const P2_CHANNEL:u32=${UBA_STRIDE*this.simulation.capacity.address.blocks}u;
+var<workgroup> p2Block:u32;
+@compute @workgroup_size(64) fn pClear2(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var item=group.x;item<P2_CHANNELS*umHeldBlockCount();item+=groups.x){
+  if(l==0u){p2Block=umHeldBlock(item/P2_CHANNELS);}
+  let base=P2_FIRST+P2_CHANNEL*(item%P2_CHANNELS)+UBA_STRIDE*workgroupUniformLoad(&p2Block);
+  for(var k=l;k<UBA_STRIDE;k+=64u){pool[base+k]=0u;}
+ }
+}`,
    // 32h, the coarsest level (a row a page with rows): one workgroup solves
    // them by red-black sweeps, row e the page list's e-th page at sX[e+1]
    // (sX[0] stays zero: a missing neighbour's, so the six loads take no
@@ -2320,7 +2338,7 @@ fn sProlong6(g:vec3i)->f32{
   else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
-  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
+  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],clear2:["pClear2"],
    rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
@@ -2415,9 +2433,10 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  encodePrepare(encoder:GPUCommandEncoder):void{
   const a=this.arena,step=a.stepClear(this.tableWord);
   encoder.clearBuffer(this.index,0,4*this.tableWord);
-  encoder.clearBuffer(this.index,step.offset,step.size);encoder.clearBuffer(this.pool,this.level2Clear.offset,this.level2Clear.size);
+  encoder.clearBuffer(this.index,step.offset,step.size);
   const blocks=this.simulation.capacity.address.blocks,cap=a.fineCapacity,band=!this.empty;
   const pass=encoder.beginComputePass(PREPARE_PASS);
+  this.clearLevel2(pass);
   if(band)this.dispatch(pass,"pMark","tiles");
   this.dispatch(pass,"ubaUpdate",Math.min(groupsOf(a.bricks,64),TABLE_GROUPS));
   this.dispatch(pass,"ubaLists",Math.min(groupsOf(Math.max(cap,blocks),64),TABLE_GROUPS));
@@ -2439,9 +2458,14 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   if(!kick)return;
   for(let k=0;k<UNIFORM_PRESSURE_KICK_RESOLVES;k++){
    // The cycle history and the band's level 2 channels start empty, as encodePrepare leaves them.
-   encoder.clearBuffer(this.index,4*HISTORY_WORD,4*(GEOMETRY_WORD-HISTORY_WORD));encoder.clearBuffer(this.pool,this.level2Clear.offset,this.level2Clear.size);
+   encoder.clearBuffer(this.index,4*HISTORY_WORD,4*(GEOMETRY_WORD-HISTORY_WORD));
+   const clear=encoder.beginComputePass(PREPARE_PASS);this.clearLevel2(clear);clear.end();
    this.encodeSolveFrom(encoder,"pInitP","pRebaseP");
   }
+ }
+ /** The held blocks' level 2 band channels to zero (level2Clear). */
+ private clearLevel2(pass:GPUComputePassEncoder):void{
+  this.dispatch(pass,"pClear2",uniformStageListGroups(this.level2Clear.channels*this.simulation.capacity.address.blocks));
  }
  private encodeSolveFrom(encoder:GPUCommandEncoder,init:string,rebase:string):void{
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,PAGE_GROUPS),g=this.level1Groups;
