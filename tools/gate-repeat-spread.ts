@@ -11,14 +11,14 @@
  *   every --stats-every frames and the last: volume drift (readStats) and
  *   occupancy (liquid vertices, phi < 0, read by live page identity).
  *
- * For each value and frame: the A/A spread (max - min over the baseline's
- * repeats) and the A/B deviation, |mean A - mean B|: one comparison a frame,
- * as each arm's spread is (the largest of the cross-arm pair differences,
- * reported as maxPairAB, is the largest of 4 samples against 2 at two
- * repeats, so it exceeds the spreads by chance alone). It passes when every
- * A/B deviation is within the tolerance:
- * the largest A/A or B/B spread of that value within +-5 frames, or the
- * repeat-noise band (relative to the baseline mean; volume drift, a ratio,
+ * The verdict is on 10-frame window means (frames 1-10, 11-20, ...), as
+ * 60 frames of 6 values each against a spread from two repeats would flag
+ * something by chance. For each value and window: each instance's mean over
+ * the window, the A/A and B/B spreads (max - min of those means within an
+ * arm) and the A/B deviation |mean A - mean B|. It passes when every
+ * window's A/B deviation is within the tolerance: the largest A/A or B/B
+ * window spread of that value over the whole run, or the repeat-noise band
+ * (relative to the baseline's window mean; volume drift, a ratio,
  * absolute): 0.2% to frame 60, 2% after (speed-of-light-plan-2026-10-20.md
  * section 6). A fatal or a GPU error fails the run.
  *
@@ -45,10 +45,10 @@ import { createRegionTierScene, REGION_TIER_SCENES, type RegionTierScene } from 
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
-for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|repeats|stats-every|scene|length|depth|pool-blocks|out|gate)=.+$/);
+for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|repeats|stats-every|scene|length|depth|pool-blocks|out|gate|rescore)=.+$/);
 const steps = Number(option("steps") ?? 70), repeats = Number(option("repeats") ?? 2), statsEvery = Number(option("stats-every") ?? 10);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(repeats) && repeats >= 2 && Number.isInteger(statsEvery) && statsEvery > 0);
-const roots = [option("baseline"), option("candidate")].map(r => resolve(r!)); assert.ok(roots.every(Boolean));
+const roots = [option("baseline"), option("candidate")].map(r => resolve(r ?? "")); assert.ok(option("rescore") || (option("baseline") && option("candidate")));
 const sceneOption = option("scene") ?? "splash", region = (REGION_TIER_SCENES as readonly string[]).includes(sceneOption);
 const length = Number(option("length") ?? 128), depth = Number(option("depth") ?? 32);
 const poolBlocks = option("pool-blocks") === undefined ? undefined : Number(option("pool-blocks"));
@@ -72,6 +72,42 @@ const METRICS = ["fineTiles", "bandTiles", "bandBricks", "particles", "volumeDri
 type Metric = typeof METRICS[number];
 /** series[metric][instance]: frame -> value. */
 const series = Object.fromEntries(METRICS.map(m => [m, [] as Map<number, number>[]])) as Record<Metric, Map<number, number>[]>;
+/** The verdict over series[metric][instance] (frame -> value), each instance's arm in armOf. */
+function verdict(armOf: readonly (0 | 1)[], series: Record<Metric, Map<number, number>[]>) {
+  const arms = [0, 1].map(arm => armOf.flatMap((x, i) => x === arm ? [i] : []));
+  const band = (frame: number) => frame <= 60 ? 0.002 : 0.02, WINDOW = 10;
+  const report: Record<string, unknown> = {}; let pass = true;
+  for (const m of METRICS) {
+    const frames = [...series[m][0]!.keys()].filter(f => armOf.every((_, i) => series[m][i]!.has(f))).sort((x, y) => x - y);
+    const windows = new Map<number, number[]>();
+    for (const f of frames) { const w = Math.floor((f - 1) / WINDOW); windows.set(w, [...windows.get(w) ?? [], f]); }
+    const mean = (v: number[]) => v.reduce((s, x) => s + x, 0) / v.length;
+    const rows = [...windows].map(([w, fs]) => {
+      const means = armOf.map((_, i) => mean(fs.map(f => series[m][i]!.get(f)!)));
+      const [a, b] = arms.map(arm => arm.map(i => means[i]!)) as [number[], number[]];
+      const last = fs.at(-1)!;
+      return { frames: `${w * WINDOW + 1}-${(w + 1) * WINDOW}`, aa: Math.max(...a) - Math.min(...a), bb: Math.max(...b) - Math.min(...b), ab: Math.abs(mean(a) - mean(b)), noise: m === "volumeDrift" ? band(last) : band(last) * Math.abs(mean(a)) };
+    });
+    const spread = Math.max(0, ...rows.map(r => Math.max(r.aa, r.bb)));
+    let worst = { frames: "", ratio: 0, ab: 0, tolerance: 0 }, over = 0;
+    for (const r of rows) {
+      const tolerance = Math.max(r.noise, spread), ratio = r.ab === 0 ? 0 : tolerance === 0 ? Infinity : r.ab / tolerance;
+      if (ratio > 1) over++;
+      if (ratio > worst.ratio) worst = { frames: r.frames, ratio, ab: r.ab, tolerance };
+    }
+    pass &&= over === 0;
+    report[m] = { windows: rows.length, over, worst, spread, maxAB: Math.max(0, ...rows.map(r => r.ab)) };
+  }
+  return { pass, report };
+}
+// --rescore=NAME.json: the verdict over a saved run's series, without a GPU.
+const rescore = option("rescore");
+if (rescore) {
+  const saved = JSON.parse(readFileSync(rescore, "utf8")) as { series: Record<Metric, { arm: 0 | 1; values: Record<string, number> }[]> };
+  const result = verdict(saved.series.fineTiles.map(x => x.arm), Object.fromEntries(METRICS.map(m => [m, saved.series[m].map(x => new Map(Object.entries(x.values).map(([f, v]) => [Number(f), v])))])) as Record<Metric, Map<number, number>[]>);
+  console.log(JSON.stringify({ phase: "rescored", file: rescore, ...result }));
+  process.exit(result.pass ? 0 : 1);
+}
 const instances: Instance[] = [], snapshots: Record<string, unknown>[] = [], errors: string[] = [];
 let raw: GPUDevice | undefined;
 const read = { buffer: undefined as GPUBuffer | undefined };
@@ -144,28 +180,7 @@ try {
   }
   lock?.stdin?.end(); lock = undefined;
   // The spreads and the verdict.
-  const arms = [0, 1].map(arm => instances.flatMap((x, i) => x.arm === arm ? [i] : []));
-  const band = (frame: number) => frame <= 60 ? 0.002 : 0.02;
-  const report: Record<string, unknown> = {}; let pass = true;
-  for (const m of METRICS) {
-    const frames = [...series[m][0]!.keys()].filter(f => instances.every((_, i) => series[m][i]!.has(f))).sort((a, b) => a - b);
-    const at = (i: number, f: number) => series[m][i]!.get(f)!;
-    const spread = (arm: number[], f: number) => { const v = arm.map(i => at(i, f)); return Math.max(...v) - Math.min(...v); };
-    const rows = frames.map(f => {
-      let pair = 0; for (const a of arms[0]!) for (const b of arms[1]!) pair = Math.max(pair, Math.abs(at(a, f) - at(b, f)));
-      const [mean, meanB] = arms.map(arm => arm.reduce((s, i) => s + at(i, f), 0) / arm.length) as [number, number];
-      return { frame: f, aa: spread(arms[0]!, f), bb: spread(arms[1]!, f), ab: Math.abs(mean - meanB), pair, noise: m === "volumeDrift" ? band(f) : band(f) * Math.abs(mean) };
-    });
-    let worst = { frame: 0, ratio: 0, aa: 0, bb: 0, ab: 0, tolerance: 0 }, over = 0;
-    for (const r of rows) {
-      const near = rows.filter(q => Math.abs(q.frame - r.frame) <= 5), tolerance = Math.max(r.noise, ...near.map(q => Math.max(q.aa, q.bb)));
-      const ratio = r.ab === 0 ? 0 : tolerance === 0 ? Infinity : r.ab / tolerance;
-      if (ratio > 1) over++;
-      if (ratio > worst.ratio) worst = { frame: r.frame, ratio, aa: r.aa, bb: r.bb, ab: r.ab, tolerance };
-    }
-    pass &&= over === 0;
-    report[m] = { frames: rows.length, over, worst, maxAA: Math.max(0, ...rows.map(r => r.aa)), maxAB: Math.max(0, ...rows.map(r => r.ab)), maxPairAB: Math.max(0, ...rows.map(r => r.pair)) };
-  }
+  const { pass, report } = verdict(instances.map(x => x.arm), series);
   const values_ = Object.fromEntries(METRICS.map(m => [m, instances.map((x, i) => ({ arm: x.arm, values: Object.fromEntries(series[m][i]!) }))]));
   writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), scene: sceneOption, length, depth, poolBlocks, steps, repeats, statsEvery, snapshots, pass, report, series: values_ }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", pass, report }));
