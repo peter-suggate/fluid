@@ -1,4 +1,5 @@
 import { UNIFORM_COARSE_CACHE_REACH } from "./uniform-coarse-velocity-cache";
+import { NARROW_BAND_TRACE_TURN } from "./uniform-narrow-band-advection.wgsl";
 
 /** How momentum's unit sampler interpolates (NB-FLIP method param
  * momentumSampler): "software" takes the eight halo and 4h-cache loads of
@@ -8,6 +9,14 @@ import { UNIFORM_COARSE_CACHE_REACH } from "./uniform-coarse-velocity-cache";
  * halo and keeps the 4h interpolant in software. Hardware filtering rounds
  * the weights to the filter's subtexel precision. */
 export type UniformMomentumSampler = "software" | "texture32" | "texture16";
+
+/** How momentum's unit trace finds a face's departure (NB-FLIP method param
+ * momentumTrace): "midpoint" takes one RK2 midpoint step of the whole dt;
+ * "turn" also samples the start's straight departure and takes it where the
+ * field turns along the midpoint trace by more than NARROW_BAND_TRACE_TURN of
+ * the start speed (where traceSubsteps "gradient" would substep a particle).
+ * Both take a fixed number of samples a face, at one call site. */
+export type UniformMomentumTrace = "midpoint" | "turn";
 
 /** Shared sampling of prepared h/4h velocity fields for momentum. A sample
  * resolves its tile once (umSampleTile): the tile's key classifies it and
@@ -19,7 +28,7 @@ export type UniformMomentumSampler = "software" | "texture32" | "texture16";
  * coarseFiltered (the 4h cache). The fine atlas's layout sits behind
  * umUnitHaloHome and umAtlasTexel (and the build that fills it), so another
  * layout (brick aprons) replaces those without touching the kernels. */
-export function uniformCachedMomentumSamplingWGSL(sampler: UniformMomentumSampler): string {
+export function uniformCachedMomentumSamplingWGSL(sampler: UniformMomentumSampler, trace: UniformMomentumTrace = "midpoint"): string {
   const interpolant = sampler === "software" ? /* wgsl */ `
  // The sample's page's halo block holds every tap, the low-wall faces
  // included: plain offsets from the home its sample resolved once.
@@ -81,7 +90,7 @@ fn umUnitSample(p:vec3f,lo:u32,hi:u32)->vec3f {
  for(var a=lo;a<hi;a++){v[a]=umUnitWeighted(p,home,a,fine);}
  return v;
 }
-// A face's advected component: one RK2 midpoint step of the whole dt,
+${trace === "midpoint" ? /* wgsl */ `// A face's advected component: one RK2 midpoint step of the whole dt,
 // whatever its length (no substep limit), then the face's own component at
 // the departure. The three samples share one call site.
 fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
@@ -93,6 +102,38 @@ fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
   at=umClampMomentum(position-select(0.5,1.0,stage==1u)*v*dt/h);
  }
  return 0.0;
-}
+}` : /* wgsl */ `// A face's advected component (momentumTrace "turn"): the RK2 midpoint
+// departure's component, unless the field turns along that trace (the
+// midpoint's or that departure's sample differs from the start's by more
+// than NB_MOMENTUM_TURN of the start speed, taken as at least a cell a
+// step: where a gradient-substepped particle trace would split the step).
+// There the midpoint is no measure of the path, and the start's straight
+// departure's component is taken. A midpoint that lands upstream of a sharp
+// acceleration (a fast throat fed by a slow reservoir) gives a short
+// departure that keeps the start's speed, and a faster stream keeps more of
+// its faces that way: the projection hands the flux its slower faces lost
+// to the faster ones, step after step. The straight departure lies farther
+// upstream the faster the start, which damps that instead. Four samples at
+// one call site: the start, the midpoint, the straight departure (the
+// face's component only) and the midpoint departure.
+const NB_MOMENTUM_TURN:f32=${NARROW_BAND_TRACE_TURN};
+fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
+ var at=position;var start=vec3f(0.0);var middle=vec3f(0.0);var straight=0.0;var turn=0.0;
+ for(var stage=select(0u,3u,abs(dt)<=1e-7);stage<4u;stage++){
+  let one=stage==2u;
+  let v=umUnitSample(at,select(0u,axis,one),select(3u,axis+1u,one));
+  let delta=abs(v-start);
+  if(stage==0u){start=v;at=umClampMomentum(position-0.5*v*dt/h);}
+  else if(stage==1u){middle=v;turn=max(delta.x,max(delta.y,delta.z));at=umClampMomentum(position-start*dt/h);}
+  else if(stage==2u){straight=v[axis];at=umClampMomentum(position-middle*dt/h);}
+  else{
+   if(abs(dt)<=1e-7){return v[axis];}
+   turn=max(turn,max(delta.x,max(delta.y,delta.z)));
+   let speed=max(max(abs(start.x),max(abs(start.y),abs(start.z))),min(h.x,min(h.y,h.z))/abs(dt));
+   return select(v[axis],straight,turn>NB_MOMENTUM_TURN*speed);
+  }
+ }
+ return 0.0;
+}`}
 `;
 }
