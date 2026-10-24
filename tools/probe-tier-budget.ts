@@ -612,7 +612,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
   const phiStageSteps = new Set(String(option("phiStages") ?? "").split(",").filter(Boolean).map(Number));
   let phiTaken: { name: string; done: () => Promise<Float32Array> }[] | undefined;
   if (phiStageSteps.size) {
-    const m = (solver as unknown as { mixedFrame: { fields: { phi: GPUTexture; phiScratch: GPUTexture }; surface: Record<string, (...a: unknown[]) => unknown>; narrowBandFlip: Record<string, (...a: unknown[]) => unknown> } }).mixedFrame;
+    const m = (solver as unknown as { mixedFrame: { fields: { phi: GPUTexture; phiScratch: GPUTexture; velocityScratch: GPUTexture }; surface: Record<string, (...a: unknown[]) => unknown>; narrowBandFlip: Record<string, (...a: unknown[]) => unknown> } }).mixedFrame;
     const hook = (object: Record<string, (...a: unknown[]) => unknown>, key: string, name: string, texture: () => GPUTexture, before = false) => {
       assert.ok(object[key], `no stage ${key}`); const original = object[key]!.bind(object);
       const take = (encoder: GPUCommandEncoder) => { if (phiTaken) phiTaken.push({ name, done: uniformDetailField(texture())!.storage.capture(encoder, texture()) }); };
@@ -620,6 +620,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
     };
     const phi = () => m.fields.phi, scratch = () => m.fields.phiScratch;
     hook(m.narrowBandFlip, "move", "start", phi, true);
+    hook(m.surface, "encode", "velocity", () => m.fields.velocityScratch, true);
     hook(m.surface, "encode", "advect", scratch);
     hook(m.narrowBandFlip, "reconstruct", "reconstruct", phi);
     hook(m.narrowBandFlip, "clearAir", "clearAir", phi);
@@ -630,6 +631,14 @@ var<workgroup> sums:array<atomic<u32>,5>;
     const taken = phiTaken ?? []; phiTaken = undefined; const X = g.nx + 1, Y = g.ny + 1;
     for (const c of taken) {
       const field = await c.done();
+      if (c.name === "velocity") {
+        // The velocity texels the surface trace reads around the tube (m/s): u, the +y faces at z and z -/+ 1, the +z faces at y and y + 1.
+        const v = (x: number, y: number, z: number, a: number) => +field[4 * (x + g.nx * (y + g.ny * z)) + a]!.toFixed(3);
+        const Y = wall.holeY, Z = wall.holeZ;
+        console.log(JSON.stringify({ phiStage: "velocity", step, faces: Array.from({ length: 12 }, (_, i) => { const x = wall.high - 8 + i;
+          return { x, u: v(x, Y, Z, 0), vTop: v(x, Y, Z, 1), vBottom: v(x, Y - 1, Z, 1), vTopZm: v(x, Y, Z - 1, 1), vTopZp: v(x, Y, Z + 1, 1), wFront: v(x, Y, Z, 2), wBack: v(x, Y, Z - 1, 2), wFrontYp: v(x, Y + 1, Z, 2), wBackYp: v(x, Y + 1, Z - 1, 2) }; }) }));
+        continue;
+      }
       const at = (x: number, y: number, z: number) => +(field[x + X * (y + Y * z)]! / h).toFixed(2);
       console.log(JSON.stringify({ phiStage: c.name, step, vertexLine: Array.from({ length: 12 }, (_, i) => { const x = wall.high - 6 + i;
         return [x, at(x, wall.holeY, wall.holeZ), at(x, wall.holeY + 1, wall.holeZ), at(x, wall.holeY, wall.holeZ + 1), at(x, wall.holeY + 1, wall.holeZ + 1)]; }) }));
