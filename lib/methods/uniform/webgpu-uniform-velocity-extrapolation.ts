@@ -1,6 +1,6 @@
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import type { UniformLatticeAddress } from "./uniform-lattice-address";
-import { uniformStageListGroups } from "./uniform-stage-lists";
+import { UNIFORM_LIVE_GROUP_GROUPS } from "./uniform-live-lists";
 import { UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS, UNIFORM_EXTRAPOLATION_WORK_WORDS, uniformVelocityExtrapolationShader } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 
 type Dims3 = readonly [number, number, number];
@@ -99,7 +99,7 @@ export class WebGPUUniformVelocityExtrapolator {
       });
       this.levels.push({ dims: size, down: velocity("down"), up: velocity("up"), originsDown: origins(), originsUp: origins() });
     }
-    this.groupCounts = LEVEL_EDGES.map(edge => uniformStageListGroups(address.blocks * edge ** 3 / GROUP_CELLS));
+    this.groupCounts = LEVEL_EDGES.map(() => UNIFORM_LIVE_GROUP_GROUPS);
     this.coarseVelocityTableAvailable = address.cells.every(value => value % 4 === 0 || value === 1);
   }
 

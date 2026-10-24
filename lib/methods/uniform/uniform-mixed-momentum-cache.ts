@@ -8,7 +8,8 @@ import { uniformCompiledVelocityTapWGSL } from "./uniform-compiled-velocity-taps
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyNeighboursWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
-import { uniformStageListGroups, uniformStageListsWGSL } from "./uniform-stage-lists";
+import { UNIFORM_LIVE_GROUP_GROUPS } from "./uniform-live-lists";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 import { UNIFORM_MIXED_HANGING_TAPS, UNIFORM_UNIT_HALO_EDGE, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource, uniformUnitHaloExtent, uniformUnitHaloWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 
 /** Workgroups a block of the unit halo fill: one a z-plane of its texels. */
@@ -470,7 +471,7 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
     const halo=this.haloGroups.get(group);
     if(halo){
       pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,halo.group);pass.setBindGroup(2,this.ownership.hangingGroup);
-      const blocks=uniformStageListGroups(this.haloBlockCount);
+      const blocks=UNIFORM_LIVE_GROUP_GROUPS;
       pass.setPipeline(uniformDetailPick(this.haloMarkPipeline!));pass.dispatchWorkgroups(blocks);
       pass.setPipeline(uniformDetailPick(this.haloPipeline!));pass.dispatchWorkgroups(blocks,HALO_SLICES);
     }

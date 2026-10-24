@@ -11,7 +11,8 @@ import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressu
 import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_FORCE_MODE, uniformRegionForceWGSL, type UniformMixedRegionDynamics } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
-import { uniformStageListGroups, uniformStageListsWGSL } from "./uniform-stage-lists";
+import { UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 
 export const UNIFORM_NORMAL_ANCHOR_ERROR=0.01;
 export const UNIFORM_CAPILLARY_DISPLACEMENT_ERROR_H=0.0001;
@@ -528,7 +529,7 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
     if(capillarity&&this.curvaturePipeline){
       this.ownership.dispatchAllCounted(pass,this.variant(this.normalPipeline!));
-      if(this.curvatureRegionsPipeline){pass.setPipeline(this.variant(this.curvatureRegionsPipeline));pass.dispatchWorkgroups(uniformStageListGroups(this.ownership.capacity.tiles/64/64));}
+      if(this.curvatureRegionsPipeline){pass.setPipeline(this.variant(this.curvatureRegionsPipeline));pass.dispatchWorkgroups(UNIFORM_LIVE_LANE_GROUPS);}
       this.ownership.dispatchAllCounted(pass,this.variant(this.curvaturePipeline));
       this.ownership.dispatchBuffered(pass,this.variant(this.slopePipeline!),"seamCoarse",this.ownership.capacity.tiles,64);
     }

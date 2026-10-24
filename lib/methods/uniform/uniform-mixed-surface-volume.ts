@@ -6,7 +6,8 @@ import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedPageCou
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {levelSetFillWGSL} from "../../core/level-set-fill.wgsl";
 import {type UniformLatticeAddress} from "./uniform-lattice-address";
-import {uniformStageListGroups,uniformStageListsWGSL} from "./uniform-stage-lists";
+import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
+import {uniformStageListsWGSL} from "./uniform-stage-lists";
 import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,uniformMixedVertexBuriedWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
 /** NB-FLIP's scalar volume budget: the liquid's filled volume measured on a
@@ -88,7 +89,7 @@ export class UniformMixedSurfaceVolume {
   const address=this.address=ownership.capacity.address;
   this.vertices=address.vertexKeys;
   this.tiles=ownership.capacity.tiles;this.pages=uniformMixedPageCount(this.tiles);
-  this.clearGroups=uniformStageListGroups(this.tiles/64);
+  this.clearGroups=UNIFORM_LIVE_KEY_GROUPS;
   // Partial rows: the residentAll launch's job bound (svJobs): every tile h,
   // plus a job per page. Rows sized to the tiles alone let an all-h layout's
   // page jobs write the chunk sums, and its extra chunk the Newton state.

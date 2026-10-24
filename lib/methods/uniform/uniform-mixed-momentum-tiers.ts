@@ -2,7 +2,8 @@ import { UNIFORM_DETAIL_RING_4H_LOAD } from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { UNIFORM_REGION_HEAT_BUDGET_H, uniformRegionHeatWGSL } from "./uniform-region-heat";
-import { uniformStageListGroups, uniformStageListsWGSL } from "./uniform-stage-lists";
+import { UNIFORM_LIVE_GROUP_GROUPS, UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 
 /** Full: every face traces. Retain: a face keeps its extended value.
  * Affine: a face traces the region's affine model (no sampler).
@@ -46,7 +47,7 @@ const UNIFORM_MOMENTUM_FIT_ITEMS=8;
  * UNIFORM_MOMENTUM_FIT_ITEMS tests one (region, part) item of the held
  * regions, so an idle frame costs each workgroup one gather; consecutive
  * regions land in different workgroups. A fixed grid: past it they stride. */
-export function uniformMomentumFitGrid(regions:number,parts:number):number{return uniformStageListGroups(parts*regions/UNIFORM_MOMENTUM_FIT_ITEMS);}
+export const UNIFORM_MOMENTUM_FIT_GRID=UNIFORM_LIVE_GROUP_GROUPS;
 /** The tiers' own pass (decide, the momentum's fit, affine). */
 export const UNIFORM_MOMENTUM_TIER_PASS:GPUComputePassDescriptor={label:"Uniform mixed momentum tiers"};
 
@@ -88,7 +89,7 @@ export class UniformMixedMomentumTiers {
   /** heat: the frame's region work tiers (UniformRegionHeat.tiers). */
   constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly heat:GPUBuffer){
     this.regions=ownership.capacity.tiles/64;
-    this.groups=uniformStageListGroups(this.regions/64);
+    this.groups=UNIFORM_LIVE_LANE_GROUPS;
     this.record=device.createBuffer({label:"Uniform mixed momentum tiers",size:4*this.regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
     this.models=device.createBuffer({label:"Uniform mixed momentum affine models",size:4*UNIFORM_MOMENTUM_MODEL_WORDS*this.regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
     this.allocatedBytes=this.record.size+this.models.size;

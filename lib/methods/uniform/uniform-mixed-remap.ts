@@ -14,7 +14,7 @@ import {UNIFORM_MIXED_RELAYOUT_RECEIPT,uniformMixedChangedTilesWGSL} from "./uni
 import {uniformBufferedWork} from "./uniform-buffered-work";
 import {uniformKeyGroups} from "./uniform-lattice-address";
 import {uniformMixedRemapCapacity} from "./uniform-mixed-remap-capacity";
-import {uniformStageListGroups} from "./uniform-stage-lists";
+import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
 
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
 /** Workgroups of each remap launch (see applyGpu). */
@@ -217,7 +217,7 @@ export class UniformMixedRemap {
   // markListed strides the dilated list (its count on the GPU) on a fixed grid.
   if(!copy){
    pass.setBindGroup(2,(listed??this.groups[0]).group);pass.setBindGroup(3,this.statusGroup.group);pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"markListed":"markChanged")!));
-   if(listed)pass.dispatchWorkgroups(uniformStageListGroups(this.tiles/64));
+   if(listed)pass.dispatchWorkgroups(UNIFORM_LIVE_KEY_GROUPS);
    else{const groups=uniformKeyGroups(this.tiles,64,x,this.listGrid);pass.dispatchWorkgroups(groups[0],groups[1]);}
   }
   if(solid)pass.setBindGroup(3,solid.tileGroup);

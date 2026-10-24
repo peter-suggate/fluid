@@ -21,16 +21,9 @@
  * blocks of the simulation ownership are the pool's resident blocks once the
  * commit has named the stored set, but a standalone ownership has no pool,
  * and the resident pressure ownership's lists are its static layout's (a
- * stage over it scans every page). */
-
-/** The fixed grid of a stage's list launch: past it a workgroup strides. */
-export const UNIFORM_STAGE_LIST_GRID = 1024;
-
-/** Workgroups of a list launch over at most `jobs` jobs: never more than the
- * fixed grid, and one at least. */
-export function uniformStageListGroups(jobs: number, grid = UNIFORM_STAGE_LIST_GRID): number {
-  return Math.max(1, Math.min(grid, Math.ceil(jobs)));
-}
+ * stage over it scans every page). A launch over either takes the live
+ * lists' fixed grids (UNIFORM_LIVE_LANE_GROUPS and its kin), whatever the
+ * reservation. */
 
 /** Needs uniformMixedTopologyWGSL in the module (umTopology, umCounts). */
 export const uniformStageListsWGSL = /* wgsl */ `

@@ -15,7 +15,8 @@ import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
 import {planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
-import {uniformStageListGroups,uniformStageListsWGSL} from "./uniform-stage-lists";
+import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS} from "./uniform-live-lists";
+import {uniformStageListsWGSL} from "./uniform-stage-lists";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -2434,12 +2435,12 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   const a=this.arena,step=a.stepClear(this.tableWord);
   encoder.clearBuffer(this.index,0,4*this.tableWord);
   encoder.clearBuffer(this.index,step.offset,step.size);
-  const blocks=this.simulation.capacity.address.blocks,cap=a.fineCapacity,band=!this.empty;
+  const blocks=this.simulation.capacity.address.blocks,band=!this.empty;
   const pass=encoder.beginComputePass(PREPARE_PASS);
   this.clearLevel2(pass);
   if(band)this.dispatch(pass,"pMark","tiles");
-  this.dispatch(pass,"ubaUpdate",Math.min(groupsOf(a.bricks,64),TABLE_GROUPS));
-  this.dispatch(pass,"ubaLists",Math.min(groupsOf(Math.max(cap,blocks),64),TABLE_GROUPS));
+  this.dispatch(pass,"ubaUpdate",UNIFORM_LIVE_KEY_GROUPS);
+  this.dispatch(pass,"ubaLists",UNIFORM_LIVE_LANE_GROUPS);
   this.dispatch(pass,"ubaLevel1",Math.min(groupsOf(this.workBricks,64),TABLE_GROUPS));
   this.dispatch(pass,"ubaRecord",Math.min(groupsOf(32*(2*this.workBricks+blocks),64),4*TABLE_GROUPS));
   if(band){this.dispatch(pass,"pRows",this.tileGroups);this.dispatch(pass,"pRowsG",this.tileGroups);}
@@ -2465,7 +2466,7 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  }
  /** The held blocks' level 2 band channels to zero (level2Clear). */
  private clearLevel2(pass:GPUComputePassEncoder):void{
-  this.dispatch(pass,"pClear2",uniformStageListGroups(this.level2Clear.channels*this.simulation.capacity.address.blocks));
+  this.dispatch(pass,"pClear2",UNIFORM_LIVE_GROUP_GROUPS);
  }
  private encodeSolveFrom(encoder:GPUCommandEncoder,init:string,rebase:string):void{
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,PAGE_GROUPS),g=this.level1Groups;

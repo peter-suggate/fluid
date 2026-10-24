@@ -8,7 +8,8 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformExtrapolationWorkBytes, type WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
 import { UNIFORM_EXTRAPOLATION_WORK_WORDS } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 import { UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { uniformStageListGroups, uniformStageListsWGSL } from "./uniform-stage-lists";
+import { UNIFORM_LIVE_KEY_GROUPS, UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 import { uniformMixedFaceAddressWGSL,uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformRegionHeatWGSL } from "./uniform-region-heat";
@@ -203,13 +204,13 @@ export class UniformMixedExtension {
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false,private readonly coldFreeze=false){
   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
   if(!directRestriction)throw new Error("Mixed extension restricts the face-plane anchors directly");
-  this.address=ownership.capacity.address;this.restrictGroups=uniformStageListGroups(ownership.capacity.tiles/64);
+  this.address=ownership.capacity.address;this.restrictGroups=UNIFORM_LIVE_KEY_GROUPS;
   this.alwaysLive=device.createBuffer({label:"Uniform mixed extension live gate",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.alwaysLive,0,new Uint32Array([1,0,0,0]));
   const tiles=ownership.capacity.tiles,regions=tiles/64;
   this.stamp=device.createBuffer({label:"Uniform mixed extension topology stamp",size:4*(2*tiles+2*regions),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
   this.work=device.createBuffer({label:"Uniform mixed extension work words",size:uniformExtrapolationWorkBytes(this.address.blocks),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.work,0,new Uint32Array([1,1,0,0]));
   this.blocksLayout=device.createBindGroupLayout({label:"Uniform mixed extension held blocks",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
-  this.blockGroups=uniformStageListGroups(this.address.blocks/64);
+  this.blockGroups=UNIFORM_LIVE_LANE_GROUPS;
   this.blocksGroup=device.createBindGroup({label:"Uniform mixed extension held blocks",layout:this.blocksLayout,entries:[{binding:0,resource:{buffer:this.work}}]});
   this.noBodies=device.createBuffer({label:"Uniform mixed extension no bodies",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.noBodies,0,new Uint32Array([~0,~0,~0,~0]));
   this.modes=[[0,0],[1,0],[1,1],[2,0],[2,1]].map(([regional,parity])=>{const b=device.createBuffer({label:"Uniform mixed extension region mode",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,new Uint32Array([regional!,parity!,0,0]));return b;});
@@ -1591,7 +1592,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   // The fine publisher grid-strides its live tile list; cap empty launch groups.
   if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(p.fine));pass.dispatchWorkgroups(Math.min(8192,o.capacity.fineTiles));}
   // The coarse publisher strides its 4h list from a fixed grid.
-  pass.setPipeline(uniformDetailPick(p.coarse));pass.dispatchWorkgroups(uniformStageListGroups(ceilDiv(3*o.capacity.tiles,64)));pass.end();
+  pass.setPipeline(uniformDetailPick(p.coarse));pass.dispatchWorkgroups(UNIFORM_LIVE_KEY_GROUPS);pass.end();
   this.snapshotEncoder=encoder;this.snapshotSweeps=sweeps;
  }
  private encodeStages(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps:number,replayHierarchy:boolean,mode?:"pair"|"companion"|"current",replayPublication=false,regional=false):void{
