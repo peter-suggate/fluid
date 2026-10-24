@@ -22,8 +22,12 @@ import { UNIFORM_PAGE_POOL_STATUS } from "./uniform-page-pool";
  * commit): the launch then carries grid.y = 2 (uniformLiveDispatch), which
  * ulSweep reads; the workgroups of the second row exit at once.
  *
- * The region of a visit index is 8 a block plus its octant, so regions and
- * tile keys keep the lists' ascending order. */
+ * Every visit also takes the two sentinels (block 0, AIR, and the last,
+ * SOLID) after the lists: their words are what a tile nothing stores reads,
+ * and other launches may store there through such a tile, so they are
+ * rewritten at every launch as before.
+ *
+ * The region of a visit index is 8 a block plus its octant. */
 export function uniformLiveListsWGSL(group:number,binding:number,layout:UniformPagePoolLayout):string{
  return `@group(${group}) @binding(${binding}) var<storage,read> ulPool:array<u32>;\n${uniformLiveListsOfWGSL("ulPool",layout)}`;
 }
@@ -35,12 +39,13 @@ const UL_BLOCKS:u32=${layout.blocks}u;
 fn ulSweep(groups:vec3u)->bool{return groups.y>1u;}
 fn ulResidentCount()->u32{return ${state}[${S.resident}u];}
 fn ulResidentBlock(i:u32)->u32{return ${state}[${layout.state.resident}u+i];}
-fn ulVisitCount(sweep:bool)->u32{if(sweep){return UL_BLOCKS;}return ${state}[${S.resident}u]+${state}[${S.pending}u];}
+fn ulVisitCount(sweep:bool)->u32{if(sweep){return UL_BLOCKS;}return ${state}[${S.resident}u]+${state}[${S.pending}u]+2u;}
 fn ulVisitBlock(i:u32,sweep:bool)->u32{
  if(sweep){return i;}
- let resident=${state}[${S.resident}u];
+ let resident=${state}[${S.resident}u];let listed=resident+${state}[${S.pending}u];
  if(i<resident){return ${state}[${layout.state.resident}u+i];}
- return ${state}[${layout.state.retired}u+i-resident];
+ if(i<listed){return ${state}[${layout.state.retired}u+i-resident];}
+ return select(UL_BLOCKS-1u,0u,i==listed);
 }
 fn ulVisitRegion(i:u32,sweep:bool)->u32{return 8u*ulVisitBlock(i>>3u,sweep)+(i&7u);}
 `;}
