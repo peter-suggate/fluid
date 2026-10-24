@@ -816,11 +816,13 @@ var<workgroup> tileOpenFaces:array<vec2f,48>;
 // face's normal velocity carries no information across it, and the
 // one-sided difference in its place would put the largest value at the wall,
 // outside every face it was built from.
-fn remapBesideFace(q:vec3i,axis:u32,sign:i32)->vec2f{
+// V is umPressureFaceV of that face, where umCellPresent holds at q and at
+// the face's low cell and q's old owner is stored (remapBeside's probe).
+fn remapBesideFace(q:vec3i,axis:u32,sign:i32,V:f32)->vec2f{
  if(!umCellPresent(q)){return vec2f(0);}
  let o=oldumOwnerAt(q);if(o.width==0u){return vec2f(0);}
  var id=q;if(sign<0){id[axis]-=1;}
- if(!umCellPresent(id)||umPressureFaceV(id,axis)<1.0){return vec2f(0);}
+ if(!umCellPresent(id)||V<1.0){return vec2f(0);}
  return vec2f(oldFaceValue(oldPatch(o,vec3u(q),axis,sign)),1.0);
 }
 // The lane's unit faces beside the tile, when its old owner is 4h and the
@@ -834,13 +836,22 @@ fn remapBeside(entry:u32,lane:u32){
   let k=cell/16u;let d=(axis+1u+k/2u)%3u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
   var q=vec3i(umTileCoord(tile)*4u);q[u]+=i32(cell%4u);q[v]+=i32((cell/4u)%4u);
   var low=q;var high=q;high[axis]+=3;
-  if(k==0u){
-   var id=low;id[axis]-=1;
-   open=vec2f(select(0.0,1.0,own&&umCellPresent(id)&&umPressureFaceV(id,axis)>=1.0),select(0.0,1.0,umPressureFaceV(high,axis)>=1.0));
+  let step=select(-4,4,(k&1u)!=0u);var lowBeside=low;var highBeside=high;lowBeside[d]+=step;highBeside[d]+=step;
+  // The four faces' V at one umPressureFaceV site (Metal inlines each):
+  // the tile's own low and high faces, then the low and high faces beside.
+  var V=vec4f(-1.0);
+  for(var j=0u;j<4u;j++){
+   var id=select(high,low,j==0u);var need=k==0u;
+   if(j>=2u){
+    let at=select(highBeside,lowBeside,j==2u);id=at;
+    need=(j==3u||own)&&umCellPresent(at)&&oldumOwnerAt(at).width!=0u;
+   }
+   if(j%2u==0u){id[axis]-=1;need=need&&(j==2u||own)&&umCellPresent(id);}
+   if(need){V[j]=umPressureFaceV(id,axis);}
   }
-  let step=select(-4,4,(k&1u)!=0u);low[d]+=step;high[d]+=step;
-  if(own){beside=vec4f(remapBesideFace(low,axis,-1),0.0,0.0);}
-  beside=vec4f(beside.xy,remapBesideFace(high,axis,1));
+  open=vec2f(select(0.0,1.0,V.x>=1.0),select(0.0,1.0,V.y>=1.0));
+  if(own){beside=vec4f(remapBesideFace(lowBeside,axis,-1,V.z),0.0,0.0);}
+  beside=vec4f(beside.xy,remapBesideFace(highBeside,axis,1,V.w));
  }
  tileBeside[lane]=beside;
  if(cell<16u){tileOpenFaces[16u*axis+cell]=open;}
