@@ -79,6 +79,11 @@ export interface UniformDetailDomain{
  readonly compactFaces:boolean;
  /** A/B: per-tile cell fields follow the capacity like every other field. */
  readonly unpinned?:boolean;
+ /** The h stores will hold slots alone (compact()): a load of an h texture
+  * at a block with no slot reads the field's base instead (its texel of
+  * q: the tile's cell, face or low corner), so every field binding but an
+  * atlas-only one declares its twin. Off, every module's text is as it was. */
+ readonly sparse?:boolean;
  // The ring: beside the base block, the h store holds a 4h tile's canonical
  // texels only for the tiles of the detail ring (UNIFORM_MIXED_DETAIL_RING:
  // an h tile within three tiles). A 4h store outside it lands in the base
@@ -270,11 +275,11 @@ export class UniformDetailStorage{
  readonly signature:string;
  private readonly ringDimensions:GPUBuffer;
  /** address: the solver's lattice address. */
- constructor(private readonly device:GPUDevice,address:UniformLatticeAddress){
-  const domain:UniformDetailDomain={checked:false,compactFaces:true,unpinned:false};
+ constructor(private readonly device:GPUDevice,address:UniformLatticeAddress,options:{readonly sparse?:boolean}={}){
+  const domain:UniformDetailDomain={checked:false,compactFaces:true,unpinned:false,sparse:!!options.sparse};
   this.layout=domainLayout(address,domain);
   const l=this.layout;
-  this.signature=`${l.placement}:${l.patchEdge}:${l.layer}::domain:${domain.checked}:${domain.compactFaces}:${!!domain.unpinned}:${!!domain.poison}:${!!domain.survey}:${!!domain.untwinned}:${!!domain.unwrapped}`;
+  this.signature=`${l.placement}:${l.patchEdge}:${l.layer}::domain:${domain.checked}:${domain.compactFaces}:${!!domain.unpinned}:${!!domain.poison}:${!!domain.survey}:${!!domain.untwinned}:${!!domain.unwrapped}:${!!domain.sparse}`;
   let set=live.get(device);if(!set)live.set(device,set=new Set());set.add(this);liveLayout(device,l.address.tileKeys);
   this.ringDimensions=device.createBuffer({label:"Uniform detail ring dimensions",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.ringDimensions,0,new Uint32Array([...l.tiles,l.address.blocks]));
   // Every block its own slot until compact(): the h stores are the whole block grid.
@@ -967,6 +972,7 @@ fn drShare(t:u32){
   * resident: a later admit stays whole-grid. */
  async compact(requested?:number):Promise<void>{
   if(!this.resident||this.sparse)return;
+  if(!this.layout.domain.sparse)throw new Error("Uniform detail storage compacts only under a sparse domain (its modules' slotless loads)");
   if(!this.transfers||!this.installed)throw new Error("Uniform detail storage compacts after its first layout and prepare()");
   const device=this.device,a=this.layout.address,B=a.blocks,held=this.simulation!.presentation.buffer;
   // The need: a claim over every block from an empty assignment, read back.
@@ -1171,7 +1177,9 @@ function detailDomainWGSL(kinds:ReadonlyMap<string,{kind:UniformDetailClass;type
  guards?:ReadonlySet<string>,
  /** Run accessors the code calls, by name (udRun_phi, udLoad48_phi, ...). */
  asked?:ReadonlySet<string>,
- call=""):string{
+ call="",
+ /** UniformDetailDomain.sparse: an h load at a slotless block reads the base twin. */
+ sparse=false):string{
  const j="(((q&vec3i(3))+vec3i(1))>>vec3u(2u))";
  // ringed: a canonical store reaches the h texture only inside the ring.
  // watch (checked): every h texture load is tested against the ring (and the poison).
@@ -1292,7 +1300,10 @@ fn udVertexSlot(v:vec3i,bits:u32)->vec4u{
   // a canonical stored v's texel there, by the bound texture's b.
   const twin=twins?.get(name),other=(v:string)=>A.store(v,"(1u-b)");
   if(!storage||type.includes("read_write")){
-   const check="";
+   // Compacted stores: an h texture holds no texel of a slotless block, whose values are its base's.
+   const slotless=kind==="vertex"?`${pf}umVertexSlotless(q)`:`${pf}umCellSlotless(q)`;
+   const check=sparse&&twin&&kind!=="atlas"?`if(b==0u&&${slotless}){return textureLoad(${twin},${home("q")}${level});}
+ `:"";
    const load=`textureLoad(${name},${at("q")}${level})`;
    out+=`fn udLoad_${name}${sfx}(q:vec3i${site})->vec4f{
  ${mode}
@@ -1522,7 +1533,7 @@ export function uniformDetailShader(code:string,device?:GPUDevice):string{
   // declares its twin, and every sampled one with a canonical load.
   const twins=new Map<string,string>();let declarations="";
   for(const [,group,binding,name,type] of code.matchAll(/@group\((\d+)\)\s*@binding\((\d+)\)\s*var\s+(\w+)\s*:\s*(texture(?:_storage)?_3d<[^>]+>)/g)){
-   const field=kinds.get(name!);if(!field||field.kind==="atlas"||(type!.startsWith("texture_storage")?based.has(name!):!based.has(name!))){
+   const field=kinds.get(name!);if(!field||field.kind==="atlas"||(type!.startsWith("texture_storage")?based.has(name!):!based.has(name!)&&!domain.sparse)){
     if(field&&based.has(name!))throw new Error(`Uniform detail rewrite: ${name} has a canonical load and is ${field.kind==="atlas"?"atlas-only":"a stored binding"}`);
     continue;
    }
@@ -1532,7 +1543,7 @@ export function uniformDetailShader(code:string,device?:GPUDevice):string{
   for(const [name,{kind,type}] of kinds)if((based.has(name)||(kind!=="atlas"&&type.startsWith("texture_storage")))&&!twins.has(name))throw new Error(`Uniform detail rewrite: ${name} is not declared as @group(g) @binding(b) var, so its twin has no binding`);
   // A remap stores the fields of the generation it adopts: the unprefixed topology beside the one it leaves.
   const target=pf&&/var<storage,\s*read>\s*umTopology\s*:/.test(code)?"":pf;
-  let rewritten=calls+declarations+detailDomainWGSL(kinds,`${pf}umSupport[${pf}UM_DETAIL_VIOLATION]`,atomic,false,hOnly,twins,based,{pf,target,sites},either,new Set([...kinds.keys()].filter(name=>calls.includes(`udLoadG_${name}(`))),asked);
+  let rewritten=calls+declarations+detailDomainWGSL(kinds,`${pf}umSupport[${pf}UM_DETAIL_VIOLATION]`,atomic,false,hOnly,twins,based,{pf,target,sites},either,new Set([...kinds.keys()].filter(name=>calls.includes(`udLoadG_${name}(`))),asked,"",!!domain.sparse);
   if(code.includes(`fn ${pf}umPlannedVertexSlot(`))rewritten=rewritten.replace("fn udVertexSlot(v:vec3i,bits:u32)->vec4u{",`fn udVertexSlot(v:vec3i,bits:u32)->vec4u{let plan=${pf}umPlannedVertexSlot(v,bits);if(plan.w!=0xffffffffu){return plan;}`);
   return rewritten;
  }

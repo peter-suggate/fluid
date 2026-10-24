@@ -731,7 +731,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.fieldPages.createTexture({ label, size, dimension: "3d", format, usage });
     // Geometric h fields come from the detail storage, registered with the
     // page layer by their logical dims; their bytes are the storage's (refreshMixedAllocation).
-    const detailStorage = this.detailStorage = new UniformDetailStorage(device, address);
+    // fluid.tiers.fineBlocks compacts the h stores after t=0: every module then reads a slotless block's base.
+    const detailStorage = this.detailStorage = new UniformDetailStorage(device, address, { sparse: scene.fluid?.tiers?.fineBlocks !== undefined });
     // Vertex phi where nothing is stored: the initial level set's value far from liquid (uniformLatticeInitialPhi).
     const emptyPhi = uniformLatticeFarPhi(scene);
     const field = (label: string, kind: UniformDetailClass, perTile = false) =>
