@@ -747,8 +747,15 @@ fn umSurfaceWallVertex(p:vec3u)->bool{
 // A vertex on a page wall or an aligned embedded wall whose liquid one
 // width inside moves onto the
 // wall takes the phi carried to that inside point, where it is liquid.
+// "clip": the wall's zero normal speed holds the liquid, not the extended
+// velocity that carries its surface. The vertex departs by its own trace
+// along the wall and, on each contact axis, by the inside point's normal
+// speed (the extension continued to the wall), and takes the lesser value
+// whatever its sign: a surface arriving within a 4h width of the wall is
+// then placed where it arrives, not held at the far value the wall plane
+// kept (a block landing at 2.6 m/s lost 14% of its volume in one step).
 fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
- if(params.hDt.w<=0.0){return value;}var interior=p;var contact=false;
+ if(params.hDt.w<=0.0){return value;}var interior=p;var contact=false;var travel=umLastTravel;
  for(var k=0u;k<6u;k++){
   let axis=k>>1u;let inward=select(1.0,-1.0,(k&1u)!=0u);
   var contactWall=umWallBlock(vec3i(p),k)!=0u;
@@ -760,15 +767,16 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   var probe=p;probe[axis]+=inward*f32(width);
   var speed=0.0;if(umFastSurface){speed=umFastVelocity(probe)[axis];}else{speed=umSampleVelocity(probe)[axis];}
   if(inward*speed>=-1e-6){continue;}
-  interior[axis]+=inward*f32(width);contact=true;
+  interior[axis]+=inward*f32(width);contact=true;travel[axis]=-params.hDt.w*speed/params.hDt[axis];
  }
  if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}
- // "clip": the interior point moved by the vertex's own trace, held in the
- // domain (umPointFrom) and walked against solids; "retrace": its own trace.
+ // "clip": the vertex's departure (travel), held in the domain (umPointFrom)
+ // and walked against solids from the inside point; "retrace": the inside
+ // point's own trace.
  var start=vec3f(0.0);
- if(UM_WALL_CLIP){start=umPointFrom(interior,interior+umLastTravel);${this.solid?"start=umWalk(interior,start).q;":""}}else{start=umTrace(interior);}
+ if(UM_WALL_CLIP){start=umPointFrom(interior,p+travel);${this.solid?"start=umWalk(interior,start).q;":""}}else{start=umTrace(interior);}
  let continued=umSampleVertex(start);
- return select(value,min(value,continued),continued<0.0);
+ return select(value,min(value,continued),continued<0.0||UM_WALL_CLIP);
 }
 // The six wall reach words (UM_WALL_REACH, a face direction each) are final
 // once wallReach, an earlier dispatch, is done. Every advect entry stages
