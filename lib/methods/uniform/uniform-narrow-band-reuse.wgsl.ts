@@ -10,12 +10,14 @@ export function narrowBandReuseLayout(base:number,regions:number,capacity=region
  const metricValid=valid+64*capacity, nearestValid=metricValid+64*capacity;
  const nearestState=nearestValid+regions, nearestFlags=nearestState+158*capacity;
  const masks=nearestFlags+regions;
- const nearest=masks+128*capacity, metric=nearest+6144*capacity, plane=metric+8000*capacity, regionPlane=plane+384*capacity;
+ // The metric payload went with the arena's redistance (8000 words a region,
+ // never read since): only its validity words remain.
+ const nearest=masks+128*capacity, plane=nearest+6144*capacity, regionPlane=plane+384*capacity;
  // The frame's region work tiers (UniformRegionHeat.tiers words [0, regions)),
  // copied in before each stage that reads them (UniformNarrowBandFlip.syncTiers).
  const tiers=regionPlane+8*capacity;
  const framePlan=tiers+regions;
- return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,metric,plane,regionPlane,tiers,framePlan,metadataWords:masks-base,words:framePlan+5+7*regions-base};
+ return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,plane,regionPlane,tiers,framePlan,metadataWords:masks-base,words:framePlan+5+7*regions-base};
 }
 export type NarrowBandReuseLayout=ReturnType<typeof narrowBandReuseLayout>;
 export function narrowBandReuseWGSL(l:NarrowBandReuseLayout){return /* wgsl */`
@@ -41,7 +43,7 @@ const NB_REUSE_HISTORY:u32=${l.history}u;const NB_REUSE_HISTORY_WORDS:u32=${l.hi
 const NB_REUSE_ALLOWED:u32=${l.allowed}u;const NB_REUSE_VALID:u32=${l.valid}u;const NB_REUSE_MASK:u32=${l.masks}u;
 const NB_REUSE_REGION_PLANE:u32=${l.regionPlane}u;
 const NB_REUSE_PLANE:u32=${l.plane}u;
-const NB_REUSE_METRIC_VALID:u32=${l.metricValid}u;const NB_REUSE_METRIC:u32=${l.metric}u;const NB_REUSE_METRIC_CAPACITY:u32=${l.capacity}u;
+const NB_REUSE_METRIC_VALID:u32=${l.metricValid}u;
 const NB_REUSE_NEAREST_VALID:u32=${l.nearestValid}u;const NB_REUSE_NEAREST_STATE:u32=${l.nearestState}u;const NB_REUSE_NEAREST_FLAGS:u32=${l.nearestFlags}u;const NB_REUSE_NEAREST:u32=${l.nearest}u;
 // Region work tiers (UniformRegionHeat): COLD 0, WARM 1, HOT 2. A COLD
 // region's producers hold phi (no write, no revision bump) and its
