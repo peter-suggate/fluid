@@ -72,7 +72,7 @@ const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "";
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|set|out|classes)=.+|--classify|--print-scene|--heatState)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes)=.+|--classify|--print-scene|--heatState)$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
 assert.ok(stepList.every(s => Number.isInteger(s) && s > 0) && Number.isInteger(every) && every > 0 && Number.isInteger(from) && from >= 1);
@@ -673,12 +673,116 @@ var<workgroup> sums:array<atomic<u32>,5>;
         return [x, at(x, wall.holeY, wall.holeZ), at(x, wall.holeY + 1, wall.holeZ), at(x, wall.holeY, wall.holeZ + 1), at(x, wall.holeY + 1, wall.holeZ + 1)]; }) }));
     }
   };
+  // --flowStages=<step,...>: where a step's speed and volume come from. Each
+  // velocity stage's liquid faces (cells liquid in the step's start phi, or
+  // their +face neighbour) by zone (left x < wall.low, tube, right x >=
+  // wall.high): the largest |component| and the faces over the energy bound
+  // sqrt(2 g (authored top - floor)); and the zones' liquid volume (mL, a
+  // vertex's clamp(1/2 - phi/h) of h^3) after each phi stage.
+  const flowSteps = new Set(String(option("flowStages") ?? "").split(",").filter(Boolean).map(Number));
+  let flowTaken: { name: string; kind: "phi" | "velocity"; done: () => Promise<Float32Array> }[] | undefined;
+  let flowMeasured: { name: string; done: () => Promise<Uint32Array> }[] | undefined;
+  const rawProbe = probes.find(p => p.key.startsWith("raw/"));
+  const resetBuffer = device.createBuffer({ label: "Tier budget probe reset", size: 4 * W, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(resetBuffer, 0, reset);
+  /** The probe's liquid sums (left, right, total, cells) of texture at this point of encoder. */
+  const measureStage = (encoder: GPUCommandEncoder, texture: GPUTexture): (() => Promise<Uint32Array>) | undefined => {
+    if (!rawProbe) return undefined;
+    const b = device.createBuffer({ label: "Tier budget stage probe", size: 4 * W, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const out = device.createBuffer({ label: "Tier budget stage probe readback", size: 4 * W, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    encoder.copyBufferToBuffer(resetBuffer, 0, b, 0, 4 * W);
+    const pass = encoder.beginComputePass({ label: "Tier budget stage probe" }); pass.setBindGroup(0, frame.ownership.bindGroup); pass.setBindGroup(1, rawGroup(texture, b));
+    frame.ownership.dispatchAllCounted(pass, rawProbe.pipeline); pass.end();
+    encoder.copyBufferToBuffer(b, 0, out, 0, 4 * W);
+    return async () => { await out.mapAsync(GPUMapMode.READ); const u = new Uint32Array(out.getMappedRange().slice(0)); out.unmap(); out.destroy(); b.destroy(); return u; };
+  };
+  const flowCounts = new Map<string, number>();
+  if (flowSteps.size) {
+    type Stage = Record<string, (...a: unknown[]) => unknown>;
+    const m = (solver as unknown as { mixedFrame: { fields: Record<string, GPUTexture>; surface: Stage; narrowBandFlip: Stage; momentum: Stage; forces: Stage; band: Stage; extension: Stage; projection: Stage } }).mixedFrame;
+    const hook = (object: Stage, key: string, name: string, kind: "phi" | "velocity", texture: string, before = false, when?: (a: unknown[]) => boolean) => {
+      assert.ok(object[key], `no stage ${key}`); assert.ok(m.fields[texture], `no field ${texture}`); const original = object[key]!.bind(object);
+      const take = (encoder: GPUCommandEncoder) => {
+        if (!flowTaken) return; const t = m.fields[texture]!, detail = uniformDetailField(t); if (!detail) return;
+        const k = (flowCounts.get(name) ?? 0) + 1; flowCounts.set(name, k);
+        flowTaken.push({ name: k > 1 ? `${name}#${k}` : name, kind, done: detail.storage.capture(encoder, t) });
+        if (kind === "phi") { const m = measureStage(encoder, t); if (m) flowMeasured?.push({ name: k > 1 ? `${name}#${k}` : name, done: m }); }
+      };
+      object[key] = (...a: unknown[]) => { const go = !when || when(a); if (before && go) take(a[0] as GPUCommandEncoder); const r = original(...a); if (!before && go) take(a[0] as GPUCommandEncoder); return r; };
+    };
+    hook(m.momentum, "encode", "momentum/departure", "velocity", "departure");
+    hook(m.narrowBandFlip, "transfer", "transfer/velocity", "velocity", "velocity");
+    hook(m.narrowBandFlip, "move", "start", "phi", "phi", true);
+    hook(m.surface, "encode", "advect", "phi", "phiScratch");
+    hook(m.narrowBandFlip, "reconstruct", "reconstruct", "phi", "phi");
+    hook(m.narrowBandFlip, "clearAir", "clearAir", "phi", "phi");
+    hook(m.narrowBandFlip, "retire", "retire", "phi", "phi");
+    hook(m.narrowBandFlip, "redistance", "redistance", "phi", "phi");
+    hook(m.forces, "encode", "forces/scratch", "velocity", "velocityScratch");
+    hook(m.projection, "encode", "project/scratch", "velocity", "velocityScratch", false, a => a[1] === "project");
+    hook(m.band, "encodeProject", "band/velocity", "velocity", "velocity");
+    hook(m.band, "encodeProject", "band/scratch", "velocity", "velocityScratch");
+    hook(m.extension, "encode", "extension/scratch", "velocity", "velocityScratch");
+    hook(m.extension, "finishPair", "finishPair/scratch", "velocity", "velocityScratch");
+  }
+  const authoredFloor_m = Math.min(...(scene.fluid.initialLiquidVolumes ?? []).map(v => "min_m" in v ? (v as { min_m: { y: number } }).min_m.y : 0));
+  const bound_m_s = Math.sqrt(2 * gravity * Math.max(0, authoredTop_m - Math.min(0, authoredFloor_m)));
+  const printFlowStages = async (step: number) => {
+    const taken = flowTaken ?? []; flowTaken = undefined; flowCounts.clear(); if (!taken.length) return;
+    // The GPU probe's sums (as the rows' liquid_m3, mL) after each phi stage.
+    const gpu: Record<string, Record<string, number>> = {};
+    for (const mm of flowMeasured ?? []) { const u = await mm.done(); gpu[mm.name] = { left: +(wide(u, 2) * cell3 * 1e6).toFixed(2), right: +(wide(u, 4) * cell3 * 1e6).toFixed(2), total: +(wide(u, 0) * cell3 * 1e6).toFixed(2), wall: +(wide(u, 6) * cell3 * 1e6).toFixed(2) }; }
+    flowMeasured = undefined;
+    const X = g.nx + 1, Y = g.ny + 1, zone = (x: number) => x < wall.low ? 0 : x < wall.high ? 1 : 2, names = ["left", "tube", "right"];
+    let liquid: Uint8Array | undefined; const stages: Record<string, unknown>[] = [];
+    const fields: { name: string; field: Float32Array }[] = [];
+    for (const c of taken) {
+      const field = await c.done();
+      if (c.kind === "phi") {
+        const vol = [0, 0, 0];
+        for (let z = 0; z <= g.nz; z++) for (let y = 0; y <= g.ny; y++) for (let x = 0; x <= g.nx; x++) {
+          const f = field[x + X * (y + Y * z)]! / h; if (f >= 0.5) continue; vol[zone(Math.min(x, g.nx - 1))]! += Math.min(1, 0.5 - f);
+        }
+        stages.push({ stage: c.name, mL: Object.fromEntries(vol.map((v, i) => [names[i], +(v * h ** 3 * 1e6).toFixed(2)])), gpu: gpu[c.name] });
+        if (c.name === "start" || (!liquid && c.name === "redistance")) {
+          liquid = new Uint8Array(g.nx * g.ny * g.nz);
+          for (let z = 0; z < g.nz; z++) for (let y = 0; y < g.ny; y++) for (let x = 0; x < g.nx; x++) {
+            let sum = 0; for (let k = 0; k < 8; k++) sum += field[(x + (k & 1)) + X * ((y + ((k >> 1) & 1)) + Y * (z + (k >> 2)))]!;
+            liquid[x + g.nx * (y + g.ny * z)] = sum < 0 ? 1 : 0;
+          }
+        }
+        continue;
+      }
+      fields.push({ name: c.name, field });
+    }
+    if (!liquid) return;
+    const L = liquid, wet = (x: number, y: number, z: number, a: number) => {
+      if (L[x + g.nx * (y + g.ny * z)]) return true;
+      const n = [x, y, z]; n[a]!++; return n[0]! < g.nx && n[1]! < g.ny && n[2]! < g.nz && L[n[0]! + g.nx * (n[1]! + g.ny * n[2]!)] === 1;
+    };
+    // The last velocity stage's fastest liquid faces, followed through every stage.
+    const last = fields[fields.length - 1]!, top: { x: number; y: number; z: number; a: number; s: number }[] = [];
+    for (const { name, field } of fields) {
+      const max = [0, 0, 0], over = [0, 0, 0];
+      for (let z = 0; z < g.nz; z++) for (let y = 0; y < g.ny; y++) for (let x = 0; x < g.nx; x++) for (let a = 0; a < 3; a++) {
+        const v = Math.abs(field[4 * (x + g.nx * (y + g.ny * z)) + a]!); if (!(v > 0) || !wet(x, y, z, a)) continue;
+        const k = zone(x); if (v > max[k]!) max[k] = v; if (v > bound_m_s) over[k]!++;
+        if (field === last.field && v > bound_m_s) { top.push({ x, y, z, a, s: v }); if (top.length > 64) { top.sort((p, q) => q.s - p.s); top.length = 32; } }
+      }
+      stages.push({ stage: name, maxSpeed: Object.fromEntries(max.map((v, i) => [names[i], +v.toFixed(3)])), overBound: Object.fromEntries(over.map((v, i) => [names[i], v])) });
+    }
+    top.sort((p, q) => q.s - p.s); top.length = Math.min(top.length, 10);
+    console.log(JSON.stringify({ flowStage: step, bound_m_s: +bound_m_s.toFixed(3), stages,
+      fastest: top.map(f => ({ face: [f.x, f.y, f.z, "xyz"[f.a]], liquidCell: L[f.x + g.nx * (f.y + g.ny * f.z)], values: Object.fromEntries(fields.map(({ name, field }) => [name, +field[4 * (f.x + g.nx * (f.y + g.ny * f.z)) + f.a]!.toFixed(3)])) })) }));
+  };
   await record(0, 0);
   for (let step = 1; step <= steps; step++) {
     frameReached = step;
     phiTaken = phiStageSteps.has(step) ? [] : undefined;
+    flowTaken = flowSteps.has(step) ? [] : undefined; flowMeasured = flowTaken ? [] : undefined;
     const wall_ms = await advance(step);
     await printPhiStages(step);
+    await printFlowStages(step);
     { const info = solver.info as unknown as Record<string, number | undefined>; dust.dustMass_cells += info.uniformVolumeDustMass_cells ?? 0; dust.orphanDustMass_cells += info.uniformVolumeOrphanDustMass_cells ?? 0; dust.steps++; }
     walls.push({ frame: step, wall_ms, afterSample: (step - 1) % every === 0 });
     if (solver.info.simulationPipelineError) throw new Error(String(solver.info.simulationPipelineError));
