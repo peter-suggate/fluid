@@ -503,7 +503,7 @@ ${this.hanging?uniformMixedMomentumUnitWGSL(this.sampler):""}
     this.tiers.encodeDecide(tiers,this.tierGroup);
     tiers.setBindGroup(0, this.ownership.bindGroup); tiers.setBindGroup(1,group.group); if (this.hanging) tiers.setBindGroup(2, this.ownership.hangingGroup);
     // The affine models of the regions the budget refused to retain: a
-    // workgroup a region, striding the pool (an unlisted region exits at once).
+    // workgroup a region, a fixed grid striding the held regions (umHeldPage).
     const regions=this.ownership.capacity.tiles/64;
     tiers.setPipeline(this.fitPipeline!);tiers.dispatchWorkgroups(uniformMomentumFitGrid(regions,4));
     tiers.setPipeline(this.residualPipeline!);tiers.dispatchWorkgroups(uniformMomentumFitGrid(regions,UNIFORM_MOMENTUM_RESIDUAL_PARTS));

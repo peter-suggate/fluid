@@ -8,6 +8,7 @@ import { uniformCompiledVelocityTapWGSL } from "./uniform-compiled-velocity-taps
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyNeighboursWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
+import { uniformStageListGroups, uniformStageListsWGSL } from "./uniform-stage-lists";
 import { UNIFORM_MIXED_HANGING_TAPS, UNIFORM_UNIT_HALO_EDGE, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource, uniformUnitHaloExtent, uniformUnitHaloWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 
 /** Workgroups a block of the unit halo fill: one a z-plane of its texels. */
@@ -224,7 +225,6 @@ export class UniformMixedHangingTaps {
       {binding:7,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float",viewDimension:"3d"}}]},[3]);
     this.halfStandIn=device.createTexture({label:"Uniform mixed unit halo half stand-in",size:[1,1,1],dimension:"3d",format:"rgba16float",usage:GPUTextureUsage.STORAGE_BINDING});
     const grid=ownership.capacity.address.blockGrid;this.haloBlockCount=grid[0]*grid[1]*grid[2];
-    if(this.haloBlockCount>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Unit halo marking launches a workgroup a block: ${this.haloBlockCount} blocks exceed ${device.limits.maxComputeWorkgroupsPerDimension}`);
     this.haloBlocks=device.createBuffer({label:"Uniform mixed unit halo blocks",size:64*this.haloBlockCount,usage:GPUBufferUsage.STORAGE});
     this.unitVelocity=this.createTaps("Uniform mixed unit velocity taps",halfHalo);
   }
@@ -269,7 +269,7 @@ export class UniformMixedHangingTaps {
     // One lane a texel of the halo texture, whatever its block holds
     // (uniformUnitHaloExtent): a stored block's page's taps and the cell
     // around them, each the value the unit interpolant reads for that tap.
-    const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+    const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read> negative:array<f32>;
 @group(1) @binding(2) var coarse:texture_3d<f32>;
@@ -296,15 +296,15 @@ ${uniformCoarseCacheWGSL+uniformCompiledVelocityTapWGSL+uniformUnitHaloWGSL+unif
 var<workgroup> haloSources:array<atomic<u32>,16>;
 var<workgroup> haloReach:array<atomic<u32>,16>;
 fn umHaloBit(l:vec3u)->u32{return l.x|(l.y<<3u)|(l.z<<6u);}
-@compute @workgroup_size(64) fn markUnitHalo(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let b=group.x;let live=b<UM_BLOCKS&&umBlockStored(b)&&umBlockWord(b)!=UM_FREE;
- if(lane<16u){atomicStore(&haloSources[lane],0u);atomicStore(&haloReach[lane],0u);}
- workgroupBarrier();
- if(live){
+// A held block a workgroup (umHeldBlock: a fixed grid strides them); only
+// the fill of the same held block reads its words.
+@compute @workgroup_size(64) fn markUnitHalo(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var r=group.x;r<umHeldBlockCount();r+=groups.x){
+  let b=umHeldBlock(r);
+  if(lane<16u){atomicStore(&haloSources[lane],0u);atomicStore(&haloReach[lane],0u);}
+  workgroupBarrier();
   for(var k=lane;k<512u;k+=64u){let key=512u*b+k;if(umTileWidth(key)==1u||umVelocityBlendMask(key)!=0u){atomicOr(&haloSources[k>>5u],1u<<(k&31u));}}
- }
- workgroupBarrier();
- if(live){
+  workgroupBarrier();
   for(var k=lane;k<512u;k+=64u){
    let l=umLocalTile(k);let lo=max(l,vec3u(1u))-vec3u(1u);let hi=min(l+vec3u(1u),vec3u(7u));var near=false;
    for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
@@ -312,21 +312,22 @@ fn umHaloBit(l:vec3u)->u32{return l.x|(l.y<<3u)|(l.z<<6u);}
    }}}
    if(near){atomicOr(&haloReach[k>>5u],1u<<(k&31u));}
   }
+  workgroupBarrier();
+  if(lane<16u){haloBlocks[16u*b+lane]=atomicLoad(&haloReach[lane]);}
+  workgroupBarrier();
  }
- workgroupBarrier();
- if(lane<16u){haloBlocks[16u*b+lane]=atomicLoad(&haloReach[lane]);}
 }
 // A block's texels, a workgroup a z-plane (y). A plane lies in one tile row:
 // its 10 x 10 tiles' words (marked, unit-or-slotted, SOLID) are staged
-// first, so a texel reads none of the tables; an unstored block's workgroups
-// and an unmarked tile's texels write nothing.
+// first, so a texel reads none of the tables; only held blocks are visited
+// (umHeldBlock, a fixed grid striding them) and an unmarked tile's texels
+// write nothing.
 const UM_HALO_MARKED=1u;const UM_HALO_UNIT=2u;const UM_HALO_SOLID=4u;
 var<workgroup> haloTiles:array<u32,100>;
-@compute @workgroup_size(64) fn fillUnitHalo(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let b=group.x;let live=b<UM_BLOCKS&&umBlockStored(b)&&umBlockWord(b)!=UM_FREE;
- let origin=(vec3i(umBlockPage(min(b,UM_BLOCKS-1u)))<<vec3u(5u))-vec3i(2);
+@compute @workgroup_size(64) fn fillUnitHalo(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let z=group.y;let tz=(z+2u)/4u;
- if(live){
+ for(var r=group.x;r<umHeldBlockCount();r+=groups.x){
+  let b=umHeldBlock(r);let origin=(vec3i(umBlockPage(b))<<vec3u(5u))-vec3i(2);
   for(var k=lane;k<100u;k+=64u){
    // Local tile t covers the texels with (l + 2) / 4 == t: its first, l = max(4 t, 2) - 2.
    let t=vec3u(k%10u,k/10u,tz);let tap=origin+vec3i(max(4u*t,vec3u(2u))-vec3u(2u));
@@ -336,13 +337,13 @@ var<workgroup> haloTiles:array<u32,100>;
    if(umCellKind(tap)==UM_SOLID){word|=UM_HALO_SOLID;}
    haloTiles[k]=word;
   }
- }
- workgroupBarrier();
- if(!live){return;}
- for(var i=lane;i<${UNIFORM_UNIT_HALO_EDGE**2}u;i+=64u){
-  let l=vec3u(i%${UNIFORM_UNIT_HALO_EDGE}u,i/${UNIFORM_UNIT_HALO_EDGE}u,z);let t=(l+vec3u(2u))/4u;
-  let word=haloTiles[t.x+10u*t.y];
-  if((word&UM_HALO_MARKED)!=0u){umFillUnitHaloTexel(b,origin+vec3i(l),l,word);}
+  workgroupBarrier();
+  for(var i=lane;i<${UNIFORM_UNIT_HALO_EDGE**2}u;i+=64u){
+   let l=vec3u(i%${UNIFORM_UNIT_HALO_EDGE}u,i/${UNIFORM_UNIT_HALO_EDGE}u,z);let t=(l+vec3u(2u))/4u;
+   let word=haloTiles[t.x+10u*t.y];
+   if((word&UM_HALO_MARKED)!=0u){umFillUnitHaloTexel(b,origin+vec3i(l),l,word);}
+  }
+  workgroupBarrier();
  }
 }
 fn umFillUnitHaloTexel(b:u32,tap:vec3i,l:vec3u,word:u32){
@@ -465,12 +466,13 @@ fn umCoarseSlots()->vec2u{let header=7u*UM_TILES+16u;let fine=umSupport[header];
     if(this.wallGroup)pass.setBindGroup(3,this.wallGroup);
     this.ownership.dispatchCounted(pass,this.slotGroups.has(group)?this.slotPipeline!:this.pipeline,this.ownership.capacity.tiles,"fineAndSeams");
     // Every fill but a slot fill refreshes its halo: the texels samples can read (markUnitHalo),
-    // a fixed grid of HALO_SLICES workgroups a block.
+    // HALO_SLICES workgroups a held block, a fixed grid striding them.
     const halo=this.haloGroups.get(group);
     if(halo){
       pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,halo.group);pass.setBindGroup(2,this.ownership.hangingGroup);
-      pass.setPipeline(uniformDetailPick(this.haloMarkPipeline!));pass.dispatchWorkgroups(this.haloBlockCount);
-      pass.setPipeline(uniformDetailPick(this.haloPipeline!));pass.dispatchWorkgroups(this.haloBlockCount,HALO_SLICES);
+      const blocks=uniformStageListGroups(this.haloBlockCount);
+      pass.setPipeline(uniformDetailPick(this.haloMarkPipeline!));pass.dispatchWorkgroups(blocks);
+      pass.setPipeline(uniformDetailPick(this.haloPipeline!));pass.dispatchWorkgroups(blocks,HALO_SLICES);
     }
     if(!shared)pass.end();
   }
