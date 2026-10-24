@@ -151,7 +151,9 @@ function score(name: NbflipAnalyticCase, rows: Row[]): Check[] {
   checks.push(check("fill-field volume drift (fraction)", Math.max(...rows.map(r => Math.abs(r.volume_m3 / first.volume_m3 - 1))), .01));
   const late = rows.filter(r => r.frame > rows.length / 2);
   const liveFrames = late.reduce((s, r) => s + r.tiers.live, 0) || 1;
-  checks.push(check("late tier changes per live region-frame", late.reduce((s, r) => s + r.tiers.changed, 0) / liveFrames, name === "rest" || name === "rest-step" ? 0 : .05));
+  // A translating body's regions must change tier as it enters and leaves
+  // them: free fall's late window needs ~0.0625 for that alone.
+  checks.push(check("late tier changes per live region-frame", late.reduce((s, r) => s + r.tiers.changed, 0) / liveFrames, name === "rest" || name === "rest-step" ? 0 : name === "free-fall" ? .08 : .05));
   checks.push(check("tier reversals per live region-frame", rows.reduce((s, r) => s + r.tiers.reversed, 0) / (rows.reduce((s, r) => s + r.tiers.live, 0) || 1), .01));
   if (name === "rest" || name === "rest-step") {
     const H = NBFLIP_ANALYTIC_POOL_CELLS * h;
