@@ -13,7 +13,15 @@
  * live, so the held blocks are the blocks of the live tiles of rank 512 r in
  * key order: the r-th held block is the block of the (512 r)-th smallest key
  * of the two sorted lists, found by a binary search of their merge. Its 16h
- * pages are 8 a block (umPageOfTile's order). Nothing is built or stored. */
+ * pages are 8 a block (umPageOfTile's order). Nothing is built or stored.
+ *
+ * The frame head's launches stride the pool's own lists instead
+ * (uniform-live-lists.ts): they run around the commit and bind the pool. A
+ * stage binds only its ownership, and these are that ownership's: the held
+ * blocks of the simulation ownership are the pool's resident blocks once the
+ * commit has named the stored set, but a standalone ownership has no pool,
+ * and the resident pressure ownership's lists are its static layout's (a
+ * stage over it scans every page). */
 
 /** The fixed grid of a stage's list launch: past it a workgroup strides. */
 export const UNIFORM_STAGE_LIST_GRID = 1024;
