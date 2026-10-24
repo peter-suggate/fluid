@@ -152,10 +152,13 @@ export class ProceduralSolidField {
   withEdits(edits: readonly SolidWorldVoxelPatch[]): ProceduralSolidField {
     return edits.length ? new ProceduralSolidField(this.source, [...this.edits, ...edits]) : this;
   }
+  // A lattice walk asks for the same brick eight cells running: the last key's answer is kept.
+  private lastBrick: [number, number, number, { values: readonly number[]; valid: Uint32Array } | undefined] = [NaN, NaN, NaN, undefined];
   at(p: V3) {
-    const c = p.map(Math.floor), b = this.bricks.get(c.map(v => v >> 3).join());
-    const i = (c[0]! & 7) + 8 * ((c[1]! & 7) + 8 * (c[2]! & 7));
-    return b && (b.valid[i >> 5]! & (1 << (i & 31))) ? { ...b, local: p.map((v, a) => v - (c[a]! >> 3) * 8) as unknown as V3 } : undefined;
+    const c0 = Math.floor(p[0]), c1 = Math.floor(p[1]), c2 = Math.floor(p[2]), x = c0 >> 3, y = c1 >> 3, z = c2 >> 3, last = this.lastBrick;
+    if (x !== last[0] || y !== last[1] || z !== last[2]) { last[0] = x; last[1] = y; last[2] = z; last[3] = this.bricks.get(`${x},${y},${z}`); }
+    const b = last[3], i = (c0 & 7) + 8 * ((c1 & 7) + 8 * (c2 & 7));
+    return b && (b.valid[i >> 5]! & (1 << (i & 31))) ? { ...b, local: [p[0] - x * 8, p[1] - y * 8, p[2] - z * 8] as unknown as V3 } : undefined;
   }
   sample(p: V3) { const b = this.at(p); return b ? sampleSolidNodes(b.values, b.local) : undefined; }
   open(c: V3) { const b = this.at(c); return b ? solidNodesOpen(b.values, b.local.map(v => v + 0.5) as unknown as V3, [1, 1, 1]) : undefined; }

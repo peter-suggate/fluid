@@ -64,9 +64,10 @@ function buriedVertices(closed: Uint8Array, dimensions: readonly [number, number
   const layers = sliceZ === undefined ? nz+1 : 1;
   const buried = new Uint8Array((nx+1)*(ny+1)*layers);
   for (let outputZ=0; outputZ<layers; outputZ++) for (let y=0; y<=ny; y++) for (let x=0; x<=nx; x++) {
-    const zs = sliceZ === undefined ? [outputZ-1, outputZ] : [Math.floor(sliceZ)];
+    // The incident cells: z in [outputZ-1, outputZ] (or the slice's one layer), y-1..y, x-1..x.
+    const zLow = sliceZ === undefined ? outputZ-1 : Math.floor(sliceZ), zHigh = sliceZ === undefined ? outputZ : zLow;
     let allClosed = true, any = false;
-    for (const z of zs) for (const cy of [y-1, y]) for (const cx of [x-1, x]) {
+    for (let z=zLow; z<=zHigh; z++) for (let cy=y-1; cy<=y; cy++) for (let cx=x-1; cx<=x; cx++) {
       if (cx<0 || cy<0 || z<0 || cx>=nx || cy>=ny || z>=nz) continue;
       any = true;
       if (!closed[cx+nx*(cy+ny*z)]) { allClosed = false; }
@@ -80,7 +81,7 @@ function buriedVertices(closed: Uint8Array, dimensions: readonly [number, number
       if (!closed[x+nx*(y+ny*z)]) open[(x>>2)+tx*((y>>2)+ty*(z>>2))] = 1;
     for (let z=0; z<=tz; z++) for (let y=0; y<=ty; y++) for (let x=0; x<=tx; x++) {
       let any = false;
-      for (const cz of [z-1, z]) for (const cy of [y-1, y]) for (const cx of [x-1, x])
+      for (let cz=z-1; cz<=z; cz++) for (let cy=y-1; cy<=y; cy++) for (let cx=x-1; cx<=x; cx++)
         if (cx>=0 && cy>=0 && cz>=0 && cx<tx && cy<ty && cz<tz && open[cx+tx*(cy+ty*cz)]) any = true;
       if (any) buried[4*x+(nx+1)*(4*y+(ny+1)*4*z)] = 0;
     }
@@ -100,7 +101,9 @@ function closedCell(scene: SceneDescription, dimensions: readonly [number, numbe
   const world = solidWorldForScene(scene);
   const boundary = proceduralSolidField(scene);
   const terrain = terrainColumnHeights(scene, nx, nz), hy = scene.container.height_m / ny;
-  return (x, y, z) => (boundary?.open([x,y,z]) ?? Number(sampleSolidWorld(world,[x,y,z],true).solidFraction === 0)) <= 1e-5
+  const cell: [number, number, number] = [0, 0, 0];
+  return (x, y, z) => (cell[0] = x, cell[1] = y, cell[2] = z,
+    boundary?.open(cell) ?? Number(sampleSolidWorld(world,cell,true).solidFraction === 0)) <= 1e-5
     || Math.fround(terrain[x+nx*z]! / hy) >= y + 1;
 }
 
