@@ -23,8 +23,7 @@ export interface UniformMixedLayout {
   readonly tileDimensions: Triple;
   /** Upper bit: h (set) or 4h owner width. Remaining bits: first active cell. */
   readonly tiles: Uint32Array<ArrayBuffer>;
-  /** The h tiles, then the 4h tiles, each in ascending owner order: by key,
-   * and by box index in a layout with no h tile. */
+  /** The h tiles, then the 4h tiles, each in ascending owner order: by key. */
   readonly fineTiles: Uint32Array<ArrayBuffer>;
   readonly coarseTiles: Uint32Array<ArrayBuffer>;
   /** Per tile: the 27-bit h neighbourhood mask with the maximum width in its
@@ -291,10 +290,8 @@ export function uniformMixedAllCoarseLayout(layout: UniformMixedLayout): Uniform
 
 /** widths: a byte per tile by box index; a tile with nothing stored takes no
  * part. Owners are numbered in ascending tile key, the h tiles' first (the
- * GPU builder's order). A layout with no h tile numbers its owners by box
- * index instead: it is the pressure root's ownership, whose rows, wall slots
- * and solid record are one box, and a box index no stored tile has is an
- * owner no tile names. */
+ * GPU builder's order), with or without an h tile: at most 63 an h tile past
+ * the stored tiles, never a box's worth. */
 function packUniformMixedLayout(lattice: RefinementRegionLattice, address: UniformLatticeAddress, widths: Uint8Array,
   regions: UniformMixedLayout["regions"]): UniformMixedLayout {
   const count = address.tileKeys;
@@ -304,21 +301,19 @@ function packUniformMixedLayout(lattice: RefinementRegionLattice, address: Unifo
   const fine: number[] = [], coarse: number[] = [];
   let fineCount = 0;
   uniformEachTile(address, (_key, x, y, z) => { if (widths[uniformBoxTileIndex(address, x, y, z)] === 1) fineCount++; });
-  const cellCount = fineCount ? 63 * fineCount + address.liveTiles : address.boxTiles;
+  const cellCount = 63 * fineCount + address.liveTiles;
   let fineBase = 0, coarseBase = fineCount * 64;
   uniformEachTile(address, (key, x, y, z) => {
     const index = uniformBoxTileIndex(address, x, y, z), isFine = widths[index] === 1;
     if (!isFine && widths[index] !== 4) throw new Error("Mixed ownership is h/4h");
-    if (!fineCount) { tiles[key] = index;coarse[index] = key;return; }
     tiles[key] = ((isFine ? fineBase : coarseBase) | (isFine ? MIXED_FINE_TILE : 0)) >>> 0;
     (isFine ? fine : coarse).push(key);
     if (isFine) fineBase += 64; else coarseBase += 1;
   });
   const stencils = mixedStencils(address, widths);
   const blendMasks=Uint32Array.from({length:count},(_,i)=>compileUniformBlendMask(stencils[2*i]!));
-  // With no h tile, coarse is indexed by box index: filter drops the indices no stored tile has.
   return { lattice, address, tileDimensions: address.tiles, tiles, stencils, blendMasks, fineTiles: Uint32Array.from(fine),
-    coarseTiles: Uint32Array.from(fineCount ? coarse : coarse.filter(() => true)), cellCount, metadataBytes: count * 20, regions };
+    coarseTiles: Uint32Array.from(coarse), cellCount, metadataBytes: count * 20, regions };
 }
 
 /** Second stencil word, bit 0: the tile is in the detail ring, an h tile

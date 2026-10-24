@@ -5,6 +5,7 @@ import { sceneCellSizes_m } from "../scene-lattice";
 import type { EditorHighlight } from "../editor-target";
 import type { SceneDescription, Vec3 } from "../model";
 import { decodeVoxelBlock, encodeVoxelBlock } from "../solid-patch/block";
+import { ellipsoidBounds, ellipsoidInsets } from "../solid-patch/ellipsoid-bounds";
 import { SOLID_PATCH_BLOCK_KIND, SOLID_PATCH_CYLINDER_KIND, SOLID_PATCH_ELLIPSOID_KIND,
   solidPatchKindId } from "../solid-patch/kind";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../solid-world";
@@ -55,15 +56,21 @@ function flippedPayload(patch: Patch, axis: 0 | 1 | 2): string {
  * A patch's image in the plane `2 x = centre` across one axis.
  *
  * A box, and the ellipsoid or cylinder inscribed in one, are symmetric about
- * every axis plane, so only their box moves: kind and axis are unchanged by any
- * reflection. A block's cells are not, so its payload is flipped along the
- * axis as well.
+ * every axis plane, so kind and axis survive reflection. Subcell ellipsoid
+ * insets swap sides; a block's cells are flipped along the axis as well.
  */
 export function mirrorPatch(patch: Patch, axis: 0 | 1 | 2, centre: number): Patch {
   const minimum = [...patch.minimum], maximumExclusive = [...patch.maximumExclusive];
   minimum[axis] = centre - patch.maximumExclusive[axis];
   maximumExclusive[axis] = centre - patch.minimum[axis];
+  let payload = patch.payload;
+  if (solidPatchKindId(patch) === SOLID_PATCH_ELLIPSOID_KIND && payload !== undefined) {
+    const insets = [...ellipsoidInsets(patch)];
+    [insets[axis], insets[axis + 3]] = [insets[axis + 3]!, insets[axis]!];
+    payload = JSON.stringify(insets);
+  }
   return { ...patch, minimum: minimum as unknown as Cell, maximumExclusive: maximumExclusive as unknown as Cell,
+    ...(payload === undefined ? {} : { payload }),
     ...(solidPatchKindId(patch) === SOLID_PATCH_BLOCK_KIND ? { payload: flippedPayload(patch, axis) } : {}) };
 }
 export const mirrorPatchX = (patch: Patch, centreX: number): Patch => mirrorPatch(patch, 0, centreX);
@@ -85,7 +92,7 @@ export function mirroredPatches(context: Pick<ToolContext, "scene" | "values">, 
   for (const axis of toolMirrorAxes(context.values)) {
     images = images.flatMap((patch) => {
       const image = mirrorPatch(patch, axis, centres[axis]);
-      return image.minimum[axis] === patch.minimum[axis] && solidPatchKindId(patch) !== SOLID_PATCH_BLOCK_KIND
+      return image.minimum[axis] === patch.minimum[axis] && image.payload === patch.payload && solidPatchKindId(patch) !== SOLID_PATCH_BLOCK_KIND
         ? [patch] : [patch, image];
     });
   }
@@ -155,7 +162,7 @@ const worldBox = (scene: SceneDescription, patch: Pick<Patch, "minimum" | "maxim
  * shape the bake evaluates, so the ghost is the solid that release will write.
  */
 function curveOutline(scene: SceneDescription, patch: Patch): Vec3[][] {
-  const box = worldBox(scene, patch);
+  const box = worldBox(scene, solidPatchKindId(patch) === SOLID_PATCH_ELLIPSOID_KIND ? ellipsoidBounds(patch) : patch);
   const lo = [box.min.x, box.min.y, box.min.z], hi = [box.max.x, box.max.y, box.max.z];
   const centre = lo.map((v, a) => (v + hi[a]!) / 2), radius = lo.map((v, a) => (hi[a]! - v) / 2);
   const point = (q: readonly number[]): Vec3 => ({ x: q[0]!, y: q[1]!, z: q[2]! });

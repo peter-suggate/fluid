@@ -1,5 +1,6 @@
 import type { SolidWorldCoordinate, SolidWorldVoxelPatch } from "../solid-world";
 import type { SolidPatchRasterizer } from "./kind";
+import { ellipsoidBounds } from "./ellipsoid-bounds";
 
 /**
  * The round shapes a patch box inscribes: an ellipsoid over its round axes and
@@ -30,10 +31,14 @@ interface InscribedQuadric {
   readonly minimumRadius: number;
 }
 
-function inscribedQuadric(patch: Pick<SolidWorldVoxelPatch, "minimum" | "maximumExclusive">,
+function inscribedQuadric(patch: Pick<SolidWorldVoxelPatch, "minimum" | "maximumExclusive" | "payload">,
   flatAxis: number | undefined): InscribedQuadric {
+  const subcell = flatAxis === undefined && patch.payload !== undefined;
+  if (subcell) {
+    patch = { ...patch, ...ellipsoidBounds(patch as SolidWorldVoxelPatch) };
+  }
   const half = patch.minimum.map((value, axis) => 0.5 * (patch.maximumExclusive[axis]! - value));
-  const round = half.map((value, axis) => axis !== flatAxis && value > 0.5);
+  const round = half.map((value, axis) => axis !== flatAxis && (value > 0.5 || subcell));
   return {
     centre: patch.minimum.map((value, axis) => value + half[axis]!) as unknown as SolidWorldCoordinate,
     half: half as unknown as SolidWorldCoordinate,
@@ -51,7 +56,7 @@ function inscribedQuadric(patch: Pick<SolidWorldVoxelPatch, "minimum" | "maximum
  * always at least half a cell away and so never decides anything.
  */
 export function inscribedQuadricSignedDistance_cells(
-  patch: Pick<SolidWorldVoxelPatch, "minimum" | "maximumExclusive">,
+  patch: Pick<SolidWorldVoxelPatch, "minimum" | "maximumExclusive" | "payload">,
   flatAxis: number | undefined,
   point: SolidWorldCoordinate,
 ): number {

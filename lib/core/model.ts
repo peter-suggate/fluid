@@ -360,6 +360,15 @@ export interface SceneDescription {
      * no storage, by page coordinate.
      */
     pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
+    /**
+     * Uniform NB-FLIP: storage capacity by tier, separate from the page pool.
+     * bricks: the h capacity in 8³-cell bricks (8 h tiles each). Set, it sizes
+     * every particle buffer: bricks·512 h cells × particlesPerFineCell
+     * (default 4), plus the spill reserve. Unset, particles keep the pool's
+     * sizing. A source or the initial band that needs more is fatal, naming
+     * these; optional reseeding at capacity is deferred.
+     */
+    tiers?: { bricks?: number; particlesPerFineCell?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -667,6 +676,9 @@ export function validateScene(scene: SceneDescription): string[] {
   if (pool?.memory_MiB !== undefined && (!(pool.memory_MiB > 0) || pool.blocks !== undefined)) {
     errors.push("A page pool's memory budget must be positive, and it replaces a block count");
   }
+  const tiers = scene.fluid?.tiers;
+  if (tiers?.bricks !== undefined && !(Number.isInteger(tiers.bricks) && tiers.bricks > 0)) errors.push("fluid.tiers.bricks must be a positive integer");
+  if (tiers?.particlesPerFineCell !== undefined && !(tiers.particlesPerFineCell > 0 && tiers.particlesPerFineCell <= 64)) errors.push("fluid.tiers.particlesPerFineCell must be in (0, 64]");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {

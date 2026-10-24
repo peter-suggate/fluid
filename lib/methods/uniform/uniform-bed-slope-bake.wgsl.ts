@@ -3,7 +3,10 @@
  * workgroups of 8x8 columns over a window of columns given by the params
  * block; a column's floor cells are its slots, lowest first.
  *
- * Scratch, by slot s = layers*(x + nx*z) + k:
+ * State only for the page columns of the bake's directory (a word a page
+ * column x + 64 z: its window slot plus one, 0 for none); a column without
+ * any is no neighbour and no kernel's. Scratch, by slot
+ * s = layers*(1024*(window slot) + (x&31) + 32*(z&31)) + k:
  *   meta   one word: bits 0..10 the floor cell's y, bit 11 a drop beside it,
  *          then five bits a direction (-x, +x, -z, +z): the neighbour's slot
  *          in its column (3 bits) and the step in y plus one (2 bits; 3 for
@@ -25,16 +28,17 @@ const BINDINGS:Readonly<Record<UniformBedSlopeBakeStage,string>>={
  build:`@group(0) @binding(1) var<storage,read> bsMask:array<u32>;
 @group(0) @binding(2) var<storage,read_write> bsMeta:array<u32>;
 @group(0) @binding(3) var<storage,read_write> bsA:array<u32>;
-@group(0) @binding(4) var<storage,read_write> bsB:array<u32>;`,
+@group(0) @binding(4) var<storage,read_write> bsB:array<u32>;
+@group(0) @binding(5) var<storage,read> bsDirectory:array<u32>;`,
  spread:`@group(0) @binding(1) var<storage,read> bsMeta:array<u32>;
 @group(0) @binding(2) var<storage,read> bsFrom:array<u32>;
-@group(0) @binding(3) var<storage,read_write> bsTo:array<u32>;`,
- // The mask's buffer again, for its lane: two cells share a word and belong
- // to different invocations, so a cell's sixteen bits are cleared and set
- // with atomics.
+@group(0) @binding(3) var<storage,read_write> bsTo:array<u32>;
+@group(0) @binding(4) var<storage,read> bsDirectory:array<u32>;`,
+ // The mask's buffer again, for its lane (atomic: the same binding the mask's own kernels read it by).
  resolve:`@group(0) @binding(1) var<storage,read_write> bsLane:array<atomic<u32>>;
 @group(0) @binding(2) var<storage,read> bsMeta:array<u32>;
-@group(0) @binding(3) var<storage,read> bsB:array<u32>;`,
+@group(0) @binding(3) var<storage,read> bsB:array<u32>;
+@group(0) @binding(4) var<storage,read> bsDirectory:array<u32>;`,
 };
 
 const COMMON=(l:UniformBedSlopeBakeLayout)=>/* wgsl */`
@@ -42,14 +46,18 @@ const COMMON=(l:UniformBedSlopeBakeLayout)=>/* wgsl */`
 struct BsParams{window:vec4u,bake:vec4u}
 @group(0) @binding(0) var<uniform> bsParams:BsParams;
 const BS_SIZE=vec3u(${l.size[0]}u,${l.size[1]}u,${l.size[2]}u);
-const BS_SHAPE=vec3u(${l.size[0]+2}u,${l.size[1]+2}u,${l.size[2]+2}u);
 const BS_LAYERS:u32=${l.layers}u;
 const BS_LANE:u32=${l.laneBaseWord}u;
 const BS_NONE:u32=0xffffffffu;
 const BS_POINT:u32=0xffffffu;
 const BS_STEP=array<vec2i,4>(vec2i(-1,0),vec2i(1,0),vec2i(0,-1),vec2i(0,1));
-fn bsCell(p:vec3i)->u32{let q=vec3u(p+vec3i(1));return q.x+BS_SHAPE.x*(q.y+BS_SHAPE.y*q.z);}
-fn bsColumn(x:u32,z:u32)->u32{return x+BS_SIZE.x*z;}
+fn bsPage(x:u32,z:u32)->u32{return (x>>5u)+64u*(z>>5u);}
+/** A column's index in the bake's state, BS_NONE for one it holds none for. */
+fn bsColumn(x:u32,z:u32)->u32{
+ let d=bsDirectory[bsPage(x,z)];
+ if(d==0u){return BS_NONE;}
+ return 1024u*(d-1u)+(x&31u)+32u*(z&31u);
+}
 fn bsLink(info:u32,d:u32)->u32{return (info>>(12u+5u*d))&31u;}
 /** The slot a link names, in the column one step along d. */
 fn bsNeighbour(x:u32,z:u32,d:u32,link:u32)->u32{
@@ -81,7 +89,9 @@ fn bsSolid(p:vec3i)->bool{return bsWindowSolid(p+BS_ORIGIN);}
 /** A column's floor cells: open over solid, the lowest BS_LAYERS of them. */
 @compute @workgroup_size(8,8,1) fn bsLayers(@builtin(global_invocation_id) id:vec3u){
  if(any(id.xy>=bsParams.window.zw)){return;}
- let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let base=BS_LAYERS*bsColumn(x,z);
+ let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
+ if(column==BS_NONE){return;}
+ let base=BS_LAYERS*column;
  var k=0u;var below=bsSolid(vec3i(i32(x),-1,i32(z)));
  for(var y=0u;y<BS_SIZE.y;y++){
   let here=bsSolid(vec3i(i32(x),i32(y),i32(z)));
@@ -93,7 +103,9 @@ fn bsSolid(p:vec3i)->bool{return bsWindowSolid(p+BS_ORIGIN);}
 /** Links to the floor cells a film reaches in one step, and the nosings beside the cell. */
 @compute @workgroup_size(8,8,1) fn bsLinks(@builtin(global_invocation_id) id:vec3u){
  if(any(id.xy>=bsParams.window.zw)){return;}
- let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let base=BS_LAYERS*bsColumn(x,z);
+ let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
+ if(column==BS_NONE){return;}
+ let base=BS_LAYERS*column;
  let c=vec2i(i32(2u*x+1u),i32(2u*z+1u));
  let low=vec2i(bsParams.window.xy);let high=low+vec2i(bsParams.window.zw);
  for(var k=0u;k<BS_LAYERS;k++){
@@ -106,7 +118,7 @@ fn bsSolid(p:vec3i)->bool{return bsWindowSolid(p+BS_ORIGIN);}
    let openBeside=!bsSolid(vec3i(q.x,i32(y),q.y));
    // A column outside the window is no neighbour: the window is grown past
    // every column whose state can reach a cell the bake writes.
-   if(all(q>=low)&&all(q<high)){
+   if(all(q>=low)&&all(q<high)&&bsColumn(u32(q.x),u32(q.y))!=BS_NONE){
     let other=BS_LAYERS*bsColumn(u32(q.x),u32(q.y));
     for(var j=0u;j<BS_LAYERS;j++){
      let y1=bsB[4u*(other+j)];
@@ -134,7 +146,9 @@ fn bsReach(p:u32,c:vec2i)->i32{
 /** The bed height of every floor cell from its nosings, in 1/4096 cell above the lattice's floor less one. */
 @compute @workgroup_size(8,8,1) fn bsHeight(@builtin(global_invocation_id) id:vec3u){
  if(any(id.xy>=bsParams.window.zw)){return;}
- let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let base=BS_LAYERS*bsColumn(x,z);
+ let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
+ if(column==BS_NONE){return;}
+ let base=BS_LAYERS*column;
  let c=vec2i(i32(2u*x+1u),i32(2u*z+1u));
  for(var k=0u;k<BS_LAYERS;k++){
   let s=base+k;let info=bsMeta[s];
@@ -159,7 +173,9 @@ fn bsReach(p:u32,c:vec2i)->i32{
 }
 fn bsRelax(id:vec3u,src:u32,dst:u32){
  if(any(id.xy>=bsParams.window.zw)){return;}
- let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let base=BS_LAYERS*bsColumn(x,z);
+ let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
+ if(column==BS_NONE){return;}
+ let base=BS_LAYERS*column;
  for(var k=0u;k<BS_LAYERS;k++){
   let s=base+k;let info=bsMeta[s];
   if(info==BS_NONE){break;}
@@ -185,7 +201,9 @@ const SPREAD=/* wgsl */`
 /** One step of the nearest nosings along the links: the neighbour's nosing of a level is this cell's of the same level. */
 @compute @workgroup_size(8,8,1) fn bsSpread(@builtin(global_invocation_id) id:vec3u){
  if(any(id.xy>=bsParams.window.zw)){return;}
- let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let base=BS_LAYERS*bsColumn(x,z);
+ let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
+ if(column==BS_NONE){return;}
+ let base=BS_LAYERS*column;
  let c=vec2i(i32(2u*x+1u),i32(2u*z+1u));
  for(var k=0u;k<BS_LAYERS;k++){
   let s=base+k;let info=bsMeta[s];
@@ -217,19 +235,10 @@ fn bsSide(info:u32,x:u32,z:u32,d:u32)->u32{
  if(link>=24u){return BS_NONE;}
  return bsB[4u*bsNeighbour(x,z,d,link)+BS_HEIGHT];
 }
-/** The lane of a column's cells: zero, but for its floor cells with a bed height, the height's gradient. */
-@compute @workgroup_size(8,8,1) fn bsResolve(@builtin(global_invocation_id) id:vec3u){
- if(any(id.xy>=bsParams.bake.zw)){return;}
- let x=bsParams.bake.x+id.x;let z=bsParams.bake.y+id.y;let base=BS_LAYERS*bsColumn(x,z);
- for(var y=0u;y<BS_SIZE.y;y++){
-  let i=bsCell(vec3i(i32(x),i32(y),i32(z)));
-  atomicAnd(&bsLane[BS_LANE+(i>>1u)],~(0xffffu<<(16u*(i&1u))));
- }
- for(var k=0u;k<BS_LAYERS;k++){
-  let s=base+k;let info=bsMeta[s];
-  if(info==BS_NONE){break;}
+/** A floor cell's lane word: (y + 1) << 16 | the height's gradient, 0 for none or level. */
+fn bsEntry(s:u32,info:u32,x:u32,z:u32)->u32{
   let h=bsB[4u*s+BS_HEIGHT];
-  if(h==BS_NONE){continue;}
+  if(h==BS_NONE){return 0u;}
   // In 1/8192 cell a cell: the centred difference, or the one side that has a height.
   var g=vec2i(0);
   for(var axis=0u;axis<2u;axis++){
@@ -239,7 +248,7 @@ fn bsSide(info:u32,x:u32,z:u32,d:u32)->u32{
    else if(low!=BS_NONE){g[axis]=2*(i32(h)-i32(low));}
   }
   let m2=u32(dot(g,g));
-  if(m2<${l.minSlope2}u||m2>${l.maxSlope2}u){continue;}
+  if(m2<${l.minSlope2}u||m2>${l.maxSlope2}u){return 0u;}
   if(m2>${4096*4096}u){
    // Past half a cell a cell by rounding alone: brought back to it.
    var r=bsRoot(m2);
@@ -248,8 +257,18 @@ fn bsSide(info:u32,x:u32,z:u32,d:u32)->u32{
   }
   let size=min((254*abs(g)+4096)/8192,vec2i(127));let lane=select(size,-size,g<vec2i(0));
   let entry=(u32(lane.x)&255u)|((u32(lane.y)&255u)<<8u);
-  let i=bsCell(vec3i(i32(x),i32(info&2047u),i32(z)));
-  if(entry!=0u){atomicOr(&bsLane[BS_LANE+(i>>1u)],entry<<(16u*(i&1u)));}
+  return select(0u,entry|(((info&2047u)+1u)<<16u),entry!=0u);
+}
+/** The lane of a column with one: a word a floor cell, zero but for one with a bed height, the height's gradient. */
+@compute @workgroup_size(8,8,1) fn bsResolve(@builtin(global_invocation_id) id:vec3u){
+ if(any(id.xy>=bsParams.bake.zw)){return;}
+ let x=bsParams.bake.x+id.x;let z=bsParams.bake.y+id.y;let column=bsColumn(x,z);
+ let slot=atomicLoad(&bsLane[BS_LANE+bsPage(x,z)]);
+ if(slot==0u||column==BS_NONE){return;}
+ let at=slot+BS_LAYERS*((x&31u)+32u*(z&31u));let base=BS_LAYERS*column;
+ for(var k=0u;k<BS_LAYERS;k++){
+  let s=base+k;let info=bsMeta[s];
+  atomicStore(&bsLane[at+k],select(bsEntry(s,info,x,z),0u,info==BS_NONE));
  }
 }`;
 
