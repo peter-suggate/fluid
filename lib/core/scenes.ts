@@ -55,6 +55,7 @@ import { HERO_GARDEN_BLENDER_ID, createHeroGardenBlenderScene, heroGardenBlender
 import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
 import { FOREST_WATERFALL_ID, createForestWaterfallScene, forestWaterfallCamera } from "./forest-waterfall-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
+import { createReservoirSeepScene, RESERVOIR_SEEP_CAMERA, RESERVOIR_SEEP_ID } from "./reservoir-seep-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
 import type { EnvironmentId } from "./environments";
@@ -1466,6 +1467,18 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: { distance_m: 5.2, target_m: { x: 0, y: 0.65, z: 0 }, elevation_rad: 0.62, azimuth_rad: 0.7 },
     methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
       overrides: { rigidCoupling: "on" } },
+  }),
+  defineScene({
+    id: RESERVOIR_SEEP_ID,
+    name: "Deep reservoir · tiny seep",
+    blurb: "Deep water on the left, an empty catch chamber on the right. A dividing wall has a 5 mm (h) throat with rounded mouths. Hydrostatic pressure drives the seep through a 512×256×64 lattice (8.4 million finest cells). Detail follows the jet while quiet water can coarsen; the page pool reserves at least 25% growth space. Press Play to start.",
+    audience: "explore", shelf: "Tanks", environment: "stage",
+    build: () => createReservoirSeepScene(),
+    buildAt: lattice => createReservoirSeepScene(lattice.cellSize_m),
+    camera: RESERVOIR_SEEP_CAMERA,
+    methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
+      overrides: { detailPolicy: "dynamic", detailNearFocus: "off", detailBudgetPercent: 5,
+        regionTiering: "error", warmResolution: "h" } },
   }),
   ...([false, true] as const).map(wet => defineScene({
     id: wet ? "interactive-pool" : "interactive-playground",
