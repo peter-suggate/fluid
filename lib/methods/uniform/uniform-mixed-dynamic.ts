@@ -91,8 +91,8 @@ const CENSUS_TILE_GRID=4096;
  * region's 27-region neighbourhood has run non-COLD since, so phi, velocity,
  * widths and the open-cell masks classify read are the ones it saw. */
 const REPLAY_WORDS=10;
-/** pageMark's fixed grid: a workgroup a page, strided. */
-const PAGE_MARK_GRID=4096;
+/** pageMark's fixed grid: a workgroup a visited page at a time, strided. */
+const PAGE_MARK_GRID=UNIFORM_LIVE_GROUP_GROUPS;
 /** Persistent words after the importance words: a hold per tile, the
  * budget's score cutoff, its histogram. */
 const importanceStateWords=(tiles:number)=>tiles;

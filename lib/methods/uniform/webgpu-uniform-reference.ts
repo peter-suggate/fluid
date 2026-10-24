@@ -733,10 +733,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const detailStorage = this.detailStorage = new UniformDetailStorage(device, address);
     // Vertex phi where nothing is stored: the initial level set's value far from liquid (uniformLatticeInitialPhi).
     const emptyPhi = uniformLatticeFarPhi(scene);
-    const field = (label: string, kind: UniformDetailClass) =>
-      this.fieldPages.adopt(detailStorage.createField(label, kind, kind === "face" ? "rgba32float" : "r32float", false, kind === "vertex" ? emptyPhi : 0), kind === "vertex" ? address.vertexBox : address.cells);
+    const field = (label: string, kind: UniformDetailClass, perTile = false) =>
+      this.fieldPages.adopt(detailStorage.createField(label, kind, kind === "face" ? "rgba32float" : "r32float", perTile, kind === "vertex" ? emptyPhi : 0), kind === "vertex" ? address.vertexBox : address.cells);
     const hVelocity = (label: string) => field(label, "face");
     const hScalar = (label: string) => field(label, "cell");
+    // Base only at every capacity (no h texels): every live access is a tile
+    // origin (volume B: written by the pressure transfer, read by the 4h
+    // projection), or there is none (gamma A, the legacy correction).
+    const tileScalar = (label: string) => field(label, "cell", true);
     this.velocityA = hVelocity("Uniform reference velocity A");
     this.velocityB = hVelocity("Uniform reference velocity B");
     // The mixed frame carries no MacCormack momentum (assertUniformMixedOptions): Geometric binds a placeholder.
@@ -756,10 +760,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.pressureA = pressure("Uniform reference pressure A");
     this.pressureB = pressure("Uniform reference pressure B");
     this.volumeA = hScalar("Uniform reference volume A");
-    this.volumeB = hScalar("Uniform reference volume B");
+    this.volumeB = tileScalar("Uniform reference volume B");
     this.surfaceA = hScalar("Uniform reference smoothed surface A");
     this.surfaceB = hScalar("Uniform reference smoothed surface B");
-    this.gammaA = hScalar("Uniform reference transport gamma A");
+    this.gammaA = tileScalar("Uniform reference transport gamma A");
     this.gammaB = hScalar("Uniform reference transport gamma B");
     {
       this.vertexPhiField = field("Uniform Geometric vertex phi", "vertex");
