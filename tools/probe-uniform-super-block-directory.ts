@@ -12,7 +12,8 @@
  * Scenarios: a super-block claimed, shared, emptied and retired, and claimed
  * again after its quarantine; a walk of 300 commits of random clusters across
  * negative and wrapped coordinates (claims, retires and slot reuse every
- * commit); the superBlocks fatal; an alias of two super-blocks of one entry.
+ * commit); sparse pages across the solver's 256-page window; the
+ * superBlocks fatal; an alias of two super-blocks of one entry.
  * node --import tsx tools/probe-uniform-super-block-directory.ts
  */
 import assert from "node:assert/strict";
@@ -140,6 +141,18 @@ async function harness(options: UniformPagePoolOptions) {
   }
   assert.ok(reused > 0 && seen.size <= 40);
   console.log(JSON.stringify({ walk: 300, slotsUsed: seen.size, slotReuses: reused }));
+  h.destroy();
+}
+// The solver's window, 256 pages an axis: sparse pages across 250 of them,
+// inside and past the flat window, then a shifted set; slots retire behind them.
+{
+  const h = await harness({ blocks: 64, idleSteps: 1, superBlocks: 64, hostCapacity: 64 });
+  const xs = [-1, 0, 31, 61, 62, 63, 64, 100, 127, 128, 200, 249];
+  let s = await h.commit(xs.flatMap(x => [[x, 0, 0], [x, 70, 3], [x, 2, 130]] as Page[]));
+  assert.equal(s.resident.size, 3 * xs.length);
+  s = await h.commit(xs.map(x => [x + 1, 5, 250] as Page));
+  assert.equal(s.resident.size, xs.length);
+  console.log(JSON.stringify({ window: 256, pages: 3 * xs.length, held: s.held.size }));
   h.destroy();
 }
 // The superBlocks fatal: three super-blocks asked of two slots.
