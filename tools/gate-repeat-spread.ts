@@ -24,9 +24,11 @@
  *   --baseline=/abs/snapshot --candidate=/abs/snapshot
  *   [--scene=rest|cold|warm|splash|hot|<scene id>] [--length=128] [--depth=32]
  *   [--pool-blocks=N] [--steps=70] [--repeats=3] [--stats-every=10] [--out=DIR] [--gate="RUNNER MODE"]
- *   [--differ=key,key]
+ *   [--differ=key,key] [--set=key:value,key:value]
  * --differ: method params whose resolved values may differ between the arms
  * (a change of defaults, gated as an A/B); every other value must match.
+ * --set: method params both arms take in place of their resolved values
+ * (a number where the value parses as one), e.g. volumeControlSeconds:0.
  * --gate: construct every instance (mostly CPU: pipeline compiles) first,
  * then hold a GPU runner slot only over the frames: the gate command runs
  * `cat` once the slot is held, and the slot is released when its stdin
@@ -47,8 +49,12 @@ import { METRICS, repeatSpreadVerdict as verdict, type Metric } from "./gate-rep
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
-for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|repeats|stats-every|scene|length|depth|pool-blocks|out|gate|rescore|differ)=.+$/);
+for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|repeats|stats-every|scene|length|depth|pool-blocks|out|gate|rescore|differ|set)=.+$/);
 const differ = new Set((option("differ") ?? "").split(",").filter(Boolean));
+const sets = Object.fromEntries((option("set") ?? "").split(",").filter(Boolean).map(pair => {
+  const at = pair.indexOf(":"); assert.ok(at > 0, `--set=${pair}: key:value`);
+  const raw = pair.slice(at + 1); return [pair.slice(0, at), raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : raw];
+}));
 const steps = Number(option("steps") ?? 70), repeats = Number(option("repeats") ?? 3), statsEvery = Number(option("stats-every") ?? 10);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(repeats) && repeats >= 2 && Number.isInteger(statsEvery) && statsEvery > 0);
 const roots = [option("baseline"), option("candidate")].map(r => resolve(r ?? "")); assert.ok(option("rescore") || (option("baseline") && option("candidate")));
@@ -117,6 +123,7 @@ try {
       const definition = getSceneDefinition(sceneOption); built = structuredClone(sceneDocument(definition));
       quality = definition.methodProfile.quality; armValues = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile.overrides });
     }
+    for (const [key, value] of Object.entries(sets)) { assert.ok(key in armValues, `--set: ${key} is not a method param of ${cwd}`); armValues[key] = value; }
     if (poolBlocks !== undefined) built.fluid = { ...built.fluid, pagePool: { ...built.fluid?.pagePool, blocks: poolBlocks } } as SceneDescription["fluid"];
     const step = method.effectiveStep_s?.(built, armValues) ?? built.numerics.fixedDt_s;
     built.duration_s = Math.max(built.duration_s, steps * step);

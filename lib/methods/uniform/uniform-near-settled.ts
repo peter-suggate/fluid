@@ -15,7 +15,7 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   triggers, like any other liquid; "always" keeps every source tile hot.
  * - bandExit: "returns" ends the h band's V-cycles at 0.05 1/s
  *   (UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL); "strict" only at its 1e-4 1/s tolerance.
- * - bandCycles: the h band's V-cycles at most (1..8, default 3).
+ * - bandCycles: the h band's V-cycles at most (1..8, default 4).
  * - pressureTail: "auto" solves the band's coarsest correction over its 32h
  *   rows (a row a page) up to 4096 pages and over the super-block tail's
  *   128h rows above; "superblocks" always takes the super-block tail.
@@ -121,7 +121,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  rootTiles:values.rootTiles==="octant"?"octant":"page",
  rootCoarse:values.rootCoarse==="tiled"?"tiled":"fused",
  rootReserve:values.rootReserve==="parallel"?"parallel":"fused",
- bandCycles:typeof values.bandCycles==="number"&&Number.isInteger(values.bandCycles)?Math.min(8,Math.max(1,values.bandCycles)):3,
+ bandCycles:typeof values.bandCycles==="number"&&Number.isInteger(values.bandCycles)?Math.min(8,Math.max(1,values.bandCycles)):4,
  pressureTail:values.pressureTail==="superblocks"?"superblocks":"auto",
  surfaceImpulse:values.surfaceImpulse==="full"?"full":"energy",
  traceSubsteps:values.traceSubsteps==="travel"?"travel":"gradient",
