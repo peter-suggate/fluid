@@ -1,5 +1,5 @@
 import { settleGPUInitialization } from "../../core/gpu-initialization";
-import { UniformNarrowBandFlip } from "./uniform-narrow-band-flip";
+import { UniformNarrowBandFlip, type NarrowBandParticleBudget } from "./uniform-narrow-band-flip";
 import { NARROW_BAND_AIR_CHANGED_WORD } from "./uniform-narrow-band-air.wgsl";
 import {UNIFORM_MIXED_OVERFLOW_FINE,uniformMixedDetailViolationWord} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedHangingBytes} from "./uniform-mixed-velocity-sampling.wgsl";
@@ -248,7 +248,9 @@ export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;b
  /** Host cold-frame skip (UniformColdFrame): "on" (default) leaves out launches of stages with no work in the lagged region heat; "off" encodes every launch. */
  coldFrameSkip?:"on"|"off";
  /** NB-FLIP regionTiering, warmResolution, particleSeeding (default uniformNearSettled()). */
- nearSettled?:UniformNearSettled}
+ nearSettled?:UniformNearSettled;
+ /** The particles' h capacity (scene fluid.tiers): absent, they keep the pool's sizing (UniformNarrowBandFlip). */
+ particles?:NarrowBandParticleBudget}
 
 export class UniformMixedFrame {
  /** The NB-FLIP near-settled settings, fixed for the frame's life. */
@@ -487,7 +489,7 @@ export class UniformMixedFrame {
     band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded");
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",capacity.particles);
   this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
