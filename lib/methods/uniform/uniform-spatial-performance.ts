@@ -31,7 +31,7 @@ export function decodeUniformSpatialWork(raw: UniformSpatialRaw): SpatialWorkCel
   const out: SpatialWorkCell[] = [];
   for (let block = 1; block < raw.blocks.length - 1; block++) {
     const word = raw.blocks[block]!; if (word === 0xffffffff) continue;
-    const page = [word & 63, (word >>> 6) & 63, (word >>> 12) & 63].map((v, a) => (v - raw.framePage[a]!) & 63);
+    const page = [word & 255, (word >>> 8) & 255, (word >>> 16) & 255].map((v, a) => (v - raw.framePage[a]!) & 255);
     for (let local = 0; local < 512; local++) {
       const xyz = [local & 7, (local >>> 3) & 7, local >>> 6];
       const t = 512 * block + local, owners = raw.tiles[t]! >>> 31 ? 64 : 1;

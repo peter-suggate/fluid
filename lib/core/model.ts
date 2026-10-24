@@ -359,7 +359,7 @@ export interface SceneDescription {
      * shuffle of the pages' blocks. air: pages of the box seeded as air, with
      * no storage, by page coordinate.
      */
-    pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
+    pagePool?: { blocks?: number; memory_MiB?: number; /** Super-block slots of the page directory (128³ cells each); default 1.5 x a closed box's footprint, two a block with an open top. */ superBlocks?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
     /**
      * Uniform NB-FLIP: storage capacity by tier, separate from the page pool.
      * bricks: the h capacity in 8³-cell bricks (8 h tiles each). Set, it sizes
@@ -680,6 +680,9 @@ export function validateScene(scene: SceneDescription): string[] {
   const pool = scene.fluid?.pagePool;
   if (pool?.memory_MiB !== undefined && (!(pool.memory_MiB > 0) || pool.blocks !== undefined)) {
     errors.push("A page pool's memory budget must be positive, and it replaces a block count");
+  }
+  if (pool?.superBlocks !== undefined && !(Number.isInteger(pool.superBlocks) && pool.superBlocks >= 1 && pool.superBlocks <= 4094)) {
+    errors.push("A page pool's super-blocks must be an integer in 1..4094");
   }
   const tiers = scene.fluid?.tiers;
   if (tiers?.bricks !== undefined && !(Number.isInteger(tiers.bricks) && tiers.bricks > 0)) errors.push("fluid.tiers.bricks must be a positive integer");

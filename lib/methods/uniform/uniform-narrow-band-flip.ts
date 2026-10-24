@@ -864,7 +864,7 @@ fn nbSourcePhi(p:vec3f,value:f32)->f32{
 // of 32 cells (the greatest raised). The host stops the run (noteReceipt);
 // the sample is not clamped into a stored cell or counted in one.
 fn nbArrived(q:vec3f){
- let page=vec3u(q)>>vec3u(5u);atomicStore(&state[3],4u);atomicMax(&state[11],0x80000000u|page.x|(page.y<<6u)|(page.z<<12u));
+ let page=vec3u(q)>>vec3u(5u);atomicStore(&state[3],4u);atomicMax(&state[11],0x80000000u|(page.x&255u)|((page.y&255u)<<8u)|((page.z&255u)<<16u));
 }
 // Gather/addition/velocity support reaches neighboring tiles. Erasure heat
 // belongs to occupied tiles: dilating it erodes unseeded neighbors.
@@ -1807,7 +1807,7 @@ ${narrowBandSurfaceWGSL}
   // Persistent samples own the budget first. At capacity optional reseeding
   // is deferred (reseedClipped); never destroy a surface to make room for it.
   // Liquid a source or the initial band must add has no such deferral.
-  if(words[3]===4){const p=words[11]!;throw new Error(`Narrow-band FLIP: a particle arrived in page (${p&63},${(p>>>6)&63},${(p>>>12)&63}), which holds no storage; the residency closure is too small`);}
+  if(words[3]===4){const p=words[11]!;throw new Error(`Narrow-band FLIP: a particle arrived in page (${p&255},${(p>>>8)&255},${(p>>>16)&255}), which holds no storage; the residency closure is too small`);}
   const budget=this.budget&&(words[3]>=5&&words[3]<=7||words[3]===9)?`; fluid.tiers.bricks and fluid.tiers.particlesPerFineCell size it (${this.budget.fineTiles} h tiles at ${this.budget.perFineCell} a fine cell)`:"";
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory longer than the lattice (${NARROW_BAND_TRACE_REACH} cells an axis)`:words[3]===2?"nonfinite velocity"
    :words[3]===5?`particle bank is full: brick overflow exhausted the free tail of the ${this.capacity}-record pool`

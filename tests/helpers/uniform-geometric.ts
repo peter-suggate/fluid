@@ -46,15 +46,15 @@ export async function advanceUniform(solver:WebGPUUniformReferenceSolver,time:nu
 export async function readUniformLiveAddress(device:GPUDevice,solver:WebGPUUniformReferenceSolver):Promise<UniformLatticeAddress>{
  const address=(solver as unknown as {address:UniformLatticeAddress}).address;
  const pool=(solver as unknown as {mixedFrame:{pagePool:UniformPagePool}}).mixedFrame.pagePool,l=pool.layout;
- // uniformPageWord indexes a 64-page table, as the pool's default.
- assert.equal(l.table,64,"The live directory read assumes a 64-page table");
+ // uniformPageWord reads the directory of the solver's 256-page window, as the pool's default.
+ assert.equal(l.table,256,"The live directory read assumes the 256-page window");
  const read=device.createBuffer({size:4*l.state.words,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  try{
   const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(pool.state,0,read,0,4*l.state.words);device.queue.submit([encoder.finish()]);
   await read.mapAsync(GPUMapMode.READ);
   const state=new Uint32Array(read.getMappedRange().slice(0));
   const view=(at:number,words:number)=>state.subarray(at,at+words);
-  const seed={...address.seed,state,table:view(l.state.table,l.entries),blocks:view(l.state.blocks,l.blocks),tail:view(l.state.table,l.tail.words),
+  const seed={...address.seed,state,table:view(l.state.table,l.directory),blocks:view(l.state.blocks,l.blocks),tail:view(l.state.table,l.tail.words),
    resident:view(l.state.resident,state[UNIFORM_PAGE_POOL_STATUS.resident]!)};
   return {...address,seed};
  }finally{if(read.mapState==="mapped")read.unmap();read.destroy();}

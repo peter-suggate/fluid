@@ -41,7 +41,7 @@ ${uniformWindowAddressWGSL("bnTail","BN_TABLE","BN_BLOCKS")}
  let record=umBlockWord(b);let row=BN_ROWS+27u*b;
  // No page: AIR all round, or SOLID for the block that stands for it.
  if(record==BN_FREE){let word=select(0u,BN_SOLID,b==BN_BLOCKS-1u);for(var i=0u;i<27u;i++){bnTail[row+i]=word;}return;}
- let page=vec3i(vec3u(record&63u,(record>>6u)&63u,(record>>12u)&63u));
+ let page=vec3i(vec3u(record&255u,(record>>8u)&255u,(record>>16u)&255u));
  for(var i=0u;i<27u;i++){
   let q=page+vec3i(vec3u(i%3u,(i/3u)%3u,i/9u))-vec3i(1);
   let word=umPageWord(q);

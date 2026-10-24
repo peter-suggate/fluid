@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {uniformDetailModule,uniformDetailPipeline} from '../lib/methods/uniform/uniform-detail-fields';
-import {uniformWindowAddressWGSL} from '../lib/methods/uniform/uniform-window-address';
+import {UNIFORM_DIRECTORY_WORDS,uniformWindowAddressWGSL} from '../lib/methods/uniform/uniform-window-address';
 import {uniformLatticeAddress} from '../lib/methods/uniform/uniform-lattice-address';
 import type {UniformMixedOwnership} from '../lib/methods/uniform/uniform-mixed-ownership';
 
@@ -26,7 +26,7 @@ test('standalone ownership keeps runtime header interpretation through reseeding
  for(const d of h.descriptors)assert.deepEqual(d.compute.constants,{existing:7});
  const code=(h.module as unknown as {code:string}).code;
  assert.match(code,/override umFixedWorldGeometry:bool=false/);
- assert.match(code,/select\(pages\[0u\+262168u\],umWindowWord24,umFixedWorldGeometry\)/);
+ assert.ok(code.includes(`select(pages[0u+${UNIFORM_DIRECTORY_WORDS+24}u],umWindowWord24,umFixedWorldGeometry)`));
 });
 
 test('fixed world specializes both ownership prefixes and preserves explicit caller constants',async()=>{
@@ -70,7 +70,7 @@ test('paged scenes share modules and pipelines while bounds and capacity remain 
  assert.match(code,/umCounts.window\[6u\]\[0u\]/);
  assert.doesNotMatch(code,/WindowWord|override umFixedFrame/);
  const descriptor=(a.pipeline as unknown as {descriptor:GPUComputePipelineDescriptor}).descriptor;
- assert.deepEqual(descriptor.compute.constants,{umFixedWorldGeometry:1});
+ assert.deepEqual(descriptor.compute.constants,{umFixedWorldGeometry:1,umFlatWindow:1});
  assert.equal(gpuCompilationManagerFor(device).snapshot().cacheStats.pipelineHits,1);
 });
 
@@ -90,5 +90,12 @@ test('hot modules specialize immutable bounds at construction while movable fram
  assert.equal(fixed.umFixedWorldGeometry,1);
  for(let i=24;i<32;i++)assert.equal(fixed['umWindowWord'+i],address.seed.tail[address.seed.layout.tail.window+i]);
  assert.equal(fixed.umFixedFrame,undefined,'movable frame is never frozen by world specialization');
+ assert.equal(fixed.umFlatWindow,1,'a narrow pool reads only the flat window, its frame moving or not');
  assert.equal(descriptors[1]!.compute.constants,undefined,'mutable ownership reads the uniform even in a hot module');
+ // A closed tank inside lattice pages -1..62 reads only the flat window; one past it keeps the two-level lookup.
+ for(const [x,flat] of [[62,1],[64,undefined]] as const){
+  const closed=uniformLatticeAddress([32*x,32,32],false,{blocks:80,air:[]});
+  await uniformDetailPipeline(device,{fixedWorldGeometry:true,capacity:{address:closed}} as UniformMixedOwnership,descriptor);
+  assert.equal(descriptors.at(-1)!.compute.constants!.umFixedFrame,1);assert.equal(descriptors.at(-1)!.compute.constants!.umFlatWindow,flat,`${x} pages`);
+ }
 });

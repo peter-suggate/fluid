@@ -1,3 +1,6 @@
+import { UNIFORM_DIRECTORY_WORDS, UNIFORM_WINDOW_HEADER_WORDS } from "./uniform-window-address";
+/** The runtime header's words in a page tail, as a regex alternation. */
+const WINDOW_WORDS = Array.from({ length: UNIFORM_WINDOW_HEADER_WORDS }, (_, i) => UNIFORM_DIRECTORY_WORDS + i).join("|");
 /** Keep physical spacing, work counts and paged pool capacity in the
  * ownership uniform. Boxed grid dimensions remain specialized: constant division and addressing are
  * substantially cheaper than runtime integer division in the mixed kernels.
@@ -85,7 +88,7 @@ function uniformWindowCountsWGSL(code:string,specializeWorldGeometry:boolean):st
  const counts=[...code.matchAll(/var<uniform>\s+(\w*umCounts)\s*:\s*(\w+)\s*;/g)];
  for(const [,name,type] of counts){
   const prefix=name!.slice(0,-"umCounts".length);
-  const pattern=new RegExp(`\\b${prefix}umTopology\\[${prefix}UM_PAGE_TABLE(?:\\(\\))?\\+(2621(?:4[4-9]|[56][0-9]|7[0-5]))u\\]`,"g");
+  const pattern=new RegExp(`\\b${prefix}umTopology\\[${prefix}UM_PAGE_TABLE(?:\\(\\))?\\+(${WINDOW_WORDS})u\\]`,"g");
   if(!pattern.test(code))continue;pattern.lastIndex=0;
   if(type==="vec4u"){
    const struct=`${prefix}UMWindowCounts`;
@@ -98,7 +101,7 @@ function uniformWindowCountsWGSL(code:string,specializeWorldGeometry:boolean):st
    const match=declaration.exec(code);if(!match)throw new Error(`Window counts missing struct ${type}`);
    code=code.replace(declaration,`struct ${type}{${match[1]},window:array<vec4u,8>}`);
   }
-  code=code.replace(pattern,(_read,index:string)=>{const word=Number(index)-262144;return `${name}.window[${word>>2}u][${word&3}u]`;});
+  code=code.replace(pattern,(_read,index:string)=>{const word=Number(index)-UNIFORM_DIRECTORY_WORDS;return `${name}.window[${word>>2}u][${word&3}u]`;});
   if(specializeWorldGeometry)continue;
   // Keep the fixed-world promise (SolidIsBox), but read each scene's bounds
   // and frame from its uniform. Coordinates must not split pipeline keys.

@@ -5,6 +5,7 @@ import { UNIFORM_MIXED_FUSED_REGULAR_TILES, uniformMixedActiveWord, uniformMixed
 import { uniformDetailPick, uniformDetailSupportWords, uniformDetailTableWords } from "./uniform-detail-fields";
 import { uniformBufferedWork, type UniformWorkEdit } from "./uniform-buffered-work";
 import { uniformBlockNeighbourWords, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { UNIFORM_DIRECTORY_WORDS } from "./uniform-window-address";
 
 /** Counts copied into the existing frame receipt: tier counts (4 words),
  * seam counts (2), regular coarse owners, resident pages. */
@@ -265,7 +266,7 @@ export class UniformMixedOwnership {
     // h slot of every block (umFineSlot: where the h stores place its page),
     // each block its own until a detail storage publishes its slots
     // (encodeFineSlots), and the last word.
-    const pages=address.seed.tail,neighbours=uniformBlockNeighbourWords(address.seed.table,address.seed.blocks);
+    const pages=address.seed.tail,neighbours=uniformBlockNeighbourWords(address.seed.tail,address.seed.blocks);
     this.detailBytes=layout.metadataBytes+pages.byteLength+neighbours.byteLength;
     this.topology = device.createBuffer({ label: "Uniform mixed owners and tier worklists", size: this.detailBytes+4*(uniformDetailTableWords()+address.blocks),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE });
@@ -278,7 +279,7 @@ export class UniformMixedOwnership {
     device.queue.writeBuffer(this.topology,this.topology.size-4,Uint32Array.of(this.detailBytes/4));
     this.counts = device.createBuffer({ label: "Uniform mixed work counts, geometry and window", size: 176,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE });
-    device.queue.writeBuffer(this.counts,48,pages.subarray(64**3,64**3+32));
+    device.queue.writeBuffer(this.counts,48,pages.subarray(UNIFORM_DIRECTORY_WORDS,UNIFORM_DIRECTORY_WORDS+32));
     device.queue.writeBuffer(this.counts, 16, new Uint32Array([...address.cells, n]));
     device.queue.writeBuffer(this.counts, 32, new Float32Array([...layout.lattice.cellSize_m, Math.min(...layout.lattice.cellSize_m)]));
     // 9n+24: the mixed pressure schedule's slot gate (umSlotClosed), zero
