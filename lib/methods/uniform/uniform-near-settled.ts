@@ -1,5 +1,5 @@
 import type { MethodParamValues } from "../../core/method-contract";
-import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
+import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
 
 /** The NB-FLIP near-settled settings (method params regionTiering,
  * warmResolution, particleSeeding, bandExit, bandCycles, surfaceImpulse, rootReserve, rootCoarse, rootTiles, surfaceSplat), fixed for a solver's life (update
@@ -70,8 +70,11 @@ import type { UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
  * - momentumSampler: how grid momentum's unit sampler interpolates
  *   (UniformMomentumSampler); "texture32" falls back to "texture16" on a
  *   device without float32-filterable.
+ * - momentumTrace: how grid momentum's unit trace finds a face's departure
+ *   (UniformMomentumTrace): "midpoint" one RK2 midpoint step; "turn" the
+ *   start's straight departure where the field turns along that step.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -94,6 +97,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  crossingGuard:values.crossingGuard==="search"?"search":"previous",
  flipDelta:values.flipDelta==="extended"?"extended":"swept",
  momentumSampler:values.momentumSampler==="software"||values.momentumSampler==="texture16"?values.momentumSampler:"texture32",
+ momentumTrace:values.momentumTrace==="turn"?"turn":"midpoint",
  solidContact:values.solidContact==="liquid"?"liquid":"surface",
  particleBandDepth:typeof values.particleBandDepth==="number"&&Number.isFinite(values.particleBandDepth)?Math.min(4,Math.max(2,values.particleBandDepth)):3,
  particleDensity:values.particleDensity==="uniform"?"uniform":"graded",
