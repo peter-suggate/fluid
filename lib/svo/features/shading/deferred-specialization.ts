@@ -72,11 +72,14 @@ export function canUseOpaqueConeLighting(
  * This uses the same spot eligibility and capacity as the shadow producer. */
 export function canUseOpaqueRasterLighting(
   scene: SparseVoxelDrySceneData | undefined,
-  options: { coneMode: string; globalIllumination: boolean },
+  options: { coneMode: string; globalIllumination: boolean; precomputedVisibility?: boolean },
 ): boolean {
   const lights = scene?.lightRecords;
   if (!scene?.opaqueSurfaceOnly || options.coneMode !== "raster-ao"
     || options.globalIllumination || !lights?.length || lights.length % SVO_LIGHT_RECORD_WORDS) return false;
+  // The producer resolves every supported light type, including its exact
+  // edge queries, before this material-only shader is selected.
+  if (options.precomputedVisibility) return true;
   const values = rasterLightValues(lights);
   let spots = 0;
   for (let offset = 0; offset < lights.length; offset += SVO_LIGHT_RECORD_WORDS) {
