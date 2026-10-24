@@ -1200,6 +1200,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const fineCeiling=Math.min(tiles,seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiers?.bricks!==undefined?8*tiers.bricks:tiles);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
     const particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined||coarseStart?{fineTiles:fineCeiling,perFineCell:tiers?.particlesPerFineCell??4}:undefined;
+    // The solid record's fraction and aperture slots under fluid.tiers: only a
+    // tile within a cell of a solid (the promotion's coupled tiles) or of the
+    // box's walls holds one, x 1.5 for edits and bodies; a tile the slots
+    // cannot serve reads the solids themselves. Else every key its own.
+    const box=fluidRegionLattice(this.scene).dimensions.map(n=>n/4),inner=box.reduce((n,b)=>n*Math.max(0,b-2),1);
+    const solidSlots=coarseStart||tiers?.bricks!==undefined?Math.min(tiles,Math.ceil(1.5*(promotion.coupledTiles+box.reduce((n,b)=>n*b,1)-inner))):undefined;
     if(seed&&seed.fineTiles.length>fineCeiling)throw new Error(`Uniform simulation detail: the coarse start holds ${seed.fineTiles.length} h tiles (its Fine regions); fluid.tiers.bricks ${fineCeiling/8} holds ${fineCeiling}: raise fluid.tiers.bricks`);
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
@@ -1208,7 +1214,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
       pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),sourceParams:this.params,
       // Live edits and rigid bodies share the pipelines built at setup.
-      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten},
+      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten,slots:solidSlots},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
     },this.address.openTop,this.pressureSchedule);
     this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;this.mixedFrame.narrowBandFlip.sparseNeighbours=this.narrowBandSparseNeighbours;

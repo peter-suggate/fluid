@@ -38,7 +38,10 @@ fn umSolidBodyBuilt(t:u32)->bool{return false;}
 fn umBodyPoseNearTile(t:u32,margin:u32)->bool{return false;}
 fn umAnyBodyNear(p:vec3f,margin:f32)->bool{return false;}
 fn umSolidFaceWorld(p:vec3i,axis:u32)->vec3f{return vec3f(p);}
-fn umSolidApertureRow(t:u32)->u32{return 0u;}
+const UM_SOLID_WHOLE:u32=0xffffffffu;const UM_SOLID_GEOMETRY:u32=0xfffffffeu;
+fn umSolidApertureStampRow(t:u32)->u32{return 48u;}
+fn umSolidTileSlot(t:u32)->u32{return 0u;}
+fn umSolidApertureSlotRow(s:u32)->u32{return 0u;}
 fn umSolidApertureEpochRow()->u32{return 61u;}
 fn umSolidApertureCell(p:vec3i,axis:u32)->vec3i{return p;}
 fn umSolidApertureAt(rows:u32,p:vec3i,axis:u32)->f32{return .25;}

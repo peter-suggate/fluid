@@ -165,8 +165,10 @@ export interface UniformPressureArenaFields {
   * module's text as it was. */
  bulk?:{regions:number};
  /** The most h tiles the simulation ever holds (the frame's ceiling): pMark
-  * gives a fine slot only to a brick holding a band h tile, so no more
-  * fine slots than this are live. Absent: the lattice share alone. */
+  * gives a fine slot only to a brick holding a band h tile, and frames
+  * hold 4.4 to 22 h tiles for each such brick (splash L128, letters, seep
+  * at 767fc07f), so a quarter of this many fine slots holds the band (the
+  * overflow stays fatal). Absent: the lattice share alone. */
  fineTiles?:number;
 }
 
@@ -263,7 +265,7 @@ export class UniformPressureArena {
    ...["xb","yb","rb","db"].map(name=>cell(name,2)),...six("kb",2),
    ...["nx","nb","nr","nd","nm"].map(name=>cell(name,2)),...six("nk",2),...six("nl",2),
    ...["xt","yt","rt","dt"].map(name=>cell(name,2)),...six("kt",2)];
-  const bricks=64*blocks,fineCapacity=Math.max(1,Math.min(bricks,Math.max(ARENA_SLOTS_MIN,Math.ceil(bricks*ARENA_SLOT_SHARE)),fields.fineTiles??bricks));
+  const bricks=64*blocks,fineCapacity=Math.max(1,Math.min(bricks,Math.max(ARENA_SLOTS_MIN,Math.ceil(bricks*ARENA_SLOT_SHARE)),Math.ceil((fields.fineTiles??4*bricks)/4)));
   this.arena=new UniformBrickArena({blocks,channels,lists:[{name:"fine",any:UNIFORM_ARENA_CLASS.fine}],level1From:"fine",fineCapacity});
   const a=this.arena;
   for(const [prefix,level] of [["c",0],["u",0],...(solid?[["v",0]]:[]),["ka",1],["kb",2],["nk",2],["nl",2],["kt",2]] as [string,0|1|2][]){
@@ -880,10 +882,7 @@ override bLocalSolidWork:bool=true;
 ${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
  if(bLocalSolidWork&&umSolidEnabled()){
   let tile=umTileKey(p>>vec3u(2u));
-  if(umKeyStored(tile)){
-   let local=vec3u(p)&vec3u(3u);let cell=local.x+4u*(local.y+4u*local.z);
-   return umSolidRecord[umSolidCount()+4u*umSolidTiles()+16u*tile+(cell>>2u)][cell&3u];
-  }
+  if(umKeyStored(tile)){let open=umSolidRecordedOpen(tile,p);if(open>=0.0){return open;}}
  }
  return umCellOpen(p);
 }`:""}

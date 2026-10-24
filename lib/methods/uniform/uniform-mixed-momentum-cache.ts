@@ -83,7 +83,7 @@ fn umCacheTileKind(p:vec3i)->u32{
  let t=umTileKey(p);if(!umKeyStored(t)){return 2u;}
  // The record is rebuilt before the cache. A body near either tile keeps
  // its existing velocity extension, including its moving boundary terms.
- if(wallRecord[${this.solid!.coarse!.count}u+20u*UM_TILES+2u*t+1u].z>0.5){return 2u;}
+ if(wallRecord[${this.solid!.coarse!.count}u+4u*UM_TILES+2u*t+1u].z>0.5){return 2u;}
  let capacity=wallRecord[t].x;
  if(capacity==0.0){return 0u;}if(capacity==1.0){return 1u;}return 2u;
 }
@@ -412,9 +412,12 @@ ${uniformCoarseCacheWGSL+uniformMixedHangingTapWGSL(2)+uniformCompiledVelocityTa
 ${this.wallLayout?`@group(3) @binding(0) var<storage,read> wallRecord:array<vec4f>;
 fn umCacheTileKind(p:vec3i)->u32{
  let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return 2u;}
- if(wallRecord[${this.solid!.coarse!.count}u+20u*UM_TILES+2u*t+1u].z>0.5){return 2u;}
+ if(wallRecord[${this.solid!.coarse!.count}u+4u*UM_TILES+2u*t+1u].z>0.5){return 2u;}
  let l=vec3u(p)&vec3u(3u);let c=l.x+4u*l.y+16u*l.z;
- let capacity=wallRecord[${this.solid!.coarse!.count}u+4u*UM_TILES+16u*t+(c>>2u)][c&3u];
+ // The tile's fraction slot (umSolidTileSlot): none is every cell whole; the
+ // slots running out leave the geometry's, unknown here.
+ let word=wallRecord[${this.solid!.coarse!.count}u+4u*UM_TILES+2u*t+1u].w;if(!(word>0.0)){return 1u;}if(word>=16777216.0){return 2u;}
+ let capacity=wallRecord[${this.solid!.coarse!.count}u+8u*UM_TILES+UM_TILES/64u+2u+77u*(u32(word)-1u)+(c>>2u)][c&3u];
  if(capacity==0.0){return 0u;}if(capacity==1.0){return 1u;}return 2u;
 }
 ${uniformVelocityWallCacheWGSL}
