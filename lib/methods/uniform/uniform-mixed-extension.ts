@@ -8,7 +8,7 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformExtrapolationWorkBytes, type WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
 import { UNIFORM_EXTRAPOLATION_WORK_WORDS } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 import { UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_LIVE_KEY_GROUPS, UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
+import { UNIFORM_LIVE_GROUP_GROUPS, UNIFORM_LIVE_KEY_GROUPS, UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
 import { uniformStageListsWGSL } from "./uniform-stage-lists";
 import { uniformMixedFaceAddressWGSL,uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
@@ -312,7 +312,7 @@ export class UniformMixedExtension {
  }
  /** The mark passes ahead of a swept encode's seed: stamp, then classify. */
  private async initializeMarks():Promise<void>{
-  const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> slots0:array<vec2f>;
 @group(1) @binding(1) var<storage,read_write> slots1:array<vec2f>;
 @group(1) @binding(2) var<storage,read_write> stamp:array<u32>;
@@ -335,11 +335,16 @@ fn mrBodyNear(region:u32)->bool{return region<arrayLength(&bodyRegions)&&(bodyRe
 // A region changed when a tile word or support bit differs from the last
 // swept encode's, or it is not COLD and beside a moved body (see
 // UNIFORM_EXTENSION_BODY_REACH). The stamp then takes the current words.
+// A fixed grid strides the held regions (umHeldPage). A region that holds
+// no page is never stamped: no reader asks its bits (classifyRegions reads
+// those of stored keys alone), and a claim makes it HOT (UniformRegionHeat)
+// before its first stamp, so it changes and is hot whatever its old words.
 @compute @workgroup_size(64) fn stampRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  // A held encode always publishes (its quiet regions restore their held
  // values over whatever the frame's stages left in the output).
  if(group.x==0u&&lane==0u){let quiet=vec2f(select(0.0,1.0,mode.x==2u),0.0);slots0[arrayLength(&slots0)-1u]=quiet;slots1[arrayLength(&slots1)-1u]=quiet;atomicStore(&work[0],0u);atomicStore(&work[1],0u);}
- for(var region=group.x;region<UM_PAGES;region+=groups.x){
+ for(var visit=group.x;visit<umHeldPageCount();visit+=groups.x){
+  let region=umHeldPage(visit);
   if(lane==0u){atomicStore(&mrChanged,0u);}
   workgroupBarrier();
   let block=region>>3u;let stored=umBlockStored(block);let tile=umPageTile(region,lane);
@@ -412,7 +417,7 @@ fn mrBodyNear(region:u32)->bool{return region<arrayLength(&bodyRegions)&&(bodyRe
   if(!this.markPipelines||!this.markGroups)throw new Error("Mixed extension regions are not initialized");
   const regions=this.ownership.capacity.tiles/64;
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.markGroups[mark==="full"?0:mark==="regional"?1+parity:3+parity]!);
-  pass.setPipeline(this.markPipelines.stamp);pass.dispatchWorkgroups(Math.min(65535,regions));
+  pass.setPipeline(this.markPipelines.stamp);pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_GROUP_GROUPS,regions));
   pass.setPipeline(this.markPipelines.classify);pass.dispatchWorkgroups(Math.min(65535,ceilDiv(regions,64)));
  }
  destroy():void{this.held?.destroy();this.stamp.destroy();this.work.destroy();this.noBodies.destroy();for(const b of this.modes)b.destroy();this.alwaysLive.destroy();}
