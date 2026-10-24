@@ -26,7 +26,6 @@ import { uniformDensityPostProcessingEnabled } from "./uniform-options";
 export { uniformDensityPostProcessingEnabled } from "./uniform-options";
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
 import {
-  UNIFORM_VOLUME_EDGE_BYTES,
   UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS,
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
@@ -37,7 +36,6 @@ import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
 import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, LIQUID_EXTRUSION_MAX_EDGES, type LiquidExtrusion } from "../../core/liquid-extrusion";
 import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES, UNIFORM_SOURCE_PLUG_OVERLAP_CELLS } from "./uniform-source.wgsl";
-import { planUniformHostAllocation } from "./uniform-host-allocation";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
 import { UniformBedSlopeBake } from "./uniform-bed-slope-bake";
@@ -700,14 +698,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const address = this.address = uniformLatticeAddress([nx, ny, nz], scene.container.top === "open", { ...scene.fluid.pagePool, air: residency.air },
       scene.container.walls === "none" ? { boxPage } : undefined);
     // The mixed-ownership frame owns every geometric advance, on native fields over the shared scratch arena.
-    this.scratchArena = new UniformScratchArena(device, address, address.boxCells*UNIFORM_VOLUME_EDGE_BYTES,options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));
+    this.scratchArena = new UniformScratchArena(device, address, options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));
     this.fieldPages = new UniformTexturePages(device, this.scratchArena);
-    {
-      if (Math.max(nx,ny,nz)+2 > device.limits.maxTextureDimension3D)
-        throw new Error("Uniform Geometric finest lattice exceeds the device texture limit");
-      if (address.boxCells*24 > Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))
-        throw new Error("Uniform Geometric donor sums exceed the device storage limit");
-    }
     const tileRecords = address.tileKeys;
     // The 4h face table and class map sit in the second conditioning plane,
     // whose per-step clears are ranged away from it. Same size test, plus the
@@ -724,13 +716,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const spacing = [scene.container.width_m / cells[0], scene.container.height_m / cells[1],
       scene.container.depth_m / cells[2]];
     this.twoLevelShellReach = Math.max(1, Math.ceil(0.5 * Math.max(...spacing) / Math.min(...spacing)));
-    const allocation = planUniformHostAllocation(address, "maccormack");
-    this.executionNegativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
+    // One scalar-packed negative x/y/z MAC boundary field: a word a low face key.
+    const boundaryVelocityBytes = this.executionNegativeBoundaryVelocityBytes = address.lowFaceKeys * 4;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     const texture3d = (label: string, format: GPUTextureFormat, size: GPUExtent3D) =>
       this.fieldPages.createTexture({ label, size, dimension: "3d", format, usage });
-    const velocity = (label: string) => texture3d(label, "rgba32float", allocation.velocityExtent);
     // Geometric h fields come from the detail storage, registered with the
     // page layer by their logical dims; their bytes are the storage's (refreshMixedAllocation).
     const detailStorage = this.detailStorage = new UniformDetailStorage(device, address);
@@ -742,10 +733,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const hScalar = (label: string) => field(label, "cell");
     this.velocityA = hVelocity("Uniform reference velocity A");
     this.velocityB = hVelocity("Uniform reference velocity B");
-    const lazyMac = this.velocityTransport !== "maccormack";
-    this.velocityC = lazyMac ? texture3d("Uniform reference unused velocity C", "rgba32float", [1,1,1]) : velocity("Uniform reference velocity C");
+    // The mixed frame carries no MacCormack momentum (assertUniformMixedOptions): Geometric binds a placeholder.
+    this.velocityC = texture3d("Uniform reference unused velocity C", "rgba32float", [1,1,1]);
     this.velocityD = hVelocity("Uniform reference velocity D");
-    const boundaryVelocity = (label: string, size = allocation.boundaryVelocityBytes) => device.createBuffer({ label, size,
+    const boundaryVelocity = (label: string, size = boundaryVelocityBytes) => device.createBuffer({ label, size,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.boundaryVelocityA = boundaryVelocity("Uniform reference negative boundary velocity A");
     this.boundaryVelocityB = boundaryVelocity("Uniform reference negative boundary velocity B");
@@ -767,14 +758,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     {
       this.vertexPhiField = field("Uniform Geometric vertex phi", "vertex");
       this.vertexPhiScratch = field("Uniform Geometric vertex phi scratch", "vertex");
-      const edgeBytes = address.boxCells * UNIFORM_VOLUME_EDGE_BYTES;
-      if (edgeBytes > device.limits.maxStorageBufferBindingSize || edgeBytes > device.limits.maxBufferSize)
-        throw new Error(`Uniform Geometric receiver stencils require ${edgeBytes} bytes, exceeding the device limit`);
       this.executionDenseLevelSetVolumeSource = { vertexPhi: this.vertexPhiField, openFraction: this.gammaB,
         cellSize_m: [scene.container.width_m/cells[0], scene.container.height_m/cells[1], scene.container.depth_m/cells[2]] };
     }
-    this.heightA = device.createTexture({ label: "Uniform reference column base", size: [nx, nz], format: "rg32float", usage });
-    this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [nx, nz], format: "rg32float", usage });
+    // No kernel reads or writes a column: bindings 7 and 8 take placeholders, and the grid overlay's column base is zero as before.
+    this.heightA = device.createTexture({ label: "Uniform reference column base", size: [1, 1], format: "rg32float", usage });
+    this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [1, 1], format: "rg32float", usage });
     // An open world's ground runs on past the box: its columns are the window's, baked on the GPU (UniformOpenWorldTerrain).
     const openWorldTerrain = scene.container.walls === "none" && sceneHasTerrain(scene);
     this.terrainTexture = device.createTexture({ label: "Uniform reference terrain",
@@ -783,7 +772,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     // The mixed frame reads neither padded transport field: Geometric binds placeholders.
     this.transportA = this.fieldPages.createTexture({ label: "Uniform reference transport A", size: [1,1,1], dimension: "3d", format: "rgba32float", usage: transportUsage });
-    this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: lazyMac ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
+    this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: [1,1,1], dimension: "3d", format: "rgba32float", usage: transportUsage });
 
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     // A procedural solid with voxel collision is drawn smooth and collides as
@@ -958,20 +947,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     };
 
     const count = address.boxCells;
-    // The legacy host plan reserves nine scalars; this owner has eight. Add
-    // the extension hierarchy/origins and the two RG columns plus terrain,
-    // which that plan does not include. Scratch backing is reconciled below.
-    const hostAuxiliaryBytes = this.velocityExtrapolator.scratchBytes - count*4 + nx*nz*20;
+    // What this constructor allocates: the h fields are the detail storage's
+    // and the frame's own buffers its, both added as they are built (refreshMixedAllocation).
+    const textureBytes = (t: GPUTexture, texel: number) => t.width*t.height*t.depthOrArrayLayers*texel;
     this.executionInfo = {
       nx, ny, nz, tankCells: cells, storedNy: ny, cellCount: count, equivalentUniformCells: count,
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]),
       pressureIterations: 0, pressureSolver: `CM11a LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post ${"projected Jacobi; V-first adaptive"})`,
-      allocatedBytes: allocation.allocatedBytes - (count*8-8) - (allocation.conditioningBytes-this.scratchArena.conditioningBytes) - (lazyMac ? count*16+(nx+2)*(ny+2)*(nz+2)*16-32 : 0) - ((nx+2)*(ny+2)*(nz+2)*16-16+allocation.boundaryVelocityBytes-16) + 8 + this.pressureMultigrid.allocatedBytes
-        + (8 * address.vertexKeys + 12)
-        + this.pages.size + this.activeScratch.size
-        + hostAuxiliaryBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
+      allocatedBytes: 3*boundaryVelocityBytes + 16 + [this.velocityC, this.transportA, this.transportB].reduce((n,t)=>n+textureBytes(t,16),0)
+        + textureBytes(this.pressureA,4) + textureBytes(this.pressureB,4) + textureBytes(this.heightA,8) + textureBytes(this.heightB,8) + textureBytes(this.terrainTexture,4)
+        + this.scratchArena.byteLength + this.scratchArena.conditioningBytes + this.pressureMultigrid.allocatedBytes + (8 * address.vertexKeys + 12)
+        + this.pages.size + this.activeScratch.size + this.params.size + this.reductions.size + this.rigidExchange.size
+        + this.velocityExtrapolator.scratchBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: false,
@@ -2348,8 +2337,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.solidExcessCorrection = values.solidExcessCorrection !== "off";
     this.rigidCoupling = values.rigidCoupling !== "off";
     this.fixedStep_s = uniformFixedStep_s(values.timeStep);
-    if(values.velocityTransport === "maccormack" && this.velocityC.width===1 && this.executionInfo.nx>1)
-      throw new Error("Changing velocity transport requires rebuilding the Uniform Geometric solver");
+    if(values.velocityTransport === "maccormack") assertUniformMixedOptions({ velocityTransport: "maccormack", liquidOnlyVelocityAdvection: false });
     this.velocityTransport = values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
     this.liquidOnlyVelocityAdvection = values.liquidOnlyVelocityAdvection === "on";
