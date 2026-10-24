@@ -62,6 +62,7 @@ import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harne
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { uniformDetailBindLayout, uniformDetailField, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline } from "../lib/methods/uniform/uniform-detail-fields";
 import { UNIFORM_WINDOW_HEADER } from "../lib/methods/uniform/uniform-window-address";
+import { UNIFORM_MOMENTUM_TRACE_CAPPED_WORD } from "../lib/methods/uniform/uniform-mixed-momentum";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "../lib/methods/uniform/uniform-mixed-topology.wgsl";
 import type { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed-ownership";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
@@ -75,6 +76,8 @@ assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=.
 for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes)=.+|--classify|--print-scene|--heatState)$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
+/** Momentum traces cut at the segment bound (momentumTrace "substep"), summed over the run. */
+let traceCappedTotal = 0;
 assert.ok(stepList.every(s => Number.isInteger(s) && s > 0) && Number.isInteger(every) && every > 0 && Number.isInteger(from) && from >= 1);
 const cell = option("cell") === undefined ? undefined : Number(option("cell"));
 const poolBlocks = option("pool") === undefined ? undefined : Number(option("pool"));
@@ -699,7 +702,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
   const flowCounts = new Map<string, number>();
   if (flowSteps.size) {
     type Stage = Record<string, (...a: unknown[]) => unknown>;
-    const m = (solver as unknown as { mixedFrame: { fields: Record<string, GPUTexture>; surface: Stage; narrowBandFlip: Stage; momentum: Stage; forces: Stage; band: Stage; extension: Stage; projection: Stage } }).mixedFrame;
+    const m = (solver as unknown as { mixedFrame: { fields: Record<string, GPUTexture>; surface: Stage; narrowBandFlip: Stage; momentum: Stage; forces: Stage; band: Stage; extension: Stage; projection: Stage; remap: Stage; phiResolve: Stage; coarsePhi: Stage } }).mixedFrame;
     const hook = (object: Stage, key: string, name: string, kind: "phi" | "velocity", texture: string, before = false, when?: (a: unknown[]) => boolean) => {
       assert.ok(object[key], `no stage ${key}`); assert.ok(m.fields[texture], `no field ${texture}`); const original = object[key]!.bind(object);
       const take = (encoder: GPUCommandEncoder) => {
@@ -718,6 +721,11 @@ var<workgroup> sums:array<atomic<u32>,5>;
     hook(m.narrowBandFlip, "clearAir", "clearAir", "phi", "phi");
     hook(m.narrowBandFlip, "retire", "retire", "phi", "phi");
     hook(m.narrowBandFlip, "redistance", "redistance", "phi", "phi");
+    // Between steps: the relayout's remap, every phi resolve and the 4h phi.
+    hook(m.remap, "applyGpu", "preRemap", "phi", "phi", true);
+    hook(m.remap, "applyGpu", "remap", "phi", "phi");
+    hook(m.phiResolve, "encode", "resolve", "phi", "phi", false, a => a[1] === (m as unknown as { phiResolveGroups: { phi: unknown } }).phiResolveGroups.phi);
+    hook(m.coarsePhi, "encode", "coarsePhi", "phi", "phi");
     hook(m.forces, "encode", "forces/scratch", "velocity", "velocityScratch");
     hook(m.projection, "encode", "project/scratch", "velocity", "velocityScratch", false, a => a[1] === "project");
     hook(m.band, "encodeProject", "band/velocity", "velocity", "velocity");
@@ -725,6 +733,22 @@ var<workgroup> sums:array<atomic<u32>,5>;
     hook(m.extension, "encode", "extension/scratch", "velocity", "velocityScratch");
     hook(m.extension, "finishPair", "finishPair/scratch", "velocity", "velocityScratch");
   }
+  // The substep trace's cut count (claim word UNIFORM_MOMENTUM_TRACE_CAPPED_WORD,
+  // cleared each frame): a slot a step since the last sample, summed there.
+  const cappedRing = device.createBuffer({ label: "Tier budget trace capped", size: 16 * every, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  let cappedSteps = 0;
+  {
+    const mm = (solver as unknown as { mixedFrame?: { momentum?: { claims?: GPUBuffer; encode: (...a: unknown[]) => unknown } } }).mixedFrame?.momentum;
+    if (mm?.claims) {
+      const original = mm.encode.bind(mm);
+      mm.encode = (...a: unknown[]) => { const r = original(...a); (a[0] as GPUCommandEncoder).copyBufferToBuffer(mm.claims!, 4 * UNIFORM_MOMENTUM_TRACE_CAPPED_WORD, cappedRing, 4 * (cappedSteps++ % (4 * every)), 4); return r; };
+    }
+  }
+  const readCapped = async () => {
+    if (!cappedSteps) return 0;
+    await cappedRing.mapAsync(GPUMapMode.READ); const u = new Uint32Array(cappedRing.getMappedRange().slice(0)); cappedRing.unmap();
+    let n = 0; for (let i = 0; i < Math.min(cappedSteps, 4 * every); i++) n += u[i]!; cappedSteps = 0; traceCappedTotal += n; return n;
+  };
   const authoredFloor_m = Math.min(...(scene.fluid.initialLiquidVolumes ?? []).map(v => "min_m" in v ? (v as { min_m: { y: number } }).min_m.y : 0));
   const bound_m_s = Math.sqrt(2 * gravity * Math.max(0, authoredTop_m - Math.min(0, authoredFloor_m)));
   const printFlowStages = async (step: number) => {
@@ -788,6 +812,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
     if (solver.info.simulationPipelineError) throw new Error(String(solver.info.simulationPipelineError));
     assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - step * dt) < 1e-8);
     if (step % every === 0 || step === steps) {
+      const capped = await readCapped(); if (capped) console.log(JSON.stringify({ traceCapped: capped, step }));
       const row = await record(step, wall_ms);
       if ((row.pool as { fatal?: string }).fatal) throw new Error(`pool fatal: ${(row.pool as { fatal?: string }).fatal}`);
     }
@@ -809,7 +834,7 @@ const thirds = [0, 1, 2].map(i => { const w = walls.filter(x => x.frame >= from 
   return s.length ? s.reduce((a, b) => a + b, 0) / s.length : undefined; });
 const lateMean = (path: string) => { const v = rows.map(r => get(r, path)).filter((x): x is number => x !== undefined && Number.isFinite(x)).slice(1);
   const l = v.slice(Math.floor(v.length / 2)); return l.length ? l.reduce((x, y) => x + y, 0) / l.length : undefined; };
-const summary = { steps: frameReached, failure, step_ms: { mean, median: pct(.5), p95: pct(.95), longest: timed[timed.length - 1], thirds },
+const summary = { steps: frameReached, failure, traceCapped: traceCappedTotal, step_ms: { mean, median: pct(.5), p95: pct(.95), longest: timed[timed.length - 1], thirds },
   peaks: { hTiles: peak("tiles.h"), coarseTiles: peak("tiles.coarse"), resident: peak("pool.resident"), particles: peak("particles"),
     hTilesRightFloor: peak("zones.hTilesRightFloor"), hTilesRightJet: peak("zones.hTilesRightJet"), hTilesThroat: peak("zones.hTilesThroat"), hot: peak("regions.hot"), warm: peak("regions.warm"), allocatedBytes: peak("allocatedBytes") },
   final: { tiles: last.tiles, pool: last.pool, regions: last.regions, zones: last.zones, volume: last.volume, liquid_m3: last.liquid_m3, byClass: last.byClass },
@@ -819,7 +844,7 @@ writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, summary, rows
 const fmt = (v: number | undefined, d = 1) => v === undefined ? "-" : v.toFixed(d);
 const gib = (b: number | undefined) => b === undefined ? "-" : (b / 2 ** 30).toFixed(2);
 const byClass = (last.byClass ?? {}) as Record<string, number>;
-console.log(`${name}: ${sceneId} ${g.nx}x${g.ny}x${g.nz} h=${h * 1000}mm pool ${g.pool} | ${frameReached}/${steps} steps${failure ? ` FAILED (${failure})` : ""} | step median ${fmt(pct(.5))} p95 ${fmt(pct(.95))} ms | peak h tiles ${peak("tiles.h")} resident ${peak("pool.resident")} particles ${peak("particles")} | floor h tiles peak ${peak("zones.hTilesRightFloor")} | GiB h ${gib(byClass["pool-at-h"])} 4h ${gib(byClass["pool-at-4h"])} box ${gib(byClass["dense-box"])} fixed ${gib(byClass.fixed)} unclassified ${gib(byClass.unclassified)} total ${gib(get(last, "allocatedBytes"))} | Cd late: right volume ${fmt(summary.discharge.cdRightLateHalfMean, 3)} throat u ${fmt(summary.discharge.cdThroatLateHalfMean, 3)} | phi ${get(last, "phi.source") ?? "-"}${get(last, "phi.measured") ? "" : " (unmeasured)"} | drift ${fmt(get(last, "volume.drift"), 4)}`);
+console.log(`${name}: ${sceneId} ${g.nx}x${g.ny}x${g.nz} h=${h * 1000}mm pool ${g.pool} | ${frameReached}/${steps} steps${failure ? ` FAILED (${failure})` : ""} | step median ${fmt(pct(.5))} p95 ${fmt(pct(.95))} ms | peak h tiles ${peak("tiles.h")} resident ${peak("pool.resident")} particles ${peak("particles")} | floor h tiles peak ${peak("zones.hTilesRightFloor")} | GiB h ${gib(byClass["pool-at-h"])} 4h ${gib(byClass["pool-at-4h"])} box ${gib(byClass["dense-box"])} fixed ${gib(byClass.fixed)} unclassified ${gib(byClass.unclassified)} total ${gib(get(last, "allocatedBytes"))} | Cd late: right volume ${fmt(summary.discharge.cdRightLateHalfMean, 3)} throat u ${fmt(summary.discharge.cdThroatLateHalfMean, 3)} | phi ${get(last, "phi.source") ?? "-"}${get(last, "phi.measured") ? "" : " (unmeasured)"} | drift ${fmt(get(last, "volume.drift"), 4)} | traces capped ${traceCappedTotal}`);
 if (c) await destroy(c);
 return failure === undefined;
 }
