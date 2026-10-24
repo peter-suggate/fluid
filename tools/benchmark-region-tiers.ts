@@ -2,7 +2,7 @@
  * diagnostics (--profile) are separate runs. --timestamps also attempts native
  * phase timing; unsupported/invalid samples remain explicit in the report.
  * node --import tsx tools/benchmark-region-tiers.ts --scene=splash --length=128
- *   [--steps=120] [--from=40] [--profile] [--values={...}] [--out=PATH.json]
+ *   [--steps=120] [--from=40] [--profile] [--values={...}] [--pool-blocks=N] [--out=PATH.json]
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
@@ -35,8 +35,12 @@ const values: MethodParamValues = JSON.parse(option("values") ?? "{}");
 assert.ok(values && typeof values === "object" && !Array.isArray(values));
 const depth = Number(option("depth") ?? 32);
 const scene = createRegionTierScene(mode, length, depth);
+// --pool-blocks=N: the page pool's reservation (blocks, the two sentinels included).
+const poolBlocks = option("pool-blocks") === undefined ? undefined : Number(option("pool-blocks"));
+assert.ok(poolBlocks === undefined || (Number.isInteger(poolBlocks) && poolBlocks >= 3));
+if (poolBlocks !== undefined) scene.fluid = { ...scene.fluid, pagePool: { ...scene.fluid?.pagePool, blocks: poolBlocks } } as typeof scene.fluid;
 scene.duration_s = Math.max(scene.duration_s, steps * scene.numerics.fixedDt_s);
-const out = resolve(option("out") ?? `artifacts/region-tiers/${mode}-${length}${depth === 32 ? "" : `-depth${depth}`}${profile ? "-profile" : ""}.json`);
+const out = resolve(option("out") ?? `artifacts/region-tiers/${mode}-${length}${depth === 32 ? "" : `-depth${depth}`}${poolBlocks === undefined ? "" : `-pool${poolBlocks}`}${profile ? "-profile" : ""}.json`);
 process.env.WEBGPU_NODE_MODULE ??= resolve("node_modules/webgpu/index.js");
 paceDawnEventPolling();
 const source = createHash("sha256");
