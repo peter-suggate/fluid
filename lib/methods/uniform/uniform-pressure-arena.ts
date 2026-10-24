@@ -103,6 +103,7 @@ const TILE_WG=64;
 const BAND_CYCLE_WINDOW=4;
 const groupsOf=(count:number,per:number):number=>{const padded=count+per-1;return (padded-padded%per)/per;};
 const PREPARE_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena marks and rows"};
+const UNMARK_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena unmark"};
 const SOLVE_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena solve"};
 const VERDICT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena verdict"};
 const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena projection"};
@@ -176,6 +177,11 @@ export class UniformPressureArena {
  /** The tiles pRows leaves to its geometry variant (their tile list indices; the count in header word GEOMETRY_WORD). */
  private readonly geometryListWord:number;
  private readonly tableWord:number;
+ /** The tile slot map and brick masks hold only the last frame's band
+  * (pUnmark clears them through its list): false until the first frame's
+  * whole clear, and again after a resize (a new band capacity bounds the
+  * list differently). */
+ private indexClean=false;
  /** Level 2's band channels (pool words first.., a level 2 slot a block):
   * pClear2 zeroes the held blocks' slots each frame, a workgroup a (block,
   * channel). A free block's slot is no live neighbour's (its records' words
@@ -310,7 +316,7 @@ export class UniformPressureArena {
   this.bindLaunches();this.boundPass=undefined;this.boundGroup=undefined;
  }
  /** Between frames, after the h-tile capacity (the phi view, the stage grids) changed: rebind. The arena's own buffers are lattice-sized. */
- resize(fields:Pick<UniformPressureArenaFields,"phi"|"presentation"|"capacity">):void{this.fields={...this.fields,...fields};this.bind();}
+ resize(fields:Pick<UniformPressureArenaFields,"phi"|"presentation"|"capacity">):void{this.fields={...this.fields,...fields};this.bind();this.indexClean=false;}
  /** Fixed-lag evidence: band tiles, live bricks and level 1's and 2's bricks of a receipted frame. Launch width only. */
  observeWork(tiles:number,reserve=0,bricks=tiles,level1=bricks,level2=level1):void{
   const cap=this.arena.fineCapacity,blocks=this.simulation.capacity.address.blocks;
@@ -734,6 +740,20 @@ var<workgroup> member:atomic<u32>;
     atomicStore(&state[SLOTS+t],slot+1u);atomicStore(&state[TLIST+slot],(id<<3u)|bit);ubaMark(id,P_FINE);atomicOr(&state[MASK+id],1u<<bit);
    }else{atomicStore(&state[1],1u);}
   }
+ }
+}
+// The last frame's marks back to zero (encodePrepare, before the header's
+// clear): pMark sets no other word of the tile slot map or the brick masks,
+// so the clear strides its band tile list, not the lattice. An entry is
+// brick slot << 3 | tile bit after the rows; the slot holds its brick until
+// ubaUpdate.
+@compute @workgroup_size(64) fn pUnmark(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var j=gid.x;j<pTileCount();j+=64u*groups.x){
+  let w=pIndex(TLIST+j);let id=ubaBrick(pTileSlot(w));
+  if(id>=${a.bricks}u){continue;}
+  let l=id&63u;let b=w&7u;
+  let t=512u*(id>>6u)+umTileLocal(2u*vec3u(l&3u,(l>>2u)&3u,l>>4u)+vec3u(b&1u,(b>>1u)&1u,b>>2u));
+  atomicStore(&state[SLOTS+t],0u);atomicStore(&state[MASK+id],0u);
  }
 }`,
    rows:header()+poolWGSL+theta+owner+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
@@ -2339,7 +2359,7 @@ fn sProlong6(g:vec3i)->f32{
   else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
-  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],clear2:["pClear2"],
+  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],clear2:["pClear2"],
    rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
@@ -2433,7 +2453,10 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   * the native rows run every frame; an empty band lists no tiles. */
  encodePrepare(encoder:GPUCommandEncoder):void{
   const a=this.arena,step=a.stepClear(this.tableWord);
-  encoder.clearBuffer(this.index,0,4*this.tableWord);
+  if(this.indexClean){
+   const unmark=encoder.beginComputePass(UNMARK_PASS);this.dispatch(unmark,"pUnmark",UNIFORM_LIVE_KEY_GROUPS);unmark.end();
+   encoder.clearBuffer(this.index,0,4*HEADER);
+  }else{encoder.clearBuffer(this.index,0,4*this.tableWord);this.indexClean=true;}
   encoder.clearBuffer(this.index,step.offset,step.size);
   const blocks=this.simulation.capacity.address.blocks,band=!this.empty;
   const pass=encoder.beginComputePass(PREPARE_PASS);
