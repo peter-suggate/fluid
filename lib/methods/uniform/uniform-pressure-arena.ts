@@ -163,6 +163,10 @@ export interface UniformPressureArenaFields {
   * ten storage bindings. Absent with bulkTier off, which leaves every
   * module's text as it was. */
  bulk?:{regions:number};
+ /** The most h tiles the simulation ever holds (the frame's ceiling): pMark
+  * gives a fine slot only to a brick holding a band h tile, so no more
+  * fine slots than this are live. Absent: the lattice share alone. */
+ fineTiles?:number;
 }
 
 /** The two-stage solve's h band (the band's contract: tiles, rows, faces,
@@ -253,7 +257,7 @@ export class UniformPressureArena {
    ...["xb","yb","rb","db"].map(name=>cell(name,2)),...six("kb",2),
    ...["nx","nb","nr","nd","nm"].map(name=>cell(name,2)),...six("nk",2),...six("nl",2),
    ...["xt","yt","rt","dt"].map(name=>cell(name,2)),...six("kt",2)];
-  const bricks=64*blocks,fineCapacity=Math.min(bricks,Math.max(ARENA_SLOTS_MIN,Math.ceil(bricks*ARENA_SLOT_SHARE)));
+  const bricks=64*blocks,fineCapacity=Math.max(1,Math.min(bricks,Math.max(ARENA_SLOTS_MIN,Math.ceil(bricks*ARENA_SLOT_SHARE)),fields.fineTiles??bricks));
   this.arena=new UniformBrickArena({blocks,channels,lists:[{name:"fine",any:UNIFORM_ARENA_CLASS.fine}],level1From:"fine",fineCapacity});
   const a=this.arena;
   for(const [prefix,level] of [["c",0],["u",0],...(solid?[["v",0]]:[]),["ka",1],["kb",2],["nk",2],["nl",2],["kt",2]] as [string,0|1|2][]){
