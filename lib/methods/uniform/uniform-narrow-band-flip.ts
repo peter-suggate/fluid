@@ -687,7 +687,7 @@ const NB_ARENA:u32=${this.arenaWord}u;
 // start at links[nbBinCell(cell)]; NB_LINKS words of starts head the links.
 // Under a particle budget a covered tile's 64 bins are in its brick's slot
 // (the sort's slab slot, NB_SLOT_MAP a brick id); an uncovered tile has none.
-const NB_LINKS:u32=${this.binCells}u;const NB_NO_BIN:u32=0xffffffffu;
+const NB_LINKS:u32=${this.binSlots?`${this.binCells}u`:"UM_CELL_KEYS"};const NB_NO_BIN:u32=0xffffffffu;
 ${this.binSlots?`const NB_SLOT_MAP:u32=${this.binCells}u;
 fn nbBinTile(tile:u32)->u32{return 512u*atomicLoad(&bins[NB_SLOT_MAP+ubBrickOfTile(tile)])+64u*((tile&1u)|(((tile>>3u)&1u)<<1u)|(((tile>>6u)&1u)<<2u));}
 fn nbBinCell(cell:u32)->u32{if(atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){return NB_NO_BIN;}return nbBinTile(cell/64u)+cell%64u;}`
@@ -730,7 +730,7 @@ fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[NB_LINKS+4u*i+3u]
 fn nbPosition(i:u32)->vec3f{let a=NB_LINKS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
 fn nbMotion(i:u32)->vec4f{let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let mode=links[NB_LINKS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}
 // Live particle counts per tile drive sparse cell-bin clearing.
-const NB_COVERAGE:u32=${this.countWords}u;
+const NB_COVERAGE:u32=${this.binSlots?`${this.binCells}u+64u*UM_BLOCKS`:"2u*UM_CELL_KEYS"};
 const NB_SURFACE_TILES:u32=NB_COVERAGE+UM_TILES;
 // The occupied tile list (UniformNarrowBandFlip.occupiedWord): its length,
 // then a tile key an entry. A key joins when its coverage leaves 0.
