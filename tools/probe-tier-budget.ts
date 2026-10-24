@@ -72,7 +72,7 @@ const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "";
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|set|out|classes)=.+|--classify|--print-scene)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|set|out|classes)=.+|--classify|--print-scene)$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
 assert.ok(stepList.every(s => Number.isInteger(s) && s > 0) && Number.isInteger(every) && every > 0 && Number.isInteger(from) && from >= 1);
@@ -80,6 +80,9 @@ const cell = option("cell") === undefined ? undefined : Number(option("cell"));
 const poolBlocks = option("pool") === undefined ? undefined : Number(option("pool"));
 const wallShift = Number(option("wallShift") ?? 0);
 assert.ok(Number.isInteger(wallShift), "--wallShift=cells");
+const mouths = option("mouths") ?? "round", throatCells = Number(option("throat") ?? 1);
+assert.ok(mouths === "round" || mouths === "none", "--mouths=round|none");
+assert.ok(Number.isInteger(throatCells) && throatCells >= 1, "--throat=cells (the square throat's side)");
 const sets: Record<string, string | number | boolean> = {};
 for (const a of options.filter(a => a.startsWith("--set="))) {
   const [key, ...rest] = a.slice(6).split(":"); const text = rest.join(":");
@@ -165,9 +168,25 @@ function shiftWall(scene: SceneDescription, d: number): SceneDescription {
   return s;
 }
 
+/** The throat as a probe variant: `mouths` "none" drops the round mouth
+ * cylinders (a straight cut, as the fast-jet fixture), and `side` widens the
+ * square throat and its wetted passage upward in y and z from (holeY, holeZ). */
+function reshapeThroat(scene: SceneDescription, mouthShape: string, side: number): SceneDescription {
+  if (mouthShape === "round" && side === 1) return scene;
+  const wall = wallOf(scene); assert.ok(wall, "--mouths/--throat need a dividing wall");
+  const h = scene.voxelDomain.finestCellSize_m, s = structuredClone(scene), grow = side - 1;
+  s.solidVoxels = s.solidVoxels.filter(p => !(mouthShape === "none" && p.operation === "clear" && "kind" in p && p.kind === "cylinder"))
+    .map(p => p.operation === "clear" && !("kind" in p && p.kind) && p.minimum[0] === wall.low && p.maximumExclusive[0] === wall.high
+      ? { ...p, maximumExclusive: [p.maximumExclusive[0], p.maximumExclusive[1] + grow, p.maximumExclusive[2] + grow] } : p) as typeof s.solidVoxels;
+  const W = scene.container.width_m, wallLow_m = wall.low * h - W / 2;
+  s.fluid.initialLiquidVolumes = s.fluid.initialLiquidVolumes?.map(v => v.shape === "box" && v.min_m.x < wallLow_m && v.max_m.x > wallLow_m + h
+    ? { ...v, max_m: { ...v.max_m, y: v.max_m.y + grow * h, z: v.max_m.z + grow * h } } : v);
+  return s;
+}
+
 function buildScene(k: number, pool?: number, dryLiquid = false): SceneDescription {
   const base = cell === undefined ? sceneDocument(definition) : sceneDocumentAtLattice(definition, { cellSize_m: cell, detailCellSize_m: cell }).scene;
-  const scene = shiftWall(lengthenReservoir(structuredClone(base), k, dryLiquid), dryLiquid ? 0 : wallShift);
+  const scene = reshapeThroat(shiftWall(lengthenReservoir(structuredClone(base), k, dryLiquid), dryLiquid ? 0 : wallShift), mouths, throatCells);
   if (pool !== undefined) scene.fluid.pagePool = { ...scene.fluid.pagePool, blocks: pool };
   return scene;
 }
@@ -292,7 +311,7 @@ console.log(JSON.stringify({ phase: "start", ...metadata, values: undefined }));
 
 const rows: Record<string, unknown>[] = [], walls: { frame: number; wall_ms: number; afterSample: boolean }[] = [];
 let c: Awaited<ReturnType<typeof construct>> | undefined, failure: string | undefined, frameReached = 0;
-const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, W = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!; // probe words: 44 scalars, then the throat line (3 words a cell)
+const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, W = VLINE_AT + 4 * VLINE; // probe words: 44 scalars, then the throat line (3 words a cell)
 try {
   c = await construct(scene);
   const { solver } = c, base = c.base;
@@ -410,6 +429,13 @@ var<workgroup> sums:array<atomic<u32>,5>;
     atomicStore(&words[base+2u],bitcast<u32>(record.y));atomicStore(&words[base+3u],bitcast<u32>(record.x));}
    var centre=0.0;for(var k=0u;k<8u;k++){centre+=corner(vec3u(at)+umCorner(k,2u),width);}
    atomicStore(&words[base],bitcast<u32>(centre/8.0));atomicStore(&words[base+1u],bitcast<u32>(faceU(at)));
+  }
+  // The tube's four edge vertices (y, z of the throat cell and +1) from
+  // wall.high - 6 along x: the vertex phi the surface trace starts from.
+  for(var i=0u;i<${4 * 12}u;i++){
+   let e=i%4u;let at=vec3i(${wall.high - 6}+i32(i/4u),THROAT.y+i32(e&1u),THROAT.z+i32(e>>1u))+boxOrigin();
+   var value=1e30;if(umCellPresent(at)){value=corner(vec3u(at),umTileWidth(umTileAt(vec3u(at)/4u)));}
+   atomicStore(&words[${VLINE_AT}u+i],bitcast<u32>(value));
   }
   {atomicStore(&words[39],UM_VERTEX_TEXTURE.x);atomicStore(&words[40],UM_TILES);let d=dims();atomicStore(&words[41],d.x);atomicStore(&words[42],d.y);
   }
@@ -560,6 +586,8 @@ var<workgroup> sums:array<atomic<u32>,5>;
       phi: { source: phiSource, measured, totals, solverCells: stats.volumeCellSum, represented: stats.representedVolumeCellSum, rawDrift: stats.rawVolumeDrift,
         preTotals, throatU, rightMaxU, negativeOwners, points, pointPhi, centreWidth: u[38], host: hostExtents(), extents: Object.fromEntries(probes.map((p, i) => [p.key, [39, 40, 41, 42].map(k => all[W * i + k])])), lowCorner: f[30], boxOriginX: u[31] },
       particles: solver.narrowBandFlipInfo?.particles, line,
+      // The tube's edge vertices from wall.high - 6: x, then phi (h) at (y, z), (y+1, z), (y, z+1), (y+1, z+1).
+      vertexLine: Array.from({ length: VLINE }, (_, i) => [wall.high - 6 + i, ...[0, 1, 2, 3].map(e => +(f[VLINE_AT + 4 * i + e]! / h).toFixed(2))]),
       // The outlet mouth as [z][y] rows of x cells (wall.high - 3 ...): "phi(h)/u/V+x/open".
       mouth: Array.from({ length: MOUTH[2]! }, (_, z) => Array.from({ length: MOUTH[1]! }, (_, y) => Array.from({ length: MOUTH[0]! }, (_, x) => {
         const at = MOUTH_AT + 4 * (x + MOUTH[0]! * (y + MOUTH[1]! * z)); return u[at] === 0xffffffff ? "-" : `${(f[at]! / h).toFixed(2)}/${f[at + 1]!.toFixed(2)}/${f[at + 2]!.toFixed(2)}/${f[at + 3]!.toFixed(2)}`; }).join(" "))),
