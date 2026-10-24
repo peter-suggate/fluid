@@ -203,22 +203,66 @@ What a resample cannot fix (shown with CPU twins):
   where fill * div * dt predicts +0.6). Keeping moving corners at h, or volume
   control, are the levers.
 
-Found, not yet fixed: uniform translation makes 10-24 of 32 regions HOT and
-seeds ~29k particles, contrary to Sato's translation-insensitive heat; the
-trigger is not isolated.
+### Round 5
+
+13. **Velocity detail only where liquid is** (`4a07622c`). Uniform translation
+    turned 10-24 of 32 regions HOT: dry 4h collar tiles compared their
+    extrapolated mean with unextended or frozen neighbours and closed wall
+    faces (0.19-0.38 m/s of false detail). Sato's high-pass q is the liquid's,
+    so a tile with no liquid corner stores defect -1 and adds no detail. It
+    keeps its gradient, and the momentum term takes the largest neighbour
+    speed that can carry liquid in, so stale COLD air ahead of a dam-break
+    front still thaws (dropping that gradient took dam-break to 14.8% drift).
+    Thin shape, and shape near a body, seed particles on deformation (the
+    velocity change across a tile), not speed. Translation HOT region-frames
+    478 -> 202, final tiers 14/0/18 -> 14/11/7.
+14. **Moving corners and curves stay at h** (`049221ca`). There was never a
+    curvature rule: moving surfaces were h first by detailSurfaceDistance 2,
+    then only where particles joined (until a6bcb5b8 seeded shape particles
+    only near bodies). The census now scores a moving tile's
+    VOLUME_SHAPE (4h)^2/12 |laplacian(phi)| (Sato's geometric heat) against the
+    shape tolerance, and surfaceAllowed lets the predicted band through beside
+    a moving shape tile. A flat or still surface keeps the displacement test.
+    About 230-270 h tiles in the moving blocks (their corner lines span all
+    eight z tile layers).
+15. **Tile width picks the interpolation order** (`0597befd`, default in
+    `febcb0b4`). Under trilinear h advection a corner kept at h erodes every
+    step; the cubic rounds it once and holds it. With the census holding
+    detail at h, a 4h surface is flat or gently curved, so 4h takes trilinear
+    (0-0.5 points of drift; the 22% of round 1 predates the curvature rule)
+    and h the cubic, adaptive: trilinear where hot particles hold the
+    surface. New control phiCoarseAdvection; phiCubicAdvection is on for
+    NB-FLIP. Pour late frame about +1.6 ms (h cubic +1.86, 4h trilinear
+    -0.37); Peter chose correctness first.
+
+Not yet fixed:
+
+- The regional extension does not re-extend COLD regions: their reader tiles
+  keep zero air velocity (now thawed through the momentum term instead).
+- Translation's last 7 HOT regions sit at h/4h seams, likely the remap of 4h
+  faces onto fresh h tiles; its internal KE (0.005 J) and extent (1 cell) fail.
+- Free-fall loses its remaining ~5% at the z depth walls (wall-plane phi
+  collapses inside the block from frame ~3) and at impact.
+- Dam-break's late tier changes rose to 0.068 with the cubic; its loss is SL
+  advection in the falling column's h tiles.
 
 ## Results
 
-Full suite, HEAD b26e0e02, default parameters, 1/60 s:
+Full suite, HEAD febcb0b4, default parameters, 1/60 s:
 
 | case | pass | failing checks |
 |---|---|---|
 | rest | yes | |
 | rest-step | yes | |
 | standing-wave | yes | |
-| free-fall | no | phi drift 6.7%, extent 1.04 cells, late tier changes 0.117 |
-| dam-break | no | phi drift 2.5%, front 12.8%, energy rise 12% |
-| mound | no | phi drift 4.8%, energy rise 20%, final KE 25% of peak |
+| tilted-free-fall | no | late tier changes 0.094 (phi drift 0.40%) |
+| translation | no | fill drift 1.36%, velocity error 0.012 m/s, extent 1.0 cells, internal KE 0.0053 J (phi drift 0.95%) |
+| free-fall | no | phi drift 5.7%, late tier changes 0.094 |
+| dam-break | no | phi drift 3.3%, late tier changes 0.068, front 12.8%, energy rise 11% |
+| mound | no | phi drift 4.75%, energy rise 18%, final KE 27% of peak |
+
+At b26e0e02 (round 3): free-fall 6.7%, dam-break 2.5%, mound 4.8%; at
+083c31cf, translation 9.4% and tilted-free-fall 6.9% phi drift.
 
 At session start every case failed: rest was HOT for 15 frames and WARM for
 15 more; rest-step developed 0.29 m/s of spurious flow and seeded ~4900
@@ -242,10 +286,10 @@ standing wave flickered (reversals 1.4%).
 
 1. Land the divergence-free extension patch (principled; exposes rather than
    adds the dam-break advection loss; needs a frame-time check)?
-2. Spend ~250 h tiles to keep moving surfaces at h (detailSurfaceDistance 1),
-   or develop a volume-preserving 4h resample?
-3. Plumb `initialVelocity_m_s` and tilted gravity into NB-FLIP so the suite
-   can add uniform translation, rotation and a tilted fall.
+2. Recover the cubic's ~1.9 ms: cubic only at h tiles the census flags for
+   shape (corners, curvature, thin), trilinear at crossing-only h tiles. Needs
+   the census importance bit in the surface stage (one tile-plane copy into
+   claims, or a bit packed into the copied heat plane).
 
 Also failing, independent of this work (they fail identically before it):
 `tests/uniform-hydrostatic-offset.test.ts` "a detached liquid source preserves
