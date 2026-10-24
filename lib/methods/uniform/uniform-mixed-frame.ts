@@ -8,6 +8,7 @@ import {UNIFORM_DETAIL_VIOLATION,type UniformDetailGroup,type UniformDetailStora
 import {UniformPressureSurfaceBand} from "./uniform-pressure-surface-band";
 import {UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL,UNIFORM_PRESSURE_ARENA_SCHEDULE,UniformPressureArena} from "./uniform-pressure-arena";
 import {UniformComputeBlit} from "./uniform-compute-blit";
+import {UniformLiveBlockCopy} from "./uniform-live-block-copy";
 import {UniformMixedFramePlan} from "./uniform-mixed-frame-plan";
 import {UniformMixedOwnershipTransfer,UniformMixedRemap} from "./uniform-mixed-remap";
 import {UniformMixedPhiResolve} from "./uniform-mixed-phi-resolve";
@@ -270,8 +271,6 @@ export class UniformMixedFrame {
  readonly levels:readonly UniformMixedPressureRootLevel[];
  /** Ownership of pressure level 0: the fixed all-4h layout. */
  get pressureOwnership(){return this.levels[0]!.ownership;}
- /** Level 0's live pressure words: all-4h owners plus boundary slots. */
- private get pressureWords(){return uniformMixedPressureStorage(this.pressureOwnership.layout).count;}
  /** The grid overlay's view of the last solve: pressure and pressure phi of
   * pressure level 0, indexed by the pressure owners it was solved on. The
   * phi buffer ends with the frame's stage grids (uniform-stage-grids.ts),
@@ -281,6 +280,12 @@ export class UniformMixedFrame {
   * two-stage h band section in front of it (see uniform-stage-grids). */
  private stageGridWord:number;
  private readonly stageBandWord:number;
+ /** The frame's whole-array copies of tile-key words (a word a key, and
+  * the root's wall slots) as visits of the pool's live blocks: the warm
+  * start, the band's slot map as buildRhs's map input, the presented root
+  * pressure, phi and band slot map, and the transport and pressure stage
+  * grids. The words of a block holding no page are a fixed point in each. */
+ private readonly liveCopies:{readonly warm:UniformLiveBlockCopy;readonly bandMap:UniformLiveBlockCopy;readonly pressure:UniformLiveBlockCopy;readonly phi:UniformLiveBlockCopy;readonly band:UniformLiveBlockCopy;readonly transport:UniformLiveBlockCopy;readonly grid:UniformLiveBlockCopy};
  /** Accepted fine pressure and its slot map, including after storage growth. */
  /** Existing band slots, copied only by the opt-in spatial performance sampler. */
  /** Extra producer counters only on explicitly sampled calibration frames. */
@@ -619,6 +624,13 @@ export class UniformMixedFrame {
   this.split.transfer.attachProjectedBand(this.band.index,this.band.slotMapOffset);
   this.bulk?.bind({params:this.bandParams,velocity:f.velocity,slots:{buffer:this.band.index,word:this.band.slotMapOffset/4},rootPhi:root.phi!,rootTopology,tiers:this.heat.tiers,pressure:root.pressure});
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
+  {
+   const blocks=this.pagePool.layout.blocks,cells=p.layout.cellCount,keys={from:0,to:0,words:512},walls={from:cells,to:cells,words:384},map=this.band.slotMapOffset/4;
+   if(cells!==512*blocks||this.ownership.capacity.tiles!==512*blocks||uniformMixedPressureStorage(p.layout).count!==cells+384*blocks)throw new Error("The frame's live copies need a word a tile key and 384 wall slots a block");
+   const copy=(label:string,spans:{from:number;to:number;words:number}[])=>new UniformLiveBlockCopy(device,this.pagePool,`Uniform live copy: ${label}`,spans);
+   this.liveCopies={warm:copy("warm start",[keys,walls]),bandMap:copy("band map input",[{from:map,to:0,words:512}]),pressure:copy("presented pressure",[keys,walls]),phi:copy("presented phi",[keys]),
+    band:copy("presented band slots",[{from:map,to:this.stageBandWord,words:512}]),transport:copy("transport grid",[{from:0,to:this.stageGridAt("transport"),words:512}]),grid:copy("pressure grid",[{from:0,to:this.stageGridAt("pressure"),words:512}])};
+  }
  }
  /** The stage scratch at `fineTiles` h tiles and `bandTiles` band tiles: the
   * largest of its consumers, each of which checks the buffer against its
@@ -765,7 +777,7 @@ export class UniformMixedFrame {
   const tileWords=new UniformPageTileWords(this.device,this.pagePool,[uniformPageTopology(this.ownership)]);
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,this.surfaceWorkControl,...this.pageOwners]});
-  await settleGPUInitialization([this.blit,this.solid,this.tileContext,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip,this.bulk]
+  await settleGPUInitialization([...Object.values(this.liveCopies),this.blit,this.solid,this.tileContext,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip,this.bulk]
    .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership,this.pagePool),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
   this.ready=true;
  }
@@ -887,10 +899,20 @@ export class UniformMixedFrame {
  }
  /** Copies one stage's tile words (or the band bits) into the stage grids. */
  private recordStageGrid(encoder:GPUCommandEncoder,source:GPUBuffer,range:"transport"|"pressure"|"band"):void{
-  const n=this.ownership.capacity.tiles,words=range==="band"?(n+31)>>>5:n;
-  const at=this.stageGridWord+UNIFORM_STAGE_GRID_HEADER_WORDS+(range==="transport"?0:range==="pressure"?n:2*n);
-  encoder.copyBufferToBuffer(source,0,this.presentation.phi.buffer,4*at,4*words);
+  const n=this.ownership.capacity.tiles,at=this.stageGridAt(range);
+  if(range==="band"){encoder.copyBufferToBuffer(source,0,this.presentation.phi.buffer,4*at,4*((n+31)>>>5));return;}
+  // A word a tile key: the live blocks' (the stage grids move with the band capacity).
+  const copy=range==="transport"?this.liveCopies.transport:this.liveCopies.grid;
+  this.gridSpan.to=at;copy.setSpans(this.gridSpans);
+  copy.encode(encoder,source,this.presentation.phi);
  }
+ private stageGridAt(range:"transport"|"pressure"|"band"):number{
+  const n=this.ownership.capacity.tiles;
+  return this.stageGridWord+UNIFORM_STAGE_GRID_HEADER_WORDS+(range==="transport"?0:range==="pressure"?n:2*n);
+ }
+ /** recordStageGrid's span (its target word moves with the band capacity). */
+ private readonly gridSpan={from:0,to:0,words:512};
+ private readonly gridSpans=[this.gridSpan];
  /** Discarded mass uses native sixty-fourths-of-threshold counters, weighted
   * by owner volume. It is a quantized lower bound; counts name owners, not
   * fine cells. Counters are reset once per frame. */
@@ -944,14 +966,14 @@ export class UniformMixedFrame {
    // carry its count until the receipt of the frame that built it is the one observed.
    const edit=relayout?.edit?.(),firstCensus=relayout!==undefined&&!this.censused;
    if(edit)this.noteEdit(frame,edit);
-   else if(relayout&&!this.censused){this.workEpoch=frame-1;this.band.observeWork(this.band.capacity);this.band.forgetCycles();this.ownership.forgetWork();this.remap.forgetWork();}
+   else if(relayout&&!this.censused){this.workEpoch=frame-1;this.band.observeWork(this.band.capacity);this.band.forgetCycles();this.ownership.forgetWork();this.pressureOwnership.observeResidency();this.remap.forgetWork();}
    const edited=this.editedBy(frame);
    const work=!kick&&frame-UNIFORM_MIXED_RECEIPT_RING>this.workEpoch?this.laggedOf(frame-UNIFORM_MIXED_RECEIPT_RING):undefined;
    // Under a census the budgets keep a reserve: it admits tiles the receipts report two frames late.
    // A counted edit's build admits none but its own.
    const reserve=relayout&&!edit?UNIFORM_WORK_RELAYOUT_RESERVE:0;
    // The band's tiles are wet h tiles: an edit adds its own at most.
-   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0),work.bandLevel1+(edited?.tiles??0),work.bandLevel2+(edited?.tiles??0));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);this.remap.observeWork(work.listed,reserve,edited?.reach);}
+   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0),work.bandLevel1+(edited?.tiles??0),work.bandLevel2+(edited?.tiles??0),Math.ceil((work.work[0]!+work.work[1]!+(edited?.reach??0))/512));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);if(this.pressureOwnership!==this.ownership)this.pressureOwnership.observeResidency(work.work[7]!+Math.ceil((edited?.reach??0)/64),reserve);this.remap.observeWork(work.listed,reserve,edited?.reach);}
    // Only a census certifies residency: a frame without one must not skip a page the last one did.
    if(!kick||relayout){if(!relayout&&this.censused)this.ownership.resetResidency();this.censused=!!relayout;}
    // Only a census asks the pool for the liquid's pages: without one a live pool would advance into pages it never claimed.
@@ -1150,7 +1172,7 @@ export class UniformMixedFrame {
    // that one smooth divergence: it expanded each step, conservative
    // transport diluted its V into a layer above phi, and the floor's lost
    // volume later surfaced as a growing cavity.
-   {const to=this.levels[0]!.pressure;encoder.copyBufferToBuffer(this.presentation.pressure.buffer,0,to.buffer,to.offset??0,4*this.pressureWords);}
+   this.liveCopies.warm.encode(encoder,this.presentation.pressure,this.levels[0]!.pressure);
    if(this.projection.skipBandRootRhs){
     // Prepare reads authority, topology and forced faces, not root RHS,
     // pressure or minima. Its slot map identifies exactly the owner RHS
@@ -1158,8 +1180,7 @@ export class UniformMixedFrame {
     // map input; buildRhs still writes every resident owner's warm/bound state
     // and every domain-wall row before solve initialization consumes them.
     this.band.encodePrepare(encoder);
-    const rhs=this.levels[0]!.rhs[0];
-    encoder.copyBufferToBuffer(this.band.index,this.band.slotMapOffset,rhs.buffer,rhs.offset??0,4*this.pressureOwnership.layout.cellCount);
+    this.liveCopies.bandMap.encode(encoder,this.band.index,this.levels[0]!.rhs[0]);
    }
    this.projection.encode(encoder,"rhs",split.rhsGroup);
    // One composite solve: the band's h rows and every other liquid root row
@@ -1201,13 +1222,14 @@ export class UniformMixedFrame {
    }
    const root=this.levels[0]!,rootPressure=root.pressure,rootPhi=root.phi!;
    // Present the live all-4h words only: level 0 keeps the simulation
-   // layout's capacity, but its owners and boundary slots are all-4h.
-   encoder.copyBufferToBuffer(rootPressure.buffer,rootPressure.offset??0,this.presentation.pressure.buffer,0,4*this.pressureWords);
-   encoder.copyBufferToBuffer(rootPhi.buffer,rootPhi.offset??0,this.presentation.phi.buffer,0,4*this.pressureOwnership.layout.cellCount);
+   // layout's capacity, but its owners and boundary slots are all-4h; the
+   // live blocks' words (liveCopies).
+   this.liveCopies.pressure.encode(encoder,rootPressure,this.presentation.pressure);
+   this.liveCopies.phi.encode(encoder,rootPhi,this.presentation.phi);
    this.recordStageGrid(encoder,this.pressureOwnership.presentation.buffer,"pressure");
    // The h band re-solved this frame (empty on an all-4h simulation); the
    // live band pressures were presented by the band's own slot launch.
-   encoder.copyBufferToBuffer(this.band.index,this.band.slotMapOffset,this.presentation.phi.buffer,4*this.stageBandWord,4*this.ownership.capacity.tiles);
+   this.liveCopies.band.encode(encoder,this.band.index,this.presentation.phi);
    trace?.phase(encoder,V.band);
    // Rigid coupling reads the accepted h pressure and projected field;
    // the census below promotes around the integrated poses.
@@ -1433,7 +1455,7 @@ export class UniformMixedFrame {
   // the host UNIFORM_MIXED_RECEIPT_RING frames late: launch at the ceilings
   // until a receipt of this owner arrives. A budget left at the host
   // layout's (one group from all-4h) runs the new h tiles on a few lanes.
-  if(relayout&&!counted){this.workEpoch=this.frameIndex;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.remap.forgetWork();}
+  if(relayout&&!counted){this.workEpoch=this.frameIndex;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.pressureOwnership.observeResidency();this.remap.forgetWork();}
   // markChanged latches a builder fatal into this frame's record.
   this.remap.bindStatus(this.status);
  }
@@ -1536,5 +1558,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{this.blit.destroy();this.surfaceWorkControl.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.tileContext.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();this.bulk?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{for(const c of Object.values(this.liveCopies))c.destroy();this.blit.destroy();this.surfaceWorkControl.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.tileContext.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();this.bulk?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

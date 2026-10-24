@@ -9,7 +9,7 @@ import { uniformBlockNeighbourWords, type UniformLatticeAddress } from "./unifor
 /** Counts copied into the existing frame receipt: tier counts (4 words),
  * seam counts (2), regular coarse owners, resident pages. */
 export const UNIFORM_WORK_RECEIPT_WORDS=8;
-type WorkKind="fine"|"coarse"|"all"|"regularCoarse"|"fused"|"merged"|"coarseMerged"|"sharpen"|"hanging"|"fineAndSeams"|"seamFine"|"seamCoarse"|"seams";
+type WorkKind="fine"|"coarse"|"all"|"residentAll"|"residentPages"|"regularCoarse"|"fused"|"merged"|"coarseMerged"|"sharpen"|"hanging"|"fineAndSeams"|"seamFine"|"seamCoarse"|"seams";
 
 type OwnershipUploadTarget="topology"|"counts"|"support";
 interface OwnershipDerivation{
@@ -213,6 +213,18 @@ export class UniformMixedOwnership {
     this.observe("sharpen",(sharpen-sharpen%192)/192+seamCoarse+reach,reserve);
     this.observe("fineAndSeams",fine+seamCoarse+reach,reserve);this.observe("seamFine",seamFine+reach,reserve);this.observe("seamCoarse",seamCoarse+reach,reserve);
     this.observe("seams",seamFine+seamCoarse+regular+reach,reserve);
+    // The resident pages a launch strides: an edit's census certifies its own,
+    // the receipt's grown by the edit's reach (a width only: the lists rule).
+    const resident=Math.min(uniformMixedPageCount(this.capacity.tiles),words[7]!+(edit?Math.ceil(edit.reach/64):0));
+    this.observe("residentPages",resident,reserve);this.observe("residentAll",fine+tiles+resident,reserve);
+  }
+  /** The resident pressure ownership's residency evidence: the simulation's
+   * resident pages of a receipted frame (it carries the simulation's
+   * certificate, uniform-mixed-remap.ts; an edit's grown by its reach), its
+   * own static h list before them. None takes every page. */
+  observeResidency(pages?:number,reserve=0):void{
+    if(pages===undefined){delete this.work.residentPages;delete this.work.residentAll;return;}
+    this.observe("residentPages",pages,reserve);this.observe("residentAll",this.currentLayout.fineTiles.length+pages,reserve);
   }
   private observe(kind:WorkKind,count:number,reserve:number):void{this.work[kind]=uniformBufferedWork(this.work[kind]??1,count,this.capacity.tiles,reserve);}
   /** No evidence of the layout to come: every launch at its ceiling. */
@@ -415,12 +427,20 @@ export class UniformMixedOwnership {
    * unused list-0 slot [4n+16, 5n+16). No stage reads them on a remap
    * target, and the frame that adopts rebuilds the header and planes
    * (UniformMixedFramePlan.encode clears [0, n) and the header, seeds, and
-   * dilates [n, 4n) over every tile) before any reader. */
-  adoptGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers):void{
-    this.copyGeneration(encoder,source);
+   * dilates [n, 4n) over every tile) before any reader.
+   * copyLive: a launch that copies only the words a reader can reach (the
+   * source's live tiles, its lists by their counts, the sentinel keys;
+   * UniformMixedRemap's adopt) into adoptionTargets; the whole range is
+   * copied without one. */
+  adoptGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers,copyLive?:(encoder:GPUCommandEncoder)=>void):void{
+    if(copyLive){encoder.copyBufferToBuffer(source.counts.buffer,source.counts.offset,this.counts,0,16);copyLive(encoder);}
+    else this.copyGeneration(encoder,source);
     this.revision++;
     this.mirrorCurrent=false;this.overCapacity=false;
   }
+  /** What adoptGpu's copyLive writes: the tile words, the support words and
+   * (sampled) the hanging slot table. */
+  get adoptionTargets():{readonly topology:GPUBuffer;readonly support:GPUBuffer;readonly hanging?:GPUBuffer}{return {topology:this.topology,support:this.support,hanging:this.sampled?this.hanging:undefined};}
   /** False once a GPU generation was adopted without a host mirror. */
   mirrorCurrent=true;
   /** The host-sized launches below size grids from the host mirror: after a

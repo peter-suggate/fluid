@@ -1,16 +1,16 @@
 /** A point on a face belongs to both incident cells. Testing only floor(q)
  * pins high-side wall contact while allowing the reflected low-side contact
  * to slide. No tolerance: points strictly inside a closed cell stay closed.
- * Requires umCellIsOpen, which also rejects non-resident solid pages. */
+ * Requires umCellIsOpen, which also rejects non-resident solid pages.
+ * k=0 is floor(q) itself: one umCellIsOpen site, because Metal inlines the
+ * solid geometry into every call site and compile time follows the copies. */
 export const uniformSolidPointOpenWGSL=/* wgsl */`
 fn umOpenAt(q:vec3f)->bool{
  let base=vec3i(floor(q));
- if(umCellIsOpen(base)){return true;}
  let on=q==floor(q);let faces=u32(on.x)|(u32(on.y)<<1u)|(u32(on.z)<<2u);
- for(var k=1u;k<=faces;k++){
-  let d=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
+ for(var k=0u;k<=faces;k++){
   if((k&faces)!=k){continue;}
-  if(umCellIsOpen(base-d)){return true;}
+  if(umCellIsOpen(base-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))){return true;}
  }
  return false;
 }
@@ -38,14 +38,21 @@ fn umSampleClosed(q:vec3f)->bool{
  * motion. Clamp only components directed into the solid, as the exterior
  * domain clamp does. Probe incident cells at the starting point so corners
  * treat every wall independently; the subsequent walk still checks the
- * entire segment for other obstacles. */
+ * entire segment for other obstacles. Probes run as one flat loop (ahead,
+ * then behind only when ahead is closed) so umOpenAt has a single site. */
 export const uniformSolidSlideStartWGSL=/* wgsl */`
 fn umSlideStart(p:vec3f,end:vec3f)->vec3f{
- var q=end;
+ var q=end;var axes=0u;var count=0u;
  for(var axis=0u;axis<3u;axis++){
-  if(p[axis]!=floor(p[axis])||end[axis]==p[axis]){continue;}
+  if(p[axis]==floor(p[axis])&&end[axis]!=p[axis]){axes|=axis<<(2u*count);count++;}
+ }
+ var aheadClosed=false;
+ for(var j=0u;j<2u*count;j++){
+  let axis=(axes>>(2u*(j>>1u)))&3u;let behind=(j&1u)!=0u;
+  if(behind&&!aheadClosed){continue;}
   var step=vec3f(0);step[axis]=select(-0.25,0.25,end[axis]>p[axis]);
-  if(!umOpenAt(p+step)&&umOpenAt(p-step)){q[axis]=p[axis];}
+  let open=umOpenAt(select(p+step,p-step,behind));
+  if(!behind){aheadClosed=!open;}else if(open){q[axis]=p[axis];}
  }
  return q;
 }
