@@ -1,7 +1,6 @@
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 export const UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE = 6;
 export const UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS = 3;
-export const UNIFORM_VOLUME_EDGE_BYTES = 40;
 
 export function uniformVolumeTargetWGSL(cached: boolean, mixed = false): string {
   // The mixed variant takes the owner's eight corner values from its caller.

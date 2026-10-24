@@ -80,6 +80,10 @@ export function extensionSlots(a:UniformLatticeAddress,fineTiles:number):number{
  // The low-face planes: per h face a low-face table's keys (UM_LOW_FACE_KEYS), per 4h face three planes of 64 a block.
  return 5*a.tileKeys+a.lowFaceKeys+192*a.blocks+1+240*fineTiles;
 }
+/** One scalar companion per slot and epoch at `fineTiles` h tiles (companionBytesAt). */
+export function extensionCompanionBytes(a:UniformLatticeAddress,fineTiles:number):number{
+ return 2*Math.ceil(Math.ceil(8*extensionSlots(a,fineTiles)/256)*256/2/256)*256;
+}
 /** Seam 4h tiles per sweepSeams job (ueSweepCoarsePack). */
 const UE_PACK_TILES=2;
 /** Regular-bulk mode restricts physical source faces directly to the 4h
@@ -119,7 +123,7 @@ export class UniformMixedExtension {
   * each followed by the region states (useSlots). */
  slotBufferBytesAt(fineTiles:number):number{return 2*(this.slotBytesAt(fineTiles)+this.regionBytes);}
  /** One scalar companion per slot and epoch, borrowed until G2P resampling. */
- companionBytesAt(fineTiles:number):number{return 2*Math.ceil(this.slotBytesAt(fineTiles)/2/256)*256;}
+ companionBytesAt(fineTiles:number):number{return extensionCompanionBytes(this.address,fineTiles);}
  private readonly resources:GPUBindGroupLayout;
  private readonly pairedResources?:GPUBindGroupLayout;
  private readonly snapshotResources?:GPUBindGroupLayout;

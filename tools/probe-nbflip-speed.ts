@@ -37,7 +37,8 @@
  * cell volume, and for --slab-stages (default forces.scratch,
  * toSimulation.velocity, band.velocity) the three face velocities and the
  * six-face divergence of every cell. A texel at cell c, component a, is the
- * velocity on the cell's upper a face.
+ * velocity on the cell's upper a face. --slab-z=z,z,... prints several z
+ * planes of the same window.
  * --lock=<file> builds the solver outside the GPU lock and takes it for the
  * steps (tools/gpu-hold.ts). */
 import { pathToFileURL } from "node:url";
@@ -63,7 +64,7 @@ assert.ok(sceneId && Number.isInteger(steps) && steps >= 1, "usage: probe-nbflip
 const option = (name: string) => process.argv.find(a => a.startsWith(`--${name}=`))?.split("=")[1];
 const dt = Number(option("dt") ?? 1 / 60), top = Number(option("top") ?? 6), over = Number(option("over") ?? 0), cells = Number(option("cells") ?? 8);
 // With --stages, a window of raw face texels on one z plane as chosen stages leave it: --slab=x0,x1,y0,y1,z [--slab-stages=forces.scratch,toSimulation.velocity,band.velocity].
-const slab = option("slab")?.split(",").map(Number), slabStages = new Set((option("slab-stages") ?? "forces.scratch,toSimulation.velocity,band.velocity").split(","));
+const slab = option("slab")?.split(",").map(Number), slabZ = option("slab-z")?.split(",").map(Number), slabStages = new Set((option("slab-stages") ?? "forces.scratch,toSimulation.velocity,band.velocity").split(","));
 const stageSteps = new Set((option("stages") ?? "").split(",").filter(Boolean).map(Number));
 // --capture=<stage,...> keeps the named stages alone (every stage when absent).
 const captured = option("capture") ? new Set(option("capture")!.split(",")) : undefined;
@@ -143,8 +144,11 @@ try {
   for (let step = 1; step <= steps; step++) {
     let thrown: string | undefined;
     captures = stageSteps.has(step) ? [] : undefined;
+    // The census records each tile's band reason only while layout views are on.
+    if (captures) (solver as unknown as { mixedFrame: { setLayoutViews(on: boolean): void } }).mixedFrame.setLayoutViews(true);
     try { solver.advanceTo(step * dt, []); await solver.awaitFrameCompletion(); } catch (e) { const cause = (e as Error).cause; thrown = `${(e as Error).message}${cause instanceof Error ? `: ${cause.message}` : ""}`; }
     const taken = captures ?? []; captures = undefined;
+    if (stageSteps.has(step)) (solver as unknown as { mixedFrame: { setLayoutViews(on: boolean): void } }).mixedFrame.setLayoutViews(false);
     { const encoder = device.createCommandEncoder(); pool.encodeReceipt(encoder, statusRead, 0); device.queue.submit([encoder.finish()]); await statusRead.mapAsync(GPUMapMode.READ); status.set(new Uint32Array(statusRead.getMappedRange())); statusRead.unmap(); }
     const fatal = uniformPagePoolFatalMessage(l, status), failure = thrown ?? solver.info.simulationPipelineError;
     const words = await readBuffer(census.work, census.work.size), floats = new Float32Array(words.buffer);
@@ -167,11 +171,14 @@ try {
     if (taken.length) {
       const [phi, volume] = failure ? [undefined, undefined] : await Promise.all([readMixedTexture(device, solver.vertexPhiTexture!), readMixedTexture(device, solver.volumeTexture)]);
       if (slab && phi && volume) {
-        const [x0, x1, y0, y1, Z] = slab as [number, number, number, number, number];
+        const [x0, x1, y0, y1] = slab as [number, number, number, number, number];
+        for (const Z of slabZ ?? [slab[4]!]) {
         console.log(`   slab step ${step} (end of the step): vertex phi in cells, z ${Z}, vertices x = ${x0}..${x1 + 1}`);
         for (let y = y1 + 1; y >= y0; y--) console.log(`    y ${String(y).padStart(3)} ${Array.from({ length: x1 - x0 + 2 }, (_, k) => (phi[x0 + k + (nx + 1) * (y + (ny + 1) * Z)]! / H).toFixed(2).padStart(7)).join(" ")}`);
-        console.log(`   slab step ${step} (end of the step): cell volume and tile width, z ${Z}`);
-        for (let y = y1; y >= y0; y--) console.log(`    y ${String(y).padStart(3)} ${Array.from({ length: x1 - x0 + 1 }, (_, k) => `${volume[x0 + k + nx * (y + ny * Z)]!.toFixed(2)}${(after[uniformTileKey(address, (x0 + k) >> 2, y >> 2, Z >> 2)]! & 0x80000000) ? "h" : "C"}`.padStart(7)).join(" ")}`);
+        console.log(`   slab step ${step} (end of the step): cell volume, the tile's width before and after the step (h or C) and its census band reason (UNIFORM_STAGE_REASON), z ${Z}`);
+        const width = (w: Uint32Array, x: number, y: number) => (w[uniformTileKey(address, x >> 2, y >> 2, Z >> 2)]! & 0x80000000) ? "h" : "C";
+        for (let y = y1; y >= y0; y--) console.log(`    y ${String(y).padStart(3)} ${Array.from({ length: x1 - x0 + 1 }, (_, k) => `${volume[x0 + k + nx * (y + ny * Z)]!.toFixed(2)}${width(before, x0 + k, y)}${width(after, x0 + k, y)}${words[census.wetOffset + 2 * census.words + uniformTileKey(address, (x0 + k) >> 2, y >> 2, Z >> 2)]}`.padStart(9)).join(" ")}`);
+        }
       }
       if (trace && taken.some(c => c.name === trace)) {
         // The traced stage's largest face, then that face and the six faces of the two cells it joins in every captured stage.
@@ -230,13 +237,16 @@ try {
           console.log(`   sinks ${capture.name}: ${n} h cells with divergence under -1, ${total.toFixed(1)} cell volumes a step in all${phi ? `; ${air} of them air cells taking ${airTotal.toFixed(1)}, ${voids} of those enclosed one-cell voids taking ${voidTotal.toFixed(1)}` : ""}${n ? `, the largest ${worst.toFixed(2)} at (${where % nx},${Math.floor(where / nx) % ny},${Math.floor(where / (nx * ny))}) V ${volume ? volume[where]!.toFixed(2) : "?"}` : ""}`);
         }
         if (slab && slabStages.has(capture.name)) {
-          const [x0, x1, y0, y1, Z] = slab as [number, number, number, number, number], at = (x: number, y: number, z: number, c: number) => x < 0 || y < 0 || z < 0 ? 0 : field[4 * (x + nx * (y + ny * z)) + c]! * cell;
+          const [x0, x1, y0, y1] = slab as [number, number, number, number, number];
+          for (const Z of slabZ ?? [slab[4]!]) {
+          const at = (x: number, y: number, z: number, c: number) => x < 0 || y < 0 || z < 0 ? 0 : field[4 * (x + nx * (y + ny * z)) + c]! * cell;
           for (const c of [0, 1, 2]) {
             console.log(`   slab ${capture.name} step ${step}: velocity ${"xyz"[c]} on each cell's upper face (cells a step), z ${Z}, columns x = ${x0}..${x1}`);
             for (let y = y1; y >= y0; y--) console.log(`    y ${String(y).padStart(3)} ${Array.from({ length: x1 - x0 + 1 }, (_, k) => at(x0 + k, y, Z, c).toFixed(2).padStart(7)).join(" ")}`);
           }
           console.log(`   slab ${capture.name} step ${step}: divergence of the cell's six faces (cells a step), z ${Z}`);
           for (let y = y1; y >= y0; y--) console.log(`    y ${String(y).padStart(3)} ${Array.from({ length: x1 - x0 + 1 }, (_, k) => { const x = x0 + k; return (at(x, y, Z, 0) - at(x - 1, y, Z, 0) + at(x, y, Z, 1) - at(x, y - 1, Z, 1) + at(x, y, Z, 2) - at(x, y, Z - 1, 2)).toFixed(2).padStart(7); }).join(" ")}`);
+          }
         }
       }
     }

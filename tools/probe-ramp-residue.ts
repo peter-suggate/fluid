@@ -46,8 +46,8 @@ import {
   NBFLIP_RAMP_CELL_SIZE_M, NBFLIP_RAMP_GRID, NBFLIP_RAMP_LENGTH, NBFLIP_RAMP_VARIANTS,
   createNbflipRamp, nbflipRampBed, nbflipRampEmittedCells, nbflipRampShape, type NbflipRampVariant,
 } from "../lib/core/nbflip-ramp-scene";
-import { UniformBedSlopeBake } from "../lib/methods/uniform/uniform-bed-slope-bake";
-import { uniformSolidBedSlopeAt, uniformSolidBedSlopeEntry, uniformSolidMaskPages, uniformSolidScratchLayout } from "../lib/methods/uniform/uniform-mixed-solid.wgsl";
+import { UNIFORM_BED_SLOPE_LAYERS, UniformBedSlopeBake, uniformBedSlopeBakeCapacity, uniformBedSlopePartialColumns } from "../lib/methods/uniform/uniform-bed-slope-bake";
+import { UNIFORM_SOLID_BED_SLOPE_UNITS, uniformSolidBedSlopeAt, uniformSolidBedSlopeEntry, uniformSolidMaskPages, uniformSolidScratchLayout } from "../lib/methods/uniform/uniform-mixed-solid.wgsl";
 import { advanceUniform, createUniformSolver, readUniformFields, withUniformDevice } from "../tests/helpers/uniform-geometric";
 import { readMixedBuffer, readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
 
@@ -86,14 +86,13 @@ await withUniformDevice("ramp residue probe", async device => {
     const pool = scene.fluid.initialLiquidVolumes?.[0];
     if (option.has("level") && pool?.shape === "box") pool.max_m = { ...pool.max_m, y: Number(option.get("level")) * H };
     const mask = new SolidOccupancyMask(uniformSolidMaskPages(uniformLatticeAddress(NBFLIP_RAMP_GRID, scene.container.top === "open"))); mask.update(fluidSolidWorldForScene(scene));
-    const haloed = (x: number, y: number, z: number) => (x + 1) + (nx + 2) * ((y + 1) + (ny + 2) * (z + 1));
     const solid = (x: number, y: number, z: number) => mask.solid(x, y, z);
-    /** A lane against the ramp's own slope, as the lane's rounding stores it. */
+    /** A lane (the mask buffer's words from 0, its slots included) against the ramp's own slope, as the lane's rounding stores it. */
     const laneReport = (words: Uint32Array) => {
-      const want = uniformSolidBedSlopeAt(Uint32Array.of(uniformSolidBedSlopeEntry(shape.level ? 0 : -1 / shape.run, 0)), 0)[0];
+      const want = (uniformSolidBedSlopeEntry(shape.level ? 0 : -1 / shape.run, 0) << 24 >> 24) / UNIFORM_SOLID_BED_SLOPE_UNITS;
       let floor = 0, sloped = 0, worst = 0, elsewhere = 0;
       for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-        const [slopeX, slopeZ] = uniformSolidBedSlopeAt(words, haloed(x, y, z));
+        const [slopeX, slopeZ] = uniformSolidBedSlopeAt(words, x, y, z);
         if (x < RAMP && y === nbflipRampBed(variant, x) && !solid(x, y, z) && solid(x, y - 1, z)) {
           floor++; if (slopeX !== 0 || slopeZ !== 0) sloped++;
           worst = Math.max(worst, Math.abs(slopeX - want), Math.abs(slopeZ));
@@ -103,14 +102,15 @@ await withUniformDevice("ramp residue probe", async device => {
     };
     const started = performance.now();
     if (option.get("lane") === "check") {
-      const layout = uniformSolidScratchLayout(NBFLIP_RAMP_GRID);
-      const scratch = device.createBuffer({ label: "Ramp probe solid scratch", size: mask.words.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-      const bake = new UniformBedSlopeBake(device, scratch, { size: NBFLIP_RAMP_GRID, laneBaseWord: layout.bedSlopeBaseWord });
+      const layout = uniformSolidScratchLayout(), partial = uniformBedSlopePartialColumns(mask.words, NBFLIP_RAMP_GRID), slots = uniformBedSlopeBakeCapacity(NBFLIP_RAMP_GRID, partial);
+      const extent = mask.words.length + slots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS;
+      const scratch = device.createBuffer({ label: "Ramp probe solid scratch", size: 4 * extent, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      const bake = new UniformBedSlopeBake(device, scratch, { size: NBFLIP_RAMP_GRID, laneBaseWord: layout.bedSlopeBaseWord, laneSlotBaseWord: mask.words.length, ...slots });
       try {
         device.queue.writeBuffer(scratch, 0, mask.words);
         await bake.initialize();
-        const encoder = device.createCommandEncoder(); bake.encode(encoder); device.queue.submit([encoder.finish()]);
-        const report = laneReport(await readWords(device, scratch, layout.bedSlopeBaseWord, layout.bedSlopeWords));
+        const encoder = device.createCommandEncoder(); bake.plan(partial); bake.encode(encoder); device.queue.submit([encoder.finish()]);
+        const report = laneReport(await readWords(device, scratch, 0, extent));
         console.log(`LANE ${JSON.stringify({ arm: arm.text, built_s: +((performance.now() - started) / 1000).toFixed(1), ...report })}`);
       } finally { bake.destroy(); scratch.destroy(); }
       continue;
@@ -138,7 +138,7 @@ await withUniformDevice("ramp residue probe", async device => {
 
     // The lane as the solver's bake wrote it at the build, against the ramp's
     // own slope; lane=off then zeroes it, which is every tread a level floor.
-    const lane = solver.solidBedSlopeLane, baked = laneReport(await readWords(device, lane.buffer, lane.baseWord, lane.words));
+    const lane = solver.solidBedSlopeLane, baked = laneReport(await readWords(device, lane.buffer, 0, lane.extentWords));
     if (laneOff) device.queue.writeBuffer(lane.buffer, 4 * lane.baseWord, new Uint32Array(lane.words));
 
     const emittedAll = nbflipRampEmittedCells(variant), rate = shape.stream ? emittedAll / shape.stream.seconds : 0;

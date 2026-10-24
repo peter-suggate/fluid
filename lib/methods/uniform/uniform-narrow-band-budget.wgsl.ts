@@ -81,9 +81,14 @@ fn nbBudgetScore(w0:u32,w1:u32)->u32{
  }
  return top;
 }
+// Rank and admit stride the pool's resident tile keys (uniform-live-lists,
+// which the including module binds): a free key writes nothing.
 // After importance: every tile's words are final, and this pass writes none.
-@compute @workgroup_size(64) fn activityRank(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(t)){return;}
+@compute @workgroup_size(64) fn activityRank(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){activityRankTile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn activityRankTile(t:u32){
+ if(!umTileLive(t)){return;}
  var rank=NB_BUDGET_NONE;
  let own=atomicLoad(&census[importanceIndex(t,1u)]);let p=vec3i(umTileCoord(t));
  let flight=nbBudgetInFlight(t,p,own);
@@ -107,8 +112,11 @@ fn nbBudgetScore(w0:u32,w1:u32)->u32{
  }
  atomicStore(&census[nbBudgetState(0u)],cutoff);
 }
-@compute @workgroup_size(64) fn activityAdmit(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(t)){return;}
+@compute @workgroup_size(64) fn activityAdmit(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){activityAdmitTile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn activityAdmitTile(t:u32){
+ if(!umTileLive(t)){return;}
  var w1=atomicLoad(&census[importanceIndex(t,1u)]);
  let rank=atomicLoad(&census[nbBudgetRank(t)]);
  atomicStore(&census[nbBudgetFlight(t)],(atomicLoad(&census[nbBudgetFlight(t)])>>8u)&3u);

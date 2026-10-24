@@ -19,7 +19,7 @@ test("production solid support is local, strict, and refreshed each frame",{skip
   const ownership=new UniformMixedOwnership(device,layout,true,0),storage=new UniformDetailStorage(device,address);storage.attach(ownership);
   const phi=storage.createField("solid support phi","vertex","r32float"),texture=storage.physical(phi);
   const params=device.createBuffer({size:272,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  const scratch=device.createBuffer({size:4*(uniformSolidScratchLayout(address.cells).cutMapOffsetWords+layout.tiles.length),usage:GPUBufferUsage.STORAGE});
+  const scratch=device.createBuffer({size:4*(uniformSolidScratchLayout().cutMapOffsetWords+layout.tiles.length),usage:GPUBufferUsage.STORAGE});
   const bodies=device.createBuffer({size:1536,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
   const terrain=device.createTexture({size:[1,1],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING});
   const solid=new UniformMixedSolid(device,{params,scratch,bodies,terrain,coupledTiles:0,paramsWritten:()=>true},uniformMixedAllCoarseLayout(layout));

@@ -20,7 +20,7 @@ export type Size = readonly [number, number, number];
 export interface Mask { readonly size: Size; readonly words: Uint32Array }
 export const HEADER = 4, NONE = 0xffffffff, POINT = 0xffffff;
 export const layoutOf = (size: Size, passes?: number, layers?: number): UniformBedSlopeBakeLayout =>
-  uniformBedSlopeBakeLayout({ size, laneBaseWord: uniformSolidScratchLayout(size).bedSlopeBaseWord, passes, layers });
+  uniformBedSlopeBakeLayout({ size, laneBaseWord: uniformSolidScratchLayout().bedSlopeBaseWord, passes, layers });
 export const cellOf = (size: Size, x: number, y: number, z: number) => (x + 1) + (size[0] + 2) * ((y + 1) + (size[1] + 2) * (z + 1));
 export const solidIn = (m: Mask) => (x: number, y: number, z: number) => { const i = cellOf(m.size, x, y, z); return (m.words[HEADER + (i >>> 5)]! >>> (i & 31) & 1) === 1; };
 /** A mask from a predicate over the lattice and its halo. */
@@ -33,9 +33,34 @@ export function maskOf(size: Size, solid: (x: number, y: number, z: number) => b
   }
   return { size, words };
 }
-/** A rig's mask image for a lattice (SolidOccupancyMask's layout): the lane after the directory, `tail` words after the lane, then a slot a page of the lattice. */
+/** A rig's mask image for a lattice (SolidOccupancyMask's layout): the lane's directory after the directory, `tail` words after it, then a slot a page of the lattice. */
 export const imageLayoutOf = (size: Size, tail = 0): SolidOccupancyMaskLayout =>
-  solidOccupancyMaskLayout(tail, Math.ceil(size[0] / 32) * Math.ceil(size[1] / 32) * Math.ceil(size[2] / 32), uniformSolidScratchLayout(size).bedSlopeWords);
+  solidOccupancyMaskLayout(tail, Math.ceil(size[0] / 32) * Math.ceil(size[1] / 32) * Math.ceil(size[2] / 32), uniformSolidScratchLayout().bedSlopeWords);
+/** The page columns (x + 64 z) holding a page of the lattice with both solid and open cells: what the bake places its lane by (uniformBedSlopePartialColumns of the mask's image). */
+export function partialOf(mask: Mask): Uint8Array {
+  const [nx, ny, nz] = mask.size, solid = solidIn(mask), out = new Uint8Array(4096);
+  for (let pz = 0; pz < Math.ceil(nz / 32); pz++) for (let px = 0; px < Math.ceil(nx / 32); px++) for (let py = 0; py < Math.ceil(ny / 32) && !out[px + 64 * pz]; py++) {
+    let seen = 0;
+    for (let z = 32 * pz; z < Math.min(nz, 32 * pz + 32) && seen !== 3; z++) for (let y = 32 * py; y < Math.min(ny, 32 * py + 32) && seen !== 3; y++) for (let x = 32 * px; x < Math.min(nx, 32 * px + 32); x++) seen |= solid(x, y, z) ? 1 : 2;
+    if (seen === 3) out[px + 64 * pz] = 1;
+  }
+  return out;
+}
+/** The sparse lane of a mask buffer's words (its directory at l.laneBaseWord, its slots where that names) as the dense lane of the emulation: two cells a word over the haloed lattice. */
+export function denseLaneOf(words: ArrayLike<number>, l: UniformBedSlopeBakeLayout): Uint32Array {
+  const [nx, ny, nz] = l.size, lane = new Uint32Array(l.denseLaneWords);
+  for (let z = 0; z < nz; z++) for (let x = 0; x < nx; x++) {
+    const slot = words[l.laneBaseWord + (x >> 5) + 64 * (z >> 5)]!;
+    if (slot) for (let k = 0; k < l.layers; k++) {
+      const w = words[slot + l.layers * ((x & 31) + 32 * (z & 31)) + k]!;
+      if (!w) continue;
+      const y = (w >>> 16) - 1, i = cellOf(l.size, x, y, z);
+      if (y < 0 || y >= ny || (w & 0xffff) === 0) assert.fail(`lane word ${w.toString(16)} of column ${x},${z} names no floor cell`);
+      lane[i >>> 1]! |= (w & 0xffff) << (16 * (i & 1));
+    }
+  }
+  return lane;
+}
 /** `mask` as the mask image the kernels read: a slot for every page of the
  * lattice, the pages over it open or walls as the mask's halo is over its
  * first column, and every other page a wall. An image has no halo of its own:
@@ -236,7 +261,7 @@ export function reference(mask: Mask, l: UniformBedSlopeBakeLayout, into?: Uint3
   for (let pass = 0; pass < l.passes; pass++) if (!emulateSpread(e)) break;
   emulateHeights(e);
   for (let pass = 0; pass < l.relax; pass++) emulateRelax(e);
-  const lane = into ?? new Uint32Array(l.laneWords), rise = new Float32Array(l.cells);
+  const lane = into ?? new Uint32Array(l.denseLaneWords), rise = new Float32Array(l.cells);
   emulateResolve(e, lane, rise);
   return { lane, rise, floors: e.floors, maxLayers: e.maxLayers, dropped: e.dropped };
 }
@@ -260,7 +285,9 @@ const expectZero = (name: string, mask: Mask, lane: Uint32Array) => { const [flo
 
 // ---- The shapes. ----
 export interface Shape { readonly name: string; readonly mask: Mask; readonly passes?: number; check(lane: Uint32Array, ref: Reference): string }
-export const BED_SLOPE_RAMP: Size = [128, 32, 32], BED_SLOPE_DRUM: Size = [160, 96, 160], BED_SLOPE_LONG: Size = [512, 96, 128];
+export const BED_SLOPE_RAMP: Size = [128, 32, 32], BED_SLOPE_DRUM: Size = [160, 96, 160], BED_SLOPE_LONG: Size = [512, 96, 128], BED_SLOPE_WIDE: Size = [512, 64, 64];
+/** A staircase down to a page boundary in its first three page columns, then level on it: the pages past are full or empty. */
+export const wideBed = (x: number) => x < 90 ? 32 + Math.max(0, 15 - Math.floor(x / 6)) : 32;
 const RAMP = BED_SLOPE_RAMP, RAMP_Z: Size = [32, 32, 128], SQUARE: Size = [96, 32, 96];
 /** The probe ramp of the investigation: a staircase falling along `s` to a pit two cells up, 96 cells in. */
 export const rampBed = (run: number) => (s: number) => s < 96 ? Math.max(2, Math.floor(17 - (s + 0.5) / run)) : 2;
@@ -347,6 +374,17 @@ export function bedSlopeShapes(wanted: (name: string) => boolean = () => true): 
   level("staircase 1:1", RAMP, x => Math.max(2, 30 - x));
   // A platform with a riser up at one end and a pit at the other, and no staircase above it.
   level("lone platform between a riser and a drop", RAMP, x => x < 40 ? 7 : x < 70 ? 6 : 1);
+  {
+    // Sparse: a staircase at one end of a wide lattice whose other pages are full or empty. Its page columns
+    // are the lane's and the window's few, the rest have neither; the lane is a full dense bake's.
+    const mask = bedMask(BED_SLOPE_WIDE, x => wideBed(x));
+    shapes.push({ name: "staircase 1:6 at one end of a 512-cell lattice", mask, check(lane) {
+      const [floors, sloped] = floorOnly(this.name, mask, lane), slope = slopeIn(BED_SLOPE_WIDE, lane); let far = 0;
+      for (let z = 0; z < 64; z++) for (let x = 192; x < 512; x++) if (slope(x, 32, z).some(v => v !== 0)) far++;
+      assert.equal(far, 0, `${this.name}: ${far} cells past the lane's page columns hold a slope`); assert.ok(sloped > 0, `${this.name}: no tread holds a slope`);
+      return `${sloped} of ${floors} floor cells sloped, none past x 192`;
+    } });
+  }
   {
     const bed = (x: number) => Math.max(2, 30 - Math.floor(x / 2)), mask = bedMask(RAMP, x => bed(x));
     shapes.push({ name: "staircase 1:2", mask, check(lane) {
@@ -485,6 +523,11 @@ export function bedSlopeEdits(wanted: (name: string) => boolean = () => true): E
       [[box(30, field(30, 90), 90, 1, 1, 1), true], [box(100, field(100, 30) - 1, 30, 2, 1, 2), false]],
     ] });
   }
+  // A block far down the wide lattice moves the lane's page columns (a full bake, then the block's own page columns
+  // the lane's); one on the staircase does not (a region bake); the far block out again moves them back.
+  edits.push({ name: "wide lattice: a block far from the staircase, one on it, the far one out", base: bedMask(BED_SLOPE_WIDE, x => wideBed(x)), steps: [
+    [[box(400, 32, 20, 4, 3, 4), true]], [[box(30, wideBed(30), 10, 3, 1, 3), true]], [[box(400, 32, 20, 4, 3, 4), false]],
+  ] });
   if (wanted(LONG_EDIT)) edits.push({ name: LONG_EDIT, base: bedSlopeSceneMask("long"), steps: ((): Step[] => {
     const [cx, cz] = nbflipSlideLongCentreline(120), x = Math.floor(cx), z = Math.floor(cz), solid = solidIn(bedSlopeSceneMask("long"));
     let y = 9; while (!(solid(x, y - 1, z) && !solid(x, y, z))) y++;

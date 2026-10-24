@@ -46,8 +46,10 @@ export const NB_SLAB_HEADER_WORDS=32;
 export function particleSlabWords(blocks:number):number{return NB_SLAB_HEADER_WORDS+17*64*blocks;}
 /** Minimum tail headroom: slab sizing leaves this much of each bank free. */
 export function particleSlabSpill(capacity:number):number{return Math.max(4096,Math.floor(capacity/16));}
-/** limit: the slabs' bound; spill: minimum tail headroom. Unused slab space also spills. */
-export function particleSlabWGSL(limit:number,spill:number,apic=false):string{return /* wgsl */`
+/** limit: the slabs' bound; spill: minimum tail headroom. Unused slab space also spills.
+ * binSlots: the cell bins' brick slots (nbBinTile), the sort's slab slots;
+ * 0 keys them by cell key. */
+export function particleSlabWGSL(limit:number,spill:number,apic=false,binSlots=0):string{return /* wgsl */`
 ${particleCanonicalWGSL(apic)}
 const NB_SLAB_LIMIT:u32=${limit}u;
 const NB_PARTICLE_CAPACITY:u32=${limit+spill}u;
@@ -74,7 +76,7 @@ fn nbSpillCount(scratch:bool)->u32{return min(atomicLoad(&state[select(21u,16u,s
 // The move's endpoint workspace is dead after advectWalk. SORT writes only
 // compact positions (the preceding 4*capacity words), so these indices stay
 // live until every brick has read its overflow. No particle is copied twice.
-fn nbOverflowIndex(k:u32)->u32{return UM_CELL_KEYS+4u*NB_PARTICLE_CAPACITY+k;}
+fn nbOverflowIndex(k:u32)->u32{return NB_LINKS+4u*NB_PARTICLE_CAPACITY+k;}
 // A record with no room: the spill reserve of the scratch bank (the move's)
 // or the current bank's. A full reserve stops the run (state[3] = 5) unless
 // the record is optional (an overlap reseed: it is clipped and its cell is
@@ -232,7 +234,7 @@ fn nbCurrentCap(id:u32)->vec2u{
  let count=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);
  for(var j=group.x;j<count;j+=groups.x){
   let tile=atomicLoad(&bins[NB_OCCUPIED+4u+j]);
-  atomicStore(&bins[64u*tile+lane],0u);
+  ${binSlots?"// A slot's bins are the sort's to rewrite whole: an uncovered tile reads none (nbBinCell).":"atomicStore(&bins[64u*tile+lane],0u);"}
   if(lane==0u){atomicStore(&bins[NB_COVERAGE+tile],0u);}
  }
 }
@@ -272,14 +274,14 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
  return links[nbOverflowIndex(job.w+k-job.z)];
 }
 @compute @workgroup_size(256) fn slabSort(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane==0u){nbSortJobs=min(atomicLoad(&state[20u]),UB_BRICKS);}
+ if(lane==0u){nbSortJobs=min(atomicLoad(&state[20u]),UB_BRICKS);${binSlots?`if(nbSortJobs>${binSlots}u){atomicStore(&state[3],9u);nbSortJobs=${binSlots}u;}`:""}}
  let jobs=workgroupUniformLoad(&nbSortJobs);
  for(var j=group.x;j<jobs;j+=groups.x){
   if(lane==0u){
    let id=atomicLoad(&state[NB_SLAB_OUT+j]);
    nbSortJob[0]=vec4u(id,atomicLoad(&state[nbSlab(id,0u)]),atomicLoad(&state[nbSlab(id,2u)]),atomicLoad(&state[nbSlab(id,9u)]));
    nbSortJob[1]=vec4u(atomicLoad(&state[nbSlab(id,5u)]),atomicLoad(&state[nbSlab(id,7u)]),atomicLoad(&state[nbSlab(id,6u)]),0u);
-   atomicStore(&nbSortStray,0u);
+   atomicStore(&nbSortStray,0u);${binSlots?"atomicStore(&bins[NB_SLOT_MAP+id],j);":""}
   }
   for(var k=lane;k<512u;k+=256u){atomicStore(&nbSortCount[k],0u);atomicStore(&nbSortHeat[k],0u);}
   if(lane<64u){atomicStore(&nbSortWindow[lane],0u);}
@@ -306,7 +308,7 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
   workgroupBarrier();
   // Cell starts and counts; the counts become the fill cursors.
   for(var k=lane;k<512u;k+=256u){
-   let key=64u*nbSortTile(id,origin,k>>6u)+(k&63u);
+   let key=${binSlots?"512u*j+k":"64u*nbSortTile(id,origin,k>>6u)+(k&63u)"};
    links[key]=base+nbSortStart[k];atomicStore(&bins[key],atomicExchange(&nbSortCount[k],0u));
   }
   workgroupBarrier();
@@ -315,7 +317,7 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
   for(var k=lane;k<n;k+=256u){
    let i=nbSortInput(input,k);let q=source[i].position.xyz;let lc=nbSortCell(q,origin);
    let at=base+nbSortStart[lc]+atomicAdd(&nbSortCount[lc],1u);
-   let c=UM_CELL_KEYS+4u*at;let bits=bitcast<vec3u>(q);links[c]=i;links[c+1u]=bits.x;links[c+2u]=bits.y;links[c+3u]=bits.z;
+   let c=NB_LINKS+4u*at;let bits=bitcast<vec3u>(q);links[c]=i;links[c+1u]=bits.x;links[c+2u]=bits.y;links[c+3u]=bits.z;
   }
   for(var k=n+lane;k<output.z;k+=256u){particles[base+k]=nbDead();}
   // Atomic append order must never reach floating reductions or retirement:
@@ -324,13 +326,13 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
   // before rebuilding compact positions over the scatter's words.
   storageBarrier();workgroupBarrier();
   for(var k=lane;k<n;k+=256u){
-   let at=base+k;let c=UM_CELL_KEYS+4u*at;let i=links[c];let key=vec3u(links[c+1u],links[c+2u],links[c+3u]);
+   let at=base+k;let c=NB_LINKS+4u*at;let i=links[c];let key=vec3u(links[c+1u],links[c+2u],links[c+3u]);
    let lc=nbSortCell(bitcast<vec3f>(key),origin);let start=base+nbSortStart[lc];
    particles[start+nbParticleRank(at,start,atomicLoad(&nbSortCount[lc]),i,key)]=source[i];
   }
   storageBarrier();workgroupBarrier();
   for(var k=lane;k<n;k+=256u){
-   let at=base+k;let bits=bitcast<vec4u>(particles[at].position);let c=UM_CELL_KEYS+4u*at;
+   let at=base+k;let bits=bitcast<vec4u>(particles[at].position);let c=NB_LINKS+4u*at;
    links[c]=bits.x;links[c+1u]=bits.y;links[c+2u]=bits.z;links[c+3u]=bits.w;
   }
   storageBarrier();workgroupBarrier();
@@ -361,7 +363,7 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
   // A sample whose support leaves its cell's reach marks its own tiles.
   if(workgroupUniformLoad(&nbSortStray)!=0u){
    for(var k=lane;k<n;k+=256u){
-    let c=UM_CELL_KEYS+4u*(base+k);let p=bitcast<vec4f>(vec4u(links[c],links[c+1u],links[c+2u],links[c+3u]));
+    let c=NB_LINKS+4u*(base+k);let p=bitcast<vec4f>(vec4u(links[c],links[c+1u],links[c+2u],links[c+3u]));
     if(nbSortStrays(p.xyz,origin,nbSortCell(p.xyz,origin))){markSurfaceTiles(p.xyz,max(0.0,p.w));}
    }
   }

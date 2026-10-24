@@ -5,12 +5,13 @@ import { uniformFramePlanSpreadWGSL } from "./uniform-frame-plan-spread";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_TILE_BITS_WORDS,uniformTileBitsWGSL} from "./uniform-block-tables";
-import {uniformKeyGroups} from "./uniform-lattice-address";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyNeighboursWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {UNIFORM_STAGE_CERTIFICATE} from "./uniform-stage-grids";
 import {uniformRegionHeatWGSL} from "./uniform-region-heat";
+import type {UniformPagePool} from "./uniform-page-pool";
+import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
 
 /** Owner entries: one lane per owner of every tier, GPU-counted. */
 const counted:readonly string[]=["seed","localSpeed"];
@@ -21,7 +22,8 @@ const PLAN_PASS:GPUComputePassDescriptor={label:"Uniform shared frame plan"},CER
 /** The support policy of an encode given none. */
 const DEFAULT_POLICY:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean}={fineReach:RESIDENCY_STAGES[1].core,shellReach:1,twoLevel:true,shellOnly:true};
 /** One launch of a plan pass: an owner entry's GPU-counted launch, or a
- * per-tile (coarseBlocks: per block) entry's grid, fixed with the pool. */
+ * per-tile (coarseBlocks: per block) entry's small fixed grid striding the
+ * pool's resident blocks (uniform-live-lists). */
 interface PlanLaunch{readonly pipeline:GPUComputePipeline;readonly counted:boolean;readonly x:number;readonly y:number}
 
 /** Start-of-frame support census, independent of simulation ownership. The
@@ -57,10 +59,12 @@ export class UniformMixedFramePlan {
   private stepWords?:Float32Array<ArrayBuffer>;
   private launches?:{readonly support:readonly PlanLaunch[];readonly held:readonly PlanLaunch[];readonly certificate:readonly PlanLaunch[]};
   private certificateView?:{readonly buffer:GPUBuffer;readonly offset:number};
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,
+  /** pool: the frame's page pool, whose resident list the per-tile entries stride. */
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly pool:UniformPagePool,volume:GPUTexture,phi:GPUTexture,
     /** The extended field every characteristic samples, valid at encodeCertificate. */
     extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false,private readonly surfaceOnly=false,private readonly solid?:UniformMixedSolid){
     if(!directionalCertificate)throw new Error("The mixed frame plan certifies signed per-axis reach only");
+    if(ownership.capacity.tiles!==512*pool.layout.blocks)throw new Error(`Mixed frame plan: ${ownership.capacity.tiles} tile keys are not the page pool's ${pool.layout.blocks} blocks`);
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.coarse=device.createBuffer({label:"Uniform frame plan 4h tile bits",size:4*UNIFORM_TILE_BITS_WORDS*ownership.capacity.address.blocks,usage:GPUBufferUsage.STORAGE});
     this.held=device.createBuffer({label:"Uniform frame plan held seed flags",size:4*ownership.capacity.tiles,usage:GPUBufferUsage.STORAGE});
@@ -70,8 +74,9 @@ export class UniformMixedFramePlan {
     this.group=uniformDetailGroup(device,{layout:this.resources,entries:[...[volume,phi].map((t,binding)=>({binding,resource:t})),{binding:2,resource:{buffer:this.params}}]});
     this.heldResources=device.createBindGroupLayout({label:"Uniform frame plan held seed flags",entries:[{binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
     this.extendedResources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
-      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...[2,3,4,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))]});
-    this.extendedGroup=uniformDetailGroup(device,{layout:this.extendedResources,entries:[{binding:0,resource:extended},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}},{binding:3,resource:{buffer:this.coarse}},{binding:4,resource:{buffer:ownership.regionVelocity}},{binding:5,resource:{buffer:this.updateErrors}}]});
+      {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...[2,3,4,5].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
+      {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
+    this.extendedGroup=uniformDetailGroup(device,{layout:this.extendedResources,entries:[{binding:0,resource:extended},{binding:1,resource:{buffer:extendedNegative}},{binding:2,resource:{buffer:ownership.speeds}},{binding:3,resource:{buffer:this.coarse}},{binding:4,resource:{buffer:ownership.regionVelocity}},{binding:5,resource:{buffer:this.updateErrors}},{binding:6,resource:{buffer:pool.state}}]});
   }
   /** The region work tiers (UniformRegionHeat.tiers), fixed for life: a
    * retaining encode keeps a COLD tile's seed flags. */
@@ -99,6 +104,9 @@ ${uniformRegionHeatWGSL(3,9,this.ownership.capacity.tiles/64)}
 @group(2) @binding(3) var<storage,read_write> coarse:array<u32>;
 @group(2) @binding(4) var<storage,read_write> regionVelocity:array<atomic<u32>>;
 @group(2) @binding(5) var<storage,read_write> updateError:array<f32>;
+// The pool's live lists: the per-tile entries stride its resident blocks (a
+// free tile key writes nothing).
+${uniformLiveListsWGSL(2,6,this.pool.layout)}
 ${uniformMixedSolidWGSL(this.solid?3:undefined,this.solid?.coarse?.count)}
 // umSupport and speeds hold a word per tile KEY: a lane indexes them by its
 // own tile's key, and a neighbour's word by umTileKey of the neighbour's
@@ -197,8 +205,11 @@ var<workgroup> seeded:array<atomic<u32>,64>;
  }
 }
 ${[0,1,2].map(axis=>/* wgsl */`
-@compute @workgroup_size(64) fn dilate${axis}(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
+@compute @workgroup_size(64) fn dilate${axis}(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){dilate${axis}Tile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn dilate${axis}Tile(tile:u32){
+ if(!umTileLive(tile)){return;}
  let p=vec3i(umTileCoord(tile));var flags=0u;
  let reach=i32(policy.settings.x+policy.settings.y);
  for(var delta=-reach;delta<=reach;delta++){
@@ -331,8 +342,11 @@ fn umVelocityOrder(value:f32)->u32{
 // Coarse samples cannot see an interior fine defect. Estimate unresolved
 // curvature from adjacent tile means (the midpoint interpolation defect).
 // Each invocation writes only word 7; neighbours read immutable words 0..6.
-@compute @workgroup_size(64) fn tileError(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(t)){return;}let at=8u*t;
+@compute @workgroup_size(64) fn tileError(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){tileErrorOf(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn tileErrorOf(t:u32){
+ if(!umTileLive(t)){return;}let at=8u*t;
  // Detail is the liquid's velocity high-pass (Sato et al. 2018, Eq. 3). A
  // dry tile (defect -1) holds extrapolated air: its mean's second difference
  // against an unextended or frozen neighbour, or a closed wall face, is the
@@ -393,8 +407,10 @@ ${uniformTileBitsWGSL({name:"coarse",word:(b,i)=>`coarse[${UNIFORM_TILE_BITS_WOR
 // Appends aggregate per workgroup: one global atomic per list, not per tile.
 var<workgroup> certifyCounts:array<atomic<u32>,2>;
 var<workgroup> certifyBases:array<u32,2>;
-@compute @workgroup_size(64) fn certify(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=gid.x+umDispatchX*64u*gid.y;let fine=umTileLive(tile)&&umTileWidth(min(tile,UM_TILES-1u))==1u;
+// A workgroup a z-slab of a resident block.
+@compute @workgroup_size(64) fn certify(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var slab=group.x;slab<8u*ulResidentCount();slab+=groups.x){
+ let tile=512u*ulResidentBlock(slab>>3u)+64u*(slab&7u)+lane;let fine=umTileLive(tile)&&umTileWidth(tile)==1u;
  if(lane<2u){atomicStore(&certifyCounts[lane],0u);}workgroupBarrier();
  // Every characteristic from this tile stays in its signed reach box: the
  // spread reach bounds the extended velocities of the global-reach box around
@@ -416,6 +432,7 @@ var<workgroup> certifyBases:array<u32,2>;
  if(lane<2u){let count=atomicLoad(&certifyCounts[lane]);if(count>0u){certifyBases[lane]=atomicAdd(&umSupport[4u*UM_TILES+lane+1u],count);}}
  workgroupBarrier();
  if(fine){atomicStore(&umSupport[(4u+list)*UM_TILES+16u+certifyBases[list-1u]+local],tile);}
+ }
 }
 `,counted)});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
@@ -488,10 +505,12 @@ var<workgroup> certifyBases:array<u32,2>;
     const of=(entry:string):PlanLaunch=>{
       const pipeline=this.pipelines.get(entry)!;
       if(counted.includes(entry))return {pipeline,counted:true,x:0,y:0};
-      // coarseBlocks: a lane per block. The rest: a lane per tile key.
-      if(entry==="coarseBlocks")return {pipeline,counted:false,x:Math.ceil(this.ownership.capacity.address.blocks/64),y:1};
-      const [x,y]=uniformKeyGroups(this.ownership.capacity.tiles,64,this.ownership.dispatchX,[0,0]);
-      return {pipeline,counted:false,x,y};
+      // coarseBlocks: a lane per resident block; coarseBits and certify a
+      // workgroup per resident z-slab; the rest a lane per resident tile key.
+      const tiles=this.ownership.capacity.tiles;
+      if(entry==="coarseBlocks")return {pipeline,counted:false,x:Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(this.ownership.capacity.address.blocks/64)),y:1};
+      if(entry==="coarseBits"||entry==="certify")return {pipeline,counted:false,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,tiles/64),y:1};
+      return {pipeline,counted:false,x:Math.min(UNIFORM_LIVE_KEY_GROUPS,tiles/64),y:1};
     };
     const support=SUPPORT_ENTRIES.map(of);
     return {support,held:[{...support[0]!,pipeline:this.pipelines.get("seedHeld")!},...support.slice(1)],certificate:CERTIFICATE_ENTRIES.map(of)};

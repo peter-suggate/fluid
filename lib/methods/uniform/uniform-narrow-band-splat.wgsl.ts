@@ -2,12 +2,12 @@
 export const narrowBandSplatWGSL=/* wgsl */`
 // Before the deposit, the motion bank holds one word per occupied cell.
 // There can be no more occupied cells than sorted live particles.
-fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
+fn nbSurfaceCells()->u32{return NB_LINKS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
  for(var cell=gid.x;cell<UM_CELL_KEYS;cell+=65536u){
   if(!umTileLive(cell/64u)){continue;}
   if(nbSparseBins&&atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){continue;}
-  if(atomicLoad(&bins[cell])==0u){continue;}
+  if(atomicLoad(&bins[nbBinCell(cell)])==0u){continue;}
   // A cell whose splat footprint (cell - 1 to cell + 2) lies in a COLD
   // region's closure feeds only vertices reconstruction holds.
   {let l=(4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u))&vec3u(15u);if(all((l>=vec3u(1u))&(l<=vec3u(13u)))&&nbTileCold(cell/64u)){continue;}}
@@ -19,7 +19,7 @@ fn nbSurfaceCells()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
  let cell=links[nbSurfaceCells()+group.x];let c=4u*umTileCoord(cell/64u)+umCorner(cell%64u,4u);
  let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
  if(!umVertexPresent(q)){return;}
- let start=links[cell];let end=start+atomicLoad(&bins[cell]);var nearest2=4.0;var hot2=4.0;
+ let bin=nbBinCell(cell);let start=links[bin];let end=start+atomicLoad(&bins[bin]);var nearest2=4.0;var hot2=4.0;
  for(var i=start;i<end;i++){let d=vec3f(q)-nbPosition(i);nearest2=min(nearest2,dot(d,d));if(nbSurfaceParticleHot(i)){hot2=min(hot2,dot(d,d));}}
  if(nearest2<4.0){atomicMax(&bins[NB_DEPTH_A+umVertexAt(vec3u(q))],~bitcast<u32>(nearest2));}
  if(hot2<4.0){atomicMax(&bins[NB_SURFACE_HOT_NEAREST+umVertexAt(vec3u(q))],~bitcast<u32>(hot2));}
@@ -54,7 +54,7 @@ const NB_SURFACE_FAR:u32=0x40800000u;
   if(!umTileLive(tile)){continue;}
   umLoadAddressPlan(tile>>9u,lane);
   let origin=4u*umTileCoord(tile);let cold=nbTileCold(tile);
-  let start=links[64u*tile];let end=links[64u*tile+63u]+atomicLoad(&bins[64u*tile+63u]);
+  let bin=nbBinTile(tile);let start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);
   for(var i=start+lane;i<end;i+=128u){
    // The sort's cell: positions relative to a tile origin are exact.
    let p=nbPosition(i)-vec3f(origin);let c=clamp(vec3i(floor(p)),vec3i(0),vec3i(3));
@@ -84,7 +84,7 @@ fn nbSurfaceSplatCell(cell:u32,lane:u32){
  let q=vec3i(c)+vec3i(umCorner(lane,4u))-1;
  // One slot lookup serves the presence test and the depth key.
  let slot=umVertexSlot(q);let present=umBlockStored(slot.w);
- if(lane==0u){let start=links[cell];nbSurfaceRange=vec2u(start,start+atomicLoad(&bins[cell]));}
+ if(lane==0u){let bin=nbBinCell(cell);let start=links[bin];nbSurfaceRange=vec2u(start,start+atomicLoad(&bins[bin]));}
  let range=workgroupUniformLoad(&nbSurfaceRange);let start=range.x;let end=range.y;var nearest2=4.0;var hot2=4.0;
  for(var first=start;first<end;first+=64u){
   let count=min(64u,end-first);

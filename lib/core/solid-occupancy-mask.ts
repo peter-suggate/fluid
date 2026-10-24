@@ -139,9 +139,10 @@ const popcount = (value: number): number => {
  * box. Only a region is read as a box, and a region is refused unless it is
  * one.
  *
- * The image is sized once. A world with more partly solid pages than the
- * slots it was given is refused, loudly and for good: the image is then part
- * of one world and part of the next.
+ * The image's slots grow as pages take them, up to the slots it was made
+ * with, until its owner seals it at a count (seal): the image is then sized
+ * for good. A world with more partly solid pages than that is refused, loudly
+ * and for good: the image is then part of one world and part of the next.
  */
 export class SolidOccupancyMask {
   private readonly separateTerrain: boolean;
@@ -149,12 +150,15 @@ export class SolidOccupancyMask {
   /** pages.origin, and the same in cells. */
   private readonly origin: readonly [number, number, number];
   readonly originCell: readonly [number, number, number];
-  readonly words: Uint32Array<ArrayBuffer>;
-  readonly layout: SolidOccupancyMaskLayout;
+  /** The image: the directory, the lane, the cut map and the slots handed out so far (every one once sealed). */
+  get words(): Uint32Array<ArrayBuffer> { return this.image; }
+  get layout(): SolidOccupancyMaskLayout { return this.shape; }
+  private image: Uint32Array<ArrayBuffer>;
+  private shape: SolidOccupancyMaskLayout;
   private world: SolidWorld | undefined;
-  /** Units no page holds; the last is taken first. */
-  private readonly free: Uint16Array;
-  private freeCount: number;
+  /** Units given back, the last taken first; then the next never held, below which every held unit lies. */
+  private readonly freed: number[] = [];
+  private fresh: number;
   /** Pages off the wall whose code is not EMPTY. */
   private occupied = 0;
   private refused: string | undefined;
@@ -168,13 +172,32 @@ export class SolidOccupancyMask {
     const origin = this.origin = pages.origin ?? [0, 0, 0];
     this.originCell = [origin[0] * SOLID_MASK_PAGE_CELLS, origin[1] * SOLID_MASK_PAGE_CELLS, origin[2] * SOLID_MASK_PAGE_CELLS];
     if (pages.table.length !== SOLID_MASK_DIRECTORY_WORDS) throw new RangeError(`A solid mask takes the lattice's ${SOLID_MASK_DIRECTORY_WORDS}-word page table; it was given ${pages.table.length} words`);
-    const layout = this.layout = solidOccupancyMaskLayout(pages.tileKeys, pages.slots, pages.laneWords);
-    const words = this.words = new Uint32Array(layout.words);
+    const layout = this.shape = solidOccupancyMaskLayout(pages.tileKeys, pages.slots, pages.laneWords);
+    const words = this.image = new Uint32Array((layout.firstSlot + Math.min(layout.slots, 16)) * SOLID_MASK_UNIT_WORDS);
     for (let e = 0; e < SOLID_MASK_DIRECTORY_WORDS; e += 1) if (pages.table[e] === SOLID_MASK_WALL) words[e] = SOLID_MASK_WALL;
     words.fill(1, layout.cutMap, layout.cutMap + layout.tileKeys);
-    this.free = new Uint16Array(layout.slots);
-    for (let slot = 0; slot < layout.slots; slot += 1) this.free[slot] = layout.firstSlot + layout.slots - 1 - slot;
-    this.freeCount = layout.slots;
+    this.fresh = layout.firstSlot;
+  }
+
+  /** Size the image for good at `slots` page slots: no fewer than it has handed out, no more than it was made with. */
+  seal(slots: number): void {
+    const shape = this.shape, used = this.fresh - shape.firstSlot;
+    if (!Number.isSafeInteger(slots) || slots < used || slots > shape.slots) throw new RangeError(`A solid mask that has handed out ${used} of ${shape.slots} page slots cannot be sealed at ${slots}`);
+    const words = (shape.firstSlot + slots) * SOLID_MASK_UNIT_WORDS;
+    this.shape = { ...shape, slots, words };
+    if (this.image.length !== words) { const image = new Uint32Array(words); image.set(this.image.subarray(0, Math.min(words, this.image.length))); this.image = image; }
+  }
+
+  /** A page's unit: the last given back, else the next never held, the image grown to hold it. */
+  private take(): number {
+    const freed = this.freed.pop();
+    if (freed !== undefined) return freed;
+    const unit = this.fresh++, units = this.image.length / SOLID_MASK_UNIT_WORDS;
+    if (unit >= units) {
+      const image = new Uint32Array(Math.min(this.shape.firstSlot + this.shape.slots, Math.max(2 * units, unit + 1)) * SOLID_MASK_UNIT_WORDS);
+      image.set(this.image); this.image = image;
+    }
+    return unit;
   }
 
   /** The mask was made from this world: an update to it changes no bit. */
@@ -184,7 +207,7 @@ export class SolidOccupancyMask {
   get empty(): boolean { return this.occupied === 0; }
 
   /** Page slots in use: the pages that are partly solid. */
-  get slotsHeld(): number { return this.layout.slots - this.freeCount; }
+  get slotsHeld(): number { return this.fresh - this.shape.firstSlot - this.freed.length; }
 
   /** Whether cell (x, y, z) is solid: what `umSolidVoxel` reads from the image. */
   solid(x: number, y: number, z: number): boolean { const o = this.originCell; return solidOccupancyMaskVoxel(this.words, x + o[0], y + o[1], z + o[2]); }
@@ -306,7 +329,8 @@ export class SolidOccupancyMask {
    */
   private foldPage(e: number, world: SolidWorld, regions: readonly SolidWorldVoxelPatch[], commit: boolean,
     changed: ((x: number, y: number, z: number, solid: boolean) => void) | undefined): boolean | "waits" {
-    const words = this.words, held = words[e]!;
+    let words = this.image;
+    const held = words[e]!;
     if (held === SOLID_MASK_WALL) return false;
     const P = SOLID_MASK_PAGE_CELLS, B = SOLID_WORLD_BRICK_CELLS, page = this.page, o = this.origin;
     // The page's low cell in the world's cells.
@@ -365,7 +389,7 @@ export class SolidOccupancyMask {
     for (let w = 0; w < SOLID_MASK_UNIT_WORDS && !moved; w += 1) moved = (slot < 0 ? uniform : words[slot + w]!) !== page[w]!;
     if (!moved || !commit) return moved;
     const partial = count !== 0 && count !== P ** 3;
-    if (partial && slot < 0 && this.freeCount === 0) return "waits";
+    if (partial && slot < 0 && this.slotsHeld === this.shape.slots) return "waits";
     if (changed) {
       for (let w = 0; w < SOLID_MASK_UNIT_WORDS; w += 1) {
         const now = page[w]!;
@@ -379,11 +403,11 @@ export class SolidOccupancyMask {
     const dirty = this.dirty;
     let next = partial ? code : count ? SOLID_MASK_FULL : SOLID_MASK_EMPTY;
     if (partial) {
-      if (slot < 0) next = this.free[--this.freeCount]!;
+      if (slot < 0) { next = this.take(); words = this.image; }
       const first = next << 10;
       words.set(page, first);
       dirty.slotLow = Math.min(dirty.slotLow, first); dirty.slotHigh = Math.max(dirty.slotHigh, first + SOLID_MASK_UNIT_WORDS - 1);
-    } else if (slot >= 0) this.free[this.freeCount++] = code;
+    } else if (slot >= 0) this.freed.push(code);
     if (next !== code) {
       this.occupied += (next !== SOLID_MASK_EMPTY ? 1 : 0) - (code !== SOLID_MASK_EMPTY ? 1 : 0);
       words[e] = ((held & 0xffff0000) | next) >>> 0;

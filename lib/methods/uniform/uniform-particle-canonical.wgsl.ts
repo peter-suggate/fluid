@@ -19,7 +19,7 @@ fn nbParticleRank(at:u32,start:u32,count:u32,index:u32,key:vec3u)->u32{
  var rank=0u;
  for(var o=start;o<start+count;o++){
   if(o==at){continue;}
-  let c=UM_CELL_KEYS+4u*o;let other=vec3u(links[c+1u],links[c+2u],links[c+3u]);
+  let c=NB_LINKS+4u*o;let other=vec3u(links[c+1u],links[c+2u],links[c+3u]);
   var less=false;
   if(other.x!=key.x){less=other.x<key.x;}
   else if(other.y!=key.y){less=other.y<key.y;}

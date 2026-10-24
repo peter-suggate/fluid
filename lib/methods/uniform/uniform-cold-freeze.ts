@@ -3,6 +3,7 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedFrameStatusWGSL } from "./uniform-mixed-frame-status";
 import type { UniformRegionHeat } from "./uniform-region-heat";
+import { UNIFORM_LIVE_GROUP_GROUPS, uniformLiveListsWGSL } from "./uniform-live-lists";
 
 /** COLD freeze: a region whose work tier is COLD (UniformRegionHeat) keeps
  * its fine velocity frozen at the post-projection value of its last
@@ -198,13 +199,14 @@ fn texel(i:u32)->vec2i{return vec2i(i32(i%${REGION_WIDTH}u),i32(i/${REGION_WIDTH
  textureStore(snapshot,texel(REGIONS+1u+region),freeze[REGIONS+region]);
 }
 `});
-    const accumulateLayout=device.createBindGroupLayout({label:"Uniform cold freeze accumulate",entries:[buffer(0,"storage"),
+    const accumulateLayout=device.createBindGroupLayout({label:"Uniform cold freeze accumulate",entries:[buffer(0,"storage"),buffer(4,"read-only-storage"),
       {binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"2d"}},buffer(2,"read-only-storage"),{binding:3,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"2d"}}]});
     const accumulate=uniformDetailModule(device,{label:"Uniform cold freeze accumulate",code:uniformMixedTopologyWGSL(o.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> freeze:array<vec4f>;
 @group(1) @binding(1) var corrections:texture_storage_2d<r32float,read_write>;
 @group(1) @binding(3) var snapshot:texture_storage_2d<rgba32float,write>;
 ${uniformMixedFrameStatusWGSL(1,2,"read")}
+${uniformLiveListsWGSL(1,4,this.heat.pool.layout)}
 const REGIONS:u32=${R}u;
 var<workgroup> sums:array<vec4f,64>;
 var<workgroup> counts:array<vec4f,64>;
@@ -212,15 +214,18 @@ var<workgroup> frozen:u32;
 ${uniformColdProjectionDefectWGSL}
 var<workgroup> correctionLo:array<vec3f,64>;
 var<workgroup> correctionHi:array<vec3f,64>;
-// One workgroup a region (a fixed grid striding them), a lane a tile: a
-// frozen region adds the mean correction of its own tiles' positive 4h
+// One workgroup a resident region (a fixed grid striding the pool's
+// resident list; a free region holds no correction, so its T and error
+// stand), a lane a tile: a frozen region adds the mean correction of its own tiles' positive 4h
 // faces, per axis, to T, and resets each read correction to NO_FACE (a
 // face the projection skips next frame adds nothing). A wall uses a negative
 // count that dominates the at most 64 ordinary counts: reduce its constraint
 // with the same scratch and keep T tangent to every wall in the region.
 @compute @workgroup_size(64) fn accumulate(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umFrameFailed()){return;}
- for(var region=group.x;region<REGIONS;region+=groups.x){
+ let regions=8u*ulResidentCount();
+ for(var visit=group.x;visit<regions;visit+=groups.x){
+  let region=8u*ulResidentBlock(visit>>3u)+(visit&7u);
   if(lane==0u){let s=u32(freeze[region].w);frozen=u32(s==1u||s==2u);}
   if(workgroupUniformLoad(&frozen)==0u){continue;}
   let tile=umPageTile(region,lane);var sum=vec4f(0);var count=vec4f(0);
@@ -258,7 +263,7 @@ var<workgroup> correctionHi:array<vec3f,64>;
       uniformDetailPipeline(device,o,{layout:device.createPipelineLayout({bindGroupLayouts:[o.bindLayout,accumulateLayout]}),compute:{module:accumulate,entryPoint:"accumulate",constants:{umDispatchX:o.dispatchX}}}),
     ]);
     this.headGroup=device.createBindGroup({label:"Uniform cold freeze head",layout:headLayout,entries:[{binding:0,resource:{buffer:this.heat.tiers,size:4*R}},{binding:1,resource:{buffer:this.buffer}},{binding:2,resource:this.regions.createView()},{binding:3,resource:{buffer:this.params}}]});
-    this.accumulateGroup=device.createBindGroup({label:"Uniform cold freeze accumulate",layout:accumulateLayout,entries:[{binding:0,resource:{buffer:this.buffer}},{binding:1,resource:this.corrections.createView()},{binding:2,resource:{buffer:status}},{binding:3,resource:this.regions.createView()}]});
+    this.accumulateGroup=device.createBindGroup({label:"Uniform cold freeze accumulate",layout:accumulateLayout,entries:[{binding:0,resource:{buffer:this.buffer}},{binding:1,resource:this.corrections.createView()},{binding:2,resource:{buffer:status}},{binding:3,resource:this.regions.createView()},{binding:4,resource:{buffer:this.heat.pool.state}}]});
   }
   /** After the frame head's tiers are final (the relayout head's encodeDeep),
    * before every stage that reads the freeze. dt, gravity: the frame's step
@@ -277,7 +282,7 @@ var<workgroup> correctionHi:array<vec3f,64>;
     if(!UNIFORM_COLD_FREEZE)return;
     if(!this.accumulatePipeline||!this.accumulateGroup)throw new Error("Cold freeze is not initialized");
     const pass=encoder.beginComputePass(PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.accumulateGroup);
-    pass.setPipeline(uniformDetailPick(this.accumulatePipeline));pass.dispatchWorkgroups(Math.min(1024,this.shape.regions));pass.end();
+    pass.setPipeline(uniformDetailPick(this.accumulatePipeline));pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.shape.regions));pass.end();
   }
   destroy():void{this.buffer.destroy();this.regions.destroy();this.corrections.destroy();this.params.destroy();}
 }

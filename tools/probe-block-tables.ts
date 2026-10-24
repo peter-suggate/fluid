@@ -75,6 +75,9 @@ const UM_D=vec3u(2048u);const UM_T=UM_D/4u;const UM_TILES:u32=${KEYS}u;
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return tailWords[e.x|(e.y<<6u)|(e.z<<12u)];}
 fn umBlockWord(b:u32)->u32{return tailWords[${TABLE}u+b];}
 fn umBlockNeighbourWord(b:u32,i:u32)->u32{return tailWords[${TABLE + BLOCKS}u+27u*b+i];}
+// The live lists (uniform-live-lists): every block resident, ascending.
+fn ulResidentCount()->u32{return ${BLOCKS}u;}
+fn ulResidentBlock(i:u32)->u32{return i;}
 ${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged: { blocks: `${BLOCKS}u` } })}
 struct Ask{home:u32,low:vec3i,high:vec3i}
 fn ask(i:u32)->Ask{let a=8u+8u*i;return Ask(u32(script[a+1u]),vec3i(script[a+2u],script[a+3u],script[a+4u]),vec3i(script[a+5u],script[a+6u],script[a+7u]));}`;
@@ -131,8 +134,9 @@ function run(launches: readonly (readonly [string, number, number])[]): void {
   for (const [name, x, y] of launches) { const pass = encoder.beginComputePass();pass.setPipeline(pipelines.get(name)!);pass.setBindGroup(0, group);pass.dispatchWorkgroups(x, y);pass.end(); }
   device.queue.submit([encoder.finish()]);
 }
-const slabs = Math.ceil(KEYS / 64), BUILD = [["census.interfaceBits", DISPATCH_X, Math.ceil(slabs / DISPATCH_X)], ["plan.coarseBits", DISPATCH_X, Math.ceil(slabs / DISPATCH_X)],
-  ["census.interfaceBlocks", Math.ceil(BLOCKS / 64), 1], ["plan.coarseBlocks", Math.ceil(BLOCKS / 64), 1], ["census.boundCubes", BLOCKS, 1]] as const;
+// Fixed grids smaller than the work: the builds stride the resident blocks.
+const slabs = Math.ceil(KEYS / 64), BUILD = [["census.interfaceBits", Math.ceil(slabs / 3), 1], ["plan.coarseBits", Math.ceil(slabs / 3), 1],
+  ["census.interfaceBlocks", 1, 1], ["plan.coarseBlocks", 1, 1], ["census.boundCubes", Math.ceil(BLOCKS / 3), 1]] as const;
 const ASK = [["census.evaluate", QUERIES / 64, 1], ["plan.evaluate", QUERIES / 64, 1]] as const;
 
 async function round(label: string): Promise<void> {

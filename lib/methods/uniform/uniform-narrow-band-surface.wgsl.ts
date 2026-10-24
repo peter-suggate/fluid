@@ -78,7 +78,7 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32,tiled
   for(var k=0u;k<8u;k++){
    let c=q+vec3i(umCorner(k,2u))-1;
    if(!umCellPresent(c)||!nbParticleCellOpen(c)){continue;}
-   open++;held+=min(atomicLoad(&bins[umCellAt(vec3u(c))]),8u);
+   open++;held+=min(nbBinCount(umCellAt(vec3u(c))),8u);
   }
   if(open>0u){particle=max(particle,min(bulk,1.0-f32(held)/(4.0*f32(open))));}
  }
