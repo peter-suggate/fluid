@@ -69,17 +69,20 @@ function beginPattern(context: ToolContext): ToolGesture | undefined {
   let atOrigin = stamp.patches.get(operation);
   if (!atOrigin) stamp.patches.set(operation, atOrigin = blockPatches(operation, [0, 0, 0], stamp.block));
   const size = stamp.block.size;
+  let shown: { corner: Cell; update: ToolUpdate } | undefined;
   return { surface: first.picked, update(input): ToolUpdate | undefined {
     const surface = toolSurface(context, input, false);
     if (!surface) return undefined;
     const lo = surface.coordinate.map((v, a) => v - Math.floor((size[a]! - 1) / 2)), hi = lo.map((v, a) => v + size[a]! - 1);
     const corner = faceBox(surface, lo, hi, size[surface.faceAxis], operation === "fill").minimum;
+    if (shown && corner.every((v, a) => v === shown!.corner[a])) return shown.update;
     const patches = mirroredPatches(context, atOrigin!.map((patch) => ({ ...patch,
       minimum: patch.minimum.map((v, a) => v + corner[a]!) as unknown as Cell,
       maximumExclusive: patch.maximumExclusive.map((v, a) => v + corner[a]!) as unknown as Cell })));
     assertStrokeCaps(patches, "The copied block is too large to stamp in one stroke; copy a smaller selection or use fewer mirror planes.");
-    return { patches, tone: operationTone(operation), highlight: strokeHighlight(scene, patches),
+    const update: ToolUpdate = { patches, tone: operationTone(operation), highlight: strokeHighlight(scene, patches),
       caption: `${operationCaption(operation)} PATTERN · ${size.join(" × ")}` };
+    shown = { corner, update }; return update;
   } };
 }
 

@@ -45,13 +45,14 @@ export interface UniformTileBitsSource {
   readonly air: boolean;
 }
 
-/** A tile-bit table's two build entries and its query.
+/** A tile-bit table's two build entries and its query. Both stride the
+ * pool's resident list (uniform-live-lists, which the module includes) over
+ * any fixed grid.
  *
- * nameBits: a launch of ceil(tile keys / 64) workgroups over umDispatchX, a
- * workgroup a z-slab of one block, writes the 16 bit words of every block.
- * nameBlocks: a launch of ceil(blocks / 64) workgroups, a lane a block,
- * writes the slabs and around words of every stored block from them and the
- * neighbour rows. A free block's words are stale and no query reads them.
+ * nameBits: a workgroup a z-slab of one resident block writes the block's 16
+ * bit words. nameBlocks: a lane a resident block writes its slabs and around
+ * words from them and the neighbour rows. A free block's words are stale and
+ * no query reads them.
  *
  * nameAny(home, low, high): a bit is set in the inclusive tile box. home is a
  * stored block: where the box lies in its page and the 26 around it, the
@@ -62,18 +63,21 @@ export function uniformTileBitsWGSL(o: UniformTileBitsSource): string {
   const n = o.name;
   return /* wgsl */ `
 var<workgroup> ${n}Slab:array<atomic<u32>,2>;
-@compute @workgroup_size(64) fn ${n}Bits(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- let tile=gid.x+umDispatchX*64u*gid.y;
+@compute @workgroup_size(64) fn ${n}Bits(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var slab=group.x;slab<8u*ulResidentCount();slab+=groups.x){
+ let first=512u*ulResidentBlock(slab>>3u)+64u*(slab&7u);let tile=first+lane;
  if(lane<2u){atomicStore(&${n}Slab[lane],0u);}
  workgroupBarrier();
  if(umTileLive(tile)){if(${o.flag("tile")}){atomicOr(&${n}Slab[lane>>5u],1u<<(lane&31u));}}
  workgroupBarrier();
  // The slab's two words, by its first two lanes.
- let first=tile-lane;
- if(lane<2u&&first<UM_TILES){${o.store("(first>>9u)", "(((first&511u)>>5u)+lane)", `atomicLoad(&${n}Slab[lane])`)}}
+ if(lane<2u){${o.store("(first>>9u)", "(((first&511u)>>5u)+lane)", `atomicLoad(&${n}Slab[lane])`)}}
+ }
 }
-@compute @workgroup_size(64) fn ${n}Blocks(@builtin(global_invocation_id) gid:vec3u){
- let b=gid.x;if(b>=UM_BLOCKS){return;}
+@compute @workgroup_size(64) fn ${n}Blocks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var i=gid.x;i<ulResidentCount();i+=64u*groups.x){${n}Block(ulResidentBlock(i));}
+}
+fn ${n}Block(b:u32){
  if(umBlockWord(b)==UM_FREE){return;}
  var slabs=0u;
  for(var z=0u;z<8u;z++){if((${o.word("b", "(2u*z)")}|${o.word("b", "(2u*z+1u)")})!=0u){slabs|=1u<<z;}}
@@ -143,10 +147,11 @@ export interface UniformBoundCubesSource {
 
 /** A bound-cube table's build entry and its query.
  *
- * boundCubes: a launch of one workgroup a block. Its 64 lanes fold the block's
- * tiles into its 64 cubes of side 2, eight of them those into its cubes of
- * side 4, and one those into the page's. A free block's words are stale and
- * no query reads them.
+ * boundCubes: a workgroup a resident block (striding the pool's resident
+ * list, uniform-live-lists, over any fixed grid). Its 64 lanes fold the
+ * block's tiles into its 64 cubes of side 2, eight of them those into its
+ * cubes of side 4, and one those into the page's. A free block's words are
+ * stale and no query reads them.
  *
  * rangeKeys(a, b): the keys of every stored tile in the inclusive tile box,
  * from the aligned cubes of the smallest side that cover it within the
@@ -166,8 +171,9 @@ fn boundCubeIndex(blk:u32,j:u32,c:vec3u)->u32{
 }
 var<workgroup> boundPairs:array<u32,384>;
 var<workgroup> boundFours:array<u32,48>;
-@compute @workgroup_size(64) fn boundCubes(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let blk=min(group.x,UM_BLOCKS-1u);let stored=group.x<UM_BLOCKS&&umBlockWord(blk)!=UM_FREE;
+@compute @workgroup_size(64) fn boundCubes(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var resident=group.x;resident<ulResidentCount();resident+=groups.x){
+ let blk=ulResidentBlock(resident);let stored=umBlockWord(blk)!=UM_FREE;
  var keys=identityKeys();
  if(stored){
   let c=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
@@ -194,6 +200,9 @@ var<workgroup> boundFours:array<u32,48>;
   keys=identityKeys();
   for(var i=0u;i<8u;i++){let l=6u*i;${fold(k => `boundFours[l+${k}]`, k => `boundFours[l+${k}]`)}}
   for(var k=0u;k<6u;k++){${o.store(`${UNIFORM_BOUND_CUBE_WORDS}u*blk+432u+k`, "keys[k]")}}
+ }
+ // Lane 0's reads of the fours land before the next block's.
+ workgroupBarrier();
  }
 }
 fn rangeKeys(low:vec3i,high:vec3i)->array<u32,6>{

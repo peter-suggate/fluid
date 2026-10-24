@@ -124,8 +124,9 @@ export interface UniformMixedCapacity{
   /** h tiles the owner-indexed storage holds (C <= address.poolTiles): the
    * host's allocation, never a GPU count. A generation with more is fatal. */
   readonly fineTiles:number;
-  /** Owners at that capacity: 63*fineTiles+address.boxTiles (an h tile is
-   * 64 owners in place of one); the pressure root's, a row a tile key. */
+  /** Owners at that capacity: 63*fineTiles+address.poolTiles (an h tile is
+   * 64 owners in place of one, every other stored tile one); the pressure
+   * root's, a row a tile key. */
   readonly owners:number;
 }
 
@@ -245,7 +246,7 @@ export class UniformMixedOwnership {
     this.currentLayout = layout;
     const address=layout.address,n=address.tileKeys;
     if(!Number.isInteger(fineTiles)||fineTiles<0||fineTiles>address.poolTiles)throw new Error(`Uniform mixed ownership cannot hold ${fineTiles} h tiles: its page pool stores at most ${address.poolTiles}`);
-    this.held={lattice:layout.lattice,address,tileDimensions:address.tiles,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:layout.boxOwners??63*fineTiles+address.boxTiles};
+    this.held={lattice:layout.lattice,address,tileDimensions:address.tiles,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:layout.boxOwners??63*fineTiles+address.poolTiles};
     this.dispatchX = device.limits.maxComputeWorkgroupsPerDimension;
     this.bindLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -266,7 +267,7 @@ export class UniformMixedOwnership {
     // (encodeFineSlots), and the last word.
     const pages=address.seed.tail,neighbours=uniformBlockNeighbourWords(address.seed.table,address.seed.blocks);
     this.detailBytes=layout.metadataBytes+pages.byteLength+neighbours.byteLength;
-    this.topology = device.createBuffer({ label: "Uniform mixed owners and tier worklists", size: this.detailBytes+4*(uniformDetailTableWords(layout.lattice.dimensions)+address.blocks),
+    this.topology = device.createBuffer({ label: "Uniform mixed owners and tier worklists", size: this.detailBytes+4*(uniformDetailTableWords()+address.blocks),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE });
     this.presentation={buffer:this.topology,size:this.topology.size};
     device.queue.writeBuffer(this.topology,layout.metadataBytes,pages);
@@ -340,7 +341,7 @@ export class UniformMixedOwnership {
         this.hangingGroupCurrent=this.device.createBindGroup({layout:this.hangingLayout,entries:[{binding:0,resource:{buffer:next}}]});
       }
     }
-    this.held={...this.held,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:this.currentLayout.boxOwners??63*fineTiles+this.held.address.boxTiles};
+    this.held={...this.held,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:this.currentLayout.boxOwners??63*fineTiles+this.held.address.poolTiles};
     // A GPU-adopted generation's h tiles reach the host as receipts: growth keeps it, a smaller capacity needs one.
     this.overCapacity=this.mirrorCurrent?this.currentLayout.fineTiles.length>fineTiles:this.overCapacity||(fineTiles<before&&!confirmed);
     this.capacityRevision++;
@@ -363,12 +364,16 @@ export class UniformMixedOwnership {
     if(this.sampled)this.device.queue.writeBuffer(this.hanging!,0,derived.slots);
     this.currentLayout=layout;
     this.mirrorCurrent=true;
-    this.revision++;
+    this.revision++;this.residencyResets++;
   }
   /** Bumped by every generation this ownership takes (update, adopt,
    * adoptGpu): a stage that patches what changed since its last encode
    * checks that exactly one adoption intervened. */
   revision=0;
+  /** Bumped by every host write of the residency certificate (a generation's
+   * write, resetResidency): every page resident again, flags of free and
+   * sentinel blocks too (a live-list mark sweeps after one). */
+  residencyResets=0;
 
   /** Byte offset of the detail-storage table in the topology buffer. */
   private readonly detailBytes:number;
@@ -397,6 +402,7 @@ export class UniformMixedOwnership {
   resetResidency():void{
     if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
     this.device.queue.writeBuffer(this.support,uniformMixedResidencyWord(this.capacity.tiles)*4,allResident(this.capacity.tiles));
+    this.residencyResets++;
   }
   /** Adopt a GPU-built generation with no host object: buffers only, encoded
    * at the head of the frame that runs on it (so no frame hold is checked:

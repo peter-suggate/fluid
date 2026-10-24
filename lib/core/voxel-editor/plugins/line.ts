@@ -33,11 +33,13 @@ function beginLine(context: ToolContext): ToolGesture | undefined {
     surface.coordinate.map((v, a) => a === surface.faceAxis && operation === "fill" ? v + surface.faceSign : v) as unknown as Cell;
   const from = anchor(start);
   const extent = [0, 1, 2].map((a) => a === axis ? height : width);
+  let shown: { to: Cell; update: ToolUpdate } | undefined;
   return { surface: start.picked, update(input): ToolUpdate | undefined {
     const under = toolSurface(context, input, false);
     const onFace = under?.picked ? undefined : faceCell(scene, start, input);
     const to = under?.picked ? anchor(under) : onFace && anchor({ ...start, coordinate: onFace });
     if (!to) return undefined;
+    if (shown && to.every((v, a) => v === shown!.to[a])) return shown.update;
     const patches = new Map<string, Patch>();
     for (const at of interpolateCells(from, to)) {
       const minimum = at.map((v, a) => a === axis ? (grows > 0 ? v : v - (height - 1)) : v - Math.floor((width - 1) / 2)) as unknown as Cell;
@@ -47,8 +49,9 @@ function beginLine(context: ToolContext): ToolGesture | undefined {
     }
     const proposal = [...patches.values()];
     assertStrokeCaps(proposal);
-    return { patches: proposal, tone: operationTone(operation), highlight: strokeHighlight(scene, proposal),
+    const update: ToolUpdate = { patches: proposal, tone: operationTone(operation), highlight: strokeHighlight(scene, proposal),
       caption: `${operationCaption(operation)} LINE · ${patchesSize(proposal)}` };
+    shown = { to, update }; return update;
   } };
 }
 

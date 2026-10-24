@@ -46,6 +46,7 @@ function beginVoxelStroke(context: ToolContext): ToolGesture | undefined {
    * mirror plane does not write a stamp twice.
    */
   const stroke = { keys: new Set<string>(), patches: [] as Patch[], voxels: 0 };
+  let shown: ToolUpdate | undefined;
   let last: { readonly ray: EditorRay; readonly surface: ToolSurface } | undefined;
   /** The surfaces between the last sample and this one, found by sweeping the ray across the gap. */
   const crossed = (input: EditorRay, surface: ToolSurface): ToolSurface[] => {
@@ -83,10 +84,11 @@ function beginVoxelStroke(context: ToolContext): ToolGesture | undefined {
         throw new Error("Stroke is full; release and start another stroke.");
       }
       last = { ray: input, surface };
-    }
+      if (!added.length && shown) return shown;
+    } else { last = undefined; return shown; }
     if (stroke.patches.length === 0) return undefined;
     const patches = stroke.patches.slice();
-    return { patches, tone: operationTone(operation), highlight: strokeHighlight(scene, patches),
+    return shown = { patches, tone: operationTone(operation), highlight: strokeHighlight(scene, patches),
       caption: `${operationCaption(operation)} · ${patchesSize(patches)}` };
   } };
 }

@@ -8,10 +8,12 @@ test("occupied surface scatter matches cell scan with cold cells and long partic
   const module=device.createShaderModule({code:/* wgsl */`
 const UM_CELL_KEYS=192u;const UM_TILES=3u;const NB_COVERAGE=256u;const NB_DEPTH_A=1024u;const NB_SURFACE_HOT_NEAREST=1400u;const NB_BAND=2048u;const NB_OCCUPIED=2052u;
 const nbSparseBins=true;
+const NB_LINKS=UM_CELL_KEYS;fn nbBinTile(t:u32)->u32{return 64u*t;}fn nbBinCell(c:u32)->u32{return c;}
 @group(0) @binding(0) var<storage,read_write> bins:array<atomic<u32>>;
 @group(0) @binding(1) var<storage,read_write> links:array<u32>;
 @group(0) @binding(2) var<storage,read> particles:array<vec4f>;
 fn umTileLive(t:u32)->bool{return t<3u;}
+fn umLiveTileCount()->u32{return 3u;}fn umLiveTile(j:u32)->u32{return j;}
 fn nbTileCold(t:u32)->bool{return t==2u;}
 fn umTileCoord(t:u32)->vec3u{return vec3u(t,0,0);}
 fn umCorner(j:u32,n:u32)->vec3u{return vec3u(j%n,(j/n)%n,j/(n*n));}

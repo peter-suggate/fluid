@@ -1,3 +1,4 @@
+import { prepareSvoSculptCutDistance } from "../svo/features/scene-publication/svo-sculpt-distance";
 import { oakTreeControlGroups, OAK_MATERIALS } from "./oak-tree-controls";
 import { planOakV2 } from "./voxel-scenery/oak-v2";
 import { add, sub } from "./math";
@@ -399,30 +400,10 @@ function cutsForTarget(cuts: SceneryPickCuts, target: SceneryPickTarget): Scener
   if (!selected.length) { cuts.targets.set(target, null); return null; }
   const words = new Uint32Array(SVO_SCULPT_CUT_HEADER_WORDS + selected.length * SVO_SCULPT_CUT_RECORD_WORDS);
   words[0] = selected.length;
-  const prepared = new Float64Array(selected.length * 7);
   selected.forEach((at, i) => {
     words.set(cuts.words.subarray(at, at + SVO_SCULPT_CUT_RECORD_WORDS), SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS);
-    for (let a = 0; a < 3; a++) {
-      prepared[7 * i + a] = .5 * (f[at + a]! + f[at + 4 + a]!);
-      prepared[7 * i + 3 + a] = .5 * (f[at + 4 + a]! - f[at + a]!);
-    }
-    prepared[7 * i + 6] = cuts.words[at + 3]!;
   });
-  const query: SceneryCutQuery = { words, distance: point => {
-    let nearest = 1e20;
-    for (let i = 0; i < prepared.length; i += 7) {
-      const x = point.x - prepared[i]!, y = point.y - prepared[i + 1]!, z = point.z - prepared[i + 2]!;
-      const rx = prepared[i + 3]!, ry = prepared[i + 4]!, rz = prepared[i + 5]!;
-      let distance: number;
-      if (prepared[i + 6] === 2) distance = (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz);
-      else {
-        const qx = Math.abs(x) - rx, qy = Math.abs(y) - ry, qz = Math.abs(z) - rz;
-        distance = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0);
-      }
-      nearest = Math.min(nearest, distance);
-    }
-    return nearest;
-  } };
+  const query: SceneryCutQuery = { words, distance: prepareSvoSculptCutDistance(words) };
   cuts.targets.set(target, query);
   return query;
 }

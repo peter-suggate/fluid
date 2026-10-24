@@ -1,6 +1,6 @@
 import { sceneCellSizes_m } from "../../../core/scene-lattice-dimensions";
 import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
-import { packSvoSculptCuts, SVO_SCULPT_MATERIAL_OFFSET } from "./svo-sculpt-cuts";
+import { packSvoSculptCuts } from "./svo-sculpt-cuts";
 import { classifySvoSculptInstances } from "./svo-sculpt-instances";
 import { sceneUsesFlatVoxelNormals, type SceneDescription } from "../../../core/model";
 import { solidWorldContentStamp } from "../../../core/solid-world";
@@ -21,7 +21,7 @@ import {
 import { buildSparseVoxelDrySceneLightingMirrors } from "../../pipeline/webgpu-svo-dry-scene";
 import { sceneSvoGroundPlane, sceneTerrainSurfaceModel, type SvoGroundPlane, type SvoTerrainSurfaceModel } from "../materials/svo-terrain-material";
 import { publishOpaqueSurfaceCapability } from "../shading/deferred-specialization";
-import { markSampledVolumeOwnerMaterials, sampledVolumeMaterialRecords } from "../materials/svo-sampled-materials";
+import { markSampledVolumeOwnerMaterials, sampledVolumeMaterialRecords, sculptMaterialTable } from "../materials/svo-sampled-materials";
 import { successorEnvironmentCatalog } from "./scene-environment-catalog";
 import { buildSvoPrimitiveCandidates, type SvoPrimitiveCandidatePublication } from "./svo-primitive-candidates";
 import { buildSvoScenePrimitives, type SvoEnvironmentPrimitiveMetadata, type SvoScenePrimitiveBuild } from "./svo-scene-primitives";
@@ -140,25 +140,7 @@ function materialTable(
   ]);
 }
 
-const sculptMaterialMirrors = new WeakMap<Uint32Array, Uint32Array<ArrayBuffer>>();
-/** Independent palette identities let an edited instance use the SVO mesh
- * while other instances of the same asset keep their original native mesh. */
-export function sculptMaterialTable(base: Uint32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> {
-  const cached = sculptMaterialMirrors.get(base); if (cached) return cached;
-  const count = base.length / SVO_MATERIAL_RECORD_WORDS;
-  if (count > SVO_SCULPT_MATERIAL_OFFSET) throw new RangeError("Scenery sculpt material palette capacity exceeded");
-  const table = new Uint32Array((SVO_SCULPT_MATERIAL_OFFSET + count) * SVO_MATERIAL_RECORD_WORDS);
-  table.set(base);
-  for (let id = 1; id < count; id++) {
-    const from = id * SVO_MATERIAL_RECORD_WORDS;
-    if (!(base[from + 23]! & SVO_MATERIAL_FLAGS.sampledVolume)) continue;
-    const to = (id + SVO_SCULPT_MATERIAL_OFFSET) * SVO_MATERIAL_RECORD_WORDS;
-    table.set(base.subarray(from, from + SVO_MATERIAL_RECORD_WORDS), to);
-    table[to + 20] = id + SVO_SCULPT_MATERIAL_OFFSET;
-    table[to + 23]! &= ~SVO_MATERIAL_FLAGS.sampledVolume;
-  }
-  sculptMaterialMirrors.set(base, table); return table;
-}
+export { sculptMaterialTable } from "../materials/svo-sampled-materials";
 
 function sameWords(a: Uint32Array | undefined, b: Uint32Array | undefined): boolean {
   if (a === b) return true;
