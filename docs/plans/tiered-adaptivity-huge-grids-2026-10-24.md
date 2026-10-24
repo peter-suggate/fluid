@@ -204,11 +204,18 @@ The reservoir is near-hydrostatic, and the seep is driven by the global head. Pr
 | Live super-blocks | ≤ 8 | ≤ 32 | ~130 of 256 |
 | Capacity ×1.5–2 at ~150 / 48 / 32 KiB per slot | ≈ 0.2 GiB | ≈ 0.3 GiB | ≈ 0.5–0.7 GiB |
 | Today | 2.0 GiB | ≈ 10 GiB | over the window, B and tail limits (~60+ GiB) |
+| **Measured (Phase 0)** live h tiles | **250–385** steady (≈ 30–50 bricks), 500 in the first second | pending | — |
+| **Measured** live blocks (resident / pool) | **138–158 / 226** | pending | — |
+| **Measured** 4h tiles | **73–80k** (left 53.7k, right 15–21k) | pending | — |
+| **Measured** today, allocated | **3.53 GiB**: pool-at-h 3.30, pool-at-4h 0.11, dense-box 0.03, fixed 0.09 | fit: 22.1 GiB at the default 1442 blocks, 15.4 GiB at 1000 | — |
+
+Measured per block: **15.45 MiB** (h 14.97, 4h 0.48), against the 10 MiB of §1.2. Per box cell 3.27 B, fixed 96.5 MiB (`artifacts/tier-budget/allocation-classes.json`). The pool is the memory: 93% of it is h storage reserved for every block.
 
 **Biggest unknown: the catch floor.**
 - At 5 mm the seep delivers about 1.8 L in 20 s (Torricelli: Cd·h²·√(2g·0.64 m)). Over 0.41 m² of floor, that is a film about one h thick.
 - The `thin` criterion would put the whole floor at h, about 256 bricks at 5 mm and more at finer h.
 - Phase 0 measures it. If it dominates, the thin criterion needs a minimum film-area rule, or a sub-h film goes to particles.
+- **Measured (Phase 0, 5 mm, 20 s):** the right floor band (y < 8 h) holds 46–70 h tiles in the first second, then **1** from step 300 to step 1200. There is no h film. The jet and spray zone holds 130–300 h tiles, and the throat ±8 h holds about 81. The right chamber's liquid volume is not yet measured (see Phase 0 results), so this does not yet prove the film is thin rather than absent.
 
 ### 3.2 Frame (M1 Max, 1/60 s)
 
@@ -220,6 +227,7 @@ The reservoir is near-hydrostatic, and the seep is driven by the global head. Pr
 | Pressure, all rows, warm-started | ≤ 2 ms | rows |
 | Floor (census, plan, lists, pool commit) | ≤ 1 ms, independent of box and capacity | — |
 | Surface extraction | ≤ 1 ms | surface blocks and bricks |
+| **Measured (Phase 0) whole step today, 5 mm** | — | fenced `advanceTo` + `awaitFrameCompletion`, timing mode: **median 20.6 ms, p95 35.2, mean 22.9** over 1200 steps (steps 600–1200: median 20.0) |
 
 **Scaling gates.**
 - Doubling the reservoir length at a fixed h with the same throat adds ≤ 0.2 ms and no h storage.
@@ -277,6 +285,63 @@ The speed gains 2.8 m/s a step at 2.5 mm and 5.6 m/s a step at 1.25 mm. Gravity 
 **With the page window and memory both fixed, the next binding limit is the block grid**: 3968 blocks is 62 GiB at today's 16 MiB a block, so memory binds first until W6 cuts the block's cost; after that, W7's directory must lift the grid before 1.25 mm (10882 blocks).
 
 Before 877f9138 the 1.25 mm refusal came after 452 s of host passes; 52b9daca keeps it ahead of them now that the window check lives in the address (`uniformLatticeWindowBox`). c406a706 removed the per-cell allocations of the host initial-liquid passes (seep GC 9.3 s → 2.4 s at 5 mm, hashes identical).
+
+### 3.5 Phase 0 results (2026-10-24)
+**Setup.**
+- Machine: Apple M1 Max, 32 GiB, Darwin 25.6.0.
+- Node: v22.22.1 (`/Users/petersuggate/.nvm/versions/node/v22.22.1/bin/node`) with Dawn (`webgpu`).
+- Solver: commit e218ecfe (main with 94960cdc and e0d8994f). Harness: `tools/probe-tier-budget.ts` (49d6e5c2, zone fix b964dbc6).
+- Scene: `reservoir-seep` as committed.
+- Profile: dynamic policy, detailBudgetPercent 5, regionTiering error, warm at h; quality balanced.
+- ms are from the shared runner's timing mode only.
+
+**Reports** (`artifacts/tier-budget/`):
+- `seep5-r1-1200.summary.json`: 5 mm, 1200 steps, a sample every 30.
+- `seep5-r2-check.summary.json`: 5 mm ×2 reservoir, 300 steps, check mode (counts and bytes only).
+- `allocation-classes.json`: the bytes-by-class fit.
+
+**What the harness reports per sample.**
+- Live h and 4h tiles and resident pages, from the ownership work receipt.
+- Pool status, and region heat (COLD/WARM/HOT/free).
+- Particles; phi volume drift (the solver's `narrow-band-phi` truth).
+- Allocated bytes split into pool-at-h, pool-at-4h, dense-box and fixed.
+- A per-owner zone probe: h tiles left of the wall, at the throat ±8 h, on the right floor (y < 8 h) and in the right jet; 4h tiles left and right.
+
+**Allocation classes.** Each allocation label is fitted as fixed + perBlock·blocks + perBoxCell·boxCells over three constructions (pool, pool + 64, a ×2 box). A per-block term of 64 KiB or more is pool-at-h.
+
+**5 mm, 1200 steps (20 s).**
+- Step ms: median 20.6, p95 35.2. The first second is about 2 ms slower (13–300: median 22.5).
+- h tiles: about 500 for the first second, then 250–385. Bricks number 30–50, not ~500.
+- Resident blocks: 138–158 of 226.
+- Regions: about 1050 COLD, 20–80 WARM, 20–170 HOT, 600–700 free.
+- Particles: peak 580, a steady 43 from step 390.
+- Floor film: none at h (see §3.1).
+- Construction: 252 s. Pipeline constants depend on capacity, so a new pool or box recompiles.
+
+**Length ladder at 5 mm** (the tool's `--reservoir=N`: the left chamber N× as long, same throat, head and right chamber; the wall moves to x = 240N).
+
+| | ×1 | ×2 | ×4 |
+|---|---|---|---|
+| Lattice | 512×256×64 | 752×256×64 | 1232×256×64 |
+| Pool (scene) / resident | 226 / 138–158 | 370 / 236–246 | 670 / pending |
+| Allocated (fit) | 3.53 GiB | **5.71 GiB** (fit 5.72): h 5.41, 4h 0.17, box 0.04, fixed 0.09 | pending (fit 10.27) |
+| h tiles after the first second | 250–385 | **95–144** (throat 74–76, jet 19–68, floor 0) | pending |
+| 4h tiles | 73–80k (left 53.8k) | **121–126k** (left 107.5k, right 10–15k) | pending |
+| Regions COLD / WARM / HOT | ~1050 / 20–80 / 20–170 | 1857–1932 / 8–32 / 11–18 | pending |
+| Particles | peak 580, 43 from step 390 | **0** throughout | pending |
+| Step ms (timing mode) | median 20.6, p95 35.2 | pending (batched) | pending |
+
+×2 ran 300 steps in check mode (`seep5-r2-check.summary.json`), so its ms do not count. Bytes per doubling are the pool's: +144 blocks, +2.18 GiB measured for ×1→×2. The fit predicts +300 blocks, +4.5 GiB for ×2→×4. The 4h tiles of the left chamber double with its length, while the h work does not grow; it shrinks, and ×2 has no particles at all. Whether ×2's throat flows at all is the discharge question below.
+
+**2.5 mm.** Pending, batched behind the merge gates as a timing run (over 6 GiB). The fit predicts 22.1 GiB at the default 1442 blocks, which does not fit a 32 GiB machine beside the OS, and 15.4 GiB at an explicit pool of 1000.
+
+**Open: discharge.** After the first commit, the probe's phi and velocity loads read empty (phi 0 in both ping-pong textures, throat face u 0). This happens even through the canonical-load form `UniformMixedDiagnostics` uses, so the right chamber's volume, the level and Cd against Torricelli (Q_T = h²·√(2g·0.6375 m) = 8.84·10⁻⁵ m³/s at 5 mm) are not measured yet. The window coordinates are fixed: owner origins are window lattice cells, and under an open top the frame moves after the first commit.
+
+**Contradictions with the estimates.**
+- A block costs 15.45 MiB, not 10, so today's 5 mm is 3.53 GiB, not 2.0.
+- Live h work is about 10× smaller than estimated (30–50 bricks, not ~500).
+- The catch floor does not go to h.
+- The whole step today is about 20 ms. The §3.2 budget (≤ 1 + 0.3 + 2 + 1 + 1 ms plus fine stages) sits well below it.
 
 ## 4. Phases
 Each phase ends with numbers, the letters A/B, the analytic suite (no regressions against `nbflip-analytic-correctness` round 5) and a commit. Physics changes sit behind NB-FLIP params, and the old path stays the default until the A/B passes.

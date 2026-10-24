@@ -150,7 +150,7 @@ export class UniformColdFreeze {
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly heat:UniformRegionHeat){
     const regions=heat.regions,tiles=ownership.capacity.tiles;this.shape={regions,tiles};
     // Zero: every region live with no term until the first head.
-    this.buffer=device.createBuffer({label:"Uniform cold freeze",size:32*regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    this.buffer=device.createBuffer({label:"Uniform cold freeze",size:32*regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     const rows=Math.ceil((2*regions+1)/REGION_WIDTH),faces=3*tiles,faceRows=Math.ceil(faces/CORRECTION_WIDTH);
     if(faceRows>device.limits.maxTextureDimension2D)throw new Error(`Cold freeze: ${faces} face corrections exceed the 2D texture limit`);
     this.regions=device.createTexture({label:"Uniform cold freeze regions",dimension:"2d",format:"rgba32float",size:[REGION_WIDTH,rows],usage:GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.TEXTURE_BINDING});
