@@ -967,6 +967,17 @@ export function uniformEachTile(a: UniformLatticeAddress, visit: (key: number, x
       visit(base + ((x & 7) | ((y & 7) << 3) | ((z & 7) << 6)), x, y, z);
   }
 }
+/** Calls visit for every stored block whose page is a page of the box, in
+ * ascending block order, with its page's box coordinates. */
+export function uniformEachPage(a: UniformLatticeAddress, visit: (block: number, x: number, y: number, z: number) => void): void {
+  const o = a.boxPage, [px, py, pz] = a.pages;
+  for (let b = 1; b < a.blocks - 1; b++) {
+    const r = a.seed.blocks[b]!;
+    if (r === UNIFORM_PAGE_POOL_FREE) continue;
+    const x = ((r & 63) - o[0]) & 63, y = (((r >>> 6) & 63) - o[1]) & 63, z = (((r >>> 12) & 63) - o[2]) & 63;
+    if (x < px && y < py && z < pz) visit(b, x, y, z);
+  }
+}
 /** Calls visit for every stored cell, in ascending key order: tile by tile,
  * then z, y, x inside the tile. */
 export function uniformEachCell(a: UniformLatticeAddress, visit: (key: number, x: number, y: number, z: number) => void): void {

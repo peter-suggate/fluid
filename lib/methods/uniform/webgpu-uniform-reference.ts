@@ -19,7 +19,7 @@ import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixed
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, uniformMixedUp, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
-import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformBlockStored, uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformPageWord, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
@@ -30,7 +30,8 @@ import {
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
-import { uniformInitialLiquidVelocity, uniformLatticeFarPhi, uniformLatticeInitialPhi, uniformLatticeInitialVolume } from "./uniform-volume-initial";
+import { uniformInitialLiquidVelocityPages, uniformLatticeFarPhi, uniformLatticePagedPhi, uniformLatticePagedVolume } from "./uniform-volume-initial";
+import type { LatticePages } from "../../core/initial-liquid-lattice";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
 import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
@@ -572,7 +573,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The scene's stored set at build: which pages the address seeded and the pool pins. */
   private readonly pageResidency: UniformPagePoolResidency;
   /** The initial liquid the residency was computed from, held for the upload that follows it. */
-  private initialVolume?: ReturnType<typeof uniformLatticeInitialVolume>;
+  private initialVolume?: ReturnType<typeof uniformLatticePagedVolume>;
   /** The container's cells: what its extents are divided by for a cell's size. The lattice (executionInfo.nx, ny, nz) is these rounded up to whole pages. */
   private readonly containerCells: readonly [number, number, number];
   /** The scene's fluid frame (sceneFluidFrame), memoised by scene document. */
@@ -694,7 +695,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const boxPage = sceneFluidBoxPage(scene);
     const residency = this.pageResidency = uniformPagePoolResidency([nx, ny, nz], scene.fluid.pagePool,
       uniformPageSources(scene, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
-      () => (this.initialVolume = uniformLatticeInitialVolume(scene)).volume, boxPage);
+      () => (this.initialVolume = uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, boxPage);
     // The frame is the page table's window: outside the box it is SOLID, but
     // for the column above an open top, which is AIR and claimable, and but in
     // an open world, where every page above the floor is (uniformLatticeAddress).
@@ -2406,12 +2407,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private initializeVolumeAndTerrain(): void {
     const { nx, ny, nz } = this.executionInfo;
     const c = this.scene.container;
-    const {volume,terrain,initial,dam} = this.initialVolume ?? uniformLatticeInitialVolume(this.scene);
+    // By page: the stored pages' values alone (uniformLatticePagedVolume, uniformLatticePagedPhi).
+    const {volume,terrain,initial,dam} = this.initialVolume ?? uniformLatticePagedVolume(this.scene, UNIFORM_PAGE_POOL_EDGE);
     this.initialVolume = undefined;
     const cellHeight = c.height_m / this.containerCells[1];
     if (this.vertexPhiField && this.vertexPhiScratch) {
       // Cut 4h solid owners read their plane at corners the h rule buries.
-      const phi = uniformLatticeInitialPhi(this.scene, uniformDetailCoarseSolids(this.detail));
+      const a = this.address, phi = uniformLatticePagedPhi(this.scene, UNIFORM_PAGE_POOL_EDGE, (x, y, z) => uniformBlockStored(a, uniformPageWord(a, x, y, z)), uniformDetailCoarseSolids(this.detail));
       this.upload3DF32(this.vertexPhiField, phi);
       this.upload3DF32(this.vertexPhiScratch, phi);
     }
@@ -2419,7 +2421,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.volumeB, volume);
     this.upload3DF32(this.surfaceA, volume);
     this.upload3DF32(this.surfaceB, volume);
-    const velocity = uniformInitialLiquidVelocity(this.scene.fluid.initialVelocity_m_s, volume, [nx, ny, nz]);
+    const velocity = uniformInitialLiquidVelocityPages(this.scene.fluid.initialVelocity_m_s, volume);
     if (velocity) this.upload3DF32(this.velocityA, velocity);
     this.upload3DF32(this.gammaA);
     this.upload3DF32(this.gammaB);
@@ -2454,10 +2456,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.velocityA,values);
   }
 
-  /** No values: zero throughout (a detail field's own empty image, no box-sized array). */
-  private upload3DF32(texture: GPUTexture, values?: Float32Array): void {
+  /** No values: zero throughout (a detail field's own empty image, no box-sized array). By page: a detail field's alone. */
+  private upload3DF32(texture: GPUTexture, values?: Float32Array | LatticePages): void {
     const field=uniformDetailField(texture);
     if(field) { field.storage.upload(texture,values); return; }
+    if(values && !(values instanceof Float32Array)) throw new Error(`${texture.label}: an upload by page needs a detail field`);
     this.fieldPages.upload(texture,values ?? new Float32Array(this.address.boxCells));
   }
 
