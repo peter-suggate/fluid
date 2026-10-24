@@ -28,6 +28,7 @@ import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformDetailPick} from "./uniform-detail-fields";
 import {UNIFORM_PAGE_TABLE_WORDS,UNIFORM_PAGE_WINDOW,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,type UniformLatticeAddress} from "./uniform-lattice-address";
 import {uniformPagePoolWGSL,type UniformPagePoolLayout} from "./uniform-page-pool";
+import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsOfWGSL} from "./uniform-live-lists";
 import { uniformSolidBoundaryWGSL } from "./uniform-solid-boundary.wgsl";
 import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
 
@@ -354,7 +355,7 @@ override umDispatchX:u32=65535u;
 @group(1) @binding(1) var<uniform> umBuiltBodies:array<UMRigidBody,12>;
 @group(1) @binding(2) var<storage,read> topology:array<u32>;
 ${solidRecordAddressWGSL(layout,"topology")}
-${pool?uniformPagePoolWGSL(pool.layout,1,3):""}
+${pool?uniformPagePoolWGSL(pool.layout,1,3)+uniformLiveListsOfWGSL("upState",pool.layout):""}
 @group(1) @binding(4) var<storage,read_write> bodyRegions:array<u32>;
 const UM_REGIONS:u32=${layout.tiles.length/64}u;
 // Bodies-only rebuild: a tile far from every body that moved, as last built
@@ -677,11 +678,14 @@ var<workgroup> regionSwept:u32;
 ${pool?/* wgsl */`// Each tile has exactly one writer, even overlapping new-page halos.
 // No claims means no geometric neighbourhood work. A retirement may retain
 // false (conservative), while every claim refreshes its entire incident halo.
-@compute @workgroup_size(64) fn surfaceClearNew(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
+// A fixed grid of workgroups strides the resident blocks' regions (a tile
+// no page stores is written by neither helper).
+@compute @workgroup_size(64) fn surfaceClearNew(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let moved=any(vec3u(upState[UP_AT_WINDOW+4u],upState[UP_AT_WINDOW+5u],upState[UP_AT_WINDOW+6u])!=vec3u(0u));
  if(lane==0u){regionRefresh=select(0u,1u,upNewCount()!=0u||moved);}
  if(workgroupUniformLoad(&regionRefresh)==0u){return;}
- let t=umSolidRegionTile(g.x+umDispatchX*g.y,lane);
+ for(var visit=g.x;visit<8u*ulResidentCount();visit+=groups.x){
+ let t=umSolidRegionTile(8u*ulResidentBlock(visit>>3u)+(visit&7u),lane);
  if(umTileLive(t)){
   let p=vec3i(umTileCoord(t));var dirty=moved;
   for(var i=0u;i<upNewCount();i++){
@@ -692,6 +696,7 @@ ${pool?/* wgsl */`// Each tile has exactly one writer, even overlapping new-page
  // Claims/window moves can change incident cut rings. Refresh the cheap
  // region reduction for all live regions in this already-dispatched pass.
  umBuildRegionClear(t,lane);
+ }
 }
 `:""}
 ${pool?/* wgsl */`// The tiles of the blocks the last commit claimed (the pool's new list): job
@@ -746,11 +751,12 @@ override umDispatchX:u32=65535u;
 @group(0) @binding(1) var<storage,read> topology:array<u32>;
 ${solidRecordAddressWGSL(layout,"topology")}
 ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
-// A key that holds no tile keeps its row.
-@compute @workgroup_size(64) fn widthsListed(@builtin(global_invocation_id) g:vec3u){
- let i=g.x+umDispatchX*64u*g.y;if(i>=umChangedCount()){return;}
- let t=umChangedTile(i);if(!umTileLive(t)){return;}
- record[umSolidCount()+t].y=select(0.0,1.0,(topology[t]&0x80000000u)!=0u);
+// A key that holds no tile keeps its row. A fixed grid strides the list.
+@compute @workgroup_size(64) fn widthsListed(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var i=g.x;i<umChangedCount();i+=64u*groups.x){
+  let t=umChangedTile(i);if(!umTileLive(t)){continue;}
+  record[umSolidCount()+t].y=select(0.0,1.0,(topology[t]&0x80000000u)!=0u);
+ }
 }`});
   const flagErrors=[...(await flagModule.getCompilationInfo()).messages,...(await listModule.getCompilationInfo()).messages].filter(m=>m.type==="error");if(flagErrors.length)throw new Error(flagErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const flagLayout=this.device.createBindGroupLayout({label:"Uniform mixed solid simulation widths",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
@@ -814,8 +820,7 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   pass.setBindGroup(0,this.recordSolids!.group);pass.setBindGroup(1,this.builderGroup(topology));
   pass.setPipeline(cuts);pass.dispatchWorkgroups(this.claimedGroups,1);
   pass.setPipeline(claimed);pass.dispatchWorkgroups(this.claimedGroups,1);
-  const groups=ceilDiv(this.coarseLayout.tiles.length,64),gx=Math.min(groups,this.maxGroups);
-  pass.setPipeline(this.builder!.surfaceClearNew!);pass.dispatchWorkgroups(gx,ceilDiv(groups,gx));pass.end();
+  pass.setPipeline(this.builder!.surfaceClearNew!);pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.coarseLayout.tiles.length/64));pass.end();
  }
  /** A record kernel reads tile keys through the page table and block records after the topology's tile words. */
  private paged(topology:GPUBufferBinding):void{
@@ -856,7 +861,7 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   const pass=encoder.beginComputePass(WIDTHS_PASS);
   if(changes){
    if(s.list?.topology!==topology.buffer||s.list.changes!==changes){this.paged(topology);s.list={topology:topology.buffer,changes,group:this.device.createBindGroup({layout:s.listLayout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology},{binding:2,resource:{buffer:changes}}]})};}
-   pass.setPipeline(s.listed!);pass.setBindGroup(0,s.list.group);
+   pass.setPipeline(s.listed!);pass.setBindGroup(0,s.list.group);pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,groups));pass.end();return;
   }else{
    if(s.topology!==topology.buffer){this.paged(topology);s.topology=topology.buffer;s.group=this.device.createBindGroup({layout:s.layout,entries:[{binding:0,resource:{buffer:coarse.record}},{binding:1,resource:topology}]});}
    pass.setPipeline(s.pipeline);pass.setBindGroup(0,s.group!);
