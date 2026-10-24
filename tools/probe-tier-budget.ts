@@ -317,7 +317,7 @@ console.log(JSON.stringify({ phase: "start", ...metadata, values: undefined }));
 
 const rows: Record<string, unknown>[] = [], walls: { frame: number; wall_ms: number; afterSample: boolean }[] = [];
 let c: Awaited<ReturnType<typeof construct>> | undefined, failure: string | undefined, frameReached = 0;
-const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, W = VLINE_AT + 4 * VLINE; // probe words: 44 scalars, then the throat line (3 words a cell)
+const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, ZONES_AT = VLINE_AT + 4 * VLINE, W = ZONES_AT + 6; // probe words: 44 scalars, then the throat line (3 words a cell)
 try {
   c = await construct(scene);
   const { solver } = c, base = c.base;
@@ -401,9 +401,9 @@ const LINE_X0:i32=${wall.low - 16};
 const POINTS=array<vec3u,4>(${points.map(q => `vec3u(${q.join(",")})`).join(",")});
 // A fixed-point sum (4096 per cell) carried into a high word.
 fn addWide(at:u32,value:u32){if(value==0u){return;}let old=atomicAdd(&words[at],value);if(old+value<old){atomicAdd(&words[at+1u],1u);}}
-var<workgroup> sums:array<atomic<u32>,5>;
+var<workgroup> sums:array<atomic<u32>,8>;
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane<5u){atomicStore(&sums[lane],0u);}
+ if(lane<8u){atomicStore(&sums[lane],0u);}
  workgroupBarrier();
  // Debug: phi at fixed box points (reservoir centre, under its surface, air above, the throat).
  if(all(gid==vec3u(0u))){
@@ -458,6 +458,11 @@ var<workgroup> sums:array<atomic<u32>,5>;
   let left=q.x+w<=WALL_LOW;let right=q.x>=WALL_HIGH;
   if(left){atomicAdd(&sums[1],fixed);}else if(right){atomicAdd(&sums[2],fixed);}else{atomicAdd(&sums[3],fixed);}
   if(right&&q.y<FLOOR_BAND){atomicAdd(&sums[4],fixed);}
+  // The catch split (wide words from ZONES_AT): its 4h owners; the jet
+  // column (above the floor band, within 64 cells of the wall); its h floor band.
+  if(right&&w==4u){atomicAdd(&sums[5],fixed);}
+  if(right&&q.y>=FLOOR_BAND&&q.x<WALL_HIGH+64u){atomicAdd(&sums[6],fixed);}
+  if(right&&w==1u&&q.y<FLOOR_BAND){atomicAdd(&sums[7],fixed);}
   if(right&&q.y==0u&&fraction>0.01){atomicAdd(&words[18],w*w);}
   if(fraction>0.5){atomicMin(&words[21],q.x);atomicMax(&words[22],q.x+w);atomicMax(&words[23],q.y+w);}
   if(w==1u&&owner.lane==0u){
@@ -476,7 +481,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
   if(w==1u&&right){atomicMax(&words[32],bitcast<u32>(abs(faceU(umFace(owner,0u,1,0u).anchor))));}
  }
  workgroupBarrier();
- if(lane<5u){addWide(2u*lane,atomicLoad(&sums[lane]));}
+ if(lane<5u){addWide(2u*lane,atomicLoad(&sums[lane]));}else if(lane<8u){addWide(${ZONES_AT}u+2u*(lane-5u),atomicLoad(&sums[lane]));}
 }`, ["probe"]);
   // As the solver's own kernels: a closed tank's frame and world bounds are
   // pipeline constants (uniformDetailPipeline); without them a page decode
@@ -755,11 +760,13 @@ var<workgroup> sums:array<atomic<u32>,5>;
     const taken = flowTaken ?? []; flowTaken = undefined; flowCounts.clear(); if (!taken.length) return;
     // The GPU probe's sums (as the rows' liquid_m3, mL) after each phi stage.
     const gpu: Record<string, Record<string, number>> = {};
-    for (const mm of flowMeasured ?? []) { const u = await mm.done(); gpu[mm.name] = { left: +(wide(u, 2) * cell3 * 1e6).toFixed(2), right: +(wide(u, 4) * cell3 * 1e6).toFixed(2), total: +(wide(u, 0) * cell3 * 1e6).toFixed(2), wall: +(wide(u, 6) * cell3 * 1e6).toFixed(2) }; }
+    for (const mm of flowMeasured ?? []) { const u = await mm.done(); gpu[mm.name] = { left: +(wide(u, 2) * cell3 * 1e6).toFixed(2), right: +(wide(u, 4) * cell3 * 1e6).toFixed(2), total: +(wide(u, 0) * cell3 * 1e6).toFixed(2), wall: +(wide(u, 6) * cell3 * 1e6).toFixed(2),
+      right4h: +(wide(u, ZONES_AT) * cell3 * 1e6).toFixed(2), rightJet: +(wide(u, ZONES_AT + 2) * cell3 * 1e6).toFixed(2), rightFloor: +(wide(u, 8) * cell3 * 1e6).toFixed(2), rightFloorH: +(wide(u, ZONES_AT + 4) * cell3 * 1e6).toFixed(2) }; }
     flowMeasured = undefined;
     const X = g.nx + 1, Y = g.ny + 1, zone = (x: number) => x < wall.low ? 0 : x < wall.high ? 1 : 2, names = ["left", "tube", "right"];
     let liquid: Uint8Array | undefined; const stages: Record<string, unknown>[] = [];
     const fields: { name: string; field: Float32Array }[] = [];
+    let startPhi: Float32Array | undefined;
     for (const c of taken) {
       const field = await c.done();
       if (c.kind === "phi") {
@@ -768,6 +775,22 @@ var<workgroup> sums:array<atomic<u32>,5>;
           const f = field[x + X * (y + Y * z)]! / h; if (f >= 0.5) continue; vol[zone(Math.min(x, g.nx - 1))]! += Math.min(1, 0.5 - f);
         }
         stages.push({ stage: c.name, mL: Object.fromEntries(vol.map((v, i) => [names[i], +(v * h ** 3 * 1e6).toFixed(2)])), gpu: gpu[c.name] });
+        if (c.name === "start") startPhi = field;
+        if (c.name === "advect" && startPhi) {
+          // Where the advect changes the catch's liquid: 16-cell blocks of the
+          // right zone by the host measure's change (mL), the largest loss and
+          // gain, with the block's deepest liquid (min phi, h) before and after.
+          const blocks = new Map<string, { d: number; before: number; after: number }>();
+          const fill = (f: number) => f >= 0.5 ? 0 : Math.min(1, 0.5 - f);
+          for (let z = 0; z <= g.nz; z++) for (let y = 0; y <= g.ny; y++) for (let x = wall.high; x <= g.nx; x++) {
+            const i = x + X * (y + Y * z), a = startPhi[i]! / h, b = field[i]! / h, d = fill(b) - fill(a); if (!d && a >= 0.5 && b >= 0.5) continue;
+            const k = `${x >> 4},${y >> 4},${z >> 4}`, e = blocks.get(k) ?? { d: 0, before: Infinity, after: Infinity };
+            e.d += d; e.before = Math.min(e.before, a); e.after = Math.min(e.after, b); blocks.set(k, e);
+          }
+          const list = [...blocks].map(([k, e]) => ({ block16: k.split(",").map(Number), mL: +(e.d * h ** 3 * 1e6).toFixed(3), minPhiBefore_h: +e.before.toFixed(2), minPhiAfter_h: +e.after.toFixed(2) }));
+          list.sort((p, q) => p.mL - q.mL);
+          console.log(JSON.stringify({ advectBlocks: step, lost: list.slice(0, 8), gained: list.slice(-8).reverse(), net_mL: +list.reduce((s, b) => s + b.mL, 0).toFixed(3) }));
+        }
         if (c.name === "start" || (!liquid && c.name === "redistance")) {
           liquid = new Uint8Array(g.nx * g.ny * g.nz);
           for (let z = 0; z < g.nz; z++) for (let y = 0; y < g.ny; y++) for (let x = 0; x < g.nx; x++) {
