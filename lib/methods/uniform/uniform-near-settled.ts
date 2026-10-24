@@ -86,8 +86,19 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  * - momentumTrace: how grid momentum's unit trace integrates a fine face's
  *   characteristic back over the step (UniformMomentumTrace): "midpoint"
  *   one RK2 midpoint step; "substep" RK2 segments of at most a cell of travel.
+ * - seedScoring: which surface tiles the census scores for thin, strain,
+ *   rotation, impact and approach. "unshaped" skips a tile shape already
+ *   requires at h: refinement needs no second reason, but particleSeeding
+ *   "need" seeds only from those criteria, so a jet or film that shape holds
+ *   at h never seeds. "every" scores every surface tile; refinement is
+ *   unchanged (a shaped tile is already required), the triggers it reports
+ *   seed and heat particles there.
+ * - outerSeeding: "retain" reseeds a heated tile's outer layer (under a cell
+ *   deep) only where it is newly heated or a source adds liquid; "uncovered"
+ *   also where no sample lies within a cell, which the union leaves to the
+ *   level set, so liquid reaching the surface without samples gains them.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -117,4 +128,6 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  particleDensity:values.particleDensity==="uniform"?"uniform":"graded",
  bulkTier:values.bulkTier==="16h"?"16h":"off",
  coldSurface:values.coldSurface==="warm"?"warm":"budget",
+ seedScoring:values.seedScoring==="every"?"every":"unshaped",
+ outerSeeding:values.outerSeeding==="uncovered"?"uncovered":"retain",
 });

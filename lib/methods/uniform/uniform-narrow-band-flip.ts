@@ -206,6 +206,13 @@ export function narrowBandBudgetCapacity(budget:NarrowBandParticleBudget):number
  while(capacity-particleSlabSpill(capacity)<samples)capacity++;
  return capacity;
 }
+/** Diagnostics only (set before a solver is built; off leaves every shader
+ * unchanged): count the move's retirements in receipt words from
+ * NARROW_BAND_RETIRE_WORD, cumulative: deep, sparse expiry, crowded cell,
+ * blocked in a solid, heat expiry, then sparse, blocked and heat expiry of a
+ * sample less than a cell inside the advected level set (liquid it may not hold). */
+export const NARROW_BAND_RETIRE_WORD=24;
+export const narrowBandRetireCounting={on:false};
 export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  readonly label="Narrow-band FLIP page words";
  readonly capacity:number;
@@ -454,7 +461,15 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    * below a cell expect half the mass. */
   readonly gradedDensity=false,
   /** The particles' h capacity (scene fluid.tiers); absent, the pool's cell keys size them. */
-  readonly budget?:NarrowBandParticleBudget){
+  readonly budget?:NarrowBandParticleBudget,
+  /** outerSeeding "uncovered": the outer layer (under a cell deep) of a
+   * heated tile is also seeded where no sample lies in the cell or the 26
+   * around it. There the union keeps the advected level set as it is
+   * (particleSurfaceFinish's empty gather), so the seeds add no liquid; they
+   * carry liquid that reached the surface without samples (a jet leaving a
+   * full throat at ten cells a step) from the next step. "retain" seeds it
+   * only where a tile is newly heated or a source adds liquid. */
+  readonly outerSeeding:"retain"|"uncovered"="retain"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   // The seed list packs a cell key in 30 bits below the source and deep flags.
   if(cells>0x40000000)throw new Error(`Narrow-band FLIP's seed list packs a cell key in 30 bits: ${cells} cell keys exceed 1073741824`);
@@ -820,7 +835,11 @@ ${narrowBandArenaWGSL}
 ${this.solid.coarse?narrowBandArenaCanonicalWGSL:""}
 ${narrowBandActivityTriggerWGSL(this.seeding,this.sourceSeeding)}
 // The particle band (particleBandDepth, particleDensity).
-const NB_BAND_DEPTH:f32=${this.bandDepth.toFixed(2)};
+const NB_BAND_DEPTH:f32=${this.bandDepth.toFixed(2)};${narrowBandRetireCounting.on?`
+fn nbRetireCount(reason:u32,depth:f32){
+ atomicAdd(&state[${NARROW_BAND_RETIRE_WORD}u+reason],1u);
+ if(depth> -1.0&&(reason==1u||reason==3u||reason==4u)){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+5}u+select(select(2u,1u,reason==3u),0u,reason==1u)],1u);}
+}`:""}
 const NB_GRADED:bool=${this.gradedDensity};
 fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",this.gradedDensity)};}
 // The samples a cell holds when seeded full: four of the eight sites in a
@@ -1027,20 +1046,20 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    // The accepted grid motion: the next head's residency prediction.
    // FLIP's residual velocity transfers momentum but traces no position.
    p.before=vec4f(pic,p.before.w);
-   if(depth< -NB_BAND_DEPTH||nbSparseExpired(age)){return NbMoved(p,1u);}
+   if(depth< -NB_BAND_DEPTH||nbSparseExpired(age)){${narrowBandRetireCounting.on?"nbRetireCount(select(1u,0u,depth< -NB_BAND_DEPTH),depth);":""}return NbMoved(p,1u);}
    if(depth<-1.0&&params.activity.w>0.0){
     let cell=nbBinCell(umCellAt(vec3u(q)));
     if(cell!=NB_NO_BIN){
      let rank=i-links[cell];
      let cap=select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);
-     if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){return NbMoved(p,1u);}
+     if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){${narrowBandRetireCounting.on?"nbRetireCount(2u,depth);":""}return NbMoved(p,1u);}
     }
    }
    // Bodies advance at the previous fluid step's tail. Push samples they
    // overtook out to the moving surface before the static-solid rejection.
    let rigidStart=nbRigidContact(q,p.velocity.xyz);q=rigidStart.position;p.velocity=vec4f(rigidStart.velocity,p.velocity.w);
    // Solid collision, rather than grid ownership, limits particle motion.
-   if(nbParticleBlocked(q)){return NbMoved(p,1u);}
+   if(nbParticleBlocked(q)){${narrowBandRetireCounting.on?"nbRetireCount(3u,depth);":""}return NbMoved(p,1u);}
    ballistic=mode==1.0||!gridSupported(q);p.before.w=nbParticleState(nbParticleAge(p),select(0.0,1.0,ballistic));
    ${this.apic?"if(ballistic){p.cx=vec4f(0);p.cy=vec4f(0);p.cz=vec4f(0);}":""}
    // A sample takes erasure heat (over 1) at G2P, with its tile's new
@@ -1048,7 +1067,7 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    // tiles beside it that same step.
    let tileHeat=nbMoveHeat(q);
    p.position.w=max(select(min(tileHeat,1.0),tileHeat,p.position.w>1.0),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
-   if(p.position.w<=0.0){return NbMoved(p,1u);}
+   if(p.position.w<=0.0){${narrowBandRetireCounting.on?"nbRetireCount(4u,depth);":""}return NbMoved(p,1u);}
    // A record its transfer left coupled was bounded by the grid flow alone
    // (its travel record is the accepted grid motion): found unsupported here,
    // it drifts this step by that grid sample. Its FLIP velocity is momentum,
@@ -1267,7 +1286,15 @@ fn nbMove(group:u32,groups:u32,lane:u32){
 // Keep tangential quarter-cell positions: their known offset determines the
 // seed depth and preserves a resting plane without any volume correction.
 ${narrowBandSeedShellWGSL}
-fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
+${this.outerSeeding==="uncovered"?`// No sample in cell c or the 26 around it (outerSeeding "uncovered").
+fn nbUncovered(c:vec3u)->bool{
+ for(var k=0u;k<27u;k++){
+  let n=vec3i(c)+vec3i(umCorner(k,3u))-1;
+  if(umCellPresent(n)&&nbBinCount(umCellAt(vec3u(n)))!=0u){return false;}
+ }
+ return true;
+}
+`:""}fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
   let q=vec3f(c)+0.25+0.5*vec3f(umCorner(k,2u));let distance=particleDepth(q);
   if(distance>0.0||distance< -NB_BAND_DEPTH||nbParticleBlocked(q)){return vec4f(-1,0,0,0);}
   // Paper Section 3.3: replenish only the inner [-R,-h] band. The outer
@@ -1275,7 +1302,7 @@ fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
   // of ownership or an uncovered tile cannot bootstrap one from the bulk
   // field. Section 3.2: liquid made from a description gets its whole band,
   // at initialization and where a source has just made it.
-  if(!initial&&!activated&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0){return vec4f(-1,0,0,0);}
+  if(!initial&&!activated&&distance>-1.0&&nbSourcePhi(q,1.0)>=0.0${this.outerSeeding==="uncovered"?"&&!nbUncovered(c)":""}){return vec4f(-1,0,0,0);}
   // The heat-one overlap supplies support without authority to erase
   // liquid. Its outer shell only seeds on resolved fine owners.
   if(distance>-1.0&&umOwnerAt(vec3i(c)).width!=1u){return vec4f(-1,0,0,0);}

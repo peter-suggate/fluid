@@ -63,6 +63,8 @@ import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/unifor
 import { uniformDetailBindLayout, uniformDetailField, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline } from "../lib/methods/uniform/uniform-detail-fields";
 import { UNIFORM_WINDOW_HEADER } from "../lib/methods/uniform/uniform-window-address";
 import { UNIFORM_MOMENTUM_TRACE_CAPPED_WORD } from "../lib/methods/uniform/uniform-mixed-momentum";
+import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../lib/methods/uniform/uniform-surface-transport.wgsl";
+import { NARROW_BAND_RETIRE_WORD, narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-band-flip";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "../lib/methods/uniform/uniform-mixed-topology.wgsl";
 import type { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed-ownership";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
@@ -72,8 +74,10 @@ import { GPUMemoryProfile } from "./gpu-memory-profile";
 const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "";
+// --retire: count NB-FLIP's retirements by reason (diagnostic shader words).
+if (options.includes("--retire")) narrowBandRetireCounting.on = true;
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes)=.+|--classify|--print-scene|--heatState)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes)=.+|--classify|--print-scene|--heatState|--census|--retire)$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
 /** Momentum traces cut at the segment bound (momentumTrace "substep"), summed over the run. */
@@ -754,6 +758,45 @@ var<workgroup> sums:array<atomic<u32>,8>;
     await cappedRing.mapAsync(GPUMapMode.READ); const u = new Uint32Array(cappedRing.getMappedRange().slice(0)); cappedRing.unmap();
     let n = 0; for (let i = 0; i < Math.min(cappedSteps, 4 * every); i++) n += u[i]!; cappedSteps = 0; traceCappedTotal += n; return n;
   };
+  // --census: the head census's particle evidence over every tile key at a
+  // sample (NB-FLIP bins from NB_ACTIVITY_SCORES: two importance words, heat
+  // planes, then the update-error certificate, 4 words a tile). Counts the
+  // criteria triggered and kept, those dropped by the budget, thin tiles whose
+  // deformation passes "need"'s transport test, and tiles with particle heat.
+  const census = options.includes("--census") ? (() => {
+    const flip = (frame as unknown as { narrowBandFlip: { airGateBuffer: GPUBuffer; activityHeatWord: number } }).narrowBandFlip, N = frame.ownership.capacity.tiles;
+    const start = 4 * (flip.activityHeatWord - 2 * N), bytes = 4 * 11 * N;
+    const buffer = device.createBuffer({ label: "Tier budget census", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const pass = UNIFORM_SURFACE_TRANSPORT_ERROR_H * h / dt;
+    return async () => {
+      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(flip.airGateBuffer, start, buffer, 0, bytes); device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ); const raw = buffer.getMappedRange().slice(0); buffer.unmap();
+      const u = new Uint32Array(raw), f = new Float32Array(raw), names = ["shape", "thin", "strain", "rotation", "impact", "approach"];
+      const kept: Record<string, number> = {}, dropped: Record<string, number> = {};
+      let wet = 0, crossing = 0, required = 0, thinChanging = 0, thinCertified = 0, need = 0, heated = 0, hot = 0, deformationMax = 0;
+      for (let t = 0; t < N; t++) {
+        const flags = u[2 * t + 1]!, bits = (flags >>> 16) & 63, drop = (flags & (1 << 27)) !== 0;
+        wet += +((flags & (1 << 29)) !== 0); crossing += +((flags & (1 << 28)) !== 0); required += +((flags & (1 << 25)) !== 0);
+        for (let k = 0; k < 6; k++) if (bits & (1 << k)) { const into = drop ? dropped : kept; into[names[k]!] = (into[names[k]!] ?? 0) + 1; }
+        const certified = f[7 * N + 4 * t + 3]! > 0, deformation = certified ? f[7 * N + 4 * t]! : Infinity;
+        if (bits & 2) { thinCertified += +certified; if (deformation > pass) thinChanging++; if (certified) deformationMax = Math.max(deformationMax, deformation); }
+        if (!drop && ((bits & 0x3c) || ((bits & 2) && deformation > pass))) need++;
+        const heat = f[2 * N + t]!; heated += +(heat > 0); hot += +(heat >= 2);
+      }
+      return { wet, crossing, required, kept, dropped, thinCertified, thinChanging, thinDeformationMax: +deformationMax.toExponential(2), pass_m_s: +pass.toExponential(2), need, heated, hot };
+    };
+  })() : undefined;
+  // --retire: the move's cumulative retirements by reason, and of those a
+  // sample less than a cell inside the advected level set.
+  const retired = narrowBandRetireCounting.on ? (() => {
+    const flip = (frame as unknown as { narrowBandFlip: { state: GPUBuffer } }).narrowBandFlip;
+    const buffer = device.createBuffer({ label: "Tier budget retirements", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    return async () => {
+      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(flip.state, 4 * NARROW_BAND_RETIRE_WORD, buffer, 0, 32); device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ); const u = new Uint32Array(buffer.getMappedRange().slice(0)); buffer.unmap();
+      return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], sparseShallow: u[5], blockedShallow: u[6], heatShallow: u[7] };
+    };
+  })() : undefined;
   const authoredFloor_m = Math.min(...(scene.fluid.initialLiquidVolumes ?? []).map(v => "min_m" in v ? (v as { min_m: { y: number } }).min_m.y : 0));
   const bound_m_s = Math.sqrt(2 * gravity * Math.max(0, authoredTop_m - Math.min(0, authoredFloor_m)));
   const printFlowStages = async (step: number) => {
@@ -836,6 +879,8 @@ var<workgroup> sums:array<atomic<u32>,8>;
     assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - step * dt) < 1e-8);
     if (step % every === 0 || step === steps) {
       const capped = await readCapped(); if (capped) console.log(JSON.stringify({ traceCapped: capped, step }));
+      if (census) console.log(JSON.stringify({ census: await census(), step }));
+      if (retired) console.log(JSON.stringify({ retired: await retired(), step }));
       const row = await record(step, wall_ms);
       if ((row.pool as { fatal?: string }).fatal) throw new Error(`pool fatal: ${(row.pool as { fatal?: string }).fatal}`);
     }
