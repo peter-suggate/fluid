@@ -39,7 +39,9 @@ ${levelSetFillWGSL}
  }
  let mass=f32(owner.width*owner.width*owner.width)*capacity;
  if(negative==8u){result[i]=mass;return;}if(negative==0u){return;}
- if(owner.width==1u||capacity>=0.99999){result[i]=fill(values)*mass;return;}
+ // A 4h owner, full or cut, sums its 64 h subcells: fill()'s one 6-tet split
+ // is orientation-biased (an aligned 16^3 block read 7.68 of 8.192 L).
+ if(owner.width==1u){result[i]=fill(values)*mass;return;}
  var sum=0.0;
  for(var s=0u;s<64u;s++){
   let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umCellOpen(c+vec3i(cell));if(open<=0.0){continue;}
