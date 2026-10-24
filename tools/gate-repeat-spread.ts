@@ -24,6 +24,9 @@
  *   --baseline=/abs/snapshot --candidate=/abs/snapshot
  *   [--scene=rest|cold|warm|splash|hot|<scene id>] [--length=128] [--depth=32]
  *   [--pool-blocks=N] [--steps=70] [--repeats=3] [--stats-every=10] [--out=DIR] [--gate="RUNNER MODE"]
+ *   [--differ=key,key]
+ * --differ: method params whose resolved values may differ between the arms
+ * (a change of defaults, gated as an A/B); every other value must match.
  * --gate: construct every instance (mostly CPU: pipeline compiles) first,
  * then hold a GPU runner slot only over the frames: the gate command runs
  * `cat` once the slot is held, and the slot is released when its stdin
@@ -44,7 +47,8 @@ import { METRICS, repeatSpreadVerdict as verdict, type Metric } from "./gate-rep
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
-for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|repeats|stats-every|scene|length|depth|pool-blocks|out|gate|rescore)=.+$/);
+for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|repeats|stats-every|scene|length|depth|pool-blocks|out|gate|rescore|differ)=.+$/);
+const differ = new Set((option("differ") ?? "").split(",").filter(Boolean));
 const steps = Number(option("steps") ?? 70), repeats = Number(option("repeats") ?? 3), statsEvery = Number(option("stats-every") ?? 10);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(repeats) && repeats >= 2 && Number.isInteger(statsEvery) && statsEvery > 0);
 const roots = [option("baseline"), option("candidate")].map(r => resolve(r ?? "")); assert.ok(option("rescore") || (option("baseline") && option("candidate")));
@@ -94,6 +98,7 @@ try {
    * param the other snapshot predates, such as bulkTier) must sit at that
    * arm's own default. */
   const shared = (mine: Record<string, unknown>, other: Record<string, unknown>, own: Record<string, unknown>) => Object.fromEntries(Object.entries(mine).filter(([key, value]) => {
+    if (differ.has(key)) return false;
     if (key in other) return true;
     assert.deepEqual(value, own[key], `${key} exists in one snapshot only and is not at its default`); return false;
   }));

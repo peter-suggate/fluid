@@ -15,7 +15,9 @@
  *   --baseline=/abs/snapshot --candidate=/abs/snapshot
  *   [--scene=rest|cold|warm|splash|hot|<scene id>] [--length=128] [--depth=32]
  *   [--pool-blocks=N] [--steps=100] [--from=40] [--profile] [--identity] [--keep-going]
- *   [--hash-at=F,F] [--diff] [--out=DIR] [--gate="RUNNER MODE"]
+ *   [--hash-at=F,F] [--diff] [--out=DIR] [--gate="RUNNER MODE"] [--differ=key,key]
+ * --differ: method params whose resolved values may differ between the arms
+ * (a change of defaults timed as an A/B); every other value must match.
  * --keep-going: with --identity, record work-history differences and run on
  * to the field hashes (the run still fails on either). --hash-at=10,20:
  * compare the field hashes after those frames too; --diff prints where they
@@ -40,7 +42,9 @@ import { createRegionTierScene, REGION_TIER_SCENES, type RegionTierScene } from 
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
-for (const a of process.argv.slice(3)) assert.match(a, /^--(?:(?:baseline|candidate|steps|from|scene|length|depth|pool-blocks|out|gate|hash-at)=.+|profile|keep-going|diff|identity)$/);
+for (const a of process.argv.slice(3)) assert.match(a, /^--(?:(?:baseline|candidate|steps|from|scene|length|depth|pool-blocks|out|gate|hash-at|differ)=.+|profile|keep-going|diff|identity)$/);
+const differ = new Set((option("differ") ?? "").split(",").filter(Boolean));
+const comparedValues = (values: unknown) => Object.fromEntries(Object.entries(values as Record<string, unknown>).filter(([key]) => !differ.has(key)));
 const diffFields = process.argv.includes("--diff"), identity = process.argv.includes("--identity");
 const hashAt = new Set((option("hash-at") ?? "").split(",").filter(Boolean).map(Number));
 const steps = Number(option("steps") ?? 100), from = Number(option("from") ?? 40), profile = process.argv.includes("--profile"), keepGoing = process.argv.includes("--keep-going");
@@ -125,7 +129,7 @@ try {
     if (poolBlocks !== undefined) built.fluid = { ...built.fluid, pagePool: { ...built.fluid?.pagePool, blocks: poolBlocks } } as SceneDescription["fluid"];
     const step = method.effectiveStep_s?.(built, values) ?? built.numerics.fixedDt_s;
     built.duration_s = Math.max(built.duration_s, steps * step);
-    if (index) { assert.equal(step, dt); assert.deepEqual(values, snapshots[0]!.values); assert.deepEqual(built, scene); }
+    if (index) { assert.equal(step, dt); assert.deepEqual(comparedValues(values), comparedValues(snapshots[0]!.values)); assert.deepEqual(built, scene); }
     scene = built; dt = step;
     const hash = createHash("sha256"), directory = resolve(cwd, "lib/methods/uniform");
     for (const f of readdirSync(directory).filter(f => f.endsWith(".ts")).sort()) { hash.update(f); hash.update(readFileSync(resolve(directory, f))); }

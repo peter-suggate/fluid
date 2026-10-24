@@ -21,7 +21,7 @@ import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
 import { narrowBandTerrainContactWGSL, narrowBandRigidContactWGSL } from "./uniform-particle-contact.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
-import { NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
+import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
 import { particleBrickDepositWGSL } from "./uniform-particle-brick.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { UNIFORM_DETAIL_H_STORE, UNIFORM_DETAIL_MERGED_SLOTS, uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
@@ -210,9 +210,11 @@ export function narrowBandBudgetCapacity(budget:NarrowBandParticleBudget):number
  * unchanged): count the move's retirements in receipt words from
  * NARROW_BAND_RETIRE_WORD, cumulative: deep, sparse expiry, crowded cell,
  * blocked in a solid, heat expiry, then sparse, blocked and heat expiry of a
- * sample less than a cell inside the advected level set (liquid it may not hold). */
+ * sample less than a cell inside the advected level set (liquid it may not hold).
+ * splitX at or above 0 makes the last three words, at cells x >= splitX:
+ * crowded, every retirement, and seeds offered. */
 export const NARROW_BAND_RETIRE_WORD=24;
-export const narrowBandRetireCounting={on:false};
+export const narrowBandRetireCounting={on:false,splitX:-1};
 export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  readonly label="Narrow-band FLIP page words";
  readonly capacity:number;
@@ -469,7 +471,17 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    * carry liquid that reached the surface without samples (a jet leaving a
    * full throat at ten cells a step) from the next step. "retain" seeds it
    * only where a tile is newly heated or a source adds liquid. */
-  readonly outerSeeding:"retain"|"uncovered"="retain"){
+  readonly outerSeeding:"retain"|"uncovered"="retain",
+  /** heatExpiry "held": a sample whose heat runs out is retired only where
+   * the level set holds its liquid: a cell deep or more, or in a tile whose
+   * surface the census finds resolved (not thin). A shallow sample in a thin
+   * tile keeps heat 1 (support without erasure). "anywhere" retires it
+   * wherever its tile has cooled. */
+  readonly heatExpiry:"anywhere"|"held"="anywhere",
+  /** sampleBound "walls": the samples' mass bound in the union holds a
+   * wall or floor vertex's plane against the wall (NARROW_BAND_WALL_BOUND_WGSL);
+   * "centred" places every vertex at its open cells' centre. */
+  readonly sampleBound:"centred"|"walls"="centred"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   // The seed list packs a cell key in 30 bits below the source and deep flags.
   if(cells>0x40000000)throw new Error(`Narrow-band FLIP's seed list packs a cell key in 30 bits: ${cells} cell keys exceed 1073741824`);
@@ -836,9 +848,9 @@ ${this.solid.coarse?narrowBandArenaCanonicalWGSL:""}
 ${narrowBandActivityTriggerWGSL(this.seeding,this.sourceSeeding)}
 // The particle band (particleBandDepth, particleDensity).
 const NB_BAND_DEPTH:f32=${this.bandDepth.toFixed(2)};${narrowBandRetireCounting.on?`
-fn nbRetireCount(reason:u32,depth:f32){
+fn nbRetireCount(reason:u32,depth:f32,x:f32){
  atomicAdd(&state[${NARROW_BAND_RETIRE_WORD}u+reason],1u);
- if(depth> -1.0&&(reason==1u||reason==3u||reason==4u)){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+5}u+select(select(2u,1u,reason==3u),0u,reason==1u)],1u);}
+ ${narrowBandRetireCounting.splitX>=0?`if(x>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+6}u],1u);if(reason==2u){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+5}u],1u);}}`:`if(depth> -1.0&&(reason==1u||reason==3u||reason==4u)){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+5}u+select(select(2u,1u,reason==3u),0u,reason==1u)],1u);}`}
 }`:""}
 const NB_GRADED:bool=${this.gradedDensity};
 fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",this.gradedDensity)};}
@@ -967,7 +979,9 @@ fn nbWinStage(lane:u32){
 }
 // nbTargetHeat, nbSampleCold and the depth's reach, through the window.
 fn nbMoveHeat(p:vec3f)->f32{let t=vec3u(p/4.0);let w=nbWinIndex(vec3i(t));if(w<64u){return nbWinHeat[w];}return bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+umTileAt(t)]));}
-fn nbMoveCold(q:vec3f)->bool{let t=vec3i(floor(q))>>vec3u(2u);let w=nbWinIndex(t);if(w<64u){return (nbWinFlags[w]&NB_WIN_COLD)!=0u;}return nbTileCold(umTileKey(t));}
+${this.heatExpiry==="held"?`// The census found the surface of q's tile thin (UNIFORM_STAGE_IMPORTANCE triggered thin).
+fn nbTileThin(q:vec3f)->bool{let t=vec3u(q/4.0);let key=umTileAt(t);if(!umKeyStored(key)){return false;}return ((atomicLoad(&bins[NB_ACTIVITY_SCORES+2u*key+1u])>>17u)&1u)!=0u;}
+`:""}fn nbMoveCold(q:vec3f)->bool{let t=vec3i(floor(q))>>vec3u(2u);let w=nbWinIndex(t);if(w<64u){return (nbWinFlags[w]&NB_WIN_COLD)!=0u;}return nbTileCold(umTileKey(t));}
 fn nbMoveDepth(p:vec3f)->f32{
  let t=vec3u(p)/4u;let w=nbWinIndex(vec3i(t));var reached:bool;
  if(w<64u){reached=(nbWinFlags[w]&NB_WIN_REACH)!=0u;}else{reached=(atomicLoad(&bins[NB_BAND_REACH+umTileAt(t)])&1u)!=0u;}
@@ -1046,20 +1060,20 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    // The accepted grid motion: the next head's residency prediction.
    // FLIP's residual velocity transfers momentum but traces no position.
    p.before=vec4f(pic,p.before.w);
-   if(depth< -NB_BAND_DEPTH||nbSparseExpired(age)){${narrowBandRetireCounting.on?"nbRetireCount(select(1u,0u,depth< -NB_BAND_DEPTH),depth);":""}return NbMoved(p,1u);}
+   if(depth< -NB_BAND_DEPTH||nbSparseExpired(age)){${narrowBandRetireCounting.on?"nbRetireCount(select(1u,0u,depth< -NB_BAND_DEPTH),depth,q.x);":""}return NbMoved(p,1u);}
    if(depth<-1.0&&params.activity.w>0.0){
     let cell=nbBinCell(umCellAt(vec3u(q)));
     if(cell!=NB_NO_BIN){
      let rank=i-links[cell];
      let cap=select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);
-     if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){${narrowBandRetireCounting.on?"nbRetireCount(2u,depth);":""}return NbMoved(p,1u);}
+     if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){${narrowBandRetireCounting.on?"nbRetireCount(2u,depth,q.x);":""}return NbMoved(p,1u);}
     }
    }
    // Bodies advance at the previous fluid step's tail. Push samples they
    // overtook out to the moving surface before the static-solid rejection.
    let rigidStart=nbRigidContact(q,p.velocity.xyz);q=rigidStart.position;p.velocity=vec4f(rigidStart.velocity,p.velocity.w);
    // Solid collision, rather than grid ownership, limits particle motion.
-   if(nbParticleBlocked(q)){${narrowBandRetireCounting.on?"nbRetireCount(3u,depth);":""}return NbMoved(p,1u);}
+   if(nbParticleBlocked(q)){${narrowBandRetireCounting.on?"nbRetireCount(3u,depth,q.x);":""}return NbMoved(p,1u);}
    ballistic=mode==1.0||!gridSupported(q);p.before.w=nbParticleState(nbParticleAge(p),select(0.0,1.0,ballistic));
    ${this.apic?"if(ballistic){p.cx=vec4f(0);p.cy=vec4f(0);p.cz=vec4f(0);}":""}
    // A sample takes erasure heat (over 1) at G2P, with its tile's new
@@ -1067,7 +1081,9 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    // tiles beside it that same step.
    let tileHeat=nbMoveHeat(q);
    p.position.w=max(select(min(tileHeat,1.0),tileHeat,p.position.w>1.0),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
-   if(p.position.w<=0.0){${narrowBandRetireCounting.on?"nbRetireCount(4u,depth);":""}return NbMoved(p,1u);}
+   ${this.heatExpiry==="held"?`// heatExpiry "held": the level set does not hold a shallow sample in a thin tile.
+   if(depth> -1.0&&nbTileThin(q)){p.position.w=max(p.position.w,1.0);}
+   `:""}if(p.position.w<=0.0){${narrowBandRetireCounting.on?"nbRetireCount(4u,depth,q.x);":""}return NbMoved(p,1u);}
    // A record its transfer left coupled was bounded by the grid flow alone
    // (its travel record is the accepted grid motion): found unsupported here,
    // it drifts this step by that grid sample. Its FLIP velocity is momentum,
@@ -1385,7 +1401,7 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
 // spills, an overlap reseed is clipped (its cell is short again next step).
 fn storeSeedCandidate(p:Particle,mandatory:bool){
  var s=p;${this.apic?"s.lifetime.x=nbSeedFirst();":"s.before.w=nbParticleState(nbSeedFirst(),0.0);"}
- if(p.position.x>=0.0){_=nbSeedAppend(s,mandatory);}
+ if(p.position.x>=0.0){${narrowBandRetireCounting.on&&narrowBandRetireCounting.splitX>=0?`if(p.position.x>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+7}u],1u);}`:""}_=nbSeedAppend(s,mandatory);}
 }
 @compute @workgroup_size(64) fn seedSources(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  storeSeedCandidate(seedCandidate(group,lane,true),true);
@@ -1515,7 +1531,7 @@ fn nbSampleCold(q:vec3f)->bool{return nbTileCold(umTileKey(vec3i(floor(q))>>vec3
  }
  atomicMax(&state[4],bitcast<u32>(outside));
 }
-${narrowBandSurfaceWGSL}
+${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_BOUND_WGSL,NARROW_BAND_WALL_BOUND_WGSL):narrowBandSurfaceWGSL}
 
 `,[]);
   // Advection borrows the exact extended-field unit taps Uniform already
