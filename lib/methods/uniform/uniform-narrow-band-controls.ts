@@ -33,11 +33,20 @@ export const NARROW_BAND_FINE_ADVECTION:SelectParamSpec={kind:"select",key:"phiF
   options:[{value:"adaptive",label:"Adaptive"},{value:"cubic",label:"Cubic"},{value:"trilinear",label:"Trilinear"}],
   hint:"Trilinear moves the level set at h vertices with eight taps in place of the cubic's 64, 1 to 3 ms of a figure-9 frame (about 1.9 ms of the pour's late frame); 4h vertices follow the 4h-tile phi advection. Curved surfaces that the particles do not fully carry shrink a little more each step: the figure-9 take then holds 5 to 9% fewer particles. Adaptive keeps the cubic wherever no hot particles hold the surface (spray, the letters' first frames) and takes trilinear under them. With cubic phi advection off, h vertices take trilinear. A falling or translating block, kept at h at its corners, loses 3% in 10 frames under trilinear and under 1% under the cubic."};
 export const narrowBandFineAdvection=(value:unknown):"cubic"|"trilinear"|"adaptive"=>value==="cubic"||value==="trilinear"?value:"adaptive";
-/** The level-set advect at 4h vertices. No particles carry a 4h surface: the
- * census keeps a moving surface at h where 4h would round its corners or
- * curves, so a 4h surface is flat or gently curved. */
-export const NARROW_BAND_COARSE_ADVECTION:SelectParamSpec={kind:"select",key:"phiCoarseAdvection",label:"4h-tile phi advection",default:"trilinear",tier:"fine",update:"runtime",
-  options:[{value:"cubic",label:"Cubic"},{value:"trilinear",label:"Trilinear"}],
-  hint:"How 4h vertices move the level set. The census keeps a moving corner, curve, thin sheet or droplet at h, so a 4h surface is flat or gently curved: trilinear moves a flat surface exactly with eight taps in place of the cubic's 64, and pulls a curved one in by a twelfth of its 4h second difference a step. Cubic holds a curved 4h surface. In the analytic suite trilinear 4h costs 0 to 0.5% more volume in 10 frames (translation, dam-break) and saves about 0.4 ms of the pour's late frame."};
 export const narrowBandCoarseAdvection=(value:unknown):"cubic"|"trilinear"=>value==="cubic"?"cubic":"trilinear";
+/** How the level set moves, in three steps; it sets what h and 4h vertices
+ * take. Fast: trilinear everywhere. Balanced: the cubic at h, trilinear
+ * where hot particles hold the surface, and trilinear at 4h (the census keeps
+ * a moving corner, curve, thin sheet or droplet at h, so a 4h surface is flat
+ * or gently curved). Best: the cubic everywhere. */
+export type NarrowBandSurfaceAdvection="fast"|"balanced"|"best";
+export const NARROW_BAND_SURFACE_ADVECTION:SelectParamSpec={kind:"select",key:"surfaceAdvection",label:"Surface advection",default:"balanced",tier:"coarse",update:"runtime",
+  options:[{value:"fast",label:"Fast"},{value:"balanced",label:"Balanced"},{value:"best",label:"Best"}],
+  hint:"How the level set moves each step. Fast interpolates it trilinearly everywhere (eight taps): a moving corner or curve shrinks a little every step, about 3% of a falling block in 10 frames. Balanced takes the cubic (64 taps) at h, where the census keeps corners, curves, sheets and droplets, except where particles already hold the surface, and trilinear at 4h, where the surface is flat or gently curved: under 1% in 10 frames, about 1.6 ms more than Fast's 4h cubic on the pour's late frame. Best takes the cubic everywhere."};
+export const narrowBandSurfaceAdvection=(value:unknown):NarrowBandSurfaceAdvection=>value==="fast"||value==="best"?value:"balanced";
+/** The solver settings a surface advection level sets. */
+export function narrowBandSurfaceAdvectionSettings(value:unknown):{cubic:boolean;fine:"cubic"|"trilinear"|"adaptive";coarse:"cubic"|"trilinear"}{
+  const level=narrowBandSurfaceAdvection(value);
+  return level==="fast"?{cubic:false,fine:"trilinear",coarse:"trilinear"}:level==="best"?{cubic:true,fine:"cubic",coarse:"cubic"}:{cubic:true,fine:"adaptive",coarse:"trilinear"};
+}
 export const narrowBandControlParams:readonly NumberParamSpec[]=controls.map(c=>({...c,kind:"number",tier:"coarse",update:"runtime",dedicated:true}));

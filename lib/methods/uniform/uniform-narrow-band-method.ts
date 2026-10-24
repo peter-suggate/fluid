@@ -1,4 +1,4 @@
-import { NARROW_BAND_COARSE_ADVECTION, NARROW_BAND_FINE_ADVECTION, narrowBandCoarseAdvection, narrowBandControlParams, narrowBandControlValues, narrowBandFineAdvection } from "./uniform-narrow-band-controls";
+import { NARROW_BAND_SURFACE_ADVECTION, narrowBandControlParams, narrowBandControlValues, narrowBandSurfaceAdvection, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
 import type { MethodParamValues, SimulationMethod } from "../../core/method-contract";
 import { UNIFORM_GEOMETRIC_PARAMS } from "./uniform-geometric-parameters";
 import { composeFeatures } from "../../framework/composition";
@@ -26,19 +26,17 @@ export const narrowBandFixedDetail:MethodParamValues={detailPolicy:"dynamic",det
  * falling stream has dt·g/|u| of it (0.15 per 1/24 s step on the pour's
  * spout, every tile of it h, its particles seeded and their joins h). */
 export const narrowBandAdaptiveDetail:MethodParamValues={...narrowBandFixedDetail,...narrowBandControlValues(),adaptiveSurface:"on",
- detailShapeTolerance:0.5,detailShapeMetric:"displacement",detailThin:"on",detailImpact:"on",detailApproach:"on",
- // Correctness first: h vertices take the cubic (adaptive: trilinear under
- // hot particles), 4h the trilinear (phiCoarseAdvection). The census keeps
- // moving corners and curves at h; trilinear h erodes them every step.
- phiCubicAdvection:"on"};
+ detailShapeTolerance:0.5,detailShapeMetric:"displacement",detailThin:"on",detailImpact:"on",detailApproach:"on"};
+/** surfaceAdvection's level as the geometric and NB-FLIP advection settings. */
+const surfaceAdvectionValues=(value:unknown)=>{const a=narrowBandSurfaceAdvectionSettings(value);
+ return {surfaceAdvection:narrowBandSurfaceAdvection(value),phiCubicAdvection:a.cubic?"on":"off",phiFineAdvection:a.fine,phiCoarseAdvection:a.coarse};};
 export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  ...resolveUniformGeometricValues({...narrowBandAdaptiveDetail,...values}),...narrowBandControlValues(values),...fixed,
  fineGridPadding:Math.max(0,Math.min(4,Number.isFinite(Number(values.fineGridPadding))?Number(values.fineGridPadding):0)),
  particleTransfer:values.particleTransfer==="apic"?"apic":"flip",
  adaptiveSurface:"on",
  coarseParticleMode:"off",
- phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),
- phiCoarseAdvection:narrowBandCoarseAdvection(values.phiCoarseAdvection),
+ ...surfaceAdvectionValues(values.surfaceAdvection),
  coldCensus:values.coldCensus==="full"?"full":"replay",
  coldRegions:values.coldRegions==="fine"?"fine":"frozen16h",
  coldFrameSkip:values.coldFrameSkip==="off"?"off":"on",
@@ -49,8 +47,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
 const params:SimulationMethod["params"]=[
  ...narrowBandControlParams,
  {kind:"select",key:"particleTransfer",label:"Particle transfer",default:"flip",tier:"coarse",update:"solver",options:[{value:"flip",label:"FLIP (95%)"},{value:"apic",label:"APIC (experimental)"}],hint:"APIC replaces residual FLIP velocities with quadratic affine transfers, following Sato 2018. Restarts the solver."},
- NARROW_BAND_FINE_ADVECTION,
- NARROW_BAND_COARSE_ADVECTION,
+ NARROW_BAND_SURFACE_ADVECTION,
  {kind:"select",key:"surfaceSplat",label:"Particle surface scatter",default:"fused",tier:"fine",update:"solver",options:[{value:"fused",label:"Occupied cells"},{value:"separate",label:"Separate cell scan"}],hint:"Fuse occupied-cell selection and particle surface scatter using the current particle sort. Preserves the same surface distances. Restarts the solver."},
  {kind:"select",key:"rootCoarse",label:"Deep pressure levels",default:"fused",tier:"fine",update:"solver",options:[{value:"fused",label:"Fused 16h and 32h"},{value:"tiled",label:"Separate tiled levels"}],hint:"Run the deepest pressure levels in one workgroup using the current resident-block list and globally ordered iterations. Restarts the solver."},
  {kind:"select",key:"rootTiles",label:"Pressure stencil sharing",default:"page",tier:"fine",update:"solver",options:[{value:"page",label:"Whole pages"},{value:"octant",label:"Separate octants"}],hint:"Share a pressure halo across all eight octants of each page, preserving the global iteration schedule. Restarts the solver."},
@@ -78,7 +75,7 @@ const params:SimulationMethod["params"]=[
  {kind:"select",key:"surfaceImpulse",label:"Free-surface impulse",default:"energy",tier:"fine",update:"solver",options:[{value:"energy",label:"Bounded by pressure work"},{value:"full",label:"Whole step"}],hint:"How fast pressure may push liquid out through its free surface in one step. Bounded: no faster than the pressure's work allows (the square root of 2p/ρ beyond its incoming speed), so an impact cannot fire a thin sliver at tens of m/s. Whole step: the full ghost-fluid impulse. Restarts the solver."},
  {kind:"select",key:"momentumSampler",label:"Momentum sampler",default:"texture32",tier:"fine",update:"solver",options:[{value:"texture32",label:"Texture filter, 32-bit"},{value:"texture16",label:"Texture filter, 16-bit"},{value:"software",label:"Software"}],hint:"Grid momentum traces each fine face back one step and interpolates the velocity there. The texture filter asks the GPU's texture unit for each interpolated sample, from the same 32-bit velocities (falling back to 16-bit where the GPU cannot filter 32-bit textures) or from a 16-bit copy of the fine velocities; it rounds the interpolation weights slightly. Software does the eight loads and the blend itself, exactly. Restarts the solver."},
  {kind:"number",key:"fineGridPadding",label:"Fine-grid padding",default:0,tier:"fine",update:"runtime",min:0,max:4,step:1,digits:0,unit:"h",hint:"Extra h cells around swept surface crossings. The particle band stays 4h wide."},
- ...UNIFORM_GEOMETRIC_PARAMS.filter(p=>!Object.hasOwn(fixed,p.key)).map(p=>Object.hasOwn(narrowBandAdaptiveDetail,p.key)?{...p,default:narrowBandAdaptiveDetail[p.key]} as typeof p:p)
+ ...UNIFORM_GEOMETRIC_PARAMS.filter(p=>!Object.hasOwn(fixed,p.key)&&p.key!=="phiCubicAdvection").map(p=>Object.hasOwn(narrowBandAdaptiveDetail,p.key)?{...p,default:narrowBandAdaptiveDetail[p.key]} as typeof p:p)
   // One sweep: the particles carry the velocity, and what reads the extension
   // (their own taps and the surface advect) stays within a cell of liquid; the
   // hierarchy fill covers the rest. Each sweep is 1.4 ms of a figure-9 frame,
@@ -118,6 +115,6 @@ export const uniformNarrowBandMethod:SimulationMethod={
  appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:0,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
-  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),phiCoarseAdvection:narrowBandCoarseAdvection(values.phiCoarseAdvection),narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandSparseNeighbours:narrowBandControlValues(values).sparseNeighbours,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
+  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).fine,phiCoarseAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).coarse,narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandSparseNeighbours:narrowBandControlValues(values).sparseNeighbours,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

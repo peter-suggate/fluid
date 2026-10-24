@@ -88,7 +88,7 @@ import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
-import { narrowBandCoarseAdvection, narrowBandFineAdvection, narrowBandParticleCellCap, narrowBandSparseNeighbours } from "./uniform-narrow-band-controls";
+import { narrowBandParticleCellCap, narrowBandSparseNeighbours, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
 import { UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
@@ -2321,8 +2321,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
     };
     this.narrowBandFinePadding=finite("fineGridPadding",this.narrowBandFinePadding,0,4);
-    if(values.phiFineAdvection!==undefined)this.phiFineAdvection=narrowBandFineAdvection(values.phiFineAdvection);
-    if(values.phiCoarseAdvection!==undefined)this.phiCoarseAdvection=narrowBandCoarseAdvection(values.phiCoarseAdvection);
+    if(values.surfaceAdvection!==undefined){const a=narrowBandSurfaceAdvectionSettings(values.surfaceAdvection);this.phiFineAdvection=a.fine;this.phiCoarseAdvection=a.coarse;}
     this.narrowBandAdaptiveBudgetPercent=finite("adaptiveBudgetPercent",this.narrowBandAdaptiveBudgetPercent,0,100);
     this.narrowBandAdaptiveFadeSeconds=finite("adaptiveFadeSeconds",this.narrowBandAdaptiveFadeSeconds,0.05,2);
     this.narrowBandSparseParticleLifetime=finite("sparseParticleLifetime",this.narrowBandSparseParticleLifetime,0,10);
@@ -2380,6 +2379,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.executionInfo.uniformDetail = { ...this.executionInfo.uniformDetail, rejected: undefined };
       }
       if (values.phiCubicAdvection !== undefined) this.phiCubicAdvection = values.phiCubicAdvection === "on";
+      // NB-FLIP's surface advection level owns the cubic switch.
+      if (values.surfaceAdvection !== undefined) this.phiCubicAdvection = narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).cubic;
       this.solidExcessCorrection = false;
       this.densityPostProcessing = false;
       this.gammaDiffusionIterations = 0;

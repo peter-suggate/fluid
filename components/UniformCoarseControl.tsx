@@ -9,10 +9,10 @@ import { UNIFORM_DETAIL_CRITERION_PARAMS, UNIFORM_DETAIL_RANGES, uniformDetailSe
 import { UNIFORM_DETAIL_CRITERIA, type UniformDetailCriterion } from "../lib/methods/uniform/uniform-stage-grids";
 import { IMPORTANCE_LEGEND, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
 import { uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
-import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP, NARROW_BAND_SPARSE_CONTROL, NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL, narrowBandControlValues } from "../lib/methods/uniform/uniform-narrow-band-controls";
+import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP, NARROW_BAND_SPARSE_CONTROL, NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL, NARROW_BAND_SURFACE_ADVECTION as ADVECTION, narrowBandControlValues, narrowBandSurfaceAdvection, type NarrowBandSurfaceAdvection } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { Grid3X3 } from "lucide-react";
 import { ToolstripMenuButton, ToolstripMenuItem, ToolstripMenuRule, ToolstripRow, useToolstripSection } from "./toolstrip";
-import { Facts, Field, FieldList, FieldNote, NumberInput, RangeField, ToggleButton } from "./ui";
+import { ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, ToggleButton } from "./ui";
 
 const SHAPE_DISPLACEMENT_HINT = "Shape measures how far the surface moves at 4h, not the error in phi beside it. Off: value error.";
 const SURFACE_DISTANCE_HINT = "Allowed tile layers around surface-crossing tiles, including diagonals. 0 keeps only crossing tiles. This permits existing refinement; it does not request more.";
@@ -100,6 +100,11 @@ export function UniformDetailRow() {
     testId="scene-detail-tune"
     onOpen={value => { claim(value); setTuning(value); }}
   >
+    <ChoiceField<NarrowBandSurfaceAdvection> label={ADVECTION.label} hint={ADVECTION.hint} testId="scene-detail-surface-advection"
+      value={narrowBandSurfaceAdvection(resolved.surfaceAdvection)}
+      options={ADVECTION.options.map(o => ({ value: o.value as NarrowBandSurfaceAdvection, label: o.label }))}
+      onChange={value => set(ADVECTION.key, value)} />
+    <ToolstripMenuRule />
     {adaptive && <>
       {NARROW_BAND_ACTIVITY_CONTROLS.map(c => <RangeField key={c.key} label={c.label} value={activityValues[c.key]}
         min={c.min} max={c.max} step={c.step} digits={c.digits} unit={c.unit} hint={c.hint}
