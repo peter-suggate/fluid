@@ -261,14 +261,19 @@ export class UniformMixedOwnership {
     // neighbour rows and the wall faces of that seed (UM_BLOCK_NEIGHBOURS,
     // UM_WALL_FACES), which UniformBlockNeighbours rebuilds wherever a
     // commit rewrites the table. Then the detail-storage table, zero (raw
-    // fields) until a UniformDetailStorage writes it (writeDetail).
+    // fields) until a UniformDetailStorage writes it (writeDetail). Then the
+    // h slot of every block (umFineSlot: where the h stores place its page),
+    // each block its own until a detail storage publishes its slots
+    // (encodeFineSlots), and the last word.
     const pages=address.seed.tail,neighbours=uniformBlockNeighbourWords(address.seed.table,address.seed.blocks);
     this.detailBytes=layout.metadataBytes+pages.byteLength+neighbours.byteLength;
-    this.topology = device.createBuffer({ label: "Uniform mixed owners and tier worklists", size: this.detailBytes+4*uniformDetailTableWords(),
+    this.topology = device.createBuffer({ label: "Uniform mixed owners and tier worklists", size: this.detailBytes+4*(uniformDetailTableWords()+address.blocks),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.STORAGE });
     this.presentation={buffer:this.topology,size:this.topology.size};
     device.queue.writeBuffer(this.topology,layout.metadataBytes,pages);
     device.queue.writeBuffer(this.topology,layout.metadataBytes+pages.byteLength,neighbours);
+    this.fineSlotBytes=this.topology.size-4-4*address.blocks;
+    device.queue.writeBuffer(this.topology,this.fineSlotBytes,Uint32Array.from({length:address.blocks},(_,b)=>b));
     // The tail's last word locates the detail table (lib/core/uniform-detail-abi.ts).
     device.queue.writeBuffer(this.topology,this.topology.size-4,Uint32Array.of(this.detailBytes/4));
     this.counts = device.createBuffer({ label: "Uniform mixed work counts, geometry and window", size: 176,
@@ -376,14 +381,20 @@ export class UniformMixedOwnership {
    * table and block records: queue-ordered, so it takes effect for work submitted after it. */
   writeDetail(words:Uint32Array<ArrayBuffer>):void{
     if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
-    if(this.detailBytes+words.byteLength>this.topology.size-4)throw new Error("Uniform detail table exceeds the topology tail");
+    if(this.detailBytes+words.byteLength>this.fineSlotBytes)throw new Error("Uniform detail table exceeds the topology tail");
     this.device.queue.writeBuffer(this.topology,this.detailBytes,words);
+  }
+  /** Byte offset of the h slots (a word a block) in the topology buffer: the last word follows them. */
+  private readonly fineSlotBytes:number;
+  /** The h slots (UNIFORM_FINE_SLOTS: a word a block, from word 0 of source), ordered inside an encoder. */
+  encodeFineSlots(encoder:GPUCommandEncoder,source:GPUBuffer):void{
+    encoder.copyBufferToBuffer(source,0,this.topology,this.fineSlotBytes,4*this.capacity.address.blocks);
   }
   /** The same table's words from a GPU buffer, ordered inside an encoder
    * (the detail directory a relayout changed, ahead of the passes that
    * address fields through it). */
   encodeDetail(encoder:GPUCommandEncoder,source:GPUBuffer,sourceOffset:number,word:number,words:number):void{
-    if(this.detailBytes+4*(word+words)>this.topology.size-4)throw new Error("Uniform detail table exceeds the topology tail");
+    if(this.detailBytes+4*(word+words)>this.fineSlotBytes)throw new Error("Uniform detail table exceeds the topology tail");
     encoder.copyBufferToBuffer(source,sourceOffset,this.topology,this.detailBytes+4*word,4*words);
   }
   /** Every page resident again (between frames): a frame with no census

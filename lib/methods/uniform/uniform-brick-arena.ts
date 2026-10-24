@@ -121,6 +121,8 @@ export class UniformBrickArena{
   const enter=free+cap,leave=enter+cap,live=leave+cap,lists=live+cap,brick1=lists+this.lists.length*cap,record1=brick1+cap,record2=record1+UBA_RECORD*cap,pages=record2+UBA_RECORD*blocks,held=pages+blocks,high=held+1;
   return {mark,table1,table,brick,klass,record,free,enter,leave,live,lists,brick1,record1,record2,pages,held,high};
  }
+ /** The table's word offsets (from its base word), for readbacks and tests. */
+ get tableLayout(){return this.layout;}
  /** Words written once at attach (base: the table's first word): an empty
   * table and a full free stack. The only host writes the table takes. */
  initialWrites(base:number):{offset:number;data:Uint32Array}[]{

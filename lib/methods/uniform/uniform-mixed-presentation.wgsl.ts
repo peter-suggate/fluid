@@ -17,7 +17,7 @@ function uniformMixedPresentationLoops(source:string):string{
 /** The lattice address of a presentation module: the lattice, the blocks
  * and the pages are the bound topology's (umPageWord, umBlockWord), so
  * every extent is a function of it. */
-const PRESENTATION_ADDRESS=uniformLatticeAddressWGSL({constant:false,paged:{blocks:"udrBlocks"}});
+const PRESENTATION_ADDRESS=uniformLatticeAddressWGSL({constant:false,paged:{blocks:"udrBlocks"},fine:"umTopology[arrayLength(&umTopology)-1u-udrBlocks+b]"});
 /** The compiled topology on the bound lattice. */
 const PRESENTATION_COMPILED=uniformCompiledTopologyWGSL.replace(/\bUM_TILES\b/g,"umTileCount()");
 /** The extents that address declares as functions, which simulation text reads as constants of the same name. */
