@@ -9,6 +9,19 @@ import { UNIFORM_COARSE_CACHE_REACH } from "./uniform-coarse-velocity-cache";
  * the weights to the filter's subtexel precision. */
 export type UniformMomentumSampler = "software" | "texture32" | "texture16";
 
+/** How momentum's unit trace integrates a face's characteristic back over
+ * the step (NB-FLIP method param momentumTrace): "midpoint" takes one RK2
+ * midpoint step of the whole dt, however far it travels; "substep" splits
+ * the one backward trace into RK2 segments of at most a cell of travel each
+ * (UNIFORM_MOMENTUM_TRACE_SEGMENTS at most), so a departure through a
+ * contraction follows the streamline instead of one midpoint sample that
+ * may land upstream of the acceleration. The time step is unchanged. */
+export type UniformMomentumTrace = "midpoint" | "substep";
+/** The substep trace's segment bound: a work bound past 128 cells of travel
+ * a step (the residency closure's own reach), not a speed limit; the last
+ * segment then takes the remaining time. */
+export const UNIFORM_MOMENTUM_TRACE_SEGMENTS = 128;
+
 /** Shared sampling of prepared h/4h velocity fields for momentum. A sample
  * resolves its tile once (umSampleTile): the tile's key classifies it and
  * names the 4h cache block its three components read, and its unit taps'
@@ -19,7 +32,7 @@ export type UniformMomentumSampler = "software" | "texture32" | "texture16";
  * coarseFiltered (the 4h cache). The fine atlas's layout sits behind
  * umUnitHaloHome and umAtlasTexel (and the build that fills it), so another
  * layout (brick aprons) replaces those without touching the kernels. */
-export function uniformCachedMomentumSamplingWGSL(sampler: UniformMomentumSampler): string {
+export function uniformCachedMomentumSamplingWGSL(sampler: UniformMomentumSampler, trace: UniformMomentumTrace = "midpoint"): string {
   const interpolant = sampler === "software" ? /* wgsl */ `
  // The sample's page's halo block holds every tap, the low-wall faces
  // included: plain offsets from the home its sample resolved once.
@@ -81,7 +94,7 @@ fn umUnitSample(p:vec3f,lo:u32,hi:u32)->vec3f {
  for(var a=lo;a<hi;a++){v[a]=umUnitWeighted(p,home,a,fine);}
  return v;
 }
-// A face's advected component: one RK2 midpoint step of the whole dt,
+${trace === "midpoint" ? /* wgsl */ `// A face's advected component: one RK2 midpoint step of the whole dt,
 // whatever its length (no substep limit), then the face's own component at
 // the departure. The three samples share one call site.
 fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
@@ -93,6 +106,29 @@ fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
   at=umClampMomentum(position-select(0.5,1.0,stage==1u)*v*dt/h);
  }
  return 0.0;
-}
+}` : /* wgsl */ `// A face's advected component (momentumTrace "substep"): the step's one
+// backward characteristic in RK2 midpoint segments, each at most a cell of
+// travel at its start velocity (the last takes what remains of dt), then
+// the face's own component at the departure. Every sample shares one call
+// site: a segment's start, its midpoint, and finally the departure.
+const UM_TRACE_SEGMENTS:u32=${UNIFORM_MOMENTUM_TRACE_SEGMENTS}u;
+fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
+ var at=position;var p=position;var left=abs(dt);let sign=select(-1.0,1.0,dt>=0.0);
+ var span=0.0;var segments=0u;var middle=false;var last=left<=1e-7;
+ loop{
+  let v=umUnitSample(at,select(0u,axis,last),select(3u,axis+1u,last));
+  if(last){return v[axis];}
+  let cells=v/h;
+  if(!middle){
+   // A segment from p: at most one cell of travel at its start velocity.
+   let speed=max(abs(cells.x),max(abs(cells.y),abs(cells.z)));segments++;
+   span=select(min(left,1.0/max(speed,1e-30)),left,segments>=UM_TRACE_SEGMENTS);
+   at=umClampMomentum(p-0.5*sign*span*cells);middle=true;
+  }else{
+   p=umClampMomentum(p-sign*span*cells);left=left-span;at=p;middle=false;
+   last=left<=1e-7*abs(dt);
+  }
+ }
+}`}
 `;
 }

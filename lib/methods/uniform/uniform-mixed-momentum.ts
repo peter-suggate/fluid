@@ -1,4 +1,4 @@
-import { uniformCachedMomentumSamplingWGSL, type UniformMomentumSampler } from "./uniform-cached-momentum.wgsl";
+import { uniformCachedMomentumSamplingWGSL, type UniformMomentumSampler, type UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
@@ -69,7 +69,7 @@ export function uniformMomentumTraceBinding(fineTiles:number,scratch:GPUBufferBi
  * call site, and stores the texel. The merged seam and regular 4h jobs
  * evaluate umUnitMomentum. Every sample stays in the sampler (the unit halo
  * holds the low-wall taps), so no face is deferred. */
-const uniformMixedMomentumUnitWGSL = (sampler: UniformMomentumSampler) => uniformCachedMomentumSamplingWGSL(sampler) + uniformTileContextSidesWGSL + /* wgsl */ `
+const uniformMixedMomentumUnitWGSL = (sampler: UniformMomentumSampler, trace: UniformMomentumTrace) => uniformCachedMomentumSamplingWGSL(sampler, trace) + uniformTileContextSidesWGSL + /* wgsl */ `
 // umMomentum through the unit sampler.
 // A frozen face keeps its frozen value; a thawing one folds its region's term in.
 fn umUnitMomentum(owner:UMOwner,face:UMFace)->f32 {
@@ -262,7 +262,9 @@ export class UniformMixedMomentum {
     /** The unit sampler's interpolation (hanging taps only): texture32
      * requires float32-filterable. */
     readonly sampler: UniformMomentumSampler = "software",
-    private readonly traceStorage: "owned" | "shared" = "owned") {
+    private readonly traceStorage: "owned" | "shared" = "owned",
+    /** The unit trace's characteristic (UniformMomentumTrace; hanging taps only). */
+    readonly trace: UniformMomentumTrace = "midpoint") {
     // Far-air regular 4h owners (uniformMixedFarAirWGSL) are culled to zero,
     // so the merged launch skips them; forces supplies that zero itself.
     if(sourceParams&&!cullAir)throw new Error("Mixed momentum far-air skipping requires prediction culling");
@@ -475,7 +477,7 @@ var<workgroup> umMomentumComponents:array<f32,192>;
  if(lane<64u&&live){textureStore(output,vec3i(umOrigin(owner)),vec4f(umMomentumComponents[cell],umMomentumComponents[cell+64u],umMomentumComponents[cell+128u],0));}
 }
 ${uniformMixedFaceTileDispatchWGSL("momentumStep", this.hanging?"umUnitMomentum(owner,face)":"umMomentum(owner,face)",undefined,this.sourceParams?"umFarAirOwner":undefined,"umOwnerFrozen")}
-${this.hanging?uniformMixedMomentumUnitWGSL(this.sampler):""}
+${this.hanging?uniformMixedMomentumUnitWGSL(this.sampler,this.trace):""}
 `, ["momentumRegularStep", "momentumStep",...(this.hanging?["momentumFine"]:[])], "umClaims") });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
