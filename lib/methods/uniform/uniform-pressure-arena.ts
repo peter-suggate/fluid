@@ -1387,11 +1387,13 @@ ${B?"   if((workgroupUniformLoad(&rFlags)&4u)!=0u){r=nBulkMean(r,(m&N_BULK)!=0u,
  }
 }
 // A half sweep of the native rows (colour pColour of the 4h lattice) against
-// the band's iterate (plane X, after its pre-smoothing) and the other
-// colour's rows: the composite's fine smoothing of the rows that level 2
-// alone corrects otherwise (schedule.nativeSweeps). Walls solve their
-// clamps as the band's rows do; a closed row stays at or above zero.
+// the band's iterate (plane pBand: X after a pre-smoothing, the prolonged
+// plane before a post-smoothing) and the other colour's rows: the
+// composite's fine smoothing of the rows that level 2 alone corrects
+// otherwise (schedule.nativeSweeps). Walls solve their clamps as the band's
+// rows do; a closed row stays at or above zero.
 override pColour:u32=0u;
+override pBand:u32=0u;
 @compute @workgroup_size(${WG}) fn pNativeRelax(${lanes}){
  if(lane==0u){rN=select(ubaLevelCount(2u),0u,bConverged());}
  let n=workgroupUniformLoad(&rN);
@@ -1406,7 +1408,10 @@ override pColour:u32=0u;
     for(var f=0u;f<6u;f++){
      let kind=nKind(m,f);let link=pool[PN_L+f*PLANE2+at2];
      if(kind==N_NATIVE){off+=pF(PN_K+f*PLANE2,at2)*pF(PN_X,link);}
-     else if(kind==N_SEAM){off+=nSeamSum(link,f);}
+     else if(kind==N_SEAM){
+      let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let w=nStride((axis+2u)%3u);let plane=select(P_X,P_X1,pBand==1u);
+      for(var j=0u;j<16u;j++){let at=link+(j&3u)*u+(j>>2u)*w;if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){off+=pF(P_C+g*PLANE,at)*pF(plane,at);}}
+     }
      else if(kind==N_WALL){walls=true;}
     }
     var v=off/d0;
@@ -2498,7 +2503,7 @@ fn sProlong6(g:vec3i)->f32{
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
-   pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],pNativeRelax:[["0",{pColour:0}],["1",{pColour:1}]],
+   pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],pNativeRelax:[["0",{pColour:0}],["1",{pColour:1}],["0X1",{pColour:0,pBand:1}],["1X1",{pColour:1,pBand:1}]],
    pDownA:[["",{}],["@0",{pBake:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
    ...(W?{pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
   };
@@ -2659,7 +2664,10 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
     this.dispatch(pass,"pUp3"+y,pages);
    }
    this.dispatch(pass,"pUpB",pages);this.dispatch(pass,"pUpA",g);
-   const post=cycle===cycles-1?odd:0;this.dispatch(pass,"pProlong0"+post,this.tileGroups);sweeps(false,post);
+   const post=cycle===cycles-1?odd:0;this.dispatch(pass,"pProlong0"+post,this.tileGroups);
+   // The native rows against the prolonged band (plane post) before its post-smoothing.
+   for(let k=0;k<s.nativeSweeps;k++){const band=post?"X1":"";this.dispatch(pass,"pNativeRelax0"+band,pages);this.dispatch(pass,"pNativeRelax1"+band,pages);}
+   sweeps(false,post);
   }
   this.dispatch(pass,"pResidual2F",pages);this.dispatch(pass,"pFinal",this.tileGroups);this.dispatch(pass,"pWrite",pages);
   if(W)this.dispatch(pass,"sForget",groupsOf(W.capacity6,64));
