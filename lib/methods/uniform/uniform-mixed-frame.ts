@@ -492,7 +492,7 @@ export class UniformMixedFrame {
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
    // A budget's banks still hold the extension's paired companion at every reservation (bindStage).
    capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,o.capacity.address.poolTiles)});
-  this.plan=new UniformMixedFramePlan(device,o,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
+  this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
   // The census extension crosses a relayout in these instead of being
@@ -529,7 +529,7 @@ export class UniformMixedFrame {
    this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false,0,capacity.fixedWorldGeometry),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:rootPhi,frozen:view(r.frozen),residual:view(r.residual),
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
   const root=this.levels[0]!,p=root.ownership;
-  this.rootOwners=new UniformMixedRootOwners(device,p,root.phi!,this.solidTopology);
+  this.rootOwners=new UniformMixedRootOwners(device,p,this.pagePool,root.phi!,this.solidTopology);
   this.blockNeighbours=new UniformBlockNeighbours(device,layout.address.blocks,[o.pageMirror,p.pageMirror]);
   this.frameOwnerships.push(o);for(const level of this.levels)if(!this.frameOwnerships.includes(level.ownership))this.frameOwnerships.push(level.ownership);
   if(f.detail){f.detail.attach(o);f.detail.attach(p);}
@@ -541,7 +541,7 @@ export class UniformMixedFrame {
   // Surface and momentum share hanging taps of velocityScratch: nothing
   // between the cache and forces writes it, negativeScratch or cache 0.
   this.hangingGroup=this.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:caches[0]!});
-  this.heat=new UniformRegionHeat(device,o,()=>this.surfaceWorkControl.generation);this.plan.attachHeat(this.heat.tiers);this.phiResolve.attachHeat(this.heat.tiers);
+  this.heat=new UniformRegionHeat(device,o,this.pagePool,()=>this.surfaceWorkControl.generation);this.plan.attachHeat(this.heat.tiers);this.phiResolve.attachHeat(this.heat.tiers);
   this.surfaceWorkControl=new UniformSurfaceWorkControl(device,o,f.phi,solid,this.pagePool,this.heat);
   this.narrowBandFlip.attachFramePlan(this.surfaceWorkControl.framePlan);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
@@ -553,7 +553,7 @@ export class UniformMixedFrame {
 
   // Viscosity reads exact MAC sites from the momentum fill (the extended
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
-  this.dynamics=new UniformMixedRegionDynamics(device,o,{forceParams:this.params.forces,pressure:root.pressure,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,heat:this.heat.tiers,normalDirty:this.geometry.curvatureDirty});
+  this.dynamics=new UniformMixedRegionDynamics(device,o,{pool:this.pagePool,forceParams:this.params.forces,pressure:root.pressure,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,heat:this.heat.tiers,normalDirty:this.geometry.curvatureDirty});
   this.freeze=capacity.coldRegions==="fine"?undefined:new UniformColdFreeze(device,o,this.heat);
   this.narrowBandFlip.attachFreeze(this.freeze);
   this.heat.attach({dynamics:this.dynamics.record,updateErrors:this.plan.updateErrors,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,sourceParams:f.sourceParams,
@@ -675,7 +675,7 @@ export class UniformMixedFrame {
  /** Every buffer the h-tile capacity sizes, at `fineTiles` h tiles and
   * `bandTiles` band tiles: label and bytes. Each is one storage binding. */
  private capacityBuffers(fineTiles:number,bandTiles:number):[string,number][]{
-  const n=this.ownership.capacity.tiles,owners=63*fineTiles+this.ownership.capacity.address.boxTiles;
+  const n=this.ownership.capacity.tiles,owners=63*fineTiles+this.ownership.capacity.address.poolTiles;
   return [["stage scratch",this.stageBytesAt(fineTiles,bandTiles)],["retained normals and curvature",this.geometry.normalBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
    ["presented pressure phi",4*(this.stageBandWord+uniformStageBandWords(n,bandTiles)+uniformStageGridWords(n))]];
  }

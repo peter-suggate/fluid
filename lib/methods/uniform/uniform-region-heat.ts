@@ -7,6 +7,8 @@ import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-so
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "./uniform-surface-transport.wgsl";
 import { UNIFORM_REGION_DYNAMICS, UNIFORM_REGION_DYNAMICS_WORDS } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
+import type { UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_LIVE_GROUP_GROUPS, UNIFORM_LIVE_LANE_GROUPS, UniformLiveVisit, uniformLiveDispatch, uniformLiveListsWGSL } from "./uniform-live-lists";
 
 /** Per-16h-region update activity, independent of the spatial owner widths.
  * In error mode, COLD retains non-pressure fields only while the accumulated
@@ -68,6 +70,13 @@ import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
  * The deep words, epochs and active list follow the tiers as encode leaves
  * them; after a relayout's claims and remaps raise tiers, encodeDeep
  * recomputes them.
+ * Every pass visits the pool's live lists (uniform-live-lists): the
+ * resident regions and those the latest commit retired. A free region's
+ * state, tier (HOT) and deep word are a fixed point its first visit writes;
+ * its epochs then hold where every pass used to advance them, and no
+ * reader compares the epochs of a region that holds no page (a claim's
+ * encodeDeep finds it HOT and advances them before any reader). The free
+ * count is the regions less those of the resident blocks.
  * The buffer is fixed for the frame's lifetime (never replaced). */
 export const UNIFORM_REGION_TIER={cold:0,warm:1,hot:2} as const;
 export const UNIFORM_REGION_HEAT_HEADER_WORDS=8;
@@ -123,7 +132,6 @@ fn rhBulkAcceleration(acceleration:f32,gradient:f32,representedSpeed:f32)->f32{
  * readers submerged; bit 14 records a physical h owner. */
 export const UNIFORM_REGION_HEAT_STATE_WORDS=18;
 const STATE_WORDS=UNIFORM_REGION_HEAT_STATE_WORDS;
-const HEAT_GRID=1024;
 const PASS:GPUComputePassDescriptor={label:"Uniform region work heat"};
 
 /** The tiers bound read-only at (group, binding); needs the topology WGSL.
@@ -212,13 +220,24 @@ export class UniformRegionHeat {
   private heatPipeline?:GPUComputePipeline;
   private spreadPipeline?:GPUComputePipeline;
   private deepPipeline?:GPUComputePipeline;
+  private publishPipeline?:GPUComputePipeline;
+  private publishGroup?:GPUBindGroup;
+  /** Visits of encode's passes and of encodeDeep's. */
+  private readonly headVisit:UniformLiveVisit;
+  private readonly deepVisit:UniformLiveVisit;
+  /** Grids: a workgroup a region (heat), a lane a region (the rest). */
+  private readonly groupGrid:number;
+  private readonly laneGrid:number;
   private forced=true;
   private seenGeneration=-1;
   /** The tiers exist from construction, for every stage to bind; the
    * sources attach before initialize. */
-  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly generation:()=>number){
+  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly pool:UniformPagePool,private readonly generation:()=>number){
     this.regions=ownership.capacity.tiles/64;
     if(!Number.isInteger(this.regions))throw new Error(`Region heat: ${ownership.capacity.tiles} tiles are not whole regions`);
+    if(this.regions!==8*pool.layout.blocks)throw new Error(`Region heat: ${this.regions} regions are not the pool's ${pool.layout.blocks} blocks`);
+    this.headVisit=new UniformLiveVisit(pool);this.deepVisit=new UniformLiveVisit(pool);
+    this.groupGrid=Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.regions);this.laneGrid=Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(this.regions/64));
     const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
     // Every region reads HOT (and not deep COLD) until the first encode.
     this.tiers=device.createBuffer({label:"Uniform region work tiers",size:4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions)+4*(1+this.regions),usage,mappedAtCreation:true});
@@ -234,7 +253,7 @@ export class UniformRegionHeat {
     this.sources=sources;const device=this.device;
     const entry=(binding:number,buffer:GPUBufferBindingLayout)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer});
     this.layout=device.createBindGroupLayout({label:"Uniform region work heat",entries:[
-      entry(0,{type:"storage"}),entry(1,{type:"storage"}),entry(2,{type:"uniform"}),entry(3,{type:"read-only-storage"}),entry(4,{type:"read-only-storage"}),...(sources.updateErrors?[entry(9,{type:"read-only-storage"})]:[]),
+      entry(0,{type:"storage"}),entry(1,{type:"storage"}),entry(2,{type:"uniform"}),entry(3,{type:"read-only-storage"}),entry(4,{type:"read-only-storage"}),entry(10,{type:"read-only-storage"}),...(sources.updateErrors?[entry(9,{type:"read-only-storage"})]:[]),
       ...(sources.bodyRegions?[entry(5,{type:"read-only-storage"})]:[]),...(sources.particleHeat?[entry(6,{type:"read-only-storage"})]:[]),...(sources.sourceParams?[entry(7,{type:"uniform"})]:[]),
       ...(this.freezeOf(sources)?[{binding:8,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
     ]});
@@ -260,6 +279,7 @@ ${s.particleHeat?`@group(1) @binding(6) var<storage,read> particleHeat:array<u32
 ${s.sourceParams?uniformMixedSourceWGSL(7):""}
 ${UniformColdFreeze.wgsl(this.freezeOf(s),1,8)}
 ${s.updateErrors?uniformTileUpdateWGSL(1,9):""}
+${uniformLiveListsWGSL(1,10,this.pool.layout)}
 // A frozen region's coarse term: its speed bound, m/s (0 when not frozen).
 fn rhColdSpeed(region:u32)->f32{if(!umFrozenRegion(region)){return 0.0;}return max(abs(umColdTermOf(region,0u)),max(abs(umColdTermOf(region,1u)),abs(umColdTermOf(region,2u))));}
 const RH_REGIONS:u32=${this.regions}u;
@@ -298,10 +318,14 @@ var<workgroup> rhAcceleration:atomic<u32>;
 var<workgroup> rhRelevant:atomic<u32>;
 var<workgroup> rhReaderClass:atomic<u32>;
 var<workgroup> rhFine:atomic<u32>;
-// One workgroup a region (a fixed grid striding them): a lane a tile reads
-// the particle heat, lane 0 updates the region's heat and displacement.
+// One workgroup a region (a fixed grid striding the visited regions): a
+// lane a tile reads the particle heat, lane 0 updates the region's heat and
+// displacement.
 @compute @workgroup_size(64) fn heat(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var region=group.x;region<RH_REGIONS;region+=groups.x){
+ if(group.y!=0u){return;}
+ let sweep=ulSweep(groups);let visits=8u*ulVisitCount(sweep);
+ for(var visit=group.x;visit<visits;visit+=groups.x){
+  let region=ulVisitRegion(visit,sweep);
   if(l==0u){rhLive=u32(umTileLive(umPageTile(region,0u)));atomicStore(&rhParticle,0u);atomicStore(&rhError,0u);atomicStore(&rhNormal,0u);atomicStore(&rhAcceleration,0u);atomicStore(&rhRelevant,0u);atomicStore(&rhReaderClass,0u);atomicStore(&rhFine,0u);}
   let live=workgroupUniformLoad(&rhLive);
   let at=RH_STATE*region;
@@ -410,9 +434,16 @@ var<workgroup> rhFine:atomic<u32>;
 }
 // HOT from own evidence; fine surface readers retain a WARM collar.
 // Coarse and deep readers keep their own error budget at the interface.
-@compute @workgroup_size(64) fn spread(@builtin(global_invocation_id) gid:vec3u){
- let region=gid.x;if(region>=RH_REGIONS){return;}
- if(!umTileLive(umPageTile(region,0u))){atomicStore(&tiers[region],${UNIFORM_REGION_TIER.hot}u);atomicAdd(&tiers[RH_REGIONS+3u],1u);return;}
+// A lane a visited region; the free count is every region less the
+// resident blocks' (umTileLive holds exactly in a resident block).
+@compute @workgroup_size(64) fn spread(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(group.y!=0u){return;}
+ let sweep=ulSweep(groups);let visits=8u*ulVisitCount(sweep);
+ if(gid.x==0u){atomicAdd(&tiers[RH_REGIONS+3u],RH_REGIONS-8u*ulResidentCount());}
+ for(var visit=gid.x;visit<visits;visit+=64u*groups.x){rhSpread(ulVisitRegion(visit,sweep));}
+}
+fn rhSpread(region:u32){
+ if(!umTileLive(umPageTile(region,0u))){atomicStore(&tiers[region],${UNIFORM_REGION_TIER.hot}u);return;}
  let c=vec3i(umPageCoord(region));let own=rhLevel(region);var level=own;
  for(var k=0u;k<27u;k++){
   if(k==13u){continue;}
@@ -422,10 +453,14 @@ var<workgroup> rhFine:atomic<u32>;
  let tier=select(select(${UNIFORM_REGION_TIER.cold}u,${UNIFORM_REGION_TIER.warm}u,level>0.0),${UNIFORM_REGION_TIER.hot}u,own>=1.0);
  atomicStore(&tiers[region],tier);atomicAdd(&tiers[RH_REGIONS+tier],1u);
 }
-// A thread a region, on the frame's tiers as they stand: its deep COLD flag
-// and its non-COLD epoch.
-@compute @workgroup_size(64) fn deep(@builtin(global_invocation_id) gid:vec3u){
- let region=gid.x;if(region>=RH_REGIONS){return;}
+// A lane a visited region, on the frame's tiers as they stand: its deep
+// COLD flag and its non-COLD epoch.
+@compute @workgroup_size(64) fn deep(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(group.y!=0u){return;}
+ let sweep=ulSweep(groups);let visits=8u*ulVisitCount(sweep);
+ for(var visit=gid.x;visit<visits;visit+=64u*groups.x){rhDeep(ulVisitRegion(visit,sweep));}
+}
+fn rhDeep(region:u32){
  let tier=atomicLoad(&tiers[region]);
  if(tier!=${UNIFORM_REGION_TIER.cold}u){atomicAdd(&tiers[${UNIFORM_REGION_HEAT_EPOCH_WORD(this.regions)}u+region],1u);}
  var cold=tier==${UNIFORM_REGION_TIER.cold}u&&umTileLive(umPageTile(region,0u));
@@ -441,9 +476,24 @@ var<workgroup> rhFine:atomic<u32>;
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.layout]});
-    [this.heatPipeline,this.spreadPipeline,this.deepPipeline]=await Promise.all(["heat","spread","deep"].map(entryPoint=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}})));
+    // The active list to the ownership's support: a lane an entry of the
+    // count the deep pass left (the support is the ownership group's, read there).
+    const active=UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),target=uniformMixedActiveWord(this.ownership.capacity.tiles);
+    const publishModule=this.device.createShaderModule({label:"Uniform region work heat publish",code:/* wgsl */`
+@group(0) @binding(0) var<storage,read> tiers:array<u32>;
+@group(0) @binding(1) var<storage,read_write> support:array<u32>;
+@compute @workgroup_size(64) fn publish(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let count=tiers[${active}u];
+ if(gid.x==0u){support[${target}u]=count;}
+ for(var i=gid.x;i<count;i+=64u*groups.x){support[${target+1}u+i]=tiers[${active+1}u+i];}
+}`});
+    const publishLayout=this.device.createBindGroupLayout({label:"Uniform region work heat publish",entries:[
+      {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+    [this.heatPipeline,this.spreadPipeline,this.deepPipeline,this.publishPipeline]=await Promise.all([...["heat","spread","deep"].map(entryPoint=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}})),
+      this.device.createComputePipelineAsync({label:"Uniform region work heat publish",layout:this.device.createPipelineLayout({bindGroupLayouts:[publishLayout]}),compute:{module:publishModule,entryPoint:"publish"}})]);
+    this.publishGroup=this.device.createBindGroup({label:"Uniform region work heat publish",layout:publishLayout,entries:[{binding:0,resource:{buffer:this.tiers}},{binding:1,resource:{buffer:this.ownership.support}}]});
     const entries:GPUBindGroupEntry[]=[{binding:0,resource:{buffer:this.tiers}},{binding:1,resource:{buffer:this.state}},{binding:2,resource:{buffer:this.params}},
-      {binding:3,resource:{buffer:this.ownership.regionVelocity}},{binding:4,resource:{buffer:s.dynamics}}];
+      {binding:3,resource:{buffer:this.ownership.regionVelocity}},{binding:4,resource:{buffer:s.dynamics}},{binding:10,resource:{buffer:this.pool.state}}];
     if(s.updateErrors)entries.push({binding:9,resource:{buffer:s.updateErrors}});
     if(s.bodyRegions)entries.push({binding:5,resource:{buffer:s.bodyRegions.buffer,size:4*this.regions}});
     if(s.particleHeat)entries.push({binding:6,resource:{buffer:s.particleHeat.buffer}});
@@ -464,10 +514,11 @@ var<workgroup> rhFine:atomic<u32>;
     this.device.queue.writeBuffer(this.params,0,this.words);
     encoder.clearBuffer(this.tiers,4*this.regions,4*UNIFORM_REGION_HEAT_HEADER_WORDS);
     encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);
+    const sweep=this.headVisit.sweep();
     const pass=encoder.beginComputePass(PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
-    pass.setPipeline(uniformDetailPick(this.heatPipeline));pass.dispatchWorkgroups(Math.min(HEAT_GRID,this.regions));
-    pass.setPipeline(uniformDetailPick(this.spreadPipeline));pass.dispatchWorkgroups(Math.ceil(this.regions/64));
-    pass.setPipeline(uniformDetailPick(this.deepPipeline!));pass.dispatchWorkgroups(Math.ceil(this.regions/64));
+    pass.setPipeline(uniformDetailPick(this.heatPipeline));uniformLiveDispatch(pass,this.groupGrid,sweep);
+    pass.setPipeline(uniformDetailPick(this.spreadPipeline));uniformLiveDispatch(pass,this.laneGrid,sweep);
+    pass.setPipeline(uniformDetailPick(this.deepPipeline!));uniformLiveDispatch(pass,this.laneGrid,sweep);
     pass.end();this.publishActive(encoder);
   }
   /** The deep COLD flags and epochs again, after a relayout's claims and
@@ -475,13 +526,14 @@ var<workgroup> rhFine:atomic<u32>;
   encodeDeep(encoder:GPUCommandEncoder):void{
     if(!this.deepPipeline||!this.group)throw new Error("Region heat is not initialized");
     encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);
+    const sweep=this.deepVisit.sweep();
     const pass=encoder.beginComputePass(PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
-    pass.setPipeline(uniformDetailPick(this.deepPipeline));pass.dispatchWorkgroups(Math.ceil(this.regions/64));pass.end();this.publishActive(encoder);
+    pass.setPipeline(uniformDetailPick(this.deepPipeline));uniformLiveDispatch(pass,this.laneGrid,sweep);pass.end();this.publishActive(encoder);
   }
-  /** The deep pass's active list to the ownership's support, where every
-   * stage binds it (umActiveCoarse). */
+  /** The deep pass's active list (its count and entries, no more) to the
+   * ownership's support, where every stage binds it (umActiveCoarse). */
   private publishActive(encoder:GPUCommandEncoder):void{
-    encoder.copyBufferToBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),this.ownership.support,4*uniformMixedActiveWord(this.ownership.capacity.tiles),4*(1+this.regions));
+    const pass=encoder.beginComputePass(PASS);pass.setPipeline(this.publishPipeline!);pass.setBindGroup(0,this.publishGroup!);pass.dispatchWorkgroups(this.laneGrid);pass.end();
   }
   /** WGSL for hooks that raise a region's tier now and promote it again at
    * the next encode (a one-frame trigger): tiers and state bound read-write

@@ -26,7 +26,6 @@ import { uniformDensityPostProcessingEnabled } from "./uniform-options";
 export { uniformDensityPostProcessingEnabled } from "./uniform-options";
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
 import {
-  UNIFORM_VOLUME_EDGE_BYTES,
   UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS,
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
@@ -37,10 +36,9 @@ import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
 import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, LIQUID_EXTRUSION_MAX_EDGES, type LiquidExtrusion } from "../../core/liquid-extrusion";
 import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES, UNIFORM_SOURCE_PLUG_OVERLAP_CELLS } from "./uniform-source.wgsl";
-import { planUniformHostAllocation } from "./uniform-host-allocation";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
-import { UniformBedSlopeBake } from "./uniform-bed-slope-bake";
+import { UNIFORM_BED_SLOPE_LAYERS, UniformBedSlopeBake, uniformBedSlopeBakeCapacity, uniformBedSlopePartialColumns } from "./uniform-bed-slope-bake";
 import { UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UniformOpenWorldTerrain } from "./uniform-open-world-terrain";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
 import { samplePrescribedRigidBody } from "../../core/prescribed-rigid-motion";
@@ -489,9 +487,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Stable pool publication plus the live GPU frame; no per-frame allocation. */
   private mixedPageSource?: import("../../core/method-view-records").GPUFluidVolumePageSource;
   get volumePageSource() { return this.mixedPageSource; }
-  /** The bed-slope lane of the solid scratch (uniformSolidScratchLayout): `words` u32 from word `baseWord` of `buffer`. The bake writes it; a probe reads it back or zeroes it. */
-  get solidBedSlopeLane(): { buffer: GPUBuffer; baseWord: number; words: number } {
-    return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords };
+  /** The bed-slope lane of the solid scratch (uniformSolidScratchLayout): its directory, `words` u32 from word `baseWord` of `buffer`, and its slots,
+   * all within the buffer's first `extentWords` (uniformSolidBedSlopeAt reads a copy of those). The bake writes it; a probe reads it back or zeroes its directory. */
+  get solidBedSlopeLane(): { buffer: GPUBuffer; baseWord: number; words: number; extentWords: number } {
+    return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords, extentWords: this.solidBedSlopeSlots.word + this.solidBedSlopeSlots.count * 1024 * UNIFORM_BED_SLOPE_LAYERS };
   }
   get physicsFieldsForQA(): {pressure:GPUTexture;gamma:GPUTexture;latticeOrigin:[number,number,number];latticeDimensions:[number,number,number]} {
     return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.live(this.gammaA),
@@ -530,6 +529,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly params: GPUBuffer;
   private readonly solidBedSlopeBaseWord: number;
   private readonly solidBedSlopeWords: number;
+  /** The bed-slope lane's slots (past the procedural boundary) and the bake's window slots, sized by the build's partly solid page columns. */
+  private readonly solidBedSlopeSlots: { word: number; count: number; window: number };
   private readonly reductions: GPUBuffer;
   private readonly conditioningScratch: GPUBuffer;
   /** The page table and block words the native kernels address through: a
@@ -700,14 +701,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const address = this.address = uniformLatticeAddress([nx, ny, nz], scene.container.top === "open", { ...scene.fluid.pagePool, air: residency.air },
       scene.container.walls === "none" ? { boxPage } : undefined);
     // The mixed-ownership frame owns every geometric advance, on native fields over the shared scratch arena.
-    this.scratchArena = new UniformScratchArena(device, address, address.boxCells*UNIFORM_VOLUME_EDGE_BYTES,options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));
+    this.scratchArena = new UniformScratchArena(device, address, options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));
     this.fieldPages = new UniformTexturePages(device, this.scratchArena);
-    {
-      if (Math.max(nx,ny,nz)+2 > device.limits.maxTextureDimension3D)
-        throw new Error("Uniform Geometric finest lattice exceeds the device texture limit");
-      if (address.boxCells*24 > Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))
-        throw new Error("Uniform Geometric donor sums exceed the device storage limit");
-    }
     const tileRecords = address.tileKeys;
     // The 4h face table and class map sit in the second conditioning plane,
     // whose per-step clears are ranged away from it. Same size test, plus the
@@ -724,28 +719,31 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const spacing = [scene.container.width_m / cells[0], scene.container.height_m / cells[1],
       scene.container.depth_m / cells[2]];
     this.twoLevelShellReach = Math.max(1, Math.ceil(0.5 * Math.max(...spacing) / Math.min(...spacing)));
-    const allocation = planUniformHostAllocation(address, "maccormack");
-    this.executionNegativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
+    // One scalar-packed negative x/y/z MAC boundary field: a word a low face key.
+    const boundaryVelocityBytes = this.executionNegativeBoundaryVelocityBytes = address.lowFaceKeys * 4;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     const texture3d = (label: string, format: GPUTextureFormat, size: GPUExtent3D) =>
       this.fieldPages.createTexture({ label, size, dimension: "3d", format, usage });
-    const velocity = (label: string) => texture3d(label, "rgba32float", allocation.velocityExtent);
     // Geometric h fields come from the detail storage, registered with the
     // page layer by their logical dims; their bytes are the storage's (refreshMixedAllocation).
     const detailStorage = this.detailStorage = new UniformDetailStorage(device, address);
     // Vertex phi where nothing is stored: the initial level set's value far from liquid (uniformLatticeInitialPhi).
     const emptyPhi = uniformLatticeFarPhi(scene);
-    const field = (label: string, kind: UniformDetailClass) =>
-      this.fieldPages.adopt(detailStorage.createField(label, kind, kind === "face" ? "rgba32float" : "r32float", false, kind === "vertex" ? emptyPhi : 0), kind === "vertex" ? address.vertexBox : address.cells);
+    const field = (label: string, kind: UniformDetailClass, perTile = false) =>
+      this.fieldPages.adopt(detailStorage.createField(label, kind, kind === "face" ? "rgba32float" : "r32float", perTile, kind === "vertex" ? emptyPhi : 0), kind === "vertex" ? address.vertexBox : address.cells);
     const hVelocity = (label: string) => field(label, "face");
     const hScalar = (label: string) => field(label, "cell");
+    // Base only at every capacity (no h texels): every live access is a tile
+    // origin (volume B: written by the pressure transfer, read by the 4h
+    // projection), or there is none (gamma A, the legacy correction).
+    const tileScalar = (label: string) => field(label, "cell", true);
     this.velocityA = hVelocity("Uniform reference velocity A");
     this.velocityB = hVelocity("Uniform reference velocity B");
-    const lazyMac = this.velocityTransport !== "maccormack";
-    this.velocityC = lazyMac ? texture3d("Uniform reference unused velocity C", "rgba32float", [1,1,1]) : velocity("Uniform reference velocity C");
+    // The mixed frame carries no MacCormack momentum (assertUniformMixedOptions): Geometric binds a placeholder.
+    this.velocityC = texture3d("Uniform reference unused velocity C", "rgba32float", [1,1,1]);
     this.velocityD = hVelocity("Uniform reference velocity D");
-    const boundaryVelocity = (label: string, size = allocation.boundaryVelocityBytes) => device.createBuffer({ label, size,
+    const boundaryVelocity = (label: string, size = boundaryVelocityBytes) => device.createBuffer({ label, size,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.boundaryVelocityA = boundaryVelocity("Uniform reference negative boundary velocity A");
     this.boundaryVelocityB = boundaryVelocity("Uniform reference negative boundary velocity B");
@@ -759,31 +757,30 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.pressureA = pressure("Uniform reference pressure A");
     this.pressureB = pressure("Uniform reference pressure B");
     this.volumeA = hScalar("Uniform reference volume A");
-    this.volumeB = hScalar("Uniform reference volume B");
+    this.volumeB = tileScalar("Uniform reference volume B");
     this.surfaceA = hScalar("Uniform reference smoothed surface A");
     this.surfaceB = hScalar("Uniform reference smoothed surface B");
-    this.gammaA = hScalar("Uniform reference transport gamma A");
+    this.gammaA = tileScalar("Uniform reference transport gamma A");
     this.gammaB = hScalar("Uniform reference transport gamma B");
     {
       this.vertexPhiField = field("Uniform Geometric vertex phi", "vertex");
       this.vertexPhiScratch = field("Uniform Geometric vertex phi scratch", "vertex");
-      const edgeBytes = address.boxCells * UNIFORM_VOLUME_EDGE_BYTES;
-      if (edgeBytes > device.limits.maxStorageBufferBindingSize || edgeBytes > device.limits.maxBufferSize)
-        throw new Error(`Uniform Geometric receiver stencils require ${edgeBytes} bytes, exceeding the device limit`);
       this.executionDenseLevelSetVolumeSource = { vertexPhi: this.vertexPhiField, openFraction: this.gammaB,
         cellSize_m: [scene.container.width_m/cells[0], scene.container.height_m/cells[1], scene.container.depth_m/cells[2]] };
     }
-    this.heightA = device.createTexture({ label: "Uniform reference column base", size: [nx, nz], format: "rg32float", usage });
-    this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [nx, nz], format: "rg32float", usage });
+    // No kernel reads or writes a column: bindings 7 and 8 take placeholders, and the grid overlay's column base is zero as before.
+    this.heightA = device.createTexture({ label: "Uniform reference column base", size: [1, 1], format: "rg32float", usage });
+    this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [1, 1], format: "rg32float", usage });
     // An open world's ground runs on past the box: its columns are the window's, baked on the GPU (UniformOpenWorldTerrain).
+    // A scene with no terrain has every column at zero: one zero texel reads the same at any clamped column.
     const openWorldTerrain = scene.container.walls === "none" && sceneHasTerrain(scene);
     this.terrainTexture = device.createTexture({ label: "Uniform reference terrain",
-      size: openWorldTerrain ? [UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS] : [nx, nz], format: "r32float", usage });
+      size: openWorldTerrain ? [UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS] : sceneHasTerrain(scene) ? [nx, nz] : [1, 1], format: "r32float", usage });
     const transportUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     // The mixed frame reads neither padded transport field: Geometric binds placeholders.
     this.transportA = this.fieldPages.createTexture({ label: "Uniform reference transport A", size: [1,1,1], dimension: "3d", format: "rgba32float", usage: transportUsage });
-    this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: lazyMac ? [1,1,1] : allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
+    this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: [1,1,1], dimension: "3d", format: "rgba32float", usage: transportUsage });
 
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     // A procedural solid with voxel collision is drawn smooth and collides as
@@ -791,19 +788,24 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.voxelCollision = scene.solidBoundary?.collision === "voxels";
     this.solidMask = new SolidOccupancyMask(uniformSolidMaskPages(address, this.voxelCollision));
     this.solidMask.update(solidWorldForFluidLattice(scene));
+    // Slots for the pages partly solid now, and as many again and one a block
+    // the pool stores, for edits: never one a page of the box.
+    this.solidMask.seal(Math.min(this.solidMask.layout.slots, 2 * this.solidMask.slotsHeld + Math.max(64, address.blocks - 2)));
     // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
     this.solidVoxelsEmpty = this.solidMask.empty;
     this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.pages, 0, address.seed.tail);
     // The solid mask's image whole (SolidOccupancyMask): the page directory,
-    // the bed-slope lane (two bytes a haloed cell, zero until the frame's bake
-    // writes it at its build: every bed level; see bedSlopeBake), the mixed
+    // the bed-slope lane's directory (zero until the frame's bake places and
+    // writes the lane at its build: every bed level; see bedSlopeBake), the mixed
     // solid library's tile cut map, one word per tile key and all cut until
     // built, and the page slots. uniformSolidScratchLayout has the lane's and
-    // the cut map's offsets, as umBedSlope and umSolidCutMap derive them. Sized
-    // once; a voxel edit uploads the directory words and the slots it rewrote,
-    // so the lane keeps its place and its size.
-    const solidScratch = uniformSolidScratchLayout([nx, ny, nz]);
+    // the cut map's offsets, as umBedSlope and umSolidCutMap derive them. Then
+    // the procedural boundary and the lane's slots, a page column near a
+    // partly solid page each. Sized once; a voxel edit uploads the directory
+    // words and the slots it rewrote, so the lane keeps its place and its size.
+    const solidScratch = uniformSolidScratchLayout();
+    const bedSlopeSlots = uniformBedSlopeBakeCapacity([nx, ny, nz], uniformBedSlopePartialColumns(this.solidMask.words, [nx, ny, nz], address.boxPage.map(p => 32 * p) as [number, number, number]));
     this.solidBedSlopeBaseWord = solidScratch.bedSlopeBaseWord;
     this.solidBedSlopeWords = solidScratch.bedSlopeWords;
     const boundaryField = this.voxelCollision ? undefined : proceduralSolidField(scene), boundaryImage = boundaryField?.pack();
@@ -811,9 +813,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       || boundaryField.source.cellSize_m.some((v,a)=>Math.abs(v-[scene.container.width_m/this.containerCells[0],scene.container.height_m/this.containerCells[1],scene.container.depth_m/this.containerCells[2]][a]!)>1e-9)))
       throw new Error("Procedural boundary lattice changed; regenerate the procedural solid at this resolution");
     this.solidBoundaryCapacity = boundaryImage?.length ?? 0;
+    this.solidBedSlopeSlots = { word: this.solidMask.words.length + this.solidBoundaryCapacity, count: bedSlopeSlots.laneSlots, window: bedSlopeSlots.windowSlots };
     this.activeScratch = device.createBuffer({
       label: "Uniform reference solid page mask, bed-slope lane and tile cut map",
-      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + 2),
+      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + bedSlopeSlots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS + 2),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     // Around the lane: the buffer's zeros are the lane's until the bake, and
@@ -958,20 +961,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     };
 
     const count = address.boxCells;
-    // The legacy host plan reserves nine scalars; this owner has eight. Add
-    // the extension hierarchy/origins and the two RG columns plus terrain,
-    // which that plan does not include. Scratch backing is reconciled below.
-    const hostAuxiliaryBytes = this.velocityExtrapolator.scratchBytes - count*4 + nx*nz*20;
+    // What this constructor allocates: the h fields are the detail storage's
+    // and the frame's own buffers its, both added as they are built (refreshMixedAllocation).
+    const textureBytes = (t: GPUTexture, texel: number) => t.width*t.height*t.depthOrArrayLayers*texel;
     this.executionInfo = {
       nx, ny, nz, tankCells: cells, storedNy: ny, cellCount: count, equivalentUniformCells: count,
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]),
       pressureIterations: 0, pressureSolver: `CM11a LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post ${"projected Jacobi; V-first adaptive"})`,
-      allocatedBytes: allocation.allocatedBytes - (count*8-8) - (allocation.conditioningBytes-this.scratchArena.conditioningBytes) - (lazyMac ? count*16+(nx+2)*(ny+2)*(nz+2)*16-32 : 0) - ((nx+2)*(ny+2)*(nz+2)*16-16+allocation.boundaryVelocityBytes-16) + 8 + this.pressureMultigrid.allocatedBytes
-        + (8 * address.vertexKeys + 12)
-        + this.pages.size + this.activeScratch.size
-        + hostAuxiliaryBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
+      allocatedBytes: 3*boundaryVelocityBytes + 16 + [this.velocityC, this.transportA, this.transportB].reduce((n,t)=>n+textureBytes(t,16),0)
+        + textureBytes(this.pressureA,4) + textureBytes(this.pressureB,4) + textureBytes(this.heightA,8) + textureBytes(this.heightB,8) + textureBytes(this.terrainTexture,4)
+        + this.scratchArena.byteLength + this.scratchArena.conditioningBytes + this.pressureMultigrid.allocatedBytes + (8 * address.vertexKeys + 12)
+        + this.pages.size + this.activeScratch.size + this.params.size + this.reductions.size + this.rigidExchange.size
+        + this.velocityExtrapolator.scratchBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: false,
@@ -987,6 +990,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       Object.entries(this.symmetryStageAuditFields).map(([name,field])=>[name,field]),
     )) as NonNullable<WebGPUUniformReferenceSolver["symmetryStageAuditTextures"]>;
     this.initializeVolumeAndTerrain();
+  }
+
+  /** The page columns of the box with a partly solid page in the host's mask: what the bed-slope bake places its lane and window by (plan). */
+  private bedSlopePartialColumns(): Uint8Array {
+    return uniformBedSlopePartialColumns(this.solidMask.words, [this.executionInfo.nx, this.executionInfo.ny, this.executionInfo.nz], this.address.boxPage.map(p => 32 * p) as [number, number, number]);
   }
 
   /** Bound staging just as field-page initialization does. Native Dawn aborts
@@ -1181,18 +1189,24 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
-    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,this.address.pages[0]*this.address.pages[1]*this.address.pages[2],this.mixedFrame.solid!.coarse!,this.mixedFrame.nearSettled.solidContact==="surface");
+    // Its host tile planes hold a record a page with a set tile: the build's
+    // solid-coupled pages twice over and 1024 for edits, never more than the
+    // box's; a set past that fails loudly (hostTilePlane).
+    const coupledPages=new Set(this.mixedTileWords(promotion.coupled).map(w=>((w>>3)&63)|(((w>>12)&63)<<6)|(((w>>21)&63)<<12))).size;
+    const hostPages=Math.min(this.address.pages[0]*this.address.pages[1]*this.address.pages[2],65535,Math.max(1024,2*coupledPages));
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,hostPages,this.mixedFrame.solid!.coarse!,this.mixedFrame.nearSettled.solidContact==="surface");
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
     // warmResolution "4h": WARM regions' cut tiles stay 4h (the census reads the tiers).
     {const warmSolids=this.mixedFrame.nearSettled.warmResolution==="4h";
      if(this.narrowBandColdCensus==="replay"||warmSolids)this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers,this.narrowBandColdCensus==="replay",warmSolids);}
-    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership);
+    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership,this.mixedFrame.pagePool);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure});
     // The frame's forces and its samples read the bed-slope lane; the bake is
     // its only writer. Built with the frame whether or not the scene has a
     // voxel yet: an edit may add the first.
-    const bedSlopeBake=new UniformBedSlopeBake(this.device,this.activeScratch,{size:[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz],laneBaseWord:this.solidBedSlopeBaseWord,origin:this.frame.boxCell});
+    const bedSlopeBake=new UniformBedSlopeBake(this.device,this.activeScratch,{size:[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz],laneBaseWord:this.solidBedSlopeBaseWord,origin:this.frame.boxCell,
+      laneSlotBaseWord:this.solidBedSlopeSlots.word,laneSlots:this.solidBedSlopeSlots.count,windowSlots:this.solidBedSlopeSlots.window});
     // One concurrent compile: serial stages left a first load waiting on
     // each uncached pipeline in turn.
     const dynamic=this.mixedDynamic,builder=this.mixedBuilder,mixedBodies=this.mixedBodies;
@@ -1202,7 +1216,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // it. An edit taken up while the pipelines compiled is in that mask; one
     // from here on re-bakes around itself (applySceneUniforms).
     const bedSlope=this.device.createCommandEncoder({label:"Uniform bed-slope bake"});
-    bedSlopeBake.encode(bedSlope);
+    bedSlopeBake.plan(this.bedSlopePartialColumns());bedSlopeBake.encode(bedSlope);
     // An open world's ground, before the first layout builds the solid record and cut map from it.
     if(this.openWorldTerrain){const f=this.frame;this.openWorldTerrain.encodeBake(bedSlope,this.scene.terrain!,[f.origin_m[0],f.origin_m[2]],[f.cellSize_m[0],f.cellSize_m[2]],f.cellSize_m[1]);
       this.executionInfo.allocatedBytes+=this.openWorldTerrain.allocatedBytes;}
@@ -2351,8 +2365,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.solidExcessCorrection = values.solidExcessCorrection !== "off";
     this.rigidCoupling = values.rigidCoupling !== "off";
     this.fixedStep_s = uniformFixedStep_s(values.timeStep);
-    if(values.velocityTransport === "maccormack" && this.velocityC.width===1 && this.executionInfo.nx>1)
-      throw new Error("Changing velocity transport requires rebuilding the Uniform Geometric solver");
+    if(values.velocityTransport === "maccormack") assertUniformMixedOptions({ velocityTransport: "maccormack", liquidOnlyVelocityAdvection: false });
     this.velocityTransport = values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
     this.liquidOnlyVelocityAdvection = values.liquidOnlyVelocityAdvection === "on";
@@ -2415,9 +2428,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.surfaceB, volume);
     const velocity = uniformInitialLiquidVelocity(this.scene.fluid.initialVelocity_m_s, volume, [nx, ny, nz]);
     if (velocity) this.upload3DF32(this.velocityA, velocity);
-    const gamma = new Float32Array(this.address.boxCells);
-    this.upload3DF32(this.gammaA, gamma);
-    this.upload3DF32(this.gammaB, gamma);
+    this.upload3DF32(this.gammaA);
+    this.upload3DF32(this.gammaB);
     const zeroBoundaryVelocity = new Float32Array(this.executionNegativeBoundaryVelocityBytes / 4);
     this.device.queue.writeBuffer(this.boundaryVelocityA, 0, zeroBoundaryVelocity);
     this.device.queue.writeBuffer(this.boundaryVelocityB, 0, zeroBoundaryVelocity);
@@ -2426,7 +2438,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.referenceVolumeCells = initial;
     const terrainCells = Float32Array.from(terrain, (height) => height / cellHeight);
     // An open world's columns are the window's, baked with the first layout (initializeMixedFrame).
-    if (!this.openWorldTerrain) this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
+    if (this.terrainTexture.width * this.terrainTexture.height === 1 && nx * nz > 1) {
+      if (terrainCells.some(height => height !== 0)) throw new Error("Uniform reference: this scene's terrain was absent when the solver was built; rebuild it");
+    } else if (!this.openWorldTerrain) this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
     this.mixedTerrainCells = terrainCells;
     Object.assign(this.executionInfo, {
       initialVolumeCellSum: initial, volumeCellSum: initial,
@@ -2447,10 +2461,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.velocityA,values);
   }
 
-  private upload3DF32(texture: GPUTexture, values: Float32Array): void {
+  /** No values: zero throughout (a detail field's own empty image, no box-sized array). */
+  private upload3DF32(texture: GPUTexture, values?: Float32Array): void {
     const field=uniformDetailField(texture);
     if(field) { field.storage.upload(texture,values); return; }
-    this.fieldPages.upload(texture,values);
+    this.fieldPages.upload(texture,values ?? new Float32Array(this.address.boxCells));
   }
 
   private upload2DF32(texture: GPUTexture, values: Float32Array, nx: number, nz: number): void {
@@ -2958,10 +2973,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The directory words and the page slots the edit rewrote; the buffer is never resized.
     if (dirty) for (const range of dirty) this.device.queue.writeBuffer(this.activeScratch, range.firstWord * 4, this.solidMask.words, range.firstWord, range.wordCount);
     // The bed-slope lane again around the edit, from the mask just uploaded:
-    // one region bake to a submit.
+    // one region bake to a submit, or a full one where the edit moved the lane's page columns.
     if (dirty && this.bedSlopeBake && x1 >= x0) {
       const encoder = this.device.createCommandEncoder({ label: "Uniform bed-slope re-bake" });
-      this.bedSlopeBake.encodeRegion(encoder, { minimum: [x0, -1, z0], maximumExclusive: [x1 + 1, this.executionInfo.ny + 1, z1 + 1] });
+      if (this.bedSlopeBake.plan(this.bedSlopePartialColumns())) this.bedSlopeBake.encode(encoder);
+      else this.bedSlopeBake.encodeRegion(encoder, { minimum: [x0, -1, z0], maximumExclusive: [x1 + 1, this.executionInfo.ny + 1, z1 + 1] });
       this.device.queue.submit([encoder.finish()]); this.bedSlopeBake.submitted();
     }
     // The plug is a walk over a whole face of the lattice and a function of

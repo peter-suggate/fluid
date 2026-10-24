@@ -4,6 +4,8 @@ import { uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING} from "./uniform-mixed-topology.wgsl";
 import type {UniformMixedGenerationBuffers,UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_PAGE_TABLE_WORDS,uniformLatticeAddressWGSL} from "./uniform-lattice-address";
+import type {UniformPagePool} from "./uniform-page-pool";
+import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
 
 const BLOCK=256;
 /** Work header: the cleared counters [0, CLEARED), then umCounts at COUNTS
@@ -165,9 +167,12 @@ export class UniformMixedLayoutBuilder {
  /** encode's launches in order (admit only under an admission capacity), resolved once. */
  private launches?:readonly GPUComputePipeline[];
  private static readonly PASS:GPUComputePassDescriptor={label:"Uniform mixed layout build"};
- /** ownership: the simulation ownership the built generation replaces. */
- constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership){
+ /** ownership: the simulation ownership the built generation replaces.
+  * pool: the frame's page pool, whose resident list the per-key launches
+  * stride (uniform-live-lists). */
+ constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership,private readonly pool:UniformPagePool){
   const n=ownership.capacity.tiles;
+  if(n!==512*pool.layout.blocks)throw new Error(`Mixed layout builder: ${n} tile keys are not the page pool's ${pool.layout.blocks} blocks`);
   this.tiles=n;this.blocks=Math.ceil(n/BLOCK);
   // The per-tile launches are one dimension of 64-lane groups, and the verify ticket counts them in 16 bits: 8,191 pages of 512 tiles at 65,535 groups.
   const groups=Math.ceil(n/64),most=Math.min(0xffff,device.limits.maxComputeWorkgroupsPerDimension);
@@ -183,6 +188,7 @@ export class UniformMixedLayoutBuilder {
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    ...[4,5,6,7,8].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
+   {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]});
   let bytes=this.statics.size;
   const topology=storage("Uniform layout builder topology",5*n);
@@ -204,6 +210,7 @@ export class UniformMixedLayoutBuilder {
    {binding:0,resource:{buffer:band.buffer}},{binding:1,resource:{buffer:this.statics}},{binding:2,resource:ownership.presentation},
    {binding:3,resource:{buffer:params}},{binding:4,resource:{buffer:work}},{binding:5,resource:{buffer:topology}},
    {binding:6,resource:{buffer:support}},{binding:7,resource:{buffer:slots}},{binding:8,resource:{buffer:status}},
+   {binding:9,resource:{buffer:pool.state}},
   ]});
   bytes+=topology.size+support.size+slots.size+work.size+params.size+status.size;
   this.level={current:ownership,topology,support,slots,work,params,group,status};
@@ -226,6 +233,9 @@ struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,adm
 @group(0) @binding(7) var<storage,read_write> slots:array<u32>;
 // The compact relayout receipt (UNIFORM_MIXED_RELAYOUT_RECEIPT).
 @group(0) @binding(8) var<storage,read_write> status:array<atomic<u32>>;
+// The pool's live lists: widths, admit, mirror and verifyWords stride its
+// resident blocks (a free tile key writes nothing).
+${uniformLiveListsWGSL(0,9,this.pool.layout)}
 const R_CHANGED:u32=${R.changed}u;const R_TIERS:u32=${R.tiers}u;const R_SEAMS:u32=${R.seams}u;const R_COUNTS:u32=${R.counts}u;
 const R_NEED:u32=${R.need}u;const R_ADMIT:u32=${R.admit}u;const NEED:u32=${NEED}u;
 const R_GENERATION:u32=${R.generation}u;const R_BUILDS:u32=${R.builds}u;const R_FATAL:u32=${R.fatal}u;const R_FATAL_BUILD:u32=${R.fatalBuild}u;
@@ -249,8 +259,11 @@ fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
 // Width: h for the band and static tiles, else 4h (ungraded). Staged as a
 // plain word in the tile-word plane, which scatter overwrites, so classify's
 // 27 neighbour reads are plain loads.
-@compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(t==0u){atomicStore(&work[8u],N);}
+@compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(gid.x==0u){atomicStore(&work[8u],N);}
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){widthOf(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn widthOf(t:u32){
  if(!umTileLive(t)){return;}
  let w=select(4u,1u,fineAt(t));
  topology[t]=w;
@@ -262,18 +275,24 @@ fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
 // generation it is against: the staged widths return to it and no tile is
 // changed, so nothing is remapped and the generation does not advance. The
 // receipt carries the need; the host grows the capacity between frames.
-@compute @workgroup_size(64) fn admit(@builtin(global_invocation_id) gid:vec3u){
+@compute @workgroup_size(64) fn admit(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  if(atomicLoad(&work[NEED])<=params.admitCapacity){return;}
- let t=gid.x;if(t==0u){atomicStore(&work[0],0u);}
- if(!umTileLive(t)){return;}
- topology[t]=wordWidth(current[t]);
+ if(gid.x==0u){atomicStore(&work[0],0u);}
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){
+  let t=512u*ulResidentBlock(visit>>9u)+(visit&511u);
+  if(umTileLive(t)){topology[t]=wordWidth(current[t]);}
+ }
 }
 // The dilated list: each changed tile's 3x3x3 neighbourhood, deduplicated by
 // flag bit 16 (classify rewrote the flags; every later reader masks the
 // width and regular bits).
-@compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u){
- let i=gid.x;if(i>=atomicLoad(&work[0])){return;}
- let t=atomicLoad(&work[CHANGED+i]);let p=vec3i(umTileCoord(t));
+// A fixed grid strides the list.
+@compute @workgroup_size(64) fn dilate(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let changed=atomicLoad(&work[0]);
+ for(var i=gid.x;i<changed;i+=64u*groups.x){dilateOf(atomicLoad(&work[CHANGED+i]));}
+}
+fn dilateOf(t:u32){
+ let p=vec3i(umTileCoord(t));
  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
   let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}
   let s=umTileAt(vec3u(q));
@@ -426,8 +445,11 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
 // The detail ring (UNIFORM_MIXED_DETAIL_RING): bit 0 of the second stencil
 // word, an h tile within three tiles, from classify's 27-bit h masks of the
 // tiles two apart. Each lane writes its own word.
-@compute @workgroup_size(64) fn mirror(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(!umTileLive(t)){return;}
+@compute @workgroup_size(64) fn mirror(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){mirrorOf(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn mirrorOf(t:u32){
+ if(!umTileLive(t)){return;}
  let p=vec3i(umTileCoord(t));var near=false;
  for(var z=-2;z<=2;z+=2){for(var y=-2;y<=2;y+=2){for(var x=-2;x<=2;x+=2){
   let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}
@@ -439,16 +461,19 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
 // receipt: an h tile's owner base is 64 x its rank below the h count, a 4h
 // tile's owner lies in [64f, 64f + c), and its tier list entry names it.
 var<workgroup> groupBad:atomic<u32>;
-const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
-@compute @workgroup_size(64) fn verifyWords(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+// A fixed grid of VERIFY_GROUPS workgroups, a workgroup a resident z-slab at a time.
+const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
+@compute @workgroup_size(64) fn verifyWords(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane==0u){atomicStore(&groupBad,0u);}
  workgroupBarrier();
- let t=gid.x;
+ for(var slab=group.x;slab<8u*ulResidentCount();slab+=groups.x){
+ let t=512u*ulResidentBlock(slab>>3u)+64u*(slab&7u)+lane;
  if(umTileLive(t)){
   let word=topology[t];let f=atomicLoad(&work[1]);let c=atomicLoad(&work[2]);var ok=wordWidth(word)==widthAt(t)&&(word&0x40000000u)==0u;
   if((word&0x80000000u)!=0u){let base=word&0x3fffffffu;let rank=base/64u;ok=ok&&base%64u==0u&&rank<f&&topology[N+rank]==t;}
   else{ok=ok&&word>=64u*f&&word-64u*f<c&&topology[N+f+word-64u*f]==t;}
   if(!ok){atomicStore(&groupBad,1u);}
+ }
  }
  workgroupBarrier();
  if(lane!=0u){return;}
@@ -470,7 +495,7 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
  TOTALS:{type:"u32",value:"76u+N"},
  CHANGED:{type:"u32",value:"76u+N+5u*BLOCKS"},
  DILATED:{type:"u32",value:"CHANGED+N"},
- VERIFY_GROUPS:{type:"u32",value:"(N+63u)/64u"},
+ VERIFY_GROUPS:{type:"u32",value:`min(${UNIFORM_LIVE_GROUP_GROUPS}u,(N+63u)/64u)`},
  })});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
@@ -530,7 +555,10 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   if(!this.staticReady)throw new Error("Mixed layout builder has no region table");
   if(!this.cleared)throw new Error("Mixed layout builder encoded without encodeClear");
   this.cleared=false;
-  const groups64=(this.tiles+63)>>>6;
+  // The per-key launches: small fixed grids over the resident blocks (and
+  // dilate over the changed list); classify and scatter a workgroup per
+  // 256 keys of every block (scan's prefix and the slot table span them all).
+  const groups64=(this.tiles+63)>>>6,keys=Math.min(UNIFORM_LIVE_KEY_GROUPS,groups64),verify=Math.min(UNIFORM_LIVE_GROUP_GROUPS,groups64);
   const level=this.level;
   // The ownership's capacity was reserved anew: this build's bounds follow
   // (queue-ordered, ahead of this encoder's submit).
@@ -542,14 +570,14 @@ const VERIFY_GROUPS:u32=${Math.ceil(n/64)}u;
   const launches=this.launches??=this.buildLaunches();
   const pass=encoder.beginComputePass(UniformMixedLayoutBuilder.PASS);pass.setBindGroup(0,level.group);
   // admit is launched only under an admission capacity: without one it could never act.
-  pass.setPipeline(launches[0]!);pass.dispatchWorkgroups(groups64);
-  if(this.admission!==undefined){pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(groups64);}
+  pass.setPipeline(launches[0]!);pass.dispatchWorkgroups(keys);
+  if(this.admission!==undefined){pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);}
   pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(this.blocks);
-  pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(groups64);
-  pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(groups64);
+  pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(keys);
+  pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(keys);
   pass.setPipeline(launches[5]!);pass.dispatchWorkgroups(1);
   pass.setPipeline(launches[6]!);pass.dispatchWorkgroups(this.blocks);
-  pass.setPipeline(launches[7]!);pass.dispatchWorkgroups(groups64);
+  pass.setPipeline(launches[7]!);pass.dispatchWorkgroups(verify);
   pass.end();
  }
  destroy():void{
