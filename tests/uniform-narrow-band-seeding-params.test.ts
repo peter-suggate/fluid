@@ -6,16 +6,16 @@ import { narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-
 import { UNIFORM_PRESSURE_ARENA_SCHEDULE } from "../lib/methods/uniform/uniform-pressure-arena";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, narrowBandSurfaceWGSL } from "../lib/methods/uniform/uniform-narrow-band-surface.wgsl";
 
-test("seedScoring and outerSeeding default to the census and reseeding they replace", () => {
-  assert.equal(uniformNearSettled({}).seedScoring, "unshaped");
-  assert.equal(uniformNearSettled({ seedScoring: "bogus" }).seedScoring, "unshaped");
-  assert.equal(uniformNearSettled({ seedScoring: "every" }).seedScoring, "every");
-  assert.equal(uniformNearSettled({}).outerSeeding, "retain");
-  assert.equal(uniformNearSettled({ outerSeeding: "bogus" }).outerSeeding, "retain");
-  assert.equal(uniformNearSettled({ outerSeeding: "uncovered" }).outerSeeding, "uncovered");
+test("seedScoring and outerSeeding default to scoring every surface tile and reseeding uncovered layers", () => {
+  assert.equal(uniformNearSettled({}).seedScoring, "every");
+  assert.equal(uniformNearSettled({ seedScoring: "bogus" }).seedScoring, "every");
+  assert.equal(uniformNearSettled({ seedScoring: "unshaped" }).seedScoring, "unshaped");
+  assert.equal(uniformNearSettled({}).outerSeeding, "uncovered");
+  assert.equal(uniformNearSettled({ outerSeeding: "bogus" }).outerSeeding, "uncovered");
+  assert.equal(uniformNearSettled({ outerSeeding: "retain" }).outerSeeding, "retain");
   const values = narrowBandFlipValues({});
-  assert.equal(values.seedScoring, "unshaped");
-  assert.equal(values.outerSeeding, "retain");
+  assert.equal(values.seedScoring, "every");
+  assert.equal(values.outerSeeding, "uncovered");
   for (const key of ["seedScoring", "outerSeeding"]) {
     const param = uniformNarrowBandMethod.params.find(p => p.key === key);
     assert.ok(param && param.kind === "select" && param.update === "solver", `${key} is a solver-restarting select`);
@@ -26,14 +26,14 @@ test("retirement counting is a diagnostic that is off unless a probe turns it on
   assert.equal(narrowBandRetireCounting.on, false);
 });
 
-test("heatExpiry and sampleBound default to the retirement and union bound they replace", () => {
-  assert.equal(uniformNearSettled({}).heatExpiry, "anywhere");
-  assert.equal(uniformNearSettled({ heatExpiry: "held" }).heatExpiry, "held");
-  assert.equal(uniformNearSettled({}).sampleBound, "centred");
-  assert.equal(uniformNearSettled({ sampleBound: "walls" }).sampleBound, "walls");
+test("heatExpiry and sampleBound default to retiring only held liquid and the bound against walls", () => {
+  assert.equal(uniformNearSettled({}).heatExpiry, "held");
+  assert.equal(uniformNearSettled({ heatExpiry: "anywhere" }).heatExpiry, "anywhere");
+  assert.equal(uniformNearSettled({}).sampleBound, "walls");
+  assert.equal(uniformNearSettled({ sampleBound: "centred" }).sampleBound, "centred");
   const values = narrowBandFlipValues({});
-  assert.equal(values.heatExpiry, "anywhere");
-  assert.equal(values.sampleBound, "centred");
+  assert.equal(values.heatExpiry, "held");
+  assert.equal(values.sampleBound, "walls");
 });
 
 test("the wall bound replaces the centred one once, and keeps its expression where all eight cells are open", () => {
@@ -44,12 +44,12 @@ test("the wall bound replaces the centred one once, and keeps its expression whe
   assert.match(NARROW_BAND_WALL_BOUND_WGSL, /bound=select\(-sparse,1\.0-max\(low,high\)-sparse,denseOpen\);/);
 });
 
-test("nativeSmoothing defaults to the level 2 correction alone, and composite relaxes the native rows once a cycle", () => {
-  assert.equal(uniformNearSettled({}).nativeSmoothing, "coarse");
-  assert.equal(uniformNearSettled({ nativeSmoothing: "bogus" }).nativeSmoothing, "coarse");
-  assert.equal(uniformNearSettled({ nativeSmoothing: "composite" }).nativeSmoothing, "composite");
-  assert.equal(UNIFORM_PRESSURE_ARENA_SCHEDULE.nativeSweeps, 0);
-  assert.equal(narrowBandFlipValues({}).nativeSmoothing, "coarse");
+test("nativeSmoothing defaults to composite, relaxing the native rows with the band each cycle", () => {
+  assert.equal(uniformNearSettled({}).nativeSmoothing, "composite");
+  assert.equal(uniformNearSettled({ nativeSmoothing: "bogus" }).nativeSmoothing, "composite");
+  assert.equal(uniformNearSettled({ nativeSmoothing: "coarse" }).nativeSmoothing, "coarse");
+  assert.equal(UNIFORM_PRESSURE_ARENA_SCHEDULE.nativeSweeps, 0, "the schedule's own default is the level 2 correction alone; the frame sets it");
+  assert.equal(narrowBandFlipValues({}).nativeSmoothing, "composite");
   const param = uniformNarrowBandMethod.params.find(p => p.key === "nativeSmoothing");
   assert.ok(param && param.kind === "select" && param.update === "solver");
 });
