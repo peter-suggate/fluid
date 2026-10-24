@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {UNIFORM_FINE_SLOT_FLOOR,uniformFineSlotCapacity,uniformFineSlotInitWGSL,uniformFineSlotLayers,uniformFineSlotWords} from "../lib/methods/uniform/uniform-fine-slots";
+import {UNIFORM_FINE_SLOT_FLOOR,uniformFineBlocks,uniformFineSlotCapacity,uniformFineSlotInitWGSL,uniformFineSlotLayers,uniformFineSlotWords} from "../lib/methods/uniform/uniform-fine-slots";
 
 test("h slot words: slots, need, free stack and claimed list of a capacity",()=>{
  const w=uniformFineSlotWords(10,4);
@@ -23,8 +23,19 @@ test("h slot capacity: the request, else the need x 1.5 over the floor, to a who
  assert.equal(uniformFineSlotCapacity(20,[2,2,5],12),18);
  assert.equal(uniformFineSlotCapacity(226,[8,8,4],10,100),127);
  assert.ok(UNIFORM_FINE_SLOT_FLOOR>=1);
+ // At least a coarse start's ceiling share; a request overrides it.
+ assert.equal(uniformFineSlotCapacity(226,[8,8,4],0,undefined,64),127);
+ assert.equal(uniformFineSlotCapacity(226,[8,8,4],0,40,64),63);
  assert.throws(()=>uniformFineSlotCapacity(226,[8,8,4],50,20),/fewer blocks than the t=0 detail ring needs/);
  assert.throws(()=>uniformFineSlotCapacity(226,[8,8,4],1,0),/positive whole number/);
+});
+
+test("h slot compaction: fineBlocks as set, else \"auto\" under a coarse start, else none",()=>{
+ assert.equal(uniformFineBlocks(undefined),undefined);
+ assert.equal(uniformFineBlocks({start:"h"}),undefined);
+ assert.equal(uniformFineBlocks({start:"4h"}),"auto");
+ assert.equal(uniformFineBlocks({start:"4h",fineBlocks:40}),40);
+ assert.equal(uniformFineBlocks({fineBlocks:"auto"}),"auto");
 });
 
 test("h slot init: every texel of a claimed slot, 32³ a cell or face block and 33³ a vertex block",()=>{

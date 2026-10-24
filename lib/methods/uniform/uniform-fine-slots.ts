@@ -22,6 +22,10 @@
 export const UNIFORM_DETAIL_SLOT_VIOLATION=8192;
 /** The default capacity over the t=0 need, and its floor (fluid.tiers.fineBlocks overrides both). */
 export const UNIFORM_FINE_SLOT_GROWTH=1.5,UNIFORM_FINE_SLOT_FLOOR=16;
+/** Under a coarse start the default also holds the h ceiling's tiles at this
+ * many a slot: a ring is sparse in its blocks (letters at 4273 h tiles held
+ * 98 blocks, 44 a block; the seep's jet 40 at 500 tiles, 12 a block). */
+export const UNIFORM_FINE_SLOT_TILES=32;
 /** Workgroups an init launch strides the claimed list with. */
 const INIT_GROUPS=32;
 
@@ -31,14 +35,18 @@ export function uniformFineSlotWords(blocks:number,capacity:number):UniformFineS
  return {slot:0,need:blocks,free,stack:free+1,claimed,list:claimed+1,words:claimed+1+capacity};
 }
 /** Blocks of the slot grid on z: slot s sits at umBlockCoord(s), the block grid's width and height a layer. */
+/** The scene's compaction (fluid.tiers.fineBlocks): a coarse start (tiers.start "4h") compacts at "auto" unless told otherwise; undefined keeps the whole-grid stores. */
+export function uniformFineBlocks(tiers?:{readonly fineBlocks?:number|"auto";readonly start?:"h"|"4h"}):number|"auto"|undefined{
+ return tiers?.fineBlocks??(tiers?.start==="4h"?"auto":undefined);
+}
 export function uniformFineSlotLayers(blockGrid:readonly number[],capacity:number):number{return Math.ceil((capacity+1)/(blockGrid[0]!*blockGrid[1]!));}
 /** Slots for a need: requested (fluid.tiers.fineBlocks) or the need x 1.5 with
- * the floor, rounded up to a whole layer (the texture holds it anyway), and
- * no more than the blocks that can hold a tile (every block but the two
- * sentinels). */
-export function uniformFineSlotCapacity(blocks:number,blockGrid:readonly number[],need:number,requested?:number):number{
+ * the floor and at least `least` (a coarse start's ceiling share), rounded up
+ * to a whole layer (the texture holds it anyway), and no more than the blocks
+ * that can hold a tile (every block but the two sentinels). */
+export function uniformFineSlotCapacity(blocks:number,blockGrid:readonly number[],need:number,requested?:number,least=0):number{
  if(requested!==undefined&&!(Number.isSafeInteger(requested)&&requested>=1))throw new RangeError(`fluid.tiers.fineBlocks must be a positive whole number of blocks, not ${requested}`);
- const want=requested??Math.max(UNIFORM_FINE_SLOT_FLOOR,Math.ceil(UNIFORM_FINE_SLOT_GROWTH*need));
+ const want=requested??Math.max(UNIFORM_FINE_SLOT_FLOOR,Math.ceil(UNIFORM_FINE_SLOT_GROWTH*need),least);
  if(want<need)throw new RangeError(`fluid.tiers.fineBlocks ${want} holds fewer blocks than the t=0 detail ring needs (${need})`);
  const layer=blockGrid[0]!*blockGrid[1]!;
  return Math.min(layer*uniformFineSlotLayers(blockGrid,want)-1,Math.max(1,blocks-2));

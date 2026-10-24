@@ -252,11 +252,18 @@ export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;b
  /** NB-FLIP regionTiering, warmResolution, particleSeeding (default uniformNearSettled()). */
  nearSettled?:UniformNearSettled;
  /** The particles' h capacity (scene fluid.tiers): absent, they keep the pool's sizing (UniformNarrowBandFlip). */
- particles?:NarrowBandParticleBudget}
+ particles?:NarrowBandParticleBudget;
+ /** The most h tiles the frame ever holds (fluid.tiers under a coarse
+  * start, which reserves it as fineTiles): absent, every tile the page pool
+  * can store. Sizes the particle banks' companion floor; a build over it is
+  * the host's fatal. */
+ fineCeiling?:number}
 
 export class UniformMixedFrame {
  /** The NB-FLIP near-settled settings, fixed for the frame's life. */
  readonly nearSettled:UniformNearSettled;
+ /** The h tiles the frame ever holds (UniformMixedFrameCapacity.fineCeiling). */
+ readonly fineCeiling:number;
  readonly ownership:UniformMixedOwnership;
  /** The page pool, seeded with the address's stored set and pinned with the
   * residency's pages. The simulation and pressure-root topologies and the
@@ -487,6 +494,8 @@ export class UniformMixedFrame {
   const solid=this.solid=new UniformMixedSolid(device,f.solid,coarseLayout,this.pagePool);
   this.coarseCache=caches[0]!;
   const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles,capacity.fixedWorldGeometry);
+  this.fineCeiling=capacity.fineCeiling??o.capacity.address.poolTiles;
+  if(!Number.isInteger(this.fineCeiling)||this.fineCeiling<capacity.fineTiles||this.fineCeiling>o.capacity.address.poolTiles)throw new Error(`A mixed frame's h ceiling ${this.fineCeiling} must be in ${capacity.fineTiles}..${o.capacity.address.poolTiles}: its reservation to the tiles its pool stores`);
   this.tileContext=new UniformTileContext(device,o,solid,this.pagePool);
   {const h=o.capacity.lattice.cellSize_m,inverse=(x:number)=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x)));
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
@@ -496,7 +505,7 @@ export class UniformMixedFrame {
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
    // A budget's banks still hold the extension's paired companion at every reservation (bindStage).
-   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,o.capacity.address.poolTiles)});
+   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,this.fineCeiling)});
   this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -636,7 +645,7 @@ export class UniformMixedFrame {
  private bindStage():void{
   // Share taps only when the paired path fits at every possible reservation.
   // Otherwise a later fallback snapshots before viscosity's last tap read.
-  const shareUnit=this.extension.supportsPair&&this.narrowBandFlip.particles.every(b=>b.size>=this.extension.companionBytesAt(this.ownership.capacity.address.poolTiles));
+  const shareUnit=this.extension.supportsPair&&this.narrowBandFlip.particles.every(b=>b.size>=this.extension.companionBytesAt(this.fineCeiling));
   this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging,sharedStageUnit:shareUnit?this.hanging.unitVelocity:undefined});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   // The retained extension slots expire before surface transport. Surface and
@@ -1304,7 +1313,7 @@ export class UniformMixedFrame {
    if(mapped[DETAIL_RECEIPT/4+1]!&UNIFORM_MIXED_ROOT_UNREACHED)throw new Error(`${UNIFORM_MIXED_ROOT_UNREACHED_MESSAGE}${failure?`; ${failure}`:""}`);
    const detail=mapped[DETAIL_RECEIPT/4]!|mapped[DETAIL_RECEIPT/4+1]!;
    if(detail)throw this.detailViolation(detail,mapped[DETAIL_RECEIPT/4]!,mapped[DETAIL_RECEIPT/4+1]!,failure);
-   if(failure)throw new Error(`${failure}${slot.status[UNIFORM_MIXED_STATUS.residencyAudit]?`; residency audit ${slot.status[UNIFORM_MIXED_STATUS.residencyAudit]} (1: absent near, 2: closure)`:""}${mapped[30]===UNIFORM_MIXED_FAILURE.layoutCapacity&&mapped[33]!&UNIFORM_MIXED_OVERFLOW_FINE?`; the layout holds ${mapped[WORK_RECEIPT/4]} h tiles, capacity ${this.ownership.capacity.fineTiles}`:""}; projection withheld${""}`);
+   if(failure)throw new Error(`${failure}${slot.status[UNIFORM_MIXED_STATUS.residencyAudit]?`; residency audit ${slot.status[UNIFORM_MIXED_STATUS.residencyAudit]} (1: absent near, 2: closure)`:""}${mapped[30]===UNIFORM_MIXED_FAILURE.layoutCapacity&&mapped[33]!&UNIFORM_MIXED_OVERFLOW_FINE?`; the layout holds ${mapped[WORK_RECEIPT/4]} h tiles, capacity ${this.ownership.capacity.fineTiles}${this.fineCeiling<this.ownership.capacity.address.poolTiles?` (fluid.tiers.bricks ${this.fineCeiling/8}: raise it)`:""}`:""}; projection withheld${""}`);
    // Words 0-7 are the acceptance state, 8-19 the dust accounting.
    // The composite solve's residual and cycles; a residual over target is not fatal (its verdict latches a non-finite one).
    const residual=floats[1]!,count=mapped[7]!;
@@ -1339,11 +1348,15 @@ export class UniformMixedFrame {
  /** Takes the ungraded h/4h simulation layout; pressure stays all-4h. The
   * host (CPU) layout path: authored regions, and the initial layout. Its h
   * tiles are reserved first (reserveFine): a capacity the device refuses is
-  * returned with nothing changed, the frame still on its last generation. */
- updateLayout(layout:UniformMixedLayout):string|undefined{
+  * returned with nothing changed, the frame still on its last generation.
+  * reserve: the h tiles to hold instead (at least the layout's), as a coarse
+  * start holds the ceiling the relayout attached next reserves, so the first
+  * layout's detail storage is resident even with no h tile yet. */
+ updateLayout(layout:UniformMixedLayout,reserve=layout.fineTiles.length):string|undefined{
   if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
   if(this.relayout)throw new Error("A GPU relayout owns the mixed layout: detach it (setRelayout()) before a host relayout");
-  const refusal=this.reserveFine(layout.fineTiles.length);if(refusal)return refusal;
+  if(reserve<layout.fineTiles.length)throw new Error(`A host layout of ${layout.fineTiles.length} h tiles cannot reserve ${reserve}`);
+  const refusal=this.reserveFine(reserve);if(refusal)return refusal;
   this.cold.trigger();this.surfaceWorkControl.invalidate();this.dynamics.invalidate();
   // An authored refinement is immediate evidence of possible new band work;
   // reserve launch parallelism before its first frame, ahead of the lagged
@@ -1411,9 +1424,9 @@ export class UniformMixedFrame {
   * describe the host layout it replaced. */
  private workEpoch=0;
  /** reserved: the h tiles the relayout starts with storage for (a request's
-  * host count, or the capacity already held); absent, every tile the pool
-  * can store, with the band at its liquid bound (a census's first build may
-  * ask any stored tile).
+  * host count, or the capacity already held); absent, the frame's h ceiling
+  * (every tile the pool can store unless the tiers hold less), with the band
+  * at its liquid bound (a census's first build may ask any stored tile).
   * After that the capacity follows the build receipts: the builder defers a
   * build over its admission and the host moves the storage between frames
   * (reserveFine). The caller asks fineReservation first: a refusal here
@@ -1423,13 +1436,13 @@ export class UniformMixedFrame {
   * small request arriving launches a small frame. */
  setRelayout(relayout?:UniformMixedFrameRelayout,reserved?:number,counted=false):void{
   if(this.busy)throw new Error("The mixed relayout cannot change during an advance");
-  // A census's first build has no receipt to size from: storage for every
-  // tile the pool can store, the band at its liquid bound, unless the host
-  // reserved for its requests. Detached, host layouts reserve their own
+  // A census's first build has no receipt to size from: storage at the
+  // ceiling, the band at its liquid bound, unless the host reserved for its
+  // requests. Detached, host layouts reserve their own
   // again (the next updateLayout).
   if(relayout){
-   const refusal=reserved===undefined?this.reserveFine(this.ownership.capacity.address.poolTiles,true):this.reserveFine(reserved,false);
-   if(refusal)throw new Error(`A GPU relayout holds ${reserved===undefined?"every tile the pool can store":`${reserved} tiles`} at h: ${refusal}`);
+   const refusal=reserved===undefined?this.reserveFine(this.fineCeiling,true):this.reserveFine(reserved,false);
+   if(refusal)throw new Error(`A GPU relayout holds ${reserved===undefined?`its ceiling's ${this.fineCeiling} tiles`:`${reserved} tiles`} at h: ${refusal}`);
   }else{this.liquidBand=false;if(this.censused){this.ownership.resetResidency();this.censused=false;}}
   this.relayout=relayout;this.relayoutAdopted=relayout?.adopted?.bind(relayout);this.cold.trigger();
   // The census may admit any tile in its first frame and its counts reach
