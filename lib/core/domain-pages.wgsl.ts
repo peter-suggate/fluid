@@ -1,6 +1,9 @@
 /** Page diagnostics read the published allocation directly: no field sampling,
  * ownership lookup or CPU readback. Shared by the slice and 3D overlay. */
-import { uniformWindowWorldWGSL } from "../methods/uniform/uniform-window-address";
+import { UNIFORM_DIRECTORY_CHILD_WORDS, UNIFORM_DIRECTORY_FLAT_WORDS, UNIFORM_SUPER_BLOCK_CHILDREN, UNIFORM_SUPER_BLOCK_SLOTS, uniformWindowWorldWGSL } from "../methods/uniform/uniform-window-address";
+
+/** Words of the directory after its top table: the child tables and the flat window. */
+const CHILD_WORDS = UNIFORM_DIRECTORY_CHILD_WORDS + UNIFORM_DIRECTORY_FLAT_WORDS;
 import { FRACTION_READOUT_FONT, packFractionReadoutGlyph } from "./fraction-readout.wgsl";
 
 /** The heat layer's resolution labels ("h", "4h", "16h"): the V/K readout's
@@ -11,13 +14,21 @@ const HEAT_LABEL_FONT = [
 ];
 const hex = (value: number): string => `0x${value.toString(16)}u`;
 export const domainPagesWGSL = /* wgsl */ `
-${uniformWindowWorldWGSL(i=>`viewRecords[u32(layers.control.w)+viewRecords[u32(layers.control.w)+3u]+viewRecords[u32(layers.control.w)+2u]*viewRecords[u32(layers.control.w)+2u]*viewRecords[u32(layers.control.w)+2u]+${i}]`,"domain")}
+${uniformWindowWorldWGSL(i=>`viewRecords[u32(layers.control.w)+viewRecords[u32(layers.control.w)+3u]+viewRecords[u32(layers.control.w)+2u]*viewRecords[u32(layers.control.w)+2u]*viewRecords[u32(layers.control.w)+2u]+${CHILD_WORDS}u+${i}]`,"domain")}
 fn domainPagesValid()->bool {
   let base=u32(layers.control.w);
   if(base==0u || arrayLength(&viewRecords)<base+32u){return false;}
   let blocks=viewRecords[base+1u];let edge=viewRecords[base+2u];
-  return viewRecords[base+6u]==2u && blocks>2u && edge>0u &&
-    arrayLength(&viewRecords)>=base+32u+4u*blocks+edge*edge*edge+32u;
+  return viewRecords[base+6u]==3u && blocks>2u && edge>0u &&
+    arrayLength(&viewRecords)>=base+32u+4u*blocks+edge*edge*edge+${CHILD_WORDS}u+32u;
+}
+// The directory word of a world page: its super-block's top word, then
+// that slot's child (uniform-window-address: slot 0 all AIR, the last all SOLID).
+fn domainDirectoryWord(world:vec3i)->u32 {
+  let b=u32(layers.control.w);let edge=viewRecords[b+2u];let d=b+viewRecords[b+3u];
+  let e=(bitcast<vec3u>(world)>>vec3u(2u))&vec3u(edge-1u);let l=bitcast<vec3u>(world)&vec3u(3u);
+  let top=viewRecords[d+e.x+edge*(e.y+edge*e.z)];
+  return viewRecords[d+edge*edge*edge+${UNIFORM_SUPER_BLOCK_CHILDREN}u*min(top,${UNIFORM_SUPER_BLOCK_SLOTS - 1}u)+(l.x|(l.y<<2u)|(l.z<<4u))];
 }
 fn domainPageFrameOrigin()->vec3f {
   let b=u32(layers.control.w);
@@ -30,9 +41,9 @@ fn domainPageCellSize()->vec3f {
   return u.container.xyz/max(u.gridInfo.xyz,vec3f(1));
 }
 fn domainPageState(q:vec3i)->u32 {
-  let b=u32(layers.control.w);let edge=viewRecords[b+2u];let world=q+domainFramePage();let p=bitcast<vec3u>(world)&vec3u(edge-1u);
+  let b=u32(layers.control.w);let world=q+domainFramePage();
   if(domainPolicy()!=0u&&domainWorldSolid(world)){return 2u;}
-  let block=viewRecords[b+viewRecords[b+3u]+p.x+edge*(p.y+edge*p.z)];
+  let block=domainDirectoryWord(world);
   if(block==0xffffffffu){return select(0u,2u,domainPolicy()==0u);}
   if(block==0u || block>=viewRecords[b+1u]-1u){return 0u;}
   let r=b+32u+4u*block;
@@ -41,8 +52,8 @@ fn domainPageState(q:vec3i)->u32 {
 }
 // The pool block holding lattice page q, or 0 (AIR, SOLID, or a record of another page).
 fn domainPageBlock(q:vec3i)->u32 {
-  let b=u32(layers.control.w);let edge=viewRecords[b+2u];let world=q+domainFramePage();let p=bitcast<vec3u>(world)&vec3u(edge-1u);
-  let block=viewRecords[b+viewRecords[b+3u]+p.x+edge*(p.y+edge*p.z)];
+  let b=u32(layers.control.w);let world=q+domainFramePage();
+  let block=domainDirectoryWord(world);
   if(block==0xffffffffu || block==0u || block>=viewRecords[b+1u]-1u){return 0u;}
   let r=b+32u+4u*block;
   let page=bitcast<vec3i>(vec3u(viewRecords[r],viewRecords[r+1u],viewRecords[r+2u]));

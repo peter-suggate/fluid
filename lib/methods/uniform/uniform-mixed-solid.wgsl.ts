@@ -25,7 +25,7 @@ import {SOLID_MASK_DIRECTORY_WORDS,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type S
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformDetailPick} from "./uniform-detail-fields";
-import {UNIFORM_PAGE_TABLE_WORDS,UNIFORM_PAGE_WINDOW,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,type UniformLatticeAddress} from "./uniform-lattice-address";
+import {UNIFORM_PAGE_TABLE_WORDS,UNIFORM_PAGE_WINDOW,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,uniformLatticeWallTable,type UniformLatticeAddress} from "./uniform-lattice-address";
 import {uniformPagePoolWGSL,type UniformPagePoolLayout} from "./uniform-page-pool";
 import { uniformSolidBoundaryWGSL } from "./uniform-solid-boundary.wgsl";
 import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
@@ -102,7 +102,7 @@ export function uniformSolidScratchLayout(cells:readonly [number,number,number])
  * address.boxPage. */
 export function uniformSolidMaskPages(address:UniformLatticeAddress,halfSolid=false):SolidOccupancyMaskPages{
  const [x,y,z]=address.pages;
- return {table:address.seed.table,tileKeys:address.tileKeys,slots:x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0),
+ return {table:uniformLatticeWallTable(address),tileKeys:address.tileKeys,slots:x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0),
   laneWords:uniformSolidScratchLayout(address.cells).bedSlopeWords,separateTerrain:true,halfSolid,origin:address.boxPage};
 }
 /** A bed slope as its lane entry: 16 bits, x in the low byte, each rounded

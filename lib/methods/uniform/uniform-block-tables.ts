@@ -1,5 +1,6 @@
 import { UNIFORM_PAGE_WINDOW } from "./uniform-lattice-address";
 import { UNIFORM_PAGE_POOL_FREE } from "./uniform-page-pool";
+import { uniformBlockWordPage, uniformTablePageWord } from "./uniform-window-address";
 
 /** Per-block tables: what a kernel asks about a box of tiles, kept by block.
  *
@@ -229,7 +230,7 @@ fn rangeKeys(low:vec3i,high:vec3i)->array<u32,6>{
 }
 
 const stored = (word: number, blocks: number): boolean => word >= 1 && word < blocks - 1;
-const pageWord = (table: ArrayLike<number>, x: number, y: number, z: number): number => table[x | (y << 6) | (z << 12)]!;
+const pageWord = uniformTablePageWord;
 
 /** nameBits and nameBlocks on the host: the table of a page table's blocks
  * (records.length of them) from flag(tile key) over the keys of stored
@@ -271,7 +272,7 @@ export function uniformTileBitsAny(words: ArrayLike<number>, table: ArrayLike<nu
   const blocks = records.length, last = 8 * UNIFORM_PAGE_WINDOW - 1;
   const a = [0, 1, 2].map(k => Math.max(low[k]!, 0)), b = [0, 1, 2].map(k => Math.min(high[k]!, last));
   if (b.some((v, k) => v < a[k]!)) return false;
-  const pa = a.map(v => v >> 3), pb = b.map(v => v >> 3), r = records[home]!, hp = [r & 63, (r >>> 6) & 63, (r >>> 12) & 63];
+  const pa = a.map(v => v >> 3), pb = b.map(v => v >> 3), hp = uniformBlockWordPage(records[home]!);
   const near = pa.every((v, k) => v >= hp[k]! - 1) && pb.every((v, k) => v <= hp[k]! + 1);
   let around = 0;
   if (near) { around = words[UNIFORM_TILE_BITS_WORDS * home + 17]!; if (around === 0) return false; }
@@ -281,7 +282,7 @@ export function uniformTileBitsAny(words: ArrayLike<number>, table: ArrayLike<nu
     for (let blk = 1; blk + 1 < blocks; blk++) {
       const record = records[blk]!;
       if (record === UNIFORM_PAGE_POOL_FREE) continue;
-      const q = [record & 63, (record >>> 6) & 63, (record >>> 12) & 63];
+      const q = uniformBlockWordPage(record);
       if (q.some((v, k) => v < pa[k]! || v > pb[k]!)) continue;
       if (local(q, blk)) return true;
     }
@@ -339,7 +340,7 @@ export function uniformBoundCubeRange(cubes: ArrayLike<number>, key: (tile: numb
     for (let blk = 1; blk + 1 < blocks; blk++) {
       const record = records[blk]!;
       if (record === UNIFORM_PAGE_POOL_FREE) continue;
-      const q = [record & 63, (record >>> 6) & 63, (record >>> 12) & 63];
+      const q = uniformBlockWordPage(record);
       if (q.some((v, k) => v < pa[k]! || v > pb[k]!)) continue;
       reads++; fold(k => cubes[W * blk + 432 + k]!);
     }

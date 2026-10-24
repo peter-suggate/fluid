@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {uniformDetailModule,uniformDetailPipeline} from '../lib/methods/uniform/uniform-detail-fields';
-import {uniformWindowAddressWGSL} from '../lib/methods/uniform/uniform-window-address';
+import {UNIFORM_DIRECTORY_WORDS,uniformWindowAddressWGSL} from '../lib/methods/uniform/uniform-window-address';
 import {uniformLatticeAddress} from '../lib/methods/uniform/uniform-lattice-address';
 import type {UniformMixedOwnership} from '../lib/methods/uniform/uniform-mixed-ownership';
 
@@ -26,7 +26,7 @@ test('standalone ownership keeps runtime header interpretation through reseeding
  for(const d of h.descriptors)assert.deepEqual(d.compute.constants,{existing:7});
  const code=(h.module as unknown as {code:string}).code;
  assert.match(code,/override umFixedWorldGeometry:bool=false/);
- assert.match(code,/select\(pages\[0u\+262168u\],umWindowWord24,umFixedWorldGeometry\)/);
+ assert.ok(code.includes(`select(pages[0u+${UNIFORM_DIRECTORY_WORDS+24}u],umWindowWord24,umFixedWorldGeometry)`));
 });
 
 test('fixed world specializes both ownership prefixes and preserves explicit caller constants',async()=>{

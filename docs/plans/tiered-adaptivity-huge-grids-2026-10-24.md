@@ -116,6 +116,12 @@ Every tier stores **8³ cells of its own width** in a slot of a fixed-capacity p
   - `umPageWord(page)` becomes `child[superSlot(page>>2)·64 + (page&3)]` during migration.
 - **Keys:** tile keys become `512·blockSlot + local` (unchanged meaning). Cell keys become `512·brickSlot + local`: h data is only addressable where a brick exists.
 - **Free stacks per tier, fail-fast,** as `uniform-brick-arena.ts` and `uniform-page-pool.ts` already do. Retire after idle steps with one-commit quarantine.
+- **As built (W7, the page level).** `uniform-window-address.ts` and `uniform-page-pool.ts`:
+  - Top 64³ (x | y<<6 | z<<12 of `(world>>2)&63`), 4096 child tables of 64 words (slot 0 all AIR, slot 4095 all SOLID, so `child[min(top,4095)·64 + local]` has no branch): a 256-page (8192 h) toroidal window. Block words pack the page residue at 8 bits an axis. The box limit is 252 pages an axis (8064 h).
+  - Slots claimed with the first page of a super-block, retired with its last, quarantined a commit; `pagePool.superBlocks` (fatal `superBlocks`), default 1.5 × a closed box's super-block footprint, twice the blocks with an open top.
+  - Cost: a knock-out (a dependent read ahead of every directory read) cost letters +5.5 % and pour's late frames about +23 % (timing). So the directory also carries a **flat window**: 64³ raw words of lattice pages −1..62 under the current frame, rewritten whole by the commit's last kernel (`upFlat`). A lookup there is the old single read; only pages outside it walk the two levels.
+  - Moving window: F moves in pages, unaligned (the directory is indexed by world page, so a shift rewrites nothing). A frame of at most 60 pages is placed in a 64-page window exactly as before; a wider one in the full 256.
+  - The solid occupancy mask (`uniformSolidMaskPages`) and the mixed-dynamic host tile plane keep their own 64-page windows: boxes past 62 pages need W1's work there.
 
 ### 2.2 What each tier stores
 Target per-cell bytes. Scratch is shared across tiers and sized by the largest live list, not by capacity.

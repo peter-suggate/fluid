@@ -9,6 +9,7 @@
  * liquid's side is then below the plane); u = (axis + 1) % 3 and
  * v = (axis + 2) % 3 are the plane's axes, as the block-face families have
  * them (uniformBlockFaceWGSL). */
+import { uniformTablePageWord } from "./uniform-window-address";
 
 /** Walls through and near a lattice vertex. */
 export const uniformMixedWallVertexWGSL = /* wgsl */ `
@@ -131,7 +132,7 @@ fn umTileHeld(p:vec3i)->vec3i{return umSpanHeld(p,3u);}
 
 type Vec3 = [number, number, number];
 type Blocks4 = [number, number, number, number];
-const pageWord = (table: ArrayLike<number>, x: number, y: number, z: number): number => table[(x & 63) | ((y & 63) << 6) | ((z & 63) << 12)]!;
+const pageWord = uniformTablePageWord;
 /** umBlockStored and umPageKind's SOLID of a table word, in a pool of `blocks`. */
 const storedWord = (w: number, blocks: number): boolean => w >= 1 && w < blocks - 1;
 const solidWord = (w: number, blocks: number): boolean => w >= blocks - 1;
@@ -172,14 +173,14 @@ export function uniformWallWithin(table: ArrayLike<number>, blocks: number, p: r
 /** umWallFaceVertex on the host, over the block records. */
 export function uniformWallFaceVertex(records: ArrayLike<number>, face: number, l: number, out: Vec3): Vec3 {
   const r = records[Math.floor(face / 6)]!, side = face % 6, axis = side >> 1;
-  out[0] = (r & 63) << 5;out[1] = ((r >>> 6) & 63) << 5;out[2] = ((r >>> 12) & 63) << 5;
+  out[0] = (r & 255) << 5;out[1] = ((r >>> 8) & 255) << 5;out[2] = ((r >>> 16) & 255) << 5;
   out[axis]! += 32 * (side & 1);out[(axis + 1) % 3]! += l % 33;out[(axis + 2) % 3]! += Math.floor(l / 33);
   return out;
 }
 /** umWallFaceTile on the host. */
 export function uniformWallFaceTile(records: ArrayLike<number>, face: number, lane: number, out: Vec3): Vec3 {
   const r = records[Math.floor(face / 6)]!, side = face % 6, axis = side >> 1;
-  out[0] = (r & 63) << 3;out[1] = ((r >>> 6) & 63) << 3;out[2] = ((r >>> 12) & 63) << 3;
+  out[0] = (r & 255) << 3;out[1] = ((r >>> 8) & 255) << 3;out[2] = ((r >>> 16) & 255) << 3;
   out[axis]! += 7 * (side & 1);out[(axis + 1) % 3]! += lane & 7;out[(axis + 2) % 3]! += lane >> 3;
   return out;
 }

@@ -359,7 +359,7 @@ export interface SceneDescription {
      * shuffle of the pages' blocks. air: pages of the box seeded as air, with
      * no storage, by page coordinate.
      */
-    pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
+    pagePool?: { blocks?: number; memory_MiB?: number; /** Super-block slots of the page directory (128³ cells each); default 1.5 x a closed box's footprint, two a block with an open top. */ superBlocks?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -666,6 +666,9 @@ export function validateScene(scene: SceneDescription): string[] {
   const pool = scene.fluid?.pagePool;
   if (pool?.memory_MiB !== undefined && (!(pool.memory_MiB > 0) || pool.blocks !== undefined)) {
     errors.push("A page pool's memory budget must be positive, and it replaces a block count");
+  }
+  if (pool?.superBlocks !== undefined && !(Number.isInteger(pool.superBlocks) && pool.superBlocks >= 1 && pool.superBlocks <= 4094)) {
+    errors.push("A page pool's super-blocks must be an integer in 1..4094");
   }
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");

@@ -1,19 +1,34 @@
 /** GPU page pool of the domain-less uniform solver: `blocks` storage blocks
  * of 32^3 cells. Block 0 is the AIR sentinel and block `blocks`-1 the SOLID
  * sentinel; blocks 1..blocks-2 are the slots, claimed on demand anywhere in
- * an unbounded signed page lattice and retired when idle. A toroidal page
- * table of `table`^3 words is the only directory: page q lives at entry
- * q & (table-1) per axis, so two resident pages `table` apart on an axis
- * alias one entry, which is fatal. A table word is 0 (AIR: no storage),
- * 0xffffffff (SOLID: no storage) or the block 1..blocks-2 that holds the
- * page, so min(word, blocks-1) is the block a read resolves to. SOLID is
- * written by the host seed alone: no kernel writes it, and a SOLID entry is
- * never requested, claimed or retired. Everything is GPU resident; the host
- * seeds the pool at scene build (uniformPagePoolSeed, UniformPagePool.seed),
- * queues page coordinates (request), fixes the pinned pages (pin) and
- * encodes fixed launches (encodeCommit). The mixed frame owns the solver's
- * (UniformMixedFrame.pagePool): the census asks for its residency
- * certificate's pages and one commit follows every census.
+ * an unbounded signed page lattice and retired when idle. A two-level
+ * toroidal directory (tiered-adaptivity §2.1, uniform-window-address.ts) is
+ * the only index: a top table of (table/4)^3 words, one a super-block of 4^3
+ * pages at entry (q>>2) & (table/4-1) per axis, then UNIFORM_SUPER_BLOCK_SLOTS
+ * child tables of 64 words, one a page of a super-block slot. A top word is
+ * 0 (AIR), 0xffffffff (SOLID) or the slot 1..4094 that holds the
+ * super-block; slot 0 is all AIR and slot 4095 all SOLID, so a page's word
+ * is child[min(top, 4095)*64 + (q&3 packed x|y<<2|z<<4)], two dependent
+ * reads. Two resident pages `table` apart on an axis meet in one entry (two
+ * super-blocks table/4 apart), which is fatal. A page word is 0 (AIR: no
+ * storage), 0xffffffff (SOLID: no storage) or the block 1..blocks-2 that
+ * holds the page, so min(word, blocks-1) is the block a read resolves to.
+ * SOLID is written by the host seed alone: no kernel writes it, and a SOLID
+ * page is never requested, claimed or retired. Everything is GPU resident;
+ * the host seeds the pool at scene build (uniformPagePoolSeed,
+ * UniformPagePool.seed), queues page coordinates (request), fixes the pinned
+ * pages (pin) and encodes fixed launches (encodeCommit). The mixed frame owns
+ * the solver's (UniformMixedFrame.pagePool): the census asks for its
+ * residency certificate's pages and one commit follows every census.
+ *
+ * A super-block slot is claimed by the commit that claims the first page of a
+ * super-block without one (its 64 children start as the top word it
+ * replaces, its background), counts its resident pages, and retires, its top
+ * word back to the background, at the commit that retires its last; like a
+ * block it is quarantined for a commit before reuse. A seeded super-block
+ * whose pages without storage are a mix of AIR and SOLID has no background:
+ * its slot is fixed and never retires. `superBlocks` slots (1..superBlocks)
+ * are claimable; claiming past them is the superBlocks fatal.
  *
  * Three buffers, all created once: state, work and the published block record.
  * Publication is independent of whether the scene names a seed box.
@@ -33,14 +48,21 @@
  *            11 requests        distinct requests this commit listed
  *            12 fatalDetail     a number that goes with fatalFirst: the pages
  *                               resident before the commit (exhausted), the
+ *                               super-block slots held (superBlocks), the
  *                               certificate's reach (closureCap), else 0
- *            13..15 reserved
- *   table    [16, 16+table^3): entry x | y<<b | z<<2b (b = log2 table) of the
- *            masked page coordinate; 0 AIR, 0xffffffff SOLID, else the block
+ *            13 superResident   super-block slots held, the fixed among them
+ *            14 superFree       free super-block slots, the quarantined apart
+ *            15 superPending    super-block slots this commit retired
+ *   table    [16, 16+directory): the top table, entry x | y<<b | z<<2b (b =
+ *            log2 table/4) of the masked super-block coordinate, then the
+ *            4096 child tables of 64 words, then the flat window: 64^3
+ *            words, the raw word of lattice pages -1..62 an axis under the
+ *            frame (uniform-window-address.ts), rewritten whole by upFlat at
+ *            the end of every commit
  *   window   32 runtime words after the directory: F, revision, delta, fatal,
  *            boundary counter, world policy/box and the disabled probe command
  *   blocks   one word per block, after the runtime header: the world page residue
- *            x | y<<6 | z<<12 (each coordinate & (table-1)) of the page a
+ *            x | y<<8 | z<<16 (each coordinate & (table-1)) of the page a
  *            resident block holds; 0xffffffff for a free or quarantined block
  *            and for the two sentinels
  *   records  8 words per block (UNIFORM_PAGE_POOL_RECORD): page x,y,z (i32),
@@ -52,10 +74,14 @@
  *            unordered; a consumer initialises those pages. The list is this
  *            commit's alone: empty at generation 0, so seeded residents are
  *            never in it and whoever seeds the pool initialises their blocks.
+ *   supers   8 words per super-block slot (UNIFORM_PAGE_POOL_SUPER), 4096:
+ *            super-block x,y,z (i32, page >> 2), state (UNIFORM_PAGE_POOL_BLOCK,
+ *            fixed for a seeded mixed one), generation of the claim, the
+ *            background top word, 2 reserved
  * Word offsets: uniformPagePoolLayout(options).state.
  *
- * published: 32 header words [edge, blocks, table edge, directory offset,
- * resident count, record stride=4, version=2, reserved, 12 frame lanes,
+ * published: 32 header words [edge, blocks, top table edge, directory offset,
+ * resident count, record stride=4, version=3, reserved, 12 frame lanes,
  * signed world resident bounds at words 20..22 / 24..26, padding], then one record [signed world page x,y,z, state] per pool block:
  * the allocator's own record, frame invariant (a reader subtracts the directory header's F for lattice pages). State is 1 for
  * resident, 0 otherwise; SOLID remains a directory state (2 in the overlay).
@@ -64,9 +90,9 @@
  * The directory, runtime header and block words (layout.tail.words) are the
  * tail a reader of another buffer needs. initialize(mirrors) takes up to
  * UNIFORM_PAGE_POOL_MIRRORS buffers and a word offset in each: the seed
- * uploads the tail there and the commit kernels store every table and block
- * word they change there as well as in state, so a mirror equals the state's
- * tail after every commit with nothing copied.
+ * uploads the tail there and the commit kernels store every directory and
+ * block word they change there as well as in state, so a mirror equals the
+ * state's tail after every commit with nothing copied.
  *
  * work (UniformPagePool.work; a requesting consumer binds it read_write,
  * array<atomic<u32>>; nothing else of it is a consumer's):
@@ -74,8 +100,8 @@
  *            (may pass the list capacity), 1 host commands uploaded, 2 sticky
  *            fatal bits, 3 the bit raised first (the lock on words 4..6 and
  *            9), 4..6 its page, 7 blocks popped by the commit under way, 8
- *            ring head, 9 the first bit's detail, 10 pinned pages, 11..15
- *            reserved
+ *            ring head, 9 the first bit's detail, 10 pinned pages, 11
+ *            super-block slots popped, 12 super ring head, 13..15 reserved
  *   host     4 words per host command (x,y,z,0), `hostCapacity` of them
  *   pins     4 words per pinned page (x,y,z,0), `pinCapacity` of them: written
  *            by pin() at scene build and asked for by every commit
@@ -84,37 +110,47 @@
  *   ring     layout.ringCapacity words (the power of two that holds the
  *            slots), a queue of blocks: [head, head+free) are free and the
  *            `pending` after them are quarantined
- *   claims   3 words per table entry: the x, y and z wrap tags
- *            ((q>>b)<<1 | 1) of the page asked for there this step, 0 unasked
+ *   claims   5 words per top entry: the x, y and z wrap tags
+ *            ((q>>log2 table)<<1 | 1) of the super-block asked for there this
+ *            step (0 unasked), then a 64-bit mask of its pages asked for
+ *   supers   4096 words, the super ring: [head, head+superFree) are free
+ *            slots and the superPending after them quarantined
+ *   counts   4096 words, the resident pages of each super-block slot
  * Word offsets: uniformPagePoolLayout(options).work.
  *
  * A step: consumer kernels call upRequest / upKeep (uniformPagePoolWGSL), the
  * host queues request(x,y,z), then encodeCommit, which asks for the host
- * commands and the pinned pages itself. A request toward a SOLID
- * entry does nothing; one for a resident page keeps it. Otherwise each axis
- * tag is compare-and-swapped into the entry's claim words: the invocation
- * that stores the x tag appends the page to the list, any other with the
- * same tags is a duplicate, and one that meets a different tag found an
- * alias. So a listed request owns its table entry until the commit ends. The
- * commit pops one block per listed request off the ring head (first-in
- * first-out; which request gets which block is a race), ages the residents
- * it did not just claim (kept: idle 0, else idle+1), retires those at
- * `idleSteps` by clearing their entry and block word and queuing them behind
- * the free blocks, and rebuilds the resident list. A block retired by commit
- * n is therefore not claimable in commit n, and only once every older free
- * block is gone from commit n+1. Claims precede retirement, so a request
- * that aliases a page retiring in the same commit is still an alias. A
- * pinned page is asked for by every commit, so it never ages.
+ * commands and the pinned pages itself. A request toward a SOLID page does
+ * nothing; one for a resident page keeps it. Otherwise each axis tag of its
+ * super-block is compare-and-swapped into its top entry's claim words (one
+ * that meets a different tag found an alias), then the page's bit is set in
+ * the entry's mask: the invocation that sets it appends the page to the
+ * list, any other is a duplicate. So a listed request owns its page word
+ * until the commit ends. upClaimSuper gives each top entry asked for a slot
+ * where it has none (one held by another super-block is an alias), popped
+ * off the super ring; upClaim pops one block per listed request off the ring
+ * head (first-in first-out; which request gets which block is a race);
+ * upSlots ages the residents it did not just claim (kept: idle 0, else
+ * idle+1), retires those at `idleSteps` by clearing their page word and
+ * block word and queuing them behind the free blocks, and rebuilds the
+ * resident list; upSuperSlots retires every slot left without a resident
+ * page. A block retired by commit n is therefore not claimable in commit n,
+ * and only once every older free block is gone from commit n+1. Claims
+ * precede retirement, so a request that aliases a page retiring in the same
+ * commit is still an alias. A pinned page is asked for by every commit, so
+ * it never ages.
  *
  * A fatal leaves the pool consistent and the commits running: an exhausted,
  * aliased or overflowed request is simply not resident, and a certificate
  * over the cap asks for nothing. The bits are sticky and the first raised
  * keeps its page; uniformPagePoolFatalMessage reads them from the receipt. */
 import { uniformMovingWindowDecisionWGSL } from "./uniform-moving-window";
-import { UNIFORM_WINDOW_HEADER_WORDS, uniformWindowDerivedWords, uniformWindowWorldWGSL } from "./uniform-window-address";
+import { UNIFORM_DIRECTORY_FLAT_WORDS, UNIFORM_SUPER_BLOCK_CHILDREN, UNIFORM_SUPER_BLOCK_SLOTS, UNIFORM_WINDOW_HEADER_WORDS, UNIFORM_WINDOW_PAGES, uniformDirectoryFlat, uniformDirectoryWord, uniformSuperBlockLocal, uniformWindowDerivedWords, uniformWindowWorldWGSL } from "./uniform-window-address";
 import type { GPUFluidVolumePageSource } from "../../core/method-view-records";
 
 const RECORD=8;
+/** upFlat's workgroups a row of its two-dimensional launch. */
+const FLAT_ROW=64;
 export const UNIFORM_PAGE_POOL_EDGE=32;
 /** upBlockOf of a page that is not resident. */
 export const UNIFORM_PAGE_POOL_NONE=0xffffffff;
@@ -126,7 +162,7 @@ export const UNIFORM_PAGE_POOL_FREE=0xffffffff;
 export const UNIFORM_PAGE_POOL_KIND={resident:0,air:1,solid:2} as const;
 /** Mirrors initialize() takes: each is one storage binding of the commit kernels. */
 export const UNIFORM_PAGE_POOL_MIRRORS=4;
-export const UNIFORM_PAGE_POOL_STATUS={generation:0,resident:1,claimed:2,free:3,pending:4,fatal:5,fatalPage:6,fatalGeneration:9,fatalFirst:10,requests:11,fatalDetail:12,words:16} as const;
+export const UNIFORM_PAGE_POOL_STATUS={generation:0,resident:1,claimed:2,free:3,pending:4,fatal:5,fatalPage:6,fatalGeneration:9,fatalFirst:10,requests:11,fatalDetail:12,superResident:13,superFree:14,superPending:15,words:16} as const;
 /** Sticky fatal bits of the status. exhausted: a request found no free block.
  * alias: a request's entry is held by, or was asked for in the same step
  * for, a page with another coordinate. requests: more distinct requests in a
@@ -137,20 +173,29 @@ export const UNIFORM_PAGE_POOL_STATUS={generation:0,resident:1,claimed:2,free:3,
  * was not resident before the commit (it is asked for all the same). edge:
  * a certificate reached past the frame (window pages 0..table-1 an axis)
  * toward a page that is not SOLID: the liquid has reached the edge of the
- * world's frame, and the page is not asked for. */
-export const UNIFORM_PAGE_POOL_FATAL={exhausted:1,alias:2,requests:4,closureCap:8,closure:16,edge:32} as const;
-/** Record states; sentinel: block 0 and the last block, which never change state. */
-export const UNIFORM_PAGE_POOL_BLOCK={free:0,resident:1,pending:2,sentinel:3} as const;
+ * world's frame, and the page is not asked for. superBlocks: a page's
+ * super-block needed a slot and none of the `superBlocks` was free. */
+export const UNIFORM_PAGE_POOL_FATAL={exhausted:1,alias:2,requests:4,closureCap:8,closure:16,edge:32,superBlocks:64} as const;
+/** Record states; sentinel: block 0 and the last block (and super-block
+ * slots 0, 4095 and those past superBlocks), which never change state;
+ * fixed: a seeded super-block slot that never retires. */
+export const UNIFORM_PAGE_POOL_BLOCK={free:0,resident:1,pending:2,sentinel:3,fixed:4} as const;
 export const UNIFORM_PAGE_POOL_RECORD={page:0,state:3,generation:4,idle:5,words:RECORD} as const;
-export const UNIFORM_PAGE_POOL_WORK={requests:0,host:1,flags:2,first:3,firstPage:4,pops:7,head:8,detail:9,pins:10,words:16} as const;
+/** A super-block slot's record: its super-block (page >> 2), state, generation of the claim and background top word. */
+export const UNIFORM_PAGE_POOL_SUPER={block:0,state:3,generation:4,background:5,words:RECORD} as const;
+export const UNIFORM_PAGE_POOL_WORK={requests:0,host:1,flags:2,first:3,firstPage:4,pops:7,head:8,detail:9,pins:10,superPops:11,superHead:12,words:16} as const;
 /** The published record (file header): header words and the offset of the flags. */
 export const UNIFORM_PAGE_POOL_PUBLISHED={edge:0,blocks:1,table:2,directory:3,resident:4,stride:5,version:6,frame:8,low:20,high:24,records:32,recordWords:4} as const;
 
 /** The scene's bounding box in pages: its low corner and its extent. */
 export interface UniformPagePoolBox {readonly origin:readonly [number,number,number];readonly pages:readonly [number,number,number]}
 export interface UniformPagePoolOptions {
- /** Page table edge in pages, a power of two up to 64 (default 64): the virtual window is table*32 cells an axis. */
+ /** The directory's period in pages, a power of two in 4..256 (default
+  * UNIFORM_WINDOW_PAGES, 256): the virtual window is table*32 cells an axis,
+  * the top table table/4 super-blocks an axis. */
  readonly table?:number;
+ /** Super-block slots a commit may hold, the fixed seeded ones among them: 1..4094 (default 4094). */
+ readonly superBlocks?:number;
  /** Runtime world classification: 1 closed tank, 2 open top, 3 open ground. */
  readonly worldPolicy?:number;
  /** Storage blocks, the two sentinels included (NB); any integer from 3. blocks-2 pages can be resident. */
@@ -176,9 +221,11 @@ const powerOfTwo=(n:number)=>Number.isSafeInteger(n)&&n>0&&(n&(n-1))===0;
 const int32=(n:number)=>(n|0)===n;
 /** Sizes and word offsets of the pool's buffers and of the tail (see the file header). */
 export function uniformPagePoolLayout(options:UniformPagePoolOptions){
- const table=options.table??64,blocks=options.blocks,slots=blocks-2,idleSteps=options.idleSteps,requests=options.requestCapacity??slots,host=options.hostCapacity??64,pins=options.pinCapacity??64,closureCap=options.closureCap??16;
- // A block word packs the window page at six bits an axis.
- if(!powerOfTwo(table)||table<2||table>64)throw new RangeError(`Uniform page table edge must be a power of two in 2..64: ${table}`);
+ const table=options.table??UNIFORM_WINDOW_PAGES,blocks=options.blocks,slots=blocks-2,idleSteps=options.idleSteps,requests=options.requestCapacity??slots,host=options.hostCapacity??64,pins=options.pinCapacity??64,closureCap=options.closureCap??16;
+ const superBlocks=options.superBlocks??UNIFORM_SUPER_BLOCK_SLOTS-2,SUPERS=UNIFORM_SUPER_BLOCK_SLOTS;
+ // A block word packs the window page at eight bits an axis.
+ if(!powerOfTwo(table)||table<4||table>UNIFORM_WINDOW_PAGES)throw new RangeError(`Uniform page table edge must be a power of two in 4..${UNIFORM_WINDOW_PAGES}: ${table}`);
+ if(!Number.isSafeInteger(superBlocks)||superBlocks<1||superBlocks>SUPERS-2)throw new RangeError(`Uniform page pool super-blocks must be an integer in 1..${SUPERS-2}: ${superBlocks}`);
  if(!Number.isSafeInteger(blocks)||blocks<3||blocks>65536)throw new RangeError(`Uniform page pool blocks must be an integer in 3..65536, two of them the sentinels: ${blocks}`);
  if(!Number.isSafeInteger(idleSteps)||idleSteps<1)throw new RangeError(`Uniform page pool idle steps must be a positive integer: ${idleSteps}`);
  if(!Number.isSafeInteger(requests)||requests<1||!Number.isSafeInteger(host)||host<1||!Number.isSafeInteger(pins)||pins<1)throw new RangeError(`Uniform page pool request capacities must be positive integers: ${requests}, ${host}, ${pins}`);
@@ -188,16 +235,18 @@ export function uniformPagePoolLayout(options:UniformPagePoolOptions){
  if(options.box&&!(origin.every(int32)&&extent.every(n=>Number.isSafeInteger(n)&&n>=1&&n<=table)))throw new RangeError(`Uniform page pool box must have a 32-bit integer origin and 1..${table} pages an axis: origin ${origin}, pages ${extent}`);
  const boxPages=extent[0]*extent[1]*extent[2];
  let ringCapacity=1;while(ringCapacity<slots)ringCapacity*=2;
- const entries=table**3,tableAt=UNIFORM_PAGE_POOL_STATUS.words,blockWords=tableAt+entries+UNIFORM_WINDOW_HEADER_WORDS,records=blockWords+blocks,resident=records+RECORD*blocks,claimed=resident+slots;
- const hostList=UNIFORM_PAGE_POOL_WORK.words,pinList=hostList+4*host,list=pinList+4*pins,keep=list+4*requests,ring=keep+blocks,claims=ring+ringCapacity;
- return {table,tableBits:Math.log2(table),entries,blocks,slots,solidBlock:blocks-1,ringCapacity,idleSteps,requests,host,pins,closureCap,
+ const edge=table/4,entries=edge**3,flat=entries+UNIFORM_SUPER_BLOCK_CHILDREN*SUPERS,directory=flat+UNIFORM_DIRECTORY_FLAT_WORDS,tableAt=UNIFORM_PAGE_POOL_STATUS.words,blockWords=tableAt+directory+UNIFORM_WINDOW_HEADER_WORDS,records=blockWords+blocks,resident=records+RECORD*blocks,claimed=resident+slots,supers=claimed+slots;
+ const hostList=UNIFORM_PAGE_POOL_WORK.words,pinList=hostList+4*host,list=pinList+4*pins,keep=list+4*requests,ring=keep+blocks,claims=ring+ringCapacity,superRing=claims+5*entries,counts=superRing+SUPERS;
+ return {table,tableBits:Math.log2(table),
+  /** The top table: `edge` super-blocks an axis, `entries` words; `directory` words of top and child tables and the flat window. */
+  edge,edgeBits:Math.log2(edge),entries,directory,superBlocks,blocks,slots,solidBlock:blocks-1,ringCapacity,idleSteps,requests,host,pins,closureCap,
   /** The box (origin and extent in pages) and its page count; count 0: no box. */
   box:{origin,pages:extent,count:boxPages},
-  state:{table:tableAt,window:tableAt+entries,blocks:blockWords,records,resident,claimed,words:claimed+slots},
+  state:{table:tableAt,window:tableAt+directory,blocks:blockWords,records,resident,claimed,supers,words:supers+RECORD*SUPERS},
   /** Word offsets inside the tail, wherever it lies: state.table in the state buffer, a mirror's offset in a mirror. */
-  tail:{table:0,window:entries,blocks:entries+UNIFORM_WINDOW_HEADER_WORDS,words:entries+UNIFORM_WINDOW_HEADER_WORDS+blocks},
+  tail:{table:0,children:entries,flat,window:directory,blocks:directory+UNIFORM_WINDOW_HEADER_WORDS,words:directory+UNIFORM_WINDOW_HEADER_WORDS+blocks},
   worldPolicy:options.worldPolicy??0,
-  work:{hostList,pins:pinList,list,keep,ring,claims,bounds:claims+3*entries,words:claims+3*entries+8},
+  work:{hostList,pins:pinList,list,keep,ring,claims,superRing,counts,bounds:counts+SUPERS,words:counts+SUPERS+8},
   /** One coordinate/state record per block, independent of the seed box. */
   published:{records:UNIFORM_PAGE_POOL_PUBLISHED.records,words:UNIFORM_PAGE_POOL_PUBLISHED.records+4*blocks}} as const;
 }
@@ -211,65 +260,100 @@ export interface UniformPagePoolSeed {
  readonly layout:UniformPagePoolLayout;
  /** The whole state buffer. */
  readonly state:Uint32Array<ArrayBuffer>;
- /** The page table, layout.entries words. */
+ /** The directory, layout.directory words: the top table then the child tables (uniformDirectoryWord reads a page's word). */
  readonly table:Uint32Array<ArrayBuffer>;
  /** The block words, layout.blocks of them. */
  readonly blocks:Uint32Array<ArrayBuffer>;
- /** Table then block words, layout.tail.words: what a mirror holds at its offset. */
+ /** Directory, runtime header then block words, layout.tail.words: what a mirror holds at its offset. */
  readonly tail:Uint32Array<ArrayBuffer>;
  /** The resident blocks, ascending. */
  readonly resident:Uint32Array<ArrayBuffer>;
  /** The free ring from its head (word 0), layout.ringCapacity words: the `free` first are the free blocks, ascending. */
  readonly ring:Uint32Array<ArrayBuffer>;
  readonly free:number;
+ /** The super ring from its head, UNIFORM_SUPER_BLOCK_SLOTS words: the superFree first are the free slots, ascending. */
+ readonly superRing:Uint32Array<ArrayBuffer>;
+ readonly superFree:number;
+ /** The resident pages of each super-block slot (the work buffer's counts). */
+ readonly superCount:Uint32Array<ArrayBuffer>;
 }
-/** Entry of page (x,y,z) in the table. */
+/** Top entry of page (x,y,z): its super-block's, masked. */
 export function uniformPagePoolEntry(layout:UniformPagePoolLayout,x:number,y:number,z:number):number{
- const mask=layout.table-1,bits=layout.tableBits;return (x&mask)|((y&mask)<<bits)|((z&mask)<<(2*bits));
+ const mask=layout.edge-1,bits=layout.edgeBits;return ((x>>2)&mask)|(((y>>2)&mask)<<bits)|(((z>>2)&mask)<<(2*bits));
+}
+/** The word of page (x,y,z) in a directory of the layout (seed.table, or a tail at word `at`). */
+export function uniformPagePoolWord(layout:UniformPagePoolLayout,table:ArrayLike<number>,x:number,y:number,z:number,at=0):number{
+ return uniformDirectoryWord(table,x,y,z,layout.edge,at);
 }
 /** Block word of a block that holds page (x,y,z). */
 export function uniformPagePoolBlockWord(layout:UniformPagePoolLayout,x:number,y:number,z:number):number{
- const mask=layout.table-1;return (x&mask)|((y&mask)<<6)|((z&mask)<<12);
+ const mask=layout.table-1;return ((x&mask)|((y&mask)<<8)|((z&mask)<<16))>>>0;
 }
 /** The whole pool state for a given resident set, built on the host at scene
  * build: `pages` are resident in the blocks they name (any order, any
  * blocks of 1..blocks-2, holes allowed), and `other(x,y,z)` gives
- * UNIFORM_PAGE_POOL_KIND.air or .solid for every other table entry, by its
- * window page coordinate (0..table-1 an axis). Blocks no page names are
- * free, in ascending order from the ring head. Throws on a coordinate that
- * is not a 32-bit integer, a block out of range or named twice, a page
- * listed twice, and two pages that alias one entry. */
-export function uniformPagePoolSeed(layout:UniformPagePoolLayout,pages:readonly UniformPagePoolSeedPage[],other:(x:number,y:number,z:number)=>number):UniformPagePoolSeed{
- const l=layout,S=UNIFORM_PAGE_POOL_STATUS,R=UNIFORM_PAGE_POOL_RECORD,B=UNIFORM_PAGE_POOL_BLOCK,K=UNIFORM_PAGE_POOL_KIND;
- const state=new Uint32Array(l.state.words),signed=new Int32Array(state.buffer),ring=new Uint32Array(l.ringCapacity);
- const table=state.subarray(l.state.table,l.state.table+l.entries),blocks=state.subarray(l.state.blocks,l.state.blocks+l.blocks);
+ * UNIFORM_PAGE_POOL_KIND.air or .solid for every other page of the window,
+ * by its window page coordinate (0..table-1 an axis); without it every other
+ * page is AIR. Blocks no page names are free, in ascending order from the
+ * ring head. Super-block slots go to the super-blocks with a resident page in
+ * the order their first is listed, then to the mixed AIR and SOLID ones in
+ * entry order (fixed). Throws on a coordinate that is not a 32-bit integer, a
+ * block out of range or named twice, a page listed twice, two pages that
+ * alias one entry and more slots than superBlocks. */
+export function uniformPagePoolSeed(layout:UniformPagePoolLayout,pages:readonly UniformPagePoolSeedPage[],other?:(x:number,y:number,z:number)=>number):UniformPagePoolSeed{
+ const l=layout,S=UNIFORM_PAGE_POOL_STATUS,R=UNIFORM_PAGE_POOL_RECORD,B=UNIFORM_PAGE_POOL_BLOCK,K=UNIFORM_PAGE_POOL_KIND,U=UNIFORM_PAGE_POOL_SUPER,SUPERS=UNIFORM_SUPER_BLOCK_SLOTS,C=UNIFORM_SUPER_BLOCK_CHILDREN;
+ const state=new Uint32Array(l.state.words),signed=new Int32Array(state.buffer),ring=new Uint32Array(l.ringCapacity),superRing=new Uint32Array(SUPERS),superCount=new Uint32Array(SUPERS);
+ const table=state.subarray(l.state.table,l.state.table+l.directory),blocks=state.subarray(l.state.blocks,l.state.blocks+l.blocks);
  const record=(block:number)=>l.state.records+RECORD*block,held=(block:number)=>{const r=record(block);return `(${signed[r]}, ${signed[r+1]}, ${signed[r+2]})`;};
+ const superRecord=(slot:number)=>l.state.supers+RECORD*slot,first=new Uint32Array(SUPERS);
  state[l.state.window+12]=l.worldPolicy;state.set(l.box.origin,l.state.window+13);state.set(l.box.pages,l.state.window+16);state.set(uniformWindowDerivedWords(l.worldPolicy,l.box.origin,l.box.pages),l.state.window+24);
  blocks.fill(UNIFORM_PAGE_POOL_FREE);state[record(0)+R.state]=state[record(l.solidBlock)+R.state]=B.sentinel;
+ for(let s=0;s<SUPERS;s++)state[superRecord(s)+U.state]=B.sentinel;
+ table.fill(UNIFORM_PAGE_POOL_SOLID,l.entries+C*(SUPERS-1),l.directory);
+ let slots=0;
+ const claim=(entry:number,state_:number,background:number,sb:readonly number[])=>{
+  if(++slots>l.superBlocks)throw new RangeError(`Uniform page pool seed needs more than its ${l.superBlocks} super-block slots`);
+  const r=superRecord(slots);signed.set(sb,r);state[r+U.state]=state_;state[r+U.background]=background;table[entry]=slots;
+  return slots;
+ };
  pages.forEach(({x,y,z,block},i)=>{
   const name=()=>`Uniform page pool seed page ${i} (${x}, ${y}, ${z})`;
   if((x|0)!==x||(y|0)!==y||(z|0)!==z)throw new RangeError(`${name()}: coordinates must be 32-bit integers`);
   if(!Number.isSafeInteger(block)||block<1||block>l.blocks-2)throw new RangeError(`${name()}: block ${block} is outside 1..${l.blocks-2}`);
-  const r=record(block),entry=uniformPagePoolEntry(l,x,y,z),at=table[entry]!;
+  const r=record(block),entry=uniformPagePoolEntry(l,x,y,z),sb=[x>>2,y>>2,z>>2];
   if(state[r+R.state]===B.resident)throw new Error(`${name()}: block ${block} already holds page ${held(block)}`);
-  if(at){
-   const q=record(at);
-   if(signed[q]===x&&signed[q+1]===y&&signed[q+2]===z)throw new Error(`${name()}: listed twice (blocks ${at} and ${block})`);
-   throw new Error(`${name()}: aliases page ${held(at)} of block ${at} in a table of edge ${l.table}`);
-  }
-  table[entry]=block;blocks[block]=uniformPagePoolBlockWord(l,x,y,z);
+  let slot=table[entry]!;
+  if(slot){const q=superRecord(slot);if(signed[q]!==sb[0]||signed[q+1]!==sb[1]||signed[q+2]!==sb[2])throw new Error(`${name()}: aliases page ${held(first[slot]!)} of block ${first[slot]} in a table of edge ${l.table}`);}
+  else{slot=claim(entry,B.resident,UNIFORM_PAGE_POOL_AIR,sb);first[slot]=block;}
+  const child=l.entries+C*slot+uniformSuperBlockLocal(x,y,z),at=table[child]!;
+  if(at)throw new Error(`${name()}: listed twice (blocks ${at} and ${block})`);
+  table[child]=block;superCount[slot]!++;blocks[block]=uniformPagePoolBlockWord(l,x,y,z);
   signed[r]=x;signed[r+1]=y;signed[r+2]=z;state[r+R.state]=B.resident;
  });
  let resident=0,free=0;
  for(let block=1;block<=l.blocks-2;block++){if(state[record(block)+R.state]===B.resident)state[l.state.resident+resident++]=block;else ring[free++]=block;}
- for(let z=0,entry=0;z<l.table;z++)for(let y=0;y<l.table;y++)for(let x=0;x<l.table;x++,entry++){
-  if(table[entry])continue;
-  const kind=other(x,y,z);
-  if(kind===K.solid)table[entry]=UNIFORM_PAGE_POOL_SOLID;
-  else if(kind!==K.air)throw new RangeError(`Uniform page pool seed: entry (${x}, ${y}, ${z}) must be classified air (${K.air}) or solid (${K.solid}): ${kind}`);
+ // The pages without storage: a super-block of one kind is that top word (or a resident one's background), a mix is a fixed slot.
+ const kinds=new Uint8Array(C);
+ if(other)for(let z=0,entry=0;z<l.edge;z++)for(let y=0;y<l.edge;y++)for(let x=0;x<l.edge;x++,entry++){
+  const slot=table[entry]!;let air=0,solid=0;
+  for(let k=0;k<C;k++){
+   if(slot&&table[l.entries+C*slot+k])continue;
+   const px=4*x+(k&3),py=4*y+((k>>2)&3),pz=4*z+(k>>4),kind=other(px,py,pz);
+   if(kind===K.solid)solid++;else if(kind===K.air)air++;
+   else throw new RangeError(`Uniform page pool seed: page (${px}, ${py}, ${pz}) must be classified air (${K.air}) or solid (${K.solid}): ${kind}`);
+   kinds[k]=kind;
+  }
+  if(!solid)continue;
+  if(!air&&!slot){table[entry]=UNIFORM_PAGE_POOL_SOLID;continue;}
+  const s=slot||claim(entry,B.fixed,UNIFORM_PAGE_POOL_AIR,[x,y,z]);
+  if(!air)state[superRecord(s)+U.background]=UNIFORM_PAGE_POOL_SOLID;else state[superRecord(s)+U.state]=B.fixed;
+  for(let k=0;k<C;k++)if(!(slot&&table[l.entries+C*slot+k])&&kinds[k]===K.solid)table[l.entries+C*s+k]=UNIFORM_PAGE_POOL_SOLID;
  }
- state[S.resident]=resident;state[S.free]=free;
- return {layout:l,state,table,blocks,tail:state.subarray(l.state.table,l.state.table+l.tail.words),resident:state.subarray(l.state.resident,l.state.resident+resident),ring,free};
+ let superFree=0;
+ for(let s=slots+1;s<=l.superBlocks;s++){superRing[superFree++]=s;state[superRecord(s)+U.state]=B.free;}
+ state[S.resident]=resident;state[S.free]=free;state[S.superResident]=slots;state[S.superFree]=superFree;
+ uniformDirectoryFlat(table,[signed[l.state.window]!,signed[l.state.window+1]!,signed[l.state.window+2]!],l.edge);
+ return {layout:l,state,table,blocks,tail:state.subarray(l.state.table,l.state.table+l.tail.words),resident:state.subarray(l.state.resident,l.state.resident+resident),ring,free,superRing,superFree,superCount};
 }
 /** A resident set inside the layout's box. */
 export interface UniformPagePoolBoxSeedOptions {
@@ -313,9 +397,9 @@ export function uniformPagePoolBoxSeed(layout:UniformPagePoolLayout,options:Unif
 /** Overlay publication of the pool's block records, including signed pages. */
 export function uniformPagePoolPublished(seed:UniformPagePoolSeed,layout:UniformPagePoolLayout=seed.layout):Uint32Array<ArrayBuffer>{
  const l=layout,P=UNIFORM_PAGE_POOL_PUBLISHED,record=new Uint32Array(l.published.words);
- record[P.edge]=UNIFORM_PAGE_POOL_EDGE;record[P.blocks]=l.blocks;record[P.table]=l.table;
+ record[P.edge]=UNIFORM_PAGE_POOL_EDGE;record[P.blocks]=l.blocks;record[P.table]=l.edge;
  record[P.directory]=l.published.words;record[P.resident]=seed.resident.length;
- record[P.stride]=4;record[P.version]=2;
+ record[P.stride]=4;record[P.version]=3;
  const signed=new Int32Array(record.buffer);signed.set([2147483647,2147483647,2147483647],P.low);signed.set([-2147483647,-2147483647,-2147483647],P.high);
  for(const b of seed.resident){
   const r=l.state.records+RECORD*b;
@@ -455,7 +539,8 @@ export function uniformPagePoolFatalMessage(layout:UniformPagePoolLayout,status:
  switch(first){
   case F.exhausted:return `Page pool exhausted at commit ${commit}: ${page} requested with ${detail} of ${layout.slots} blocks resident and the other ${layout.slots-detail} claimed by the same commit. Raise pagePool.memory_MiB or pagePool.blocks (about 10 MiB a block, UNIFORM_PAGE_BLOCK_MiB) or shrink the scene.`;
   case F.requests:return `More than claimsPerStep (${layout.requests}) pages were requested in commit ${commit} (first dropped: ${page}).`;
-  case F.alias:return `Two pages name one page table entry (${page}, commit ${commit}): the resident set is wider than the table's ${layout.table} pages, or an allocator bug.`;
+  case F.alias:return `Two pages name one page directory entry (${page}, commit ${commit}): the resident set is wider than the directory's ${layout.table} pages (super-blocks of 4 pages ${layout.edge} apart share a top entry), or an allocator bug.`;
+  case F.superBlocks:return `Super-block slots exhausted at commit ${commit}: ${page} needed one with ${detail} of ${layout.superBlocks} held before the commit and the rest claimed by it. Raise pagePool.superBlocks (at most ${UNIFORM_SUPER_BLOCK_SLOTS-2}, a slot for each 4x4x4 pages holding a resident page) or shrink the scene.`;
   case F.closureCap:return `Departure travel gives a closure of ${detail} tiles, over the cap of ${layout.closureCap} (commit ${commit}, ${page}): a sample is moving faster than the residency certificate covers.`;
   case F.closure:return `Liquid or band tile found in ${page}, which was not resident at the start of commit ${commit}.`;
   case F.edge:return `Liquid exceeds the moving fluid frame at ${page} (commit ${commit}): residents and requests must fit ${layout.table-4} pages per axis with the window margin; an invalid forced shift or signed coordinate overflow also raises this fatal.`;
@@ -464,10 +549,15 @@ export function uniformPagePoolFatalMessage(layout:UniformPagePoolLayout,status:
 }
 
 const READERS=/* wgsl */`
-fn upEntry(q:vec3i)->u32{let m=vec3u(q)&vec3u(UP_TABLE-1u);return m.x|(m.y<<UP_TABLE_BITS)|(m.z<<(2u*UP_TABLE_BITS));}
-// The word at q's entry: UP_AIR_WORD, UP_SOLID_WORD or the block resident there (q's own unless a page a table apart holds the entry).
+// The top entry of q's super-block, and q's word in its child table.
+fn upEntry(q:vec3i)->u32{let m=vec3u(q>>vec3u(2u))&vec3u(UP_TOP-1u);return m.x|(m.y<<UP_TOP_BITS)|(m.z<<(2u*UP_TOP_BITS));}
+fn upLocal(q:vec3i)->u32{let l=vec3u(q)&vec3u(3u);return l.x|(l.y<<2u)|(l.z<<4u);}
+fn upChild(slot:u32,q:vec3i)->u32{return UP_TOP_WORDS+64u*min(slot,UP_SUPER_LAST)+upLocal(q);}
+fn upSuperStored(slot:u32)->bool{return slot-1u<UP_SUPER_LAST-1u;}
+fn upSuperOf(slot:u32)->vec3i{let r=UP_AT_SUPERS+8u*slot;return vec3i(bitcast<i32>(upState[r]),bitcast<i32>(upState[r+1u]),bitcast<i32>(upState[r+2u]));}
+// The word of q's page: UP_AIR_WORD, UP_SOLID_WORD or the block resident there (q's own unless a page a table apart holds the word).
 fn upWord(q:vec3i)->u32{
- let raw=upState[UP_AT_TABLE+upEntry(q)];if(upPolicy()==0u){return raw;}
+ let raw=upState[UP_AT_TABLE+upChild(upState[UP_AT_TABLE+upEntry(q)],q)];if(upPolicy()==0u){return raw;}
  if(upWorldSolid(q)){return UP_SOLID_WORD;}
  return select(raw,UP_AIR_WORD,raw==UP_SOLID_WORD);
 }
@@ -482,7 +572,7 @@ fn upBlockWrapped(q:vec3i)->u32{return min(upWord(q),UP_SOLID_BLOCK);}
 fn upBlockOf(q:vec3i)->u32{let block=upWord(q);if(!upStored(block)){return UP_NONE;}return select(UP_NONE,block,all(upPageOf(block)==q));}
 // The block's word: the window page of the page it holds (upWindowPage), or UP_FREE.
 fn upBlockWord(block:u32)->u32{return upState[UP_AT_BLOCKS+block];}
-fn upWindowPage(word:u32)->vec3i{return vec3i((vec3u(word&63u,(word>>6u)&63u,(word>>12u)&63u)-bitcast<vec3u>(upFramePage()))&vec3u(63u));}
+fn upWindowPage(word:u32)->vec3i{return vec3i((vec3u(word&255u,(word>>8u)&255u,(word>>16u)&255u)-bitcast<vec3u>(upFramePage()))&vec3u(UP_TABLE-1u));}
 fn upGeneration()->u32{return upState[0u];}
 fn upResidentCount()->u32{return upState[1u];}
 fn upResidentBlock(i:u32)->u32{return upState[UP_AT_RESIDENT+i];}
@@ -524,16 +614,17 @@ fn upInclude(q:vec3i){
  atomicOr(&upWork[UP_WORK_BOUNDS+6u],1u);
 }
 fn upRequest(q:vec3i){
- let e=upEntry(q);let held=upWord(q);
+ let held=upWord(q);
  if(held==UP_SOLID_WORD){return;}
  upInclude(q);
  if(held!=UP_AIR_WORD&&all(upPageOf(held)==q)){upKeep(held);return;}
+ // The super-block's wrap tags claim its top entry; its page's bit lists it once.
  let tag=(vec3u(q>>vec3u(UP_TABLE_BITS))<<vec3u(1u))|vec3u(1u);
- let c=UP_WORK_CLAIMS+3u*e;
- let x=upClaimWord(c,tag.x);if(x==2u){upFail(select(UP_FATAL_ALIAS,UP_FATAL_EDGE,upPolicy()!=0u),q);return;}
- let y=upClaimWord(c+1u,tag.y);let z=upClaimWord(c+2u,tag.z);
- if(y==2u||z==2u){upFail(select(UP_FATAL_ALIAS,UP_FATAL_EDGE,upPolicy()!=0u),q);}
- if(x!=1u){return;}
+ let c=UP_WORK_CLAIMS+5u*upEntry(q);
+ let x=upClaimWord(c,tag.x);let y=upClaimWord(c+1u,tag.y);let z=upClaimWord(c+2u,tag.z);
+ if(x==2u||y==2u||z==2u){upFail(select(UP_FATAL_ALIAS,UP_FATAL_EDGE,upPolicy()!=0u),q);return;}
+ let l=upLocal(q);let bit=1u<<(l&31u);
+ if((atomicOr(&upWork[c+3u+(l>>5u)],bit)&bit)!=0u){return;}
  let i=atomicAdd(&upWork[0u],1u);
  if(i>=UP_REQUESTS){upFail(UP_FATAL_REQUESTS,q);return;}
  let a=UP_WORK_LIST+4u*i;
@@ -544,13 +635,14 @@ function source(l:UniformPagePoolLayout,group:number,state:number,work:number|un
  const F=UNIFORM_PAGE_POOL_FATAL,K=UNIFORM_PAGE_POOL_KIND;
  return /* wgsl */`
 const UP_EDGE:u32=${UNIFORM_PAGE_POOL_EDGE}u;const UP_BLOCKS:u32=${l.blocks}u;const UP_SOLID_BLOCK:u32=${l.solidBlock}u;const UP_TABLE:u32=${l.table}u;const UP_NONE:u32=0xffffffffu;
+const UP_TOP:u32=${l.edge}u;const UP_TOP_BITS:u32=${l.edgeBits}u;const UP_TOP_WORDS:u32=${l.entries}u;const UP_SUPER_LAST:u32=${UNIFORM_SUPER_BLOCK_SLOTS-1}u;const UP_AT_SUPERS:u32=${l.state.supers}u;
 const UP_AIR_WORD:u32=0u;const UP_SOLID_WORD:u32=0xffffffffu;const UP_FREE:u32=0xffffffffu;
 const UP_RESIDENT:u32=${K.resident}u;const UP_AIR:u32=${K.air}u;const UP_SOLID:u32=${K.solid}u;
 const UP_TABLE_BITS:u32=${l.tableBits}u;const UP_REQUESTS:u32=${l.requests}u;const UP_CLOSURE_CAP:u32=${l.closureCap}u;
 const UP_AT_WINDOW:u32=${l.state.window}u;const UP_WORK_BOUNDS:u32=${l.work.bounds}u;
 const UP_AT_TABLE:u32=${l.state.table}u;const UP_AT_BLOCKS:u32=${l.state.blocks}u;const UP_AT_RECORDS:u32=${l.state.records}u;const UP_AT_RESIDENT:u32=${l.state.resident}u;const UP_AT_NEW:u32=${l.state.claimed}u;
 const UP_WORK_LIST:u32=${l.work.list}u;const UP_WORK_KEEP:u32=${l.work.keep}u;const UP_WORK_CLAIMS:u32=${l.work.claims}u;const UP_WORK_DETAIL:u32=${UNIFORM_PAGE_POOL_WORK.detail}u;
-const UP_FATAL_EXHAUSTED:u32=${F.exhausted}u;const UP_FATAL_ALIAS:u32=${F.alias}u;const UP_FATAL_REQUESTS:u32=${F.requests}u;const UP_FATAL_CLOSURE_CAP:u32=${F.closureCap}u;const UP_FATAL_CLOSURE:u32=${F.closure}u;const UP_FATAL_EDGE:u32=${F.edge}u;
+const UP_FATAL_EXHAUSTED:u32=${F.exhausted}u;const UP_FATAL_ALIAS:u32=${F.alias}u;const UP_FATAL_REQUESTS:u32=${F.requests}u;const UP_FATAL_CLOSURE_CAP:u32=${F.closureCap}u;const UP_FATAL_CLOSURE:u32=${F.closure}u;const UP_FATAL_EDGE:u32=${F.edge}u;const UP_FATAL_SUPER:u32=${F.superBlocks}u;
 @group(${group}) @binding(${state}) var<storage,${access}> upState:array<u32>;
 ${uniformWindowWorldWGSL(i=>`upState[UP_AT_WINDOW+${i}]`,"up")}
 ${READERS}${work===undefined?"":`@group(${group}) @binding(${work}) var<storage,read_write> upWork:array<atomic<u32>>;
@@ -605,8 +697,11 @@ export class UniformPagePool {
  private started=false;
  private windowPipeline?:GPUComputePipeline;
  private hostPipeline?:GPUComputePipeline;
+ private claimSuperPipeline?:GPUComputePipeline;
  private claimPipeline?:GPUComputePipeline;
  private slotsPipeline?:GPUComputePipeline;
+ private superSlotsPipeline?:GPUComputePipeline;
+ private flatPipeline?:GPUComputePipeline;
  private publishPipeline?:GPUComputePipeline;
  /** State read-only (the host command launch is a consumer); state and
   * mirrors writable (the commit); state read-only beside the published record. */
@@ -623,13 +718,13 @@ export class UniformPagePool {
   this.work=device.createBuffer({label:"Uniform page pool work",size:4*l.work.words,usage});
   if(l.published.words){
    this.published=device.createBuffer({label:"Uniform page pool published pages",size:4*l.published.words,usage});
-   this.volumePageSource={records:{buffer:this.published},directory:{buffer:this.state,offset:4*l.state.table,size:4*(l.entries+UNIFORM_WINDOW_HEADER_WORDS)}};
+   this.volumePageSource={records:{buffer:this.published},directory:{buffer:this.state,offset:4*l.state.table,size:4*(l.directory+UNIFORM_WINDOW_HEADER_WORDS)}};
   }
   this.allocatedBytes=this.state.size+this.work.size+(this.published?.size??0);
   this.host=new Int32Array(4*l.host);this.pins=new Int32Array(4*l.pins);
   // Publication visits blocks; the address-window directory is copied only by a visible overlay.
   this.hostGroups=Math.min(Math.ceil(Math.max(l.host,l.pins)/64),16);this.claimGroups=Math.min(Math.ceil(l.requests/64),16);this.publishGroups=Math.ceil(l.blocks/64);
-  this.current=uniformPagePoolSeed(l,[],()=>UNIFORM_PAGE_POOL_KIND.air);this.upload();
+  this.current=uniformPagePoolSeed(l,[]);this.upload();
  }
  /** The host copy of the pool at generation 0: the last seed, or the empty pool. */
  get seeded():UniformPagePoolSeed{return this.current;}
@@ -639,13 +734,13 @@ export class UniformPagePool {
   * command pending. The pinned pages stay. Scene build only: it allocates. */
  seed(seed:UniformPagePoolSeed):void{
   const l=this.layout,s=seed.layout;
-  if(s.table!==l.table||s.blocks!==l.blocks||seed.state.length!==l.state.words||seed.ring.length!==l.ringCapacity)throw new Error(`Uniform page pool seed is of table ${s.table} and ${s.blocks} blocks; the pool is of table ${l.table} and ${l.blocks} blocks`);
+  if(s.table!==l.table||s.blocks!==l.blocks||s.superBlocks!==l.superBlocks||seed.state.length!==l.state.words||seed.ring.length!==l.ringCapacity)throw new Error(`Uniform page pool seed is of table ${s.table} and ${s.blocks} blocks; the pool is of table ${l.table} and ${l.blocks} blocks`);
   this.current=seed;this.hostCount=0;this.upload();
  }
  private upload():void{
   const l=this.layout,seed=this.current,queue=this.device.queue,work=new Uint32Array(l.work.words);
   work.fill(0xffffffff,l.work.bounds,l.work.bounds+3);
-  work.set(seed.ring,l.work.ring);work[UNIFORM_PAGE_POOL_WORK.pins]=this.pinCount;work.set(new Uint32Array(this.pins.buffer,0,4*this.pinCount),l.work.pins);
+  work.set(seed.ring,l.work.ring);work.set(seed.superRing,l.work.superRing);work.set(seed.superCount,l.work.counts);work[UNIFORM_PAGE_POOL_WORK.pins]=this.pinCount;work.set(new Uint32Array(this.pins.buffer,0,4*this.pinCount),l.work.pins);
   queue.writeBuffer(this.state,0,seed.state);queue.writeBuffer(this.work,0,work);
   if(this.published)queue.writeBuffer(this.published,0,uniformPagePoolPublished(seed,l));
   for(const m of this.mirrors){
@@ -713,7 +808,7 @@ export class UniformPagePool {
    .replace("@compute @workgroup_size(1) fn mwDecide()", "fn upDecide()")
    .replace("let old=", "if(upPolicy()==0u){return;}let old=")
    // A finite tank already has walls on every side; only the probe moves it.
-   .replace("if(forced){", "if(upPolicy()==1u||(a==1u&&upPolicy()==3u&&lo==((upState[UP_AT_WINDOW+14u])^0x80000000u)&&hi>=old[a]&&hi-old[a]<62u)){next[a]=old[a];}if(forced){");
+   .replace("if(forced){", "if(upPolicy()==1u||(a==1u&&upPolicy()==3u&&lo==((upState[UP_AT_WINDOW+14u])^0x80000000u)&&hi>=old[a]&&hi-old[a]<span-2u)){next[a]=old[a];}if(forced){");
   const [hostModule,publishModule,commitModule]=await Promise.all([compile("Uniform page pool host commands",/* wgsl */`${source(l,0,0,1,"read")}
 fn upAsk(a:u32){upRequest(vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32>(atomicLoad(&upWork[a+1u])),bitcast<i32>(atomicLoad(&upWork[a+2u]))));}
 // The host commands and the pinned pages ask as any consumer does, so they deduplicate with the kernels' requests.
@@ -739,14 +834,17 @@ fn upAsk(a:u32){upRequest(vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32
 }`):undefined,compile("Uniform page pool commit",/* wgsl */`${source(l,0,0,1,"read_write")}
 ${this.mirrors.map((_,i)=>`@group(0) @binding(${2+i}) var<storage,read_write> upMirror${i}:array<u32>;`).join("\n")}
 const S_FREE:u32=${S.free}u;const S_PENDING:u32=${S.pending}u;const S_FATAL:u32=${S.fatal}u;
+const S_SUPER_RESIDENT:u32=${S.superResident}u;const S_SUPER_FREE:u32=${S.superFree}u;const S_SUPER_PENDING:u32=${S.superPending}u;
 const W_POPS:u32=${W.pops}u;const W_HEAD:u32=${W.head}u;const W_RING:u32=${l.work.ring}u;const RING_MASK:u32=${l.ringCapacity-1}u;
-const R_STATE:u32=${R.state}u;const R_GENERATION:u32=${R.generation}u;const R_IDLE:u32=${R.idle}u;
-const FREE:u32=${B.free}u;const RESIDENT:u32=${B.resident}u;const PENDING:u32=${B.pending}u;
+const W_SUPER_POPS:u32=${W.superPops}u;const W_SUPER_HEAD:u32=${W.superHead}u;const W_SUPER_RING:u32=${l.work.superRing}u;const W_SUPER_COUNT:u32=${l.work.counts}u;const SUPER_MASK:u32=${UNIFORM_SUPER_BLOCK_SLOTS-1}u;
+const R_STATE:u32=${R.state}u;const R_GENERATION:u32=${R.generation}u;const R_IDLE:u32=${R.idle}u;const U_BACKGROUND:u32=${UNIFORM_PAGE_POOL_SUPER.background}u;
+const FREE:u32=${B.free}u;const RESIDENT:u32=${B.resident}u;const PENDING:u32=${B.pending}u;const FIXED:u32=${B.fixed}u;
 const IDLE_STEPS:u32=${l.idleSteps}u;const CLAIM_WIDTH:u32=${64*this.claimGroups}u;
-// The only stores of table and block words: to the state and to every mirror.
+// The only stores of directory and block words: to the state and to every mirror.
 fn upPutEntry(i:u32,word:u32){upState[UP_AT_TABLE+i]=word;${puts(l.tail.table)}}
 fn upPutBlock(i:u32,word:u32){upState[UP_AT_BLOCKS+i]=word;${puts(l.tail.blocks)}}
 fn upPutWindow(i:u32,word:u32){upState[UP_AT_WINDOW+i]=word;${puts(l.tail.window)}}
+fn upPutFlat(i:u32,word:u32){upState[UP_AT_TABLE+${l.tail.flat}u+i]=word;${puts(l.tail.flat)}}
 ${frameParams?`@group(0) @binding(${2+this.mirrors.length}) var<storage,read_write> upParams:array<u32>;`:""}
 ${windowBody}
 @compute @workgroup_size(1) fn upWindow(){
@@ -759,31 +857,56 @@ ${windowBody}
   if(d!=0.0){upParams[8u+a]=bitcast<u32>(bitcast<f32>(upParams[8u+a])+d*bitcast<f32>(upParams[4u+a]));upParams[32u+a]=bitcast<u32>(bitcast<f32>(upParams[32u+a])-d);}
  }`:""}
 }
-fn upBlockWordOf(q:vec3i)->u32{let m=vec3u(q)&vec3u(UP_TABLE-1u);return m.x|(m.y<<6u)|(m.z<<12u);}
-// upClaim: one block per listed request, popped off the ring head; the
-// blocks free or quarantined before this commit are all claimable. Each
-// request owns its table entry, its block's words and its new-list word. A
-// request whose entry is SOLID by now is dropped.
-@compute @workgroup_size(64) fn upClaim(@builtin(global_invocation_id) gid:vec3u){
+fn upBlockWordOf(q:vec3i)->u32{let m=vec3u(q)&vec3u(UP_TABLE-1u);return m.x|(m.y<<8u)|(m.z<<16u);}
+fn upListed(i:u32)->vec3i{let a=UP_WORK_LIST+4u*i;return vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32>(atomicLoad(&upWork[a+1u])),bitcast<i32>(atomicLoad(&upWork[a+2u])));}
+// q's top entry holds a slot for q's super-block: its own, or a fixed one, which every super-block of the entry shares.
+fn upSuperHolds(slot:u32,q:vec3i)->bool{return upSuperStored(slot)&&(upState[UP_AT_SUPERS+8u*slot+R_STATE]==FIXED||all(upSuperOf(slot)==(q>>vec3u(2u))));}
+// upClaimSuper: the first listed request of each top entry clears the
+// entry's claim words and, where the entry holds no slot, pops one off the
+// super ring for the request's super-block: its children start as the top
+// word it replaces. An entry held by another super-block is an alias.
+@compute @workgroup_size(64) fn upClaimSuper(@builtin(global_invocation_id) gid:vec3u){
  let asked=atomicLoad(&upWork[0u]);
  // A list that overflowed left claim words no listed request clears.
- if(asked>UP_REQUESTS){for(var w=gid.x;w<${3*l.entries}u;w+=CLAIM_WIDTH){atomicStore(&upWork[UP_WORK_CLAIMS+w],0u);}}
+ if(asked>UP_REQUESTS){for(var w=gid.x;w<${5*l.entries}u;w+=CLAIM_WIDTH){atomicStore(&upWork[UP_WORK_CLAIMS+w],0u);}}
  let count=min(asked,UP_REQUESTS);let generation=upState[0u]+1u;
+ let head=atomicLoad(&upWork[W_SUPER_HEAD]);let available=upState[S_SUPER_FREE]+upState[S_SUPER_PENDING];
+ for(var i=gid.x;i<count;i+=CLAIM_WIDTH){
+  let q=upListed(i);let e=upEntry(q);let c=UP_WORK_CLAIMS+5u*e;
+  if(atomicExchange(&upWork[c],0u)==0u){continue;}
+  for(var k=1u;k<5u;k++){atomicStore(&upWork[c+k],0u);}
+  if(atomicLoad(&upWork[2u])!=0u){continue;}
+  let top=upState[UP_AT_TABLE+e];
+  if(upSuperStored(top)){if(!upSuperHolds(top,q)){upFail(select(UP_FATAL_ALIAS,UP_FATAL_EDGE,upPolicy()!=0u),q);}continue;}
+  let pop=atomicAdd(&upWork[W_SUPER_POPS],1u);
+  if(pop>=available){upFailWith(UP_FATAL_SUPER,q,upState[S_SUPER_RESIDENT]);continue;}
+  let slot=atomicLoad(&upWork[W_SUPER_RING+((head+pop)&SUPER_MASK)]);let r=UP_AT_SUPERS+8u*slot;let sb=q>>vec3u(2u);
+  upState[r]=bitcast<u32>(sb.x);upState[r+1u]=bitcast<u32>(sb.y);upState[r+2u]=bitcast<u32>(sb.z);
+  upState[r+R_STATE]=RESIDENT;upState[r+R_GENERATION]=generation;upState[r+U_BACKGROUND]=top;
+  for(var k=0u;k<64u;k++){upPutEntry(UP_TOP_WORDS+64u*slot+k,top);}
+  upPutEntry(e,slot);
+ }
+}
+// upClaim: one block per listed request, popped off the ring head; the
+// blocks free or quarantined before this commit are all claimable. Each
+// request owns its page word, its block's words and its new-list word. A
+// request whose page is SOLID by now, or whose super-block has no slot, is
+// dropped.
+@compute @workgroup_size(64) fn upClaim(@builtin(global_invocation_id) gid:vec3u){
+ let count=min(atomicLoad(&upWork[0u]),UP_REQUESTS);let generation=upState[0u]+1u;
  let head=atomicLoad(&upWork[W_HEAD]);let available=upState[S_FREE]+upState[S_PENDING];
  for(var i=gid.x;i<count;i+=CLAIM_WIDTH){
-  let a=UP_WORK_LIST+4u*i;
-  let q=vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32>(atomicLoad(&upWork[a+1u])),bitcast<i32>(atomicLoad(&upWork[a+2u])));
-  let e=upEntry(q);let c=UP_WORK_CLAIMS+3u*e;
-  atomicStore(&upWork[c],0u);atomicStore(&upWork[c+1u],0u);atomicStore(&upWork[c+2u],0u);
+  let q=upListed(i);let slot=upState[UP_AT_TABLE+upEntry(q)];
   let held=upWord(q);
-  if(held==UP_SOLID_WORD||atomicLoad(&upWork[2u])!=0u){continue;}
+  if(held==UP_SOLID_WORD||atomicLoad(&upWork[2u])!=0u||!upSuperHolds(slot,q)){continue;}
   if(held!=UP_AIR_WORD){if(any(upPageOf(held)!=q)){upFail(UP_FATAL_ALIAS,q);}continue;}
   let pop=atomicAdd(&upWork[W_POPS],1u);
   if(pop>=available){upFailWith(UP_FATAL_EXHAUSTED,q,upState[${S.resident}u]);continue;}
   let block=atomicLoad(&upWork[W_RING+((head+pop)&RING_MASK)]);let r=UP_AT_RECORDS+8u*block;
   upState[r]=bitcast<u32>(q.x);upState[r+1u]=bitcast<u32>(q.y);upState[r+2u]=bitcast<u32>(q.z);
   upState[r+R_STATE]=RESIDENT;upState[r+R_GENERATION]=generation;upState[r+R_IDLE]=0u;
-  upPutEntry(e,block);upPutBlock(block,upBlockWordOf(q));upState[UP_AT_NEW+pop]=block;
+  upPutEntry(upChild(slot,q),block);atomicAdd(&upWork[W_SUPER_COUNT+slot],1u);
+  upPutBlock(block,upBlockWordOf(q));upState[UP_AT_NEW+pop]=block;
  }
 }
 // upSlots: one workgroup over every block, each lane a run of them. Ages and
@@ -806,8 +929,10 @@ var<workgroup> upScan:array<vec2u,256>;
   if(upState[r+R_GENERATION]!=generation){
    let idle=select(upState[r+R_IDLE]+1u,0u,kept!=0u);upState[r+R_IDLE]=idle;
    if(idle>=IDLE_STEPS){
-    // Only an entry that names this block is cleared.
-    let e=upEntry(upPageOf(s));if(upState[UP_AT_TABLE+e]==s){upPutEntry(e,UP_AIR_WORD);}
+    // Only a word that names this block is cleared; its slot counts one page fewer.
+    let q=upPageOf(s);let slot=upState[UP_AT_TABLE+upEntry(q)];let at=upChild(slot,q);
+    if(upState[UP_AT_TABLE+at]==s){upPutEntry(at,UP_AIR_WORD);}
+    if(upSuperStored(slot)){atomicSub(&upWork[W_SUPER_COUNT+slot],1u);}
     upPutBlock(s,UP_FREE);upState[r+R_STATE]=PENDING;count.y+=1u;continue;
    }
   }
@@ -836,6 +961,48 @@ var<workgroup> upScan:array<vec2u,256>;
   atomicStore(&upWork[W_HEAD],(head+pops)&RING_MASK);atomicStore(&upWork[W_POPS],0u);
   atomicStore(&upWork[${W.requests}u],0u);atomicStore(&upWork[${W.host}u],0u);
  }
+}
+// upSuperSlots: one workgroup over every super-block slot, after upSlots.
+// Frees the slots the last commit quarantined and retires the resident ones
+// left without a page, their top entry back to the background; then queues
+// the retired behind the super ring's free slots and seals the super status.
+const SUPER_PER:u32=${UNIFORM_SUPER_BLOCK_SLOTS/256}u;
+@compute @workgroup_size(256) fn upSuperSlots(@builtin(local_invocation_index) lane:u32){
+ let first=lane*SUPER_PER;let last=first+SUPER_PER;
+ let head=atomicLoad(&upWork[W_SUPER_HEAD]);let available=upState[S_SUPER_FREE]+upState[S_SUPER_PENDING];
+ // x: held, y: retired.
+ var count=vec2u(0u);
+ for(var s=first;s<last;s++){
+  let r=UP_AT_SUPERS+8u*s;let state=upState[r+R_STATE];
+  if(state==PENDING){upState[r+R_STATE]=FREE;continue;}
+  if(state==FIXED){count.x+=1u;continue;}
+  if(state!=RESIDENT){continue;}
+  if(atomicLoad(&upWork[W_SUPER_COUNT+s])==0u){
+   let e=upEntry(4*upSuperOf(s));if(upState[UP_AT_TABLE+e]==s){upPutEntry(e,upState[r+U_BACKGROUND]);}
+   upState[r+R_STATE]=PENDING;count.y+=1u;continue;
+  }
+  count.x+=1u;
+ }
+ upScan[lane]=count;workgroupBarrier();
+ for(var stride=1u;stride<LANES;stride*=2u){
+  var add=vec2u(0u);if(lane>=stride){add=upScan[lane-stride];}
+  workgroupBarrier();upScan[lane]+=add;workgroupBarrier();
+ }
+ var at=upScan[lane]-count;
+ for(var s=first;s<last;s++){
+  if(upState[UP_AT_SUPERS+8u*s+R_STATE]==PENDING){atomicStore(&upWork[W_SUPER_RING+((head+available+at.y)&SUPER_MASK)],s);at.y+=1u;}
+ }
+ if(lane==LANES-1u){
+  let pops=min(atomicLoad(&upWork[W_SUPER_POPS]),available);
+  upState[S_SUPER_RESIDENT]=at.x;upState[S_SUPER_FREE]=available-pops;upState[S_SUPER_PENDING]=at.y;
+  atomicStore(&upWork[W_SUPER_HEAD],(head+pops)&SUPER_MASK);atomicStore(&upWork[W_SUPER_POPS],0u);
+ }
+}
+// upFlat: the flat window under the frame upWindow left, after the commit's
+// last directory write: one lane a word.
+@compute @workgroup_size(64) fn upFlat(@builtin(global_invocation_id) gid:vec3u){
+ let i=gid.x+${64*FLAT_ROW}u*gid.y;let q=vec3i(vec3u(i&63u,(i>>6u)&63u,i>>12u))-vec3i(1)+upFramePage();
+ upPutFlat(i,upState[UP_AT_TABLE+upChild(upState[UP_AT_TABLE+upEntry(q)],q)]);
 }`)]);
   const binding=(at:number,type:GPUBufferBindingType):GPUBindGroupLayoutEntry=>({binding:at,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
   const readerLayout=device.createBindGroupLayout({entries:[binding(0,"read-only-storage"),binding(1,"storage")]});
@@ -846,11 +1013,14 @@ var<workgroup> upScan:array<vec2u,256>;
   // The published record takes the work buffer's place beside the read-only state.
   if(this.published)this.publisher=device.createBindGroup({layout:readerLayout,entries:[entries[0]!,{binding:1,resource:{buffer:this.published}}]});
   const reading=device.createPipelineLayout({bindGroupLayouts:[readerLayout]}),writing=device.createPipelineLayout({bindGroupLayouts:[writerLayout]});
-  [this.windowPipeline,this.hostPipeline,this.claimPipeline,this.slotsPipeline,this.publishPipeline]=await Promise.all([
+  [this.windowPipeline,this.hostPipeline,this.claimSuperPipeline,this.claimPipeline,this.slotsPipeline,this.superSlotsPipeline,this.flatPipeline,this.publishPipeline]=await Promise.all([
    device.createComputePipelineAsync({label:"Uniform page pool upWindow",layout:writing,compute:{module:commitModule,entryPoint:"upWindow"}}),
    device.createComputePipelineAsync({label:"Uniform page pool upHost",layout:reading,compute:{module:hostModule,entryPoint:"upHost"}}),
+   device.createComputePipelineAsync({label:"Uniform page pool upClaimSuper",layout:writing,compute:{module:commitModule,entryPoint:"upClaimSuper"}}),
    device.createComputePipelineAsync({label:"Uniform page pool upClaim",layout:writing,compute:{module:commitModule,entryPoint:"upClaim"}}),
    device.createComputePipelineAsync({label:"Uniform page pool upSlots",layout:writing,compute:{module:commitModule,entryPoint:"upSlots"}}),
+   device.createComputePipelineAsync({label:"Uniform page pool upSuperSlots",layout:writing,compute:{module:commitModule,entryPoint:"upSuperSlots"}}),
+   device.createComputePipelineAsync({label:"Uniform page pool upFlat",layout:writing,compute:{module:commitModule,entryPoint:"upFlat"}}),
    publishModule?device.createComputePipelineAsync({label:"Uniform page pool upPublish",layout:reading,compute:{module:publishModule,entryPoint:"upPublish"}}):undefined,
   ]);
  }
@@ -883,8 +1053,11 @@ var<workgroup> upScan:array<vec2u,256>;
   // upHost and upClaim.
   pass.setBindGroup(0,this.writer!);
   pass.setPipeline(this.windowPipeline!);pass.dispatchWorkgroups(1);
+  pass.setPipeline(this.claimSuperPipeline!);pass.dispatchWorkgroups(this.claimGroups);
   pass.setPipeline(this.claimPipeline!);pass.dispatchWorkgroups(this.claimGroups);
   pass.setPipeline(this.slotsPipeline);pass.dispatchWorkgroups(1);
+  pass.setPipeline(this.superSlotsPipeline!);pass.dispatchWorkgroups(1);
+  pass.setPipeline(this.flatPipeline!);pass.dispatchWorkgroups(FLAT_ROW,UNIFORM_DIRECTORY_FLAT_WORDS/(64*FLAT_ROW));
   if(this.publishPipeline){pass.setPipeline(this.publishPipeline);pass.setBindGroup(0,this.publisher!);pass.dispatchWorkgroups(this.publishGroups);}
   pass.end();
   // Queue-ordered publication uses the existing uniform binding and no new compute pass.
