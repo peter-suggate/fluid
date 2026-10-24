@@ -68,6 +68,8 @@ export const UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL=0.05;
  * of pNative) in place of the root buildRhs's: the all-4h mirror's
  * retirement, step 1 (plan §1.10). Off: the root's rows. */
 export const UNIFORM_PRESSURE_ARENA_NATIVE_RHS:boolean=false;
+/** The projected kick's re-solves from its own pressure (encodeSolve). */
+export const UNIFORM_PRESSURE_KICK_RESOLVES=3;
 
 /** Workgroups of the band-tile mark at most (the simulation's buffered h tiles). */
 const LIST_GROUPS=4096;
@@ -388,9 +390,17 @@ fn pF(base:u32,at:u32)->f32{return bitcast<f32>(pool[base+at]);}
 fn pSet(base:u32,at:u32,value:f32){pool[base+at]=bitcast<u32>(value);}
 fn pAddr(slot:u32,l:vec3u)->u32{return UBA_STRIDE*slot+l.x+8u*(l.y+8u*l.z);}
 // The h face and its native 4h row differ tangentially by up to 1.5h.
-// Compare the hydrostatic part at the h face's potential, leaving the dynamic
-// pressure as the solved unknown. Otherwise an h/4h interface along gravity
-// turns a resting pressure column into flow across it from the first kick.
+// Carry the row's start to the h face's tangential position along the start
+// pressure's own tangential gradient, leaving the dynamic pressure as the
+// solved unknown. Otherwise an h/4h interface along gravity turns a resting
+// pressure column into flow across it. The gradient is the start's (last
+// frame's pressure; the kick's own, re-solved: encodeSolve), measured at the
+// h cell from its band neighbours, not rho g: grad p = rho (g - a), so a
+// falling or accelerating liquid has none of it. rho g there forced a jump
+// of up to 1.5 rho g h across every seam subface: a free-falling block grew
+// seam shear of 0.1 m/s from frame 1, its wall faces read suction and
+// separated, and the wall-plane phi opened into an air film (5-11% of each
+// depth wall's volume in 16 frames).
 // Native and band RHS use opposite offsets, and projection uses the same
 // offset: one pressure difference for both incident cells and their flux.
 fn bSeamHead(at:u32,f:u32)->f32{
@@ -399,12 +409,24 @@ fn bSeamHead(at:u32,f:u32)->f32{
  // already locates that boundary. A hydrostatic offset here imposes a
  // different nonzero air pressure on each subface; a tiny theta amplifies
  // that incompatible boundary data into opposing jets.
- if(!bLiquid(pool[P_KINDS+at])){return 0.0;}
- // The h cell's offset from its 4h row's centre on each axis, but the face's
- // own (its normal offset is the discretisation's): rho g . offset.
- let local=at%UBA_STRIDE;var offset=vec3f(vec3u(local,local/8u,local/64u)&vec3u(3u))-1.5;offset[f/2u]=0.0;
- let head=params.gravity.xyz*params.hDt.xyz*offset;
- return (head.x+head.y)+head.z;
+ let kinds=pool[P_KINDS+at];
+ if(!bLiquid(kinds)){return 0.0;}
+ // The h cell's offset from its 4h row's centre on each tangential axis (the
+ // normal offset is the discretisation's) times the start's slope there: a
+ // central difference over liquid band neighbours, one-sided at the band's
+ // or the liquid's edge, none without a neighbour. Exact for a linear start.
+ let slot=at/UBA_STRIDE;let local=at%UBA_STRIDE;let lb=vec3u(local&7u,(local>>3u)&7u,local>>6u);
+ let own=pF(P_BASE,at);var head=0.0;
+ for(var axis=0u;axis<3u;axis++){
+  if(axis==f/2u){continue;}
+  var rise=0.0;var count=0.0;
+  for(var side=0u;side<2u;side++){
+   let g=2u*axis+side;
+   if(bFaceKind(kinds,g)==K_BAND){let m=pNear0(at,slot,lb,g);if(bLiquid(pool[P_KINDS+m])){rise+=f32(bSign(g))*(pF(P_BASE,m)-own);count+=1.0;}}
+  }
+  if(count>0.0){head+=rise/count*(f32(lb[axis]&3u)-1.5);}
+ }
+ return head;
 }
 // The pool offset of band cell q (UB_NONE_ID: no band cell).
 fn pAt(q:vec3i)->u32{if(!pBandCell(q)){return UB_NONE_ID;}return pAddr(ubaSlot(ubaBrickAt(q)),vec3u(q)&vec3u(7u));}
@@ -816,7 +838,9 @@ ${zero}
 // The start: last frame's pressure on a warm row, else UniformPressureBand's
 // carried trilinear 4h pressure (last frame's presented one); the iterate is
 // the correction to it. A Neumann face (a frozen tile's) folds its forced
-// flux and cold term into the RHS.
+// flux and cold term into the RHS. pPicard (the kick's re-solve): the start
+// is the last solve's pressure and the RHS pRebase's stash.
+override pPicard:bool=false;
 @compute @workgroup_size(${TILE_WG}) fn pInit(${lanes}){
  if(lane==0u){pN=pTileCount();}
  let n=workgroupUniformLoad(&pN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
@@ -825,7 +849,8 @@ ${zero}
   let p=vec3i(ubaOrigin(ubaBrick(slot))+lb);let kinds=pool[P_KINDS+at];
   if(!bLiquid(kinds)){pSet(P_X,at,0.0);pSet(P_X1,at,0.0);pSet(P_BASE,at,0.0);continue;}
   var start=0.0;
-  if((kinds&P_WARM)!=0u){start=pF(P_WARMP,at);}
+  if(pPicard){start=pF(P_BASE,at)+pF(P_X,at);}
+  else if((kinds&P_WARM)!=0u){start=pF(P_WARMP,at);}
   else{
    let y=(vec3f(p)+0.5)/4.0-0.5;let b=vec3i(floor(y));let w=y-floor(y);var sum=vec3f(0.0);
    let home=umCellBlock(vec3u(p));let page=p>>vec3u(5u);
@@ -845,6 +870,7 @@ ${zero}
   }
   if(bInside(kinds)){start=max(start,0.0);}
   pSet(P_BASE,at,start);pSet(P_X,at,0.0);pSet(P_X1,at,0.0);
+  if(pPicard){continue;}
   var rhs=pF(P_RHS,at);
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);
@@ -1234,6 +1260,9 @@ var<workgroup> fSum:array<vec2f,64>;
    // measure (x = 0: each row's own), each region's predictor residual, and
    // level 1's rows: each brick bakes its parent octant.
    rebase:header()+poolWGSL+/* wgsl */`
+// The kick's first solve stashes each row's RHS ahead of its start's terms
+// in the warm plane (unread until pProject), its re-solves read it back.
+override pStash:u32=0u;
 ${this.fields.dynamics?"@group(1) @binding(24) var<storage,read_write> bDynamics:array<atomic<u32>>;":""}
 var<workgroup> worst:atomic<u32>;
 var<workgroup> tileWorst:atomic<u32>;
@@ -1275,7 +1304,8 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
     }
     sums[axis]=w.x*(d.x+d.y)+(w.y-w.x)*d.y;
    }
-   let rhs=pF(P_RHS,at)+((sums.x+sums.z)+sums.y-open*own);pSet(P_RHS,at,rhs);
+   var given=pF(P_RHS,at);if(pStash==1u){pSet(P_WARMP,at,given);}else if(pStash==2u){given=pF(P_WARMP,at);}
+   let rhs=given+((sums.x+sums.z)+sums.y-open*own);pSet(P_RHS,at,rhs);
    if(pActive(kinds)){
     // The band's residual of the zero iterate (its halos at their start).
     var r=rhs+lifted;if(bInside(kinds)&&own<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
@@ -1948,7 +1978,7 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
    pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],
-   pDownA:[["",{}],["@0",{pBake:1}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
+   pDownA:[["",{}],["@0",{pBake:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
   };
   this.verdict=await this.verdictPipeline();
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
@@ -2047,11 +2077,26 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   pass.end();
  }
  /** Before the 4h projection: the composite solve (start, native rows,
-  * V-cycles, final measure), the native pressures into the root, the verdict. */
- encodeSolve(encoder:GPUCommandEncoder):void{
+  * V-cycles, final measure), the native pressures into the root, the verdict.
+  * kick: the projected kick has no last frame, so its seam heads (bSeamHead:
+  * the start's tangential gradient) start at none; it re-solves
+  * UNIFORM_PRESSURE_KICK_RESOLVES times from its own pressure. Each re-solve
+  * cuts a resting pool's seam error about 3.3x (rest-step's corner jet: 36
+  * mm/s from one solve, 1.0 after three re-solves); a falling one has no
+  * gradient to find. Once, at t=0. */
+ encodeSolve(encoder:GPUCommandEncoder,kick=false):void{
+  this.encodeSolveFrom(encoder,"pInit",kick?"pRebaseK":"pRebase");
+  if(!kick)return;
+  for(let k=0;k<UNIFORM_PRESSURE_KICK_RESOLVES;k++){
+   // The cycle history and the band's level 2 channels start empty, as encodePrepare leaves them.
+   encoder.clearBuffer(this.index,4*HISTORY_WORD,4*(GEOMETRY_WORD-HISTORY_WORD));encoder.clearBuffer(this.pool,this.level2Clear.offset,this.level2Clear.size);
+   this.encodeSolveFrom(encoder,"pInitP","pRebaseP");
+  }
+ }
+ private encodeSolveFrom(encoder:GPUCommandEncoder,init:string,rebase:string):void{
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,PAGE_GROUPS),g=this.level1Groups;
   const pass=encoder.beginComputePass(SOLVE_PASS);
-  this.dispatch(pass,"pInit",this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);this.dispatch(pass,"pRebase",this.tileGroups);
+  this.dispatch(pass,init,this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);this.dispatch(pass,rebase,this.tileGroups);
   // One cycle past the most the solve ran lately; a frame needing more ends at its last.
   const cycles=Math.min(s.cycles,this.wideCycles+1);
   // Level 0 ping-pongs X and X1 (pInit zeroes both); a leg of n sweeps from

@@ -449,7 +449,7 @@ export class UniformMixedFrame {
   * the cell size and every constant are placed once, here. */
  private readonly words:{readonly frame:Uint32Array<ArrayBuffer>;readonly extension:Float32Array<ArrayBuffer>;readonly surface:Float32Array<ArrayBuffer>;readonly surfaceFlags:Uint32Array<ArrayBuffer>;
   readonly momentum:Float32Array<ArrayBuffer>;readonly momentumFlags:Uint32Array<ArrayBuffer>;readonly forces:Float32Array<ArrayBuffer>;readonly projection:Float32Array<ArrayBuffer>;
-  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>;readonly bandGravity:Float32Array<ArrayBuffer>};
+  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>};
  /** Byte offset in an ownership's support of its sticky detail violation word. */
  private readonly violationByte:number;
  /** encodeGeometry's options, set in place by each caller that passes any. */
@@ -484,7 +484,7 @@ export class UniformMixedFrame {
   {const h=o.capacity.lattice.cellSize_m,inverse=(x:number)=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x)));
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
     momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
-    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1),bandGravity:new Float32Array(4)};}
+    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded");
@@ -845,12 +845,9 @@ export class UniformMixedFrame {
   forces[3]=dt;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;forces[12]=gx;forces[13]=gy;forces[14]=gz;q.writeBuffer(to.forces,0,forces);
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
   projection[3]=dt;projection[4]=density;projection[5]=open;q.writeBuffer(to.projection,0,projection);
-  // The composite seam compares pressures at a common gravitational
-  // potential: the band's gravity words carry the hydrostatic gradient rho g.
   band[3]=dt;band[4]=density;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
   // The composite's native 4h rows stop at the root's target, the band's h rows at band[8]: native residuals scale by their ratio.
   w.bandNative[0]=band[8]!/target;q.writeBuffer(this.bandParams,52,w.bandNative);
-  {const g=w.bandGravity;g[0]=density*gx;g[1]=density*gy;g[2]=density*gz;q.writeBuffer(this.bandParams,64,g);}
   const views=this.layoutViews?(this.relayout?UNIFORM_STAGE_VIEWS.previous|UNIFORM_STAGE_VIEWS.reasons|UNIFORM_STAGE_VIEWS.importance:0)|UNIFORM_STAGE_VIEWS.certificate|UNIFORM_STAGE_VIEWS.band:0;
   q.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
   this.pressureTarget=target;
@@ -1157,7 +1154,7 @@ export class UniformMixedFrame {
    // as native 4h rows. Its verdict gates the 4h projection on the GPU.
    if(!this.projection.skipBandRootRhs)this.band.encodePrepare(encoder);
    trace?.phase(encoder,A.pressureSetup);
-   this.band.encodeSolve(encoder);
+   this.band.encodeSolve(encoder,kick>0);
    trace?.phase(encoder,A.pressureVCycles);
    this.projection.encode(encoder,"project",split.projectionGroup);
    // Frozen regions take the mean of the projection's corrections into their term.
