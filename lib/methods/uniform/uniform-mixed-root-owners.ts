@@ -7,6 +7,8 @@ import {
 import { UNIFORM_MIXED_DETAIL_RING } from "./uniform-mixed-layout";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedDetailViolationWord } from "./uniform-mixed-topology.wgsl";
+import type { UniformPagePool, UniformPagePoolLayout } from "./uniform-page-pool";
+import { UNIFORM_LIVE_KEY_GROUPS, UniformLiveVisit, uniformLiveDispatch, uniformLiveListsWGSL } from "./uniform-live-lists";
 
 /** The pressure root's owners, built on the GPU from the page table every
  * step.
@@ -120,8 +122,9 @@ export function uniformMixedRootSentinelRows(address: UniformLatticeAddress, phi
 
 const float = (x: number) => Number.isInteger(x) ? x.toFixed(1) : String(x);
 
-/** The kernels. record: the root record (a vec4 a row) is bound, at binding 3. */
-export function uniformMixedRootOwnersWGSL(address: UniformLatticeAddress, lattice: { readonly dimensions: readonly number[]; readonly cellSize_m: readonly number[] }, record: boolean): string {
+/** The kernels. record: the root record (a vec4 a row) is bound, at binding
+ * 3; the pool state at binding 4 (uniform-live-lists). */
+export function uniformMixedRootOwnersWGSL(address: UniformLatticeAddress, lattice: { readonly dimensions: readonly number[]; readonly cellSize_m: readonly number[] }, record: boolean, pool: UniformPagePoolLayout): string {
   const n = address.tileKeys, table = 5 * n;
   const paged = { blocks: `${n / 512}u` };
   const far = UNIFORM_MIXED_ROOT_FAR_CELLS * Math.max(...lattice.cellSize_m);
@@ -138,8 +141,15 @@ ${record ? "@group(0) @binding(3) var<storage,read_write> roRecord:array<vec4f>;
 ${uniformWindowAddressWGSL("roTopology",`${table}u`,"0u")}
 ${uniformLatticeAddressWGSL({ constant: true, paged })}
 ${uniformCompileStencilWGSL}
-@compute @workgroup_size(64) fn roKeys(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) launched:vec3u){
- let k=gid.x+64u*launched.x*gid.y;if(k>=RO_KEYS){return;}
+${uniformLiveListsWGSL(0, 4, pool)}
+// A lane a key of the visited blocks (uniform-live-lists): a free key's
+// rows are a fixed point, written once it leaves.
+@compute @workgroup_size(64) fn roKeys(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(group.y!=0u){return;}
+ let sweep=ulSweep(groups);let keys=512u*ulVisitCount(sweep);
+ for(var visit=gid.x;visit<keys;visit+=64u*groups.x){roKey(512u*ulVisitBlock(visit>>9u,sweep)+(visit&511u));}
+}
+fn roKey(k:u32){
  var word=0u;var first=0u;var second=0u;let live=umTileLive(k);
  if(live){
   let c=vec3i(umTileCoord(k));
@@ -184,28 +194,31 @@ export class UniformMixedRootOwners {
   readonly label = "Uniform pressure root owners";
   private pipeline?: GPUComputePipeline;
   private group?: GPUBindGroup;
-  private readonly keyGroups: readonly [number, number];
-  /** ownership: the pressure root's. phi: the root phi, by tile key. record:
-   * the root record (a vec4 a row, by tile key), where the scene has one. */
-  constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership, private readonly phi: GPUBufferBinding, private readonly record?: GPUBufferBinding) {
-    const c = ownership.capacity, limit = device.limits.maxComputeWorkgroupsPerDimension;
+  private readonly keyGroups: number;
+  private readonly visit: UniformLiveVisit;
+  /** ownership: the pressure root's. pool: the page pool its keys address.
+   * phi: the root phi, by tile key. record: the root record (a vec4 a row,
+   * by tile key), where the scene has one. */
+  constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership, private readonly pool: UniformPagePool, private readonly phi: GPUBufferBinding, private readonly record?: GPUBufferBinding) {
+    const c = ownership.capacity;
+    if (c.tiles !== 512 * pool.layout.blocks) throw new Error(`Uniform pressure root owners: ${c.tiles} tile keys are not the pool's ${pool.layout.blocks} blocks`);
+    this.visit = new UniformLiveVisit(pool);
     if (c.fineTiles !== 0) throw new Error(`Uniform pressure root owners: the ownership holds ${c.fineTiles} h tiles; the root is all-4h`);
     const rows = c.tiles, slots = uniformFaceTileSlots(c.address.blocks);
     if ((phi.size ?? phi.buffer.size - (phi.offset ?? 0)) < 4 * rows) throw new Error(`Uniform pressure root owners: the root phi holds fewer than the ${rows} tile keys' rows`);
     if (record && (record.size ?? record.buffer.size - (record.offset ?? 0)) < 16 * (rows + slots)) throw new Error(`Uniform pressure root owners: the root record holds fewer than the ${rows} tile keys' rows and ${slots} wall slots`);
-    const grid = (groups: number): readonly [number, number] => { const x = Math.min(groups, limit); return [x, Math.ceil(groups / x)]; };
-    this.keyGroups = grid(Math.ceil(c.tiles / 64));
+    this.keyGroups = Math.min(UNIFORM_LIVE_KEY_GROUPS, c.tiles / 64);
   }
   async initialize(): Promise<void> {
     if (this.pipeline) throw new Error("Uniform pressure root owners is already initialized");
     const device = this.device, c = this.ownership.capacity, C = GPUShaderStage.COMPUTE, storage = { type: "storage" as const };
-    const module = device.createShaderModule({ label: this.label, code: uniformMixedRootOwnersWGSL(c.address, c.lattice, !!this.record) });
+    const module = device.createShaderModule({ label: this.label, code: uniformMixedRootOwnersWGSL(c.address, c.lattice, !!this.record, this.pool.layout) });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(`${this.label}: ${errors.map(m => `${m.lineNum}: ${m.message}`).join("\n")}`);
-    const layout = device.createBindGroupLayout({ label: this.label, entries: [0, 1, 2, ...(this.record ? [3] : [])].map(binding => ({ binding, visibility: C, buffer: storage })) });
+    const layout = device.createBindGroupLayout({ label: this.label, entries: [...[0, 1, 2, ...(this.record ? [3] : [])].map(binding => ({ binding, visibility: C, buffer: storage })), { binding: 4, visibility: C, buffer: { type: "read-only-storage" as const } }] });
     this.group = device.createBindGroup({ label: this.label, layout, entries: [
       { binding: 0, resource: { buffer: this.ownership.presentation.buffer } }, { binding: 1, resource: { buffer: this.ownership.support } },
-      { binding: 2, resource: this.phi }, ...(this.record ? [{ binding: 3, resource: this.record }] : [])] });
+      { binding: 2, resource: this.phi }, ...(this.record ? [{ binding: 3, resource: this.record }] : []), { binding: 4, resource: { buffer: this.pool.state } }] });
     this.pipeline = await device.createComputePipelineAsync({ label: `${this.label} roKeys`, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: "roKeys" } });
   }
   /** After the step's page commit, before the first root reader (the split
@@ -215,7 +228,7 @@ export class UniformMixedRootOwners {
     if (!p) throw new Error("Uniform pressure root owners is not initialized");
     const pass = encoder.beginComputePass(PASS);
     pass.setBindGroup(0, this.group!);
-    pass.setPipeline(p);pass.dispatchWorkgroups(this.keyGroups[0], this.keyGroups[1]);
+    pass.setPipeline(p);uniformLiveDispatch(pass, this.keyGroups, this.visit.sweep());
     pass.end();
   }
 }

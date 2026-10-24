@@ -14,6 +14,7 @@ import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTR
 import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
+import {planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -57,8 +58,18 @@ export interface UniformPressureArenaSchedule {
   * into air by its pressure's work, |u| <= sqrt(u0^2+2p/rho); "full" applies
   * the whole step's impulse dt*p/(rho*theta*h). */
  surfaceImpulse:"energy"|"full";
+ /** NB-FLIP pressureTail: the 32h rows' correction. "pages" solves them in
+  * one workgroup (at most TAIL_ROWS pages); "superblocks" takes them through
+  * 64h (2^3 pages) and 128h (4^3 pages, a row a super-block) and solves the
+  * 128h rows in that workgroup; "auto" is "pages" while the pool fits it. */
+ tail:"auto"|"pages"|"superblocks";
+ /** The 64h and 128h aggregates' scale, as tailScale: 0.5 (rediscretised)
+  * suits full groups but overshoots where a pool's faces leave part groups
+  * (a CPU twin diverges on ragged pools); 0.75 contracts on every pool the
+  * twin tries (tests/pressure-tail.test.ts). */
+ superScale:number;
 }
-export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,surfaceImpulse:"energy"};
+export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,surfaceImpulse:"energy",tail:"auto",superScale:0.75};
 /** bandExit "returns": the band's residual target (1/s, h-equivalent). The
  * band stops at it or at the cycle cap; the strict exit keeps the frame's
  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
@@ -108,8 +119,8 @@ const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29;
 const GEOMETRY_WORD=33;
 /** Kinds bits beyond the band's: an active row (liquid, positive diagonal) and a warm one (its slot held a liquid row last frame). */
 const ACTIVE_BIT=1<<27,WARM_BIT=1<<28;
-/** The coarsest (32h) rows, one a page, are one workgroup's: a lattice of
- * more pages is refused at construction. */
+/** The coarsest rows are one workgroup's: the 32h rows (a page each) of
+ * the "pages" tail, the 128h rows (a super-block each) of "superblocks". */
 const TAIL_ROWS=4096,TAIL_LANES=256,TAIL_SWEEPS=32;
 /** pTail's lanes: enough that every page's row stays in a lane's registers
  * (a reloaded row walks its six neighbour records each half sweep). */
@@ -166,6 +177,9 @@ export class UniformPressureArena {
  private readonly level2Clear:{offset:number;size:number};
  private slots=0;
  get capacity():number{return this.slots;}
+ /** The 32h rows' correction goes through the super-block levels (schedule.tail). */
+ readonly superTail:boolean;
+ private readonly super?:UniformPressureSuperWords;
  get slotMapOffset():number{return 4*HEADER;}
  private workBricks=1;private workLevel1=1;private level1Groups=1;private workLevel2=1;private level2Groups=1;
  private workTiles=1;private tileGroups=1;private relaxGroups=1;
@@ -191,7 +205,9 @@ export class UniformPressureArena {
   if(solid&&!solid.coarse)throw new Error("The solid pressure arena needs the all-4h solid record");
   if(!Number.isInteger(schedule.cycles)||schedule.cycles<1||schedule.cycles>=HISTORY)throw new Error(`Pressure arena cycles must be 1..${HISTORY-1}`);
   const address=simulation.capacity.address,blocks=address.blocks;
-  if(blocks>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages, over the coarsest workgroup's ${TAIL_ROWS}`);
+  this.superTail=schedule.tail==="superblocks"||(schedule.tail==="auto"&&blocks>TAIL_ROWS);
+  if(!this.superTail&&blocks>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages, over the page tail's ${TAIL_ROWS}; use the super-block tail`);
+  if(!(schedule.superScale>0))throw new Error("Pressure arena: the super-block tail's scale must be positive");
   if(schedule.tailCycles%2!==1)throw new Error(`Pressure arena: ${schedule.tailCycles} 8h cycles; level 2's up leg reads the odd cycles' channel`);
   if(pressure.capacity.address.blocks!==blocks)throw new Error("Pressure arena: the root's blocks are the simulation's");
   const rootWords=(view:GPUBufferBinding)=>(view.size??view.buffer.size-(view.offset??0))/4;
@@ -226,9 +242,12 @@ export class UniformPressureArena {
   this.level2Clear={offset:4*first,size:4*(last-first)};
   this.maskWord=HEADER+this.tiles;this.tileListWord=this.maskWord+a.bricks;this.geometryListWord=this.tileListWord+this.tiles;this.tableWord=this.geometryListWord+this.tiles;
   const limit=device.limits.maxStorageBufferBindingSize;
-  if(4*a.poolWords>limit)throw new Error(`Pressure arena pool (${4*a.poolWords} bytes) exceeds the storage binding limit ${limit}`);
-  this.index=device.createBuffer({label:"Uniform pressure arena state",size:4*(this.tableWord+a.tableWords),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  this.pool=device.createBuffer({label:"Uniform pressure arena pool",size:4*a.poolWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  // The super-block tail's lists and maps follow the arena table; its rows the arena's pool.
+  this.super=this.superTail?planUniformPressureSuper(blocks,this.tableWord+a.tableWords,a.poolWords):undefined;
+  const indexWords=this.super?.index.end??this.tableWord+a.tableWords,poolWords=this.super?.pool.end??a.poolWords;
+  if(4*poolWords>limit)throw new Error(`Pressure arena pool (${4*poolWords} bytes) exceeds the storage binding limit ${limit}`);
+  this.index=device.createBuffer({label:"Uniform pressure arena state",size:4*indexWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  this.pool=device.createBuffer({label:"Uniform pressure arena pool",size:4*poolWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   for(const w of a.initialWrites(this.tableWord))device.queue.writeBuffer(this.index,w.offset,w.data as Uint32Array<ArrayBuffer>);
   this.restricts=Array.from({length:schedule.cycles},(_,k)=>`pRestrict0@${k}`);
   this.residuals=Array.from({length:schedule.cycles},(_,k)=>`pResidual2@${k}`);
@@ -652,6 +671,37 @@ fn tLocal(j:u32,s:u32)->vec3i{return vec3i(vec3u(j%s,(j/s)%s,j/(s*s)));}
 // A page with band tiles or native rows (pNative's flag).
 fn tPageLive(block:u32)->bool{return (nPage(block)&1u)!=0u;}
 `;
+  // The super-block tail (planUniformPressureSuper): 64h rows a 2^3 group of
+  // pages, 128h rows a 4^3 group, keyed by page coordinate from the box's
+  // low page. A level's row e: its key (list), its rows' channels (planes of
+  // CAP words), its eight children (page blocks at 64h, 64h rows at 128h).
+  const W=this.super,superBox=this.simulation.capacity.address.pool.box.origin;
+  const superWGSL=W?/* wgsl */`
+const S_BOX:vec3u=vec3u(${superBox[0]}u,${superBox[1]}u,${superBox[2]}u);const S_SCALE:f32=${schedule.superScale};
+const CAP6:u32=${W.capacity6}u;const CAP7:u32=${W.capacity7}u;
+const S_COUNT6:u32=${W.index.count6}u;const S_COUNT7:u32=${W.index.count7}u;const S_LIST6:u32=${W.index.list6}u;const S_LIST7:u32=${W.index.list7}u;const S_MAP6:u32=${W.index.map6}u;const S_MAP7:u32=${W.index.map7}u;
+const S6_X:u32=${W.pool.x6}u;const S6_Y:u32=${W.pool.y6}u;const S6_R:u32=${W.pool.r6}u;const S6_D:u32=${W.pool.d6}u;const S6_K:u32=${W.pool.k6}u;const S6_C:u32=${W.pool.c6}u;
+const S7_X:u32=${W.pool.x7}u;const S7_R:u32=${W.pool.r7}u;const S7_D:u32=${W.pool.d7}u;const S7_K:u32=${W.pool.k7}u;const S7_C:u32=${W.pool.c7}u;
+// A page's coordinate from the box's low page (mod the window).
+fn sRel(block:u32)->vec3i{return vec3i((umBlockPage(block)+vec3u(64u)-S_BOX)&vec3u(63u));}
+fn sPack6(g:vec3i)->u32{return u32(g.x)|(u32(g.y)<<5u)|(u32(g.z)<<10u);}
+fn sPack7(g:vec3i)->u32{return u32(g.x)|(u32(g.y)<<4u)|(u32(g.z)<<8u);}
+fn sKey6(e:u32)->vec3i{let k=pIndex(S_LIST6+e);return vec3i(vec3u(k&31u,(k>>5u)&31u,k>>10u));}
+fn sKey7(e:u32)->vec3i{let k=pIndex(S_LIST7+e);return vec3i(vec3u(k&15u,(k>>4u)&15u,k>>8u));}
+// The row of a group key (UB_NONE_ID: none, or outside the window).
+fn sRow6(g:vec3i)->u32{if(any(g<vec3i(0))||any(g>=vec3i(32))){return UB_NONE_ID;}let v=pIndex(S_MAP6+sPack6(g));return select(v-1u,UB_NONE_ID,v==0u);}
+fn sRow7(g:vec3i)->u32{if(any(g<vec3i(0))||any(g>=vec3i(16))){return UB_NONE_ID;}let v=pIndex(S_MAP7+sPack7(g));return select(v-1u,UB_NONE_ID,v==0u);}
+fn sCount6()->u32{return select(min(pIndex(S_COUNT6),CAP6),0u,bConverged());}
+fn sCount7()->u32{return select(min(pIndex(S_COUNT7),CAP7),0u,bConverged());}
+fn sChild6(e:u32,j:u32)->u32{return pool[S6_C+j*CAP6+e];}
+fn sChild7(e:u32,j:u32)->u32{return pool[S7_C+j*CAP7+e];}
+fn sOctant(j:u32)->vec3u{return vec3u(j&1u,(j>>1u)&1u,j>>2u);}
+fn sFace(f:u32)->vec3i{var d=vec3i(0);d[f/2u]=bSign(f);return d;}
+// Face f of child j points at a sibling (inside the group): the sibling, else 8.
+fn sSibling(j:u32,f:u32)->u32{let a=f/2u;return select(8u,j^(1u<<a),((j>>a)&1u)!=(f&1u));}
+fn sParity(g:vec3i)->u32{return u32(g.x+g.y+g.z)&1u;}
+fn sWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1)*select(0.75,0.25,d.z==1);}
+`:"";
   const sources:Record<string,string>={
    table:uniformMixedTopologyWGSL(layout,0)+/* wgsl */`
 @group(1) @binding(2) var<storage,read_write> state:array<atomic<u32>>;
@@ -1654,6 +1704,7 @@ fn sRow(block:u32,at:u32,d:f32)->f32{
    // 16h rows and their ring (two deep: the neighbours' rows plus their own
    // prolonged correction), the rows' sweeps against the ring, into Y.
    up4:header()+poolWGSL+tail+/* wgsl */`
+override pTailY:bool=false;
 var<workgroup> vX:array<f32,216>;
 var<workgroup> uN:u32;
 fn vBox(g:vec3i)->u32{let q=vec3u(g+2);return q.x+6u*(q.y+6u*q.z);}
@@ -1672,7 +1723,7 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
     let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
     for(var i=0u;i<8u;i++){
      let dd=vec3i(vec3u(i&1u,(i>>1u)&1u,i>>2u));let q=G+dd*o;if(any(abs(q)>vec3i(1))){continue;}
-     let m=tAt(slot,5u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){sum+=uWeight(dd)*pF(PT_X,m);total+=uWeight(dd);}
+     let m=tAt(slot,5u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){sum+=uWeight(dd)*pF(select(PT_X,PT_Y,pTailY),m);total+=uWeight(dd);}
     }
     if(total>0.0){x+=sum/total;}
    }
@@ -1968,17 +2019,316 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
  }
 }`,
   };
+  if(W){
+   const base=header()+poolWGSL+tail+superWGSL;
+   Object.assign(sources,{
+    // A thread a page with a 32h row: its group's first such page (by
+    // octant) lists the group's 64h row and its children.
+    group6:base+/* wgsl */`
+@compute @workgroup_size(64) fn sGroup6(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let n=select(ubaLevelCount(2u),0u,bConverged());
+ for(var e=gid.x;e<n;e+=64u*groups.x){
+  let block=ubaLevelSlot(2u,e);if(pF(PT_D,UBA_STRIDE*block+72u)<=0.0){continue;}
+  let rel=sRel(block);let o=rel&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
+  var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
+  for(var j=0u;j<8u;j++){
+   let d=vec3i(sOctant(j))-o;var b=block;
+   if(j!=mine){b=ubaLevelRecord(2u,block,u32(13+d.x+3*d.y+9*d.z));}
+   if(b!=UB_NONE_ID&&pF(PT_D,UBA_STRIDE*b+72u)>0.0){kids[j]=b;first=min(first,j);}
+  }
+  if(first!=mine){continue;}
+  let row=atomicAdd(&state[S_COUNT6],1u);if(row>=CAP6){continue;}
+  let key=sPack6(rel>>vec3u(1u));atomicStore(&state[S_LIST6+row],key);atomicStore(&state[S_MAP6+key],row+1u);
+  for(var j=0u;j<8u;j++){pool[S6_C+j*CAP6+row]=kids[j];}
+ }
+}`,
+    // A thread a 64h row: its operator from its pages' 32h rows; its 128h
+    // group's first 64h row (by octant) lists the 128h row and its children.
+    group7:base+/* wgsl */`
+@compute @workgroup_size(64) fn sGroup7(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let n=sCount6();
+ for(var e=gid.x;e<n;e+=64u*groups.x){
+  var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  for(var j=0u;j<8u;j++){
+   let b=sChild6(e,j);if(b==UB_NONE_ID){continue;}
+   let at=UBA_STRIDE*b+72u;var part=pF(PT_D,at);
+   for(var axis=0u;axis<3u;axis++){
+    let bit=(j>>axis)&1u;
+    if(sChild6(e,j^(1u<<axis))!=UB_NONE_ID){part-=pF(PT_K+(2u*axis+1u-bit)*PLANE2,at);}
+    k[2u*axis+bit]+=pF(PT_K+(2u*axis+bit)*PLANE2,at);
+   }
+   d+=part;
+  }
+  pSet(S6_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){pSet(S6_K+f*CAP6,e,S_SCALE*k[f]);}
+  let g=sKey6(e);let o=g&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
+  var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
+  for(var j=0u;j<8u;j++){let r=select(sRow6(g-o+vec3i(sOctant(j))),e,j==mine);if(r!=UB_NONE_ID){kids[j]=r;first=min(first,j);}}
+  if(first!=mine){continue;}
+  let row=atomicAdd(&state[S_COUNT7],1u);if(row>=CAP7){continue;}
+  let key=sPack7(g>>vec3u(1u));atomicStore(&state[S_LIST7+row],key);atomicStore(&state[S_MAP7+key],row+1u);
+  for(var j=0u;j<8u;j++){pool[S7_C+j*CAP7+row]=kids[j];}
+ }
+}`,
+    // A thread a 128h row: its operator from its 64h rows'.
+    bake7:base+/* wgsl */`
+@compute @workgroup_size(64) fn sBake7(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let n=sCount7();
+ for(var e=gid.x;e<n;e+=64u*groups.x){
+  var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  for(var j=0u;j<8u;j++){
+   let r=sChild7(e,j);if(r==UB_NONE_ID){continue;}
+   var part=pF(S6_D,r);
+   for(var axis=0u;axis<3u;axis++){
+    let bit=(j>>axis)&1u;
+    if(sChild7(e,j^(1u<<axis))!=UB_NONE_ID){part-=pF(S6_K+(2u*axis+1u-bit)*CAP6,r);}
+    k[2u*axis+bit]+=pF(S6_K+(2u*axis+bit)*CAP6,r);
+   }
+   d+=part;
+  }
+  pSet(S7_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){pSet(S7_K+f*CAP7,e,S_SCALE*k[f]);}
+ }
+}`,
+    // A 64h group a workgroup: its pages' 16h residuals (against the
+    // neighbour pages' rows, pDown4's) into their 32h RHS, then the 32h rows
+    // from zero inside the group (the first block-Jacobi iterate).
+    down45:base+/* wgsl */`
+var<workgroup> dR:array<f32,64>;
+var<workgroup> dX:array<f32,8>;
+var<workgroup> dN:u32;
+@compute @workgroup_size(64) fn sDown45(${lanes}){
+ if(lane==0u){dN=sCount6();}
+ let n=workgroupUniformLoad(&dN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let page=sChild6(e,lane>>3u);var res=0.0;
+  if(page!=UB_NONE_ID){
+   let c=lane&7u;let g4=tLocal(c,2u);let at4=UBA_STRIDE*page+64u+c;let d4=pF(PT_D,at4);
+   if(d4>0.0){
+    res=pF(PT_R,at4)-d4*pF(PT_X,at4);
+    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(page,4u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){res+=pF(PT_K+f*PLANE2,at4)*pF(PT_X,m);}}
+   }
+  }
+  dR[lane]=res;
+  workgroupBarrier();
+  var at5=0u;var r5=0.0;var d5=0.0;var k5=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  if(lane<8u){
+   let b=sChild6(e,lane);
+   if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;for(var c=0u;c<8u;c++){r5+=dR[8u*lane+c];}pSet(PT_R,at5,r5);d5=pF(PT_D,at5);for(var f=0u;f<6u;f++){k5[f]=pF(PT_K+f*PLANE2,at5);}}
+   dX[lane]=0.0;
+  }
+  workgroupBarrier();
+  for(var s=0u;s<${schedule.sweeps}u;s++){
+   for(var col=0u;col<2u;col++){
+    if(lane<8u&&d5>0.0&&(countOneBits(lane)&1u)==col){
+     var off=r5;for(var f=0u;f<6u;f++){let j=sSibling(lane,f);if(j<8u&&sChild6(e,j)!=UB_NONE_ID){off+=k5[f]*dX[j];}}
+     dX[lane]=off/d5;
+    }
+    workgroupBarrier();
+   }
+  }
+  if(lane<8u&&d5>0.0){pSet(PT_X,at5,dX[lane]);}
+  workgroupBarrier();
+ }
+}`,
+    // A 128h group a workgroup: its pages' 32h residuals (against the
+    // neighbour pages') into their 64h rows' RHS, then the 64h rows from zero
+    // inside the group.
+    down6:base+/* wgsl */`
+var<workgroup> dR:array<f32,64>;
+var<workgroup> dX:array<f32,8>;
+var<workgroup> dN:u32;
+@compute @workgroup_size(64) fn sDown6(${lanes}){
+ if(lane==0u){dN=sCount7();}
+ let n=workgroupUniformLoad(&dN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let r6=sChild7(e,lane>>3u);var res=0.0;
+  if(r6!=UB_NONE_ID){
+   let page=sChild6(r6,lane&7u);
+   if(page!=UB_NONE_ID){
+    let at5=UBA_STRIDE*page+72u;let d5=pF(PT_D,at5);
+    res=pF(PT_R,at5)-d5*pF(PT_X,at5);
+    for(var f=0u;f<6u;f++){let m=tAt(page,5u,sFace(f));if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){res+=pF(PT_K+f*PLANE2,at5)*pF(PT_X,m);}}
+   }
+  }
+  dR[lane]=res;
+  workgroupBarrier();
+  var row=UB_NONE_ID;var r=0.0;var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  if(lane<8u){
+   row=sChild7(e,lane);
+   if(row!=UB_NONE_ID){for(var j=0u;j<8u;j++){r+=dR[8u*lane+j];}pSet(S6_R,row,r);d=pF(S6_D,row);for(var f=0u;f<6u;f++){k[f]=pF(S6_K+f*CAP6,row);}}
+   dX[lane]=0.0;
+  }
+  workgroupBarrier();
+  for(var s=0u;s<${schedule.sweeps}u;s++){
+   for(var col=0u;col<2u;col++){
+    if(lane<8u&&d>0.0&&(countOneBits(lane)&1u)==col){
+     var off=r;for(var f=0u;f<6u;f++){let j=sSibling(lane,f);if(j<8u&&sChild7(e,j)!=UB_NONE_ID){off+=k[f]*dX[j];}}
+     dX[lane]=off/d;
+    }
+    workgroupBarrier();
+   }
+  }
+  if(lane<8u&&d>0.0){pSet(S6_X,row,dX[lane]);}
+  workgroupBarrier();
+ }
+}`,
+    // Eight lanes a 128h row: its 64h rows' residuals against the neighbour
+    // 64h rows, summed into its RHS.
+    down7:base+/* wgsl */`
+var<workgroup> dR:array<f32,64>;
+var<workgroup> dN:u32;
+@compute @workgroup_size(64) fn sDown7(${lanes}){
+ if(lane==0u){dN=sCount7();}
+ let n=workgroupUniformLoad(&dN);
+ for(var first=8u*group.x;first<n;first+=8u*groups.x){
+  let e=first+(lane>>3u);var res=0.0;
+  if(e<n){
+   let r=sChild7(e,lane&7u);
+   if(r!=UB_NONE_ID){
+    let d=pF(S6_D,r);res=pF(S6_R,r)-d*pF(S6_X,r);let g=sKey6(r);
+    for(var f=0u;f<6u;f++){let m=sRow6(g+sFace(f));if(m!=UB_NONE_ID&&pF(S6_D,m)>0.0){res+=pF(S6_K+f*CAP6,r)*pF(S6_X,m);}}
+   }
+  }
+  dR[lane]=res;
+  workgroupBarrier();
+  if((lane&7u)==0u&&e<n){var sum=0.0;for(var j=0u;j<8u;j++){sum+=dR[lane+j];}pSet(S7_R,e,sum);}
+  workgroupBarrier();
+ }
+}`,
+    // 128h, the coarsest level (a row a super-block with rows): one
+    // workgroup's red-black sweeps from zero, as pTail's over the 32h rows.
+    tail7:base+/* wgsl */`
+var<workgroup> sX:array<f32,${TAIL_ROWS+1}>;
+var<workgroup> tN:u32;
+// The row (index + 1, 0: none) across face f of row e.
+fn sNear7(e:u32,f:u32)->u32{let m=sRow7(sKey7(e)+sFace(f));if(m==UB_NONE_ID||pF(S7_D,m)<=0.0){return 0u;}return m+1u;}
+fn sRow7Next(e:u32,d:f32)->f32{var off=pF(S7_R,e);for(var f=0u;f<6u;f++){off+=pF(S7_K+f*CAP7,e)*sX[sNear7(e,f)];}return off/d;}
+@compute @workgroup_size(${lanesTail}) fn sTail7(@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){tN=sCount7();}
+ let P=workgroupUniformLoad(&tN);if(P==0u){return;}
+ for(var e=lane;e<P;e+=${lanesTail}u){sX[e+1u]=0.0;}
+ if(lane==0u){sX[0]=0.0;}
+ workgroupBarrier();
+ var d0=0.0;var r0=0.0;var k0=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);var n0=array<u32,6>(0u,0u,0u,0u,0u,0u);var c0=0u;
+ if(lane<P){d0=pF(S7_D,lane);c0=sParity(sKey7(lane));if(d0>0.0){r0=pF(S7_R,lane);for(var f=0u;f<6u;f++){n0[f]=sNear7(lane,f);k0[f]=pF(S7_K+f*CAP7,lane);}}}
+ for(var sweep=0u;sweep<${TAIL_SWEEPS}u;sweep++){
+  for(var col=0u;col<2u;col++){
+   if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){off+=k0[f]*sX[n0[f]];}sX[lane+1u]=off/d0;}
+   for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){let d=pF(S7_D,e);if(d>0.0&&sParity(sKey7(e))==col){sX[e+1u]=sRow7Next(e,d);}}
+   workgroupBarrier();
+  }
+ }
+ for(var e=lane;e<P;e+=${lanesTail}u){if(pF(S7_D,e)>0.0){pSet(S7_X,e,sX[e+1u]);}}
+}`,
+    // 64h up (a 128h group a workgroup): each 64h row and its ring (the
+    // neighbour rows outside the group) take the 128h correction, trilinear
+    // and renormalised; the group's rows sweep against the frozen ring, into Y.
+    up7:base+/* wgsl */`
+var<workgroup> vS:array<f32,56>;
+var<workgroup> vX:array<f32,8>;
+var<workgroup> uN:u32;
+fn sProlong7(g:vec3i)->f32{
+ let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
+ for(var i=0u;i<8u;i++){let dd=vec3i(sOctant(i));let m=sRow7(G+dd*o);if(m!=UB_NONE_ID&&pF(S7_D,m)>0.0){sum+=sWeight(dd)*pF(S7_X,m);total+=sWeight(dd);}}
+ return select(0.0,sum/total,total>0.0);
+}
+@compute @workgroup_size(64) fn sUp7(${lanes}){
+ if(lane==0u){uN=sCount7();}
+ let n=workgroupUniformLoad(&uN);
+ for(var e=group.x;e<n;e+=groups.x){
+  // Lane 7c+k: child c's own start (k 0) or its ring's across face k-1.
+  if(lane<56u){
+   let c=lane/7u;let k=lane%7u;let r=sChild7(e,c);var x=0.0;
+   if(r!=UB_NONE_ID){
+    var g=sKey6(r);var m=r;
+    if(k>0u){if(sSibling(c,k-1u)<8u){m=UB_NONE_ID;}else{g+=sFace(k-1u);m=sRow6(g);}}
+    if(m!=UB_NONE_ID&&pF(S6_D,m)>0.0){x=pF(S6_X,m)+sProlong7(g);}
+   }
+   vS[lane]=x;
+  }
+  workgroupBarrier();
+  var row=UB_NONE_ID;var r=0.0;var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  if(lane<8u){row=sChild7(e,lane);if(row!=UB_NONE_ID){r=pF(S6_R,row);d=pF(S6_D,row);for(var f=0u;f<6u;f++){k[f]=pF(S6_K+f*CAP6,row);}}vX[lane]=vS[7u*lane];}
+  workgroupBarrier();
+  for(var s=0u;s<${schedule.sweeps}u;s++){
+   for(var col=0u;col<2u;col++){
+    if(lane<8u&&d>0.0&&(countOneBits(lane)&1u)==col){
+     var off=r;
+     for(var f=0u;f<6u;f++){let j=sSibling(lane,f);if(j<8u){if(sChild7(e,j)!=UB_NONE_ID){off+=k[f]*vX[j];}}else{off+=k[f]*vS[7u*lane+1u+f];}}
+     vX[lane]=off/d;
+    }
+    workgroupBarrier();
+   }
+  }
+  if(lane<8u&&d>0.0){pSet(S6_Y,row,vX[lane]);}
+  workgroupBarrier();
+ }
+}`,
+    // 32h up (a 64h group a workgroup): each page's 32h row and its ring take
+    // the 64h correction (Y), trilinear and renormalised; the group's rows
+    // sweep against the frozen ring, into the 32h Y word pUp4S reads.
+    up6:base+/* wgsl */`
+var<workgroup> vS:array<f32,56>;
+var<workgroup> vX:array<f32,8>;
+var<workgroup> uN:u32;
+fn sProlong6(g:vec3i)->f32{
+ let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
+ for(var i=0u;i<8u;i++){let dd=vec3i(sOctant(i));let m=sRow6(G+dd*o);if(m!=UB_NONE_ID&&pF(S6_D,m)>0.0){sum+=sWeight(dd)*pF(S6_Y,m);total+=sWeight(dd);}}
+ return select(0.0,sum/total,total>0.0);
+}
+@compute @workgroup_size(64) fn sUp6(${lanes}){
+ if(lane==0u){uN=sCount6();}
+ let n=workgroupUniformLoad(&uN);
+ for(var e=group.x;e<n;e+=groups.x){
+  if(lane<56u){
+   let c=lane/7u;let k=lane%7u;let page=sChild6(e,c);var x=0.0;
+   if(page!=UB_NONE_ID){
+    var at=UBA_STRIDE*page+72u;var b=page;
+    if(k>0u){if(sSibling(c,k-1u)<8u){at=UB_NONE_ID;}else{at=tAt(page,5u,sFace(k-1u));b=(at-72u)/UBA_STRIDE;}}
+    if(at!=UB_NONE_ID&&pF(PT_D,at)>0.0){x=pF(PT_X,at)+sProlong6(sRel(b));}
+   }
+   vS[lane]=x;
+  }
+  workgroupBarrier();
+  var at5=0u;var r=0.0;var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  if(lane<8u){let b=sChild6(e,lane);if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;r=pF(PT_R,at5);d=pF(PT_D,at5);for(var f=0u;f<6u;f++){k[f]=pF(PT_K+f*PLANE2,at5);}}vX[lane]=vS[7u*lane];}
+  workgroupBarrier();
+  for(var s=0u;s<${schedule.sweeps}u;s++){
+   for(var col=0u;col<2u;col++){
+    if(lane<8u&&d>0.0&&(countOneBits(lane)&1u)==col){
+     var off=r;
+     for(var f=0u;f<6u;f++){let j=sSibling(lane,f);if(j<8u){if(sChild6(e,j)!=UB_NONE_ID){off+=k[f]*vX[j];}}else{off+=k[f]*vS[7u*lane+1u+f];}}
+     vX[lane]=off/d;
+    }
+    workgroupBarrier();
+   }
+  }
+  if(lane<8u&&d>0.0){pSet(PT_Y,at5,vX[lane]);}
+  workgroupBarrier();
+ }
+}`,
+    // After the solve: the map entries this solve's lists wrote, back to
+    // none (the counts are cleared before the next solve).
+    forget:base+/* wgsl */`
+@compute @workgroup_size(64) fn sForget(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let n6=min(pIndex(S_COUNT6),CAP6);let n7=min(pIndex(S_COUNT7),CAP7);
+ for(var e=gid.x;e<n6;e+=64u*groups.x){atomicStore(&state[S_MAP6+pIndex(S_LIST6+e)],0u);}
+ for(var e=gid.x;e<n7;e+=64u*groups.x){atomicStore(&state[S_MAP7+pIndex(S_LIST7+e)],0u);}
+}`,
+   });
+  }
   if(!UNIFORM_PRESSURE_ARENA_NATIVE_RHS)delete sources.nrhs;
   else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
   const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],
-   rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"]};
+   rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
+   group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
    pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],
    pDownA:[["",{}],["@0",{pBake:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
+   ...(W?{pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
   };
   this.verdict=await this.verdictPipeline();
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
@@ -2095,6 +2445,8 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  }
  private encodeSolveFrom(encoder:GPUCommandEncoder,init:string,rebase:string):void{
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,PAGE_GROUPS),g=this.level1Groups;
+  const W=this.super;
+  if(W)encoder.clearBuffer(this.index,4*W.index.count6,16);
   const pass=encoder.beginComputePass(SOLVE_PASS);
   this.dispatch(pass,init,this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);this.dispatch(pass,rebase,this.tileGroups);
   // One cycle past the most the solve ran lately; a frame needing more ends at its last.
@@ -2112,11 +2464,22 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
    const settle=first&&!!this.solid?.present;sweeps(settle,(s.sweeps+(settle?1:0))&1);
    this.dispatch(pass,this.residuals[cycle]!,pages);this.dispatch(pass,this.restricts[cycle]!,this.tileGroups);
    this.dispatch(pass,first?"pDownA@0":"pDownA",g);this.dispatch(pass,first?"pDownB@0":"pDownB",pages);this.dispatch(pass,"pDown2",pages);
-   for(let m=0;m<s.tailCycles;m++){const y=m%2===1?"Y":"";this.dispatch(pass,"pDown3"+y,pages);this.dispatch(pass,"pDown4",pages);this.dispatch(pass,"pTail",1);this.dispatch(pass,"pUp4",pages);this.dispatch(pass,"pUp3"+y,pages);}
+   // The super-block tail's rows, from this frame's 32h rows (baked by pDownB@0).
+   if(W&&first){this.dispatch(pass,"sGroup6",Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,"sGroup7",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
+   for(let m=0;m<s.tailCycles;m++){
+    const y=m%2===1?"Y":"";this.dispatch(pass,"pDown3"+y,pages);
+    if(W){
+     const groups7=Math.min(W.capacity7,PAGE_GROUPS);
+     this.dispatch(pass,"sDown45",pages);this.dispatch(pass,"sDown6",groups7);this.dispatch(pass,"sDown7",Math.min(groupsOf(W.capacity7,8),PAGE_GROUPS));
+     this.dispatch(pass,"sTail7",1);this.dispatch(pass,"sUp7",groups7);this.dispatch(pass,"sUp6",pages);this.dispatch(pass,"pUp4S",pages);
+    }else{this.dispatch(pass,"pDown4",pages);this.dispatch(pass,"pTail",1);this.dispatch(pass,"pUp4",pages);}
+    this.dispatch(pass,"pUp3"+y,pages);
+   }
    this.dispatch(pass,"pUpB",pages);this.dispatch(pass,"pUpA",g);
    const post=cycle===cycles-1?odd:0;this.dispatch(pass,"pProlong0"+post,this.tileGroups);sweeps(false,post);
   }
   this.dispatch(pass,"pResidual2F",pages);this.dispatch(pass,"pFinal",this.tileGroups);this.dispatch(pass,"pWrite",pages);
+  if(W)this.dispatch(pass,"sForget",groupsOf(W.capacity6,64));
   pass.end();
   const verdict=encoder.beginComputePass(VERDICT_PASS);
   verdict.setPipeline(this.verdict!.pipeline);verdict.setBindGroup(0,this.verdict!.group);verdict.dispatchWorkgroups(1);verdict.end();

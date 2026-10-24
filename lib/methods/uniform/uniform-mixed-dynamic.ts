@@ -2,7 +2,6 @@ import {uniformSolidRefinementWGSL} from "./uniform-solid-refinement";
 import { STAGE_RESIDENCY_WORDS, RESIDENCY_STAGES, RESIDENCY_STENCIL_TILES, localResidencyWGSL, localResidencyRequestWGSL, localResidencyMarkWGSL } from "./uniform-local-residency";
 import { narrowBandBudgetWGSL, narrowBandBudgetWords, NARROW_BAND_BUDGET_ENTRIES } from "./uniform-narrow-band-budget.wgsl";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
-import {uniformKeyGroups} from "./uniform-lattice-address";
 import type {UniformMixedSolidCoarse} from "./uniform-mixed-solid.wgsl";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_REGION_LIMIT,UNIFORM_MIXED_REGION_TABLE_WORDS,uniformMixedRegionWGSL,type UniformMixedBandBits} from "./uniform-mixed-layout-builder";
@@ -12,6 +11,7 @@ import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-sourc
 import {UNIFORM_REGION_HEAT_DEEP_WORD,UNIFORM_REGION_TIER} from "./uniform-region-heat";
 import {UNIFORM_RESIDENCY_PAGE_REACH,UNIFORM_RESIDENCY_LIQUID as PAGE_LIQUID,UNIFORM_RESIDENCY_SEEDED as PAGE_SEEDED} from "./uniform-mixed-residency";
 import {uniformPagePoolWGSL,type UniformPagePool} from "./uniform-page-pool";
+import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS,UniformLiveVisit,uniformLiveDispatch,uniformLiveListsOfWGSL,uniformLiveListsWGSL} from "./uniform-live-lists";
 import {uniformPageInitBlocksWGSL,uniformPageInitGroups,type UniformPageInitBlocks} from "./uniform-page-initialise";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_STAGE_REASON as REASON,UNIFORM_STAGE_IMPORTANCE as IMPORTANCE,UNIFORM_DETAIL_CRITERIA,type UniformDetailCriterion} from "./uniform-stage-grids";
@@ -91,8 +91,8 @@ const CENSUS_TILE_GRID=4096;
  * region's 27-region neighbourhood has run non-COLD since, so phi, velocity,
  * widths and the open-cell masks classify read are the ones it saw. */
 const REPLAY_WORDS=10;
-/** pageMark's fixed grid: a workgroup a page, strided. */
-const PAGE_MARK_GRID=4096;
+/** pageMark's fixed grid: a workgroup a visited page at a time, strided. */
+const PAGE_MARK_GRID=UNIFORM_LIVE_GROUP_GROUPS;
 /** Persistent words after the importance words: a hold per tile, the
  * budget's score cutoff, its histogram. */
 const importanceStateWords=(tiles:number)=>tiles;
@@ -293,6 +293,14 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
  /** The page initialise's hook (encodeInitBlocks): the hold and budget flight words of a claimed block's keys. */
  private initBlocks?:{readonly pipeline:GPUComputePipeline;readonly group:GPUBindGroup};
  private static readonly INIT_PASS:GPUComputePassDescriptor={label:"Uniform dynamic ownership page words"};
+ /** pageSeed's and pageMark's visits of the pool's live lists
+  * (uniform-live-lists): a free page's words are a fixed point of both
+  * (zero records and box; flag 0), so each takes the resident pages and
+  * the ones the latest commit retired. A host write of the residency
+  * certificate (UniformMixedOwnership.residencyResets) sets every flag:
+  * the mark then sweeps. */
+ private readonly seedVisit:UniformLiveVisit;
+ private readonly markVisit:UniformLiveVisit;
  private readonly words:number;
  /** Words of a host tile plane (hostTilePlane): solidTiles' and joinTiles' after their key words. */
  private readonly planeWords:number;
@@ -400,6 +408,7 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
    {binding:8,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
    {binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   {binding:11,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]});
   this.group=uniformDetailGroup(device,{layout:this.resources,entries:[
    {binding:0,resource:volume},{binding:1,resource:phi},
@@ -408,7 +417,11 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
    {binding:8,resource:{buffer:source,size:SOURCE_PARAMS_BYTES}},
    {binding:9,resource:{buffer:particles.allocation}},
    {binding:10,resource:{buffer:solidGeometry.record}},
+   {binding:11,resource:{buffer:pool.state}},
   ]});
+  if(this.pages!==8*pool.layout.blocks||tiles!==512*pool.layout.blocks)throw new Error(`Dynamic ownership: ${this.pages} pages and ${tiles} tile keys are not the page pool's ${pool.layout.blocks} blocks`);
+  this.seedVisit=new UniformLiveVisit(pool);
+  this.markVisit=new UniformLiveVisit(pool,()=>ownership.residencyResets);
  }
  async initialize():Promise<void>{
   const h=this.ownership.capacity.lattice.cellSize_m,cap=UNIFORM_MIXED_DYNAMIC_DISTANCE_CAP;
@@ -432,6 +445,8 @@ struct DynamicPolicy {step:vec4f,reach:vec4u,surface:vec4f,flow:vec4f,importance
 // Joined tiles: GPU producer words (joinTarget), then the host's tile plane
 // (join); then the region table (setRegions).
 @group(1) @binding(7) var<storage,read> joinTiles:array<u32>;
+// The pool's live lists: the per-key launches stride its resident blocks.
+${uniformLiveListsWGSL(1,11,this.pool.layout)}
 ${uniformMixedSourceWGSL(8)}
 @group(1) @binding(9) var<storage,read> particleAllocation:array<u32>;
 @group(1) @binding(10) var<storage,read> solidRecord:array<vec4f>;
@@ -1060,11 +1075,14 @@ fn umReplayTile(tile:u32){
  }
 }
 // Single-owner (4h) tiles: one lane per tile. A workgroup per tile left 63
-// of its 64 lanes idle over most of the domain.
-@compute @workgroup_size(64) fn classifyCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
+// of its 64 lanes idle over most of the domain. A fixed grid strides the 4h
+// list, 64 tiles a workgroup at a time; umCounts is uniform, so the loop
+// keeps its barriers.
+@compute @workgroup_size(64) fn classifyCoarse(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var first=64u*group.x;first<umCounts.y;first+=64u*groups.x){
  if(lane==0u){resetGroupCensus();}
  workgroupBarrier();
- let index=gid.x+umDispatchX*64u*gid.y;
+ let index=first+lane;
  if(index<umCounts.y){
   let tile=umTopology[UM_TILES+umCounts.x+index];
   if(ccValid(tile)){umReplayTile(tile);}
@@ -1083,6 +1101,7 @@ fn umReplayTile(tile:u32){
  }
  workgroupBarrier();
  if(lane==0u){flushGroupCensus();}
+ }
 }
 // The neighbour criteria and the decision, one lane per tile, after every
 // tile is classified. It reads other tiles' velocity keys, wet bits and the
@@ -1178,8 +1197,11 @@ fn umScoreByte(w0:u32,w1:u32,k:u32)->u32{
  if(k<4u){return (w0>>(8u*k))&255u;}
  return (w1>>(8u*(k-4u)))&255u;
 }
-@compute @workgroup_size(64) fn importance(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
+@compute @workgroup_size(64) fn importance(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){importanceTile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn importanceTile(tile:u32){
+ if(!umTileLive(tile)){return;}
  let own=vec2u(atomicLoad(&census[importanceIndex(tile,0u)]),atomicLoad(&census[importanceIndex(tile,1u)]));
  var w0=own.x;var w1=own.y;
  let crossing=(w1&${IMPORTANCE.crossing}u)!=0u;let wet=(w1&${IMPORTANCE.wet}u)!=0u;
@@ -1427,8 +1449,11 @@ fn movingShapeNear(tile:u32,p:vec3i)->bool{
  }}}
  return false;
 }
-@compute @workgroup_size(64) fn decide(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
+@compute @workgroup_size(64) fn decide(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){decideTile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn decideTile(tile:u32){
+ if(!umTileLive(tile)){return;}
  let p=vec3i(umTileCoord(tile));let scale=policy.step.x/H;
  // A Coarse region that no Fine one overlaps holds no band tile, whatever
  // asks; solidPromote may still add one.
@@ -1518,8 +1543,11 @@ fn movingShapeNear(tile:u32,p:vec3i)->bool{
 // the band. The band certificate fails a liquid row in a cut tile the
 // simulation holds at 4h.
 fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%32u)))!=0u;}
-@compute @workgroup_size(64) fn solidActive(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
+@compute @workgroup_size(64) fn solidActive(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){solidActiveTile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn solidActiveTile(tile:u32){
+ if(!umTileLive(tile)){return;}
  if(!umSolidTile(umTileCoord(tile))){return;}
  ${this.warmSolids?`let tier=bounds[CC_TIER+umPageOfTile(tile)];
  let coarseHeat=tier==${UNIFORM_REGION_TIER.warm}u||(tier==${UNIFORM_REGION_TIER.cold}u&&umTileWidth(tile)!=1u);`:"let coarseHeat=false;"}
@@ -1527,8 +1555,11 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
   atomicOr(&census[activeIndex(tile/32u)],1u<<(tile%32u));
  }
 }
-@compute @workgroup_size(64) fn solidPromote(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
+@compute @workgroup_size(64) fn solidPromote(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){solidPromoteTile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn solidPromoteTile(tile:u32){
+ if(!umTileLive(tile)){return;}
  if(umBit(${HEADER}u,tile)){return;}
  let p=vec3i(umTileCoord(tile));
  let a=umWindowTile(p-vec3i(1));let b=umWindowTile(p+vec3i(1));
@@ -1581,15 +1612,20 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
 // Bit 19: a seed is the liquid's (a band tile, or a near tile that is not a
 // static h tile), which is what the page request audits (pageRequest).
 fn umStaticFine(t:u32)->bool{return (umRegionsAt(umTileCoord(t))&1u)!=0u;}
-@compute @workgroup_size(64) fn pageSeed(@builtin(global_invocation_id) gid:vec3u){
- let page=gid.x+umDispatchX*64u*gid.y;
+// A lane a page of the pool's visit list (uniform-live-lists): a free page
+// writes zero records and box, the same words each time.
+@compute @workgroup_size(64) fn pageSeed(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let sweep=ulSweep(groups);if(gid.y!=0u){return;}
  // The in-frame readers' sticky closure bits join this census's audit, and
  // its closure radius is the certificate's from here on: the request reads
  // it before the commit and the mark after.
- if(page==0u){
+ if(gid.x==0u){
   if(umSupport[UM_RESIDENCY+1u]!=0u){atomicOr(&census[auditIndex()],${UNIFORM_MIXED_RESIDENCY_AUDIT.closure}u);}
   umSupport[UM_RESIDENCY+2u]=residencyRadius();
  }
+ for(var visit=gid.x;visit<8u*ulVisitCount(sweep);visit+=64u*groups.x){pageSeedOf(ulVisitRegion(visit,sweep));}
+}
+fn pageSeedOf(page:u32){
  if(page>=UM_PAGES){return;}
  var lo=vec3u(3u);var hi=vec3u(0u);var found=false;var liquid=false;
  var masks:array<vec2u,${RESIDENCY_STAGES.length}>;
@@ -1647,11 +1683,14 @@ ${localResidencyMarkWGSL}
 // pageMark, after the commit: the same exact occupied-tile dilation as
 // the request. The largest local radius only bounds the seed search; it
 // never expands an individual region. Claimed blocks had zero seed masks.
-// A workgroup a page, strided over a fixed grid (lrResidentLane).
+// A workgroup a page of the pool's visit list (uniform-live-lists; a free
+// page's flag is 0), strided over a fixed grid (lrResidentLane).
 @compute @workgroup_size(64) fn pageMark(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let sweep=ulSweep(groups);if(g.y!=0u){return;}
  let radius=atomicLoad(&census[${this.localOffset+STAGE_RESIDENCY_WORDS*this.pages}u]);
  if(g.x==0u&&lane==0u){umSupport[UM_RESIDENCY+2u]=radius;}
- for(var page=g.x;page<UM_PAGES;page+=groups.x){
+ for(var visit=g.x;visit<8u*ulVisitCount(sweep);visit+=groups.x){
+  let page=ulVisitRegion(visit,sweep);
   if(lane==0u){atomicStore(&lrMarks,0u);}
   workgroupBarrier();
   lrResidentLane(page,min(radius,${4*UNIFORM_RESIDENCY_PAGE_REACH}u),lane);
@@ -1660,12 +1699,16 @@ ${localResidencyMarkWGSL}
  }
 }
 // pageCompact: one workgroup lists the resident pages in ascending order.
+// Only a resident block's pages can hold a flag (pageMark leaves 0 on every
+// other), and the pool lists those blocks ascending.
 const COMPACT_LANES:u32=256u;
 var<workgroup> compactCounts:array<u32,256>;
+fn compactPage(i:u32)->u32{return 8u*ulResidentBlock(i>>3u)+(i&7u);}
 @compute @workgroup_size(256) fn pageCompact(@builtin(local_invocation_index) lane:u32){
- let per=(UM_PAGES+COMPACT_LANES-1u)/COMPACT_LANES;let first=lane*per;let last=min(first+per,UM_PAGES);
+ let pages=8u*ulResidentCount();
+ let per=(pages+COMPACT_LANES-1u)/COMPACT_LANES;let first=lane*per;let last=min(first+per,pages);
  var count=0u;
- for(var p=first;p<last;p++){if(umPageResident(p)){count++;}}
+ for(var i=first;i<last;i++){if(umPageResident(compactPage(i))){count++;}}
  compactCounts[lane]=count;workgroupBarrier();
  // Inclusive Hillis-Steele scan over the lanes.
  for(var stride=1u;stride<COMPACT_LANES;stride*=2u){
@@ -1673,7 +1716,7 @@ var<workgroup> compactCounts:array<u32,256>;
   workgroupBarrier();compactCounts[lane]+=add;workgroupBarrier();
  }
  var at=compactCounts[lane]-count;
- for(var p=first;p<last;p++){if(umPageResident(p)){umSupport[UM_RESIDENCY+4u+UM_PAGES+at]=p;at++;}}
+ for(var i=first;i<last;i++){let p=compactPage(i);if(umPageResident(p)){umSupport[UM_RESIDENCY+4u+UM_PAGES+at]=p;at++;}}
  if(lane==COMPACT_LANES-1u){umSupport[UM_RESIDENCY]=compactCounts[lane];}
 }
 `});
@@ -1690,14 +1733,17 @@ var<workgroup> compactCounts:array<u32,256>;
   const module=uniformDetailModule(device,{label:"Uniform dynamic ownership page request",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read> census:array<u32>;
 ${uniformPagePoolWGSL(this.pool.layout,1,1,2)}
+${uniformLiveListsOfWGSL("upState",this.pool.layout)}
 ${localResidencyWGSL}
 fn lrRecord(page:u32,stage:u32)->vec4u{let i=${this.localOffset}u+4u*(stage*UM_PAGES+page);return vec4u(census[i],census[i+1u],census[i+2u],census[i+3u]);}
 ${localResidencyRequestWGSL}
 // Union only after each stage dilates its own exact occupancy and signed
 // travel. A lane a (page, stage): a lane a page held the six stages' boxes
-// in series (0.16 ms over 43 workgroups in an all-4h frame).
+// in series (0.16 ms over 43 workgroups in an all-4h frame). The pages are
+// the resident blocks' (pageSeed leaves a free page's records zero).
 @compute @workgroup_size(64) fn pageRequest(@builtin(global_invocation_id) gid:vec3u){
- for(var item=gid.x;item<${RESIDENCY_STAGES.length}u*UM_PAGES;item+=${64*groups}u){lrAsk(item%UM_PAGES,item/UM_PAGES);}
+ let pages=8u*ulResidentCount();
+ for(var item=gid.x;item<${RESIDENCY_STAGES.length}u*pages;item+=${64*groups}u){let i=item%pages;lrAsk(8u*ulResidentBlock(i>>3u)+(i&7u),item/pages);}
 }
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
@@ -1771,9 +1817,9 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
  private readonly policyU=new Uint32Array(this.policyBytes);
  /** encode's launches in order, with their fixed grids (y 0: one argument).
   * when: 0 always, 1 a seeded census, 2 one under an activity budget, 3 solids or bodies. */
- private launches?:readonly {readonly pipeline:GPUComputePipeline;readonly when:0|1|2|3;readonly x:number;readonly y:number}[];
+ private launches?:readonly {readonly pipeline:GPUComputePipeline;readonly when:0|1|2|3;readonly x:number;readonly y:number;readonly visit?:boolean}[];
  /** encodeResidency's launches: pageMark's fixed grid over the pages, then pageCompact's one workgroup. */
- private marks?:{readonly mark:GPUComputePipeline;readonly x:number;readonly y:number;readonly compact:GPUComputePipeline};
+ private marks?:{readonly mark:GPUComputePipeline;readonly x:number;readonly compact:GPUComputePipeline};
  private static readonly RESIDENCY_PASS:GPUComputePassDescriptor={label:"Uniform dynamic ownership residency"};
  /** The certificate's flags and list, in the encoder of the page commit
   * that follows encode and straight after it: the mark reads the page table
@@ -1784,27 +1830,29 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   const m=this.marks??=this.residencyLaunches();
   const pass=encoder.beginComputePass(UniformMixedDynamicClassifier.RESIDENCY_PASS);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);
-  pass.setPipeline(uniformDetailPick(m.mark));pass.dispatchWorkgroups(m.x,m.y);
+  pass.setPipeline(uniformDetailPick(m.mark));uniformLiveDispatch(pass,m.x,this.markVisit.sweep());
   pass.setPipeline(uniformDetailPick(m.compact));pass.dispatchWorkgroups(1);
   pass.end();
  }
  private residencyLaunches(){
-  return {mark:this.pipelines.get("pageMark")!,x:Math.min(this.pages,PAGE_MARK_GRID),y:1,compact:this.pipelines.get("pageCompact")!};
+  return {mark:this.pipelines.get("pageMark")!,x:Math.min(this.pages,PAGE_MARK_GRID),compact:this.pipelines.get("pageCompact")!};
  }
  private censusLaunches(){
-  const tiles=this.ownership.capacity.tiles,x=this.ownership.dispatchX,blocks=this.ownership.capacity.address.blocks;
+  const tiles=this.ownership.capacity.tiles,blocks=this.ownership.capacity.address.blocks;
   const launch=(entry:string,when:0|1|2|3)=>{
-   // Fixed grids: classify strides over the h list; classifyCoarse has a
-   // lane per tile, bounded by the 4h count; the bound cubes a workgroup
-   // per block and the interface summary a lane per block; the rest are
-   // sized by the tile keys.
-   const lines=entry.startsWith("page")?this.pages:tiles;
-   const pipeline=this.pipelines.get(entry)!,[gx,gy]=uniformKeyGroups(lines,64,x,[0,0]);
+   // Fixed grids, none sized by the pool: classify strides over the h list
+   // and classifyCoarse over the 4h list (a lane a tile); the per-key
+   // entries over the resident tile keys, the interface bits a workgroup a
+   // resident z-slab, the interface summary a lane and the bound cubes a
+   // workgroup a resident block; pageSeed a lane a visited page.
+   const pipeline=this.pipelines.get(entry)!;
    if(entry==="classify")return {pipeline,when,x:Math.min(CENSUS_TILE_GRID,tiles),y:0};
-   if(entry==="boundCubes")return {pipeline,when,x:blocks,y:0};
-   if(entry==="interfaceBlocks")return {pipeline,when,x:Math.ceil(blocks/64),y:0};
+   if(entry==="boundCubes")return {pipeline,when,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,blocks),y:0};
+   if(entry==="interfaceBits")return {pipeline,when,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,tiles/64),y:0};
+   if(entry==="interfaceBlocks")return {pipeline,when,x:Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(blocks/64)),y:0};
    if(entry==="activityCutoff")return {pipeline,when,x:1,y:0};
-   return {pipeline,when,x:gx,y:gy};
+   if(entry==="pageSeed")return {pipeline,when,x:Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(this.pages/64)),y:0,visit:true};
+   return {pipeline,when,x:Math.min(UNIFORM_LIVE_KEY_GROUPS,tiles/64),y:0};
   };
   return [launch("classify",0),launch("classifyCoarse",0),launch("importance",1),...NARROW_BAND_BUDGET_ENTRIES.map(entry=>launch(entry,2)),
    launch("interfaceBits",1),launch("interfaceBlocks",1),launch("boundCubes",0),
@@ -1896,7 +1944,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
    const l=launches[i]!;
    if(l.when===1?!seeded:l.when===2?!(seeded&&activityBudgetOn):l.when===3&&!solids)continue;
    pass.setPipeline(uniformDetailPick(l.pipeline));
-   if(l.y===0)pass.dispatchWorkgroups(l.x);else pass.dispatchWorkgroups(l.x,l.y);
+   if(l.visit)uniformLiveDispatch(pass,l.x,this.seedVisit.sweep());else if(l.y===0)pass.dispatchWorkgroups(l.x);else pass.dispatchWorkgroups(l.x,l.y);
   }
   // The certificate is seeded: the pages its seeds reach ask the pool, ahead of the frame's commit and of encodeResidency.
   pass.setPipeline(uniformDetailPick(request.pipeline));pass.setBindGroup(1,request.group);pass.dispatchWorkgroups(request.groups);
