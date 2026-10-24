@@ -12,8 +12,9 @@ import type { UniformPagePool } from "./uniform-page-pool";
 import { UNIFORM_LIVE_KEY_GROUPS, uniformLiveListsWGSL } from "./uniform-live-lists";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformMixedDetailViolationWord, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockCoord, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
+import { UniformFineSlots, uniformFineSlotCapacity, uniformFineSlotInitWGSL, uniformFineSlotLayers } from "./uniform-fine-slots";
 import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_BASED, UNIFORM_DETAIL_CANONICAL_LOAD, UNIFORM_DETAIL_FACE_COMPACT, UNIFORM_DETAIL_HEADER_WORDS, UNIFORM_DETAIL_PACKED, UNIFORM_DETAIL_RING_4H_LOAD, registerUniformDetailBase } from "../../core/uniform-detail-abi";
 
 export type UniformDetailClass="cell"|"face"|"vertex"|"atlas";
@@ -248,6 +249,8 @@ interface DomainKernels{
  readonly layouts:Record<"r32float"|"rgba32float",GPUBindGroupLayout>;
  /** refresh: h to base, the canonical texels. */
  readonly refresh:Record<TransferKind,GPUComputePipeline>;
+ /** The h slots' init: a launch per batch of one format (uniformFineSlotInitWGSL). */
+ readonly init:readonly {readonly handles:readonly GPUTexture[];readonly layout:GPUBindGroupLayout;readonly pipeline:GPUComputePipeline}[];
 }
 /** The field factory: owns every h-sized texture of one solver and their
  * residency. Every field has a base block; while the simulation ownership
@@ -273,11 +276,38 @@ export class UniformDetailStorage{
   this.signature=`${l.placement}:${l.patchEdge}:${l.layer}::domain:${domain.checked}:${domain.compactFaces}:${!!domain.unpinned}:${!!domain.poison}:${!!domain.survey}:${!!domain.untwinned}:${!!domain.unwrapped}`;
   let set=live.get(device);if(!set)live.set(device,set=new Set());set.add(this);liveLayout(device,l.address.tileKeys);
   this.ringDimensions=device.createBuffer({label:"Uniform detail ring dimensions",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.ringDimensions,0,new Uint32Array([...l.tiles,l.address.blocks]));
+  // Every block its own slot until compact(): the h stores are the whole block grid.
+  const B=l.address.blocks;this.slots=new UniformFineSlots(device,B,Math.max(1,B-1));
+  this.hostSlots=Uint32Array.from({length:B},(_,b)=>b);this.slots.write(this.hostSlots,Math.max(1,B-1));
+ }
+ /** Where the h stores place each block (uniform-fine-slots.ts): identity until compact(). */
+ private readonly slots:UniformFineSlots;
+ /** The h stores hold their slots alone (compact), not the whole block grid. */
+ private sparse=false;
+ /** Slots the h textures hold past the sentinel (compact's capacity). */
+ private slotCapacity=0;
+ /** The host's copy of the slots: valid until a frame claims or releases one. */
+ private hostSlots?:Uint32Array<ArrayBuffer>;
+ /** The slots a host image or capture places texels by (hostSlots, or a capture's own copy). */
+ private slotMap?:Uint32Array;
+ /** Buffers that mirror the slots (a page table's copy beside its tail): byte offsets. */
+ private readonly slotMirrors:{buffer:GPUBuffer;offset:number}[]=[];
+ /** The slot state: words 0..blocks are the slot of each block (bound by page initialise). */
+ get slotState():GPUBuffer{return this.slots.state;}
+ /** Keep a copy of the slots (a word a block) at a byte offset of a buffer, from now on. */
+ mirrorSlots(buffer:GPUBuffer,offset:number):void{
+  this.slotMirrors.push({buffer,offset});
+  if(this.hostSlots)this.device.queue.writeBuffer(buffer,offset,this.hostSlots);
  }
 
  /** A field's texture size: its h store (the block grid in cells; a vertex field's, the box's vertices) or its base block. */
  private extent(kind:UniformDetailClass,resident=this.resident):Dims{
   const l=this.layout,a=l.address;
+  if(resident&&this.sparse){
+   // Slots: the block grid's width and height a layer, as many layers as the capacity needs.
+   const e=kind==="vertex"?33:32,g=a.blockGrid;
+   return [e*g[0],e*g[1],e*uniformFineSlotLayers(g,this.slotCapacity)];
+  }
   return resident?kind==="vertex"?a.vertexTexture:a.cellTexture:l.classes[kind].base;
  }
  private allocate(label:string,kind:UniformDetailClass,format:GPUTextureFormat,resident=this.resident):GPUTexture{
@@ -383,7 +413,7 @@ export class UniformDetailStorage{
  reserve(_layout:UniformMixedLayout):void{this.follow();
  }
  get allocatedBytes():number{
-  return this.bytes??=this.textures().reduce((n,t)=>n+t.width*t.height*t.depthOrArrayLayers*(t.format==="rgba32float"?16:4),0)+this.ringDimensions.size;
+  return this.bytes??=this.textures().reduce((n,t)=>n+t.width*t.height*t.depthOrArrayLayers*(t.format==="rgba32float"?16:4),0)+this.ringDimensions.size+this.slots.allocatedBytes;
  }
  /** allocatedBytes, summed once per set of textures: createField, stub,
   * adoptBase, admit and commitRetire are what change the set (resized). */
@@ -412,7 +442,7 @@ export class UniformDetailStorage{
  get fieldTextures():readonly GPUTexture[]{return this.handles;}
 
  destroy():void{
-  live.get(this.device)?.delete(this);this.ringDimensions.destroy();
+  live.get(this.device)?.delete(this);this.ringDimensions.destroy();this.slots.destroy();
 
   for(const t of this.textures())t.destroy();
  }
@@ -421,12 +451,20 @@ export class UniformDetailStorage{
 
  private readonly texel:[number,number,number]=[0,0,0];
  /** A cell or face field's h store: the texel index of a cell. */
- private cellIndex(x:number,y:number,z:number,W:number,H:number):number{const t=uniformCellTexel(this.layout.address,x,y,z,this.texel);return t[0]+W*(t[1]+H*t[2]);}
+ private cellIndex(x:number,y:number,z:number,W:number,H:number):number{return this.fineIndex(uniformCellTexel(this.layout.address,x,y,z,this.texel),32,W,H);}
+ /** An h store's texel index of a whole-grid texel t (blocks of edge e): at
+  * its block's slot (slotMap), -1 where the block has none (the sentinel). */
+ private fineIndex(t:readonly number[],e:number,W:number,H:number):number{
+  const map=this.slotMap;if(!map)return t[0]!+W*(t[1]!+H*t[2]!);
+  const k=this.layout.address.blockBits,m=(1<<k)-1,bx=Math.floor(t[0]!/e),by=Math.floor(t[1]!/e),bz=Math.floor(t[2]!/e),b=bx|(by<<k)|(bz<<2*k),s=map[b]!;
+  if(s===0&&b!==0)return -1;
+  return t[0]!+e*((s&m)-bx)+W*(t[1]!+e*(((s>>k)&m)-by)+H*(t[2]!+e*((s>>2*k)-bz)));
+ }
  /** A cell or face field's base block: the texel index of a tile. A face
   * base stacks a tile's four texels along z: m = 0 its origin, else the
   * +face anchor of axis m - 1. */
  /** The h store's texel index of a vertex, and a base block's of a tile corner (in tile units). */
- private vertexIndex(x:number,y:number,z:number,W:number,H:number):number{const t=uniformVertexTexel(this.layout.address,x,y,z,this.texel);return t[0]+W*(t[1]+H*t[2]);}
+ private vertexIndex(x:number,y:number,z:number,W:number,H:number):number{return this.fineIndex(uniformVertexTexel(this.layout.address,x,y,z,this.texel),33,W,H);}
  private cornerIndex(x:number,y:number,z:number,W:number,H:number):number{const t=uniformWideVertexTexel(this.layout.address,x,y,z,this.texel);return t[0]+W*(t[1]+H*t[2]);}
  private baseIndex(kind:"cell"|"face",x:number,y:number,z:number,m:number,W:number,H:number):number{const t=uniformTileTexel(this.layout.address,x,y,z,this.texel);return t[0]+W*(t[1]+H*(kind==="cell"?t[2]:4*t[2]+m));}
  /** Whole-field upload of logical values (tight, x fastest, vec4 for
@@ -439,6 +477,7 @@ export class UniformDetailStorage{
   if(values&&values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
 
   if(!this.installed){this.pending.set(texture,values);return;}
+  if(this.sparse&&this.twinned(texture)&&!this.hostSlots)throw new Error(`${texture.label}: an upload after a frame has moved the h slots (the host holds none)`);
   this.write(texture,this.image(texture,values));
   if(this.twinned(texture))this.write(texture,this.image(texture,values,true),true);
   // QA: the upload wrote the h texels of every tile.
@@ -452,7 +491,12 @@ export class UniformDetailStorage{
  private image(texture:GPUTexture,values?:Float32Array,base=false):Float32Array<ArrayBuffer>{
   const kind=this.kindOf(texture),[lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,t=base?this.bases.get(fields.get(texture)!.handle)!:this.physical(texture),W=t.width,H=t.height;
   const h=!base&&this.twinned(texture);
-  const image=new Float32Array(W*H*t.depthOrArrayLayers*comp),a=this.layout.address,empty=fields.get(texture)!.empty;
+  const image=new Float32Array(W*H*t.depthOrArrayLayers*comp),empty=fields.get(texture)!.empty;
+  this.slotMap=h&&this.sparse?this.hostSlots:undefined;
+  try{return this.fill(kind,image,values,h,W,H,[lx,ly,lz],comp,empty);}finally{this.slotMap=undefined;}
+ }
+ private fill(kind:UniformDetailClass,image:Float32Array<ArrayBuffer>,values:Float32Array|undefined,h:boolean,W:number,H:number,[lx,ly,lz]:Dims,comp:number,empty:number):Float32Array<ArrayBuffer>{
+  const a=this.layout.address;
   // The image starts as the field's empty value: only stored texels take an upload's.
   if(empty!==0)image.fill(empty);
   if(!values)return image;
@@ -464,8 +508,9 @@ export class UniformDetailStorage{
    for(let z=0;z<lz;z++)for(let y=0;y<ly;y++)for(let x=0;x<lx;){
     const end=Math.min(lx,x===0?33:x+32),src=x+lx*(y+ly*z);
     uniformVertexSlot(a,x,y,z,5,first);uniformVertexSlot(a,end-1,y,z,5,last);
-    if(uniformBlockStored(a,first[3])&&first[3]===last[3]&&last[0]-first[0]===end-1-x)image.set(values.subarray(src,src+end-x),this.vertexIndex(x,y,z,W,H));
-    else for(let v=x;v<end;v++)if(uniformVertexStored(a,v,y,z))image[this.vertexIndex(v,y,z,W,H)]=values[src+v-x]!;
+    const at=this.vertexIndex(x,y,z,W,H);
+    if(uniformBlockStored(a,first[3])&&first[3]===last[3]&&last[0]-first[0]===end-1-x){if(at>=0)image.set(values.subarray(src,src+end-x),at);}
+    else for(let v=x;v<end;v++)if(uniformVertexStored(a,v,y,z)){const i=this.vertexIndex(v,y,z,W,H);if(i>=0)image[i]=values[src+v-x]!;}
     x=end;
    }
   }else if(kind==="vertex"){
@@ -477,7 +522,8 @@ export class UniformDetailStorage{
    const [dx,dy,dz]=this.layout.dims;
    for(let z=0;z<dz;z++)for(let y=0;y<dy;y++)for(let x=0;x<dx;x+=32){
     if(!uniformCellStored(a,x,y,z))continue;
-    const src=(x+lx*(y+ly*z))*comp;image.set(values.subarray(src,src+Math.min(32,dx-x)*comp),this.cellIndex(x,y,z,W,H)*comp);
+    const at=this.cellIndex(x,y,z,W,H);if(at<0)continue;
+    const src=(x+lx*(y+ly*z))*comp;image.set(values.subarray(src,src+Math.min(32,dx-x)*comp),at*comp);
    }
   }else{
    // A base block: each tile's origin texel, and a face field's three +face anchors.
@@ -629,6 +675,8 @@ export class UniformDetailStorage{
    const base=this.bases.get(handle)!,field=fields.get(handle)!,after=this.allocate(handle.label,field.kind,base.format as GPUTextureFormat,true);
    this.physicals.set(handle,after);fields.set(after,field);registerUniformDetailBase(after,base);this.writeEmpty(after,field.empty);
   }
+  // Compacted h stores come back with no block holding a slot: the relayout's claim gives them.
+  if(this.sparse)this.writeSlots(new Uint32Array(this.layout.address.blocks));
   this.resident=true;this.publishTable();this.rebind();this.resized();
   // QA: a fresh h generation is poison throughout (the first layout's uploads fill it instead).
 
@@ -695,6 +743,7 @@ export class UniformDetailStorage{
   * publication). Nothing while the fields are their bases. */
  encodeBaseRefresh(encoder:GPUCommandEncoder,written:readonly GPUTexture[]):void{
   if(!this.resident)return;
+  if(this.sparse)throw new Error("Uniform detail storage: the dense t=0 kernels and their base refresh run over the whole block grid, before compact()");
   // Only the fields those kernels stored: every other field's h texture
   // holds no current canonical texel outside the ring, and its base is
   // current already.
@@ -732,7 +781,29 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
    const [scalarPipeline,vertexPipeline,facePipeline]=await Promise.all([pipeline("r32float",entryPoint),pipeline("r32float",`${entryPoint}Vertex`),pipeline("rgba32float",entryPoint)]);
    return {cell:scalarPipeline,vertex:vertexPipeline,face:facePipeline};
   };
-  return {layouts,refresh:await pair("refresh"),ring:await this.compileRing(domain)};
+  const init=await Promise.all(this.ringSets().map(async(handles,n)=>{
+   const format=handles[0]!.format as "r32float"|"rgba32float";
+   const layout=device.createBindGroupLayout({label:`Uniform detail h slot init ${n}`,entries:[...handles.map((_,i)=>({binding:i,visibility:C,storageTexture:{access:"write-only" as const,format,viewDimension:"3d" as const}})),
+    {binding:4,visibility:C,buffer:{type:"read-only-storage" as const}}]});
+   const code=uniformFineSlotInitWGSL(handles.map(h=>({format,vertex:fields.get(h)!.kind==="vertex",empty:fields.get(h)!.empty})),this.slots.words,this.layout.address.blockBits);
+   const module=device.createShaderModule({label:`Uniform detail h slot init ${n}`,code});
+   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+   return {handles,layout,pipeline:await compiler.compileComputePipeline({label:`Uniform detail h slot init ${n}`,layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint:"init"}},{priority:"visible"})};
+  }));
+  await this.slots.initialize(t=>this.seam(t),this.ringDimensions,this.simulation!.support,uniformMixedDetailViolationWord(this.layout.address.tileKeys));
+  return {layouts,refresh:await pair("refresh"),ring:await this.compileRing(domain),init};
+ }
+ /** The following fields in launches of up to BATCH of one format (the ring's and the slot init's). */
+ private ringSets():GPUTexture[][]{
+  const following=this.following,sets:GPUTexture[][]=[];
+  for(const format of ["rgba32float","r32float"] as const){const of=following.filter(h=>h.format===format);for(let i=0;i<of.length;i+=BATCH)sets.push(of.slice(i,i+BATCH));}
+  return sets;
+ }
+ /** The ring kernels' lattice is their uniform's (the box in tiles, the
+  * blocks); table: the topology whose tail holds the pages. */
+ private seam(table:string):string{
+  return `${uniformWindowAddressWGSL(`${table}`,"5u*drCount()","(drCount()/512u)")}
+${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"},fine:`${table}[arrayLength(&${table})-1u-drDimensions.w+b]`})}`;
  }
  /** The ring kernels, a lane per tile. enter:
   * a tile the target generation brings into the ring takes its canonical
@@ -742,12 +813,7 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
  private async compileRing(domain:UniformDetailDomain):Promise<DomainKernels["ring"]>{
   const device=this.device,C=GPUShaderStage.COMPUTE,N=this.layout.address.tileKeys,compiler=gpuCompilationManagerFor(device),pool=this.pool;
   if(Math.ceil(N/64)>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Uniform detail storage: the ring kernels launch ${Math.ceil(N/64)} workgroups, past one dispatch dimension`);
-  const following=this.following,sets:GPUTexture[][]=[];
-  // The ring kernels' lattice is their uniform's (the box in tiles, the
-  // blocks); table: the topology whose tail holds the pages.
-  const seam=(table:string)=>`${uniformWindowAddressWGSL(`${table}`,"5u*drCount()","(drCount()/512u)")}
-${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"},fine:`${table}[arrayLength(&${table})-1u-drDimensions.w+b]`})}`;
-  for(const format of ["rgba32float","r32float"] as const){const of=following.filter(h=>h.format===format);for(let i=0;i<of.length;i+=BATCH)sets.push(of.slice(i,i+BATCH));}
+  const sets=this.ringSets(),seam=(table:string)=>this.seam(table);
   const head=`@group(0) @binding(${2*BATCH}) var<storage,read> drHeldWords:array<u32>;
 @group(0) @binding(${2*BATCH+1}) var<storage,read> drNextWords:array<u32>;
 @group(0) @binding(${2*BATCH+4}) var<uniform> drDimensions:vec4u;
@@ -826,10 +892,87 @@ fn drShare(t:u32){
  /** Before a remap, in its encoder: the tiles the target generation
   * (target: its topology) brings into the detail ring take their canonical
   * texels from the bases. */
- encodeAdmit(encoder:GPUCommandEncoder,target:GPUBuffer):void{if(this.resident)this.encodeRing(encoder,target);}
+ encodeAdmit(encoder:GPUCommandEncoder,target:GPUBuffer):void{
+  if(!this.resident)return;
+  if(this.sparse)this.encodeClaim(encoder,target);
+  this.encodeRing(encoder,target);
+ }
+ /** After a commit claims blocks, ahead of page initialise: a vertex of a
+  * ring tile may move into a claimed block's high plane, which then needs a
+  * slot before the next relayout. */
+ encodeBlocks(encoder:GPUCommandEncoder):void{if(this.resident&&this.sparse)this.encodeClaim(encoder,this.simulation!.presentation.buffer);}
+ /** Slots for the blocks the next generation's ring needs, published to
+  * every topology that addresses the fields, and cleared to empty. */
+ private encodeClaim(encoder:GPUCommandEncoder,next:GPUBuffer):void{
+  this.hostSlots=undefined;
+  this.slots.encodeClaim(encoder,this.simulation!.presentation.buffer,next,this.layout.address.tileKeys);
+  this.encodePublish(encoder);
+  const init=this.kernelsOfDomain().init,first=this.physicals.get(init[0]!.handles[0]!)!;
+  if(this.initKey!==first){this.initKey=first;this.initGroups=init.map(b=>this.device.createBindGroup({label:"Uniform detail h slot init",layout:b.layout,entries:[
+   ...b.handles.map((h,i)=>({binding:i,resource:this.physicals.get(h)!.createView()})),{binding:4,resource:{buffer:this.slots.state}}]}));}
+  const pass=encoder.beginComputePass({label:"Uniform detail h slot init"});
+  for(let n=0;n<init.length;n++){pass.setPipeline(init[n]!.pipeline);pass.setBindGroup(0,this.initGroups[n]!);pass.dispatchWorkgroups(UniformFineSlots.initGroups);}
+  pass.end();
+ }
+ private initKey?:GPUTexture;
+ private initGroups:GPUBindGroup[]=[];
+ /** The slots to every attached topology and mirror, in encoder order. */
+ private encodePublish(encoder:GPUCommandEncoder):void{
+  for(const o of this.ownerships)o.encodeFineSlots(encoder,this.slots.state);
+  for(const m of this.slotMirrors)encoder.copyBufferToBuffer(this.slots.state,0,m.buffer,m.offset,4*this.layout.address.blocks);
+ }
+ /** A host assignment of the slots to the state, every attached topology and mirror (between frames). */
+ private writeSlots(slots:Uint32Array<ArrayBuffer>):void{
+  this.slots.write(slots,this.slotCapacity);this.hostSlots=slots;
+  for(const o of this.ownerships)o.writeFineSlots(slots);
+  for(const m of this.slotMirrors)this.device.queue.writeBuffer(m.buffer,m.offset,slots);
+ }
+ /** Between frames, after the first layout's t=0 kernels (which run over
+  * the whole block grid): the h stores keep only the blocks the held
+  * generation's ring needs, each at a slot (uniform-fine-slots.ts), at a
+  * capacity of `requested` blocks (fluid.tiers.fineBlocks) or the need x
+  * 1.5. Reads the need back (setup only). Nothing while no h generation is
+  * resident: a later admit stays whole-grid. */
+ async compact(requested?:number):Promise<void>{
+  if(!this.resident||this.sparse)return;
+  if(!this.transfers||!this.installed)throw new Error("Uniform detail storage compacts after its first layout and prepare()");
+  const device=this.device,a=this.layout.address,B=a.blocks,held=this.simulation!.presentation.buffer;
+  // The need: a claim over every block from an empty assignment, read back.
+  this.slots.write(new Uint32Array(B),Math.max(1,B-2));
+  const staging=device.createBuffer({label:"Uniform detail h slot need",size:4*B,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  let need:Uint32Array;
+  try{
+   const e=device.createCommandEncoder({label:"Uniform detail h slot need"});
+   this.slots.encodeClaim(e,held,held,a.tileKeys);e.copyBufferToBuffer(this.slots.state,4*this.slots.words.need,staging,0,4*B);device.queue.submit([e.finish()]);
+   await staging.mapAsync(GPUMapMode.READ);need=new Uint32Array(staging.getMappedRange().slice(0));
+  }finally{if(staging.mapState==="mapped")staging.unmap();staging.destroy();}
+  const blocks:number[]=[];for(let b=1;b<B-1;b++)if(need[b])blocks.push(b);
+  this.slotCapacity=uniformFineSlotCapacity(B,a.blockGrid,blocks.length,requested);
+  const slots=new Uint32Array(B);blocks.forEach((b,i)=>{slots[b]=i+1;});
+  // The new h stores: each needed block's texels copied to its slot, the AIR block's to the sentinel (what the
+  // t=0 kernels left there, as a whole-grid store holds it), the free slots empty.
+  this.sparse=true;
+  const e=device.createCommandEncoder({label:"Uniform detail h slot compaction"}),old:GPUTexture[]=[],from:[number,number,number]=[0,0,0],to:[number,number,number]=[0,0,0];
+  for(const handle of this.following){
+   const field=fields.get(handle)!,before=this.physicals.get(handle)!,after=this.allocate(handle.label,field.kind,before.format,true),edge=field.kind==="vertex"?33:32;
+   this.writeEmpty(after,field.empty);
+   for(const b of [0,...blocks]){
+    uniformBlockCoord(a,b,from);uniformBlockCoord(a,slots[b]!,to);
+    e.copyTextureToTexture({texture:before,origin:from.map(n=>edge*n)},{texture:after,origin:to.map(n=>edge*n)},[edge,edge,edge]);
+   }
+   old.push(before);this.physicals.set(handle,after);fields.set(after,field);registerUniformDetailBase(after,this.bases.get(handle)!);
+  }
+  device.queue.submit([e.finish()]);
+  this.writeSlots(slots);this.rebind();this.resized();this.release(old);
+ }
+ /** Whether the h stores hold slots (compact), and how many past the sentinel. */
+ get fineSlots():{readonly sparse:boolean;readonly capacity:number}{return {sparse:this.sparse,capacity:this.slotCapacity};}
  /** After the remap and its phi resolve, in their encoder: a pending
   * retirement is marked for commitRetire. */
- encodeRetire(encoder:GPUCommandEncoder):void{this.encodeRestriction(encoder);}
+ encodeRetire(encoder:GPUCommandEncoder):void{
+  this.encodeRestriction(encoder);
+  if(this.resident&&this.sparse){this.slots.encodeRelease(encoder,this.simulation!.presentation.buffer);this.encodePublish(encoder);}
+ }
  /** Logical readback (tight, as upload takes it): loads as the accessors do. */
  async read(texture:GPUTexture):Promise<Float32Array>{
   const encoder=this.device.createCommandEncoder({label:"Uniform detail field readback"}),done=this.capture(encoder,texture);
@@ -852,10 +995,14 @@ fn drShare(t:u32){
   const bw=base?.width??0,bh=base?.height??0,bd=base?.depthOrArrayLayers??0,brow=bw*comp*4,bpitch=Math.ceil(brow/256)*256;
   const beside=base?this.device.createBuffer({size:bpitch*bh*bd,usage}):undefined;
   if(base)encoder.copyTextureToBuffer({texture:base},{buffer:beside!,bytesPerRow:bpitch,rowsPerImage:bh},[bw,bh,bd]);
+  // Compacted h stores: the slots as of this point of the encoder place the texels.
+  const B=this.layout.address.blocks,slotted=resident&&this.sparse?this.device.createBuffer({size:4*B,usage}):undefined;
+  if(slotted)encoder.copyBufferToBuffer(this.slots.state,0,slotted,0,4*B);
   return async()=>{
-   let image:Float32Array,held:Float32Array|undefined;
+   let image:Float32Array,held:Float32Array|undefined,map:Uint32Array|undefined;
    try{
-    await Promise.all([staging.mapAsync(GPUMapMode.READ),beside?.mapAsync(GPUMapMode.READ)]);
+    await Promise.all([staging.mapAsync(GPUMapMode.READ),beside?.mapAsync(GPUMapMode.READ),slotted?.mapAsync(GPUMapMode.READ)]);
+    if(slotted)map=new Uint32Array(slotted.getMappedRange().slice(0));
     const src=new Uint8Array(staging.getMappedRange()),dst=new Uint8Array(row*H*Z);
     for(let r=0;r<H*Z;r++)dst.set(src.subarray(r*pitch,r*pitch+row),r*row);
     image=new Float32Array(dst.buffer);
@@ -864,8 +1011,9 @@ fn drShare(t:u32){
      for(let r=0;r<bh*bd;r++)tight.set(packed.subarray(r*bpitch,r*bpitch+brow),r*brow);
      held=new Float32Array(tight.buffer);
     }
-   }finally{for(const b of [staging,beside]){if(b?.mapState==="mapped")b.unmap();b?.destroy();}}
-   return kind==="vertex"?this.logicalVertex([lx,ly,lz],image,[W,H],resident,held,[bw,bh]):this.logical(kind,[lx,ly,lz],comp,image,[W,H],resident,held,[bw,bh]);
+   }finally{for(const b of [staging,beside,slotted]){if(b?.mapState==="mapped")b.unmap();b?.destroy();}}
+   this.slotMap=map;
+   try{return kind==="vertex"?this.logicalVertex([lx,ly,lz],image,[W,H],resident,held,[bw,bh]):this.logical(kind,[lx,ly,lz],comp,image,[W,H],resident,held,[bw,bh]);}finally{this.slotMap=undefined;}
   };
  }
  /** A cell or face field's logical values from its physical images. With an
@@ -1058,7 +1206,7 @@ ${`fn udFace(q:vec3i,b:u32)->vec3i{let c=q>>vec3u(2u*b);let j=${j};return vec3i(
  if(b==0u){return ${pf}umVertexTexel(q);}return ${pf}umWideVertexTexel(q>>vec3u(2u));
 }
 fn udVertexStore(q:vec3i,b:u32)->vec3i{
- if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);if(!${pf}umBlockStored(s.w)){return vec3i(-1);}let c=udVertexCoord(s.w,b);return (c<<vec3u(bits))+c+vec3i(s.xyz);}
+ if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);if(!${pf}umBlockStored(s.w)||(b==0u&&${pf}umFineSlot(s.w)==0u)){return vec3i(-1);}let c=udVertexCoord(s.w,b);return (c<<vec3u(bits))+c+vec3i(s.xyz);}
  if(b==0u){return ${pf}umVertexStoreTexel(q);}return ${pf}umWideVertexStoreTexel(q>>vec3u(2u));
 }
 // Where a vertex texture places block w: an h store (b 0) at its h slot's place, a base at its own.

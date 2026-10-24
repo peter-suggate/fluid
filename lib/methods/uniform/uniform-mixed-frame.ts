@@ -2,6 +2,7 @@ import { settleGPUInitialization } from "../../core/gpu-initialization";
 import { UniformNarrowBandFlip, type NarrowBandParticleBudget } from "./uniform-narrow-band-flip";
 import { NARROW_BAND_AIR_CHANGED_WORD } from "./uniform-narrow-band-air.wgsl";
 import {UNIFORM_MIXED_OVERFLOW_FINE,uniformMixedDetailViolationWord} from "./uniform-mixed-topology.wgsl";
+import {UNIFORM_DETAIL_SLOT_VIOLATION} from "./uniform-fine-slots";
 import {uniformMixedHangingBytes} from "./uniform-mixed-velocity-sampling.wgsl";
 import {UNIFORM_DETAIL_POLICY} from "./uniform-detail-policy";
 import {UNIFORM_DETAIL_VIOLATION,type UniformDetailGroup,type UniformDetailStorage} from "./uniform-detail-fields";
@@ -1262,6 +1263,7 @@ export class UniformMixedFrame {
  }
  /** Its own function: one holding a closure allocates that closure's context at every entry, and receive runs every frame. */
  private detailViolation(detail:number,simulation:number,pressure:number,failure:string|undefined):Error{
+  if(detail&UNIFORM_DETAIL_SLOT_VIOLATION)return new Error(`Uniform detail storage: the detail ring needs more blocks than the h stores' ${this.fields.detail?.fineSlots.capacity} slots (raise fluid.tiers.fineBlocks)${failure?`; ${failure}`:""}`);
   return new Error(`Uniform detail storage: a store a non-resident tile cannot hold (${Object.entries(UNIFORM_DETAIL_VIOLATION).filter(([,bit])=>detail&bit).map(([kind])=>kind).join(", ")} field; simulation ${simulation}, pressure ${pressure})${failure?`; ${failure}`:""}`);
  }
  private refuse(slot:ReceiptSlot,error:unknown):never{this.failed=true;slot.unchecked=false;throw error;}
@@ -1470,6 +1472,8 @@ export class UniformMixedFrame {
   * then the solid record over it. */
  encodeNewBlocks(encoder:GPUCommandEncoder):void{
   this.pageInitialise!.encode(encoder);this.extension.invalidateRetained();
+  // A claimed block may now hold a ring tile's vertex: its h slot before any store there.
+  this.fields.detail?.encodeBlocks(encoder);
   this.solid?.encodeNewBlocks(encoder,this.ownership.presentation);
  }
  private encodeRelayoutHead(encoder:GPUCommandEncoder,p:UniformMixedFrameParameters,dt:number,same:boolean,relayout:UniformMixedFrameRelayout,bodies:boolean,trace?:UniformMixedFrameTrace):void{

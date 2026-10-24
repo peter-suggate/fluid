@@ -390,6 +390,12 @@ export class UniformMixedOwnership {
   encodeFineSlots(encoder:GPUCommandEncoder,source:GPUBuffer):void{
     encoder.copyBufferToBuffer(source,0,this.topology,this.fineSlotBytes,4*this.capacity.address.blocks);
   }
+  /** The same slots from the host, queue-ordered (between frames). */
+  writeFineSlots(slots:Uint32Array<ArrayBuffer>):void{
+    if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
+    if(slots.length!==this.capacity.address.blocks)throw new Error(`Uniform h slots: ${slots.length} words for ${this.capacity.address.blocks} blocks`);
+    this.device.queue.writeBuffer(this.topology,this.fineSlotBytes,slots);
+  }
   /** The same table's words from a GPU buffer, ordered inside an encoder
    * (the detail directory a relayout changed, ahead of the passes that
    * address fields through it). */

@@ -799,7 +799,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The page pool's tail (a mirror), then the detail storage's h slots (a mirror), each block its own until it publishes them.
     this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength + 4 * address.blocks, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.pages, 0, address.seed.tail);
-    device.queue.writeBuffer(this.pages, address.seed.tail.byteLength, Uint32Array.from({ length: address.blocks }, (_, b) => b));
+    detailStorage.mirrorSlots(this.pages, address.seed.tail.byteLength);
     // The solid mask's image whole (SolidOccupancyMask): the page directory,
     // the bed-slope lane's directory (zero until the frame's bake places and
     // writes the lane at its build: every bed level; see bedSlopeBake), the mixed
@@ -1251,6 +1251,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // layout encodes no relayout publish).
     this.mixedFrame.publishCoarseVertexPhi();
     if(deferred)this.encodeInitialPresentationSurface();
+    // The t=0 kernels ran over the whole block grid: from here the h stores
+    // hold only the blocks the detail ring needs (uniform-fine-slots.ts)
+    // when fluid.tiers.fineBlocks asks for it (opt-in: 4h stages still load
+    // h texels outside the ring).
+    const fineBlocks=this.scene.fluid?.tiers?.fineBlocks;
+    if(fineBlocks!==undefined)await detail.compact(fineBlocks==="auto"?undefined:fineBlocks);
   }
   private mixedDynamic?: UniformMixedDynamicClassifier;
   /** GPU ownership builder for dynamic relayouts; region edits stay on the CPU path. */

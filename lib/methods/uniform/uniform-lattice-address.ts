@@ -222,7 +222,7 @@ fn umTileKey(p:vec3i)->u32{let b=umPageWord(p>>vec3u(3u));if(!umBlockStored(b)){
 fn umCellPresent(p:vec3i)->bool{return umBlockStored(umPageWord(p>>vec3u(5u)));}
 ${boxed(`fn umCellNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d})-vec3i(1));}
 `)}fn umCellTexel(p:vec3i)->vec3i{${cellLet}return (umFineCoord(umBlockOf(${cellQ}>>vec3u(5u)))<<vec3u(5u))|(${cellQ}&vec3i(31));}
-fn umCellStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(5u));if(!umBlockStored(b)){return vec3i(-1);}return (umFineCoord(b)<<vec3u(5u))|(p&vec3i(31));}
+fn umCellStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(5u));let f=umFineSlot(b);if(!umBlockStored(b)||f==0u){return vec3i(-1);}return (umBlockCoord(f)<<vec3u(5u))|(p&vec3i(31));}
 // The same in a cell texture that places a block at its own place (fine
 // false: a base block's map, >> 2) or at its h slot's (fine true).
 fn umCellTexelOf(p:vec3i,fine:bool)->vec3i{${cellLet}var b=umBlockOf(${cellQ}>>vec3u(5u));if(fine){b=umFineSlot(b);}return (umBlockCoord(b)<<vec3u(5u))|(${cellQ}&vec3i(31));}
@@ -258,7 +258,7 @@ fn umVertexSlot(v:vec3i)->vec4u{
 }
 fn umVertexPresent(p:vec3i)->bool{return umBlockStored(umVertexSlot(p).w);}
 fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(${vertexQ});let c=umFineCoord(min(s.w,${blocks}-1u));return (c<<vec3u(5u))+c+vec3i(s.xyz);}
-fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umFineCoord(s.w);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
+fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);let f=umFineSlot(s.w);if(!umBlockStored(s.w)||f==0u){return vec3i(-1);}let c=umBlockCoord(f);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 // Vertices of the 4h lattice (tile corners), in tile units: 9³ blocks.
 fn umWideVertexSlot(v:vec3i)->vec4u{
  ${source.addressPlan ? "let plan=umPlannedVertexSlot(v,3u);if(plan.w!=0xffffffffu){return plan;}" : ""}
@@ -302,7 +302,9 @@ ${source.constant
     ? "const UM_BLOCK_GRID:vec3u=vec3u(1u<<UM_BLOCK_BITS,1u<<UM_BLOCK_BITS,(UM_BLOCKS+(1u<<(2u*UM_BLOCK_BITS))-1u)>>(2u*UM_BLOCK_BITS));"
     : "fn UM_BLOCK_GRID()->vec3u{let k=UM_BLOCK_BITS();return vec3u(1u<<k,1u<<k,(UM_BLOCKS()+(1u<<(2u*k))-1u)>>(2u*k));}"}
 fn umBlockCoord(b:u32)->vec3i{let k=${bits};let m=(1u<<k)-1u;return vec3i(vec3u(b&m,(b>>k)&m,b>>(2u*k)));}
-// The h stores place block b at its h slot's place in the grid.
+// The h stores place block b at its h slot's place in the grid. Slot 0 is
+// the sentinel: a block with no slot reads its empty block, and a Store form
+// drops a store there.
 fn umFineSlot(b:u32)->u32{return ${source.fine ?? "b"};}
 fn umFineCoord(b:u32)->vec3i{return umBlockCoord(umFineSlot(b));}
 // A tile's index in its page, and the tile of an index (or of a key) from
