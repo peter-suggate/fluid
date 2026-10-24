@@ -2,7 +2,8 @@
  * program and allocation fingerprints, per-frame particle counts and, at the
  * end, a hash of every copyable buffer and texture (the fields).
  * node --import tsx tools/probe-nbflip-particle-tiers.ts NAME --scene=ID
- *   [--steps=N] [--tiers=JSON] [--hash=all|none] [--profile] [--out=DIR]
+ *   [--steps=N] [--tiers=JSON] [--hash=all|none] [--profile] [--stats] [--out=DIR]
+ * --stats reads the volume drift every frame (a readback a frame).
  * --tiers sets scene.fluid.tiers, e.g. '{"bricks":2000,"particlesPerFineCell":4}'.
  * PROBE_SHADERS=DIR writes every shader module there, in creation order.
  * --profile adds pass timestamps (mean ms by label over the last third).
@@ -27,11 +28,9 @@ import { createRegionTierScene, type RegionTierScene } from "./region-tier-scene
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "run"; assert.match(name, /^[a-z0-9-]+$/);
-const steps = Number(option("steps") ?? 24), hashMode = option("hash") ?? "all", profiled = process.argv.includes("--profile");
+const steps = Number(option("steps") ?? 24), hashMode = option("hash") ?? "all", profiled = process.argv.includes("--profile"), perFrameStats = process.argv.includes("--stats");
 const out = option("out") ?? "artifacts/nbflip-particle-tiers"; mkdirSync(out, { recursive: true });
-// tools/gate-nbflip-particle-tiers.ts imports this probe once an arm, in one process.
-const paced = globalThis as { nbParticleTierPaced?: boolean };
-if (!paced.nbParticleTierPaced) { paceDawnEventPolling(); paced.nbParticleTierPaced = true; }
+paceDawnEventPolling();
 // --scene=region:MODE:LENGTH:BLOCKS is a region-tier scene (tools/region-tier-scenes.ts) on a pool of BLOCKS blocks.
 const sceneId = option("scene") ?? "nbflip-figure-8-letters", region = /^region:([a-z]+):(\d+):(\d+)$/.exec(sceneId);
 const definition = region ? { id: sceneId, methodProfile: { quality: "balanced" as const, overrides: {} } } : getSceneDefinition(sceneId);
@@ -73,7 +72,9 @@ try {
     const work = { particles: f.particles, reseedClipped: f.reseedClipped, ...solver.workDomainInfo, residentPages: solver.pagePoolInfo?.residentPages, claimedPages: solver.pagePoolInfo?.claimedPages, retiredPages: solver.pagePoolInfo?.retiredPages,
       changedTiles: (solver.info as unknown as Record<string, unknown>).uniformMixedDynamicChangedTiles, bandTiles: solver.info.uniformPressureBandTiles, bandCycles: solver.info.uniformPressureBandCycles, bandResidual: solver.info.uniformPressureBandResidual };
     history.update(JSON.stringify(work));
-    rows.push({ frame, wall_ms, capacity: f.capacity, ...work, passes });
+    const drift = perFrameStats ? await solver.readStats() : undefined;
+    rows.push({ frame, wall_ms, capacity: f.capacity, ...work, occupancy: f.particles / f.capacity,
+      volumeDrift: drift?.volumeDrift, representedVolumeDrift: drift?.representedVolumeDrift, passes });
   }
   const stats = await solver.readStats();
   const physics = { maxSpeed_m_s: stats.maxSpeed_m_s, volumeCellSum: stats.volumeCellSum, representedVolumeCellSum: stats.representedVolumeCellSum, volumeDrift: stats.volumeDrift, front_m: stats.front_m };
