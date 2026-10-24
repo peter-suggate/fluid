@@ -117,6 +117,7 @@
 import { uniformMovingWindowDecisionWGSL } from "./uniform-moving-window";
 import { UNIFORM_WINDOW_HEADER_WORDS, uniformWindowDerivedWords, uniformWindowWorldWGSL } from "./uniform-window-address";
 import type { GPUFluidVolumePageSource } from "../../core/method-view-records";
+import type { LatticePages } from "../../core/initial-liquid-lattice";
 
 const RECORD=8;
 export const UNIFORM_PAGE_POOL_EDGE=32;
@@ -402,10 +403,10 @@ export interface UniformPagePoolResidency {
  * Resident at build: the box less record.air where the record lists one;
  * otherwise, live, the pages within UNIFORM_PAGE_POOL_SEED_MARGIN cells of a
  * wet cell of the initial liquid and the pinned; otherwise every box page.
- * liquid: the initial cell volumes, x fastest, asked for only by the
- * wet-cell case. origin: the box's low page in the window. The sources'
+ * liquid: the initial cell volumes, x fastest or by page (LatticePages of
+ * UNIFORM_PAGE_POOL_EDGE cells), asked for only by the wet-cell case. origin: the box's low page in the window. The sources'
  * cell boxes and the pins are the window's, the AIR pages the box's. */
-export function uniformPagePoolResidency(cells:readonly [number,number,number],record:{readonly blocks?:number;readonly air?:readonly (readonly [number,number,number])[]}|undefined,sources:readonly UniformPagePoolCellBox[],follows:boolean,liquid:()=>ArrayLike<number>,origin:readonly [number,number,number]=[0,0,0]):UniformPagePoolResidency{
+export function uniformPagePoolResidency(cells:readonly [number,number,number],record:{readonly blocks?:number;readonly air?:readonly (readonly [number,number,number])[]}|undefined,sources:readonly UniformPagePoolCellBox[],follows:boolean,liquid:()=>ArrayLike<number>|LatticePages,origin:readonly [number,number,number]=[0,0,0]):UniformPagePoolResidency{
  const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,count=px*py*pz;
  const live=follows,resident=new Uint8Array(count).fill(1),pinned=new Uint8Array(count);
  const coordinates=(flags:Uint8Array,set:number)=>{const out:[number,number,number][]=[];for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++)if(flags[i]===set)out.push([x,y,z]);return out;};
@@ -429,15 +430,24 @@ export function uniformPagePoolSourcePages(cells:readonly [number,number,number]
 }
 /** One flag per box page: a wet cell (volume above zero) lies within `margin`
  * cells of it on every axis. Each page keeps the box of its wet cells, so a
- * page is tested against boxes, not cells: never fewer pages than the cells give. */
-function wetPages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>,margin:number):Uint8Array{
+ * page is tested against boxes, not cells: never fewer pages than the cells give.
+ * By page, only the pages that hold liquid are read. */
+function wetPages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>|LatticePages,margin:number):Uint8Array{
  const E=UNIFORM_PAGE_POOL_EDGE,[nx,ny,nz]=cells,[px,py,pz]=pages,count=px*py*pz,low=new Int32Array(3*count).fill(0x7fffffff),high=new Int32Array(3*count).fill(-1),flags=new Uint8Array(count);
- if(volume.length!==nx*ny*nz)throw new RangeError(`Uniform page pool: the initial liquid holds ${volume.length} cells, not the lattice's ${nx*ny*nz}`);
- for(let z=0,i=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++,i++){
-  if(!(volume[i]!>0))continue;
-  const p=3*(Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E)));
+ const wet=(p:number,x:number,y:number,z:number)=>{
   if(x<low[p]!)low[p]=x;if(y<low[p+1]!)low[p+1]=y;if(z<low[p+2]!)low[p+2]=z;
   if(x>high[p]!)high[p]=x;if(y>high[p+1]!)high[p+1]=y;if(z>high[p+2]!)high[p+2]=z;
+ };
+ if("edge" in volume){
+  if(volume.edge!==E||volume.cells.some((n,a)=>n!==cells[a]))throw new RangeError(`Uniform page pool: the initial liquid's pages are of ${volume.edge} cells over ${volume.cells.join("x")}, not ${E} over the lattice's ${cells.join("x")}`);
+  for(let i=0;i<count;i++){
+   const page=volume.at[i];if(!page)continue;
+   const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
+   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz)wet(3*i,ox+x,oy+y,oz+z);
+  }
+ }else{
+  if(volume.length!==nx*ny*nz)throw new RangeError(`Uniform page pool: the initial liquid holds ${volume.length} cells, not the lattice's ${nx*ny*nz}`);
+  for(let z=0,i=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++,i++)if(volume[i]!>0)wet(3*(Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E))),x,y,z);
  }
  const reach=Math.ceil(margin/E),gap=(p:number,k:number,a:number)=>Math.max(low[p+k]!-(a+E-1),a-high[p+k]!,0);
  for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++){

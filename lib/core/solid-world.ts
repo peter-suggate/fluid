@@ -226,6 +226,11 @@ const floorDiv = (value: number, divisor: number): number => Math.floor(value / 
 const floorMod = (value: number, divisor: number): number =>
   value - floorDiv(value, divisor) * divisor;
 
+const validSolidWorldCoordinate = (value: number): boolean => Number.isSafeInteger(value)
+  && value >= -0x8000_0000 && value <= 0x7fff_ffff;
+// sampleSolidWorld's page coordinate; the directory reads it and keeps nothing.
+const sampledPage: [number, number, number] = [0, 0, 0];
+
 export function solidWorldPageAddress(coordinate: SolidWorldCoordinate): {
   readonly page: SolidWorldCoordinate;
   readonly local: SolidWorldCoordinate;
@@ -1143,14 +1148,23 @@ export function sampleSolidWorld(
   separateTerrain = false,
 ): { readonly solidFraction: number; readonly signedDistance_cells: number;
   readonly materialId: number } {
-  const address = solidWorldPageAddress(coordinate);
-  const pageIndex = world.directory.lookup(address.page);
+  // solidWorldPageAddress without its arrays: a lattice walk samples every cell.
+  const cx = coordinate[0], cy = coordinate[1], cz = coordinate[2];
+  if (!(validSolidWorldCoordinate(cx) && validSolidWorldCoordinate(cy) && validSolidWorldCoordinate(cz))) {
+    throw new RangeError("SolidWorld voxel coordinate must fit signed i32");
+  }
+  const lookupPage = sampledPage;
+  lookupPage[0] = floorDiv(cx, SOLID_WORLD_BRICK_CELLS); lookupPage[1] = floorDiv(cy, SOLID_WORLD_BRICK_CELLS);
+  lookupPage[2] = floorDiv(cz, SOLID_WORLD_BRICK_CELLS);
+  const localIndex = floorMod(cx, SOLID_WORLD_BRICK_CELLS) + SOLID_WORLD_BRICK_CELLS
+    * (floorMod(cy, SOLID_WORLD_BRICK_CELLS) + SOLID_WORLD_BRICK_CELLS * floorMod(cz, SOLID_WORLD_BRICK_CELLS));
+  const pageIndex = world.directory.lookup(lookupPage);
   let page = pageIndex === undefined ? undefined : world.pages[pageIndex]!;
   if (separateTerrain && world.ground && page
-    && (!page.authored || !(page.authored[address.localIndex >>> 3]! & (1 << (address.localIndex & 7))))) page = undefined;
-  let solidFraction = page?.solidFraction[address.localIndex] ?? 0;
-  let signedDistanceQ8 = page?.signedDistanceQ8[address.localIndex] ?? 0x7fff;
-  let materialId = page?.materialId[address.localIndex] ?? 0;
+    && (!page.authored || !(page.authored[localIndex >>> 3]! & (1 << (localIndex & 7))))) page = undefined;
+  let solidFraction = page?.solidFraction[localIndex] ?? 0;
+  let signedDistanceQ8 = page?.signedDistanceQ8[localIndex] ?? 0x7fff;
+  let materialId = page?.materialId[localIndex] ?? 0;
   let held = page !== undefined;
   const ground = held || separateTerrain ? undefined : world.ground;
   if (ground) {
@@ -1164,8 +1178,8 @@ export function sampleSolidWorld(
   }
   let regionMatched = false;
   for (const region of world.regions ?? []) {
-    if (!coordinate.every((value, axis) => value >= region.minimum[axis]!
-      && value < region.maximumExclusive[axis]!)) continue;
+    const low = region.minimum, high = region.maximumExclusive;
+    if (!(cx >= low[0]! && cx < high[0]! && cy >= low[1]! && cy < high[1]! && cz >= low[2]! && cz < high[2]!)) continue;
     assertSolidWorldRegionIsBox(region);
     // A paint recolours what is solid and makes nothing so.
     if (region.operation === "paint") {
