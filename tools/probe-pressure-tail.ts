@@ -3,7 +3,10 @@
  * read: max speed, volume drift and (reservoir seep) the volume past the wall.
  *   node --import tsx tools/probe-pressure-tail.ts NAME --scene=reservoir-seep [--cell=0.005]
  *   node --import tsx tools/probe-pressure-tail.ts NAME --tier=rest [--length=128] [--depth=32]
- *   [--steps=120] [--from=13] [--values={...}] [--no-profile] [--out=DIR]
+ *   [--steps=120] [--from=13] [--values={...}] [--pool-blocks=N] [--no-profile] [--out=DIR] [--gate="RUNNER MODE"]
+ * --gate: construct first (mostly CPU: pipeline compiles), then hold a slot
+ * of the shared GPU runner only over the frames: the gate command runs `cat`
+ * once the slot is held, and the slot is released when its stdin closes.
  * Pass times are timestamped passes (GPUPassProfile): the solve pass is the
  * V-cycles, its start and final measure; ms a cycle divides it by the
  * frame's completed cycles. */
@@ -11,6 +14,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { spawn, type ChildProcess } from "node:child_process";
 import { resolveMethodValues, type MethodParamValues } from "../lib/core/method-contract";
 import { sceneDocument, sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -30,25 +34,34 @@ const name = process.argv[2] ?? "probe";
 assert.match(name, /^[a-z0-9.-]+$/);
 const steps = Number(option("steps") ?? 120), from = Number(option("from") ?? 13), profiled = !process.argv.includes("--no-profile");
 const extra: MethodParamValues = JSON.parse(option("values") ?? "{}");
-let scene: SceneDescription, overrides: MethodParamValues = {};
+let scene: SceneDescription, overrides: MethodParamValues = {}, quality = "balanced";
 const tier = option("tier") as RegionTierScene | undefined;
 if (tier) {
   assert.ok(REGION_TIER_SCENES.includes(tier));
   scene = createRegionTierScene(tier, Number(option("length") ?? 128), Number(option("depth") ?? 32));
 } else {
   const definition = getSceneDefinition(option("scene") ?? "reservoir-seep");
-  overrides = definition.methodProfile?.overrides ?? {};
+  overrides = definition.methodProfile?.overrides ?? {}; quality = definition.methodProfile?.quality ?? quality;
   const cell = option("cell");
   scene = structuredClone(cell ? sceneDocumentAtLattice(definition, { cellSize_m: Number(cell) }).scene : sceneDocument(definition));
 }
+const poolBlocks = option("pool-blocks");
+if (poolBlocks !== undefined) scene.fluid = { ...scene.fluid, pagePool: { ...scene.fluid?.pagePool, blocks: Number(poolBlocks) } } as SceneDescription["fluid"];
 scene.duration_s = Math.max(scene.duration_s, steps * scene.numerics.fixedDt_s);
-const values = resolveMethodValues(method, "balanced", { ...method.appDefaults, timeStep: "scene", ...overrides, ...extra });
+const values = resolveMethodValues(method, quality as never, { ...method.appDefaults, timeStep: "scene", ...overrides, ...extra });
 const dt = scene.numerics.fixedDt_s;
 paceDawnEventPolling();
 const out = option("out") ?? "artifacts/pressure-tail";
 mkdirSync(out, { recursive: true });
 const quantile = (v: number[], q: number) => { const s = [...v].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(q * s.length))]! : NaN; };
 const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / Math.max(1, v.length);
+async function acquireGate(gate: string): Promise<ChildProcess> {
+  const [command, ...args] = gate.split(" ").filter(Boolean);
+  const child = spawn(command!, [...args, "cat"], { stdio: ["pipe", "pipe", "inherit"] });
+  await new Promise<void>((done, fail) => { child.stdout!.once("data", () => done()); child.once("exit", code => fail(new Error(`gate exited ${code}`))); child.stdin!.write("held\n"); });
+  return child;
+}
+let lock: ChildProcess | undefined;
 let device: GPUDevice | undefined, profile: GPUPassProfile | undefined, solver: WebGPUUniformReferenceSolver | undefined;
 const rows: { frame: number; wall_ms: number; cycles: number; residual: number; bandTiles: number; solve_ms?: number; prepare_ms?: number; frame_gpu_ms?: number }[] = [];
 const errors: string[] = [];
@@ -64,6 +77,8 @@ try {
   const built = performance.now();
   solver = await method.createSolverAsync!(device, scene, "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
   console.log(JSON.stringify({ phase: "constructed", ms: performance.now() - built, grid: [solver.info.nx, solver.info.ny, solver.info.nz], dt }));
+  const gate = option("gate");
+  if (gate) { const t = performance.now(); lock = await acquireGate(gate); console.log(JSON.stringify({ phase: "locked", wait_ms: performance.now() - t })); }
   for (let frame = 1; frame <= steps; frame++) {
     if (profile && frame >= from) profile.start();
     const start = performance.now();
@@ -95,5 +110,6 @@ try {
   writeFileSync(`${out}/${name}.json`, JSON.stringify({ name, scene: scene.sceneId, values: extra, steps, from, summary, rows }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", name, summary }));
 } finally {
+  lock?.stdin?.end();
   solver?.destroy(); await device?.queue.onSubmittedWorkDone(); profile?.destroy(); device?.destroy();
 }
