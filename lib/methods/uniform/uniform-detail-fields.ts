@@ -430,10 +430,11 @@ export class UniformDetailStorage{
  /** Whole-field upload of logical values (tight, x fastest, vec4 for
   * faces), as a raw texture would hold them: resident patches take every
   * texel, a non-resident tile its canonical texels' values. Packed uploads
-  * before the first layout stay pending: install() deposits them. */
- upload(texture:GPUTexture,values:Float32Array):void{
+  * before the first layout stay pending: install() deposits them. No values:
+  * the field's empty value throughout, with no lattice-sized array. */
+ upload(texture:GPUTexture,values?:Float32Array):void{
   const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1;this.kindOf(texture);
-  if(values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
+  if(values&&values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
 
   if(!this.installed){this.pending.set(texture,values);return;}
   this.write(texture,this.image(texture,values));
@@ -444,7 +445,7 @@ export class UniformDetailStorage{
  /** Domain: the field's h generation is resident, its base a second texture. */
  private twinned(texture:GPUTexture):boolean{return this.resident&&!this.pinned.has(fields.get(texture)!.handle);}
  private installed=false;
- private readonly pending=new Map<GPUTexture,Float32Array>();
+ private readonly pending=new Map<GPUTexture,Float32Array|undefined>();
  get settled():boolean{return this.installed;}
  private image(texture:GPUTexture,values?:Float32Array,base=false):Float32Array<ArrayBuffer>{
   const kind=this.kindOf(texture),[lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,t=base?this.bases.get(fields.get(texture)!.handle)!:this.physical(texture),W=t.width,H=t.height;
@@ -504,8 +505,8 @@ export class UniformDetailStorage{
   if(this.pending.has(live.velocityScratch))throw new Error("The scratch velocity has no initial upload");
   for(const [texture,values] of this.pending){
    const image=this.image(texture,values);
-   if(!all&&texture===live.volume)this.coarsenCells(layout,values,image,texture);
-   if(!all&&texture===live.velocity){
+   if(!all&&values&&texture===live.volume)this.coarsenCells(layout,values,image,texture);
+   if(!all&&values&&texture===live.velocity){
     this.coarsenFaces(layout,values,image,texture);
     const scratch=this.image(live.velocityScratch);this.coarsenFaces(layout,values,scratch,live.velocityScratch);this.write(live.velocityScratch,scratch);
    }
