@@ -13,6 +13,7 @@ import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
 import {UNIFORM_MIXED_RELAYOUT_RECEIPT,uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformBufferedWork} from "./uniform-buffered-work";
 import {uniformKeyGroups} from "./uniform-lattice-address";
+import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
 import {uniformMixedRemapCapacity} from "./uniform-mixed-remap-capacity";
 
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
@@ -212,11 +213,12 @@ export class UniformMixedRemap {
   const solid=this.solid;
   // The list compares the live (old) and target widths, so it is built
   // before the live ownership adopts the target and reused by the publish.
-  // Either launch is one lane per tile, the list's bound.
+  // The scan is one lane per tile key; the listed launch a fixed grid
+  // striding the list.
   if(!copy){
-   const groups=uniformKeyGroups(this.tiles,64,x,this.listGrid);
    pass.setBindGroup(2,(listed??this.groups[0]).group);pass.setBindGroup(3,this.statusGroup.group);pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"markListed":"markChanged")!));
-   pass.dispatchWorkgroups(groups[0],groups[1]);
+   if(listed)pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,Math.ceil(this.tiles/64)));
+   else{const groups=uniformKeyGroups(this.tiles,64,x,this.listGrid);pass.dispatchWorkgroups(groups[0],groups[1]);}
   }
   if(solid)pass.setBindGroup(3,solid.tileGroup);
   // The extension leaves the scratch velocity before the velocity remap
@@ -612,16 +614,17 @@ const RECEIPT_GENERATION:u32=${UNIFORM_MIXED_RELAYOUT_RECEIPT.generation}u;
 // its 3x3x3 neighbourhood, so it is in that list, and every entry runs the
 // same test. A fatal receipt bit lists nothing; lane 0 of the first group
 // latches it once, then publishes the receipt's generation as the frame's
-// current one (a failure latched later names it).
-@compute @workgroup_size(64) fn markListed(@builtin(global_invocation_id) gid:vec3u){
- let i=gid.x+umDispatchX*64u*gid.y;let fatal=receipt[RECEIPT_FATAL];
- if(i==0u){
+// current one (a failure latched later names it). A fixed grid strides the
+// list.
+@compute @workgroup_size(64) fn markListed(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let fatal=receipt[RECEIPT_FATAL];
+ if(gid.x==0u){
   atomicOr(&umStatus[${UNIFORM_MIXED_STATUS.residencyAudit}u],receipt[${UNIFORM_MIXED_RELAYOUT_RECEIPT.audit}u]);
   if(fatal!=0u){umLatchFailure(select(${UNIFORM_MIXED_FAILURE.layoutCapacity}u,${UNIFORM_MIXED_FAILURE.invalidSupport}u,(fatal&~REMAP_FATAL_CAPACITY)!=0u),fatal,receipt[RECEIPT_FATAL_BUILD]);}
   atomicStore(&umStatus[${UNIFORM_MIXED_STATUS.currentGeneration}u],receipt[RECEIPT_GENERATION]);
  }
- if(fatal!=0u||umFrameFailed()||i>=umDilatedCount()){return;}
- let tile=umDilatedTile(i);markTile(tile);
+ if(fatal!=0u||umFrameFailed()){return;}
+ for(var i=gid.x;i<umDilatedCount();i+=64u*groups.x){markTile(umDilatedTile(i));}
 }
 fn refinedAt(c:vec3u,d:vec3u)->bool{
  let q=c+d;if(!umTilePresent(vec3i(q))){return false;}
