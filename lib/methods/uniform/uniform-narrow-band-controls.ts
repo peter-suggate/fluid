@@ -36,8 +36,8 @@ export const narrowBandFineAdvection=(value:unknown):"cubic"|"trilinear"|"adapti
 /** The level-set advect at 4h vertices. No particles carry a 4h surface: the
  * census keeps a moving surface at h where 4h would round its corners or
  * curves, so a 4h surface is flat or gently curved. */
-export const NARROW_BAND_COARSE_ADVECTION:SelectParamSpec={kind:"select",key:"phiCoarseAdvection",label:"4h-tile phi advection",default:"cubic",tier:"fine",update:"runtime",
+export const NARROW_BAND_COARSE_ADVECTION:SelectParamSpec={kind:"select",key:"phiCoarseAdvection",label:"4h-tile phi advection",default:"trilinear",tier:"fine",update:"runtime",
   options:[{value:"cubic",label:"Cubic"},{value:"trilinear",label:"Trilinear"}],
   hint:"How 4h vertices move the level set. The census keeps a moving corner, curve, thin sheet or droplet at h, so a 4h surface is flat or gently curved: trilinear moves a flat surface exactly with eight taps in place of the cubic's 64, and pulls a curved one in by a twelfth of its 4h second difference a step. Cubic holds a curved 4h surface. In the analytic suite trilinear 4h costs 0 to 0.5% more volume in 10 frames (translation, dam-break) and saves about 0.4 ms of the pour's late frame."};
-export const narrowBandCoarseAdvection=(value:unknown):"cubic"|"trilinear"=>value==="trilinear"?"trilinear":"cubic";
+export const narrowBandCoarseAdvection=(value:unknown):"cubic"|"trilinear"=>value==="cubic"?"cubic":"trilinear";
 export const narrowBandControlParams:readonly NumberParamSpec[]=controls.map(c=>({...c,kind:"number",tier:"coarse",update:"runtime",dedicated:true}));

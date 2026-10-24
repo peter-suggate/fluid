@@ -26,7 +26,11 @@ export const narrowBandFixedDetail:MethodParamValues={detailPolicy:"dynamic",det
  * falling stream has dt·g/|u| of it (0.15 per 1/24 s step on the pour's
  * spout, every tile of it h, its particles seeded and their joins h). */
 export const narrowBandAdaptiveDetail:MethodParamValues={...narrowBandFixedDetail,...narrowBandControlValues(),adaptiveSurface:"on",
- detailShapeTolerance:0.5,detailShapeMetric:"displacement",detailThin:"on",detailImpact:"on",detailApproach:"on"};
+ detailShapeTolerance:0.5,detailShapeMetric:"displacement",detailThin:"on",detailImpact:"on",detailApproach:"on",
+ // Correctness first: h vertices take the cubic (adaptive: trilinear under
+ // hot particles), 4h the trilinear (phiCoarseAdvection). The census keeps
+ // moving corners and curves at h; trilinear h erodes them every step.
+ phiCubicAdvection:"on"};
 export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  ...resolveUniformGeometricValues({...narrowBandAdaptiveDetail,...values}),...narrowBandControlValues(values),...fixed,
  fineGridPadding:Math.max(0,Math.min(4,Number.isFinite(Number(values.fineGridPadding))?Number(values.fineGridPadding):0)),
