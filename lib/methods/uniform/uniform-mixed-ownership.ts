@@ -404,12 +404,20 @@ export class UniformMixedOwnership {
    * unused list-0 slot [4n+16, 5n+16). No stage reads them on a remap
    * target, and the frame that adopts rebuilds the header and planes
    * (UniformMixedFramePlan.encode clears [0, n) and the header, seeds, and
-   * dilates [n, 4n) over every tile) before any reader. */
-  adoptGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers):void{
-    this.copyGeneration(encoder,source);
+   * dilates [n, 4n) over every tile) before any reader.
+   * copyLive: a launch that copies only the words a reader can reach (the
+   * source's live tiles, its lists by their counts, the sentinel keys;
+   * UniformMixedRemap's adopt) into adoptionTargets; the whole range is
+   * copied without one. */
+  adoptGpu(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers,copyLive?:(encoder:GPUCommandEncoder)=>void):void{
+    if(copyLive){encoder.copyBufferToBuffer(source.counts.buffer,source.counts.offset,this.counts,0,16);copyLive(encoder);}
+    else this.copyGeneration(encoder,source);
     this.revision++;
     this.mirrorCurrent=false;this.overCapacity=false;
   }
+  /** What adoptGpu's copyLive writes: the tile words, the support words and
+   * (sampled) the hanging slot table. */
+  get adoptionTargets():{readonly topology:GPUBuffer;readonly support:GPUBuffer;readonly hanging?:GPUBuffer}{return {topology:this.topology,support:this.support,hanging:this.sampled?this.hanging:undefined};}
   /** False once a GPU generation was adopted without a host mirror. */
   mirrorCurrent=true;
   /** The host-sized launches below size grids from the host mirror: after a
