@@ -90,5 +90,12 @@ test('hot modules specialize immutable bounds at construction while movable fram
  assert.equal(fixed.umFixedWorldGeometry,1);
  for(let i=24;i<32;i++)assert.equal(fixed['umWindowWord'+i],address.seed.tail[address.seed.layout.tail.window+i]);
  assert.equal(fixed.umFixedFrame,undefined,'movable frame is never frozen by world specialization');
+ assert.equal(fixed.umFlatWindow,undefined,'a movable frame keeps the two-level lookup');
  assert.equal(descriptors[1]!.compute.constants,undefined,'mutable ownership reads the uniform even in a hot module');
+ // A closed tank inside lattice pages -1..62 reads only the flat window; one past it keeps the two-level lookup.
+ for(const [x,flat] of [[62,1],[64,undefined]] as const){
+  const closed=uniformLatticeAddress([32*x,32,32],false,{blocks:80,air:[]});
+  await uniformDetailPipeline(device,{fixedWorldGeometry:true,capacity:{address:closed}} as UniformMixedOwnership,descriptor);
+  assert.equal(descriptors.at(-1)!.compute.constants!.umFixedFrame,1);assert.equal(descriptors.at(-1)!.compute.constants!.umFlatWindow,flat,`${x} pages`);
+ }
 });
