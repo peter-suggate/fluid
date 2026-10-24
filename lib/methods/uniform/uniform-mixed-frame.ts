@@ -525,7 +525,7 @@ export class UniformMixedFrame {
    this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false,0,capacity.fixedWorldGeometry),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:rootPhi,frozen:view(r.frozen),residual:view(r.residual),
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
   const root=this.levels[0]!,p=root.ownership;
-  this.rootOwners=new UniformMixedRootOwners(device,p,root.phi!,this.solidTopology);
+  this.rootOwners=new UniformMixedRootOwners(device,p,this.pagePool,root.phi!,this.solidTopology);
   this.blockNeighbours=new UniformBlockNeighbours(device,layout.address.blocks,[o.pageMirror,p.pageMirror]);
   this.frameOwnerships.push(o);for(const level of this.levels)if(!this.frameOwnerships.includes(level.ownership))this.frameOwnerships.push(level.ownership);
   if(f.detail){f.detail.attach(o);f.detail.attach(p);}
@@ -537,7 +537,7 @@ export class UniformMixedFrame {
   // Surface and momentum share hanging taps of velocityScratch: nothing
   // between the cache and forces writes it, negativeScratch or cache 0.
   this.hangingGroup=this.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:caches[0]!});
-  this.heat=new UniformRegionHeat(device,o,()=>this.surfaceWorkControl.generation);this.plan.attachHeat(this.heat.tiers);this.phiResolve.attachHeat(this.heat.tiers);
+  this.heat=new UniformRegionHeat(device,o,this.pagePool,()=>this.surfaceWorkControl.generation);this.plan.attachHeat(this.heat.tiers);this.phiResolve.attachHeat(this.heat.tiers);
   this.surfaceWorkControl=new UniformSurfaceWorkControl(device,o,f.phi,solid,this.pagePool,this.heat);
   this.narrowBandFlip.attachFramePlan(this.surfaceWorkControl.framePlan);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
@@ -549,7 +549,7 @@ export class UniformMixedFrame {
 
   // Viscosity reads exact MAC sites from the momentum fill (the extended
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
-  this.dynamics=new UniformMixedRegionDynamics(device,o,{forceParams:this.params.forces,pressure:root.pressure,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,heat:this.heat.tiers,normalDirty:this.geometry.curvatureDirty});
+  this.dynamics=new UniformMixedRegionDynamics(device,o,{pool:this.pagePool,forceParams:this.params.forces,pressure:root.pressure,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,heat:this.heat.tiers,normalDirty:this.geometry.curvatureDirty});
   this.freeze=capacity.coldRegions==="fine"?undefined:new UniformColdFreeze(device,o,this.heat);
   this.narrowBandFlip.attachFreeze(this.freeze);
   this.heat.attach({dynamics:this.dynamics.record,updateErrors:this.plan.updateErrors,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,sourceParams:f.sourceParams,
