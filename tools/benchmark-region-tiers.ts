@@ -10,7 +10,7 @@ import { dirname, resolve } from "node:path";
 import { cpus } from "node:os";
 import { createHash } from "node:crypto";
 import { createUniformSolver, withUniformDevice } from "../tests/helpers/uniform-geometric";
-import { readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
+import { readMixedBuffer, readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
@@ -98,10 +98,14 @@ await withUniformDevice("region tier benchmark", async device => {
     }
     const stats = await solver.readStats();
     const fields: Record<string, string> = {};
-    if (process.argv.includes("--fingerprint")) for (const [name, texture] of Object.entries({
-      velocity: solver.velocityTexture, volume: solver.volumeTexture, phi: solver.vertexPhiTexture!, pressure: solver.gridPressureTexture,
+    // A mixed frame's pressure is its presentation buffer: gridPressureTexture is a 1x1x1 placeholder there.
+    const pressure = (solver as unknown as { mixedFrame?: { presentation: { pressure: GPUBufferBinding } } }).mixedFrame?.presentation.pressure;
+    if (process.argv.includes("--fingerprint")) for (const [name, read] of Object.entries({
+      velocity: () => readMixedTexture(device, solver.velocityTexture), volume: () => readMixedTexture(device, solver.volumeTexture),
+      phi: () => readMixedTexture(device, solver.vertexPhiTexture!),
+      pressure: () => pressure ? readMixedBuffer(device, pressure.buffer) : readMixedTexture(device, solver.gridPressureTexture),
     })) {
-      const data = await readMixedTexture(device, texture);
+      const data = await read();
       fields[name] = createHash("sha256").update(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)).digest("hex");
     }
     const summary = { mean_ms: mean(selected.map(r => r.wall_ms)), median_ms: quantile(selected.map(r => r.wall_ms), .5),
