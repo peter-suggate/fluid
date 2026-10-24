@@ -45,6 +45,7 @@ import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
+import { createFastJetScene, FAST_JET_METHOD_OVERRIDES } from "./fast-jet-scene";
 import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { uniformDetailField } from "../lib/methods/uniform/uniform-detail-fields";
 import { uniformTileCoord, uniformTileKey, type UniformLatticeAddress } from "../lib/methods/uniform/uniform-lattice-address";
@@ -68,7 +69,10 @@ const trace = option("trace");
 // --sinks adds, per captured stage, the h cells whose six faces take in more than one cell volume a step.
 const sinks = process.argv.includes("--sinks");
 const variant = JSON.parse(option("variant") ?? "{}") as Record<string, string | number>;
-const scene = structuredClone(sceneDocument(getSceneDefinition(sceneId)));
+// fast-jet:<cell mm> is the fast-front fixture (tools/fast-jet-scene.ts), with reservoir-seep's profile under --variant.
+const fastJet = sceneId.startsWith("fast-jet:") ? createFastJetScene({ cellSize_m: Number(sceneId.slice(9)) / 1000 }) : undefined;
+if (fastJet) Object.assign(variant, { ...FAST_JET_METHOD_OVERRIDES, ...variant });
+const scene = fastJet ? fastJet.scene : structuredClone(sceneDocument(getSceneDefinition(sceneId)));
 scene.numerics = { ...scene.numerics, fixedDt_s: dt, maxDt_s: dt };
 /** Census header words and the margin of the residency radius (uniform-mixed-dynamic.ts: HEADER, RESIDENCY_MARGIN_TILES). */
 const HEADER = 20, MARGIN = 5;
