@@ -15,7 +15,7 @@ import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { UNIFORM_BULK_FACE_TEXELS, UNIFORM_BULK_FACE_WIDTH, UNIFORM_BULK_HEADS, UNIFORM_BULK_LIST, UNIFORM_BULK_NONE_BITS, UNIFORM_BULK_OFFSET } from "./uniform-bulk-tier-reference";
 
 /** The 16h bulk tier (UniformBulkTier): its record and faces texture. */
-export interface UniformMixedPressureBulk {readonly record:GPUBuffer;readonly faces:GPUTexture;readonly regions:number}
+export interface UniformMixedPressureBulk {readonly record:{buffer:GPUBuffer;offset:number;size:number};readonly faces:GPUTexture;readonly regions:number}
 
 interface CommonFields {
  velocity:GPUTexture;
@@ -162,7 +162,7 @@ export class UniformMixedPressureVelocity {
   return uniformDetailGroup(this.device,{layout:this.bulkLayout,entries:[...this.common(f),
    {binding:4,resource:this.scalar(f.pressure,uniformMixedPressureStorage(this.ownership.layout).count)},{binding:7,resource:f.volume},
    ...(this.rounding?[{binding:12,resource:{buffer:this.rounding}}]:[]),{binding:13,resource:this.rootTopology(f)},
-   ...(this.cold?[{binding:14,resource:this.cold.regions}]:[]),{binding:16,resource:this.bulk.faces},{binding:17,resource:{buffer:this.bulk.record}}]});
+   ...(this.cold?[{binding:14,resource:this.cold.regions}]:[]),{binding:16,resource:this.bulk.faces},{binding:17,resource:this.bulk.record}]});
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;

@@ -36,7 +36,11 @@
  * Channels: 512 values a brick (x fastest, owned high: a cell, its +x/+y/+z
  * faces and its +++ vertex) at a slot stride of 520 words, so the 27
  * neighbours of a brick do not alias the same cache sets (a 512 stride
- * stages 2.5× slower). One pool, array<u32>, f32 by bitcast. */
+ * stages 2.5× slower). Pools of array<u32>, f32 by bitcast: a channel
+ * lives in the pool its options name (0 by default), so a module binds each
+ * pool it reads as its own array and no access chooses one at run time. A
+ * pool holds at most a storage binding's bytes: a lattice whose channels
+ * overflow one splits them across several. */
 import { UNIFORM_BRICK_CLASS } from "./uniform-brick-table";
 
 /** Class bits of the arena: the brick table's, the arena's own, and the
@@ -50,12 +54,13 @@ export const UBA_STRIDE=520;
 const UBA_RECORD=32,UBA_HEADER=32,UBA_BANKS=16,UBA_COUNTS=2+UBA_BANKS,UBA_LISTS=9;
 export type UniformArenaLevel=0|1|2;
 export type UniformArenaLayout="cell"|"face"|"vertex";
-export interface UniformArenaChannel{name:string;levels:readonly UniformArenaLevel[];layout:UniformArenaLayout;banks?:1|2}
+export interface UniformArenaChannel{name:string;levels:readonly UniformArenaLevel[];layout:UniformArenaLayout;banks?:1|2;pool?:number}
 export interface UniformArenaList{name:string;any:number}
 export interface UniformArenaOptions{
  /** Blocks of the lattice (UM_BLOCKS). */
  blocks:number;
- /** Level 0 slots (and level 1 slots); default every brick of the lattice (cannot overflow). */
+ /** Level 0 slots; default every brick of the lattice (cannot overflow).
+  * Level 1 has at most this many, and at most 8 a block (its keys). */
  fineCapacity?:number;
  channels:readonly UniformArenaChannel[];
  /** Compact level 0 slot lists by class: a live slot joins each list whose bits it has any of. */
@@ -78,8 +83,10 @@ export class UniformBrickArena{
  readonly bricks:number;
  readonly fineCapacity:number;
  readonly tableWords:number;
- readonly poolWords:number;
+ /** Words of each pool. */
+ readonly poolWords:readonly number[];
  private readonly bases=new Map<string,number>();
+ private readonly pools=new Map<string,number>();
  private readonly bankWords=new Map<string,number>();
  private readonly lists:readonly UniformArenaList[];
  private readonly level1:number;
@@ -91,14 +98,17 @@ export class UniformBrickArena{
   this.lists=options.lists;
   this.level1=options.level1From===undefined?-1:options.lists.findIndex(list=>list.name===options.level1From);
   if(options.level1From!==undefined&&this.level1<0){throw new Error(`Brick arena: no list ${options.level1From} for level 1`);}
-  let words=0,banks=0;
+  const words:number[]=[];let banks=0;
   for(const channel of options.channels){
+   const pool=channel.pool??0;if(!Number.isInteger(pool)||pool<0||pool>7){throw new Error(`Brick arena: channel ${channel.name} in pool ${pool}`);}
+   while(words.length<=pool){words.push(0);}
+   this.pools.set(channel.name,pool);
    const components=channel.layout==="face"?3:1,count=channel.banks??1;
    if(count===2){if(banks===UBA_BANKS){throw new Error(`Brick arena: more than ${UBA_BANKS} two-bank channels`);}this.bankWords.set(channel.name,banks++);}
    for(const level of channel.levels){
     if(level===1&&this.level1<0){throw new Error(`Brick arena: channel ${channel.name} at level 1 without level1From`);}
     for(let bank=0;bank<count;bank++)for(let component=0;component<components;component++){
-     this.bases.set(`${channel.name}/${level}/${component}/${bank}`,words);words+=UBA_STRIDE*this.capacity(level);
+     this.bases.set(`${channel.name}/${level}/${component}/${bank}`,words[pool]!);words[pool]!+=UBA_STRIDE*this.capacity(level);
     }
    }
   }
@@ -106,8 +116,10 @@ export class UniformBrickArena{
   const l=this.layout;this.tableWords=l.high+1;
  }
  /** Slots of a level. */
- capacity(level:UniformArenaLevel):number{return level===2?this.options.blocks:this.fineCapacity;}
- /** The pool word of a channel's first slot. */
+ capacity(level:UniformArenaLevel):number{return level===2?this.options.blocks:level===1?Math.min(this.fineCapacity,8*this.options.blocks):this.fineCapacity;}
+ /** The pool a channel lives in. */
+ poolOf(name:string):number{const pool=this.pools.get(name);if(pool===undefined){throw new Error(`Brick arena: no channel ${name}`);}return pool;}
+ /** The word of a channel's first slot in its pool. */
  base(name:string,level:UniformArenaLevel,component=0,bank=0):number{
   const base=this.bases.get(`${name}/${level}/${component}/${bank}`);
   if(base===undefined){throw new Error(`Brick arena: no channel ${name} at level ${level} component ${component} bank ${bank}`);}
@@ -372,15 +384,18 @@ fn ubrLiveSlot(e:u32)->u32{return ${buffer}[${base+l.live}u+e];}
 ${Object.entries(c).filter(([name])=>name!=="entering"&&name!=="leaving").map(([name,bit])=>`const UBA_${name.replace(/[A-Z]/g,ch=>`_${ch}`).toUpperCase()}:u32=${bit}u;`).join("")}
 fn ubaMark(id:u32,bits:u32){let at=${base+this.layout.mark}u+id;if((atomicLoad(&${buffer}[at])&bits)!=bits){atomicOr(&${buffer}[at],bits);}}
 `;}
- /** Channel bases (from pool word base) and the pool accessors. pool: an array<u32> the module binds. */
- poolWGSL(pool:string,base=0):string{
-  const constants=[...this.bases].map(([key,word])=>{const [name,level,component,bank]=key.split("/");return `const UBA_${name!.toUpperCase()}_L${level}_${component}_${bank}:u32=${base+word}u;`;}).join("");
+ /** Channel bases (each in its pool's words) and the pool accessors.
+  * pools: the array<u32> the module binds for each pool, in order; pool k's
+  * accessors are ubaLoad and ubaStore suffixed k (none for pool 0). */
+ poolWGSL(pools:readonly string[]):string{
+  if(pools.length!==this.poolWords.length){throw new Error(`Brick arena: ${this.poolWords.length} pools, ${pools.length} bound`);}
+  const constants=[...this.bases].map(([key,word])=>{const [name,level,component,bank]=key.split("/");return `const UBA_${name!.toUpperCase()}_L${level}_${component}_${bank}:u32=${word}u;`;}).join("");
   const banks=[...this.bankWords].map(([name,j])=>`const UBA_BANK_${name.toUpperCase()}:u32=${j}u;`).join("");
   return /* wgsl */`
 const UBA_STRIDE:u32=${UBA_STRIDE}u;
 ${constants}${banks}
-fn ubaLoad(base:u32,slot:u32,i:u32)->f32{return bitcast<f32>(${pool}[base+UBA_STRIDE*slot+i]);}
-fn ubaStore(base:u32,slot:u32,i:u32,value:f32){${pool}[base+UBA_STRIDE*slot+i]=bitcast<u32>(value);}
+${pools.map((pool,k)=>`fn ubaLoad${k||""}(base:u32,slot:u32,i:u32)->f32{return bitcast<f32>(${pool}[base+UBA_STRIDE*slot+i]);}
+fn ubaStore${k||""}(base:u32,slot:u32,i:u32,value:f32){${pool}[base+UBA_STRIDE*slot+i]=bitcast<u32>(value);}`).join("\n")}
 `;}
  /** A channel's base expression: a two-bank channel's bank picks by the table's bank word (bank 0 current, 1 the other). */
  private baseExpression(name:string,level:UniformArenaLevel,component=0,bank:0|1=0):string{
@@ -408,7 +423,7 @@ fn ubaStore(base:u32,slot:u32,i:u32,value:f32){${pool}[base+UBA_STRIDE*slot+i]=b
  for(var k=lane;k<${e3}u;k+=${workgroup}u){
   let c=vec3i(vec3u(k%${e}u,(k/${e}u)%${e}u,k/${e*e}u))-${halo}+shift;let d=vec3u(c+8)>>vec3u(3u);let n=d.x+3u*d.y+9u*d.z;
   let w=ubaR_${k}[n];let l=vec3u(c&vec3i(7));let t=(l.x>>2u)|((l.y>>2u)<<1u)|((l.z>>2u)<<2u);
-  if(w<UBA_SEAM&&((ubaM_${k}[n]>>t)&1u)!=0u){ubaW_${k}[${at}u+k]=ubaLoad(${this.baseExpression(ch.name,level,ch.component,ch.bank)},w,l.x+8u*(l.y+8u*l.z));}
+  if(w<UBA_SEAM&&((ubaM_${k}[n]>>t)&1u)!=0u){ubaW_${k}[${at}u+k]=ubaLoad${this.poolOf(ch.name)||""}(${this.baseExpression(ch.name,level,ch.component,ch.bank)},w,l.x+8u*(l.y+8u*l.z));}
   else{ubaW_${k}[${at}u+k]=${ch.seam}(origin+c,w);}
  }`;}).join("");
   const at=channels.map((_,j)=>`if(j==${j}u){let q=vec3u(c+${halos[j]});return ${offsets[j]}u+q.x+${n+2*halos[j]!}u*(q.y+${n+2*halos[j]!}u*q.z);}`).join("");
@@ -437,8 +452,8 @@ fn ubaStage_${k}(slot:u32,lane:u32,octant:u32){
   const j=this.lists.findIndex(item=>item.name===list);
   const [count,slotOf]=list==="enter"?["ubaCount(UBA_ENTER_COUNT)","ubaEnterSlot(e)"]:list==="leave"?["ubaCount(UBA_LEAVE_COUNT)","ubaLeaveSlot(e)"]
    :j>=0?[`ubaListCount(${j}u)`,`ubaListSlot(${j}u,e)`]:(()=>{throw new Error(`Brick arena: no list ${list}`);})();
-  const body=channels.map(ch=>{const base=this.baseExpression(ch.name,0,ch.component,ch.bank);
-   return direction==="gather"?`ubaStore(${base},slot,k,${ch.fn}(p));`:`${ch.fn}(p,ubaLoad(${base},slot,k));`;}).join("");
+  const body=channels.map(ch=>{const base=this.baseExpression(ch.name,0,ch.component,ch.bank),pool=this.poolOf(ch.name)||"";
+   return direction==="gather"?`ubaStore${pool}(${base},slot,k,${ch.fn}(p));`:`${ch.fn}(p,ubaLoad${pool}(${base},slot,k));`;}).join("");
   return /* wgsl */`
 @compute @workgroup_size(${workgroup}) fn ${entry}(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let n=${count};

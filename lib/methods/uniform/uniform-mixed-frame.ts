@@ -590,7 +590,6 @@ export class UniformMixedFrame {
    // and is projected into the scratch pair, then transferred back. Volume
    // reaches pressure ownership in its (free) scratch field.
    const [rhsGroup,projectionGroup]=bindProjection({velocity:f.velocity,negative:f.negative},{velocity:f.velocityScratch,negative:f.negativeScratch},f.volumeScratch,fine);
-   if(this.bulk)this.bulkGroup=this.projection.bindBulk({velocity:f.velocity,negative:{buffer:f.negative},phi:root.phi!,params:this.params.projection,rootTopology,pressure:root.pressure,volume:f.volumeScratch,output:f.velocityScratch,outputNegative:{buffer:f.negativeScratch}});
    const transfer=new UniformMixedOwnershipTransfer(device,o,p,solid,this.freeze);
    const present=(label:string,bytes:number)=>buffer(`Uniform presented ${label}`,bytes,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
    // The record holds any band this frame builds: a larger one is fatal.
@@ -614,10 +613,12 @@ export class UniformMixedFrame {
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
    root:{rhs:root.rhs[0],minimum:root.minimum[0],pressure:root.pressure,phi:root.phi!,topology:rootTopology,support:root.ownership.support,supportWord:9*p.layout.tiles.length+24},
    status:this.status,acceptance:this.state,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined,
-   bulk:this.bulk?{record:this.bulk.record,regions:this.bulk.regions}:undefined},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles,surfaceImpulse:this.nearSettled.surfaceImpulse,tail:this.nearSettled.pressureTail},solid);
+   bulk:this.bulk?{regions:this.bulk.regions}:undefined},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles,surfaceImpulse:this.nearSettled.surfaceImpulse,tail:this.nearSettled.pressureTail},solid);
   // The next full band projection overwrites these tile faces; its copy
   // stage preserves only non-band texels. No reader needs their 4h return.
   this.split.transfer.attachProjectedBand(this.band.index,this.band.slotMapOffset);
+  // The bulk record lives in the arena's pool B (pNative's ten bindings).
+  if(this.bulk){this.bulk.adopt(this.band.bulkRecord!);this.bulkGroup=this.projection.bindBulk({velocity:f.velocity,negative:{buffer:f.negative},phi:root.phi!,params:this.params.projection,rootTopology,pressure:root.pressure,volume:f.volumeScratch,output:f.velocityScratch,outputNegative:{buffer:f.negativeScratch}});}
   this.bulk?.bind({params:this.bandParams,velocity:f.velocity,slots:{buffer:this.band.index,word:this.band.slotMapOffset/4},rootPhi:root.phi!,rootTopology,tiers:this.heat.tiers,pressure:root.pressure});
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
  }

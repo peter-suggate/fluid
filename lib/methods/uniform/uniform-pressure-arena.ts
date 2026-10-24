@@ -14,7 +14,7 @@ import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTR
 import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
-import {UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN} from "./uniform-bulk-tier-reference";
+import {UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN,UNIFORM_BULK_WORDS} from "./uniform-bulk-tier-reference";
 import {planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS} from "./uniform-live-lists";
 import {uniformStageListsWGSL} from "./uniform-stage-lists";
@@ -157,10 +157,12 @@ export interface UniformPressureArenaFields {
  freeze?:UniformColdFreeze;
  coldFrame?:UniformColdFrame;
  warmTiers?:GPUBuffer;
- /** The 16h bulk tier's record (UniformBulkTier: member flags; the seam
-  * heads pNative writes for its face pass). Absent with bulkTier off, which
-  * leaves every module's text as it was. */
- bulk?:{record:GPUBuffer;regions:number};
+ /** The 16h bulk tier's regions: the arena holds its record (UniformBulkTier:
+  * member flags; the seam heads pNative writes for its face pass) after pool
+  * B's words (bulkRecord), so pNative reads it through pool B and stays at
+  * ten storage bindings. Absent with bulkTier off, which leaves every
+  * module's text as it was. */
+ bulk?:{regions:number};
 }
 
 /** The two-stage solve's h band (the band's contract: tiles, rows, faces,
@@ -173,8 +175,16 @@ export class UniformPressureArena {
  readonly arena:UniformBrickArena;
  /** Header, tile slot map, brick masks and the arena table (one storage binding). */
  readonly index:GPUBuffer;
+ /** The channels in two storage bindings, each under the binding limit: A
+  * (9) level 0's iterates, rows and coefficients; B (10) level 0's forced
+  * velocities and apertures, levels 1 and 2 and the super-block tail. A
+  * channel's pool is fixed, so every access names its binding. */
  private readonly pool:GPUBuffer;
- get allocatedBytes():number{return this.index.size+this.pool.size;}
+ private readonly poolB:GPUBuffer;
+ /** The 16h bulk tier's record, pool B's last words (fields.bulk). */
+ readonly bulkRecord?:{buffer:GPUBuffer;offset:number;size:number};
+ private readonly bulkWord:number=0;
+ get allocatedBytes():number{return this.index.size+this.pool.size+this.poolB.size;}
  private readonly tiles:number;
  private readonly maskWord:number;
  private readonly tileListWord:number;
@@ -233,12 +243,12 @@ export class UniformPressureArena {
    const word=(v:GPUBufferBinding)=>((v.offset??0)-base)/4;
    this.rootSpan={binding:{buffer:r.pressure.buffer,offset:base,size:end-base},pressure:word(r.pressure),rhs:word(r.rhs),minimum:word(r.minimum)};}
   this.tiles=address.tileKeys;
-  const cell=(name:string,level:0|1|2):UniformArenaChannel=>({name,levels:[level],layout:"cell"});
-  const six=(prefix:string,level:0|1|2)=>Array.from({length:6},(_,f)=>cell(`${prefix}${f}`,level));
+  const cell=(name:string,level:0|1|2,pool=level?1:0):UniformArenaChannel=>({name,levels:[level],layout:"cell",pool});
+  const six=(prefix:string,level:0|1|2,pool=level?1:0)=>Array.from({length:6},(_,f)=>cell(`${prefix}${f}`,level,pool));
   // Level 2's band channels contiguous: one clear empties them each frame.
   // The native rows' channels (n*) are written whole by pNative; the tail's
   // (8h at word 0, 16h at 64, 32h at 72 of a page) by pDownB's bake.
-  const channels=[...["x","x1","diag","base","warm","rhs","kinds"].map(name=>cell(name,0)),...six("c",0),...six("u",0),...(solid?six("v",0):[]),
+  const channels=[...["x","x1","diag","base","warm","rhs","kinds"].map(name=>cell(name,0)),...six("c",0),...six("u",0,1),...(solid?six("v",0,1):[]),
    ...["xa","ya","ra","da"].map(name=>cell(name,1)),...six("ka",1),
    ...["xb","yb","rb","db"].map(name=>cell(name,2)),...six("kb",2),
    ...["nx","nb","nr","nd","nm"].map(name=>cell(name,2)),...six("nk",2),...six("nl",2),
@@ -255,12 +265,18 @@ export class UniformPressureArena {
   this.level2Clear={first,channels:level2};
   this.maskWord=HEADER+this.tiles;this.tileListWord=this.maskWord+a.bricks;this.geometryListWord=this.tileListWord+this.tiles;this.tableWord=this.geometryListWord+this.tiles;
   const limit=device.limits.maxStorageBufferBindingSize;
-  // The super-block tail's lists and maps follow the arena table; its rows the arena's pool.
-  this.super=this.superTail?planUniformPressureSuper(blocks,this.tableWord+a.tableWords,a.poolWords):undefined;
-  const indexWords=this.super?.index.end??this.tableWord+a.tableWords,poolWords=this.super?.pool.end??a.poolWords;
-  if(4*poolWords>limit)throw new Error(`Pressure arena pool (${4*poolWords} bytes) exceeds the storage binding limit ${limit}`);
+  // The super-block tail's lists and maps follow the arena table; its rows pool B's channels.
+  if(a.poolWords.length!==2)throw new Error("Pressure arena: the channels fill pools A and B");
+  this.super=this.superTail?planUniformPressureSuper(blocks,this.tableWord+a.tableWords,a.poolWords[1]!):undefined;
+  const indexWords=this.super?.index.end??this.tableWord+a.tableWords,poolWords=[a.poolWords[0]!,this.super?.pool.end??a.poolWords[1]!];
+  // The bulk record follows pool B's words at a storage offset.
+  const align=device.limits.minStorageBufferOffsetAlignment/4;
+  if(fields.bulk){this.bulkWord=Math.ceil(poolWords[1]!/align)*align;poolWords[1]=this.bulkWord+UNIFORM_BULK_WORDS(fields.bulk.regions);}
+  for(const [k,words] of poolWords.entries())if(4*words>Math.min(limit,device.limits.maxBufferSize))throw new Error(`Pressure arena pool ${"AB"[k]} (${4*words} bytes) exceeds the storage binding limit ${Math.min(limit,device.limits.maxBufferSize)}`);
   this.index=device.createBuffer({label:"Uniform pressure arena state",size:4*indexWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  this.pool=device.createBuffer({label:"Uniform pressure arena pool",size:4*poolWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  this.pool=device.createBuffer({label:"Uniform pressure arena pool",size:4*poolWords[0]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  this.poolB=device.createBuffer({label:"Uniform pressure arena pool B",size:4*poolWords[1]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  if(fields.bulk)this.bulkRecord={buffer:this.poolB,offset:4*this.bulkWord,size:4*UNIFORM_BULK_WORDS(fields.bulk.regions)};
   for(const w of a.initialWrites(this.tableWord))device.queue.writeBuffer(this.index,w.offset,w.data as Uint32Array<ArrayBuffer>);
   this.restricts=Array.from({length:schedule.cycles},(_,k)=>`pRestrict0@${k}`);
   this.residuals=Array.from({length:schedule.cycles},(_,k)=>`pResidual2@${k}`);
@@ -271,13 +287,13 @@ export class UniformPressureArena {
   const entries:Record<string,GPUBindGroupLayoutEntry[]>={
    table:[buffer(2)],
    mark:[params,buffer(2),buffer(3,"read-only-storage"),texture(6),...cold,...(fields.warmTiers?[buffer(25,"read-only-storage")]:[])],
-   rows:[params,buffer(2),buffer(9),buffer(3,"read-only-storage"),buffer(4,"uniform"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(29,"read-only-storage"),...cold],
-   init:[params,buffer(2),buffer(9),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),...cold],
-   copy:[params,buffer(2),buffer(9),texture(11),write(23)],
-   native:[params,buffer(2),buffer(9),buffer(26),buffer(29,"read-only-storage"),...(solid?[buffer(30,"read-only-storage")]:[]),...(fields.bulk?[buffer(31)]:[])],
+   rows:[params,buffer(2),buffer(9),buffer(10),buffer(3,"read-only-storage"),buffer(4,"uniform"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(29,"read-only-storage"),...cold],
+   init:[params,buffer(2),buffer(9),buffer(10),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),...cold],
+   copy:[params,buffer(2),buffer(9),buffer(10),texture(11),write(23)],
+   native:[params,buffer(2),buffer(9),buffer(10),buffer(26),buffer(29,"read-only-storage"),...(solid?[buffer(30,"read-only-storage")]:[])],
    ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:[params,buffer(2),buffer(4,"uniform"),texture(7),buffer(8,"read-only-storage"),buffer(26),buffer(29,"read-only-storage"),...cold]}:{}),
-   solver:[params,buffer(2),buffer(9),...(fields.dynamics?[buffer(24)]:[])],
-   project:[params,buffer(2),buffer(9),texture(7),texture(15),write(16),buffer(17),buffer(21),...cold],
+   solver:[params,buffer(2),buffer(9),buffer(10),...(fields.dynamics?[buffer(24)]:[])],
+   project:[params,buffer(2),buffer(9),buffer(10),texture(7),texture(15),write(16),buffer(17),buffer(21),...cold],
   };
   for(const [name,list] of Object.entries(entries))this.layouts.set(name,uniformDetailBindLayout(device,{label:`Uniform pressure arena ${name}`,entries:list}));
   this.bind();
@@ -293,7 +309,7 @@ export class UniformPressureArena {
   const scalars=(view:GPUBufferBinding,count:number):GPUBufferBinding=>{
    const offset=view.offset??0;if((view.size??view.buffer.size-offset)<4*count)throw new Error("Pressure arena field view is too small");return {buffer:view.buffer,offset,size:4*count};
   };
-  const P={0:{buffer:f.params,size:80}},S={2:{buffer:this.index}},Q={9:{buffer:this.pool}};
+  const P={0:{buffer:f.params,size:80}},S={2:{buffer:this.index}},Q={9:{buffer:this.pool},10:{buffer:this.poolB}};
   const resources:Record<string,Record<number,GPUBindingResource|GPUTexture>>={
    table:{...S},
    mark:{...P,...S,3:scalars(f.phi,cells),6:f.vertexPhi},
@@ -308,7 +324,6 @@ export class UniformPressureArena {
   };
   if(f.dynamics)resources.solver![24]={buffer:f.dynamics};
   if(f.root.topology)resources.native![30]=f.root.topology;
-  if(f.bulk)resources.native![31]={buffer:f.bulk.record};
   const freeze=this.cold;if(freeze)for(const name of ["mark","rows","init","project",...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?["nrhs"]:[])])resources[name]![14]=freeze.regions;
   if(f.warmTiers)resources.mark![25]={buffer:f.warmTiers};
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure arena ${name}`,layout:this.layouts.get(name)!,
@@ -335,7 +350,7 @@ export class UniformPressureArena {
  }
  forgetCycles():void{this.recentCount=0;this.wideCycles=Number.POSITIVE_INFINITY;}
  /** Bytes of the arena's buffers (lattice-sized: no capacity changes them). */
- get bytes():{state:number;pool:number}{return {state:this.index.size,pool:this.pool.size};}
+ get bytes():{state:number;pool:number}{return {state:this.index.size,pool:this.pool.size+this.poolB.size};}
 
  async initialize():Promise<void>{
   const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule,a=this.arena,B=this.fields.bulk;
@@ -350,7 +365,7 @@ const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u
 const P_ACTIVE:u32=${ACTIVE_BIT}u;const P_WARM:u32=${WARM_BIT}u;const P_FINE:u32=${UNIFORM_ARENA_CLASS.fine}u;
 const P_X:u32=${C("x")}u;const P_X1:u32=${C("x1")}u;const P_DIAG:u32=${C("diag")}u;const P_BASE:u32=${C("base")}u;const P_WARMP:u32=${C("warm")}u;const P_RHS:u32=${C("rhs")}u;const P_KINDS:u32=${C("kinds")}u;
 const P_C:u32=${C("c0")}u;const P_U:u32=${C("u0")}u;${S?`const P_V:u32=${C("v0")}u;`:""}const PLANE:u32=${plane0}u;
-const PA_X:u32=${C("xa",1)}u;const PA_Y:u32=${C("ya",1)}u;const PA_R:u32=${C("ra",1)}u;const PA_D:u32=${C("da",1)}u;const PA_K:u32=${C("ka0",1)}u;
+const PA_X:u32=${C("xa",1)}u;const PA_Y:u32=${C("ya",1)}u;const PA_R:u32=${C("ra",1)}u;const PA_D:u32=${C("da",1)}u;const PA_K:u32=${C("ka0",1)}u;const PLANE1:u32=${520*a.capacity(1)}u;
 const PB_X:u32=${C("xb",2)}u;const PB_Y:u32=${C("yb",2)}u;const PB_R:u32=${C("rb",2)}u;const PB_D:u32=${C("db",2)}u;const PB_K:u32=${C("kb0",2)}u;const PLANE2:u32=${plane2}u;
 const P_SCALE:f32=${schedule.coarseScale};const T_SCALE:f32=${schedule.tailScale};
 const K_SEAM:u32=6u;
@@ -418,9 +433,12 @@ fn pTileCell(w:u32,l:vec3u)->vec3u{let t=w&7u;return 4u*vec3u(t&1u,(t>>1u)&1u,t>
 `;
   const poolWGSL=/* wgsl */`
 @group(1) @binding(9) var<storage,read_write> pool:array<u32>;
-${a.poolWGSL("pool")}
+@group(1) @binding(10) var<storage,read_write> poolB:array<u32>;
+${a.poolWGSL(["pool","poolB"])}
 fn pF(base:u32,at:u32)->f32{return bitcast<f32>(pool[base+at]);}
 fn pSet(base:u32,at:u32,value:f32){pool[base+at]=bitcast<u32>(value);}
+fn qF(base:u32,at:u32)->f32{return bitcast<f32>(poolB[base+at]);}
+fn qSet(base:u32,at:u32,value:f32){poolB[base+at]=bitcast<u32>(value);}
 fn pAddr(slot:u32,l:vec3u)->u32{return UBA_STRIDE*slot+l.x+8u*(l.y+8u*l.z);}
 // The h face and its native 4h row differ tangentially by up to 1.5h.
 // Carry the row's start to the h face's tangential position along the start
@@ -475,8 +493,8 @@ fn pNear0(at:u32,slot:u32,lb:vec3u,f:u32)->u32{
 fn pNear(at:u32,p:vec3i,f:u32)->u32{return pNear0(at,at/UBA_STRIDE,vec3u(p&vec3i(7)),f);}
 // A unit face (most band faces) loads nothing.
 fn pCoefficient(at:u32,kinds:u32,f:u32)->f32{if(bUnit(kinds,f)){return params.solve[1u+f/2u];}return pF(P_C+f*PLANE,at);}
-fn pForced(at:u32,f:u32)->f32{return pF(P_U+f*PLANE,at);}
-${S?"fn pVolume(at:u32,f:u32)->f32{return pF(P_V+f*PLANE,at);}":""}
+fn pForced(at:u32,f:u32)->f32{return qF(P_U+f*PLANE,at);}
+${S?"fn pVolume(at:u32,f:u32)->f32{return qF(P_V+f*PLANE,at);}":""}
 // A wall face's native one-cell halo, less the row's start: max(x + lift, -base).
 fn pLift(at:u32,f:u32)->f32{return f32(bSign(f))*params.policy.x*pForced(at,f)*params.hDt[f/2u]/params.hDt.w;}
 fn pZeroSeam(p:vec3i,word:u32)->f32{return 0.0;}
@@ -488,7 +506,7 @@ fn nKind(m:u32,f:u32)->u32{return (m>>(3u*f))&7u;}
 fn nStride(axis:u32)->u32{return select(select(64u,8u,axis==1u),1u,axis==0u);}
 // A page's flags (word 512 of its native mask): bit 0 live (band tiles or
 // native rows: the level 2 box and the tail's), bit 1 native rows.
-fn nPage(block:u32)->u32{return pool[PN_M+UBA_STRIDE*block+512u];}
+fn nPage(block:u32)->u32{return poolB[PN_M+UBA_STRIDE*block+512u];}
 `;
   const header=(neighbours=false)=>uniformMixedTopologyWGSL(layout,0)+(neighbours?uniformMixedTopologyNeighboursWGSL():"")+uniformMixedFaceAddressWGSL+uniformMixedSolidWGSL(S?2:undefined,this.solid?.coarse?.count)+params+/* wgsl */`
 @group(1) @binding(2) var<storage,read_write> state:array<atomic<u32>>;
@@ -551,13 +569,13 @@ fn nBulkMean(v:f32,bulk:bool,lane:u32)->f32{
   // member's pressure in its links is its 16h one, its rows' start mean
   // (UniformBulkTier), not the row's own start: each row keeps its offset.
   const bulkNative=B?bulkMean("nRed")+/* wgsl */`
-@group(1) @binding(31) var<storage,read_write> bulk:array<u32>;
+const N_BULK:u32=${this.bulkWord}u;
 const N_HEADS:u32=${UNIFORM_BULK_HEADS(B.regions)}u;const N_MEAN:u32=${UNIFORM_BULK_MEAN(B.regions)}u;
 var<workgroup> nRed:array<f32,512>;
 var<workgroup> nBulkW:u32;
 fn nRegionKey(k:u32)->u32{return 8u*(k>>9u)+nRegionOf(k&511u);}
-fn nMember(k:u32)->bool{return (bulk[nRegionKey(k)]&1u)!=0u;}
-fn nBulkStart(k:u32)->f32{if(nMember(k)){return bitcast<f32>(bulk[N_MEAN+nRegionKey(k)]);}return rootArena[R_PRESSURE+k];}
+fn nMember(k:u32)->bool{return (poolB[N_BULK+nRegionKey(k)]&1u)!=0u;}
+fn nBulkStart(k:u32)->f32{if(nMember(k)){return bitcast<f32>(poolB[N_BULK+N_MEAN+nRegionKey(k)]);}return rootArena[R_PRESSURE+k];}
 // A member face's seam head slot: region, face, the subface's tangential cell.
 fn nHeadIndex(k:u32,f:u32)->u32{let a=f/2u;let t=umTileCoord(k);return N_HEADS+96u*nRegionKey(k)+16u*f+(t[(a+1u)%3u]&3u)+4u*(t[(a+2u)%3u]&3u);}
 // The key across face f of key k, N_KEYS outside (a SOLID page).
@@ -593,7 +611,7 @@ fn nBulkLink(k:u32,n:u32,f:u32,member:bool)->vec2f{
  if(member&&other){if(nRegionKey(k)==nRegionKey(n)){return vec2f(0.0);}return vec2f(16.0,0.0);}
  if(!member&&!other){return vec2f(64.0,0.0);}
  let head=nBulkHead(select(k,n,member),f/2u);
- if(member){bulk[nHeadIndex(k,f)]=bitcast<u32>(head);return vec2f(25.6,-head);}
+ if(member){poolB[N_BULK+nHeadIndex(k,f)]=bitcast<u32>(head);return vec2f(25.6,-head);}
  return vec2f(25.6,head);
 }
 `:"";
@@ -623,15 +641,15 @@ fn cBoxCell(col:u32,i:u32)->vec3i{let y=(i/5u)%10u;let z=i/50u;let x=2u*(i%5u)+(
 fn cCore(lane:u32)->vec3i{return vec3i(vec3u(lane&7u,(lane>>3u)&7u,lane>>6u));}
 `;
   // A coarse level's (1 or 2) rows, linear: x = (r + sum k x_n)/d.
-  const coarse=(L:1|2,sweeps=schedule.sweeps)=>{const [X,Y,R,D,K,PL]=L===1?["PA_X","PA_Y","PA_R","PA_D","PA_K","PLANE"]:["PB_X","PB_Y","PB_R","PB_D","PB_K","PLANE2"];return box(L)+/* wgsl */`
+  const coarse=(L:1|2,sweeps=schedule.sweeps)=>{const [X,Y,R,D,K,PL]=L===1?["PA_X","PA_Y","PA_R","PA_D","PA_K","PLANE1"]:["PB_X","PB_Y","PB_R","PB_D","PB_K","PLANE2"];return box(L)+/* wgsl */`
 const CX:u32=${X};const CY:u32=${Y};const CRH:u32=${R};const CD:u32=${D};const CK:u32=${K};const CPL:u32=${PL};
-fn cDiag(at:u32)->f32{if(at==UB_NONE_ID){return 0.0;}return pF(CD,at);}
+fn cDiag(at:u32)->f32{if(at==UB_NONE_ID){return 0.0;}return qF(CD,at);}
 // A coarse row, held by its lane: diagonal (0: none), RHS, couplings.
 struct CCell {d:f32,r:f32,k:array<f32,6>}
 fn cCell(at:u32)->CCell{
  var cell:CCell;if(at==UB_NONE_ID){return cell;}
- let d=pF(CD,at);if(d<=0.0){return cell;}
- cell.d=d;cell.r=pF(CRH,at);for(var f=0u;f<6u;f++){cell.k[f]=pF(CK+f*CPL,at);}
+ let d=qF(CD,at);if(d<=0.0){return cell;}
+ cell.d=d;cell.r=qF(CRH,at);for(var f=0u;f<6u;f++){cell.k[f]=qF(CK+f*CPL,at);}
  return cell;
 }
 fn cBoxRow(col:u32,lane:u32)->CCell{if(lane>=500u){return cCell(UB_NONE_ID);}return cCell(cAddr(cBoxCell(col,lane)));}
@@ -676,8 +694,8 @@ fn gCoarseChild(i:u32,l:vec3u,at:u32,d:f32,K:u32,PL:u32){
    // A missing correction row is fixed at zero. Its coefficient remains
    // on the diagonal; it must neither cancel inside this aggregate nor
    // become a link to unrelated live children in the next aggregate.
-   if(cDiag(cAddr(qi))>0.0){part-=pF(K+inner*PL,at);}
-   if(cDiag(cAddr(qo))>0.0){cross[axis]=pF(K+outer*PL,at);}
+   if(cDiag(cAddr(qi))>0.0){part-=qF(K+inner*PL,at);}
+   if(cDiag(cAddr(qo))>0.0){cross[axis]=qF(K+outer*PL,at);}
   }
  }
  gPart[i]=part;gCross[i]=cross.x;gCross[512u+i]=cross.y;gCross[1024u+i]=cross.z;
@@ -706,7 +724,7 @@ fn pRelaxRow(at:u32,slot:u32,lb:vec3u,kinds:u32,black:bool)->f32{
  for(var f=0u;f<6u;f++){
   let kind=bFaceKind(kinds,f);
   if(kind==K_BAND){off+=pCoefficient(at,kinds,f)*pNeighbourX(at,slot,lb,f,black);}
-  else if(kind==K_SEAM){off+=pF(P_C+f*PLANE,at)*pF(PN_X,nAcross(vec3i(ubaOrigin(ubaBrick(slot))+lb),f));}
+  else if(kind==K_SEAM){off+=pF(P_C+f*PLANE,at)*qF(PN_X,nAcross(vec3i(ubaOrigin(ubaBrick(slot))+lb),f));}
   else if(kind==K_WALL){walls=true;}
  }
  let d0=pF(P_DIAG,at);var v=off/d0;
@@ -776,8 +794,8 @@ fn sRow6(g:vec3i)->u32{if(any(g<vec3i(0))||any(g>=vec3i(32))){return UB_NONE_ID;
 fn sRow7(g:vec3i)->u32{if(any(g<vec3i(0))||any(g>=vec3i(16))){return UB_NONE_ID;}let v=pIndex(S_MAP7+sPack7(g));return select(v-1u,UB_NONE_ID,v==0u);}
 fn sCount6()->u32{return select(min(pIndex(S_COUNT6),CAP6),0u,bConverged());}
 fn sCount7()->u32{return select(min(pIndex(S_COUNT7),CAP7),0u,bConverged());}
-fn sChild6(e:u32,j:u32)->u32{return pool[S6_C+j*CAP6+e];}
-fn sChild7(e:u32,j:u32)->u32{return pool[S7_C+j*CAP7+e];}
+fn sChild6(e:u32,j:u32)->u32{return poolB[S6_C+j*CAP6+e];}
+fn sChild7(e:u32,j:u32)->u32{return poolB[S7_C+j*CAP7+e];}
 fn sOctant(j:u32)->vec3u{return vec3u(j&1u,(j>>1u)&1u,j>>2u);}
 fn sFace(f:u32)->vec3i{var d=vec3i(0);d[f/2u]=bSign(f);return d;}
 // Face f of child j points at a sibling (inside the group): the sibling, else 8.
@@ -922,8 +940,8 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
    ${S?`if(volume<=1e-6||sealed){kind=K_CLOSED;coefficient=0.0;fraction=0.0;}
    else if(kind==K_NEUMANN){fraction=volume;}
    else{if(kind==K_WALL){coefficient=volume/(h*h);}else{coefficient*=volume;}fraction=volume;}
-   pSet(P_V+f*PLANE,at,volume);`:""}
-   kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.solve[1u+axis]);pSet(P_U+f*PLANE,at,forced);pSet(P_C+f*PLANE,at,coefficient);
+   qSet(P_V+f*PLANE,at,volume);`:""}
+   kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.solve[1u+axis]);qSet(P_U+f*PLANE,at,forced);pSet(P_C+f*PLANE,at,coefficient);
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
    ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN&&(!bLocalSolidWork||capacity!=fraction)){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
   }
@@ -1075,7 +1093,7 @@ fn nSeamFirst(t:u32,g:u32)->u32{
  let l=vec3u(lane&7u,(lane>>3u)&7u,lane>>6u);
  for(var e=group.x;e<count;e+=groups.x){
   let block=ubaLevelSlot(2u,e);let k=512u*block+lane;let at2=UBA_STRIDE*block+lane;
-  if(lane==0u){atomicStore(&nFlags,0u);${B?"var any=0u;for(var r=0u;r<8u;r++){any|=bulk[8u*block+r];}nBulkW=any&1u;":""}}
+  if(lane==0u){atomicStore(&nFlags,0u);${B?"var any=0u;for(var r=0u;r<8u;r++){any|=poolB[N_BULK+8u*block+r];}nBulkW=any&1u;":""}}
   workgroupBarrier();
   var m=0u;var start=0.0;var rhs=0.0;var diagonal=0.0;var walls=0.0;var lifted=0.0;
 ${B?"  let bulkPage=workgroupUniformLoad(&nBulkW)!=0u;let member=bulkPage&&nMember(k);var bulkDelta=0.0;var rInit=0.0;\n":""}  if(pIndex(SLOTS+k)!=0u){atomicOr(&nFlags,1u);}
@@ -1084,7 +1102,7 @@ ${B?"  let bulkPage=workgroupUniformLoad(&nBulkW)!=0u;let member=bulkPage&&nMemb
    for(var f=0u;f<6u;f++){
     let axis=f/2u;let side=f&1u;let stride=nStride(axis);let h4=4.0*params.hDt[axis];
     var kind=N_NONE;var c=0.0;var link=0u;var level2=0.0;
-${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){bulk[nHeadIndex(k,f)]=0x7f61b1e6u;}\n":""}    var n=select(k-stride,k+stride,side==1u);var across=block;
+${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){poolB[N_BULK+nHeadIndex(k,f)]=0x7f61b1e6u;}\n":""}    var n=select(k-stride,k+stride,side==1u);var across=block;
     if(l[axis]==select(0u,7u,side==1u)){
      let step=select(select(9u,3u,axis==1u),1u,axis==0u);
      across=umBlockNeighbourWord(block,select(13u-step,13u+step,side==1u));
@@ -1122,22 +1140,22 @@ ${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){bulk[nHea
      }
     }
     m|=kind<<(3u*f);
-    pSet(PN_K+f*PLANE2,at2,c);pool[PN_L+f*PLANE2+at2]=link;pSet(PB_K+f*PLANE2,at2,level2);
+    qSet(PN_K+f*PLANE2,at2,c);poolB[PN_L+f*PLANE2+at2]=link;qSet(PB_K+f*PLANE2,at2,level2);
    }
    if(diagonal${B?"+bulkDelta":""}>0.0){m|=N_ACTIVE;atomicOr(&nFlags,3u);}
    if(rootArena[R_MINIMUM+k]>-1e38){m|=N_CLOSED;}
 ${B?"   if(member){m|=N_BULK;}\n":""}  }
-  pool[PN_M+at2]=m;pSet(PN_X,at2,0.0);pSet(PN_B,at2,start);pSet(PN_R,at2,rhs);pSet(PN_D,at2,diagonal);
+  poolB[PN_M+at2]=m;qSet(PN_X,at2,0.0);qSet(PN_B,at2,start);qSet(PN_R,at2,rhs);qSet(PN_D,at2,diagonal);
   if((m&N_ACTIVE)!=0u){
    // Level 2's correction operator: the walls follow their row.
-   pSet(PB_D,at2,diagonal${B?"+bulkDelta":""}-walls);
+   qSet(PB_D,at2,diagonal${B?"+bulkDelta":""}-walls);
    var r=rhs+lifted;if((m&N_CLOSED)!=0u&&start<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
    ${B?"rInit=r;if((m&N_BULK)==0u){atomicMax(&nWorst,bResidualMagnitude(r*nScale()));}":"atomicMax(&nWorst,bResidualMagnitude(r*nScale()));"}
   }
   workgroupBarrier();
 ${B?`  // A member region's residual is its 16h row's: the mean of its lanes'.
   if(bulkPage){let mean=nBulkMean(rInit,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&nWorst,bResidualMagnitude(mean*nScale()));}if(lane==0u){atomicOr(&nFlags,4u);}workgroupBarrier();}
-`:""}  if(lane==0u){pool[PN_M+UBA_STRIDE*block+512u]=atomicLoad(&nFlags);}
+`:""}  if(lane==0u){poolB[PN_M+UBA_STRIDE*block+512u]=atomicLoad(&nFlags);}
  }
  workgroupBarrier();
  // The start meets the root's bound only under its floor: a tenth of itself it never is.
@@ -1152,13 +1170,13 @@ ${B?`  // A member region's residual is its 16h row's: the mean of its lanes'.
   let block=ubaLevelSlot(2u,e);
   if(lane==0u){nPageFlags=nPage(block);}
   if((workgroupUniformLoad(&nPageFlags)&2u)!=0u){
-   let at2=UBA_STRIDE*block+lane;let m=pool[PN_M+at2];
+   let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];
    if((m&N_ACTIVE)!=0u){
-    let p=pF(PN_B,at2)+pF(PN_X,at2);rootArena[R_PRESSURE+512u*block+lane]=p;
+    let p=qF(PN_B,at2)+qF(PN_X,at2);rootArena[R_PRESSURE+512u*block+lane]=p;
     for(var f=0u;f<6u;f++){
      let kind=nKind(m,f);
      if(kind==N_WALL||kind==N_HELD){
-      let s=N_KEYS+umFaceTile(block,f,l);let wall=p+64.0*rootArena[R_RHS+s]/pF(PN_K+f*PLANE2,at2);
+      let s=N_KEYS+umFaceTile(block,f,l);let wall=p+64.0*rootArena[R_RHS+s]/qF(PN_K+f*PLANE2,at2);
       rootArena[R_PRESSURE+s]=select(max(wall,0.0),wall,kind==N_HELD);
      }
     }
@@ -1331,19 +1349,19 @@ fn nSeamSum(first:u32,f:u32)->f32{
   let block=ubaLevelSlot(2u,e);
   if(lane==0u){rFlags=nPage(block);}
   if((workgroupUniformLoad(&rFlags)&2u)!=0u){
-   let at2=UBA_STRIDE*block+lane;let m=pool[PN_M+at2];var r=0.0;
+   let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];var r=0.0;
    if((m&N_ACTIVE)!=0u){
-    let x=pF(PN_X,at2);let base=pF(PN_B,at2);r=pF(PN_R,at2)-pF(PN_D,at2)*x;
+    let x=qF(PN_X,at2);let base=qF(PN_B,at2);r=qF(PN_R,at2)-qF(PN_D,at2)*x;
     for(var f=0u;f<6u;f++){
-     let kind=nKind(m,f);let link=pool[PN_L+f*PLANE2+at2];
-     if(kind==N_NATIVE){r+=pF(PN_K+f*PLANE2,at2)*pF(PN_X,link);}
+     let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
+     if(kind==N_NATIVE){r+=qF(PN_K+f*PLANE2,at2)*qF(PN_X,link);}
      else if(kind==N_SEAM){r+=nSeamSum(link,f);}
-     else if(kind==N_WALL){r+=pF(PN_K+f*PLANE2,at2)*max(x+bitcast<f32>(link),-base);}
+     else if(kind==N_WALL){r+=qF(PN_K+f*PLANE2,at2)*max(x+bitcast<f32>(link),-base);}
     }
     if((m&N_CLOSED)!=0u&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
     ${B?"if((m&N_BULK)==0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}":"atomicMax(&worst,bResidualMagnitude(r*nScale()));"}
    }
-${B?"   if((workgroupUniformLoad(&rFlags)&4u)!=0u){r=nBulkMean(r,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}}\n":""}   if(!pLast){pSet(PB_R,at2,r);}
+${B?"   if((workgroupUniformLoad(&rFlags)&4u)!=0u){r=nBulkMean(r,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}}\n":""}   if(!pLast){qSet(PB_R,at2,r);}
   }
   workgroupBarrier();
  }
@@ -1373,7 +1391,7 @@ var<workgroup> fSum:array<vec2f,64>;
    for(var f=0u;f<6u;f++){
     let kind=bFaceKind(kinds,f);let c=pCoefficient(at,kinds,f);d0+=c;
     if(kind==K_BAND){off+=c*pF(P_X,pNear(at,p,f));}
-    else if(kind==K_SEAM){off+=c*pF(PN_X,nAcross(p,f));}
+    else if(kind==K_SEAM){off+=c*qF(PN_X,nAcross(p,f));}
     else if(kind==K_WALL){off+=c*max(own+pLift(at,f),-base);}
    }
    if(d0>0.0){
@@ -1433,8 +1451,8 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
      else if(kind==K_SEAM){
       // A seam: the native row's start; out of the aggregate (a tile face)
       // toward an active native row, its level 2 cell.
-      let m=nAcross(p,f);w[side]=c;d[side]=pF(PN_B,m)+bSeamHead(at,f)-own;let sc=seamCoarse(c);part+=sc.x;
-      if((pool[PN_M+m]&N_ACTIVE)!=0u){cross[axis]=sc.y;}
+      let m=nAcross(p,f);w[side]=c;d[side]=qF(PN_B,m)+bSeamHead(at,f)-own;let sc=seamCoarse(c);part+=sc.x;
+      if((poolB[PN_M+m]&N_ACTIVE)!=0u){cross[axis]=sc.y;}
      }
      else if(kind==K_GHOST||kind==K_OPEN){open+=c;}
      else if(kind==K_WALL){walls+=c;lifted+=c*max(pLift(at,f),-own);}
@@ -1458,12 +1476,12 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
   let parent=ubaParent(0u,slot);let o=parent.y;let oct=4u*vec3u(o&1u,(o>>1u)&1u,o>>2u);
   if(lane<8u){
    let A=vec3u(lane&1u,(lane>>1u)&1u,lane>>2u);let at1=pAddr(parent.x,oct+2u*(lb>>vec3u(2u))+A);
-   pSet(PA_D,at1,rDiag(A));for(var f=0u;f<6u;f++){pSet(PA_K+f*PLANE,at1,rCouple(A,f));}
+   qSet(PA_D,at1,rDiag(A));for(var f=0u;f<6u;f++){qSet(PA_K+f*PLANE1,at1,rCouple(A,f));}
   }
   let mask=pIndex(MASK+id);let dead=lane>>3u;
   if((mask&((1u<<bit)-1u))==0u&&((mask>>dead)&1u)==0u){
    let A=2u*vec3u(dead&1u,(dead>>1u)&1u,dead>>2u)+vec3u(lane&1u,(lane>>1u)&1u,(lane>>2u)&1u);let at1=pAddr(parent.x,oct+A);
-   pSet(PA_D,at1,0.0);for(var f=0u;f<6u;f++){pSet(PA_K+f*PLANE,at1,0.0);}
+   qSet(PA_D,at1,0.0);for(var f=0u;f<6u;f++){qSet(PA_K+f*PLANE1,at1,0.0);}
   }
   workgroupBarrier();
   if(lane==0u){
@@ -1520,7 +1538,7 @@ var<workgroup> rRes:array<f32,64>;
    for(var f=0u;f<6u;f++){
     let kind=bFaceKind(kinds,f);
     if(kind==K_BAND){off+=pCoefficient(at,kinds,f)*pF(P_X,pNear0(at,slot,lb,f));}
-    else if(kind==K_SEAM){off+=pF(P_C+f*PLANE,at)*pF(PN_X,nAcross(vec3i(ubaOrigin(ubaBrick(slot))+lb),f));}
+    else if(kind==K_SEAM){off+=pF(P_C+f*PLANE,at)*qF(PN_X,nAcross(vec3i(ubaOrigin(ubaBrick(slot))+lb),f));}
     else if(kind==K_WALL){off+=pF(P_C+f*PLANE,at)*max(x+pLift(at,f),-base);}
    }
    r=pF(P_RHS,at)+off-pF(P_DIAG,at)*x;
@@ -1532,7 +1550,7 @@ var<workgroup> rRes:array<f32,64>;
    let A=vec3u(lane&1u,(lane>>1u)&1u,lane>>2u);var s=0.0;
    for(var k=0u;k<8u;k++){let c=2u*A+vec3u(k&1u,(k>>1u)&1u,k>>2u);s+=rRes[c.x+4u*(c.y+4u*c.z)];}
    let parent=ubaParent(0u,slot);let o=parent.y;
-   pSet(PA_R,pAddr(parent.x,4u*vec3u(o&1u,(o>>1u)&1u,o>>2u)+2u*(lb>>vec3u(2u))+A),s);
+   qSet(PA_R,pAddr(parent.x,4u*vec3u(o&1u,(o>>1u)&1u,o>>2u)+2u*(lb>>vec3u(2u))+A),s);
   }
   workgroupBarrier();
  }
@@ -1553,7 +1571,7 @@ override pBake:bool=false;
   workgroupBarrier();
   cSweeps(red,cR0,black,cB0);
   let c=cCore(lane);let at=cAddr(c);let core=cCell(at);let d=core.d;let x=cX[cBox(c)];
-  ubaStore(CX,slot,lane,x);
+  ubaStore1(CX,slot,lane,x);
   var r=0.0;if(d>0.0){r=core.r+cOff(c,core)-d*x;}
   workgroupBarrier();
   gRes[lane]=r;
@@ -1564,7 +1582,7 @@ override pBake:bool=false;
    if(d>0.0){for(var axis=0u;axis<3u;axis++){let f=2u*axis+(u32(c[axis])&1u);var q=c;q[axis]+=bSign(f);let k=core.k[f];if(k>0.0&&cDiag(cAddr(q))<=0.0){
      let hq=2*(vec3i(ubaLevelOrigin(1u,ubaLevelRecord(1u,slot,29u)))+q);
      if(umCellPresent(hq)){let tile=umTileKey(hq/4);let native=UBA_STRIDE*(tile>>9u)+(tile&511u);
-      if((pool[PN_M+native]&N_ACTIVE)!=0u){let sc=seamCoarse(k);gPart[lane]+=sc.x;gCross[512u*axis+lane]=sc.y;}
+      if((poolB[PN_M+native]&N_ACTIVE)!=0u){let sc=seamCoarse(k);gPart[lane]+=sc.x;gCross[512u*axis+lane]=sc.y;}
      }
     }}}
   }
@@ -1573,9 +1591,9 @@ override pBake:bool=false;
    let parent=ubaParent(1u,slot);let A=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);let o=parent.y;
    let at2=pAddr(parent.x,4u*vec3u(o&1u,(o>>1u)&1u,o>>2u)+A);
    // A native row's level 2 row is its own (pNative, pResidual2).
-   if((pool[PN_M+at2]&N_ACTIVE)==0u){
-    pSet(PB_R,at2,gSum(A));
-    if(pBake){pSet(PB_D,at2,gDiag(A));for(var f=0u;f<6u;f++){pSet(PB_K+f*PLANE2,at2,gCouple(A,f));}}
+   if((poolB[PN_M+at2]&N_ACTIVE)==0u){
+    qSet(PB_R,at2,gSum(A));
+    if(pBake){qSet(PB_D,at2,gDiag(A));for(var f=0u;f<6u;f++){qSet(PB_K+f*PLANE2,at2,gCouple(A,f));}}
    }
   }
  }
@@ -1595,7 +1613,7 @@ fn tPart(i:u32,l:vec3u,d:f32,k:array<f32,6>){
 fn tBake(at:u32,A:vec3u,s:u32){
  var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
  for(var j=0u;j<8u;j++){let i=tChild(A,j,s);d+=gPart[i];for(var axis=0u;axis<3u;axis++){let bit=(j>>axis)&1u;k[2u*axis+bit]+=gCross[512u*axis+i];}}
- pSet(PT_D,at,T_SCALE*d);for(var f=0u;f<6u;f++){pSet(PT_K+f*PLANE2,at,T_SCALE*k[f]);}
+ qSet(PT_D,at,T_SCALE*d);for(var f=0u;f<6u;f++){qSet(PT_K+f*PLANE2,at,T_SCALE*k[f]);}
 }
 @compute @workgroup_size(${WG}) fn pDownB(${lanes}){
  if(lane==0u){cN=select(ubaLevelCount(2u),0u,bConverged());}
@@ -1604,28 +1622,28 @@ fn tBake(at:u32,A:vec3u,s:u32){
   let slot=ubaLevelSlot(2u,e);
   if(lane==0u){cN=u32(tPageLive(slot));}
   // A page with no rows: its tail rows (read by its neighbours) are none.
-  if(workgroupUniformLoad(&cN)==0u){if(pBake&&lane<73u){pSet(PT_D,UBA_STRIDE*slot+lane,0.0);}workgroupBarrier();continue;}
+  if(workgroupUniformLoad(&cN)==0u){if(pBake&&lane<73u){qSet(PT_D,UBA_STRIDE*slot+lane,0.0);}workgroupBarrier();continue;}
   cRecords(slot,lane);
   for(var k=lane;k<1728u;k+=${WG}u){cX[k]=0.0;}
   let red=cBoxCell(0u,lane);let black=cBoxCell(1u,lane);let cR0=cBoxRow(0u,lane);let cB0=cBoxRow(1u,lane);
   workgroupBarrier();
   cSweeps(red,cR0,black,cB0);
   let c=cCore(lane);let at=cAddr(c);let core=cCell(at);
-  ubaStore(CX,slot,lane,cX[cBox(c)]);
+  ubaStore1(CX,slot,lane,cX[cBox(c)]);
   // With pBake the page's 8h, 16h and 32h rows (aggregates within the page).
   if(pBake){
    workgroupBarrier();
    gCoarseChild(lane,vec3u(c),at,core.d,CK,CPL);
    workgroupBarrier();
    let g=tLocal(lane,4u);let at3=UBA_STRIDE*slot+lane;var d3=0.0;var k3=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-   if(lane<64u){let A=vec3u(g);d3=gDiag(A);for(var f=0u;f<6u;f++){k3[f]=gCouple(A,f);}pSet(PT_D,at3,d3);for(var f=0u;f<6u;f++){pSet(PT_K+f*PLANE2,at3,k3[f]);}}
+   if(lane<64u){let A=vec3u(g);d3=gDiag(A);for(var f=0u;f<6u;f++){k3[f]=gCouple(A,f);}qSet(PT_D,at3,d3);for(var f=0u;f<6u;f++){qSet(PT_K+f*PLANE2,at3,k3[f]);}}
    workgroupBarrier();
    if(lane<64u){tPart(lane,vec3u(g),d3,k3);}
    workgroupBarrier();
    let g4=tLocal(lane,2u);let at4=UBA_STRIDE*slot+64u+lane;
    if(lane<8u){tBake(at4,vec3u(g4),2u);}
    workgroupBarrier();
-   if(lane<8u){var k4=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);for(var f=0u;f<6u;f++){k4[f]=pF(PT_K+f*PLANE2,at4);}tPart(lane,vec3u(g4),pF(PT_D,at4),k4);}
+   if(lane<8u){var k4=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);for(var f=0u;f<6u;f++){k4[f]=qF(PT_K+f*PLANE2,at4);}tPart(lane,vec3u(g4),qF(PT_D,at4),k4);}
    workgroupBarrier();
    if(lane==0u){tBake(UBA_STRIDE*slot+72u,vec3u(0u),1u);}
   }
@@ -1649,15 +1667,15 @@ var<workgroup> tX:array<f32,64>;
   let c=cCore(lane);let at=cAddr(c);let core=cCell(at);var r=0.0;
   if(core.d>0.0){
    var off=0.0;
-   for(var f=0u;f<6u;f++){if(core.k[f]!=0.0){var q=c;q[f/2u]+=bSign(f);let m=cAddr(q);if(m!=UB_NONE_ID){off+=core.k[f]*pF(CX,m);}}}
-   r=core.r+off-core.d*pF(CX,at);
+   for(var f=0u;f<6u;f++){if(core.k[f]!=0.0){var q=c;q[f/2u]+=bSign(f);let m=cAddr(q);if(m!=UB_NONE_ID){off+=core.k[f]*qF(CX,m);}}}
+   r=core.r+off-core.d*qF(CX,at);
   }
   gRes[lane]=r;
   workgroupBarrier();
   let g=tLocal(lane,4u);let at3=UBA_STRIDE*slot+lane;var r3=0.0;var d3=0.0;var k3=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   if(lane<64u){
-   r3=gSum(vec3u(g));pSet(PT_R,at3,r3);
-   d3=pF(PT_D,at3);for(var f=0u;f<6u;f++){k3[f]=pF(PT_K+f*PLANE2,at3);}
+   r3=gSum(vec3u(g));qSet(PT_R,at3,r3);
+   d3=qF(PT_D,at3);for(var f=0u;f<6u;f++){k3[f]=qF(PT_K+f*PLANE2,at3);}
    tX[lane]=0.0;
   }
   workgroupBarrier();
@@ -1671,7 +1689,7 @@ var<workgroup> tX:array<f32,64>;
     workgroupBarrier();
    }
   }
-  if(lane<64u){pSet(PT_X,at3,tX[lane]);}
+  if(lane<64u){qSet(PT_X,at3,tX[lane]);}
   workgroupBarrier();
  }
 }`,
@@ -1686,7 +1704,7 @@ override pSrcY:bool=false;
 var<workgroup> dR:array<f32,64>;
 var<workgroup> dX:array<f32,8>;
 var<workgroup> dN:u32;
-fn tSrc(at:u32)->f32{return pF(select(PT_X,PT_Y,pSrcY),at);}
+fn tSrc(at:u32)->f32{return qF(select(PT_X,PT_Y,pSrcY),at);}
 @compute @workgroup_size(64) fn pDown3(${lanes}){
  if(lane==0u){dN=select(ubaLevelCount(2u),0u,bConverged());}
  let n=workgroupUniformLoad(&dN);
@@ -1694,10 +1712,10 @@ fn tSrc(at:u32)->f32{return pF(select(PT_X,PT_Y,pSrcY),at);}
   let slot=ubaLevelSlot(2u,e);
   if(lane==0u){dN=u32(tPageLive(slot));}
   if(workgroupUniformLoad(&dN)==0u){continue;}
-  let g=tLocal(lane,4u);let at3=UBA_STRIDE*slot+lane;let d3=pF(PT_D,at3);var res=0.0;
+  let g=tLocal(lane,4u);let at3=UBA_STRIDE*slot+lane;let d3=qF(PT_D,at3);var res=0.0;
   if(d3>0.0){
-   res=pF(PT_R,at3)-d3*tSrc(at3);
-   for(var f=0u;f<6u;f++){var q=g;q[f/2u]+=bSign(f);let m=tAt(slot,3u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){res+=pF(PT_K+f*PLANE2,at3)*tSrc(m);}}
+   res=qF(PT_R,at3)-d3*tSrc(at3);
+   for(var f=0u;f<6u;f++){var q=g;q[f/2u]+=bSign(f);let m=tAt(slot,3u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at3)*tSrc(m);}}
   }
   dR[lane]=res;
   workgroupBarrier();
@@ -1705,7 +1723,7 @@ fn tSrc(at:u32)->f32{return pF(select(PT_X,PT_Y,pSrcY),at);}
   if(lane<8u){
    let A=vec3u(g4);
    for(var j=0u;j<8u;j++){let l=2u*A+vec3u(j&1u,(j>>1u)&1u,j>>2u);r4+=dR[l.x+4u*(l.y+4u*l.z)];}
-   pSet(PT_R,at4,r4);d4=pF(PT_D,at4);for(var f=0u;f<6u;f++){k4[f]=pF(PT_K+f*PLANE2,at4);}dX[lane]=0.0;
+   qSet(PT_R,at4,r4);d4=qF(PT_D,at4);for(var f=0u;f<6u;f++){k4[f]=qF(PT_K+f*PLANE2,at4);}dX[lane]=0.0;
   }
   workgroupBarrier();
   for(var s=0u;s<${schedule.sweeps}u;s++){
@@ -1717,7 +1735,7 @@ fn tSrc(at:u32)->f32{return pF(select(PT_X,PT_Y,pSrcY),at);}
     workgroupBarrier();
    }
   }
-  if(lane<8u){pSet(PT_X,at4,dX[lane]);}
+  if(lane<8u){qSet(PT_X,at4,dX[lane]);}
   workgroupBarrier();
  }
 }`,
@@ -1733,15 +1751,15 @@ var<workgroup> dN:u32;
   if(lane==0u){dN=u32(tPageLive(slot));}
   if(workgroupUniformLoad(&dN)==0u){continue;}
   if(lane<8u){
-   let g4=tLocal(lane,2u);let at4=UBA_STRIDE*slot+64u+lane;let d4=pF(PT_D,at4);var res=0.0;
+   let g4=tLocal(lane,2u);let at4=UBA_STRIDE*slot+64u+lane;let d4=qF(PT_D,at4);var res=0.0;
    if(d4>0.0){
-    res=pF(PT_R,at4)-d4*pF(PT_X,at4);
-    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){res+=pF(PT_K+f*PLANE2,at4)*pF(PT_X,m);}}
+    res=qF(PT_R,at4)-d4*qF(PT_X,at4);
+    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at4)*qF(PT_X,m);}}
    }
    dR[lane]=res;
   }
   workgroupBarrier();
-  if(lane==0u){var r5=0.0;for(var j=0u;j<8u;j++){r5+=dR[j];}pSet(PT_R,UBA_STRIDE*slot+72u,r5);}
+  if(lane==0u){var r5=0.0;for(var j=0u;j<8u;j++){r5+=dR[j];}qSet(PT_R,UBA_STRIDE*slot+72u,r5);}
   workgroupBarrier();
  }
 }`,
@@ -1753,7 +1771,7 @@ var<workgroup> p2Block:u32;
  for(var item=group.x;item<P2_CHANNELS*umHeldBlockCount();item+=groups.x){
   if(l==0u){p2Block=umHeldBlock(item/P2_CHANNELS);}
   let base=P2_FIRST+P2_CHANNEL*(item%P2_CHANNELS)+UBA_STRIDE*workgroupUniformLoad(&p2Block);
-  for(var k=l;k<UBA_STRIDE;k+=64u){pool[base+k]=0u;}
+  for(var k=l;k<UBA_STRIDE;k+=64u){poolB[base+k]=0u;}
  }
 }`,
    // 32h, the coarsest level (a row a page with rows): one workgroup solves
@@ -1766,37 +1784,37 @@ var<workgroup> tN:u32;
 // The row (staged index + 1, 0: none) across face f of page block's.
 fn sNear(block:u32,f:u32)->u32{
  var d=vec3i(0);d[f/2u]=bSign(f);let near=ubaLevelRecord(2u,block,u32(13+d.x+3*d.y+9*d.z));
- if(near==UB_NONE_ID){return 0u;}return pool[PT_Y+UBA_STRIDE*near+72u];
+ if(near==UB_NONE_ID){return 0u;}return poolB[PT_Y+UBA_STRIDE*near+72u];
 }
 fn sColour(block:u32)->u32{let page=umBlockPage(block);return (page.x+page.y+page.z)&1u;}
 // Row e's update: (r + sum k x_n) / d.
 fn sRow(block:u32,at:u32,d:f32)->f32{
- var off=pF(PT_R,at);for(var f=0u;f<6u;f++){off+=pF(PT_K+f*PLANE2,at)*sX[sNear(block,f)];}
+ var off=qF(PT_R,at);for(var f=0u;f<6u;f++){off+=qF(PT_K+f*PLANE2,at)*sX[sNear(block,f)];}
  return off/d;
 }
 @compute @workgroup_size(${lanesTail}) fn pTail(@builtin(local_invocation_index) lane:u32){
  if(lane==0u){tN=select(ubaLevelCount(2u),0u,bConverged());}
  let P=workgroupUniformLoad(&tN);if(P==0u){return;}
  // A row's staged index + 1, in its page's spare 32h word of the 8h up channel.
- for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;pool[PT_Y+at]=select(0u,e+1u,pF(PT_D,at)>0.0);sX[e+1u]=0.0;}
+ for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;poolB[PT_Y+at]=select(0u,e+1u,qF(PT_D,at)>0.0);sX[e+1u]=0.0;}
  if(lane==0u){sX[0]=0.0;}
  storageBarrier();workgroupBarrier();
  var d0=0.0;var r0=0.0;var k0=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);var n0=array<u32,6>(0u,0u,0u,0u,0u,0u);var c0=0u;
  if(lane<P){
-  let block=ubaLevelSlot(2u,lane);let at=UBA_STRIDE*block+72u;d0=pF(PT_D,at);c0=sColour(block);
-  if(d0>0.0){r0=pF(PT_R,at);for(var f=0u;f<6u;f++){n0[f]=sNear(block,f);k0[f]=pF(PT_K+f*PLANE2,at);}}
+  let block=ubaLevelSlot(2u,lane);let at=UBA_STRIDE*block+72u;d0=qF(PT_D,at);c0=sColour(block);
+  if(d0>0.0){r0=qF(PT_R,at);for(var f=0u;f<6u;f++){n0[f]=sNear(block,f);k0[f]=qF(PT_K+f*PLANE2,at);}}
  }
  for(var sweep=0u;sweep<${TAIL_SWEEPS}u;sweep++){
   for(var col=0u;col<2u;col++){
    if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){off+=k0[f]*sX[n0[f]];}sX[lane+1u]=off/d0;}
    for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){
-    let block=ubaLevelSlot(2u,e);let at=UBA_STRIDE*block+72u;let d=pF(PT_D,at);
+    let block=ubaLevelSlot(2u,e);let at=UBA_STRIDE*block+72u;let d=qF(PT_D,at);
     if(d>0.0&&sColour(block)==col){sX[e+1u]=sRow(block,at,d);}
    }
    workgroupBarrier();
   }
  }
- for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;if(pF(PT_D,at)>0.0){pSet(PT_X,at,sX[e+1u]);}}
+ for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;if(qF(PT_D,at)>0.0){qSet(PT_X,at,sX[e+1u]);}}
 }`,
    // 16h up (a page a group): the 32h correction prolonged into the page's
    // 16h rows and their ring (two deep: the neighbours' rows plus their own
@@ -1816,19 +1834,19 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
   if(workgroupUniformLoad(&uN)==0u){continue;}
   if(lane<216u){
    let g=vec3i(vec3u(lane%6u,(lane/6u)%6u,lane/36u))-2;let at=tAt(slot,4u,g);var x=0.0;
-   if(at!=UB_NONE_ID&&pF(PT_D,at)>0.0){
-    x=pF(PT_X,at);
+   if(at!=UB_NONE_ID&&qF(PT_D,at)>0.0){
+    x=qF(PT_X,at);
     let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
     for(var i=0u;i<8u;i++){
      let dd=vec3i(vec3u(i&1u,(i>>1u)&1u,i>>2u));let q=G+dd*o;if(any(abs(q)>vec3i(1))){continue;}
-     let m=tAt(slot,5u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){sum+=uWeight(dd)*pF(select(PT_X,PT_Y,pTailY),m);total+=uWeight(dd);}
+     let m=tAt(slot,5u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){sum+=uWeight(dd)*qF(select(PT_X,PT_Y,pTailY),m);total+=uWeight(dd);}
     }
     if(total>0.0){x+=sum/total;}
    }
    vX[lane]=x;
   }
   let g4=tLocal(lane,2u);let at4=UBA_STRIDE*slot+64u+lane;var d4=0.0;var r4=0.0;var k4=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-  if(lane<8u){d4=pF(PT_D,at4);if(d4>0.0){r4=pF(PT_R,at4);for(var f=0u;f<6u;f++){k4[f]=pF(PT_K+f*PLANE2,at4);}}}
+  if(lane<8u){d4=qF(PT_D,at4);if(d4>0.0){r4=qF(PT_R,at4);for(var f=0u;f<6u;f++){k4[f]=qF(PT_K+f*PLANE2,at4);}}}
   workgroupBarrier();
   for(var s=0u;s<${schedule.sweeps}u;s++){
    for(var col=0u;col<2u;col++){
@@ -1839,7 +1857,7 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
     workgroupBarrier();
    }
   }
-  if(lane<8u){pSet(PT_Y,at4,vX[vBox(g4)]);}
+  if(lane<8u){qSet(PT_Y,at4,vX[vBox(g4)]);}
   workgroupBarrier();
  }
 }`,
@@ -1862,19 +1880,19 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
   if(workgroupUniformLoad(&uN)==0u){continue;}
   if(lane<216u){
    let g=vec3i(vec3u(lane%6u,(lane/6u)%6u,lane/36u))-1;let at=tAt(slot,3u,g);var x=0.0;
-   if(at!=UB_NONE_ID&&pF(PT_D,at)>0.0){
-    x=pF(src,at);
+   if(at!=UB_NONE_ID&&qF(PT_D,at)>0.0){
+    x=qF(src,at);
     let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
     for(var i=0u;i<8u;i++){
      let dd=vec3i(vec3u(i&1u,(i>>1u)&1u,i>>2u));let q=G+dd*o;
-     let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){sum+=uWeight(dd)*pF(PT_Y,m);total+=uWeight(dd);}
+     let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){sum+=uWeight(dd)*qF(PT_Y,m);total+=uWeight(dd);}
     }
     if(total>0.0){x+=sum/total;}
    }
    uX[lane]=x;
   }
   let g=tLocal(lane,4u);let at3=UBA_STRIDE*slot+lane;var d3=0.0;var r3=0.0;var k3=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-  if(lane<64u){d3=pF(PT_D,at3);if(d3>0.0){r3=pF(PT_R,at3);for(var f=0u;f<6u;f++){k3[f]=pF(PT_K+f*PLANE2,at3);}}}
+  if(lane<64u){d3=qF(PT_D,at3);if(d3>0.0){r3=qF(PT_R,at3);for(var f=0u;f<6u;f++){k3[f]=qF(PT_K+f*PLANE2,at3);}}}
   workgroupBarrier();
   for(var s=0u;s<${schedule.sweeps}u;s++){
    for(var col=0u;col<2u;col++){
@@ -1885,7 +1903,7 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
     workgroupBarrier();
    }
   }
-  if(lane<64u){pSet(dst,at3,uX[uBox(g)]);}
+  if(lane<64u){qSet(dst,at3,uX[uBox(g)]);}
   workgroupBarrier();
  }
 }`,
@@ -1902,17 +1920,17 @@ fn tBox(q:vec3i)->u32{let u=vec3u(q+2);return u.x+8u*(u.y+8u*u.z);}
   if(lane==0u){cN=u32(tPageLive(slot));${B?"uBulk=nPage(slot)&4u;":""}}
   if(workgroupUniformLoad(&cN)==0u){continue;}
   cRecords(slot,lane);
-  {let g=vec3i(vec3u(lane&7u,(lane>>3u)&7u,lane>>6u))-2;let m=tAt(slot,3u,g);var x=0.0;var d=0.0;if(m!=UB_NONE_ID){x=pF(PT_Y,m);d=pF(PT_D,m);}tS[lane]=x;tS[512u+lane]=d;}
+  {let g=vec3i(vec3u(lane&7u,(lane>>3u)&7u,lane>>6u))-2;let m=tAt(slot,3u,g);var x=0.0;var d=0.0;if(m!=UB_NONE_ID){x=qF(PT_Y,m);d=qF(PT_D,m);}tS[lane]=x;tS[512u+lane]=d;}
   workgroupBarrier();
-  for(var k=lane;k<1728u;k+=${WG}u){let c=cStaged(k);let at=cAddr(c);var x=0.0;if(at!=UB_NONE_ID){x=pF(CX,at);if(pF(CD,at)>0.0){x+=cProlong(c);}}cX[k]=x;}
+  for(var k=lane;k<1728u;k+=${WG}u){let c=cStaged(k);let at=cAddr(c);var x=0.0;if(at!=UB_NONE_ID){x=qF(CX,at);if(qF(CD,at)>0.0){x+=cProlong(c);}}cX[k]=x;}
   let red=cBoxCell(0u,lane);let black=cBoxCell(1u,lane);let cR0=cBoxRow(0u,lane);let cB0=cBoxRow(1u,lane);
   workgroupBarrier();
   cSweeps(red,cR0,black,cB0);
   // Every native row takes the coupled correction; a closed row stays
   // at or above zero. A native-only stop would invalidate the hierarchy.
-  let at2=UBA_STRIDE*slot+lane;let m=pool[PN_M+at2];
-  let y=cX[cBox(cCore(lane))];ubaStore(CY,slot,lane,y);
-${B?"  // A member region takes its lanes' mean correction: one pressure.\n  var yb=y;if(workgroupUniformLoad(&uBulk)!=0u){yb=nBulkMean(y,(m&N_BULK)!=0u,lane);}\n":""}  if((m&N_ACTIVE)!=0u){var x=pF(PN_X,at2)+${B?"yb":"y"};if((m&N_CLOSED)!=0u){x=max(x,-pF(PN_B,at2));}pSet(PN_X,at2,x);}
+  let at2=UBA_STRIDE*slot+lane;let m=poolB[PN_M+at2];
+  let y=cX[cBox(cCore(lane))];ubaStore1(CY,slot,lane,y);
+${B?"  // A member region takes its lanes' mean correction: one pressure.\n  var yb=y;if(workgroupUniformLoad(&uBulk)!=0u){yb=nBulkMean(y,(m&N_BULK)!=0u,lane);}\n":""}  if((m&N_ACTIVE)!=0u){var x=qF(PN_X,at2)+${B?"yb":"y"};if((m&N_CLOSED)!=0u){x=max(x,-qF(PN_B,at2));}qSet(PN_X,at2,x);}
   workgroupBarrier();
  }
 }`,
@@ -1928,11 +1946,11 @@ ${B?"  // A member region takes its lanes' mean correction: one pressure.\n  var
   cRecords(slot,lane);
   // Across a seam (no level 1 row there, or one with no diagonal), the
   // native row's level 2 correction.
-  for(var k=lane;k<1728u;k+=${WG}u){let c=cStaged(k);let at=cAddr(c);var x=0.0;if(cDiag(at)>0.0){x=pF(CX,at)+cProlong(c);}else{let P=c>>vec3u(1u);x=select(0.0,ubaW_q[ubaAt_q(P,0u)],ubaW_q[ubaAt_q(P,1u)]>0.0);}cX[k]=x;}
+  for(var k=lane;k<1728u;k+=${WG}u){let c=cStaged(k);let at=cAddr(c);var x=0.0;if(cDiag(at)>0.0){x=qF(CX,at)+cProlong(c);}else{let P=c>>vec3u(1u);x=select(0.0,ubaW_q[ubaAt_q(P,0u)],ubaW_q[ubaAt_q(P,1u)]>0.0);}cX[k]=x;}
   let red=cBoxCell(0u,lane);let black=cBoxCell(1u,lane);let cR0=cBoxRow(0u,lane);let cB0=cBoxRow(1u,lane);
   workgroupBarrier();
   cSweeps(red,cR0,black,cB0);
-  ubaStore(CY,slot,lane,cX[cBox(cCore(lane))]);
+  ubaStore1(CY,slot,lane,cX[cBox(cCore(lane))]);
  }
 }`,
    // Level 0 up, a workgroup a band tile: level 1's correction prolonged
@@ -1960,7 +1978,7 @@ override pDst:u32=0u;
   let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);
   let parent=ubaParent(0u,slot);let o=parent.y;
   let q=p1At(parent.x,vec3i(4u*vec3u(o&1u,(o>>1u)&1u,o>>2u)+2u*(lb>>vec3u(2u))+l)-1);
-  var y=0.0;var d=0.0;if(q!=UB_NONE_ID){y=pF(PA_Y,q);d=pF(PA_D,q);}
+  var y=0.0;var d=0.0;if(q!=UB_NONE_ID){y=qF(PA_Y,q);d=qF(PA_D,q);}
   qY[lane]=y;qD[lane]=d;
   workgroupBarrier();
   let at=pAddr(slot,lb);let kinds=pool[P_KINDS+at];
@@ -2010,7 +2028,7 @@ fn bFace(at:u32,p:vec3i,f:u32)->f32{
  if(kind==K_OPEN){if(!liquid){return forced;}return bSurface(forced+scale*f32(sign)*(base+own)*coefficient*h,forced,f32(sign),base+own);}
  var other=0.0;var otherBase=0.0;var otherLiquid=false;
  if(kind==K_BAND){let m=pNear(at,p,f);other=pF(P_X,m);otherBase=pF(P_BASE,m);otherLiquid=bLiquid(pool[P_KINDS+m]);}
- else if(kind==K_SEAM){let m=nAcross(p,f);other=pF(PN_X,m);otherBase=pF(PN_B,m)+bSeamHead(at,f);otherLiquid=true;}
+ else if(kind==K_SEAM){let m=nAcross(p,f);other=qF(PN_X,m);otherBase=qF(PN_B,m)+bSeamHead(at,f);otherLiquid=true;}
  if(!liquid&&!otherLiquid){return 0.0;}
  let value=forced-scale*f32(sign)*((otherBase-base)+(other-own))*coefficient*h;
  if(liquid!=otherLiquid){let drop=(base+own)-(otherBase+other);return bSurface(value,forced,select(-1.0,1.0,liquid)*f32(sign),select(-drop,drop,liquid));}
@@ -2126,18 +2144,18 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
 @compute @workgroup_size(64) fn sGroup6(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let n=select(ubaLevelCount(2u),0u,bConverged());
  for(var e=gid.x;e<n;e+=64u*groups.x){
-  let block=ubaLevelSlot(2u,e);if(pF(PT_D,UBA_STRIDE*block+72u)<=0.0){continue;}
+  let block=ubaLevelSlot(2u,e);if(qF(PT_D,UBA_STRIDE*block+72u)<=0.0){continue;}
   let rel=sRel(block);let o=rel&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
   var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
   for(var j=0u;j<8u;j++){
    let d=vec3i(sOctant(j))-o;var b=block;
    if(j!=mine){b=ubaLevelRecord(2u,block,u32(13+d.x+3*d.y+9*d.z));}
-   if(b!=UB_NONE_ID&&pF(PT_D,UBA_STRIDE*b+72u)>0.0){kids[j]=b;first=min(first,j);}
+   if(b!=UB_NONE_ID&&qF(PT_D,UBA_STRIDE*b+72u)>0.0){kids[j]=b;first=min(first,j);}
   }
   if(first!=mine){continue;}
   let row=atomicAdd(&state[S_COUNT6],1u);if(row>=CAP6){continue;}
   let key=sPack6(rel>>vec3u(1u));atomicStore(&state[S_LIST6+row],key);atomicStore(&state[S_MAP6+key],row+1u);
-  for(var j=0u;j<8u;j++){pool[S6_C+j*CAP6+row]=kids[j];}
+  for(var j=0u;j<8u;j++){poolB[S6_C+j*CAP6+row]=kids[j];}
  }
 }`,
     // A thread a 64h row: its operator from its pages' 32h rows; its 128h
@@ -2149,22 +2167,22 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
   var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   for(var j=0u;j<8u;j++){
    let b=sChild6(e,j);if(b==UB_NONE_ID){continue;}
-   let at=UBA_STRIDE*b+72u;var part=pF(PT_D,at);
+   let at=UBA_STRIDE*b+72u;var part=qF(PT_D,at);
    for(var axis=0u;axis<3u;axis++){
     let bit=(j>>axis)&1u;
-    if(sChild6(e,j^(1u<<axis))!=UB_NONE_ID){part-=pF(PT_K+(2u*axis+1u-bit)*PLANE2,at);}
-    k[2u*axis+bit]+=pF(PT_K+(2u*axis+bit)*PLANE2,at);
+    if(sChild6(e,j^(1u<<axis))!=UB_NONE_ID){part-=qF(PT_K+(2u*axis+1u-bit)*PLANE2,at);}
+    k[2u*axis+bit]+=qF(PT_K+(2u*axis+bit)*PLANE2,at);
    }
    d+=part;
   }
-  pSet(S6_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){pSet(S6_K+f*CAP6,e,S_SCALE*k[f]);}
+  qSet(S6_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){qSet(S6_K+f*CAP6,e,S_SCALE*k[f]);}
   let g=sKey6(e);let o=g&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
   var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
   for(var j=0u;j<8u;j++){let r=select(sRow6(g-o+vec3i(sOctant(j))),e,j==mine);if(r!=UB_NONE_ID){kids[j]=r;first=min(first,j);}}
   if(first!=mine){continue;}
   let row=atomicAdd(&state[S_COUNT7],1u);if(row>=CAP7){continue;}
   let key=sPack7(g>>vec3u(1u));atomicStore(&state[S_LIST7+row],key);atomicStore(&state[S_MAP7+key],row+1u);
-  for(var j=0u;j<8u;j++){pool[S7_C+j*CAP7+row]=kids[j];}
+  for(var j=0u;j<8u;j++){poolB[S7_C+j*CAP7+row]=kids[j];}
  }
 }`,
     // A thread a 128h row: its operator from its 64h rows'.
@@ -2175,15 +2193,15 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
   var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   for(var j=0u;j<8u;j++){
    let r=sChild7(e,j);if(r==UB_NONE_ID){continue;}
-   var part=pF(S6_D,r);
+   var part=qF(S6_D,r);
    for(var axis=0u;axis<3u;axis++){
     let bit=(j>>axis)&1u;
-    if(sChild7(e,j^(1u<<axis))!=UB_NONE_ID){part-=pF(S6_K+(2u*axis+1u-bit)*CAP6,r);}
-    k[2u*axis+bit]+=pF(S6_K+(2u*axis+bit)*CAP6,r);
+    if(sChild7(e,j^(1u<<axis))!=UB_NONE_ID){part-=qF(S6_K+(2u*axis+1u-bit)*CAP6,r);}
+    k[2u*axis+bit]+=qF(S6_K+(2u*axis+bit)*CAP6,r);
    }
    d+=part;
   }
-  pSet(S7_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){pSet(S7_K+f*CAP7,e,S_SCALE*k[f]);}
+  qSet(S7_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){qSet(S7_K+f*CAP7,e,S_SCALE*k[f]);}
  }
 }`,
     // A 64h group a workgroup: its pages' 16h residuals (against the
@@ -2199,10 +2217,10 @@ var<workgroup> dN:u32;
  for(var e=group.x;e<n;e+=groups.x){
   let page=sChild6(e,lane>>3u);var res=0.0;
   if(page!=UB_NONE_ID){
-   let c=lane&7u;let g4=tLocal(c,2u);let at4=UBA_STRIDE*page+64u+c;let d4=pF(PT_D,at4);
+   let c=lane&7u;let g4=tLocal(c,2u);let at4=UBA_STRIDE*page+64u+c;let d4=qF(PT_D,at4);
    if(d4>0.0){
-    res=pF(PT_R,at4)-d4*pF(PT_X,at4);
-    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(page,4u,q);if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){res+=pF(PT_K+f*PLANE2,at4)*pF(PT_X,m);}}
+    res=qF(PT_R,at4)-d4*qF(PT_X,at4);
+    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(page,4u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at4)*qF(PT_X,m);}}
    }
   }
   dR[lane]=res;
@@ -2210,7 +2228,7 @@ var<workgroup> dN:u32;
   var at5=0u;var r5=0.0;var d5=0.0;var k5=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   if(lane<8u){
    let b=sChild6(e,lane);
-   if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;for(var c=0u;c<8u;c++){r5+=dR[8u*lane+c];}pSet(PT_R,at5,r5);d5=pF(PT_D,at5);for(var f=0u;f<6u;f++){k5[f]=pF(PT_K+f*PLANE2,at5);}}
+   if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;for(var c=0u;c<8u;c++){r5+=dR[8u*lane+c];}qSet(PT_R,at5,r5);d5=qF(PT_D,at5);for(var f=0u;f<6u;f++){k5[f]=qF(PT_K+f*PLANE2,at5);}}
    dX[lane]=0.0;
   }
   workgroupBarrier();
@@ -2223,7 +2241,7 @@ var<workgroup> dN:u32;
     workgroupBarrier();
    }
   }
-  if(lane<8u&&d5>0.0){pSet(PT_X,at5,dX[lane]);}
+  if(lane<8u&&d5>0.0){qSet(PT_X,at5,dX[lane]);}
   workgroupBarrier();
  }
 }`,
@@ -2242,9 +2260,9 @@ var<workgroup> dN:u32;
   if(r6!=UB_NONE_ID){
    let page=sChild6(r6,lane&7u);
    if(page!=UB_NONE_ID){
-    let at5=UBA_STRIDE*page+72u;let d5=pF(PT_D,at5);
-    res=pF(PT_R,at5)-d5*pF(PT_X,at5);
-    for(var f=0u;f<6u;f++){let m=tAt(page,5u,sFace(f));if(m!=UB_NONE_ID&&pF(PT_D,m)>0.0){res+=pF(PT_K+f*PLANE2,at5)*pF(PT_X,m);}}
+    let at5=UBA_STRIDE*page+72u;let d5=qF(PT_D,at5);
+    res=qF(PT_R,at5)-d5*qF(PT_X,at5);
+    for(var f=0u;f<6u;f++){let m=tAt(page,5u,sFace(f));if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at5)*qF(PT_X,m);}}
    }
   }
   dR[lane]=res;
@@ -2252,7 +2270,7 @@ var<workgroup> dN:u32;
   var row=UB_NONE_ID;var r=0.0;var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   if(lane<8u){
    row=sChild7(e,lane);
-   if(row!=UB_NONE_ID){for(var j=0u;j<8u;j++){r+=dR[8u*lane+j];}pSet(S6_R,row,r);d=pF(S6_D,row);for(var f=0u;f<6u;f++){k[f]=pF(S6_K+f*CAP6,row);}}
+   if(row!=UB_NONE_ID){for(var j=0u;j<8u;j++){r+=dR[8u*lane+j];}qSet(S6_R,row,r);d=qF(S6_D,row);for(var f=0u;f<6u;f++){k[f]=qF(S6_K+f*CAP6,row);}}
    dX[lane]=0.0;
   }
   workgroupBarrier();
@@ -2265,7 +2283,7 @@ var<workgroup> dN:u32;
     workgroupBarrier();
    }
   }
-  if(lane<8u&&d>0.0){pSet(S6_X,row,dX[lane]);}
+  if(lane<8u&&d>0.0){qSet(S6_X,row,dX[lane]);}
   workgroupBarrier();
  }
 }`,
@@ -2282,13 +2300,13 @@ var<workgroup> dN:u32;
   if(e<n){
    let r=sChild7(e,lane&7u);
    if(r!=UB_NONE_ID){
-    let d=pF(S6_D,r);res=pF(S6_R,r)-d*pF(S6_X,r);let g=sKey6(r);
-    for(var f=0u;f<6u;f++){let m=sRow6(g+sFace(f));if(m!=UB_NONE_ID&&pF(S6_D,m)>0.0){res+=pF(S6_K+f*CAP6,r)*pF(S6_X,m);}}
+    let d=qF(S6_D,r);res=qF(S6_R,r)-d*qF(S6_X,r);let g=sKey6(r);
+    for(var f=0u;f<6u;f++){let m=sRow6(g+sFace(f));if(m!=UB_NONE_ID&&qF(S6_D,m)>0.0){res+=qF(S6_K+f*CAP6,r)*qF(S6_X,m);}}
    }
   }
   dR[lane]=res;
   workgroupBarrier();
-  if((lane&7u)==0u&&e<n){var sum=0.0;for(var j=0u;j<8u;j++){sum+=dR[lane+j];}pSet(S7_R,e,sum);}
+  if((lane&7u)==0u&&e<n){var sum=0.0;for(var j=0u;j<8u;j++){sum+=dR[lane+j];}qSet(S7_R,e,sum);}
   workgroupBarrier();
  }
 }`,
@@ -2298,8 +2316,8 @@ var<workgroup> dN:u32;
 var<workgroup> sX:array<f32,${TAIL_ROWS+1}>;
 var<workgroup> tN:u32;
 // The row (index + 1, 0: none) across face f of row e.
-fn sNear7(e:u32,f:u32)->u32{let m=sRow7(sKey7(e)+sFace(f));if(m==UB_NONE_ID||pF(S7_D,m)<=0.0){return 0u;}return m+1u;}
-fn sRow7Next(e:u32,d:f32)->f32{var off=pF(S7_R,e);for(var f=0u;f<6u;f++){off+=pF(S7_K+f*CAP7,e)*sX[sNear7(e,f)];}return off/d;}
+fn sNear7(e:u32,f:u32)->u32{let m=sRow7(sKey7(e)+sFace(f));if(m==UB_NONE_ID||qF(S7_D,m)<=0.0){return 0u;}return m+1u;}
+fn sRow7Next(e:u32,d:f32)->f32{var off=qF(S7_R,e);for(var f=0u;f<6u;f++){off+=qF(S7_K+f*CAP7,e)*sX[sNear7(e,f)];}return off/d;}
 @compute @workgroup_size(${lanesTail}) fn sTail7(@builtin(local_invocation_index) lane:u32){
  if(lane==0u){tN=sCount7();}
  let P=workgroupUniformLoad(&tN);if(P==0u){return;}
@@ -2307,15 +2325,15 @@ fn sRow7Next(e:u32,d:f32)->f32{var off=pF(S7_R,e);for(var f=0u;f<6u;f++){off+=pF
  if(lane==0u){sX[0]=0.0;}
  workgroupBarrier();
  var d0=0.0;var r0=0.0;var k0=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);var n0=array<u32,6>(0u,0u,0u,0u,0u,0u);var c0=0u;
- if(lane<P){d0=pF(S7_D,lane);c0=sParity(sKey7(lane));if(d0>0.0){r0=pF(S7_R,lane);for(var f=0u;f<6u;f++){n0[f]=sNear7(lane,f);k0[f]=pF(S7_K+f*CAP7,lane);}}}
+ if(lane<P){d0=qF(S7_D,lane);c0=sParity(sKey7(lane));if(d0>0.0){r0=qF(S7_R,lane);for(var f=0u;f<6u;f++){n0[f]=sNear7(lane,f);k0[f]=qF(S7_K+f*CAP7,lane);}}}
  for(var sweep=0u;sweep<${TAIL_SWEEPS}u;sweep++){
   for(var col=0u;col<2u;col++){
    if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){off+=k0[f]*sX[n0[f]];}sX[lane+1u]=off/d0;}
-   for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){let d=pF(S7_D,e);if(d>0.0&&sParity(sKey7(e))==col){sX[e+1u]=sRow7Next(e,d);}}
+   for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){let d=qF(S7_D,e);if(d>0.0&&sParity(sKey7(e))==col){sX[e+1u]=sRow7Next(e,d);}}
    workgroupBarrier();
   }
  }
- for(var e=lane;e<P;e+=${lanesTail}u){if(pF(S7_D,e)>0.0){pSet(S7_X,e,sX[e+1u]);}}
+ for(var e=lane;e<P;e+=${lanesTail}u){if(qF(S7_D,e)>0.0){qSet(S7_X,e,sX[e+1u]);}}
 }`,
     // 64h up (a 128h group a workgroup): each 64h row and its ring (the
     // neighbour rows outside the group) take the 128h correction, trilinear
@@ -2326,7 +2344,7 @@ var<workgroup> vX:array<f32,8>;
 var<workgroup> uN:u32;
 fn sProlong7(g:vec3i)->f32{
  let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
- for(var i=0u;i<8u;i++){let dd=vec3i(sOctant(i));let m=sRow7(G+dd*o);if(m!=UB_NONE_ID&&pF(S7_D,m)>0.0){sum+=sWeight(dd)*pF(S7_X,m);total+=sWeight(dd);}}
+ for(var i=0u;i<8u;i++){let dd=vec3i(sOctant(i));let m=sRow7(G+dd*o);if(m!=UB_NONE_ID&&qF(S7_D,m)>0.0){sum+=sWeight(dd)*qF(S7_X,m);total+=sWeight(dd);}}
  return select(0.0,sum/total,total>0.0);
 }
 @compute @workgroup_size(64) fn sUp7(${lanes}){
@@ -2339,13 +2357,13 @@ fn sProlong7(g:vec3i)->f32{
    if(r!=UB_NONE_ID){
     var g=sKey6(r);var m=r;
     if(k>0u){if(sSibling(c,k-1u)<8u){m=UB_NONE_ID;}else{g+=sFace(k-1u);m=sRow6(g);}}
-    if(m!=UB_NONE_ID&&pF(S6_D,m)>0.0){x=pF(S6_X,m)+sProlong7(g);}
+    if(m!=UB_NONE_ID&&qF(S6_D,m)>0.0){x=qF(S6_X,m)+sProlong7(g);}
    }
    vS[lane]=x;
   }
   workgroupBarrier();
   var row=UB_NONE_ID;var r=0.0;var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-  if(lane<8u){row=sChild7(e,lane);if(row!=UB_NONE_ID){r=pF(S6_R,row);d=pF(S6_D,row);for(var f=0u;f<6u;f++){k[f]=pF(S6_K+f*CAP6,row);}}vX[lane]=vS[7u*lane];}
+  if(lane<8u){row=sChild7(e,lane);if(row!=UB_NONE_ID){r=qF(S6_R,row);d=qF(S6_D,row);for(var f=0u;f<6u;f++){k[f]=qF(S6_K+f*CAP6,row);}}vX[lane]=vS[7u*lane];}
   workgroupBarrier();
   for(var s=0u;s<${schedule.sweeps}u;s++){
    for(var col=0u;col<2u;col++){
@@ -2357,7 +2375,7 @@ fn sProlong7(g:vec3i)->f32{
     workgroupBarrier();
    }
   }
-  if(lane<8u&&d>0.0){pSet(S6_Y,row,vX[lane]);}
+  if(lane<8u&&d>0.0){qSet(S6_Y,row,vX[lane]);}
   workgroupBarrier();
  }
 }`,
@@ -2370,7 +2388,7 @@ var<workgroup> vX:array<f32,8>;
 var<workgroup> uN:u32;
 fn sProlong6(g:vec3i)->f32{
  let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
- for(var i=0u;i<8u;i++){let dd=vec3i(sOctant(i));let m=sRow6(G+dd*o);if(m!=UB_NONE_ID&&pF(S6_D,m)>0.0){sum+=sWeight(dd)*pF(S6_Y,m);total+=sWeight(dd);}}
+ for(var i=0u;i<8u;i++){let dd=vec3i(sOctant(i));let m=sRow6(G+dd*o);if(m!=UB_NONE_ID&&qF(S6_D,m)>0.0){sum+=sWeight(dd)*qF(S6_Y,m);total+=sWeight(dd);}}
  return select(0.0,sum/total,total>0.0);
 }
 @compute @workgroup_size(64) fn sUp6(${lanes}){
@@ -2382,13 +2400,13 @@ fn sProlong6(g:vec3i)->f32{
    if(page!=UB_NONE_ID){
     var at=UBA_STRIDE*page+72u;var b=page;
     if(k>0u){if(sSibling(c,k-1u)<8u){at=UB_NONE_ID;}else{at=tAt(page,5u,sFace(k-1u));b=(at-72u)/UBA_STRIDE;}}
-    if(at!=UB_NONE_ID&&pF(PT_D,at)>0.0){x=pF(PT_X,at)+sProlong6(sRel(b));}
+    if(at!=UB_NONE_ID&&qF(PT_D,at)>0.0){x=qF(PT_X,at)+sProlong6(sRel(b));}
    }
    vS[lane]=x;
   }
   workgroupBarrier();
   var at5=0u;var r=0.0;var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-  if(lane<8u){let b=sChild6(e,lane);if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;r=pF(PT_R,at5);d=pF(PT_D,at5);for(var f=0u;f<6u;f++){k[f]=pF(PT_K+f*PLANE2,at5);}}vX[lane]=vS[7u*lane];}
+  if(lane<8u){let b=sChild6(e,lane);if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;r=qF(PT_R,at5);d=qF(PT_D,at5);for(var f=0u;f<6u;f++){k[f]=qF(PT_K+f*PLANE2,at5);}}vX[lane]=vS[7u*lane];}
   workgroupBarrier();
   for(var s=0u;s<${schedule.sweeps}u;s++){
    for(var col=0u;col<2u;col++){
@@ -2400,7 +2418,7 @@ fn sProlong6(g:vec3i)->f32{
     workgroupBarrier();
    }
   }
-  if(lane<8u&&d>0.0){pSet(PT_Y,at5,vX[lane]);}
+  if(lane<8u&&d>0.0){qSet(PT_Y,at5,vX[lane]);}
   workgroupBarrier();
  }
 }`,
