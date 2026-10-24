@@ -908,7 +908,7 @@ export function uniformLatticeWallTable(a: UniformLatticeAddress): Uint32Array<A
   }
   return table;
 }
-/** A page's table word (umPageWord): its block, 0 (AIR) or 0xffffffff (SOLID). */
+/** A box page's table word (umPageWord), read at its world page under any frame: its block, 0 (AIR) or 0xffffffff (SOLID). */
 export function uniformPageWord(a: UniformLatticeAddress, x: number, y: number, z: number): number {
   const o = a.boxPage;
   return uniformWindowPageWord(a.seed.tail, x + o[0], y + o[1], z + o[2]);

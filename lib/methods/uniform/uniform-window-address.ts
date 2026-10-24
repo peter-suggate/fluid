@@ -43,20 +43,22 @@ export function uniformDirectoryFlat(tail: Uint32Array, frame: readonly number[]
   for (let z = 0, i = 0; z < E; z++) for (let y = 0; y < E; y++) for (let x = 0; x < E; x++, i++)
     tail[flat + i] = uniformDirectoryWord(tail, x - 1 + frame[0]!, y - 1 + frame[1]!, z - 1 + frame[2]!, edge, at);
 }
-/** The host twin of umPageWord: the word of lattice page (x, y, z) in a tail
- * (directory, then the runtime header at `at`) as the GPU reads it, the
- * world box's SOLID over the stored words. A page outside the box is SOLID
- * here by the header's policy alone: a seed for a policy other than 0 stores
- * no SOLID word. */
-export function uniformWindowPageWord(tail: ArrayLike<number>, x: number, y: number, z: number, at = UNIFORM_DIRECTORY_WORDS): number {
-  const h = (i: number) => tail[at + i]! | 0, wx = x + h(0), wy = y + h(1), wz = z + h(2), last = h(30) >>> 0;
+/** The host twin of umPageWord: the word of world page (wx, wy, wz) in a
+ * tail (directory, then the runtime header at `at`) as the GPU reads it at
+ * frame page world - F, the world box's SOLID over the stored words. Host
+ * readers name world pages (a seed's frame is 0, where the two agree; a
+ * live tail's frame moves under an open top). A page outside the box is
+ * SOLID here by the header's policy alone: a seed for a policy other than 0
+ * stores no SOLID word. */
+export function uniformWindowPageWord(tail: ArrayLike<number>, wx: number, wy: number, wz: number, at = UNIFORM_DIRECTORY_WORDS): number {
+  const h = (i: number) => tail[at + i]! | 0, x = wx - h(0), y = wy - h(1), z = wz - h(2), last = h(30) >>> 0;
   if (wx < h(24) || wy < h(25) || wz < h(26) || wx >= h(27) || wy >= h(28) || wz >= h(29)) return 0xffffffff;
   const raw = uniformDirectoryWord(tail, wx, wy, wz);
   return (x >>> 0) <= last && (y >>> 0) <= last && (z >>> 0) <= last && raw !== (h(31) >>> 0) ? raw : 0;
 }
-/** A host reader's page word: umPageWord's (uniformWindowPageWord) from a
- * tail that carries its runtime header, the raw directory word from a bare
- * directory (a seed's table). */
+/** A host reader's page word of a world page: umPageWord's
+ * (uniformWindowPageWord) from a tail that carries its runtime header, the
+ * raw directory word from a bare directory (a seed's table). */
 export function uniformTablePageWord(table: ArrayLike<number>, x: number, y: number, z: number): number {
   return table.length >= UNIFORM_DIRECTORY_WORDS + UNIFORM_WINDOW_HEADER_WORDS ? uniformWindowPageWord(table, x, y, z) : uniformDirectoryWord(table, x, y, z);
 }
