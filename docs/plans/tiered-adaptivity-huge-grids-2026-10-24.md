@@ -308,3 +308,164 @@ Peter: "Implement all of it using parallel agents so that we can move fast." Eac
 | W6 bricks | 2, then 3 (storage half) | h fields onto persistent bricks; blocks keep 4h only; then the super-block tree | letters A/B; bytes match §3.1 |
 
 The W6 storage moves follow the W1–W3 merges, because they rewrite the same addressing.
+
+## 8. Phase 2 inventory: who reads and writes h storage (W6, at e218ecfe)
+Every reader and writer of every h-resolution field, read from the code (not traced). B = pool blocks with the sentinels; C = 32768·B cell keys; V = 35937·B vertex keys; F = the h-tile capacity. Paths are under `lib/methods/uniform/` unless they start with `lib/core/` or `tools/`.
+
+**Domains:**
+- **H:** h-owner tiles only.
+- **4hS:** also touches h storage of 4h tiles (seam patches, hanging texels, ring texels, h anchors of cut 4h faces).
+- **C:** canonical texels only (a tile origin, a face anchor, a 4h corner), which the base block serves.
+- **L:** the whole lattice, or every block.
+
+### 8.1 What holds h storage today
+`UniformDetailStorage` gives each field two homes:
+- a base block: 8³ tile texels a block, or 9³ corners for a vertex field;
+- while F > 0, an h store shaped like the block grid: 32³ cells or 33³ vertices for **every** block, whatever its tier.
+
+Twin bindings (+64) write canonical texels to both. Pinned (per-tile) fields are base-only at every F.
+
+| Field (reference name) | Class | h store a block | Frame name |
+|---|---|---|---|
+| velocityA / B / D | face rgba32f | 512 KiB each | V `velocity`, S `velocityScratch`, D `departure` |
+| unit taps U, NB-FLIP stage taps SU (`createTaps`) | atlas (face) rgba32f | 512 KiB each | `unitVelocity`, stage unit taps |
+| volumeA, volumeB, surfaceA, surfaceB, gammaA, gammaB | cell r32f | 128 KiB each | volume, volumeScratch, phase, centerPhi, correction, target |
+| vertexPhiField, vertexPhiScratch | vertex r32f, base adopted from the coarse vertex phi | 140 KiB each | `phi`, `phiScratch` |
+| pressureGeometry.target / centerPhi | cell, pinned | base only (2 KiB) | — |
+
+That is **3.5 MiB a block** of detail fields. Beside them sit the raw block-keyed unit halo (35³ rgba32f, 670 KiB) and its rgba16f half halo (335 KiB).
+
+**Buffers keyed by h keys** (`uniform-narrow-band-flip.ts:435-481`):
+- **Particles:** banks A and B at 48·cap each. cap = min(8C, max(2²¹, C), limit/64), which is C at B ≥ 64: 1.5 MiB a bank, **3 MiB a block**.
+- **`bins`:** counts 2C (no named reader of [C, 2C)), NB_DEPTH_A max(V, C/2), NB_DEPTH_B C, surface-hot V.
+- **`links`:** cell starts C, then 7 words a particle, then 729-word arena windows for every one of the 64·B bricks.
+- **Stage scratch:** at least 4V (the surface deferred list, surface-volume `SV_P`).
+- **Boundary velocity planes:** 4·LF each.
+- **Already sized by bricks:**
+  - brick table: 31 words;
+  - slab records: 17 words;
+  - pressure arena: fineCap = min(64B, max(2048, ⌈0.45·64B⌉)), about 1.8 MiB a block.
+
+### 8.2 Cell scalars
+
+| Field | Writers | Live readers in NB-FLIP | Reads |
+|---|---|---|---|
+| gammaA (correction) | t=0 zero upload; authority `resolve`, not compiled under `surfaceOnly` | **none**: legacy t=0 binding 24 and QA `physicsFieldsForQA` only | — |
+| pressureGeometry.target | `geometry*` at tile origins (`uniform-mixed-surface-geometry.ts:299`) | **none**: the split authority's `targetFill` is dead | — |
+| volumeB (volumeScratch) | `toPressureCoarse` / `toPressureFine`, tile origin only (`uniform-mixed-remap.ts:494/497`) | pressure-velocity `project` via `/*r4h*/` (`uniform-mixed-pressure-velocity.ts:374-438`) | **C**: never needs h storage |
+| gammaB (target) | `geometry*` (h cells and 4h origins); t=0 `uvPublish` | `mirror*` (→ volumeA); `measureInitial` (budget capture, gauge steps); grid overlay `openFraction` | H + C |
+| volumeA (volume) | `mirror*` from gammaB, at owner origins | `toPressureFine` (64 h cells); `toPressureCoarse` (`/*4h*/`); forces `umCoarseMass` (C); `momentumFine` (64 + 48 cells); `momentumTrace` / `momentumRegularStep`; `diagnostics`; renderer `volumeTexture`; tools | H + C, seam gathers |
+| surfaceA (phase) | authority `surface` family (`umSurfaceOwner`); t=0 `buildDenseExtrapolationAuthority` (L, then `encodeBaseRefresh`) | extension `seed*` / `publish*` (`ueSeedOwner`, `ueHeldFace`); extension pair; NB `advectParticles` (`gridLiquidCell`, the trilinear footprint) | H + C, seam gathers |
+| surfaceB (centerPhi) | `geometry*`; t=0 `uvPublish` | authority (origin, plus 6 neighbours on solid h cells); forces (`umCellPhi`, `umFineOccupancy`); momentum; renderer `surfaceFieldTexture` (water pipeline, overlay) | H + C, seam gathers |
+
+**Bound but never read in NB-FLIP:**
+- the volume bindings of the remap faces, `remapCells`, the frame plan and the dynamic classifier;
+- momentum's phase.
+
+### 8.3 Vertex φ
+**Writers into h storage:**
+- Surface advect (`advect*`, `solid*`, `wallReach`), writing S: H, plus h texels of 4h tiles.
+- `coupleFine` and `airClearFine`: H.
+- `arenaStore`: H, plus the seam-face vertices whose cell is 4h.
+- **Phi resolve** (`uniform-mixed-phi-resolve.ts:123`): the hanging texels of mixed-stencil **4h seam tiles**, on P and S.
+- **Remap** (`remapCells` and the plane kernels): new h texels in **former 4h tiles**.
+- Page initialise: whole 33³ blocks, skirt included.
+- The ring's `enter`: canonical corners.
+
+**Canonical writers** (C, twinned to the base):
+- `coarseCorners` / `couple`;
+- `redistanceCoarse`;
+- `arenaDistanceCanonical` / `arenaPublishCanonical` / `arenaPublishFinish`;
+- `airClearCoarse`.
+
+**Readers that gather h texels, the hanging texels of 4h tiles included:**
+- surface advect (8-tap, and cubic 64-tap over raw 33-stride `udRun_phi` / `udTexel_phi`);
+- pressure arena `pMark` / `pRows` (`bNeighbour`);
+- particles (`bandPhi` / `umSampleVertex` in move, seed, transfer and depth);
+- census and activity (`classify`, `umResolutionError`);
+- frame plan `seed` / `localSpeed`;
+- surface volume, geometry (`gcOwner`), membership (`nbCrossingVertex`), surface work control;
+- `arenaGather`, which reads `udTexel_phi(33*umBlockCoord(block)+…)` raw;
+- forces and diagnostics, through the unresolved authority walk;
+- bodies `couple`, at corners of any width;
+- presentation `denseVertexPhi`, for the water pipeline and the grid overlay.
+
+**Buffers keyed by vertex key:**
+- NB_DEPTH_A and NB_SURFACE_HOT(_NEAREST);
+- the surface deferred and cubic lists;
+- surface-volume `SV_P`;
+- two inline 35937·block keys: `uniform-narrow-band-membership.wgsl.ts` about lines 309-321, and `uniform-surface-brick-arena.wgsl.ts:38-41`.
+
+**The base must keep its layout:** it is the adopted coarse vertex phi, which the renderer reads directly as `coarseVertexPhi`.
+
+### 8.4 Velocity faces (V, S, D) and taps (U, SU)
+**Writers into 4h tiles' h storage (4hS):**
+- extension `publishSeams` / `publishList`;
+- NB `transferOwners` / `transferSeams`;
+- `toPressureFine`;
+- `momentumStep` (the merged 4h/seam dispatch) and the merged `forces`;
+- `pProjectNative` and pressure-velocity `project`;
+- `remapFaces` / `copyFaces`;
+- the seam slots of `unitVelocityTaps`, which write U at 4h seam tiles;
+- the ring's `enter`, and page initialise.
+
+**H-only writers:**
+- `publishFine`;
+- `momentumFine` / `momentumTrace` / `momentumRegularStep`;
+- `forcesFine` / `forcesRegular`;
+- `transferProperties` / `transfer`;
+- `pProject` / `pCopy`;
+- the unit jobs of `unitVelocityTaps`;
+- `toSimulation*`.
+
+**Texture-filtered readers** (sampler, owners of any width, L):
+- NB G2P: `advectParticles*`, `advectWalk`, seed, `countInitial` / `seedInitial`, and `snapshot` via SU;
+- surface advection: S, U and the halo;
+- momentum's cached sampler: the halo, the half halo and C4;
+- the grid overlay's `udrLoadFace` (`lib/core/uniform-detail-abi.ts:143-152`), which tells the h store from the base by `textureDimensions`.
+
+**Readers that cross blocks:**
+- `fillUnitHalo` reads U up to 2 texels outside the block, and S faces at walls.
+- The C4 cache reads a 1-tile halo around each block.
+
+**The pressure side's ownership differs from the simulation's:** `buildRhs`, `project` and `toSimulation*` run on all-4h pressure owners and read the h faces of cut 4h faces (`fineVelocity`).
+
+**Dense passes (L):**
+- `buildDenseExtrapolationAuthority`, which writes D, then `encodeBaseRefresh`;
+- `diagnostics`, `localSpeed`, `classify`;
+- `copyFacesReference`;
+- the host `copyWhole` (V → D) on the path without particle momentum.
+
+### 8.5 Particles
+Particles live in per-brick slabs: 17 words for each of the 64·B bricks. The capacity is one pool across all bricks, and a full pool is fatal (`noteReceipt`). Also sized by cap:
+- `links`: 7 words a particle;
+- display energy: 1 word a particle;
+- seed list: up to 3·cap entries.
+
+**Two couplings make shrinking cap unsafe without a check:**
+- The deposit shares the source bank only while 1540·poolTiles ≤ the bank's bytes. Otherwise it moves into `bins`, adding 770 KiB a block.
+- The paired extension and swept delta need the bank to be at least `companionBytesAt(F)`.
+
+### 8.6 What the inventory decides
+1. **h storage must exist beyond the h owners.** Several stages touch h texels of 4h tiles next to h tiles: phi resolve, seam publishing, transfer seams, momentum and forces seams, projection, remap, the U seam slots, and the pressure side's cut 4h faces.
+   - So the fine brick set is the h bricks **dilated by one brick** (the uba dilation), plus the bricks of cut 4h pressure faces.
+   - Open question: whether the detail ring (4h tiles within 3 tiles of an h tile) fits inside that dilation, or has to shrink first.
+2. **Addressing is not in one place yet.** These compute h texels themselves:
+   - the samplers (G2P, surface advect, overlay);
+   - `umBodyOwnerVelocity`, `umLoadMixedFace`;
+   - the raw 33-stride vertex users (`udRun_phi`, `udTexel_phi`, `arenaGather`, `refreshVertex`);
+   - the inline vertex keys;
+   - host upload and readback;
+   - `readMixedTexture`, in about 20 tools and tests.
+
+   Each must move to a brick-slot address in its channel's commit.
+3. **A slot lookup must stay out of inner loops.** Without the kernel first staging its 27-neighbour record (`brick-arena-core` §3.9), a brick slot is a table read per texel.
+   - The kernels that gather across seams need the records: authority, extension, `gridLiquidCell`, forces, momentum, `bNeighbour`.
+   - The records need those kernels launched over brick lists. That launch code is what W2/W3 are rewriting.
+4. **Migration order** (fewest readers and least addressing first):
+   1. **Base-only, no addressing change:** gammaA (no reader) and volumeB (canonical only). pressureGeometry.target already is.
+   2. **Particle capacity to bricks.** Host side; check the deposit and companion couplings.
+   3. **Cell scalars onto fine bricks through the accessors,** in the order gammaB, surfaceA, volumeA, surfaceB. Needs items 1 and 3.
+   4. **Vertex φ:** a 9³-a-brick store, with the vertex-keyed buffers re-keyed and the raw 33-stride users rewritten.
+   5. **Faces last:** V, S, D, U and SU onto atlas slots with a 1-cell apron. These are the sampled channels with the most readers, and they carry the halo's and C4's block-crossing reads.
+   6. **Drop the block-sized h textures:** retire the detail storage's resident generation.
