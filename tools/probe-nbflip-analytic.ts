@@ -58,7 +58,7 @@ async function readParticles(device: GPUDevice, particles: UniformNarrowBandFlip
   } finally { if (read.mapState === "mapped") read.unmap(); read.destroy(); }
 }
 
-async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, frameIndex: number, gravity: { x: number; y: number; z: number }, piers: readonly (readonly [number, number])[]) {
+async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, frameIndex: number, gravity: { x: number; y: number; z: number }, piers: readonly (readonly [number, number])[], solids: readonly (readonly [number, number, number])[]) {
   // The detail storage's own logical read: a live address passed here remaps
   // it through the wrong layout and reads zeros.
   const fields = await readUniformFields(device, solver), velocity = await readMixedTexture(device, solver.velocityTexture);
@@ -89,7 +89,9 @@ async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, f
     let height = NaN;
     // Columns touching a solid that pierces the surface have no free surface.
     if (piers.some(([x0, x1]) => x >= x0 && x <= x1)) { heights.push(height); continue; }
-    for (let y = 0; y < ny; y++) {
+    // Start above any solid under the column: buried padding phi is no surface.
+    const floor = Math.max(0, ...solids.filter(([x0, x1]) => x >= x0 && x <= x1).map(([, , top]) => top));
+    for (let y = floor; y < ny; y++) {
       const a = fields.vertex(x, y, nz / 2), b = fields.vertex(x, y + 1, nz / 2);
       if (a <= 0 && b > 0) { height = (y + a / (a - b)) * h; break; }
     }
@@ -185,6 +187,7 @@ await withUniformDevice("NB-FLIP analytic cases", async device => {
     const gravity = scene.fluid.gravity_m_s2, began = performance.now();
     const surfaceTop = NBFLIP_ANALYTIC_POOL_CELLS - 1;
     const piers = (scene.solidVoxels ?? []).filter(v => v.maximumExclusive[1] > surfaceTop).map(v => [v.minimum[0], v.maximumExclusive[0]] as const);
+    const solids = (scene.solidVoxels ?? []).map(v => [v.minimum[0], v.maximumExclusive[0], v.maximumExclusive[1]] as const);
     const solver = await createUniformSolver(device, scene, overrides);
     const built_ms = performance.now() - began;
     try {
@@ -195,7 +198,7 @@ await withUniformDevice("NB-FLIP analytic cases", async device => {
       const stepStart = performance.now();
       for (let frame = 0; frame <= frames; frame++) {
         if (frame > 0) await advanceUniform(solver, frame * NBFLIP_ANALYTIC_DT_S);
-        const tiers = await readTiers(device, mixed), state = await sample(device, solver, frame, gravity, piers);
+        const tiers = await readTiers(device, mixed), state = await sample(device, solver, frame, gravity, piers, solids);
         // Region r is the 16h octant r&7 of pool block r>>3; the block is live
         // when its word holds a world page residue (0xffffffff: free). Key
         // regions by world page and octant so history follows space, not slots.
