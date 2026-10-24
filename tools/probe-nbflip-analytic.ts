@@ -9,8 +9,8 @@
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import {
-  createNbflipAnalyticScene, martinMoyceFront, nbflipAnalyticWaveOmega, NBFLIP_ANALYTIC_CASES, NBFLIP_ANALYTIC_CELL_M,
-  NBFLIP_ANALYTIC_DAM_CELLS, NBFLIP_ANALYTIC_DT_S, NBFLIP_ANALYTIC_FALL_BLOCK, NBFLIP_ANALYTIC_FALL_GRAVITY, NBFLIP_ANALYTIC_FRAMES, NBFLIP_ANALYTIC_GRAVITY_M_S2,
+  createNbflipAnalyticScene, martinMoyceFront, nbflipAnalyticBallistic, nbflipAnalyticWaveOmega, NBFLIP_ANALYTIC_CASES, NBFLIP_ANALYTIC_CELL_M,
+  NBFLIP_ANALYTIC_DAM_CELLS, NBFLIP_ANALYTIC_DT_S, NBFLIP_ANALYTIC_FRAMES, NBFLIP_ANALYTIC_GRAVITY_M_S2,
   NBFLIP_ANALYTIC_GRID, NBFLIP_ANALYTIC_POOL_CELLS, NBFLIP_ANALYTIC_WAVE_AMPLITUDE_M, type NbflipAnalyticCase,
 } from "../lib/core/nbflip-analytic-scenes";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
@@ -149,11 +149,11 @@ function score(name: NbflipAnalyticCase, rows: Row[]): Check[] {
   const phi0 = rows.find(r => r.phiVolume_m3 > 0)?.phiVolume_m3 ?? NaN;
   checks.push(check("phi volume drift (fraction)", Math.max(...rows.filter(r => r.phiVolume_m3 > 0).map(r => Math.abs(r.phiVolume_m3 / phi0 - 1))), .01));
   checks.push(check("fill-field volume drift (fraction)", Math.max(...rows.map(r => Math.abs(r.volume_m3 / first.volume_m3 - 1))), .01));
-  const late = rows.filter(r => r.frame > rows.length / 2);
+  const late = rows.filter(r => r.frame > rows.length / 2), ballistic = nbflipAnalyticBallistic(name);
   const liveFrames = late.reduce((s, r) => s + r.tiers.live, 0) || 1;
   // A translating body's regions must change tier as it enters and leaves
   // them: free fall's late window needs ~0.0625 for that alone.
-  checks.push(check("late tier changes per live region-frame", late.reduce((s, r) => s + r.tiers.changed, 0) / liveFrames, name === "rest" || name === "rest-step" ? 0 : name === "free-fall" ? .08 : .05));
+  checks.push(check("late tier changes per live region-frame", late.reduce((s, r) => s + r.tiers.changed, 0) / liveFrames, name === "rest" || name === "rest-step" ? 0 : ballistic ? .08 : .05));
   checks.push(check("tier reversals per live region-frame", rows.reduce((s, r) => s + r.tiers.reversed, 0) / (rows.reduce((s, r) => s + r.tiers.live, 0) || 1), .01));
   if (name === "rest" || name === "rest-step") {
     const H = NBFLIP_ANALYTIC_POOL_CELLS * h;
@@ -161,12 +161,16 @@ function score(name: NbflipAnalyticCase, rows: Row[]): Check[] {
     checks.push(check("surface deviation from H (h)", Math.max(...rows.map(r => Math.max(Math.abs(r.surface.max - H), Math.abs(r.surface.min - H)))) / h, .1));
     checks.push(check("non-COLD live regions, last frame", last.tiers.warm + last.tiers.hot, 0));
   }
-  if (name === "free-fall") {
-    const g = NBFLIP_ANALYTIC_FALL_GRAVITY, c0 = first.centroid, v0 = first.meanVelocity, t0 = first.t;
+  if (ballistic) {
+    // The scene's own block, gravity and initial velocity (v0 the uploaded
+    // field, the row before any advance).
+    const { block, gravity: g, velocity: u0 } = ballistic, c0 = first.centroid, v0 = first.meanVelocity, t0 = first.t, n = [NX, NY];
     let centroidError = 0, velocityError = 0, shape = 0;
-    // Ballistic while the exact block's bottom is two cells above the floor.
-    const bottom0 = NBFLIP_ANALYTIC_FALL_BLOCK[0][1] * h;
-    const flight = rows.filter(r => bottom0 + .5 * g.y * (r.t - t0) ** 2 >= 2 * h);
+    // Ballistic while every face of the exact block is two cells from a wall.
+    const flight = rows.filter(r => [0, 1].every(a => {
+      const t = r.t - t0, d = [u0.x, u0.y][a]! * t + .5 * [g.x, g.y][a]! * t * t;
+      return block[0][a] * h + d >= 2 * h && block[1][a] * h + d <= (n[a]! - 2) * h;
+    }));
     for (const r of flight) {
       const dt = r.t - t0, ex = c0[0]! + v0[0]! * dt + .5 * g.x * dt * dt, ey = c0[1]! + v0[1]! * dt + .5 * g.y * dt * dt;
       centroidError = Math.max(centroidError, Math.hypot(r.centroid[0]! - ex, r.centroid[1]! - ey) / h);
@@ -176,6 +180,8 @@ function score(name: NbflipAnalyticCase, rows: Row[]): Check[] {
       velocityError = Math.max(velocityError, Math.hypot(r.meanVelocity[0]! - v0[0]! - g.x * lead, r.meanVelocity[1]! - v0[1]! - g.y * lead));
       shape = Math.max(shape, Math.abs(r.extentCells[0]! - first.extentCells[0]!), Math.abs(r.extentCells[1]! - first.extentCells[1]!));
     }
+    checks.push(check("flight frames scored", -flight.length, -Math.min(rows.length, 8)));
+    checks.push(check("initial velocity error vs the scene's (m/s)", Math.hypot(v0[0]! - u0.x, v0[1]! - u0.y), 1e-6));
     checks.push(check("centroid error vs x0+v0t+gt^2/2 (h)", centroidError, .5));
     checks.push(check("mean velocity error vs v0+g(t+dt/2) (m/s)", velocityError, .02 * Math.hypot(g.x, g.y) * (last.t - t0) + .01));
     checks.push(check("moment extent change (cells)", shape, .5));

@@ -129,9 +129,10 @@ export interface UniformPressureArenaFields {
   support:GPUBuffer;supportWord:number};
  /** The frame status record (uniform-mixed-frame-status) and the acceptance state (8 words) the verdict writes. */
  status:GPUBuffer;acceptance:GPUBuffer;
- /** As the band's (64 bytes): h.xyz, dt; density, rho*gravityY, dt/density, min
+ /** As the band's (80 bytes): h.xyz, dt; density, unused, dt/density, min
   * h; the residual target, then 1/h^2 per axis; four u32 the arena writes:
-  * the presentation capacity, two spare, the presentation word. */
+  * the presentation capacity, the native residual scale, spare, the
+  * presentation word; rho g.xyz (the hydrostatic gradient, Pa/m), unused. */
  params:GPUBuffer;
  presentation:{buffer:GPUBuffer;word:number};
  /** Band tiles the presentation holds (more is the fatal overflow). */
@@ -258,7 +259,7 @@ export class UniformPressureArena {
   const scalars=(view:GPUBufferBinding,count:number):GPUBufferBinding=>{
    const offset=view.offset??0;if((view.size??view.buffer.size-offset)<4*count)throw new Error("Pressure arena field view is too small");return {buffer:view.buffer,offset,size:4*count};
   };
-  const P={0:{buffer:f.params,size:64}},S={2:{buffer:this.index}},Q={9:{buffer:this.pool}};
+  const P={0:{buffer:f.params,size:80}},S={2:{buffer:this.index}},Q={9:{buffer:this.pool}};
   const resources:Record<string,Record<number,GPUBindingResource|GPUTexture>>={
    table:{...S},
    mark:{...P,...S,3:scalars(f.phi,cells),6:f.vertexPhi},
@@ -340,7 +341,7 @@ fn nBound()->f32{return min(params.solve.x,max(0.1*bitcast<f32>(pIndex(NATIVE_IN
 fn nStopScale()->f32{let b=nBound();return select(1.0,params.solve.x/b,b>0.0&&b<params.solve.x);}
 `;
   const params=/* wgsl */`
-struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u}
+struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec4f}
 @group(1) @binding(0) var<uniform> params:BandParams;
 `;
   const helpers=/* wgsl */`
@@ -387,9 +388,9 @@ fn pF(base:u32,at:u32)->f32{return bitcast<f32>(pool[base+at]);}
 fn pSet(base:u32,at:u32,value:f32){pool[base+at]=bitcast<u32>(value);}
 fn pAddr(slot:u32,l:vec3u)->u32{return UBA_STRIDE*slot+l.x+8u*(l.y+8u*l.z);}
 // The h face and its native 4h row differ tangentially by up to 1.5h.
-// Compare the hydrostatic part at the h face's height, leaving the dynamic
-// pressure as the solved unknown. Otherwise a vertical h/4h interface
-// turns a resting pressure column into horizontal flow from the first kick.
+// Compare the hydrostatic part at the h face's potential, leaving the dynamic
+// pressure as the solved unknown. Otherwise an h/4h interface along gravity
+// turns a resting pressure column into flow across it from the first kick.
 // Native and band RHS use opposite offsets, and projection uses the same
 // offset: one pressure difference for both incident cells and their flux.
 fn bSeamHead(at:u32,f:u32)->f32{
@@ -399,8 +400,11 @@ fn bSeamHead(at:u32,f:u32)->f32{
  // different nonzero air pressure on each subface; a tiny theta amplifies
  // that incompatible boundary data into opposing jets.
  if(!bLiquid(pool[P_KINDS+at])){return 0.0;}
- let y=f32(((at%UBA_STRIDE)/8u)&3u)-1.5;
- return select(params.policy.y*params.hDt.y*y,0.0,f/2u==1u);
+ // The h cell's offset from its 4h row's centre on each axis, but the face's
+ // own (its normal offset is the discretisation's): rho g . offset.
+ let local=at%UBA_STRIDE;var offset=vec3f(vec3u(local,local/8u,local/64u)&vec3u(3u))-1.5;offset[f/2u]=0.0;
+ let head=params.gravity.xyz*params.hDt.xyz*offset;
+ return (head.x+head.y)+head.z;
 }
 // The pool offset of band cell q (UB_NONE_ID: no band cell).
 fn pAt(q:vec3i)->u32{if(!pBandCell(q)){return UB_NONE_ID;}return pAddr(ubaSlot(ubaBrickAt(q)),vec3u(q)&vec3u(7u));}

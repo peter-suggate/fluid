@@ -158,6 +158,14 @@ export interface UniformMixedDynamicImportance {
 const LEGACY_IMPORTANCE:UniformMixedDynamicImportance={criteria:{shape:true,thin:false,strain:false,rotation:false,impact:true,approach:false},
  thinThickness:0,strainThreshold:0,rotationThreshold:0,approachSteps:0,bulk:false,holdSteps:0,retireRatio:1};
 
+/** The census's up for gravity g (m/s^2): the axis g pulls along most (the
+ * first of equals) and the sign of -g on it; up 0 without gravity. A tilted
+ * gravity's lift rule takes the walls along that axis. */
+export function uniformMixedUp(g:readonly [number,number,number]):{up:-1|0|1;upAxis:0|1|2}{
+ const a=Math.abs(g[0]),b=Math.abs(g[1]),c=Math.abs(g[2]);
+ const upAxis=b>=a&&b>=c?1:a>=c?0:2,up=Math.sign(-g[upAxis]);
+ return {up:up>0?1:up<0?-1:0,upAxis};
+}
 export interface UniformMixedDynamicPolicy {
  /** The time the census plans for: every frame until its layout's successor
   * is adopted. With the tile speed it bounds travel (boundary rules). */
@@ -188,11 +196,14 @@ export interface UniformMixedDynamicPolicy {
   * wall or solid piles up instead of turning, and a sheet climbing a wall
   * stalls (docs/plans/uniform-dynamic-coarsening.md, far-wall run-up).
   * Two rules: impact (surface within one 4h cell of a closed wall or solid
-  * tile, moving toward it faster than along it) and lift (a tile on a closed vertical wall moving up
+  * tile, moving toward it faster than along it) and lift (a tile on a closed wall along `upAxis` moving up
   * faster than along the wall). A free fast front meets neither. 0 disables. */
  boundaryTravel:number;
- /** Axis-1 direction of "up": +1, -1, or 0 without gravity (no lift rule). */
+ /** The direction of "up" along upAxis: +1, -1, or 0 without gravity (no lift rule). */
  up:number;
+ /** The axis gravity pulls along most (uniformMixedUpAxis): the lift rule's
+  * walls run along it. Absent: 1. */
+ upAxis?:0|1|2;
  /** Record why each tile is band (UNIFORM_STAGE_REASON, the `reasons`
   * words) for the tiles layer, and every criterion's score (on or off) in
   * the importance words. Off records nothing and adds no work. */
@@ -750,13 +761,15 @@ fn umBoundary(tile:u32,p:vec3u,width:u32,c:TileClass)->Boundary{
   result.score=max(result.score,travel[k]/threshold);
   if(travel[k]>=threshold){result.triggered=true;if(!recordReasons()){return result;}}
  }
- // Lift: on a closed vertical wall, moving up faster than along the wall.
- if(policy.reach.w==0u){return result;}
- let up=select(travel[1],travel[4],policy.reach.w==1u);
+ // Lift: on a closed wall along the up axis (reach.w bits 2-3; bits 0-1 its
+ // sign, 1 +, 2 -), moving up faster than along the wall.
+ if((policy.reach.w&3u)==0u){return result;}
+ let upAxis=policy.reach.w>>2u;
+ let up=select(travel[upAxis],travel[3u+upAxis],(policy.reach.w&3u)==1u);
  if(up<least){return result;}
  for(var k=0u;k<6u;k++){
-  let a=k%3u;if(a==1u){continue;}
-  let along=max(travel[2u-a],travel[5u-a]);
+  let a=k%3u;if(a==upAxis){continue;}
+  let b=3u-a-upAxis;let along=max(travel[b],travel[3u+b]);
   if(umWallBeyond(tile,k)==0u&&up>=along){result.score=max(result.score,up/threshold);if(up>=threshold){result.triggered=true;}}
  }
  return result;
@@ -1702,9 +1715,10 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   this.distance("reach",reach);this.distance("hysteresis",hysteresis);
   if(!Number.isFinite(surfaceTolerance)||surfaceTolerance<0)throw new Error(`Dynamic ownership surfaceTolerance must be finite and non-negative: ${surfaceTolerance}`);
   F[0]=dt;F[1]=surfaceTolerance;F[2]=fullTolerance;F[3]=emptyTolerance;
-  const up=policy.up;
+  const up=policy.up,upAxis=policy.upAxis??1;
   if(up!==1&&up!==-1&&up!==0)throw new Error(`Dynamic ownership up must be 1, -1 or 0: ${up}`);
-  U[4]=reach;U[5]=hysteresis;U[7]=up===1?1:up===-1?2:0;
+  if(upAxis!==0&&upAxis!==1&&upAxis!==2)throw new Error(`Dynamic ownership upAxis must be 0, 1 or 2: ${upAxis}`);
+  U[4]=reach;U[5]=hysteresis;U[7]=up===0?0:(up===1?1:2)|upAxis<<2;
   const fastTravel=policy.fastTravel,boundaryTravel=policy.boundaryTravel,steps=policy.steps;
   this.finite("fastTravel",fastTravel);this.finite("boundaryTravel",boundaryTravel);
   if(!Number.isSafeInteger(steps)||steps<1)throw new Error(`Dynamic ownership steps must be a positive integer: ${steps}`);

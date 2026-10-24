@@ -16,7 +16,7 @@ import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBound
 import type { UniformWorkEdit } from "./uniform-buffered-work";
 import type { SolverDetailFocus, SolverDetailInput } from "../../core/solver-detail";
 import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixedRegionTable, type UniformMixedRegion } from "./uniform-mixed-layout-builder";
-import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
+import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, uniformMixedUp, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
@@ -31,7 +31,7 @@ import {
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
-import { uniformLatticeFarPhi, uniformLatticeInitialPhi, uniformLatticeInitialVolume } from "./uniform-volume-initial";
+import { uniformInitialLiquidVelocity, uniformLatticeFarPhi, uniformLatticeInitialPhi, uniformLatticeInitialVolume } from "./uniform-volume-initial";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
 import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
@@ -1755,10 +1755,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(applied){this.mixedCensusSceneRevision=this.sceneRevision;gravity[0]=g.x;gravity[1]=g.y;gravity[2]=g.z;}
       const policy=this.mixedCensusPolicy??={dt,steps:1,gravity,reach:this.detail.marginTiles,hysteresis:0,
         surfaceTolerance:importance.shapeTolerance,fastTravel:0,importance,
-        boundaryTravel:importance.impactTravel,up:Math.sign(-g.y),
+        boundaryTravel:importance.impactTravel,...uniformMixedUp(gravity),
         fullTolerance:UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE,emptyTolerance:Math.max(0,1e-6),reasons:views};
       policy.dt=dt;policy.reach=this.detail.marginTiles;policy.reasons=views;
-      if(applied)policy.up=Math.sign(-g.y);
+      if(applied){const up=uniformMixedUp(gravity);policy.up=up.up;policy.upAxis=up.upAxis;}
       if(policy.importance!==importance){policy.importance=importance;policy.surfaceTolerance=importance.shapeTolerance;policy.boundaryTravel=importance.impactTravel;}
       dynamic.encode(encoder,policy,false);
       // The census listed its certificate's pages: the commit stores them, this step's drop's and the next step's scheduled drop's, before any stage of the generation reads a block.
@@ -2119,7 +2119,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       f[4] = width / this.containerCells[0];
       f[5] = height / this.containerCells[1];
       f[6] = depth / this.containerCells[2];
-      f[7] = this.scene.fluid.gravity_m_s2.y;
+      // f[7] (cellGravity.w) is unread: the frame's stages take gravity as a
+      // vector from its parameters (UniformMixedFrameParameters.gravity).
       // The frame's origin: the world position of lattice cell (0,0,0)'s low corner.
       const origin_m = this.frame.origin_m;
       f[8] = origin_m[0];
@@ -2403,6 +2404,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.volumeB, volume);
     this.upload3DF32(this.surfaceA, volume);
     this.upload3DF32(this.surfaceB, volume);
+    const velocity = uniformInitialLiquidVelocity(this.scene.fluid.initialVelocity_m_s, volume, [nx, ny, nz]);
+    if (velocity) this.upload3DF32(this.velocityA, velocity);
     const gamma = new Float32Array(this.address.boxCells);
     this.upload3DF32(this.gammaA, gamma);
     this.upload3DF32(this.gammaB, gamma);
@@ -2723,7 +2726,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         // The scene's own numbers stand in a record until the scene is applied again.
         if(this.mixedParameterScenes[slot]!==this.sceneRevision){
           this.mixedParameterScenes[slot]=this.sceneRevision;
-          p.gravity=this.scene.fluid.gravity_m_s2.y;p.density=this.scene.fluid.density_kg_m3;p.viscosity=this.scene.fluid.dynamicViscosity_Pa_s;p.surfaceTension=this.scene.fluid.surfaceTension_N_m;
+          {const g=this.scene.fluid.gravity_m_s2,gravity=(p.gravity??=[0,0,0]) as [number,number,number];gravity[0]=g.x;gravity[1]=g.y;gravity[2]=g.z;}p.density=this.scene.fluid.density_kg_m3;p.viscosity=this.scene.fluid.dynamicViscosity_Pa_s;p.surfaceTension=this.scene.fluid.surfaceTension_N_m;
         }
         p.openTop=this.address.openTop;p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.fineAdvection=this.phiFineAdvection;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.extensionSweeps;
         // Impacts raise pressure demand faster than a plan two frames old

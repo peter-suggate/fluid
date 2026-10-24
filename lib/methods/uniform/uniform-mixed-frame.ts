@@ -93,8 +93,11 @@ export interface UniformMixedFrameFields {
   * pressure-root topologies (group 0 of every field stage). */
  detail?:UniformDetailStorage;
 }
+/** A gravity vector, m/s^2 (x, y, z). */
+export type UniformMixedGravity=readonly [number,number,number];
 export interface UniformMixedFrameParameters {
- dt:number;gravity:number;density:number;viscosity:number;surfaceTension:number;
+ /** gravity: the acceleration vector (m/s^2), every component a uniform: any direction, changed between advances. */
+ dt:number;gravity:UniformMixedGravity;density:number;viscosity:number;surfaceTension:number;
  openTop:boolean;noSlip:boolean;cubic:boolean;
  /** With cubic: how h vertices advect phi (4h vertices keep the cubic). Trilinear; cubic (the default); adaptive, trilinear in a tile whose particles pin the surface. */
  fineAdvection?:"cubic"|"trilinear"|"adaptive";
@@ -444,7 +447,7 @@ export class UniformMixedFrame {
   * the cell size and every constant are placed once, here. */
  private readonly words:{readonly frame:Uint32Array<ArrayBuffer>;readonly extension:Float32Array<ArrayBuffer>;readonly surface:Float32Array<ArrayBuffer>;readonly surfaceFlags:Uint32Array<ArrayBuffer>;
   readonly momentum:Float32Array<ArrayBuffer>;readonly momentumFlags:Uint32Array<ArrayBuffer>;readonly forces:Float32Array<ArrayBuffer>;readonly projection:Float32Array<ArrayBuffer>;
-  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>};
+  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>;readonly bandGravity:Float32Array<ArrayBuffer>};
  /** Byte offset in an ownership's support of its sticky detail violation word. */
  private readonly violationByte:number;
  /** encodeGeometry's options, set in place by each caller that passes any. */
@@ -461,7 +464,7 @@ export class UniformMixedFrame {
   const buffer=(label:string,size:number,usage:number)=>{const b=device.createBuffer({label,size,usage});this.owned.push(b);return b;};
   // STORAGE too: a copy into one is a compute launch (UniformComputeBlit).
   const uniform=(name:string,size:number)=>buffer(`Uniform ${name} parameters`,size,GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST);
-  this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",48),authority:uniform("authority",16),projection:uniform("projection",32)};
+  this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",64),authority:uniform("authority",16),projection:uniform("projection",32)};
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.status=buffer("Uniform mixed frame status",4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.receipts=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>this.receiptSlot(buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ)));
@@ -478,8 +481,8 @@ export class UniformMixedFrame {
   this.tileContext=new UniformTileContext(device,o,solid,this.pagePool.state);
   {const h=o.capacity.lattice.cellSize_m,inverse=(x:number)=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x)));
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
-    momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
-    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1)};}
+    momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
+    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1),bandGravity:new Float32Array(4)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded");
@@ -591,7 +594,7 @@ export class UniformMixedFrame {
     authority,authorityGroup:authority.bind({centerPhi:g.centerPhi,volume:f.volumeScratch,targetFill:g.target,phi:root.phi!,phase:f.phase,correction:f.correction,scratch:coarseSolid?undefined:root.frozen,params:this.params.authority,
      fine:coarseSolid?{phi:f.phi,topology:rootTopology!}:undefined,simulation:{buffer:o.presentation.buffer,size:4*o.capacity.tiles}})};
   }
-  this.bandParams=uniform("pressure band",64);
+  this.bandParams=uniform("pressure band",80);
   this.surfaceBand=new UniformPressureSurfaceBand(device,o,f.phi);
   // The composite solve: the band's h rows and the root's native 4h rows in one system.
   this.band=new UniformPressureArena(device,o,p,{phi:{buffer:this.authorityPhi},authorityParams:this.params.authority,vertexPhi:f.phi,
@@ -756,6 +759,8 @@ export class UniformMixedFrame {
   * the support policy it holds. */
  private readonly key=extensionKey();
  private readonly keyPolicy={fineReach:0,shellReach:0,twoLevel:false,shellOnly:false};
+ /** The key's gravity: the frame's own copy (the caller may reuse its array). */
+ private readonly keyGravity:[number,number,number]=[NaN,NaN,NaN];
  private keyed=false;
  /** The last advance's residual target (write). */
  private pressureTarget:number|undefined=undefined;
@@ -821,7 +826,7 @@ export class UniformMixedFrame {
   * True: that key is the last write's. dt and gravity are the caller's
   * reads of p: each number leaves p once, since a double an object holds is
   * boxed again by every load until its reader is optimized. */
- private write(p:UniformMixedFrameParameters,dt:number,gravity:number):boolean{
+ private write(p:UniformMixedFrameParameters,dt:number,gravity:UniformMixedGravity):boolean{
   if(p.openTop!==this.openTop)throw new Error(`Uniform mixed frame: built with ${this.openTop?"an open":"a closed"} top (page tables, pressure); an advance cannot change it`);
   const density=p.density,viscosity=p.viscosity,tension=p.surfaceTension,tolerance=p.pressureTolerance,open=+p.openTop,step=dt/density,target=tolerance>0?tolerance:UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
   const w=this.words,q=this.queue,to=this.params,forces=w.forces,projection=w.projection,band=w.band;
@@ -833,23 +838,25 @@ export class UniformMixedFrame {
   // p.cubic picks only what h vertices take.
   w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineAdvection==="trilinear"?2:p.fineAdvection==="adaptive"?3:1):2;w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
   w.momentum[3]=dt;q.writeBuffer(to.momentum,0,w.momentum);w.momentumFlags[0]=open;q.writeBuffer(to.momentum,16,w.momentumFlags);
-  forces[3]=dt;forces[4]=gravity;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;q.writeBuffer(to.forces,0,forces);
+  const gx=gravity[0],gy=gravity[1],gz=gravity[2];
+  forces[3]=dt;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;forces[12]=gx;forces[13]=gy;forces[14]=gz;q.writeBuffer(to.forces,0,forces);
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
   projection[3]=dt;projection[4]=density;projection[5]=open;q.writeBuffer(to.projection,0,projection);
-  // The composite seam compares pressures at a common height. policy.y
-  // carries the hydrostatic gradient (previously unused by the band).
-  band[3]=dt;band[4]=density;band[5]=density*gravity;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
+  // The composite seam compares pressures at a common gravitational
+  // potential: the band's gravity words carry the hydrostatic gradient rho g.
+  band[3]=dt;band[4]=density;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
   // The composite's native 4h rows stop at the root's target, the band's h rows at band[8]: native residuals scale by their ratio.
   w.bandNative[0]=band[8]!/target;q.writeBuffer(this.bandParams,52,w.bandNative);
+  {const g=w.bandGravity;g[0]=density*gx;g[1]=density*gy;g[2]=density*gz;q.writeBuffer(this.bandParams,64,g);}
   const views=this.layoutViews?(this.relayout?UNIFORM_STAGE_VIEWS.previous|UNIFORM_STAGE_VIEWS.reasons|UNIFORM_STAGE_VIEWS.importance:0)|UNIFORM_STAGE_VIEWS.certificate|UNIFORM_STAGE_VIEWS.band:0;
   q.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
   this.pressureTarget=target;
   const k=this.key,held=k.supportPolicy,policy=p.supportPolicy,reserve=p.pressureReserve,seconds=p.volumeControlSeconds,sweeps=p.extensionSweeps;
-  const same=this.keyed&&agree(k.gravity,gravity)&&agree(k.density,density)&&agree(k.viscosity,viscosity)&&agree(k.surfaceTension,tension)&&k.openTop===p.openTop&&k.noSlip===p.noSlip&&k.cubic===p.cubic&&k.fineAdvection===p.fineAdvection
+  const kept=k.gravity,same=this.keyed&&kept!==undefined&&agree(kept[0],gx)&&agree(kept[1],gy)&&agree(kept[2],gz)&&agree(k.density,density)&&agree(k.viscosity,viscosity)&&agree(k.surfaceTension,tension)&&k.openTop===p.openTop&&k.noSlip===p.noSlip&&k.cubic===p.cubic&&k.fineAdvection===p.fineAdvection
    &&k.fullPressureEnvelope===p.fullPressureEnvelope&&agree(k.pressureReserve,reserve)&&agree(k.volumeControlSeconds,seconds)
    &&k.redistance===p.redistance&&agree(k.extensionSweeps,sweeps)&&agree(k.pressureTolerance,tolerance)
    &&(policy?!!held&&agree(held.fineReach,policy.fineReach)&&agree(held.shellReach,policy.shellReach)&&held.twoLevel===policy.twoLevel&&held.shellOnly===policy.shellOnly:!held);
-  k.gravity=gravity;k.density=density;k.viscosity=viscosity;k.surfaceTension=tension;k.openTop=p.openTop;k.noSlip=p.noSlip;k.cubic=p.cubic;k.fineAdvection=p.fineAdvection;
+  {const own=this.keyGravity;own[0]=gx;own[1]=gy;own[2]=gz;k.gravity=own;}k.density=density;k.viscosity=viscosity;k.surfaceTension=tension;k.openTop=p.openTop;k.noSlip=p.noSlip;k.cubic=p.cubic;k.fineAdvection=p.fineAdvection;
   k.fullPressureEnvelope=p.fullPressureEnvelope;k.pressureReserve=reserve;k.volumeControlSeconds=seconds;
   k.redistance=p.redistance;k.extensionSweeps=sweeps;k.pressureTolerance=tolerance;
   if(policy){const own=this.keyPolicy;own.fineReach=policy.fineReach;own.shellReach=policy.shellReach;own.twoLevel=policy.twoLevel;own.shellOnly=policy.shellOnly;k.supportPolicy=own;}else k.supportPolicy=undefined;

@@ -255,7 +255,7 @@ fn umRdForce(region:u32,stored:bool){
  }
  mirror[at+${UNIFORM_REGION_MIRROR.mode}u]=mode;
 }
-struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f}
+struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f,gravity:vec4f}
 @group(1) @binding(5) var<uniform> force:UMForceParams;
 ${this.sources.bodyRegions?`@group(1) @binding(6) var<storage,read> bodyRegions:array<u32>;
 fn umRdBodySwept(region:u32)->u32{return bodyRegions[region]&0xffu;}`:"fn umRdBodySwept(region:u32)->u32{return 255u;}"}
@@ -308,8 +308,8 @@ fn umRdDecode(word:u32)->f32{
    for(var k=0u;k<6u;k++){vmax=max(vmax,umRdDecode(regionVelocity[6u*n+k]));}
   }else{let page=umPageWord((origin+4*offset)>>vec3u(3u));a=umRdMix(a,page^d);b=umRdMix(b,page+d);}
  }
- let p=array<vec4f,3>(force.hDt,force.physical,force.controls);
- for(var i=0u;i<3u;i++){for(var c=0u;c<4u;c++){let w=bitcast<u32>(p[i][c]);a=umRdMix(a,w);b=umRdMix(b,w^0x9e3779b9u);}}
+ let p=array<vec4f,4>(force.hDt,force.physical,force.controls,force.gravity);
+ for(var i=0u;i<4u;i++){for(var c=0u;c<4u;c++){let w=bitcast<u32>(p[i][c]);a=umRdMix(a,w);b=umRdMix(b,w^0x9e3779b9u);}}
  let changed=a!=record[at+${R.hood}u]||b!=record[at+${R.hoodHigh}u]||umRdBodySwept(region)<=${UNIFORM_FORCE_BODY_MARGIN}u;
  record[at+${R.hood}u]=a;record[at+${R.hoodHigh}u]=b;
  var tier=${UNIFORM_FORCE_TIER.full}u;var budget=0.0;var last=record[at+${R.lastFull}u];
@@ -388,7 +388,7 @@ fn umRdPressure(t:u32,region:u32){
     this.classifyGroup??=this.device.createBindGroup({label:"Uniform region dynamics classify",layout:this.classifyLayout,entries:[
       {binding:0,resource:{buffer:this.record}},{binding:1,resource:{buffer:this.forceStore}},{binding:7,resource:{buffer:s.heat}},
       {binding:3,resource:{buffer:this.ownership.regionVelocity}},
-      {binding:4,resource:{buffer:this.params}},{binding:5,resource:{buffer:s.forceParams,size:48}},
+      {binding:4,resource:{buffer:this.params}},{binding:5,resource:{buffer:s.forceParams,size:64}},
       ...(s.bodyRegions?[{binding:6,resource:{buffer:s.bodyRegions.buffer}}]:[]),...(s.normalDirty?[{binding:8,resource:{buffer:s.normalDirty}}]:[])]});
     this.publishGroup??=this.device.createBindGroup({label:"Uniform region dynamics publish",layout:this.publishLayout,entries:[
       {binding:0,resource:{buffer:this.record}},{binding:2,resource:s.pressure},{binding:3,resource:{buffer:this.pressureHistory}},

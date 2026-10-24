@@ -371,6 +371,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly activityWords=this.stepWords.subarray(8,12);
  // params.live.y: live.x is the state's live word, copied in by the GPU.
  private readonly sparseWords=new Uint32Array(1);
+ /** params.gravity: the step's gravity vector (m/s^2), the ballistic kick. */
+ private readonly gravityWords=new Float32Array(4);
  private readonly receiptBits=new Uint32Array(2);
  private readonly receiptDistances=new Float32Array(this.receiptBits.buffer);
  /** The groups' bank order: binding 0 the scratch bank, binding 1 the current. */
@@ -474,7 +476,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
   // The arena's windows follow: a window (9³ vertices) a brick-table slot; every brick of the lattice has room.
   this.arenaWord=cells+7*this.capacity;
-  this.next=buffer("cell starts, compact neighbor samples and surface brick arena windows",4*(this.arenaWord+729*64*address.blocks));this.params=buffer("parameters",64,true);
+  this.next=buffer("cell starts, compact neighbor samples and surface brick arena windows",4*(this.arenaWord+729*64*address.blocks));this.params=buffer("parameters",80,true);
   this.liveGate=buffer("live sample gate",16,true);device.queue.writeBuffer(this.liveGate,0,new Uint32Array([1,0,0,0]));
   this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
   const size=uniformCoarseCacheExtent(address);
@@ -637,7 +639,7 @@ ${this.sharedDeposit?"@group(1) @binding(0) var<storage,read_write> depositScrat
 @group(1) @binding(3) var<storage,read_write> links:array<u32>;
 @group(1) @binding(4) var<storage,read_write> state:array<atomic<u32>>;
 @group(1) @binding(5) var<storage,read> negative:array<f32>;
-struct Params{hDt:vec4f,settings:vec4f,activity:vec4f,live:vec4u}
+struct Params{hDt:vec4f,settings:vec4f,activity:vec4f,live:vec4u,gravity:vec4f}
 @group(1) @binding(6) var<uniform> params:Params;
 // This frame's live sample count (move's commit): a uniform, so a kernel
 // with barriers may exit on it.
@@ -963,7 +965,7 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
     ${this.apic?"p=nbApicSample(p);v=p.velocity.xyz;":"var flip=v;if(!nbMoveCold(q)){"+(this.sweptDelta?"let d=p.before.xyz;flip=select(pic,v+d,abs(d)<vec3f(1e30));":"flip+=pic-p.before.xyz;")+"}v=select(mix(pic,flip,params.settings.x),pic,first);"}
    }else{
     ${this.apic?"p.cx=vec4f(0);p.cy=vec4f(0);p.cz=vec4f(0);":""}
-    v+=vec3f(0,params.settings.z*dt,0);
+    v+=params.gravity.xyz*dt;
     // A sample within 0.011 of a cell of a solid page it moves toward loses
     // that axis: one kind an axis, of the cell ahead.
     for(var axis=0u;axis<3u;axis++){
@@ -1552,18 +1554,20 @@ ${narrowBandSurfaceWGSL}
  }
  /** Refresh the step and cap together, retaining the latest activity settings
   * even when a static layout skips the census. */
- private writeStep(dt:number,openTop:number,gravity:number):void{
+ private writeStep(dt:number,openTop:number):void{
   const w=this.stepWords,h=this.ownership.capacity.lattice.cellSize_m;
-  w[0]=h[0]!;w[1]=h[1]!;w[2]=h[2]!;w[3]=dt;w[4]=this.apic?0:0.95;w[5]=openTop;w[6]=gravity;w[7]=+this.measureTraces;
+  w[0]=h[0]!;w[1]=h[1]!;w[2]=h[2]!;w[3]=dt;w[4]=this.apic?0:0.95;w[5]=openTop;w[6]=0;w[7]=+this.measureTraces;
   w[11]=this.particleCellCap;
   this.device.queue.writeBuffer(this.params,0,w);
   this.sparseWords[0]=this.sparseNeighbours;this.device.queue.writeBuffer(this.params,52,this.sparseWords);
  }
- move(encoder:GPUCommandEncoder,dt:number,openTop:boolean,gravity=0):void{
+ /** gravity: the step's vector, m/s^2. */
+ move(encoder:GPUCommandEncoder,dt:number,openTop:boolean,gravity:readonly [number,number,number]):void{
   if(this.idleNow)return;
   const b=this.compiled;
   this.crossingCanPlan=false;this.crossingIsPlanned=false;this.framePlan?.invalidateDomain(this);
-  this.writeStep(dt,+openTop,gravity);
+  this.writeStep(dt,+openTop);
+  {const g=this.gravityWords;g[0]=gravity[0];g[1]=gravity[1];g[2]=gravity[2];this.device.queue.writeBuffer(this.params,64,g);}
   // Words 4 to 10 are the step's (10: advect's slow samples) and 23 (its walk list); word 11, the arrival fatal's page, stays.
   encoder.clearBuffer(this.state,16,28);encoder.clearBuffer(this.state,4*23,4);
   this.bootstrap(encoder);
@@ -1630,7 +1634,7 @@ ${narrowBandSurfaceWGSL}
  activity(encoder:GPUCommandEncoder,importance:{buffer:GPUBuffer;offset:number},dt:number,fadeSeconds=0.5,sparseSeconds=2):void{
   const w=this.activityWords;w[0]=2/Math.max(0.05,fadeSeconds);w[1]=sparseSeconds;w[2]=this.refinePadding;w[3]=this.particleCellCap;
   this.device.queue.writeBuffer(this.params,32,w);
-  this.writeStep(dt,0,0);
+  this.writeStep(dt,0);
   if(this.updateErrors)encoder.copyBufferToBuffer(this.updateErrors,32*this.tiles,this.bins,4*(this.activityWord+7*this.tiles),16*this.tiles);
   encoder.copyBufferToBuffer(importance.buffer,importance.offset,this.bins,this.activityWord*4,this.tiles*8);
   this.run(encoder,this.compiled.activity);

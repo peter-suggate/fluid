@@ -2145,6 +2145,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       "standing-wave": "The fundamental seiche of a 0.64 m tank, 2 cm amplitude. Linear theory: the ends follow A cos \u03c9t and the middle stays level.",
       "dam-break": "A column 16 cells wide and twice as tall collapses. The surge front follows Martin & Moyce (1952).",
       "mound": "A cylinder of liquid drops onto a pool. Total energy must never rise, and the surface returns to rest.",
+      "tilted-free-fall": "The block falls from rest under gravity tilted along (−4, −8, 0). Exact before contact: x = x₀ + ½gt² on both axes, no deformation.",
+      "translation": "A block moves diagonally at 1.25 cells a step in zero gravity. Exact before contact: rigid translation at constant velocity and volume.",
     }[name],
     audience: "validation", shelf: "NB-FLIP analytic", environment: "stage",
     methodProfile: NBFLIP_METHOD_PROFILE,

@@ -283,7 +283,7 @@ export interface SceneDescription {
     gravity_m_s2: Vec3;
     /** Feature-owned toggle memory; serialized with the scene for undo, reset and pane isolation. */
     rememberedGravity_m_s2?: Vec3;
-    /** Uniform starting velocity, currently consumed by Sparse CM12. Omitted means rest. */
+    /** Uniform starting velocity of all initial liquid (NB-FLIP: uniformInitialLiquidVelocity). Omitted means rest. */
     initialVelocity_m_s?: Vec3;
     initialCondition: "dam-break" | "tank-fill";
     /** Optional curved tank-fill surface, rasterized once into initial cell volumes. */

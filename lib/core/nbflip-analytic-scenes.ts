@@ -17,7 +17,12 @@ import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
  *    that pierces the surface. Exact as rest: solids change nothing.
  *  - **free-fall**: a block falling from rest, no pool. Exact: a rigid
  *    translation x0 + g t^2 / 2 with no deformation and zero pressure, until
- *    it nears the floor. Vertical: the solver's forces take gravity's y alone.
+ *    it nears the floor.
+ *  - **tilted-free-fall**: the same fall under gravity along (-4, -8, 0), of
+ *    the same magnitude: x0 + g t^2 / 2 on both axes, until it nears a wall.
+ *  - **translation**: a block in zero gravity moving diagonally at 1.25
+ *    cells a step on each axis (scene.fluid.initialVelocity_m_s). Exact: a
+ *    rigid translation x0 + v t at constant velocity and volume.
  *  - **standing-wave**: the fundamental seiche of a 0.64 m tank 0.24 m deep,
  *    2 cm amplitude. Linear theory: the end heights follow A cos(wt) with
  *    w^2 = g k tanh(k H), k = pi / L; the middle stays at H.
@@ -34,18 +39,35 @@ export const NBFLIP_ANALYTIC_DT_S = 1 / 60;
 export const NBFLIP_ANALYTIC_GRAVITY_M_S2 = 9.81;
 export const NBFLIP_ANALYTIC_POOL_CELLS = 24;
 
-export const NBFLIP_ANALYTIC_CASES = ["rest", "rest-step", "free-fall", "standing-wave", "dam-break", "mound"] as const;
+export const NBFLIP_ANALYTIC_CASES = ["rest", "rest-step", "free-fall", "standing-wave", "dam-break", "mound", "tilted-free-fall", "translation"] as const;
 export type NbflipAnalyticCase = (typeof NBFLIP_ANALYTIC_CASES)[number];
 export const nbflipAnalyticSceneId = (name: NbflipAnalyticCase) => `nbflip-analytic-${name}`;
 
 /** Frames each case runs: long enough to show its answer, no longer. */
 export const NBFLIP_ANALYTIC_FRAMES: Readonly<Record<NbflipAnalyticCase, number>> = {
   "rest": 60, "rest-step": 60, "free-fall": 16, "standing-wave": 60, "dam-break": 18, "mound": 120,
+  "tilted-free-fall": 16, "translation": 20,
 };
 
-/** free-fall: the block's cells (x, y) and the tilted gravity. */
+/** free-fall: the block's cells (x, y) and its gravity. */
 export const NBFLIP_ANALYTIC_FALL_BLOCK = [[24, 36], [40, 52]] as const;
 export const NBFLIP_ANALYTIC_FALL_GRAVITY = { x: 0, y: -NBFLIP_ANALYTIC_GRAVITY_M_S2, z: 0 } as const;
+/** tilted-free-fall: the block's cells and gravity along (-4, -8, 0), |g| as free-fall's. */
+export const NBFLIP_ANALYTIC_TILTED_BLOCK = [[28, 38], [44, 54]] as const;
+export const NBFLIP_ANALYTIC_TILTED_GRAVITY = {
+  x: -4 * NBFLIP_ANALYTIC_GRAVITY_M_S2 / Math.hypot(4, 8), y: -8 * NBFLIP_ANALYTIC_GRAVITY_M_S2 / Math.hypot(4, 8), z: 0 } as const;
+/** translation: the block's cells and its velocity, 1.25 cells a step on x and y. */
+export const NBFLIP_ANALYTIC_TRANSLATION_BLOCK = [[12, 12], [28, 28]] as const;
+export const NBFLIP_ANALYTIC_TRANSLATION_VELOCITY = { x: 0.75, y: 0.75, z: 0 } as const;
+
+/** The ballistic cases' block (cells, x and y), gravity and initial velocity: exactly x0 + v0 t + g t^2 / 2. */
+export function nbflipAnalyticBallistic(name: NbflipAnalyticCase) {
+  const zero = { x: 0, y: 0, z: 0 } as const;
+  if (name === "free-fall") return { block: NBFLIP_ANALYTIC_FALL_BLOCK, gravity: NBFLIP_ANALYTIC_FALL_GRAVITY, velocity: zero };
+  if (name === "tilted-free-fall") return { block: NBFLIP_ANALYTIC_TILTED_BLOCK, gravity: NBFLIP_ANALYTIC_TILTED_GRAVITY, velocity: zero };
+  if (name === "translation") return { block: NBFLIP_ANALYTIC_TRANSLATION_BLOCK, gravity: zero, velocity: NBFLIP_ANALYTIC_TRANSLATION_VELOCITY };
+  return undefined;
+}
 /** rest-step: a submerged step and a pier through the surface, in cells. */
 export const NBFLIP_ANALYTIC_STEP = [[24, 0], [40, 12]] as const;
 export const NBFLIP_ANALYTIC_PIER = [[46, 0], [50, 40]] as const;
@@ -97,9 +119,11 @@ export function createNbflipAnalyticScene(name: NbflipAnalyticCase): SceneDescri
   const scene = nbflipDomain(nbflipAnalyticSceneId(name), grid, h, NBFLIP_ANALYTIC_FRAMES[name], pool, grid, NBFLIP_ANALYTIC_DT_S, NBFLIP_ANALYTIC_GRAVITY_M_S2);
   scene.solidVoxels = [];
   if (name === "rest-step") scene.solidVoxels = [solidCells(...NBFLIP_ANALYTIC_STEP), solidCells(...NBFLIP_ANALYTIC_PIER)];
-  if (name === "free-fall") {
-    scene.fluid.gravity_m_s2 = { ...NBFLIP_ANALYTIC_FALL_GRAVITY };
-    scene.fluid.initialLiquidVolumes = [liquidSlab(...NBFLIP_ANALYTIC_FALL_BLOCK)];
+  const ballistic = nbflipAnalyticBallistic(name);
+  if (ballistic) {
+    scene.fluid.gravity_m_s2 = { ...ballistic.gravity };
+    scene.fluid.initialVelocity_m_s = { ...ballistic.velocity };
+    scene.fluid.initialLiquidVolumes = [liquidSlab(ballistic.block[0], ballistic.block[1])];
   }
   if (name === "standing-wave") {
     const L = grid[0] * h;

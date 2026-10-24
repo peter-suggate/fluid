@@ -27,8 +27,8 @@ export interface UniformMixedForceFields {
   negative: GPUBuffer;
   output: GPUTexture;
   outputNegative: GPUBuffer;
-  /** h.xyz,dt; gravity,density,dynamic viscosity,surface tension;
-   * noSlip,openTop,unused,dust threshold. All f32. */
+  /** h.xyz,dt; unused,density,dynamic viscosity,surface tension;
+   * noSlip,openTop,unused,dust threshold; gravity.xyz (m/s^2),unused. All f32. */
   params: GPUBuffer;
   /** Dead transport/sharpening arena, one vec4 per possible owner: an
    * unretained owner's normal (xyz) and curvature (w), and a seam 4h
@@ -114,7 +114,7 @@ export class UniformMixedForces {
     const group=uniformDetailGroup(this.device,{layout:this.resources,entries:[
       ...[f.advected,f.phi,f.volume].map((t,i)=>({binding:i+1,resource:t})),
       {binding:4,resource:{buffer:f.negative}},{binding:5,resource:f.output},
-      {binding:6,resource:{buffer:f.outputNegative}},{binding:7,resource:{buffer:f.params,size:48}},
+      {binding:6,resource:{buffer:f.outputNegative}},{binding:7,resource:{buffer:f.params,size:64}},
       {binding:8,resource:f.centerPhi??f.volume},
       {binding:10,resource:coarse},{binding:11,resource:unit},
       ...(f.normals?[{binding:13,resource:{...f.normals,size:normalBytes}}]:[]),
@@ -134,7 +134,7 @@ export class UniformMixedForces {
 @group(1) @binding(4) var<storage,read> negative:array<f32>;
 @group(1) @binding(5) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(6) var<storage,read_write> boundary:array<f32>;
-struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f}
+struct UMForceParams {hDt:vec4f,physical:vec4f,controls:vec4f,gravity:vec4f}
 @group(1) @binding(7) var<uniform> force:UMForceParams;
 @group(1) @binding(8) var centerPhi:texture_3d<f32>;
 override umCachedGeometry:bool=false;
@@ -313,7 +313,7 @@ fn umLaplacian(face:UMFace)->f32 {
  }
  return (terms.x+terms.y)+terms.z;
 }
-// Gravity acts vertically on the same faces the pressure operator projects.
+// Gravity acts along its own direction on the same faces the pressure operator projects.
 // An extra horizontal bed-slope force is not balanced by hydrostatic pressure:
 // a shallow cell at a lake's shoreline is indistinguishable from a thin film
 // by depth alone. Voxel treads are resolved solid geometry, not a second
@@ -357,19 +357,21 @@ fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool,retain:vec3u)
  var value=0.0;if(face.width==4u){value=${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(advected,face.anchor,0)[face.axis];}else{value=textureLoad(advected,face.anchor,0)[face.axis];}let dt=force.hDt.w;
  if(umForceFaceFrozen(owner,face)){return value;}
  let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
- let gravity=face.axis==1u&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor));
+ // Gravity's component along the face's axis (every direction: a uniform).
+ let g=force.gravity[face.axis];
+ let gravity=g!=0.0&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor));
  let kept=face.sign>0&&retain.x!=0u;
  if(kept&&retain.x==2u){
-  if(gravity){value+=dt*force.physical.x;}
+  if(gravity){value+=dt*g;}
   value+=bitcast<f32>(umForceStore[retain.y+face.axis]);
  }else{
   let advected=value;
   // A retaining region (UNIFORM_FORCE_TIER.retain) drops viscosity within its budget.
   if(occupancy>0.0&&force.physical.z>0.0&&umViscosityExact(owner)){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
-  if(gravity){value+=dt*force.physical.x;}
+  if(gravity){value+=dt*g;}
   value+=umCapillary(owner,face,solidClear);
   // The kept drive: the evaluation less the advected value and gravity.
-  if(kept){umForceKeep(owner,retain,face.axis,value-advected-select(0.0,dt*force.physical.x,gravity));}
+  if(kept){umForceKeep(owner,retain,face.axis,value-advected-select(0.0,dt*g,gravity));}
  }
  return umInflow(face,value);
 }
@@ -418,18 +420,22 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
  // (viscosity as a vector, capillarity per face) is kept or
  // reused by a COLD region (umForceRetain); gravity and inflow are fresh.
  var value=textureLoad(advected,at,0).xyz;let occupancy=umOccupancy(owner);
- let neighbor=umFace(owner,1u,1,0u).neighbor;
- let gravity=occupancy>1e-5||umOccupancy(neighbor)>1e-5||umCoarseMass(neighbor);
+ // Gravity on each +face along which it has a component (a uniform: no
+ // other axis reads a neighbour), where either cell holds liquid.
+ var gravity=vec3<bool>(false);
+ for(var axis=0u;axis<3u;axis++){
+  if(force.gravity[axis]!=0.0){let neighbor=umFace(owner,axis,1,0u).neighbor;gravity[axis]=occupancy>1e-5||umOccupancy(neighbor)>1e-5||umCoarseMass(neighbor);}
+ }
  let retain=umForceRetain(owner);
  if(retain.x==2u){
-  if(gravity){value.y+=force.hDt.w*force.physical.x;}
+  for(var axis=0u;axis<3u;axis++){if(gravity[axis]){value[axis]+=force.hDt.w*force.gravity[axis];}}
   value+=umForceKept(retain);
  }else{
   if(occupancy>0.0&&force.physical.z>0.0&&umViscosityExact(owner)){
    let terms=umViscosityTerms(at);
    value+=force.hDt.w*(force.physical.z/force.physical.y)*((terms[0]+terms[1])+terms[2]);
   }
-  if(gravity){value.y+=force.hDt.w*force.physical.x;}
+  for(var axis=0u;axis<3u;axis++){if(gravity[axis]){value[axis]+=force.hDt.w*force.gravity[axis];}}
   if(force.physical.w>0.0){
    for(var axis=0u;axis<3u;axis++){
     // A +face inside the owner's tile meets an h owner: its reconstructed
@@ -443,7 +449,7 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
   // The kept drive: the evaluation less the advected value and gravity
   // (only a keeping region reloads the advected texel).
   if(retain.x==1u){
-   var base=textureLoad(advected,at,0).xyz;if(gravity){base.y+=force.hDt.w*force.physical.x;}
+   var base=textureLoad(advected,at,0).xyz;for(var axis=0u;axis<3u;axis++){if(gravity[axis]){base[axis]+=force.hDt.w*force.gravity[axis];}}
    let drive=value-base;for(var axis=0u;axis<3u;axis++){umForceKeep(owner,retain,axis,drive[axis]);}
   }
  }
