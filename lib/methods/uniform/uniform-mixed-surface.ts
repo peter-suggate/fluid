@@ -717,20 +717,32 @@ fn umCubicPhi(q:vec3f,cell:UMVertexCell)->f32{
   tapRun=udRun_phi(base-vec3i(width),3u*u32(width));tapStep=i32(u32(width)>>u32(max(tapRun.w,0)));
   if(tapRun.w<0||(tapStep<<u32(tapRun.w))!=width){tapRun.w=-1;}
  }
+ // The limiter range is the 27 taps about the vertex nearest q: on each
+ // axis the two inner taps and the end tap on q's side (upper: the tap
+ // at offset 2). The owner cell's eight corners alone clamped one side only
+ // where q lies on a cell plane (a lattice-axis motion: weights 0,1,0,0
+ // there, the range the plane above's): a vertex on a convex kink beside
+ // a corner had its undershoot clamped above a face and kept below it, and
+ // the clamp rounded corners on one side (a falling 4h block lost 1.3% in
+ // 9 frames, its right faces only). The range nests: rows, planes, volume.
+ let upper=fraction>=vec3f(0.5);
  // As umVertexCell: the width branch is outside the 64 taps.
  ${(taps=>`if(!umRegularFine&&cell.width==4u){${taps("umLoadCorner(vec3u(vertex))")}}else if(tapRun.w>=0){${taps("udTexel_phi(tapRun.xyz+tapStep*vec3i(vec3u(x,y,z))).x",false)}}else{${taps("umLoadVertex(vec3u(vertex))")}}`)((load:string,near=true)=>/* wgsl */`
- for(var z=0u;z<4u;z++){var plane=0.0;
-  for(var y=0u;y<4u;y++){var row=0.0;
+ var zEndLow=0.0;var zEndHigh=0.0;
+ for(var z=0u;z<4u;z++){var plane=0.0;var planeLow=1e30;var planeHigh=-1e30;var yEndLow=0.0;var yEndHigh=0.0;
+  for(var y=0u;y<4u;y++){var row=0.0;var rowLow=1e30;var rowHigh=-1e30;var xEnd=0.0;
    for(var x=0u;x<4u;x++){
     let offset=vec3i(vec3u(x,y,z))-vec3i(1);${near?"let vertex=umVertexNearFromPage(home,page,base+offset*width);":""}
     // Cubic taps lie on lattice vertices, stored or resolved: direct loads.
     // The inner taps are the cell's corners.
     let inner=all(offset>=vec3i(0))&&all(offset<=vec3i(1));
     var s=0.0;if(inner){s=cell.corners[x-1u+2u*(y-1u)+4u*(z-1u)];}else{s=${load};}row+=wx[x]*s;
-    if(inner){low=min(low,s);high=max(high,s);}
-   }plane+=wy[y]*row;
-  }value+=wz[z]*plane;
- }`)}
+    if(x==1u||x==2u){rowLow=min(rowLow,s);rowHigh=max(rowHigh,s);}else if((x==3u)==upper.x){xEnd=s;}
+   }plane+=wy[y]*row;rowLow=min(rowLow,xEnd);rowHigh=max(rowHigh,xEnd);
+   if(y==1u||y==2u){planeLow=min(planeLow,rowLow);planeHigh=max(planeHigh,rowHigh);}else if((y==3u)==upper.y){yEndLow=rowLow;yEndHigh=rowHigh;}
+  }value+=wz[z]*plane;planeLow=min(planeLow,yEndLow);planeHigh=max(planeHigh,yEndHigh);
+  if(z==1u||z==2u){low=min(low,planeLow);high=max(high,planeHigh);}else if((z==3u)==upper.z){zEndLow=planeLow;zEndHigh=planeHigh;}
+ }low=min(low,zEndLow);high=max(high,zEndHigh);`)}
  return clamp(value,low,high);
 }
 ${uniformMixedWallVertexWGSL}
