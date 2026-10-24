@@ -23,10 +23,11 @@ const MIN_PATCH_EDGE=16;
 const HEADER=UNIFORM_DETAIL_HEADER_WORDS;
 /** Sticky bits in umSupport[UM_DETAIL_VIOLATION], one per class. */
 export const UNIFORM_DETAIL_VIOLATION={cell:1,face:2,vertex:4,atlas:8} as const;
-/** Words the topology tail reserves: the table for the smallest patch edge,
- * then the locator (the table's first word index: a consumer that does not
- * know the lattice finds the table from the buffer's last word). */
-export function uniformDetailTableWords(dims:readonly number[]):number{return HEADER+dims.reduce((n,d)=>n*Math.ceil(d/MIN_PATCH_EDGE),1)+1;}
+/** Words the topology tail reserves: the table (table(): the header and the
+ * one directory word of packed storage, whatever the lattice), then the
+ * locator (the table's first word index: a consumer that does not know the
+ * lattice finds the table from the buffer's last word). */
+export function uniformDetailTableWords():number{return HEADER+2;}
 
 export interface UniformDetailClassLayout{
  /** Atlas slot pitch: P, or P+1 for packed vertex slots. */
@@ -429,10 +430,11 @@ export class UniformDetailStorage{
  /** Whole-field upload of logical values (tight, x fastest, vec4 for
   * faces), as a raw texture would hold them: resident patches take every
   * texel, a non-resident tile its canonical texels' values. Packed uploads
-  * before the first layout stay pending: install() deposits them. */
- upload(texture:GPUTexture,values:Float32Array):void{
+  * before the first layout stay pending: install() deposits them. No values:
+  * the field's empty value throughout, with no lattice-sized array. */
+ upload(texture:GPUTexture,values?:Float32Array):void{
   const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1;this.kindOf(texture);
-  if(values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
+  if(values&&values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
 
   if(!this.installed){this.pending.set(texture,values);return;}
   this.write(texture,this.image(texture,values));
@@ -443,7 +445,7 @@ export class UniformDetailStorage{
  /** Domain: the field's h generation is resident, its base a second texture. */
  private twinned(texture:GPUTexture):boolean{return this.resident&&!this.pinned.has(fields.get(texture)!.handle);}
  private installed=false;
- private readonly pending=new Map<GPUTexture,Float32Array>();
+ private readonly pending=new Map<GPUTexture,Float32Array|undefined>();
  get settled():boolean{return this.installed;}
  private image(texture:GPUTexture,values?:Float32Array,base=false):Float32Array<ArrayBuffer>{
   const kind=this.kindOf(texture),[lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,t=base?this.bases.get(fields.get(texture)!.handle)!:this.physical(texture),W=t.width,H=t.height;
@@ -503,8 +505,8 @@ export class UniformDetailStorage{
   if(this.pending.has(live.velocityScratch))throw new Error("The scratch velocity has no initial upload");
   for(const [texture,values] of this.pending){
    const image=this.image(texture,values);
-   if(!all&&texture===live.volume)this.coarsenCells(layout,values,image,texture);
-   if(!all&&texture===live.velocity){
+   if(!all&&values&&texture===live.volume)this.coarsenCells(layout,values,image,texture);
+   if(!all&&values&&texture===live.velocity){
     this.coarsenFaces(layout,values,image,texture);
     const scratch=this.image(live.velocityScratch);this.coarsenFaces(layout,values,scratch,live.velocityScratch);this.write(live.velocityScratch,scratch);
    }
@@ -744,7 +746,9 @@ ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"}})}`;
 @group(0) @binding(${2*BATCH+4}) var<uniform> drDimensions:vec4u;
 fn drTiles()->vec3u{return drDimensions.xyz;}
 fn drCount()->u32{return 512u*drDimensions.w;}
-${seam("drNextWords")}
+// The pages from the held topology: a GPU generation's buffer is its tile
+// words alone (no page tail), and no relayout moves a page.
+${seam("drHeldWords")}
 fn drHeld(t:u32)->bool{return (drHeldWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 fn drNext(t:u32)->bool{return (drNextWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 `;

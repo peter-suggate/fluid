@@ -723,13 +723,12 @@ ${run("WideVertex", 3)}`;
 /** A lattice is a whole number of pages on every axis: its walls, its floor
  * and its top are page faces. A scene's lattice is its container's cells
  * rounded up to one (sceneFluidLatticeDimensions), so any other box is a
- * caller's error and is refused here. */
+ * caller's error and is refused here. A box has no size limit of its own:
+ * the page table's window is the address's (uniformLatticeAddress). */
 export function uniformLatticeBox(cells: readonly number[]): UniformLatticeBox {
   if (cells.length !== 3 || cells.some(n => !Number.isSafeInteger(n) || n < UNIFORM_PAGE_CELLS || n % UNIFORM_PAGE_CELLS !== 0)) throw new RangeError(`Uniform lattice ${cells.join("x")} is refused: a lattice is a whole number of ${UNIFORM_PAGE_CELLS}-cell pages on every axis, so each dimension must be a positive multiple of ${UNIFORM_PAGE_CELLS} cells`);
   const box: Extent = [cells[0]!, cells[1]!, cells[2]!], tiles: Extent = [box[0] / 4, box[1] / 4, box[2] / 4];
   const pages: Extent = [box[0] / UNIFORM_PAGE_CELLS, box[1] / UNIFORM_PAGE_CELLS, box[2] / UNIFORM_PAGE_CELLS];
-  // The table entry past the box on each axis, and the one a coordinate of -1 wraps to, must not be a box page.
-  if (pages.some(n => n > UNIFORM_PAGE_WINDOW - 2)) throw new RangeError(`Uniform lattice ${box.join("x")} exceeds ${UNIFORM_PAGE_WINDOW - 2} pages of ${UNIFORM_PAGE_CELLS} cells on an axis`);
   return {
     cells: box, tiles, boxTiles: tiles[0] * tiles[1] * tiles[2], boxCells: box[0] * box[1] * box[2],
     vertexBox: [box[0] + 1, box[1] + 1, box[2] + 1], wideVertexBox: [tiles[0] + 1, tiles[1] + 1, tiles[2] + 1],
@@ -741,7 +740,8 @@ export function uniformLatticeBox(cells: readonly number[]): UniformLatticeBox {
  * data only. Absent fields give one block per box page in scan order and
  * the two sentinels. */
 export interface UniformPagePoolScene {
-  /** Storage blocks, the two sentinels included; default: the box's pages + 2. */
+  /** Storage blocks, the two sentinels included; default: the box's pages + 2, or an open world's budget for a
+   * box with more pages than the block grid holds (its resident pages, not its own, must then fit). */
   readonly blocks?: number;
   /** A number that fixes a shuffle of the seeded blocks (uniformPagePoolBoxPages). */
   readonly permute?: number;
@@ -756,7 +756,9 @@ export interface UniformPagePoolScene {
  * on the water slide (40 to 80 blocks: 592 to 979 MiB, 9.7 MiB a block) and
  * rounded up. */
 export const UNIFORM_PAGE_BLOCK_MiB = 10;
-/** The budget of an open world that names none. */
+/** The most blocks the block grid holds: 8x8 blocks a layer, 62 layers (uniformLatticeAddress). */
+export const UNIFORM_BLOCK_GRID_BLOCKS = 8 * 8 * 62;
+/** The budget of an open world that names none, and of a box with more pages than the block grid holds. */
 export const UNIFORM_OPEN_WORLD_MEMORY_MiB = 1024;
 /** The blocks a memory budget buys, the two that hold no page among them. */
 export function uniformPagePoolBlocksForMemory(memory_MiB: number): number {
@@ -837,13 +839,16 @@ export const UNIFORM_FRAME_FLOOR_PAGES = 8;
  * asks for when the liquid nears the top. */
 export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}, world?: { readonly boxPage: readonly number[] }): UniformLatticeAddress {
   const box = uniformLatticeBox(cells), [px, py, pz] = box.pages;
+  // The table entry past the box on each axis, and the one a coordinate of -1 wraps to, must not be a box page.
+  if (box.pages.some(n => n > UNIFORM_PAGE_WINDOW - 2)) throw new RangeError(`Uniform lattice ${box.cells.join("x")} exceeds ${UNIFORM_PAGE_WINDOW - 2} pages of ${UNIFORM_PAGE_CELLS} cells on an axis`);
   if (world && !openTop) throw new RangeError("Uniform lattice: an open world has an open top");
   const boxPage: Extent = world ? [world.boxPage[0]!, world.boxPage[1]!, world.boxPage[2]!] : [0, 0, 0];
   // Every page the box covers lies in the window above its floor, and no coordinate of a box page wraps.
   if (boxPage.some((o, axis) => !Number.isSafeInteger(o) || o < 0 || o + box.pages[axis]! > UNIFORM_PAGE_WINDOW - (axis === 1 ? UNIFORM_FRAME_FLOOR_PAGES : 1)))
     throw new RangeError(`Uniform lattice: a box of ${box.pages.join("x")} pages at page ${boxPage.join(",")} does not lie inside the window`);
+  const boxBlocks = px * py * pz + 2 + (openTop ? px * pz : 0);
   const blocks = scene.blocks ?? (scene.memory_MiB !== undefined ? uniformPagePoolBlocksForMemory(scene.memory_MiB)
-    : world ? uniformPagePoolBlocksForMemory(UNIFORM_OPEN_WORLD_MEMORY_MiB) : px * py * pz + 2 + (openTop ? px * pz : 0));
+    : world || boxBlocks > UNIFORM_BLOCK_GRID_BLOCKS ? uniformPagePoolBlocksForMemory(UNIFORM_OPEN_WORLD_MEMORY_MiB) : boxBlocks);
   const blockBits = Math.min(Math.floor(blocks / 8), 1) + Math.min(Math.floor(blocks / 64), 1) + Math.min(Math.floor(blocks / 512), 1);
   const blockGrid: Extent = [1 << blockBits, 1 << blockBits, Math.ceil(blocks / 4 ** blockBits)];
   // 33 texels of a vertex texture per block: 62 blocks stay inside a 2048-texel 3D texture.

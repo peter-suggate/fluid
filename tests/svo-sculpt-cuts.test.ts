@@ -8,6 +8,7 @@ import { SparseSceneProxyVoxelizer, sparseSceneProxyVoxelizationShaderFor } from
 import { PublishedWords } from "../lib/svo/features/scene-publication/svo-table-upload";
 import { SCENE_ENVIRONMENT_OWNER_BASE } from "../lib/core/webgpu-rigid-body";
 import type { SolidWorldVoxelPatch } from "../lib/core/solid-world";
+import { subcellEllipsoidPatch } from "../lib/core/solid-patch/ellipsoid-bounds";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
 const lattice = { origin_m: [-2, 0, -1] as const, cellSize_m: [.25, .5, .125] as const };
@@ -59,7 +60,8 @@ test("voxelizer cut publication retains its arena and restores affected native o
 
 test("native sculpt union distances and cut normals match CPU for box/ellipsoid CSG", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   await withUniformDevice("scenery sculpt distance parity", async device => {
-    const words = packSvoSculptCuts(cuts, lattice);
+    const words = packSvoSculptCuts([...cuts, { ...subcellEllipsoidPatch(
+      [15.125, 3.125, 6.125], [20.125, 8.125, 11.125], "clear"), affectsScenery: true }], lattice);
     const points = Array.from({ length: 513 }, (_, i) => [
       -2.5 + 5 * ((i * 73 % 521) / 520), -.5 + 3 * ((i * 137 % 521) / 520),
       -1.5 + 2 * ((i * 197 % 521) / 520), 0,

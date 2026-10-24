@@ -3149,11 +3149,14 @@ ${dual && dualMarchingCubes ? `
       let sampled=sceneFieldProgramBlockSurface(scenePrimitiveArenaSlot(primitive),local);
       if(sampled.material!=0u){
         bestMaterial=sampled.material;
-        ${sculptCutOffsetWords === undefined ? "bestNormal=inverseRotate(sampled.normal,vec4f(-primitive.rotation.xyz,primitive.rotation.w));" : `let cut=svoSculptCutSample(surfacePoint);
-        if(primitiveReceivesSculptCuts(primitive)&&-cut.distance>primitiveUncutDistance(primitive,surfacePoint)){
-          bestNormal=-cut.normal;
-        }else{bestNormal=inverseRotate(sampled.normal,vec4f(-primitive.rotation.xyz,primitive.rotation.w));}`}
+        bestNormal=inverseRotate(sampled.normal,vec4f(-primitive.rotation.xyz,primitive.rotation.w));
       }
+      ${sculptCutOffsetWords === undefined ? "" : `// Deep interiors can have no stored surface palette/normal. The cut's
+      // normal still wins there; material falls back to the source owner.
+      let cut=svoSculptCutSample(surfacePoint);
+      if(primitiveReceivesSculptCuts(primitive)&&-cut.distance>=primitiveUncutDistance(primitive,surfacePoint)){
+        bestNormal=-cut.normal;
+      }`}
     }
   }
   ${sculptCutOffsetWords === undefined ? "" : `if(bestPrimitive!=INVALID_INDEX&&primitiveHasSculptedNativeSurface(primitives[bestPrimitive])){
