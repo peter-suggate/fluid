@@ -14,7 +14,7 @@ import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTR
 import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
-import {UNIFORM_BULK_HEADS} from "./uniform-bulk-tier-reference";
+import {UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN} from "./uniform-bulk-tier-reference";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -501,8 +501,8 @@ fn bNeighbour(q:vec3i)->BNeighbour{
 }
 `;
   const lanes=/* wgsl */`@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u`;
-  // The 16h bulk tier (bulkTier "16h"): a member region's 64 native rows hold
-  // one pressure, its 16h row their sum. The region mean of a lane value over
+  // The 16h bulk tier (bulkTier "16h"): a member region's 64 native rows take
+  // one correction, its 16h row their sum. The region mean of a lane value over
   // a page's 8 regions (64 lanes each), through workgroup array 'red' (512+
   // floats); every lane of the page calls it.
   const bulkMean=(red:string)=>/* wgsl */`
@@ -520,14 +520,17 @@ fn nBulkMean(v:f32,bulk:bool,lane:u32)->f32{
   // member to member a 16h coupling (16 4h subfaces at 16h spacing: 16 per
   // subface on the native 64), member to native a 10h one (25.6), the
   // member's pressure carried to the subface's tangential position along the
-  // native side's measured slope (the head; bSeamHead's at ratio 4).
+  // native side's measured slope (the head; bSeamHead's at ratio 4). A
+  // member's pressure in its links is its 16h one, its rows' start mean
+  // (UniformBulkTier), not the row's own start: each row keeps its offset.
   const bulkNative=B?bulkMean("nRed")+/* wgsl */`
 @group(1) @binding(31) var<storage,read_write> bulk:array<u32>;
-const N_HEADS:u32=${UNIFORM_BULK_HEADS(B.regions)}u;
+const N_HEADS:u32=${UNIFORM_BULK_HEADS(B.regions)}u;const N_MEAN:u32=${UNIFORM_BULK_MEAN(B.regions)}u;
 var<workgroup> nRed:array<f32,512>;
 var<workgroup> nBulkW:u32;
 fn nRegionKey(k:u32)->u32{return 8u*(k>>9u)+nRegionOf(k&511u);}
 fn nMember(k:u32)->bool{return (bulk[nRegionKey(k)]&1u)!=0u;}
+fn nBulkStart(k:u32)->f32{if(nMember(k)){return bitcast<f32>(bulk[N_MEAN+nRegionKey(k)]);}return rootArena[R_PRESSURE+k];}
 // A member face's seam head slot: region, face, the subface's tangential cell.
 fn nHeadIndex(k:u32,f:u32)->u32{let a=f/2u;let t=umTileCoord(k);return N_HEADS+96u*nRegionKey(k)+16u*f+(t[(a+1u)%3u]&3u)+4u*(t[(a+2u)%3u]&3u);}
 // The key across face f of key k, N_KEYS outside (a SOLID page).
@@ -1055,7 +1058,7 @@ ${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){bulk[nHea
        }
        diagonal+=c;
       }else if(nLiquid(n)){${B?
-       "kind=N_NATIVE;level2=64.0*volume/(h4*h4);let b=nBulkLink(k,n,f,member);c=b.x*volume/(h4*h4);bulkDelta+=level2-c;diagonal+=c;rhs+=c*(rootArena[R_PRESSURE+n]-start+b.y);link=UBA_STRIDE*(n>>9u)+(n&511u);":
+       "kind=N_NATIVE;level2=64.0*volume/(h4*h4);let b=nBulkLink(k,n,f,member);c=b.x*volume/(h4*h4);bulkDelta+=level2-c;diagonal+=c;rhs+=c*(nBulkStart(n)-select(start,nBulkStart(k),member)+b.y);link=UBA_STRIDE*(n>>9u)+(n&511u);":
        "kind=N_NATIVE;c=64.0*volume/(h4*h4);diagonal+=c;level2=c;rhs+=c*(rootArena[R_PRESSURE+n]-start);link=UBA_STRIDE*(n>>9u)+(n&511u);"}}
       else{kind=N_GHOST;c=64.0*volume/(h4*h4*nTheta(k,n,axis,side));diagonal+=c;rhs-=c*start;}
      }

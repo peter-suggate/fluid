@@ -5,7 +5,7 @@ import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { UNIFORM_REGION_TIER } from "./uniform-region-heat";
 import {
   UNIFORM_BULK_COUNT, UNIFORM_BULK_DEPTH_CELLS, UNIFORM_BULK_ERROR, UNIFORM_BULK_FACE_TEXELS, UNIFORM_BULK_FACE_WIDTH, UNIFORM_BULK_FLOOR,
-  UNIFORM_BULK_HEADER, UNIFORM_BULK_HOLD, UNIFORM_BULK_HOLD_FRAMES, UNIFORM_BULK_LIST, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, UNIFORM_BULK_WORDS,
+  UNIFORM_BULK_HEADER, UNIFORM_BULK_HOLD, UNIFORM_BULK_HOLD_FRAMES, UNIFORM_BULK_LIST, UNIFORM_BULK_MEAN, UNIFORM_BULK_OFFSET, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, UNIFORM_BULK_WORDS,
 } from "./uniform-bulk-tier-reference";
 import type { UniformMixedPressureBulk } from "./uniform-mixed-pressure-velocity";
 
@@ -46,9 +46,12 @@ export interface UniformBulkTierFields {
  * - hysteresis: a region enters after UNIFORM_BULK_HOLD_FRAMES passing
  *   frames and leaves at once on a structural failure or twice the error.
  *
- * A member's 64 root rows start from their mean pressure (the coarsen
- * remap: a V-weighted restrict, exact for a uniform field; refining keeps
- * the prolonged 4h field the projection wrote). */
+ * A member's 16h pressure is its 64 root rows' start mean (the coarsen
+ * remap: a restrict, exact for a uniform field), recorded with the first
+ * row's offset from it. The rows keep their offsets and move together, so
+ * what other stages read stays the 4h profile (hydrostatic at rest), and
+ * refining starts from it. Resetting the rows to the mean thawed every COLD
+ * member (a pressure step the heat counts) and kinked its neighbours. */
 export class UniformBulkTier implements UniformMixedPressureBulk {
   readonly regions: number;
   readonly record: GPUBuffer;
@@ -77,7 +80,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
     const buffer = (binding: number, type: GPUBufferBindingType) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type } });
     this.layout = uniformDetailBindLayout(device, { label: "Uniform bulk tier", entries: [buffer(0, "uniform"),
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-      buffer(2, "read-only-storage"), buffer(3, "read-only-storage"), ...(S ? [buffer(4, "read-only-storage")] : []), buffer(5, "read-only-storage"), buffer(6, "storage"), buffer(7, "storage"),
+      buffer(2, "read-only-storage"), buffer(3, "read-only-storage"), ...(S ? [buffer(4, "read-only-storage")] : []), buffer(5, "read-only-storage"), buffer(6, "read-only-storage"), buffer(7, "storage"),
       { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }] });
     // The root pressure's view, aligned down (the arena's rootSpan).
     const p = f.pressure, align = device.limits.minStorageBufferOffsetAlignment, offset = p.offset ?? 0, base = offset - offset % align;
@@ -98,10 +101,11 @@ struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec
 @group(1) @binding(3) var<storage,read> rootPhi:array<f32>;
 ${S ? "@group(1) @binding(4) var<storage,read> rootTopology:array<vec4f>;" : ""}
 @group(1) @binding(5) var<storage,read> tiers:array<u32>;
-@group(1) @binding(6) var<storage,read_write> rootPressure:array<f32>;
+@group(1) @binding(6) var<storage,read> rootPressure:array<f32>;
 @group(1) @binding(7) var<storage,read_write> record:array<atomic<u32>>;
 @group(1) @binding(8) var faces:texture_storage_2d<r32float,write>;
 const B_REGIONS:u32=${R}u;const B_SLOTS:u32=${f.slots.word}u;const B_ROOT:u32=${this.rootWord}u;
+const B_MEAN:u32=${UNIFORM_BULK_MEAN(R)}u;const B_OFFSET:u32=${UNIFORM_BULK_OFFSET(R)}u;
 const B_HOLD:u32=${UNIFORM_BULK_HOLD(R)}u;const B_ERROR:u32=${UNIFORM_BULK_ERROR(R)}u;const B_HEADER:u32=${H}u;const B_LIST:u32=${UNIFORM_BULK_LIST(R)}u;
 const B_HOLD_FRAMES:u32=${UNIFORM_BULK_HOLD_FRAMES}u;const B_HOT:u32=${UNIFORM_REGION_TIER.hot}u;
 const B_TOLERANCE:f32=${UNIFORM_BULK_TOLERANCE};const B_FLOOR:f32=${UNIFORM_BULK_FLOOR};const B_DEPTH:f32=${UNIFORM_BULK_DEPTH_CELLS};const B_REACH:f32=${UNIFORM_BULK_REACH_CELLS}.0;
@@ -172,11 +176,13 @@ fn bFace(t:vec3i,a:u32)->f32{
    bState=u32(member);
    textureStore(faces,bTexel(${UNIFORM_BULK_FACE_TEXELS}u*r),vec4f(f32(member),0.0,0.0,0.0));
   }
-  // A member's 64 rows start from their mean.
+  // A member's 16h pressure: its 64 rows' start mean. Each row keeps its
+  // offset (the solve moves them together), the first's for the bulk faces.
   if(workgroupUniformLoad(&bState)!=0u){
-   let k=B_ROOT+umPageTile(r,lane);bSum[lane]=rootPressure[k];workgroupBarrier();
+   let k=B_ROOT+umPageTile(r,lane);let own=rootPressure[k];bSum[lane]=own;workgroupBarrier();
    for(var s=32u;s>0u;s>>=1u){if(lane<s){bSum[lane]+=bSum[lane+s];}workgroupBarrier();}
-   rootPressure[k]=bSum[0]/64.0;
+   let mean=bSum[0]/64.0;
+   if(lane==0u){atomicStore(&record[B_MEAN+r],bitcast<u32>(mean));atomicStore(&record[B_OFFSET+r],bitcast<u32>(own-mean));}
   }
   workgroupBarrier();
  }

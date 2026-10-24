@@ -71,6 +71,11 @@ test("16h composite: a hydrostatic column is an exact rest state across seams an
   assert.ok(Math.max(...r.map(Math.abs)) < 1e-9, `residual ${Math.max(...r.map(Math.abs))}`);
   const { u } = c.project(p, p, ustar);
   assert.ok(Math.max(...u.map(Math.abs)) < 1e-9, `rest speed ${Math.max(...u.map(Math.abs))}`);
+  // Member rows that keep the 4h hydrostatic profile (their offsets from the
+  // region mean) are the same rest state: the operator reads the mean.
+  const profile = Float64Array.from({ length: c.cells }, (_, k) => -g * c.coord(k)[1]);
+  assert.ok(Math.max(...c.residual(profile, profile, ustar).map(Math.abs)) < 1e-9);
+  assert.ok(Math.max(...c.project(profile, profile, ustar).u.map(Math.abs)) < 1e-9);
   // Solving from a zero start (no heads) or the rest start returns it.
   for (const start of [p, new Float64Array(c.cells)]) {
     const solved = c.solve(start, ustar), shift = solved[0]! - p[0]!;

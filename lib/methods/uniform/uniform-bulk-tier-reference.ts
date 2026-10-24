@@ -4,7 +4,9 @@
  * A region (16h: 4^3 tiles, 8 to a block) of submerged liquid bulk owns one
  * pressure row and six face velocities. On today's storage its data stays in
  * its 64 tiles' 4h storage, constrained: the 64 native rows of the pressure
- * arena hold one pressure (their sum is the 16h row), and the projection
+ * arena take one correction (their sum is the 16h row), so each keeps its
+ * offset from the region's mean, the 16h pressure (a hydrostatic profile
+ * stays in the rows other stages read), and the projection
  * writes every 4h face of the region from the region's six face means
  * (UniformBulkTier). W6 moves it into a 16h slot without changing the rules.
  *
@@ -14,7 +16,9 @@
  *  [2R, 3R)      the last error test, err / threshold (f32 bits)
  *  [3R, 3R+8)    counts (UNIFORM_BULK_COUNT)
  *  [3R+8]        the member list's length, the list after it
- *  [4R+16, ...)  seam heads: 96 a region, 16 a member face (pNative)
+ *  [4R+16, 100R+16)  seam heads: 96 a region, 16 a member face (pNative)
+ *  [100R+16, 101R+16)  a member's 16h pressure: its rows' start mean (f32)
+ *  [101R+16, 102R+16)  its first row's start offset from that mean (f32)
  * The faces texture (r32float, UNIFORM_BULK_FACE_WIDTH wide), 128 texels a
  * region: [0] member flag, [1+f] face f's mean velocity, [8+16f+j] subface
  * j's projected value (3e38: the 4h projection's own). */
@@ -39,7 +43,9 @@ export const UNIFORM_BULK_ERROR = (regions: number) => 2 * regions;
 export const UNIFORM_BULK_HEADER = (regions: number) => 3 * regions;
 export const UNIFORM_BULK_LIST = (regions: number) => 3 * regions + 8;
 export const UNIFORM_BULK_HEADS = (regions: number) => 4 * regions + 16;
-export const UNIFORM_BULK_WORDS = (regions: number) => 100 * regions + 16;
+export const UNIFORM_BULK_MEAN = (regions: number) => 100 * regions + 16;
+export const UNIFORM_BULK_OFFSET = (regions: number) => 101 * regions + 16;
+export const UNIFORM_BULK_WORDS = (regions: number) => 102 * regions + 16;
 /** Native coupling per V/h4^2 of a 4h subface: 4h spacing, member to member (16h), member to native (10h). */
 export const UNIFORM_BULK_COUPLING = { native: 64, member: 16, seam: 25.6 } as const;
 
@@ -133,12 +139,19 @@ export class UniformBulkComposite {
     if (mk === mn) return 0;
     return mk ? -this.head(start, n, a) : this.head(start, k, a);
   }
+  /** Each cell's pressure in the operator: a member's is its region's mean (its 16h pressure; the rows keep their offsets). */
+  level(p: Float64Array): Float64Array {
+    const sums = new Map<number, number>(), q = Float64Array.from(p);
+    for (let k = 0; k < this.cells; k++) { const c = this.coord(k); if (this.member(c)) sums.set(this.region(c), (sums.get(this.region(c)) ?? 0) + p[k]!); }
+    for (let k = 0; k < this.cells; k++) { const c = this.coord(k); if (this.member(c)) q[k] = sums.get(this.region(c))! / 64; }
+    return q;
+  }
   private *links(k: BulkVec): Generator<{ n: BulkVec; a: number; s: number }> {
     for (let a = 0; a < 3; a++) for (const s of [-1, 1]) { const n: BulkVec = [...k]; n[a] += s; if (this.inside(n)) yield { n, a, s }; }
   }
   /** Rows (pNative) of pressure p: 64 R + sum c (p_n - p_k + o), R = -sum s u* (the 4h cell's divergence). */
-  rows(p: Float64Array, start: Float64Array, ustar: Float64Array): Float64Array {
-    const r = new Float64Array(this.cells);
+  rows(rows: Float64Array, start: Float64Array, ustar: Float64Array): Float64Array {
+    const r = new Float64Array(this.cells), p = this.level(rows);
     for (let k = 0; k < this.cells; k++) {
       const c = this.coord(k); let row = 0;
       for (const { n, a, s } of this.links(c)) {
@@ -183,8 +196,8 @@ export class UniformBulkComposite {
    * its own; at a member's boundary the bulk faces' subface values (a seam:
    * the 10h gradient on the head; member to member: the 16h gradient on the
    * face's mean u*); inside a member the prolonged face means. */
-  project(p: Float64Array, start: Float64Array, ustar: Float64Array): { u: Float64Array; means: Map<number, number[]> } {
-    const u = new Float64Array(this.faces), means = new Map<number, number[]>();
+  project(rows: Float64Array, start: Float64Array, ustar: Float64Array): { u: Float64Array; means: Map<number, number[]> } {
+    const u = new Float64Array(this.faces), means = new Map<number, number[]>(), p = this.level(rows);
     const value = (a: number, low: BulkVec, high: BulkVec): number => {
       const ml = this.member(low), mh = this.member(high), f = this.face(a, high);
       const pl = p[this.cell(low)]!, ph = p[this.cell(high)]!;

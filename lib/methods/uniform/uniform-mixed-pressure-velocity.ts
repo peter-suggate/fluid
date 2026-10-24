@@ -12,7 +12,7 @@ import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSoli
 import { UNIFORM_BODY_FLUX_REACH } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_MIXED_ROOT_TILE_WORDS, uniformMixedRootMaskWords, uniformMixedRootTopologyBytes } from "./uniform-mixed-pressure-authority";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
-import { UNIFORM_BULK_FACE_TEXELS, UNIFORM_BULK_FACE_WIDTH, UNIFORM_BULK_HEADS, UNIFORM_BULK_LIST, UNIFORM_BULK_NONE_BITS } from "./uniform-bulk-tier-reference";
+import { UNIFORM_BULK_FACE_TEXELS, UNIFORM_BULK_FACE_WIDTH, UNIFORM_BULK_HEADS, UNIFORM_BULK_LIST, UNIFORM_BULK_NONE_BITS, UNIFORM_BULK_OFFSET } from "./uniform-bulk-tier-reference";
 
 /** The 16h bulk tier (UniformBulkTier): its record and faces texture. */
 export interface UniformMixedPressureBulk {readonly record:GPUBuffer;readonly faces:GPUTexture;readonly regions:number}
@@ -452,7 +452,10 @@ fn umBulkRow(o:UMOwner,face:UMFace)->vec2f{
 // accumulate.
 fn umProject(o:UMOwner,face:UMFace)->f32{
  ${this.coarse?`let low=umColdLow(o,face);let cold=UM_COLD_FREEZE&&umFrozenFace(low,face.axis,o.width);
- ${B?"var row=umBulkRow(o,face);if(row.y==0.0){row=umProjectRow(o,face,cold);}":"let row=umProjectRow(o,face,cold);"}if(!cold){return row.x;}
+ ${B?`let bulk=umBulkRow(o,face);var row=bulk;if(row.y==0.0){row=umProjectRow(o,face,cold);}if(!cold){return row.x;}
+ // A frozen face the bulk faces set is live: it keeps the 16h value less
+ // the region term (velocity is F + T) and gives the accumulate no correction.
+ if(bulk.y!=0.0){if(face.sign>0){umColdCorrect(o.tile,face.axis,3.0e38);}return bulk.x-umColdFaceTerm(low,face.axis,o.width);}`:"let row=umProjectRow(o,face,cold);if(!cold){return row.x;}"}
  let raw=umFaceVelocity(face);
  if(face.sign>0){
   // Wet topology already records voxel-wall normals. A constant frozen
@@ -527,7 +530,7 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
    const bulkSource=common.replace("${COLD}",UniformColdFreeze.wgsl(this.cold,1,14))+projectHead+/* wgsl */`
 @group(1) @binding(16) var bulkOut:texture_storage_2d<r32float,write>;
 @group(1) @binding(17) var<storage,read> bulkRecord:array<u32>;
-const UB_LIST:u32=${UNIFORM_BULK_LIST(R)}u;const UB_HEADS:u32=${UNIFORM_BULK_HEADS(R)}u;const UB_NONE:u32=${UNIFORM_BULK_NONE_BITS}u;
+const UB_LIST:u32=${UNIFORM_BULK_LIST(R)}u;const UB_HEADS:u32=${UNIFORM_BULK_HEADS(R)}u;const UB_NONE:u32=${UNIFORM_BULK_NONE_BITS}u;const UB_OFFSET:u32=${UNIFORM_BULK_OFFSET(R)}u;
 const UB_WALL:u32=0u;const UB_SEAM:u32=1u;const UB_MEMBER:u32=2u;
 var<workgroup> ubN:u32;
 var<workgroup> ubFlux:array<f32,96>;
@@ -537,11 +540,13 @@ var<workgroup> ubKind:array<u32,96>;
 var<workgroup> ubMean:array<f32,6>;
 fn ubStore(i:u32,v:f32){textureStore(bulkOut,vec2u(i%${W}u,i/${W}u),vec4f(v,0.0,0.0,0.0));}
 fn ubOwner(t:vec3i)->UMOwner{let k=umTileAt(vec3u(t));return UMOwner(k,0u,4u,k);}
+// Member r's 16h pressure: its rows moved together, so its first row less that row's start offset.
+fn ubPressure(r:u32)->f32{return pressures[umPageTile(r,0u)]-bitcast<f32>(bulkRecord[UB_OFFSET+r]);}
 @compute @workgroup_size(64) fn bulkFaces(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u){
  if(lane==0u){ubN=bulkRecord[UB_LIST];}
  let n=workgroupUniformLoad(&ubN);let scale=params.hDt.w/params.policy.x;
  for(var e=group.x;e<n;e+=groups.x){
-  let r=bulkRecord[UB_LIST+1u+e];let origin=vec3i(4u*umPageCoord(r));let p16=pressures[umTileAt(vec3u(origin))];
+  let r=bulkRecord[UB_LIST+1u+e];let origin=vec3i(4u*umPageCoord(r));let p16=ubPressure(r);
   for(var s=lane;s<96u;s+=64u){
    let f=s/16u;let j=s%16u;let a=f/2u;let high=(f&1u)==1u;let sign=select(-1,1,high);
    var m=origin;m[(a+1u)%3u]+=i32(j&3u);m[(a+2u)%3u]+=i32(j>>2u);m[a]+=select(0,3,high);
@@ -565,7 +570,7 @@ fn ubOwner(t:vec3i)->UMOwner{let k=umTileAt(vec3u(t));return UMOwner(k,0u,4u,k);
    for(var j=0u;j<16u;j++){let s=16u*f+j;star+=ubFlux[s];mean+=ubV[s]*ubValue[s];}
    mean/=16.0;
    if(ubKind[16u*f]==UB_MEMBER){
-    var q=origin;q[a]+=select(-1,4,high);let pn=pressures[umTileAt(vec3u(q))];
+    var q=origin;q[a]+=select(-1,4,high);let pn=ubPressure(umPageOfTile(umTileAt(vec3u(q))));
     mean=star/16.0-scale*select(p16-pn,pn-p16,high)/(16.0*UM_H[a]);
    }
    ubMean[f]=mean;ubStore(${X}u*r+1u+f,mean);
