@@ -19,8 +19,11 @@ import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
  * uniform pressure motion as omitted transport. Pressure still solves globally.
  *
  * HOT means body/source contact, live particle detail, a tile reconstruction
- * error above the detailed-update budget, excessive characteristic travel,
- * or invalid evidence. Spatial curvature alone never makes a region HOT.
+ * error above the detailed-update budget (a velocity high-pass, blind to
+ * translation however fast), or invalid evidence. Spatial curvature alone
+ * never makes a region HOT. Omission within the fine pressure's own
+ * resolution (its residual r: r h of velocity, r dt h a step) is noise, not
+ * freeze budget.
  * WARM means the freeze budget was exhausted, a spatial remap needs refreshing,
  * or a fine surface reader shares the dependency closure of a HOT region. WARM
  * uses the spatial resolution selected by the geometry census by default.
@@ -113,9 +116,12 @@ fn rhBulkAcceleration(acceleration:f32,gradient:f32,representedSpeed:f32)->f32{
  * HOT/WARM hold counters (low/high 16 bits). Words 9..15 publish the decision
  * evidence: surface, momentum, pressure-gradient and frozen-response errors
  * (h), detailed-update error (h), physical tile count (u32), incoming debt (h).
+ * Words 16 and 17 carry the freeze's discarded correction across frames:
+ * the last raw umColdError seen (m/s) and its charged part (m/s), the sum of
+ * its per-projection increments above the projection's resolution.
  * Trigger bit 12 records a physical reader; bit 13 certifies all physical
  * readers submerged; bit 14 records a physical h owner. */
-export const UNIFORM_REGION_HEAT_STATE_WORDS=16;
+export const UNIFORM_REGION_HEAT_STATE_WORDS=18;
 const STATE_WORDS=UNIFORM_REGION_HEAT_STATE_WORDS;
 const HEAT_GRID=1024;
 const PASS:GPUComputePassDescriptor={label:"Uniform region work heat"};
@@ -245,7 +251,7 @@ export class UniformRegionHeat {
     const module=uniformDetailModule(this.device,{label:"Uniform region work heat",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> tiers:array<atomic<u32>>;
 @group(1) @binding(1) var<storage,read_write> state:array<u32>;
-struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,horizon:f32,pad1:u32,pad2:u32}
+struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,horizon:f32,residual:f32,pad2:u32}
 @group(1) @binding(2) var<uniform> rh:RHParams;
 @group(1) @binding(3) var<storage,read> regionVelocity:array<u32>;
 @group(1) @binding(4) var<storage,read> dynamics:array<u32>;
@@ -310,7 +316,7 @@ var<workgroup> rhFine:atomic<u32>;
   if(l==0u){
    let submerged=${error&&s.updateErrors?"atomicLoad(&rhReaderClass)==1u":"false"};
    let fine=atomicLoad(&rhFine)!=0u;
-   var trigger=0u;for(var k=9u;k<RH_STATE;k++){state[at+k]=0u;}
+   var trigger=0u;for(var k=9u;k<16u;k++){state[at+k]=0u;}
    if(rh.force!=0u){trigger|=1u;}
    let block=umPageTile(region,0u)>>9u;let word=umBlockWord(block);let c=umPageCoord(region);
    if(state[at+2u]!=word||state[at+3u]!=c.x||state[at+4u]!=c.y||state[at+5u]!=c.z){trigger|=2u;}
@@ -321,12 +327,23 @@ var<workgroup> rhFine:atomic<u32>;
    // A region that ran non-COLD last frame was refreshed then.
    let refreshed=atomicLoad(&tiers[region])!=0u;
    var displacement=bitcast<f32>(state[at+1u]);if(refreshed){displacement=0.0;}
+   ${error&&s.updateErrors?`// The freeze's discarded correction (umColdError) grows by each
+   // projection's non-uniform response to the frozen F + T + g dt. F left an
+   // accepted solve, so up to the projection's own resolution (its fine
+   // residual times h, rh.residual/hInverse) that response is F's residue,
+   // which a live step would apply once and a frozen one meets again every
+   // frame: a still pool's 2e-5 m/s spent the 0.02h budget in 30 frames.
+   // Only an increment above it is omitted motion (Pi(g) dt: a real wave).
+   var discarded=0.0;
+   {let raw=umColdError(region);let last=bitcast<f32>(state[at+16u]);
+    if(!refreshed){discarded=bitcast<f32>(state[at+17u])+max(0.0,select(raw-last,raw,raw<last)-rh.residual/rh.hInverse);}
+    state[at+16u]=bitcast<u32>(select(raw,0.0,refreshed));state[at+17u]=bitcast<u32>(discarded);}`:""}
    var speed=0.0;for(var k=0u;k<6u;k++){speed=max(speed,rhSpeed(regionVelocity[6u*region+k]));}
    // The detail trigger's excess over its budget (1: at the budget).
    var detail=2.0;
-   // Detail the cheap transport tiers do not certify: the velocity span
-   // (umSurfaceTransport's velocityError against its error budget) or a
-   // step's travel beyond half a cell.
+   // Detail the cheap transport tiers do not certify: the tile defect (error
+   // mode) or the velocity span (umSurfaceTransport's velocityError against
+   // its error budget) and, in motion mode, a step's travel.
    {var span=0.0;
     for(var axis=0u;axis<3u;axis++){let hi=regionVelocity[6u*region+axis];let lo=regionVelocity[6u*region+3u+axis];
      if(hi!=0u&&lo!=0u&&hi!=0xffffffffu&&lo!=0xffffffffu){span+=max(0.0,rhSigned(hi)+rhSigned(lo));}}
@@ -335,7 +352,15 @@ var<workgroup> rhFine:atomic<u32>;
     // No certificate yet (the first frame, a recycled tile): HOT while it
     // stands and its holds, but no heat. Heat retires measured detail; an
     // absent measurement seeded 0.5 s of HOT/WARM in a pool at rest.
-    if(!(error<RH_UNKNOWN)){trigger|=32u;}else{detail=max(rh.dt*error*rh.hInverse/${UNIFORM_TILE_UPDATE_BUDGET_H},0.5*rh.dt*speed*rh.hInverse);if(detail>1.0){trigger|=2048u;}}`:"if(0.5*rh.dt*span*rh.hInverse>4.0*RH_SPAN_H||rh.dt*speed*rh.hInverse>2.0){trigger|=2048u;}"):""}}
+    // Detail is the tile defect alone: the velocity's departure from its
+    // trilinear (affine) reconstruction, Sato et al. 2018's high-pass q (Eq.
+    // 3), which "does not respond to translational movements; e.g., free
+    // falling liquids". Speed is not detail: a fast uniform region needs the
+    // interface transport WARM already runs (its surface omission thaws it)
+    // and full momentum, which WARM's affine tier takes itself once
+    // dt (|u| + r) > 1.5 h. HOT for travel beyond 2 cells bought only 0.5 s
+    // of heat, a halo and flicker as the block's regions sped up.
+    if(!(error<RH_UNKNOWN)){trigger|=32u;}else{detail=rh.dt*error*rh.hInverse/${UNIFORM_TILE_UPDATE_BUDGET_H};if(detail>1.0){trigger|=2048u;}}`:"if(0.5*rh.dt*span*rh.hInverse>4.0*RH_SPAN_H||rh.dt*speed*rh.hInverse>2.0){trigger|=2048u;}"):""}}
    var dp=bitcast<f32>(dynamics[${UNIFORM_REGION_DYNAMICS_WORDS}u*region+${UNIFORM_REGION_DYNAMICS.pressureDelta}u]);
    // After a one-frame trigger the pressure change has no baseline.
    if((state[at+7u]&RH_ONE_FRAME)!=0u){dp=0.0;}
@@ -350,14 +375,20 @@ var<workgroup> rhFine:atomic<u32>;
      // change, not distance travelled tangentially or through deep water.
      let surface= rh.dt*normal*rh.hInverse;
      let momentum=rh.dt*sqrt(max(0.0,2.0*acceleration*displacement*rh.hInverse))+rh.dt*rh.dt*acceleration*rh.hInverse;
-     let pressure=rh.pressure*dp;let frozen=rh.dt*rhFrozenErrorSpeed(submerged,rhColdSpeed(region),umColdError(region))*rh.hInverse;
+     let pressure=rh.pressure*dp;let frozen=rh.dt*rhFrozenErrorSpeed(submerged,rhColdSpeed(region),discarded)*rh.hInverse;
      state[at+9u]=bitcast<u32>(surface);state[at+10u]=bitcast<u32>(momentum);state[at+11u]=bitcast<u32>(pressure);state[at+12u]=bitcast<u32>(frozen);
-     displacement+=surface+momentum+pressure+frozen;
+     // A step omits only what exceeds the projection's own per-step error:
+     // a residual divergence r moves a surface cell's interface r dt h a
+     // step, the live solve's resolution. Below it the omission is the
+     // solve's noise (a still pool's 6e-5 m/s), which never stops, so it
+     // otherwise thaws every pool at rest once it sums to the budget.
+     let floor=rh.residual*rh.dt;
+     displacement+=max(0.0,surface+momentum+pressure+frozen-floor);
      // Hysteresis: a refreshed region refreezes only when its omission
      // would stay within budget for the heat's retirement horizon (N
      // frames; the momentum term grows as N^2/2 from rest). Otherwise a
      // smooth wave thaws, refreshes, refreezes and thaws every few frames.
-     if(refreshed){let n=rh.horizon;projected=n*(surface+pressure+frozen)+0.5*n*n*momentum;}
+     if(refreshed){let n=rh.horizon;projected=n*max(0.0,surface+pressure+frozen-floor)+0.5*n*n*momentum;}
     }`:"displacement+=rh.dt*(speed+rhColdSpeed(region))*rh.hInverse+rh.pressure*dp;"}
     if(max(displacement,projected)>${error?"rhFreezeBudget(submerged,fine)":"0.002"}){trigger|=64u;}
    }
@@ -423,11 +454,13 @@ var<workgroup> rhFine:atomic<u32>;
   }
   private hInverse=0;
   /** The frame head's tiers, before any stage that reads them. dt: this
-   * frame's step; density: the liquid's, kg/m^3. */
-  encode(encoder:GPUCommandEncoder,dt:number,density:number):void{
+   * frame's step; density: the liquid's, kg/m^3; residual: the fine
+   * pressure's stopping divergence, s^-1 (the band's), the freeze's noise
+   * floor (r h of discarded velocity a projection, r dt h of omission a step). */
+  encode(encoder:GPUCommandEncoder,dt:number,density:number,residual:number):void{
     if(!this.heatPipeline||!this.spreadPipeline||!this.group)throw new Error("Region heat is not initialized");
     const generation=this.generation();const force=this.forced||generation!==this.seenGeneration;this.forced=false;this.seenGeneration=generation;
-    const w=this.words;w[0]=dt;w[1]=2/UNIFORM_REGION_HEAT_FADE_SECONDS;w[2]=dt*dt*this.hInverse*this.hInverse/Math.max(density,1e-30);w[3]=this.hInverse;this.bits[4]=+force;w[5]=UNIFORM_REGION_HEAT_FADE_SECONDS/Math.max(dt,1e-30);
+    const w=this.words;w[0]=dt;w[1]=2/UNIFORM_REGION_HEAT_FADE_SECONDS;w[2]=dt*dt*this.hInverse*this.hInverse/Math.max(density,1e-30);w[3]=this.hInverse;this.bits[4]=+force;w[5]=UNIFORM_REGION_HEAT_FADE_SECONDS/Math.max(dt,1e-30);w[6]=residual;
     this.device.queue.writeBuffer(this.params,0,this.words);
     encoder.clearBuffer(this.tiers,4*this.regions,4*UNIFORM_REGION_HEAT_HEADER_WORDS);
     encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);

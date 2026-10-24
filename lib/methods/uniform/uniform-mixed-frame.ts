@@ -964,7 +964,7 @@ export class UniformMixedFrame {
    // the swept-body region mask (UniformMixedSolid.bodyRegions) here.
    const solidBuild=!!this.solid?.recordStale;this.solid?.encodeCoarse(encoder,this.ownership.presentation);if(solidBuild)this.tileContext.encodeBuild(encoder);
    // Where this frame's non-pressure work goes: after the swept-body mask, before every stage that reads the tiers.
-   this.heat.encode(encoder,dt,p.density);
+   this.heat.encode(encoder,dt,p.density,this.words.band[8]!);
    // The freeze follows the final tiers: a relayout head's after its promotions (encodeRelayoutHead).
    if(!relayout)this.freeze?.encodeHead(encoder,dt,gravity,this.frozenQuiet);
    // A host layout: a live solid edit, or the cells bodies entered, lands on
