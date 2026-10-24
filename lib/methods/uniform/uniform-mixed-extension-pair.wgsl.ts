@@ -294,7 +294,8 @@ fn publicationReplay(face:UMFace,staged:bool)->f32{
  let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
  for(var k=0u;k<8u;k++){
   if((selected&(1u<<k))==0u){continue;}
-  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));let weight=w.x*w.y*w.z;
+  // umFarValue's weight: a zero factor (its second pass) floored to 2^-10.
+  let bit=vec3i(umCorner(k,2u));let w=max(select(vec3f(1)-fraction,fraction,bit==vec3i(1)),vec3f(0.0009765625));let weight=w.x*w.y*w.z;
   let p=base+bit;
   var value:f32;if(staged){value=farState[umFarSlot(p)][face.axis];}else{value=publicationLoad(p)[face.axis];}
   sum+=weight*value;total+=weight;

@@ -49,17 +49,24 @@ export function uniformExtensionFarValueWGSL(name:string):string{
  return /* wgsl */`// A face no sweep reached. A 4h cell's value sits at its tile's +face centre:
 // the face takes the trilinear combination of the cells around its own
 // centre, over the taps that are known and renormalised by their weight, so
-// it stays between the least and the greatest of them. Zero with none.
+// it stays between the least and the greatest of them. A face on a cell
+// plane (a tile's -face sits at the cell below's +face centre) has taps of
+// zero weight across that plane: only where no tap of positive weight is
+// known does a second pass take those, weighted by their tangential
+// fractions (each zero factor floored to 2^-10, below every positive one, so
+// a positive weight is unchanged). A trailing tile's -face then takes the
+// tile above's known value rather than zero. Zero with none.
 fn ${name}(face:UMFace)->f32{
  let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
  let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
- for(var k=0u;k<8u;k++){
-  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));let weight=w.x*w.y*w.z;if(weight<=0.0){continue;}
+ for(var farPass=0u;farPass<2u&&total<=0.0;farPass++){for(var k=0u;k<8u;k++){
+  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if((w.x*w.y*w.z>0.0)!=(farPass==0u)){continue;}
+  let floored=max(w,vec3f(0.0009765625));let weight=floored.x*floored.y*floored.z;
   let texel=umTileStoreTexel(base+bit);if(texel.x<0){continue;}
   let state=textureLoad(coarse,texel,0);
   if((u32(round(state.w))&(1u<<face.axis))==0u){continue;}
   sum+=weight*state[face.axis];total+=weight;
- }
+ }}
  return select(0.0,sum/total,total>0.0);
 }
 `;
@@ -1259,8 +1266,12 @@ var<workgroup> rbFlags:array<u32,192>;
   // tile with unit patches (that tile is h): loaded once for the anchors.
   let word=umTopology[tile];let coarse=(word&0x80000000u)==0u;var patchWidth=1u;var upper=0u;
   if(coarse){patchWidth=umFace(umOwnerAt(origin),component,1,0u).width;if(patchWidth==1u){var above=gid;above[component]+=1u;upper=umTopology[umTileAt(above)];}}`}
-  // Restrict real MAC patches, with the native vertical footprint fallback.
-  for(var fallback=0u;fallback<select(1u,2u,component==1u&&!coarse);fallback++){
+  // Restrict real MAC patches. An h tile whose +face plane no sweep reached
+  // falls back to its nearest reached face anywhere in the tile, on every
+  // axis (native Uniform does so on y alone): its far value then reaches the
+  // +plane, which a remap to 4h averages into the coarse owner's face. On y
+  // alone, a body moving along x left a coarsened owner's leading face zero.
+  for(var fallback=0u;fallback<select(1u,2u,!coarse);fallback++){
    if(count>0.0){break;}
    // Preserve z/y/x order among the 16 face-plane anchors.
    for(var k=0u;k<select(select(16u,64u,fallback!=0u),1u,patchWidth==4u);k++){
@@ -1298,15 +1309,16 @@ var<workgroup> farState:array<vec4f,27>;
 // that is not stored stages as unknown.
 var<workgroup> farKnown:array<u32,27>;
 fn umFarSlot(p:vec3i)->u32{let local=vec3u(p-vec3i(umTileCoord(farTile))+vec3i(1));return local.x+3u*(local.y+3u*local.z);}
-// umFarValue over the staged cells: the same taps, weights and order.
+// umFarValue over the staged cells: the same taps, weights, passes and order.
 fn umFarValueStaged(face:UMFace)->f32{
  let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
  let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
- for(var k=0u;k<8u;k++){
-  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));let weight=w.x*w.y*w.z;if(weight<=0.0){continue;}
+ for(var farPass=0u;farPass<2u&&total<=0.0;farPass++){for(var k=0u;k<8u;k++){
+  let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if((w.x*w.y*w.z>0.0)!=(farPass==0u)){continue;}
+  let floored=max(w,vec3f(0.0009765625));let weight=floored.x*floored.y*floored.z;
   let slot=umFarSlot(base+bit);if((farKnown[slot]&(1u<<face.axis))==0u){continue;}
   sum+=weight*farState[slot][face.axis];total+=weight;
- }
+ }}
  return select(0.0,sum/total,total>0.0);
 }
 // The components some face of the tile needs a far value for: gathered from

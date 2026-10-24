@@ -219,15 +219,18 @@ export function uniformExtrapolationRun(pool: UniformExtrapolationPool, root: Un
 /** umFarValue: the far value at a face centre `point` (cells) of component
  * `axis`, from the filled 4h level: the trilinear combination of the known
  * cells around it. A tap in a page that is not stored, and an unknown cell,
- * take no part. */
+ * take no part. Where no tap of positive weight is known, a second pass
+ * takes the zero-weight taps across the cell plane the face lies on, each
+ * zero factor floored to 2^-10. */
 export function uniformExtrapolationFarValue(pool: UniformExtrapolationPool, root: UniformExtrapolationLevel, point: Vec3, axis: number): number {
   const base = [0, 0, 0], fraction = [0, 0, 0], w = UNIFORM_PAGE_WINDOW - 1;
   for (let a = 0; a < 3; a++) { let q = f(f(f(point[a]!) / 4) - 0.5); if (a === axis) q = f(q - 0.5); base[a] = Math.floor(q); fraction[a] = f(q - Math.floor(q)); }
   let sum = 0, total = 0;
-  for (let k = 0; k < 8; k++) {
+  for (let pass = 0; pass < 2 && total <= 0; pass++) for (let k = 0; k < 8; k++) {
     const bit = [k & 1, (k >> 1) & 1, k >> 2], side = bit.map((on, a) => (on ? fraction[a]! : f(1 - fraction[a]!)));
-    const weight = f(f(side[0]! * side[1]!) * side[2]!);
-    if (weight <= 0) continue;
+    if ((f(f(side[0]! * side[1]!) * side[2]!) > 0) !== (pass === 0)) continue;
+    const floored = side.map(value => Math.max(value, 2 ** -10));
+    const weight = f(f(floored[0]! * floored[1]!) * floored[2]!);
     const t = [base[0]! + bit[0]!, base[1]! + bit[1]!, base[2]! + bit[2]!];
     const b = pool.table[((t[0]! >> 3) & w) | (((t[1]! >> 3) & w) << 6) | (((t[2]! >> 3) & w) << 12)]!;
     if (!stored(pool, b)) continue;
