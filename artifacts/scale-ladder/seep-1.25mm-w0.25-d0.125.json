@@ -1,0 +1,197 @@
+{
+ "date": "2026-10-24T17:58:01.164Z",
+ "tag": "seep-1.25mm-w0.25-d0.125",
+ "cell_m": 0.00125,
+ "widthScale": 0.25,
+ "depthScale": 0.125,
+ "lattice": [
+  512,
+  1024,
+  32
+ ],
+ "boxCells": 16777216,
+ "boxPages": [
+  16,
+  32,
+  1
+ ],
+ "poolBlocks": 360,
+ "dt": 0.016666666666666666,
+ "values": {},
+ "limits": {
+  "maxBufferSize": 4294967295,
+  "maxStorageBufferBindingSize": 4294967295,
+  "maxTextureDimension2D": 16384,
+  "maxTextureDimension3D": 2048
+ },
+ "construction_ms": 1243446,
+ "stepsRun": 3,
+ "failure": {
+  "phase": "step 3",
+  "message": "Uniform mixed frame 3: Departure travel gives a closure of 40 tiles, over the cap of 32 (commit 4, page (1, 3, 0)): a sample is moving faster than the residency certificate covers.: Departure travel gives a closure of 40 tiles, over the cap of 32 (commit 4, page (1, 3, 0)): a sample is moving faster than the residency certificate covers.",
+  "where": "lib/methods/uniform/uniform-mixed-frame.ts:1305",
+  "numbers": [
+   3,
+   40,
+   32,
+   4,
+   1,
+   3,
+   0,
+   40,
+   32,
+   4,
+   1,
+   3,
+   0
+  ]
+ },
+ "gpuErrors": [],
+ "liveMiB": 5548.7,
+ "peakMiB": 5559.6,
+ "perBlockMiB": 15.4,
+ "byClassMiB": {
+  "h detail fields": 1804.4,
+  "particles": 1550.7,
+  "ownership/layout": 1197.7,
+  "pressure": 893.2,
+  "other": 87.1,
+  "scratch": 10.5,
+  "page pool": 5
+ },
+ "topResourcesMiB": [
+  [
+   "Uniform pressure arena pool",
+   1,
+   746.2
+  ],
+  [
+   "Uniform mixed stage scratch",
+   1,
+   703.3
+  ],
+  [
+   "Narrow-band FLIP particles A",
+   1,
+   540
+  ],
+  [
+   "Narrow-band FLIP particles B",
+   1,
+   540
+  ],
+  [
+   "Narrow-band FLIP cell counts, surface metrics and persistent regional crossing masks",
+   1,
+   428.9
+  ],
+  [
+   "Narrow-band FLIP cell starts, compact neighbor samples and surface brick arena windows",
+   1,
+   424.1
+  ],
+  [
+   "Uniform mixed all-4h solid record",
+   1,
+   241.2
+  ],
+  [
+   "Uniform mixed unit velocity taps halo",
+   1,
+   240.8
+  ],
+  [
+   "Uniform reference velocity A",
+   2,
+   195.5
+  ],
+  [
+   "Uniform reference velocity B",
+   2,
+   195.5
+  ],
+  [
+   "Uniform reference velocity D",
+   2,
+   195.5
+  ],
+  [
+   "Uniform mixed unit velocity taps",
+   2,
+   195.5
+  ],
+  [
+   "Uniform mixed extension held values",
+   1,
+   175.8
+  ],
+  [
+   "Uniform Geometric vertex phi scratch",
+   2,
+   51.5
+  ],
+  [
+   "Uniform presented pressure phi and stage grids",
+   1,
+   51.1
+  ],
+  [
+   "Uniform Geometric vertex phi",
+   1,
+   50.4
+  ]
+ ],
+ "medianStep_ms": 429.88,
+ "last": {
+  "step": 3,
+  "wall_ms": 429.88,
+  "hTiles": 325,
+  "resident": 147,
+  "free": 122,
+  "particles": 0,
+  "regionsColdWarmHot": []
+ },
+ "rows": [
+  {
+   "step": 1,
+   "wall_ms": 3503.21,
+   "hTiles": 120,
+   "resident": 208,
+   "free": 98,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    2080
+   ],
+   "maxSpeed_m_s": 6.539150238037109,
+   "maxSpeed_hPerStep": 87.19,
+   "drift": -0.0005586393275304921
+  },
+  {
+   "step": 2,
+   "wall_ms": 78.77,
+   "hTiles": 170,
+   "resident": 236,
+   "free": 122,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    1664
+   ],
+   "maxSpeed_m_s": 12.186237335205078,
+   "maxSpeed_hPerStep": 162.48,
+   "drift": -0.0018215541532587576
+  },
+  {
+   "step": 3,
+   "wall_ms": 429.88,
+   "hTiles": 325,
+   "resident": 147,
+   "free": 122,
+   "particles": 0,
+   "regionsColdWarmHot": []
+  }
+ ]
+}

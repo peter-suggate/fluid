@@ -3,7 +3,7 @@ import { uniformVelocityWallCacheWGSL } from "./uniform-velocity-wall-cache.wgsl
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailStorage, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
-import { uniformCoarseCacheExtent, uniformCoarseCacheGroups, uniformCoarseCacheWGSL } from "./uniform-coarse-velocity-cache";
+import { uniformCoarseCacheExtent, uniformCoarseCacheWGSL } from "./uniform-coarse-velocity-cache";
 import { uniformCompiledVelocityTapWGSL } from "./uniform-compiled-velocity-taps.wgsl";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyNeighboursWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -39,9 +39,9 @@ export class UniformMixedMomentumCache {
   private readonly slotResources?:GPUBindGroupLayout;
   private readonly slotGroups=new WeakSet<UniformDetailGroup>();
   private readonly resources:GPUBindGroupLayout;
-  /** Workgroups of the cache launch: a lane a texel of the block grid's
-   * texture, whatever its blocks hold. */
-  private readonly groups:readonly [number,number,number];
+  /** Workgroups of the cache launch: a fixed grid striding the held blocks'
+   * texels, 8 workgroups (5³ lanes) a block. */
+  private readonly groups:number;
   private readonly wallLayout?:GPUBindGroupLayout;
   private readonly wallGroup?:GPUBindGroup;
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
@@ -49,7 +49,7 @@ export class UniformMixedMomentumCache {
       this.wallLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
       this.wallGroup=device.createBindGroup({layout:this.wallLayout,entries:[{binding:0,resource:{buffer:solid.coarse.record}}]});
     }
-    this.groups=uniformCoarseCacheGroups(ownership.capacity.address);
+    this.groups=Math.min(UNIFORM_LIVE_GROUP_GROUPS,8*ownership.capacity.address.blocks);
     const entries:GPUBindGroupLayoutEntry[]=[
       {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
@@ -73,7 +73,7 @@ export class UniformMixedMomentumCache {
   initialize():Promise<void>{return this.initialization??=this.compile();}
   private async compile():Promise<void>{
    for(const slots of this.slotResources?[false,true]:[false]){
-    const module=uniformDetailModule(this.device,{label:"Uniform mixed momentum cache",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformMixedTopologyNeighboursWGSL()+/* wgsl */`
+    const module=uniformDetailModule(this.device,{label:"Uniform mixed momentum cache",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformMixedTopologyNeighboursWGSL()+uniformStageListsWGSL+/* wgsl */`
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read> negative:array<f32>;
 @group(1) @binding(2) var coarseExtended:texture_storage_3d<rgba32float,write>;
@@ -101,11 +101,17 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
 // page, the page's edge tile's where a wall holds the tap (umTileNearFromPage)
 // and, below the page along the face's own axis, always the tile's own: the
 // low face of the page's first tile. A face with no stored cell on either
-// side is zero.
-@compute @workgroup_size(5,5,5) fn cache(@builtin(global_invocation_id) gid:vec3u){
+// side is zero. A fixed grid strides the held blocks (umHeldBlock), a
+// workgroup a 5³ octant of a block's 10³ texels; a free block's texels are
+// never written.
+@compute @workgroup_size(5,5,5) fn cache(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_id) local:vec3u){
  ${slots?"if(umSlotGate.x==0u){return;}":""}
- let cell=gid/10u;if(any(cell>=UM_BLOCK_GRID)){return;}
- let b=cell.x|(cell.y<<UM_BLOCK_BITS)|(cell.z<<(2u*UM_BLOCK_BITS));
+ for(var visit=group.x;visit<8u*umHeldBlockCount();visit+=groups.x){
+  let b=umHeldBlock(visit>>3u);let o=visit&7u;
+  cacheTexel(b,10u*vec3u(umBlockCoord(b))+5u*vec3u(o&1u,(o>>1u)&1u,o>>2u)+local);
+ }
+}
+fn cacheTexel(b:u32,gid:vec3u){
  if(!umBlockStored(b)||umBlockWord(b)==UM_FREE){return;}
  let page=vec3i(umBlockPage(b));let low=page<<vec3u(3u);let tile=low+vec3i(gid%10u)-vec3i(1);
  let near=umTileNearFromPage(b,page,tile);
@@ -147,7 +153,7 @@ fn umCacheExtended(anchor:vec3i,axis:u32)->f32 {
     if(!this.pipeline)throw new Error("Mixed momentum cache is not initialized");
     const pass=shared??encoder.beginComputePass(CACHE_PASS),g=this.groups;pass.setPipeline(uniformDetailPick(this.slotGroups.has(group)?this.slotPipeline!:this.pipeline));pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);
     if(this.wallGroup)pass.setBindGroup(2,this.wallGroup);
-    pass.dispatchWorkgroups(g[0],g[1],g[2]);if(!shared)pass.end();
+    pass.dispatchWorkgroups(g);if(!shared)pass.end();
   }
 }
 

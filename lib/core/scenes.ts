@@ -1471,7 +1471,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: RESERVOIR_SEEP_ID,
     name: "Deep reservoir · tiny seep",
-    blurb: "Deep water on the left, an empty catch chamber on the right. A dividing wall has a 5 mm (h) throat with rounded mouths. Hydrostatic pressure drives the seep through a 512×256×64 lattice (8.4 million finest cells). Detail follows the jet while quiet water can coarsen; the page pool reserves at least 25% growth space. Press Play to start.",
+    blurb: "Deep water on the left, an empty catch chamber on the right. A dividing wall has a straight square throat two finest cells (10 mm) across. Hydrostatic pressure drives the seep through a 512×256×64 lattice (8.4 million finest cells). Detail follows the jet while quiet water can coarsen; the page pool reserves at least 25% growth space. Press Play to start.",
     audience: "explore", shelf: "Tanks", environment: "stage",
     build: () => createReservoirSeepScene(),
     buildAt: lattice => createReservoirSeepScene(lattice.cellSize_m),

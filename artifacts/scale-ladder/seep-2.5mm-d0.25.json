@@ -1,0 +1,277 @@
+{
+ "date": "2026-10-24T17:17:56.974Z",
+ "tag": "seep-2.5mm-d0.25",
+ "cell_m": 0.0025,
+ "widthScale": 1,
+ "depthScale": 0.25,
+ "lattice": [
+  1024,
+  512,
+  32
+ ],
+ "boxCells": 16777216,
+ "boxPages": [
+  32,
+  16,
+  1
+ ],
+ "poolBlocks": 362,
+ "dt": 0.016666666666666666,
+ "values": {},
+ "limits": {
+  "maxBufferSize": 4294967295,
+  "maxStorageBufferBindingSize": 4294967295,
+  "maxTextureDimension2D": 16384,
+  "maxTextureDimension3D": 2048
+ },
+ "construction_ms": 409231,
+ "stepsRun": 8,
+ "failure": {
+  "phase": "step 8",
+  "message": "Uniform mixed frame 8: Departure travel gives a closure of 35 tiles, over the cap of 32 (commit 9, page (15, 6, 0)): a sample is moving faster than the residency certificate covers.: Departure travel gives a closure of 35 tiles, over the cap of 32 (commit 9, page (15, 6, 0)): a sample is moving faster than the residency certificate covers.",
+  "where": "lib/methods/uniform/uniform-mixed-frame.ts:1305",
+  "numbers": [
+   8,
+   35,
+   32,
+   9,
+   15,
+   6,
+   0,
+   35,
+   32,
+   9,
+   15,
+   6,
+   0
+  ]
+ },
+ "gpuErrors": [],
+ "liveMiB": 5574.2,
+ "peakMiB": 5585.2,
+ "perBlockMiB": 15.4,
+ "byClassMiB": {
+  "h detail fields": 1807.2,
+  "particles": 1559.3,
+  "ownership/layout": 1204.5,
+  "pressure": 898.2,
+  "other": 89.5,
+  "scratch": 10.6,
+  "page pool": 5
+ },
+ "topResourcesMiB": [
+  [
+   "Uniform pressure arena pool",
+   1,
+   750.4
+  ],
+  [
+   "Uniform mixed stage scratch",
+   1,
+   707.2
+  ],
+  [
+   "Narrow-band FLIP particles A",
+   1,
+   543
+  ],
+  [
+   "Narrow-band FLIP particles B",
+   1,
+   543
+  ],
+  [
+   "Narrow-band FLIP cell counts, surface metrics and persistent regional crossing masks",
+   1,
+   431.3
+  ],
+  [
+   "Narrow-band FLIP cell starts, compact neighbor samples and surface brick arena windows",
+   1,
+   426.4
+  ],
+  [
+   "Uniform mixed all-4h solid record",
+   1,
+   242.6
+  ],
+  [
+   "Uniform mixed unit velocity taps halo",
+   1,
+   240.8
+  ],
+  [
+   "Uniform reference velocity A",
+   2,
+   195.5
+  ],
+  [
+   "Uniform reference velocity B",
+   2,
+   195.5
+  ],
+  [
+   "Uniform reference velocity D",
+   2,
+   195.5
+  ],
+  [
+   "Uniform mixed unit velocity taps",
+   2,
+   195.5
+  ],
+  [
+   "Uniform mixed extension held values",
+   1,
+   176.8
+  ],
+  [
+   "Uniform Geometric vertex phi scratch",
+   2,
+   51.5
+  ],
+  [
+   "Uniform presented pressure phi and stage grids",
+   1,
+   51.4
+  ],
+  [
+   "Uniform Geometric vertex phi",
+   1,
+   50.4
+  ]
+ ],
+ "medianStep_ms": 51.9,
+ "last": {
+  "step": 8,
+  "wall_ms": 73.12,
+  "hTiles": 1140,
+  "resident": 226,
+  "free": 72,
+  "particles": 322,
+  "regionsColdWarmHot": []
+ },
+ "rows": [
+  {
+   "step": 1,
+   "wall_ms": 912.22,
+   "hTiles": 92,
+   "resident": 214,
+   "free": 108,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    2016
+   ],
+   "maxSpeed_m_s": 4.139520168304443,
+   "maxSpeed_hPerStep": 27.6,
+   "drift": -0.00002075516647776457
+  },
+  {
+   "step": 2,
+   "wall_ms": 41.67,
+   "hTiles": 168,
+   "resident": 219,
+   "free": 141,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    1712
+   ],
+   "maxSpeed_m_s": 6.9575982093811035,
+   "maxSpeed_hPerStep": 46.38,
+   "drift": -0.00004331513004055215
+  },
+  {
+   "step": 3,
+   "wall_ms": 53.95,
+   "hTiles": 120,
+   "resident": 228,
+   "free": 132,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    1752
+   ],
+   "maxSpeed_m_s": 9.77515983581543,
+   "maxSpeed_hPerStep": 65.17,
+   "drift": -0.00004889359375789599
+  },
+  {
+   "step": 4,
+   "wall_ms": 43.2,
+   "hTiles": 179,
+   "resident": 232,
+   "free": 128,
+   "particles": 256,
+   "regionsColdWarmHot": [
+    1523,
+    132,
+    169
+   ],
+   "maxSpeed_m_s": 12.50003719329834,
+   "maxSpeed_hPerStep": 83.33,
+   "drift": -0.000048729521295621165
+  },
+  {
+   "step": 5,
+   "wall_ms": 39.18,
+   "hTiles": 424,
+   "resident": 245,
+   "free": 114,
+   "particles": 276,
+   "regionsColdWarmHot": [
+    1513,
+    134,
+    209
+   ],
+   "maxSpeed_m_s": 15.520246505737305,
+   "maxSpeed_hPerStep": 103.47,
+   "drift": -0.00003281449245496375
+  },
+  {
+   "step": 6,
+   "wall_ms": 51.9,
+   "hTiles": 446,
+   "resident": 259,
+   "free": 101,
+   "particles": 312,
+   "regionsColdWarmHot": [
+    1541,
+    140,
+    279
+   ],
+   "maxSpeed_m_s": 18.388227462768555,
+   "maxSpeed_hPerStep": 122.59,
+   "drift": -0.000030353405520841467
+  },
+  {
+   "step": 7,
+   "wall_ms": 60.57,
+   "hTiles": 696,
+   "resident": 288,
+   "free": 72,
+   "particles": 322,
+   "regionsColdWarmHot": [
+    1591,
+    150,
+    331
+   ],
+   "maxSpeed_m_s": 21.1841983795166,
+   "maxSpeed_hPerStep": 141.23,
+   "drift": -0.00003002526059629183
+  },
+  {
+   "step": 8,
+   "wall_ms": 73.12,
+   "hTiles": 1140,
+   "resident": 226,
+   "free": 72,
+   "particles": 322,
+   "regionsColdWarmHot": []
+  }
+ ]
+}

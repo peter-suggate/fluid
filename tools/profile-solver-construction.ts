@@ -1,7 +1,7 @@
 /** Where an NB-FLIP solver's construction goes, and what it computes after.
  *
  * WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/profile-solver-construction.ts
- *   [--scene=reservoir-seep] [--cell=0.005] [--steps=3] [--report=<path.json>]
+ *   [--scene=reservoir-seep] [--cell=0.005] [--steps=3] [--report=<path.json>] [--dump=<dir>]
  *
  * Every native compilation call on the raw device is timed: createShaderModule
  * (WGSL parse and validation; generation is the caller's), and each
@@ -13,10 +13,13 @@
  * pressure and phi fields are hashed: equal hashes between two builds mean
  * the same simulation output. Every host upload (queue.writeBuffer and
  * writeTexture) during construction is hashed too, in order and by label:
- * the gate of a host-side change that must build the same fields. */
+ * the gate of a host-side change that must build the same fields. --dump
+ * writes each module's WGSL (<dir>/<sha>.wgsl) and every compute pipeline's
+ * module, entry point and override constants (<dir>/pipelines.json): what
+ * tools/probe-pipeline-compile.ts compiles alone. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
@@ -32,7 +35,7 @@ import { readUniformFields } from "../tests/helpers/uniform-geometric";
 
 const options = process.argv.slice(2);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
-for (const a of options) assert.ok(/^--(?:scene|cell|steps|report)=.+$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^--(?:scene|cell|steps|report|dump)=.+$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep", steps = Number(option("steps") ?? 3);
 const cell = option("cell") === undefined ? undefined : Number(option("cell"));
 assert.ok(Number.isInteger(steps) && steps >= 0);
@@ -57,18 +60,24 @@ interface Pipeline { kind: "compute" | "render"; label?: string; module?: string
 const modules: Module[] = [], pipelines: Pipeline[] = [];
 const moduleLabel = new WeakMap<GPUShaderModule, string>();
 const shader = raw.createShaderModule.bind(raw), computeAsync = raw.createComputePipelineAsync.bind(raw), renderAsync = raw.createRenderPipelineAsync.bind(raw);
+const dump = option("dump"), moduleSha = new WeakMap<GPUShaderModule, string>();
+const dumped: { module?: string; sha?: string; entryPoint?: string; constants?: Record<string, number> }[] = [];
+if (dump) mkdirSync(dump, { recursive: true });
 raw.createShaderModule = descriptor => {
   const start = now(), module = shader(descriptor);
-  modules.push({ label: descriptor.label, bytes: descriptor.code.length, sha: createHash("sha256").update(descriptor.code).digest("hex").slice(0, 16), ms: now() - start });
-  moduleLabel.set(module, descriptor.label ?? "");
+  const sha = createHash("sha256").update(descriptor.code).digest("hex").slice(0, 16);
+  modules.push({ label: descriptor.label, bytes: descriptor.code.length, sha, ms: now() - start });
+  moduleLabel.set(module, descriptor.label ?? ""); moduleSha.set(module, sha);
+  if (dump) writeFileSync(resolve(dump, `${sha}.wgsl`), descriptor.code);
   return module;
 };
 const timed = <T>(entry: Omit<Pipeline, "start" | "end">, promise: () => Promise<T>) => {
   const record: Pipeline = { ...entry, start: now(), end: Number.NaN }; pipelines.push(record);
   return promise().finally(() => { record.end = now(); });
 };
-raw.createComputePipelineAsync = descriptor => timed({ kind: "compute", label: descriptor.label, module: moduleLabel.get(descriptor.compute.module), entryPoint: descriptor.compute.entryPoint },
-  () => computeAsync(descriptor));
+raw.createComputePipelineAsync = descriptor => (dump && dumped.push({ module: moduleLabel.get(descriptor.compute.module), sha: moduleSha.get(descriptor.compute.module),
+  entryPoint: descriptor.compute.entryPoint, constants: descriptor.compute.constants as Record<string, number> | undefined }), timed({ kind: "compute", label: descriptor.label, module: moduleLabel.get(descriptor.compute.module), entryPoint: descriptor.compute.entryPoint },
+  () => computeAsync(descriptor)));
 raw.createRenderPipelineAsync = descriptor => timed({ kind: "render", label: descriptor.label, module: moduleLabel.get(descriptor.vertex.module), entryPoint: descriptor.vertex.entryPoint },
   () => renderAsync(descriptor));
 /** Every byte the host uploads while constructing, in queue order: equal
@@ -181,6 +190,7 @@ const step_ms = steps ? (now() - stepStart) / steps : 0;
 if (steps) await sample(steps);
 solver.destroy(); await raw.queue.onSubmittedWorkDone();
 assert.deepEqual(errors, []);
+if (dump) writeFileSync(resolve(dump, "pipelines.json"), JSON.stringify(dumped, null, 1) + "\n");
 if (report) writeFileSync(report, JSON.stringify({ summary, step_ms, hashes, uploads: host, modules, pipelines: pipelineDurations }, null, 2) + "\n");
 console.log(JSON.stringify({ phase: "done", construction_ms: summary.construction_ms, step_ms, total_ms: now() }));
 process.exit(0);

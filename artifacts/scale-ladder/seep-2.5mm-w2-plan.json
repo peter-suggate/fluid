@@ -1,0 +1,59 @@
+{
+ "tag": "seep-2.5mm-w2",
+ "cell_m": 0.0025,
+ "widthScale": 2,
+ "depthScale": 1,
+ "lattice": [
+  2048,
+  512,
+  128
+ ],
+ "boxCells": 134217728,
+ "boxPages": [
+  64,
+  16,
+  4
+ ],
+ "poolBlocks": 2722,
+ "dt": 0.016666666666666666,
+ "values": {},
+ "plan": true,
+ "residentPages": 1904,
+ "checks": [
+  {
+   "check": "page window, per axis",
+   "owner": "W7",
+   "ok": false,
+   "detail": "Uniform lattice 2048x512x128 exceeds 62 pages of 32 cells on an axis"
+  },
+  {
+   "check": "seed residency (host pass over every cell)",
+   "owner": "W1",
+   "ok": true,
+   "detail": "1904 resident pages of 2720 slots, 55202 ms host"
+  },
+  {
+   "check": "lattice address: window y, block grid (<= 3968 blocks)",
+   "owner": "W7",
+   "ok": false,
+   "detail": "Uniform lattice 2048x512x128 exceeds 62 pages of 32 cells on an axis"
+  },
+  {
+   "check": "layout builder, extension hierarchy, region dynamics (<= 8191 blocks, plan section 1.3)",
+   "owner": "W6/W7",
+   "ok": true,
+   "detail": "2722 blocks"
+  },
+  {
+   "check": "memory at today's block cost",
+   "owner": "W6",
+   "ok": false,
+   "detail": "2722 blocks x 16 MiB = 42.5 GiB, past 16 GiB of a 32 GiB machine"
+  }
+ ],
+ "blockers": [
+  "W7: page window, per axis",
+  "W7: lattice address: window y, block grid (<= 3968 blocks)",
+  "W6: memory at today's block cost"
+ ]
+}

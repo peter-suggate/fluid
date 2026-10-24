@@ -813,7 +813,7 @@ ${this.resident?`// A group per page (fixed grid, strided): the 4h owners of an 
  /** The owner launches: resident mode's all-4h ownership has no h jobs, so
   * its jobs are its resident pages (any grid is correct; this prices it). */
  private dispatchOwners(pass:GPUComputePassEncoder,pipeline:GPUComputePipeline):void{
-  if(this.resident)this.ownership.dispatchCounted(pass,pipeline,this.pages);else this.ownership.dispatchAllCounted(pass,pipeline);
+  if(this.resident)this.ownership.dispatchCounted(pass,pipeline,this.pages,"residentAll");else this.ownership.dispatchAllCounted(pass,pipeline);
  }
  /** Coarse mode: the root's topology, from the rows the pass has written
   * and the h vertices (the full group, as cut). */

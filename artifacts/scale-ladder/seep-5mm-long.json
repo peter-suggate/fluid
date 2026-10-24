@@ -1,0 +1,4087 @@
+{
+ "date": "2026-10-24T17:00:36.949Z",
+ "tag": "seep-5mm",
+ "cell_m": 0.005,
+ "widthScale": 1,
+ "depthScale": 1,
+ "lattice": [
+  512,
+  256,
+  64
+ ],
+ "boxCells": 8388608,
+ "boxPages": [
+  16,
+  8,
+  2
+ ],
+ "poolBlocks": 226,
+ "dt": 0.016666666666666666,
+ "values": {},
+ "limits": {
+  "maxBufferSize": 4294967295,
+  "maxStorageBufferBindingSize": 4294967295,
+  "maxTextureDimension2D": 16384,
+  "maxTextureDimension3D": 2048
+ },
+ "construction_ms": 34505,
+ "stepsRun": 240,
+ "gpuErrors": [],
+ "liveMiB": 3533.2,
+ "peakMiB": 3540.5,
+ "perBlockMiB": 15.6,
+ "byClassMiB": {
+  "h detail fields": 1164.8,
+  "particles": 973.5,
+  "ownership/layout": 751.3,
+  "pressure": 560.6,
+  "other": 71.3,
+  "scratch": 6.8,
+  "page pool": 5
+ },
+ "topResourcesMiB": [
+  [
+   "Uniform pressure arena pool",
+   1,
+   468.5
+  ],
+  [
+   "Uniform mixed stage scratch",
+   1,
+   440.1
+  ],
+  [
+   "Narrow-band FLIP particles A",
+   1,
+   339
+  ],
+  [
+   "Narrow-band FLIP particles B",
+   1,
+   339
+  ],
+  [
+   "Narrow-band FLIP cell counts, surface metrics and persistent regional crossing masks",
+   1,
+   269.2
+  ],
+  [
+   "Narrow-band FLIP cell starts, compact neighbor samples and surface brick arena windows",
+   1,
+   266.2
+  ],
+  [
+   "Uniform mixed unit velocity taps halo",
+   1,
+   157
+  ],
+  [
+   "Uniform mixed all-4h solid record",
+   1,
+   151.4
+  ],
+  [
+   "Uniform reference velocity A",
+   2,
+   127.5
+  ],
+  [
+   "Uniform reference velocity B",
+   2,
+   127.5
+  ],
+  [
+   "Uniform reference velocity D",
+   2,
+   127.5
+  ],
+  [
+   "Uniform mixed unit velocity taps",
+   2,
+   127.5
+  ],
+  [
+   "Uniform mixed extension held values",
+   1,
+   110
+  ],
+  [
+   "Uniform Geometric vertex phi scratch",
+   2,
+   33.6
+  ],
+  [
+   "Uniform Geometric vertex phi",
+   1,
+   32.9
+  ],
+  [
+   "Uniform presented pressure phi and stage grids",
+   1,
+   32
+  ]
+ ],
+ "medianStep_ms": 19.59,
+ "last": {
+  "step": 240,
+  "wall_ms": 18.25,
+  "hTiles": 179,
+  "resident": 140,
+  "free": 84,
+  "particles": 2792,
+  "regionsColdWarmHot": [
+   1072,
+   20,
+   28
+  ],
+  "maxSpeed_m_s": 4.106328010559082,
+  "maxSpeed_hPerStep": 13.69,
+  "drift": 0.000010681079908040988,
+  "catchFloorH": 0,
+  "catchChamberH": 179,
+  "presentedH": 179,
+  "origin": [
+   -27,
+   -28,
+   -31
+  ]
+ },
+ "rows": [
+  {
+   "step": 1,
+   "wall_ms": 936.22,
+   "hTiles": 92,
+   "resident": 116,
+   "free": 64,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    1280
+   ],
+   "maxSpeed_m_s": 2.2374470233917236,
+   "maxSpeed_hPerStep": 7.46,
+   "drift": 0.0000011867866564489987
+  },
+  {
+   "step": 2,
+   "wall_ms": 18.32,
+   "hTiles": 96,
+   "resident": 116,
+   "free": 108,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    928
+   ],
+   "maxSpeed_m_s": 3.232241630554199,
+   "maxSpeed_hPerStep": 10.77,
+   "drift": 0.0000033908190184257107
+  },
+  {
+   "step": 3,
+   "wall_ms": 20.18,
+   "hTiles": 93,
+   "resident": 122,
+   "free": 102,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    0,
+    0,
+    928
+   ],
+   "maxSpeed_m_s": 3.676464557647705,
+   "maxSpeed_hPerStep": 12.25,
+   "drift": 0.0000020344914110554265
+  },
+  {
+   "step": 4,
+   "wall_ms": 17.5,
+   "hTiles": 99,
+   "resident": 124,
+   "free": 100,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    864,
+    1,
+    111
+   ],
+   "maxSpeed_m_s": 3.7711005210876465,
+   "maxSpeed_hPerStep": 12.57,
+   "drift": 0.000004323294248492781
+  },
+  {
+   "step": 5,
+   "wall_ms": 16.32,
+   "hTiles": 114,
+   "resident": 128,
+   "free": 96,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    852,
+    5,
+    135
+   ],
+   "maxSpeed_m_s": 3.7817723751068115,
+   "maxSpeed_hPerStep": 12.61,
+   "drift": 0.000008731358972446205
+  },
+  {
+   "step": 6,
+   "wall_ms": 22.23,
+   "hTiles": 134,
+   "resident": 128,
+   "free": 96,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    848,
+    1,
+    175
+   ],
+   "maxSpeed_m_s": 3.7894492149353027,
+   "maxSpeed_hPerStep": 12.63,
+   "drift": 0.000005594851380402423
+  },
+  {
+   "step": 7,
+   "wall_ms": 16.41,
+   "hTiles": 110,
+   "resident": 128,
+   "free": 96,
+   "particles": 0,
+   "regionsColdWarmHot": [
+    915,
+    2,
+    107
+   ],
+   "maxSpeed_m_s": 3.8037145137786865,
+   "maxSpeed_hPerStep": 12.68,
+   "drift": 0.0000022888028374373545
+  },
+  {
+   "step": 8,
+   "wall_ms": 17.74,
+   "hTiles": 128,
+   "resident": 128,
+   "free": 96,
+   "particles": 68,
+   "regionsColdWarmHot": [
+    955,
+    2,
+    67
+   ],
+   "maxSpeed_m_s": 3.8087069988250732,
+   "maxSpeed_hPerStep": 12.7,
+   "drift": 0.00000398421234665021
+  },
+  {
+   "step": 9,
+   "wall_ms": 16.56,
+   "hTiles": 125,
+   "resident": 128,
+   "free": 96,
+   "particles": 79,
+   "regionsColdWarmHot": [
+    1005,
+    8,
+    11
+   ],
+   "maxSpeed_m_s": 3.8050599098205566,
+   "maxSpeed_hPerStep": 12.68,
+   "drift": 0.000007459801840536563
+  },
+  {
+   "step": 10,
+   "wall_ms": 15.66,
+   "hTiles": 134,
+   "resident": 128,
+   "free": 96,
+   "particles": 90,
+   "regionsColdWarmHot": [
+    1000,
+    12,
+    12
+   ],
+   "maxSpeed_m_s": 3.8175950050354004,
+   "maxSpeed_hPerStep": 12.73,
+   "drift": 0.000008137965644221706
+  },
+  {
+   "step": 11,
+   "wall_ms": 16.35,
+   "hTiles": 146,
+   "resident": 132,
+   "free": 92,
+   "particles": 101,
+   "regionsColdWarmHot": [
+    998,
+    13,
+    13
+   ],
+   "maxSpeed_m_s": 3.828233480453491,
+   "maxSpeed_hPerStep": 12.76,
+   "drift": 0.000011867866564489987
+  },
+  {
+   "step": 12,
+   "wall_ms": 22.75,
+   "hTiles": 166,
+   "resident": 132,
+   "free": 92,
+   "particles": 112,
+   "regionsColdWarmHot": [
+    982,
+    13,
+    61
+   ],
+   "maxSpeed_m_s": 3.8395791053771973,
+   "maxSpeed_hPerStep": 12.8,
+   "drift": 0.000017123636043049838
+  },
+  {
+   "step": 13,
+   "wall_ms": 18.28,
+   "hTiles": 182,
+   "resident": 136,
+   "free": 88,
+   "particles": 123,
+   "regionsColdWarmHot": [
+    985,
+    8,
+    63
+   ],
+   "maxSpeed_m_s": 3.852578639984131,
+   "maxSpeed_hPerStep": 12.84,
+   "drift": 0.000021870782668845833
+  },
+  {
+   "step": 14,
+   "wall_ms": 18.29,
+   "hTiles": 211,
+   "resident": 140,
+   "free": 84,
+   "particles": 134,
+   "regionsColdWarmHot": [
+    973,
+    4,
+    111
+   ],
+   "maxSpeed_m_s": 3.862579107284546,
+   "maxSpeed_hPerStep": 12.88,
+   "drift": 0.00002356619217805869
+  },
+  {
+   "step": 15,
+   "wall_ms": 18.26,
+   "hTiles": 222,
+   "resident": 142,
+   "free": 82,
+   "particles": 145,
+   "regionsColdWarmHot": [
+    990,
+    8,
+    122
+   ],
+   "maxSpeed_m_s": 3.8740034103393555,
+   "maxSpeed_hPerStep": 12.91,
+   "drift": 0.000025261601687271544
+  },
+  {
+   "step": 16,
+   "wall_ms": 17.8,
+   "hTiles": 252,
+   "resident": 142,
+   "free": 82,
+   "particles": 156,
+   "regionsColdWarmHot": [
+    989,
+    8,
+    139
+   ],
+   "maxSpeed_m_s": 3.885996103286743,
+   "maxSpeed_hPerStep": 12.95,
+   "drift": 0.000027126552147405685
+  },
+  {
+   "step": 17,
+   "wall_ms": 18.14,
+   "hTiles": 276,
+   "resident": 146,
+   "free": 78,
+   "particles": 167,
+   "regionsColdWarmHot": [
+    1029,
+    14,
+    93
+   ],
+   "maxSpeed_m_s": 3.8983147144317627,
+   "maxSpeed_hPerStep": 12.99,
+   "drift": 0.000028228568328394042
+  },
+  {
+   "step": 18,
+   "wall_ms": 18.03,
+   "hTiles": 288,
+   "resident": 148,
+   "free": 76,
+   "particles": 178,
+   "regionsColdWarmHot": [
+    1051,
+    20,
+    97
+   ],
+   "maxSpeed_m_s": 3.912189483642578,
+   "maxSpeed_hPerStep": 13.04,
+   "drift": 0.00002950012546030368
+  },
+  {
+   "step": 19,
+   "wall_ms": 20.97,
+   "hTiles": 320,
+   "resident": 148,
+   "free": 76,
+   "particles": 189,
+   "regionsColdWarmHot": [
+    1063,
+    24,
+    97
+   ],
+   "maxSpeed_m_s": 3.921584129333496,
+   "maxSpeed_hPerStep": 13.07,
+   "drift": 0.000030263059739449466
+  },
+  {
+   "step": 20,
+   "wall_ms": 23.97,
+   "hTiles": 358,
+   "resident": 152,
+   "free": 72,
+   "particles": 200,
+   "regionsColdWarmHot": [
+    1063,
+    24,
+    97
+   ],
+   "maxSpeed_m_s": 3.9327504634857178,
+   "maxSpeed_hPerStep": 13.11,
+   "drift": 0.00001966675030686912,
+   "catchFloorH": 0,
+   "catchChamberH": 358,
+   "presentedH": 358,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 21,
+   "wall_ms": 19.79,
+   "hTiles": 370,
+   "resident": 152,
+   "free": 72,
+   "particles": 503,
+   "regionsColdWarmHot": [
+    1081,
+    24,
+    111
+   ],
+   "maxSpeed_m_s": 3.9458820819854736,
+   "maxSpeed_hPerStep": 13.15,
+   "drift": 0.000017293176993971124
+  },
+  {
+   "step": 22,
+   "wall_ms": 18.73,
+   "hTiles": 334,
+   "resident": 152,
+   "free": 72,
+   "particles": 514,
+   "regionsColdWarmHot": [
+    1101,
+    30,
+    85
+   ],
+   "maxSpeed_m_s": 3.956691026687622,
+   "maxSpeed_hPerStep": 13.19,
+   "drift": 0.000015512997009297627
+  },
+  {
+   "step": 23,
+   "wall_ms": 19.05,
+   "hTiles": 322,
+   "resident": 154,
+   "free": 70,
+   "particles": 525,
+   "regionsColdWarmHot": [
+    1101,
+    29,
+    86
+   ],
+   "maxSpeed_m_s": 3.9675486087799072,
+   "maxSpeed_hPerStep": 13.23,
+   "drift": 0.000013987128451006056
+  },
+  {
+   "step": 24,
+   "wall_ms": 19.11,
+   "hTiles": 327,
+   "resident": 156,
+   "free": 68,
+   "particles": 536,
+   "regionsColdWarmHot": [
+    1129,
+    40,
+    63
+   ],
+   "maxSpeed_m_s": 3.978041172027588,
+   "maxSpeed_hPerStep": 13.26,
+   "drift": 0.00001102016180988356
+  },
+  {
+   "step": 25,
+   "wall_ms": 18.07,
+   "hTiles": 225,
+   "resident": 156,
+   "free": 68,
+   "particles": 547,
+   "regionsColdWarmHot": [
+    1127,
+    37,
+    84
+   ],
+   "maxSpeed_m_s": 3.989027500152588,
+   "maxSpeed_hPerStep": 13.3,
+   "drift": 0.00001042676848165906
+  },
+  {
+   "step": 26,
+   "wall_ms": 18.17,
+   "hTiles": 222,
+   "resident": 158,
+   "free": 66,
+   "particles": 558,
+   "regionsColdWarmHot": [
+    1129,
+    43,
+    76
+   ],
+   "maxSpeed_m_s": 3.999660015106201,
+   "maxSpeed_hPerStep": 13.33,
+   "drift": 0.000008646588496985562
+  },
+  {
+   "step": 27,
+   "wall_ms": 18.8,
+   "hTiles": 212,
+   "resident": 156,
+   "free": 66,
+   "particles": 569,
+   "regionsColdWarmHot": [
+    1139,
+    40,
+    85
+   ],
+   "maxSpeed_m_s": 4.0093092918396,
+   "maxSpeed_hPerStep": 13.36,
+   "drift": 0.0000062730151840875645
+  },
+  {
+   "step": 28,
+   "wall_ms": 17.5,
+   "hTiles": 214,
+   "resident": 156,
+   "free": 68,
+   "particles": 580,
+   "regionsColdWarmHot": [
+    1158,
+    39,
+    51
+   ],
+   "maxSpeed_m_s": 4.018447399139404,
+   "maxSpeed_hPerStep": 13.39,
+   "drift": 0.00000830750659514299
+  },
+  {
+   "step": 29,
+   "wall_ms": 20.82,
+   "hTiles": 182,
+   "resident": 158,
+   "free": 66,
+   "particles": 591,
+   "regionsColdWarmHot": [
+    1163,
+    34,
+    51
+   ],
+   "maxSpeed_m_s": 4.025263786315918,
+   "maxSpeed_hPerStep": 13.42,
+   "drift": 0.000010087686579816489
+  },
+  {
+   "step": 30,
+   "wall_ms": 17.93,
+   "hTiles": 194,
+   "resident": 158,
+   "free": 66,
+   "particles": 602,
+   "regionsColdWarmHot": [
+    1171,
+    24,
+    69
+   ],
+   "maxSpeed_m_s": 4.0297465324401855,
+   "maxSpeed_hPerStep": 13.43,
+   "drift": 0.000012546030368175129
+  },
+  {
+   "step": 31,
+   "wall_ms": 17.88,
+   "hTiles": 216,
+   "resident": 158,
+   "free": 66,
+   "particles": 613,
+   "regionsColdWarmHot": [
+    1177,
+    18,
+    69
+   ],
+   "maxSpeed_m_s": 4.0332560539245605,
+   "maxSpeed_hPerStep": 13.44,
+   "drift": 0.00001500437415653377
+  },
+  {
+   "step": 32,
+   "wall_ms": 18.11,
+   "hTiles": 230,
+   "resident": 158,
+   "free": 66,
+   "particles": 624,
+   "regionsColdWarmHot": [
+    1173,
+    18,
+    73
+   ],
+   "maxSpeed_m_s": 4.040265083312988,
+   "maxSpeed_hPerStep": 13.47,
+   "drift": 0.000017038865567589197
+  },
+  {
+   "step": 33,
+   "wall_ms": 18.02,
+   "hTiles": 224,
+   "resident": 158,
+   "free": 66,
+   "particles": 635,
+   "regionsColdWarmHot": [
+    1207,
+    24,
+    33
+   ],
+   "maxSpeed_m_s": 4.0439324378967285,
+   "maxSpeed_hPerStep": 13.48,
+   "drift": 0.000019751520782329764
+  },
+  {
+   "step": 34,
+   "wall_ms": 17.77,
+   "hTiles": 263,
+   "resident": 158,
+   "free": 66,
+   "particles": 646,
+   "regionsColdWarmHot": [
+    1207,
+    28,
+    29
+   ],
+   "maxSpeed_m_s": 4.049986362457275,
+   "maxSpeed_hPerStep": 13.5,
+   "drift": 0.000021870782668845833
+  },
+  {
+   "step": 35,
+   "wall_ms": 52.54,
+   "hTiles": 276,
+   "resident": 156,
+   "free": 66,
+   "particles": 657,
+   "regionsColdWarmHot": [
+    1205,
+    28,
+    31
+   ],
+   "maxSpeed_m_s": 4.053195476531982,
+   "maxSpeed_hPerStep": 13.51,
+   "drift": 0.00002543114263819283
+  },
+  {
+   "step": 36,
+   "wall_ms": 38.2,
+   "hTiles": 288,
+   "resident": 156,
+   "free": 68,
+   "particles": 668,
+   "regionsColdWarmHot": [
+    1193,
+    30,
+    25
+   ],
+   "maxSpeed_m_s": 4.058992385864258,
+   "maxSpeed_hPerStep": 13.53,
+   "drift": 0.000027465634049248254
+  },
+  {
+   "step": 37,
+   "wall_ms": 28.95,
+   "hTiles": 348,
+   "resident": 158,
+   "free": 66,
+   "particles": 679,
+   "regionsColdWarmHot": [
+    1189,
+    34,
+    25
+   ],
+   "maxSpeed_m_s": 4.063978672027588,
+   "maxSpeed_hPerStep": 13.55,
+   "drift": 0.000030517371165831396
+  },
+  {
+   "step": 38,
+   "wall_ms": 18.93,
+   "hTiles": 378,
+   "resident": 158,
+   "free": 66,
+   "particles": 690,
+   "regionsColdWarmHot": [
+    1160,
+    37,
+    67
+   ],
+   "maxSpeed_m_s": 4.069094181060791,
+   "maxSpeed_hPerStep": 13.56,
+   "drift": 0.00003475589493886353
+  },
+  {
+   "step": 39,
+   "wall_ms": 18.42,
+   "hTiles": 396,
+   "resident": 158,
+   "free": 66,
+   "particles": 701,
+   "regionsColdWarmHot": [
+    1150,
+    43,
+    71
+   ],
+   "maxSpeed_m_s": 4.105926513671875,
+   "maxSpeed_hPerStep": 13.69,
+   "drift": 0.00003492543588978482
+  },
+  {
+   "step": 40,
+   "wall_ms": 19.31,
+   "hTiles": 442,
+   "resident": 158,
+   "free": 66,
+   "particles": 712,
+   "regionsColdWarmHot": [
+    1150,
+    40,
+    74
+   ],
+   "maxSpeed_m_s": 4.19822359085083,
+   "maxSpeed_hPerStep": 13.99,
+   "drift": 0.00002051445506147555,
+   "catchFloorH": 0,
+   "catchChamberH": 442,
+   "presentedH": 442,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 41,
+   "wall_ms": 25.73,
+   "hTiles": 394,
+   "resident": 156,
+   "free": 66,
+   "particles": 749,
+   "regionsColdWarmHot": [
+    1186,
+    38,
+    40
+   ],
+   "maxSpeed_m_s": 4.215920925140381,
+   "maxSpeed_hPerStep": 14.05,
+   "drift": 0.000012376489417253843
+  },
+  {
+   "step": 42,
+   "wall_ms": 51.62,
+   "hTiles": 384,
+   "resident": 158,
+   "free": 66,
+   "particles": 760,
+   "regionsColdWarmHot": [
+    1171,
+    37,
+    40
+   ],
+   "maxSpeed_m_s": 4.076562881469727,
+   "maxSpeed_hPerStep": 13.59,
+   "drift": 0.000007459801840536563
+  },
+  {
+   "step": 43,
+   "wall_ms": 44.02,
+   "hTiles": 252,
+   "resident": 158,
+   "free": 66,
+   "particles": 771,
+   "regionsColdWarmHot": [
+    1148,
+    38,
+    78
+   ],
+   "maxSpeed_m_s": 4.078770637512207,
+   "maxSpeed_hPerStep": 13.6,
+   "drift": 0.000008816129447906848
+  },
+  {
+   "step": 44,
+   "wall_ms": 81.14,
+   "hTiles": 210,
+   "resident": 158,
+   "free": 66,
+   "particles": 782,
+   "regionsColdWarmHot": [
+    1148,
+    40,
+    76
+   ],
+   "maxSpeed_m_s": 4.079919338226318,
+   "maxSpeed_hPerStep": 13.6,
+   "drift": 0.000008646588496985562
+  },
+  {
+   "step": 45,
+   "wall_ms": 26.17,
+   "hTiles": 157,
+   "resident": 158,
+   "free": 66,
+   "particles": 793,
+   "regionsColdWarmHot": [
+    1148,
+    44,
+    72
+   ],
+   "maxSpeed_m_s": 4.080221176147461,
+   "maxSpeed_hPerStep": 13.6,
+   "drift": 0.00000796842469330042
+  },
+  {
+   "step": 46,
+   "wall_ms": 18.8,
+   "hTiles": 152,
+   "resident": 158,
+   "free": 66,
+   "particles": 804,
+   "regionsColdWarmHot": [
+    1196,
+    48,
+    20
+   ],
+   "maxSpeed_m_s": 4.081687927246094,
+   "maxSpeed_hPerStep": 13.61,
+   "drift": 0.000010172457055277132
+  },
+  {
+   "step": 47,
+   "wall_ms": 19.32,
+   "hTiles": 173,
+   "resident": 158,
+   "free": 66,
+   "particles": 815,
+   "regionsColdWarmHot": [
+    1201,
+    45,
+    18
+   ],
+   "maxSpeed_m_s": 4.081470012664795,
+   "maxSpeed_hPerStep": 13.6,
+   "drift": 0.000011104932285344202
+  },
+  {
+   "step": 48,
+   "wall_ms": 17.09,
+   "hTiles": 172,
+   "resident": 158,
+   "free": 66,
+   "particles": 826,
+   "regionsColdWarmHot": [
+    1215,
+    27,
+    22
+   ],
+   "maxSpeed_m_s": 4.082228660583496,
+   "maxSpeed_hPerStep": 13.61,
+   "drift": 0.0000122917189417932
+  },
+  {
+   "step": 49,
+   "wall_ms": 17.36,
+   "hTiles": 208,
+   "resident": 158,
+   "free": 66,
+   "particles": 837,
+   "regionsColdWarmHot": [
+    1225,
+    13,
+    26
+   ],
+   "maxSpeed_m_s": 4.08149528503418,
+   "maxSpeed_hPerStep": 13.6,
+   "drift": 0.000014919603681073126
+  },
+  {
+   "step": 50,
+   "wall_ms": 17.31,
+   "hTiles": 208,
+   "resident": 158,
+   "free": 66,
+   "particles": 848,
+   "regionsColdWarmHot": [
+    1223,
+    14,
+    27
+   ],
+   "maxSpeed_m_s": 4.08292818069458,
+   "maxSpeed_hPerStep": 13.61,
+   "drift": 0.000016106390337522126
+  },
+  {
+   "step": 51,
+   "wall_ms": 18.82,
+   "hTiles": 217,
+   "resident": 158,
+   "free": 66,
+   "particles": 859,
+   "regionsColdWarmHot": [
+    1223,
+    14,
+    27
+   ],
+   "maxSpeed_m_s": 4.085318088531494,
+   "maxSpeed_hPerStep": 13.62,
+   "drift": 0.000017632258895813696
+  },
+  {
+   "step": 52,
+   "wall_ms": 20.76,
+   "hTiles": 219,
+   "resident": 158,
+   "free": 66,
+   "particles": 870,
+   "regionsColdWarmHot": [
+    1222,
+    15,
+    27
+   ],
+   "maxSpeed_m_s": 4.086977005004883,
+   "maxSpeed_hPerStep": 13.62,
+   "drift": 0.00001966675030686912
+  },
+  {
+   "step": 53,
+   "wall_ms": 17.44,
+   "hTiles": 252,
+   "resident": 158,
+   "free": 66,
+   "particles": 881,
+   "regionsColdWarmHot": [
+    1218,
+    17,
+    29
+   ],
+   "maxSpeed_m_s": 4.089051246643066,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.000019158127454105265
+  },
+  {
+   "step": 54,
+   "wall_ms": 17.86,
+   "hTiles": 266,
+   "resident": 158,
+   "free": 66,
+   "particles": 892,
+   "regionsColdWarmHot": [
+    1214,
+    21,
+    29
+   ],
+   "maxSpeed_m_s": 4.089227199554443,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.000020175373159632977
+  },
+  {
+   "step": 55,
+   "wall_ms": 17.9,
+   "hTiles": 294,
+   "resident": 158,
+   "free": 66,
+   "particles": 903,
+   "regionsColdWarmHot": [
+    1212,
+    19,
+    33
+   ],
+   "maxSpeed_m_s": 4.090368270874023,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.000023735733128979974
+  },
+  {
+   "step": 56,
+   "wall_ms": 18.15,
+   "hTiles": 295,
+   "resident": 158,
+   "free": 66,
+   "particles": 914,
+   "regionsColdWarmHot": [
+    1203,
+    35,
+    26
+   ],
+   "maxSpeed_m_s": 4.088321685791016,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.000026278847392799256
+  },
+  {
+   "step": 57,
+   "wall_ms": 18.27,
+   "hTiles": 314,
+   "resident": 156,
+   "free": 66,
+   "particles": 925,
+   "regionsColdWarmHot": [
+    1203,
+    33,
+    28
+   ],
+   "maxSpeed_m_s": 4.087360858917236,
+   "maxSpeed_hPerStep": 13.62,
+   "drift": 0.000028906732132079182
+  },
+  {
+   "step": 58,
+   "wall_ms": 28.53,
+   "hTiles": 326,
+   "resident": 158,
+   "free": 66,
+   "particles": 936,
+   "regionsColdWarmHot": [
+    1187,
+    31,
+    30
+   ],
+   "maxSpeed_m_s": 4.087474346160889,
+   "maxSpeed_hPerStep": 13.62,
+   "drift": 0.00003331479685603261
+  },
+  {
+   "step": 59,
+   "wall_ms": 33.18,
+   "hTiles": 346,
+   "resident": 158,
+   "free": 66,
+   "particles": 947,
+   "regionsColdWarmHot": [
+    1167,
+    25,
+    72
+   ],
+   "maxSpeed_m_s": 4.087724685668945,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.00003492543588978482
+  },
+  {
+   "step": 60,
+   "wall_ms": 19.9,
+   "hTiles": 390,
+   "resident": 158,
+   "free": 66,
+   "particles": 958,
+   "regionsColdWarmHot": [
+    1157,
+    32,
+    75
+   ],
+   "maxSpeed_m_s": 4.086124897003174,
+   "maxSpeed_hPerStep": 13.62,
+   "drift": 0.000018649504601341408,
+   "catchFloorH": 0,
+   "catchChamberH": 390,
+   "presentedH": 390,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 61,
+   "wall_ms": 19.88,
+   "hTiles": 394,
+   "resident": 158,
+   "free": 66,
+   "particles": 1040,
+   "regionsColdWarmHot": [
+    1151,
+    36,
+    77
+   ],
+   "maxSpeed_m_s": 4.0856146812438965,
+   "maxSpeed_hPerStep": 13.62,
+   "drift": 0.000013054653220938985
+  },
+  {
+   "step": 62,
+   "wall_ms": 18.84,
+   "hTiles": 398,
+   "resident": 158,
+   "free": 66,
+   "particles": 1051,
+   "regionsColdWarmHot": [
+    1191,
+    36,
+    37
+   ],
+   "maxSpeed_m_s": 4.087967872619629,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.00000796842469330042
+  },
+  {
+   "step": 63,
+   "wall_ms": 20.23,
+   "hTiles": 362,
+   "resident": 156,
+   "free": 66,
+   "particles": 1062,
+   "regionsColdWarmHot": [
+    1187,
+    41,
+    36
+   ],
+   "maxSpeed_m_s": 4.087120056152344,
+   "maxSpeed_hPerStep": 13.62,
+   "drift": 0.000007629342791457849
+  },
+  {
+   "step": 64,
+   "wall_ms": 18.8,
+   "hTiles": 212,
+   "resident": 158,
+   "free": 66,
+   "particles": 1073,
+   "regionsColdWarmHot": [
+    1173,
+    39,
+    36
+   ],
+   "maxSpeed_m_s": 4.088622570037842,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.000009748604677973919
+  },
+  {
+   "step": 65,
+   "wall_ms": 17.93,
+   "hTiles": 198,
+   "resident": 158,
+   "free": 66,
+   "particles": 1084,
+   "regionsColdWarmHot": [
+    1151,
+    41,
+    72
+   ],
+   "maxSpeed_m_s": 4.089562892913818,
+   "maxSpeed_hPerStep": 13.63,
+   "drift": 0.000007459801840536563
+  },
+  {
+   "step": 66,
+   "wall_ms": 17.92,
+   "hTiles": 206,
+   "resident": 158,
+   "free": 66,
+   "particles": 1095,
+   "regionsColdWarmHot": [
+    1151,
+    39,
+    74
+   ],
+   "maxSpeed_m_s": 4.090539932250977,
+   "maxSpeed_hPerStep": 13.64,
+   "drift": 0.0000060187037577056365
+  },
+  {
+   "step": 67,
+   "wall_ms": 19.68,
+   "hTiles": 146,
+   "resident": 158,
+   "free": 66,
+   "particles": 1106,
+   "regionsColdWarmHot": [
+    1150,
+    45,
+    69
+   ],
+   "maxSpeed_m_s": 4.095889091491699,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.000004577605674874709
+  },
+  {
+   "step": 68,
+   "wall_ms": 17.63,
+   "hTiles": 164,
+   "resident": 158,
+   "free": 66,
+   "particles": 1117,
+   "regionsColdWarmHot": [
+    1193,
+    52,
+    19
+   ],
+   "maxSpeed_m_s": 4.0998148918151855,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000007120719938693992
+  },
+  {
+   "step": 69,
+   "wall_ms": 21.19,
+   "hTiles": 172,
+   "resident": 158,
+   "free": 66,
+   "particles": 1128,
+   "regionsColdWarmHot": [
+    1197,
+    46,
+    21
+   ],
+   "maxSpeed_m_s": 4.1004719734191895,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00001805611127311691
+  },
+  {
+   "step": 70,
+   "wall_ms": 18.31,
+   "hTiles": 187,
+   "resident": 158,
+   "free": 66,
+   "particles": 1138,
+   "regionsColdWarmHot": [
+    1205,
+    36,
+    23
+   ],
+   "maxSpeed_m_s": 4.1017913818359375,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00002204032361976712
+  },
+  {
+   "step": 71,
+   "wall_ms": 17.45,
+   "hTiles": 206,
+   "resident": 158,
+   "free": 66,
+   "particles": 1148,
+   "regionsColdWarmHot": [
+    1225,
+    18,
+    21
+   ],
+   "maxSpeed_m_s": 4.1013689041137695,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000028737191181157896
+  },
+  {
+   "step": 72,
+   "wall_ms": 17.75,
+   "hTiles": 228,
+   "resident": 158,
+   "free": 66,
+   "particles": 1158,
+   "regionsColdWarmHot": [
+    1225,
+    16,
+    23
+   ],
+   "maxSpeed_m_s": 4.1027326583862305,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00003526451779162739
+  },
+  {
+   "step": 73,
+   "wall_ms": 58.5,
+   "hTiles": 258,
+   "resident": 158,
+   "free": 66,
+   "particles": 1168,
+   "regionsColdWarmHot": [
+    1219,
+    19,
+    26
+   ],
+   "maxSpeed_m_s": 4.1014723777771,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.0000428090901076246
+  },
+  {
+   "step": 74,
+   "wall_ms": 30.2,
+   "hTiles": 269,
+   "resident": 158,
+   "free": 66,
+   "particles": 1178,
+   "regionsColdWarmHot": [
+    1211,
+    27,
+    26
+   ],
+   "maxSpeed_m_s": 4.102829456329346,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000045267433895983235
+  },
+  {
+   "step": 75,
+   "wall_ms": 18.68,
+   "hTiles": 298,
+   "resident": 158,
+   "free": 66,
+   "particles": 1188,
+   "regionsColdWarmHot": [
+    1205,
+    31,
+    28
+   ],
+   "maxSpeed_m_s": 4.101602077484131,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000050184121472700516
+  },
+  {
+   "step": 76,
+   "wall_ms": 18.58,
+   "hTiles": 319,
+   "resident": 158,
+   "free": 66,
+   "particles": 1198,
+   "regionsColdWarmHot": [
+    1204,
+    35,
+    25
+   ],
+   "maxSpeed_m_s": 4.0996551513671875,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00005433787477027201
+  },
+  {
+   "step": 77,
+   "wall_ms": 18.66,
+   "hTiles": 336,
+   "resident": 158,
+   "free": 66,
+   "particles": 1208,
+   "regionsColdWarmHot": [
+    1200,
+    35,
+    29
+   ],
+   "maxSpeed_m_s": 4.10120964050293,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000057559152837776434
+  },
+  {
+   "step": 78,
+   "wall_ms": 18.86,
+   "hTiles": 361,
+   "resident": 158,
+   "free": 66,
+   "particles": 1218,
+   "regionsColdWarmHot": [
+    1191,
+    44,
+    29
+   ],
+   "maxSpeed_m_s": 4.099496841430664,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00006289969279179693
+  },
+  {
+   "step": 79,
+   "wall_ms": 19.89,
+   "hTiles": 398,
+   "resident": 158,
+   "free": 66,
+   "particles": 1228,
+   "regionsColdWarmHot": [
+    1189,
+    44,
+    31
+   ],
+   "maxSpeed_m_s": 4.101386547088623,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00006646005276114392
+  },
+  {
+   "step": 80,
+   "wall_ms": 20.42,
+   "hTiles": 436,
+   "resident": 158,
+   "free": 66,
+   "particles": 1238,
+   "regionsColdWarmHot": [
+    1187,
+    43,
+    34
+   ],
+   "maxSpeed_m_s": 4.09944486618042,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.000046962843405196094,
+   "catchFloorH": 0,
+   "catchChamberH": 436,
+   "presentedH": 436,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 81,
+   "wall_ms": 75.79,
+   "hTiles": 439,
+   "resident": 158,
+   "free": 66,
+   "particles": 1248,
+   "regionsColdWarmHot": [
+    1179,
+    47,
+    38
+   ],
+   "maxSpeed_m_s": 4.101161956787109,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00003950304156465953
+  },
+  {
+   "step": 82,
+   "wall_ms": 19.41,
+   "hTiles": 449,
+   "resident": 158,
+   "free": 66,
+   "particles": 1258,
+   "regionsColdWarmHot": [
+    1181,
+    45,
+    38
+   ],
+   "maxSpeed_m_s": 4.180251121520996,
+   "maxSpeed_hPerStep": 13.93,
+   "drift": 0.000028059027377472756
+  },
+  {
+   "step": 83,
+   "wall_ms": 18.57,
+   "hTiles": 443,
+   "resident": 156,
+   "free": 66,
+   "particles": 1268,
+   "regionsColdWarmHot": [
+    1183,
+    42,
+    39
+   ],
+   "maxSpeed_m_s": 4.2653117179870605,
+   "maxSpeed_hPerStep": 14.22,
+   "drift": 0.000023735733128979974
+  },
+  {
+   "step": 84,
+   "wall_ms": 19.49,
+   "hTiles": 405,
+   "resident": 158,
+   "free": 66,
+   "particles": 1278,
+   "regionsColdWarmHot": [
+    1167,
+    39,
+    42
+   ],
+   "maxSpeed_m_s": 4.190632343292236,
+   "maxSpeed_hPerStep": 13.97,
+   "drift": 0.000023227110276216117
+  },
+  {
+   "step": 85,
+   "wall_ms": 19.5,
+   "hTiles": 265,
+   "resident": 156,
+   "free": 66,
+   "particles": 1288,
+   "regionsColdWarmHot": [
+    1147,
+    34,
+    83
+   ],
+   "maxSpeed_m_s": 4.102602958679199,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000024413896932665114
+  },
+  {
+   "step": 86,
+   "wall_ms": 18.32,
+   "hTiles": 222,
+   "resident": 158,
+   "free": 66,
+   "particles": 1298,
+   "regionsColdWarmHot": [
+    1148,
+    34,
+    66
+   ],
+   "maxSpeed_m_s": 4.100881099700928,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000030517371165831396
+  },
+  {
+   "step": 87,
+   "wall_ms": 20.23,
+   "hTiles": 233,
+   "resident": 156,
+   "free": 66,
+   "particles": 1308,
+   "regionsColdWarmHot": [
+    1150,
+    29,
+    85
+   ],
+   "maxSpeed_m_s": 4.104712009429932,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00002390527407990126
+  },
+  {
+   "step": 88,
+   "wall_ms": 20.25,
+   "hTiles": 230,
+   "resident": 156,
+   "free": 68,
+   "particles": 1316,
+   "regionsColdWarmHot": [
+    1150,
+    41,
+    57
+   ],
+   "maxSpeed_m_s": 4.101734161376953,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000017632258895813696
+  },
+  {
+   "step": 89,
+   "wall_ms": 19.17,
+   "hTiles": 242,
+   "resident": 156,
+   "free": 68,
+   "particles": 1327,
+   "regionsColdWarmHot": [
+    1154,
+    37,
+    57
+   ],
+   "maxSpeed_m_s": 4.103982448577881,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000012715571319096415
+  },
+  {
+   "step": 90,
+   "wall_ms": 17.76,
+   "hTiles": 263,
+   "resident": 156,
+   "free": 68,
+   "particles": 1325,
+   "regionsColdWarmHot": [
+    1184,
+    35,
+    29
+   ],
+   "maxSpeed_m_s": 4.105139255523682,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001076585038350163
+  },
+  {
+   "step": 91,
+   "wall_ms": 19.11,
+   "hTiles": 289,
+   "resident": 156,
+   "free": 68,
+   "particles": 1325,
+   "regionsColdWarmHot": [
+    1186,
+    33,
+    29
+   ],
+   "maxSpeed_m_s": 4.106209754943848,
+   "maxSpeed_hPerStep": 13.69,
+   "drift": 0.000007290260889615277
+  },
+  {
+   "step": 92,
+   "wall_ms": 18.25,
+   "hTiles": 285,
+   "resident": 158,
+   "free": 66,
+   "particles": 1325,
+   "regionsColdWarmHot": [
+    1186,
+    29,
+    33
+   ],
+   "maxSpeed_m_s": 4.098926544189453,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.000012969882745478342
+  },
+  {
+   "step": 93,
+   "wall_ms": 18.1,
+   "hTiles": 267,
+   "resident": 158,
+   "free": 66,
+   "particles": 1325,
+   "regionsColdWarmHot": [
+    1164,
+    25,
+    75
+   ],
+   "maxSpeed_m_s": 4.102794647216797,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000012969882745478342
+  },
+  {
+   "step": 94,
+   "wall_ms": 23.61,
+   "hTiles": 268,
+   "resident": 158,
+   "free": 66,
+   "particles": 1353,
+   "regionsColdWarmHot": [
+    1156,
+    31,
+    77
+   ],
+   "maxSpeed_m_s": 4.102773189544678,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000024244355981743832
+  },
+  {
+   "step": 95,
+   "wall_ms": 19.28,
+   "hTiles": 309,
+   "resident": 158,
+   "free": 66,
+   "particles": 1364,
+   "regionsColdWarmHot": [
+    1158,
+    31,
+    75
+   ],
+   "maxSpeed_m_s": 4.099920749664307,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.0000257702245400354
+  },
+  {
+   "step": 96,
+   "wall_ms": 18.42,
+   "hTiles": 322,
+   "resident": 158,
+   "free": 66,
+   "particles": 1372,
+   "regionsColdWarmHot": [
+    1200,
+    35,
+    29
+   ],
+   "maxSpeed_m_s": 4.0975823402404785,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.000030602141641292034
+  },
+  {
+   "step": 97,
+   "wall_ms": 18.41,
+   "hTiles": 329,
+   "resident": 158,
+   "free": 66,
+   "particles": 1380,
+   "regionsColdWarmHot": [
+    1192,
+    43,
+    29
+   ],
+   "maxSpeed_m_s": 4.104637622833252,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000032467092101426176
+  },
+  {
+   "step": 98,
+   "wall_ms": 62.17,
+   "hTiles": 306,
+   "resident": 158,
+   "free": 66,
+   "particles": 1388,
+   "regionsColdWarmHot": [
+    1190,
+    39,
+    35
+   ],
+   "maxSpeed_m_s": 4.102740287780762,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00003823148443274989
+  },
+  {
+   "step": 99,
+   "wall_ms": 22.63,
+   "hTiles": 331,
+   "resident": 158,
+   "free": 66,
+   "particles": 1399,
+   "regionsColdWarmHot": [
+    1188,
+    41,
+    35
+   ],
+   "maxSpeed_m_s": 4.099758148193359,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00003848579585913181
+  },
+  {
+   "step": 100,
+   "wall_ms": 19.56,
+   "hTiles": 350,
+   "resident": 158,
+   "free": 66,
+   "particles": 1407,
+   "regionsColdWarmHot": [
+    1192,
+    39,
+    33
+   ],
+   "maxSpeed_m_s": 4.098288059234619,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00003000874831306754,
+   "catchFloorH": 0,
+   "catchChamberH": 350,
+   "presentedH": 350,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 101,
+   "wall_ms": 18.89,
+   "hTiles": 329,
+   "resident": 156,
+   "free": 66,
+   "particles": 1421,
+   "regionsColdWarmHot": [
+    1186,
+    43,
+    35
+   ],
+   "maxSpeed_m_s": 4.095886707305908,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.000026617929294641828
+  },
+  {
+   "step": 102,
+   "wall_ms": 18.98,
+   "hTiles": 341,
+   "resident": 158,
+   "free": 66,
+   "particles": 1432,
+   "regionsColdWarmHot": [
+    1168,
+    47,
+    33
+   ],
+   "maxSpeed_m_s": 4.100918769836426,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000017971340797656267
+  },
+  {
+   "step": 103,
+   "wall_ms": 20.21,
+   "hTiles": 352,
+   "resident": 158,
+   "free": 66,
+   "particles": 1443,
+   "regionsColdWarmHot": [
+    1150,
+    42,
+    72
+   ],
+   "maxSpeed_m_s": 4.101511478424072,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000017293176993971124
+  },
+  {
+   "step": 104,
+   "wall_ms": 18.62,
+   "hTiles": 363,
+   "resident": 158,
+   "free": 66,
+   "particles": 1454,
+   "regionsColdWarmHot": [
+    1149,
+    46,
+    69
+   ],
+   "maxSpeed_m_s": 4.097606182098389,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.000015428226533836982
+  },
+  {
+   "step": 105,
+   "wall_ms": 110.15,
+   "hTiles": 383,
+   "resident": 156,
+   "free": 66,
+   "particles": 1462,
+   "regionsColdWarmHot": [
+    1150,
+    38,
+    76
+   ],
+   "maxSpeed_m_s": 4.095369338989258,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.00001746271794489241
+  },
+  {
+   "step": 106,
+   "wall_ms": 30.57,
+   "hTiles": 400,
+   "resident": 156,
+   "free": 68,
+   "particles": 1470,
+   "regionsColdWarmHot": [
+    1170,
+    37,
+    41
+   ],
+   "maxSpeed_m_s": 4.167863845825195,
+   "maxSpeed_hPerStep": 13.89,
+   "drift": 0.000019158127454105265
+  },
+  {
+   "step": 107,
+   "wall_ms": 20.05,
+   "hTiles": 398,
+   "resident": 156,
+   "free": 68,
+   "particles": 1478,
+   "regionsColdWarmHot": [
+    1170,
+    36,
+    42
+   ],
+   "maxSpeed_m_s": 4.148823261260986,
+   "maxSpeed_hPerStep": 13.83,
+   "drift": 0.000002627884739279926
+  },
+  {
+   "step": 108,
+   "wall_ms": 19.81,
+   "hTiles": 325,
+   "resident": 156,
+   "free": 68,
+   "particles": 1488,
+   "regionsColdWarmHot": [
+    1164,
+    39,
+    45
+   ],
+   "maxSpeed_m_s": 4.247683525085449,
+   "maxSpeed_hPerStep": 14.16,
+   "drift": 0.0000022888028374373545
+  },
+  {
+   "step": 109,
+   "wall_ms": 18.36,
+   "hTiles": 232,
+   "resident": 158,
+   "free": 66,
+   "particles": 1498,
+   "regionsColdWarmHot": [
+    1167,
+    35,
+    46
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000010341998006198417
+  },
+  {
+   "step": 110,
+   "wall_ms": 17.86,
+   "hTiles": 203,
+   "resident": 158,
+   "free": 66,
+   "particles": 1508,
+   "regionsColdWarmHot": [
+    1147,
+    37,
+    80
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00001661501319028598
+  },
+  {
+   "step": 111,
+   "wall_ms": 30.31,
+   "hTiles": 231,
+   "resident": 156,
+   "free": 66,
+   "particles": 1519,
+   "regionsColdWarmHot": [
+    1146,
+    42,
+    76
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00001686932461666791
+  },
+  {
+   "step": 112,
+   "wall_ms": 20.32,
+   "hTiles": 214,
+   "resident": 156,
+   "free": 68,
+   "particles": 1527,
+   "regionsColdWarmHot": [
+    1152,
+    37,
+    59
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000016191160812982767
+  },
+  {
+   "step": 113,
+   "wall_ms": 22.71,
+   "hTiles": 238,
+   "resident": 158,
+   "free": 66,
+   "particles": 1538,
+   "regionsColdWarmHot": [
+    1182,
+    37,
+    29
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000015258685582915698
+  },
+  {
+   "step": 114,
+   "wall_ms": 17.99,
+   "hTiles": 263,
+   "resident": 158,
+   "free": 66,
+   "particles": 1549,
+   "regionsColdWarmHot": [
+    1157,
+    40,
+    67
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000016106390337522126
+  },
+  {
+   "step": 115,
+   "wall_ms": 18.28,
+   "hTiles": 263,
+   "resident": 158,
+   "free": 66,
+   "particles": 1560,
+   "regionsColdWarmHot": [
+    1153,
+    42,
+    69
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00002051445506147555
+  },
+  {
+   "step": 116,
+   "wall_ms": 18.81,
+   "hTiles": 306,
+   "resident": 158,
+   "free": 66,
+   "particles": 1571,
+   "regionsColdWarmHot": [
+    1155,
+    42,
+    67
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00002390527407990126
+  },
+  {
+   "step": 117,
+   "wall_ms": 18.56,
+   "hTiles": 323,
+   "resident": 158,
+   "free": 66,
+   "particles": 1579,
+   "regionsColdWarmHot": [
+    1198,
+    37,
+    29
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000025261601687271544
+  },
+  {
+   "step": 118,
+   "wall_ms": 19.53,
+   "hTiles": 360,
+   "resident": 158,
+   "free": 66,
+   "particles": 1587,
+   "regionsColdWarmHot": [
+    1200,
+    32,
+    32
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000025600683589114116
+  },
+  {
+   "step": 119,
+   "wall_ms": 20.39,
+   "hTiles": 350,
+   "resident": 158,
+   "free": 66,
+   "particles": 1595,
+   "regionsColdWarmHot": [
+    1192,
+    38,
+    34
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00003484066541432418
+  },
+  {
+   "step": 120,
+   "wall_ms": 19.53,
+   "hTiles": 380,
+   "resident": 156,
+   "free": 66,
+   "particles": 1606,
+   "regionsColdWarmHot": [
+    1186,
+    42,
+    36
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000029669666411224967,
+   "catchFloorH": 0,
+   "catchChamberH": 380,
+   "presentedH": 380,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 121,
+   "wall_ms": 26.9,
+   "hTiles": 343,
+   "resident": 158,
+   "free": 66,
+   "particles": 1838,
+   "regionsColdWarmHot": [
+    1170,
+    37,
+    41
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00003204323972412296
+  },
+  {
+   "step": 122,
+   "wall_ms": 18.98,
+   "hTiles": 326,
+   "resident": 158,
+   "free": 66,
+   "particles": 1846,
+   "regionsColdWarmHot": [
+    1145,
+    37,
+    82
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000027126552147405685
+  },
+  {
+   "step": 123,
+   "wall_ms": 19.11,
+   "hTiles": 325,
+   "resident": 158,
+   "free": 66,
+   "particles": 1854,
+   "regionsColdWarmHot": [
+    1148,
+    31,
+    85
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00002602453596641733
+  },
+  {
+   "step": 124,
+   "wall_ms": 18.81,
+   "hTiles": 292,
+   "resident": 158,
+   "free": 66,
+   "particles": 1865,
+   "regionsColdWarmHot": [
+    1148,
+    34,
+    82
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000018649504601341408
+  },
+  {
+   "step": 125,
+   "wall_ms": 21.9,
+   "hTiles": 268,
+   "resident": 158,
+   "free": 66,
+   "particles": 1873,
+   "regionsColdWarmHot": [
+    1188,
+    31,
+    45
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00002000583220871169
+  },
+  {
+   "step": 126,
+   "wall_ms": 40.1,
+   "hTiles": 287,
+   "resident": 158,
+   "free": 66,
+   "particles": 1881,
+   "regionsColdWarmHot": [
+    1192,
+    33,
+    39
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00001746271794489241
+  },
+  {
+   "step": 127,
+   "wall_ms": 25.33,
+   "hTiles": 310,
+   "resident": 158,
+   "free": 66,
+   "particles": 1889,
+   "regionsColdWarmHot": [
+    1188,
+    36,
+    40
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000020683996012396835
+  },
+  {
+   "step": 128,
+   "wall_ms": 19.21,
+   "hTiles": 335,
+   "resident": 158,
+   "free": 66,
+   "particles": 1900,
+   "regionsColdWarmHot": [
+    1190,
+    32,
+    42
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00001898858650318398
+  },
+  {
+   "step": 129,
+   "wall_ms": 18.61,
+   "hTiles": 316,
+   "resident": 158,
+   "free": 66,
+   "particles": 1908,
+   "regionsColdWarmHot": [
+    1188,
+    36,
+    40
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00002204032361976712
+  },
+  {
+   "step": 130,
+   "wall_ms": 19.18,
+   "hTiles": 281,
+   "resident": 158,
+   "free": 66,
+   "particles": 1916,
+   "regionsColdWarmHot": [
+    1188,
+    34,
+    42
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00001907335697864462
+  },
+  {
+   "step": 131,
+   "wall_ms": 18.92,
+   "hTiles": 286,
+   "resident": 158,
+   "free": 66,
+   "particles": 1924,
+   "regionsColdWarmHot": [
+    1186,
+    40,
+    38
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000027465634049248254
+  },
+  {
+   "step": 132,
+   "wall_ms": 19.35,
+   "hTiles": 284,
+   "resident": 158,
+   "free": 66,
+   "particles": 1935,
+   "regionsColdWarmHot": [
+    1180,
+    42,
+    42
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000031110764494055895
+  },
+  {
+   "step": 133,
+   "wall_ms": 55.74,
+   "hTiles": 331,
+   "resident": 158,
+   "free": 66,
+   "particles": 1943,
+   "regionsColdWarmHot": [
+    1181,
+    46,
+    37
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.000040605057745647885
+  },
+  {
+   "step": 134,
+   "wall_ms": 19.27,
+   "hTiles": 334,
+   "resident": 158,
+   "free": 66,
+   "particles": 1951,
+   "regionsColdWarmHot": [
+    1183,
+    44,
+    37
+   ],
+   "maxSpeed_m_s": 4.231979846954346,
+   "maxSpeed_hPerStep": 14.11,
+   "drift": 0.00004136799202479367
+  },
+  {
+   "step": 135,
+   "wall_ms": 19.23,
+   "hTiles": 345,
+   "resident": 156,
+   "free": 66,
+   "particles": 1959,
+   "regionsColdWarmHot": [
+    1178,
+    47,
+    39
+   ],
+   "maxSpeed_m_s": 4.098737716674805,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00005069274432546437
+  },
+  {
+   "step": 136,
+   "wall_ms": 24.31,
+   "hTiles": 364,
+   "resident": 158,
+   "free": 66,
+   "particles": 1970,
+   "regionsColdWarmHot": [
+    1168,
+    44,
+    36
+   ],
+   "maxSpeed_m_s": 4.619171142578125,
+   "maxSpeed_hPerStep": 15.4,
+   "drift": 0.00005374448144204751
+  },
+  {
+   "step": 137,
+   "wall_ms": 20.79,
+   "hTiles": 381,
+   "resident": 158,
+   "free": 66,
+   "particles": 1978,
+   "regionsColdWarmHot": [
+    1143,
+    47,
+    74
+   ],
+   "maxSpeed_m_s": 4.094382286071777,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.00006018703757705636
+  },
+  {
+   "step": 138,
+   "wall_ms": 21.28,
+   "hTiles": 395,
+   "resident": 158,
+   "free": 66,
+   "particles": 1986,
+   "regionsColdWarmHot": [
+    1144,
+    43,
+    77
+   ],
+   "maxSpeed_m_s": 4.099132537841797,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00006128905375804472
+  },
+  {
+   "step": 139,
+   "wall_ms": 30.07,
+   "hTiles": 420,
+   "resident": 158,
+   "free": 66,
+   "particles": 1994,
+   "regionsColdWarmHot": [
+    1136,
+    53,
+    75
+   ],
+   "maxSpeed_m_s": 4.09782600402832,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00007205490414154635
+  },
+  {
+   "step": 140,
+   "wall_ms": 23.32,
+   "hTiles": 451,
+   "resident": 156,
+   "free": 66,
+   "particles": 2005,
+   "regionsColdWarmHot": [
+    1164,
+    63,
+    37
+   ],
+   "maxSpeed_m_s": 4.096464157104492,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.00006467987277647043,
+   "catchFloorH": 0,
+   "catchChamberH": 451,
+   "presentedH": 451,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 141,
+   "wall_ms": 35.64,
+   "hTiles": 445,
+   "resident": 156,
+   "free": 68,
+   "particles": 2028,
+   "regionsColdWarmHot": [
+    1152,
+    55,
+    41
+   ],
+   "maxSpeed_m_s": 4.0959248542785645,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.00006781638036851421
+  },
+  {
+   "step": 142,
+   "wall_ms": 25.46,
+   "hTiles": 447,
+   "resident": 158,
+   "free": 66,
+   "particles": 2037,
+   "regionsColdWarmHot": [
+    1166,
+    40,
+    42
+   ],
+   "maxSpeed_m_s": 4.108199119567871,
+   "maxSpeed_hPerStep": 13.69,
+   "drift": 0.00006349308612002143
+  },
+  {
+   "step": 143,
+   "wall_ms": 22.07,
+   "hTiles": 427,
+   "resident": 158,
+   "free": 66,
+   "particles": 2045,
+   "regionsColdWarmHot": [
+    1142,
+    38,
+    84
+   ],
+   "maxSpeed_m_s": 4.318004608154297,
+   "maxSpeed_hPerStep": 14.39,
+   "drift": 0.00006569711848199814
+  },
+  {
+   "step": 144,
+   "wall_ms": 20.35,
+   "hTiles": 421,
+   "resident": 156,
+   "free": 66,
+   "particles": 2056,
+   "regionsColdWarmHot": [
+    1142,
+    38,
+    84
+   ],
+   "maxSpeed_m_s": 4.288997173309326,
+   "maxSpeed_hPerStep": 14.3,
+   "drift": 0.0000644255613500885
+  },
+  {
+   "step": 145,
+   "wall_ms": 21.91,
+   "hTiles": 406,
+   "resident": 158,
+   "free": 66,
+   "particles": 2064,
+   "regionsColdWarmHot": [
+    1142,
+    37,
+    69
+   ],
+   "maxSpeed_m_s": 7.077266693115234,
+   "maxSpeed_hPerStep": 23.59,
+   "drift": 0.00006408647944824593
+  },
+  {
+   "step": 146,
+   "wall_ms": 20.66,
+   "hTiles": 437,
+   "resident": 158,
+   "free": 66,
+   "particles": 2072,
+   "regionsColdWarmHot": [
+    1144,
+    35,
+    85
+   ],
+   "maxSpeed_m_s": 4.171403408050537,
+   "maxSpeed_hPerStep": 13.9,
+   "drift": 0.00005365971096658687
+  },
+  {
+   "step": 147,
+   "wall_ms": 20.37,
+   "hTiles": 363,
+   "resident": 158,
+   "free": 66,
+   "particles": 2080,
+   "regionsColdWarmHot": [
+    1144,
+    35,
+    85
+   ],
+   "maxSpeed_m_s": 4.098994255065918,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00006001749662613508
+  },
+  {
+   "step": 148,
+   "wall_ms": 20.92,
+   "hTiles": 420,
+   "resident": 156,
+   "free": 66,
+   "particles": 2091,
+   "regionsColdWarmHot": [
+    1142,
+    35,
+    87
+   ],
+   "maxSpeed_m_s": 5.668301105499268,
+   "maxSpeed_hPerStep": 18.89,
+   "drift": 0.00006035657852797765
+  },
+  {
+   "step": 149,
+   "wall_ms": 22.87,
+   "hTiles": 412,
+   "resident": 158,
+   "free": 66,
+   "particles": 2099,
+   "regionsColdWarmHot": [
+    1164,
+    36,
+    48
+   ],
+   "maxSpeed_m_s": 5.251297950744629,
+   "maxSpeed_hPerStep": 17.5,
+   "drift": 0.00006188244708626921
+  },
+  {
+   "step": 150,
+   "wall_ms": 26.13,
+   "hTiles": 432,
+   "resident": 158,
+   "free": 66,
+   "particles": 2108,
+   "regionsColdWarmHot": [
+    1138,
+    36,
+    90
+   ],
+   "maxSpeed_m_s": 4.093014717102051,
+   "maxSpeed_hPerStep": 13.64,
+   "drift": 0.00005696575950955194
+  },
+  {
+   "step": 151,
+   "wall_ms": 23.03,
+   "hTiles": 398,
+   "resident": 158,
+   "free": 66,
+   "particles": 2119,
+   "regionsColdWarmHot": [
+    1136,
+    35,
+    93
+   ],
+   "maxSpeed_m_s": 4.097602367401123,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00005120136717822823
+  },
+  {
+   "step": 152,
+   "wall_ms": 24.89,
+   "hTiles": 418,
+   "resident": 156,
+   "free": 66,
+   "particles": 2130,
+   "regionsColdWarmHot": [
+    1138,
+    36,
+    90
+   ],
+   "maxSpeed_m_s": 4.2156877517700195,
+   "maxSpeed_hPerStep": 14.05,
+   "drift": 0.000060865201380741504
+  },
+  {
+   "step": 153,
+   "wall_ms": 23.67,
+   "hTiles": 449,
+   "resident": 158,
+   "free": 66,
+   "particles": 2141,
+   "regionsColdWarmHot": [
+    1154,
+    42,
+    52
+   ],
+   "maxSpeed_m_s": 4.337993144989014,
+   "maxSpeed_hPerStep": 14.46,
+   "drift": 0.00006306923374271822
+  },
+  {
+   "step": 154,
+   "wall_ms": 20.93,
+   "hTiles": 442,
+   "resident": 158,
+   "free": 66,
+   "particles": 2149,
+   "regionsColdWarmHot": [
+    1133,
+    43,
+    88
+   ],
+   "maxSpeed_m_s": 4.131563663482666,
+   "maxSpeed_hPerStep": 13.77,
+   "drift": 0.00006103474233166279
+  },
+  {
+   "step": 155,
+   "wall_ms": 20.83,
+   "hTiles": 434,
+   "resident": 158,
+   "free": 66,
+   "particles": 2158,
+   "regionsColdWarmHot": [
+    1136,
+    40,
+    88
+   ],
+   "maxSpeed_m_s": 4.1619873046875,
+   "maxSpeed_hPerStep": 13.87,
+   "drift": 0.00006374739754640336
+  },
+  {
+   "step": 156,
+   "wall_ms": 23.38,
+   "hTiles": 423,
+   "resident": 156,
+   "free": 66,
+   "particles": 2164,
+   "regionsColdWarmHot": [
+    1144,
+    34,
+    86
+   ],
+   "maxSpeed_m_s": 4.253634452819824,
+   "maxSpeed_hPerStep": 14.18,
+   "drift": 0.00006603620038384071
+  },
+  {
+   "step": 157,
+   "wall_ms": 22.22,
+   "hTiles": 437,
+   "resident": 156,
+   "free": 68,
+   "particles": 2174,
+   "regionsColdWarmHot": [
+    1167,
+    34,
+    47
+   ],
+   "maxSpeed_m_s": 4.168028354644775,
+   "maxSpeed_hPerStep": 13.89,
+   "drift": 0.0000667991346629865
+  },
+  {
+   "step": 158,
+   "wall_ms": 25.76,
+   "hTiles": 444,
+   "resident": 158,
+   "free": 66,
+   "particles": 2182,
+   "regionsColdWarmHot": [
+    1166,
+    34,
+    48
+   ],
+   "maxSpeed_m_s": 4.129197120666504,
+   "maxSpeed_hPerStep": 13.76,
+   "drift": 0.0000761238869636572
+  },
+  {
+   "step": 159,
+   "wall_ms": 23.73,
+   "hTiles": 489,
+   "resident": 158,
+   "free": 66,
+   "particles": 2191,
+   "regionsColdWarmHot": [
+    1140,
+    34,
+    90
+   ],
+   "maxSpeed_m_s": 4.2164459228515625,
+   "maxSpeed_hPerStep": 14.05,
+   "drift": 0.00008002332883484677
+  },
+  {
+   "step": 160,
+   "wall_ms": 21.4,
+   "hTiles": 495,
+   "resident": 156,
+   "free": 66,
+   "particles": 2202,
+   "regionsColdWarmHot": [
+    1138,
+    35,
+    91
+   ],
+   "maxSpeed_m_s": 4.224781513214111,
+   "maxSpeed_hPerStep": 14.08,
+   "drift": 0.00006137382423350536,
+   "catchFloorH": 0,
+   "catchChamberH": 495,
+   "presentedH": 495,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 161,
+   "wall_ms": 21.27,
+   "hTiles": 491,
+   "resident": 158,
+   "free": 66,
+   "particles": 2513,
+   "regionsColdWarmHot": [
+    1140,
+    32,
+    76
+   ],
+   "maxSpeed_m_s": 4.31226921081543,
+   "maxSpeed_hPerStep": 14.37,
+   "drift": 0.00006137382423350536
+  },
+  {
+   "step": 162,
+   "wall_ms": 21.25,
+   "hTiles": 455,
+   "resident": 158,
+   "free": 66,
+   "particles": 2524,
+   "regionsColdWarmHot": [
+    1138,
+    33,
+    93
+   ],
+   "maxSpeed_m_s": 4.097304344177246,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.000053235858589283655
+  },
+  {
+   "step": 163,
+   "wall_ms": 22.14,
+   "hTiles": 449,
+   "resident": 158,
+   "free": 66,
+   "particles": 2532,
+   "regionsColdWarmHot": [
+    1137,
+    35,
+    92
+   ],
+   "maxSpeed_m_s": 4.095250129699707,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.00005696575950955194
+  },
+  {
+   "step": 164,
+   "wall_ms": 22.49,
+   "hTiles": 417,
+   "resident": 158,
+   "free": 66,
+   "particles": 2541,
+   "regionsColdWarmHot": [
+    1140,
+    32,
+    92
+   ],
+   "maxSpeed_m_s": 4.09475564956665,
+   "maxSpeed_hPerStep": 13.65,
+   "drift": 0.00005442264524573265
+  },
+  {
+   "step": 165,
+   "wall_ms": 20.5,
+   "hTiles": 401,
+   "resident": 158,
+   "free": 66,
+   "particles": 2552,
+   "regionsColdWarmHot": [
+    1178,
+    38,
+    48
+   ],
+   "maxSpeed_m_s": 4.117762088775635,
+   "maxSpeed_hPerStep": 13.73,
+   "drift": 0.00005128613765368887
+  },
+  {
+   "step": 166,
+   "wall_ms": 20.15,
+   "hTiles": 357,
+   "resident": 158,
+   "free": 66,
+   "particles": 2563,
+   "regionsColdWarmHot": [
+    1179,
+    37,
+    48
+   ],
+   "maxSpeed_m_s": 5.314423561096191,
+   "maxSpeed_hPerStep": 17.71,
+   "drift": 0.00005925456234698929
+  },
+  {
+   "step": 167,
+   "wall_ms": 20.71,
+   "hTiles": 380,
+   "resident": 156,
+   "free": 66,
+   "particles": 2572,
+   "regionsColdWarmHot": [
+    1180,
+    37,
+    47
+   ],
+   "maxSpeed_m_s": 4.313170433044434,
+   "maxSpeed_hPerStep": 14.38,
+   "drift": 0.00005857639854330415
+  },
+  {
+   "step": 168,
+   "wall_ms": 89.96,
+   "hTiles": 367,
+   "resident": 158,
+   "free": 66,
+   "particles": 2580,
+   "regionsColdWarmHot": [
+    1167,
+    36,
+    45
+   ],
+   "maxSpeed_m_s": 4.230865001678467,
+   "maxSpeed_hPerStep": 14.1,
+   "drift": 0.00006137382423350536
+  },
+  {
+   "step": 169,
+   "wall_ms": 23.22,
+   "hTiles": 387,
+   "resident": 156,
+   "free": 66,
+   "particles": 2588,
+   "regionsColdWarmHot": [
+    1141,
+    40,
+    83
+   ],
+   "maxSpeed_m_s": 4.181347370147705,
+   "maxSpeed_hPerStep": 13.94,
+   "drift": 0.00006340831564456078
+  },
+  {
+   "step": 170,
+   "wall_ms": 22.08,
+   "hTiles": 350,
+   "resident": 156,
+   "free": 68,
+   "particles": 2595,
+   "regionsColdWarmHot": [
+    1139,
+    38,
+    71
+   ],
+   "maxSpeed_m_s": 4.165165424346924,
+   "maxSpeed_hPerStep": 13.88,
+   "drift": 0.00006374739754640336
+  },
+  {
+   "step": 171,
+   "wall_ms": 20.37,
+   "hTiles": 382,
+   "resident": 158,
+   "free": 66,
+   "particles": 2602,
+   "regionsColdWarmHot": [
+    1139,
+    40,
+    69
+   ],
+   "maxSpeed_m_s": 4.104069709777832,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00006569711848199814
+  },
+  {
+   "step": 172,
+   "wall_ms": 20.95,
+   "hTiles": 445,
+   "resident": 158,
+   "free": 66,
+   "particles": 2610,
+   "regionsColdWarmHot": [
+    1140,
+    41,
+    83
+   ],
+   "maxSpeed_m_s": 4.102673053741455,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00006578188895745879
+  },
+  {
+   "step": 173,
+   "wall_ms": 21.6,
+   "hTiles": 422,
+   "resident": 156,
+   "free": 66,
+   "particles": 2618,
+   "regionsColdWarmHot": [
+    1142,
+    33,
+    89
+   ],
+   "maxSpeed_m_s": 4.1029534339904785,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00006959656035318771
+  },
+  {
+   "step": 174,
+   "wall_ms": 22.98,
+   "hTiles": 456,
+   "resident": 156,
+   "free": 68,
+   "particles": 2625,
+   "regionsColdWarmHot": [
+    1140,
+    40,
+    68
+   ],
+   "maxSpeed_m_s": 4.133947372436523,
+   "maxSpeed_hPerStep": 13.78,
+   "drift": 0.00007239398604338892
+  },
+  {
+   "step": 175,
+   "wall_ms": 42.55,
+   "hTiles": 472,
+   "resident": 158,
+   "free": 66,
+   "particles": 2633,
+   "regionsColdWarmHot": [
+    1163,
+    42,
+    43
+   ],
+   "maxSpeed_m_s": 4.2238311767578125,
+   "maxSpeed_hPerStep": 14.08,
+   "drift": 0.00007341123174891664
+  },
+  {
+   "step": 176,
+   "wall_ms": 20.9,
+   "hTiles": 507,
+   "resident": 158,
+   "free": 66,
+   "particles": 2640,
+   "regionsColdWarmHot": [
+    1139,
+    43,
+    82
+   ],
+   "maxSpeed_m_s": 4.106694221496582,
+   "maxSpeed_hPerStep": 13.69,
+   "drift": 0.00007934516503116162
+  },
+  {
+   "step": 177,
+   "wall_ms": 21.39,
+   "hTiles": 527,
+   "resident": 158,
+   "free": 66,
+   "particles": 2651,
+   "regionsColdWarmHot": [
+    1139,
+    40,
+    85
+   ],
+   "maxSpeed_m_s": 4.206413745880127,
+   "maxSpeed_hPerStep": 14.02,
+   "drift": 0.00008824606495452912
+  },
+  {
+   "step": 178,
+   "wall_ms": 69.57,
+   "hTiles": 546,
+   "resident": 154,
+   "free": 66,
+   "particles": 2662,
+   "regionsColdWarmHot": [
+    1140,
+    37,
+    87
+   ],
+   "maxSpeed_m_s": 4.230045795440674,
+   "maxSpeed_hPerStep": 14.1,
+   "drift": 0.00009426476871223475
+  },
+  {
+   "step": 179,
+   "wall_ms": 40.69,
+   "hTiles": 560,
+   "resident": 156,
+   "free": 68,
+   "particles": 2672,
+   "regionsColdWarmHot": [
+    1145,
+    37,
+    50
+   ],
+   "maxSpeed_m_s": 4.139631748199463,
+   "maxSpeed_hPerStep": 13.8,
+   "drift": 0.00009807944010796367
+  },
+  {
+   "step": 180,
+   "wall_ms": 26.58,
+   "hTiles": 621,
+   "resident": 156,
+   "free": 68,
+   "particles": 2683,
+   "regionsColdWarmHot": [
+    1119,
+    39,
+    90
+   ],
+   "maxSpeed_m_s": 4.221918106079102,
+   "maxSpeed_hPerStep": 14.07,
+   "drift": 0.00006968133082864836,
+   "catchFloorH": 0,
+   "catchChamberH": 621,
+   "presentedH": 621,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 181,
+   "wall_ms": 23.48,
+   "hTiles": 515,
+   "resident": 154,
+   "free": 68,
+   "particles": 2712,
+   "regionsColdWarmHot": [
+    1119,
+    36,
+    93
+   ],
+   "maxSpeed_m_s": 4.136041164398193,
+   "maxSpeed_hPerStep": 13.79,
+   "drift": 0.00006120428328258407
+  },
+  {
+   "step": 182,
+   "wall_ms": 20.09,
+   "hTiles": 490,
+   "resident": 154,
+   "free": 70,
+   "particles": 2723,
+   "regionsColdWarmHot": [
+    1116,
+    39,
+    77
+   ],
+   "maxSpeed_m_s": 4.110288619995117,
+   "maxSpeed_hPerStep": 13.7,
+   "drift": 0.00005722007093593387
+  },
+  {
+   "step": 183,
+   "wall_ms": 53.56,
+   "hTiles": 420,
+   "resident": 154,
+   "free": 70,
+   "particles": 2734,
+   "regionsColdWarmHot": [
+    1139,
+    39,
+    54
+   ],
+   "maxSpeed_m_s": 4.1047821044921875,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00005433787477027201
+  },
+  {
+   "step": 184,
+   "wall_ms": 21.03,
+   "hTiles": 351,
+   "resident": 156,
+   "free": 68,
+   "particles": 2745,
+   "regionsColdWarmHot": [
+    1141,
+    36,
+    55
+   ],
+   "maxSpeed_m_s": 6.499444484710693,
+   "maxSpeed_hPerStep": 21.66,
+   "drift": 0.000051625219555531444
+  },
+  {
+   "step": 185,
+   "wall_ms": 33.65,
+   "hTiles": 326,
+   "resident": 156,
+   "free": 68,
+   "particles": 2756,
+   "regionsColdWarmHot": [
+    1123,
+    30,
+    95
+   ],
+   "maxSpeed_m_s": 4.299172401428223,
+   "maxSpeed_hPerStep": 14.33,
+   "drift": 0.000046962843405196094
+  },
+  {
+   "step": 186,
+   "wall_ms": 20.18,
+   "hTiles": 356,
+   "resident": 158,
+   "free": 66,
+   "particles": 2767,
+   "regionsColdWarmHot": [
+    1123,
+    37,
+    88
+   ],
+   "maxSpeed_m_s": 4.259550094604492,
+   "maxSpeed_hPerStep": 14.2,
+   "drift": 0.00004170707392663624
+  },
+  {
+   "step": 187,
+   "wall_ms": 21.99,
+   "hTiles": 374,
+   "resident": 158,
+   "free": 66,
+   "particles": 2778,
+   "regionsColdWarmHot": [
+    1102,
+    40,
+    122
+   ],
+   "maxSpeed_m_s": 4.212315082550049,
+   "maxSpeed_hPerStep": 14.04,
+   "drift": 0.000037299009202682815
+  },
+  {
+   "step": 188,
+   "wall_ms": 20.13,
+   "hTiles": 357,
+   "resident": 158,
+   "free": 66,
+   "particles": 2789,
+   "regionsColdWarmHot": [
+    1144,
+    38,
+    82
+   ],
+   "maxSpeed_m_s": 4.101658821105957,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00003195846924866232
+  },
+  {
+   "step": 189,
+   "wall_ms": 19.8,
+   "hTiles": 369,
+   "resident": 158,
+   "free": 66,
+   "particles": 2797,
+   "regionsColdWarmHot": [
+    1145,
+    40,
+    79
+   ],
+   "maxSpeed_m_s": 4.101206302642822,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00002882196165661854
+  },
+  {
+   "step": 190,
+   "wall_ms": 20.43,
+   "hTiles": 376,
+   "resident": 156,
+   "free": 66,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1181,
+    38,
+    45
+   ],
+   "maxSpeed_m_s": 4.099377155303955,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00002153170076700326
+  },
+  {
+   "step": 191,
+   "wall_ms": 51.38,
+   "hTiles": 343,
+   "resident": 156,
+   "free": 68,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1153,
+    49,
+    46
+   ],
+   "maxSpeed_m_s": 4.10140323638916,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000022803257898912904
+  },
+  {
+   "step": 192,
+   "wall_ms": 24.69,
+   "hTiles": 325,
+   "resident": 156,
+   "free": 68,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1159,
+    43,
+    46
+   ],
+   "maxSpeed_m_s": 4.148506164550781,
+   "maxSpeed_hPerStep": 13.83,
+   "drift": 0.000022294635046149046
+  },
+  {
+   "step": 193,
+   "wall_ms": 19.64,
+   "hTiles": 329,
+   "resident": 156,
+   "free": 68,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1162,
+    39,
+    47
+   ],
+   "maxSpeed_m_s": 4.1453776359558105,
+   "maxSpeed_hPerStep": 13.82,
+   "drift": 0.000018479963650420122
+  },
+  {
+   "step": 194,
+   "wall_ms": 24,
+   "hTiles": 266,
+   "resident": 158,
+   "free": 66,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1163,
+    42,
+    43
+   ],
+   "maxSpeed_m_s": 4.1022748947143555,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000019158127454105265
+  },
+  {
+   "step": 195,
+   "wall_ms": 32,
+   "hTiles": 274,
+   "resident": 156,
+   "free": 66,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1147,
+    36,
+    81
+   ],
+   "maxSpeed_m_s": 4.100921154022217,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.000018479963650420122
+  },
+  {
+   "step": 196,
+   "wall_ms": 68.6,
+   "hTiles": 232,
+   "resident": 156,
+   "free": 68,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1145,
+    46,
+    57
+   ],
+   "maxSpeed_m_s": 4.1016998291015625,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00001932766840502655
+  },
+  {
+   "step": 197,
+   "wall_ms": 19.29,
+   "hTiles": 253,
+   "resident": 158,
+   "free": 66,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1140,
+    51,
+    57
+   ],
+   "maxSpeed_m_s": 4.101658344268799,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00001839519317495948
+  },
+  {
+   "step": 198,
+   "wall_ms": 19.59,
+   "hTiles": 259,
+   "resident": 156,
+   "free": 66,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1137,
+    54,
+    73
+   ],
+   "maxSpeed_m_s": 4.0994110107421875,
+   "maxSpeed_hPerStep": 13.66,
+   "drift": 0.00001839519317495948
+  },
+  {
+   "step": 199,
+   "wall_ms": 19.07,
+   "hTiles": 267,
+   "resident": 156,
+   "free": 68,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1124,
+    53,
+    71
+   ],
+   "maxSpeed_m_s": 4.1006035804748535,
+   "maxSpeed_hPerStep": 13.67,
+   "drift": 0.00001805611127311691
+  },
+  {
+   "step": 200,
+   "wall_ms": 19.12,
+   "hTiles": 236,
+   "resident": 156,
+   "free": 68,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1120,
+    56,
+    72
+   ],
+   "maxSpeed_m_s": 4.102558135986328,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000017717029371274337,
+   "catchFloorH": 0,
+   "catchChamberH": 236,
+   "presentedH": 236,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 201,
+   "wall_ms": 18.79,
+   "hTiles": 238,
+   "resident": 150,
+   "free": 68,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1161,
+    54,
+    33
+   ],
+   "maxSpeed_m_s": 4.1041975021362305,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000017886570322195623
+  },
+  {
+   "step": 202,
+   "wall_ms": 25.95,
+   "hTiles": 217,
+   "resident": 152,
+   "free": 72,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1114,
+    52,
+    34
+   ],
+   "maxSpeed_m_s": 4.103675842285156,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000017971340797656267
+  },
+  {
+   "step": 203,
+   "wall_ms": 22.18,
+   "hTiles": 185,
+   "resident": 150,
+   "free": 72,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1092,
+    56,
+    68
+   ],
+   "maxSpeed_m_s": 4.103830337524414,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000017886570322195623
+  },
+  {
+   "step": 204,
+   "wall_ms": 20.76,
+   "hTiles": 196,
+   "resident": 146,
+   "free": 74,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1090,
+    45,
+    65
+   ],
+   "maxSpeed_m_s": 4.103950500488281,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001805611127311691
+  },
+  {
+   "step": 205,
+   "wall_ms": 17.84,
+   "hTiles": 190,
+   "resident": 140,
+   "free": 78,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1079,
+    25,
+    64
+   ],
+   "maxSpeed_m_s": 4.103932857513428,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000016954095092128552
+  },
+  {
+   "step": 206,
+   "wall_ms": 17.08,
+   "hTiles": 180,
+   "resident": 138,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1077,
+    18,
+    25
+   ],
+   "maxSpeed_m_s": 4.103946685791016,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000016275931288443412
+  },
+  {
+   "step": 207,
+   "wall_ms": 18.96,
+   "hTiles": 180,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1063,
+    15,
+    26
+   ],
+   "maxSpeed_m_s": 4.103925704956055,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000016784554141207266
+  },
+  {
+   "step": 208,
+   "wall_ms": 17.26,
+   "hTiles": 182,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1063,
+    15,
+    26
+   ],
+   "maxSpeed_m_s": 4.103967189788818,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001602161986206148
+  },
+  {
+   "step": 209,
+   "wall_ms": 19.64,
+   "hTiles": 181,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1065,
+    12,
+    27
+   ],
+   "maxSpeed_m_s": 4.103959560394287,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000014919603681073126
+  },
+  {
+   "step": 210,
+   "wall_ms": 17.35,
+   "hTiles": 182,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1063,
+    15,
+    26
+   ],
+   "maxSpeed_m_s": 4.103990077972412,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000015767308435679554
+  },
+  {
+   "step": 211,
+   "wall_ms": 17.27,
+   "hTiles": 224,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1061,
+    17,
+    26
+   ],
+   "maxSpeed_m_s": 4.103962421417236,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000016360701763904053
+  },
+  {
+   "step": 212,
+   "wall_ms": 17.05,
+   "hTiles": 186,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1060,
+    18,
+    26
+   ],
+   "maxSpeed_m_s": 4.104001998901367,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001653024271482534
+  },
+  {
+   "step": 213,
+   "wall_ms": 18.91,
+   "hTiles": 184,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1062,
+    17,
+    25
+   ],
+   "maxSpeed_m_s": 4.104029655456543,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000016275931288443412
+  },
+  {
+   "step": 214,
+   "wall_ms": 70.7,
+   "hTiles": 185,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1064,
+    15,
+    25
+   ],
+   "maxSpeed_m_s": 4.104007244110107,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000017208406518510483
+  },
+  {
+   "step": 215,
+   "wall_ms": 22.9,
+   "hTiles": 220,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1063,
+    16,
+    25
+   ],
+   "maxSpeed_m_s": 4.104026794433594,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000018310422699498836
+  },
+  {
+   "step": 216,
+   "wall_ms": 18.44,
+   "hTiles": 193,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1062,
+    16,
+    26
+   ],
+   "maxSpeed_m_s": 4.104052543640137,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000019412438880487192
+  },
+  {
+   "step": 217,
+   "wall_ms": 18.55,
+   "hTiles": 181,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1060,
+    18,
+    26
+   ],
+   "maxSpeed_m_s": 4.104032039642334,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000019497209355947837
+  },
+  {
+   "step": 218,
+   "wall_ms": 20.1,
+   "hTiles": 191,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1060,
+    18,
+    26
+   ],
+   "maxSpeed_m_s": 4.104059219360352,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000019751520782329764
+  },
+  {
+   "step": 219,
+   "wall_ms": 18.44,
+   "hTiles": 191,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1060,
+    18,
+    26
+   ],
+   "maxSpeed_m_s": 4.104070663452148,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001966675030686912
+  },
+  {
+   "step": 220,
+   "wall_ms": 17.91,
+   "hTiles": 188,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1062,
+    17,
+    25
+   ],
+   "maxSpeed_m_s": 4.104032039642334,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000016954095092128552,
+   "catchFloorH": 0,
+   "catchChamberH": 188,
+   "presentedH": 188,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  },
+  {
+   "step": 221,
+   "wall_ms": 21.89,
+   "hTiles": 185,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1061,
+    18,
+    25
+   ],
+   "maxSpeed_m_s": 4.104077339172363,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000017208406518510483
+  },
+  {
+   "step": 222,
+   "wall_ms": 17.66,
+   "hTiles": 181,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1060,
+    19,
+    25
+   ],
+   "maxSpeed_m_s": 4.10405158996582,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000017377947469431765
+  },
+  {
+   "step": 223,
+   "wall_ms": 17.52,
+   "hTiles": 182,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1058,
+    21,
+    25
+   ],
+   "maxSpeed_m_s": 4.1040940284729,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001602161986206148
+  },
+  {
+   "step": 224,
+   "wall_ms": 17.29,
+   "hTiles": 182,
+   "resident": 138,
+   "free": 86,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1057,
+    22,
+    25
+   ],
+   "maxSpeed_m_s": 4.104086399078369,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000014580521779230555
+  },
+  {
+   "step": 225,
+   "wall_ms": 17.26,
+   "hTiles": 183,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1058,
+    22,
+    24
+   ],
+   "maxSpeed_m_s": 4.104122161865234,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000013393735122781557
+  },
+  {
+   "step": 226,
+   "wall_ms": 17.16,
+   "hTiles": 185,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1054,
+    19,
+    39
+   ],
+   "maxSpeed_m_s": 4.104096412658691,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000013902357975545413
+  },
+  {
+   "step": 227,
+   "wall_ms": 16.88,
+   "hTiles": 179,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1056,
+    18,
+    38
+   ],
+   "maxSpeed_m_s": 4.104113578796387,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000014156669401927342
+  },
+  {
+   "step": 228,
+   "wall_ms": 17.36,
+   "hTiles": 192,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1056,
+    18,
+    38
+   ],
+   "maxSpeed_m_s": 4.104086399078369,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000013902357975545413
+  },
+  {
+   "step": 229,
+   "wall_ms": 16.92,
+   "hTiles": 188,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1068,
+    20,
+    24
+   ],
+   "maxSpeed_m_s": 4.104111194610596,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000012969882745478342
+  },
+  {
+   "step": 230,
+   "wall_ms": 17.5,
+   "hTiles": 193,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1066,
+    21,
+    25
+   ],
+   "maxSpeed_m_s": 4.1040849685668945,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.0000122917189417932
+  },
+  {
+   "step": 231,
+   "wall_ms": 48.68,
+   "hTiles": 194,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1066,
+    21,
+    25
+   ],
+   "maxSpeed_m_s": 4.104104995727539,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001076585038350163
+  },
+  {
+   "step": 232,
+   "wall_ms": 17.58,
+   "hTiles": 194,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1066,
+    21,
+    25
+   ],
+   "maxSpeed_m_s": 4.104076385498047,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000010002916104355846
+  },
+  {
+   "step": 233,
+   "wall_ms": 16.94,
+   "hTiles": 194,
+   "resident": 139,
+   "free": 85,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1068,
+    18,
+    26
+   ],
+   "maxSpeed_m_s": 4.104102611541748,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000010681079908040988
+  },
+  {
+   "step": 234,
+   "wall_ms": 17.67,
+   "hTiles": 227,
+   "resident": 140,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1068,
+    18,
+    26
+   ],
+   "maxSpeed_m_s": 4.104076385498047,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000010341998006198417
+  },
+  {
+   "step": 235,
+   "wall_ms": 19.25,
+   "hTiles": 196,
+   "resident": 140,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1058,
+    17,
+    45
+   ],
+   "maxSpeed_m_s": 4.104099750518799,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.00001102016180988356
+  },
+  {
+   "step": 236,
+   "wall_ms": 20.84,
+   "hTiles": 194,
+   "resident": 140,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1058,
+    17,
+    45
+   ],
+   "maxSpeed_m_s": 4.104085445404053,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000011104932285344202
+  },
+  {
+   "step": 237,
+   "wall_ms": 25.81,
+   "hTiles": 188,
+   "resident": 140,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1057,
+    18,
+    45
+   ],
+   "maxSpeed_m_s": 4.104472637176514,
+   "maxSpeed_hPerStep": 13.68,
+   "drift": 0.000011189702760804845
+  },
+  {
+   "step": 238,
+   "wall_ms": 18.6,
+   "hTiles": 192,
+   "resident": 140,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1074,
+    19,
+    27
+   ],
+   "maxSpeed_m_s": 4.105818271636963,
+   "maxSpeed_hPerStep": 13.69,
+   "drift": 0.000010935391334422916
+  },
+  {
+   "step": 239,
+   "wall_ms": 17.52,
+   "hTiles": 186,
+   "resident": 140,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1073,
+    19,
+    28
+   ],
+   "maxSpeed_m_s": 4.105684280395508,
+   "maxSpeed_hPerStep": 13.69,
+   "drift": 0.000010681079908040988
+  },
+  {
+   "step": 240,
+   "wall_ms": 18.25,
+   "hTiles": 179,
+   "resident": 140,
+   "free": 84,
+   "particles": 2792,
+   "regionsColdWarmHot": [
+    1072,
+    20,
+    28
+   ],
+   "maxSpeed_m_s": 4.106328010559082,
+   "maxSpeed_hPerStep": 13.69,
+   "drift": 0.000010681079908040988,
+   "catchFloorH": 0,
+   "catchChamberH": 179,
+   "presentedH": 179,
+   "origin": [
+    -27,
+    -28,
+    -31
+   ]
+  }
+ ]
+}

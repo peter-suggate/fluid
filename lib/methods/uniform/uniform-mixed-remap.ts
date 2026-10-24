@@ -15,6 +15,7 @@ import {uniformBufferedWork} from "./uniform-buffered-work";
 import {uniformKeyGroups} from "./uniform-lattice-address";
 import {uniformMixedRemapCapacity} from "./uniform-mixed-remap-capacity";
 import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
+import {UNIFORM_MIXED_HANGING_RECORD} from "./uniform-mixed-velocity-sampling.wgsl";
 
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
 /** Workgroups of each remap launch (see applyGpu). */
@@ -70,6 +71,11 @@ export class UniformMixedRemap {
   * receipt, bound per changes buffer. */
  private readonly listResources:GPUBindGroupLayout;
  private listGroup?:{readonly changes:GPUBuffer;readonly receipt:GPUBuffer;readonly group:UniformDetailGroup};
+ /** adopt's group 1: the live ownership's adoptionTargets and the source's
+  * hanging slot table, bound per (source topology, live hanging) pair. */
+ private readonly adoptLayout:GPUBindGroupLayout;
+ private adoptGroup?:{readonly topology:GPUBuffer;readonly hanging?:GPUBuffer;readonly group:GPUBindGroup};
+ private adoptPipeline?:GPUComputePipeline;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields,private readonly solid?:UniformMixedSolid,private readonly surfaceOnly=false){
   const capacity=uniformMixedRemapCapacity(ownership.layout.lattice.dimensions,ownership.capacity.tiles,Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize),!!solid);
   this.planeCapacity=capacity.corners;
@@ -103,6 +109,11 @@ export class UniformMixedRemap {
   this.statusLayout=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
   this.idleStatus=device.createBuffer({label:"Uniform mixed remap idle status",size:UNIFORM_MIXED_STATUS_WORDS*4,usage:GPUBufferUsage.STORAGE});
   this.statusGroup=this.bindStatusGroup(this.idleStatus);this.cellsGroup=this.bindCellsGroup(this.idleStatus);
+  const sampled=!!ownership.adoptionTargets.hanging;
+  this.adoptLayout=device.createBindGroupLayout({label:"Uniform mixed remap adopt",entries:[
+   {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+   ...(sampled?[{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}},{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
+  ]});
  }
  private bindStatusGroup(status:GPUBuffer):UniformDetailGroup{return uniformDetailGroup(this.device,{layout:this.statusLayout,entries:[{binding:0,resource:{buffer:status,size:UNIFORM_MIXED_STATUS_WORDS*4}}]});}
  private bindCellsGroup(status:GPUBuffer):UniformDetailGroup{return uniformDetailGroup(this.device,{layout:this.cellsResources,entries:[
@@ -138,7 +149,9 @@ export class UniformMixedRemap {
    await Promise.all(names.map(async name=>{const entryPoint=name.split("@")[0]!,twin:Record<string,number>=solid&&REMAP_FREE_TWINS.includes(entryPoint)?name.endsWith("@free")?{umSolidFree:1}:{umSolidTwinned:1}:{};
     this.pipelines.set(name,await uniformMixedSolidPipeline(solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...twin,...s}}})));}));
   };
-  await Promise.all([compile("list",this.resources,["markChanged"]),compile("faces",this.resources,["remapFaces","copyFaces"]),compile("list",this.listResources,["markListed"]),compile("cells",this.cellsResources,["remapCells","planeList","planeSums","planeFinish"])]);
+  const adopt=this.device.createShaderModule({label:"Uniform mixed remap adopt",code:uniformMixedAdoptWGSL(this.tiles,!!this.ownership.adoptionTargets.hanging)});
+  const adopting=this.device.createComputePipelineAsync({label:"Uniform mixed remap adopt",layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.adoptLayout]}),compute:{module:adopt,entryPoint:"adopt"}}).then(p=>{this.adoptPipeline=p;});
+  await Promise.all([adopting,compile("list",this.resources,["markChanged"]),compile("faces",this.resources,["remapFaces","copyFaces"]),compile("list",this.listResources,["markListed"]),compile("cells",this.cellsResources,["remapCells","planeList","planeSums","planeFinish"])]);
  }
  /** before: encoded ahead of the remap pass with the target's topology
   * (tile words from word 0): the detail storage's patch admission. */
@@ -186,7 +199,7 @@ export class UniformMixedRemap {
   const target=this.targetGroup.group.group;
   const grid=this.work??Math.min(REMAP_GRID,this.tiles);
   this.encodePass(encoder,false,target,extension,grid,this.listGroup.group);
-  this.ownership.adoptGpu(encoder,source);adopted?.(encoder);this.encodePass(encoder,true,target,extension,grid);
+  this.ownership.adoptGpu(encoder,source,e=>this.encodeAdopt(e,source));adopted?.(encoder);this.encodePass(encoder,true,target,extension,grid);
  }
  /** applyGpu's launch width (uniformBufferedWork: parallelism only, every
   * kernel strides the live list). listed: a completed frame's list. reach:
@@ -235,7 +248,65 @@ export class UniformMixedRemap {
   const solid=this.solid,pipeline=this.pipelines.get(name)!,free=this.pipelines.get(`${name}@free`);
   pass.setBindGroup(2,group.group);if(free){pass.setPipeline(uniformDetailPick(free));pass.dispatchWorkgroups(gx,gy);}pass.setPipeline(uniformDetailPick(solid?solid.select(pipeline):pipeline));pass.dispatchWorkgroups(gx,gy);
  }
+ /** adoptGpu's live copy: the source's words a reader can reach into the
+  * live ownership, a fixed grid striding them (uniformMixedAdoptWGSL). */
+ private encodeAdopt(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers):void{
+  const live=this.ownership.adoptionTargets;
+  if(this.adoptGroup?.topology!==source.topology||this.adoptGroup.hanging!==live.hanging)this.adoptGroup={topology:source.topology,hanging:live.hanging,group:this.device.createBindGroup({label:"Uniform mixed remap adopt",layout:this.adoptLayout,entries:[
+   {binding:0,resource:{buffer:live.topology}},{binding:1,resource:{buffer:live.support}},
+   ...(live.hanging?[{binding:2,resource:{buffer:source.slots}},{binding:3,resource:{buffer:live.hanging}}]:[]),
+  ]})};
+  const pass=encoder.beginComputePass(REMAP_ADOPT_PASS);
+  pass.setPipeline(this.adoptPipeline!);pass.setBindGroup(0,this.targetGroup!.group.group);pass.setBindGroup(1,this.adoptGroup.group);
+  pass.dispatchWorkgroups(UNIFORM_LIVE_KEY_GROUPS);pass.end();
+ }
  destroy():void{this.worklist.destroy();this.idleStatus.destroy();}
+}
+const REMAP_ADOPT_PASS:GPUComputePassDescriptor={label:"Uniform mixed remap adopt"};
+
+/** The adoption copy (UniformMixedOwnership.adoptGpu's copyLive): group 0 the
+ * source generation (the ownership's layout), group 1 the live ownership's
+ * words and, sampled, the hanging slot tables. Of the whole-range copy it
+ * keeps the words a reader can reach:
+ * - a key's words (its tile word, two stencil words, blend mask and slot)
+ *   for the source's live tiles, every key of a held block, read in its h
+ *   then 4h list, and for the AIR and SOLID sentinel blocks' keys, which an
+ *   unstored tile resolves to (umTileAt); no reader reaches another key;
+ * - the h and 4h lists, the support's h list, seam lists and regular 4h list
+ *   (with their headers) and the slot-to-tile table, each by its count, which
+ *   bounds every reader of it.
+ * A lane a word group, striding the concatenation on a fixed grid. */
+export function uniformMixedAdoptWGSL(tiles:number,sampled:boolean):string{
+ return /* wgsl */`
+@group(0) @binding(0) var<storage,read> srcTopology:array<u32>;
+@group(0) @binding(1) var<uniform> srcCounts:vec4u;
+@group(0) @binding(2) var<storage,read_write> srcSupport:array<u32>;
+@group(1) @binding(0) var<storage,read_write> topology:array<u32>;
+@group(1) @binding(1) var<storage,read_write> support:array<u32>;
+${sampled?`@group(1) @binding(2) var<storage,read> srcSlots:array<u32>;
+@group(1) @binding(3) var<storage,read_write> hanging:array<u32>;`:""}
+const N:u32=${tiles}u;
+// The support lists: the h list, the seam header and lists, the regular 4h header and list.
+const FINE:u32=6u*N+16u;const SEAMS:u32=7u*N+16u;const REGULAR:u32=8u*N+20u;
+fn copyKey(t:u32){
+ topology[t]=srcTopology[t];topology[2u*N+2u*t]=srcTopology[2u*N+2u*t];topology[2u*N+2u*t+1u]=srcTopology[2u*N+2u*t+1u];topology[4u*N+t]=srcTopology[4u*N+t];
+ ${sampled?"hanging[t]=srcSlots[t];":""}
+}
+@compute @workgroup_size(64) fn adopt(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let live=srcCounts.x+srcCounts.y;let seams=srcSupport[SEAMS]+srcSupport[SEAMS+1u];let regular=srcSupport[REGULAR];
+ ${sampled?`let slots=min(seams,(arrayLength(&hanging)-2u*N)/${UNIFORM_MIXED_HANGING_RECORD}u);`:"let slots=0u;"}
+ // [0, live) a live tile and its list entry; then the two sentinel blocks'
+ // keys; then the support words; then the slot-to-tile table.
+ let keys=live+1024u;let fine=keys+srcCounts.x;let seamEnd=fine+4u+seams;let regularEnd=seamEnd+4u+regular;let total=regularEnd+slots;
+ for(var j=gid.x;j<total;j+=64u*groups.x){
+  if(j<live){let t=srcTopology[N+j];topology[N+j]=t;copyKey(t);}
+  else if(j<keys){let s=j-live;copyKey(select(N-1024u+s,s,s<512u));}
+  else if(j<fine){let w=FINE+j-keys;support[w]=srcSupport[w];}
+  else if(j<seamEnd){let w=SEAMS+j-fine;support[w]=srcSupport[w];}
+  else if(j<regularEnd){let w=REGULAR+j-seamEnd;support[w]=srcSupport[w];}
+  ${sampled?"else{let w=N+j-regularEnd;hanging[w]=srcSlots[w];}":""}
+ }
+}`;
 }
 
 /** Frame-internal transfer between the h/4h simulation ownership and the
@@ -346,7 +417,7 @@ export class UniformMixedOwnershipTransfer {
   const pass=e.beginComputePass(entry==="toPressure"?TRANSFER_TO_PRESSURE_PASS:TRANSFER_TO_SIMULATION_PASS);
   pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,group.group);
   const weighted=!!this.solid&&entry==="toPressure";if(weighted)pass.setBindGroup(2,this.solid!.tileGroup);
-  this.simulation.dispatchCounted(pass,weighted?this.solid!.select(coarse):coarse,this.pages);
+  this.simulation.dispatchCounted(pass,weighted?this.solid!.select(coarse):coarse,this.pages,"residentPages");
   // A grid-stride over the h tiles (umCounts.x): sized by them, and not
   // issued while the simulation holds no h-tile capacity.
   if(entry==="toSimulation"&&this.projectedBand)pass.setBindGroup(2,this.projectedBand.group);

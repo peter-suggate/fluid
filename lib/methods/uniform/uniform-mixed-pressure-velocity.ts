@@ -596,6 +596,6 @@ fn ubPressure(r:u32)->f32{return pressures[umPageTile(r,0u)]-bitcast<f32>(bulkRe
  encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:UniformDetailGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
   const pass=encoder.beginComputePass(entry==="rhs"?RHS_PASS:PROJECT_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.coarse?this.solid.coarse!.bindGroup:this.solid.bindGroup);// The all-4h ownership's residentAll jobs are its resident pages.
-  this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline,this.pages);pass.end();
+  this.ownership.dispatchCounted(pass,this.solid?.select(pipeline)??pipeline,this.pages,"residentAll");pass.end();
  }
 }

@@ -9,6 +9,13 @@ export function profileRegionTierCommands(device: GPUDevice, timings = false) {
   let current: RegionTierCommands | undefined;
   const queries=timings?device.createQuerySet({type:"timestamp",count:64}):undefined;
   let timed:{label:string;index:number}[]=[];
+  // Pipelines by name (label, else module label and entry point): the shared
+  // frame schedule's work is counted by pipeline.
+  const names=new WeakMap<GPUComputePipeline,string>();
+  const nameOf=(d:GPUComputePipelineDescriptor)=>d.label||`${d.compute.module.label||"module"}:${d.compute.entryPoint??"main"}`;
+  const devices=Object.getPrototypeOf(device) as GPUDevice,create=devices.createComputePipeline,createAsync=devices.createComputePipelineAsync;
+  devices.createComputePipeline=function(this:GPUDevice,d:GPUComputePipelineDescriptor){const p=create.call(this,d);names.set(p,nameOf(d));return p;};
+  devices.createComputePipelineAsync=async function(this:GPUDevice,d:GPUComputePipelineDescriptor){const p=await createAsync.call(this,d);names.set(p,nameOf(d));return p;};
   const labels=new Set(["Uniform shared frame schedule","Narrow-band FLIP regional air update","Narrow-band FLIP crossing search","Narrow-band FLIP retire empty air","Narrow-band FLIP shared frame crossing domain","APIC bin prefix scan","Narrow-band FLIP clear occupied bins","Narrow-band FLIP occupied cell offsets"]);
   prototype.beginComputePass = function(descriptor?: GPUComputePassDescriptor) {
     let measured=descriptor;
@@ -19,8 +26,16 @@ export function profileRegionTierCommands(device: GPUDevice, timings = false) {
     }
     const pass = begin.call(this, measured);
     if (current) {
-      const row = current[String(descriptor?.label ?? "unlabelled")] ??= { passes: 0, dispatches: 0, indirectDispatches: 0, workgroups: 0 };
+      const label = String(descriptor?.label ?? "unlabelled"), rows = current;
+      let row = rows[label] ??= { passes: 0, dispatches: 0, indirectDispatches: 0, workgroups: 0 };
       row.passes++;
+      if (label === "Uniform shared frame schedule") {
+        const set = pass.setPipeline;
+        pass.setPipeline = function(pipeline: GPUComputePipeline) {
+          row = rows[`schedule: ${names.get(pipeline) ?? (pipeline.label || "unnamed")}`] ??= { passes: 0, dispatches: 0, indirectDispatches: 0, workgroups: 0 };
+          set.call(this, pipeline);
+        };
+      }
       const indirect = pass.dispatchWorkgroupsIndirect;
       pass.dispatchWorkgroupsIndirect = function(buffer: GPUBuffer, offset: number) { row.dispatches++; row.indirectDispatches++; indirect.call(this, buffer, offset); };
       const dispatch = pass.dispatchWorkgroups;
@@ -41,5 +56,5 @@ export function profileRegionTierCommands(device: GPUDevice, timings = false) {
         const result=timed.map(({label,index})=>({label,ms:Number(times[index+1]!-times[index]!)/1e6}));read.unmap();return result;
       }finally{resolve.destroy();read.destroy();}
     },
-    destroy: () => { prototype.beginComputePass = begin;queries?.destroy(); } };
+    destroy: () => { prototype.beginComputePass = begin;devices.createComputePipeline=create;devices.createComputePipelineAsync=createAsync;queries?.destroy(); } };
 }

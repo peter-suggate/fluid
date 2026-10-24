@@ -202,6 +202,10 @@ export interface UniformRegionHeatSources {
    * refinement remains independent. "motion" retains absolute-motion tiers
    * and their wider neighbour activation for comparison. */
   tiering?:"error"|"motion";
+  /** NB-FLIP coldSurface "warm": in error mode a region with a free-surface
+   * physical reader (not submerged) is at least WARM every frame (trigger
+   * bit 64, as a displacement over budget). */
+  surfaceWarm?:boolean;
 }
 
 export class UniformRegionHeat {
@@ -413,6 +417,10 @@ var<workgroup> rhFine:atomic<u32>;
      // frames; the momentum term grows as N^2/2 from rest). Otherwise a
      // smooth wave thaws, refreshes, refreezes and thaws every few frames.
      if(refreshed){let n=rh.horizon;projected=n*max(0.0,surface+pressure+frozen-floor)+0.5*n*n*momentum;}
+     ${s.surfaceWarm?`// coldSurface "warm": a free surface is never held. Holding it omits
+     // the surface's transport, whose volume (lag times area) no
+     // displacement budget bounds over time.
+     if(!submerged){trigger|=64u;}`:""}
     }`:"displacement+=rh.dt*(speed+rhColdSpeed(region))*rh.hInverse+rh.pressure*dp;"}
     if(max(displacement,projected)>${error?"rhFreezeBudget(submerged,fine)":"0.002"}){trigger|=64u;}
    }
