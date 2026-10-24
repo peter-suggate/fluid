@@ -38,7 +38,8 @@
  * toSimulation.velocity, band.velocity) the three face velocities and the
  * six-face divergence of every cell. A texel at cell c, component a, is the
  * velocity on the cell's upper a face. --slab-z=z,z,... prints several z
- * planes of the same window.
+ * planes of the same window. --particles=x0,x1,y0,y1,z0,z1 lists, at the
+ * --stages steps, each cell of that box (inclusive) with its live particles.
  * --lock=<file> builds the solver outside the GPU lock and takes it for the
  * steps (tools/gpu-hold.ts). */
 import { pathToFileURL } from "node:url";
@@ -64,7 +65,7 @@ assert.ok(sceneId && Number.isInteger(steps) && steps >= 1, "usage: probe-nbflip
 const option = (name: string) => process.argv.find(a => a.startsWith(`--${name}=`))?.split("=")[1];
 const dt = Number(option("dt") ?? 1 / 60), top = Number(option("top") ?? 6), over = Number(option("over") ?? 0), cells = Number(option("cells") ?? 8);
 // With --stages, a window of raw face texels on one z plane as chosen stages leave it: --slab=x0,x1,y0,y1,z [--slab-stages=forces.scratch,toSimulation.velocity,band.velocity].
-const slab = option("slab")?.split(",").map(Number), slabZ = option("slab-z")?.split(",").map(Number), slabStages = new Set((option("slab-stages") ?? "forces.scratch,toSimulation.velocity,band.velocity").split(","));
+const slab = option("slab")?.split(",").map(Number), particleBox = option("particles")?.split(",").map(Number), slabZ = option("slab-z")?.split(",").map(Number), slabStages = new Set((option("slab-stages") ?? "forces.scratch,toSimulation.velocity,band.velocity").split(","));
 const stageSteps = new Set((option("stages") ?? "").split(",").filter(Boolean).map(Number));
 // --capture=<stage,...> keeps the named stages alone (every stage when absent).
 const captured = option("capture") ? new Set(option("capture")!.split(",")) : undefined;
@@ -168,6 +169,26 @@ try {
       console.log(`  tile (${coord.join(",")}) cells ${coord.map(c => 4 * c).join(",")} page (${coord.map(c => c >> 3).join(",")}) width ${width} wet ${bit(census.wetOffset, t)} near ${bit(census.nearOffset, t)} speed ${s.toFixed(3)} low ${[0, 1, 2].map(k => (bound(t, k) * cell).toFixed(2)).join(" ")} high ${[3, 4, 5].map(k => (bound(t, k) * cell).toFixed(2)).join(" ")}`);
     }
     const after = failure ? before : await readMixedTileWords(device, solver);
+    if (particleBox && stageSteps.has(step) && !failure) {
+      // Each cell of the box: its live particles, their mean velocity and the
+      // mean grid velocity the move gave them (float 8), both in cells a step.
+      const flip = (frame as unknown as { narrowBandFlip: { state: GPUBuffer; activeParticles: GPUBuffer; particleStride: number } }).narrowBandFlip;
+      const extent = new Uint32Array((await readBuffer(flip.state, 16)).buffer)[0]!, stride = flip.particleStride;
+      const records = new Float32Array((await readBuffer(flip.activeParticles, Math.max(16, extent * stride * 4))).buffer);
+      const [x0, x1, y0, y1, z0, z1] = particleBox as [number, number, number, number, number, number];
+      const cells = new Map<string, number[]>();
+      for (let i = 0; i < extent; i++) {
+        const at = i * stride; if (!(records[at + 3]! > 0)) continue;
+        const c = [0, 1, 2].map(k => Math.floor(records[at + k]!));
+        if (c[0]! < x0 || c[0]! > x1 || c[1]! < y0 || c[1]! > y1 || c[2]! < z0 || c[2]! > z1) continue;
+        const key = c.join(","), sum = cells.get(key) ?? [0, 0, 0, 0, 0, 0, 0];
+        sum[0]! += 1; for (let k = 0; k < 3; k++) { sum[1 + k]! += records[at + 4 + k]!; sum[4 + k]! += records[at + 8 + k]!; }
+        cells.set(key, sum);
+      }
+      console.log(`   particles step ${step} (end of the step), box ${particleBox.join(",")}: cell count | mean velocity | mean grid velocity taken (raw units)`);
+      for (const [key, sum] of [...cells].sort((a, b) => { const p = a[0].split(",").map(Number), q = b[0].split(",").map(Number); return p[2]! - q[2]! || p[1]! - q[1]! || p[0]! - q[0]!; }))
+        console.log(`    (${key}) ${sum[0]} | ${[1, 2, 3].map(k => (sum[k]! / sum[0]!).toFixed(3)).join(" ")} | ${[4, 5, 6].map(k => (sum[k]! / sum[0]!).toFixed(3)).join(" ")}`);
+    }
     if (taken.length) {
       const [phi, volume] = failure ? [undefined, undefined] : await Promise.all([readMixedTexture(device, solver.vertexPhiTexture!), readMixedTexture(device, solver.volumeTexture)]);
       if (slab && phi && volume) {
