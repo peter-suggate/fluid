@@ -301,7 +301,7 @@ function audit(words: Uint32Array, table: Uint32Array, records: Uint32Array, lab
   const layout = createUniformMixedLayout(boxLattice, [], 4, undefined, boxAddress), ownership = new UniformMixedOwnership(device, layout, false, 0);
   const mirror = ownership.pageMirror, l = uniformBlockNeighbourLayout(boxAddress.blocks), table = boxAddress.seed.table, records = boxAddress.seed.blocks;
   if (mirror.offset !== 5 * boxKeys) fail(`ownership: the page table is at word ${mirror.offset}, expected ${5 * boxKeys}`);
-  const size = 4 * (5 * boxKeys + l.end + uniformDetailTableWords(boxLattice.dimensions));
+  const size = 4 * (5 * boxKeys + l.end + uniformDetailTableWords());
   if (mirror.buffer.size !== size) fail(`ownership: the topology is ${mirror.buffer.size} bytes, expected ${size}`);
   const built = await read(mirror.buffer, 4 * mirror.offset);
   same(built.subarray(0, l.rows), boxAddress.seed.tail, "ownership: page table and block records");

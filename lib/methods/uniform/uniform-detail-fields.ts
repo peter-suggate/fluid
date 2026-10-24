@@ -23,10 +23,11 @@ const MIN_PATCH_EDGE=16;
 const HEADER=UNIFORM_DETAIL_HEADER_WORDS;
 /** Sticky bits in umSupport[UM_DETAIL_VIOLATION], one per class. */
 export const UNIFORM_DETAIL_VIOLATION={cell:1,face:2,vertex:4,atlas:8} as const;
-/** Words the topology tail reserves: the table for the smallest patch edge,
- * then the locator (the table's first word index: a consumer that does not
- * know the lattice finds the table from the buffer's last word). */
-export function uniformDetailTableWords(dims:readonly number[]):number{return HEADER+dims.reduce((n,d)=>n*Math.ceil(d/MIN_PATCH_EDGE),1)+1;}
+/** Words the topology tail reserves: the table (table(): the header and the
+ * one directory word of packed storage, whatever the lattice), then the
+ * locator (the table's first word index: a consumer that does not know the
+ * lattice finds the table from the buffer's last word). */
+export function uniformDetailTableWords():number{return HEADER+2;}
 
 export interface UniformDetailClassLayout{
  /** Atlas slot pitch: P, or P+1 for packed vertex slots. */
