@@ -10,13 +10,16 @@ export const RESERVOIR_SEEP_CAMERA: Partial<CameraState> = {
 
 /** A large quiet reservoir drives a tiny jet solely through hydrostatic head.
  * Keep the throat at h when rebuilding the lattice: this is a resolution
- * stress scene, not a geometrically scaled nozzle benchmark. */
-export function createReservoirSeepScene(cellSize_m = RESERVOIR_SEEP_CELL_M): SceneDescription {
+ * stress scene, not a geometrically scaled nozzle benchmark. `widthScale`
+ * lengthens both chambers about the middle wall and `depthScale` the span,
+ * at the same h and head (the scale ladder's box variants). */
+export function createReservoirSeepScene(cellSize_m = RESERVOIR_SEEP_CELL_M,
+  { widthScale = 1, depthScale = 1 }: { readonly widthScale?: number; readonly depthScale?: number } = {}): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = RESERVOIR_SEEP_ID;
   scene.duration_s = 20;
   scene.container = {
-    width_m: 2.56, height_m: 1.28, depth_m: 0.32,
+    width_m: 2.56 * widthScale, height_m: 1.28, depth_m: 0.32 * depthScale,
     fillFraction: 0, top: "open", fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: cellSize_m, brickSize_cells: 8 };

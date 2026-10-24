@@ -1,0 +1,57 @@
+{
+ "tag": "seep-1.25mm-w0.75-d0.125",
+ "cell_m": 0.00125,
+ "widthScale": 0.75,
+ "depthScale": 0.125,
+ "lattice": [
+  1536,
+  1024,
+  32
+ ],
+ "boxCells": 50331648,
+ "boxPages": [
+  48,
+  32,
+  1
+ ],
+ "poolBlocks": 1042,
+ "dt": 0.016666666666666666,
+ "values": {},
+ "plan": true,
+ "residentPages": 676,
+ "checks": [
+  {
+   "check": "page window, per axis",
+   "owner": "W7",
+   "ok": true,
+   "detail": "48x32x1 pages"
+  },
+  {
+   "check": "seed residency (host pass over every cell)",
+   "owner": "W1",
+   "ok": true,
+   "detail": "676 resident pages of 1040 slots, 8903 ms host"
+  },
+  {
+   "check": "lattice address: window y, block grid (<= 3968 blocks)",
+   "owner": "W7",
+   "ok": true,
+   "detail": "1042 blocks, block grid 8x8x17"
+  },
+  {
+   "check": "layout builder, extension hierarchy, region dynamics (<= 8191 blocks, plan section 1.3)",
+   "owner": "W6/W7",
+   "ok": true,
+   "detail": "1042 blocks"
+  },
+  {
+   "check": "memory at today's block cost",
+   "owner": "W6",
+   "ok": false,
+   "detail": "1042 blocks x 16 MiB = 16.3 GiB, past 16 GiB of a 32 GiB machine"
+  }
+ ],
+ "blockers": [
+  "W6: memory at today's block cost"
+ ]
+}

@@ -236,6 +236,35 @@ The head is (¾ − ¼)·1.28 m = 0.64 m, so the jet leaves at about 3.5 m/s. Th
 
 The known band-face speed fatal is at 25–47 cells a step (`domainless-nbflip-remaining`). The rules are no substeps and 1/60 s everywhere. So the h band and residency must reach the jet's next position by velocity projection, and the band must tolerate a stream that crosses several bricks a step. This is a physics decision (§6, item 2), not just plumbing.
 
+### 3.4 Scale ladder (W9, measured)
+`tools/probe-scale-ladder.ts` builds the seep at a cell size (throat at h, `--width`/`--depth` scale the box at the same head), constructs the production solver with an explicit pool and reports the first failure, bytes by class, live counts, jet speed in h a step and catch-floor h tiles. `--plan` evaluates every host-side limit without a GPU. Summaries: `artifacts/scale-ladder/`.
+
+```
+env WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/probe-scale-ladder.ts \
+  --cell=0.0025 [--width=W] [--depth=D] [--pool=N] [--steps=10] [--hold=/private/tmp/claude-501/fluid-gpu-run.sh] [--plan]
+```
+
+**First blocker per rung (main at 8010cd35, after W1 and W8's tail; plan checks, no GPU).**
+
+| Rung | Lattice | Pool (blocks) | First blocker | Owner |
+|---|---|---|---|---|
+| 5 mm (control) | 512×256×64 | 226 (160 resident pages) | none; runs | — |
+| 2.5 mm | 1024×512×128 | 1442 (1008 resident) | memory: 22.5 GiB at 16 MiB a block | W6 |
+| 2.5 mm, pool 64 | 1024×512×128 | 64 | seed holds more pages than the pool | W6 (pool sized by memory) |
+| 2.5 mm, ¼ depth | 1024×512×32 | 362 (252 resident) | none at the plan; 5.7 GiB | — |
+| 2.5 mm, ½ depth | 1024×512×64 | 722 (504 resident) | none at the plan; 11.3 GiB (timing lane only) | — |
+| 2.5 mm ×1.5 width | 1536×512×128 | 2082 (1456 resident) | memory: 32.5 GiB | W6 |
+| 2.5 mm ×2 width | 2048×512×128 | 2722 (1904 resident) | 64 pages on x, past the window's 62 | W7 |
+| 1.25 mm | 2048×1024×256 | 10882 (7072 resident) | 64 pages on x, past the window's 62 | W7 |
+| 1.25 mm, ¼ width, ⅛ depth | 512×1024×32 | 402 (260 resident) | none at the plan; 6.3 GiB | — |
+| 1.25 mm, ¾ width, ⅛ depth | 1536×1024×32 | 1042 (676 resident) | memory: 16.3 GiB | W6 |
+
+**Behind the first blocker** (each check on its own): 2.5 mm ×2 width: 42.5 GiB (W6). 1.25 mm: a block grid z of 171 > 62, i.e. more than 3968 blocks (W6/W7); 170 GiB (W6); the seed residency's host pass, 100–230 s over 537M cells on a loaded machine (W1). The box-sized device checks (3D texture extent, boxCells·24 and ·40 bindings, which also failed 1.25 mm and 2.5 mm ×2 width at 0deb44ee) went with W1's 8bf2039e, and the 4096-block page tail with W8's super-block tail (51f3b614).
+
+**With the page window and memory both fixed, the next binding limit is the block grid**: 3968 blocks is 62 GiB at today's 16 MiB a block, so memory binds first until W6 cuts the block's cost; after that, W7's directory must lift the grid before 1.25 mm (10882 blocks).
+
+Before 877f9138 the 1.25 mm refusal came after 452 s of host passes; 52b9daca keeps it ahead of them now that the window check lives in the address (`uniformLatticeWindowBox`). c406a706 removed the per-cell allocations of the host initial-liquid passes (seep GC 9.3 s → 2.4 s at 5 mm, hashes identical).
+
 ## 4. Phases
 Each phase ends with numbers, the letters A/B, the analytic suite (no regressions against `nbflip-analytic-correctness` round 5) and a commit. Physics changes sit behind NB-FLIP params, and the old path stays the default until the A/B passes.
 
