@@ -373,3 +373,66 @@ Peter: "Implement all of it using parallel agents so that we can move fast." Eac
 | W6 bricks | 2, then 3 (storage half) | h fields onto persistent bricks; blocks keep 4h only; then the super-block tree | letters A/B; bytes match §3.1 |
 
 The W6 storage moves follow the W1–W3 merges, because they rewrite the same addressing.
+
+### 7.1 W4 results (16h physics, branch `worktree-agent-a52ae86e35fe7c7ab`, 2026-10-25)
+NB-FLIP param `bulkTier: "off" | "16h"`, default `"off"`. Commits: 28c303bd (the tier, CPU twin, probe), 2f712b94 (detail-field binding), e36d90e9 (row offsets, live frozen faces), 8a70b571 (glued level-2 rows) reverted by 70e81733.
+
+**Design.**
+- **Unit:** a 16h owner is one region (4³ tiles = one 16h cell). Selection is a per-region kernel (`uniform-bulk-tier.ts`) after region heat; its CPU twin and rules live in `uniform-bulk-tier-reference.ts`.
+- **Storage (for W6 to move):** constrained, on today's storage. A member's data stays in its 64 tiles' 4h storage, plus a record buffer (flags, hold, error, counts, member list, seam heads, the member's 16h pressure and row offset) and an r32float faces texture (128 texels a region: six face means and each seam subface's value). W6 replaces the 64-tile constraint with a 16h slot holding the same record; the rules don't change.
+- **Criteria:**
+  - *Structural* over the 12³-tile neighbourhood (one 16h cell of margin): no h band tile, HOT region, air, cut tile, open tile above 5.5 h deep, or closed own tile, and reach `speed·dt ≤ 8 h`. SOLID pages and closed tiles beside it are walls. This also gives the grading: h is at least one 4h region away on faces, edges and corners.
+  - *Error:* the Sato high-pass one level up, `max |u − prolong(restrict u)| < 0.1·speed + 0.002·h/dt`, on each axis's 5×16 4h faces, with restrict as the V-weighted face mean and prolong linear between the two face means.
+  - *Hysteresis:* enter after 30 consecutive passing frames; leave at once on structure or at an error above twice the threshold.
+- **Pressure:**
+  - A member's 64 arena rows take one correction: the V-cycle update is the region mean on member lanes, so their sum is the 16h row. Each row keeps its offset from the region mean, so the hydrostatic profile stays in the rows other stages read.
+  - The operator couples a member at its 16h pressure (its rows' start mean): member↔member at 16h spacing, member↔native at 10h (the 4h↔16h seam, reusing the h↔4h head form at ratio 4: native start slope × tangential offset).
+  - Level-2 correction couplings stay native. Gluing them to the member's true couplings (8a70b571) sent the rest probe HOT at step 60, so it was reverted.
+  - The MG levels, tail and warm start are unchanged (W8's).
+- **Seam and faces:**
+  - Inside a member, every 4h face is prolonged linearly from the six face means.
+  - A face mean is the V-weighted sum of its 4×4 subfaces /16 (reflux). The natives across a seam see the subface values, and their sum is the 16h flux exactly.
+  - Frozen (COLD) member faces are written live as `bulk − umColdFaceTerm`, with no correction charged to the freeze budget.
+- **Remap:** a refine leaves the 4h faces and rows as they are (the prolonged field is already stored). A coarsen takes the V-weighted face means. A uniform or axis-linear field survives both exactly.
+- **Tests** (`tests/uniform-bulk-tier.test.ts`): remap exactness, hysteresis, grading/structure, the hydrostatic composite rest state across seams, and a divergence-free projection with the reflux identity.
+
+**Gates** (check mode unless marked).
+- **First run:** bulkTier=16h first ran the closed-throat rest scene at 2f712b94: 248 members at step 45, zero drift.
+- **1. Hydrostatic rest** (`reservoir-seep` 5 mm, throat closed, `tools/probe-reservoir-bulk.ts --closed`, 900 steps at e36d90e9 ≡ 70e81733):
+  - Owners: 535–541 of 928 regions are 16h members from step 31 (about 34.5k of the 4h tiles' worth); the other ~390 regions stay 4h, with 54 h tiles.
+  - Heat stays ≈ [922 COLD, 6 WARM, 0 HOT]. Volume drift is exactly 0 over 900 steps.
+  - Max speed falls 2.55e-2 → 1.34e-2 (step 120) → 4.99e-3 (step 420), then holds.
+  - Off over the same 90 steps: 2.55e-2 → 1.505e-2 at step 90, against 1.548e-2 with 16h. Its residual is 0.003–0.03; with 16h it is 0.01–0.08.
+  - **Not met:** ≤ 1e-5 m/s is not reached by either arm. The scene's own start transient decays slowly; 16h doesn't cause it.
+- **2. Discharge A/B** (`reservoir-seep` 5 mm, two repeats per arm, 600–1200 steps):
+
+  | | escaped L (1 s) | escaped L (10 s) | mean x m (10 s) | front m (1–2 s) | h tiles (10 s) | max speed (10 s) | drift (10 s) |
+  |---|---|---|---|---|---|---|---|
+  | off a / b | 0.019 / 0.016 | 0.001 / 0.003 | 1.338 / 1.527 | 2.558 | 105 / 232 | 4.106 / 4.106 | −4.2e-6 / 3.8e-6 |
+  | 16h b / c | 0.024 / 0.022 | 0.003 / 0.004 | 1.524 / 1.432 | 2.558 | 238 / 206 | 4.099 / 4.098 | 2.9e-6 / 4.3e-6 |
+
+  - With 16h, 532–543 regions are members throughout.
+  - Every 10 s value is inside the off repeats' spread.
+  - The 1 s burst is about 25% larger in both 16h repeats (0.022–0.024 L against 0.016–0.019 L). It is the one systematic difference.
+  - **Caveat:** in both arms the seep stops after about 2 s: the escaped volume falls to 0.001–0.004 L, the floor front vanishes, and the max speed holds at ≈4.1 m/s. That is baseline behaviour of e218ecfe, so this A/B only tests the first 2 s of jet.
+  - **Gate-tool A/B** (repeat-spread, a 16h-default snapshot against e218ecfe, 120 frames, two repeats each):
+    - The first run failed on particles only: 2 of 12 windows over, worst ratio 1.22 at frames 91–100 (A/B 124 against a spread of 102). h tiles, band, drift and occupancy passed.
+    - A rerun of the same pair passed everything, with a particles ratio of 0.22.
+    - So the particle count's two-repeat spread underestimates its noise. The 16h arm's slightly larger early burst, seen in both runs here and in the probe above, is the thing to watch with more repeats.
+- **3. Analytic suite** (`--set=bulkTier:16h`, e36d90e9): identical to round 6 at e0d8994f, because no region engages on the suite's 64×64×32 grids.
+  - rest, rest-step, standing-wave and translation pass. The figures below are the e0d8994f baseline's, not W4's.
+  - free-fall: φ drift 5.84%.
+  - dam-break: φ drift 3.79% (round 5: 3.3%).
+  - mound: φ drift 4.80%.
+  - So no case is worse than round 5 because of 16h. The suite doesn't exercise the tier.
+- **4. bulkTier off is unchanged:**
+  - Shader digests of `reservoir-seep` (1 cm, 103 modules) are identical between the merge-base e218ecfe and HEAD. So are the 3-step max speed (2.369669198989868) and drift (4.3594e-6).
+  - Repeat-spread gate (`tools/gate-repeat-spread.ts` from f82ca90c, window means, two repeats per arm, e218ecfe against HEAD): splash 70 frames passes, with h tiles, band, particles and occupancy identical in all four instances and drift A/B 1.8e-7 against an A/A spread of 3.6e-7. `reservoir-seep` 5 mm, 120 frames, passes, the worst window ratio being 0.42 (band bricks).
+  - Letters (`nbflip-figure-8-letters`), 120 frames, pass, the worst window ratio being 0.81 (particles: A/B 3452 against a spread of 4253).
+  - `tools/benchmark-nbflip-letters.ts --track --plain` stops at frame 1 with bulkTier off ("complete exactly one requested clock step"). The off path is the merge-base's, so that is a harness/baseline issue, not W4; the gate tool runs the letters scene instead.
+- **Letters with 16h on:** the repeat-spread gate of a 16h-default snapshot against e218ecfe (120 frames) passes. The worst window ratio is 0.70 (band tiles), and drift peaks at 0.18 of its band.
+
+**Failures and diagnosis.**
+- *"Destroyed texture velocity A used in a submit":* the selection bound a detail field's texture view directly, so every frame's submit was rejected once the physical texture was replaced. Fixed by binding through `uniformDetailGroup` and marking the canonical load (2f712b94).
+- *Members thawed the reservoir* (248 members fell to 20, regions went HOT): resetting a member's rows to the region mean put a pressure step at the seams and kinks in the hydrostatic profile, and the frozen faces' corrections were charged to the freeze budget. Keeping the row offsets and writing frozen member faces live fixed it (e36d90e9).
+- *Glued level-2 rows* (8a70b571): the coarse operator no longer matched the native rows' residual, so the V-cycle injected non-hydrostatic corrections and the rest scene went HOT at step 60 (max speed 0.257 m/s). Reverted.

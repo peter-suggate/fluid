@@ -3,9 +3,10 @@ export const narrowBandSplatWGSL=/* wgsl */`
 // Before the deposit, the motion bank holds one word per occupied cell.
 // There can be no more occupied cells than sorted live particles.
 fn nbSurfaceCells()->u32{return NB_LINKS+4u*arrayLength(&particles);}
+// The live tiles' cells (uniformStageListsWGSL), a fixed grid striding them.
 @compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
- for(var cell=gid.x;cell<UM_CELL_KEYS;cell+=65536u){
-  if(!umTileLive(cell/64u)){continue;}
+ for(var j=gid.x;j<64u*umLiveTileCount();j+=65536u){
+  let cell=64u*umLiveTile(j/64u)+j%64u;
   if(nbSparseBins&&atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){continue;}
   if(atomicLoad(&bins[nbBinCell(cell)])==0u){continue;}
   // A cell whose splat footprint (cell - 1 to cell + 2) lies in a COLD

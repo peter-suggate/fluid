@@ -8,15 +8,21 @@
  *
  * Persistence (level 0): a brick keeps its slot, and so its channel values,
  * while it stays marked. Per step: clear the marks and counts (stepClear),
- * launch the markers, then ubaUpdate (a thread a brick id: dilate, take a
- * slot from the free stack for an entering brick, list a leaving one),
- * ubaLists (the live and class lists, the page list), ubaLevel1 (level 1
- * slots of the parents of one level 0 list's bricks: scratch, rebuilt every
- * step), ubaRecord (level 0, 1 and 2 records); the stages; the churn scatter
+ * launch the markers, then ubaUpdate (a thread a brick of a held block:
+ * dilate, take a slot from the free stack for an entering brick, list a
+ * leaving one; and a thread an entry of the last step's live list whose block
+ * is no longer held: list it leaving), ubaLists (the page list over the
+ * held blocks; the live and class lists, in slot order, over the slots below
+ * the free stack's high water mark), ubaLevel1 (level 1 slots of the
+ * parents of one level 0 list's bricks: scratch, rebuilt every step; it also
+ * keeps the live count for the next ubaUpdate), ubaRecord (level 0, 1 and 2
+ * records); the stages; the churn scatter
  * over the leave list; then ubaRelease (leaving slots back onto the free
- * stack). A pop from an empty stack stores UBA_SEAM | brick id in the fatal
- * word (fail-fast: no growth, no recovery); the host's frame diagnostics
- * throw on it.
+ * stack: after it every held slot is on the live list). The build strides
+ * the held blocks (uniformStageListsWGSL) and the slots ever taken, so its
+ * cost follows them, not the lattice or the slot capacity. A pop from an
+ * empty stack stores UBA_SEAM | brick id in the fatal word (fail-fast: no
+ * growth, no recovery); the host's frame diagnostics throw on it.
  *
  * Records, 32 words a slot of every level: 0..26 neighbour words (offset
  * x+3y+9z of (-1..1)³), 27 parent (slot | octant<<29, UB_NONE at level 2 or
@@ -97,7 +103,7 @@ export class UniformBrickArena{
    }
   }
   this.poolWords=words;
-  const l=this.layout;this.tableWords=l.pages+options.blocks;
+  const l=this.layout;this.tableWords=l.high+1;
  }
  /** Slots of a level. */
  capacity(level:UniformArenaLevel):number{return level===2?this.options.blocks:this.fineCapacity;}
@@ -112,8 +118,8 @@ export class UniformBrickArena{
  private get layout(){
   const cap=this.fineCapacity,blocks=this.options.blocks;
   const mark=UBA_HEADER,table1=mark+this.bricks,table=table1+8*blocks,brick=table+this.bricks,klass=brick+cap,record=klass+cap,free=record+UBA_RECORD*cap;
-  const enter=free+cap,leave=enter+cap,live=leave+cap,lists=live+cap,brick1=lists+this.lists.length*cap,record1=brick1+cap,record2=record1+UBA_RECORD*cap,pages=record2+UBA_RECORD*blocks;
-  return {mark,table1,table,brick,klass,record,free,enter,leave,live,lists,brick1,record1,record2,pages};
+  const enter=free+cap,leave=enter+cap,live=leave+cap,lists=live+cap,brick1=lists+this.lists.length*cap,record1=brick1+cap,record2=record1+UBA_RECORD*cap,pages=record2+UBA_RECORD*blocks,held=pages+blocks,high=held+1;
+  return {mark,table1,table,brick,klass,record,free,enter,leave,live,lists,brick1,record1,record2,pages,held,high};
  }
  /** Words written once at attach (base: the table's first word): an empty
   * table and a full free stack. The only host writes the table takes. */
@@ -136,8 +142,9 @@ export class UniformBrickArena{
 
  /** The table: constants, accessors and the entries. table: an
   * array<atomic<u32>> the module binds; base: a WGSL u32 expression for the
-  * table's first word. Needs the lattice address; tileMask: a WGSL u32
-  * expression of id, the level 0 brick's h-owned tiles. */
+  * table's first word. Needs the lattice address and the held blocks
+  * (uniformStageListsWGSL); tileMask: a WGSL u32 expression of id, the level
+  * 0 brick's h-owned tiles. */
  tableWGSL(table:string,base:string,tileMask="0xffu"):string{
   const l=this.layout,cap=this.fineCapacity,c=UNIFORM_ARENA_CLASS,blocks=this.options.blocks;
   const count=(k:number)=>`${base}+${UBA_COUNTS+k}u`;
@@ -172,6 +179,8 @@ const UBA_BRICK1:u32=${word("brick1")};
 const UBA_RECORD1:u32=${word("record1")};
 const UBA_RECORD2:u32=${word("record2")};
 const UBA_PAGES:u32=${word("pages")};
+const UBA_HELD:u32=${word("held")};
+const UBA_HIGH:u32=${word("high")};
 const UBA_ENTERING:u32=${c.entering>>>0}u;
 const UBA_LEAVING:u32=${c.leaving>>>0}u;
 const UBA_DIRTY:u32=${c.dirty}u;
@@ -219,11 +228,10 @@ fn ubaBank(j:u32)->u32{return atomicLoad(&${table}[UBA_BANK+j])&1u;}
 fn ubaFlip(j:u32){atomicXor(&${table}[UBA_BANK+j],1u);}
 fn ubaAppend(count:u32,list:u32,slot:u32){let e=atomicAdd(&${table}[count],1u);atomicStore(&${table}[list+e],slot);}
 fn ubaPageLive(block:u32)->bool{return umBlockStored(block)&&umBlockWord(block)!=UM_FREE;}
-// A thread a brick id: dilate the core marks; an entering brick takes a
-// slot, a leaving one is listed (its slot stays until ubaRelease), a dirty
-// live one is listed for the gather again.
-@compute @workgroup_size(64) fn ubaUpdate(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- for(var id=gid.x;id<UBA_BRICKS;id+=64u*groups.x){
+// A brick id: dilate the core marks; an entering brick takes a slot, a
+// leaving one is listed (its slot stays until ubaRelease), a dirty live one
+// is listed for the gather again.
+fn ubaUpdateBrick(id:u32){
   var bits=0u;
   if(ubaPageLive(id>>6u)){
    bits=atomicLoad(&${table}[UBA_MARK+id]);let origin=vec3i(ubaOrigin(id));
@@ -233,28 +241,45 @@ fn ubaPageLive(block:u32)->bool{return umBlockStored(block)&&umBlockWord(block)!
    }
   }
   let old=atomicLoad(&${table}[UBA_TABLE+id]);
-  if(bits==0u){if(old!=UB_NONE_ID){atomicStore(&${table}[UBA_CLASS+old],UBA_LEAVING);ubaAppend(UBA_LEAVE_COUNT,UBA_LEAVE,old);}continue;}
-  if(old!=UB_NONE_ID){atomicStore(&${table}[UBA_CLASS+old],bits);if((bits&UBA_DIRTY)!=0u){ubaAppend(UBA_ENTER_COUNT,UBA_ENTER,old);}continue;}
+  if(bits==0u){if(old!=UB_NONE_ID){atomicStore(&${table}[UBA_CLASS+old],UBA_LEAVING);ubaAppend(UBA_LEAVE_COUNT,UBA_LEAVE,old);}return;}
+  if(old!=UB_NONE_ID){atomicStore(&${table}[UBA_CLASS+old],bits);if((bits&UBA_DIRTY)!=0u){ubaAppend(UBA_ENTER_COUNT,UBA_ENTER,old);}return;}
   let top=atomicSub(&${table}[UBA_FREE_TOP],1u);
-  if(top-1u>=UBA_CAPACITY){atomicAdd(&${table}[UBA_FREE_TOP],1u);atomicCompareExchangeWeak(&${table}[UBA_FATAL],0u,UBA_SEAM|id);continue;}
-  let slot=atomicLoad(&${table}[UBA_FREE+top-1u]);
+  if(top-1u>=UBA_CAPACITY){atomicAdd(&${table}[UBA_FREE_TOP],1u);atomicCompareExchangeWeak(&${table}[UBA_FATAL],0u,UBA_SEAM|id);return;}
+  let slot=atomicLoad(&${table}[UBA_FREE+top-1u]);atomicMax(&${table}[UBA_HIGH],UBA_CAPACITY+1u-top);
   atomicStore(&${table}[UBA_TABLE+id],slot);atomicStore(&${table}[UBA_BRICK+slot],id);atomicStore(&${table}[UBA_CLASS+slot],bits|UBA_ENTERING);
   ubaAppend(UBA_ENTER_COUNT,UBA_ENTER,slot);
+}
+// A thread a brick of a held block, then a thread an entry of the last
+// step's live list (every held slot, UBA_HELD entries) whose block is no
+// longer held: its brick leaves. A brick of a free block holds no slot
+// otherwise, and the two sets are disjoint.
+@compute @workgroup_size(64) fn ubaUpdate(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let bricks=64u*umHeldBlockCount();let last=min(atomicLoad(&${table}[UBA_HELD]),UBA_CAPACITY);
+ for(var j=gid.x;j<bricks+last;j+=64u*groups.x){
+  if(j<bricks){ubaUpdateBrick(64u*umHeldBlock(j>>6u)+(j&63u));continue;}
+  let id=atomicLoad(&${table}[UBA_BRICK+atomicLoad(&${table}[UBA_LIVE+j-bricks])]);
+  if(!ubaPageLive(id>>6u)){ubaUpdateBrick(id);}
  }
 }
-// A thread a slot: the live list and the class lists; a thread a block: the page list.
+// A thread a held block: the page list; a thread a slot below the high
+// water mark (UBA_HIGH: the free stack pops slots 0, 1, .. and takes back
+// only slots it gave out, so every slot ever taken is below it): the live
+// and class lists, in slot order.
 @compute @workgroup_size(64) fn ubaLists(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- for(var slot=gid.x;slot<max(UBA_CAPACITY,UBA_PAGES_CAPACITY);slot+=64u*groups.x){
-  if(slot<UBA_PAGES_CAPACITY&&ubaPageLive(slot)){ubaAppend(UBA_PAGE_COUNT,UBA_PAGES,slot);}
-  if(slot>=UBA_CAPACITY){continue;}
+ let held=umHeldBlockCount();let high=min(atomicLoad(&${table}[UBA_HIGH]),UBA_CAPACITY);
+ for(var slot=gid.x;slot<max(high,held);slot+=64u*groups.x){
+  if(slot<held){ubaAppend(UBA_PAGE_COUNT,UBA_PAGES,umHeldBlock(slot));}
+  if(slot>=high){continue;}
   let bits=atomicLoad(&${table}[UBA_CLASS+slot]);if(bits==0u||(bits&UBA_LEAVING)!=0u){continue;}
   ubaAppend(UBA_LIVE_COUNT,UBA_LIVE,slot);
   ${this.lists.map((list,j)=>`if((bits&${list.any}u)!=0u){ubaAppend(UBA_LIST_COUNT+${j}u,UBA_LISTS+${j*cap}u,slot);}`).join("\n  ")}
  }
 }
 // A thread a brick of the level 1 list: its parent takes a level 1 slot
-// (table1: slot+1 by level 1 key, cleared every step).
+// (table1: slot+1 by level 1 key, cleared every step). The first thread
+// keeps the live count (UBA_HELD) for the next step's ubaUpdate.
 @compute @workgroup_size(64) fn ubaLevel1(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(gid.x==0u){atomicStore(&${table}[UBA_HELD],ubaCount(UBA_LIVE_COUNT));}
  ${this.level1<0?"":`let n=ubaListCount(${this.level1}u);
  for(var e=gid.x;e<n;e+=64u*groups.x){
   let key=ubaParentKey(ubaBrick(ubaListSlot(${this.level1}u,e)));

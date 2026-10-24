@@ -1,7 +1,8 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
-import { uniformKeyGroups } from "./uniform-lattice-address";
+import type { UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_LIVE_KEY_GROUPS, uniformLiveListsOfWGSL } from "./uniform-live-lists";
 
 /** Clearances are counted to this many tiles at most (a 16h page and more). */
 export const UNIFORM_TILE_CONTEXT_CAP = 8;
@@ -121,7 +122,9 @@ fn utcClassOf(t:u32)->u32{
  * transform over the tile grid. A tile is closed where no page stores it or
  * its cut-map word is set; the Chebyshev distance to the nearest closed tile,
  * capped, is separable: three passes of one axis each (x from the closed
- * test, y and z over the pass before, an unstored tile reading 0). Static: it
+ * test, y and z over the pass before, an unstored tile reading 0), each a
+ * fixed grid striding the pool's resident tile keys (uniform-live-lists.ts:
+ * a key no page stores is written by none and read as 0). Static: it
  * is built after each solid record build (encodeBuild: a live edit, bodies)
  * and after each page commit that claimed or retired a block (encodeClaims:
  * the launches read the pool's claimed and retired counts and leave at once
@@ -141,25 +144,24 @@ export class UniformTileContext {
   private readonly tiles: number;
   private readonly layout?: GPUBindGroupLayout;
   private group?: GPUBindGroup;
-  private idle?: GPUBuffer;
   private pipelines?: { readonly header: GPUComputePipeline; readonly passes: readonly GPUComputePipeline[]; readonly gated: readonly GPUComputePipeline[] };
-  private readonly grid: [number, number] = [0, 0];
+  private readonly grid: number;
   /** solid: the frame's solid library with its record (none: free throughout).
-   * poolState: the page pool's state buffer (its new count gates encodeClaims). */
-  constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership, private readonly solid?: UniformMixedSolid, private readonly poolState?: GPUBuffer) {
+   * pool: the page pool (its resident list is what the passes visit, its
+   * claimed and retired counts gate encodeClaims). */
+  constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership, private readonly solid: UniformMixedSolid | undefined, private readonly pool: UniformPagePool) {
     this.tiles = ownership.capacity.tiles;
     const words = UNIFORM_TILE_CONTEXT_HEADER + 3 * this.tiles;
     this.buffer = device.createBuffer({ label: "Uniform tile context", size: 4 * words, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.allocatedBytes = this.buffer.size;
-    uniformKeyGroups(this.tiles, 64, ownership.dispatchX, this.grid);
+    this.grid = Math.min(UNIFORM_LIVE_KEY_GROUPS, Math.ceil(this.tiles / 64));
     // No record: nothing to measure, and the helpers answer free.
     if (!solid?.coarse) { device.queue.writeBuffer(this.buffer, 0, new Uint32Array([UNIFORM_TILE_CONTEXT_FREE])); return; }
     this.layout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
-    const state = poolState ?? (this.idle = device.createBuffer({ label: "Uniform tile context idle pool", size: 16, usage: GPUBufferUsage.STORAGE }));
-    this.group = device.createBindGroup({ layout: this.layout, entries: [{ binding: 0, resource: { buffer: this.buffer } }, { binding: 1, resource: { buffer: state } }] });
+    this.group = device.createBindGroup({ layout: this.layout, entries: [{ binding: 0, resource: { buffer: this.buffer } }, { binding: 1, resource: { buffer: pool.state } }] });
   }
   layoutEntry(binding: number): GPUBindGroupLayoutEntry { return { binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }; }
   groupEntry(binding: number): GPUBindGroupEntry { return { binding, resource: { buffer: this.buffer } }; }
@@ -170,6 +172,7 @@ export class UniformTileContext {
     const code = uniformMixedTopologyWGSL(this.ownership.capacity, 0) + uniformMixedSolidWGSL(1, solid.coarse.count) + /* wgsl */ `
 @group(2) @binding(0) var<storage,read_write> utcContext:array<u32>;
 @group(2) @binding(1) var<storage,read> utcPool:array<u32>;
+${uniformLiveListsOfWGSL("utcPool", this.pool.layout)}
 // A commit launch: work only when the pool's last commit claimed or retired a block (status words 2 and 4).
 override utcClaims:bool=false;
 const UTC_CAP:u32=${cap}u;const UTC_CLEARANCE:u32=${UNIFORM_TILE_CONTEXT_HEADER}u;const UTC_A:u32=${A}u;const UTC_B:u32=${B}u;
@@ -182,9 +185,9 @@ fn utcRun()->bool{return (!utcClaims||utcPool[2]!=0u||utcPool[4]!=0u)&&utcMeasur
 fn utcClosed(c:vec3i)->bool{let k=umTileKey(c);if(!umKeyStored(k)){return true;}return umSolidScratch[umSolidCutMap()+k]!=0u;}
 // The distance a pass read: 0 where no page stores the tile.
 fn utcPassed(base:u32,c:vec3i)->u32{let k=umTileKey(c);if(!umKeyStored(k)){return 0u;}return utcContext[base+k];}
-fn utcKey(gid:vec3u)->u32{let t=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(t)||!utcRun()){return UM_TILES;}return t;}
-@compute @workgroup_size(64) fn utcAxisX(@builtin(global_invocation_id) gid:vec3u){
- let t=utcKey(gid);if(t==UM_TILES){return;}
+// The k-th resident tile key, UM_TILES where its block's tile holds no page.
+fn utcKey(k:u32)->u32{let t=512u*ulResidentBlock(k>>9u)+(k&511u);return select(UM_TILES,t,umTileLive(t));}
+fn utcAxisXTile(t:u32){
  let c=vec3i(umTileCoord(t));var d=UTC_CAP;
  for(var s=0;s<i32(UTC_CAP);s++){if(utcClosed(c+vec3i(s,0,0))||utcClosed(c-vec3i(s,0,0))){d=u32(s);break;}}
  utcContext[UTC_A+t]=d;
@@ -198,11 +201,17 @@ fn utcAxis(t:u32,axis:u32,source:u32)->u32{
  }
  return d;
 }
-@compute @workgroup_size(64) fn utcAxisY(@builtin(global_invocation_id) gid:vec3u){
- let t=utcKey(gid);if(t==UM_TILES){return;}utcContext[UTC_B+t]=utcAxis(t,1u,UTC_A);
+@compute @workgroup_size(64) fn utcAxisX(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(!utcRun()){return;}
+ for(var k=gid.x;k<512u*ulResidentCount();k+=64u*groups.x){let t=utcKey(k);if(t!=UM_TILES){utcAxisXTile(t);}}
 }
-@compute @workgroup_size(64) fn utcAxisZ(@builtin(global_invocation_id) gid:vec3u){
- let t=utcKey(gid);if(t==UM_TILES){return;}utcContext[UTC_CLEARANCE+t]=utcAxis(t,2u,UTC_B);
+@compute @workgroup_size(64) fn utcAxisY(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(!utcRun()){return;}
+ for(var k=gid.x;k<512u*ulResidentCount();k+=64u*groups.x){let t=utcKey(k);if(t!=UM_TILES){utcContext[UTC_B+t]=utcAxis(t,1u,UTC_A);}}
+}
+@compute @workgroup_size(64) fn utcAxisZ(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(!utcRun()){return;}
+ for(var k=gid.x;k<512u*ulResidentCount();k+=64u*groups.x){let t=utcKey(k);if(t!=UM_TILES){utcContext[UTC_CLEARANCE+t]=utcAxis(t,2u,UTC_B);}}
 }
 `;
     const module = this.device.createShaderModule({ label: "Uniform tile context", code });
@@ -220,7 +229,7 @@ fn utcAxis(t:u32,axis:u32,source:u32)->u32{
   /** After a page commit (UniformMixedFrame.encodePageCommit), its claimed
    * blocks' record built: every clearance again where the commit claimed a
    * block (read on the GPU), nothing otherwise. */
-  encodeClaims(encoder: GPUCommandEncoder): void { if (this.poolState) this.encode(encoder, true); }
+  encodeClaims(encoder: GPUCommandEncoder): void { this.encode(encoder, true); }
   private encode(encoder: GPUCommandEncoder, claims: boolean): void {
     const p = this.pipelines;
     if (!this.solid?.coarse) return;
@@ -229,8 +238,8 @@ fn utcAxis(t:u32,axis:u32,source:u32)->u32{
     pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.solid.tileGroup); pass.setBindGroup(2, this.group);
     if (!claims) { pass.setPipeline(p.header); pass.dispatchWorkgroups(1); }
     const passes = claims ? p.gated : p.passes;
-    for (let i = 0; i < passes.length; i++) { pass.setPipeline(passes[i]!); pass.dispatchWorkgroups(this.grid[0], this.grid[1]); }
+    for (let i = 0; i < passes.length; i++) { pass.setPipeline(passes[i]!); pass.dispatchWorkgroups(this.grid); }
     pass.end();
   }
-  destroy(): void { this.buffer.destroy(); this.idle?.destroy(); }
+  destroy(): void { this.buffer.destroy(); }
 }

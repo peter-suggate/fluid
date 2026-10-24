@@ -8,9 +8,12 @@ import { uniformSceneConstantsWGSL } from "./uniform-scene-constants";
  * read the base at canonical texels and keep both homes current inside the
  * detail ring. */
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
+import type { UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_LIVE_KEY_GROUPS, uniformLiveListsWGSL } from "./uniform-live-lists";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformMixedDetailViolationWord, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockStored, uniformCellTexel, uniformEachPage, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileTexel, uniformVertexSlot, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
+import type { LatticePages } from "../../core/initial-liquid-lattice";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_BASED, UNIFORM_DETAIL_CANONICAL_LOAD, UNIFORM_DETAIL_FACE_COMPACT, UNIFORM_DETAIL_HEADER_WORDS, UNIFORM_DETAIL_PACKED, UNIFORM_DETAIL_RING_4H_LOAD, registerUniformDetailBase } from "../../core/uniform-detail-abi";
 
@@ -431,10 +434,14 @@ export class UniformDetailStorage{
   * faces), as a raw texture would hold them: resident patches take every
   * texel, a non-resident tile its canonical texels' values. Packed uploads
   * before the first layout stay pending: install() deposits them. No values:
-  * the field's empty value throughout, with no lattice-sized array. */
- upload(texture:GPUTexture,values?:Float32Array):void{
-  const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1;this.kindOf(texture);
-  if(values&&values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
+  * the field's empty value throughout, with no lattice-sized array. By page
+  * (LatticePages of the box's pages, a cell field's 32^3 cells, a vertex
+  * field's 33^3 vertices): only the stored pages are read. */
+ upload(texture:GPUTexture,values?:Float32Array|LatticePages):void{
+  const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,kind=this.kindOf(texture),d=this.layout.dims,p=this.layout.address.pages;
+  if(values instanceof Float32Array&&values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
+  if(values&&!(values instanceof Float32Array)&&(values.edge!==32||values.cells.some((n,a)=>n!==d[a])||values.pages.some((n,a)=>n!==p[a])||values.at.some(v=>v&&v.length!==comp*(kind==="vertex"?33:32)**3)))
+   throw new Error(`${texture.label}: an upload by page holds the ${p.join("x")} pages of 32 cells of the ${d.join("x")} box`);
 
   if(!this.installed){this.pending.set(texture,values);return;}
   this.write(texture,this.image(texture,values));
@@ -445,46 +452,70 @@ export class UniformDetailStorage{
  /** Domain: the field's h generation is resident, its base a second texture. */
  private twinned(texture:GPUTexture):boolean{return this.resident&&!this.pinned.has(fields.get(texture)!.handle);}
  private installed=false;
- private readonly pending=new Map<GPUTexture,Float32Array|undefined>();
+ private readonly pending=new Map<GPUTexture,Float32Array|LatticePages|undefined>();
  get settled():boolean{return this.installed;}
- private image(texture:GPUTexture,values?:Float32Array,base=false):Float32Array<ArrayBuffer>{
+ /** An upload's values page by page: the box page's 32^3 cells (a vertex
+  * field's 33^3 vertices from its low corner), x fastest, or undefined where
+  * they are zero. One whole field is copied a page at a time, the last page
+  * held until another is asked for. */
+ private pages(texture:GPUTexture,values:Float32Array|LatticePages):(x:number,y:number,z:number)=>Float32Array|undefined{
+  const [px,py]=this.layout.address.pages;
+  if(!(values instanceof Float32Array))return (x,y,z)=>values.at[x+px*(y+py*z)];
+  const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,n=this.kindOf(texture)==="vertex"?33:32,page=new Float32Array(comp*n**3);let held=-1;
+  return (x,y,z)=>{
+   const key=x+px*(y+py*z);if(key===held)return page;held=key;page.fill(0);
+   const ox=32*x,oy=32*y,oz=32*z,m=Math.min(n,lx-ox);
+   for(let k=0;k<n&&oz+k<lz;k++)for(let j=0;j<n&&oy+j<ly;j++){const src=comp*(ox+lx*(oy+j+ly*(oz+k)));page.set(values.subarray(src,src+comp*m),comp*n*(j+n*k));}
+   return page;
+  };
+ }
+ private image(texture:GPUTexture,values?:Float32Array|LatticePages,base=false):Float32Array<ArrayBuffer>{
   const kind=this.kindOf(texture),[lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,t=base?this.bases.get(fields.get(texture)!.handle)!:this.physical(texture),W=t.width,H=t.height;
   const h=!base&&this.twinned(texture);
   const image=new Float32Array(W*H*t.depthOrArrayLayers*comp),a=this.layout.address,empty=fields.get(texture)!.empty;
   // The image starts as the field's empty value: only stored texels take an upload's.
   if(empty!==0)image.fill(empty);
   if(!values)return image;
+  // Each stored page of the box, from its values: a page with none is zero (left so where the empty value is).
+  const read=this.pages(texture,values),zero=empty!==0?new Float32Array(comp*(kind==="vertex"?33:32)**3):undefined;
+  const slot:[number,number,number,number]=[0,0,0,0];
   if(kind==="vertex"&&h){
-   // The h store: a page's rows, each whole where one block holds the row
-   // (the vertex at 0 in the first page's skirt). A row no one block holds
-   // goes vertex by vertex.
-   const first:[number,number,number,number]=[0,0,0,0],last:[number,number,number,number]=[0,0,0,0];
-   for(let z=0;z<lz;z++)for(let y=0;y<ly;y++)for(let x=0;x<lx;){
-    const end=Math.min(lx,x===0?33:x+32),src=x+lx*(y+ly*z);
-    uniformVertexSlot(a,x,y,z,5,first);uniformVertexSlot(a,end-1,y,z,5,last);
-    if(uniformBlockStored(a,first[3])&&first[3]===last[3]&&last[0]-first[0]===end-1-x)image.set(values.subarray(src,src+end-x),this.vertexIndex(x,y,z,W,H));
-    else for(let v=x;v<end;v++)if(uniformVertexStored(a,v,y,z))image[this.vertexIndex(v,y,z,W,H)]=values[src+v-x]!;
-    x=end;
-   }
+   // The h store: the page's vertices off its low planes are its own, whole
+   // rows; one on a low plane where no stored page below holds it.
+   uniformEachPage(a,(b,px,py,pz)=>{
+    const src=read(px,py,pz)??zero;if(!src)return;
+    const x0=32*px,y0=32*py,z0=32*pz,nx=Math.min(32,lx-1-x0),ny=Math.min(32,ly-1-y0),nz=Math.min(32,lz-1-z0);
+    for(let k=0;k<=nz;k++)for(let j=0;j<=ny;j++){
+     if(j&&k)image.set(src.subarray(1+33*(j+33*k),1+nx+33*(j+33*k)),this.vertexIndex(x0+1,y0+j,z0+k,W,H));
+     for(let i=0;i<=(j&&k?0:nx);i++)if(uniformVertexSlot(a,x0+i,y0+j,z0+k,5,slot)[3]===b)image[this.vertexIndex(x0+i,y0+j,z0+k,W,H)]=src[i+33*(j+33*k)]!;
+    }
+   });
   }else if(kind==="vertex"){
-   // A vertex base: tile corner g is vertex 4g.
+   // A vertex base: tile corner g is vertex 4g, the page's own as above.
    const [tx,ty,tz]=this.layout.tiles;
-   for(let z=0;z<=tz;z++)for(let y=0;y<=ty;y++)for(let x=0;x<=tx;x++)if(uniformVertexStored(a,4*x,4*y,4*z))image[this.cornerIndex(x,y,z,W,H)]=values[4*x+lx*(4*y+ly*4*z)]!;
+   uniformEachPage(a,(b,px,py,pz)=>{
+    const src=read(px,py,pz)??zero;if(!src)return;
+    for(let k=0;k<=8&&8*pz+k<=tz;k++)for(let j=0;j<=8&&8*py+j<=ty;j++)for(let i=0;i<=8&&8*px+i<=tx;i++)
+     if(uniformVertexSlot(a,8*px+i,8*py+j,8*pz+k,3,slot)[3]===b)image[this.cornerIndex(8*px+i,8*py+j,8*pz+k,W,H)]=src[4*i+33*(4*j+33*4*k)]!;
+   });
   }else if(h){
    // The h store: a page's rows, each whole.
    const [dx,dy,dz]=this.layout.dims;
-   for(let z=0;z<dz;z++)for(let y=0;y<dy;y++)for(let x=0;x<dx;x+=32){
-    if(!uniformCellStored(a,x,y,z))continue;
-    const src=(x+lx*(y+ly*z))*comp;image.set(values.subarray(src,src+Math.min(32,dx-x)*comp),this.cellIndex(x,y,z,W,H)*comp);
-   }
+   uniformEachPage(a,(_,px,py,pz)=>{
+    const src=read(px,py,pz);if(!src)return;
+    const x0=32*px,y0=32*py,z0=32*pz,n=comp*Math.min(32,dx-x0);
+    for(let k=0;k<32&&z0+k<dz;k++)for(let j=0;j<32&&y0+j<dy;j++)image.set(src.subarray(comp*32*(j+32*k),comp*32*(j+32*k)+n),this.cellIndex(x0,y0+j,z0+k,W,H)*comp);
+   });
   }else{
    // A base block: each tile's origin texel, and a face field's three +face anchors.
    const [tx,ty,tz]=this.layout.tiles,k=kind==="cell"?"cell":"face",n=k==="cell"?1:4;
-   for(let z=0;z<tz;z++)for(let y=0;y<ty;y++)for(let x=0;x<tx;x++)for(let m=0;m<n;m++){
-    if(!uniformTileStored(a,x,y,z))continue;
-    const dst=this.baseIndex(k,x,y,z,m,W,H)*comp,src=(4*x+(m===1?3:0)+lx*(4*y+(m===2?3:0)+ly*(4*z+(m===3?3:0))))*comp;
-    for(let c=0;c<comp;c++)image[dst+c]=values[src+c]!;
-   }
+   uniformEachPage(a,(_,px,py,pz)=>{
+    const src=read(px,py,pz);if(!src)return;
+    for(let z=0;z<8&&8*pz+z<tz;z++)for(let y=0;y<8&&8*py+y<ty;y++)for(let x=0;x<8&&8*px+x<tx;x++)for(let m=0;m<n;m++){
+     const dst=this.baseIndex(k,8*px+x,8*py+y,8*pz+z,m,W,H)*comp,from=(4*x+(m===1?3:0)+32*(4*y+(m===2?3:0)+32*(4*z+(m===3?3:0))))*comp;
+     for(let c=0;c<comp;c++)image[dst+c]=src[from+c]!;
+    }
+   });
   }
   return image;
  }
@@ -521,25 +552,29 @@ export class UniformDetailStorage{
   const address=this.layout.address,c:[number,number,number]=[0,0,0];
   uniformEachTile(address,(t,x,y,z)=>{if(!(layout.tiles[t]!&0x80000000))visit([4*x,4*y,4*z]);});
  }
- private coarsenCells(layout:UniformMixedLayout,values:Float32Array,image:Float32Array,texture:GPUTexture):void{
-  const [lx,ly]=this.logicalOf(texture),W=this.physical(texture).width,H=this.physical(texture).height;
+ private coarsenCells(layout:UniformMixedLayout,values:Float32Array|LatticePages,image:Float32Array,texture:GPUTexture):void{
+  const W=this.physical(texture).width,H=this.physical(texture).height,read=this.pages(texture,values),zero=new Float32Array(32**3);
   this.coarse(layout,o=>{
-   let sum=0;for(let k=0;k<64;k++)sum=Math.fround(sum+values[(o[0]+(k&3))+lx*((o[1]+((k>>2)&3))+ly*(o[2]+(k>>4)))]!);
+   const src=read(o[0]>>5,o[1]>>5,o[2]>>5)??zero,x=o[0]&31,y=o[1]&31,z=o[2]&31;
+   let sum=0;for(let k=0;k<64;k++)sum=Math.fround(sum+src[(x+(k&3))+32*((y+((k>>2)&3))+32*(z+(k>>4)))]!);
    image[this.baseIndex("cell",o[0]>>2,o[1]>>2,o[2]>>2,0,W,H)]=Math.fround(sum/64);
   });
  }
- private coarsenFaces(layout:UniformMixedLayout,values:Float32Array,image:Float32Array,texture:GPUTexture):void{
-  const [lx,ly]=this.logicalOf(texture),W=this.physical(texture).width,H=this.physical(texture).height,d=this.layout.dims;
-  const at=(q:readonly number[])=>4*(q[0]!+lx*(q[1]!+ly*q[2]!));
+ private coarsenFaces(layout:UniformMixedLayout,values:Float32Array|LatticePages,image:Float32Array,texture:GPUTexture):void{
+  const W=this.physical(texture).width,H=this.physical(texture).height,d=this.layout.dims,read=this.pages(texture,values),zero=new Float32Array(4*32**3);
+  // A tile's cells are of one page.
+  let src:Float32Array=zero;
+  const at=(q:readonly number[])=>4*((q[0]!&31)+32*((q[1]!&31)+32*(q[2]!&31)));
   // The 16 h owners of a plane of the tile: axis a at local coordinate c.
   const plane=(o:Dims,a:number,c:number)=>{const u=(a+1)%3,v=(a+2)%3,out:number[][]=[];
    for(let y=0;y<4;y++)for(let x=0;x<4;x++){const q=[...o];q[a]=o[a]!+c;q[u]=o[u]!+x;q[v]=o[v]!+y;out.push(q);}return out;};
-  const held=(qs:number[][],bit:number)=>qs.every(q=>(Math.round(values[at(q)+3]!)>>bit)&1);
+  const held=(qs:number[][],bit:number)=>qs.every(q=>(Math.round(src[at(q)+3]!)>>bit)&1);
   this.coarse(layout,o=>{
+   src=read(o[0]>>5,o[1]>>5,o[2]>>5)??zero;
    let walls=0;for(let b=0;b<3;b++)if(o[b]===0&&held(plane(o,b,0),b+3))walls|=1<<(b+3);
    for(let a=0;a<3;a++){
     if(o[a]+3>=d[a]!)continue;
-    const qs=plane(o,a,3);let sum=0;for(const q of qs)sum=Math.fround(sum+values[at(q)+a]!);
+    const qs=plane(o,a,3);let sum=0;for(const q of qs)sum=Math.fround(sum+src[at(q)+a]!);
     const i=4*this.baseIndex("face",o[0]>>2,o[1]>>2,o[2]>>2,a+1,W,H);image.fill(0,i,i+4);image[i+a]=Math.fround(sum/16);image[i+3]=walls|(held(qs,a)?1<<a:0);
    }
   });
@@ -550,6 +585,8 @@ export class UniformDetailStorage{
  private resident=false;
  /** The ownership whose h-tile capacity residency follows (prepare). */
  private simulation?:UniformMixedOwnership;
+ /** The page pool whose blocks the ring kernels visit (prepare; none: every tile key). */
+ private pool?:UniformPagePool;
  private transfers?:DomainKernels;
  /** The capacity is zero under a resident generation: the remap that
   * coarsens its last h tiles still reads it (encodeRetire). */
@@ -642,27 +679,30 @@ export class UniformDetailStorage{
   if(!ring)throw new Error("Uniform detail storage: no ring kernels (the storage is not prepared)");
   const first=this.physicals.get(ring.batches[0]!.handles[0]!)!;let bound=this.ringGroups.get(target);
   if(!bound||bound.key!==first)bound=this.bindRing(ring,first,held,target);
-  const groups=(this.layout.address.tileKeys+63)>>>6,pass=encoder.beginComputePass(RING_ENTER_PASS);
+  const groups=this.ringGroupCount(),pass=encoder.beginComputePass(RING_ENTER_PASS);
   for(let n=0;n<ring.batches.length;n++){const p=ring.batches[n]!.enter;if(!p)throw new Error("Uniform detail storage: Uniform detail ring enter is not compiled");pass.setPipeline(p);pass.setBindGroup(0,bound.groups[n]!);pass.dispatchWorkgroups(groups);}
   pass.end();
  }
+
+ /** The ring kernels' grid: fixed over a pool's blocks, else a lane per tile key. */
+ private ringGroupCount():number{const groups=(this.layout.address.tileKeys+63)>>>6;return this.pool?Math.min(UNIFORM_LIVE_KEY_GROUPS,groups):groups;}
 
  /** encodeRing's groups over the fields' textures now (apart from it: a closure there would cost every encode a context). */
  private bindRing(ring:NonNullable<DomainKernels["ring"]>,first:GPUTexture,held:GPUBuffer,target:GPUBuffer){
   const other=this.other().presentation.buffer;
   const bound={key:first,groups:ring.batches.map((b,n)=>this.device.createBindGroup({label:"Uniform detail ring",layout:b.layout,entries:[
    ...b.handles.flatMap((h,i)=>[{binding:i,resource:this.bases.get(h)!.createView()},{binding:BATCH+i,resource:this.physicals.get(h)!.createView()}]),
-   {binding:2*BATCH,resource:{buffer:held}},{binding:2*BATCH+1,resource:{buffer:target}},{binding:2*BATCH+4,resource:{buffer:this.ringDimensions}},...(n===0?[{binding:2*BATCH+2,resource:{buffer:other}}]:[])]}))};
+   {binding:2*BATCH,resource:{buffer:held}},{binding:2*BATCH+1,resource:{buffer:target}},{binding:2*BATCH+4,resource:{buffer:this.ringDimensions}},...(n===0?[{binding:2*BATCH+2,resource:{buffer:other}}]:[]),...(this.pool?[{binding:2*BATCH+5,resource:{buffer:this.pool.state}}]:[])]}))};
   this.ringGroups.set(target,bound);return bound;
  }
 
  encodeSettle(encoder:GPUCommandEncoder,share:boolean):void{
 
   if(share){
-   const ring=this.kernelsOfDomain().ring!,tiles=this.layout.address.tileKeys;
+   const ring=this.kernelsOfDomain().ring!;
    const pass=encoder.beginComputePass(RING_SHARE_PASS);pass.setPipeline(ring.share);
-   pass.setBindGroup(0,this.shareGroup??=this.device.createBindGroup({label:"Uniform detail ring share",layout:ring.shareLayout,entries:[{binding:2,resource:{buffer:this.ringDimensions}},{binding:0,resource:{buffer:this.simulation!.presentation.buffer}},{binding:1,resource:{buffer:this.other().presentation.buffer}}]}));
-   pass.dispatchWorkgroups((tiles+63)>>>6);pass.end();
+   pass.setBindGroup(0,this.shareGroup??=this.device.createBindGroup({label:"Uniform detail ring share",layout:ring.shareLayout,entries:[{binding:2,resource:{buffer:this.ringDimensions}},{binding:0,resource:{buffer:this.simulation!.presentation.buffer}},{binding:1,resource:{buffer:this.other().presentation.buffer}},...(this.pool?[{binding:3,resource:{buffer:this.pool.state}}]:[])]}));
+   pass.dispatchWorkgroups(this.ringGroupCount());pass.end();
   }
 
  }
@@ -733,7 +773,7 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
   * The first batch also hands the target's ring bit to the other ownership
   * (the all-4h pressure root, whose kernels store these fields too). */
  private async compileRing(domain:UniformDetailDomain):Promise<DomainKernels["ring"]>{
-  const device=this.device,C=GPUShaderStage.COMPUTE,N=this.layout.address.tileKeys,compiler=gpuCompilationManagerFor(device);
+  const device=this.device,C=GPUShaderStage.COMPUTE,N=this.layout.address.tileKeys,compiler=gpuCompilationManagerFor(device),pool=this.pool;
   if(Math.ceil(N/64)>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Uniform detail storage: the ring kernels launch ${Math.ceil(N/64)} workgroups, past one dispatch dimension`);
   const following=this.following,sets:GPUTexture[][]=[];
   // The ring kernels' lattice is their uniform's (the box in tiles, the
@@ -752,13 +792,23 @@ ${seam("drHeldWords")}
 fn drHeld(t:u32)->bool{return (drHeldWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 fn drNext(t:u32)->bool{return (drNextWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 `;
+  // With a pool, a fixed grid strides the blocks a tile key can be live in
+  // (uniform-live-lists.ts: the resident and latest retired, the sentinels);
+  // else a lane per tile key. visit(fn, binding): the entry point's body.
+  const lists=(binding:number)=>pool?uniformLiveListsWGSL(0,binding,pool.layout):"";
+  const visit=(fn:string)=>pool
+   ?`@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var k=gid.x;k<512u*ulVisitCount(false);k+=64u*groups.x){${fn}(512u*ulVisitBlock(k>>9u,false)+(k&511u));}
+}`
+   :`@builtin(global_invocation_id) gid:vec3u){${fn}(gid.x);}`;
+  const poolEntry=(binding:number)=>pool?[{binding,visibility:C,buffer:{type:"read-only-storage" as const}}]:[];
   const batches=await Promise.all(sets.map(async(handles,n):Promise<RingBatch>=>{
    const format=handles[0]!.format as "r32float"|"rgba32float";
    const layout=device.createBindGroupLayout({label:`Uniform detail ring ${n}`,entries:[
     ...handles.flatMap((_,i)=>[{binding:i,visibility:C,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}},{binding:BATCH+i,visibility:C,storageTexture:{access:"write-only" as const,format,viewDimension:"3d" as const}}]),
     {binding:2*BATCH+4,visibility:C,buffer:{type:"uniform" as const}},
     {binding:2*BATCH,visibility:C,buffer:{type:"read-only-storage" as const}},{binding:2*BATCH+1,visibility:C,buffer:{type:"read-only-storage" as const}},
-    ...(n===0?[{binding:2*BATCH+2,visibility:C,buffer:{type:"storage" as const}}]:[])]});
+    ...(n===0?[{binding:2*BATCH+2,visibility:C,buffer:{type:"storage" as const}}]:[]),...poolEntry(2*BATCH+5)]});
    let seed="";
    handles.forEach((h,i)=>{
     const kind=fields.get(h)!.kind;
@@ -773,9 +823,10 @@ fn drNext(t:u32)->bool{return (drNextWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
     }
    });
    const code=handles.map((_,i)=>`@group(0) @binding(${i}) var src${i}:texture_3d<f32>;\n@group(0) @binding(${BATCH+i}) var dst${i}:texture_storage_3d<${format},write>;\n`).join("")+head
-    +(n===0?`@group(0) @binding(${2*BATCH+2}) var<storage,read_write> drShared:array<u32>;\n`:"")+`
-@compute @workgroup_size(64) fn enter(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(!umTileLive(t)){return;}
+    +(n===0?`@group(0) @binding(${2*BATCH+2}) var<storage,read_write> drShared:array<u32>;\n`:"")+`${lists(2*BATCH+5)}
+@compute @workgroup_size(64) fn enter(${visit("drEnter")}
+fn drEnter(t:u32){
+ if(!umTileLive(t)){return;}
  let near=drNext(t);
 ${n===0?` let word=2u*drCount()+2u*t+1u;let w=drShared[word];let m=(w&0xfffffffeu)|u32(near);if(m!=w){drShared[word]=m;}
 `:""} if(!near||drHeld(t)){return;}
@@ -787,21 +838,24 @@ ${seed}}
    const pipeline=(entryPoint:string)=>compiler.compileComputePipeline({label:`Uniform detail ring ${entryPoint} ${n}`,layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint}},{priority:"visible"});
    return {handles,layout,enter:await pipeline("enter")};
   }));
-  const shareLayout=device.createBindGroupLayout({label:"Uniform detail ring share",entries:[{binding:2,visibility:C,buffer:{type:"uniform"}},{binding:0,visibility:C,buffer:{type:"read-only-storage"}},{binding:1,visibility:C,buffer:{type:"storage"}}]});
+  const shareLayout=device.createBindGroupLayout({label:"Uniform detail ring share",entries:[{binding:2,visibility:C,buffer:{type:"uniform"}},{binding:0,visibility:C,buffer:{type:"read-only-storage"}},{binding:1,visibility:C,buffer:{type:"storage"}},...poolEntry(3)]});
   const share=await compiler.compileComputePipeline({label:"Uniform detail ring share",layout:device.createPipelineLayout({bindGroupLayouts:[shareLayout]}),compute:{module:device.createShaderModule({label:"Uniform detail ring share",code:`
 @group(0) @binding(2) var<uniform> drDimensions:vec4u;
 @group(0) @binding(0) var<storage,read> drFrom:array<u32>;
 @group(0) @binding(1) var<storage,read_write> drTo:array<u32>;
 fn drCount()->u32{return 512u*drDimensions.w;}
 ${seam("drFrom")}
-@compute @workgroup_size(64) fn share(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x;if(!umTileLive(t)){return;}
+${lists(3)}
+@compute @workgroup_size(64) fn share(${visit("drShare")}
+fn drShare(t:u32){
+ if(!umTileLive(t)){return;}
  let word=2u*drCount()+2u*t+1u;let w=drTo[word];let m=(w&0xfffffffeu)|(drFrom[word]&1u);if(m!=w){drTo[word]=m;}
 }`}),entryPoint:"share"}},{priority:"visible"});
   return {batches,shareLayout,share};
  }
 
- async prepare(ownership:UniformMixedOwnership):Promise<void>{if(this.transfers)return;this.simulation=ownership;this.transfers=await this.compileDomain(this.layout.domain!);}
+ /** pool: the page pool whose blocks the ring kernels visit (none: every tile key). */
+ async prepare(ownership:UniformMixedOwnership,pool?:UniformPagePool):Promise<void>{if(this.transfers)return;this.simulation=ownership;this.pool=pool;this.transfers=await this.compileDomain(this.layout.domain!);}
  /** Before a remap, in its encoder: the tiles the target generation
   * (target: its topology) brings into the detail ring take their canonical
   * texels from the bases. */

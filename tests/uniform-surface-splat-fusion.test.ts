@@ -13,6 +13,7 @@ const NB_LINKS=UM_CELL_KEYS;fn nbBinTile(t:u32)->u32{return 64u*t;}fn nbBinCell(
 @group(0) @binding(1) var<storage,read_write> links:array<u32>;
 @group(0) @binding(2) var<storage,read> particles:array<vec4f>;
 fn umTileLive(t:u32)->bool{return t<3u;}
+fn umLiveTileCount()->u32{return 3u;}fn umLiveTile(j:u32)->u32{return j;}
 fn nbTileCold(t:u32)->bool{return t==2u;}
 fn umTileCoord(t:u32)->vec3u{return vec3u(t,0,0);}
 fn umCorner(j:u32,n:u32)->vec3u{return vec3u(j%n,(j/n)%n,j/(n*n));}
