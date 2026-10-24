@@ -2420,9 +2420,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.surfaceB, volume);
     const velocity = uniformInitialLiquidVelocity(this.scene.fluid.initialVelocity_m_s, volume, [nx, ny, nz]);
     if (velocity) this.upload3DF32(this.velocityA, velocity);
-    const gamma = new Float32Array(this.address.boxCells);
-    this.upload3DF32(this.gammaA, gamma);
-    this.upload3DF32(this.gammaB, gamma);
+    this.upload3DF32(this.gammaA);
+    this.upload3DF32(this.gammaB);
     const zeroBoundaryVelocity = new Float32Array(this.executionNegativeBoundaryVelocityBytes / 4);
     this.device.queue.writeBuffer(this.boundaryVelocityA, 0, zeroBoundaryVelocity);
     this.device.queue.writeBuffer(this.boundaryVelocityB, 0, zeroBoundaryVelocity);
@@ -2452,10 +2451,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.velocityA,values);
   }
 
-  private upload3DF32(texture: GPUTexture, values: Float32Array): void {
+  /** No values: zero throughout (a detail field's own empty image, no box-sized array). */
+  private upload3DF32(texture: GPUTexture, values?: Float32Array): void {
     const field=uniformDetailField(texture);
     if(field) { field.storage.upload(texture,values); return; }
-    this.fieldPages.upload(texture,values);
+    this.fieldPages.upload(texture,values ?? new Float32Array(this.address.boxCells));
   }
 
   private upload2DF32(texture: GPUTexture, values: Float32Array, nx: number, nz: number): void {
