@@ -13,8 +13,8 @@ import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
 import {UNIFORM_MIXED_RELAYOUT_RECEIPT,uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformBufferedWork} from "./uniform-buffered-work";
 import {uniformKeyGroups} from "./uniform-lattice-address";
-import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
 import {uniformMixedRemapCapacity} from "./uniform-mixed-remap-capacity";
+import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
 
 interface Fields{volume:GPUTexture;velocity:GPUTexture;phi:GPUTexture;negative:GPUBuffer}
 /** Workgroups of each remap launch (see applyGpu). */
@@ -63,7 +63,7 @@ export class UniformMixedRemap {
  private statusGroup:UniformDetailGroup;
  /** Tiles in the lattice: the worklist's capacity. */
  private readonly tiles:number;
- /** The list launch's grid (one lane per tile). */
+ /** markChanged's grid (one lane per tile; host layouts only). */
  private readonly listGrid:[number,number]=[0,0];
  /** markListed's group 2: the worklist, a generation's changed tiles
   * (UniformMixedGenerationBuffers.changes) and its builder's relayout
@@ -213,8 +213,8 @@ export class UniformMixedRemap {
   const solid=this.solid;
   // The list compares the live (old) and target widths, so it is built
   // before the live ownership adopts the target and reused by the publish.
-  // The scan is one lane per tile key; the listed launch a fixed grid
-  // striding the list.
+  // Either launch is one lane per tile, the list's bound.
+  // markListed strides the dilated list (its count on the GPU) on a fixed grid.
   if(!copy){
    pass.setBindGroup(2,(listed??this.groups[0]).group);pass.setBindGroup(3,this.statusGroup.group);pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"markListed":"markChanged")!));
    if(listed)pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,Math.ceil(this.tiles/64)));
@@ -614,8 +614,7 @@ const RECEIPT_GENERATION:u32=${UNIFORM_MIXED_RELAYOUT_RECEIPT.generation}u;
 // its 3x3x3 neighbourhood, so it is in that list, and every entry runs the
 // same test. A fatal receipt bit lists nothing; lane 0 of the first group
 // latches it once, then publishes the receipt's generation as the frame's
-// current one (a failure latched later names it). A fixed grid strides the
-// list.
+// current one (a failure latched later names it). A fixed grid strides the list.
 @compute @workgroup_size(64) fn markListed(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let fatal=receipt[RECEIPT_FATAL];
  if(gid.x==0u){

@@ -19,7 +19,7 @@ import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixed
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, uniformMixedUp, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
-import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformLatticeWindowBox, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
@@ -689,6 +689,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.inflowBoundary = scene.fluid.inflow
       ? createInflowGridBoundary(scene.fluid.inflow, scene.container, cells) : undefined;
     this.detail = options.detail ?? uniformDetailSettings({});
+    // Refuse a lattice past the page window before the residency's host
+    // passes over every cell (100 s at 2048 cells an axis).
+    uniformLatticeWindowBox([nx, ny, nz]);
     // The stored set at build (uniformPagePoolResidency): under the census of the Dynamic policy only the sources' pages are pinned.
     // The box's place in the window: its origin, but in an open world (container.walls "none").
     const boxPage = sceneFluidBoxPage(scene);
@@ -1172,7 +1175,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // limits refuse a reservation (UniformMixedFrameCapacity).
     const tiles=this.address.poolTiles,gpuLayout=this.detail.policy==="dynamic";
     const solids=!this.solidVoxelsEmpty||sceneHasTerrain(this.scene),bodies=this.scene.rigidBodies.length;
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
+    // fluid.tiers: the particles' h capacity, a brick 8 h tiles; unset, the pool sizes them.
+    const tiers=this.scene.fluid.tiers,particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined
+      ?{fineTiles:Math.min(tiles,tiers.bricks!==undefined?8*tiers.bricks:tiles),perFineCell:tiers.particlesPerFineCell??4}:undefined;
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,particles,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
