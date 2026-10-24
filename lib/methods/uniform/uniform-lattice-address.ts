@@ -740,7 +740,8 @@ export function uniformLatticeBox(cells: readonly number[]): UniformLatticeBox {
  * data only. Absent fields give one block per box page in scan order and
  * the two sentinels. */
 export interface UniformPagePoolScene {
-  /** Storage blocks, the two sentinels included; default: the box's pages + 2. */
+  /** Storage blocks, the two sentinels included; default: the box's pages + 2, or an open world's budget for a
+   * box with more pages than the block grid holds (its resident pages, not its own, must then fit). */
   readonly blocks?: number;
   /** A number that fixes a shuffle of the seeded blocks (uniformPagePoolBoxPages). */
   readonly permute?: number;
@@ -755,7 +756,9 @@ export interface UniformPagePoolScene {
  * on the water slide (40 to 80 blocks: 592 to 979 MiB, 9.7 MiB a block) and
  * rounded up. */
 export const UNIFORM_PAGE_BLOCK_MiB = 10;
-/** The budget of an open world that names none. */
+/** The most blocks the block grid holds: 8x8 blocks a layer, 62 layers (uniformLatticeAddress). */
+export const UNIFORM_BLOCK_GRID_BLOCKS = 8 * 8 * 62;
+/** The budget of an open world that names none, and of a box with more pages than the block grid holds. */
 export const UNIFORM_OPEN_WORLD_MEMORY_MiB = 1024;
 /** The blocks a memory budget buys, the two that hold no page among them. */
 export function uniformPagePoolBlocksForMemory(memory_MiB: number): number {
@@ -843,8 +846,9 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   // Every page the box covers lies in the window above its floor, and no coordinate of a box page wraps.
   if (boxPage.some((o, axis) => !Number.isSafeInteger(o) || o < 0 || o + box.pages[axis]! > UNIFORM_PAGE_WINDOW - (axis === 1 ? UNIFORM_FRAME_FLOOR_PAGES : 1)))
     throw new RangeError(`Uniform lattice: a box of ${box.pages.join("x")} pages at page ${boxPage.join(",")} does not lie inside the window`);
+  const boxBlocks = px * py * pz + 2 + (openTop ? px * pz : 0);
   const blocks = scene.blocks ?? (scene.memory_MiB !== undefined ? uniformPagePoolBlocksForMemory(scene.memory_MiB)
-    : world ? uniformPagePoolBlocksForMemory(UNIFORM_OPEN_WORLD_MEMORY_MiB) : px * py * pz + 2 + (openTop ? px * pz : 0));
+    : world || boxBlocks > UNIFORM_BLOCK_GRID_BLOCKS ? uniformPagePoolBlocksForMemory(UNIFORM_OPEN_WORLD_MEMORY_MiB) : boxBlocks);
   const blockBits = Math.min(Math.floor(blocks / 8), 1) + Math.min(Math.floor(blocks / 64), 1) + Math.min(Math.floor(blocks / 512), 1);
   const blockGrid: Extent = [1 << blockBits, 1 << blockBits, Math.ceil(blocks / 4 ** blockBits)];
   // 33 texels of a vertex texture per block: 62 blocks stay inside a 2048-texel 3D texture.
