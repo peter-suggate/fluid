@@ -10,11 +10,16 @@
  * brick's class. The other classes are plain marks.
  *
  * Words (from a base in an atomic<u32> buffer; B = 64·UM_BLOCKS):
- * [0] slot count, [1..3] spare; mark (B, by brick id); table (B, slot or
+ * [0] slot count, [1] arena window count, [2..3] spare; mark (B, by brick id); table (B, slot or
  * UB_NONE by brick id); list (B, brick id by slot); class (B, by slot);
  * record (27·B, neighbour slot or UB_NONE, offset x+3y+9z of (-1..1)³).
  * The capacity is every brick of the lattice, allocated upfront: the slot
  * space cannot overflow, whatever the classes.
+ *
+ * An arena brick (class arena, after the dilation) also takes the next arena
+ * window, which its class word holds from bit 8 (ubWindow): the surface
+ * arena's windows are sized by their own capacity, not the slot space, and
+ * the count can pass it (the arena's gather makes that fatal).
  *
  * Build: clear the count and marks (uniformBrickTableClear), launch the
  * markers, then brickTableList and brickTableRecord. A rebuild drops every
@@ -23,7 +28,10 @@
 export const UNIFORM_BRICK_CLASS={arenaCore:1,arena:2,particlesCore:4,particles:8,solidClear:16,blend:32,rigid:64} as const;
 export const UNIFORM_BRICK_TABLE_ENTRIES=["brickTableList","brickTableRecord"] as const;
 /** Words the table takes in its buffer, of a lattice of blocks blocks. */
-export function uniformBrickTableWords(blocks:number):number{return 4+31*64*blocks;}
+export function uniformBrickTableWords(blocks:number):number{
+ if(64*blocks>=1<<24)throw new Error(`Brick table: ${64*blocks} bricks, over the class word's 24-bit arena window`);
+ return 4+31*64*blocks;
+}
 /** The byte range build clears (count and marks), of a table at word base. */
 export function uniformBrickTableClear(base:number,blocks:number):{offset:number;size:number}{return {offset:4*base,size:4*(4+64*blocks)};}
 /** buffer: an array<atomic<u32>> the module binds; base: a WGSL u32
@@ -50,6 +58,9 @@ fn ubCount()->u32{return min(atomicLoad(&${buffer}[UB_COUNT]),UB_BRICKS);}
 fn ubSlot(id:u32)->u32{return atomicLoad(&${buffer}[UB_TABLE+id]);}
 fn ubBrick(slot:u32)->u32{return atomicLoad(&${buffer}[UB_LIST+slot]);}
 fn ubClass(slot:u32)->u32{return atomicLoad(&${buffer}[UB_CLASS+slot]);}
+// An arena slot's window (its class word from bit 8), and the windows the build gave.
+fn ubWindow(slot:u32)->u32{return ubClass(slot)>>8u;}
+fn ubWindows()->u32{return atomicLoad(&${buffer}[UB_COUNT+1u]);}
 fn ubNeighbour(slot:u32,n:u32)->u32{return atomicLoad(&${buffer}[UB_RECORD+27u*slot+n]);}
 // A thread a brick id: dilate the core marks, take a slot, list it.
 @compute @workgroup_size(64) fn brickTableList(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
@@ -63,8 +74,8 @@ fn ubNeighbour(slot:u32,n:u32)->u32{return atomicLoad(&${buffer}[UB_RECORD+27u*s
    }
   }
   if(bits==0u){atomicStore(&${buffer}[UB_TABLE+id],UB_NONE);continue;}
-  let slot=atomicAdd(&${buffer}[UB_COUNT],1u);
-  atomicStore(&${buffer}[UB_TABLE+id],slot);atomicStore(&${buffer}[UB_LIST+slot],id);atomicStore(&${buffer}[UB_CLASS+slot],bits);
+  let slot=atomicAdd(&${buffer}[UB_COUNT],1u);var window=0u;if((bits&UB_ARENA)!=0u){window=atomicAdd(&${buffer}[UB_COUNT+1u],1u);}
+  atomicStore(&${buffer}[UB_TABLE+id],slot);atomicStore(&${buffer}[UB_LIST+slot],id);atomicStore(&${buffer}[UB_CLASS+slot],bits|(window<<8u));
  }
 }
 // A thread a (slot, neighbour).

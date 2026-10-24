@@ -197,6 +197,8 @@ export interface NarrowBandSurfaceRevisions{readonly buffer:GPUBuffer;readonly l
  * by the pool's cell keys. bankBytes floors each bank's buffer: the
  * extension borrows a bank as its paired companion (UniformMixedFrame
  * bindStage), sized by the pool's h tiles; the records stay capacity's. */
+/** The surface arena's windows under a particle budget, at least (arenaWindows). */
+const NB_ARENA_WINDOW_FLOOR=2048;
 export interface NarrowBandParticleBudget{readonly fineTiles:number;readonly perFineCell:number;readonly bankBytes?:number}
 /** Particle records for a budget: its samples, then the slabs' spill reserve
  * (particleSlabSpill) on top, so the slabs alone hold the budget. */
@@ -341,6 +343,11 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   * 729 vertices a brick-table slot, after the links of binding 3 (no
   * storage binding is spare: the adapter allows ten a stage). */
  private readonly arenaWord:number;
+ /** The windows the links buffer holds after arenaWord (NB_ARENA_WINDOWS):
+  * every brick of the lattice, or under a particle budget one an h tile with
+  * a floor (NB_ARENA_WINDOW_FLOOR). The arena held about a brick an h tile:
+  * the letters 2396 bricks at 2466 h tiles, the seep 994 at 931. */
+ readonly arenaWindows:number;
  /** The shared brick table's first bins word (uniform-brick-table.ts). */
  private readonly brickWord:number;
  /** transferRefine's prediction for the next census (refine): a join bit a
@@ -507,9 +514,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
   this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
-  // The arena's windows follow: a window (9³ vertices) a brick-table slot; every brick of the lattice has room.
-  this.arenaWord=this.binCells+7*this.capacity;
-  this.next=buffer("cell starts, compact neighbor samples and surface brick arena windows",4*(this.arenaWord+729*64*address.blocks));this.params=buffer("parameters",80,true);
+  // The arena's windows follow: a window (9³ vertices) an arena brick (ubWindow).
+  this.arenaWord=this.binCells+7*this.capacity;this.arenaWindows=Math.min(64*address.blocks,budget?Math.max(NB_ARENA_WINDOW_FLOOR,budget.fineTiles):Infinity);
+  this.next=buffer("cell starts, compact neighbor samples and surface brick arena windows",4*(this.arenaWord+729*this.arenaWindows));this.params=buffer("parameters",80,true);
   this.liveGate=buffer("live sample gate",16,true);device.queue.writeBuffer(this.liveGate,0,new Uint32Array([1,0,0,0]));
   this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
   const size=uniformCoarseCacheExtent(address);
@@ -684,6 +691,7 @@ fn nbParticlesLive()->bool{return params.live.x!=0u;}
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
 ${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
 const NB_ARENA:u32=${this.arenaWord}u;
+const NB_ARENA_WINDOWS:u32=${this.arenaWindows}u;
 // The particle cell bins: a cell's count at bins[nbBinCell(cell)] and its
 // start at links[nbBinCell(cell)]; NB_LINKS words of starts head the links.
 // Under a particle budget a covered tile's 64 bins are in its brick's slot
@@ -1808,13 +1816,14 @@ ${narrowBandSurfaceWGSL}
   // is deferred (reseedClipped); never destroy a surface to make room for it.
   // Liquid a source or the initial band must add has no such deferral.
   if(words[3]===4){const p=words[11]!;throw new Error(`Narrow-band FLIP: a particle arrived in page (${p&255},${(p>>>8)&255},${(p>>>16)&255}), which holds no storage; the residency closure is too small`);}
-  const budget=this.budget&&(words[3]>=5&&words[3]<=7||words[3]===9)?`; fluid.tiers.bricks and fluid.tiers.particlesPerFineCell size it (${this.budget.fineTiles} h tiles at ${this.budget.perFineCell} a fine cell)`:"";
+  const budget=this.budget&&(words[3]>=5&&words[3]<=7||words[3]===9||words[3]===10)?`; fluid.tiers.bricks and fluid.tiers.particlesPerFineCell size it (${this.budget.fineTiles} h tiles at ${this.budget.perFineCell} a fine cell)`:"";
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory longer than the lattice (${NARROW_BAND_TRACE_REACH} cells an axis)`:words[3]===2?"nonfinite velocity"
    :words[3]===5?`particle bank is full: brick overflow exhausted the free tail of the ${this.capacity}-record pool`
    :words[3]===6?`particle slabs exceed the pool: ${words[0]} records sized of ${this.capacity-this.spill} before the spill reserve (${words[1]} live)`
    :words[3]===7?`seed candidates exceed their list (${3*this.capacity} cells)`
    :words[3]===8?`coarse corners exceed their list (${this.coarseListCapacity} entries)`
    :words[3]===9?`particle bricks exceed the cell bins' ${this.binSlots} brick slots`
+   :words[3]===10?`surface arena bricks (${words[11]}) exceed the arena's ${this.arenaWindows} windows`
    :`unknown particle fatal ${words[3]}`}${budget}`);
  }
  destroy():void{this.displayMotion?.destroy();this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
