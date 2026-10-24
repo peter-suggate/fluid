@@ -29,7 +29,9 @@ const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`)
 const name = process.argv[2] ?? "run"; assert.match(name, /^[a-z0-9-]+$/);
 const steps = Number(option("steps") ?? 24), hashMode = option("hash") ?? "all", profiled = process.argv.includes("--profile");
 const out = option("out") ?? "artifacts/nbflip-particle-tiers"; mkdirSync(out, { recursive: true });
-paceDawnEventPolling();
+// tools/gate-nbflip-particle-tiers.ts imports this probe once an arm, in one process.
+const paced = globalThis as { nbParticleTierPaced?: boolean };
+if (!paced.nbParticleTierPaced) { paceDawnEventPolling(); paced.nbParticleTierPaced = true; }
 // --scene=region:MODE:LENGTH:BLOCKS is a region-tier scene (tools/region-tier-scenes.ts) on a pool of BLOCKS blocks.
 const sceneId = option("scene") ?? "nbflip-figure-8-letters", region = /^region:([a-z]+):(\d+):(\d+)$/.exec(sceneId);
 const definition = region ? { id: sceneId, methodProfile: { quality: "balanced" as const, overrides: {} } } : getSceneDefinition(sceneId);
