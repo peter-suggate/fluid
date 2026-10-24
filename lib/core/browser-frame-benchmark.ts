@@ -14,12 +14,13 @@ export function createBrowserFrameBenchmark() {
   const intervals: number[] = [], cpu: number[] = [];
   const stages = new Map<number, NonNullable<RendererFrameMetrics["presentationStages"]>>();
   let armed = false;
+  let measuredContext: string | undefined;
   const button = document.createElement("button");
   button.id = "browser-frame-benchmark-run";
   button.textContent = "Run frame benchmark";
   button.style.cssText = "position:fixed;right:12px;top:52px;z-index:10000;background:#111;color:#bff;padding:6px";
   button.onclick = () => {
-    calls = 0; firstCompleted = undefined; start = 0; done = false; armed = true;
+    calls = 0; measuredContext = undefined; firstCompleted = undefined; start = 0; done = false; armed = true;
     intervals.length = 0; cpu.length = 0; stages.clear();
     document.getElementById("browser-frame-benchmark")?.remove();
     button.textContent = "Measuring 360 completed frames…";
@@ -45,12 +46,17 @@ export function createBrowserFrameBenchmark() {
     },
     sample(completed: number, encoding_ms: number, metrics: RendererFrameMetrics, resolution: string, configuration: Record<string, unknown>, ready: boolean) {
       if (!armed || done || completed === 0) return;
-      if (!ready) {
+      const context = JSON.stringify([metrics.context, resolution, configuration.scene, configuration.camera]);
+      const changedContext = measuredContext !== undefined && measuredContext !== context;
+      measuredContext = context;
+      if (!ready || changedContext) {
         firstCompleted = undefined; start = 0; intervals.length = 0; cpu.length = 0; stages.clear();
         button.textContent = "Waiting for complete renderer…";
+        button.title = JSON.stringify(configuration.readiness ?? configuration);
         return;
       }
       button.textContent = "Measuring 360 completed frames…";
+      button.title = "";
       firstCompleted ??= completed;
       if (completed - firstCompleted < 120) return;
       const now = performance.now();

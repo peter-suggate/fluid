@@ -36,8 +36,10 @@ The moving-camera results do not establish a material end-to-end improvement.
 An initial 116.7 FPS moving run overlapped asynchronous pipeline compilation and
 is explicitly excluded. The repeat with the completed scene was 64.36 FPS. The
 benchmark now requires an active renderer, ready mesh, matching effective
-lighting mode, and ready GPU status before beginning its warmup; losing readiness
-discards the current sample window. Results include effective renderer state and
+lighting mode, and ready platform, scene and fluid owners before beginning its
+warmup. The last global status can remain at “finalizing” after the owners are
+ready, so it is not a readiness gate. Losing readiness, changing the scene/view
+configuration or render resolution discards the current sample window. Results include effective renderer state and
 quality settings. Earlier measurements predate that automatic readiness gate.
 
 ## Changes retained at this checkpoint
@@ -93,6 +95,44 @@ The next optimization needs to avoid repeated exact visibility work for these
 finite lights while retaining their occluders and edge quality. Smaller dispatch
 grids and more parallel emitter dispatches did not demonstrate a general win.
 The coarse three-pixel lattice and parallel-emitter experiment were removed.
+
+## Follow-up after checkpoint commit a4504c67
+
+Further isolated A/B experiments preserved every HDR/depth byte in four captures
+(authored and mixed lights, stationary and orbiting), but did not establish a
+general performance improvement. They were removed rather than enabled by default.
+
+| Experiment | Authored orbit paired speedup | Mixed-light orbit paired speedup |
+| --- | ---: | ---: |
+| Separate cheap classifier and per-pixel exact-ray queue | 1.043× | 0.876× |
+| Same queue preserving 8×8 spatial tiles | 0.946× | 1.018× |
+| Fuse AO and cheap classification | 0.960× | 0.980× |
+| Structural-root ray miss and AO page-cache reuse | 0.937× | 0.992× |
+
+The tiled queue completed the actual water/AO/multiple-light browser frame in
+**15.40 ms (64.94 FPS)** at the verified 3474×1882 backing resolution. This does
+not improve materially on the retained checkpoint's 15.54 ms. A reload briefly
+produced a 6948×3764 backing canvas; those observations were excluded, and canvas
+dimensions were checked before the saved run. Dry timings above exclude water
+and browser scheduling. Raw paired samples, byte comparisons and the browser
+run are retained in `complete-frame-followup-2026-10-25.json`.
+
+A final run of the retained checkpoint with the strengthened readiness gate
+reported **14.88 ms / 67.22 FPS moving** and **8.97 ms / 111.49 FPS stationary**.
+CPU unit tests were running during these verification captures; they are not
+evidence of a rendering speedup or a regression from the earlier stationary run.
+Both retained runs still miss the strict 8.33 ms complete-frame target.
+
+The tiled mixed-light run still spent about **97 ms** in queued exact visibility.
+Moving work between kernels or adding root-box checks is therefore insufficient.
+A larger change must eliminate repeated finite-light queries, for example through
+conservative cached visibility or broader shadow-map coverage, with explicit
+handling for transmission, moving occluders and disocclusions. None of these
+unimplemented directions should be counted as an achieved speedup.
+
+Follow-up validation: type checking passed; unit tests reported 1,196 passed,
+127 skipped and zero failures. The new benchmark regression exercises startup,
+readiness loss, context changes and resize invalidation.
 
 ## Reproduction and evidence
 

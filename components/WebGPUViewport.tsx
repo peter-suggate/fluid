@@ -1137,10 +1137,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
           lighting: ui.svoConeTracingMode, primary: ui.svoPrimaryTraversal, water: ui.fluidSurfaceRenderMode,
           disabledStages: ui.disabledRenderStages, tuning: ui.svoRenderTuning,
           effectiveRenderer: state.effectiveRendererStatus,
+          readiness: { gpu: state.gpuStatus, svo: state.resourceReadiness.svo, fluid: state.resourceReadiness.fluid },
         }, state.effectiveRendererStatus.state === "active"
           && (ui.svoPrimaryTraversal !== "mesh" || state.effectiveRendererStatus.surfaceMesh?.state === "ready")
           && state.effectiveRendererStatus.lightingVisibility?.state === ui.svoConeTracingMode
-          && state.gpuStatus.state === "ready");
+          && state.resourceReadiness.platform.state === "ready"
+          && state.resourceReadiness.svo.state === "ready"
+          && state.resourceReadiness.fluid.state === "ready");
         activeBinding.publishPixelTrace(renderer);
         simulation.recordFrame(metrics, renderer.presentationResolution, paneId);
         activeBinding.publishFrameRate(frameRate.sampleCompleted(renderer.completedPresentationCount, performance.now()));
