@@ -234,7 +234,7 @@ var<workgroup> tileVelocity:array<atomic<u32>,384>;
 var<workgroup> planSpeed:atomic<u32>;
 var<workgroup> planValues:array<vec3f,64>;
 var<workgroup> planDefect:array<f32,64>;
-var<workgroup> planSurface:array<vec2f,64>;
+var<workgroup> planSurface:array<vec3f,64>;
 var<workgroup> planPhi:array<f32,125>;
 var<workgroup> planBoundary:atomic<u32>;
 ${uniformTileFineDefectWGSL}
@@ -249,7 +249,7 @@ fn umVelocityOrder(value:f32)->u32{
 @compute @workgroup_size(64) fn localSpeed(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  let owner=umAllOwner(gid);let slot=lane-owner.lane;
  for(var k=0u;k<6u;k++){atomicStore(&tileReach[64u*k+lane],0u);atomicStore(&tileVelocity[64u*k+lane],0u);}
- planValues[lane]=vec3f(0.0);planDefect[lane]=0.0;planSurface[lane]=vec2f(0.0);
+ planValues[lane]=vec3f(0.0);planDefect[lane]=0.0;planSurface[lane]=vec3f(0.0);
  if(lane==0u){atomicStore(&planSpeed,0u);atomicStore(&planBoundary,0u);}
  // A fine tile shares its 125 vertices, instead of reloading eight corners
  // for each of its 64 cells. Coarse owners still load their own eight taps.
@@ -280,7 +280,10 @@ fn umVelocityOrder(value:f32)->u32{
    for(var k=0u;k<8u;k++){let q=umCorner(owner.lane,4u)+umCorner(k,2u);corners[k]=planPhi[q.x+5u*q.y+25u*q.z];}
   }
   let open=select(umCellIsOpen(vec3i(origin)),umTileOpen(owner.tile)>0.0,owner.width==4u);
-  planSurface[lane]=tuSurfaceRate(corners,planValues[lane],umSceneMinimumSpacing(),owner.width,open);
+  // z: the owner holds liquid (a corner inside). Sato et al. 2018's high-pass
+  // q is the liquid's: extrapolated air carries no velocity detail of its own.
+  var wet=0.0;for(var k=0u;k<8u;k++){if(corners[k]<0.0){wet=1.0;}}
+  planSurface[lane]=vec3f(tuSurfaceRate(corners,planValues[lane],umSceneMinimumSpacing(),owner.width,open),wet);
   // Use the production support closure, including extension dependencies;
   // a phi-distance collar alone misses readers of extrapolated air.
   let reader=open&&(atomicLoad(&umSupport[3u*UM_TILES+owner.tile])&3u)!=0u;
@@ -303,7 +306,7 @@ fn umVelocityOrder(value:f32)->u32{
   // no additional field scan, publish current unquantized local motion.
   let n=select(1u,64u,owner.width==1u);var average=vec3f(0.0);var defect=0.0;
   for(var i=0u;i<n;i++){average+=planValues[slot+i]/f32(n);defect=max(defect,planDefect[slot+i]);}
-  var surface=vec2f(0.0);for(var i=0u;i<n;i++){surface=max(surface,planSurface[slot+i]);}
+  var surface=vec3f(0.0);for(var i=0u;i<n;i++){surface=max(surface,planSurface[slot+i]);}
   var speed=0.0;var span=0.0;
   for(var a=0u;a<3u;a++){
    let hi=atomicLoad(&tileVelocity[64u*a+slot]);let lo=atomicLoad(&tileVelocity[64u*(3u+a)+slot]);
@@ -314,7 +317,9 @@ fn umVelocityOrder(value:f32)->u32{
   // constant-model error there. Nonfinite samples must never pass as quiet.
   if(owner.width!=1u||atomicLoad(&planBoundary)!=0u){defect=max(defect,0.5*span);}
   let at=8u*owner.tile;updateError[at]=average.x;updateError[at+1u]=average.y;updateError[at+2u]=average.z;
-  updateError[at+3u]=defect;updateError[at+4u]=speed;updateError[at+5u]=bitcast<f32>(umBlockWord(owner.tile>>9u));updateError[at+6u]=f32(owner.width);
+  // A tile with no liquid owner stores defect -1: tileError measures no
+  // detail there (an extension's edge or its seam with a closed wall face).
+  updateError[at+3u]=select(-1.0,defect,surface.z>0.0);updateError[at+4u]=speed;updateError[at+5u]=bitcast<f32>(umBlockWord(owner.tile>>9u));updateError[at+6u]=f32(owner.width);
   // Tail after the compact FLIP copy: normal phi rate, advection
   // acceleration, physical-reader class (0 unused, 1 deep, 2 surface), span.
   let physical=12u*UM_TILES+4u*owner.tile;
@@ -328,8 +333,17 @@ fn umVelocityOrder(value:f32)->u32{
 // Each invocation writes only word 7; neighbours read immutable words 0..6.
 @compute @workgroup_size(64) fn tileError(@builtin(global_invocation_id) gid:vec3u){
  let t=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(t)){return;}let at=8u*t;
- var error=updateError[at+3u];let centre=vec3f(updateError[at],updateError[at+1u],updateError[at+2u]);
- var gradient=0.0;
+ // Detail is the liquid's velocity high-pass (Sato et al. 2018, Eq. 3). A
+ // dry tile (defect -1) holds extrapolated air: its mean's second difference
+ // against an unextended or frozen neighbour, or a closed wall face, is the
+ // extension's edge, not flow (a translating block's collar tiles read 0.19
+ // to 0.38 m/s of it and went HOT). Its gradient stays: a live extension
+ // reaching a frozen region's stale air is transport the region must thaw
+ // for (WARM, through the momentum term), as a dam-break front arrives.
+ // A NaN defect is not -1 and still saturates.
+ let dry=updateError[at+3u]==-1.0;
+ var error=select(updateError[at+3u],0.0,dry);let centre=vec3f(updateError[at],updateError[at+1u],updateError[at+2u]);
+ var gradient=0.0;var carried=updateError[at+4u];
  {
   let c=vec3i(umTileCoord(t));
   for(var axis=0u;axis<3u;axis++){
@@ -337,23 +351,33 @@ fn umVelocityOrder(value:f32)->u32{
    if(!umKeyStored(lo)||!umKeyStored(hi)){continue;}
    let a=8u*lo;let b=8u*hi;
    let below=vec3f(updateError[a],updateError[a+1u],updateError[a+2u]);let above=vec3f(updateError[b],updateError[b+1u],updateError[b+2u]);
-   let second=abs(above-2.0*centre+below)/8.0;if(updateError[at+6u]==4.0){error=max(error,second.x+second.y+second.z);}
+   let second=abs(above-2.0*centre+below)/8.0;if(updateError[at+6u]==4.0&&!dry){error=max(error,second.x+second.y+second.z);}
    let variation=max(abs(above-centre),abs(centre-below));
+   carried=max(carried,max(max(abs(below.x),max(abs(below.y),abs(below.z))),max(abs(above.x),max(abs(above.y),abs(above.z)))));
    gradient+=max(variation.x,max(variation.y,variation.z))/(4.0*umSceneMinimumSpacing());
   }
  }
  if(!(error>=0.0&&error<3.0e38)||!(updateError[at+4u]<3.0e38)){error=3.402823e38;}
  let physical=12u*UM_TILES+4u*t;
- if(updateError[physical+2u]==0.0){error=0.0;gradient=0.0;}
- else{gradient=max(gradient,updateError[physical+3u]/umSceneMinimumSpacing());}
- updateError[physical+1u]=updateError[at+4u]*gradient;
+ let span=updateError[physical+3u];
+ // The velocity change across one tile (m/s): what motion can do to a shape
+ // there in a step. Uniform motion moves a shape without changing it.
+ var deformation=max(4.0*umSceneMinimumSpacing()*gradient,span);
+ if(updateError[physical+2u]==0.0){error=0.0;gradient=0.0;deformation=0.0;}
+ else{gradient=max(gradient,span/umSceneMinimumSpacing());}
+ if(!(error<3.0e38)||!(deformation<3.0e38)){deformation=3.402823e38;}
+ // Advection acceleration (u.grad)u at the speed that can carry into the
+ // tile: a neighbour's as well as its own. A COLD region's stale air (zero
+ // where its extension never reached) beside moving liquid has no speed of
+ // its own, yet the liquid arrives there: its momentum term thaws it.
+ updateError[physical+1u]=carried*gradient;
  // Retain the gradient independently of speed: a COLD region's pressure
  // translation can advect an existing gradient even when local F is zero.
  updateError[physical+3u]=gradient;
  updateError[at+7u]=error;
  // Compact per-tile copy for FLIP activity: no additional storage binding in
  // the already full FLIP pipeline layout. Metadata rejects recycled pages.
- let packed=8u*UM_TILES+4u*t;updateError[packed]=updateError[at+4u];updateError[packed+1u]=error;
+ let packed=8u*UM_TILES+4u*t;updateError[packed]=deformation;updateError[packed+1u]=error;
  updateError[packed+2u]=updateError[at+5u];updateError[packed+3u]=updateError[at+6u];
 }
 // Sparse allocation need not contain the rectangular intermediate paths of

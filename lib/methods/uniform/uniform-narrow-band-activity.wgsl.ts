@@ -14,7 +14,9 @@ import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
  * triggered criteria (bits in UNIFORM_DETAIL_CRITERIA order: shape, thin,
  * strain, rotation, impact, approach) heat it. "activity": any. "need":
  * strain, rotation, impact or approach; thin geometry and shape near a body
- * also require per-tile motion above the transport budget. Static shape
+ * also require per-tile deformation above the transport budget: a uniform
+ * motion carries a shape unchanged (Sato et al. 2018: translation, e.g. free
+ * fall, is no detail), and the grid's transport moves it. Static shape
  * remains spatially refined without refreshing particle heat. Shape elsewhere measures
  * h-versus-4h surface error, which the h tiles it requires already carry:
  * a ripple or a resting wall's meniscus needs h, not particles. */
@@ -30,9 +32,12 @@ fn nbActivityTriggered(t:u32,criteria:u32)->bool{
  // Strain, rotation, impact and approach already measure evolution.
  if((criteria&0x3cu)!=0u){return true;}
  // Thin/curved geometry still requests h in the census. It requests particles
- // only when motion can change that shape by more than the transport budget.
+ // only when motion can change that shape by more than the transport budget:
+ // the velocity's change across the tile, not its speed. A translating
+ // block's coarse leading face reads thin (its phi there is no distance)
+ // every frame at 1.25 cells a step, and seeded ~29k particles.
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- let changing=params.hDt.w*tuSpeed(t)/h>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
+ let changing=params.hDt.w*tuDeformation(t)/h>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
  return changing&&((criteria&2u)!=0u||((criteria&1u)!=0u&&umBodyCount()>0u&&umBodyPoseNearTile(t,${UNIFORM_BODY_GEOMETRY_REACH}u)));
 }`;}
 export const NARROW_BAND_ACTIVITY_WORDS_PER_TILE = 11;

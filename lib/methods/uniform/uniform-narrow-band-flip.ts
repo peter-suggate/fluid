@@ -656,11 +656,12 @@ const NB_ARENA:u32=${this.arenaWord}u;
 ${slots?UniformColdFreeze.wgsl(undefined,1,18):UniformColdFreeze.wgsl(this.freeze,1,18)}
 ${this.updateErrors?`// Packed certificate copy: reuse the bins binding (the full FLIP layout is at its buffer limit).
 const NB_UPDATE_ERRORS:u32=${this.activityWord+7*this.tiles}u;
-fn tuSpeed(t:u32)->f32{
+// The tile's deformation: its velocity change across one tile, m/s.
+fn tuDeformation(t:u32)->f32{
  let at=NB_UPDATE_ERRORS+4u*t;
  if(!umKeyStored(t)||atomicLoad(&bins[at+2u])!=umBlockWord(t>>9u)||bitcast<f32>(atomicLoad(&bins[at+3u]))<=0.0){return 3.402823e38;}
  return bitcast<f32>(atomicLoad(&bins[at]));
-}`:"fn tuSpeed(t:u32)->f32{return 3.402823e38;}"}
+}`:"fn tuDeformation(t:u32)->f32{return 3.402823e38;}"}
 // A thawing region's coarse term on an h cell's three positive faces.
 fn nbThaw(cell:vec3u)->vec3f{return vec3f(umThawFaceTerm(vec3i(cell),0u,1u),umThawFaceTerm(vec3i(cell),1u,1u),umThawFaceTerm(vec3i(cell),2u,1u));}
 // SORT leaves each brick slab's samples sorted by cell key, a tile's 64

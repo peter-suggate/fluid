@@ -4,7 +4,10 @@ import {UNIFORM_SURFACE_TRANSPORT_ERROR_H} from "./uniform-surface-transport.wgs
  * mean.xyz, fine reconstruction defect (m/s), max component speed (m/s),
  * block identity (u32 bits), owner width, final defect (m/s).
  * Four additional words per tile follow the records as a compact FLIP copy:
- * speed, defect, identity, width. Four further words per tile hold
+ * deformation (the velocity change across one tile, m/s: 4h times the
+ * neighbour-mean gradient, or the tile's own face span), defect, identity,
+ * width. A tile with no liquid owner measures no defect (its velocity is an
+ * extrapolation); its gradient still bounds the transport a thaw needs. Four further words per tile hold
  * normal surface rate, momentum acceleration, reader class, velocity gradient.
  * Reader classes: 0 unused, 1 fully submerged, 2 surface/unknown. Taking
  * their maximum only certifies submerged when every physical cell agrees.

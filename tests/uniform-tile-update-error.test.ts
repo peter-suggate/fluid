@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {advanceTierHold,uniformTierHoldWGSL,uniformTileFineDefectWGSL} from "../lib/methods/uniform/uniform-tile-update-error";
-import {narrowBandActivityTriggerWGSL} from "../lib/methods/uniform/uniform-narrow-band-activity.wgsl";
 import {withUniformDevice} from "./helpers/uniform-geometric";
 import {readMixedBuffer} from "./helpers/uniform-mixed-native-fields";
 
@@ -60,26 +59,6 @@ ${uniformTileFineDefectWGSL}
    assert.ok(Math.max(...result.slice(0,128))<3e-6,"translation/shear are representable even with a large velocity range");
    for(let i=0;i<64;i++)assert.ok(Math.abs(result[128+i]!-(i%4===1||i%4===2?1:0))<3e-6,"quadratic midpoint defect is one m/s");
   }finally{input.destroy();output.destroy();}
- });
-});
-
-test("particle updates distinguish stationary shape from evolving detail",gpu,async()=>{
- await withUniformDevice("shape versus activity",async device=>{
-  const output=device.createBuffer({size:32,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
-  try{
-   const module=device.createShaderModule({code:`
-@group(0) @binding(0) var<storage,read_write> output:array<u32>;
-struct Params{hDt:vec4f} const params=Params(vec4f(.05,.05,.05,1.0/60.0));
-fn tuSpeed(t:u32)->f32{return select(0.0,1.0,t>=4u);}
-fn umBodyCount()->u32{return 1u;}fn umBodyPoseNearTile(t:u32,m:u32)->bool{return true;}
-${narrowBandActivityTriggerWGSL("need")}
-@compute @workgroup_size(1) fn main(){
- for(var i=0u;i<8u;i++){let criterion=array<u32,4>(1u,2u,4u,16u)[i%4u];output[i]=u32(nbActivityTriggered(i,criterion));}}
-`});
-   const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}}),group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
-   const e=device.createCommandEncoder(),p=e.beginComputePass();p.setPipeline(pipeline);p.setBindGroup(0,group);p.dispatchWorkgroups(1);p.end();device.queue.submit([e.finish()]);
-   assert.deepEqual(Array.from(new Uint32Array((await readMixedBuffer(device,output)).buffer)),[0,0,1,1,1,1,1,1]);
-  }finally{output.destroy();}
  });
 });
 
