@@ -193,8 +193,10 @@ export interface UniformNarrowBandSlotSnapshot {
 export interface NarrowBandSurfaceRevisions{readonly buffer:GPUBuffer;readonly liveOffset:number;readonly scratchOffset:number;readonly regions:number}
 /** The particles' h capacity (scene fluid.tiers): every particle buffer is
  * sized by fineTiles h tiles of 64 cells at perFineCell samples a cell, not
- * by the pool's cell keys. */
-export interface NarrowBandParticleBudget{readonly fineTiles:number;readonly perFineCell:number}
+ * by the pool's cell keys. bankBytes floors each bank's buffer: the
+ * extension borrows a bank as its paired companion (UniformMixedFrame
+ * bindStage), sized by the pool's h tiles; the records stay capacity's. */
+export interface NarrowBandParticleBudget{readonly fineTiles:number;readonly perFineCell:number;readonly bankBytes?:number}
 /** Particle records for a budget: its samples, then the slabs' spill reserve
  * (particleSlabSpill) on top, so the slabs alone hold the budget. */
 export function narrowBandBudgetCapacity(budget:NarrowBandParticleBudget):number{
@@ -207,6 +209,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  readonly label="Narrow-band FLIP page words";
  readonly capacity:number;
  readonly particleStride:number;
+ /** The records' bytes in a bank, its binding (arrayLength) size: a budget's bank buffer can be larger (bankBytes). */
+ private readonly recordBytes:number;
  private get apic():boolean{return this.transferMode==="apic";}
  readonly particles:readonly [GPUBuffer,GPUBuffer];
  readonly state:GPUBuffer;
@@ -473,7 +477,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   if(budget&&narrowBandBudgetCapacity(budget)>deviceRecords)throw new Error(`Narrow-band FLIP: fluid.tiers (${budget.fineTiles} h tiles at ${budget.perFineCell} particles a fine cell) needs ${narrowBandBudgetCapacity(budget)} particle records; the device's binding limit holds ${deviceRecords}`);
   this.capacity=budget?narrowBandBudgetCapacity(budget):Math.min(cells*8,Math.max(2_097_152,cells),deviceRecords);
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  this.particles=[buffer("particles A",this.capacity*particleBytes),buffer("particles B",this.capacity*particleBytes)];
+  this.recordBytes=this.capacity*particleBytes;const bankBytes=Math.max(this.recordBytes,budget?.bankBytes??0);
+  this.particles=[buffer("particles A",bankBytes),buffer("particles B",bankBytes)];
   // The receipt, then the slab records (uniform-particle-slab.wgsl).
   this.state=buffer("receipt, particle frame and brick slabs",4*particleSlabWords(address.blocks));
   if(sweptDelta)this.displayMotion=new GPUFluidParticleMotion(device,this.activeParticles,this.state,this.particleStride,this.capacity);
@@ -495,7 +500,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // (reserveFine), and the pour's late frames hold over 12k: the deposit's
   // words are sized for the pool, so no layout leaves the fast deposit.
   // Under a particle budget its h tiles bound the deposit: a layout past them takes the general gather.
-  const deposit=particleDepositStorage(this.coarseListWord+4+2*this.coarseListCapacity,budget?Math.min(budget.fineTiles,address.poolTiles):address.poolTiles,limit,this.particles[0].size);
+  const deposit=particleDepositStorage(this.coarseListWord+4+2*this.coarseListCapacity,budget?Math.min(budget.fineTiles,address.poolTiles):address.poolTiles,limit,this.recordBytes);
   this.depositWord=deposit.offsetWords;this.depositTiles=deposit.tiles;this.sharedDeposit=deposit.shared;
   const binBytes=deposit.binsBytes;
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
@@ -588,7 +593,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
    this.groups[name]=[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
-    {binding:0,resource:{buffer:this.particles[parity]!}},{binding:1,resource:{buffer:this.particles[1-parity]!}},
+    {binding:0,resource:{buffer:this.particles[parity]!,size:this.recordBytes}},{binding:1,resource:{buffer:this.particles[1-parity]!,size:this.recordBytes}},
     {binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
     {binding:5,resource:{buffer:negative}},{binding:6,resource:{buffer:this.params}},
     {binding:7,resource:name==="reconstruct"||name==="redistanceStore"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
@@ -606,7 +611,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  bindDeltaSlots(current:GPUBufferBinding,old:GPUBufferBinding):UniformDetailGroup{
   if(!this.deltaResources)throw new Error("Swept FLIP delta is not available");
   return uniformDetailGroup(this.device,{layout:this.deltaResources,entries:[
-   {binding:1,resource:{buffer:this.activeParticles}},{binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
+   {binding:1,resource:{buffer:this.activeParticles,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
    {binding:6,resource:{buffer:this.params}},{binding:17,resource:old},{binding:19,resource:current},
   ]});
  }
@@ -632,7 +637,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    cache:this.cache.bind({extended:f.raw,negative:f.negative,coarseExtended:this.coarseVelocity,slots,gate:this.liveGate}),
    taps:this.stageTaps.builder.bind({extended:f.raw,negative:f.negative,coarse:this.coarseVelocity,slots,gate:this.liveGate},unit),
    particles:[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.slotSnapshotResources!,entries:[
-    {binding:1,resource:{buffer:this.particles[1-parity]!}},{binding:2,resource:{buffer:this.bins}},{binding:4,resource:{buffer:this.state}},
+    {binding:1,resource:{buffer:this.particles[1-parity]!,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:4,resource:{buffer:this.state}},
     {binding:5,resource:{buffer:f.negative}},{binding:6,resource:{buffer:this.params}},
     {binding:8,resource:f.raw},{binding:10,resource:this.coarseVelocity},{binding:11,resource:unit},{binding:17,resource:slots},
    ]})) as [UniformDetailGroup,UniformDetailGroup],
