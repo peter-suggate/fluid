@@ -3,6 +3,7 @@ import test from "node:test";
 import { uniformNearSettled } from "../lib/methods/uniform/uniform-near-settled";
 import { narrowBandFlipValues, uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-band-flip";
+import { UNIFORM_PRESSURE_ARENA_SCHEDULE } from "../lib/methods/uniform/uniform-pressure-arena";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, narrowBandSurfaceWGSL } from "../lib/methods/uniform/uniform-narrow-band-surface.wgsl";
 
 test("seedScoring and outerSeeding default to the census and reseeding they replace", () => {
@@ -41,4 +42,14 @@ test("the wall bound replaces the centred one once, and keeps its expression whe
   assert.ok(NARROW_BAND_CENTRED_BOUND_WGSL.includes(`if(open>0u){${centred}}`));
   assert.ok(NARROW_BAND_WALL_BOUND_WGSL.includes(`if(open==8u){${centred}}`));
   assert.match(NARROW_BAND_WALL_BOUND_WGSL, /bound=select\(-sparse,1\.0-max\(low,high\)-sparse,denseOpen\);/);
+});
+
+test("nativeSmoothing defaults to the level 2 correction alone, and composite relaxes the native rows once a cycle", () => {
+  assert.equal(uniformNearSettled({}).nativeSmoothing, "coarse");
+  assert.equal(uniformNearSettled({ nativeSmoothing: "bogus" }).nativeSmoothing, "coarse");
+  assert.equal(uniformNearSettled({ nativeSmoothing: "composite" }).nativeSmoothing, "composite");
+  assert.equal(UNIFORM_PRESSURE_ARENA_SCHEDULE.nativeSweeps, 0);
+  assert.equal(narrowBandFlipValues({}).nativeSmoothing, "coarse");
+  const param = uniformNarrowBandMethod.params.find(p => p.key === "nativeSmoothing");
+  assert.ok(param && param.kind === "select" && param.update === "solver");
 });

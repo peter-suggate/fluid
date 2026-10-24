@@ -896,8 +896,10 @@ var<workgroup> sums:array<atomic<u32>,16>;
     // side) over cells whose six neighbours the start phi also calls liquid:
     // by zone the largest, the count over 1/s, and the worst cells.
     for (const { name, field } of fields) {
-      if (!name.startsWith("band/velocity")) continue;
-      const at = (x: number, y: number, z: number, a: number) => field[4 * (x + g.nx * (y + g.ny * z)) + a]!;
+      if (!name.startsWith("band/") && !name.startsWith("finishPair/") && !name.startsWith("project/")) continue;
+      // A face beside a wall cell (the dividing wall less its square hole) carries nothing: the solver leaves closed faces' values unweighted.
+      const side = wall.side ?? 1, solidCell = (x: number, y: number, z: number) => x >= wall.low && x < wall.high && !(y >= wall.holeY && y < wall.holeY + side && z >= wall.holeZ && z < wall.holeZ + side);
+      const at = (x: number, y: number, z: number, a: number) => { const n = [x, y, z]; n[a]!--; return solidCell(x, y, z) || solidCell(n[0]!, n[1]!, n[2]!) ? 0 : field[4 * (x + g.nx * (y + g.ny * z)) + a]!; };
       const worst: { c: number[]; d: number }[] = [], max = [0, 0, 0], over = [0, 0, 0], cells = [0, 0, 0];
       for (let z = 1; z < g.nz - 1; z++) for (let y = 1; y < g.ny - 1; y++) for (let x = 1; x < g.nx - 1; x++) {
         if (!L[x + g.nx * (y + g.ny * z)] || !L[x - 1 + g.nx * (y + g.ny * z)] || !L[x + 1 + g.nx * (y + g.ny * z)] || !L[x + g.nx * (y - 1 + g.ny * z)] || !L[x + g.nx * (y + 1 + g.ny * z)] || !L[x + g.nx * (y + g.ny * (z - 1))] || !L[x + g.nx * (y + g.ny * (z + 1))]) continue;
@@ -907,6 +909,11 @@ var<workgroup> sums:array<atomic<u32>,16>;
         if (Math.abs(d) > 1) { worst.push({ c: [x, y, z], d }); if (worst.length > 64) { worst.sort((p, q) => Math.abs(q.d) - Math.abs(p.d)); worst.length = 16; } }
       }
       worst.sort((p, q) => Math.abs(q.d) - Math.abs(p.d)); worst.length = Math.min(worst.length, 12);
+      // The divergence around the throat: x from wall.low - 12, y and z from the hole's low cell - 4, ten each; null where the start phi is air.
+      const near: (number | null)[][][] = [];
+      for (let z = throat[2]! - 4; z < throat[2]! + 6; z++) { const plane: (number | null)[][] = []; for (let y = throat[1]! - 4; y < throat[1]! + 6; y++) { const row: (number | null)[] = []; for (let x = wall.low - 12; x < wall.high + 8; x++) {
+        row.push(L[x + g.nx * (y + g.ny * z)] ? +((at(x + 1, y, z, 0) - at(x, y, z, 0) + at(x, y + 1, z, 1) - at(x, y, z, 1) + at(x, y, z + 1, 2) - at(x, y, z, 2)) / h).toFixed(2) : null); } plane.push(row); } near.push(plane); }
+      console.log(JSON.stringify({ divergenceNear: step, stage: name, x0: wall.low - 12, y0: throat[1]! - 4, z0: throat[2]! - 4, near }));
       console.log(JSON.stringify({ divergence: step, stage: name, cells: Object.fromEntries(cells.map((v, i) => [names[i], v])), max: Object.fromEntries(max.map((v, i) => [names[i], +v.toFixed(3)])), over1: Object.fromEntries(over.map((v, i) => [names[i], v])), worst: worst.map(w => [...w.c, +w.d.toFixed(2)]) }));
     }
     console.log(JSON.stringify({ flowStage: step, bound_m_s: +bound_m_s.toFixed(3), stages,
@@ -938,6 +945,15 @@ var<workgroup> sums:array<atomic<u32>,16>;
         await hb.mapAsync(GPUMapMode.READ); const hu = new Uint32Array(hb.getMappedRange().slice(0)); hb.unmap(); hb.destroy(); const hf = new Float32Array(hu.buffer);
         const valid = hu[25]!; const history = Array.from({ length: 16 }, (_, k) => (valid >> k) & 1 ? +hf[8 + k]!.toExponential(3) : null).filter(v => v !== null);
         console.log(JSON.stringify({ bandHeader: { tiles: hu[0], cycles: hu[4], final: +hf[2]!.toExponential(3), initial: (valid >> 16) & 1 ? +hf[26]!.toExponential(3) : null, history, nativeInitial: +hf[27]!.toExponential(3), nativeFinal: +hf[28]!.toExponential(3) }, step }));
+        // A debug build's large-residual cells (x, y, z, tag: cycle, 100 final, 200 + cycle native, 300 native final; residual; kinds).
+        const debugWord = (arena as unknown as { debugWord?: number }).debugWord;
+        if (debugWord) {
+          const W = 16, words = 1 + W * 8192, db = device.createBuffer({ label: "Tier budget band debug", size: 4 * words, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+          const e2 = device.createCommandEncoder(); e2.copyBufferToBuffer(arena.index, 4 * debugWord, db, 0, 4 * words); device.queue.submit([e2.finish()]);
+          await db.mapAsync(GPUMapMode.READ); const du = new Uint32Array(db.getMappedRange().slice(0)); db.unmap(); db.destroy(); const df = new Float32Array(du.buffer);
+          const n = Math.min(du[0]!, 8192), cells = Array.from({ length: n }, (_, e) => ({ x: du[1 + W * e]!, y: du[2 + W * e]!, z: du[3 + W * e]!, tag: du[4 + W * e]!, r: +df[5 + W * e]!.toPrecision(4), kinds: du[6 + W * e]!.toString(16), extra: Array.from(df.subarray(7 + W * e, 1 + W * (e + 1)), v => +v.toPrecision(4)) }));
+          console.log(JSON.stringify({ bandDebug: { recorded: du[0], cells }, step }));
+        }
       }
       // The h band's V-cycles and final residual (1/s, its receipt) for each step since the last sample.
       if (band.length) { const r = band.map(b => b[2]!).sort((x, y) => x - y); console.log(JSON.stringify({ band: { cycles: band.map(b => b[1]), residualMedian: +r[r.length >> 1]!.toExponential(3), residualMax: +r[r.length - 1]!.toExponential(3), residuals: band.map(b => +b[2]!.toExponential(3)) }, step })); band.length = 0; }

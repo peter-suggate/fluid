@@ -104,8 +104,12 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   "centred" reads its open cells as centred on it, which at a wall or floor
  *   sets the plane a cell too high (a floor film under half a cell deep adds
  *   nothing); "walls" fills from the wall there, with the same mass.
+ * - nativeSmoothing: "coarse" corrects the band solve's native 4h rows by its
+ *   level 2 alone, which sees the band as 4h aggregates; "composite" also
+ *   relaxes them against the band's iterate each cycle, so a row coupled
+ *   mostly through seams (a solid's pocket beside a throat) converges.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -139,4 +143,5 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  outerSeeding:values.outerSeeding==="uncovered"?"uncovered":"retain",
  heatExpiry:values.heatExpiry==="held"?"held":"anywhere",
  sampleBound:values.sampleBound==="walls"?"walls":"centred",
+ nativeSmoothing:values.nativeSmoothing==="composite"?"composite":"coarse",
 });
