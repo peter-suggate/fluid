@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 assert.ok(modulePath, "set WEBGPU_NODE_MODULE to node_modules/webgpu/index.js");
@@ -17,7 +18,7 @@ const dawn = await import(pathToFileURL(modulePath).href) as {
   globals: Record<string, unknown>;
 };
 Object.assign(globalThis, dawn.globals);
-const adapter = await dawn.create(["backend=metal"]).requestAdapter();
+const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requestAdapter();
 assert.ok(adapter);
 const device = await adapter.requestDevice();
 const module = device.createShaderModule({ code: /* wgsl */ `

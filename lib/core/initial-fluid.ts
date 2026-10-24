@@ -166,11 +166,9 @@ export function initialLiquidVolumeContainsPoint(volume: InitialLiquidVolume, po
 }
 
 function analyticBoxSignedDistance(point: Vec3, min: Vec3, max: Vec3): number {
-  const center = { x: 0.5 * (min.x + max.x), y: 0.5 * (min.y + max.y), z: 0.5 * (min.z + max.z) };
-  const half = { x: 0.5 * (max.x - min.x), y: 0.5 * (max.y - min.y), z: 0.5 * (max.z - min.z) };
-  const qx = Math.abs(point.x - center.x) - half.x;
-  const qy = Math.abs(point.y - center.y) - half.y;
-  const qz = Math.abs(point.z - center.z) - half.z;
+  const qx = Math.abs(point.x - 0.5 * (min.x + max.x)) - 0.5 * (max.x - min.x);
+  const qy = Math.abs(point.y - 0.5 * (min.y + max.y)) - 0.5 * (max.y - min.y);
+  const qz = Math.abs(point.z - 0.5 * (min.z + max.z)) - 0.5 * (max.z - min.z);
   return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0))
     + Math.min(Math.max(qx, qy, qz), 0);
 }
@@ -206,7 +204,9 @@ export function initialLiquidVolumesSignedDistance(
 ): number | undefined {
   const volumes = sceneInitialLiquidVolumes(scene);
   if (volumes.length === 0) return undefined;
-  return Math.min(...volumes.map((volume) => initialLiquidVolumeSignedDistance(volume, point)));
+  let nearest = Infinity;
+  for (const volume of volumes) nearest = Math.min(nearest, initialLiquidVolumeSignedDistance(volume, point));
+  return nearest;
 }
 
 /** Whether a finest-cell centre lies inside any authored analytic volume. */
@@ -259,13 +259,12 @@ export function initialLiquidFractionAtCell(
     z: -0.5 * c.depth_m + (z + 0.5) * h[2],
   };
   let wetSamples = 0;
+  const point = { x: 0, y: 0, z: 0 };
   for (let corner = 0; corner < 8; corner += 1) {
-    const point = {
-      x: center.x + ((corner & 1) ? 0.4 : -0.4) * h[0],
-      y: center.y + ((corner & 2) ? 0.4 : -0.4) * h[1],
-      z: center.z + ((corner & 4) ? 0.4 : -0.4) * h[2],
-    };
-    if (volumes.some((volume) => initialLiquidVolumeContainsPoint(volume, point))) wetSamples += 1;
+    point.x = center.x + ((corner & 1) ? 0.4 : -0.4) * h[0];
+    point.y = center.y + ((corner & 2) ? 0.4 : -0.4) * h[1];
+    point.z = center.z + ((corner & 4) ? 0.4 : -0.4) * h[2];
+    for (const volume of volumes) if (initialLiquidVolumeContainsPoint(volume, point)) { wetSamples += 1; break; }
   }
   return Math.max(resolvedBase, wetSamples / 8);
 }

@@ -3,10 +3,11 @@
 // Run from the tree: node --import tsx <this>
 import assert from "node:assert/strict";
 import {pathToFileURL} from "node:url";
+import {createProcessRetainedDawnGPU} from "../lib/harness/node-dawn-provider";
 const W=await import(pathToFileURL(`${process.cwd()}/lib/core/webgpu-water-pipeline.ts`).href);
 const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE??`${process.cwd()}/node_modules/webgpu/index.js`).href);Object.assign(globalThis,dawn.globals);
-// The instance is held for the life of the process: a collected one crashes Dawn's event pump.
-const gpu=dawn.create([`backend=${process.env.BACKEND??"metal"}`]) as GPU;(globalThis as any).__gpu=gpu;
+// The instance is held for the life of the process (createProcessRetainedDawnGPU): a collected one crashes Dawn's event pump.
+const gpu=createProcessRetainedDawnGPU(dawn,[`backend=${process.env.BACKEND??"metal"}`]);
 const adapter=await gpu.requestAdapter();assert.ok(adapter,"no adapter");
 const device=await adapter.requestDevice({requiredLimits:{maxStorageBuffersPerShaderStage:10}});let errors=0;
 device.addEventListener("uncapturederror",(e:any)=>{errors++;console.log("device error: "+e.error.message.slice(0,600));});
