@@ -826,7 +826,12 @@ export class UniformMixedFrame {
   const density=p.density,viscosity=p.viscosity,tension=p.surfaceTension,tolerance=p.pressureTolerance,open=+p.openTop,step=dt/density,target=tolerance>0?tolerance:UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
   const w=this.words,q=this.queue,to=this.params,forces=w.forces,projection=w.projection,band=w.band;
   w.extension[3]=open;q.writeBuffer(to.extension,0,w.extension);
-  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineAdvection==="trilinear"?2:p.fineAdvection==="adaptive"?3:1):0;w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
+  // 4h vertices always take the cubic (flags.y 2 without p.cubic): no
+  // particle band carries a 4h surface, and a trilinear resample there pulls
+  // a moving curved or cornered zero set inward 16x faster than at h, every
+  // step it moves (a grid-aligned falling block lost 22% in 14 frames).
+  // p.cubic picks only what h vertices take.
+  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineAdvection==="trilinear"?2:p.fineAdvection==="adaptive"?3:1):2;w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
   w.momentum[3]=dt;q.writeBuffer(to.momentum,0,w.momentum);w.momentumFlags[0]=open;q.writeBuffer(to.momentum,16,w.momentumFlags);
   forces[3]=dt;forces[4]=gravity;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;q.writeBuffer(to.forces,0,forces);
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
