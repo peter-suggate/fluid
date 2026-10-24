@@ -746,7 +746,9 @@ ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"}})}`;
 @group(0) @binding(${2*BATCH+4}) var<uniform> drDimensions:vec4u;
 fn drTiles()->vec3u{return drDimensions.xyz;}
 fn drCount()->u32{return 512u*drDimensions.w;}
-${seam("drNextWords")}
+// The pages from the held topology: a GPU generation's buffer is its tile
+// words alone (no page tail), and no relayout moves a page.
+${seam("drHeldWords")}
 fn drHeld(t:u32)->bool{return (drHeldWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 fn drNext(t:u32)->bool{return (drNextWords[2u*drCount()+2u*t+1u]&1u)!=0u;}
 `;

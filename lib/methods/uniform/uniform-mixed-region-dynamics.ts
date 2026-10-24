@@ -2,6 +2,8 @@ import { uniformDetailModule, uniformDetailPick, uniformDetailPipeline } from ".
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { UNIFORM_REGION_TIER, uniformRegionHeatWGSL } from "./uniform-region-heat";
+import type { UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_LIVE_GROUP_GROUPS, UNIFORM_LIVE_KEY_GROUPS, UNIFORM_LIVE_LANE_GROUPS, UniformLiveVisit, uniformLiveDispatch, uniformLiveListsWGSL } from "./uniform-live-lists";
 
 /** Per-16h-region dynamics record (region = umPageOfTile(tile), UM_PAGES of
  * them): what a frame's pressure did to each region, for the next
@@ -137,6 +139,8 @@ fn umForceKeep(owner:UMOwner,retain:vec3u,axis:u32,drive:f32){umForceStore[retai
 `;}
 
 export interface UniformRegionDynamicsSources {
+  /** The page pool the tile keys address: its live lists (uniform-live-lists). */
+  pool:UniformPagePool;
   /** The forces' params uniform (UniformMixedForceFields.params), 48 bytes. */
   forceParams:GPUBuffer;
   /** UniformMixedSolid.bodyRegions, when solids are compiled in. */
@@ -152,8 +156,6 @@ export interface UniformRegionDynamicsSources {
   normalDirty?:GPUBuffer;
 }
 
-/** The pressure publish's fixed grid: 64-tile groups striding the tiles. */
-const PRESSURE_GROUPS=4096;
 const CLASSIFY_PASS:GPUComputePassDescriptor={label:"Uniform region dynamics classify"};
 const PUBLISH_PASS:GPUComputePassDescriptor={label:"Uniform region dynamics publish"};
 
@@ -181,11 +183,20 @@ export class UniformMixedRegionDynamics {
   private beginPipeline?:GPUComputePipeline;
   private pressurePipeline?:GPUComputePipeline;
   private rememberPressurePipeline?:GPUComputePipeline;
+  /** Visits of classify and of publish (uniform-live-lists); grids: a
+   * workgroup a region, a lane a region, a lane a resident tile key. */
+  private readonly classifyVisit:UniformLiveVisit;
+  private readonly publishVisit:UniformLiveVisit;
+  private readonly groupGrid:number;
+  private readonly laneGrid:number;
+  private readonly keyGrid:number;
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sources:UniformRegionDynamicsSources){
     this.regions=ownership.capacity.tiles/64;
     if(!Number.isInteger(this.regions))throw new Error(`Region dynamics: ${ownership.capacity.tiles} tiles are not whole regions`);
     if(sources.bodyRegions&&sources.bodyRegions.regions!==this.regions)throw new Error("Region dynamics: body mask region count differs");
-    if(this.regions>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Region dynamics: regionKey launches a workgroup a region; ${this.regions} regions exceed ${device.limits.maxComputeWorkgroupsPerDimension}`);
+    if(this.regions!==8*sources.pool.layout.blocks)throw new Error(`Region dynamics: ${this.regions} regions are not the pool's ${sources.pool.layout.blocks} blocks`);
+    this.classifyVisit=new UniformLiveVisit(sources.pool);this.publishVisit=new UniformLiveVisit(sources.pool);
+    this.groupGrid=Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.regions);this.laneGrid=Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(this.regions/64));this.keyGrid=Math.min(UNIFORM_LIVE_KEY_GROUPS,8*this.regions);
     const words=UNIFORM_REGION_DYNAMICS_WORDS*this.regions;
     this.record=device.createBuffer({label:"Uniform region dynamics record",size:4*words,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST,mappedAtCreation:true});
     {const r=new Uint32Array(this.record.getMappedRange());const W=UNIFORM_REGION_DYNAMICS;
@@ -203,11 +214,11 @@ export class UniformMixedRegionDynamics {
     {const w=new Uint32Array(this.forceStore.getMappedRange());w.fill(0xffffffff);for(let i=0;i<this.regions;i++)w[UNIFORM_REGION_MIRROR_WORDS*i+UNIFORM_REGION_MIRROR.primed]=0;this.forceStore.unmap();}
     const storage=(binding:number,type:GPUBufferBindingType)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type}});
     this.classifyLayout=device.createBindGroupLayout({label:"Uniform region dynamics classify",entries:[
-      storage(0,"storage"),storage(1,"storage"),storage(3,"read-only-storage"),storage(7,"read-only-storage"),
+      storage(0,"storage"),storage(1,"storage"),storage(3,"read-only-storage"),storage(7,"read-only-storage"),storage(9,"read-only-storage"),
       {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
       ...(sources.bodyRegions?[storage(6,"read-only-storage")]:[]),...(sources.normalDirty?[storage(8,"read-only-storage")]:[])]});
     this.publishLayout=device.createBindGroupLayout({label:"Uniform region dynamics publish",entries:[
-      storage(0,"storage"),storage(2,"read-only-storage"),storage(3,"storage"),{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
+      storage(0,"storage"),storage(2,"read-only-storage"),storage(3,"storage"),{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},storage(9,"read-only-storage")]});
   }
   /** Bytes held: the record, the force store, the params and the pressure history. */
   get allocatedBytes():number{return this.record.size+this.forceStore.size+this.params.size+this.pressureHistory.size;}
@@ -224,6 +235,7 @@ struct UMRDParams{stamp:u32,generation:u32,unused0:u32,unused1:u32}
 @group(1) @binding(4) var<uniform> rd:UMRDParams;
 fn umRdMix(h:u32,x:u32)->u32{var v=(h^x)*0x9e3779b1u;v=(v^(v>>16u))*0x7feb352du;v=(v^(v>>15u))*0x846ca68bu;return v^(v>>16u);}
 fn umRdStored(region:u32)->bool{let b=region>>3u;return umBlockStored(b)&&umBlockWord(b)!=0xffffffffu;}
+${uniformLiveListsWGSL(1,9,this.sources.pool.layout)}
 `;
     const classify=common+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> record:array<u32>;
@@ -263,13 +275,17 @@ fn umRdBodySwept(region:u32)->u32{return bodyRegions[region]&0xffu;}`:"fn umRdBo
 // bits. One workgroup per region, one lane per tile: each lane ORs its two
 // width bits into the region's four 16-tile words (tile i at bit
 // 2*(15-(i&15)) of word i>>4, the order a serial walk shifts them in), and
-// lane 0 mixes them. An unstored region exits the whole workgroup.
+// lane 0 mixes them. An unstored region's words are constants (lane 0). A
+// fixed grid strides the visited regions (uniform-live-lists).
 var<workgroup> umRdWidths:array<atomic<u32>,4>;
-@compute @workgroup_size(64) fn regionKey(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) i:u32){
- let region=wid.x;
+@compute @workgroup_size(64) fn regionKey(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) i:u32){
+ if(wid.y!=0u){return;}
+ let sweep=ulSweep(groups);let visits=8u*ulVisitCount(sweep);
+ for(var visit=wid.x;visit<visits;visit+=groups.x){
+ let region=ulVisitRegion(visit,sweep);
  if(!umRdStored(region)){
   if(i==0u){record[${W}u*region+${R.key}u]=0x01234567u;record[${W}u*region+${R.keyHigh}u]=0x89abcdefu;record[${W}u*region+${R.pressureResidual}u]=0x7f800000u;}
-  return;
+  continue;
  }
  if(i<4u){atomicStore(&umRdWidths[i],0u);}
  workgroupBarrier();
@@ -277,12 +293,16 @@ var<workgroup> umRdWidths:array<atomic<u32>,4>;
  let l=o+vec3u(i&3u,(i>>2u)&3u,i>>4u);let t=512u*block+(l.x|(l.y<<3u)|(l.z<<6u));
  atomicOr(&umRdWidths[i>>4u],(umTopology[t]>>30u)<<(2u*(15u-(i&15u))));
  workgroupBarrier();
- if(i!=0u){return;}
+ if(i==0u){
  let word=umBlockWord(block);var a=umRdMix(0x01234567u,word);var b=umRdMix(0x89abcdefu^0x5bd1e995u,word);
  for(var k=0u;k<4u;k++){let widths=atomicLoad(&umRdWidths[k]);a=umRdMix(a,widths);b=umRdMix(b,widths^0x165667b1u);}
  record[${W}u*region+${R.key}u]=a;record[${W}u*region+${R.keyHigh}u]=b;
  // The band's initial measure fills it this frame (UniformPressureBand).
  record[${W}u*region+${R.pressureResidual}u]=0u;
+ }
+ // Lane 0's reads land before the next region clears the words.
+ workgroupBarrier();
+ }
 }
 fn umRdDecode(word:u32)->f32{
  if(word==0u){return 0.0;}if(word==0xffffffffu){return 3.402823e38;}
@@ -291,8 +311,13 @@ fn umRdDecode(word:u32)->f32{
 // The neighbourhood key over 27 regions, the forces' parameters and the
 // host generation; a change or a moved body within the forces' footprint
 // takes the full tier. Otherwise the viscous budget picks retain or bounded.
-@compute @workgroup_size(64) fn regionDecide(@builtin(global_invocation_id) gid:vec3u){
- let region=gid.x;if(region>=UM_RD_REGIONS){return;}
+// A lane a visited region.
+@compute @workgroup_size(64) fn regionDecide(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(group.y!=0u){return;}
+ let sweep=ulSweep(groups);let visits=8u*ulVisitCount(sweep);
+ for(var visit=gid.x;visit<visits;visit+=64u*groups.x){umRdDecide(ulVisitRegion(visit,sweep));}
+}
+fn umRdDecide(region:u32){
  let at=${W}u*region;
  if(!umRdStored(region)){
   record[at+${R.tier}u]=${UNIFORM_FORCE_TIER.full}u;record[at+${R.hood}u]=0xffffffffu;record[at+${R.hoodHigh}u]=0xffffffffu;
@@ -328,19 +353,25 @@ fn umRdDecode(word:u32)->f32{
 `;
     const publish=common+uniformPressureGradientChangeWGSL+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> record:array<atomic<u32>>;
-@compute @workgroup_size(64) fn publishBegin(@builtin(global_invocation_id) gid:vec3u){
- let region=gid.x;if(region>=UM_RD_REGIONS){return;}
- let unknown=select(0x7f800000u,0u,umRdStored(region));
- atomicStore(&record[${W}u*region+${R.pressureDelta}u],unknown);
+// A lane a visited region.
+@compute @workgroup_size(64) fn publishBegin(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(group.y!=0u){return;}
+ let sweep=ulSweep(groups);let visits=8u*ulVisitCount(sweep);
+ for(var visit=gid.x;visit<visits;visit+=64u*groups.x){
+  let region=ulVisitRegion(visit,sweep);
+  let unknown=select(0x7f800000u,0u,umRdStored(region));
+  atomicStore(&record[${W}u*region+${R.pressureDelta}u],unknown);
+ }
 }
 @group(1) @binding(2) var<storage,read> pressure:array<f32>;
 @group(1) @binding(3) var<storage,read_write> pressureHistory:array<u32>;
-// One lane per tile key: the root pressure's change since the last publish.
-// A fixed grid strides the tiles; a free region's 64 tiles exit together.
-@compute @workgroup_size(64) fn publishPressure(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var base=64u*group.x;base<UM_TILES;base+=64u*groups.x){
-  let t=base+lane;let region=umPageOfTile(t);
-  if(t<UM_TILES&&umRdStored(region)){umRdPressure(t,region);}
+// One lane per resident tile key (uniform-live-lists): the root pressure's
+// change since the last publish. A fixed grid strides the keys; a free
+// region writes nothing here.
+@compute @workgroup_size(64) fn publishPressure(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let keys=512u*ulResidentCount();
+ for(var visit=gid.x;visit<keys;visit+=64u*groups.x){
+  let t=512u*ulResidentBlock(visit>>9u)+(visit&511u);umRdPressure(t,umPageOfTile(t));
  }
 }
 fn umRdPressure(t:u32,region:u32){
@@ -366,9 +397,10 @@ fn umRdPressure(t:u32,region:u32){
 }
 // A separate dispatch is essential: every gradient above must see the same
 // old pressure, including across workgroups and region boundaries.
-@compute @workgroup_size(64) fn rememberPressure(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var t=64u*group.x+lane;t<UM_TILES;t+=64u*groups.x){
-  if(!umRdStored(umPageOfTile(t))){continue;}
+@compute @workgroup_size(64) fn rememberPressure(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let keys=512u*ulResidentCount();
+ for(var visit=gid.x;visit<keys;visit+=64u*groups.x){
+  let t=512u*ulResidentBlock(visit>>9u)+(visit&511u);
   pressureHistory[2u*t]=bitcast<u32>(pressure[t]);pressureHistory[2u*t+1u]=rd.stamp;
  }
 }
@@ -388,11 +420,11 @@ fn umRdPressure(t:u32,region:u32){
     this.classifyGroup??=this.device.createBindGroup({label:"Uniform region dynamics classify",layout:this.classifyLayout,entries:[
       {binding:0,resource:{buffer:this.record}},{binding:1,resource:{buffer:this.forceStore}},{binding:7,resource:{buffer:s.heat}},
       {binding:3,resource:{buffer:this.ownership.regionVelocity}},
-      {binding:4,resource:{buffer:this.params}},{binding:5,resource:{buffer:s.forceParams,size:64}},
+      {binding:4,resource:{buffer:this.params}},{binding:5,resource:{buffer:s.forceParams,size:64}},{binding:9,resource:{buffer:s.pool.state}},
       ...(s.bodyRegions?[{binding:6,resource:{buffer:s.bodyRegions.buffer}}]:[]),...(s.normalDirty?[{binding:8,resource:{buffer:s.normalDirty}}]:[])]});
     this.publishGroup??=this.device.createBindGroup({label:"Uniform region dynamics publish",layout:this.publishLayout,entries:[
       {binding:0,resource:{buffer:this.record}},{binding:2,resource:s.pressure},{binding:3,resource:{buffer:this.pressureHistory}},
-      {binding:4,resource:{buffer:this.params}}]});
+      {binding:4,resource:{buffer:this.params}},{binding:9,resource:{buffer:s.pool.state}}]});
     return {classify:this.classifyGroup,publish:this.publishGroup};
   }
   /** Frame head, after the region velocity certificate, the surface
@@ -403,10 +435,10 @@ fn umRdPressure(t:u32,region:u32){
     this.stamp=(this.stamp+1)&0x0fffffff;if(this.stamp===0)this.stamp=1;
     this.paramWords[0]=this.stamp;this.paramWords[1]=this.generation;
     this.device.queue.writeBuffer(this.params,0,this.paramWords);
-    const pass=encoder.beginComputePass(CLASSIFY_PASS),groups=Math.ceil(this.regions/64);
+    const pass=encoder.beginComputePass(CLASSIFY_PASS),sweep=this.classifyVisit.sweep();
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups().classify);
-    pass.setPipeline(uniformDetailPick(this.keyPipeline!));pass.dispatchWorkgroups(this.regions);
-    pass.setPipeline(uniformDetailPick(this.decidePipeline));pass.dispatchWorkgroups(groups);
+    pass.setPipeline(uniformDetailPick(this.keyPipeline!));uniformLiveDispatch(pass,this.groupGrid,sweep);
+    pass.setPipeline(uniformDetailPick(this.decidePipeline));uniformLiveDispatch(pass,this.laneGrid,sweep);
     pass.end();
   }
   /** After the band's projection: each region's root pressure change. */
@@ -414,9 +446,9 @@ fn umRdPressure(t:u32,region:u32){
     if(!this.pressurePipeline)throw new Error("Region dynamics are not initialized");
     const pass=encoder.beginComputePass(PUBLISH_PASS);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups().publish);
-    pass.setPipeline(uniformDetailPick(this.beginPipeline!));pass.dispatchWorkgroups(Math.ceil(this.regions/64));
-    pass.setPipeline(uniformDetailPick(this.pressurePipeline));pass.dispatchWorkgroups(Math.min(PRESSURE_GROUPS,this.ownership.capacity.tiles/64));
-    pass.setPipeline(uniformDetailPick(this.rememberPressurePipeline!));pass.dispatchWorkgroups(Math.min(PRESSURE_GROUPS,this.ownership.capacity.tiles/64));
+    pass.setPipeline(uniformDetailPick(this.beginPipeline!));uniformLiveDispatch(pass,this.laneGrid,this.publishVisit.sweep());
+    pass.setPipeline(uniformDetailPick(this.pressurePipeline));pass.dispatchWorkgroups(this.keyGrid);
+    pass.setPipeline(uniformDetailPick(this.rememberPressurePipeline!));pass.dispatchWorkgroups(this.keyGrid);
     pass.end();
   }
 }

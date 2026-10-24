@@ -359,12 +359,16 @@ export class UniformMixedOwnership {
     if(this.sampled)this.device.queue.writeBuffer(this.hanging!,0,derived.slots);
     this.currentLayout=layout;
     this.mirrorCurrent=true;
-    this.revision++;
+    this.revision++;this.residencyResets++;
   }
   /** Bumped by every generation this ownership takes (update, adopt,
    * adoptGpu): a stage that patches what changed since its last encode
    * checks that exactly one adoption intervened. */
   revision=0;
+  /** Bumped by every host write of the residency certificate (a generation's
+   * write, resetResidency): every page resident again, flags of free and
+   * sentinel blocks too (a live-list mark sweeps after one). */
+  residencyResets=0;
 
   /** Byte offset of the detail-storage table in the topology buffer. */
   private readonly detailBytes:number;
@@ -387,6 +391,7 @@ export class UniformMixedOwnership {
   resetResidency():void{
     if(this.frameHeld)throw new Error("Ownership is immutable during an active frame");
     this.device.queue.writeBuffer(this.support,uniformMixedResidencyWord(this.capacity.tiles)*4,allResident(this.capacity.tiles));
+    this.residencyResets++;
   }
   /** Adopt a GPU-built generation with no host object: buffers only, encoded
    * at the head of the frame that runs on it (so no frame hold is checked:

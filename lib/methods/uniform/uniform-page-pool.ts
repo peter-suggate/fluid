@@ -52,6 +52,10 @@
  *            unordered; a consumer initialises those pages. The list is this
  *            commit's alone: empty at generation 0, so seeded residents are
  *            never in it and whoever seeds the pool initialises their blocks.
+ *   retired  `blocks`-2 words: the blocks this commit retired, ascending,
+ *            [0, status.pending); empty at generation 0. With the resident
+ *            list it names every block whose liveness this commit changed
+ *            (uniform-live-lists).
  * Word offsets: uniformPagePoolLayout(options).state.
  *
  * published: 32 header words [edge, blocks, table edge, directory offset,
@@ -188,12 +192,12 @@ export function uniformPagePoolLayout(options:UniformPagePoolOptions){
  if(options.box&&!(origin.every(int32)&&extent.every(n=>Number.isSafeInteger(n)&&n>=1&&n<=table)))throw new RangeError(`Uniform page pool box must have a 32-bit integer origin and 1..${table} pages an axis: origin ${origin}, pages ${extent}`);
  const boxPages=extent[0]*extent[1]*extent[2];
  let ringCapacity=1;while(ringCapacity<slots)ringCapacity*=2;
- const entries=table**3,tableAt=UNIFORM_PAGE_POOL_STATUS.words,blockWords=tableAt+entries+UNIFORM_WINDOW_HEADER_WORDS,records=blockWords+blocks,resident=records+RECORD*blocks,claimed=resident+slots;
+ const entries=table**3,tableAt=UNIFORM_PAGE_POOL_STATUS.words,blockWords=tableAt+entries+UNIFORM_WINDOW_HEADER_WORDS,records=blockWords+blocks,resident=records+RECORD*blocks,claimed=resident+slots,retired=claimed+slots;
  const hostList=UNIFORM_PAGE_POOL_WORK.words,pinList=hostList+4*host,list=pinList+4*pins,keep=list+4*requests,ring=keep+blocks,claims=ring+ringCapacity;
  return {table,tableBits:Math.log2(table),entries,blocks,slots,solidBlock:blocks-1,ringCapacity,idleSteps,requests,host,pins,closureCap,
   /** The box (origin and extent in pages) and its page count; count 0: no box. */
   box:{origin,pages:extent,count:boxPages},
-  state:{table:tableAt,window:tableAt+entries,blocks:blockWords,records,resident,claimed,words:claimed+slots},
+  state:{table:tableAt,window:tableAt+entries,blocks:blockWords,records,resident,claimed,retired,words:retired+slots},
   /** Word offsets inside the tail, wherever it lies: state.table in the state buffer, a mirror's offset in a mirror. */
   tail:{table:0,window:entries,blocks:entries+UNIFORM_WINDOW_HEADER_WORDS,words:entries+UNIFORM_WINDOW_HEADER_WORDS+blocks},
   worldPolicy:options.worldPolicy??0,
@@ -548,7 +552,7 @@ const UP_AIR_WORD:u32=0u;const UP_SOLID_WORD:u32=0xffffffffu;const UP_FREE:u32=0
 const UP_RESIDENT:u32=${K.resident}u;const UP_AIR:u32=${K.air}u;const UP_SOLID:u32=${K.solid}u;
 const UP_TABLE_BITS:u32=${l.tableBits}u;const UP_REQUESTS:u32=${l.requests}u;const UP_CLOSURE_CAP:u32=${l.closureCap}u;
 const UP_AT_WINDOW:u32=${l.state.window}u;const UP_WORK_BOUNDS:u32=${l.work.bounds}u;
-const UP_AT_TABLE:u32=${l.state.table}u;const UP_AT_BLOCKS:u32=${l.state.blocks}u;const UP_AT_RECORDS:u32=${l.state.records}u;const UP_AT_RESIDENT:u32=${l.state.resident}u;const UP_AT_NEW:u32=${l.state.claimed}u;
+const UP_AT_TABLE:u32=${l.state.table}u;const UP_AT_BLOCKS:u32=${l.state.blocks}u;const UP_AT_RECORDS:u32=${l.state.records}u;const UP_AT_RESIDENT:u32=${l.state.resident}u;const UP_AT_NEW:u32=${l.state.claimed}u;const UP_AT_RETIRED:u32=${l.state.retired}u;
 const UP_WORK_LIST:u32=${l.work.list}u;const UP_WORK_KEEP:u32=${l.work.keep}u;const UP_WORK_CLAIMS:u32=${l.work.claims}u;const UP_WORK_DETAIL:u32=${UNIFORM_PAGE_POOL_WORK.detail}u;
 const UP_FATAL_EXHAUSTED:u32=${F.exhausted}u;const UP_FATAL_ALIAS:u32=${F.alias}u;const UP_FATAL_REQUESTS:u32=${F.requests}u;const UP_FATAL_CLOSURE_CAP:u32=${F.closureCap}u;const UP_FATAL_CLOSURE:u32=${F.closure}u;const UP_FATAL_EDGE:u32=${F.edge}u;
 @group(${group}) @binding(${state}) var<storage,${access}> upState:array<u32>;
@@ -592,6 +596,11 @@ export class UniformPagePool {
  /** Host commands queued for the next commit, four words each. */
  private readonly host:Int32Array<ArrayBuffer>;
  private hostCount=0;
+ /** Changes of the stored block set the host has encoded: one a commit
+  * (its resident and retired lists name every block it changed), two an
+  * upload (a seed may change any block). UniformLiveVisit reads it. */
+ private changes=0;
+ get liveRevision():number{return this.changes;}
  /** The pinned pages, four words each: the host copy of the work buffer's pin list. */
  private readonly pins:Int32Array<ArrayBuffer>;
  private pinCount=0;
@@ -644,6 +653,7 @@ export class UniformPagePool {
  }
  private upload():void{
   const l=this.layout,seed=this.current,queue=this.device.queue,work=new Uint32Array(l.work.words);
+  this.changes+=2;
   work.fill(0xffffffff,l.work.bounds,l.work.bounds+3);
   work.set(seed.ring,l.work.ring);work[UNIFORM_PAGE_POOL_WORK.pins]=this.pinCount;work.set(new Uint32Array(this.pins.buffer,0,4*this.pinCount),l.work.pins);
   queue.writeBuffer(this.state,0,seed.state);queue.writeBuffer(this.work,0,work);
@@ -823,7 +833,7 @@ var<workgroup> upScan:array<vec2u,256>;
  for(var s=first;s<last;s++){
   let state=upState[UP_AT_RECORDS+8u*s+R_STATE];
   if(state==RESIDENT){upState[UP_AT_RESIDENT+at.x]=s;at.x+=1u;}
-  else if(state==PENDING){atomicStore(&upWork[W_RING+((head+available+at.y)&RING_MASK)],s);at.y+=1u;}
+  else if(state==PENDING){atomicStore(&upWork[W_RING+((head+available+at.y)&RING_MASK)],s);upState[UP_AT_RETIRED+at.y]=s;at.y+=1u;}
  }
  if(lane==LANES-1u){
   let pops=min(atomicLoad(&upWork[W_POPS]),available);let flags=atomicLoad(&upWork[${W.flags}u]);
@@ -869,6 +879,7 @@ var<workgroup> upScan:array<vec2u,256>;
   * the published record are current when the pass ends. */
  encodeCommit(encoder:GPUCommandEncoder):void{
   if(!this.slotsPipeline)throw new Error("Uniform page pool is not initialized");
+  this.changes++;
   const host=this.hostCount;
   if(host){
    this.word[0]=host;this.device.queue.writeBuffer(this.work,4*UNIFORM_PAGE_POOL_WORK.host,this.word);
