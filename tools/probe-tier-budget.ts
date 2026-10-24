@@ -80,9 +80,9 @@ const cell = option("cell") === undefined ? undefined : Number(option("cell"));
 const poolBlocks = option("pool") === undefined ? undefined : Number(option("pool"));
 const wallShift = Number(option("wallShift") ?? 0);
 assert.ok(Number.isInteger(wallShift), "--wallShift=cells");
-const mouths = option("mouths") ?? "round", throatCells = Number(option("throat") ?? 1);
+const mouths = option("mouths") ?? "round", throatCells = option("throat") === undefined ? undefined : Number(option("throat"));
 assert.ok(mouths === "round" || mouths === "none", "--mouths=round|none");
-assert.ok(Number.isInteger(throatCells) && throatCells >= 1, "--throat=cells (the square throat's side)");
+assert.ok(throatCells === undefined || (Number.isInteger(throatCells) && throatCells >= 1), "--throat=cells (the square throat's side)");
 const sets: Record<string, string | number | boolean> = {};
 for (const a of options.filter(a => a.startsWith("--set="))) {
   const [key, ...rest] = a.slice(6).split(":"); const text = rest.join(":");
@@ -100,14 +100,14 @@ const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...
 
 /** The dividing wall: the first interior fill patch spanning the box's full
  * height and depth (the finished document's vessel walls lie outside the box). */
-interface Wall { low: number; high: number; holeY: number; holeZ: number }
+interface Wall { low: number; high: number; holeY: number; holeZ: number; side?: number }
 function wallOf(scene: SceneDescription): Wall | undefined {
   const [nx, ny, nz] = sceneLatticeDimensions(scene);
   const fill = scene.solidVoxels.find(p => p.operation === "fill" && p.minimum[0] > 0 && p.maximumExclusive[0] < nx && p.minimum[1] === 0 && p.minimum[2] === 0
     && p.maximumExclusive[1] === ny && p.maximumExclusive[2] === nz);
   if (!fill) return undefined;
   const hole = scene.solidVoxels.find(p => p.operation === "clear" && p.minimum[0] === fill.minimum[0] && p.maximumExclusive[0] === fill.maximumExclusive[0]);
-  return { low: fill.minimum[0], high: fill.maximumExclusive[0], holeY: hole?.minimum[1] ?? -1, holeZ: hole?.minimum[2] ?? -1 };
+  return { low: fill.minimum[0], high: fill.maximumExclusive[0], holeY: hole?.minimum[1] ?? -1, holeZ: hole?.minimum[2] ?? -1, side: hole ? hole.maximumExclusive[1] - hole.minimum[1] : 0 };
 }
 
 /** reservoir-seep with its left reservoir k times as long: head, wall, throat
@@ -170,11 +170,14 @@ function shiftWall(scene: SceneDescription, d: number): SceneDescription {
 
 /** The throat as a probe variant: `mouths` "none" drops the round mouth
  * cylinders (a straight cut, as the fast-jet fixture), and `side` widens the
- * square throat and its wetted passage upward in y and z from (holeY, holeZ). */
-function reshapeThroat(scene: SceneDescription, mouthShape: string, side: number): SceneDescription {
-  if (mouthShape === "round" && side === 1) return scene;
-  const wall = wallOf(scene); assert.ok(wall, "--mouths/--throat need a dividing wall");
-  const h = scene.voxelDomain.finestCellSize_m, s = structuredClone(scene), grow = side - 1;
+ * square throat (from the scene's own side) and its wetted passage upward in y
+ * and z from (holeY, holeZ). */
+function reshapeThroat(scene: SceneDescription, mouthShape: string, side: number | undefined): SceneDescription {
+  const wall = wallOf(scene);
+  const grow = side === undefined || !wall ? 0 : side - (wall.side ?? 1);
+  if (mouthShape === "round" && grow === 0) return scene;
+  assert.ok(wall && grow >= 0, "--mouths/--throat need a dividing wall; --throat cannot narrow the scene's throat");
+  const h = scene.voxelDomain.finestCellSize_m, s = structuredClone(scene);
   s.solidVoxels = s.solidVoxels.filter(p => !(mouthShape === "none" && p.operation === "clear" && "kind" in p && p.kind === "cylinder"))
     .map(p => p.operation === "clear" && !("kind" in p && p.kind) && p.minimum[0] === wall.low && p.maximumExclusive[0] === wall.high
       ? { ...p, maximumExclusive: [p.maximumExclusive[0], p.maximumExclusive[1] + grow, p.maximumExclusive[2] + grow] } : p) as typeof s.solidVoxels;
@@ -541,7 +544,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
     return u;
   };
   const cell3 = h ** 3, wide = (u: Uint32Array, at: number) => (u[at]! + 4294967296 * u[at + 1]!) / 4096;
-  const throatCentre_m = (wall.holeY + 0.5) * h, reservoirFootprint = wall.low * g.nz;
+  const throatCentre_m = (wall.holeY + 0.5 * (wall.side ?? 1)) * h, throatArea_m2 = (wall.side ?? 1) ** 2 * h * h, reservoirFootprint = wall.low * g.nz;
   let previous: { t: number; left: number; right: number } | undefined;
   const advance = async (step: number) => {
     const start = performance.now();
@@ -569,7 +572,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
     const t = step * dt, liquid = { total: wide(u, 0), left: wide(u, 2), right: wide(u, 4), wall: wide(u, 6), rightFloorBand: wide(u, 8) };
     const measured = liquid.left > 0 && Math.abs(liquid.total - solverCells) < 0.05 * solverCells;
     const level_m = measured ? liquid.left / reservoirFootprint * h : authoredTop_m, head_m = level_m - throatCentre_m;
-    const qT = wall.holeY >= 0 && head_m > 0 ? h * h * Math.sqrt(2 * gravity * head_m) : undefined;
+    const qT = wall.holeY >= 0 && head_m > 0 ? throatArea_m2 * Math.sqrt(2 * gravity * head_m) : undefined;
     const uThroat = u[17] ? f[16]! : undefined;
     const qRight = previous ? (liquid.right - previous.right) * cell3 / (t - previous.t) : undefined;
     const qLeft = previous ? -(liquid.left - previous.left) * cell3 / (t - previous.t) : undefined;
@@ -594,9 +597,9 @@ var<workgroup> sums:array<atomic<u32>,5>;
       zones: { hTilesLeft: u[10], hTilesThroat: u[11], hTilesRightFloor: u[12], hTilesRightJet: u[13], coarseTilesRight: u[14], coarseTilesLeft: u[15],
         rightWetFloor_cells: u[18], liquidX: [u[21], u[22]], liquidTopY: u[23], ownerBox: [u[24], u[25], u[26], u[27], u[28], u[29]] },
       liquid_m3: Object.fromEntries(Object.entries(liquid).map(([k, v]) => [k, v * cell3])),
-      discharge: { level_m, head_m, uThroat_m_s: uThroat, qInstant_m3_s: uThroat === undefined ? undefined : uThroat * h * h,
+      discharge: { level_m, head_m, uThroat_m_s: uThroat, qInstant_m3_s: uThroat === undefined ? undefined : uThroat * throatArea_m2,
         qRight_m3_s: qRight, qLeft_m3_s: qLeft, qTorricelli_m3_s: qT,
-        cdRight: qRight !== undefined && qT ? qRight / qT : undefined, cdInstant: uThroat !== undefined && qT ? uThroat * h * h / qT : undefined },
+        cdRight: qRight !== undefined && qT ? qRight / qT : undefined, cdInstant: uThroat !== undefined && qT ? uThroat * throatArea_m2 / qT : undefined },
       volume: { cells: stats.volumeCellSum, drift: stats.volumeDrift, rawDrift: stats.rawVolumeDrift, source: stats.volumeTelemetrySource, maxSpeed_m_s: stats.maxSpeed_m_s },
       // The volume budget: dust the frames deleted (summed over every step so far) and the controller's shift that restores it.
       budget: { ...dust, ...Object.fromEntries(["narrowBandTargetVolume_cells", "narrowBandOutflowVolume_cells", "narrowBandVolumeShift_cells", "narrowBandVolumeBeforeCorrection_cells",
