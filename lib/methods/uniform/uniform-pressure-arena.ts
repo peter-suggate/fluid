@@ -523,6 +523,9 @@ fn nBulkMean(v:f32,bulk:bool,lane:u32)->f32{
   // native side's measured slope (the head; bSeamHead's at ratio 4). A
   // member's pressure in its links is its 16h one, its rows' start mean
   // (UniformBulkTier), not the row's own start: each row keeps its offset.
+  // Level 2's correction operator takes the same couplings, and the native
+  // 64 inside a member region (a glue its aggregates cancel), so the baked
+  // 16h level holds the member's 16h row exactly.
   const bulkNative=B?bulkMean("nRed")+/* wgsl */`
 @group(1) @binding(31) var<storage,read_write> bulk:array<u32>;
 const N_HEADS:u32=${UNIFORM_BULK_HEADS(B.regions)}u;const N_MEAN:u32=${UNIFORM_BULK_MEAN(B.regions)}u;
@@ -1058,7 +1061,7 @@ ${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){bulk[nHea
        }
        diagonal+=c;
       }else if(nLiquid(n)){${B?
-       "kind=N_NATIVE;level2=64.0*volume/(h4*h4);let b=nBulkLink(k,n,f,member);c=b.x*volume/(h4*h4);bulkDelta+=level2-c;diagonal+=c;rhs+=c*(nBulkStart(n)-select(start,nBulkStart(k),member)+b.y);link=UBA_STRIDE*(n>>9u)+(n&511u);":
+       "kind=N_NATIVE;level2=64.0*volume/(h4*h4);let b=nBulkLink(k,n,f,member);c=b.x*volume/(h4*h4);level2=select(c,level2,b.x==0.0);bulkDelta+=level2-c;diagonal+=c;rhs+=c*(nBulkStart(n)-select(start,nBulkStart(k),member)+b.y);link=UBA_STRIDE*(n>>9u)+(n&511u);":
        "kind=N_NATIVE;c=64.0*volume/(h4*h4);diagonal+=c;level2=c;rhs+=c*(rootArena[R_PRESSURE+n]-start);link=UBA_STRIDE*(n>>9u)+(n&511u);"}}
       else{kind=N_GHOST;c=64.0*volume/(h4*h4*nTheta(k,n,axis,side));diagonal+=c;rhs-=c*start;}
      }
