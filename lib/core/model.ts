@@ -360,6 +360,10 @@ export interface SceneDescription {
      * no storage, by page coordinate.
      */
     pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
+    /** Storage tiers (uniformFineBrickCapacity). bricks: the h brick slots
+     * (8³ cells each), instead of 1.5 × the t=0 census with a floor of 256.
+     * particlesPerFineCell: particle capacity per h cell of those slots. */
+    tiers?: { bricks?: number; particlesPerFineCell?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
