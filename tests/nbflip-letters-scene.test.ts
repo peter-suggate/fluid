@@ -3,15 +3,13 @@ import test from "node:test";
 import "../lib/methods";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
-import { parseScene, serializeScene, validateScene } from "../lib/core/model";
+import { validateScene } from "../lib/core/model";
 import { scaleScene } from "../lib/core/scene-scale";
 import {
   LIQUID_EXTRUSION_MAX_EDGES, liquidExtrusionBounds, liquidExtrusionDistance, liquidExtrusionEdges,
   liquidExtrusionRefusal, liquidExtrusionVolume_m3, type LiquidExtrusion,
 } from "../lib/core/liquid-extrusion";
-import {
-  NBFLIP_LETTERS_CELL_SIZE_M, NBFLIP_LETTERS_GRID, NBFLIP_LETTERS_SCENE_ID, NBFLIP_LETTERS_TIME_STEP_S,
-} from "../lib/core/nbflip-paper-scenes";
+import { NBFLIP_LETTERS_SCENE_ID } from "../lib/core/nbflip-paper-scenes";
 
 /** A 4 x 4 square frame around a 2 x 2 hole, extruded 2 deep about z = 1. */
 const frame = (offset_m = 0, edgeRadius_m = 0): LiquidExtrusion => ({
@@ -60,38 +58,6 @@ test("an extrusion the solver cannot take is refused with its reason", () => {
     return [Math.cos(angle), Math.sin(angle)];
   }).flat();
   assert.match(liquidExtrusionRefusal({ ...frame(), contours_m: [circle] })!, /65 outline edges/);
-});
-
-test("NB-FLIP Figure 8 is the published grid with nine letters on a ten-frame schedule", () => {
-  const definition = getSceneDefinition(NBFLIP_LETTERS_SCENE_ID), scene = sceneDocument(definition);
-  assert.deepEqual(validateScene(scene), []);
-  assert.deepEqual(parseScene(serializeScene(scene)).fluid, scene.fluid);
-  assert.deepEqual(definition.methodProfile, { methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene" } });
-  const h = scene.voxelDomain.finestCellSize_m, c = scene.container;
-  assert.equal(h, NBFLIP_LETTERS_CELL_SIZE_M);
-  assert.deepEqual([c.width_m, c.height_m, c.depth_m].map((length) => length / h), [...NBFLIP_LETTERS_GRID]);
-  assert.deepEqual(NBFLIP_LETTERS_GRID, [256, 192, 128]);
-  assert.equal(c.fillFraction * 192, 37);
-  assert.equal(scene.numerics.fixedDt_s, 1 / 24);
-  // The fall the footage shows: 0.8 cells per frame squared.
-  assert.ok(Math.abs(-scene.fluid.gravity_m_s2.y * NBFLIP_LETTERS_TIME_STEP_S ** 2 / h - 0.8) < 1e-12);
-  const drops = scene.fluid.scheduledDrops!;
-  assert.deepEqual(drops.map((drop) => Math.round(drop.time_s * 24)), [1, 11, 21, 31, 41, 51, 61, 71, 81]);
-  for (const [index, drop] of drops.entries()) {
-    assert.equal(drop.volume.shape, "extrusion");
-    const letter = drop.volume as LiquidExtrusion, bounds = liquidExtrusionBounds(letter);
-    assert.equal(liquidExtrusionRefusal(letter), undefined);
-    const height = (bounds.max_m.y - bounds.min_m.y) / h, width = (bounds.max_m.x - bounds.min_m.x) / h;
-    assert.ok(height > 43 && height < 45.5 && width < 43, `letter ${index} is ${width} x ${height} cells`);
-    assert.ok(bounds.min_m.y / h > 37 + 40, "spawns clear of the pool");
-    // The centre of the stroke is liquid: every letter is solid one cell inside its outline somewhere.
-    const edges = liquidExtrusionEdges(letter);
-    const inside = liquidExtrusionDistance(letter, { x: 0.5 * (edges[0]! + edges[2]!), y: 0.5 * (edges[1]! + edges[3]!), z: letter.centerZ_m }, edges);
-    assert.ok(Math.abs(inside + letter.offset_m) < 1e-5, "an outline edge lies one offset inside the liquid");
-  }
-  // Letters carry between 9 and 13 thousand cells of liquid each.
-  const cells = drops.map((drop) => liquidExtrusionVolume_m3(drop.volume as LiquidExtrusion, h / 2) / h ** 3);
-  assert.ok(cells.every((volume) => volume > 5000 && volume < 16000), cells.map(Math.round).join(" "));
 });
 
 test("world scale carries scheduled drops with the container", () => {

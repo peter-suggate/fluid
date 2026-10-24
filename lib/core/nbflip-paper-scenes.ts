@@ -47,12 +47,13 @@ const cellSizeForFall_m = (cellsPerFrame2: number, framesPerSecond = NBFLIP_FRAM
 const mantaflowFall = (grid: readonly [number, number, number]) => 0.003 * Math.max(...grid);
 
 /**
- * Pins the scene's own step -- the method's default is a sixtieth of a second.
- * Grid coverage is the method's default: dynamic, with the tiles the surface
- * crosses at the published cell size and the rest of the liquid at 4h.
+ * The method's defaults: a sixtieth of a second a step, as every scene runs
+ * (the scene's own frame step stays available as the "scene" time step).
+ * Grid coverage is dynamic, with the tiles the surface crosses at the
+ * published cell size and the rest of the liquid at 4h.
  */
 export const NBFLIP_METHOD_PROFILE: MethodProfile = {
-  methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { timeStep: "scene" },
+  methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: {},
 };
 
 /**
