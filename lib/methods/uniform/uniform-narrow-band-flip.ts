@@ -13,6 +13,7 @@ import { narrowBandActivityTriggerWGSL, narrowBandActivityWGSL, NARROW_BAND_ACTI
 import {narrowBandReuseLayout,narrowBandReuseWGSL,type NarrowBandReuseLayout} from "./uniform-narrow-band-reuse.wgsl";
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
 import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 import { narrowBandArenaWGSL, narrowBandArenaCanonicalWGSL } from "./uniform-surface-brick-arena.wgsl";
 import { UNIFORM_BRICK_TABLE_ENTRIES, uniformBrickTableClear, uniformBrickTableWGSL, uniformBrickTableWords } from "./uniform-brick-table";
 import { narrowBandNearestEntries, narrowBandNearestControlEntries } from "./uniform-narrow-band-nearest.wgsl";
@@ -139,7 +140,7 @@ fn ndSample(p:vec3f)->vec3f{
   if(lane==0u){let t=atomicLoad(&bins[NB_OCCUPIED+4u+job]);ndTile=t;ndCold=u32(umTileLive(t)&&nbTileCold(t));}
   let tile=workgroupUniformLoad(&ndTile);let cold=workgroupUniformLoad(&ndCold)!=0u;
   if(!umTileLive(tile)){continue;}
-  let start=links[64u*tile];let end=links[64u*tile+63u]+atomicLoad(&bins[64u*tile+63u]);
+  let bin=nbBinTile(tile);let start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);
   // A COLD tile's samples take no delta; one its region thaws by G2P takes PIC.
   if(cold){for(var i=start+lane;i<end;i+=ND_LANES){particles[i].before.x=NB_DELTA_NONE;}continue;}
   let origin=vec3i(4u*umTileCoord(tile));
@@ -191,10 +192,26 @@ export interface UniformNarrowBandSlotSnapshot {
  readonly particles:readonly [UniformDetailGroup,UniformDetailGroup];
 }
 export interface NarrowBandSurfaceRevisions{readonly buffer:GPUBuffer;readonly liveOffset:number;readonly scratchOffset:number;readonly regions:number}
+/** The particles' h capacity (scene fluid.tiers): every particle buffer is
+ * sized by fineTiles h tiles of 64 cells at perFineCell samples a cell, not
+ * by the pool's cell keys. bankBytes floors each bank's buffer: the
+ * extension borrows a bank as its paired companion (UniformMixedFrame
+ * bindStage), sized by the pool's h tiles; the records stay capacity's. */
+export interface NarrowBandParticleBudget{readonly fineTiles:number;readonly perFineCell:number;readonly bankBytes?:number}
+/** Particle records for a budget: its samples, then the slabs' spill reserve
+ * (particleSlabSpill) on top, so the slabs alone hold the budget. */
+export function narrowBandBudgetCapacity(budget:NarrowBandParticleBudget):number{
+ const samples=Math.ceil(64*budget.fineTiles*budget.perFineCell);
+ let capacity=samples+Math.max(4096,Math.ceil(samples/15));
+ while(capacity-particleSlabSpill(capacity)<samples)capacity++;
+ return capacity;
+}
 export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  readonly label="Narrow-band FLIP page words";
  readonly capacity:number;
  readonly particleStride:number;
+ /** The records' bytes in a bank, its binding (arrayLength) size: a budget's bank buffer can be larger (bankBytes). */
+ private readonly recordBytes:number;
  private get apic():boolean{return this.transferMode==="apic";}
  readonly particles:readonly [GPUBuffer,GPUBuffer];
  readonly state:GPUBuffer;
@@ -208,7 +225,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly baseAllocatedBytes:number;
  get allocatedBytes():number{return this.baseAllocatedBytes+(this.displayMotion?.energy.size??0);}
  /** A word per tile key from word `offset` of the buffer: non-zero where a sample's support reached at its last move (slabSort). */
- get particleTiles():{buffer:GPUBuffer;offset:number;allocation:GPUBuffer}{return {buffer:this.bins,offset:2*this.cells+this.tiles,allocation:this.particleAllocation};}
+ get particleTiles():{buffer:GPUBuffer;offset:number;allocation:GPUBuffer}{return {buffer:this.bins,offset:this.countWords+this.tiles,allocation:this.particleAllocation};}
  /** Particle occupancy and signed travel for the census: transferRefine writes them, refine copies them here. */
  private readonly particleAllocation:GPUBuffer;
  count=0;
@@ -360,6 +377,10 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  /** The lattice's addressing; its cell, vertex and tile keys are the bins' bank offsets. */
  private readonly address:UniformLatticeAddress;
  private readonly cells:number;
+ /** Particle brick slots of the cell bins under a budget (0: keyed by cell key), their words, and the count planes' words before NB_COVERAGE. */
+ private readonly binSlots:number;
+ private readonly binCells:number;
+ private readonly countWords:number;
  /** NB_BAND's word: the search's counters, then masks, reach and lists (uniform-narrow-band-membership.wgsl). */
  private readonly bandWord:number;
  /** Bank A's words (NB_DEPTH_A to NB_DEPTH_B): a vertex key each, or the two packed nearest banks where those are longer. */
@@ -379,7 +400,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly parity=0;
  private started=false;
  private bandCurrent=false;
- private get activityWord():number{return 3*this.cells+this.vertices+9*this.tiles+4;}
+ private get activityWord():number{return this.countWords+this.cells+this.vertices+9*this.tiles+4;}
  /** The occupied tile list in the bins: word 0 its length, entries from
   * word 4. A tile key joins it when its coverage (NB_COVERAGE) leaves 0,
   * so the coverage is non-zero only on listed keys; slabPrepare clears
@@ -393,7 +414,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  /** The bins, which hold the gate plane at airGateWord. */
  get airGateBuffer():GPUBuffer{return this.bins;}
  /** Existing particle-bin coverage, for opt-in spatial cost sampling. */
- get performanceTileCounts():GPUBufferBinding{return {buffer:this.bins,offset:8*this.cells,size:4*this.tiles};}
+ get performanceTileCounts():GPUBufferBinding{return {buffer:this.bins,offset:4*this.countWords,size:4*this.tiles};}
  /** The particle activity heat plane (f32 a tile key, NB_ACTIVITY_HEAT) in airGateBuffer: the region heat's particle evidence. */
  get activityHeatWord():number{return this.activityWord+2*this.tiles;}
  /** The surface heat plane (f32 a tile key, NB_ACTIVITY_SURFACE_HEAT) in airGateBuffer: this step's sort writes it before the surface advect. */
@@ -431,13 +452,20 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   /** particleDensity "graded": four seed sites a cell (of the eight) in
    * cells deeper than 1.5 cells, a crowding cap of six there, and faces
    * below a cell expect half the mass. */
-  readonly gradedDensity=false){
+  readonly gradedDensity=false,
+  /** The particles' h capacity (scene fluid.tiers); absent, the pool's cell keys size them. */
+  readonly budget?:NarrowBandParticleBudget){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   // The seed list packs a cell key in 30 bits below the source and deep flags.
   if(cells>0x40000000)throw new Error(`Narrow-band FLIP's seed list packs a cell key in 30 bits: ${cells} cell keys exceed 1073741824`);
   if(!(bandDepth>=2&&bandDepth<=4))throw new Error(`Narrow-band FLIP particle band depth ${bandDepth} is outside 2-4 cells`);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
-  this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;this.bandWord=3*cells+vertices+2*this.tiles;
+  // The particle cell bins (counts in bins, starts in links): a word a cell
+  // key; under a budget, 512 a particle brick slot (the sort's slab slot,
+  // nbBinTile) and a slot word a brick id after them.
+  this.binSlots=budget?Math.min(64*address.blocks,budget.fineTiles):0;this.binCells=budget?512*this.binSlots:cells;
+  this.countWords=budget?this.binCells+64*address.blocks:2*cells;
+  this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;this.bandWord=this.countWords+cells+vertices+2*this.tiles;
   // The band is a surface, but what a scene's surface grows to is not known
   // here. Budget one sample per domain cell, with a two-million floor: twice
   // the previous allocation, still capped by full-domain seeding and the
@@ -445,15 +473,19 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // silently change the maximum sample count on a smaller adapter. A full budget defers optional reseeding and
   // is fatal to liquid a source or the initial band must add (noteReceipt).
   this.particleStride=narrowBandParticleStride(this.apic);const particleBytes=4*this.particleStride;
-  this.capacity=Math.min(cells*8,Math.max(2_097_152,cells),Math.floor(device.limits.maxStorageBufferBindingSize/(this.apic?112:64)));
+  const deviceRecords=Math.floor(device.limits.maxStorageBufferBindingSize/(this.apic?112:64));
+  if(budget&&!(Number.isInteger(budget.fineTiles)&&budget.fineTiles>0&&budget.perFineCell>0))throw new Error(`Narrow-band FLIP particle budget ${JSON.stringify(budget)} needs a positive integer of fine tiles and a positive density`);
+  if(budget&&narrowBandBudgetCapacity(budget)>deviceRecords)throw new Error(`Narrow-band FLIP: fluid.tiers (${budget.fineTiles} h tiles at ${budget.perFineCell} particles a fine cell) needs ${narrowBandBudgetCapacity(budget)} particle records; the device's binding limit holds ${deviceRecords}`);
+  this.capacity=budget?narrowBandBudgetCapacity(budget):Math.min(cells*8,Math.max(2_097_152,cells),deviceRecords);
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  this.particles=[buffer("particles A",this.capacity*particleBytes),buffer("particles B",this.capacity*particleBytes)];
+  this.recordBytes=this.capacity*particleBytes;const bankBytes=Math.max(this.recordBytes,budget?.bankBytes??0);
+  this.particles=[buffer("particles A",bankBytes),buffer("particles B",bankBytes)];
   // The receipt, then the slab records (uniform-particle-slab.wgsl).
   this.state=buffer("receipt, particle frame and brick slabs",4*particleSlabWords(address.blocks));
   if(sweptDelta)this.displayMotion=new GPUFluidParticleMotion(device,this.activeParticles,this.state,this.particleStride,this.capacity);
   this.spill=particleSlabSpill(this.capacity);
   // After the air planes: the occupied tile list (occupiedWord).
-  this.occupiedWord=3*cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
+  this.occupiedWord=this.countWords+cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
   const binWords=this.occupiedWord+4+address.tileKeys;
   const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
   const completeReuse=narrowBandReuseLayout(binWords,8*address.blocks);
@@ -468,14 +500,15 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // The fine-tile capacity can grow between frames up to the pool's tiles
   // (reserveFine), and the pour's late frames hold over 12k: the deposit's
   // words are sized for the pool, so no layout leaves the fast deposit.
-  const deposit=particleDepositStorage(this.coarseListWord+4+2*this.coarseListCapacity,address.poolTiles,limit,this.particles[0].size);
+  // Under a particle budget its h tiles bound the deposit: a layout past them takes the general gather.
+  const deposit=particleDepositStorage(this.coarseListWord+4+2*this.coarseListCapacity,budget?Math.min(budget.fineTiles,address.poolTiles):address.poolTiles,limit,this.recordBytes);
   this.depositWord=deposit.offsetWords;this.depositTiles=deposit.tiles;this.sharedDeposit=deposit.shared;
   const binBytes=deposit.binsBytes;
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
   this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
   // The arena's windows follow: a window (9³ vertices) a brick-table slot; every brick of the lattice has room.
-  this.arenaWord=cells+7*this.capacity;
+  this.arenaWord=this.binCells+7*this.capacity;
   this.next=buffer("cell starts, compact neighbor samples and surface brick arena windows",4*(this.arenaWord+729*64*address.blocks));this.params=buffer("parameters",80,true);
   this.liveGate=buffer("live sample gate",16,true);device.queue.writeBuffer(this.liveGate,0,new Uint32Array([1,0,0,0]));
   this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
@@ -561,7 +594,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
    this.groups[name]=[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
-    {binding:0,resource:{buffer:this.particles[parity]!}},{binding:1,resource:{buffer:this.particles[1-parity]!}},
+    {binding:0,resource:{buffer:this.particles[parity]!,size:this.recordBytes}},{binding:1,resource:{buffer:this.particles[1-parity]!,size:this.recordBytes}},
     {binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
     {binding:5,resource:{buffer:negative}},{binding:6,resource:{buffer:this.params}},
     {binding:7,resource:name==="reconstruct"||name==="redistanceStore"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
@@ -579,7 +612,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  bindDeltaSlots(current:GPUBufferBinding,old:GPUBufferBinding):UniformDetailGroup{
   if(!this.deltaResources)throw new Error("Swept FLIP delta is not available");
   return uniformDetailGroup(this.device,{layout:this.deltaResources,entries:[
-   {binding:1,resource:{buffer:this.activeParticles}},{binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
+   {binding:1,resource:{buffer:this.activeParticles,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
    {binding:6,resource:{buffer:this.params}},{binding:17,resource:old},{binding:19,resource:current},
   ]});
  }
@@ -605,7 +638,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    cache:this.cache.bind({extended:f.raw,negative:f.negative,coarseExtended:this.coarseVelocity,slots,gate:this.liveGate}),
    taps:this.stageTaps.builder.bind({extended:f.raw,negative:f.negative,coarse:this.coarseVelocity,slots,gate:this.liveGate},unit),
    particles:[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.slotSnapshotResources!,entries:[
-    {binding:1,resource:{buffer:this.particles[1-parity]!}},{binding:2,resource:{buffer:this.bins}},{binding:4,resource:{buffer:this.state}},
+    {binding:1,resource:{buffer:this.particles[1-parity]!,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:4,resource:{buffer:this.state}},
     {binding:5,resource:{buffer:f.negative}},{binding:6,resource:{buffer:this.params}},
     {binding:8,resource:f.raw},{binding:10,resource:this.coarseVelocity},{binding:11,resource:unit},{binding:17,resource:slots},
    ]})) as [UniformDetailGroup,UniformDetailGroup],
@@ -626,7 +659,7 @@ ${uniformPageInitBlocksWGSL(this.pool.layout,"nbInitBlocks",512,`bins[${heat}u+k
    this.initGroup=this.device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:this.pool.state}},{binding:1,resource:{buffer:this.bins}}]});
    this.initPipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint:"nbInitBlocks"}});
   }
-  const sourceCode=(unitTaps:boolean,slots=false,delta=false)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const sourceCode=(unitTaps:boolean,slots=false,delta=false)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 const nbSparseBins:bool=true;
 const NB_PREVIOUS_CROSSINGS:bool=${this.previousCrossings};
 ${narrowBandParticleWGSL(this.apic)}
@@ -651,6 +684,18 @@ fn nbParticlesLive()->bool{return params.live.x!=0u;}
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
 ${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
 const NB_ARENA:u32=${this.arenaWord}u;
+// The particle cell bins: a cell's count at bins[nbBinCell(cell)] and its
+// start at links[nbBinCell(cell)]; NB_LINKS words of starts head the links.
+// Under a particle budget a covered tile's 64 bins are in its brick's slot
+// (the sort's slab slot, NB_SLOT_MAP a brick id); an uncovered tile has none.
+const NB_LINKS:u32=${this.binSlots?`${this.binCells}u`:"UM_CELL_KEYS"};const NB_NO_BIN:u32=0xffffffffu;
+${this.binSlots?`const NB_SLOT_MAP:u32=${this.binCells}u;
+fn nbBinTile(tile:u32)->u32{return 512u*atomicLoad(&bins[NB_SLOT_MAP+ubBrickOfTile(tile)])+64u*((tile&1u)|(((tile>>3u)&1u)<<1u)|(((tile>>6u)&1u)<<2u));}
+fn nbBinCell(cell:u32)->u32{if(atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){return NB_NO_BIN;}return nbBinTile(cell/64u)+cell%64u;}
+fn nbBinCount(cell:u32)->u32{let bin=nbBinCell(cell);if(bin==NB_NO_BIN){return 0u;}return atomicLoad(&bins[bin]);}`
+:`fn nbBinTile(tile:u32)->u32{return 64u*tile;}
+fn nbBinCell(cell:u32)->u32{return cell;}
+fn nbBinCount(cell:u32)->u32{return atomicLoad(&bins[cell]);}`}
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
 ${slots?UniformColdFreeze.wgsl(undefined,1,18):UniformColdFreeze.wgsl(this.freeze,1,18)}
@@ -675,7 +720,7 @@ fn nbCellLocal(c:vec3i)->u32{let l=vec3u(c)&vec3u(3u);return l.x|(l.y<<2u)|(l.z<
 fn nbRun(a:vec3i,b:vec3i)->vec2u{
  let tile=umTileKey(a>>vec3u(2u));if(!umKeyStored(tile)){return vec2u(0);}
  if(atomicLoad(&bins[NB_COVERAGE+tile])==0u){return vec2u(0);}
- let last=64u*tile+nbCellLocal(b);return vec2u(links[64u*tile+nbCellLocal(a)],links[last]+atomicLoad(&bins[last]));}
+ let bin=nbBinTile(tile);let last=bin+nbCellLocal(b);return vec2u(links[bin+nbCellLocal(a)],links[last]+atomicLoad(&bins[last]));}
 fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 // Position and motion remain compact streams for the neighbor gathers.
 // Reconstruction reads position.w's heat to restrict erasure to its nearest
@@ -684,11 +729,11 @@ fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 const NB_SURFACE_HOT_NEAREST=${this.surfaceHotWord}u;
 const NB_COARSE_LIST:u32=${this.coarseListWord}u;const NB_COARSE_CAP:u32=${this.coarseListCapacity}u;
 const NB_DEPOSIT:u32=${this.depositWord}u;const NB_DEPOSIT_TILES:u32=${this.depositTiles}u;
-fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[UM_CELL_KEYS+4u*i+3u]&0x7fffffffu)>1.0;}
-fn nbPosition(i:u32)->vec3f{let a=UM_CELL_KEYS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
-fn nbMotion(i:u32)->vec4f{let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let mode=links[UM_CELL_KEYS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}
+fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[NB_LINKS+4u*i+3u]&0x7fffffffu)>1.0;}
+fn nbPosition(i:u32)->vec3f{let a=NB_LINKS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
+fn nbMotion(i:u32)->vec4f{let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let mode=links[NB_LINKS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}
 // Live particle counts per tile drive sparse cell-bin clearing.
-const NB_COVERAGE:u32=2u*UM_CELL_KEYS;
+const NB_COVERAGE:u32=${this.binSlots?`${this.binCells}u+64u*UM_BLOCKS`:"2u*UM_CELL_KEYS"};
 const NB_SURFACE_TILES:u32=NB_COVERAGE+UM_TILES;
 // The occupied tile list (UniformNarrowBandFlip.occupiedWord): its length,
 // then a tile key an entry. A key joins when its coverage leaves 0.
@@ -837,7 +882,7 @@ fn markSurfaceTiles(position:vec3f,heat:f32){
   atomicMax(&bins[NB_ACTIVITY_THETA+tile],bitcast<u32>(max(heat,0.0)));
  }}}
 }
-${particleSlabWGSL(this.capacity-this.spill,this.spill,this.apic)}
+${particleSlabWGSL(this.capacity-this.spill,this.spill,this.apic,this.binSlots)}
 override nbAdvectScalarCollision:bool=false;
 // With a static solid in the scene the fast launch (umSolidFree) still
 // advects a sample whose trace has no closed cell and no cell the
@@ -909,7 +954,7 @@ fn nbMoveDepth(p:vec3f)->f32{
  if(w<64u){reached=(nbWinFlags[w]&NB_WIN_REACH)!=0u;}else{reached=(atomicLoad(&bins[NB_BAND_REACH+umTileAt(t)])&1u)!=0u;}
  return particleDepthIn(p,reached);
 }
-fn nbListSlow(i:u32){let j=atomicAdd(&state[NB_SLOW_PARTICLES],1u);links[UM_CELL_KEYS+j]=i;}
+fn nbListSlow(i:u32){let j=atomicAdd(&state[NB_SLOW_PARTICLES],1u);links[NB_LINKS+j]=i;}
 // A moved record: status 0 live, 1 retired (or past a fatal), 2 slow (the
 // fast launch cannot serve it: nothing of it is stored, the general launch
 // moves it from the same record).
@@ -984,9 +1029,12 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    p.before=vec4f(pic,p.before.w);
    if(depth< -NB_BAND_DEPTH||nbSparseExpired(age)){return NbMoved(p,1u);}
    if(depth<-1.0&&params.activity.w>0.0){
-    let cell=umCellAt(vec3u(q));let rank=i-links[cell];
-    let cap=select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);
-    if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){return NbMoved(p,1u);}
+    let cell=nbBinCell(umCellAt(vec3u(q)));
+    if(cell!=NB_NO_BIN){
+     let rank=i-links[cell];
+     let cap=select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);
+     if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){return NbMoved(p,1u);}
+    }
    }
    // Bodies advance at the previous fluid step's tail. Push samples they
    // overtook out to the moving surface before the static-solid rejection.
@@ -1113,11 +1161,11 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
 // in position) back in its current-bank slot, its end in its motion words
 // (the seed list's, consumed before the move; the deposit writes them next).
 const NB_WALK_PARTICLES:u32=23u;
-fn nbWalkList()->u32{return UM_CELL_KEYS+2u*arrayLength(&particles);}
+fn nbWalkList()->u32{return NB_LINKS+2u*arrayLength(&particles);}
 fn nbListWalk(i:u32,p:Particle,start:vec3f,end:vec3f){
  let j=atomicAdd(&state[NB_WALK_PARTICLES],1u);links[nbWalkList()+j]=i;
  var r=p;r.position=vec4f(start,p.position.w);particles[i]=r;
- let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let e=bitcast<vec3u>(end);links[a]=e.x;links[a+1u]=e.y;links[a+2u]=e.z;
+ let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let e=bitcast<vec3u>(end);links[a]=e.x;links[a+1u]=e.y;links[a+2u]=e.z;
 }
 // The walk lane: a listed sample's solid walk and arrival, without the
 // trace's samplers. It appends as the flat lane does.
@@ -1125,7 +1173,7 @@ fn nbListWalk(i:u32,p:Particle,start:vec3f,end:vec3f){
  let n=atomicLoad(&state[NB_WALK_PARTICLES]);
  for(var j=gid.x;j<n;j+=64u*groups.x){
   let i=links[nbWalkList()+j];let p=particles[i];let start=p.position.xyz;
-  let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let end=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));
+  let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let end=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));
   let r=nbFinish(p,start,end,nbTraceEndpoint(vec3i(floor(start)),end),nbParticleMode(p)==1.0,false);
   if(r.status==0u){nbMoveAppend(r.p);}
  }
@@ -1204,7 +1252,7 @@ fn nbMove(group:u32,groups:u32,lane:u32){
    let k=off+lane;var r=NbMoved();r.status=1u;
    if(k<job.z){
     var i=job.y+k;
-    if(job.x==1u){i=select(nbSpillBase(false)+i-jobs.w,links[UM_CELL_KEYS+i],i<jobs.w);}
+    if(job.x==1u){i=select(nbSpillBase(false)+i-jobs.w,links[NB_LINKS+i],i<jobs.w);}
     let record=particles[i];
     if(nbLive(record)){r=nbAdvect(record,i);if(r.status==2u){nbListSlow(i);r.status=1u;}}
    }
@@ -1277,14 +1325,14 @@ fn nbSourceCell(c:vec3u)->bool{return nbSourcePhi(vec3f(c)+0.5,1.0)<1.0;}
 // The cells needing candidates: a list in the motion words, which nothing
 // reads from the transfer to the next deposit (the move reads the cell
 // starts). A list past them stops the run (state[3] = 7).
-fn nbSeedList()->u32{return UM_CELL_KEYS+4u*arrayLength(&particles);}
+fn nbSeedList()->u32{return NB_LINKS+4u*arrayLength(&particles);}
 @compute @workgroup_size(64) fn seedCells(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let c=nbSeedCell(group,lane);
  if((nbBandReach(c)&1u)==0u){return;}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
  if(!nbParticleCellOpen(vec3i(c))){return;}
  let depth=particleDepth(vec3f(c)+0.5);if(depth>0.9||depth< -NB_BAND_DEPTH-0.5){return;}
- if(atomicLoad(&bins[umCellAt(c)])>=nbSeedTarget(depth)){return;}
+ if(nbBinCount(umCellAt(c))>=nbSeedTarget(depth)){return;}
  let slot=atomicAdd(&bins[NB_BAND+3u],1u);
  if(slot>=3u*arrayLength(&particles)){atomicStore(&state[3],7u);return;}
  // Bit 31 a source cell, bit 30 a graded band's deep cell (nbSeedTarget 4).
@@ -1295,7 +1343,7 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
  let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))){return empty;}
  let entry=links[nbSeedList()+slot];if(((entry&0x80000000u)!=0u)!=sourcePass){return empty;}
  let c=umCellCoord(entry&0x3fffffffu);let j=lane%8u;let deep=(entry&0x40000000u)!=0u;
- if(j<atomicLoad(&bins[umCellAt(c)])||j>=select(8u,4u,deep)){return empty;}
+ if(j<nbBinCount(umCellAt(c))||j>=select(8u,4u,deep)){return empty;}
  let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
  let site=seedSite(c,select(j,array<u32,4>(0u,3u,5u,6u)[j&3u],deep),false,activated);if(site.x<0.0){return empty;}
  let heat=nbTargetHeat(vec3f(c)+0.5);
@@ -1580,7 +1628,7 @@ ${narrowBandSurfaceWGSL}
   // in the scratch bank, and SORT files them by cell into the current bank
   // and marks the tiles they reach.
   encoder.clearBuffer(this.state,4,8);
-  encoder.clearBuffer(this.bins,this.cells*8+this.tiles*4,this.tiles*4);
+  encoder.clearBuffer(this.bins,4*this.countWords+this.tiles*4,this.tiles*4);
   this.clearBrickTable(encoder);this.run(encoder,b.allocate);
   this.run(encoder,b.advect);
   this.sort(encoder);this.crossingCanPlan=true;
@@ -1590,11 +1638,11 @@ ${narrowBandSurfaceWGSL}
  private bootstrap(encoder:GPUCommandEncoder):void{
   if(this.started)return;
   const b=this.compiled;
-  encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,this.cells*8);
-  encoder.clearBuffer(this.bins,this.cells*8+this.tiles*4,this.tiles*4);
+  encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.bins,0,4*this.countWords);
+  encoder.clearBuffer(this.bins,4*this.countWords+this.tiles*4,this.tiles*4);
   this.arenaSearch(encoder);this.run(encoder,b.arenaMetric);this.cache.encode(encoder,this.cacheGroups.bootstrap!);
   // Coverage and the occupied list start empty: countInitial lists its tiles.
-  encoder.clearBuffer(this.bins,this.cells*8,this.tiles*4);encoder.clearBuffer(this.bins,4*this.occupiedWord,4);
+  encoder.clearBuffer(this.bins,4*this.countWords,this.tiles*4);encoder.clearBuffer(this.bins,4*this.occupiedWord,4);
   this.clearBrickTable(encoder);this.run(encoder,b.countInitial);
   this.run(encoder,b.seedInitial);this.sort(encoder);
   this.started=true;
@@ -1652,9 +1700,9 @@ ${narrowBandSurfaceWGSL}
   // The step's seeds (none in a quiet frame) join the holes past the
   // sorted runs against this step's band, phi and counts, sampling the
   // field the move sampled (storeSeedCandidate). Their candidate count is NB_BAND+3.
-  if(!this.quiet){encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles+3)*4,4);this.run(encoder,this.compiled.seed);}
+  if(!this.quiet){encoder.clearBuffer(this.bins,(this.bandWord+3)*4,4);this.run(encoder,this.compiled.seed);}
   // The seam list's length (NB_BAND+3), which transferOwners counts.
-  encoder.clearBuffer(this.bins,(3*this.cells+this.vertices+2*this.tiles+3)*4,4);
+  encoder.clearBuffer(this.bins,(this.bandWord+3)*4,4);
   this.run(encoder,this.compiled.transfer);
  }
  snapshot(encoder:GPUCommandEncoder,slots?:UniformNarrowBandSlotSnapshot):void{
@@ -1760,12 +1808,14 @@ ${narrowBandSurfaceWGSL}
   // is deferred (reseedClipped); never destroy a surface to make room for it.
   // Liquid a source or the initial band must add has no such deferral.
   if(words[3]===4){const p=words[11]!;throw new Error(`Narrow-band FLIP: a particle arrived in page (${p&63},${(p>>>6)&63},${(p>>>12)&63}), which holds no storage; the residency closure is too small`);}
+  const budget=this.budget&&(words[3]>=5&&words[3]<=7||words[3]===9)?`; fluid.tiers.bricks and fluid.tiers.particlesPerFineCell size it (${this.budget.fineTiles} h tiles at ${this.budget.perFineCell} a fine cell)`:"";
   if(words[3])throw new Error(`Narrow-band FLIP ${words[3]===1?`trajectory longer than the lattice (${NARROW_BAND_TRACE_REACH} cells an axis)`:words[3]===2?"nonfinite velocity"
    :words[3]===5?`particle bank is full: brick overflow exhausted the free tail of the ${this.capacity}-record pool`
    :words[3]===6?`particle slabs exceed the pool: ${words[0]} records sized of ${this.capacity-this.spill} before the spill reserve (${words[1]} live)`
    :words[3]===7?`seed candidates exceed their list (${3*this.capacity} cells)`
    :words[3]===8?`coarse corners exceed their list (${this.coarseListCapacity} entries)`
-   :`unknown particle fatal ${words[3]}`}`);
+   :words[3]===9?`particle bricks exceed the cell bins' ${this.binSlots} brick slots`
+   :`unknown particle fatal ${words[3]}`}${budget}`);
  }
  destroy():void{this.displayMotion?.destroy();this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
 }

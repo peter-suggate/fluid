@@ -1,5 +1,5 @@
 import { settleGPUInitialization } from "../../core/gpu-initialization";
-import { UniformNarrowBandFlip } from "./uniform-narrow-band-flip";
+import { UniformNarrowBandFlip, type NarrowBandParticleBudget } from "./uniform-narrow-band-flip";
 import { NARROW_BAND_AIR_CHANGED_WORD } from "./uniform-narrow-band-air.wgsl";
 import {UNIFORM_MIXED_OVERFLOW_FINE,uniformMixedDetailViolationWord} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedHangingBytes} from "./uniform-mixed-velocity-sampling.wgsl";
@@ -21,7 +21,7 @@ import type {UniformScratchArena} from "./uniform-scratch-arena";
 import type {WebGPUUniformPressureMultigrid} from "./webgpu-uniform-pressure-multigrid";
 import type {WebGPUUniformVelocityExtrapolator} from "./webgpu-uniform-velocity-extrapolation";
 import {UNIFORM_WORK_RECEIPT_WORDS,UniformMixedOwnership,type UniformMixedGenerationBuffers} from "./uniform-mixed-ownership";
-import {UniformMixedExtension} from "./uniform-mixed-extension";
+import {UniformMixedExtension,extensionCompanionBytes} from "./uniform-mixed-extension";
 import {UniformMixedHangingTaps, UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
 import {uniformCoarseCacheExtent} from "./uniform-coarse-velocity-cache";
 import {UniformMixedSurface} from "./uniform-mixed-surface";
@@ -248,7 +248,9 @@ export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;b
  /** Host cold-frame skip (UniformColdFrame): "on" (default) leaves out launches of stages with no work in the lagged region heat; "off" encodes every launch. */
  coldFrameSkip?:"on"|"off";
  /** NB-FLIP regionTiering, warmResolution, particleSeeding (default uniformNearSettled()). */
- nearSettled?:UniformNearSettled}
+ nearSettled?:UniformNearSettled;
+ /** The particles' h capacity (scene fluid.tiers): absent, they keep the pool's sizing (UniformNarrowBandFlip). */
+ particles?:NarrowBandParticleBudget}
 
 export class UniformMixedFrame {
  /** The NB-FLIP near-settled settings, fixed for the frame's life. */
@@ -480,14 +482,16 @@ export class UniformMixedFrame {
   const solid=this.solid=new UniformMixedSolid(device,f.solid,coarseLayout,this.pagePool);
   this.coarseCache=caches[0]!;
   const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles,capacity.fixedWorldGeometry);
-  this.tileContext=new UniformTileContext(device,o,solid,this.pagePool.state);
+  this.tileContext=new UniformTileContext(device,o,solid,this.pagePool);
   {const h=o.capacity.lattice.cellSize_m,inverse=(x:number)=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x)));
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
     momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
     band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded");
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
+   // A budget's banks still hold the extension's paired companion at every reservation (bindStage).
+   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,o.capacity.address.poolTiles)});
   this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -754,7 +758,7 @@ export class UniformMixedFrame {
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,this.surfaceWorkControl,...this.pageOwners]});
   await settleGPUInitialization([this.blit,this.solid,this.tileContext,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip]
-   .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
+   .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership,this.pagePool),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
   this.ready=true;
  }
  /** The last advance's extension key (write), once there has been one, and

@@ -1176,7 +1176,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // limits refuse a reservation (UniformMixedFrameCapacity).
     const tiles=this.address.poolTiles,gpuLayout=this.detail.policy==="dynamic";
     const solids=!this.solidVoxelsEmpty||sceneHasTerrain(this.scene),bodies=this.scene.rigidBodies.length;
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
+    // fluid.tiers: the particles' h capacity, a brick 8 h tiles; unset, the pool sizes them.
+    const tiers=this.scene.fluid.tiers,particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined
+      ?{fineTiles:Math.min(tiles,tiers.bricks!==undefined?8*tiers.bricks:tiles),perFineCell:tiers.particlesPerFineCell??4}:undefined;
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,particles,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,

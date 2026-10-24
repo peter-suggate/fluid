@@ -176,7 +176,7 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
   }
   workgroupBarrier();
   // The sort keeps a tile's cells contiguous, in local cell order.
-  let start=links[64u*tile];let end=links[64u*tile+63u]+atomicLoad(&bins[64u*tile+63u]);
+  let bin=nbBinTile(tile);let start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);
   // Classify: support at the new position. The mode bit rides the
   // record's before.w and the compact flag word; motion feeds the seams.
   for(var i=start+lane;i<end;i+=PB_LANES){
@@ -191,8 +191,8 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
    counts.y+=u32(!supported);
    if(census){let d=bandPhi(q);outside=max(outside,d);counts+=vec3u(u32(d>0.5),0u,u32(particleDepth(q)<-4.0));}
    particles[i].before.w=nbParticleState(nbParticleAge(s),select(1.0,0.0,supported));
-   let a=UM_CELL_KEYS+4u*arrayLength(&particles)+3u*i;let v=bitcast<vec3u>(s.velocity.xyz);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;
-   links[UM_CELL_KEYS+4u*i+3u]=(bitcast<u32>(s.position.w)&0x7fffffffu)|select(0x80000000u,0u,supported);
+   let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let v=bitcast<vec3u>(s.velocity.xyz);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;
+   links[NB_LINKS+4u*i+3u]=(bitcast<u32>(s.position.w)&0x7fffffffu)|select(0x80000000u,0u,supported);
    // Sorted samples lie in their tile; the clamp only bounds the window.
    if(fits&&supported){pbScatter(clamp(q-vec3f(origin),vec3f(0.0),vec3f(3.9999998)),s.velocity.xyz${apic?",array<vec3f,3>(s.cx.xyz,s.cy.xyz,s.cz.xyz)":""});}
   }
@@ -231,7 +231,7 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
   let tile=workgroupUniformLoad(&pbTile);
   if(!umTileLive(tile)){continue;}
   let at=vec3i(umTileCoord(tile));let reach=(atomicLoad(&bins[NB_BAND_REACH+tile])&1u)!=0u;
-  let start=links[64u*tile];let end=links[64u*tile+63u]+atomicLoad(&bins[64u*tile+63u]);
+  let bin=nbBinTile(tile);let start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);
   for(var i=start+lane;i<end;i+=64u){
    let s=particles[i];let ballistic=nbParticleMode(s)==1.0;
    // Support: the 2³ tiles from floor((p-2)/4), i.e. which half of the tile p sits in.

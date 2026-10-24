@@ -3,6 +3,7 @@ import { uniformMixedPressureCutWGSL } from "./uniform-mixed-pressure-cut.wgsl";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedPageCount, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 import { uniformVolumeCorrectionWGSL } from "./uniform-volume-correction.wgsl";
 import { uniformMixedDetachedMassWGSL } from "./uniform-mixed-detached-mass.wgsl";
 import { uniformMixedPressureLiquidWGSL } from "./uniform-mixed-pressure-surface.wgsl";
@@ -235,7 +236,7 @@ export class UniformMixedPressureAuthority {
  async initialize():Promise<void>{
   // rows, build (and its phase variant) and resolve stride the GPU-counted
   // owners of every tier (umAllOwner); build writes one balance partial per job.
-  const module=uniformDetailModule(this.device,{label:"Uniform mixed pressure authority",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const module=uniformDetailModule(this.device,{label:"Uniform mixed pressure authority",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 @group(1) @binding(0) var centerPhi:texture_3d<f32>;
 @group(1) @binding(1) var volume:texture_3d<f32>;
 @group(1) @binding(2) var targetFill:texture_3d<f32>;
@@ -661,9 +662,14 @@ const UM_TILE_BASE:u32=${STAMP_WORDS*this.pages}u;
 var<workgroup> umHeldGate:u32;
 var<workgroup> umHeldFine:atomic<u32>;
 var<workgroup> umHeldFineTiles:u32;
+// Items of the held regions only (umHeldPage): a free region's gate is closed.
+// Held and body modes are a non-resident ownership's, whose h and 4h lists
+// hold every stored tile; the resident pressure ownership's lists are its
+// static layout's, so its page launches (cutRegions, wetRegions, absent)
+// scan every page.
 @compute @workgroup_size(64) fn surfaceHeld(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var item=group.x;item<8u*UM_PAGES;item+=groups.x){
-  let region=item>>3u;let first=8u*(item&7u);
+ for(var item=group.x;item<8u*umHeldPageCount();item+=groups.x){
+  let region=umHeldPage(item>>3u);let first=8u*(item&7u);
   if(l==0u){umHeldGate=u32(umTileLive(umPageTile(region,0u)))|(stamps[UM_STAMP_WORDS*region+12u]&2u);atomicStore(&umHeldFine,0u);}
   let gate=workgroupUniformLoad(&umHeldGate);if((gate&1u)==0u){continue;}
   if(l<8u){
@@ -699,9 +705,10 @@ var<workgroup> umAuthorityBodyNear:atomic<u32>;
 var<workgroup> umAuthorityFine:atomic<u32>;
 var<workgroup> umAuthorityBodyGate:u32;
 var<workgroup> umAuthorityFineTiles:u32;
+// Items of the held regions only (umHeldPage): a free region reaches nothing.
 @compute @workgroup_size(64) fn surfaceRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var item=group.x;item<8u*UM_PAGES;item+=groups.x){
-  let region=item>>3u;let first=8u*(item&7u);
+ for(var item=group.x;item<8u*umHeldPageCount();item+=groups.x){
+  let region=umHeldPage(item>>3u);let first=8u*(item&7u);
   if(l==0u){atomicStore(&umAuthorityBodyNear,0u);atomicStore(&umAuthorityFine,0u);}
   workgroupBarrier();
   if(l<27u&&umTileLive(umPageTile(region,0u))){

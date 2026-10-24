@@ -6,6 +6,8 @@ import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourLayout } from "./uniform
  * reaches 64 cells from a near tile, a near tile 20 cells from the surface.
  * Odd, so the last sweep writes the level's `up` textures. */
 export const UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS = 3;
+/** heWork's words before its block list: the two gates, the block count, a spare. */
+export const UNIFORM_EXTRAPOLATION_WORK_WORDS = 4;
 
 /** Coarse nearest-source continuation for narrow-band FLIP: the 4h, 8h, 16h
  * and 32h levels of every pool block (8, 4, 2 and 1 cells a block axis),
@@ -37,16 +39,23 @@ struct Params {
 @group(0) @binding(7) var<storage,read> pagePool: array<u32>;
 
 // The caller's work words (UniformMixedExtension's marks): [0] some region
-// is dirty this encode, [1] some region publishes the old FLIP payload.
+// is dirty this encode, [1] some region publishes the old FLIP payload, [2]
+// the held blocks listed from [${UNIFORM_EXTRAPOLATION_WORK_WORDS}] on (any order).
 @group(0) @binding(8) var<storage,read> heWork: array<u32>;
 // 0 every launch runs; 1 only with a dirty region; 2 only with an old-payload
 // region; 3 only without one. A launch that does not run leaves every texel
 // as the last run wrote it: its inputs are those of that run.
 override heGate:u32=0u;
-var<workgroup> heSkipWord:u32;
-fn heSkip(lane:u32)->bool{
-  if(lane==0u){var skip=false;if(heGate==1u){skip=heWork[0]==0u;}else if(heGate==2u){skip=heWork[1]==0u;}else if(heGate==3u){skip=heWork[1]!=0u;}heSkipWord=select(0u,1u,skip);}
-  return workgroupUniformLoad(&heSkipWord)!=0u;
+var<workgroup> heJobsWord:u32;
+fn heHeldBlocks()->u32{return min(heWork[2],BLOCKS);}
+// A launch's 64-cell group jobs over the listed blocks' cells (edge a block
+// axis), none where the gate skips it. A fixed grid strides them.
+fn heJobs(lane:u32,edge:u32)->u32{
+  if(lane==0u){
+    var skip=false;if(heGate==1u){skip=heWork[0]==0u;}else if(heGate==2u){skip=heWork[1]==0u;}else if(heGate==3u){skip=heWork[1]!=0u;}
+    heJobsWord=select(((heHeldBlocks()<<(3u*firstTrailingBit(edge)))+63u)/64u,0u,skip);
+  }
+  return workgroupUniformLoad(&heJobsWord);
 }
 
 const BLOCKS:u32=${blocks}u;
@@ -87,9 +96,11 @@ fn highBit(w:u32,component:u32)->u32{return (w>>(24u+component))&1u;}
 // held: the block holds a page (a free block and the two sentinels do not).
 struct LevelCell { held: bool, block: u32, page: vec3i, local: vec3i, edge: i32 }
 
-// 64 cells a workgroup in block order; edge is the level's cells a block axis.
-fn levelCell(group:u32,cell:u32,edge:u32)->LevelCell{
-  let k=firstTrailingBit(edge);let n=64u*group+cell;let b=n>>(3u*k);let l=n&((1u<<(3u*k))-1u);
+// 64 cells a group job in list order; edge is the level's cells a block
+// axis. Past the list, block 0 (a sentinel): not held.
+fn levelCell(job:u32,cell:u32,edge:u32)->LevelCell{
+  let k=firstTrailingBit(edge);let n=64u*job+cell;let j=n>>(3u*k);let l=n&((1u<<(3u*k))-1u);
+  let b=select(0u,heWork[${UNIFORM_EXTRAPOLATION_WORK_WORDS}u+j],j<heHeldBlocks());
   let record=umBlockWord(min(b,BLOCKS-1u));
   return LevelCell(blockStored(b)&&record!=FREE,b,vec3i(vec3u(record&63u,(record>>6u)&63u,(record>>12u)&63u)),
     vec3i(vec3u(l&(edge-1u),(l>>k)&(edge-1u),l>>(2u*k))),i32(edge));
@@ -238,41 +249,50 @@ fn mixedStoreValues(texel:vec3i,x:vec4u,y:vec4u,z:vec4u){
 
 // A level from the next finer one, whose cells are in the same block.
 @compute @workgroup_size(192)
-fn mixedRestrictKnownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
-  if(heSkip(lane)){return;}
+fn mixedRestrictKnownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+  let edge=textureDimensions(primaryOut).x>>BLOCK_BITS;let jobs=heJobs(lane,edge);
   let component=lane/64u;let cell=lane%64u;
-  let c=levelCell(wid.x,cell,textureDimensions(primaryOut).x>>BLOCK_BITS);
-  var entry=vec4u(0u);
-  if(c.held){
-    var result=nearestHierarchySample(c,2*c.edge,component,false);
-    if(result.weight<=0.0&&component==1u){result=nearestHierarchySample(c,2*c.edge,component,true);}
-    entry=mixedHierarchyEntry(result);
+  for(var job=wid.x;job<jobs;job+=groups.x){
+    let c=levelCell(job,cell,edge);
+    var entry=vec4u(0u);
+    if(c.held){
+      var result=nearestHierarchySample(c,2*c.edge,component,false);
+      if(result.weight<=0.0&&component==1u){result=nearestHierarchySample(c,2*c.edge,component,true);}
+      entry=mixedHierarchyEntry(result);
+    }
+    mixedHierarchyLanes[lane]=entry;
+    workgroupBarrier();
+    if(component==0u&&c.held){
+      let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
+      mixedStoreOrigins(levelTexel(c),x,y,z);mixedStoreValues(levelTexel(c),x,y,z);
+    }
+    workgroupBarrier();
   }
-  mixedHierarchyLanes[lane]=entry;
-  workgroupBarrier();
-  if(component!=0u||!c.held){return;}
-  let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
-  mixedStoreOrigins(levelTexel(c),x,y,z);mixedStoreValues(levelTexel(c),x,y,z);
 }
 
 // One sweep of the 32h level, a cell a block: a block without a value takes
 // the nearest among its 26 neighbours'. ${UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS} sweeps stand for every level
 // above 32h.
 @compute @workgroup_size(192)
-fn mixedSweepBlocks(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
-  if(heSkip(lane)){return;}
-  let component=lane/64u;let cell=lane%64u;let c=levelCell(wid.x,cell,1u);
-  var entry=vec4u(0u);
-  if(c.held){
-    let texel=levelTexel(c);let half=vec3i(0,0,i32(textureDimensions(sourceOrigins).z/2u));
-    entry=mixedExistingEntry(textureLoad(primaryIn,texel,0),textureLoad(sourceOrigins,texel,0),textureLoad(sourceOrigins,texel+half,0),component);
-    if((entry.w&1u)==0u){entry=mixedHierarchyEntry(nearestBlockSample(c,component));}
+fn mixedSweepBlocks(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+  let jobs=heJobs(lane,1u);
+  let component=lane/64u;let cell=lane%64u;
+  for(var job=wid.x;job<jobs;job+=groups.x){
+    let c=levelCell(job,cell,1u);
+    var entry=vec4u(0u);
+    if(c.held){
+      let texel=levelTexel(c);let half=vec3i(0,0,i32(textureDimensions(sourceOrigins).z/2u));
+      entry=mixedExistingEntry(textureLoad(primaryIn,texel,0),textureLoad(sourceOrigins,texel,0),textureLoad(sourceOrigins,texel+half,0),component);
+      if((entry.w&1u)==0u){entry=mixedHierarchyEntry(nearestBlockSample(c,component));}
+    }
+    mixedHierarchyLanes[lane]=entry;
+    workgroupBarrier();
+    if(component==0u&&c.held){
+      let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
+      mixedStoreOrigins(levelTexel(c),x,y,z);mixedStoreValues(levelTexel(c),x,y,z);
+    }
+    workgroupBarrier();
   }
-  mixedHierarchyLanes[lane]=entry;
-  workgroupBarrier();
-  if(component!=0u||!c.held){return;}
-  let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
-  mixedStoreOrigins(levelTexel(c),x,y,z);mixedStoreValues(levelTexel(c),x,y,z);
 }
 
 // A 4h cell whose +face on the component is a closed wall (the page across
@@ -286,52 +306,60 @@ fn closedFace(c:LevelCell,component:u32)->bool{
 // A level's unknown values from the complete coarser level; a tap in another
 // page goes through the block's neighbour row.
 @compute @workgroup_size(192)
-fn mixedProlongUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
-  if(heSkip(lane)){return;}
+fn mixedProlongUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+  let edge=textureDimensions(primaryOut).x>>BLOCK_BITS;let jobs=heJobs(lane,edge);
   let component=lane/64u;let cell=lane%64u;
-  let c=levelCell(wid.x,cell,textureDimensions(primaryOut).x>>BLOCK_BITS);
-  var entry=vec4u(0u);
-  if(c.held){
-    let texel=levelTexel(c);let half=vec3i(0,0,i32(textureDimensions(existingOrigins).z/2u));
-    entry=mixedExistingEntry(textureLoad(secondaryIn,texel,0),textureLoad(existingOrigins,texel,0),textureLoad(existingOrigins,texel+half,0),component);
-    if((entry.w&1u)==0u&&!closedFace(c,component)){
-      let result=nearestHierarchySample(c,c.edge/2,component,false);
-      if(result.weight>0.0){entry=mixedHierarchyEntry(result);entry.w|=nearestSelection<<8u;}
+  for(var job=wid.x;job<jobs;job+=groups.x){
+    let c=levelCell(job,cell,edge);
+    var entry=vec4u(0u);
+    if(c.held){
+      let texel=levelTexel(c);let half=vec3i(0,0,i32(textureDimensions(existingOrigins).z/2u));
+      entry=mixedExistingEntry(textureLoad(secondaryIn,texel,0),textureLoad(existingOrigins,texel,0),textureLoad(existingOrigins,texel+half,0),component);
+      if((entry.w&1u)==0u&&!closedFace(c,component)){
+        let result=nearestHierarchySample(c,c.edge/2,component,false);
+        if(result.weight>0.0){entry=mixedHierarchyEntry(result);entry.w|=nearestSelection<<8u;}
+      }
     }
+    mixedHierarchyLanes[lane]=entry;
+    workgroupBarrier();
+    if(component==0u&&c.held){
+      let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
+      mixedStoreOrigins(levelTexel(c),x,y,z);mixedStoreValues(levelTexel(c),x,y,z);
+    }
+    workgroupBarrier();
   }
-  mixedHierarchyLanes[lane]=entry;
-  workgroupBarrier();
-  if(component!=0u||!c.held){return;}
-  let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
-  mixedStoreOrigins(levelTexel(c),x,y,z);mixedStoreValues(levelTexel(c),x,y,z);
 }
 
 // The same fill from the taps a prolongation recorded in its origins.
 @compute @workgroup_size(192)
-fn mixedReplayUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
- if(heSkip(lane)){return;}
+fn mixedReplayUnknownVelocity(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let edge=textureDimensions(primaryOut).x>>BLOCK_BITS;let jobs=heJobs(lane,edge);
  let component=lane/64u;let cell=lane%64u;
- let c=levelCell(wid.x,cell,textureDimensions(primaryOut).x>>BLOCK_BITS);var value=0.0;var mask=0u;
- if(c.held){
-  let texel=levelTexel(c);let existing=textureLoad(secondaryIn,texel,0);value=existing[component];mask=u32(round(existing.w));
-  if(!componentKnown(existing,component)){
-   let selected=(textureLoad(existingOrigins,texel,0).w>>(8u*component))&255u;
-   if(selected!=0u){
-    let g=c.page*c.edge+c.local;
-    var sourcePosition=(vec3f(g)+0.5)*0.5-0.5;
-    sourcePosition[component]=f32(g[component]+1)*0.5-1.0;
-    let lower=vec3i(floor(sourcePosition));var terms:array<vec2f,8>;
-    for(var k=0u;k<8u;k++){
-     terms[k]=vec2f(0);if((selected&(1u<<k))!=0u){let q=tapTexel(c.block,c.page,lower+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),c.edge/2);terms[k]=vec2f(textureLoad(primaryIn,q,0)[component],1.0);}
+ for(var job=wid.x;job<jobs;job+=groups.x){
+  let c=levelCell(job,cell,edge);var value=0.0;var mask=0u;
+  if(c.held){
+   let texel=levelTexel(c);let existing=textureLoad(secondaryIn,texel,0);value=existing[component];mask=u32(round(existing.w));
+   if(!componentKnown(existing,component)){
+    let selected=(textureLoad(existingOrigins,texel,0).w>>(8u*component))&255u;
+    if(selected!=0u){
+     let g=c.page*c.edge+c.local;
+     var sourcePosition=(vec3f(g)+0.5)*0.5-0.5;
+     sourcePosition[component]=f32(g[component]+1)*0.5-1.0;
+     let lower=vec3i(floor(sourcePosition));var terms:array<vec2f,8>;
+     for(var k=0u;k<8u;k++){
+      terms[k]=vec2f(0);if((selected&(1u<<k))!=0u){let q=tapTexel(c.block,c.page,lower+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),c.edge/2);terms[k]=vec2f(textureLoad(primaryIn,q,0)[component],1.0);}
+     }
+     let sum=d4Sum8Vec2(terms);value=sum.x/sum.y;mask|=1u<<component;
     }
-    let sum=d4Sum8Vec2(terms);value=sum.x/sum.y;mask|=1u<<component;
    }
   }
+  mixedHierarchyLanes[lane]=vec4u(bitcast<u32>(value),0u,0u,mask);workgroupBarrier();
+  if(component==0u&&c.held){
+   let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
+   textureStore(primaryOut,levelTexel(c),vec4f(bitcast<f32>(x.x),bitcast<f32>(y.x),bitcast<f32>(z.x),f32(x.w|y.w|z.w)));
+  }
+  workgroupBarrier();
  }
- mixedHierarchyLanes[lane]=vec4u(bitcast<u32>(value),0u,0u,mask);workgroupBarrier();
- if(component!=0u||!c.held){return;}
- let x=mixedHierarchyLanes[cell];let y=mixedHierarchyLanes[cell+64u];let z=mixedHierarchyLanes[cell+128u];
- textureStore(primaryOut,levelTexel(c),vec4f(bitcast<f32>(x.x),bitcast<f32>(y.x),bitcast<f32>(z.x),f32(x.w|y.w|z.w)));
 }
 `;
 }
