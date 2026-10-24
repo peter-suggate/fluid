@@ -128,9 +128,9 @@ export function uniformWindowAddressWGSL(buffer: string, table: string, blocks: 
 // closed tank, uniformWindowFixedFrame): every translation then folds.
 override ${prefix}FixedWorldGeometry:bool=false;
 override ${prefix}FixedFrame:bool=false;
-// A fixed frame whose world box lies in lattice pages -1..62: every stored
-// page is in the flat window, so the lookup is its one read (clamped; a page
-// off it is off the box, SOLID), the code the 64-page table compiled to.
+// Every stored page lies in the flat window (a narrow pool's frames, or a
+// fixed frame whose world box lies in lattice pages -1..62): the lookup is
+// its one read, AIR off it, the code the 64-page table compiled to.
 override ${prefix}FlatWindow:bool=false;
 ${Array.from({length:8},(_,i)=>`override ${prefix}WindowWord${24+i}:u32=0u;`).join("\n")}
 ${Array.from({length:3},(_,i)=>`override ${prefix}WindowWord${i}:u32=0u;`).join("\n")}
@@ -149,7 +149,8 @@ fn ${prefix}PageWord(page:vec3i)->u32{
  // Lattice pages -1..62 read the flat window, one read; the rest the top
  // word, then the child word it names.
  var raw:u32;
- if(${prefix}FlatWindow||all(f<vec3u(${UNIFORM_DIRECTORY_FLAT_EDGE}u))){let g=min(f,vec3u(${UNIFORM_DIRECTORY_FLAT_EDGE - 1}u));raw=${buffer}[${table}+${UNIFORM_DIRECTORY_TOP_WORDS + UNIFORM_DIRECTORY_CHILD_WORDS}u+(g.x|(g.y<<6u)|(g.z<<12u))];}
+ let inFlat=all(f<vec3u(${UNIFORM_DIRECTORY_FLAT_EDGE}u));
+ if(${prefix}FlatWindow||inFlat){let g=min(f,vec3u(${UNIFORM_DIRECTORY_FLAT_EDGE - 1}u));raw=select(0u,${buffer}[${table}+${UNIFORM_DIRECTORY_TOP_WORDS + UNIFORM_DIRECTORY_CHILD_WORDS}u+(g.x|(g.y<<6u)|(g.z<<12u))],inFlat);}
  else{
   let e=bitcast<vec3u>(world>>vec3u(2u))&vec3u(63u);let l=bitcast<vec3u>(world)&vec3u(3u);
   raw=${buffer}[${table}+${UNIFORM_DIRECTORY_TOP_WORDS}u+64u*min(${buffer}[${table}+(e.x|(e.y<<6u)|(e.z<<12u))],${UNIFORM_SUPER_BLOCK_SLOTS - 1}u)+(l.x|(l.y<<2u)|(l.z<<4u))];

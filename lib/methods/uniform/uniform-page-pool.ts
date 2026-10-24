@@ -148,7 +148,7 @@
  * aliased or overflowed request is simply not resident, and a certificate
  * over the cap asks for nothing. The bits are sticky and the first raised
  * keeps its page; uniformPagePoolFatalMessage reads them from the receipt. */
-import { uniformMovingWindowDecisionWGSL } from "./uniform-moving-window";
+import { UNIFORM_MOVING_WINDOW_INNER, UNIFORM_MOVING_WINDOW_MARGIN, uniformMovingWindowDecisionWGSL } from "./uniform-moving-window";
 import { UNIFORM_DIRECTORY_FLAT_WORDS, UNIFORM_SUPER_BLOCK_CHILDREN, UNIFORM_SUPER_BLOCK_SLOTS, UNIFORM_WINDOW_HEADER_WORDS, UNIFORM_WINDOW_PAGES, uniformDirectoryFlat, uniformDirectoryWord, uniformSuperBlockLocal, uniformWindowDerivedWords, uniformWindowWorldWGSL } from "./uniform-window-address";
 import type { GPUFluidVolumePageSource } from "../../core/method-view-records";
 
@@ -218,6 +218,12 @@ export interface UniformPagePoolOptions {
   * source's pages are clipped to (uniformPagePoolCellBoxPages). With it the
   * pool publishes the overlay's page record; no kernel reads it. */
  readonly box?:UniformPagePoolBox;
+ /** Frames past the inner window's 60 pages an axis may be placed in the full
+  * one (default: no box, or a box past 60 pages on an axis). A narrow pool
+  * refuses them (edge fatal), as the 64-page table did: its stored pages stay
+  * in the flat window, and its readers' lookups compile to that one read
+  * (umFlatWindow). */
+ readonly wide?:boolean;
 }
 export type UniformPagePoolLayout=ReturnType<typeof uniformPagePoolLayout>;
 
@@ -237,7 +243,7 @@ export function uniformPagePoolLayout(options:UniformPagePoolOptions){
  // A box wider than the table would alias itself.
  const origin:readonly [number,number,number]=options.box?[...options.box.origin]:[0,0,0],extent:readonly [number,number,number]=options.box?[...options.box.pages]:[0,0,0];
  if(options.box&&!(origin.every(int32)&&extent.every(n=>Number.isSafeInteger(n)&&n>=1&&n<=table)))throw new RangeError(`Uniform page pool box must have a 32-bit integer origin and 1..${table} pages an axis: origin ${origin}, pages ${extent}`);
- const boxPages=extent[0]*extent[1]*extent[2];
+ const boxPages=extent[0]*extent[1]*extent[2],wide=options.wide??(!options.box||extent.some(n=>n>UNIFORM_MOVING_WINDOW_INNER-2*UNIFORM_MOVING_WINDOW_MARGIN));
  let ringCapacity=1;while(ringCapacity<slots)ringCapacity*=2;
  const edge=table/4,entries=edge**3,flat=entries+UNIFORM_SUPER_BLOCK_CHILDREN*SUPERS,directory=flat+UNIFORM_DIRECTORY_FLAT_WORDS,tableAt=UNIFORM_PAGE_POOL_STATUS.words,blockWords=tableAt+directory+UNIFORM_WINDOW_HEADER_WORDS,records=blockWords+blocks,resident=records+RECORD*blocks,claimed=resident+slots,retired=claimed+slots,supers=retired+slots;
  const hostList=UNIFORM_PAGE_POOL_WORK.words,pinList=hostList+4*host,list=pinList+4*pins,keep=list+4*requests,ring=keep+blocks,claims=ring+ringCapacity,superRing=claims+5*entries,counts=superRing+SUPERS;
@@ -245,7 +251,7 @@ export function uniformPagePoolLayout(options:UniformPagePoolOptions){
   /** The top table: `edge` super-blocks an axis, `entries` words; `directory` words of top and child tables and the flat window. */
   edge,edgeBits:Math.log2(edge),entries,directory,superBlocks,blocks,slots,solidBlock:blocks-1,ringCapacity,idleSteps,requests,host,pins,closureCap,
   /** The box (origin and extent in pages) and its page count; count 0: no box. */
-  box:{origin,pages:extent,count:boxPages},
+  box:{origin,pages:extent,count:boxPages},wide,
   state:{table:tableAt,window:tableAt+directory,blocks:blockWords,records,resident,claimed,retired,supers,words:supers+RECORD*SUPERS},
   /** Word offsets inside the tail, wherever it lies: state.table in the state buffer, a mirror's offset in a mirror. */
   tail:{table:0,children:entries,flat,window:directory,blocks:directory+UNIFORM_WINDOW_HEADER_WORDS,words:directory+UNIFORM_WINDOW_HEADER_WORDS+blocks},
@@ -815,10 +821,12 @@ export class UniformPagePool {
    .replaceAll("mwForce.y","bitcast<i32>(upState[UP_AT_WINDOW+22u])")
    .replaceAll("mwForce.z","bitcast<i32>(upState[UP_AT_WINDOW+23u])")
    .replace("upState[UP_AT_WINDOW+20u]==upState[UP_AT_WINDOW+8u]+1u",frameParams?"upState[UP_AT_WINDOW+20u]==u32(bitcast<f32>(upParams[53u]))":"upState[UP_AT_WINDOW+20u]==upState[UP_AT_WINDOW+8u]+1u")
+   .replace(`hi-lo>=${UNIFORM_WINDOW_PAGES-2*UNIFORM_MOVING_WINDOW_MARGIN}u`,`hi-lo>=${(l.wide?UNIFORM_WINDOW_PAGES:UNIFORM_MOVING_WINDOW_INNER)-2*UNIFORM_MOVING_WINDOW_MARGIN}u`)
    .replace("@compute @workgroup_size(1) fn mwDecide()", "fn upDecide()")
    .replace("let old=", "if(upPolicy()==0u){return;}let old=")
    // A finite tank already has walls on every side; only the probe moves it.
    .replace("if(forced){", "if(upPolicy()==1u||(a==1u&&upPolicy()==3u&&lo==((upState[UP_AT_WINDOW+14u])^0x80000000u)&&hi>=old[a]&&hi-old[a]<span-2u)){next[a]=old[a];}if(forced){");
+  if(!windowBody.includes(`hi-lo>=${(l.wide?UNIFORM_WINDOW_PAGES:UNIFORM_MOVING_WINDOW_INNER)-2*UNIFORM_MOVING_WINDOW_MARGIN}u`))throw new Error("Uniform page pool: the window decision's width test moved");
   const [hostModule,publishModule,commitModule]=await Promise.all([compile("Uniform page pool host commands",/* wgsl */`${source(l,0,0,1,"read")}
 fn upAsk(a:u32){upRequest(vec3i(bitcast<i32>(atomicLoad(&upWork[a])),bitcast<i32>(atomicLoad(&upWork[a+1u])),bitcast<i32>(atomicLoad(&upWork[a+2u]))));}
 // The host commands and the pinned pages ask as any consumer does, so they deduplicate with the kernels' requests.

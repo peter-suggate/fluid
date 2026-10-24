@@ -19,7 +19,9 @@
  * exactly as in a window of 64 pages: the same pages hold the same lattice
  * coordinates as before the directory, and lattice positions stay small
  * where f32 particle coordinates need them. A wider one is placed in the
- * full window.
+ * full window, only in a wide pool (uniformPagePoolLayout's wide): any other
+ * refuses it with the edge fatal, as the 64-page table did, so its stored
+ * pages always lie in the flat window.
  */
 import { UNIFORM_WINDOW_EDGE_FATAL, UNIFORM_WINDOW_PAGES } from "./uniform-window-address";
 const UNIFORM_PAGE_POOL_FATAL = { edge: UNIFORM_WINDOW_EDGE_FATAL };
@@ -53,7 +55,7 @@ export interface UniformWindowForce { readonly boundary: number; readonly delta:
  * A two-page margin on either side reserves room for the next census;
  * a forced probe shift may use that margin but must keep all pages inside.
  */
-export function uniformWindowDecision(frame: UniformWindowPage, bounds?: UniformWindowBounds, force?: UniformWindowPage): UniformWindowDecision {
+export function uniformWindowDecision(frame: UniformWindowPage, bounds?: UniformWindowBounds, force?: UniformWindowPage, wide = true): UniformWindowDecision {
   if (!frame.every(int32) || (force && !force.every(int32))) throw new RangeError("Moving-window coordinates must be i32 pages");
   if (bounds && (!bounds.low.every(int32) || !bounds.high.every(int32) || bounds.low.some((v, k) => v > bounds.high[k]!)))
     throw new RangeError("Moving-window bounds must be ordered i32 pages");
@@ -62,7 +64,7 @@ export function uniformWindowDecision(frame: UniformWindowPage, bounds?: Uniform
     const lo = bounds?.low[axis], hi = bounds?.high[axis];
     if (lo !== undefined && hi !== undefined) {
       const width = hi - lo + 1, span = width <= INNER - 2 * MARGIN ? INNER : PAGES;
-      if (width > PAGES - 2 * MARGIN)
+      if (width > (wide ? PAGES : INNER) - 2 * MARGIN)
         return { frame, delta: [0, 0, 0], fatal: UNIFORM_PAGE_POOL_FATAL.edge };
       if (lo - frame[axis]! < MARGIN || hi - frame[axis]! >= span - MARGIN)
         next[axis] = Math.max(I32_MIN, Math.min(I32_MAX - (PAGES - 1), lo - Math.floor((span - width) / 2)));

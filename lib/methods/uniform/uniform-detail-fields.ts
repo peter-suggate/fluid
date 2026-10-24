@@ -1377,10 +1377,10 @@ export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwn
   const seed=ownership.capacity.address.seed,at=seed.layout.tail.window,frame=uniformWindowFixedFrame(seed.tail[at+UNIFORM_WINDOW_HEADER.policy]!);
   const word=(i:number)=>seed.tail[at+i]!|0,last=word(UNIFORM_WINDOW_HEADER.windowLast)>>>0;
   const within=(edge:number,from:number)=>[0,1,2].every(a=>{const f=word(UNIFORM_WINDOW_HEADER.frame+a)+from,lo=word(UNIFORM_WINDOW_HEADER.solidLow+a),hi=word(UNIFORM_WINDOW_HEADER.solidHigh+a);return lo>=f&&hi<=f+edge;});
-  const inside=within(last+1,0),flat=frame&&within(UNIFORM_DIRECTORY_FLAT_EDGE,-1);
+  const inside=within(last+1,0),narrow=!seed.layout.wide,flat=frame&&within(UNIFORM_DIRECTORY_FLAT_EDGE,-1);
   const constants:Record<string,number>={};
   for(const prefix of prefixes){
-   constants[`${prefix}FixedWorldGeometry`]=1;
+   constants[`${prefix}FixedWorldGeometry`]=1;if(narrow)constants[`${prefix}FlatWindow`]=1;
    if(runtimeWorldPrefixes.get(descriptor.compute.module)?.has(prefix))continue;
    if(flat)constants[`${prefix}FlatWindow`]=1;
    for(let i=24;i<32;i++)constants[`${prefix}WindowWord${i}`]=seed.tail[at+i]!;

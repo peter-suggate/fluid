@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { UNIFORM_LATTICE_MAX_PAGES, uniformLatticeAddress, uniformPageWord } from "../lib/methods/uniform/uniform-lattice-address";
-import { UNIFORM_PAGE_POOL_SOLID } from "../lib/methods/uniform/uniform-page-pool";
-import { UNIFORM_DIRECTORY_CHILD_WORDS, UNIFORM_DIRECTORY_TOP_WORDS, UNIFORM_DIRECTORY_WORDS, uniformDirectoryWord } from "../lib/methods/uniform/uniform-window-address";
+import { UNIFORM_PAGE_POOL_SOLID, uniformPagePoolLayout } from "../lib/methods/uniform/uniform-page-pool";
+import { uniformWindowDecision } from "../lib/methods/uniform/uniform-moving-window";
+import { UNIFORM_DIRECTORY_CHILD_WORDS, UNIFORM_DIRECTORY_TOP_WORDS, UNIFORM_DIRECTORY_WORDS, UNIFORM_WINDOW_EDGE_FATAL, uniformDirectoryWord } from "../lib/methods/uniform/uniform-window-address";
 
 // A box far past the old 64-page table (2048 h): 128 pages along x, a few
 // pages stored, each found by the two-level read; the flat window holds the
@@ -29,4 +30,16 @@ test("a sparse box of 4096 cells an axis resolves every page through the super-b
 test("the box limit is the directory window's, past the old 62 pages", () => {
   assert.equal(UNIFORM_LATTICE_MAX_PAGES, 252);
   assert.throws(() => uniformLatticeAddress([32 * 253, 32, 32], false, { blocks: 20, air: [] }), /exceeds 252 pages/);
+});
+
+// A narrow pool (a box within the inner 60 pages) refuses a wider frame, as
+// the 64-page table did, so its stored pages stay in the flat window; a wide
+// one places it in the full window.
+test("only a wide pool places a frame past 60 pages", () => {
+  const bounds = { low: [0, 0, 0], high: [60, 1, 1] } as const;
+  assert.equal(uniformWindowDecision([0, 0, 0], bounds, undefined, false).fatal, UNIFORM_WINDOW_EDGE_FATAL);
+  assert.equal(uniformWindowDecision([0, 0, 0], bounds).fatal, 0);
+  assert.equal(uniformWindowDecision([0, 0, 0], { low: [0, 0, 0], high: [59, 1, 1] }, undefined, false).fatal, 0);
+  assert.equal(uniformPagePoolLayout({ blocks: 8, idleSteps: 1, worldPolicy: 2, box: { origin: [0, 0, 0], pages: [60, 4, 4] } }).wide, false);
+  assert.equal(uniformPagePoolLayout({ blocks: 8, idleSteps: 1, worldPolicy: 2, box: { origin: [0, 0, 0], pages: [61, 4, 4] } }).wide, true);
 });

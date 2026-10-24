@@ -70,7 +70,7 @@ test('paged scenes share modules and pipelines while bounds and capacity remain 
  assert.match(code,/umCounts.window\[6u\]\[0u\]/);
  assert.doesNotMatch(code,/WindowWord|override umFixedFrame/);
  const descriptor=(a.pipeline as unknown as {descriptor:GPUComputePipelineDescriptor}).descriptor;
- assert.deepEqual(descriptor.compute.constants,{umFixedWorldGeometry:1});
+ assert.deepEqual(descriptor.compute.constants,{umFixedWorldGeometry:1,umFlatWindow:1});
  assert.equal(gpuCompilationManagerFor(device).snapshot().cacheStats.pipelineHits,1);
 });
 
@@ -90,7 +90,7 @@ test('hot modules specialize immutable bounds at construction while movable fram
  assert.equal(fixed.umFixedWorldGeometry,1);
  for(let i=24;i<32;i++)assert.equal(fixed['umWindowWord'+i],address.seed.tail[address.seed.layout.tail.window+i]);
  assert.equal(fixed.umFixedFrame,undefined,'movable frame is never frozen by world specialization');
- assert.equal(fixed.umFlatWindow,undefined,'a movable frame keeps the two-level lookup');
+ assert.equal(fixed.umFlatWindow,1,'a narrow pool reads only the flat window, its frame moving or not');
  assert.equal(descriptors[1]!.compute.constants,undefined,'mutable ownership reads the uniform even in a hot module');
  // A closed tank inside lattice pages -1..62 reads only the flat window; one past it keeps the two-level lookup.
  for(const [x,flat] of [[62,1],[64,undefined]] as const){
