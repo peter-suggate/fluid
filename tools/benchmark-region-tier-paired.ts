@@ -1,14 +1,25 @@
 /** Alternate fenced simulation frames from two source snapshots on one device,
  * a region-tier fixture (tools/region-tier-scenes.ts) or a registered scene,
  * at an optional pool reservation. Each frame runs both arms, alternating
- * which goes first. Fails unless final fields (read by live page identity:
- * which request gets which block is a race) and every frame's work history
- * match. --profile counts each arm's passes, dispatches, workgroups, clears
- * and copies by pass label (a separate diagnostic run: it adds CPU work).
+ * which goes first; it reports paired wall times, final field hashes (read
+ * by live page identity: which request gets which block is a race) and
+ * every frame's work history: the region tiers read at its end, and its
+ * receipt (band, work words, heat evidence) by the frame it describes, not
+ * the newest one solver.info shows. Two instances of one source are not
+ * bit-identical (atomic slot allocation), so the physics gate is
+ * gate-repeat-spread.ts; --identity fails the run on any field or history
+ * difference. --profile counts each arm's passes, dispatches, workgroups,
+ * clears and copies by pass label (a separate diagnostic run: it adds CPU
+ * work).
  * node --import tsx tools/benchmark-region-tier-paired.ts NAME
  *   --baseline=/abs/snapshot --candidate=/abs/snapshot
  *   [--scene=rest|cold|warm|splash|hot|<scene id>] [--length=128] [--depth=32]
- *   [--pool-blocks=N] [--steps=100] [--from=40] [--profile] [--out=DIR] [--gate="RUNNER MODE"]
+ *   [--pool-blocks=N] [--steps=100] [--from=40] [--profile] [--identity] [--keep-going]
+ *   [--hash-at=F,F] [--diff] [--out=DIR] [--gate="RUNNER MODE"]
+ * --keep-going: with --identity, record work-history differences and run on
+ * to the field hashes (the run still fails on either). --hash-at=10,20:
+ * compare the field hashes after those frames too; --diff prints where they
+ * differ (float index, both values).
  * --gate: construct both arms (mostly CPU: pipeline compiles) first, then
  * hold a GPU slot only over the frames and readback: the gate command (a
  * shared runner and its mode, e.g. "fluid-gpu-run.sh check") runs `cat`
@@ -29,8 +40,10 @@ import { createRegionTierScene, REGION_TIER_SCENES, type RegionTierScene } from 
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
-for (const a of process.argv.slice(3)) assert.match(a, /^--(?:(?:baseline|candidate|steps|from|scene|length|depth|pool-blocks|out|gate)=.+|profile)$/);
-const steps = Number(option("steps") ?? 100), from = Number(option("from") ?? 40), profile = process.argv.includes("--profile");
+for (const a of process.argv.slice(3)) assert.match(a, /^--(?:(?:baseline|candidate|steps|from|scene|length|depth|pool-blocks|out|gate|hash-at)=.+|profile|keep-going|diff|identity)$/);
+const diffFields = process.argv.includes("--diff"), identity = process.argv.includes("--identity");
+const hashAt = new Set((option("hash-at") ?? "").split(",").filter(Boolean).map(Number));
+const steps = Number(option("steps") ?? 100), from = Number(option("from") ?? 40), profile = process.argv.includes("--profile"), keepGoing = process.argv.includes("--keep-going");
 assert.ok(Number.isInteger(steps) && Number.isInteger(from) && from > 0 && steps >= from);
 const roots = [option("baseline"), option("candidate")].map(r => resolve(r!)); assert.ok(roots.every(Boolean));
 const sceneOption = option("scene") ?? "rest", region = (REGION_TIER_SCENES as readonly string[]).includes(sceneOption);
@@ -131,9 +144,41 @@ try {
     raw!.queue.submit([encoder.finish()]); await read.buffer!.mapAsync(GPUMapMode.READ);
     const tiers = [...new Uint32Array(read.buffer!.getMappedRange()).slice(0, 5)]; read.buffer!.unmap(); return tiers;
   };
+  /** Each arm's field hashes, read by live page identity. */
+  const hashFields = async () => {
+    const all: Record<string, string>[] = [], arrays: Record<string, Float32Array>[] = [];
+    for (const [i, solver] of solvers.entries()) {
+      arrays.push({});
+      const address = await helpers[i]!.readUniformLiveAddress(raw!, solver), out: Record<string, string> = {};
+      for (const [key, texture] of Object.entries({ velocity: solver.velocityTexture, volume: solver.volumeTexture, phi: solver.vertexPhiTexture!, pressure: solver.gridPressureTexture })) {
+        const data = await helpers[i]!.readMixedTexture(raw!, texture, address);
+        out[key] = createHash("sha256").update(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)).digest("hex").slice(0, 16);
+        if (diffFields) arrays[i]![key] = data;
+      }
+      all.push(out);
+    }
+    // --diff: where two arms' fields differ (float index, both values).
+    if (diffFields) for (const key of Object.keys(arrays[0]!)) {
+      const a = arrays[0]![key]!, b = arrays[1]![key]!; let count = 0, max = 0; const first: [number, number, number][] = [];
+      for (let j = 0; j < Math.min(a.length, b.length); j++) if (!Object.is(a[j], b[j])) { count++; max = Math.max(max, Math.abs(a[j]! - b[j]!)); if (first.length < 8) first.push([j, a[j]!, b[j]!]); }
+      if (count || a.length !== b.length) console.log(JSON.stringify({ phase: "diff", key, length: [a.length, b.length], count, max, first }));
+    }
+    return all;
+  };
+  const frameHashes: { frame: number; match: boolean; differ: string[] }[] = [];
   let residualDiffers = 0;
+  const historyDiffs: { frame: number; baseline: unknown; candidate: unknown }[] = [];
+  // Each arm's frame receipts by the frame they describe (the mixed frame's
+  // lagged plans: band, work words, remap list, heat evidence). solver.info
+  // shows the newest receipt resolved so far, which lags by timing.
+  type Lagged = { frame: number; bandTiles: number; bandBricks: number; bandLevel1: number; bandLevel2: number; bandCycles: number; work: Uint32Array; listed: number; heat: Uint32Array };
+  const receipts = solvers.map(() => new Map<number, string>()), compared = new Set<number>();
+  const harvest = (i: number) => {
+    for (const p of (solvers[i] as unknown as { mixedFrame: { lagged: readonly Lagged[] } }).mixedFrame.lagged) if (p.frame >= 0 && !compared.has(p.frame))
+      receipts[i]!.set(p.frame, JSON.stringify({ band: p.bandTiles, bricks: p.bandBricks, levels: [p.bandLevel1, p.bandLevel2], cycles: p.bandCycles, work: [...p.work], listed: p.listed, heat: [...p.heat] }));
+  };
   for (let frame = 1; frame <= steps; frame++) {
-    const wall = [0, 0], history: unknown[] = [], profiles: Profile[] = [];
+    const wall = [0, 0], history: unknown[] = [], shown: unknown[] = [], profiles: Profile[] = [];
     for (const i of frame % 2 ? [0, 1] : [1, 0]) {
       const solver = solvers[i]!; commands?.begin();
       const start = performance.now();
@@ -142,15 +187,20 @@ try {
       assert.equal(solver.info.simulationPipelineError, undefined);
       assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - frame * dt) < 1e-8);
       const nb = solver.narrowBandFlipInfo;
-      history[i] = { tiers: await tiersOf(solver), particles: nb?.particles, fine: solver.info.uniformMixedFineTiles, band: solver.info.uniformPressureBandTiles, bandResidual: solver.info.uniformPressureBandResidual, pool: { ...solver.pagePoolInfo, frame: undefined } };
+      history[i] = { tiers: await tiersOf(solver) };harvest(i);
+      shown[i] = { particles: nb?.particles, fine: solver.info.uniformMixedFineTiles, band: solver.info.uniformPressureBandTiles, bandResidual: solver.info.uniformPressureBandResidual, pool: { ...solver.pagePoolInfo, frame: undefined } };
     }
+    // The tiers, read at the frame's end, compare by frame; the receipts by
+    // the frame they describe, once both arms hold it.
+    const differs = (b: unknown, c: unknown) => { if (keepGoing || !identity) historyDiffs.push({ frame, baseline: b, candidate: c }); else assert.fail(`frame ${frame}: work histories differ: ${JSON.stringify(b)} vs ${JSON.stringify(c)}`); };
+    if (JSON.stringify(history[1]) !== JSON.stringify(history[0])) differs(history[0], history[1]);
+    for (const [at, b] of receipts[0]!) { const c = receipts[1]!.get(at); if (c === undefined) continue; if (c !== b) differs({ receipt: at, ...JSON.parse(b) }, { receipt: at, ...JSON.parse(c) }); receipts[0]!.delete(at); receipts[1]!.delete(at); compared.add(at); }
     // The band residual is a float reduction whose order differs between two
-    // instances of one source (an A/A pair differs at it): compared apart.
-    const strip = (h: unknown) => ({ ...(h as Record<string, unknown>), bandResidual: undefined });
-    assert.deepEqual(strip(history[1]), strip(history[0]), `frame ${frame}: work histories differ`);
-    const residuals = history.map(h => (h as { bandResidual?: number }).bandResidual ?? 0);
+    // instances of one source (an A/A pair differs at it): counted apart.
+    const residuals = shown.map(h => (h as { bandResidual?: number }).bandResidual ?? 0);
     if (residuals[0] !== residuals[1]) residualDiffers++;
-    rows.push({ frame, baseline_ms: wall[0]!, candidate_ms: wall[1]!, saved_ms: wall[0]! - wall[1]!, first: frame % 2 ? "baseline" : "candidate", history: [history[0]], profile: commands ? profiles : undefined });
+    rows.push({ frame, baseline_ms: wall[0]!, candidate_ms: wall[1]!, saved_ms: wall[0]! - wall[1]!, first: frame % 2 ? "baseline" : "candidate", history: [{ ...(history[0] as object), shown: shown[0] }], profile: commands ? profiles : undefined });
+    if (hashAt.has(frame)) { const h = await hashFields(); const differ = Object.keys(h[0]!).filter(k => h[0]![k] !== h[1]![k]); frameHashes.push({ frame, match: differ.length === 0, differ }); console.log(JSON.stringify({ phase: "hashes", frame, differ })); }
     if (frame % 20 === 0 || frame === steps) console.log(JSON.stringify({ ...rows.at(-1), profile: undefined, totals: commands ? profiles.map(total) : undefined }));
   }
   const fieldHashes: Record<string, string>[] = [];
@@ -170,13 +220,17 @@ try {
     baseline_ms: mean(measured.map(r => r.baseline_ms)), candidate_ms: mean(measured.map(r => r.candidate_ms)),
     baseline_median_ms: median(measured.map(r => r.baseline_ms)), candidate_median_ms: median(measured.map(r => r.candidate_ms)),
     paired_median_saved_ms: median(measured.map(r => r.saved_ms)),
-    residualDiffers,
+    residualDiffers, frameHashes, historyDiffs: historyDiffs.length, firstHistoryDiffs: historyDiffs.slice(0, 4),
     commands: commands ? [0, 1].map(i => { const t = measured.map(r => total(r.profile![i]!)); return Object.fromEntries(Object.keys(t[0]!).map(k => [k, mean(t.map(x => x[k as keyof typeof x]))])); }) : undefined,
   };
   writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), cpu: cpus()[0]?.model, node: process.version, scene: scene?.sceneId, poolBlocks, steps, from,
     scope: "alternating fenced simulation advances on one device; excludes construction, renderer and diagnostic reads", snapshots, summary, fieldHashes, rows, errors }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "complete", summary, fieldHashes }));
+  if (identity) {
   assert.ok(summary.fieldsMatch, "final fields differ");
+  assert.ok(frameHashes.every(f => f.match), `fields differ at frame ${frameHashes.find(f => !f.match)?.frame}`);
+  assert.equal(historyDiffs.length, 0, `work histories differ at ${historyDiffs.length} frames, first ${historyDiffs[0]?.frame}`);
+  }
 } catch (error) {
   writeFileSync(`${out}/${name}-failed.json`, JSON.stringify({ snapshots, rows, errors, error: String(error) }, null, 2) + "\n"); throw error;
 } finally {
