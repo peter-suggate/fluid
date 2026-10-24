@@ -12,8 +12,11 @@
  *   occupancy (liquid vertices, phi < 0, read by live page identity).
  *
  * For each value and frame: the A/A spread (max - min over the baseline's
- * repeats) and the A/B deviation (max |a - b| over baseline and candidate
- * repeats). It passes when every A/B deviation is within the tolerance:
+ * repeats) and the A/B deviation, |mean A - mean B|: one comparison a frame,
+ * as each arm's spread is (the largest of the cross-arm pair differences,
+ * reported as maxPairAB, is the largest of 4 samples against 2 at two
+ * repeats, so it exceeds the spreads by chance alone). It passes when every
+ * A/B deviation is within the tolerance:
  * the largest A/A or B/B spread of that value within +-5 frames, or the
  * repeat-noise band (relative to the baseline mean; volume drift, a ratio,
  * absolute): 0.2% to frame 60, 2% after (speed-of-light-plan-2026-10-20.md
@@ -149,9 +152,9 @@ try {
     const at = (i: number, f: number) => series[m][i]!.get(f)!;
     const spread = (arm: number[], f: number) => { const v = arm.map(i => at(i, f)); return Math.max(...v) - Math.min(...v); };
     const rows = frames.map(f => {
-      let ab = 0; for (const a of arms[0]!) for (const b of arms[1]!) ab = Math.max(ab, Math.abs(at(a, f) - at(b, f)));
-      const mean = arms[0]!.reduce((s, i) => s + at(i, f), 0) / arms[0]!.length;
-      return { frame: f, aa: spread(arms[0]!, f), bb: spread(arms[1]!, f), ab, noise: m === "volumeDrift" ? band(f) : band(f) * Math.abs(mean) };
+      let pair = 0; for (const a of arms[0]!) for (const b of arms[1]!) pair = Math.max(pair, Math.abs(at(a, f) - at(b, f)));
+      const [mean, meanB] = arms.map(arm => arm.reduce((s, i) => s + at(i, f), 0) / arm.length) as [number, number];
+      return { frame: f, aa: spread(arms[0]!, f), bb: spread(arms[1]!, f), ab: Math.abs(mean - meanB), pair, noise: m === "volumeDrift" ? band(f) : band(f) * Math.abs(mean) };
     });
     let worst = { frame: 0, ratio: 0, aa: 0, bb: 0, ab: 0, tolerance: 0 }, over = 0;
     for (const r of rows) {
@@ -161,7 +164,7 @@ try {
       if (ratio > worst.ratio) worst = { frame: r.frame, ratio, aa: r.aa, bb: r.bb, ab: r.ab, tolerance };
     }
     pass &&= over === 0;
-    report[m] = { frames: rows.length, over, worst, maxAA: Math.max(0, ...rows.map(r => r.aa)), maxAB: Math.max(0, ...rows.map(r => r.ab)) };
+    report[m] = { frames: rows.length, over, worst, maxAA: Math.max(0, ...rows.map(r => r.aa)), maxAB: Math.max(0, ...rows.map(r => r.ab)), maxPairAB: Math.max(0, ...rows.map(r => r.pair)) };
   }
   const values_ = Object.fromEntries(METRICS.map(m => [m, instances.map((x, i) => ({ arm: x.arm, values: Object.fromEntries(series[m][i]!) }))]));
   writeFileSync(`${out}/${name}.json`, JSON.stringify({ date: new Date().toISOString(), scene: sceneOption, length, depth, poolBlocks, steps, repeats, statsEvery, snapshots, pass, report, series: values_ }, null, 2) + "\n");
