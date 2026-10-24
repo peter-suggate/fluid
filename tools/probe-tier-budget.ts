@@ -72,7 +72,7 @@ const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "";
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|set|out|classes)=.+|--classify|--print-scene)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|set|out|classes)=.+|--classify|--print-scene)$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
 assert.ok(stepList.every(s => Number.isInteger(s) && s > 0) && Number.isInteger(every) && every > 0 && Number.isInteger(from) && from >= 1);
@@ -607,10 +607,40 @@ var<workgroup> sums:array<atomic<u32>,5>;
     return row;
   };
   const dust = { dustMass_cells: 0, orphanDustMass_cells: 0, steps: 0 };
+  // --phiStages=<step,...>: the tube's edge vertices (as vertexLine) as each
+  // surface stage leaves the phi field, captured mid-encoder.
+  const phiStageSteps = new Set(String(option("phiStages") ?? "").split(",").filter(Boolean).map(Number));
+  let phiTaken: { name: string; done: () => Promise<Float32Array> }[] | undefined;
+  if (phiStageSteps.size) {
+    const m = (solver as unknown as { mixedFrame: { fields: { phi: GPUTexture; phiScratch: GPUTexture }; surface: Record<string, (...a: unknown[]) => unknown>; narrowBandFlip: Record<string, (...a: unknown[]) => unknown> } }).mixedFrame;
+    const hook = (object: Record<string, (...a: unknown[]) => unknown>, key: string, name: string, texture: () => GPUTexture, before = false) => {
+      assert.ok(object[key], `no stage ${key}`); const original = object[key]!.bind(object);
+      const take = (encoder: GPUCommandEncoder) => { if (phiTaken) phiTaken.push({ name, done: uniformDetailField(texture())!.storage.capture(encoder, texture()) }); };
+      object[key] = (...a: unknown[]) => { if (before) take(a[0] as GPUCommandEncoder); const r = original(...a); if (!before) take(a[0] as GPUCommandEncoder); return r; };
+    };
+    const phi = () => m.fields.phi, scratch = () => m.fields.phiScratch;
+    hook(m.narrowBandFlip, "move", "start", phi, true);
+    hook(m.surface, "encode", "advect", scratch);
+    hook(m.narrowBandFlip, "reconstruct", "reconstruct", phi);
+    hook(m.narrowBandFlip, "clearAir", "clearAir", phi);
+    hook(m.narrowBandFlip, "retire", "retire", phi);
+    hook(m.narrowBandFlip, "redistance", "redistance", phi);
+  }
+  const printPhiStages = async (step: number) => {
+    const taken = phiTaken ?? []; phiTaken = undefined; const X = g.nx + 1, Y = g.ny + 1;
+    for (const c of taken) {
+      const field = await c.done();
+      const at = (x: number, y: number, z: number) => +(field[x + X * (y + Y * z)]! / h).toFixed(2);
+      console.log(JSON.stringify({ phiStage: c.name, step, vertexLine: Array.from({ length: 12 }, (_, i) => { const x = wall.high - 6 + i;
+        return [x, at(x, wall.holeY, wall.holeZ), at(x, wall.holeY + 1, wall.holeZ), at(x, wall.holeY, wall.holeZ + 1), at(x, wall.holeY + 1, wall.holeZ + 1)]; }) }));
+    }
+  };
   await record(0, 0);
   for (let step = 1; step <= steps; step++) {
     frameReached = step;
+    phiTaken = phiStageSteps.has(step) ? [] : undefined;
     const wall_ms = await advance(step);
+    await printPhiStages(step);
     { const info = solver.info as unknown as Record<string, number | undefined>; dust.dustMass_cells += info.uniformVolumeDustMass_cells ?? 0; dust.orphanDustMass_cells += info.uniformVolumeOrphanDustMass_cells ?? 0; dust.steps++; }
     walls.push({ frame: step, wall_ms, afterSample: (step - 1) % every === 0 });
     if (solver.info.simulationPipelineError) throw new Error(String(solver.info.simulationPipelineError));
