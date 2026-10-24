@@ -12,20 +12,18 @@
  *   occupancy (liquid vertices, phi < 0, read by live page identity).
  *
  * The verdict is on 10-frame window means (frames 1-10, 11-20, ...), as
- * 60 frames of 6 values each against a spread from two repeats would flag
- * something by chance. For each value and window: each instance's mean over
- * the window, the A/A and B/B spreads (max - min of those means within an
- * arm) and the A/B deviation |mean A - mean B|. It passes when every
- * window's A/B deviation is within the tolerance: the largest A/A or B/B
- * window spread of that value over the whole run, or the repeat-noise band
- * (relative to the baseline's window mean; volume drift, a ratio,
- * absolute): 0.2% to frame 60, 2% after (speed-of-light-plan-2026-10-20.md
- * section 6). A fatal or a GPU error fails the run.
+ * 60 frames of 6 values each against a spread from the repeats would flag
+ * something by chance: every window's |mean A - mean B| within max(noise
+ * band, 1.66 x the run's largest A/A or B/B window spread)
+ * (gate-repeat-spread-verdict.ts holds the rule and its calibration). A
+ * registered scene (seep, letters: its divergence grows through the run)
+ * needs 3 repeats at least; a region-tier fixture may run 2. A fatal or a
+ * GPU error fails the run.
  *
  * node --import tsx tools/gate-repeat-spread.ts NAME
  *   --baseline=/abs/snapshot --candidate=/abs/snapshot
  *   [--scene=rest|cold|warm|splash|hot|<scene id>] [--length=128] [--depth=32]
- *   [--pool-blocks=N] [--steps=70] [--repeats=2] [--stats-every=10] [--out=DIR] [--gate="RUNNER MODE"]
+ *   [--pool-blocks=N] [--steps=70] [--repeats=3] [--stats-every=10] [--out=DIR] [--gate="RUNNER MODE"]
  * --gate: construct every instance (mostly CPU: pipeline compiles) first,
  * then hold a GPU runner slot only over the frames: the gate command runs
  * `cat` once the slot is held, and the slot is released when its stdin
@@ -42,14 +40,16 @@ import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harne
 import type { SceneDescription } from "../lib/core/model";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { createRegionTierScene, REGION_TIER_SCENES, type RegionTierScene } from "./region-tier-scenes";
+import { METRICS, repeatSpreadVerdict as verdict, type Metric } from "./gate-repeat-spread-verdict";
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
 for (const a of process.argv.slice(3)) assert.match(a, /^--(?:baseline|candidate|steps|repeats|stats-every|scene|length|depth|pool-blocks|out|gate|rescore)=.+$/);
-const steps = Number(option("steps") ?? 70), repeats = Number(option("repeats") ?? 2), statsEvery = Number(option("stats-every") ?? 10);
+const steps = Number(option("steps") ?? 70), repeats = Number(option("repeats") ?? 3), statsEvery = Number(option("stats-every") ?? 10);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(repeats) && repeats >= 2 && Number.isInteger(statsEvery) && statsEvery > 0);
 const roots = [option("baseline"), option("candidate")].map(r => resolve(r ?? "")); assert.ok(option("rescore") || (option("baseline") && option("candidate")));
 const sceneOption = option("scene") ?? "splash", region = (REGION_TIER_SCENES as readonly string[]).includes(sceneOption);
+assert.ok(region || repeats >= 3 || option("rescore"), `--scene=${sceneOption}: a registered scene needs --repeats=3 at least (gate-repeat-spread-verdict.ts)`);
 const length = Number(option("length") ?? 128), depth = Number(option("depth") ?? 32);
 const poolBlocks = option("pool-blocks") === undefined ? undefined : Number(option("pool-blocks"));
 assert.ok(poolBlocks === undefined || (Number.isInteger(poolBlocks) && poolBlocks >= 3));
@@ -68,38 +68,8 @@ async function acquireGate(gate: string): Promise<ChildProcess> {
 type Lagged = { frame: number; bandTiles: number; bandBricks: number; work: Uint32Array };
 type Internals = { mixedFrame: { lagged: readonly Lagged[]; narrowBandFlip: { state: GPUBuffer } } };
 interface Instance { arm: 0 | 1; solver: WebGPUUniformReferenceSolver; readMixedTexture: (d: GPUDevice, t: GPUTexture, a?: unknown) => Promise<Float32Array>; readUniformLiveAddress: (d: GPUDevice, s: WebGPUUniformReferenceSolver) => Promise<unknown> }
-const METRICS = ["fineTiles", "bandTiles", "bandBricks", "particles", "volumeDrift", "occupancy"] as const;
-type Metric = typeof METRICS[number];
 /** series[metric][instance]: frame -> value. */
 const series = Object.fromEntries(METRICS.map(m => [m, [] as Map<number, number>[]])) as Record<Metric, Map<number, number>[]>;
-/** The verdict over series[metric][instance] (frame -> value), each instance's arm in armOf. */
-function verdict(armOf: readonly (0 | 1)[], series: Record<Metric, Map<number, number>[]>) {
-  const arms = [0, 1].map(arm => armOf.flatMap((x, i) => x === arm ? [i] : []));
-  const band = (frame: number) => frame <= 60 ? 0.002 : 0.02, WINDOW = 10;
-  const report: Record<string, unknown> = {}; let pass = true;
-  for (const m of METRICS) {
-    const frames = [...series[m][0]!.keys()].filter(f => armOf.every((_, i) => series[m][i]!.has(f))).sort((x, y) => x - y);
-    const windows = new Map<number, number[]>();
-    for (const f of frames) { const w = Math.floor((f - 1) / WINDOW); windows.set(w, [...windows.get(w) ?? [], f]); }
-    const mean = (v: number[]) => v.reduce((s, x) => s + x, 0) / v.length;
-    const rows = [...windows].map(([w, fs]) => {
-      const means = armOf.map((_, i) => mean(fs.map(f => series[m][i]!.get(f)!)));
-      const [a, b] = arms.map(arm => arm.map(i => means[i]!)) as [number[], number[]];
-      const last = fs.at(-1)!;
-      return { frames: `${w * WINDOW + 1}-${(w + 1) * WINDOW}`, aa: Math.max(...a) - Math.min(...a), bb: Math.max(...b) - Math.min(...b), ab: Math.abs(mean(a) - mean(b)), noise: m === "volumeDrift" ? band(last) : band(last) * Math.abs(mean(a)) };
-    });
-    const spread = Math.max(0, ...rows.map(r => Math.max(r.aa, r.bb)));
-    let worst = { frames: "", ratio: 0, ab: 0, tolerance: 0 }, over = 0;
-    for (const r of rows) {
-      const tolerance = Math.max(r.noise, spread), ratio = r.ab === 0 ? 0 : tolerance === 0 ? Infinity : r.ab / tolerance;
-      if (ratio > 1) over++;
-      if (ratio > worst.ratio) worst = { frames: r.frames, ratio, ab: r.ab, tolerance };
-    }
-    pass &&= over === 0;
-    report[m] = { windows: rows.length, over, worst, spread, maxAB: Math.max(0, ...rows.map(r => r.ab)) };
-  }
-  return { pass, report };
-}
 // --rescore=NAME.json: the verdict over a saved run's series, without a GPU.
 const rescore = option("rescore");
 if (rescore) {
