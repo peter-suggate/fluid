@@ -1,0 +1,1387 @@
+{
+ "name": "seep5-r2-check",
+ "sceneId": "reservoir-seep",
+ "arguments": [
+  "seep5-r2-check",
+  "--reservoir=2",
+  "--steps=300",
+  "--every=30"
+ ],
+ "date": "2026-10-24T10:45:03.110Z",
+ "host": {
+  "cpu": "Apple M1 Max",
+  "platform": "darwin",
+  "release": "25.6.0",
+  "node": "v22.22.1",
+  "nodePath": "/Users/petersuggate/.nvm/versions/node/v22.22.1/bin/node",
+  "commit": "b964dbc6"
+ },
+ "quality": "balanced",
+ "sets": {},
+ "dt": 0.016666666666666666,
+ "reservoir": 2,
+ "geometry": {
+  "nx": 752,
+  "ny": 256,
+  "nz": 64,
+  "cell_m": 0.005,
+  "boxCells": 12320768,
+  "pool": 370,
+  "wall": {
+   "low": 480,
+   "high": 496,
+   "holeY": 64,
+   "holeZ": 32
+  }
+ },
+ "zones": {
+  "floorBand_cells": 8,
+  "throatReach_cells": 8
+ },
+ "classes": "artifacts/tier-budget/allocation-classes.json",
+ "summary": {
+  "steps": 300,
+  "step_ms": {
+   "mean": 29.965464896060556,
+   "median": 19.01204200007487,
+   "p95": 84.31804200005718,
+   "longest": 232.72145900002215,
+   "thirds": [
+    31.801282290327965,
+    30.652499956991374,
+    27.442612440862334
+   ]
+  },
+  "peaks": {
+   "hTiles": 143360,
+   "coarseTiles": 125840,
+   "resident": 280,
+   "particles": 0,
+   "hTilesRightFloor": 576,
+   "hTilesRightJet": 13760,
+   "hTilesThroat": 8192,
+   "hot": 18,
+   "warm": 32,
+   "allocatedBytes": 6132411560
+  },
+  "final": {
+   "tiles": {
+    "h": 112,
+    "coarse": 125840,
+    "residentPages": 1740,
+    "probedH": 112,
+    "probedCoarse": 125840
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1932,
+    "warm": 25,
+    "hot": 11,
+    "free": 992
+   },
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 38,
+    "coarseTilesRight": 14797,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "volume": {
+    "cells": 5898260.5,
+    "drift": 8.477076290295782e-08,
+    "rawDrift": -0.7111087322223789,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.108502388000488
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "byClass": {
+    "pool-at-h": 5804295403.003939,
+    "pool-at-4h": 187194502.88342217,
+    "dense-box": 39728400.01566633,
+    "fixed": 101190958.09697342,
+    "unclassified": 2296
+   }
+  },
+  "discharge": {
+   "cdRightLateHalfMean": 0,
+   "cdThroatLateHalfMean": 0,
+   "qThroatLateHalfMean_m3_s": 0,
+   "rightVolume_L": 0,
+   "torricelliAtStart_m3_s": 8.840064603129323e-05
+  }
+ },
+ "rows": [
+  {
+   "step": 0,
+   "t": 0,
+   "wall_ms": 0,
+   "tiles": {
+    "h": 143360,
+    "coarse": 0,
+    "residentPages": 2944,
+    "probedH": 143360,
+    "probedCoarse": 0
+   },
+   "pool": {
+    "resident": 280,
+    "free": 88,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 0,
+    "warm": 0,
+    "hot": 0,
+    "free": 0
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 8845656.997314453,
+     "canonical/scratch": 8845656.997314453,
+     "byClass/field": 8845656.997314453,
+     "byClass/scratch": 8845656.997314453,
+     "sampled/field": 8845656.997314453,
+     "sampled/scratch": 8845656.997314453
+    },
+    "solverCells": 1703955.072265625,
+    "represented": 1703951.236328125,
+    "rawDrift": -0.7111088571433567,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 9040994,
+     "canonical/scratch": 9040994,
+     "byClass/field": 9040994,
+     "byClass/scratch": 9040994,
+     "sampled/field": 9040994,
+     "sampled/scratch": 9040994
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 0
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 120832,
+    "hTilesThroat": 8192,
+    "hTilesRightFloor": 576,
+    "hTilesRightJet": 13760,
+    "coarseTilesRight": 0,
+    "coarseTilesLeft": 0,
+    "rightWetFloor_cells": 5120,
+    "liquidX": [
+     1,
+     576
+    ],
+    "liquidTopY": 256,
+    "ownerBox": [
+     0,
+     576,
+     0,
+     256,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 1.1057071246643069,
+    "left": 0.9441308385314943,
+    "right": 0.12918557177734377,
+    "wall": 0.03239071435546875,
+    "rightFloorBand": 0.004859892578125001
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 1703955.072265625,
+    "drift": -0.7111088571433567,
+    "rawDrift": -0.7111088571433567,
+    "source": "dense-volume",
+    "maxSpeed_m_s": 0
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 30,
+   "t": 0.5,
+   "wall_ms": 17.97041700000409,
+   "tiles": {
+    "h": 144,
+    "coarse": 120688,
+    "residentPages": 1711,
+    "probedH": 144,
+    "probedCoarse": 120688
+   },
+   "pool": {
+    "resident": 236,
+    "free": 130,
+    "claimed": 2
+   },
+   "regions": {
+    "cold": 1862,
+    "warm": 8,
+    "hot": 18,
+    "free": 1072
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898263.5,
+    "represented": 1704474.5659179688,
+    "rawDrift": -0.7111083780726487,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 76,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 68,
+    "coarseTilesRight": 9645,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     608,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": -0.25837114355468754,
+    "qLeft_m3_s": 1.8882616770629885,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": -2922.7291332602467,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898263.5,
+    "drift": 5.933953403207047e-07,
+    "rawDrift": -0.7111083780726487,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.028794765472412
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 60,
+   "t": 1,
+   "wall_ms": 18.392457999987528,
+   "tiles": {
+    "h": 95,
+    "coarse": 120737,
+    "residentPages": 1707,
+    "probedH": 95,
+    "probedCoarse": 120737
+   },
+   "pool": {
+    "resident": 236,
+    "free": 132,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1857,
+    "warm": 17,
+    "hot": 14,
+    "free": 1072
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898260.5,
+    "represented": 1704837.8447265625,
+    "rawDrift": -0.7111094973944116,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 76,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 19,
+    "coarseTilesRight": 9694,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     608,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898260.5,
+    "drift": 8.477076290295782e-08,
+    "rawDrift": -0.7111094973944116,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.085075378417969
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 90,
+   "t": 1.5,
+   "wall_ms": 20.47274999995716,
+   "tiles": {
+    "h": 120,
+    "coarse": 125832,
+    "residentPages": 1745,
+    "probedH": 120,
+    "probedCoarse": 125832
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1929,
+    "warm": 22,
+    "hot": 17,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898260,
+    "represented": 1704758.3125,
+    "rawDrift": -0.7111092357143516,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 46,
+    "coarseTilesRight": 14789,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898260,
+    "drift": 0,
+    "rawDrift": -0.7111092357143516,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.100620269775391
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 120,
+   "t": 2,
+   "wall_ms": 74.62787500000559,
+   "tiles": {
+    "h": 126,
+    "coarse": 125826,
+    "residentPages": 1746,
+    "probedH": 126,
+    "probedCoarse": 125826
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1925,
+    "warm": 32,
+    "hot": 11,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898258,
+    "represented": 1704611.1049804688,
+    "rawDrift": -0.7111090604607333,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 52,
+    "coarseTilesRight": 14783,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898258,
+    "drift": -3.3908305161183127e-07,
+    "rawDrift": -0.7111090604607333,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.103573322296143
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 150,
+   "t": 2.5,
+   "wall_ms": 16.93920900009107,
+   "tiles": {
+    "h": 118,
+    "coarse": 125834,
+    "residentPages": 1745,
+    "probedH": 118,
+    "probedCoarse": 125834
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1929,
+    "warm": 28,
+    "hot": 11,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898258.5,
+    "represented": 1704651.4453125,
+    "rawDrift": -0.7111089896804577,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 44,
+    "coarseTilesRight": 14791,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898258.5,
+    "drift": -2.5431228870887345e-07,
+    "rawDrift": -0.7111089896804577,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.1032843589782715
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 180,
+   "t": 3,
+   "wall_ms": 16.88404199993238,
+   "tiles": {
+    "h": 117,
+    "coarse": 125835,
+    "residentPages": 1745,
+    "probedH": 117,
+    "probedCoarse": 125835
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1930,
+    "warm": 27,
+    "hot": 11,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898259,
+    "represented": 1704634.9956054688,
+    "rawDrift": -0.7111089044129911,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 43,
+    "coarseTilesRight": 14792,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898259,
+    "drift": -1.6954152580591563e-07,
+    "rawDrift": -0.7111089044129911,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.105008602142334
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 210,
+   "t": 3.5,
+   "wall_ms": 16.43083300010767,
+   "tiles": {
+    "h": 121,
+    "coarse": 125831,
+    "residentPages": 1745,
+    "probedH": 121,
+    "probedCoarse": 125831
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1930,
+    "warm": 27,
+    "hot": 11,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898260,
+    "represented": 1704612.3061523438,
+    "rawDrift": -0.7111087763462233,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 47,
+    "coarseTilesRight": 14788,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898260,
+    "drift": 0,
+    "rawDrift": -0.7111087763462233,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.104922294616699
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 240,
+   "t": 4,
+   "wall_ms": 40.305874999961816,
+   "tiles": {
+    "h": 121,
+    "coarse": 125831,
+    "residentPages": 1745,
+    "probedH": 121,
+    "probedCoarse": 125831
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1927,
+    "warm": 30,
+    "hot": 11,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898260.5,
+    "represented": 1704605.7436523438,
+    "rawDrift": -0.7111086736113437,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 47,
+    "coarseTilesRight": 14788,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898260.5,
+    "drift": 8.477076290295782e-08,
+    "rawDrift": -0.7111086736113437,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.108602046966553
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 270,
+   "t": 4.5,
+   "wall_ms": 22.961042000097223,
+   "tiles": {
+    "h": 116,
+    "coarse": 125836,
+    "residentPages": 1740,
+    "probedH": 116,
+    "probedCoarse": 125836
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1930,
+    "warm": 27,
+    "hot": 11,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898261,
+    "represented": 1704637.576171875,
+    "rawDrift": -0.7111087012611823,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 42,
+    "coarseTilesRight": 14793,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898261,
+    "drift": 1.6954152580591563e-07,
+    "rawDrift": -0.7111087012611823,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.108493328094482
+   },
+   "allocatedBytes": 6132411560
+  },
+  {
+   "step": 300,
+   "t": 5,
+   "wall_ms": 17.812208999996074,
+   "tiles": {
+    "h": 112,
+    "coarse": 125840,
+    "residentPages": 1740,
+    "probedH": 112,
+    "probedCoarse": 125840
+   },
+   "pool": {
+    "resident": 246,
+    "free": 122,
+    "claimed": 0
+   },
+   "regions": {
+    "cold": 1932,
+    "warm": 25,
+    "hot": 11,
+    "free": 992
+   },
+   "phi": {
+    "source": "canonical/field",
+    "measured": false,
+    "totals": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "solverCells": 5898260.5,
+    "represented": 1704656.2939453125,
+    "rawDrift": -0.7111087322223789,
+    "throatU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "rightMaxU": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "negativeOwners": {
+     "canonical/field": 0,
+     "canonical/scratch": 0,
+     "byClass/field": 0,
+     "byClass/scratch": 0,
+     "sampled/field": 0,
+     "sampled/scratch": 0
+    },
+    "lowCorner": 3.8399999141693115,
+    "boxOriginX": 736
+   },
+   "particles": 0,
+   "zones": {
+    "hTilesLeft": 0,
+    "hTilesThroat": 74,
+    "hTilesRightFloor": 0,
+    "hTilesRightJet": 38,
+    "coarseTilesRight": 14797,
+    "coarseTilesLeft": 107511,
+    "rightWetFloor_cells": 0,
+    "liquidX": [
+     4294967295,
+     0
+    ],
+    "liquidTopY": 0,
+    "ownerBox": [
+     0,
+     672,
+     0,
+     224,
+     0,
+     64
+    ]
+   },
+   "liquid_m3": {
+    "total": 0,
+    "left": 0,
+    "right": 0,
+    "wall": 0,
+    "rightFloorBand": 0
+   },
+   "discharge": {
+    "level_m": 0.96,
+    "head_m": 0.6375,
+    "uThroat_m_s": 0,
+    "qInstant_m3_s": 0,
+    "qRight_m3_s": 0,
+    "qLeft_m3_s": 0,
+    "qTorricelli_m3_s": 8.840064603129323e-05,
+    "cdRight": 0,
+    "cdInstant": 0
+   },
+   "volume": {
+    "cells": 5898260.5,
+    "drift": 8.477076290295782e-08,
+    "rawDrift": -0.7111087322223789,
+    "source": "narrow-band-phi",
+    "maxSpeed_m_s": 4.108502388000488
+   },
+   "allocatedBytes": 6132411560,
+   "byClass": {
+    "pool-at-h": 5804295403.003939,
+    "pool-at-4h": 187194502.88342217,
+    "dense-box": 39728400.01566633,
+    "fixed": 101190958.09697342,
+    "unclassified": 2296
+   }
+  }
+ ]
+}
