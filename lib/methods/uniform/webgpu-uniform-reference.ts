@@ -768,9 +768,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.heightA = device.createTexture({ label: "Uniform reference column base", size: [1, 1], format: "rg32float", usage });
     this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [1, 1], format: "rg32float", usage });
     // An open world's ground runs on past the box: its columns are the window's, baked on the GPU (UniformOpenWorldTerrain).
+    // A scene with no terrain has every column at zero: one zero texel reads the same at any clamped column.
     const openWorldTerrain = scene.container.walls === "none" && sceneHasTerrain(scene);
     this.terrainTexture = device.createTexture({ label: "Uniform reference terrain",
-      size: openWorldTerrain ? [UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS] : [nx, nz], format: "r32float", usage });
+      size: openWorldTerrain ? [UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS] : sceneHasTerrain(scene) ? [nx, nz] : [1, 1], format: "r32float", usage });
     const transportUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     // The mixed frame reads neither padded transport field: Geometric binds placeholders.
@@ -2430,7 +2431,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.referenceVolumeCells = initial;
     const terrainCells = Float32Array.from(terrain, (height) => height / cellHeight);
     // An open world's columns are the window's, baked with the first layout (initializeMixedFrame).
-    if (!this.openWorldTerrain) this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
+    if (this.terrainTexture.width * this.terrainTexture.height === 1 && nx * nz > 1) {
+      if (terrainCells.some(height => height !== 0)) throw new Error("Uniform reference: this scene's terrain was absent when the solver was built; rebuild it");
+    } else if (!this.openWorldTerrain) this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
     this.mixedTerrainCells = terrainCells;
     Object.assign(this.executionInfo, {
       initialVolumeCellSum: initial, volumeCellSum: initial,
