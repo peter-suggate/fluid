@@ -21,7 +21,8 @@ import {UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES,uniformOpenWorldTerrainSampleWGS
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {sceneShapeWgsl} from "../../core/scene-shape";
-import {SOLID_MASK_DIRECTORY_WORDS,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
+import {SOLID_MASK_DIRECTORY_WORDS,SOLID_MASK_FULL,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
+import {UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS,UNIFORM_BED_SLOPE_LAYERS} from "./uniform-bed-slope-bake";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformDetailPick} from "./uniform-detail-fields";
@@ -74,36 +75,41 @@ ${uniformLatticeAddressWGSL({constant:true,paged})}`;
 /** Units of a bed-slope byte: 127 is half a cell of rise in a cell of run. */
 export const UNIFORM_SOLID_BED_SLOPE_UNITS=254;
 /** The parts of the solid mask image (SolidOccupancyMask) this library
- * places, in u32 words, for a lattice of `cells`:
+ * places, in u32 words, whatever the lattice:
  *
- *   bedSlope  after the directory, two signed bytes per cell of the lattice
- *             and its one-cell halo, cell (x,y,z) at index
- *             i=(x+1)+sx*((y+1)+sy*(z+1)), a word to two cells: bits
- *             16*(i&1)..+15 of word bedSlopeBaseWord+(i>>1), its low byte the
- *             bed height's gradient along x and its high byte along z, in
- *             cells per cell times UNIFORM_SOLID_BED_SLOPE_UNITS, pointing
- *             uphill. Non-zero only for an open cell that sits on a solid
- *             voxel's top face (umBedSlope).
- *   cutMap    after the lane, a word per tile key
+ *   bedSlope  after the directory, the bed-slope lane's directory
+ *             (uniform-bed-slope-bake): a word a page column x + 64 z of
+ *             the lattice, the first word of its slot in the mask's buffer,
+ *             0 for none. A slot holds UNIFORM_BED_SLOPE_LAYERS words a
+ *             column (x&31) + 32 (z&31), a word a floor cell, lowest first:
+ *             (y + 1) << 16 | its entry, 0 for a level one. An entry's low
+ *             byte is the bed height's gradient along x and its high byte
+ *             along z, in cells per cell times UNIFORM_SOLID_BED_SLOPE_UNITS,
+ *             pointing uphill. Non-zero only for an open cell that sits on a
+ *             solid voxel's top face near a partly solid page (umBedSlope).
+ *   cutMap    after the lane's directory, a word per tile key
  *
- * The lane's words are the mask's `laneWords`; umBedSlope and umSolidCutMap
- * derive the same offsets. */
-export function uniformSolidScratchLayout(cells:readonly [number,number,number]):{bedSlopeBaseWord:number;bedSlopeWords:number;cutMapOffsetWords:number}{
- const bedSlopeWords=Math.ceil((cells[0]+2)*(cells[1]+2)*(cells[2]+2)/2);
+ * The lane's directory is the mask's `laneWords`; its slots lie past the
+ * image, where the owner places them. umBedSlope and umSolidCutMap derive
+ * the same offsets. */
+export function uniformSolidScratchLayout():{bedSlopeBaseWord:number;bedSlopeWords:number;cutMapOffsetWords:number}{
+ const bedSlopeWords=UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS;
  return {bedSlopeBaseWord:SOLID_MASK_DIRECTORY_WORDS,bedSlopeWords,cutMapOffsetWords:SOLID_MASK_DIRECTORY_WORDS+bedSlopeWords};
 }
 /** What the solver sizes its solid mask by (SolidOccupancyMask): the
- * lattice's page table and tile keys, the bed-slope lane, and a slot for
- * every page of the box and of the first layer of pages above an open top,
- * and in an open world one for each block the pool can store a page in. No
- * edit inside the tank can then run out of slots; one that makes more
+ * lattice's page table and tile keys, the bed-slope lane's directory, and
+ * at most a slot for every page of the box and of the first layer of pages
+ * above an open top, and in an open world one for each block the pool can
+ * store a page in, as many as a directory word can name. The solver seals
+ * the mask at fewer once it holds the scene (seal); an edit that makes more
  * pages partly solid than that is refused by the mask. The mask's world is
  * the box's: its cell (0,0,0) is the box's low cell, at the window's page
  * address.boxPage. */
 export function uniformSolidMaskPages(address:UniformLatticeAddress,halfSolid=false):SolidOccupancyMaskPages{
  const [x,y,z]=address.pages;
- return {table:address.seed.table,tileKeys:address.tileKeys,slots:x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0),
-  laneWords:uniformSolidScratchLayout(address.cells).bedSlopeWords,separateTerrain:true,halfSolid,origin:address.boxPage};
+ const laneWords=uniformSolidScratchLayout().bedSlopeWords,firstSlot=Math.ceil((SOLID_MASK_DIRECTORY_WORDS+laneWords+address.tileKeys)/1024);
+ return {table:address.seed.table,tileKeys:address.tileKeys,slots:Math.max(0,Math.min(SOLID_MASK_FULL-firstSlot,x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0))),
+  laneWords,separateTerrain:true,halfSolid,origin:address.boxPage};
 }
 /** A bed slope as its lane entry: 16 bits, x in the low byte, each rounded
  * half away from zero as the bake rounds (uniform-bed-slope-bake). */
@@ -111,9 +117,14 @@ export function uniformSolidBedSlopeEntry(slopeX:number,slopeZ:number):number{
  const byte=(slope:number)=>Math.sign(slope)*Math.min(127,Math.floor(Math.abs(slope)*UNIFORM_SOLID_BED_SLOPE_UNITS+0.5))&0xff;
  return byte(slopeX)|byte(slopeZ)<<8;
 }
-/** The slope a lane holds for a haloed cell index: umBedSlope's read. */
-export function uniformSolidBedSlopeAt(lane:Uint32Array,index:number):[x:number,z:number]{
- const entry=lane[index>>>1]!>>>(16*(index&1));
+/** The slope a lane holds for cell (x,y,z) of the lattice: umBedSlope's
+ * read, of `words` the mask buffer's from word 0 (or any copy that holds
+ * the lane's directory and slots at their words). */
+export function uniformSolidBedSlopeAt(words:ArrayLike<number>,x:number,y:number,z:number):[x:number,z:number]{
+ if(x<0||z<0||x>=2048||z>=2048)return [0,0];
+ const slot=words[uniformSolidScratchLayout().bedSlopeBaseWord+(x>>5)+64*(z>>5)]??0;
+ let entry=0;
+ if(slot)for(let k=0,at=slot+UNIFORM_BED_SLOPE_LAYERS*((x&31)+32*(z&31));k<UNIFORM_BED_SLOPE_LAYERS;k++){const w=words[at+k]!;if(w>>>16===y+1){entry=w;break;}}
  return [(entry<<24>>24)/UNIFORM_SOLID_BED_SLOPE_UNITS,(entry<<16>>24)/UNIFORM_SOLID_BED_SLOPE_UNITS];
 }
 
@@ -299,7 +310,7 @@ export class UniformMixedSolid {
    if(coarseLayout.tiles.some(word=>(word&0xc0000000)!==0)||coarseLayout.cellCount!==tiles)throw new Error("The coarse solid record requires the all-4h layout");
    if(coarseLayout.tiles.length%512)throw new Error(`The coarse solid record's layout has ${coarseLayout.tiles.length} tile keys: not whole blocks of 512`);
    if(pool&&512*pool.layout.blocks!==coarseLayout.tiles.length)throw new Error(`The coarse solid record's layout has ${coarseLayout.tiles.length} tile keys; the page pool has ${pool.layout.blocks} blocks of 512`);
-   if(resources.scratch.size<4*(uniformSolidScratchLayout(coarseLayout.address.cells).cutMapOffsetWords+coarseLayout.tiles.length))throw new Error(`The solid mask image of ${resources.scratch.size} bytes has no room for the tile cut map of ${coarseLayout.tiles.length} tile keys after its directory and bed-slope lane`);
+   if(resources.scratch.size<4*(uniformSolidScratchLayout().cutMapOffsetWords+coarseLayout.tiles.length))throw new Error(`The solid mask image of ${resources.scratch.size} bytes has no room for the tile cut map of ${coarseLayout.tiles.length} tile keys after its directory and bed-slope lane directory`);
    this.pool=pool;
    const writable=device.createBindGroupLayout({label:"Uniform mixed static solids of the record build",entries:entries.map(entry=>entry.binding===1?{...entry,buffer:{type:"storage" as const}}:entry)});
    this.recordSolids={layout:writable,group:device.createBindGroup({layout:writable,entries:resourcesOf()})};
@@ -1068,21 +1079,22 @@ fn umPatchFaceV(t:u32,id:vec3i,axis:u32)->f32{
 ${solidOccupancyMaskWGSL("umSolidScratch","umSolidPage","umSolidVoxel",true)}
 // The cell is not in a page the lattice walls off: one directory word.
 fn umSolidValid(p:vec3i)->bool{return umSolidPage(p)!=${SOLID_MASK_WALL}u;}
-// The bed-slope lane, after the directory and by cell of the box and its
-// one-cell halo (uniformSolidScratchLayout): the gradient of the bed's height along x and
+// The bed-slope lane, its directory after the mask's and its slots by page
+// column of the box (uniformSolidScratchLayout): the gradient of the bed's height along x and
 // z, in cells per cell and pointing uphill, for an open cell that sits on a
 // solid voxel's top face. Zero for every other cell: a voxel tread is then
 // the level floor it looks like.
-fn umSolidHaloCells()->u32{let s=umSolidDimensions()+vec3u(2u);return s.x*s.y*s.z;}
 fn umBedSlopeBase()->u32{return ${SOLID_MASK_DIRECTORY_WORDS}u;}
-// The tile cut map's first word: after the lane.
-fn umSolidCutMap()->u32{return umBedSlopeBase()+(umSolidHaloCells()+1u)/2u;}
+// The tile cut map's first word: after the lane's directory.
+fn umSolidCutMap()->u32{return ${uniformSolidScratchLayout().cutMapOffsetWords}u;}
 fn umBedSlope(p:vec3i)->vec2f{
  if(!umSolidEnabled()||umBoundaryRecord(p)!=0u){return vec2f(0);}
- let shape=vec3i(umSolidDimensions())+vec3i(2);let q=p+vec3i(1)-umSolidBoxCell();
- if(any(q<vec3i(0))||any(q>=shape)){return vec2f(0);}
- let index=u32(q.x+shape.x*(q.y+shape.y*q.z));
- let entry=umSolidScratch[umBedSlopeBase()+(index>>1u)]>>(16u*(index&1u));
+ let q=p-umSolidBoxCell();
+ if(any(q<vec3i(0))||any(vec3u(q)>=umSolidDimensions())){return vec2f(0);}
+ let slot=umSolidScratch[umBedSlopeBase()+u32(q.x>>5u)+64u*u32(q.z>>5u)];
+ if(slot==0u){return vec2f(0);}
+ let at=slot+${UNIFORM_BED_SLOPE_LAYERS}u*u32((q.x&31)+32*(q.z&31));var entry=0u;
+ for(var k=0u;k<${UNIFORM_BED_SLOPE_LAYERS}u;k++){let w=umSolidScratch[at+k];if(w>>16u==u32(q.y)+1u){entry=w;break;}}
  return vec2f(vec2i(bitcast<i32>(entry<<24u)>>24u,bitcast<i32>(entry<<16u)>>24u))/${UNIFORM_SOLID_BED_SLOPE_UNITS}.0;
 }
 fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
