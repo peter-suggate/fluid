@@ -12,6 +12,8 @@ import { sceneWithSolidStroke } from "../lib/core/solid-world";
 import { SVO_SCULPT_CUT_MAXIMUM_RECORDS } from "../lib/svo/features/scene-publication/svo-sculpt-cuts";
 import { sceneCellSizes_m } from "../lib/core/scene-lattice";
 import { SOLID_PATCH_ELLIPSOID_KIND } from "../lib/core/solid-patch/kind";
+import { ellipsoidBounds } from "../lib/core/solid-patch/ellipsoid-bounds";
+import { packSvoSculptCuts, sampleSvoSculptCuts } from "../lib/svo/features/scene-publication/svo-sculpt-cuts";
 import { penDiameterControl, penTool } from "../lib/core/voxel-editor/plugins/pen";
 import { adjustableControl, toolValues } from "../lib/core/voxel-editor/plugin";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
@@ -77,13 +79,37 @@ test("rounded Draw and Carve stamps have adjustable diameter and opposite modifi
     const result = gesture.update(start)!;
     const patch = result.patches[0]!;
     assert.equal(patch.kind, SOLID_PATCH_ELLIPSOID_KIND);
-    assert.deepEqual(patch.maximumExclusive.map((v, a) => v - patch.minimum[a]!), [5, 5, 5]);
+    const bounds = ellipsoidBounds(patch);
+    assert.deepEqual(bounds.maximumExclusive.map((v, a) => v - bounds.minimum[a]!), [5, 5, 5]);
     assert.equal(patch.operation, (mode === 1) !== invert ? "clear" : "fill");
     assert.equal(result.selection, undefined);
     assert.equal(result.highlight.kind, "paths");
   }
   const carve = penTool.begin({ scene: base, ray: start, values: values(1, 1) })!.update(start)!;
   assert.deepEqual(carve.patches[0]!.minimum, [10, 3, 8], "single-cell carving lands inside the surface");
+});
+
+test("rounded carving follows subcell motion and leaves a smooth diagonal groove", () => {
+  const base = scene(), start = ray(base, 10.125, 8.125), h = sceneCellSizes_m(base);
+  const gesture = penTool.begin({ scene: base, ray: start, values: values(5, 1) })!;
+  const first = gesture.update(start)!.patches[0]!;
+  const bounds = ellipsoidBounds(first);
+  assert.deepEqual(bounds.minimum, [8.125, 1.5, 6.125]);
+  const small = gesture.update(ray(base, 10.375, 8.375))!;
+  assert.equal(small.patches.length, 2, "movement within the same voxel changes the rounded cut");
+  const moved = gesture.update(ray(base, 14.125, 12.125))!;
+  const packed = packSvoSculptCuts(moved.patches, {
+    origin_m: [-base.container.width_m / 2, 0, -base.container.depth_m / 2], cellSize_m: h,
+  });
+  // Across a diagonal stroke, the bottom stays close to the intended radius
+  // instead of jumping a voxel whenever the snapped stamp centre changes.
+  for (let i = 0; i <= 64; i++) {
+    const t = i / 64, x = 10.625 + 4 * t, z = 8.625 + 4 * t;
+    const d = sampleSvoSculptCuts(packed, [-base.container.width_m / 2 + x * h[0],
+      1.5 * h[1], -base.container.depth_m / 2 + z * h[2]]).distance;
+    assert.ok(Math.abs(d) < .04 * Math.max(...h), `groove ripple at ${t}: ${d}`);
+  }
+  assert.deepEqual(gesture.update(ray(base, 14.125, 12.125))!.patches, moved.patches);
 });
 
 test("empty space never becomes a ground-plane stroke and a miss breaks interpolation", () => {
@@ -145,11 +171,11 @@ test("consecutive scenery strokes pick the newly carved cut face then reveal the
   const first = penTool.begin({ scene: base, ray: start, values: values(5, 1) })!.update(start)!;
   const cut = sceneWithSolidStroke(base, first.patches);
   const cap = scenerySurfaceAt(cut, start)!;
-  assert.ok(cap.position_m.y > .54 && cap.position_m.y < .56, `cut face at ${cap.position_m.y}`);
+  assert.ok(Math.abs(cap.position_m.y - .575) < 1e-4, `cut face follows the brush radius at ${cap.position_m.y}`);
   assert.ok(cap.normal.y > .99, "retained cut wall normal points into the cavity");
   assert.equal(cap.nodeId, "block");
   assert.ok(Math.abs(scenerySurfaceAt(base, start)!.position_m.y - .7) < 1e-5, "old document's uncut pick is unchanged");
-  const second = penTool.begin({ scene: cut, ray: start, values: values(3, 1) })!.update(start)!;
+  const second = penTool.begin({ scene: cut, ray: start, values: values(4, 1) })!.update(start)!;
   assert.ok(second.patches[0]!.minimum[1] < first.patches[0]!.minimum[1], "new stroke sinks into the exposed cut wall");
   const through = sceneWithSolidStroke(cut, second.patches);
   assert.equal(scenerySurfaceAt(through, start), undefined, "a fully opened hole does not pick the old face or back face");

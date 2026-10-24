@@ -1,7 +1,9 @@
 import { SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS } from "../../../core/webgpu-sparse-scene-proxies";
 import { buriedSolidClassifier } from "./svo-buried-solid";
 import { meshAssetHeader, sampledVolumeExtraWords, sampledVolumeHorizontalSlab, sampledVolumeSupport } from "../../../core/imported-assets/asset-library";
-import { sampledVolumeMaterialRecords } from "../materials/svo-sampled-materials";
+import { sampledVolumeMaterialRecords, sculptMaterialTable, writeSculptMaterialMirrors } from "../materials/svo-sampled-materials";
+import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
+import { SVO_SCULPT_MATERIAL_OFFSET } from "../scene-publication/svo-sculpt-cuts";
 import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
 import { TerrainEditPages, terrainEditSurfacePages, terrainFieldStamp } from "../../../core/live-terrain-overlay";
 import { rigidBodyHasVisibleFixedPose, type RigidBodyDescription, type SceneDescription } from "../../../core/model";
@@ -1209,16 +1211,20 @@ export function buildOctreeSvoPbrMaterialPublication(
       }
       const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
       if (materialId > 0xffff) throw new RangeError(`Environment material ID for ${primitive.key} does not fit uint16`);
-      return svoMaterialFromEnvironmentProxyMaterial(
+      const record = svoMaterialFromEnvironmentProxyMaterial(
         materialId,
         primitive.material,
         revision,
         svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel),
       );
+      return primitive.kind === "field-program" && primitive.program.sampledVolume
+        ? { ...record, flags: record.flags | SVO_MATERIAL_FLAGS.sampledVolume } : record;
     }),
   ];
   records.push(...sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), revision));
-  const packedRecords = packSvoMaterialTable(records);
+  const baseRecords = packSvoMaterialTable(records);
+  const packedRecords = environmentPrimitives.some(p => p.kind === "field-program" && p.program.sampledVolume)
+    ? sculptMaterialTable(baseRecords) : baseRecords;
   return internSvoPublication(octreeSvoPbrMaterialCache, cacheKey, {
     packedRecords,
     count: packedRecords.byteLength / SVO_MATERIAL_RECORD_STRIDE_BYTES,
@@ -1234,7 +1240,7 @@ export function buildOctreeSvoPbrMaterialPublication(
  * already sized for the arena, without the publication around it: a staged
  * document needs the words and not their content hash. Returns the record count.
  */
-function writeOctreeSvoPbrMaterialTable(
+export function writeOctreeSvoPbrMaterialTable(
   table: Uint32Array,
   environmentPrimitives: readonly EnvironmentProxyPrimitive[],
   surfaceModel: SvoTerrainSurfaceModel,
@@ -1257,13 +1263,16 @@ function writeOctreeSvoPbrMaterialTable(
     if (table[materialId * SVO_MATERIAL_RECORD_WORDS + 20] !== 0) throw new RangeError(`Duplicate SVO material ID ${materialId}`);
     writeSvoEnvironmentMaterialRecord(table, materialId, primitive.material, OCTREE_SVO_PBR_MATERIAL_REVISION,
       svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel));
+    if (primitive.kind === "field-program" && primitive.program.sampledVolume) {
+      table[materialId * SVO_MATERIAL_RECORD_WORDS + 23]! |= SVO_MATERIAL_FLAGS.sampledVolume;
+    }
     count = Math.max(count, materialId + 1);
   }
   for (const record of sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), OCTREE_SVO_PBR_MATERIAL_REVISION)) {
     if (record.materialId >= OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) throw new RangeError("Imported palette exceeds material capacity");
     writeSvoMaterialRecord(table, record); count = Math.max(count, record.materialId + 1);
   }
-  return count;
+  return writeSculptMaterialMirrors(table, count);
 }
 
 export interface OctreeSvoLightPublicationData {
@@ -3423,7 +3432,14 @@ export class OctreeSparseBrickWorld {
         const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
         writeSvoEnvironmentMaterialRecord(this.pbrMaterialStaging, materialId, primitive.material,
           OCTREE_SVO_PBR_MATERIAL_REVISION, svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel));
+        if (primitive.kind === "field-program" && primitive.program.sampledVolume) {
+          this.pbrMaterialStaging[materialId * SVO_MATERIAL_RECORD_WORDS + 23]! |= SVO_MATERIAL_FLAGS.sampledVolume;
+        }
         first = Math.min(first, materialId); end = Math.max(end, materialId + 1);
+      }
+      if (end > first) {
+        end = Math.max(end, writeSculptMaterialMirrors(this.pbrMaterialStaging,
+          Math.min(end, SVO_SCULPT_MATERIAL_OFFSET)));
       }
     }
     if (end > first) {

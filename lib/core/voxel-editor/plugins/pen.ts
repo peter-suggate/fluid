@@ -3,6 +3,7 @@ import { scenerySurfaceAt } from "../../editor-scenery";
 import type { Vec3 } from "../../model";
 import { sceneCellSizes_m } from "../../scene-lattice";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../../solid-world";
+import { subcellEllipsoidPatch } from "../../solid-patch/ellipsoid-bounds";
 import { SVO_SCULPT_CUT_MAXIMUM_RECORDS } from "../../../svo/features/scene-publication/svo-sculpt-cuts";
 import { materialControl, operationTone, shellControl, toolMaterialId } from "../controls";
 import { MAX_STROKE_PATCHES, MAX_STROKE_VOXELS, shapePatches, strokeHighlight, toolPassesThrough,
@@ -44,6 +45,14 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
   const origin = [-context.scene.container.width_m / 2, 0, -context.scene.container.depth_m / 2];
   const axes = ["x", "y", "z"] as const;
   const stamp = (surface: PenSurface): Patch => {
+    if (diameter > 1) {
+      // Eighth-cell centres remove whole-voxel stair steps without recording
+      // every tiny pointer fluctuation as a new CSG operand.
+      const centre = axes.map((axis, a) => Math.round((surface.point[axis] - origin[a]!) / cell[a]! * 8) / 8);
+      return { ...subcellEllipsoidPatch(centre.map(v => v - diameter / 2) as unknown as Cell,
+        centre.map(v => v + diameter / 2) as unknown as Cell, operation),
+        ...(carve ? { affectsScenery: true } : { materialId: toolMaterialId(context.values) }) };
+    }
     // Centred on the hit, a rounded stamp overlaps the surface instead of
     // balancing an outward sphere on a single point. The tiny normal offset
     // resolves half-cell ties outward for Draw and inward for Carve.
@@ -60,6 +69,8 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
   const patches: Patch[] = [], keys = new Set<string>();
   let voxels = 0;
   let last: { readonly ray: EditorRay; readonly surface: PenSurface } | undefined;
+  let published: readonly Patch[] = patches;
+  let shown: { key: string; update: ToolUpdate } | undefined;
   const caption = `${carve ? "CARVE" : "DRAW"} · ${diameter} voxel diameter`;
   return { surface: true, update(ray): ToolUpdate | undefined {
     const surface = surfaceAt(context, ray, false);
@@ -67,14 +78,16 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
       // A later re-entry begins a fresh segment, even when two endpoints would
       // otherwise span an editable surface behind the off-surface excursion.
       last = undefined;
-      return patches.length ? { patches: patches.slice(), highlight: { kind: "paths", paths: [] },
+      shown = undefined;
+      return patches.length ? { patches: published, highlight: { kind: "paths", paths: [] },
         tone: operationTone(operation), caption } : undefined;
     }
     const landed: PenSurface[] = [];
     if (last) {
-      const span = Math.ceil(Math.max(...axes.map((axis, a) =>
-        Math.abs(surface.point[axis] - last!.surface.point[axis]) / cell[a]!)));
-      if (span > 1024) throw new Error("Stroke span exceeds 1,024 voxels; use shorter strokes.");
+      const delta = axes.map((axis, a) => (surface.point[axis] - last!.surface.point[axis]) / cell[a]!);
+      const distance = diameter > 1 ? Math.hypot(...delta) : Math.max(...delta.map(Math.abs));
+      if (distance > 1024) throw new Error("Stroke span exceeds 1,024 voxels; use shorter strokes.");
+      const span = Math.ceil(distance / (diameter > 1 ? .5 : 1));
       const mix = (a: Vec3, b: Vec3, t: number): Vec3 => ({
         x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t,
       });
@@ -86,12 +99,14 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
       }
     }
     landed.push(surface);
+    const nib = stamp(surface), nibKey = `${nib.minimum.join(",")}:${nib.payload ?? ""}`;
     const additions: Patch[] = [], addedKeys = new Set<string>();
     let additionalVoxels = 0;
     for (const hit of landed) {
-      const patch = stamp(hit), key = patch.minimum.join(",");
+      const patch = hit === surface ? nib : stamp(hit), key = `${patch.minimum.join(",")}:${patch.payload ?? ""}`;
       if (keys.has(key) || addedKeys.has(key)) continue;
-      additions.push(patch); addedKeys.add(key); additionalVoxels += diameter ** 3;
+      additions.push(patch); addedKeys.add(key);
+      additionalVoxels += patch.minimum.reduce((volume, v, a) => volume * (patch.maximumExclusive[a]! - v), 1);
     }
     if (carve && existingCuts + patches.length + additions.length > SVO_SCULPT_CUT_MAXIMUM_RECORDS) {
       throw new Error(`Scenery sculpt capacity reached (${SVO_SCULPT_CUT_MAXIMUM_RECORDS} cuts); undo cuts before adding more.`);
@@ -100,11 +115,14 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
       throw new Error("Stroke is full; release and start another stroke.");
     }
     patches.push(...additions); for (const key of addedKeys) keys.add(key); voxels += additionalVoxels;
+    if (additions.length) published = patches.slice();
     last = { ray, surface };
+    if (!additions.length && shown?.key === nibKey) return shown.update;
     // Only the nib is outlined. Accepted geometry is already live, and no
     // accumulated region or standing selection is part of this interaction.
-    return { patches: patches.slice(), highlight: strokeHighlight(context.scene, [stamp(surface)]),
+    const update: ToolUpdate = { patches: published, highlight: strokeHighlight(context.scene, [nib]),
       tone: operationTone(operation), caption };
+    shown = { key: nibKey, update }; return update;
   } };
 }
 
