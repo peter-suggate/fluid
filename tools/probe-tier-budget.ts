@@ -411,7 +411,7 @@ const WALL_LOW:u32=${wall.low}u;const WALL_HIGH:u32=${wall.high}u;
 const THROAT_LOW:u32=${Math.max(0, wall.low - THROAT_REACH)}u;const THROAT_HIGH:u32=${wall.high + THROAT_REACH}u;
 const FLOOR_BAND:u32=${FLOOR_BAND}u;const THROAT:vec3i=vec3i(${throat.join(",")});
 const LINE_X0:i32=${wall.low - 16};
-const POINTS=array<vec3u,4>(${points.map(q => `vec3u(${q.join(",")})`).join(",")});
+const POINTS=array<vec3u,4>(${points.map(q => `vec3u(${q.map(v => Math.max(0, v)).join(",")})`).join(",")});
 // A fixed-point sum (4096 per cell) carried into a high word.
 fn addWide(at:u32,value:u32){if(value==0u){return;}let old=atomicAdd(&words[at],value);if(old+value<old){atomicAdd(&words[at+1u],1u);}}
 var<workgroup> sums:array<atomic<u32>,16>;
@@ -892,10 +892,28 @@ var<workgroup> sums:array<atomic<u32>,16>;
       stages.push({ stage: name, maxSpeed: Object.fromEntries(max.map((v, i) => [names[i], +v.toFixed(3)])), overBound: Object.fromEntries(over.map((v, i) => [names[i], v])) });
     }
     top.sort((p, q) => q.s - p.s); top.length = Math.min(top.length, 10);
+    // The projected h velocity's divergence (1/s, faces at each cell's low
+    // side) over cells whose six neighbours the start phi also calls liquid:
+    // by zone the largest, the count over 1/s, and the worst cells.
+    for (const { name, field } of fields) {
+      if (!name.startsWith("band/velocity")) continue;
+      const at = (x: number, y: number, z: number, a: number) => field[4 * (x + g.nx * (y + g.ny * z)) + a]!;
+      const worst: { c: number[]; d: number }[] = [], max = [0, 0, 0], over = [0, 0, 0], cells = [0, 0, 0];
+      for (let z = 1; z < g.nz - 1; z++) for (let y = 1; y < g.ny - 1; y++) for (let x = 1; x < g.nx - 1; x++) {
+        if (!L[x + g.nx * (y + g.ny * z)] || !L[x - 1 + g.nx * (y + g.ny * z)] || !L[x + 1 + g.nx * (y + g.ny * z)] || !L[x + g.nx * (y - 1 + g.ny * z)] || !L[x + g.nx * (y + 1 + g.ny * z)] || !L[x + g.nx * (y + g.ny * (z - 1))] || !L[x + g.nx * (y + g.ny * (z + 1))]) continue;
+        const d = (at(x + 1, y, z, 0) - at(x, y, z, 0) + at(x, y + 1, z, 1) - at(x, y, z, 1) + at(x, y, z + 1, 2) - at(x, y, z, 2)) / h;
+        if (!Number.isFinite(d)) continue;
+        const k = zone(x); cells[k]!++; if (Math.abs(d) > max[k]!) max[k] = Math.abs(d); if (Math.abs(d) > 1) over[k]!++;
+        if (Math.abs(d) > 1) { worst.push({ c: [x, y, z], d }); if (worst.length > 64) { worst.sort((p, q) => Math.abs(q.d) - Math.abs(p.d)); worst.length = 16; } }
+      }
+      worst.sort((p, q) => Math.abs(q.d) - Math.abs(p.d)); worst.length = Math.min(worst.length, 12);
+      console.log(JSON.stringify({ divergence: step, stage: name, cells: Object.fromEntries(cells.map((v, i) => [names[i], v])), max: Object.fromEntries(max.map((v, i) => [names[i], +v.toFixed(3)])), over1: Object.fromEntries(over.map((v, i) => [names[i], v])), worst: worst.map(w => [...w.c, +w.d.toFixed(2)]) }));
+    }
     console.log(JSON.stringify({ flowStage: step, bound_m_s: +bound_m_s.toFixed(3), stages,
       fastest: top.map(f => ({ face: [f.x, f.y, f.z, "xyz"[f.a]], liquidCell: L[f.x + g.nx * (f.y + g.ny * f.z)], values: Object.fromEntries(fields.map(({ name, field }) => [name, +field[4 * (f.x + g.nx * (f.y + g.ny * f.z)) + f.a]!.toFixed(3)])) })) }));
   };
   await record(0, 0);
+  const band: number[][] = [];
   for (let step = 1; step <= steps; step++) {
     frameReached = step;
     phiTaken = phiStageSteps.has(step) ? [] : undefined;
@@ -903,6 +921,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
     const wall_ms = await advance(step);
     await printPhiStages(step);
     await printFlowStages(step);
+    { const info = solver.info as unknown as Record<string, number | undefined>; band.push([step, info.uniformPressureBandCycles ?? -1, info.uniformPressureBandResidual ?? -1]); }
     { const info = solver.info as unknown as Record<string, number | undefined>; dust.dustMass_cells += info.uniformVolumeDustMass_cells ?? 0; dust.orphanDustMass_cells += info.uniformVolumeOrphanDustMass_cells ?? 0; dust.steps++; }
     walls.push({ frame: step, wall_ms, afterSample: (step - 1) % every === 0 });
     if (solver.info.simulationPipelineError) throw new Error(String(solver.info.simulationPipelineError));
@@ -911,6 +930,17 @@ var<workgroup> sums:array<atomic<u32>,16>;
       const capped = await readCapped(); if (capped) console.log(JSON.stringify({ traceCapped: capped, step }));
       if (census) console.log(JSON.stringify({ census: await census(), step }));
       if (retired) console.log(JSON.stringify({ retired: await retired(), step }));
+      // The last step's band solve header: initial residual, the residual after each cycle's pre-smoothing, the native rows' initial and final.
+      {
+        const arena = (frame as unknown as { band: { index: GPUBuffer } }).band;
+        const hb = device.createBuffer({ label: "Tier budget band header", size: 4 * 37, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = device.createCommandEncoder(); enc.copyBufferToBuffer(arena.index, 0, hb, 0, 4 * 37); device.queue.submit([enc.finish()]);
+        await hb.mapAsync(GPUMapMode.READ); const hu = new Uint32Array(hb.getMappedRange().slice(0)); hb.unmap(); hb.destroy(); const hf = new Float32Array(hu.buffer);
+        const valid = hu[25]!; const history = Array.from({ length: 16 }, (_, k) => (valid >> k) & 1 ? +hf[8 + k]!.toExponential(3) : null).filter(v => v !== null);
+        console.log(JSON.stringify({ bandHeader: { tiles: hu[0], cycles: hu[4], final: +hf[2]!.toExponential(3), initial: (valid >> 16) & 1 ? +hf[26]!.toExponential(3) : null, history, nativeInitial: +hf[27]!.toExponential(3), nativeFinal: +hf[28]!.toExponential(3) }, step }));
+      }
+      // The h band's V-cycles and final residual (1/s, its receipt) for each step since the last sample.
+      if (band.length) { const r = band.map(b => b[2]!).sort((x, y) => x - y); console.log(JSON.stringify({ band: { cycles: band.map(b => b[1]), residualMedian: +r[r.length >> 1]!.toExponential(3), residualMax: +r[r.length - 1]!.toExponential(3), residuals: band.map(b => +b[2]!.toExponential(3)) }, step })); band.length = 0; }
       const row = await record(step, wall_ms);
       if ((row.pool as { fatal?: string }).fatal) throw new Error(`pool fatal: ${(row.pool as { fatal?: string }).fatal}`);
     }
