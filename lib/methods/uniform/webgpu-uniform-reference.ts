@@ -797,8 +797,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.solidMask.seal(Math.min(this.solidMask.layout.slots, 2 * this.solidMask.slotsHeld + Math.max(64, address.blocks - 2)));
     // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
     this.solidVoxelsEmpty = this.solidMask.empty;
-    this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    // The page pool's tail (a mirror), then the detail storage's h slots (a mirror), each block its own until it publishes them.
+    this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength + 4 * address.blocks, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.pages, 0, address.seed.tail);
+    device.queue.writeBuffer(this.pages, address.seed.tail.byteLength, Uint32Array.from({ length: address.blocks }, (_, b) => b));
     // The solid mask's image whole (SolidOccupancyMask): the page directory,
     // the bed-slope lane's directory (zero until the frame's bake places and
     // writes the lane at its build: every bed level; see bedSlopeBake), the mixed

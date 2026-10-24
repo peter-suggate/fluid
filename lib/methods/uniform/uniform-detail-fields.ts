@@ -779,7 +779,7 @@ ${kernel("refresh","dst"," textureStore(dst,vec3i(g),textureLoad(src,ddFace(g),0
   // The ring kernels' lattice is their uniform's (the box in tiles, the
   // blocks); table: the topology whose tail holds the pages.
   const seam=(table:string)=>`${uniformWindowAddressWGSL(`${table}`,"5u*drCount()","(drCount()/512u)")}
-${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"}})}`;
+${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"},fine:`${table}[arrayLength(&${table})-1u-drDimensions.w+b]`})}`;
   for(const format of ["rgba32float","r32float"] as const){const of=following.filter(h=>h.format===format);for(let i=0;i<of.length;i+=BATCH)sets.push(of.slice(i,i+BATCH));}
   const head=`@group(0) @binding(${2*BATCH}) var<storage,read> drHeldWords:array<u32>;
 @group(0) @binding(${2*BATCH+1}) var<storage,read> drNextWords:array<u32>;
@@ -982,7 +982,8 @@ function classify(name:string,type:string):UniformDetailClass|undefined{
  * (uniform-lattice-address.ts). q is a logical coordinate. b = 1 while the
  * bound texture is the field's base block, told by its extent: a base block
  * is narrower than any h store. The bound texture's texel of q:
- *  cell          the h store's (umCellTexel(q)) >> 2b
+ *  cell          umCellTexel(q) in an h store (its block at its h slot), in
+ *                a base umCellTexelOf(q, false) >> 2 (its block at its own)
  *  vertex        umVertexTexel(q) in an h store, umWideVertexTexel(q >> 2)
  *                in a base: a block is 33 vertices against 9
  *  face          udFace: on a base, the tile's texel c with z = 4 c.z +
@@ -1072,8 +1073,10 @@ ${`fn udFace(q:vec3i,b:u32)->vec3i{let c=q>>vec3u(2u*b);let j=${j};return vec3i(
  // A cell or face field: its h store is a cell texture, its base a tile texture (a face base stacks four texels per tile
  // along z). A base block's texel is a map of the h store's.
  const cellAddress=(face:boolean):DetailAddress=>{
+  // An h store places a block at its h slot, a base at its own: the texel b tells, of the h lattice, mapped.
   const base=(texel:string,b:string)=>b===H?texel:face?`udFace(${texel},${b})`:`(${texel}>>vec3u(2u*${b}))`;
-  return {load:(v,b)=>base(`${pf}umCellTexel(${v})`,b),store:(v,b)=>base(`${pf}umCellStoreTexel(${v})`,b),present:v=>`${pf}umCellPresent(${v})`,
+  const of=(f:string,v:string,b:string)=>b===H?`${pf}${f}(${v})`:`${pf}${f}Of(${v},${b}==0u)`;
+  return {load:(v,b)=>base(of("umCellTexel",v,b),b),store:(v,b)=>base(of("umCellStoreTexel",v,b),b),present:v=>`${pf}umCellPresent(${v})`,
    size:`${pf}UM_CELL_TEXTURE${call}`};
  };
  // A vertex field: a block of its h store holds a page's vertices, 33 on an axis; a block of its base the page's tile
@@ -1084,13 +1087,15 @@ ${`fn udFace(q:vec3i,b:u32)->vec3i{let c=q>>vec3u(2u*b);let j=${j};return vec3i(
   present:v=>`${pf}umVertexPresent(${v})`,
   size:`${pf}UM_VERTEX_TEXTURE${call}`};
  if([...kinds.values()].some(k=>k.kind==="vertex"))out+=`fn udVertex(q:vec3i,b:u32)->vec3i{
- if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);let c=${pf}umBlockCoord(min(s.w,${pf}UM_BLOCKS${call}-1u));return (c<<vec3u(bits))+c+vec3i(s.xyz);}
+ if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);let c=udVertexCoord(min(s.w,${pf}UM_BLOCKS${call}-1u),b);return (c<<vec3u(bits))+c+vec3i(s.xyz);}
  if(b==0u){return ${pf}umVertexTexel(q);}return ${pf}umWideVertexTexel(q>>vec3u(2u));
 }
 fn udVertexStore(q:vec3i,b:u32)->vec3i{
- if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);if(!${pf}umBlockStored(s.w)){return vec3i(-1);}let c=${pf}umBlockCoord(s.w);return (c<<vec3u(bits))+c+vec3i(s.xyz);}
+ if(udMergedSlots){let bits=select(5u,3u,b!=0u);let s=udVertexSlot(select(q,q>>vec3u(2u),b!=0u),bits);if(!${pf}umBlockStored(s.w)){return vec3i(-1);}let c=udVertexCoord(s.w,b);return (c<<vec3u(bits))+c+vec3i(s.xyz);}
  if(b==0u){return ${pf}umVertexStoreTexel(q);}return ${pf}umWideVertexStoreTexel(q>>vec3u(2u));
 }
+// Where a vertex texture places block w: an h store (b 0) at its h slot's place, a base at its own.
+fn udVertexCoord(w:u32,b:u32)->vec3i{if(b==0u){return ${pf}umFineCoord(w);}return ${pf}umBlockCoord(w);}
 // umVertexSlot (bits 5) or umWideVertexSlot (bits 3) of v, by one walk.
 fn udVertexSlot(v:vec3i,bits:u32)->vec4u{
  let mask=(1<<bits)-1;
@@ -1201,7 +1206,7 @@ fn udVertexSlot(v:vec3i,bits:u32)->vec4u{
  let page=((q>>vec3u(sh))-vec3i(1))>>vec3u(bits);let cross=vec3i((((q+vec3i(i32(s)))>>vec3u(sh))>>vec3u(bits))!=page);
  if(cross.x+cross.y+cross.z==1){
   let w0=${pf}umPageWord(page);let w1=${pf}umPageWord(page+cross);let walk=!${pf}umBlockStored(w0)&&${pf}umBlockStored(w1);
-  let c0=${pf}umBlockCoord(min(w0,${pf}UM_BLOCKS${call}-1u));let c1=${pf}umBlockCoord(min(w1,${pf}UM_BLOCKS${call}-1u));
+  let c0=udVertexCoord(min(w0,${pf}UM_BLOCKS${call}-1u),b);let c1=udVertexCoord(min(w1,${pf}UM_BLOCKS${call}-1u),b);
   let base0=(c0<<vec3u(bits))+c0+vec3i(1);let base1=(c1<<vec3u(bits))+c1+vec3i(1);
   for(var k=0;k<8;k++){
    let at=((q+i32(s)*vec3i(k&1,(k>>1)&1,k>>2))>>vec3u(sh))-vec3i(1);let l=at&vec3i(mask);

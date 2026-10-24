@@ -22,6 +22,7 @@
  *   WEBGPU_BACKEND=metal
  */
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 
 
 const unsignedInteger = (name: string, fallback: number, maximum: number): number => {
@@ -255,7 +256,7 @@ const dawn = await import(pathToFileURL(modulePath).href) as {
   globals: Record<string, unknown>;
 };
 Object.assign(globalThis, dawn.globals);
-const gpu = dawn.create([`backend=${backend}`]);
+const gpu = createProcessRetainedDawnGPU(dawn, [`backend=${backend}`]);
 const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
 if (!adapter) throw new Error(`No WebGPU adapter for backend ${backend}`);
 if (!adapter.features.has("timestamp-query")) throw new Error("Atomic clock experiment requires timestamp-query calibration");

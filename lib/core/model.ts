@@ -366,7 +366,8 @@ export interface SceneDescription {
      * every particle buffer: bricks·512 h cells × particlesPerFineCell
      * (default 4), plus the spill reserve. Unset, particles keep the pool's
      * sizing. A source or the initial band that needs more is fatal, naming
-     * these; optional reseeding at capacity is deferred.
+     * these; optional reseeding at capacity is deferred. The persistent fine
+     * brick store (uniformFineBrickCapacity) reads bricks the same way.
      */
     tiers?: { bricks?: number; particlesPerFineCell?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */

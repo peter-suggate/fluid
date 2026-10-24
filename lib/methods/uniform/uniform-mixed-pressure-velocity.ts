@@ -12,6 +12,10 @@ import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSoli
 import { UNIFORM_BODY_FLUX_REACH } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_MIXED_ROOT_TILE_WORDS, uniformMixedRootMaskWords, uniformMixedRootTopologyBytes } from "./uniform-mixed-pressure-authority";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
+import { UNIFORM_BULK_FACE_TEXELS, UNIFORM_BULK_FACE_WIDTH, UNIFORM_BULK_HEADS, UNIFORM_BULK_LIST, UNIFORM_BULK_NONE_BITS, UNIFORM_BULK_OFFSET } from "./uniform-bulk-tier-reference";
+
+/** The 16h bulk tier (UniformBulkTier): its record and faces texture. */
+export interface UniformMixedPressureBulk {readonly record:GPUBuffer;readonly faces:GPUTexture;readonly regions:number}
 
 interface CommonFields {
  velocity:GPUTexture;
@@ -50,6 +54,8 @@ export interface UniformMixedPressureProjectionFields extends CommonFields {
 /** The stage's passes, described once. */
 const RHS_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure rhs"};
 const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure project"};
+const BULK_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure bulk faces"};
+const BULK_GROUPS=1024;
 /** Pressure/velocity coupling on exactly the same canonical patches as the
  * mixed matrix. With static solids, fine owners use the native CM11a face V,
  * p_min=0 solid rows and embedded contact release; the RHS pass publishes the
@@ -74,13 +80,15 @@ export class UniformMixedPressureVelocity {
  private readonly projectLayout:GPUBindGroupLayout;
  private rhsPipeline?:GPUComputePipeline;
  private projectPipeline?:GPUComputePipeline;
+ private bulkPipeline?:GPUComputePipeline;
+ private readonly bulkLayout?:GPUBindGroupLayout;
  /** Both launches' jobs: the lattice's residency pages. */
  private readonly pages:number;
  /** Coarse mode's COLD freeze (UniformColdFreeze): a frozen face's u* is
   * F + T + gravity (umColdForced), and the projection keeps F there and
   * stores its correction instead. */
  private readonly cold?:UniformColdFreeze;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer,freeze?:UniformColdFreeze,readonly skipBandRootRhs=false){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly coarse=false,private readonly rounding?:GPUBuffer,freeze?:UniformColdFreeze,readonly skipBandRootRhs=false,private readonly bulk?:UniformMixedPressureBulk){
   if(skipBandRootRhs&&!coarse)throw new Error("Skipping band root RHS requires the all-4h coupled pressure root");
   this.cold=coarse&&UNIFORM_COLD_FREEZE?freeze:undefined;
   if(coarse&&(!solid?.coarse||ownership.layout.tiles.some(word=>(word&0xc0000000)!==0)))throw new Error("Coarse mixed pressure coupling requires the all-4h solid record and all-4h ownership");
@@ -95,7 +103,15 @@ export class UniformMixedPressureVelocity {
   this.rhsLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}},storage(5),storage(6),storage(7),...topology,...regions]});
   this.projectLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),
    {binding:8,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba32float",viewDimension:"3d"}},storage(9),...(sourceParams?[{binding:10,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),...(solid&&!coarse?[texture(11)]:[]),...(rounding?[storage(12)]:[]),...(coarse?[storage(13)]:[]),
-   ...regions,...(this.cold?[{binding:15,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"2d" as const}}]:[])]});
+   ...regions,...(this.cold?[{binding:15,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"2d" as const}}]:[]),
+   ...(bulk?[{binding:16,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[])]});
+  if(bulk){
+   if(!coarse)throw new Error("The 16h bulk tier needs the all-4h coupled pressure root");
+   // The bulk faces: the projection's reads, its record, the faces it writes.
+   this.bulkLayout=uniformDetailBindLayout(device,{entries:[texture(0),storage(1),storage(2),uniform,storage(4),texture(7),...(rounding?[storage(12)]:[]),storage(13),...regions,
+    {binding:16,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"r32float" as const,viewDimension:"2d" as const}},
+    {binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]});
+  }
  }
  private rootTopology(f:CommonFields):GPUBufferBinding{
   const t=f.rootTopology,size=uniformMixedRootTopologyBytes(this.ownership.layout);
@@ -137,7 +153,16 @@ export class UniformMixedPressureVelocity {
    ...(this.sourceParams?[{binding:10,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
    ...(this.topology(f.topology)?[{binding:11,resource:f.topology!}]:[]),...(this.rounding?[{binding:12,resource:{buffer:this.rounding}}]:[]),
    ...(this.coarse?[{binding:13,resource:this.rootTopology(f)}]:[]),
-   ...(this.cold?[{binding:14,resource:this.cold.regions},{binding:15,resource:this.cold.corrections}]:[])]});
+   ...(this.cold?[{binding:14,resource:this.cold.regions},{binding:15,resource:this.cold.corrections}]:[]),
+   ...(this.bulk?[{binding:16,resource:this.bulk.faces}]:[])]});
+ }
+ /** The bulk faces' group: the projection's inputs (its output is not read). */
+ bindBulk(f:UniformMixedPressureProjectionFields):UniformDetailGroup{
+  if(!this.bulk||!this.bulkLayout)throw new Error("Mixed pressure has no bulk tier");
+  return uniformDetailGroup(this.device,{layout:this.bulkLayout,entries:[...this.common(f),
+   {binding:4,resource:this.scalar(f.pressure,uniformMixedPressureStorage(this.ownership.layout).count)},{binding:7,resource:f.volume},
+   ...(this.rounding?[{binding:12,resource:{buffer:this.rounding}}]:[]),{binding:13,resource:this.rootTopology(f)},
+   ...(this.cold?[{binding:14,resource:this.cold.regions}]:[]),{binding:16,resource:this.bulk.faces},{binding:17,resource:{buffer:this.bulk.record}}]});
  }
  async initialize():Promise<void>{
   const ownership=this.ownership,h=ownership.layout.lattice.cellSize_m;
@@ -339,7 +364,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
   rhs[halo]=select(0.0,b,liquid);minimum[halo]=select(0.0,-3.402823e38,umWallHeld(o));pressures[halo]=${this.coarse?"select(0.0,max(pressures[halo],minimum[halo]),liquid)":"0.0"};`)}
 }
 `;
-  const projectSource=common.replace("${COLD}",UniformColdFreeze.wgsl(this.cold,1,14,15))+/* wgsl */`
+  const projectHead=/* wgsl */`
 @group(1) @binding(4) var<storage,read_write> pressures:array<f32>;
 @group(1) @binding(7) var volume:texture_3d<f32>;
 @group(1) @binding(8) var output:texture_storage_3d<rgba32float,write>;
@@ -397,13 +422,40 @@ fn umProjectRow(o:UMOwner,face:UMFace,cold:bool)->vec2f{
  if(!liquid&&!umPressureLiquid(face.neighbor)){return vec2f(v,0.0);}
  return vec2f(v-scale*umReconstructedPressureGradient(o,face),1.0);
 }
-// A frozen face keeps its stored F (the projection writes it back as it
+`;
+  const B=this.bulk,W=UNIFORM_BULK_FACE_WIDTH,X=UNIFORM_BULK_FACE_TEXELS;
+  // A face of a 16h bulk member region (UniformBulkTier): inside it, the
+  // linear prolongation of the region's two face means on its axis (the
+  // 16h cell's divergence-free field); on its boundary, the bulk faces' value
+  // of the subface; elsewhere (y 0) the 4h projection's own.
+  const bulkRow=B?/* wgsl */`
+@group(1) @binding(16) var bulkFaces:texture_2d<f32>;
+fn umBulkTexel(i:u32)->f32{return textureLoad(bulkFaces,vec2u(i%${W}u,i/${W}u),0).x;}
+fn umBulkRegion(t:vec3i)->u32{
+ if(!umTilePresent(t)){return 0xffffffffu;}
+ let r=umPageOfTile(umTileAt(vec3u(t)));
+ return select(r,0xffffffffu,umBulkTexel(${X}u*r)==0.0);
+}
+fn umBulkRow(o:UMOwner,face:UMFace)->vec2f{
+ let a=face.axis;var L=vec3i(umOrigin(o)/4u);if(face.sign<0){L[a]-=1;}var H=L;H[a]+=1;
+ let rl=umBulkRegion(L);let rh=umBulkRegion(H);
+ if(rl==0xffffffffu&&rh==0xffffffffu){return vec2f(0.0);}
+ if(rl==rh){let k=f32(L[a]&3);let lo=umBulkTexel(${X}u*rl+1u+2u*a);let hi=umBulkTexel(${X}u*rl+2u+2u*a);return vec2f(lo+0.25*(k+1.0)*(hi-lo),1.0);}
+ let j=u32(L[(a+1u)%3u]&3)+4u*u32(L[(a+2u)%3u]&3);
+ var v=0.0;if(rl!=0xffffffffu){v=umBulkTexel(${X}u*rl+8u+16u*(2u*a+1u)+j);}else{v=umBulkTexel(${X}u*rh+8u+32u*a+j);}
+ return select(vec2f(v,1.0),vec2f(0.0),v>1e38);
+}
+`:"";
+  const projectSource=common.replace("${COLD}",UniformColdFreeze.wgsl(this.cold,1,14,15))+projectHead+bulkRow+/* wgsl */`// A frozen face keeps its stored F (the projection writes it back as it
 // is); a positive one stores its correction, projected - F - T, or no face
 // (3e38) where it is no liquid row or a wall, for UniformColdFreeze's
 // accumulate.
 fn umProject(o:UMOwner,face:UMFace)->f32{
  ${this.coarse?`let low=umColdLow(o,face);let cold=UM_COLD_FREEZE&&umFrozenFace(low,face.axis,o.width);
- let row=umProjectRow(o,face,cold);if(!cold){return row.x;}
+ ${B?`let bulk=umBulkRow(o,face);var row=bulk;if(row.y==0.0){row=umProjectRow(o,face,cold);}if(!cold){return row.x;}
+ // A frozen face the bulk faces set is live: it keeps the 16h value less
+ // the region term (velocity is F + T) and gives the accumulate no correction.
+ if(bulk.y!=0.0){if(face.sign>0){umColdCorrect(o.tile,face.axis,3.0e38);}return bulk.x-umColdFaceTerm(low,face.axis,o.width);}`:"let row=umProjectRow(o,face,cold);if(!cold){return row.x;}"}
  let raw=umFaceVelocity(face);
  if(face.sign>0){
   // Wet topology already records voxel-wall normals. A constant frozen
@@ -467,6 +519,79 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
    return uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll,...s}}}));
   };
   this.rhsPipeline=await compile(rhsSource,"buildRhs",this.rhsLayout);this.projectPipeline=await compile(projectSource,"project",this.projectLayout);
+  if(B){
+   // The bulk faces, a workgroup a member region: each of its 96 boundary
+   // subfaces' projected value (a seam: the 10h gradient to the native row,
+   // the member's pressure carried by pNative's head; a wall: the 4h
+   // projection's), and each face's mean: across to another member, the 16h
+   // gradient on the face's mean u* (identical from both sides), else the
+   // V-weighted mean of its subfaces (the reflux sum the 16h row balanced).
+   const R=B.regions;
+   const bulkSource=common.replace("${COLD}",UniformColdFreeze.wgsl(this.cold,1,14))+projectHead+/* wgsl */`
+@group(1) @binding(16) var bulkOut:texture_storage_2d<r32float,write>;
+@group(1) @binding(17) var<storage,read> bulkRecord:array<u32>;
+const UB_LIST:u32=${UNIFORM_BULK_LIST(R)}u;const UB_HEADS:u32=${UNIFORM_BULK_HEADS(R)}u;const UB_NONE:u32=${UNIFORM_BULK_NONE_BITS}u;const UB_OFFSET:u32=${UNIFORM_BULK_OFFSET(R)}u;
+const UB_WALL:u32=0u;const UB_SEAM:u32=1u;const UB_MEMBER:u32=2u;
+var<workgroup> ubN:u32;
+var<workgroup> ubFlux:array<f32,96>;
+var<workgroup> ubV:array<f32,96>;
+var<workgroup> ubValue:array<f32,96>;
+var<workgroup> ubKind:array<u32,96>;
+var<workgroup> ubMean:array<f32,6>;
+fn ubStore(i:u32,v:f32){textureStore(bulkOut,vec2u(i%${W}u,i/${W}u),vec4f(v,0.0,0.0,0.0));}
+fn ubOwner(t:vec3i)->UMOwner{let k=umTileAt(vec3u(t));return UMOwner(k,0u,4u,k);}
+// Member r's 16h pressure: its rows moved together, so its first row less that row's start offset.
+fn ubPressure(r:u32)->f32{return pressures[umPageTile(r,0u)]-bitcast<f32>(bulkRecord[UB_OFFSET+r]);}
+@compute @workgroup_size(64) fn bulkFaces(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u){
+ if(lane==0u){ubN=bulkRecord[UB_LIST];}
+ let n=workgroupUniformLoad(&ubN);let scale=params.hDt.w/params.policy.x;
+ for(var e=group.x;e<n;e+=groups.x){
+  let r=bulkRecord[UB_LIST+1u+e];let origin=vec3i(4u*umPageCoord(r));let p16=ubPressure(r);
+  for(var s=lane;s<96u;s+=64u){
+   let f=s/16u;let j=s%16u;let a=f/2u;let high=(f&1u)==1u;let sign=select(-1,1,high);
+   var m=origin;m[(a+1u)%3u]+=i32(j&3u);m[(a+2u)%3u]+=i32(j>>2u);m[a]+=select(0,3,high);
+   var q=m;q[a]+=sign;
+   let o=ubOwner(m);let face=umFace(o,a,sign,0u);
+   ${this.cold?"let cold=UM_COLD_FREEZE&&umFrozenFace(umColdLow(o,face),a,4u);":"let cold=false;"}
+   var u=umFaceVelocity(face);${this.cold?"if(cold){u+=umColdAdd(o,face,true);}":""}
+   var kind=UB_WALL;var value=0.0;
+   if(umTileKind(q)==UM_RESIDENT){
+    let across=umTileAt(vec3u(q));
+    if((bulkRecord[umPageOfTile(across)]&1u)!=0u){kind=UB_MEMBER;}
+    else{let head=bulkRecord[UB_HEADS+96u*r+s];
+     if(head!=UB_NONE){kind=UB_SEAM;let pm=p16+bitcast<f32>(head);let pn=pressures[across];value=u-scale*select(pm-pn,pn-pm,high)/(10.0*UM_H[a]);}}
+   }
+   if(kind==UB_WALL){value=umProjectRow(o,face,cold).x;}
+   let V=umProjectV(o,face);ubFlux[s]=V*u;ubV[s]=V;ubValue[s]=value;ubKind[s]=kind;
+  }
+  workgroupBarrier();
+  if(lane<6u){
+   let f=lane;let a=f/2u;let high=(f&1u)==1u;var star=0.0;var mean=0.0;
+   for(var j=0u;j<16u;j++){let s=16u*f+j;star+=ubFlux[s];mean+=ubV[s]*ubValue[s];}
+   mean/=16.0;
+   if(ubKind[16u*f]==UB_MEMBER){
+    var q=origin;q[a]+=select(-1,4,high);let pn=ubPressure(umPageOfTile(umTileAt(vec3u(q))));
+    mean=star/16.0-scale*select(p16-pn,pn-p16,high)/(16.0*UM_H[a]);
+   }
+   ubMean[f]=mean;ubStore(${X}u*r+1u+f,mean);
+  }
+  workgroupBarrier();
+  for(var s=lane;s<96u;s+=64u){let kind=ubKind[s];ubStore(${X}u*r+8u+s,select(select(3e38,ubValue[s],kind==UB_SEAM),ubMean[s/16u],kind==UB_MEMBER));}
+  workgroupBarrier();
+ }
+}
+`;
+   const module=uniformDetailModule(this.device,{label:"Uniform mixed pressure bulk faces",code:bulkSource});
+   const info=await module.getCompilationInfo();const errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+   const layout=this.device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,this.bulkLayout!,this.solid!.coarse!.bindLayout]});
+   this.bulkPipeline=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,ownership,{layout,compute:{module,entryPoint:"bulkFaces",constants:{umDispatchX:ownership.dispatchX,...s}}}));
+  }
+ }
+ /** The bulk faces, after the solve and before the projection. */
+ encodeBulk(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
+  const pipeline=this.bulkPipeline;if(!pipeline||!this.bulk)throw new Error("Mixed pressure bulk faces are not initialized");
+  const pass=encoder.beginComputePass(BULK_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.solid!.coarse!.bindGroup);
+  pass.setPipeline(this.solid!.select(pipeline));pass.dispatchWorkgroups(Math.min(BULK_GROUPS,this.bulk.regions));pass.end();
  }
  encode(encoder:GPUCommandEncoder,entry:"rhs"|"project",group:UniformDetailGroup):void{
   const pipeline=entry==="rhs"?this.rhsPipeline:this.projectPipeline;if(!pipeline)throw new Error("Mixed pressure velocity stage is not initialized");
