@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import {
   createNbflipAnalyticScene, martinMoyceFront, nbflipAnalyticWaveOmega, NBFLIP_ANALYTIC_CASES, NBFLIP_ANALYTIC_CELL_M,
-  NBFLIP_ANALYTIC_DAM_CELLS, NBFLIP_ANALYTIC_DT_S, NBFLIP_ANALYTIC_FALL_GRAVITY, NBFLIP_ANALYTIC_FRAMES, NBFLIP_ANALYTIC_GRAVITY_M_S2,
+  NBFLIP_ANALYTIC_DAM_CELLS, NBFLIP_ANALYTIC_DT_S, NBFLIP_ANALYTIC_FALL_BLOCK, NBFLIP_ANALYTIC_FALL_GRAVITY, NBFLIP_ANALYTIC_FRAMES, NBFLIP_ANALYTIC_GRAVITY_M_S2,
   NBFLIP_ANALYTIC_GRID, NBFLIP_ANALYTIC_POOL_CELLS, NBFLIP_ANALYTIC_WAVE_AMPLITUDE_M, type NbflipAnalyticCase,
 } from "../lib/core/nbflip-analytic-scenes";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
@@ -39,7 +39,7 @@ paceDawnEventPolling();
 interface Row {
   frame: number; t: number; particles: number; volume_m3: number; phiVolume_m3: number; centroid: number[]; meanVelocity: number[];
   maxSpeed: number; ke_J: number; pe_J: number; surface: { mean: number; min: number; max: number; left: number; right: number; middle: number };
-  front_cells: number; bboxCells: number[]; tiers: { cold: number; warm: number; hot: number; live: number; changed: number; reversed: number };
+  front_cells: number; bboxCells: number[]; extentCells: number[]; tiers: { cold: number; warm: number; hot: number; live: number; changed: number; reversed: number };
 }
 
 async function readTiers(device: GPUDevice, frame: UniformMixedFrame): Promise<Uint32Array> {
@@ -63,7 +63,7 @@ async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, f
   // it through the wrong layout and reads zeros.
   const fields = await readUniformFields(device, solver), velocity = await readMixedTexture(device, solver.velocityTexture);
   const { nx, ny, nz } = solver.info; assert.deepEqual([nx, ny, nz], [NX, NY, NZ]);
-  let mass = 0, ke = 0, pe = 0, maxSpeed = 0; const c = [0, 0, 0], v = [0, 0, 0], lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  let mass = 0, ke = 0, pe = 0, maxSpeed = 0; const m2 = [0, 0], c = [0, 0, 0], v = [0, 0, 0], lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
   let front = 0;
   for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
     const i = x + nx * (y + ny * z), d = fields.density[i]!;
@@ -79,6 +79,7 @@ async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, f
     if (d > .5) maxSpeed = Math.max(maxSpeed, Math.sqrt(s2));
     mass += d; ke += .5 * d * s2; pe -= d * (gravity.x * p[0]! + gravity.y * p[1]! + gravity.z * p[2]!);
     for (let a = 0; a < 3; a++) { c[a]! += d * p[a]!; v[a]! += d * u[a]!; }
+    m2[0]! += d * x * x; m2[1]! += d * y * y;
     if (d > .5) { lo[0] = Math.min(lo[0]!, x); hi[0] = Math.max(hi[0]!, x); lo[1] = Math.min(lo[1]!, y); hi[1] = Math.max(hi[1]!, y); }
     if (y < 2 && d > .5) front = Math.max(front, x + 1);
   }
@@ -104,6 +105,8 @@ async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, f
     surface: { mean: finite.reduce((s, x) => s + x, 0) / Math.max(1, finite.length), min: Math.min(...finite), max: Math.max(...finite),
       left: .5 * (at(1) + at(2)), right: .5 * (at(nx - 1) + at(nx - 2)), middle: .5 * (at(nx / 2) + at(nx / 2 + 1)) },
     front_cells: front, bboxCells: [hi[0]! - lo[0]! + 1, hi[1]! - lo[1]! + 1, lo[0]!, lo[1]!],
+    // A uniform box's extent from its second moment: sqrt(12 var), in cells.
+    extentCells: [0, 1].map(a => Math.sqrt(12 * Math.max(0, m2[a]! / mass - (c[a]! / mass / h - .5) ** 2))),
   };
 }
 
@@ -112,7 +115,9 @@ const check = (name: string, value: number, limit: number): Check => ({ name, va
 
 function score(name: NbflipAnalyticCase, rows: Row[]): Check[] {
   const first = rows[0]!, last = rows[rows.length - 1]!, checks: Check[] = [];
-  checks.push(check("phi volume drift (fraction)", Math.max(...rows.map(r => Math.abs(r.phiVolume_m3 / first.phiVolume_m3 - 1))), .01));
+  // The phi gauge can read 0 before the first advance resolves phi (mound).
+  const phi0 = rows.find(r => r.phiVolume_m3 > 0)?.phiVolume_m3 ?? NaN;
+  checks.push(check("phi volume drift (fraction)", Math.max(...rows.filter(r => r.phiVolume_m3 > 0).map(r => Math.abs(r.phiVolume_m3 / phi0 - 1))), .01));
   checks.push(check("fill-field volume drift (fraction)", Math.max(...rows.map(r => Math.abs(r.volume_m3 / first.volume_m3 - 1))), .01));
   const late = rows.filter(r => r.frame > rows.length / 2);
   const liveFrames = late.reduce((s, r) => s + r.tiers.live, 0) || 1;
@@ -127,16 +132,22 @@ function score(name: NbflipAnalyticCase, rows: Row[]): Check[] {
   if (name === "free-fall") {
     const g = NBFLIP_ANALYTIC_FALL_GRAVITY, c0 = first.centroid, v0 = first.meanVelocity, t0 = first.t;
     let centroidError = 0, velocityError = 0, shape = 0;
-    for (const r of rows) {
+    // Ballistic while the exact block's bottom is two cells above the floor.
+    const bottom0 = NBFLIP_ANALYTIC_FALL_BLOCK[0][1] * h;
+    const flight = rows.filter(r => bottom0 + .5 * g.y * (r.t - t0) ** 2 >= 2 * h);
+    for (const r of flight) {
       const dt = r.t - t0, ex = c0[0]! + v0[0]! * dt + .5 * g.x * dt * dt, ey = c0[1]! + v0[1]! * dt + .5 * g.y * dt * dt;
       centroidError = Math.max(centroidError, Math.hypot(r.centroid[0]! - ex, r.centroid[1]! - ey) / h);
-      velocityError = Math.max(velocityError, Math.hypot(r.meanVelocity[0]! - v0[0]! - g.x * dt, r.meanVelocity[1]! - v0[1]! - g.y * dt));
-      shape = Math.max(shape, Math.abs(r.bboxCells[0]! - first.bboxCells[0]!), Math.abs(r.bboxCells[1]! - first.bboxCells[1]!));
+      // The grid velocity after a step is the leapfrog half-step velocity
+      // v0 + g (t + dt/2), the one the positions integrate exactly.
+      const lead = r.frame > 0 ? dt + NBFLIP_ANALYTIC_DT_S / 2 : 0;
+      velocityError = Math.max(velocityError, Math.hypot(r.meanVelocity[0]! - v0[0]! - g.x * lead, r.meanVelocity[1]! - v0[1]! - g.y * lead));
+      shape = Math.max(shape, Math.abs(r.extentCells[0]! - first.extentCells[0]!), Math.abs(r.extentCells[1]! - first.extentCells[1]!));
     }
     checks.push(check("centroid error vs x0+v0t+gt^2/2 (h)", centroidError, .5));
-    checks.push(check("mean velocity error vs v0+gt (m/s)", velocityError, .02 * Math.hypot(g.x, g.y) * (last.t - t0) + .01));
-    checks.push(check("bounding box change (cells)", shape, 1));
-    const internal = Math.max(...rows.map(r => r.ke_J - .5 * rho * r.volume_m3 * (r.meanVelocity[0]! ** 2 + r.meanVelocity[1]! ** 2 + r.meanVelocity[2]! ** 2)));
+    checks.push(check("mean velocity error vs v0+g(t+dt/2) (m/s)", velocityError, .02 * Math.hypot(g.x, g.y) * (last.t - t0) + .01));
+    checks.push(check("moment extent change (cells)", shape, .5));
+    const internal = Math.max(...flight.map(r => r.ke_J - .5 * rho * r.volume_m3 * (r.meanVelocity[0]! ** 2 + r.meanVelocity[1]! ** 2 + r.meanVelocity[2]! ** 2)));
     checks.push(check("internal (non-translational) KE (J)", internal, 1e-3 * Math.max(...rows.map(r => r.ke_J)) + 1e-6));
   }
   if (name === "standing-wave") {
