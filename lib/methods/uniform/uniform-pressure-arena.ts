@@ -14,6 +14,7 @@ import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTR
 import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
+import {UNIFORM_BULK_HEADS} from "./uniform-bulk-tier-reference";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -143,6 +144,10 @@ export interface UniformPressureArenaFields {
  freeze?:UniformColdFreeze;
  coldFrame?:UniformColdFrame;
  warmTiers?:GPUBuffer;
+ /** The 16h bulk tier's record (UniformBulkTier: member flags; the seam
+  * heads pNative writes for its face pass). Absent with bulkTier off, which
+  * leaves every module's text as it was. */
+ bulk?:{record:GPUBuffer;regions:number};
 }
 
 /** The two-stage solve's h band (the band's contract: tiles, rows, faces,
@@ -242,7 +247,7 @@ export class UniformPressureArena {
    rows:[params,buffer(2),buffer(9),buffer(3,"read-only-storage"),buffer(4,"uniform"),texture(6),texture(7),buffer(8,"read-only-storage"),buffer(29,"read-only-storage"),...cold],
    init:[params,buffer(2),buffer(9),buffer(12,"read-only-storage"),buffer(13,"read-only-storage"),...cold],
    copy:[params,buffer(2),buffer(9),texture(11),write(23)],
-   native:[params,buffer(2),buffer(9),buffer(26),buffer(29,"read-only-storage"),...(solid?[buffer(30,"read-only-storage")]:[])],
+   native:[params,buffer(2),buffer(9),buffer(26),buffer(29,"read-only-storage"),...(solid?[buffer(30,"read-only-storage")]:[]),...(fields.bulk?[buffer(31)]:[])],
    ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:[params,buffer(2),buffer(4,"uniform"),texture(7),buffer(8,"read-only-storage"),buffer(26),buffer(29,"read-only-storage"),...cold]}:{}),
    solver:[params,buffer(2),buffer(9),...(fields.dynamics?[buffer(24)]:[])],
    project:[params,buffer(2),buffer(9),texture(7),texture(15),write(16),buffer(17),buffer(21),...cold],
@@ -276,6 +281,7 @@ export class UniformPressureArena {
   };
   if(f.dynamics)resources.solver![24]={buffer:f.dynamics};
   if(f.root.topology)resources.native![30]=f.root.topology;
+  if(f.bulk)resources.native![31]={buffer:f.bulk.record};
   const freeze=this.cold;if(freeze)for(const name of ["mark","rows","init","project",...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?["nrhs"]:[])])resources[name]![14]=freeze.regions;
   if(f.warmTiers)resources.mark![25]={buffer:f.warmTiers};
   for(const [name,map] of Object.entries(resources))this.groups.set(name,uniformDetailGroup(device,{label:`Uniform pressure arena ${name}`,layout:this.layouts.get(name)!,
@@ -305,7 +311,7 @@ export class UniformPressureArena {
  get bytes():{state:number;pool:number}{return {state:this.index.size,pool:this.pool.size};}
 
  async initialize():Promise<void>{
-  const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule,a=this.arena;
+  const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule,a=this.arena,B=this.fields.bulk;
   const cap=a.fineCapacity,blocks=this.simulation.capacity.address.blocks;
   const plane0=520*cap,plane2=520*blocks,lanesTail=tailLanes(blocks,this.device.limits.maxComputeInvocationsPerWorkgroup);
   const C=(name:string,level:0|1|2=0)=>a.base(name,level);
@@ -495,6 +501,72 @@ fn bNeighbour(q:vec3i)->BNeighbour{
 }
 `;
   const lanes=/* wgsl */`@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u`;
+  // The 16h bulk tier (bulkTier "16h"): a member region's 64 native rows hold
+  // one pressure, its 16h row their sum. The region mean of a lane value over
+  // a page's 8 regions (64 lanes each), through workgroup array 'red' (512+
+  // floats); every lane of the page calls it.
+  const bulkMean=(red:string)=>/* wgsl */`
+const N_BULK:u32=${1<<22}u;
+fn nRegionOf(lane:u32)->u32{return ((lane>>2u)&1u)|(((lane>>5u)&1u)<<1u)|(((lane>>8u)&1u)<<2u);}
+fn nRegionLane(lane:u32)->u32{return (lane&3u)|(((lane>>3u)&3u)<<2u)|(((lane>>6u)&3u)<<4u);}
+fn nBulkMean(v:f32,bulk:bool,lane:u32)->f32{
+ let local=nRegionLane(lane);let i=64u*nRegionOf(lane)+local;
+ workgroupBarrier();${red}[i]=select(0.0,v,bulk);workgroupBarrier();
+ for(var s=32u;s>0u;s>>=1u){if(local<s){${red}[i]+=${red}[i+s];}workgroupBarrier();}
+ return select(v,${red}[i-local]/64.0,bulk);
+}
+`;
+  // pNative's bulk links: a member's link inside its region carries nothing,
+  // member to member a 16h coupling (16 4h subfaces at 16h spacing: 16 per
+  // subface on the native 64), member to native a 10h one (25.6), the
+  // member's pressure carried to the subface's tangential position along the
+  // native side's measured slope (the head; bSeamHead's at ratio 4).
+  const bulkNative=B?bulkMean("nRed")+/* wgsl */`
+@group(1) @binding(31) var<storage,read_write> bulk:array<u32>;
+const N_HEADS:u32=${UNIFORM_BULK_HEADS(B.regions)}u;
+var<workgroup> nRed:array<f32,512>;
+var<workgroup> nBulkW:u32;
+fn nRegionKey(k:u32)->u32{return 8u*(k>>9u)+nRegionOf(k&511u);}
+fn nMember(k:u32)->bool{return (bulk[nRegionKey(k)]&1u)!=0u;}
+// A member face's seam head slot: region, face, the subface's tangential cell.
+fn nHeadIndex(k:u32,f:u32)->u32{let a=f/2u;let t=umTileCoord(k);return N_HEADS+96u*nRegionKey(k)+16u*f+(t[(a+1u)%3u]&3u)+4u*(t[(a+2u)%3u]&3u);}
+// The key across face f of key k, N_KEYS outside (a SOLID page).
+fn nNeighbour(k:u32,f:u32)->u32{
+ let axis=f/2u;let side=f&1u;let stride=nStride(axis);let lk=k&511u;let l=vec3u(lk&7u,(lk>>3u)&7u,lk>>6u);
+ if(l[axis]!=select(0u,7u,side==1u)){return select(k-stride,k+stride,side==1u);}
+ let step=select(select(9u,3u,axis==1u),1u,axis==0u);let across=umBlockNeighbourWord(k>>9u,select(13u-step,13u+step,side==1u));
+ if(across>=N_SENTINEL){return N_KEYS;}
+ return 512u*across+(select(k+7u*stride,k-7u*stride,side==1u)&511u);
+}
+fn nBulkOpen(n:u32)->bool{
+ if(n>=N_KEYS){return false;}
+ if(pIndex(SLOTS+n)!=0u||!nLiquid(n)||nMember(n)){return false;}
+ ${S?"if(rootTopology[n].x<0.99999){return false;}":""}
+ return true;
+}
+// Native row q's start slope along both tangential axes of normal a (central
+// over open native neighbours, one-sided at an edge), times q's offset from
+// its region's centre: the member pressure at q's tangential position.
+fn nBulkHead(q:u32,a:u32)->f32{
+ let own=rootArena[R_PRESSURE+q];let t=umTileCoord(q);var head=0.0;
+ for(var b=0u;b<3u;b++){
+  if(b==a){continue;}
+  var rise=0.0;var count=0.0;
+  for(var side=0u;side<2u;side++){let g=2u*b+side;let n=nNeighbour(q,g);if(nBulkOpen(n)){rise+=f32(bSign(g))*(rootArena[R_PRESSURE+n]-own);count+=1.0;}}
+  if(count>0.0){head+=rise/count*(f32(t[b]&3u)-1.5);}
+ }
+ return head;
+}
+// (coupling per V/h4^2, start offset) of native link k -> n across face f.
+fn nBulkLink(k:u32,n:u32,f:u32,member:bool)->vec2f{
+ let other=nMember(n);
+ if(member&&other){if(nRegionKey(k)==nRegionKey(n)){return vec2f(0.0);}return vec2f(16.0,0.0);}
+ if(!member&&!other){return vec2f(64.0,0.0);}
+ let head=nBulkHead(select(k,n,member),f/2u);
+ if(member){bulk[nHeadIndex(k,f)]=bitcast<u32>(head);return vec2f(25.6,-head);}
+ return vec2f(25.6,head);
+}
+`:"";
   // The overlapping box of a brick of level L: the records of its 27
   // neighbours, the pool offset of a box cell, and its 12^3 iterate.
   const box=(L:number)=>/* wgsl */`
@@ -926,7 +998,7 @@ var<workgroup> nWorst:atomic<u32>;
 var<workgroup> nN:u32;
 var<workgroup> nPageFlags:u32;
 fn nLiquid(k:u32)->bool{return bWet(rootPhi[k],4.0);}
-// umTheta of liquid row k and air row n across face (axis, side).
+${bulkNative}// umTheta of liquid row k and air row n across face (axis, side).
 fn nTheta(k:u32,n:u32,axis:u32,side:u32)->f32{
  ${S?`let low=select(n,k,side==1u);if(arrayLength(&rootTopology)>N_THETA+low){let t=rootTopology[N_THETA+low][axis];if(t>0.0){return t;}}`:""}
  return bTheta(rootPhi[k],rootPhi[n]);
@@ -942,16 +1014,16 @@ fn nSeamFirst(t:u32,g:u32)->u32{
  let l=vec3u(lane&7u,(lane>>3u)&7u,lane>>6u);
  for(var e=group.x;e<count;e+=groups.x){
   let block=ubaLevelSlot(2u,e);let k=512u*block+lane;let at2=UBA_STRIDE*block+lane;
-  if(lane==0u){atomicStore(&nFlags,0u);}
+  if(lane==0u){atomicStore(&nFlags,0u);${B?"var any=0u;for(var r=0u;r<8u;r++){any|=bulk[8u*block+r];}nBulkW=any&1u;":""}}
   workgroupBarrier();
   var m=0u;var start=0.0;var rhs=0.0;var diagonal=0.0;var walls=0.0;var lifted=0.0;
-  if(pIndex(SLOTS+k)!=0u){atomicOr(&nFlags,1u);}
+${B?"  let bulkPage=workgroupUniformLoad(&nBulkW)!=0u;let member=bulkPage&&nMember(k);var bulkDelta=0.0;var rInit=0.0;\n":""}  if(pIndex(SLOTS+k)!=0u){atomicOr(&nFlags,1u);}
   else if(nLiquid(k)){
    start=rootArena[R_PRESSURE+k];rhs=64.0*rootArena[R_RHS+k];
    for(var f=0u;f<6u;f++){
     let axis=f/2u;let side=f&1u;let stride=nStride(axis);let h4=4.0*params.hDt[axis];
     var kind=N_NONE;var c=0.0;var link=0u;var level2=0.0;
-    var n=select(k-stride,k+stride,side==1u);var across=block;
+${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){bulk[nHeadIndex(k,f)]=0x7f61b1e6u;}\n":""}    var n=select(k-stride,k+stride,side==1u);var across=block;
     if(l[axis]==select(0u,7u,side==1u)){
      let step=select(select(9u,3u,axis==1u),1u,axis==0u);
      across=umBlockNeighbourWord(block,select(13u-step,13u+step,side==1u));
@@ -982,25 +1054,29 @@ fn nSeamFirst(t:u32,g:u32)->u32{
         }
        }
        diagonal+=c;
-      }else if(nLiquid(n)){kind=N_NATIVE;c=64.0*volume/(h4*h4);diagonal+=c;level2=c;rhs+=c*(rootArena[R_PRESSURE+n]-start);link=UBA_STRIDE*(n>>9u)+(n&511u);}
+      }else if(nLiquid(n)){${B?
+       "kind=N_NATIVE;level2=64.0*volume/(h4*h4);let b=nBulkLink(k,n,f,member);c=b.x*volume/(h4*h4);bulkDelta+=level2-c;diagonal+=c;rhs+=c*(rootArena[R_PRESSURE+n]-start+b.y);link=UBA_STRIDE*(n>>9u)+(n&511u);":
+       "kind=N_NATIVE;c=64.0*volume/(h4*h4);diagonal+=c;level2=c;rhs+=c*(rootArena[R_PRESSURE+n]-start);link=UBA_STRIDE*(n>>9u)+(n&511u);"}}
       else{kind=N_GHOST;c=64.0*volume/(h4*h4*nTheta(k,n,axis,side));diagonal+=c;rhs-=c*start;}
      }
     }
     m|=kind<<(3u*f);
     pSet(PN_K+f*PLANE2,at2,c);pool[PN_L+f*PLANE2+at2]=link;pSet(PB_K+f*PLANE2,at2,level2);
    }
-   if(diagonal>0.0){m|=N_ACTIVE;atomicOr(&nFlags,3u);}
+   if(diagonal${B?"+bulkDelta":""}>0.0){m|=N_ACTIVE;atomicOr(&nFlags,3u);}
    if(rootArena[R_MINIMUM+k]>-1e38){m|=N_CLOSED;}
-  }
+${B?"   if(member){m|=N_BULK;}\n":""}  }
   pool[PN_M+at2]=m;pSet(PN_X,at2,0.0);pSet(PN_B,at2,start);pSet(PN_R,at2,rhs);pSet(PN_D,at2,diagonal);
   if((m&N_ACTIVE)!=0u){
    // Level 2's correction operator: the walls follow their row.
-   pSet(PB_D,at2,diagonal-walls);
+   pSet(PB_D,at2,diagonal${B?"+bulkDelta":""}-walls);
    var r=rhs+lifted;if((m&N_CLOSED)!=0u&&start<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
-   atomicMax(&nWorst,bResidualMagnitude(r*nScale()));
+   ${B?"rInit=r;if((m&N_BULK)==0u){atomicMax(&nWorst,bResidualMagnitude(r*nScale()));}":"atomicMax(&nWorst,bResidualMagnitude(r*nScale()));"}
   }
   workgroupBarrier();
-  if(lane==0u){pool[PN_M+UBA_STRIDE*block+512u]=atomicLoad(&nFlags);}
+${B?`  // A member region's residual is its 16h row's: the mean of its lanes'.
+  if(bulkPage){let mean=nBulkMean(rInit,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&nWorst,bResidualMagnitude(mean*nScale()));}if(lane==0u){atomicOr(&nFlags,4u);}workgroupBarrier();}
+`:""}  if(lane==0u){pool[PN_M+UBA_STRIDE*block+512u]=atomicLoad(&nFlags);}
  }
  workgroupBarrier();
  // The start meets the root's bound only under its floor: a tenth of itself it never is.
@@ -1175,7 +1251,7 @@ fn nPart16(k:u32,f:u32,j:u32,word:u32)->vec2f{
    // A native row's composite residual: each cycle's after the band's
    // pre-smoothing (level 2's RHS; its largest into the cycle's history
    // word), and the final measure (pLast).
-   residual:header()+poolWGSL+/* wgsl */`
+   residual:header()+poolWGSL+(B?bulkMean("rRed")+"var<workgroup> rRed:array<f32,512>;\n":"")+/* wgsl */`
 override pCycle:u32=0u;
 override pLast:bool=false;
 var<workgroup> worst:atomic<u32>;
@@ -1204,9 +1280,9 @@ fn nSeamSum(first:u32,f:u32)->f32{
      else if(kind==N_WALL){r+=pF(PN_K+f*PLANE2,at2)*max(x+bitcast<f32>(link),-base);}
     }
     if((m&N_CLOSED)!=0u&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
-    atomicMax(&worst,bResidualMagnitude(r*nScale()));
+    ${B?"if((m&N_BULK)==0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}":"atomicMax(&worst,bResidualMagnitude(r*nScale()));"}
    }
-   if(!pLast){pSet(PB_R,at2,r);}
+${B?"   if((workgroupUniformLoad(&rFlags)&4u)!=0u){r=nBulkMean(r,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}}\n":""}   if(!pLast){pSet(PB_R,at2,r);}
   }
   workgroupBarrier();
  }
@@ -1741,7 +1817,7 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
  }
 }`,
    // Level 2 up: the 8h correction prolonged into the page's box, then its sweeps.
-   upB:header()+poolWGSL+coarse(2,schedule.coarsestSweeps)+tail+/* wgsl */`
+   upB:header()+poolWGSL+coarse(2,schedule.coarsestSweeps)+tail+(B?bulkMean("tS")+"var<workgroup> uBulk:u32;\n":"")+/* wgsl */`
 var<workgroup> tS:array<f32,1024>;
 ${prolong("tS[tBox(q)]","tS[512u+tBox(q)]")}
 fn tBox(q:vec3i)->u32{let u=vec3u(q+2);return u.x+8u*(u.y+8u*u.z);}
@@ -1750,7 +1826,7 @@ fn tBox(q:vec3i)->u32{let u=vec3u(q+2);return u.x+8u*(u.y+8u*u.z);}
  let n=workgroupUniformLoad(&cN);
  for(var e=group.x;e<n;e+=groups.x){
   let slot=ubaLevelSlot(2u,e);
-  if(lane==0u){cN=u32(tPageLive(slot));}
+  if(lane==0u){cN=u32(tPageLive(slot));${B?"uBulk=nPage(slot)&4u;":""}}
   if(workgroupUniformLoad(&cN)==0u){continue;}
   cRecords(slot,lane);
   {let g=vec3i(vec3u(lane&7u,(lane>>3u)&7u,lane>>6u))-2;let m=tAt(slot,3u,g);var x=0.0;var d=0.0;if(m!=UB_NONE_ID){x=pF(PT_Y,m);d=pF(PT_D,m);}tS[lane]=x;tS[512u+lane]=d;}
@@ -1763,7 +1839,7 @@ fn tBox(q:vec3i)->u32{let u=vec3u(q+2);return u.x+8u*(u.y+8u*u.z);}
   // at or above zero. A native-only stop would invalidate the hierarchy.
   let at2=UBA_STRIDE*slot+lane;let m=pool[PN_M+at2];
   let y=cX[cBox(cCore(lane))];ubaStore(CY,slot,lane,y);
-  if((m&N_ACTIVE)!=0u){var x=pF(PN_X,at2)+y;if((m&N_CLOSED)!=0u){x=max(x,-pF(PN_B,at2));}pSet(PN_X,at2,x);}
+${B?"  // A member region takes its lanes' mean correction: one pressure.\n  var yb=y;if(workgroupUniformLoad(&uBulk)!=0u){yb=nBulkMean(y,(m&N_BULK)!=0u,lane);}\n":""}  if((m&N_ACTIVE)!=0u){var x=pF(PN_X,at2)+${B?"yb":"y"};if((m&N_CLOSED)!=0u){x=max(x,-pF(PN_B,at2));}pSet(PN_X,at2,x);}
   workgroupBarrier();
  }
 }`,
