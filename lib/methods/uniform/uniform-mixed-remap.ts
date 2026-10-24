@@ -217,7 +217,7 @@ export class UniformMixedRemap {
   // markListed strides the dilated list (its count on the GPU) on a fixed grid.
   if(!copy){
    pass.setBindGroup(2,(listed??this.groups[0]).group);pass.setBindGroup(3,this.statusGroup.group);pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"markListed":"markChanged")!));
-   if(listed)pass.dispatchWorkgroups(UNIFORM_LIVE_KEY_GROUPS);
+   if(listed)pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,Math.ceil(this.tiles/64)));
    else{const groups=uniformKeyGroups(this.tiles,64,x,this.listGrid);pass.dispatchWorkgroups(groups[0],groups[1]);}
   }
   if(solid)pass.setBindGroup(3,solid.tileGroup);
