@@ -77,10 +77,11 @@ const hostPlaneWGSL=(name:string,buffer:string,offset:string)=>/* wgsl */`fn ${n
  * of one side, before it takes the next side up (uniformBoundCubesWGSL: a
  * cover may overhang the box by under its side, looser and never tighter). */
 const BOX_CUBES=64;
-/** Workgroups of the h-tile classify launch at most: a fixed grid that
- * strides over the live h list (umCounts.x), so no host tile count sizes it.
- * The ownership's counted-launch grid (COUNTED_GRID): enough to fill the
- * GPU, and an h tile's classify costs about the same as any other's. */
+/** Workgroups of the h-tile classify launch at most: a grid that strides
+ * over the live h list (umCounts.x), so no host tile count sizes it. The
+ * ownership's counted-launch grid (COUNTED_GRID): enough to fill the GPU,
+ * and an h tile's classify costs about the same as any other's. The launch
+ * takes the ownership's buffered h work below it (any grid is correct). */
 const CENSUS_TILE_GRID=4096;
 /** A tile's deep COLD replay record (classify, bounds words): crossing cells
  * (2), importance words (2), gap, directed travel, flags (bit 0 crossing,
@@ -1817,7 +1818,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
  private readonly policyU=new Uint32Array(this.policyBytes);
  /** encode's launches in order, with their fixed grids (y 0: one argument).
   * when: 0 always, 1 a seeded census, 2 one under an activity budget, 3 solids or bodies. */
- private launches?:readonly {readonly pipeline:GPUComputePipeline;readonly when:0|1|2|3;readonly x:number;readonly y:number;readonly visit?:boolean}[];
+ private launches?:readonly {readonly pipeline:GPUComputePipeline;readonly when:0|1|2|3;readonly x:number;readonly y:number;readonly visit?:boolean;readonly work?:"fine"|"coarse";readonly per?:number}[];
  /** encodeResidency's launches: pageMark's fixed grid over the pages, then pageCompact's one workgroup. */
  private marks?:{readonly mark:GPUComputePipeline;readonly x:number;readonly compact:GPUComputePipeline};
  private static readonly RESIDENCY_PASS:GPUComputePassDescriptor={label:"Uniform dynamic ownership residency"};
@@ -1844,9 +1845,12 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
    // and classifyCoarse over the 4h list (a lane a tile); the per-key
    // entries over the resident tile keys, the interface bits a workgroup a
    // resident z-slab, the interface summary a lane and the bound cubes a
-   // workgroup a resident block; pageSeed a lane a visited page.
+   // workgroup a resident block; pageSeed a lane a visited page. classify
+   // and classifyCoarse take the ownership's buffered h and 4h work below
+   // their grids (a workgroup an h tile, or 64 4h tiles).
    const pipeline=this.pipelines.get(entry)!;
-   if(entry==="classify")return {pipeline,when,x:Math.min(CENSUS_TILE_GRID,tiles),y:0};
+   if(entry==="classify")return {pipeline,when,x:Math.min(CENSUS_TILE_GRID,tiles),y:0,work:"fine" as const,per:1};
+   if(entry==="classifyCoarse")return {pipeline,when,x:Math.min(UNIFORM_LIVE_KEY_GROUPS,tiles/64),y:0,work:"coarse" as const,per:64};
    if(entry==="boundCubes")return {pipeline,when,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,blocks),y:0};
    if(entry==="interfaceBits")return {pipeline,when,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,tiles/64),y:0};
    if(entry==="interfaceBlocks")return {pipeline,when,x:Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(blocks/64)),y:0};
@@ -1943,6 +1947,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   for(let i=0;i<launches.length;i++){
    const l=launches[i]!;
    if(l.when===1?!seeded:l.when===2?!(seeded&&activityBudgetOn):l.when===3&&!solids)continue;
+   if(l.work){this.ownership.dispatchBuffered(pass,l.pipeline,l.work,l.x,l.per);continue;}
    pass.setPipeline(uniformDetailPick(l.pipeline));
    if(l.visit)uniformLiveDispatch(pass,l.x,this.seedVisit.sweep());else if(l.y===0)pass.dispatchWorkgroups(l.x);else pass.dispatchWorkgroups(l.x,l.y);
   }
