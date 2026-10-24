@@ -863,7 +863,8 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
  return umColdForced(a,axis,1u,raw,wet);
 }
 override bLocalSolidWork:bool=true;
-${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
+${S?/* wgsl */`// open: umCellOpen(p), evaluated at the row's one site.
+fn bHeadCapacity(p:vec3i,open:f32)->f32{
  if(bLocalSolidWork&&umSolidEnabled()){
   let tile=umTileKey(p>>vec3u(2u));
   if(umKeyStored(tile)){
@@ -871,7 +872,7 @@ ${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
    return umSolidRecord[umSolidCount()+4u*umSolidTiles()+16u*tile+(cell>>2u)][cell&3u];
   }
  }
- return umCellOpen(p);
+ return open;
 }`:""}
 ${zero}
 // UniformPressureBand's row assembly, a workgroup a band tile: the kinds,
@@ -918,10 +919,12 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
   let p=vec3i(ubaOrigin(id)+lb);
   let own=bPhiH(p);let liquid=bWet(own,1.0);${S?`
   let solidClear=bLocalSolidWork&&umSolidRegionClearAtBuild(p);
-  var shut=false;var inside=false;if(!solidClear){shut=!umCellIsOpen(p);inside=umCellInsideSolid(p);}`:""}
+  var shut=false;var inside=false;if(!solidClear){shut=!umCellIsOpen(p);inside=umCellInsideSolid(p);}
+  // One umCellOpen site for p and one umCellIsOpen site for q (Metal inlines each).
+  let open=umCellOpen(p);`:""}
   var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,inside)|select(0u,0x20000000u,shut)":""};var diagonal=0.0;var divergence=0.0;
   ${S?`let bodies=liquid&&!solidClear&&umBodyCount()>0u&&umBodyPoseNearTile(umTileKey(p>>vec3u(2u)),${UNIFORM_BODY_FLUX_REACH}u);var capacity=0.0;
-  if(bodies||!bLocalSolidWork){capacity=bHeadCapacity(p);}`:""}
+  if(bodies||!bLocalSolidWork){capacity=bHeadCapacity(p,open);}`:""}
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];var q=p;q[axis]+=sign;
    let forced=bForcedField(p,axis,sign);var kind=K_GHOST;var coefficient=0.0;var fraction=1.0;
@@ -937,10 +940,12 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
    // in pNative, disconnecting its gravity RHS from the live surface.
    else{
     let n=bNeighbour(q);
-    var theta=1.0;
+    var theta=1.0;${S?`
+    // q's closure, where a row reads it: a face between liquid and air.
+    var acrossShut=false;if(!solidClear&&liquid!=n.wet){acrossShut=!umCellIsOpen(q);}`:""}
     if(liquid!=n.wet){
-     if(${S?"!solidClear&&(shut||!umCellIsOpen(q))":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
-     ${S?"else if(inside&&umCellInsideSolid(q)&&umCellOpen(p)<0.1&&umCellOpen(q)<0.1){theta=1.0;}":""}
+     if(${S?"!solidClear&&(shut||acrossShut)":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
+     ${S?"else if(inside&&umCellInsideSolid(q)&&open<0.1&&umCellOpen(q)<0.1){theta=1.0;}":""}
      else{theta=bFaceTheta(bFacePhi(p,axis,sign),own,liquid,n.phi,n.wet);}
     }
     if(pBandCell(q)){kind=K_BAND;coefficient=1.0/(h*h*theta);}
@@ -949,7 +954,7 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
     else if(bNative(q)){kind=K_SEAM;coefficient=1.0/(2.5*h*h*select(theta,1.0,liquid));}
     else if(n.neumann){kind=K_NEUMANN;}
     else{coefficient=1.0/(h*h*theta);}
-    ${S?"if(!solidClear&&kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q));}":""}
+    ${S?"if(!solidClear&&kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&acrossShut);}":""}
    }
    ${S?`if(volume<=1e-6||sealed){kind=K_CLOSED;coefficient=0.0;fraction=0.0;}
    else if(kind==K_NEUMANN){fraction=volume;}
@@ -959,7 +964,7 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
    ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN&&(!bLocalSolidWork||capacity!=fraction)){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
   }
-  let control=authority.z*${S?"select(1.0,umCellOpen(p),umSolidEnabled())":"1.0"};
+  let control=authority.z*${S?"select(1.0,open,umSolidEnabled())":"1.0"};
   kinds|=select(0u,P_ACTIVE,liquid&&diagonal>0.0)|select(0u,P_WARM,warm);
   pSet(P_RHS,at,select(0.0,-params.policy.x*(divergence-control)/params.hDt.w,liquid));pool[P_KINDS+at]=kinds;pSet(P_X,at,own);
  }

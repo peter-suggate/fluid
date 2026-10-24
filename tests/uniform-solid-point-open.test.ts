@@ -21,6 +21,7 @@ test('adaptive surface interpolation reads liquid heat on every reflected wall',
 @group(0) @binding(1) var<storage,read_write> output:array<u32>;
 struct Params {flags:vec4u};var<private> params:Params;
 fn umCellIsOpen(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(8));}
+fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{return umCellIsOpen(p);}
 fn umTileAt(p:vec3u)->u32{return p.x+1u+4u*(p.y+1u)+16u*(p.z+1u);}
 fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
 fn umTileKey(p:vec3i)->u32{return u32(p.x+1+4*(p.y+1)+16*(p.z+1));}
@@ -62,6 +63,7 @@ test('solid point contact is reflection invariant on faces, edges and corners wi
 @group(0) @binding(0) var<storage,read> points:array<vec4f>;
 @group(0) @binding(1) var<storage,read_write> result:array<vec4u>;
 fn umCellIsOpen(p:vec3i)->bool{return all(p>=vec3i(0))&&all(p<vec3i(8));}
+fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{return umCellIsOpen(p);}
 fn umSolidEnabled()->bool{return true;}
 fn umTileKey(p:vec3i)->u32{return u32((p.x+1)+4*(p.y+1)+16*(p.z+1));}
 fn umKeyStored(t:u32)->bool{return t<64u;}
