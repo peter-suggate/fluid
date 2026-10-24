@@ -58,12 +58,20 @@ async function readParticles(device: GPUDevice, particles: UniformNarrowBandFlip
   } finally { if (read.mapState === "mapped") read.unmap(); read.destroy(); }
 }
 
-async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, frameIndex: number, gravity: { x: number; y: number; z: number }, piers: readonly (readonly [number, number])[], solids: readonly (readonly [number, number, number])[]) {
+async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, frameIndex: number, gravity: { x: number; y: number; z: number }, piers: readonly (readonly [number, number])[], solids: readonly (readonly [number, number, number])[], extended?: GPUTexture) {
   // The detail storage's own logical read: a live address passed here remaps
   // it through the wrong layout and reads zeros.
-  const fields = await readUniformFields(device, solver), velocity = await readMixedTexture(device, solver.velocityTexture);
+  // Liquid outside the pressure rows (a partly filled owner whose centre is
+  // air) has no projected velocity: the projection zeroes every face between
+  // two air owners, and a cell average over one read half or none of the
+  // liquid's speed (free fall's 4h end rows: up to 16% of the mass, the mean
+  // 7% slow at frame 15 while every face was exact). The velocity the solver
+  // carries that liquid with, and the next step transports, is the
+  // extension of the projected field (extended; the lattice where the
+  // advance extended nothing).
+  const fields = await readUniformFields(device, solver), velocity = await readMixedTexture(device, extended ?? solver.velocityTexture);
   const { nx, ny, nz } = solver.info; assert.deepEqual([nx, ny, nz], [NX, NY, NZ]);
-  let mass = 0, ke = 0, pe = 0, maxSpeed = 0; const m2 = [0, 0], c = [0, 0, 0], v = [0, 0, 0], lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+  let mass = 0, ke = 0, pe = 0, maxSpeed = 0; const c = [0, 0, 0], v = [0, 0, 0], lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
   let front = 0;
   for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
     const i = x + nx * (y + ny * z), d = fields.density[i]!;
@@ -79,7 +87,6 @@ async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, f
     if (d > .5) maxSpeed = Math.max(maxSpeed, Math.sqrt(s2));
     mass += d; ke += .5 * d * s2; pe -= d * (gravity.x * p[0]! + gravity.y * p[1]! + gravity.z * p[2]!);
     for (let a = 0; a < 3; a++) { c[a]! += d * p[a]!; v[a]! += d * u[a]!; }
-    m2[0]! += d * x * x; m2[1]! += d * y * y;
     if (d > .5) { lo[0] = Math.min(lo[0]!, x); hi[0] = Math.max(hi[0]!, x); lo[1] = Math.min(lo[1]!, y); hi[1] = Math.max(hi[1]!, y); }
     if (y < 2 && d > .5) front = Math.max(front, x + 1);
   }
@@ -106,8 +113,31 @@ async function sample(device: GPUDevice, solver: WebGPUUniformReferenceSolver, f
       left: .5 * (at(1) + at(2)), right: .5 * (at(nx - 1) + at(nx - 2)), middle: .5 * (at(nx / 2) + at(nx / 2 + 1)) },
     front_cells: front, bboxCells: [hi[0]! - lo[0]! + 1, hi[1]! - lo[1]! + 1, lo[0]!, lo[1]!],
     // A uniform box's extent from its second moment: sqrt(12 var), in cells.
-    extentCells: [0, 1].map(a => Math.sqrt(12 * Math.max(0, m2[a]! / mass - (c[a]! / mass / h - .5) ** 2))),
+    extentCells: phiExtent(fields, nx, ny, nz),
   };
+}
+
+/** The liquid's x and y extent from its second moment, sqrt(12 var) in
+ * cells, on the mid-depth plane of the resolved phi: each h cell's liquid
+ * area from its bilinear corners. The fill field broadcasts a 4h owner's V
+ * over its cells, which spreads a partly filled owner's liquid across it: a
+ * 16-cell block whose ends sit mid-owner read up to 1.4 cells long. */
+function phiExtent(fields: Awaited<ReturnType<typeof readUniformFields>>, nx: number, ny: number, nz: number): number[] {
+  const z = nz / 2, n = 8; let mass = 0; const m1 = [0, 0], m2 = [0, 0];
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const a = fields.vertex(x, y, z), b = fields.vertex(x + 1, y, z), c = fields.vertex(x, y + 1, z), d = fields.vertex(x + 1, y + 1, z);
+    let area = 0;
+    if (a < 0 && b < 0 && c < 0 && d < 0) area = 1;
+    else if (a < 0 || b < 0 || c < 0 || d < 0) {
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        const u = (i + .5) / n, v = (j + .5) / n;
+        if ((a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v < 0) area += 1 / (n * n);
+      }
+    }
+    if (!area) continue;
+    mass += area; m1[0]! += area * (x + .5); m1[1]! += area * (y + .5); m2[0]! += area * (x + .5) ** 2; m2[1]! += area * (y + .5) ** 2;
+  }
+  return [0, 1].map(k => Math.sqrt(12 * Math.max(0, m2[k]! / mass - (m1[k]! / mass) ** 2)));
 }
 
 type Check = { name: string; value: number; limit: number; pass: boolean };
@@ -209,7 +239,8 @@ await withUniformDevice("NB-FLIP analytic cases", async device => {
       const stepStart = performance.now();
       for (let frame = 0; frame <= frames; frame++) {
         if (frame > 0) await advanceUniform(solver, frame * NBFLIP_ANALYTIC_DT_S);
-        const tiers = await readTiers(device, mixed), state = await sample(device, solver, frame, gravity, piers, solids);
+        const tiers = await readTiers(device, mixed), state = await sample(device, solver, frame, gravity, piers, solids,
+          frame > 0 && !(mixed as unknown as { extensionIdle: boolean }).extensionIdle ? (mixed as unknown as { fields: { velocityScratch: GPUTexture } }).fields.velocityScratch : undefined);
         // Region r is the 16h octant r&7 of pool block r>>3; the block is live
         // when its word holds a world page residue (0xffffffff: free). Key
         // regions by world page and octant so history follows space, not slots.
