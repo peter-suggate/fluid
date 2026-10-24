@@ -37,7 +37,9 @@
  * cell volume, and for --slab-stages (default forces.scratch,
  * toSimulation.velocity, band.velocity) the three face velocities and the
  * six-face divergence of every cell. A texel at cell c, component a, is the
- * velocity on the cell's upper a face. */
+ * velocity on the cell's upper a face.
+ * --lock=<file> builds the solver outside the GPU lock and takes it for the
+ * steps (tools/gpu-hold.ts). */
 import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
@@ -46,6 +48,7 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { createFastJetScene, FAST_JET_METHOD_OVERRIDES } from "./fast-jet-scene";
+import { takeGpuHold } from "./gpu-hold";
 import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { uniformDetailField } from "../lib/methods/uniform/uniform-detail-fields";
 import { uniformTileCoord, uniformTileKey, type UniformLatticeAddress } from "../lib/methods/uniform/uniform-lattice-address";
@@ -87,7 +90,10 @@ try {
   device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); console.error(e.error.message); });
   const started = performance.now();
   solver = await method.createSolverAsync!(device, scene, "balanced", { ...method.appDefaults, timeStep: "scene", ...variant }, undefined, () => {}) as WebGPUUniformReferenceSolver;
-  const { nx, ny, nz } = solver.info, H = scene.container.width_m / nx, cell = dt / H;
+  // The lattice is the container rounded up to whole pages: h is the voxel
+  // domain's cell, not the container over nx.
+  const { nx, ny, nz } = solver.info, H = scene.voxelDomain?.finestCellSize_m ?? scene.container.width_m / nx, cell = dt / H;
+  const release = option("lock") ? await takeGpuHold(option("lock")!) : () => {};
   const address = (solver as unknown as { address: UniformLatticeAddress }).address;
   const census = (solver as unknown as { mixedDynamic: { work: GPUBuffer; words: number; wetOffset: number; nearOffset: number } }).mixedDynamic;
   const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; ownership: { capacity: { tiles: number } } } }).mixedFrame;
@@ -239,4 +245,5 @@ try {
   }
   statusRead.destroy();
   console.log(`errors ${JSON.stringify(errors)}`);
+  release();
 } finally { solver?.destroy(); await device?.queue.onSubmittedWorkDone(); device?.destroy(); }
