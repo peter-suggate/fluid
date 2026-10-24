@@ -1,0 +1,1542 @@
+{
+  "name": "smoke",
+  "sceneId": "reservoir-seep",
+  "host": {
+    "cpu": "Apple M1 Max",
+    "platform": "darwin",
+    "release": "25.6.0",
+    "node": "v22.22.1",
+    "nodePath": "/Users/petersuggate/.nvm/versions/node/v22.22.1/bin/node",
+    "commit": "e218ecfe"
+  },
+  "geometry": {
+    "pool": {
+      "nx": 512,
+      "ny": 256,
+      "nz": 64,
+      "cell_m": 0.005,
+      "boxCells": 8388608,
+      "pool": 226,
+      "wall": {
+        "low": 240,
+        "high": 256,
+        "holeY": 64,
+        "holeZ": 32
+      }
+    },
+    "pool+64": {
+      "nx": 512,
+      "ny": 256,
+      "nz": 64,
+      "cell_m": 0.005,
+      "boxCells": 8388608,
+      "pool": 290,
+      "wall": {
+        "low": 240,
+        "high": 256,
+        "holeY": 64,
+        "holeZ": 32
+      }
+    },
+    "box": {
+      "nx": 752,
+      "ny": 256,
+      "nz": 64,
+      "cell_m": 0.005,
+      "boxCells": 12320768,
+      "pool": 226,
+      "wall": {
+        "low": 480,
+        "high": 496,
+        "holeY": 64,
+        "holeZ": 32
+      }
+    }
+  },
+  "totals": {
+    "pool-at-h": 3543189242.09849,
+    "pool-at-4h": 114333178.6113747,
+    "dense-box": 26876372.09013495,
+    "fixed": 101192231.2
+  },
+  "perBlock": {
+    "h": 15702004.5,
+    "coarse": 505993.5
+  },
+  "perBoxCell": 3.2678385416666664,
+  "labels": [
+    {
+      "label": "Uniform pressure arena pool",
+      "class": "pool-at-h",
+      "bytesAtPool": 491248160,
+      "perBlock": 2173372.5,
+      "perBoxCell": 0.0,
+      "fixed": 65975.0
+    },
+    {
+      "label": "Uniform mixed stage scratch",
+      "class": "pool-at-h",
+      "bytesAtPool": 461491200,
+      "perBlock": 2059392.0,
+      "perBoxCell": 0.0,
+      "fixed": -3931392.0
+    },
+    {
+      "label": "Narrow-band FLIP particles A",
+      "class": "pool-at-h",
+      "bytesAtPool": 355467264,
+      "perBlock": 1572864.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Narrow-band FLIP particles B",
+      "class": "pool-at-h",
+      "bytesAtPool": 355467264,
+      "perBlock": 1572864.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Narrow-band FLIP cell counts, surface metrics and persistent regional crossing masks",
+      "class": "pool-at-h",
+      "bytesAtPool": 282313872,
+      "perBlock": 1249176.0,
+      "perBoxCell": 0.0,
+      "fixed": 96.0
+    },
+    {
+      "label": "Narrow-band FLIP cell starts, compact neighbor samples and surface brick arena windows",
+      "class": "pool-at-h",
+      "bytesAtPool": 279155200,
+      "perBlock": 1235200.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed unit velocity taps halo",
+      "class": "pool-at-h",
+      "bytesAtPool": 164640000,
+      "perBlock": 686000.0,
+      "perBoxCell": 0.0,
+      "fixed": 9604000.0
+    },
+    {
+      "label": "Uniform mixed all-4h solid record",
+      "class": "pool-at-h",
+      "bytesAtPool": 158785824,
+      "perBlock": 702592.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform mixed unit velocity taps",
+      "class": "pool-at-h",
+      "bytesAtPool": 133693440,
+      "perBlock": 557056.0,
+      "perBoxCell": 0.0,
+      "fixed": 7798784.0
+    },
+    {
+      "label": "Uniform reference velocity A",
+      "class": "pool-at-h",
+      "bytesAtPool": 133693440,
+      "perBlock": 557056.0,
+      "perBoxCell": 0.0,
+      "fixed": 7798784.0
+    },
+    {
+      "label": "Uniform reference velocity B",
+      "class": "pool-at-h",
+      "bytesAtPool": 133693440,
+      "perBlock": 557056.0,
+      "perBoxCell": 0.0,
+      "fixed": 7798784.0
+    },
+    {
+      "label": "Uniform reference velocity D",
+      "class": "pool-at-h",
+      "bytesAtPool": 133693440,
+      "perBlock": 557056.0,
+      "perBoxCell": 0.0,
+      "fixed": 7798784.0
+    },
+    {
+      "label": "Uniform mixed extension held values",
+      "class": "pool-at-h",
+      "bytesAtPool": 115365632,
+      "perBlock": 514816.0,
+      "perBoxCell": 0.0,
+      "fixed": -982784.0
+    },
+    {
+      "label": "Uniform Geometric vertex phi scratch",
+      "class": "pool-at-h",
+      "bytesAtPool": 35199360,
+      "perBlock": 146664.0,
+      "perBoxCell": 0.0,
+      "fixed": 2053296.0
+    },
+    {
+      "label": "Uniform Geometric vertex phi",
+      "class": "pool-at-h",
+      "bytesAtPool": 34499520,
+      "perBlock": 143748.0,
+      "perBoxCell": 0.0,
+      "fixed": 2012472.0
+    },
+    {
+      "label": "Uniform presented pressure phi and stage grids",
+      "class": "pool-at-h",
+      "bytesAtPool": 33540256,
+      "perBlock": 149568.0,
+      "perBoxCell": 0.0,
+      "fixed": -262112.0
+    },
+    {
+      "label": "Uniform reference smoothed surface A",
+      "class": "pool-at-h",
+      "bytesAtPool": 31948800,
+      "perBlock": 133120.0,
+      "perBoxCell": 0.0,
+      "fixed": 1863680.0
+    },
+    {
+      "label": "Uniform reference smoothed surface B",
+      "class": "pool-at-h",
+      "bytesAtPool": 31948800,
+      "perBlock": 133120.0,
+      "perBoxCell": 0.0,
+      "fixed": 1863680.0
+    },
+    {
+      "label": "Uniform reference transport gamma A",
+      "class": "pool-at-h",
+      "bytesAtPool": 31948800,
+      "perBlock": 133120.0,
+      "perBoxCell": 0.0,
+      "fixed": 1863680.0
+    },
+    {
+      "label": "Uniform reference transport gamma B",
+      "class": "pool-at-h",
+      "bytesAtPool": 31948800,
+      "perBlock": 133120.0,
+      "perBoxCell": 0.0,
+      "fixed": 1863680.0
+    },
+    {
+      "label": "Uniform reference volume A",
+      "class": "pool-at-h",
+      "bytesAtPool": 31948800,
+      "perBlock": 133120.0,
+      "perBoxCell": 0.0,
+      "fixed": 1863680.0
+    },
+    {
+      "label": "Uniform reference volume B",
+      "class": "pool-at-h",
+      "bytesAtPool": 31948800,
+      "perBlock": 133120.0,
+      "perBoxCell": 0.0,
+      "fixed": 1863680.0
+    },
+    {
+      "label": "Fluid particle display energy",
+      "class": "pool-at-h",
+      "bytesAtPool": 29622272,
+      "perBlock": 131072.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed pressure phi",
+      "class": "pool-at-h",
+      "bytesAtPool": 29425664,
+      "perBlock": 129024.0,
+      "perBoxCell": 0.06666666666666667,
+      "fixed": -293000.5333333333
+    },
+    {
+      "label": "Uniform shared pressure scratch",
+      "class": "pool-at-h",
+      "bytesAtPool": 24025848,
+      "perBlock": 106308.0,
+      "perBoxCell": 0.0,
+      "fixed": 240.0
+    },
+    {
+      "label": "Uniform mixed velocity tap cache",
+      "class": "pool-at-h",
+      "bytesAtPool": 23142400,
+      "perBlock": 102400.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform reference solid page mask, bed-slope lane and tile cut map",
+      "class": "dense-box",
+      "bytesAtPool": 20197384,
+      "perBlock": 2048.0,
+      "perBoxCell": 2.3677083333333333,
+      "fixed": -127241.06666666642
+    },
+    {
+      "label": "Uniform 16h geometry work evidence",
+      "class": "pool-at-4h",
+      "bytesAtPool": 17361424,
+      "perBlock": 256.0,
+      "perBoxCell": 0.0,
+      "fixed": 17303568.0
+    },
+    {
+      "label": "Uniform region force store",
+      "class": "pool-at-4h",
+      "bytesAtPool": 11889024,
+      "perBlock": 8384.0,
+      "perBoxCell": 0.0,
+      "fixed": 9994240.0
+    },
+    {
+      "label": "Uniform persistent geometry normals and curvature",
+      "class": "pool-at-4h",
+      "bytesAtPool": 10240000,
+      "perBlock": 8192.0,
+      "perBoxCell": 0.0,
+      "fixed": 8388608.0
+    },
+    {
+      "label": "Uniform nearest-source origins NxN",
+      "class": "pool-at-4h",
+      "bytesAtPool": 8985600,
+      "perBlock": 37440.0,
+      "perBoxCell": 0.0,
+      "fixed": 524160.0
+    },
+    {
+      "label": "Uniform shared frame support and certified work",
+      "class": "pool-at-4h",
+      "bytesAtPool": 8374952,
+      "perBlock": 37056.0,
+      "perBoxCell": 0.0,
+      "fixed": 296.0
+    },
+    {
+      "label": "Uniform dynamic ownership census",
+      "class": "pool-at-4h",
+      "bytesAtPool": 7659804,
+      "perBlock": 33888.0,
+      "perBoxCell": 0.0,
+      "fixed": 1116.0
+    },
+    {
+      "label": "Uniform tile update errors",
+      "class": "pool-at-4h",
+      "bytesAtPool": 7405568,
+      "perBlock": 32768.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed owners and tier worklists",
+      "class": "pool-at-4h",
+      "bytesAtPool": 6852896,
+      "perBlock": 20968.0,
+      "perBoxCell": 0.0020833333333333333,
+      "fixed": 2096651.7333333334
+    },
+    {
+      "label": "Uniform 16h surface work evidence",
+      "class": "pool-at-4h",
+      "bytesAtPool": 6740240,
+      "perBlock": 29824.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed root topology",
+      "class": "pool-at-4h",
+      "bytesAtPool": 5091328,
+      "perBlock": 22528.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform dynamic ownership bound cubes",
+      "class": "pool-at-4h",
+      "bytesAtPool": 5069632,
+      "perBlock": 22432.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform layout builder support",
+      "class": "pool-at-4h",
+      "bytesAtPool": 4165728,
+      "perBlock": 18432.0,
+      "perBoxCell": 0.0,
+      "fixed": 96.0
+    },
+    {
+      "label": "Narrow-band FLIP stage sampling cache",
+      "class": "pool-at-4h",
+      "bytesAtPool": 3840000,
+      "perBlock": 16000.0,
+      "perBoxCell": 0.0,
+      "fixed": 224000.0
+    },
+    {
+      "label": "Uniform 4h sampling cache 0",
+      "class": "pool-at-4h",
+      "bytesAtPool": 3840000,
+      "perBlock": 16000.0,
+      "perBoxCell": 0.0,
+      "fixed": 224000.0
+    },
+    {
+      "label": "Uniform pressure arena state",
+      "class": "pool-at-4h",
+      "bytesAtPool": 3474044,
+      "perBlock": 15369.5,
+      "perBoxCell": 0.0,
+      "fixed": 537.0
+    },
+    {
+      "label": "Uniform reference compatibility scratch",
+      "class": "pool-at-4h",
+      "bytesAtPool": 3239984,
+      "perBlock": 14336.0,
+      "perBoxCell": 0.0,
+      "fixed": 48.0
+    },
+    {
+      "label": "Uniform page pool work",
+      "class": "pool-at-4h",
+      "bytesAtPool": 3153384,
+      "perBlock": 36.0,
+      "perBoxCell": 0.0,
+      "fixed": 3145248.0
+    },
+    {
+      "label": "Uniform mixed remapped extension walls",
+      "class": "pool-at-4h",
+      "bytesAtPool": 2777088,
+      "perBlock": 12288.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform reference negative boundary velocity A",
+      "class": "pool-at-4h",
+      "bytesAtPool": 2777088,
+      "perBlock": 12288.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform reference negative boundary velocity B",
+      "class": "pool-at-4h",
+      "bytesAtPool": 2777088,
+      "perBlock": 12288.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform reference negative boundary velocity D",
+      "class": "pool-at-4h",
+      "bytesAtPool": 2777088,
+      "perBlock": 12288.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform layout builder topology",
+      "class": "pool-at-4h",
+      "bytesAtPool": 2314240,
+      "perBlock": 10240.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform Sec. 3.3 hierarchy down NxN",
+      "class": "pool-at-4h",
+      "bytesAtPool": 2246400,
+      "perBlock": 9360.0,
+      "perBoxCell": 0.0,
+      "fixed": 131040.0
+    },
+    {
+      "label": "Uniform Sec. 3.3 hierarchy up NxN",
+      "class": "pool-at-4h",
+      "bytesAtPool": 2246400,
+      "perBlock": 9360.0,
+      "perBoxCell": 0.0,
+      "fixed": 131040.0
+    },
+    {
+      "label": "Uniform bed-slope bake nosings A",
+      "class": "dense-box",
+      "bytesAtPool": 2097152,
+      "perBlock": 0.0,
+      "perBoxCell": 0.26666666666666666,
+      "fixed": -139810.1333333333
+    },
+    {
+      "label": "Uniform bed-slope bake nosings B",
+      "class": "dense-box",
+      "bytesAtPool": 2097152,
+      "perBlock": 0.0,
+      "perBoxCell": 0.26666666666666666,
+      "fixed": -139810.1333333333
+    },
+    {
+      "label": "Uniform mixed root pressure phi",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1851392,
+      "perBlock": 8192.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed surface job claims",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1793688,
+      "perBlock": 7936.0,
+      "perBoxCell": 0.0,
+      "fixed": 152.0
+    },
+    {
+      "label": "Uniform mixed remap worklist",
+      "class": "dense-box",
+      "bytesAtPool": 1603224,
+      "perBlock": 2048.0,
+      "perBoxCell": 0.14388020833333334,
+      "fixed": -66578.66666666674
+    },
+    {
+      "label": "Uniform layout builder work",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1397888,
+      "perBlock": 6184.0,
+      "perBoxCell": 0.0,
+      "fixed": 304.0
+    },
+    {
+      "label": "Uniform cold freeze corrections",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1392640,
+      "perBlock": 6144.0,
+      "perBoxCell": 0.0,
+      "fixed": 4096.0
+    },
+    {
+      "label": "Uniform tile context",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1388560,
+      "perBlock": 6144.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform shared regional frame plan",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1063152,
+      "perBlock": 4704.0,
+      "perBoxCell": 0.0,
+      "fixed": 48.0
+    },
+    {
+      "label": "Uniform page pool state",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1058696,
+      "perBlock": 44.0,
+      "perBoxCell": 0.0,
+      "fixed": 1048752.0
+    },
+    {
+      "label": "Uniform reference page table",
+      "class": "pool-at-4h",
+      "bytesAtPool": 1049608,
+      "perBlock": 4.0,
+      "perBoxCell": 0.0,
+      "fixed": 1048704.0
+    },
+    {
+      "label": "Narrow-band FLIP receipt, particle frame and brick slabs",
+      "class": "pool-at-4h",
+      "bytesAtPool": 983680,
+      "perBlock": 4352.0,
+      "perBoxCell": 0.0,
+      "fixed": 128.0
+    },
+    {
+      "label": "Uniform mixed extension topology stamp",
+      "class": "pool-at-4h",
+      "bytesAtPool": 940160,
+      "perBlock": 4160.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed geometry changed tiles",
+      "class": "pool-at-4h",
+      "bytesAtPool": 925712,
+      "perBlock": 4096.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed pressure authority retained cut fits",
+      "class": "pool-at-4h",
+      "bytesAtPool": 925704,
+      "perBlock": 4096.0,
+      "perBoxCell": 0.0,
+      "fixed": 8.0
+    },
+    {
+      "label": "Uniform layout builder slots",
+      "class": "pool-at-4h",
+      "bytesAtPool": 925696,
+      "perBlock": 4096.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform local speed certificate",
+      "class": "pool-at-4h",
+      "bytesAtPool": 925696,
+      "perBlock": 4096.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform region dynamics pressure history",
+      "class": "pool-at-4h",
+      "bytesAtPool": 925696,
+      "perBlock": 4096.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform presented pressure",
+      "class": "pool-at-4h",
+      "bytesAtPool": 809984,
+      "perBlock": 3584.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform Geometric 4h vertex phi base",
+      "class": "pool-at-4h",
+      "bytesAtPool": 699840,
+      "perBlock": 2916.0,
+      "perBoxCell": 0.0,
+      "fixed": 40824.0
+    },
+    {
+      "label": "Uniform mixed pressure authority region stamps and tile bases",
+      "class": "pool-at-4h",
+      "bytesAtPool": 578560,
+      "perBlock": 2560.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform bed-slope bake links",
+      "class": "dense-box",
+      "bytesAtPool": 524288,
+      "perBlock": 0.0,
+      "perBoxCell": 0.06666666666666667,
+      "fixed": -34952.533333333326
+    },
+    {
+      "label": "Uniform compute blit tables",
+      "class": "fixed",
+      "bytesAtPool": 524288,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 524288.0
+    },
+    {
+      "label": "Uniform mixed pressure centre phi",
+      "class": "pool-at-4h",
+      "bytesAtPool": 491520,
+      "perBlock": 2048.0,
+      "perBoxCell": 0.0,
+      "fixed": 28672.0
+    },
+    {
+      "label": "Uniform mixed pressure surface target",
+      "class": "pool-at-4h",
+      "bytesAtPool": 491520,
+      "perBlock": 2048.0,
+      "perBoxCell": 0.0,
+      "fixed": 28672.0
+    },
+    {
+      "label": "Uniform frame plan held seed flags",
+      "class": "pool-at-4h",
+      "bytesAtPool": 462848,
+      "perBlock": 2048.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed phi resolve held tiles",
+      "class": "pool-at-4h",
+      "bytesAtPool": 462848,
+      "perBlock": 2048.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform reference column base",
+      "class": "dense-box",
+      "bytesAtPool": 262144,
+      "perBlock": 0.0,
+      "perBoxCell": 0.03333333333333333,
+      "fixed": -17476.266666666663
+    },
+    {
+      "label": "Uniform reference column occupancy",
+      "class": "dense-box",
+      "bytesAtPool": 262144,
+      "perBlock": 0.0,
+      "perBoxCell": 0.03333333333333333,
+      "fixed": -17476.266666666663
+    },
+    {
+      "label": "Uniform mixed momentum affine models",
+      "class": "pool-at-4h",
+      "bytesAtPool": 260352,
+      "perBlock": 1152.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform reference terrain",
+      "class": "dense-box",
+      "bytesAtPool": 131072,
+      "perBlock": 0.0,
+      "perBoxCell": 0.016666666666666666,
+      "fixed": -8738.133333333331
+    },
+    {
+      "label": "Uniform region work heat state",
+      "class": "pool-at-4h",
+      "bytesAtPool": 130176,
+      "perBlock": 576.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed pressure authority region stamps",
+      "class": "pool-at-4h",
+      "bytesAtPool": 115712,
+      "perBlock": 512.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform dynamic ownership join tiles",
+      "class": "dense-box",
+      "bytesAtPool": 97428,
+      "perBlock": 64.0,
+      "perBoxCell": 0.0020833333333333333,
+      "fixed": 65487.73333333334
+    },
+    {
+      "label": "Uniform dynamic ownership solid tiles",
+      "class": "dense-box",
+      "bytesAtPool": 96388,
+      "perBlock": 64.0,
+      "perBoxCell": 0.0020833333333333333,
+      "fixed": 64447.73333333334
+    },
+    {
+      "label": "Uniform region dynamics record",
+      "class": "pool-at-4h",
+      "bytesAtPool": 72320,
+      "perBlock": 320.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform pending 16h curvature changes",
+      "class": "pool-at-4h",
+      "bytesAtPool": 61700,
+      "perBlock": 128.0,
+      "perBoxCell": 0.0,
+      "fixed": 32772.0
+    },
+    {
+      "label": "Uniform cold freeze regions",
+      "class": "pool-at-4h",
+      "bytesAtPool": 61440,
+      "perBlock": 256.0,
+      "perBoxCell": 0.0,
+      "fixed": 3584.0
+    },
+    {
+      "label": "Narrow-band FLIP particle allocation support",
+      "class": "pool-at-4h",
+      "bytesAtPool": 57856,
+      "perBlock": 256.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform cold freeze",
+      "class": "pool-at-4h",
+      "bytesAtPool": 57856,
+      "perBlock": 256.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform 16h current extended velocity extrema",
+      "class": "pool-at-4h",
+      "bytesAtPool": 43392,
+      "perBlock": 192.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform region work tiers",
+      "class": "pool-at-4h",
+      "bytesAtPool": 36196,
+      "perBlock": 160.0,
+      "perBoxCell": 0.0,
+      "fixed": 36.0
+    },
+    {
+      "label": "Uniform frame plan 4h tile bits",
+      "class": "pool-at-4h",
+      "bytesAtPool": 16272,
+      "perBlock": 72.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed unit halo blocks",
+      "class": "pool-at-4h",
+      "bytesAtPool": 15360,
+      "perBlock": 64.0,
+      "perBoxCell": 0.0,
+      "fixed": 896.0
+    },
+    {
+      "label": "Uniform dynamic ownership readback",
+      "class": "pool-at-4h",
+      "bytesAtPool": 14544,
+      "perBlock": 64.0,
+      "perBoxCell": 0.0,
+      "fixed": 80.0
+    },
+    {
+      "label": "Uniform independent pressure surface band",
+      "class": "pool-at-4h",
+      "bytesAtPool": 14464,
+      "perBlock": 64.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform mixed swept-body region mask",
+      "class": "pool-at-4h",
+      "bytesAtPool": 7248,
+      "perBlock": 32.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed momentum tiers",
+      "class": "pool-at-4h",
+      "bytesAtPool": 7232,
+      "perBlock": 32.0,
+      "perBoxCell": 0.0,
+      "fixed": 0.0
+    },
+    {
+      "label": "Uniform page pool published pages",
+      "class": "pool-at-4h",
+      "bytesAtPool": 3744,
+      "perBlock": 16.0,
+      "perBoxCell": 0.0,
+      "fixed": 128.0
+    },
+    {
+      "label": "Uniform bed-slope bake params",
+      "class": "fixed",
+      "bytesAtPool": 2304,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 2304.0
+    },
+    {
+      "label": "Uniform field page layouts",
+      "class": "fixed",
+      "bytesAtPool": 2304,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 2304.0
+    },
+    {
+      "label": "GPU authoritative rigid-body state",
+      "class": "fixed",
+      "bytesAtPool": 1536,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1536.0
+    },
+    {
+      "label": "GPU rigid motion roster scratch",
+      "class": "fixed",
+      "bytesAtPool": 1536,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1536.0
+    },
+    {
+      "label": "GPU rigid primitive motion sidecar",
+      "class": "fixed",
+      "bytesAtPool": 1536,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1536.0
+    },
+    {
+      "label": "GPU rigid-body roster scratch",
+      "class": "fixed",
+      "bytesAtPool": 1536,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1536.0
+    },
+    {
+      "label": "Uniform mixed solid body mirror",
+      "class": "fixed",
+      "bytesAtPool": 1536,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1536.0
+    },
+    {
+      "label": "Uniform mixed solid record body mirror",
+      "class": "fixed",
+      "bytesAtPool": 1536,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1536.0
+    },
+    {
+      "label": "Uniform reference parameters",
+      "class": "fixed",
+      "bytesAtPool": 1312,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1312.0
+    },
+    {
+      "label": "Uniform layout builder region table",
+      "class": "fixed",
+      "bytesAtPool": 1040,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 1040.0
+    },
+    {
+      "label": "GPU rigid render roster scratch",
+      "class": "fixed",
+      "bytesAtPool": 768,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 768.0
+    },
+    {
+      "label": "GPU rigid-body render records",
+      "class": "fixed",
+      "bytesAtPool": 768,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 768.0
+    },
+    {
+      "label": "Uniform reference rigid exchange",
+      "class": "fixed",
+      "bytesAtPool": 576,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 576.0
+    },
+    {
+      "label": "Uniform pressure receipt and mass accounting 0",
+      "class": "fixed",
+      "bytesAtPool": 364,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 364.0
+    },
+    {
+      "label": "Uniform pressure receipt and mass accounting 1",
+      "class": "fixed",
+      "bytesAtPool": 364,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 364.0
+    },
+    {
+      "label": "Uniform mixed work counts, geometry and window",
+      "class": "fixed",
+      "bytesAtPool": 352,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 352.0
+    },
+    {
+      "label": "Inactive analytic terrain",
+      "class": "fixed",
+      "bytesAtPool": 288,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 288.0
+    },
+    {
+      "label": "Uniform layout builder relayout receipt",
+      "class": "fixed",
+      "bytesAtPool": 144,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 144.0
+    },
+    {
+      "label": "Uniform mixed relayout receipt read 0",
+      "class": "fixed",
+      "bytesAtPool": 144,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 144.0
+    },
+    {
+      "label": "Uniform mixed relayout receipt read 1",
+      "class": "fixed",
+      "bytesAtPool": 144,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 144.0
+    },
+    {
+      "label": "Uniform mixed relayout receipt read 2",
+      "class": "fixed",
+      "bytesAtPool": 144,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 144.0
+    },
+    {
+      "label": "Uniform compute blit unused slot",
+      "class": "fixed",
+      "bytesAtPool": 128,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 128.0
+    },
+    {
+      "label": "GPU rigid-body step parameters",
+      "class": "fixed",
+      "bytesAtPool": 112,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 112.0
+    },
+    {
+      "label": "Uniform dynamic ownership policy",
+      "class": "fixed",
+      "bytesAtPool": 112,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 112.0
+    },
+    {
+      "label": "Narrow-band FLIP parameters",
+      "class": "fixed",
+      "bytesAtPool": 80,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 80.0
+    },
+    {
+      "label": "Uniform mixed extension region mode",
+      "class": "fixed",
+      "bytesAtPool": 80,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 80.0
+    },
+    {
+      "label": "Uniform pressure band parameters",
+      "class": "fixed",
+      "bytesAtPool": 80,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 80.0
+    },
+    {
+      "label": "Narrow-band FLIP regional reuse pass controls",
+      "class": "fixed",
+      "bytesAtPool": 72,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 72.0
+    },
+    {
+      "label": "Uniform detail twin stand-in",
+      "class": "fixed",
+      "bytesAtPool": 72,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 72.0
+    },
+    {
+      "label": "Uniform forces parameters",
+      "class": "fixed",
+      "bytesAtPool": 64,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 64.0
+    },
+    {
+      "label": "Uniform mixed frame status",
+      "class": "fixed",
+      "bytesAtPool": 64,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 64.0
+    },
+    {
+      "label": "Uniform mixed remap idle status",
+      "class": "fixed",
+      "bytesAtPool": 64,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 64.0
+    },
+    {
+      "label": "GPU rigid immersed volumes",
+      "class": "fixed",
+      "bytesAtPool": 48,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 48.0
+    },
+    {
+      "label": "GPU rigid-body pick result",
+      "class": "fixed",
+      "bytesAtPool": 48,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 48.0
+    },
+    {
+      "label": "Uniform dust accounting",
+      "class": "fixed",
+      "bytesAtPool": 48,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 48.0
+    },
+    {
+      "label": "Uniform reference diagnostics and volume control",
+      "class": "fixed",
+      "bytesAtPool": 48,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 48.0
+    },
+    {
+      "label": "NB scalar volume budget",
+      "class": "fixed",
+      "bytesAtPool": 36,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 36.0
+    },
+    {
+      "label": "GPU rigid-body pick ray",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform mixed momentum job claims",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform momentum parameters",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform pressure acceptance",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform projection parameters",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform region work heat params",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform shared support policy",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform surface parameters",
+      "class": "fixed",
+      "bytesAtPool": 32,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 32.0
+    },
+    {
+      "label": "Uniform layout builder params",
+      "class": "fixed",
+      "bytesAtPool": 24,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 24.0
+    },
+    {
+      "label": "NB volume budget parameters",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Narrow-band FLIP live sample gate",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform Sec. 3.3 extrapolation work (always)",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform authority parameters",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform cold freeze params",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform detail ring dimensions",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform disabled MacCormack audit binding",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform extension parameters",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed extension live gate",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed extension no bodies",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed extension work words",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed rigid body tiles horizon",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed unit velocity taps stub",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform page initialise mode 0",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform page initialise mode 1",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform reference negative boundary velocity C",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform reference transport A",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform reference transport B",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform reference unused velocity C",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform reference velocity A stub",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform reference velocity B stub",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform reference velocity D stub",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform region dynamics params",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform regional frame plan policy",
+      "class": "fixed",
+      "bytesAtPool": 16,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 16.0
+    },
+    {
+      "label": "Uniform mixed unit halo half stand-in",
+      "class": "fixed",
+      "bytesAtPool": 8,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 8.0
+    },
+    {
+      "label": "Uniform CM11a L0 pressure A",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform Geometric vertex phi scratch stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform Geometric vertex phi stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform mixed pressure centre phi stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform mixed pressure surface target stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference pressure A",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference pressure B",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference smoothed surface A stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference smoothed surface B stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference transport gamma A stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference transport gamma B stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference volume A stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    },
+    {
+      "label": "Uniform reference volume B stub",
+      "class": "fixed",
+      "bytesAtPool": 4,
+      "perBlock": 0.0,
+      "perBoxCell": 0.0,
+      "fixed": 4.0
+    }
+  ],
+  "refit": "labels normalised (NxN extents), split by fitted terms; from the 3-construction smoke fit"
+}
