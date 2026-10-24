@@ -323,7 +323,7 @@ try {
     grid: [solver.info.nx, solver.info.ny, solver.info.nz] };
   writeFileSync(`${out}/${name}-construction-memory.json`, JSON.stringify({ ...construction, resources: constructionMemory.resources }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "constructed", ...construction }));
-  const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; ownership: UniformMixedOwnership; heat: { counts: { buffer: GPUBuffer; offset: number }; tiers: GPUBuffer; regions: number }; solid?: { coarse?: { record: GPUBuffer } } } }).mixedFrame;
+  const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; ownership: UniformMixedOwnership; heat: { counts: { buffer: GPUBuffer; offset: number }; tiers: GPUBuffer; state: GPUBuffer; regions: number }; freeze?: { buffer: GPUBuffer }; solid?: { coarse?: { record: GPUBuffer } } } }).mixedFrame;
   // The projection's face apertures: the coarse solid record, a vec4 (open, V+x, V+y, V+z) per owner index (umRecordV).
   const solidRecord = frame.solid?.coarse?.record ?? device.createBuffer({ label: "Tier budget no solid record", size: 16, usage: GPUBufferUsage.STORAGE });
   const textures = solver as unknown as { vertexPhiField: GPUTexture; vertexPhiScratch: GPUTexture; velocityA: GPUTexture };
@@ -527,6 +527,30 @@ var<workgroup> sums:array<atomic<u32>,5>;
   const READ = { work: P, heat: P + 32, pool: P + 48, tiers: P + 48 + 4 * S.words }, readBytes = READ.tiers + 4 * frame.heat.regions;
   const read = device.createBuffer({ label: "Tier budget readback", size: readBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const reset = new Uint32Array(W); for (const at of [21, 24, 26, 28]) reset[at] = 0xffffffff;
+  // --heatState: every surface-reader region's freeze evidence (region heat
+  // state words) and its COLD term T, grouped by tier.
+  const heatStates = options.includes("--heatState"), R = frame.heat.regions, HW = 18;
+  const heatRead = heatStates ? device.createBuffer({ label: "Tier budget heat state", size: 4 * HW * R + 32 * R, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : undefined;
+  const readHeatState = async () => {
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(frame.heat.state, 0, heatRead!, 0, 4 * HW * R);
+    if (frame.freeze) encoder.copyBufferToBuffer(frame.freeze.buffer, 0, heatRead!, 4 * HW * R, 32 * R);
+    device.queue.submit([encoder.finish()]);
+    await heatRead!.mapAsync(GPUMapMode.READ); const bytes = heatRead!.getMappedRange().slice(0); heatRead!.unmap();
+    return { u: new Uint32Array(bytes, 0, HW * R), f: new Float32Array(bytes, 0, HW * R), term: new Float32Array(bytes, 4 * HW * R, 8 * R) };
+  };
+  const summariseHeat = (s: { u: Uint32Array; f: Float32Array; term: Float32Array }, tiers: Uint32Array) => {
+    const out: Record<string, unknown[]> = {};
+    for (let r = 0; r < R; r++) {
+      const at = HW * r, trigger = s.u[at + 7]!;
+      if (!(trigger & 4096) || (trigger & 8192)) continue;
+      const name = "CWH"[tiers[r]!] ?? "?";
+      (out[name] ??= []).push({ r, c: [s.u[at + 3], s.u[at + 4], s.u[at + 5]], disp: +s.f[at + 15]!.toExponential(2), surf: +s.f[at + 9]!.toExponential(2),
+        mom: +s.f[at + 10]!.toExponential(2), pres: +s.f[at + 11]!.toExponential(2), froz: +s.f[at + 12]!.toExponential(2), trig: trigger & 4095, fine: (trigger & 16384) ? 1 : 0,
+        T: [0, 1, 2].map(k => +s.term[8 * r + k]!.toExponential(2)), state: s.term[8 * r + 3] });
+    }
+    return out;
+  };
   const sample = async () => {
     for (const p of probes) device.queue.writeBuffer(p.buffer, 0, reset);
     const encoder = device.createCommandEncoder();
@@ -556,6 +580,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
   const authoredTop_m = Math.max(0, ...(scene.fluid.initialLiquidVolumes ?? []).map(v => "max_m" in v ? (v as { max_m: { y: number } }).max_m.y : 0));
   const record = async (step: number, wall_ms: number) => {
     const before = await sample();
+    const heatState = heatStates ? await readHeatState() : undefined;
     const stats = await solver.readStats();
     const all = await sample();
     const preTotals = Object.fromEntries(probes.map((p, i) => [p.key, wide(before, W * i)]));
@@ -607,6 +632,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
       allocatedBytes: snapshot.bytes, byClass: bytesByClass(snapshot, g.pool ?? 0, g.boxCells) };
     rows.push(row);
     console.log(JSON.stringify({ ...row, byClass: undefined }));
+    if (heatState) console.log(JSON.stringify({ heatState: step, regions: summariseHeat(heatState, tiers) }));
     return row;
   };
   const dust = { dustMass_cells: 0, orphanDustMass_cells: 0, steps: 0 };
