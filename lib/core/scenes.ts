@@ -47,6 +47,7 @@ import { studioStageCamera, studioStageSceneryGraph } from "./studio-stage-scene
 import { createAnalyticMotionScene, createRerungFreeFallScene, createStandingWaveScene } from "./analytic-motion-scenes";
 import { createGeometricUniformTranslationScene } from "./geometric-translation-scene";
 import { createGentleMovingBlobScene } from "./gentle-moving-blob-scene";
+import { NBFLIP_ANALYTIC_CASES, createNbflipAnalyticScene, nbflipAnalyticSceneId } from "./nbflip-analytic-scenes";
 import { CHURNING_TANK_SCENE_ID, createChurningTankScene } from "./churning-tank-scene";
 import { NBFLIP_STAIR_CUBE_ID, createNbflipStairCube, nbflipStairCubeCamera } from "./nbflip-stair-cube-scene";
 import { createStationaryBowlScene } from "./stationary-bowl-scene";
@@ -2134,6 +2135,22 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createGardenSvoLightingScene,
     camera: gardenCamera,
   }),
+  ...NBFLIP_ANALYTIC_CASES.map(name => defineScene({
+    id: nbflipAnalyticSceneId(name),
+    name: `NB-FLIP analytic \u00b7 ${name.replace("-", " ")}`,
+    blurb: {
+      "rest": "A still pool 24 cells deep. Exact: nothing moves, the surface stays level and every region goes COLD.",
+      "rest-step": "The still pool over a submerged step and around a pier through the surface. Exact as rest: solids change nothing.",
+      "free-fall": "A block falls from rest with no pool. Exact before contact: y = y\u2080 \u2212 \u00bdgt\u00b2, no deformation, no volume change.",
+      "standing-wave": "The fundamental seiche of a 0.64 m tank, 2 cm amplitude. Linear theory: the ends follow A cos \u03c9t and the middle stays level.",
+      "dam-break": "A column 16 cells wide and twice as tall collapses. The surge front follows Martin & Moyce (1952).",
+      "mound": "A cylinder of liquid drops onto a pool. Total energy must never rise, and the surface returns to rest.",
+    }[name],
+    audience: "validation", shelf: "NB-FLIP analytic", environment: "stage",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    build: () => createNbflipAnalyticScene(name),
+    camera: { distance_m: 1.4, target_m: { x: 0, y: .28, z: 0 }, elevation_rad: .3, azimuth_rad: .45 },
+  })),
   defineScene({
     id: "geometric-uniform-translation",
     name: "Geometric · uniform high-speed translation",
