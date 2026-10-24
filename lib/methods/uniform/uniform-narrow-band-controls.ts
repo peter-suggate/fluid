@@ -22,7 +22,17 @@ export function narrowBandParticleCellCap(value:unknown,fallback=20):number{
 export function narrowBandSparseNeighbours(value:unknown,fallback=16):number{
  const n=Number(value);return Number.isFinite(n)?Math.round(Math.min(64,Math.max(0,n))):fallback;
 }
-const controls=[...NARROW_BAND_ACTIVITY_CONTROLS,NARROW_BAND_VOLUME_CONTROL,NARROW_BAND_SPARSE_CONTROL,NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL,NARROW_BAND_PARTICLE_CAP_CONTROL] as const;
+/** Where the Tune menu's dials sit (uniform-narrow-band-tuning.ts). A dial writes the params it drives; its
+ * position is kept only for the slider to show, and the solver reads none of these. 0.5 is the defaults. */
+export const NARROW_BAND_TUNE_CONTROLS = [
+ {key:"tuneSurface",label:"Surface accuracy",unit:"",min:0,max:1,step:0.01,digits:2,default:0.5,
+  hint:"How faithfully the grid keeps the surface's shape, for more h tiles and cubic taps. Drives Surface advection (Fast below 0.25, Balanced, Best above 0.75), Shape tolerance 1 → 0.5 → 0.25 h and Thin thickness 2 → 4 → 6 h."},
+ {key:"tuneSplash",label:"Splash particles",unit:"",min:0,max:1,step:0.01,digits:2,default:0.5,
+  hint:"How readily particles take over where the grid falls short, for more particle work. Drives Impact travel 2 → 1 → 0.5 h/step, Approach horizon 1 → 2 → 4 steps and Particles per cell 10 → 20 → 40."},
+ {key:"tunePersistence",label:"Persistence",unit:"",min:0,max:1,step:0.01,digits:2,default:0.5,
+  hint:"How long detail outlives its cause: low is cheap and can flicker, high is steady and costs more. Drives Retirement time 0.25 → 0.5 → 1 s, Sparse particle lifetime 0.5 → 2 → 6 s, Sparse neighbours 32 → 16 → 8, and above the middle Hold 0 → 8 steps and Margin 0 → 1 tile."},
+] as const;
+const controls=[...NARROW_BAND_ACTIVITY_CONTROLS,NARROW_BAND_VOLUME_CONTROL,NARROW_BAND_SPARSE_CONTROL,NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL,NARROW_BAND_PARTICLE_CAP_CONTROL,...NARROW_BAND_TUNE_CONTROLS] as const;
 export const narrowBandControlValues = (values:MethodParamValues={}) => Object.fromEntries(controls.map(c=>{
  const raw=Number(values[c.key]);
  return [c.key,c.key==="particleCellCap"?narrowBandParticleCellCap(raw):c.key==="sparseNeighbours"?narrowBandSparseNeighbours(raw):Number.isFinite(raw)?Math.min(c.max,Math.max(c.min,raw)):c.default];

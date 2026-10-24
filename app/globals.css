@@ -1073,12 +1073,17 @@ button.card[data-active] { border-color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .transport-notice { transition: none; } }
 
 /* ---- simulation-time video playback ---- */
-.recording-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 28px; background: var(--scrim); backdrop-filter: blur(12px); }
+.recording-modal-backdrop, .detail-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 28px; background: var(--scrim); backdrop-filter: blur(12px); }
 .recording-modal { width: min(980px, 94vw); max-height: 92vh; overflow: auto; border: 1px solid var(--line-strong); background: var(--overlay); box-shadow: var(--shadow-lift); }
-.recording-modal > header { min-height: 70px; padding: 14px 17px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
-.recording-modal > header .eyebrow { margin-bottom: 5px; }
-.recording-modal > header h2 { margin: 0; font: var(--text-heading); letter-spacing: var(--track-tight); }
-.recording-modal .icon-button { width: 30px; height: 30px; background: transparent; color: var(--muted); font-size: var(--size-6); }
+/* Simulation detail's every control (the Tune menu's All controls): the
+   playback dialog's shell at the width of one column of fields. */
+.detail-modal { width: min(460px, 94vw); max-height: 92vh; overflow: auto; border: 1px solid var(--line-strong); background: var(--overlay); box-shadow: var(--shadow-lift); }
+.detail-modal-body { padding: 8px 17px 16px; }
+.detail-modal-body > h3 { margin: 14px 0 5px; padding-top: 9px; border-top: 1px solid var(--line); color: var(--micro); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.recording-modal > header, .detail-modal > header { min-height: 70px; padding: 14px 17px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+.recording-modal > header .eyebrow, .detail-modal > header .eyebrow { margin-bottom: 5px; }
+.recording-modal > header h2, .detail-modal > header h2 { margin: 0; font: var(--text-heading); letter-spacing: var(--track-tight); }
+.recording-modal .icon-button, .detail-modal .icon-button { width: 30px; height: 30px; background: transparent; color: var(--muted); font-size: var(--size-6); }
 .recording-video-frame { position: relative; aspect-ratio: 16 / 9; overflow: hidden; background: var(--bg); }
 .recording-video-frame video { width: 100%; height: 100%; display: block; object-fit: contain; }
 .recording-time-badge { position: absolute; top: 12px; left: 12px; padding: 7px 9px; border: 1px solid var(--accent-line); background: var(--overlay); color: var(--accent); font: var(--text-tag); letter-spacing: var(--track-wide); pointer-events: none; backdrop-filter: blur(10px); }
@@ -1999,7 +2004,7 @@ button.card[data-active] { border-color: var(--accent); }
 }
 
 @media (max-width: 920px) {
-  .recording-modal-backdrop { padding: 12px; }
+  .recording-modal-backdrop, .detail-modal-backdrop { padding: 12px; }
   .recording-stats { grid-template-columns: 1fr 1fr; }
   /* Narrow enough that a centred cluster and the mode chip would overlap, so
      the cluster gives up the centre and the notice gives up its line. */
@@ -2107,13 +2112,13 @@ button.card[data-active] { border-color: var(--accent); }
 .entity-hover-chip, .editor-hover-chip, .shape-readout, .shape-axis-lock,
 .editor-fill-handle, .toolstrip-pane, .toolstrip-tip,
 .svo-cost-legend, .gpu-fallback,
-.recording-modal, .viewport-failure-alert {
+.recording-modal, .detail-modal, .viewport-failure-alert {
   border-color: var(--line-strong);
   border-radius: var(--pane-radius, var(--radius-s));
   box-shadow: var(--shadow-card);
 }
 .svo-cost-legend, .gpu-fallback,
-.recording-modal, .viewport-failure-alert { --pane-radius: var(--radius-m); }
+.recording-modal, .detail-modal, .viewport-failure-alert { --pane-radius: var(--radius-m); }
 /* The chips, the bar and the tags: one plate, the rail's. Stated after the
    rules that draw each of them and at their own specificity, so every lit
    state — armed, pressed, alert, hovered — still outranks it. */
