@@ -1,4 +1,5 @@
-import { uniformDetailModule, uniformDetailPick, uniformDetailPipeline } from "./uniform-detail-fields";
+import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
+import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPick, uniformDetailPipeline, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { UNIFORM_REGION_TIER } from "./uniform-region-heat";
@@ -54,7 +55,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
   readonly faces: GPUTexture;
   private readonly readback: GPUBuffer;
   private pipeline?: GPUComputePipeline;
-  private group?: GPUBindGroup;
+  private group?: UniformDetailGroup;
   private layout?: GPUBindGroupLayout;
   private fields?: UniformBulkTierFields;
   private rootWord = 0;
@@ -74,7 +75,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
     const f = this.fields; if (!f) throw new Error("The 16h bulk tier is not bound");
     const device = this.device, R = this.regions, S = !!f.rootTopology;
     const buffer = (binding: number, type: GPUBufferBindingType) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type } });
-    this.layout = device.createBindGroupLayout({ label: "Uniform bulk tier", entries: [buffer(0, "uniform"),
+    this.layout = uniformDetailBindLayout(device, { label: "Uniform bulk tier", entries: [buffer(0, "uniform"),
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       buffer(2, "read-only-storage"), buffer(3, "read-only-storage"), ...(S ? [buffer(4, "read-only-storage")] : []), buffer(5, "read-only-storage"), buffer(6, "storage"), buffer(7, "storage"),
       { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }] });
@@ -82,8 +83,9 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
     const p = f.pressure, align = device.limits.minStorageBufferOffsetAlignment, offset = p.offset ?? 0, base = offset - offset % align;
     const size = p.size ?? p.buffer.size - offset;
     this.rootWord = (offset - base) / 4;
-    this.group = device.createBindGroup({ label: "Uniform bulk tier", layout: this.layout, entries: [
-      { binding: 0, resource: { buffer: f.params, size: 80 } }, { binding: 1, resource: f.velocity.createView() },
+    // A detail group: the storage re-creates it when the velocity field moves.
+    this.group = uniformDetailGroup(device, { label: "Uniform bulk tier", layout: this.layout, entries: [
+      { binding: 0, resource: { buffer: f.params, size: 80 } }, { binding: 1, resource: f.velocity },
       { binding: 2, resource: { buffer: f.slots.buffer } }, { binding: 3, resource: f.rootPhi }, ...(f.rootTopology ? [{ binding: 4, resource: f.rootTopology }] : []),
       { binding: 5, resource: { buffer: f.tiers } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
       { binding: 7, resource: { buffer: this.record } }, { binding: 8, resource: this.faces.createView() }] });
@@ -114,7 +116,7 @@ fn bTexel(i:u32)->vec2u{return vec2u(i%${UNIFORM_BULK_FACE_WIDTH}u,i/${UNIFORM_B
 // The +face of tile t on axis a (0 where t is not stored: a wall).
 fn bFace(t:vec3i,a:u32)->f32{
  if(umTileKind(t)!=UM_RESIDENT){return 0.0;}
- var q=4*t;q[a]+=3;return textureLoad(velocity,q,0)[a];
+ var q=4*t;q[a]+=3;return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,q,0)[a];
 }
 @compute @workgroup_size(64) fn bulkSelect(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u){
  let dt=params.hDt.w;let h=params.policy.w;
@@ -190,7 +192,7 @@ fn bFace(t:vec3i,a:u32)->f32{
   encodeSelect(encoder: GPUCommandEncoder): void {
     if (!this.pipeline || !this.group) throw new Error("The 16h bulk tier is not initialized");
     encoder.clearBuffer(this.record, 4 * UNIFORM_BULK_HEADER(this.regions), 4 * 9);
-    const pass = encoder.beginComputePass(PASS); pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.group);
+    const pass = encoder.beginComputePass(PASS); pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.group.group);
     pass.setPipeline(uniformDetailPick(this.pipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.regions)); pass.end();
   }
   /** Diagnostics (a readback): the last selection's counts. */
