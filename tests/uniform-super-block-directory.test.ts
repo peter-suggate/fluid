@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { UNIFORM_LATTICE_MAX_PAGES, uniformLatticeAddress, uniformPageWord } from "../lib/methods/uniform/uniform-lattice-address";
+import { UNIFORM_LATTICE_MAX_PAGES, uniformEachPage, uniformLatticeAddress, uniformPageWord } from "../lib/methods/uniform/uniform-lattice-address";
 import { UNIFORM_PAGE_POOL_SOLID, uniformPagePoolLayout } from "../lib/methods/uniform/uniform-page-pool";
 import { uniformWindowDecision } from "../lib/methods/uniform/uniform-moving-window";
 import { UNIFORM_DIRECTORY_CHILD_WORDS, UNIFORM_DIRECTORY_TOP_WORDS, UNIFORM_DIRECTORY_WORDS, UNIFORM_WINDOW_EDGE_FATAL, uniformDirectoryWord } from "../lib/methods/uniform/uniform-window-address";
@@ -20,6 +20,8 @@ test("a sparse box of 4096 cells an axis resolves every page through the super-b
     else assert.equal(w, 0, `page ${x},${y},${z} is AIR`);
   }
   assert.equal(blocks.size, keep.size);
+  const visited: string[] = []; uniformEachPage(a, (b, x, y, z) => { assert.equal(uniformPageWord(a, x, y, z), b); visited.push(`${x},${y},${z}`); });
+  assert.deepEqual(new Set(visited), keep);
   for (const [x, y, z] of [[-1, 0, 0], [px, 1, 0], [5, py, 1], [5, 0, -1]] as const) assert.equal(uniformPageWord(a, x, y, z), UNIFORM_PAGE_POOL_SOLID, `page ${x},${y},${z} past the box`);
   const tail = a.seed.tail, flat = UNIFORM_DIRECTORY_TOP_WORDS + UNIFORM_DIRECTORY_CHILD_WORDS;
   for (let z = 0; z < 64; z++) for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++)

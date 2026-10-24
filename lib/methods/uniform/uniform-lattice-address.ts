@@ -1013,7 +1013,7 @@ export function uniformEachPage(a: UniformLatticeAddress, visit: (block: number,
   for (let b = 1; b < a.blocks - 1; b++) {
     const r = a.seed.blocks[b]!;
     if (r === UNIFORM_PAGE_POOL_FREE) continue;
-    const x = ((r & 63) - o[0]) & 63, y = (((r >>> 6) & 63) - o[1]) & 63, z = (((r >>> 12) & 63) - o[2]) & 63;
+    const x = ((r & 255) - o[0]) & 255, y = (((r >>> 8) & 255) - o[1]) & 255, z = (((r >>> 16) & 255) - o[2]) & 255;
     if (x < px && y < py && z < pz) visit(b, x, y, z);
   }
 }
