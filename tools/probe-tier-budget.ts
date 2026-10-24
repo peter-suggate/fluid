@@ -55,12 +55,12 @@ import { sceneLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { UNIFORM_DETAIL_CANONICAL_LOAD } from "../lib/core/uniform-detail-abi";
+import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_CANONICAL_LOAD } from "../lib/core/uniform-detail-abi";
 import { levelSetFillWGSL } from "../lib/core/level-set-fill.wgsl";
-import { uniformMixedVertexSamplingSource } from "../lib/methods/uniform/uniform-mixed-vertex-sampling.wgsl";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
-import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule } from "../lib/methods/uniform/uniform-detail-fields";
+import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline } from "../lib/methods/uniform/uniform-detail-fields";
+import { UNIFORM_WINDOW_HEADER } from "../lib/methods/uniform/uniform-window-address";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "../lib/methods/uniform/uniform-mixed-topology.wgsl";
 import type { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed-ownership";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
@@ -275,43 +275,44 @@ try {
   writeFileSync(`${out}/${name}-construction-memory.json`, JSON.stringify({ ...construction, resources: constructionMemory.resources }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "constructed", ...construction }));
   const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; ownership: UniformMixedOwnership; heat: { counts: { buffer: GPUBuffer; offset: number } } } }).mixedFrame;
-  const textures = solver as unknown as { vertexPhiField: GPUTexture; velocityA: GPUTexture };
+  const textures = solver as unknown as { vertexPhiField: GPUTexture; vertexPhiScratch: GPUTexture; velocityA: GPUTexture };
   // Zone probe: one lane per owner of every tier, as UniformMixedDiagnostics.
+  // It runs twice, over the phi field and over its scratch twin: the frame
+  // ping-pongs phi through both, and a sample keeps the one whose total is
+  // the solver's own volume (stats.volumeCellSum).
   const layout = uniformDetailBindLayout(device, { entries: [
     ...[0, 1].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } })),
     { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } }] });
-  const probe = device.createBuffer({ label: "Tier budget probe", size: 4 * W, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-  const group = uniformDetailGroup(device, { layout, entries: [{ binding: 0, resource: textures.vertexPhiField },{ binding: 1, resource: textures.velocityA }, { binding: 2, resource: { buffer: probe } }] });
+  const phis = { field: textures.vertexPhiField, scratch: textures.vertexPhiScratch };
+  const probes = Object.fromEntries(Object.entries(phis).map(([key, phi]) => {
+    const buffer = device.createBuffer({ label: `Tier budget probe (${key})`, size: 4 * W, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    return [key, { buffer, group: uniformDetailGroup(device, { layout, entries: [{ binding: 0, resource: phi }, { binding: 1, resource: textures.velocityA }, { binding: 2, resource: { buffer } }] }) }];
+  })) as Record<keyof typeof phis, { buffer: GPUBuffer; group: ReturnType<typeof uniformDetailGroup> }>;
   const throat = [Math.floor((wall.low + wall.high) / 2), wall.holeY, wall.holeZ];
   const module = uniformDetailModule(device, { label: "Tier budget probe", code: uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(frame.ownership.capacity, 0) + /* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var velocity:texture_3d<f32>;
 @group(1) @binding(2) var<storage,read_write> words:array<atomic<u32>>;
-fn umLoadVertex(p:vec3u)->f32{return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(phi,vec3i(p),0).x;}
-${uniformMixedVertexSamplingSource("", false)}
+// A canonical vertex load (UniformMixedDiagnostics' form): a 4h owner's
+// corners are canonical vertices, as are an h owner's.
+fn corner(p:vec3u)->f32{return ${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(phi,vec3i(p),0).x;}
 ${levelSetFillWGSL}
-// An owner's liquid in h cells: the tetrahedral fill of phi over each of its
-// h cells (NB-FLIP's volume measure, uniform-mixed-surface-volume.ts), a 4h
-// owner's under the trilinear field of its eight corners. Solids are not
-// subtracted: the zone that holds one (the wall) is reported apart.
+// An owner's liquid in h cells: NB-FLIP's volume measure
+// (uniform-mixed-surface-volume.ts measure): the tetrahedral fill of its
+// eight corners times its cells. Solids are not subtracted: the zone that
+// holds one (the wall) is reported apart.
 fn ownerFill(q:vec3u,w:u32)->f32{
  var c:array<f32,8>;
- for(var k=0u;k<8u;k++){c[k]=umVertexValue(q+umCorner(k,2u)*w);}
- if(w==1u){return fill(c);}
- var lo=0.0;var hi=0.0;for(var k=0u;k<8u;k++){lo=min(lo,c[k]);hi=max(hi,c[k]);}
- if(hi<0.0){return 64.0;}if(lo>=0.0){return 0.0;}
- var sum=0.0;
- for(var s=0u;s<64u;s++){
-  let base=vec3f(f32(s&3u),f32((s>>2u)&3u),f32(s>>4u));var v:array<f32,8>;
-  for(var k=0u;k<8u;k++){
-   let f=0.25*(base+vec3f(umCorner(k,2u)));
-   let a=mix(mix(c[0],c[1],f.x),mix(c[2],c[3],f.x),f.y);let b=mix(mix(c[4],c[5],f.x),mix(c[6],c[7],f.x),f.y);
-   v[k]=mix(a,b,f.z);
-  }
-  sum+=fill(v);
- }
- return sum;
+ for(var k=0u;k<8u;k++){c[k]=corner(q+umCorner(k,2u)*w);}
+ var lo=1e30;var hi=-1e30;for(var k=0u;k<8u;k++){lo=min(lo,c[k]);hi=max(hi,c[k]);}
+ let cells=f32(w*w*w);
+ if(hi<0.0){return cells;}if(lo>=0.0){return 0.0;}
+ return fill(c)*cells;
 }
+// Owner origins are window lattice cells: the box's low cell is its world
+// page less the frame's (umWallLow without the clamp), which moves under an
+// open top. Zones are box cells.
+fn boxOrigin()->vec3i{return 32*vec3i(bitcast<vec3u>(umWorldLow()-umFramePage())&vec3u(63u));}
 const WALL_LOW:u32=${wall.low}u;const WALL_HIGH:u32=${wall.high}u;
 const THROAT_LOW:u32=${Math.max(0, wall.low - THROAT_REACH)}u;const THROAT_HIGH:u32=${wall.high + THROAT_REACH}u;
 const FLOOR_BAND:u32=${FLOOR_BAND}u;const THROAT:vec3i=vec3i(${throat.join(",")});
@@ -323,9 +324,11 @@ var<workgroup> sums:array<atomic<u32>,5>;
  workgroupBarrier();
  let owner=umAllOwner(gid);
  if(owner.width!=0u){
-  let q=umOrigin(owner);let w=owner.width;
+  let window=umOrigin(owner);let q=vec3u(vec3i(window)-boxOrigin());let w=owner.width;
   atomicMin(&words[24],q.x);atomicMax(&words[25],q.x+w);atomicMin(&words[26],q.y);atomicMax(&words[27],q.y+w);atomicMin(&words[28],q.z);atomicMax(&words[29],q.z+w);
-  let liquid=ownerFill(q,w);let fraction=liquid/f32(w*w*w);
+  // Debug: phi at the box's low corner vertex, and the box origin in window cells (x).
+  if(all(q==vec3u(0u))&&owner.lane==0u){atomicStore(&words[30],bitcast<u32>(corner(window)));atomicStore(&words[31],u32(boxOrigin().x));}
+  let liquid=ownerFill(window,w);let fraction=liquid/f32(w*w*w);
   let fixed=u32(liquid*4096.0+0.5);
   atomicAdd(&sums[0],fixed);
   let left=q.x+w<=WALL_LOW;let right=q.x>=WALL_HIGH;
@@ -352,17 +355,26 @@ var<workgroup> sums:array<atomic<u32>,5>;
   const messages = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
   // A probe that does not compile would fail every configuration after it: stop the process.
   if (messages.length) { console.error(messages.map(m => `probe WGSL ${m.lineNum}:${m.linePos} ${m.message}`).join("\n")); process.exit(2); }
-  const pipeline = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [frame.ownership.bindLayout, layout] }),
+  // As the solver's own kernels: a closed tank's frame and world bounds are
+  // pipeline constants (uniformDetailPipeline); without them a page decode
+  // after the first commit does not match the solver's.
+  const seed = frame.ownership.capacity.address.seed, at = seed.layout.tail.window;
+  const windowHeader = { fixedWorldGeometry: frame.ownership.fixedWorldGeometry, policy: seed.tail[at + UNIFORM_WINDOW_HEADER.policy],
+    frame: [0, 1, 2].map(i => seed.tail[at + UNIFORM_WINDOW_HEADER.frame + i]! | 0), box: [0, 1, 2].map(i => seed.tail[at + UNIFORM_WINDOW_HEADER.box + i]! | 0) };
+  console.log(JSON.stringify({ phase: "window", ...windowHeader }));
+  const pipeline = await uniformDetailPipeline(device, frame.ownership, { layout: device.createPipelineLayout({ bindGroupLayouts: [frame.ownership.bindLayout, layout] }),
     compute: { module, entryPoint: "probe", constants: { umDispatchX: frame.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.all } } });
-  const READ = { probe: 0, work: 4 * W, heat: 4 * W + 32, pool: 4 * W + 48 }, readBytes = READ.pool + 4 * S.words;
+  const READ = { field: 0, scratch: 4 * W, work: 8 * W, heat: 8 * W + 32, pool: 8 * W + 48 }, readBytes = READ.pool + 4 * S.words;
   const read = device.createBuffer({ label: "Tier budget readback", size: readBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const reset = new Uint32Array(W); for (const at of [21, 24, 26, 28]) reset[at] = 0xffffffff;
   const sample = async () => {
-    device.queue.writeBuffer(probe, 0, reset);
+    for (const p of Object.values(probes)) device.queue.writeBuffer(p.buffer, 0, reset);
     const encoder = device.createCommandEncoder();
-    const pass = encoder.beginComputePass({ label: "Tier budget probe" }); pass.setBindGroup(0, frame.ownership.bindGroup); pass.setBindGroup(1, group.group);
-    frame.ownership.dispatchAllCounted(pass, pipeline); pass.end();
-    encoder.copyBufferToBuffer(probe, 0, read, READ.probe, 4 * W);
+    for (const [key, p] of Object.entries(probes) as [keyof typeof probes, typeof probes.field][]) {
+      const pass = encoder.beginComputePass({ label: `Tier budget probe (${key})` }); pass.setBindGroup(0, frame.ownership.bindGroup); pass.setBindGroup(1, p.group.group);
+      frame.ownership.dispatchAllCounted(pass, pipeline); pass.end();
+      encoder.copyBufferToBuffer(p.buffer, 0, read, READ[key], 4 * W);
+    }
     frame.ownership.encodeWorkReceipt(encoder, read, READ.work);
     encoder.copyBufferToBuffer(frame.heat.counts.buffer, frame.heat.counts.offset, read, READ.heat, 16);
     frame.pagePool.encodeReceipt(encoder, read, READ.pool);
@@ -379,21 +391,29 @@ var<workgroup> sums:array<atomic<u32>,5>;
     await solver.awaitFrameCompletion();
     return performance.now() - start;
   };
+  // The head before any liquid is measured: the reservoir's authored top over the throat's centre.
+  const authoredTop_m = Math.max(0, ...(scene.fluid.initialLiquidVolumes ?? []).map(v => "max_m" in v ? (v as { max_m: { y: number } }).max_m.y : 0));
   const record = async (step: number, wall_ms: number) => {
-    const u = await sample(), f = new Float32Array(u.buffer);
+    const all = await sample();
     const stats = await solver.readStats();
+    // The phi texture whose total is the solver's volume (in cells) holds this step's phi.
+    const totals = { field: wide(all, READ.field / 4), scratch: wide(all, READ.scratch / 4) }, solverCells = stats.volumeCellSum ?? 0;
+    const phiSource = Math.abs(totals.scratch - solverCells) < Math.abs(totals.field - solverCells) ? "scratch" : "field";
+    const u = new Uint32Array(all.buffer.slice(READ[phiSource], READ[phiSource] + 4 * W)), f = new Float32Array(u.buffer);
     const t = step * dt, liquid = { total: wide(u, 0), left: wide(u, 2), right: wide(u, 4), wall: wide(u, 6), rightFloorBand: wide(u, 8) };
-    const level_m = liquid.left / reservoirFootprint * h, head_m = level_m - throatCentre_m;
+    const measured = liquid.left > 0 && Math.abs(liquid.total - solverCells) < 0.05 * solverCells;
+    const level_m = measured ? liquid.left / reservoirFootprint * h : authoredTop_m, head_m = level_m - throatCentre_m;
     const qT = wall.holeY >= 0 && head_m > 0 ? h * h * Math.sqrt(2 * gravity * head_m) : undefined;
     const uThroat = u[17] ? f[16]! : undefined;
     const qRight = previous ? (liquid.right - previous.right) * cell3 / (t - previous.t) : undefined;
     const qLeft = previous ? -(liquid.left - previous.left) * cell3 / (t - previous.t) : undefined;
     previous = { t, left: liquid.left, right: liquid.right };
-    const snapshot = since(base), status = u.subarray(READ.pool / 4, READ.pool / 4 + S.words);
+    const snapshot = since(base), status = all.subarray(READ.pool / 4, READ.pool / 4 + S.words);
     const row = { step, t, wall_ms,
-      tiles: { h: u[READ.work / 4], coarse: u[READ.work / 4 + 1], residentPages: u[READ.work / 4 + 7], probedH: u[19], probedCoarse: u[20] },
+      tiles: { h: all[READ.work / 4], coarse: all[READ.work / 4 + 1], residentPages: all[READ.work / 4 + 7], probedH: u[19], probedCoarse: u[20] },
       pool: { resident: status[S.resident], free: status[S.free], claimed: status[S.claimed], fatal: uniformPagePoolFatalMessage(frame.pagePool.layout, status) ?? undefined },
-      regions: { cold: u[READ.heat / 4], warm: u[READ.heat / 4 + 1], hot: u[READ.heat / 4 + 2], free: u[READ.heat / 4 + 3] },
+      regions: { cold: all[READ.heat / 4], warm: all[READ.heat / 4 + 1], hot: all[READ.heat / 4 + 2], free: all[READ.heat / 4 + 3] },
+      phi: { source: phiSource, measured, fieldCells: totals.field, scratchCells: totals.scratch, solverCells: stats.volumeCellSum, lowCorner: f[30], boxOriginX: u[31] },
       particles: solver.narrowBandFlipInfo?.particles,
       zones: { hTilesLeft: u[10], hTilesThroat: u[11], hTilesRightFloor: u[12], hTilesRightJet: u[13], coarseTilesRight: u[14], coarseTilesLeft: u[15],
         rightWetFloor_cells: u[18], liquidX: [u[21], u[22]], liquidTopY: u[23], ownerBox: [u[24], u[25], u[26], u[27], u[28], u[29]] },
@@ -420,7 +440,7 @@ var<workgroup> sums:array<atomic<u32>,5>;
     }
   }
   assert.deepEqual(errors, []);
-  read.destroy(); probe.destroy();
+  read.destroy(); for (const p of Object.values(probes)) p.buffer.destroy();
 } catch (error) {
   failure = `${error instanceof Error ? error.message : String(error)}${error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : ""}`;
   console.error(`failed at step ${frameReached}: ${failure}`);
@@ -434,19 +454,19 @@ const peak = (path: string) => rows.reduce((m, r) => Math.max(m, get(r, path) ??
 const last = rows[rows.length - 1] ?? {};
 const thirds = [0, 1, 2].map(i => { const w = walls.filter(x => x.frame >= from && !x.afterSample); const s = w.slice(Math.floor(i * w.length / 3), Math.floor((i + 1) * w.length / 3)).map(x => x.wall_ms);
   return s.length ? s.reduce((a, b) => a + b, 0) / s.length : undefined; });
-const cds = rows.map(r => get(r, "discharge.cdRight")).filter((v): v is number => v !== undefined && Number.isFinite(v));
-const late = cds.slice(Math.floor(cds.length / 2));
+const lateMean = (path: string) => { const v = rows.map(r => get(r, path)).filter((x): x is number => x !== undefined && Number.isFinite(x)).slice(1);
+  const l = v.slice(Math.floor(v.length / 2)); return l.length ? l.reduce((x, y) => x + y, 0) / l.length : undefined; };
 const summary = { steps: frameReached, failure, step_ms: { mean, median: pct(.5), p95: pct(.95), longest: timed[timed.length - 1], thirds },
   peaks: { hTiles: peak("tiles.h"), coarseTiles: peak("tiles.coarse"), resident: peak("pool.resident"), particles: peak("particles"),
     hTilesRightFloor: peak("zones.hTilesRightFloor"), hTilesRightJet: peak("zones.hTilesRightJet"), hTilesThroat: peak("zones.hTilesThroat"), hot: peak("regions.hot"), warm: peak("regions.warm"), allocatedBytes: peak("allocatedBytes") },
   final: { tiles: last.tiles, pool: last.pool, regions: last.regions, zones: last.zones, volume: last.volume, liquid_m3: last.liquid_m3, byClass: last.byClass },
-  discharge: { cdRightLateHalfMean: late.length ? late.reduce((a, b) => a + b, 0) / late.length : undefined,
+  discharge: { cdRightLateHalfMean: lateMean("discharge.cdRight"), cdThroatLateHalfMean: lateMean("discharge.cdInstant"), qThroatLateHalfMean_m3_s: lateMean("discharge.qInstant_m3_s"),
     rightVolume_L: (get(last, "liquid_m3.right") ?? 0) * 1000, torricelliAtStart_m3_s: get(rows[0] ?? {}, "discharge.qTorricelli_m3_s") } };
 writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, summary, rows, walls }, null, 2) + "\n");
 const fmt = (v: number | undefined, d = 1) => v === undefined ? "-" : v.toFixed(d);
 const gib = (b: number | undefined) => b === undefined ? "-" : (b / 2 ** 30).toFixed(2);
 const byClass = (last.byClass ?? {}) as Record<string, number>;
-console.log(`${name}: ${sceneId} ${g.nx}x${g.ny}x${g.nz} h=${h * 1000}mm pool ${g.pool} | ${frameReached}/${steps} steps${failure ? ` FAILED (${failure})` : ""} | step median ${fmt(pct(.5))} p95 ${fmt(pct(.95))} ms | peak h tiles ${peak("tiles.h")} resident ${peak("pool.resident")} particles ${peak("particles")} | floor h tiles peak ${peak("zones.hTilesRightFloor")} | GiB h ${gib(byClass["pool-at-h"])} 4h ${gib(byClass["pool-at-4h"])} box ${gib(byClass["dense-box"])} fixed ${gib(byClass.fixed)} unclassified ${gib(byClass.unclassified)} total ${gib(get(last, "allocatedBytes"))} | Cd late ${fmt(summary.discharge.cdRightLateHalfMean, 3)} | drift ${fmt(get(last, "volume.drift"), 4)}`);
+console.log(`${name}: ${sceneId} ${g.nx}x${g.ny}x${g.nz} h=${h * 1000}mm pool ${g.pool} | ${frameReached}/${steps} steps${failure ? ` FAILED (${failure})` : ""} | step median ${fmt(pct(.5))} p95 ${fmt(pct(.95))} ms | peak h tiles ${peak("tiles.h")} resident ${peak("pool.resident")} particles ${peak("particles")} | floor h tiles peak ${peak("zones.hTilesRightFloor")} | GiB h ${gib(byClass["pool-at-h"])} 4h ${gib(byClass["pool-at-4h"])} box ${gib(byClass["dense-box"])} fixed ${gib(byClass.fixed)} unclassified ${gib(byClass.unclassified)} total ${gib(get(last, "allocatedBytes"))} | Cd late: right volume ${fmt(summary.discharge.cdRightLateHalfMean, 3)} throat u ${fmt(summary.discharge.cdThroatLateHalfMean, 3)} | phi ${get(last, "phi.source") ?? "-"}${get(last, "phi.measured") ? "" : " (unmeasured)"} | drift ${fmt(get(last, "volume.drift"), 4)}`);
 if (c) await destroy(c);
 return failure === undefined;
 }
