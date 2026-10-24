@@ -166,7 +166,9 @@ fn umPageWord(page:vec3i)->u32{return ${pagesOf}umPageWord(page);}
 fn umBlockWord(b:u32)->u32{return ${pagesOf}umBlockWord(b);}`}
 // Lattice addressing (uniform-lattice-address.ts): its paged bodies, whose
 // tile key count is UM_TILES. No box: a coordinate resolves through the page table.
-${uniformLatticeAddressWGSL({ constant: true, paged: { blocks: "(UM_TILES/512u)" }, world: true, addressPlan: pagesOf === undefined })}
+// The h slots (umFineSlot): a word a block before the buffer's last word.
+${uniformLatticeAddressWGSL({ constant: true, paged: { blocks: "(UM_TILES/512u)" }, world: true, addressPlan: pagesOf === undefined,
+    fine: pagesOf === undefined ? "umTopology[arrayLength(&umTopology)-1u-UM_BLOCKS+b]" : `${pagesOf}umFineSlot(b)` })}
 ${uniformCompiledTopologyWGSL}
 struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
 fn umAllOwner(gid:vec3u)->UMOwner {

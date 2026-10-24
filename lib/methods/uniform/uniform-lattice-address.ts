@@ -31,6 +31,12 @@ import { uniformAddressHome } from "./uniform-address-plan";
  * block: storage a field fills with what it holds where there is no
  * liquid, and no kernel writes (a store there is dropped).
  *
+ * An h store (a cell or vertex texture of the h lattice: umCellTexel,
+ * umVertexTexel and their Store and Run forms) places a block at its h
+ * slot's place in the grid (umFineCoord) instead: umFineSlot(b), which the
+ * including module names (source.fine), identity where it names none. A
+ * tile texture and a 4h vertex texture always place a block at its own.
+ *
  * Keys are block-major. A tile key is 512 x its page's block + its index in
  * the page, x | y<<3 | z<<6; a cell key is 64 x its tile's key + its index
  * in the tile, x | y<<2 | z<<4. Every block has its 512 tile keys, so the
@@ -49,10 +55,10 @@ import { uniformAddressHome } from "./uniform-address-plan";
  *  tiles         umTileAt umTileCoord umTilePresent umTileInBox umTileNear umTileLive
  *                umTileTexel umTileStoreTexel umTileKey umKeyStored
  *  cells         umCellAt umCellCoord umCellPresent umCellInBox umCellNear umCellTexel
- *                umCellStoreTexel umCellLive umCellRowAt umPointNear umPointNearIn
+ *                umCellStoreTexel umCellTexelOf umCellStoreTexelOf umCellLive umCellRowAt umPointNear umPointNearIn
  *                umPointPresent
  *  pages         UM_PAGE_BOX UM_BLOCKS umBlockPage umTileLocal umLocalTile
- *  block grid    UM_BLOCK_BITS UM_BLOCK_GRID umBlockCoord
+ *  block grid    UM_BLOCK_BITS UM_BLOCK_GRID umBlockCoord umFineSlot umFineCoord
  *  vertices      umVertexAt umVertexCoord umVertexPresent umVertexNear umVertexSlot
  *                umVertexTexel umVertexStoreTexel
  *  4h vertices   umWideVertexPresent umWideVertexNear umWideVertexSlot
@@ -133,6 +139,9 @@ export interface UniformLatticeAddressSource {
    * the walls fold to it (umFixedBox, umBoxWalls). */
   readonly world?: boolean;
   readonly addressPlan?: boolean;
+  /** A u32 expression of b: the h slot of block b, where the h stores
+   * place its page (umFineSlot). Omitted: b, every block its own. */
+  readonly fine?: string;
 }
 
 /** A page: 32³ cells, 8³ tiles. The page table and block records are the
@@ -212,8 +221,12 @@ fn umTileKey(p:vec3i)->u32{let b=umPageWord(p>>vec3u(3u));if(!umBlockStored(b)){
 // Cells.${boxed(" umPointNear clamps a position in cell units to the box.")}
 fn umCellPresent(p:vec3i)->bool{return umBlockStored(umPageWord(p>>vec3u(5u)));}
 ${boxed(`fn umCellNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(0),vec3i(${d})-vec3i(1));}
-`)}fn umCellTexel(p:vec3i)->vec3i{${cellLet}return (umBlockCoord(umBlockOf(${cellQ}>>vec3u(5u)))<<vec3u(5u))|(${cellQ}&vec3i(31));}
-fn umCellStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(5u));if(!umBlockStored(b)){return vec3i(-1);}return (umBlockCoord(b)<<vec3u(5u))|(p&vec3i(31));}
+`)}fn umCellTexel(p:vec3i)->vec3i{${cellLet}return (umFineCoord(umBlockOf(${cellQ}>>vec3u(5u)))<<vec3u(5u))|(${cellQ}&vec3i(31));}
+fn umCellStoreTexel(p:vec3i)->vec3i{let b=umPageWord(p>>vec3u(5u));if(!umBlockStored(b)){return vec3i(-1);}return (umFineCoord(b)<<vec3u(5u))|(p&vec3i(31));}
+// The same in a cell texture that places a block at its own place (fine
+// false: a base block's map, >> 2) or at its h slot's (fine true).
+fn umCellTexelOf(p:vec3i,fine:bool)->vec3i{${cellLet}var b=umBlockOf(${cellQ}>>vec3u(5u));if(fine){b=umFineSlot(b);}return (umBlockCoord(b)<<vec3u(5u))|(${cellQ}&vec3i(31));}
+fn umCellStoreTexelOf(p:vec3i,fine:bool)->vec3i{let w=umPageWord(p>>vec3u(5u));if(!umBlockStored(w)){return vec3i(-1);}var b=w;if(fine){b=umFineSlot(w);if(b==0u){return vec3i(-1);}}return (umBlockCoord(b)<<vec3u(5u))|(p&vec3i(31));}
 // The block of a cell${boxed(" of the box")}.
 fn umCellBlock(p:vec3u)->u32{return umBlockOf(vec3i(p>>vec3u(5u)));}
 // Vertices of the h lattice: one more plane per axis than the cells. A page
@@ -244,8 +257,8 @@ fn umVertexSlot(v:vec3i)->vec4u{
  return vec4u(own,b);
 }
 fn umVertexPresent(p:vec3i)->bool{return umBlockStored(umVertexSlot(p).w);}
-fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(${vertexQ});let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(5u))+c+vec3i(s.xyz);}
-fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
+fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(${vertexQ});let c=umFineCoord(min(s.w,${blocks}-1u));return (c<<vec3u(5u))+c+vec3i(s.xyz);}
+fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umFineCoord(s.w);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 // Vertices of the 4h lattice (tile corners), in tile units: 9³ blocks.
 fn umWideVertexSlot(v:vec3i)->vec4u{
  ${source.addressPlan ? "let plan=umPlannedVertexSlot(v,3u);if(plan.w!=0xffffffffu){return plan;}" : ""}
@@ -289,6 +302,9 @@ ${source.constant
     ? "const UM_BLOCK_GRID:vec3u=vec3u(1u<<UM_BLOCK_BITS,1u<<UM_BLOCK_BITS,(UM_BLOCKS+(1u<<(2u*UM_BLOCK_BITS))-1u)>>(2u*UM_BLOCK_BITS));"
     : "fn UM_BLOCK_GRID()->vec3u{let k=UM_BLOCK_BITS();return vec3u(1u<<k,1u<<k,(UM_BLOCKS()+(1u<<(2u*k))-1u)>>(2u*k));}"}
 fn umBlockCoord(b:u32)->vec3i{let k=${bits};let m=(1u<<k)-1u;return vec3i(vec3u(b&m,(b>>k)&m,b>>(2u*k)));}
+// The h stores place block b at its h slot's place in the grid.
+fn umFineSlot(b:u32)->u32{return ${source.fine ?? "b"};}
+fn umFineCoord(b:u32)->vec3i{return umBlockCoord(umFineSlot(b));}
 // A tile's index in its page, and the tile of an index (or of a key) from
 // its page's low corner.
 fn umTileLocal(p:vec3u)->u32{let l=p&vec3u(7u);return l.x|(l.y<<3u)|(l.z<<6u);}
@@ -714,7 +730,7 @@ export function uniformLatticeRunWGSL(prefix = ""): string {
  if(any(l+n==vec3u(${1 << bits}u))){return vec4u(0u);}
  return vec4u(l,${prefix}umBlockOf(page));
 }
-fn ${prefix}um${name}RunTexel(s:vec4u)->vec3i{let c=${prefix}umBlockCoord(s.w);return (c<<vec3u(${bits}u))+c+vec3i(s.xyz);}
+fn ${prefix}um${name}RunTexel(s:vec4u)->vec3i{let c=${prefix}${bits === 5 ? "umFineCoord" : "umBlockCoord"}(s.w);return (c<<vec3u(${bits}u))+c+vec3i(s.xyz);}
 `;
   return `${run("Vertex", 5)}fn ${prefix}umVertexRunAt(s:vec4u)->u32{return 35937u*s.w+s.x+33u*(s.y+33u*s.z);}
 ${run("WideVertex", 3)}`;
