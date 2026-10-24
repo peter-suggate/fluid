@@ -1,4 +1,4 @@
-import { NARROW_BAND_FINE_ADVECTION, narrowBandControlParams, narrowBandControlValues, narrowBandFineAdvection } from "./uniform-narrow-band-controls";
+import { NARROW_BAND_COARSE_ADVECTION, NARROW_BAND_FINE_ADVECTION, narrowBandCoarseAdvection, narrowBandControlParams, narrowBandControlValues, narrowBandFineAdvection } from "./uniform-narrow-band-controls";
 import type { MethodParamValues, SimulationMethod } from "../../core/method-contract";
 import { UNIFORM_GEOMETRIC_PARAMS } from "./uniform-geometric-parameters";
 import { composeFeatures } from "../../framework/composition";
@@ -34,6 +34,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  adaptiveSurface:"on",
  coarseParticleMode:"off",
  phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),
+ phiCoarseAdvection:narrowBandCoarseAdvection(values.phiCoarseAdvection),
  coldCensus:values.coldCensus==="full"?"full":"replay",
  coldRegions:values.coldRegions==="fine"?"fine":"frozen16h",
  coldFrameSkip:values.coldFrameSkip==="off"?"off":"on",
@@ -45,6 +46,7 @@ const params:SimulationMethod["params"]=[
  ...narrowBandControlParams,
  {kind:"select",key:"particleTransfer",label:"Particle transfer",default:"flip",tier:"coarse",update:"solver",options:[{value:"flip",label:"FLIP (95%)"},{value:"apic",label:"APIC (experimental)"}],hint:"APIC replaces residual FLIP velocities with quadratic affine transfers, following Sato 2018. Restarts the solver."},
  NARROW_BAND_FINE_ADVECTION,
+ NARROW_BAND_COARSE_ADVECTION,
  {kind:"select",key:"surfaceSplat",label:"Particle surface scatter",default:"fused",tier:"fine",update:"solver",options:[{value:"fused",label:"Occupied cells"},{value:"separate",label:"Separate cell scan"}],hint:"Fuse occupied-cell selection and particle surface scatter using the current particle sort. Preserves the same surface distances. Restarts the solver."},
  {kind:"select",key:"rootCoarse",label:"Deep pressure levels",default:"fused",tier:"fine",update:"solver",options:[{value:"fused",label:"Fused 16h and 32h"},{value:"tiled",label:"Separate tiled levels"}],hint:"Run the deepest pressure levels in one workgroup using the current resident-block list and globally ordered iterations. Restarts the solver."},
  {kind:"select",key:"rootTiles",label:"Pressure stencil sharing",default:"page",tier:"fine",update:"solver",options:[{value:"page",label:"Whole pages"},{value:"octant",label:"Separate octants"}],hint:"Share a pressure halo across all eight octants of each page, preserving the global iteration schedule. Restarts the solver."},
@@ -112,6 +114,6 @@ export const uniformNarrowBandMethod:SimulationMethod={
  appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:0,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
  createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
-  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandSparseNeighbours:narrowBandControlValues(values).sparseNeighbours,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
+  {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandFineAdvection(values.phiFineAdvection),phiCoarseAdvection:narrowBandCoarseAdvection(values.phiCoarseAdvection),narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandSparseNeighbours:narrowBandControlValues(values).sparseNeighbours,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

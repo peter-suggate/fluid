@@ -88,7 +88,7 @@ import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
-import { narrowBandFineAdvection, narrowBandParticleCellCap, narrowBandSparseNeighbours } from "./uniform-narrow-band-controls";
+import { narrowBandCoarseAdvection, narrowBandFineAdvection, narrowBandParticleCellCap, narrowBandSparseNeighbours } from "./uniform-narrow-band-controls";
 import { UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
@@ -112,8 +112,10 @@ export interface WebGPUUniformReferenceOptions {
   narrowBandColdFrameSkip?: "on" | "off";
   /** NB-FLIP regionTiering, warmResolution, particleSeeding (default uniformNearSettled()). */
   narrowBandNearSettled?: UniformNearSettled;
-  /** NB-FLIP: how h vertices advect phi with phiCubicAdvection on (4h vertices keep the cubic): trilinear, cubic, or adaptive (trilinear under hot particles). */
+  /** NB-FLIP: how h vertices advect phi with phiCubicAdvection on (4h vertices follow phiCoarseAdvection): trilinear, cubic, or adaptive (trilinear under hot particles). */
   phiFineAdvection?: "cubic" | "trilinear" | "adaptive";
+  /** NB-FLIP: how 4h vertices advect phi: cubic (the default) or trilinear (phiCoarseAdvection). */
+  phiCoarseAdvection?: "cubic" | "trilinear";
   /** Independent dense vertex level set and conservative cell volume, advanced
    * only by the mixed-ownership frame. */
   geometricVolume?: boolean;
@@ -341,6 +343,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly narrowBandColdFrameSkip: "on" | "off";
   private readonly narrowBandNearSettled: UniformNearSettled;
   private phiFineAdvection: "cubic" | "trilinear" | "adaptive";
+  private phiCoarseAdvection: "cubic" | "trilinear";
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
   get pagePoolInfo(){return this.mixedFrame?.pagePoolInfo;}
   get workDomainInfo(){return this.mixedFrame?.workDomainInfo;}
@@ -651,6 +654,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.narrowBandColdFrameSkip = options.narrowBandColdFrameSkip ?? "on";
     this.narrowBandNearSettled = options.narrowBandNearSettled ?? uniformNearSettled();
     this.phiFineAdvection = options.phiFineAdvection ?? "adaptive";
+    this.phiCoarseAdvection = options.phiCoarseAdvection ?? "cubic";
     this.twoLevelVelocity = true;
     this.phiCubicAdvection = options.phiCubicAdvection !== false;
     this.retainStageDiagnosticsForQA=options.retainStageDiagnosticsForQA===true;
@@ -2318,6 +2322,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     };
     this.narrowBandFinePadding=finite("fineGridPadding",this.narrowBandFinePadding,0,4);
     if(values.phiFineAdvection!==undefined)this.phiFineAdvection=narrowBandFineAdvection(values.phiFineAdvection);
+    if(values.phiCoarseAdvection!==undefined)this.phiCoarseAdvection=narrowBandCoarseAdvection(values.phiCoarseAdvection);
     this.narrowBandAdaptiveBudgetPercent=finite("adaptiveBudgetPercent",this.narrowBandAdaptiveBudgetPercent,0,100);
     this.narrowBandAdaptiveFadeSeconds=finite("adaptiveFadeSeconds",this.narrowBandAdaptiveFadeSeconds,0.05,2);
     this.narrowBandSparseParticleLifetime=finite("sparseParticleLifetime",this.narrowBandSparseParticleLifetime,0,10);
@@ -2728,7 +2733,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           this.mixedParameterScenes[slot]=this.sceneRevision;
           {const g=this.scene.fluid.gravity_m_s2,gravity=(p.gravity??=[0,0,0]) as [number,number,number];gravity[0]=g.x;gravity[1]=g.y;gravity[2]=g.z;}p.density=this.scene.fluid.density_kg_m3;p.viscosity=this.scene.fluid.dynamicViscosity_Pa_s;p.surfaceTension=this.scene.fluid.surfaceTension_N_m;
         }
-        p.openTop=this.address.openTop;p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.fineAdvection=this.phiFineAdvection;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.extensionSweeps;
+        p.openTop=this.address.openTop;p.noSlip=this.scene.container.fluidWallMode==="no-slip";p.cubic=this.phiCubicAdvection;p.fineAdvection=this.phiFineAdvection;p.coarseAdvection=this.phiCoarseAdvection;p.pressureTolerance=this.pressureMultigrid.residualTolerance;p.redistance=true;p.extensionSweeps=this.extensionSweeps;
         // Impacts raise pressure demand faster than a plan two frames old
         // follows. One additional reserve covers long-dam frame 79's third
         // cycle under a 4h surface, and the dam 128^3 all-fine far-wall

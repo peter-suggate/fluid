@@ -61,7 +61,7 @@ export const UNIFORM_GEOMETRIC_SPLASH_HINTS = Object.freeze({
     "How: a vertex whose trilinear read is within 2 cells of the surface re-reads phi with a separable Catmull-Rom cubic over the 4×4×4 vertices around its departure point. Catmull-Rom reproduces quadratics exactly, so the curvature bias drops from second to third order. The result is clamped to the lowest and highest of the 8 vertices enclosing the departure point, so it adds no new extrema: no overshoot or ringing at a crease or a thin sheet.",
     "Scope and cost: 64 taps instead of 8, on band vertices only; deep liquid and far air keep the trilinear read. Frame time within run-to-run noise on the crown splash.",
     "Measured (cm12-figure-6, frame 90, this toggle alone): V inside phi 80,425 → 84,409 of about 94,000 cell volumes; V stranded in the relay band 7,303 → 4,794. No effect on a drop at rest: it does not move, so nothing is resampled. The resting shrink comes from redistancing.",
-    "Off: the trilinear resample at h vertices. 4h vertices keep the cubic either way: no particles carry a 4h surface, and its trilinear resample erodes 16 times faster than at h.",
+    "Off: the trilinear resample at h vertices. 4h vertices keep the cubic either way unless NB-FLIP's 4h-tile phi advection asks for trilinear: no particles carry a 4h surface.",
   ].join("\n\n"),
   phiDrain: [
     "Removes ghost liquid: level set that still says liquid where no volume is left behind it. The surface stops drawing water that has already gone, and V and phi agree about where the liquid is.",
@@ -84,8 +84,8 @@ params.push(
   // Trilinear by default: the NB-FLIP teaser (frames 5-120) ran 11-13% less
   // GPU a frame than with the cubic, with less grid volume loss (-0.8%
   // against -1.1% at frame 120) and less refinement (6144 fine tiles against
-  // 6859). Off is trilinear at h vertices only: 4h vertices keep the cubic
-  // (UniformMixedFrame.write), as nothing else carries a 4h surface.
+  // 6859). Off is trilinear at h vertices only: 4h vertices follow
+  // phiCoarseAdvection, the cubic by default (UniformMixedFrame.write).
   {kind:"select",key:"phiCubicAdvection",label:"Cubic phi advection",default:"off",tier:"fine",update:"runtime",
     options:[{value:"on",label:"On"},{value:"off",label:"Off"}],
     hint:UNIFORM_GEOMETRIC_SPLASH_HINTS.phiCubicAdvection},

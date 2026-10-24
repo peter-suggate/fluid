@@ -99,8 +99,10 @@ export interface UniformMixedFrameParameters {
  /** gravity: the acceleration vector (m/s^2), every component a uniform: any direction, changed between advances. */
  dt:number;gravity:UniformMixedGravity;density:number;viscosity:number;surfaceTension:number;
  openTop:boolean;noSlip:boolean;cubic:boolean;
- /** With cubic: how h vertices advect phi (4h vertices keep the cubic). Trilinear; cubic (the default); adaptive, trilinear in a tile whose particles pin the surface. */
+ /** With cubic: how h vertices advect phi (4h vertices follow coarseAdvection). Trilinear; cubic (the default); adaptive, trilinear in a tile whose particles pin the surface. */
  fineAdvection?:"cubic"|"trilinear"|"adaptive";
+ /** How 4h vertices advect phi, whatever cubic says: cubic (the default) or trilinear. */
+ coarseAdvection?:"cubic"|"trilinear";
  /** Encode the existing maximum slot envelope; convergence still stops execution. */
  fullPressureEnvelope?:boolean;
  /** Extra slots beyond the lagged planner's existing spare; bounded by the configured maximum. */
@@ -144,7 +146,7 @@ const TRACE_RECEIPT=HEAT_RECEIPT+4*UNIFORM_COLD_FRAME_HEAT_WORDS;
  * by each load until its reader is optimized, where one that held anything
  * else keeps the number by reference. */
 type ExtensionKey={-readonly [K in Exclude<keyof UniformMixedFrameParameters,"dt"|"addedVolumeCells">]:UniformMixedFrameParameters[K]|undefined};
-const extensionKey=():ExtensionKey=>({gravity:undefined,density:undefined,viscosity:undefined,surfaceTension:undefined,openTop:undefined,noSlip:undefined,cubic:undefined,fineAdvection:undefined,
+const extensionKey=():ExtensionKey=>({gravity:undefined,density:undefined,viscosity:undefined,surfaceTension:undefined,openTop:undefined,noSlip:undefined,cubic:undefined,fineAdvection:undefined,coarseAdvection:undefined,
  fullPressureEnvelope:undefined,pressureReserve:undefined,volumeControlSeconds:undefined,
  redistance:undefined,extensionSweeps:undefined,supportPolicy:undefined,pressureTolerance:undefined});
 /** Two key values agree (NaN is itself). */
@@ -831,12 +833,13 @@ export class UniformMixedFrame {
   const density=p.density,viscosity=p.viscosity,tension=p.surfaceTension,tolerance=p.pressureTolerance,open=+p.openTop,step=dt/density,target=tolerance>0?tolerance:UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
   const w=this.words,q=this.queue,to=this.params,forces=w.forces,projection=w.projection,band=w.band;
   w.extension[3]=open;q.writeBuffer(to.extension,0,w.extension);
-  // 4h vertices always take the cubic (flags.y 2 without p.cubic): no
-  // particle band carries a 4h surface, and a trilinear resample there pulls
-  // a moving curved or cornered zero set inward 16x faster than at h, every
-  // step it moves (a grid-aligned falling block lost 22% in 14 frames).
-  // p.cubic picks only what h vertices take.
-  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;w.surfaceFlags[1]=p.cubic?(p.fineAdvection==="trilinear"?2:p.fineAdvection==="adaptive"?3:1):2;w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
+  // p.cubic picks what h vertices take, p.coarseAdvection what 4h vertices
+  // take (umCubicAt: 1 all, 2 4h, 3 4h and adaptive h, 0 none, 4 h, 5
+  // adaptive h). A trilinear resample pulls a moving curved or cornered zero
+  // set inward 16x faster at 4h than at h (a grid-aligned falling block lost
+  // 22% in 14 frames while the census left it all 4h); the census now keeps
+  // such a surface at h (umCurveError).
+  w.surface[3]=dt;q.writeBuffer(to.surface,0,w.surface);w.surfaceFlags[0]=open;{const fine=p.cubic?p.fineAdvection??"cubic":"trilinear",coarse=p.coarseAdvection!=="trilinear";w.surfaceFlags[1]=fine==="trilinear"?(coarse?2:0):fine==="adaptive"?(coarse?3:5):(coarse?1:4);}w.surfaceFlags[2]=+this.performanceDiagnostics;q.writeBuffer(to.surface,16,w.surfaceFlags);
   w.momentum[3]=dt;q.writeBuffer(to.momentum,0,w.momentum);w.momentumFlags[0]=open;q.writeBuffer(to.momentum,16,w.momentumFlags);
   const gx=gravity[0],gy=gravity[1],gz=gravity[2];
   forces[3]=dt;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;forces[12]=gx;forces[13]=gy;forces[14]=gz;q.writeBuffer(to.forces,0,forces);
@@ -852,11 +855,11 @@ export class UniformMixedFrame {
   q.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
   this.pressureTarget=target;
   const k=this.key,held=k.supportPolicy,policy=p.supportPolicy,reserve=p.pressureReserve,seconds=p.volumeControlSeconds,sweeps=p.extensionSweeps;
-  const kept=k.gravity,same=this.keyed&&kept!==undefined&&agree(kept[0],gx)&&agree(kept[1],gy)&&agree(kept[2],gz)&&agree(k.density,density)&&agree(k.viscosity,viscosity)&&agree(k.surfaceTension,tension)&&k.openTop===p.openTop&&k.noSlip===p.noSlip&&k.cubic===p.cubic&&k.fineAdvection===p.fineAdvection
+  const kept=k.gravity,same=this.keyed&&kept!==undefined&&agree(kept[0],gx)&&agree(kept[1],gy)&&agree(kept[2],gz)&&agree(k.density,density)&&agree(k.viscosity,viscosity)&&agree(k.surfaceTension,tension)&&k.openTop===p.openTop&&k.noSlip===p.noSlip&&k.cubic===p.cubic&&k.fineAdvection===p.fineAdvection&&k.coarseAdvection===p.coarseAdvection
    &&k.fullPressureEnvelope===p.fullPressureEnvelope&&agree(k.pressureReserve,reserve)&&agree(k.volumeControlSeconds,seconds)
    &&k.redistance===p.redistance&&agree(k.extensionSweeps,sweeps)&&agree(k.pressureTolerance,tolerance)
    &&(policy?!!held&&agree(held.fineReach,policy.fineReach)&&agree(held.shellReach,policy.shellReach)&&held.twoLevel===policy.twoLevel&&held.shellOnly===policy.shellOnly:!held);
-  {const own=this.keyGravity;own[0]=gx;own[1]=gy;own[2]=gz;k.gravity=own;}k.density=density;k.viscosity=viscosity;k.surfaceTension=tension;k.openTop=p.openTop;k.noSlip=p.noSlip;k.cubic=p.cubic;k.fineAdvection=p.fineAdvection;
+  {const own=this.keyGravity;own[0]=gx;own[1]=gy;own[2]=gz;k.gravity=own;}k.density=density;k.viscosity=viscosity;k.surfaceTension=tension;k.openTop=p.openTop;k.noSlip=p.noSlip;k.cubic=p.cubic;k.fineAdvection=p.fineAdvection;k.coarseAdvection=p.coarseAdvection;
   k.fullPressureEnvelope=p.fullPressureEnvelope;k.pressureReserve=reserve;k.volumeControlSeconds=seconds;
   k.redistance=p.redistance;k.extensionSweeps=sweeps;k.pressureTolerance=tolerance;
   if(policy){const own=this.keyPolicy;own.fineReach=policy.fineReach;own.shellReach=policy.shellReach;own.twoLevel=policy.twoLevel;own.shellOnly=policy.shellOnly;k.supportPolicy=own;}else k.supportPolicy=undefined;

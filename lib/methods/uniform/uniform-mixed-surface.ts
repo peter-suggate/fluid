@@ -1332,10 +1332,16 @@ fn umFarAir(vertex:vec3u)->f32{
 }`:"fn umFarAir(vertex:vec3u)->f32{return -1.0;}"}
 // The cubic at a vertex of width (flags.y 1: every vertex; 2: 4h only;
 // 3, adaptive: 4h, and h where no incident liquid tile has surface heat
-// above 1.5 (strong particle authority).
+// above 1.5 (strong particle authority); 4: h only; 5: h as 3, 4h none).
+// From 4 the tile width is the selector: the census keeps a moving surface
+// at h where 4h would round its corners or curves (umCurveError), so the
+// cubic runs where there is detail; a 4h surface is flat or gently curved,
+// which the trilinear carries.
 fn umCubicAt(vertex:vec3u,width:u32)->bool{
- if(width>1u||params.flags.y==1u){return true;}
- if(params.flags.y!=3u){return false;}
+ let mode=params.flags.y;
+ if(width>1u){return mode<4u;}
+ if(mode==1u||mode==4u){return true;}
+ if(mode!=3u&&mode!=5u){return false;}
  ${this.farGate?`// A shared vertex has no preferred incident tile. Use the strongest
  // particle authority touching it; choosing the positive-side tile makes
  // the cubic/linear switch direction-dependent at interior heat seams too.
