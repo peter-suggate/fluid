@@ -112,15 +112,16 @@ struct RigidBody {
 @group(0) @binding(27) var<storage,read_write> boundaryVelocityOut:array<f32>;
 
 // The page table (a 64³ window of words), then a word per block: a mirror
-// of the page pool's.
+// of the page pool's. Then the h slot of every block (umFineSlot), a mirror
+// of the detail storage's.
 @group(0) @binding(29) var<storage,read> umPages:array<u32>;
 
 @group(0) @binding(30) var<storage,read_write> activeScratch:array<u32>;
 
 
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
-${uniformWindowAddressWGSL("umPages","0u",`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`)}
-${uniformLatticeAddressWGSL({constant:false,paged:{blocks:`(arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)`}})}
+${uniformWindowAddressWGSL("umPages","0u",`((arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)/2u)`)}
+${uniformLatticeAddressWGSL({constant:false,paged:{blocks:`((arrayLength(&umPages)-${UNIFORM_PAGE_TABLE_WORDS}u)/2u)`},fine:`umPages[(arrayLength(&umPages)+${UNIFORM_PAGE_TABLE_WORDS}u)/2u+b]`})}
 
 // The box: its low cell in the lattice (tuning.xyz, zero but in an open
 // world) and its cells. A launch over the box runs gid from zero.

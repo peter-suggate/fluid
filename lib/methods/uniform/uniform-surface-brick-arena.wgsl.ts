@@ -70,7 +70,7 @@ fn nbArenaCornerAt(q:vec3u,t0:vec3u)->f32{let n=q+1u-t0;return nbArenaCorner[n.x
   if(lane<125u){let q=vec3i(t0)+vec3i(umCorner(lane,5u))-1;nbArenaCorner[lane]=select(0.0,umLoadCorner(vec3u(4*q)),all(q>=vec3i(0)));}
   workgroupBarrier();
   // The h texel of the brick's local 0: an owned vertex (every index 1..8) is that plus its index.
-  let texel=33*umBlockCoord(block)+vec3i(origin&vec3u(31u));
+  let texel=33*umFineCoord(block)+vec3i(origin&vec3u(31u));
   for(var k=lane;k<NB_ARENA_WINDOW;k+=256u){
    let l=umCorner(k,9u);let p=origin+l;
    var c=p;if(any(l==vec3u(8u))){c=vec3u(umCellNearFromPage(block,page,vec3i(p)));}
