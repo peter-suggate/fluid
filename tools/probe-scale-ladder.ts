@@ -18,7 +18,10 @@
  * any GPU allocation. A row per step: fenced ms, h tiles, resident pages,
  * particles, regions COLD/WARM/HOT, the max speed in h cells a step, and
  * (every --every steps and the last) the catch chamber's h tiles: on its
- * floor (the bottom 8 cells) and in all. */
+ * floor (the bottom 8 cells) and in all. --timestamps=<step> samples the
+ * solver's GPU phase timestamps from that step on (row.phases_ms, summed per
+ * label, and the report's medians); the probe then waits out the trace cadence
+ * before each sampled step. */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -31,6 +34,7 @@ import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../lib/core
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import { takeGpuHold } from "./gpu-hold";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddress, uniformLatticeWindowBox } from "../lib/methods/uniform/uniform-lattice-address";
@@ -42,6 +46,7 @@ import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const cell = Number(option("cell") ?? 0.005), widthScale = Number(option("width") ?? 1), depthScale = Number(option("depth") ?? 1);
 const holdFile = option("hold"), holdMode = option("hold-mode") === "timing" ? "timing" as const : "check" as const;
+const timestampsFrom = option("timestamps") === undefined ? undefined : Number(option("timestamps"));
 const steps = Number(option("steps") ?? 10), budget_s = Number(option("budget-s") ?? 150), every = Number(option("every") ?? 5);
 const maxGiB = Number(option("max-gib") ?? 6), blockMiB = Number(option("block-mib") ?? 16);
 const pool = option("pool") === undefined ? undefined : Number(option("pool"));
@@ -85,6 +90,14 @@ const classify = (label: string) => classes.find(([, r]) => r.test(label))?.[0] 
 const rows: Record<string, unknown>[] = [];
 let failure: Failure | undefined, construction_ms = NaN, allocation: ReturnType<ReturnType<typeof auditUniformGPUAllocations>["snapshot"]> | undefined;
 const gpuErrors: string[] = [];
+/** Each phase label's median over the sampled rows (--timestamps), and the GPU total's. */
+const medianPhases = () => {
+  const sampled = rows.filter(r => r.phases_ms) as { gpu_ms: number; phases_ms: Record<string, number> }[];
+  if (!sampled.length) return undefined;
+  const median = (v: number[]) => Math.round([...v].sort((a, b) => a - b)[Math.floor(v.length / 2)]! * 1000) / 1000;
+  const labels = [...new Set(sampled.flatMap(r => Object.keys(r.phases_ms)))];
+  return { samples: sampled.length, gpu: median(sampled.map(r => r.gpu_ms)), ...Object.fromEntries(labels.map(l => [l, median(sampled.map(r => r.phases_ms[l] ?? 0))])) };
+};
 const report = () => {
   const byClass: Record<string, number> = {};
   for (const r of allocation?.resources ?? []) byClass[classify(r.label)] = (byClass[classify(r.label)] ?? 0) + r.bytes;
@@ -97,7 +110,7 @@ const report = () => {
     byClassMiB: Object.fromEntries(Object.entries(byClass).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, mib(v)])),
     topResourcesMiB: (allocation?.resources ?? []).slice(0, 16).map(r => [r.label, r.count, mib(r.bytes)]),
     medianStep_ms: steady.length ? Math.round(steady[Math.floor(steady.length / 2)]! * 100) / 100 : undefined,
-    last: rows.at(-1) };
+    medianPhases_ms: medianPhases(), last: rows.at(-1) };
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), ...summary, rows }, null, 1) + "\n");
   console.log(JSON.stringify({ ...summary, last: undefined, out }));
@@ -148,7 +161,7 @@ if (blocks * blockMiB / 1024 > maxGiB) {
 paceDawnEventPolling();
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/index.js")).href); Object.assign(globalThis, dawn.globals);
 const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requestAdapter(); assert.ok(adapter);
-const raw = await adapter.requestDevice({ requiredFeatures: (["float32-filterable", "subgroups"] as GPUFeatureName[]).filter(f => adapter.features.has(f)),
+const raw = await adapter.requestDevice({ requiredFeatures: (["float32-filterable", "subgroups", ...(timestampsFrom === undefined ? [] : ["timestamp-query"])] as GPUFeatureName[]).filter(f => adapter.features.has(f)),
   requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
 const limits = Object.fromEntries((["maxBufferSize", "maxStorageBufferBindingSize", "maxTextureDimension2D", "maxTextureDimension3D"] as const)
   .map(k => [k, raw.limits[k]]));
@@ -206,6 +219,9 @@ try {
       if ((performance.now() - started) / 1000 > budget_s) { console.log(`budget ${budget_s} s reached after ${step - 1} steps`); break; }
       const census = step % every === 0 || step === steps;
       if (census) frame.setLayoutViews(true);
+      const sampling = timestampsFrom !== undefined && step >= timestampsFrom;
+      usePerformanceInstrumentationStore.getState().setEnabled(sampling);
+      if (sampling) await new Promise(r => setTimeout(r, 120)); // the trace cadence (100 ms)
       const t = performance.now();
       try { assert.ok(solver.advanceTo(step * dt, []), "advance admitted"); await solver.awaitFrameCompletion(); }
       catch (error) { failure = failureOf(`step ${step}`, error); }
@@ -223,6 +239,12 @@ try {
         resident: status[S.resident], free: status[S.free], particles: solver.narrowBandFlipInfo?.particles,
         regionsColdWarmHot: tiers, maxSpeed_m_s: stats?.maxSpeed_m_s, maxSpeed_hPerStep: stats && Math.round((stats.maxSpeed_m_s ?? NaN) * dt / cell * 100) / 100,
         drift: stats?.volumeDrift };
+      if (sampling && !failure) {
+        for (let n = 0; n < 100 && (solver as unknown as { physicsTracePending: boolean }).physicsTracePending; n++) await new Promise(r => setTimeout(r, 5));
+        const trace = solver.info.physicsTrace, phases: Record<string, number> = {};
+        for (const ph of trace?.phases ?? []) phases[ph.label] = (phases[ph.label] ?? 0) + ph.duration_ms;
+        if (trace) Object.assign(row, { gpu_ms: trace.total_ms, phases_ms: phases });
+      }
       if (census && !failure) { Object.assign(row, await catchTiles()); frame.setLayoutViews(false); }
       rows.push(row); console.log(JSON.stringify(row));
       if (failure) break;
