@@ -576,6 +576,10 @@ var<workgroup> tileHigh:array<atomic<u32>,3>;
 var<workgroup> tileGap:array<atomic<u32>,6>;
 var<workgroup> tileReach:array<atomic<u32>,6>;
 var<workgroup> tileError:atomic<u32>;
+// The h tile's signed 4h displacement summed over its crossings (1/1024 h)
+// and their count: umSurfaceDisplacement's volume term.
+var<workgroup> tileSigned:atomic<i32>;
+var<workgroup> tileCrossings:atomic<u32>;
 var<workgroup> tileWide:atomic<u32>;
 var<workgroup> tileDeep:array<atomic<u32>,2>;
 // Largest travel of the workgroup's tiles (census[18]), flushed once per group.
@@ -604,10 +608,15 @@ fn umWideShared(wide:u32,local:vec3u)->bool{
 }
 // How far an h tile's surface moves when its eight 4h corners carry it, in
 // h: at every zero crossing of an h edge, the corners' trilinear phi over
-// its gradient (the distance to their zero set, to first order).
+// its gradient (the distance to their zero set, to first order). Signed
+// (positive: the 4h surface lies on the liquid side), the crossings' mean is
+// the volume 4h takes per unit surface (tileSigned, tileCrossings): a curved
+// surface's is one-signed, (4h)^2/12 of its curvature, however small the
+// largest is, and every closed body loses 2 pi (4h)^2/12 of area per section
+// when coarsened (Gauss-Bonnet), whatever its radius.
 fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
  let origin=umTileCoord(tile)*4u;let open=umCensusOpenCells(tile);
- var c:array<f32,8>;var worst=0.0;
+ var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;
  c=umLoadCorner8(origin,4u);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
@@ -622,10 +631,23 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
    let gx=mix(vec2f(dx.x,dx.z),vec2f(dx.y,dx.w),t.y);
    // Per tile width (4h), so the distance in h is 4 |phi| / |gradient|.
    let gradient=vec3f(mix(gx.x,gx.y,t.z),mix(x0.y-x0.x,x0.w-x0.z,t.z),y0.y-y0.x);
-   worst=max(worst,4.0*abs(mix(y0.x,y0.y,t.z))/max(length(gradient),4.0e-3*UM_H));
+   let d=4.0*mix(y0.x,y0.y,t.z)/max(length(gradient),4.0e-3*UM_H);
+   worst=max(worst,abs(d));along+=d;crossings++;
   }
  }
+ if(crossings!=0u){atomicAdd(&tileSigned,i32(clamp(along,-1.0e5,1.0e5)*1024.0));atomicAdd(&tileCrossings,crossings);}
  return worst;
+}
+// The volume term of an h tile's 4h error: VOLUME_SHAPE times the mean
+// signed displacement, so a tile coarsens only where 4h keeps the surface
+// within the tolerance everywhere and within a quarter of it on average.
+// At 0.5 h that holds a body of radius under ~10 h at h (Sato 2018's
+// geometric heat |phi - G*phi| / dx > T_g / A_g = 0.2, taken at 4h), and
+// lets a flat or gently curved surface coarsen as before.
+const VOLUME_SHAPE:f32=4.0;
+fn umVolumeError()->f32{
+ let n=atomicLoad(&tileCrossings);if(n==0u){return 0.0;}
+ return VOLUME_SHAPE*abs(f32(atomicLoad(&tileSigned))/(1024.0*f32(n)));
 }
 // Surface error of the tile at 4h, in h (non-negative, ordered as bits).
 // wide: an h tile's 4h neighbours (umWideShared).
@@ -913,7 +935,7 @@ fn umReplayTile(tile:u32){
   if(lane==0u){resetGroupCensus();umReplayTile(tile);flushGroupCensus();}
   workgroupBarrier();continue;
  }
- if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var k=0u;k<2u;k++){atomicStore(&tileCrossing[k],0u);}for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);atomicStore(&tileWide,0u);for(var k=0u;k<2u;k++){atomicStore(&tileDeep[k],0u);}}workgroupBarrier();
+ if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var k=0u;k<2u;k++){atomicStore(&tileCrossing[k],0u);}for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);atomicStore(&tileSigned,0);atomicStore(&tileCrossings,0u);atomicStore(&tileWide,0u);for(var k=0u;k<2u;k++){atomicStore(&tileDeep[k],0u);}}workgroupBarrier();
  // The h list holds h tiles only: one lane per owner.
  const width=1u;
  // The tile's 4h neighbours, for the shape criterion (umWideShared).
@@ -937,6 +959,7 @@ fn umReplayTile(tile:u32){
   for(var a=0u;a<3u;a++){c.low[a]=atomicLoad(&tileLow[a]);c.high[a]=atomicLoad(&tileHigh[a]);}
   for(var k=0u;k<6u;k++){c.gap[k]=atomicLoad(&tileGap[k]);c.reach[k]=atomicLoad(&tileReach[k]);}
   c.flags=atomicLoad(&mixedTile);c.error=atomicLoad(&tileError);
+  if(shapeDisplacement()){c.error=bitcast<u32>(max(bitcast<f32>(c.error),umVolumeError()));}
   c.crossing=vec2u(atomicLoad(&tileCrossing[0]),atomicLoad(&tileCrossing[1]));
   c.deep=vec2u(atomicLoad(&tileDeep[0]),atomicLoad(&tileDeep[1]));
   umFinishTile(tile,width,c);
