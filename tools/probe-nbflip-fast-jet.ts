@@ -10,13 +10,11 @@
  * --arms runs each of a JSON list of such overrides in turn on one device
  * (later arms reuse the first's compiled pipelines).
  * --lock: build each arm's solver (shader compilation, CPU) without the GPU
- * lock, then take the lock (lockf on that file) for the arm's steps, at most
- * --hold seconds: an arm that runs out of time stops and says so. Without
- * it, run the whole probe under lockf. */
+ * lock, then take the lock for the arm's steps, at most --hold seconds: an
+ * arm that runs out of time stops and says so. A .sh file is a shared GPU
+ * runner (`<runner> check <command>`), any other file is taken with lockf.
+ * Without it, run the whole probe under the lock. */
 import { resolve } from "node:path";
-import { spawn } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
@@ -28,6 +26,7 @@ import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type Unifor
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { createNbflipVolumeProbe } from "./probe-nbflip-volume";
 import { createFastJetScene, FAST_JET_METHOD_OVERRIDES } from "./fast-jet-scene";
+import { takeGpuHold } from "./gpu-hold";
 
 const positional = process.argv.slice(2).filter(a => !a.startsWith("--"));
 const option = (name: string) => process.argv.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3);
@@ -41,14 +40,6 @@ for (const a of process.argv.filter(a => a.startsWith("--param="))) {
 }
 const arms = (JSON.parse(option("arms") ?? "[{}]") as Record<string, string | number | boolean>[]).map(arm => ({ ...params, ...arm }));
 const lockFile = option("lock"), hold_s = Number(option("hold") ?? 170);
-/** Takes the GPU lock: a lockf child that holds it until the returned
- * release, or until this process exits. */
-async function takeLock(file: string): Promise<() => void> {
-  const flag = resolve(tmpdir(), `fast-jet-lock-${process.pid}`);
-  spawn("lockf", [file, "sh", "-c", `touch '${flag}'; while [ -e '${flag}' ] && kill -0 ${process.pid} 2>/dev/null; do sleep 0.2; done; rm -f '${flag}'`], { stdio: "ignore", detached: false });
-  while (!existsSync(flag)) await new Promise(r => setTimeout(r, 200));
-  return () => { try { unlinkSync(flag); } catch { /* released */ } };
-}
 const h = cell_mm / 1000, dt = 1 / 60;
 const jet = createFastJetScene({ cellSize_m: h, blocks: option("blocks") ? Number(option("blocks")) : undefined,
   depth_m: option("depth") ? Number(option("depth")) : undefined, reservoirWidth_m: option("reservoir") ? Number(option("reservoir")) : undefined });
@@ -65,7 +56,7 @@ try {
   const values = resolveMethodValues(method, "balanced", { ...method.appDefaults, timeStep: "scene", ...FAST_JET_METHOD_OVERRIDES, ...arm });
   const built = performance.now();
   solver = await method.createSolverAsync!(device, structuredClone(scene), "balanced", values, undefined, () => {}) as WebGPUUniformReferenceSolver;
-  const release = lockFile ? await takeLock(lockFile) : () => {};
+  const release = lockFile ? await takeGpuHold(lockFile) : () => {};
   const locked = performance.now();
   const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; ownership: { capacity: { fineTiles: number } } } }).mixedFrame;
   const pool = frame.pagePool, l = pool.layout, status = new Uint32Array(S.words);
