@@ -1191,7 +1191,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     },this.address.openTop,this.pressureSchedule);
     this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;this.mixedFrame.narrowBandFlip.sparseNeighbours=this.narrowBandSparseNeighbours;
     this.mixedFrame.solid!.present=solids||bodies>0;
-    this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField,this.reductions);
+    this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
     // Its host tile planes hold a record a page with a set tile: the build's
     // solid-coupled pages twice over and 1024 for edits, never more than the
@@ -2877,15 +2877,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(this.disposed||this.readbackPending)return this.executionInfo;
       this.readbackPending=true;
       this.statsReadback??=this.device.createBuffer({label:"Uniform diagnostics readback",size:264,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      const totals=this.mixedDiagnostics!.totals;
       try{
         const encoder=this.device.createCommandEncoder();this.mixedDiagnostics!.encode(encoder);
-        encoder.copyBufferToBuffer(this.reductions,0,this.statsReadback,0,24);
+        // Words 0-5 the diagnostics' totals, 24-25 the carries of represented and fill.
+        encoder.copyBufferToBuffer(totals,0,this.statsReadback,0,24);encoder.copyBufferToBuffer(totals,24,this.statsReadback,96,8);
         encoder.copyBufferToBuffer(this.params,32,this.statsReadback,80,12);
         encoder.copyBufferToBuffer(this.mixedFrame.ownership.support,this.mixedFrame.ownership.capacity.tiles*16,this.statsReadback,24,16);
         const budget=this.mixedFrame.narrowBandVolumeBudget;
         if(budget){encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,36);this.mixedFrame.requestNarrowBandVolumeProbe();}
         this.device.queue.submit([encoder.finish()]);
-        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,23).slice();
+        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,26).slice();
+        const represented=(words[0]!+4294967296*words[24]!)/2048,fill=(words[3]!+4294967296*words[25]!)/2048;
         // The liquid's volume is the budget's measurement of phi, from the
         // last step that took it (this read requests the next). The V
         // texture is the pressure fill: an uncut, non-planar owner's is an
@@ -2897,9 +2900,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           narrowBandTargetVolume_cells:b[0],narrowBandOutflowVolume_cells:b[2],
           narrowBandVolumeShift_cells:b[3]!/Math.min(...this.mixedFrame.ownership.capacity.lattice.cellSize_m),
           narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],
-          narrowBandVolumeBudgetDrift:((measured??words[3]!/2048)-b[0]!)/Math.max(1,b[0]!),
+          narrowBandVolumeBudgetDrift:((measured??fill)-b[0]!)/Math.max(1,b[0]!),
         });}}
-        const represented=words[0]!/2048,fill=words[3]!/2048,volume=measured??fill,reference=Math.max(1,this.referenceVolumeCells);
+        const volume=measured??fill,reference=Math.max(1,this.referenceVolumeCells);
         Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
           representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(fill-reference)/reference,volumeDrift:(volume-reference)/reference,
           volumeTelemetrySource:measured===undefined?"dense-volume":"narrow-band-phi",frontTelemetrySource:"dense-volume",
@@ -3041,7 +3044,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.velocityExtrapolator.destroy();
     this.pressureMultigrid.destroy();
     this.params.destroy();
-    this.reductions.destroy();
+    this.reductions.destroy();this.mixedDiagnostics?.destroy();
     this.conditioningScratch.destroy();
     this.pages.destroy();
     this.activeScratch.destroy(); this.bedSlopeBake?.destroy(); this.openWorldTerrain?.destroy();
