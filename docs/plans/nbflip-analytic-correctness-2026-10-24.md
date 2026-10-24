@@ -235,31 +235,80 @@ What a resample cannot fix (shown with CPU twins):
     NB-FLIP. Pour late frame about +1.6 ms (h cubic +1.86, 4h trilinear
     -0.37); Peter chose correctness first.
 
+### Round 6
+
+16. **A coarsened owner keeps a uniform field** (`bed9fcbf`). The restriction
+    fallback now extends every face that a coarsened owner reads, on all three
+    axes, not only along the remap axis. The extension's far value takes a
+    second pass over zero-weight taps, floored at 2^-10. Translation's h/4h
+    seams stopped leaking: velocity error 0.012 -> 1.7e-5 m/s, internal KE
+    0.0053 -> 1.4e-6 J.
+17. **Seam pressure follows its measured gradient** (`d7fa24db`). The
+    pressure arena's seam head (bSeamHead) now carries P_BASE along its
+    measured tangential slope, not rho g. The kick re-solves 3 times at t = 0
+    only, which is startup work and adds nothing per frame.
+18. **Moving h tiles measure curvature at their corners** (`e0d8994f`).
+    umCurveError only read interior vertices. A block edge on a tile plane,
+    or a corner within a cell of a tile corner, puts its second differences
+    on boundary vertices that no h tile reads. The displacement there is also
+    near zero, because the 4h lattice carries such a corner. At census 12 the
+    falling block's bottom row (scores 0.4-0.9) went entirely to 4h. An h tile
+    now also takes the 4h-lattice Laplacian at its eight corners, the same
+    measure a 4h tile uses (hysteresis comes from the full shape tolerance
+    against the 4h tile's half). That costs about six loads and one workgroup
+    atomicMax in the corner lanes. Free fall frame 12: -2.71% -> -0.92%.
+    Translation passes. **Dam-break worsens, 3.36% -> 3.79%**: its bulging
+    side-face tiles (4,3), (5,3) and (5,2) now stay at h. As a 4h tile, (4,3)
+    gained 70 cells in frame 9; as h it gains 52. That is consistent with the
+    first 4h layer's spurious growth (round 3) having masked an advection
+    loss, but this is not proven.
+19. **Controls** (`97004a1e`, `7a4316df`). One surface-advection setting
+    (Fast: all trilinear; Balanced: adaptive h cubic, 4h trilinear (the
+    default); Best: all cubic). The Tune menu holds Surface accuracy, Splash
+    particles, Persistence and Budget dials, with 0.5 at today's defaults
+    (uniform-narrow-band-tuning.ts). "All controls..." opens a dialog with
+    every individual control. Every scene runs at 1/60 s (`27413f78`).
+
+Free fall at the floor (frame 16, -4.95%) is not an impact. The bottom is
+still a cell above the floor, and the whole loss is in the advect stage. The
+frame-16 census refines the floor tile row from 4h to h, and the remap
+interpolates the old 4h owner's faces between the floor wall's 0 and -2.54
+m/s, so the trace in the gap departs short (about 3.4 cells instead of
+4.2). The root is the extension, which publishes a wall face at its physical
+zero even beside air. A zero-normal-gradient dry wall face (equal cost)
+moved the loss one frame later (frame 16 -2.3%, frame 17 -21.6% either way)
+and took dam-break to 4.0%, so it was reverted
+(scratchpad agentQ/wall.patch). Past contact each step drifts phi by dt U
+with the pre-contact velocity before pressure acts (frame 18 -36.5%). That is
+the drift-then-kick limit at a large step. The remedies are substeps or a CFL
+limit (both ruled out) or projecting before the drift (a structural change),
+so it is left alone. The suite's 16 frames stop before it.
+
 Not yet fixed:
 
 - The regional extension does not re-extend COLD regions: their reader tiles
   keep zero air velocity (now thawed through the momentum term instead).
-- Translation's last 7 HOT regions sit at h/4h seams, likely the remap of 4h
-  faces onto fresh h tiles; its internal KE (0.005 J) and extent (1 cell) fail.
-- Free-fall loses its remaining ~5% at the z depth walls (wall-plane phi
-  collapses inside the block from frame ~3) and at impact.
-- Dam-break's late tier changes rose to 0.068 with the cubic; its loss is SL
-  advection in the falling column's h tiles.
+- Free fall's floor contact (above); dam-break's side-face loss at h.
+- Tilted free fall and free fall fail late tier changes (0.086, 0.0147
+  reversals in free fall).
 
 ## Results
 
-Full suite, HEAD febcb0b4, default parameters, 1/60 s:
+Full suite, HEAD e0d8994f, default parameters, 1/60 s:
 
 | case | pass | failing checks |
 |---|---|---|
 | rest | yes | |
 | rest-step | yes | |
 | standing-wave | yes | |
-| tilted-free-fall | no | late tier changes 0.094 (phi drift 0.40%) |
-| translation | no | fill drift 1.36%, velocity error 0.012 m/s, extent 1.0 cells, internal KE 0.0053 J (phi drift 0.95%) |
-| free-fall | no | phi drift 5.7%, late tier changes 0.094 |
-| dam-break | no | phi drift 3.3%, late tier changes 0.068, front 12.8%, energy rise 11% |
-| mound | no | phi drift 4.75%, energy rise 18%, final KE 27% of peak |
+| translation | yes | (fill drift 0.16%, phi drift 0.45%, internal KE 3e-14 J) |
+| tilted-free-fall | no | late tier changes 0.086 (phi drift 0.57%) |
+| free-fall | no | phi drift 5.84% (frame 16 floor approach), tier reversals 0.0147 |
+| dam-break | no | phi drift 3.79%, late tier changes 0.065, front 12.8%, energy rise 11% |
+| mound | no | phi drift 4.80%, energy rise 20% |
+
+At febcb0b4 (round 5): translation 0.95% with fill drift 1.36%, free-fall
+5.7%, dam-break 3.3%, mound 4.75%.
 
 At b26e0e02 (round 3): free-fall 6.7%, dam-break 2.5%, mound 4.8%; at
 083c31cf, translation 9.4% and tilted-free-fall 6.9% phi drift.
