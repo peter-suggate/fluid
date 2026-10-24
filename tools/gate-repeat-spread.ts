@@ -119,14 +119,22 @@ try {
   raw = await adapter.requestDevice({ requiredFeatures: features, requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
   raw.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
   read.buffer = raw.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-  let dt = 0, scene: SceneDescription | undefined, values: unknown;
+  let dt = 0, scene: SceneDescription | undefined, values: Record<string, unknown> | undefined, defaults: Record<string, unknown> = {};
+  /** Both arms' values with the keys they share; a key only one arm has (a
+   * param the other snapshot predates, such as bulkTier) must sit at that
+   * arm's own default. */
+  const shared = (mine: Record<string, unknown>, other: Record<string, unknown>, own: Record<string, unknown>) => Object.fromEntries(Object.entries(mine).filter(([key, value]) => {
+    if (key in other) return true;
+    assert.deepEqual(value, own[key], `${key} exists in one snapshot only and is not at its default`); return false;
+  }));
   for (const [arm, cwd] of roots.entries()) {
     const load = (file: string) => import(pathToFileURL(resolve(cwd, file)).href);
     const [{ uniformNarrowBandMethod: method }, { resolveMethodValues }, { sceneDocument }, { getSceneDefinition }, { managedGPUDevice }, fields, geometric] = await Promise.all([
       load("lib/methods/uniform/uniform-narrow-band-method.ts"), load("lib/core/method-contract.ts"), load("lib/core/scene-definition.ts"), load("lib/core/scenes.ts"), load("lib/core/gpu-compilation-manager.ts"),
       load("tests/helpers/uniform-mixed-native-fields.ts"), load("tests/helpers/uniform-geometric.ts"),
     ]);
-    let armValues: unknown, quality: string, built: SceneDescription;
+    let armValues: Record<string, unknown>, quality: string, built: SceneDescription;
+    const armDefaults = Object.fromEntries((method.params as { key: string; default: unknown }[]).map(spec => [spec.key, spec.default]));
     if (region) {
       built = createRegionTierScene(sceneOption as RegionTierScene, length, depth); quality = "balanced";
       armValues = resolveMethodValues(method, quality, { ...method.appDefaults, timeStep: "scene" });
@@ -137,8 +145,8 @@ try {
     if (poolBlocks !== undefined) built.fluid = { ...built.fluid, pagePool: { ...built.fluid?.pagePool, blocks: poolBlocks } } as SceneDescription["fluid"];
     const step = method.effectiveStep_s?.(built, armValues) ?? built.numerics.fixedDt_s;
     built.duration_s = Math.max(built.duration_s, steps * step);
-    if (arm) { assert.equal(step, dt); assert.deepEqual(armValues, values); assert.deepEqual(built, scene); }
-    scene = built; dt = step; values = armValues;
+    if (arm) { assert.equal(step, dt); assert.deepEqual(shared(armValues, values!, armDefaults), shared(values!, armValues, defaults)); assert.deepEqual(built, scene); }
+    scene = built; dt = step; values = armValues; defaults = armDefaults;
     const hash = createHash("sha256"), directory = resolve(cwd, "lib/methods/uniform");
     for (const f of readdirSync(directory).filter(f => f.endsWith(".ts")).sort()) { hash.update(f); hash.update(readFileSync(resolve(directory, f))); }
     snapshots.push({ root: cwd, sourceHash: hash.digest("hex"), quality, dt });
