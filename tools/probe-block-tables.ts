@@ -29,6 +29,7 @@ import {
 } from "../lib/methods/uniform/uniform-block-tables";
 import { UNIFORM_PAGE_TABLE_WORDS as TABLE, uniformBlockNeighbourWords, uniformLatticeAddressWGSL } from "../lib/methods/uniform/uniform-lattice-address";
 import { UNIFORM_PAGE_POOL_FREE as FREE, UNIFORM_PAGE_POOL_KIND as KIND, uniformPagePoolLayout, uniformPagePoolSeed } from "../lib/methods/uniform/uniform-page-pool";
+import { UNIFORM_WINDOW_HEADER_WORDS } from "../lib/methods/uniform/uniform-window-address";
 
 type Page = readonly [number, number, number];
 const errors: string[] = [], started = performance.now();
@@ -42,7 +43,8 @@ const seed = uniformPagePoolSeed(uniformPagePoolLayout({ table: 64, blocks: BLOC
   return (y >= 2 && x <= 2 && z <= 1) || x > 8 || y > 8 || z > 8 ? KIND.air : KIND.solid;
 });
 const table = new Uint32Array(seed.table), records = new Uint32Array(seed.blocks);
-assert.equal(table.length, TABLE);assert.equal(records.length, BLOCKS);
+// The table words are the window entries, then the window header (UNIFORM_WINDOW_HEADER_WORDS, zero here).
+assert.equal(table.length + UNIFORM_WINDOW_HEADER_WORDS, TABLE);assert.equal(records.length, BLOCKS);
 const hash = (x: number, y: number, z: number, salt: number) => (Math.imul(x + 1, 73856093) ^ Math.imul(y + 1, 19349663) ^ Math.imul(z + 1, 83492791) ^ Math.imul(salt + 1, 2654435761)) >>> 0;
 /** Flags and keys by tile key: values of the key itself, so a block's page changes nothing of them. */
 const flags = new Uint32Array(KEYS), keys = new Uint32Array(6 * KEYS);

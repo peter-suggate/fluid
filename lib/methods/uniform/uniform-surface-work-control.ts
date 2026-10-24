@@ -8,6 +8,7 @@ import { uniformPageInitBlocksWGSL, uniformPageInitGroups } from "./uniform-page
 import { UNIFORM_SURFACE_SUPPORT_WORDS } from "./uniform-surface-transport.wgsl";
 import { UniformRegionalFramePlan } from "./uniform-regional-frame-plan";
 import { uniformRegionHeatWGSL, type UniformRegionHeat } from "./uniform-region-heat";
+import { UNIFORM_LIVE_GROUP_GROUPS, uniformLiveListsWGSL } from "./uniform-live-lists";
 
 /** Shared current surface models and exact derived-geometry evidence on a
  * 16h lattice, independent of 32h paging. Surface model scans retain no tile
@@ -119,7 +120,7 @@ export class UniformSurfaceWorkControl {
     const surfaceBytes=4*(this.topologyEpochWordOffset+this.regions),geometryBytes=4*(this.geometryRemapWordOffset+this.regions);
     const make=(stage:string,size:number)=>device.createBuffer({label:`Uniform 16h ${stage} work evidence`,size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.surface=make("surface",surfaceBytes);this.geometry=make("geometry",geometryBytes);
-    this.framePlan=new UniformRegionalFramePlan(device,ownership,this.revisions,heat?.tiers,()=>this.generation,{buffer:this.geometry,mapping:this.mappingWordOffset,owners:3*this.regions+4,remap:this.geometryRemapWordOffset,regions:this.cacheRegions});
+    this.framePlan=new UniformRegionalFramePlan(device,ownership,this.revisions,heat?.tiers,()=>this.generation,{buffer:this.geometry,mapping:this.mappingWordOffset,owners:3*this.regions+4,remap:this.geometryRemapWordOffset,regions:this.cacheRegions},this.pool);
     this.allocatedBytes=surfaceBytes+geometryBytes+this.framePlan.allocatedBytes;
     device.queue.writeBuffer(this.surface,4*this.topologyEpochWordOffset,new Uint32Array(this.regions).fill(1));
     device.queue.writeBuffer(this.surface,4*this.liveEpochWordOffset,new Uint32Array(2*this.regions).fill(1));
@@ -543,9 +544,12 @@ fn wcSupportContains(code:u32,offset:i32)->bool{
 @group(1) @binding(1) var<storage,read_write> surface:array<atomic<u32>>;
 @group(1) @binding(2) var<storage,read_write> geometry:array<atomic<u32>>;
 ${this.heat?this.heat.promoteWGSL(1,3,4):"fn rhPromoteWarm(region:u32){}"}
+${this.pool?uniformLiveListsWGSL(1,5,this.pool.layout):""}
 var<workgroup> changed:atomic<u32>;
-@compute @workgroup_size(64) fn publish(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let region=group.x+umDispatchX*group.y;if(region>=UM_PAGES){return;}
+// A region only a stored tile marks: with a pool, a fixed grid of
+// workgroups strides the resident blocks' regions (uniform-live-lists.ts).
+@compute @workgroup_size(64) fn publish(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ ${this.pool?"for(var visit=group.x;visit<8u*ulResidentCount();visit+=groups.x){let region=8u*ulResidentBlock(visit>>3u)+(visit&7u);":"let region=group.x+umDispatchX*group.y;if(region>=UM_PAGES){return;}{"}
  if(lane==0u){atomicStore(&changed,0u);}workgroupBarrier();
  let tile=umPageTile(region,lane);
  if(umTileLive(tile)&&(changes[76u+tile]&16u)!=0u){atomicOr(&changed,1u);}workgroupBarrier();
@@ -558,8 +562,9 @@ var<workgroup> changed:atomic<u32>;
   // the neighbours a changed tile reaches are listed regions themselves.
   rhPromoteWarm(region);
  }
+ }
 }`});
-    this.remapLayout=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...(this.heat?[1,2,3,4]:[1,2]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))]});
+    this.remapLayout=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...(this.heat?[1,2,3,4]:[1,2]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),...(this.pool?[{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[])]});
     this.remapPipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.remapLayout]}),compute:{module:remap,entryPoint:"publish",constants:{umDispatchX:this.supportGrids[0]}}});
     if(this.pool){
       const init=this.device.createShaderModule({label:"Uniform 16h work evidence page claims",code:`
@@ -588,8 +593,9 @@ if(local<8u){let home=2*upPageOf(block)+vec3i(i32(local&1u),i32((local>>1u)&1u),
    * This fixed metadata-only pass cannot lose changes if the builder is reused. */
   encodeRemapRevisions(encoder:GPUCommandEncoder,changes:GPUBuffer):void{
     if(!this.remapPipeline||!this.remapLayout)throw new Error("Work-control remap revisions are not initialized");
-    if(this.remapGroup?.changes!==changes)this.remapGroup={changes,group:this.device.createBindGroup({layout:this.remapLayout,entries:[{binding:0,resource:{buffer:changes}},{binding:1,resource:{buffer:this.surface}},{binding:2,resource:{buffer:this.geometry}},...(this.heat?[{binding:3,resource:{buffer:this.heat.tiers}},{binding:4,resource:{buffer:this.heat.state}}]:[])]})};
-    const pass=encoder.beginComputePass({label:"Uniform16h remap producer revisions"});pass.setPipeline(this.remapPipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.remapGroup.group);pass.dispatchWorkgroups(...this.supportGrids);pass.end();
+    if(this.remapGroup?.changes!==changes)this.remapGroup={changes,group:this.device.createBindGroup({layout:this.remapLayout,entries:[{binding:0,resource:{buffer:changes}},{binding:1,resource:{buffer:this.surface}},{binding:2,resource:{buffer:this.geometry}},...(this.heat?[{binding:3,resource:{buffer:this.heat.tiers}},{binding:4,resource:{buffer:this.heat.state}}]:[]),...(this.pool?[{binding:5,resource:{buffer:this.pool.state}}]:[])]})};
+    const pass=encoder.beginComputePass({label:"Uniform16h remap producer revisions"});pass.setPipeline(this.remapPipeline);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.remapGroup.group);
+    if(this.pool)pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.regions));else pass.dispatchWorkgroups(...this.supportGrids);pass.end();
   }
   encodeInitBlocks(encoder:GPUCommandEncoder):void{
     if(!this.pool||!this.initPipeline||!this.initGroup)throw new Error("Work control has no initialized page pool");

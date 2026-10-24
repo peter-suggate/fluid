@@ -5,8 +5,11 @@ import { pairedExtensionSource, pairedSnapshotSource, replayedPublicationSource 
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformLatticeAddress } from "./uniform-lattice-address";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import type { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
+import { uniformExtrapolationWorkBytes, type WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
+import { UNIFORM_EXTRAPOLATION_WORK_WORDS } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 import { UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { UNIFORM_LIVE_KEY_GROUPS, UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 import { uniformMixedFaceAddressWGSL,uniformMixedFaceDispatchWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformRegionHeatWGSL } from "./uniform-region-heat";
@@ -153,6 +156,8 @@ export class UniformMixedExtension {
  private readonly companionSeams=new Map<string,GPUComputePipeline>();
  private companionRestrict?:GPUComputePipeline;
  private readonly address:UniformLatticeAddress;
+ /** restrictBand's fixed grid: 64 live tiles a workgroup job. */
+ private readonly restrictGroups:number;
  /** The gate of a bind without one: always live. */
  private readonly alwaysLive:GPUBuffer;
  /** The slot arrays (slotBufferBytesAt), created by bind() at the
@@ -163,8 +168,14 @@ export class UniformMixedExtension {
   * encode saw, per 16h region its work tier then and whether it changed. */
  private readonly stamp:GPUBuffer;
  /** The marks' work words (the hierarchy's heWork): [0] a region is dirty,
-  * [1] a region publishes the old FLIP payload. */
+  * [1] a region publishes the old FLIP payload; then the held blocks the
+  * hierarchy strides, listed before each of its encodes (encodeBlocks). */
  private readonly work:GPUBuffer;
+ private readonly blocksLayout:GPUBindGroupLayout;
+ private readonly blocksGroup:GPUBindGroup;
+ private blocksPipeline?:GPUComputePipeline;
+ /** The block list's fixed grid: a held block a lane. */
+ private readonly blockGroups:number;
  /** The body mask of a frame without solids: no region near a body. */
  private readonly noBodies:GPUBuffer;
  private bodyRegions?:GPUBuffer;
@@ -193,11 +204,14 @@ export class UniformMixedExtension {
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,readonly hierarchy:Hierarchy,private readonly regularBulk=false,directRestriction=false,private readonly coldFreeze=false){
   if(ownership.capacity.lattice.dimensions.some(n=>n%4!==0))throw new Error("Mixed extension requires a 4-aligned lattice");
   if(!directRestriction)throw new Error("Mixed extension restricts the face-plane anchors directly");
-  this.address=ownership.capacity.address;
+  this.address=ownership.capacity.address;this.restrictGroups=UNIFORM_LIVE_KEY_GROUPS;
   this.alwaysLive=device.createBuffer({label:"Uniform mixed extension live gate",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.alwaysLive,0,new Uint32Array([1,0,0,0]));
   const tiles=ownership.capacity.tiles,regions=tiles/64;
   this.stamp=device.createBuffer({label:"Uniform mixed extension topology stamp",size:4*(2*tiles+2*regions),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
-  this.work=device.createBuffer({label:"Uniform mixed extension work words",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.work,0,new Uint32Array([1,1,0,0]));
+  this.work=device.createBuffer({label:"Uniform mixed extension work words",size:uniformExtrapolationWorkBytes(this.address.blocks),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.work,0,new Uint32Array([1,1,0,0]));
+  this.blocksLayout=device.createBindGroupLayout({label:"Uniform mixed extension held blocks",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+  this.blockGroups=UNIFORM_LIVE_LANE_GROUPS;
+  this.blocksGroup=device.createBindGroup({label:"Uniform mixed extension held blocks",layout:this.blocksLayout,entries:[{binding:0,resource:{buffer:this.work}}]});
   this.noBodies=device.createBuffer({label:"Uniform mixed extension no bodies",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(this.noBodies,0,new Uint32Array([~0,~0,~0,~0]));
   this.modes=[[0,0],[1,0],[1,1],[2,0],[2,1]].map(([regional,parity])=>{const b=device.createBuffer({label:"Uniform mixed extension region mode",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(b,0,new Uint32Array([regional!,parity!,0,0]));return b;});
   this.markLayout=device.createBindGroupLayout({label:"Uniform mixed extension regions",entries:[
@@ -402,9 +416,30 @@ fn mrBodyNear(region:u32)->bool{return region<arrayLength(&bodyRegions)&&(bodyRe
   pass.setPipeline(this.markPipelines.classify);pass.dispatchWorkgroups(Math.min(65535,ceilDiv(regions,64)));
  }
  destroy():void{this.held?.destroy();this.stamp.destroy();this.work.destroy();this.noBodies.destroy();for(const b of this.modes)b.destroy();this.alwaysLive.destroy();}
+ /** The hierarchy's held blocks (its work words' list, umHeldBlock): the
+  * hierarchy binds no ownership lists. */
+ private async initializeBlocks():Promise<void>{
+  const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
+@group(1) @binding(0) var<storage,read_write> work:array<u32>;
+@compute @workgroup_size(64) fn blocksList(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let held=umHeldBlockCount();if(gid.x==0u){work[2]=held;}
+ for(var r=gid.x;r<held;r+=64u*groups.x){work[${UNIFORM_EXTRAPOLATION_WORK_WORDS}u+r]=umHeldBlock(r);}
+}`;
+  const module=this.device.createShaderModule({label:"Uniform mixed extension held blocks",code});
+  const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+  const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.blocksLayout]});
+  this.blocksPipeline=await this.device.createComputePipelineAsync({label:"Uniform mixed extension held blocks",layout,compute:{module,entryPoint:"blocksList"}});
+ }
+ /** List the held blocks, then the hierarchy over them; group 0 is left rebound. */
+ private encodeHierarchy(pass:GPUComputePassEncoder,replay:boolean,gate:0|1|2|3,replayGate:0|1|2|3=0):void{
+  if(!this.blocksPipeline)throw new Error("Mixed extension held blocks are not initialized");
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.blocksGroup);
+  pass.setPipeline(this.blocksPipeline);pass.dispatchWorkgroups(this.blockGroups);
+  this.hierarchy.encode(pass,replay,gate,replayGate);
+ }
  async initialize():Promise<void>{
-  const marks=this.regularBulk?undefined:this.initializeMarks();
-  const source=uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
+  const marks=this.regularBulk?undefined:this.initializeMarks(),blocks=this.initializeBlocks();
+  const source=uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> stateIn:array<vec2f>;
 @group(1) @binding(1) var<storage,read_write> stateOut:array<vec2f>;
 @group(1) @binding(4) var physical:texture_3d<f32>;
@@ -1244,9 +1279,13 @@ var<workgroup> rbValues:array<f32,192>;
 var<workgroup> rbLower:array<u32,192>;
 var<workgroup> rbUpper:array<u32,192>;
 var<workgroup> rbFlags:array<u32,192>;
-@compute @workgroup_size(64,3) fn restrictBand(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_id) id:vec3u){
- // A key that holds no page (a free block, a sentinel) restricts and stores nothing.
- let tile=64u*group.x+id.x;let component=id.y;let at=id.x+64u*component;
+@compute @workgroup_size(64,3) fn restrictBand(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_id) id:vec3u){
+ // A key that holds no page (a free block, a sentinel) restricts and stores
+ // nothing: the jobs are the live tiles (umLiveTile), 64 a workgroup job.
+ let live=umLiveTileCount();
+ for(var job=group.x;job<(live+63u)/64u;job+=groups.x){
+ workgroupBarrier();
+ let tile=umLiveTileOr(64u*job+id.x,UM_TILES);let component=id.y;let at=id.x+64u*component;
  // A clean region keeps its texels of the last restriction (ueRegionalRetain).
  let inside=umBlockStored(tile>>9u)&&umTileLive(tile)&&ueRestrictDirty(tile);let gid=umTileCoord(tile);let origin=vec3i(gid)*4;
  // Off the extension support every face keeps its seed distance, and a
@@ -1302,6 +1341,7 @@ var<workgroup> rbFlags:array<u32,192>;
   }
   let texel=(umBlockCoord(tile>>9u)<<vec3u(3u))|vec3i(umLocalTile(tile));
   values.w=f32(mask);textureStore(coarseOut,texel,values);textureStore(originsOut,texel,lower);textureStore(originsOut,texel+UE_UPPER_BOUNDS,upper);
+ }
  }
 }
 ${uniformExtensionFarValueWGSL("umFarValue")}
@@ -1501,7 +1541,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
    const make=(entryPoint:string)=>uniformDetailPipeline(this.device,this.ownership,{layout:snapshotLayout,compute:{module:snapshot,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,ueCompanionValues:1,ueOldPayload:1}}});
    const [restrict,fine,coarse]=await Promise.all([make("restrictBand"),make("snapshotFine"),make("snapshotCoarse")]);this.snapshotPipelines={restrict,fine,coarse};
   }
-  await marks;
+  await marks;await blocks;
  }
  /** regional: seed and sweep only the changed regions (not COLD now or at
   * the last swept encode, or a stamped topology word or support bit moved)
@@ -1547,11 +1587,12 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);pass.setPipeline(uniformDetailPick(p.restrict));
   // The old payload's hierarchy runs only where a region publishes it
   // (gate 2); with none, the current one prolongs instead of replaying.
-  pass.dispatchWorkgroups(8*this.address.blocks);this.hierarchy.encode(pass,false,2);
+  pass.dispatchWorkgroups(this.restrictGroups);this.encodeHierarchy(pass,false,2);
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);
   // The fine publisher grid-strides its live tile list; cap empty launch groups.
   if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(p.fine));pass.dispatchWorkgroups(Math.min(8192,o.capacity.fineTiles));}
-  const count=ceilDiv(3*o.capacity.tiles,64);pass.setPipeline(uniformDetailPick(p.coarse));pass.dispatchWorkgroups(Math.min(65535,count),ceilDiv(count,65535));pass.end();
+  // The coarse publisher strides its 4h list from a fixed grid.
+  pass.setPipeline(uniformDetailPick(p.coarse));pass.dispatchWorkgroups(UNIFORM_LIVE_KEY_GROUPS);pass.end();
   this.snapshotEncoder=encoder;this.snapshotSweeps=sweeps;
  }
  private encodeStages(encoder:GPUCommandEncoder,groups:readonly [UniformDetailGroup,UniformDetailGroup],sweeps:number,replayHierarchy:boolean,mode?:"pair"|"companion"|"current",replayPublication=false,regional=false):void{
@@ -1578,15 +1619,15 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   // The tail's current payload replays the old one's selections where the
   // old payload was published (gate 2), else prolongs.
   // A held tail's likewise.
-  this.hierarchy.encode(pass,replayHierarchy,(swept&&regional)||(mode==="current"&&this.heldTail)?1:0,mode==="current"&&replayHierarchy?2:0);pass.setBindGroup(0,this.ownership.bindGroup);this.encodeStage(pass,"publish",final,mode,replayPublication);pass.end();
+  this.encodeHierarchy(pass,replayHierarchy,(swept&&regional)||(mode==="current"&&this.heldTail)?1:0,mode==="current"&&replayHierarchy?2:0);pass.setBindGroup(0,this.ownership.bindGroup);this.encodeStage(pass,"publish",final,mode,replayPublication);pass.end();
  }
  /** One stage of encodeStages' pass. A method, not a closure there: a closure is a fresh object every frame. */
  private encodeStage(pass:GPUComputePassEncoder,entry:string,group:UniformDetailGroup,mode:"pair"|"companion"|"current"|undefined,replayPublication:boolean):void{
   const o=this.ownership;pass.setBindGroup(1,group.group);
   if(entry==="restrictBand"){
-   // 64 tile keys a workgroup: every key of the pool, eight workgroups a block.
+   // 64 live tiles a workgroup job, striding the live list.
    pass.setPipeline(uniformDetailPick((mode==="companion"?this.companionRestrict:this.restrictPipeline)!));
-   pass.dispatchWorkgroups(8*this.address.blocks);return;
+   pass.dispatchWorkgroups(this.restrictGroups);return;
   }
   const publication=replayPublication?this.replayPublishers:undefined;
   const regular=mode==="pair"?this.pairedRegular:mode==="companion"?this.companionRegular:publication?.regular??this.regularPipelines;

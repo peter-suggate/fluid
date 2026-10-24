@@ -8,6 +8,7 @@ import { uniformSurfacePlaneWGSL } from "./uniform-surface-plane.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
+import { UNIFORM_LIVE_KEY_GROUPS } from "./uniform-live-lists";
 import type { UniformSurfaceWorkControl } from "./uniform-surface-work-control";
 
 /** Workgroups of the changed-tile geometry launch at most (grid-stride). */
@@ -306,7 +307,7 @@ fn gcOwner(owner:UMOwner,terms:bool,mode:u32){
  if(owner.width==0u||!gcNeeds(owner)){return;}gcOwner(owner,geometryPressure,0u);
 }
 // Changed tiles: the adopted generation's dilated list (each tile once),
-// split by width. One lane per entry over a grid of the list's bound.
+// split by width. A fixed grid strides the list.
 ${uniformMixedChangedTilesWGSL(tiles,this.solid?3:2,0)}
 // A listed tile: its region's controller words dirty and its snapshot
 // stale (the next full launch recomputes it), then split by width. Changed
@@ -317,9 +318,8 @@ fn gcList(tile:u32){
  if(umTileWidth(tile)==1u){atomicStore(&changes[GC_FINE+atomicAdd(&changes[0],1u)],tile);}
  else{atomicStore(&changes[GC_COARSE+atomicAdd(&changes[1],1u)],tile);}
 }
-@compute @workgroup_size(64) fn compactChanged(@builtin(global_invocation_id) gid:vec3u){
- let i=gid.x+umDispatchX*64u*gid.y;if(i>=umDilatedCount()){return;}
- gcList(umDilatedTile(i));
+@compute @workgroup_size(64) fn compactChanged(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var i=gid.x;i<umDilatedCount();i+=64u*groups.x){gcList(umDilatedTile(i));}
 }
 // A job per marked h tile (a lane per owner), then 64 marked 4h tiles per job.
 var<workgroup> gcJobs:vec2u;
@@ -484,9 +484,9 @@ ${this.workControl?`@group(1) @binding(3) var<storage,read> mirrorPlan:array<u32
     }
     const pass=encoder.beginComputePass(GEOMETRY_PASS);if(sharedSetup)this.workControl!.encodeRegionalGeometry(pass);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
     if(options.changed){
-      const compact=this.changedPipelines[0]!,changed=changedMaintenance?this.changedMaintenancePipeline!:this.changedPipelines[1]!,tiles=this.ownership.capacity.tiles,groups=ceilDiv(tiles,64),x=this.ownership.dispatchX;
+      const compact=this.changedPipelines[0]!,changed=changedMaintenance?this.changedMaintenancePipeline!:this.changedPipelines[1]!,tiles=this.ownership.capacity.tiles;
       pass.setBindGroup(this.solid?3:2,this.listGroup!.group.group);
-      pass.setPipeline(this.variant(compact));pass.dispatchWorkgroups(Math.min(groups,x),ceilDiv(groups,x));
+      pass.setPipeline(this.variant(compact));pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,ceilDiv(tiles,64)));
       pass.setPipeline(this.variant(changed));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
     else if(options.bodies){

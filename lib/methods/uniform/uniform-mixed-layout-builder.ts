@@ -233,8 +233,8 @@ struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,adm
 @group(0) @binding(7) var<storage,read_write> slots:array<u32>;
 // The compact relayout receipt (UNIFORM_MIXED_RELAYOUT_RECEIPT).
 @group(0) @binding(8) var<storage,read_write> status:array<atomic<u32>>;
-// The pool's live lists: widths, admit, mirror and verifyWords stride its
-// resident blocks (a free tile key writes nothing).
+// The pool's live lists: widths, admit, classify, mirror, scatter and
+// verifyWords stride its resident blocks (a free tile key writes nothing).
 ${uniformLiveListsWGSL(0,9,this.pool.layout)}
 const R_CHANGED:u32=${R.changed}u;const R_TIERS:u32=${R.tiers}u;const R_SEAMS:u32=${R.seams}u;const R_COUNTS:u32=${R.counts}u;
 const R_NEED:u32=${R.need}u;const R_ADMIT:u32=${R.admit}u;const NEED:u32=${NEED}u;
@@ -308,10 +308,15 @@ fn categories(w:u32,regular:bool)->array<u32,${CATEGORIES}>{
 }
 ${uniformCompileStencilWGSL}
 // Frozen 3x3x3 stencil masks, compiled recipes and per-block category totals.
-@compute @workgroup_size(${BLOCK}) fn classify(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+// A fixed grid strides the resident blocks' groups of ${BLOCK} keys (two a
+// block): a free block's totals are neither written nor read (scan skips it).
+@compute @workgroup_size(${BLOCK}) fn classify(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var visit=group.x;visit<2u*ulResidentCount();visit+=groups.x){classifyGroup(2u*ulResidentBlock(visit>>1u)+(visit&1u),lane);workgroupBarrier();}
+}
+fn classifyGroup(g:u32,lane:u32){
  if(lane<${CATEGORIES}u){atomicStore(&blockTotals[lane],0u);}
  workgroupBarrier();
- let t=group.x*${BLOCK}u+lane;
+ let t=g*${BLOCK}u+lane;
  if(umTileLive(t)){
   let w=topology[t];let p=vec3i(umTileCoord(t));
   var maximum=w;var minimum=w;var fine=0u;var valid=0u;
@@ -334,7 +339,7 @@ ${uniformCompileStencilWGSL}
  // Regular 4h tiles are the block's non-seam 4h: a key that holds no tile counts nowhere.
  if(lane==0u){atomicStore(&blockTotals[4],atomicLoad(&blockTotals[1])-atomicLoad(&blockTotals[3]));}
  workgroupBarrier();
- if(lane<${CATEGORIES}u){atomicStore(&work[TOTALS+group.x*${CATEGORIES}u+lane],atomicLoad(&blockTotals[lane]));}
+ if(lane<${CATEGORIES}u){atomicStore(&work[TOTALS+g*${CATEGORIES}u+lane],atomicLoad(&blockTotals[lane]));}
 }
 var<workgroup> partial:array<u32,${BLOCK}>;
 var<workgroup> held:array<u32,${BLOCK}>;
@@ -369,10 +374,11 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
  atomicAdd(&stored,tiles);
  let per=(BLOCKS+${BLOCK-1}u)/${BLOCK}u;let first=min(BLOCKS,lane*per);let last=min(BLOCKS,first+per);
  for(var k=0u;k<${CATEGORIES}u;k++){
-  var local=0u;for(var b=first;b<last;b++){local+=atomicLoad(&work[TOTALS+b*${CATEGORIES}u+k]);}
+  // A free block's groups hold no tile (classify left their totals).
+  var local=0u;for(var b=first;b<last;b++){if(umBlockWord(b>>1u)==UM_FREE){continue;}local+=atomicLoad(&work[TOTALS+b*${CATEGORIES}u+k]);}
   partial[lane]=local;workgroupBarrier();scanPartial(lane);
   var running=partial[lane]-local;
-  for(var b=first;b<last;b++){let i=TOTALS+b*${CATEGORIES}u+k;let c=atomicLoad(&work[i]);atomicStore(&work[i],running);running+=c;}
+  for(var b=first;b<last;b++){if(umBlockWord(b>>1u)==UM_FREE){continue;}let i=TOTALS+b*${CATEGORIES}u+k;let c=atomicLoad(&work[i]);atomicStore(&work[i],running);running+=c;}
   if(lane==${BLOCK-1}u){grand[k]=partial[lane];}
   workgroupBarrier();
  }
@@ -410,8 +416,15 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
  }
 }
 // Owner numbering, worklists and the hanging slot table, in tile key order.
-@compute @workgroup_size(${BLOCK}) fn scatter(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let t=group.x*${BLOCK}u+lane;let valid=umTileLive(t);
+// A fixed grid: a slot no seam tile takes names no tile (every slot of the
+// table's N, whatever its key holds), then the resident blocks' groups.
+@compute @workgroup_size(${BLOCK}) fn scatter(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let seamF=atomicLoad(&work[3]);let seamC=atomicLoad(&work[4]);
+ for(var s=min(seamF+seamC,params.hangingCapacity)+group.x*${BLOCK}u+lane;s<N;s+=${BLOCK}u*groups.x){slots[N+s]=INF;}
+ for(var visit=group.x;visit<2u*ulResidentCount();visit+=groups.x){scatterGroup(2u*ulResidentBlock(visit>>1u)+(visit&1u),lane,seamF);workgroupBarrier();}
+}
+fn scatterGroup(g:u32,lane:u32,seamF:u32){
+ let t=g*${BLOCK}u+lane;let valid=umTileLive(t);
  var w=0u;var regular=false;
  if(valid){let f=atomicLoad(&work[FLAGS+t]);w=f&7u;regular=(f&8u)!=0u;}
  let c=categories(w,regular);
@@ -420,14 +433,14 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
  // is the tiles below it minus its h rank, its regular rank that minus its
  // seam 4h.
  partial[lane]=c[0]|(c[2]<<10u)|(c[3]<<20u);held[lane]=u32(valid);workgroupBarrier();scanPartialHeld(lane);
- let seamF=atomicLoad(&work[3]);let seamC=atomicLoad(&work[4]);
- // A slot no seam tile takes names no tile: t is a slot here, whatever its key holds.
- if(t>=min(seamF+seamC,params.hangingCapacity)){slots[N+t]=INF;}
- if(!valid){return;}
- let packed=partial[lane];var rank:array<u32,${CATEGORIES}>;
+ if(valid){scatterTile(t,g,w,regular,c,partial[lane],held[lane],seamF);}
+}
+// A stored tile of the group: packed and heldBelow are its inclusive scans.
+fn scatterTile(t:u32,g:u32,w:u32,regular:bool,c:array<u32,${CATEGORIES}>,packed:u32,heldBelow:u32,seamF:u32){
+ var rank:array<u32,${CATEGORIES}>;
  rank[0]=(packed&1023u)-c[0];rank[2]=((packed>>10u)&1023u)-c[2];rank[3]=(packed>>20u)-c[3];
- rank[1]=held[lane]-1u-rank[0];rank[4]=rank[1]-rank[3];
- for(var k=0u;k<${CATEGORIES}u;k++){rank[k]+=atomicLoad(&work[TOTALS+group.x*${CATEGORIES}u+k]);}
+ rank[1]=heldBelow-1u-rank[0];rank[4]=rank[1]-rank[3];
+ for(var k=0u;k<${CATEGORIES}u;k++){rank[k]+=atomicLoad(&work[TOTALS+g*${CATEGORIES}u+k]);}
  let f=atomicLoad(&work[1]);
  var slot=INF;
  // Slots past the preallocated cache stay unslotted (scan raised the fatal bit).
@@ -557,8 +570,8 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
   this.cleared=false;
   // The per-key launches: small fixed grids over the resident blocks (and
   // dilate over the changed list); classify and scatter a workgroup per
-  // 256 keys of every block (scan's prefix and the slot table span them all).
-  const groups64=(this.tiles+63)>>>6,keys=Math.min(UNIFORM_LIVE_KEY_GROUPS,groups64),verify=Math.min(UNIFORM_LIVE_GROUP_GROUPS,groups64);
+  // 256 keys of a resident block at a time (scan alone spans them all).
+  const groups64=(this.tiles+63)>>>6,keys=Math.min(UNIFORM_LIVE_KEY_GROUPS,groups64),verify=Math.min(UNIFORM_LIVE_GROUP_GROUPS,groups64),wide=Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.blocks);
   const level=this.level;
   // The ownership's capacity was reserved anew: this build's bounds follow
   // (queue-ordered, ahead of this encoder's submit).
@@ -572,11 +585,11 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
   // admit is launched only under an admission capacity: without one it could never act.
   pass.setPipeline(launches[0]!);pass.dispatchWorkgroups(keys);
   if(this.admission!==undefined){pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);}
-  pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(this.blocks);
+  pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(wide);
   pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(keys);
   pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(keys);
   pass.setPipeline(launches[5]!);pass.dispatchWorkgroups(1);
-  pass.setPipeline(launches[6]!);pass.dispatchWorkgroups(this.blocks);
+  pass.setPipeline(launches[6]!);pass.dispatchWorkgroups(wide);
   pass.setPipeline(launches[7]!);pass.dispatchWorkgroups(verify);
   pass.end();
  }

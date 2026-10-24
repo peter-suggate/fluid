@@ -1,6 +1,7 @@
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import type { UniformLatticeAddress } from "./uniform-lattice-address";
-import { UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS, uniformVelocityExtrapolationShader } from "./webgpu-uniform-velocity-extrapolation.wgsl";
+import { UNIFORM_LIVE_GROUP_GROUPS } from "./uniform-live-lists";
+import { UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS, UNIFORM_EXTRAPOLATION_WORK_WORDS, uniformVelocityExtrapolationShader } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 
 type Dims3 = readonly [number, number, number];
 /** The 4h, 8h, 16h and 32h levels: 8, 4, 2 and 1 cells a block axis. */
@@ -9,6 +10,9 @@ const LEVEL_EDGES = [8, 4, 2, 1] as const;
 const GROUP_CELLS = 64;
 
 interface MixedPipelines { readonly restrict?: GPUComputePipeline; readonly sweep?: GPUComputePipeline; readonly prolong?: GPUComputePipeline; readonly replay?: GPUComputePipeline }
+/** The caller's work words (heWork): two gate words, the held block count,
+ * a spare word, then the held blocks in any order, a word each. */
+export function uniformExtrapolationWorkBytes(blocks: number): number { return 4 * (UNIFORM_EXTRAPOLATION_WORK_WORDS + blocks); }
 /** A launch gate (the kernels' heGate) over the caller's work words: 0 always;
  * 1 with a dirty region; 2 with an old-payload region; 3 without one. */
 export type UniformExtrapolationGate = 0 | 1 | 2 | 3;
@@ -42,7 +46,8 @@ export class WebGPUUniformVelocityExtrapolator {
   private readonly layouts: { readonly restrict: GPUBindGroupLayout; readonly prolong: GPUBindGroupLayout; readonly replay: GPUBindGroupLayout };
   /** levels[0] is the 4h root; the last is one cell a block. */
   private readonly levels: HierarchyLevel[] = [];
-  /** Workgroups of a launch over every block's cells of each level. */
+  /** Workgroups of each level's launch: a fixed grid striding the held
+   * blocks' cells (the work words' list), 64 cells a group job. */
   private readonly groupCounts: readonly number[];
   /** restrictGroups[level-1] fills `level` from the one above it. */
   private restrictGroups: GPUBindGroup[] = [];
@@ -54,8 +59,6 @@ export class WebGPUUniformVelocityExtrapolator {
   readonly coarseVelocityTableAvailable: boolean;
   /** Gated variants (heGate): per gate, the kernels that take it. */
   private mixedPipelines?: readonly MixedPipelines[];
-  /** The work words of a caller without marks: every gate runs. */
-  private readonly alwaysRun: GPUBuffer;
 
   constructor(private readonly device: GPUDevice, private readonly address: UniformLatticeAddress, private readonly params: GPUBuffer) {
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
@@ -77,8 +80,6 @@ export class WebGPUUniformVelocityExtrapolator {
       label: `Uniform Sec. 3.3 extrapolation layout - ${kernel}`, entries: entries.filter(entry => bindings.includes(entry.binding)),
     });
     this.layouts = { restrict: layout("restrict", [0, 1, 3, 4, 6, 7, 8]), prolong: layout("prolong", [0, 1, 2, 3, 4, 5, 6, 7, 8]), replay: layout("replay", [1, 2, 3, 5, 7, 8]) };
-    this.alwaysRun = device.createBuffer({ label: "Uniform Sec. 3.3 extrapolation work (always)", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(this.alwaysRun, 0, new Uint32Array([1, 1, 0, 0]));
 
     // CM11b Sec. 3.3.1 requires the reverse pass to leave every finest-grid
     // value known that a source reaches. A block's levels stop at its one
@@ -98,20 +99,21 @@ export class WebGPUUniformVelocityExtrapolator {
       });
       this.levels.push({ dims: size, down: velocity("down"), up: velocity("up"), originsDown: origins(), originsUp: origins() });
     }
-    this.groupCounts = LEVEL_EDGES.map(edge => Math.ceil(address.blocks * edge ** 3 / GROUP_CELLS));
-    if (this.groupCounts[0]! > device.limits.maxComputeWorkgroupsPerDimension)
-      throw new Error(`Mixed extension hierarchy cannot launch over ${address.blocks} blocks`);
+    this.groupCounts = LEVEL_EDGES.map(() => UNIFORM_LIVE_GROUP_GROUPS);
     this.coarseVelocityTableAvailable = address.cells.every(value => value % 4 === 0 || value === 1);
   }
 
   /** Bind the levels to the page pool's tail: `topology` holds the page
    * table from word `pageTable` on, then the block records and the neighbour
-   * rows. Called once the owner of that buffer exists. */
-  private attach(topology: GPUBuffer, pageTable: number, work?: GPUBuffer): void {
+   * rows. Called once the owner of that buffer exists. work: the caller's
+   * work words (uniformExtrapolationWorkBytes), whose block list is current
+   * at every encode. */
+  private attach(topology: GPUBuffer, pageTable: number, work: GPUBuffer): void {
     const device = this.device, levels = this.levels, count = levels.length, params = this.params;
     const offset = 4 * pageTable;
     if (offset % device.limits.minStorageBufferOffsetAlignment !== 0) throw new Error("Mixed extension hierarchy needs an aligned page table");
-    const pool = { binding: 7, resource: { buffer: topology, offset } }, gate = { binding: 8, resource: { buffer: work ?? this.alwaysRun, size: 8 } };
+    if (work.size < uniformExtrapolationWorkBytes(this.address.blocks)) throw new Error("Mixed extension hierarchy work words hold fewer blocks than the pool");
+    const pool = { binding: 7, resource: { buffer: topology, offset } }, gate = { binding: 8, resource: { buffer: work } };
     const view = (texture: GPUTexture) => texture.createView();
     const restrict = (source: GPUTexture, sourceOrigins: GPUTexture, target: GPUTexture, targetOrigins: GPUTexture) => device.createBindGroup({ layout: this.layouts.restrict, entries: [
       { binding: 0, resource: { buffer: params } },
@@ -161,8 +163,8 @@ export class WebGPUUniformVelocityExtrapolator {
     const root=this.levels[0]!,mixed=this.mixedPipelines,counts=this.groupCounts,top=this.levels.length-1;
     if(!mixed)throw new Error("Mixed extension requires the resident 4h nearest-source hierarchy");
     return {input:root.down,inputOrigins:root.originsDown,output:root.up,outputOrigins:root.originsUp,
-      /** work: the caller's work words (heWork); without them every gate runs. */
-      attach:(topology:GPUBuffer,pageTable:number,work?:GPUBuffer)=>this.attach(topology,pageTable,work),
+      /** work: the caller's work words (heWork, uniformExtrapolationWorkBytes). */
+      attach:(topology:GPUBuffer,pageTable:number,work:GPUBuffer)=>this.attach(topology,pageTable,work),
       /** Encodes into the caller's compute pass; its group 0 is left rebound.
        * gate: the restriction and sweeps' gate (and the fill's); replayGate,
        * with replay: the replay's, and the prolongation then also runs under
@@ -217,6 +219,5 @@ export class WebGPUUniformVelocityExtrapolator {
 
   destroy(): void {
     this.levels.forEach((level) => { level.down.destroy(); level.up.destroy(); level.originsDown.destroy(); level.originsUp.destroy(); });
-    this.alwaysRun.destroy();
   }
 }

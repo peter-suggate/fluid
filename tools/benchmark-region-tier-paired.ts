@@ -92,7 +92,7 @@ function commandProfile(device: GPUDevice) {
 }
 const total = (p: Profile) => Object.values(p).reduce((s, r) => ({ dispatches: s.dispatches + r.dispatches, indirect: s.indirect + r.indirect, workgroups: s.workgroups + r.workgroups, clears: s.clears + r.clears, clearBytes: s.clearBytes + r.clearBytes, copies: s.copies + r.copies, copyBytes: s.copyBytes + r.copyBytes }), { dispatches: 0, indirect: 0, workgroups: 0, clears: 0, clearBytes: 0, copies: 0, copyBytes: 0 });
 
-const errors: string[] = [], solvers: WebGPUUniformReferenceSolver[] = [], helpers: { readMixedTexture: (d: GPUDevice, t: GPUTexture, a?: unknown) => Promise<Float32Array>; readUniformLiveAddress: (d: GPUDevice, s: WebGPUUniformReferenceSolver) => Promise<unknown> }[] = [];
+const errors: string[] = [], solvers: WebGPUUniformReferenceSolver[] = [], helpers: { readMixedTexture: (d: GPUDevice, t: GPUTexture, a?: unknown) => Promise<Float32Array>; readMixedBuffer: (d: GPUDevice, b: GPUBuffer) => Promise<Float32Array>; readUniformLiveAddress: (d: GPUDevice, s: WebGPUUniformReferenceSolver) => Promise<unknown> }[] = [];
 const rows: { frame: number; baseline_ms: number; candidate_ms: number; saved_ms: number; first: string; history: unknown[]; profile?: Profile[] }[] = [];
 const snapshots: Record<string, unknown>[] = [];
 let raw: GPUDevice | undefined, commands: ReturnType<typeof commandProfile> | undefined;
@@ -113,7 +113,7 @@ try {
       load("lib/methods/uniform/uniform-narrow-band-method.ts"), load("lib/core/method-contract.ts"), load("lib/core/scene-definition.ts"), load("lib/core/scenes.ts"), load("lib/core/gpu-compilation-manager.ts"),
       load("tests/helpers/uniform-mixed-native-fields.ts"), load("tests/helpers/uniform-geometric.ts"),
     ]);
-    helpers.push({ readMixedTexture: fields.readMixedTexture, readUniformLiveAddress: geometric.readUniformLiveAddress });
+    helpers.push({ readMixedTexture: fields.readMixedTexture, readMixedBuffer: fields.readMixedBuffer, readUniformLiveAddress: geometric.readUniformLiveAddress });
     let values: unknown, quality: string, built: SceneDescription;
     if (region) {
       built = createRegionTierScene(sceneOption as RegionTierScene, length, depth); quality = "balanced";
@@ -144,14 +144,24 @@ try {
     raw!.queue.submit([encoder.finish()]); await read.buffer!.mapAsync(GPUMapMode.READ);
     const tiers = [...new Uint32Array(read.buffer!.getMappedRange()).slice(0, 5)]; read.buffer!.unmap(); return tiers;
   };
+  /** An arm's hashed fields, read by live page identity. A mixed frame's
+   * pressure is its presentation buffer: gridPressureTexture is a 1x1x1
+   * placeholder there, the same bytes every frame. */
+  const fieldData = async (i: number, solver: WebGPUUniformReferenceSolver, address: unknown) => {
+    const out: Record<string, Float32Array> = {};
+    for (const [key, texture] of Object.entries({ velocity: solver.velocityTexture, volume: solver.volumeTexture, phi: solver.vertexPhiTexture! }))
+      out[key] = await helpers[i]!.readMixedTexture(raw!, texture, address);
+    const pressure = (solver as unknown as { mixedFrame?: { presentation: { pressure: GPUBufferBinding } } }).mixedFrame?.presentation.pressure;
+    out.pressure = pressure ? await helpers[i]!.readMixedBuffer(raw!, pressure.buffer) : await helpers[i]!.readMixedTexture(raw!, solver.gridPressureTexture, address);
+    return out;
+  };
   /** Each arm's field hashes, read by live page identity. */
   const hashFields = async () => {
     const all: Record<string, string>[] = [], arrays: Record<string, Float32Array>[] = [];
     for (const [i, solver] of solvers.entries()) {
       arrays.push({});
       const address = await helpers[i]!.readUniformLiveAddress(raw!, solver), out: Record<string, string> = {};
-      for (const [key, texture] of Object.entries({ velocity: solver.velocityTexture, volume: solver.volumeTexture, phi: solver.vertexPhiTexture!, pressure: solver.gridPressureTexture })) {
-        const data = await helpers[i]!.readMixedTexture(raw!, texture, address);
+      for (const [key, data] of Object.entries(await fieldData(i, solver, address))) {
         out[key] = createHash("sha256").update(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)).digest("hex").slice(0, 16);
         if (diffFields) arrays[i]![key] = data;
       }
@@ -206,8 +216,7 @@ try {
   const fieldHashes: Record<string, string>[] = [];
   for (const [i, solver] of solvers.entries()) {
     const address = await helpers[i]!.readUniformLiveAddress(raw, solver), out: Record<string, string> = {};
-    for (const [key, texture] of Object.entries({ velocity: solver.velocityTexture, volume: solver.volumeTexture, phi: solver.vertexPhiTexture!, pressure: solver.gridPressureTexture })) {
-      const data = await helpers[i]!.readMixedTexture(raw, texture, address);
+    for (const [key, data] of Object.entries(await fieldData(i, solver, address))) {
       out[key] = createHash("sha256").update(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)).digest("hex");
     }
     fieldHashes.push(out);

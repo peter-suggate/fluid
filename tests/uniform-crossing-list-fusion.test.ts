@@ -17,6 +17,7 @@ var<workgroup> nbReuseClean:atomic<u32>;
 fn umCorner(k:u32,n:u32)->vec3u{return vec3u(k%n,(k/n)%n,k/(n*n));}
 fn nbReuseTile(region:u32,lane:u32)->u32{return 64u*region+lane;}
 fn umTileLive(tile:u32)->bool{return tile<512u;}
+fn umLiveTileCount()->u32{return 512u;}fn umLiveTile(j:u32)->u32{return j;}
 fn umTileCoord(tile:u32)->vec3u{return umCorner(tile,8u);}
 fn umTileKey(p:vec3i)->u32{return u32(p.x+8*p.y+64*p.z);}
 fn nbReuseCacheEnabled()->bool{return false;}

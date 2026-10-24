@@ -1,5 +1,7 @@
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import type { UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_LIVE_GROUP_GROUPS, UniformLiveVisit, uniformLiveDispatch, uniformLiveListsWGSL } from "./uniform-live-lists";
 
 /** Potential writers and their dependency neighbourhoods for one complete
  * frame. These are conservative work domains, not permissions to discard
@@ -19,7 +21,10 @@ export function uniformRegionalPlanLayout(regions:number){
 
 /** Direct launches only. One metadata pass builds all lists at the frame
  * boundary; none of its consumers rebuilds or resizes the plan. A bounded
- * direct grid strides the actual list, including unexpected activation. */
+ * direct grid strides the actual list, including unexpected activation.
+ * With a page pool both launches stride its blocks (uniform-live-lists.ts):
+ * a free region's seed is a fixed point after one visit (its history's
+ * revision zero), and its expand writes nothing. */
 export class UniformRegionalFramePlan {
  readonly layout:ReturnType<typeof uniformRegionalPlanLayout>;
  readonly buffer:GPUBuffer;
@@ -55,8 +60,10 @@ export class UniformRegionalFramePlan {
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,
   revisions:{buffer:GPUBuffer;liveOffset:number;topologyOffset:number;regions:number},tiers:GPUBuffer|undefined,
   private readonly currentGeneration:()=>number,
-  private readonly geometryCache?:{buffer:GPUBuffer;mapping:number;owners:number;remap:number;regions:number}){
-  const r=revisions.regions;this.layout=uniformRegionalPlanLayout(r);this.groups=Math.max(1,Math.min(128,r));
+  private readonly geometryCache?:{buffer:GPUBuffer;mapping:number;owners:number;remap:number;regions:number},
+  private readonly pool?:UniformPagePool){
+  const r=revisions.regions;this.layout=uniformRegionalPlanLayout(r);this.groups=Math.max(1,Math.min(pool?UNIFORM_LIVE_GROUP_GROUPS:128,r));
+  this.seedVisit=pool&&new UniformLiveVisit(pool);
   this.buffer=device.createBuffer({label:"Uniform shared regional frame plan",size:4*this.layout.words,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.params=device.createBuffer({label:"Uniform regional frame plan policy",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   this.allocatedBytes=this.buffer.size+this.params.size;
@@ -65,16 +72,19 @@ export class UniformRegionalFramePlan {
    ...[1,2,...(tiers?[3]:[])].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
    ...(geometryCache?[{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
+   ...(pool?[{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
   ]});
   this.group=device.createBindGroup({layout:this.resources,entries:[
    {binding:0,resource:{buffer:this.buffer}},{binding:1,resource:{buffer:revisions.buffer}},
    {binding:2,resource:{buffer:ownership.regionVelocity}},...(tiers?[{binding:3,resource:{buffer:tiers}}]:[]),
    {binding:4,resource:{buffer:this.params}},
    ...(geometryCache?[{binding:5,resource:{buffer:geometryCache.buffer}}]:[]),
+   ...(pool?[{binding:6,resource:{buffer:pool.state}}]:[]),
   ]});
   this.source={revision:revisions.liveOffset/4,topology:revisions.topologyOffset/4,tiers:!!tiers};
  }
  private readonly source:{revision:number;topology:number;tiers:boolean};
+ private readonly seedVisit?:UniformLiveVisit;
  async initialize():Promise<void>{
   const l=this.layout,r=l.regions;
   const module=this.device.createShaderModule({label:"Uniform shared regional frame plan",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
@@ -84,6 +94,10 @@ export class UniformRegionalFramePlan {
 ${this.source.tiers?"@group(1) @binding(3) var<storage,read> tiers:array<u32>;":""}
 @group(1) @binding(4) var<uniform> policy:vec4u;
 const RP_REGIONS:u32=${r}u;
+${this.pool?uniformLiveListsWGSL(1,6,this.pool.layout)+`fn rpVisits(sweep:bool)->u32{return 8u*ulVisitCount(sweep);}
+fn rpRegion(i:u32,sweep:bool)->u32{return ulVisitRegion(i,sweep);}`:`fn ulSweep(groups:vec3u)->bool{return false;}
+fn rpVisits(sweep:bool)->u32{return RP_REGIONS;}
+fn rpRegion(i:u32,sweep:bool)->u32{return i;}`}
 fn rpRetiredHalo(at:u32){
  if(atomicLoad(&plan[at+3u])==0u){return;}
  let old=vec3i(vec3u(atomicLoad(&plan[at]),atomicLoad(&plan[at+1u]),atomicLoad(&plan[at+2u])));
@@ -125,9 +139,10 @@ fn rpCache(lane:u32){
 }
 `:""}
 @compute @workgroup_size(64) fn seed(@builtin(global_invocation_id) id:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let sweep=ulSweep(groups);if(group.y!=0u){return;}
  ${this.geometryCache?"if(group.x==0u&&policy.y!=0u){rpCache(lane);}":""}
- for(var region=id.x;region<RP_REGIONS;region+=64u*groups.x){
-  let at=${l.history}u+11u*region;
+ for(var visit=id.x;visit<rpVisits(sweep);visit+=64u*groups.x){
+  let region=rpRegion(visit,sweep);let at=${l.history}u+11u*region;
   if(!umTileLive(umPageTile(region,0u))){rpRetiredHalo(at);atomicStore(&plan[at+3u],0u);continue;}
   var flags=0u;let world=umPageCoord(region);
   if(any(world!=vec3u(atomicLoad(&plan[at]),atomicLoad(&plan[at+1u]),atomicLoad(&plan[at+2u])))){rpRetiredHalo(at);flags=7u;}
@@ -152,7 +167,8 @@ var<workgroup> rpBases:array<u32,2>;
 var<workgroup> rpLive:u32;
 var<workgroup> rpMask:u32;
 @compute @workgroup_size(64) fn expand(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var region=group.x;region<RP_REGIONS;region+=groups.x){
+ for(var visit=group.x;visit<rpVisits(false);visit+=groups.x){
+  let region=rpRegion(visit,false);
   if(lane==0u){rpLive=u32(umTileLive(umPageTile(region,0u)));atomicStore(&rpHalo,atomicLoad(&plan[${l.flags}u+region])&7u);}
   if(workgroupUniformLoad(&rpLive)==0u){continue;}
   let own=atomicLoad(&plan[${l.flags}u+region])&7u;
@@ -184,7 +200,7 @@ var<workgroup> rpMask:u32;
   const generation=this.currentGeneration();this.device.queue.writeBuffer(this.params,0,new Uint32Array([+(generation!==this.generation),+this.retainGeometryCache,0,0]));this.generation=generation;
   encoder.clearBuffer(this.buffer,0,4*(HEADER+this.layout.regions));
   const pass=encoder.beginComputePass({label:"Uniform shared regional frame plan"});pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
-  pass.setPipeline(this.seed);pass.dispatchWorkgroups(Math.min(128,Math.ceil(this.layout.regions/64)));pass.setPipeline(this.expand);pass.dispatchWorkgroups(this.groups);pass.end();this.active=true;
+  pass.setPipeline(this.seed);uniformLiveDispatch(pass,Math.min(128,Math.ceil(this.layout.regions/64)),this.seedVisit?.sweep()??false);pass.setPipeline(this.expand);pass.dispatchWorkgroups(this.groups);pass.end();this.active=true;
  }
  /** A consumer selects this list once for its frame. The list is immutable
   * until the next head, including through reconstruction and projection. */

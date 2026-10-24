@@ -109,9 +109,10 @@ fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
  let expected=nbExpectedMass(depth);
  return nbTheta(q)*mix(min(1.0,mass/expected),1.0,nbSurfaceTheta(q));
 }
+// The live tiles (uniformStageListsWGSL), a fixed grid striding them.
 @compute @workgroup_size(64) fn activity(@builtin(global_invocation_id) gid:vec3u){
- for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
-  if(!umTileLive(t)){continue;}
+ for(var j=gid.x;j<umLiveTileCount();j+=65536u){
+  let t=umLiveTile(j);
   let flags=atomicLoad(&bins[NB_ACTIVITY_SCORES+2u*t+1u]);
   let triggered=nbActivityTriggered(t,(flags>>${I.triggeredShift}u)&63u)&&(flags&${I.dropped}u)==0u;
   let q=4.0*vec3f(umTileCoord(t))+2.0;
@@ -122,8 +123,8 @@ fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
  }
 }
 @compute @workgroup_size(64) fn activitySpread(@builtin(global_invocation_id) gid:vec3u){
- for(var t=gid.x;t<NB_BAND_TILES;t+=65536u){
-  if(!umTileLive(t)){continue;}
+ for(var j=gid.x;j<umLiveTileCount();j+=65536u){
+  let t=umLiveTile(j);
   let p=vec3i(umTileCoord(t));var heat=0.0;
   for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
    let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}

@@ -33,7 +33,7 @@ import {
   uniformExtrapolationFarValue, uniformExtrapolationLevel, uniformExtrapolationReplay, uniformExtrapolationRestrict, uniformExtrapolationRun, uniformExtrapolationSweep,
   uniformSourceWord, type UniformExtrapolationLevel,
 } from "../lib/methods/uniform/uniform-velocity-extrapolation-twin";
-import { WebGPUUniformVelocityExtrapolator } from "../lib/methods/uniform/webgpu-uniform-velocity-extrapolation";
+import { uniformExtrapolationWorkBytes, WebGPUUniformVelocityExtrapolator } from "../lib/methods/uniform/webgpu-uniform-velocity-extrapolation";
 import { UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS, uniformVelocityExtrapolationShader } from "../lib/methods/uniform/webgpu-uniform-velocity-extrapolation.wgsl";
 
 type Vec3 = readonly [number, number, number];
@@ -175,7 +175,9 @@ device.queue.writeBuffer(params, 0, new Float32Array([...address.cells, 1 / 60, 
 const extrapolator = new WebGPUUniformVelocityExtrapolator(device, address, params);
 const built = performance.now();await extrapolator.initialize();
 const hierarchy = extrapolator.prepareMixedContinuation(), tail = storage("page pool tail", 4 * (TABLE + 28 * BLOCKS));
-hierarchy.attach(tail, 0);
+// Every gate runs; the held blocks follow the gate words and their count.
+const work = storage("work words", uniformExtrapolationWorkBytes(BLOCKS));
+hierarchy.attach(tail, 0, work);
 const valuesBuffer = storage("root values", 16 * TEXELS), lowerBuffer = storage("root lower bounds", 16 * TEXELS), upperBuffer = storage("root upper bounds", 16 * TEXELS);
 const facesBuffer = storage("faces", 16 * FACES, faces), farBuffer = storage("far values", 4 * FACES);
 async function pipeline(label: string, code: string, entryPoint: string, entries: GPUBindGroupLayoutEntry[]): Promise<{ pipeline: GPUComputePipeline; layout: GPUBindGroupLayout }> {
@@ -244,6 +246,7 @@ function compareFar(label: string, got: Uint32Array, pool: Parameters<typeof uni
 async function round(label: string, seed: number): Promise<void> {
   const pool = { table, records, rows: rows() };
   device.queue.writeBuffer(tail, 0, table);device.queue.writeBuffer(tail, 4 * TABLE, records);device.queue.writeBuffer(tail, 4 * (TABLE + BLOCKS), pool.rows);
+  const heldBlocks = order.filter(held);device.queue.writeBuffer(work, 0, Uint32Array.from([1, 1, heldBlocks.length, 0, ...heldBlocks]));
   const first = makeRoot(seed), twin = uniformExtrapolationRun(pool, first, SCALE), got = await launch(first, false);
   const filled = compare(`${label} prolong`, got, twin.up[0]!, true), looked = compareFar(`${label} prolong`, got.far, pool, twin.up[0]!);
   // New values at the same sources: the replay re-reads the taps the prolongation recorded.

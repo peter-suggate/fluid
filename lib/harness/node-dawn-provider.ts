@@ -10,12 +10,17 @@ export interface NodeDawnProvider {
   globals: Record<string, unknown>;
 }
 
+import { configureMetalShaderCache } from "./metal-shader-cache";
+
 const PROCESS_DAWN_GPU_KEEPALIVE = new Set<GPU>();
 
+/** Also moves the process's Metal shader cache to the harness's own
+ * (configureMetalShaderCache: the system cache rarely hits across runs). */
 export function createProcessRetainedDawnGPU(
   dawn: NodeDawnProvider,
   options: string[],
 ): GPU {
+  configureMetalShaderCache();
   const gpu = dawn.create(options);
   PROCESS_DAWN_GPU_KEEPALIVE.add(gpu);
   return gpu;
@@ -54,4 +59,10 @@ export function paceDawnEventPolling(interval_ms = 0.25): void {
     waiting.push(callback); return immediate(tick);
   }
   globalThis.setImmediate = Object.assign(paced, immediate) as unknown as typeof setImmediate;
+}
+
+/** Dawn options for a harness: `base` plus FLUID_DAWN_OPTIONS (space-separated). */
+export function nodeDawnOptions(base: readonly string[]): string[] {
+  const extra = (typeof process !== "undefined" ? process.env.FLUID_DAWN_OPTIONS ?? "" : "").split(/\s+/).filter(Boolean);
+  return [...base, ...extra];
 }

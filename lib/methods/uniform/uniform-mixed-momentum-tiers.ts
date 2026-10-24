@@ -2,6 +2,8 @@ import { UNIFORM_DETAIL_RING_4H_LOAD } from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { UNIFORM_REGION_HEAT_BUDGET_H, uniformRegionHeatWGSL } from "./uniform-region-heat";
+import { UNIFORM_LIVE_GROUP_GROUPS, UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
+import { uniformStageListsWGSL } from "./uniform-stage-lists";
 
 /** Full: every face traces. Retain: a face keeps its extended value.
  * Affine: a face traces the region's affine model (no sampler).
@@ -42,10 +44,10 @@ fn ${name}(region:u32,dt:f32,hmin:f32)->bool{
  * in an all-pending frame (0.34 ms). */
 const UNIFORM_MOMENTUM_FIT_ITEMS=8;
 /** The momentum's affine fit and residual grids: a lane of the first
- * UNIFORM_MOMENTUM_FIT_ITEMS tests one (region, part) item, so an idle frame
- * costs each workgroup one gather; consecutive regions land in different
- * workgroups. */
-export function uniformMomentumFitGrid(regions:number,parts:number):number{return Math.min(65535,Math.ceil(parts*regions/UNIFORM_MOMENTUM_FIT_ITEMS));}
+ * UNIFORM_MOMENTUM_FIT_ITEMS tests one (region, part) item of the held
+ * regions, so an idle frame costs each workgroup one gather; consecutive
+ * regions land in different workgroups. A fixed grid: past it they stride. */
+export const UNIFORM_MOMENTUM_FIT_GRID=UNIFORM_LIVE_GROUP_GROUPS;
 /** The tiers' own pass (decide, the momentum's fit, affine). */
 export const UNIFORM_MOMENTUM_TIER_PASS:GPUComputePassDescriptor={label:"Uniform mixed momentum tiers"};
 
@@ -87,7 +89,7 @@ export class UniformMixedMomentumTiers {
   /** heat: the frame's region work tiers (UniformRegionHeat.tiers). */
   constructor(private readonly device:GPUDevice,private readonly ownership:UniformMixedOwnership,private readonly heat:GPUBuffer){
     this.regions=ownership.capacity.tiles/64;
-    this.groups=Math.min(65535,Math.ceil(this.regions/64));
+    this.groups=UNIFORM_LIVE_LANE_GROUPS;
     this.record=device.createBuffer({label:"Uniform mixed momentum tiers",size:4*this.regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
     this.models=device.createBuffer({label:"Uniform mixed momentum affine models",size:4*UNIFORM_MOMENTUM_MODEL_WORDS*this.regions,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
     this.allocatedBytes=this.record.size+this.models.size;
@@ -108,7 +110,7 @@ export class UniformMixedMomentumTiers {
   }
   async initialize():Promise<void>{
     const T=UNIFORM_MOMENTUM_TIER,W=UNIFORM_MOMENTUM_MODEL_WORDS;
-    const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformRegionHeatWGSL(1,2,this.regions)+/* wgsl */`
+    const code=uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+uniformRegionHeatWGSL(1,2,this.regions)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> tiers:array<u32>;
 @group(1) @binding(1) var<storage,read> regionVelocity:array<u32>;
 struct UMMomentumParams {hDt:vec4f,flags:vec4u}
@@ -118,8 +120,9 @@ const MT_MAX:f32=3.402823e38;
 // The plan's float-flip order (uniform-mixed-frame-plan.ts umVelocityOrder) undone.
 fn mtDecode(w:u32)->f32{return bitcast<f32>(select(~w,w^0x80000000u,(w&0x80000000u)!=0u));}
 ${affineCandidateWGSL("mtCandidate","models")}
+// A held region a lane: only a live owner reads its region's tier and model.
 @compute @workgroup_size(64) fn decide(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- for(var region=gid.x;region<UM_PAGES;region+=64u*groups.x){
+ for(var j=gid.x;j<umHeldPageCount();j+=64u*groups.x){let region=umHeldPage(j);
   // The momentum's fit sets eligible again where it models this region.
   models[${W}u*region+13u]=0.0;
   let heat=umRegionTier(region);
@@ -140,7 +143,7 @@ ${affineCandidateWGSL("mtCandidate","models")}
 }
 @compute @workgroup_size(64) fn affine(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let h=momentum.hDt.xyz;let dt=momentum.hDt.w;let hmin=min(h.x,min(h.y,h.z));
- for(var region=gid.x;region<UM_PAGES;region+=64u*groups.x){
+ for(var j=gid.x;j<umHeldPageCount();j+=64u*groups.x){let region=umHeldPage(j);
   if(tiers[region]!=${T.pending}u){continue;}
   let b=${W}u*region;var fail=!mtCandidate(region,dt,hmin);
   // r: the fit's residual over every face the trace can read.
@@ -173,6 +176,7 @@ ${affineCandidateWGSL("mtCandidate","models")}
 /** The momentum's read of the tiers (bound read-only at `binding`) and of
  * the affine models (read-write at `models`: the fit writes them). */
 export function uniformMomentumTierWGSL(binding:number,models:number):string{const W=UNIFORM_MOMENTUM_MODEL_WORDS,T=UNIFORM_MOMENTUM_TIER;return /* wgsl */`
+${uniformStageListsWGSL}
 @group(1) @binding(${binding}) var<storage,read> umTiers:array<u32>;
 @group(1) @binding(${models}) var<storage,read_write> umModels:array<f32>;
 fn umMomentumRetained(owner:UMOwner)->bool{return umTiers[umPageOfTile(owner.tile)]==${T.retain}u;}
@@ -209,17 +213,20 @@ fn umFitFace(cell:vec3i,axis:u32,width:u32,centre:vec3f)->vec4f{
  var p=vec3f(cell)+vec3f(0.5);p[axis]=f32(cell[axis]+1);
  return vec4f(p-centre,textureLoad(extended,cell,0)[axis]);
 }
-// The (region, part) items of pending regions among a workgroup's
-// UM_FIT_ITEMS: item = group + groups x (lane + UM_FIT_ITEMS round),
-// region = item % pages.
+// The (region, part) items of pending held regions among a workgroup's
+// UM_FIT_ITEMS: n = group + groups x (lane + UM_FIT_ITEMS round) is held
+// region n % held, part n / held; the item listed is region + pages x part.
 const UM_FIT_ITEMS:u32=${UNIFORM_MOMENTUM_FIT_ITEMS}u;
 fn umFitGather(round:u32,group:u32,groups:u32,lane:u32,parts:u32,modelled:bool)->u32{
  if(lane==0u){atomicStore(&umFitCount,0u);}
  workgroupBarrier();
- let item=group+groups*(lane+UM_FIT_ITEMS*round);
- if(lane<UM_FIT_ITEMS&&item<parts*UM_PAGES&&umTiers[item%UM_PAGES]==${T.pending}u){
-  let h=momentum.hDt.xyz;
-  if(!modelled||umAffineCandidate(item%UM_PAGES,momentum.hDt.w,min(h.x,min(h.y,h.z)))){umFitList[atomicAdd(&umFitCount,1u)]=item;}
+ let n=group+groups*(lane+UM_FIT_ITEMS*round);let held=umHeldPageCount();
+ if(lane<UM_FIT_ITEMS&&n<parts*held){
+  let region=umHeldPage(n%held);
+  if(umTiers[region]==${T.pending}u){
+   let h=momentum.hDt.xyz;
+   if(!modelled||umAffineCandidate(region,momentum.hDt.w,min(h.x,min(h.y,h.z)))){umFitList[atomicAdd(&umFitCount,1u)]=region+UM_PAGES*(n/held);}
+  }
  }
  workgroupBarrier();
  if(lane==0u){umFitTotal=atomicLoad(&umFitCount);}
@@ -232,7 +239,7 @@ fn umFitRegion(region:u32)->vec3u{let origin=16u*umPageCoord(region);return vec3
 // about the grid's own centre the least squares normal equations are
 // diagonal: c = mean v, g_j = sum v x_j / sum x_j^2.
 @compute @workgroup_size(256) fn momentumAffineFit(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var round=0u;UM_FIT_ITEMS*groups.x*round<4u*UM_PAGES;round++){
+ for(var round=0u;UM_FIT_ITEMS*groups.x*round<4u*umHeldPageCount();round++){
   let count=umFitGather(round,group.x,groups.x,lane,4u,false);
   for(var j=0u;j<count;j++){
    let item=workgroupUniformLoad(&umFitList[j]);let region=item%UM_PAGES;let part=item/UM_PAGES;
@@ -282,7 +289,7 @@ fn umFitRegion(region:u32)->vec3u{let origin=16u*umPageCoord(region);return vec3
 // regions), a workgroup per (region, part) of those faces.
 @compute @workgroup_size(256) fn momentumAffineResidual(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  const parts=${UNIFORM_MOMENTUM_RESIDUAL_PARTS}u;
- for(var round=0u;UM_FIT_ITEMS*groups.x*round<parts*UM_PAGES;round++){
+ for(var round=0u;UM_FIT_ITEMS*groups.x*round<parts*umHeldPageCount();round++){
   let count=umFitGather(round,group.x,groups.x,lane,parts,true);
   for(var j=0u;j<count;j++){
    let item=workgroupUniformLoad(&umFitList[j]);let region=item%UM_PAGES;let part=item/UM_PAGES;

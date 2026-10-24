@@ -108,6 +108,7 @@ fn umTileKind(q:vec3i)->u32{return select(2u,0u,umTileKey(q)<UM_TILES);}
 fn umPageOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
 fn umKeyStored(t:u32)->bool{return t<UM_TILES;}
 fn umTileLive(t:u32)->bool{return t<UM_TILES;}
+fn umLiveTileCount()->u32{return UM_TILES;}fn umLiveTile(j:u32)->u32{return j;}
 fn umSolidRegionClearAtBuild(p:vec3i)->bool{return true;}
 fn umSolidEnabled()->bool{return false;}
 fn umSolidOpenCells(t:u32)->vec2u{return vec2u(0xffffffffu);}

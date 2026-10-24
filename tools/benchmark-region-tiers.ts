@@ -2,7 +2,7 @@
  * diagnostics (--profile) are separate runs. --timestamps also attempts native
  * phase timing; unsupported/invalid samples remain explicit in the report.
  * node --import tsx tools/benchmark-region-tiers.ts --scene=splash --length=128
- *   [--steps=120] [--from=40] [--profile] [--values={...}] [--out=PATH.json]
+ *   [--steps=120] [--from=40] [--profile] [--values={...}] [--pool-blocks=N] [--out=PATH.json]
  */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
@@ -10,7 +10,7 @@ import { dirname, resolve } from "node:path";
 import { cpus } from "node:os";
 import { createHash } from "node:crypto";
 import { createUniformSolver, withUniformDevice } from "../tests/helpers/uniform-geometric";
-import { readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
+import { readMixedBuffer, readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
@@ -35,8 +35,12 @@ const values: MethodParamValues = JSON.parse(option("values") ?? "{}");
 assert.ok(values && typeof values === "object" && !Array.isArray(values));
 const depth = Number(option("depth") ?? 32);
 const scene = createRegionTierScene(mode, length, depth);
+// --pool-blocks=N: the page pool's reservation (blocks, the two sentinels included).
+const poolBlocks = option("pool-blocks") === undefined ? undefined : Number(option("pool-blocks"));
+assert.ok(poolBlocks === undefined || (Number.isInteger(poolBlocks) && poolBlocks >= 3));
+if (poolBlocks !== undefined) scene.fluid = { ...scene.fluid, pagePool: { ...scene.fluid?.pagePool, blocks: poolBlocks } } as typeof scene.fluid;
 scene.duration_s = Math.max(scene.duration_s, steps * scene.numerics.fixedDt_s);
-const out = resolve(option("out") ?? `artifacts/region-tiers/${mode}-${length}${depth === 32 ? "" : `-depth${depth}`}${profile ? "-profile" : ""}.json`);
+const out = resolve(option("out") ?? `artifacts/region-tiers/${mode}-${length}${depth === 32 ? "" : `-depth${depth}`}${poolBlocks === undefined ? "" : `-pool${poolBlocks}`}${profile ? "-profile" : ""}.json`);
 process.env.WEBGPU_NODE_MODULE ??= resolve("node_modules/webgpu/index.js");
 paceDawnEventPolling();
 const source = createHash("sha256");
@@ -98,10 +102,14 @@ await withUniformDevice("region tier benchmark", async device => {
     }
     const stats = await solver.readStats();
     const fields: Record<string, string> = {};
-    if (process.argv.includes("--fingerprint")) for (const [name, texture] of Object.entries({
-      velocity: solver.velocityTexture, volume: solver.volumeTexture, phi: solver.vertexPhiTexture!, pressure: solver.gridPressureTexture,
+    // A mixed frame's pressure is its presentation buffer: gridPressureTexture is a 1x1x1 placeholder there.
+    const pressure = (solver as unknown as { mixedFrame?: { presentation: { pressure: GPUBufferBinding } } }).mixedFrame?.presentation.pressure;
+    if (process.argv.includes("--fingerprint")) for (const [name, read] of Object.entries({
+      velocity: () => readMixedTexture(device, solver.velocityTexture), volume: () => readMixedTexture(device, solver.volumeTexture),
+      phi: () => readMixedTexture(device, solver.vertexPhiTexture!),
+      pressure: () => pressure ? readMixedBuffer(device, pressure.buffer) : readMixedTexture(device, solver.gridPressureTexture),
     })) {
-      const data = await readMixedTexture(device, texture);
+      const data = await read();
       fields[name] = createHash("sha256").update(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)).digest("hex");
     }
     const summary = { mean_ms: mean(selected.map(r => r.wall_ms)), median_ms: quantile(selected.map(r => r.wall_ms), .5),
