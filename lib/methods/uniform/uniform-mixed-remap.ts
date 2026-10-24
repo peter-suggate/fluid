@@ -346,7 +346,7 @@ export class UniformMixedOwnershipTransfer {
   const pass=e.beginComputePass(entry==="toPressure"?TRANSFER_TO_PRESSURE_PASS:TRANSFER_TO_SIMULATION_PASS);
   pass.setBindGroup(0,this.simulation.bindGroup);pass.setBindGroup(1,group.group);
   const weighted=!!this.solid&&entry==="toPressure";if(weighted)pass.setBindGroup(2,this.solid!.tileGroup);
-  this.simulation.dispatchCounted(pass,weighted?this.solid!.select(coarse):coarse,this.pages);
+  this.simulation.dispatchCounted(pass,weighted?this.solid!.select(coarse):coarse,this.pages,"residentPages");
   // A grid-stride over the h tiles (umCounts.x): sized by them, and not
   // issued while the simulation holds no h-tile capacity.
   if(entry==="toSimulation"&&this.projectedBand)pass.setBindGroup(2,this.projectedBand.group);

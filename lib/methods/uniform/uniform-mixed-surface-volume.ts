@@ -53,6 +53,8 @@ const NB_VOLUME_RATE_LIMIT=4;
  * at rest must be asked for nothing, or the divergence moves its waterline
  * and wakes the adaptive surface. */
 const NB_VOLUME_DEAD_BAND=0.01;
+/** Workgroups of the reduce launch at most: the ownership's counted-launch grid. */
+const REDUCE_GRID=4096;
 const VOLUME_PASS:GPUComputePassDescriptor={label:"Uniform mixed global surface volume"},BUDGET_PASS:GPUComputePassDescriptor={label:"NB scalar volume sources"};
 export class UniformMixedSurfaceVolume {
  /** NB budget: target, initialized, a word no stage writes, last normal shift,
@@ -557,9 +559,10 @@ var<workgroup> svReduceJobs:u32;
  private run(pass:GPUComputePassEncoder,entry:string):void{
   const own=this.pipelines.get(entry)!;const pipeline=uniformDetailPick(this.solid?.select(own)??own);pass.setPipeline(pipeline);
   if(entry==="solve"||entry==="capture"||entry==="gauge")pass.dispatchWorkgroups(1);
-  else if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,this.chunks);
+  // reduce: a workgroup 64 measure partials (svJobs, the residentAll jobs).
+  else if(entry==="reduce")this.ownership.dispatchBuffered(pass,pipeline,"residentAll",Math.min(REDUCE_GRID,this.chunks),64);
   else if(entry==="resolveScale")this.ownership.dispatchFusedCounted(pass,pipeline);
-  else if(entry==="grow"||entry==="measureGrow")this.ownership.dispatchCounted(pass,pipeline,this.pages);
+  else if(entry==="grow"||entry==="measureGrow")this.ownership.dispatchCounted(pass,pipeline,this.pages,"residentPages");
   else if(entry==="clearBand")pass.dispatchWorkgroups(this.clearGroups);
   else this.ownership.dispatchAllCounted(pass,pipeline);
  }

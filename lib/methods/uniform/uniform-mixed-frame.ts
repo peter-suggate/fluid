@@ -936,14 +936,14 @@ export class UniformMixedFrame {
    // carry its count until the receipt of the frame that built it is the one observed.
    const edit=relayout?.edit?.(),firstCensus=relayout!==undefined&&!this.censused;
    if(edit)this.noteEdit(frame,edit);
-   else if(relayout&&!this.censused){this.workEpoch=frame-1;this.band.observeWork(this.band.capacity);this.band.forgetCycles();this.ownership.forgetWork();this.remap.forgetWork();}
+   else if(relayout&&!this.censused){this.workEpoch=frame-1;this.band.observeWork(this.band.capacity);this.band.forgetCycles();this.ownership.forgetWork();this.pressureOwnership.observeResidency();this.remap.forgetWork();}
    const edited=this.editedBy(frame);
    const work=!kick&&frame-UNIFORM_MIXED_RECEIPT_RING>this.workEpoch?this.laggedOf(frame-UNIFORM_MIXED_RECEIPT_RING):undefined;
    // Under a census the budgets keep a reserve: it admits tiles the receipts report two frames late.
    // A counted edit's build admits none but its own.
    const reserve=relayout&&!edit?UNIFORM_WORK_RELAYOUT_RESERVE:0;
    // The band's tiles are wet h tiles: an edit adds its own at most.
-   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0),work.bandLevel1+(edited?.tiles??0),work.bandLevel2+(edited?.tiles??0));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);this.remap.observeWork(work.listed,reserve,edited?.reach);}
+   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0),work.bandLevel1+(edited?.tiles??0),work.bandLevel2+(edited?.tiles??0),Math.ceil((work.work[0]!+work.work[1]!+(edited?.reach??0))/512));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);if(this.pressureOwnership!==this.ownership)this.pressureOwnership.observeResidency(work.work[7]!+Math.ceil((edited?.reach??0)/64),reserve);this.remap.observeWork(work.listed,reserve,edited?.reach);}
    // Only a census certifies residency: a frame without one must not skip a page the last one did.
    if(!kick||relayout){if(!relayout&&this.censused)this.ownership.resetResidency();this.censused=!!relayout;}
    // Only a census asks the pool for the liquid's pages: without one a live pool would advance into pages it never claimed.
@@ -1422,7 +1422,7 @@ export class UniformMixedFrame {
   // the host UNIFORM_MIXED_RECEIPT_RING frames late: launch at the ceilings
   // until a receipt of this owner arrives. A budget left at the host
   // layout's (one group from all-4h) runs the new h tiles on a few lanes.
-  if(relayout&&!counted){this.workEpoch=this.frameIndex;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.remap.forgetWork();}
+  if(relayout&&!counted){this.workEpoch=this.frameIndex;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.pressureOwnership.observeResidency();this.remap.forgetWork();}
   // markChanged latches a builder fatal into this frame's record.
   this.remap.bindStatus(this.status);
  }
