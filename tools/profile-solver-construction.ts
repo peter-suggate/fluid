@@ -11,7 +11,9 @@
  * WGSL is hashed, so two runs show whether the source is deterministic. After
  * construction the solver advances --steps fixed steps and the density,
  * pressure and phi fields are hashed: equal hashes between two builds mean
- * the same simulation output. */
+ * the same simulation output. Every host upload (queue.writeBuffer and
+ * writeTexture) during construction is hashed too, in order and by label:
+ * the gate of a host-side change that must build the same fields. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -69,6 +71,34 @@ raw.createComputePipelineAsync = descriptor => timed({ kind: "compute", label: d
   () => computeAsync(descriptor));
 raw.createRenderPipelineAsync = descriptor => timed({ kind: "render", label: descriptor.label, module: moduleLabel.get(descriptor.vertex.module), entryPoint: descriptor.vertex.entryPoint },
   () => renderAsync(descriptor));
+/** Every byte the host uploads while constructing, in queue order: equal
+ * hashes between two builds mean the host-built fields (initial volume, phi,
+ * velocity, solids, layouts, tables) are identical. Per label too, so a
+ * mismatch names its resource. */
+const uploads = createHash("sha256"), uploadsByLabel = new Map<string, ReturnType<typeof createHash>>();
+let uploadBytes = 0, uploading = true;
+const bytesOf = (data: BufferSource | SharedArrayBuffer, offset = 0, size?: number) => {
+  const view = ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data as ArrayBuffer);
+  return view.subarray(offset, size === undefined ? undefined : offset + size);
+};
+const upload = (label: string, bytes: Uint8Array) => {
+  if (!uploading) return;
+  uploads.update(label).update(bytes); uploadBytes += bytes.byteLength;
+  let h = uploadsByLabel.get(label); if (!h) uploadsByLabel.set(label, h = createHash("sha256")); h.update(bytes);
+};
+const writeBuffer = raw.queue.writeBuffer.bind(raw.queue), writeTexture = raw.queue.writeTexture.bind(raw.queue);
+raw.queue.writeBuffer = (buffer, bufferOffset, data, dataOffset, size) => {
+  // dataOffset and size count elements of a typed array, bytes otherwise.
+  const unit = ArrayBuffer.isView(data) && "BYTES_PER_ELEMENT" in data ? (data as unknown as { BYTES_PER_ELEMENT: number }).BYTES_PER_ELEMENT : 1;
+  upload(`${buffer.label}@${bufferOffset}`, bytesOf(data, (dataOffset ?? 0) * unit, size === undefined ? undefined : size * unit));
+  return writeBuffer(buffer, bufferOffset, data, dataOffset, size);
+};
+raw.queue.writeTexture = (destination, data, layout, size) => {
+  upload(`${destination.texture.label}@${destination.mipLevel ?? 0}:${JSON.stringify(destination.origin ?? 0)}`, bytesOf(data, layout.offset ?? 0));
+  return writeTexture(destination, data, layout, size);
+};
+const uploadSummary = () => ({ uploadBytes, uploadHash: uploads.copy().digest("hex").slice(0, 16),
+  uploadsByLabel: Object.fromEntries([...uploadsByLabel].map(([k, h]) => [k, h.copy().digest("hex").slice(0, 16)]).sort((a, b) => a[0]! < b[0]! ? -1 : 1)) });
 const device = managedGPUDevice(raw, { requireWorkerRealm: false });
 const errors: string[] = [];
 device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); console.error(e.error.message); });
@@ -127,9 +157,10 @@ const progress = setInterval(() => console.log(JSON.stringify({ phase: "construc
   modules: modules.length, pipelines: pipelines.length, settled: pipelines.filter(p => !Number.isNaN(p.end)).length })), 30_000);
 const solver = await method.createSolverAsync!(device, scene, quality, values, undefined,
   snapshot => { tasks.push({ at: now(), taskId: snapshot.taskId ?? snapshot.label, phase: snapshot.phase, label: snapshot.label }); }) as WebGPUUniformReferenceSolver;
-constructEnd = now(); clearInterval(progress);
+constructEnd = now(); clearInterval(progress); uploading = false;
 const { summary, durations: pipelineDurations } = summarize(constructStart, constructEnd);
-console.log(JSON.stringify({ phase: "constructed", ...summary }));
+const host = uploadSummary();
+console.log(JSON.stringify({ phase: "constructed", ...summary, uploadBytes: host.uploadBytes, uploadHash: host.uploadHash }));
 
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 const digest = (a: ArrayBufferView) => createHash("sha256").update(new Uint8Array(a.buffer, a.byteOffset, a.byteLength)).digest("hex").slice(0, 16);
@@ -150,6 +181,6 @@ const step_ms = steps ? (now() - stepStart) / steps : 0;
 if (steps) await sample(steps);
 solver.destroy(); await raw.queue.onSubmittedWorkDone();
 assert.deepEqual(errors, []);
-if (report) writeFileSync(report, JSON.stringify({ summary, step_ms, hashes, modules, pipelines: pipelineDurations }, null, 2) + "\n");
+if (report) writeFileSync(report, JSON.stringify({ summary, step_ms, hashes, uploads: host, modules, pipelines: pipelineDurations }, null, 2) + "\n");
 console.log(JSON.stringify({ phase: "done", construction_ms: summary.construction_ms, step_ms, total_ms: now() }));
 process.exit(0);
