@@ -129,6 +129,9 @@ function domainLayout(address:UniformLatticeAddress,domain:UniformDetailDomain):
 
 interface Field{readonly storage:UniformDetailStorage;readonly kind:UniformDetailClass;readonly logical:Dims;readonly handle:GPUTexture;readonly empty:number}
 const fields=new WeakMap<GPUTexture,Field>();
+/** A raw texture the h slots place as they place the h stores (createSlotted): its handle's current texture. */
+interface Slotted{readonly storage:UniformDetailStorage;readonly edge:number;current:GPUTexture}
+const slottedTextures=new WeakMap<GPUTexture,Slotted>();
 /** The detail field a texture is (handle or physical), if a UniformDetailStorage made it. */
 export function uniformDetailField(texture:GPUTexture):Field|undefined{return fields.get(texture);}
 /** A bind group over detail fields. The storage re-creates it when the
@@ -153,7 +156,8 @@ export function uniformDetailGroup(device:GPUDevice,descriptor:UniformDetailGrou
  const domain=!!storage?.layout.domain;
  const build=(base=false)=>device.createBindGroup({label:descriptor.label,layout:descriptor.layout,entries:entries.flatMap(e=>{
   const f=fields.get(e.resource as GPUTexture);
-  const primary={binding:e.binding,resource:f?(base?f.storage.baseOf(f.handle)!:f.storage.physical(f.handle)).createView():"createView" in e.resource?(e.resource as GPUTexture).createView():e.resource as GPUBindingResource};
+  const slotted=f?undefined:slottedTextures.get(e.resource as GPUTexture);
+  const primary={binding:e.binding,resource:f?(base?f.storage.baseOf(f.handle)!:f.storage.physical(f.handle)).createView():slotted?slotted.current.createView():"createView" in e.resource?(e.resource as GPUTexture).createView():e.resource as GPUBindingResource};
   if(!twins?.formats.has(e.binding))return [primary];
   const sampled=!twins.formats.get(e.binding);
   return [primary,{binding:e.binding+UNIFORM_DETAIL_TWIN_BINDING,resource:(f?f.storage.twin(f.handle,sampled,base):twinDummy(device,twins!,e.binding)).createView()}];
@@ -392,6 +396,23 @@ export class UniformDetailStorage{
  private readonly pinned=new Set<GPUTexture>();
  /** The fields whose generation follows the h-tile capacity. */
  private get following():GPUTexture[]{return this.handles.filter(h=>!this.pinned.has(h));}
+ /** A raw texture of `edge` texels a block on each axis that the h slots
+  * place as they place the h stores (umFineCoord): the whole block grid
+  * until compact(), then the slots' layers, each needed block's texels
+  * moved to its slot. Not a field: no accessor, base or twin; bind the
+  * returned handle through uniformDetailGroup, which binds its current
+  * texture (slottedPhysical), and destroy it with destroySlotted. */
+ createSlotted(label:string,edge:number,format:GPUTextureFormat):GPUTexture{
+  const g=this.layout.address.blockGrid,layers=this.sparse?uniformFineSlotLayers(g,this.slotCapacity):g[2]!;
+  const extent=[edge*g[0]!,edge*g[1]!,edge*layers];
+  if(extent.some(n=>n>this.device.limits.maxTextureDimension3D))throw new RangeError(`${label} needs ${extent}, past the device's 3D texture limit`);
+  const handle=this.device.createTexture({label,size:extent,dimension:"3d",format,usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST});
+  slottedTextures.set(handle,{storage:this,edge,current:handle});this.slottedHandles.push(handle);return handle;
+ }
+ /** The texture a createSlotted handle binds now. */
+ slottedPhysical(handle:GPUTexture):GPUTexture{const s=slottedTextures.get(handle);if(s?.storage!==this)throw new Error(`${handle.label} is not a slotted texture of this detail storage`);return s.current;}
+ destroySlotted(handle:GPUTexture):void{const s=slottedTextures.get(handle);if(s?.storage!==this)return;s.current.destroy();handle.destroy();}
+ private readonly slottedHandles:GPUTexture[]=[];
  /** The texture that holds a field's texels now: valid until the storage
   * next grows, so resolve it at each use. */
  physical(texture:GPUTexture):GPUTexture{
@@ -1000,7 +1021,19 @@ fn drShare(t:u32){
    }
    old.push(before);this.physicals.set(handle,after);fields.set(after,field);registerUniformDetailBase(after,this.bases.get(handle)!);
   }
+  const replaced:GPUTexture[]=[];
+  for(const handle of this.slottedHandles){
+   const s=slottedTextures.get(handle)!,before=s.current,edge=s.edge,g=a.blockGrid;
+   const after=device.createTexture({label:before.label,size:[edge*g[0]!,edge*g[1]!,edge*uniformFineSlotLayers(g,this.slotCapacity)],dimension:"3d",format:before.format,usage:before.usage});
+   for(const b of blocks){
+    uniformBlockCoord(a,b,from);uniformBlockCoord(a,slots[b]!,to);
+    e.copyTextureToTexture({texture:before,origin:from.map(n=>edge*n)},{texture:after,origin:to.map(n=>edge*n)},[edge,edge,edge]);
+   }
+   s.current=after;if(before!==handle)replaced.push(before);
+  }
   device.queue.submit([e.finish()]);
+  // The handle stays a slotted texture's identity; its first texture is freed with the replaced ones.
+  if(this.slottedHandles.length||replaced.length)void device.queue.onSubmittedWorkDone().then(()=>{for(const t of [...replaced,...this.slottedHandles])if(slottedTextures.get(t)?.current!==t)t.destroy();});
   this.writeSlots(slots);this.rebind();this.resized();this.release(old);
  }
  /** Whether the h stores hold slots (compact), and how many past the sentinel. */
