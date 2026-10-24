@@ -5,7 +5,8 @@ import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedPageCount,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {levelSetFillWGSL} from "../../core/level-set-fill.wgsl";
-import {uniformKeyGroups,type UniformLatticeAddress} from "./uniform-lattice-address";
+import {type UniformLatticeAddress} from "./uniform-lattice-address";
+import {uniformStageListGroups,uniformStageListsWGSL} from "./uniform-stage-lists";
 import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,uniformMixedVertexBuriedWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
 /** NB-FLIP's scalar volume budget: the liquid's filled volume measured on a
@@ -75,8 +76,8 @@ export class UniformMixedSurfaceVolume {
  /** Residency pages: the bound of the page launches. */
  private readonly pages:number;
  private readonly address:UniformLatticeAddress;
- /** clearBand's dense launch, a lane a tile. */
- private readonly tileLaneGroups:[number,number]=[0,0];
+ /** clearBand's fixed grid, a lane a live tile (strided). */
+ private readonly clearGroups:number;
  private readonly resources:GPUBindGroupLayout;
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  /** The caller runs UniformMixedPhiResolve on phi before encode: every owner
@@ -87,7 +88,7 @@ export class UniformMixedSurfaceVolume {
   const address=this.address=ownership.capacity.address;
   this.vertices=address.vertexKeys;
   this.tiles=ownership.capacity.tiles;this.pages=uniformMixedPageCount(this.tiles);
-  uniformKeyGroups(address.tileKeys,64,ownership.dispatchX,this.tileLaneGroups);
+  this.clearGroups=uniformStageListGroups(this.tiles/64);
   // Partial rows: the residentAll launch's job bound (svJobs): every tile h,
   // plus a job per page. Rows sized to the tiles alone let an all-h layout's
   // page jobs write the chunk sums, and its extra chunk the Newton state.
@@ -107,7 +108,7 @@ export class UniformMixedSurfaceVolume {
   return uniformDetailGroup(this.device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:volume},{binding:3,resource:work},{binding:5,resource:{buffer:this.budget}},{binding:6,resource:{buffer:this.budgetParams}}]});
  }
  async initialize():Promise<void>{
-  const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0);
+  const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL;
   const sourceScale=uniformMixedVertexSamplingSource("",false,undefined,undefined,true).replace(/\bum(Vertex(?!(?:At|Coord|Present|Near|Texel|CellAbove|CellBelow)\b)\w*|SampleVertex|LoadVertex8?)\b/g,name=>name.replace("um","umScale"));
   // Owner entries stride every live owner (all), resolveScale every seam
   // tile (fused): GPU-counted fixed grids, sized by capacity alone.
@@ -221,11 +222,12 @@ fn storePartial(l:u32,group:vec3u){
  sumGroup(l);
  if(l==0u){storeSum(at,sums[0]);}
 }
-// Clears the tile flags; tile 0's thread also starts the Newton state:
-// shift, the bracket's low and high, converged, secant step.
-@compute @workgroup_size(64) fn clearBand(@builtin(global_invocation_id) gid:vec3u){
- let t=gid.x+umDispatchX*64u*gid.y;if(umTileLive(t)){scratch[SV_BAND+t]=0.0;scratch[SV_VISIT+t]=0.0;scratch[SV_MEASURE+t]=0.0;}
- if(t==0u){let limit=umShiftLimit();scratch[SV_S]=0.0;scratch[(SV_S+1u)]=-limit;scratch[(SV_S+2u)]=limit;scratch[(SV_S+3u)]=0.0;scratch[(SV_S+4u)]=limit/64.0;}
+// Clears the live tiles' flags (a fixed grid striding them); the first
+// thread also starts the Newton state: shift, the bracket's low and high,
+// converged, secant step.
+@compute @workgroup_size(64) fn clearBand(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var j=gid.x;j<umLiveTileCount();j+=64u*groups.x){let t=umLiveTile(j);scratch[SV_BAND+t]=0.0;scratch[SV_VISIT+t]=0.0;scratch[SV_MEASURE+t]=0.0;}
+ if(gid.x==0u){let limit=umShiftLimit();scratch[SV_S]=0.0;scratch[(SV_S+1u)]=-limit;scratch[(SV_S+2u)]=limit;scratch[(SV_S+3u)]=0.0;scratch[(SV_S+4u)]=limit/64.0;}
 }
 // A seed workgroup that is one unit-stencil fine tile stages its 5^3 stored
 // vertices once; every lane then reads its eight corners from them.
@@ -557,7 +559,7 @@ var<workgroup> svReduceJobs:u32;
   else if(entry==="reduce")this.ownership.dispatchCounted(pass,pipeline,this.chunks);
   else if(entry==="resolveScale")this.ownership.dispatchFusedCounted(pass,pipeline);
   else if(entry==="grow"||entry==="measureGrow")this.ownership.dispatchCounted(pass,pipeline,this.pages);
-  else if(entry==="clearBand")pass.dispatchWorkgroups(this.tileLaneGroups[0],this.tileLaneGroups[1]);
+  else if(entry==="clearBand")pass.dispatchWorkgroups(this.clearGroups);
   else this.ownership.dispatchAllCounted(pass,pipeline);
  }
  /** Capture the initialized surface once; thereafter only explicit sources
