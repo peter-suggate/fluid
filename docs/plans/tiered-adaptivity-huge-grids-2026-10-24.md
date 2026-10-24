@@ -261,6 +261,19 @@ env WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools
 
 **Behind the first blocker** (each check on its own): 2.5 mm ×2 width: 42.5 GiB (W6). 1.25 mm: a block grid z of 171 > 62, i.e. more than 3968 blocks (W6/W7); 170 GiB (W6); the seed residency's host pass, 100–230 s over 537M cells on a loaded machine (W1). The box-sized device checks (3D texture extent, boxCells·24 and ·40 bindings, which also failed 1.25 mm and 2.5 mm ×2 width at 0deb44ee) went with W1's 8bf2039e, and the 4096-block page tail with W8's super-block tail (51f3b614).
 
+**5 mm control on the GPU** (7e75a94d, check lane, 240 steps = 4 s; ms are not timing-lane numbers): no failure. Live 3533 MiB for 226 blocks (15.6 MiB a block): h detail fields 1165, particles 974, ownership/layout 751, pressure 561 MiB. The largest single buffers are sized by the whole pool, not by what is live: pressure arena 469 MiB, mixed stage scratch 440 MiB (fineCapacity 114688 tiles against ≤ 621 live h tiles), FLIP particles A and B 339 MiB each against ≤ 2792 particles (W10), and FLIP cell counts and starts 269 and 266 MiB. The jet runs at 13.7–14.1 h a step from step 40 (4.1–4.2 m/s); median step 19.6 ms (check lane); build 34.5 s outside the lock.
+
+**Catch floor at 5 mm** (`seep-5mm-floor`, 120 steps = 2 s, the window-address decode): catch-chamber h tiles run 73–333 (peak 333 at step 80), and floor tiles (ty < 2) stay 0. By 2 s the jet has not landed. W0's 448 floor peak comes later in its 20 s run, so the floor count at a full horizon is still to be measured.
+
+**GPU rungs below 5 mm (check lane, ms not authoritative)**: both fail on the same fatal, after a max-speed runaway.
+
+| Rung | Lattice, pool | Live MiB | First failure | Max speed, m/s (h a step) |
+|---|---|---|---|---|
+| 2.5 mm, ¼ depth | 1024×512×32, 362 blocks | 5574 (15.4 a block) | step 8: departure closure 35 > 32 tiles, page (15,6,0), uniform-mixed-frame.ts:1305 | 4.14, 6.96, 9.78, 12.5, 15.5, 18.4, 21.2 (27.6 → 141) |
+| 1.25 mm, ¼ width, ⅛ depth | 512×1024×32, 360 blocks | 5549 (15.4 a block) | step 3: closure 40 > 32 tiles, page (1,3,0) | 6.54, 12.19 (87, 162) |
+
+The speed gains 2.8 m/s a step at 2.5 mm and 5.6 m/s a step at 1.25 mm. Gravity adds 0.16 m/s a step and Torricelli allows about 4 m/s, so this is an instability, not honest fast flow. The gain scales as 1/h. W5 traced it to grid momentum's single RK2 midpoint trace (umUnitTrace) at CFL ≥ 12 through the throat. Faces whose midpoint lands in the slow reservoir come back near zero, and the projection hands their flux to the few fast faces. The fix candidate is NB-FLIP `momentumTrace: "turn"` (W5 e2206321, not on main), which is unverified at these rungs. Both rungs are one page thick in z, and 5 mm runs two, so the 5 mm ½/¼-depth controls (`seep-5mm-d0.5`, `seep-5mm-d0.25`) were queued to rule out single-page-z halos and never ran. 1.25 mm bytes by class: h detail 1804, particles 1551, ownership 1198, pressure 893 MiB. The biggest buffers are still sized by the whole pool: pressure arena 746, stage scratch 703, FLIP particles A/B 540 each.
+
 **With the page window and memory both fixed, the next binding limit is the block grid**: 3968 blocks is 62 GiB at today's 16 MiB a block, so memory binds first until W6 cuts the block's cost; after that, W7's directory must lift the grid before 1.25 mm (10882 blocks).
 
 Before 877f9138 the 1.25 mm refusal came after 452 s of host passes; 52b9daca keeps it ahead of them now that the window check lives in the address (`uniformLatticeWindowBox`). c406a706 removed the per-cell allocations of the host initial-liquid passes (seep GC 9.3 s → 2.4 s at 5 mm, hashes identical).

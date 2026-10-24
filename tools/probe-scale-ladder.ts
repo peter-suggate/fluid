@@ -186,11 +186,13 @@ try {
     const catchTiles = async () => {
       const n = frame.ownership.capacity.tiles, nb = n / 512, p = frame.ownership.presentation;
       const words = await read(p.buffer, p.offset ?? 0, 4 * (5 * n + UNIFORM_PAGE_TABLE_WORDS + 3 + nb));
-      const recordBase = 5 * n + UNIFORM_PAGE_TABLE_WORDS, origin = [0, 1, 2].map(k => words[5 * n + 64 ** 3 + k]! | 0);
+      // A block word is a world-page residue (uniformWindowAddressWGSL); its box page is that less the box's world low page.
+      const header = 5 * n + 64 ** 3, recordBase = 5 * n + UNIFORM_PAGE_TABLE_WORDS;
+      const frameWindow = [0, 1, 2].map(k => words[header + k]! | 0), worldLow = [24, 25, 26].map(k => words[header + k]! | 0);
       let floor = 0, chamber = 0, all = 0;
       for (let b = 1; b < nb - 1; b++) {
         const r = words[recordBase + b]!; if (r === 0xffffffff) continue;
-        const page = [r & 63, (r >>> 6) & 63, (r >>> 12) & 63].map((v, k) => ((v - origin[k]!) % 64 + 64) % 64);
+        const page = [r & 63, (r >>> 6) & 63, (r >>> 12) & 63].map((v, k) => (v - worldLow[k]!) & 63);
         for (let t = 0; t < 512; t++) {
           if (!(words[512 * b + t]! & 0x80000000)) continue;
           all++;
@@ -198,7 +200,7 @@ try {
           if (4 * tx >= wallHigh) { chamber++; if (ty < 2) floor++; }
         }
       }
-      return { catchFloorH: floor, catchChamberH: chamber, presentedH: all, origin };
+      return { catchFloorH: floor, catchChamberH: chamber, presentedH: all, frame: frameWindow, worldLow };
     };
     for (let step = 1; step <= steps; step++) {
       if ((performance.now() - started) / 1000 > budget_s) { console.log(`budget ${budget_s} s reached after ${step - 1} steps`); break; }
