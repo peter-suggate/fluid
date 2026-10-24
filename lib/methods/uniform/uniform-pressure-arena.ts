@@ -569,13 +569,13 @@ fn nBulkMean(v:f32,bulk:bool,lane:u32)->f32{
   // member's pressure in its links is its 16h one, its rows' start mean
   // (UniformBulkTier), not the row's own start: each row keeps its offset.
   const bulkNative=B?bulkMean("nRed")+/* wgsl */`
-const N_BULK:u32=${this.bulkWord}u;
+const N_RECORD:u32=${this.bulkWord}u;
 const N_HEADS:u32=${UNIFORM_BULK_HEADS(B.regions)}u;const N_MEAN:u32=${UNIFORM_BULK_MEAN(B.regions)}u;
 var<workgroup> nRed:array<f32,512>;
 var<workgroup> nBulkW:u32;
 fn nRegionKey(k:u32)->u32{return 8u*(k>>9u)+nRegionOf(k&511u);}
-fn nMember(k:u32)->bool{return (poolB[N_BULK+nRegionKey(k)]&1u)!=0u;}
-fn nBulkStart(k:u32)->f32{if(nMember(k)){return bitcast<f32>(poolB[N_BULK+N_MEAN+nRegionKey(k)]);}return rootArena[R_PRESSURE+k];}
+fn nMember(k:u32)->bool{return (poolB[N_RECORD+nRegionKey(k)]&1u)!=0u;}
+fn nBulkStart(k:u32)->f32{if(nMember(k)){return bitcast<f32>(poolB[N_RECORD+N_MEAN+nRegionKey(k)]);}return rootArena[R_PRESSURE+k];}
 // A member face's seam head slot: region, face, the subface's tangential cell.
 fn nHeadIndex(k:u32,f:u32)->u32{let a=f/2u;let t=umTileCoord(k);return N_HEADS+96u*nRegionKey(k)+16u*f+(t[(a+1u)%3u]&3u)+4u*(t[(a+2u)%3u]&3u);}
 // The key across face f of key k, N_KEYS outside (a SOLID page).
@@ -611,7 +611,7 @@ fn nBulkLink(k:u32,n:u32,f:u32,member:bool)->vec2f{
  if(member&&other){if(nRegionKey(k)==nRegionKey(n)){return vec2f(0.0);}return vec2f(16.0,0.0);}
  if(!member&&!other){return vec2f(64.0,0.0);}
  let head=nBulkHead(select(k,n,member),f/2u);
- if(member){poolB[N_BULK+nHeadIndex(k,f)]=bitcast<u32>(head);return vec2f(25.6,-head);}
+ if(member){poolB[N_RECORD+nHeadIndex(k,f)]=bitcast<u32>(head);return vec2f(25.6,-head);}
  return vec2f(25.6,head);
 }
 `:"";
@@ -1093,7 +1093,7 @@ fn nSeamFirst(t:u32,g:u32)->u32{
  let l=vec3u(lane&7u,(lane>>3u)&7u,lane>>6u);
  for(var e=group.x;e<count;e+=groups.x){
   let block=ubaLevelSlot(2u,e);let k=512u*block+lane;let at2=UBA_STRIDE*block+lane;
-  if(lane==0u){atomicStore(&nFlags,0u);${B?"var any=0u;for(var r=0u;r<8u;r++){any|=poolB[N_BULK+8u*block+r];}nBulkW=any&1u;":""}}
+  if(lane==0u){atomicStore(&nFlags,0u);${B?"var any=0u;for(var r=0u;r<8u;r++){any|=poolB[N_RECORD+8u*block+r];}nBulkW=any&1u;":""}}
   workgroupBarrier();
   var m=0u;var start=0.0;var rhs=0.0;var diagonal=0.0;var walls=0.0;var lifted=0.0;
 ${B?"  let bulkPage=workgroupUniformLoad(&nBulkW)!=0u;let member=bulkPage&&nMember(k);var bulkDelta=0.0;var rInit=0.0;\n":""}  if(pIndex(SLOTS+k)!=0u){atomicOr(&nFlags,1u);}
@@ -1102,7 +1102,7 @@ ${B?"  let bulkPage=workgroupUniformLoad(&nBulkW)!=0u;let member=bulkPage&&nMemb
    for(var f=0u;f<6u;f++){
     let axis=f/2u;let side=f&1u;let stride=nStride(axis);let h4=4.0*params.hDt[axis];
     var kind=N_NONE;var c=0.0;var link=0u;var level2=0.0;
-${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){poolB[N_BULK+nHeadIndex(k,f)]=0x7f61b1e6u;}\n":""}    var n=select(k-stride,k+stride,side==1u);var across=block;
+${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){poolB[N_RECORD+nHeadIndex(k,f)]=0x7f61b1e6u;}\n":""}    var n=select(k-stride,k+stride,side==1u);var across=block;
     if(l[axis]==select(0u,7u,side==1u)){
      let step=select(select(9u,3u,axis==1u),1u,axis==0u);
      across=umBlockNeighbourWord(block,select(13u-step,13u+step,side==1u));
