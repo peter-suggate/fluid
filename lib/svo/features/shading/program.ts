@@ -615,6 +615,8 @@ export interface SvoDryOptimizationExperiments {
   readonly opaqueConeLighting?: boolean;
   /** Internal cached sun/spot Raster AO closure, guarded at draw time. */
   readonly opaqueRasterLighting?: boolean;
+  /** Material consumer only: visibility was resolved by current-frame compute. */
+  readonly precomputedRasterVisibility?: boolean;
   /** Resolve current-frame radiance and exact fallbacks in one draw; false retains the A/B reference. */
   readonly singlePassReconstruction?: boolean;
   /** Cached opaque voxel boundary triangles; unavailable publications fail closed. */
@@ -5260,7 +5262,18 @@ fn dryFluidOpticalDepth(origin:vec3f,direction:vec3f,maximumDistance_m:f32,apert
  * It also shares the solid shadow's strength knob, so a scene that softens or
  * disables shadows softens or disables the water's shadow with it.
  */
-fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32,lightIndex:u32)->vec3f {
+${experiments.rasterAo ? `fn dryLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32,lightIndex:u32)->vec3f {
+  if(dot(geometricNormal,towardLight)<=0.0){return vec3f(0);}
+  if((dry.materialPublication.w&2u)==0u){return vec3f(1);}
+  ${experiments.precomputedRasterVisibility ? "{" : "if(rasterLighting.control.w!=0u){"}
+    ${experiments.waterShadows === true ? "" : `// No dynamic body or fluid correction: the shared AO reconstruction
+    // already contains this sun's complete visibility. Avoid four atlas reads.
+    if(lightIndex==0u&&dryLighting.lights[0].identity.x==SVO_LIGHT_DIRECTIONAL&&uniforms.options.z<.5&&rasterVisibilityWeight>1e-4){return vec3f(mix(1.0,rasterResolvedVisibility.y,dry.tuningRays0.y));}`}
+    return rasterCachedLightVisibility(rasterCurrentSample);
+  }
+  ${experiments.precomputedRasterVisibility ? "" : "return rasterEvaluateLightVisibility(position,geometricNormal,ownerId,towardLight,finiteDistance_m,lightIndex);"}
+}
+` : ""}fn ${experiments.rasterAo ? "rasterEvaluateLightVisibility" : "dryLightVisibility"}(position:vec3f,geometricNormal:vec3f,ownerId:u32,towardLight:vec3f,finiteDistance_m:f32,lightIndex:u32)->vec3f {
   let solid=dryLightVisibilitySolid(position,geometricNormal,ownerId,towardLight,finiteDistance_m${experiments.rasterAo ? ",lightIndex" : ""});${experiments.waterShadows === true ? "" : `
   return solid;`}${experiments.waterShadows === true ? `
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.exactShadow}u)==0u
@@ -5566,7 +5579,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
     if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
-    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
+    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}${experiments.rasterAo ? "rasterCurrentSample=sampleBudget;" : ""}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,hit.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf*drySpecularVisibility(dot(contactVisibility,vec3f(1.0/3.0))*gi.visibility,max(dot(hit.normal,viewDirection),0.0),surface.roughness);let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
@@ -5615,7 +5628,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
   }
   return dryFragmentOut(svoGBufferMiss(radiance,0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
-${experiments.rasterAo ? rasterAoConsumerWGSL + `
+${experiments.rasterAo ? rasterAoConsumerWGSL(experiments.precomputedRasterVisibility,experiments.waterShadows) + `
 fn dryLightVisibilitySolid(position:vec3f,normal:vec3f,owner:u32,towardLight:vec3f,distance:f32,lightIndex:u32)->vec3f{
   if(dot(normal,towardLight)<=0.0){return vec3f(0);}
   if((dry.materialPublication.w&2u)==0u){return vec3f(1);}

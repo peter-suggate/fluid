@@ -1399,6 +1399,26 @@ if (phaseTraceEnabled && profileSeconds <= 0 && GPUPassTimestampRecorder.support
 // simulation submissions in this branch; xctrace observes the shipping graph.
 // ---------------------------------------------------------------------------
 if (profileSeconds > 0) {
+  if (process.env.FLUID_SVO_DRY_FRAME_VISIBILITY_COMPARE === "1") {
+    assert.equal(coneTracingMode, "raster-ao");
+    const { benchmarkRasterVisibility } = await import("./benchmark-raster-visibility");
+    await benchmarkRasterVisibility({ device, renderer, uniforms: uniformBuffer,
+      view: { scene, camera, environmentId, info: solver.info, bodyCount: bodies.count, width, height },
+      publication: drySceneData, outPath });
+    assert.deepEqual(validationErrors, [], "GPU validation during paired raster visibility");
+    renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy();
+    process.exit(0);
+  }
+  if (process.env.FLUID_SVO_DRY_FRAME_LIGHTING_BUDGET === "1") {
+    assert.equal(coneTracingMode, "raster-ao", "Lighting budget study requires raster AO");
+    const { benchmarkRasterLightingBudget } = await import("./benchmark-raster-lighting-budget");
+    await benchmarkRasterLightingBudget({ device, renderer, uniforms: uniformBuffer,
+      view: { scene, camera, environmentId, info: solver.info, bodyCount: bodies.count, width, height },
+      tuning: configuredRenderTuning, outPath });
+    assert.deepEqual(validationErrors, [], "GPU validation errors during lighting budget study");
+    renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy();
+    process.exit(0);
+  }
   const samples_ms: number[] = [];
   console.log(JSON.stringify({
     phase: "constructed",

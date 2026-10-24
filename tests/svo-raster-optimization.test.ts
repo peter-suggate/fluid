@@ -53,3 +53,15 @@ test("spot maps and shader capability agree on capacity and unsupported projecti
   const spotOnly = four.slice(28, 56);
   assert.equal(canUseOpaqueRasterLighting({ ...scene, lightRecords: spotOnly }, options), true);
 });
+
+test("precomputed visibility admits all light types without weakening the opaque receiver proof", () => {
+  const scene = sunScene();
+  const options = { coneMode: "raster-ao", globalIllumination: false, precomputedVisibility: true };
+  for (const kind of [1, 2, 3, 4, 5]) {
+    scene.lightRecords![24] = kind;
+    assert.equal(canUseOpaqueRasterLighting(scene, options), true);
+  }
+  assert.equal(canUseOpaqueRasterLighting({ ...scene, opaqueSurfaceOnly: false }, options), false);
+  assert.equal(canUseOpaqueRasterLighting(scene, { ...options, globalIllumination: true }), false);
+  assert.equal(canUseOpaqueRasterLighting(scene, { ...options, precomputedVisibility: false }), false);
+});

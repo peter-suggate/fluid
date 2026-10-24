@@ -804,7 +804,7 @@ export function createProductionSparseVoxelDrySceneRenderer(
     bodyBuffer,
     "rgba16float",
     traversal,
-    "off",
+    rasterAo ? "bounds" : "off",
     "split",
     rasterArms && primaryTraversal !== "mesh" ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
     rasterArms,
@@ -2974,6 +2974,10 @@ export class FluidLabRenderer {
     packed[100] = this.hoverHighlight?.first ?? 0; packed[101] = this.hoverHighlight?.last ?? 0;
     packed[102] = this.hoverHighlight ? .45 : 0; packed[103] = this.hoverHighlight ? 2.6 : 0;
     this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
+    // A paused, body-free view can reuse exactly the same visibility textures.
+    // Water still renders each frame; water-shadow variants explicitly refuse
+    // reuse because the optical coverage has a separate GPU revision.
+    this.svoDryScenePipeline?.setRasterVisibilityView(!this.simulationRunning && bodies.length===0 ? packed : undefined);
     // A paused placement or carry still needs fresh render records. The rigid
     // system uploads only changed commands/roster entries, preserving GPU-owned
     // poses for all other bodies without spending a simulation step.
