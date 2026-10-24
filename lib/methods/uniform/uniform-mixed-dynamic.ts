@@ -591,6 +591,10 @@ var<workgroup> tileError:atomic<u32>;
 // and their count: umSurfaceDisplacement's volume term.
 var<workgroup> tileSigned:atomic<i32>;
 var<workgroup> tileCrossings:atomic<u32>;
+// The h tile's (4h)^2/12 laplacian(phi) summed over its interior vertices
+// near the surface (1/1024 h) and their count: umCurveError.
+var<workgroup> tileCurve:atomic<i32>;
+var<workgroup> tileCurves:atomic<u32>;
 var<workgroup> tileWide:atomic<u32>;
 var<workgroup> tileDeep:array<atomic<u32>,2>;
 // Largest travel of the workgroup's tiles (census[18]), flushed once per group.
@@ -627,11 +631,23 @@ fn umWideShared(wide:u32,local:vec3u)->bool{
 // when coarsened (Gauss-Bonnet), whatever its radius.
 fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
  let origin=umTileCoord(tile)*4u;let open=umCensusOpenCells(tile);
- var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;
+ var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
  c=umLoadCorner8(origin,4u);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
   let v=umCorner(i,5u);let value=umLoadFine(origin+v);
+  // An interior vertex within 1.5 h of the surface: the mean displacement a
+  // 4h lattice makes of it anywhere, (L^2/12) phi_aa per axis with L = 4
+  // cells, 4/3 of the h second differences (umCurveError).
+  if(all(v>=vec3u(1u))&&all(v<=vec3u(3u))&&abs(value)<=1.5*UM_H){
+   var sum=0.0;var closed=false;
+   for(var a=0u;a<3u;a++){
+    var below=v;below[a]-=1u;var above=v;above[a]+=1u;
+    if(!umCensusEdgeOpen(open,below,a)||!umCensusEdgeOpen(open,v,a)){closed=true;break;}
+    sum+=umLoadFine(origin+below)+umLoadFine(origin+above)-2.0*value;
+   }
+   if(!closed){curve+=sum*(4.0/3.0)/UM_H;curves++;}
+  }
   for(var a=0u;a<3u;a++){
    if(v[a]>=4u||!umCensusEdgeOpen(open,v,a)){continue;}
    var n=v;n[a]+=1u;let next=umLoadFine(origin+n);
@@ -647,6 +663,7 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
   }
  }
  if(crossings!=0u){atomicAdd(&tileSigned,i32(clamp(along,-1.0e5,1.0e5)*1024.0));atomicAdd(&tileCrossings,crossings);}
+ if(curves!=0u){atomicAdd(&tileCurve,i32(clamp(curve,-1.0e5,1.0e5)*1024.0));atomicAdd(&tileCurves,curves);}
  return worst;
 }
 // The volume term of an h tile's 4h error: VOLUME_SHAPE times the mean
@@ -659,6 +676,35 @@ const VOLUME_SHAPE:f32=4.0;
 fn umVolumeError()->f32{
  let n=atomicLoad(&tileCrossings);if(n==0u){return 0.0;}
  return VOLUME_SHAPE*abs(f32(atomicLoad(&tileSigned))/(1024.0*f32(n)));
+}
+// A moving surface's 4h error wherever the lattice lies: VOLUME_SHAPE
+// (4h)^2/12 |laplacian(phi)| over the h tile's interior vertices near it. The
+// displacement above is zero for a corner or curve the 4h lattice happens to
+// carry (a block aligned to it at rest) and stays small until the surface
+// has moved off the lattice, by when a census has coarsened it and the 4h
+// resample has rounded it. Sato 2018's geometric heat (|phi - G*phi| / dx,
+// a laplacian) "acts to retain sharp corners during the liquid's
+// free-fall". A 90 degree corner scores several h; a cylinder of radius
+// 10.7 h the 0.5 h tolerance; a flat or gently curved surface nothing.
+fn umCurveError()->f32{
+ let n=atomicLoad(&tileCurves);if(n==0u){return 0.0;}
+ return VOLUME_SHAPE*abs(f32(atomicLoad(&tileCurve))/(1024.0*f32(n)));
+}
+// A 4h tile's (umResolutionError, one lane per tile): the largest
+// (4h)^2/12 |laplacian(phi)| at its corners within 2 h of the surface.
+var<private> coarseCurve:f32;
+// A surface moves when it crosses a 4h tile within MOVING_SECONDS: its
+// tile's fastest extended face, in h per step, against 4 dt / MOVING_SECONDS.
+// A still surface keeps the displacement test alone.
+const MOVING_SECONDS:f32=0.5;
+fn umMovingTravel()->f32{return 4.0*policy.step.x/MOVING_SECONDS;}
+fn umClassMoving(c:TileClass)->bool{
+ var speed=0.0;
+ for(var a=0u;a<3u;a++){
+  if(c.low[a]!=0xffffffffu){speed=max(speed,abs(orderValue(c.low[a]))*policy.step.x/H[a]);}
+  if(c.high[a]!=0u){speed=max(speed,abs(orderValue(c.high[a]))*policy.step.x/H[a]);}
+ }
+ return speed>=umMovingTravel();
 }
 // Surface error of the tile at 4h, in h (non-negative, ordered as bits).
 // wide: an h tile's 4h neighbours (umWideShared).
@@ -686,6 +732,7 @@ fn umResolutionError(tile:u32,lane:u32,width:u32,wide:u32)->f32{
  // halved so one tolerance gives refine-at-2x hysteresis.
  let c=origin+umCorner(lane,2u)*4u;let centre=umLoadCorner(c);
  if(abs(centre)>=8.0*UM_H){return 0.0;}
+ var lap=0.0;
  for(var a=0u;a<3u;a++){
   var lo=vec3i(c/4u);lo[a]-=1;var hi=vec3i(c/4u);hi[a]+=1;
   if(!umWideVertexPresent(lo)||!umWideVertexPresent(hi)){continue;}
@@ -695,7 +742,12 @@ fn umResolutionError(tile:u32,lane:u32,width:u32,wide:u32)->f32{
   // second difference refined every surface tile beside the box's low faces.
   if(abs(below-centre)>6.0*H[a]||abs(above-centre)>6.0*H[a]){continue;}
   worst=max(worst,abs(above-2.0*centre+below)/(16.0*UM_H));
+  lap+=above-2.0*centre+below;
  }
+ // (L^2/12) phi_aa is a twelfth of the 4h second difference. Within 2 h of
+ // the surface: a deeper corner's stencil reaches the medial axis of a body
+ // three tiles across, which no 4h zero crossing sees (and h would drop).
+ if(abs(centre)<=2.0*UM_H){coarseCurve=max(coarseCurve,abs(lap)/(12.0*UM_H));}
  return worst;
 }
 // The solid mask at any tile of the window: a body's bit (by the tile's key,
@@ -948,7 +1000,7 @@ fn umReplayTile(tile:u32){
   if(lane==0u){resetGroupCensus();umReplayTile(tile);flushGroupCensus();}
   workgroupBarrier();continue;
  }
- if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var k=0u;k<2u;k++){atomicStore(&tileCrossing[k],0u);}for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);atomicStore(&tileSigned,0);atomicStore(&tileCrossings,0u);atomicStore(&tileWide,0u);for(var k=0u;k<2u;k++){atomicStore(&tileDeep[k],0u);}}workgroupBarrier();
+ if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var k=0u;k<2u;k++){atomicStore(&tileCrossing[k],0u);}for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);atomicStore(&tileSigned,0);atomicStore(&tileCrossings,0u);atomicStore(&tileCurve,0);atomicStore(&tileCurves,0u);atomicStore(&tileWide,0u);for(var k=0u;k<2u;k++){atomicStore(&tileDeep[k],0u);}}workgroupBarrier();
  // The h list holds h tiles only: one lane per owner.
  const width=1u;
  // The tile's 4h neighbours, for the shape criterion (umWideShared).
@@ -972,7 +1024,7 @@ fn umReplayTile(tile:u32){
   for(var a=0u;a<3u;a++){c.low[a]=atomicLoad(&tileLow[a]);c.high[a]=atomicLoad(&tileHigh[a]);}
   for(var k=0u;k<6u;k++){c.gap[k]=atomicLoad(&tileGap[k]);c.reach[k]=atomicLoad(&tileReach[k]);}
   c.flags=atomicLoad(&mixedTile);c.error=atomicLoad(&tileError);
-  if(shapeDisplacement()){c.error=bitcast<u32>(max(bitcast<f32>(c.error),umVolumeError()));}
+  if(shapeDisplacement()){c.error=bitcast<u32>(max(bitcast<f32>(c.error),max(umVolumeError(),select(0.0,umCurveError(),umClassMoving(c)))));}
   c.crossing=vec2u(atomicLoad(&tileCrossing[0]),atomicLoad(&tileCrossing[1]));
   c.deep=vec2u(atomicLoad(&tileDeep[0]),atomicLoad(&tileDeep[1]));
   umFinishTile(tile,width,c);
@@ -991,7 +1043,13 @@ fn umReplayTile(tile:u32){
   if(ccValid(tile)){umReplayTile(tile);}
   else{
    var c=umEmptyClass();umClassifyOwner(tile,4u,0u,&c);
-   if((c.flags&2u)!=0u&&policy.step.y>0.0){var error=0.0;for(var l=0u;l<8u;l++){error=max(error,umResolutionError(tile,l,4u,0u));}c.error=bitcast<u32>(error);}
+   if((c.flags&2u)!=0u&&policy.step.y>0.0){
+    var error=0.0;coarseCurve=0.0;for(var l=0u;l<8u;l++){error=max(error,umResolutionError(tile,l,4u,0u));}
+    // A moving curve or corner (umCurveError), halved like the corners'
+    // second differences: refined at twice the error an h tile keeps.
+    if(shapeDisplacement()&&umClassMoving(c)){error=max(error,0.5*VOLUME_SHAPE*coarseCurve);}
+    c.error=bitcast<u32>(error);
+   }
    if((c.flags&2u)!=0u&&thinWanted()){for(var i=0u;i<64u;i++){c.deep=max(c.deep,umDepthSample(tile,i));}}
    umFinishTile(tile,4u,c);
   }
@@ -1305,11 +1363,40 @@ fn umSourceTile(p:vec3i)->bool{
 // Read actual crossings, not the required-seed prefix (criteria may omit seeds).
 fn surfaceAllowed(tile:u32,p:vec3i)->bool{
  if((atomicLoad(&census[importanceIndex(tile,1u)])&${IMPORTANCE.crossing}u)!=0u){return true;}
- let radius=i32((policy.shaping.x>>13u)&3u);if(radius==0){return false;}
- let lo=umWindowTile(p-vec3i(radius));let hi=umWindowTile(p+vec3i(radius));
+ let radius=i32((policy.shaping.x>>13u)&3u);
+ if(radius!=0){
+  let lo=umWindowTile(p-vec3i(radius));let hi=umWindowTile(p+vec3i(radius));
+  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
+   let t=umTileKey(vec3i(x,y,z));if(!umKeyStored(t)){continue;}
+   if((atomicLoad(&census[importanceIndex(t,1u)])&${IMPORTANCE.crossing}u)!=0u){return true;}
+  }}}
+ }
+ return movingShapeNear(tile,p);
+}
+// Tile speed in h per step from its velocity keys; a tile with no faces has none.
+fn umKeySpeed(t:u32)->f32{
+ var speed=0.0;
+ for(var a=0u;a<3u;a++){
+  let low=atomicLoad(&census[boundIndex(t,a)]);let high=atomicLoad(&census[boundIndex(t,3u+a)]);
+  if(low!=0xffffffffu){speed=max(speed,abs(orderValue(low))*policy.step.x/H[a]);}
+  if(high!=0u){speed=max(speed,abs(orderValue(high))*policy.step.x/H[a]);}
+ }
+ return speed;
+}
+// A moving surface shape requires (a corner or curve 4h would round:
+// umCurveError) carries its h tiles with it: decide's departure trace may
+// refine any tile within the step's travel of one (Chebyshev tiles, from the
+// tile's own speed, one to three), not only crossing ones. Elsewhere a
+// moving h surface enters a 4h tile and is regenerated from the 4h
+// interpolant; a flat or still one keeps the crossing filter.
+fn movingShapeNear(tile:u32,p:vec3i)->bool{
+ let reach=clamp(i32(ceil(umKeySpeed(tile)/4.0)),1,3);
+ if(!interfaceAny(tile>>9u,p-vec3i(reach),p+vec3i(reach))){return false;}
+ let want=${IMPORTANCE.crossing}u|${IMPORTANCE.required}u|triggerBit(SHAPE);
+ let lo=umWindowTile(p-vec3i(reach));let hi=umWindowTile(p+vec3i(reach));
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
-  let t=umTileKey(vec3i(x,y,z));if(!umKeyStored(t)){continue;}
-  if((atomicLoad(&census[importanceIndex(t,1u)])&${IMPORTANCE.crossing}u)!=0u){return true;}
+  let t=umTileKey(vec3i(x,y,z));if(!umKeyStored(t)||t==tile){continue;}
+  if((atomicLoad(&census[importanceIndex(t,1u)])&want)==want&&umKeySpeed(t)>=umMovingTravel()){return true;}
  }}}
  return false;
 }
