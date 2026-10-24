@@ -1,4 +1,4 @@
-import { uniformCachedMomentumSamplingWGSL, type UniformMomentumSampler, type UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
+import { UNIFORM_MOMENTUM_TRACE_SEGMENTS, uniformCachedMomentumSamplingWGSL, type UniformMomentumSampler, type UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
@@ -7,7 +7,7 @@ import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
-import { uniformVelocityDepartureWGSL } from "./uniform-velocity-departure.wgsl";
+import { uniformVelocityDepartureWGSL, uniformVelocitySegmentedDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { uniformTileContextSidesWGSL } from "./uniform-tile-context";
 import { UNIFORM_MOMENTUM_RESIDUAL_PARTS, UNIFORM_MOMENTUM_TIER, UNIFORM_MOMENTUM_TIER_PASS, UNIFORM_MOMENTUM_FIT_GRID, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
@@ -44,6 +44,10 @@ const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum
 /** Claim word of momentumFine's trace list count (the claims buffer is
  * cleared each frame; words 0..2 are the claimed launches'). */
 const TRACE_COUNT_WORD=3;
+/** Claim word counting, this frame, the substep traces cut at
+ * UNIFORM_MOMENTUM_TRACE_SEGMENTS (umTraceCapped): a diagnostic that should
+ * stay zero, since so long a travel is past the residency closure's cap. */
+export const UNIFORM_MOMENTUM_TRACE_CAPPED_WORD=4;
 /** Bytes of a trace list entry (UMTraceEntry). */
 const TRACE_ENTRY_BYTES=20;
 
@@ -353,7 +357,9 @@ struct UMMomentumParams {hDt:vec4f,flags:vec4u}
 ${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;\n@group(1) @binding(18) var unitHalo:texture_3d<f32>;":""}
 ${this.sampler!=="software"?"@group(1) @binding(22) var unitHaloFiltered:texture_3d<f32>;\n@group(1) @binding(23) var umMomentumSampler:sampler;":""}
 ${this.sampler==="texture32"?"@group(1) @binding(24) var coarseFiltered:texture_3d<f32>;":""}
-${uniformMomentumTierWGSL(19,20)}
+${uniformMomentumTierWGSL(19,20,this.trace)}
+${this.trace==="substep"?`const UM_TRACE_CAPPED:u32=${UNIFORM_MOMENTUM_TRACE_CAPPED_WORD}u;
+fn umTraceCapped(){atomicAdd(&umClaims[UM_TRACE_CAPPED],1u);}`:""}
 ${UniformColdFreeze.wgsl(this.freeze,1,21)}
 // A frozen owner (UniformColdFreeze): its texels and low walls hold.
 fn umOwnerFrozen(owner:UMOwner)->bool{return owner.width!=0u&&umFrozenRegion(umPageOfTile(owner.tile));}
@@ -377,9 +383,12 @@ ${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",this.hang
 // A departure stops at a wall, a face with a SOLID page across it, and
 // nowhere else: it runs on into an AIR page.
 fn umClampMomentum(p:vec3f)->vec3f {return umPointHeld(p);}
-fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
+${this.trace==="midpoint"?`fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
 ${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum")}
-}
+}`:`// momentumTrace "substep": segments of at most the face's own cell (reach).
+fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f,reach:f32)->vec3f {
+${uniformVelocitySegmentedDepartureWGSL(at=>`umSampleVelocity(${at})`,p=>`umClampMomentum(${p})`,"reach",`${UNIFORM_MOMENTUM_TRACE_SEGMENTS}u`,"umTraceCapped();")}
+}`}
 fn umOriginalMomentum(face:UMFace)->f32 {
  if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
  // A 4h-wide patch's anchor is canonical: the base block where the h store
@@ -408,7 +417,7 @@ fn umClosedPositive(face:UMFace)->bool {
  return umAcrossKind(face.anchor,face.axis,1)==UM_SOLID;
 }
 fn umAdvectedMomentum(face:UMFace,dt:f32)->f32 {
- return umSampleVelocityComponent(umMomentumDeparture(umFaceCenter(face),dt,momentum.hDt.xyz),face.axis);
+ return umSampleVelocityComponent(umMomentumDeparture(umFaceCenter(face),dt,momentum.hDt.xyz${this.trace==="substep"?",f32(face.width)":""}),face.axis);
 }
 // An exterior neighbor is not a pressure row. If the incident interior owner
 // is empty too, projection writes zero and no RHS can read this prediction.

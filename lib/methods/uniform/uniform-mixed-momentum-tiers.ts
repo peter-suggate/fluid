@@ -1,3 +1,5 @@
+import { UNIFORM_MOMENTUM_TRACE_SEGMENTS, type UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
+import { uniformVelocitySegmentedDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import { UNIFORM_DETAIL_RING_4H_LOAD } from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
@@ -175,7 +177,7 @@ ${affineCandidateWGSL("mtCandidate","models")}
 }
 /** The momentum's read of the tiers (bound read-only at `binding`) and of
  * the affine models (read-write at `models`: the fit writes them). */
-export function uniformMomentumTierWGSL(binding:number,models:number):string{const W=UNIFORM_MOMENTUM_MODEL_WORDS,T=UNIFORM_MOMENTUM_TIER;return /* wgsl */`
+export function uniformMomentumTierWGSL(binding:number,models:number,trace:UniformMomentumTrace="midpoint"):string{const W=UNIFORM_MOMENTUM_MODEL_WORDS,T=UNIFORM_MOMENTUM_TIER;return /* wgsl */`
 ${uniformStageListsWGSL}
 @group(1) @binding(${binding}) var<storage,read> umTiers:array<u32>;
 @group(1) @binding(${models}) var<storage,read_write> umModels:array<f32>;
@@ -191,11 +193,18 @@ fn umAffineAt(region:u32,p:vec3f)->vec3f{
 }
 // The momentum's one midpoint step (uniformVelocityDepartureWGSL: the tier
 // admits only a single substep, and no departure is held) on the model.
-fn umAffineMomentum(owner:UMOwner,face:UMFace)->f32{
+${trace==="midpoint"?/* wgsl */`fn umAffineMomentum(owner:UMOwner,face:UMFace)->f32{
  let region=umPageOfTile(owner.tile);let h=momentum.hDt.xyz;let dt=momentum.hDt.w;let p=umFaceCenter(face);
  let at=p-0.5*umAffineAt(region,p)*dt/h;let point=p-umAffineAt(region,at)*dt/h;
  return umAffineAt(region,point)[face.axis];
+}`:/* wgsl */`// momentumTrace "substep": the same model in segments of a face's own cell.
+fn umAffineDeparture(region:u32,position:vec3f,dt:f32,h:vec3f,reach:f32)->vec3f{
+${uniformVelocitySegmentedDepartureWGSL(at=>`umAffineAt(region,${at})`,p=>`(${p})`,"reach",`${UNIFORM_MOMENTUM_TRACE_SEGMENTS}u`,"umTraceCapped();")}
 }
+fn umAffineMomentum(owner:UMOwner,face:UMFace)->f32{
+ let region=umPageOfTile(owner.tile);
+ return umAffineAt(region,umAffineDeparture(region,umFaceCenter(face),momentum.hDt.w,momentum.hDt.xyz,f32(face.width)))[face.axis];
+}`}
 var<workgroup> umFitSums:array<vec4f,256>;
 var<workgroup> umFitSquares:array<f32,256>;
 ${affineCandidateWGSL("umAffineCandidate","umModels")}

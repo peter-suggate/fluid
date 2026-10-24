@@ -17,9 +17,11 @@ export type UniformMomentumSampler = "software" | "texture32" | "texture16";
  * contraction follows the streamline instead of one midpoint sample that
  * may land upstream of the acceleration. The time step is unchanged. */
 export type UniformMomentumTrace = "midpoint" | "substep";
-/** The substep trace's segment bound: a work bound past 128 cells of travel
- * a step (the residency closure's own reach), not a speed limit; the last
- * segment then takes the remaining time. */
+/** The substep trace's segment bound: a work bound past 127 cells of travel
+ * a step, beyond the residency closure's cap (UNIFORM_RESIDENCY_PAGE_REACH:
+ * 108 cells), whose fatal a live pool raises first. Not a speed limit: a cut
+ * trace's last segment takes the remaining time and the module's
+ * umTraceCapped() counts it (UNIFORM_MOMENTUM_TRACE_CAPPED_WORD). */
 export const UNIFORM_MOMENTUM_TRACE_SEGMENTS = 128;
 
 /** Shared sampling of prepared h/4h velocity fields for momentum. A sample
@@ -122,7 +124,9 @@ fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
   if(!middle){
    // A segment from p: at most one cell of travel at its start velocity.
    let speed=max(abs(cells.x),max(abs(cells.y),abs(cells.z)));segments++;
-   span=select(min(left,1.0/max(speed,1e-30)),left,segments>=UM_TRACE_SEGMENTS);
+   span=min(left,1.0/max(speed,1e-30));
+   // Cut at the segment bound: counted (umTraceCapped), never silent.
+   if(segments>=UM_TRACE_SEGMENTS&&span<left){span=left;umTraceCapped();}
    at=umClampMomentum(p-0.5*sign*span*cells);middle=true;
   }else{
    p=umClampMomentum(p-sign*span*cells);left=left-span;at=p;middle=false;
