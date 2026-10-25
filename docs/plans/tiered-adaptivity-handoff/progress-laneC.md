@@ -3,12 +3,58 @@
 Written by the lane C agent; read by Peter and the coordinator. The format and rules are in `../tiered-adaptivity-handoff-2026-10-25.md` §6. Newest entry first.
 
 ## Status
-- **Tip:** 49c20310 (C4 `efda8410`; C3 candidate `77c275dc`; gate tooling `49c20310`)
-- **Doing now:** C4 and gate tooling ready for review; current-default paired timing and C3 evidence queued
-- **Next:** C4 GPU smoke, current-default paired baseline and particle-path attribution (C3)
-- **Waiting on:** CPU suites and active GPU checks before uncontended timing; A1 for C1, B1/B2 for C2
+- **Tip:** e73cbfa0 (C3/C4, construction locking and measurement tooling ready)
+- **Doing now:** Preparing final-A1 cost snapshot after its focused checks; all C harness verification passed
+- **Next:** Rebaseline and run C5 after final A1 checks and CPU suites; serialized wide ABBA when authorized by coordinator
+- **Waiting on:** Final A1 candidate and B1/B2 storage/work separation; coordinator review of ready commits
 
 ## Log
+
+### 2026-10-25 · READY TO MERGE · C1/C5 measurement tooling d905ea99..e73cbfa0
+- Tooling commits `d905ea99`, `62c72a70`, `9025d008` and `e73cbfa0` are ready together. They add explicit wide geometry and same-source length comparisons, CPU-only plans, and memory-safe serialized wide ABBA measurements. They do not change solver physics.
+- Both small GPU harness checks PASS under the check runner: same-source/same-scene 3 steps with matching final hashes; same-source cold 128→256 3 steps with separate geometry, both live-work histories and a computed slope. Different-geometry field equality is correctly reported as null. Logs/artifacts `/private/tmp/lane-c-20261025/harness-{same,length}.{log,json}`; wrapper reports `HARNESS GPU SMOKES PASS`. These short check-mode wall times are **not performance evidence**.
+- Full unit suite: 1221 pass / 131 skip / 0 fail. Typecheck: only the two documented baseline import errors. Eleven plan fixtures and six ABBA orchestration/failure fixtures pass. Final CPU-wait fix anchors the actual Node executable, excludes stopped suites and ignores queued lock wrappers so an exclusive run cannot wait on its own queued followers. Evidence remains in `unit-paired-harness.log`, `types-abba.log`, `paired-plan-fixture.log`, `abba-fixture.log` in that artifact directory.
+- No real wide ABBA run or C5 acceptance run has happened. Candidate `82326cc7` includes the reviewed direct velocity-footprint repair; final cost work waits for A’s focused GPU/full unit checks and an immutable agreed snapshot. Prior `787d5cdd` cost results remain superseded checkpoint evidence. No lane C GPU job remains queued.
+
+### 2026-10-25 · PROGRESS · serialized wide timing and harness checks
+- Tooling `62c72a70` adds `benchmark-seep-abba.ts`: one exclusive runner lock, four fresh processes in A/B/B/A order, at most one wide solver resident. Same-scene preflight permits only the A1 coldSurface difference; both arms use controller off and 1/60 s. Source hashes are checked before/after each child. Frames 40–100 are measured, with final diagnostic-layout frame 101 excluded.
+- Review follow-up `9025d008` waits for active CPU unit suites after taking the lock and before each block, records before/after process snapshots, and rejects a block with a unit suite still active afterward. The command notes document the boundary-check limitation and require CPU-heavy work to remain paused.
+- Fake runner/probe/process fixtures PASS: one lock, ABBA order, fresh processes, paths with spaces, equal windows, excluded diagnostic frame, active/stopped CPU handling, overlap rejection, child nonzero exit, probe exit-zero failure, GPU errors and truncated horizons. Logs `/private/tmp/lane-c-20261025/abba-fixture.log`; `check-abba.py` reproduces them. Real-source CPU preflight confirms 834 blocks per arm and warm/still defaults; no wide GPU run was launched.
+- Required full unit rerun PASS: 1221 passed / 131 skipped / 0 failed, 307.95 s (`unit-paired-harness.log`). Latest typecheck only the two documented baseline errors (`types-abba.log`). Same-source cold GPU harness check PASS for 3 steps with identical final hashes and zero history differences (`harness-same.json`). Check-mode wall times are not performance evidence.
+- One tiny 128→256 cold check remains queued under the runner (wrapper PID 70765), behind other shared GPU work; no C timing jobs are queued. Final A1 costs remain deferred until A supplies the repaired candidate and regression evidence. The new measurement tooling is not marked ready until the remaining GPU check clears.
+
+### 2026-10-25 · PROGRESS · C1/C5 measurement preparation d905ea99
+- Separate tooling checkpoint adds explicit `--seep-width`, `--seep-depth`, `--seep-cell` to the paired benchmark, using each snapshot's production factory. `--candidate-length` compares different lengths only with the same source and method values; normal scene equality remains strict. Both arms' live-work rows and a paired cost slope per doubling are saved.
+- `--plan` resolves both scenes, clocks and parameters before any GPU initialization. Eleven CPU-only geometry/argument checks pass: base/wide seep, rest/cold 128→256→512, and invalid identity/method/geometry/scale inputs. Wide plans confirm 834 blocks in each arm. Typecheck has only the two baseline import errors. Logs: `/private/tmp/lane-c-20261025/paired-plan-fixture.log`, `types-paired-harness.log`; plans in `prepared/` there.
+- Commands and acceptance interpretation are in the branch file `laneC-cost-commands.md`. C5 uses current final-A1 defaults, 180 frames with frames 120–180 measured, adjacent slopes ≤0.2 ms/doubling, with actual tiers/live work reported. No forced cold tier or altered physics.
+- The old-layout wide pair would hold roughly 26 GiB, so it must **not** run on this 32 GiB host. Await integrated memory measurements, or implement separately labeled serialized ABBA blocks. No wide pair or new timing was launched.
+- This tooling commit is **not yet ready**: a full unit rerun is deferred behind active A/B suites, and small same-scene/different-length GPU harness checks remain pending. Earlier C3/C4/lock-tooling ready evidence is unchanged. Final A1 SHA and repaired regression are still required before cost runs.
+
+### 2026-10-25 · READY TO MERGE · C3 77c275dc
+- Exact merge-scan short circuit: stop reading later records when accumulated integer mass reaches the cap of 8. Every live record has positive mass, so no later record can be accepted; accepted arithmetic, sample order and retirement diagnostics stay unchanged. No new dispatch, allocation or physics parameter.
+- Required repeat-spread bundle against `c8b25c39` PASS: splash 70 ×2/arm (worst ratio 0.4124), seep 60 ×3 (0.1382), letters 60 ×3 (0.2159). No fatal. Artifacts: `/private/tmp/fluid-gates/gates/c3-merge-cap-{splash,seep,letters}.{json,log}`.
+- Paired alternating letters run completed 100 steps/arm, measured frames 40–100 with identical default parameters (`coldSurface:warm`, `volumeControlSeconds:0.1`, dt 1/60). Mean wall time 37.549 → 36.704 ms; median paired saving **0.539 ms**, with 49/61 measured pairs faster. Separate arm medians: 36.829 → 36.459 ms. Artifacts: `/private/tmp/lane-c-20261025/merge-short-circuit.{json,log}`.
+- Performance scope: one clean paired run, not an isolated kernel attribution. Atomic-scatter histories first differ at frame 36 and final field hashes differ, as expected for this registered-scene comparison; the repeat-spread gate above is the correctness evidence. Do not read the 0.539 ms as a guaranteed speedup independent of the evolved workload.
+- Checks: full unit suite 1221 pass / 131 skip / 0 fail; final typecheck only the two documented baseline `app/app/*-lab` import errors. All A/C timing is finished; lane B was notified to resume its deliberately paused suite. No lane C GPU jobs remain.
+- C4 `efda8410` and construction-lock tooling `49c20310` remain independently ready. C1 final-default/wide cost, C2 16h scale ladder and C5 length ladder remain unfinished dependencies; this entry completes the first C3 optimization only.
+
+### 2026-10-25 · PROGRESS · A1 candidate cost evidence (787d5cdd)
+- Paired alternating runs against `c8b25c39`, 80 steps each, measured steps 40–80. Both arms use `volumeControlSeconds:0`; baseline `coldSurface:warm`, candidate `coldSurface:still`. Every scene completed without a fatal. This is evidence for candidate `787d5cdd`, not approval of final A1: lane A is still checking ballistic-particle reach.
+
+| Scene | Baseline median ms | Candidate median ms | Median paired candidate cost change |
+|---|---:|---:|---:|
+| Splash | 10.701 | 10.591 | +0.047 ms |
+| Letters | 32.477 | 32.488 | +0.364 ms |
+| Seep | 28.008 | 28.496 | +0.715 ms |
+
+- The paired differences, not subtraction of separate medians, are the comparison. These basic scenes show small added cost rather than savings. Lane A owns rest and its command attribution. Wide seep remains pending the final A1 candidate.
+- Artifacts: `/private/tmp/lane-c-20261025/a1-cost-{splash,nbflip-figure-8-letters,reservoir-seep}.json` and matching logs. Pre-run process snapshots are `timing-processes-*.log` in the same directory; no active unit suite ran during these samples. Lane B's suite remains explicitly stopped until the final C3 pair finishes.
+
+### 2026-10-25 · MILESTONE · C3 physics gate PASS · tip 49c20310
+- Solver candidate `77c275dc` against baseline `c8b25c39`: full `c3-merge-cap` bundle PASS. Splash 70 frames ×2 repeats per arm: worst ratio 0.4124 (bandTiles). Seep 60 ×3: 0.1382 (fineTiles). Letters 60 ×3: 0.2159 (occupancy). No fatal; all scenes reached their full lengths.
+- Gate artifacts: `/private/tmp/fluid-gates/gates/c3-merge-cap-{splash,seep,letters}.{log,json}`; bundle summary `/private/tmp/lane-c-20261025/c3-bundle.log`, exit 0. Whole-process construction locking was enabled, so no registered-scene GPU allocation happened before its exclusive slot.
+- Still not ready for the C3 optimization: paired cost evidence remains pending. A1 cost pairs now use immutable candidate `787d5cdd` and baseline `c8b25c39`, both with volume controller off; the earlier `352645f6` candidate was superseded before any measurements.
+- Timing hygiene: CPU suites finished except lane B's explicitly paused process group 6825; all its processes were verified stopped. The cost launcher excludes stopped suites, checks again after acquiring the timing lock and saves a process snapshot immediately before each measured run. Lane B resumes after A/C costs finish.
 
 ### 2026-10-25 · READY TO MERGE · C4 efda8410; gate tooling 49c20310
 - C4 `efda8410` fixes the letters benchmark clock without changing solver physics. Default and explicit 0.0166667 s smokes both pass 3 steps with no fatal, ending at 0.05 s and 0.0500001 s respectively. Logs/artifacts: `/private/tmp/lane-c-20261025/clock-{default,explicit}.log` and `nbflip-letters-clock-{default,explicit}.json`. A conflicting explicit clock/method mode rejects before GPU setup (`invalid-clock.log`).
