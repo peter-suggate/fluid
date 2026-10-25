@@ -12,6 +12,53 @@ export const NARROW_BAND_SEED_DEPTH=Math.sqrt(NARROW_BAND_SURFACE_RADIUS**2-0.12
 export function narrowBandExpectedMassWGSL(depth:string,graded:boolean):string{
  return graded?`max(1.0,select(8.0,4.0,${depth}< -1.0)*clamp(0.5-${depth},0.0,1.0))`:`max(1.0,8.0*clamp(0.5-${depth},0.0,1.0))`;
 }
+/** The samples' mass bound at vertex q (particleSurfaceFinish), sampleBound
+ * "centred": a plane through the open cells around q as if q were their
+ * centre. At a wall or floor (closed cells on one side) that plane is a cell
+ * too high: a floor film half a cell deep held phi 0 at the floor and no liquid. */
+export const NARROW_BAND_CENTRED_BOUND_WGSL=/* wgsl */` if(particle<bulk){
+  var held=0u;var open=0u;
+  for(var k=0u;k<8u;k++){
+   let c=q+vec3i(umCorner(k,2u))-1;
+   if(!umCellPresent(c)||!nbParticleCellOpen(c)){continue;}
+   open++;held+=min(nbBinCount(umCellAt(vec3u(c))),8u);
+  }
+  if(open>0u){particle=max(particle,min(bulk,1.0-f32(held)/(4.0*f32(open))));}
+ }
+`;
+/** sampleBound "walls": the same plane where all eight cells are open (the
+ * same expression). Elsewhere, along the axis whose two layers of four cells
+ * differ most in held fraction (a closed layer reads as full), the liquid
+ * fills from the denser layer: from its far side, phi 1 - f_dense - f_sparse,
+ * or against it where that layer is closed (a wall), phi -f_sparse. Either
+ * holds exactly the samples' mass (f: held over eight a cell, over a layer's
+ * open cells; a closed sparse layer holds none). */
+export const NARROW_BAND_WALL_BOUND_WGSL=/* wgsl */` if(particle<bulk){
+  var held=0u;var open=0u;var heldLow=vec3u(0u);var heldHigh=vec3u(0u);var openLow=vec3u(0u);var openHigh=vec3u(0u);
+  for(var k=0u;k<8u;k++){
+   let bit=umCorner(k,2u);let c=q+vec3i(bit)-1;
+   if(!umCellPresent(c)||!nbParticleCellOpen(c)){continue;}
+   let n=min(nbBinCount(umCellAt(vec3u(c))),8u);open++;held+=n;
+   let high=bit!=vec3u(0u);
+   heldHigh+=select(vec3u(0u),vec3u(n),high);openHigh+=select(vec3u(0u),vec3u(1u),high);
+   heldLow+=select(vec3u(n),vec3u(0u),high);openLow+=select(vec3u(1u),vec3u(0u),high);
+  }
+  if(open==8u){particle=max(particle,min(bulk,1.0-f32(held)/(4.0*f32(open))));}
+  else if(open>0u){
+   var gap=-1.0;var bound=1.0;
+   for(var a=0u;a<3u;a++){
+    let low=select(1.0,f32(heldLow[a])/(8.0*f32(openLow[a])),openLow[a]>0u);
+    let high=select(1.0,f32(heldHigh[a])/(8.0*f32(openHigh[a])),openHigh[a]>0u);
+    if(abs(low-high)<=gap){continue;}
+    gap=abs(low-high);let lowDense=low>=high;
+    let denseOpen=select(openHigh[a],openLow[a],lowDense)>0u;let sparseOpen=select(openLow[a],openHigh[a],lowDense)>0u;
+    let sparse=select(0.0,select(low,high,lowDense),sparseOpen);
+    bound=select(-sparse,1.0-max(low,high)-sparse,denseOpen);
+   }
+   particle=max(particle,min(bulk,bound));
+  }
+ }
+`;
 export const narrowBandParticleSurfaceWGSL=/* wgsl */`
 // Ferstl et al. 2016, Eq. 4: phi <- min(phi' + h, phi_p). The advected level
 // set, shrunk by one cell, is united with the surface of the samples, so the
@@ -73,16 +120,7 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32,tiled
  // samples were sparse (spray, a spreading sheet): trough +2.2% at step 40,
  // open ground +6.5% at 120. A cell counts eight at most, so the samples a
  // converging surface keeps do not loosen it.
- if(particle<bulk){
-  var held=0u;var open=0u;
-  for(var k=0u;k<8u;k++){
-   let c=q+vec3i(umCorner(k,2u))-1;
-   if(!umCellPresent(c)||!nbParticleCellOpen(c)){continue;}
-   open++;held+=min(nbBinCount(umCellAt(vec3u(c))),8u);
-  }
-  if(open>0u){particle=max(particle,min(bulk,1.0-f32(held)/(4.0*f32(open))));}
- }
- // A transported particle may add liquid throughout its sphere support.
+${NARROW_BAND_CENTRED_BOUND_WGSL} // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
  var theta=heat;
  if(particle>bulk){

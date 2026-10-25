@@ -12,14 +12,14 @@ export const NARROW_BAND_VOLUME_CONTROL = {key:"volumeControlSeconds",label:"Vol
 export const NARROW_BAND_SPARSE_CONTROL = {key:"sparseParticleLifetime",label:"Sparse particle lifetime",unit:"s",min:0,max:10,step:0.1,digits:1,default:2,
   hint:"Retire a particle after this many continuous seconds with fewer than Sparse neighbours in the 3×3×3 grid cells around it. Neighbours returning reset its timer. Applies to coupled and ballistic particles; dense sheets and droplets retain their support. 0 disables sparse retirement."} as const;
 /** Sparse retirement's threshold: a full h cell seeds eight samples, so 8 is about one cell's worth across the 27-cell block. */
-export const NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL = {key:"sparseNeighbours",label:"Sparse neighbours",unit:"",min:0,max:64,step:1,digits:0,default:16,
+export const NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL = {key:"sparseNeighbours",label:"Sparse neighbours",unit:"",min:0,max:64,step:1,digits:0,default:0,
   hint:"A particle with fewer than this many other particles in the 3×3×3 grid cells around it is sparse and retires after Sparse particle lifetime. A full cell seeds eight, so 8 keeps any clump of about a cell; 16 or 32 also retires small clumps of spray. 0 disables sparse retirement."} as const;
 export const NARROW_BAND_PARTICLE_CAP_CONTROL = {key:"particleCellCap",label:"Particles per cell",unit:"",min:0,max:128,step:1,digits:0,default:20,
   hint:"Limits crowding more than one cell beneath the surface. Lower values reduce particle work. Surface particles are preserved; newly seeded particles may temporarily exceed this limit. 0 disables the cap."} as const;
 export function narrowBandParticleCellCap(value:unknown,fallback=20):number{
  const n=Number(value);return Number.isFinite(n)?Math.floor(Math.min(128,Math.max(0,n))):fallback;
 }
-export function narrowBandSparseNeighbours(value:unknown,fallback=16):number{
+export function narrowBandSparseNeighbours(value:unknown,fallback=0):number{
  const n=Number(value);return Number.isFinite(n)?Math.round(Math.min(64,Math.max(0,n))):fallback;
 }
 /** Where the Tune menu's dials sit (uniform-narrow-band-tuning.ts). A dial writes the params it drives; its

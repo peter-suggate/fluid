@@ -15,7 +15,14 @@
  *   --baseline=/abs/snapshot --candidate=/abs/snapshot
  *   [--scene=rest|cold|warm|splash|hot|<scene id>] [--length=128] [--depth=32]
  *   [--pool-blocks=N] [--steps=100] [--from=40] [--profile] [--identity] [--keep-going]
- *   [--hash-at=F,F] [--diff] [--out=DIR] [--gate="RUNNER MODE"]
+ *   [--hash-at=F,F] [--diff] [--out=DIR] [--gate="RUNNER MODE"] [--differ=key,key]
+ *   [--set=key:value,key:value] [--set-candidate=key:value,key:value]
+ * --differ: method params whose resolved values may differ between the arms
+ * (a change of defaults timed as an A/B); every other value must match.
+ * --set: method params both arms take in place of their resolved values (a
+ * number where the value parses as one); --set-candidate: the candidate arm
+ * alone, after --set (name each such key in --differ), e.g. one arm of an
+ * attribution with a single default reverted.
  * --keep-going: with --identity, record work-history differences and run on
  * to the field hashes (the run still fails on either). --hash-at=10,20:
  * compare the field hashes after those frames too; --diff prints where they
@@ -40,7 +47,14 @@ import { createRegionTierScene, REGION_TIER_SCENES, type RegionTierScene } from 
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2]; assert.ok(name); assert.match(name, /^[a-z0-9-]+$/);
-for (const a of process.argv.slice(3)) assert.match(a, /^--(?:(?:baseline|candidate|steps|from|scene|length|depth|pool-blocks|out|gate|hash-at)=.+|profile|keep-going|diff|identity)$/);
+for (const a of process.argv.slice(3)) assert.match(a, /^--(?:(?:baseline|candidate|steps|from|scene|length|depth|pool-blocks|out|gate|hash-at|differ|set|set-candidate)=.+|profile|keep-going|diff|identity)$/);
+const differ = new Set((option("differ") ?? "").split(",").filter(Boolean));
+const parseSets = (text: string | undefined) => Object.fromEntries((text ?? "").split(",").filter(Boolean).map(pair => {
+  const at = pair.indexOf(":"); assert.ok(at > 0, `--set=${pair}: key:value`);
+  const raw = pair.slice(at + 1); return [pair.slice(0, at), raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : raw];
+}));
+const armSets = [parseSets(option("set")), { ...parseSets(option("set")), ...parseSets(option("set-candidate")) }];
+const comparedValues = (values: unknown) => Object.fromEntries(Object.entries(values as Record<string, unknown>).filter(([key]) => !differ.has(key)));
 const diffFields = process.argv.includes("--diff"), identity = process.argv.includes("--identity");
 const hashAt = new Set((option("hash-at") ?? "").split(",").filter(Boolean).map(Number));
 const steps = Number(option("steps") ?? 100), from = Number(option("from") ?? 40), profile = process.argv.includes("--profile"), keepGoing = process.argv.includes("--keep-going");
@@ -122,10 +136,11 @@ try {
       const definition = getSceneDefinition(sceneOption); built = structuredClone(sceneDocument(definition));
       quality = definition.methodProfile.quality; values = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile.overrides });
     }
+    for (const [key, value] of Object.entries(armSets[index]!)) { assert.ok(key in (values as object), `--set: ${key} is not a method param of ${cwd}`); (values as Record<string, unknown>)[key] = value; }
     if (poolBlocks !== undefined) built.fluid = { ...built.fluid, pagePool: { ...built.fluid?.pagePool, blocks: poolBlocks } } as SceneDescription["fluid"];
     const step = method.effectiveStep_s?.(built, values) ?? built.numerics.fixedDt_s;
     built.duration_s = Math.max(built.duration_s, steps * step);
-    if (index) { assert.equal(step, dt); assert.deepEqual(values, snapshots[0]!.values); assert.deepEqual(built, scene); }
+    if (index) { assert.equal(step, dt); assert.deepEqual(comparedValues(values), comparedValues(snapshots[0]!.values)); assert.deepEqual(built, scene); }
     scene = built; dt = step;
     const hash = createHash("sha256"), directory = resolve(cwd, "lib/methods/uniform");
     for (const f of readdirSync(directory).filter(f => f.endsWith(".ts")).sort()) { hash.update(f); hash.update(readFileSync(resolve(directory, f))); }
