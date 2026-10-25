@@ -87,7 +87,7 @@ ${seeds.replaceAll("textureLoad(outputPhi,vec3i(p)).x","umLoadVertex(p)")}
  });
 });
 
-test("retained XYZ nearest minima match full search and crossing changes invalidate metric payloads",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+test("retained XYZ nearest minima match full search and crossing changes invalidate nearest payloads",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("retained nearest minima",async device=>{
   const T=4096,R=64,C=64*T,A=0,B=C/2,band=B+C,mask=band+4,reach=mask+2*T,search=reach+2*T;
   const L=narrowBandReuseLayout(search+2*T,R),helper=narrowBandReuseWGSL(L).split("fn nbStoreReconstructed(")[0]!;
@@ -141,12 +141,10 @@ ${narrowBandNearestWGSL}
    run();const full=await outputs();
    device.queue.writeBuffer(bins,4*A,new Uint32Array(C/2+C));run();assert.deepEqual(await outputs(),full);
    // Phi epochs and ownership certificates remain unchanged; a changed
-   // crossing selection alone must invalidate both nearest and metric data.
-   device.queue.writeBuffer(bins,4*L.metricValid,new Uint32Array(64*R).fill(1));
+   // crossing selection alone must invalidate the nearest data.
    device.queue.writeBuffer(bins,4*(mask+2*crossing),new Uint32Array([0x44444444,0x44444444]));
    run();const changed=await outputs();assert.notDeepEqual(changed,full);
    const region=7;assert.equal((await read(L.nearestFlags+region,1))[0],0);
-   assert.ok((await read(L.metricValid+64*region,64)).every(v=>v===0));
    device.queue.writeBuffer(bins,4*L.control,new Uint32Array([0,1,0]));run();assert.deepEqual(await outputs(),changed);
   }finally{bins.destroy();}
  });

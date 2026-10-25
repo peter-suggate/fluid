@@ -24,8 +24,8 @@ var<workgroup> nbReuseLive:u32;
   if(lane==0u){nbReuseLive=select(select(0u,2u,atomicLoad(&bins[NB_REUSE_ALLOWED+region])==2u),1u,umTileLive(tile));}
   let live=workgroupUniformLoad(&nbReuseLive);
   if(live!=1u){
-   if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);atomicStore(&bins[NB_REUSE_REGION_PLANE+8u*region+7u],0u);}
-   if(live==0u){atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);}continue;
+   if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);}
+   continue;
   }
   let origin=(umTileCoord(tile)/4u)*4u;
   let base=NB_REUSE_NEAREST_STATE+158u*region;
@@ -74,8 +74,6 @@ var<workgroup> nbMetricClean:atomic<u32>;
   workgroupBarrier();
   let nearest=atomicLoad(&nbReuseClean)!=0u;let metric=nearest&&atomicLoad(&nbMetricClean)!=0u;
   if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],select(0u,1u,nearest)|select(0u,2u,metric));}
-  // Clear omitted tiles too: neighbor changes cannot age back into hits.
-  if(!metric){atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);}
   workgroupBarrier();
   }
   if(nbXWithSelect){

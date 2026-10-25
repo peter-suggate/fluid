@@ -7,17 +7,18 @@ export function narrowBandReuseLayout(base:number,regions:number,capacity=region
  // The other bank stays immutable.
  const historyWords=capacity?258*regions:0;
  const allowed=history+2*historyWords,valid=allowed+(capacity?regions:0);
- const metricValid=valid+64*capacity, nearestValid=metricValid+64*capacity;
+ const nearestValid=valid+64*capacity;
  const nearestState=nearestValid+regions, nearestFlags=nearestState+158*capacity;
  const masks=nearestFlags+regions;
  // The metric payload went with the arena's redistance (8000 words a region,
- // never read since): only its validity words remain.
- const nearest=masks+128*capacity, plane=nearest+6144*capacity, regionPlane=plane+384*capacity;
+ // never read since), and with it its validity words and the per-tile and
+ // per-region plane records, which nothing read.
+ const nearest=masks+128*capacity;
  // The frame's region work tiers (UniformRegionHeat.tiers words [0, regions)),
  // copied in before each stage that reads them (UniformNarrowBandFlip.syncTiers).
- const tiers=regionPlane+8*capacity;
+ const tiers=nearest+6144*capacity;
  const framePlan=tiers+regions;
- return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,plane,regionPlane,tiers,framePlan,metadataWords:masks-base,words:framePlan+5+7*regions-base};
+ return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,nearestValid,nearestState,nearestFlags,nearest,tiers,framePlan,metadataWords:masks-base,words:framePlan+5+7*regions-base};
 }
 export type NarrowBandReuseLayout=ReturnType<typeof narrowBandReuseLayout>;
 export function narrowBandReuseWGSL(l:NarrowBandReuseLayout){return /* wgsl */`
@@ -41,9 +42,6 @@ const NB_REUSE_REGIONS:u32=${l.regions}u;const NB_REUSE_CAPACITY:u32=${l.capacit
 const NB_REUSE_LIVE:u32=${l.live}u;const NB_REUSE_CONTROL:u32=${l.control}u;
 const NB_REUSE_HISTORY:u32=${l.history}u;const NB_REUSE_HISTORY_WORDS:u32=${l.historyWords}u;
 const NB_REUSE_ALLOWED:u32=${l.allowed}u;const NB_REUSE_VALID:u32=${l.valid}u;const NB_REUSE_MASK:u32=${l.masks}u;
-const NB_REUSE_REGION_PLANE:u32=${l.regionPlane}u;
-const NB_REUSE_PLANE:u32=${l.plane}u;
-const NB_REUSE_METRIC_VALID:u32=${l.metricValid}u;
 const NB_REUSE_NEAREST_VALID:u32=${l.nearestValid}u;const NB_REUSE_NEAREST_STATE:u32=${l.nearestState}u;const NB_REUSE_NEAREST_FLAGS:u32=${l.nearestFlags}u;const NB_REUSE_NEAREST:u32=${l.nearest}u;
 // Region work tiers (UniformRegionHeat): COLD 0, WARM 1, HOT 2. A COLD
 // region's producers hold phi (no write, no revision bump) and its
@@ -101,8 +99,6 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
   if(nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){
    if(lane==0u){atomicStore(&bins[nbReuseCurrent()+4u*NB_REUSE_REGIONS+region],0u);atomicStore(&bins[NB_REUSE_ALLOWED+region],2u);}
    atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);
-   atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);
-   atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);
   }
   return false;
  }
@@ -159,7 +155,7 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
  let clean=atomicLoad(&nbReuseClean)!=0u;
  if(nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){
   if(lane==0u){atomicStore(&bins[NB_REUSE_ALLOWED+region],select(0u,1u,clean));}
-  if(!clean){atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);}
+  if(!clean){atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);}
  }
  workgroupBarrier();return clean;
 }

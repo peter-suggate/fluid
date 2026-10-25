@@ -285,7 +285,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get regionalReuseCapacity():number{return this.reuse.capacity;}
  get regionalReuseAllocatedBytes():number{return 4*this.reuse.words;}
  /** Read-only post-run diagnostics; never used to size simulation launches. */
- get regionalReuseEvidence(){return {buffer:this.bins,regions:this.reuse.capacity,flagsOffset:4*this.reuse.nearestFlags,planeOffset:4*this.reuse.regionPlane};}
+ get regionalReuseEvidence(){return {buffer:this.bins,regions:this.reuse.capacity,flagsOffset:4*this.reuse.nearestFlags};}
  regionalCrossingReuseEnabled=true;
  /** Exact full-scan ablation for the shared frame crossing domain. */
  regionalCrossingPlanEnabled=true;

@@ -122,11 +122,10 @@ var<workgroup> nbAirPlanHalo:atomic<u32>;
     // An omitted region cannot supply an old nearest/metric certificate
     // after its request set or world mapping changed.
     atomicStore(&bins[NB_REUSE_ALLOWED+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);
-    atomicStore(&bins[NB_REUSE_REGION_PLANE+8u*region+7u],0u);
    }
   }
   if(!included&&region<NB_REUSE_CAPACITY){
-   atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);
+   atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);
   }
   workgroupBarrier();
  }
