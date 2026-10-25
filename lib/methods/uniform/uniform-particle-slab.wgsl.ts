@@ -41,7 +41,7 @@ import { particleCanonicalWGSL } from "./uniform-particle-canonical.wgsl";
  * - From NB_SLAB_IN, 4 words an input entry (last move's slabs): id, current
  *   base, count, first job.
  * - From NB_SLAB_OUT, one word a slab: its brick id, in slot order. */
-export const NB_SLAB_HEADER_WORDS=32;
+export const NB_SLAB_HEADER_WORDS=48;
 /** Receipt-buffer words for a lattice of `blocks` blocks. */
 export function particleSlabWords(blocks:number):number{return NB_SLAB_HEADER_WORDS+17*64*blocks;}
 /** Minimum tail headroom: slab sizing leaves this much of each bank free. */
@@ -63,8 +63,9 @@ fn nbSlab(id:u32,k:u32)->u32{return NB_SLAB_RECORD+12u*id+k;}
 fn nbExtent()->u32{return min(atomicLoad(&state[0]),NB_SLAB_LIMIT);}
 fn nbLive(p:Particle)->bool{return p.position.w>0.0;}
 // A deferred step seed's age until its first move (the largest finite f32
-// less one ulp: no age reaches it, ages are capped at the sparse lifetime).
-const NB_SEED_FIRST:u32=0x7f7ffffeu;
+// less seven ulps, its low three bits clear for a merge's mass: no age
+// reaches it, ages are capped at the sparse lifetime).
+const NB_SEED_FIRST:u32=0x7f7ffff8u;
 fn nbSeedFirst()->f32{return bitcast<f32>(NB_SEED_FIRST);}
 fn nbDead()->Particle{var p=Particle();p.position=vec4f(-1.0,0.0,0.0,0.0);return p;}
 // The brick has slabs this move.

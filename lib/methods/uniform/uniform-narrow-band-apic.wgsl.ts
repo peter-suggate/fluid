@@ -3,15 +3,25 @@
  * Thus D = I/4 and C = 4 sum(w u r^T), including anisotropic physical cells.
  * FLIP packs nonnegative sparse age and the ballistic bit into before.w.
  * Its sign bit is the flag (including negative zero); its magnitude keeps
- * every age bit. APIC keeps its existing affine/presentation record. */
+ * every age bit. APIC keeps its existing affine/presentation record.
+ * merge (crowdedCells "merge"): a sample's mass, a whole number of seeded
+ * samples from 1 to 8. FLIP keeps mass - 1 in before.w's low three bits (the
+ * age keeps the rest of its mantissa); APIC keeps it in lifetime.y. Without
+ * merge every mass is 1 and the record is unchanged. */
 export type NarrowBandTransfer = "flip" | "apic";
 export const narrowBandParticleStride = (apic: boolean) => apic ? 28 : 12;
-export const narrowBandParticleWGSL = (apic: boolean) =>
- `struct Particle{position:vec4f,velocity:vec4f,before:vec4f${apic?",cx:vec4f,cy:vec4f,cz:vec4f,lifetime:vec4f":""}}
+export const narrowBandParticleWGSL = (apic: boolean, merge = false) => {
+ const ageBits = merge ? "0x7ffffff8u" : "0x7fffffffu";
+ return `struct Particle{position:vec4f,velocity:vec4f,before:vec4f${apic?",cx:vec4f,cy:vec4f,cz:vec4f,lifetime:vec4f":""}}
 fn nbParticleMode(p:Particle)->f32{return ${apic?"p.before.w":"f32(bitcast<u32>(p.before.w)>>31u)"};}
-fn nbParticleAge(p:Particle)->f32{return ${apic?"p.lifetime.x":"bitcast<f32>(bitcast<u32>(p.before.w)&0x7fffffffu)"};}
-fn nbParticleState(age:f32,mode:f32)->f32{return ${apic?"mode":"bitcast<f32>((bitcast<u32>(age)&0x7fffffffu)|(u32(mode)<<31u))"};}
+fn nbParticleAge(p:Particle)->f32{return ${apic?"p.lifetime.x":`bitcast<f32>(bitcast<u32>(p.before.w)&${ageBits})`};}
+fn nbParticleState(age:f32,mode:f32)->f32{return ${apic?"mode":`bitcast<f32>((bitcast<u32>(age)&${ageBits})|(u32(mode)<<31u))`};}
+fn nbParticleMass(p:Particle)->f32{return ${!merge?"1.0":apic?"p.lifetime.y+1.0":"f32((bitcast<u32>(p.before.w)&7u)+1u)"};}
+// before.w for age and mode, keeping p's mass.
+fn nbParticleRestate(p:Particle,age:f32,mode:f32)->f32{return ${merge&&!apic?"bitcast<f32>(bitcast<u32>(nbParticleState(age,mode))|(bitcast<u32>(p.before.w)&7u))":"nbParticleState(age,mode)"};}
+fn nbWithMass(p:Particle,mass:f32)->Particle{var r=p;${!merge?"":apic?"r.lifetime.y=mass-1.0;":"r.before.w=bitcast<f32>((bitcast<u32>(p.before.w)&0xfffffff8u)|((u32(mass)-1u)&7u));"}return r;}
 `;
+};
 
 /** nbApicTap reads the projected/extrapolated MAC component at an h-face
  * anchor. Its boundary extension must leave the virtual stencil positions

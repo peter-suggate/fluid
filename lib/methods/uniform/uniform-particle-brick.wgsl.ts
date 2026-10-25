@@ -21,7 +21,7 @@ export const PARTICLE_DEPOSIT_WORDS_PER_CELL = 6;
  * a join bit a tile key (joins words), then PARTICLE_RESIDENCY_WORDS a page
  * (allocation support masks and travel bounds), at these bins words. */
 export interface ParticleRefineWords {readonly joins:number;readonly allocation:number}
-export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords, deposit = "bins"): string {
+export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords, deposit = "bins", merge = false): string {
   return /* wgsl */`
 ${particleResidencyTravelWGSL}
 // Coupled samples need only accepted motion; avoid their unused velocity norm.
@@ -137,13 +137,13 @@ fn pbNode(slot:u32)->vec3i{let axis=slot/PB_WINDOW;let r=i32(slot%PB_WINDOW);let
 fn pbQuadratic(f:f32)->vec3f{return vec3f(0.5*(1.5-f)*(1.5-f),0.75-(f-1.0)*(f-1.0),0.5*(f-0.5)*(f-0.5));}
 fn pbAdd(slot:u32,w:f32,m:f32){atomicAdd(&pbMomentum[slot],i32(round(m*PB_MOMENTUM)));atomicAdd(&pbWeight[slot],u32(round(w*PB_WEIGHT)));}
 // A sample's three MAC components. p is relative to the tile origin.
-fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
+fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}${merge?",mass:f32":""}){
  for(var axis=0u;axis<3u;axis++){
   var offset=vec3f(0.5);offset[axis]=1.0;
   let base=vec3i(floor(p-offset-0.5));let f=p-offset-vec3f(base);
   let wx=pbQuadratic(f.x);let wy=pbQuadratic(f.y);let wz=pbQuadratic(f.z);
   for(var z=0;z<3;z++){for(var y=0;y<3;y++){let wyz=wy[y]*wz[z];for(var x=0;x<3;x++){
-   let node=base+vec3i(x,y,z);let w=wx[x]*wyz;
+   let node=base+vec3i(x,y,z);let w=wx[x]*wyz${merge?"*mass":""};
    pbAdd(pbSlot(axis,node),w,w*${apic?"(u[axis]+dot(c[axis],vec3f(node)+offset-p))":"u[axis]"});
   }}}
  }
@@ -190,11 +190,11 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}){
    }
    counts.y+=u32(!supported);
    if(census){let d=bandPhi(q);outside=max(outside,d);counts+=vec3u(u32(d>0.5),0u,u32(particleDepth(q)<-4.0));}
-   particles[i].before.w=nbParticleState(nbParticleAge(s),select(1.0,0.0,supported));
+   particles[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));
    let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let v=bitcast<vec3u>(s.velocity.xyz);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;
-   links[NB_LINKS+4u*i+3u]=(bitcast<u32>(s.position.w)&0x7fffffffu)|select(0x80000000u,0u,supported);
+   links[NB_LINKS+4u*i+3u]=${merge?"(bitcast<u32>(s.position.w)&0x7ffffff8u)|(u32(nbParticleMass(s))-1u)":"(bitcast<u32>(s.position.w)&0x7fffffffu)"}|select(0x80000000u,0u,supported);
    // Sorted samples lie in their tile; the clamp only bounds the window.
-   if(fits&&supported){pbScatter(clamp(q-vec3f(origin),vec3f(0.0),vec3f(3.9999998)),s.velocity.xyz${apic?",array<vec3f,3>(s.cx.xyz,s.cy.xyz,s.cz.xyz)":""});}
+   if(fits&&supported){pbScatter(clamp(q-vec3f(origin),vec3f(0.0),vec3f(3.9999998)),s.velocity.xyz${apic?",array<vec3f,3>(s.cx.xyz,s.cy.xyz,s.cz.xyz)":""}${merge?",nbParticleMass(s)":""});}
   }
   if(!fits){continue;}
   workgroupBarrier();

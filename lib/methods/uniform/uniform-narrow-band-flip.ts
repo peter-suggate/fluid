@@ -211,9 +211,13 @@ export function narrowBandBudgetCapacity(budget:NarrowBandParticleBudget):number
  * NARROW_BAND_RETIRE_WORD, cumulative: deep, sparse expiry, crowded cell,
  * blocked in a solid, heat expiry, then sparse, blocked and heat expiry of a
  * sample less than a cell inside the advected level set (liquid it may not hold).
- * splitX at or above 0 makes the last three words, at cells x >= splitX:
- * crowded, every retirement, and seeds offered. */
-export const NARROW_BAND_RETIRE_WORD=24;
+ * splitX at or above 0 makes those last three words, at cells x >= splitX:
+ * crowded, every retirement, and seeds offered. Then (crowdedCells "merge")
+ * samples merged into another, excess samples a full gatherer refused (kept
+ * live over the cap, a step each), splits, and the mass past 1 of retired
+ * merged samples. */
+export const NARROW_BAND_RETIRE_WORD=32;
+export const NARROW_BAND_RETIRE_WORDS=12;
 export const narrowBandRetireCounting={on:false,splitX:-1};
 export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  readonly label="Narrow-band FLIP page words";
@@ -481,7 +485,12 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   /** sampleBound "walls": the samples' mass bound in the union holds a
    * wall or floor vertex's plane against the wall (NARROW_BAND_WALL_BOUND_WGSL);
    * "centred" places every vertex at its open cells' centre. */
-  readonly sampleBound:"centred"|"walls"="centred"){
+  readonly sampleBound:"centred"|"walls"="centred",
+  /** crowdedCells "merge": a deep cell's samples past particleCellCap fold
+   * into its kept samples as mass (nbMergeRun), and a merged sample splits
+   * where it reaches a shallow or under-filled cell (nbFinish); "retire"
+   * retires them. */
+  readonly crowdedCells:"retire"|"merge"="retire"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   // The seed list packs a cell key in 30 bits below the source and deep flags.
   if(cells>0x40000000)throw new Error(`Narrow-band FLIP's seed list packs a cell key in 30 bits: ${cells} cell keys exceed 1073741824`);
@@ -689,7 +698,7 @@ ${uniformPageInitBlocksWGSL(this.pool.layout,"nbInitBlocks",512,`bins[${heat}u+k
   const sourceCode=(unitTaps:boolean,slots=false,delta=false)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 const nbSparseBins:bool=true;
 const NB_PREVIOUS_CROSSINGS:bool=${this.previousCrossings};
-${narrowBandParticleWGSL(this.apic)}
+${narrowBandParticleWGSL(this.apic,this.crowdedCells==="merge")}
 @group(1) @binding(0) var<storage,read_write> source:array<Particle>;
 // Disjoint entry points alias binding 0: only transferClear/Deposit/Properties
 // access the atomic view, after SORT consumed source and before tail extension.
@@ -758,6 +767,8 @@ const NB_COARSE_LIST:u32=${this.coarseListWord}u;const NB_COARSE_CAP:u32=${this.
 const NB_DEPOSIT:u32=${this.depositWord}u;const NB_DEPOSIT_TILES:u32=${this.depositTiles}u;
 fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[NB_LINKS+4u*i+3u]&0x7fffffffu)>1.0;}
 fn nbPosition(i:u32)->vec3f{let a=NB_LINKS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
+// A sample's mass from the compact flag word (the deposit writes it).
+fn nbStreamMass(i:u32)->f32{return ${this.crowdedCells==="merge"?"f32((links[NB_LINKS+4u*i+3u]&7u)+1u)":"1.0"};}
 fn nbMotion(i:u32)->vec4f{let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let mode=links[NB_LINKS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}
 // Live particle counts per tile drive sparse cell-bin clearing.
 const NB_COVERAGE:u32=${this.binSlots?`${this.binCells}u+64u*UM_BLOCKS`:"2u*UM_CELL_KEYS"};
@@ -848,11 +859,51 @@ ${this.solid.coarse?narrowBandArenaCanonicalWGSL:""}
 ${narrowBandActivityTriggerWGSL(this.seeding,this.sourceSeeding)}
 // The particle band (particleBandDepth, particleDensity).
 const NB_BAND_DEPTH:f32=${this.bandDepth.toFixed(2)};${narrowBandRetireCounting.on?`
-fn nbRetireCount(reason:u32,depth:f32,x:f32){
+fn nbRetireCount(reason:u32,depth:f32,x:f32,mass:f32){
  atomicAdd(&state[${NARROW_BAND_RETIRE_WORD}u+reason],1u);
+ if(mass>1.0){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+11}u],u32(mass)-1u);}
  ${narrowBandRetireCounting.splitX>=0?`if(x>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+6}u],1u);if(reason==2u){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+5}u],1u);}}`:`if(depth> -1.0&&(reason==1u||reason==3u||reason==4u)){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+5}u+select(select(2u,1u,reason==3u),0u,reason==1u)],1u);}`}
 }`:""}
-const NB_GRADED:bool=${this.gradedDensity};
+const NB_GRADED:bool=${this.gradedDensity};${narrowBandRetireCounting.on?`
+fn nbMergeCount(k:u32,n:u32){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+8}u+k],n);}`:""}${this.crowdedCells==="merge"?`
+// crowdedCells "merge": the mass a sample may hold (the deposit's fixed-point
+// sums keep their headroom).
+const NB_MASS_MAX:f32=8.0;
+// The cap of a deep cell (centre depth): six in a graded band's cells past 1.5.
+fn nbCellCap(depth:f32)->u32{return select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);}
+// Rank r of a crowded run gathers ranks r+cap, r+2cap, ... (low, high: the
+// first and the run's end; stride: the cap) as one sample of their summed
+// mass at their mass-weighted position, velocity and snapshot (a swept
+// delta absent on an axis for any is absent for the merged one), the most
+// heat and the least age. A sample whose mass would pass NB_MASS_MAX is not
+// gathered: it stays live, holding the cell over its cap (nbMergeAbsorbed,
+// counted). The gathered records are retired unmoved by their own lanes, so
+// their slots hold this step's state.
+fn nbMergeRun(record:Particle,low:u32,high:u32,stride:u32)->Particle{
+ var m=nbParticleMass(record);var x=m*record.position.xyz;var v=m*record.velocity.xyz;var b=m*record.before.xyz;
+ var none=abs(record.before.xyz)>=vec3f(1e30);var heat=record.position.w;var age=nbParticleAge(record);
+ for(var j=low;j<high;j+=stride){
+  let o=particles[j];if(!nbLive(o)){continue;}
+  let mo=nbParticleMass(o);
+  if(m+mo>NB_MASS_MAX){continue;}
+  m+=mo;x+=mo*o.position.xyz;v+=mo*o.velocity.xyz;b+=mo*o.before.xyz;none=none|(abs(o.before.xyz)>=vec3f(1e30));
+  heat=max(heat,o.position.w);age=min(age,nbParticleAge(o));
+  ${narrowBandRetireCounting.on?"nbMergeCount(0u,1u);":""}
+ }
+ var p=record;p.position=vec4f(x/m,heat);p.velocity=vec4f(v/m,record.velocity.w);
+ p.before=vec4f(select(b/m,vec3f(3e38),none),nbParticleState(age,nbParticleMode(record)));
+ return nbWithMass(p,m);
+}
+// Whether the gatherer of excess rank i (start: the run's first; stride: the
+// cap) takes it: the same walk nbMergeRun makes, up to i.
+fn nbMergeAbsorbed(start:u32,i:u32,stride:u32)->bool{
+ let k=start+(i-start)%stride;var m=nbParticleMass(particles[k]);
+ for(var j=k+stride;j<i;j+=stride){
+  let o=particles[j];if(!nbLive(o)){continue;}
+  let mo=nbParticleMass(o);if(m+mo<=NB_MASS_MAX){m+=mo;}
+ }
+ return m+nbParticleMass(particles[i])<=NB_MASS_MAX;
+}`:""}
 fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",this.gradedDensity)};}
 // The samples a cell holds when seeded full: four of the eight sites in a
 // graded band's deep cells (centre depth), else eight.
@@ -1009,6 +1060,27 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
   // it the grid's velocity, as the tail seeds sampled the step's final field.
   let first=bitcast<u32>(nbParticleAge(record))==NB_SEED_FIRST;
   if(first){${this.apic?"p.lifetime.x=0.0;":"p.before.w=nbParticleState(0.0,nbParticleMode(record));"}}
+  ${this.crowdedCells==="merge"?`// crowdedCells "merge": a deep cell (its centre a cell or more under the
+  // surface) holding more than its cap keeps the cap's lowest ranks of its
+  // sorted run, each gathering the excess ranks congruent to it
+  // (nbMergeRun); the excess gathered retire here, unmoved, and the excess
+  // a full gatherer refused move on as samples. Every sample in the
+  // cell reads the same centre depth, so all agree on the cell.
+  if(params.activity.w>0.0){
+   let cell=nbBinCell(umCellAt(vec3u(q)));
+   if(cell!=NB_NO_BIN){
+    let start=links[cell];let count=atomicLoad(&bins[cell]);
+    if(i>=start&&i-start<count){
+     let centre=floor(q)+0.5;let deep=nbMoveDepth(centre);let cap=nbCellCap(deep);
+     if(deep< -1.0&&count>cap){
+      if(i-start<cap){p=nbMergeRun(p,i+cap,start+count,cap);q=p.position.xyz-nbHeldShift();}
+      else if(nbMergeAbsorbed(start,i,cap)){${narrowBandRetireCounting.on?"nbRetireCount(2u,deep,q.x,1.0);":""}return NbMoved(p,1u);}
+      ${narrowBandRetireCounting.on?"else{nbMergeCount(1u,1u);}":""}
+     }
+    }
+   }
+  }
+  `:""}
   let routed=nbFastSample&&umSolidPresent();
   nbHullLo=q;nbHullHi=q;if(routed&&!nbHullUncut()){return NbMoved(p,2u);}
   let mode=nbParticleMode(p);
@@ -1055,26 +1127,26 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    ${this.apic?"if(!all(abs(p.cx.xyz)<vec3f(1e10))||!all(abs(p.cy.xyz)<vec3f(1e10))||!all(abs(p.cz.xyz)<vec3f(1e10))){atomicStore(&state[3],2u);return NbMoved(p,1u);}":""}
    if(!all(abs(v)<vec3f(1e10))){atomicStore(&state[3],2u);return NbMoved(p,1u);}
    let age=nbSparseAge(i,q,nbParticleAge(p));let depth=nbMoveDepth(q);
-   ${this.apic?"p.lifetime.x=age;":"p.before.w=nbParticleState(age,mode);"}
+   ${this.apic?"p.lifetime.x=age;":"p.before.w=nbParticleRestate(p,age,mode);"}
    p.velocity=vec4f(v,depth);p.position.w=max(p.position.w,nbMoveHeat(q));
    // The accepted grid motion: the next head's residency prediction.
    // FLIP's residual velocity transfers momentum but traces no position.
    p.before=vec4f(pic,p.before.w);
-   if(depth< -NB_BAND_DEPTH||nbSparseExpired(age)){${narrowBandRetireCounting.on?"nbRetireCount(select(1u,0u,depth< -NB_BAND_DEPTH),depth,q.x);":""}return NbMoved(p,1u);}
-   if(depth<-1.0&&params.activity.w>0.0){
+   if(depth< -NB_BAND_DEPTH||nbSparseExpired(age)){${narrowBandRetireCounting.on?"nbRetireCount(select(1u,0u,depth< -NB_BAND_DEPTH),depth,q.x,nbParticleMass(p));":""}return NbMoved(p,1u);}
+   if(${this.crowdedCells==="merge"?"false&&":""}depth<-1.0&&params.activity.w>0.0){
     let cell=nbBinCell(umCellAt(vec3u(q)));
     if(cell!=NB_NO_BIN){
      let rank=i-links[cell];
      let cap=select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);
-     if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){${narrowBandRetireCounting.on?"nbRetireCount(2u,depth,q.x);":""}return NbMoved(p,1u);}
+     if(i>=links[cell]&&rank<atomicLoad(&bins[cell])&&rank>=cap){${narrowBandRetireCounting.on?"nbRetireCount(2u,depth,q.x,1.0);":""}return NbMoved(p,1u);}
     }
    }
    // Bodies advance at the previous fluid step's tail. Push samples they
    // overtook out to the moving surface before the static-solid rejection.
    let rigidStart=nbRigidContact(q,p.velocity.xyz);q=rigidStart.position;p.velocity=vec4f(rigidStart.velocity,p.velocity.w);
    // Solid collision, rather than grid ownership, limits particle motion.
-   if(nbParticleBlocked(q)){${narrowBandRetireCounting.on?"nbRetireCount(3u,depth,q.x);":""}return NbMoved(p,1u);}
-   ballistic=mode==1.0||!gridSupported(q);p.before.w=nbParticleState(nbParticleAge(p),select(0.0,1.0,ballistic));
+   if(nbParticleBlocked(q)){${narrowBandRetireCounting.on?"nbRetireCount(3u,depth,q.x,nbParticleMass(p));":""}return NbMoved(p,1u);}
+   ballistic=mode==1.0||!gridSupported(q);p.before.w=nbParticleRestate(p,nbParticleAge(p),select(0.0,1.0,ballistic));
    ${this.apic?"if(ballistic){p.cx=vec4f(0);p.cy=vec4f(0);p.cz=vec4f(0);}":""}
    // A sample takes erasure heat (over 1) at G2P, with its tile's new
    // collar seeded: a collar tile the census triggered eroded the unseeded
@@ -1083,7 +1155,7 @@ fn nbAdvect(record:Particle,i:u32)->NbMoved{
    p.position.w=max(select(min(tileHeat,1.0),tileHeat,p.position.w>1.0),max(0.0,p.position.w-select(nbCooling()*params.hDt.w,0.0,ballistic)));
    ${this.heatExpiry==="held"?`// heatExpiry "held": the level set does not hold a shallow sample in a thin tile.
    if(depth> -1.0&&nbTileThin(q)){p.position.w=max(p.position.w,1.0);}
-   `:""}if(p.position.w<=0.0){${narrowBandRetireCounting.on?"nbRetireCount(4u,depth,q.x);":""}return NbMoved(p,1u);}
+   `:""}if(p.position.w<=0.0){${narrowBandRetireCounting.on?"nbRetireCount(4u,depth,q.x,nbParticleMass(p));":""}return NbMoved(p,1u);}
    // A record its transfer left coupled was bounded by the grid flow alone
    // (its travel record is the accepted grid motion): found unsupported here,
    // it drifts this step by that grid sample. Its FLIP velocity is momentum,
@@ -1189,7 +1261,30 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   // beside it. Spray keeps its heat: nothing else erases what it leaves.
   var heat=p.position.w;
   if(!ballistic){let arrived=nbMoveHeat(q);if(arrived>0.0){heat=min(heat,max(arrived,1.0));}}
-  p.position=vec4f(q,heat);return NbMoved(p,0u);
+  p.position=vec4f(q,heat);
+  ${this.crowdedCells==="merge"?`// crowdedCells "merge": a merged sample that ends shallow (under a cell
+  // deep) or in a cell its run left under half the cap splits in two a
+  // quarter cell apart along a direction hashed from its position, about its
+  // centroid, each half with its velocity and snapshot: the film it spreads
+  // into gets back the coverage its mass stands for. The second half
+  // appends to its brick's slab (nbMoveAppend). Halves that would leave the
+  // storage or enter a solid stay merged this step.
+  let mass=nbParticleMass(p);
+  if(mass>1.0&&!ballistic&&params.activity.w>0.0){
+   let cell=nbBinCell(umCellAt(vec3u(q)));let depth=nbMoveDepth(q);
+   if(depth> -1.0||cell==NB_NO_BIN||2u*atomicLoad(&bins[cell])<nbCellCap(depth)){
+    let kept=ceil(0.5*mass);let moved=mass-kept;
+    let bits=bitcast<vec3u>(q);let hash=(bits.x*73856093u)^(bits.y*19349663u)^(bits.z*83492791u);
+    let along=normalize(vec3f(f32(hash&255u),f32((hash>>8u)&255u),f32((hash>>16u)&255u))-127.5);
+    let a=q+0.25*(moved/mass)*along;let b=q-0.25*(kept/mass)*along;
+    if(umPointPresent(a)&&umPointPresent(b)&&!nbParticleBlocked(a)&&!nbParticleBlocked(b)){
+     var other=p;other.position=vec4f(b,heat);nbMoveAppend(nbWithMass(other,moved));
+     p.position=vec4f(a,heat);${narrowBandRetireCounting.on?"nbMergeCount(2u,1u);":""}
+     return NbMoved(nbWithMass(p,kept),0u);
+    }
+   }
+  }
+  `:""}return NbMoved(p,0u);
 }
 // The walk list: an index a record in the dead compact stream past the slow
 // list (both hold at most a bank's records), the record (its trace's start
@@ -1434,14 +1529,14 @@ fn transferFace(face:UMFace)->f32{
    let r=(q-nbPosition(i))/width;let w=weight(r.x)*weight(r.y)*weight(r.z);
    var u=motion[face.axis];
    ${this.apic?"let p=particles[i];var row=p.cx.xyz;if(face.axis==1u){row=p.cy.xyz;}if(face.axis==2u){row=p.cz.xyz;}u+=dot(row,r);":""}
-   total+=w;momentum+=w*u;
+   ${this.crowdedCells==="merge"?"let mass=nbStreamMass(i);total+=mass*w;momentum+=mass*w*u;":"total+=w;momentum+=w*u;"}
   }
  }}}
  if(total<1e-5){return original;}return mix(original,momentum/total+umThawFaceTerm(face.anchor,face.axis,face.width),blend*nbTransferBlend(q,depth,total));
 }
 ${narrowBandTransferPropertiesSource(this.gradedDensity,this.sharedDeposit?"depositScratch":"bins")}
-${narrowBandFineTransferSource(subgroups,this.apic,this.gradedDensity)}
-${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords},this.sharedDeposit?"depositScratch":"bins")}
+${narrowBandFineTransferSource(subgroups,this.apic,this.gradedDensity,this.crowdedCells==="merge")}
+${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords},this.sharedDeposit?"depositScratch":"bins",this.crowdedCells==="merge")}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one
 // patch a face, and a face centred in a tile past the reach lies more than
 // two cells from the surface: it keeps its velocity without a gather. The

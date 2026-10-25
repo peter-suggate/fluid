@@ -75,7 +75,10 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   COLD is left to submerged bulk, air and solid. "budget" freezes a surface
  *   region's phi while its omitted transport fits the freeze budget, which a
  *   steady drain refills (the lag is never recovered) and which a drain below
- *   the fine pressure's resolution (r h) never reaches.
+ *   the fine pressure's resolution (r h) never reaches. "still" is "warm"
+ *   except that a surface whose omitted transport is provably round-off (a
+ *   step's within 256 f32 ulps of the hydrostatic balance, its sum since
+ *   the last trigger within 0.01 h) may stay COLD.
  * - solidContact: "liquid" holds a static solid's cut tiles, and their
  *   neighbours, at h wherever liquid can meet them; "surface" only where the
  *   surface census already holds the cut tile at h (submerged cut tiles run
@@ -104,12 +107,17 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   "centred" reads its open cells as centred on it, which at a wall or floor
  *   sets the plane a cell too high (a floor film under half a cell deep adds
  *   nothing); "walls" fills from the wall there, with the same mass.
+ * - crowdedCells: a deep cell (its centre a cell or more under the surface)
+ *   holding more samples than particleCellCap. "retire" retires the excess,
+ *   and the liquid they carry with them; "merge" folds the excess into the
+ *   kept samples as mass (to 8 a sample), conserving mass and momentum, and
+ *   a merged sample splits again where it reaches a shallow or under-filled cell.
  * - nativeSmoothing: "coarse" corrects the band solve's native 4h rows by its
  *   level 2 alone, which sees the band as 4h aggregates; "composite" also
  *   relaxes them against the band's iterate each cycle, so a row coupled
  *   mostly through seams (a solid's pocket beside a throat) converges.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"|"still";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -138,10 +146,11 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  particleBandDepth:typeof values.particleBandDepth==="number"&&Number.isFinite(values.particleBandDepth)?Math.min(4,Math.max(2,values.particleBandDepth)):3,
  particleDensity:values.particleDensity==="uniform"?"uniform":"graded",
  bulkTier:values.bulkTier==="16h"?"16h":"off",
- coldSurface:values.coldSurface==="budget"?"budget":"warm",
+ coldSurface:values.coldSurface==="budget"?"budget":values.coldSurface==="still"?"still":"warm",
  seedScoring:values.seedScoring==="unshaped"?"unshaped":"every",
  outerSeeding:values.outerSeeding==="retain"?"retain":"uncovered",
  heatExpiry:values.heatExpiry==="anywhere"?"anywhere":"held",
  sampleBound:values.sampleBound==="centred"?"centred":"walls",
  nativeSmoothing:values.nativeSmoothing==="coarse"?"coarse":"composite",
+ crowdedCells:values.crowdedCells==="retire"?"retire":"merge",
 });
