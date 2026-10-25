@@ -1428,12 +1428,12 @@ override pBand:u32=0u;
   let block=ubaLevelSlot(2u,e);
   if(lane==0u){rFlags=nPage(block);}
   if((workgroupUniformLoad(&rFlags)&2u)!=0u){
-   let at2=UBA_STRIDE*block+lane;let m=pool[PN_M+at2];
+   let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];
    if((m&N_ACTIVE)!=0u&&((l.x+l.y+l.z)&1u)==pColour${B?"&&(m&N_BULK)==0u":""}){
-    let base=pF(PN_B,at2);let d0=pF(PN_D,at2);var off=pF(PN_R,at2);var walls=false;
+    let base=qF(PN_B,at2);let d0=qF(PN_D,at2);var off=qF(PN_R,at2);var walls=false;
     for(var f=0u;f<6u;f++){
-     let kind=nKind(m,f);let link=pool[PN_L+f*PLANE2+at2];
-     if(kind==N_NATIVE){off+=pF(PN_K+f*PLANE2,at2)*pF(PN_X,link);}
+     let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
+     if(kind==N_NATIVE){off+=qF(PN_K+f*PLANE2,at2)*qF(PN_X,link);}
      else if(kind==N_SEAM){
       let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let w=nStride((axis+2u)%3u);let plane=select(P_X,P_X1,pBand==1u);
       for(var j=0u;j<16u;j++){let at=link+(j&3u)*u+(j>>2u)*w;if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){off+=pF(P_C+g*PLANE,at)*pF(plane,at);}}
@@ -1446,14 +1446,14 @@ override pBand:u32=0u;
       var d=d0;var o=off;
       for(var f=0u;f<6u;f++){
        if(nKind(m,f)!=N_WALL){continue;}
-       let w=pF(PN_K+f*PLANE2,at2);let g=bitcast<f32>(pool[PN_L+f*PLANE2+at2]);
+       let w=qF(PN_K+f*PLANE2,at2);let g=bitcast<f32>(poolB[PN_L+f*PLANE2+at2]);
        if(v+g>=-base){d-=w;o+=w*g;}else{o-=w*base;}
       }
       if(d>0.0){v=o/d;}
      }
     }
     if((m&N_CLOSED)!=0u){v=max(v,-base);}
-    pSet(PN_X,at2,v);
+    qSet(PN_X,at2,v);
    }
   }
   workgroupBarrier();
