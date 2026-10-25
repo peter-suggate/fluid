@@ -104,12 +104,17 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   "centred" reads its open cells as centred on it, which at a wall or floor
  *   sets the plane a cell too high (a floor film under half a cell deep adds
  *   nothing); "walls" fills from the wall there, with the same mass.
+ * - crowdedCells: a deep cell (its centre a cell or more under the surface)
+ *   holding more samples than particleCellCap. "retire" retires the excess,
+ *   and the liquid they carry with them; "merge" folds the excess into the
+ *   kept samples as mass (to 8 a sample), conserving mass and momentum, and
+ *   a merged sample splits again where it reaches a shallow or under-filled cell.
  * - nativeSmoothing: "coarse" corrects the band solve's native 4h rows by its
  *   level 2 alone, which sees the band as 4h aggregates; "composite" also
  *   relaxes them against the band's iterate each cycle, so a row coupled
  *   mostly through seams (a solid's pocket beside a throat) converges.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly solidContact:"liquid"|"surface";readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -144,4 +149,5 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  heatExpiry:values.heatExpiry==="anywhere"?"anywhere":"held",
  sampleBound:values.sampleBound==="centred"?"centred":"walls",
  nativeSmoothing:values.nativeSmoothing==="coarse"?"coarse":"composite",
+ crowdedCells:values.crowdedCells==="merge"?"merge":"retire",
 });

@@ -4,6 +4,8 @@ import { uniformNearSettled } from "../lib/methods/uniform/uniform-near-settled"
 import { narrowBandFlipValues, uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-band-flip";
 import { UNIFORM_PRESSURE_ARENA_SCHEDULE } from "../lib/methods/uniform/uniform-pressure-arena";
+import { narrowBandParticleWGSL } from "../lib/methods/uniform/uniform-narrow-band-apic.wgsl";
+import { particleSlabWGSL } from "../lib/methods/uniform/uniform-particle-slab.wgsl";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, narrowBandSurfaceWGSL } from "../lib/methods/uniform/uniform-narrow-band-surface.wgsl";
 
 test("seedScoring and outerSeeding default to scoring every surface tile and reseeding uncovered layers", () => {
@@ -52,4 +54,22 @@ test("nativeSmoothing defaults to composite, relaxing the native rows with the b
   assert.equal(narrowBandFlipValues({}).nativeSmoothing, "composite");
   const param = uniformNarrowBandMethod.params.find(p => p.key === "nativeSmoothing");
   assert.ok(param && param.kind === "select" && param.update === "solver");
+});
+
+test("crowdedCells defaults to retiring the excess, and its merge carries mass in the age word's low bits", () => {
+  assert.equal(uniformNearSettled({}).crowdedCells, "retire");
+  assert.equal(uniformNearSettled({ crowdedCells: "bogus" }).crowdedCells, "retire");
+  assert.equal(uniformNearSettled({ crowdedCells: "merge" }).crowdedCells, "merge");
+  assert.equal(narrowBandFlipValues({}).crowdedCells, "retire");
+  const param = uniformNarrowBandMethod.params.find(p => p.key === "crowdedCells");
+  assert.ok(param && param.kind === "select" && param.update === "solver");
+  const retire = narrowBandParticleWGSL(false);
+  assert.ok(retire.includes("fn nbParticleMass(p:Particle)->f32{return 1.0;}"));
+  assert.ok(retire.includes("&0x7fffffffu") && !retire.includes("0x7ffffff8u"), "retire keeps every age bit");
+  const merge = narrowBandParticleWGSL(false, true);
+  assert.ok(merge.includes("(bitcast<u32>(p.before.w)&7u)+1u"), "a FLIP sample's mass is its low three bits plus one");
+  assert.ok(merge.includes("&0x7ffffff8u"), "ages leave the mass bits");
+  const seed = /const NB_SEED_FIRST:u32=(0x[0-9a-f]+)u;/.exec(particleSlabWGSL(1024, 4096));
+  assert.ok(seed);
+  assert.equal(Number(seed[1]) & 7, 0, "a seed's sentinel age holds mass 1");
 });

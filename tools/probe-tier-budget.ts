@@ -9,7 +9,9 @@
  * node --import tsx tools/probe-tier-budget.ts NAME --classify [--scene=..] [--cell=..] [--pool=<blocks>] [--steps=.. then runs]
  * node --import tsx tools/probe-tier-budget.ts NAME --print-scene [--reservoir=1,2,4] [--cell=..]  (no GPU)
  *
- * --cell rebuilds the scene through its own buildAt at that h. --pool sets
+ * --region=rest|cold|warm|splash|hot runs a region-tier scene
+ * (tools/region-tier-scenes.ts, 128 x 32, balanced, as the paired benchmark)
+ * in place of --scene. --cell rebuilds the scene through its own buildAt at that h. --pool sets
  * fluid.pagePool.blocks. --reservoir=k (reservoir-seep only) lengthens the
  * left reservoir k times, keeping the head, the wall and the throat: every
  * feature right of the reservoir's left wall moves right by (k-1)*wallLow
@@ -49,6 +51,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execSync } from "node:child_process";
 import { resolveMethodValues } from "../lib/core/method-contract";
+import { createRegionTierScene, REGION_TIER_SCENES, type RegionTierScene } from "./region-tier-scenes";
 import type { SceneDescription } from "../lib/core/model";
 import { sceneDocument, sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
@@ -64,7 +67,7 @@ import { uniformDetailBindLayout, uniformDetailField, uniformDetailGroup, unifor
 import { UNIFORM_WINDOW_HEADER } from "../lib/methods/uniform/uniform-window-address";
 import { UNIFORM_MOMENTUM_TRACE_CAPPED_WORD } from "../lib/methods/uniform/uniform-mixed-momentum";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../lib/methods/uniform/uniform-surface-transport.wgsl";
-import { NARROW_BAND_RETIRE_WORD, narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-band-flip";
+import { NARROW_BAND_RETIRE_WORD, NARROW_BAND_RETIRE_WORDS, narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-band-flip";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "../lib/methods/uniform/uniform-mixed-topology.wgsl";
 import type { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed-ownership";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
@@ -80,7 +83,7 @@ if (options.includes("--retire")) narrowBandRetireCounting.on = true;
 const retireSplit = options.find(a => a.startsWith("--retireSplit="));
 if (retireSplit) { narrowBandRetireCounting.on = true; narrowBandRetireCounting.splitX = Number(retireSplit.slice(14)); }
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes|retireSplit)=.+|--classify|--print-scene|--heatState|--census|--retire)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|region|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes|retireSplit)=.+|--classify|--print-scene|--heatState|--census|--retire)$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
 /** Momentum traces cut at the segment bound (momentumTrace "substep"), summed over the run. */
@@ -103,10 +106,12 @@ const out = option("out") ?? "artifacts/tier-budget";
 const classify = options.includes("--classify");
 mkdirSync(out, { recursive: true });
 
-const definition = getSceneDefinition(sceneId);
+const region = option("region") as RegionTierScene | undefined;
+assert.ok(region === undefined || REGION_TIER_SCENES.includes(region), `--region=${REGION_TIER_SCENES.join("|")}`);
+const definition = getSceneDefinition(region ? "reservoir-seep" : sceneId);
 assert.equal(definition.methodProfile?.methodId, method.id, `${sceneId} is not an NB-FLIP scene`);
-const quality = definition.methodProfile!.quality;
-const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile!.overrides, ...sets });
+const quality = region ? "balanced" : definition.methodProfile!.quality;
+const values = resolveMethodValues(method, quality, region ? { ...method.appDefaults, timeStep: "scene", ...sets } : { ...method.appDefaults, ...definition.methodProfile!.overrides, ...sets });
 
 /** The dividing wall: the first interior fill patch spanning the box's full
  * height and depth (the finished document's vessel walls lie outside the box). */
@@ -198,6 +203,7 @@ function reshapeThroat(scene: SceneDescription, mouthShape: string, side: number
 }
 
 function buildScene(k: number, pool?: number, dryLiquid = false): SceneDescription {
+  if (region) { const scene = createRegionTierScene(region); if (pool !== undefined) scene.fluid.pagePool = { ...scene.fluid.pagePool, blocks: pool }; return scene; }
   const base = cell === undefined ? sceneDocument(definition) : sceneDocumentAtLattice(definition, { cellSize_m: cell, detailCellSize_m: cell }).scene;
   const scene = reshapeThroat(shiftWall(lengthenReservoir(structuredClone(base), k, dryLiquid), dryLiquid ? 0 : wallShift), mouths, throatCells);
   if (pool !== undefined) scene.fluid.pagePool = { ...scene.fluid.pagePool, blocks: pool };
@@ -814,15 +820,18 @@ var<workgroup> sums:array<atomic<u32>,16>;
     };
   })() : undefined;
   // --retire: the move's cumulative retirements by reason, and of those a
-  // sample less than a cell inside the advected level set.
+  // sample less than a cell inside the advected level set; then the merge's
+  // counts (crowdedCells "merge": merged, refused at full mass, splits, and
+  // the mass past 1 of retired merged samples).
   const retired = narrowBandRetireCounting.on ? (() => {
     const flip = (frame as unknown as { narrowBandFlip: { state: GPUBuffer } }).narrowBandFlip;
-    const buffer = device.createBuffer({ label: "Tier budget retirements", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const buffer = device.createBuffer({ label: "Tier budget retirements", size: 4 * NARROW_BAND_RETIRE_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     return async () => {
-      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(flip.state, 4 * NARROW_BAND_RETIRE_WORD, buffer, 0, 32); device.queue.submit([encoder.finish()]);
+      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(flip.state, 4 * NARROW_BAND_RETIRE_WORD, buffer, 0, 4 * NARROW_BAND_RETIRE_WORDS); device.queue.submit([encoder.finish()]);
       await buffer.mapAsync(GPUMapMode.READ); const u = new Uint32Array(buffer.getMappedRange().slice(0)); buffer.unmap();
-      if (narrowBandRetireCounting.splitX >= 0) return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], splitCrowded: u[5], splitRetired: u[6], splitSeeded: u[7] };
-      return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], sparseShallow: u[5], blockedShallow: u[6], heatShallow: u[7] };
+      const merge = { merged: u[8], overCap: u[9], splits: u[10], mergedMassRetired: u[11] };
+      if (narrowBandRetireCounting.splitX >= 0) return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], splitCrowded: u[5], splitRetired: u[6], splitSeeded: u[7], ...merge };
+      return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], sparseShallow: u[5], blockedShallow: u[6], heatShallow: u[7], ...merge };
     };
   })() : undefined;
   const authoredFloor_m = Math.min(...(scene.fluid.initialLiquidVolumes ?? []).map(v => "min_m" in v ? (v as { min_m: { y: number } }).min_m.y : 0));
