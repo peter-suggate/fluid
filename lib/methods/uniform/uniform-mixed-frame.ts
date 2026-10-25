@@ -510,7 +510,7 @@ export class UniformMixedFrame {
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
    // A budget's banks still hold the extension's paired companion at every reservation (bindStage).
-   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,this.fineCeiling)},this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound);
+   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,this.fineCeiling)},this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound,this.nearSettled.crowdedCells);
   this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -576,7 +576,7 @@ export class UniformMixedFrame {
   this.freeze=capacity.coldRegions==="fine"?undefined:new UniformColdFreeze(device,o,this.heat);
   this.narrowBandFlip.attachFreeze(this.freeze);
   this.heat.attach({dynamics:this.dynamics.record,updateErrors:this.plan.updateErrors,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,sourceParams:f.sourceParams,
-   particleHeat:{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.activityHeatWord},coldFreeze:this.freeze,holdRises:capacity.coldFrameSkip!=="off",tiering:this.nearSettled.regionTiering,surfaceWarm:this.nearSettled.coldSurface==="warm"});
+   particleHeat:{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.activityHeatWord},coldFreeze:this.freeze,holdRises:capacity.coldFrameSkip!=="off",tiering:this.nearSettled.regionTiering,surfaceWarm:this.nearSettled.coldSurface!=="budget",surfaceStill:this.nearSettled.coldSurface==="still"});
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
   // Its tiers follow the region heat (UniformMixedMomentumTiers).
@@ -1016,7 +1016,7 @@ export class UniformMixedFrame {
    // the swept-body region mask (UniformMixedSolid.bodyRegions) here.
    const solidBuild=!!this.solid?.recordStale;this.solid?.encodeCoarse(encoder,this.ownership.presentation);if(solidBuild)this.tileContext.encodeBuild(encoder);
    // Where this frame's non-pressure work goes: after the swept-body mask, before every stage that reads the tiers.
-   this.heat.encode(encoder,dt,p.density,this.words.band[8]!);
+   this.heat.encode(encoder,dt,p.density,this.words.band[8]!,gravity);
    // The freeze follows the final tiers: a relayout head's after its promotions (encodeRelayoutHead).
    if(!relayout)this.freeze?.encodeHead(encoder,dt,gravity,this.frozenQuiet);
    // A host layout: a live solid edit, or the cells bodies entered, lands on
