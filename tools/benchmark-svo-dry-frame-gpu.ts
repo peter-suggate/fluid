@@ -27,6 +27,9 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  *      labels; each is replayed alone with GPU timestamps and reported in JSON.
  *      _PRIMARY_RESOLUTIONS=1724x946,3448x1892,1724x946 compares viewport sizes
  *      on the same published scene, logging isolated cull/draw times and counts.
+ *      _NATIVE_LOD_SWEEP=0.25,0.5,1,2 compares native projected-error budgets
+ *      in ABBA order at full resolution, with draw census and image comparisons
+ *      for overview/orbit/close cameras. The first budget must be the shipped .25.
  *      _PRIMARY_INDEX_CAPTURE=<directory> saves native asset index buffers.
  *      _PRIMARY_INDEX_REFERENCE=<directory> interleaves those buffers with the
  *      current ordering; use only with identical vertices and LOD ranges.
@@ -124,6 +127,7 @@ import type { RenderFrameSeam } from "../lib/core/render-frame-stages";
 import "../lib/methods";
 import assert from "node:assert/strict";
 import { benchmarkSvoPrimaryPass } from "./benchmark-svo-primary-pass";
+import { nativeLodStudy, benchmarkNativeLod } from "./benchmark-native-lod";
 import { primaryDrawAblation } from "./primary-draw-ablation";
 import { computeShaderReference } from "./compute-shader-reference";
 import { capturePrimaryComputeInputs } from "./probe-svo-primary-compute";
@@ -1109,7 +1113,9 @@ const primaryAblation = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION === "1"
 const lightingReferencePath = process.env.FLUID_SVO_DRY_FRAME_LIGHTING_REFERENCE;
 const lightingReference = lightingReferencePath ? computeShaderReference(primaryAblation?.device ?? device,
   JSON.parse(readFileSync(lightingReferencePath, "utf8"))) : undefined;
-const renderer = new SparseVoxelDrySceneRenderer(lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
+const nativeLodBudgets = process.env.FLUID_SVO_DRY_FRAME_NATIVE_LOD_SWEEP;
+const nativeLod = nativeLodBudgets ? nativeLodStudy(lightingReference?.device ?? primaryAblation?.device ?? device, nativeLodBudgets.split(",").map(Number)) : undefined;
+const renderer = new SparseVoxelDrySceneRenderer(nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
@@ -1274,6 +1280,18 @@ if (profileGate) {
 }
 
 const primaryPassTimings = [];
+if (nativeLod) {
+  await benchmarkNativeLod({device,study:nativeLod,encode:encodeFrame,
+    capture:()=>captureTextureBytes(target,8,"Native LOD quality capture"),width,height,cycles,
+    outPath:`${outPath}.native-lod.json`,grade:resolveDisplayGrade(svoSceneLighting(scene).grade),
+    views:[
+      {name:"overview",camera},
+      {name:"orbit",camera:{...camera,azimuth_rad:camera.azimuth_rad+1.1}},
+      {name:"close",camera:{...camera,distance_m:camera.distance_m*.25,elevation_rad:.25}},
+    ].map(view=>({name:view.name,set(){activeCamera=view.camera;device.queue.writeBuffer(uniformBuffer,0,packViewUniforms(scene,activeCamera,environmentId,solver.info,bodies.count));}})),
+  });
+  assert.deepEqual(validationErrors,[],"GPU validation during native LOD study");
+}
 if (primaryAblation && primaryPaired) {
   let frame = 0;
   const paired = await benchmarkSvoPrimaryPass(device, encoder => {

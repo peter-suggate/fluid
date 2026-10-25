@@ -20,8 +20,10 @@ Resolution changes both fragment work and geometry admission:
 - Sample-coverage culling retains more small voxel triangles at the larger size.
 - Native asset LOD selection uses projected error in pixels, so increasing
   resolution can select finer index streams.
-- The four primary colour attachments and depth occupy 60 bytes per pixel:
-  approximately 391 MB at the Retina size. This is attachment storage, not a
+- The four primary colour attachments and depth occupy 52 bytes per pixel:
+  approximately 339 MB at the Retina size. The separate HDR output adds another
+  8 bytes per pixel, bringing these textures together to about 391 MB.
+  This is attachment storage, not a
   measurement of physical memory traffic; tile storage and compression matter.
 
 The final resolution sweep reuses one scene, alternates the sizes twice, and
@@ -83,6 +85,81 @@ passes. `npm run test:unit` passes with 1,201 passing, 127 skipped and no failur
 Sampler-loop unrolling and duplicate material-vote rejection did not improve
 the paired median. Reusing adjacent decoded normals regressed 4.653 → 4.784 ms.
 Those experiments were removed.
+
+## Adaptive geometry investigation
+
+The native selector already adapts per instance: it chooses the coarsest stored
+index stream whose estimated world-space simplification error projects to at
+most **0.25 physical pixels**. It projects using the nearest depth of the asset's
+bounding sphere, which is conservative for elongated assets or a camera close to
+a large asset. The sphere is also used for frustum culling. This is independent
+of the normal/material field sampler; coarser geometry still evaluates the
+original source field at each surviving full-resolution fragment.
+
+The voxel mesh has a different policy. `dryMeshLodPixels` scales its reference
+pixel threshold with viewport height, but returns zero for dual contouring and
+dual marching cubes. In these smooth modes, the existing “Filtered detail”
+control cannot lower geometry resolution. Sample-coverage culling only removes
+triangles that cannot cover a raster sample; it is not a perceptual LOD.
+
+The first experiment is therefore a native LOD error sweep, keeping the viewport,
+materials, source meshes, shadows and voxel geometry fixed. The benchmark-only
+`FLUID_SVO_DRY_FRAME_NATIVE_LOD_SWEEP=0.25,0.5,1,2` compiles selector variants and
+alternates each candidate with the shipped quarter-pixel selector in ABBA order.
+It records native triangle/instance counts, isolated primary GPU time and
+display/depth/coverage differences in overview, orbit and close-up views. PNGs
+and a `.native-lod.json` report are written alongside the requested output.
+The sweep does not change the production selector.
+
+### Full-resolution native LOD sweep (2026-10-25)
+
+The pool sweep used 3448×1892, minimum AO 0, the preset overview, an azimuth
+offset of 1.1 radians, and a close camera at one quarter of the preset distance.
+Each comparison used eight warmups and 64 ABBA samples (32 per arm). The scene
+is static and dry, with no simulated water. These timings isolate the primary
+raster pass and exclude culling, lighting and presentation.
+
+| Camera | Error allowance | Native triangles, reference → candidate | Raster ms, reference → candidate | Display RMSE / 255 | Surface pixels differing >8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Overview | 0.5 px | 8,712,025 → 6,921,427 | 5.898 → 4.981 | 10.68 | 5.73% |
+| Overview | 1 px | 8,712,025 → 6,564,109 | 4.850 → 4.063 | 11.99 | 7.35% |
+| Orbit | 0.5 px | 8,812,259 → 6,943,205 | 4.850 → 4.522 | 11.15 | 6.30% |
+| Orbit | 1 px | 8,812,259 → 6,564,109 | 4.784 → 4.063 | 13.12 | 8.15% |
+| Close | 0.5 px | 8,944,639 → 5,306,922 | 4.260 → 4.194 | 5.20 | 1.72% |
+| Close | 1 px | 8,944,639 → 4,569,572 | 4.260 → 3.932 | 7.04 | 2.68% |
+
+Two pixels selected the same native index streams as one pixel in the overview
+and orbit views. Close-up it selected 4,314,838 triangles, measured 3.998 ms and
+increased RMSE to 8.91. Absolute clocks drifted in the first overview comparison;
+ABBA samples are retained in the report, and the rows are independent paired
+comparisons rather than a shared fixed baseline. Visible instance counts are
+unchanged in every comparison. GPU validation reported no errors.
+
+This is evidence of both geometry and pixel costs: cutting close-up native
+triangles by 41% at 0.5 px barely changed raster time, while the overview gained
+more. **No looser native error limit is shipped.** The half-pixel result already
+shows objectionable speckling on the umbrella. Estimated geometric error does
+not bound shading error when simplified geometry samples the original normal
+and categorical-material fields. A future LOD policy needs an appearance-error
+constraint as well as a silhouette/position constraint. These image errors are
+substantially larger than the accepted adaptive AO changes.
+
+Local evidence: `artifacts/primary-adaptive/pool.log`,
+`pool.json.native-lod.json` and its overview/orbit/close PNGs. Type checking and
+the unit suite passed (1,221 passed, 131 skipped).
+
+Unlike the AO minimum, geometry error should not be normalized so that some
+object must always select the coarsest mesh: that could remove a silhouette
+even when every visible object needs detail. A screen-space error allowance,
+with tighter treatment for thin features and stable transitions as the camera
+moves, is the appropriate quality constraint. Smooth voxel geometry would need
+compatible simplified meshes and seam handling before it can use that policy.
+
+A larger alternative is to separate full-resolution visibility (depth and
+surface identity) from material/normal evaluation, then share those evaluations
+inside smooth regions with exact fallbacks at boundaries. That targets fragment
+work and attachment traffic rather than triangle count, but requires a new
+representation and reconstruction pass; its net benefit has not been measured.
 
 ## Reproduction
 
