@@ -152,5 +152,5 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  heatExpiry:values.heatExpiry==="anywhere"?"anywhere":"held",
  sampleBound:values.sampleBound==="centred"?"centred":"walls",
  nativeSmoothing:values.nativeSmoothing==="coarse"?"coarse":"composite",
- crowdedCells:values.crowdedCells==="merge"?"merge":"retire",
+ crowdedCells:values.crowdedCells==="retire"?"retire":"merge",
 });

@@ -69,11 +69,11 @@ test("coldSurface still holds a surface COLD only within round-off, and keeps wa
   assert.equal(UNIFORM_REGION_HEAT_STATE_WORDS, 19);
 });
 
-test("crowdedCells defaults to retiring the excess, and its merge carries mass in the age word's low bits", () => {
-  assert.equal(uniformNearSettled({}).crowdedCells, "retire");
-  assert.equal(uniformNearSettled({ crowdedCells: "bogus" }).crowdedCells, "retire");
-  assert.equal(uniformNearSettled({ crowdedCells: "merge" }).crowdedCells, "merge");
-  assert.equal(narrowBandFlipValues({}).crowdedCells, "retire");
+test("crowdedCells defaults to merging the excess, and the merge carries mass in the age word's low bits", () => {
+  assert.equal(uniformNearSettled({}).crowdedCells, "merge");
+  assert.equal(uniformNearSettled({ crowdedCells: "bogus" }).crowdedCells, "merge");
+  assert.equal(uniformNearSettled({ crowdedCells: "retire" }).crowdedCells, "retire");
+  assert.equal(narrowBandFlipValues({}).crowdedCells, "merge");
   const param = uniformNarrowBandMethod.params.find(p => p.key === "crowdedCells");
   assert.ok(param && param.kind === "select" && param.update === "solver");
   const retire = narrowBandParticleWGSL(false);
