@@ -114,8 +114,13 @@ export class UniformMixedSurface {
    * joins the deferred list. */
   private readonly traceEntries:number;
   private readonly traceGrid:number;
-  /** Workgroups of the deferred advect launches: the list's bound (one word
-   * per lattice vertex), capped where the GPU is saturated. */
+  /** The deferred list's words: each canonical vertex is listed at most
+   * once, and a listed vertex is a 4-aligned one (a block's 9³: every 4h
+   * corner) or one of an h tile's 5³ closure (advectFine, the h walls), so
+   * 729 a block and 125 an h tile bound it, under one a lattice vertex. */
+  private readonly deferredEntries:number;
+  /** Workgroups of the deferred advect launches: the list's bound, capped
+   * where the GPU is saturated. */
   private readonly deferredGrid:number;
   /** Launch widths the pool fixes: wallReach (a workgroup a wall face) and
    * advectWalls (a lane a wall-face vertex), each striding the wall-face list. */
@@ -148,7 +153,10 @@ export class UniformMixedSurface {
     private readonly oneStepTrace=false,
     /** A COLD freeze holds deep-COLD regions: advect enumerates the active
      * regions' regular 4h owners only (umActiveCoarse). */
-    private readonly activeCoarse=false) {
+    private readonly activeCoarse=false,
+    /** The h tiles the frame ever holds (UniformMixedFrame.fineCeiling): the
+     * deferred list's bound (deferredEntries); absent, the pool's tiles. */
+    fineCeiling?:number) {
     if(velocitySampler==="texture32"&&!device.features.has("float32-filterable"))throw new Error("Mixed surface texture32 velocity sampling requires float32-filterable");
     this.resources = uniformDetailBindLayout(device,{entries:[
       ...[0,2,3,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
@@ -184,7 +192,10 @@ export class UniformMixedSurface {
     const claimsLimit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
     if(this.allocatedBytes>claimsLimit)throw new Error(`Uniform mixed surface claims and 16h support tables require ${this.allocatedBytes} bytes, exceeding the device buffer limit ${claimsLimit}; reduce scene capacity or resolution`);
     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-    this.deferredGrid=Math.min(1024,Math.ceil(address.vertexKeys/64));
+    const ceiling=fineCeiling??address.poolTiles;
+    if(!(Number.isInteger(ceiling)&&ceiling>=0&&ceiling<=address.poolTiles))throw new Error(`Mixed surface h ceiling ${ceiling} is outside 0..${address.poolTiles}`);
+    this.deferredEntries=Math.min(address.vertexKeys,729*address.blocks+125*ceiling);
+    this.deferredGrid=Math.min(1024,Math.ceil(this.deferredEntries/64));
     const staging=uniformMixedSurfaceCapacity(ownership.capacity.fineTiles);
     this.cubicEntries=staging.cubicEntries;
     this.cubicGrid=Math.max(1,Math.min(1024,Math.ceil(this.cubicEntries/64)));
@@ -200,10 +211,10 @@ export class UniformMixedSurface {
     const c=this.ownership.capacity;
     return Math.ceil((this.solid?8*c.tiles:0)/256)*256+this.deferredBytes;
   }
-  /** The deferred binding: count words, a word per lattice vertex (the
-   * deferred list), five words per cubic entry (advectCubic), eight per
-   * trace entry (advectTrace). */
-  private get deferredBytes():number{return 32+4*this.address.vertexKeys+20*this.cubicEntries+32*this.traceEntries;}
+  /** The deferred binding: count words, deferredEntries words (the deferred
+   * list), five words per cubic entry (advectCubic), eight per trace entry
+   * (advectTrace). */
+  private get deferredBytes():number{return 32+4*this.deferredEntries+20*this.cubicEntries+32*this.traceEntries;}
   bind(f: UniformMixedSurfaceFields): UniformDetailGroup {
     const a=this.address;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity].entries()){
@@ -1394,8 +1405,9 @@ fn umKeptAir(vertex:vec3u,width:u32,deep:bool)->f32{
  return umAirSource(vertex,value);
 }
 override umDeferTraced:bool=false;
-// The cubic list's first word in deferred.data: past a word per lattice vertex.
-const UM_CUBIC_BASE=${this.address.vertexKeys}u;
+// The cubic list's first word in deferred.data: past the deferred list's
+// words (deferredEntries), which both its ends together never pass.
+const UM_CUBIC_BASE=${this.deferredEntries}u;
 // A vertex two widths from the surface (umVertexFoot's own test: no foot,
 // smoothing or cubic) is listed from the list's end (header[5]), every
 // other from its start (header[0]): a SIMD group of advectDeferred then
@@ -1423,7 +1435,7 @@ fn umQueueVertex(vertex:vec3u,width:u32){
 // end once traced), the shift and the smoothing.
 override umSplitTrace:bool=false;
 const UM_TRACE_ENTRIES=${this.traceEntries}u;
-const UM_TRACE_BASE=${this.address.vertexKeys+5*this.cubicEntries}u;
+const UM_TRACE_BASE=${this.deferredEntries+5*this.cubicEntries}u;
 fn umListTrace(vertex:vec3u,width:u32){
  let p=vec3f(vertex);
  ${this.solid?"if(!umSolidClear(vec3i(p))&&umBuried(p)){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLoadVertex(vertex));return;}":""}
