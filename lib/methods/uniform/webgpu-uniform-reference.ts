@@ -1855,7 +1855,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedImportanceFor(detail:UniformDetailSettings,tiles:number){
     const budget={percent:this.narrowBandAdaptiveBudgetPercent};
     // Bootstrap inflows that 4h cannot sample; resolved streams use the surface criteria.
-    const importance={...uniformDetailImportance(detail,tiles),surfaceAuthority:true,sources:detail.policy==="dynamic"?"unresolved" as const:false,
+    const importance={...uniformDetailImportance(detail,tiles),surfaceAuthority:true,scoreShaped:this.narrowBandNearSettled.seedScoring==="every",sources:detail.policy==="dynamic"?"unresolved" as const:false,
       ...(detail.policy==="dynamic"?{budgetTiles:undefined,activityBudget:budget}:{})};
     return {detail,tiles,importance,budget,criteria:Object.values(importance.criteria).some(Boolean)};
   }

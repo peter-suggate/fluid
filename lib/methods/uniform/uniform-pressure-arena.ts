@@ -71,8 +71,15 @@ export interface UniformPressureArenaSchedule {
   * (a CPU twin diverges on ragged pools); 0.75 contracts on every pool the
   * twin tries (tests/pressure-tail.test.ts). */
  superScale:number;
+ /** NB-FLIP nativeSmoothing: red-black sweeps of the native rows against
+  * the band's iterate after each cycle's pre-smoothing (0: level 2's
+  * correction alone). Level 2 sees the band as its 4h aggregates, so a
+  * native row coupled mostly through seams (a solid's pocket beside a
+  * throat) keeps the residual of the band's real profile, and the band's
+  * own sweeps answer it: a period-2 exchange no cycle count removes. */
+ nativeSweeps:number;
 }
-export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,surfaceImpulse:"energy",tail:"auto",superScale:0.75};
+export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,surfaceImpulse:"energy",tail:"auto",superScale:0.75,nativeSweeps:0};
 /** bandExit "returns": the band's residual target (1/s, h-equivalent). The
  * band stops at it or at the cycle cap; the strict exit keeps the frame's
  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
@@ -241,6 +248,7 @@ export class UniformPressureArena {
   this.superTail=schedule.tail==="superblocks"||(schedule.tail==="auto"&&blocks>TAIL_ROWS);
   if(!this.superTail&&blocks>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages, over the page tail's ${TAIL_ROWS}; use the super-block tail`);
   if(!(schedule.superScale>0))throw new Error("Pressure arena: the super-block tail's scale must be positive");
+  if(!Number.isInteger(schedule.nativeSweeps)||schedule.nativeSweeps<0)throw new Error(`Pressure arena: ${schedule.nativeSweeps} native sweeps`);
   if(schedule.tailCycles%2!==1)throw new Error(`Pressure arena: ${schedule.tailCycles} 8h cycles; level 2's up leg reads the odd cycles' channel`);
   if(pressure.capacity.address.blocks!==blocks)throw new Error("Pressure arena: the root's blocks are the simulation's");
   const rootWords=(view:GPUBufferBinding)=>(view.size??view.buffer.size-(view.offset??0))/4;
@@ -879,12 +887,13 @@ fn bForcedField(p:vec3i,axis:u32,sign:i32)->f32{
  return umColdForced(a,axis,1u,raw,wet);
 }
 override bLocalSolidWork:bool=true;
-${S?/* wgsl */`fn bHeadCapacity(p:vec3i)->f32{
+${S?/* wgsl */`// open: umCellOpen(p), evaluated at the row's one site.
+fn bHeadCapacity(p:vec3i,open:f32)->f32{
  if(bLocalSolidWork&&umSolidEnabled()){
   let tile=umTileKey(p>>vec3u(2u));
   if(umKeyStored(tile)){let open=umSolidRecordedOpen(tile,p);if(open>=0.0){return open;}}
  }
- return umCellOpen(p);
+ return open;
 }`:""}
 ${zero}
 // UniformPressureBand's row assembly, a workgroup a band tile: the kinds,
@@ -931,10 +940,12 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
   let p=vec3i(ubaOrigin(id)+lb);
   let own=bPhiH(p);let liquid=bWet(own,1.0);${S?`
   let solidClear=bLocalSolidWork&&umSolidRegionClearAtBuild(p);
-  var shut=false;var inside=false;if(!solidClear){shut=!umCellIsOpen(p);inside=umCellInsideSolid(p);}`:""}
+  var shut=false;var inside=false;if(!solidClear){shut=!umCellIsOpen(p);inside=umCellInsideSolid(p);}
+  // One umCellOpen site for p and one umCellIsOpen site for q (Metal inlines each).
+  let open=umCellOpen(p);`:""}
   var kinds=select(0u,0x80000000u,liquid)${S?"|select(0u,0x40000000u,inside)|select(0u,0x20000000u,shut)":""};var diagonal=0.0;var divergence=0.0;
   ${S?`let bodies=liquid&&!solidClear&&umBodyCount()>0u&&umBodyPoseNearTile(umTileKey(p>>vec3u(2u)),${UNIFORM_BODY_FLUX_REACH}u);var capacity=0.0;
-  if(bodies||!bLocalSolidWork){capacity=bHeadCapacity(p);}`:""}
+  if(bodies||!bLocalSolidWork){capacity=bHeadCapacity(p,open);}`:""}
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];var q=p;q[axis]+=sign;
    let forced=bForcedField(p,axis,sign);var kind=K_GHOST;var coefficient=0.0;var fraction=1.0;
@@ -950,10 +961,12 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
    // in pNative, disconnecting its gravity RHS from the live surface.
    else{
     let n=bNeighbour(q);
-    var theta=1.0;
+    var theta=1.0;${S?`
+    // q's closure, where a row reads it: a face between liquid and air.
+    var acrossShut=false;if(!solidClear&&liquid!=n.wet){acrossShut=!umCellIsOpen(q);}`:""}
     if(liquid!=n.wet){
-     if(${S?"!solidClear&&(shut||!umCellIsOpen(q))":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
-     ${S?"else if(inside&&umCellInsideSolid(q)&&umCellOpen(p)<0.1&&umCellOpen(q)<0.1){theta=1.0;}":""}
+     if(${S?"!solidClear&&(shut||acrossShut)":"false"}){theta=bPairTheta(own,liquid,n.phi,n.wet);}
+     ${S?"else if(inside&&umCellInsideSolid(q)&&open<0.1&&umCellOpen(q)<0.1){theta=1.0;}":""}
      else{theta=bFaceTheta(bFacePhi(p,axis,sign),own,liquid,n.phi,n.wet);}
     }
     if(pBandCell(q)){kind=K_BAND;coefficient=1.0/(h*h*theta);}
@@ -962,7 +975,7 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
     else if(bNative(q)){kind=K_SEAM;coefficient=1.0/(2.5*h*h*select(theta,1.0,liquid));}
     else if(n.neumann){kind=K_NEUMANN;}
     else{coefficient=1.0/(h*h*theta);}
-    ${S?"if(!solidClear&&kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&!umCellIsOpen(q));}":""}
+    ${S?"if(!solidClear&&kind!=K_NEUMANN){sealed=(liquid&&shut&&!n.wet)||(!liquid&&n.wet&&acrossShut);}":""}
    }
    ${S?`if(volume<=1e-6||sealed){kind=K_CLOSED;coefficient=0.0;fraction=0.0;}
    else if(kind==K_NEUMANN){fraction=volume;}
@@ -972,7 +985,7 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
    ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN&&(!bLocalSolidWork||capacity!=fraction)){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
   }
-  let control=authority.z*${S?"select(1.0,umCellOpen(p),umSolidEnabled())":"1.0"};
+  let control=authority.z*${S?"select(1.0,open,umSolidEnabled())":"1.0"};
   kinds|=select(0u,P_ACTIVE,liquid&&diagonal>0.0)|select(0u,P_WARM,warm);
   pSet(P_RHS,at,select(0.0,-params.policy.x*(divergence-control)/params.hDt.w,liquid));pool[P_KINDS+at]=kinds;pSet(P_X,at,own);
  }
@@ -1397,6 +1410,53 @@ ${B?"   if((workgroupUniformLoad(&rFlags)&4u)!=0u){r=nBulkMean(r,(m&N_BULK)!=0u,
   if(!pLast&&w>pIndex(NATIVE_HISTORY+pCycle)){atomicMax(&state[NATIVE_HISTORY+pCycle],w);}
   if(pLast&&w>pIndex(NATIVE_FINAL)){atomicMax(&state[NATIVE_FINAL],w);}
   if(group.x==0u){atomicOr(&state[VALID],1u<<pCycle);}
+ }
+}
+// A half sweep of the native rows (colour pColour of the 4h lattice) against
+// the band's iterate (plane pBand: X after a pre-smoothing, the prolonged
+// plane before a post-smoothing) and the other colour's rows: the
+// composite's fine smoothing of the rows that level 2 alone corrects
+// otherwise (schedule.nativeSweeps). Walls solve their clamps as the band's
+// rows do; a closed row stays at or above zero.
+override pColour:u32=0u;
+override pBand:u32=0u;
+@compute @workgroup_size(${WG}) fn pNativeRelax(${lanes}){
+ if(lane==0u){rN=select(ubaLevelCount(2u),0u,bConverged());}
+ let n=workgroupUniformLoad(&rN);
+ let l=vec3u(lane&7u,(lane>>3u)&7u,lane>>6u);
+ for(var e=group.x;e<n;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);
+  if(lane==0u){rFlags=nPage(block);}
+  if((workgroupUniformLoad(&rFlags)&2u)!=0u){
+   let at2=UBA_STRIDE*block+lane;let m=pool[PN_M+at2];
+   if((m&N_ACTIVE)!=0u&&((l.x+l.y+l.z)&1u)==pColour${B?"&&(m&N_BULK)==0u":""}){
+    let base=pF(PN_B,at2);let d0=pF(PN_D,at2);var off=pF(PN_R,at2);var walls=false;
+    for(var f=0u;f<6u;f++){
+     let kind=nKind(m,f);let link=pool[PN_L+f*PLANE2+at2];
+     if(kind==N_NATIVE){off+=pF(PN_K+f*PLANE2,at2)*pF(PN_X,link);}
+     else if(kind==N_SEAM){
+      let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let w=nStride((axis+2u)%3u);let plane=select(P_X,P_X1,pBand==1u);
+      for(var j=0u;j<16u;j++){let at=link+(j&3u)*u+(j>>2u)*w;if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){off+=pF(P_C+g*PLANE,at)*pF(plane,at);}}
+     }
+     else if(kind==N_WALL){walls=true;}
+    }
+    var v=off/d0;
+    if(walls){
+     for(var it=0u;it<4u;it++){
+      var d=d0;var o=off;
+      for(var f=0u;f<6u;f++){
+       if(nKind(m,f)!=N_WALL){continue;}
+       let w=pF(PN_K+f*PLANE2,at2);let g=bitcast<f32>(pool[PN_L+f*PLANE2+at2]);
+       if(v+g>=-base){d-=w;o+=w*g;}else{o-=w*base;}
+      }
+      if(d>0.0){v=o/d;}
+     }
+    }
+    if((m&N_CLOSED)!=0u){v=max(v,-base);}
+    pSet(PN_X,at2,v);
+   }
+  }
+  workgroupBarrier();
  }
 }`,
    // The band's final measure (when no cycle stopped), each band tile's mean
@@ -2463,13 +2523,13 @@ fn sProlong6(g:vec3i)->f32{
   else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
-  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2"],final:["pFinal"],clear2:["pClear2"],
+  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2","pNativeRelax"],final:["pFinal"],clear2:["pClear2"],
    rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
-   pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],
+   pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],pNativeRelax:[["0",{pColour:0}],["1",{pColour:1}],["0X1",{pColour:0,pBand:1}],["1X1",{pColour:1,pBand:1}]],
    pDownA:[["",{}],["@0",{pBake:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
    ...(W?{pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
   };
@@ -2615,6 +2675,7 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   for(let cycle=0;cycle<cycles;cycle++){
    const first=cycle===0;
    const settle=first&&!!this.solid?.present;sweeps(settle,(s.sweeps+(settle?1:0))&1);
+   for(let k=0;k<s.nativeSweeps;k++){this.dispatch(pass,"pNativeRelax0",pages);this.dispatch(pass,"pNativeRelax1",pages);}
    this.dispatch(pass,this.residuals[cycle]!,pages);this.dispatch(pass,this.restricts[cycle]!,this.tileGroups);
    this.dispatch(pass,first?"pDownA@0":"pDownA",g);this.dispatch(pass,first?"pDownB@0":"pDownB",pages);this.dispatch(pass,"pDown2",pages);
    // The super-block tail's rows, from this frame's 32h rows (baked by pDownB@0).
@@ -2629,7 +2690,10 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
     this.dispatch(pass,"pUp3"+y,pages);
    }
    this.dispatch(pass,"pUpB",pages);this.dispatch(pass,"pUpA",g);
-   const post=cycle===cycles-1?odd:0;this.dispatch(pass,"pProlong0"+post,this.tileGroups);sweeps(false,post);
+   const post=cycle===cycles-1?odd:0;this.dispatch(pass,"pProlong0"+post,this.tileGroups);
+   // The native rows against the prolonged band (plane post) before its post-smoothing.
+   for(let k=0;k<s.nativeSweeps;k++){const band=post?"X1":"";this.dispatch(pass,"pNativeRelax0"+band,pages);this.dispatch(pass,"pNativeRelax1"+band,pages);}
+   sweeps(false,post);
   }
   this.dispatch(pass,"pResidual2F",pages);this.dispatch(pass,"pFinal",this.tileGroups);this.dispatch(pass,"pWrite",pages);
   if(W)this.dispatch(pass,"sForget",groupsOf(W.capacity6,64));

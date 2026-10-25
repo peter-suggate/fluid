@@ -980,7 +980,7 @@ fn umVertexCellCapacity(cell:vec3i,t:u32)->bool{
  if(!umSolidValid(cell)){return false;}
  if(!umKeyStored(t)){return umTileOpenAt(cell>>vec3u(2u))>1e-5;}
  if(umTileWidth(t)==4u){return umTileOpen(t)>1e-5;}
- return umCellIsOpen(cell);
+ return umStoredCellIsOpen(cell,t);
 }
 fn umVertexBuried(p:vec3i)->bool{
  let base=p-vec3i(1);
@@ -1017,6 +1017,7 @@ fn umBoundarySampleAt(q:vec3f,c:vec3i,r:u32)->vec4f{return vec4f(0,0,0,1e6);}
 fn umBoundarySample(p:vec3f)->vec4f{return vec4f(0,0,0,1e6);}
 fn umCellOpen(p:vec3i)->f32{return select(0.0,1.0,umSolidValid(p));}
 fn umCellIsOpen(p:vec3i)->bool{return umSolidValid(p);}
+fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{return umSolidValid(p);}
 fn umCellInsideSolid(p:vec3i)->bool{return false;}
 fn umFaceOpen(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umPressureFaceV(id:vec3i,axis:u32)->f32{return 1.0;}
@@ -1252,7 +1253,26 @@ fn umTerrainBoxOpen(q:vec3f,width:vec3f)->f32{
  return open;
 }
 fn umCellInsideTerrain(p:vec3i)->bool{if(!umSolidHasTerrain()){return false;}return f32(p.y)+0.5<umSolidTerrainHeight(p.x,p.z);}
-fn umCellTerrainFraction(p:vec3i)->f32{return 1.0-umTerrainBoxOpen(vec3f(p)+0.5,vec3f(1));}
+// The unit box at q: x umTerrainBoxOpen, and y umBoundaryBoxOpen where
+// boundary (else 0), through one umTerrainPlaneBoxFraction site (Metal
+// inlines every site, and umCellOpenGeometry is inlined at every umCellOpen).
+fn umUnitBoxOpen(q:vec3f,boundary:bool)->vec2f{
+ let width=vec3f(1);let terrain=umSolidHasTerrain();
+ var open=vec2f(select(1.0,0.0,terrain),0.0);
+ for(var j=select(4u,0u,terrain);j<select(4u,12u,boundary);j++){
+  var normal=vec3f(0);var offset=0.0;var part=width*0.5;var weight=0.125;
+  if(j<4u){
+   let at=q+vec3f(select(-0.25,0.25,(j&1u)!=0u)*width.x,0,select(-0.25,0.25,(j&2u)!=0u)*width.z);
+   let s=umTerrainSurface(at);normal=vec3f(s.y,-1,s.z);offset=at.y-s.x;part=width*vec3f(0.5,1,0.5);weight=0.25;
+  }else{
+   let k=j-4u;let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let at=q+select(vec3f(-0.25),vec3f(0.25),bit!=vec3u(0))*width;
+   let s=umBoundarySample(at);normal=s.xyz;offset=s.w;
+  }
+  let fraction=weight*umTerrainPlaneBoxFraction(normal,offset,part);
+  if(j<4u){open.x+=fraction;}else{open.y+=fraction;}
+ }
+ return open;
+}
 fn umSolidWorldCell(id:vec3i)->vec3f{let h=umSolidParams.cellGravity.xyz;
  return vec3f(umSolidParams.frame.x+(f32(id.x)+0.5)*h.x,umSolidParams.frame.y+(f32(id.y)+0.5)*h.y,umSolidParams.frame.z+(f32(id.z)+0.5)*h.z);}
 // The tile cut map (UniformMixedSolid, after the bed-slope lane in the mask
@@ -1306,8 +1326,8 @@ fn umCellOpenGeometry(p:vec3i)->f32{
  if(boundary==0u&&umSolidVoxel(p)){return 0.0;}
  // One body and one terrain site for both forms: Metal inlines each site,
  // and this function is inlined at every umCellOpen site of a kernel.
- let body=umCellBodyFraction(p);let terrain=umCellTerrainFraction(p);
- if(boundary!=0u){return min(umBoundaryBoxOpen(vec3f(p)+0.5,vec3f(1)),min(1.0-body,1.0-terrain));}
+ let body=umCellBodyFraction(p);let box=umUnitBoxOpen(vec3f(p)+0.5,boundary!=0u);let terrain=1.0-box.x;
+ if(boundary!=0u){return min(box.y,min(1.0-body,1.0-terrain));}
  return clamp((1.0-body)*(1.0-terrain),0.0,1.0);
 }
 fn umCellOpen(p:vec3i)->f32{
@@ -1335,9 +1355,16 @@ fn umCellOpen(p:vec3i)->f32{
 fn umCellIsOpen(p:vec3i)->bool{
  ${coarse!==undefined&&gated?`if(!umSolidEnabled()){return umSolidValid(p);}
  let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return umCellOpen(p)>1e-5;}
+ return umStoredCellIsOpen(p,t);`:"return umCellOpen(p)>1e-5;"}
+}
+// umCellIsOpen(p) where t, the key of p's tile, is stored: the record's bit,
+// without the unstored tile's geometry. A caller that knows the tile is
+// stored then holds no umCellOpen site (Metal inlines one per site).
+fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{
+ ${coarse!==undefined&&gated?`if(!umSolidEnabled()){return umSolidValid(p);}
  let l=vec3u(p)&vec3u(3u);let lane=l.x+4u*(l.y+4u*l.z);
  let mask=umSolidOpenCells(t);
- return (select(mask.x,mask.y,lane>=32u)&(1u<<(lane&31u)))!=0u;`:"return umCellOpen(p)>1e-5;"}
+ return (select(mask.x,mask.y,lane>=32u)&(1u<<(lane&31u)))!=0u;`:"return umCellIsOpen(p);"}
 }
 // cellInsideSolid: voxel, terrain or a body at the centre -- the CM11a p_min=0 rows.
 fn umCellInsideSolid(p:vec3i)->bool{
@@ -1401,17 +1428,12 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
  }
  return result;
 }
-// faceOpenFraction: the Sec. 3.6 transverse face aperture.
+// faceOpenFraction: the Sec. 3.6 transverse face aperture, at a face a body
+// reaches (its samples lie within 0.35 sqrt(2) h of the face centre) that is
+// neither clear nor beside a voxel: umPressureFaceV's rigid contact, its one
+// caller, has taken those forms.
 fn umFaceOpen(id:vec3i,axis:u32)->f32{
  if(!umSolidEnabled()){return 1.0;}
- var q=vec3f(id)+0.5;q[axis]+=0.5;var width=vec3f(1);width[axis]=0.0;
- // Its samples lie within 0.35 sqrt(2) h of the face centre: a face no body
- // reaches is evaluated as in a scene without bodies.
- let bodyFree=!umAnyBodyNear(umSolidFaceWorld(id,axis),length(0.5*umSolidParams.cellGravity.xyz));
- if(bodyFree&&umBoundaryTouchesBox(q,vec3f(1))){return min(umBoundaryBoxOpen(q,width),umTerrainBoxOpen(q,width));}
- var neighbor=id;neighbor[axis]+=1;
- if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
- if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
  let tangentA=(axis+1u)%3u;let tangentB=(axis+2u)%3u;var solid=0.0;
  for(var sampleIndex=0u;sampleIndex<4u;sampleIndex+=1u){
@@ -1436,16 +1458,25 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
  // distant body changes no aperture.
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
  let bodyNear=umAnyBodyNear(world,length(0.5*h));
- if(!bodyNear&&umBoundaryTouchesBox(q,vec3f(1))){return min(umBoundaryBoxOpen(q,vec3f(1)),umTerrainBoxOpen(q,vec3f(1)));}
- var neighbor=id;neighbor[axis]+=1;
- if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
- if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.5*(umCellOpen(id)+umCellOpen(neighbor));}
- // Rigid contact uses the face aperture. A dual cell can contain liquid on
- // one side of a completely blocked face; treating that volume as an open
- // face couples the fluid to ghost liquid inside the body at the waterline.
- // Gravity then creates velocity through the body even while it is fixed.
- if(bodyNear){return umFaceOpen(id,axis);}
- return umTerrainBoxOpen(q,vec3f(1));
+ // One terrain, boundary and umCellOpen site each: Metal inlines every site,
+ // and this function is inlined at every face a kernel weighs.
+ let boxed=!bodyNear&&umBoundaryTouchesBox(q,vec3f(1));
+ if(!boxed){
+  var neighbor=id;neighbor[axis]+=1;
+  if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
+  if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){
+   var open=0.0;
+   for(var j=0u;j<2u;j++){let cell=umCellOpen(select(id,neighbor,j==1u));if(j==0u){open=cell;}else{return 0.5*(open+cell);}}
+  }
+  // Rigid contact uses the face aperture. A dual cell can contain liquid on
+  // one side of a completely blocked face; treating that volume as an open
+  // face couples the fluid to ghost liquid inside the body at the waterline.
+  // Gravity then creates velocity through the body even while it is fixed.
+  if(bodyNear){return umFaceOpen(id,axis);}
+ }
+ let box=umUnitBoxOpen(q,boxed);
+ if(boxed){return min(box.y,box.x);}
+ return box.x;
 }
 // The cell whose tile's aperture rows hold the face of cell id normal to
 // axis on its high side: id, or where no page stores id's tile (a domain or
