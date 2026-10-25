@@ -30,6 +30,14 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  *      _NATIVE_LOD_SWEEP=0.25,0.5,1,2 compares native projected-error budgets
  *      in ABBA order at full resolution, with draw census and image comparisons
  *      for overview/orbit/close cameras. The first budget must be the shipped .25.
+ *      _SURFACE_EXPERIMENTS=<comma-separated names> compares benchmark-only
+ *      shader, attachment and geometry variants against the campaign reference.
+ *      _SURFACE_FULL_FRAME=1 also records interleaved complete dry-frame GPU spans.
+ *      _ADAPTIVE_NORMALS=0 retains full source normals for production comparisons.
+ *      _MESH_SUBGROUPS=0 checks the portable workgroup-compaction fallback.
+ *      _SURFACE_ZOOM_SWEEP=<ratios> adds fixed-camera quality captures.
+ *      _CHECK_PRIMARY_TARGETS=1 verifies production attachment/pipeline transitions
+ *      when inspection, bodies and seam closure change (no experimental replay).
  *      _PRIMARY_INDEX_CAPTURE=<directory> saves native asset index buffers.
  *      _PRIMARY_INDEX_REFERENCE=<directory> interleaves those buffers with the
  *      current ordering; use only with identical vertices and LOD ranges.
@@ -128,6 +136,8 @@ import "../lib/methods";
 import assert from "node:assert/strict";
 import { benchmarkSvoPrimaryPass } from "./benchmark-svo-primary-pass";
 import { nativeLodStudy, benchmarkNativeLod } from "./benchmark-native-lod";
+import { primarySurfaceStudy } from "./primary-surface-experiments";
+import { SVO_SURFACE_MESH_STATE } from "../lib/svo/features/primary-visibility/svo-surface-mesh";
 import { primaryDrawAblation } from "./primary-draw-ablation";
 import { computeShaderReference } from "./compute-shader-reference";
 import { capturePrimaryComputeInputs } from "./probe-svo-primary-compute";
@@ -323,6 +333,8 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   importedSurfaceBatching: process.env.FLUID_SVO_DRY_FRAME_IMPORTED_BATCHING !== "0",
   nativeAssetShadows: process.env.FLUID_SVO_DRY_FRAME_NATIVE_SHADOWS !== "0",
   surfaceMeshCulling: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_CULLING !== "0",
+  surfaceMeshSubgroups: process.env.FLUID_SVO_DRY_FRAME_MESH_SUBGROUPS === "0" ? false : undefined,
+  surfaceMeshAdaptiveNormals: process.env.FLUID_SVO_DRY_FRAME_ADAPTIVE_NORMALS !== "0",
   surfaceMeshSampleCulling: process.env.FLUID_SVO_DRY_FRAME_MESH_SAMPLE_CULLING !== "0",
   surfaceMeshMaxBytes: process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES ? Number(process.env.FLUID_SVO_DRY_FRAME_SURFACE_MESH_BYTES) : undefined,
   voxelLightCache: coneTracingModeRaw !== "raster-ao" && process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
@@ -1115,9 +1127,14 @@ const lightingReference = lightingReferencePath ? computeShaderReference(primary
   JSON.parse(readFileSync(lightingReferencePath, "utf8"))) : undefined;
 const nativeLodBudgets = process.env.FLUID_SVO_DRY_FRAME_NATIVE_LOD_SWEEP;
 const nativeLod = nativeLodBudgets ? nativeLodStudy(lightingReference?.device ?? primaryAblation?.device ?? device, nativeLodBudgets.split(",").map(Number)) : undefined;
-const renderer = new SparseVoxelDrySceneRenderer(nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
+const surfaceExperiments=process.env.FLUID_SVO_DRY_FRAME_SURFACE_EXPERIMENTS;
+assert.ok(!(surfaceExperiments&&nativeLod),"Run surface and LOD sweeps separately");
+const normalSources={terrain:!!source.structural?.sceneMaintenance?.renderTerrain,boundary:!!source.structural?.sceneMaintenance?.solidBoundary};
+if(surfaceExperiments)log(`Primary normal sources: ${JSON.stringify(normalSources)}`);
+const surfaceStudy=surfaceExperiments?await primarySurfaceStudy(lightingReference?.device??primaryAblation?.device??device,surfaceExperiments.split(","),normalSources):undefined;
+const renderer = new SparseVoxelDrySceneRenderer(surfaceStudy?.device ?? nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
-  optimizationExperiments);
+  surfaceStudy ? { ...optimizationExperiments, surfaceMeshCompactTargets: false, surfaceMeshAdaptiveNormals: false } : optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count, bodies.bounds);
 // FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS: the voxel-mesh "Filtered detail" threshold
@@ -1249,6 +1266,56 @@ await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
 
+if(process.env.FLUID_SVO_DRY_FRAME_CHECK_PRIMARY_TARGETS==="1"){
+  assert.ok(optimizationExperiments.surfaceMesh&&!surfaceStudy,"Check production mesh targets without experimental replay");
+  const checkFrame=async(inspected:boolean,count:number,seam=silhouetteRefinementEnabled)=>{
+    renderer.setIdentityPlanesInspected(inspected);
+    let primary=0;
+    const encoder=device.createCommandEncoder();
+    const checked=new Proxy(encoder,{get(target,key){
+      if(key==="beginRenderPass")return (descriptor:GPURenderPassDescriptor)=>{
+        if(descriptor.label==="Voxel surface mesh rasterization"){
+          primary++;
+          const attachments=Array.from(descriptor.colorAttachments);
+          assert.equal(attachments[0]!==null,inspected||count>0||seam,"Packed surface must follow its consumers");
+          assert.equal(attachments[1]!==null,inspected||count>0||seam,"Identity media must follow its consumers");
+        }
+        return target.beginRenderPass(descriptor);
+      };
+      const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+    }});
+    encodeFrame(checked);assert.equal(primary,1);device.queue.submit([encoder.finish()]);await device.queue.onSubmittedWorkDone();
+    const mesh=renderer as unknown as {surfaceMeshState:GPUBuffer;surfaceMeshPipelines?:{farDraw?:unknown}};
+    if(mesh.surfaceMeshPipelines?.farDraw){
+      const read=device.createBuffer({size:12,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      try {
+        const copy=device.createCommandEncoder();
+        [SVO_SURFACE_MESH_STATE.packedDraw,SVO_SURFACE_MESH_STATE.nearNormalDraw,SVO_SURFACE_MESH_STATE.farNormalDraw]
+          .forEach((word,index)=>copy.copyBufferToBuffer(mesh.surfaceMeshState,word*4,read,index*4,4));
+        device.queue.submit([copy.finish()]);await read.mapAsync(GPUMapMode.READ);
+        const counts=new Uint32Array(read.getMappedRange());
+        assert.equal(counts[1]!+counts[2]!,counts[0],"Production normal partitions must conserve submitted vertices");
+      } finally {read.destroy();}
+    }
+    return captureTextureBytes(target,8,"Production primary target transition");
+  };
+  for(const count of [0,bodies.count,0,bodies.count]){
+    renderer.setRigidBodyCount(count,bodies.bounds);await awaitPresentationBundle(renderer);
+    const reference=await checkFrame(true,count),candidate=await checkFrame(false,count);
+    if(count===0)assert.ok(Buffer.from(candidate).equals(Buffer.from(reference)),"Omitting unused primary targets must preserve every output bit");
+    const restored=await checkFrame(true,count);
+    assert.ok(Buffer.from(restored).equals(Buffer.from(reference)),"Restoring inspection targets must preserve the rendered result");
+  }
+  renderer.setRigidBodyCount(0,bodies.bounds);applyLighting(coneScale,shadowsEnabled,ambientOcclusionEnabled,true);
+  await awaitPresentationBundle(renderer);
+  const seamReference=await checkFrame(true,0,true),seamCandidate=await checkFrame(false,0,true);
+  assert.ok(Buffer.from(seamCandidate).equals(Buffer.from(seamReference)),"Seam closure must retain its identity inputs without inspection");
+  renderer.setRigidBodyCount(bodies.count,bodies.bounds);applyLighting(coneScale);await awaitPresentationBundle(renderer);
+  renderer.setIdentityPlanesInspected(false);
+  assert.deepEqual(validationErrors,[],"GPU validation during primary target transitions");
+  log("Production primary target transitions passed (inspection, body-count and seam-closure changes)");
+}
+
 if (process.env.FLUID_SVO_DRY_FRAME_PRIMARY_RESOLUTIONS) {
   assert.ok(optimizationExperiments.surfaceMesh, "Primary resolution study requires surface meshing");
   const { benchmarkSvoPrimaryResolution } = await import("./benchmark-svo-primary-resolution");
@@ -1280,14 +1347,19 @@ if (profileGate) {
 }
 
 const primaryPassTimings = [];
-if (nativeLod) {
-  await benchmarkNativeLod({device,study:nativeLod,encode:encodeFrame,
+if (nativeLod||surfaceStudy) {
+  await benchmarkNativeLod({device,study:(nativeLod??surfaceStudy)!,encode:encodeFrame,
+    fullFrame:process.env.FLUID_SVO_DRY_FRAME_SURFACE_FULL_FRAME==="1",
     capture:()=>captureTextureBytes(target,8,"Native LOD quality capture"),width,height,cycles,
-    outPath:`${outPath}.native-lod.json`,grade:resolveDisplayGrade(svoSceneLighting(scene).grade),
+    outPath:`${outPath}.${surfaceStudy?"surface-study":"native-lod"}.json`,grade:resolveDisplayGrade(svoSceneLighting(scene).grade),
     views:[
       {name:"overview",camera},
       {name:"orbit",camera:{...camera,azimuth_rad:camera.azimuth_rad+1.1}},
       {name:"close",camera:{...camera,distance_m:camera.distance_m*.25,elevation_rad:.25}},
+      ...(process.env.FLUID_SVO_DRY_FRAME_SURFACE_ZOOM_SWEEP?.split(",").map(Number)??[]).map(ratio=>{
+        assert.ok(Number.isFinite(ratio)&&ratio>0,"Zoom ratios must be positive");
+        return {name:`zoom-${ratio}`,camera:{...camera,distance_m:camera.distance_m*ratio}};
+      }),
     ].map(view=>({name:view.name,set(){activeCamera=view.camera;device.queue.writeBuffer(uniformBuffer,0,packViewUniforms(scene,activeCamera,environmentId,solver.info,bodies.count));}})),
   });
   assert.deepEqual(validationErrors,[],"GPU validation during native LOD study");

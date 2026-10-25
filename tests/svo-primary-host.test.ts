@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_PARAMS_LAYOUT } from '../lib/svo/pipeline/webgpu-svo-dry-scene';
 import { DEFAULT_SVO_RENDER_TUNING, SvoSurfaceTuningCache } from '../lib/svo/pipeline/svo-render-tuning';
-import { SVO_SURFACE_MESH_STATE_BYTES } from '../lib/svo/features/primary-visibility/svo-surface-mesh';
+import { SVO_SURFACE_MESH_STATE, SVO_SURFACE_MESH_STATE_BYTES } from '../lib/svo/features/primary-visibility/svo-surface-mesh';
 
 test('surface tuning reuses storage but notices in-place edits and surface-style changes', () => {
   const cache = new SvoSurfaceTuningCache();
@@ -39,7 +39,8 @@ function meshFixture() {
   let bundles = 0, draws = 0, writes = 0, receipts = 0;
   const compute: GPUComputePassDescriptor[] = [], render: GPURenderPassDescriptor[] = [];
   const bundleDescriptors: GPURenderBundleEncoderDescriptor[] = [], boundPipelines: unknown[] = [];
-  const commands = { setPipeline(pipeline: unknown) { boundPipelines.push(pipeline); }, setBindGroup() {}, setVertexBuffer() {}, setIndexBuffer() {}, draw() {}, drawIndirect() {}, drawIndexedIndirect() {}, finish() { return {}; } };
+  const indirect: { buffer: unknown; offset: number }[] = [];
+  const commands = { setPipeline(pipeline: unknown) { boundPipelines.push(pipeline); }, setBindGroup() {}, setVertexBuffer() {}, setIndexBuffer() {}, draw() {}, drawIndirect(buffer: unknown, offset: number) { indirect.push({ buffer, offset }); }, drawIndexedIndirect() {}, finish() { return {}; } };
   const renderer = Object.assign(Object.create(SparseVoxelDrySceneRenderer.prototype), {
     device: { queue: { writeBuffer() { writes++; } }, createRenderBundleEncoder(descriptor: GPURenderBundleEncoderDescriptor) { bundles++; bundleDescriptors.push(descriptor); return commands; } },
     source: { structural: { domain: { brickSize: 8 }, planarBoundaries: { count: 2 }, sceneMaintenance: { activity: 0 } } },
@@ -60,7 +61,7 @@ function meshFixture() {
     copyBufferToBuffer(_a: unknown, _b: number, target: unknown, _d: number, size: number) { if (target === renderer.surfaceMeshReadback) { assert.equal(size, SVO_SURFACE_MESH_STATE_BYTES); receipts++; } },
   };
   const views = { hardwareDepth: {}, packedSurface: {}, identityMedia: {} };
-  return { renderer, views, frame: () => renderer.encodeSurfaceMesh(encoder, views, false, 1), compute, render, bundleDescriptors, boundPipelines,
+  return { renderer, views, frame: () => renderer.encodeSurfaceMesh(encoder, views, false, 1), compute, render, bundleDescriptors, boundPipelines, indirect,
     counts: () => ({ bundles, draws, writes, receipts }) };
 }
 
@@ -130,4 +131,20 @@ test('cached G-buffer views retain identity until resize and retire on destructi
     arena.ensureSize(20, 20); assert.notEqual(arena.views, before);
     arena.destroy(); assert.equal(arena.views, undefined);
   } finally { if (saved === undefined) delete globals.GPUTextureUsage; else globals.GPUTextureUsage = saved; }
+});
+
+test('adaptive normal lists draw once each with the matching compact and full pipelines', () => {
+  const f = meshFixture();
+  const far = {}, compactFar = {};
+  f.renderer.surfaceMeshPipelines.farDraw = far;
+  f.renderer.compactMeshPrimaryPipelines.set(far, compactFar);
+  f.frame();
+  assert.deepEqual(f.indirect, [SVO_SURFACE_MESH_STATE.nearNormalDraw, SVO_SURFACE_MESH_STATE.farNormalDraw]
+    .map(word => ({ buffer: f.renderer.surfaceMeshState, offset: word * 4 })));
+  assert.ok(f.boundPipelines.includes(compactFar));
+  f.indirect.length = 0;f.boundPipelines.length = 0;
+  f.renderer.rigidBodyCount = 1;f.frame();
+  assert.deepEqual(f.indirect.map(draw => draw.offset), [SVO_SURFACE_MESH_STATE.nearNormalDraw * 4, SVO_SURFACE_MESH_STATE.farNormalDraw * 4]);
+  assert.ok(f.boundPipelines.includes(far));
+  assert.ok(!f.boundPipelines.includes(compactFar));
 });

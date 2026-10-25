@@ -299,6 +299,9 @@ export const SVO_SURFACE_MESH_STATE = Object.freeze({
   primaryListReuse: 9,
   primaryCandidateCount: 84,
   geometryKey: 88,
+  /** Near/far normal-quality draws share the two ends of the visible list. */
+  nearNormalDraw: 104,
+  farNormalDraw: 108,
   cullDispatch: 120,
   candidateDispatch: 124,
   wordCount: 128,
@@ -449,10 +452,11 @@ fn meshStreamVertex(streamVertex:u32,trianglesOnly:bool)->vec2u{
 }
 `;
 
-export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false, sampleCulling = true, subgroups = false): string {
+export function svoSurfaceMeshWGSL(group: number, flatNormalsFlag: number, culling = true, contours = false, retainSampledShadowCasters = false, sampleCulling = true, subgroups = false, adaptiveNormals = false): string {
   const W = SVO_SURFACE_MESH_STATE;
   const F = SVO_SURFACE_MESH_FLAGS;
   const M = SVO_SURFACE_MESH_MODE;
+  adaptiveNormals &&= culling;
   return /* wgsl */ `
 // \`face\` packs the boundary face in bits 0-2, the detail level in bits 3-5 and
 // the brick's octree depth in bits 6-10 and normal agreement in bits 11-18.
@@ -950,6 +954,10 @@ fn surfaceMeshPrepare(){
   atomicStore(&meshState[${W.packedDraw+1}],1u);
   atomicStore(&meshState[${W.packedDraw+2}],0u);
   atomicStore(&meshState[${W.packedDraw+3}],0u);
+  ${adaptiveNormals ? [W.nearNormalDraw,W.farNormalDraw].map(at=>`
+  atomicStore(&meshState[${at+1}],1u);
+  atomicStore(&meshState[${at+2}],0u);
+  atomicStore(&meshState[${at+3}],0u);`).join("") : ""}
   atomicStore(&meshState[${W.cullQuads}],0u);
   atomicStore(&meshState[${W.ingestBegin}],0u);atomicStore(&meshState[${W.ingestEnd}],0u);
   // Smooth raster surfaces use the dual-grid attachment. Publication and
@@ -1221,6 +1229,7 @@ fn surfaceMeshPublish(){
   }
   atomicStore(&meshState[${W.drawInstanceCount}],${culling ? "0u" : "quads"});
   atomicStore(&meshState[${W.packedDraw}],${culling ? "0u" : "quads*select(6u,3u,meshDmcEnabled())"});
+  ${adaptiveNormals ? `atomicStore(&meshState[${W.nearNormalDraw}],0u);atomicStore(&meshState[${W.farNormalDraw}],0u);` : ""}
   atomicStore(&meshState[${W.cullQuads}],quads);
 }
 // Dirty boxes of the build's pending bricks, recomputed every presentation
@@ -1497,6 +1506,22 @@ fn surfaceMeshCullDispatch(){
   atomicStore(&meshState[${W.cullDispatch+1}],max(1u,(groups+65534u)/65535u));
   atomicStore(&meshState[${W.cullDispatch+2}],1u);
 }
+${adaptiveNormals ? `
+// A projected-cell estimate using conservative depth keeps full source
+// normals on nearby triangles. The candidate half remains immutable for shadows/publication;
+// near and far records fill opposite ends of the camera-visible half.
+fn meshFarNormal(index:u32)->bool{
+  if(!meshDcEnabled()){return false;}
+  let quad=meshArena[index];let camera=dryRasterPrimaryCamera();
+  let halfExtent=vec3f(meshQuadExtent(quad))*dry.mapping.cellSize*.5;
+  let centre=dry.mapping.worldOrigin+vec3f(meshQuadOrigin(quad))*dry.mapping.cellSize+halfExtent;
+  let depth=max(dot(centre-camera[0],camera[1])-dot(halfExtent,abs(camera[1])),DRY_REVERSED_Z_NEAR_M);
+  let h=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z))*f32(1u<<(dry.mapping.maximumDepth-meshQuadDepth(quad.face)));
+  return h*uniforms.viewport.y/(2.0*cameraTanHalfFov()*depth)<=4.0;
+}
+var<workgroup> meshNormalCounts:array<atomic<u32>,2>;
+var<workgroup> meshNormalBases:array<u32,2>;
+` : ""}
 @compute @workgroup_size(64)
 fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invocation_index) lane:u32){
   if(lane==0u){meshCullHeader=vec3u(atomicLoad(&meshState[${W.frontCursor}]),
@@ -1508,7 +1533,42 @@ fn surfaceMeshCull(@builtin(global_invocation_id) id:vec3u,@builtin(local_invoca
     index=meshVisibleOutput[arrayLength(&meshVisibleOutput)/2u+entry];
     visible=meshQuadVisible(index,meshCullHeader.x,meshCullHeader.z!=0u);
   }
-  ${subgroups ? `meshCompact(index,visible,false);` : `
+  ${adaptiveNormals ? `
+  var far=false;if(visible){far=meshFarNormal(index);}
+  let tier=select(0u,1u,far);let vertices=select(6u,3u,meshDmcEnabled());
+  ${subgroups ? `
+  let nearCount=subgroupAdd(select(0u,1u,visible&&!far));
+  let farCount=subgroupAdd(select(0u,1u,visible&&far));
+  let nearRank=subgroupExclusiveAdd(select(0u,1u,visible&&!far));
+  let farRank=subgroupExclusiveAdd(select(0u,1u,visible&&far));
+  var nearBase=0u;var farBase=0u;
+  if(subgroupElect()){
+    if(nearCount>0u){nearBase=atomicAdd(&meshState[${W.nearNormalDraw}],nearCount*vertices)/vertices;}
+    if(farCount>0u){farBase=atomicAdd(&meshState[${W.farNormalDraw}],farCount*vertices)/vertices;}
+    atomicAdd(&meshState[${W.drawInstanceCount}],nearCount+farCount);
+    atomicAdd(&meshState[${W.packedDraw}],(nearCount+farCount)*vertices);
+  }
+  nearBase=subgroupBroadcastFirst(nearBase);farBase=subgroupBroadcastFirst(farBase);
+  if(visible){
+    let output=select(nearBase+nearRank,arrayLength(&meshVisibleOutput)/2u-1u-farBase-farRank,far);
+    meshVisibleOutput[output]=index;
+  }
+  ` : `
+  if(lane==0u){atomicStore(&meshNormalCounts[0],0u);atomicStore(&meshNormalCounts[1],0u);}workgroupBarrier();
+  var rank=0u;if(visible){rank=atomicAdd(&meshNormalCounts[tier],1u);}workgroupBarrier();
+  if(lane==0u){
+    let nearCount=atomicLoad(&meshNormalCounts[0]);let farCount=atomicLoad(&meshNormalCounts[1]);
+    meshNormalBases[0]=atomicAdd(&meshState[${W.nearNormalDraw}],nearCount*vertices)/vertices;
+    meshNormalBases[1]=atomicAdd(&meshState[${W.farNormalDraw}],farCount*vertices)/vertices;
+    atomicAdd(&meshState[${W.drawInstanceCount}],nearCount+farCount);
+    atomicAdd(&meshState[${W.packedDraw}],(nearCount+farCount)*vertices);
+  }workgroupBarrier();
+  if(visible){
+    let offset=meshNormalBases[tier]+rank;
+    meshVisibleOutput[select(offset,arrayLength(&meshVisibleOutput)/2u-1u-offset,far)]=index;
+  }
+  `}
+  ` : subgroups ? `meshCompact(index,visible,false);` : `
   if(lane==0u){atomicStore(&meshCullCount,0u);}workgroupBarrier();
   var rank=0u;if(visible){rank=atomicAdd(&meshCullCount,1u);}workgroupBarrier();
   if(lane==0u){
@@ -1534,12 +1594,13 @@ struct MeshVertexOut {
   @location(6) @interpolate(flat) geometricNormal:vec3f,
 }
 ${surfaceMeshStreamVertexWGSL}
-@vertex fn surfaceMeshVertex(@builtin(vertex_index) streamVertex:u32)->MeshVertexOut{
+${(adaptiveNormals ? [false,true] : [false]).map(far => /* wgsl */ `
+@vertex fn ${far ? "surfaceMeshFarVertex" : "surfaceMeshVertex"}(@builtin(vertex_index) streamVertex:u32)->MeshVertexOut{
   // Tiny per-record instances underfill Apple vertex SIMD groups. A single
   // contiguous stream preserves record order and the original strip diagonal.
   let indices=meshStreamVertex(streamVertex,meshDmcEnabled());
   let vertex=indices.x;let instance=indices.y;
-  let quad=meshDrawnQuad(${culling ? "meshVisible[instance]" : "instance"});
+  let quad=meshDrawnQuad(${culling ? (far ? "meshVisible[arrayLength(&meshVisible)/2u-1u-instance]" : "meshVisible[instance]") : "instance"});
   let face=meshQuadFace(quad.face);let axis=face/2u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
   let corners=array<vec2u,4>(vec2u(1u,0u),vec2u(1u,1u),vec2u(0u,0u),vec2u(0u,1u));
   // Swapping the two in-plane coordinates reverses winding on negative
@@ -1576,6 +1637,7 @@ ${surfaceMeshStreamVertexWGSL}
   return MeshVertexOut(position,world,quad.identity,normal,meshQuadLevel(quad.face),f32((quad.face>>11u)&255u)/255.0,
     cellPixels,geometricNormal);
 }
+`).join("\n")}
 struct MeshSurfaceOut {
   @location(0) packedSurface:vec4u,@location(1) identityMedia:vec4u,
   @location(2) geometry:vec4f,@location(3) opaqueIdentity:vec2u,
@@ -1590,10 +1652,13 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
   }
   return normalize(mix(face,baked,strength));
 }
-@fragment fn surfaceMeshFragment(input:MeshVertexOut)->MeshSurfaceOut{
+// Only smooth reconstructed triangles enter the far list. Its shader omits
+// source reconstruction and the legacy box-voxel filtering path completely.
+${(adaptiveNormals ? [false,true] : [false]).map(far => /* wgsl */ `
+@fragment fn ${far ? "surfaceMeshFarFragment" : "surfaceMeshFragment"}(input:MeshVertexOut)->MeshSurfaceOut{
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);let t=length(input.world-camera[0]);
   var normal=normalize(input.normal);var receiverNormal=input.geometricNormal;
-  var boundaryNormal=vec3f(0);
+${far ? "" : `  var boundaryNormal=vec3f(0);
   if(meshDcEnabled()&&meshHeader[${W.hostSolidBoundary}u]!=0u){
     // Evaluate the continuous source field once per visible fragment.
     // Subpixel triangles no longer repeat boundary lookups at every vertex.
@@ -1603,8 +1668,8 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
   if(meshDcEnabled()&&dot(boundaryNormal,boundaryNormal)==0.0){
     boundaryNormal=meshAuthoredSurfaceNormal(input.world,sceneIdentityMaterial(input.identity),input.geometricNormal);
   }
-  if(dot(boundaryNormal,boundaryNormal)>1e-12){normal=normalize(boundaryNormal);receiverNormal=normal;}
-  if(!meshContoursEnabled()&&!meshDcEnabled()&&dry.meshFilter.x>0.5&&dry.meshFilterNormals.x>0.5&&dry.meshFilter.y>0.0){
+  if(dot(boundaryNormal,boundaryNormal)>1e-12){normal=normalize(boundaryNormal);receiverNormal=normal;}`}
+${far ? "" : `  if(!meshContoursEnabled()&&!meshDcEnabled()&&dry.meshFilter.x>0.5&&dry.meshFilterNormals.x>0.5&&dry.meshFilter.y>0.0){
     // Filtered detail shades the baked normal: a coarse quad carries its cells'
     // mean, an exact quad reads the voxel just behind its face. The surface
     // itself stays the quad, so depth is unchanged; a baked normal facing away
@@ -1619,6 +1684,7 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
       normal=meshFilteredNormal(input.normal,sceneIdentityNormal(word),input.level,input.agreement,input.cellPixels);
     }
   }
+`}
   var shading=dryShadingNormal(input.identity,normal);
   if(meshDcEnabled()){shading=DryShadingNormal(normal,SVO_FEATURE_SMOOTH);}
   // Tag reconstructed receivers for the shared lighting encoder. Their implicit
@@ -1633,6 +1699,7 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
   out.opaqueIdentity.x|=(input.level+1u)<<27u;
   return MeshSurfaceOut(out.packedSurface,out.identityMedia,out.geometry,out.opaqueIdentity);
 }
+`).join("\n")}
 // Whether a camera ray crosses any dirty box of the pending build, in world
 // metres. Pixels that do are traced; the rest keep the cached mesh.
 fn meshRayTouchesBox(slot:u32,origin:vec3f,inverse:vec3f)->bool{

@@ -1012,7 +1012,7 @@ interface SvoDrySplitPipelineBundle {
   readonly surfaceMesh?: {
     prepare: GPUComputePipeline; boxes: GPUComputePipeline; ingest: GPUComputePipeline; schedule: GPUComputePipeline;
     count: GPUComputePipeline; allocate: GPUComputePipeline; emit: GPUComputePipeline; publish: GPUComputePipeline;
-    select: GPUComputePipeline; cull: GPUComputePipeline; cullDispatch: GPUComputePipeline; candidates: GPUComputePipeline; draw: GPURenderPipeline; background: GPURenderPipeline; planar: GPURenderPipeline;
+    select: GPUComputePipeline; cull: GPUComputePipeline; cullDispatch: GPUComputePipeline; candidates: GPUComputePipeline; draw: GPURenderPipeline; farDraw?: GPURenderPipeline; background: GPURenderPipeline; planar: GPURenderPipeline;
   };
   readonly brickBackground?: GPURenderPipeline;
   readonly brickRaster?: GPURenderPipeline;
@@ -2404,7 +2404,11 @@ export class SparseVoxelDrySceneRenderer {
     draw.setPipeline(primaryPipeline(pipelines.draw));
     if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
     draw.setBindGroup(group, this.surfaceMeshDrawGroup!);
-    draw.drawIndirect(state, SVO_SURFACE_MESH_STATE.packedDraw * 4);
+    draw.drawIndirect(state, (pipelines.farDraw ? SVO_SURFACE_MESH_STATE.nearNormalDraw : SVO_SURFACE_MESH_STATE.packedDraw) * 4);
+    if (pipelines.farDraw) {
+      draw.setPipeline(primaryPipeline(pipelines.farDraw));
+      draw.drawIndirect(state, SVO_SURFACE_MESH_STATE.farNormalDraw * 4);
+    }
     if (this.rasterRigidActive && !this.disabledStages.has("rigid-impostor") && !this.identityPlanesInspected) {
       draw.setPipeline(this.rasterRigidDirectPipeline!);
       draw.setBindGroup(0, this.rasterRigidInputBindGroup!);
@@ -3749,7 +3753,7 @@ export class SparseVoxelDrySceneRenderer {
     const layout = this.layout;
     const vertexModule = this.vertexModule;
     const shaderExperimentsBase = { ...this.experiments,
-      surfaceMeshSubgroups: this.device.features.has("subgroups"),
+      surfaceMeshSubgroups: this.experiments.surfaceMeshSubgroups !== false && this.device.features.has("subgroups"),
       ...(scale === 1 ? { halfPrecisionLighting: false } : {}),
     };
     const shaderExperimentsPruned = voxelLightCacheEnabled
@@ -4140,13 +4144,17 @@ export class SparseVoxelDrySceneRenderer {
         const draw = await this.compileMeshPrimaryPipeline({ label: "Opaque voxel surface triangles", layout: drawLayout,
           vertex: { module, entryPoint: "surfaceMeshVertex" }, fragment: { module, entryPoint: "surfaceMeshFragment", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-list", cullMode: "none" }, depthStencil });
+        const farDraw = this.experiments.surfaceMeshAdaptiveNormals !== false && this.experiments.surfaceMeshCulling !== false
+          ? await this.compileMeshPrimaryPipeline({ label: "Distant voxel surface triangles", layout: drawLayout,
+            vertex: { module, entryPoint: "surfaceMeshFarVertex" }, fragment: { module, entryPoint: "surfaceMeshFarFragment", targets: rasterPrimaryTargets },
+            primitive: { topology: "triangle-list", cullMode: "none" }, depthStencil }) : undefined;
         const background = await this.compileMeshPrimaryPipeline({ label: "Voxel mesh backdrop and pending geometry", layout: drawLayout,
           vertex: { module: vertexModule, entryPoint: "vertexMain" }, fragment: { module, entryPoint: "surfaceMeshBackground", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-list" }, depthStencil: { ...depthStencil, depthCompare: "always" } });
         const planar = await this.compileMeshPrimaryPipeline({ label: "Projected exact planar slabs", layout: drawLayout,
           vertex: { module, entryPoint: "meshPlanarVertex" }, fragment: { module, entryPoint: "meshPlanarFragment", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-strip" }, depthStencil: { ...depthStencil, depthCompare: "greater-equal" } });
-        surfaceMesh = { prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, cullDispatch, candidates, draw, background, planar };
+        surfaceMesh = { prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, cullDispatch, candidates, draw, farDraw, background, planar };
       }
       // Compile only the expensive closure again. All visibility and cone work
       // shares the generic bundle; unsupported live publications switch back in

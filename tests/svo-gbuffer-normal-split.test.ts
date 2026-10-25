@@ -50,11 +50,12 @@ test("every other producer publishes one normal twice, bit for bit", async () =>
   // The old signature is the new one with the surface's own normal for a face,
   // so nothing but the mesh can move by so much as an oct8 quantum.
   assert.match(source, /fn dryRasterPrimarySurface\(opaque:DryHit,ro:vec3f,rd:vec3f,forward:vec3f,producer:u32\)->DryRasterPrimaryOut\{\s*return dryRasterPrimaryFacedSurface\(opaque,opaque\.normal,ro,rd,forward,producer\);/);
-  // Exactly one call site passes a face that is not the shading normal.
+  // Both voxel quality entries preserve an independent receiver normal.
+  // No other producer may introduce another distinct-face call site.
   const faced = source.match(/dryRasterPrimaryFacedSurface\([^)]*\)/g) ?? [];
   const distinct = faced.filter((call) => !call.includes("opaque,opaque.normal") && !call.startsWith("dryRasterPrimaryFacedSurface(opaque:"));
-  assert.equal(distinct.length, 1, distinct.join(" | "));
-  assert.match(distinct[0], /hit,receiverNormal/);
+  assert.equal(distinct.length, 2, distinct.join(" | "));
+  for (const call of distinct) assert.match(call, /hit,receiverNormal/);
   // A cleared face word is what every one of them writes, and it reads back as
   // the shading normal itself rather than a decoded approximation of it.
   assert.match(source, /if\(all\(geometricNormal==shadingNormal\)\)\{return 0u;\}/);
