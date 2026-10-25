@@ -118,16 +118,19 @@ var<workgroup> nbAirPlanHalo:atomic<u32>;
    if(included){
     atomicOr(&bins[NB_FRAME_PLAN+4u+region],2u);
     let rank=atomicAdd(&bins[NB_FRAME_PLAN+1u],1u);atomicStore(&bins[NB_FRAME_PLAN+4u+3u*NB_REUSE_REGIONS+rank],region);
-   }else if(region<NB_REUSE_CAPACITY){
+   }else if(nbReuseSlot(region)!=NB_REUSE_NO_SLOT){
     // An omitted region cannot supply an old nearest/metric certificate
     // after its request set or world mapping changed.
     atomicStore(&bins[NB_REUSE_ALLOWED+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);
    }
   }
-  if(!included&&region<NB_REUSE_CAPACITY){
-   atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);
+  let slot=nbReuseSlot(region);
+  if(!included&&slot!=NB_REUSE_NO_SLOT){
+   atomicStore(&bins[NB_REUSE_VALID+64u*slot+lane],0u);
   }
   workgroupBarrier();
+  // Slotted, the omitted region's slot goes back, its valid words clear.
+  if(!included&&lane==0u){nbReuseRelease(region);}
  }
  if(group.x==0u&&lane==0u){atomicStore(&bins[NB_FRAME_PLAN],1u);}
 }

@@ -199,6 +199,8 @@ export interface NarrowBandSurfaceRevisions{readonly buffer:GPUBuffer;readonly l
  * bindStage), sized by the pool's h tiles; the records stay capacity's. */
 /** The surface arena's windows under a particle budget, at least (arenaWindows). */
 const NB_ARENA_WINDOW_FLOOR=2048;
+/** The reuse cache's fewest payload slots under a particle budget. */
+const NB_REUSE_SLOT_FLOOR=256;
 export interface NarrowBandParticleBudget{readonly fineTiles:number;readonly perFineCell:number;readonly bankBytes?:number}
 /** Particle records for a budget: its samples, then the slabs' spill reserve
  * (particleSlabSpill) on top, so the slabs alone hold the budget. */
@@ -285,7 +287,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get regionalReuseCapacity():number{return this.reuse.capacity;}
  get regionalReuseAllocatedBytes():number{return 4*this.reuse.words;}
  /** Read-only post-run diagnostics; never used to size simulation launches. */
- get regionalReuseEvidence(){return {buffer:this.bins,regions:this.reuse.capacity,flagsOffset:4*this.reuse.nearestFlags};}
+ get regionalReuseEvidence(){return {buffer:this.bins,regions:this.reuse.capacity?this.reuse.regions:0,flagsOffset:4*this.reuse.nearestFlags};}
  regionalCrossingReuseEnabled=true;
  /** Exact full-scan ablation for the shared frame crossing domain. */
  regionalCrossingPlanEnabled=true;
@@ -522,7 +524,12 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.occupiedWord=this.countWords+cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
   const binWords=this.occupiedWord+4+address.tileKeys;
   const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
-  const completeReuse=narrowBandReuseLayout(binWords,8*address.blocks);
+  // Under a particle budget the payload slots follow the planned regions
+  // (narrowBandReuseLayout): about one in four of its h tiles' count was
+  // measured (seep 4h: 374 regions planned at 1451 h tiles), so half of them,
+  // with a floor; a region the slots miss searches afresh.
+  const regions=8*address.blocks,slots=budget?Math.max(NB_REUSE_SLOT_FLOOR,Math.ceil(budget.fineTiles/2)):regions;
+  const completeReuse=slots<regions?narrowBandReuseLayout(binWords,regions,slots,true):narrowBandReuseLayout(binWords,regions);
   this.reuse=4*(binWords+completeReuse.words+address.vertexKeys)<=limit?completeReuse:narrowBandReuseLayout(binWords,8*address.blocks,0);
   this.surfaceHotWord=binWords+this.reuse.words;
   // The shared brick table (uniform-brick-table.ts) persists after the surface-hot words.
