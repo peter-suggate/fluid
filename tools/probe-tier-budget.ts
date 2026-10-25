@@ -63,6 +63,8 @@ import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/unifor
 import { uniformDetailBindLayout, uniformDetailField, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline } from "../lib/methods/uniform/uniform-detail-fields";
 import { UNIFORM_WINDOW_HEADER } from "../lib/methods/uniform/uniform-window-address";
 import { UNIFORM_MOMENTUM_TRACE_CAPPED_WORD } from "../lib/methods/uniform/uniform-mixed-momentum";
+import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../lib/methods/uniform/uniform-surface-transport.wgsl";
+import { NARROW_BAND_RETIRE_WORD, narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-band-flip";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "../lib/methods/uniform/uniform-mixed-topology.wgsl";
 import type { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed-ownership";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
@@ -72,8 +74,13 @@ import { GPUMemoryProfile } from "./gpu-memory-profile";
 const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "";
+// --retire: count NB-FLIP's retirements by reason (diagnostic shader words).
+if (options.includes("--retire")) narrowBandRetireCounting.on = true;
+// --retireSplit=x: the last three retirement words count at cells x >= the split: crowded, all, seeds offered.
+const retireSplit = options.find(a => a.startsWith("--retireSplit="));
+if (retireSplit) { narrowBandRetireCounting.on = true; narrowBandRetireCounting.splitX = Number(retireSplit.slice(14)); }
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes)=.+|--classify|--print-scene|--heatState)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes|retireSplit)=.+|--classify|--print-scene|--heatState|--census|--retire)$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
 /** Momentum traces cut at the segment bound (momentumTrace "substep"), summed over the run. */
@@ -317,7 +324,7 @@ console.log(JSON.stringify({ phase: "start", ...metadata, values: undefined }));
 
 const rows: Record<string, unknown>[] = [], walls: { frame: number; wall_ms: number; afterSample: boolean }[] = [];
 let c: Awaited<ReturnType<typeof construct>> | undefined, failure: string | undefined, frameReached = 0;
-const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, ZONES_AT = VLINE_AT + 4 * VLINE, W = ZONES_AT + 6; // probe words: 44 scalars, then the throat line (3 words a cell)
+const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, ZONES_AT = VLINE_AT + 4 * VLINE, W = ZONES_AT + 22; // probe words: 44 scalars, then the throat line (3 words a cell)
 try {
   c = await construct(scene);
   const { solver } = c, base = c.base;
@@ -330,6 +337,10 @@ try {
   // The projection's face apertures: the coarse solid record, a vec4 (open, V+x, V+y, V+z) per owner index (umRecordV).
   const solidRecord = frame.solid?.coarse?.record ?? device.createBuffer({ label: "Tier budget no solid record", size: 16, usage: GPUBufferUsage.STORAGE });
   const textures = solver as unknown as { vertexPhiField: GPUTexture; vertexPhiScratch: GPUTexture; velocityA: GPUTexture };
+  // NB-FLIP's cell bins (a sample count a cell key, nbBinCount without a
+  // particle budget): the catch floor's particle mass, eight samples a cell.
+  const flipBins = (frame as unknown as { narrowBandFlip?: { airGateBuffer: GPUBuffer; budget?: unknown } }).narrowBandFlip;
+  const particleBins = flipBins && !flipBins.budget ? flipBins.airGateBuffer : device.createBuffer({ label: "Tier budget no bins", size: 4 * frame.ownership.capacity.address.cellKeys, usage: GPUBufferUsage.STORAGE });
   // Zone probe: one lane per owner of every tier, as UniformMixedDiagnostics.
   // Each load form (LOADS) runs over the phi field and over its scratch twin:
   // the frame ping-pongs phi through both, and a sample keeps the pair whose
@@ -337,9 +348,10 @@ try {
   const layout = uniformDetailBindLayout(device, { entries: [
     ...[0, 1].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } })),
     { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } },
-    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } }] });
+    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } },
+    { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } }] });
   const phis = { field: textures.vertexPhiField };
-  const groupOf = (phi: GPUTexture, buffer: GPUBuffer) => uniformDetailGroup(device, { layout, entries: [{ binding: 0, resource: phi }, { binding: 1, resource: textures.velocityA }, { binding: 2, resource: { buffer } }, { binding: 4, resource: { buffer: solidRecord } }] });
+  const groupOf = (phi: GPUTexture, buffer: GPUBuffer) => uniformDetailGroup(device, { layout, entries: [{ binding: 0, resource: phi }, { binding: 1, resource: textures.velocityA }, { binding: 2, resource: { buffer } }, { binding: 4, resource: { buffer: solidRecord } }, { binding: 5, resource: { buffer: particleBins } }] });
   const throat = [Math.floor((wall.low + wall.high) / 2), wall.holeY, wall.holeZ];
   // Debug points (box cells, tile corners): the reservoir's centre, 8 cells under its authored top, 8 above it, the throat.
   const top = Math.round(Math.max(0, ...(scene.fluid.initialLiquidVolumes ?? []).map(v => "max_m" in v ? (v as { max_m: { y: number } }).max_m.y : 0)) / h);
@@ -375,6 +387,7 @@ fn dims()->vec2u{return vec2u(0u);}`,
 ${bindings}
 @group(1) @binding(2) var<storage,read_write> words:array<atomic<u32>>;
 @group(1) @binding(4) var<storage,read> solidRecord:array<vec4f>;
+@group(1) @binding(5) var<storage,read> particleBins:array<u32>;
 ${loads}
 ${levelSetFillWGSL}
 // An owner's liquid in h cells: NB-FLIP's volume measure
@@ -398,12 +411,12 @@ const WALL_LOW:u32=${wall.low}u;const WALL_HIGH:u32=${wall.high}u;
 const THROAT_LOW:u32=${Math.max(0, wall.low - THROAT_REACH)}u;const THROAT_HIGH:u32=${wall.high + THROAT_REACH}u;
 const FLOOR_BAND:u32=${FLOOR_BAND}u;const THROAT:vec3i=vec3i(${throat.join(",")});
 const LINE_X0:i32=${wall.low - 16};
-const POINTS=array<vec3u,4>(${points.map(q => `vec3u(${q.join(",")})`).join(",")});
+const POINTS=array<vec3u,4>(${points.map(q => `vec3u(${q.map(v => Math.max(0, v)).join(",")})`).join(",")});
 // A fixed-point sum (4096 per cell) carried into a high word.
 fn addWide(at:u32,value:u32){if(value==0u){return;}let old=atomicAdd(&words[at],value);if(old+value<old){atomicAdd(&words[at+1u],1u);}}
-var<workgroup> sums:array<atomic<u32>,8>;
+var<workgroup> sums:array<atomic<u32>,16>;
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane<8u){atomicStore(&sums[lane],0u);}
+ if(lane<16u){atomicStore(&sums[lane],0u);}
  workgroupBarrier();
  // Debug: phi at fixed box points (reservoir centre, under its surface, air above, the throat).
  if(all(gid==vec3u(0u))){
@@ -462,7 +475,24 @@ var<workgroup> sums:array<atomic<u32>,8>;
   // column (above the floor band, within 64 cells of the wall); its h floor band.
   if(right&&w==4u){atomicAdd(&sums[5],fixed);}
   if(right&&q.y>=FLOOR_BAND&&q.x<WALL_HIGH+64u){atomicAdd(&sums[6],fixed);}
-  if(right&&w==1u&&q.y<FLOOR_BAND){atomicAdd(&sums[7],fixed);}
+  // The same over the right chamber's h owners: samples, their excess, the
+  // level set's liquid without and with samples.
+  if(right&&w==1u){
+   let samples=f32(min(particleBins[umCellAt(window)],8u))/8.0;
+   atomicAdd(&sums[12],u32(samples*4096.0+0.5));
+   atomicAdd(&sums[13],u32(max(samples-liquid,0.0)*4096.0+0.5));
+   if(samples==0.0){atomicAdd(&sums[14],fixed);}else{atomicAdd(&sums[15],fixed);}
+  }
+  if(right&&w==1u&&q.y<FLOOR_BAND){
+   atomicAdd(&sums[7],fixed);
+   // The h floor band's samples against its level set, cell by cell: the
+   // samples' mass (min(count, 8)/8 a cell), where they exceed the level
+   // set, the level set's liquid in cells without a sample, and in cells with one.
+   let samples=f32(min(particleBins[umCellAt(window)],8u))/8.0;
+   atomicAdd(&sums[8],u32(samples*4096.0+0.5));
+   atomicAdd(&sums[9],u32(max(samples-liquid,0.0)*4096.0+0.5));
+   if(samples==0.0){atomicAdd(&sums[10],fixed);}else{atomicAdd(&sums[11],fixed);}
+  }
   if(right&&q.y==0u&&fraction>0.01){atomicAdd(&words[18],w*w);}
   if(fraction>0.5){atomicMin(&words[21],q.x);atomicMax(&words[22],q.x+w);atomicMax(&words[23],q.y+w);}
   if(w==1u&&owner.lane==0u){
@@ -481,7 +511,7 @@ var<workgroup> sums:array<atomic<u32>,8>;
   if(w==1u&&right){atomicMax(&words[32],bitcast<u32>(abs(faceU(umFace(owner,0u,1,0u).anchor))));}
  }
  workgroupBarrier();
- if(lane<5u){addWide(2u*lane,atomicLoad(&sums[lane]));}else if(lane<8u){addWide(${ZONES_AT}u+2u*(lane-5u),atomicLoad(&sums[lane]));}
+ if(lane<5u){addWide(2u*lane,atomicLoad(&sums[lane]));}else if(lane<16u){addWide(${ZONES_AT}u+2u*(lane-5u),atomicLoad(&sums[lane]));}
 }`, ["probe"]);
   // As the solver's own kernels: a closed tank's frame and world bounds are
   // pipeline constants (uniformDetailPipeline); without them a page decode
@@ -499,12 +529,13 @@ var<workgroup> sums:array<atomic<u32>,8>;
   const rawLayout = device.createBindGroupLayout({ label: "Tier budget raw probe", entries: [
     ...[0, 1, 3].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } })),
     { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } },
-    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } }] });
+    { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } },
+    { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" as const } }] });
   const live = (t: GPUTexture) => uniformDetailField(t)?.storage.physical(t) ?? t;
   const baseOf = (t: GPUTexture) => uniformDetailField(t)?.storage.baseOf(t) ?? live(t);
   const rawGroup = (phi: GPUTexture, buffer: GPUBuffer) => device.createBindGroup({ label: "Tier budget raw probe", layout: rawLayout, entries: [
     { binding: 0, resource: live(phi).createView() }, { binding: 1, resource: baseOf(phi).createView() },
-    { binding: 2, resource: { buffer } }, { binding: 3, resource: live(textures.velocityA).createView() }, { binding: 4, resource: { buffer: solidRecord } }] });
+    { binding: 2, resource: { buffer } }, { binding: 3, resource: live(textures.velocityA).createView() }, { binding: 4, resource: { buffer: solidRecord } }, { binding: 5, resource: { buffer: particleBins } }] });
   const probes: { key: string; pipeline: GPUComputePipeline; buffer: GPUBuffer; bind: () => GPUBindGroup }[] = [];
   // The detail rewrite finds the field storage by the device that made it:
   // the solver's scoped initialization device (gpuInitializationDevice), not
@@ -754,6 +785,46 @@ var<workgroup> sums:array<atomic<u32>,8>;
     await cappedRing.mapAsync(GPUMapMode.READ); const u = new Uint32Array(cappedRing.getMappedRange().slice(0)); cappedRing.unmap();
     let n = 0; for (let i = 0; i < Math.min(cappedSteps, 4 * every); i++) n += u[i]!; cappedSteps = 0; traceCappedTotal += n; return n;
   };
+  // --census: the head census's particle evidence over every tile key at a
+  // sample (NB-FLIP bins from NB_ACTIVITY_SCORES: two importance words, heat
+  // planes, then the update-error certificate, 4 words a tile). Counts the
+  // criteria triggered and kept, those dropped by the budget, thin tiles whose
+  // deformation passes "need"'s transport test, and tiles with particle heat.
+  const census = options.includes("--census") ? (() => {
+    const flip = (frame as unknown as { narrowBandFlip: { airGateBuffer: GPUBuffer; activityHeatWord: number } }).narrowBandFlip, N = frame.ownership.capacity.tiles;
+    const start = 4 * (flip.activityHeatWord - 2 * N), bytes = 4 * 11 * N;
+    const buffer = device.createBuffer({ label: "Tier budget census", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const pass = UNIFORM_SURFACE_TRANSPORT_ERROR_H * h / dt;
+    return async () => {
+      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(flip.airGateBuffer, start, buffer, 0, bytes); device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ); const raw = buffer.getMappedRange().slice(0); buffer.unmap();
+      const u = new Uint32Array(raw), f = new Float32Array(raw), names = ["shape", "thin", "strain", "rotation", "impact", "approach"];
+      const kept: Record<string, number> = {}, dropped: Record<string, number> = {};
+      let wet = 0, crossing = 0, required = 0, thinChanging = 0, thinCertified = 0, need = 0, heated = 0, hot = 0, deformationMax = 0;
+      for (let t = 0; t < N; t++) {
+        const flags = u[2 * t + 1]!, bits = (flags >>> 16) & 63, drop = (flags & (1 << 27)) !== 0;
+        wet += +((flags & (1 << 29)) !== 0); crossing += +((flags & (1 << 28)) !== 0); required += +((flags & (1 << 25)) !== 0);
+        for (let k = 0; k < 6; k++) if (bits & (1 << k)) { const into = drop ? dropped : kept; into[names[k]!] = (into[names[k]!] ?? 0) + 1; }
+        const certified = f[7 * N + 4 * t + 3]! > 0, deformation = certified ? f[7 * N + 4 * t]! : Infinity;
+        if (bits & 2) { thinCertified += +certified; if (deformation > pass) thinChanging++; if (certified) deformationMax = Math.max(deformationMax, deformation); }
+        if (!drop && ((bits & 0x3c) || ((bits & 2) && deformation > pass))) need++;
+        const heat = f[2 * N + t]!; heated += +(heat > 0); hot += +(heat >= 2);
+      }
+      return { wet, crossing, required, kept, dropped, thinCertified, thinChanging, thinDeformationMax: +deformationMax.toExponential(2), pass_m_s: +pass.toExponential(2), need, heated, hot };
+    };
+  })() : undefined;
+  // --retire: the move's cumulative retirements by reason, and of those a
+  // sample less than a cell inside the advected level set.
+  const retired = narrowBandRetireCounting.on ? (() => {
+    const flip = (frame as unknown as { narrowBandFlip: { state: GPUBuffer } }).narrowBandFlip;
+    const buffer = device.createBuffer({ label: "Tier budget retirements", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    return async () => {
+      const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(flip.state, 4 * NARROW_BAND_RETIRE_WORD, buffer, 0, 32); device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ); const u = new Uint32Array(buffer.getMappedRange().slice(0)); buffer.unmap();
+      if (narrowBandRetireCounting.splitX >= 0) return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], splitCrowded: u[5], splitRetired: u[6], splitSeeded: u[7] };
+      return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], sparseShallow: u[5], blockedShallow: u[6], heatShallow: u[7] };
+    };
+  })() : undefined;
   const authoredFloor_m = Math.min(...(scene.fluid.initialLiquidVolumes ?? []).map(v => "min_m" in v ? (v as { min_m: { y: number } }).min_m.y : 0));
   const bound_m_s = Math.sqrt(2 * gravity * Math.max(0, authoredTop_m - Math.min(0, authoredFloor_m)));
   const printFlowStages = async (step: number) => {
@@ -761,7 +832,9 @@ var<workgroup> sums:array<atomic<u32>,8>;
     // The GPU probe's sums (as the rows' liquid_m3, mL) after each phi stage.
     const gpu: Record<string, Record<string, number>> = {};
     for (const mm of flowMeasured ?? []) { const u = await mm.done(); gpu[mm.name] = { left: +(wide(u, 2) * cell3 * 1e6).toFixed(2), right: +(wide(u, 4) * cell3 * 1e6).toFixed(2), total: +(wide(u, 0) * cell3 * 1e6).toFixed(2), wall: +(wide(u, 6) * cell3 * 1e6).toFixed(2),
-      right4h: +(wide(u, ZONES_AT) * cell3 * 1e6).toFixed(2), rightJet: +(wide(u, ZONES_AT + 2) * cell3 * 1e6).toFixed(2), rightFloor: +(wide(u, 8) * cell3 * 1e6).toFixed(2), rightFloorH: +(wide(u, ZONES_AT + 4) * cell3 * 1e6).toFixed(2) }; }
+      right4h: +(wide(u, ZONES_AT) * cell3 * 1e6).toFixed(2), rightJet: +(wide(u, ZONES_AT + 2) * cell3 * 1e6).toFixed(2), rightFloor: +(wide(u, 8) * cell3 * 1e6).toFixed(2), rightFloorH: +(wide(u, ZONES_AT + 4) * cell3 * 1e6).toFixed(2),
+      floorSamples: +(wide(u, ZONES_AT + 6) * cell3 * 1e6).toFixed(2), floorSamplesOver: +(wide(u, ZONES_AT + 8) * cell3 * 1e6).toFixed(2), floorBare: +(wide(u, ZONES_AT + 10) * cell3 * 1e6).toFixed(2), floorCovered: +(wide(u, ZONES_AT + 12) * cell3 * 1e6).toFixed(2),
+      rightSamples: +(wide(u, ZONES_AT + 14) * cell3 * 1e6).toFixed(2), rightSamplesOver: +(wide(u, ZONES_AT + 16) * cell3 * 1e6).toFixed(2), rightBare: +(wide(u, ZONES_AT + 18) * cell3 * 1e6).toFixed(2), rightCovered: +(wide(u, ZONES_AT + 20) * cell3 * 1e6).toFixed(2) }; }
     flowMeasured = undefined;
     const X = g.nx + 1, Y = g.ny + 1, zone = (x: number) => x < wall.low ? 0 : x < wall.high ? 1 : 2, names = ["left", "tube", "right"];
     let liquid: Uint8Array | undefined; const stages: Record<string, unknown>[] = [];
@@ -819,10 +892,35 @@ var<workgroup> sums:array<atomic<u32>,8>;
       stages.push({ stage: name, maxSpeed: Object.fromEntries(max.map((v, i) => [names[i], +v.toFixed(3)])), overBound: Object.fromEntries(over.map((v, i) => [names[i], v])) });
     }
     top.sort((p, q) => q.s - p.s); top.length = Math.min(top.length, 10);
+    // The projected h velocity's divergence (1/s, faces at each cell's low
+    // side) over cells whose six neighbours the start phi also calls liquid:
+    // by zone the largest, the count over 1/s, and the worst cells.
+    for (const { name, field } of fields) {
+      if (!name.startsWith("band/") && !name.startsWith("finishPair/") && !name.startsWith("project/")) continue;
+      // A face beside a wall cell (the dividing wall less its square hole) carries nothing: the solver leaves closed faces' values unweighted.
+      const side = wall.side ?? 1, solidCell = (x: number, y: number, z: number) => x >= wall.low && x < wall.high && !(y >= wall.holeY && y < wall.holeY + side && z >= wall.holeZ && z < wall.holeZ + side);
+      const at = (x: number, y: number, z: number, a: number) => { const n = [x, y, z]; n[a]!--; return solidCell(x, y, z) || solidCell(n[0]!, n[1]!, n[2]!) ? 0 : field[4 * (x + g.nx * (y + g.ny * z)) + a]!; };
+      const worst: { c: number[]; d: number }[] = [], max = [0, 0, 0], over = [0, 0, 0], cells = [0, 0, 0];
+      for (let z = 1; z < g.nz - 1; z++) for (let y = 1; y < g.ny - 1; y++) for (let x = 1; x < g.nx - 1; x++) {
+        if (!L[x + g.nx * (y + g.ny * z)] || !L[x - 1 + g.nx * (y + g.ny * z)] || !L[x + 1 + g.nx * (y + g.ny * z)] || !L[x + g.nx * (y - 1 + g.ny * z)] || !L[x + g.nx * (y + 1 + g.ny * z)] || !L[x + g.nx * (y + g.ny * (z - 1))] || !L[x + g.nx * (y + g.ny * (z + 1))]) continue;
+        const d = (at(x + 1, y, z, 0) - at(x, y, z, 0) + at(x, y + 1, z, 1) - at(x, y, z, 1) + at(x, y, z + 1, 2) - at(x, y, z, 2)) / h;
+        if (!Number.isFinite(d)) continue;
+        const k = zone(x); cells[k]!++; if (Math.abs(d) > max[k]!) max[k] = Math.abs(d); if (Math.abs(d) > 1) over[k]!++;
+        if (Math.abs(d) > 1) { worst.push({ c: [x, y, z], d }); if (worst.length > 64) { worst.sort((p, q) => Math.abs(q.d) - Math.abs(p.d)); worst.length = 16; } }
+      }
+      worst.sort((p, q) => Math.abs(q.d) - Math.abs(p.d)); worst.length = Math.min(worst.length, 12);
+      // The divergence around the throat: x from wall.low - 12, y and z from the hole's low cell - 4, ten each; null where the start phi is air.
+      const near: (number | null)[][][] = [];
+      for (let z = throat[2]! - 4; z < throat[2]! + 6; z++) { const plane: (number | null)[][] = []; for (let y = throat[1]! - 4; y < throat[1]! + 6; y++) { const row: (number | null)[] = []; for (let x = wall.low - 12; x < wall.high + 8; x++) {
+        row.push(L[x + g.nx * (y + g.ny * z)] ? +((at(x + 1, y, z, 0) - at(x, y, z, 0) + at(x, y + 1, z, 1) - at(x, y, z, 1) + at(x, y, z + 1, 2) - at(x, y, z, 2)) / h).toFixed(2) : null); } plane.push(row); } near.push(plane); }
+      console.log(JSON.stringify({ divergenceNear: step, stage: name, x0: wall.low - 12, y0: throat[1]! - 4, z0: throat[2]! - 4, near }));
+      console.log(JSON.stringify({ divergence: step, stage: name, cells: Object.fromEntries(cells.map((v, i) => [names[i], v])), max: Object.fromEntries(max.map((v, i) => [names[i], +v.toFixed(3)])), over1: Object.fromEntries(over.map((v, i) => [names[i], v])), worst: worst.map(w => [...w.c, +w.d.toFixed(2)]) }));
+    }
     console.log(JSON.stringify({ flowStage: step, bound_m_s: +bound_m_s.toFixed(3), stages,
       fastest: top.map(f => ({ face: [f.x, f.y, f.z, "xyz"[f.a]], liquidCell: L[f.x + g.nx * (f.y + g.ny * f.z)], values: Object.fromEntries(fields.map(({ name, field }) => [name, +field[4 * (f.x + g.nx * (f.y + g.ny * f.z)) + f.a]!.toFixed(3)])) })) }));
   };
   await record(0, 0);
+  const band: number[][] = [];
   for (let step = 1; step <= steps; step++) {
     frameReached = step;
     phiTaken = phiStageSteps.has(step) ? [] : undefined;
@@ -830,12 +928,35 @@ var<workgroup> sums:array<atomic<u32>,8>;
     const wall_ms = await advance(step);
     await printPhiStages(step);
     await printFlowStages(step);
+    { const info = solver.info as unknown as Record<string, number | undefined>; band.push([step, info.uniformPressureBandCycles ?? -1, info.uniformPressureBandResidual ?? -1]); }
     { const info = solver.info as unknown as Record<string, number | undefined>; dust.dustMass_cells += info.uniformVolumeDustMass_cells ?? 0; dust.orphanDustMass_cells += info.uniformVolumeOrphanDustMass_cells ?? 0; dust.steps++; }
     walls.push({ frame: step, wall_ms, afterSample: (step - 1) % every === 0 });
     if (solver.info.simulationPipelineError) throw new Error(String(solver.info.simulationPipelineError));
     assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - step * dt) < 1e-8);
     if (step % every === 0 || step === steps) {
       const capped = await readCapped(); if (capped) console.log(JSON.stringify({ traceCapped: capped, step }));
+      if (census) console.log(JSON.stringify({ census: await census(), step }));
+      if (retired) console.log(JSON.stringify({ retired: await retired(), step }));
+      // The last step's band solve header: initial residual, the residual after each cycle's pre-smoothing, the native rows' initial and final.
+      {
+        const arena = (frame as unknown as { band: { index: GPUBuffer } }).band;
+        const hb = device.createBuffer({ label: "Tier budget band header", size: 4 * 37, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        const enc = device.createCommandEncoder(); enc.copyBufferToBuffer(arena.index, 0, hb, 0, 4 * 37); device.queue.submit([enc.finish()]);
+        await hb.mapAsync(GPUMapMode.READ); const hu = new Uint32Array(hb.getMappedRange().slice(0)); hb.unmap(); hb.destroy(); const hf = new Float32Array(hu.buffer);
+        const valid = hu[25]!; const history = Array.from({ length: 16 }, (_, k) => (valid >> k) & 1 ? +hf[8 + k]!.toExponential(3) : null).filter(v => v !== null);
+        console.log(JSON.stringify({ bandHeader: { tiles: hu[0], cycles: hu[4], final: +hf[2]!.toExponential(3), initial: (valid >> 16) & 1 ? +hf[26]!.toExponential(3) : null, history, nativeInitial: +hf[27]!.toExponential(3), nativeFinal: +hf[28]!.toExponential(3) }, step }));
+        // A debug build's large-residual cells (x, y, z, tag: cycle, 100 final, 200 + cycle native, 300 native final; residual; kinds).
+        const debugWord = (arena as unknown as { debugWord?: number }).debugWord;
+        if (debugWord) {
+          const W = 16, words = 1 + W * 8192, db = device.createBuffer({ label: "Tier budget band debug", size: 4 * words, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+          const e2 = device.createCommandEncoder(); e2.copyBufferToBuffer(arena.index, 4 * debugWord, db, 0, 4 * words); device.queue.submit([e2.finish()]);
+          await db.mapAsync(GPUMapMode.READ); const du = new Uint32Array(db.getMappedRange().slice(0)); db.unmap(); db.destroy(); const df = new Float32Array(du.buffer);
+          const n = Math.min(du[0]!, 8192), cells = Array.from({ length: n }, (_, e) => ({ x: du[1 + W * e]!, y: du[2 + W * e]!, z: du[3 + W * e]!, tag: du[4 + W * e]!, r: +df[5 + W * e]!.toPrecision(4), kinds: du[6 + W * e]!.toString(16), extra: Array.from(df.subarray(7 + W * e, 1 + W * (e + 1)), v => +v.toPrecision(4)) }));
+          console.log(JSON.stringify({ bandDebug: { recorded: du[0], cells }, step }));
+        }
+      }
+      // The h band's V-cycles and final residual (1/s, its receipt) for each step since the last sample.
+      if (band.length) { const r = band.map(b => b[2]!).sort((x, y) => x - y); console.log(JSON.stringify({ band: { cycles: band.map(b => b[1]), residualMedian: +r[r.length >> 1]!.toExponential(3), residualMax: +r[r.length - 1]!.toExponential(3), residuals: band.map(b => +b[2]!.toExponential(3)) }, step })); band.length = 0; }
       const row = await record(step, wall_ms);
       if ((row.pool as { fatal?: string }).fatal) throw new Error(`pool fatal: ${(row.pool as { fatal?: string }).fatal}`);
     }

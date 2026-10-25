@@ -500,7 +500,7 @@ export class UniformMixedFrame {
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
    // A budget's banks still hold the extension's paired companion at every reservation (bindStage).
-   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,o.capacity.address.poolTiles)});
+   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,o.capacity.address.poolTiles)},this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound);
   this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -618,7 +618,7 @@ export class UniformMixedFrame {
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
    root:{rhs:root.rhs[0],minimum:root.minimum[0],pressure:root.pressure,phi:root.phi!,topology:rootTopology,support:root.ownership.support,supportWord:9*p.layout.tiles.length+24},
    status:this.status,acceptance:this.state,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined,
-   bulk:this.bulk?{record:this.bulk.record,regions:this.bulk.regions}:undefined},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles,surfaceImpulse:this.nearSettled.surfaceImpulse,tail:this.nearSettled.pressureTail},solid);
+   bulk:this.bulk?{record:this.bulk.record,regions:this.bulk.regions}:undefined},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles,surfaceImpulse:this.nearSettled.surfaceImpulse,tail:this.nearSettled.pressureTail,nativeSweeps:this.nearSettled.nativeSmoothing==="composite"?1:0},solid);
   // The next full band projection overwrites these tile faces; its copy
   // stage preserves only non-band texels. No reader needs their 4h return.
   this.split.transfer.attachProjectedBand(this.band.index,this.band.slotMapOffset);

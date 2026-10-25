@@ -122,6 +122,9 @@ export interface UniformMixedDynamicImportance {
  surfaceDistance?:number;
  /** NB has surface-derived occupancy; include zero boundaries on both sides. */
  surfaceAuthority?:boolean;
+ /** Score every criterion on a tile shape already requires (NB-FLIP
+  * seedScoring "every"): its triggers seed particles. Refinement is unchanged. */
+ scoreShaped?:boolean;
  criteria:Readonly<Record<UniformDetailCriterion,boolean>>;
  /** Liquid or air thinner than this across a surface tile, in h. Twice the
   * deepest phi on either side, over the 4-aligned vertices one tile around. */
@@ -573,7 +576,9 @@ fn unseeded()->bool{return (policy.shaping.x&1024u)!=0u;}
 fn shapeDisplacement()->bool{return (policy.shaping.x&2048u)!=0u;}
 // A tile shape requires needs no other score, unless a layer shows them or
 // the budget ranks it by its top one.
-fn scoreAll()->bool{return recordReasons()||nbBudgetOn();}
+// Bit 131072 (importance.scoreShaped, NB-FLIP seedScoring "every"): every
+// surface tile, its triggers seed and heat particles.
+fn scoreAll()->bool{return recordReasons()||nbBudgetOn()||(policy.shaping.x&131072u)!=0u;}
 // The lowest score, over its threshold, that can matter: a trigger, or with
 // a hold the score that keeps it; a layer shows every one.
 fn scoreFloor()->f32{
@@ -1915,7 +1920,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   // solids and bodies remain) requires no tile: decide then reads no table.
   let criteria=0;for(let k=0;k<UNIFORM_DETAIL_CRITERIA.length;k++)if(importance.criteria[UNIFORM_DETAIL_CRITERIA[k]!])criteria|=1<<k;
   const seeded=!!policy.reasons||fastTravel>0||holdSteps>0||criteria!==0;
-  U[20]=(importance.bulk?256:0)|(importance.sources==="unresolved"?65536:importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)|(importance.surfaceAuthority?32768:0)|criteria;
+  U[20]=(importance.bulk?256:0)|(importance.sources==="unresolved"?65536:importance.sources===false?0:512)|(seeded?0:1024)|(shapeMetric==="displacement"?2048:0)|(importance.surfaceOnly?4096:0)|(surfaceDistance<<13)|(importance.surfaceAuthority?32768:0)|(importance.scoreShaped?131072:0)|criteria;
   U[21]=holdSteps;U[22]=0xffffffff;U[23]=Math.min(255,Math.floor(retireRatio*IMPORTANCE.scoreOne));
   // Any change of the policy (word 6 aside) retires every replay record.
   {const last=this.policyLast;let changed=false;for(let i=0;i<28;i++)if(i!==6&&last[i]!==U[i]){last[i]=U[i]!;changed=true;}if(changed)this.policyGeneration=(this.policyGeneration%0xfffffffe)+1;}

@@ -12,11 +12,11 @@ const traceOf = (source: string) => {
   return source.slice(at, source.indexOf("\n}", at) + 2);
 };
 
-test("momentumTrace defaults to the one-step midpoint trace, whose source is unchanged", () => {
-  assert.equal(uniformNearSettled({}).momentumTrace, "midpoint");
-  assert.equal(uniformNearSettled({ momentumTrace: "bogus" }).momentumTrace, "midpoint");
-  assert.equal(uniformNearSettled({ momentumTrace: "substep" }).momentumTrace, "substep");
-  assert.equal(narrowBandFlipValues({}).momentumTrace, "midpoint");
+test("momentumTrace defaults to the substep trace, and the midpoint trace's source is unchanged", () => {
+  assert.equal(uniformNearSettled({}).momentumTrace, "substep");
+  assert.equal(uniformNearSettled({ momentumTrace: "bogus" }).momentumTrace, "substep");
+  assert.equal(uniformNearSettled({ momentumTrace: "midpoint" }).momentumTrace, "midpoint");
+  assert.equal(narrowBandFlipValues({}).momentumTrace, "substep");
   for (const sampler of ["software", "texture32", "texture16"] as const) {
     assert.equal(uniformCachedMomentumSamplingWGSL(sampler), uniformCachedMomentumSamplingWGSL(sampler, "midpoint"));
     assert.equal(traceOf(uniformCachedMomentumSamplingWGSL(sampler)), `fn umUnitTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32 {
