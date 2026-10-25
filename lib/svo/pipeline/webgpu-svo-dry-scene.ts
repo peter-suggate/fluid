@@ -992,6 +992,7 @@ const rasterPrimaryTargets: GPUColorTargetState[] = [
   { format: SVO_DRY_SPLIT_GEOMETRY_FORMAT },
   { format: SVO_DRY_SPLIT_IDENTITY_FORMAT },
 ];
+const compactMeshPrimaryTargets = rasterPrimaryTargets.map((target, index) => index < 2 ? null : target);
 
 /** Below this pixel count, Metal's TBDR fragment resolve remains faster. */
 export const SVO_SCENE_PRIMITIVE_COMPUTE_MINIMUM_PIXELS = 1 << 20;
@@ -1205,6 +1206,7 @@ export class SparseVoxelDrySceneRenderer {
   /** Raster-assisted primary visibility (traversal mode `raster-primary`). */
   private surfaceMeshDisposed = false;
   private surfaceMeshDrawCache?: ReturnType<SparseVoxelDrySceneRenderer["createSurfaceMeshDrawBundle"]>;
+  private readonly compactMeshPrimaryPipelines = new WeakMap<GPURenderPipeline, GPURenderPipeline>();
   private surfaceMeshPass?: GPURenderPassDescriptor;
   private deferredLightingPass?: GPURenderPassDescriptor;
   private encodeResult?: { readonly encoded: true; readonly sampledTargetView: GPUTextureView };
@@ -2312,15 +2314,16 @@ export class SparseVoxelDrySceneRenderer {
           select.dispatchWorkgroups(Math.ceil(this.importedSurfaceInstances.length/64));select.end();
     }
     tracePhase?.("surface-mesh-cull");
-    const identityStore = this.identityPlanesInspected || this.rigidBodyCount > 0 ? "store" : "discard";
+    const identityStore = this.identityPlanesInspected || this.rigidBodyCount > 0 || this.rasterRigidActive || this.silhouetteRefinementEnabled ? "store" : "discard";
+    const compact = this.experiments.surfaceMeshCompactTargets !== false && identityStore === "discard";
     const previous = this.surfaceMeshPass;
-    const attachments = previous?.colorAttachments as GPURenderPassColorAttachment[] | undefined;
+    const attachments = previous?.colorAttachments as (GPURenderPassColorAttachment | null)[] | undefined;
     if (!previous || previous.depthStencilAttachment?.view !== views.hardwareDepth
-      || attachments![0]!.view !== views.packedSurface || attachments![1]!.view !== views.identityMedia
+      || attachments![0]?.view !== (compact ? undefined : views.packedSurface) || attachments![1]?.view !== (compact ? undefined : views.identityMedia)
       || attachments![2]!.view !== this.splitGeometryView || attachments![3]!.view !== this.splitOpaqueIdentityView
-      || attachments![0]!.storeOp !== identityStore) {
+      || (!compact && attachments![0]!.storeOp !== identityStore)) {
       this.surfaceMeshPass = { label: "Voxel surface mesh rasterization",
-        colorAttachments: this.rasterPrimaryAttachments(views, "clear", identityStore),
+        colorAttachments: this.rasterPrimaryAttachments(views, "clear", identityStore).map((attachment, index) => compact && index < 2 ? null : attachment),
         depthStencilAttachment: { view: views.hardwareDepth, depthLoadOp: "clear", depthStoreOp: "store", depthClearValue: 0 } };
     }
     const rigid = this.rasterRigidActive && !this.disabledStages.has("rigid-impostor") && !this.identityPlanesInspected;
@@ -2330,9 +2333,9 @@ export class SparseVoxelDrySceneRenderer {
       || cached.group !== group || cached.planes !== this.source!.structural!.planarBoundaries.count
       || cached.instances !== this.importedSurfaceInstances || cached.imported !== this.importedSurfacePipeline
       || cached.records !== this.importedSurfaceLodRecords || cached.args !== this.importedSurfaceDrawArgs
-      || cached.rigid !== rigid || cached.rigidPipeline !== this.rasterRigidDirectPipeline
+      || cached.compact !== compact || cached.rigid !== rigid || cached.rigidPipeline !== this.rasterRigidDirectPipeline
       || cached.rigidGroup !== this.rasterRigidInputBindGroup) {
-      this.surfaceMeshDrawCache = this.createSurfaceMeshDrawBundle(usePrepass, group);
+      this.surfaceMeshDrawCache = this.createSurfaceMeshDrawBundle(usePrepass, group, compact);
     }
     const draw = encoder.beginRenderPass(this.surfaceMeshPass!);
     draw.executeBundles(this.surfaceMeshDrawCache!.bundles);
@@ -2359,23 +2362,24 @@ export class SparseVoxelDrySceneRenderer {
   /** Commands and bindings are immutable until a publication/variant changes.
    * Camera, body poses, LOD and visible draw counts remain GPU buffer contents,
    * so replaying these commands never caches visibility or skips a fresh draw. */
-  private createSurfaceMeshDrawBundle(usePrepass: boolean, group: number) {
+  private createSurfaceMeshDrawBundle(usePrepass: boolean, group: number, compact: boolean) {
     const pipelines = this.surfaceMeshPipelines!;
     const state = this.surfaceMeshState!;
     const draw = this.device.createRenderBundleEncoder({ label: "Cached primary draw commands",
-      colorFormats: rasterPrimaryTargets.map(target => target.format),
+      colorFormats: (compact ? compactMeshPrimaryTargets : rasterPrimaryTargets).map(target => target?.format ?? null),
       depthStencilFormat: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat });
     draw.setBindGroup(0, this.bindGroup);
     if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
     draw.setBindGroup(group, this.surfaceMeshDrawGroup!);
     // Background, projected exact slabs, then cached voxel triangles. Slabs
     // test only their covered pixels instead of scanning the entire catalogue.
-    draw.setPipeline(pipelines.background); draw.draw(3);
-    draw.setPipeline(pipelines.planar); draw.draw(4, this.source!.structural!.planarBoundaries.count);
+    const primaryPipeline = (pipeline: GPURenderPipeline) => compact ? this.compactMeshPrimaryPipelines.get(pipeline)! : pipeline;
+    draw.setPipeline(primaryPipeline(pipelines.background)); draw.draw(3);
+    draw.setPipeline(primaryPipeline(pipelines.planar)); draw.draw(4, this.source!.structural!.planarBoundaries.count);
     // Keep native assets in the same tile pass: do not store and reload
     // four full-resolution G-buffer attachments and hardware depth.
     if (this.importedSurfaceInstances.length && this.importedSurfacePipeline) {
-          draw.setPipeline(this.importedSurfacePipeline);
+          draw.setPipeline(primaryPipeline(this.importedSurfacePipeline));
           draw.setBindGroup(0, this.bindGroup);
           if (this.experiments.importedSurfaceBatching !== false) {
             this.importedSurfaceGroups.forEach((batch, index) => {
@@ -2397,7 +2401,7 @@ export class SparseVoxelDrySceneRenderer {
             }
           }
     }
-    draw.setPipeline(pipelines.draw);
+    draw.setPipeline(primaryPipeline(pipelines.draw));
     if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
     draw.setBindGroup(group, this.surfaceMeshDrawGroup!);
     draw.drawIndirect(state, SVO_SURFACE_MESH_STATE.packedDraw * 4);
@@ -2406,12 +2410,27 @@ export class SparseVoxelDrySceneRenderer {
       draw.setBindGroup(0, this.rasterRigidInputBindGroup!);
       draw.draw(SVO_RIGID_RASTER_CONTRACT.verticesPerProxy, SVO_RIGID_RASTER_CONTRACT.maximumBodies);
     }
-    return { bundles: [draw.finish()], main: this.bindGroup, pipelines, mesh: this.surfaceMeshDrawGroup,
+    return { bundles: [draw.finish()], compact, main: this.bindGroup, pipelines, mesh: this.surfaceMeshDrawGroup,
       prepass: usePrepass ? this.conePrepassBindGroup : undefined, group,
       planes: this.source!.structural!.planarBoundaries.count, instances: this.importedSurfaceInstances,
       imported: this.importedSurfacePipeline, records: this.importedSurfaceLodRecords, args: this.importedSurfaceDrawArgs,
       rigid: this.rasterRigidActive && !this.disabledStages.has("rigid-impostor") && !this.identityPlanesInspected,
       rigidPipeline: this.rasterRigidDirectPipeline, rigidGroup: this.rasterRigidInputBindGroup };
+  }
+
+  /** Keep a ready full-identity variant for picking, overlays and seam closure.
+   * Lighting alone consumes only the last two targets. Removing the unused
+   * targets also removes their tile footprint and fragment output work. */
+  private async compileMeshPrimaryPipeline(descriptor: GPURenderPipelineDescriptor): Promise<GPURenderPipeline> {
+    const pipeline = await this.device.createRenderPipelineAsync(descriptor);
+    if (this.experiments.surfaceMeshCompactTargets !== false) {
+      const compact = await this.device.createRenderPipelineAsync({ ...descriptor,
+        label: `${descriptor.label} (lighting planes only)`,
+        fragment: { ...descriptor.fragment!, targets: compactMeshPrimaryTargets },
+      });
+      this.compactMeshPrimaryPipelines.set(pipeline, compact);
+    }
+    return pipeline;
   }
 
   private async ensureBrickCullPipelines(): Promise<void> {
@@ -4118,13 +4137,13 @@ export class SparseVoxelDrySceneRenderer {
           this.device.createComputePipelineAsync({ label: entryPoint, layout: computeLayout, compute: { module, entryPoint } })));
         const depthStencil: GPUDepthStencilState = { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
           depthWriteEnabled: true, depthCompare: "greater" };
-        const draw = await this.device.createRenderPipelineAsync({ label: "Opaque voxel surface triangles", layout: drawLayout,
+        const draw = await this.compileMeshPrimaryPipeline({ label: "Opaque voxel surface triangles", layout: drawLayout,
           vertex: { module, entryPoint: "surfaceMeshVertex" }, fragment: { module, entryPoint: "surfaceMeshFragment", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-list", cullMode: "none" }, depthStencil });
-        const background = await this.device.createRenderPipelineAsync({ label: "Voxel mesh backdrop and pending geometry", layout: drawLayout,
+        const background = await this.compileMeshPrimaryPipeline({ label: "Voxel mesh backdrop and pending geometry", layout: drawLayout,
           vertex: { module: vertexModule, entryPoint: "vertexMain" }, fragment: { module, entryPoint: "surfaceMeshBackground", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-list" }, depthStencil: { ...depthStencil, depthCompare: "always" } });
-        const planar = await this.device.createRenderPipelineAsync({ label: "Projected exact planar slabs", layout: drawLayout,
+        const planar = await this.compileMeshPrimaryPipeline({ label: "Projected exact planar slabs", layout: drawLayout,
           vertex: { module, entryPoint: "meshPlanarVertex" }, fragment: { module, entryPoint: "meshPlanarFragment", targets: rasterPrimaryTargets },
           primitive: { topology: "triangle-strip" }, depthStencil: { ...depthStencil, depthCompare: "greater-equal" } });
         surfaceMesh = { prepare, boxes, ingest, schedule, count, allocate, emit, publish, select, cull, cullDispatch, candidates, draw, background, planar };
@@ -4173,7 +4192,7 @@ export class SparseVoxelDrySceneRenderer {
         label: "Native asset draw-group reset", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, this.importedSurfaceLodLayout!] }),
         compute: { module, entryPoint: "importedSurfaceResetGroups" },
       }) : undefined;
-      const importedSurface = this.experiments.surfaceMesh ? await this.device.createRenderPipelineAsync({
+      const importedSurface = this.experiments.surfaceMesh ? await this.compileMeshPrimaryPipeline({
         label: "Cached native asset surfaces", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
         vertex: { module, entryPoint: "importedSurfaceVertex", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }, { arrayStride: 4, stepMode: "instance", attributes: [{ shaderLocation: 1, offset: 0, format: "uint32" }] }] },
         fragment: { module, entryPoint: "importedSurfaceFragment", targets: rasterPrimaryTargets },
@@ -5644,14 +5663,14 @@ export class SparseVoxelDrySceneRenderer {
 
   /**
    * Whether an overlay will read this frame's packed-surface and identity-media
-   * planes. Taken every frame, beside the disabled set, and like it never
-   * reaches a shader or a bundle.
+   * planes. Sampled every frame beside the disabled stages; a change selects
+   * an already-compiled target variant and rebuilds the cached draw bundle.
    *
-   * Under the surface mesh nothing in the frame reads those two planes: split
-   * lighting reads the geometry and opaque-identity planes. Only rigid-body
-   * picking and the stage overlay read them, so without either the mesh pass
-   * discards them in tile memory instead of writing 24 B/px back. Picking with
-   * no bodies is always a miss, so it needs no plane.
+   * Split lighting reads the geometry and opaque-identity planes. Rigid-body
+   * picking, stage overlays and optional seam closure need the other planes.
+   * Without these consumers the mesh uses pipelines with those targets omitted;
+   * the profiling reference retains them with discard stores. Picking with no
+   * bodies is always a miss, so it needs no plane.
    */
   setIdentityPlanesInspected(inspected: boolean): void {
     this.identityPlanesInspected = inspected;

@@ -623,6 +623,8 @@ export interface SvoDryOptimizationExperiments {
   readonly surfaceMesh?: boolean;
   /** Disable only for paired performance/image comparisons. */
   readonly surfaceMeshCulling?: boolean;
+  /** Omit unconsumed identity attachments; false retains the profiling reference. */
+  readonly surfaceMeshCompactTargets?: boolean;
   /** Group repeated native assets by surface LOD. False retains the reference draws for A/B profiling. */
   readonly importedSurfaceBatching?: boolean;
   /** Full-detail native asset casters replace duplicate voxel shadow meshes; false is the profiling reference. */

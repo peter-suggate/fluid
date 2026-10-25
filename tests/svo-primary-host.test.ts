@@ -38,9 +38,10 @@ test('moving rigid bounds update only their 16-byte parameter block and memoized
 function meshFixture() {
   let bundles = 0, draws = 0, writes = 0, receipts = 0;
   const compute: GPUComputePassDescriptor[] = [], render: GPURenderPassDescriptor[] = [];
-  const commands = { setPipeline() {}, setBindGroup() {}, setVertexBuffer() {}, setIndexBuffer() {}, draw() {}, drawIndirect() {}, drawIndexedIndirect() {}, finish() { return {}; } };
+  const bundleDescriptors: GPURenderBundleEncoderDescriptor[] = [], boundPipelines: unknown[] = [];
+  const commands = { setPipeline(pipeline: unknown) { boundPipelines.push(pipeline); }, setBindGroup() {}, setVertexBuffer() {}, setIndexBuffer() {}, draw() {}, drawIndirect() {}, drawIndexedIndirect() {}, finish() { return {}; } };
   const renderer = Object.assign(Object.create(SparseVoxelDrySceneRenderer.prototype), {
-    device: { queue: { writeBuffer() { writes++; } }, createRenderBundleEncoder() { bundles++; return commands; } },
+    device: { queue: { writeBuffer() { writes++; } }, createRenderBundleEncoder(descriptor: GPURenderBundleEncoderDescriptor) { bundles++; bundleDescriptors.push(descriptor); return commands; } },
     source: { structural: { domain: { brickSize: 8 }, planarBoundaries: { count: 2 }, sceneMaintenance: { activity: 0 } } },
     surfaceMeshState: {}, surfaceMeshArena: { size: 4096 }, surfaceMeshCullIndirect: {}, surfaceMeshReadback: {},
     surfaceMeshPipelines: Object.fromEntries(['prepare', 'publish', 'select', 'candidates', 'cullDispatch', 'cull', 'ingest', 'schedule', 'count', 'allocate', 'emit', 'boxes', 'background', 'planar', 'draw'].map(key => [key, {}])),
@@ -52,13 +53,14 @@ function meshFixture() {
     importedSurfaceInstances: [], disabledStages: new Set(), rigidBodyCount: 0,
     splitGeometryView: {}, splitOpaqueIdentityView: {}, ensureSurfaceMeshWork() {},
   });
+  renderer.compactMeshPrimaryPipelines = new WeakMap(Object.values(renderer.surfaceMeshPipelines).map(pipeline => [pipeline as object, {}]));
   const encoder = {
     beginComputePass(descriptor: GPUComputePassDescriptor) { compute.push(descriptor); return { ...commands, dispatchWorkgroups() {}, dispatchWorkgroupsIndirect() {}, end() {} }; },
     beginRenderPass(descriptor: GPURenderPassDescriptor) { render.push(descriptor); return { executeBundles() { draws++; }, end() {} }; },
     copyBufferToBuffer(_a: unknown, _b: number, target: unknown, _d: number, size: number) { if (target === renderer.surfaceMeshReadback) { assert.equal(size, SVO_SURFACE_MESH_STATE_BYTES); receipts++; } },
   };
   const views = { hardwareDepth: {}, packedSurface: {}, identityMedia: {} };
-  return { renderer, views, frame: () => renderer.encodeSurfaceMesh(encoder, views, false, 1), compute, render,
+  return { renderer, views, frame: () => renderer.encodeSurfaceMesh(encoder, views, false, 1), compute, render, bundleDescriptors, boundPipelines,
     counts: () => ({ bundles, draws, writes, receipts }) };
 }
 
@@ -80,6 +82,27 @@ test('warm primary replays commands and descriptors, still culls every frame, an
   f.frame();
   assert.equal(f.renderer.surfaceMeshStatus.state, 'pending');
   assert.ok(f.compute.some(p => p.label === 'Voxel surface mesh quad emission'), 'known edits start in this frame, even while a receipt is pending');
+});
+
+test('primary target consumers switch both attachments and ready pipelines, then restore the compact draw', () => {
+  const f = meshFixture();
+  const frame = (compact: boolean) => {
+    f.boundPipelines.length = 0;f.frame();
+    const attachments = Array.from(f.render.at(-1)!.colorAttachments);
+    assert.equal(attachments[0] === null, compact);assert.equal(attachments[1] === null, compact);
+    const formats = Array.from(f.bundleDescriptors.at(-1)!.colorFormats);
+    assert.equal(formats[0] === null, compact);assert.equal(formats[1] === null, compact);
+    for (const key of ['background', 'planar', 'draw']) {
+      const full = f.renderer.surfaceMeshPipelines[key], lean = f.renderer.compactMeshPrimaryPipelines.get(full);
+      assert.ok(f.boundPipelines.includes(compact ? lean : full));
+      assert.ok(!f.boundPipelines.includes(compact ? full : lean));
+    }
+    if (!compact) assert.equal(attachments[0]!.storeOp, 'store');
+  };
+  frame(true);
+  for (const [key, on, off] of [['identityPlanesInspected', true, false], ['rigidBodyCount', 1, 0], ['silhouetteRefinementEnabled', true, false]] as const) {
+    f.renderer[key] = on;frame(false);f.renderer[key] = off;frame(true);
+  }
 });
 
 test('primary commands invalidate on bindings, assets, variants and rigid inspection; resize replaces attachments', () => {

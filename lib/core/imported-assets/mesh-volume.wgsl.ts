@@ -1,3 +1,9 @@
+/** Equal non-air corners have an unambiguous material. Keep the accumulated
+ * distance and normal arithmetic identical to the general election path. */
+export const meshVolumeUniformMaterialWGSL = /* wgsl */ `if(ids[0]!=0u&&${Array.from({length:7},(_,i)=>`ids[${i+1}]==ids[0]`).join("&&")}){
+    result.material=ids[0];result.distance=value;if(dot(normal,normal)>1e-12){result.normal=normalize(normal);}return result;
+  }`;
+
 /** Sampler shared by every host of the field-program arena. Pointers within a
  * volume are relative to its header, so the same image works in both arenas.
  * Marching uses the scalar entry point; only an accepted surface decodes PBR. */
@@ -28,7 +34,7 @@ fn ${distanceOnly ? `${name}Distance` : name}(base:u32,p:vec3f)->${distanceOnly 
     if(m!=0u){normal+=w*${name}Normal(identity);}`}
   }
   ${distanceOnly && cacheDistance ? `${name}DistanceHeld=true;${name}DistanceBase=base;${name}DistanceCell=cell;` : ""}
-  ${distanceOnly ? "return value;" : `var best=-1.0;
+  ${distanceOnly ? "return value;" : `${meshVolumeUniformMaterialWGSL}var best=-1.0;
   // Constant indices avoid dynamic local-array access in material election.
   // Preserve the original corner order, addition order and first-wins ties.
   ${Array.from({ length: 8 }, (_, i) => `
