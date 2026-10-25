@@ -140,6 +140,15 @@ export const UNIFORM_REGION_HEAT_STILL_ROUNDOFF=256;
 /** coldSurface "still": the omission a still surface may sum since its last
  * trigger, cells, with no noise floor. */
 export const UNIFORM_REGION_HEAT_STILL_H=0.01;
+/** coldSurface "still": words after the active list in tiers. +0 the liquid's
+ * extent along gravity, regions, at the last spread (persistent; 0 before
+ * any); +1/+2 this frame's highest and lowest liquid region along gravity
+ * (max of 32768 +- the projection); +3 this frame's fastest liquid travel,
+ * h a step (f32 bits); +4 the frames whose travel reached a region width,
+ * where a one-region halo proves nothing and every surface region warmed
+ * (persistent, for probes). */
+export const UNIFORM_REGION_HEAT_STILL_WORD=(regions:number):number=>UNIFORM_REGION_HEAT_ACTIVE_WORD(regions)+1+regions;
+export const UNIFORM_REGION_HEAT_STILL_WORDS=8;
 const STATE_WORDS=UNIFORM_REGION_HEAT_STATE_WORDS;
 const PASS:GPUComputePassDescriptor={label:"Uniform region work heat"};
 
@@ -229,7 +238,7 @@ export class UniformRegionHeat {
   readonly state:GPUBuffer;
   readonly allocatedBytes:number;
   private readonly params:GPUBuffer;
-  private readonly words=new Float32Array(8);
+  private readonly words=new Float32Array(12);
   private readonly bits=new Uint32Array(this.words.buffer);
   private layout?:GPUBindGroupLayout;
   private sources?:UniformRegionHeatSources;
@@ -257,10 +266,10 @@ export class UniformRegionHeat {
     this.groupGrid=Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.regions);this.laneGrid=Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(this.regions/64));
     const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
     // Every region reads HOT (and not deep COLD) until the first encode.
-    this.tiers=device.createBuffer({label:"Uniform region work tiers",size:4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions)+4*(1+this.regions),usage,mappedAtCreation:true});
+    this.tiers=device.createBuffer({label:"Uniform region work tiers",size:4*UNIFORM_REGION_HEAT_STILL_WORD(this.regions)+4*UNIFORM_REGION_HEAT_STILL_WORDS,usage,mappedAtCreation:true});
     new Uint32Array(this.tiers.getMappedRange()).fill(UNIFORM_REGION_TIER.hot,0,this.regions);this.tiers.unmap();
     this.state=device.createBuffer({label:"Uniform region work heat state",size:4*STATE_WORDS*this.regions,usage});
-    this.params=device.createBuffer({label:"Uniform region work heat params",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.params=device.createBuffer({label:"Uniform region work heat params",size:48,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.allocatedBytes=this.tiers.size+this.state.size+this.params.size;
   }
   attach(sources:UniformRegionHeatSources):void{
@@ -283,11 +292,11 @@ export class UniformRegionHeat {
   invalidate():void{this.forced=true;}
   async initialize():Promise<void>{
     const s=this.sources;if(!s||!this.layout)throw new Error("Region heat initializes after its sources attach");
-    const h=Math.min(...this.ownership.capacity.lattice.cellSize_m);const error=s.tiering!=="motion";
+    const h=Math.min(...this.ownership.capacity.lattice.cellSize_m);const error=s.tiering!=="motion";const still=error&&!!s.updateErrors&&!!s.surfaceWarm&&!!s.surfaceStill;
     const module=uniformDetailModule(this.device,{label:"Uniform region work heat",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> tiers:array<atomic<u32>>;
 @group(1) @binding(1) var<storage,read_write> state:array<u32>;
-struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,horizon:f32,residual:f32,still:f32}
+struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,horizon:f32,residual:f32,still:f32,down:vec3f,pad3:f32}
 @group(1) @binding(2) var<uniform> rh:RHParams;
 @group(1) @binding(3) var<storage,read> regionVelocity:array<u32>;
 @group(1) @binding(4) var<storage,read> dynamics:array<u32>;
@@ -301,6 +310,7 @@ ${uniformLiveListsWGSL(1,10,this.pool.layout)}
 fn rhColdSpeed(region:u32)->f32{if(!umFrozenRegion(region)){return 0.0;}return max(abs(umColdTermOf(region,0u)),max(abs(umColdTermOf(region,1u)),abs(umColdTermOf(region,2u))));}
 const RH_REGIONS:u32=${this.regions}u;
 const RH_ACTIVE:u32=${UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions)}u;
+const RH_STILL:u32=${UNIFORM_REGION_HEAT_STILL_WORD(this.regions)}u;
 const RH_STATE:u32=${STATE_WORDS}u;
 ${uniformRegionFreezeBudgetWGSL}
 const RH_UNKNOWN:f32=3.0e38;
@@ -438,9 +448,15 @@ var<workgroup> rhFine:atomic<u32>;
      // (rh.still), and the omission since the last trigger, summed with no
      // noise floor, stays within UNIFORM_REGION_HEAT_STILL_H: a resting pool
      // holds, any surface with solved flux warms.
+     // The head H is the liquid's extent along gravity at the last spread
+     // (whole regions, at least one): f32 round-off of rho g H.
+     {let along=i32(round(dot(vec3f(umPageCoord(region)),rh.down)));
+      atomicMax(&tiers[RH_STILL+1u],u32(32768+along));atomicMax(&tiers[RH_STILL+2u],u32(32768-along));
+      atomicMax(&tiers[RH_STILL+3u],bitcast<u32>(min(rh.dt*speed*rh.hInverse,3.0e38)));}
+     let head=16.0*f32(max(1u,atomicLoad(&tiers[RH_STILL])));
      let omitted=surface+momentum+pressure+frozen;let still=bitcast<f32>(state[at+18u])+omitted;
      state[at+18u]=bitcast<u32>(still);
-     if(!submerged&&(!(omitted<=rh.still)||!(still<=${UNIFORM_REGION_HEAT_STILL_H}))){trigger|=64u;}`:"if(!submerged){trigger|=64u;}"}`:""}
+     if(!submerged&&(!(omitted<=rh.still*head)||!(still<=${UNIFORM_REGION_HEAT_STILL_H}))){trigger|=64u;}`:"if(!submerged){trigger|=64u;}"}`:""}
     }`:"displacement+=rh.dt*(speed+rhColdSpeed(region))*rh.hInverse+rh.pressure*dp;"}
     if(max(displacement,projected)>${error?"rhFreezeBudget(submerged,fine)":"0.002"}){trigger|=64u;}
    }
@@ -467,15 +483,27 @@ var<workgroup> rhFine:atomic<u32>;
 @compute @workgroup_size(64) fn spread(@builtin(global_invocation_id) gid:vec3u,@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u){
  if(group.y!=0u){return;}
  let sweep=ulSweep(groups);let visits=8u*ulVisitCount(sweep);
- if(gid.x==0u){atomicAdd(&tiers[RH_REGIONS+3u],RH_REGIONS-8u*ulResidentCount());}
+ if(gid.x==0u){atomicAdd(&tiers[RH_REGIONS+3u],RH_REGIONS-8u*ulResidentCount());${still?`
+  let high=atomicLoad(&tiers[RH_STILL+1u]);let low=atomicLoad(&tiers[RH_STILL+2u]);
+  if(high!=0u){atomicStore(&tiers[RH_STILL],high+low-65535u);}
+  if(!(bitcast<f32>(atomicLoad(&tiers[RH_STILL+3u]))<16.0)){atomicAdd(&tiers[RH_STILL+4u],1u);}`:""}}
  for(var visit=gid.x;visit<visits;visit+=64u*groups.x){rhSpread(ulVisitRegion(visit,sweep));}
 }
 fn rhSpread(region:u32){
  if(!umTileLive(umPageTile(region,0u))){atomicStore(&tiers[region],${UNIFORM_REGION_TIER.hot}u);return;}
  let c=vec3i(umPageCoord(region));let own=rhLevel(region);var level=own;
+ ${still?`// coldSurface "still": a still surface's proof is its own past. A
+ // moving neighbour (any not COLD) can bring flux within the step, so a
+ // free-surface region beside one is WARM, as "warm" holds it: an
+ // approaching jet or body wakes the pool before it lands, not after.
+ // That holds while no liquid travels a region (16 h) a step; past it a
+ // one-region halo proves nothing, and every surface region warms.
+ let stillSurface=(state[RH_STATE*region+7u]&12288u)==4096u;
+ if(stillSurface&&!(bitcast<f32>(atomicLoad(&tiers[RH_STILL+3u]))<16.0)){level=max(level,0.5);}`:""}
  for(var k=0u;k<27u;k++){
   if(k==13u){continue;}
   let key=umTileKey(4*(c+vec3i(umCorner(k,3u))-vec3i(1)));if(!umKeyStored(key)){continue;}
+  ${still?"if(stillSurface&&rhLevel(umPageOfTile(key))>0.0){level=max(level,0.5);}":""}
   ${error?`{let n=rhLevel(umPageOfTile(key));if(n>=1.0${s.updateErrors?"&&rhHotHaloRequired((state[RH_STATE*region+7u]&4096u)!=0u,(state[RH_STATE*region+7u]&8192u)!=0u,(state[RH_STATE*region+7u]&16384u)!=0u)":""}){level=max(level,0.5*n);}}`:"level=max(level,0.5*rhLevel(umPageOfTile(key)));"}
  }
  let tier=select(select(${UNIFORM_REGION_TIER.cold}u,${UNIFORM_REGION_TIER.warm}u,level>0.0),${UNIFORM_REGION_TIER.hot}u,own>=1.0);
@@ -539,12 +567,15 @@ fn rhDeep(region:u32){
     if(!this.heatPipeline||!this.spreadPipeline||!this.group)throw new Error("Region heat is not initialized");
     const generation=this.generation();const force=this.forced||generation!==this.seenGeneration;this.forced=false;this.seenGeneration=generation;
     const w=this.words;w[0]=dt;w[1]=2/UNIFORM_REGION_HEAT_FADE_SECONDS;w[2]=dt*dt*this.hInverse*this.hInverse/Math.max(density,1e-30);w[3]=this.hInverse;this.bits[4]=+force;w[5]=UNIFORM_REGION_HEAT_FADE_SECONDS/Math.max(dt,1e-30);w[6]=residual;
-    // coldSurface "still": the hydrostatic pressure's round-off over the
-    // domain's head along gravity, as interface motion a step (h).
-    const tiles=this.ownership.capacity.tileDimensions;
-    w[7]=UNIFORM_REGION_HEAT_STILL_ROUNDOFF*2**-23*dt*dt*4*this.hInverse*(Math.abs(gravity[0])*tiles[0]+Math.abs(gravity[1])*tiles[1]+Math.abs(gravity[2])*tiles[2]);
+    // coldSurface "still": the hydrostatic pressure's round-off a cell of
+    // head (the heat pass scales it by the liquid's extent along gravity),
+    // as interface motion a step (h); and gravity's direction.
+    const g=Math.hypot(gravity[0],gravity[1],gravity[2]);
+    w[7]=UNIFORM_REGION_HEAT_STILL_ROUNDOFF*2**-23*dt*dt*g*this.hInverse;
+    for(let i=0;i<3;i++)w[8+i]=g>0?gravity[i]!/g:0;
     this.device.queue.writeBuffer(this.params,0,this.words);
     encoder.clearBuffer(this.tiers,4*this.regions,4*UNIFORM_REGION_HEAT_HEADER_WORDS);
+    encoder.clearBuffer(this.tiers,4*(UNIFORM_REGION_HEAT_STILL_WORD(this.regions)+1),12);
     encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);
     const sweep=this.headVisit.sweep();
     const pass=encoder.beginComputePass(PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group);
