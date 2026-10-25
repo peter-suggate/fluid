@@ -3,12 +3,17 @@
 Written by the lane B agent; read by Peter and the coordinator. The format and rules are in `../tiered-adaptivity-handoff-2026-10-25.md` §6. Newest entry first.
 
 ## Status
-- **Tip:** 9ae05441 + vertex-compaction work in progress (codex/tiers-lane-b)
-- **Doing now:** B0 cell and vertex compaction implemented; first 3-step seep smoke constructing.
-- **Next:** GPU correctness bundle and two-pool allocation audit; then compact vertex metrics.
-- **Waiting on:** Candidate GPU construction/check, then two-pool audit and repeat gates.
+- **Tip:** 87b3ed35 (codex/tiers-lane-b)
+- **Doing now:** B0 cell/vertex scratch smoke passed; reducing surface-volume scratch next.
+- **Next:** GPU correctness bundle and two-pool allocation audit; compact surface-volume corner scales.
+- **Waiting on:** Whole-process GPU lock for two-pool audit and compact-tier repeat gates.
 
 ## Log
+
+### 2026-10-25 · COORDINATION · tip 87b3ed35
+- Next B0 cut edits `uniform-mixed-surface-volume.ts` and only its constructor call in `uniform-mixed-frame.ts`: replace the dense 33³ corner-scale scratch plane with canonical 9³ coarse corners and bounded fine-neighbour slots. No scalar volume arithmetic changes.
+- The first compact-bin runtime smoke passed three seep steps: 819.891 MiB live; band slots 241/16384 peak, metric slots 865/16384 peak, no fatal, volume drift 3.39077e-6. This is an early smoke, not mature-particle or registered-gate evidence. Log: `/private/tmp/fluid-laneB/metric-smoke-226.log`.
+- Candidate `87b3ed35` includes the construction-lock gate harness. Two-pool allocation audit and full `start:"4h"`, volume-control-off repeat bundle are queued safely; final full unit suite is running with concurrency 2. No READY TO MERGE claim yet.
 
 ### 2026-10-25 · PROGRESS · tip 9ae05441 + vertex-compaction work in progress
 - DEPTH_A, surfaceHot and the packed XY scratch now have compact addressing as well. Canonical 4h corners retain 729 words per block; noncanonical physical vertices use 125-word band slots. Physical block skirts retain distinct identities.
