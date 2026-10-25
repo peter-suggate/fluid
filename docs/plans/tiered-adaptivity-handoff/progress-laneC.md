@@ -4,11 +4,46 @@ Written by the lane C agent; read by Peter and the coordinator. The format and r
 
 ## Status
 - **Tip:** e73cbfa0 (C3/C4, construction locking and measurement tooling ready)
-- **Doing now:** Preparing final-A1 cost snapshot after its focused checks; all C harness verification passed
-- **Next:** Rebaseline and run C5 after final A1 checks and CPU suites; serialized wide ABBA when authorized by coordinator
-- **Waiting on:** Final A1 candidate and B1/B2 storage/work separation; coordinator review of ready commits
+- **Doing now:** Candidate43 letters cost complete; seep is last queued pair (PID 83841)
+- **Next:** Complete C1 basic scenes; hold C5 and wide ABBA while core A/B proofs progress
+- **Waiting on:** Exclusive timing slots; A acceptance repair; B1/B2 storage/work separation; coordinator review of ready commits
 
 ## Log
+
+### 2026-10-25 · COORDINATION · next exact C3 deposit candidate
+- C will edit only `pbAdd` in `uniform-particle-brick.wgsl.ts`: keep the existing round/cast, then independently skip momentum or weight atomicAdd when its integer operand is exactly zero. B confirms no overlapping deposit/scatter edits. No allocation, dispatch, quantization, classification or nonzero sum changes.
+- Root approved this narrow candidate with focused arithmetic/overflow GPU cases and the registered gate/performance evidence, reusing existing full-suite evidence. Existing older letters profile identifies transfer as material (~1.80 ms/step), but gives no current isolated estimate for this guard. No saving is claimed before measurement.
+- Root released C5 after the current seep pair. Coordinator 11166 waits for a valid C1 completion, then runs the existing guarded length ladder sequentially. Wide43 ABBA remains held pending A discharge attribution or a replacement candidate.
+
+### 2026-10-25 · MILESTONE · candidate43 letters cost
+- Letters completed 100 steps/arm, measuring frames 40–100: median paired candidate added cost **0.052292 ms**; mean wall 39.8347 → 39.9020 ms. Effectively flat in one run. Separate medians (40.081 → 38.666 ms) are not the paired comparison and should not be used to claim a saving.
+- No GPU errors; all final field hashes differ. Durable `final-43b1aa3c/a1-nbflip-figure-8-letters.{json,log}` and before/after process snapshots preserve the evidence. `basic-cost-summary.json` consolidates completed scene results, source hashes, clocks and the failed-acceptance caveat.
+- Seep is the final queued C comparison. Driver stops after it. C5/wide remain held, and no new full suite is planned. A’s failed seep gate/conservation acceptance remains unresolved.
+
+### 2026-10-25 · PROGRESS · remaining C1 resumed; acceptance remains failed
+- B’s direct RHS fixture passed 1/1 and its requested manual hold cleared; its strict batch also finished. A requested resume under the coordinator’s existing priority decision. Guarded continuation PID 83841 runs only candidate43 letters and seep, sequentially. No active full suite was present. C5 and wide ABBA remain held.
+- A reports candidate43 A/B splash and letters gates pass, but seep fails the bandTiles window at frames 31–40 (ratio 1.080976). Candidate 20s and fast-jet runs also have conservation failures. These costs are evidence for `43b1aa3c`; they cannot make A1 READY or override those failures.
+- A’s separate rest100 physical check passed: maximum sampled speed 1.9559011e-6 m/s, zero solver/raw drift, no fatal/capped traces. This supports the unchanged rest surface in C’s matched phi/volume hashes; pressure/velocity differences remain disclosed. A’s evidence is in its durable `artifacts/tiered-lane-a-2026-10-25/rest-footprint*` files.
+
+### 2026-10-25 · MILESTONE · final43 splash cost; C queue held
+- Final splash pair reached 100 steps/arm, measured frames 40–100: median paired candidate added cost **0.040458 ms**; mean wall 16.3892 → 16.4091 ms. Effectively flat in this single run, with no GPU errors. All final field hashes differ; the A repeat-spread gates, not these hashes, determine correctness. Durable evidence: `final-43b1aa3c/a1-splash.{json,log}` plus process snapshots.
+- To free B’s implementation proof queue, the remaining C continuation was canceled. Splash had just begun when cancellation was requested, so its GPU child ran to completion untouched. No C GPU/CPU job or pending marker remains. Letters/seep continuation now requires explicit coordinator release after B’s pressure400 audit and focused shadow/RHS batch. C5 and wide ABBA remain held as well.
+- B reports the pressure400 audit finished without errors; focused proof batch is queued. C’s completed rest/splash results and all previous ready evidence remain preserved. No new full suite is planned.
+
+### 2026-10-25 · MILESTONE · final43 rest cost, remaining C1 queued
+- `43b1aa3c` against exact `c8b25c39`, controller off, 100 steps/arm and frames 40–100 measured: median paired saving **0.375126 ms**; mean wall 10.9975 → 10.6648 ms. One paired run, not a guaranteed or isolated-kernel gain. No GPU errors. Final phi/volume hashes match; velocity/pressure differ, and live histories first differ at frame 5. A owns the physical rest speed/drift check.
+- Evidence is durable `final-43b1aa3c/a1-rest.{json,log}` with before/after process snapshots in the C artifact directory. Candidate frame100 tiers: 64 COLD; baseline: 32 COLD + 32 WARM. No CPU suite overlapped the measured window according to the timing-entry/completion checks.
+- Coordinator priority now holds C5 length pairs and wide ABBA until core A/B proofs progress. The original scheduler was replaced without touching its already queued splash runner 11858. Continuation 17866 validates that result, then runs letters/seep only. The old combined driver is disabled; a separate C5 script remains held. No extra full unit suite is planned.
+
+### 2026-10-25 · PROGRESS · final candidate cost queue
+- A confirmed `43b1aa3c`: focused GPU 2/2 pass; full unit 1222 pass / 134 skip / 0 fail. Shared immutable snapshots exist. C launched durable final driver PID 788 with one sequential timing waiter at a time; first rest pair is waiting for the exclusive GPU slot.
+- Final wide ABBA CPU-only preflight passes for the same exact snapshots: 834 blocks per arm, 1/60 s, controller off, only coldSurface warm→still differs. Plan is `final-43b1aa3c/a1-wide-abba/plan.json` inside the durable artifact directory. Actual wide ABBA remains unlaunched.
+- Per user steering, no new full unit suites for incremental work. C reuses its completed full-suite evidence; subsequent tooling edits will use focused fixtures/types. This cost driver launches no CPU test suites.
+
+### 2026-10-25 · PROGRESS · durable evidence and final cost preparation
+- All completed C logs, fixtures, plans and C3 gate results are preserved in ignored durable `artifacts/lane-c-2026-10-25/` in `/Users/petersuggate/.codex/worktrees/tiers-lane-c/fluid` (1.8 MiB). Its README maps the previous temporary paths and records snapshot recovery commits. New final cost outputs will be written there directly.
+- Prepared `final-a1-costs.sh` now targets candidate `43b1aa3c` and exact baseline `c8b25c39` shared snapshots. Candidate focused GPU tests passed 2/2 with no skips; A’s full suite and shared snapshot are still pending. No C timing or GPU job has launched.
+- The driver covers C1 rest/splash/letters/seep (100 steps, frames 40–100) and C5 rest/cold adjacent 128→256→512 (180 steps, frames 120–180), preserving existing CPU guards and whole-process timing locks. A owns the separate rest physical-stat check. Wide ABBA remains separately coordinated.
 
 ### 2026-10-25 · READY TO MERGE · C1/C5 measurement tooling d905ea99..e73cbfa0
 - Tooling commits `d905ea99`, `62c72a70`, `9025d008` and `e73cbfa0` are ready together. They add explicit wide geometry and same-source length comparisons, CPU-only plans, and memory-safe serialized wide ABBA measurements. They do not change solver physics.

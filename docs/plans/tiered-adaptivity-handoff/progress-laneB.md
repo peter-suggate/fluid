@@ -3,12 +3,64 @@
 Written by the lane B agent; read by Peter and the coordinator. The format and rules are in `../tiered-adaptivity-handoff-2026-10-25.md` §6. Newest entry first.
 
 ## Status
-- **Tip:** 6c5336dc (codex/tiers-lane-b)
-- **Doing now:** B0 pressure cleanup committed; B1 shadow row/partition diagnostics committed, validation queued.
-- **Next:** Validate final B0 allocations/gates and B1 shadow equivalence before changing active dispatch.
-- **Waiting on:** GPU queue. Required unit suite passed (1,224 / 135 skipped / 0 failed); B0 target remains unmet.
+- **Tip:** 2b6f32be (codex/tiers-lane-b)
+- **Doing now:** c628c773 storage tranche ready; independent pressure-cleanup 58c62618 gate bundle queued; B1 actual-frame RHS proof queued.
+- **Next:** Complete the same-frame RHS comparison; then replace native work under an explicit compact hierarchy contract.
+- **Waiting on:** One focused GPU rerun and the exact58 default bundle queued. Reusing completed full unit evidence; B0 target and B1 hydrostatic speed threshold remain unmet.
 
 ## Log
+
+### 2026-10-25 · PROGRESS · independent pressure tranche and actual RHS proof
+- Package **58c62618** independently of B1: exact snapshots c628c773 → 58c62618 now run one full default registered bundle, `b0-pressure-default`, volume control off and construction locked. Existing two-pool memory/smoke evidence (958.3 KiB/block), required full-unit evidence, and c628 default/compact bundles are reused. No new full suite or duplicate snapshot.
+- Actual-frame diagnostic b2c8a46f compiled successfully; types have only the known two errors. Its initial enable guard incorrectly required optional `pRhs`, which is off: the active legacy root `buildRhs` already precedes selection and solve. **2b6f32be** removes that requirement while retaining strict admission and pre-frame enable; only closed35 is rerun. Failure log is preserved separately as `bulk-actual-rhs-enable-failure.log`.
+- Coordinator audit clarified the next B1 contract: current PB correction coefficients restore native64 stiffness even inside members, and pUpB performs 4h sweeps before averaging. Compact PN row equivalence does not prove the current V-cycle equivalent. A parallel CPU restriction/prolongation reference will make the replacement explicit before active list removal.
+
+### 2026-10-25 · MILESTONE · strict flux admission a8428ee0
+- Shared GPU certificate test passed 1/1; types have only the known two TS2307 errors. Closed35 retained **552 members** with an exact capacity sum **35,328**, matching 64 per member; no unsupported neighbours, unchanged shadow comparison and zero drift.
+- Max speed remains **0.0208358 m/s**, so hydrostatic acceptance still fails as previously recorded. Default selection is unchanged; strict admission is explicitly enabled before frame 1. Current actual-frame RHS diagnostic is a separate uncommitted change, queued for types and one closed35 comparison.
+- Durable evidence: `types-strict.log`, `bulk-flux-certificate.log`, `bulk-strict-closed.{log,json}`. Lane C's manual timing hold was cleared immediately after the tiny direct fixture completed; later B checks use normal shared queueing.
+
+### 2026-10-25 · COORDINATION · actual-frame boundary RHS comparison
+- Edit `uniform-pressure-arena.ts`, the bulk record tail, and `probe-reservoir-bulk.ts` for an explicit diagnostic enabled before frame 1. Both pipelines/storage are created upfront; default dispatch stays unchanged. Gather boundary flux before projection and retain the full incident-face contribution budget, then compare raw RHS and held-wall lift with native rows from the same solve.
+- Strict preparation is committed as a8428ee0. Types have only the known two TS2307 errors and its shared GPU certificate test passed 1/1. Closed35 is running against that immutable loaded source; no full suite was rerun.
+
+### 2026-10-25 · MILESTONE · independent boundary RHS fixture cab45335
+- The repaired direct boundary-RHS GPU fixture passed **1/1** with no validation errors. It covers anchor, mean, weighted, cut, moving-body and COLD wall fluxes, including zero/near-zero aperture with nonzero listed flux. All outputs must be finite; tolerances use an independently computed CPU contribution scale, and the GPU scale is separately checked.
+- The producer remains unhooked: this establishes boundary gather semantics, not active 16h dispatch or interior cancellation. Strict admission/capacity retention is in its own focused batch, followed by an actual-frame forced-flux comparison before any list removal.
+- Exact final log: `artifacts/lane-b-2026-10-25/bulk-rhs-gpu-test.log` in the lane worktree. The tiny fixture released its slot and lane C was notified to resume costs. Reused full-unit evidence; no new full suite.
+
+### 2026-10-25 · COORDINATION · opt-in strict flux selection preparation
+- Next edits: `uniform-bulk-tier.ts`, bulk record constants, one bulk-binding call in `uniform-mixed-frame.ts`, and diagnostic activation in `probe-reservoir-bulk.ts`. Allocate a capacity-sum plane upfront and precompile a strict-selection variant; default selection remains unchanged. The diagnostic must enable it before frame 1.
+- Strict selection will conservatively reject present-body support within the flux reach using the existing current body-region mask. Without that row-specific moving-wall term, both incident native rows use the same interior source face, cut mask/aperture and COLD addition; exact retained capacity sum handles the volume source. This certificate is separate from the boundary-gather fixture and must match in both A/B arms before active integration.
+- Historical W4 notes already show the intended closed-rest gate's unmet speed threshold in both arms (0.0255 initially, about 0.005 after 420 frames). The current step-35 transient is consistent with that history; no new broad baseline run is needed now.
+
+### 2026-10-25 · PROGRESS · B1 shadow proof and failed rest acceptance
+- Synthetic GPU row/partition test passed: whole/mixed pages, reversed held list, seam heads, held/bounded walls and unchanged native inputs. Final types have only the two known TS2307 errors. CPU reference fixture strengthening is included as 57f76ec1 (source 9174f782; coordinator's five focused tests and types passed).
+- Closed seep at 35 frames exercises **552 members**, **66 whole pages + 50 native/mixed pages = 116 held**, no unsupported neighbours and exact diagonal agreement. RHS absolute error is 503.997 and output-relative error 1.956, but error divided by absolute contributions is **5.028e-7**; the row is cancellation dominated. Durable logs: `bulk-shadow-test.log`, `bulk-shadow-closed.{log,json}` and `types-shadow-final.log`.
+- **Hydrostatic acceptance is not met:** drift is zero, but max speed is **0.0208358 m/s**, above 1e-5. Shadow diagnostics execute only after the completed frame and active native dispatch remains unchanged. This is a row-comparison result, not B1 completion.
+- The direct RHS GPU fixture's first run failed with zero output: its texture omitted the explicit 3D dimension. The fixture is repaired and now asserts validation errors before arithmetic comparisons; a focused rerun is queued. No full suite rerun.
+
+### 2026-10-25 · MILESTONE · pressure-cut allocation audit 58c62618
+- Two-pool audit confirms **958.3 KiB/block**: 226 blocks use 779.439 MiB, 400 use 942.281 MiB. This is another 85.309 KiB/block below c628c773, about 39% below the original 1,570 KiB/block, still above B0's target. Both three-step smokes have no fatal/errors, band peak 241 and metric peak 865. Durable `pressure-smoke-{226,400}.log` and `perblock-pressure.txt` are in the lane artifact directory.
+- This allocation/smoke result does not extend the c628 readiness claim to 58c62618. Shadow equivalence and direct boundary-RHS GPU tests remain queued as one focused batch; no full suite rerun.
+- The direct RHS integration has a new explicit proof obligation: near-unit membership alone does not prove common interior flux when moving-body cut terms use row-specific capacities. Active integration must exclude that support or prove/retain its interior correction. The unhooked synthetic fixture checks boundary gather, not membership cancellation.
+
+### 2026-10-25 · READY TO MERGE · bounded B0 tranche c628c773
+- **Merge candidate: c628c773**, on codex/tiers-lane-b. Compact NB scratch, surface-volume scales and low-wall extension slots reduce measured marginal storage from about 1,570 to **1,043.6 KiB/block**. B0's well-under-0.5-MiB target remains unmet; this is a partial storage tranche.
+- Both full registered bundles passed against c8b25c39, volume control off: default splash 70 × 2 / seep 60 × 3 / letters 60 × 3, worst ratios **0.310 / 0.227 / 0.301**; identical-arm `start:"4h", bricks:512` bundle worst ratios **0.158 / 0.589 / 0.380**. Default and compact addressing paths are covered.
+- Required unit evidence: **1,224 passed, 134 skipped, 0 failed** in `unit-scale.log`; final types have only the two permitted TS2307 symlink errors. The strengthened missing-page/low-wall GPU address test passed separately, as did NB and surface-volume slot coverage. The full suite began before c628's final test-file addition; the final runtime modules and that added GPU test were checked as recorded below.
+- Durable evidence: `/Users/petersuggate/.codex/worktrees/tiers-lane-b/fluid/artifacts/lane-b-2026-10-25/`, including `bundle-final-default.log`, both `b0-final-{default,4h}-{splash,seep,letters}.log` bundles, `perblock-wall.txt` and focused/unit/type logs. The added map scan's paired cost is still unmeasured; this claim is storage/correctness only.
+- **Excluded from this readiness claim:** newer pressure cleanup 58c62618 and B1 shadow/direct-RHS preparation. They have separate pending GPU evidence. No active 16h scheduling/storage saving or B1/B2/B3 completion is claimed. Lane B has not merged anything.
+
+### 2026-10-25 · PROGRESS · direct RHS preparation
+- Incorporated the coordinator's independent boundary-flux CPU reference as 9bc89717 (source 59dbf244, five focused tests passed). It compares 64 native rows with 96 boundary subfaces, including COLD terms, volume sources and held/bounded wall handling. This is reference evidence, not an active solver change.
+- Drafted an unhooked lean GPU producer and a focused fixture for anchor/mean/weighted/cut/moving-wall paths. The coordinator caught a missing near-zero wall-aperture guard; it is fixed with zero/near-zero aperture cases carrying nonzero flux. It will be committed after its queued focused GPU check.
+- Per Peter's steering, reuse the completed full unit evidence and run focused affected tests plus relevant types/GPU checks for incremental B1 work. No new full unit suite is queued by lane B.
+
+### 2026-10-25 · PROGRESS · pressure cleanup 58c62618
+- Frozen 226-block audit confirms 779.439 MiB live versus 798.267 MiB at c628c773: 18.828 MiB saved, exactly 85.309 KiB/block. The three-step seep smoke has no fatal/errors; fine tiles 54 → 63 → 84, band peak 241/16,384 and metric peak 865/16,384. Volume drift is 3.730e-6. The second pool size remains queued, so the final marginal table is pending.
+- Default c628c773 splash gate passed (70 × 2, worst ratio 0.310); default seep and letters remain queued. The full compact-tier bundle already passed. Later pressure cleanup and shadow diagnostics still need their own GPU evidence.
+- Confirmed another future dead-allocation candidate: the 14.1 KiB/block compatibility scratch has no shader access beyond its declaration. Keeping the current validation snapshots fixed; no extra storage edit yet.
 
 ### 2026-10-25 · MILESTONE · combined compact-tier candidate c628c773
 - Full compact-tier bundle passed: splash 70 × 2, seep 60 × 3 (worst ratio 0.589, bandTiles), letters 60 × 3 (0.380, particles). All use volume control off and identical `start:"4h", bricks:512` in both arms. Logs: `/private/tmp/fluid-gates/gates/b0-final-4h-{splash,seep,letters}.log`; bundle verdict: `/private/tmp/fluid-laneB/bundle-final-4h.log`.
