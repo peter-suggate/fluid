@@ -16,11 +16,9 @@ import { findSceneryNode } from "../lib/core/scenery-edit";
 import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
 import { EditorActionGlyph } from "./EditorActionIcon";
 import { EntityDeleteRow, EntityMoreRow, EntityOptionRows } from "./EntityOptions";
-import { FieldViewRows, methodHasQuickFields } from "./FieldQuickBar";
-import { FieldControlRows, methodSetupTabs } from "./FluidFieldFlyout";
+import { methodSetupTabs } from "./FluidFieldFlyout";
 import { FeatureSlot } from "../lib/features/ui/FeatureSlot";
 import { MakeRows } from "./MakeRows";
-import { UniformDetailRow } from "./UniformCoarseControl";
 import { OakTreeEditor } from "./OakTreeEditor";
 import { StoneDialRows } from "./StoneLookFlyout";
 import { CanopyDialRows } from "./TreeCanopyFlyout";
@@ -204,7 +202,6 @@ const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: 
   const session = useSession();
   const scene = session.scene((state) => state.scene);
   const methodId = session.method((state) => state.methodId);
-  const hasFields = methodHasQuickFields(methodId);
   // A dry document has no solve to choose, so the solver row follows the water
   // switch — the same flag the tank declares as `offersFluidMethod`.
   const hasSolver = scene.systems?.fluid !== false;
@@ -212,14 +209,11 @@ const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: 
   return <>
     {/* The high-priority readings first, in the order a reader changes them:
         what is moving the water, how its surface is drawn, and whether gravity
-        is on. The slots order their own placements by declared priority. */}
+        is on. The slots order their own placements by declared priority. The
+        solver's detail tuning and the layers that inspect a run stand on the
+        study rail at the viewport's right edge (`ViewRail`), not here. */}
     {hasSolver && <SolverRow />}
-    {/* The solver's own detail switches, directly under its name. */}
-    {hasSolver && <UniformDetailRow />}
     {hasSolver && <FeatureSlot slot="scene.surface" />}
-    {/* The inspection views follow the solver, its detail and the surface:
-        they are opened to question a run, the three above to set one up. */}
-    {hasFields && <FieldViewRows />}
     <FeatureSlot slot="scene.visibility" />
     {hasSolver && <FeatureSlot slot="scene.physics" />}
     {hasSolver && <><FeatureSlot slot="scene.adaptivity" /><FeatureSlot slot="scene.simulation" /></>}
@@ -251,7 +245,6 @@ const ContainerToolstripRows = memo(function ContainerToolstripRows({ entity }: 
       />
       : <>
         <ToolstripRule />
-        <FieldControlRows />
         {/* Only over rows that exist. The tank's own list is down to the water's
             settings, and those are only its while the scene has no body to hang
             them off — so on a filled scene this section is empty, and a heading

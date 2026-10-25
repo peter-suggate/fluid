@@ -1,6 +1,8 @@
 "use client";
 import { useMemo } from "react";
-import { SurfaceDisplayRow } from "../surface-display/ui";
+import { ParticleDisplayLines, SurfaceDisplayRow } from "../surface-display/ui";
+import { VisualLayerLegendControl, VisualLayersControl } from "../field-view/layers-ui";
+import { UniformTunePanel } from "../../../components/UniformCoarseControl";
 
 import { resolvedMethodValues } from "../../core/stores/method-store";
 import { useSession } from "../../core/session/session-context";
@@ -13,6 +15,10 @@ import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/u
 /** Only application composition knows the installed React implementations. */
 export const applicationViews: FeatureControlViews = {
   "presentation.surface-display/mode": SurfaceDisplayRow,
+  "presentation.surface-display/particles": ParticleDisplayLines,
+  "presentation.visual-layers/layers": VisualLayersControl,
+  "presentation.visual-layers/legend": VisualLayerLegendControl,
+  "uniform.detail-tuning/dials": UniformTunePanel,
   "scene.gravity/enabled": GravityRow,
   "scene.gravity/y": GravityYRow,
   ...SVO_FEATURE_VIEWS,

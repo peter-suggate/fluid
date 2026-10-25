@@ -5,7 +5,8 @@ import { composeFeatures } from "../../framework/composition";
 import { parameterVariantFeature, parameterVariantSelections } from "../../core/method-parameter-variants";
 import { uniformFixedStep_s } from "./uniform-paper";
 import { uniformDiagnosticRows } from "./uniform-diagnostics";
-import { migrateUniformDetailOverrides } from "./uniform-detail-policy";
+import { migrateUniformDetailOverrides, uniformDetailSettings } from "./uniform-detail-policy";
+import { uniformDetailTuningFeature } from "./uniform-detail-tuning-feature";
 import { uniformGeometricSolverOptions } from "./uniform-geometric-options";
 import { resolveUniformGeometricValues } from "./uniform-geometric-parameters";
 import { WebGPUUniformReferenceSolver } from "./webgpu-uniform-reference";
@@ -97,7 +98,8 @@ const point = "simulation.narrow-band-flip.algorithms";
 const choices = params.filter(p => p.kind === "select");
 const algorithmFeature = parameterVariantFeature(point, choices, ["simulation.page-domain"]);
 const resolveComposition = (values: MethodParamValues = {}) => composeFeatures({
- features: [{ id: "simulation.narrow-band-flip.host", provides: ["simulation.page-domain", "simulation.vertex-phi", "simulation.conservative-volume"] }, algorithmFeature],
+ features: [{ id: "simulation.narrow-band-flip.host", provides: ["simulation.page-domain", "simulation.vertex-phi", "simulation.conservative-volume"] }, algorithmFeature,
+  ...(uniformDetailSettings(values).policy === "dynamic" ? [uniformDetailTuningFeature] : [])],
  selections: parameterVariantSelections(point, choices, values),
 });
 export const uniformNarrowBandMethod:SimulationMethod={

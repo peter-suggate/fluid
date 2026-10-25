@@ -1,5 +1,5 @@
 "use client";
-import { Choice, Select } from "../../../components/ui";
+import { RailChoice, RailKey, RailSelect } from "../../../components/rail";
 import { useSession } from "../../core/session/session-context";
 import { DEFAULT_PERFORMANCE_VIEW, PERFORMANCE_RAMP, type PerformanceView } from "./view";
 import type { VisualLayerState } from "../../core/visual-layers";
@@ -9,16 +9,16 @@ export function PerformanceControls({ state, onChange }: { state: VisualLayerSta
   const stages = session.diagnostics(s => s.gpuInfo?.spatialPerformanceStages);
   const view = state.performance ?? DEFAULT_PERFORMANCE_VIEW;
   const change = (patch: Partial<PerformanceView>) => onChange({ ...state, performance: { ...view, ...patch } });
-  return <div style={{ display: "grid", gap: 6, padding: "6px 8px" }}>
-    <Choice<PerformanceView["sampling"]> ariaLabel="Performance sampling" value={view.sampling} onChange={sampling => change({ sampling })}
-      options={[{ value: "adaptive", label: "Live estimate", hint: "Learn from diagnostic observations; use cheap rules only after held-out validation passes." }, { value: "diagnostic", label: "Measure + learn", hint: "Measure stage timings on every sampled frame. Adds diagnostic overhead." }]} />
-    <Select<string> ariaLabel="Performance stage" value={view.stage} onChange={stage => change({ stage })}
+  return <>
+    <RailChoice<PerformanceView["sampling"]> label="Sampling" ariaLabel="Performance sampling" value={view.sampling} onChange={sampling => change({ sampling })}
+      options={[{ value: "adaptive", label: "Estimate", hint: "Live estimate: learn from diagnostic observations; use cheap rules only after held-out validation passes." }, { value: "diagnostic", label: "Measure", hint: "Measure + learn: measure stage timings on every sampled frame. Adds diagnostic overhead." }]} />
+    <RailSelect<string> label="Stage" ariaLabel="Performance stage" value={view.stage} onChange={stage => change({ stage })}
       options={[{ value: "all", label: "All simulation stages" }, ...((report?.stages ?? stages)?.map(s => ({ value: s.id, label: s.label })) ?? [])]} />
-    <Choice<PerformanceView["grain"]> ariaLabel="Performance aggregation" value={view.grain} onChange={grain => change({ grain })}
-      options={[{ value: "cell", label: "Cells" }, { value: "tile", label: "4h tiles" }, { value: "region", label: "16h regions" }]} />
-    <Choice<PerformanceView["paint"]> ariaLabel="Performance colour" value={view.paint} onChange={paint => change({ paint })}
-      options={[{ value: "cost", label: "Frame cost" }, { value: "tiers", label: "Work tiers" }]} />
-  </div>;
+    <RailChoice<PerformanceView["grain"]> label="Grain" ariaLabel="Performance aggregation" value={view.grain} onChange={grain => change({ grain })}
+      options={[{ value: "cell", label: "Cells" }, { value: "tile", label: "4h" }, { value: "region", label: "16h" }]} />
+    <RailChoice<PerformanceView["paint"]> label="Colour" ariaLabel="Performance colour" value={view.paint} onChange={paint => change({ paint })}
+      options={[{ value: "cost", label: "Frame cost" }, { value: "tiers", label: "Tiers" }]} />
+  </>;
 }
 const ms = (value: number) => `${value.toFixed(2)} ms`;
 export function PerformanceLegend({ state }: { state: VisualLayerState }) {
@@ -30,15 +30,14 @@ export function PerformanceLegend({ state }: { state: VisualLayerState }) {
   const attributed = selected?.attributed_ms ?? report?.attributed_ms ?? 0;
   const entities = report ? view.grain === "cell" ? report.cells : view.grain === "tile" ? report.tiles : report.regions : 0;
   const meanUs = report && entities ? 1000 * report.wall_ms / entities : 0;
-  return <div aria-label="Spatial performance" style={{ display: "grid", gap: 4, width: 300, maxWidth: "100%", fontSize: 11, lineHeight: 1.4, padding: "6px 8px" }}>
+  return <div className="performance-key" aria-label="Spatial performance">
     {view.paint === "cost" && <>
       <div style={{ height: 8, borderRadius: 3, background: `linear-gradient(90deg,${PERFORMANCE_RAMP.join(",")})` }} />
       <div style={{ display: "flex", justifyContent: "space-between" }}><span>0</span><span>¼×</span><span>1×</span><span>4×</span><span>16×+</span></div>
       <span>1× = {meanUs ? `${meanUs.toPrecision(3)} µs` : "mean frame share"} per {view.grain === "cell" ? "cell" : view.grain === "tile" ? "4h tile" : "16h region"} · fixed across stages</span>
     </>}
-    <div className="toolstrip-legend" aria-label="Region work tiers">
-      {[{ color: "#4094f0", label: "Cold" }, { color: "#fab842", label: "Warm" }, { color: "#f54761", label: "Hot" }].map((t, i) => <span key={t.label}><i style={{ background: t.color }} />{t.label}{report ? ` ${report.tiers[i]}` : ""}</span>)}
-    </div>
+    <RailKey label="Region work tiers" entries={[{ color: "#4094f0", label: "Cold" }, { color: "#fab842", label: "Warm" }, { color: "#f54761", label: "Hot" }]
+      .map((t, i) => ({ ...t, label: report ? `${t.label} ${report.tiers[i]}` : t.label }))} />
     {error ? <span role="status">{error}</span> : !report ? <span role="status">Run the simulation to sample performance.</span> : <>
       <strong>Frame {report.frame} · {ms(report.wall_ms)} wall</strong>
       <span>{selected?.label ?? "All stages"}: {ms(attributed)} mapped · {(100 * attributed / report.wall_ms).toFixed(1)}%</span>

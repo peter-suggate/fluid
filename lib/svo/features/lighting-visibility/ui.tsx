@@ -2,7 +2,8 @@
 
 import { useSession } from "../../../core/session/session-context";
 import type { FeatureControlViewProps } from "../../../framework/ui/slot";
-import { ChoiceField, RangeField, ResetButton, Slider, Switch, SwitchField, Value } from "../../../../components/ui";
+import { ChoiceField, RangeField, SwitchField } from "../../../../components/ui";
+import { RailKey, RailRange, RailToggle } from "../../../../components/rail";
 import { useSvoRenderTuningValue } from "../../pipeline/tuning-binding";
 import { SVO_LIGHTING_VISIBILITY_FEATURE, SVO_LIGHTING_VISIBILITY_OPTIONS } from "./definition";
 import { SVO_AO_TAP_LEGEND } from "../diagnostics/svo-render-diagnostics";
@@ -14,15 +15,11 @@ export function SvoAoTapOverlayControlRow({ control }: FeatureControlViewProps) 
   const raster = session.ui(state => state.svoConeTracingMode === "raster-ao");
   const enabled = view === "raster-ao-taps";
   return <>
-    <div className="view-rail-toggle" title={control.hint} data-testid="svo-ao-tap-overlay">
-      <span>{control.label}</span>
-      <Switch checked={enabled} disabled={!raster && !enabled} ariaLabel={control.label}
-        onChange={value => setView(value ? "raster-ao-taps" : "off")} />
-    </div>
-    {enabled && <div className="view-rail-ao-legend" aria-label="AO tap budget legend">
-      {SVO_AO_TAP_LEGEND.map(stop => <span key={stop.at}><i style={{backgroundColor:stop.color}} aria-hidden />{stop.label}</span>)}
-    </div>}
-    <p className="tool-options-note">{!raster ? "Select RASTER + AO to inspect its tap budget." : "Scene-normalized budget per receiver, before sharing or rejected samples. Coarse voxel AO is separate."}</p>
+    <RailToggle label={control.label} checked={enabled} disabled={!raster && !enabled} testId="svo-ao-tap-overlay"
+      hint={`${control.hint} Scene-normalized budget per receiver, before sharing or rejected samples. Coarse voxel AO is separate.`}
+      onChange={value => setView(value ? "raster-ao-taps" : "off")} />
+    {enabled && <RailKey label="AO tap budget legend" entries={SVO_AO_TAP_LEGEND.map(stop => ({ color: stop.color, label: stop.label }))} />}
+    {!raster && <p className="tool-options-note">Select RASTER + AO to inspect its tap budget.</p>}
   </>;
 }
 
@@ -79,14 +76,9 @@ export function SvoFarAoTapsControlRow({ control, placement }: FeatureControlVie
       disabled={disabled} onChange={set} modified={modified} onReset={reset} hint={control.hint} testId="svo-far-ao-taps" />;
   }
   return <>
-    <div className="view-rail-range" title={control.hint} data-testid="svo-far-ao-taps">
-      <span>{control.label}</span>
-      <Slider value={value} min={min} max={max} step={step} disabled={disabled} ariaLabel={control.label}
-        onInput={set} onChange={set} />
-      <Value value={value} digits={0} unit={control.unit} />
-      <ResetButton onReset={reset} ariaLabel={`Reset ${control.label}`}
-        className={modified ? undefined : "is-idle"} />
-    </div>
+    <RailRange label={control.label} value={value} min={min} max={max} step={step} digits={0} unit={control.unit}
+      disabled={disabled} hint={control.hint} testId="svo-far-ao-taps"
+      onInput={set} onChange={set} modified={modified} onReset={reset} />
     {disabled && <p className="tool-options-note">Only the RASTER + AO visibility source samples screen-space AO.</p>}
   </>;
 }
@@ -104,8 +96,6 @@ export function SvoStillViewReuseControlRow({ control, placement }: FeatureContr
     return <SwitchField label={control.label} hint={control.hint} checked={value} onChange={set} disabled={disabled}
       testId="svo-still-view-reuse" />;
   }
-  return <div className="view-rail-toggle" title={control.hint} data-testid="svo-still-view-reuse">
-    <span>{control.label}</span>
-    <Switch checked={value} onChange={set} disabled={disabled} ariaLabel={control.label} hint={control.hint} />
-  </div>;
+  return <RailToggle label={control.label} checked={value} onChange={set} disabled={disabled} hint={control.hint}
+    testId="svo-still-view-reuse" />;
 }

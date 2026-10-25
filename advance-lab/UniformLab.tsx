@@ -3,7 +3,7 @@ import {
   VISUAL_LAYERS, LAYER_PALETTE, LAYER_PARTICLE_SPEED_SCALE, scalarLayerPaint, layerOpacity,
   particleLayerShown, toggleVisualLayer, type VisualLayerState,
 } from "../lib/core/visual-layers";
-import { VisualLayerRows } from "../lib/features/field-view/layers-ui";
+import { VisualLayerLines } from "../lib/features/field-view/layers-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { LabSceneSelector } from "./LabSceneSelector";
@@ -688,7 +688,10 @@ function UniformRun({ session }: { session: PaneSession }) {
       <div className={css.layout}>
         <section className={css.viewport} aria-label="Narrow-band FLIP simulation">
           <div className={css.tools}>
-            <DockedToolstrip ariaLabel="Visual layers"><VisualLayerRows hidden={["pages", "importance", "performance"]} state={layers} onChange={layers => store.setState({ layers })} /></DockedToolstrip>
+            <details className="rail-card" aria-label="Visual layers">
+              <summary className="view-rail-heading">Layers</summary>
+              <VisualLayerLines hidden={["pages", "importance", "performance"]} state={layers} onChange={layers => store.setState({ layers })} />
+            </details>
             <button onClick={() => setCamera(fit)}>Fit</button>
           </div>
           <canvas

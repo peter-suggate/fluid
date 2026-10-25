@@ -6,7 +6,6 @@ import type { MethodParamSpec, SelectParamSpec } from "../lib/core/method-contra
 import type { GPUQuality } from "../lib/core/gpu-quality";
 import { Field, FieldList, RangeField, Select, SelectField } from "./ui";
 import { simulation } from "../lib/core/simulation/controller";
-import { FieldViewRows } from "./FieldQuickBar";
 import { useSession } from "../lib/core/session/session-context";
 import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import type { ToolstripTab } from "./toolstrip";
@@ -63,8 +62,6 @@ function MethodSelect({ spec, value, onChange }: {
   return <SelectField label={spec.label} hint={paramTitle(spec)} value={value} onChange={onChange}
     options={spec.options} />;
 }
-
-export function FieldControlRows() { return <FieldViewRows />; }
 
 export function MethodSetupTab() {
   const session = useSession();

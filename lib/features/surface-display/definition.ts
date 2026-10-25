@@ -24,6 +24,10 @@ export const surfaceDisplayQuery = queryRecord<SurfaceDisplayState>({
 });
 export const surfaceDisplayFeature = {
   id: "presentation.surface-display", controls: [{ id: "mode", label: "Fluid surface", kind: "choice", update: "live", setting: "fluidSurfaceRenderMode",
-    hint: "Shade the liquid, show it as a murky body its particles are seen through, or show triangle edges.", options: SURFACE_DISPLAY_OPTIONS }],
-  placements: [{ slot: "scene.surface", control: "mode", presentation: "compact", priority: "high" }, { slot: "frame.surface", control: "mode", presentation: "expanded" }],
+    hint: "Shade the liquid, show it as a murky body its particles are seen through, or show triangle edges.", options: SURFACE_DISPLAY_OPTIONS },
+    { id: "particles", label: "Particles", kind: "choice", update: "live", setting: "fluidParticleDisplay",
+      hint: "The method's own particles, drawn through the liquid. Under the Simple surface they sit in the water, fogged by the liquid in front of them." }],
+  placements: [{ slot: "scene.surface", control: "mode", presentation: "compact", priority: "high" }, { slot: "frame.surface", control: "mode", presentation: "expanded" },
+    // A drawn layer like the field views, so it stands first among them.
+    { slot: "study.layers", control: "particles", presentation: "compact", priority: "high" }],
 } as const satisfies FeatureDefinition;

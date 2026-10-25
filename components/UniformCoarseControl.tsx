@@ -8,13 +8,12 @@ import { simulation } from "../lib/core/simulation/controller";
 import type { MethodParamValue, MethodParamValues } from "../lib/core/method-contract";
 import { UNIFORM_DETAIL_CRITERION_PARAMS, UNIFORM_DETAIL_RANGES, uniformDetailSettings, uniformDetailValues } from "../lib/methods/uniform/uniform-detail-policy";
 import { UNIFORM_DETAIL_CRITERIA, type UniformDetailCriterion } from "../lib/methods/uniform/uniform-stage-grids";
-import { IMPORTANCE_LEGEND, legacyVisualLayers, toggleVisualLayer } from "../lib/core/visual-layers";
+import { IMPORTANCE_LEGEND } from "../lib/core/visual-layers";
 import { uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
 import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP, NARROW_BAND_SPARSE_CONTROL, NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL, NARROW_BAND_SURFACE_ADVECTION as ADVECTION, NARROW_BAND_TUNE_CONTROLS, narrowBandControlValues, narrowBandSurfaceAdvection, type NarrowBandSurfaceAdvection } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { NARROW_BAND_TUNE_DIALS, narrowBandTunePosition, narrowBandTuneValues, type NarrowBandTuneDial } from "../lib/methods/uniform/uniform-narrow-band-tuning";
-import { Grid3X3, SlidersHorizontal } from "lucide-react";
-import { ToolstripMenuButton, ToolstripMenuRule, ToolstripRow, useToolstripSection } from "./toolstrip";
-import { ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, Slider, Swatch, Switch, SwitchField, ToggleButton, Value } from "./ui";
+import { RailLink, RailRange, RailReadout, RailRule } from "./rail";
+import { ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, Swatch, Switch, SwitchField } from "./ui";
 
 const SHAPE_DISPLACEMENT_HINT = "Shape measures how far the surface moves at 4h, not the error in phi beside it. Off: value error.";
 const SURFACE_DISTANCE_HINT = "Allowed tile layers around surface-crossing tiles, including diagonals. 0 keeps only crossing tiles. This permits existing refinement; it does not request more.";
@@ -59,7 +58,7 @@ const thresholdOf = (values: Record<string, unknown>, key: keyof typeof UNIFORM_
 type SetParam = (key: string, value: MethodParamValue) => void;
 
 /**
- * One of the Tune menu's dials: a slider over several params at once
+ * One of the Tune card's dials: a slider over several params at once
  * (uniform-narrow-band-tuning.ts). Moving it writes every param it drives and
  * its own position; it reads Custom once the full controls move one of them
  * off its curve, and dragging it from there writes them all again.
@@ -71,18 +70,17 @@ function TuneDial({ dial, values, set }: { dial: NarrowBandTuneDial; values: Met
     for (const [key, value] of Object.entries(narrowBandTuneValues(dial, t))) if (values[key] !== value) set(key, value);
     if (values[spec.key] !== t) set(spec.key, t);
   };
-  return <Field label={spec.label} hint={spec.hint} testId={`scene-detail-tune-${dial}`}
-    value={<Value value={custom ? "Custom" : position} digits={custom ? undefined : spec.digits} />}>
-    <Slider value={position} min={spec.min} max={spec.max} step={spec.step} onInput={apply} onChange={apply} />
-  </Field>;
+  return <RailRange label={spec.label} hint={spec.hint} testId={`scene-detail-tune-${dial}`}
+    value={position} min={spec.min} max={spec.max} step={spec.step} digits={spec.digits}
+    display={custom ? "Custom" : undefined} onInput={apply} onChange={apply} />;
 }
 
 /**
- * Every detail control on its own, for the Tune menu's All controls: the
+ * Every detail control on its own, for the Tune card's All controls: the
  * surface advection, the particle controls, the surface filter, each
- * criterion with its threshold, and the shaping dials. The menu's dials write
+ * criterion with its threshold, and the shaping dials. The card's dials write
  * these same params, so a change here moves a dial off its curve (Custom).
- * Changes apply live, as the menu's do.
+ * Changes apply live, as the card's do.
  */
 function UniformDetailControls({ onClose }: { onClose: () => void }) {
   const session = useSession();
@@ -171,75 +169,34 @@ function UniformDetailControls({ onClose }: { onClose: () => void }) {
 }
 
 /**
- * The detail controls on the scene toolstrip, under the solver row: the policy
- * on one row and, for Dynamic, a Tune dropdown beside it. The menu holds four
- * dials, Surface accuracy, Splash particles, Persistence and Budget, each a
- * writer over the params it names; All controls under the rule opens every
- * control on its own in a dialog. A menu because the rows stood three wide
- * over the water. Changes tune the running simulation; the panel below
- * reports the accepted layout.
+ * Dynamic detail's tuning, as the study rail's Tune card: the accepted
+ * coverage, four dials, Surface accuracy, Splash particles, Persistence and
+ * Budget, each a writer over the params it names, and All controls, which
+ * opens every control on its own in a dialog. The method installs the card
+ * only under the Dynamic policy (`uniformDetailTuningFeature`). Changes tune
+ * the running simulation; the Detail importance layer draws what they ask for.
  */
-export function UniformDetailRow() {
+export function UniformTunePanel() {
   const session = useSession();
   const method = session.method();
   const fine = session.diagnostics(state => state.gpuInfo?.uniformMixedFineTiles);
   const coarse = session.diagnostics(state => state.gpuInfo?.uniformMixedCoarseTiles);
-  const layers = session.ui(state => state.visualLayers);
-  const overlayMode = session.ui(state => state.gridOverlayMode);
-  const overlayAxis = session.ui(state => state.gridOverlayAxis);
-  const [tuning, setTuning] = useState(false);
   const [everything, setEverything] = useState(false);
-  const { claim } = useToolstripSection("uniform-detail", () => setTuning(false));
   const resolved = resolvedMethodValues(method);
   const activityValues = narrowBandControlValues(resolved);
-  const settings = uniformDetailSettings(resolved);
   const set: SetParam = (key, value) => simulation.setMethodParam(method.methodId, key, value, session.id);
-  const dynamic = settings.policy === "dynamic";
-  // The scores layer rides the field view's layer state (FieldQuickBar).
-  const drawn = layers ?? { ...legacyVisualLayers(overlayMode), visible: overlayAxis !== "off" };
-  const scores = drawn.visible && drawn.enabled.includes("importance");
-  const showScores = (on: boolean) => session.ui.setState({
-    visualLayers: on === drawn.enabled.includes("importance") ? { ...drawn, visible: true } : toggleVisualLayer(drawn, "importance"),
-    gridOverlayMode: "structure",
-    gridOverlayAxis: overlayAxis === "off" || overlayAxis === "volume" ? "z" : overlayAxis,
-  });
   const budget = NARROW_BAND_ACTIVITY_CONTROLS[0];
-  const menu = <ToolstripMenuButton
-    label="Detail tuning"
-    caption="Tune"
-    hint="Four dials over what makes a tile run h and what it costs; All controls holds every setting on its own."
-    open={dynamic && tuning}
-    testId="scene-detail-tune"
-    onOpen={value => { claim(value); setTuning(value); }}
-  >
+  return <>
+    <RailReadout label="Dynamic detail" value={fine === undefined ? "—" : `${percent(fine, fine + (coarse ?? 0))} h`}
+      hint="Where the solver runs h cells on its 4h base: tiles of 4×4×4 h cells running h in the accepted layout."
+      testId="scene-detail-coverage" />
     {NARROW_BAND_TUNE_DIALS.map(dial => <TuneDial key={dial} dial={dial} values={resolved} set={set} />)}
-    <RangeField label="Budget" value={activityValues[budget.key]} min={budget.min} max={budget.max} step={budget.step} digits={budget.digits}
+    <RailRange label="Budget" value={activityValues[budget.key]} min={budget.min} max={budget.max} step={budget.step} digits={budget.digits}
       unit={budget.unit} hint={BUDGET_HINT} testId="scene-detail-tune-budget"
       onInput={value => set(budget.key, value)} onChange={value => set(budget.key, value)} />
-    <ToolstripMenuRule />
-    <button type="button" role="menuitem" title="Every detail control on its own, grouped as the solver reads them. Changes apply live."
-      data-testid="scene-detail-all-controls" onClick={() => { claim(false); setTuning(false); setEverything(true); }}>
-      <SlidersHorizontal width={13} height={13} strokeWidth={1.7} aria-hidden />
-      <span>All controls…</span>
-    </button>
-  </ToolstripMenuButton>;
-  return <>
-    <ToolstripRow
-      icon={<Grid3X3 width={14} height={14} strokeWidth={1.7} aria-hidden />}
-      name="Simulation detail"
-      hint="Where the solver runs h cells on its 4h base. Changes apply at the next frame and keep the running simulation."
-      testId="scene-detail-row"
-      after={<>
-        <span className="toolstrip-gutter" aria-hidden />
-        <span className="toolstrip-name">Dynamic</span>
-        {dynamic && menu}
-        {dynamic && <ToggleButton pressed={scores} ariaLabel="Show detail importance scores" testId="scene-detail-scores"
-          hint="Draw every criterion's score per tile on the slice (the Detail importance layer): 1 is where it starts asking for h. Criteria that are off are scored too."
-          onChange={showScores}>Scores</ToggleButton>}
-        {fine !== undefined && <span className="toolstrip-name" data-testid="scene-detail-coverage"
-          title="Tiles of 4×4×4 h cells running h in the accepted layout.">{percent(fine, fine + (coarse ?? 0))} h</span>}
-      </>}
-    />
+    <RailRule />
+    <RailLink label="All controls…" hint="Every detail control on its own, grouped as the solver reads them. Changes apply live."
+      testId="scene-detail-all-controls" onClick={() => setEverything(true)} />
     {everything && <UniformDetailControls onClose={() => setEverything(false)} />}
   </>;
 }
