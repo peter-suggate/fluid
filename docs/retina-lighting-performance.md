@@ -23,8 +23,8 @@ individual windows; whole-frame paired measurements are the performance gate.
 ## Changes
 
 The **Lighting → Minimum AO taps** slider selects 0, 4, 8 … 36 taps;
-24 remains the default used for the measurements below. It updates live and is
-saved in links as `svoFarAO`. Zero removes screen-space contact AO at the
+0 is the default; the historical measurements below state their tested budgets.
+It updates live and is saved in links as `svoFarAO`. Zero removes screen-space contact AO at the
 minimum-importance receivers; coarse voxel AO remains separately controlled.
 Lower budgets retain the innermost taps first, alternating opposite directions.
 
@@ -91,8 +91,9 @@ Setting 36 bypasses classification. The existing still-view reuse also reuses
 this publication when receiver inputs are unchanged.
 
 This is a cheap visual-loss proxy, not a conservative proof that contact AO is
-absent. The default remains 24, preserving four inner samples in all six
-directions; low settings intentionally make a larger tradeoff. No temporal
+absent. The default is 0, allowing clear regions to skip horizon taps while
+footprint protection retains extra samples near contacts. A minimum of 24
+preserves four inner samples in all six directions. No temporal
 history is used. A changed view can change the normalization range.
 
 At minimum 24, the garden's stationary view averages **25.10 taps**: 4,517,072
@@ -104,7 +105,7 @@ counts match. Display RMSE is **0.35/255**, with 0.042% of surface pixels differ
 by more than eight levels in any channel. The orbit comparison was effectively
 even at 12.65 ms for both arms (paired median 0.990×), with RMSE 0.36. These are
 aggregate errors, not a claim that every contact is identical or that the
-default produces a consistent frame-time win.
+24-tap minimum produces a consistent frame-time win.
 
 With footprint protection and minimum **4**, the same garden view averages
 **17.05 taps**. 2,259,433 surface pixels use exactly 4; contact/detail regions
@@ -120,7 +121,8 @@ surface pixels differ by more than eight display levels in any channel; local
 maxima reach 26, so low budgets still trade some contact detail. Classification
 plus footprint bounds costs about 0.39 ms, while the sun/horizon pass falls
 from 3.34 to 2.29 ms. Coarse AO and direct shadows remain; reduced horizon taps
-do not translate proportionally into whole-frame savings. The default stays 24.
+do not translate proportionally into whole-frame savings. These measurements
+used minimum 4, not the current default of 0.
 
 `tools/benchmark-raster-ao-census.ts` measures the same importance/budget planes
 outside timed frames and separates locally flat and detailed pixel counts.

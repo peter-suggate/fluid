@@ -7,10 +7,12 @@ import { FluidLabRenderer } from "../lib/core/webgpu-renderer";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning } from "../lib/svo/pipeline/svo-render-tuning";
 
 test("far AO tuning preserves zero, round-trips slider values, and normalizes saved budgets", () => {
-  assert.equal(lightingTuningQuery.read(new URLSearchParams()).rasterFarAoTaps,24);
+  assert.equal(DEFAULT_SVO_RENDER_TUNING.rasterFarAoTaps,0);
+  assert.equal(lightingTuningQuery.read(new URLSearchParams()).rasterFarAoTaps,0);
   for(let taps=0;taps<=36;taps+=4){
     const tuning=normalizeSvoRenderTuning({...DEFAULT_SVO_RENDER_TUNING,rasterFarAoTaps:taps});
     const query=new URLSearchParams();lightingTuningQuery.write(query,tuning);
+    assert.equal(query.has("svoFarAO"),taps!==0,"only non-default tap budgets need a link override");
     assert.equal(lightingTuningQuery.read(query).rasterFarAoTaps,taps);
   }
   for(const [requested,expected] of [[-4,0],[7,8],[100,36]])
@@ -56,7 +58,7 @@ test("GPU far AO budgets use every slider tap count and converge continuously to
         assert.ok(values[offset+3]!-values[offset]!>=-1e-5 && values[offset+3]!-values[offset]!<=1+1e-5,"only the next sample can be fractional");
         assert.ok(values[offset+3]!>=farTaps && values[offset+3]!<=36);
         assert.ok(Math.abs(values[offset]!-(farTaps+(36-farTaps)*values[offset+2]!))<.0005+1e-5);
-        if(farTaps>=24) assert.equal(values[offset+1],1,"default and higher budgets preserve every inner contact tap");
+        if(farTaps>=24) assert.equal(values[offset+1],1,"budgets of 24 or higher preserve every inner contact tap");
         if(radius<=48) assert.equal(values[offset],farTaps);
         if(radius>=112) assert.equal(values[offset],36,"nearby receivers retain every original tap at full weight");
         if(radius>0) {

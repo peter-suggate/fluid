@@ -313,7 +313,7 @@ export interface SvoRenderTuning {
   readonly aoStrength: number;
   /** Sparse world-opacity AO for the raster backend; zero keeps contact AO only. */
   readonly rasterCoarseAoStrength: number;
-  /** Distant screen-space AO budget, in four-tap steps; nearby AO keeps 36. */
+  /** Minimum screen-space AO budget, in four-tap steps; important receivers receive up to 36. */
   readonly rasterFarAoTaps: number;
   /**
    * Reuse the raster shadow and AO visibility while the camera is still: paused,
@@ -442,7 +442,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   aoRadiusScale: 1,
   aoStrength: 1,
   rasterCoarseAoStrength: 0.6,
-  rasterFarAoTaps: 24,
+  rasterFarAoTaps: 0,
   rasterStillViewReuse: false,
   aoConeAperture: 0.62,
   shadowConeAperture: 0.065,

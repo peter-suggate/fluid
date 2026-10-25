@@ -22,8 +22,8 @@ fn rasterHorizonTapCount(budget:f32,farTaps:u32)->u32{
   return u32(ceil(rasterHorizonTargetTaps(budget,farTaps)));
 }
 fn rasterHorizonStepWeight(direction:u32,step:u32,budget:f32,farTaps:u32)->f32{
-  // Spend taps from the inside out, alternating opposite directions. At the
-  // default 24 taps this retains all four inner samples in every direction.
+  // Spend taps from the inside out, alternating opposite directions. At a
+  // minimum of 24 taps this retains all four inner samples in every direction.
   let order=(step-1u)*6u+(direction%3u)*2u+direction/3u;
   return clamp(rasterHorizonTargetTaps(budget,farTaps)-f32(order),0.0,1.0);
 }

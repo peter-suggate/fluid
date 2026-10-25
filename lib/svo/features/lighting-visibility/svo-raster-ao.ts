@@ -561,7 +561,7 @@ export class SvoRasterAo {
   private renderedSettledKey?: string;
   private coarseAoStrength = 0;
   private aoContrast = 1;
-  private farAoTaps = 24;
+  private farAoTaps = 0;
   private shadowLayerCount = 2;
   /** One indexed indirect record plus its immutable instance capacity per asset. */
   nativeDrawArguments?: GPUBuffer;
