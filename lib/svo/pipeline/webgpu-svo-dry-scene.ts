@@ -5798,6 +5798,15 @@ export class SparseVoxelDrySceneRenderer {
     // deep the primary descends and nothing else. It adds no pass, moves no
     // march shape, and lighting never reads it — so a slider drag must cost one
     // 16-byte write, not a world-GI rebuild and a discarded primary.
+    // Still-view reuse is read where the visibility pass is encoded and
+    // nowhere else; an absent reuse key there recomputes, so switching it
+    // either way needs no invalidation of its own.
+    const encodeOnlyKeys = ["rasterStillViewReuse"] as const;
+    if ((Object.keys(normalized) as (keyof SvoRenderTuning)[])
+      .every((key) => normalized[key] === this.renderTuning[key] || (encodeOnlyKeys as readonly string[]).includes(key))) {
+      this.renderTuning = normalized;
+      return;
+    }
     const lodKeys = ["lodMode", "lodScreenSpacePixels", "lodFixedLevel", "surfaceMeshLodPixels", "surfaceMeshFilteringEnabled", "surfaceMeshNormalSmoothing", "surfaceMeshNormalStrength", "surfaceMeshMaxCoarsening", "surfaceMeshLodHysteresis", "surfaceMeshNormalAgreement", "surfaceMeshPreserveCloseNormals"] as const;
     const lodOnly = (Object.keys(normalized) as (keyof SvoRenderTuning)[])
       .every((key) => normalized[key] === this.renderTuning[key] || (lodKeys as readonly string[]).includes(key));
@@ -5864,6 +5873,7 @@ export class SparseVoxelDrySceneRenderer {
     this.rasterAo?.setVisibilityEnabled(this.rasterLightVisibilityRequested && scene.opaqueSurfaceOnly === true && this.lightingOptions.globalIlluminationEnabled !== true);
     this.rasterAo?.setVisibilityLayers(rasterVisibilityLayers(scene.lightRecords, this.renderTuning.maximumShadedLights, Math.max(this.renderTuning.stableAreaLightSamples, this.renderTuning.movingAreaLightSamples), this.lightingOptions.globalIlluminationEnabled === true));
     this.rasterAo?.setCoarseAoStrength(this.renderTuning.rasterCoarseAoStrength);
+    this.rasterAo?.setFarAoTaps(this.renderTuning.rasterFarAoTaps);
     this.rasterAo?.setAoContrast(scene.rasterAoContrast ?? 1);
     this.rasterAo?.update(structural.domain.worldOrigin_m,
       structural.domain.dimensionsCells.map((cells, axis) => cells * structural.domain.cellSize_m[axis]),
@@ -6398,6 +6408,14 @@ export class SparseVoxelDrySceneRenderer {
   get stagePlanes(): SvoRenderStagePlanes {
     const gBuffer = this.gBufferTargets.views;
     return {
+      rasterAoRange: this.rasterAo?.aoRange,
+      rasterAoImportance: this.rasterAo?.aoImportanceView,
+      rasterAoBudget: this.rasterAo && this.source?.structural ? {
+        enabled: this.lightingOptions.ambientOcclusionEnabled && this.lightingOptions.coneTracingMode === "raster-ao",
+        farTaps: this.renderTuning.rasterFarAoTaps,
+        cellSize_m: Math.max(...this.source.structural.domain.cellSize_m),
+        radiusScale: this.renderTuning.aoRadiusScale,
+      } : undefined,
       packedSurface: gBuffer?.packedSurface,
       identityMedia: gBuffer?.identityMedia,
       hardwareDepth: gBuffer?.hardwareDepth,
@@ -6943,7 +6961,7 @@ export class SparseVoxelDrySceneRenderer {
           this.completeRasterShadows, this.completeRasterAo,
           this.experiments.rasterShadowPassReuse !== false && this.surfaceMeshStatus?.state === "ready"
             ? this.shadowReuseKey : undefined, this.drawImportedShadows,
-          this.visibilityViewValid && !this.experiments.waterShadows && this.disabledStages.size===0 && !this.rigidBodiesRequested()
+          this.visibilityViewValid && this.renderTuning.rasterStillViewReuse && !this.experiments.waterShadows && this.disabledStages.size===0 && !this.rigidBodiesRequested()
             ? `${this.visibilityViewRevision}:${this.visibilityInputsRevision}` : undefined);
         this.rasterAoTrace = undefined;
       }

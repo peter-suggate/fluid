@@ -3,6 +3,22 @@ import assert from 'node:assert/strict';
 import { meshVolumeSurface } from '../lib/core/imported-assets/mesh-volume-surface';
 import type { MeshVolume, MeshVolumeBrick } from '../lib/core/imported-assets/mesh-volume';
 
+test('native triangle ordering preserves shared vertex addresses, winding and duplicate faces', async () => {
+  const { prepareMeshVolumeSurfaces, reorderMeshVolumeTriangles } = await import('../lib/core/imported-assets/mesh-volume-surface');
+  await prepareMeshVolumeSurfaces();
+  // Deliberately sparse addresses: unused vertices must not shift the addresses
+  // used by another LOD in the shared vertex buffer.
+  const indices = new Uint32Array([10,30,50, 90,110,130, 50,30,70, 130,110,150, 10,30,50]);
+  const triangles = (words: Uint32Array) => Array.from({ length: words.length / 3 }, (_, i) =>
+    Array.from(words.subarray(i * 3, i * 3 + 3)).join(',')).sort();
+  const before = triangles(indices);
+  reorderMeshVolumeTriangles(indices);
+  assert.deepEqual(triangles(indices), before, 'each oriented triangle retains its exact original indices');
+  const empty = new Uint32Array();
+  reorderMeshVolumeTriangles(empty);
+  assert.equal(empty.length, 0);
+});
+
 test('native surface extraction shares brick seams and retains subcell geometry', () => {
   const bricks = new Map<string, MeshVolumeBrick>();
   for (let bx=0;bx<2;bx++) {

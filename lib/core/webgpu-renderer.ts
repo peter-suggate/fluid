@@ -3253,7 +3253,9 @@ export class FluidLabRenderer {
         activeSvoDiagnostics.stageView, activeSvoDiagnostics.lightSlot,
         this.presentationTexture.width, this.presentationTexture.height,
         camera.distance_m + sceneExtent,
-        { ...(this.svoDryScenePipeline?.stagePlanes ?? {}), sceneRadiance: this.waterPipeline.drySceneRadianceView },
+        { ...(this.svoDryScenePipeline?.stagePlanes ?? {}), sceneRadiance: this.waterPipeline.drySceneRadianceView,
+          cameraTanHalfFov: cameraTanHalfFov(camera),
+          sceneExtent_m: [scene.container.width_m,scene.container.height_m,scene.container.depth_m] },
       );
     }
     // The gather is a compute pass over published topology, so it is encoded

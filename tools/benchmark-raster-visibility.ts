@@ -1,9 +1,11 @@
 /** Paired production-renderer measurements and full-resolution image comparisons.
- * The reference retains the old per-fragment visibility; both arms keep AO,
- * the same lights, sample budgets, material shading and mesh. */
+ * Compare per-fragment/queued visibility, or selected reference compute shaders,
+ * while retaining the same lights, material shading and mesh. */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { cameraTanHalfFov } from "../lib/core/webgpu-camera";
+import { svoContactVisibilityRadius_m } from "../lib/svo/features/lighting-visibility/svo-contact-visibility";
 import { GPUPassTimestampRecorder } from "../lib/core/performance-trace";
 import { resolveDisplayGrade, sceneLinearToDisplay } from "../lib/core/webgpu-lighting";
 import { svoSceneLighting } from "../lib/svo/features/lighting-visibility/svo-dry-scene-lighting";
@@ -11,6 +13,7 @@ import { buildSvoSceneLights, packSvoLightRecords, type SvoLightRecord } from ".
 import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
 import type { SparseVoxelDrySceneRenderer } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 import { packSvoDryViewUniforms } from "./svo-dry-frame-harness";
+import { rasterAoBudgetCensus } from "./benchmark-raster-ao-census";
 import { writeFramePng } from "./write-frame-png";
 
 function half(v: number): number {
@@ -22,6 +25,8 @@ const quantile = (xs: number[], q: number) => [...xs].sort((a, b) => a - b)[Math
 export async function benchmarkRasterVisibility(input: {
   device: GPUDevice; renderer: SparseVoxelDrySceneRenderer; uniforms: GPUBuffer;
   view: Parameters<typeof packSvoDryViewUniforms>[0]; publication: SparseVoxelDrySceneData; outPath: string;
+  aoCellSize?: number;
+  reference?: { encode(encoder: GPUCommandEncoder): GPUCommandEncoder; exactReceiverCount(): Promise<number | undefined>; omittedPasses: string[] };
 }) {
   const { device, renderer, uniforms, view, publication } = input;
   const { width, height } = view, directory = dirname(input.outPath);
@@ -49,16 +54,21 @@ export async function benchmarkRasterVisibility(input: {
   const results: unknown[] = [];
   let previousArm: boolean | undefined;
   async function frame(enabled: boolean, timed: boolean) {
-    renderer.setRasterLightVisibilityEnabled(enabled || process.env.FLUID_VISIBILITY_QUEUE_COMPARE === "1");
-    renderer.setRasterVisibilityQueueEnabled(enabled || process.env.FLUID_VISIBILITY_QUEUE_COMPARE !== "1");
+    renderer.setRasterLightVisibilityEnabled(!!input.reference || enabled || process.env.FLUID_VISIBILITY_QUEUE_COMPARE === "1");
+    renderer.setRasterVisibilityQueueEnabled(!!input.reference || enabled || process.env.FLUID_VISIBILITY_QUEUE_COMPARE !== "1");
     if (previousArm !== enabled) { previousArm = enabled; await frame(enabled, false); }
     const encoder = device.createCommandEncoder();
     const recorder = timed ? new GPUPassTimestampRecorder(device, 512, "Paired raster visibility") : undefined;
-    assert.ok(renderer.encode(recorder?.instrument(encoder) ?? encoder, target));
+    const timedEncoder = recorder?.instrument(encoder) ?? encoder;
+    assert.ok(renderer.encode(!enabled && input.reference ? input.reference.encode(timedEncoder) : timedEncoder, target));
     if (recorder) assert.ok(recorder.resolve(encoder));
     device.queue.submit([encoder.finish()]);
     if (!recorder) { await device.queue.onSubmittedWorkDone(); return undefined; }
-    const reading = await recorder.read(); assert.ok(reading); return reading;
+    const reading = await recorder.read(); assert.ok(reading);
+    if (!enabled && input.reference) for (const label of input.reference.omittedPasses) {
+      assert.ok(!reading.passes.some(pass => pass.label === label), `Reference unexpectedly submitted ${label}`);
+    }
+    return reading;
   }
   async function capture(name: string) {
     const pitch = Math.ceil(width * 8 / 256) * 256;
@@ -89,16 +99,43 @@ export async function benchmarkRasterVisibility(input: {
           for (const enabled of cycle % 2 ? [true, false] : [false, true]) {
             const reading = await frame(enabled, cycle >= 0);if (!reading) continue;
             (enabled ? candidate : reference).push(reading.span_ms);pair[enabled ? 1 : 0] = reading.span_ms;
-            if (enabled) for (const p of reading.passes) if (p.trusted) (compute[p.label] ??= []).push(p.duration_ms);
+            for (const p of reading.passes) if (p.trusted) (compute[`${enabled ? "candidate" : "reference"}: ${p.label}`] ??= []).push(p.duration_ms);
           }
           if (cycle >= 0) paired.push(pair[0]! / pair[1]!);
         }
         await frame(false, false);const a = await capture(`${fixture.name}-${motion}-reference`);
+        const referenceExactReceivers = await input.reference?.exactReceiverCount();
         await frame(true, false);const b = await capture(`${fixture.name}-${motion}-candidate`);
-        let sum = 0, sumSquares = 0, maximum = 0, over2 = 0, over8 = 0, receivers = 0, depthMismatches = 0;
+        const candidateExactReceivers = await input.reference?.exactReceiverCount();
+        const aoRange = renderer.stagePlanes.rasterAoRange;
+        let normalizedRange: Float32Array | undefined;
+        if (aoRange) {
+          const read = device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+          try {
+            const encoder=device.createCommandEncoder();encoder.copyBufferToBuffer(aoRange,0,read,0,16);
+            device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
+            const words=new Uint32Array(read.getMappedRange());
+            if(words[1])normalizedRange=new Float32Array(new Uint32Array([~words[0]!,words[1]!]).buffer);
+          } finally {if(read.mapState==="mapped")read.unmap();read.destroy();}
+        }
+        const cell = input.aoCellSize ?? 0;
+        const radius = svoContactVisibilityRadius_m([cell, cell, cell], [view.scene.container.width_m, view.scene.container.height_m, view.scene.container.depth_m]);
+        const budgetCensus = await rasterAoBudgetCensus(device,renderer.stagePlanes,width,height,{radius_m:radius,tanHalfFov:cameraTanHalfFov(baseCamera)});
+        const farTaps = renderer.stagePlanes.rasterAoBudget?.farTaps ?? 36;
+
+        let sum = 0, sumSquares = 0, maximum = 0, over2 = 0, over8 = 0, receivers = 0, depthMismatches = 0, hdrMismatches = 0;
+        const footprint = { reduced: 0, transition: 0, full: 0 };
         for (let p = 0; p < width * height; p++) {
           if (a[p * 4 + 3] !== b[p * 4 + 3]) depthMismatches++;
+          if (a[p * 4] !== b[p * 4] || a[p * 4 + 1] !== b[p * 4 + 1] || a[p * 4 + 2] !== b[p * 4 + 2]) hdrMismatches++;
           if (half(a[p * 4 + 3]!) <= 0) continue;
+          if(input.aoCellSize!==undefined){
+            const nx=((p%width+.5)/width*2-1)*width/height*cameraTanHalfFov(baseCamera);
+            const ny=(1-(Math.floor(p/width)+.5)/height*2)*cameraTanHalfFov(baseCamera);
+            const depth=half(a[p*4+3]!)/Math.sqrt(1+nx*nx+ny*ny);
+            const projected=radius*height/(2*depth*cameraTanHalfFov(baseCamera));
+            footprint[projected<=16?"reduced":projected<24?"transition":"full"]++;
+          }
           const x = sceneLinearToDisplay([half(a[p * 4]!), half(a[p * 4 + 1]!), half(a[p * 4 + 2]!)], grade);
           const y = sceneLinearToDisplay([half(b[p * 4]!), half(b[p * 4 + 1]!), half(b[p * 4 + 2]!)], grade);
           let error = 0;
@@ -121,16 +158,22 @@ export async function benchmarkRasterVisibility(input: {
           assert.ok(invalidated?.passes.some(p => p.label === "Reduced all-light visibility"), "changed view invalidates visibility");
           renderer.setRasterVisibilityView(undefined); reuseVerified = true;
         }
-        const row = { reuseVerified, fixture: fixture.name, motion, referenceMedian_ms: quantile(reference, .5), candidateMedian_ms: quantile(candidate, .5),
+        const row = { reuseVerified, fixture: fixture.name, motion, referenceExactReceivers, candidateExactReceivers,
+          normalizedAoBudget: normalizedRange ? {importanceRange:[...normalizedRange],farTaps,census:budgetCensus} : undefined,
+          projectedRadiusBudget: input.aoCellSize===undefined?undefined:{radius_m:radius,...footprint},
+          referenceMedian_ms: quantile(reference, .5), candidateMedian_ms: quantile(candidate, .5),
           referenceP95_ms: quantile(reference, .95), candidateP95_ms: quantile(candidate, .95), pairedMedianSpeedup: quantile(paired, .5), reference, candidate,
           computeMedian_ms: Object.fromEntries(Object.entries(compute).map(([k, v]) => [k, quantile(v, .5)])),
-          quality: { receivers, depthMismatches, displayMeanAbsolute_255: sum / (receivers * 3), displayRmse_255: Math.sqrt(sumSquares / (receivers * 3)),
+          quality: { receivers, depthMismatches, hdrMismatches, displayMeanAbsolute_255: sum / (receivers * 3), displayRmse_255: Math.sqrt(sumSquares / (receivers * 3)),
             displayMaximum_255: maximum, fractionOver2: over2 / receivers, fractionOver8: over8 / receivers } };
+        results.push(row);console.log(JSON.stringify({ phase: "visibility-pair", ...row }));
+        writeFileSync(input.outPath, JSON.stringify({ scene: view.scene.sceneId, width, height, camera: baseCamera, cycles, adapter: device.adapterInfo,
+          reference: input.reference ? "compute shader reference" : process.env.FLUID_VISIBILITY_QUEUE_COMPARE === "1" ? "inline exact edges, stride 2" : "per-fragment visibility",
+          candidate: input.reference ? "production compute shaders" : process.env.FLUID_VISIBILITY_QUEUE_COMPARE === "1" ? "queued exact edges, stride 2" : "precomputed visibility, stride 2",
+          scope: "Production dry render, AO and shadows on; excludes water, physics and browser presentation", results }, null, 2));
         assert.equal(depthMismatches, 0, "Visibility changes must not move geometry");
         assert.ok(row.quality.displayRmse_255 < 1, "Receiver display RMSE must stay below one 8-bit level");
         assert.ok(row.quality.fractionOver8 < .01, "Large differences must cover less than 1% of receivers");
-        results.push(row);console.log(JSON.stringify({ phase: "visibility-pair", ...row }));
-        writeFileSync(input.outPath, JSON.stringify({ scene: view.scene.sceneId, width, height, camera: baseCamera, cycles, adapter: device.adapterInfo, reference: process.env.FLUID_VISIBILITY_QUEUE_COMPARE === "1" ? "inline exact edges, stride 2" : "per-fragment visibility", candidate: process.env.FLUID_VISIBILITY_QUEUE_COMPARE === "1" ? "queued exact edges, stride 2" : "precomputed visibility, stride 2", scope: "Production dry render, AO and shadows on; excludes water, physics and browser presentation", results }, null, 2));
       }
     }
   } finally { renderer.setRasterLightVisibilityEnabled(true);renderer.publishScene(publication);target.destroy(); }

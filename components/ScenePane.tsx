@@ -14,6 +14,7 @@ import { PipelineOverlay } from "./PipelineOverlay";
 import { RadialMenu } from "./RadialMenu";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
 import { SceneSelector } from "./SceneSelector";
+import { ViewRail } from "./ViewRail";
 import { VoxelToolRail } from "./VoxelToolRail";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { InteractionLayer } from "../lib/features/interactive/ui";
@@ -144,6 +145,7 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
       <InteractionLayer paneId={paneId} focused={focused} />
       <EditorModeChip />
       <VoxelToolRail />
+      <ViewRail />
       <RadialMenu />
       <SceneScaleOverlay />
       <PipelineOverlay />

@@ -1,6 +1,5 @@
 "use client";
 
-import { sceneRenderTuning } from "../../core/scene-render-profile";
 import { renderSparseWorldBuildControls } from "../features/construction/controls";
 import { renderConeVisibilityControls } from "../features/lighting-visibility/controls";
 import { renderPresentControls } from "../features/presentation/controls";
@@ -46,11 +45,11 @@ import { disabledRenderStagesFrom } from "./render-stage-switches";
 import { resolveSvoPrimaryTraversal } from "./svo-render-options";
 import {
 SVO_RENDER_QUALITY_PRESETS,
-SVO_RENDER_TUNING_PRESETS,
 svoRenderTuningKey,
 type SvoRenderQualityPreset,
 type SvoRenderTuning,
 } from "./svo-render-tuning";
+import { svoSceneTuningDefaults } from "./tuning-binding";
 import { SvoFeatureSlot } from "./ui-slots";
 
 /** Frames the live readout averages over. */
@@ -161,9 +160,7 @@ export function RenderPipelineOverlay() {
   const setSvoMaximumNodeVisits = session.ui((state) => state.setSvoMaximumNodeVisits);
   const tuning = session.ui((state) => state.svoRenderTuning);
   const renderProfile = session.scene((state) => state.scene.renderProfile);
-  const sceneTuningDefaults = renderProfile ? { ...SVO_RENDER_TUNING_PRESETS.balanced,
-    environmentRefinementDepth: sceneRenderTuning(renderProfile).environmentRefinementDepth,
-  } : SVO_RENDER_TUNING_PRESETS.balanced;
+  const sceneTuningDefaults = svoSceneTuningDefaults(renderProfile);
   const setTuning = session.ui((state) => state.setSvoRenderTuning);
 
   // The scene facts the build node has to state for itself: what a leaf

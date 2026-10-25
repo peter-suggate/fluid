@@ -104,6 +104,49 @@ test("GPU exact-edge dispatch handles zero, partial groups, and more than 65535 
   });
 });
 
+test("GPU exact tiles retain every receiver once and leave AO payloads intact", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+  const { withUniformDevice } = await import("./helpers/uniform-geometric");
+  const { rasterExactQueueWGSL, rasterExactTileQueueWGSL } = await import("../lib/svo/features/lighting-visibility/raster-light-visibility");
+  await withUniformDevice("exact tile queue", async device => {
+    const size=(4+768*2)*4;
+    const queue=device.createBuffer({size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+    const read=device.createBuffer({size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+    const mode=device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    try {
+      const module=device.createShaderModule({code:`${rasterExactQueueWGSL}${rasterExactTileQueueWGSL}
+@group(0) @binding(0) var<uniform> testMode:vec4u;
+@compute @workgroup_size(64) fn main(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  rasterBeginExactTile(lane);
+  for(var i=0u;i<4u;i++){
+    let coordinate=group.x*256u+lane*4u+i;
+    if(testMode.x!=0u&&(coordinate==511u||group.x==2u)){rasterAppendExactTile(coordinate);}
+  }
+  rasterFlushExactTile(lane);
+}`});
+      assert.deepEqual((await module.getCompilationInfo()).messages.filter(message=>message.type==="error"),[]);
+      const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
+      const group0=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:mode}}]});
+      const group1=device.createBindGroup({layout:pipeline.getBindGroupLayout(1),entries:[]});
+      const group2=device.createBindGroup({layout:pipeline.getBindGroupLayout(2),entries:[{binding:20,resource:{buffer:queue}}]});
+      const sentinel=new Uint32Array(size/4).fill(0xdeadbeef);device.queue.writeBuffer(queue,0,sentinel);
+      for(const enabled of [1,0,1]){
+        device.queue.writeBuffer(mode,0,new Uint32Array([enabled,0,0,0]));
+        const encoder=device.createCommandEncoder();encoder.clearBuffer(queue,0,4);
+        const pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group0);pass.setBindGroup(1,group1);pass.setBindGroup(2,group2);pass.dispatchWorkgroups(3);pass.end();
+        encoder.copyBufferToBuffer(queue,0,read,0,size);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
+        const words=new Uint32Array(read.getMappedRange());assert.equal(words[0],enabled?257:0);
+        const coordinates=Array.from({length:words[0]!},(_,i)=>words[4+i*2]!);
+        if(enabled){
+          assert.deepEqual([...coordinates].sort((a,b)=>a-b),Array.from({length:257},(_,i)=>511+i));
+          assert.ok(coordinates[0]===511||coordinates[256]===511,"each tile owns a contiguous range");
+        }
+        for(let i=0;i<768;i++)assert.equal(words[5+i*2],0xdeadbeef,"coordinate compaction preserves the separate AO word");
+        read.unmap();
+      }
+    } finally {queue.destroy();read.destroy();mode.destroy();}
+  });
+});
+
 test("GPU atlas permutation keeps representatives compact and exact receivers collision-free", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   const { withUniformDevice } = await import("./helpers/uniform-geometric");
   const { rasterAtlasLayoutWGSL } = await import("../lib/svo/features/lighting-visibility/raster-light-visibility");

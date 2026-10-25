@@ -4,13 +4,52 @@
  * An optional shader reference replays every draw with one alternate pipeline
  * for same-device interleaved comparisons. Never used by production rendering. */
 export interface PrimaryShaderReference { pipeline: string; search: string; replacement: string }
-export function primaryDrawAblation(device: GPUDevice, reference?: PrimaryShaderReference) {
+/** Capture immutable asset indices, or supply a previous ordering for replay.
+ * Reference indices must address the same vertex buffer and LOD ranges. */
+export interface PrimaryIndexReference {
+  replay: boolean;
+  read: (label: string, candidate: Uint32Array) => Uint32Array | undefined;
+}
+export function primaryDrawAblation(device: GPUDevice, reference?: PrimaryShaderReference, indexReference?: PrimaryIndexReference) {
   const variants = new WeakMap<GPURenderBundle, Map<string, GPURenderBundle>>();
+  const referenceIndices = new WeakMap<GPUBuffer, GPUBuffer>();
   const referenceModules = new WeakMap<GPUShaderModule, GPUShaderModule>();
   const referencePipelines = new WeakMap<GPURenderPipeline, GPURenderPipeline>();
   const labels = new Set<string>();
   const wrappedDevice = new Proxy(device, {
     get(target, property) {
+      if (indexReference && property === 'createBuffer') return (descriptor: GPUBufferDescriptor) => {
+        const buffer = target.createBuffer(descriptor);
+        if (descriptor.mappedAtCreation && descriptor.label?.endsWith(' native surface indices')) {
+          const unmap = buffer.unmap.bind(buffer);
+          const getMappedRange = buffer.getMappedRange.bind(buffer);
+          let mapped: ArrayBuffer | undefined;
+          buffer.getMappedRange = (offset, size) => {
+            const range = getMappedRange(offset, size);
+            if ((offset ?? 0) !== 0 || range.byteLength !== Number(descriptor.size)) throw new Error('Index capture requires the full mapped range');
+            mapped = range;
+            return range;
+          };
+          buffer.unmap = () => {
+            // WebGPU forbids requesting an overlapping mapped range twice.
+            const words = new Uint32Array(mapped ?? getMappedRange());
+            const original = indexReference.read(descriptor.label!, words);
+            if (original) {
+              if (original.byteLength !== words.byteLength) throw new Error(`Reference index size mismatch: ${descriptor.label}`);
+              const previous = target.createBuffer({ ...descriptor, label: `${descriptor.label} reference` });
+              new Uint32Array(previous.getMappedRange()).set(original);
+              previous.unmap();
+              referenceIndices.set(buffer, previous);
+              const destroy = buffer.destroy.bind(buffer);
+              buffer.destroy = () => { previous.destroy(); destroy(); };
+            }
+            buffer.getMappedRange = getMappedRange;
+            buffer.unmap = unmap;
+            unmap();
+          };
+        }
+        return buffer;
+      };
       if (reference && property === 'createShaderModule') return (descriptor: GPUShaderModuleDescriptor) => {
         const module = target.createShaderModule(descriptor);
         if (descriptor.code.includes(reference.search)) referenceModules.set(module, target.createShaderModule({
@@ -43,8 +82,12 @@ export function primaryDrawAblation(device: GPUDevice, reference?: PrimaryShader
                 && referencePipelines.has(command.args[0] as GPURenderPipeline))) {
                 throw new Error(`Reference pipeline not drawn: ${reference.pipeline}`);
               }
+              if (indexReference?.replay && !commands.some(command => command.name === 'setIndexBuffer'
+                && referenceIndices.has(command.args[0] as GPUBuffer))) {
+                throw new Error('Reference index buffer not drawn');
+              }
               const alternatives = new Map<string, GPURenderBundle>();
-              for (const omitted of [...pipelines, ...(reference ? ['@reference'] : [])]) {
+              for (const omitted of [...pipelines, ...(reference || indexReference?.replay ? ['@reference'] : [])]) {
                 labels.add(omitted);
                 const replay = target.createRenderBundleEncoder(descriptor);
                 let pipeline = '';
@@ -52,10 +95,12 @@ export function primaryDrawAblation(device: GPUDevice, reference?: PrimaryShader
                   if (command.name === 'setPipeline') pipeline = (command.args[0] as GPURenderPipeline).label;
                   if (command.name.startsWith('draw') && pipeline === omitted) continue;
                   const args = omitted === '@reference' && command.name === 'setPipeline'
-                    ? [referencePipelines.get(command.args[0] as GPURenderPipeline) ?? command.args[0]] : command.args;
+                    ? [referencePipelines.get(command.args[0] as GPURenderPipeline) ?? command.args[0]]
+                    : omitted === '@reference' && command.name === 'setIndexBuffer'
+                      ? [referenceIndices.get(command.args[0] as GPUBuffer) ?? command.args[0], ...command.args.slice(1)] : command.args;
                   Reflect.get(replay, command.name).apply(replay, args);
                 }
-                alternatives.set(omitted, replay.finish({ label: omitted === '@reference' ? 'Primary shader reference' : `Primary without ${omitted}` }));
+                alternatives.set(omitted, replay.finish({ label: omitted === '@reference' ? 'Primary reference' : `Primary without ${omitted}` }));
               }
               variants.set(result, alternatives);
               return result;

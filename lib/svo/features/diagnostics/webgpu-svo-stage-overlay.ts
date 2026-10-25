@@ -6,6 +6,7 @@ import {
 import {
   SVO_RENDER_STAGE_CLAIMANT_LEGEND,
   SVO_MESH_LOD_LEGEND,
+  SVO_AO_TAP_LEGEND,
   SVO_PRIMARY_WORK_REFERENCE,
   SVO_RENDER_STAGE_SEQUENTIAL_LEGEND,
   svoRenderStageCode,
@@ -13,12 +14,15 @@ import {
   type SvoRenderStageView,
 } from "./svo-render-diagnostics";
 import { unifiedDisplayTransferShaderLibrary } from "../../../core/webgpu-lighting";
+import { svoContactVisibilityRadius_m } from "../lighting-visibility/svo-contact-visibility";
+import { rasterHorizonBudgetWGSL, rasterHorizonImportanceWGSL } from "../lighting-visibility/raster-ao-budget";
 
 /**
  * Render-stage overlay.
  *
  * One full-screen pass encoded after the optical composite that replaces the
- * presented image with a decode of a plane some earlier pass wrote. Its own
+ * presented image with a decode of a plane some earlier pass wrote. The AO
+ * budget view derives sample counts from geometry and the production range. Its own
  * bindings stay read-only. Ordinary stage views consume production planes;
  * the explicitly labelled primary-work family requests a counter publication
  * from traced visibility and therefore describes that diagnostic arm, including
@@ -30,8 +34,8 @@ import { unifiedDisplayTransferShaderLibrary } from "../../../core/webgpu-lighti
  */
 export const SVO_RENDER_STAGE_OVERLAY_CONTRACT = Object.freeze({
   entryPoints: Object.freeze({ vertex: "svoStageOverlayVertex" as const, fragment: "svoStageOverlayFragment" as const }),
-  /** control(vec4u) + extent(vec4f). */
-  paramsBytes: 32,
+  /** control(vec4u) + extent(vec4f) + AO budget(vec4f). */
+  paramsBytes: 48,
   bindings: Object.freeze({
     params: 0,
     packedSurface: 1,
@@ -46,6 +50,8 @@ export const SVO_RENDER_STAGE_OVERLAY_CONTRACT = Object.freeze({
     conePrepassRadiance: 11,
     sceneRadiance: 12,
     primaryWork: 13,
+    aoRange: 14,
+    aoImportance: 15,
   }),
   formats: Object.freeze({
     packedSurface: "rgba32uint" as GPUTextureFormat,
@@ -65,6 +71,11 @@ export const SVO_RENDER_STAGE_OVERLAY_CONTRACT = Object.freeze({
 
 /** The planes a frame can offer. Absent entries fall back to a 1x1 texture. */
 export interface SvoRenderStagePlanes {
+  readonly rasterAoRange?: GPUBuffer;
+  readonly rasterAoImportance?: GPUTextureView;
+  readonly rasterAoBudget?: { readonly enabled: boolean; readonly farTaps: number; readonly cellSize_m: number; readonly radiusScale: number };
+  readonly cameraTanHalfFov?: number;
+  readonly sceneExtent_m?: readonly [number,number,number];
   readonly packedSurface?: GPUTextureView;
   readonly identityMedia?: GPUTextureView;
   readonly hardwareDepth?: GPUTextureView;
@@ -90,6 +101,8 @@ export function svoRenderStageOverlayBindGroupLayoutEntries(): GPUBindGroupLayou
   const float = { sampleType: "unfilterable-float" as const };
   return [
     { binding: bindings.params, visibility, buffer: { type: "uniform" } },
+    { binding: bindings.aoRange, visibility, buffer: { type: "uniform" } },
+    { binding: bindings.aoImportance, visibility, texture: float },
     { binding: bindings.packedSurface, visibility, texture: uint },
     { binding: bindings.identityMedia, visibility, texture: uint },
     { binding: bindings.hardwareDepth, visibility, texture: { sampleType: "depth" } },
@@ -144,6 +157,8 @@ struct SvoStageParams{
   control:vec4u,
   // target width, target height, far distance in metres, unused
   extent:vec4f,
+  // AO enabled, far taps, reserved
+  ao:vec4f,
 }
 @group(0) @binding(${bindings.params}) var<uniform> stage:SvoStageParams;
 @group(0) @binding(${bindings.packedSurface}) var stagePackedSurface:texture_2d<u32>;
@@ -158,10 +173,35 @@ struct SvoStageParams{
 @group(0) @binding(${bindings.conePrepassRadiance}) var stageConeRadiance:texture_2d<f32>;
 @group(0) @binding(${bindings.sceneRadiance}) var stageSceneRadiance:texture_2d<f32>;
 @group(0) @binding(${bindings.primaryWork}) var stagePrimaryWork:texture_2d<u32>;
+@group(0) @binding(${bindings.aoRange}) var<uniform> stageAoRange:vec4u;
+@group(0) @binding(${bindings.aoImportance}) var rasterAoImportance:texture_2d<f32>;
 
 ${unifiedDisplayTransferShaderLibrary}
 ${rampWGSL()}
 ${claimantWGSL()}
+${rasterHorizonBudgetWGSL}
+${rasterHorizonImportanceWGSL}
+
+fn svoStageAoTapColor(taps:u32)->vec3f{
+  let colors=array<vec3f,4>(${SVO_AO_TAP_LEGEND.map(wgslColor).join(",")});
+  let value=clamp(f32(taps)/12.0,0.0,3.0);let index=min(u32(value),2u);
+  return mix(colors[index],colors[index+1u],value-f32(index));
+}
+
+fn svoStageAoTaps(coordinate:vec2i)->vec3f{
+  let g=textureLoad(stageSplitGeometry,coordinate,0);
+  if(!(g.w>0.0&&g.w<3.402823e38)||dot(g.xyz,g.xyz)<.1){return vec3f(.055,.055,.075);}
+  if(stage.ao.x==0.0){return svoStageAoTapColor(0u);}
+  let dims=vec2i(textureDimensions(rasterAoImportance));
+  let stride=(vec2i(stage.extent.xy)+dims-1)/dims;
+  let ndc=(vec2f(coordinate)+.5)/stage.extent.xy*2.0-1.0;
+  let ray=vec2f(ndc.x*stage.extent.x/stage.extent.y,ndc.y)*stage.ao.w;
+  let depth=g.w*inverseSqrt(1.0+dot(ray,ray));
+  var radius=0.0;
+  if(stage.ao.w>0.0){radius=clamp(rasterHorizonProjectedRadius(stage.ao.z,depth,stage.extent.y,stage.ao.w),2.0,160.0);}
+  let budget=rasterHorizonReceiverBudget((vec2f(coordinate)+.5)/vec2f(stride),radius/f32(stride.x),u32(stage.ao.y),rasterHorizonRange(stageAoRange.xy));
+  return svoStageAoTapColor(rasterHorizonTapCount(budget,u32(stage.ao.y)));
+}
 
 const SVO_STAGE_MISS_DISTANCE:f32=3.402823e38;
 const SVO_STAGE_ABSENT:vec3f=vec3f(.055,.055,.075);
@@ -332,6 +372,8 @@ fn svoStageMedia(coordinate:vec2i)->vec3f{
     color=svoStagePrimaryClaimant(coordinate);
   }else if(mode==${view("primary-depth")}){
     color=svoStageDistanceRamp(textureLoad(stageSplitGeometry,coordinate,0).w);
+  }else if(mode==${view("raster-ao-taps")}){
+    color=svoStageAoTaps(coordinate);
   }else if(mode==${view("mesh-lod")}){
     let code=(textureLoad(stageSplitIdentity,coordinate,0).x>>27u)&15u;
     let palette=array<vec3f,4>(${SVO_MESH_LOD_LEGEND.map(wgslColor).join(",")});
@@ -420,6 +462,7 @@ fn svoStageMedia(coordinate:vec2i)->vec3f{
  */
 export class SparseVoxelRenderStageOverlay {
   private readonly params: GPUBuffer;
+  private readonly emptyAoRange: GPUBuffer;
   private readonly layout: GPUBindGroupLayout;
   private readonly fallbacks = new Map<string, GPUTextureView>();
   private pipeline?: GPURenderPipeline;
@@ -428,6 +471,7 @@ export class SparseVoxelRenderStageOverlay {
   private readonly scratch = new ArrayBuffer(SVO_RENDER_STAGE_OVERLAY_CONTRACT.paramsBytes);
 
   constructor(private readonly device: GPUDevice, private readonly targetFormat: GPUTextureFormat) {
+    this.emptyAoRange = device.createBuffer({label: "Absent AO footprint range", size: 16, usage: GPUBufferUsage.UNIFORM});
     this.params = device.createBuffer({
       label: "Sparse voxel render-stage overlay parameters",
       size: SVO_RENDER_STAGE_OVERLAY_CONTRACT.paramsBytes,
@@ -487,6 +531,9 @@ export class SparseVoxelRenderStageOverlay {
       Math.max(1, Math.round(planes.conePrepassWidth ?? 1)), Math.max(1, Math.round(planes.conePrepassHeight ?? 1)),
     ]);
     extent.set([width, height, Math.max(1e-3, farDistance_m), 0]);
+    const ao = planes.rasterAoBudget, scene = planes.sceneExtent_m;
+    const radius = ao && scene ? ao.radiusScale*svoContactVisibilityRadius_m([ao.cellSize_m,ao.cellSize_m,ao.cellSize_m],scene) : 0;
+    new Float32Array(this.scratch,32,4).set([ao?.enabled ? 1 : 0, ao?.farTaps ?? 0, radius, planes.cameraTanHalfFov ?? 0]);
     this.device.queue.writeBuffer(this.params, 0, this.scratch);
     const pass = encoder.beginRenderPass({
       label: "Sparse voxel render-stage overlay",
@@ -501,6 +548,7 @@ export class SparseVoxelRenderStageOverlay {
 
   destroy(): void {
     this.params.destroy();
+    this.emptyAoRange.destroy();
     this.fallbacks.clear();
     this.pipeline = undefined;
     this.bindGroup = undefined;
@@ -536,16 +584,19 @@ export class SparseVoxelRenderStageOverlay {
       [bindings.conePrepassRadiance, planes.conePrepassRadiance ?? this.fallback(formats.conePrepassRadiance)],
       [bindings.sceneRadiance, planes.sceneRadiance ?? this.fallback(formats.sceneRadiance)],
       [bindings.primaryWork, planes.primaryWork ?? this.fallback(formats.primaryWork)],
+      [bindings.aoImportance, planes.rasterAoImportance ?? this.fallback("r32float")],
     ];
     // Views are stable per allocation, so identity is a sufficient cache key and
     // a resize or a republished plane rebuilds the group exactly once.
-    const key = resolved.map(([binding, resource]) => `${binding}:${this.viewKey(resource)}`).join("|");
+    const aoRange = planes.rasterAoRange ?? this.emptyAoRange;
+    const key = `ao:${this.viewKey(aoRange)}|` + resolved.map(([binding, resource]) => `${binding}:${this.viewKey(resource)}`).join("|");
     if (this.bindGroup && key === this.bindGroupKey) return this.bindGroup;
     this.bindGroup = this.device.createBindGroup({
       label: "Sparse voxel render-stage overlay binding",
       layout: this.layout,
       entries: [
         { binding: bindings.params, resource: { buffer: this.params } },
+        { binding: bindings.aoRange, resource: { buffer: aoRange } },
         ...resolved.map(([binding, resource]) => ({ binding, resource })),
       ],
     });
@@ -553,10 +604,10 @@ export class SparseVoxelRenderStageOverlay {
     return this.bindGroup;
   }
 
-  private readonly viewIds = new WeakMap<GPUTextureView, number>();
+  private readonly viewIds = new WeakMap<GPUTextureView | GPUBuffer, number>();
   private nextViewId = 0;
 
-  private viewKey(resource: GPUTextureView): number {
+  private viewKey(resource: GPUTextureView | GPUBuffer): number {
     const existing = this.viewIds.get(resource);
     if (existing !== undefined) return existing;
     this.nextViewId += 1;

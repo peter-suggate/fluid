@@ -23,6 +23,25 @@ export interface FeaturePlacement {
    */
   readonly priority?: "high" | "low";
 }
+/**
+ * A place on a host surface that opens a slot: a mark on a rail, a tab on a card.
+ *
+ * Declared by a feature, filled by placements from any feature, so a host draws
+ * its surface from the composition rather than from a list of its own. A host
+ * draws a section only while its slot holds something.
+ */
+export interface FeatureSection {
+  readonly id: string;
+  /** The host surface it stands on, e.g. "view-rail". */
+  readonly surface: string;
+  /** The slot it opens. */
+  readonly slot: string;
+  readonly label: string;
+  readonly hint?: string;
+  /** A path in a 24-unit box, for hosts that mark a section with a glyph. */
+  readonly icon?: string;
+  readonly order?: number;
+}
 export interface VariantDefinition {
   readonly id: string;
   readonly point: string;
@@ -43,6 +62,7 @@ export interface FeatureDefinition {
   readonly provides?: readonly string[];
   readonly controls?: readonly FeatureControl[];
   readonly placements?: readonly FeaturePlacement[];
+  readonly sections?: readonly FeatureSection[];
   readonly variants?: readonly VariantDefinition[];
 }
 export interface FeatureCompositionInput {
@@ -52,11 +72,13 @@ export interface FeatureCompositionInput {
 }
 export interface ResolvedControl extends FeatureControl { readonly feature: string }
 export interface ResolvedPlacement extends FeaturePlacement { readonly feature: string }
+export interface ResolvedSection extends FeatureSection { readonly feature: string }
 export interface FeatureComposition {
   readonly features: readonly FeatureDefinition[];
   readonly variants: readonly VariantDefinition[];
   readonly controls: readonly ResolvedControl[];
   readonly placements: readonly ResolvedPlacement[];
+  readonly sections: readonly ResolvedSection[];
   readonly capabilities: readonly string[];
 }
 
@@ -76,6 +98,7 @@ export function composeFeatures(input: FeatureCompositionInput): FeatureComposit
   const points = new Map<string, VariantDefinition[]>();
   const controls: ResolvedControl[] = [];
   const placements: ResolvedPlacement[] = [];
+  const sections: ResolvedSection[] = [];
   const owners = new Map<string, string>();
   const provide = (capability: string, owner: string) => {
     const previous = owners.get(capability);
@@ -105,6 +128,14 @@ export function composeFeatures(input: FeatureCompositionInput): FeatureComposit
         throw new Error(`Duplicate placement ${feature.id}/${placement.control} in ${placement.slot}`);
       }
       placements.push(Object.freeze({ ...placement, feature: feature.id }));
+    }
+    for (const section of feature.sections ?? []) {
+      if (!section.id || !section.surface || !section.slot) throw new Error(`Incomplete section ${feature.id}/${section.id}`);
+      // One slot, one opener: two marks for the same controls would split them.
+      const previous = sections.find(candidate => candidate.slot === section.slot
+        || (candidate.surface === section.surface && candidate.id === section.id));
+      if (previous) throw new Error(`Duplicate section ${section.surface}/${section.id} (${section.slot}): ${previous.feature} and ${feature.id}`);
+      sections.push(Object.freeze({ ...section, feature: feature.id }));
     }
     for (const variant of feature.variants ?? []) {
       const candidates = points.get(variant.point) ?? [];
@@ -153,6 +184,7 @@ export function composeFeatures(input: FeatureCompositionInput): FeatureComposit
     variants: Object.freeze(variants),
     controls: Object.freeze(controls),
     placements: Object.freeze(placements.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))),
+    sections: Object.freeze(sections.sort((a, b) => (a.order ?? 0) - (b.order ?? 0))),
     capabilities: Object.freeze([...owners.keys()]),
   });
 }

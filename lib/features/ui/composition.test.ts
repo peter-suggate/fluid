@@ -21,3 +21,23 @@ test("the maintained method supplies its complete active composition to the UI",
     for (const variant of expected.variants) assert.ok(resolved.variants.some(candidate => candidate.point === variant.point && candidate.id === variant.id));
   }
 });
+
+test("the view rail's sections come from installed features, with the controls placed in them", () => {
+  for (const fluid of [true, false]) {
+    const composition = composeFeatureUI("uniform-volume", fluid);
+    const lighting = composition.sections.find(section => section.surface === "view-rail" && section.id === "lighting");
+    assert.equal(lighting?.feature, "svo.lighting-visibility");
+    assert.ok(composition.placements.some(p => p.slot === lighting?.slot && p.control === "far-ao-taps" && p.presentation === "compact"));
+    const performance = composition.sections.find(section => section.surface === "view-rail" && section.id === "performance");
+    assert.equal(performance?.feature, "view.rail");
+    assert.ok(composition.placements.some(p => p.slot === performance?.slot && p.feature === "svo.lighting-visibility" && p.control === "still-view-reuse"));
+    assert.ok(!composition.placements.some(p => p.slot === lighting?.slot && p.control === "still-view-reuse"));
+    const diagnostics = composition.sections.find(section => section.surface === "view-rail" && section.id === "ao-diagnostics");
+    assert.ok(diagnostics);
+    assert.ok(composition.placements.some(p => p.slot === diagnostics.slot && p.control === "ao-tap-overlay"));
+    // A control has one home on the rail; a second section would only repeat it.
+    const railSlots = new Set(composition.sections.filter(section => section.surface === "view-rail").map(section => section.slot));
+    const railHomes = composition.placements.filter(p => railSlots.has(p.slot)).map(p => `${p.feature}/${p.control}`);
+    assert.deepEqual(railHomes, [...new Set(railHomes)]);
+  }
+});

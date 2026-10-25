@@ -4,6 +4,7 @@ import { getMethod } from "../../core/method-registry";
 import { composeFeatures } from "../../framework/composition";
 import { SVO_PIPELINE_FEATURES } from "../../svo/pipeline/composition";
 import { gravityFeature } from "../gravity/definition";
+import { viewRailFeature } from "../view-rail/definition";
 
 /** Installed methods supply their own features and resolved variation points. */
 export function composeFeatureUI(
@@ -15,6 +16,7 @@ export function composeFeatureUI(
   const method = fluid ? getMethod(methodId).resolveComposition(methodValues) : undefined;
   return composeFeatures({
     features: [
+      viewRailFeature,
       ...SVO_PIPELINE_FEATURES,
       ...(fluid ? [gravityFeature, surfaceDisplayFeature] : []),
       ...(method?.features ?? []),

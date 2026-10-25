@@ -77,3 +77,18 @@ test("one owner cannot publish two incompatible meanings for the same port ID", 
   const b = publicationPort<number>({ id: "field", representation: "pressure", lifetime: "frame" });
   assert.throws(() => composeFeatures({ features: [{ id: "owner", outputs: [a, b] }] }), /Duplicate output port/);
 });
+test("sections open a slot that any feature's placements fill", () => {
+  const host: FeatureDefinition = { id: "host", sections: [
+    { id: "late", surface: "rail", slot: "rail.late", label: "Late", order: 2 },
+    { id: "early", surface: "rail", slot: "rail.early", label: "Early", order: 1 },
+  ] };
+  const guest: FeatureDefinition = { id: "guest", controls: [{ id: "a", label: "A", kind: "toggle" }],
+    placements: [{ control: "a", slot: "rail.early" }] };
+  const result = composeFeatures({ features: [host, guest] });
+  assert.deepEqual(result.sections.map(section => `${section.feature}/${section.id}`), ["host/early", "host/late"]);
+  assert.ok(Object.isFrozen(result.sections[0]));
+  assert.throws(() => composeFeatures({ features: [host, { id: "rival", sections: [
+    { id: "other", surface: "rail", slot: "rail.early", label: "Other" }] }] }), /Duplicate section rail\/other \(rail\.early\): host and rival/);
+  assert.throws(() => composeFeatures({ features: [{ id: "bare", sections: [{ id: "x", surface: "rail", slot: "", label: "X" }] }] }),
+    /Incomplete section bare\/x/);
+});

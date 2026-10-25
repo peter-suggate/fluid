@@ -441,7 +441,7 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     side: "right",
     label: "Lighting visibility",
     switchedBy: "svoConeTracingMode",
-    taps: ["cone-ambient-visibility", "cone-light-visibility", "cone-geometry"],
+    taps: ["cone-ambient-visibility", "cone-light-visibility", "cone-geometry", "raster-ao-taps"],
     toggleable: true,
     tip: {
       summary: "Cone-traced soft shadows, AO and GI, marched at the prepass rate against the node-mip opacity pyramid. Turning this off does not remove shadows — it hands them to EXACT rays, which are sharper and cost more per pixel. RASTER + AO selects preview sun shadow maps and local screen-space AO. OFF removes visibility work entirely.",

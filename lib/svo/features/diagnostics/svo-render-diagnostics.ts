@@ -33,6 +33,7 @@ export const SVO_RENDER_STAGE_VIEWS = [
   "water-depth",
   "lighting-partition",
   "mesh-lod",
+  "raster-ao-taps",
 ] as const;
 
 export type SvoRenderStageView = typeof SVO_RENDER_STAGE_VIEWS[number];
@@ -141,6 +142,12 @@ export const SVO_RENDER_STAGE_CLAIMANT_LEGEND = Object.freeze([
 ] as const satisfies readonly SvoRenderStageLegendStop[]);
 
 const sequential = SVO_RENDER_STAGE_SEQUENTIAL_LEGEND;
+export const SVO_AO_TAP_LEGEND = Object.freeze([
+  { at: 0, color: "#08051f", label: "0 taps" },
+  { at: 1 / 3, color: "#00d9ff", label: "12 taps" },
+  { at: 2 / 3, color: "#eaff00", label: "24 taps" },
+  { at: 1, color: "#ff174d", label: "36 taps" },
+] as const satisfies readonly SvoRenderStageLegendStop[]);
 
 /** Measured p99 thresholds for the depth-3 hero-garden-hose reference view. */
 export const SVO_PRIMARY_WORK_REFERENCE = Object.freeze({
@@ -329,6 +336,11 @@ const definitions = [
     view: "water-depth", label: "Depth handed to water", group: "Lighting", plane: "dry scene HDR alpha",
     description: "The linear depth the lighting pass published for the compositor to sort water and spray against.",
     palette: "sequential", legend: depth,
+  },
+  {
+    view: "raster-ao-taps", label: "AO tap budget", group: "Lighting", plane: "AO importance + scene-normalized range",
+    description: "Selected screen-space horizon taps per receiver: dark = 0, cyan = 12, yellow = 24, pink = 36. Budgets are normalized to the visible scene, with intermediate counts between the slider minimum and 36. This is the sampling budget, before border rejection and receiver sharing; excludes coarse voxel AO.",
+    palette: "sequential", legend: SVO_AO_TAP_LEGEND,
   },
   {
     view: "lighting-partition", label: "Sky / shaded partition", group: "Lighting", plane: "hardwareDepth",

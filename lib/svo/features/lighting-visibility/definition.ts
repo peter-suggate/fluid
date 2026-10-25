@@ -27,11 +27,29 @@ export const SVO_LIGHTING_VISIBILITY_FEATURE = {
     { id: "ambient-occlusion", label: "AO", kind: "toggle", setting: "svoAmbientOcclusionEnabled", update: "live" },
     { id: "lattice", label: "Lattice visibility", kind: "toggle", setting: "svoLatticeVisibilityEnabled", update: "live",
       hint: "On samples the shadow and AO cones on the half-voxel lattice of each lit face, once per point, and interpolates between points. Off samples them per reduced-resolution screen texel. Serves reduced-rate cones with full-resolution relight, GI off and Smooth surface off. Smooth surfaces use screen-space lighting." },
+    { id: "far-ao-taps", label: "Minimum AO taps", kind: "number", setting: "rasterFarAoTaps", unit: "taps", min: 0, max: 36, step: 4, update: "live",
+      hint: "Minimum contact-AO taps in the visible scene. Clear regions use this count; curved surfaces and nearby contacts receive more, up to 36. Zero skips contact AO at the minimum. Coarse voxel AO is separate." },
+    { id: "still-view-reuse", label: "Still-camera reuse", kind: "toggle", setting: "rasterStillViewReuse", update: "live",
+      hint: "While paused with no bodies and the camera still, keep the last frame's shadow and AO visibility instead of recomputing it. Water shadows and stage ablations always recompute." },
+    { id: "ao-tap-overlay", label: "AO tap budget", kind: "toggle", setting: "svoStageView", update: "live",
+      hint: "Show the selected horizon-AO sample budget at each surface pixel. Excludes coarse AO and receiver sharing." },
+  ],
+  sections: [
+    { id: "ao-diagnostics", surface: "view-rail", slot: "view.ao-diagnostics", label: "AO diagnostics",
+      hint: "Inspect where ambient occlusion spends samples.", icon: "M3 3h18v18H3ZM7 15v3M12 10v8M17 6v12" },
+    // A sun: what the scene is lit by, and what stands in its way.
+    { id: "lighting", surface: "view-rail", slot: "view.lighting", label: "Lighting", hint: "How the frame is lit and occluded.",
+      icon: "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8ZM12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" },
   ],
   placements: [
+    { slot: "view.ao-diagnostics", control: "ao-tap-overlay", presentation: "compact" },
     { slot: "frame.lighting", control: "mode", presentation: "expanded" },
     { slot: "frame.lighting", control: "shadows", presentation: "expanded" },
     { slot: "frame.lighting", control: "ambient-occlusion", presentation: "expanded" },
     { slot: "frame.lighting", control: "lattice", presentation: "expanded" },
+    { slot: "frame.lighting", control: "far-ao-taps", presentation: "expanded" },
+    { slot: "view.lighting", control: "far-ao-taps", presentation: "compact" },
+    // A renderer saving, not a look: it stands with the rail's other savings.
+    { slot: "view.performance", control: "still-view-reuse", presentation: "compact" },
   ],
 } as const satisfies FeatureDefinition;

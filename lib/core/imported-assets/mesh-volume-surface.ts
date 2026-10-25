@@ -1,4 +1,4 @@
-import { MeshoptSimplifier } from "meshoptimizer";
+import { MeshoptEncoder, MeshoptSimplifier } from "meshoptimizer";
 import type { MeshVolume } from './mesh-volume';
 import { marchingCubesLookupWGSL } from '../marching-cubes-lookup.wgsl';
 
@@ -10,7 +10,23 @@ const corners = [[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]
 const edgeA = [0,1,2,3,4,5,6,7,0,1,2,3], edgeB = [1,2,3,0,5,6,7,4,4,5,6,7];
 export interface MeshVolumeSurface { positions: Float32Array<ArrayBuffer>; indices: Uint32Array<ArrayBuffer>; levels: readonly { first: number; count: number; error: number }[] }
 let simplifierReady = false;
-export async function prepareMeshVolumeSurfaces(): Promise<void> { await MeshoptSimplifier.ready; simplifierReady = true; }
+export async function prepareMeshVolumeSurfaces(): Promise<void> {
+  await Promise.all([MeshoptSimplifier.ready, MeshoptEncoder.ready]);
+  simplifierReady = true;
+}
+
+/** Optimize triangle locality without changing the shared vertex addresses.
+ * Each LOD has its own index range but all levels and instances share vertices.
+ * Undo the encoder's fetch remap while retaining its vertex-cache ordering. */
+export function reorderMeshVolumeTriangles(indices: Uint32Array): void {
+  if (indices.length === 0) return;
+  const [remap, count] = MeshoptEncoder.reorderMesh(indices, true, false);
+  const original = new Uint32Array(count);
+  for (let vertex = 0; vertex < remap.length; vertex++) {
+    if (remap[vertex] !== 0xffffffff) original[remap[vertex]!] = vertex;
+  }
+  for (let index = 0; index < indices.length; index++) indices[index] = original[indices[index]!]!;
+}
 const cache = new WeakMap<MeshVolume, { surface: MeshVolumeSurface; prepared: boolean }>();
 /** Immutable source-space isosurface at the asset's native sample spacing.
  * Instances share this geometry. Shading still samples the original normal
@@ -96,6 +112,10 @@ export function meshVolumeSurface(volume: MeshVolume): MeshVolumeSurface {
     if(simplified.length>=levels.at(-1)!.count||simplified.length===0)continue;
     levels.push({first:length,count:simplified.length,error:Math.max(error,actual)});buffers.push(new Uint32Array(simplified));length+=simplified.length;
   }
+  // Extraction order and simplification order are not vertex-cache orders.
+  // Preserve every triangle and LOD error; reorder independently so an
+  // indirect draw can never cross into a different level's geometry.
+  if(simplifierReady) for(const buffer of buffers) reorderMeshVolumeTriangles(buffer);
   const combined=new Uint32Array(length);let offset=0;for(const buffer of buffers){combined.set(buffer,offset);offset+=buffer.length;}
   const surface={positions:points,indices:combined,levels};
   cache.set(volume,{surface,prepared:simplifierReady}); return surface;

@@ -313,6 +313,13 @@ export interface SvoRenderTuning {
   readonly aoStrength: number;
   /** Sparse world-opacity AO for the raster backend; zero keeps contact AO only. */
   readonly rasterCoarseAoStrength: number;
+  /** Distant screen-space AO budget, in four-tap steps; nearby AO keeps 36. */
+  readonly rasterFarAoTaps: number;
+  /**
+   * Reuse the raster shadow and AO visibility while the camera is still: paused,
+   * body-free and an unchanged view. Read at encode time only.
+   */
+  readonly rasterStillViewReuse: boolean;
   readonly aoConeAperture: number;
   readonly shadowConeAperture: number;
   /** Artistic exposure applied only to gathered diffuse radiance. */
@@ -435,6 +442,8 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   aoRadiusScale: 1,
   aoStrength: 1,
   rasterCoarseAoStrength: 0.6,
+  rasterFarAoTaps: 24,
+  rasterStillViewReuse: false,
   aoConeAperture: 0.62,
   shadowConeAperture: 0.065,
   // Off by default.
@@ -653,6 +662,8 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     aoRadiusScale: bounded(value.aoRadiusScale, 0.1, 3),
     aoStrength: bounded(value.aoStrength, 0, 1),
     rasterCoarseAoStrength: bounded(value.rasterCoarseAoStrength ?? DEFAULT_SVO_RENDER_TUNING.rasterCoarseAoStrength, 0, 1),
+    rasterFarAoTaps: Math.round(bounded(value.rasterFarAoTaps ?? DEFAULT_SVO_RENDER_TUNING.rasterFarAoTaps, 0, 36) / 4) * 4,
+    rasterStillViewReuse: value.rasterStillViewReuse === true,
     aoConeAperture: bounded(value.aoConeAperture, 0.1, 1.4),
     shadowConeAperture: bounded(value.shadowConeAperture, 0.01, 0.25),
     giBounceStrength: bounded(value.giBounceStrength ?? DEFAULT_SVO_RENDER_TUNING.giBounceStrength, 0, 4),

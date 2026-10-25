@@ -2596,6 +2596,19 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .tool-rail-key[data-unavailable="true"]:not([aria-pressed="true"]) { opacity: .45; }
 /* The digit of its place, in the mark's own corner: the rail is its own key legend. */
 .tool-rail-key > kbd { position: absolute; right: 2px; bottom: 1px; color: currentColor; font: 600 8px/1 var(--mono); opacity: .5; pointer-events: none; }
+/* Its name: a caption past the card's edge, over the scene rather than on the
+   plate, so the card stays a column of marks. Measured from the key, which
+   stands 4px inside the card (5px inside the switch's own outline), to land
+   10px clear of it. Haloed in the overlay's colour, as the editor's captions
+   are, so it reads over sky and stone alike; never a target, so it costs the
+   canvas no picks. It gives way to the tip and the line, which name the key
+   themselves. */
+.tool-rail-label { position: absolute; left: calc(100% + 14px); top: 50%; transform: translateY(-50%); color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; white-space: nowrap; opacity: .78; -webkit-text-stroke: 3px var(--overlay); paint-order: stroke fill; text-shadow: 0 0 6px var(--overlay); pointer-events: none; transition: opacity .12s ease; }
+.tool-rail-switch .tool-rail-label { left: calc(100% + 15px); }
+.tool-rail-key:hover .tool-rail-label { opacity: 1; }
+.tool-rail-key[aria-pressed="true"] .tool-rail-label { color: var(--accent-strong); opacity: 1; }
+.tool-rail-key:hover .tool-rail-label, .tool-rail-key:focus-visible .tool-rail-label,
+.tool-rail-slot[data-armed] .tool-rail-label, .tool-rail-slot:has(> .selection-bar) .tool-rail-label { visibility: hidden; }
 .tool-rail-rule { width: 18px; height: 1px; margin: 3px 0; background: var(--line); }
 /* The operation switch: its marks share one outline and stand with nothing
    between them, so three buttons read as one control with one of them down.
@@ -2609,6 +2622,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 /* Named through the slot so the first mark is not taken for the rail's own
    first slot, the pointer, which is lit quietly. */
 .tool-rail-switch .tool-rail-slot .tool-rail-key[aria-pressed="true"] { border-color: var(--tone); background: var(--tone); color: var(--on-accent); }
+.tool-rail-switch .tool-rail-key[aria-pressed="true"] .tool-rail-label { color: var(--tone); }
 /* The armed tool does not read the switch: it still holds what the next brush
    will do, so the lit mark keeps its tone as an outline and gives up the fill. */
 .tool-rail-switch[data-idle] .tool-rail-slot .tool-rail-key[aria-pressed="true"] { background: transparent; color: var(--tone); }
@@ -2638,6 +2652,33 @@ button:hover .iso-water-side { fill-opacity: .26; }
    short viewport. A verb that runs several ways is its name and a tight run of
    marks, one a way. */
 .tool-options.selection-bar { top: 0; transform: none; }
+
+/* ---- view rail -------------------------------------------------------------
+   The sculpt rail's mirror on the right edge, in LOOK and EDIT: how the frame
+   is drawn rather than what a hand does to it. Its marks, tips and lines are
+   the sculpt rail's own, hung leftward. Its first mark is a section like the
+   rest, so it is lit as loudly as they are — the quiet first slot is the
+   sculpt rail's pointer. */
+.view-rail { left: auto; right: 12px; }
+.view-rail .tool-rail-tip, .view-rail .tool-options { left: auto; right: calc(100% + 9px); }
+.view-rail .tool-rail-slot:first-child .tool-rail-key[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+/* Its captions stand inward too: left of the card. */
+.view-rail .tool-rail-label { left: auto; right: calc(100% + 14px); }
+/* A fixed width, so a line never resizes under the pointer that is moving it. */
+.view-rail .tool-options { width: 320px; padding: 5px 10px 6px; }
+/* A rail slider: name, track, readout, reset. Everything right of the name is
+   a fixed width, so every track on the rail starts and ends at the same place
+   whatever its name says — the name takes what is left, and clips. */
+.view-rail-range { display: grid; grid-template-columns: minmax(0, 1fr) 120px 6.5ch 14px; align-items: center; gap: 8px; min-height: 22px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); white-space: nowrap; }
+.view-rail-range > span { overflow: hidden; text-overflow: ellipsis; }
+.view-rail-range .ui-slider { width: 100%; min-width: 0; }
+.view-rail-range .ui-value { justify-content: flex-end; }
+.view-rail-range .ui-reset.is-idle { visibility: hidden; }
+/* A rail switch: its name, and its knob where the sliders' readouts end, so a
+   line of switches and sliders keeps one right edge. */
+.view-rail-toggle { display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-items: center; gap: 8px; min-height: 22px; padding-right: 22px; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); white-space: nowrap; }
+.view-rail-toggle > span { overflow: hidden; text-overflow: ellipsis; }
+.view-rail-heading { color: var(--accent-strong); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; white-space: nowrap; }
 .selection-bar .tool-options-line { gap: 6px; }
 .selection-bar .tool-options-line > strong { min-width: 64px; }
 .selection-bar-ways { display: flex; align-items: center; gap: 2px; }
@@ -2653,11 +2694,15 @@ button:hover .iso-water-side { fill-opacity: .26; }
    head — clear of the line an armed tool opens to the right. Pane B's tag is
    on its far edge and never meets the rail. A pane is half the window there,
    so the line is held to it and wraps rather than running under the seam. */
-.viewport-shell:has(> .tool-rail) > .pane-tag[data-pane="a"] { left: 60px; }
+.viewport-shell:has(> .tool-rail:not(.view-rail)) > .pane-tag[data-pane="a"] { left: 60px; }
+/* The view rail stands on pane B's edge as the sculpt rail does on A's, and
+   its tag steps up onto that rail's head the same way. */
 @supports (anchor-name: --tool-rail) {
-  .viewport-shell { anchor-scope: --tool-rail; }
-  .tool-rail { anchor-name: --tool-rail; }
-  .viewport-shell:has(> .tool-rail) > .pane-tag[data-pane="a"] { position-anchor: --tool-rail; left: anchor(center); top: auto; bottom: calc(anchor(top) + 6px); transform: translateX(-50%); }
+  .viewport-shell { anchor-scope: --tool-rail, --view-rail; }
+  .tool-rail:not(.view-rail) { anchor-name: --tool-rail; }
+  .view-rail { anchor-name: --view-rail; }
+  .viewport-shell:has(> .tool-rail:not(.view-rail)) > .pane-tag[data-pane="a"] { position-anchor: --tool-rail; left: anchor(center); top: auto; bottom: calc(anchor(top) + 6px); transform: translateX(-50%); }
+  .viewport-shell:has(> .view-rail) > .pane-tag[data-pane="b"] { position-anchor: --view-rail; left: anchor(center); right: auto; top: auto; bottom: calc(anchor(top) + 6px); transform: translateX(-50%); }
 }
 .lab-shell[data-compare="true"] .tool-options { max-width: calc(50vw - 90px); }
 .tool-options-line { flex-wrap: wrap; row-gap: 3px; }
@@ -2733,3 +2778,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .interactive-inspector-menus { display: flex; gap: 6px; padding: 2px 4px; pointer-events: auto; }
 .interactive-missing, .interactive-field-error { margin: 0; max-width: 240px; padding: 3px 5px; color: var(--red); font: var(--text-micro); pointer-events: auto; }
 .interactive-missing code { font-family: var(--mono); }
+/* Numeric AO sampling legend in the view rail's diagnostics section. */
+.view-rail-ao-legend { display: flex; gap: 12px; align-items: center; font-size: 11px; }
+.view-rail-ao-legend span { display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
+.view-rail-ao-legend i { width: 10px; height: 10px; border-radius: 2px; border: 1px solid #ffffff40; }

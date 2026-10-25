@@ -10,6 +10,7 @@ import { SHARED_TOOL_VALUES_ID, adjustableControl, controlValueOwner, controlVal
   type VoxelToolPlugin } from "../lib/core/voxel-editor/plugin";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
 import { EditorActionPathGlyph } from "./EditorActionIcon";
+import { RailKeyFace } from "./rail";
 import { VoxelSelectionBar } from "./VoxelSelectionBar";
 import { Stepper, Swatch, ToggleButton } from "./ui";
 
@@ -165,8 +166,8 @@ function RailSwitch({ control, idle }: { control: ToolChoiceControl; idle: boole
         // As a tool's mark: the canvas keeps the focus, and with it the keys.
         onMouseDown={(event) => event.preventDefault()}
         onClick={() => session.ui.getState().setVoxelToolValue(SHARED_TOOL_VALUES_ID, control.id, option.value)}>
-        {option.icon ? <EditorActionPathGlyph path={option.icon} size={14} /> : option.label.slice(0, 1)}
-        {option.shortcut && <kbd aria-hidden>{option.shortcut.toUpperCase()}</kbd>}
+        <RailKeyFace glyph={option.icon ? <EditorActionPathGlyph path={option.icon} size={14} /> : option.label.slice(0, 1)}
+          label={option.label} shortcut={option.shortcut?.toUpperCase()} />
       </button>
       <span className="tool-rail-tip">
         <strong>{option.label}{option.shortcut && <kbd>{option.shortcut.toUpperCase()}</kbd>}</strong>
@@ -203,7 +204,7 @@ export function VoxelToolRail() {
       <button type="button" className="tool-rail-key" aria-pressed={!armed} aria-label="Select"
         data-testid="voxel-tool-rail-select" onMouseDown={keepFocus}
         onClick={() => session.ui.getState().setVoxelTool(undefined)}>
-        <MousePointer2 width={15} height={15} strokeWidth={1.7} aria-hidden />
+        <RailKeyFace glyph={<MousePointer2 width={15} height={15} strokeWidth={1.7} aria-hidden />} label="Select" />
       </button>
       {selected
         ? <VoxelSelectionBar region={selected} />
@@ -222,8 +223,7 @@ export function VoxelToolRail() {
           <button type="button" className="tool-rail-key" aria-pressed={lit} aria-label={tool.label}
             aria-keyshortcuts={tool.key} data-unavailable={tool.unavailable ? "true" : undefined}
             data-testid={`voxel-tool-rail-${tool.id}`} onMouseDown={keepFocus} onClick={() => arm(tool.id)}>
-            <EditorActionPathGlyph path={tool.iconPath} size={16} />
-            {tool.key && <kbd aria-hidden>{tool.key}</kbd>}
+            <RailKeyFace glyph={<EditorActionPathGlyph path={tool.iconPath} size={16} />} label={tool.label} shortcut={tool.key} />
           </button>
           {lit && armed
             ? <ToolOptions plugin={armed} />
@@ -237,7 +237,7 @@ export function VoxelToolRail() {
       <div className="tool-rail-slot" data-armed>
         <button type="button" className="tool-rail-key" aria-pressed aria-label={`${guest.ui.label} — put away`}
           data-testid={`voxel-tool-rail-${guest.id}`} onMouseDown={keepFocus} onClick={() => arm(guest.id)}>
-          <EditorActionPathGlyph path={guest.ui.icon} size={16} />
+          <RailKeyFace glyph={<EditorActionPathGlyph path={guest.ui.icon} size={16} />} label={guest.ui.label} />
         </button>
         <ToolOptions plugin={guest} />
       </div>
@@ -250,7 +250,7 @@ export function VoxelToolRail() {
       <button type="button" className="tool-rail-key" aria-label="Revert scene" disabled={pending}
         data-testid="voxel-tool-rail-revert" onMouseDown={keepFocus}
         onClick={() => simulation.revertScene(session.id)}>
-        <RotateCcw width={15} height={15} strokeWidth={1.7} aria-hidden />
+        <RailKeyFace glyph={<RotateCcw width={15} height={15} strokeWidth={1.7} aria-hidden />} label="Revert" />
       </button>
       <span className="tool-rail-tip"><strong>Revert scene</strong>
         <small>Discard every edit and reopen the scene as authored. Camera and solver settings stay; undo brings the edits back.</small></span>

@@ -62,3 +62,47 @@ test('primary shader references replace only the selected pipeline and reject un
   empty.setPipeline(background); empty.draw(3);
   assert.throws(() => empty.finish(), /Reference pipeline not drawn/);
 });
+
+test('primary index references retain the real candidate buffer and replay only the saved index order', () => {
+  const buffers: { words: Uint32Array; destroyed: boolean }[] = [];
+  const device = {
+    createBuffer(descriptor: GPUBufferDescriptor) {
+      const state = { words: new Uint32Array(Number(descriptor.size) / 4), destroyed: false };
+      buffers.push(state);
+      let mapped = false;
+      return { getMappedRange: () => {
+        assert.equal(mapped, false, 'WebGPU rejects overlapping mapped ranges'); mapped = true; return state.words.buffer;
+      }, unmap() {}, destroy() { state.destroyed = true; } };
+    },
+    createRenderBundleEncoder() {
+      let indices: GPUBuffer;
+      const draws: GPUBuffer[] = [];
+      return { setPipeline() {}, setIndexBuffer(buffer: GPUBuffer) { indices = buffer; },
+        drawIndexedIndirect() { draws.push(indices); }, finish() { return { draws }; } };
+    },
+  } as unknown as GPUDevice;
+  const reference = new Uint32Array([0, 1, 2, 2, 1, 3]);
+  const candidate = new Uint32Array([2, 1, 3, 0, 1, 2]);
+  const audit = primaryDrawAblation(device, undefined, { replay: true, read(label, words) {
+    assert.equal(label, 'test native surface indices');
+    assert.deepEqual(words, candidate);
+    return reference;
+  } });
+  const buffer = audit.device.createBuffer({ label: 'test native surface indices', size: 24, usage: 16, mappedAtCreation: true });
+  new Uint32Array(buffer.getMappedRange()).set(candidate); buffer.unmap();
+  assert.deepEqual(buffers.map(b => b.words), [candidate, reference]);
+  const bundle = audit.device.createRenderBundleEncoder({ label: 'Cached primary draw commands', colorFormats: [] });
+  bundle.setPipeline({ label: 'native' } as GPURenderPipeline);
+  bundle.setIndexBuffer(buffer, 'uint32'); bundle.drawIndexedIndirect({} as GPUBuffer, 0);
+  const original = bundle.finish();
+  const observed: GPUBuffer[] = [];
+  const encoder = { beginRenderPass() { return { executeBundles(bundles: { draws: GPUBuffer[] }[]) {
+    observed.push(...bundles.flatMap(b => b.draws));
+  } }; } } as unknown as GPUCommandEncoder;
+  audit.omit(encoder, '@reference').beginRenderPass({ label: 'Voxel surface mesh rasterization', colorAttachments: [] }).executeBundles([original]);
+  encoder.beginRenderPass({ colorAttachments: [] }).executeBundles([original]);
+  assert.notEqual(observed[0], buffer);
+  assert.equal(observed[1], buffer);
+  buffer.destroy();
+  assert.ok(buffers.every(b => b.destroyed), 'references follow the candidate buffer lifetime');
+});

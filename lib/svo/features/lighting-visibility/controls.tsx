@@ -11,9 +11,9 @@ export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updat
   const exactBudgets = svoConeTracingMode === "exact";
   const lightSlot = svoRenderStageUsesLightSlot(svoStageView);
   return {
-    // Source, shadows, AO, lattice, water shadows and rate on the rail; ten calibrations, two
-    // sample counts, and the arm- and plane-specific budgets in the drawer.
-    settings: 7 + 12 + (rasterAo ? 1 : 0) + (exactBudgets ? 4 : 0) + (lightSlot ? 1 : 0),
+    // Source, shadows, AO, lattice, far AO taps, water shadows and rate on the rail; ten
+    // calibrations, two sample counts, and the arm- and plane-specific budgets in the drawer.
+    settings: 8 + 12 + (rasterAo ? 1 : 0) + (exactBudgets ? 4 : 0) + (lightSlot ? 1 : 0),
     notice: (lightingVisibilityStatus.fallback || lightingVisibilityStatus.detail)
       && <p data-testid="lighting-visibility-status" aria-live="polite" className="render-inline-warning">
         Lighting visibility: {lightingVisibilityStatus.state.toUpperCase()}

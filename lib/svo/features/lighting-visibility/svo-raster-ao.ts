@@ -1,3 +1,5 @@
+import { rasterHorizonBudgetWGSL, rasterHorizonRangeProducerWGSL, rasterHorizonImportanceWGSL, rasterAoImportanceMipWGSL } from "./raster-ao-budget";
+export { rasterHorizonBudgetWGSL } from "./raster-ao-budget";
 import { RASTER_MAX_SPOT_LIGHTS, rasterSpotLights } from "./raster-spot-lights";
 import { rasterLightVisibilityWGSL } from "./raster-light-visibility";
 import { importedSurfaceShadowWGSL, importedSurfaceShadowGateWGSL } from "./imported-surface-shadow";
@@ -21,12 +23,14 @@ export interface RasterAoPipelines {
   terrain: GPURenderPipeline;
   casters: GPUComputePipeline;
   ao: GPUComputePipeline;
+  aoRange: GPUComputePipeline;
   aoTiled: GPUComputePipeline;
   classify: GPUComputePipeline;
   finalize: GPUComputePipeline;
   lights: GPUComputePipeline;
   lightEdges: GPUComputePipeline;
   exactEdges: GPUComputePipeline;
+  exactContact: GPUComputePipeline;
   inlineEdges: GPUComputePipeline;
   exactFinalize: GPUComputePipeline;
 }
@@ -35,6 +39,8 @@ const paramsWGSL = /* wgsl */ `
 struct RasterSpot { positionNear:vec4f, directionTan:vec4f, rangeRadiusIndex:vec4f }
 struct RasterLightingParams { control:vec4u, farCenterExtent:vec4f, depthCell:vec4f, sun:vec4f, spots:array<RasterSpot,${RASTER_MAX_SPOT_LIGHTS}> }
 @group(2) @binding(0) var<uniform> rasterLighting:RasterLightingParams;
+@group(2) @binding(21) var<uniform> rasterAoRange:vec4u;
+@group(2) @binding(23) var rasterAoImportance:texture_2d<f32>;
 `;
 
 /** Depth across a planar receiver is affine in shadow-map UV, including a
@@ -209,6 +215,8 @@ ${rasterLightVisibilityWGSL}
 
 /** Local estimator shared with the GPU reconstruction regression fixture. */
 export const rasterHorizonWGSL = /* wgsl */ `
+${rasterHorizonBudgetWGSL}
+${rasterHorizonImportanceWGSL}
 fn rasterWorldAt(pixel:vec2f,depth:f32)->vec3f{
   let camera=dryRasterPrimaryCamera();let ndc=pixel/uniforms.viewport.xy*vec2f(2,-2)+vec2f(-1,1);
   return camera[0]+normalize(camera[1]+camera[2]*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+camera[3]*ndc.y*cameraTanHalfFov())*depth;
@@ -221,13 +229,19 @@ fn rasterHorizonVisibility(pixel:vec2f,position:vec3f,normal:vec3f)->f32{
   let radius=dryContactVisibilityRadius();
   let receiverDistance=length(position-uniforms.cameraPosition.xyz);let radiusSquared=radius*radius;
   let viewDepth=dot(position-uniforms.cameraPosition.xyz,normalize(uniforms.cameraTarget.xyz-uniforms.cameraPosition.xyz));
-  let projected=clamp(radius*uniforms.viewport.y/(2.0*max(viewDepth,.001)*cameraTanHalfFov()),2.0,160.0);
+  let footprint=rasterHorizonProjectedRadius(radius,viewDepth,uniforms.viewport.y,cameraTanHalfFov());
+  let projected=clamp(footprint,2.0,160.0);
+  let farTaps=u32(clamp(rasterLighting.depthCell.w,0.0,36.0));
+  let stride=f32(rasterVisibilityStride());
+  let budget=rasterHorizonReceiverBudget(pixel/stride,projected/stride,farTaps,rasterHorizonRange(rasterAoRange.xy));
+  if(farTaps==0u&&budget==0.0){return 1.0;}
   var occlusion=0.0;
-  // Six azimuths, six quadratic distance samples. A small tangent bias prevents
+  // Six azimuths with nested quadratic distance samples. A small tangent bias prevents
   // the receiver plane and fitted-normal noise from darkening themselves.
   for(var direction=0u;direction<6u;direction++){
     let angle=(f32(direction)+.5)*6.28318530718/6.0;let axis=vec2f(cos(angle),sin(angle));var horizon=0.0;
     for(var step=1u;step<=6u;step++){
+      let stepWeight=rasterHorizonStepWeight(direction,step,budget,farTaps);if(stepWeight==0.0){continue;}
       let fraction=f32(step)/6.0;let tap=vec2i(round(pixel-.5+axis*max(1.0,projected*fraction*fraction)));
       if(any(tap<vec2i(0))||any(tap>=fullDims)){continue;}
       let sample=drySplitGeometryAt(tap);if(!(sample.w<DRY_MISS)){continue;}
@@ -241,12 +255,12 @@ fn rasterHorizonVisibility(pixel:vec2f,position:vec3f,normal:vec3f)->f32{
         // a square root and normalization over large coplanar receivers.
         if(height<=0.0||distanceSquared<1e-10||distanceSquared>=radiusSquared){continue;}
         let cosine=max(height*inverseSqrt(distanceSquared)-.08,0.0);
-        horizon=max(horizon,cosine*(1.0-distanceSquared/radiusSquared));continue;
+        horizon=max(horizon,cosine*(1.0-distanceSquared/radiusSquared)*stepWeight);continue;
       }
       let delta=rasterWorldAt(vec2f(tap)+.5,sample.w)-position;let distance=length(delta);
       if(distance<1e-5||distance>=radius){continue;}
       let cosine=max(dot(normal,delta/distance)-.08,0.0);
-      horizon=max(horizon,cosine*(1.0-distance*distance/(radius*radius)));
+      horizon=max(horizon,cosine*(1.0-distance*distance/(radius*radius))*stepWeight);
     }occlusion+=horizon;
   }
   return pow(clamp(1.0-occlusion/6.0,0.0,1.0),2.0);
@@ -426,6 +440,7 @@ fn rasterShadowCastersMain(@builtin(global_invocation_id) id:vec3u,@builtin(loca
 }
 ${importedSurfaceShadowWGSL}
 ${rasterHorizonWGSL}
+${rasterHorizonRangeProducerWGSL}
 ${rasterCoarseAoWGSL}
 fn rasterContactAt(id:vec3u)->f32{
   let dims=textureDimensions(rasterContactOutput);if(any(id.xy>=dims)){return 1.0;}
@@ -500,6 +515,7 @@ export class SvoRasterAo {
   private exactRequests?: GPUBuffer;
   private exactIndirect?: GPUBuffer;
   readonly params: GPUBuffer;
+  readonly aoRange: GPUBuffer;
   shadow: GPUTexture;
   readonly cache: GPUBuffer;
   /** What the shadow passes of a frame redraw; written by the cache check on the GPU. */
@@ -518,6 +534,11 @@ export class SvoRasterAo {
   private shadowGroups: GPUBindGroup[];
   private shadowViews: GPUTextureView[];
   private ao?: GPUTexture;
+  private aoImportance?: GPUTexture;
+  aoImportanceView?: GPUTextureView;
+  private readonly importanceMipLayout: GPUBindGroupLayout;
+  private importanceMipPipeline?: GPUComputePipeline;
+  private importanceMipGroups: GPUBindGroup[] = [];
   private shadowVisibility?: GPUTexture;
   private aoGroup?: GPUBindGroup;
   private lightGroup?: GPUBindGroup;
@@ -540,6 +561,7 @@ export class SvoRasterAo {
   private renderedSettledKey?: string;
   private coarseAoStrength = 0;
   private aoContrast = 1;
+  private farAoTaps = 24;
   private shadowLayerCount = 2;
   /** One indexed indirect record plus its immutable instance capacity per asset. */
   nativeDrawArguments?: GPUBuffer;
@@ -548,17 +570,20 @@ export class SvoRasterAo {
   private nativeArgumentLayout?: GPUBindGroupLayout;
 
   constructor(private readonly device: GPUDevice) {
+    this.aoRange=device.createBuffer({label:"Visible AO footprint range",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+    this.importanceMipLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float"}},{binding:1,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float"}}]});
     this.params=device.createBuffer({label:"Raster lighting parameters",size:(2+RASTER_MAX_SPOT_LIGHTS)*256,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.cache=device.createBuffer({label:"Raster shadow cache generations and indirect draws",size:CACHE.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     const uniform:GPUBindGroupLayoutEntry={binding:0,visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,buffer:{type:"uniform"}};
-    this.consumerLayout=device.createBindGroupLayout({label:"Raster lighting consumer",entries:[uniform,
+    const aoRange:GPUBindGroupLayoutEntry={binding:21,visibility:GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,buffer:{type:"uniform"}};
+    this.consumerLayout=device.createBindGroupLayout({label:"Raster lighting consumer",entries:[uniform,aoRange,{binding:23,visibility:GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float"}},
       {binding:1,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"depth",viewDimension:"2d-array"}},
       {binding:2,visibility:GPUShaderStage.FRAGMENT,sampler:{type:"comparison"}},
       {binding:3,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"unfilterable-float"}},
       {binding:5,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"unfilterable-float"}},
       {binding:14,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"uint",viewDimension:"2d-array"}},
       {binding:19,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"uint"}}]});
-    this.lightLayout=device.createBindGroupLayout({label:"All-light visibility producer",entries:[uniform,
+    this.lightLayout=device.createBindGroupLayout({label:"All-light visibility producer",entries:[uniform,aoRange,{binding:23,visibility:GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"depth",viewDimension:"2d-array"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,sampler:{type:"comparison"}},
       {binding:3,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float"}},
@@ -567,7 +592,7 @@ export class SvoRasterAo {
       {binding:18,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rg32uint"}},
       {binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:20,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
-    this.classifyLayout=device.createBindGroupLayout({entries:[uniform,{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+    this.classifyLayout=device.createBindGroupLayout({entries:[uniform,{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}, {binding:22,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}, {binding:24,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float"}}]});
     this.redraw=device.createBuffer({label:"Raster shadow redraw box",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE});
     this.casters=device.createBuffer({label:"Raster shadow redraw casters",size:SVO_RASTER_SHADOW_CASTER_CAPACITY*4,usage:GPUBufferUsage.STORAGE});
     const redrawn:GPUBindGroupLayoutEntry={binding:7,visibility:GPUShaderStage.VERTEX|GPUShaderStage.COMPUTE,buffer:{type:"uniform"}};
@@ -579,7 +604,7 @@ export class SvoRasterAo {
     this.cacheLayout=device.createBindGroupLayout({entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
-    this.aoLayout=device.createBindGroupLayout({entries:[uniform,
+    this.aoLayout=device.createBindGroupLayout({entries:[uniform,aoRange,{binding:23,visibility:GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"depth",viewDimension:"2d-array"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,sampler:{type:"comparison"}},
       {binding:4,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}},
@@ -591,6 +616,7 @@ export class SvoRasterAo {
     this.sampler=device.createSampler({compare:"less-equal",magFilter:"linear",minFilter:"linear"});
   }
   async compile(module:GPUShaderModule,scene:GPUBindGroupLayout,mesh:GPUBindGroupLayout,split:GPUBindGroupLayout,nativeShadows=true):Promise<RasterAoPipelines>{
+    this.importanceMipPipeline ??= await this.device.createComputePipelineAsync({label:"AO importance bounds",layout:this.device.createPipelineLayout({bindGroupLayouts:[this.importanceMipLayout]}),compute:{module:this.device.createShaderModule({code:rasterAoImportanceMipWGSL}),entryPoint:"main"}});
     if(nativeShadows){
       this.nativeArgumentLayout ??= this.device.createBindGroupLayout({entries:[
         {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
@@ -608,7 +634,7 @@ export class SvoRasterAo {
       this.device.createComputePipelineAsync({label:"Raster shadow caster count",layout,compute:{module,entryPoint:"resolve"}})]);})();
     [this.cachePipeline,this.resolvePipeline] = await this.cacheCompile;
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[scene,mesh,this.shadowLayout]});
-    const [shadow,terrain,casters,ao,nativeShadow,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges]=await Promise.all([
+    const [shadow,terrain,casters,ao,nativeShadow,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges,exactContact,aoRange]=await Promise.all([
       this.device.createRenderPipelineAsync({label:"Raster shadow casters",layout,vertex:{module,entryPoint:"rasterShadowVertex"},primitive:{topology:"triangle-strip",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}}),
       this.device.createRenderPipelineAsync({label:"Raster shadow terrain and clear",layout,vertex:{module,entryPoint:"rasterShadowClearVertex"},fragment:{module,entryPoint:"rasterShadowTerrain",targets:[]},primitive:{topology:"triangle-list"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"always"}}),
       this.device.createComputePipelineAsync({label:"Raster shadow redraw casters",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,mesh,this.casterLayout]}),compute:{module,entryPoint:"rasterShadowCastersMain"}}),
@@ -626,7 +652,9 @@ export class SvoRasterAo {
       this.device.createComputePipelineAsync({label:"Exact visibility exceptions",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.lightLayout]}),compute:{module,entryPoint:"rasterExactEdgesMain"}}),
       this.device.createComputePipelineAsync({label:"Exact visibility dispatch",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.lightLayout]}),compute:{module,entryPoint:"rasterExactFinalize"}}),
       this.device.createComputePipelineAsync({label:"Inline visibility reference",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.lightLayout]}),compute:{module,entryPoint:"rasterInlineEdgesMain"}}),
-    ]);return {shadow,terrain,casters,ao,nativeShadow,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges};
+      this.device.createComputePipelineAsync({label:"Exact receiver contact AO",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.lightLayout]}),compute:{module,entryPoint:"rasterExactContactMain"}}),
+      this.device.createComputePipelineAsync({label:"Normalize visible AO footprint",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.classifyLayout]}),compute:{module,entryPoint:"rasterAoRangeMain"}}),
+    ]);return {shadow,terrain,casters,ao,nativeShadow,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges,exactContact,aoRange};
   }
   /** Membership/asset changes alter caster geometry even when the camera does not move. */
   invalidateNativeGeometry():void{
@@ -667,7 +695,7 @@ export class SvoRasterAo {
     for(let layer=0;layer<this.shadowLayerCount;layer++){
       const buffer=new ArrayBuffer(256),f=new Float32Array(buffer),u=new Uint32Array(buffer);
       u.set([this.generation,layer,spots.length,this.visibilityControl]);f.set(origin.map((v,i)=>v+extent[i]*.5),4);f[7]=radius*1.02;
-      f[8]=radius*4;f[9]=Math.max(...cellSize);f[10]=this.aoContrast;f.set(direction,12);f[15]=this.coarseAoStrength;
+      f[8]=radius*4;f[9]=Math.max(...cellSize);f[10]=this.aoContrast;f[11]=this.farAoTaps;f.set(direction,12);f[15]=this.coarseAoStrength;
       for(let slot=0;slot<spots.length;slot++){
         const spot=spots[slot]!,offset=16+slot*12;
         f.set([...spot.position,spot.near,...spot.direction,spot.tanHalfAngle,spot.far,spot.radius,spot.index,0],offset);
@@ -679,6 +707,11 @@ export class SvoRasterAo {
     if(strength===this.coarseAoStrength)return;
     this.invalidateVisibility();this.coarseAoStrength=strength;
     for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*256+60,new Float32Array([strength]));
+  }
+  setFarAoTaps(taps:number):void{
+    if(taps===this.farAoTaps)return;
+    this.invalidateVisibility();this.farAoTaps=taps;
+    for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*256+44,new Float32Array([taps]));
   }
   setAoContrast(contrast:number):void{
     if(contrast===this.aoContrast)return;
@@ -692,19 +725,25 @@ export class SvoRasterAo {
     if(this.consumer&&this.fullWidth===fullWidth&&this.fullHeight===fullHeight&&this.ao?.width===width&&this.ao?.height===height&&this.lightVisibility?.depthOrArrayLayers===this.visibilityLayers)return;
     this.invalidateVisibility();this.fullWidth=fullWidth;this.fullHeight=fullHeight;
     this.exactRequests?.destroy();this.exactIndirect?.destroy();
-    this.exactRequests=this.device.createBuffer({label:"Unrepresented visibility receivers",size:(4+fullWidth*fullHeight)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+    this.exactRequests=this.device.createBuffer({label:"Unrepresented visibility receivers",size:(4+fullWidth*fullHeight*2)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.exactIndirect=this.device.createBuffer({label:"Exact visibility indirect dispatch",size:12,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
     this.tileRequests?.destroy();this.tileIndirect?.destroy();
     this.tileRequests=this.device.createBuffer({label:"Occupied lighting tiles",size:(4+Math.ceil(fullWidth/16)*Math.ceil(fullHeight/16))*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
     this.tileIndirect=this.device.createBuffer({label:"Lighting tile indirect dispatch",size:12,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
-    this.classifyGroup=this.device.createBindGroup({layout:this.classifyLayout,entries:[{binding:0,resource:{buffer:this.params,offset:0,size:256}},{binding:17,resource:{buffer:this.tileRequests}}]});
+    this.aoImportance?.destroy();this.aoImportance=this.device.createTexture({label:"Screen-space AO importance",size:[width,height],mipLevelCount:Math.min(9,1+Math.floor(Math.log2(Math.max(width,height)))),format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
+    this.aoImportanceView=this.aoImportance.createView();
+    this.importanceMipGroups=Array.from({length:this.aoImportance.mipLevelCount-1},(_,i)=>this.device.createBindGroup({layout:this.importanceMipLayout,entries:[
+      {binding:0,resource:this.aoImportance!.createView({baseMipLevel:i,mipLevelCount:1})},
+      {binding:1,resource:this.aoImportance!.createView({baseMipLevel:i+1,mipLevelCount:1})},
+    ]}));
+    this.classifyGroup=this.device.createBindGroup({layout:this.classifyLayout,entries:[{binding:0,resource:{buffer:this.params,offset:0,size:256}},{binding:17,resource:{buffer:this.tileRequests}},{binding:22,resource:{buffer:this.aoRange}},{binding:24,resource:this.aoImportance.createView({baseMipLevel:0,mipLevelCount:1})}]});
     this.lightVisibility?.destroy();this.lightVisibility=this.device.createTexture({label:"Current-frame all-light visibility RGB10",size:[fullWidth,fullHeight,this.visibilityLayers],format:"r32uint",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
     this.guide?.destroy();this.guide=this.device.createTexture({label:"Resolved visibility reconstruction",size:[fullWidth,fullHeight],format:"rg32uint",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
     this.ao?.destroy();this.ao=this.device.createTexture({label:"Half-resolution sun visibility and horizon AO",size:[width,height],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
     this.shadowVisibility?.destroy();this.shadowVisibility=this.device.createTexture({label:"Half-resolution sun visibility",size:[width,height],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
     const uniform={buffer:this.params,offset:0,size:256};const view=this.ao.createView();const shadowView=this.shadowVisibility.createView();
-    this.aoGroup=this.device.createBindGroup({layout:this.aoLayout,entries:[{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:4,resource:view},{binding:6,resource:shadowView},{binding:16,resource:{buffer:this.tileRequests}}]});
-    const common:GPUBindGroupEntry[]=[{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:3,resource:view},{binding:5,resource:shadowView}];
+    this.aoGroup=this.device.createBindGroup({layout:this.aoLayout,entries:[{binding:23,resource:this.aoImportanceView},{binding:21,resource:{buffer:this.aoRange}},{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:4,resource:view},{binding:6,resource:shadowView},{binding:16,resource:{buffer:this.tileRequests}}]});
+    const common:GPUBindGroupEntry[]=[{binding:23,resource:this.aoImportanceView},{binding:21,resource:{buffer:this.aoRange}},{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:3,resource:view},{binding:5,resource:shadowView}];
     const lightView=this.lightVisibility.createView({dimension:"2d-array"});
     this.consumer=this.device.createBindGroup({layout:this.consumerLayout,entries:[...common,{binding:14,resource:lightView},{binding:19,resource:this.guide.createView()}]});
     this.lightGroup=this.device.createBindGroup({layout:this.lightLayout,entries:[...common,{binding:15,resource:lightView},{binding:18,resource:this.guide.createView()},{binding:16,resource:{buffer:this.tileRequests}},{binding:20,resource:{buffer:this.exactRequests}}]});
@@ -758,6 +797,16 @@ export class SvoRasterAo {
     const reuseVisibility=this.visibilityEnabled&&reuse&&receiverKey!==undefined&&receiverKey===this.visibilityCacheKey;
     this.visibilityCacheKey=receiverKey;
     if(reuseVisibility)return;
+    if(aoEnabled&&this.farAoTaps<36){
+      encoder.clearBuffer(this.aoRange);
+      const range=encoder.beginComputePass({label:"Normalize visible AO footprint"});
+      range.setPipeline(pipelines.aoRange);range.setBindGroup(0,scene);range.setBindGroup(1,split);range.setBindGroup(2,this.classifyGroup!);
+      range.dispatchWorkgroups(Math.ceil(this.ao!.width/16),Math.ceil(this.ao!.height/16));range.end();
+      if(this.farAoTaps<24){
+        const bounds=encoder.beginComputePass({label:"Build AO importance bounds"});bounds.setPipeline(this.importanceMipPipeline!);
+        this.importanceMipGroups.forEach((group,i)=>{bounds.setBindGroup(0,group);bounds.dispatchWorkgroups(Math.ceil(Math.max(1,this.ao!.width>>(i+1))/8),Math.ceil(Math.max(1,this.ao!.height>>(i+1))/8));});bounds.end();
+      }
+    }
     if((aoEnabled||shadowsEnabled)&&this.visibilityEnabled&&this.visibilityTilingEnabled){
       encoder.clearBuffer(this.tileRequests!,0,4);
       const pass=encoder.beginComputePass({label:"Classify occupied visibility tiles"});
@@ -781,10 +830,14 @@ export class SvoRasterAo {
       const size=encoder.beginComputePass({label:"Prepare exact visibility exceptions"});
       size.setPipeline(pipelines.exactFinalize);size.setBindGroup(0,scene);size.setBindGroup(1,split);size.setBindGroup(2,this.lightGroup!);size.dispatchWorkgroups(1);size.end();
       encoder.copyBufferToBuffer(this.exactRequests!,4,this.exactIndirect!,0,12);
+      if(aoEnabled){
+        const contact=encoder.beginComputePass({label:"Exact receiver contact AO"});
+        contact.setPipeline(pipelines.exactContact);contact.setBindGroup(0,scene);contact.setBindGroup(1,split);contact.setBindGroup(2,this.lightGroup!);contact.dispatchWorkgroupsIndirect(this.exactIndirect!,0);contact.end();
+      }
       const exact=encoder.beginComputePass({label:"Exact visibility exceptions"});
       exact.setPipeline(pipelines.exactEdges);exact.setBindGroup(0,scene);exact.setBindGroup(1,split);exact.setBindGroup(2,this.lightGroup!);exact.dispatchWorkgroupsIndirect(this.exactIndirect!,0);exact.end();
     }
     if(aoEnabled||shadowsEnabled)aoComplete?.();
   }
-  destroy():void{this.nativeDrawArguments?.destroy();this.params.destroy();this.cache.destroy();this.redraw.destroy();this.casters.destroy();this.shadow.destroy();this.ao?.destroy();this.shadowVisibility?.destroy();this.lightVisibility?.destroy();this.guide?.destroy();this.tileRequests?.destroy();this.tileIndirect?.destroy();this.exactRequests?.destroy();this.exactIndirect?.destroy();}
+  destroy():void{this.aoImportance?.destroy();this.aoRange.destroy();this.nativeDrawArguments?.destroy();this.params.destroy();this.cache.destroy();this.redraw.destroy();this.casters.destroy();this.shadow.destroy();this.ao?.destroy();this.shadowVisibility?.destroy();this.lightVisibility?.destroy();this.guide?.destroy();this.tileRequests?.destroy();this.tileIndirect?.destroy();this.exactRequests?.destroy();this.exactIndirect?.destroy();}
 }

@@ -8,7 +8,9 @@ export const lightingQuery = queryRecord<LightingQueryState>({
   svoConeTracingMode: choiceQuery("svoCones", DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode, ["cones", "exact", "raster-ao", "off"]),
   svoLatticeVisibilityEnabled: booleanQuery("svoLattice", DEFAULT_SVO_LIGHTING_OPTIONS.latticeVisibilityEnabled),
 });
-export const lightingTuningQuery = queryRecord<Pick<SvoRenderTuning, "waterShadowsEnabled" | "rasterCoarseAoStrength">>({
+export const lightingTuningQuery = queryRecord<Pick<SvoRenderTuning, "waterShadowsEnabled" | "rasterCoarseAoStrength" | "rasterFarAoTaps" | "rasterStillViewReuse">>({
+  rasterStillViewReuse: booleanQuery("svoStillReuse", DEFAULT_SVO_RENDER_TUNING.rasterStillViewReuse),
+  rasterFarAoTaps: numberQuery("svoFarAO", DEFAULT_SVO_RENDER_TUNING.rasterFarAoTaps, 0, 36),
   rasterCoarseAoStrength: numberQuery("svoCoarseAO", DEFAULT_SVO_RENDER_TUNING.rasterCoarseAoStrength, 0, 1),
   waterShadowsEnabled: booleanQuery("svoWaterShadows", DEFAULT_SVO_RENDER_TUNING.waterShadowsEnabled),
 });

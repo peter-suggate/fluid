@@ -59,7 +59,8 @@ fn rasterUnpackVisibility(value:u32)->vec3f{
 
 /** Count and indirect dispatch share one buffer; the dispatch is copied out
  * before its INDIRECT usage scope. The two-dimensional dispatch covers Retina
- * frames even when every pixel needs exact visibility. */
+ * frames even when every pixel needs exact visibility. After the four-word
+ * header, each receiver has a pixel address and an unquantized AO result. */
 export const rasterExactQueueWGSL = /* wgsl */ `
 @group(2) @binding(20) var<storage,read_write> rasterExactRequests:array<atomic<u32>>;
 @compute @workgroup_size(1) fn rasterExactFinalize(){
@@ -67,6 +68,26 @@ export const rasterExactQueueWGSL = /* wgsl */ `
   atomicStore(&rasterExactRequests[1],min(groups,65535u));
   atomicStore(&rasterExactRequests[2],max(1u,(groups+65534u)/65535u));
   atomicStore(&rasterExactRequests[3],1u);
+}
+`;
+
+/** Reserve one contiguous queue range per 16x16 pixel tile. This removes
+ * per-pixel contention and keeps the expensive consumers spatially coherent. */
+export const rasterExactTileQueueWGSL = /* wgsl */ `
+var<workgroup> rasterExactTileCount:atomic<u32>;
+var<workgroup> rasterExactTileBase:u32;
+var<workgroup> rasterExactTileCoordinates:array<u32,256>;
+fn rasterBeginExactTile(lane:u32){
+  if(lane==0u){atomicStore(&rasterExactTileCount,0u);}workgroupBarrier();
+}
+fn rasterAppendExactTile(coordinate:u32){
+  let index=atomicAdd(&rasterExactTileCount,1u);rasterExactTileCoordinates[index]=coordinate;
+}
+fn rasterFlushExactTile(lane:u32){
+  workgroupBarrier();let count=atomicLoad(&rasterExactTileCount);
+  if(lane==0u&&count>0u){rasterExactTileBase=atomicAdd(&rasterExactRequests[0],count);}
+  workgroupBarrier();
+  for(var index=lane;index<count;index+=64u){atomicStore(&rasterExactRequests[4u+(rasterExactTileBase+index)*2u],rasterExactTileCoordinates[index]);}
 }
 `;
 
@@ -87,6 +108,7 @@ fn rasterCompactAtlasCoordinate(c:vec2i,dims:vec2i)->vec2i{
 export const rasterLightVisibilityWGSL = /* wgsl */ `
 @group(2) @binding(14) var rasterLightVisibility:texture_2d_array<u32>;
 ${rasterExactQueueWGSL}
+${rasterExactTileQueueWGSL}
 @group(2) @binding(18) var rasterGuideOutput:texture_storage_2d<rg32uint,write>;
 @group(2) @binding(19) var rasterGuide:texture_2d<u32>;
 @group(2) @binding(15) var rasterLightVisibilityOutput:texture_storage_2d_array<r32uint,write>;
@@ -222,8 +244,7 @@ fn rasterLightEdgeAt(coord:vec2i){
   var resolved=rasterPrepareVisibility(position,normal);var weights=0u;
   if(rasterVisibilityWeight>1e-4){weights=pack4x8unorm(rasterVisibilityWeights/rasterVisibilityWeight);}
   else{
-    let index=atomicAdd(&rasterExactRequests[0],1u);
-    atomicStore(&rasterExactRequests[4u+index],u32(coord.y)*u32(dims.x)+u32(coord.x));
+    rasterAppendExactTile(u32(coord.y)*u32(dims.x)+u32(coord.x));
     return;
   }
   textureStore(rasterGuideOutput,coord,vec4u(pack2x16float(resolved),weights,0u,0u));
@@ -252,15 +273,27 @@ fn rasterInlineEdgeAt(coord:vec2i){
 }
 // Exact traversal lives in a separate entry point: the common full-screen
 // resolve must not carry its private stacks/register pressure on every lane.
+// AO has no light-ray traversal either. Keep its horizon/mip work out of the
+// shadow kernel, using the queue's second word for the unquantized AO result.
+@compute @workgroup_size(64) fn rasterExactContactMain(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  let index=(group.x+group.y*65535u)*64u+lane;
+  if(index>=atomicLoad(&rasterExactRequests[0])){return;}
+  let dims=textureDimensions(drySplitGeometryRead);let address=atomicLoad(&rasterExactRequests[4u+index*2u]);
+  let coord=vec2i(i32(address%dims.x),i32(address/dims.x));
+  let g=rasterVisibilityGeometryAt(coord);let pixel=vec2f(coord)+.5;
+  let position=rasterWorldAt(pixel,g.w);let normal=normalize(g.xyz);
+  let contact=min(rasterHorizonVisibility(pixel,position,normal),rasterCoarseVisibility(position,normal));
+  atomicStore(&rasterExactRequests[5u+index*2u],bitcast<u32>(contact));
+}
 @compute @workgroup_size(64) fn rasterExactEdgesMain(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
   let index=(group.x+group.y*65535u)*64u+lane;
   if(index>=atomicLoad(&rasterExactRequests[0])){return;}
-  let dims=textureDimensions(drySplitGeometryRead);let address=atomicLoad(&rasterExactRequests[4u+index]);
+  let dims=textureDimensions(drySplitGeometryRead);let address=atomicLoad(&rasterExactRequests[4u+index*2u]);
   let coord=vec2i(i32(address%dims.x),i32(address/dims.x));
   let g=rasterVisibilityGeometryAt(coord);rasterPixel=vec2f(coord)+.5;
   let position=rasterWorldAt(rasterPixel,g.w);let normal=normalize(g.xyz);
   var resolved=vec2f(1);
-  if((dry.materialPublication.w&1u)!=0u){resolved.x=min(rasterHorizonVisibility(rasterPixel,position,normal),rasterCoarseVisibility(position,normal));}
+  if((dry.materialPublication.w&1u)!=0u){resolved.x=bitcast<f32>(atomicLoad(&rasterExactRequests[5u+index*2u]));}
   if((dry.materialPublication.w&2u)!=0u){
     resolved.y=rasterSunVisibility(position,dryGeometricNormal(rasterVisibilityHit(coord,g)));
     if(!all(coord==rasterRepresentative(coord/i32(rasterVisibilityStride())))){rasterProduceLightVisibility(coord,g,resolved.y);}
@@ -268,12 +301,12 @@ fn rasterInlineEdgeAt(coord:vec2i){
   textureStore(rasterGuideOutput,coord,vec4u(pack2x16float(resolved),0u,0u,0u));
 }
 @compute @workgroup_size(8,8) fn rasterLightEdgesMain(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_id) local:vec3u){
-  if((rasterLighting.control.w&2u)==0u){
-    let origin=vec2i(group.xy*8u+local.xy)*2;
-    for(var y=0;y<2;y++){for(var x=0;x<2;x++){rasterLightEdgeAt(origin+vec2i(x,y));}}return;
+  let lane=local.y*8u+local.x;rasterBeginExactTile(lane);
+  let id=rasterQueuedCoordinate(group,local);
+  if(all(id<textureDimensions(rasterContact))){
+    let stride=i32(rasterVisibilityStride());let origin=vec2i(id)*stride;
+    for(var y=0;y<stride;y++){for(var x=0;x<stride;x++){rasterLightEdgeAt(origin+vec2i(x,y));}}
   }
-  let id=rasterQueuedCoordinate(group,local);if(any(id>=textureDimensions(rasterContact))){return;}
-  let stride=i32(rasterVisibilityStride());let origin=vec2i(id)*stride;
-  for(var y=0;y<stride;y++){for(var x=0;x<stride;x++){rasterLightEdgeAt(origin+vec2i(x,y));}}
+  rasterFlushExactTile(lane);
 }
 `;

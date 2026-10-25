@@ -7,6 +7,7 @@ import { useSession } from "../../core/session/session-context";
 import { SVO_FEATURE_VIEWS } from "../../svo/pipeline/ui-slots";
 import { GravityRow, GravityYRow } from "../gravity/ui";
 import { composeFeatureUI } from "./composition";
+import type { FeatureComposition } from "../../framework/composition";
 import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/ui/slot";
 
 /** Only application composition knows the installed React implementations. */
@@ -17,7 +18,8 @@ export const applicationViews: FeatureControlViews = {
   ...SVO_FEATURE_VIEWS,
 };
 
-export function FeatureSlot({ slot }: { readonly slot: string }) {
+/** The installed features, as the session's method and selections resolve them. */
+export function useFeatureComposition(): FeatureComposition {
   const session = useSession();
   const methodId = session.method(state => state.methodId);
   const quality = session.method(state => state.quality);
@@ -30,11 +32,14 @@ export function FeatureSlot({ slot }: { readonly slot: string }) {
   // inputs move with the method, not with the host. The scene toolstrip rides
   // the camera, so it re-renders on every orbit step: recomposing there was
   // most of that column's render cost, six slots over, at pointer rate.
-  const composition = useMemo(() => composeFeatureUI(methodId, fluid, {
+  return useMemo(() => composeFeatureUI(methodId, fluid, {
     "svo.primary-visibility": primary,
     "svo.lighting-visibility": lighting,
     "svo.radiance-reconstruction": reconstruction,
   }, fluid ? resolvedMethodValues({ methodId, quality, overrides }) : {}),
   [methodId, quality, overrides, fluid, primary, lighting, reconstruction]);
-  return <ComposedFeatureSlot composition={composition} views={applicationViews} slot={slot} />;
+}
+
+export function FeatureSlot({ slot }: { readonly slot: string }) {
+  return <ComposedFeatureSlot composition={useFeatureComposition()} views={applicationViews} slot={slot} />;
 }

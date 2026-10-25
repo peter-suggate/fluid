@@ -25,6 +25,11 @@ import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
  *      pass after warmup (fixed scene/camera; excludes entry preparation).
  *      _PRIMARY_TIMING_LABELS optionally selects comma-separated production-pass
  *      labels; each is replayed alone with GPU timestamps and reported in JSON.
+ *      _PRIMARY_RESOLUTIONS=1724x946,3448x1892,1724x946 compares viewport sizes
+ *      on the same published scene, logging isolated cull/draw times and counts.
+ *      _PRIMARY_INDEX_CAPTURE=<directory> saves native asset index buffers.
+ *      _PRIMARY_INDEX_REFERENCE=<directory> interleaves those buffers with the
+ *      current ordering; use only with identical vertices and LOD ranges.
  *      _MESH_CENSUS=1 counts the culled mesh records by material before timing.
  *      _MESH_SAMPLE_CULLING=0 retains the reference draw for image comparisons.
  *      _MESH_CAMERA_CHECKS=1 captures orbit/close/return views alongside the
@@ -120,6 +125,7 @@ import "../lib/methods";
 import assert from "node:assert/strict";
 import { benchmarkSvoPrimaryPass } from "./benchmark-svo-primary-pass";
 import { primaryDrawAblation } from "./primary-draw-ablation";
+import { computeShaderReference } from "./compute-shader-reference";
 import { capturePrimaryComputeInputs } from "./probe-svo-primary-compute";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -967,6 +973,9 @@ const environmentRefinementDepth = requestedRefinementDepth === undefined
     : svoEnvironmentTreeRefinementDepth(scene.voxelDomain, { fluid: false });
 const presetCamera = sceneModule ? sceneModule.camera : preset.camera;
 const camera: CameraState = { ...defaultCamera, ...presetCamera, target_m: { ...(presetCamera?.target_m ?? defaultCamera.target_m) } };
+const cameraDistanceScale = Number(process.env.FLUID_SVO_DRY_FRAME_CAMERA_DISTANCE_SCALE ?? 1);
+assert.ok(Number.isFinite(cameraDistanceScale) && cameraDistanceScale > 0, "camera distance scale must be positive");
+camera.distance_m *= cameraDistanceScale;
 let activeCamera: CameraState = camera;
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
 
@@ -1081,9 +1090,26 @@ async function awaitPresentationBundle(target: SparseVoxelDrySceneRenderer): Pro
 }
 
 const primaryReferencePath = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_REFERENCE;
-const primaryAblation = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION === "1" || primaryReferencePath
-  ? primaryDrawAblation(device, primaryReferencePath ? JSON.parse(readFileSync(primaryReferencePath, 'utf8')) : undefined) : undefined;
-const renderer = new SparseVoxelDrySceneRenderer(primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
+const primaryIndexCapture = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_INDEX_CAPTURE;
+const primaryIndexReference = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_INDEX_REFERENCE;
+assert.ok(!(primaryIndexReference && primaryReferencePath), "Compare index order and shader changes separately");
+const primaryPaired = primaryReferencePath || primaryIndexReference;
+const primaryAblation = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION === "1" || primaryPaired || primaryIndexCapture
+  ? primaryDrawAblation(device, primaryReferencePath ? JSON.parse(readFileSync(primaryReferencePath, 'utf8')) : undefined,
+    primaryIndexCapture || primaryIndexReference ? { replay: !!primaryIndexReference, read(label, candidate) {
+      const name = `${encodeURIComponent(label)}.u32`;
+      if (primaryIndexCapture) {
+        mkdirSync(primaryIndexCapture, { recursive: true });
+        writeFileSync(path.join(primaryIndexCapture, name), candidate);
+      }
+      if (!primaryIndexReference) return undefined;
+      const bytes = readFileSync(path.join(primaryIndexReference, name));
+      return new Uint32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    } } : undefined) : undefined;
+const lightingReferencePath = process.env.FLUID_SVO_DRY_FRAME_LIGHTING_REFERENCE;
+const lightingReference = lightingReferencePath ? computeShaderReference(primaryAblation?.device ?? device,
+  JSON.parse(readFileSync(lightingReferencePath, "utf8"))) : undefined;
+const renderer = new SparseVoxelDrySceneRenderer(lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
@@ -1094,6 +1120,7 @@ renderer.setRigidBodyCount(rasterRigidForced ? 12 : bodies.count, bodies.bounds)
 const meshLodPixelsRaw = Number(process.env.FLUID_SVO_DRY_FRAME_MESH_LOD_PIXELS ?? DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels);
 const meshLodPixels = Number.isFinite(meshLodPixelsRaw) ? Math.min(Math.max(meshLodPixelsRaw, 0), 8) : DEFAULT_SVO_RENDER_TUNING.surfaceMeshLodPixels;
 const configuredRenderTuning: SvoRenderTuning = { ...DEFAULT_SVO_RENDER_TUNING,
+  rasterFarAoTaps: Number(process.env.FLUID_SVO_DRY_FRAME_FAR_AO_TAPS ?? DEFAULT_SVO_RENDER_TUNING.rasterFarAoTaps),
   surfaceMeshing: process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-marching-cubes" ? "dual-marching-cubes" : process.env.FLUID_SVO_DRY_FRAME_MESHER === "dual-contouring" ? "dual-contouring" : process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1" ? "contours" : "voxels",
   surfaceMeshContours: process.env.FLUID_SVO_DRY_FRAME_MESH_CONTOURS === "1",
   surfaceMeshContourInflation: Number(process.env.FLUID_SVO_DRY_FRAME_CONTOUR_INFLATION ?? 0), coneLightingScale: coneScale,
@@ -1216,6 +1243,17 @@ await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
 
+if (process.env.FLUID_SVO_DRY_FRAME_PRIMARY_RESOLUTIONS) {
+  assert.ok(optimizationExperiments.surfaceMesh, "Primary resolution study requires surface meshing");
+  const { benchmarkSvoPrimaryResolution } = await import("./benchmark-svo-primary-resolution");
+  const results = await benchmarkSvoPrimaryResolution({ device, renderer, uniforms: uniformBuffer,
+    view: { scene, camera: activeCamera, environmentId, info: solver.info, bodyCount: bodies.count, width, height, cameraMoving },
+    sizes: process.env.FLUID_SVO_DRY_FRAME_PRIMARY_RESOLUTIONS, warmups, cycles });
+  mkdirSync(path.dirname(outPath), { recursive: true });
+  writeFileSync(`${outPath}.primary-resolutions.json`, JSON.stringify(results, null, 2));
+  assert.deepEqual(validationErrors, [], "GPU validation errors during primary resolution study");
+}
+
 if (process.env.FLUID_SVO_DRY_FRAME_MESH_CENSUS === "1") {
   const { censusSvoMeshMaterials } = await import("./census-svo-mesh-materials");
   const counts = await censusSvoMeshMaterials(device, renderer);
@@ -1236,7 +1274,7 @@ if (profileGate) {
 }
 
 const primaryPassTimings = [];
-if (primaryAblation && primaryReferencePath) {
+if (primaryAblation && primaryPaired) {
   let frame = 0;
   const paired = await benchmarkSvoPrimaryPass(device, encoder => {
     // ABBA balances order and short-term clock/load changes on the same device.
@@ -1245,12 +1283,12 @@ if (primaryAblation && primaryReferencePath) {
   }, 16, 256, "Voxel surface mesh rasterization");
   for (const arm of ['reference', 'candidate'] as const) {
     const samples = paired.samples_ms.filter((_, i) => ((i % 4 === 0 || i % 4 === 3) ? 'reference' : 'candidate') === arm).sort((a,b)=>a-b);
-    console.log(`Paired primary shader: ${JSON.stringify({ arm,
+    console.log(`Paired primary ${primaryIndexReference ? 'indices' : 'shader'}: ${JSON.stringify({ arm,
       median_ms: samples[Math.floor(samples.length / 2)],
       p95_ms: samples[Math.ceil(samples.length * .95) - 1], samples_ms: samples })}`);
   }
 }
-if (primaryAblation && !primaryReferencePath) {
+if (primaryAblation && process.env.FLUID_SVO_DRY_FRAME_PRIMARY_ABLATION === "1" && !primaryPaired) {
   for (const omitted of ['', ...primaryAblation.labels, '']) {
     const timing = await benchmarkSvoPrimaryPass(device,
       encoder => encodeFrame(omitted ? primaryAblation.omit(encoder, omitted) : encoder),
@@ -1404,7 +1442,8 @@ if (profileSeconds > 0) {
     const { benchmarkRasterVisibility } = await import("./benchmark-raster-visibility");
     await benchmarkRasterVisibility({ device, renderer, uniforms: uniformBuffer,
       view: { scene, camera, environmentId, info: solver.info, bodyCount: bodies.count, width, height },
-      publication: drySceneData, outPath });
+      publication: drySceneData, outPath, reference: lightingReference,
+      aoCellSize: Math.max(...source.structural.domain.cellSize_m) });
     assert.deepEqual(validationErrors, [], "GPU validation during paired raster visibility");
     renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy();
     process.exit(0);

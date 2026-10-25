@@ -4,6 +4,69 @@ import { lightingQuery, lightingTuningQuery } from "../lib/svo/features/lighting
 import { DEFAULT_SVO_LIGHTING_OPTIONS } from "../lib/svo/pipeline/svo-render-options";
 import { createUIStore } from "../lib/core/stores/ui-store";
 import { FluidLabRenderer } from "../lib/core/webgpu-renderer";
+import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning } from "../lib/svo/pipeline/svo-render-tuning";
+
+test("far AO tuning preserves zero, round-trips slider values, and normalizes saved budgets", () => {
+  assert.equal(lightingTuningQuery.read(new URLSearchParams()).rasterFarAoTaps,24);
+  for(let taps=0;taps<=36;taps+=4){
+    const tuning=normalizeSvoRenderTuning({...DEFAULT_SVO_RENDER_TUNING,rasterFarAoTaps:taps});
+    const query=new URLSearchParams();lightingTuningQuery.write(query,tuning);
+    assert.equal(lightingTuningQuery.read(query).rasterFarAoTaps,taps);
+  }
+  for(const [requested,expected] of [[-4,0],[7,8],[100,36]])
+    assert.equal(normalizeSvoRenderTuning({...DEFAULT_SVO_RENDER_TUNING,rasterFarAoTaps:requested!}).rasterFarAoTaps,expected);
+});
+
+test("GPU far AO budgets use every slider tap count and converge continuously to full quality", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+  const { withUniformDevice } = await import("./helpers/uniform-geometric");
+  const { readMixedBuffer } = await import("./helpers/uniform-mixed-native-fields");
+  const { rasterHorizonBudgetWGSL } = await import("../lib/svo/features/lighting-visibility/svo-raster-ao");
+  await withUniformDevice("adaptive horizon sampling", async device => {
+    const output = device.createBuffer({ size: 161 * 10 * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    try {
+      const module = device.createShaderModule({ code: `${rasterHorizonBudgetWGSL}
+@group(0) @binding(0) var<storage,read_write> result:array<vec4f>;
+@compute @workgroup_size(32) fn main(@builtin(global_invocation_id) id:vec3u){
+  if(id.x>160u){return;}
+  let budget=rasterHorizonBudget(f32(id.x),vec2f(40,120));let farTaps=id.y*4u;
+  var taps=0.0;var totalWeight=0.0;var inner=1.0;
+  for(var direction=0u;direction<6u;direction++){
+    for(var step=1u;step<=6u;step++){
+      let weight=rasterHorizonStepWeight(direction,step,budget,farTaps);
+      if(weight>0.0){taps+=1.0;}totalWeight+=weight;
+      if(step<=4u){inner=min(inner,weight);}
+    }
+  }
+  result[id.y*161u+id.x]=vec4f(totalWeight,inner,budget,taps);
+  result[1610u+id.y*161u+id.x]=vec4f(
+    budget-rasterHorizonBudget(f32(id.x)*2.0,vec2f(80,240)),
+    rasterHorizonBudget(80.0,vec2f(80,80)),
+    f32(rasterHorizonTapCount(budget,farTaps))-taps,0.0);
+}` });
+      const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "main" } });
+      const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: output } }] });
+      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(6,10);pass.end();device.queue.submit([encoder.finish()]);
+      const values = await readMixedBuffer(device,output);
+      for(let level=0;level<10;level++) for(let radius=0;radius<=160;radius++) {
+        const offset=(level*161+radius)*4, farTaps=level*4;
+        assert.ok(Math.abs(values[1610*4+offset]!)<1e-6,"Retina scaling preserves normalized allocation within float precision");
+        assert.equal(values[1610*4+offset+1],0,"flat views use the requested minimum");
+        assert.equal(values[1610*4+offset+2],0,"overlay count matches selected shader taps");
+        assert.ok(values[offset+3]!-values[offset]!>=-1e-5 && values[offset+3]!-values[offset]!<=1+1e-5,"only the next sample can be fractional");
+        assert.ok(values[offset+3]!>=farTaps && values[offset+3]!<=36);
+        assert.ok(Math.abs(values[offset]!-(farTaps+(36-farTaps)*values[offset+2]!))<.0005+1e-5);
+        if(farTaps>=24) assert.equal(values[offset+1],1,"default and higher budgets preserve every inner contact tap");
+        if(radius<=48) assert.equal(values[offset],farTaps);
+        if(radius>=112) assert.equal(values[offset],36,"nearby receivers retain every original tap at full weight");
+        if(radius>0) {
+          const delta=values[offset]!-values[offset-4]!;
+          assert.ok(delta>=0 && delta<1,"weights fade monotonically without a tier jump");
+        }
+      }
+    } finally { output.destroy(); }
+  });
+});
 
 test("raster AO is the default, cones remain saved explicitly, and selecting raster AO prepares the mesh", () => {
   assert.equal(DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode, "raster-ao");

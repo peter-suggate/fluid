@@ -29,6 +29,7 @@ export async function benchmarkRasterLightingBudget(input: {
   type Arm = { name: string; ao?: boolean; shadows?: boolean; coarse?: number; area?: number; lights?: number; scale?: number };
   const samples = new Map<string, number[]>();
   const aoSamples = new Map<string, number[]>();
+  const computeSamples = new Map<string, Record<string, number[]>>();
   const targets = new Map<number, GPUTexture>();
   let coverage: { emptyPixelFraction: number; emptyTileFraction: number; tileSize: number } | undefined;
   const quantile = (values: number[], q: number) => [...values].sort((a, b) => a - b)[Math.ceil(values.length * q) - 1]!;
@@ -64,6 +65,9 @@ export async function benchmarkRasterLightingBudget(input: {
           const values = samples.get(arm.name) ?? []; values.push(reading.span_ms); samples.set(arm.name, values);
           const ao = reading.passes.find(pass => pass.label === "Half-resolution sun visibility and horizon AO");
           if (ao) { const values = aoSamples.get(arm.name) ?? []; values.push(ao.duration_ms); aoSamples.set(arm.name, values); }
+          const compute = computeSamples.get(arm.name) ?? {};
+          for (const pass of reading.passes) if (pass.trusted) (compute[pass.label] ??= []).push(pass.duration_ms);
+          computeSamples.set(arm.name, compute);
         }
         if (!coverage && arm.name === "baseline") {
           // Read once, outside all timed frames. Reversed-Z zero is a miss;
@@ -94,9 +98,10 @@ export async function benchmarkRasterLightingBudget(input: {
     const results = arms.map(arm => ({ name: arm.name, samples_ms: samples.get(arm.name)!,
       median_ms: quantile(samples.get(arm.name)!, 0.5), p95_ms: quantile(samples.get(arm.name)!, 0.95),
       visibilityComputeMedian_ms: aoSamples.has(arm.name) ? quantile(aoSamples.get(arm.name)!, 0.5) : null,
+      computeMedian_ms: Object.fromEntries(Object.entries(computeSamples.get(arm.name) ?? {}).map(([label, values]) => [label, quantile(values, 0.5)])),
     }));
     const report = { scope: "Production dry renderer; excludes simulation, water and browser presentation. Ablations change quality.",
-      scene: view.scene.sceneId, resolution: { width: view.width, height: view.height }, tuning, coverage,
+      scene: view.scene.sceneId, camera: view.camera, resolution: { width: view.width, height: view.height }, tuning, coverage,
       method: "GPU timestamp frame spans; four alternating forward/reverse arm blocks, two warmup and four measured frames per arm/block",
       results };
     mkdirSync(dirname(input.outPath), { recursive: true });
