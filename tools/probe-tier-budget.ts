@@ -65,6 +65,7 @@ import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harne
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { uniformDetailBindLayout, uniformDetailField, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline } from "../lib/methods/uniform/uniform-detail-fields";
 import { UNIFORM_WINDOW_HEADER } from "../lib/methods/uniform/uniform-window-address";
+import { UNIFORM_REGION_HEAT_STATE_WORDS, UNIFORM_REGION_HEAT_STILL_WORD, UNIFORM_REGION_HEAT_STILL_WORDS } from "../lib/methods/uniform/uniform-region-heat";
 import { UNIFORM_MOMENTUM_TRACE_CAPPED_WORD } from "../lib/methods/uniform/uniform-mixed-momentum";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../lib/methods/uniform/uniform-surface-transport.wgsl";
 import { NARROW_BAND_RETIRE_WORD, NARROW_BAND_RETIRE_WORDS, narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-band-flip";
@@ -569,12 +570,12 @@ var<workgroup> sums:array<atomic<u32>,16>;
   }
   if (!probes.length) throw new Error("No probe load form compiles");
   const P = 4 * W * probes.length;
-  const READ = { work: P, heat: P + 32, pool: P + 48, tiers: P + 48 + 4 * S.words }, readBytes = READ.tiers + 4 * frame.heat.regions;
+  const READ = { work: P, heat: P + 32, pool: P + 48, tiers: P + 48 + 4 * S.words, still: P + 48 + 4 * S.words + 4 * frame.heat.regions }, readBytes = READ.still + 4 * UNIFORM_REGION_HEAT_STILL_WORDS;
   const read = device.createBuffer({ label: "Tier budget readback", size: readBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const reset = new Uint32Array(W); for (const at of [21, 24, 26, 28]) reset[at] = 0xffffffff;
   // --heatState: every surface-reader region's freeze evidence (region heat
   // state words) and its COLD term T, grouped by tier.
-  const heatStates = options.includes("--heatState"), R = frame.heat.regions, HW = 18;
+  const heatStates = options.includes("--heatState"), R = frame.heat.regions, HW = UNIFORM_REGION_HEAT_STATE_WORDS;
   const heatRead = heatStates ? device.createBuffer({ label: "Tier budget heat state", size: 4 * HW * R + 32 * R, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : undefined;
   const readHeatState = async () => {
     const encoder = device.createCommandEncoder();
@@ -608,6 +609,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
     encoder.copyBufferToBuffer(frame.heat.counts.buffer, frame.heat.counts.offset, read, READ.heat, 16);
     frame.pagePool.encodeReceipt(encoder, read, READ.pool);
     encoder.copyBufferToBuffer(frame.heat.tiers, 0, read, READ.tiers, 4 * frame.heat.regions);
+    encoder.copyBufferToBuffer(frame.heat.tiers, 4 * UNIFORM_REGION_HEAT_STILL_WORD(frame.heat.regions), read, READ.still, 4 * UNIFORM_REGION_HEAT_STILL_WORDS);
     device.queue.submit([encoder.finish()]);
     await read.mapAsync(GPUMapMode.READ); const u = new Uint32Array(read.getMappedRange().slice(0)); read.unmap();
     return u;
@@ -656,6 +658,8 @@ var<workgroup> sums:array<atomic<u32>,16>;
       tiles: { h: all[READ.work / 4], coarse: all[READ.work / 4 + 1], residentPages: all[READ.work / 4 + 7], probedH: u[19], probedCoarse: u[20] },
       pool: { resident: status[S.resident], free: status[S.free], claimed: status[S.claimed], fatal: uniformPagePoolFatalMessage(frame.pagePool.layout, status) ?? undefined },
       regions: { cold: all[READ.heat / 4], warm: all[READ.heat / 4 + 1], hot: all[READ.heat / 4 + 2], free: all[READ.heat / 4 + 3] },
+      // coldSurface "still": the liquid's extent along gravity (regions), this frame's fastest travel (h a step), and the frames it reached a region.
+      still: { extentRegions: all[READ.still / 4], travel_h: new Float32Array(all.buffer, all.byteOffset + READ.still + 12, 1)[0], breachFrames: all[READ.still / 4 + 4] },
       phi: { source: phiSource, measured, totals, solverCells: stats.volumeCellSum, represented: stats.representedVolumeCellSum, rawDrift: stats.rawVolumeDrift,
         preTotals, throatU, rightMaxU, negativeOwners, points, pointPhi, centreWidth: u[38], host: hostExtents(), extents: Object.fromEntries(probes.map((p, i) => [p.key, [39, 40, 41, 42].map(k => all[W * i + k])])), lowCorner: f[30], boxOriginX: u[31] },
       particles: solver.narrowBandFlipInfo?.particles, line,

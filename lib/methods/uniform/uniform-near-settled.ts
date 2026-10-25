@@ -78,7 +78,8 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   the fine pressure's resolution (r h) never reaches. "still" is "warm"
  *   except that a surface whose omitted transport is provably round-off (a
  *   step's within 256 f32 ulps of the hydrostatic balance, its sum since
- *   the last trigger within 0.01 h) may stay COLD.
+ *   the last trigger within 0.01 h) and no neighbouring region is moving
+ *   (not COLD) may stay COLD.
  * - solidContact: "liquid" holds a static solid's cut tiles, and their
  *   neighbours, at h wherever liquid can meet them; "surface" only where the
  *   surface census already holds the cut tile at h (submerged cut tiles run
