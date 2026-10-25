@@ -3,12 +3,55 @@
 Written by the lane C agent; read by Peter and the coordinator. The format and rules are in `../tiered-adaptivity-handoff-2026-10-25.md` §6. Newest entry first.
 
 ## Status
-- **Tip:** e73cbfa0 (C3/C4, construction locking and measurement tooling ready)
-- **Doing now:** Candidate43 letters cost complete; seep is last queued pair (PID 83841)
-- **Next:** Complete C1 basic scenes; hold C5 and wide ABBA while core A/B proofs progress
+- **Tip:** bd51cedd (parked experiment, not READY); earlier C3/C4/tooling remain READY
+- **Doing now:** C5 measurement complete, Phase 1 gate fails; deposit experiment parked after clean cost; no C GPU jobs
+- **Next:** Coordinator review of READY tranches; next exact grid-work target; wide/16h costs wait for dependencies
 - **Waiting on:** Exclusive timing slots; A acceptance repair; B1/B2 storage/work separation; coordinator review of ready commits
 
 ## Log
+
+### 2026-10-25 · PROGRESS · zero-atomic candidate parked after clean cost
+- Clean retry completed against immutable 77c275dc: letters 100 steps, frames 40–100, controller off, dt 1/60. CPU entry/completion guards cleared and there were no GPU errors. Paired median saving is only **0.072042 ms**; mean wall 36.8300 → 36.6153 ms, 35/61 candidate-faster pairs.
+- Work histories diverge from frame 36, so this tiny single-run result does not establish a useful isolated deposit improvement. Exploratory matching-history frames 20–35 instead show 0.111897 ms added cost; that is outside the acceptance window and is not a separate performance claim. **bd51cedd is parked, not READY. No full bundle was run.**
+- Its focused GPU proof remains PASS 4/4. Durable clean report: `deposit-zero-letters-retry1.{json,log}`, verdict and process evidence. The original CPU-contaminated attempt remains explicitly invalid. All C GPU jobs and controllers have completed; no C full suite was repeated.
+- Existing READY tranches remain: C3 **77c275dc**, C4 **efda8410**, construction locking **49c20310**, and measurement tooling **d905ea99 / 62c72a70 / 9025d008 / e73cbfa0**. C5 has measured current-default scaling failure; wide A1 and 16h costs remain dependent work.
+
+### 2026-10-25 · PROGRESS · deposit timing rejected for external CPU overlap
+- The first bd51 incremental letters run completed without GPU errors, but a foreign UI agent's full suite started during it (Node6714 was45s old in the after-run process snapshot). The wrapper rejected the sample. Its apparent added1.032833ms is **not valid performance evidence** and cannot justify acceptance or rejection.
+- Original JSON/log/process evidence remains intact with `deposit-zero-letters-verdict.json`. One retry, coordinator9799 and name `deposit-zero-letters-retry1`, waits outside the GPU lock until that suite exits. No foreign process was touched and no full gate bundle is queued.
+- C5 completed before this later suite and retains its process checks. New deposit focused GPU4/4 and the previously READY tranches remain separate from this timing rejection.
+
+### 2026-10-25 · MILESTONE · current-default length ladder measured; Phase 1 gate FAIL
+- All four adjacent pairs complete on immutable c8b25c39, coldSurface:warm and volumeControlSeconds:0.1 defaults, dt1/60,180 steps/arm,61 measured frames120–180. No GPU errors; source/default/clock validation passes. Durable `c5-c8b25c39/summary.{json,log}` and scene reports preserve the evidence.
+- Paired added ms per doubling: **rest 128→256: 0.232167** (repeat **0.181875**), **rest 256→512: 0.474875**, **cold 128→256: 0.075750**, **cold 256→512: 0.341917**. The small rest case straddles the 0.2 ms target; both 256 doublings exceed it. C5 is not an accepted Phase1 milestone.
+- Final particles/fine/band are zero. Rest retains equal COLD/WARM halves; the nominal cold fixture actually ends with 0 COLD and 32/64/128 WARM regions under these defaults. This is measured current-default behavior, not proof of fully frozen cold scaling.
+- Incremental deposit cost now follows under the exclusive runner after a protected immutable bd51 archive. Its focused GPU4/4 proof remains good; full bundle will only follow a useful cost result. No full suite repeated.
+
+### 2026-10-25 · PROGRESS · warm-default rest scaling misses Phase 1 target
+- Immutable c8 warm defaults, 180 steps/arm and frames120–180: rest128→256 paired slope **+0.232167 ms**, means7.3634→7.5809; rest256→512 **+0.474875 ms**, means8.2599→8.6766. Both exceed the ≤0.2ms/doubling target; the first is borderline and has one repeat scheduled. This is a baseline finding, not a C5 PASS.
+- Both sizes have zero particles/fine/band at the final frame. The second pair ends with64COLD+64WARM versus128COLD+128WARM, so the remaining scaling cost is grid work. No GPU errors; durable `c5-c8b25c39/rest-length-{128,256}.json` plus process evidence.
+- Cold128 entry detected an external unit suite after acquiring the lock, released with75, and now waits outside the GPU lock. No C full suite was launched. Cost controller97278 replaces90523 to also protect source archive creation with a check lock; it still validates completed C5 before any incremental-cost launch.
+
+### 2026-10-25 · PROGRESS · exact deposit GPU proof passes; remaining ladder resumed
+- Missing reservoir water was traced to the collector's stale 6-bit page decode after the shared ABI moved to 8 bits. C identified the exact mismatch; root owns the one-line fix/regression, with B's extraction proof. No lane C renderer edit was made.
+- Root released GPU work after verification. Remaining C5 driver 88428 skips the completed rest128→256 result (**+0.232167 ms**, borderline over the 0.2 ms target), runs the other three adjacent pairs, then repeats that borderline pair. Source remains immutable c8b25c39 warm defaults.
+- **bd51cedd focused GPU tests PASS 4/4, zero skips/failures, 3.55s**: production zero guards preserve old atomic sums and independent integer/modular expectations; poisoned-storage range check also passes. Durable `deposit-zero-focused-gpu.log`; prior typecheck only the two baseline import errors. No full suite repeated.
+- Delayed cost coordinator 90523 validates all C5 outputs, then runs one isolated letters100/from40 comparison against solver-identical 77c275dc before deciding whether the new optimization merits a full bundle. No additional timing request is queued until C5 finishes. Existing READY tranches remain separate; bd51 is not READY yet.
+
+### 2026-10-25 · PROGRESS · resumed after reload resolved missing fluid
+- The user reports reload restored fluid. Read-only audit found no confirmed renderer defect; C made no renderer edits. All C jobs were stopped while diagnosing, before any length measurement or new GPU fixture started.
+- Root released work again. C5 current-main warm-default ladder resumes with coordinator 46461; the exact zero-atomic GPU/storage fixture is queued as 45447. At most two C jobs, no full suite rerun.
+- New candidate **bd51cedd** commits only `pbAdd`'s zero integer atomic guards and the focused GPU fixture. It is not READY: GPU equivalence, registered bundle and incremental cost are pending. The already-ready C3/C4/tooling evidence remains separate. Incremental cost will use existing immutable 77c275dc (identical solver source to e73cbfa0 before this change); the bundle uses c8b25c39 merge-base.
+
+### 2026-10-25 · MILESTONE · candidate43 basic costs complete
+- Seep completed 100 steps/arm, measuring frames 40–100: median paired candidate added cost **0.957333 ms**; mean wall 40.1349 → 40.7179 ms, 24/61 candidate-faster pairs. All final field hashes differ; no GPU errors. Source hashes, dt 1/60, controller 0 and complete horizons agree across all four scene reports.
+- Consolidated paired added costs (ms): rest **−0.375126**, splash **+0.040458**, letters **+0.052292**, seep **+0.957333**. These are single-run evolved-workload comparisons, not isolated kernel savings. Durable `final-43b1aa3c/basic-cost-summary.{json,log}` links the evidence. A's failed seep window/conservation acceptance remains unresolved; this is not final A1/default readiness.
+- Root redirected C5 to the immutable **c8b25c39 warm defaults**, making it independent of the unaccepted still candidate. The unstarted 43 length waiter was canceled before any benchmark process existed. New coordinator 25080 runs rest/cold 128→256→512, 180 steps and frames 120–180, with one exclusive timing waiter at a time. Output is durable `c5-c8b25c39/`. Wide43 ABBA remains held.
+
+### 2026-10-25 · PROGRESS · timing queue releases idle GPU; exact deposit check prepared
+- Replaced the unstarted seep lock chain while a foreign CPU suite was active. The driver now waits outside the GPU lock; a CPU race after acquiring it releases the lock with exit 75 and retries. No foreign process was interrupted. Coordinator 20107 now runs seep, then the released C5 ladder with one timing waiter at a time. Wide ABBA remains held.
+- The narrow `pbAdd` candidate is prepared. Focused CPU storage cases pass (2 pass, 2 GPU skips); typecheck has only the two baseline imports. A dedicated GPU fixture compares production guards against unconditional atomics across zero operands, independent momentum/weight effects, signed cancellation, rounding boundaries and modular overflow, including an independent integer oracle. It is queued under check mode; no new optimization readiness or saving is claimed.
+- Existing C3 `77c275dc`, C4 `efda8410` and tooling READY evidence remains unchanged. No full suite was launched.
 
 ### 2026-10-25 · COORDINATION · next exact C3 deposit candidate
 - C will edit only `pbAdd` in `uniform-particle-brick.wgsl.ts`: keep the existing round/cast, then independently skip momentum or weight atomicAdd when its integer operand is exactly zero. B confirms no overlapping deposit/scatter edits. No allocation, dispatch, quantization, classification or nonzero sum changes.

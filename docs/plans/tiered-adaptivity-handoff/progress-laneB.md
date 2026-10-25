@@ -3,12 +3,52 @@
 Written by the lane B agent; read by Peter and the coordinator. The format and rules are in `../tiered-adaptivity-handoff-2026-10-25.md` §6. Newest entry first.
 
 ## Status
-- **Tip:** 2b6f32be (codex/tiers-lane-b)
-- **Doing now:** c628c773 storage tranche ready; independent pressure-cleanup 58c62618 gate bundle queued; B1 actual-frame RHS proof queued.
-- **Next:** Complete the same-frame RHS comparison; then replace native work under an explicit compact hierarchy contract.
-- **Waiting on:** One focused GPU rerun and the exact58 default bundle queued. Reusing completed full unit evidence; B0 target and B1 hydrostatic speed threshold remain unmet.
+- **Tip:** 509e6719 (codex/tiers-lane-b)
+- **Doing now:** Bounded pressure cleanup ready; compact physical row/residual proof completed. Active comparison remains opt-in.
+- **Next:** Compare active compact member residuals while retaining the current PB hierarchy; analytic PB tail/halo replacement is still required before whole-page removal.
+- **Waiting on:** No owned GPU jobs. B1 still needs analytic PB tail/halo replacement, whole-page list removal, and repeat-noise gates; B0 target and hydrostatic speed threshold remain unmet.
+
 
 ## Log
+
+### 2026-10-25 · PROGRESS · open seep active residual comparison complete
+- Both 60-frame probes completed without validation/fatal errors and retained **550 members**, no unsupported rows, exact diagonal agreement, and direct-row contribution error at most **2.32e-7**.
+- Frame60 active/control: right volume **0.178520 / 0.173466 L** (+2.91%), jet front **2.5575 / 2.5575 m**, max speed **3.81289 / 3.76140 m/s** (+1.37%), total liquid difference **0.00137%**. These are correctness probes, not timing measurements.
+- **Not an equivalence gate:** at frame30 both had zero members, yet right volume already differed by −6.26% and speed by −3.28%. A single pair cannot separate instance variation from the compact operator. No repeat-noise or B1 acceptance pass is claimed. Both exact JSON/log pairs are retained as `bulk-compact-{control,active}-seep60`.
+- Next implementation boundary is explicit: replace the whole-member pages' PB down/up work and neighbour halo readers, preserving the all-held 8h/16h/32h tail. The existing PB operator has native internal links and 4h sweeps, so this is a preconditioner change requiring convergence gates, not finite-cycle identity. No jobs remain queued; no implementation merged.
+
+### 2026-10-25 · MILESTONE · opt-in active member residual 509e6719
+- The compact operator now evaluates one member residual from its 96 boundary subfaces; the native residual variant skips member arithmetic and mean reduction. The compact initial norm uses the same direct row. Existing PN row construction/storage and PB down/up work remain, with an explicit 64-way PB RHS publication. This is a bounded active comparison, not B1 completion.
+- Strengthened GPU fixture passed **1/1**, including varying native corrections and constant member corrections against the independent CPU constrained operator. Types have only the known two TS2307 errors. The first real initialization rejected a constant NaN in a failure branch; 509e6719 records unsupported rows as an integer infinite residual magnitude instead. The failure log is retained.
+- Active closed35 passed with **552 members**, **zero unsupported**, zero drift. Speed **0.0208365172 m/s** versus retained-row control **0.0208358299** (difference **6.87e-7 m/s**); residual **0.131043121** versus **0.131043151**. The 1e-5 m/s hydrostatic acceptance threshold remains unmet in both.
+- Open seep60 control and active probes are queued with identical strict selection and volume control off. No timing or repeat-noise equivalence claim. Logs: `bulk-compact-residual-test-final.log`, `types-compact-residual.log`, `bulk-compact-residual-closed-final.{log,json}`, then `bulk-compact-{control,active}-seep60.{log,json}`.
+
+### 2026-10-25 · COORDINATION · bounded active compact residual preparation
+- Lane B will edit the pressure arena, compact row module and focused fixture/probe. A separate opt-in residual pass will evaluate member rows from 96 boundary subfaces; the native residual pass will skip members. The result will still be scattered into the current PB RHS because native neighbour halos and down/up sweeps consume that storage.
+- This is an active-operator comparison step, not B1 completion or a claim that whole pages have left 4h work. Removing that work still requires the analytic PB tail/halo replacement and a separately gated preconditioner change.
+
+### 2026-10-25 · MILESTONE · actual-frame compact physical rows cf852e34
+- Direct boundary RHS comparison passed on closed35 with **552 selected regions**: maximum absolute difference **480**, normalized by incident-face contribution scale **1.36815e-7**. Held-wall difference **1.52588e-5**, normalized **3.79866e-15**. Capacity sum **35,328**, no unsupported region.
+- Compact physical PN fixture ddb80d2d passed **1/1**. The real pre-solve compact row capture at cf852e34 also passed: **552 rows**, **zero unsupported**, exact diagonal agreement; RHS absolute difference **696.2534**, contribution-normalized **1.73647e-7**. All outputs finite. Types have only the known two TS2307 errors.
+- Diagnostics remain opt-in and leave active solver behavior unchanged: drift **0**, max speed **0.0208358 m/s**, accepted residual **0.131043**. Hydrostatic speed acceptance remains unmet. No full suite rerun.
+- Evidence: `bulk-compact-rows-test.log`, `bulk-actual-rhs-closed.{log,json}`, `bulk-compact-actual-closed.{log,json}`, `types-compact-actual.log` in lane artifacts.
+
+### 2026-10-25 · PROGRESS · reservoir rendering fix verified; focused tier checks resumed
+- Paused tier checks twice while the coordinator investigated invisible reservoir water, canceling only owned not-started jobs. The second report reproduced: the surface collector decoded the page word as 6 bits per axis, while current storage uses 8. Shared umBlockPage fixes the mismatch.
+- Main solver with the corrected water pipeline produces identical initialization window/full counts: **795,162 vertices / 132,529 cubes**, identical bounds reaching the **0.96 m** waterline. After one step, production windows produce **795,402 finite vertices**, no GPU validation errors. Durable evidence is in `artifacts/lane-b-2026-10-25/render-repro/` and the coordinator's `artifacts/fluid-visibility-fix/`; the latter README explains the naive full scan's invalid post-recenter origin. Coordinator verified the browser through 9.4 s and owns the separate renderer fix.
+- Resumed exactly two focused checks at ddb80d2d: closed35 strict actual-frame RHS comparison and the compact physical PN GPU fixture. No full unit suite, implementation merge, active compact solve, or expanded B1 acceptance claim.
+
+### 2026-10-25 · READY TO MERGE · independent pressure cleanup 58c62618
+- **Merge candidate: 58c62618**, directly after c628c773. Removes the unused legacy pressure hierarchy and unused root planes/continuation plumbing while retaining the live pressure, RHS, minimum and frozen fields. Coordinator read-only review found no arithmetic change.
+- Exact isolated default bundle **c628c773 → 58c62618 PASSED** with volume control off: splash **70 × 2**, seep **60 × 3**, letters **60 × 3**. Worst ratios **0.159744 / 0.365525 / 0.212478**; every metric has zero over-tolerance windows. Whole-process locking covered construction. A render-investigation pause interrupted the scheduler after seep; only the remaining letters gate resumed.
+- Measured marginal storage **958.3 KiB/block**, saving **85.309 KiB/block** relative to c628. Two-pool three-step smokes passed with no fatal/errors. Required checks reused: **1,224 passed, 135 skipped, 0 failed** (`unit-pressure.log`); types only the known two TS2307 errors.
+- Durable evidence: `artifacts/lane-b-2026-10-25/bundle-pressure-default.log`, `b0-pressure-default-{splash,seep,letters}.log`, `perblock-pressure.txt`, `pressure-smoke-{226,400}.log`, and `unit-pressure.log`, in the lane worktree. Overall B0 well-under-0.5-MiB target remains unmet. This is storage/correctness readiness; newer B1 work and paired-cost claims are excluded. Lane B has not merged anything.
+
+### 2026-10-25 · PROGRESS · resumed after render investigation
+- Paused tier work and canceled only owned not-started jobs for the reported invisible fluid. The active exact58 seep gate finished safely: **PASS, 60 × 3**, worst ratio **0.365525** (particles). Splash had already passed **70 × 2**, worst ratio **0.159744**. User reported fluid returned after reload; read-only scene/publication audit found no defect and no speculative patch was made.
+- Resumed only the remaining exact58 default letters gate, against c628c773 with identical volume control off, plus the same-frame RHS closed35 proof at 2b6f32be. No duplicate splash/seep run or new full suite.
+- CPU correction-hierarchy reference14888716 is incorporated as **f9660ba3**, reusing coordinator evidence: five focused tests passed; types only the two known errors. Analytic PB boundary baking agrees at scales .5/.375/.28125, but the current 4h down/up sweeps invalidate naive residual splitting and eight-child mean prolongation. A replacement preconditioner requires its own convergence gates.
+- Unhooked physical PN compact-row module and independent GPU fixture are drafted. They consume direct boundary RHS and enumerate96boundarysubfaces; they do not yet change active dispatch or establish B1 completion.
 
 ### 2026-10-25 · PROGRESS · independent pressure tranche and actual RHS proof
 - Package **58c62618** independently of B1: exact snapshots c628c773 → 58c62618 now run one full default registered bundle, `b0-pressure-default`, volume control off and construction locked. Existing two-pool memory/smoke evidence (958.3 KiB/block), required full-unit evidence, and c628 default/compact bundles are reused. No new full suite or duplicate snapshot.
