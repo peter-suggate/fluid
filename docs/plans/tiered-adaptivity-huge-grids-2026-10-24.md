@@ -1,5 +1,7 @@
 # Three-tier adaptivity: h / 4h / 16h storage and work for huge grids, 2026-10-24
 
+> **2026-10-25:** the work has been handed to new agents. Current state, rules, lanes and progress are in `tiered-adaptivity-handoff-2026-10-25.md` and `tiered-adaptivity-handoff/`.
+
 Peter: "double down on adaptivity to ensure extremely high fidelity physics and fluid surface treatment at areas of high heat and much less elsewhere in order to save compute … support extremely large (high resolution) grids that are mostly 4h or 16h with only h at certain areas. Both the memory and compute should follow this pattern with enough memory buffer to allow for some growth."
 
 Test scene: `reservoir-seep` (`lib/core/reservoir-seep-scene.ts`, another agent, uncommitted). A deep reservoir on the left and an empty catch chamber on the right, with an 8-cell wall between them. The wall has a one-cell (h) throat with rounded mouths. At 5 mm the lattice is 512×256×64; `buildAt` keeps the throat at h at any cell size.
