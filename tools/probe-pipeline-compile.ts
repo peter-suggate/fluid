@@ -8,8 +8,9 @@
  * names one, so every compile is cold.
  *
  * env WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/probe-pipeline-compile.ts
- *   --dump=<dir> [--module=<regex>] [--entry=<regex>] [--limit=N] [--source=<sha>:<file.wgsl>]
- * --source replaces the dumped WGSL of module <sha> with <file.wgsl> (an edited copy). */
+ *   --dump=<dir> [--module=<regex>] [--entry=<regex>] [--limit=N] [--source=<sha>:<file.wgsl>] [--parallel=N]
+ * --source replaces the dumped WGSL of module <sha> with <file.wgsl> (an edited copy).
+ * --parallel keeps N compiles in flight (default 1) and also reports the wall. */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,10 +21,10 @@ import { createProcessRetainedDawnGPU, nodeDawnOptions } from "../lib/harness/no
 
 const options = process.argv.slice(2);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
-for (const a of options) assert.ok(/^--(?:dump|module|entry|limit|source)=.+$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^--(?:dump|module|entry|limit|source|parallel)=.+$/.test(a), `Unknown option: ${a}`);
 const dump = resolve(option("dump") ?? assert.fail("--dump=<dir> is required"));
 const moduleFilter = new RegExp(option("module") ?? ""), entryFilter = new RegExp(option("entry") ?? "");
-const limit = Number(option("limit") ?? Infinity);
+const limit = Number(option("limit") ?? Infinity), parallel = Number(option("parallel") ?? 1);
 const sources = new Map(options.filter(a => a.startsWith("--source=")).map(a => { const [sha, file] = a.slice(9).split(":"); return [sha!, file!]; }));
 process.env.FLUID_METAL_SHADER_CACHE ??= mkdtempSync(join(tmpdir(), "fluid-compile-probe-"));
 
@@ -41,23 +42,28 @@ device.addEventListener("uncapturederror", e => console.error(e.error.message));
 console.log(JSON.stringify({ dump, cache: process.env.FLUID_METAL_SHADER_CACHE, pipelines: chosen.length, of: all.length }));
 
 const modules = new Map<string, GPUShaderModule>();
-let total = 0;
 for (const p of chosen) {
-  let module = modules.get(p.sha!);
-  if (!module) {
-    const code = readFileSync(sources.get(p.sha!) ?? join(dump, `${p.sha}.wgsl`), "utf8");
-    module = device.createShaderModule({ code, label: p.module });
-    for (const m of (await module.getCompilationInfo()).messages) if (m.type === "error") console.log(`${m.lineNum}: ${m.message}`);
-    modules.set(p.sha!, module);
-  }
-  const start = performance.now();
-  try {
-    await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: p.entryPoint!, constants: p.constants } });
-    const ms = performance.now() - start; total += ms;
-    console.log(JSON.stringify({ module: p.module, entryPoint: p.entryPoint, ms: Math.round(ms), constants: p.constants }));
-  } catch (error) {
-    console.log(JSON.stringify({ module: p.module, entryPoint: p.entryPoint, error: String((error as Error).message).slice(0, 400) }));
-  }
+  if (modules.has(p.sha!)) continue;
+  const code = readFileSync(sources.get(p.sha!) ?? join(dump, `${p.sha}.wgsl`), "utf8");
+  const module = device.createShaderModule({ code, label: p.module });
+  for (const m of (await module.getCompilationInfo()).messages) if (m.type === "error") console.log(`${m.lineNum}: ${m.message}`);
+  modules.set(p.sha!, module);
 }
-console.log(JSON.stringify({ total_ms: Math.round(total) }));
+let total = 0, next = 0;
+const wallStart = performance.now();
+const compileNext = async (): Promise<void> => {
+  for (let i = next++; i < chosen.length; i = next++) {
+    const p = chosen[i]!, start = performance.now();
+    try {
+      await device.createComputePipelineAsync({ layout: "auto", compute: { module: modules.get(p.sha!)!, entryPoint: p.entryPoint!, constants: p.constants } });
+      const ms = performance.now() - start; total += ms;
+      console.log(JSON.stringify({ module: p.module, entryPoint: p.entryPoint, ms: Math.round(ms), constants: p.constants }));
+    } catch (error) {
+      console.log(JSON.stringify({ module: p.module, entryPoint: p.entryPoint, error: String((error as Error).message).slice(0, 400) }));
+    }
+  }
+};
+await Promise.all(Array.from({ length: Math.max(1, parallel) }, compileNext));
+const wall = performance.now() - wallStart;
+console.log(JSON.stringify({ total_ms: Math.round(total), wall_ms: Math.round(wall), parallel }));
 device.destroy(); process.exit(0);
