@@ -7,7 +7,8 @@
  * hold's limit (counted from the hold, or from construction without --hold).
  * env WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/probe-scale-ladder.ts
  *   --cell=0.0025 [--width=2] [--depth=0.5] [--pool=<blocks>] [--steps=10] [--budget-s=150]
- *   [--hold=/private/tmp/claude-501/fluid-gpu-run.sh [--hold-mode=timing]] [--values={...}] [--out=artifacts/scale-ladder/X.json]
+ *   [--hold=/private/tmp/claude-501/fluid-gpu-run.sh [--hold-mode=timing]] [--values={...}] [--tiers=FILE.json] [--out=artifacts/scale-ladder/X.json]
+ * --tiers: a JSON file of fluid.tiers fields over the scene's (e.g. {"start":"4h"}).
  * --hold builds the solver outside the shared GPU runner and takes it (check, or timing) for the
  * steps; without it, run the whole probe under the runner. --plan evaluates the host-side
  * limits (page window, residency, lattice address and block grid, block count, memory)
@@ -23,7 +24,7 @@
  * label, and the report's medians); the probe then waits out the trace cadence
  * before each sampled step. */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolveMethodValues, type MethodParamValues } from "../lib/core/method-contract";
@@ -60,13 +61,15 @@ const definition = { ...base, buildAt: (l: { cellSize_m: number }) => createRese
 const scene = structuredClone(sceneDocumentAtLattice(definition, { cellSize_m: cell }).scene);
 scene.duration_s = Math.max(scene.duration_s, (steps + 1) * scene.numerics.fixedDt_s);
 if (pool !== undefined) scene.fluid.pagePool = { ...scene.fluid.pagePool, blocks: pool };
+const tiersFile = option("tiers");
+if (tiersFile !== undefined) scene.fluid.tiers = { ...scene.fluid.tiers, ...JSON.parse(readFileSync(resolve(tiersFile), "utf8")) };
 const quality = base.methodProfile!.quality;
 const values = resolveMethodValues(method, quality, { ...method.appDefaults, timeStep: "scene", ...base.methodProfile!.overrides, ...extra });
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 const lattice = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER), wallHigh = 16 * Math.floor(sceneLatticeDimensions(scene)[0] / 32);
 const blocks = scene.fluid.pagePool?.blocks ?? 0;
 const header = { tag, cell_m: cell, widthScale, depthScale, lattice, boxCells: lattice[0] * lattice[1] * lattice[2],
-  boxPages: lattice.map(n => Math.ceil(n / 32)), poolBlocks: blocks, dt, values: extra };
+  boxPages: lattice.map(n => Math.ceil(n / 32)), poolBlocks: blocks, dt, values: extra, tiers: scene.fluid.tiers };
 console.log(JSON.stringify(header));
 
 interface Failure { phase: string; message: string; where?: string; numbers: number[]; stack?: string }

@@ -1,4 +1,4 @@
-import { UNIFORM_PAGE_WINDOW } from "./uniform-lattice-address";
+import { uniformBlockWordPage, uniformTablePageWord } from "./uniform-window-address";
 import { UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 
 /** Host twin of the block-grid nearest-source pyramid
@@ -52,7 +52,7 @@ const log2 = (edge: number): number => 31 - Math.clz32(edge);
 interface Cell { readonly block: number; readonly page: Vec3; readonly local: Vec3; readonly edge: number; readonly index: number }
 function levelCell(pool: UniformExtrapolationPool, index: number, edge: number): Cell {
   const k = log2(edge), block = index >>> (3 * k), l = index & ((1 << (3 * k)) - 1), r = pool.records[block]!;
-  return { block, page: [r & 63, (r >>> 6) & 63, (r >>> 12) & 63], local: [l & (edge - 1), (l >> k) & (edge - 1), l >> (2 * k)], edge, index };
+  return { block, page: uniformBlockWordPage(r), local: [l & (edge - 1), (l >> k) & (edge - 1), l >> (2 * k)], edge, index };
 }
 /** tapTexel: the cell of level `edge` at q seen from block home, or -1. */
 function tapCell(pool: UniformExtrapolationPool, home: number, page: Vec3, q: Vec3, edge: number): number {
@@ -223,7 +223,7 @@ export function uniformExtrapolationRun(pool: UniformExtrapolationPool, root: Un
  * takes the zero-weight taps across the cell plane the face lies on, each
  * zero factor floored to 2^-10. */
 export function uniformExtrapolationFarValue(pool: UniformExtrapolationPool, root: UniformExtrapolationLevel, point: Vec3, axis: number): number {
-  const base = [0, 0, 0], fraction = [0, 0, 0], w = UNIFORM_PAGE_WINDOW - 1;
+  const base = [0, 0, 0], fraction = [0, 0, 0];
   for (let a = 0; a < 3; a++) { let q = f(f(f(point[a]!) / 4) - 0.5); if (a === axis) q = f(q - 0.5); base[a] = Math.floor(q); fraction[a] = f(q - Math.floor(q)); }
   let sum = 0, total = 0;
   for (let pass = 0; pass < 2 && total <= 0; pass++) for (let k = 0; k < 8; k++) {
@@ -232,7 +232,7 @@ export function uniformExtrapolationFarValue(pool: UniformExtrapolationPool, roo
     const floored = side.map(value => Math.max(value, 2 ** -10));
     const weight = f(f(floored[0]! * floored[1]!) * floored[2]!);
     const t = [base[0]! + bit[0]!, base[1]! + bit[1]!, base[2]! + bit[2]!];
-    const b = pool.table[((t[0]! >> 3) & w) | (((t[1]! >> 3) & w) << 6) | (((t[2]! >> 3) & w) << 12)]!;
+    const b = uniformTablePageWord(pool.table, t[0]! >> 3, t[1]! >> 3, t[2]! >> 3);
     if (!stored(pool, b)) continue;
     const cell = 512 * b + ((t[0]! & 7) | ((t[1]! & 7) << 3) | ((t[2]! & 7) << 6));
     if (!(root.mask[cell]! & (1 << axis))) continue;

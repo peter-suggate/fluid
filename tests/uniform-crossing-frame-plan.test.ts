@@ -10,6 +10,9 @@ test("frame crossing domain shares exact requests and bounded neighbourhoods thr
 @group(0) @binding(0) var<storage,read_write> bins:array<atomic<u32>>;
 @group(0) @binding(1) var<storage,read> topology:array<u32>;
 const UM_TILES:u32=${tiles}u;const NB_REUSE_REGIONS:u32=${regions}u;const NB_REUSE_CAPACITY:u32=${regions}u;
+const NB_REUSE_NO_SLOT:u32=0xffffffffu;
+fn nbReuseSlot(region:u32)->u32{return select(NB_REUSE_NO_SLOT,region,region<NB_REUSE_CAPACITY);}
+fn nbReuseRelease(region:u32){}
 const NB_SURFACE_TILES:u32=0u;const NB_ACTIVITY_TARGET:u32=UM_TILES;
 const NB_BAND_MASK:u32=2u*UM_TILES;const NB_BAND_REACH:u32=4u*UM_TILES;const NB_FRAME_PLAN:u32=${plan}u;
 const NB_REUSE_ALLOWED:u32=5u*UM_TILES;const NB_REUSE_NEAREST_VALID:u32=6u*UM_TILES;

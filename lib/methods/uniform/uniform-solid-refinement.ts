@@ -26,14 +26,17 @@ fn umCoarseSolidFaceExact(t:u32,axis:u32)->bool{
 // A closed page has no tile record. The adjacent stored tile owns all
 // sixteen low-face apertures, so absence of a neighbour is not absence of
 // geometric evidence. Unknown/air pages still cannot certify a wall.
+// Its slot (the word in its boundary row's w; umSolidSlotOfWord): none is
+// every face whole, the slots running out the geometry's (unknown here).
 fn umCoarseSolidLowFaceExact(t:u32,axis:u32)->bool{
- let row=${recordCount}u+23u*UM_TILES+UM_TILES/64u+1u+61u*t+49u+4u*axis;
+ let word=solidRecord[${recordCount}u+4u*UM_TILES+2u*t+1u].w;if(!(word>0.0)){return true;}if(word>=16777216.0){return false;}
+ let row=${recordCount}u+8u*UM_TILES+UM_TILES/64u+2u+77u*(u32(word)-1u)+16u+49u+4u*axis;
  let face=solidRecord[row].x;if(face!=0.0&&face!=0.5&&face!=1.0){return false;}
  for(var i=0u;i<4u;i++){if(any(solidRecord[row+i]!=vec4f(face))){return false;}}
  return true;
 }
 fn umSolidBodyContact(t:u32)->bool{
- return solidRecord[${recordCount}u+20u*UM_TILES+2u*t+1u].z>0.5;
+ return solidRecord[${recordCount}u+4u*UM_TILES+2u*t+1u].z>0.5;
 }
 // Static detail policies may coarsen submerged geometry. Rigid traction and
 // displaced-volume exchange only exist on h owners, including at rest.
@@ -59,7 +62,7 @@ fn umSolidGeometryExact(t:u32)->bool{
    continue;
   }
   if(!umCoarseSolidFaceExact(n,a)){return false;}
-  if(solidRecord[${recordCount}u+20u*UM_TILES+2u*n+1u].z>0.5){return false;}
+  if(solidRecord[${recordCount}u+4u*UM_TILES+2u*n+1u].z>0.5){return false;}
  }
  return true;
 }

@@ -9,6 +9,9 @@ test("crossing snapshot emits the exact lists including regions beyond its retai
   const module=device.createShaderModule({code:`
 @group(0) @binding(0) var<storage,read_write> bins:array<atomic<u32>>;
 const NB_REUSE_REGIONS:u32=8u;override NB_REUSE_CAPACITY:u32=2u;
+override NB_REUSE_SCAN:u32=NB_REUSE_CAPACITY;const NB_REUSE_NO_SLOT:u32=0xffffffffu;
+fn nbReuseSlot(region:u32)->u32{return select(NB_REUSE_NO_SLOT,region,region<NB_REUSE_CAPACITY);}
+var<workgroup> nbReuseSlotShared:u32;fn nbReuseSlotUniform(region:u32,lane:u32)->u32{if(lane==0u){nbReuseSlotShared=nbReuseSlot(region);}return workgroupUniformLoad(&nbReuseSlotShared);}
 const NB_BAND_TILES:u32=512u;const NB_BAND:u32=0u;const NB_BAND_REACH:u32=4u;
 const NB_BAND_SEARCH:u32=516u;const NB_BAND_DISTANCE:u32=1028u;const NB_BAND_MASK:u32=1540u;
 const NB_REUSE_ALLOWED:u32=2600u;const NB_REUSE_NEAREST_VALID:u32=2610u;const NB_REUSE_NEAREST_FLAGS:u32=2620u;

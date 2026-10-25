@@ -1,21 +1,36 @@
 /** Bounded exact crossing-mask cache. Payloads survive every borrowed bins
- * bank; metadata is independent of those scratch lifetimes. */
-export function narrowBandReuseLayout(base:number,regions:number,capacity=regions){
+ * bank; metadata is independent of those scratch lifetimes.
+ *
+ * capacity: the payload slots (masks, nearest rows and their validity). Not
+ * slotted, region r's slot is r and regions from capacity have none. Slotted
+ * (slotted, capacity under regions), a region claims a slot (nbReuseClaim)
+ * the first time a search prepares it live, and the frame plan releases it
+ * (nbReuseRelease) when it leaves the plan: only planned regions are ever
+ * searched, so the slots follow the surface. A region without one, the slots
+ * all held, searches afresh (the cache is exact either way). After the frame
+ * plan: a word a region (its slot + 1, 0 none), the free count, the claimed
+ * count, two spare words, then the free stack. */
+export function narrowBandReuseLayout(base:number,regions:number,capacity=regions,slotted=false){
+ if(slotted&&!(capacity>0&&capacity<regions))throw new Error(`A slotted reuse cache needs 1..${regions-1} slots, not ${capacity}`);
  const live=base,control=live+regions,history=control+3;
  // Each history epoch: phi revisions, world xyz, clear validity, then125
  // closure topology words and128binary-openmask words per region.
  // The other bank stays immutable.
  const historyWords=capacity?258*regions:0;
  const allowed=history+2*historyWords,valid=allowed+(capacity?regions:0);
- const metricValid=valid+64*capacity, nearestValid=metricValid+64*capacity;
+ const nearestValid=valid+64*capacity;
  const nearestState=nearestValid+regions, nearestFlags=nearestState+158*capacity;
  const masks=nearestFlags+regions;
- const nearest=masks+128*capacity, metric=nearest+6144*capacity, plane=metric+8000*capacity, regionPlane=plane+384*capacity;
+ // The metric payload went with the arena's redistance (8000 words a region,
+ // never read since), and with it its validity words and the per-tile and
+ // per-region plane records, which nothing read.
+ const nearest=masks+128*capacity;
  // The frame's region work tiers (UniformRegionHeat.tiers words [0, regions)),
  // copied in before each stage that reads them (UniformNarrowBandFlip.syncTiers).
- const tiers=regionPlane+8*capacity;
+ const tiers=nearest+6144*capacity;
  const framePlan=tiers+regions;
- return {base,regions,capacity,live,control,history,historyWords,allowed,valid,masks,metricValid,nearestValid,nearestState,nearestFlags,nearest,metric,plane,regionPlane,tiers,framePlan,metadataWords:masks-base,words:framePlan+5+7*regions-base};
+ const slotMap=framePlan+5+7*regions,slotFree=slotMap+(slotted?regions:0);
+ return {base,regions,capacity,slotted,live,control,history,historyWords,allowed,valid,masks,nearestValid,nearestState,nearestFlags,nearest,tiers,framePlan,slotMap,slotFree,metadataWords:masks-base,words:slotFree+(slotted?4+capacity:0)-base};
 }
 export type NarrowBandReuseLayout=ReturnType<typeof narrowBandReuseLayout>;
 export function narrowBandReuseWGSL(l:NarrowBandReuseLayout){return /* wgsl */`
@@ -39,10 +54,50 @@ const NB_REUSE_REGIONS:u32=${l.regions}u;const NB_REUSE_CAPACITY:u32=${l.capacit
 const NB_REUSE_LIVE:u32=${l.live}u;const NB_REUSE_CONTROL:u32=${l.control}u;
 const NB_REUSE_HISTORY:u32=${l.history}u;const NB_REUSE_HISTORY_WORDS:u32=${l.historyWords}u;
 const NB_REUSE_ALLOWED:u32=${l.allowed}u;const NB_REUSE_VALID:u32=${l.valid}u;const NB_REUSE_MASK:u32=${l.masks}u;
-const NB_REUSE_REGION_PLANE:u32=${l.regionPlane}u;
-const NB_REUSE_PLANE:u32=${l.plane}u;
-const NB_REUSE_METRIC_VALID:u32=${l.metricValid}u;const NB_REUSE_METRIC:u32=${l.metric}u;const NB_REUSE_METRIC_CAPACITY:u32=${l.capacity}u;
 const NB_REUSE_NEAREST_VALID:u32=${l.nearestValid}u;const NB_REUSE_NEAREST_STATE:u32=${l.nearestState}u;const NB_REUSE_NEAREST_FLAGS:u32=${l.nearestFlags}u;const NB_REUSE_NEAREST:u32=${l.nearest}u;
+// The payload slots (narrowBandReuseLayout). A region's slot, or
+// NB_REUSE_NO_SLOT: not slotted, the region itself below the capacity.
+var<workgroup> nbReuseSlotShared:u32;
+const NB_REUSE_SLOTTED:bool=${l.slotted};const NB_REUSE_NO_SLOT:u32=0xffffffffu;
+const NB_REUSE_SLOT_MAP:u32=${l.slotMap}u;const NB_REUSE_SLOT_FREE:u32=${l.slotFree}u;
+// The regions a capacity-bounded launch strides: all of them when slotted.
+const NB_REUSE_SCAN:u32=${l.slotted?l.regions:l.capacity}u;
+fn nbReuseSlot(region:u32)->u32{
+ if(!NB_REUSE_SLOTTED){return select(NB_REUSE_NO_SLOT,region,region<NB_REUSE_CAPACITY);}
+ if(region>=NB_REUSE_REGIONS){return NB_REUSE_NO_SLOT;}
+ return atomicLoad(&bins[NB_REUSE_SLOT_MAP+region])-1u;
+}
+// The same for a workgroup's region, uniform (a search group branches on
+// it before its barriers): lane 0's load, shared.
+fn nbReuseSlotUniform(region:u32,lane:u32)->u32{
+ if(lane==0u){nbReuseSlotShared=nbReuseSlot(region);}
+ return workgroupUniformLoad(&nbReuseSlotShared);
+}
+// A slot for a live region the search prepares (nbPrepareReuse, lane 0):
+// the free stack's top, else the next never claimed. Launches that claim
+// release none (nbReuseRelease runs in the plan's), so a pop that finds the
+// stack empty gives its decrement back and no push races it.
+fn nbReuseClaim(region:u32)->u32{
+ let held=nbReuseSlot(region);if(!NB_REUSE_SLOTTED||held!=NB_REUSE_NO_SLOT){return held;}
+ var slot=NB_REUSE_NO_SLOT;
+ let n=atomicSub(&bins[NB_REUSE_SLOT_FREE],1u)-1u;
+ if(n<NB_REUSE_CAPACITY){slot=atomicLoad(&bins[NB_REUSE_SLOT_FREE+4u+n]);}
+ else{
+  atomicAdd(&bins[NB_REUSE_SLOT_FREE],1u);
+  if(atomicLoad(&bins[NB_REUSE_SLOT_FREE+1u])<NB_REUSE_CAPACITY){let b=atomicAdd(&bins[NB_REUSE_SLOT_FREE+1u],1u);if(b<NB_REUSE_CAPACITY){slot=b;}}
+ }
+ if(slot!=NB_REUSE_NO_SLOT){atomicStore(&bins[NB_REUSE_SLOT_MAP+region],slot+1u);}
+ return slot;
+}
+// Give a region's slot back (depthPlanExpand, lane 0, its lanes' VALID words
+// already cleared): a region the plan leaves out. The region's own reuse
+// words were reset beside it, so a later claim validates afresh.
+fn nbReuseRelease(region:u32){
+ if(!NB_REUSE_SLOTTED){return;}
+ let slot=nbReuseSlot(region);if(slot==NB_REUSE_NO_SLOT){return;}
+ atomicStore(&bins[NB_REUSE_SLOT_MAP+region],0u);
+ let n=atomicAdd(&bins[NB_REUSE_SLOT_FREE],1u);atomicStore(&bins[NB_REUSE_SLOT_FREE+4u+n],slot);
+}
 // Region work tiers (UniformRegionHeat): COLD 0, WARM 1, HOT 2. A COLD
 // region's producers hold phi (no write, no revision bump) and its
 // consumers keep their retained outputs. A vertex is COLD when any stored
@@ -80,10 +135,14 @@ var<workgroup> nbCrossingLive:u32;
 // only listed, live tiles commit), so a free region's search writes no lanes.
 fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
  if(lane==0u){
-  nbCrossingLive=select(0u,1u,umTileLive(tile))|select(0u,2u,umTileLive(tile)&&nbRegionCold(region)&&nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY);
-  if(nbCrossingLive==0u&&region<NB_REUSE_CAPACITY&&atomicLoad(&bins[NB_REUSE_ALLOWED+region])==2u){nbCrossingLive=4u;}
+  // A fresh claim holds nothing to reuse: its valid words are clear.
+  var slot=nbReuseSlot(region);var fresh=false;
+  if(NB_REUSE_SLOTTED&&slot==NB_REUSE_NO_SLOT&&umTileLive(tile)&&nbReuseCacheEnabled()){slot=nbReuseClaim(region);fresh=true;}
+  let held=slot!=NB_REUSE_NO_SLOT;nbReuseSlotShared=slot;
+  nbCrossingLive=select(0u,1u,umTileLive(tile))|select(0u,2u,umTileLive(tile)&&nbRegionCold(region)&&nbReuseCacheEnabled()&&held&&!fresh);
+  if(nbCrossingLive==0u&&held&&atomicLoad(&bins[NB_REUSE_ALLOWED+region])==2u){nbCrossingLive=4u;}
  }
- let live=workgroupUniformLoad(&nbCrossingLive);
+ let live=workgroupUniformLoad(&nbCrossingLive);let slot=workgroupUniformLoad(&nbReuseSlotShared);let held=slot!=NB_REUSE_NO_SLOT;
  // A COLD region's closure phi is held: its retained masks, nearest rows
  // and metric stand without validation. Its history entry is left invalid
  // (revision 0), so the first non-COLD search after it validates afresh.
@@ -96,17 +155,15 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
   return false;
  }
  if(live==0u){
-  if(nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){
+  if(nbReuseCacheEnabled()&&held){
    if(lane==0u){atomicStore(&bins[nbReuseCurrent()+4u*NB_REUSE_REGIONS+region],0u);atomicStore(&bins[NB_REUSE_ALLOWED+region],2u);}
-   atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);
-   atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);
-   atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);
+   atomicStore(&bins[NB_REUSE_VALID+64u*slot+lane],0u);
   }
   return false;
  }
- if(lane==0u){atomicStore(&nbReuseClean,select(0u,1u,nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY));}
+ if(lane==0u){atomicStore(&nbReuseClean,select(0u,1u,nbReuseCacheEnabled()&&held));}
  workgroupBarrier();
- if(nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){
+ if(nbReuseCacheEnabled()&&held){
   let current=nbReuseCurrent();let previous=nbReusePrevious();
   let origin=16u*(umTileCoord(tile)/4u);let revision=atomicLoad(&bins[NB_REUSE_LIVE+region]);
   if(lane==0u){
@@ -153,35 +210,39 @@ fn nbPrepareReuse(region:u32,lane:u32,tile:u32)->bool{
   }
  }
  workgroupBarrier();
- if(nbPlanned()&&lane==0u&&nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){atomicOr(&bins[NB_FRAME_PLAN+4u+region],4u);}
+ if(nbPlanned()&&lane==0u&&nbReuseCacheEnabled()&&held){atomicOr(&bins[NB_FRAME_PLAN+4u+region],4u);}
  let clean=atomicLoad(&nbReuseClean)!=0u;
- if(nbReuseCacheEnabled()&&region<NB_REUSE_CAPACITY){
+ if(nbReuseCacheEnabled()&&held){
   if(lane==0u){atomicStore(&bins[NB_REUSE_ALLOWED+region],select(0u,1u,clean));}
-  if(!clean){atomicStore(&bins[NB_REUSE_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);atomicStore(&bins[NB_REUSE_PLANE+384u*region+6u*lane+5u],0u);}
+  if(!clean){atomicStore(&bins[NB_REUSE_VALID+64u*slot+lane],0u);}
  }
  workgroupBarrier();return clean;
 }
 fn nbCrossingReuse(tile:u32)->bool{
- let region=nbReuseRegion(tile);if(region>=NB_REUSE_CAPACITY){return false;}
- return nbReuseCacheEnabled()&&atomicLoad(&bins[NB_REUSE_ALLOWED+region])==1u&&atomicLoad(&bins[NB_REUSE_VALID+64u*region+nbReuseLocal(tile)])!=0u;
+ let region=nbReuseRegion(tile);let slot=nbReuseSlot(region);if(slot==NB_REUSE_NO_SLOT){return false;}
+ return nbReuseCacheEnabled()&&atomicLoad(&bins[NB_REUSE_ALLOWED+region])==1u&&atomicLoad(&bins[NB_REUSE_VALID+64u*slot+nbReuseLocal(tile)])!=0u;
 }
+// The cached mask of a tile nbCrossingReuse admitted (its region holds a slot).
 fn nbCrossingCachedMask(tile:u32)->vec2u{
- let at=NB_REUSE_MASK+128u*nbReuseRegion(tile)+2u*nbReuseLocal(tile);
+ let at=NB_REUSE_MASK+128u*nbReuseSlot(nbReuseRegion(tile))+2u*nbReuseLocal(tile);
  return vec2u(atomicLoad(&bins[at]),atomicLoad(&bins[at+1u]));
 }
 fn nbCommitCrossing(tile:u32,mask:vec2u){
- let region=nbReuseRegion(tile);if(!nbReuseCacheEnabled()||region>=NB_REUSE_CAPACITY){return;}
- let local=nbReuseLocal(tile);let at=NB_REUSE_MASK+128u*region+2u*local;
- atomicStore(&bins[at],mask.x);atomicStore(&bins[at+1u],mask.y);atomicStore(&bins[NB_REUSE_VALID+64u*region+local],1u);
+ let slot=nbReuseSlot(nbReuseRegion(tile));if(!nbReuseCacheEnabled()||slot==NB_REUSE_NO_SLOT){return;}
+ let local=nbReuseLocal(tile);let at=NB_REUSE_MASK+128u*slot+2u*local;
+ atomicStore(&bins[at],mask.x);atomicStore(&bins[at+1u],mask.y);atomicStore(&bins[NB_REUSE_VALID+64u*slot+local],1u);
 }
 fn nbNearestReusable(tile:u32)->bool{
- let r=nbReuseRegion(tile);return nbReuseCacheEnabled()&&r<NB_REUSE_CAPACITY&&(atomicLoad(&bins[NB_REUSE_NEAREST_FLAGS+r])&1u)!=0u;
+ let r=nbReuseRegion(tile);return nbReuseCacheEnabled()&&nbReuseSlot(r)!=NB_REUSE_NO_SLOT&&(atomicLoad(&bins[NB_REUSE_NEAREST_FLAGS+r])&1u)!=0u;
 }
+// A tile's nearest rows in its region's slot (the region holds one: callers
+// test nbNearestReusable or nbNearestCached first).
+fn nbNearestCached(tile:u32)->bool{return nbReuseCacheEnabled()&&nbReuseSlot(nbReuseRegion(tile))!=NB_REUSE_NO_SLOT;}
 fn nbNearestCacheAt(tile:u32,axis:u32,row:u32)->u32{
- return NB_REUSE_NEAREST+6144u*nbReuseRegion(tile)+1024u*axis+16u*nbReuseLocal(tile)+row;
+ return NB_REUSE_NEAREST+6144u*nbReuseSlot(nbReuseRegion(tile))+1024u*axis+16u*nbReuseLocal(tile)+row;
 }
 fn nbNearestFinalAt(tile:u32,row:u32)->u32{
- return NB_REUSE_NEAREST+6144u*nbReuseRegion(tile)+2048u+64u*nbReuseLocal(tile)+4u*row;
+ return NB_REUSE_NEAREST+6144u*nbReuseSlot(nbReuseRegion(tile))+2048u+64u*nbReuseLocal(tile)+4u*row;
 }
 fn nbMarkPhiChanged(p:vec3u){
  if(!nbReuseEnabled()){return;}

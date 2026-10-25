@@ -87,7 +87,7 @@ ${seeds.replaceAll("textureLoad(outputPhi,vec3i(p)).x","umLoadVertex(p)")}
  });
 });
 
-test("retained XYZ nearest minima match full search and crossing changes invalidate metric payloads",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+test("retained XYZ nearest minima match full search and crossing changes invalidate nearest payloads",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("retained nearest minima",async device=>{
   const T=4096,R=64,C=64*T,A=0,B=C/2,band=B+C,mask=band+4,reach=mask+2*T,search=reach+2*T;
   const L=narrowBandReuseLayout(search+2*T,R),helper=narrowBandReuseWGSL(L).split("fn nbStoreReconstructed(")[0]!;
@@ -141,13 +141,21 @@ ${narrowBandNearestWGSL}
    run();const full=await outputs();
    device.queue.writeBuffer(bins,4*A,new Uint32Array(C/2+C));run();assert.deepEqual(await outputs(),full);
    // Phi epochs and ownership certificates remain unchanged; a changed
-   // crossing selection alone must invalidate both nearest and metric data.
-   device.queue.writeBuffer(bins,4*L.metricValid,new Uint32Array(64*R).fill(1));
+   // crossing selection alone must invalidate the nearest data.
    device.queue.writeBuffer(bins,4*(mask+2*crossing),new Uint32Array([0x44444444,0x44444444]));
    run();const changed=await outputs();assert.notDeepEqual(changed,full);
    const region=7;assert.equal((await read(L.nearestFlags+region,1))[0],0);
-   assert.ok((await read(L.metricValid+64*region,64)).every(v=>v===0));
    device.queue.writeBuffer(bins,4*L.control,new Uint32Array([0,1,0]));run();assert.deepEqual(await outputs(),changed);
   }finally{bins.destroy();}
  });
+});
+test("a slotted reuse cache holds its payloads in fewer slots than regions, with a slot map and free stack after the frame plan",()=>{
+ const full=narrowBandReuseLayout(100,64),bounded=narrowBandReuseLayout(100,64,16),slotted=narrowBandReuseLayout(100,64,16,true);
+ assert.equal(full.slotMap,full.framePlan+5+7*64);assert.equal(full.slotFree,full.slotMap);assert.equal(full.words,full.slotMap-100);
+ assert.equal(slotted.framePlan,bounded.framePlan);assert.equal(slotted.slotMap,bounded.slotMap);
+ assert.equal(slotted.slotFree,slotted.slotMap+64);assert.equal(slotted.words,bounded.words+64+4+16);
+ assert.ok(slotted.words<full.words);
+ assert.match(narrowBandReuseWGSL(slotted),/const NB_REUSE_SLOTTED:bool=true;/);assert.match(narrowBandReuseWGSL(slotted),/const NB_REUSE_SCAN:u32=64u;/);
+ assert.match(narrowBandReuseWGSL(bounded),/const NB_REUSE_SCAN:u32=16u;/);
+ assert.throws(()=>narrowBandReuseLayout(0,64,64,true),/1\.\.63 slots/);assert.throws(()=>narrowBandReuseLayout(0,64,0,true));
 });

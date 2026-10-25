@@ -1,7 +1,9 @@
 import type { SceneDescription } from "./model";
 
-/** Default WebGPU texture extent cap used by scene planning. */
-export const DEFAULT_MAXIMUM_LATTICE_DIMENSION = 2048;
+/** The cells an axis a scene may plan: the page directory's box limit
+ * (UNIFORM_LATTICE_MAX_PAGES, 252 pages of 32 cells). A structure that
+ * still spans the box (the solid mask's 64-page window) holds its own limit. */
+export const DEFAULT_MAXIMUM_LATTICE_DIMENSION = 8064;
 /** Below this a container axis stops resolving anything, so the layout floors. */
 export const MINIMUM_LATTICE_DIMENSION = 8;
 

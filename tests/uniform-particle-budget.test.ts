@@ -26,4 +26,7 @@ test("fluid.tiers validates its brick count and density", () => {
   assert.equal(errors({ bricks: 0 }).length, 1);
   assert.equal(errors({ bricks: 1.5 }).length, 1);
   assert.equal(errors({ particlesPerFineCell: 0 }).length, 1);
+  assert.deepEqual(errors({ start: "4h", fineBlocks: "auto" }), []);
+  assert.deepEqual(errors({ start: "h" }), []);
+  assert.equal(errors({ start: "16h" }).length, 1);
 });

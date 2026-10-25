@@ -100,7 +100,7 @@ async function run(device:GPUDevice,steps:readonly (readonly number[])[],capacit
  assert.deepEqual(errors.map(m=>`${m.lineNum}: ${m.message}`),[]);
  const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC;
  const table=device.createBuffer({size:4*a.tableWords,usage}),pages=device.createBuffer({size:4*(WINDOW+BLOCKS),usage});
- const pool=device.createBuffer({size:Math.max(16,4*a.poolWords),usage}),out=device.createBuffer({size:4*2*128*64*64,usage});
+ const pool=device.createBuffer({size:Math.max(16,4*(a.poolWords[0]??0)),usage}),out=device.createBuffer({size:4*2*128*64*64,usage});
  const marks=device.createBuffer({size:4*(1+64*BLOCKS),usage});
  const atlas=store.createAtlases(device).get("u/0/0")!;
  device.queue.writeBuffer(pages,0,pageTable());

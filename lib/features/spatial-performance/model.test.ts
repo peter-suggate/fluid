@@ -43,7 +43,7 @@ test("aggregation preserves contribution and cell division never multiplies a ti
 test("decode uses physical block octants, skips free/sentinel blocks and translates signed windows", () => {
   const tiles = new Uint32Array(4 * 512);tiles[512 + 4] = 0x80000000;
   const tiers = new Uint32Array(32);tiers[8] = 0;tiers[9] = 1;tiers[10] = 2;
-  const block = (63 | (1 << 6) | (2 << 12));
+  const block = (255 | (1 << 8) | (2 << 16));
   const data = decodeUniformSpatialWork({ tiles, tiers, particles: new Uint32Array(tiles.length), blocks: new Uint32Array([0xffffffff, block, 0xffffffff, 0xffffffff]), framePage: new Int32Array([-2, 0, 1]), origin: [-64, 0, 32], h: [1, 1, 1] });
   assert.equal(data.length, 512);assert.deepEqual(data[0]!.origin, [-32, 32, 64]);
   assert.equal(data[4]!.tier, 1);assert.equal(data[4]!.owners, 64);assert.equal(data[4 * 8]!.tier, 2);

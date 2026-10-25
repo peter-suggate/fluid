@@ -57,6 +57,7 @@ fn umCellAt(p:vec3u)->u32{let l=p&vec3u(3);return 64u*umTileKey(vec3i(p>>vec3u(2
 fn nbNearestReusable(tile:u32)->bool{return tile%7u==0u;}
 fn nbReuseRegion(tile:u32)->u32{return tile;}
 fn nbReuseCacheEnabled()->bool{return true;}
+fn nbNearestCached(tile:u32)->bool{return nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY;}
 fn nbNearestCacheAt(tile:u32,axis:u32,row:u32)->u32{return 32768u+32u*tile+16u*axis+row;}
 fn nbNearestFinalAt(tile:u32,row:u32)->u32{return 65536u+64u*tile+4u*row;}
 fn nbBandRow(coord:vec3u,y:i32,z:i32)->u32{return 0u;}

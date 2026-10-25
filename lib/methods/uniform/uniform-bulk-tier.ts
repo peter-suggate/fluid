@@ -54,7 +54,9 @@ export interface UniformBulkTierFields {
  * member (a pressure step the heat counts) and kinked its neighbours. */
 export class UniformBulkTier implements UniformMixedPressureBulk {
   readonly regions: number;
-  readonly record: GPUBuffer;
+  private held?: { buffer: GPUBuffer; offset: number; size: number };
+  /** The record: words the pressure arena holds after its pool B (adopt). */
+  get record(): { buffer: GPUBuffer; offset: number; size: number } { if (!this.held) throw new Error("The 16h bulk tier has no record"); return this.held; }
   readonly faces: GPUTexture;
   private readonly readback: GPUBuffer;
   private pipeline?: GPUComputePipeline;
@@ -62,15 +64,19 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
   private layout?: GPUBindGroupLayout;
   private fields?: UniformBulkTierFields;
   private rootWord = 0;
-  get allocatedBytes(): number { return this.record.size + 4 * this.faces.width * this.faces.height + this.readback.size; }
+  get allocatedBytes(): number { return 4 * this.faces.width * this.faces.height + this.readback.size; }
   constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership) {
     if (ownership.layout.tiles.some(word => (word & 0xc0000000) !== 0)) throw new Error("The 16h bulk tier selects on the all-4h pressure root");
     this.regions = 8 * ownership.capacity.address.blocks;
     const texels = UNIFORM_BULK_FACE_TEXELS * this.regions, rows = Math.ceil(texels / UNIFORM_BULK_FACE_WIDTH);
     if (rows > device.limits.maxTextureDimension2D) throw new Error(`The 16h bulk faces need ${rows} rows`);
-    this.record = device.createBuffer({ label: "Uniform bulk tier record", size: 4 * UNIFORM_BULK_WORDS(this.regions), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.faces = device.createTexture({ label: "Uniform bulk tier faces", size: [UNIFORM_BULK_FACE_WIDTH, rows], format: "r32float", usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
     this.readback = device.createBuffer({ label: "Uniform bulk tier counts", size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  }
+  /** Once, when the pressure arena exists: its record words (bulkRecord). */
+  adopt(record: { buffer: GPUBuffer; offset: number; size: number }): void {
+    if (record.size !== 4 * UNIFORM_BULK_WORDS(this.regions)) throw new Error("The 16h bulk record does not match its regions");
+    this.held = record;
   }
   /** Once, after the pressure stages exist. */
   bind(fields: UniformBulkTierFields): void { this.fields = fields; }
@@ -91,7 +97,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
       { binding: 0, resource: { buffer: f.params, size: 80 } }, { binding: 1, resource: f.velocity },
       { binding: 2, resource: { buffer: f.slots.buffer } }, { binding: 3, resource: f.rootPhi }, ...(f.rootTopology ? [{ binding: 4, resource: f.rootTopology }] : []),
       { binding: 5, resource: { buffer: f.tiers } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
-      { binding: 7, resource: { buffer: this.record } }, { binding: 8, resource: this.faces.createView() }] });
+      { binding: 7, resource: this.record }, { binding: 8, resource: this.faces.createView() }] });
     const H = UNIFORM_BULK_HEADER(R), C = UNIFORM_BULK_COUNT;
     const code = uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec4f}
@@ -197,18 +203,18 @@ fn bFace(t:vec3i,a:u32)->f32{
   /** After the band's prepare (its slot map) and the root RHS, before the solve. */
   encodeSelect(encoder: GPUCommandEncoder): void {
     if (!this.pipeline || !this.group) throw new Error("The 16h bulk tier is not initialized");
-    encoder.clearBuffer(this.record, 4 * UNIFORM_BULK_HEADER(this.regions), 4 * 9);
+    encoder.clearBuffer(this.record.buffer, this.record.offset + 4 * UNIFORM_BULK_HEADER(this.regions), 4 * 9);
     const pass = encoder.beginComputePass(PASS); pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.group.group);
     pass.setPipeline(uniformDetailPick(this.pipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.regions)); pass.end();
   }
   /** Diagnostics (a readback): the last selection's counts. */
   async readCounts(): Promise<Record<keyof typeof UNIFORM_BULK_COUNT, number> & { listed: number }> {
     const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(this.record, 4 * UNIFORM_BULK_HEADER(this.regions), this.readback, 0, 36);
+    encoder.copyBufferToBuffer(this.record.buffer, this.record.offset + 4 * UNIFORM_BULK_HEADER(this.regions), this.readback, 0, 36);
     this.device.queue.submit([encoder.finish()]); await this.readback.mapAsync(GPUMapMode.READ);
     const w = new Uint32Array(this.readback.getMappedRange().slice(0, 36)); this.readback.unmap();
     const C = UNIFORM_BULK_COUNT;
     return { members: w[C.members]!, eligible: w[C.eligible]!, structural: w[C.structural]!, error: w[C.error]!, entered: w[C.entered]!, left: w[C.left]!, listed: w[8]! };
   }
-  destroy(): void { this.record.destroy(); this.faces.destroy(); this.readback.destroy(); }
+  destroy(): void { this.faces.destroy(); this.readback.destroy(); }
 }

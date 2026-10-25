@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { uniformAddressPlanWGSL, UNIFORM_ADDRESS_HOME_MASK } from '../lib/methods/uniform/uniform-address-plan';
-import { uniformBlockNeighbourLayout, uniformBlockNeighbourWords, uniformLatticeAddress, uniformLatticeAddressWGSL, uniformVertexSlot } from '../lib/methods/uniform/uniform-lattice-address';
-import { uniformWindowAddressWGSL } from '../lib/methods/uniform/uniform-window-address';
+import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourLayout, uniformBlockNeighbourWords, uniformLatticeAddress, uniformLatticeAddressWGSL, uniformVertexSlot } from '../lib/methods/uniform/uniform-lattice-address';
+import { UNIFORM_DIRECTORY_WORDS, uniformBlockWordPage, uniformWindowAddressWGSL } from '../lib/methods/uniform/uniform-window-address';
 import { UniformBlockNeighbours } from '../lib/methods/uniform/uniform-block-neighbours';
 import { withUniformDevice } from './helpers/uniform-geometric';
 
 const address=()=>uniformLatticeAddress([96,96,96],true,{permute:871,air:[[0,0,0],[1,0,1],[0,1,1],[2,2,1],[1,2,2]]});
 test('packed canonical homes preserve the first stored incident page for fine and coarse vertices',()=>{
- const a=address(),words=uniformBlockNeighbourWords(a.seed.table,a.seed.blocks);
+ const a=address(),words=uniformBlockNeighbourWords(a.seed.tail,a.seed.blocks);
  const homes=33*a.blocks+1;
  for(let b=1;b<a.blocks-1;b++){
   const record=a.seed.blocks[b]!;if(record===0xffffffff)continue;
-  const page=[record&63,(record>>>6)&63,(record>>>12)&63];
+  const page=uniformBlockWordPage(record);
   for(const bits of [3,5] as const){const edge=1<<bits;
    for(let f=0;f<27;f++){
     const side=[f%3,Math.floor(f/3)%3,Math.floor(f/9)];
@@ -36,7 +36,7 @@ test('GPU rebuilt plans match directory addressing after reseeding and window mo
   const code=`
 @group(0) @binding(0) var<storage,read> umTopology:array<u32>;
 @group(0) @binding(1) var<storage,read_write> result:array<vec4u>;
-const UM_BLOCK_RECORD:u32=262176u;
+const UM_BLOCK_RECORD:u32=${UNIFORM_PAGE_TABLE_WORDS}u;
 ${uniformWindowAddressWGSL('umTopology','0u',`${a.blocks}u`).replace('fn umPageWord(','fn umDirectoryPageWord(')}
 ${uniformLatticeAddressWGSL({constant:true,paged:{blocks:`${a.blocks}u`},world:true,addressPlan:true})}
 ${uniformAddressPlanWGSL}
@@ -60,7 +60,7 @@ ${uniformAddressPlanWGSL}
   const pipelines=await Promise.all([0,1].map(enabled=>device.createComputePipelineAsync({layout:'auto',compute:{module,entryPoint:'compare',constants:{umUseAddressPlan:enabled}}})));
   try{
    for(const shift of [0,1,63]){
-    const seed=a.seed.tail.slice();seed[262144]=shift;seed[262145]=shift;seed[262146]=shift;
+    const seed=a.seed.tail.slice();seed[UNIFORM_DIRECTORY_WORDS]=shift;seed[UNIFORM_DIRECTORY_WORDS+1]=shift;seed[UNIFORM_DIRECTORY_WORDS+2]=shift;
     device.queue.writeBuffer(tail,0,seed);
     const rebuild=device.createCommandEncoder();builder.encode(rebuild);device.queue.submit([rebuild.finish()]);
     let reference:Uint32Array|undefined;

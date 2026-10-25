@@ -147,9 +147,9 @@ export class UniformFineBrickStore{
   this.atlasExtent=[UFB_EDGE*this.atlasGrid[0],UFB_EDGE*this.atlasGrid[1],UFB_EDGE*this.atlasGrid[2]];
  }
  /** Bytes the store allocates: the table, the SoA pool and every atlas. */
- get allocatedBytes():number{return 4*(this.arena.tableWords+this.arena.poolWords)+4*this.atlases.length*this.atlasExtent[0]*this.atlasExtent[1]*this.atlasExtent[2];}
+ get allocatedBytes():number{return 4*(this.arena.tableWords+(this.arena.poolWords[0]??0))+4*this.atlases.length*this.atlasExtent[0]*this.atlasExtent[1]*this.atlasExtent[2];}
  /** Bytes a slot costs in channels (pool and atlases), without the table. */
- get slotBytes():number{return 4*this.arena.poolWords/this.capacity+4*UFB_EDGE**3*this.atlases.length;}
+ get slotBytes():number{return 4*(this.arena.poolWords[0]??0)/this.capacity+4*UFB_EDGE**3*this.atlases.length;}
  private atlas(name:string,component=0,bank=0):Atlas{
   const a=this.atlases.find(t=>t.name===name&&t.component===component&&t.bank===bank);
   if(!a)throw new Error(`Fine brick store: no atlas ${name} component ${component} bank ${bank}`);
@@ -251,6 +251,6 @@ var<workgroup> ufbN_${entry}:u32;
   * over var ufbTable (array<atomic<u32>>, the table at word base), its
   * pool accessors over var ufbPool, and the atlas addressing. */
  moduleWGSL(base:number,tileMask="0xffu"):string{
-  return this.arena.tableWGSL("ufbTable",`${base}u`,tileMask)+(this.arena.poolWords?this.arena.poolWGSL("ufbPool"):"")+this.atlasWGSL();
+  return this.arena.tableWGSL("ufbTable",`${base}u`,tileMask)+(this.arena.poolWords.length?this.arena.poolWGSL(["ufbPool"]):"")+this.atlasWGSL();
  }
 }

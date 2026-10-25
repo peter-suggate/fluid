@@ -102,7 +102,7 @@ fn levelCell(job:u32,cell:u32,edge:u32)->LevelCell{
   let k=firstTrailingBit(edge);let n=64u*job+cell;let j=n>>(3u*k);let l=n&((1u<<(3u*k))-1u);
   let b=select(0u,heWork[${UNIFORM_EXTRAPOLATION_WORK_WORDS}u+j],j<heHeldBlocks());
   let record=umBlockWord(min(b,BLOCKS-1u));
-  return LevelCell(blockStored(b)&&record!=FREE,b,vec3i(vec3u(record&63u,(record>>6u)&63u,(record>>12u)&63u)),
+  return LevelCell(blockStored(b)&&record!=FREE,b,vec3i(vec3u(record&255u,(record>>8u)&255u,(record>>16u)&255u)),
     vec3i(vec3u(l&(edge-1u),(l>>k)&(edge-1u),l>>(2u*k))),i32(edge));
 }
 

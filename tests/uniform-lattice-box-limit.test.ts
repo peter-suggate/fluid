@@ -5,7 +5,8 @@ import { UNIFORM_BLOCK_GRID_BLOCKS, UNIFORM_OPEN_WORLD_MEMORY_MiB, uniformLattic
 test("a box has no page limit of its own: the page table's window is the address's", () => {
   const box = uniformLatticeBox([4096, 256, 4096]);
   assert.deepEqual(box.pages, [128, 8, 128]); assert.equal(box.boxTiles, 1024 * 64 * 1024);
-  assert.throws(() => uniformLatticeAddress([4096, 256, 4096], true, { blocks: 64 }), /exceeds 62 pages/);
+  // The directory's window (UNIFORM_LATTICE_MAX_PAGES) holds 252 pages an axis.
+  assert.throws(() => uniformLatticeAddress([32 * 253, 256, 64], true, { blocks: 64 }), /exceeds 252 pages/);
   assert.equal(uniformLatticeAddress([1984, 64, 64], false).blocks, 62 * 2 * 2 + 2);
 });
 
