@@ -6,6 +6,7 @@ import { narrowBandRetireCounting } from "../lib/methods/uniform/uniform-narrow-
 import { UNIFORM_PRESSURE_ARENA_SCHEDULE } from "../lib/methods/uniform/uniform-pressure-arena";
 import { narrowBandParticleWGSL } from "../lib/methods/uniform/uniform-narrow-band-apic.wgsl";
 import { particleSlabWGSL } from "../lib/methods/uniform/uniform-particle-slab.wgsl";
+import { UNIFORM_REGION_HEAT_STATE_WORDS, UNIFORM_REGION_HEAT_STILL_H, UNIFORM_REGION_HEAT_STILL_ROUNDOFF } from "../lib/methods/uniform/uniform-region-heat";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, narrowBandSurfaceWGSL } from "../lib/methods/uniform/uniform-narrow-band-surface.wgsl";
 
 test("seedScoring and outerSeeding default to scoring every surface tile and reseeding uncovered layers", () => {
@@ -54,6 +55,18 @@ test("nativeSmoothing defaults to composite, relaxing the native rows with the b
   assert.equal(narrowBandFlipValues({}).nativeSmoothing, "composite");
   const param = uniformNarrowBandMethod.params.find(p => p.key === "nativeSmoothing");
   assert.ok(param && param.kind === "select" && param.update === "solver");
+});
+
+test("coldSurface still holds a surface COLD only within round-off, and keeps warm the default", () => {
+  assert.equal(uniformNearSettled({}).coldSurface, "warm");
+  assert.equal(uniformNearSettled({ coldSurface: "still" }).coldSurface, "still");
+  assert.equal(uniformNearSettled({ coldSurface: "budget" }).coldSurface, "budget");
+  assert.equal(uniformNearSettled({ coldSurface: "bogus" }).coldSurface, "warm");
+  const param = uniformNarrowBandMethod.params.find(p => p.key === "coldSurface");
+  assert.ok(param && param.kind === "select" && param.options.some(o => o.value === "still"));
+  assert.equal(UNIFORM_REGION_HEAT_STILL_ROUNDOFF, 256);
+  assert.equal(UNIFORM_REGION_HEAT_STILL_H, 0.01);
+  assert.equal(UNIFORM_REGION_HEAT_STATE_WORDS, 19);
 });
 
 test("crowdedCells defaults to retiring the excess, and its merge carries mass in the age word's low bits", () => {

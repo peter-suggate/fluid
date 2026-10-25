@@ -128,9 +128,18 @@ fn rhBulkAcceleration(acceleration:f32,gradient:f32,representedSpeed:f32)->f32{
  * Words 16 and 17 carry the freeze's discarded correction across frames:
  * the last raw umColdError seen (m/s) and its charged part (m/s), the sum of
  * its per-projection increments above the projection's resolution.
+ * Word 18 (coldSurface "still") sums a surface region's omitted transport
+ * since its last trigger with no noise floor (h).
  * Trigger bit 12 records a physical reader; bit 13 certifies all physical
  * readers submerged; bit 14 records a physical h owner. */
-export const UNIFORM_REGION_HEAT_STATE_WORDS=18;
+export const UNIFORM_REGION_HEAT_STATE_WORDS=19;
+/** coldSurface "still": the per-step omission a still surface may hold, in
+ * units of the hydrostatic balance's f32 round-off (eps dt^2 |g| H / h^2,
+ * H the domain's extent along gravity). A pool at rest omits under 50. */
+export const UNIFORM_REGION_HEAT_STILL_ROUNDOFF=256;
+/** coldSurface "still": the omission a still surface may sum since its last
+ * trigger, cells, with no noise floor. */
+export const UNIFORM_REGION_HEAT_STILL_H=0.01;
 const STATE_WORDS=UNIFORM_REGION_HEAT_STATE_WORDS;
 const PASS:GPUComputePassDescriptor={label:"Uniform region work heat"};
 
@@ -206,6 +215,10 @@ export interface UniformRegionHeatSources {
    * physical reader (not submerged) is at least WARM every frame (trigger
    * bit 64, as a displacement over budget). */
   surfaceWarm?:boolean;
+  /** With surfaceWarm, NB-FLIP coldSurface "still": a free-surface region
+   * whose omitted transport is provably round-off may stay COLD
+   * (UNIFORM_REGION_HEAT_STILL_ROUNDOFF, UNIFORM_REGION_HEAT_STILL_H). */
+  surfaceStill?:boolean;
 }
 
 export class UniformRegionHeat {
@@ -274,7 +287,7 @@ export class UniformRegionHeat {
     const module=uniformDetailModule(this.device,{label:"Uniform region work heat",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var<storage,read_write> tiers:array<atomic<u32>>;
 @group(1) @binding(1) var<storage,read_write> state:array<u32>;
-struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,horizon:f32,residual:f32,pad2:u32}
+struct RHParams{dt:f32,cooling:f32,pressure:f32,hInverse:f32,force:u32,horizon:f32,residual:f32,still:f32}
 @group(1) @binding(2) var<uniform> rh:RHParams;
 @group(1) @binding(3) var<storage,read> regionVelocity:array<u32>;
 @group(1) @binding(4) var<storage,read> dynamics:array<u32>;
@@ -420,7 +433,14 @@ var<workgroup> rhFine:atomic<u32>;
      ${s.surfaceWarm?`// coldSurface "warm": a free surface is never held. Holding it omits
      // the surface's transport, whose volume (lag times area) no
      // displacement budget bounds over time.
-     if(!submerged){trigger|=64u;}`:""}
+     ${s.surfaceStill?`// coldSurface "still": unless that transport is provably zero. A step
+     // omits no more than the hydrostatic balance's f32 round-off
+     // (rh.still), and the omission since the last trigger, summed with no
+     // noise floor, stays within UNIFORM_REGION_HEAT_STILL_H: a resting pool
+     // holds, any surface with solved flux warms.
+     let omitted=surface+momentum+pressure+frozen;let still=bitcast<f32>(state[at+18u])+omitted;
+     state[at+18u]=bitcast<u32>(still);
+     if(!submerged&&(!(omitted<=rh.still)||!(still<=${UNIFORM_REGION_HEAT_STILL_H}))){trigger|=64u;}`:"if(!submerged){trigger|=64u;}"}`:""}
     }`:"displacement+=rh.dt*(speed+rhColdSpeed(region))*rh.hInverse+rh.pressure*dp;"}
     if(max(displacement,projected)>${error?"rhFreezeBudget(submerged,fine)":"0.002"}){trigger|=64u;}
    }
@@ -428,7 +448,7 @@ var<workgroup> rhFine:atomic<u32>;
    // (bit 9 a held HOT, bit 10 a held WARM): the host's evidence lags
    // UNIFORM_MIXED_RECEIPT_RING frames, and sees it while it still stands.
    {${uniformTierHoldWGSL}}
-   if(trigger!=0u){displacement=0.0;}
+   if(trigger!=0u){displacement=0.0;${s.surfaceWarm&&s.surfaceStill?"state[at+18u]=0u;":""}}
    var value=max(0.0,bitcast<f32>(state[at])-rh.cooling*rh.dt);
    if((trigger&24u)!=0u){value=2.0;}
    // Detail heat grows with its excess, as Sato et al. 2018 Eq. (5)
@@ -515,10 +535,14 @@ fn rhDeep(region:u32){
    * frame's step; density: the liquid's, kg/m^3; residual: the fine
    * pressure's stopping divergence, s^-1 (the band's), the freeze's noise
    * floor (r h of discarded velocity a projection, r dt h of omission a step). */
-  encode(encoder:GPUCommandEncoder,dt:number,density:number,residual:number):void{
+  encode(encoder:GPUCommandEncoder,dt:number,density:number,residual:number,gravity:readonly [number,number,number]=[0,0,0]):void{
     if(!this.heatPipeline||!this.spreadPipeline||!this.group)throw new Error("Region heat is not initialized");
     const generation=this.generation();const force=this.forced||generation!==this.seenGeneration;this.forced=false;this.seenGeneration=generation;
     const w=this.words;w[0]=dt;w[1]=2/UNIFORM_REGION_HEAT_FADE_SECONDS;w[2]=dt*dt*this.hInverse*this.hInverse/Math.max(density,1e-30);w[3]=this.hInverse;this.bits[4]=+force;w[5]=UNIFORM_REGION_HEAT_FADE_SECONDS/Math.max(dt,1e-30);w[6]=residual;
+    // coldSurface "still": the hydrostatic pressure's round-off over the
+    // domain's head along gravity, as interface motion a step (h).
+    const tiles=this.ownership.capacity.tileDimensions;
+    w[7]=UNIFORM_REGION_HEAT_STILL_ROUNDOFF*2**-23*dt*dt*4*this.hInverse*(Math.abs(gravity[0])*tiles[0]+Math.abs(gravity[1])*tiles[1]+Math.abs(gravity[2])*tiles[2]);
     this.device.queue.writeBuffer(this.params,0,this.words);
     encoder.clearBuffer(this.tiers,4*this.regions,4*UNIFORM_REGION_HEAT_HEADER_WORDS);
     encoder.clearBuffer(this.tiers,4*UNIFORM_REGION_HEAT_ACTIVE_WORD(this.regions),4);
