@@ -8,13 +8,30 @@
  *
  * Addressing and world-solid policy live in uniform-window-address.ts.
  * See docs/plans/moving-window-handoff-2026-10-14.md for integration evidence.
+ *
+ * The window is the page directory's period, 256 pages an axis, and F moves
+ * in pages, with no super-block alignment (tiered-adaptivity §2.1): the
+ * directory is indexed by world page, so a shift rewrites no directory word,
+ * and what the frame holds after one, at most 252 pages an axis inside a
+ * two-page margin, touches at most 64 super-blocks an axis, so no two
+ * resident super-blocks share a top entry. A frame whose pages fit the inner
+ * window (UNIFORM_MOVING_WINDOW_INNER less the margins, 60 pages) is placed
+ * exactly as in a window of 64 pages: the same pages hold the same lattice
+ * coordinates as before the directory, and lattice positions stay small
+ * where f32 particle coordinates need them. A wider one is placed in the
+ * full window, only in a wide pool (uniformPagePoolLayout's wide): any other
+ * refuses it with the edge fatal, as the 64-page table did, so its stored
+ * pages always lie in the flat window.
  */
-import { UNIFORM_WINDOW_EDGE_FATAL } from "./uniform-window-address";
+import { UNIFORM_WINDOW_EDGE_FATAL, UNIFORM_WINDOW_PAGES } from "./uniform-window-address";
 const UNIFORM_PAGE_POOL_FATAL = { edge: UNIFORM_WINDOW_EDGE_FATAL };
 
 export type UniformWindowPage = readonly [number, number, number];
-export const UNIFORM_MOVING_WINDOW_PAGES = 64;
+export const UNIFORM_MOVING_WINDOW_PAGES = UNIFORM_WINDOW_PAGES;
+/** The window a frame of at most INNER - 2 MARGIN pages is placed in. */
+export const UNIFORM_MOVING_WINDOW_INNER = 64;
 export const UNIFORM_MOVING_WINDOW_MARGIN = 2;
+const PAGES = UNIFORM_MOVING_WINDOW_PAGES, INNER = UNIFORM_MOVING_WINDOW_INNER, MARGIN = UNIFORM_MOVING_WINDOW_MARGIN;
 /** State and bounds are separate: gather writes only bounds; decision writes
  * only state, then resets bounds for the next gather. F is never host-written
  * after construction. delta is this boundary's shift, revision counts shifts,
@@ -38,7 +55,7 @@ export interface UniformWindowForce { readonly boundary: number; readonly delta:
  * A two-page margin on either side reserves room for the next census;
  * a forced probe shift may use that margin but must keep all pages inside.
  */
-export function uniformWindowDecision(frame: UniformWindowPage, bounds?: UniformWindowBounds, force?: UniformWindowPage): UniformWindowDecision {
+export function uniformWindowDecision(frame: UniformWindowPage, bounds?: UniformWindowBounds, force?: UniformWindowPage, wide = true): UniformWindowDecision {
   if (!frame.every(int32) || (force && !force.every(int32))) throw new RangeError("Moving-window coordinates must be i32 pages");
   if (bounds && (!bounds.low.every(int32) || !bounds.high.every(int32) || bounds.low.some((v, k) => v > bounds.high[k]!)))
     throw new RangeError("Moving-window bounds must be ordered i32 pages");
@@ -46,16 +63,16 @@ export function uniformWindowDecision(frame: UniformWindowPage, bounds?: Uniform
   for (let axis = 0; axis < 3; axis++) {
     const lo = bounds?.low[axis], hi = bounds?.high[axis];
     if (lo !== undefined && hi !== undefined) {
-      const width = hi - lo + 1;
-      if (width > UNIFORM_MOVING_WINDOW_PAGES - 2 * UNIFORM_MOVING_WINDOW_MARGIN)
+      const width = hi - lo + 1, span = width <= INNER - 2 * MARGIN ? INNER : PAGES;
+      if (width > (wide ? PAGES : INNER) - 2 * MARGIN)
         return { frame, delta: [0, 0, 0], fatal: UNIFORM_PAGE_POOL_FATAL.edge };
-      if (lo - frame[axis]! < UNIFORM_MOVING_WINDOW_MARGIN || hi - frame[axis]! >= UNIFORM_MOVING_WINDOW_PAGES - UNIFORM_MOVING_WINDOW_MARGIN)
-        next[axis] = Math.max(I32_MIN, Math.min(I32_MAX - 63, lo - Math.floor((64 - width) / 2)));
+      if (lo - frame[axis]! < MARGIN || hi - frame[axis]! >= span - MARGIN)
+        next[axis] = Math.max(I32_MIN, Math.min(I32_MAX - (PAGES - 1), lo - Math.floor((span - width) / 2)));
     }
     if (force) next[axis] = frame[axis]! + force[axis]!;
     // The full window, and the particle rebase delta, must be representable.
-    if (!int32(next[axis]!) || next[axis]! > I32_MAX - 63 || !int32(next[axis]! - frame[axis]!) ||
-        (lo !== undefined && hi !== undefined && (lo < next[axis]! || hi - next[axis]! >= 64)))
+    if (!int32(next[axis]!) || next[axis]! > I32_MAX - (PAGES - 1) || !int32(next[axis]! - frame[axis]!) ||
+        (lo !== undefined && hi !== undefined && (lo < next[axis]! || hi - next[axis]! >= PAGES)))
       return { frame, delta: [0, 0, 0], fatal: UNIFORM_PAGE_POOL_FATAL.edge };
   }
   return { frame: next, delta: [next[0] - frame[0], next[1] - frame[1], next[2] - frame[2]], fatal: 0 };
@@ -90,14 +107,16 @@ struct MWForce{boundary:u32,x:i32,y:i32,z:i32}
  let force=vec3i(mwForce.x,mwForce.y,mwForce.z);
  for(var a=0u;a<3u;a++){
   let lo=atomicLoad(&mwBounds[a]);let hi=atomicLoad(&mwBounds[3u+a]);
+  // The window this axis is placed in: the inner one while its pages fit it.
+  var span=${PAGES}u;
   if(seen){
    // Check the difference before adding 1 (a full i32 extent is 2^32).
-   if(hi<lo||hi-lo>=60u){fail=true;}
+   if(hi<lo||hi-lo>=${PAGES - 2 * MARGIN}u){fail=true;}
    else{
-    let width=hi-lo+1u;
-    if(lo<old[a]||lo-old[a]<2u||hi<old[a]||hi-old[a]>=62u){
-     let pad=(64u-width)/2u;
-     next[a]=min(lo-min(lo,pad),0xffffffc0u);
+    let width=hi-lo+1u;if(width<=${INNER - 2 * MARGIN}u){span=${INNER}u;}
+    if(lo<old[a]||lo-old[a]<${MARGIN}u||hi<old[a]||hi-old[a]>=span-${MARGIN}u){
+     let pad=(span-width)/2u;
+     next[a]=min(lo-min(lo,pad),${0x100000000 - PAGES}u);
     }
    }
   }
@@ -108,10 +127,10 @@ struct MWForce{boundary:u32,x:i32,y:i32,z:i32}
    if(negative){if(magnitude>old[a]){fail=true;}next[a]=old[a]-magnitude;}
    else{if(magnitude>0xffffffffu-old[a]){fail=true;}next[a]=old[a]+magnitude;}
   }
-  if(next[a]>0xffffffc0u){fail=true;}
+  if(next[a]>${0x100000000 - PAGES}u){fail=true;}
   if(next[a]>=old[a]){if(next[a]-old[a]>0x7fffffffu){fail=true;}}
   else{if(old[a]-next[a]>0x80000000u){fail=true;}}
-  if(seen&&(lo<next[a]||hi<next[a]||hi-next[a]>=64u)){fail=true;}
+  if(seen&&(lo<next[a]||hi<next[a]||hi-next[a]>=${PAGES}u)){fail=true;}
   atomicStore(&mwBounds[a],0xffffffffu);atomicStore(&mwBounds[3u+a],0u);
  }
  atomicStore(&mwBounds[6u],0u);
@@ -137,7 +156,7 @@ export class UniformMovingWindow {
   private group?: GPUBindGroup;
   private static readonly PASS: GPUComputePassDescriptor = { label: "Moving window boundary decision" };
   constructor(private readonly device: GPUDevice, frame: UniformWindowPage = [0, 0, 0], force?: UniformWindowForce) {
-    if (!frame.every(v => int32(v) && v <= I32_MAX - 63)) throw new RangeError("Moving-window frame must hold 64 signed pages on each axis");
+    if (!frame.every(v => int32(v) && v <= I32_MAX - (PAGES - 1))) throw new RangeError(`Moving-window frame must hold ${PAGES} signed pages on each axis`);
     if (force && (!Number.isInteger(force.boundary) || force.boundary < 1 || force.boundary > 0xffffffff || !force.delta.every(int32)))
       throw new RangeError("Moving-window probe force needs a positive u32 boundary and i32 page delta");
     this.state = device.createBuffer({ label: "Moving window GPU frame", size: 4 * UNIFORM_MOVING_WINDOW_STATE.words, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });

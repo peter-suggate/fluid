@@ -9,7 +9,9 @@ import { uniformDetailCapacityRule } from "./uniform-detail-policy";
 import { uniformWindowFixedFrame } from "./uniform-window-address";
 import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
-import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit } from "./uniform-mixed-layout";
+import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, type UniformMixedLayout } from "./uniform-mixed-layout";
+import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
+import { UNIFORM_FINE_SLOT_TILES, uniformFineBlocks } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
@@ -731,7 +733,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.fieldPages.createTexture({ label, size, dimension: "3d", format, usage });
     // Geometric h fields come from the detail storage, registered with the
     // page layer by their logical dims; their bytes are the storage's (refreshMixedAllocation).
-    const detailStorage = this.detailStorage = new UniformDetailStorage(device, address);
+    // fluid.tiers.fineBlocks (or a coarse start) compacts the h stores after t=0: every module then reads a slotless block's base.
+    const detailStorage = this.detailStorage = new UniformDetailStorage(device, address, { sparse: uniformFineBlocks(scene.fluid?.tiers) !== undefined });
     // Vertex phi where nothing is stored: the initial level set's value far from liquid (uniformLatticeInitialPhi).
     const emptyPhi = uniformLatticeFarPhi(scene);
     const field = (label: string, kind: UniformDetailClass, perTile = false) =>
@@ -800,7 +803,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The page pool's tail (a mirror), then the detail storage's h slots (a mirror), each block its own until it publishes them.
     this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength + 4 * address.blocks, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.pages, 0, address.seed.tail);
-    device.queue.writeBuffer(this.pages, address.seed.tail.byteLength, Uint32Array.from({ length: address.blocks }, (_, b) => b));
+    detailStorage.mirrorSlots(this.pages, address.seed.tail.byteLength);
     // The solid mask's image whole (SolidOccupancyMask): the page directory,
     // the bed-slope lane's directory (zero until the frame's bake places and
     // writes the lane at its build: every bed level; see bedSlopeBake), the mixed
@@ -1162,6 +1165,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return tiles;
   }
   private mixedSource?: DenseLevelSetVolumeConsumerSource;
+  /** Dynamic's coarse start (fluid.tiers.start "4h"), held from the frame's
+   * construction to its first layout. */
+  private mixedSeed?:UniformMixedLayout;
+  /** Dynamic's coarse start: every tile at 4h but Fine regions, solids cut
+   * 4h owners as a Requested layout holds them. Frame 1's census refines it
+   * where its criteria ask (its solid contact is liquid-conditional), as it
+   * coarsens the h start; the t=0 uploads reach the 4h tiles restricted. */
+  private dynamicSeed():UniformMixedLayout{
+    return createUniformMixedLayout(fluidRegionLattice(this.scene),this.scene.fluid.refinementRegions??[],4,undefined,this.address);
+  }
   private async initializeMixedFrame():Promise<void>{
     this.assertMixedOptions();
     if(!this.vertexPhiField||!this.vertexPhiScratch)throw new Error("Mixed Uniform requires the shared native field arena");
@@ -1178,17 +1191,30 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // limits refuse a reservation (UniformMixedFrameCapacity).
     const tiles=this.address.poolTiles,gpuLayout=this.detail.policy==="dynamic";
     const solids=!this.solidVoxelsEmpty||sceneHasTerrain(this.scene),bodies=this.scene.rigidBodies.length;
-    // fluid.tiers: the particles' h capacity, a brick 8 h tiles; unset, the pool sizes them.
-    const tiers=this.scene.fluid.tiers,particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined
-      ?{fineTiles:Math.min(tiles,tiers.bricks!==undefined?8*tiers.bricks:tiles),perFineCell:tiers.particlesPerFineCell??4}:undefined;
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?tiles:0,particles,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
+    // fluid.tiers.start "4h": Dynamic starts on the coarse seed, so it holds
+    // its h ceiling from here (fluid.tiers.bricks, 8 h tiles a brick, or the
+    // seed's bricks x 1.5 with a floor: uniformFineBrickCapacity), and the
+    // particles at it. A build over the ceiling is fatal (followMixedCapacity).
+    const tiers=this.scene.fluid.tiers,coarseStart=gpuLayout&&tiers?.start==="4h";
+    const seed=this.mixedSeed=coarseStart?this.dynamicSeed():undefined;
+    const fineCeiling=Math.min(tiles,seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiers?.bricks!==undefined?8*tiers.bricks:tiles);
+    // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
+    const particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined||coarseStart?{fineTiles:fineCeiling,perFineCell:tiers?.particlesPerFineCell??4}:undefined;
+    // The solid record's fraction and aperture slots under fluid.tiers: only a
+    // tile within a cell of a solid (the promotion's coupled tiles) or of the
+    // box's walls holds one, x 1.5 for edits and bodies; a tile the slots
+    // cannot serve reads the solids themselves. Else every key its own.
+    const box=fluidRegionLattice(this.scene).dimensions.map(n=>n/4),inner=box.reduce((n,b)=>n*Math.max(0,b-2),1);
+    const solidSlots=coarseStart||tiers?.bricks!==undefined?Math.min(tiles,Math.ceil(1.5*(promotion.coupledTiles+box.reduce((n,b)=>n*b,1)-inner))):undefined;
+    if(seed&&seed.fineTiles.length>fineCeiling)throw new Error(`Uniform simulation detail: the coarse start holds ${seed.fineTiles.length} h tiles (its Fine regions); fluid.tiers.bricks ${fineCeiling/8} holds ${fineCeiling}: raise fluid.tiers.bricks`);
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
       pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),sourceParams:this.params,
       // Live edits and rigid bodies share the pipelines built at setup.
-      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten},
+      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten,slots:solidSlots},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
     },this.address.openTop,this.pressureSchedule);
     this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;this.mixedFrame.narrowBandFlip.sparseNeighbours=this.narrowBandSparseNeighbours;
@@ -1252,6 +1278,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // layout encodes no relayout publish).
     this.mixedFrame.publishCoarseVertexPhi();
     if(deferred)this.encodeInitialPresentationSurface();
+    // The t=0 kernels ran over the whole block grid: from here the h stores
+    // hold only the blocks the detail ring needs (uniform-fine-slots.ts)
+    // when fluid.tiers.fineBlocks asks for it (opt-in). A load at a slotless
+    // block reads the field's base (the sparse domain).
+    // "auto" under a ceiling (a coarse start) holds the ceiling's tiles at UNIFORM_FINE_SLOT_TILES a slot.
+    const fineBlocks=uniformFineBlocks(this.scene.fluid?.tiers),ceiling=this.mixedFrame.fineCeiling;
+    if(fineBlocks!==undefined)await detail.compact(fineBlocks==="auto"?undefined:fineBlocks,ceiling<this.address.poolTiles?Math.ceil(ceiling/UNIFORM_FINE_SLOT_TILES):0);
   }
   private mixedDynamic?: UniformMixedDynamicClassifier;
   /** GPU ownership builder for dynamic relayouts; region edits stay on the CPU path. */
@@ -1372,19 +1405,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * relayout is attached), and the return of h-tile capacity (a GPU-built
    * generation's h tiles reach the host two frames late, so it cannot
    * shrink under one). mask: the tiles at h on a 4h background; absent,
-   * Dynamic's start (Coarse regions at 4h, solid contact at h). Returns the
-   * frame's refusal, with nothing changed. */
+   * Dynamic's start (Coarse regions at 4h, solid contact at h, the rest at
+   * h; under fluid.tiers.start "4h" the coarse seed the frame's capacity was
+   * sized for: dynamicSeed). Returns the frame's refusal, with nothing changed. */
   private hostMixedLayout(mask?:Uint8Array):string|undefined{
     const started=performance.now(),lattice=fluidRegionLattice(this.scene),regions=this.scene.fluid.refinementRegions??[];
-    let layout;
+    let layout,reserve:number|undefined;
     if(mask){
       const snapped=regions.flatMap(r=>{const box=uniformDetailTileBounds(lattice,{min:r.min_m,max:r.max_m});return box?[{id:r.id,...box}]:[];});
       layout=createUniformMixedLayoutFromWidths(lattice,Uint8Array.from(mask,m=>m?1:4),snapped,this.address);
     }else{
       const forced=this.mixedSolidPromotion().forced;
-      layout=createUniformMixedLayout(lattice,regions,1,forced,this.address);assertUniformMixedSolidPromotion(layout,forced);
+      // A coarse seed holds the ceiling the relayout reserves next: the first layout's detail storage is resident.
+      if(this.mixedSeed){layout=this.mixedSeed;reserve=this.mixedFrame!.fineCeiling;this.mixedSeed=undefined;}
+      else{layout=createUniformMixedLayout(lattice,regions,1,forced,this.address);assertUniformMixedSolidPromotion(layout,forced);}
     }
-    const built=performance.now(),refusal=this.mixedFrame!.updateLayout(layout);
+    const built=performance.now(),refusal=this.mixedFrame!.updateLayout(layout,reserve);
     if(refusal)return refusal;
     this.mixedGeneration++;this.mixedHostFine=layout.fineTiles.length;
     Object.assign(this.executionInfo,{uniformMixedGeneration:this.mixedGeneration,uniformMixedFineTiles:layout.fineTiles.length,
@@ -1472,9 +1508,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // The swept count is the marking's own; only a live edit's join scans the tiles.
       if(joined){for(let t=0;t<tiles;t++)if(swept?.[t]||joined[t])extra++;}else if(swept)extra+=this.mixedBodySwept;
       // The bound is the capacity the attach reserved, every tile the pool
-      // can store: nothing grows here. A census has no generation to fall
-      // back to.
-      const refusal=this.followMixedCapacity(this.address.poolTiles,extra,true,true);
+      // can store or the frame's h ceiling: nothing grows here. A census has
+      // no generation to fall back to.
+      const refusal=this.followMixedCapacity(this.mixedFrame!.fineCeiling,extra,true,true);
       if(refusal)throw new Error(`Uniform simulation detail: ${refusal}`);
       return true;
     }
@@ -1629,13 +1665,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * tiles newly planned), held above what the receipts count. live: the
    * liquid moves the need (a census), so the capacity keeps the rule's
    * headroom over the last receipt (UniformDetailCapacityRule). Growth is
-   * between frames (reserveFine) and stops at address.poolTiles: a build
-   * marks h only where a tile is stored, so none asks for more. Dynamic's
-   * attach reserves that much, so under it nothing here grows. The rule
+   * between frames (reserveFine) and stops at the frame's h ceiling:
+   * address.poolTiles (a build marks h only where a tile is stored, so none
+   * asks for more), or under fluid.tiers.start "4h" the tiers' ceiling, where
+   * a build deferred over it is fatal. Dynamic's attach reserves that much,
+   * so under it nothing here grows. The rule
    * holds what it reserved: the capacity never returns.
    * Returns the device's refusal of a growth, with nothing changed. */
   private followMixedCapacity(bound:number,extra:number,live:boolean,liquidBand:boolean):string|undefined{
-    const frame=this.mixedFrame!,rule=this.mixedCapacityRule,T=this.address.poolTiles,held=frame.ownership.capacity.fineTiles;
+    const frame=this.mixedFrame!,rule=this.mixedCapacityRule,T=frame.fineCeiling,held=frame.ownership.capacity.fineTiles;
+    if(this.mixedDeferredNeed>T)throw new Error(`Uniform simulation detail: a build needs ${this.mixedDeferredNeed} h tiles; fluid.tiers.bricks ${T/8} holds ${T}: raise fluid.tiers.bricks`);
     const needs=this.mixedNeeds,last=Math.max(needs.length?needs[needs.length-1]!:0,this.mixedDeferredNeed);
     // What must fit now, and what a growth reserves.
     const must=Math.max(Math.min(T,bound),this.mixedDeferredNeed,live?Math.min(T,this.grownMixedTiles(last)+extra):0);
@@ -1653,7 +1692,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.admitMixed(admission,!live&&!liquidBand&&bound<=admission);
     return undefined;
   }
-  /** The builder's admission capacity. A capacity of every tile the pool can store admits anything: no admit launch.
+  /** The builder's admission capacity, never over the frame's h ceiling. A capacity of every tile the pool can store admits anything: no admit launch.
    * fits: it holds everything a host-counted request asks, so the build under it moves no tile (a zero edit). */
   /** ceil((1 + grow) need) and ceil((1 + headroom) need) of the capacity rule,
    * each kept for the need it last answered: the product is a heap number
@@ -1669,7 +1708,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedGrownNeed=-1;private mixedGrown=0;private mixedRoomedNeed=-1;private mixedRoomed=0;
   private admitMixed(tiles?:number,fits=false):void{
     const frame=this.mixedFrame!,capacity=frame.ownership.capacity;
-    if(tiles!==this.mixedReserved){this.mixedBuilder!.setAdmission(tiles===undefined||tiles>=capacity.address.poolTiles?undefined:tiles);this.mixedReserved=tiles;this.staleMixed(fits?{tiles:0,reach:0}:undefined);}
+    if(tiles!==this.mixedReserved){const admit=tiles===undefined?undefined:Math.min(tiles,frame.fineCeiling);this.mixedBuilder!.setAdmission(admit===undefined||admit>=capacity.address.poolTiles?undefined:admit);this.mixedReserved=tiles;this.staleMixed(fits?{tiles:0,reach:0}:undefined);}
     this.publishMixedCapacity();
   }
   private publishMixedCapacity():void{

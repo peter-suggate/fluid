@@ -1,4 +1,5 @@
 import { UNIFORM_NEAR_SPAN, uniformBlockHeld, uniformNearFrom } from "./uniform-lattice-address";
+import { uniformTablePageWord } from "./uniform-window-address";
 
 /** The narrow band's kind-aware clamps, from a home coordinate.
  *
@@ -52,7 +53,7 @@ fn nbTraceEndpoint(home:vec3i,p:vec3f)->vec3f{
 const held: [boolean, boolean, boolean] = [false, false, false], step: [number, number, number] = [0, 0, 0], page: [number, number, number] = [0, 0, 0];
 /** umBlockOf on the host: the block of a page of the table, a sentinel's where it holds none. */
 function blockOf(table: ArrayLike<number>, blocks: number, at: readonly number[]): number {
-  return Math.min(table[(at[0]! & 63) | ((at[1]! & 63) << 6) | ((at[2]! & 63) << 12)]!, blocks - 1);
+  return Math.min(uniformTablePageWord(table, at[0]!, at[1]!, at[2]!), blocks - 1);
 }
 /** nbCellNear and nbTileNear on the host, over a page table and its
  * neighbour rows (27 words a block): p from home, both in the span's units

@@ -28,6 +28,7 @@
  * A radius over UNIFORM_RESIDENCY_PAGE_REACH pages makes every page of a
  * block that holds one resident, and the request then reaches that far. */
 import { UNIFORM_PAGE_POOL_FREE } from "./uniform-page-pool";
+import { UNIFORM_WINDOW_PAGES, uniformTablePageWord } from "./uniform-window-address";
 
 /** Pages the mark scans around a page, and the request's reach in pages.
  * A live pool's closure cap is this in tiles: a travel of 108 cells a step.
@@ -56,13 +57,13 @@ export function uniformResidencyBlockHeld(pages: UniformResidencyPages, block: n
 }
 /** The page at a 16-cell page coordinate of the window (umFarAirOwner's lookup): a page of block 0 or of the last block, never resident, where nothing is stored. */
 export function uniformResidencyPageAt(pages: UniformResidencyPages, x: number, y: number, z: number): number {
-  const word = pages.table[((x >> 1) & 63) | (((y >> 1) & 63) << 6) | (((z >> 1) & 63) << 12)]!;
+  const word = uniformTablePageWord(pages.table, x >> 1, y >> 1, z >> 1);
   return 8 * Math.min(word, pages.blocks.length - 1) + ((x & 1) | ((y & 1) << 1) | ((z & 1) << 2));
 }
 /** umPageCoord: a page's 16-cell page coordinate, into `out`. */
 export function uniformResidencyPageCoord(pages: UniformResidencyPages, page: number, out: number[]): number[] {
   const r = pages.blocks[page >>> 3]!;
-  out[0] = 2 * (r & 63) + (page & 1);out[1] = 2 * ((r >>> 6) & 63) + ((page >>> 1) & 1);out[2] = 2 * ((r >>> 12) & 63) + ((page >>> 2) & 1);
+  out[0] = 2 * (r & 255) + (page & 1);out[1] = 2 * ((r >>> 8) & 255) + ((page >>> 1) & 1);out[2] = 2 * ((r >>> 16) & 255) + ((page >>> 2) & 1);
   return out;
 }
 /** pageSeed's fold over a page's 64 tile lanes: `flags(lane)` is the tile's UNIFORM_RESIDENCY_SEED bits. */
@@ -110,9 +111,9 @@ export function uniformResidencyResident(pages: UniformResidencyPages, seeds: Ar
   const reach = (radius + 3) >> 2;
   if (reach > UNIFORM_RESIDENCY_PAGE_REACH) return true;
   const q = uniformResidencyPageCoord(pages, page, []), box: number[] = [];
-  const a = q.map(v => Math.max(v - reach, 0) >> 1), b = q.map(v => Math.min(v + reach, 127) >> 1);
+  const a = q.map(v => Math.max(v - reach, 0) >> 1), b = q.map(v => Math.min(v + reach, 2 * UNIFORM_WINDOW_PAGES - 1) >> 1);
   for (let z = a[2]!; z <= b[2]!; z++) for (let y = a[1]!; y <= b[1]!; y++) for (let x = a[0]!; x <= b[0]!; x++) {
-    const n = pages.table[x | (y << 6) | (z << 12)]!;
+    const n = uniformTablePageWord(pages.table, x, y, z);
     if (!(n >= 1 && n < pages.blocks.length - 1)) continue;
     for (let o = 0; o < 8; o++) {
       const s = [2 * x + (o & 1), 2 * y + ((o >> 1) & 1), 2 * z + (o >> 2)];

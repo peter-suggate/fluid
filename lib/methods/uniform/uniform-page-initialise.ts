@@ -8,7 +8,9 @@
  * a vertex field's 33^3 h texels (skirt included) and its 9^3 base, a
  * per-tile field's 8^3 texels, and the 3072 rows of every low-face-keyed
  * buffer it is given. A block's texels start at umBlockCoord(block) times the
- * class's block extent, in every texture.
+ * class's block extent, in every texture but an h store, which places them at
+ * the block's h slot (the storage's slotState; a block with none has no h
+ * texels to write).
  *
  * The fields are the storage's own list (fieldTextures) as of construction,
  * every generation of a ping-ponged field being a field of its own. AIR is
@@ -96,15 +98,17 @@ export function uniformPageInitialiseWGSL(layout:UniformPagePoolLayout,blockBits
  if(!PAGE_INIT_CHUNKS.includes(chunks))throw new RangeError(`Uniform page initialise chunks must be 1, 2, 4, 8, 16 or 32: ${chunks}`);
  const format=(f:UniformPageInitialiseField)=>f.kind==="face"?"rgba32float":"r32float";
  // A shape shallower than the chunks takes one z plane a chunk; the chunks past its depth idle.
- const fill=(name:string,s:UniformPageInitShape,value:string)=>{
+ const fill=(name:string,s:UniformPageInitShape,value:string,g="g")=>{
   const z=Math.max(1,s.depth/chunks),slabs=s.depth/z,extra=s.skirt?`+vec3u(vec2u(l.xy==vec2u(7u)),u32(chunk==${slabs-1}u))`:"";
-  return `${slabs<chunks?`if(chunk<${slabs}u)`:""}{let o=g*vec3u(${s.extent.map(n=>`${n}u`).join(",")});let a=vec3u(${s.step}u*l.xy,${z}u*chunk);let b=a+vec3u(${s.step}u,${s.step}u,${z}u)${extra};
+  return `${slabs<chunks?`if(chunk<${slabs}u)`:""}{let o=${g}*vec3u(${s.extent.map(n=>`${n}u`).join(",")});let a=vec3u(${s.step}u*l.xy,${z}u*chunk);let b=a+vec3u(${s.step}u,${s.step}u,${z}u)${extra};
    for(var z=a.z;z<b.z;z++){for(var y=a.y;y<b.y;y++){for(var x=a.x;x<b.x;x++){textureStore(${name},vec3i(o+vec3u(x,y,z)),${value});}}}}`;
  };
  return /* wgsl */`${uniformPagePoolWGSL(layout,0,0)}
 // x: 0 the blocks the last commit claimed, 1 every block.
 @group(0) @binding(1) var<uniform> piMode:vec4u;
 ${rows.map((_,j)=>`@group(0) @binding(${2+j}) var<storage,read_write> piRows${j}:array<u32>;`).join("\n")}
+// The detail storage's h slots (slotState): an h store places a block at its slot, none at slot 0 but the AIR block's own.
+@group(0) @binding(${2+rows.length}) var<storage,read> piSlots:array<u32>;
 ${fields.map((f,i)=>`@group(1) @binding(${2*i}) var piH${i}:texture_storage_3d<${format(f)},write>;@group(1) @binding(${2*i+1}) var piBase${i}:texture_storage_3d<${format(f)},write>;`).join("\n")}
 const PI_SLOTS:u32=${uniformPageInitSlots(layout)}u;const PI_CHUNKS:u32=${chunks}u;const PI_BITS:u32=${blockBits}u;
 fn piBlockCoord(b:u32)->vec3u{let m=(1u<<PI_BITS)-1u;return vec3u(b&m,(b>>PI_BITS)&m,b>>(2u*PI_BITS));}
@@ -113,9 +117,9 @@ fn piBlockCoord(b:u32)->vec3u{let m=(1u<<PI_BITS)-1u;return vec3u(b&m,(b>>PI_BIT
  let chunk=w.x%PI_CHUNKS;
  for(var i=w.x/PI_CHUNKS;i<count;i+=PI_SLOTS){
   var block=i;if(!all){block=upNewBlock(i);}
-  let g=piBlockCoord(block);
+  let g=piBlockCoord(block);let slot=piSlots[block];let gh=piBlockCoord(slot);let held=slot!=0u||block==0u;
 ${fields.map((f,i)=>{const s=UNIFORM_PAGE_INIT_SHAPES[f.kind],v=literal(f.value),value=f.kind==="face"?`vec4f(${v})`:`vec4f(${v},0.0,0.0,0.0)`;
-  return `  // A field with no h store binds a 1^3 stand-in there.\n  if(textureDimensions(piH${i}).x>1u)${fill(`piH${i}`,s.h,value)}\n  ${fill(`piBase${i}`,s.base,value)}`;}).join("\n")}
+  return `  // A field with no h store binds a 1^3 stand-in there.\n  if(textureDimensions(piH${i}).x>1u&&held)${fill(`piH${i}`,s.h,value,"gh")}\n  ${fill(`piBase${i}`,s.base,value)}`;}).join("\n")}
 ${rows.map((r,j)=>`  for(var r=lane+64u*chunk;r<${UNIFORM_PAGE_INIT_KEYS.lowFace}u;r+=${64*chunks}u){piRows${j}[${r.offset}u+${UNIFORM_PAGE_INIT_KEYS.lowFace}u*block+r]=${bits(r.value)}u;}`).join("\n")}
  }
 }`;
@@ -189,7 +193,7 @@ export class UniformPageInitialise{
    literal(value);return {buffer,offset,value};
   });
   // Two storage textures a field; the pool state beside the row buffers.
-  const per=Math.floor(device.limits.maxStorageTexturesPerShaderStage/2),most=device.limits.maxStorageBuffersPerShaderStage-1;
+  const per=Math.floor(device.limits.maxStorageTexturesPerShaderStage/2),most=device.limits.maxStorageBuffersPerShaderStage-2;
   if(per<1||most<1)throw new RangeError("Uniform page initialise: the device binds no storage texture pair or no second storage buffer in a stage");
   const count=Math.max(Math.ceil(this.fields.length/per),Math.ceil(rows.length/most));
   for(let i=0;i<count;i++)this.batches.push({fields:this.fields.slice(per*i,per*i+per),rows:rows.slice(most*i,most*i+most),held:{} as UniformDetailGroup});
@@ -197,15 +201,16 @@ export class UniformPageInitialise{
  /** The texture group of a batch over the fields' textures as they are now. */
  private bind(i:number):GPUBindGroup{
   const s=this.storage,G=s.layout.address.blockGrid;
-  const shaped=(t:GPUTexture,e:readonly [number,number,number],what:string)=>{
-   if(t.width!==e[0]*G[0]||t.height!==e[1]*G[1]||t.depthOrArrayLayers!==e[2]*G[2])throw new Error(`Uniform page initialise: ${t.label} ${what} is ${t.width}x${t.height}x${t.depthOrArrayLayers}, not ${e.join("x")} texels for each of ${G.join("x")} blocks`);
+  // An h store's depth is its slots' (whole blocks; the block grid's while every block is its own slot).
+  const shaped=(t:GPUTexture,e:readonly [number,number,number],what:string,slots=false)=>{
+   if(t.width!==e[0]*G[0]||t.height!==e[1]*G[1]||(slots?t.depthOrArrayLayers%e[2]!==0||t.depthOrArrayLayers>e[2]*G[2]:t.depthOrArrayLayers!==e[2]*G[2]))throw new Error(`Uniform page initialise: ${t.label} ${what} is ${t.width}x${t.height}x${t.depthOrArrayLayers}, not ${e.join("x")} texels for each of ${G.join("x")} blocks`);
    return t;
   };
   return this.device.createBindGroup({label:`Uniform page initialise fields ${i}`,layout:this.textureLayouts[i]!,entries:this.batches[i]!.fields.flatMap((f,k)=>{
    const shape=UNIFORM_PAGE_INIT_SHAPES[f.kind],base=s.baseOf(f.handle),h=s.physical(f.handle);
    if(!base)throw new Error(`Uniform page initialise: ${f.handle.label} has no base block`);
    // A per-tile field, and every field while no h generation is resident, is its base alone.
-   return [{binding:2*k,resource:(h===base?s.stub(f.handle):shaped(h,shape.h.extent,"h store")).createView()},{binding:2*k+1,resource:shaped(base,shape.base.extent,"base").createView()}];
+   return [{binding:2*k,resource:(h===base?s.stub(f.handle):shaped(h,shape.h.extent,"h store",true)).createView()},{binding:2*k+1,resource:shaped(base,shape.base.extent,"base").createView()}];
   })});
  }
  /** Compile every pipeline encode and encodeAll launch, and bind them. */
@@ -217,10 +222,10 @@ export class UniformPageInitialise{
   const pipelines=await Promise.all(this.batches.map(async(b,i)=>{
    const module=await compile(device,`Uniform page initialise ${i}`,uniformPageInitialiseWGSL(l,bits,this.chunks,b.fields,b.rows));
    const buffers=device.createBindGroupLayout({label:`Uniform page initialise buffers ${i}`,entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-    ...b.rows.map((_,j)=>({binding:2+j,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))]});
+    ...b.rows.map((_,j)=>({binding:2+j,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),{binding:2+b.rows.length,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]});
    const textures=this.textureLayouts[i]=device.createBindGroupLayout({label:`Uniform page initialise fields ${i}`,entries:b.fields.flatMap((f,k)=>[0,1].map(t=>({binding:2*k+t,visibility:GPUShaderStage.COMPUTE,
     storageTexture:{access:"write-only" as const,format:(f.kind==="face"?"rgba32float":"r32float") as GPUTextureFormat,viewDimension:"3d" as const}})))});
-   const group=(mode:GPUBuffer)=>device.createBindGroup({layout:buffers,entries:[{binding:0,resource:{buffer:this.pool.state}},{binding:1,resource:{buffer:mode}},...b.rows.map((r,j)=>({binding:2+j,resource:{buffer:r.buffer}}))]});
+   const group=(mode:GPUBuffer)=>device.createBindGroup({layout:buffers,entries:[{binding:0,resource:{buffer:this.pool.state}},{binding:1,resource:{buffer:mode}},...b.rows.map((r,j)=>({binding:2+j,resource:{buffer:r.buffer}})),{binding:2+b.rows.length,resource:{buffer:this.storage.slotState,size:4*l.blocks}}]});
    this.listed[i]=group(this.mode[0]!);this.every[i]=group(this.mode[1]!);
    // The storage rebuilds the texture group when it replaces a field's textures (admit, retire, an adopted base).
    let last:GPUBindGroup|undefined;const build=(base?:boolean)=>base&&last?last:last=this.bind(i);

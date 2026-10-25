@@ -25,8 +25,8 @@ ${uniformSolidRefinementWGSL(0)}
   if(c==1u){solidRecord[13u].x=.5;}
   if(c==2u){solidRecord[13u].y=.5;}
   if(c==3u){solidRecord[12u].y=.5;}
-  if(c==4u){solidRecord[20u*27u+2u*13u+1u].z=1.0;}
-  if(c==5u){solidRecord[20u*27u+2u*12u+1u].z=1.0;}
+  if(c==4u){solidRecord[4u*27u+2u*13u+1u].z=1.0;}
+  if(c==5u){solidRecord[4u*27u+2u*12u+1u].z=1.0;}
   if(c==6u){solidRecord[12u]=vec4f(0);solidRecord[27u+36u+1u]=vec4f(f32(0x111111u));solidRecord[27u+36u+2u]=vec4f(f32(0x111111u));}
   if(c==7u){solidRecord[13u]=vec4f(0);solidRecord[27u+39u+1u]=vec4f(f32(0x111111u));solidRecord[27u+39u+2u]=vec4f(f32(0x111111u));}
   if(c==9u){solidRecord[13u]=vec4f(1,.5,.5,.5);solidRecord[27u+39u+1u]=vec4f(f32(0x555555u));solidRecord[27u+39u+2u]=vec4f(f32(0x555555u));}
@@ -34,11 +34,12 @@ ${uniformSolidRefinementWGSL(0)}
   // the certificate, including the two axes sharing packed words.
   if(c>=10u&&c<16u){let slots=array<u32,6>(0u,15u,16u,31u,32u,47u);let slot=slots[c-10u];let word=slot/6u;
    solidRecord[27u+39u+1u+word/4u][word%4u]-=f32(8u<<(4u*(slot%6u)));}
-  if(c>=16u){let row=23u*27u+1u+61u*13u+49u+8u;
+  // Tile 13's low faces in slot 0 (its boundary row's word 1).
+  if(c>=16u){solidRecord[4u*27u+2u*13u+1u].w=1.0;let row=8u*27u+2u+16u+49u+8u;
    for(var i=0u;i<4u;i++){solidRecord[row+i]=vec4f(.5);}
    if(c==17u){solidRecord[row+3u].w=1.0;}
    if(c==18u){for(var i=0u;i<4u;i++){solidRecord[row+i]=vec4f(.25);}}
-   if(c==19u){solidRecord[20u*27u+2u*13u+1u].z=1.0;}
+   if(c==19u){solidRecord[4u*27u+2u*13u+1u].z=1.0;}
   }
   result[c]=u32(umSolidGeometryExact(13u));
  }

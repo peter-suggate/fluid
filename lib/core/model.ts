@@ -359,7 +359,7 @@ export interface SceneDescription {
      * shuffle of the pages' blocks. air: pages of the box seeded as air, with
      * no storage, by page coordinate.
      */
-    pagePool?: { blocks?: number; memory_MiB?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
+    pagePool?: { blocks?: number; memory_MiB?: number; /** Super-block slots of the page directory (128³ cells each); default 1.5 x a closed box's footprint, two a block with an open top. */ superBlocks?: number; permute?: number; air?: [number, number, number][]; /** Oracle-only initial window placement, off by default. */ probeBoxPage?: [number,number,number] };
     /**
      * Uniform NB-FLIP: storage capacity by tier, separate from the page pool.
      * bricks: the h capacity in 8³-cell bricks (8 h tiles each). Set, it sizes
@@ -368,8 +368,18 @@ export interface SceneDescription {
      * sizing. A source or the initial band that needs more is fatal, naming
      * these; optional reseeding at capacity is deferred. The persistent fine
      * brick store (uniformFineBrickCapacity) reads bricks the same way.
+     * fineBlocks: compacted h stores (opt-in) holding this many blocks
+     * (uniformFineSlotCapacity), or "auto" for 1.5 × the t=0 detail ring's
+     * with a floor of 16 (under start "4h", at least the h ceiling at 32
+     * tiles a block). Unset, every block keeps its h storage (the stores
+     * the size of the block grid), unless start is "4h".
+     * start: Dynamic detail's t=0 layout. "h" (default): every stored tile
+     * at h, frame 1's census coarsening it. "4h": every tile at 4h but Fine
+     * regions, the census refining it; the h capacity is
+     * then held at bricks (default: the start's bricks × 1.5, floor 256)
+     * from construction, particles with it, and fineBlocks defaults to "auto".
      */
-    tiers?: { bricks?: number; particlesPerFineCell?: number };
+    tiers?: { bricks?: number; particlesPerFineCell?: number; fineBlocks?: number | "auto"; start?: "h" | "4h" };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -677,9 +687,14 @@ export function validateScene(scene: SceneDescription): string[] {
   if (pool?.memory_MiB !== undefined && (!(pool.memory_MiB > 0) || pool.blocks !== undefined)) {
     errors.push("A page pool's memory budget must be positive, and it replaces a block count");
   }
+  if (pool?.superBlocks !== undefined && !(Number.isInteger(pool.superBlocks) && pool.superBlocks >= 1 && pool.superBlocks <= 4094)) {
+    errors.push("A page pool's super-blocks must be an integer in 1..4094");
+  }
   const tiers = scene.fluid?.tiers;
   if (tiers?.bricks !== undefined && !(Number.isInteger(tiers.bricks) && tiers.bricks > 0)) errors.push("fluid.tiers.bricks must be a positive integer");
   if (tiers?.particlesPerFineCell !== undefined && !(tiers.particlesPerFineCell > 0 && tiers.particlesPerFineCell <= 64)) errors.push("fluid.tiers.particlesPerFineCell must be in (0, 64]");
+  if (tiers?.fineBlocks !== undefined && tiers.fineBlocks !== "auto" && !(Number.isInteger(tiers.fineBlocks) && tiers.fineBlocks > 0)) errors.push("fluid.tiers.fineBlocks must be a positive integer or \"auto\"");
+  if (tiers?.start !== undefined && tiers.start !== "h" && tiers.start !== "4h") errors.push("fluid.tiers.start must be \"h\" or \"4h\"");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {

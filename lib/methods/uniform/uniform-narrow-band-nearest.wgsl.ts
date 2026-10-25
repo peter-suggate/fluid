@@ -13,22 +13,22 @@ var<workgroup> nbReuseLive:u32;
 // revisions: continuous surface motion inside the same crossing cells does
 // not change these integer minima. One group owns each 16h control region.
 @compute @workgroup_size(64) fn depthReuseSnapshot(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- let regions=select(NB_REUSE_CAPACITY,nbPlanRegions(lane),nbListWithSnapshot);
+ let regions=select(NB_REUSE_SCAN,nbPlanRegions(lane),nbListWithSnapshot);
  for(var slot=group.x;slot<regions;slot+=groups.x){
   let region=nbPlanRegion(slot,lane);
   let tile=nbReuseTile(region,lane);
-  if(nbListWithSnapshot){nbDepthList(tile);}if(region>=NB_REUSE_CAPACITY){continue;}
+  if(nbListWithSnapshot){nbDepthList(tile);}let held=nbReuseSlotUniform(region,lane);if(held==NB_REUSE_NO_SLOT){continue;}
   // Pooled storage includes free 32h pages. Invalidate without touching
   // their masks, world mapping, or halo page tables.
   // 2: free and its words cleared by this search's prepare or before (nbPrepareReuse).
   if(lane==0u){nbReuseLive=select(select(0u,2u,atomicLoad(&bins[NB_REUSE_ALLOWED+region])==2u),1u,umTileLive(tile));}
   let live=workgroupUniformLoad(&nbReuseLive);
   if(live!=1u){
-   if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);atomicStore(&bins[NB_REUSE_REGION_PLANE+8u*region+7u],0u);}
-   if(live==0u){atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);}continue;
+   if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_VALID+region],0u);atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],0u);}
+   continue;
   }
   let origin=(umTileCoord(tile)/4u)*4u;
-  let base=NB_REUSE_NEAREST_STATE+158u*region;
+  let base=NB_REUSE_NEAREST_STATE+158u*held;
   if(lane==0u){atomicStore(&nbReuseClean,select(0u,1u,nbReuseCacheEnabled()&&umTileLive(tile)&&(atomicLoad(&bins[NB_REUSE_NEAREST_VALID+region])&5u)==5u));}
   workgroupBarrier();
   for(var word=0u;word<2u;word++){
@@ -50,7 +50,7 @@ var<workgroup> nbMetricClean:atomic<u32>;
  let regions=nbPlanRegions(lane);
  for(var slot=group.x;slot<regions;slot+=groups.x){
   let region=nbPlanRegion(slot,lane);
-  if(region<NB_REUSE_CAPACITY){
+  if(nbReuseSlotUniform(region,lane)!=NB_REUSE_NO_SLOT){
   let tile=nbReuseTile(region,lane);
   if(lane==0u){nbReuseLive=select(0u,1u,umTileLive(tile));}
   if(workgroupUniformLoad(&nbReuseLive)==0u){continue;}
@@ -64,7 +64,7 @@ var<workgroup> nbMetricClean:atomic<u32>;
    if(!umKeyStored(key)){if(!nbRegionCold(region)){atomicStore(&nbMetricClean,0u);}}
    else{
     let other=nbReuseRegion(key);
-    if(other>=NB_REUSE_CAPACITY){atomicStore(&nbReuseClean,0u);atomicStore(&nbMetricClean,0u);}
+    if(nbReuseSlot(other)==NB_REUSE_NO_SLOT){atomicStore(&nbReuseClean,0u);atomicStore(&nbMetricClean,0u);}
     else{
      if((atomicLoad(&bins[NB_REUSE_NEAREST_VALID+other])&2u)==0u){atomicStore(&nbReuseClean,0u);}
      if(atomicLoad(&bins[NB_REUSE_ALLOWED+other])!=1u){atomicStore(&nbMetricClean,0u);}
@@ -74,8 +74,6 @@ var<workgroup> nbMetricClean:atomic<u32>;
   workgroupBarrier();
   let nearest=atomicLoad(&nbReuseClean)!=0u;let metric=nearest&&atomicLoad(&nbMetricClean)!=0u;
   if(lane==0u){atomicStore(&bins[NB_REUSE_NEAREST_FLAGS+region],select(0u,1u,nearest)|select(0u,2u,metric));}
-  // Clear omitted tiles too: neighbor changes cannot age back into hits.
-  if(!metric){atomicStore(&bins[NB_REUSE_METRIC_VALID+64u*region+lane],0u);}
   workgroupBarrier();
   }
   if(nbXWithSelect){
@@ -142,7 +140,7 @@ fn nbNearestXRow(tile:u32,row:u32){
   }
  }
  atomicStore(&bins[NB_DEPTH_A+16u*tile+row],packed);
- if(nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY){atomicStore(&bins[nbNearestCacheAt(tile,0u,row)],packed);}
+ if(nbNearestCached(tile)){atomicStore(&bins[nbNearestCacheAt(tile,0u,row)],packed);}
 }
 @compute @workgroup_size(64) fn depthNearestX(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let job=4u*group.x+lane/16u;if(job>=atomicLoad(&bins[NB_BAND+1u])){return;}
@@ -162,7 +160,7 @@ fn nbNearestXRow(tile:u32,row:u32){
  }
  let packed=best.x|(best.y<<8u)|(best.z<<16u)|(best.w<<24u);
  atomicStore(&bins[NB_DEPTH_A+UM_CELL_KEYS/4u+16u*tile+lane%16u],packed);
- if(nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY){atomicStore(&bins[nbNearestCacheAt(tile,1u,lane%16u)],packed);}
+ if(nbNearestCached(tile)){atomicStore(&bins[nbNearestCacheAt(tile,1u,lane%16u)],packed);}
 }
 @compute @workgroup_size(64) fn depthNearestZ(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let job=4u*group.x+lane/16u;let jobLive=job<atomicLoad(&bins[NB_BAND+1u]);
@@ -188,7 +186,7 @@ fn nbNearestXRow(tile:u32,row:u32){
   if(distance[k]<1000){nearest[k]=umCellAt(vec3u(vec3i(bestX[k],bestY[k],bestZ[k])));}
  }
  let at=NB_DEPTH_B+umCellAt(vec3u(p));
- if(nbReuseCacheEnabled()&&nbReuseRegion(tile)<NB_REUSE_CAPACITY){
+ if(nbNearestCached(tile)){
   let cached=nbNearestFinalAt(tile,lane%16u);for(var k=0u;k<4u;k++){atomicStore(&bins[cached+k],nearest[k]);}
  }
  atomicStore(&bins[at],nearest.x);atomicStore(&bins[at+1u],nearest.y);atomicStore(&bins[at+2u],nearest.z);atomicStore(&bins[at+3u],nearest.w);

@@ -1566,8 +1566,10 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   if(!this.retainPipelines)throw new Error("Paired extension is not initialized");
   const pass=encoder.beginComputePass(RETAIN_PASS),o=this.ownership;
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[0].group);
-  if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(this.retainPipelines[0]));pass.dispatchWorkgroups(Math.min(4096,o.capacity.fineTiles));}
-  pass.setPipeline(uniformDetailPick(this.retainPipelines[1]));pass.dispatchWorkgroups(Math.min(4096,o.capacity.tiles));pass.end();
+  // Each strides its GPU count: a workgroup an h tile, then the regular 4h
+  // packs and coarse seams (the coarse merged list), at the lists' buffered widths.
+  if(o.capacity.fineTiles>0)o.dispatchCounted(pass,this.retainPipelines[0],o.capacity.fineTiles,"fine");
+  o.dispatchCounted(pass,this.retainPipelines[1],o.capacity.tiles,"coarseMerged");pass.end();
  }
  /** Seed the current field and shared geometry without overwriting the old
   * scalar payload retained before pressure, then sweep both together. */
@@ -1595,7 +1597,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
   pass.dispatchWorkgroups(this.restrictGroups);this.encodeHierarchy(pass,false,2);
   pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,groups[sweeps%2]!.group);
   // The fine publisher grid-strides its live tile list; cap empty launch groups.
-  if(o.capacity.fineTiles>0){pass.setPipeline(uniformDetailPick(p.fine));pass.dispatchWorkgroups(Math.min(8192,o.capacity.fineTiles));}
+  if(o.capacity.fineTiles>0)o.dispatchBuffered(pass,p.fine,"fine",Math.min(8192,o.capacity.fineTiles));
   // The coarse publisher strides its 4h list from a fixed grid.
   pass.setPipeline(uniformDetailPick(p.coarse));pass.dispatchWorkgroups(UNIFORM_LIVE_KEY_GROUPS);pass.end();
   this.snapshotEncoder=encoder;this.snapshotSweeps=sweeps;

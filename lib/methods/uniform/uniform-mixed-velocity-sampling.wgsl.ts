@@ -53,15 +53,15 @@ fn umHangingPlaneAddress(slot:u32,local:vec3u,axis:u32)->u32 {
  * Channel w is 1 where a tap may read xyz (a unit or a slotted tile of a
  * stored page, whose xyz are umVelocityTap1's, or a SOLID cell), 0 elsewhere (an
  * AIR page, or a coarse tile the fill did not write).
- * The blocks that hold no page are never written; a sample whose tile is not
- * stored never reads the halo. */
+ * The blocks that hold no page or no h slot are never written; a sample
+ * whose tile is not stored, or whose block has no h slot, never reads the
+ * halo. The texture is UNIFORM_UNIT_HALO_EDGE texels a block of the h slots
+ * (UniformDetailStorage.createSlotted): the block grid until compaction. */
 export const UNIFORM_UNIT_HALO_EDGE = 35;
-export function uniformUnitHaloExtent(address: { readonly blockGrid: readonly number[] }): [number, number, number] {
-  return [UNIFORM_UNIT_HALO_EDGE * address.blockGrid[0]!, UNIFORM_UNIT_HALO_EDGE * address.blockGrid[1]!, UNIFORM_UNIT_HALO_EDGE * address.blockGrid[2]!];
-}
-/** The texel of block b's page's first cell (local 0, 0, 0). */
+/** The texel of block b's page's first cell (local 0, 0, 0): the halo
+ * places a block at its h slot, as the h stores do (umFineCoord). */
 export const uniformUnitHaloWGSL = /* wgsl */ `
-fn umUnitHaloOrigin(b:u32)->vec3i{return ${UNIFORM_UNIT_HALO_EDGE}*umBlockCoord(b)+vec3i(2);}
+fn umUnitHaloOrigin(b:u32)->vec3i{return ${UNIFORM_UNIT_HALO_EDGE}*umFineCoord(b)+vec3i(2);}
 `;
 
 /** MAC sampling from canonical mixed face values. The caller supplies
@@ -318,7 +318,7 @@ fn umCachedFineTile(key:u32)->bool {return (umTileSupport(key)&1u)!=0u&&umTileWi
 var<private> umUnitHome:vec4i=vec4i(-1);
 fn umUnitHaloHome(s:UMSampleTile)->vec4i {
  let block=s.key>>9u;
- if(umRegularFine||textureDimensions(${unitHalo}).x<2u||!umBlockStored(block)){return vec4i(-1);}
+ if(umRegularFine||textureDimensions(${unitHalo}).x<2u||!umBlockStored(block)||umFineSlot(block)==0u){return vec4i(-1);}
  return vec4i(umUnitHaloOrigin(block)-((s.tile>>vec3u(3u))<<vec3u(5u)),0);
 }
 `:""}
