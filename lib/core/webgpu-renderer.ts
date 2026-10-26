@@ -1643,9 +1643,11 @@ export class FluidLabRenderer {
       const pendingBatches = this.gpuPendingBatches;
       const duringCompilation = compilation.state === "compiling" && compilation.progress
         ? ` while compiling ${compilation.progress.label}` : "";
-      console.error("GPU device lost", { reason: info.reason, message: info.message,
+      const diagnostics = { reason: info.reason, message: info.message,
         compilation, pendingBatches, initializingScene: Boolean(this.gpuFluidPending),
-        allocatedSolverBytes: this.gpuFluid?.info.allocatedBytes });
+        recentCompilations: gpuCompilationManagerFor(device).compilationTimings().slice(-12),
+        allocatedSolverBytes: this.gpuFluid?.info.allocatedBytes };
+      console.error("GPU device lost", diagnostics);
       invalidateGPUCompilationManager(device, info.message || info.reason);
       this.deviceLost = true;
       const fluid = this.gpuFluid;
@@ -1671,7 +1673,7 @@ export class FluidLabRenderer {
       // Breadcrumbs for hang diagnosis: the last known solver state narrows a
       // watchdog reset down to a stage without needing a reproduction.
       if (fluid) console.error("GPU device lost mid-simulation", { reason: info.reason, message: info.message, submittedTime_s: fluid.info.submittedTime_s, completedTime_s: fluid.info.completedTime_s, pendingBatches, encodedSteps: fluid.info.encodedSteps, physicsTrace: fluid.info.physicsTrace });
-      this.onStatus({ state: "lost", label: `GPU device lost${duringCompilation}: ${info.message || info.reason}`, resource: webGPUPlatformResourcePlugin });
+      this.onStatus({ state: "lost", label: `GPU device lost${duringCompilation}: ${info.message || info.reason}`, diagnostics, resource: webGPUPlatformResourcePlugin });
       // Device loss is terminal. A new session requires an explicit reload.
     }).catch((error: unknown) => {
       if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);

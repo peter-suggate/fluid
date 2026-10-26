@@ -1,5 +1,6 @@
 import type { SimulationFailure } from "./simulation-failure";
 import type { ResourcePluginDefinition } from "./resource-plugin";
+import type { GPUCompilationSnapshot, GPUCompilationTiming } from "./gpu-compilation-manager";
 
 /**
  * Device-lifecycle status published by whichever resource currently owns the
@@ -31,4 +32,7 @@ export type GPUStatus =
   | { state: "cancelled"; label: string; resource: ResourcePluginDefinition }
   | { state: "stopping"; label: string; resource: ResourcePluginDefinition }
   | { state: "unavailable"; label: string; failure?: SimulationFailure; resource: ResourcePluginDefinition }
-  | { state: "lost"; label: string; resource: ResourcePluginDefinition };
+  | { state: "lost"; label: string; resource: ResourcePluginDefinition;
+      diagnostics?: { reason: GPUDeviceLostReason; message: string; compilation: GPUCompilationSnapshot;
+        recentCompilations: readonly GPUCompilationTiming[];
+        pendingBatches: number; initializingScene: boolean; allocatedSolverBytes?: number } };

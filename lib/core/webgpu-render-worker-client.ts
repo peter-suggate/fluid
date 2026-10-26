@@ -599,6 +599,7 @@ export class WebGPURenderWorkerClient {
           previousLabel: this.lastRuntimeStatus?.label,
           completedPresentations: this.snapshot.completedPresentationCount,
           presentationResolution: this.snapshot.presentationResolution,
+          ...(status.state === "lost" && { diagnostics: status.diagnostics }),
         }));
         this.runtimeUnavailable = status.label;
         // The worker may still need to drain/destroy GPU resources. Reject
