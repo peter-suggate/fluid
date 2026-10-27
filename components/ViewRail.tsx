@@ -2,6 +2,10 @@
 
 import { useState } from "react";
 import { applicationViews, useFeatureComposition } from "../lib/features/ui/FeatureSlot";
+import { simulationFeature } from "../lib/features/simulation/definition";
+import { viewRailFeature } from "../lib/features/view-rail/definition";
+import type { SceneOverlay } from "../lib/core/stores/ui-store";
+import { useSession } from "../lib/core/session/session-context";
 import type { FeatureComposition, ResolvedSection } from "../lib/framework/composition";
 import { ComposedFeatureSlot } from "../lib/framework/ui/slot";
 import { EditorActionPathGlyph } from "./EditorActionIcon";
@@ -24,6 +28,17 @@ const RAILS = [
 ] as const;
 
 const sectionKey = (section: ResolvedSection) => `${section.feature}/${section.id}`;
+/**
+ * The cards that are the two pipeline instruments' homes, so their open state
+ * is the instrument's: S or V, the ring's wedge and `?overlay=` all open them,
+ * and Escape puts them away.
+ */
+const INSTRUMENT_CARDS: Partial<Record<SceneOverlay, string>> = {
+  "sim-pipeline": `${simulationFeature.id}/${simulationFeature.sections[0].id}`,
+  "render-pipeline": `${viewRailFeature.id}/${viewRailFeature.sections[0].id}`,
+};
+const instrumentForCard = (key: string | undefined) =>
+  (Object.keys(INSTRUMENT_CARDS) as SceneOverlay[]).find((overlay) => INSTRUMENT_CARDS[overlay] === key);
 const filled = (composition: FeatureComposition, slot: string) =>
   composition.placements.some((placement) => placement.slot === slot);
 
@@ -45,7 +60,17 @@ const filled = (composition: FeatureComposition, slot: string) =>
  */
 export function ViewRail() {
   const composition = useFeatureComposition();
-  const [openId, setOpenId] = useState<string>();
+  const session = useSession();
+  const overlay = session.ui((state) => state.sceneOverlay);
+  const setSceneOverlay = session.ui((state) => state.setSceneOverlay);
+  const [localId, setLocalId] = useState<string>();
+  const openId = (overlay && INSTRUMENT_CARDS[overlay]) ?? localId;
+  const setOpenId = (key: string | undefined) => {
+    const instrument = instrumentForCard(key);
+    if (instrument) { setLocalId(undefined); setSceneOverlay(instrument); return; }
+    if (overlay && INSTRUMENT_CARDS[overlay]) setSceneOverlay(null);
+    setLocalId(key);
+  };
   const rails = RAILS.map((rail) => ({
     ...rail,
     sections: composition.sections.filter((section) => section.surface === rail.surface && filled(composition, section.slot)),

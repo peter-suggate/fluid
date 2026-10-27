@@ -902,11 +902,8 @@ button.card[data-active] { border-color: var(--accent); }
 /* Every band and section inside the pane shares one inline gutter, so the
    spine, the collar rules and the header all hang off the same edge. */
 .scene-instrument-body > .render-status-line,
-.scene-instrument-body > .render-inline-warning,
 .scene-instrument-section { margin: 0; padding: 9px 14px; }
-.scene-instrument-body > .grid-readout { margin: 0; padding: 7px 14px; }
-.scene-instrument-section + .scene-instrument-section,
-.scene-instrument .rp-graph + .scene-instrument-section { border-top: 1px solid var(--instrument-hair-soft); }
+.scene-instrument-section + .scene-instrument-section { border-top: 1px solid var(--instrument-hair-soft); }
 .scene-instrument .control-hint { display: block; margin-top: 9px; color: var(--dim); font: var(--text-note); }
 @media (max-width: 720px) {
   /* Below this the column would leave no scene beside it, which defeats the
@@ -933,24 +930,6 @@ button.card[data-active] { border-color: var(--accent); }
    ellipsis through the last of them reads as a broken readout — the labels are
    the whole point of showing three. */
 .render-status-line code { min-width: 0; margin-left: auto; color: var(--micro); font: var(--text-micro); font-variant-numeric: tabular-nums; text-align: right; }
-
-/* The quality rung. A row of quiet words, not a segmented control: nothing here
-   is pressed often enough to earn four filled buttons. */
-.render-preset-strip { min-height: 30px; padding: 4px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 2px; border-bottom: 1px solid var(--instrument-hair-soft); }
-.render-preset-strip > span { margin-right: 5px; color: var(--dim); font: 500 var(--size-2)/1.3 var(--sans); }
-/* The rungs are a `Choice`, drawn borderless until chosen: a strip of named
-   profiles reads as a scale, not as four boxed buttons. */
-.render-preset-strip .ui-choice > button { height: 22px; padding: 0 8px; border-color: transparent; color: var(--label); text-transform: capitalize; }
-.render-preset-strip .ui-choice > button:hover { background: var(--hover); color: var(--ink); }
-.render-preset-strip .ui-choice > button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
-.render-preset-strip output { margin-left: auto; color: var(--micro); font: var(--text-micro); }
-.render-withheld-reset { margin-left: auto; border-color: var(--amber-line) !important; color: var(--amber-ink) !important; }
-.render-frame-options { border-bottom: 1px solid var(--instrument-hair-soft); }
-
-/* What the configuration actually allocated: a fact line, not a boxed readout. */
-.grid-readout { display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--instrument-hair-soft); }
-.grid-readout strong { color: var(--label); font: var(--text-readout); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.grid-readout span { overflow: hidden; color: var(--micro); font: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; }
 
 /* Diagnostics blocks: the run's own invariants, and the body's live state. */
 .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
@@ -1072,159 +1051,6 @@ button.card[data-active] { border-color: var(--accent); }
 .recording-stats dd { margin: 0; color: var(--accent-strong); font: var(--text-readout); }
 .recording-note { margin: 0; padding: 12px 17px 15px; color: var(--muted); font-size: var(--size-3); line-height: 1.55; }
 
-
-/* SVO tuning panel.
- *
- * Two type sizes and two text colours, and nothing below them. The floor is
- * 11px for anything sentence-cased and 10px for tracked uppercase micro-labels,
- * which carry a taller cap height over three or four words; the panel used to
- * run 6px labels on `--dim`, which is unreadable and fails AA on size and
- * contrast at once. Every grid here is `auto-fit`, so the columns answer to the
- * container's own width.
- *
- * The panel *shell* these controls used to sit in — its header, status line,
- * PROFILE strip and withheld-stage reset — went with `VisualPanel`. The controls
- * themselves stay: `RenderPipeline` and `components/ui` still draw them, and a
- * later slice rehosts them as a scene overlay. `--render-control-bg` was
- * declared on that shell, so it moves to the root rather than resolving to
- * nothing once the shell is gone. */
-:root { --render-control-bg: var(--well); }
-.render-toggle-row { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0; }
-.render-toggle { min-height: 32px; padding: 0 11px 0 7px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--render-control-bg); color: var(--label); font: var(--text-label); cursor: pointer; }
-.render-toggle i { position: relative; width: 22px; height: 12px; flex: 0 0 auto; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--well); }
-.render-toggle i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--dim); transition: transform .13s ease, background .13s ease; }
-.render-toggle[aria-checked="true"] { border-color: var(--accent-line); color: var(--accent-strong); }
-.render-toggle[aria-checked="true"] i { border-color: var(--accent-line); background: var(--accent-wash); }
-.render-toggle[aria-checked="true"] i::after { transform: translateX(10px); background: var(--accent); }
-.render-toggle:disabled { opacity: .45; cursor: not-allowed; }
-
-/* ── The pipeline diagram ──────────────────────────────────────────────────
-   A spine down the left edge with a card tapping it per stage, in encode order,
-   and the cost of each stage read at its own junction.
-
-   The spine used to run down the centre with cards alternating either side of
-   it. That cost half the pane's width — a row never shares its grid line with
-   the row opposite, so the alternation bought no height back — and it split the
-   figures into two columns facing each other across the pipe, which is the one
-   arrangement in which a column of costs cannot be scanned. One rail, one
-   column of numbers, and the same pipe. */
-.rp-graph { padding: 2px 12px 8px 0; display: grid; gap: 0; }
-.rp-row { display: grid; grid-template-columns: 64px minmax(0,1fr); align-items: stretch; }
-.rp-slot { min-width: 0; }
-/* The definite box the pipe fills. Without it the percentage-height SVG falls
-   back to its 150px replaced-element intrinsic and sets the row height. */
-.rp-trunk-cell { position: relative; min-height: 22px; }
-.rp-trunk { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.rp-trunk-marks { position: absolute; top: 0; left: 0; overflow: visible; }
-.rp-pipe { stroke: var(--instrument-hair); stroke-width: 1.5; }
-.rp-link { stroke: var(--instrument-hair); stroke-width: 1; }
-.rp-link.is-live { stroke: var(--accent-line); }
-.rp-link.is-dashed { stroke-dasharray: 2 3; }
-.rp-junction { fill: var(--instrument-veil); stroke: var(--line-strong); stroke-width: 1; }
-.rp-junction.is-live { fill: var(--accent); stroke: var(--accent); }
-.rp-cap { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
-.rp-row-cap { min-height: 14px; }
-
-/* The band collar: the section's name against the pipe, its measured share at
-   the far edge, and a hairline carrying the eye between them. */
-.rp-row-collar { min-height: 24px; }
-.rp-collar { display: flex; align-items: center; gap: 6px; padding: 9px 0 3px; }
-/* Sentence case, not caps. A band name here can run to forty characters
-   ("Composite pressure projection + receipts"); set in tracked capitals it
-   shouts across a scene it is floating over, and at this width it is the widest
-   thing in the pane. The rule beside it is what says "section". */
-.rp-collar h3 { margin: 0; color: var(--micro); font: 600 var(--size-2)/1.3 var(--sans); letter-spacing: .01em; }
-.rp-collar i { flex: 1; height: 1px; background: var(--instrument-hair-soft); }
-.rp-collar output { color: var(--label); font: var(--text-micro); font-variant-numeric: tabular-nums; }
-.rp-collar small { color: var(--dim); font: var(--text-micro); font-variant-numeric: tabular-nums; }
-/* The fence-measured wall for the whole band, beside the Σcompute figure the
-   rows add up to. Tagged so the two measurement bases cannot be read as one. */
-.rp-collar-wall { display: inline-flex; align-items: baseline; gap: 2px; color: var(--amber-ink) !important; }
-.rp-collar-wall small { color: inherit; font: var(--text-tag); }
-
-.rp-row-node > .rp-node { margin: 0 0 3px; }
-.rp-node { min-width: 0; padding: 4px 9px 6px; border: 1px solid transparent; background: var(--instrument-hair-soft); transition: background .14s ease, border-color .14s ease; }
-.rp-node:hover { border-color: var(--instrument-hair); background: var(--hover); }
-.rp-node.is-off { background: transparent; }
-.rp-node.is-off:hover { background: var(--instrument-hair-soft); }
-.rp-node.is-unavailable { background: transparent; opacity: .45; }
-.rp-node-head { min-height: 18px; display: grid; grid-template-columns: 9px minmax(0,1fr) auto auto; align-items: center; gap: 7px; }
-/* Toggleable lamps keep their full-size switch silhouette. Fixed simulation
-   stages use a smaller neutral ring, so only controls can read as green/on. */
-.rp-lamp { width: 8px; height: 8px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; background: transparent; cursor: pointer; transition: box-shadow .14s ease, border-color .14s ease; }
-.rp-lamp.is-toggleable:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
-.rp-node.is-on .rp-lamp { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 2.5px var(--accent-wash); }
-.rp-lamp.is-fixed,
-.rp-node.is-on .rp-lamp.is-fixed { border-color: var(--dim); background: transparent; box-shadow: none; transform: scale(.6); }
-.rp-node.is-armed .rp-lamp { border-color: var(--accent); background: linear-gradient(90deg,var(--accent) 50%,transparent 50%); }
-.rp-node.is-unavailable .rp-lamp { border-style: dashed; }
-.rp-lamp:disabled { cursor: default; }
-.rp-node-head strong { overflow: hidden; color: var(--ink); font: 600 var(--size-3)/1.35 var(--sans); text-overflow: ellipsis; white-space: nowrap; }
-.rp-node.is-off .rp-node-head strong { color: var(--label); }
-.rp-node.is-unavailable .rp-node-head strong { color: var(--micro); }
-/* The cost reads on the trunk, at the junction the node taps. One column of
-   figures against the pipe, so the frame's shape is legible by scanning down it
-   rather than by reading eighteen right-aligned card edges. A withheld pass is a
-   measured zero and reads like one; the em dash is kept for a measurement that
-   is genuinely missing, so the two can never be confused for each other. */
-.rp-trunk-cost { fill: var(--label); font: 500 var(--size-1)/1.15 var(--mono); font-variant-numeric: tabular-nums; }
-.rp-trunk-cost.is-measured { fill: var(--ink); }
-.rp-trunk-cost.is-withheld, .rp-trunk-cost.is-structural, .rp-trunk-cost.is-unmeasured, .rp-trunk-cost.is-idle { fill: var(--dim); }
-.rp-trunk-cost.is-shared { fill: var(--micro); }
-/* A fence-derived wall figure at a junction: full strength like a measured cost
-   — it is one — but in the warm ink, because its basis includes render passes
-   the compute column around it cannot see. */
-.rp-trunk-cost.is-wall { fill: var(--amber-ink); }
-/* Compact stage facts under the name. Most receipts remain one line; a stage
-   with several related counts can publish one labeled fact per line. */
-.rp-node-chip { display: block; margin: 1px 0 0 16px; overflow: hidden; color: var(--micro); font: 400 var(--size-2)/1.45 var(--sans); white-space: pre-line; }
-/* What the switch was worth: the frame total differenced across it. Cheaper
-   under the current setting reads as a saving, dearer as a charge. */
-.rp-node-delta { padding: 0 4px; border: 1px solid var(--instrument-hair); color: var(--micro); font: 500 var(--size-1)/14px var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* The stage tap. Every published plane reaches the frame through the node that
-   wrote it, which is what retired the flat eighteen-button grid. */
-.rp-tap { width: 16px; height: 16px; padding: 0; border: 1px solid var(--instrument-hair); background: transparent; color: var(--dim); font: var(--text-micro); line-height: 1; cursor: pointer; transition: border-color .14s ease, color .14s ease, background .14s ease; }
-.rp-tap:hover { border-color: var(--line-strong); color: var(--ink); }
-.rp-tap.is-active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
-.rp-node-controls { margin: 4px 0 0 16px; display: grid; gap: 3px; }
-.rp-breakdown { margin: 5px 0 1px 16px; color: var(--micro); font: 400 var(--size-2)/1.5 var(--sans); }
-.rp-breakdown > div { display: flex; justify-content: space-between; gap: 12px; }
-.rp-breakdown dt { min-width: 0; }
-.rp-breakdown dd { margin: 0; flex: none; font-family: var(--mono); font-variant-numeric: tabular-nums; }
-/* A folded card: its name is the disclosure. Closed, the head says how much is
-   inside, so a reader can tell a stage with one switch from one with nine
-   without opening either; open, the card is framed and its fields sit under a
-   hairline, apart from the chip that summarises them. */
-.rp-node-disclose { min-width: 0; margin: -3px -5px; padding: 3px 5px; display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.rp-node-disclose > strong { flex: 0 1 auto; min-width: 0; }
-.rp-node-disclose > small { margin-left: auto; flex: 0 100 auto; min-width: 0; overflow: hidden; color: var(--dim); font: 400 var(--size-1)/1.3 var(--sans); text-overflow: ellipsis; white-space: nowrap; transition: color .14s ease; }
-.rp-node-disclose > i { width: 4px; height: 4px; flex: none; margin: 0 2px 0 2px; border-right: 1px solid var(--dim); border-bottom: 1px solid var(--dim); transform: rotate(-45deg); transition: transform .16s ease, border-color .14s ease; }
-.rp-node-disclose > strong + i { margin-left: auto; }
-.rp-node-disclose[aria-expanded="true"] > i { transform: rotate(45deg) translate(-1px,-1px); }
-.rp-node-disclose:hover > small { color: var(--micro); }
-.rp-node-disclose:hover > i { border-color: var(--ink); }
-.rp-node-disclose:focus-visible { outline: 1px solid var(--accent-line); outline-offset: 0; }
-/* Holds the lens tap's place on a card without one, so every chevron in the
-   pipeline sits in one column. */
-.rp-tap-slot { width: 16px; }
-.rp-node.is-open { padding-bottom: 8px; border-color: var(--instrument-hair); }
-/* A card's notice speaks at the chip's size: it is a status of this stage, not
-   a banner over the pane. The warning keeps its amber, the status its quiet. */
-.rp-node > .render-inline-status, .rp-node > .render-inline-warning { margin: 4px 0 0 16px; font: 400 var(--size-2)/1.4 var(--sans); letter-spacing: 0; text-transform: none; }
-.rp-node > .render-inline-warning { padding: 4px 7px; }
-.rp-node.is-open .rp-node-controls { margin-top: 6px; padding-top: 7px; gap: 6px; border-top: 1px solid var(--instrument-hair-soft); }
-/* The planes a stage can present, as a run of words rather than a wall of
-   boxes: nine bordered chips read as nine controls competing with the fields
-   under them, when they are one choice of what to look at. Borderless until
-   pointed at or chosen, like the profile rungs. */
-.rp-planes { display: flex; flex-wrap: wrap; gap: 1px 2px; margin-left: -6px; }
-.rp-planes button { min-height: 18px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--micro); font: 500 var(--size-2)/1.3 var(--sans); cursor: pointer; transition: border-color .14s ease, color .14s ease, background .14s ease; }
-.rp-planes button:hover { background: var(--hover); color: var(--ink); }
-.rp-planes button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
-
-.render-inline-warning { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--amber-line); color: var(--amber-ink); background: var(--amber-wash); font: var(--text-note); }
-.render-inline-status { margin: 8px 0 0; color: var(--micro); font: var(--text-note); text-transform: uppercase; letter-spacing: var(--track-wide); }
-.render-visualization-status { margin: 8px 0 0; color: var(--accent-strong); font: var(--text-readout); letter-spacing: var(--track-wide); text-align: right; }
 
 .icon-button { width: 29px; height: 29px; background: transparent; color: var(--muted); font-size: var(--size-6); }
 
@@ -2359,9 +2185,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 /* Instrument controls are small, so their corners are small. */
 .lab-shell .scene-instrument button,
 .lab-shell .scene-instrument .metric-card { border-radius: 5px; }
-.lab-shell .scene-instrument .rp-lamp { border-radius: 50%; }
 .lab-shell .scene-instrument .panel-close { border-radius: var(--radius-s); }
-.lab-shell .scene-instrument .rp-node { border-radius: var(--radius-s); }
 
 /* The scroll: a hairline that only appears against the pane it moves over. */
 .scene-instrument .panel-scroll,
@@ -2392,30 +2216,23 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .scene-instrument .metric-card.tone-good strong { color: var(--accent-strong); }
 .scene-instrument .metric-card.tone-warn strong { color: var(--amber-ink); }
 
-/* A drawer, wherever one is warranted: on a node inside the diagram
-   (`.rp-tune`) or as a section of the pane (`.instrument-drawer`). Both are the
-   same object — a name, a chevron that turns, and the hairline that separates
-   what is folded from what is not. */
-.rp-tune, .instrument-drawer { display: block; }
-.rp-tune > summary, .instrument-drawer > summary {
+/* A drawer section of the pane: a name, a chevron that turns, and the
+   hairline that separates what is folded from what is not. */
+.instrument-drawer { display: block; }
+.instrument-drawer > summary {
   display: flex; align-items: center; gap: 6px;
   color: var(--micro); cursor: pointer;
   list-style: none;
 }
-.rp-tune > summary::-webkit-details-marker,
 .instrument-drawer > summary::-webkit-details-marker { display: none; }
-.rp-tune > summary::before, .instrument-drawer > summary::before {
+.instrument-drawer > summary::before {
   content: ""; width: 4px; height: 4px; flex: none;
   border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
   transform: rotate(-45deg) translate(-1px, -1px);
   transition: transform .16s ease;
 }
-.rp-tune[open] > summary::before,
 .instrument-drawer[open] > summary::before { transform: rotate(45deg) translate(-1px, -1px); }
-.rp-tune > summary:hover, .instrument-drawer > summary:hover { color: var(--ink); }
-.rp-tune > summary { min-height: 18px; font: 500 var(--size-2)/1.3 var(--sans); }
-.rp-tune[open] > summary { margin-bottom: 3px; }
-.rp-tune > * + * { margin-top: 3px; }
+.instrument-drawer > summary:hover { color: var(--ink); }
 .instrument-drawer > summary { min-height: 20px; }
 .instrument-drawer > summary > span { color: var(--label); font: 600 var(--size-3)/1.3 var(--sans); }
 .instrument-drawer > summary > small { margin-left: auto; color: var(--dim); font: var(--text-micro); }
@@ -2680,6 +2497,53 @@ button:hover .iso-water-side { fill-opacity: .26; }
 /* A way out of the card, its arrow where the knobs end. */
 .rail-link { display: flex; justify-content: space-between; align-items: center; min-height: 22px; padding: 0 22px 0 0; border: 0; background: transparent; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
 .rail-link:hover { color: var(--accent-strong); }
+/* A fold in a card: a captioned rule that opens. */
+.rail-more > summary { display: flex; align-items: center; gap: 6px; min-height: 20px; margin: 2px 0; color: var(--muted); font: var(--text-micro); letter-spacing: var(--track-wide); text-transform: uppercase; list-style: none; cursor: pointer; }
+.rail-more > summary::-webkit-details-marker { display: none; }
+.rail-more > summary::before { content: "›"; display: inline-block; width: 8px; transition: transform .15s ease; }
+.rail-more[open] > summary::before { transform: rotate(90deg); }
+.rail-more > summary::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.rail-more > summary:hover { color: var(--ink); }
+.rail-more[open] { display: grid; gap: 3px; }
+.rail-more.is-nested > summary::after { display: none; }
+.rail-more .ui-facts { margin: 0 0 4px; }
+.rail-note { display: block; color: var(--dim); font: var(--text-note); }
+.rail-note[data-tone="attention"] { color: var(--amber); }
+/* A pipeline's cost: name, share of the advance, figure — one column of figures down the card. */
+.rail-cost { display: grid; gap: 1px; }
+.rail-cost-line { display: grid; grid-template-columns: minmax(0, 1fr) 72px 6.5ch; align-items: center; gap: 8px; width: 100%; min-height: 22px; padding: 0 22px 0 0; border: 0; background: transparent; color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); text-align: left; white-space: nowrap; }
+.rail-cost-head { cursor: pointer; }
+.rail-cost-head:hover, .rail-cost-head[aria-expanded="true"] { color: var(--ink); }
+.rail-cost-name { min-width: 0; overflow: hidden; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+button.rail-cost-name:not(:disabled) { cursor: pointer; }
+button.rail-cost-name:not(:disabled):hover, button.rail-cost-name[aria-expanded="true"] { color: var(--ink); }
+.rail-cost-alert { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--amber); vertical-align: 1px; }
+.rail-cost-bar { height: 4px; overflow: hidden; border-radius: 2px; background: var(--line); }
+.rail-cost-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+.rail-cost-line > .ui-switch, .rail-cost-line > :nth-child(2):empty { justify-self: end; }
+.rail-cost-figure { justify-self: end; color: var(--ink); font-variant-numeric: tabular-nums; }
+.rail-cost-figure:is([data-kind="unmeasured"], [data-kind="withheld"], [data-kind="idle"], [data-kind="structural"]) { color: var(--muted); }
+/* A stage's middle column is its switch, not a bar: the name takes the width. */
+.rail-cost-stage > .rail-cost-line { grid-template-columns: minmax(0, 1fr) auto 6.5ch; }
+.rail-cost-stages { display: grid; gap: 1px; margin: 0 0 4px 4px; padding-left: 10px; border-left: 1px solid var(--line); }
+.rail-cost-stage:is([data-state="off"], [data-state="unavailable"]) .rail-cost-name { color: var(--muted); }
+/* A stage's own lines stand at the stages' indent, not a second one in, so a slider keeps its name. */
+.rail-cost-stage .rail-sub { margin: 1px 0 4px; padding-left: 0; border-left: 0; }
+.rail-cost-stage .view-rail-range { grid-template-columns: minmax(0, 1fr) 88px 6.5ch 14px; }
+.rail-cost-chip { color: var(--dim); font: var(--text-note); white-space: normal; }
+.rail-cost-breakdown { display: grid; gap: 1px; margin: 0; }
+.rail-cost-breakdown > div { display: flex; justify-content: space-between; gap: 8px; padding-right: 22px; color: var(--muted); font: var(--text-note); }
+.rail-cost-breakdown dd { margin: 0; font-variant-numeric: tabular-nums; }
+/* A quiet word that acts: a count that opens, a way back from a withheld stage. */
+.rail-text-button { justify-self: start; padding: 0; border: 0; background: transparent; color: var(--muted); font: var(--text-micro); letter-spacing: var(--track-wide); cursor: pointer; }
+.rail-text-button[data-tone="attention"] { color: var(--amber-ink); }
+.rail-text-button:hover { color: var(--ink); }
+/* A stage's planes: a run of words, one of which may be presented instead of the composite. */
+.rail-cost-planes { display: flex; flex-wrap: wrap; gap: 1px 2px; margin-left: -6px; }
+.rail-cost-planes button { min-height: 18px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: transparent; color: var(--muted); font: var(--text-note); cursor: pointer; }
+.rail-cost-planes button:hover { background: var(--hover); color: var(--ink); }
+.rail-cost-planes button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.rail-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0; }
 /* A drawn colour's meaning: swatches wrapped to the card. */
 .rail-key { display: flex; flex-wrap: wrap; gap: 2px 9px; padding-bottom: 2px; color: var(--muted); font: var(--text-micro); }
 .rail-key > span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }

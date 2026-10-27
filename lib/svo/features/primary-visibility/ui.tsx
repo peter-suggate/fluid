@@ -1,6 +1,6 @@
 "use client";
 
-import { ChoiceField } from "../../../../components/ui";
+import { RailChoice } from "../../../../components/rail";
 import { SVO_PRIMARY_VISIBILITY_FEATURE, SVO_PRIMARY_VISIBILITY_OPTIONS } from "./definition";
 import { useState, type ComponentType } from "react";
 import { Activity, Boxes, Eye, Grid3X3, Network, ScanLine } from "lucide-react";
@@ -110,7 +110,7 @@ export function SvoPrimaryVisibilityControlRow() {
   const value = session.ui((state) => state.svoPrimaryTraversal);
   const rasterAo = session.ui((state) => state.svoConeTracingMode === "raster-ao");
   const onChange = session.ui((state) => state.setSvoPrimaryTraversal);
-  return <ChoiceField label={SVO_PRIMARY_VISIBILITY_FEATURE.controls[0].label}
+  return <RailChoice label={SVO_PRIMARY_VISIBILITY_FEATURE.controls[0].label}
     value={rasterAo || value === "raster" ? "mesh" : value} onChange={onChange}
     options={SVO_PRIMARY_VISIBILITY_OPTIONS} disabled={rasterAo} hint={rasterAo ? "Raster + AO preview uses the published Mesh surface." : undefined} />;
 }

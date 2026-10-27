@@ -39,15 +39,10 @@ export type SvoFeatureControlContext = Pick<UIState,
 };
 
 /**
- * What a stage hands its card: the controls behind the fold, the count read on
- * the closed card, and any status that must show whether or not it is open.
- *
- * `settings` and `readouts` are counted by the stage that renders them — only
- * it knows which of its fields this scene and this arm actually draw.
+ * What a stage hands its card: its controls, shown once the stage is opened,
+ * and any status that must show whether or not it is.
  */
 export interface SvoStageControls {
   readonly node?: ReactNode;
-  readonly settings?: number;
-  readonly readouts?: number;
   readonly notice?: ReactNode;
 }

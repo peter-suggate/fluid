@@ -43,11 +43,11 @@ export const SVO_LIGHTING_VISIBILITY_FEATURE = {
   ],
   placements: [
     { slot: "view.ao-diagnostics", control: "ao-tap-overlay", presentation: "compact" },
-    { slot: "frame.lighting", control: "mode", presentation: "expanded" },
-    { slot: "frame.lighting", control: "shadows", presentation: "expanded" },
-    { slot: "frame.lighting", control: "ambient-occlusion", presentation: "expanded" },
-    { slot: "frame.lighting", control: "lattice", presentation: "expanded" },
-    { slot: "frame.lighting", control: "far-ao-taps", presentation: "expanded" },
+    { slot: "frame.lighting", control: "mode", presentation: "compact" },
+    { slot: "frame.lighting", control: "shadows", presentation: "compact" },
+    { slot: "frame.lighting", control: "ambient-occlusion", presentation: "compact" },
+    { slot: "frame.lighting", control: "lattice", presentation: "compact" },
+    { slot: "frame.lighting", control: "far-ao-taps", presentation: "compact" },
     { slot: "view.lighting", control: "far-ao-taps", presentation: "compact" },
     // A renderer saving, not a look: it stands with the rail's other savings.
     { slot: "view.performance", control: "still-view-reuse", presentation: "compact" },

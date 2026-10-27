@@ -2,8 +2,7 @@
 
 import { useSession } from "../../../core/session/session-context";
 import type { FeatureControlViewProps } from "../../../framework/ui/slot";
-import { ChoiceField, RangeField, SwitchField } from "../../../../components/ui";
-import { RailKey, RailRange, RailToggle } from "../../../../components/rail";
+import { RailKey, RailRange, RailSelect, RailToggle } from "../../../../components/rail";
 import { useSvoRenderTuningValue } from "../../pipeline/tuning-binding";
 import { SVO_LIGHTING_VISIBILITY_FEATURE, SVO_LIGHTING_VISIBILITY_OPTIONS } from "./definition";
 import { SVO_AO_TAP_LEGEND } from "../diagnostics/svo-render-diagnostics";
@@ -27,7 +26,7 @@ export function SvoLightingVisibilityControlRow() {
   const session = useSession();
   const value = session.ui((state) => state.svoConeTracingMode);
   const onChange = session.ui((state) => state.setSvoConeTracingMode);
-  return <ChoiceField label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[0].label}
+  return <RailSelect label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[0].label}
     value={value} onChange={onChange} options={SVO_LIGHTING_VISIBILITY_OPTIONS} />;
 }
 
@@ -36,7 +35,7 @@ export function SvoShadowsControlRow() {
   const checked = session.ui((state) => state.svoShadowsEnabled);
   const onChange = session.ui((state) => state.setSvoShadowsEnabled);
   const disabled = session.ui((state) => state.svoConeTracingMode === "off");
-  return <SwitchField label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[1].label} checked={checked} onChange={onChange} disabled={disabled} />;
+  return <RailToggle label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[1].label} checked={checked} onChange={onChange} disabled={disabled} />;
 }
 
 export function SvoAmbientOcclusionControlRow() {
@@ -44,7 +43,7 @@ export function SvoAmbientOcclusionControlRow() {
   const checked = session.ui((state) => state.svoAmbientOcclusionEnabled);
   const onChange = session.ui((state) => state.setSvoAmbientOcclusionEnabled);
   const disabled = session.ui((state) => state.svoConeTracingMode === "off");
-  return <SwitchField label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[2].label} checked={checked} onChange={onChange} disabled={disabled} />;
+  return <RailToggle label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[2].label} checked={checked} onChange={onChange} disabled={disabled} />;
 }
 
 export function SvoLatticeVisibilityControlRow() {
@@ -54,27 +53,22 @@ export function SvoLatticeVisibilityControlRow() {
   // Only the cone arm samples reduced visibility; EXACT and OFF have no source to choose.
   const disabled = session.ui((state) => state.svoConeTracingMode !== "cones");
   const control = SVO_LIGHTING_VISIBILITY_FEATURE.controls[3];
-  return <SwitchField label={control.label} hint={control.hint} checked={checked} onChange={onChange} disabled={disabled}
+  return <RailToggle label={control.label} hint={control.hint} checked={checked} onChange={onChange} disabled={disabled}
     testId="svo-lattice-visibility" />;
 }
 
 /**
- * The distant contact-AO budget. Expanded, a slider among the pipeline's
- * lighting fields; compact, a slider on the view rail's line that holds its
- * shape while it moves — the readout is a fixed width and the reset keeps its
- * place when there is nothing to reset. The budget is a live uniform, so the
- * frame follows the thumb. Only RASTER + AO samples it, so under any other
- * source it stands dimmed and says why.
+ * The distant contact-AO budget, a slider that holds its shape while it moves
+ * — the readout is a fixed width and the reset keeps its place when there is
+ * nothing to reset. The budget is a live uniform, so the frame follows the
+ * thumb. Only RASTER + AO samples it, so under any other source it stands
+ * dimmed and says why.
  */
-export function SvoFarAoTapsControlRow({ control, placement }: FeatureControlViewProps) {
+export function SvoFarAoTapsControlRow({ control }: FeatureControlViewProps) {
   const session = useSession();
   const disabled = session.ui((state) => state.svoConeTracingMode !== "raster-ao");
   const { value, set, modified, reset } = useSvoRenderTuningValue("rasterFarAoTaps");
   const min = control.min ?? 0, max = control.max ?? 36, step = control.step ?? 4;
-  if (placement.presentation !== "compact") {
-    return <RangeField label={control.label} unit={control.unit} value={value} min={min} max={max} step={step} digits={0}
-      disabled={disabled} onChange={set} modified={modified} onReset={reset} hint={control.hint} testId="svo-far-ao-taps" />;
-  }
   return <>
     <RailRange label={control.label} value={value} min={min} max={max} step={step} digits={0} unit={control.unit}
       disabled={disabled} hint={control.hint} testId="svo-far-ao-taps"
@@ -83,19 +77,11 @@ export function SvoFarAoTapsControlRow({ control, placement }: FeatureControlVie
   </>;
 }
 
-/**
- * Whether a still camera reuses the last frame's raster shadow and AO
- * visibility. Compact, a switch whose knob stands where the rail's readouts
- * end, so a line of toggles and sliders keeps one right edge.
- */
-export function SvoStillViewReuseControlRow({ control, placement }: FeatureControlViewProps) {
+/** Whether a still camera reuses the last frame's raster shadow and AO visibility. */
+export function SvoStillViewReuseControlRow({ control }: FeatureControlViewProps) {
   const session = useSession();
   const disabled = session.ui((state) => state.svoConeTracingMode !== "raster-ao");
   const { value, set } = useSvoRenderTuningValue("rasterStillViewReuse");
-  if (placement.presentation !== "compact") {
-    return <SwitchField label={control.label} hint={control.hint} checked={value} onChange={set} disabled={disabled}
-      testId="svo-still-view-reuse" />;
-  }
   return <RailToggle label={control.label} checked={value} onChange={set} disabled={disabled} hint={control.hint}
     testId="svo-still-view-reuse" />;
 }

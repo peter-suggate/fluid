@@ -6,15 +6,10 @@ import { renderPresentControls } from "../features/presentation/controls";
 import { renderFilteredDetailControls,renderPrimaryTraversalControls,renderSeamClosureControls } from "../features/primary-visibility/controls";
 import { renderGiCompositionControls,renderReducedShadeControls } from "../features/radiance/controls";
 
-import { useEffect,useMemo,useState } from "react";
-import { Button, Choice, Facts, FieldList, Switch, SwitchField } from "../../../components/ui";
-import {
-PipelineGraph,
-formatPipelineDuration,
-pipelineFoldSummary,
-type PipelineBand,
-type PipelineRow,
-} from "../../../components/PipelineGraph";
+import { useEffect,useMemo } from "react";
+import { Facts } from "../../../components/ui";
+import { PipelineCost, formatPipelineDuration, type PipelineBand, type PipelineRow } from "../../../components/PipelineCost";
+import { RailReadout, RailSelect, RailToggle } from "../../../components/rail";
 import { sceneUsesFlatVoxelNormals } from "../../core/model";
 import {
 averagePerformanceTraces,
@@ -65,22 +60,22 @@ const rendererFailureLabels = {
   "frame-rejected": "live SVO frame publication was rejected",
 } as const;
 
-/** Why the figure on the pipe is the kind of number it is, in frame terms. */
+/** Why the figure is the kind of number it is, in frame terms. */
 function costExplanation(cost: RenderPipelineMeasurement): string {
   switch (cost.kind) {
     case "withheld":
-      return "0 ms — this stage encoded no work in the sampled frame.";
+      return "0 ms — encoded no work in the sampled frame.";
     case "idle":
-      return "0 ms — the frame partition arrived, and this stage encoded no GPU work in the sampled frames.";
+      return "0 ms — encoded no GPU work in the sampled frames.";
     case "shared":
-      return `Not a stage of its own: this work runs inside ${cost.insideNode?.replace(/-/g, " ").toUpperCase()}, and ⊂ marks the figure as that stage's.`;
+      return `Runs inside ${cost.insideNode?.replace(/-/g, " ")}; the figure is that stage's.`;
     case "structural":
-      return "A gate, not a pass. It spends no frame time either way — its worth shows up as the row it lets the frame skip going to zero.";
+      return "A gate, not a pass.";
     case "unmeasured":
-      return "No stage sample has arrived yet.";
+      return "No stage sample yet.";
     default:
-      return `${formatPipelineDuration(cost.duration_ms ?? 0)} for this stage on the frame's exclusive GPU completion timeline.${cost.encodedFraction !== undefined
-        ? `\n\nEncoded in ${Math.round(cost.encodedFraction * 100)}% of sampled frames; the figure is the expected cost per frame, not the per-encode mean.`
+      return `${formatPipelineDuration(cost.duration_ms ?? 0)} GPU, mean of the trace window.${cost.encodedFraction !== undefined
+        ? ` Encoded in ${Math.round(cost.encodedFraction * 100)}% of frames; per-frame expectation.`
         : ""}`;
   }
 }
@@ -124,15 +119,31 @@ function usePresentationTiming(): {
   }, [reports]);
 }
 
+
 /**
- * The frame graph, as an instrument over the scene.
- *
- * Everything the retired RENDER tab held except its docked shell and its PROBES
- * strip — the probes are ring wedges now. The PROFILE rung strip and the render
- * resolution scale came with it: they are the two questions asked before any
- * node is opened, so they stay above the graph rather than inside a node.
+ * Samples the renderer for as long as it is mounted, and hands the setting
+ * back exactly as it found it: measurement is work the product did not ask
+ * for, so it runs only while a reading of it is open. It never overrides an
+ * explicit choice made elsewhere, which is why the guard is on `off`.
  */
-export function RenderPipelineOverlay() {
+function useFrameSampling() {
+  useEffect(() => {
+    const store = usePerformanceInstrumentationStore.getState();
+    if (store.mode !== "off") return;
+    store.setMode("timeline");
+    return () => {
+      const current = usePerformanceInstrumentationStore.getState();
+      if (current.mode === "timeline") current.setMode("off");
+    };
+  }, []);
+}
+
+/**
+ * The frame graph's view model: the renderer's stages in encode order, priced
+ * by the frame's exclusive GPU completion partition, each with its own switch,
+ * planes and controls.
+ */
+function useRenderPipelineBands(): { readonly bands: readonly PipelineBand[]; readonly frame: string; readonly source: string } {
   const session = useSession();
   const effectiveRendererStatus = session.diagnostics((state) => state.effectiveRendererStatus);
   const svoShadowsEnabled = session.ui((state) => state.svoShadowsEnabled);
@@ -170,7 +181,6 @@ export function RenderPipelineOverlay() {
   const finestCellSize_m = session.scene((state) => state.scene.voxelDomain.finestCellSize_m);
   const sceneIsDry = session.scene((state) => state.scene.systems?.fluid === false);
   const surfaceStyle = session.scene((state) => state.scene.surfaceStyle);
-  const patchScene = session.scene((state) => state.patchScene);
   const smoothSurfaceEnabled = !sceneUsesFlatVoxelNormals({ surfaceStyle });
   const methodId = session.method((state) => state.methodId);
   const renderRefinementPermitted = svoRenderRefinementPermitted(
@@ -178,32 +188,10 @@ export function RenderPipelineOverlay() {
   const renderRefinementDepth = renderRefinementPermitted ? tuning.environmentRefinementDepth : 0;
   const leafVoxel_mm = finestCellSize_m * 1000 / 2 ** renderRefinementDepth;
 
-  const [liveTiming, setLiveTiming] = useState(true);
-
-  // Per-pass costs only reach the diagnostics store while instrumentation is
-  // recording, and instrumentation is off by default because measurement is
-  // work the product did not ask for. The overlay opts in for as long as it is
-  // open and hands the setting back exactly as it found it — an overlay that
-  // left measurement running after it closed would charge every later frame for
-  // a readout nobody is looking at. It never overrides an explicit choice made
-  // elsewhere, which is why the guard is on `off` rather than a stored previous
-  // value.
-  useEffect(() => {
-    if (!liveTiming) return;
-    const store = usePerformanceInstrumentationStore.getState();
-    if (store.mode !== "off") return;
-    store.setMode("timeline");
-    return () => {
-      const current = usePerformanceInstrumentationStore.getState();
-      if (current.mode === "timeline") current.setMode("off");
-    };
-  }, [liveTiming]);
-
   const timing = usePresentationTiming();
-  const trace = liveTiming ? timing.total : undefined;
+  const trace = timing.total;
   const stageTrace = timing.stages;
-  const durations = useMemo(
-    () => renderPipelineStageDurations(liveTiming ? stageTrace : undefined), [stageTrace, liveTiming]);
+  const durations = useMemo(() => renderPipelineStageDurations(stageTrace), [stageTrace]);
   // A trace label that names no stage of the ABI is a measurement bug — a seam
   // publishing a label the registry does not own — and it is louder as a
   // console warning than as a row that quietly reads zero.
@@ -211,9 +199,7 @@ export function RenderPipelineOverlay() {
   useEffect(() => {
     if (unowned.length > 0) console.warn("Render trace phases owned by no pipeline stage:", unowned);
   }, [unowned]);
-  const measured = liveTiming && trace !== undefined;
-  const wallTimed = liveTiming && timing.queue_ms !== undefined;
-  const total_ms = trace?.total_ms ?? 0;
+  const partitioned = stageTrace !== undefined;
 
   const updateTuning = <K extends keyof SvoRenderTuning>(key: K, value: SvoRenderTuning[K]) =>
     setTuning((current) => ({ ...current, [key]: value,
@@ -224,13 +210,6 @@ export function RenderPipelineOverlay() {
   const resetTuning = <K extends keyof SvoRenderTuning>(key: K) => () =>
     updateTuning(key, sceneTuningDefaults[key]);
 
-  const tuningKey = svoRenderTuningKey(tuning);
-  // A rung is the pair, so the match is on the pair. `quality` and `reference`
-  // carry the same sliders and differ only in how visibility is answered; a
-  // lookup by tuning alone would report EXACT as QUALITY.
-  const activePreset = (Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[])
-    .find((preset) => svoRenderTuningKey(SVO_RENDER_QUALITY_PRESETS[preset].tuning) === tuningKey
-      && SVO_RENDER_QUALITY_PRESETS[preset].coneTracingMode === svoConeTracingMode);
   const silhouetteRefinementStatus = effectiveRendererStatus.silhouetteRefinement ?? {
     state: effectiveRendererStatus.state === "pending" ? "compiling" as const
       : effectiveRendererStatus.state === "failed" ? "failed" as const
@@ -238,18 +217,6 @@ export function RenderPipelineOverlay() {
     detail: effectiveRendererStatus.detail,
   };
   const lightingVisibilityStatus = effectiveRendererStatus.lightingVisibility ?? { state: svoConeTracingMode };
-
-  const partitioned = liveTiming && stageTrace !== undefined;
-  const timingLabel = !liveTiming ? "timing off"
-    : !measured ? "awaiting trace"
-    : `${total_ms.toFixed(2)} ms ${trace?.measurementSource === "gpu-queue-wall" ? "queue" : "GPU"}`;
-  const timingHint = !liveTiming
-    ? "Live frame timing is off. Turn it on to sample the presentation boundary chain."
-    : !measured
-      ? "No presentation trace has arrived yet."
-      : trace?.measurementSource === "gpu-queue-wall"
-        ? "Queue completion wall time includes backlog and callback delivery. It overlaps host and GPU work. FPS measures completed presentation cadence, not the reciprocal of this span."
-        : `GPU execution span, excluding host work, worker message latency and display pacing. ${partitioned ? `One exclusive timing per stage; overlapped work is charged once, to the stage that advances GPU completion. ${TRACE_WINDOW}-sample mean.` : "Detailed stage timings are not available yet."} FPS measures completed presentation cadence, not the reciprocal of this span.`;
 
   const disabledStages = useMemo(
     () => disabledRenderStagesFrom(disabledRenderStages), [disabledRenderStages]);
@@ -272,8 +239,7 @@ export function RenderPipelineOverlay() {
     // Asked of the shared rule rather than assumed: it answers `traced` for
     // every production frame, so the three raster-only tiers read as
     // unavailable — but under FLUID_SVO_PRIMARY_TRAVERSAL=raster they are live
-    // passes with live switches, and the panel should say which frame it is
-    // looking at rather than hard-coding one.
+    // passes with live switches.
     rasterPrimaryActive: resolvedPrimary !== "traced",
     surfaceMeshSelected: resolvedPrimary === "mesh",
     smoothSurfaceEnabled,
@@ -281,12 +247,10 @@ export function RenderPipelineOverlay() {
     surfaceMeshStatus: effectiveRendererStatus.surfaceMesh,
   };
 
-  // The lamp is the node's own switch, and every node has one.
-  //
-  // Most route through the encode-time ablation set, which withholds the pass
-  // outright. Cone visibility, GI composition, the world-space GI cache and
-  // seam closure are switched by contracts the shaders already compile
-  // against. The graph says which is which.
+  // Most switches route through the encode-time ablation set, which withholds
+  // the pass outright. Cone visibility, GI composition, the world-space GI
+  // cache and seam closure are switched by contracts the shaders already
+  // compile against. The graph says which is which.
   const toggleNode = (id: string) => {
     const node = RENDER_PIPELINE_NODES.find((candidate) => candidate.id === id);
     if (node?.stage) {
@@ -300,32 +264,15 @@ export function RenderPipelineOverlay() {
     else if (id === "world-gi-cache") setSvoWorldGiCacheEnabled(!svoWorldGiCacheEnabled);
   };
 
-  // Every card folds behind its name.
-  //
-  // Every control a node owns still lives on that node — that is the whole
-  // point of the graph — but eleven open cards made the instrument four screens
-  // tall over a scene it is supposed to be read against, and buried the one
-  // thing the diagram is for: the stages in encode order against their costs.
-  // Closed, a card is its head, its chip and a count of what is inside; a
-  // failure it has to report shows either way. A cluster that is *calibration*
-  // (twenty cone budgets) folds once more inside the open card.
   const controls: Readonly<Record<string, SvoStageControls>> = {
     "sparse-world-build": renderSparseWorldBuildControls({ renderRefinementDepth, renderRefinementPermitted, sceneIsDry, updateTuning, modified, resetTuning, leafVoxel_mm, finestCellSize_m, tuning }),
-
     "filtered-detail": renderFilteredDetailControls({ resolvedPrimary, smoothSurfaceEnabled, tuning, updateTuning, effectiveRendererStatus, svoStageView, setSvoStageView }),
-
     [resolvedPrimary === "mesh" ? "surface-mesh-update" : "primary-traversal"]: renderPrimaryTraversalControls({ resolvedPrimary, effectiveRendererStatus, smoothSurfaceEnabled, svoMaximumTraversalDepth, setSvoMaximumTraversalDepth, svoMaximumNodeVisits, setSvoMaximumNodeVisits, tuning, updateTuning, modified, resetTuning }),
-
-    "surface-mesh-cull": { readouts: 1, node: <Facts items={[{ label: "Drawn mesh records", value: effectiveRendererStatus.surfaceMesh?.quads?.toLocaleString() ?? "—", hint: "Records surviving current-camera culling. Updated asynchronously." }]} /> },
-
+    "surface-mesh-cull": { node: <Facts items={[{ label: "Drawn mesh records", value: effectiveRendererStatus.surfaceMesh?.quads?.toLocaleString() ?? "—", hint: "Records surviving current-camera culling. Updated asynchronously." }]} /> },
     "seam-closure": renderSeamClosureControls({ silhouetteRefinementStatus }),
-
     "cone-visibility": renderConeVisibilityControls({ svoConeTracingMode, tuning, updateTuning, modified, resetTuning, svoStageView, svoStageLightSlot, setSvoStageLightSlot, lightingVisibilityStatus }),
-
     "reduced-shade": renderReducedShadeControls(),
-
     "gi-composition": renderGiCompositionControls({ svoGlobalIlluminationEnabled, tuning, updateTuning, modified, resetTuning }),
-
     present: renderPresentControls({ tuning, updateTuning, modified, resetTuning }),
   };
 
@@ -333,61 +280,41 @@ export function RenderPipelineOverlay() {
   // accounting, but the graph's denominator is the actual GPU frame span.
   const graphTotal_ms = stageTrace?.total_ms ?? 0;
 
-  const bands: readonly PipelineBand[] = RENDER_PIPELINE_BANDS.map((band): PipelineBand => {
+  const bands = RENDER_PIPELINE_BANDS.map((band): PipelineBand => {
     const bandCost = measureRenderPipelineBand(band.id, durations, graphTotal_ms);
     const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id
       && (context.surfaceMeshSelected || (node.id !== "surface-mesh-update" && node.id !== "surface-mesh-cull")))
       .map((node) => renderPipelineNodeForContext(node, context));
-    const entries = nodes.map((node) => {
-      const state = node.state(context);
-      const cost: RenderPipelineMeasurement = partitioned
-        ? measureRenderPipelineNode(node, durations, graphTotal_ms, state)
-        : { kind: "unmeasured", share: 0 };
-      return { node, state, cost };
-    });
-    const priced = partitioned && bandCost.duration_ms !== undefined;
     const rows: PipelineRow[] = [];
-    for (const { node, state, cost } of entries) {
-      // A run of rows on an unreachable arm reads as one collapsed row:
-      // repeating `unavailable` per tier is diagram space spent on a path
-      // the frame cannot take. The first member renders the placeholder;
-      // the rest render nothing while every member is unreachable.
+    for (const node of nodes) {
+      const state = node.state(context);
+      // A run of rows on an unreachable arm reads as one row: repeating
+      // `unavailable` per tier is space spent on a path the frame cannot take.
       if (node.collapseGroup) {
         const members = nodes.filter((other) => other.collapseGroup === node.collapseGroup);
         if (members.every((member) => member.state(context) === "unavailable")) {
           if (members.indexOf(node) !== 0) continue;
           const group = RENDER_PIPELINE_COLLAPSE_GROUPS[node.collapseGroup];
           const tip = `${group.label} · ${group.chip}\n\n${group.summary}`;
-          rows.push({
-            id: node.collapseGroup,
-            label: group.label,
-            state: "unavailable",
-            tip,
-            lamp: { kind: "switch", checked: true, disabled: true, ariaLabel: group.label, title: tip },
-          });
+          rows.push({ id: node.collapseGroup, label: group.label, state: "unavailable", tip,
+            lamp: { kind: "switch", checked: true, disabled: true, ariaLabel: group.label, title: tip } });
           continue;
         }
       }
+      const cost: RenderPipelineMeasurement = partitioned
+        ? measureRenderPipelineNode(node, durations, graphTotal_ms, state)
+        : { kind: "unmeasured", share: 0 };
       const chip = node.chip(context);
       const tip = renderPipelineTipText(node, chip);
       const unavailable = state === "unavailable";
-      const activeTap = node.taps.find((view) => view === svoStageView);
-      const primaryTap = node.taps[0];
       const stage = controls[node.id];
-      const views = node.taps.length > 1 ? node.taps.length : 0;
-      const summary = pipelineFoldSummary({ settings: stage?.settings, readouts: stage?.readouts, views });
       rows.push({
         id: node.id,
         label: node.label,
         state,
         tip,
         chip,
-        cost: {
-          kind: cost.kind,
-          duration_ms: cost.duration_ms,
-          encodedFraction: cost.encodedFraction,
-          explanation: `${node.label}\n\n${costExplanation(cost)}`,
-        },
+        cost: { kind: cost.kind, duration_ms: cost.duration_ms, encodedFraction: cost.encodedFraction, explanation: costExplanation(cost) },
         lamp: {
           kind: "switch",
           checked: state !== "off",
@@ -396,13 +323,8 @@ export function RenderPipelineOverlay() {
           title: tip,
           onToggle: () => toggleNode(node.id),
         },
-        tap: primaryTap && !unavailable ? {
-          label: "◨",
-          title: `Present a plane this pass wrote instead of the composite.\n\n${tip}`,
-          active: Boolean(activeTap),
-          onToggle: () => setSvoStageView(activeTap ? "off" : primaryTap),
-        } : undefined,
-        planes: node.taps.length > 1 ? node.taps.map((view) => {
+        // The planes this pass wrote, presented instead of the composite.
+        planes: unavailable ? undefined : node.taps.map((view) => {
           const definition = SVO_RENDER_STAGE_DEFINITIONS[view];
           return {
             label: definition.label,
@@ -410,12 +332,12 @@ export function RenderPipelineOverlay() {
             active: svoStageView === view,
             onToggle: () => setSvoStageView(svoStageView === view ? "off" : view),
           };
-        }) : undefined,
+        }),
         controls: stage?.node,
         notice: stage?.notice,
-        fold: summary ? { summary } : undefined,
       });
     }
+    const priced = partitioned && bandCost.duration_ms !== undefined;
     return {
       id: band.id,
       label: band.label,
@@ -425,82 +347,92 @@ export function RenderPipelineOverlay() {
     };
   });
 
+  return {
+    bands,
+    frame: trace ? formatPipelineDuration(trace.total_ms) : "—",
+    source: !trace ? "Waiting for a sampled frame."
+      : trace.measurementSource === "gpu-queue-wall"
+        ? "Queue completion wall time: includes backlog and callback delivery."
+        : `GPU execution span, mean of up to ${TRACE_WINDOW} frames${partitioned ? "; one exclusive timing per stage" : ""}. Not the reciprocal of fps.`,
+  };
+}
+
+/** The quality rung: how expensive the frame is allowed to be. */
+function FrameProfileLine() {
+  const session = useSession();
+  const tuning = session.ui((state) => state.svoRenderTuning);
+  const setTuning = session.ui((state) => state.setSvoRenderTuning);
+  const coneTracingMode = session.ui((state) => state.svoConeTracingMode);
+  const setSvoConeTracingMode = session.ui((state) => state.setSvoConeTracingMode);
+  const tuningKey = svoRenderTuningKey(tuning);
+  // A rung is the pair, so the match is on the pair. `quality` and `reference`
+  // carry the same sliders and differ only in how visibility is answered.
+  const presets = Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[];
+  const active = presets.find((preset) => svoRenderTuningKey(SVO_RENDER_QUALITY_PRESETS[preset].tuning) === tuningKey
+    && SVO_RENDER_QUALITY_PRESETS[preset].coneTracingMode === coneTracingMode);
+  return <RailSelect label="Profile" value={active ?? "custom"} testId="render-profile"
+    options={[...presets.map((preset) => ({ value: preset, label: preset })), ...(active ? [] : [{ value: "custom", label: "custom" }])]}
+    onChange={(preset) => {
+      if (preset === "custom") return;
+      // One choice, both halves: a named rung is never half-applied.
+      setTuning(SVO_RENDER_QUALITY_PRESETS[preset as SvoRenderQualityPreset].tuning);
+      setSvoConeTracingMode(SVO_RENDER_QUALITY_PRESETS[preset as SvoRenderQualityPreset].coneTracingMode);
+    }} />;
+}
+
+/** What a frame costs: the rung, the total, then a line per band. */
+export function FrameCostLines() {
+  useFrameSampling();
+  const session = useSession();
+  const status = session.diagnostics((state) => state.effectiveRendererStatus);
+  const withheld = session.ui((state) => state.disabledRenderStages);
+  const setRenderStageDisabled = session.ui((state) => state.setRenderStageDisabled);
+  const cost = useRenderPipelineBands();
   return <>
-    {/* One band: what is running, whether the figures are live, and what the
-        frame costs. These were a status strip and a live strip stacked over the
-        profile rung, three full-width bars before the first measurement. */}
-    <div className="render-status-line">
-      <span className={effectiveRendererStatus.state === "active" ? "online" : ""} />
-      <strong data-testid="effective-renderer-status">{effectiveRendererStatus.state === "active"
-        ? lightingVisibilityStatus.state === "cones" ? "SVO GI"
-          : lightingVisibilityStatus.state === "exact" ? "SVO exact" : "SVO direct"
-        : effectiveRendererStatus.state === "not-required" ? "SVO not required"
-        : effectiveRendererStatus.state === "pending" ? "SVO pending" : "SVO failed closed"}</strong>
-      <Switch label="Live" checked={liveTiming} onChange={setLiveTiming}
-        hint={`Samples the renderer while this panel is open. Measurement stops when this is off or the panel closes.\n\n${timingHint}`} />
-      <code data-testid="render-frame-cost" title={timingHint}>{timingLabel}</code>
-    </div>
-    {/* The frame's other figures on one fact line under the cost they sit
-        beside: host and queue time, then what the frame is made of. They were
-        a second status band and a code chip crowding the first. */}
-    {(wallTimed || effectiveRendererStatus.terminalCounts) && <div className="grid-readout"
-      data-testid={wallTimed ? "render-wall-timing" : undefined}>
-      {wallTimed && <strong title="CPU is measured host frame work. Queue is submission-to-completion wall time, including queued GPU work and callback delivery. These overlap GPU execution and must not be added to the GPU total above.">
-        CPU {timing.cpu_ms?.toFixed(2) ?? "—"} · Queue {timing.queue_ms?.toFixed(2)} ms</strong>}
-      {effectiveRendererStatus.terminalCounts && <span data-testid="svo-terminal-counts"
-        title="Accepted unified SVO leaf terminals. Planar terminals keep exact thin slab geometry without voxel payload traversal.">
-        {effectiveRendererStatus.terminalCounts.planarBoundary} planar · {effectiveRendererStatus.terminalCounts.voxel} voxel</span>}
-      {wallTimed && <span title="Cumulative water mesh extractions since this pipeline was created. A paused unchanged surface should retain its mesh.">
-        {timing.extractionCount ?? "—"} mesh builds{timing.extractionReason ? ` (${timing.extractionReason})` : ""}</span>}
-    </div>}
-
-    {/* The profile rung is the question asked before any node is opened — how
-        expensive is this frame allowed to be — so it stays above the graph
-        rather than inside a node that can be collapsed over it. */}
-    <div className="render-preset-strip" role="group" aria-label="Render performance profile">
-      <span>Profile</span>
-      <Choice value={activePreset ?? ""} ariaLabel="Render performance profile"
-        options={(Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[]).map((preset) => ({ value: preset, label: preset }))}
-        onChange={(preset) => {
-          if (!preset) return;
-          // One click, both halves. The visibility mode has its own buttons on
-          // the cone node and stays reachable there; what this strip guarantees
-          // is that a named rung is never half-applied.
-          setTuning(SVO_RENDER_QUALITY_PRESETS[preset].tuning);
-          setSvoConeTracingMode(SVO_RENDER_QUALITY_PRESETS[preset].coneTracingMode);
-        }} />
-      {!activePreset && <output>custom</output>}
-      {/* A withheld stage is easy to forget and looks like a bug from the
-          viewport, so the count is always visible once there is one and the way
-          back is one click from where it is stated. */}
-      {disabledRenderStages.length > 0 && <Button className="render-withheld-reset" testId="withheld-stage-count"
-        hint={`Withheld from the encode:\n${disabledRenderStages.map((stage) => `· ${stage.replace(/-/g, " ")}`).join("\n")}\n\nRestore all of them.`}
-        onClick={() => { for (const stage of disabledRenderStages) setRenderStageDisabled(stage, false); }}>
-        {disabledRenderStages.length} withheld ↺
-      </Button>}
-    </div>
-
-    {/* How the frame finds its surface, on the same rail as every card's
-        fields: which primary answers visibility, and what surface it shades. */}
-    <FieldList className="scene-instrument-section render-frame-options" role="group" aria-label="Frame surface options">
-      <SvoFeatureSlot slot="frame.options" />
-      <SwitchField label="Smooth surface" checked={smoothSurfaceEnabled}
-        onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
-        hint={resolvedPrimary === "mesh"
-          ? "Reconstruct a continuous triangle surface from the procedural field using dual marching cubes, with smooth silhouettes and shared vertices across brick boundaries."
-          : "Reconstruct a sub-voxel tangent surface from each cell's coverage and baked normal, changing both surface depth and orientation. Off draws the entered axis-aligned voxel face."} />
-    </FieldList>
-
-    {resolvedPrimary === "mesh" && smoothSurfaceEnabled && <p className="render-inline-status">
-      Smooth surface uses dual marching cubes at native resolution for a watertight mesh.
-    </p>}
-
-    {resolvedPrimary === "mesh" && effectiveRendererStatus.surfaceMesh?.state === "blocked"
-      && <p className="render-inline-status">{effectiveRendererStatus.surfaceMesh.detail}</p>}
-
-    {effectiveRendererStatus.failureReason && <p className="render-inline-warning">SVO unavailable: {effectiveRendererStatus.detail
-      ?? rendererFailureLabels[effectiveRendererStatus.failureReason]}.</p>}
-
-    <PipelineGraph bands={bands} testId="render-pipeline" />
+    {status.failureReason && <small className="rail-note" data-tone="attention" title={status.detail ?? undefined}>
+      SVO unavailable: {rendererFailureLabels[status.failureReason]}</small>}
+    <FrameProfileLine />
+    <RailReadout label="Frame" value={cost.frame} hint={cost.source} testId="render-frame-cost" />
+    <PipelineCost id="render-pipeline" bands={cost.bands} />
+    {/* A withheld stage looks like a bug from the viewport, so the count stays
+        in view and the way back is one click from where it is stated. */}
+    {withheld.length > 0 && <button type="button" className="rail-text-button" data-tone="attention" data-testid="withheld-stage-count"
+      title={withheld.map((stage) => stage.replace(/-/g, " ")).join("\n")}
+      onClick={() => { for (const stage of withheld) setRenderStageDisabled(stage, false); }}>
+      {withheld.length} withheld · restore
+    </button>}
   </>;
+}
+
+/** Whether More was left open, for the life of the page. */
+let frameMoreOpen = false;
+
+/** The frame's other facts and its surface options, folded. */
+export function FrameMoreLines() {
+  const session = useSession();
+  const status = session.diagnostics((state) => state.effectiveRendererStatus);
+  const surfaceStyle = session.scene((state) => state.scene.surfaceStyle);
+  const patchScene = session.scene((state) => state.patchScene);
+  const lighting = status.lightingVisibility?.state ?? session.ui.getState().svoConeTracingMode;
+  const timing = usePresentationTiming();
+  const smooth = !sceneUsesFlatVoxelNormals({ surfaceStyle });
+  return <details className="rail-more" open={frameMoreOpen} onToggle={(event) => { frameMoreOpen = event.currentTarget.open; }}>
+    <summary>More</summary>
+    <RailReadout label="Renderer" testId="effective-renderer-status" hint={status.detail ?? undefined}
+      value={status.state === "active" ? lighting === "cones" ? "SVO GI" : lighting === "exact" ? "SVO exact"
+        : lighting === "raster-ao" ? "SVO raster AO" : "SVO direct"
+        : status.state === "not-required" ? "not required" : status.state === "pending" ? "pending" : "failed"} />
+    {timing.queue_ms !== undefined && <RailReadout label="Host · queue" testId="render-wall-timing"
+      hint="Host frame work, then submit-to-completion wall time. Both overlap GPU execution."
+      value={`${timing.cpu_ms?.toFixed(2) ?? "—"} · ${timing.queue_ms.toFixed(2)} ms`} />}
+    {status.terminalCounts && <RailReadout label="Terminals" testId="svo-terminal-counts"
+      value={`${status.terminalCounts.planarBoundary} planar · ${status.terminalCounts.voxel} voxel`} />}
+    {timing.extractionCount !== undefined && <RailReadout label="Mesh builds" hint={timing.extractionReason}
+      value={timing.extractionCount} />}
+    <SvoFeatureSlot slot="frame.options" />
+    <RailToggle label="Smooth surface" checked={smooth}
+      onChange={(enabled) => patchScene({ surfaceStyle: enabled ? "smooth" : "voxel-flat" })}
+      hint="Reconstruct a continuous surface instead of drawing axis-aligned voxel faces." />
+    {status.surfaceMesh?.state === "blocked" && <small className="rail-note">{status.surfaceMesh.detail}</small>}
+  </details>;
 }

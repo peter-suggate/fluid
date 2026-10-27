@@ -2,15 +2,12 @@
 
 import { SCENE_INSTRUMENTS } from "../lib/core/scene-instruments";
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay";
-import { RenderPipelineOverlay } from "../lib/svo/pipeline/ui";
-import { SimPipelineOverlay } from "./SimPipelineOverlay";
 import { useSession } from "../lib/core/session/session-context";
 
 /**
- * The one host every scene instrument is drawn in.
+ * The host the metric cards are drawn in.
  *
- * A pane of frosted glass along one edge, never a page. The three things it can
- * hold — the advance pipeline, the frame pipeline, the metric cards — are all
+ * A pane of frosted glass along one edge, never a page. The cards are
  * readings *about the scene*, and a reading that covers the thing it is a
  * reading of is useless: the picture has to stay visible while a slider moves,
  * because watching the water is how you tell whether the number was worth it.
@@ -24,7 +21,7 @@ import { useSession } from "../lib/core/session/session-context";
  * that happens to be floating. It is one 34px line now — what this is, and the
  * way out — and the contents state their own status on a single band under it.
  *
- * The three contents own that status band; this owns the frame, the scroll, the
+ * The contents own that status band; this owns the frame, the scroll, the
  * title and the two ways out (the close button and Escape).
  */
 
@@ -32,7 +29,8 @@ export function PipelineOverlay() {
   const session = useSession();
   const overlay = session.ui((state) => state.sceneOverlay);
   const setSceneOverlay = session.ui((state) => state.setSceneOverlay);
-  if (!overlay) return null;
+  // The two pipelines are rail cards now (Simulation, Performance); ViewRail opens them.
+  if (overlay !== "diagnostics") return null;
   const chrome = SCENE_INSTRUMENTS[overlay];
   return <aside
     className="scene-instrument"
@@ -60,9 +58,7 @@ export function PipelineOverlay() {
         cannot hold a header still without a sticky element re-blurring the
         backdrop under it, and rounded corners clip a scrolling child cleanly. */}
     <div className="scene-instrument-body panel-scroll">
-      {overlay === "sim-pipeline" && <SimPipelineOverlay />}
-      {overlay === "render-pipeline" && <RenderPipelineOverlay />}
-      {overlay === "diagnostics" && <DiagnosticsOverlay />}
+      <DiagnosticsOverlay />
     </div>
   </aside>;
 }

@@ -28,5 +28,5 @@ export const SVO_RADIANCE_RECONSTRUCTION_FEATURE = {
     requires: ["svo.lighting-visibility"], provides: ["svo.reconstructed-radiance"],
   })),
   controls: [{ id: "mode", kind: "choice", label: "Reconstruction", setting: "svoRenderTuning.coneRadianceReconstruction", options: SVO_RADIANCE_RECONSTRUCTION_OPTIONS, update: "live" }],
-  placements: [{ slot: "frame.reconstruction", control: "mode", presentation: "expanded" }],
+  placements: [{ slot: "frame.reconstruction", control: "mode", presentation: "compact" }],
 } as const satisfies FeatureDefinition;

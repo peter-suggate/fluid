@@ -23,7 +23,7 @@ export const SVO_PRIMARY_VISIBILITY_FEATURE = {
     { id: "primary-work", label: "Primary ray work", kind: "choice", setting: "svoStageView", update: "rebuild" },
   ],
   placements: [
-    { slot: "frame.options", control: "mode", presentation: "expanded" },
+    { slot: "frame.options", control: "mode", presentation: "compact" },
     { slot: "scene.visibility", control: "primary-work", presentation: "compact" },
   ],
 } as const satisfies FeatureDefinition;

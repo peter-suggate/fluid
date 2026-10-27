@@ -48,7 +48,7 @@ test("the study rail holds the clock, the method's tuning and the layers, and no
   assert.deepEqual(study.map(section => section.id), ["simulation", "tune", "layers"]);
   const clock = study.find(section => section.id === "simulation")!;
   assert.deepEqual(composition.placements.filter(p => p.slot === clock.slot).map(p => `${p.feature}/${p.control}`),
-    ["simulation.clock/step"]);
+    ["simulation/step", "simulation/cost", "simulation/more"]);
   const layers = study.find(section => section.id === "layers")!;
   const inLayers = composition.placements.filter(p => p.slot === layers.slot).map(p => `${p.feature}/${p.control}`);
   // The particle display is a layer: it stands first in the layer card.

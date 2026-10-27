@@ -11,18 +11,17 @@ export function PerformanceLoadLines() {
 }
 
 /**
- * The three instruments, each a switch. An instrument is a reading of the
- * whole run rather than a verb on an object, so it needs a route that does not
- * depend on a right-click landing on the water; each switch names its key, so
- * the card is where people learn them.
+ * The instruments still drawn over the scene, each a switch. The two
+ * pipelines are rail cards of their own (Simulation, and this one), so only
+ * the metric cards remain; the switch names its key, so the card is where
+ * people learn it.
  */
 export function InstrumentLines() {
   const session = useSession();
   const overlay = session.ui((state) => state.sceneOverlay);
   const setSceneOverlay = session.ui((state) => state.setSceneOverlay);
   return <>
-    <RailRule label="Instruments" />
-    {SCENE_INSTRUMENT_ORDER.map((instrument) => <RailToggle
+    {SCENE_INSTRUMENT_ORDER.filter((instrument) => instrument.id === "diagnostics").map((instrument) => <RailToggle
       key={instrument.id}
       label={<>{instrument.label} <kbd className="rail-kbd">{instrument.shortcut.toUpperCase()}</kbd></>}
       ariaLabel={instrument.label}

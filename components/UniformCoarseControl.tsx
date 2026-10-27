@@ -13,7 +13,7 @@ import { uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-r
 import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP, NARROW_BAND_SPARSE_CONTROL, NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL, NARROW_BAND_SURFACE_ADVECTION as ADVECTION, NARROW_BAND_TUNE_CONTROLS, narrowBandControlValues, narrowBandSurfaceAdvection, type NarrowBandSurfaceAdvection } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { NARROW_BAND_TUNE_DIALS, narrowBandTunePosition, narrowBandTuneValues, type NarrowBandTuneDial } from "../lib/methods/uniform/uniform-narrow-band-tuning";
 import { RailLink, RailRange, RailReadout, RailRule } from "./rail";
-import { ChoiceField, Facts, Field, FieldList, FieldNote, NumberInput, RangeField, Swatch, Switch, SwitchField } from "./ui";
+import { ChoiceField, Facts, Field, FieldList, NumberInput, RangeField, Swatch, Switch, SwitchField } from "./ui";
 
 const SHAPE_DISPLACEMENT_HINT = "Shape measures how far the surface moves at 4h, not the error in phi beside it. Off: value error.";
 const SURFACE_DISTANCE_HINT = "Allowed tile layers around surface-crossing tiles, including diagonals. 0 keeps only crossing tiles. This permits existing refinement; it does not request more.";
@@ -201,56 +201,60 @@ export function UniformTunePanel() {
   </>;
 }
 
-/**
- * Simulation detail: where the Uniform Geometric solver runs h on its 4h base.
- * Keep this panel focused on accepted coverage and status; tuning lives in
- * the scene toolstrip.
- */
-export function UniformCoarseControl() {
+/** The accepted layout, and whether the latest request is still on its way. */
+function useUniformDetail() {
   const session = useSession();
   const method = session.method();
   const scene = session.scene(state => state.scene);
   const info = session.diagnostics(state => state.gpuInfo);
   const values = resolvedMethodValues(method), settings = uniformDetailSettings(values);
-  const narrowBand = true;
-  const adaptive = narrowBand && values.adaptiveSurface === "on";
-  const activityValues = narrowBandControlValues(values);
-  const regions = scene.fluid.refinementRegions ?? [];
   const detail = info?.uniformDetail;
   const fine = info?.uniformMixedFineTiles, coarse = info?.uniformMixedCoarseTiles;
   const ready = detail !== undefined && fine !== undefined;
   // The accepted layout answers a policy and region set; anything else is still on its way.
-  const pending = ready && detail.requestKey !== uniformDetailRequestKey(settings.policy, regions);
-  const tiles = (fine ?? 0) + (coarse ?? 0);
-  return <FieldList testId="uniform-resolution-control">
-    <Field label="Coverage" className="is-readout"
-      hint="Tiles of 4×4×4 h cells in the accepted layout. Enabled solid-contact refinement also requests h.">
-      <output className="ui-value" data-testid="uniform-detail-coverage">
-        {!ready ? "Initializing" : `${percent(fine!, tiles)} h · ${percent(coarse ?? 0, tiles)} 4h`}{detail?.preparing ? " · preparing" : pending ? detail.rejected ? " · refused" : " · applying" : ""}
-      </output>
-    </Field>
-    {ready && <FieldNote>
-      {`${fine!.toLocaleString()} h · ${(coarse ?? 0).toLocaleString()} 4h tiles · requested ${detail.requestedTiles.toLocaleString()}, admitted ${detail.admittedTiles.toLocaleString()}`
-        + `${detail.contactTiles ? ` + ${detail.contactTiles.toLocaleString()} contact` : ""} · ${(info!.allocatedBytes / 1048576).toFixed(1)} MiB allocated`}
-    </FieldNote>}
-    {ready && detail.rejected && <FieldNote><span data-testid="uniform-detail-rejected">
-      {`Request refused; the layout above keeps running. ${detail.rejected}.`}</span></FieldNote>}
-    {ready && detail.preparing && <FieldNote><span data-testid="uniform-detail-preparing">
-      {`Compiling ${detail.preparing} pipelines for the latest change; the simulation above keeps running until they are ready.`}</span></FieldNote>}
-    {ready && <details className="instrument-drawer" data-testid="uniform-detail-diagnostics">
-      <summary><span>Detail plan</span><small>Accepted layout</small></summary>
+  const pending = ready && detail.requestKey !== uniformDetailRequestKey(settings.policy, scene.fluid.refinementRegions ?? []);
+  return { values, info, detail, fine: fine ?? 0, coarse: coarse ?? 0, ready, pending };
+}
+
+/**
+ * What the detail planner is doing that the reader has to see without opening
+ * anything: a refused request, or pipelines compiling for the latest change.
+ */
+export function UniformDetailStatus() {
+  const { detail, ready } = useUniformDetail();
+  if (!ready) return null;
+  return <>
+    {detail!.rejected && <small className="rail-note" data-tone="attention" data-testid="uniform-detail-rejected"
+      title={`The previous layout keeps running. ${detail!.rejected}.`}>Detail request refused</small>}
+    {detail!.preparing && <small className="rail-note" data-testid="uniform-detail-preparing"
+      title="The simulation keeps running until they are ready.">Compiling {detail!.preparing} detail pipelines</small>}
+  </>;
+}
+
+/** Where the Uniform Geometric solver runs h on its 4h base, and the plan that put it there. */
+export function UniformDetailLines() {
+  const { values, info, detail, fine, coarse, ready, pending } = useUniformDetail();
+  const adaptive = values.adaptiveSurface === "on";
+  const activityValues = narrowBandControlValues(values);
+  const tiles = fine + coarse;
+  return <>
+    <RailReadout label="Coverage" testId="uniform-detail-coverage"
+      hint={ready ? `${fine.toLocaleString()} h · ${coarse.toLocaleString()} 4h tiles · requested ${detail!.requestedTiles.toLocaleString()}, admitted ${detail!.admittedTiles.toLocaleString()}${detail!.contactTiles ? ` + ${detail!.contactTiles.toLocaleString()} contact` : ""}` : undefined}
+      value={!ready ? "—" : `${percent(fine, tiles)} h${detail!.preparing ? " · preparing" : pending ? detail!.rejected ? " · refused" : " · applying" : ""}`} />
+    {ready && <details className="rail-more is-nested" data-testid="uniform-detail-diagnostics">
+      <summary>Plan</summary>
       <Facts items={[
-        { label: "Mapping", value: detail.mapping },
-        { label: "Requests", value: `${detail.reasons.region.toLocaleString()} region · ${detail.reasons.full.toLocaleString()} full · ${detail.reasons.focus.toLocaleString()} focus · ${detail.reasons.activity.toLocaleString()} activity tiles` },
-        { label: "Support overhead", value: `${detail.supportTiles.toLocaleString()} tiles (${percent(detail.supportTiles, detail.admittedTiles + detail.supportTiles)})`,
+        { label: "Mapping", value: detail!.mapping },
+        { label: "Requests", value: `${detail!.reasons.region.toLocaleString()} region · ${detail!.reasons.full.toLocaleString()} full · ${detail!.reasons.focus.toLocaleString()} focus · ${detail!.reasons.activity.toLocaleString()} activity` },
+        { label: "Support", value: `${detail!.supportTiles.toLocaleString()} (${percent(detail!.supportTiles, detail!.admittedTiles + detail!.supportTiles)})`,
           hint: "Tiles around admitted h tiles that a patch store must also hold." },
-        ...(adaptive ? [{ label: "Adaptive budget", value: `${activityValues.adaptiveBudgetPercent}% of requesting tiles`, hint: "Automatic candidates only; cooling support, sources and required contact may add tiles." }]
-          : [{ label: "Domain budget", value: `${detail.automaticCostTiles.toLocaleString()} / ${detail.budgetTiles.toLocaleString()} tiles${detail.budgetClippedTiles ? ` · ${detail.budgetClippedTiles.toLocaleString()} clipped` : ""}` }]),
-        { label: "Patches", value: `${detail.residentPatches.toLocaleString()} × ${detail.patchCells}³ · ${percent(detail.wastedCells, detail.allocatedCells)} unused`,
-          hint: "What a 4h-first patch store would allocate for this plan; this build still holds the full h lattice." },
-        ...(detail.deferredTiles ? [{ label: "Deferred", value: `${detail.deferredTiles.toLocaleString()} tiles over capacity` }] : []),
-        ...(detail.unconstrainedRegions ? [{ label: "Unconstrained", value: `${detail.unconstrainedRegions} region${detail.unconstrainedRegions === 1 ? "" : "s"} allow both sizes and request nothing` }] : []),
+        ...(adaptive ? [{ label: "Budget", value: `${activityValues.adaptiveBudgetPercent}% of requesting` }]
+          : [{ label: "Budget", value: `${detail!.automaticCostTiles.toLocaleString()} / ${detail!.budgetTiles.toLocaleString()}${detail!.budgetClippedTiles ? ` · ${detail!.budgetClippedTiles.toLocaleString()} clipped` : ""}` }]),
+        { label: "Patches", value: `${detail!.residentPatches.toLocaleString()} × ${detail!.patchCells}³ · ${percent(detail!.wastedCells, detail!.allocatedCells)} unused` },
+        ...(detail!.deferredTiles ? [{ label: "Deferred", value: `${detail!.deferredTiles.toLocaleString()} over capacity` }] : []),
+        ...(detail!.unconstrainedRegions ? [{ label: "Unconstrained", value: `${detail!.unconstrainedRegions} region${detail!.unconstrainedRegions === 1 ? "" : "s"}` }] : []),
+        { label: "Allocated", value: `${((info?.allocatedBytes ?? 0) / 1048576).toFixed(1)} MiB` },
       ]} />
     </details>}
-  </FieldList>;
+  </>;
 }

@@ -4,7 +4,7 @@ import { getMethod } from "../../core/method-registry";
 import { composeFeatures } from "../../framework/composition";
 import { SVO_PIPELINE_FEATURES } from "../../svo/pipeline/composition";
 import { gravityFeature } from "../gravity/definition";
-import { simulationClockFeature } from "../simulation-clock/definition";
+import { simulationFeature } from "../simulation/definition";
 import { viewRailFeature } from "../view-rail/definition";
 import { visualLayersFeature } from "../field-view/definition";
 
@@ -22,7 +22,7 @@ export function composeFeatureUI(
     features: [
       viewRailFeature,
       ...SVO_PIPELINE_FEATURES,
-      ...(fluid ? [simulationClockFeature, gravityFeature, surfaceDisplayFeature] : []),
+      ...(fluid ? [simulationFeature, gravityFeature, surfaceDisplayFeature] : []),
       ...(layers ? [visualLayersFeature] : []),
       ...(method?.features ?? []),
     ],
