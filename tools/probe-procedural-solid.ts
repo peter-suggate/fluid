@@ -36,6 +36,9 @@ fn umTerrainSurface(p:vec3f)->vec3f{return vec3f(0);}
 fn umBodyAt(p:vec3f)->i32{return -1;}
 fn umSolidTraceWorld(p:vec3f)->vec3f{return p;}
 fn umCellOpen(p:vec3i)->f32{return umBoundaryBoxOpen(vec3f(p)+.5,vec3f(1));}
+// No solid record: every cell may be cut (uniformMixedSolidWGSL's fallback).
+fn umSolidFieldCutAt(p:vec3i)->bool{return true;}
+fn umPointPresent(q:vec3f)->bool{return umSolidValid(vec3i(floor(q)));}
 ${geometricPlaneBoxWGSL.replaceAll("geometric","umTerrain")}
 ${uniformSolidBoundaryWGSL}
 ${narrowBandTerrainContactWGSL}
@@ -44,7 +47,7 @@ ${narrowBandTerrainContactWGSL}
  result[3u*i]=umBoundarySample(q);
  result[3u*i+1u]=vec4f(umBoundaryBoxOpen(floor(q)+.5,vec3f(1)),umBoundaryBoxOpen(floor(q)+vec3f(1,.5,.5),vec3f(0,1,1)),0,0);
  let end=vec3f(8.5,7.3,.5);let start=end+vec3f(0,.5,0);
- let hit=nbBoundaryHit(start,end);let contact=nbProceduralContact(start,end,vec3f(0,-1,0));
+ let hit=nbBoundaryHit(start,end);let contact=nbProceduralContact(start,end,vec3f(0,-1,0),0.25);
  // Positive endpoints with a negative interior: (t-.5)^2-.01.
  let ridge=nbBoundaryCubicHit(vec4f(.24,-.0933333333,-.0933333333,.24));
  result[3u*i+2u]=vec4f(hit,umBoundarySample(contact.position).w,ridge,dot(contact.velocity,normalize(vec3f(.0625,1,.03125))));

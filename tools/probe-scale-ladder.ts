@@ -9,6 +9,7 @@
  *   --cell=0.0025 [--width=2] [--depth=0.5] [--pool=<blocks>] [--steps=10] [--budget-s=150]
  *   [--hold=/private/tmp/claude-501/fluid-gpu-run.sh [--hold-mode=timing]] [--values={...}] [--tiers=FILE.json] [--out=artifacts/scale-ladder/X.json]
  * --tiers: a JSON file of fluid.tiers fields over the scene's (e.g. {"start":"4h"}).
+ * --water=inviscid zeroes the scene's viscosity and surface tension.
  * --hold builds the solver outside the shared GPU runner and takes it (check, or timing) for the
  * steps; without it, run the whole probe under the runner. --plan evaluates the host-side
  * limits (page window, residency, lattice address and block grid, block count, memory)
@@ -16,7 +17,8 @@
  * --pool replaces the scene's page pool (fluid.pagePool.blocks); without it
  * the scene's own pool is used, and --max-gib (default 6, the shared runner's check-mode cap) refuses a pool
  * whose blocks would exceed it at --block-mib (default 16, measured at 5 mm) a block before
- * any GPU allocation. A row per step: fenced ms, h tiles, resident pages,
+ * any GPU allocation, and the allocation audit refuses any resource that takes the requested bytes past
+ * --max-gib. A row per step: fenced ms, h tiles, resident pages,
  * particles, regions COLD/WARM/HOT, the max speed in h cells a step, and
  * (every --every steps and the last) the catch chamber's h tiles: on its
  * floor (the bottom 8 cells) and in all. --timestamps=<step> samples the
@@ -43,12 +45,17 @@ import { uniformPageSources, type WebGPUUniformReferenceSolver } from "../lib/me
 import { uniformLatticeInitialVolume } from "../lib/methods/uniform/uniform-volume-initial";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, uniformPagePoolResidency, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
 import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
+import { gpuKernelTimer } from "./gpu-kernel-timer";
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const cell = Number(option("cell") ?? 0.005), widthScale = Number(option("width") ?? 1), depthScale = Number(option("depth") ?? 1);
 const holdFile = option("hold"), holdMode = option("hold-mode") === "timing" ? "timing" as const : "check" as const;
 const timestampsFrom = option("timestamps") === undefined ? undefined : Number(option("timestamps"));
+// --kernels=<step>: per-dispatch GPU times (tools/gpu-kernel-timer.ts) from that step on (row.kernels_ms, report kernelMedians_ms).
+const kernelsFrom = option("kernels") === undefined ? undefined : Number(option("kernels"));
 const steps = Number(option("steps") ?? 10), budget_s = Number(option("budget-s") ?? 150), every = Number(option("every") ?? 5);
+// --stats-every=N: readStats (max speed, drift) every N steps and the last; 1 (the default) every step.
+const statsEvery = Number(option("stats-every") ?? 1);
 const maxGiB = Number(option("max-gib") ?? 6), blockMiB = Number(option("block-mib") ?? 16);
 const pool = option("pool") === undefined ? undefined : Number(option("pool"));
 const extra: MethodParamValues = JSON.parse(option("values") ?? "{}");
@@ -63,13 +70,15 @@ scene.duration_s = Math.max(scene.duration_s, (steps + 1) * scene.numerics.fixed
 if (pool !== undefined) scene.fluid.pagePool = { ...scene.fluid.pagePool, blocks: pool };
 const tiersFile = option("tiers");
 if (tiersFile !== undefined) scene.fluid.tiers = { ...scene.fluid.tiers, ...JSON.parse(readFileSync(resolve(tiersFile), "utf8")) };
+// --water=inviscid: zero viscosity and surface tension (the realtime water model).
+if (option("water") === "inviscid") { scene.fluid.dynamicViscosity_Pa_s = 0; scene.fluid.surfaceTension_N_m = 0; }
 const quality = base.methodProfile!.quality;
 const values = resolveMethodValues(method, quality, { ...method.appDefaults, timeStep: "scene", ...base.methodProfile!.overrides, ...extra });
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 const lattice = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER), wallHigh = 16 * Math.floor(sceneLatticeDimensions(scene)[0] / 32);
 const blocks = scene.fluid.pagePool?.blocks ?? 0;
 const header = { tag, cell_m: cell, widthScale, depthScale, lattice, boxCells: lattice[0] * lattice[1] * lattice[2],
-  boxPages: lattice.map(n => Math.ceil(n / 32)), poolBlocks: blocks, dt, values: extra, tiers: scene.fluid.tiers };
+  boxPages: lattice.map(n => Math.ceil(n / 32)), poolBlocks: blocks, dt, values: extra, tiers: scene.fluid.tiers, water: option("water") ?? "scene" };
 console.log(JSON.stringify(header));
 
 interface Failure { phase: string; message: string; where?: string; numbers: number[]; stack?: string }
@@ -101,6 +110,15 @@ const medianPhases = () => {
   const labels = [...new Set(sampled.flatMap(r => Object.keys(r.phases_ms)))];
   return { samples: sampled.length, gpu: median(sampled.map(r => r.gpu_ms)), ...Object.fromEntries(labels.map(l => [l, median(sampled.map(r => r.phases_ms[l] ?? 0))])) };
 };
+/** Each kernel label's median over the --kernels rows. */
+const medianKernels = () => {
+  const sampled = rows.filter(r => r.kernels_ms) as { kernel_total_ms: number; kernels_ms: Record<string, number> }[];
+  if (!sampled.length) return undefined;
+  const median = (v: number[]) => Math.round([...v].sort((a, b) => a - b)[Math.floor(v.length / 2)]! * 1000) / 1000;
+  const labels = [...new Set(sampled.flatMap(r => Object.keys(r.kernels_ms)))];
+  const by = labels.map(l => [l, median(sampled.map(r => r.kernels_ms[l] ?? 0))] as const).sort((a, b) => b[1] - a[1]);
+  return { samples: sampled.length, total: median(sampled.map(r => r.kernel_total_ms)), ...Object.fromEntries(by) };
+};
 const report = () => {
   const byClass: Record<string, number> = {};
   for (const r of allocation?.resources ?? []) byClass[classify(r.label)] = (byClass[classify(r.label)] ?? 0) + r.bytes;
@@ -112,8 +130,9 @@ const report = () => {
     perBlockMiB: allocation && blocks ? mib(allocation.liveBytes / blocks) : undefined,
     byClassMiB: Object.fromEntries(Object.entries(byClass).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, mib(v)])),
     topResourcesMiB: (allocation?.resources ?? []).slice(0, 16).map(r => [r.label, r.count, mib(r.bytes)]),
+    resourcesBytes: (allocation?.resources ?? []).map(r => [r.label, r.count, r.bytes]),
     medianStep_ms: steady.length ? Math.round(steady[Math.floor(steady.length / 2)]! * 100) / 100 : undefined,
-    medianPhases_ms: medianPhases(), last: rows.at(-1) };
+    medianPhases_ms: medianPhases(), kernelMedians_ms: medianKernels(), last: rows.at(-1) };
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), ...summary, rows }, null, 1) + "\n");
   console.log(JSON.stringify({ ...summary, last: undefined, out }));
@@ -164,14 +183,15 @@ if (blocks * blockMiB / 1024 > maxGiB) {
 paceDawnEventPolling();
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/index.js")).href); Object.assign(globalThis, dawn.globals);
 const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requestAdapter(); assert.ok(adapter);
-const raw = await adapter.requestDevice({ requiredFeatures: (["float32-filterable", "subgroups", ...(timestampsFrom === undefined ? [] : ["timestamp-query"])] as GPUFeatureName[]).filter(f => adapter.features.has(f)),
+const raw = await adapter.requestDevice({ requiredFeatures: (["float32-filterable", "subgroups", ...(timestampsFrom === undefined && kernelsFrom === undefined ? [] : ["timestamp-query"])] as GPUFeatureName[]).filter(f => adapter.features.has(f)),
   requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
 const limits = Object.fromEntries((["maxBufferSize", "maxStorageBufferBindingSize", "maxTextureDimension2D", "maxTextureDimension3D"] as const)
   .map(k => [k, raw.limits[k]]));
 console.log(JSON.stringify({ limits }));
 Object.assign(header, { limits });
-const audit = auditUniformGPUAllocations(raw);
-const device = managedGPUDevice(audit.device, { requireWorkerRealm: false });
+const audit = auditUniformGPUAllocations(raw, maxGiB * 1073741824);
+const timer = gpuKernelTimer(audit.device);
+const device = managedGPUDevice(timer.device, { requireWorkerRealm: false });
 raw.addEventListener("uncapturederror", e => { e.preventDefault(); gpuErrors.push((e as GPUUncapturedErrorEvent).error.message); });
 let solver: WebGPUUniformReferenceSolver | undefined;
 let started = performance.now(), release: (() => void) | undefined;
@@ -189,7 +209,8 @@ try {
   }
   if (solver && !failure) {
     const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; heat: { tiers: GPUBuffer; regions: number }; setLayoutViews(on: boolean): void;
-      ownership: { presentation: GPUBufferBinding; capacity: { tiles: number; fineTiles: number } } } }).mixedFrame;
+      ownership: { presentation: GPUBufferBinding; capacity: { tiles: number; fineTiles: number } }; bulk?: import("../lib/methods/uniform/uniform-bulk-tier").UniformBulkTier } }).mixedFrame;
+    const bulk = frame.bulk;
     const l = frame.pagePool.layout, status = new Uint32Array(S.words);
     console.log(JSON.stringify({ constructed_ms: Math.round(construction_ms), liveMiB: Math.round(allocation.liveBytes / 1048576), poolSlots: l.slots,
       blocks: l.blocks, tileCapacity: frame.ownership.capacity.tiles, fineCapacity: frame.ownership.capacity.fineTiles }));
@@ -225,10 +246,13 @@ try {
       const sampling = timestampsFrom !== undefined && step >= timestampsFrom;
       usePerformanceInstrumentationStore.getState().setEnabled(sampling);
       if (sampling) await new Promise(r => setTimeout(r, 120)); // the trace cadence (100 ms)
+      timer.enabled = kernelsFrom !== undefined && step >= kernelsFrom;
       const t = performance.now();
       try { assert.ok(solver.advanceTo(step * dt, []), "advance admitted"); await solver.awaitFrameCompletion(); }
       catch (error) { failure = failureOf(`step ${step}`, error); }
       const wall_ms = performance.now() - t;
+      timer.enabled = false;
+      const kernels = kernelsFrom !== undefined && step >= kernelsFrom ? await timer.collect() : undefined;
       if (!failure && solver.info.simulationPipelineError) failure = { phase: `step ${step}`, message: String(solver.info.simulationPipelineError), numbers: [] };
       const receipt = device.createBuffer({ size: 4 * S.words, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const e = device.createCommandEncoder(); frame.pagePool.encodeReceipt(e, receipt, 0); device.queue.submit([e.finish()]);
@@ -237,11 +261,14 @@ try {
       if (!failure && fatal) failure = { phase: `step ${step}`, message: `page pool: ${fatal}`, numbers: [...fatal.matchAll(/\d+/g)].map(m => Number(m[0])) };
       if (!failure && gpuErrors.length) failure = { phase: `step ${step}`, message: `GPU validation: ${gpuErrors[0]}`, numbers: [] };
       const tiers = failure ? [] : [...(await read(frame.heat.tiers, 4 * frame.heat.regions, 16))].slice(0, 3);
-      const stats = failure ? undefined : await solver.readStats();
+      // readStats asks the next step for NB-FLIP's volume measurement (a diagnostic the app's live frames never run).
+      const stats = failure || (step % statsEvery !== 0 && step !== steps) ? undefined : await solver.readStats();
       const row: Record<string, unknown> = { step, wall_ms: Math.round(wall_ms * 100) / 100, hTiles: solver.info.uniformMixedFineTiles,
         resident: status[S.resident], free: status[S.free], particles: solver.narrowBandFlipInfo?.particles,
         regionsColdWarmHot: tiers, maxSpeed_m_s: stats?.maxSpeed_m_s, maxSpeed_hPerStep: stats && Math.round((stats.maxSpeed_m_s ?? NaN) * dt / cell * 100) / 100,
         drift: stats?.volumeDrift };
+      if (kernels) Object.assign(row, { kernel_total_ms: Math.round([...kernels.byLabel.values()].reduce((a, b) => a + b, 0) * 1000) / 1000, kernel_dispatches: kernels.dispatches, kernel_untimed: kernels.untimed,
+        kernels_ms: Object.fromEntries([...kernels.byLabel].sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, Math.round(v * 1000) / 1000])) });
       if (sampling && !failure) {
         for (let n = 0; n < 100 && (solver as unknown as { physicsTracePending: boolean }).physicsTracePending; n++) await new Promise(r => setTimeout(r, 5));
         const trace = solver.info.physicsTrace, phases: Record<string, number> = {};
@@ -249,6 +276,12 @@ try {
         if (trace) Object.assign(row, { gpu_ms: trace.total_ms, phases_ms: phases });
       }
       if (census && !failure) { Object.assign(row, await catchTiles()); frame.setLayoutViews(false); }
+      // The 16h bulk tier (bulkTier "16h"): its counts, and the whole pages (all 8 regions members).
+      if (census && !failure && bulk) {
+        const counts = await bulk.readCounts(), r = bulk.record, flags = await read(r.buffer, r.offset, 4 * bulk.regions);
+        let wholePages = 0; for (let b = 0; 8 * b < bulk.regions; b++) { let all = true; for (let i = 0; i < 8; i++) all &&= (flags[8 * b + i]! & 1) !== 0; if (all) wholePages++; }
+        Object.assign(row, { bulk: { ...counts, wholePages } });
+      }
       rows.push(row); console.log(JSON.stringify(row));
       if (failure) break;
     }

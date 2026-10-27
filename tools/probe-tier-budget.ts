@@ -45,6 +45,7 @@
  * dense-box if the box term is non-zero, otherwise fixed. Written to
  * OUT/allocation-classes.json, which runs read by default. */
 import assert from "node:assert/strict";
+import { PARTICLE_MASS_HEADER_WORDS, particleMassReadbackBytes, particleMassRecords } from "./particle-mass-readback";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { cpus, platform, release } from "node:os";
 import { resolve } from "node:path";
@@ -74,17 +75,29 @@ import type { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { GPUMemoryProfile } from "./gpu-memory-profile";
+import { gpuKernelTimer } from "./gpu-kernel-timer";
 
 const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "";
 // --retire: count NB-FLIP's retirements by reason (diagnostic shader words).
 if (options.includes("--retire")) narrowBandRetireCounting.on = true;
-// --retireSplit=x: the last three retirement words count at cells x >= the split: crowded, all, seeds offered.
+// --retireSplit=x[,y]: from word 5, at lattice cells x >= the split: deep-retired
+// mass past x + 16, and in [x, x + 16); seeds appended; seeds offered as
+// activated, above y + 8, interior and outer (the merge words' slots).
 const retireSplit = options.find(a => a.startsWith("--retireSplit="));
-if (retireSplit) { narrowBandRetireCounting.on = true; narrowBandRetireCounting.splitX = Number(retireSplit.slice(14)); }
+if (retireSplit) { const [x, y] = retireSplit.slice(14).split(","); narrowBandRetireCounting.on = true; narrowBandRetireCounting.splitX = Number(x); narrowBandRetireCounting.splitY = Number(y ?? 0); }
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|region|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|set|out|classes|retireSplit)=.+|--classify|--print-scene|--heatState|--census|--retire)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|region|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|ledger|set|out|classes|retireSplit|kernels)=.+|--classify|--print-scene|--heatState|--census|--retire|--particleMass|--cells|--walls)$/.test(a), `Unknown option: ${a}`);
+// --kernels=A-B[,C-D]: per-dispatch GPU times (tools/gpu-kernel-timer.ts)
+// over those step windows, a median a label each with the window's records.
+// Attribution only: the timer splits every dispatch into its own pass.
+const kernelWindows = (option("kernels") ?? "").split(",").filter(Boolean).map(w => w.split("-").map(Number) as [number, number]);
+// --cells: at each sample, the current bank's live records by cell and by
+// 8^3 brick (the sort's slab): population histogram, maxima, cells over 256.
+const cellCensus = options.includes("--cells");
+// --walls: every step's wall time with its particle and fine/band tile counts.
+const wallLines = options.includes("--walls");
 const sceneId = option("scene") ?? "reservoir-seep";
 const stepList = String(option("steps") ?? 1200).split(",").map(Number), every = Number(option("every") ?? 30), from = Number(option("from") ?? 13);
 /** Momentum traces cut at the segment bound (momentumTrace "substep"), summed over the run. */
@@ -259,10 +272,11 @@ const adapter = await gpu.requestAdapter(); assert.ok(adapter);
 
 // One device for every configuration of the process: its compilation cache
 // spares later constructions the cold compile (~150 s on an M1 Max).
-const raw = await adapter.requestDevice({ requiredFeatures: [...(["subgroups", "float32-filterable"] as const).filter(f => adapter.features.has(f))],
+const raw = await adapter.requestDevice({ requiredFeatures: [...(["subgroups", "float32-filterable", "timestamp-query"] as const).filter(f => (f !== "timestamp-query" || kernelWindows.length > 0) && adapter.features.has(f))],
   requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
 const memory = new GPUMemoryProfile(raw);
-const device = managedGPUDevice(memory.device, { requireWorkerRealm: false });
+const timer = kernelWindows.length ? gpuKernelTimer(memory.device) : undefined;
+const device = managedGPUDevice(timer?.device ?? memory.device, { requireWorkerRealm: false });
 let errors: string[] = [];
 device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); console.error(e.error.message); });
 /** Live allocations by label, less what was live before the solver (a destroyed predecessor's leftovers). */
@@ -331,7 +345,7 @@ console.log(JSON.stringify({ phase: "start", ...metadata, values: undefined }));
 
 const rows: Record<string, unknown>[] = [], walls: { frame: number; wall_ms: number; afterSample: boolean }[] = [];
 let c: Awaited<ReturnType<typeof construct>> | undefined, failure: string | undefined, frameReached = 0;
-const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, ZONES_AT = VLINE_AT + 4 * VLINE, W = ZONES_AT + 22; // probe words: 44 scalars, then the throat line (3 words a cell)
+const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, ZONES_AT = VLINE_AT + 4 * VLINE, ORIGIN_AT = ZONES_AT + 22, W = ORIGIN_AT + 3; // probe words: 44 scalars, throat data, zones, then box origin
 try {
   c = await construct(scene);
   const { solver } = c, base = c.base;
@@ -413,7 +427,7 @@ fn ownerFill(q:vec3u,w:u32)->f32{
 // Owner origins are window lattice cells: the box's low cell is its world
 // page less the frame's (umWallLow without the clamp), which moves under an
 // open top. Zones are box cells.
-fn boxOrigin()->vec3i{return 32*vec3i(bitcast<vec3u>(umWorldLow()-umFramePage())&vec3u(63u));}
+fn boxOrigin()->vec3i{return 32*(umWorldLow()-umFramePage());}
 const WALL_LOW:u32=${wall.low}u;const WALL_HIGH:u32=${wall.high}u;
 const THROAT_LOW:u32=${Math.max(0, wall.low - THROAT_REACH)}u;const THROAT_HIGH:u32=${wall.high + THROAT_REACH}u;
 const FLOOR_BAND:u32=${FLOOR_BAND}u;const THROAT:vec3i=vec3i(${throat.join(",")});
@@ -427,6 +441,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
  workgroupBarrier();
  // Debug: phi at fixed box points (reservoir centre, under its surface, air above, the throat).
  if(all(gid==vec3u(0u))){
+  let origin=boxOrigin();for(var axis=0u;axis<3u;axis++){atomicStore(&words[${ORIGIN_AT}u+axis],bitcast<u32>(origin[axis]));}
   for(var i=0u;i<4u;i++){
    let at=vec3u(vec3i(POINTS[i])+boxOrigin());let width=umTileWidth(umTileAt(at/4u));
    atomicStore(&words[34u+i],bitcast<u32>(corner(at,max(width,1u))));if(i==0u){atomicStore(&words[38],width);}
@@ -662,7 +677,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
       still: { extentRegions: all[READ.still / 4], travel_h: new Float32Array(all.buffer, all.byteOffset + READ.still + 12, 1)[0], breachFrames: all[READ.still / 4 + 4] },
       phi: { source: phiSource, measured, totals, solverCells: stats.volumeCellSum, represented: stats.representedVolumeCellSum, rawDrift: stats.rawVolumeDrift,
         preTotals, throatU, rightMaxU, negativeOwners, points, pointPhi, centreWidth: u[38], host: hostExtents(), extents: Object.fromEntries(probes.map((p, i) => [p.key, [39, 40, 41, 42].map(k => all[W * i + k])])), lowCorner: f[30], boxOriginX: u[31] },
-      particles: solver.narrowBandFlipInfo?.particles, line,
+      particles: solver.narrowBandFlipInfo?.particles, particleMass: particleMass ? await particleMass(Array.from(u.slice(ORIGIN_AT, ORIGIN_AT + 3), word => word | 0)) : undefined, line,
       // The tube's edge vertices from wall.high - 6: x, then phi (h) at (y, z), (y+1, z), (y, z+1), (y+1, z+1).
       vertexLine: Array.from({ length: VLINE }, (_, i) => [wall.high - 6 + i, ...[0, 1, 2, 3].map(e => +(f[VLINE_AT + 4 * i + e]! / h).toFixed(2))]),
       // The outlet mouth as [z][y] rows of x cells (wall.high - 3 ...): "phi(h)/u/V+x/open".
@@ -779,6 +794,39 @@ var<workgroup> sums:array<atomic<u32>,16>;
     hook(m.extension, "encode", "extension/scratch", "velocity", "velocityScratch");
     hook(m.extension, "finishPair", "finishPair/scratch", "velocity", "velocityScratch");
   }
+  // --ledger=A-B: over steps A..B, the GPU probe's liquid (mL: right, left,
+  // total) after each phi stage, its change summed by the stage that made it
+  // (the first stage of a step is measured against the last of the step
+  // before). No field capture: a measure a stage.
+  const ledgerRange = option("ledger")?.split("-").map(Number);
+  const ledgerPending: { name: string; done: () => Promise<Uint32Array> }[] = []; let ledgerOn = false;
+  const ledgerSums = new Map<string, Record<string, number>>(); let ledgerLast: Record<string, number> | undefined;
+  if (ledgerRange) {
+    type Stage = Record<string, (...a: unknown[]) => unknown>;
+    const m = (solver as unknown as { mixedFrame: { fields: Record<string, GPUTexture>; surface: Stage; narrowBandFlip: Stage; remap: Stage; phiResolve: Stage; coarsePhi: Stage } }).mixedFrame;
+    const hook = (object: Stage, key: string, name: string, texture: string, before = false) => {
+      const original = object[key]!.bind(object);
+      const take = (encoder: GPUCommandEncoder) => { if (!ledgerOn) return; const d = measureStage(encoder, m.fields[texture]!); if (d) ledgerPending.push({ name, done: d }); };
+      object[key] = (...a: unknown[]) => { if (before) take(a[0] as GPUCommandEncoder); const r = original(...a); if (!before) take(a[0] as GPUCommandEncoder); return r; };
+    };
+    hook(m.narrowBandFlip, "move", "move", "phi", true);
+    hook(m.surface, "encode", "advect", "phiScratch");
+    hook(m.narrowBandFlip, "reconstruct", "reconstruct", "phi");
+    hook(m.narrowBandFlip, "clearAir", "clearAir", "phi");
+    hook(m.narrowBandFlip, "retire", "retire", "phi");
+    hook(m.narrowBandFlip, "redistance", "redistance", "phi");
+    hook(m.remap, "applyGpu", "preRemap", "phi", true);
+    hook(m.remap, "applyGpu", "remap", "phi");
+    hook(m.coarsePhi, "encode", "coarsePhi", "phi");
+  }
+  const ledgerFlush = async () => {
+    for (const p of ledgerPending.splice(0)) {
+      const u = await p.done(), at = { right: 4, left: 2, total: 0, wall: 6, rightJet: ZONES_AT + 2, rightFloor: 8, right4h: ZONES_AT, rightBare: ZONES_AT + 18 };
+      const now = Object.fromEntries(Object.entries(at).map(([k, i]) => [k, wide(u, i) * cell3 * 1e6]));
+      if (ledgerLast) { const s = ledgerSums.get(p.name) ?? { n: 0 }; for (const k of Object.keys(at)) s[k] = (s[k] ?? 0) + now[k]! - ledgerLast[k]!; s.n!++; ledgerSums.set(p.name, s); }
+      ledgerLast = now;
+    }
+  };
   // The substep trace's cut count (claim word UNIFORM_MOMENTUM_TRACE_CAPPED_WORD,
   // cleared each frame): a slot a step since the last sample, summed there.
   const cappedRing = device.createBuffer({ label: "Tier budget trace capped", size: 16 * every, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -834,10 +882,61 @@ var<workgroup> sums:array<atomic<u32>,16>;
       const encoder = device.createCommandEncoder(); encoder.copyBufferToBuffer(flip.state, 4 * NARROW_BAND_RETIRE_WORD, buffer, 0, 4 * NARROW_BAND_RETIRE_WORDS); device.queue.submit([encoder.finish()]);
       await buffer.mapAsync(GPUMapMode.READ); const u = new Uint32Array(buffer.getMappedRange().slice(0)); buffer.unmap();
       const merge = { merged: u[8], overCap: u[9], splits: u[10], mergedMassRetired: u[11] };
-      if (narrowBandRetireCounting.splitX >= 0) return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], splitCrowded: u[5], splitRetired: u[6], splitSeeded: u[7], ...merge };
+      if (narrowBandRetireCounting.splitX >= 0) return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], splitDeepFarMass: u[5], splitDeepNearMass: u[6], splitSeeded: u[7], seedActivated: u[8], seedAboveFloor: u[9], seedFloorInterior: u[10], seedFloorOuter: u[11] };
       return { deep: u[0], sparse: u[1], crowded: u[2], blocked: u[3], heat: u[4], sparseShallow: u[5], blockedShallow: u[6], heatShallow: u[7], ...merge };
     };
   })() : undefined;
+  // --particleMass: the live samples' mass by zone, read from the current
+  // bank (binding 1, particles[1]); eight units a cell. The stride is in
+  // floats. FLIP packs mass - 1 in before.w; APIC stores it in lifetime.y.
+  const particleMass = options.includes("--particleMass") ? (() => {
+    const flip = (frame as unknown as { narrowBandFlip: { particles: readonly [GPUBuffer, GPUBuffer]; state: GPUBuffer; capacity: number; particleStride: number; crowdedCells: string } }).narrowBandFlip;
+    const words = flip.particleStride, bytes = particleMassReadbackBytes(flip.capacity, words), merge = flip.crowdedCells === "merge";
+    const buffer = device.createBuffer({ label: "Tier budget particle mass", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    return async (origin: readonly number[]) => {
+      const encoder = device.createCommandEncoder();
+      const headerBytes = 4 * PARTICLE_MASS_HEADER_WORDS;
+      encoder.copyBufferToBuffer(flip.state, 0, buffer, 0, headerBytes);
+      encoder.copyBufferToBuffer(flip.particles[1], 0, buffer, headerBytes, bytes - headerBytes); device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ); const raw = buffer.getMappedRange();
+      const z = { live: 0, outside: 0, left: 0, wall: 0, right: 0, rightFloorBand: 0, rightHeavy: 0, rightRecords: 0, rightClamped: 0, rightY: new Array<number>(17).fill(0), rightDepth: new Array<number>(8).fill(0), rightDeepX: new Array<number>(16).fill(0), rightDeepY: new Array<number>(16).fill(0), minX: Infinity, maxX: -Infinity, maxY: -Infinity };
+      for (const particle of particleMassRecords(raw, flip.capacity, words, merge)) {
+        const x = particle.x - origin[0]!, y = particle.y - origin[1]!, m = particle.mass; z.live++;
+        if (!(x >= 0 && x <= g.nx && y >= 0)) { z.outside += m; continue; }
+        z.minX = Math.min(z.minX, x); z.maxX = Math.max(z.maxX, x); z.maxY = Math.max(z.maxY, y);
+        if (x < wall.low) z.left += m; else if (x < wall.high) z.wall += m;
+        else { z.right += m; if (y < FLOOR_BAND) z.rightFloorBand += m; if (m > 1) z.rightHeavy += m; z.rightRecords++; if (y < 0.0101) z.rightClamped += m; z.rightY[Math.min(16, Math.floor(4 * y))]! += m;
+          const depth = particle.depth; z.rightDepth[Math.min(7, Math.max(0, Math.floor(-depth)))]! += m; if (depth < -1) { z.rightDeepX[Math.min(15, Math.floor((x - wall.high) / 16))]! += m; z.rightDeepY[Math.min(15, Math.floor(y / 8))]! += m; } }
+      }
+      buffer.unmap();
+      const m3 = (units: number) => units / 8 * cell3;
+      return { live: z.live, origin, outside_m3: m3(z.outside), x: [+z.minX.toFixed(1), +z.maxX.toFixed(1)], maxY: +z.maxY.toFixed(1), left_m3: m3(z.left), wall_m3: m3(z.wall), right_m3: m3(z.right), rightFloorBand_m3: m3(z.rightFloorBand), rightHeavy_m3: m3(z.rightHeavy), rightRecords: z.rightRecords, rightClamped_m3: m3(z.rightClamped), rightY_quarterCells: z.rightY, rightDepth_cells: z.rightDepth, rightDeepX_16cells: z.rightDeepX, rightDeepY_8cells: z.rightDeepY };
+    };
+  })() : undefined;
+  const cells = cellCensus ? (() => {
+    const flip = (frame as unknown as { narrowBandFlip: { particles: readonly [GPUBuffer, GPUBuffer]; state: GPUBuffer; capacity: number; particleStride: number } }).narrowBandFlip;
+    const words = flip.particleStride, bytes = particleMassReadbackBytes(flip.capacity, words);
+    const buffer = device.createBuffer({ label: "Tier budget cell census", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    return async () => {
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(flip.state, 0, buffer, 0, 4 * PARTICLE_MASS_HEADER_WORDS);
+      encoder.copyBufferToBuffer(flip.particles[1], 0, buffer, 4 * PARTICLE_MASS_HEADER_WORDS, bytes - 4 * PARTICLE_MASS_HEADER_WORDS); device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ); const raw = buffer.getMappedRange();
+      const byCell = new Map<number, number>(), brick = new Map<number, number>(); let live = 0;
+      const key = (x: number, y: number, z: number) => (x + 4096) + 8192 * ((y + 4096) + 8192 * (z + 4096));
+      for (const p of particleMassRecords(raw, flip.capacity, words, false)) {
+        const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z); live++;
+        const c = key(x, y, z), b = key(x >> 3, y >> 3, z >> 3);
+        byCell.set(c, (byCell.get(c) ?? 0) + 1); brick.set(b, (brick.get(b) ?? 0) + 1);
+      }
+      buffer.unmap();
+      const histogram: Record<string, number> = { "1-8": 0, "9-20": 0, "21-64": 0, "65-256": 0, ">256": 0 }; let maxCell = 0, over256Records = 0, squares = 0;
+      for (const n of byCell.values()) { maxCell = Math.max(maxCell, n); squares += n * n; const k = n <= 8 ? "1-8" : n <= 20 ? "9-20" : n <= 64 ? "21-64" : n <= 256 ? "65-256" : ">256"; histogram[k]!++; if (n > 256) over256Records += n; }
+      const bricks = [...brick.values()].sort((a, b) => b - a);
+      return { live, cells: byCell.size, maxCell, over256Records, sumSquares: squares, histogram, bricks: bricks.length, maxBrick: bricks[0] ?? 0, top8Bricks: bricks.slice(0, 8), bricksOver2048: bricks.filter(n => n > 2048).length };
+    };
+  })() : undefined;
+  const kernelSamples = new Map<string, number[]>(); let kernelParticles: number[] = [], kernelSums: number[] = [], kernelFine: number[] = [];
   const authoredFloor_m = Math.min(...(scene.fluid.initialLiquidVolumes ?? []).map(v => "min_m" in v ? (v as { min_m: { y: number } }).min_m.y : 0));
   const bound_m_s = Math.sqrt(2 * gravity * Math.max(0, authoredTop_m - Math.min(0, authoredFloor_m)));
   const printFlowStages = async (step: number) => {
@@ -938,18 +1037,34 @@ var<workgroup> sums:array<atomic<u32>,16>;
     frameReached = step;
     phiTaken = phiStageSteps.has(step) ? [] : undefined;
     flowTaken = flowSteps.has(step) ? [] : undefined; flowMeasured = flowTaken ? [] : undefined;
+    ledgerOn = !!ledgerRange && step >= ledgerRange[0]! && step <= ledgerRange[1]!;
+    const kw = timer ? kernelWindows.find(([a, b]) => step >= a && step <= b) : undefined, timed = !!kw && (step - 1) % every !== 0;
+    if (timer) timer.enabled = timed;
     const wall_ms = await advance(step);
+    if (timer) {
+      timer.enabled = false;
+      if (timed) { const k = await timer.collect(); let sum = 0; for (const [label, ms] of k.byLabel) { const list = kernelSamples.get(label) ?? []; list.push(ms); kernelSamples.set(label, list); sum += ms; } kernelSums.push(sum); kernelParticles.push(solver.narrowBandFlipInfo?.particles ?? 0); kernelFine.push((solver.info as unknown as Record<string, number | undefined>).uniformMixedFineTiles ?? 0); }
+      if (kw && step === kw[1]) {
+        const median = (v: number[]) => { const s = [...v].sort((x, y) => x - y); return s.length ? s[s.length >> 1]! : 0; };
+        const steps = kernelSums.length, medians = Object.fromEntries([...kernelSamples].map(([k, v]) => [k, +median([...v, ...new Array<number>(Math.max(0, steps - v.length)).fill(0)]).toFixed(4)] as const).sort((a, b) => b[1] - a[1]));
+        console.log(JSON.stringify({ kernels: kw, steps, particles: median(kernelParticles), fine: median(kernelFine), total_ms: +median(kernelSums).toFixed(3), medians_ms: medians }));
+        kernelSamples.clear(); kernelParticles = []; kernelSums = []; kernelFine = [];
+      }
+    }
+    if (ledgerOn) { await ledgerFlush(); if (step === ledgerRange![1] || step % every === 0) console.log(JSON.stringify({ ledger: step, from: ledgerRange![0], stages: Object.fromEntries([...ledgerSums].map(([k, s]) => [k, Object.fromEntries(Object.entries(s).map(([a, v]) => [a, +v.toFixed(1)]))])) })); }
     await printPhiStages(step);
     await printFlowStages(step);
     { const info = solver.info as unknown as Record<string, number | undefined>; band.push([step, info.uniformPressureBandCycles ?? -1, info.uniformPressureBandResidual ?? -1]); }
     { const info = solver.info as unknown as Record<string, number | undefined>; dust.dustMass_cells += info.uniformVolumeDustMass_cells ?? 0; dust.orphanDustMass_cells += info.uniformVolumeOrphanDustMass_cells ?? 0; dust.steps++; }
     walls.push({ frame: step, wall_ms, afterSample: (step - 1) % every === 0 });
+    if (wallLines) { const info = solver.info as unknown as Record<string, number | undefined>; console.log(JSON.stringify({ wall: step, ms: +wall_ms.toFixed(3), particles: solver.narrowBandFlipInfo?.particles ?? 0, fine: info.uniformMixedFineTiles, band: info.uniformPressureBandTiles, transport: info.uniformTransportTiles, timed: !!timer?.enabled || (!!kernelWindows.find(([a, b]) => step >= a && step <= b) && (step - 1) % every !== 0) })); }
     if (solver.info.simulationPipelineError) throw new Error(String(solver.info.simulationPipelineError));
     assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - step * dt) < 1e-8);
     if (step % every === 0 || step === steps) {
       const capped = await readCapped(); if (capped) console.log(JSON.stringify({ traceCapped: capped, step }));
       if (census) console.log(JSON.stringify({ census: await census(), step }));
       if (retired) console.log(JSON.stringify({ retired: await retired(), step }));
+      if (cells) console.log(JSON.stringify({ cells: await cells(), step }));
       // The last step's band solve header: initial residual, the residual after each cycle's pre-smoothing, the native rows' initial and final.
       {
         const arena = (frame as unknown as { band: { index: GPUBuffer } }).band;

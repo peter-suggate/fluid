@@ -3,13 +3,20 @@
  * (the furthest liquid x on the catch floor), volume drift, max speed, region
  * tiers and the bulk owner counts.
  * node --import tsx tools/probe-reservoir-bulk.ts [--cell=0.005] [--steps=1200] [--every=60]
- *   [--values={"bulkTier":"16h"}] [--closed] [--out=PATH.json]
- * --closed fills the throat: the hydrostatic rest gate. */
+ *   [--values={"bulkTier":"16h"}] [--closed] [--tiers=FILE.json] [--out=PATH.json]
+ * --tiers: a JSON file of fluid.tiers fields over the scene's (e.g. {"start":"4h","bricks":512}).
+ * --water=inviscid zeroes the scene's viscosity and surface tension.
+ * --closed fills the throat: the hydrostatic rest gate.
+ * --pipelined keeps up to the solver's receipt ring of frames in flight, as the
+ * app does: a step's ms is then the admission period, not advance + fence.
+ * --kernels=<step> times every dispatch from that step on (tools/gpu-kernel-timer.ts;
+ * distorted, for attribution only); the report keeps every step's fenced ms. */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import "../lib/methods";
 import { createUniformSolver, readUniformFields, withUniformDevice } from "../tests/helpers/uniform-geometric";
+import { gpuKernelTimer } from "./gpu-kernel-timer";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { sceneDocumentAtLattice } from "../lib/core/scene-definition";
@@ -20,6 +27,9 @@ import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-fra
 const option = (name: string) => process.argv.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3);
 const cell = Number(option("cell") ?? 0.005), steps = Number(option("steps") ?? 1200), every = Number(option("every") ?? 60);
 const closed = process.argv.includes("--closed");
+const pipelined = process.argv.includes("--pipelined");
+const kernelsFrom = option("kernels") === undefined ? Infinity : Number(option("kernels"));
+const stepMs: number[] = [], kernels = new Map<string, number[]>();
 const values: MethodParamValues = JSON.parse(option("values") ?? "{}");
 process.env.WEBGPU_NODE_MODULE ??= resolve("node_modules/webgpu/index.js");
 paceDawnEventPolling();
@@ -31,11 +41,16 @@ if (closed) {
   scene.solidVoxels = scene.solidVoxels!.filter(v => v.operation === "fill");
   scene.fluid.initialLiquidVolumes = scene.fluid.initialLiquidVolumes!.slice(0, 1);
 }
+const tiersFile = option("tiers");
+if (tiersFile !== undefined) scene.fluid.tiers = { ...scene.fluid.tiers, ...JSON.parse(readFileSync(resolve(tiersFile), "utf8")) };
+// --water=inviscid: zero viscosity and surface tension (the realtime water model).
+if (option("water") === "inviscid") { scene.fluid.dynamicViscosity_Pa_s = 0; scene.fluid.surfaceTension_N_m = 0; }
 scene.duration_s = Math.max(scene.duration_s, steps * scene.numerics.fixedDt_s);
 const tag = Object.entries(values).map(([k, v]) => `${k}-${v}`).join("_") || "default";
 const out = resolve(option("out") ?? `artifacts/reservoir-bulk/${closed ? "rest" : "seep"}-${cell * 1000}mm-${tag}.json`);
 const rows: Record<string, unknown>[] = [];
-await withUniformDevice("reservoir bulk probe", async device => {
+await withUniformDevice("reservoir bulk probe", async raw => {
+  const timer = gpuKernelTimer(raw), device = timer.device;
   device.addEventListener("uncapturederror", event => console.error("GPU validation:", event.error.message));
   const solver = await createUniformSolver(device, scene, { ...definition.methodProfile!.overrides, ...values });
   const frame = (solver as unknown as { mixedFrame: UniformMixedFrame }).mixedFrame;
@@ -52,9 +67,14 @@ await withUniformDevice("reservoir bulk probe", async device => {
   try {
     for (let step = 1; step <= steps; step++) {
       const t = performance.now();
+      timer.enabled = step >= kernelsFrom;
       assert.ok(solver.advanceTo(step * scene.numerics.fixedDt_s, []));
-      await solver.awaitFrameCompletion();
-      wall += performance.now() - t;
+      // --pipelined: as the app, admit the next advance once the receipt ring has room; drain only on report steps.
+      if (!pipelined || step % every === 0 || step === steps) await solver.awaitFrameCompletion();
+      else while (solver.framePending) await new Promise(r => setImmediate(r));
+      timer.enabled = false;
+      const ms = performance.now() - t; wall += ms; stepMs.push(ms);
+      if (step >= kernelsFrom) for (const [k, v] of (await timer.collect()).byLabel) { const list = kernels.get(k) ?? []; list.push(v); kernels.set(k, list); }
       assert.equal(solver.info.simulationPipelineError, undefined);
       if (step % every !== 0 && step !== steps) continue;
       const tiers = (await words(frame.heat.tiers, 4 * frame.heat.regions)).slice(0, 3);
@@ -75,7 +95,12 @@ await withUniformDevice("reservoir bulk probe", async device => {
       rows.push(row); console.log(JSON.stringify(row));
     }
   } finally { read.destroy(); solver.destroy(); }
-});
+}, Number.isFinite(kernelsFrom) ? ["timestamp-query"] : []);
 mkdirSync(dirname(out), { recursive: true });
-writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, steps, closed, values, rows }, null, 2) + "\n");
+const quantile = (list: number[], q: number) => { const s = [...list].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(q * s.length))]! : NaN; };
+const kernelMedians_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, quantile(v, 0.5)] as const).sort((a, b) => b[1] - a[1]));
+const late = stepMs.slice(Math.floor(stepMs.length / 2));
+const timing = { median_ms: quantile(stepMs, 0.5), p95_ms: quantile(stepMs, 0.95), lateHalfMedian_ms: quantile(late, 0.5), lateHalfP95_ms: quantile(late, 0.95) };
+console.log(JSON.stringify(timing));
+writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, steps, closed, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, rows }, null, 2) + "\n");
 console.log(JSON.stringify({ out }));
