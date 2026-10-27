@@ -193,15 +193,8 @@ select.ui-select:disabled { opacity: .45; cursor: not-allowed; }
    at a fifth of full ink — a control that read as absent rather than locked. */
 .ui-stepper.is-disabled > :is(button:disabled, .ui-number.is-disabled) { opacity: 1; }
 
-/* The transport's dt: glyph-sized chrome on the image, not a form field, so it
-   states the strip's small height rather than inheriting the studio's floor
-   (the floor's 38px is what clipped the readout to "16.6"). The typed figure
-   turns amber while a method pins the clock, since the number is then the
-   method's and not the scene's. */
-.transport-step { --control-height: 22px; --control-inline-padding: 4px; --control-font-size: var(--size-3); }
-.transport-step .ui-stepper { gap: 3px; }
-.transport-step .ui-number { --ui-number-width: 44px; }
-.transport-step[data-pinned="true"] .ui-number > input { color: var(--amber); }
+/* The rail's dt: wide enough for "16.7" without clipping. */
+[data-testid="transport-step"] .ui-number { --ui-number-width: 44px; }
 
 /* The scale rows keep one column per part across all three rows — label, ÷2,
    the readout, ×2 — so their buttons stack in two tidy columns. */

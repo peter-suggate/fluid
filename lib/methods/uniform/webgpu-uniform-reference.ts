@@ -1033,9 +1033,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         solver = new WebGPUUniformReferenceSolver(device, scene, quality, onRigidLoads, { ...options, deferPipelineCompilation: true });
       } }]);
       await runner.run(solver!.initializationTasks(signal));
-      await runner.run([{id:"uniform.mixed",phase:"solver-pipelines",label:"Prepare shared mixed ownership",run:async(_signal,report)=>{
+      await runner.run([{id:"uniform.mixed",phase:"solver-pipelines",label:"Compiling simulation shaders",run:async(_signal,report)=>{
+        // The mixed frame enqueues its pipelines as it discovers them, so the
+        // count is the compiler's batch — settled out of known — not a total
+        // this task could declare up front.
         const unsubscribe=gpuCompilationManagerFor(device).subscribe(snapshot=>{
-          if(snapshot.progress&&!signal.aborted)report?.(`${snapshot.progress.label}: ${snapshot.progress.current ?? "compiling"} (${snapshot.queued} queued)`);
+          if(snapshot.batch&&!signal.aborted)report?.("Compiling simulation shaders",0,
+            {completed:snapshot.batch.completed,total:snapshot.batch.total,unit:"pipelines"});
         });
         try { await solver!.initializeMixedFrame(); } finally { unsubscribe(); }
       }}]);

@@ -1,6 +1,7 @@
 import type { GPUEulerianInfo } from "./webgpu-eulerian";
 import type { EffectiveRendererStatus } from "./renderer-status";
 import type { GPUStatus } from "./gpu-status";
+import type { GPUInitializationWork } from "./gpu-initialization";
 import type {
   ResourceLaneId,
   ResourceLaneState,
@@ -23,6 +24,8 @@ export interface ResourceActivity {
   phase: string;
   completed: number;
   total: number;
+  /** A count inside the current task, when the task is waiting on work it does not size. */
+  work?: GPUInitializationWork;
   startedAt_ms: number;
   operation?: string;
   /** A usable generation remains attached while this work runs. */
@@ -144,6 +147,7 @@ export function reduceGPUResourceStatus(
         phase: status.phase ?? "planning",
         completed: status.completed ?? 0,
         total: status.total ?? 0,
+        ...(status.work ? { work: status.work } : {}),
         startedAt_ms: status.startedAt_ms ?? performance.now(),
         operation: status.operation,
         retainingPrevious,

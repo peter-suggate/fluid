@@ -9,6 +9,7 @@ import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
 import type { MetricSample } from "../model";
 import type { WaterSurfacePresentationDiagnostics } from "../webgpu-water-pipeline";
 import type { PerformanceTrace } from "../performance-trace";
+import { LOAD_HISTORY_LENGTH, type WorkerLoadSample } from "../system-load";
 import {
   initialResourceReadiness,
   reduceGPUResourceEvidence,
@@ -81,7 +82,10 @@ interface DiagnosticsStore {
   samples: MetricSample[];
   performanceReport: PerformanceReport;
   performanceReports: PerformanceReport[];
+  /** The render worker's load reports, oldest first, stamped on arrival (see `system-load.ts`). */
+  workerLoad: readonly (WorkerLoadSample & { readonly at_ms: number })[];
   set: (patch: Partial<DiagnosticsStore>) => void;
+  pushWorkerLoad: (sample: WorkerLoadSample) => void;
   pushPerformanceReport: (report: PerformanceReport, sample?: MetricSample) => void;
 }
 
@@ -132,6 +136,10 @@ export const createDiagnosticsStore = () => create<DiagnosticsStore>((set) => ({
   samples: [],
   performanceReport: emptyPerformanceReport,
   performanceReports: [],
+  workerLoad: [],
+  pushWorkerLoad: (sample) => set((state) => ({
+    workerLoad: [...state.workerLoad.slice(1 - LOAD_HISTORY_LENGTH), { ...sample, at_ms: performance.now() }],
+  })),
   set: (patch) => set((state) => {
     let resourceReadiness = state.resourceReadiness;
     if (patch.gpuStatus) resourceReadiness = reduceGPUResourceStatus(resourceReadiness, patch.gpuStatus);

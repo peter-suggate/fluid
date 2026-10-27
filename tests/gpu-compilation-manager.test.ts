@@ -51,6 +51,29 @@ interface FakeGPU {
   };
 }
 
+test("the batch counts every pipeline settled since the queue was last empty, and closes when it drains", async () => {
+  const device = managedGPUDevice(fakeGPU().device, { requireWorkerRealm: false });
+  const manager = gpuCompilationManagerFor(device);
+  const module = device.createShaderModule({ code: "shader" });
+  const seen: { completed: number; total: number }[] = [];
+  const unsubscribe = manager.subscribe(snapshot => {
+    if (snapshot.batch) seen.push({ completed: snapshot.batch.completed, total: snapshot.batch.total });
+  });
+  await Promise.all(["a", "b", "c"].map(entryPoint =>
+    device.createComputePipelineAsync({ label: entryPoint, layout: "auto", compute: { module, entryPoint } })));
+  unsubscribe();
+  // One count for the whole wait, not 0/1 per job: the total grows as work is
+  // discovered, and neither figure ever runs backwards.
+  assert.ok(seen.every((sample, index) => index === 0
+    || sample.total >= seen[index - 1]!.total && sample.completed >= seen[index - 1]!.completed), JSON.stringify(seen));
+  assert.deepEqual(seen.at(-1), { completed: 3, total: 3 });
+  assert.equal(manager.snapshot().batch, undefined);
+  // The next request is a new wait, counted from zero.
+  const next = device.createComputePipelineAsync({ label: "d", layout: "auto", compute: { module, entryPoint: "d" } });
+  assert.deepEqual({ completed: manager.snapshot().batch?.completed, total: manager.snapshot().batch?.total }, { completed: 0, total: 1 });
+  await next;
+});
+
 function fakeGPU(options: {
   beforePipeline?: (label: string) => Promise<void>;
 } = {}): FakeGPU {

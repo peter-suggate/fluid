@@ -953,6 +953,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // stand for the other's and break the barrier it exists to keep.
       onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s, paneId),
       onEffectiveRendererStatus: (effectiveRendererStatus) => session.diagnostics.getState().set({ effectiveRendererStatus }),
+      onLoad: (sample) => session.diagnostics.getState().pushWorkerLoad(sample),
     });
     const detachInteractionFluid = simulation.attachInteractionFluid(paneId,
       createInteractionFluidDriver(session.diagnostics, request => renderer.advanceInteractionFluid(request)));

@@ -17,6 +17,7 @@ import type { EffectiveRendererStatus } from "./renderer-status";
 import type { FluidLabRenderer, RendererFrameMetrics } from "./webgpu-renderer";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { usePerformanceInstrumentationStore, type PerformanceInstrumentationMode } from "./stores/performance-instrumentation-store";
+import type { WorkerLoadSample } from "./system-load";
 
 type DrawArguments = Parameters<FluidLabRenderer["draw"]>;
 type DrawArgumentsWithoutScene = DrawArguments extends [infer Time, unknown, ...infer Rest]
@@ -123,6 +124,8 @@ export type WebGPURenderWorkerResponse =
   | { type: "rigid-loads"; loads: GPURigidLoad[] }
   | { type: "advance-completed"; time_s: number }
   | { type: "effective-renderer-status"; status: EffectiveRendererStatus }
+  /** The worker's own thread and its device's queue, every `LOAD_SAMPLE_INTERVAL_MS`. */
+  | { type: "load"; sample: WorkerLoadSample }
   | { type: "initialized"; requestId: number }
   | { type: "simulation-running-set"; requestId: number; submittedTime_s: number | undefined }
   | { type: "frame"; frameId: number; metrics: RendererFrameMetrics; snapshot: WebGPURenderWorkerSnapshot }
@@ -142,6 +145,7 @@ interface WorkerClientCallbacks {
   onGPURigidLoads?(loads: GPURigidLoad[]): void;
   onGPUAdvanceCompleted?(time_s: number): void;
   onEffectiveRendererStatus?(status: EffectiveRendererStatus): void;
+  onLoad?(sample: WorkerLoadSample): void;
 }
 
 const EMPTY_SNAPSHOT: WebGPURenderWorkerSnapshot = {
@@ -620,6 +624,7 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "rigid-loads") this.callbacks.onGPURigidLoads?.(message.loads);
     else if (message.type === "advance-completed") this.callbacks.onGPUAdvanceCompleted?.(message.time_s);
     else if (message.type === "effective-renderer-status") this.callbacks.onEffectiveRendererStatus?.(message.status);
+    else if (message.type === "load") this.callbacks.onLoad?.(message.sample);
     else if (message.type === "initialized" || message.type === "shutdown-complete" || message.type === "solid-edit-validated") this.settle(message.requestId);
     else if (message.type === "simulation-running-set") this.settle(message.requestId, message.submittedTime_s);
     else if (message.type === "pick-result") this.settle(message.requestId, message.result);

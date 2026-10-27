@@ -79,6 +79,20 @@ export interface GPUCompilationProgress {
   readonly current?: string;
 }
 
+/**
+ * Pipelines settled out of everything enqueued since the queue was last empty.
+ *
+ * The total is the work known so far, not a promise: a manifest that discovers
+ * more pipelines while compiling grows it. It is still a count, which is what a
+ * progress readout can stand on — `progress` above is only the job in hand.
+ */
+export interface GPUCompilationBatch {
+  readonly completed: number;
+  readonly total: number;
+  /** performance.now() in the manager's realm when the queue last left empty. */
+  readonly startedAt_ms: number;
+}
+
 export interface GPUCompilationSnapshot {
   readonly state: "idle" | "compiling" | "invalidated";
   readonly generation: number;
@@ -88,6 +102,7 @@ export interface GPUCompilationSnapshot {
   readonly cached: number;
   readonly cacheStats: GPUCompilationCacheStats;
   readonly progress?: GPUCompilationProgress;
+  readonly batch?: GPUCompilationBatch;
   readonly invalidationReason?: string;
 }
 
@@ -274,6 +289,8 @@ export class GPUCompilationManager implements GPUCompilationService {
   private pumpScheduled = false;
   private invalidationReason?: string;
   private progress?: GPUCompilationProgress;
+  private batchSettled = 0;
+  private batchStarted_ms?: number;
   private readonly abortListeners = new Map<AbortSignal, { callbacks: Set<() => void>; listener: () => void }>();
 
   private onAbort(signal: AbortSignal, callback: () => void): () => void {
@@ -435,6 +452,8 @@ export class GPUCompilationManager implements GPUCompilationService {
         compilationMilliseconds: this.compilationMilliseconds,
       }),
       ...(this.progress ? { progress: this.progress } : {}),
+      ...(this.batchStarted_ms !== undefined ? { batch: Object.freeze({ completed: this.batchSettled,
+        total: this.batchSettled + this.active + this.queue.length, startedAt_ms: this.batchStarted_ms }) } : {}),
       ...(this.invalidationReason ? { invalidationReason: this.invalidationReason } : {}),
     });
   }
@@ -470,6 +489,7 @@ export class GPUCompilationManager implements GPUCompilationService {
     this.pipelineLayouts.clear();
     this.pipelines.clear();
     this.progress = undefined;
+    this.batchStarted_ms = undefined;
     for (const job of this.queue.splice(0)) {
       this.pipelineJobs.delete(job.key);
       job.reject(new GPUCompilationInvalidatedError(reason));
@@ -549,9 +569,15 @@ export class GPUCompilationManager implements GPUCompilationService {
         module: stage.module.label, entryPoint: stage.entryPoint, milliseconds, succeeded }));
       this.pipelineJobs.delete(job.key);
       this.active -= 1;
+      this.batchSettled += 1;
       if (this.progress?.key === job.key) this.progress = undefined;
-      this.emit();
+      // Pumping reports the batch complete; it is closed after, so the next
+      // enqueue opens a new batch rather than counting against one the reader
+      // saw finish. The emit after it is not redundant: an invalidated manager
+      // does not pump, and `whenIdle` still has to hear this job settle.
       this.pump();
+      if (this.active === 0 && this.queue.length === 0) this.batchStarted_ms = undefined;
+      this.emit();
     }
   }
 
@@ -591,6 +617,10 @@ export class GPUCompilationManager implements GPUCompilationService {
         label: saved.label ?? `${kind} pipeline`, descriptor: saved, promise,
         consumers: 0, started: false, resolve, reject };
       this.pipelineJobs.set(key, job);
+      if (this.batchStarted_ms === undefined) {
+        this.batchStarted_ms = performance.now();
+        this.batchSettled = 0;
+      }
       this.queue.push(job);
       this.sortQueue();
       this.schedulePump();
@@ -617,6 +647,7 @@ export class GPUCompilationManager implements GPUCompilationService {
         this.queue.splice(index, 1);
         this.pipelineJobs.delete(job.key);
         job.reject(abortError());
+        if (this.active === 0 && this.queue.length === 0) this.batchStarted_ms = undefined;
         this.emit();
       }) : undefined;
       void job.promise.then(

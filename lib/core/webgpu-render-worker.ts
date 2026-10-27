@@ -13,6 +13,7 @@ import { createWorkerSolidEditAcceptance, SolidEditBaseMismatchError, SolidEditR
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { markSceneRevision, type SceneDescription } from "./model";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
+import { LOAD_SAMPLE_INTERVAL_MS, observedGPUQueue, startThreadStallMeter } from "./system-load";
 import type {
   WebGPURenderWorkerRequest,
   WebGPURenderWorkerResponse,
@@ -74,6 +75,21 @@ let renderScene: {
 } | undefined;
 
 const post = (message: WebGPURenderWorkerResponse) => scope.postMessage(message);
+
+/**
+ * This thread's own load, and its device queue's, reported on a fixed cadence.
+ *
+ * Measured here because this is where the work is: shader modules, pipeline
+ * compiles, uploads and every submit run on this thread, and the window's
+ * meters cannot see any of it. A report that arrives late is itself the
+ * reading — the thread was too busy to send it.
+ */
+const threadLoad = startThreadStallMeter();
+setInterval(() => {
+  const now_ms = performance.now();
+  const gpu = observedGPUQueue()?.sample();
+  post({ type: "load", sample: { thread: threadLoad.meter.sample(now_ms), ...(gpu ? { gpu } : {}) } });
+}, LOAD_SAMPLE_INTERVAL_MS);
 
 function snapshot(runtime: FluidLabRenderer): WebGPURenderWorkerSnapshot {
   return {

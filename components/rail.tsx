@@ -139,6 +139,14 @@ export function RailReadout({ label, value, hint, testId }: { label: ReactNode; 
   </div>;
 }
 
+/** A control of its own kind: its name, and the control where the knobs end. */
+export function RailLine({ label, hint, testId, children }: { label: ReactNode; hint?: string; testId?: string; children: ReactNode }) {
+  return <div className="view-rail-toggle" title={hint} data-testid={testId}>
+    <RailName label={label} />
+    {children}
+  </div>;
+}
+
 /** The lines that belong to the switch or choice above them, set in under it. */
 export function RailSub({ children }: { children: ReactNode }) {
   return <div className="rail-sub">{children}</div>;

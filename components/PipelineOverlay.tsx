@@ -1,6 +1,6 @@
 "use client";
 
-import { SCENE_INSTRUMENTS, SCENE_INSTRUMENT_ORDER } from "../lib/core/scene-instruments";
+import { SCENE_INSTRUMENTS } from "../lib/core/scene-instruments";
 import { DiagnosticsOverlay } from "./DiagnosticsOverlay";
 import { RenderPipelineOverlay } from "../lib/svo/pipeline/ui";
 import { SimPipelineOverlay } from "./SimPipelineOverlay";
@@ -65,35 +65,4 @@ export function PipelineOverlay() {
       {overlay === "diagnostics" && <DiagnosticsOverlay />}
     </div>
   </aside>;
-}
-
-/**
- * The three instruments as toggles, in the transport's overflow menu.
- *
- * The ring is still the route for everything you do *to* the scene, but an
- * instrument is not a verb on an object — it is a reading of the whole run, so
- * it needs a route that does not depend on a right-click landing on the water.
- * These used to sit permanently beside the frame rate in the top-right corner,
- * which made that corner a third bar. They are occasional, so they live in the
- * menu now. The keys in `SCENE_INSTRUMENTS` do the same job with no chrome, and
- * each toggle shows its key so the menu is where people learn them.
- */
-export function SceneInstrumentTags() {
-  const session = useSession();
-  const overlay = session.ui((state) => state.sceneOverlay);
-  const setSceneOverlay = session.ui((state) => state.setSceneOverlay);
-  return <div className="transport-menu-instruments" role="group" aria-label="Scene instruments" data-testid="scene-instrument-tags">
-    {SCENE_INSTRUMENT_ORDER.map((instrument) => {
-      const open = overlay === instrument.id;
-      return <button
-        key={instrument.id}
-        type="button"
-        data-testid={`scene-instrument-tag-${instrument.id}`}
-        aria-pressed={open}
-        aria-label={`${open ? "Close" : "Open"} ${instrument.label.toLowerCase()}`}
-        title={`${instrument.hint} · ${instrument.shortcut.toUpperCase()}`}
-        onClick={() => setSceneOverlay(open ? null : instrument.id)}
-      >{instrument.tag}<kbd>{instrument.shortcut.toUpperCase()}</kbd></button>;
-    })}
-  </div>;
 }

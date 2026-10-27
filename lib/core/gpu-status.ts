@@ -1,6 +1,7 @@
 import type { SimulationFailure } from "./simulation-failure";
 import type { ResourcePluginDefinition } from "./resource-plugin";
 import type { GPUCompilationSnapshot, GPUCompilationTiming } from "./gpu-compilation-manager";
+import type { GPUInitializationWork } from "./gpu-initialization";
 
 /**
  * Device-lifecycle status published by whichever resource currently owns the
@@ -17,6 +18,8 @@ export type GPUStatus =
       phase?: string;
       completed?: number;
       total?: number;
+      /** A count inside the current task, in its own unit (see `GPUInitializationWork`). */
+      work?: GPUInitializationWork;
       startedAt_ms?: number;
       /** Startup has no previous frame; rebuild keeps the prior GPU state visible. */
       kind?: "startup" | "rebuild";

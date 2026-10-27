@@ -860,11 +860,13 @@ button.card[data-active] { border-color: var(--accent); }
   --instrument-veil: light-dark(rgba(255, 253, 248, .62), rgba(28, 24, 18, .52));
   --instrument-hair: light-dark(rgba(66, 56, 38, .12), rgba(244, 214, 166, .1));
   --instrument-hair-soft: light-dark(rgba(66, 56, 38, .04), rgba(244, 214, 166, .05));
-  position: absolute; z-index: 10; top: 14px; right: 14px; bottom: 62px;
+  /* Left of the right-edge column (the transport card and the rail under it),
+     which stays usable while an instrument is open. */
+  position: absolute; z-index: 10; top: 14px; right: calc(var(--transport-card-width, 264px) + 24px); bottom: 14px;
   /* Narrow on purpose. The graph is one rail now, so a card is wider here at
      420px than it was in the 560px pane that drew two of them side by side —
      and the scene keeps another 140px of itself. */
-  width: min(420px, calc(100% - 28px));
+  width: min(420px, calc(100% - var(--transport-card-width, 264px) - 38px));
   display: flex; flex-direction: column; min-height: 0;
   overflow: hidden;
   border: 1px solid var(--instrument-hair);
@@ -978,81 +980,56 @@ button.card[data-active] { border-color: var(--accent); }
 .diagnostic-footnote { display: block; margin-top: 9px; color: var(--amber); font: var(--text-note); }
 
 /* ---------------------------------------------------------------------------
-   The transport mini-cluster.
+   The transport card.
 
-   Four controls and a clock, floating on the scene at the bottom edge. It
-   replaced a full-width docked footer that reserved 58 px of the window
-   permanently in order to carry a step-size slider, a rate chip, a lag chip and
-   a lockstep label — three diagnostics and one authored constant, none of which
-   a reader reaches for while watching water move.
+   The head of the right-edge column: the card, then the rail's marks under it.
+   Two rows — the verbs, then the clock and the frame rate — and, only while
+   work holds the scene, a section under them with its progress and the load of
+   the machine doing it. It was a bar at the bottom centre while its
+   explanation hung in the top-right corner and the settings stood on the rail;
+   one column now, so the reason Play is disabled sits under Play.
 
-   It recedes when the pointer stops rather than disappearing: opacity only, so
-   it stays in the DOM, stays in the tab order, and stays hit-testable. Hover
-   and focus-within both override the idle state, so it is fully lit before
-   anyone can click it, and a keyboard reader never loses it at all.
+   It never recedes. The clock is the one readout of where the run is, and a
+   fixed width keeps the marks under it from shifting as figures change.
    --------------------------------------------------------------------------- */
-.transport-cluster {
-  position: absolute; z-index: 11; left: 50%; bottom: 15px; transform: translateX(-50%);
-  max-width: min(760px, calc(100% - 32px));
-  padding: 5px 7px;
-  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px;
+.lab-shell { --transport-card-width: 264px; }
+.transport-card {
+  position: absolute; z-index: 13; top: 14px; right: 12px;
+  width: var(--transport-card-width); max-width: calc(100% - 24px);
+  padding: 6px 7px 7px;
+  display: grid; gap: 4px;
   border: 1px solid var(--line-strong); background: var(--overlay);
-  opacity: 1; transition: opacity .35s ease;
   backdrop-filter: var(--frost);
 }
-/* Receded, not gone: at .16 the clock — the one readout of where the run is —
-   could not be read without moving the pointer to wake it. */
-.transport-cluster[data-idle="true"] { opacity: .5; }
-.transport-cluster:hover, .transport-cluster:focus-within { opacity: 1; transition-duration: .12s; }
-@media (prefers-reduced-motion: reduce) { .transport-cluster { transition: none; } }
-/* Nothing to wake it with, so it never sleeps. */
-@media (hover: none) { .transport-cluster[data-idle="true"] { opacity: 1; } }
-.transport-cluster button { min-width: 48px; height: 27px; padding: 0 9px; border: 1px solid var(--line); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
-.transport-cluster button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
+.transport-controls { display: flex; align-items: center; gap: 3px; }
+.transport-readouts { display: flex; align-items: baseline; gap: 6px; padding: 0 2px; }
+.transport-card button { min-width: 34px; height: 28px; padding: 0 8px; display: inline-grid; place-items: center; border: 1px solid var(--line); background: transparent; color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); cursor: pointer; }
+.transport-card button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
 /* The verbs are the rail's marks: no box at rest, a hairline and a wash under
-   the pointer. Only the direct children — the step's own nudge buttons keep
-   the stepper's look. */
-.transport-cluster > button { border-color: transparent; }
-.transport-cluster button:disabled { opacity: .45; cursor: wait; }
-/* The one control this cluster exists for, so it is not the smallest thing in
-   it: the same box as STEP and RESET, with the glyph two steps up from their
-   tag type because a triangle at 11px was still a speck. */
-.transport-cluster .transport-main { width: 48px; padding: 0; border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); font-size: var(--size-5); }
-.transport-cluster .record-button { color: var(--red); }
-.transport-cluster .record-button.active { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
-.transport-cluster .stop-gpu-button { border-color: var(--amber-line); color: var(--amber); }
-/* The mode is a chip, not a verb, so it keeps its box on the bar where the
-   verbs beside it have none; a hairline separates it from the clock. */
-.transport-cluster .viewport-mode-toggle { min-width: 0; margin-right: 4px; backdrop-filter: none; }
-.transport-cluster .viewport-mode-toggle:not([data-viewport-mode="interact"]) { border-color: var(--line-strong); }
-/* What the frame costs: quiet, a glance rather than a control. `--dim` to
-   `--ink` on hover, at contrast the whole way. */
-.transport-fps { min-width: 68px; padding: 0 6px; color: var(--dim); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); text-align: right; transition: color .2s ease; }
-.transport-cluster:hover .transport-fps { color: var(--ink); }
-/* Why the interactive entities hold the run. Only on the bar while it applies. */
-.transport-hold { max-width: 220px; padding: 2px 7px; overflow: hidden; border: 1px solid var(--amber-line); border-radius: var(--radius-s); background: var(--amber-wash); color: var(--amber); font: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; cursor: help; }
+   the pointer. */
+.transport-controls > button { border-color: transparent; }
+.transport-card button:disabled { opacity: .45; cursor: wait; }
+/* The one control this card exists for, so it is not the smallest thing in it. */
+.transport-card .transport-main { width: 44px; padding: 0; border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.transport-card .record-button { color: var(--red); }
+.transport-card .record-button.active { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
+.transport-card .stop-gpu-button { border-color: var(--amber-line); color: var(--amber); }
+/* What the frame costs: quiet, a glance rather than a control. */
+.transport-fps { margin-left: auto; color: var(--dim); font: var(--text-tag); font-variant-numeric: tabular-nums; letter-spacing: var(--track-wide); text-align: right; white-space: nowrap; transition: color .2s ease; }
+.transport-card:hover .transport-fps { color: var(--ink); }
+/* Why the interactive entities hold the run. Only on the card while it applies. */
+.transport-hold { min-width: 0; max-width: 120px; padding: 1px 6px; overflow: hidden; border: 1px solid var(--amber-line); border-radius: var(--radius-s); background: var(--amber-wash); color: var(--amber); font: var(--text-micro); text-overflow: ellipsis; white-space: nowrap; cursor: help; }
 .transport-hold[data-state="failed"], .transport-hold[data-state="unavailable"] { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
-/* The overflow menu opens upward from the trigger and right-aligned to it, so
-   it never covers the clock it sits beside. */
-.transport-menu { position: relative; display: flex; }
-.transport-cluster .transport-more { min-width: 30px; padding: 0 6px; font-size: var(--size-4); }
-.transport-cluster .transport-more[aria-expanded="true"] { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
-.transport-menu-panel { position: absolute; right: -8px; bottom: calc(100% + 12px); width: max-content; min-width: 240px; max-width: min(340px, calc(100vw - 32px)); padding: 8px; display: grid; gap: 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--chrome); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); }
+/* The overflow menu sits at the end of the verbs and opens down and leftward,
+   over the scene rather than over the card's own clock. */
+.transport-menu { position: relative; display: flex; margin-left: auto; }
+.transport-card .transport-more { min-width: 30px; padding: 0 6px; font-size: var(--size-4); }
+.transport-card .transport-more[aria-expanded="true"] { border-color: var(--line-strong); background: var(--hover); color: var(--ink); }
+.transport-menu-panel { position: absolute; z-index: 2; right: -8px; top: calc(100% + 10px); width: max-content; min-width: 240px; max-width: min(340px, calc(100vw - 32px)); padding: 8px; display: grid; gap: 8px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); background: var(--chrome); backdrop-filter: var(--frost); box-shadow: var(--shadow-card); }
 .transport-menu-section { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .transport-menu-section + .transport-menu-section { padding-top: 8px; border-top: 1px solid var(--line); }
 .transport-menu-section > small { flex-basis: 100%; color: var(--dim); font: var(--text-micro); }
-.transport-menu-panel .transport-step { margin: 0; padding: 0; border: 0; }
-.transport-menu-instruments { display: flex; gap: 4px; }
-.transport-menu-instruments button { display: inline-flex; align-items: center; gap: 6px; }
-.transport-menu-instruments kbd { padding: 0 4px; border: 1px solid currentColor; border-radius: 4px; font: 600 9px/1.3 var(--mono); opacity: .55; }
-.transport-cluster .transport-menu-instruments button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
-/* The step, between the buttons and the clock it paces: a pair of nudge
-   buttons narrower than the transport's verbs, around a number that is typed
-   into as readily as it is nudged. */
-.transport-step { display: flex; align-items: center; gap: 3px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--line); color: var(--ink); font-variant-numeric: tabular-nums; }
-.transport-step small { color: var(--dim); font: var(--text-micro); }
-.transport-cluster .transport-step button { min-width: 22px; height: 22px; padding: 0; font-size: var(--size-2); }
-.transport-time { position: relative; display: flex; align-items: baseline; gap: 4px; margin-left: 4px; padding: 0 8px 0 12px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.transport-time { position: relative; display: flex; align-items: baseline; gap: 4px; padding-left: 10px; color: var(--ink); font-variant-numeric: tabular-nums; }
 /* Sized for the hundreds of seconds a long run reaches, right-aligned so the
    number grows into the reserve and the unit never leaves its side. */
 .transport-time strong { min-width: 8ch; font: var(--text-readout); text-align: right; }
@@ -1060,17 +1037,17 @@ button.card[data-active] { border-color: var(--accent); }
 /* On the readout's left padding rather than in the row: a dot that took a flex
    slot shifted the clock sideways every time recording started. */
 .transport-recording-dot { position: absolute; left: 0; top: 50%; width: 6px; height: 6px; margin-top: -3px; border-radius: 50%; background: var(--red); box-shadow: 0 0 9px var(--red-line); animation: status-pulse 1.2s ease-in-out infinite; }
-/* Out of flow, floated above the bar: a sentence in the row stretched the
-   shrink-wrapped cluster to its own length and — because it stays in the DOM
-   while faded — held that phantom width forever. Absolute positioning means no
-   notice, however long, can ever change the cluster's size. */
-.transport-notice { position: absolute; bottom: calc(100% + 5px); left: 50%; transform: translateX(-50%); width: max-content; max-width: 100%; margin: 0; padding: 2px 9px; overflow: hidden; border: 1px solid var(--line); background: var(--overlay); color: var(--dim); font: var(--text-micro); text-align: center; text-overflow: ellipsis; white-space: nowrap; backdrop-filter: var(--frost); border-radius: var(--radius-s); transition: opacity .8s ease; }
+/* What the run is waiting on, under the controls it holds. */
+.transport-work { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; margin: 3px -7px -7px; padding: 8px 9px 9px; border-top: 1px solid var(--line); animation: activity-in .2s ease both; }
+/* Out of flow, hung under the card: a sentence in the card would stretch it,
+   and absolute positioning means no notice can ever change the card's size. */
+.transport-notice { position: absolute; top: calc(100% + 5px); right: 0; width: max-content; max-width: 100%; margin: 0; padding: 2px 9px; overflow: hidden; border: 1px solid var(--line); background: var(--overlay); color: var(--dim); font: var(--text-micro); text-align: right; text-overflow: ellipsis; white-space: nowrap; backdrop-filter: var(--frost); border-radius: var(--radius-s); transition: opacity .8s ease; pointer-events: none; }
 .transport-notice.warn { color: var(--amber); }
 /* Said once. A notice that never expires stops being news and becomes a label
-   on the cluster, so it fades out a few seconds after it last changed and comes
+   on the card, so it fades out a few seconds after it last changed and comes
    back the moment there is something new to say. */
 .transport-notice[data-stale="true"] { opacity: 0; }
-@media (prefers-reduced-motion: reduce) { .transport-notice { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .transport-notice { transition: none; } .transport-work { animation: none; } }
 
 /* ---- simulation-time video playback ---- */
 .recording-modal-backdrop, .detail-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 28px; background: var(--scrim); backdrop-filter: blur(12px); }
@@ -1317,10 +1294,7 @@ button.card[data-active] { border-color: var(--accent); }
    is: the berth is a property of the `.viewport-shell` the HUDs dock in, not of
    the page they happen to be on. */
 .lab-shell[data-compare="true"] .pixel-trace-hud[data-trace="fluid-cell"] { right: auto; left: 16px; }
-/* Both panes dock their bring-up tray to the right, which in pane A is the
-   seam — under the diff strip, and beside pane B's own copy of the same card.
-   Sent to the pair's outer edges instead, where the pane tags already are. */
-.lab-shell[data-compare="true"] .viewport-shell[data-pane="a"] .activity { top: 66px; right: auto; left: 16px; }
+
 /* Pinned and stale are the two states worth spending the edge on, so they keep
    their coloured border against the hairline everything else gets. */
 .pixel-trace-hud[data-pinned="true"] { border-color: var(--amber-line); }
@@ -1998,9 +1972,7 @@ button.card[data-active] { border-color: var(--accent); }
 @media (max-width: 920px) {
   .recording-modal-backdrop, .detail-modal-backdrop { padding: 12px; }
   .recording-stats { grid-template-columns: 1fr 1fr; }
-  /* Narrow enough that a centred cluster and the mode chip would overlap, so
-     the cluster gives up the centre and the notice gives up its line. */
-  .transport-cluster { max-width: calc(100% - 24px); }
+  /* Narrow enough that the notice would cross the rail under the card. */
   .transport-notice { display: none; }
 }
 
@@ -2100,7 +2072,7 @@ button.card[data-active] { border-color: var(--accent); }
 .lab-shell button, .lab-shell input, .lab-shell select, .lab-shell .metric-card { border-radius: var(--radius-s); }
 
 .gpu-badge, .health-chip, .camera-toolbar, .scene-overlay,
-.transport-cluster, .scene-scale-overlay,
+.transport-card, .scene-scale-overlay,
 .entity-hover-chip, .editor-hover-chip, .shape-readout, .shape-axis-lock,
 .editor-fill-handle, .toolstrip-pane, .toolstrip-tip,
 .svo-cost-legend, .gpu-fallback,
@@ -2115,7 +2087,7 @@ button.card[data-active] { border-color: var(--accent); }
    rules that draw each of them and at their own specificity, so every lit
    state — armed, pressed, alert, hovered — still outranks it. */
 .gpu-badge, .health-chip, .viewport-mode-toggle,
-.scene-overlay, .transport-cluster, .transport-notice, .scene-scale-overlay,
+.scene-overlay, .transport-card, .transport-notice, .scene-scale-overlay,
 .mode-chip, .editor-hover-chip, .pane-tag {
   border-color: var(--line);
   border-radius: var(--radius-s);
@@ -2133,11 +2105,9 @@ button.card[data-active] { border-color: var(--accent); }
   padding-inline: var(--control-inline-padding);
   font-size: var(--control-font-size);
 }
-/* The transport cluster is chrome on the image, not a form: its buttons and
-   the dt entry are glyph-sized on purpose and opt out of the studio's control
-   floor — the floor's 38px height and 11px padding were what clipped the step
-   readout to "16.6" and bulged the field out of its row. */
-.lab-shell .transport-cluster button { min-height: 27px; }
+/* The transport card is chrome on the image, not a form: its buttons are
+   glyph-sized on purpose and opt out of the studio's control floor. */
+.lab-shell .transport-card button { min-height: 28px; }
 
 
 /* ---------------------------------------------------------------------------
@@ -2275,42 +2245,59 @@ button.card[data-active] { border-color: var(--accent); }
 button:hover .iso-water-top { fill-opacity: .44; }
 button:hover .iso-water-side { fill-opacity: .26; }
 
-/* ---- the activity mark ---------------------------------------------------
-   Everything the pane is waiting on, as one plate under the frame rate: a ring
-   for the whole of the progress, a line per piece of work, and at most one
-   sentence about what is held up. It replaced a card with its own meter and a
-   pill per further task with its own — so however much is running there is one
-   indicator, and it is the studio's plate rather than a dialog's.
-
-   It takes no input: it hangs over the scene's own corner, and nothing in it
-   is a control. */
-.activity { position: absolute; z-index: 8; top: 49px; right: 16px; width: max-content; min-width: 200px; max-width: min(330px, calc(100% - 32px)); display: grid; gap: 5px; padding: 7px 11px 8px 9px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--chrome); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); pointer-events: none; animation: activity-in .2s ease both; }
-.activity[data-tone="attention"] { border-color: var(--amber-line); }
-.activity-head { display: flex; align-items: center; gap: 8px; min-height: 16px; }
-.activity-head strong { flex: 1; min-width: 0; overflow: hidden; color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
-.activity-meta { flex: none; color: var(--dim); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* The one indicator. Counted work fills it; uncounted work turns it. */
-.activity-ring { flex: none; overflow: visible; }
-.activity-ring circle { fill: none; stroke-width: 2; }
-.activity-ring-track { stroke: var(--line-strong); }
-.activity-ring-value { stroke: var(--accent); stroke-linecap: round; transition: stroke-dasharray .3s ease; }
-.activity-ring[data-indeterminate] { animation: activity-spin .9s linear infinite; }
-.activity-flag { flex: none; width: 8px; height: 8px; margin: 0 4px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px var(--amber-wash); }
-/* Indented to the headline's text, so the ring reads as heading all of it. */
-.activity-rows { margin: 0; padding: 0 0 0 24px; list-style: none; display: grid; gap: 2px; }
+/* ---- the activity section ----------------------------------------------
+   A section of the transport card (see `ActivityIndicator`): a headline, one
+   bar for the whole of the progress with its figures, a line per piece of
+   work, and at most one sentence about what is held up. It takes no input. */
+.activity { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; min-width: 0; }
+/* A count that will not fit beside its headline drops under it, whole. */
+.activity-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 7px; min-height: 16px; }
+.activity-head strong { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ink); font: var(--text-tag); letter-spacing: var(--track-wide); text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.activity-tag { flex: none; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: var(--radius-s); color: var(--muted); font: var(--text-micro); }
+.activity-meta { flex: none; margin-left: auto; color: var(--dim); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.activity-progress { display: grid; gap: 3px; }
+/* The one indicator. Measured work fills it; unmeasured work sweeps it. */
+.activity-bar { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: var(--line); }
+.activity-bar > i { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 2px; background: var(--accent); transition: width .3s ease; }
+.activity-bar[data-indeterminate] > i { width: 30%; animation: activity-sweep 1.3s ease-in-out infinite; }
+.activity-figures { display: flex; gap: 10px; color: var(--muted); font: var(--text-micro); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.activity-figures > span:first-child { color: var(--ink); }
+.activity-figures > span:last-child:not(:first-child) { margin-left: auto; }
+.activity-flag { flex: none; width: 8px; height: 8px; margin: 0 2px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 3px var(--amber-wash); }
+.activity[data-tone="attention"] .activity-head strong { color: var(--amber); }
+.activity-rows { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
 .activity-rows li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; column-gap: 12px; color: var(--muted); font: var(--text-note); }
 .activity-rows li > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-rows li:not([data-state="active"]) > span:first-child { color: var(--amber); }
 .activity-rows li > p { grid-column: 1 / -1; margin: 1px 0 2px; color: var(--dim); font: var(--text-note); overflow-wrap: anywhere; }
-.activity-note { margin: 0; padding-left: 24px; color: var(--dim); font: var(--text-note); overflow-wrap: anywhere; }
+.activity-note { margin: 0; color: var(--dim); font: var(--text-note); overflow-wrap: anywhere; }
 @keyframes activity-in { from { opacity: 0; transform: translateY(-3px); } }
-@keyframes activity-spin { to { transform: rotate(360deg); } }
+@keyframes activity-sweep { from { left: -30%; } to { left: 100%; } }
 @media (prefers-reduced-motion: reduce) {
-  .activity { animation: none; }
-  .activity-ring-value { transition: none; }
-  /* Still, but still plainly "working": the arc stays, the turning does not. */
-  .activity-ring[data-indeterminate] { animation: none; }
+  .activity-bar > i { transition: none; }
+  /* Still, but still plainly "working": the segment stays, the sweep does not. */
+  .activity-bar[data-indeterminate] > i { animation: none; left: 35%; }
 }
+
+/* ---- machine load --------------------------------------------------------
+   A line per thing measured: its name, a sparkline of the last twenty seconds
+   on a fixed 0–100% scale, and the latest figure. Text stays in the ink tones;
+   the line and its wash carry no meaning beyond "this one". A tone (amber, red)
+   is a state and comes with its word. */
+.load-meters { display: grid; gap: 2px; }
+.load-line { display: grid; grid-template-columns: 46px 64px minmax(0, 1fr); align-items: center; column-gap: 8px; min-height: 16px; color: var(--muted); font: var(--text-micro); font-variant-numeric: tabular-nums; }
+.load-name { color: var(--dim); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.load-value { overflow: hidden; color: var(--ink); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.load-spark { display: block; overflow: visible; }
+.load-spark-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.load-spark-area { fill: var(--accent-wash); stroke: none; }
+.load-dot { justify-self: start; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.load-line[data-tone="warn"] .load-value { color: var(--amber); }
+.load-line[data-tone="warn"] .load-dot { background: var(--amber); }
+.load-line[data-tone="alert"] .load-value { color: var(--red); }
+.load-line[data-tone="alert"] .load-dot { background: var(--red); }
+.view-rail-heading ~ .load-meters, .rail-rule + .load-meters { padding: 2px 0 4px; }
+.rail-kbd { margin-left: 4px; padding: 0 4px; border: 1px solid currentColor; border-radius: 4px; font: 600 9px/1.3 var(--mono); opacity: .55; }
 
 /* What an armed tool is proposing to put down: its silhouette on the glass,
    dashed like every other outline that is a proposal rather than a published
@@ -2653,7 +2640,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
    middle. Their marks, tips and cards are the sculpt rail's own, hung
    leftward. Their first marks are sections like the rest, so they are lit as
    loudly as they are — the quiet first slot is the sculpt rail's pointer. */
-.rail-stack { position: absolute; z-index: 12; right: 12px; top: 0; bottom: 0; height: fit-content; margin-block: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.rail-stack { position: absolute; z-index: 12; right: 12px; top: 86px; bottom: 0; height: fit-content; margin-block: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .rail-stack > .tool-rail { position: relative; inset: auto; margin: 0; }
 /* The rail with a card open stands over the other, whose captions would
    otherwise paint across a card that runs past its own rail. */

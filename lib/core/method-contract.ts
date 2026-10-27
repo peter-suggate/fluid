@@ -20,7 +20,7 @@ import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
 import type {
   DenseLevelSetVolumeConsumerSource,
 } from "./levelset-consumer-abi";
-import type { GPUInitializationPhase } from "./gpu-initialization";
+import type { GPUInitializationPhase, GPUInitializationWork } from "./gpu-initialization";
 import type { ResourcePluginDefinition } from "./resource-plugin";
 import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
 import type { ConfigurationReadout, DiagnosticRow } from "./method-diagnostics";
@@ -623,6 +623,7 @@ export interface GPUInitializationProgress {
   label: string;
   completed: number;
   total: number;
+  work?: GPUInitializationWork;
 }
 
 export type GPUInitializationReporter = (progress: GPUInitializationProgress) => void;

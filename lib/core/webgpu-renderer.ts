@@ -82,7 +82,8 @@ import {
 import { SparseVoxelRenderStageOverlay } from "../svo/features/diagnostics/webgpu-svo-stage-overlay";
 import { SvoSurfaceTuningCache, type SvoRenderTuning } from "../svo/pipeline/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../svo/features/lighting-visibility/svo-screen-space-termination";
-import { isGPUInitializationAbort } from "./gpu-initialization";
+import { isGPUInitializationAbort, type GPUInitializationWork } from "./gpu-initialization";
+import { observeGPUQueue } from "./system-load";
 import {
   fluidExecutionDeviceFeatures,
 } from "./gpu-startup";
@@ -1621,6 +1622,7 @@ export class FluidLabRenderer {
     const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
     const rawDevice = await adapter.requestDevice({ requiredFeatures, requiredLimits });
     if (this.disposed) { rawDevice.destroy(); return; }
+    observeGPUQueue(rawDevice.queue);
     const context = this.canvas.getContext("webgpu") as GPUCanvasContext | null;
     if (!context) {
       rawDevice.destroy();
@@ -2003,7 +2005,7 @@ export class FluidLabRenderer {
     // transaction. Only the warmed candidate is allowed to replace it.
     this.gpuFluidPendingKey=key;
     let reportedCompleted=0,reportedTotal=1;
-    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number})=>{if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
+    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number;work?:GPUInitializationWork})=>{if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
     let previousDestroyedForReset=false;
     let previousSidecarDestroyedForReset=false;
     const prepare=async()=>{

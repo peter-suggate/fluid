@@ -18,12 +18,27 @@ export type GPUInitializationPhase =
   | "warmup"
   | "attach";
 
+/**
+ * A count inside one task, for work the task does not own the size of.
+ *
+ * A task is one unit of the runner's total, so a task that waits on 124
+ * pipelines it cannot enumerate up front would otherwise read as a single
+ * step stuck at its last percent. This carries that count as it is: what has
+ * settled out of what is known, in its own unit, beside the task's position.
+ */
+export interface GPUInitializationWork {
+  completed: number;
+  total: number;
+  unit: string;
+}
+
 export interface GPUInitializationSnapshot {
   phase: GPUInitializationPhase;
   taskId: string;
   label: string;
   completed: number;
   total: number;
+  work?: GPUInitializationWork;
 }
 
 export interface GPUInitializationTask {
@@ -38,7 +53,7 @@ export interface GPUInitializationTask {
   /** Force a paint immediately before this task. Phase changes and long
    * same-phase batches already paint automatically. */
   paintBeforeRun?: boolean;
-  run(signal: AbortSignal, report?: (label: string, completedWorkUnits?: number) => void): void | Promise<void>;
+  run(signal: AbortSignal, report?: (label: string, completedWorkUnits?: number, work?: GPUInitializationWork) => void): void | Promise<void>;
 }
 
 export type GPUInitializationSnapshotReporter = (snapshot: GPUInitializationSnapshot) => void;
@@ -205,7 +220,7 @@ export class GPUInitializationTaskRunner {
       }
       if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
       const taskStarted = initializationCensusEnabled ? performance.now() : 0;
-      await task.run(this.signal, (label, completedWorkUnits) => this.reportTask(task, label, completedWorkUnits));
+      await task.run(this.signal, (label, completedWorkUnits, work) => this.reportTask(task, label, completedWorkUnits, work));
       if (this.signal.aborted) throw new DOMException("GPU initialization superseded", "AbortError");
       if (initializationCensusEnabled) {
         initializationCensus.push({ taskId: task.id, phase: task.phase,
@@ -277,11 +292,11 @@ export class GPUInitializationTaskRunner {
     }
   }
 
-  private reportTask(task: GPUInitializationTask, label: string, completedWithinTask = 0) {
+  private reportTask(task: GPUInitializationTask, label: string, completedWithinTask = 0, work?: GPUInitializationWork) {
     const workUnits = Math.max(1, Math.floor(task.workUnits ?? 1));
     this.report({ phase: task.phase, taskId: task.id, label,
       completed: this.completedWorkUnits + Math.max(0, Math.min(workUnits - 1, Math.floor(completedWithinTask))),
-      total: this.total });
+      total: this.total, ...(work ? { work } : {}) });
   }
 
 }

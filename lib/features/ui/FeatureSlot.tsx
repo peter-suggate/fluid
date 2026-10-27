@@ -8,6 +8,8 @@ import { resolvedMethodValues } from "../../core/stores/method-store";
 import { useSession } from "../../core/session/session-context";
 import { SVO_FEATURE_VIEWS } from "../../svo/pipeline/ui-slots";
 import { GravityRow, GravityYRow } from "../gravity/ui";
+import { SimulationStepLine } from "../simulation-clock/ui";
+import { InstrumentLines, PerformanceLoadLines } from "../view-rail/ui";
 import { composeFeatureUI } from "./composition";
 import type { FeatureComposition } from "../../framework/composition";
 import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/ui/slot";
@@ -21,6 +23,9 @@ export const applicationViews: FeatureControlViews = {
   "uniform.detail-tuning/dials": UniformTunePanel,
   "scene.gravity/enabled": GravityRow,
   "scene.gravity/y": GravityYRow,
+  "simulation.clock/step": SimulationStepLine,
+  "view.rail/load": PerformanceLoadLines,
+  "view.rail/instruments": InstrumentLines,
   ...SVO_FEATURE_VIEWS,
 };
 
