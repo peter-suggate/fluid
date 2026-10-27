@@ -1,5 +1,7 @@
 # Tiered adaptivity: handoff to the next agents (2026-10-25)
 
+> **PAUSED — 27 October 2026, at Peter's request.** Continue from the [completion handoff](tiered-adaptivity-completion-handoff-2026-10-27.md). It records verified scope, remaining acceptance gates, the GPU incident and safeguards, worktree/evidence locations, and the single-agent completion sequence. No GPU jobs or lane agents are running. Historical “running”, parallel-lane and next-task instructions below are superseded. The goal is not complete; resume only on request.
+
 This doc hands the tiered-adaptivity work (`tiered-adaptivity-huge-grids-2026-10-24.md`) from the Claude lanes to a new set of agents.
 - The new agents implement.
 - Claude (the coordinator session) plans and verifies.
