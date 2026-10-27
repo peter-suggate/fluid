@@ -42,6 +42,8 @@ fn umSolidTraceWorld(p:vec3f)->vec3f{return p;}
 fn umBodyAt(p:vec3f)->i32{return -1;}
 fn umSolidVoxel(c:vec3i)->bool{return false;}
 fn umCellOpen(c:vec3i)->f32{return 1.0;}
+fn umSolidFieldCutAt(c:vec3i)->bool{return true;}
+fn umPointPresent(q:vec3f)->bool{return true;}
 ${narrowBandTerrainContactWGSL}
 @compute @workgroup_size(1) fn probe(@builtin(global_invocation_id) id:vec3u){
  let points=array<vec2f,${points.length}>(${points.map(p=>`vec2f(${p.join(",")})`).join(",")});
@@ -49,7 +51,7 @@ ${narrowBandTerrainContactWGSL}
  let surface=umTerrainSurface(q);result[4u*i]=vec4f(surface,0);result[4u*i+1u]=vec4f(nbTerrainNormal(surface),0);
  q.y=surface.x+0.001;var v=vec3f(0,-9.81/60.0,0);
  for(var step=0u;step<20u;step++){
-  let contact=nbTerrainContact(q,q+v*params.hDt.w/params.hDt.xyz,v);q=contact.position;v=contact.velocity+vec3f(0,-9.81/60.0,0);
+  let contact=nbTerrainContact(q,q+v*params.hDt.w/params.hDt.xyz,v,0.25);q=contact.position;v=contact.velocity+vec3f(0,-9.81/60.0,0);
  }
  result[4u*i+2u]=vec4f(q,0);result[4u*i+3u]=vec4f(v,0);
 }`});

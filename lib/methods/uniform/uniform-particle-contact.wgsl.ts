@@ -30,11 +30,17 @@ struct NBTerrainContact{position:vec3f,velocity:vec3f}
 // Every surface sample is at one call site (Metal inlines each): stage 0 the
 // end, 1 the start, 2 the bisection's twelve midpoints, 3 the hit, 4 the
 // slide's up to four re-evaluations after it.
-fn nbTerrainContact(startPoint:vec3f,endPoint:vec3f,velocity:vec3f)->NBTerrainContact{
- var q=endPoint;var v=velocity;let skin=0.001;
+// inset: the sample's radius in cells, which its centre keeps from the
+// surface along the normal (min(h) a cell): over a patch of gradient s.yz
+// that is inset*min(h)*|(s.y/h.x,1/h.y,s.z/h.z)| cells of height.
+fn nbTerrainClearance(s:vec3f,inset:f32)->f32{
+ let h=params.hDt.xyz;return inset*min(h.x,min(h.y,h.z))*length(vec3f(s.y/h.x,1.0/h.y,s.z/h.z));
+}
+fn nbTerrainContact(startPoint:vec3f,endPoint:vec3f,velocity:vec3f,inset:f32)->NBTerrainContact{
+ var q=endPoint;var v=velocity;
  var low=0.0;var high=1.0;var mid=0.0;var stage=0u;var i=0u;var at=endPoint;
  loop{
-  let s=nbTerrainSurface(at);
+  let s=nbTerrainSurface(at);let skin=nbTerrainClearance(s,inset);
   if(stage==0u){if(at.y-s.x>skin){return NBTerrainContact(q,v);}stage=1u;at=startPoint;continue;}
   if(stage==1u||stage==2u){
    if(stage==2u){if(at.y-s.x>skin){low=mid;}else{high=mid;}i++;}
@@ -110,18 +116,24 @@ fn nbBoundaryHit(start:vec3f,end:vec3f)->f32{
  }
  return -1.0;
 }
-fn nbProceduralContact(start:vec3f,end:vec3f,velocity:vec3f)->NBTerrainContact{
+// inset: the sample's radius in cells (min(h) a cell). A segment that
+// crosses the surface slides along it from the hit; then, crossed or not, a
+// centre nearer the surface than its radius moves out along the normal to
+// it, losing its velocity into the surface.
+fn nbProceduralContact(start:vec3f,end:vec3f,velocity:vec3f,inset:f32)->NBTerrainContact{
  if(umBoundaryBase()==0u){return NBTerrainContact(end,velocity);}
- let hit=nbBoundaryHit(start,end);if(hit<0.0){return NBTerrainContact(end,velocity);}
- let at=mix(start,end,hit);let s=umBoundarySample(at);let gradient=s.xyz/params.hDt.xyz;
- if(dot(gradient,gradient)<1e-12){return NBTerrainContact(start,velocity);}
- let n=normalize(gradient);var travel=(end-at)*params.hDt.xyz;
- travel-=min(dot(travel,n),0.0)*n;var q=at+travel/params.hDt.xyz;
- var v=velocity-min(dot(velocity,n),0.0)*n;
+ let hit=nbBoundaryHit(start,end);var at=end;var q=end;var v=velocity;
+ if(hit>=0.0){
+  at=mix(start,end,hit);let s=umBoundarySample(at);let gradient=s.xyz/params.hDt.xyz;
+  if(dot(gradient,gradient)<1e-12){return NBTerrainContact(start,velocity);}
+  let n=normalize(gradient);var travel=(end-at)*params.hDt.xyz;
+  travel-=min(dot(travel,n),0.0)*n;q=at+travel/params.hDt.xyz;
+  v=velocity-min(dot(velocity,n),0.0)*n;
+ }
  for(var i=0u;i<4u;i++){
   let sample=umBoundarySample(q);let g=sample.xyz/params.hDt.xyz;let lengthG=length(g);
   if(lengthG<1e-12){break;}let normal=g/lengthG;
-  let depth=0.001*min(params.hDt.x,min(params.hDt.y,params.hDt.z))-sample.w/lengthG;
+  let depth=inset*min(params.hDt.x,min(params.hDt.y,params.hDt.z))-sample.w/lengthG;
   if(depth<=0.0){break;}q+=depth*normal/params.hDt.xyz;v-=min(dot(v,normal),0.0)*normal;
  }
  // A field face on a container wall would push the sample out of storage;
@@ -136,8 +148,11 @@ fn nbProceduralContact(start:vec3f,end:vec3f,velocity:vec3f)->NBTerrainContact{
  * non-penetration relative to the wall velocity (including rotation). */
 export const narrowBandRigidContactWGSL = /* wgsl */ `
 struct NBRigidContact{position:vec3f,velocity:vec3f}
-fn nbRigidContact(point:vec3f,velocity:vec3f)->NBRigidContact{
- let h=params.hDt.xyz;let skin=0.01*min(h.x,min(h.y,h.z));
+// inset: the sample's radius in cells (min(h) a cell), which its centre keeps
+// from the body's surface; the gradient's central difference steps a
+// hundredth of a cell.
+fn nbRigidContact(point:vec3f,velocity:vec3f,inset:f32)->NBRigidContact{
+ let h=params.hDt.xyz;let cell=min(h.x,min(h.y,h.z));let skin=inset*cell;let step=0.01*cell;
  var world=umSolidTraceWorld(point);var v=velocity;
  for(var i=0u;i<umBodyCount();i++){
   if(!umBodyNear(i,world,skin)){continue;}
@@ -145,7 +160,7 @@ fn nbRigidContact(point:vec3f,velocity:vec3f)->NBRigidContact{
    let distance=umBodyDistance(i,world);if(distance>skin){break;}
    var gradient=vec3f(0);
    for(var axis=0u;axis<3u;axis++){
-    var delta=vec3f(0);delta[axis]=skin;
+    var delta=vec3f(0);delta[axis]=step;
     gradient[axis]=umBodyDistance(i,world+delta)-umBodyDistance(i,world-delta);
    }
    // A sample exactly at a shape's medial axis still needs a deterministic exit.

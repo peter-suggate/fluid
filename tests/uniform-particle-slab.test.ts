@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { particleSlabWGSL, particleSlabWords } from "../lib/methods/uniform/uniform-particle-slab.wgsl";
+import { NB_SLAB_HEADER_WORDS, NB_SLAB_SORT_MAX_WORD, particleSlabSortEntries, particleSlabWGSL, particleSlabWords } from "../lib/methods/uniform/uniform-particle-slab.wgsl";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
 test("particle slabs conserve overflow and seeds beyond the reserved tail across moves", {skip:!process.env.WEBGPU_NODE_MODULE}, async()=>{
@@ -38,6 +38,15 @@ fn sample(i:u32,brick:u32)->Particle{
 @compute @workgroup_size(64) fn moveFront(@builtin(global_invocation_id) gid:vec3u){
  if(gid.x<1024u){nbMoveAppend(sample(gid.x,1u));}
 }
+// One dense run plus short runs in the same brick share all merge rounds.
+// The other two slabs are empty; a single sort group reuses its state for all.
+@compute @workgroup_size(64) fn denseFront(@builtin(global_invocation_id) gid:vec3u){
+ if(gid.x<5336u){
+  var p=sample(gid.x,1u);
+  p.position=vec4f(vec3f(8.25,0.25,0.25)+vec3f(umCorner(select(gid.x-5318u,0u,gid.x<5319u),8u)),1.0);
+  nbMoveAppend(p);
+ }
+}
 @compute @workgroup_size(64) fn seedFront(@builtin(global_invocation_id) gid:vec3u){
  if(gid.x<1200u){_=nbSeedAppend(sample(1024u+gid.x,2u),true);}
  // A brick absent from the table also survives through the current tail.
@@ -59,13 +68,16 @@ fn sample(i:u32,brick:u32)->Particle{
   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
   const layout=device.createBindGroupLayout({entries:Array.from({length:5},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))});
   const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
-  const names=["slabAllocate","moveFront","slabPlace","slabOverflow","slabSort","seedFront","slabMark","moveAgain","fillTail","mandatoryOverflow"];
-  const pipelines=new Map(await Promise.all(names.map(async entryPoint=>[entryPoint,await device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})] as const)));
+  const names=["slabAllocate","moveFront","denseFront","slabPlace","slabOverflow",...particleSlabSortEntries(capacity),"seedFront","slabMark","moveAgain","fillTail","mandatoryOverflow"];
+  const pipelines=new Map(await Promise.all(names.map(async name=>[name,await device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:name.split("@")[0],...(name.startsWith("slabSortMerge@")?{constants:{nbCanonicalWidth:Number(name.split("@")[1])}}:{})}})] as const)));
   const buffers=[4*particleSlabWords(1),48*capacity,48*capacity,4*(cells+7*capacity),4*36000].map(size=>device.createBuffer({size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}));
   const group=device.createBindGroup({layout,entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
   const read=device.createBuffer({size:Math.max(...buffers.map(b=>b.size)),usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const sort=(groups:number):[string,number][]=>particleSlabSortEntries(capacity).map(name=>[name,name==="slabSort"?groups:7]);
   const run=(entries:[string,number][])=>{
-   const e=device.createCommandEncoder(),pass=e.beginComputePass();pass.setBindGroup(0,group);
+   const e=device.createCommandEncoder();
+   e.clearBuffer(buffers[0]!,4*NB_SLAB_SORT_MAX_WORD,4);
+   const pass=e.beginComputePass();pass.setBindGroup(0,group);
    for(const [name,groups] of entries){pass.setPipeline(pipelines.get(name)!);pass.dispatchWorkgroups(groups);}
    pass.end();device.queue.submit([e.finish()]);
   };
@@ -89,12 +101,26 @@ fn sample(i:u32,brick:u32)->Particle{
   };
   try{
    // Previous demand lives in brick 0; this move sends it all to an empty brick.
-   device.queue.writeBuffer(buffers[0]!,4*(32+10),new Uint32Array([1024]));
-   run([["slabAllocate",1],["moveFront",16],["slabPlace",1],["slabOverflow",32],["slabSort",3]]);
+   device.queue.writeBuffer(buffers[0]!,4*(NB_SLAB_HEADER_WORDS+10),new Uint32Array([1024]));
+   run([["slabAllocate",1],["moveFront",16],["slabPlace",1],["slabOverflow",32],...sort(3)]);
    let receipt=await verify(1024);assert.ok(receipt[16]!>headroom,"move exceeds the old fixed reserve");assert.equal(receipt[1],1024);
    run([["seedFront",19]]);receipt=await verify(2225);assert.ok(receipt[21]!>headroom,"seeds exceed the old fixed reserve");
-   run([["slabMark",32],["slabAllocate",1],["moveAgain",32],["slabPlace",1],["slabOverflow",32],["slabSort",3]]);
+   run([["slabMark",32],["slabAllocate",1],["moveAgain",32],["slabPlace",1],["slabOverflow",32],...sort(3)]);
    receipt=await verify(2225);assert.equal(receipt[1],2225);assert.equal(receipt[21],1,"unlisted brick survives in the tail");assert.equal(receipt[24]!&15,14,"spilled seeds mark their destination bricks");
+   device.queue.writeBuffer(buffers[0]!,0,new Uint32Array(particleSlabWords(1)));
+   device.queue.writeBuffer(buffers[4]!,0,new Uint32Array(buffers[4]!.size/4));
+   run([["slabAllocate",1],["denseFront",84],["slabPlace",1],["slabOverflow",128],...sort(1)]);
+   receipt=await words(0);assert.equal(receipt[3],0);assert.equal(receipt[1],5336);
+   const denseData=await words(2),denseFloats=new Float32Array(denseData.buffer),denseBins=await words(4),denseLinks=await words(3);
+   const denseCell=64*2; // brick 1's tile zero, local cell zero
+   assert.equal(denseBins[denseCell],5319);
+   const first=denseLinks[denseCell]!;
+   for(let k=0;k<5319;k++)assert.deepEqual([...denseLinks.slice(cells+4*(first+k),cells+4*(first+k)+4)],[...denseData.slice(12*(first+k),12*(first+k)+4)],"compact position published after dense rounds");
+   for(let k=0;k<5319;k++)assert.equal(denseFloats[12*(first+k)+4],k,"dense cell is canonically ordered, with no lost IDs");
+   const ids:number[]=[];
+   for(let i=0;i<receipt[0]!;i++)if(denseFloats[12*i+3]!>0)ids.push(denseFloats[12*i+4]!);
+   assert.deepEqual(ids.sort((a,b)=>a-b),Array.from({length:5336},(_,i)=>i),"dense and short runs all survive");
+   for(let i=first;i<first+5319;i++)assert.deepEqual([...denseFloats.slice(12*i+5,12*i+12)],[2,3,4,5,6,7,8]);
    // Genuine exhaustion remains bounded: optional reseeds clip; mandatory samples fail loudly.
    const reset=new Uint32Array(particleSlabWords(1));reset[0]=capacity-headroom;device.queue.writeBuffer(buffers[0]!,0,reset);
    run([["fillTail",19]]);receipt=await words(0);assert.equal(receipt[3],0);assert.equal(receipt[2],1200-headroom);

@@ -38,7 +38,7 @@ ${narrowBandNearWGSL}
  let i=gid.x;if(i>=${cases.length}u){return;}
  let home=vec3i(inputs[4u*i].xyz);fixed=inputs[4u*i].w!=0.0;
  let p=inputs[4u*i+1u].xyz;walls=umBounds(inputs[4u*i+2u].xyz,inputs[4u*i+3u].xyz);
- outputs[2u*i]=vec4f(nbTraceEndpoint(home,p),0.0);
+ outputs[2u*i]=vec4f(nbTraceEndpointIn(home,p,0.01),0.0);
  outputs[2u*i+1u]=vec4f(nbPointNearIn(home,p,0.01),0.0);
 }`});
   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);

@@ -21,14 +21,19 @@ export const PARTICLE_DEPOSIT_WORDS_PER_CELL = 6;
  * a join bit a tile key (joins words), then PARTICLE_RESIDENCY_WORDS a page
  * (allocation support masks and travel bounds), at these bins words. */
 export interface ParticleRefineWords {readonly joins:number;readonly allocation:number}
-export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords, deposit = "bins", merge = false): string {
+/** separation: the most a coupled sample's pair separation moves it along an
+ * axis, in cells (narrowBandSeparationReach; 0 without separation). */
+export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords, deposit = "bins", merge = false, separation = 0): string {
   return /* wgsl */`
 ${particleResidencyTravelWGSL}
+// A coupled sample's move adds its pair separation to the accepted motion:
+// at most NB_SEPARATION_REACH cells along any axis, either sign.
+const NB_SEPARATION_REACH:f32=${separation.toFixed(4)};
 // Coupled samples need only accepted motion; avoid their unused velocity norm.
 // Keep ballistic length and scaling together to preserve backend rounding.
 fn lrParticleTravelConditional(velocity:vec3f,accepted:vec3f,ballistic:bool,scale:vec3f)->array<vec3f,2>{
  if(ballistic){return lrParticleTravel(velocity,accepted,ballistic,scale);}
- return array<vec3f,2>(max(-accepted,vec3f(0))*scale,max(accepted,vec3f(0))*scale);
+ return array<vec3f,2>(max(-accepted,vec3f(0))*scale+NB_SEPARATION_REACH,max(accepted,vec3f(0))*scale+NB_SEPARATION_REACH);
 }
 // Refinement prediction (the census's particle inputs), from the tile's
 // sorted samples after classify: what the census reads is exactly these
@@ -109,7 +114,7 @@ fn nbRefineJoins(box:NbRefineBox){
 // two-cell support, travel bounds and swept surface tiles.
 fn nbRefineDirect(s:Particle){
  let ballistic=nbParticleMode(s)==1.0;
- nbRefinePages(vec3i(floor((s.position.xyz-2.0)/4.0)),lrParticleTravel(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz));
+ nbRefinePages(vec3i(floor((s.position.xyz-2.0)/4.0)),lrParticleTravelConditional(s.velocity.xyz,s.before.xyz,ballistic,params.hDt.w/params.hDt.xyz));
  if(s.velocity.w < -1.0||ballistic){return;}
  let home=umTileAt(vec3u(s.position.xyz)/4u);
  nbRefineJoins(nbRefineBox(s,ballistic,home,(atomicLoad(&bins[NB_BAND_REACH+home])&1u)!=0u));

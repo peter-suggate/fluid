@@ -186,7 +186,10 @@ fn nbCoupleFineVertex(t:NBCoupleFine,lane:u32,round:u32)->vec4i{
 @compute @workgroup_size(64) fn coupleFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(umSolidSkip()){return;}
  let owner=umAllOwner(vec3u(group.x*64u,0,0));umLoadAddressPlan(owner.tile>>9u,lane);nbCoupleHeatLoad(owner.tile,lane);
- if(nbTileCold(owner.tile)){return;}
+ // A COLD tile's own vertices are COLD where its cells are all open: each
+ // touches one of them. A wall's COLD tile can still own the face vertices
+ // of a hot tile across it (nbVertexCold decides those per vertex).
+ if(nbTileCold(owner.tile)&&umTileOpen(owner.tile)>=1.0){return;}
  let fine=nbCoupleFineTile(owner.tile);let origin=fine.origin;
  for(var round=0u;round<select(1u,2u,fine.boundary);round++){
   let vertex=nbCoupleFineVertex(fine,lane,round);if(vertex.w==0){continue;}
@@ -231,11 +234,14 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
   let i=base+lane;var flags=0u;var m=0u;
   if(i<n){
    let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));
-   if(owner.width==4u&&!nbTileCold(owner.tile)){
+   let cold=nbTileCold(owner.tile);
+   // couple's corners as coupleFine's vertices: a COLD owner with solid
+   // cells may own a hot neighbour's corner (nbCoupleCorner's nbVertexCold).
+   if(owner.width==4u&&(!cold||umTileOpen(owner.tile)<1.0)){
     let origin=umOrigin(owner);let regular=umTileMaximumWidth(owner.tile)==4u&&umTileMinimumWidth(owner.tile)==4u;
     let low=umLowOpen(vec3i(origin));let corners=umCoarseCornerMask(owner.tile);
     for(var k=0u;k<8u;k++){
-     let f=select(0u,1u,nbCoarseRetires(origin,regular,low,corners,k))|select(0u,2u,nbCoupleCorner(owner,origin,regular,low,k));
+     let f=select(0u,1u,!cold&&nbCoarseRetires(origin,regular,low,corners,k))|select(0u,2u,nbCoupleCorner(owner,origin,regular,low,k));
      flags|=f<<(2u*k);m+=select(0u,1u,f!=0u);
     }
    }
@@ -263,7 +269,7 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
 @compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  if(group.x<umCounts.x){
   let owner=umAllOwner(vec3u(group.x*64u,0u,0u));umLoadAddressPlan(owner.tile>>9u,lane);
-  if(nbTileCold(owner.tile)){return;}
+  if(nbTileCold(owner.tile)&&umTileOpen(owner.tile)>=1.0){return;}
   let fine=nbCoupleFineTile(owner.tile);
   for(var round=0u;round<select(1u,2u,fine.boundary);round++){
    let vertex=nbCoupleFineVertex(fine,lane,round);if(vertex.w==0){continue;}

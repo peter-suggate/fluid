@@ -86,3 +86,25 @@ test("crowdedCells defaults to merging the excess, and the merge carries mass in
   assert.ok(seed);
   assert.equal(Number(seed[1]) & 7, 0, "a seed's sentinel age holds mass 1");
 });
+
+test("sample separation, whole-cell inner reseeding and uncovered activation are the defaults", () => {
+  const settled = uniformNearSettled({});
+  assert.equal(settled.sampleSeparation, "pairs");
+  assert.equal(settled.innerReseed, "cells");
+  assert.equal(settled.activationSeeding, "uncovered");
+  assert.equal(settled.particleDensity, "graded");
+  assert.equal(uniformNearSettled({ sampleSeparation: "bogus" }).sampleSeparation, "pairs");
+  assert.equal(uniformNearSettled({ sampleSeparation: "off" }).sampleSeparation, "off");
+  assert.equal(uniformNearSettled({ innerReseed: "sites" }).innerReseed, "sites");
+  assert.equal(uniformNearSettled({ activationSeeding: "band" }).activationSeeding, "band");
+  assert.equal(uniformNearSettled({ particleDensity: "uniform" }).particleDensity, "uniform");
+  const values = narrowBandFlipValues({});
+  assert.equal(values.sampleSeparation, "pairs");
+  assert.equal(values.innerReseed, "cells");
+  assert.equal(values.activationSeeding, "uncovered");
+  assert.equal(values.particleDensity, "graded");
+  for (const [key, value] of [["sampleSeparation", "pairs"], ["innerReseed", "cells"], ["activationSeeding", "uncovered"], ["particleDensity", "graded"]] as const) {
+    const param = uniformNarrowBandMethod.params.find(p => p.key === key);
+    assert.ok(param && param.kind === "select" && param.update === "solver" && param.default === value, `${key} is a solver-restarting select defaulting to ${value}`);
+  }
+});

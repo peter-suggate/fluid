@@ -650,46 +650,45 @@ fn umSurfaceOwner(o:UMOwner,held:bool){
 @compute @workgroup_size(64) fn surface(@builtin(global_invocation_id) gid:vec3u){
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width!=0u){umSurfaceOwner(o,${this.regional&&this.coarse?"(stamps[UM_STAMP_WORDS*umPageOfTile(o.tile)+12u]&2u)!=0u":"false"});}
 }
-${this.heldRegional?`// The held surface pass (a region a workgroup, fixed grid, strided): the
-// owners of every region the stamps did not hold, and of each tile of a
-// held region whose owner base moved (a relayout's rank shift elsewhere).
-// An item is an eighth of a region (eight of its tiles): its 4h tiles a lane
-// each, then its h tiles one after another, their owners a lane each. A
-// region a workgroup ran up to 64 h tiles in series: the few regions a
-// moving body keeps changing were 0.4 ms of a drifting-ball frame. A held
-// region's other owners keep the last pass's phi and phase.
+${this.heldRegional?`// The held surface pass (fixed grid, strided): the owners of every region
+// the stamps did not hold, and of each tile of a held region whose owner
+// base moved (a relayout's rank shift elsewhere). Two kinds of item: a held
+// region, its 64 tiles a lane each, whose 4h tiles' owners run on their
+// lanes; then each tile of the h list, its owners a lane each. An h tile is
+// its own item, so a region a moving body keeps changing is not run in
+// series (it was 0.4 ms of a drifting-ball frame at a workgroup a region),
+// and a held region costs one item, not eight: each item of a region pays
+// umHeldPage's rank search. A held region's other owners keep the last
+// pass's phi and phase.
 const UM_TILE_BASE:u32=${STAMP_WORDS*this.pages}u;
 var<workgroup> umHeldGate:u32;
-var<workgroup> umHeldFine:atomic<u32>;
-var<workgroup> umHeldFineTiles:u32;
 // Items of the held regions only (umHeldPage): a free region's gate is closed.
 // Held and body modes are a non-resident ownership's, whose h and 4h lists
 // hold every stored tile; the resident pressure ownership's lists are its
 // static layout's, so its page launches (cutRegions, wetRegions, absent)
 // scan every page.
 @compute @workgroup_size(64) fn surfaceHeld(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var item=group.x;item<8u*umHeldPageCount();item+=groups.x){
-  let region=umHeldPage(item>>3u);let first=8u*(item&7u);
-  if(l==0u){umHeldGate=u32(umTileLive(umPageTile(region,0u)))|(stamps[UM_STAMP_WORDS*region+12u]&2u);atomicStore(&umHeldFine,0u);}
-  let gate=workgroupUniformLoad(&umHeldGate);if((gate&1u)==0u){continue;}
-  if(l<8u){
-   let t=umPageTile(region,first+l);
-   if(umTileLive(t)){
+ let regions=umHeldPageCount();
+ for(var item=group.x;item<regions+umCounts.x;item+=groups.x){
+  if(item<regions){
+   let region=umHeldPage(item);
+   if(l==0u){umHeldGate=u32(umTileLive(umPageTile(region,0u)))|(stamps[UM_STAMP_WORDS*region+12u]&2u);}
+   let gate=workgroupUniformLoad(&umHeldGate);if((gate&1u)==0u){continue;}
+   let t=umPageTile(region,l);
+   if(umTileLive(t)&&umTileWidth(t)!=1u){
     let base=umTopology[t]&0x3fffffffu;
-    if((gate&2u)==0u||stamps[UM_TILE_BASE+t]!=base+1u){
-     stamps[UM_TILE_BASE+t]=base+1u;
-     if(umTileWidth(t)==1u){atomicOr(&umHeldFine,1u<<l);}
-     else{umSurfaceOwner(UMOwner(t,0u,4u,base),false);}
-    }
+    if((gate&2u)==0u||stamps[UM_TILE_BASE+t]!=base+1u){stamps[UM_TILE_BASE+t]=base+1u;umSurfaceOwner(UMOwner(t,0u,4u,base),false);}
    }
+   continue;
   }
-  workgroupBarrier();
-  if(l==0u){umHeldFineTiles=atomicLoad(&umHeldFine);}
-  let fine=workgroupUniformLoad(&umHeldFineTiles);
-  for(var k=0u;k<8u;k++){
-   if(((fine>>k)&1u)==0u){continue;}
-   let tile=umPageTile(region,first+k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
+  // An h tile (the h list holds every stored one): the same test on its stamp.
+  let tile=umTopology[UM_TILES+item-regions];let base=umTopology[tile]&0x3fffffffu;
+  if(l==0u){
+   let run=(stamps[UM_STAMP_WORDS*umPageOfTile(tile)+12u]&2u)==0u||stamps[UM_TILE_BASE+tile]!=base+1u;
+   if(run){stamps[UM_TILE_BASE+tile]=base+1u;}umHeldGate=u32(run);
   }
+  if(workgroupUniformLoad(&umHeldGate)==0u){continue;}
+  umSurfaceOwner(UMOwner(tile,l,1u,base+l),false);
  }
 }`:""}
 ${this.bodyRegional?`// A head whose only change since the last authority is rigid bodies.

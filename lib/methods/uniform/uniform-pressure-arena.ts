@@ -1080,13 +1080,27 @@ override pPicard:bool=false;
 @group(1) @binding(23) var copied:texture_storage_3d<rgba32float,write>;
 // Snapshot the projected field before the native seam return rewrites it.
 // The return must retain projection on its other faces, not read u*.
+// A job is 64 tiles of a block, a lane a tile: a 4h tile's lane copies its
+// three texels, then the job's h tiles copy their 64 one after another. A
+// job a tile left 61 of 64 lanes idle on every 4h tile of every block.
+var<workgroup> pCopyFine:array<atomic<u32>,2>;
+var<workgroup> pCopyFineTiles:vec2u;
 @compute @workgroup_size(${TILE_WG}) fn pCopyNative(${lanes}){
- if(lane==0u){pN=ubaLevelCount(2u)*512u;}
+ if(lane==0u){pN=ubaLevelCount(2u)*8u;}
  let n=workgroupUniformLoad(&pN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
  for(var j=group.x;j<n;j+=groups.x){
-  let tile=512u*ubaLevelSlot(2u,j>>9u)+(j&511u);let p=vec3i(4u*umTileCoord(tile));
-  if(umTileWidth(tile)==1u){let q=p+vec3i(l);textureStore(copied,q,textureLoad(velocity,q,0));}
-  else if(lane<3u){var q=p;q[lane]+=3;textureStore(copied,q,/*4h*/textureLoad(velocity,q,0));}
+  if(lane<2u){atomicStore(&pCopyFine[lane],0u);}
+  workgroupBarrier();
+  let first=512u*ubaLevelSlot(2u,j>>3u)+64u*(j&7u);let tile=first+lane;
+  if(umTileWidth(tile)==1u){atomicOr(&pCopyFine[lane>>5u],1u<<(lane&31u));}
+  else{let p=vec3i(4u*umTileCoord(tile));for(var a=0u;a<3u;a++){var q=p;q[a]+=3;textureStore(copied,q,/*4h*/textureLoad(velocity,q,0));}}
+  workgroupBarrier();
+  if(lane==0u){pCopyFineTiles=vec2u(atomicLoad(&pCopyFine[0]),atomicLoad(&pCopyFine[1]));}
+  let fine=workgroupUniformLoad(&pCopyFineTiles);
+  for(var k=0u;k<64u;k++){
+   if(((fine[k>>5u]>>(k&31u))&1u)==0u){continue;}
+   let q=vec3i(4u*umTileCoord(first+k))+vec3i(l);textureStore(copied,q,textureLoad(velocity,q,0));
+  }
  }
 }
 @compute @workgroup_size(${TILE_WG}) fn pCopy(${lanes}){

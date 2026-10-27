@@ -44,9 +44,10 @@ fn nbPointNear(home:vec3i,p:vec3f)->vec3f{return nbPointNearIn(home,p,0.0);}
 // wall beyond them. Fixed world walls are launch constants: clamp directly
 // to those planes, preserving the full travel along every unblocked axis.
 // Open axes retain umBoxWalls' unbounded extent; residency still owns them.
-fn nbTraceEndpoint(home:vec3i,p:vec3f)->vec3f{
- if(umFixedBox()){let walls=umBoxWalls();return clamp(p,walls.lo+vec3f(0.01),walls.hi-vec3f(0.01));}
- return nbPointNearIn(home,p,0.01);
+// inset: how far inside the walls the end stays (a sample's radius).
+fn nbTraceEndpointIn(home:vec3i,p:vec3f,inset:f32)->vec3f{
+ if(umFixedBox()){let walls=umBoxWalls();return clamp(p,walls.lo+vec3f(inset),walls.hi-vec3f(inset));}
+ return nbPointNearIn(home,p,inset);
 }
 `;
 

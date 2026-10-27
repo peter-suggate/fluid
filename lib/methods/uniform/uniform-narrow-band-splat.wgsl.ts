@@ -1,7 +1,8 @@
 /** Occupied-cell surface scatter, shared by the listed and fused paths. */
+export const NARROW_BAND_SPLAT_CHUNK=512;
 export const narrowBandSplatWGSL=/* wgsl */`
-// Before the deposit, the motion bank holds one word per occupied cell.
-// There can be no more occupied cells than sorted live particles.
+// Before the deposit, the expired motion bank holds either the separate
+// cell list or the fused path's two-word jobs, each bounded by particle count.
 fn nbSurfaceCells()->u32{return NB_LINKS+4u*arrayLength(&particles);}
 // The live tiles' cells (uniformStageListsWGSL), a fixed grid striding them.
 @compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
@@ -35,27 +36,44 @@ var<workgroup> nbSurfaceRange:vec2u;
 }
 // Fuse occupied-cell selection and its splat. The sort already maintains
 // every occupied tile; no whole-lattice scan, temporary cell list or atomic
-// append is needed. Fixed direct groups stride the current GPU count. Each
-// tile's samples scatter in parallel into a shared 7^3 vertex window (cells
+// append per cell is needed. A short planning pass splits dense tiles into
+// bounded jobs. Each scatters into a shared 7^3 vertex window (cells
 // -1 to 5): unsigned minima of nonnegative distances are order independent,
 // so one flush a touched vertex gives the per-cell scalar gather's bits.
 var<workgroup> nbSurfaceJobs:u32;
-var<workgroup> nbSurfaceTile:u32;
+var<workgroup> nbSurfaceJob:vec2u;
+const NB_SURFACE_CHUNK:u32=${NARROW_BAND_SPLAT_CHUNK}u;
+// Two words per job in the expired motion bank (3 words per particle).
+// Every job owns at least one particle, so this cannot exceed that bank.
+// The deposit may reuse the bank only after all surface jobs have finished.
+@compute @workgroup_size(64) fn surfaceSplatPlan(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let count=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);
+ for(var j=gid.x;j<count;j+=64u*groups.x){
+  let tile=atomicLoad(&bins[NB_OCCUPIED+4u+j]);if(!umTileLive(tile)){continue;}
+  let bin=nbBinTile(tile);let start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);
+  let jobs=(end-start+NB_SURFACE_CHUNK-1u)/NB_SURFACE_CHUNK;
+  if(jobs==0u){continue;}
+  let first=atomicAdd(&bins[NB_BAND+3u],jobs);
+  for(var k=0u;k<jobs;k++){
+   let at=nbSurfaceCells()+2u*(first+k);links[at]=tile;links[at+1u]=start+k*NB_SURFACE_CHUNK;
+  }
+ }
+}
 var<workgroup> nbSurfaceWindow:array<atomic<u32>,343>;
 var<workgroup> nbSurfaceWindowHot:array<atomic<u32>,343>;
 const NB_SURFACE_FAR:u32=0x40800000u;
 @compute @workgroup_size(128) fn surfaceSplatOccupied(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane==0u){nbSurfaceJobs=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);}
+ if(lane==0u){nbSurfaceJobs=atomicLoad(&bins[NB_BAND+3u]);}
  let count=workgroupUniformLoad(&nbSurfaceJobs);
  for(var job=group.x;job<count;job+=groups.x){
   workgroupBarrier();
   for(var k=lane;k<343u;k+=128u){atomicStore(&nbSurfaceWindow[k],NB_SURFACE_FAR);atomicStore(&nbSurfaceWindowHot[k],NB_SURFACE_FAR);}
-  if(lane==0u){nbSurfaceTile=atomicLoad(&bins[NB_OCCUPIED+4u+job]);}
-  let tile=workgroupUniformLoad(&nbSurfaceTile);
+  if(lane==0u){let at=nbSurfaceCells()+2u*job;nbSurfaceJob=vec2u(links[at],links[at+1u]);}
+  let range=workgroupUniformLoad(&nbSurfaceJob);let tile=range.x;
   if(!umTileLive(tile)){continue;}
   umLoadAddressPlan(tile>>9u,lane);
   let origin=4u*umTileCoord(tile);let cold=nbTileCold(tile);
-  let bin=nbBinTile(tile);let start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);
+  let bin=nbBinTile(tile);let start=range.y;let end=min(start+NB_SURFACE_CHUNK,links[bin+63u]+atomicLoad(&bins[bin+63u]));
   for(var i=start+lane;i<end;i+=128u){
    // The sort's cell: positions relative to a tile origin are exact.
    let p=nbPosition(i)-vec3f(origin);let c=clamp(vec3i(floor(p)),vec3i(0),vec3i(3));

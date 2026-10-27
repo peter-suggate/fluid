@@ -25,7 +25,7 @@ ${narrowBandRigidContactWGSL}
 @compute @workgroup_size(1) fn probe(@builtin(global_invocation_id) gid:vec3u){
  let points=array<vec3f,4>(vec3f(0,.85,0),vec3f(.2,1,0),vec3f(0,.5,0),vec3f(0,1,0));
  let p=points[gid.x];let q=(p-vec3f(-1,0,-1))/params.hDt.xyz;
- let contact=nbRigidContact(q,vec3f(3,0,2));
+ let contact=nbRigidContact(q,vec3f(3,0,2),0.25);
  result[2u*gid.x]=vec4f(umSolidTraceWorld(contact.position),1);result[2u*gid.x+1u]=vec4f(contact.velocity,0);
 }`});
    const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"probe"}});

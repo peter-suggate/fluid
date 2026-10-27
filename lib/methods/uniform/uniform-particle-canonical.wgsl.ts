@@ -1,33 +1,29 @@
-/** Canonical cell order without changing the particle multiset. A lane owns
- * one record and counts the records of its cell's run that order before it;
- * that rank is its place in the run. The scatter leaves each slot's source
- * index and position bits in its compact-position words (UM_CELL_KEYS), so
- * the comparisons read those 16 bytes and load whole records only when two
- * positions tie. Compare every record bit, including age and affine state,
- * so coincident particles cannot inherit atomic slot order; records equal in
- * every bit are interchangeable and take their slot order. */
+/** Canonical segmented parallel merge sort, without changing any record.
+ * Two of each slot's four compact-position words ping-pong source indices;
+ * source records stay immutable until the sorted records have been copied.
+ * In each round a lane binary-searches its partner run and writes its unique
+ * merged rank. O(n log² n) comparisons, O(log n) barrier rounds, no extra
+ * allocation and no population cap. The caller supplies storage/workgroup
+ * barriers between local rounds, or dispatch boundaries for dense cells.
+ * Full-record uint order matches the old canonical rank. Source index breaks
+ * only bit-identical ties (interchangeable payloads), making destinations unique. */
 export function particleCanonicalWGSL(apic:boolean):string{
  const fields=['position','velocity','before',...(apic?['cx','cy','cz','lifetime']:[])];
  return /* wgsl */`
-fn nbParticleLess(a:Particle,b:Particle)->bool{
- ${fields.map(field=>`{let x=bitcast<vec4u>(a.${field});let y=bitcast<vec4u>(b.${field});for(var k=0u;k<4u;k++){if(x[k]!=y[k]){return x[k]<y[k];}}}`).join('\n ')}
- return false;
+fn nbCanonicalIndexLess(a:u32,b:u32)->bool{
+ ${fields.map(field=>`{let x=bitcast<vec4u>(source[a].${field});let y=bitcast<vec4u>(source[b].${field});for(var k=0u;k<4u;k++){if(x[k]!=y[k]){return x[k]<y[k];}}}`).join('\n ')}
+ return a<b;
 }
-// The rank of slot at (source record index, position bits key) in the run
-// of count slots from start.
-fn nbParticleRank(at:u32,start:u32,count:u32,index:u32,key:vec3u)->u32{
- var rank=0u;
- for(var o=start;o<start+count;o++){
-  if(o==at){continue;}
-  let c=NB_LINKS+4u*o;let other=vec3u(links[c+1u],links[c+2u],links[c+3u]);
-  var less=false;
-  if(other.x!=key.x){less=other.x<key.x;}
-  else if(other.y!=key.y){less=other.y<key.y;}
-  else if(other.z!=key.z){less=other.z<key.z;}
-  else{let a=source[links[c]];let b=source[index];less=nbParticleLess(a,b)||(o<at&&!nbParticleLess(b,a));}
-  rank+=u32(less);
+fn nbCanonicalMerge(at:u32,start:u32,count:u32,width:u32,bank:u32){
+ let index=links[NB_LINKS+4u*at+bank];let end=start+count;
+ let run=(at-start)/width;let other=min(end,start+(run^1u)*width);
+ var low=other;var high=min(end,other+width);
+ while(low<high){
+  let mid=low+(high-low)/2u;
+  if(nbCanonicalIndexLess(links[NB_LINKS+4u*mid+bank],index)){low=mid+1u;}else{high=mid;}
  }
- return rank;
+ let destination=start+(run&~1u)*width+(at-start)%width+low-other;
+ links[NB_LINKS+4u*destination+(bank^1u)]=index;
 }
 `;
 }
