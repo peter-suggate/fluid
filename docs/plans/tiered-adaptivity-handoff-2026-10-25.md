@@ -98,7 +98,7 @@ Accepted-geometry diagnostic6fe38b88 independently reconstructs positive kinetic
 
 **COORDINATION / deferred work.** The earlier C5 ladder, cache timing and B0 estimate targets above are historical, deferred by the current user priority. Root's optional shared-certificate change is reverted on the integration branch at369f9a5c; its focused checks and partial allocation receipts are retained without a READY claim. B owns required pressure/compact momentum, A conservative evolution, and C functional world expansion. No further performance tuning is scheduled.
 
-Full verification records and exact raw-evidence paths are in `docs/plans/tiered-adaptivity-handoff/integrated-acceptance-ledger.md` on the isolated integration branch. Lane progress files on main retain each lane's newest evidence and coordination entries.
+Full verification records and exact raw-evidence paths are in `docs/plans/tiered-adaptivity-handoff/integrated-acceptance-ledger.md` on the isolated integration branch. Historical lane progress files are recoverable from commit `30feacbf`; they have been removed from main.
 
 Main at handoff: see the commit that adds this doc. The defaults are listed in §2.
 
@@ -244,12 +244,7 @@ Splash and seep each add +0.2–1.2 ms.
 
 ## 5. Lanes
 
-The previous owners' detailed notes are in `docs/plans/tiered-adaptivity-handoff/`:
-- `laneA-fidelity.md`: seep physics, probes, open problems.
-- `laneB-memory.md`: storage, the arena, the 16h design.
-- `laneC-compute.md`: live lists, measured costs, closed verdicts.
-
-Read your lane's note in full before starting.
+The historical lane notes and progress files have been removed from main. Retrieve them from commit `30feacbf` if needed, for example `git show 30feacbf:docs/plans/tiered-adaptivity-handoff/laneB-memory.md`. The acceptance criteria below remain reference material; use the [completion handoff](tiered-adaptivity-completion-handoff-2026-10-27.md) for the current single-agent sequence.
 
 ### Lane A: seep fidelity (the test scene must behave correctly)
 
@@ -333,56 +328,8 @@ The lane B note has the design in build order, the arena constraints and the exa
 
 **C5. Length ladder (Phase 1 gate).** Rest/cold length ×1, ×2, ×4: slope ≤ 0.2 ms per doubling on the current defaults.
 
-## 6. Reporting progress (every lane must do this)
+## 6. Reporting progress
 
-Each lane owns one progress file and nobody else edits it:
-- lane A: `docs/plans/tiered-adaptivity-handoff/progress-laneA.md`
-- lane B: `docs/plans/tiered-adaptivity-handoff/progress-laneB.md`
-- lane C: `docs/plans/tiered-adaptivity-handoff/progress-laneC.md`
+The old parallel-lane reporting workflow and its files have been retired. After an explicit resume, the single agent should update this status board and the [completion handoff](tiered-adaptivity-completion-handoff-2026-10-27.md) with exact commits, scoped results, evidence paths and remaining acceptance gates. Commit only owned documentation paths on main; preserve unrelated changes. The coordinator verifies READY TO MERGE claims and records a verified or rejected verdict before handling implementation integration.
 
-**Where to write it:** in the main checkout, so Peter and the coordinator see it without merging your branch. Commit only that file, directly on main, from the main checkout, and touch nothing else there:
-
-```bash
-cd /Users/petersuggate/code/me/fluid
-# edit docs/plans/tiered-adaptivity-handoff/progress-laneX.md
-git commit -m "Lane X progress: <one line>" -- docs/plans/tiered-adaptivity-handoff/progress-laneX.md
-```
-
-If the commit fails because the index holds someone else's staged change or a merge in progress, don't touch that state. Retry a few minutes later.
-
-**When to write:**
-- at least every 2–3 hours of work;
-- when a milestone or gate finishes, pass or fail;
-- when you hit a blocker;
-- when you need a decision;
-- before a large edit to a shared file;
-- when your lane goes idle.
-
-**Format:** newest entry at the top, under the `## Log` heading:
-
-```markdown
-### 2026-10-26 14:05 · <kind> · tip <sha>
-- What changed: …
-- Numbers: … (scene, steps, metric, value vs baseline)
-- Gates: <bundle name> PASS/FAIL, worst ratio per scene; logs at <path>
-- Next: …
-```
-
-`<kind>` is one of:
-- `PROGRESS`
-- `MILESTONE`
-- `READY TO MERGE`: give the exact SHA and the evidence §3 asks for.
-- `DECISION NEEDED`: state the question, the options and your recommendation.
-- `BLOCKED`
-- `COORDINATION`: list the files and functions you're about to change.
-- `IDLE`
-
-Also keep the `## Status` block at the top of the file current. It holds four fields:
-- **Tip**
-- **Doing now**
-- **Next**
-- **Waiting on**: a gate, a decision or another lane.
-
-Write plainly: what you measured and what it means. A failed gate or a fatal is reported as such, with the log path.
-
-**Coordinator side:** Claude reads the progress files, verifies `READY TO MERGE` claims (re-running checks or gates as needed), merges, and updates the §0 board. Verdicts go in the lane's file under a `### <date> · VERIFIED` or `### <date> · REJECTED` entry.
+Historical lane notes and progress reports remain recoverable from Git at `30feacbf`. Do not restart lanes or recreate their reporting files merely to follow the old instructions.

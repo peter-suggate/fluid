@@ -1,6 +1,6 @@
 # Interactive scenes UI: implementation notes
 
-What the UI half of [the handoff](interactive-scenes-ui-handoff-2026-10-18.md) is,
+What the UI half of the historical handoff (recoverable with `git show 30feacbf:docs/plans/interactive-scenes-ui-handoff-2026-10-18.md`) is,
 where it lives, and what it assumes of the host. Everything is in
 `lib/features/interactive/` plus small hooks in shared files.
 

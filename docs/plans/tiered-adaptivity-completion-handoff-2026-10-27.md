@@ -43,7 +43,7 @@ Read these in order, without replaying their entire history:
 2. Current root `docs/plans/tiered-adaptivity-handoff/conservative-seep-capacity.md`, starting at its final GPU incident section. Earlier sections preserve failures and repairs.
 3. Root `docs/plans/tiered-adaptivity-handoff/laneA-pressure-tree.md` when working on pressure/transport.
 4. Integration checkout `docs/plans/tiered-adaptivity-handoff/integrated-acceptance-ledger.md`, especially “Compact16h wide functional milestone VERIFIED and integrated” and “Expandable world and compact-state shift VERIFIED”.
-5. Original `laneA-fidelity.md`, `laneB-memory.md`, `laneC-compute.md` only as needed. Old `codex-prompts.md` parallel assignments and lane status blocks are superseded by this pause/single-agent handoff.
+5. Older handoff documents and lane progress files were removed from main at Peter's request. If historical detail is needed, retrieve its exact path from commit `30feacbf` using `git show 30feacbf:<path>`. The separate worktree ledgers above remain available; their old parallel assignments are superseded by this pause/single-agent handoff.
 
 ## 4. What is actually verified
 

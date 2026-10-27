@@ -16,7 +16,7 @@ Each step, the stage turns (φⁿ, u, particles) into φⁿ⁺¹ on the narrow b
 
 Production runs this as about 54 passes, each walking the page table per tap (`umVertexSlot` with up to 7 skirt pages). The resulting costs:
 
-- Occupancy is 11.8–18.8% and throughput 5–8 GB/s (near-settled-pool-handoff-2026-10-18.md:566-570). The stage is latency-bound on addressing, not on math or bandwidth.
+- Occupancy is 11.8–18.8% and throughput 5–8 GB/s (historical `near-settled-pool-handoff-2026-10-18.md:566-570`, available in Git at `30feacbf`). The stage is latency-bound on addressing, not on math or bandwidth.
 - The work is duplicated:
   - two full crossing searches per frame;
   - depthGeometry re-reading corners that depthSeeds just held;
