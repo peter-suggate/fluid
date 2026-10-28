@@ -66,13 +66,14 @@ export class ProgressHistory {
    * when its plugin reaches `ready` — a superseded or failed run is not how
    * long the work takes.
    */
-  observe(context: string, snapshot: ResourceReadinessSnapshot, now_ms: number): void {
+  observe(context: string, snapshot: ResourceReadinessSnapshot, now_ms: number, scope = ""): void {
     for (const [pluginId, state] of Object.entries(snapshot.plugins)) {
-      const run = this.runs.get(pluginId);
+      const runKey = JSON.stringify([scope, pluginId]);
+      const run = this.runs.get(runKey);
       const activity = state.activity;
       if (state.state === "preparing" && activity) {
         if (!run || run.startedAt_ms !== activity.startedAt_ms || run.context !== context) {
-          this.runs.set(pluginId, { context, startedAt_ms: activity.startedAt_ms,
+          this.runs.set(runKey, { context, startedAt_ms: activity.startedAt_ms,
             entered: [{ id: activity.phase, at_ms: now_ms }] });
         } else if (!run.entered.some((phase) => phase.id === activity.phase)) {
           run.entered.push({ id: activity.phase, at_ms: now_ms });
@@ -80,8 +81,8 @@ export class ProgressHistory {
         continue;
       }
       if (!run) continue;
-      this.runs.delete(pluginId);
-      if (state.state !== "ready") continue;
+      this.runs.delete(runKey);
+      if (state.state !== "ready" || run.context !== context) continue;
       const total_ms = now_ms - run.entered[0]!.at_ms;
       if (total_ms < MINIMUM_RECORDED_MS) continue;
       const phases = run.entered.map((phase, index) =>
@@ -100,10 +101,10 @@ export class ProgressHistory {
    * one; otherwise the phase's own elapsed time stands in, never past its
    * recorded length.
    */
-  estimate(context: string, activity: ResourceActivity, within: number | undefined, now_ms: number): ProgressEstimate | undefined {
+  estimate(context: string, activity: ResourceActivity, within: number | undefined, now_ms: number, scope = ""): ProgressEstimate | undefined {
     const record = this.records[`${activity.pluginId}|${context}`];
-    const run = this.runs.get(activity.pluginId);
-    if (!record || !run || record.total_ms <= 0) return undefined;
+    const run = this.runs.get(JSON.stringify([scope, activity.pluginId]));
+    if (!record || !run || run.context !== context || run.startedAt_ms !== activity.startedAt_ms || record.total_ms <= 0) return undefined;
     const recorded = new Map(record.phases);
     const current = run.entered.at(-1)!;
     const currentRecorded_ms = recorded.get(current.id);
@@ -120,5 +121,5 @@ export class ProgressHistory {
   }
 }
 
-/** The window's one history; every pane reads and feeds the same record. */
+/** Completed timings are shared; callers scope in-flight runs to their pane. */
 export const progressHistory = new ProgressHistory();

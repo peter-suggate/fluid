@@ -18,6 +18,8 @@ import {UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN,UNIFORM_BULK_WORDS} from "./uniform
 import {planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS} from "./uniform-live-lists";
 import {uniformStageListsWGSL} from "./uniform-stage-lists";
+import {BULK16_PAGE,BULK16_PAGE_WORDS,bulk16FaceIndexWGSL} from "./uniform-bulk-pages-reference";
+import {BULK16_STATUS,type UniformBulkPages} from "./uniform-bulk-pages";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -76,6 +78,13 @@ export interface UniformPressureArenaSchedule {
   * own sweeps answer it: a period-2 exchange no cycle count removes. */
  nativeSweeps:number;
 }
+/** A pressure at its lower bound leaves the coarse correction space until
+ * its residual asks it to increase. Recomputed after each pre-smoothing. */
+export const uniformPressureCorrectionWGSL=/* wgsl */`
+fn pCorrectionFree(bounded:bool,total:f32,residual:f32)->bool{
+ return !(bounded&&total<=0.0&&residual<=0.0);
+}
+`;
 /** The correction prolongation preserves constants. Keep the aggregate's
  * Dirichlet row sum while rediscretising only its links to other unknowns.
  * Scaling the entire diagonal weakens free-surface constraints at every level
@@ -180,6 +189,14 @@ export interface UniformPressureArenaFields {
   * ten storage bindings. Absent with bulkTier off, which leaves every
   * module's text as it was. */
  bulk?:{regions:number};
+ /** The BULK16 slot store (bulkTier "16h"). It moves into pool B after the
+  * bulk record (UniformBulkPages.adopt: bulkStore), so every solve kernel
+  * reads it through pool B. A demoted page's eight 16h rows are coarse-only
+  * rows of the composite: the 4h rows across its faces couple to them
+  * (N_BULKN), and they take part in levels 3 to 5 (16h cells; the 32h row
+  * their page's), their corrections the coarse levels' (composite FAC,
+  * docs/plans/bulk16-plan-2026-10-28.md M2 step 3, A1). */
+ bulkPages?:UniformBulkPages;
  /** The most h tiles the simulation ever holds (the frame's ceiling): pMark
   * gives a fine slot only to a brick holding a band h tile, and frames
   * hold 4.4 to 22 h tiles for each such brick (splash L128, letters, seep
@@ -207,6 +224,9 @@ export class UniformPressureArena {
  /** The 16h bulk tier's record, pool B's last words (fields.bulk). */
  readonly bulkRecord?:{buffer:GPUBuffer;offset:number;size:number};
  private readonly bulkWord:number=0;
+ /** The BULK16 store's range of pool B (fields.bulkPages), for its adopt. */
+ readonly bulkStore?:GPUBufferBinding;
+ private readonly storeWord:number=0;
  get allocatedBytes():number{return this.index.size+this.pool.size+this.poolB.size;}
  private readonly tiles:number;
  private readonly maskWord:number;
@@ -256,6 +276,12 @@ export class UniformPressureArena {
   const address=simulation.capacity.address,blocks=address.blocks;
   this.superTail=schedule.tail==="superblocks"||(schedule.tail==="auto"&&blocks>TAIL_ROWS);
   if(!this.superTail&&blocks>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages, over the page tail's ${TAIL_ROWS}; use the super-block tail`);
+  // BULK16 rows join the page tail's 32h rows (one each page). The
+  // super-block tail does not hold them yet (M5): an explicit fatal.
+  if(fields.bulkPages){
+   if(!fields.bulk)throw new Error("Pressure arena: BULK16 pages need the 16h bulk tier");
+   if(this.superTail||blocks+fields.bulkPages.layout.capacity>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages and ${fields.bulkPages.layout.capacity} BULK16 slots exceed the page tail's ${TAIL_ROWS} rows (the super-block tail holds no BULK16 row yet)`);
+  }
   if(!(schedule.superScale>0))throw new Error("Pressure arena: the super-block tail's scale must be positive");
   if(!Number.isInteger(schedule.nativeSweeps)||schedule.nativeSweeps<0)throw new Error(`Pressure arena: ${schedule.nativeSweeps} native sweeps`);
   if(schedule.tailCycles%2!==1)throw new Error(`Pressure arena: ${schedule.tailCycles} 8h cycles; level 2's up leg reads the odd cycles' channel`);
@@ -301,11 +327,18 @@ export class UniformPressureArena {
   // The bulk record follows pool B's words at a storage offset.
   const align=device.limits.minStorageBufferOffsetAlignment/4;
   if(fields.bulk){this.bulkWord=Math.ceil(poolWords[1]!/align)*align;poolWords[1]=this.bulkWord+UNIFORM_BULK_WORDS(fields.bulk.regions);}
+  if(fields.bulkPages){
+   this.storeWord=Math.ceil(poolWords[1]!/align)*align;poolWords[1]=this.storeWord+fields.bulkPages.layout.words;
+   // A BULK16 address names a tail channel by its plane (baWord).
+   const xt=a.base("xt",2);
+   for(const [j,name] of ["xt","yt","rt","dt","kt0","kt1","kt2","kt3","kt4","kt5"].entries())if(a.base(name,2)!==xt+j*UBA_STRIDE*blocks)throw new Error("Pressure arena: the tail channels are not contiguous");
+  }
   for(const [k,words] of poolWords.entries())if(4*words>Math.min(limit,device.limits.maxBufferSize))throw new Error(`Pressure arena pool ${"AB"[k]} (${4*words} bytes) exceeds the storage binding limit ${Math.min(limit,device.limits.maxBufferSize)}`);
   this.index=device.createBuffer({label:"Uniform pressure arena state",size:4*indexWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.pool=device.createBuffer({label:"Uniform pressure arena pool",size:4*poolWords[0]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.poolB=device.createBuffer({label:"Uniform pressure arena pool B",size:4*poolWords[1]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   if(fields.bulk)this.bulkRecord={buffer:this.poolB,offset:4*this.bulkWord,size:4*UNIFORM_BULK_WORDS(fields.bulk.regions)};
+  if(fields.bulkPages)this.bulkStore={buffer:this.poolB,offset:4*this.storeWord,size:fields.bulkPages.layout.bytes};
   for(const w of a.initialWrites(this.tableWord))device.queue.writeBuffer(this.index,w.offset,w.data as Uint32Array<ArrayBuffer>);
   this.restricts=Array.from({length:schedule.cycles},(_,k)=>`pRestrict0@${k}`);
   this.residuals=Array.from({length:schedule.cycles},(_,k)=>`pResidual2@${k}`);
@@ -323,6 +356,9 @@ export class UniformPressureArena {
    ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:[params,buffer(2),buffer(4,"uniform"),texture(7),buffer(8,"read-only-storage"),buffer(26),buffer(29,"read-only-storage"),...cold]}:{}),
    solver:[params,buffer(2),buffer(9),buffer(10),...(fields.dynamics?[buffer(24)]:[])],
    project:[params,buffer(2),buffer(9),buffer(10),texture(7),texture(15),write(16),buffer(17),buffer(21),...cold],
+   // The BULK16 rows (pBulkRows: the 4h wall slots' flux and the volume
+   // control's rate) and their projection.
+   ...(fields.bulkPages?{bulk:[params,buffer(2),buffer(9),buffer(10),buffer(26),buffer(4,"uniform")]}:{}),
   };
   for(const [name,list] of Object.entries(entries))this.layouts.set(name,uniformDetailBindLayout(device,{label:`Uniform pressure arena ${name}`,entries:list}));
   this.bind();
@@ -350,6 +386,7 @@ export class UniformPressureArena {
    ...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?{nrhs:{...P,...S,4:{buffer:f.authorityParams,size:16},7:f.forced.velocity,8:{buffer:f.forced.negative,size:4*faces},26:this.rootSpan.binding,29:f.root.phi}}:{}),
    solver:{...P,...S,...Q},
    project:{...P,...S,...Q,7:f.forced.velocity,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
+   ...(f.bulkPages?{bulk:{...P,...S,...Q,26:this.rootSpan.binding,4:{buffer:f.authorityParams,size:16}}}:{}),
   };
   if(f.dynamics)resources.solver![24]={buffer:f.dynamics};
   if(f.root.topology)resources.native![30]=f.root.topology;
@@ -386,7 +423,7 @@ export class UniformPressureArena {
  get bytes():{state:number;pool:number}{return {state:this.index.size,pool:this.pool.size+this.poolB.size};}
 
  async initialize():Promise<void>{
-  const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule,a=this.arena,B=this.fields.bulk;
+  const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule,a=this.arena,B=this.fields.bulk,BP=this.fields.bulkPages;
   const cap=a.fineCapacity,blocks=this.simulation.capacity.address.blocks;
   const plane0=520*cap,plane2=520*blocks,lanesTail=tailLanes(blocks,this.device.limits.maxComputeInvocationsPerWorkgroup);
   const C=(name:string,level:0|1|2=0)=>a.base(name,level);
@@ -402,6 +439,8 @@ const PA_X:u32=${C("xa",1)}u;const PA_Y:u32=${C("ya",1)}u;const PA_R:u32=${C("ra
 const PB_X:u32=${C("xb",2)}u;const PB_Y:u32=${C("yb",2)}u;const PB_R:u32=${C("rb",2)}u;const PB_D:u32=${C("db",2)}u;const PB_K:u32=${C("kb0",2)}u;const PLANE2:u32=${plane2}u;
 const P_SCALE:f32=${schedule.coarseScale};const T_SCALE:f32=${schedule.tailScale};
 ${uniformPressureAggregateWGSL}
+${uniformPressureCorrectionWGSL}
+const P_CORRECT:u32=1u<<24u;const N_CORRECT:u32=1u<<23u;
 const K_SEAM:u32=6u;
 // The composite's seam coupling on the coarse levels, its one definition. A
 // seam's native row stays 2.5h away at every level, so its coupling k never
@@ -542,7 +581,8 @@ fn nStride(axis:u32)->u32{return select(select(64u,8u,axis==1u),1u,axis==0u);}
 // native rows: the level 2 box and the tail's), bit 1 native rows.
 fn nPage(block:u32)->u32{return poolB[PN_M+UBA_STRIDE*block+512u];}
 `;
-  const header=(neighbours=false)=>uniformMixedTopologyWGSL(layout,0)+(neighbours?uniformMixedTopologyNeighboursWGSL():"")+uniformMixedFaceAddressWGSL+uniformMixedSolidWGSL(S?2:undefined,this.solid?.coarse?.count)+params+/* wgsl */`
+  // A BULK16 store's tail items reach their page neighbours' words (tAt).
+  const header=(neighbours=!!BP)=>uniformMixedTopologyWGSL(layout,0)+(neighbours?uniformMixedTopologyNeighboursWGSL():"")+uniformMixedFaceAddressWGSL+uniformMixedSolidWGSL(S?2:undefined,this.solid?.coarse?.count)+params+/* wgsl */`
 @group(1) @binding(2) var<storage,read_write> state:array<atomic<u32>>;
 const R_PRESSURE:u32=${this.rootSpan.pressure}u;const R_RHS:u32=${this.rootSpan.rhs}u;const R_MINIMUM:u32=${this.rootSpan.minimum}u;
 `+tableWGSL+constants+helpers;
@@ -622,29 +662,35 @@ fn nNeighbour(k:u32,f:u32)->u32{
 }
 fn nBulkOpen(n:u32)->bool{
  if(n>=N_KEYS){return false;}
- if(pIndex(SLOTS+n)!=0u||!nLiquid(n)||nMember(n)){return false;}
+ if(pIndex(SLOTS+n)!=0u||!nLiquid(n)){return false;}
  ${S?"if(rootTopology[n].x<0.99999){return false;}":""}
  return true;
 }
-// Native row q's start slope along both tangential axes of normal a (central
-// over open native neighbours, one-sided at an edge), times q's offset from
-// its region's centre: the member pressure at q's tangential position.
-fn nBulkHead(q:u32,a:u32)->f32{
+// Row q's start slope along both tangential axes of normal a (central over
+// open neighbours, native ones unless rows: any row's own start; one-sided
+// at an edge), times q's offset from its region's centre: the member
+// pressure at q's tangential position.
+fn nBulkHead(q:u32,a:u32,rows:bool)->f32{
  let own=rootArena[R_PRESSURE+q];let t=umTileCoord(q);var head=0.0;
  for(var b=0u;b<3u;b++){
   if(b==a){continue;}
   var rise=0.0;var count=0.0;
-  for(var side=0u;side<2u;side++){let g=2u*b+side;let n=nNeighbour(q,g);if(nBulkOpen(n)){rise+=f32(bSign(g))*(rootArena[R_PRESSURE+n]-own);count+=1.0;}}
+  for(var side=0u;side<2u;side++){let g=2u*b+side;let n=nNeighbour(q,g);if(nBulkOpen(n)&&(rows||!nMember(n))){rise+=f32(bSign(g))*(rootArena[R_PRESSURE+n]-own);count+=1.0;}}
   if(count>0.0){head+=rise/count*(f32(t[b]&3u)-1.5);}
  }
  return head;
 }
 // (coupling per V/h4^2, start offset) of native link k -> n across face f.
+// A closed native row (a wall's CM11a unknown, open 0) has no open
+// neighbours to measure: the member row's own measures the slope there.
+// With none, the head was 0 and the wall unknown jumped to the 16h mean at
+// entry (+-1.5 rho g 4h), a pressure change no fluid face carries.
 fn nBulkLink(k:u32,n:u32,f:u32,member:bool)->vec2f{
  let other=nMember(n);
  if(member&&other){if(nRegionKey(k)==nRegionKey(n)){return vec2f(0.0);}return vec2f(16.0,0.0);}
  if(!member&&!other){return vec2f(64.0,0.0);}
- let head=nBulkHead(select(k,n,member),f/2u);
+ let native=select(k,n,member);var head=0.0;
+ if(${S?"rootTopology[native].x<=1e-5":"false"}){head=nBulkHead(select(n,k,member),f/2u,true);}else{head=nBulkHead(native,f/2u,false);}
  if(member){poolB[N_RECORD+nHeadIndex(k,f)]=bitcast<u32>(head);return vec2f(25.6,-head);}
  return vec2f(25.6,head);
 }
@@ -796,20 +842,156 @@ fn cProlong(c:vec3i)->f32{
  return select(0.0,sum/total,total>0.0);
 }
 `;
-  const tail=/* wgsl */`
+  // The BULK16 store in pool B (fields.bulkPages): the live slots, each
+  // slot's record (BULK16_PAGE), and the addresses the tail levels name a
+  // BULK16 cell by. A 16h region (i, 0..7) of slot is BA | slot<<5 | i at
+  // levels 4 (and 0: its pressure), BA | slot<<5 | 16 | i at level 3 (the
+  // region's 8h iterate, one value: a BULK16 page holds no sub-16h mode),
+  // BA | slot<<5 | 8 its page's 32h row. Channel PT_c's word of one is the
+  // record's (baWord): level 3's X, Y and R its own, every other channel
+  // (D, the couplings) level 4's.
+  const store=BP?/* wgsl */`
+const BS:u32=${this.storeWord}u;const BS_LIVE:u32=${this.storeWord+BP.layout.live}u;const BS_REC:u32=${this.storeWord+BP.layout.records}u;const BS_STRIDE:u32=${BULK16_PAGE_WORDS}u;
+const BS_P:u32=${BULK16_PAGE.pressure}u;const BS_N:u32=${BULK16_PAGE.pressureNext}u;const BS_RHS:u32=${BULK16_PAGE.rhs}u;const BS_U:u32=${BULK16_PAGE.velocity}u;const BS_US:u32=${BULK16_PAGE.velocityNext}u;
+const BS_T3:u32=${BULK16_PAGE.tail3}u;const BS_T4:u32=${BULK16_PAGE.tail4}u;const BS_T5:u32=${BULK16_PAGE.tail5}u;
+const BA:u32=0x80000000u;const N_BULKN:u32=6u;
+fn bsCount()->u32{return poolB[BS+${BULK16_STATUS.live}u];}
+fn bsSlot(i:u32)->u32{return poolB[BS_LIVE+i];}
+fn bsAt(slot:u32,w:u32)->u32{return BS_REC+BS_STRIDE*slot+w;}
+fn bsF(slot:u32,w:u32)->f32{return bitcast<f32>(poolB[bsAt(slot,w)]);}
+fn bsSet(slot:u32,w:u32,v:f32){poolB[bsAt(slot,w)]=bitcast<u32>(v);}
+// The slot's page in the lattice (umPageWord's): the slot keeps the pool's world page.
+fn bsPage(slot:u32)->vec3i{return vec3i(bitcast<i32>(poolB[bsAt(slot,0u)]),bitcast<i32>(poolB[bsAt(slot,1u)]),bitcast<i32>(poolB[bsAt(slot,2u)]))-umFramePage();}
+// The slot of a BULK16 page word (a page's, or a block neighbour row's), 0 for any other.
+fn bsWordSlot(w:u32)->u32{return select(0u,w&0x3fffffffu,umBulkTag(w));}
+fn baOf(slot:u32,l3:bool,i:u32)->u32{return BA|(slot<<5u)|select(0u,16u,l3)|i;}
+fn baIs(at:u32)->bool{return at!=UB_NONE_ID&&(at&BA)!=0u;}
+fn baSlot(at:u32)->u32{return (at>>5u)&0x3ffffffu;}
+fn baWord(base:u32,at:u32)->u32{
+ let j=(base-PT_X)/PLANE2;let i=at&15u;var w=BS_T4+8u*j+i;
+ if(i==8u){w=BS_T5+j;}else if((at&16u)!=0u&&j<3u){w=BS_T3+8u*j+i;}
+ return bsAt(baSlot(at),w);
+}
+// The region of slot across face f of its region i (none: 8u), and of a 4h tile t of a page across a face of normal a.
+fn bsRegion(t:vec3u)->u32{return (t.x>>2u)|((t.y>>2u)<<1u)|((t.z>>2u)<<2u);}
+`:"";
+  // A BULK16 tail item: the page list's resident blocks, then the live slots (BA | slot).
+  const items=BP?/* wgsl */`
+fn tCount(n2:u32)->u32{return n2+bsCount();}
+fn tItem(e:u32,n2:u32)->u32{if(e<n2){return ubaLevelSlot(2u,e);}return BA|bsSlot(e-n2);}
+fn tF(base:u32,at:u32)->f32{if(baIs(at)){return bitcast<f32>(poolB[baWord(base,at)]);}return qF(base,at);}
+fn tSet(base:u32,at:u32,v:f32){if(baIs(at)){poolB[baWord(base,at)]=bitcast<u32>(v);}else{qSet(base,at,v);}}
+fn tU(base:u32,at:u32)->u32{if(baIs(at)){return poolB[baWord(base,at)];}return poolB[base+at];}
+fn tSetU(base:u32,at:u32,v:u32){if(baIs(at)){poolB[baWord(base,at)]=v;}else{poolB[base+at]=v;}}
+`:/* wgsl */`
+fn tCount(n2:u32)->u32{return n2;}
+fn tItem(e:u32,n2:u32)->u32{return ubaLevelSlot(2u,e);}
+fn tF(base:u32,at:u32)->f32{return qF(base,at);}
+fn tSet(base:u32,at:u32,v:f32){qSet(base,at,v);}
+fn tU(base:u32,at:u32)->u32{return poolB[base+at];}
+fn tSetU(base:u32,at:u32,v:u32){poolB[base+at]=v;}
+`;
+  const tail=store+items+/* wgsl */`
 // The tail's levels per page: 3 (8h, 4^3 at word 0), 4 (16h, 2^3 at 64), 5 (32h, one at 72).
 fn tSize(L:u32)->u32{return 4u>>(L-3u);}
 fn tOffset(L:u32)->u32{return select(select(72u,64u,L==4u),0u,L==3u);}
-// The pool offset of level L cell g of page block's grid (g may lie one page out), UB_NONE_ID outside stored pages.
+// Item's level L cell j (a BULK16 item's level 3 cell is its region j's).
+fn tCell(item:u32,L:u32,j:u32)->u32{
+ ${BP?"if((item&BA)!=0u){let slot=item&0x7fffffffu;if(L==5u){return baOf(slot,false,8u);}return baOf(slot,L==3u,j);}":""}
+ return UBA_STRIDE*item+tOffset(L)+j;
+}
+// The pool offset (or BULK16 address) of level L cell g of item's grid (g
+// may lie one page out), UB_NONE_ID outside stored and BULK16 pages. A
+// BULK16 item's own grid is levels 4 and 5 only.
 fn tAt(block:u32,L:u32,g:vec3i)->u32{
- let s=i32(tSize(L));let d=(g+vec3i(2*s))/s-vec3i(2);let l=g-d*s;var b=block;
- if(any(d!=vec3i(0))){b=ubaLevelRecord(2u,block,u32(13+d.x+3*d.y+9*d.z));if(b==UB_NONE_ID){return UB_NONE_ID;}}
- return UBA_STRIDE*b+tOffset(L)+u32(l.x+s*(l.y+s*l.z));
+ let s=i32(tSize(L));let d=(g+vec3i(2*s))/s-vec3i(2);let l=g-d*s;let j=u32(l.x+s*(l.y+s*l.z));
+ if(all(d==vec3i(0))){return tCell(block,L,j);}
+ let k=u32(13+d.x+3*d.y+9*d.z);
+ ${BP?`var w=0u;
+ if((block&BA)!=0u){w=umPageRawWord(bsPage(block&0x7fffffffu)+d);if(umBlockStored(w)){return UBA_STRIDE*w+tOffset(L)+j;}}
+ else{let b=ubaLevelRecord(2u,block,k);if(b!=UB_NONE_ID){return UBA_STRIDE*b+tOffset(L)+j;}w=umBlockNeighbourWord(block,k);}
+ let slot=bsWordSlot(w);if(slot==0u){return UB_NONE_ID;}
+ if(L==5u){return baOf(slot,false,8u);}
+ let r=select(vec3u(l),vec3u(l)>>vec3u(1u),L==3u);return baOf(slot,L==3u,r.x+2u*r.y+4u*r.z);`:`let b=ubaLevelRecord(2u,block,k);if(b==UB_NONE_ID){return UB_NONE_ID;}
+ return UBA_STRIDE*b+tOffset(L)+j;`}
 }
 fn tLocal(j:u32,s:u32)->vec3i{return vec3i(vec3u(j%s,(j/s)%s,j/(s*s)));}
-// A page with band tiles or native rows (pNative's flag).
-fn tPageLive(block:u32)->bool{return (nPage(block)&1u)!=0u;}
+// A page with band tiles or native rows (pNative's flag); every BULK16 item.
+fn tPageLive(block:u32)->bool{${BP?"if((block&BA)!=0u){return true;}":""}return (nPage(block)&1u)!=0u;}
 `;
+  // A BULK16 region's faces (needs store). Region i (0..7, x+2y+4z of its
+  // page's 2^3) of slot meets across face f its page's other region, a
+  // BULK16 page's region, a resident block's 16 4h rows (subface j: tile
+  // bNativeTile, their face f^1 an N_BULKN link to it), or nothing (SOLID:
+  // a wall, its flux zero).
+  const bulkRows=BP?bulk16FaceIndexWGSL+/* wgsl */`
+const B_NONE:u32=0u;const B_REGION:u32=1u;const B_BLOCK:u32=2u;
+struct BNear {kind:u32,slot:u32,region:u32,block:u32}
+fn bRegionCoord(i:u32)->vec3u{return vec3u(i&1u,(i>>1u)&1u,i>>2u);}
+fn bRegionIndex(r:vec3u)->u32{return r.x+2u*r.y+4u*r.z;}
+fn bNear(slot:u32,page:vec3i,i:u32,f:u32)->BNear{
+ let a=f/2u;let side=f&1u;var r=bRegionCoord(i);
+ if(r[a]!=side){r[a]=side;return BNear(B_REGION,slot,bRegionIndex(r),0u);}
+ var d=vec3i(0);d[a]=bSign(f);let w=umPageRawWord(page+d);r[a]=1u-side;
+ let other=bsWordSlot(w);if(other!=0u){return BNear(B_REGION,other,bRegionIndex(r),0u);}
+ if(umBlockStored(w)){return BNear(B_BLOCK,0u,i,w);}
+ return BNear(B_NONE,0u,0u,0u);
+}
+// The 4h tile of the block across face f of region i at subface j (0..15).
+fn bNativeTile(i:u32,f:u32,j:u32)->vec3u{
+ let a=f/2u;let r=bRegionCoord(i);var t=vec3u(0u);t[a]=select(7u,0u,(f&1u)==1u);
+ let u=(a+1u)%3u;let v=(a+2u)%3u;t[u]=4u*r[u]+(j&3u);t[v]=4u*r[v]+(j>>2u);return t;
+}
+fn bTileLocal(t:vec3u)->u32{return t.x+8u*(t.y+8u*t.z);}
+// The native row's link to region i of its face f^1 (active and N_BULKN), its level 2 offset at.
+fn bLinked(at:u32,f:u32)->bool{let m=poolB[PN_M+at];return (m&N_ACTIVE)!=0u&&nKind(m,f^1u)==N_BULKN;}
+// Region i's 16h coupling to another region (open: whole pages are).
+fn bRegionK(f:u32)->f32{let h4=4.0*params.hDt[f/2u];return 256.0/(h4*h4);}
+// The record's face of region i's face f (bpFace: its axis, plane 0..2, tangential region).
+fn bFace(i:u32,f:u32)->u32{let a=f/2u;let r=bRegionCoord(i);return bpFace(a,r[a]+(f&1u),r[(a+1u)%3u],r[(a+2u)%3u]);}
+// Sum k x across face f of region i: level 0's (pressureNext; the native
+// rows' x), or level 2's (natives: PB_X; regions: none, their level 3
+// correction starts after it).
+fn bLinkSum(slot:u32,page:vec3i,i:u32,f:u32,level2:bool)->f32{
+ let n=bNear(slot,page,i,f);
+ if(n.kind==B_REGION){if(level2){return 0.0;}return bRegionK(f)*bsF(n.slot,BS_N+n.region);}
+ if(n.kind==B_BLOCK){
+  var sum=0.0;
+  for(var j=0u;j<16u;j++){
+   let at=UBA_STRIDE*n.block+bTileLocal(bNativeTile(i,f,j));
+   if(bLinked(at,f)){sum+=qF(PN_K+(f^1u)*PLANE2,at)*select(qF(PN_X,at),qF(PB_X,at),level2);}
+  }
+  return sum;
+ }
+ return 0.0;
+}
+// Region i's level 0 residual: rhs - d x + sum k x (lanes 0..47 a (region, face)).
+var<workgroup> bRed:array<f32,48>;
+fn bResidual(slot:u32,lane:u32)->f32{
+ let page=bsPage(slot);
+ if(lane<48u){bRed[lane]=bLinkSum(slot,page,lane/6u,lane%6u,false);}
+ workgroupBarrier();
+ var r=0.0;
+ if(lane<8u){let s=((bRed[6u*lane]+bRed[6u*lane+1u])+(bRed[6u*lane+2u]+bRed[6u*lane+3u]))+(bRed[6u*lane+4u]+bRed[6u*lane+5u]);
+  r=bsF(slot,BS_RHS+lane)-bsF(slot,BS_T4+24u+lane)*bsF(slot,BS_N+lane)+s;}
+ workgroupBarrier();
+ return r;
+}
+`:"";
+  // Red-black sweeps of a BULK16 page's eight rows (lane < 8: its region's
+  // RHS r and diagonal d) against its own (arr: their iterates), as a page's
+  // 8h and 16h rows sweep inside it.
+  const bulkSweeps=(arr:string,r:string,d:string)=>/* wgsl */`
+  for(var s=0u;s<${schedule.sweeps}u;s++){
+   for(var col=0u;col<2u;col++){
+    if(lane<8u&&(countOneBits(lane)&1u)==col){
+     var off=${r};let c=bRegionCoord(lane);
+     for(var f=0u;f<6u;f++){if(c[f/2u]!=(f&1u)){off+=bRegionK(f)*${arr}[lane^(1u<<(f/2u))];}}
+     ${arr}[lane]=off/${d};
+    }
+    workgroupBarrier();
+   }
+  }`;
   // The super-block tail (planUniformPressureSuper): 64h rows a 2^3 group of
   // pages, 128h rows a 4^3 group, keyed by page coordinate from the box's
   // low page. A level's row e: its key (list), its rows' channels (planes of
@@ -1136,7 +1318,7 @@ var<workgroup> pCopyFineTiles:vec2u;
    // pressure). A face across a band tile is a seam: the sum of its 16 h
    // faces' couplings, toward their iterate. Writes the page's flags, each
    // native row's level 2 operator and the initial residual.
-   native:header(true)+poolWGSL+wet+theta+/* wgsl */`
+   native:header(true)+poolWGSL+store+wet+theta+/* wgsl */`
 @group(1) @binding(26) var<storage,read_write> rootArena:array<f32>;
 @group(1) @binding(29) var<storage,read> rootPhi:array<f32>;
 ${S?"@group(1) @binding(30) var<storage,read> rootTopology:array<vec4f>;":""}
@@ -1179,7 +1361,21 @@ ${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){poolB[N_R
     if(across>=N_SENTINEL){
      // A SOLID page: the root's wall slot, free (held) or bounded at 0.
      let s=N_KEYS+umFaceTile(block,f,l);let fraction=${S?"rootTopology[s].x":"0.5"};
-     if(fraction>1e-6){
+${BP?`     let bslot=bsWordSlot(across);
+     if(bslot!=0u){
+      // A BULK16 page: its region's 16h row across the face, 10h from this
+      // row's centre (member to member 16h, as nBulkLink's). The slot's
+      // row sees this row's start less its head (a member's: its region's
+      // start), q, which the wall slot's bound word keeps for pBulkRows
+      // and pWrite; buildRhs left the face's flux in its RHS word.
+      if(fraction>1e-6){
+       let w=fraction/(h4*h4);var t=l;t[axis]=select(7u,0u,side==1u);let region=bsRegion(t);
+       var q=start-nBulkHead(k,axis,false);c=25.6*w;
+       if(member){q=nBulkStart(k);c=16.0*w;}
+       kind=N_BULKN;link=baOf(bslot,false,region);level2=c;diagonal+=c;
+       rhs+=c*(bsF(bslot,BS_P+region)-q);rootArena[R_MINIMUM+s]=q;atomicOr(&nFlags,8u);
+      }
+     }else `:""}     if(fraction>1e-6){
       let w=fraction/(h4*h4);let lift=rootArena[R_RHS+s]/w;c=64.0*w;
       if(rootArena[R_MINIMUM+s]<-1e38){kind=N_HELD;rhs+=c*lift;}
       else{kind=N_WALL;diagonal+=c;walls+=c;lifted+=c*max(lift,-start);link=bitcast<u32>(lift);}
@@ -1229,6 +1425,35 @@ ${B?`  // A member region's residual is its 16h row's: the mean of its lanes'.
  // The start meets the root's bound only under its floor: a tenth of itself it never is.
  if(lane==0u){let r=atomicLoad(&nWorst);if(r!=0u){atomicMax(&state[INITIAL],select(r,0x7f7fffffu,bitcast<f32>(r)>nFloor()));atomicMax(&state[NATIVE_INITIAL],r);}}
 }
+// Rebuild the native correction rows after both residual passes published
+// their active sets. Links into held rows remain in the diagonal, with zero
+// correction on their other side; physical rows and smoothers stay intact.
+@compute @workgroup_size(${WG}) fn pNativeOperator(${lanes}){
+ if(lane==0u){nN=select(ubaLevelCount(2u),0u,bConverged());}
+ let count=workgroupUniformLoad(&nN);
+ for(var e=group.x;e<count;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);let at=UBA_STRIDE*block+lane;let m=poolB[PN_M+at];
+  if((m&N_ACTIVE)==0u){continue;}
+  let free=(m&N_CORRECT)!=0u;var d=qF(PN_D,at);let x=qF(PN_X,at);let base=qF(PN_B,at);
+  for(var f=0u;f<6u;f++){
+   let kind=nKind(m,f);let c=qF(PN_K+f*PLANE2,at);let link=poolB[PN_L+f*PLANE2+at];var k=0.0;
+   if(kind==N_NATIVE){
+    k=c;
+${B?`    let key=512u*block+lane;let other=512u*(link/UBA_STRIDE)+(link%UBA_STRIDE);let axis=f/2u;
+    let volume=${S?"select(rootTopology[other][axis+1u],rootTopology[key][axis+1u],(f&1u)==1u)":"1.0"};
+    let h4=4.0*params.hDt[axis];k=64.0*volume/(h4*h4);d+=k-c;
+`:""}    if((poolB[PN_M+link]&N_CORRECT)==0u){k=0.0;}
+   }else if(kind==N_SEAM){
+    let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let v=nStride((axis+2u)%3u);
+    for(var j=0u;j<16u;j++){let row=link+(j&3u)*u+(j>>2u)*v;let kinds=pool[P_KINDS+row];
+     if(bFaceKind(kinds,g)==K_SEAM&&(kinds&P_CORRECT)!=0u){k+=pF(P_C+g*PLANE,row);}
+    }
+   }else if(kind==N_WALL&&x+bitcast<f32>(link)>=-base){d-=c;}
+   qSet(PB_K+f*PLANE2,at,select(0.0,k,free));
+  }
+  qSet(PB_D,at,select(0.0,d,free));
+ }
+}
 // The native rows' pressures into the root (the 4h projection's), and their wall slots'.
 @compute @workgroup_size(${WG}) fn pWrite(${lanes}){
  if(lane==0u){nN=ubaLevelCount(2u);}
@@ -1246,7 +1471,14 @@ ${B?`  // A member region's residual is its 16h row's: the mean of its lanes'.
      if(kind==N_WALL||kind==N_HELD){
       let s=N_KEYS+umFaceTile(block,f,l);let wall=p+64.0*rootArena[R_RHS+s]/qF(PN_K+f*PLANE2,at2);
       rootArena[R_PRESSURE+s]=select(max(wall,0.0),wall,kind==N_HELD);
-     }
+     }${BP?`else if(kind==N_BULKN){
+      // The 4h projection reads a wall slot 4h across the face: the BULK16
+      // row's pressure in this row's frame, its difference scaled to the
+      // row's distance (10h, theta 2.5; a member's 16h, 4), as pNative's c.
+      let s=N_KEYS+umFaceTile(block,f,l);let link=poolB[PN_L+f*PLANE2+at2];let r=link&15u;let slot=baSlot(link);
+      let across=bsF(slot,BS_P+r)+bsF(slot,BS_N+r)+qF(PN_B,at2)-rootArena[R_MINIMUM+s];
+      rootArena[R_PRESSURE+s]=p+(across-p)/select(2.5,4.0,nMember(512u*block+lane));
+     }`:""}
     }
    }
   }
@@ -1334,7 +1566,7 @@ fn nPart16(k:u32,f:u32,j:u32,word:u32)->vec2f{
     if(sign<0){source=vec3u(n);}
     let mode=nFaceMode(source,axis);var q=vec3i(source*4u);q[axis]+=3;
     if(mode==2u){word=N_LISTED|N_WEIGHTED|0xffffu;}else if(mode==1u){velocities[f]=nMean(source,axis,false);}else{velocities[f]=nAnchor(q,axis);}
-   }else if(kind==UM_SOLID){
+   }else if(kind>=UM_SOLID){
     if(umTileWidth(k)==4u){velocities[f]=negative[umLowFaceIndex(T*4u,axis)];}
     else if(umSolidEnabled()&&umSolidStaticCut(k)){word=N_LISTED|N_WEIGHTED|0xffffu;}
     else{velocities[f]=nMean(T,axis,true);}
@@ -1367,7 +1599,9 @@ fn nPart16(k:u32,f:u32,j:u32,word:u32)->vec2f{
     // COLD freeze: what u* adds to the stored face (the root's umColdAdd).
     var low=O;if(sign<0){low[axis]-=4;}
     var anchor=O;anchor[axis]+=select(-1,3,sign>0);
-    var add=umColdForced(low,axis,4u,0.0,!umFaceLow(anchor,axis));
+    // A BULK16 page across is liquid: its face takes gravity and T as any
+    // frozen face (a wall, SOLID, takes neither).
+    var add=umColdForced(low,axis,4u,0.0,!umFaceLow(anchor,axis)||kind==UM_BULK16);
     if(kind==UM_SOLID){add-=umColdFaceTerm(low,axis,4u);}
     if(!UM_COLD_FREEZE){add=0.0;}
     let w=words[f];let cut=(w&(N_LISTED|N_WEIGHTED))==N_LISTED;let halo=N_KEYS+umFaceTile(block,f,l);
@@ -1375,13 +1609,14 @@ fn nPart16(k:u32,f:u32,j:u32,word:u32)->vec2f{
     var flux=sums[f];
     if(!cut){
      var recordV=1.0;
-     if(kind==UM_SOLID){recordV=umSolidCoarse(halo).x;}else if(kind==UM_RESIDENT){recordV=umSolidCoarse(select(umTileAt(vec3u(n)),k,sign>0))[axis+1u];}
+     if(kind>=UM_SOLID){recordV=umSolidCoarse(halo).x;}else if(kind==UM_RESIDENT){recordV=umSolidCoarse(select(umTileAt(vec3u(n)),k,sign>0))[axis+1u];}
      let weight=recordV*16.0;flux=vec2f(weight*face,weight);
     }
     var total=0.0;total+=flux.x+flux.y*add;
     terms[f]=f32(sign)*total/(64.0*N_H[axis]);
-    if(kind==UM_SOLID){
-     // The wall slot: its one-cell halo's RHS, bound and start.
+    if(kind>=UM_SOLID){
+     // The wall slot (a SOLID or BULK16 page across, as pNative's N_SENTINEL
+     // test): its one-cell halo's RHS, bound and start.
      var wall=0.0;if(cut){wall=(flux.x+flux.y*add)/16.0;}else{wall=umSolidCoarse(halo).x*(face+add);}
      let b=f32(sign)*params.policy.x*wall/(4.0*N_H[axis]*params.hDt.w);let bound=select(0.0,-3.402823e38,rootPhi[k]<held);
      rootArena[R_RHS+halo]=b;rootArena[R_MINIMUM+halo]=bound;rootArena[R_PRESSURE+halo]=max(rootArena[R_PRESSURE+halo],bound);
@@ -1398,7 +1633,7 @@ fn nPart16(k:u32,f:u32,j:u32,word:u32)->vec2f{
    // A native row's composite residual: each cycle's after the band's
    // pre-smoothing (level 2's RHS; its largest into the cycle's history
    // word), and the final measure (pLast).
-   residual:header()+poolWGSL+(B?bulkMean("rRed")+"var<workgroup> rRed:array<f32,512>;\n":"")+/* wgsl */`
+   residual:header()+poolWGSL+store+(B?bulkMean("rRed")+"var<workgroup> rRed:array<f32,512>;\n":"")+(BP?bulkRows:"")+/* wgsl */`
 override pCycle:u32=0u;
 override pLast:bool=false;
 var<workgroup> worst:atomic<u32>;
@@ -1424,8 +1659,12 @@ fn nSeamSum(first:u32,f:u32)->f32{
      let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
      if(kind==N_NATIVE){r+=qF(PN_K+f*PLANE2,at2)*qF(PN_X,link);}
      else if(kind==N_SEAM){r+=nSeamSum(link,f);}
-     else if(kind==N_WALL){r+=qF(PN_K+f*PLANE2,at2)*max(x+bitcast<f32>(link),-base);}
+     else if(kind==N_WALL){r+=qF(PN_K+f*PLANE2,at2)*max(x+bitcast<f32>(link),-base);}${BP?`
+     else if(kind==N_BULKN){r+=qF(PN_K+f*PLANE2,at2)*bsF(baSlot(link),BS_N+(link&15u));}`:""}
     }
+    // Bulk members are fully open (bulkSelect rejects closed/cut cells),
+    // hence unbounded: every member lane stays correction-active together.
+    if(!pLast){poolB[PN_M+at2]=(m&~N_CORRECT)|select(0u,N_CORRECT,pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));}
     if((m&N_CLOSED)!=0u&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
     ${B?"if((m&N_BULK)==0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}":"atomicMax(&worst,bResidualMagnitude(r*nScale()));"}
    }
@@ -1433,7 +1672,15 @@ ${B?"   if((workgroupUniformLoad(&rFlags)&4u)!=0u){r=nBulkMean(r,(m&N_BULK)!=0u,
   }
   workgroupBarrier();
  }
- if(lane==0u&&n>0u){
+${BP?`  // The BULK16 rows: a region's residual is its row's (64 4h rows' sum,
+  // so 1/64 of it on the native scale), into its level 3 RHS.
+ if(lane==0u){rN=select(bsCount(),0u,bConvergedBefore(pCycle));}
+ let nb=workgroupUniformLoad(&rN);
+ for(var e=group.x;e<nb;e+=groups.x){
+  let slot=bsSlot(e);let r=bResidual(slot,lane);
+  if(lane<8u){atomicMax(&worst,bResidualMagnitude(r/64.0*nScale()));if(!pLast){bsSet(slot,BS_T3+16u+lane,r);}}
+ }
+`:""} if(lane==0u&&n>0u){
   let w=atomicLoad(&worst);let word=HISTORY+pCycle;let scaled=bitcast<u32>(bitcast<f32>(w)*nStopScale());if(scaled>pIndex(word)){atomicMax(&state[word],scaled);}
   if(!pLast&&w>pIndex(NATIVE_HISTORY+pCycle)){atomicMax(&state[NATIVE_HISTORY+pCycle],w);}
   if(pLast&&w>pIndex(NATIVE_FINAL)){atomicMax(&state[NATIVE_FINAL],w);}
@@ -1461,7 +1708,8 @@ override pBand:u32=0u;
     let base=qF(PN_B,at2);let d0=qF(PN_D,at2);var off=qF(PN_R,at2);var walls=false;
     for(var f=0u;f<6u;f++){
      let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
-     if(kind==N_NATIVE){off+=qF(PN_K+f*PLANE2,at2)*qF(PN_X,link);}
+     if(kind==N_NATIVE){off+=qF(PN_K+f*PLANE2,at2)*qF(PN_X,link);}${BP?`
+     else if(kind==N_BULKN){off+=qF(PN_K+f*PLANE2,at2)*bsF(baSlot(link),BS_N+(link&15u));}`:""}
      else if(kind==N_SEAM){
       let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let w=nStride((axis+2u)%3u);let plane=select(P_X,P_X1,pBand==1u);
       for(var j=0u;j<16u;j++){let at=link+(j&3u)*u+(j>>2u)*w;if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){off+=pF(P_C+g*PLANE,at)*pF(plane,at);}}
@@ -1533,6 +1781,7 @@ var<workgroup> fSum:array<vec2f,64>;
 // The kick's first solve stashes each row's RHS ahead of its start's terms
 // in the warm plane (unread until pProject), its re-solves read it back.
 override pStash:u32=0u;
+override pCorrection:bool=false;
 ${this.fields.dynamics?"@group(1) @binding(24) var<storage,read_write> bDynamics:array<atomic<u32>>;":""}
 var<workgroup> worst:atomic<u32>;
 var<workgroup> tileWorst:atomic<u32>;
@@ -1565,27 +1814,27 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
      if(kind==K_BAND){
       let m=pNear(at,p,f);w[side]=c;d[side]=pF(P_BASE,m)-own;
       // Level 1: a coupling to an active row, inside the aggregate or out of it.
-      if(pActive(pool[P_KINDS+m])){if(side==(lb[axis]&1u)){cross[axis]=c;}else{part-=c;}}
+      if(pActive(pool[P_KINDS+m])&&(!pCorrection||(pool[P_KINDS+m]&P_CORRECT)!=0u)){if(side==(lb[axis]&1u)){cross[axis]=c;}else{part-=c;}}
      }
      else if(kind==K_SEAM){
       // A seam: the native row's start; out of the aggregate (a tile face)
       // toward an active native row, its level 2 cell.
-      let m=nAcross(p,f);w[side]=c;d[side]=qF(PN_B,m)+bSeamHead(at,f)-own;let sc=seamCoarse(c);part+=sc.x;
-      if((poolB[PN_M+m]&N_ACTIVE)!=0u){cross[axis]=sc.y;}
+      let m=nAcross(p,f);w[side]=c;d[side]=qF(PN_B,m)+bSeamHead(at,f)-own;let sc=seamCoarse(c);
+      if((poolB[PN_M+m]&N_ACTIVE)!=0u&&(!pCorrection||(poolB[PN_M+m]&N_CORRECT)!=0u)){part+=sc.x;cross[axis]=sc.y;}
      }
      else if(kind==K_GHOST||kind==K_OPEN){open+=c;}
-     else if(kind==K_WALL){walls+=c;lifted+=c*max(pLift(at,f),-own);}
+     else if(kind==K_WALL){if(!pCorrection||pF(P_X,at)+pLift(at,f)>=-own){walls+=c;}lifted+=c*max(pLift(at,f),-own);}
     }
     sums[axis]=w.x*(d.x+d.y)+(w.y-w.x)*d.y;
    }
    var given=pF(P_RHS,at);if(pStash==1u){pSet(P_WARMP,at,given);}else if(pStash==2u){given=pF(P_WARMP,at);}
-   let rhs=given+((sums.x+sums.z)+sums.y-open*own);pSet(P_RHS,at,rhs);
-   if(pActive(kinds)){
+   let rhs=given+((sums.x+sums.z)+sums.y-open*own);if(!pCorrection){pSet(P_RHS,at,rhs);}
+   if(pActive(kinds)&&(!pCorrection||(kinds&P_CORRECT)!=0u)){
     // The band's residual of the zero iterate (its halos at their start).
     var r=rhs+lifted;if(bInside(kinds)&&own<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
     let m=bResidualMagnitude(r*params.policy.z);atomicMax(&worst,m);atomicMax(&tileWorst,m);
     // The error equation's diagonal: the walls follow their row.
-    part+=d0-walls;pSet(P_DIAG,at,d0);
+    part+=d0-walls;if(!pCorrection){pSet(P_DIAG,at,d0);}
    }else{part=0.0;cross=vec3f(0.0);}
   }
   rPart[lane]=part;rCross[lane]=cross.x;rCross[64u+lane]=cross.y;rCross[128u+lane]=cross.z;
@@ -1605,12 +1854,12 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
   workgroupBarrier();
   if(lane==0u){
    let r=atomicExchange(&tileWorst,0u);
-   ${this.fields.dynamics?`let tile=umTileKey(vec3i(ubaOrigin(id)/4u)+vec3i(vec3u(bit&1u,(bit>>1u)&1u,bit>>2u)));
-   let at2=${UNIFORM_REGION_DYNAMICS_WORDS}u*umPageOfTile(tile)+${UNIFORM_REGION_DYNAMICS.pressureResidual}u;if(r>atomicLoad(&bDynamics[at2])){atomicMax(&bDynamics[at2],r);}`:""}
+   ${this.fields.dynamics?`if(!pCorrection){let tile=umTileKey(vec3i(ubaOrigin(id)/4u)+vec3i(vec3u(bit&1u,(bit>>1u)&1u,bit>>2u)));
+   let at2=${UNIFORM_REGION_DYNAMICS_WORDS}u*umPageOfTile(tile)+${UNIFORM_REGION_DYNAMICS.pressureResidual}u;if(r>atomicLoad(&bDynamics[at2])){atomicMax(&bDynamics[at2],r);}}`:""}
   }
   workgroupBarrier();
  }
- if(lane==0u&&n>0u){let r=atomicLoad(&worst);if(r>pIndex(INITIAL)){atomicMax(&state[INITIAL],r);}if(group.x==0u){atomicOr(&state[VALID],INITIAL_BIT);}}
+ if(!pCorrection&&lane==0u&&n>0u){let r=atomicLoad(&worst);if(r>pIndex(INITIAL)){atomicMax(&state[INITIAL],r);}if(group.x==0u){atomicOr(&state[VALID],INITIAL_BIT);}}
 }`,
    // A red-black sweep of level 0, in place: a workgroup relaxes two band
    // tiles, a lane one red cell and then one black. A tile's black rows see
@@ -1661,6 +1910,7 @@ var<workgroup> rRes:array<f32,64>;
     else if(kind==K_WALL){off+=pF(P_C+f*PLANE,at)*max(x+pLift(at,f),-base);}
    }
    r=pF(P_RHS,at)+off-pF(P_DIAG,at)*x;
+   pool[P_KINDS+at]=(kinds&~P_CORRECT)|select(0u,P_CORRECT,pCorrectionFree(bInside(kinds),x+base,r));
    if(bInside(kinds)&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
    atomicMax(&worst,bResidualMagnitude(r*params.policy.z));
   }
@@ -1701,7 +1951,7 @@ override pBake:bool=false;
    if(d>0.0){for(var axis=0u;axis<3u;axis++){let f=2u*axis+(u32(c[axis])&1u);var q=c;q[axis]+=bSign(f);let k=core.k[f];if(k>0.0&&cDiag(cAddr(q))<=0.0){
      let hq=2*(vec3i(ubaLevelOrigin(1u,ubaLevelRecord(1u,slot,29u)))+q);
      if(umCellPresent(hq)){let tile=umTileKey(hq/4);let native=UBA_STRIDE*(tile>>9u)+(tile&511u);
-      if((poolB[PN_M+native]&N_ACTIVE)!=0u){let sc=seamCoarse(k);gPart[lane]+=sc.x;gCross[512u*axis+lane]=sc.y;}
+      if((poolB[PN_M+native]&N_CORRECT)!=0u){let sc=seamCoarse(k);gPart[lane]+=sc.x;gCross[512u*axis+lane]=sc.y;}
      }
     }}}
   }
@@ -1729,10 +1979,13 @@ fn tPart(i:u32,l:vec3u,d:f32,k:array<f32,6>){
  if(d>0.0){part=d;for(var axis=0u;axis<3u;axis++){let bit=l[axis]&1u;part-=k[2u*axis+1u-bit];cross[axis]=k[2u*axis+bit];}}
  gPart[i]=part;gCross[i]=cross.x;gCross[512u+i]=cross.y;gCross[1024u+i]=cross.z;
 }
-fn tBake(at:u32,A:vec3u,s:u32){
+// Faces in mask (a BULK16 page across) keep their coupling unscaled, as a
+// seam's does (seamCoarse): the 16h row across stays where it is.
+fn tBake(at:u32,A:vec3u,s:u32,mask:u32){
  var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
  for(var j=0u;j<8u;j++){let i=tChild(A,j,s);d+=gPart[i];for(var axis=0u;axis<3u;axis++){let bit=(j>>axis)&1u;k[2u*axis+bit]+=gCross[512u*axis+i];}}
- var outward=0.0;for(var f=0u;f<6u;f++){outward+=k[f];}qSet(PT_D,at,pAggregateDiagonal(d,outward,T_SCALE));for(var f=0u;f<6u;f++){qSet(PT_K+f*PLANE2,at,T_SCALE*k[f]);}
+ var outward=0.0;for(var f=0u;f<6u;f++){if(((mask>>f)&1u)==0u){outward+=k[f];}}
+ tSet(PT_D,at,pAggregateDiagonal(d,outward,T_SCALE));for(var f=0u;f<6u;f++){tSet(PT_K+f*PLANE2,at,select(T_SCALE*k[f],k[f],((mask>>f)&1u)!=0u));}
 }
 @compute @workgroup_size(${WG}) fn pDownB(${lanes}){
  if(lane==0u){cN=select(ubaLevelCount(2u),0u,bConverged());}
@@ -1755,16 +2008,23 @@ fn tBake(at:u32,A:vec3u,s:u32){
    gCoarseChild(lane,vec3u(c),at,core.d,CK,CPL);
    workgroupBarrier();
    let g=tLocal(lane,4u);let at3=UBA_STRIDE*slot+lane;var d3=0.0;var k3=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-   if(lane<64u){let A=vec3u(g);d3=gDiag(A);for(var f=0u;f<6u;f++){k3[f]=gCouple(A,f);}qSet(PT_D,at3,d3);for(var f=0u;f<6u;f++){qSet(PT_K+f*PLANE2,at3,k3[f]);}}
+   if(lane<64u){let A=vec3u(g);d3=gDiag(A);for(var f=0u;f<6u;f++){k3[f]=gCouple(A,f);}
+${BP?`    // A BULK16 row across: its children's links, unscaled (gCoarseChild left them in the diagonal).
+    if((nPage(slot)&8u)!=0u){for(var f=0u;f<6u;f++){let axis=f/2u;if(u32(g[axis])!=select(0u,3u,(f&1u)==1u)){continue;}
+     for(var j=0u;j<8u;j++){if(((j>>axis)&1u)!=(f&1u)){continue;}let l=2u*A+vec3u(j&1u,(j>>1u)&1u,j>>2u);let at=UBA_STRIDE*slot+l.x+8u*(l.y+8u*l.z);let m=poolB[PN_M+at];
+      if((m&N_ACTIVE)!=0u&&(m&N_CORRECT)!=0u&&nKind(m,f)==N_BULKN){k3[f]+=qF(PN_K+f*PLANE2,at);}}}}
+`:""}    qSet(PT_D,at3,d3);for(var f=0u;f<6u;f++){qSet(PT_K+f*PLANE2,at3,k3[f]);}}
    workgroupBarrier();
    if(lane<64u){tPart(lane,vec3u(g),d3,k3);}
    workgroupBarrier();
    let g4=tLocal(lane,2u);let at4=UBA_STRIDE*slot+64u+lane;
-   if(lane<8u){tBake(at4,vec3u(g4),2u);}
+   var mask4=0u;
+${BP?`   if(lane<8u){for(var f=0u;f<6u;f++){let axis=f/2u;if(u32(g4[axis])==select(0u,1u,(f&1u)==1u)){let step=select(select(9u,3u,axis==1u),1u,axis==0u);if(bsWordSlot(umBlockNeighbourWord(slot,select(13u-step,13u+step,(f&1u)==1u)))!=0u){mask4|=1u<<f;}}}}
+`:""}   if(lane<8u){tBake(at4,vec3u(g4),2u,mask4);}
    workgroupBarrier();
    if(lane<8u){var k4=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);for(var f=0u;f<6u;f++){k4[f]=qF(PT_K+f*PLANE2,at4);}tPart(lane,vec3u(g4),qF(PT_D,at4),k4);}
    workgroupBarrier();
-   if(lane==0u){tBake(UBA_STRIDE*slot+72u,vec3u(0u),1u);}
+   if(lane==0u){tBake(UBA_STRIDE*slot+72u,vec3u(0u),1u,0u);}
   }
   workgroupBarrier();
  }
@@ -1773,7 +2033,7 @@ fn tBake(at:u32,A:vec3u,s:u32){
    // the box's own view of them, which the up leg never sees), summed into
    // the page's 8h RHS; then the 8h rows from zero inside the page (the
    // first block-Jacobi iterate).
-   down2:header()+poolWGSL+coarse(2,schedule.coarsestSweeps)+bakeArrays+tail+/* wgsl */`
+   down2:header()+poolWGSL+coarse(2,schedule.coarsestSweeps)+bakeArrays+tail+bulkRows+/* wgsl */`
 var<workgroup> tX:array<f32,64>;
 @compute @workgroup_size(${WG}) fn pDown2(${lanes}){
  if(lane==0u){cN=select(ubaLevelCount(2u),0u,bConverged());}
@@ -1811,19 +2071,36 @@ var<workgroup> tX:array<f32,64>;
   if(lane<64u){qSet(PT_X,at3,tX[lane]);}
   workgroupBarrier();
  }
-}`,
+${BP?`  // A BULK16 page: its rows' level 3 RHS takes the level 2 correction of
+  // the native rows across (their residual, after it); its 8h iterate
+  // (one a region) from zero by sweeps inside the page.
+ if(lane==0u){cN=select(bsCount(),0u,bConverged());}
+ let nb=workgroupUniformLoad(&cN);
+ for(var e=group.x;e<nb;e+=groups.x){
+  let slot=bsSlot(e);let page=bsPage(slot);
+  if(lane<48u){bRed[lane]=bLinkSum(slot,page,lane/6u,lane%6u,true);}
+  workgroupBarrier();
+  var r3=0.0;var d=0.0;
+  if(lane<8u){r3=bsF(slot,BS_T3+16u+lane)+((bRed[6u*lane]+bRed[6u*lane+1u])+(bRed[6u*lane+2u]+bRed[6u*lane+3u]))+(bRed[6u*lane+4u]+bRed[6u*lane+5u]);
+   bsSet(slot,BS_T3+16u+lane,r3);d=bsF(slot,BS_T4+24u+lane);tX[lane]=0.0;}
+  workgroupBarrier();
+${bulkSweeps("tX","r3","d")}
+  if(lane<8u){bsSet(slot,BS_T3+lane,tX[lane]);}
+  workgroupBarrier();
+ }
+`:""}}`,
    // The 8h level's V-cycles (tailCycles of them, each down3, down4, tail,
    // up4, up3): its residual against the neighbour pages' rows into the
    // page's 16h RHS, the 16h rows from zero inside the page; the 16h
    // residual against the neighbour pages' into the 32h RHS. The 8h iterate
    // alternates between the X and Y channels (pSrcY: read Y), so a page reads
    // its neighbours' while they write the other.
-   down3:header()+poolWGSL+tail+/* wgsl */`
+   down3:header()+poolWGSL+tail+bulkRows+/* wgsl */`
 override pSrcY:bool=false;
 var<workgroup> dR:array<f32,64>;
 var<workgroup> dX:array<f32,8>;
 var<workgroup> dN:u32;
-fn tSrc(at:u32)->f32{return qF(select(PT_X,PT_Y,pSrcY),at);}
+fn tSrc(at:u32)->f32{return tF(select(PT_X,PT_Y,pSrcY),at);}
 @compute @workgroup_size(64) fn pDown3(${lanes}){
  if(lane==0u){dN=select(ubaLevelCount(2u),0u,bConverged());}
  let n=workgroupUniformLoad(&dN);
@@ -1834,7 +2111,7 @@ fn tSrc(at:u32)->f32{return qF(select(PT_X,PT_Y,pSrcY),at);}
   let g=tLocal(lane,4u);let at3=UBA_STRIDE*slot+lane;let d3=qF(PT_D,at3);var res=0.0;
   if(d3>0.0){
    res=qF(PT_R,at3)-d3*tSrc(at3);
-   for(var f=0u;f<6u;f++){var q=g;q[f/2u]+=bSign(f);let m=tAt(slot,3u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at3)*tSrc(m);}}
+   for(var f=0u;f<6u;f++){var q=g;q[f/2u]+=bSign(f);let m=tAt(slot,3u,q);if(m!=UB_NONE_ID&&tF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at3)*tSrc(m);}}
   }
   dR[lane]=res;
   workgroupBarrier();
@@ -1857,31 +2134,216 @@ fn tSrc(at:u32)->f32{return qF(select(PT_X,PT_Y,pSrcY),at);}
   if(lane<8u){qSet(PT_X,at4,dX[lane]);}
   workgroupBarrier();
  }
-}`,
+${BP?`  // A BULK16 page: its rows' 8h residual (against the 8h rows across:
+  // their couplings to it, f^1) is their 16h RHS, then their 16h rows from
+  // zero inside the page.
+ if(lane==0u){dN=select(bsCount(),0u,bConverged());}
+ let nb=workgroupUniformLoad(&dN);
+ for(var e=group.x;e<nb;e+=groups.x){
+  let slot=bsSlot(e);let page=bsPage(slot);
+  if(lane<48u){
+   let i=lane/6u;let f=lane%6u;let near=bNear(slot,page,i,f);var t=0.0;
+   if(near.kind==B_REGION){t=bRegionK(f)*tSrc(baOf(near.slot,true,near.region));}
+   else if(near.kind==B_BLOCK){
+    let a=f/2u;let r=bRegionCoord(i);
+    for(var j=0u;j<4u;j++){
+     var g=vec3u(0u);g[a]=select(3u,0u,(f&1u)==1u);g[(a+1u)%3u]=2u*r[(a+1u)%3u]+(j&1u);g[(a+2u)%3u]=2u*r[(a+2u)%3u]+(j>>1u);
+     let at=UBA_STRIDE*near.block+g.x+4u*(g.y+4u*g.z);if(qF(PT_D,at)>0.0){t+=qF(PT_K+(f^1u)*PLANE2,at)*tSrc(at);}
+    }
+   }
+   dR[lane]=t;
+  }
+  workgroupBarrier();
+  var r4=0.0;var d=0.0;
+  if(lane<8u){let at=baOf(slot,true,lane);d=bsF(slot,BS_T4+24u+lane);
+   r4=tF(PT_R,at)-d*tSrc(at)+((dR[6u*lane]+dR[6u*lane+1u])+(dR[6u*lane+2u]+dR[6u*lane+3u]))+(dR[6u*lane+4u]+dR[6u*lane+5u]);
+   bsSet(slot,BS_T4+16u+lane,r4);dX[lane]=0.0;}
+  workgroupBarrier();
+${bulkSweeps("dX","r4","d")}
+  if(lane<8u){bsSet(slot,BS_T4+lane,dX[lane]);}
+  workgroupBarrier();
+ }
+`:""}}`,
    // The 16h residual against the neighbour pages' rows, summed into the page's 32h RHS.
    down4:header()+poolWGSL+tail+/* wgsl */`
 var<workgroup> dR:array<f32,8>;
 var<workgroup> dN:u32;
+var<workgroup> dM:u32;
+// Every page item: the resident pages, then the BULK16 pages (tItem).
 @compute @workgroup_size(64) fn pDown4(${lanes}){
- if(lane==0u){dN=select(ubaLevelCount(2u),0u,bConverged());}
- let n=workgroupUniformLoad(&dN);
+ if(lane==0u){dM=ubaLevelCount(2u);dN=select(tCount(dM),0u,bConverged());}
+ let n=workgroupUniformLoad(&dN);let n2=workgroupUniformLoad(&dM);
  for(var e=group.x;e<n;e+=groups.x){
-  let slot=ubaLevelSlot(2u,e);
+  let slot=tItem(e,n2);
   if(lane==0u){dN=u32(tPageLive(slot));}
   if(workgroupUniformLoad(&dN)==0u){continue;}
   if(lane<8u){
-   let g4=tLocal(lane,2u);let at4=UBA_STRIDE*slot+64u+lane;let d4=qF(PT_D,at4);var res=0.0;
+   let g4=tLocal(lane,2u);let at4=tCell(slot,4u,lane);let d4=tF(PT_D,at4);var res=0.0;
    if(d4>0.0){
-    res=qF(PT_R,at4)-d4*qF(PT_X,at4);
-    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at4)*qF(PT_X,m);}}
+    res=tF(PT_R,at4)-d4*tF(PT_X,at4);
+    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&tF(PT_D,m)>0.0){res+=tF(PT_K+f*PLANE2,at4)*tF(PT_X,m);}}
    }
    dR[lane]=res;
   }
   workgroupBarrier();
-  if(lane==0u){var r5=0.0;for(var j=0u;j<8u;j++){r5+=dR[j];}qSet(PT_R,UBA_STRIDE*slot+72u,r5);}
+  if(lane==0u){var r5=0.0;for(var j=0u;j<8u;j++){r5+=dR[j];}tSet(PT_R,tCell(slot,5u,0u),r5);}
   workgroupBarrier();
  }
 }`,
+   ...(BP?{
+   // The BULK16 rows, once a solve (after pNative): each region's 16h row
+   // of the composite. Its face means take u* (gravity; zero toward a
+   // wall); a face toward a region couples at 16h, one toward a resident
+   // block through its 16 native rows' links (their flux the wall slot's
+   // RHS, buildRhs's), as its 64 4h rows' sum would. After the solve
+   // (pBulkProject) the faces between regions project; then (pBulkCommit)
+   // the correction joins the pressure.
+   bulk:header()+poolWGSL+tail+bulkRows+/* wgsl */`
+@group(1) @binding(26) var<storage,read_write> rootArena:array<f32>;
+@group(1) @binding(4) var<uniform> authority:vec4f;
+var<workgroup> bN:u32;
+var<workgroup> bD:array<f32,48>;
+var<workgroup> bW:atomic<u32>;
+// A kick's re-solve keeps the frame's u* (pBulkProject projected the face means from it).
+override pResolve:u32=0u;
+fn bSum6(v:f32,w:f32,x:f32,y:f32,z:f32,t:f32)->f32{return ((v+w)+(x+y))+(z+t);}
+@compute @workgroup_size(64) fn pBulkRows(${lanes}){
+ if(lane==0u){bN=bsCount();atomicStore(&bW,0u);}
+ let n=workgroupUniformLoad(&bN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=bsSlot(e);let page=bsPage(slot);
+  if(lane<36u&&pResolve==0u){
+   let a=lane/12u;let plane=(lane%12u)/4u;var open=true;
+   if(plane!=1u){var d=vec3i(0);d[a]=select(-1,1,plane==2u);let w=umPageRawWord(page+d);open=bsWordSlot(w)!=0u||umBlockStored(w);}
+   let u=bsF(slot,BS_U+lane)+params.hDt.w*params.gravity[a];
+   bsSet(slot,BS_US+lane,select(0.0,u,open));
+  }
+  storageBarrier();workgroupBarrier();
+  if(lane<48u){
+   let i=lane/6u;let f=lane%6u;let a=f/2u;let near=bNear(slot,page,i,f);let p=bsF(slot,BS_P+i);var d=0.0;var r=0.0;
+   if(near.kind==B_REGION){
+    let k=bRegionK(f);d=k;
+    r=k*(bsF(near.slot,BS_P+near.region)-p)-256.0*params.policy.x*f32(bSign(f))*bsF(slot,BS_US+bFace(i,f))/(params.hDt[a]*params.hDt.w);
+   }else if(near.kind==B_BLOCK){
+    for(var j=0u;j<16u;j++){
+     let t=bNativeTile(i,f,j);let at=UBA_STRIDE*near.block+bTileLocal(t);
+     if(bLinked(at,f)){let c=qF(PN_K+(f^1u)*PLANE2,at);let s=N_KEYS+umFaceTile(near.block,f^1u,t);d+=c;r+=c*(rootArena[R_MINIMUM+s]-p)+64.0*rootArena[R_RHS+s];}
+    }
+   }
+   bD[lane]=d;bRed[lane]=r;
+  }
+  workgroupBarrier();
+  if(lane<8u){
+   let k=6u*lane;let d=bSum6(bD[k],bD[k+1u],bD[k+2u],bD[k+3u],bD[k+4u],bD[k+5u]);
+   let r=bSum6(bRed[k],bRed[k+1u],bRed[k+2u],bRed[k+3u],bRed[k+4u],bRed[k+5u])+4096.0*params.policy.x*authority.z/params.hDt.w;
+   bsSet(slot,BS_T4+24u+lane,d);bsSet(slot,BS_RHS+lane,r);
+   for(var c=0u;c<3u;c++){bsSet(slot,BS_T3+8u*c+lane,0.0);bsSet(slot,BS_T4+8u*c+lane,0.0);}
+   atomicMax(&bW,bResidualMagnitude(r/64.0*nScale()));
+  }
+  workgroupBarrier();
+ }
+ if(lane==0u){let r=atomicLoad(&bW);if(r!=0u){atomicMax(&state[INITIAL],select(r,0x7f7fffffu,bitcast<f32>(r)>nFloor()));atomicMax(&state[NATIVE_INITIAL],r);}}
+}
+// The pressure either side of a page's face lane (bpFace order), and whether both are BULK16 regions.
+@compute @workgroup_size(64) fn pBulkProject(${lanes}){
+ if(lane==0u){bN=bsCount();}
+ let n=workgroupUniformLoad(&bN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=bsSlot(e);
+  if(lane<36u){
+   let a=lane/12u;let plane=(lane%12u)/4u;var r=vec3u(0u);r[(a+1u)%3u]=lane&1u;r[(a+2u)%3u]=(lane>>1u)&1u;
+   var low=slot;var high=slot;var rl=r;var rh=r;rh[a]=1u;
+   if(plane!=1u){
+    var d=vec3i(0);d[a]=select(-1,1,plane==2u);let other=bsWordSlot(umPageRawWord(bsPage(slot)+d));
+    if(plane==0u){low=other;rl[a]=1u;rh[a]=0u;}else{high=other;rl[a]=1u;rh[a]=0u;}
+   }
+   // A face toward a resident block: its sixteen subfaces' projected flux
+   // over the face's area (the reflux sum the region's row balanced, as
+   // the bulk tier's face means): each linked row's c (p - across) plus
+   // its u* flux (pBulkRows' term), in velocity. Toward a wall: zero.
+   if(low!=0u&&high!=0u){
+    let jl=bRegionIndex(rl);let jh=bRegionIndex(rh);
+    let rise=(bsF(high,BS_P+jh)+bsF(high,BS_N+jh))-(bsF(low,BS_P+jl)+bsF(low,BS_N+jl));
+    bsSet(slot,BS_U+lane,bsF(slot,BS_US+lane)-params.hDt.w/params.policy.x*rise/(16.0*params.hDt[a]));
+   }else{
+    var u=0.0;
+    if(plane!=1u){
+     let f=2u*a+select(0u,1u,plane==2u);let i=bRegionIndex(select(rh,rl,plane==2u));let near=bNear(slot,bsPage(slot),i,f);
+     if(near.kind==B_BLOCK){
+      var flux=0.0;
+      for(var j=0u;j<16u;j++){
+       let t=bNativeTile(i,f,j);let at=UBA_STRIDE*near.block+bTileLocal(t);
+       if(bLinked(at,f)){
+        let s=N_KEYS+umFaceTile(near.block,f^1u,t);let p=qF(PN_B,at)+qF(PN_X,at);
+        let across=bsF(slot,BS_P+i)+bsF(slot,BS_N+i)+qF(PN_B,at)-rootArena[R_MINIMUM+s];
+        flux+=qF(PN_K+(f^1u)*PLANE2,at)*(p-across)+64.0*rootArena[R_RHS+s];
+       }
+      }
+      // Into the region through face f: -sign(f) along the axis; a row's
+      // flux is 64 rho V u/(4h dt), and the face sixteen subfaces.
+      u=-f32(bSign(f))*flux*4.0*params.hDt[a]*params.hDt.w/(1024.0*params.policy.x);
+     }
+    }
+    bsSet(slot,BS_U+lane,u);
+   }
+  }
+ }
+}
+@compute @workgroup_size(64) fn pBulkCommit(${lanes}){
+ if(lane==0u){bN=bsCount();}
+ let n=workgroupUniformLoad(&bN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=bsSlot(e);
+  if(lane<8u){bsSet(slot,BS_P+lane,bsF(slot,BS_P+lane)+bsF(slot,BS_N+lane));bsSet(slot,BS_N+lane,0.0);}
+ }
+}`,
+   // Each cycle after pDownB's bake: a BULK16 page's 16h couplings (to a
+   // resident block's 16h row: that row's to it, f^1) and its 32h row, as
+   // tBake bakes a page's. Before pUpB: a native row linked to a BULK16
+   // row takes that row's level 3 correction into its level 2 RHS.
+   bulkLevels:header()+poolWGSL+tail+bulkRows+/* wgsl */`
+var<workgroup> bN:u32;
+var<workgroup> bF:u32;
+var<workgroup> bK:array<f32,48>;
+@compute @workgroup_size(64) fn pBulkBake(${lanes}){
+ if(lane==0u){bN=select(bsCount(),0u,bConverged());}
+ let n=workgroupUniformLoad(&bN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=bsSlot(e);let page=bsPage(slot);
+  if(lane<48u){
+   let i=lane/6u;let f=lane%6u;let near=bNear(slot,page,i,f);var k=0.0;
+   if(near.kind==B_REGION){k=bRegionK(f);}
+   else if(near.kind==B_BLOCK){var g=bRegionCoord(i);g[f/2u]=select(1u,0u,(f&1u)==1u);let at=UBA_STRIDE*near.block+64u+bRegionIndex(g);if(qF(PT_D,at)>0.0){k=qF(PT_K+(f^1u)*PLANE2,at);}}
+   bsSet(slot,BS_T4+8u*(4u+f)+i,k);bK[lane]=k;
+  }
+  workgroupBarrier();
+  if(lane==0u){
+   var d=0.0;var k5=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+   for(var i=0u;i<8u;i++){let r=bRegionCoord(i);d+=bsF(slot,BS_T4+24u+i);for(var f=0u;f<6u;f++){if(r[f/2u]!=(f&1u)){d-=bK[6u*i+f];}else{k5[f]+=bK[6u*i+f];}}}
+   var outward=0.0;for(var f=0u;f<6u;f++){outward+=k5[f];}
+   bsSet(slot,BS_T5+3u,pAggregateDiagonal(d,outward,T_SCALE));for(var f=0u;f<6u;f++){bsSet(slot,BS_T5+4u+f,T_SCALE*k5[f]);}
+  }
+  workgroupBarrier();
+ }
+}
+@compute @workgroup_size(${WG}) fn pBulkLift(${lanes}){
+ if(lane==0u){bN=select(ubaLevelCount(2u),0u,bConverged());}
+ let n=workgroupUniformLoad(&bN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);
+  if(lane==0u){bF=nPage(block);}
+  if((workgroupUniformLoad(&bF)&8u)!=0u){
+   let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];
+   if((m&N_CORRECT)!=0u&&(m&N_ACTIVE)!=0u){
+    var lift=0.0;
+    for(var f=0u;f<6u;f++){if(nKind(m,f)==N_BULKN){lift+=qF(PN_K+f*PLANE2,at2)*tF(PT_Y,poolB[PN_L+f*PLANE2+at2]|16u);}}
+    if(lift!=0.0){qSet(PB_R,at2,qF(PB_R,at2)+lift);}
+   }
+  }
+  workgroupBarrier();
+ }
+}`,
+   }:{}),
    // Level 2's band channels of the held blocks, a workgroup a (block, channel).
    clear2:header()+poolWGSL+/* wgsl */`
 const P2_FIRST:u32=${this.level2Clear.first}u;const P2_CHANNELS:u32=${this.level2Clear.channels}u;const P2_CHANNEL:u32=${UBA_STRIDE*this.simulation.capacity.address.blocks}u;
@@ -1900,40 +2362,42 @@ var<workgroup> p2Block:u32;
    tail:header()+poolWGSL+tail+/* wgsl */`
 var<workgroup> sX:array<f32,${TAIL_ROWS+1}>;
 var<workgroup> tN:u32;
-// The row (staged index + 1, 0: none) across face f of page block's.
+var<workgroup> tM:u32;
+// The row (staged index + 1, 0: none) across face f of item block's.
 fn sNear(block:u32,f:u32)->u32{
- var d=vec3i(0);d[f/2u]=bSign(f);let near=ubaLevelRecord(2u,block,u32(13+d.x+3*d.y+9*d.z));
- if(near==UB_NONE_ID){return 0u;}return poolB[PT_Y+UBA_STRIDE*near+72u];
+ var d=vec3i(0);d[f/2u]=bSign(f);let near=tAt(block,5u,d);
+ if(near==UB_NONE_ID){return 0u;}return tU(PT_Y,near);
 }
-fn sColour(block:u32)->u32{let page=umBlockPage(block);return (page.x+page.y+page.z)&1u;}
+fn sColour(block:u32)->u32{${BP?"if((block&BA)!=0u){let page=bsPage(block&0x7fffffffu);return u32(page.x+page.y+page.z)&1u;}":""}let page=umBlockPage(block);return (page.x+page.y+page.z)&1u;}
 // Row e's update: (r + sum k x_n) / d.
 fn sRow(block:u32,at:u32,d:f32)->f32{
- var off=qF(PT_R,at);for(var f=0u;f<6u;f++){off+=qF(PT_K+f*PLANE2,at)*sX[sNear(block,f)];}
+ var off=tF(PT_R,at);for(var f=0u;f<6u;f++){off+=tF(PT_K+f*PLANE2,at)*sX[sNear(block,f)];}
  return off/d;
 }
+// Rows: the page list's, then the BULK16 pages' (tItem).
 @compute @workgroup_size(${lanesTail}) fn pTail(@builtin(local_invocation_index) lane:u32){
- if(lane==0u){tN=select(ubaLevelCount(2u),0u,bConverged());}
- let P=workgroupUniformLoad(&tN);if(P==0u){return;}
+ if(lane==0u){tM=ubaLevelCount(2u);tN=select(tCount(tM),0u,bConverged());}
+ let P=workgroupUniformLoad(&tN);let n2=workgroupUniformLoad(&tM);if(P==0u){return;}
  // A row's staged index + 1, in its page's spare 32h word of the 8h up channel.
- for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;poolB[PT_Y+at]=select(0u,e+1u,qF(PT_D,at)>0.0);sX[e+1u]=0.0;}
+ for(var e=lane;e<P;e+=${lanesTail}u){let at=tCell(tItem(e,n2),5u,0u);tSetU(PT_Y,at,select(0u,e+1u,tF(PT_D,at)>0.0));sX[e+1u]=0.0;}
  if(lane==0u){sX[0]=0.0;}
  storageBarrier();workgroupBarrier();
  var d0=0.0;var r0=0.0;var k0=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);var n0=array<u32,6>(0u,0u,0u,0u,0u,0u);var c0=0u;
  if(lane<P){
-  let block=ubaLevelSlot(2u,lane);let at=UBA_STRIDE*block+72u;d0=qF(PT_D,at);c0=sColour(block);
-  if(d0>0.0){r0=qF(PT_R,at);for(var f=0u;f<6u;f++){n0[f]=sNear(block,f);k0[f]=qF(PT_K+f*PLANE2,at);}}
+  let block=tItem(lane,n2);let at=tCell(block,5u,0u);d0=tF(PT_D,at);c0=sColour(block);
+  if(d0>0.0){r0=tF(PT_R,at);for(var f=0u;f<6u;f++){n0[f]=sNear(block,f);k0[f]=tF(PT_K+f*PLANE2,at);}}
  }
  for(var sweep=0u;sweep<${TAIL_SWEEPS}u;sweep++){
   for(var col=0u;col<2u;col++){
    if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){off+=k0[f]*sX[n0[f]];}sX[lane+1u]=off/d0;}
    for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){
-    let block=ubaLevelSlot(2u,e);let at=UBA_STRIDE*block+72u;let d=qF(PT_D,at);
+    let block=tItem(e,n2);let at=tCell(block,5u,0u);let d=tF(PT_D,at);
     if(d>0.0&&sColour(block)==col){sX[e+1u]=sRow(block,at,d);}
    }
    workgroupBarrier();
   }
  }
- for(var e=lane;e<P;e+=${lanesTail}u){let at=UBA_STRIDE*ubaLevelSlot(2u,e)+72u;if(qF(PT_D,at)>0.0){qSet(PT_X,at,sX[e+1u]);}}
+ for(var e=lane;e<P;e+=${lanesTail}u){let at=tCell(tItem(e,n2),5u,0u);if(tF(PT_D,at)>0.0){tSet(PT_X,at,sX[e+1u]);}}
 }`,
    // 16h up (a page a group): the 32h correction prolonged into the page's
    // 16h rows and their ring (two deep: the neighbours' rows plus their own
@@ -1944,28 +2408,29 @@ var<workgroup> vX:array<f32,216>;
 var<workgroup> uN:u32;
 fn vBox(g:vec3i)->u32{let q=vec3u(g+2);return q.x+6u*(q.y+6u*q.z);}
 fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1)*select(0.75,0.25,d.z==1);}
+var<workgroup> uM:u32;
 @compute @workgroup_size(${TAIL_LANES}) fn pUp4(${lanes}){
- if(lane==0u){uN=select(ubaLevelCount(2u),0u,bConverged());}
- let n=workgroupUniformLoad(&uN);
+ if(lane==0u){uM=ubaLevelCount(2u);uN=select(tCount(uM),0u,bConverged());}
+ let n=workgroupUniformLoad(&uN);let n2=workgroupUniformLoad(&uM);
  for(var e=group.x;e<n;e+=groups.x){
-  let slot=ubaLevelSlot(2u,e);
+  let slot=tItem(e,n2);
   if(lane==0u){uN=u32(tPageLive(slot));}
   if(workgroupUniformLoad(&uN)==0u){continue;}
   if(lane<216u){
    let g=vec3i(vec3u(lane%6u,(lane/6u)%6u,lane/36u))-2;let at=tAt(slot,4u,g);var x=0.0;
-   if(at!=UB_NONE_ID&&qF(PT_D,at)>0.0){
-    x=qF(PT_X,at);
+   if(at!=UB_NONE_ID&&tF(PT_D,at)>0.0){
+    x=tF(PT_X,at);
     let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
     for(var i=0u;i<8u;i++){
      let dd=vec3i(vec3u(i&1u,(i>>1u)&1u,i>>2u));let q=G+dd*o;if(any(abs(q)>vec3i(1))){continue;}
-     let m=tAt(slot,5u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){sum+=uWeight(dd)*qF(select(PT_X,PT_Y,pTailY),m);total+=uWeight(dd);}
+     let m=tAt(slot,5u,q);if(m!=UB_NONE_ID&&tF(PT_D,m)>0.0){sum+=uWeight(dd)*tF(select(PT_X,PT_Y,pTailY),m);total+=uWeight(dd);}
     }
     if(total>0.0){x+=sum/total;}
    }
    vX[lane]=x;
   }
-  let g4=tLocal(lane,2u);let at4=UBA_STRIDE*slot+64u+lane;var d4=0.0;var r4=0.0;var k4=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-  if(lane<8u){d4=qF(PT_D,at4);if(d4>0.0){r4=qF(PT_R,at4);for(var f=0u;f<6u;f++){k4[f]=qF(PT_K+f*PLANE2,at4);}}}
+  let g4=tLocal(lane,2u);let at4=tCell(slot,4u,lane);var d4=0.0;var r4=0.0;var k4=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
+  if(lane<8u){d4=tF(PT_D,at4);if(d4>0.0){r4=tF(PT_R,at4);for(var f=0u;f<6u;f++){k4[f]=tF(PT_K+f*PLANE2,at4);}}}
   workgroupBarrier();
   for(var s=0u;s<${schedule.sweeps}u;s++){
    for(var col=0u;col<2u;col++){
@@ -1976,7 +2441,7 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
     workgroupBarrier();
    }
   }
-  if(lane<8u){qSet(PT_Y,at4,vX[vBox(g4)]);}
+  if(lane<8u){tSet(PT_Y,at4,vX[vBox(g4)]);}
   workgroupBarrier();
  }
 }`,
@@ -1999,14 +2464,18 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
   if(workgroupUniformLoad(&uN)==0u){continue;}
   if(lane<216u){
    let g=vec3i(vec3u(lane%6u,(lane/6u)%6u,lane/36u))-1;let at=tAt(slot,3u,g);var x=0.0;
-   if(at!=UB_NONE_ID&&qF(PT_D,at)>0.0){
-    x=qF(src,at);
+   if(at!=UB_NONE_ID&&tF(PT_D,at)>0.0){
+    x=tF(src,at);
+    // A BULK16 row's 8h iterate takes its own 16h correction (it holds no finer mode).
+    if(${BP?"baIs(at)":"false"}){x+=tF(PT_Y,at&~16u);}
+    else{
     let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
     for(var i=0u;i<8u;i++){
      let dd=vec3i(vec3u(i&1u,(i>>1u)&1u,i>>2u));let q=G+dd*o;
-     let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){sum+=uWeight(dd)*qF(PT_Y,m);total+=uWeight(dd);}
+     let m=tAt(slot,4u,q);if(m!=UB_NONE_ID&&tF(PT_D,m)>0.0){sum+=uWeight(dd)*tF(PT_Y,m);total+=uWeight(dd);}
     }
     if(total>0.0){x+=sum/total;}
+    }
    }
    uX[lane]=x;
   }
@@ -2025,7 +2494,14 @@ fn uWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
   if(lane<64u){qSet(dst,at3,uX[uBox(g)]);}
   workgroupBarrier();
  }
-}`,
+${BP?`  // A BULK16 page's 8h iterates: their 16h correction added.
+ if(lane==0u){uN=select(bsCount(),0u,bConverged());}
+ let nb=workgroupUniformLoad(&uN);
+ for(var e=group.x;e<nb;e+=groups.x){
+  let slot=bsSlot(e);
+  if(lane<8u){let at=baOf(slot,true,lane);tSet(dst,at,tF(src,at)+bsF(slot,BS_T4+8u+lane));}
+ }
+`:""}}`,
    // Level 2 up: the 8h correction prolonged into the page's box, then its sweeps.
    upB:header()+poolWGSL+coarse(2,schedule.coarsestSweeps)+tail+(B?bulkMean("tS")+"var<workgroup> uBulk:u32;\n":"")+/* wgsl */`
 var<workgroup> tS:array<f32,1024>;
@@ -2039,7 +2515,7 @@ fn tBox(q:vec3i)->u32{let u=vec3u(q+2);return u.x+8u*(u.y+8u*u.z);}
   if(lane==0u){cN=u32(tPageLive(slot));${B?"uBulk=nPage(slot)&4u;":""}}
   if(workgroupUniformLoad(&cN)==0u){continue;}
   cRecords(slot,lane);
-  {let g=vec3i(vec3u(lane&7u,(lane>>3u)&7u,lane>>6u))-2;let m=tAt(slot,3u,g);var x=0.0;var d=0.0;if(m!=UB_NONE_ID){x=qF(PT_Y,m);d=qF(PT_D,m);}tS[lane]=x;tS[512u+lane]=d;}
+  {let g=vec3i(vec3u(lane&7u,(lane>>3u)&7u,lane>>6u))-2;let m=tAt(slot,3u,g);var x=0.0;var d=0.0;if(m!=UB_NONE_ID){x=tF(PT_Y,m);d=tF(PT_D,m);}tS[lane]=x;tS[512u+lane]=d;}
   workgroupBarrier();
   for(var k=lane;k<1728u;k+=${WG}u){let c=cStaged(k);let at=cAddr(c);var x=0.0;if(at!=UB_NONE_ID){x=qF(CX,at);if(qF(CD,at)>0.0){x+=cProlong(c);}}cX[k]=x;}
   let red=cBoxCell(0u,lane);let black=cBoxCell(1u,lane);let cR0=cBoxRow(0u,lane);let cB0=cBoxRow(1u,lane);
@@ -2049,10 +2525,17 @@ fn tBox(q:vec3i)->u32{let u=vec3u(q+2);return u.x+8u*(u.y+8u*u.z);}
   // at or above zero. A native-only stop would invalidate the hierarchy.
   let at2=UBA_STRIDE*slot+lane;let m=poolB[PN_M+at2];
   let y=cX[cBox(cCore(lane))];ubaStore1(CY,slot,lane,y);
-${B?"  // A member region takes its lanes' mean correction: one pressure.\n  var yb=y;if(workgroupUniformLoad(&uBulk)!=0u){yb=nBulkMean(y,(m&N_BULK)!=0u,lane);}\n":""}  if((m&N_ACTIVE)!=0u){var x=qF(PN_X,at2)+${B?"yb":"y"};if((m&N_CLOSED)!=0u){x=max(x,-qF(PN_B,at2));}qSet(PN_X,at2,x);}
+${B?"  // A member region takes its lanes' mean correction: one pressure.\n  var yb=y;if(workgroupUniformLoad(&uBulk)!=0u){yb=nBulkMean(y,(m&N_BULK)!=0u,lane);}\n":""}  if((m&N_CORRECT)!=0u){var x=qF(PN_X,at2)+${B?"yb":"y"};if((m&N_CLOSED)!=0u){x=max(x,-qF(PN_B,at2));}qSet(PN_X,at2,x);}
   workgroupBarrier();
  }
-}`,
+${BP?`  // A BULK16 page's rows: their level 3 iterate is their correction.
+ if(lane==0u){cN=select(bsCount(),0u,bConverged());}
+ let nb=workgroupUniformLoad(&cN);
+ for(var e=group.x;e<nb;e+=groups.x){
+  let slot=bsSlot(e);
+  if(lane<8u){bsSet(slot,BS_N+lane,bsF(slot,BS_N+lane)+bsF(slot,BS_T3+8u+lane));}
+ }
+`:""}}`,
    // Level 1 up: level 2's correction (the parent octant, two deep) prolonged into the brick's box, then its sweeps.
    upA:header()+poolWGSL+coarse(1)+a.stageWGSL("q",{level:2,region:"octant",channels:[{name:"yb",halo:2,seam:"pZeroSeam"},{name:"db",halo:2,seam:"pZeroSeam"}],workgroup:WG})+
     prolong("ubaW_q[ubaAt_q(q,0u)]","ubaW_q[ubaAt_q(q,1u)]")+/* wgsl */`
@@ -2108,7 +2591,7 @@ override pDst:u32=0u;
     let wt=select(0.75,0.25,e.x==1)*select(0.75,0.25,e.y==1)*select(0.75,0.25,e.z==1);
     if(qD[m]>0.0){sum+=wt*qY[m];total+=wt;}
    }
-   var x=pF(P_X,at);if(total>0.0){x+=sum/total;}
+   var x=pF(P_X,at);if((kinds&P_CORRECT)!=0u&&total>0.0){x+=sum/total;}
    if(bInside(kinds)){x=max(x,-pF(P_BASE,at));}
    pSet(select(P_X,P_X1,pDst==1u),at,x);
   }
@@ -2250,19 +2733,20 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
   if(W){
    const base=header()+poolWGSL+tail+superWGSL;
    Object.assign(sources,{
-    // A thread a page with a 32h row: its group's first such page (by
-    // octant) lists the group's 64h row and its children.
+    // Topology contains every physical pressure page, including pages whose
+    // correction rows are all held this cycle and may release next cycle.
+    // Its group's first page lists the 64h row and its children.
     group6:base+/* wgsl */`
 @compute @workgroup_size(64) fn sGroup6(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let n=select(ubaLevelCount(2u),0u,bConverged());
  for(var e=gid.x;e<n;e+=64u*groups.x){
-  let block=ubaLevelSlot(2u,e);if(qF(PT_D,UBA_STRIDE*block+72u)<=0.0){continue;}
+  let block=ubaLevelSlot(2u,e);if(!tPageLive(block)){continue;}
   let rel=sRel(block);let o=rel&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
   var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
   for(var j=0u;j<8u;j++){
    let d=vec3i(sOctant(j))-o;var b=block;
    if(j!=mine){b=ubaLevelRecord(2u,block,u32(13+d.x+3*d.y+9*d.z));}
-   if(b!=UB_NONE_ID&&qF(PT_D,UBA_STRIDE*b+72u)>0.0){kids[j]=b;first=min(first,j);}
+   if(b!=UB_NONE_ID&&tPageLive(b)){kids[j]=b;first=min(first,j);}
   }
   if(first!=mine){continue;}
   let row=atomicAdd(&state[S_COUNT6],1u);if(row>=CAP6){continue;}
@@ -2273,6 +2757,7 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
     // A thread a 64h row: its operator from its pages' 32h rows; its 128h
     // group's first 64h row (by octant) lists the 128h row and its children.
     group7:base+/* wgsl */`
+override sList:bool=true;
 @compute @workgroup_size(64) fn sGroup7(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let n=sCount6();
  for(var e=gid.x;e<n;e+=64u*groups.x){
@@ -2288,6 +2773,7 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
    d+=part;
   }
   var outward=0.0;for(var f=0u;f<6u;f++){outward+=k[f];}qSet(S6_D,e,pAggregateDiagonal(d,outward,S_SCALE));for(var f=0u;f<6u;f++){qSet(S6_K+f*CAP6,e,S_SCALE*k[f]);}
+  if(!sList){continue;}
   let g=sKey6(e);let o=g&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
   var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
   for(var j=0u;j<8u;j++){let r=select(sRow6(g-o+vec3i(sOctant(j))),e,j==mine);if(r!=UB_NONE_ID){kids[j]=r;first=min(first,j);}}
@@ -2547,16 +3033,16 @@ fn sProlong6(g:vec3i)->f32{
   if(!UNIFORM_PRESSURE_ARENA_NATIVE_RHS)delete sources.nrhs;
   else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
-  const layoutOf:Record<string,string>={nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
-  const entryOf:Record<string,string[]>={nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pWrite"],residual:["pResidual2","pNativeRelax"],final:["pFinal"],clear2:["pClear2"],
+  const layoutOf:Record<string,string>={bulk:"bulk",nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
+  const entryOf:Record<string,string[]>={bulk:["pBulkRows","pBulkProject","pBulkCommit"],bulkLevels:["pBulkBake","pBulkLift"],nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pNativeOperator","pWrite"],residual:["pResidual2","pNativeRelax"],final:["pFinal"],clear2:["pClear2"],
    rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
    pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],pNativeRelax:[["0",{pColour:0}],["1",{pColour:1}],["0X1",{pColour:0,pBand:1}],["1X1",{pColour:1,pBand:1}]],
-   pDownA:[["",{}],["@0",{pBake:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
-   ...(W?{pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
+   pDownA:[["",{}],["@0",{pBake:1}]],pBulkRows:[["",{}],["P",{pResolve:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}],["C",{pCorrection:1}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
+   ...(W?{sGroup7:[["",{}],["C",{sList:0}]] as Variant[],pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
   };
   this.verdict=await this.verdictPipeline();
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
@@ -2683,10 +3169,10 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  private encodeSolveFrom(encoder:GPUCommandEncoder,init:string,rebase:string):void{
   // The page launches stride the composite level 2 (every held block).
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,this.pageGroups),g=this.level1Groups;
-  const W=this.super;
+  const W=this.super,BP=!!this.fields.bulkPages;
   if(W)encoder.clearBuffer(this.index,4*W.index.count6,16);
   const pass=encoder.beginComputePass(SOLVE_PASS);
-  this.dispatch(pass,init,this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);this.dispatch(pass,rebase,this.tileGroups);
+  this.dispatch(pass,init,this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);if(BP)this.dispatch(pass,init==="pInitP"?"pBulkRowsP":"pBulkRows",pages);this.dispatch(pass,rebase,this.tileGroups);
   // One cycle past the most the solve ran lately; a frame needing more ends at its last.
   const cycles=Math.min(s.cycles,this.wideCycles+1);
   // Level 0 ping-pongs X and X1 (pInit zeroes both); a leg of n sweeps from
@@ -2702,9 +3188,10 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
    const settle=first&&!!this.solid?.present;sweeps(settle,(s.sweeps+(settle?1:0))&1);
    for(let k=0;k<s.nativeSweeps;k++){this.dispatch(pass,"pNativeRelax0",pages);this.dispatch(pass,"pNativeRelax1",pages);}
    this.dispatch(pass,this.residuals[cycle]!,pages);this.dispatch(pass,this.restricts[cycle]!,this.tileGroups);
-   this.dispatch(pass,first?"pDownA@0":"pDownA",g);this.dispatch(pass,first?"pDownB@0":"pDownB",pages);this.dispatch(pass,"pDown2",pages);
-   // The super-block tail's rows, from this frame's 32h rows (baked by pDownB@0).
-   if(W&&first){this.dispatch(pass,"sGroup6",Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,"sGroup7",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
+   this.dispatch(pass,"pRebaseC",this.tileGroups);this.dispatch(pass,"pNativeOperator",pages);
+   this.dispatch(pass,"pDownA@0",g);this.dispatch(pass,"pDownB@0",pages);if(BP)this.dispatch(pass,"pBulkBake",pages);this.dispatch(pass,"pDown2",pages);
+   // Refresh numeric coarse rows each cycle; super-block topology is frame-local.
+   if(W){if(first)this.dispatch(pass,"sGroup6",Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,first?"sGroup7":"sGroup7C",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
    for(let m=0;m<s.tailCycles;m++){
     const y=m%2===1?"Y":"";this.dispatch(pass,"pDown3"+y,pages);
     if(W){
@@ -2714,13 +3201,14 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
     }else{this.dispatch(pass,"pDown4",pages);this.dispatch(pass,"pTail",1);this.dispatch(pass,"pUp4",pages);}
     this.dispatch(pass,"pUp3"+y,pages);
    }
-   this.dispatch(pass,"pUpB",pages);this.dispatch(pass,"pUpA",g);
+   if(BP)this.dispatch(pass,"pBulkLift",pages);this.dispatch(pass,"pUpB",pages);this.dispatch(pass,"pUpA",g);
    const post=cycle===cycles-1?odd:0;this.dispatch(pass,"pProlong0"+post,this.tileGroups);
    // The native rows against the prolonged band (plane post) before its post-smoothing.
    for(let k=0;k<s.nativeSweeps;k++){const band=post?"X1":"";this.dispatch(pass,"pNativeRelax0"+band,pages);this.dispatch(pass,"pNativeRelax1"+band,pages);}
    sweeps(false,post);
   }
   this.dispatch(pass,"pResidual2F",pages);this.dispatch(pass,"pFinal",this.tileGroups);this.dispatch(pass,"pWrite",pages);
+  if(BP){this.dispatch(pass,"pBulkProject",pages);this.dispatch(pass,"pBulkCommit",pages);}
   if(W)this.dispatch(pass,"sForget",groupsOf(W.capacity6,64));
   pass.end();
   const verdict=encoder.beginComputePass(VERDICT_PASS);

@@ -6,9 +6,9 @@ import type { SvoFeatureControlContext, SvoStageControls } from "../../pipeline/
 export function renderPresentControls({ tuning, updateTuning, modified, resetTuning }: Pick<SvoFeatureControlContext, "tuning" | "updateTuning" | "modified" | "resetTuning">): SvoStageControls {
   return { node: <>
       <RailRange label="Render resolution" unit="%" value={tuning.resolutionScale * 100}
-        min={35} max={100} step={1} digits={0}
+        min={35} max={200} step={1} digits={0}
         onChange={(value) => updateTuning("resolutionScale", value / 100)}
         modified={modified("resolutionScale")} onReset={resetTuning("resolutionScale")}
-        hint="Pixel-linear: the frame costs roughly 19–22 ms per megapixel with cones and 13–15 without, so this is the one dial that moves every pass at once." />
+        hint="Above 100% supersamples geometry and reflections for smoother fine detail. 200% renders four pixels per display pixel and costs roughly four times the pixel work. Extra supersampling is capped at eight megapixels and device texture limits." />
     </> };
 }

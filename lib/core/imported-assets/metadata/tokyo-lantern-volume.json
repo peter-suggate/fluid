@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "tokyo-lantern",
+  "source": "tokyo-lantern.glb",
+  "origin": [
+    -0.19375,
+    -0.31875000000000003,
+    -0.19375
+  ],
+  "dimensions": [
+    64,
+    104,
+    64
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.00625,
+  "brickCount": 603,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Native Oiled cedar",
+      "baseColorLinear": [
+        0.10805337876081467,
+        0.03740089759230614,
+        0.011634287424385548
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Warm paper lantern",
+      "baseColorLinear": [
+        1.0,
+        0.27000001072883606,
+        0.054999999701976776
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Oiled cedar/11,7,3/r0.300",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.041722573919128626,
+        0.009529478582354435
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 324841,
+  "insideNodes": 168180
+}

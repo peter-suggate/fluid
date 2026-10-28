@@ -42,7 +42,7 @@ test("the view rail's sections come from installed features, with the controls p
   }
 });
 
-test("the study rail holds the clock, the method's tuning and the layers, and nothing on the scene strip repeats them", () => {
+test("the study rail holds the clock, the method's tuning and the layers, with surface controls reachable in scene view", () => {
   const composition = composeFeatureUI("uniform-narrow-band-flip", true, {}, { detailPolicy: "dynamic" });
   const study = composition.sections.filter(section => section.surface === "study-rail");
   assert.deepEqual(study.map(section => section.id), ["simulation", "tune", "layers"]);
@@ -51,8 +51,8 @@ test("the study rail holds the clock, the method's tuning and the layers, and no
     ["simulation/step", "simulation/cost", "simulation/more"]);
   const layers = study.find(section => section.id === "layers")!;
   const inLayers = composition.placements.filter(p => p.slot === layers.slot).map(p => `${p.feature}/${p.control}`);
-  // The particle display is a layer: it stands first in the layer card.
-  assert.deepEqual(inLayers, ["presentation.surface-display/particles", "presentation.visual-layers/layers"]);
+  // Surface options must remain reachable without entering the scene editor.
+  assert.deepEqual(inLayers, ["presentation.surface-display/mode", "presentation.surface-display/particles", "presentation.visual-layers/layers"]);
   assert.ok(!composition.placements.some(p => p.slot.startsWith("scene.") && p.control === "particles"));
   assert.ok(composition.placements.some(p => p.slot === "rail.legend" && p.feature === "presentation.visual-layers"));
   // Off Dynamic the dials would move nothing, so the method installs no Tune.

@@ -1,0 +1,950 @@
+[
+  {
+    "id": "tokyo/shopfront/left/0",
+    "asset": "tokyo-shopfront-left",
+    "position": [
+      -3,
+      0,
+      3.0
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/left/0",
+    "asset": "tokyo-blade-left",
+    "position": [
+      -3,
+      0,
+      3.0
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/left/0",
+    "asset": "tokyo-lights-left",
+    "position": [
+      -3,
+      0,
+      3.0
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/left/1",
+    "asset": "tokyo-shopfront-left",
+    "position": [
+      -3,
+      0,
+      -0.6000000000000001
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/left/1",
+    "asset": "tokyo-blade-left-1",
+    "position": [
+      -3,
+      0,
+      -0.6000000000000001
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/left/1",
+    "asset": "tokyo-lights-left",
+    "position": [
+      -3,
+      0,
+      -0.6000000000000001
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/left/2",
+    "asset": "tokyo-shopfront-left",
+    "position": [
+      -3,
+      0,
+      -4.2
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/left/2",
+    "asset": "tokyo-blade-left-2",
+    "position": [
+      -3,
+      0,
+      -4.2
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/left/2",
+    "asset": "tokyo-lights-left",
+    "position": [
+      -3,
+      0,
+      -4.2
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/left/3",
+    "asset": "tokyo-shopfront-left",
+    "position": [
+      -3,
+      0,
+      -7.800000000000001
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/left/3",
+    "asset": "tokyo-blade-left",
+    "position": [
+      -3,
+      0,
+      -7.800000000000001
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/left/3",
+    "asset": "tokyo-lights-left",
+    "position": [
+      -3,
+      0,
+      -7.800000000000001
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/left/4",
+    "asset": "tokyo-shopfront-left",
+    "position": [
+      -3,
+      0,
+      -11.4
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/left/4",
+    "asset": "tokyo-blade-left-1",
+    "position": [
+      -3,
+      0,
+      -11.4
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/left/4",
+    "asset": "tokyo-lights-left",
+    "position": [
+      -3,
+      0,
+      -11.4
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/left/5",
+    "asset": "tokyo-shopfront-left",
+    "position": [
+      -3,
+      0,
+      -15.0
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/left/5",
+    "asset": "tokyo-blade-left-2",
+    "position": [
+      -3,
+      0,
+      -15.0
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/left/5",
+    "asset": "tokyo-lights-left",
+    "position": [
+      -3,
+      0,
+      -15.0
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/left/6",
+    "asset": "tokyo-shopfront-left",
+    "position": [
+      -3,
+      0,
+      -18.6
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/left/6",
+    "asset": "tokyo-blade-left",
+    "position": [
+      -3,
+      0,
+      -18.6
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/left/6",
+    "asset": "tokyo-lights-left",
+    "position": [
+      -3,
+      0,
+      -18.6
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/right/0",
+    "asset": "tokyo-shopfront-right",
+    "position": [
+      3,
+      0,
+      1.75
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/right/0",
+    "asset": "tokyo-blade-right",
+    "position": [
+      3,
+      0,
+      1.75
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/right/0",
+    "asset": "tokyo-lights-right",
+    "position": [
+      3,
+      0,
+      1.75
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/right/1",
+    "asset": "tokyo-shopfront-closed-right",
+    "position": [
+      3,
+      0,
+      -1.85
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/right/1",
+    "asset": "tokyo-blade-right-1",
+    "position": [
+      3,
+      0,
+      -1.85
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/shopfront/right/2",
+    "asset": "tokyo-shopfront-right",
+    "position": [
+      3,
+      0,
+      -5.45
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/right/2",
+    "asset": "tokyo-blade-right-2",
+    "position": [
+      3,
+      0,
+      -5.45
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/right/2",
+    "asset": "tokyo-lights-right",
+    "position": [
+      3,
+      0,
+      -5.45
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/right/3",
+    "asset": "tokyo-shopfront-closed-right",
+    "position": [
+      3,
+      0,
+      -9.05
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/right/3",
+    "asset": "tokyo-blade-right",
+    "position": [
+      3,
+      0,
+      -9.05
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/shopfront/right/4",
+    "asset": "tokyo-shopfront-right",
+    "position": [
+      3,
+      0,
+      -12.65
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/right/4",
+    "asset": "tokyo-blade-right-1",
+    "position": [
+      3,
+      0,
+      -12.65
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/right/4",
+    "asset": "tokyo-lights-right",
+    "position": [
+      3,
+      0,
+      -12.65
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/shopfront/right/5",
+    "asset": "tokyo-shopfront-closed-right",
+    "position": [
+      3,
+      0,
+      -16.25
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/right/5",
+    "asset": "tokyo-blade-right-2",
+    "position": [
+      3,
+      0,
+      -16.25
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/shopfront/right/6",
+    "asset": "tokyo-shopfront-right",
+    "position": [
+      3,
+      0,
+      -19.85
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 0
+  },
+  {
+    "id": "tokyo/blade/right/6",
+    "asset": "tokyo-blade-right",
+    "position": [
+      3,
+      0,
+      -19.85
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 4
+  },
+  {
+    "id": "tokyo/lights/right/6",
+    "asset": "tokyo-lights-right",
+    "position": [
+      3,
+      0,
+      -19.85
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 3.2
+  },
+  {
+    "id": "tokyo/lantern/0/-1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      3.85
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/0/1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      2.15
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/1/-1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      0.2499999999999999
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/1/1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -1.4500000000000002
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/2/-1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -3.35
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/2/1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -5.05
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/3/-1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -6.950000000000001
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/3/1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -8.65
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/4/-1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -10.55
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/4/1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -12.25
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/5/-1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -14.15
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/5/1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -15.85
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/6/-1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -17.75
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/lantern/6/1",
+    "asset": "tokyo-lantern",
+    "position": [
+      -2.64,
+      2.57,
+      -19.450000000000003
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "emission": 6.4,
+    "emissionColorLinear": [
+      1.0,
+      0.27000001072883606,
+      0.054999999701976776
+    ]
+  },
+  {
+    "id": "tokyo/cyclist",
+    "asset": "tokyo-cyclist",
+    "position": [
+      0.35,
+      0.43,
+      -3.5
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ]
+  },
+  {
+    "id": "tokyo/vending",
+    "asset": "tokyo-vending",
+    "position": [
+      2.58,
+      0.45,
+      0.4
+    ],
+    "orientation": [
+      1,
+      0,
+      0,
+      0
+    ]
+  }
+]

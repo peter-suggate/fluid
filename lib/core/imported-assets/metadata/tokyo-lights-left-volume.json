@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "tokyo-lights-left",
+  "source": "tokyo-lights-left.glb",
+  "origin": [
+    -1.1500000000000001,
+    2.45,
+    -1.4500000000000002
+  ],
+  "dimensions": [
+    8,
+    8,
+    64
+  ],
+  "cellSize": 0.05,
+  "bandWidth": 0.05,
+  "brickCount": 8,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Native Warm paper lantern",
+      "baseColorLinear": [
+        1.0,
+        0.27000001072883606,
+        0.054999999701976776
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 5265,
+  "insideNodes": 86
+}

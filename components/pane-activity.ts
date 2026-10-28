@@ -42,7 +42,7 @@ function activityEntry(session: PaneSession, activity: ResourceActivity, plugin:
     : counted ? Math.max(0, Math.min(1, activity.completed / activity.total)) : undefined;
   const phases = plugin.progressPhases ?? [];
   const phaseIndex = phases.findIndex((phase) => phase.id === activity.phase);
-  const estimate = progressHistory.estimate(progressContext(session), activity, work ? within : undefined, now_ms);
+  const estimate = progressHistory.estimate(progressContext(session), activity, work ? within : undefined, now_ms, session.id);
   const fraction = estimate?.fraction
     ?? (within === undefined ? undefined : phaseIndex >= 0 ? (phaseIndex + within) / phases.length : within);
   return {
@@ -73,7 +73,7 @@ export interface PaneActivity {
  */
 export function useProgressHistory(session: PaneSession): void {
   useEffect(() => session.diagnostics.subscribe((state) =>
-    progressHistory.observe(progressContext(session), state.resourceReadiness, performance.now())), [session]);
+    progressHistory.observe(progressContext(session), state.resourceReadiness, performance.now(), session.id)), [session]);
 }
 
 /** Everything this pane is waiting on, as the transport card states it. */

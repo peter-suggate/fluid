@@ -42,3 +42,41 @@ test("volume drift takes the band absolute", () => {
   assert.equal(v.pass, false);
   assert.ok(Math.abs(worst(v.report, "volumeDrift") - 1.25) < 1e-9);
 });
+
+test("missing or non-finite measurements fail, including JSON nulls", () => {
+  for (const invalid of [NaN, Infinity, -Infinity, null]) {
+    const s = series(6, 20, () => 100);
+    s.volumeDrift[0]!.set(10, invalid as number);
+    const result = repeatSpreadVerdict(arms, s);
+    assert.equal(result.pass, false, String(invalid));
+    assert.match((result.report.volumeDrift as { error: string }).error, /finite measurements/);
+  }
+});
+
+test("empty or disjoint frame sets cannot pass the gate", () => {
+  for (const disjoint of [false, true]) {
+    const s = series(6, 20, () => 100);
+    s.particles[0] = disjoint ? new Map([[21, 100]]) : new Map();
+    const result = repeatSpreadVerdict(arms, s);
+    assert.equal(result.pass, false);
+    assert.match((result.report.particles as { error: string }).error, /No frames/);
+  }
+});
+
+test("both arms and every instance's series are required", () => {
+  assert.equal(repeatSpreadVerdict([], series(0, 20, () => 100)).pass, false);
+  assert.equal(repeatSpreadVerdict([0, 0, 0, 0], series(4, 20, () => 100)).pass, false);
+  const s = series(6, 20, () => 100);
+  s.bandTiles.pop();
+  assert.equal(repeatSpreadVerdict(arms, s).pass, false);
+});
+
+test("overflowing window statistics cannot pass the gate", () => {
+  assert.equal(repeatSpreadVerdict(arms, series(6, 20, () => Number.MAX_VALUE)).pass, false);
+});
+
+test("lagged endpoints still score the common measured frames", () => {
+  const s = series(6, 20, () => 100);
+  for (const m of METRICS) s[m][0]!.delete(20);
+  assert.equal(repeatSpreadVerdict(arms, s).pass, true);
+});

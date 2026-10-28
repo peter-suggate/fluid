@@ -35,6 +35,8 @@ const BN_BLOCKS:u32=${blocks}u;const BN_TABLE:u32=${table}u;
 const BN_RECORD:u32=${table + UNIFORM_PAGE_TABLE_WORDS}u;const BN_ROWS:u32=${table + l.rows}u;const BN_WALL_COUNT:u32=${table + l.wallCount}u;const BN_WALLS:u32=${table + l.walls}u;
 const BN_HOMES:u32=${table + l.homes}u;
 const BN_FREE:u32=0xffffffffu;const BN_SOLID:u32=0xffffffffu;
+// SOLID and BULK16 words (the top bit): no 4h block across, a wall slot.
+const BN_HELD:u32=0x80000000u;
 ${uniformWindowAddressWGSL("bnTail","BN_TABLE","BN_BLOCKS")}
 @compute @workgroup_size(64) fn bnRows(@builtin(global_invocation_id) gid:vec3u){
  let b=gid.x;if(b>=BN_BLOCKS){return;}
@@ -66,10 +68,10 @@ ${uniformWindowAddressWGSL("bnTail","BN_TABLE","BN_BLOCKS")}
 }
 const BN_LANES:u32=256u;const BN_PER:u32=${Math.ceil(blocks / 256)}u;
 var<workgroup> bnScan:array<u32,256>;
-// Face f = 2 axis + side of block b meets a SOLID page: the row word 1, 3 or 9 below or above its own.
+// Face f = 2 axis + side of block b meets a SOLID or BULK16 page: the row word 1, 3 or 9 below or above its own.
 fn bnWall(b:u32,f:u32)->bool{
  let stride=select(select(9u,3u,(f>>1u)==1u),1u,(f>>1u)==0u);
- return bnTail[BN_ROWS+27u*b+select(13u-stride,13u+stride,(f&1u)==1u)]==BN_SOLID;
+ return bnTail[BN_ROWS+27u*b+select(13u-stride,13u+stride,(f&1u)==1u)]>=BN_HELD;
 }
 // Neither sentinel holds a page, and both their records are free.
 fn bnStored(b:u32)->bool{return bnTail[BN_RECORD+b]!=BN_FREE;}

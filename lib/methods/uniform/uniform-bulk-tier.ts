@@ -2,12 +2,15 @@ import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPick, uniformDetailPipeline, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
+import { uniformMixedRegionWGSL } from "./uniform-mixed-layout-builder";
 import { UNIFORM_REGION_TIER } from "./uniform-region-heat";
 import {
   UNIFORM_BULK_COUNT, UNIFORM_BULK_DEPTH_CELLS, UNIFORM_BULK_ERROR, UNIFORM_BULK_FACE_TEXELS, UNIFORM_BULK_FACE_WIDTH, UNIFORM_BULK_FLOOR,
   UNIFORM_BULK_HEADER, UNIFORM_BULK_HOLD, UNIFORM_BULK_HOLD_FRAMES, UNIFORM_BULK_LIST, UNIFORM_BULK_MEAN, UNIFORM_BULK_OFFSET, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, UNIFORM_BULK_WORDS,
 } from "./uniform-bulk-tier-reference";
 import type { UniformMixedPressureBulk } from "./uniform-mixed-pressure-velocity";
+import { BULK16_PAGE, BULK16_PAGE_WORDS } from "./uniform-bulk-pages-reference";
+import { BULK16_STATUS, type UniformBulkPages } from "./uniform-bulk-pages";
 
 const PASS: GPUComputePassDescriptor = { label: "Uniform bulk tier selection" };
 const GROUPS = 1024;
@@ -26,6 +29,8 @@ export interface UniformBulkTierFields {
   tiers: GPUBuffer;
   /** The root's warm pressure (by tile key), which a member region's 64 rows start from as their mean. */
   pressure: GPUBufferBinding;
+  /** The BULK16 slot store (bulkTier "16h" with whole pages): bulkPromote asks its pages back. */
+  bulkPages?: UniformBulkPages;
 }
 
 /** The 16h bulk tier (bulkTier "16h"; uniform-bulk-tier-reference for the
@@ -60,6 +65,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
   readonly faces: GPUTexture;
   private readonly readback: GPUBuffer;
   private pipeline?: GPUComputePipeline;
+  private promotePipeline?: GPUComputePipeline;
   private group?: UniformDetailGroup;
   private layout?: GPUBindGroupLayout;
   private fields?: UniformBulkTierFields;
@@ -80,14 +86,19 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
   }
   /** Once, after the pressure stages exist. */
   bind(fields: UniformBulkTierFields): void { this.fields = fields; }
+  private regionTable?: { buffer: GPUBuffer; offset: number };
+  /** Once, before initialize: the census's region table (residencyRecords.regions),
+   * whose bit 0 marks authored static h tiles (umStaticFine). */
+  attachRegions(regions: { buffer: GPUBuffer; offset: number }): void { this.regionTable = regions; }
   async initialize(): Promise<void> {
     const f = this.fields; if (!f) throw new Error("The 16h bulk tier is not bound");
-    const device = this.device, R = this.regions, S = !!f.rootTopology;
+    const regions = this.regionTable; if (!regions) throw new Error("The 16h bulk tier has no region table (attachRegions)");
+    const device = this.device, R = this.regions, S = !!f.rootTopology, P = f.bulkPages;
     const buffer = (binding: number, type: GPUBufferBindingType) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type } });
     this.layout = uniformDetailBindLayout(device, { label: "Uniform bulk tier", entries: [buffer(0, "uniform"),
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       buffer(2, "read-only-storage"), buffer(3, "read-only-storage"), ...(S ? [buffer(4, "read-only-storage")] : []), buffer(5, "read-only-storage"), buffer(6, "read-only-storage"), buffer(7, "storage"),
-      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }] });
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }, buffer(9, "read-only-storage"), ...(P ? [buffer(10, "storage")] : [])] });
     // The root pressure's view, aligned down (the arena's rootSpan).
     const p = f.pressure, align = device.limits.minStorageBufferOffsetAlignment, offset = p.offset ?? 0, base = offset - offset % align;
     const size = p.size ?? p.buffer.size - offset;
@@ -97,7 +108,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
       { binding: 0, resource: { buffer: f.params, size: 80 } }, { binding: 1, resource: f.velocity },
       { binding: 2, resource: { buffer: f.slots.buffer } }, { binding: 3, resource: f.rootPhi }, ...(f.rootTopology ? [{ binding: 4, resource: f.rootTopology }] : []),
       { binding: 5, resource: { buffer: f.tiers } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
-      { binding: 7, resource: this.record }, { binding: 8, resource: this.faces.createView() }] });
+      { binding: 7, resource: this.record }, { binding: 8, resource: this.faces.createView() }, { binding: 9, resource: { buffer: regions.buffer } }, ...(P ? [{ binding: 10, resource: P.binding }] : [])] });
     const H = UNIFORM_BULK_HEADER(R), C = UNIFORM_BULK_COUNT;
     const code = uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec4f}
@@ -110,6 +121,8 @@ ${S ? "@group(1) @binding(4) var<storage,read> rootTopology:array<vec4f>;" : ""}
 @group(1) @binding(6) var<storage,read> rootPressure:array<f32>;
 @group(1) @binding(7) var<storage,read_write> record:array<atomic<u32>>;
 @group(1) @binding(8) var faces:texture_storage_2d<r32float,write>;
+@group(1) @binding(9) var<storage,read> bRegions:array<u32>;
+${uniformMixedRegionWGSL("bRegionsAt", i => `bRegions[${regions.offset}u+${i}]`)}
 const B_REGIONS:u32=${R}u;const B_SLOTS:u32=${f.slots.word}u;const B_ROOT:u32=${this.rootWord}u;
 const B_MEAN:u32=${UNIFORM_BULK_MEAN(R)}u;const B_OFFSET:u32=${UNIFORM_BULK_OFFSET(R)}u;
 const B_HOLD:u32=${UNIFORM_BULK_HOLD(R)}u;const B_ERROR:u32=${UNIFORM_BULK_ERROR(R)}u;const B_HEADER:u32=${H}u;const B_LIST:u32=${UNIFORM_BULK_LIST(R)}u;
@@ -140,6 +153,8 @@ fn bFace(t:vec3i,a:u32)->f32{
     let d=vec3i(vec3u(i%12u,(i/12u)%12u,i/144u))-vec3i(4);let t=origin+d;let own=all(d>=vec3i(0))&&all(d<vec3i(4));
     let kind=umTileKind(t);
     if(kind!=UM_RESIDENT){if(own||kind==UM_AIR){atomicOr(&bFail,1u);}continue;}
+    // Authored static h tiles are fine detail: their region holds h, never 16h.
+    if(own&&(bRegionsAt(vec3u(t))&1u)!=0u){atomicOr(&bFail,1u);continue;}
     let k=umTileAt(vec3u(t));
     if(slots[B_SLOTS+k]!=0u||tiers[umPageOfTile(k)]==B_HOT){atomicOr(&bFail,1u);continue;}
     ${S ? "let top=rootTopology[k];let open=top.x;" : "let open=1.0;"}
@@ -193,19 +208,69 @@ fn bFace(t:vec3i,a:u32)->f32{
   workgroupBarrier();
  }
 }
+${P ? /* wgsl */ `
+// Promote (BULK16 pages): a live slot's page asks for its block back (its
+// promote word, which the next commit's decide reads) when any of its eight
+// regions fails the structural test a member must pass: across its 3^3
+// neighbourhood (the page's tiles +-4) an AIR page, an h band tile, a HOT
+// region, a cut tile or one within UNIFORM_BULK_DEPTH_CELLS of the surface;
+// or a face mean moving UNIFORM_BULK_REACH_CELLS h a step. The error test
+// needs 4h faces a slot does not hold: it waits for M3.
+@group(1) @binding(10) var<storage,read_write> bStore:array<u32>;
+const BS_LIVE:u32=${P.layout.live}u;const BS_RECORDS:u32=${P.layout.records}u;
+var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
+@compute @workgroup_size(64) fn bulkPromote(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u){
+ let dt=params.hDt.w;let h=params.policy.w;
+ if(lane==0u){bN=bStore[${BULK16_STATUS.live}u];}
+ let n=workgroupUniformLoad(&bN);
+ for(var e=group.x;e<n;e+=groups.x){
+  if(lane==0u){atomicStore(&bFail,0u);}
+  workgroupBarrier();
+  let rec=BS_RECORDS+${BULK16_PAGE_WORDS}u*bStore[BS_LIVE+e];
+  let page=vec3i(bitcast<i32>(bStore[rec]),bitcast<i32>(bStore[rec+1u]),bitcast<i32>(bStore[rec+2u]))-umFramePage();
+  // The 27 pages first: AIR fails, and only a resident page has tiles to
+  // test (a BULK16 or SOLID page has none), so deep water costs 27 reads.
+  if(lane<27u){bKinds[lane]=umPageKind(page+vec3i(vec3u(lane%3u,(lane/3u)%3u,lane/9u))-vec3i(1));}
+  workgroupBarrier();
+  for(var q=0u;q<27u;q++){
+   let kind=bKinds[q];
+   if(kind==UM_AIR){if(lane==0u){atomicOr(&bFail,1u);}continue;}
+   if(kind!=UM_RESIDENT){continue;}
+   // Its tiles within 4 of the page: 4 deep across a face, all 8 along it.
+   let d=vec3i(vec3u(q%3u,(q/3u)%3u,q/9u))-vec3i(1);
+   let low=8*page+select(select(vec3i(8),vec3i(0),d==vec3i(0)),vec3i(-4),d==vec3i(-1));let ext=select(vec3u(4u),vec3u(8u),d==vec3i(0));
+   for(var i=lane;i<ext.x*ext.y*ext.z;i+=64u){
+    let t=low+vec3i(vec3u(i%ext.x,(i/ext.x)%ext.y,i/(ext.x*ext.y)));
+    let k=umTileAt(vec3u(t));
+    if(slots[B_SLOTS+k]!=0u||tiers[umPageOfTile(k)]==B_HOT){atomicOr(&bFail,1u);continue;}
+    ${S ? "let open=rootTopology[k].x;" : "let open=1.0;"}
+    if(open<=1e-5){continue;}
+    if(open<1.0-1e-5||rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,1u);}
+   }
+  }
+  if(lane<36u&&abs(bitcast<f32>(bStore[rec+${BULK16_PAGE.velocity}u+lane]))*dt>B_REACH*h){atomicOr(&bFail,1u);}
+  workgroupBarrier();
+  if(lane==0u&&atomicLoad(&bFail)!=0u){bStore[rec+${BULK16_PAGE.promote}u]=1u;}
+  workgroupBarrier();
+ }
+}` : ""}
 `;
     const module = uniformDetailModule(device, { label: "Uniform bulk tier selection", code });
     const info = await module.getCompilationInfo(), errors = info.messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
     const layout = device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.layout] });
     this.pipeline = await uniformDetailPipeline(device, this.ownership, { layout, compute: { module, entryPoint: "bulkSelect", constants: { umDispatchX: this.ownership.dispatchX } } });
+    if (P) this.promotePipeline = await uniformDetailPipeline(device, this.ownership, { layout, compute: { module, entryPoint: "bulkPromote", constants: { umDispatchX: this.ownership.dispatchX } } });
   }
   /** After the band's prepare (its slot map) and the root RHS, before the solve. */
   encodeSelect(encoder: GPUCommandEncoder): void {
     if (!this.pipeline || !this.group) throw new Error("The 16h bulk tier is not initialized");
     encoder.clearBuffer(this.record.buffer, this.record.offset + 4 * UNIFORM_BULK_HEADER(this.regions), 4 * 9);
     const pass = encoder.beginComputePass(PASS); pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.group.group);
-    pass.setPipeline(uniformDetailPick(this.pipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.regions)); pass.end();
+    pass.setPipeline(uniformDetailPick(this.pipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.regions));
+    // A live slot a workgroup (its count on the GPU): at most the store's capacity.
+    if (this.promotePipeline) { pass.setPipeline(uniformDetailPick(this.promotePipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.fields!.bulkPages!.layout.capacity)); }
+    pass.end();
   }
   /** Diagnostics (a readback): the last selection's counts. */
   async readCounts(): Promise<Record<keyof typeof UNIFORM_BULK_COUNT, number> & { listed: number }> {

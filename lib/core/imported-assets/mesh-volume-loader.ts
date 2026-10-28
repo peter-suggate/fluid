@@ -1,3 +1,4 @@
+import { attachSurfaceMapping } from "./surface-mapping";
 import { decodeMeshVolume, type MeshVolume } from "./mesh-volume";
 
 /** Hosts may serve .gz as a compressed file or as HTTP Content-Encoding.
@@ -12,7 +13,13 @@ export async function fetchMeshVolume(url: string, request: typeof fetch = fetch
       const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
       bytes = new Uint8Array(await new Response(stream).arrayBuffer());
     }
-    return decodeMeshVolume(bytes);
+    const volume = decodeMeshVolume(bytes);
+    if (volume.header.surfaceMapping) {
+      const companion = await request(volume.header.surfaceMapping.url);
+      if (!companion.ok) throw new Error(`Surface mapping HTTP ${companion.status}`);
+      await attachSurfaceMapping(volume, bytes, new Uint8Array(await companion.arrayBuffer()));
+    }
+    return volume;
   } catch (cause) {
     throw new Error(`Loading mesh asset ${url}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
   }

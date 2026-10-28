@@ -1,0 +1,39 @@
+{
+  "collection": {
+    "id": "alpine-lake",
+    "label": "Alpine Lake"
+  },
+  "source": "alpine-runtime.blend",
+  "assets": [
+    {
+      "id": "alpine-mountain-ridge",
+      "mesh": "alpine-mountain-ridge.glb",
+      "volume": "alpine-mountain-ridge.fvx.gz",
+      "cellSize": 1.25,
+      "bandCells": 1
+    },
+    {
+      "id": "alpine-fir-0",
+      "mesh": "alpine-fir-0.glb",
+      "volume": "alpine-fir-0.fvx.gz",
+      "cellSize": 0.04,
+      "bandCells": 1,
+      "solidRule": "component-union"
+    },
+    {
+      "id": "alpine-fir-1",
+      "mesh": "alpine-fir-1.glb",
+      "volume": "alpine-fir-1.fvx.gz",
+      "cellSize": 0.03,
+      "bandCells": 1,
+      "solidRule": "component-union"
+    },
+    {
+      "id": "alpine-shore-scree",
+      "mesh": "alpine-shore-scree.glb",
+      "volume": "alpine-shore-scree.fvx.gz",
+      "cellSize": 0.1,
+      "bandCells": 1
+    }
+  ]
+}

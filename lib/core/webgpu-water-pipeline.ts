@@ -1,8 +1,15 @@
+import { waterTransmissionWGSL } from "./water-transmission.wgsl";
+import { waterInterfaceSamplingWGSL } from "./water-interface-sampling.wgsl";
+import { waterSolidContactWGSL } from "./water-solid-contact";
+import { waterDielectricInterfaceWGSL } from "./water-dielectric-interface";
+import { svoEnvironmentCloudsWGSL } from "../svo/features/radiance/svo-environment-lighting";
+import { waterReflectionFilterWGSL } from "./water-reflection-filter.wgsl";
 import {uniformSolidContourWGSL} from "../methods/uniform/uniform-solid-contour.wgsl";
+import { waterReflectionWGSL } from "./water-reflection.wgsl";
 import {UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES} from "../methods/uniform/uniform-open-world-terrain";
 import { uniformMixedPresentationWGSL } from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourWGSL } from "../methods/uniform/uniform-lattice-address";
-import type { FluidSurfaceRenderMode } from "../features/surface-display/definition";
+import type { FluidSurfaceRenderMode, WaterReflectionMode } from "../features/surface-display/definition";
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
@@ -14,12 +21,12 @@ import {
   resolveWaterOptics,
   unifiedDisplayTransferShaderLibrary,
   unifiedLightingShaderLibrary,
-  WATER_OPTICS,
   WATER_SCENE_OPTICS_BYTES,
   WATER_SCENE_OPTICS_FLOATS,
   WATER_SCENE_OPTICS_RECEIVER_FLOAT_OFFSET,
   waterSceneOpticsShaderLibrary,
   type WaterOpticsAuthoring,
+  type WaterEnvironmentRadiance,
   type DisplayGradeAuthoring,
 } from "./webgpu-lighting";
 import { terrainContentStamp, terrainHeightAt, type TerrainDescription } from "./terrain";
@@ -37,6 +44,13 @@ import {
 } from "../svo/pipeline/render-stage-switches";
 
 type FluidDomain = NonNullable<GPUSolverInstance["fluidDomain"]>;
+
+/** Optional full-scene visibility provider, encoded after the water interfaces.
+ * Input and output reflections are distinct to prevent a texture feedback loop. */
+export type WaterWorldReflectionEncoder = (encoder: GPUCommandEncoder, inputs: {
+  position: GPUTextureView; normal: GPUTextureView; dryScene: GPUTextureView;
+  screenReflections: GPUTextureView; target: GPUTextureView; rayKind?: "transmission";
+}) => boolean;
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -967,7 +981,7 @@ fn collectWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(local_invoca
   udrInit();
   let b = 1u + (group.x >> 3u);
   let record = umBlockWord(b);
-  let page = vec3i(vec3u(record & 63u, (record >> 6u) & 63u, (record >> 12u) & 63u));
+  let page = vec3i(umBlockPage(b));
   let windowHalf = vec3u(group.x & 1u, (group.x >> 1u) & 1u, (group.x >> 2u) & 1u);
   let cacheOrigin = 8 * page + vec3i(4u * windowHalf) - vec3i(1);
   // Load raw texels, retaining the original per-window wall clamp below.
@@ -1668,6 +1682,8 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(12) var rearBackPosition:texture_2d<f32>;
 @group(0) @binding(13) var rearBackNormal:texture_2d<f32>;
 @group(0) @binding(14) var causticMap:texture_2d<f32>;
+@group(0) @binding(21) var frontReflections:texture_2d_array<f32>;
+@group(0) @binding(22) var rearReflections:texture_2d_array<f32>;
 // The mixed topology of Uniform Geometric's nodal level set (its tail is the
 // detail table of a packed field); one word for every other method. With it
 // the contact band samples phi as the extraction does, from the 4h vertex
@@ -1685,29 +1701,14 @@ struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let aperture=cameraTanHalfFov();let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*aperture),dot(q,up)/(d*aperture));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
-// Interface positions deliberately live in unfilterable rgba32float targets.
-// A half-float world coordinate has millimetre-scale ULPs at ordinary camera
-// distances; subtracting two such independently rounded coordinates turns a
-// sub-cell film thickness into visible contour bands. Preserve the full world
-// position and reproduce bilinear filtering explicitly with textureLoad.
-fn safePositionSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{
-  let size=vec2i(textureDimensions(texture));
-  let p=clamp(uv,vec2f(.001),vec2f(.999))*vec2f(size)-vec2f(.5);
-  let base=vec2i(floor(p));let f=fract(p);let hi=size-vec2i(1);
-  let s00=textureLoad(texture,clamp(base,vec2i(0),hi),0);
-  let s10=textureLoad(texture,clamp(base+vec2i(1,0),vec2i(0),hi),0);
-  let s01=textureLoad(texture,clamp(base+vec2i(0,1),vec2i(0),hi),0);
-  let s11=textureLoad(texture,clamp(base+vec2i(1,1),vec2i(0),hi),0);
-  let sampled=mix(mix(s00,s10,f.x),mix(s01,s11,f.x),f.y);
-  if(sampled.a<=1e-4){return vec4f(0.0);}
-  return vec4f(sampled.rgb/sampled.a,sampled.a);
-}
+${waterInterfaceSamplingWGSL}
 // Interface targets carry a binary validity mask in alpha. Their RGB is not
 // useful outside that mask, so bilinear filtering makes a boundary sample
 // premultiplied by its fractional coverage. Divide that coverage back out;
 // this preserves smooth interpolation among valid surface samples without
 // pulling world positions toward zero or normals toward the clear value.
 fn safeInterfaceSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{
+  if(!waterInterfaceUVValid(uv)){return vec4f(0.0);}
   let sampled=safeSample(texture,uv);
   if(sampled.a<=1e-4){return vec4f(0.0);}
   return vec4f(sampled.rgb/sampled.a,sampled.a);
@@ -1733,7 +1734,6 @@ fn waterKeyColor()->vec3f{return select(environmentLightColor(),waterKeyRadiance
 // leaves every un-authoring scene byte-identical and lets an authored pond
 // carry its own hue all the way out to the rim instead of ending in a fixed
 // pale turquoise that contradicts its body.
-fn waterTintScale()->vec3f{return waterScatter()/vec3f(${WATER_OPTICS.scatter.join(",")});}
 
 // The raster mesh is the fast global solution. Only pixels whose analytic
 // rigid depth lies in this narrow band evaluate the resident implicit field.
@@ -1837,12 +1837,14 @@ fn causticModulation(textureUV:vec2f)->vec3f{
 // contact is recognised here: the refined dry surface along the exit pixel's
 // ray lies no more than ~a solver cell behind the back face, measured along the
 // back normal so grazing views of a flat floor classify like head-on ones. A
-// dry surface in front of the back face (a coarse contact buried in the solid)
-// is a contact too; a sky miss never is.
-fn backIsSolidContact(back:vec3f,exitN:vec3f,exitUV:vec2f,cellSize:f32)->bool{
-  let dry=resolvedDrySceneDepth(safeSample(sceneTexture,exitUV).a);if(dry>60000.0){return false;}
+// dry surface in front of the back face can instead be an unrelated foreground
+// occluder after refraction shifts exitUV. Return signed normal separation;
+// only bounded proximity or a verified refracted-ray hit proves contact.
+fn backSolidNormalGap(back:vec3f,exitN:vec3f,exitUV:vec2f)->f32{
+  if(!waterInterfaceUVValid(exitUV)){return 1e20;}
+  let dry=resolvedDrySceneDepth(safeSample(sceneTexture,exitUV).a);if(dry>60000.0){return 1e20;}
   let ray=back-u.cameraPosition.xyz;let backDistance=length(ray);
-  return (dry-backDistance)*abs(dot(ray/max(backDistance,1e-6),exitN))<=1.25*cellSize;
+  return (dry-backDistance)*abs(dot(ray/max(backDistance,1e-6),exitN));
 }
 // Screen-space march of the refracted ray against the refined dry depth, as in
 // SSR: eight linear steps over reach, then four bisections of the bracketing
@@ -1861,6 +1863,53 @@ fn solidTerminatedHit(origin:vec3f,direction:vec3f,reach:f32)->vec4f{
 // interval. A breaking sheet can leave another interval behind it, so the
 // interface raster peels one more front/back pair after the first exit. Shade
 // that pair before the foreground interval consumes the transmitted radiance.
+// Interpolating depth across a leaf/sky edge invents a false sloping receiver.
+// Keep depth and radiance on the same discrete visibility sample.
+fn waterReflectionColor(uv:vec2f)->vec3f{
+  let dims=textureDimensions(sceneTexture);
+  let pixel=clamp(vec2i(uv*vec2f(dims)),vec2i(0),vec2i(dims)-1);
+  // Match the depth footprint: bilinear colour would pull unvalidated sky
+  // across silhouettes even when the ray correctly hit a dark leaf.
+  return textureLoad(sceneTexture,pixel,0).rgb;
+}
+fn waterReflectionDepth(uv:vec2f)->f32{
+  let size=vec2i(textureDimensions(sceneTexture));
+  let pixel=clamp(vec2i(uv*vec2f(size)),vec2i(0),size-vec2i(1));
+  return resolvedDrySceneDepth(textureLoad(sceneTexture,pixel,0).a);
+}
+${svoEnvironmentCloudsWGSL}
+// The reflected sky uses the same resolved radiance palette as dry scenery.
+// Its directional key is evaluated separately by unifiedWaterSpecular, once.
+fn waterEnvironmentRadiance(direction:vec3f)->vec3f{
+  if(waterScene.environmentLowerEnabled.w<.5){return environmentLight(direction);}
+  let r2=waterRoughness()*waterRoughness();
+  let lower=waterScene.environmentLowerEnabled.xyz;
+  let upper=waterScene.environmentUpperScale.xyz;
+  let sky=mix(mix(lower,upper,clamp(direction.y*.5+.5,0.0,1.0)),.5*(lower+upper),r2);
+  let accent=waterScene.environmentAccentPower.xyz*.13*pow(1.0-abs(direction.y),mix(waterScene.environmentAccentPower.w,1.0,r2));
+  return svoEnvironmentCloudRadiance(sky+accent,direction,waterRoughness(),waterScene.surface.y,lower,upper,waterScene.environmentKeyRadiance.xyz,waterScene.environmentKeyDirection.xyz)*waterScene.environmentUpperScale.w;
+}
+${waterReflectionWGSL}
+${waterReflectionFilterWGSL}
+${waterDielectricInterfaceWGSL}
+${waterSolidContactWGSL}
+struct ReflectionOut { @location(0) front:vec4f,@location(1) rear:vec4f }
+${waterTransmissionWGSL}
+fn reflectionForInterface(positions:texture_2d<f32>,normals:texture_2d<f32>,uv:vec2f)->vec4f{
+  let p=safePositionSample(positions,uv);if(p.a<.5){return vec4f(0);}
+  var n=normalize(safeInterfaceSample(normals,uv).xyz);
+  let rd=normalize(p.xyz-u.cameraPosition.xyz);
+  if(dot(n,rd)>0.0){n=-n;}
+  let cell=min(min(u.container.x/u.gridInfo.x,u.container.y/u.gridInfo.y),u.container.z/u.gridInfo.z);
+  // The optical composite rejects this hidden interface too. Mark it invalid
+  // so reconstruction cannot blur an occluded pixel's black radiance outward.
+  if(waterReflectionDepth(uv)+max(.0015,.18*cell)<length(p.xyz-u.cameraPosition.xyz)){return vec4f(0,0,0,-1);}
+  return waterReflectionSample(p.xyz+n*max(.002,.025*cell),reflect(rd,n),cell);
+}
+@fragment fn reflectionMain(input:VOut)->ReflectionOut{
+  let uv=vec2f(input.uv.x,1.0-input.uv.y);
+  return ReflectionOut(reflectionForInterface(frontPosition,frontNormal,uv),reflectionForInterface(rearFrontPosition,rearFrontNormal,uv));
+}
 fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let rd=cameraRay(textureUV);
   let front=safePositionSample(rearFrontPosition,textureUV);if(front.a<.5){return dryColor;}
@@ -1872,21 +1921,34 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   var inside=refract(rd,n,1.0/waterIndexOfRefraction());if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
   for(var iteration=0;iteration<3;iteration+=1){back=safePositionSample(rearBackPosition,exitUV);if(back.a<.5){break;}let backNormalSample=safeInterfaceSample(rearBackNormal,exitUV);let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(backNormalSample.xyz);}
-  let refinedBack=safePositionSample(rearBackPosition,exitUV);let refinedBackNormal=safeInterfaceSample(rearBackNormal,exitUV);if(refinedBack.a<.5){return dryColor;}back=refinedBack;exitN=normalize(refinedBackNormal.xyz);
+  let refinedBack=safePositionSample(rearBackPosition,exitUV);let refinedBackNormal=safeInterfaceSample(rearBackNormal,exitUV);
+  let worldAt=clamp(vec2i(textureUV*vec2f(textureDimensions(rearReflections))),vec2i(0),vec2i(textureDimensions(rearReflections))-1);
+  let worldTransmission=textureLoad(rearReflections,worldAt,1,0);let useWorldTransmission=refinedBack.a<.5&&worldTransmission.a>0.0;
+  if(refinedBack.a<.5){if(!useWorldTransmission){return dryColor;}back=vec4f(front.xyz+inside*worldTransmission.a,1);exitN=inside;}
+  else{back=refinedBack;exitN=normalize(refinedBackNormal.xyz);}
   var thickness=length(back.xyz-front.xyz);if(thickness<1e-4){return dryColor;}
   let thinBoundaryFilm=filmDensity>1e-4;
-  var outgoing=inside;var tir=false;var transmitted=dryColor;
-  // A basin contact ends the light at the refined solid (backIsSolidContact).
+  var outgoing=inside;var transmitted=dryColor;
+  // A basin contact ends the light at the refined solid (backSolidNormalGap).
   // Fail-safe when the march finds no surface: the unrefracted pixel, i.e.
   // dryColor, over its own dry depth, bounded by the march reach.
-  if(backIsSolidContact(back.xyz,exitN,exitUV,cellSize)){let reach=1.5*thickness+4.0*cellSize;let hit=solidTerminatedHit(front.xyz,inside,reach);if(hit.w>.5){thickness=hit.z;transmitted=safeSample(sceneTexture,hit.xy).rgb*causticModulation(hit.xy);}else{thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,reach);}}
-  else{if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,waterIndexOfRefraction());tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
-  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);}
+  let contactGap=backSolidNormalGap(back.xyz,exitN,exitUV);let contactReach=1.5*thickness+4.0*cellSize;var contactHit=vec4f(0.0);
+  if(contactGap<=1.25*cellSize){contactHit=solidTerminatedHit(front.xyz,inside,contactReach);}
+  if(verifiedWaterSolidContact(contactGap,cellSize,contactHit.w>.5)){if(contactHit.w>.5){thickness=contactHit.z;transmitted=safeSample(sceneTexture,contactHit.xy).rgb*causticModulation(contactHit.xy);}else{thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,contactReach);}}
+  else{if(dot(exitN,inside)<0.0){exitN=-exitN;}
+  let internalReflection=reflect(inside,-exitN);let exitReflectance=dielectricInterfaceReflectance(dot(inside,exitN),waterIndexOfRefraction());
+  outgoing=refract(inside,-exitN,waterIndexOfRefraction());if(length(outgoing)<1e-5){outgoing=internalReflection;}
+  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
+  // Internal reflected radiance uses the distant environment approximation.
+  // Partition at this exit, then absorb the path already travelled through
+  // water. A binary TIR tint after entrance Fresnel broke both continuity and
+  // the energy partition at the critical angle.
+  transmitted=mix(transmitted,waterEnvironmentRadiance(internalReflection),exitReflectance);}
+  if(useWorldTransmission){thickness=worldTransmission.a;transmitted=worldTransmission.rgb;}
   let refracted=unifiedAbsorbingTransmission(transmitted,waterAbsorption(),waterScatter(),thickness);
-  let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);let ssr=safeSample(sceneTexture,project(front.xyz+reflectedDir*.8));reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
-  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);if(tir){water=mix(water,environmentLight(outgoing),.88);}
+  let reflectedDir=reflect(rd,n);let reflected=filteredWaterReflection(rearReflections,rearFrontPosition,rearFrontNormal,textureUV,front.xyz,n,reflectedDir,cellSize);
+  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);
   water+=waterKeyColor()*unifiedWaterSpecular(n,-rd,waterKeyDirection(),waterRoughness(),waterFresnelF0());
-  water+=vec3f(.018,.10,.085)*waterTintScale()*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*waterTintScale()*pow(1.0-cosine,3.0)*.15;
   // The augmented wall value tends continuously to zero, but a rasterized
   // Fresnel lobe does not: its last covered pixel is still fully reflective.
   // Fade only the last few percent of represented film mass so the true dry
@@ -1943,36 +2005,41 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
     // water back face is conservatively limited to one fluid cell.
     thickness=max(.002,cellSize);exitPoint=innerOrigin+inside*thickness;exitN=-inside;
   }
-  var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);var transmittedScene=vec3f(0.0);
-  // A liquid/basin back face (backIsSolidContact) is not refracted out: the
+  var outgoing=inside;var internalReflection=inside;var exitReflectance=0.0;var backgroundUV=project(exitPoint);var transmittedScene=vec3f(0.0);
+  // A liquid/basin back face (backSolidNormalGap) is not refracted out: the
   // refracted ray ends where it meets the refined dry solid, and its path
   // length is the absorbing thickness. Nothing lies behind that opaque exit, so
   // no rear water interval is composited. Fail-safe when the march leaves the
   // screen or never crosses: the unrefracted pixel's colour over its own dry
   // depth, bounded by the march reach.
-  if(!opaqueSolidExit&&meshExitValid&&backIsSolidContact(back.xyz,exitN,exitUV,cellSize)){
-    let reach=1.5*thickness+4.0*cellSize;let hit=solidTerminatedHit(front.xyz,inside,reach);
-    if(hit.w>.5){backgroundUV=hit.xy;thickness=hit.z;}else{backgroundUV=textureUV;thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,reach);}
+  var contactGap=1e20;let contactReach=1.5*thickness+4.0*cellSize;var contactHit=vec4f(0.0);
+  if(!opaqueSolidExit&&meshExitValid){contactGap=backSolidNormalGap(back.xyz,exitN,exitUV);if(contactGap<=1.25*cellSize){contactHit=solidTerminatedHit(front.xyz,inside,contactReach);}}
+  if(verifiedWaterSolidContact(contactGap,cellSize,contactHit.w>.5)){
+    if(contactHit.w>.5){backgroundUV=contactHit.xy;thickness=contactHit.z;}else{backgroundUV=textureUV;thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,contactReach);}
     transmittedScene=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
   }else{
-  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,waterIndexOfRefraction());tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
+  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}
+  internalReflection=reflect(inside,-exitN);exitReflectance=dielectricInterfaceReflectance(dot(inside,exitN),waterIndexOfRefraction());
+  outgoing=refract(inside,-exitN,waterIndexOfRefraction());if(length(outgoing)<1e-5){outgoing=internalReflection;}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
   // The modulation goes on the *dry* term rather than on what comes back:
   // where a rear water interval exists it shades its own receiver and applies
   // its own caustic, and multiplying that result again would count the floor's
   // concentration twice through two layers of water.
-  transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV));}
+  transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV));
+  transmittedScene=mix(transmittedScene,waterEnvironmentRadiance(internalReflection),exitReflectance);}
   // Absorption is the scene's, not the renderer's: the same clean-water rate
   // that turns a metre of water blue leaves a hand's breadth colourless.
   // A small in-scattering term keeps thick regions luminous instead of turning
   // into opaque ink, and has to grow with the absorption it accompanies.
-  let refracted=unifiedAbsorbingTransmission(transmittedScene,waterAbsorption(),waterScatter(),thickness);let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
-  let ssrUV=project(front.xyz+reflectedDir*.8);let ssr=safeSample(sceneTexture,ssrUV);reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
+  let worldAt=clamp(vec2i(textureUV*vec2f(textureDimensions(frontReflections))),vec2i(0),vec2i(textureDimensions(frontReflections))-1);
+  let worldTransmission=textureLoad(frontReflections,worldAt,1,0);
+  if(waterWorldTransmissionEligible(meshExitValid,opaqueSolidExit,worldTransmission.a,thickness)){thickness=worldTransmission.a;transmittedScene=worldTransmission.rgb;}
+  let refracted=unifiedAbsorbingTransmission(transmittedScene,waterAbsorption(),waterScatter(),thickness);let reflectedDir=reflect(rd,n);
+  let reflected=filteredWaterReflection(frontReflections,frontPosition,frontNormal,textureUV,front.xyz,n,reflectedDir,cellSize);
   let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);
-  if(tir){water=mix(water,environmentLight(outgoing),.88);}
   water+=waterKeyColor()*unifiedWaterSpecular(n,-rd,waterKeyDirection(),waterRoughness(),waterFresnelF0());
-  // Thin forward-scattering highlight at silhouettes, plus a restrained
-  // turquoise body tint that grows only with actual optical thickness.
-  water+=vec3f(.018,.10,.085)*waterTintScale()*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*waterTintScale()*pow(1.0-cosine,3.0)*.15;
+  // All body colour is already in the absorbing transmission. Adding a
+  // tint after Fresnel would inject light even into a fully reflected ray.
   // At a glass/solid contact there is no air-to-water interface carrying the
   // full Fresnel lobe above. Fade that presentation term with represented film
   // mass so rho->0 is optically continuous with the dry pane instead of a
@@ -2002,6 +2069,7 @@ async function checkedModule(device: GPUDevice, label: string, code: string) {
  */
 export interface WaterSceneOpticsInput {
   readonly optics?: WaterOpticsAuthoring;
+  readonly environment?: WaterEnvironmentRadiance;
   readonly grade?: DisplayGradeAuthoring;
   readonly directional?: {
     readonly direction?: readonly [number, number, number];
@@ -2036,7 +2104,24 @@ export class RasterWaterPipeline {
   private surfaceRearBackPipeline?: GPURenderPipeline;
   private surfaceWireframePipeline?: GPURenderPipeline;
   private causticPipeline?: GPURenderPipeline;
+  private reflectionPipeline?: GPURenderPipeline;
+  private transmissionRequestPipeline?: GPURenderPipeline;
+  private transmissionVerifyPipeline?: GPURenderPipeline;
+  private transmissionRequestLayout?: GPUBindGroupLayout;
+  private transmissionRequestBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
+  private worldRefractionEnabled = false;
+  private lastWorldRefractionsApplied = false;
+  private reflectionLayout?: GPUBindGroupLayout;
+  private reflectionBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
+  private frontReflections?: GPUTexture;
+  private frontWorldReflections?: GPUTexture;
+  private rearWorldReflections?: GPUTexture;
+  private worldReflectionEncoder?: WaterWorldReflectionEncoder;
+  private lastWorldReflectionsApplied = false;
+  private rearReflections?: GPUTexture;
   private compositePipeline?: GPURenderPipeline;
+  private environmentCompositePipeline?: GPURenderPipeline;
+  private reflectionMode: WaterReflectionMode = "screen-space";
   private wireframeCompositePipeline?: GPURenderPipeline;
   private simpleCompositePipeline?: GPURenderPipeline;
   private extractLayout?: GPUBindGroupLayout;
@@ -2083,6 +2168,7 @@ export class RasterWaterPipeline {
   private surfacePeelBindGroup?: GPUBindGroup;
   private compositeBindGroup?: GPUBindGroup;
   private compositeBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
+  private worldCompositeBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
   private wireframeSceneBindGroups = new WeakMap<GPUTextureView, GPUBindGroup>();
   private rigidSceneLayout?: GPUBindGroupLayout;
   private rigidScenePipeline?: GPURenderPipeline;
@@ -2174,6 +2260,7 @@ export class RasterWaterPipeline {
       resolveWaterOptics(input.optics),
       resolveWaterKeyLight(input.directional),
       resolveDisplayGrade(input.grade),
+      input.environment,
     );
     this.causticStrength = packed[15];
     for (let index = 0; index < packed.length; index += 1) {
@@ -2195,6 +2282,12 @@ export class RasterWaterPipeline {
     );
     this.flushSceneOptics();
   }
+
+  setReflectionMode(mode: WaterReflectionMode) { this.reflectionMode = mode; }
+  setWorldRefractionEnabled(enabled: boolean) { this.worldRefractionEnabled = enabled; }
+  get worldRefractionsApplied(): boolean { return this.lastWorldRefractionsApplied; }
+  setWorldReflectionEncoder(encode?: WaterWorldReflectionEncoder) { this.worldReflectionEncoder = encode; }
+  get worldReflectionsApplied(): boolean { return this.lastWorldReflectionsApplied; }
 
   private flushSceneOptics() {
     if (!this.waterSceneOpticsBuffer || !this.waterSceneOpticsDirty) return;
@@ -2310,6 +2403,7 @@ export class RasterWaterPipeline {
     this.compositeLayout = this.device.createBindGroupLayout({ label: "Water composite bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ...[1,3,5,11,13,14].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
+      ...[21,22].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float" as const,viewDimension:"2d-array" as const}})),
       ...[2,4,10,12].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" as const } })),
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
@@ -2346,6 +2440,22 @@ export class RasterWaterPipeline {
       primitive: { topology: "triangle-list", frontFace: "ccw", cullMode },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });
+    this.reflectionLayout=this.device.createBindGroupLayout({label:"Water reflection inputs",entries:[
+      {binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
+      ...[1,3,11].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float" as const}})),
+      ...[2,10].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"unfilterable-float" as const}})),
+      {binding:6,visibility:GPUShaderStage.FRAGMENT,sampler:{type:"filtering"}},
+      {binding:15,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
+    ]});
+    const reflectionPipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.reflectionLayout]});
+    this.transmissionRequestLayout=this.device.createBindGroupLayout({label:"Water transmission request inputs",entries:[
+      {binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
+      ...[1,3,11].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float" as const}})),
+      ...[2,4,10,12].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"unfilterable-float" as const}})),
+      {binding:6,visibility:GPUShaderStage.FRAGMENT,sampler:{type:"filtering"}},
+      {binding:15,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
+    ]});
+    const transmissionRequestPipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.transmissionRequestLayout]});
     const compositePipelineLayout=this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] });
     const compositeDescriptor:GPURenderPipelineDescriptor={ label:"Composite layered water optics", layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } };
 
@@ -2383,7 +2493,17 @@ export class RasterWaterPipeline {
       fragment: { module: caustic, entryPoint: "causticFragment", targets: [{ format: "rgba16float", blend: { color: { srcFactor: "one", dstFactor: "one" }, alpha: { srcFactor: "one", dstFactor: "one" } } }] },
       primitive: { topology: "triangle-list", cullMode: "none" }
     },pipeline=>{this.causticPipeline=pipeline;});
+    render("Tracing water reflections", {label:"Trace layered water reflections",layout:reflectionPipelineLayout,
+      vertex:{module:composite,entryPoint:"vertexMain"},fragment:{module:composite,entryPoint:"reflectionMain",targets:[{format:"rgba16float"},{format:"rgba16float"}]},primitive:{topology:"triangle-list"}}, pipeline=>{this.reflectionPipeline=pipeline;});
     render("Compositing water optics",compositeDescriptor,pipeline=>{this.compositePipeline=pipeline;});
+    render("Requesting offscreen water transmission",{label:"Water transmission requests",layout:transmissionRequestPipelineLayout,
+      vertex:{module:composite,entryPoint:"vertexMain"},fragment:{module:composite,entryPoint:"transmissionRequestMain",targets:[{format:"rgba16float"},{format:"rgba16float"}]},primitive:{topology:"triangle-list"}},pipeline=>{this.transmissionRequestPipeline=pipeline;});
+    render("Verifying liquid transmission intervals",{label:"Water transmission liquid verification",layout:compositePipelineLayout,
+      vertex:{module:composite,entryPoint:"vertexMain"},fragment:{module:composite,entryPoint:"transmissionVerifyMain",targets:[{format:"rgba16float"},{format:"rgba16float"}]},primitive:{topology:"triangle-list"}},pipeline=>{this.transmissionVerifyPipeline=pipeline;});
+    render("Compositing sky-only water reflections", {
+      ...compositeDescriptor, label: "Composite water optics with environment reflections",
+      fragment: { module: composite, entryPoint: "fragmentMain", constants: { screenSpaceReflections: 0 }, targets: [{ format: this.targetFormat }] },
+    }, pipeline => { this.environmentCompositePipeline = pipeline; });
     render("Compositing wireframe background",{
       ...compositeDescriptor,label:"Composite water wireframe background",
       fragment:{module:composite,entryPoint:"fragmentMain",constants:{wireframeOnly:1},targets:[{format:this.targetFormat}]},
@@ -2580,7 +2700,11 @@ export class RasterWaterPipeline {
   }
 
   diagnosticCaptureTexture(stageKey: string) {
-    const texture = stageKey === "interfaces" ? this.frontNormal
+    const texture = stageKey === "world-refractions" ? this.frontWorldReflections
+      : stageKey === "world-reflections" ? this.frontWorldReflections
+      : stageKey === "reflections" ? this.frontReflections
+      : stageKey === "rear-reflections" ? this.rearReflections
+      : stageKey === "interfaces" ? this.frontNormal
       : stageKey === "interface-positions" ? this.frontPosition
         : stageKey === "back-interface-positions" ? this.backPosition
           : stageKey === "back-interfaces" ? this.backNormal
@@ -2589,7 +2713,7 @@ export class RasterWaterPipeline {
                 : stageKey === "rear-back-interface-positions" ? this.rearBackPosition
                   : stageKey === "rear-back-interfaces" ? this.rearBackNormal
       : this.sceneTexture;
-    return texture ? { texture, dimensions: [texture.width, texture.height, 1] as [number, number, number] } : undefined;
+    return texture ? { texture, dimensions: [texture.width, texture.height, 1] as [number, number, number], origin: [0,0,stageKey === "world-refractions" ? 1 : 0] as [number,number,number] } : undefined;
   }
 
   /** Latest bounded GPU readback proving what surface geometry is presented. */
@@ -2720,9 +2844,13 @@ export class RasterWaterPipeline {
   ensureSize(width: number, height: number) {
     const key = `${width}x${height}`;
     if (key === this.targetKey) return;
-    for (const texture of [this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth]) texture?.destroy();
+    for (const texture of [this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth]) texture?.destroy();
     const sampledTarget = (label: string, format: GPUTextureFormat = "rgba16float") => this.device.createTexture({ label, size: [width,height], format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
     this.sceneTexture = this.device.createTexture({ label: "Dry scene HDR", size: [width,height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC }); this.sceneTextureView = this.sceneTexture.createView(); this.frontPosition = sampledTarget("Water front positions", "rgba32float"); this.frontNormal = sampledTarget("Water front normals"); this.backPosition = sampledTarget("Water back positions", "rgba32float"); this.backNormal = sampledTarget("Water back normals"); this.rearFrontPosition = sampledTarget("Water rear front positions", "rgba32float"); this.rearFrontNormal = sampledTarget("Water rear front normals"); this.rearBackPosition = sampledTarget("Water rear back positions", "rgba32float"); this.rearBackNormal = sampledTarget("Water rear back normals");
+    const opticalTarget=(label:string)=>this.device.createTexture({label,size:[width,height,2],format:"rgba16float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.COPY_DST});
+    this.frontReflections=opticalTarget("Front water optical radiance"); this.rearReflections=opticalTarget("Rear water optical radiance");
+    this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
+    this.frontWorldReflections = undefined; this.rearWorldReflections = undefined;
     const depth = (label: string) => this.device.createTexture({ label, size: [width,height], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
     this.frontDepth = depth("Water front depth"); this.backDepth = depth("Water back depth"); this.rearFrontDepth = depth("Water rear front depth"); this.rearBackDepth = depth("Water rear back depth");
     this.causticTexture?.destroy(); this.causticTexture = this.device.createTexture({ label: "Refracted floor caustics", size: [384,384], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
@@ -2811,6 +2939,9 @@ export class RasterWaterPipeline {
 
   private rebuildBindGroups() {
     this.compositeBindGroups = new WeakMap();
+    this.worldCompositeBindGroups = new WeakMap();
+    this.reflectionBindGroups = new WeakMap();
+    this.transmissionRequestBindGroups = new WeakMap();
     this.wireframeSceneBindGroups = new WeakMap();
     // Mixed liquid uses the 4h base and optional h detail, intersected with
     // the independent solid domain. No dense h liquid expansion is needed
@@ -2847,10 +2978,11 @@ export class RasterWaterPipeline {
     this.compositeBindGroup = this.sceneTextureView ? this.compositeBindGroupFor(this.sceneTextureView) : undefined;
   }
 
-  private compositeBindGroupFor(sceneView: GPUTextureView): GPUBindGroup | undefined {
-    const cached = this.compositeBindGroups.get(sceneView);
+  private compositeBindGroupFor(sceneView: GPUTextureView, world = false): GPUBindGroup | undefined {
+    const cache = world ? this.worldCompositeBindGroups : this.compositeBindGroups;
+    const cached = cache.get(sceneView);
     if (cached) return cached;
-    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.causticTexture || !this.waterSceneOpticsBuffer || !this.causticReceiver || !this.fallbackSparseControl || !this.fallbackField) return undefined;
+    if (!this.compositeLayout || !this.frontReflections || !this.rearReflections || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.causticTexture || !this.waterSceneOpticsBuffer || !this.causticReceiver || !this.fallbackSparseControl || !this.fallbackField) return undefined;
     // Under the mixed presentation the contact band samples the nodal level
     // set (17-19) and the cell field at 8 is not read.
     const mixedSurface = Boolean(this.mixedOwnership && this.coarseVertexPhi);
@@ -2860,9 +2992,10 @@ export class RasterWaterPipeline {
       { binding: 17, resource: mixedSurface ? this.mixedOwnership! : { buffer: this.fallbackSparseControl, size: 4 } },
       { binding: 18, resource: ((mixedSurface ? this.denseNormalPhi : undefined) ?? this.fallbackField).createView({ dimension: "3d" }) },
       { binding: 19, resource: (this.coarseVertexPhi ?? this.fallbackField).createView({ dimension: "3d" }) },
-      { binding: 20, resource: this.mixedFrame ?? { buffer: this.uniformBuffer, size: 48 } }
+      { binding: 20, resource: this.mixedFrame ?? { buffer: this.uniformBuffer, size: 48 } },
+      { binding: 21, resource: (world ? this.frontWorldReflections! : this.frontReflections).createView({dimension:"2d-array"}) }, { binding: 22, resource: (world ? this.rearWorldReflections! : this.rearReflections).createView({dimension:"2d-array"}) }
     ] });
-    this.compositeBindGroups.set(sceneView, bindGroup);
+    cache.set(sceneView, bindGroup);
     return bindGroup;
   }
 
@@ -2895,7 +3028,7 @@ export class RasterWaterPipeline {
       || !this.collectWindowsPipeline || !this.preparePipeline || !this.polygonisePipeline
       || !this.surfaceFrontPipeline || !this.surfaceBackPipeline || !this.surfaceRearFrontPipeline
       || !this.surfaceRearBackPipeline || !this.surfaceWireframePipeline || !this.causticPipeline
-      || !this.compositePipeline || !this.wireframeCompositePipeline || !this.simpleCompositePipeline
+      || !this.reflectionPipeline || !this.compositePipeline || !this.environmentCompositePipeline || !this.wireframeCompositePipeline || !this.simpleCompositePipeline
       || !this.extractBindGroup || !this.prepareBindGroup || !this.surfaceBindGroup || !this.causticBindGroup
       || !this.surfaceUnpeeledBindGroup || !this.surfacePeelBindGroup || !this.compositeBindGroup
       || !this.indirectBuffer || !this.polygoniseDispatchBuffer || !this.volume || !this.sceneTexture
@@ -3052,14 +3185,72 @@ export class RasterWaterPipeline {
       tracePhase?.("water-rear-interfaces");
       this.dryInterfaceClearsEncoded = true;
     }
-    const compositeBindGroup = sparseSceneResult ? this.compositeBindGroupFor(sparseSceneResult.sampledTargetView) : this.compositeBindGroup;
+    let worldReflections = false;
+    this.lastWorldReflectionsApplied = false;
+    this.lastWorldRefractionsApplied = false;
+    if(surfaceRenderMode==="shaded"&&(this.reflectionMode!=="environment"||this.worldRefractionEnabled)&&this.sceneHasFluid&&!interfacesWithheld&&!this.disabledStages.has("optical-composite")){
+      const sceneView=sparseSceneResult?sparseSceneResult.sampledTargetView:this.sceneTextureView!;
+      let group=this.reflectionBindGroups.get(sceneView);
+      if(!group){group=this.device.createBindGroup({layout:this.reflectionLayout!,entries:[
+        {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:sceneView},
+        {binding:2,resource:this.frontPosition.createView()},{binding:3,resource:this.frontNormal.createView()},
+        {binding:10,resource:this.rearFrontPosition.createView()},{binding:11,resource:this.rearFrontNormal.createView()},
+        {binding:6,resource:this.sampler!},{binding:15,resource:{buffer:this.waterSceneOpticsBuffer!}},
+      ]});this.reflectionBindGroups.set(sceneView,group);}
+      const reflection=encoder.beginRenderPass({label:"Layered water scene reflections",colorAttachments:[this.frontReflections!,this.rearReflections!].map(texture=>({view:texture.createView({dimension:"2d",baseArrayLayer:0,arrayLayerCount:1}),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear" as const,storeOp:"store" as const}))});
+      reflection.setPipeline(this.reflectionPipeline!);reflection.setBindGroup(0,group);reflection.draw(3);reflection.end();
+      if ((this.reflectionMode === "world-space" || this.worldRefractionEnabled) && this.worldReflectionEncoder) {
+        if (!this.frontWorldReflections || !this.rearWorldReflections) {
+          const make = (label: string) => this.device.createTexture({ label, size: [this.frontReflections!.width, this.frontReflections!.height, 2], format: "rgba16float",
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
+          this.frontWorldReflections = make("Front world water reflections"); this.rearWorldReflections = make("Rear world water reflections");
+          this.worldCompositeBindGroups = new WeakMap();
+        }
+        if(this.reflectionMode === "world-space"){
+          const frontReady = this.worldReflectionEncoder(encoder, { position: this.frontPosition.createView(), normal: this.frontNormal.createView(),
+            dryScene: sceneView, screenReflections: this.frontReflections!.createView({dimension:"2d",baseArrayLayer:0,arrayLayerCount:1}), target: this.frontWorldReflections.createView({dimension:"2d",baseArrayLayer:0,arrayLayerCount:1}) });
+          const rearReady = this.worldReflectionEncoder(encoder, { position: this.rearFrontPosition.createView(), normal: this.rearFrontNormal.createView(),
+            dryScene: sceneView, screenReflections: this.rearReflections!.createView({dimension:"2d",baseArrayLayer:0,arrayLayerCount:1}), target: this.rearWorldReflections.createView({dimension:"2d",baseArrayLayer:0,arrayLayerCount:1}) });
+          worldReflections = frontReady && rearReady;this.lastWorldReflectionsApplied = worldReflections;
+        }else{
+          // Refraction alone must not silently enable World reflections.
+          for(const [source,target] of [[this.frontReflections!,this.frontWorldReflections],[this.rearReflections!,this.rearWorldReflections]])encoder.copyTextureToTexture({texture:source!},{texture:target!},[source!.width,source!.height,1]);
+          worldReflections=true;
+        }
+        if(worldReflections&&this.worldRefractionEnabled&&this.transmissionRequestPipeline&&this.transmissionVerifyPipeline&&this.transmissionRequestLayout){
+          let requests=this.transmissionRequestBindGroups.get(sceneView);
+          if(!requests){requests=this.device.createBindGroup({layout:this.transmissionRequestLayout,entries:[
+            {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:sceneView},
+            {binding:2,resource:this.frontPosition.createView()},{binding:3,resource:this.frontNormal.createView()},{binding:4,resource:this.backPosition.createView()},
+            {binding:10,resource:this.rearFrontPosition.createView()},{binding:11,resource:this.rearFrontNormal.createView()},{binding:12,resource:this.rearBackPosition.createView()},
+            {binding:6,resource:this.sampler!},{binding:15,resource:{buffer:this.waterSceneOpticsBuffer!}},
+          ]});this.transmissionRequestBindGroups.set(sceneView,requests);}
+          const layer=(texture:GPUTexture)=>texture.createView({dimension:"2d",baseArrayLayer:1,arrayLayerCount:1});
+          const attachments=[this.frontReflections!,this.rearReflections!].map(texture=>({view:layer(texture),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear" as const,storeOp:"store" as const}));
+          const requestPass=encoder.beginRenderPass({label:"Offscreen water transmission requests",colorAttachments:attachments});requestPass.setPipeline(this.transmissionRequestPipeline);requestPass.setBindGroup(0,requests);requestPass.draw(3);requestPass.end();
+          const first=this.worldReflectionEncoder(encoder,{position:this.frontPosition.createView(),normal:this.frontNormal.createView(),dryScene:sceneView,screenReflections:layer(this.frontReflections!),target:layer(this.frontWorldReflections!),rayKind:"transmission"});
+          const second=this.worldReflectionEncoder(encoder,{position:this.rearFrontPosition.createView(),normal:this.rearFrontNormal.createView(),dryScene:sceneView,screenReflections:layer(this.rearReflections!),target:layer(this.rearWorldReflections!),rayKind:"transmission"});
+          const verification=this.compositeBindGroupFor(sceneView,true);
+          if(first&&second&&verification){
+            const verifyPass=encoder.beginRenderPass({label:"Verify actual liquid transmission intervals",colorAttachments:attachments});verifyPass.setPipeline(this.transmissionVerifyPipeline);verifyPass.setBindGroup(0,verification);verifyPass.draw(3);verifyPass.end();
+            for(const [source,target] of [[this.frontReflections!,this.frontWorldReflections!],[this.rearReflections!,this.rearWorldReflections!]])encoder.copyTextureToTexture({texture:source!,origin:[0,0,1]},{texture:target!,origin:[0,0,1]},[source!.width,source!.height,1]);
+            this.lastWorldRefractionsApplied=true;
+          }
+        }
+      }
+    }
+    if(!this.lastWorldRefractionsApplied){
+      const targets=worldReflections?[this.frontWorldReflections!,this.rearWorldReflections!]:[this.frontReflections!,this.rearReflections!];
+      const clear=encoder.beginRenderPass({label:"Inactive world transmission clear",colorAttachments:targets.map(texture=>({view:texture.createView({dimension:"2d",baseArrayLayer:1,arrayLayerCount:1}),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}))});clear.end();
+    }
+    const compositeBindGroup = this.compositeBindGroupFor(sparseSceneResult ? sparseSceneResult.sampledTargetView : this.sceneTextureView!, worldReflections);
     if (!compositeBindGroup) return false;
     const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});
     // The single final transform every render path shares: withholding it keeps
     // the clear so the presentation target is the background colour rather than
     // a stale composite that would look like the pass still ran.
     if (!this.disabledStages.has("optical-composite")) {
-      composite.setPipeline(surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : surfaceRenderMode === "simple" ? this.simpleCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
+      composite.setPipeline(surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : surfaceRenderMode === "simple" ? this.simpleCompositePipeline : this.reflectionMode === "environment" ? this.environmentCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
     }
     composite.end();
     if (surfaceRenderMode === "wireframe" && !this.disabledStages.has("optical-composite")) {
@@ -3078,6 +3269,7 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

@@ -37,8 +37,10 @@ export interface RasterAoPipelines {
 
 const paramsWGSL = /* wgsl */ `
 struct RasterSpot { positionNear:vec4f, directionTan:vec4f, rangeRadiusIndex:vec4f }
+// control.w: low 8 bits visibility flags; high 16 bits shadow-map width.
 struct RasterLightingParams { control:vec4u, farCenterExtent:vec4f, depthCell:vec4f, sun:vec4f, spots:array<RasterSpot,${RASTER_MAX_SPOT_LIGHTS}> }
 @group(2) @binding(0) var<uniform> rasterLighting:RasterLightingParams;
+fn rasterShadowMapSize()->f32{return f32(max(rasterLighting.control.w>>16u,2048u));}
 @group(2) @binding(21) var<uniform> rasterAoRange:vec4u;
 @group(2) @binding(23) var rasterAoImportance:texture_2d<f32>;
 `;
@@ -74,11 +76,26 @@ const RASTER_VISIBILITY_WATER_SHADOWS:bool=${waterShadows};
 var<private> rasterResolvedVisibility:vec2f;
 var<private> rasterPixel:vec2f;
 fn rasterSunDirection()->vec3f{return normalize(rasterLighting.sun.xyz);}
+// Compare each bilinear texel with the receiver plane at that texel. Hardware
+// PCF uses one depth for all four, requiring a slope-sized bias that discards
+// close blockers. This retains the same four-texel footprint without that bias.
+fn rasterCompareReceiverPlane(uv:vec2f,layer:i32,depth:f32,gradient:vec2f)->f32{
+  let size=f32(textureDimensions(rasterSunDepth).x);let q=uv*size-.5;
+  let base=vec2i(floor(q));let f=fract(q);var visibility=0.0;
+  for(var y=0;y<2;y++){for(var x=0;x<2;x++){
+    let c=clamp(base+vec2i(x,y),vec2i(0),vec2i(i32(textureDimensions(rasterSunDepth).x)-1));
+    let offset=(vec2f(c)+.5)/size-uv;
+    let receiver=depth+dot(gradient,offset);
+    let weight=select(1.0-f.x,f.x,x==1)*select(1.0-f.y,f.y,y==1);
+    visibility+=weight*select(0.0,1.0,receiver<=textureLoad(rasterSunDepth,c,layer,0));
+  }}return visibility;
+}
 fn rasterSunBasis()->mat3x3f{
   let sun=rasterSunDirection();let helper=select(vec3f(0,1,0),vec3f(1,0,0),abs(sun.y)>.95);
   let right=normalize(cross(helper,sun));return mat3x3f(right,cross(sun,right),sun);
 }
-fn rasterMapCenter(layer:u32)->vec3f{return select(uniforms.container.xyz*.5,rasterLighting.farCenterExtent.xyz,layer==1u);}
+// App world coordinates center X/Z around zero; only Y starts at the floor.
+fn rasterMapCenter(layer:u32)->vec3f{return select(vec3f(0,uniforms.container.y*.5,0),rasterLighting.farCenterExtent.xyz,layer==1u);}
 fn rasterMapExtent(layer:u32)->f32{return select(max(length(uniforms.container.xyz)*.7,.1),rasterLighting.farCenterExtent.w,layer==1u);}
 fn rasterShadowPosition(world:vec3f,layer:u32)->vec3f{
   let basis=rasterSunBasis();let delta=world-rasterMapCenter(layer);let extent=rasterMapExtent(layer);
@@ -102,11 +119,30 @@ fn rasterSpotSlot(lightIndex:u32)->i32{
     if(u32(rasterLighting.spots[slot].rangeRadiusIndex.z)==lightIndex){return i32(slot);}
   }return -1;
 }
+// The blocker search must include the same local bilinear support used by
+// filtering. A single centre texel can be clear while a neighboring leaf has
+// nonzero comparison weight, incorrectly triggering the no-blocker shortcut.
+// Weight the four local texels as one search sample; retain the outer disk.
+fn rasterLocalBlocker(uv:vec2f,layer:u32,depth:f32,gradient:vec2f)->vec2f{
+  let size=f32(textureDimensions(rasterSunDepth).x);let q=uv*size-.5;
+  let base=vec2i(floor(q));let f=fract(q);var result=vec2f(0);
+  for(var y=0;y<2;y++){for(var x=0;x<2;x++){
+    let c=clamp(base+vec2i(x,y),vec2i(0),vec2i(i32(size)-1));
+    let weight=select(1.0-f.x,f.x,x==1)*select(1.0-f.y,f.y,y==1);
+    let raw=textureLoad(rasterSunDepth,c,i32(layer),0);
+    let offset=(vec2f(c)+.5)/size-uv;
+    if(weight>0.0&&raw<1.0&&raw-dot(gradient,offset)<depth){
+      var blockerDepth=raw;
+      if(layer>=2u){blockerDepth=rasterSpotDistance(raw,rasterLighting.spots[layer-2u]);}
+      result+=vec2f(blockerDepth,1.0)*weight;
+    }
+  }}return result;
+}
 fn rasterSpotVisibility(position:vec3f,normal:vec3f,slot:u32)->f32{
   let spot=rasterLighting.spots[slot];let basis=rasterSpotBasis(spot);
   let distance=dot(position-spot.positionNear.xyz,basis[2]);
-  let texel=2.0*max(distance,spot.positionNear.w)*spot.directionTan.w/f32(${SVO_RASTER_SHADOW_SIZE});
-  let biased=position+normal*(texel*1.5+rasterLighting.depthCell.y*(.18+dry.tuningRays0.x));
+  let texel=2.0*max(distance,spot.positionNear.w)*spot.directionTan.w/f32(textureDimensions(rasterSunDepth).x);
+  let biased=position;
   let clip=rasterSpotClip(biased,spot);if(clip.w<=spot.positionNear.w){return 1.0;}
   let p=clip.xyz/clip.w;let uv=p.xy*vec2f(.5,-.5)+.5;
   if(any(uv<vec2f(0))||any(uv>vec2f(1))||p.z>=1.0){return 1.0;}
@@ -114,19 +150,20 @@ fn rasterSpotVisibility(position:vec3f,normal:vec3f,slot:u32)->f32{
   let lightNormal=transpose(basis)*normal;
   let gradient=rasterSpotReceiverGradient(lightNormal,dot(normal,biased-spot.positionNear.xyz),
     spot.positionNear.w,spot.rangeRadiusIndex.x,spot.directionTan.w);
-  let receiver=clip.w-texel*.3;
+  let receiver=max(spot.positionNear.w,clip.w-rasterLighting.depthCell.y*max(dry.tuningRays0.x,0.0));
   let depth=spot.rangeRadiusIndex.x*(receiver-spot.positionNear.w)/((spot.rangeRadiusIndex.x-spot.positionNear.w)*receiver)
-    -rasterReceiverFootprintBias(gradient,f32(${SVO_RASTER_SHADOW_SIZE}));
+    -2e-7;
   let radius=spot.rangeRadiusIndex.y;
   // Compare against the receiver plane, but measure the blocker at its actual
   // depth. A slope-corrected depth is not a physical occluder distance.
   // Perspective depth is nonlinear. Recover axial blocker distance before
   // estimating the finite emitter's contact-hardening penumbra in world units.
   let search=clamp(radius/max(texel,1e-6)*(clip.w-spot.positionNear.w)/spot.positionNear.w,2.0,96.0);
-  var blocker=0.0;var count=0.0;
-  for(var i=0u;i<12u;i++){
-    let c=clamp(vec2i(uv*f32(${SVO_RASTER_SHADOW_SIZE})+offsets[i]*search),vec2i(0),vec2i(${SVO_RASTER_SHADOW_SIZE - 1}));
-    let offset=(vec2f(c)+.5)/f32(${SVO_RASTER_SHADOW_SIZE})-uv;
+  let local=rasterLocalBlocker(uv,slot+2u,depth,gradient);
+  var blocker=local.x;var count=local.y;
+  for(var i=1u;i<12u;i++){
+    let c=clamp(vec2i(uv*f32(textureDimensions(rasterSunDepth).x)+offsets[i]*search),vec2i(0),vec2i(i32(textureDimensions(rasterSunDepth).x)-1));
+    let offset=(vec2f(c)+.5)/f32(textureDimensions(rasterSunDepth).x)-uv;
     let raw=textureLoad(rasterSunDepth,c,i32(slot+2u),0);if(raw>=1.0){continue;}
     let d=raw-dot(gradient,offset);
     if(d<depth){blocker+=rasterSpotDistance(raw,spot);count+=1.0;}
@@ -136,26 +173,31 @@ fn rasterSpotVisibility(position:vec3f,normal:vec3f,slot:u32)->f32{
   let penumbra=clamp(radius*(clip.w-blockerDistance)/max(blockerDistance*texel,1e-6),1.0,96.0);
   var visibility=0.0;
   for(var i=0u;i<12u;i++){
-    let offset=offsets[i]*penumbra/f32(${SVO_RASTER_SHADOW_SIZE});
-    visibility+=textureSampleCompareLevel(rasterSunDepth,rasterSunSampler,uv+offset,i32(slot+2u),depth+dot(gradient,offset));
+    let offset=offsets[i]*penumbra/f32(textureDimensions(rasterSunDepth).x);
+    visibility+=rasterCompareReceiverPlane(uv+offset,i32(slot+2u),depth+dot(gradient,offset),gradient);
   }return visibility/12.0;
 }
 fn rasterPcf(position:vec3f,normal:vec3f,layer:u32)->f32{
-  let texel=2.0*rasterMapExtent(layer)/f32(${SVO_RASTER_SHADOW_SIZE});
-  // World-space normal offset and a small depth bias, scaled with shadow texels.
-  let biased=position+normal*(texel*1.5+rasterLighting.depthCell.y*(.18+dry.tuningRays0.x));
+  let texel=2.0*rasterMapExtent(layer)/f32(textureDimensions(rasterSunDepth).x);
+  // The receiver stays on its actual surface. Global voxel / shadow-texel
+  // normal offsets can step completely through finer imported leaf geometry.
+  let biased=position;
   let p=rasterShadowPosition(biased,layer);let uv=p.xy*vec2f(.5,-.5)+.5;
   if(any(uv<vec2f(0))||any(uv>vec2f(1))||p.z<=0.0||p.z>=1.0){return 1.0;}
   // Blocker search and a bounded PCSS filter retain contact hardening. The
   // softness control is the same angular diameter used by the cone reference.
-  let offsets=array<vec2f,12>(vec2f(.13,.09),vec2f(-.32,.23),vec2f(.25,-.39),vec2f(-.43,-.32),vec2f(.60,.15),vec2f(-.09,.67),vec2f(-.69,.12),vec2f(.09,-.76),vec2f(.55,.63),vec2f(-.57,.62),vec2f(-.64,-.64),vec2f(.79,-.48));
+  let offsets=array<vec2f,12>(vec2f(0,0),vec2f(-.32,.23),vec2f(.25,-.39),vec2f(-.43,-.32),vec2f(.60,.15),vec2f(-.09,.67),vec2f(-.69,.12),vec2f(.09,-.76),vec2f(.55,.63),vec2f(-.57,.62),vec2f(-.64,-.64),vec2f(.79,-.48));
   let angular=tan(dry.tuningRays1.y*.5);
   let search=max(2.0,length(uniforms.container.xyz)*angular/texel);
   let gradient=rasterSunReceiverGradient(transpose(rasterSunBasis())*normal,rasterMapExtent(layer),rasterLighting.depthCell.x);
-  let bias=texel*.3/rasterLighting.depthCell.x+rasterReceiverFootprintBias(gradient,f32(${SVO_RASTER_SHADOW_SIZE}));var blocker=0.0;var count=0.0;
-  for(var i=0u;i<12u;i++){
-    let c=clamp(vec2i(uv*f32(${SVO_RASTER_SHADOW_SIZE})+offsets[i]*search),vec2i(0),vec2i(${SVO_RASTER_SHADOW_SIZE - 1}));
-    let offset=(vec2f(c)+.5)/f32(${SVO_RASTER_SHADOW_SIZE})-uv;
+  // Preserve the explicit user bias; only a depth32 rounding allowance is
+  // automatic. Plane correction handles slope instead of erasing contacts.
+  let bias=max(2e-7,rasterLighting.depthCell.y*max(dry.tuningRays0.x,0.0)/rasterLighting.depthCell.x);
+  let local=rasterLocalBlocker(uv,layer,p.z-bias,gradient);
+  var blocker=local.x;var count=local.y;
+  for(var i=1u;i<12u;i++){
+    let c=clamp(vec2i(uv*f32(textureDimensions(rasterSunDepth).x)+offsets[i]*search),vec2i(0),vec2i(i32(textureDimensions(rasterSunDepth).x)-1));
+    let offset=(vec2f(c)+.5)/f32(textureDimensions(rasterSunDepth).x)-uv;
     let raw=textureLoad(rasterSunDepth,c,i32(layer),0);if(raw>=1.0){continue;}
     let d=raw-dot(gradient,offset);
     if(d<p.z-bias){blocker+=raw;count+=1.0;}
@@ -165,8 +207,8 @@ fn rasterPcf(position:vec3f,normal:vec3f,layer:u32)->f32{
   let disk=array<vec2f,24>(vec2f(0.144338,0.000000),vec2f(-0.184342,0.168873),vec2f(0.028217,-0.321513),vec2f(0.232351,0.303061),vec2f(-0.426393,-0.075423),vec2f(0.403917,-0.256939),vec2f(-0.135102,0.502574),vec2f(-0.257655,-0.496099),vec2f(0.559008,0.204149),vec2f(-0.581555,0.240057),vec2f(0.280348,-0.599087),vec2f(0.207170,0.660490),vec2f(-0.624412,-0.361860),vec2f(0.732507,-0.161040),vec2f(-0.447038,0.635865),vec2f(-0.103276,-0.796974),vec2f(0.634013,0.534347),vec2f(-0.853183,0.035282),vec2f(0.622332,-0.619303),vec2f(-0.041636,0.900426),vec2f(-0.592151,-0.709594),vec2f(0.938032,0.126211),vec2f(-0.794793,0.552996),vec2f(0.217183,-0.965401));
   var visibility=0.0;
   for(var i=0u;i<24u;i++){
-    let offset=disk[i]*penumbra/f32(${SVO_RASTER_SHADOW_SIZE});
-    visibility+=textureSampleCompareLevel(rasterSunDepth,rasterSunSampler,uv+offset,i32(layer),p.z+dot(gradient,offset)-bias);
+    let offset=disk[i]*penumbra/f32(textureDimensions(rasterSunDepth).x);
+    visibility+=rasterCompareReceiverPlane(uv+offset,i32(layer),p.z+dot(gradient,offset)-bias,gradient);
   }return visibility/24.0;
 }
 fn rasterSunVisibility(position:vec3f,normal:vec3f)->f32{
@@ -184,7 +226,7 @@ fn rasterOctDecode(p:vec2f)->vec3f{
   n.x+=select(t,-t,n.x>=0.0);n.y+=select(t,-t,n.y>=0.0);return normalize(n);
 }
 fn rasterVisibilityAt(position:vec3f,normal:vec3f)->vec2f{
-  ${precomputed ? "return rasterLoadVisibilityGuide();" : `if(rasterLighting.control.w!=0u){return rasterLoadVisibilityGuide();}
+  ${precomputed ? "return rasterLoadVisibilityGuide();" : `if((rasterLighting.control.w&1u)!=0u){return rasterLoadVisibilityGuide();}
   let depth=length(position-uniforms.cameraPosition.xyz);let q=rasterPixel*.5-.75;let base=vec2i(floor(q));let f=fract(q);
   var total=vec2f(0.0);var weight=0.0;let dims=vec2i(textureDimensions(rasterContact));
   for(var y=0;y<2;y++){for(var x=0;x<2;x++){
@@ -245,7 +287,7 @@ fn rasterHorizonVisibility(pixel:vec2f,position:vec3f,normal:vec3f)->f32{
       let fraction=f32(step)/6.0;let tap=vec2i(round(pixel-.5+axis*max(1.0,projected*fraction*fraction)));
       if(any(tap<vec2i(0))||any(tap>=fullDims)){continue;}
       let sample=drySplitGeometryAt(tap);if(!(sample.w<DRY_MISS)){continue;}
-      if(rasterLighting.control.w!=0u){
+      if((rasterLighting.control.w&1u)!=0u){
         // Reverse triangle inequality: no direction reconstruction is needed
         // when radial separation alone proves the tap is outside the AO ball.
         if(abs(sample.w-receiverDistance)>radius+1e-4){continue;}
@@ -421,11 +463,11 @@ fn rasterShadowCastersMain(@builtin(global_invocation_id) id:vec3u,@builtin(loca
   let layer=rasterLighting.control.y;
   if(rasterShadowRedrawWhole()){return vec4f(p[vertex],1,1);}
   let redraw=rasterShadowRectangle(rasterShadowRedrawCentre(),rasterShadowRedrawHalf(),layer);
-  return vec4f(redraw.xy+p[vertex]*(redraw.zw+vec2f(4.0/f32(${SVO_RASTER_SHADOW_SIZE}))),1,1);
+  return vec4f(redraw.xy+p[vertex]*(redraw.zw+vec2f(4.0/rasterShadowMapSize())),1,1);
 }
 @fragment fn rasterShadowTerrain(@builtin(position) pixel:vec4f)->@builtin(frag_depth) f32{
   ${backdrop ? `if(backdropTerrainLevels()==0u){return 1.0;}
-  let layer=rasterLighting.control.y;let uv=pixel.xy/f32(${SVO_RASTER_SHADOW_SIZE})*vec2f(2,-2)+vec2f(-1,1);
+  let layer=rasterLighting.control.y;let uv=pixel.xy/rasterShadowMapSize()*vec2f(2,-2)+vec2f(-1,1);
   if(layer>=2u){
     let spot=rasterLighting.spots[layer-2u];let basis=rasterSpotBasis(spot);
     let ray=normalize(basis[2]+(basis[0]*uv.x+basis[1]*uv.y)*spot.directionTan.w);
@@ -451,7 +493,7 @@ fn rasterContactAt(id:vec3u)->f32{
   var contact=1.0;
   if((dry.materialPublication.w&1u)!=0u){contact=min(rasterHorizonVisibility(pixel,position,normal),rasterCoarseVisibility(position,normal));}
   var shadow=1.0;
-  if((dry.materialPublication.w&2u)!=0u){shadow=rasterSunVisibility(position,normal);}
+  if((dry.materialPublication.w&2u)!=0u){shadow=rasterSunVisibility(position,dryGeometricNormal(rasterVisibilityHit(coord,g)));}
   textureStore(rasterShadowOutput,vec2i(id.xy),vec4f(shadow));
   textureStore(rasterContactOutput,vec2i(id.xy),vec4f(contact,min(g.w,65504.0),rasterOctEncode(normal)));
   return shadow;
@@ -551,7 +593,8 @@ export class SvoRasterAo {
   invalidateVisibility():void { this.visibilityCacheKey=undefined; }
   visibilityEnabled = true;
   visibilityQueueEnabled = true;
-  private get visibilityControl():number{return this.visibilityEnabled?1+(this.visibilityTilingEnabled?2:0):0;}
+  private shadowResolution = SVO_RASTER_SHADOW_SIZE;
+  private get visibilityControl():number{return (this.shadowResolution << 16) | (this.visibilityEnabled ? 1+(this.visibilityTilingEnabled?2:0) : 0);}
   // The measured M1 Max scenes favour coherent empty-lane exits over a
   // separate compaction dispatch. Keep compaction opt-in for sparse workloads.
   private visibilityTilingEnabled = false;
@@ -686,11 +729,7 @@ export class SvoRasterAo {
     const radius=Math.max(.1,Math.hypot(...extent)*.5);
     this.shadowLayerCount=2+spots.length;
     if(this.shadow.depthOrArrayLayers!==this.shadowLayerCount){
-      this.shadow.destroy();
-      this.shadow=this.device.createTexture({label:"Cached sun and spot shadows",size:[SVO_RASTER_SHADOW_SIZE,SVO_RASTER_SHADOW_SIZE,this.shadowLayerCount],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
-      this.shadowViews=Array.from({length:this.shadowLayerCount},(_,baseArrayLayer)=>this.shadow.createView({dimension:"2d",baseArrayLayer,arrayLayerCount:1}));
-      this.consumer=undefined;
-      if(this.ao)this.ensureSize(this.fullWidth,this.fullHeight);
+      this.replaceShadowTexture();
     }
     for(let layer=0;layer<this.shadowLayerCount;layer++){
       const buffer=new ArrayBuffer(256),f=new Float32Array(buffer),u=new Uint32Array(buffer);
@@ -702,6 +741,23 @@ export class SvoRasterAo {
       }
       this.device.queue.writeBuffer(this.params,layer*256,buffer);
     }
+  }
+  /** A presentation-only change: preserve screen targets, native casters and simulation. */
+  setShadowResolution(requested:number):void{
+    const resolution=requested===4096 && this.device.limits.maxTextureDimension2D>=4096 ? 4096 : SVO_RASTER_SHADOW_SIZE;
+    if(resolution===this.shadowResolution)return;
+    this.shadowResolution=resolution;
+    this.replaceShadowTexture();
+    this.invalidateNativeGeometry();
+    for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*256+12,new Uint32Array([this.visibilityControl]));
+  }
+  private replaceShadowTexture():void{
+    const previous=this.shadow;
+    this.shadow=this.device.createTexture({label:"Cached sun and spot shadows",size:[this.shadowResolution,this.shadowResolution,this.shadowLayerCount],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+    this.shadowViews=Array.from({length:this.shadowLayerCount},(_,baseArrayLayer)=>this.shadow.createView({dimension:"2d",baseArrayLayer,arrayLayerCount:1}));
+    this.invalidateVisibility();
+    if(this.ao)this.bindScreenTargets();
+    previous.destroy();
   }
   setCoarseAoStrength(strength:number):void{
     if(strength===this.coarseAoStrength)return;
@@ -741,12 +797,15 @@ export class SvoRasterAo {
     this.guide?.destroy();this.guide=this.device.createTexture({label:"Resolved visibility reconstruction",size:[fullWidth,fullHeight],format:"rg32uint",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
     this.ao?.destroy();this.ao=this.device.createTexture({label:"Half-resolution sun visibility and horizon AO",size:[width,height],format:"rgba16float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
     this.shadowVisibility?.destroy();this.shadowVisibility=this.device.createTexture({label:"Half-resolution sun visibility",size:[width,height],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
-    const uniform={buffer:this.params,offset:0,size:256};const view=this.ao.createView();const shadowView=this.shadowVisibility.createView();
-    this.aoGroup=this.device.createBindGroup({layout:this.aoLayout,entries:[{binding:23,resource:this.aoImportanceView},{binding:21,resource:{buffer:this.aoRange}},{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:4,resource:view},{binding:6,resource:shadowView},{binding:16,resource:{buffer:this.tileRequests}}]});
-    const common:GPUBindGroupEntry[]=[{binding:23,resource:this.aoImportanceView},{binding:21,resource:{buffer:this.aoRange}},{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:3,resource:view},{binding:5,resource:shadowView}];
-    const lightView=this.lightVisibility.createView({dimension:"2d-array"});
-    this.consumer=this.device.createBindGroup({layout:this.consumerLayout,entries:[...common,{binding:14,resource:lightView},{binding:19,resource:this.guide.createView()}]});
-    this.lightGroup=this.device.createBindGroup({layout:this.lightLayout,entries:[...common,{binding:15,resource:lightView},{binding:18,resource:this.guide.createView()},{binding:16,resource:{buffer:this.tileRequests}},{binding:20,resource:{buffer:this.exactRequests}}]});
+    this.bindScreenTargets();
+  }
+  private bindScreenTargets():void{
+    const uniform={buffer:this.params,offset:0,size:256};const view=this.ao!.createView();const shadowView=this.shadowVisibility!.createView();
+    this.aoGroup=this.device.createBindGroup({layout:this.aoLayout,entries:[{binding:23,resource:this.aoImportanceView!},{binding:21,resource:{buffer:this.aoRange}},{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:4,resource:view},{binding:6,resource:shadowView},{binding:16,resource:{buffer:this.tileRequests!}}]});
+    const common:GPUBindGroupEntry[]=[{binding:23,resource:this.aoImportanceView!},{binding:21,resource:{buffer:this.aoRange}},{binding:0,resource:uniform},{binding:1,resource:this.shadow.createView({dimension:"2d-array"})},{binding:2,resource:this.sampler},{binding:3,resource:view},{binding:5,resource:shadowView}];
+    const lightView=this.lightVisibility!.createView({dimension:"2d-array"});
+    this.consumer=this.device.createBindGroup({layout:this.consumerLayout,entries:[...common,{binding:14,resource:lightView},{binding:19,resource:this.guide!.createView()}]});
+    this.lightGroup=this.device.createBindGroup({layout:this.lightLayout,entries:[...common,{binding:15,resource:lightView},{binding:18,resource:this.guide!.createView()},{binding:16,resource:{buffer:this.tileRequests!}},{binding:20,resource:{buffer:this.exactRequests!}}]});
   }
   setVisibilityEnabled(enabled:boolean):void{
     if(this.visibilityEnabled===enabled)return;

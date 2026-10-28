@@ -126,14 +126,15 @@ export function buildEnvironmentProxyCatalog(scene: SceneDescription, environmen
     shell = expansion.shell; primitives = b.props;
   }
   // Source palettes follow ordinary owner materials; instances of the same
-  // immutable asset share a palette. Owner IDs remain the editor's original IDs.
+  // immutable asset and emission share a palette. Owner IDs remain the editor's original IDs.
   let materialBase = ENVIRONMENT_MATERIAL_BASE + Math.max(-1, ...shell.primitives.map(p => p.ownerIndex), ...primitives.map(p => p.ownerIndex)) + 1;
   const assetBases = new Map<string, number>();
   primitives = primitives.map(p => {
     if (p.kind !== "field-program" || !p.program.sampledVolume) return p;
     const asset = p.program.sampledVolume.asset;
-    let base = assetBases.get(asset);
-    if (base === undefined) { base = materialBase; assetBases.set(asset, base); materialBase += meshAssetHeader(asset).materials.length; }
+    const paletteKey = JSON.stringify([asset, p.material.emission]);
+    let base = assetBases.get(paletteKey);
+    if (base === undefined) { base = materialBase; assetBases.set(paletteKey, base); materialBase += meshAssetHeader(asset).materials.length; }
     if (materialBase > 8192) throw new RangeError("Imported asset palettes exceed the scene material capacity");
     return { ...p, program: { ...p.program, sampledVolume: { asset, materialBase: base } } };
   });

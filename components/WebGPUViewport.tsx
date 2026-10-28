@@ -1108,7 +1108,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
             scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
             ui.fluidSurfaceRenderMode,
             {
+              surfaceTexturesEnabled: ui.svoSurfaceTexturesEnabled,
+              nativeAmbientOcclusionEnabled: ui.svoNativeAmbientOcclusionEnabled,
               shadowsEnabled: ui.svoShadowsEnabled,
+              waterReflectionMode: ui.waterReflectionMode,
+              waterWorldRefractionEnabled: ui.waterWorldRefractionEnabled,
               ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
               silhouetteRefinementEnabled: ui.silhouetteRefinementEnabled,
               coneTracingMode: ui.svoConeTracingMode,

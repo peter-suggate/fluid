@@ -40,6 +40,7 @@ export interface SparseVoxelDrySceneData {
    * a new scene's record and grow somebody else's shape.
    */
   fieldProgramBlocks?: Uint32Array<ArrayBuffer>;
+  surfaceTextureAtlas?: import("../../core/imported-assets/surface-texture-atlas").SurfaceTextureAtlas;
   /** Explicit prop carving CSG; fixed-capacity region shared with the voxelizer. */
   sculptCuts?: Uint32Array<ArrayBuffer>;
   /** Imported instances rendered from their edited SVO surface instead of their source mesh. */

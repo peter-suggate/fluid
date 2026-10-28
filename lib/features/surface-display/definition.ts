@@ -1,7 +1,9 @@
 import type { FeatureDefinition } from "../../framework/composition";
-import { choiceQuery, numberQuery, queryRecord } from "../../framework/persistence";
+import { booleanQuery, choiceQuery, numberQuery, queryRecord } from "../../framework/persistence";
 import { DEFAULT_PARTICLE_SURFACE_SETTINGS as FINE, PARTICLE_SURFACE_MERGE_RANGE, PARTICLE_SURFACE_SMOOTHING_RANGE, PARTICLE_SURFACE_THICKNESS_RANGE } from "../../core/webgpu-particle-surface";
 export type FluidSurfaceRenderMode = "shaded" | "wireframe" | "simple";
+export type WaterReflectionMode = "screen-space" | "world-space" | "environment";
+export const WATER_REFLECTION_OPTIONS = [{ value: "screen-space", label: "Scene" }, { value: "world-space", label: "World" }, { value: "environment", label: "Sky" }] as const;
 /** The liquid's own particles over the surface (core/visual-layers ParticleDisplay). */
 export type FluidParticleDisplay = "off" | "motion" | "speed" | "fine";
 /** The Fine display's sliders (core/webgpu-particle-surface ParticleSurfaceSettings). */
@@ -9,10 +11,12 @@ export interface FineSurfaceState {
   fineSurfaceGreed: number; fineSurfaceSmoothing: number; fineSurfaceThickness: number;
   fineSpraySize: number; fineSprayOpacity: number; fineSurfaceMerge: number;
 }
-export interface SurfaceDisplayState extends FineSurfaceState { fluidSurfaceRenderMode: FluidSurfaceRenderMode; fluidParticleDisplay: FluidParticleDisplay }
+export interface SurfaceDisplayState extends FineSurfaceState { fluidSurfaceRenderMode: FluidSurfaceRenderMode; fluidParticleDisplay: FluidParticleDisplay; waterReflectionMode: WaterReflectionMode; waterWorldRefractionEnabled: boolean }
 export const SURFACE_DISPLAY_OPTIONS = [{ value: "shaded", label: "Shade" }, { value: "wireframe", label: "Wire" }, { value: "simple", label: "Simple" }] as const;
 export const surfaceDisplayQuery = queryRecord<SurfaceDisplayState>({
   fluidSurfaceRenderMode: choiceQuery("fluidSurface", "simple", SURFACE_DISPLAY_OPTIONS.map(option => option.value)),
+  waterReflectionMode: choiceQuery<WaterReflectionMode>("waterReflections", "screen-space", ["screen-space", "world-space", "environment"]),
+  waterWorldRefractionEnabled: booleanQuery("waterWorldRefraction", false),
   // On by default: a method that keeps particles shows where they are agitated.
   fluidParticleDisplay: choiceQuery<FluidParticleDisplay>("fluidParticles", "motion", ["off", "motion", "speed", "fine"]),
   fineSurfaceGreed: numberQuery("fineGreed", FINE.greed, 0, 1),
@@ -28,6 +32,7 @@ export const surfaceDisplayFeature = {
     { id: "particles", label: "Particles", kind: "choice", update: "live", setting: "fluidParticleDisplay",
       hint: "The method's own particles, drawn through the liquid. Under the Simple surface they sit in the water, fogged by the liquid in front of them." }],
   placements: [{ slot: "scene.surface", control: "mode", presentation: "compact", priority: "high" }, { slot: "frame.surface", control: "mode", presentation: "expanded" },
-    // A drawn layer like the field views, so it stands first among them.
+    // Surface and particle layers remain reachable in the normal scene view.
+    { slot: "study.layers", control: "mode", presentation: "compact", priority: "high" },
     { slot: "study.layers", control: "particles", presentation: "compact", priority: "high" }],
 } as const satisfies FeatureDefinition;

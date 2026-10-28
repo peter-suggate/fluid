@@ -380,7 +380,10 @@ export function buildSvoSceneLights(scene: SceneDescription, options: BuildSvoSc
   const selected = fixtures.slice().sort((a, b) => importance(b) - importance(a) || a.lightId - b.lightId).slice(0, maximumRecords - 1);
   const selectedIds = new Set(selected.map((light) => light.lightId));
   const omittedFixtureKeys = fixtures.filter((light) => !selectedIds.has(light.lightId)).map((light) => light.sourceKey).sort();
-  const records = [directional, ...selected.sort((a, b) => a.lightId - b.lightId)];
+  // Shaders may shade a stricter prefix than the publication capacity. Keep
+  // the importance ordering used for selection, rather than restoring author
+  // order and silently spending that budget on the earliest dim fixtures.
+  const records = [directional, ...selected];
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     records,
     omittedFixtureKeys,

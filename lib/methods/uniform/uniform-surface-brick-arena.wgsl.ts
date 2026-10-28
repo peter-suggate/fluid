@@ -482,7 +482,7 @@ fn nbStoreInterface(p:vec3u,t0:vec3i)->bool{
     mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));
     incident=(umVertexRecipe(key)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u;
    }
-   if(umTileKind(q)==UM_SOLID){bits|=NB_STORE_WALL;}
+   if(umTileKind(q)>=UM_SOLID){bits|=NB_STORE_WALL;}
    nbStoreTile[lane]=vec4u(key,bits,mask);nbStoreIncident[lane]=incident;
   }
   workgroupBarrier();
@@ -635,7 +635,7 @@ fn nbArenaCanonicalPublish(p:vec3u,l:vec3u,t0:vec3i,block:u32,page:vec3i,window:
     mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));
     incident=(umVertexRecipe(key)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u;
    }
-   if(umTileKind(q)==UM_SOLID){bits|=NB_STORE_WALL;}
+   if(umTileKind(q)>=UM_SOLID){bits|=NB_STORE_WALL;}
    nbStoreTile[lane]=vec4u(key,bits,mask);nbStoreIncident[lane]=incident;
    nbCapacityTileMask[lane]=nbCapacityMaskAt(q,key);
   }
@@ -748,7 +748,7 @@ fn nbArenaCanonicalPublish(p:vec3u,l:vec3u,t0:vec3i,block:u32,page:vec3i,window:
     mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));
     incident=(umVertexRecipe(key)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u;
    }
-   if(umTileKind(q)==UM_SOLID){bits|=NB_STORE_WALL;}
+   if(umTileKind(q)>=UM_SOLID){bits|=NB_STORE_WALL;}
    nbStoreTile[lane]=vec4u(key,bits,mask);nbStoreIncident[lane]=incident;
    nbCapacityTileMask[lane]=nbCapacityMaskAt(q,key);
   }
@@ -815,7 +815,7 @@ fn nbArenaFinishCommit(t0:vec3i,changed:u32,lane:u32){
     mask=vec2u(atomicLoad(&bins[NB_BAND_MASK+2u*key]),atomicLoad(&bins[NB_BAND_MASK+2u*key+1u]));
     incident=(umVertexRecipe(key)>>${UNIFORM_COMPILED_TOPOLOGY.incident}u)&255u;
    }
-   if(umTileKind(q)==UM_SOLID){bits|=NB_STORE_WALL;}
+   if(umTileKind(q)>=UM_SOLID){bits|=NB_STORE_WALL;}
    nbStoreTile[lane]=vec4u(key,bits,mask);nbStoreIncident[lane]=incident;
    nbCapacityTileMask[lane]=nbCapacityMaskAt(q,key);
   }

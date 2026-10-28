@@ -346,7 +346,7 @@ var<workgroup> haloTiles:array<u32,100>;
    let n=umHaloBit(clamp(t,vec3u(1u),vec3u(8u))-vec3u(1u));var word=select(0u,UM_HALO_MARKED,(haloBlocks[16u*b+(n>>5u)]&(1u<<(n&31u)))!=0u);
    let key=umTileAt(vec3u(tap)/4u);
    if(umTilePresent(tap>>vec3u(2u))&&(umTileWidth(key)==1u||umHanging[key]!=UM_NO_SLOT)){word|=UM_HALO_UNIT;}
-   if(umCellKind(tap)==UM_SOLID){word|=UM_HALO_SOLID;}
+   if(umCellKind(tap)>=UM_SOLID){word|=UM_HALO_SOLID;}
    haloTiles[k]=word;
   }
   workgroupBarrier();

@@ -1,0 +1,100 @@
+{
+  "scope": "Read-only production baseline at v37 before an attempted exact-mode switch failed. No valid frozen exact comparison was produced; that capture option was removed. Main image and both diagnostics were saved before the switch.",
+  "probe": "artifacts/water-scenes/alpine-lake-sunrise/live-world-optics-v37-native-sun-diagnostics.json",
+  "baseline_image": "artifacts/water-scenes/alpine-lake-sunrise/live-world-optics-v37.png",
+  "native_algorithm": "Production FVX surface projection and scalar marcher, diagnostic1024-step bound,8stratified disk rays at actual .065rad sun aperture pluscenter ray. Same-owner scalar visibility is an upper bound on full-scene visibility.",
+  "all_roi_statuses": {
+    "clear": 3489,
+    "occluded": 1725,
+    "notApplicable": 150,
+    "exhausted": 7,
+    "invalidProjectionOrField": 5
+  },
+  "valid_fir_samples": 2627,
+  "fir_owner_range": [
+    14,
+    59
+  ],
+  "meanRawPcf": 0.3969092811817484,
+  "meanResolvedVisibility": 0.40202355713820703,
+  "meanNativeVisibility": 0.4812047963456414,
+  "meanAbsoluteReconstructionDifference": 0.056164961625751825,
+  "conditional_bins": [
+    {
+      "nativeVisibility": 0.0,
+      "count": 1179,
+      "meanRawPcf": 0.173237962056581,
+      "meanResolvedVisibility": 0.1895064559904977
+    },
+    {
+      "nativeVisibility": 0.125,
+      "count": 85,
+      "meanRawPcf": 0.16080850629300317,
+      "meanResolvedVisibility": 0.14692447886747473
+    },
+    {
+      "nativeVisibility": 0.25,
+      "count": 40,
+      "meanRawPcf": 0.23965463789645583,
+      "meanResolvedVisibility": 0.26333298683166506
+    },
+    {
+      "nativeVisibility": 0.375,
+      "count": 42,
+      "meanRawPcf": 0.28762162512256984,
+      "meanResolvedVisibility": 0.29679652622767855
+    },
+    {
+      "nativeVisibility": 0.5,
+      "count": 49,
+      "meanRawPcf": 0.3433952321279414,
+      "meanResolvedVisibility": 0.3620535402881856
+    },
+    {
+      "nativeVisibility": 0.625,
+      "count": 41,
+      "meanRawPcf": 0.33690471679153966,
+      "meanResolvedVisibility": 0.35377483833126905
+    },
+    {
+      "nativeVisibility": 0.75,
+      "count": 34,
+      "meanRawPcf": 0.39086632981129427,
+      "meanResolvedVisibility": 0.35323217335869284
+    },
+    {
+      "nativeVisibility": 0.875,
+      "count": 39,
+      "meanRawPcf": 0.5840080086237345,
+      "meanResolvedVisibility": 0.5563792693309295
+    },
+    {
+      "nativeVisibility": 1.0,
+      "count": 1118,
+      "meanRawPcf": 0.6586698392497322,
+      "meanResolvedVisibility": 0.6540664950508978
+    }
+  ],
+  "findings": [
+    "No broad sunlight excess: average raster visibility is below same-owner scalar reference.",
+    "Shadow contrast is compressed: fully self-blocked group retains .1895resolved light; fully clear group averages.6541. Other owners may legitimately reduce the latter.",
+    "754fully blocked samples with center blocker morethan2nativecells away retain.1262mean visibility, so local contact loss is not solely immediate self-intersection.",
+    "Guide reconstruction adds.0051average visibility; main local loss is already present in rawPCF.",
+    "No production shadow/bias changes made from these data. Higher map resolution or exact native visibility requires separately measured quality/cost; environment occlusion is also significant."
+  ],
+  "lighting_energy_cross_reference": {
+    "source": "artifacts/water-scenes/alpine-lake-sunrise/foliage-lighting-energy-audit-v37.json",
+    "agent": "Tokyo",
+    "fir_direct_fraction": 0.561,
+    "fir_diffuse_environment_fraction": 0.153,
+    "fir_specular_environment_fraction": 0.287,
+    "low_direct_specular_environment_fraction": 0.697,
+    "duplicate_environment_key_total_fraction": 0.006
+  },
+  "helper_sha256": "fcaea22e827a2a9a7214fc3799dc30481810c033fe923d44b430dfb17af99b9b",
+  "validation": {
+    "diagnostic_gpu_smoke": "pass",
+    "native_projection_marcher_gpu_tests": "7/7pass",
+    "typecheck": "pass"
+  }
+}

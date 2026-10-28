@@ -52,7 +52,8 @@ fn umLoadAddressPlan(block:u32,lane:u32){
 fn umPageWord(page:vec3i)->u32{
  if(umUseAddressPlan&&umPlanReady!=0u){
   let d=page-umPlanPage;
-  if(all(abs(d)<=vec3i(1))){return umPlanNeighbors[u32(d.x+3*d.y+9*d.z+13)];}
+  // A neighbour row is raw: its BULK16 tag reads as umPageWord's.
+  if(all(abs(d)<=vec3i(1))){let w=umPlanNeighbors[u32(d.x+3*d.y+9*d.z+13)];return select(w,umBulk16Word(),umSolidIsBox()&&umBulkTag(w));}
  }
  return umDirectoryPageWord(page);
 }

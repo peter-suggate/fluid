@@ -2,6 +2,8 @@ import { uniformCompiledVertexResolveWGSL } from "./uniform-compiled-topology";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
+import type {UniformBulkPages} from "./uniform-bulk-pages";
+import {BULK16_STATUS} from "./uniform-bulk-pages";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedPageCount,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {levelSetFillWGSL} from "../../core/level-set-fill.wgsl";
@@ -86,7 +88,7 @@ export class UniformMixedSurfaceVolume {
  /** The caller runs UniformMixedPhiResolve on phi before encode: every owner
   * corner is then a stored or resolved texel; resolveScale completes the
   * corner scales the same way after metric. */
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly bulkPages?:UniformBulkPages){
   const lattice=ownership.capacity.lattice;
   const address=this.address=ownership.capacity.address;
   this.vertices=address.vertexKeys;
@@ -100,7 +102,7 @@ export class UniformMixedSurfaceVolume {
   const scratch={binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}};
   this.budget=device.createBuffer({label:"NB scalar volume budget",size:4*NB_VOLUME_BUDGET_FLOATS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.budgetParams=device.createBuffer({label:"NB volume budget parameters",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-  this.resources=uniformDetailBindLayout(device,{entries:[texture(0),texture(1),scratch,{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]});
+  this.resources=uniformDetailBindLayout(device,{entries:[texture(0),texture(1),scratch,{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}},{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}},...(bulkPages?[{binding:7,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[])]});
  }
  /** The stage measures phi and volume and writes neither. */
  bind(phi:GPUTexture,volume:GPUTexture,scratch:GPUBufferBinding):UniformDetailGroup{
@@ -108,7 +110,7 @@ export class UniformMixedSurfaceVolume {
   for(const [i,t] of [phi,volume].entries())if(t.format!=="r32float"||uniformDetailClass(t)!==(i===1?"cell":"vertex"))throw new Error("Mixed surface constraint requires native vertex and cell fields");
   if((scratch.size??scratch.buffer.size-(scratch.offset??0))<this.scratchBytes)throw new Error("Mixed surface constraint needs sufficient scratch");
   const work={...scratch,size:this.scratchBytes};
-  return uniformDetailGroup(this.device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:volume},{binding:3,resource:work},{binding:5,resource:{buffer:this.budget}},{binding:6,resource:{buffer:this.budgetParams}}]});
+  return uniformDetailGroup(this.device,{layout:this.resources,entries:[{binding:0,resource:phi},{binding:1,resource:volume},{binding:3,resource:work},{binding:5,resource:{buffer:this.budget}},{binding:6,resource:{buffer:this.budgetParams}},...(this.bulkPages?[{binding:7,resource:this.bulkPages.binding}]:[])]});
  }
  async initialize():Promise<void>{
   const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL;
@@ -122,6 +124,8 @@ export class UniformMixedSurfaceVolume {
 override parity:u32=0u;
 @group(1) @binding(5) var<storage,read_write> budget:array<f32>;
 @group(1) @binding(6) var<uniform> budgetParams:vec4f;
+// A BULK16 page is deep, fully open liquid (16h membership): 32^3 h cells.
+${this.bulkPages?`@group(1) @binding(7) var<storage,read> svBulk:array<u32>;\nfn svBulkVolume()->f32{return 32768.0*f32(svBulk[${BULK16_STATUS.live}u]);}`:"fn svBulkVolume()->f32{return 0.0;}"}
 override captureBudget:bool=false;override gaugeBudget:bool=false;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner, and below a 4h owner's own texel (its tile origin): the
@@ -482,6 +486,7 @@ var<workgroup> svReduceJobs:u32;
  if(l==0u){svReduceJobs=svJobs();}
  let count=(workgroupUniformLoad(&svReduceJobs)+63u)/64u;
  var sum=vec4f(0);for(var i=l;i<count;i+=64u){sum+=loadSum(SV_R+4u*i);}sums[l]=sum;sumGroup(l);
+ if(l==0u){let bulk=svBulkVolume();sums[0]+=vec4f(bulk,bulk,0.0,0.0);}
 
  // Volume control (Kim et al. 2007, the proportional term): the divergence
  // that closes the liquid's gap to its budget over the control time. The

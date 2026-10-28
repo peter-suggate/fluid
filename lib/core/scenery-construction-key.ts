@@ -20,6 +20,15 @@ function sceneryAppearanceField(holder: object, key: string): boolean {
   return false;
 }
 
+/** Sampled palettes share slots by asset and authored emission. Changing the
+ * latter changes voxel material identities, even though the mesh stays put. */
+function sampledEmission(node: unknown): number | undefined {
+  if (!node || typeof node !== "object") return undefined;
+  const value = node as { kind?: string; program?: { sampledVolume?: unknown }; material?: { emission?: number } };
+  return value.kind === "field-program" && value.program?.sampledVolume
+    ? value.material?.emission ?? 0 : undefined;
+}
+
 const SAME = 0, APPEARANCE = 1, GEOMETRY = 2;
 
 /** Deep comparison that allocates nothing and stops at the first geometric difference. */
@@ -38,6 +47,7 @@ function scenerySubtreeChange(previous: unknown, next: unknown, appearance: bool
     }
     return change;
   }
+  if (sampledEmission(previous) !== sampledEmission(next)) return GEOMETRY;
   const a = previous as Record<string, unknown>, b = next as Record<string, unknown>;
   let change = SAME, fields = 0;
   for (const key in a) {
@@ -148,6 +158,7 @@ export function sceneryConstructionKey(scene: SceneDescription): string {
   }
   // Appearance is live table data: it cannot invalidate the baked geometry/owner layout.
   const text = JSON.stringify(scenery, function (this: object, field: string, value: unknown) {
+    if (field === "material" && sampledEmission(this) !== undefined) return { emission: sampledEmission(this) };
     return sceneryAppearanceField(this, field) ? undefined : value;
   });
   // Two independent 32-bit lanes and length; no megabyte-long solver keys.

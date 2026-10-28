@@ -1,3 +1,4 @@
+import type { SvoEnvironmentLightingOptions } from "../radiance/svo-environment-lighting";
 import type { SceneDescription } from "../../../core/model";
 import type { EnvironmentId } from "../../../core/environments";
 
@@ -162,4 +163,17 @@ export function svoSceneLighting(
     environment: { ...base.environment, ...authored.environment },
     grade: { ...base.grade, ...authored.grade },
   };
+}
+
+/** Resolve the environment's reflected sun from the same authored key as the
+ * direct-light rig. Documents without a key override retain legacy presets. */
+export function svoSceneEnvironmentLightingOptions(
+  scene: Pick<SceneDescription, "systems" | "lighting" | "environment">,
+): SvoEnvironmentLightingOptions {
+  const lighting = svoSceneLighting(scene);
+  return { ...lighting.environment, ...(scene.lighting?.directional ? {
+    keyLightColorLinear: lighting.directional?.colorLinear,
+    keyLightDirection: lighting.directional?.direction,
+    sunIntensity: lighting.directional?.intensity,
+  } : {}) };
 }

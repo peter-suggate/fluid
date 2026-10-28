@@ -160,6 +160,14 @@ export type SvoLightingVisibilityStatus = Readonly<{
 }>;
 
 export type SvoLightingOptions = Readonly<{
+  /** Generic water presentation choice. Scene rays fall back to sky outside the viewport. */
+  waterReflectionMode?: "screen-space" | "world-space" | "environment";
+  /** Optional full-world opaque refraction, verified against actual liquid. */
+  waterWorldRefractionEnabled?: boolean;
+  /** Authored image detail on voxel surfaces. Omitted means enabled. */
+  surfaceTexturesEnabled?: boolean;
+  /** Optional four-ray native FVX contact AO; geometry remains voxel based. */
+  nativeAmbientOcclusionEnabled?: boolean;
   shadowsEnabled: boolean;
   ambientOcclusionEnabled: boolean;
   /**
@@ -221,6 +229,8 @@ export type SvoLightingOptions = Readonly<{
 
 /** The presentation preset aims for the finished image; each effect remains independently switchable. */
 export const DEFAULT_SVO_LIGHTING_OPTIONS = Object.freeze({
+  surfaceTexturesEnabled: true,
+  nativeAmbientOcclusionEnabled: false,
   shadowsEnabled: true,
   ambientOcclusionEnabled: true,
   silhouetteRefinementEnabled: false,

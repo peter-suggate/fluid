@@ -93,12 +93,14 @@ export function uniformBulkStructural(tile: (t: BulkVec) => UniformBulkTile | un
 }
 
 /** A composite pressure system of 4h cells (n, multiples of 4) with member
- * regions, as pNative and the bulk faces form it. */
+ * regions, as pNative and the bulk faces form it. Closed cells (cell
+ * indices) are a wall's CM11a unknowns: no face between two of them, and no
+ * slope of their own for a seam head. */
 export class UniformBulkComposite {
   readonly regions: BulkVec;
   readonly cells: number;
   private readonly bases: number[];
-  constructor(readonly n: BulkVec, readonly members: ReadonlySet<number>) {
+  constructor(readonly n: BulkVec, readonly members: ReadonlySet<number>, readonly closed: ReadonlySet<number> = new Set()) {
     if (n.some(v => v % 4 !== 0)) throw new Error("Whole regions only");
     this.regions = [n[0] / 4, n[1] / 4, n[2] / 4];
     this.cells = n[0] * n[1] * n[2];
@@ -110,34 +112,40 @@ export class UniformBulkComposite {
   coord(k: number): BulkVec { const [nx, ny] = this.n; return [k % nx, Math.floor(k / nx) % ny, Math.floor(k / (nx * ny))]; }
   region(c: BulkVec): number { const [rx, ry] = this.regions; return (c[0] >> 2) + rx * ((c[1] >> 2) + ry * (c[2] >> 2)); }
   member(c: BulkVec): boolean { return this.members.has(this.region(c)); }
+  isClosed(c: BulkVec): boolean { return this.closed.has(this.cell(c)); }
   inside(c: BulkVec): boolean { return c.every((v, a) => v >= 0 && v < this.n[a]!); }
   /** The face on axis a below cell c (c[a] in 0..n[a]). */
   face(a: number, c: BulkVec): number { const d: BulkVec = [...this.n]; d[a] += 1; return this.bases[a]! + c[0] + d[0] * (c[1] + d[1] * c[2]); }
   /** nBulkLink's coupling (per V/h4^2). */
   coupling(k: BulkVec, n: BulkVec): number {
+    if (this.isClosed(k) && this.isClosed(n)) return 0;
     const mk = this.member(k), mn = this.member(n);
     if (mk && mn) return this.region(k) === this.region(n) ? 0 : UNIFORM_BULK_COUPLING.member;
     return mk || mn ? UNIFORM_BULK_COUPLING.seam : UNIFORM_BULK_COUPLING.native;
   }
-  /** nBulkHead: native q's start slope over its native neighbours on the axes tangential to a, times its offset from its region's centre. */
-  head(start: Float64Array, q: BulkVec, a: number): number {
+  /** nBulkHead: q's start slope over its open neighbours (native ones unless rows) on the axes tangential to a, times its offset from its region's centre. */
+  head(start: Float64Array, q: BulkVec, a: number, rows = false): number {
     let head = 0;
     for (let b = 0; b < 3; b++) {
       if (b === a) continue;
       let rise = 0, count = 0;
       for (const s of [-1, 1]) {
         const m: BulkVec = [...q]; m[b] += s;
-        if (this.inside(m) && !this.member(m)) { rise += s * (start[this.cell(m)]! - start[this.cell(q)]!); count++; }
+        if (this.inside(m) && !this.isClosed(m) && (rows || !this.member(m))) { rise += s * (start[this.cell(m)]! - start[this.cell(q)]!); count++; }
       }
       if (count) head += rise / count * ((q[b] & 3) - 1.5);
     }
     return head;
   }
+  /** nBulkLink's head of the seam between native and member cells: the native's slope, or the member row's at a closed native. */
+  seamHead(start: Float64Array, native: BulkVec, member: BulkVec, a: number): number {
+    return this.isClosed(native) ? this.head(start, member, a, true) : this.head(start, native, a);
+  }
   /** The offset o of link k -> n (rows: c (p_n - p_k + o)). */
   offset(start: Float64Array, k: BulkVec, n: BulkVec, a: number): number {
     const mk = this.member(k), mn = this.member(n);
     if (mk === mn) return 0;
-    return mk ? -this.head(start, n, a) : this.head(start, k, a);
+    return mk ? -this.seamHead(start, n, k, a) : this.seamHead(start, k, n, a);
   }
   /** Each cell's pressure in the operator: a member's is its region's mean (its 16h pressure; the rows keep their offsets). */
   level(p: Float64Array): Float64Array {
@@ -155,6 +163,7 @@ export class UniformBulkComposite {
     for (let k = 0; k < this.cells; k++) {
       const c = this.coord(k); let row = 0;
       for (const { n, a, s } of this.links(c)) {
+        if (this.isClosed(c) && this.isClosed(n)) continue;
         row -= 64 * s * ustar[this.face(a, s > 0 ? n : c)]!;
         const coupling = this.coupling(c, n);
         if (coupling) row += coupling * (p[this.cell(n)]! - p[k]! + this.offset(start, c, n, a));
@@ -201,13 +210,14 @@ export class UniformBulkComposite {
     const value = (a: number, low: BulkVec, high: BulkVec): number => {
       const ml = this.member(low), mh = this.member(high), f = this.face(a, high);
       const pl = p[this.cell(low)]!, ph = p[this.cell(high)]!;
+      if (this.isClosed(low) && this.isClosed(high)) return 0;
       if (!ml && !mh) return ustar[f]! - (ph - pl);
       if (ml && mh) {
         let star = 0; const b = (a + 1) % 3, c = (a + 2) % 3;
         for (let j = 0; j < 16; j++) { const q: BulkVec = [...high]; q[b] = (q[b] & ~3) + (j & 3); q[c] = (q[c] & ~3) + (j >> 2); star += ustar[this.face(a, q)]!; }
         return star / 16 - (ph - pl) / 4;
       }
-      const head = this.head(start, ml ? high : low, a);
+      const head = this.seamHead(start, ml ? high : low, ml ? low : high, a);
       return ustar[f]! - ((ph + (mh ? head : 0)) - (pl + (ml ? head : 0))) * UNIFORM_BULK_COUPLING.seam / UNIFORM_BULK_COUPLING.native;
     };
     for (let a = 0; a < 3; a++) for (let k = 0; k < this.cells; k++) {

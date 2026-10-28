@@ -36,7 +36,7 @@ test("texture byte rules and caps are checked before allocation, including itera
   const audit = auditUniformGPUAllocations(raw.device, 64);
   const descriptor = { format: "rgba32float", size: { width: 2, height: 2 }, usage: 0 } as const;
   assert.throws(() => audit.device.createTexture({ ...descriptor, size: [2, 2, 2] }), /past the cap/);
-  assert.throws(() => audit.device.createTexture({ ...descriptor, mipLevelCount: 2 }), /exact byte rule/);
+  assert.throws(() => audit.device.createTexture({ ...descriptor, mipLevelCount: 2 }), /past the cap/);
   assert.throws(() => audit.device.createTexture({ ...descriptor, format: "bc1-rgba-unorm" }), /exact byte rule/);
   assert.equal(raw.textures.length, 0);
   const texture = audit.device.createTexture(descriptor);
@@ -45,4 +45,14 @@ test("texture byte rules and caps are checked before allocation, including itera
   audit.device.createTexture({ ...descriptor, size: [2, 2][Symbol.iterator]() });
   assert.deepEqual(raw.textures[1]!.size, { width: 2, height: 2, depthOrArrayLayers: 1 });
   assert.equal(audit.snapshot().liveBytes, 64);
+});
+
+
+test("sRGB array mip accounting retains layers while 3D mip depth shrinks",()=>{
+  const raw=fakeDevice(),audit=auditUniformGPUAllocations(raw.device);
+  const array=audit.device.createTexture({format:"rgba8unorm-srgb",size:[4,4,3],mipLevelCount:3,usage:0});
+  assert.equal(audit.snapshot().liveBytes,(16+4+1)*3*4);
+  array.destroy();
+  audit.device.createTexture({format:"rgba8unorm",size:[4,4,4],dimension:"3d",mipLevelCount:3,usage:0});
+  assert.equal(audit.snapshot().liveBytes,(64+8+1)*4);
 });

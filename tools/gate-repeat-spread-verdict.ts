@@ -44,8 +44,25 @@ export function repeatSpreadVerdict(armOf: readonly (0 | 1)[], series: Record<Me
   const arms = [0, 1].map(arm => armOf.flatMap((x, i) => x === arm ? [i] : []));
   const band = (frame: number) => frame <= 60 ? 0.002 : 0.02;
   const report: Record<string, unknown> = {}; let pass = true;
+  if (armOf.some(arm => arm !== 0 && arm !== 1) || arms.some(arm => arm.length < 2)) {
+    return { pass: false, report: { error: "Both arms require at least two repeats." } };
+  }
   for (const m of METRICS) {
+    const samples = series[m];
+    // Missing stats become NaN during capture and null after JSON round-tripping.
+    // Neither is evidence that the two arms agree.
+    if (!samples || samples.length !== armOf.length || samples.some(s => !(s instanceof Map) ||
+      [...s].some(([frame, value]) => !Number.isInteger(frame) || frame < 0 || !Number.isFinite(value)))) {
+      pass = false;
+      report[m] = { error: "Expected one series per instance with nonnegative integer frames and finite measurements." };
+      continue;
+    }
     const frames = [...series[m][0]!.keys()].filter(f => armOf.every((_, i) => series[m][i]!.has(f))).sort((x, y) => x - y);
+    if (frames.length === 0) {
+      pass = false;
+      report[m] = { error: "No frames have measurements from every instance." };
+      continue;
+    }
     const windows = new Map<number, number[]>();
     for (const f of frames) { const w = Math.floor((f - 1) / WINDOW); windows.set(w, [...windows.get(w) ?? [], f]); }
     const mean = (v: number[]) => v.reduce((s, x) => s + x, 0) / v.length;
@@ -55,6 +72,11 @@ export function repeatSpreadVerdict(armOf: readonly (0 | 1)[], series: Record<Me
       const last = fs.at(-1)!;
       return { frames: `${w * WINDOW + 1}-${(w + 1) * WINDOW}`, aa: Math.max(...a) - Math.min(...a), bb: Math.max(...b) - Math.min(...b), ab: Math.abs(mean(a) - mean(b)), noise: m === "volumeDrift" ? band(last) : band(last) * Math.abs(mean(a)) };
     });
+    if (rows.some(r => ![r.aa, r.bb, r.ab, r.noise].every(Number.isFinite))) {
+      pass = false;
+      report[m] = { error: "Window statistics overflowed." };
+      continue;
+    }
     const spread = Math.max(0, ...rows.map(r => Math.max(r.aa, r.bb)));
     let worst = { frames: "", ratio: 0, ab: 0, tolerance: 0 }, over = 0;
     for (const r of rows) {

@@ -356,8 +356,15 @@ fn umInflow(face:UMFace,forced:f32)->f32 {
 // retain (umForceRetain, decided once per owner): the +face's drive
 // (viscosity, capillarity) is kept (1) or reused (2); gravity and
 // inflow are applied fresh.
+// A low face's forced value: a wall's stays (its own velocity); one over a
+// BULK16 page is a liquid face both sides, so it takes gravity like any
+// other (deep water: liquid across, the umForcedVelocityClear rule).
+fn umLowForced(anchor:vec3i,axis:u32)->f32{
+ let v=negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];
+ return select(v,v+force.hDt.w*force.gravity[axis],umCellKind(anchor)==UM_BULK16);
+}
 fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool,retain:vec3u)->f32 {
- if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
+ if(umFaceLow(face.anchor,face.axis)){return umLowForced(face.anchor,face.axis);}
  var value=0.0;if(face.width==4u){value=${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(advected,face.anchor,0)[face.axis];}else{value=textureLoad(advected,face.anchor,0)[face.axis];}let dt=force.hDt.w;
  if(umForceFaceFrozen(owner,face)){return value;}
  let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
@@ -418,7 +425,7 @@ fn umViscosityTerms(at:vec3i)->array<vec3f,3>{
  let low=umLowOpen(at);
  // Do not query retained solid evidence in the already solid-free twin.
  let solidClear=!umSolidEnabled()||umSolidRegionClearAtBuild(at);
- for(var axis=0u;axis<3u;axis++){if(low[axis]){let i=umLowFaceIndex(origin,axis);boundary[i]=negative[i];}}
+ for(var axis=0u;axis<3u;axis++){if(low[axis]){var q=at;q[axis]-=1;boundary[umLowFaceIndex(origin,axis)]=umLowForced(q,axis);}}
  // The owner's three +faces share its texel (an h owner's +face is never a
  // low face: its anchor is the owner's own stored cell). The drive
  // (viscosity as a vector, capillarity per face) is kept or

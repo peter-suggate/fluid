@@ -185,7 +185,9 @@ ${uniformMixedPressureSurfaceSource(this.coarse?`
 ` : "")}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.coarse?this.solid!.coarse!.count:undefined)}
 // The kind of the cell across a face from its owner. Where nothing is stored
-// there, UM_SOLID is a wall, with a slot of its own (umBoundaryIndex), and
+// there, UM_SOLID is a wall, with a slot of its own (umBoundaryIndex);
+// UM_BULK16 (liquid, no 4h row) has that slot too, the arena's pWrite
+// giving it the BULK16 row's pressure 4h across; and
 // UM_AIR is air: V is 1 and the row across is block 0's, far air at zero
 // pressure.
 fn umFaceKind(face:UMFace)->u32{return umAcrossKind(face.anchor,face.axis,select(0,1,face.sign>0));}
@@ -207,7 +209,8 @@ fn umFaceVelocity(face:UMFace)->f32 {
 ${this.coarse?/* wgsl */`// COLD freeze (UniformColdFreeze): a face of owner o is frozen when its low
 // or high 4h cell's region is. Its stored velocity is F; u* is F + T +
 // gravity (umColdForced, forces' rule), except that a wall (a SOLID page
-// across) takes no T: no region term crosses it.
+// across) takes no T: no region term crosses it. A BULK16 page across is
+// liquid, so its face is no wall.
 fn umColdLow(o:UMOwner,face:UMFace)->vec3i{var low=vec3i(umOrigin(o));if(face.sign<0){low[face.axis]-=i32(o.width);}return low;}
 fn umColdWall(face:UMFace)->bool{return face.neighbor.width==0u&&umFaceKind(face)==UM_SOLID;}
 // What u* adds to a face's stored velocity: zero unless frozen.
@@ -216,7 +219,7 @@ fn umColdAdd(o:UMOwner,face:UMFace,occupied:bool)->f32{
  // Forces leave canonical negative boundary faces unchanged. Reconstruct
  // the same u* when frozen: adding gravity there invents a bottom flux,
  // especially where a cut tile also contains dry space outside a vessel.
- let low=umColdLow(o,face);var add=umColdForced(low,face.axis,o.width,0.0,occupied&&!umFaceLow(face.anchor,face.axis));
+ let low=umColdLow(o,face);var add=umColdForced(low,face.axis,o.width,0.0,occupied&&(!umFaceLow(face.anchor,face.axis)||umCellKind(face.anchor)==UM_BULK16));
  if(umColdWall(face)){add-=umColdFaceTerm(low,face.axis,o.width);}
  return add;
 }`:""}
@@ -303,7 +306,7 @@ fn umOwnerTopology(o:UMOwner)->vec4f{
  let p=vec3i(umOrigin(o));
  if(o.width==1u){return vec4f(umCellOpen(p),umPressureFaceV(p,0u),umPressureFaceV(p,1u),umPressureFaceV(p,2u));}
  var t=vec4f(1.0);
- for(var axis=0u;axis<3u;axis++){if(umAcrossKind(p,axis,i32(o.width))==UM_SOLID){t[axis+1u]=0.5;}}
+ for(var axis=0u;axis<3u;axis++){if(umAcrossKind(p,axis,i32(o.width))>=UM_SOLID){t[axis+1u]=0.5;}}
  return t;
 }
 // Low faces of a fine owner: the neighbour's positive V, or the wall's.
@@ -322,7 +325,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
  workgroupBarrier();
  var cutFaces=0u;
  if(o.width!=0u&&umPressureLiquid(o)){for(var f=0u;f<6u;f++){let axis=f>>1u;let sign=select(-1,1,(f&1u)==1u);
-  if(${this.skipBandRootRhs?"(!bandOwner||umAcrossKind(vec3i(umOrigin(o)),axis,select(-1,i32(o.width),sign>0))==UM_SOLID)&&":""}umCoarseCut(o,axis,sign)){cutFaces|=1u<<f;let i=atomicAdd(&umCutCount,1u);umCutItem[i]=lane|(f<<6u);umCutBits[i]=umCutWord(o,axis,sign);}
+  if(${this.skipBandRootRhs?"(!bandOwner||umAcrossKind(vec3i(umOrigin(o)),axis,select(-1,i32(o.width),sign>0))>=UM_SOLID)&&":""}umCoarseCut(o,axis,sign)){cutFaces|=1u<<f;let i=atomicAdd(&umCutCount,1u);umCutItem[i]=lane|(f<<6u);umCutBits[i]=umCutWord(o,axis,sign);}
  }}
  let cuts=workgroupUniformLoad(&umCutCount);
  for(var first=0u;first<cuts;first+=4u){
@@ -341,7 +344,7 @@ fn umLowFaceV(o:UMOwner,t:vec4f,axis:u32)->f32{
   let sign=select(-1,1,side==1u);let first=umFace(o,axis,sign,0u);var flux=0.0;
   for(var part=0u;part<first.count;part++){
    let face=umFace(o,axis,sign,part);var fraction=1.0;
-   ${this.coarse?"":"if(face.neighbor.width==0u&&umFaceKind(face)==UM_SOLID){fraction=0.5;}"}
+   ${this.coarse?"":"if(face.neighbor.width==0u&&umFaceKind(face)>=UM_SOLID){fraction=0.5;}"}
    ${this.solid&&!this.coarse?"if(o.width==1u){fraction=select(umLowFaceV(o,topology,axis),topology[axis+1u],sign>0);}":""}
    ${this.coarse?"flux+=umCoarseFlux(o,face,((cutFaces>>(2u*axis+side))&1u)!=0u,umCutSum[6u*lane+2u*axis+side]);":"flux+=fraction*umFaceVelocity(face)*f32(face.width*face.width);"}
   }
@@ -479,7 +482,8 @@ fn umProjectWithSource(o:UMOwner,face:UMFace)->f32{
  return value;
 }
 fn umRelease(o:UMOwner,face:UMFace,v:f32)->bool{
- // A face with a SOLID page across it releases: it has a wall slot and a pressure of its own.
+ // A face with a SOLID page across it releases: it has a wall slot and a
+ // pressure of its own. A BULK16 page is liquid: its face never releases.
  if(face.neighbor.width!=0u||umFaceKind(face)!=UM_SOLID||umWallHeld(o)){return false;}
  ${this.coarse?"if(umSolidCoarse(o.index).x<=1e-5||umProjectV(o,face)<=1e-6){return false;}":this.solid?"if(o.width==1u&&(umCellOpen(vec3i(umOrigin(o)))<=1e-5||umProjectV(o,face)<=1e-6)){return false;}":""}
  let pressure=select(0.0,pressures[umBoundaryIndex(o,face.axis,face.sign)],umPressureLiquid(o));
@@ -501,7 +505,7 @@ ${uniformMixedFaceDispatchWGSL("project","umProjectWithSource(owner,face)",true,
      if(own!=(umCellOpen(q)>1e-5)&&umProjectV(owner,face)>1e-6){
       var solidPressure=0.0;
       let kind=umCellKind(q);
-      if(kind!=UM_RESIDENT){solidPressure=select(0.0,pressures[umBoundaryIndex(owner,axis,1)],umPressureLiquid(owner)&&kind==UM_SOLID);}
+      if(kind!=UM_RESIDENT){solidPressure=select(0.0,pressures[umBoundaryIndex(owner,axis,1)],umPressureLiquid(owner)&&kind>=UM_SOLID);}
       else if(own){solidPressure=umSolidPressure(umOwnerAt(q));}else{solidPressure=umSolidPressure(owner);}
       if(solidPressure<=0.0&&select(1.0,-1.0,own)*value[axis]*params.hDt.w>1e-4*UM_H[axis]){released|=1u<<axis;}
      }

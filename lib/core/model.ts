@@ -143,6 +143,8 @@ export interface SceneDescription {
     };
     /** Multipliers for the diffuse and prefiltered-specular environment terms. */
     environment?: {
+      /** Optional distant cloud layer shared by visible and reflected sky; 0 disables it. */
+      cloudCoverage?: number;
       diffuseScale?: number;
       specularScale?: number;
       /** Optional scene-owned image-free backdrop/fill palette. */
@@ -641,6 +643,8 @@ export function validateScene(scene: SceneDescription): string[] {
     const balance = lighting.grade.whiteBalance;
     if (balance.length !== 3 || !balance.every((value) => Number.isFinite(value) && value > 0)) errors.push("Scene grade white balance must contain three positive finite channel gains");
   }
+  const cloudCoverage = lighting?.environment?.cloudCoverage;
+  if (cloudCoverage !== undefined && (!Number.isFinite(cloudCoverage) || cloudCoverage < 0 || cloudCoverage > 1)) errors.push("Scene environment cloud coverage must be between zero and one");
   for (const [value, label] of [[lighting?.environment?.diffuseScale, "diffuse"], [lighting?.environment?.specularScale, "specular"]] as const) {
     if (value !== undefined && (!Number.isFinite(value) || value < 0)) errors.push(`Scene environment ${label} scale must be non-negative and finite`);
   }

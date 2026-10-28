@@ -31,12 +31,14 @@ function validateAssetHeader(id: string, volume: MeshVolumeDistanceField): void 
   const expected = meshAssetHeader(id), h = volume.header;
   if (h.asset !== id || h.cellSize !== expected.cellSize || h.dimensions.join() !== expected.dimensions.join()
     || h.origin.join() !== expected.origin.join() || JSON.stringify(h.materials) !== JSON.stringify(expected.materials)
-    || JSON.stringify(h.horizontalSlab) !== JSON.stringify(expected.horizontalSlab)) {
+    || JSON.stringify(h.horizontalSlab) !== JSON.stringify(expected.horizontalSlab)
+    || JSON.stringify(h.surfaceMapping) !== JSON.stringify(expected.surfaceMapping)) {
     throw new Error(`Mesh asset ${id} does not match its published metadata`);
   }
 }
 export function registerMeshAsset(id: string, volume: MeshVolume): void {
   validateAssetHeader(id, volume);
+  if (volume.header.surfaceMapping && !volume.surfaceMapping) throw new Error(`Mesh asset ${id} surface mapping has not loaded`);
   volumes.set(id, volume);
   registerMeshAssetDistanceField(id, { header: volume.header, bricks: new Map(
     [...volume.bricks].map(([key, { origin, distance }]) => [key, { origin, distance }])) });
@@ -170,7 +172,31 @@ export function packMeshAsset(id: string): Uint32Array<ArrayBuffer> {
   const volume = meshAssetVolume(id), h = volume.header;
   const held = packed.get(volume); if (held) return held;
   const dims = h.dimensions.map(v => v / 8), cells = dims[0]! * dims[1]! * dims[2]!;
-  const words = new Uint32Array(16 + 2 * cells + volume.bricks.size * 729 * 2), floats = new Float32Array(words.buffer);
+  const mapping = volume.surfaceMapping;
+  const geometryWords = 16 + 2 * cells + volume.bricks.size * 729 * 2;
+  const mappingWords = mapping ? mapping.mappings.length + mapping.nodes.length + mapping.header.materials.length * 12 : 0;
+  const words = new Uint32Array(geometryWords + mappingWords), floats = new Float32Array(words.buffer);
+  if (mapping) {
+    // Header offsets remain relative to this volume. Node ordering is shared
+    // with FVX; affine rows are translated to the centered runtime frame.
+    words[12] = geometryWords;
+    words[13] = geometryWords + mapping.mappings.length;
+    words[14] = words[13]! + mapping.nodes.length;
+    words.set(mapping.mappings, words[12]); words.set(mapping.nodes, words[13]);
+    const center = h.origin.map((v,a)=>v+h.dimensions[a]!*h.cellSize/2);
+    for (let m=1;m<mapping.header.mappingCount;m++) for (const row of [0,4]) {
+      const at=geometryWords+m*16+row;
+      floats[at+3]! += center.reduce((sum,v,a)=>sum+v*floats[at+a]!,0);
+    }
+    mapping.header.materials.forEach((material,i)=>{
+      const at=words[14]!+i*12;
+      floats.set(material.baseColorFactor,at); floats[at+3]=material.roughnessFactor;
+      words[at+4]=material.colorRoughnessLayer; words[at+5]=material.normalLayer;
+      floats[at+6]=material.normalStrength; floats[at+7]=material.metallicFactor;
+      words[at+8]=mapping.header.textureWidth; words[at+9]=mapping.header.textureHeight;
+      words[at+10]=mapping.header.mipLevelCount;
+    });
+  }
   floats.set(h.dimensions.map(v => -v * h.cellSize / 2), 0); floats[3] = h.cellSize;
   words.set(h.dimensions, 4); floats[7] = h.bandWidth;
   words.set(dims, 8); words[11] = 16;

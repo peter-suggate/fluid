@@ -54,6 +54,9 @@ import { createStationaryBowlScene } from "./stationary-bowl-scene";
 import { HERO_GARDEN_BLENDER_ID, createHeroGardenBlenderScene, heroGardenBlenderCamera } from "./hero-garden-blender-scene";
 import { BACKYARD_POOL_DRIFT_ID, BACKYARD_POOL_PARTY_ID, backyardPoolPartyCamera, createBackyardPoolDriftScene, createBackyardPoolPartyScene } from "./backyard-pool-party-scene";
 import { FOREST_WATERFALL_ID, createForestWaterfallScene, forestWaterfallCamera } from "./forest-waterfall-scene";
+import { ALPINE_LAKE_SCENE_ID, createAlpineLakeScene, alpineLakeCamera } from "./alpine-lake-scene";
+import { TOKYO_RAIN_ID, createTokyoRainScene, tokyoRainCamera } from "./tokyo-rain-scene";
+import { ATLANTIC_LIGHTHOUSE_ID, createAtlanticLighthouseScene, atlanticLighthouseCamera } from "./atlantic-lighthouse-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { createReservoirSeepScene, RESERVOIR_SEEP_CAMERA, RESERVOIR_SEEP_ID } from "./reservoir-seep-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
@@ -1651,6 +1654,48 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     presentationMode: "full-scene",
     build: createBackyardPoolPartyScene,
     camera: backyardPoolPartyCamera,
+  }),
+  defineScene({
+    id: TOKYO_RAIN_ID,
+    name: "Tokyo · rain after dark",
+    blurb: "Roof runoff and falling drops disturb a flooded neon alley. Narrow-band FLIP water feeds a matching Blender night scene with shopfronts, a cyclist, and a clear umbrella.",
+    audience: "explore",
+    shelf: "Water landscapes",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    renderProfile: { environmentRefinementDepth: 0 },
+    build: createTokyoRainScene,
+    camera: tokyoRainCamera,
+  }),
+  defineScene({
+    id: ATLANTIC_LIGHTHOUSE_ID,
+    name: "Atlantic · lighthouse breakers",
+    blurb: "An incoming wave strikes a weathered lighthouse island. Real narrow-band FLIP water meets the same rocky terrain used by the accompanying Blender storm scene.",
+    audience: "explore",
+    shelf: "Water landscapes",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    renderProfile: { environmentRefinementDepth: 0 },
+    build: createAtlanticLighthouseScene,
+    camera: atlanticLighthouseCamera,
+  }),
+  defineScene({
+    id: ALPINE_LAKE_SCENE_ID,
+    name: "Alpine lake · first light",
+    blurb: "Clear water rests in a stone-lined mountain tarn at sunrise. The lake uses narrow-band FLIP; its simulated surface can be rendered in the accompanying Blender scene.",
+    audience: "explore",
+    shelf: "Water landscapes",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    methodProfile: NBFLIP_METHOD_PROFILE,
+    renderProfile: { environmentRefinementDepth: 0 },
+    build: createAlpineLakeScene,
+    camera: alpineLakeCamera,
   }),
   defineScene({
     id: FOREST_WATERFALL_ID,

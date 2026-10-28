@@ -4,13 +4,18 @@ import { SvoRadianceReconstructionControlRow } from "../features/radiance/ui";
 import { useSession } from "../../core/session/session-context";
 import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/ui/slot";
 import { PrimaryTraversalRow, SvoPrimaryVisibilityControlRow } from "../features/primary-visibility/ui";
-import { SvoLightingVisibilityControlRow, SvoShadowsControlRow, SvoAmbientOcclusionControlRow, SvoLatticeVisibilityControlRow, SvoFarAoTapsControlRow, SvoStillViewReuseControlRow } from "../features/lighting-visibility/ui";
+import { SvoShadowResolutionControlRow, SvoNativeAmbientOcclusionControlRow, SvoSurfaceTexturesControlRow, SvoDirectLightSamplesControlRow, SvoCloudCoverageControlRow, SvoLightingVisibilityControlRow, SvoShadowsControlRow, SvoAmbientOcclusionControlRow, SvoLatticeVisibilityControlRow, SvoFarAoTapsControlRow, SvoStillViewReuseControlRow } from "../features/lighting-visibility/ui";
 import { resolveSvoPipelineComposition } from "./composition";
 import { SvoAoTapOverlayControlRow } from "../features/lighting-visibility/ui";
 
 /** The SVO package exports its own views; application composition can install
  * them alongside other packages without the SVO host importing the app. */
 export const SVO_FEATURE_VIEWS: FeatureControlViews = {
+  "svo.lighting-visibility/shadow-resolution": SvoShadowResolutionControlRow,
+  "svo.lighting-visibility/native-ao": SvoNativeAmbientOcclusionControlRow,
+  "svo.lighting-visibility/surface-textures": SvoSurfaceTexturesControlRow,
+  "svo.lighting-visibility/direct-light-samples": SvoDirectLightSamplesControlRow,
+  "svo.lighting-visibility/cloud-coverage": SvoCloudCoverageControlRow,
   "svo.lighting-visibility/ao-tap-overlay": SvoAoTapOverlayControlRow,
   "svo.radiance-reconstruction/mode": SvoRadianceReconstructionControlRow,
   "svo.primary-visibility/primary-work": PrimaryTraversalRow,

@@ -1217,7 +1217,7 @@ fn nbSeparation(i:u32,q:vec3f,m:f32)->vec3f{
     // that axis: one kind an axis, of the cell ahead.
     for(var axis=0u;axis<3u;axis++){
      var ahead=q;ahead[axis]+=select(-1.0,1.0,v[axis]>0.0)*(0.001+nbSampleRadius(nbParticleMass(p)));
-     if((v[axis]<0.0||v[axis]>0.0)&&umPointKind(ahead)==UM_SOLID){v[axis]=0.0;}
+     if((v[axis]<0.0||v[axis]>0.0)&&umPointKind(ahead)>=UM_SOLID){v[axis]=0.0;}
     }
    }
    ${this.apic?"if(!all(abs(p.cx.xyz)<vec3f(1e10))||!all(abs(p.cy.xyz)<vec3f(1e10))||!all(abs(p.cz.xyz)<vec3f(1e10))){atomicStore(&state[3],2u);return NbMoved(p,1u);}":""}
@@ -1325,7 +1325,7 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
      }else{blocked=umCellOpen(vec3i(lead))<0.5;}
      // A SOLID page (the lattice's walls) stops it as a voxel does; only a
      // step that leaves its page reads the page table.
-     if(!blocked&&any((vec3i(floor(lead))>>vec3u(5u))!=(vec3i(floor(q))>>vec3u(5u)))){blocked=umPointKind(lead)==UM_SOLID;}
+     if(!blocked&&any((vec3i(floor(lead))>>vec3u(5u))!=(vec3i(floor(q))>>vec3u(5u)))){blocked=umPointKind(lead)>=UM_SOLID;}
      if(blocked){
       let face=floor(lead[axis])+select(1.0,0.0,stride[axis]>0.0);point[axis]=face-sign(stride[axis])*inset;
       if(axis==1u&&stride.y<0.0){landed=true;floorCell=vec3i(q);}else{p.velocity[axis]=0.0;free[axis]=0.0;}

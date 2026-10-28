@@ -1,0 +1,362 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "alpine-mountain-ridge",
+  "source": "alpine-mountain-ridge.glb",
+  "origin": [
+    -201.25,
+    -3.75,
+    -288.75
+  ],
+  "dimensions": [
+    328,
+    120,
+    232
+  ],
+  "cellSize": 1.25,
+  "bandWidth": 1.25,
+  "brickCount": 5596,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Alpine photographic gneiss",
+      "baseColorLinear": [
+        0.0832495242357254,
+        0.07895815372467041,
+        0.07013719528913498
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 0",
+      "baseColorLinear": [
+        0.47999998927116394,
+        0.5600000023841858,
+        0.6499999761581421
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 1",
+      "baseColorLinear": [
+        0.5299999713897705,
+        0.6085714101791382,
+        0.691428542137146
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 2",
+      "baseColorLinear": [
+        0.5799999833106995,
+        0.6571428775787354,
+        0.7328571677207947
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 3",
+      "baseColorLinear": [
+        0.6299999952316284,
+        0.7057142853736877,
+        0.7742857336997986
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 4",
+      "baseColorLinear": [
+        0.6800000071525574,
+        0.7542856931686401,
+        0.8157142996788025
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 5",
+      "baseColorLinear": [
+        0.7300000190734863,
+        0.8028571605682373,
+        0.8571428656578064
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 6",
+      "baseColorLinear": [
+        0.7799999713897705,
+        0.8514285683631897,
+        0.8985714316368103
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Old glacier snow 7",
+      "baseColorLinear": [
+        0.8299999833106995,
+        0.8999999761581421,
+        0.9399999976158142
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/9,9,8/r0.857",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/9,9,9/r0.857",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/10,10,9/r0.857",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/12,11,11/r0.714",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/11,11,10/r0.857",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/10,9,9/r0.857",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/9,8,8/r0.857",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/10,10,10/r0.857",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/12,12,11/r0.714",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/11,11,10/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/11,10,10/r0.857",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/8,8,7/r0.857",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/11,11,11/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/8,8,8/r0.857",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/10,9,8/r0.857",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/12,12,12/r0.714",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/13,12,12/r0.714",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/7,7,7/r0.857",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/9,8,7/r0.857",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/13,13,12/r0.714",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/8,7,7/r0.857",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/13,13,13/r0.714",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/14,13,13/r0.714",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Alpine photographic gneiss/7,7,6/r0.857",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.03113008990948415
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 2994833,
+  "insideNodes": 1883179,
+  "surfaceMapping": {
+    "url": "/assets/alpine-lake/alpine-mountain-ridge.fvm.gz",
+    "sha256": "50c4ca0092382b046a2a789c7feb241dfd4b023527ce9ba8f13fb8f92f715204"
+  }
+}

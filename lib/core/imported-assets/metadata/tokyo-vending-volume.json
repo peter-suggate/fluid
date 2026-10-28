@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "tokyo-vending",
+  "source": "tokyo-vending.glb",
+  "origin": [
+    -0.42000000000000004,
+    -0.035,
+    -0.45500000000000007
+  ],
+  "dimensions": [
+    24,
+    56,
+    32
+  ],
+  "cellSize": 0.035,
+  "bandWidth": 0.035,
+  "brickCount": 84,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Native Rubber and cables.004",
+      "baseColorLinear": [
+        0.00800000037997961,
+        0.012000000104308128,
+        0.014000000432133675
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Coral neon.003",
+      "baseColorLinear": [
+        1.0,
+        0.012000000104308128,
+        0.06499999761581421
+      ],
+      "roughness": 0.25,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Cyan neon.003",
+      "baseColorLinear": [
+        0.014999999664723873,
+        0.550000011920929,
+        1.0
+      ],
+      "roughness": 0.25,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Warm paper lantern.003",
+      "baseColorLinear": [
+        1.0,
+        0.27000001072883606,
+        0.054999999701976776
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Warm cream lettering",
+      "baseColorLinear": [
+        1.0,
+        0.7300000190734863,
+        0.4000000059604645
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Vending machine faded red enamel",
+      "baseColorLinear": [
+        0.3499999940395355,
+        0.017999999225139618,
+        0.024000000208616257
+      ],
+      "roughness": 0.2800000011920929,
+      "metallic": 0.30000001192092896
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 47025,
+  "insideNodes": 19136
+}

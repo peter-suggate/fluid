@@ -1,0 +1,238 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "tokyo-cyclist",
+  "source": "tokyo-cyclist.glb",
+  "origin": [
+    -0.8750000000000001,
+    -0.31500000000000006,
+    -0.9100000000000001
+  ],
+  "dimensions": [
+    56,
+    80,
+    56
+  ],
+  "cellSize": 0.035,
+  "bandWidth": 0.035,
+  "brickCount": 191,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Native Rubber and cables",
+      "baseColorLinear": [
+        0.00800000037997961,
+        0.012000000104308128,
+        0.014000000432133675
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Bicycle brushed chrome",
+      "baseColorLinear": [
+        0.2800000011920929,
+        0.3199999928474426,
+        0.3400000035762787
+      ],
+      "roughness": 0.1899999976158142,
+      "metallic": 0.8500000238418579
+    },
+    {
+      "name": "Native Bicycle burgundy enamel",
+      "baseColorLinear": [
+        0.1599999964237213,
+        0.012000000104308128,
+        0.02500000037252903
+      ],
+      "roughness": 0.20000000298023224,
+      "metallic": 0.550000011920929
+    },
+    {
+      "name": "Native Rider midnight waterproof coat",
+      "baseColorLinear": [
+        0.01571846194565296,
+        0.02067898027598858,
+        0.02647438831627369
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack",
+      "baseColorLinear": [
+        0.038052648305892944,
+        0.028126215562224388,
+        0.01571846194565296
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Warm skin in shade",
+      "baseColorLinear": [
+        0.3199999928474426,
+        0.1599999964237213,
+        0.10000000149011612
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider dark denim",
+      "baseColorLinear": [
+        0.014999999664723873,
+        0.02199999988079071,
+        0.029999999329447746
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider midnight waterproof coat/4,4,5/r0.670",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.01513350723396306,
+        0.02229888300503533
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider midnight waterproof coat/4,5,5/r0.670",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.02229888300503533,
+        0.02229888300503533
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider midnight waterproof coat/4,5,6/r0.670",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.02229888300503533,
+        0.03113008990948415
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider midnight waterproof coat/3,4,5/r0.670",
+      "baseColorLinear": [
+        0.009529478582354435,
+        0.01513350723396306,
+        0.02229888300503533
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider midnight waterproof coat/5,6,6/r0.670",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider midnight waterproof coat/5,5,6/r0.670",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.02229888300503533,
+        0.03113008990948415
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rider midnight waterproof coat/3,4,4/r0.670",
+      "baseColorLinear": [
+        0.009529478582354435,
+        0.01513350723396306,
+        0.01513350723396306
+      ],
+      "roughness": 0.6700000166893005,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack/7,6,4/r0.780",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack/7,6,5/r0.780",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack/6,5,4/r0.780",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.02229888300503533,
+        0.01513350723396306
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack/6,6,4/r0.780",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack/6,5,3/r0.780",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.02229888300503533,
+        0.009529478582354435
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack/8,6,5/r0.780",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Weathered waxed-canvas backpack/8,7,5/r0.780",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 109440,
+  "insideNodes": 4522
+}

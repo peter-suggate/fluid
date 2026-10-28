@@ -1,0 +1,86 @@
+{
+  "change": "Receiver-plane bilinear depth comparisons retain small contact shadows without automatic global-cell/texel normal offsets",
+  "production_file": "lib/svo/features/lighting-visibility/svo-raster-ao.ts",
+  "source_sha256": {
+    "lib/svo/features/lighting-visibility/svo-raster-ao.ts": "e6951e36803569f696c4929813917dcf434546d8f752871a8477409382c8de0b",
+    "tests/raster-shadow-contact.test.ts": "e1842b1f7d5fd8c865d5725faff1d0b1b938511970cac1e7c6d4c2ac39069772",
+    "tools/uniform-gpu-allocation-audit.ts": "4094497cec3c10f30ec33b5d42e0480a91affe186479db0e54b66ec322e7b1de"
+  },
+  "baseline": {
+    "log": "raster-shadow-contact-before.log",
+    "8cm_contact_visibility": 1,
+    "unoccluded_visibility": 1,
+    "automatic_offset_m_at_32m_half_extent_and_025m_cell": 0.091875
+  },
+  "fixed": {
+    "log": "raster-shadow-contact-after.log",
+    "gpu_tests_passed": 12,
+    "receiver_blocker_cases": 30,
+    "bias_values_cells": [
+      0,
+      0.02
+    ],
+    "sun_half_extents_m": [
+      32,
+      64
+    ],
+    "global_voxel_widths_m": [
+      0.25,
+      0.5
+    ],
+    "blocker_separation_m": 0.08,
+    "32cm_blocker_visibility": 0,
+    "8cm_blocker_visibility": 0.16061699390411377,
+    "unoccluded_flat_and_tilted_visibility": 1,
+    "perspective_contacts_visibility": 0,
+    "typecheck": "pass"
+  },
+  "changes": [
+    "Compare each of four bilinear depth samples with receiver plane at its own texel center",
+    "Remove automatic coarse normal offset and blanket slope footprint bias",
+    "Retain explicit user shadowBiasCells as light-depth bias and depth32 rounding allowance",
+    "Include centered sun blocker-search sample",
+    "Add exact depth32float accounting to GPU test allocation audit; preserve existing changes"
+  ],
+  "limits": [
+    "Actual scene image and timing validation delegated to root",
+    "Receiver-plane correction assumes geometric normal matches rasterized plane; mismatched smooth/shading normals require separate investigation",
+    "Four explicit depth loads replace each filtered comparison; production footprint unchanged but shader arithmetic increases",
+    "Finite shadow-map sampling cannot capture subtexel casters that never rasterize"
+  ],
+  "near_cascade_correction": {
+    "world_contract": "X/Z are centered about zero; Y starts at the floor",
+    "old_near_center": "container.xyz * .5",
+    "correct_near_center": "(0, container.y * .5, 0)",
+    "actual_probe": "alpine-lake-sunrise/live-firs-published-v32-shadow-diagnostics.json",
+    "bank_far_map_half_extent_m": 300.8291015625,
+    "near_map_half_extent_m": 71.933,
+    "old_actual_bank_roi_fully_far": 2688,
+    "corrected_projection_roi_near": 2648,
+    "corrected_projection_roi_blend": 2,
+    "corrected_projection_roi_far": 38,
+    "projection_gpu_cases": 75,
+    "gpu_suite_passed": 13,
+    "baseline_regression": "raster-shadow-centered-before.log",
+    "after_regression": "raster-shadow-centered-after.log",
+    "typecheck": "pass",
+    "remaining_uncertainty": "Actual v33 capture confirms bank lattice substantially removed. Finite shadow-map resolution and Oct8 normal quantization remain measurable; no speculative bias was added."
+  },
+  "actual_final_validation": {
+    "capture": "artifacts/water-scenes/alpine-lake-sunrise/live-centered-shadows-v33.png",
+    "report": "artifacts/water-scenes/alpine-lake-sunrise/live-centered-shadows-v33.json",
+    "probe": "artifacts/water-scenes/alpine-lake-sunrise/live-centered-shadows-v33-shadow-diagnostics.json",
+    "comparison": "artifacts/water-scenes/alpine-lake-sunrise/shadow-review-v33-bank.png",
+    "successful": true,
+    "gpu_errors": 0,
+    "failed_world_reflections": 0,
+    "presentation": "2400x1600 internally, 1200x800 output",
+    "native_asset_ao_enabled": false,
+    "actual_bank_samples_near_or_blend": 2650,
+    "actual_bank_samples_far": 38,
+    "stable_ground_sample_count": 2191,
+    "mean_absolute_visibility_difference_published_vs_depth_plane_before": 0.07479480210592225,
+    "mean_absolute_visibility_difference_published_vs_depth_plane_after": 0.03748700836573913,
+    "visual_assessment": "The regular diagonal bank lattice is substantially removed; coherent conifer contact shadows and branch definition are clearer. Some fine facet transitions remain. No evidence supports another automatic bias change. Trees still lack the full volumetric depth of the Cycles reference; sky and bare shore remain visually simple."
+  }
+}

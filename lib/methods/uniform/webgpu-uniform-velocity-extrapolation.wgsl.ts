@@ -296,11 +296,12 @@ fn mixedSweepBlocks(@builtin(workgroup_id) wid:vec3u,@builtin(num_workgroups) gr
 }
 
 // A 4h cell whose +face on the component is a closed wall (the page across
-// it is SOLID) stays unknown: the wall face publishes its physical value, and
-// no far lookup may take the wall layer's value for a face inside the tile.
+// it is SOLID, or BULK16: no 4h block, the top bit) stays unknown: the wall
+// face publishes its physical value, and no far lookup may take the wall
+// layer's value for a face inside the tile.
 fn closedFace(c:LevelCell,component:u32)->bool{
   if(c.edge!=8||c.local[component]!=7){return false;}
-  return pagePool[ROWS+27u*c.block+13u+select(select(9u,3u,component==1u),1u,component==0u)]==0xffffffffu;
+  return pagePool[ROWS+27u*c.block+13u+select(select(9u,3u,component==1u),1u,component==0u)]>=0x80000000u;
 }
 
 // A level's unknown values from the complete coarser level; a tap in another

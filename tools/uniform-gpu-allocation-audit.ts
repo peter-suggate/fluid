@@ -20,13 +20,13 @@ export function auditUniformGPUAllocations(device: GPUDevice, capBytes = Number.
     };
     if (key === "createTexture") return (descriptor: GPUTextureDescriptor) => {
       const bytesPerTexel: Partial<Record<GPUTextureFormat, number>> = {
-        r32float: 4, r32uint: 4, r32sint: 4, rg32float: 8, rg32uint: 8,
+        depth32float: 4, r32float: 4, r32uint: 4, r32sint: 4, rg32float: 8, rg32uint: 8,
         rgba32float: 16, rgba32uint: 16, rgba32sint: 16,
-        rgba16float: 8, r16float: 2, rg16float: 4, rgba8unorm: 4,
+        rgba16float: 8, r16float: 2, rg16float: 4, rgba8unorm: 4, "rgba8unorm-srgb": 4,
         r8unorm: 1, rg8unorm: 2, rg11b10ufloat: 4,
       };
       const size = bytesPerTexel[descriptor.format];
-      if (size === undefined || (descriptor.mipLevelCount ?? 1) !== 1 || (descriptor.sampleCount ?? 1) !== 1)
+      if (size === undefined || (descriptor.sampleCount ?? 1) !== 1)
         throw new Error(`Allocation audit needs an exact byte rule for ${descriptor.label ?? ""}: ${descriptor.format}`);
       // Normalize an iterable once: callers may supply a single-use iterator.
       const extent = Symbol.iterator in descriptor.size
@@ -35,7 +35,11 @@ export function auditUniformGPUAllocations(device: GPUDevice, capBytes = Number.
       const dimensions = extent
         ? { width: extent[0]!, height: extent[1] ?? 1, depthOrArrayLayers: extent[2] ?? 1 }
         : descriptor.size as GPUExtent3DDict;
-      const bytes = dimensions.width * (dimensions.height ?? 1) * (dimensions.depthOrArrayLayers ?? 1) * size;
+      let bytes = 0;
+      for (let mip=0; mip<(descriptor.mipLevelCount??1); mip++) {
+        const depth=descriptor.dimension === "3d" ? Math.max(1,(dimensions.depthOrArrayLayers??1)>>mip) : (dimensions.depthOrArrayLayers??1);
+        bytes += Math.max(1,dimensions.width>>mip)*Math.max(1,(dimensions.height??1)>>mip)*depth*size;
+      }
       check(descriptor.label, bytes);
       return track(target.createTexture({ ...descriptor, size: dimensions }), "texture", bytes);
     };

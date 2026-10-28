@@ -124,7 +124,7 @@ import {
   svoProceduralHashCell,
 } from "../materials/svo-procedural-material";
 import type { Vec3 } from "../../../core/model";
-import { MESH_ASSETS, meshAssetHeader, packMeshAsset, sampleAssetDistance, sampledVolumeExtent, type SampledVolumeField } from "../../../core/imported-assets/asset-library";
+import { MESH_ASSETS, meshAssetHeader, meshAssetVolume, packMeshAsset, sampleAssetDistance, sampledVolumeExtent, type SampledVolumeField } from "../../../core/imported-assets/asset-library";
 import { meshVolumeWGSL } from "../../../core/imported-assets/mesh-volume.wgsl";
 
 const f32 = Math.fround;
@@ -1717,7 +1717,12 @@ export function packSvoFieldProgramArena(
   const buffer = new ArrayBuffer(wordCount * 4);
   const words = new Uint32Array(buffer);
   const floats = new Float32Array(buffer);
-  for (const image of images.values()) words.set(image.words, image.offset);
+  let textureLayerBase = 0;
+  for (const [asset, image] of images) {
+    words.set(image.words, image.offset);
+    words[image.offset + 15] = textureLayerBase;
+    textureLayerBase += meshAssetVolume(asset).surfaceMapping?.header.textureLayerCount ?? 0;
+  }
   programs.forEach((program, index) => {
     validateSvoFieldProgram(program);
     const base = index * SVO_FIELD_PROGRAM_BLOCK_WORDS;

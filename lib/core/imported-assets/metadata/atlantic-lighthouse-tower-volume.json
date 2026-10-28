@@ -1,0 +1,198 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "atlantic-lighthouse-tower",
+  "source": "atlantic-lighthouse-tower.glb",
+  "origin": [
+    -1.56,
+    -0.28,
+    -1.56
+  ],
+  "dimensions": [
+    80,
+    320,
+    80
+  ],
+  "cellSize": 0.04,
+  "bandWidth": 0.04,
+  "brickCount": 2117,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Salted iron",
+      "baseColorLinear": [
+        0.020999999716877937,
+        0.026000000536441803,
+        0.029999999329447746
+      ],
+      "roughness": 0.4000000059604645,
+      "metallic": 0.6499999761581421
+    },
+    {
+      "name": "Runtime | Weathered granite 2",
+      "baseColorLinear": [
+        0.11800000071525574,
+        0.11599999666213989,
+        0.10499999672174454
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 3",
+      "baseColorLinear": [
+        0.1420000046491623,
+        0.13850000500679016,
+        0.125
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 4",
+      "baseColorLinear": [
+        0.16599999368190765,
+        0.16099999845027924,
+        0.14499999582767487
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 5",
+      "baseColorLinear": [
+        0.1899999976158142,
+        0.1835000067949295,
+        0.16500000655651093
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 6",
+      "baseColorLinear": [
+        0.21400000154972076,
+        0.20600000023841858,
+        0.1850000023841858
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 7",
+      "baseColorLinear": [
+        0.23800000548362732,
+        0.22849999368190765,
+        0.20499999821186066
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 8",
+      "baseColorLinear": [
+        0.2619999945163727,
+        0.25099998712539673,
+        0.22499999403953552
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 9",
+      "baseColorLinear": [
+        0.28600001335144043,
+        0.273499995470047,
+        0.24500000476837158
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 10",
+      "baseColorLinear": [
+        0.3100000023841858,
+        0.29600000381469727,
+        0.26499998569488525
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Dark reflective glazing",
+      "baseColorLinear": [
+        0.054999999701976776,
+        0.08500000089406967,
+        0.0949999988079071
+      ],
+      "roughness": 0.18000000715255737,
+      "metallic": 0.44999998807907104
+    },
+    {
+      "name": "Runtime | Weathered granite 11",
+      "baseColorLinear": [
+        0.33399999141693115,
+        0.31850001215934753,
+        0.2849999964237213
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 12",
+      "baseColorLinear": [
+        0.3580000102519989,
+        0.3409999907016754,
+        0.3050000071525574
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 13",
+      "baseColorLinear": [
+        0.38199999928474426,
+        0.3634999990463257,
+        0.32499998807907104
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 1",
+      "baseColorLinear": [
+        0.09399999678134918,
+        0.09350000321865082,
+        0.08500000089406967
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 14",
+      "baseColorLinear": [
+        0.4059999883174896,
+        0.38600000739097595,
+        0.3449999988079071
+      ],
+      "roughness": 0.699999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Recessed salt-aged lime mortar",
+      "baseColorLinear": [
+        0.23499999940395355,
+        0.23000000417232513,
+        0.20499999821186066
+      ],
+      "roughness": 0.8999999761581421,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 1151380,
+  "insideNodes": 303299
+}

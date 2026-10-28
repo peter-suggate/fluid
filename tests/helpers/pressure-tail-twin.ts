@@ -32,7 +32,7 @@ export function tailLevel(coord: readonly TailV3[], D: Float64Array, K: Float64A
 /** The next level's rows: a row an occupied 2^3 group of rows with D > 0.
  * A child adds its D less its couplings toward the siblings that hold rows
  * (Galerkin's diagonal for piecewise-constant aggregation), and its outward
- * couplings; both scaled. */
+ * couplings. Only inter-aggregate couplings scale; Dirichlet row sums stay. */
 export function uniformPressureTailAggregate(fine: TailLevel, scale: number): TailLevel {
   const index = new Map<string, number>(), coord: TailV3[] = [], D: number[] = [], K: number[] = [];
   fine.coord.forEach((c, i) => {
@@ -41,13 +41,15 @@ export function uniformPressureTailAggregate(fine: TailLevel, scale: number): Ta
     let e = index.get(key);
     if (e === undefined) { e = coord.length; index.set(key, e); coord.push(g); D.push(0); K.push(0, 0, 0, 0, 0, 0); }
     fine.parent[i] = e;
-    let part = fine.D[i]!;
+    let part = fine.D[i]!, outward = 0;
     for (let axis = 0; axis < 3; axis++) {
       const bit = c[axis]! & 1, inside = 2 * axis + 1 - bit, sibling = fine.near[6 * i + inside]!;
       if (sibling >= 0 && fine.D[sibling]! > 0) part -= fine.K[6 * i + inside]!;
-      K[6 * e + 2 * axis + bit]! += scale * fine.K[6 * i + 2 * axis + bit]!;
+      const outside = 2 * axis + bit, neighbor = fine.near[6 * i + outside]!;
+      const link = neighbor >= 0 && fine.D[neighbor]! > 0 ? fine.K[6 * i + outside]! : 0; outward += link;
+      K[6 * e + 2 * axis + bit]! += scale * link;
     }
-    D[e]! += scale * part;
+    D[e]! += (part - outward) + scale * outward;
   });
   return tailLevel(coord, Float64Array.from(D), Float64Array.from(K));
 }

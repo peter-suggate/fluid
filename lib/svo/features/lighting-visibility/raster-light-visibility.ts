@@ -182,7 +182,7 @@ fn rasterProduceLightVisibility(coord:vec2i,g:vec4f,sunVisibility:f32){
   var sampleBudget=0u;
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,32u));
   let gi=(dry.materialPublication.w&16u)!=0u;
-  for(var lightIndex=0u;lightIndex<8u;lightIndex++){
+  for(var lightIndex=0u;lightIndex<32u;lightIndex++){
     if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}
     let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}
     let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
@@ -196,9 +196,11 @@ fn rasterProduceLightVisibility(coord:vec2i,g:vec4f,sunVisibility:f32){
       if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}
       let sample=dryLightSample(light,sampleIndex,position);var visibility=vec3f(1);
       // Range, emitter facing, zero radiance and receiver backfaces all reject
-      // before a shadow-map lookup or SVO ray. Neutral visibility at a sample
+      // before a shadow-map lookup or SVO ray. Cull only by geometry: optical
+      // detail can be reoriented by the shared BSDF frame and must not cause a
+      // skipped query to become a falsely clear cached sample. Neutral visibility at a sample
       // outside a beam does not invent a dark fringe inside its zero-energy edge.
-      if(sample.valid!=0u&&dot(hit.normal,sample.towardLight)>0.0){
+      if(sample.valid!=0u&&dot(geometricNormal,sample.towardLight)>0.0){
         if(sharedMap&&mapReady&&dot(geometricNormal,sample.towardLight)>0.0){visibility=mapVisibility;}
         else{
           visibility=rasterEvaluateLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);

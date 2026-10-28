@@ -1,0 +1,193 @@
+{
+  "issue": "PCSS sparse blocker search could return fully lit when a neighboring bilinear receiver texel contains a thin blocker",
+  "oldFailure": {
+    "mode": "sun",
+    "neighborOffset": [
+      1,
+      0
+    ],
+    "actual": 1,
+    "independentDiskOracle": 0.8060335026284615,
+    "log": "artifacts/water-scenes/shadow-footprint-before.log"
+  },
+  "correction": "Replace the single center blocker-search point with all four receiver bilinear texels, weighted as one sample. Preserve eleven outer disk search taps and all existing sun/spot filter taps. Receiver plane correction, explicit bias and area sampling are unchanged. Spotlight blocker distances are linearized per texel before averaging.",
+  "validation": {
+    "gpuTestsPassed": 7,
+    "gpuTestsFailed": 0,
+    "footprintCases": 16,
+    "unoccludedCases": 8,
+    "blockedCases": 8,
+    "maximumOracleError": 4.042575701079798e-06,
+    "gpuLog": "artifacts/water-scenes/shadow-footprint-after.log",
+    "typecheck": "pass",
+    "typecheckLog": "artifacts/water-scenes/shadow-footprint-types.log",
+    "additionalCoverage": "Both2048/4096 prior leaf contacts, tilted receiver self-shadow rejection, centered basin projection and live resolution resource preservation still pass"
+  },
+  "measurements": [
+    {
+      "mode": 0,
+      "blocked": false,
+      "offset": [
+        0,
+        0
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 0,
+      "blocked": false,
+      "offset": [
+        1,
+        0
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 0,
+      "blocked": false,
+      "offset": [
+        0,
+        1
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 0,
+      "blocked": false,
+      "offset": [
+        1,
+        1
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 0,
+      "blocked": true,
+      "offset": [
+        0,
+        0
+      ],
+      "actual": 0.7198097705841064,
+      "expected": 0.7198123391502405
+    },
+    {
+      "mode": 0,
+      "blocked": true,
+      "offset": [
+        1,
+        0
+      ],
+      "actual": 0.8060375452041626,
+      "expected": 0.8060335026284615
+    },
+    {
+      "mode": 0,
+      "blocked": true,
+      "offset": [
+        0,
+        1
+      ],
+      "actual": 0.8123921155929565,
+      "expected": 0.8123893691106704
+    },
+    {
+      "mode": 0,
+      "blocked": true,
+      "offset": [
+        1,
+        1
+      ],
+      "actual": 0.8947381973266602,
+      "expected": 0.894739449074833
+    },
+    {
+      "mode": 1,
+      "blocked": false,
+      "offset": [
+        0,
+        0
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 1,
+      "blocked": false,
+      "offset": [
+        1,
+        0
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 1,
+      "blocked": false,
+      "offset": [
+        0,
+        1
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 1,
+      "blocked": false,
+      "offset": [
+        1,
+        1
+      ],
+      "actual": 1,
+      "expected": 1
+    },
+    {
+      "mode": 1,
+      "blocked": true,
+      "offset": [
+        0,
+        0
+      ],
+      "actual": 0.7036164999008179,
+      "expected": 0.7036166666666698
+    },
+    {
+      "mode": 1,
+      "blocked": true,
+      "offset": [
+        1,
+        0
+      ],
+      "actual": 0.8214918375015259,
+      "expected": 0.8214916666666607
+    },
+    {
+      "mode": 1,
+      "blocked": true,
+      "offset": [
+        0,
+        1
+      ],
+      "actual": 0.796541690826416,
+      "expected": 0.7965416666666703
+    },
+    {
+      "mode": 1,
+      "blocked": true,
+      "offset": [
+        1,
+        1
+      ],
+      "actual": 0.8955268859863281,
+      "expected": 0.8955250000000075
+    }
+  ],
+  "sceneImpact": "Pending controlled combined capture. The fixture demonstrates correctness; it does not establish frequency or visible improvement in the full lake scene.",
+  "sha256": {
+    "lib/svo/features/lighting-visibility/svo-raster-ao.ts": "fb9929d5465a75c1b1e091d5db0ecf34c578394ecd36ee32c2f4900dd40e44cd",
+    "tests/raster-shadow-footprint.test.ts": "481de5231c160be23a607f8a1850574e302cce2748164f29eba723ddd5a17c1d"
+  }
+}

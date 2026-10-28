@@ -85,6 +85,27 @@ test("16h composite: a hydrostatic column is an exact rest state across seams an
   }
 });
 
+test("16h composite: a wall's closed unknowns beside a member keep the member rows' hydrostatic start", () => {
+  // A member region (x 0..3) against a wall of closed cells (x 4..7): each
+  // closed cell's only face is to its member row. With no slope of their own,
+  // the seam head is the member row's; at rest each closed cell continues its
+  // row's start, not the 16h mean (+-1.5 rho g 4h, the M0 entry transient).
+  const n: BulkVec = [8, 4, 4], g = 9.81, closed = new Set<number>();
+  const probe = new UniformBulkComposite(n, new Set([0]));
+  for (let k = 0; k < probe.cells; k++) if (probe.coord(k)[0] >= 4) closed.add(k);
+  const c = new UniformBulkComposite(n, new Set([0]), closed);
+  const start = Float64Array.from({ length: c.cells }, (_, k) => -g * c.coord(k)[1]);
+  const ustar = verticalForce(c, g);
+  assert.ok(Math.max(...c.residual(start, start, ustar).map(Math.abs)) < 1e-9, "the start is the rest state");
+  const solved = c.solve(start, ustar), mean = -g * 1.5, p16 = solved[c.cell([0, 0, 0])]!;
+  for (let y = 0; y < 4; y++) for (let z = 0; z < 4; z++) {
+    const wall = solved[c.cell([4, y, z])]! - p16, row = start[c.cell([3, y, z])]! - mean;
+    assert.ok(Math.abs(wall - row) < 1e-9, `closed (4,${y},${z}): ${wall} against ${row}`);
+  }
+  const { u } = c.project(solved, start, ustar);
+  for (let y = 0; y < 4; y++) for (let z = 0; z < 4; z++) assert.ok(Math.abs(u[c.face(0, [4, y, z])]!) < 1e-9, "no flux into the wall");
+});
+
 test("16h composite: projection is divergence-free on native cells and each 16h cell, with a reflux seam", () => {
   const c = composite();
   let seed = 7; const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 - 0.5; };

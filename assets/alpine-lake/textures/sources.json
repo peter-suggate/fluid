@@ -1,0 +1,41 @@
+{
+  "asset": "Aerial Rocks 02",
+  "author": "Rob Tuytel",
+  "source": "https://polyhaven.com/a/aerial_rocks_02",
+  "license": "CC0",
+  "apiCredit": "Powered by Poly Haven",
+  "files": [
+    {
+      "channel": "Diffuse",
+      "file": "aerial_rocks_02_diff_2k.jpg",
+      "size": 2914545,
+      "md5": "f493fa9b31911f8a30ecd1d41cbc6f3d",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_02/aerial_rocks_02_diff_2k.jpg",
+      "sha256": "f759d2471cb6a4b3b37d0a5a249adbad1d4d48d67825f37622a603dac8d9bb22"
+    },
+    {
+      "channel": "nor_gl",
+      "file": "aerial_rocks_02_nor_gl_2k.jpg",
+      "size": 4300188,
+      "md5": "7c405cfd3308a2672c99b44e102c328e",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_02/aerial_rocks_02_nor_gl_2k.jpg",
+      "sha256": "e7ad2a65b446ef70c3eb8b32267bee74d91d9759ed52c349c38e34cfd62d079e"
+    },
+    {
+      "channel": "Displacement",
+      "file": "aerial_rocks_02_disp_2k.jpg",
+      "size": 320733,
+      "md5": "1e5149abbf28989237ef937370c6d8b3",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_02/aerial_rocks_02_disp_2k.jpg",
+      "sha256": "d67a273e73cafdcda427a969660edcd1e58ab124fc9f17206068995d4f5b735b"
+    },
+    {
+      "channel": "Rough",
+      "file": "aerial_rocks_02_rough_2k.jpg",
+      "size": 1475961,
+      "md5": "2d4464ceba47763b2ae75242e6f66270",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_rocks_02/aerial_rocks_02_rough_2k.jpg",
+      "sha256": "f1808dec1ad6dd77881baa41813d9718bb93e9aa1dabdcd9d6dc9b7f45dd90da"
+    }
+  ]
+}

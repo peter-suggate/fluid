@@ -3,6 +3,11 @@ export const levelSetFillWGSL = /* wgsl */ `
 // Adjacent pair, an outside value (not negative) after a negative one.
 fn tetraOrder(a:f32,b:f32)->vec2f{return select(vec2f(a,b),vec2f(b,a),!(a<0.0)&&b<0.0);}
 fn tetra(v:vec4f)->f32{
+ // A zero-valued face has zero measure. Resolve these exact endpoint cases
+ // before ratios: Metal's optimized dynamic division can produce NaN when
+ // zero faces meet negative corners at roundoff scale (~1e-15 metres).
+ if(all(v>=vec4f(0.0))){return 0.0;}
+ if(all(v<=vec4f(0.0))){return 1.0;}
  // Stable partition, negatives first, by a fixed odd-even transposition
  // network: s holds the negatives then the outside values in their order,
  // in registers (no dynamically indexed private arrays).

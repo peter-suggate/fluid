@@ -80,7 +80,7 @@ import { uniformAddressHome } from "./uniform-address-plan";
  * a coordinate off the stored pages reads the AIR or SOLID block.
  * Beside them, for a module whose buffer holds the block neighbour rows
  * (uniformBlockNeighbourWGSL, uniformBlockFaceWGSL):
- *  neighbours    UM_SOLID_WORD umBlockNeighbourIndex umBlockNeighbour umBlockHeld
+ *  neighbours    UM_SOLID_WORD UM_HELD_WORD umBlockNeighbourIndex umBlockNeighbour umBlockHeld
  *  kind clamps   umCellNearFrom umTileNearFrom umVertexNearFrom umWideVertexNearFrom
  *                umPointNearFrom, their FromPage forms, and the home forms
  *                umCellNearAt umTileNearAt umVertexNearAt umWideVertexNearAt
@@ -141,7 +141,6 @@ export interface UniformLatticeAddressSource {
    * the walls fold to it (umFixedBox, umBoxWalls). */
   readonly world?: boolean;
   readonly addressPlan?: boolean;
-  readonly bulk?: boolean;
   /** A u32 expression of b: the h slot of block b, where the h stores
    * place its page (umFineSlot). Omitted: b, every block its own. */
   readonly fine?: string;
@@ -286,8 +285,14 @@ fn umWideVertexPresent(p:vec3i)->bool{return umBlockStored(umWideVertexSlot(p).w
 fn umWideVertexTexel(p:vec3i)->vec3i{${T}let s=umWideVertexSlot(${wideQ});let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 fn umWideVertexStoreTexel(p:vec3i)->vec3i{let s=umWideVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 // Kinds: what a page holds, from the table (an open top is its AIR words).
-fn umBulkWord(w:u32)->bool{return ${source.bulk?"(w>>30u)==2u&&(w&0x3fffffffu)!=0u":"false"};}
-fn umPageBulk(page:vec3i)->u32{let w=umPageWord(page);return select(0u,w&0x3fffffffu,umBulkWord(w));}
+// A BULK16 page, which only a solver with the slot store has (the window
+// address's umBulkSlotsOn: a pipeline constant, so off it folds). A raw word
+// (a block neighbour row, umPageRawWord) carries its tag, 0x80000000 | slot;
+// umPageWord of a fixed geometry reads it as umBulk16Word() (blocks-1, which
+// no block holds), elsewhere as its tag.
+fn umBulk16Word()->u32{return ${blocks}-1u;}
+fn umBulkTag(w:u32)->bool{return umBulkSlotsOn()&&(w>>30u)==2u&&(w&0x3fffffffu)!=0u;}
+fn umBulkWord(w:u32)->bool{return umBulkSlotsOn()&&select(umBulkTag(w),w==umBulk16Word(),umSolidIsBox());}
 fn umPageKind(page:vec3i)->u32{let w=umPageWord(page);return select(select(select(UM_RESIDENT,UM_SOLID,w>=${blocks}-1u),UM_AIR,w==0u),UM_BULK16,umBulkWord(w));}
 fn umCellKind(p:vec3i)->u32{return umPageKind(p>>vec3u(5u));}
 fn umTileKind(p:vec3i)->u32{return umPageKind(p>>vec3u(3u));}
@@ -368,7 +373,7 @@ fn umAcrossKind(p:vec3i,axis:u32,step:i32)->u32{var q=p;q[axis]+=step;return umC
 // planes a block. A face over an AIR page is not one: AIR is ambient.${boxed(` umFaceAnchorNear: the nearest anchor of a face
 // with a stored cell above it.`)}
 ${extent("UM_LOW_FACE_KEYS", "u32", "", `3072u*${blocks}`)}
-fn umFaceLow(anchor:vec3i,axis:u32)->bool{return (anchor[axis]&31)==31&&umCellKind(anchor)==UM_SOLID;}
+fn umFaceLow(anchor:vec3i,axis:u32)->bool{return (anchor[axis]&31)==31&&umCellKind(anchor)>=UM_SOLID;}
 // The cell above a low face's anchor along axis: the stored cell whose entry umLowFaceIndex reads.
 fn umLowFaceAbove(anchor:vec3i,axis:u32)->vec3u{var q=anchor;q[axis]+=1;return vec3u(q);}
 ${boxed(`fn umFaceAnchorNear(p:vec3i)->vec3i{${D}return clamp(p,vec3i(-1),vec3i(${d})-vec3i(1));}
@@ -431,34 +436,25 @@ fn umWideVertexNear(q:vec3i)->vec3i{${T}return clamp(q,vec3i(0),vec3i(${t}));}
  * closed wall. */
 export const uniformBlockNeighbourWGSL = /* wgsl */ `
 const UM_SOLID_WORD:u32=0xffffffffu;
+// SOLID and every BULK16 word have the top bit; no block index does.
+const UM_HELD_WORD:u32=0x80000000u;
 fn umBlockNeighbourIndex(d:vec3i)->u32{return u32(d.x+3*d.y+9*d.z+13);}
 // The table word of the page d pages (-1, 0 or 1 an axis) from block b's.
 fn umBlockNeighbour(b:u32,d:vec3i)->u32{return umBlockNeighbourWord(b,umBlockNeighbourIndex(d));}
 // The axes of step d a wall holds (the diagonal rule above), from block
-// home of page page. Where the SOLID pages are those outside the world box
-// (umSolidIsBox) a stored home's row word is SOLID exactly where its page is
-// outside the box, block 0's row is AIR and the last block's SOLID: the
-// probes fold to box compares and read no row.
+// home of page page. A row word holds where nothing 4h is stored across it:
+// SOLID, or a BULK16 page (UM_HELD_WORD). Rows, not the world box, answer
+// even where the SOLID pages are those outside it (umSolidIsBox): a BULK16
+// page lies inside the box. Block 0's row is AIR and the last block's SOLID.
 fn umBlockHeld(home:u32,page:vec3i,d:vec3i)->vec3<bool>{
- if(umSolidIsBox()){
-  if(!umBlockStored(home)){return (d!=vec3i(0))&vec3<bool>(home!=0u);}
-  let world=page+umFramePage();
-  let held=vec3<bool>(
-   d.x!=0&&umWorldSolid(world+vec3i(d.x,0,0)),
-   d.y!=0&&umWorldSolid(world+vec3i(0,d.y,0)),
-   d.z!=0&&umWorldSolid(world+vec3i(0,0,d.z)));
-  let free=select(d,vec3i(0),held);let loose=vec3u(free!=vec3i(0));
-  if(loose.x+loose.y+loose.z>=2u&&umWorldSolid(world+free)){return d!=vec3i(0);}
-  return held;
- }
  // Keep the three face probes scalar to avoid dynamic vector indexing
  // inside every stencil tap.
  let held=vec3<bool>(
-  d.x!=0&&umBlockNeighbour(home,vec3i(d.x,0,0))==UM_SOLID_WORD,
-  d.y!=0&&umBlockNeighbour(home,vec3i(0,d.y,0))==UM_SOLID_WORD,
-  d.z!=0&&umBlockNeighbour(home,vec3i(0,0,d.z))==UM_SOLID_WORD);
+  d.x!=0&&umBlockNeighbour(home,vec3i(d.x,0,0))>=UM_HELD_WORD,
+  d.y!=0&&umBlockNeighbour(home,vec3i(0,d.y,0))>=UM_HELD_WORD,
+  d.z!=0&&umBlockNeighbour(home,vec3i(0,0,d.z))>=UM_HELD_WORD);
  let free=select(d,vec3i(0),held);let loose=vec3u(free!=vec3i(0));
- if(loose.x+loose.y+loose.z>=2u&&umBlockNeighbour(home,free)==UM_SOLID_WORD){return d!=vec3i(0);}
+ if(loose.x+loose.y+loose.z>=2u&&umBlockNeighbour(home,free)>=UM_HELD_WORD){return d!=vec3i(0);}
  return held;
 }
 // p held inside [low, high], home's page in p's units, on the axes a wall holds.
@@ -665,7 +661,7 @@ export function uniformBlockNeighbourWords(tail: ArrayLike<number>, records: Arr
       words[row + i] = uniformTablePageWord(tail, qx, qy, qz);
     }
     if (b === 0 || b === blocks - 1) continue;
-    for (let f = 0; f < 6; f++) if (words[row + uniformBlockFaceNeighbour(f)] === 0xffffffff) words[27 * blocks + 1 + walls++] = 6 * b + f;
+    for (let f = 0; f < 6; f++) if (uniformHeldWord(words[row + uniformBlockFaceNeighbour(f)]!)) words[27 * blocks + 1 + walls++] = 6 * b + f;
   }
   words[27 * blocks] = walls;
   for (let b = 1; b < blocks - 1; b++) if (records[b] !== UNIFORM_PAGE_POOL_FREE) {
@@ -673,6 +669,8 @@ export function uniformBlockNeighbourWords(tail: ArrayLike<number>, records: Arr
   }
   return words;
 }
+/** A row word that holds (UM_HELD_WORD): SOLID or a BULK16 page, no 4h block stored across it. */
+export function uniformHeldWord(word: number): boolean { return word >>> 0 >= 0x80000000; }
 /** The row word across face f = 2 axis + side: 13 - or + 1, 3, 9. */
 export function uniformBlockFaceNeighbour(face: number): number { return 13 + ((face & 1) ? 1 : -1) * 3 ** (face >> 1); }
 /** umBlockHeld on the host, over rows (27 words a block), written to out. */
@@ -680,10 +678,10 @@ export function uniformBlockHeld(rows: ArrayLike<number>, home: number, d: reado
   const stride = [1, 3, 9], row = 27 * home;
   let loose = 0, landing = 13;
   for (let a = 0; a < 3; a++) {
-    out[a] = d[a] !== 0 && rows[row + 13 + d[a]! * stride[a]!] === 0xffffffff;
+    out[a] = d[a] !== 0 && uniformHeldWord(rows[row + 13 + d[a]! * stride[a]!]!);
     if (d[a] !== 0 && !out[a]) { loose++; landing += d[a]! * stride[a]!; }
   }
-  if (loose >= 2 && rows[row + landing] === 0xffffffff) for (let a = 0; a < 3; a++) out[a] = d[a] !== 0;
+  if (loose >= 2 && uniformHeldWord(rows[row + landing]!)) for (let a = 0; a < 3; a++) out[a] = d[a] !== 0;
   return out;
 }
 /** The span of a page a NearFrom form holds a coordinate in: its first

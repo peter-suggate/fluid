@@ -19,14 +19,15 @@ export function uniformMixedPressureStorage(layout:UniformMixedLayout){
 
 /** One invocation owns each wall slot as well as its adjacent physical row.
  * Smoothing schedules the slot on the opposite parity to that physical row.
- * The body runs for every face of owner `o` with a SOLID page across it:
+ * The body runs for every face of owner `o` with a SOLID or BULK16 page
+ * across it (no 4h row there):
  * `halo` is the face's slot. A face with an AIR page across it has none: the
  * tile there reads as a row of block 0, far air at zero pressure
  * (UniformMixedRootOwners). */
 export function uniformMixedPressureBoundaryLoop(body:string,prefix=""):string{return (/* wgsl */ `
  for(var axis=0u;axis<3u;axis++){for(var side=0u;side<2u;side++){
   let sign=select(-1,1,side==1u);
-  if(umAcrossKind(vec3i(umOrigin(o)),axis,select(-1,i32(o.width),side==1u))!=UM_SOLID){continue;}
+  if(umAcrossKind(vec3i(umOrigin(o)),axis,select(-1,i32(o.width),side==1u))<UM_SOLID){continue;}
   let halo=umBoundaryIndex(o,axis,sign);
   __BODY__
  }}

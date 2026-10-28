@@ -4,8 +4,19 @@ import type { SvoFieldProgram } from "../scene-publication/svo-field-program";
 import { SVO_MATERIAL_FLAGS, SVO_MATERIAL_RECORD_WORDS, canonicalSvoMaterialRecord, svoMaterialFromEnvironmentProxyMaterial, type SvoMaterialRecord } from "../../contracts/svo-material-abi";
 
 /** Baked texture palette entries are ordinary PBR records, shared by all
- * instances. The voxel selects a full material, including roughness/metallic. */
-export function sampledVolumeMaterialRecords(programs: Iterable<SvoFieldProgram>, revision: number): SvoMaterialRecord[] {
+ * instances with equal authored emission. The voxel selects a full material, including roughness/metallic. */
+export function sampledVolumeMaterialRecords(programs: Iterable<SvoFieldProgram>, revision: number,
+  owners: Iterable<{ readonly program?: SvoFieldProgram; readonly emission: number }> = [],
+): SvoMaterialRecord[] {
+  const emissions = new Map<number, number>();
+  for (const owner of owners) {
+    const base = owner.program?.sampledVolume?.materialBase;
+    if (base === undefined) continue;
+    if (!Number.isFinite(owner.emission) || owner.emission < 0) throw new RangeError("Sampled material emission must be finite and non-negative");
+    const previous = emissions.get(base);
+    if (previous !== undefined && previous !== owner.emission) throw new Error("Sampled palette is shared by owners with different emission");
+    emissions.set(base, owner.emission);
+  }
   const records: SvoMaterialRecord[] = [], seen = new Set<number>();
   for (const program of programs) {
     const field = program.sampledVolume;
@@ -15,7 +26,7 @@ export function sampledVolumeMaterialRecords(programs: Iterable<SvoFieldProgram>
     if (seen.has(base)) continue;
     seen.add(base);
     meshAssetHeader(field.asset).materials.forEach((m, i) => records.push(canonicalSvoMaterialRecord({
-      ...svoMaterialFromEnvironmentProxyMaterial(base + i, { colorLinear: m.baseColorLinear, emission: 0, roughness: m.roughness }, revision),
+      ...svoMaterialFromEnvironmentProxyMaterial(base + i, { colorLinear: m.baseColorLinear, emission: emissions.get(base) ?? 0, roughness: m.roughness }, revision),
       metallic: m.metallic, flags: SVO_MATERIAL_FLAGS.opaque | SVO_MATERIAL_FLAGS.sampledVolume,
     })));
   }

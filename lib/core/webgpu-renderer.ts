@@ -1,3 +1,5 @@
+import { boundedPresentationScale } from "./presentation-resolution";
+import { svoEnvironmentLightingRecord } from "../svo/features/radiance/svo-environment-lighting";
 import { svoDerivedRadianceRequired } from "../svo/features/lighting-visibility/derived-lighting-demand";
 import { sceneRenderTuning } from "./scene-render-profile";
 import { BUB_RENDER_SHAPE, robotRenderExtent, robotRenderRadius } from '../interaction/features/robot/render';
@@ -16,7 +18,7 @@ import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { canonicalScene, rigidBodyHasFixedPose, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
 import { SCENE_SHAPE_PALETTE_LINEAR, sceneShapeCode, sceneShapeRenderHalfExtent_m } from "./scene-shape";
-import { svoSceneLighting } from "../svo/features/lighting-visibility/svo-dry-scene-lighting";
+import { svoSceneLighting, svoSceneEnvironmentLightingOptions } from "../svo/features/lighting-visibility/svo-dry-scene-lighting";
 import {
   buildSvoSceneLights,
   waterKeyDirectionalFromSceneLights,
@@ -2618,10 +2620,14 @@ export class FluidLabRenderer {
       this.canvas.height = height;
     }
     if (!this.device || !this.format || !this.upscalePipeline || !this.upscaleSampler) return;
-    this.activeRenderScale = renderScale;
-    this.presentationPixelRatio = ratio * renderScale;
-    const renderWidth = Math.max(1, Math.floor(width * renderScale));
-    const renderHeight = Math.max(1, Math.floor(height * renderScale));
+    // Supersampling uses the existing filtered presentation resolve. At 200%
+    // its bilinear footprint averages the four shaded samples per output pixel.
+    // Bound the requested scale to the device's texture extent before allocating.
+    const scale = boundedPresentationScale(width, height, renderScale, this.device.limits.maxTextureDimension2D);
+    this.activeRenderScale = scale;
+    this.presentationPixelRatio = ratio * scale;
+    const renderWidth = Math.max(1, Math.floor(width * scale));
+    const renderHeight = Math.max(1, Math.floor(height * scale));
     const key = `${renderWidth}x${renderHeight}`;
     if (key === this.presentationTextureKey) return;
     this.presentationTexture?.destroy();
@@ -2722,7 +2728,7 @@ export class FluidLabRenderer {
     // withheld would pool into one mean and the panel would report the cost of
     // neither pipeline.
     const disabledStages = disabledRenderStagesFrom(svoLightingOptions.disabledStages);
-    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:gicache-${svoLightingOptions.worldGiCacheEnabled === true ? "on" : "off"}:lattice-${svoLightingOptions.latticeVisibilityEnabled === false ? "off" : "on"}:primary-${svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
+    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:fluid-${fluidSurfaceRenderMode}:reflections-${svoLightingOptions.waterReflectionMode ?? "screen-space"}:world-refraction-${svoLightingOptions.waterWorldRefractionEnabled === true}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:gicache-${svoLightingOptions.worldGiCacheEnabled === true ? "on" : "off"}:lattice-${svoLightingOptions.latticeVisibilityEnabled === false ? "off" : "on"}:primary-${svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal}:primary-work-${primaryWorkMapRequested ? "on" : "off"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -3025,6 +3031,16 @@ export class FluidLabRenderer {
     // keeps them in tile memory.
     this.svoDryScenePipeline?.setIdentityPlanesInspected(activeSvoDiagnostics.stageView !== "off");
     this.waterPipeline.setDisabledStages(disabledStages);
+    this.waterPipeline.setReflectionMode(svoLightingOptions.waterReflectionMode ?? "screen-space");
+    this.waterPipeline.setWorldRefractionEnabled(svoLightingOptions.waterWorldRefractionEnabled === true);
+    const worldWaterRequested = sparsePresentationRequired && (svoLightingOptions.waterReflectionMode === "world-space" || svoLightingOptions.waterWorldRefractionEnabled === true);
+    if (worldWaterRequested && this.svoDryScenePipeline) {
+      void this.svoDryScenePipeline.ensureWaterWorldReflections().catch(() => { /* Status publishes the compilation error below. */ });
+    }
+    this.waterPipeline.setWorldReflectionEncoder(worldWaterRequested
+      ? (reflectionEncoder, inputs) => this.svoDryScenePipeline?.encodeWaterWorldReflections(reflectionEncoder, inputs) ?? false
+      : undefined);
+
     cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
     // Pass instrumentation forces Metal encoder breaks. Keep it out of ordinary
@@ -3155,6 +3171,7 @@ export class FluidLabRenderer {
       : sceneLighting?.directional;
     this.waterPipeline.setSceneOptics({
       optics: scene.fluid.optics,
+      environment: svoEnvironmentLightingRecord(environmentId, 1, sparsePresentationRequired ? svoSceneEnvironmentLightingOptions(scene) : sceneLighting?.environment),
       directional: waterDirectional,
       grade: sceneLighting?.grade,
       terrain: scene.terrain,
@@ -3223,16 +3240,18 @@ export class FluidLabRenderer {
     this.lastSvoPickingBodies = this.svoPickingAvailable ? bodies.slice(0, 12) : [];
     const silhouetteRefinementStatus = this.svoDryScenePipeline?.silhouetteRefinementStatus;
     const lightingVisibilityStatus = this.svoDryScenePipeline?.lightingVisibilityStatus;
+    const worldWaterStatus = worldWaterRequested ? this.svoDryScenePipeline?.waterWorldReflectionStatus : undefined;
     this.publishEffectiveRendererStatus(resolveEffectiveRendererStatus({
       required: sparsePresentationRequired,
       pipelineAvailable: this.svoPipelineAvailable,
       pipelineCompiling: this.optionalPipelineTasks.has("svo-dry-scene")
         || requestedBundleStatus?.state === "compiling"
-        || silhouetteRefinementStatus?.state === "compiling",
-      pipelineFailure: silhouetteRefinementStatus?.state === "failed"
+        || silhouetteRefinementStatus?.state === "compiling"
+        || worldWaterStatus?.state === "compiling",
+      pipelineFailure: worldWaterStatus?.state === "failed" ? worldWaterStatus.detail : silhouetteRefinementStatus?.state === "failed"
         ? silhouetteRefinementStatus.detail
         : this.optionalPipelineFailures.get("svo-dry-scene"),
-      pipelinePending: requestedBundleStatus?.state === "compiling"
+      pipelinePending: worldWaterStatus?.state === "compiling" ? worldWaterStatus.detail : requestedBundleStatus?.state === "compiling"
         ? requestedBundleStatus.detail
         : silhouetteRefinementStatus?.state === "compiling" ? silhouetteRefinementStatus.detail : undefined,
       sourceAvailable: this.svoSourceAvailable,
@@ -3240,6 +3259,10 @@ export class FluidLabRenderer {
       materialsSupported: this.svoMaterialsSupported,
       lightingSupported: this.svoLightingSupported,
       svoEncoded,
+      requestedFeature: worldWaterRequested ? {
+        state: worldWaterStatus?.state === "ready" ? "ready" : worldWaterStatus?.state === "failed" ? "failed" : "pending",
+        detail: worldWaterStatus?.detail ?? "Preparing world water optics",
+      } : undefined,
       contractFailure: this.svoPublicationFailure,
       silhouetteRefinement: silhouetteRefinementStatus,
       lightingVisibility: lightingVisibilityStatus,

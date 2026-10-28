@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "tokyo-blade-right-1",
+  "source": "tokyo-blade-right-1.glb",
+  "origin": [
+    -0.78125,
+    2.7625,
+    1.0562500000000001
+  ],
+  "dimensions": [
+    104,
+    264,
+    8
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.00625,
+  "brickCount": 161,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Native Cyan neon",
+      "baseColorLinear": [
+        0.014999999664723873,
+        0.550000011920929,
+        1.0
+      ],
+      "roughness": 0.25,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 100134,
+  "insideNodes": 7743
+}

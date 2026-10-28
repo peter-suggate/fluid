@@ -22,6 +22,7 @@ export interface MeshVolumeHeader {
   brickCells: 8;
   nodeStrideBytes: 16;
   materials: readonly MeshVolumeMaterial[];
+  surfaceMapping?: { url: string; sha256: string };
   /** Certified flat geometric slab inside this inset rectangle, in source
    * coordinates. The bevel outside it and all shading detail remain native. */
   horizontalSlab?: { minimum: V3; maximum: V3 };
@@ -42,6 +43,7 @@ export interface MeshVolumeDistanceField {
 export interface MeshVolume {
   header: MeshVolumeHeader;
   bricks: ReadonlyMap<string, MeshVolumeBrick>;
+  surfaceMapping?: import("./surface-mapping").SurfaceMapping;
 }
 const NODES = 729, BRICK_BYTES = 12 + NODES * 16;
 const triple = (v: unknown): v is [number, number, number] => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
@@ -63,6 +65,8 @@ export function decodeMeshVolume(bytes: Uint8Array, shareDistances =
     || !Number.isFinite(header.bandWidth) || header.bandWidth < header.cellSize
     || !Number.isSafeInteger(header.brickCount) || header.brickCount < 0
     || header.brickCells !== 8 || header.nodeStrideBytes !== 16 || !Array.isArray(header.materials)
+    || (header.surfaceMapping !== undefined && (typeof header.surfaceMapping.url !== "string"
+      || !header.surfaceMapping.url.startsWith("/assets/") || !/^[0-9a-f]{64}$/.test(header.surfaceMapping.sha256)))
     || (header.horizontalSlab !== undefined && (!triple(header.horizontalSlab.minimum)
       || !triple(header.horizontalSlab.maximum) || !header.horizontalSlab.maximum.every((v, a) => v > header.horizontalSlab!.minimum[a]!)))
     || !header.materials.every(m => m && typeof m.name === "string" && triple(m.baseColorLinear)

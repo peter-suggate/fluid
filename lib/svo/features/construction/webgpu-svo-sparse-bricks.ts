@@ -8,7 +8,7 @@ import { assertDualGridAttachmentFits } from "../meshing/dual-grid-capacity";
 import { TerrainEditPages, terrainEditSurfacePages, terrainFieldStamp } from "../../../core/live-terrain-overlay";
 import { rigidBodyHasVisibleFixedPose, type RigidBodyDescription, type SceneDescription } from "../../../core/model";
 import type { RenderFrameSeam } from "../../../core/render-frame-stages";
-import { svoSceneLighting } from "../lighting-visibility/svo-dry-scene-lighting";
+import { svoSceneEnvironmentLightingOptions } from "../lighting-visibility/svo-dry-scene-lighting";
 import {
   cachedSvoPublication,
   hashSvoPublication,
@@ -1221,7 +1221,8 @@ export function buildOctreeSvoPbrMaterialPublication(
         ? { ...record, flags: record.flags | SVO_MATERIAL_FLAGS.sampledVolume } : record;
     }),
   ];
-  records.push(...sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), revision));
+  records.push(...sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), revision,
+    environmentPrimitives.flatMap(p => p.kind === "field-program" ? [{ program: p.program, emission: p.material.emission }] : [])));
   const baseRecords = packSvoMaterialTable(records);
   const packedRecords = environmentPrimitives.some(p => p.kind === "field-program" && p.program.sampledVolume)
     ? sculptMaterialTable(baseRecords) : baseRecords;
@@ -1268,7 +1269,8 @@ export function writeOctreeSvoPbrMaterialTable(
     }
     count = Math.max(count, materialId + 1);
   }
-  for (const record of sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), OCTREE_SVO_PBR_MATERIAL_REVISION)) {
+  for (const record of sampledVolumeMaterialRecords(environmentPrimitives.flatMap(p => p.kind === "field-program" ? [p.program] : []), OCTREE_SVO_PBR_MATERIAL_REVISION,
+    environmentPrimitives.flatMap(p => p.kind === "field-program" ? [{ program: p.program, emission: p.material.emission }] : []))) {
     if (record.materialId >= OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) throw new RangeError("Imported palette exceeds material capacity");
     writeSvoMaterialRecord(table, record); count = Math.max(count, record.materialId + 1);
   }
@@ -1326,7 +1328,7 @@ export function buildOctreeSvoEnvironmentLightingPublication(
   revision = OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION,
 ): OctreeSvoEnvironmentLightingPublicationData {
   const lighting = buildSvoEnvironmentLighting(
-    scene.environment ?? "default", revision, svoSceneLighting(scene)?.environment);
+    scene.environment ?? "default", revision, svoSceneEnvironmentLightingOptions(scene));
   return {
     record: lighting.record,
     packedRecords: lighting.packedRecord,

@@ -1,0 +1,648 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "tokyo-shopfront-left",
+  "source": "tokyo-shopfront-left.glb",
+  "origin": [
+    -2.28,
+    0.12,
+    -1.8599999999999999
+  ],
+  "dimensions": [
+    56,
+    152,
+    64
+  ],
+  "cellSize": 0.06,
+  "bandWidth": 0.06,
+  "brickCount": 425,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Native Oxidised zinc",
+      "baseColorLinear": [
+        0.11580993235111237,
+        0.14061327278614044,
+        0.14888256788253784
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Wet black ceramic",
+      "baseColorLinear": [
+        0.022334743291139603,
+        0.028126215562224388,
+        0.03309345990419388
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Oiled cedar",
+      "baseColorLinear": [
+        0.10805337876081467,
+        0.03740089759230614,
+        0.011634287424385548
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Rubber and cables",
+      "baseColorLinear": [
+        0.00800000037997961,
+        0.012000000104308128,
+        0.014000000432133675
+      ],
+      "roughness": 0.44999998807907104,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb",
+      "baseColorLinear": [
+        0.1571749746799469,
+        0.16544294357299805,
+        0.16544294357299805
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Creased wet refuse sack",
+      "baseColorLinear": [
+        0.007447030860930681,
+        0.00827320571988821,
+        0.009927126578986645
+      ],
+      "roughness": 0.6299999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Sake amber glass 0",
+      "baseColorLinear": [
+        0.07000000029802322,
+        0.03500000014901161,
+        0.00800000037997961
+      ],
+      "roughness": 0.18000000715255737,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Sake amber glass 1",
+      "baseColorLinear": [
+        0.09000000357627869,
+        0.03500000014901161,
+        0.00800000037997961
+      ],
+      "roughness": 0.18000000715255737,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render",
+      "baseColorLinear": [
+        0.14469806849956512,
+        0.13708218932151794,
+        0.12186045199632645
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Dark upper window glass",
+      "baseColorLinear": [
+        0.02500000037252903,
+        0.03500000014901161,
+        0.054999999701976776
+      ],
+      "roughness": 0.11999999731779099,
+      "metallic": 0.18000000715255737
+    },
+    {
+      "name": "Native Oiled cedar/11,7,3/r0.300",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.041722573919128626,
+        0.009529478582354435
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/14,14,13/r0.580",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.14683923082122904
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/15,14,13/r0.580",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.14683923082122904
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Wet black ceramic/5,5,6/r0.220",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.02229888300503533,
+        0.03113008990948415
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/15,14,14/r0.580",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Wet black ceramic/5,6,6/r0.220",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Wet black ceramic/5,6,7/r0.220",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.03113008990948415,
+        0.041722573919128626
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/12,12,11/r0.580",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Wet black ceramic/6,6,7/r0.220",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.03113008990948415,
+        0.041722573919128626
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Oiled cedar/11,6,3/r0.300",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.03113008990948415,
+        0.009529478582354435
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/12,11,11/r0.580",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/13,13,12/r0.580",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/13,12,12/r0.580",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Oiled cedar/12,7,4/r0.300",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.041722573919128626,
+        0.01513350723396306
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/15,15,14/r0.580",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.1719559031258607
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Wet black ceramic/6,7,7/r0.220",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Oiled cedar/11,7,4/r0.300",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.041722573919128626,
+        0.01513350723396306
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Wet black ceramic/4,5,5/r0.220",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.02229888300503533,
+        0.02229888300503533
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/11,11,10/r0.580",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/10,10,10/r0.580",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/11,11,11/r0.580",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/12,12,12/r0.580",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/14,13,13/r0.580",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/14,13,12/r0.580",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Wet black ceramic/4,5,6/r0.220",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.02229888300503533,
+        0.03113008990948415
+      ],
+      "roughness": 0.2199999988079071,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/11,10,10/r0.580",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/13,13,13/r0.340",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/12,12,12/r0.340",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/12,13,13/r0.340",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/14,14,14/r0.340",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/14,15,15/r0.340",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.19941489015347055,
+        0.19941489015347055
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/15,15,15/r0.340",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.19941489015347055
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/11,12,12/r0.340",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Granite curb/13,14,14/r0.340",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Creased wet refuse sack/3,3,3/r0.630",
+      "baseColorLinear": [
+        0.009529478582354435,
+        0.009529478582354435,
+        0.009529478582354435
+      ],
+      "roughness": 0.6299999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Creased wet refuse sack/2,2,3/r0.630",
+      "baseColorLinear": [
+        0.0053705373494325435,
+        0.0053705373494325435,
+        0.009529478582354435
+      ],
+      "roughness": 0.6299999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Creased wet refuse sack/2,3,3/r0.630",
+      "baseColorLinear": [
+        0.0053705373494325435,
+        0.009529478582354435,
+        0.009529478582354435
+      ],
+      "roughness": 0.6299999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Creased wet refuse sack/3,3,4/r0.630",
+      "baseColorLinear": [
+        0.009529478582354435,
+        0.009529478582354435,
+        0.01513350723396306
+      ],
+      "roughness": 0.6299999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Damp soot-stained render/10,10,9/r0.580",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.5799999833106995,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Oxidised zinc/12,13,14/r0.380",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.14683923082122904,
+        0.1719559031258607
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/11,12,13/r0.380",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.1240040094060311,
+        0.14683923082122904
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/11,12,12/r0.380",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/12,13,13/r0.380",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/11,13,13/r0.380",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.14683923082122904,
+        0.14683923082122904
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/10,11,12/r0.380",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.10338683447877332,
+        0.1240040094060311
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/10,11,11/r0.380",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/12,14,14/r0.380",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/13,14,14/r0.380",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1719559031258607,
+        0.1719559031258607
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/13,14,15/r0.380",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1719559031258607,
+        0.19941489015347055
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Oxidised zinc/10,12,12/r0.380",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.3799999952316284,
+      "metallic": 0.699999988079071
+    },
+    {
+      "name": "Native Granite curb/15,16,16/r0.340",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.229274769922375,
+        0.229274769922375
+      ],
+      "roughness": 0.3400000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Native Oiled cedar/12,7,3/r0.300",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.041722573919128626,
+        0.009529478582354435
+      ],
+      "roughness": 0.30000001192092896,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 239882,
+  "insideNodes": 26842
+}

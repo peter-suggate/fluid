@@ -1,5 +1,7 @@
 "use client";
 
+import { useEditorHost } from "../../../core/session/host-context";
+import type { SceneDescription } from "../../../core/model";
 import { useSession } from "../../../core/session/session-context";
 import type { FeatureControlViewProps } from "../../../framework/ui/slot";
 import { RailKey, RailRange, RailSelect, RailToggle } from "../../../../components/rail";
@@ -84,4 +86,48 @@ export function SvoStillViewReuseControlRow({ control }: FeatureControlViewProps
   const { value, set } = useSvoRenderTuningValue("rasterStillViewReuse");
   return <RailToggle label={control.label} checked={value} onChange={set} disabled={disabled} hint={control.hint}
     testId="svo-still-view-reuse" />;
+}
+
+/** Scene-owned, serialized and undoable; changing sky never reseeds fluid. */
+export function SvoCloudCoverageControlRow() {
+  const session = useSession();
+  const lighting = session.scene(state => state.scene.lighting);
+  const host = useEditorHost<SceneDescription, Partial<SceneDescription>>();
+  const value = lighting?.environment?.cloudCoverage ?? 0;
+  return <RailRange label="Cloud coverage" value={value * 100} min={0} max={100} step={1} digits={0} unit="%"
+    hint="Distant clouds shared by the sky and reflections. Zero keeps the clear gradient."
+    testId="environment-cloud-coverage" onChange={next => host.commitPatch?.("Set cloud coverage", {
+      lighting: { ...lighting, environment: { ...lighting?.environment, cloudCoverage: next / 100 } },
+    }, { reseed: false })} />;
+}
+
+export function SvoDirectLightSamplesControlRow() {
+  const { value, set, modified, reset } = useSvoRenderTuningValue("maximumShadedLights");
+  return <RailRange label="Direct light samples" value={value} min={1} max={32} step={1} digits={0} unit="rays"
+    onChange={set} modified={modified} onReset={reset} testId="direct-light-samples"
+    hint="Total direct emitter samples. Area lights may use two each; set Area samples to one to cover up to 32 sources." />;
+}
+
+export function SvoSurfaceTexturesControlRow({ control }: FeatureControlViewProps) {
+  const session = useSession();
+  const checked = session.ui(state => state.svoSurfaceTexturesEnabled);
+  const onChange = session.ui(state => state.setSvoSurfaceTexturesEnabled);
+  return <RailToggle label={control.label} checked={checked} onChange={onChange} hint={control.hint} testId="svo-surface-textures" />;
+}
+
+export function SvoNativeAmbientOcclusionControlRow({ control }: FeatureControlViewProps) {
+  const session = useSession();
+  const checked = session.ui(state => state.svoNativeAmbientOcclusionEnabled);
+  const onChange = session.ui(state => state.setSvoNativeAmbientOcclusionEnabled);
+  return <RailToggle label={control.label} checked={checked} onChange={onChange} hint={control.hint} testId="svo-native-ao" />;
+}
+
+export function SvoShadowResolutionControlRow({ control }: FeatureControlViewProps) {
+  const session = useSession();
+  const disabled = session.ui(state => state.svoConeTracingMode !== "raster-ao");
+  const { value, set } = useSvoRenderTuningValue("rasterShadowResolution");
+  return <RailSelect label={control.label} value={String(value)} disabled={disabled}
+    onChange={next => set(next === "4096" ? 4096 : 2048)}
+    options={[{value:"2048",label:"2048"},{value:"4096",label:"4096"}]}
+    hint={control.hint} testId="svo-shadow-resolution" />;
 }

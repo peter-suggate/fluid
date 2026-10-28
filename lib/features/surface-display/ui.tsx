@@ -7,20 +7,47 @@ import { PARTICLE_DISPLAY_OPTIONS } from "../../core/visual-layers";
 import { simulation } from "../../core/simulation/controller";
 import { resolveWaterOptics, WATER_ROUGHNESS_MIN } from "../../core/webgpu-lighting";
 import { ToolstripRow } from "../../../components/toolstrip";
-import { RailChoice, RailRange, RailSub } from "../../../components/rail";
+import { RailChoice, RailRange, RailSub, RailToggle } from "../../../components/rail";
 import type { FeatureControlViewProps } from "../../framework/ui/slot";
-import { Choice, Slider, Value } from "../../../components/ui";
+import { Choice, Slider, Value, Switch } from "../../../components/ui";
 import { PARTICLE_SURFACE_MERGE_RANGE, PARTICLE_SURFACE_SMOOTHING_RANGE, PARTICLE_SURFACE_THICKNESS_RANGE } from "../../core/webgpu-particle-surface";
-import { surfaceDisplayFeature, type FineSurfaceState, type FluidParticleDisplay, type FluidSurfaceRenderMode } from "./definition";
-export function SurfaceDisplayRow() {
+import { surfaceDisplayFeature, WATER_REFLECTION_OPTIONS, type WaterReflectionMode, type FineSurfaceState, type FluidParticleDisplay, type FluidSurfaceRenderMode, SURFACE_DISPLAY_OPTIONS } from "./definition";
+export function SurfaceDisplayRow({ placement }: Partial<FeatureControlViewProps>) {
   const session = useSession();
   const value = session.ui(state => state.fluidSurfaceRenderMode);
   const change = session.ui(state => state.setFluidSurfaceRenderMode);
   const control = surfaceDisplayFeature.controls[0];
+  if (placement?.slot === "study.layers") return <>
+    <RailChoice<FluidSurfaceRenderMode> label={control.label} hint={control.hint} ariaLabel="Fluid surface render mode"
+      value={value} options={SURFACE_DISPLAY_OPTIONS} onChange={change} />
+    {value === "shaded" && <RailSub><WaterRoughnessControl rail /><WaterReflectionControl rail /><WaterRefractionControl rail /></RailSub>}
+  </>;
   return <ToolstripRow name={control.label} hint={control.hint} testId="fluid-surface-render-row" icon={<Waves width={14} height={14} />}>
     <Choice<FluidSurfaceRenderMode> ariaLabel="Fluid surface render mode" value={value} options={control.options} onChange={change} />
-    {value === "shaded" && <WaterRoughnessControl />}
+    {value === "shaded" && <><WaterRoughnessControl /><WaterReflectionControl /><WaterRefractionControl /></>}
   </ToolstripRow>;
+}
+
+function WaterRefractionControl({ rail = false }: { rail?: boolean }) {
+  const session = useSession();
+  const checked = session.ui(state => state.waterWorldRefractionEnabled);
+  const onChange = session.ui(state => state.setWaterWorldRefractionEnabled);
+  const hint = "Trace underwater scenery beyond the screen for more accurate depth and absorption. Slower to render.";
+  if (rail) return <RailToggle label="World refraction" checked={checked} onChange={onChange} hint={hint} testId="water-world-refraction" />;
+  return <Switch label="World refraction" checked={checked} onChange={onChange} hint={hint} />;
+}
+
+function WaterReflectionControl({ rail = false }: { rail?: boolean }) {
+  const session = useSession();
+  const value = session.ui(state => state.waterReflectionMode);
+  const change = session.ui(state => state.setWaterReflectionMode);
+  if (rail) return <RailChoice<WaterReflectionMode> label="Reflections" ariaLabel="Water reflections" value={value}
+    options={WATER_REFLECTION_OPTIONS} onChange={change}
+    hint="Scene reflects visible geometry. World also traces missing reflections through full-scene geometry and costs more. Sky uses only the environment." />;
+  return <>
+    <span className="toolstrip-name" title="Scene reflects visible geometry. World also traces missing reflections through full-scene geometry and costs more. Sky uses only the environment.">Reflections</span>
+    <Choice<WaterReflectionMode> ariaLabel="Water reflections" value={value} options={WATER_REFLECTION_OPTIONS} onChange={change} />
+  </>;
 }
 
 /**
@@ -68,7 +95,7 @@ function FineSlider({ setting, label, ariaLabel, min, max, step, hint, onInput }
   return <RailRange label={label} ariaLabel={ariaLabel} value={value} min={min} max={max} step={step} hint={hint} onInput={onInput} />;
 }
 
-function WaterRoughnessControl() {
+function WaterRoughnessControl({ rail = false }: { rail?: boolean }) {
   const session = useSession();
   const roughness = session.scene(state => resolveWaterOptics(state.scene.fluid.optics).roughness);
   const editing = useRef(false);
@@ -83,19 +110,21 @@ function WaterRoughnessControl() {
       simulation.commitEdit(undefined, { reseed: false }, session.id);
     }
   }, [session]);
+  const change = (value: number) => {
+    if (!editing.current) {
+      simulation.beginEdit("Change water roughness", session.id);
+      editing.current = true;
+    }
+    const store = session.scene.getState();
+    store.patchFluid({ optics: { ...store.scene.fluid.optics, roughness: value } });
+  };
+  const hint = "Lower values give sharper highlights and reflections; higher values soften them.";
+  if (rail) return <RailRange label="Roughness" ariaLabel="Water roughness" value={roughness}
+    min={WATER_ROUGHNESS_MIN} max={1} step={0.01} digits={2} hint={hint} onInput={change} onGestureEnd={finish} />;
   return <>
     <span className="toolstrip-name">Roughness</span>
     <Slider ariaLabel="Water roughness" value={roughness} min={WATER_ROUGHNESS_MIN} max={1} step={0.01}
-      hint="Lower values give sharper surface highlights; higher values spread them out."
-      onInput={value => {
-        if (!editing.current) {
-          simulation.beginEdit("Change water roughness", session.id);
-          editing.current = true;
-        }
-        const store = session.scene.getState();
-        store.patchFluid({ optics: { ...store.scene.fluid.optics, roughness: value } });
-      }}
-      onGestureEnd={finish} />
+      hint={hint} onInput={change} onGestureEnd={finish} />
     <Value value={roughness.toFixed(2)} />
   </>;
 }

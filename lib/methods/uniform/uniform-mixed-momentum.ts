@@ -142,7 +142,7 @@ fn umFineClassify(owner:UMOwner,origin:vec3i,cell:u32,axis:u32,sign:i32)->vec2f 
  let inside=all((probe>>vec3u(2u))==(origin>>vec3u(2u)));
  let s=2u*axis+u32(sign>0);
  // umFaceLow (negative) or umClosedPositive (positive): a SOLID page across.
- let wall=!inside&&utcSides[s].kind==UM_SOLID;let low=wall&&sign<0;
+ let wall=!inside&&utcSides[s].kind>=UM_SOLID;let low=wall&&sign<0;
  var anchor=origin;if(sign<0){anchor[axis]-=1;}
  let face=UMFace(UMOwner(),anchor,1u,1u,axis,sign);
  // umFaceFreeze: x frozen, y the thawing term (the owner's, else the neighbour's).
@@ -414,7 +414,7 @@ fn umRetainedFace(face:UMFace)->f32 {
  return umRetainedMomentum(face);
 }
 fn umClosedPositive(face:UMFace)->bool {
- return umAcrossKind(face.anchor,face.axis,1)==UM_SOLID;
+ return umAcrossKind(face.anchor,face.axis,1)>=UM_SOLID;
 }
 fn umAdvectedMomentum(face:UMFace,dt:f32)->f32 {
  return umSampleVelocityComponent(umMomentumDeparture(umFaceCenter(face),dt,momentum.hDt.xyz${this.trace==="substep"?",f32(face.width)":""}),face.axis);

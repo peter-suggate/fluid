@@ -1,0 +1,81 @@
+{
+  "sceneId": "atlantic-lighthouse",
+  "status": "Actual production capture validated; photorealism remains incomplete.",
+  "artifacts": {
+    "nativeImage": "artifacts/water-scenes/atlantic-lighthouse/live-world-final-v22.png",
+    "nativeDiagnostics": "artifacts/water-scenes/atlantic-lighthouse/live-world-final-v22.json",
+    "nativeSourceHashes": "artifacts/water-scenes/atlantic-lighthouse/live-world-final-v22-source.json",
+    "cyclesReference": "artifacts/water-scenes/atlantic-lighthouse/cycles-photo-rock-v19.png",
+    "simulatedWater": "artifacts/water-scenes/atlantic-lighthouse/water-active-v17.obj",
+    "waterProvenance": "artifacts/water-scenes/atlantic-lighthouse/water-active-v17.json",
+    "pressureFixEvidence": "artifacts/water-scenes/atlantic-lighthouse/pressure-active-set-fix-v17.json",
+    "textureEvidence": "artifacts/water-scenes/atlantic-lighthouse/rock-photo-verification-v19.json"
+  },
+  "reproduce": "node --import tsx tools/capture-forest-waterfall.ts --scene=atlantic-lighthouse --time=1 --width=1200 --height=800 --render-scale=2 --reflections=world-space --visibility=cones --out=artifacts/water-scenes/atlantic-lighthouse/live-world-final-v22.png --timeout=1800",
+  "nativeSettings": {
+    "time_s": 1,
+    "steps": 60,
+    "outputPixels": [
+      1200,
+      800
+    ],
+    "internalPixels": [
+      2400,
+      1600
+    ],
+    "renderScale": 2,
+    "reflectionMode": "world-space",
+    "visibility": "cones",
+    "indirectLighting": false,
+    "surfaceTexturesEnabled": true,
+    "geometry": "Native FVX/SVO surface reconstruction; FVM image attributes. No imported decorative water."
+  },
+  "validation": {
+    "successful": true,
+    "gpuErrors": [],
+    "pressureResidual_per_s": 0.046768613159656525,
+    "maxSpeed_m_s": 8.417136192321777,
+    "productionVolume_m3": {
+      "initial": 3704.460407959518,
+      "final": 3747.3131659775936,
+      "changeFraction": 0.011567881229342047,
+      "measurement": "Production phi and solid-capacity GPU readback, including settled Eulerian water"
+    },
+    "solverVolumeTelemetry": {
+      "volumeDrift": -0.014537837016109011,
+      "representedVolumeDrift": 0.11467825976073417,
+      "rawVolumeDrift": -0.03166974501062113,
+      "narrowBandVolumeBudgetDrift": 0.029862706369327897
+    },
+    "worldReflections": {
+      "visibleWaterSamples": 1007024,
+      "retainedScreenHits": 67177,
+      "addedWorldHits": 316365,
+      "skyMisses": 623482,
+      "failedWorldSamples": 0
+    },
+    "sourceFilesChangedDuringCapture": [
+      "lib/svo/features/shading/program.ts"
+    ],
+    "timings": {
+      "pausedFencedMedian_ms": 172.3480419999978,
+      "serializedLiveMedian_ms": 254.08300000001327,
+      "caution": "These serialized host measurements include fences and maintenance; they are not interactive FPS."
+    }
+  },
+  "remainingGaps": [
+    "Live water appears as broad smooth gray/teal reflective sheets, with much less small-scale surface detail and optical variation than the Cycles reference.",
+    "Tower masonry joints are excessively dark in the voxel image, and weathering is too uniform.",
+    "Visible storm sky is flatter and less dimensional than the Cycles cloud volume.",
+    "The 25cm fluid grid does not resolve fine spray or turbulent aeration; no decorative replacement spray was added.",
+    "Rock image detail improved, but the large cliff silhouette still has broad planar faces.",
+    "Production volume grew1.157% during the1s capture; solver telemetry fields use differing representations and must not be conflated with the direct phi/capacity measurement."
+  ],
+  "checks": {
+    "types": "passed",
+    "focusedPressureGPU": "8/8 passed",
+    "legacyActiveMaskRegression": "fails old arithmetic as expected",
+    "stationarySolidHydrostatic": "passes60steps at two waterline heights",
+    "forcedSuperblockBulk16": "passes60steps with16member regions,peak9.58e-6m/s"
+  }
+}

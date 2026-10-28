@@ -51,18 +51,37 @@ fn bpRetire(slot:u32){
  * identity, quarantine, the ascending live list and sticky failures. */
 export class UniformBulkPages{
  readonly layout:Layout;
- readonly state:GPUBuffer;
+ /** The store's one binding: its own buffer, or (adopt) a range of the
+  * pressure arena's pool B, which the solve's kernels then read without a
+  * binding of their own (pNative is at the per-stage storage limit). */
+ private store:{buffer:GPUBuffer;offset:number;owned:boolean};
  private begin?:GPUComputePipeline;
  private finish?:GPUComputePipeline;
  private group?:GPUBindGroup;
- get allocatedBytes():number{return this.state.size;}
+ get state():GPUBuffer{return this.store.buffer;}
+ get binding():GPUBufferBinding{return {buffer:this.store.buffer,offset:this.store.offset,size:this.layout.bytes};}
+ get allocatedBytes():number{return this.store.owned?this.store.buffer.size:0;}
  constructor(private readonly device:GPUDevice,capacity:number){
   this.layout=bulk16PageLayout(capacity);
   if(this.layout.bytes>Math.min(device.limits.maxBufferSize,device.limits.maxStorageBufferBindingSize))throw new Error(`BULK16 capacity ${capacity} needs ${this.layout.bytes} bytes in one storage binding`);
-  this.state=device.createBuffer({label:"Uniform whole-page BULK16 slots",size:this.layout.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  this.store={buffer:device.createBuffer({label:"Uniform whole-page BULK16 slots",size:this.layout.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),offset:0,owned:true};
+  this.seed();
+ }
+ private seed():void{
+  const capacity=this.layout.capacity;
   const seed=new Uint32Array(this.layout.free+capacity);seed[BULK16_STATUS.capacity]=capacity;seed[BULK16_STATUS.free]=capacity;seed[BULK16_STATUS.version]=0xb0160001;
   for(let i=0;i<capacity;i++)seed[this.layout.free+i]=i+1;
-  device.queue.writeBuffer(this.state,0,seed);
+  this.device.queue.writeBuffer(this.store.buffer,this.store.offset,seed);
+ }
+ /** Before any bind (initialize, the readers' groups): move the store into
+  * host (layout.bytes at a storage offset), seeded as the constructor's was. */
+ adopt(host:GPUBufferBinding):void{
+  if(this.group)throw new Error("BULK16 store adopted after its lifecycle bound it");
+  const offset=host.offset??0;
+  if((host.size??host.buffer.size-offset)<this.layout.bytes||offset%this.device.limits.minStorageBufferOffsetAlignment!==0)throw new Error("BULK16 store host range is too small or misaligned");
+  if(this.store.owned)this.store.buffer.destroy();
+  this.store={buffer:host.buffer,offset,owned:false};
+  this.seed();
  }
  async initialize():Promise<void>{
   const H=BULK16_STATUS;
@@ -100,7 +119,7 @@ var<workgroup> bpScan:array<u32,256>;
   const layout=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
   const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
   [this.begin,this.finish]=await Promise.all(["begin","finish"].map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
-  this.group=this.device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:this.state}}]});
+  this.group=this.device.createBindGroup({layout,entries:[{binding:0,resource:this.binding}]});
  }
  private encode(encoder:GPUCommandEncoder,pipeline:GPUComputePipeline|undefined,label:string):void{
   if(!pipeline||!this.group)throw new Error("BULK16 lifecycle is not initialized");
@@ -108,8 +127,8 @@ var<workgroup> bpScan:array<u32,256>;
  }
  encodeBegin(encoder:GPUCommandEncoder):void{this.encode(encoder,this.begin,"BULK16 reclaim quarantine");}
  encodeFinish(encoder:GPUCommandEncoder):void{this.encode(encoder,this.finish,"BULK16 publish live slots");}
- encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset=0):void{encoder.copyBufferToBuffer(this.state,0,target,offset,4*BULK16_STATUS.words);}
- destroy():void{this.state.destroy();}
+ encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset=0):void{encoder.copyBufferToBuffer(this.store.buffer,this.store.offset,target,offset,4*BULK16_STATUS.words);}
+ destroy():void{if(this.store.owned)this.store.buffer.destroy();}
 }
 
 export function bulk16Failure(receipt:ArrayLike<number>):string|undefined{

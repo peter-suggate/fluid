@@ -472,7 +472,7 @@ const UM_INF=1e20;
 // coarse +face, so the pyramid leaves the 4h cell behind a closed wall
 // unknown on the wall's axis too: no far lookup takes a value there.
 fn umClosedWall(face:UMFace)->bool{
- return face.sign>0&&umAcrossKind(face.anchor,face.axis,1)==UM_SOLID;
+ return face.sign>0&&umAcrossKind(face.anchor,face.axis,1)>=UM_SOLID;
 }
 // One (value, distance) slot per canonical patch and component. The sections
 // the lattice fixes come first. Width-4 patches (anchor/4 is their tile) sit
@@ -1306,7 +1306,7 @@ var<workgroup> rbFlags:array<u32,192>;
  rbValues[at]=0.0;rbLower[at]=0u;rbUpper[at]=0u;rbFlags[at]=0u;
  // The tile's +face on a closed wall is seeded, never restricted (umClosedWall).
  var top=origin;top[component]+=3;
- if(supported&&!((gid[component]&7u)==7u&&umAcrossKind(top,component,1)==UM_SOLID)){
+ if(supported&&!((gid[component]&7u)==7u&&umAcrossKind(top,component,1)>=UM_SOLID)){
   var location=vec3f(origin)+vec3f(2);location[component]+=2.0;
   var best=UM_INF;var sum=0.0;var count=0.0;var lo=vec3i(2048);var hi=vec3i(-1);
   ${this.regularBulk?"let coarse=false;let patchWidth=1u;":`// A 4h tile's one owner has a single positive patch (width 4: only the
@@ -1479,7 +1479,7 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
    var anchor=vec3i(origin);anchor[axis]+=3;
    let slot=umSlotState(anchor,axis,4u);let physicalAt=textureLoad(physical,anchor,0);var value=vec4f(0);let slotIndex=umSlot(anchor,axis,4u);
    // umClosedWall: a closed positive domain wall publishes its physical value.
-   if(umAcrossKind(anchor,axis,1)==UM_SOLID){value[axis]=physicalAt[axis];}
+   if(umAcrossKind(anchor,axis,1)>=UM_SOLID){value[axis]=physicalAt[axis];}
    else if(held){value[axis]=ueHeldFace(umFace(owner,axis,1,0u),owner,slotIndex);}
    else if(slot.y<0.5*UM_INF){value[axis]=slot.x;}
    else if((mask&(1u<<axis))!=0u){value[axis]=state[axis];}

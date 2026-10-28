@@ -20,6 +20,8 @@ export interface SvoEnvironmentLightingRecord {
   sunIntensity: number;
   keyLightDirection: SvoVec3;
   sunSharpness: number;
+  /** Optional directional cloud coverage, zero preserves the original gradient. */
+  cloudCoverage?: number;
 }
 
 export interface SvoEnvironmentLightingBuild {
@@ -30,6 +32,10 @@ export interface SvoEnvironmentLightingBuild {
 }
 
 export interface SvoEnvironmentLightingOptions {
+  cloudCoverage?: number;
+  keyLightColorLinear?: LinearRgb;
+  keyLightDirection?: SvoVec3;
+  sunIntensity?: number;
   diffuseScale?: number;
   specularScale?: number;
   lowerRadianceLinear?: LinearRgb;
@@ -99,8 +105,11 @@ export function canonicalSvoEnvironmentLightingRecord(input: SvoEnvironmentLight
   const accentPower = nonNegative(input.accentPower, "SVO environment accent power");
   const sunSharpness = nonNegative(input.sunSharpness, "SVO environment sun sharpness");
   if (!(accentPower > 0) || !(sunSharpness > 0)) throw new RangeError("SVO environment lobe powers must be positive");
+  const cloudCoverage = finite(input.cloudCoverage ?? 0, "SVO environment cloud coverage");
+  if (cloudCoverage < 0 || cloudCoverage > 1) throw new RangeError("SVO environment cloud coverage must be from zero to one");
   return Object.freeze({
     ...input,
+    cloudCoverage,
     lowerRadianceLinear: color(input.lowerRadianceLinear, "SVO environment lower radiance"),
     diffuseScale: nonNegative(input.diffuseScale, "SVO environment diffuse scale"),
     upperRadianceLinear: color(input.upperRadianceLinear, "SVO environment upper radiance"),
@@ -130,9 +139,10 @@ export function svoEnvironmentLightingRecord(
     specularScale: options.specularScale ?? 1,
     accentRadianceLinear: options.accentRadianceLinear ?? palette.accent,
     accentPower: 3,
-    keyLightColorLinear: palette.keyColor,
-    sunIntensity: 2.5,
-    keyLightDirection: palette.keyDirection,
+    keyLightColorLinear: options.keyLightColorLinear ?? palette.keyColor,
+    sunIntensity: options.sunIntensity ?? 2.5,
+    keyLightDirection: options.keyLightDirection ?? palette.keyDirection,
+    cloudCoverage: options.cloudCoverage ?? 0,
     sunSharpness: 360,
   });
 }
@@ -158,6 +168,7 @@ export function packSvoEnvironmentLightingRecords(records: readonly SvoEnvironme
     floats.set([...record.keyLightColorLinear, record.sunIntensity], offset + 12);
     floats.set([...record.keyLightDirection, record.sunSharpness], offset + 16);
     words.set([environmentIndex(record.environmentId), record.revision, SVO_ENVIRONMENT_LIGHTING_VERSION, 0], offset + 20);
+    floats[offset + 23] = record.cloudCoverage ?? 0;
   });
   return words;
 }
@@ -172,6 +183,7 @@ export function unpackSvoEnvironmentLightingRecord(packed: Uint32Array, recordIn
   return canonicalSvoEnvironmentLightingRecord({
     environmentId,
     revision: packed[offset + 21],
+    cloudCoverage: floats[offset + 23],
     lowerRadianceLinear: [floats[offset], floats[offset + 1], floats[offset + 2]], diffuseScale: floats[offset + 3],
     upperRadianceLinear: [floats[offset + 4], floats[offset + 5], floats[offset + 6]], specularScale: floats[offset + 7],
     accentRadianceLinear: [floats[offset + 8], floats[offset + 9], floats[offset + 10]], accentPower: floats[offset + 11],
@@ -230,9 +242,9 @@ export function evaluateSvoEnvironmentPrefilteredSpecular(
   const broadExponent = 15 * (1 - roughnessSquared) + roughnessSquared;
   const sharpEnergy = (sharpExponent + 2) / (record.sunSharpness + 2);
   const broadEnergy = (broadExponent + 2) / 17;
-  const sun = scale(record.keyLightColorLinear, record.sunIntensity * Math.pow(cosine, sharpExponent) * sharpEnergy + 0.22 * Math.pow(cosine, broadExponent) * broadEnergy);
+  const sun = scale(record.keyLightColorLinear, record.sunIntensity * Math.pow(cosine, sharpExponent) * sharpEnergy + 0.22 * (record.sunIntensity / 2.5) * Math.pow(cosine, broadExponent) * broadEnergy);
   const accent = scale(record.accentRadianceLinear, 0.13 * Math.pow(1 - Math.abs(direction[1]), record.accentPower * (1 - roughnessSquared) + roughnessSquared));
-  return scale(add(add(sky, sun), accent), record.specularScale);
+  return scale(evaluateSvoEnvironmentCloudRadiance(add(add(sky, sun), accent), direction, roughness, record.cloudCoverage ?? 0, record.lowerRadianceLinear, record.upperRadianceLinear, scale(record.keyLightColorLinear, record.sunIntensity), record.keyLightDirection), record.specularScale);
 }
 
 function fnvStep(hash: number, value: number): number {
@@ -269,9 +281,56 @@ export function svoEnvironmentAmbientBackgroundLinear(
   return Object.freeze([blend(0), blend(1), blend(2)] as const);
 }
 
+function cloudHash(x: number, y: number): number {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+function cloudNoise(x: number, y: number): number {
+  const ix = Math.floor(x), iy = Math.floor(y), fx = x - ix, fy = y - iy;
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  const a = cloudHash(ix, iy), b = cloudHash(ix + 1, iy), c = cloudHash(ix, iy + 1), d = cloudHash(ix + 1, iy + 1);
+  return (a + (b - a) * u) * (1 - v) + (c + (d - c) * u) * v;
+}
+function smoothCloud(a: number, b: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t);
+}
+/** Deterministic distant cloud layer shared by primary sky and reflections.
+ * Roughness suppresses directional detail; this is an analytic approximation,
+ * not a sampled physical atmosphere or an exact spherical convolution. */
+export function evaluateSvoEnvironmentCloudRadiance(base: LinearRgb, direction: SvoVec3, roughness: number,
+  coverage: number, lower: LinearRgb, upper: LinearRgb, keyColor: LinearRgb, keyDirection: SvoVec3): LinearRgb {
+  if (coverage <= 0) return base;
+  let x = direction[0] * 1.8 / (Math.max(direction[1], 0) + .18) + 17.3;
+  let y = direction[2] * 1.8 / (Math.max(direction[1], 0) + .18) - 9.2;
+  let noise = 0, amplitude = .5333333333;
+  for (let octave = 0; octave < 4; octave++) { noise += cloudNoise(x, y) * amplitude; x = x * 2.03 + 11.7; y = y * 2.03 - 5.2; amplitude *= .5; }
+  const edge = 1 - coverage * .85;
+  const density = smoothCloud(edge - .18, edge + .12, noise);
+  const detail = density * (1 - roughness * roughness) + coverage * .65 * roughness * roughness;
+  const amount = detail * smoothCloud(-.03, .14, direction[1]);
+  const silver = Math.pow(Math.max(0, dot(direction, keyDirection)), 8) * .15;
+  const cloud = add(mix(scale(lower, .75), scale(upper, 1.15), .55), scale(keyColor, silver));
+  return mix(base, cloud, amount * .94);
+}
+
+/** Binding-free cloud evaluator, reused by the liquid sky fallback. */
+export const svoEnvironmentCloudsWGSL = /* wgsl */ `
+fn svoCloudHash(p:vec2i)->f32{var h=bitcast<u32>(p.x)*374761393u+bitcast<u32>(p.y)*668265263u;h=(h^(h>>13u))*1274126177u;return f32(h^(h>>16u))/4294967295.0;}
+fn svoCloudNoise(p:vec2f)->f32{let i=vec2i(floor(p));let f=fract(p);let u=f*f*(vec2f(3.0)-2.0*f);return mix(mix(svoCloudHash(i),svoCloudHash(i+vec2i(1,0)),u.x),mix(svoCloudHash(i+vec2i(0,1)),svoCloudHash(i+vec2i(1,1)),u.x),u.y);}
+fn svoEnvironmentCloudRadiance(baseRadiance:vec3f,direction:vec3f,roughness:f32,coverage:f32,lower:vec3f,upper:vec3f,keyColor:vec3f,keyDirection:vec3f)->vec3f{
+  if(coverage<=0.0){return baseRadiance;}
+  var p=direction.xz*(1.8/(max(direction.y,0.0)+.18))+vec2f(17.3,-9.2);var noise=0.0;var amplitude=.5333333333;
+  for(var octave=0u;octave<4u;octave+=1u){noise+=svoCloudNoise(p)*amplitude;p=p*2.03+vec2f(11.7,-5.2);amplitude*=.5;}
+  let edge=1.0-coverage*.85;let density=smoothstep(edge-.18,edge+.12,noise);let detail=mix(density,coverage*.65,roughness*roughness);let amount=detail*smoothstep(-.03,.14,direction.y);
+  let silver=pow(max(0.0,dot(direction,keyDirection)),8.0)*.15;let cloud=mix(lower*.75,upper*1.15,.55)+keyColor*silver;return mix(baseRadiance,cloud,amount*.94);
+}
+`;
+
 /** Binding-free mirror for one selected environment record. */
 export const svoEnvironmentLightingWGSL = /* wgsl */ `
+${svoEnvironmentCloudsWGSL}
 struct SvoEnvironmentLightingRecord{lowerDiffuse:vec4f,upperSpecular:vec4f,accentPower:vec4f,keyColorIntensity:vec4f,keyDirectionSharpness:vec4f,identity:vec4u}
 fn svoEnvironmentDiffuseIrradiance(lighting:SvoEnvironmentLightingRecord,worldNormalIn:vec3f)->vec3f{let worldNormal=normalize(worldNormalIn);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let gradient=(lighting.upperSpecular.xyz-lighting.lowerDiffuse.xyz)*(worldNormal.y/3.0);let horizon=lighting.accentPower.xyz*(.13*(1.0-abs(worldNormal.y)));return max(vec3f(0.0),(average+gradient+horizon)*lighting.lowerDiffuse.w);}
-fn svoEnvironmentPrefilteredSpecular(lighting:SvoEnvironmentLightingRecord,worldDirectionIn:vec3f,roughnessIn:f32)->vec3f{let worldDirection=normalize(worldDirectionIn);let roughness=clamp(roughnessIn,0.0,1.0);let r2=roughness*roughness;let vertical=clamp(worldDirection.y*.5+.5,0.0,1.0);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let sky=mix(mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,vertical),average,r2);let cosine=max(0.0,dot(worldDirection,normalize(lighting.keyDirectionSharpness.xyz)));let sharpExponent=mix(lighting.keyDirectionSharpness.w,1.0,r2);let broadExponent=mix(15.0,1.0,r2);let sharpEnergy=(sharpExponent+2.0)/(lighting.keyDirectionSharpness.w+2.0);let broadEnergy=(broadExponent+2.0)/17.0;let sun=lighting.keyColorIntensity.xyz*(lighting.keyColorIntensity.w*pow(cosine,sharpExponent)*sharpEnergy+.22*pow(cosine,broadExponent)*broadEnergy);let accentExponent=mix(lighting.accentPower.w,1.0,r2);let accent=lighting.accentPower.xyz*(.13*pow(1.0-abs(worldDirection.y),accentExponent));return max(vec3f(0.0),(sky+sun+accent)*lighting.upperSpecular.w);}
+fn svoEnvironmentPrefilteredSpecular(lighting:SvoEnvironmentLightingRecord,worldDirectionIn:vec3f,roughnessIn:f32)->vec3f{let worldDirection=normalize(worldDirectionIn);let roughness=clamp(roughnessIn,0.0,1.0);let r2=roughness*roughness;let vertical=clamp(worldDirection.y*.5+.5,0.0,1.0);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let sky=mix(mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,vertical),average,r2);let cosine=max(0.0,dot(worldDirection,normalize(lighting.keyDirectionSharpness.xyz)));let sharpExponent=mix(lighting.keyDirectionSharpness.w,1.0,r2);let broadExponent=mix(15.0,1.0,r2);let sharpEnergy=(sharpExponent+2.0)/(lighting.keyDirectionSharpness.w+2.0);let broadEnergy=(broadExponent+2.0)/17.0;let sun=lighting.keyColorIntensity.xyz*(lighting.keyColorIntensity.w*pow(cosine,sharpExponent)*sharpEnergy+.22*(lighting.keyColorIntensity.w/2.5)*pow(cosine,broadExponent)*broadEnergy);let accentExponent=mix(lighting.accentPower.w,1.0,r2);let accent=lighting.accentPower.xyz*(.13*pow(1.0-abs(worldDirection.y),accentExponent));return max(vec3f(0.0),svoEnvironmentCloudRadiance(sky+sun+accent,worldDirection,roughness,bitcast<f32>(lighting.identity.w),lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,lighting.keyColorIntensity.xyz*lighting.keyColorIntensity.w,normalize(lighting.keyDirectionSharpness.xyz))*lighting.upperSpecular.w);}
 `;

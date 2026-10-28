@@ -155,7 +155,8 @@ fn roKey(k:u32){
   let c=vec3i(umTileCoord(k));
   // Once a block: a SOLID page across one of its faces with a stored page
   // across another axis's face has two wall slots on one cell of the tiled
-  // levels' halo (UNIFORM_MIXED_ROOT_UNREACHED).
+  // levels' halo (UNIFORM_MIXED_ROOT_UNREACHED). A BULK16 page is not a
+  // wall: its face rows are the composite's (N_BULKN), one a native face.
   if((k&511u)==0u){for(var f=0u;f<6u;f++){
    var q=c;q[f>>1u]+=select(-8,8,(f&1u)==1u);
    if(umTileKind(q)!=UM_SOLID){continue;}
@@ -219,7 +220,8 @@ export class UniformMixedRootOwners {
     this.group = device.createBindGroup({ label: this.label, layout, entries: [
       { binding: 0, resource: { buffer: this.ownership.presentation.buffer } }, { binding: 1, resource: { buffer: this.ownership.support } },
       { binding: 2, resource: this.phi }, ...(this.record ? [{ binding: 3, resource: this.record }] : []), { binding: 4, resource: { buffer: this.pool.state } }] });
-    this.pipeline = await device.createComputePipelineAsync({ label: `${this.label} roKeys`, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: "roKeys" } });
+    // A tagged BULK16 page word is a page kind of its own (umBulkSlots), not SOLID.
+    this.pipeline = await device.createComputePipelineAsync({ label: `${this.label} roKeys`, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: "roKeys", constants: this.ownership.bulk ? { umBulkSlots: 1 } : {} } });
   }
   /** After the step's page commit, before the first root reader (the split
    * authority). */

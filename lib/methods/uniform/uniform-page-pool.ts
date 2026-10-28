@@ -110,7 +110,8 @@
  *   pins     4 words per pinned page (x,y,z,0), `pinCapacity` of them: written
  *            by pin() at scene build and asked for by every commit
  *   list     4 words per distinct request (x,y,z,0), `requestCapacity` of them
- *   keep     one word per block: non-zero when upKeep marked it this step
+ *   keep     one word per block: non-zero when upKeep marked it this step;
+ *            a BULK16 word when upDemote gave the page to that slot
  *   ring     layout.ringCapacity words (the power of two that holds the
  *            slots), a queue of blocks: [head, head+free) are free and the
  *            `pending` after them are quarantined
@@ -607,7 +608,11 @@ fn upFatal()->u32{return upState[5u];}
 `;
 const REQUESTERS=/* wgsl */`
 // The resident block is in use this step: the next commit resets its idle count. Nothing for a sentinel or UP_NONE.
-fn upKeep(block:u32){if(block<UP_BLOCKS){atomicStore(&upWork[UP_WORK_KEEP+block],1u);}}
+fn upKeep(block:u32){if(block<UP_BLOCKS){atomicMax(&upWork[UP_WORK_KEEP+block],1u);}}
+// The resident block's page leaves the 4h pool for BULK16 slot word \`word\`
+// (BULK16_PAGE_TAG|slot): the next commit writes the word over the page's
+// entry and retires the block (upSlots). It outranks a keep.
+fn upDemote(block:u32,word:u32){if(upStored(block)&&upBulkWord(word)){atomicMax(&upWork[UP_WORK_KEEP+block],word);}}
 // Raise a sticky fatal bit (UP_FATAL_*); the first raised keeps its page and its detail.
 fn upFailWith(bit:u32,q:vec3i,detail:u32){
  atomicOr(&upWork[2u],bit);
@@ -638,7 +643,16 @@ fn upRequest(q:vec3i){
  let held=upWord(q);
  if(held==UP_SOLID_WORD){return;}
  upInclude(q);
+ // A BULK16 page is liquid held at 16h: only upPromote gives it a block.
+ if(upBulkWord(held)){return;}
  if(held!=UP_AIR_WORD&&all(upPageOf(held)==q)){upKeep(held);return;}
+ upList(q);
+}
+// Ask for BULK16 page q to take a block again at the next commit (its slot
+// is the caller's to prolong and retire once the commit lists the block).
+fn upPromote(q:vec3i){if(upBulkWord(upWord(q))){upList(q);}}
+// List absent page q once for the next commit's claims.
+fn upList(q:vec3i){
  // The super-block's wrap tags claim its top entry; its page's bit lists it once.
  let tag=(vec3u(q>>vec3u(UP_TABLE_BITS))<<vec3u(1u))|vec3u(1u);
  let c=UP_WORK_CLAIMS+5u*upEntry(q);
@@ -676,7 +690,8 @@ ${REQUESTERS}`}`;
  * readers upKind, upWord, upBlockOf, upBlockWrapped, upStored, upPageOf,
  * upBlockWord / upWindowPage, upGeneration, upResidentCount /
  * upResidentBlock, upNewCount / upNewBlock / upNewPage and upFatal. With `work`, the work buffer (read_write) at
- * that binding of the same group, the requesters upRequest and upKeep, and
+ * that binding of the same group, the requesters upRequest and upKeep, the
+ * BULK16 transitions upDemote and upPromote, and
  * upFail / upFailWith with the bits UP_FATAL_*. */
 export function uniformPagePoolWGSL(layout:UniformPagePoolLayout,group:number,state:number,work?:number):string{
  return source(layout,group,state,work,"read");
@@ -928,13 +943,15 @@ fn upSuperHolds(slot:u32,q:vec3i)->bool{return upSuperStored(slot)&&(upState[UP_
   let q=upListed(i);let slot=upState[UP_AT_TABLE+upEntry(q)];
   let held=upWord(q);
   if(held==UP_SOLID_WORD||atomicLoad(&upWork[2u])!=0u||!upSuperHolds(slot,q)){continue;}
-  if(held!=UP_AIR_WORD){if(any(upPageOf(held)!=q)){upFail(UP_FATAL_ALIAS,q);}continue;}
+  // A promoted BULK16 page already counts in its super-block (upSlots kept it there).
+  let bulk=upBulkWord(held);
+  if(held!=UP_AIR_WORD&&!bulk){if(any(upPageOf(held)!=q)){upFail(UP_FATAL_ALIAS,q);}continue;}
   let pop=atomicAdd(&upWork[W_POPS],1u);
   if(pop>=available){upFailWith(UP_FATAL_EXHAUSTED,q,upState[${S.resident}u]);continue;}
   let block=atomicLoad(&upWork[W_RING+((head+pop)&RING_MASK)]);let r=UP_AT_RECORDS+8u*block;
   upState[r]=bitcast<u32>(q.x);upState[r+1u]=bitcast<u32>(q.y);upState[r+2u]=bitcast<u32>(q.z);
   upState[r+R_STATE]=RESIDENT;upState[r+R_GENERATION]=generation;upState[r+R_IDLE]=0u;
-  upPutEntry(upChild(slot,q),block);atomicAdd(&upWork[W_SUPER_COUNT+slot],1u);
+  upPutEntry(upChild(slot,q),block);if(!bulk){atomicAdd(&upWork[W_SUPER_COUNT+slot],1u);}
   upPutBlock(block,upBlockWordOf(q));upState[UP_AT_NEW+pop]=block;
  }
 }
@@ -956,6 +973,13 @@ var<workgroup> upScan:array<vec2u,256>;
   if(state==PENDING){upState[r+R_STATE]=FREE;continue;}
   if(state!=RESIDENT){continue;}
   if(upState[r+R_GENERATION]!=generation){
+   // A demoted page: its entry takes the BULK16 word, which keeps the page
+   // in its super-block's count, and the block retires.
+   if(upBulkWord(kept)){
+    let q=upPageOf(s);let at=upChild(upState[UP_AT_TABLE+upEntry(q)],q);
+    if(upState[UP_AT_TABLE+at]==s){upPutEntry(at,kept);}
+    upPutBlock(s,UP_FREE);upState[r+R_STATE]=PENDING;count.y+=1u;continue;
+   }
    let idle=select(upState[r+R_IDLE]+1u,0u,kept!=0u);upState[r+R_IDLE]=idle;
    if(idle>=IDLE_STEPS){
     // Only a word that names this block is cleared; its slot counts one page fewer.

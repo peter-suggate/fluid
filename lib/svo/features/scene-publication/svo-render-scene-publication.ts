@@ -1,3 +1,4 @@
+import { meshSurfaceTextureAtlas } from "../../../core/imported-assets/surface-texture-atlas";
 import { sceneCellSizes_m } from "../../../core/scene-lattice-dimensions";
 import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
 import { packSvoSculptCuts } from "./svo-sculpt-cuts";
@@ -106,7 +107,9 @@ function materialTable(
     if (previous?.primitives === primitives && previous.terrainSurface === terrainSurface) return previous.baseMaterialRecords;
     return markSampledVolumeOwnerMaterials(packSvoMaterialTable([...buildDefaultSvoMaterialRecords(RENDER_SCENE_TABLE_REVISION, { terrainSurface }),
       ...metadata.map(p => environmentMaterialRecord(p, terrainSurface)),
-      ...sampledVolumeMaterialRecords(primitives.fieldPrograms, RENDER_SCENE_TABLE_REVISION)]), primitives.descriptors);
+      ...sampledVolumeMaterialRecords(primitives.fieldPrograms, RENDER_SCENE_TABLE_REVISION,
+        primitives.descriptors.flatMap((p, i) => p.kind === "field-program"
+          ? [{ program: p.program, emission: metadata[i]!.material.emission }] : []))]), primitives.descriptors);
   }
   const published = previous?.primitives.metadata;
   if (previous && published && published.length === metadata.length) {
@@ -252,6 +255,8 @@ export function svoRenderScenePublication(
     scene, worldRevision, baseMaterialRecords, catalog, primitives, terrainSurface, lighting, solidStamp, change,
     data: change === "none" ? held! : {
       voxelGeometryRevision: geometryMoved ? ((held?.voxelGeometryRevision ?? 0) % 0xffff_fffe) + 1 : held.voxelGeometryRevision,
+      surfaceTextureAtlas: previous?.primitives.fieldProgramBlocks === primitives.fieldProgramBlocks
+        ? held?.surfaceTextureAtlas : meshSurfaceTextureAtlas(primitives.fieldPrograms.flatMap(p=>p.sampledVolume ? [p.sampledVolume.asset] : [])),
       primitiveRecords: primitives.packedRecords,
       primitiveCandidates: candidates,
       materialRecords,

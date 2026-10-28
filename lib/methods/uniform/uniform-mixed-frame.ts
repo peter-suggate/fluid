@@ -41,6 +41,8 @@ import {UniformMixedPressureAuthority,uniformMixedRootMaskWords,uniformMixedRoot
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {UniformMixedPressureVelocity} from "./uniform-mixed-pressure-velocity";
 import {UniformBulkTier} from "./uniform-bulk-tier";
+import { UniformBulkPages } from "./uniform-bulk-pages";
+import { UniformBulkPageTransfer, type UniformBulkResidencyRecords } from "./uniform-bulk-page-transfer";
 import type {UniformMixedPressureTopology} from "./uniform-mixed-pressure-topology.wgsl";
 import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
 import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
@@ -330,10 +332,10 @@ export class UniformMixedFrame {
  /** Owners of per-key words outside the frame (the census), after the frame's own in the page initialise's order. */
  private readonly pageOwners:UniformPageInitBlocks[]=[];
  /** The census's residency certificate (registerCertificate). */
- private certificate?:{encodeResidency(encoder:GPUCommandEncoder):void};
+ private certificate?:{encodeResidency(encoder:GPUCommandEncoder):void;readonly residencyRecords:UniformBulkResidencyRecords};
  /** The owner of the residency certificate: every commit is followed by its
   * mark through the new page table, before anything reads a residency flag. */
- registerCertificate(certificate:{encodeResidency(encoder:GPUCommandEncoder):void}):void{this.certificate=certificate;}
+ registerCertificate(certificate:{encodeResidency(encoder:GPUCommandEncoder):void;readonly residencyRecords:UniformBulkResidencyRecords}):void{this.certificate=certificate;this.bulkTransfer?.attachRecords(certificate.residencyRecords);this.bulk?.attachRegions(certificate.residencyRecords.regions);}
  /** Before initialize: an owner whose words a claimed block's keys must take anew, launched after every commit. */
  registerPageOwner(owner:UniformPageInitBlocks):void{if(this.pageInitialise)throw new Error("The page initialise is built: register its owners before the frame initializes");this.pageOwners.push(owner);}
  /** The remap's extension walls: a low-face buffer of the frame's own. */
@@ -373,6 +375,11 @@ export class UniformMixedFrame {
  private readonly projection:UniformMixedPressureVelocity;
  /** The 16h bulk tier (nearSettled.bulkTier "16h", with solids' coarse root). */
  readonly bulk?:UniformBulkTier;
+ /** bulkTier "16h": the whole-page BULK16 slot store (a slot a box page) and its transitions. */
+ readonly bulkPages?:UniformBulkPages;
+ readonly bulkTransfer?:UniformBulkPageTransfer;
+ /** rho g h of the advance under way: a promote's hydrostatic pressure step a cell (Pa). */
+ private readonly bulkGradient:[number,number,number]=[0,0,0];
  private readonly bulkGroup?:UniformDetailGroup;
  private extensionGroups!:readonly [UniformDetailGroup,UniformDetailGroup];
  private flipSnapshotExtensionGroups?:readonly [UniformDetailGroup,UniformDetailGroup];
@@ -452,7 +459,7 @@ export class UniformMixedFrame {
  private allocatedTotal:number|undefined=undefined;
  get allocatedBytes():number{
   if(this.allocatedTotal!==undefined)return this.allocatedTotal;
-  let bytes=this.geometry.allocatedBytes+this.surfaceWorkControl.allocatedBytes+(this.narrowBandFlip.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+this.phiResolve.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.ownership.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.pagePool.allocatedBytes+this.dynamics.allocatedBytes+this.heat.allocatedBytes+(this.freeze?.allocatedBytes??0)+this.extension.allocatedBytes+this.momentum.allocatedBytes+this.split.authority.allocatedBytes+this.tileContext.allocatedBytes+(this.bulk?.allocatedBytes??0);
+  let bytes=this.geometry.allocatedBytes+this.surfaceWorkControl.allocatedBytes+(this.narrowBandFlip.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+this.phiResolve.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.ownership.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.pagePool.allocatedBytes+this.dynamics.allocatedBytes+this.heat.allocatedBytes+(this.freeze?.allocatedBytes??0)+this.extension.allocatedBytes+this.momentum.allocatedBytes+this.split.authority.allocatedBytes+this.tileContext.allocatedBytes+(this.bulk?.allocatedBytes??0)+(this.bulkPages?.allocatedBytes??0)+(this.bulkTransfer?.allocatedBytes??0);
   for(let i=0;i<this.levels.length;i++){const o=this.levels[i]!.ownership;if(o!==this.ownership)bytes+=o.allocatedBytes;}
   for(let i=0;i<this.owned.length;i++){const r=this.owned[i]!;bytes+="size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16;}
   if(this.ready)this.allocatedTotal=bytes;
@@ -468,7 +475,7 @@ export class UniformMixedFrame {
   * the cell size and every constant are placed once, here. */
  private readonly words:{readonly frame:Uint32Array<ArrayBuffer>;readonly extension:Float32Array<ArrayBuffer>;readonly surface:Float32Array<ArrayBuffer>;readonly surfaceFlags:Uint32Array<ArrayBuffer>;
   readonly momentum:Float32Array<ArrayBuffer>;readonly momentumFlags:Uint32Array<ArrayBuffer>;readonly forces:Float32Array<ArrayBuffer>;readonly projection:Float32Array<ArrayBuffer>;
-  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>};
+  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>;readonly bandGravity:Float32Array<ArrayBuffer>};
  /** Byte offset in an ownership's support of its sticky detail violation word. */
  private readonly violationByte:number;
  /** encodeGeometry's options, set in place by each caller that passes any. */
@@ -498,14 +505,15 @@ export class UniformMixedFrame {
   this.pagePool=new UniformPagePool(device,{...layout.address.pool,closureCap:f.residency.live?4*UNIFORM_RESIDENCY_PAGE_REACH:0xffffffff});this.pagePool.seed(layout.address.seed);this.pagePool.pin(f.residency.pins);
   const solid=this.solid=new UniformMixedSolid(device,f.solid,coarseLayout,this.pagePool);
   this.coarseCache=caches[0]!;
-  const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles,capacity.fixedWorldGeometry);
+  const bulkPages=this.bulkPages=this.nearSettled.bulkTier==="16h"?new UniformBulkPages(device,layout.address.pool.box.pages[0]*layout.address.pool.box.pages[1]*layout.address.pool.box.pages[2]):undefined;
+  const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles,capacity.fixedWorldGeometry,bulkPages);
   this.fineCeiling=capacity.fineCeiling??o.capacity.address.poolTiles;
   if(!Number.isInteger(this.fineCeiling)||this.fineCeiling<capacity.fineTiles||this.fineCeiling>o.capacity.address.poolTiles)throw new Error(`A mixed frame's h ceiling ${this.fineCeiling} must be in ${capacity.fineTiles}..${o.capacity.address.poolTiles}: its reservation to the tiles its pool stores`);
   this.tileContext=new UniformTileContext(device,o,solid,this.pagePool);
   {const h=o.capacity.lattice.cellSize_m,inverse=(x:number)=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x)));
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
     momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
-    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1)};}
+    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1),bandGravity:new Float32Array(4)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
@@ -545,7 +553,7 @@ export class UniformMixedFrame {
   const rootTopology:GPUBufferBinding|undefined=solid?.coarse?{buffer:buffer("Uniform mixed root topology",uniformMixedRootTopologyBytes(coarseLayout),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC)}:undefined;
   if(rootTopology)this.solidTopology={buffer:rootTopology.buffer,size:rootTopology.buffer.size};
   {const r=memory.root;
-   this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false,0,capacity.fixedWorldGeometry),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:rootPhi,frozen:view(r.frozen),residual:view(r.residual),
+   this.levels=[{ownership:new UniformMixedOwnership(device,coarseLayout,false,0,capacity.fixedWorldGeometry,bulkPages),pressure:view(r.pressure),rhs:[view(r.rhs[0]),view(r.rhs[1])],minimum:[view(r.minimum[0]),view(r.minimum[1])],phi:rootPhi,frozen:view(r.frozen),residual:view(r.residual),
     topology:f.solid?{buffer:this.solidTopology!}:undefined}];}
   const root=this.levels[0]!,p=root.ownership;
   this.rootOwners=new UniformMixedRootOwners(device,p,this.pagePool,root.phi!,this.solidTopology);
@@ -566,7 +574,7 @@ export class UniformMixedFrame {
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
   this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
   this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord,heatWord:this.narrowBandFlip.surfaceHeatWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps,this.nearSettled.wallTrace,this.nearSettled.surfaceVelocitySampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceTraceSubsteps==="off",UNIFORM_COLD_FREEZE&&capacity.coldRegions!=="fine",this.fineCeiling);
-  this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid);
+  this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,bulkPages);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
   this.geometry=new UniformMixedSurfaceGeometry(device,o,solid,this.surfaceWorkControl);this.geometryGroup=this.geometry.bind(f.phi,f.target,f.centerPhi,f.pressureGeometry,f.volume);
 
@@ -627,13 +635,24 @@ export class UniformMixedFrame {
    forced:{velocity:f.velocityScratch,negative:f.negativeScratch},velocity:f.velocity,negative:f.negative,copy:f.velocityScratch,
    root:{rhs:root.rhs[0],minimum:root.minimum[0],pressure:root.pressure,phi:root.phi!,topology:rootTopology,support:root.ownership.support,supportWord:9*p.layout.tiles.length+24},
    status:this.status,acceptance:this.state,params:this.bandParams,presentation:{buffer:this.presentation.phi.buffer,word:this.stageBandWord+layout.tiles.length},capacity:this.stageBandTiles,dynamics:this.dynamics.record,freeze:this.freeze,coldFrame:this.cold,warmTiers:this.nearSettled.warmResolution==="4h"?this.heat.tiers:undefined,
-   bulk:this.bulk?{regions:this.bulk.regions}:undefined,fineTiles:this.fineCeiling},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles,tail:this.nearSettled.pressureTail,nativeSweeps:this.nearSettled.nativeSmoothing==="composite"?1:0},solid);
+   bulk:this.bulk?{regions:this.bulk.regions}:undefined,bulkPages,fineTiles:this.fineCeiling},{...UNIFORM_PRESSURE_ARENA_SCHEDULE,cycles:this.nearSettled.bandCycles,tail:this.nearSettled.pressureTail,nativeSweeps:this.nearSettled.nativeSmoothing==="composite"?1:0},solid);
   // The next full band projection overwrites these tile faces; its copy
   // stage preserves only non-band texels. No reader needs their 4h return.
   this.split.transfer.attachProjectedBand(this.band.index,this.band.slotMapOffset);
   // The bulk record lives in the arena's pool B (pNative's ten bindings).
   if(this.bulk){this.bulk.adopt(this.band.bulkRecord!);this.bulkGroup=this.projection.bindBulk({velocity:f.velocity,negative:{buffer:f.negative},phi:root.phi!,params:this.params.projection,rootTopology,pressure:root.pressure,volume:f.volumeScratch,output:f.velocityScratch,outputNegative:{buffer:f.negativeScratch}});}
-  this.bulk?.bind({params:this.bandParams,velocity:f.velocity,slots:{buffer:this.band.index,word:this.band.slotMapOffset/4},rootPhi:root.phi!,rootTopology,tiers:this.heat.tiers,pressure:root.pressure});
+  this.bulk?.bind({params:this.bandParams,velocity:f.velocity,slots:{buffer:this.band.index,word:this.band.slotMapOffset/4},rootPhi:root.phi!,rootTopology,tiers:this.heat.tiers,pressure:root.pressure,bulkPages});
+  if(bulkPages){
+   // The BULK16 store too lives in pool B: the composite reads its rows there.
+   bulkPages.adopt(this.band.bulkStore!);
+   // bindStage (above) bound the surface volume to the store's own buffer.
+   if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(this.fields.phi,this.fields.target,{buffer:this.stageScratch});
+   const detail=f.detail!,velocityBase=detail.baseOf(f.velocity),phiBase=detail.baseOf(f.phi),velocityScratchBase=detail.baseOf(f.velocityScratch),phiScratchBase=detail.baseOf(f.phiScratch);
+   if(!velocityBase||!phiBase||!velocityScratchBase||!phiScratchBase)throw new Error("BULK16 pages need the live faces' and phi's 4h bases");
+   const cell=(t:GPUTexture,name:string)=>{const base=detail.baseOf(t);if(!base)throw new Error(`BULK16 pages need the ${name} 4h base`);return base;};
+   const cells={centerPhi:cell(f.centerPhi,"centre phi"),target:cell(f.target,"fill target"),volume:cell(f.volume,"volume"),volumeScratch:cell(f.volumeScratch,"volume scratch"),phase:cell(f.phase,"phase")};
+   this.bulkTransfer=new UniformBulkPageTransfer(device,this.pagePool,bulkPages,layout.address.blockBits,{velocityBase,phiBase,velocityScratchBase,phiScratchBase,cells,negative:f.negative,negativeScratch:f.negativeScratch,pressure:this.presentation.pressure,record:this.band.bulkRecord!});
+  }
   if(this.band.capacity!==this.stageBandTiles)throw new Error("The stage grids' band section must match the band capacity");
   {
    const blocks=this.pagePool.layout.blocks,cells=p.layout.cellCount,keys={from:0,to:0,words:512},walls={from:cells,to:cells,words:384},map=this.band.slotMapOffset/4;
@@ -788,7 +807,7 @@ export class UniformMixedFrame {
   const tileWords=new UniformPageTileWords(this.device,this.pagePool,[uniformPageTopology(this.ownership)]);
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,this.surfaceWorkControl,...this.pageOwners]});
-  await settleGPUInitialization([...Object.values(this.liveCopies),this.blit,this.solid,this.tileContext,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip,this.bulk]
+  await settleGPUInitialization([...Object.values(this.liveCopies),this.blit,this.solid,this.tileContext,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip,this.bulk,this.bulkPages,this.bulkTransfer]
    .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership,this.pagePool),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
   this.ready=true;
  }
@@ -883,6 +902,8 @@ export class UniformMixedFrame {
   band[3]=dt;band[4]=density;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
   // The composite's native 4h rows stop at the root's target, the band's h rows at band[8]: native residuals scale by their ratio.
   w.bandNative[0]=band[8]!/target;q.writeBuffer(this.bandParams,52,w.bandNative);
+  // BandParams.gravity (m/s^2): a BULK16 page's u* (pBulkRows), which no force stage reaches.
+  if(this.bulkPages){w.bandGravity[0]=gx;w.bandGravity[1]=gy;w.bandGravity[2]=gz;q.writeBuffer(this.bandParams,64,w.bandGravity);}
   const views=this.layoutViews?(this.relayout?UNIFORM_STAGE_VIEWS.previous|UNIFORM_STAGE_VIEWS.reasons|UNIFORM_STAGE_VIEWS.importance:0)|UNIFORM_STAGE_VIEWS.certificate|UNIFORM_STAGE_VIEWS.band:0;
   q.writeBuffer(this.presentation.phi.buffer,4*this.stageGridWord,uniformStageGridHeader(this.ownership.capacity.tiles,this.stageBandTiles,views));
   this.pressureTarget=target;
@@ -1017,6 +1038,7 @@ export class UniformMixedFrame {
    const solidBuild=!!this.solid?.recordStale;this.solid?.encodeCoarse(encoder,this.ownership.presentation);if(solidBuild)this.tileContext.encodeBuild(encoder);
    // Where this frame's non-pressure work goes: after the swept-body mask, before every stage that reads the tiers.
    this.heat.encode(encoder,dt,p.density,this.words.band[8]!,gravity);
+   if(this.bulkTransfer){const h=this.ownership.capacity.lattice.cellSize_m;for(let a=0;a<3;a++)this.bulkGradient[a]=p.density*gravity[a]!*h[a]!;}
    // The freeze follows the final tiers: a relayout head's after its promotions (encodeRelayoutHead).
    if(!relayout)this.freeze?.encodeHead(encoder,dt,gravity,this.frozenQuiet);
    // A host layout: a live solid edit, or the cells bodies entered, lands on
@@ -1512,7 +1534,9 @@ export class UniformMixedFrame {
   * census's residency certificate is marked over that set at once. */
  encodePageCommit(encoder:GPUCommandEncoder):void{
   if(!this.certificate)throw new Error("Uniform mixed frame: a page commit with no residency certificate registered (registerCertificate)");
-  this.pagePool.encodeCommit(encoder);this.certificate.encodeResidency(encoder);this.blockNeighbours.encode(encoder);this.encodeNewBlocks(encoder);this.tileContext.encodeClaims(encoder);
+  // Whole-16h pages leave (or rejoin) the 4h pool around the commit; their blocks' fields move before and after it.
+  this.bulkTransfer?.encodeBefore(encoder,this.bulkGradient);
+  this.pagePool.encodeCommit(encoder);this.bulkTransfer?.encodeClaimed(encoder);this.certificate.encodeResidency(encoder);this.blockNeighbours.encode(encoder);this.encodeNewBlocks(encoder);this.bulkTransfer?.encodeAfter(encoder);this.tileContext.encodeClaims(encoder);
  }
  /** Every owner's build of the blocks the last commit claimed, in the commit's
   * encoder: the fields' AIR image and the per-key owners' (page initialise),
@@ -1576,5 +1600,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{for(const c of Object.values(this.liveCopies))c.destroy();this.blit.destroy();this.surfaceWorkControl.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.tileContext.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();this.bulk?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{for(const c of Object.values(this.liveCopies))c.destroy();this.blit.destroy();this.surfaceWorkControl.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.tileContext.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();this.bulk?.destroy();this.bulkPages?.destroy();this.bulkTransfer?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

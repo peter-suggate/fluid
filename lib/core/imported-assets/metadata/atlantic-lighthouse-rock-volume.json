@@ -1,0 +1,192 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "atlantic-lighthouse-rock",
+  "source": "atlantic-lighthouse-rock.glb",
+  "origin": [
+    -9.125,
+    -0.375,
+    -10.125
+  ],
+  "dimensions": [
+    152,
+    64,
+    168
+  ],
+  "cellSize": 0.125,
+  "bandWidth": 0.125,
+  "brickCount": 1557,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Runtime | Wet fractured basalt 0",
+      "baseColorLinear": [
+        0.023000000044703484,
+        0.029999999329447746,
+        0.035999998450279236
+      ],
+      "roughness": 0.38999998569488525,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 1",
+      "baseColorLinear": [
+        0.029999999329447746,
+        0.03700000047683716,
+        0.0430000014603138
+      ],
+      "roughness": 0.41499999165534973,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 2",
+      "baseColorLinear": [
+        0.03700000047683716,
+        0.04399999976158142,
+        0.05000000074505806
+      ],
+      "roughness": 0.4399999976158142,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 3",
+      "baseColorLinear": [
+        0.04399999976158142,
+        0.050999999046325684,
+        0.05700000002980232
+      ],
+      "roughness": 0.4650000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 4",
+      "baseColorLinear": [
+        0.050999999046325684,
+        0.057999998331069946,
+        0.06400000303983688
+      ],
+      "roughness": 0.49000000953674316,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 5",
+      "baseColorLinear": [
+        0.057999998331069946,
+        0.06499999761581421,
+        0.07100000232458115
+      ],
+      "roughness": 0.5149999856948853,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 6",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.07199999690055847,
+        0.07800000160932541
+      ],
+      "roughness": 0.5400000214576721,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 7",
+      "baseColorLinear": [
+        0.07199999690055847,
+        0.07900000363588333,
+        0.08500000089406967
+      ],
+      "roughness": 0.5649999976158142,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 3/7,8,8/r0.465",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.4650000035762787,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 2/7,7,8/r0.440",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.05416457340265298
+      ],
+      "roughness": 0.4399999976158142,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 4/8,8,9/r0.490",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.06853841290915133
+      ],
+      "roughness": 0.49000000953674316,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 6/9,9,10/r0.540",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.0849214566468118
+      ],
+      "roughness": 0.5400000214576721,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 5/8,9,9/r0.515",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.5149999856948853,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 1/6,7,7/r0.415",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.41499999165534973,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 7/9,10,10/r0.565",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.5649999976158142,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Wet fractured basalt 0/5,6,6/r0.390",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.38999998569488525,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 838729,
+  "insideNodes": 438214,
+  "surfaceMapping": {
+    "url": "/assets/atlantic-lighthouse/atlantic-lighthouse-rock.fvm.gz",
+    "sha256": "431af4af50d731ef96a2f59739431722ada1832a7bc5712da456fd71bc24a939"
+  }
+}

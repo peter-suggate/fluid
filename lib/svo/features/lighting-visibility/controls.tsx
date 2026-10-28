@@ -52,8 +52,8 @@ export function renderConeVisibilityControls({ svoConeTracingMode, tuning, updat
           onChange={(value) => updateTuning("aoRadiusScale", value)} modified={modified("aoRadiusScale")} onReset={resetTuning("aoRadiusScale")} />
         <RailRange label="Cone step budget" disabled={rasterAo} unit="steps" value={tuning.coneStepBudget} min={1} max={48} step={1} digits={0}
           onChange={(value) => updateTuning("coneStepBudget", value)} modified={modified("coneStepBudget")} onReset={resetTuning("coneStepBudget")} />
-        <RailRange label="Shaded lights" unit="lights" value={tuning.maximumShadedLights} min={1} max={8} step={1} digits={0}
-          onChange={(value) => updateTuning("maximumShadedLights", value)} modified={modified("maximumShadedLights")} onReset={resetTuning("maximumShadedLights")} />
+        <RailRange label="Direct light samples" unit="rays" value={tuning.maximumShadedLights} min={1} max={32} step={1} digits={0}
+          onChange={(value) => updateTuning("maximumShadedLights", value)} modified={modified("maximumShadedLights")} onReset={resetTuning("maximumShadedLights")} hint="Total emitter samples per receiver. Area lights use Area samples each; set one area sample to cover up to 32 light sources." />
         <RailRange label="Normal escape" disabled={rasterAo} unit="cells" value={tuning.coneNormalEscapeCells} min={0} max={2} step={0.05} digits={2}
           onChange={(value) => updateTuning("coneNormalEscapeCells", value)} modified={modified("coneNormalEscapeCells")} onReset={resetTuning("coneNormalEscapeCells")} />
         <RailRange label="Emitter clearance" disabled={rasterAo} unit="cells" value={tuning.coneEmitterClearanceCells} min={0} max={8} step={0.25} digits={2}

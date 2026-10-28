@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "tokyo-blade-left-1",
+  "source": "tokyo-blade-left-1.glb",
+  "origin": [
+    0.15625,
+    2.7625,
+    1.0562500000000001
+  ],
+  "dimensions": [
+    104,
+    264,
+    8
+  ],
+  "cellSize": 0.00625,
+  "bandWidth": 0.00625,
+  "brickCount": 160,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Native Coral neon",
+      "baseColorLinear": [
+        1.0,
+        0.012000000104308128,
+        0.06499999761581421
+      ],
+      "roughness": 0.25,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
+  "uniqueNodes": 99558,
+  "insideNodes": 7757
+}

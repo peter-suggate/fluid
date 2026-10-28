@@ -20,12 +20,19 @@ from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+from texture_filter import TextureMipChain, uv_cell_metric
+from normal_orientation import outward_shading_normal, signed_outward_gradient
+from mesh_components import split_part
 parser = argparse.ArgumentParser()
 parser.add_argument('--asset', default='all')
-parser.add_argument('--collection', default='pool-party', choices=['pool-party', 'hero-garden-blender', 'forest-waterfall'])
+parser.add_argument('--collection', default='pool-party', help='Collection folder under public/assets containing manifest.json')
 parser.add_argument('--cell', type=float)
 parser.add_argument('--band-cells', type=float)
+parser.add_argument('--solid-rule', choices=('even-odd','component-union'), help='Default even-odd per object; component-union unions separate closed connected shells')
 args = parser.parse_args(sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else [])
+if not args.collection or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in args.collection):
+    parser.error('--collection must be a simple asset collection folder name')
 if args.band_cells is not None and (not math.isfinite(args.band_cells) or args.band_cells < 1):
     parser.error('--band-cells must be at least one source cell')
 OUT = ROOT/'public/assets'/args.collection
@@ -34,68 +41,7 @@ B = 8
 RAY = Vector((1, .371390676, .529113257)).normalized()
 
 
-def oct16(n):
-    if n.length_squared < 1e-20: return 0
-    n = n/(abs(n.x)+abs(n.y)+abs(n.z))
-    x, y = n.x, n.y
-    if n.z < 0:
-        x, y = (1-abs(y))*(1 if x >= 0 else -1), (1-abs(x))*(1 if y >= 0 else -1)
-    return int(round((x*.5+.5)*65535)) | (int(round((y*.5+.5)*65535)) << 16)
-
-
-def inside(bvh, point, epsilon, bounds=None):
-    # Odd/even intersections classify concave closed components, including cup
-    # interiors. A fixed oblique ray avoids axis-aligned edges in authored props.
-    # BVH coordinates are float32. Sub-ULP advances can hit the same triangle
-    # indefinitely, especially at the canopy's 3 m elevation.
-    epsilon = max(epsilon, 1e-5)
-    if bounds is not None:
-        # Dense forest crowns can intersect many independent closed leaves.
-        # Bound the walk by the ray's exit from the actual component AABB,
-        # not an arbitrary intersection count or an unbounded retry loop.
-        lo, hi = bounds
-        exit_distance = min((float(hi[a])-point[a])/RAY[a] for a in range(3))
-        if exit_distance < 0: return False
-        epsilon = max(epsilon, max(abs(v) for v in point)*2e-6)
-        travelled = 0.0
-        count = 0
-        seen = set()
-        stalled = 0
-        while travelled <= exit_distance + epsilon:
-            p = point + RAY*travelled
-            hit, _, tri, distance = bvh.ray_cast(p, RAY, exit_distance-travelled+epsilon)
-            if hit is None: return count % 2 == 1
-            if tri not in seen:
-                count += 1; seen.add(tri); stalled = 0
-            else:
-                # A straight ray cannot cross one planar triangle twice.
-                # Grazing float32 hits occasionally return that triangle again;
-                # do not count it twice, and advance monotonically from the
-                # original origin rather than accumulating rounded hit vectors.
-                stalled += 1
-            step = epsilon * (2 ** min(stalled, 8))
-            hit_distance = max(0.0, (hit-point).dot(RAY))
-            travelled = max(travelled+step, hit_distance+step)
-            if len(seen) > 65536:
-                raise ValueError('Bounded dense-mesh parity exceeded 65536 distinct triangles')
-        return count % 2 == 1
-    p = point.copy()
-    count = 0
-    for _ in range(256):
-        hit, _, _, _ = bvh.ray_cast(p, RAY)
-        if hit is None: return count % 2 == 1
-        count += 1
-        p = hit + RAY*epsilon
-    raise ValueError('Ray parity failed to escape mesh')
-
-
-def barycentric(p, a, b, c):
-    u, v, w = b-a, c-a, p-a
-    uu, uv, vv, wu, wv = u.dot(u), u.dot(v), v.dot(v), w.dot(u), w.dot(v)
-    det = uu*vv-uv*uv
-    if abs(det) < 1e-24: return (1, 0, 0)
-    y, z = (vv*wu-uv*wv)/det, (uu*wv-uv*wu)/det
-    return (1-y-z, y, z)
+from mesh_sampling import oct16, inside, barycentric, atomic_write
 
 
 def image_input(socket):
@@ -119,15 +65,8 @@ def image_input(socket):
     return None
 
 
-def texel(texture, uv):
-    th,tw,_=texture.shape
-    tx,ty=(uv.x%1)*tw-.5,(uv.y%1)*th-.5
-    ix,iy=math.floor(tx),math.floor(ty);fx,fy=tx-ix,ty-iy
-    return (texture[iy%th,ix%tw]*(1-fx)*(1-fy)+texture[iy%th,(ix+1)%tw]*fx*(1-fy)
-            +texture[(iy+1)%th,ix%tw]*(1-fx)*fy+texture[(iy+1)%th,(ix+1)%tw]*fx*fy)
 
-
-def bake(name, h, band_cells=3):
+def bake(name, h, band_cells=3, solid_rule='even-odd'):
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete(use_global=False)
     bpy.ops.import_scene.gltf(filepath=str(OUT/(name+'.glb')))
@@ -174,18 +113,30 @@ def bake(name, h, band_cells=3):
                                   'roughness':p.inputs['Roughness'].default_value,
                                   'metallic':p.inputs['Metallic'].default_value})
                 material_ids[mat.name]=len(materials)
-                if texture is not None: textures[len(materials)]=texture
+                if texture is not None: textures[len(materials)]=TextureMipChain(texture)
                 rough=image_input(p.inputs['Roughness'])
                 normal=image_input(p.inputs['Normal'])
-                if rough is not None: roughness_maps[len(materials)]=rough
-                if normal is not None: normal_maps[len(materials)]=normal
+                if rough is not None: roughness_maps[len(materials)]=TextureMipChain(rough)
+                if normal is not None: normal_maps[len(materials)]=TextureMipChain(normal,normal=True)
             ids.append(material_ids[mat.name])
+        uvs=[tuple(mesh.uv_layers.active.data[i].uv.copy() for i in t.loops) for t in mesh.loop_triangles] if mesh.uv_layers.active else None
+        texture_lods=[]
+        if uvs:
+            for indices,uv,material in zip(triangles,uvs,ids):
+                if not any(material in maps for maps in (textures,roughness_maps,normal_maps)):
+                    texture_lods.append((0.,0.,0.));continue
+                metric=uv_cell_metric([vertices[i] for i in indices],uv,h)
+                texture_lods.append(tuple(maps[material].lod(metric) if material in maps else 0.
+                                          for maps in (textures,roughness_maps,normal_maps)))
         bounds=np.array([tuple(v) for v in vertices])
         parts.append({'bvh':BVHTree.FromPolygons(vertices,triangles,all_triangles=True),
                       'vertices':vertices,'triangles':triangles,'normals':normals,'ids':ids,
-                      'uvs':[tuple(mesh.uv_layers.active.data[i].uv.copy() for i in t.loops) for t in mesh.loop_triangles] if mesh.uv_layers.active else None,
+                      'uvs':uvs,'texture_lods':texture_lods,
                       'lo':bounds.min(axis=0),'hi':bounds.max(axis=0)})
         evaluated.to_mesh_clear()
+    if solid_rule == 'component-union':
+        parts=[component for part in parts for component in split_part(part)]
+        print(f'{name}: component-union uses {len(parts)} closed connected parts',flush=True)
     band=band_cells*h
     lo=np.min([p['lo'] for p in parts],axis=0)
     hi=np.max([p['hi'] for p in parts],axis=0)
@@ -210,7 +161,7 @@ def bake(name, h, band_cells=3):
                     c=Vector(origin+(np.array([x,y,z])*B+B/2)*h)
                     nearest,_,_,d=part['bvh'].find_nearest(c)
                     if nearest is None: continue
-                    if d > math.sqrt(3)*B*h/2+band and not inside(part['bvh'],c,h*1e-5,(part['lo'],part['hi']) if args.collection=='forest-waterfall' else None): continue
+                    if d > math.sqrt(3)*B*h/2+band and not inside(part['bvh'],c,h*1e-5,(part['lo'],part['hi'])): continue
                     candidates.setdefault((x*B,y*B,z*B),[]).append(pi)
     data=bytearray()
     # Cache integer lattice coordinates, including shared brick faces. The exact
@@ -233,11 +184,13 @@ def bake(name, h, band_cells=3):
                             if any(p[a]<part['lo'][a]-band or p[a]>part['hi'][a]+band for a in range(3)): continue
                             nearest,normal,tri,d=part['bvh'].find_nearest(p)
                             if nearest is None: continue
-                            sign=-1 if inside(part['bvh'],p,h*1e-5,(part['lo'],part['hi']) if args.collection=='forest-waterfall' else None) else 1
+                            sign=-1 if inside(part['bvh'],p,h*1e-5,(part['lo'],part['hi'])) else 1
                             signed=sign*d
                             if signed >= best: continue
                             best=signed
-                            gradient=(p-nearest)*(sign/d) if d > 1e-9 else normal
+                            gradient=signed_outward_gradient(p,nearest,d,sign,normal,
+                                lambda q: inside(part['bvh'],q,h*1e-5,(part['lo'],part['hi'])),
+                                max(h*1e-3,1e-7))
                             verts=[part['vertices'][i] for i in part['triangles'][tri]]
                             weights=barycentric(nearest,*verts)
                             shade=sum((n*w for n,w in zip(part['normals'][tri],weights)),Vector()).normalized()
@@ -246,8 +199,9 @@ def bake(name, h, band_cells=3):
                             if part['uvs'] and (material in textures or material in roughness_maps or material in normal_maps):
                                 uv=sum((uv*w for uv,w in zip(part['uvs'][tri],weights)),Vector((0,0)))
                                 source=materials[material-1]
-                                rgb=texel(textures[material],uv) if material in textures else np.array(source['baseColorLinear'])
-                                rough=float(texel(roughness_maps[material],uv)[0]) if material in roughness_maps else source['roughness']
+                                color_lod,rough_lod,normal_lod=part['texture_lods'][tri]
+                                rgb=textures[material].sample(uv,color_lod) if material in textures else np.array(source['baseColorLinear'])
+                                rough=float(roughness_maps[material].sample(uv,rough_lod)[0]) if material in roughness_maps else source['roughness']
                                 if material in normal_maps:
                                     uv0,uv1,uv2=part['uvs'][tri];du,dv=uv1-uv0,uv2-uv0
                                     det=du.x*dv.y-du.y*dv.x
@@ -258,7 +212,7 @@ def bake(name, h, band_cells=3):
                                         tangent=(tangent-shade*tangent.dot(shade)).normalized()
                                         cross=shade.cross(tangent)
                                         cross*=1 if cross.dot(bitangent)>=0 else -1
-                                        n=texel(normal_maps[material],uv)*2-1
+                                        n=normal_maps[material].sample(uv,normal_lod)
                                         shade=(tangent*float(n[0])+cross*float(n[1])+shade*float(n[2])).normalized()
                                 # Quantise perceptually; keep the palette bounded while
                                 # retaining spatial wood grain, weave and stone variation.
@@ -275,6 +229,11 @@ def bake(name, h, band_cells=3):
                                                       'baseColorLinear':c.tolist(),'roughness':rq})
                                     variants[key_material]=len(materials)
                                 material=variants[key_material]
+                        # Parity, not source winding, defines a closed solid's
+                        # outward side. Apply after tangent-space normal detail
+                        # so valid detail survives and inward source shells do
+                        # not publish inward lighting normals into the FVX.
+                        shade=outward_shading_normal(shade,gradient)
                         if best < 0: negative+=1
                         cache[key]=struct.pack('<fIII',max(-band,best),oct16(gradient),oct16(shade),material)
                     data.extend(cache[key])
@@ -282,7 +241,7 @@ def bake(name, h, band_cells=3):
     header={'version':1,'units':'metres','upAxis':'Y','asset':name,'source':name+'.glb',
             'origin':origin.tolist(),'dimensions':dims.tolist(),'cellSize':h,'bandWidth':band,
             'brickCount':len(candidates),'brickCells':8,'nodeStrideBytes':16,'materials':materials,
-            'sign':'negative-inside','texturePolicy':'Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained',
+            'sign':'negative-inside','solidRule':solid_rule,'texturePolicy':'Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained',
             'uniqueNodes':len(cache),'insideNodes':negative}
     if name in ('honed-travertine-paver', 'hero-ground-tile'):
         # A proof over the sampled geometry, not an assumption from a material
@@ -301,10 +260,9 @@ def bake(name, h, band_cells=3):
     encoded=json.dumps(header,separators=(',',':')).encode()
     encoded+=b' '*((-len(encoded))%4)
     raw=b'FVX1'+struct.pack('<I',len(encoded))+encoded+data
-    with open(OUT/(name+'.fvx.gz'),'wb') as f:
-        with gzip.GzipFile(filename='',mode='wb',fileobj=f,mtime=0) as gz: gz.write(raw)
+    atomic_write(OUT/(name+'.fvx.gz'),raw,compressed=True)
     METADATA.mkdir(parents=True, exist_ok=True)
-    (METADATA/(name+'-volume.json')).write_text(json.dumps(header,indent=2)+'\n')
+    atomic_write(METADATA/(name+'-volume.json'),(json.dumps(header,indent=2)+'\n').encode())
     print(f'{name}: {len(raw)/1e6:.1f} MB, {len(cache)} unique nodes, {negative} inside',flush=True)
 
 
@@ -315,12 +273,17 @@ presets = [('teak-lounger',.01),('garden-parasol',.01),('insulated-cooler',.01),
                ('limestone-coping',.00625),('limestone-coping-corner',.00625),
                ('ceramic-waterline',.00625),('teak-serving-table',.00625)]
 bands = {}
+solid_rules = {}
 if args.collection != 'pool-party':
     assets = json.loads((OUT/'manifest.json').read_text())['assets']
     presets = [(a['id'], a['cellSize']) for a in assets]
     bands = {a['id']: a.get('bandCells', 3) for a in assets}
+    solid_rules = {a['id']: a.get('solidRule', 'even-odd') for a in assets}
+    if any(rule not in ('even-odd','component-union') for rule in solid_rules.values()):
+        parser.error('Manifest solidRule must be even-odd or component-union')
 if args.asset != 'all' and args.asset not in dict(presets):
     parser.error(f'Unknown asset {args.asset} in {args.collection}')
 for name,h in presets:
     if args.asset in ('all',name): bake(name,args.cell or h,
-        args.band_cells if args.band_cells is not None else bands.get(name,3))
+        args.band_cells if args.band_cells is not None else bands.get(name,3),
+        args.solid_rule or solid_rules.get(name,'even-odd'))

@@ -1631,6 +1631,7 @@ export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwn
   const constants:Record<string,number>={};
   for(const prefix of prefixes){
    constants[`${prefix}FixedWorldGeometry`]=1;if(narrow)constants[`${prefix}FlatWindow`]=1;
+   if(ownership.bulk)constants[`${prefix}BulkSlots`]=1;
    if(runtimeWorldPrefixes.get(descriptor.compute.module)?.has(prefix))continue;
    if(flat)constants[`${prefix}FlatWindow`]=1;
    for(let i=24;i<32;i++)constants[`${prefix}WindowWord${i}`]=seed.tail[at+i]!;

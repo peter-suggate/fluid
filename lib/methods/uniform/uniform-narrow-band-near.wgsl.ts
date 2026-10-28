@@ -1,4 +1,4 @@
-import { UNIFORM_NEAR_SPAN, uniformBlockHeld, uniformNearFrom } from "./uniform-lattice-address";
+import { UNIFORM_NEAR_SPAN, uniformBlockHeld, uniformHeldWord, uniformNearFrom } from "./uniform-lattice-address";
 import { uniformTablePageWord } from "./uniform-window-address";
 
 /** The narrow band's kind-aware clamps, from a home coordinate.
@@ -72,7 +72,7 @@ function rowReads(rows: ArrayLike<number>, home: number, at: readonly number[], 
   let leaving = 0, loose = 0;
   for (let a = 0; a < 3; a++) {
     const low = at[a]! << span.bits; step[a] = p[a]! > low + span.last ? 1 : p[a]! < low ? -1 : 0;
-    if (step[a] !== 0) { leaving++; if (rows[27 * home + 13 + step[a]! * 3 ** a] !== 0xffffffff) loose++; }
+    if (step[a] !== 0) { leaving++; if (!uniformHeldWord(rows[27 * home + 13 + step[a]! * 3 ** a]!)) loose++; }
   }
   return leaving + (loose >= 2 ? 1 : 0);
 }

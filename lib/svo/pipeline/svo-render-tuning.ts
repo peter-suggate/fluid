@@ -296,6 +296,7 @@ export interface SvoRenderTuning {
   readonly surfaceMeshPreserveCloseNormals: boolean;
   readonly primaryLeafVisits: number;
   readonly coneStepBudget: number;
+  /** Total direct emitter samples; area lights may consume two. Default 8. */
   readonly maximumShadedLights: number;
   readonly stableAreaLightSamples: number;
   /** Legacy serialized alias; normalized to the same sample budget. */
@@ -313,6 +314,8 @@ export interface SvoRenderTuning {
   readonly aoStrength: number;
   /** Sparse world-opacity AO for the raster backend; zero keeps contact AO only. */
   readonly rasterCoarseAoStrength: number;
+  /** Square depth-map width; changes only shadow resources, never simulation. */
+  readonly rasterShadowResolution: 2048 | 4096;
   /** Minimum screen-space AO budget, in four-tap steps; important receivers receive up to 36. */
   readonly rasterFarAoTaps: number;
   /**
@@ -442,6 +445,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   aoRadiusScale: 1,
   aoStrength: 1,
   rasterCoarseAoStrength: 0.6,
+  rasterShadowResolution: 2048,
   rasterFarAoTaps: 0,
   rasterStillViewReuse: false,
   aoConeAperture: 0.62,
@@ -597,7 +601,7 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     || value.coneRadianceReconstruction === "full-res-relight"
     ? value.coneRadianceReconstruction : "full-res-relight";
   return {
-    resolutionScale: bounded(value.resolutionScale, 0.35, 1),
+    resolutionScale: bounded(value.resolutionScale, 0.35, 2),
     environmentBrickRefinementLevels: integer(
       value.environmentBrickRefinementLevels,
       0,
@@ -648,7 +652,7 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     surfaceMeshPreserveCloseNormals: value.surfaceMeshPreserveCloseNormals ?? true,
     primaryLeafVisits: integer(value.primaryLeafVisits, 1, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT),
     coneStepBudget: integer(value.coneStepBudget, 1, 48),
-    maximumShadedLights: integer(value.maximumShadedLights, 1, 8),
+    maximumShadedLights: integer(value.maximumShadedLights, 1, 32),
     stableAreaLightSamples: areaSamples,
     movingAreaLightSamples: areaSamples,
     stableAoSamples: aoSamples,
@@ -664,6 +668,7 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     rasterCoarseAoStrength: bounded(value.rasterCoarseAoStrength ?? DEFAULT_SVO_RENDER_TUNING.rasterCoarseAoStrength, 0, 1),
     rasterFarAoTaps: Math.round(bounded(value.rasterFarAoTaps ?? DEFAULT_SVO_RENDER_TUNING.rasterFarAoTaps, 0, 36) / 4) * 4,
     rasterStillViewReuse: value.rasterStillViewReuse === true,
+    rasterShadowResolution: value.rasterShadowResolution === 4096 ? 4096 : 2048,
     aoConeAperture: bounded(value.aoConeAperture, 0.1, 1.4),
     shadowConeAperture: bounded(value.shadowConeAperture, 0.01, 0.25),
     giBounceStrength: bounded(value.giBounceStrength ?? DEFAULT_SVO_RENDER_TUNING.giBounceStrength, 0, 4),

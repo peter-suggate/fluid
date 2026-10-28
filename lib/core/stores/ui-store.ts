@@ -1,6 +1,7 @@
 import type { VisualLayerState } from "../visual-layers";
 import { uiFeatureQuery } from "../../features/persistence";
 import { surfaceDisplayQuery } from "../../features/surface-display/definition";
+import type { WaterReflectionMode } from "../../features/surface-display/definition";
 import { resolveSvoPipelineComposition } from "../../svo/pipeline/composition";
 import { create } from "zustand";
 import type { EditorAction } from "../editor-action";
@@ -248,8 +249,12 @@ interface UIStore extends FineSurfaceState {
   /** Scrubber position along a stage lens's phases. Ignored by every other mode. */
   /** Selected tank's liquid presentation; never changes simulation state. */
   fluidSurfaceRenderMode: FluidSurfaceRenderMode;
+  waterReflectionMode: WaterReflectionMode;
+  waterWorldRefractionEnabled: boolean;
   /** The liquid's own particles, for a method that keeps them; presentation only. */
   fluidParticleDisplay: FluidParticleDisplay;
+  svoSurfaceTexturesEnabled: boolean;
+  svoNativeAmbientOcclusionEnabled: boolean;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   /** Full-rate visibility refinement at reduced-cone geometry silhouettes. */
@@ -316,9 +321,13 @@ interface UIStore extends FineSurfaceState {
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
   setFluidSurfaceRenderMode: (mode: FluidSurfaceRenderMode) => void;
+  setWaterReflectionMode: (mode: WaterReflectionMode) => void;
+  setWaterWorldRefractionEnabled: (enabled: boolean) => void;
   setFluidParticleDisplay: (display: FluidParticleDisplay) => void;
   /** Merge into the Fine display's sliders. */
   setFineSurface: (patch: Partial<FineSurfaceState>) => void;
+  setSvoSurfaceTexturesEnabled: (enabled: boolean) => void;
+  setSvoNativeAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
@@ -511,6 +520,11 @@ export const createUIStore = () => create<UIStore>((set) => ({
     surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), fluidSurfaceRenderMode });
     return { fluidSurfaceRenderMode };
   }),
+  setWaterReflectionMode: (waterReflectionMode) => set(state => {
+    surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), waterReflectionMode });
+    return { waterReflectionMode };
+  }),
+  setWaterWorldRefractionEnabled: (waterWorldRefractionEnabled) => set({ waterWorldRefractionEnabled }),
   setFluidParticleDisplay: (fluidParticleDisplay) => set(state => {
     surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), fluidParticleDisplay });
     return { fluidParticleDisplay };
@@ -520,6 +534,8 @@ export const createUIStore = () => create<UIStore>((set) => ({
     surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), ...patch });
     return patch;
   }),
+  setSvoSurfaceTexturesEnabled: (svoSurfaceTexturesEnabled) => set({ svoSurfaceTexturesEnabled }),
+  setSvoNativeAmbientOcclusionEnabled: (svoNativeAmbientOcclusionEnabled) => set({ svoNativeAmbientOcclusionEnabled }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),
@@ -616,6 +632,7 @@ export const useUIStore = createUIStore();
 function surfaceDisplayState(state: UIStore): SurfaceDisplayState {
   return {
     fluidSurfaceRenderMode: state.fluidSurfaceRenderMode, fluidParticleDisplay: state.fluidParticleDisplay,
+    waterReflectionMode: state.waterReflectionMode, waterWorldRefractionEnabled: state.waterWorldRefractionEnabled,
     fineSurfaceGreed: state.fineSurfaceGreed, fineSurfaceSmoothing: state.fineSurfaceSmoothing,
     fineSurfaceThickness: state.fineSurfaceThickness, fineSpraySize: state.fineSpraySize, fineSprayOpacity: state.fineSprayOpacity,
     fineSurfaceMerge: state.fineSurfaceMerge,

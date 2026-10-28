@@ -1,0 +1,83 @@
+{
+  "feature": "Optional shared raster shadow resolution",
+  "default": 2048,
+  "choices": [
+    2048,
+    4096
+  ],
+  "scope": "Presentation-only depth attachment and shadow/visibility cache invalidation; native voxel casters and fluid unchanged",
+  "sampling": "Actual textureDimensions; caster terrain projection and redraw padding use matching packed uniform width",
+  "gpu_validation": {
+    "passed": 6,
+    "failed": 0,
+    "log": "artifacts/water-scenes/shadow-resolution-gpu.log",
+    "thin_blocker": {
+      "width_m": 0.04,
+      "receiver_gap_m": 0.08,
+      "half_extent_m": 64,
+      "visibility2048": 1,
+      "visibility4096": 0.16062681376934052
+    },
+    "tilted_planes": "No false self-shadowing at either resolution for sun and spot fixtures",
+    "lifetime": "GPU2048\u21924096\u21922048 preserves screen targets, native draw arguments, scene params; replaces depth attachment and bind groups",
+    "flags": "GPU checks resolution bits do not enable visibility when disabled"
+  },
+  "cpu_validation": {
+    "passed": 7,
+    "skipped_gpu": 5,
+    "failed": 0,
+    "log": "artifacts/water-scenes/shadow-resolution-unit.log"
+  },
+  "typecheck": "pass",
+  "capture_flags": [
+    "--shadow-resolution=4096",
+    "--shadow-resolution-comparison"
+  ],
+  "capture_invariance": "Checks solver and scene pipeline identities, completed presentation time and solver completed time after each comparison draw; records requested and applied resolution",
+  "limitations": [
+    "4096 consumes four times the shadow depth memory; no default quality change",
+    "A shadow map remains finite resolution; higher resolution does not resolve environment occlusion or all branch contrast loss",
+    "v38 improvement is modest. Later sparse blocker-search correction is independently GPU verified; full scene impact pending combined capture."
+  ],
+  "sha256": {
+    "lib/svo/features/lighting-visibility/svo-raster-ao.ts": "3bbc148ee38a55cc2a85456d187cd055590d71c77d1b2076bd6960ad2d6a6081",
+    "lib/svo/pipeline/svo-render-tuning.ts": "2452a514e9e6b43747b513b02b19df5892bab6477f43c885d69c77eacef7d003",
+    "lib/svo/pipeline/webgpu-svo-dry-scene.ts": "e7ebea7177a1e0da813bac0df11ce16819f74038a8566c54e9a7c8b990c6c7c9",
+    "tests/raster-shadow-contact.test.ts": "fb2c77a05f538aee12ac45215b52a7d3f390dea26aaa3643fcb78c192b674fa8",
+    "tests/raster-shadow-resolution.test.ts": "5d2bea08cb95ab91f64d0fb30ccf19aa8dedcd8751546e04623eaaad14f532b2"
+  },
+  "additional_checks": [
+    "git diff --check passes",
+    "All rasterLighting.control.w consumers mask visibility bits; resolution cannot enable disabled visibility",
+    "Bank and native-sun diagnostic reports record actual shadow resolution; bank texel lookup is resolution independent"
+  ],
+  "actualCaptureV38": {
+    "evaluation": "artifacts/water-scenes/alpine-lake-sunrise/shadow-resolution-evaluation-v38.json",
+    "crops": "artifacts/water-scenes/alpine-lake-sunrise/shadow-resolution-v38-crops.png",
+    "firOwnerSamples": {
+      "count": 2097,
+      "displayLumaMean2048": 66.950492799237,
+      "displayLumaMean4096": 66.4547440152599,
+      "meanDelta": -0.49574878397711025,
+      "meanAbsoluteDelta": 3.7167381974248928,
+      "p95AbsoluteDelta": 14.22743999999999,
+      "p99AbsoluteDelta": 27.37026399999999,
+      "fractionChangedOver2": 0.4492131616595136,
+      "fractionChangedOver8": 0.13733905579399142,
+      "std2048": 30.68585988700858,
+      "std4096": 31.41004422200638,
+      "q10q90Range2048": 81.38628,
+      "q10q90Range4096": 83.97476000000002
+    },
+    "repeatability": {
+      "baseline4096VsComparison4096FirSamplesMeanAbsoluteRgbMax": 0.0,
+      "maximumRgbDifference": 0.0,
+      "changedSampleCount": 0,
+      "fullImageMeanAbsoluteRgbDifference": 0.0
+    },
+    "assessment": "Modest but visible improvement in branch-layer separation and local edge contrast, especially right firs; does not produce a large change in overall crown volume. No new shadow acne observed in examined crop.",
+    "timingCaveat": "Timing contaminated by overlapping unit suite. No claim4096 is faster; reported medians not controlled FPS.",
+    "frozenState": "Capture asserts solver/pipeline identity and completedTime .5s unchanged"
+  },
+  "followupCorrection": "docs/validation/raster-shadow-footprint.json"
+}

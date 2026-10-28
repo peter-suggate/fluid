@@ -42,6 +42,8 @@ export interface EffectiveRendererConditions {
   materialsSupported?: boolean;
   lightingSupported?: boolean;
   svoEncoded: boolean;
+  /** An explicitly selected optional pass must be ready even when the base scene draws. */
+  requestedFeature?: { readonly state: "pending" | "failed" | "ready"; readonly detail?: string };
   contractFailure?: string;
   silhouetteRefinement?: SvoSilhouetteRefinementStatus;
   lightingVisibility?: SvoLightingVisibilityStatus;
@@ -85,6 +87,12 @@ export function resolveEffectiveRendererStatus(
       : { state: "pending", failureReason: "missing-source" });
     return status({ state: "failed", failureReason: "frame-rejected", detail: conditions.contractFailure });
   }
+  if (conditions.requestedFeature?.state === "pending") return status({
+    state: "pending", failureReason: "pipeline-compiling", detail: conditions.requestedFeature.detail,
+  });
+  if (conditions.requestedFeature?.state === "failed") return status({
+    state: "failed", failureReason: "pipeline-compile-failure", detail: conditions.requestedFeature.detail,
+  });
   if (!conditions.svoEncoded && conditions.pipelineCompiling) return status({
     state: "pending", failureReason: "pipeline-compiling",
     ...(conditions.pipelinePending ? { detail: conditions.pipelinePending } : {}),

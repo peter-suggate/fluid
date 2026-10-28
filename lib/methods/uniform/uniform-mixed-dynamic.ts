@@ -805,12 +805,12 @@ fn umObstacleAt(q:vec3i)->bool{
 }
 ${uniformSolidRefinementWGSL(this.solidGeometry.count)}
 // Tiles between tile t and the closed wall of its page across direction k
-// (-x,-y,-z,+x,+y,+z): the SOLID page there. NO_WALL where that page is
-// stored or AIR: past every tile scan.
+// (-x,-y,-z,+x,+y,+z): the SOLID or BULK16 page there. NO_WALL where that
+// page is stored or AIR: past every tile scan.
 const NO_WALL:u32=0xffffu;
 fn umWallBeyond(t:u32,k:u32)->u32{
  let a=k%3u;let high=k>=3u;var d=vec3i(0);d[a]=select(-1,1,high);
- if(umBlockNeighbour(t>>9u,d)!=UM_SOLID_WORD){return NO_WALL;}
+ if(umBlockNeighbour(t>>9u,d)<UM_HELD_WORD){return NO_WALL;}
  let l=umLocalTile(t);return select(l[a],7u-l[a],high);
 }
 // Boundary rules (UniformMixedDynamicPolicy.boundaryTravel), from the tile's
@@ -878,7 +878,7 @@ fn umDepthSample(tile:u32,i:u32)->vec2u{
  var low=vec3u(0u);var high=vec3u(0u);
  for(var k=0u;k<8u;k++){
   let bit=umCorner(k,2u);let cell=4*v+vec3i(bit)-1;
-  let kind=umCellKind(cell);if(kind==UM_SOLID){continue;}
+  let kind=umCellKind(cell);if(kind>=UM_SOLID){continue;}
   if(kind!=UM_AIR){let t=umTileKey(cell>>vec3u(2u));if(!umCensusCellOpen(umCensusOpenCells(t),cell&vec3i(3))){continue;}}
   high+=bit;low+=vec3u(1u)-bit;
  }
@@ -1814,6 +1814,15 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
  /** encode's launches in order, with their fixed grids (y 0: one argument).
   * when: 0 always, 1 a seeded census, 2 one under an activity budget, 3 solids or bodies. */
  private launches?:readonly {readonly pipeline:GPUComputePipeline;readonly when:0|1|2|3;readonly x:number;readonly y:number;readonly visit?:boolean;readonly work?:"fine"|"coarse";readonly per?:number}[];
+ /** The certificate's seed records, for a page that a commit claims back
+  * from BULK16 (uniform-bulk-page-transfer): its records must be deep
+  * water's before pageMark reads them. census words from offset, four a
+  * region and stage (stage-major over pages regions), then the radius
+  * word; the policy's word 20 holds the staged bit (32768). regions: the
+  * host region table pageSeed's static h tiles read (umRegionsAt). */
+ get residencyRecords():{readonly census:GPUBuffer;readonly offset:number;readonly pages:number;readonly policy:GPUBuffer;readonly regions:{readonly buffer:GPUBuffer;readonly offset:number}}{
+  return {census:this.work,offset:this.localOffset,pages:this.pages,policy:this.params,regions:{buffer:this.joinTiles,offset:this.joinWords+this.planeWords}};
+ }
  /** encodeResidency's launches: pageMark's fixed grid over the pages, then pageCompact's one workgroup. */
  private marks?:{readonly mark:GPUComputePipeline;readonly x:number;readonly compact:GPUComputePipeline};
  private static readonly RESIDENCY_PASS:GPUComputePassDescriptor={label:"Uniform dynamic ownership residency"};

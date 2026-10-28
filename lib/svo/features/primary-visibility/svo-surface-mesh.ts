@@ -1657,7 +1657,7 @@ fn meshFilteredNormal(face:vec3f,baked:vec3f,level:u32,agreement:f32,cellPixels:
 ${(adaptiveNormals ? [false,true] : [false]).map(far => /* wgsl */ `
 @fragment fn ${far ? "surfaceMeshFarFragment" : "surfaceMeshFragment"}(input:MeshVertexOut)->MeshSurfaceOut{
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);let t=length(input.world-camera[0]);
-  var normal=normalize(input.normal);var receiverNormal=input.geometricNormal;
+  var normal=normalize(input.normal);let receiverNormal=input.geometricNormal;
 ${far ? "" : `  var boundaryNormal=vec3f(0);
   if(meshDcEnabled()&&meshHeader[${W.hostSolidBoundary}u]!=0u){
     // Evaluate the continuous source field once per visible fragment.
@@ -1668,7 +1668,7 @@ ${far ? "" : `  var boundaryNormal=vec3f(0);
   if(meshDcEnabled()&&dot(boundaryNormal,boundaryNormal)==0.0){
     boundaryNormal=meshAuthoredSurfaceNormal(input.world,sceneIdentityMaterial(input.identity),input.geometricNormal);
   }
-  if(dot(boundaryNormal,boundaryNormal)>1e-12){normal=normalize(boundaryNormal);receiverNormal=normal;}`}
+  if(dot(boundaryNormal,boundaryNormal)>1e-12){normal=normalize(boundaryNormal);}`}
 ${far ? "" : `  if(!meshContoursEnabled()&&!meshDcEnabled()&&dry.meshFilter.x>0.5&&dry.meshFilterNormals.x>0.5&&dry.meshFilter.y>0.0){
     // Filtered detail shades the baked normal: a coarse quad carries its cells'
     // mean, an exact quad reads the voxel just behind its face. The surface
@@ -1690,9 +1690,9 @@ ${far ? "" : `  if(!meshContoursEnabled()&&!meshDcEnabled()&&dry.meshFilter.x>0.
   // Tag reconstructed receivers for the shared lighting encoder. Their implicit
   // no-owner slot carries the geometric normal through both deferred passes.
   let hit=DryHit(t,shading.normal,sceneIdentityMaterial(input.identity),DRY_OWNER_NONE,shading.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u,0u,select(0u,1u,meshDcEnabled()||meshContoursEnabled())));
-  // Voxel quads retain their exact geometric face for ray bias. A sampled
-  // implicit surface instead uses its own gradient: a tessellation normal's
-  // hemisphere gate would bring flat triangle shading back at the terminator.
+  // Both camera and shadow depth rasterize these triangles. Their actual
+  // plane must reach receiver-plane correction unchanged; the continuous
+  // boundary gradient only affects optical shading, not the shadow plane.
   var out=dryRasterPrimaryFacedSurface(hit,receiverNormal,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
   // Raster material bits 27..30 carry level+1 for the read-only LOD overlay.
   // Production mesh shading masks these bits in drySplitIdentityAt.

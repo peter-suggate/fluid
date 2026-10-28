@@ -1,3 +1,4 @@
+import { uniformHeldWord } from "./uniform-lattice-address";
 import { uniformBlockWordPage, uniformTablePageWord } from "./uniform-window-address";
 import { UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS } from "./webgpu-uniform-velocity-extrapolation.wgsl";
 
@@ -165,7 +166,7 @@ export function uniformExtrapolationSweep(pool: UniformExtrapolationPool, source
 }
 /** closedFace: the 4h cell's +face on the component is a closed wall. */
 export function uniformExtrapolationClosedFace(pool: UniformExtrapolationPool, block: number, local: Vec3, component: number, edge: number): boolean {
-  return edge === 8 && local[component] === 7 && pool.rows[27 * block + 13 + 3 ** component] === 0xffffffff;
+  return edge === 8 && local[component] === 7 && uniformHeldWord(pool.rows[27 * block + 13 + 3 ** component]!);
 }
 /** mixedProlongUnknownVelocity: `up` is `down` with its unknown values filled from the complete coarser level. */
 export function uniformExtrapolationProlong(pool: UniformExtrapolationPool, coarse: UniformExtrapolationLevel, down: UniformExtrapolationLevel, up: UniformExtrapolationLevel, scale: Vec3): void {

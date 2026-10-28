@@ -115,7 +115,7 @@ fn ${prefix}WorldSolid(q:vec3i)->bool{
  * lookup is the same rule as uniformWindowWorldWGSL's classification but
  * branch free over the derived header words (24..31): it is inlined at
  * hundreds of call sites per kernel. */
-export function uniformWindowAddressWGSL(buffer: string, table: string, blocks: string, prefix = "um", entries = UNIFORM_DIRECTORY_WORDS, bulk = false): string {
+export function uniformWindowAddressWGSL(buffer: string, table: string, blocks: string, prefix = "um", entries = UNIFORM_DIRECTORY_WORDS): string {
   const w = (i: number) => {
     const raw = `${buffer}[${table}+${entries + i}u]`;
     return i >= 24 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedWorldGeometry)` : i < 3 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedFrame)` : raw;
@@ -132,6 +132,10 @@ override ${prefix}FixedFrame:bool=false;
 // fixed frame whose world box lies in lattice pages -1..62): the lookup is
 // its one read, AIR off it, the code the 64-page table compiled to.
 override ${prefix}FlatWindow:bool=false;
+// A solver whose ownership binds the BULK16 slot store (bulkTier "16h"):
+// only there can a tagged page word exist (uniformDetailPipeline sets it).
+override ${prefix}BulkSlots:bool=false;
+fn ${prefix}BulkSlotsOn()->bool{return ${prefix}BulkSlots;}
 ${Array.from({length:8},(_,i)=>`override ${prefix}WindowWord${24+i}:u32=0u;`).join("\n")}
 ${Array.from({length:3},(_,i)=>`override ${prefix}WindowWord${i}:u32=0u;`).join("\n")}
 fn ${prefix}FramePage()->vec3i{return bitcast<vec3i>(${v(0)});}
@@ -144,25 +148,36 @@ fn ${prefix}WallLow()->vec3i{let low=${prefix}WorldLow();return max(select(32*(l
 fn ${prefix}WorldLow()->vec3i{return bitcast<vec3i>(${v(24)});}
 fn ${prefix}WorldHigh()->vec3i{return bitcast<vec3i>(${v(27)});}
 fn ${prefix}WorldSolid(world:vec3i)->bool{return any(world<${prefix}WorldLow())|any(world>=${prefix}WorldHigh());}
-fn ${prefix}PageWord(page:vec3i)->u32{
+// The directory's stored word of a lattice page (no keep, no world box).
+fn ${prefix}PageTableWord(page:vec3i)->u32{
  let world=page+${prefix}FramePage();let f=bitcast<vec3u>(page+vec3i(1));
  // Lattice pages -1..62 read the flat window, one read; the rest the top
  // word, then the child word it names.
- var raw:u32;
  let inFlat=all(f<vec3u(${UNIFORM_DIRECTORY_FLAT_EDGE}u));
- if(${prefix}FlatWindow||inFlat){let g=min(f,vec3u(${UNIFORM_DIRECTORY_FLAT_EDGE - 1}u));raw=select(0u,${buffer}[${table}+${UNIFORM_DIRECTORY_TOP_WORDS + UNIFORM_DIRECTORY_CHILD_WORDS}u+(g.x|(g.y<<6u)|(g.z<<12u))],inFlat);}
- else{
-  let e=bitcast<vec3u>(world>>vec3u(2u))&vec3u(63u);let l=bitcast<vec3u>(world)&vec3u(3u);
-  raw=${buffer}[${table}+${UNIFORM_DIRECTORY_TOP_WORDS}u+64u*min(${buffer}[${table}+(e.x|(e.y<<6u)|(e.z<<12u))],${UNIFORM_SUPER_BLOCK_SLOTS - 1}u)+(l.x|(l.y<<2u)|(l.z<<4u))];
- }
+ if(${prefix}FlatWindow||inFlat){let g=min(f,vec3u(${UNIFORM_DIRECTORY_FLAT_EDGE - 1}u));return select(0u,${buffer}[${table}+${UNIFORM_DIRECTORY_TOP_WORDS + UNIFORM_DIRECTORY_CHILD_WORDS}u+(g.x|(g.y<<6u)|(g.z<<12u))],inFlat);}
+ let e=bitcast<vec3u>(world>>vec3u(2u))&vec3u(63u);let l=bitcast<vec3u>(world)&vec3u(3u);
+ return ${buffer}[${table}+${UNIFORM_DIRECTORY_TOP_WORDS}u+64u*min(${buffer}[${table}+(e.x|(e.y<<6u)|(e.z<<12u))],${UNIFORM_SUPER_BLOCK_SLOTS - 1}u)+(l.x|(l.y<<2u)|(l.z<<4u))];
+}
+fn ${prefix}PageWord(page:vec3i)->u32{
+ let world=page+${prefix}FramePage();let raw=${prefix}PageTableWord(page);
  let keep=all(bitcast<vec3u>(page)<=vec3u(${w(30)}))&(raw!=${w(31)});
  // A kept word is a block or AIR wherever the host's SOLID seed reads as AIR
  // (word 31 all ones): clamped below the SOLID sentinel there, a SOLID test
  // of a fixed geometry folds to the world-box compare and drops its load.
- // Tagged BULK16 slots are directory identities, never block indices.
- let bulk=${bulk?"(raw>>30u)==2u&&(raw&0x3fffffffu)!=0u":"false"};
- let word=select(raw,min(raw,${blocks}-2u),${prefix}SolidIsBox()&&!bulk);
+ // A tagged BULK16 word (0x80000000 | slot) is the only one above the
+ // blocks there: with the slot store (BulkSlots) the clamp maps it to
+ // blocks-1, which no block holds (umBlockStored). The proof that a kept
+ // word is below the SOLID sentinel stands, and the kind needs no tag
+ // decode (umBulkWord). Its slot is PageRawWord's.
+ let word=select(raw,min(raw,select(${blocks}-2u,${blocks}-1u,${prefix}BulkSlots)),${prefix}SolidIsBox());
  return select(select(0u,word,keep),0xffffffffu,${prefix}WorldSolid(world));
+}
+// The raw word: a BULK16 page keeps its tag, for the readers that need its
+// slot (the pressure arena's).
+fn ${prefix}PageRawWord(page:vec3i)->u32{
+ let world=page+${prefix}FramePage();let raw=${prefix}PageTableWord(page);
+ let keep=all(bitcast<vec3u>(page)<=vec3u(${w(30)}))&(raw!=${w(31)});
+ return select(select(0u,raw,keep),0xffffffffu,${prefix}WorldSolid(world));
 }
 // The SOLID pages are exactly those outside the world box: a fixed geometry
 // whose host SOLID seed reads as AIR (word 31 all ones).

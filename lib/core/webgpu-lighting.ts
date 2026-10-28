@@ -70,7 +70,7 @@ export interface WaterOpticsAuthoring {
   readonly scatter?: LinearRgb;
   readonly indexOfRefraction?: number;
   readonly fresnelF0?: number;
-  /** Perceptual GGX roughness for the direct surface highlight, independent of mesh pitch. */
+  /** Perceptual roughness for the surface highlight and reflection footprint, independent of mesh pitch. */
   readonly roughness?: number;
   /**
    * How much of the refracted caustic modulation reaches the receiver, in
@@ -163,14 +163,26 @@ export function resolveWaterKeyLight(directional?: {
 }
 
 /**
- * Eight vec4 lanes shared by the water composite and the caustic projection.
+ * Eleven vec4 lanes shared by the water composite and the caustic projection.
  *
  * Lanes 0-3 are the scene's medium and key; lanes 4-5 describe the caustic
  * receiver, which the renderer resamples from `scene.terrain`; lane 6 is the
- * final display grade; lane 7 carries surface roughness. They live in one
+ * final display grade; lane 7 carries surface roughness; lanes 8–10 carry the
+ * resolved environment palette. They live in one
  * buffer because all are per-scene facts consumed by the same compositor.
  */
-export const WATER_SCENE_OPTICS_LANES = 8;
+export interface WaterEnvironmentRadiance {
+  readonly lowerRadianceLinear: LinearRgb;
+  readonly upperRadianceLinear: LinearRgb;
+  readonly accentRadianceLinear: LinearRgb;
+  readonly specularScale: number;
+  readonly accentPower: number;
+  readonly cloudCoverage?: number;
+  readonly keyLightColorLinear?: LinearRgb;
+  readonly keyLightDirection?: LinearRgb;
+  readonly sunIntensity?: number;
+}
+export const WATER_SCENE_OPTICS_LANES = 13;
 export const WATER_SCENE_OPTICS_FLOATS = 4 * WATER_SCENE_OPTICS_LANES;
 export const WATER_SCENE_OPTICS_BYTES = 4 * WATER_SCENE_OPTICS_FLOATS;
 /** Where the pipeline's own receiver description starts, in floats. */
@@ -181,6 +193,7 @@ export function packWaterSceneOptics(
   optics: ResolvedWaterOptics,
   key: ResolvedWaterKeyLight,
   grade: ResolvedDisplayGrade = DISPLAY_GRADE_NEUTRAL,
+  environment?: WaterEnvironmentRadiance,
 ): Float32Array {
   return new Float32Array([
     ...optics.absorption_mInv, optics.indexOfRefraction,
@@ -200,7 +213,12 @@ export function packWaterSceneOptics(
     // gains as authored. Widening the block would have moved every lane offset
     // in two shaders for one float.
     grade.exposure, SCENE_TONE_CURVE_CODES[grade.toneCurve], grade.whiteBalance[0], grade.whiteBalance[2],
-    optics.roughness, 0, 0, 0,
+    optics.roughness, environment?.cloudCoverage ?? 0, 0, 0,
+    ...(environment?.lowerRadianceLinear ?? [0, 0, 0]), environment ? 1 : 0,
+    ...(environment?.upperRadianceLinear ?? [0, 0, 0]), environment?.specularScale ?? 1,
+    ...(environment?.accentRadianceLinear ?? [0, 0, 0]), environment?.accentPower ?? 3,
+    ...(environment?.keyLightDirection ?? [0, 1, 0]), 0,
+    ...(environment?.keyLightColorLinear ?? [0, 0, 0]).map(value => value * (environment?.sunIntensity ?? 0)), 0,
   ]);
 }
 
@@ -226,6 +244,11 @@ struct WaterSceneOptics {
   receiverSize: vec4f,
   displayGrade: vec4f,
   surface: vec4f,
+  environmentLowerEnabled: vec4f,
+  environmentUpperScale: vec4f,
+  environmentAccentPower: vec4f,
+  environmentKeyDirection: vec4f,
+  environmentKeyRadiance: vec4f,
 }
 @group(${group}) @binding(${opticsBinding}) var<uniform> waterScene: WaterSceneOptics;
 @group(${group}) @binding(${receiverBinding}) var waterReceiver: texture_2d<f32>;
@@ -548,6 +571,18 @@ export function smithGgxVisibility(nDotV: number, nDotL: number, roughness: numb
  * incident radiance and the geometric projected cosine. Ambient, rim, and
  * emissive are retained for compatibility with the existing authored scenes.
  */
+/** Orient optical detail in the visible geometric hemisphere. A source normal
+ * behind the viewer cannot define the same visible BSDF as its geometric face;
+ * use that face in this invalid case, preserving every valid optical normal. */
+export function resolveUnifiedShadingNormal(shadingInput: LinearRgb, geometryInput: LinearRgb, viewInput: LinearRgb): [number, number, number] {
+  const view = normalize3(viewInput, [0, 0, 1]);
+  let geometry = normalize3(geometryInput, [0, 1, 0]);
+  if (dot3(geometry, view) < 0) geometry = geometry.map(value => -value) as [number, number, number];
+  let shading = normalize3(shadingInput, geometry);
+  if (dot3(shading, geometry) < 0) shading = shading.map(value => -value) as [number, number, number];
+  return dot3(shading, view) < 0 ? geometry : shading;
+}
+
 export function evaluateUnifiedLighting(
   materialInput: UnifiedLightingMaterial,
   input: UnifiedLightingSample,
@@ -566,8 +601,7 @@ export function evaluateUnifiedLighting(
   const towardViewer = normalize3(input.towardViewer, [0, 0, 1]);
   let geometricNormal = normalize3(input.geometricNormal ?? input.shadingNormal, [0, 1, 0]);
   if (dot3(geometricNormal, towardViewer) < 0) geometricNormal = geometricNormal.map((value) => -value) as [number, number, number];
-  let shadingNormal = normalize3(input.shadingNormal, geometricNormal);
-  if (dot3(shadingNormal, geometricNormal) < 0) shadingNormal = shadingNormal.map((value) => -value) as [number, number, number];
+  const shadingNormal = resolveUnifiedShadingNormal(input.shadingNormal, geometricNormal, towardViewer);
   const towardLight = normalize3(input.towardLight, geometricNormal);
   const halfVector = normalize3([
     towardViewer[0] + towardLight[0],
@@ -687,12 +721,22 @@ fn unifiedLightingInput(normal: vec3f, towardViewer: vec3f, towardLight: vec3f, 
   return unifiedLightingInputWithGeometry(normal, normal, towardViewer, towardLight, lightColor);
 }
 
+// Use one optical frame for direct and environment lobes. Geometry remains
+// authoritative for sidedness; invalid behind-view optical detail falls back.
+fn unifiedShadingNormal(shadingNormal:vec3f,geometricNormal:vec3f,towardViewer:vec3f)->vec3f {
+  let view=unifiedSafeNormal(towardViewer,vec3f(0,0,1));
+  var geometry=unifiedSafeNormal(geometricNormal,vec3f(0,1,0));
+  if(dot(geometry,view)<0.0){geometry=-geometry;}
+  var shading=unifiedSafeNormal(shadingNormal,geometry);
+  if(dot(shading,geometry)<0.0){shading=-shading;}
+  return select(shading,geometry,dot(shading,view)<0.0);
+}
+
 fn unifiedLightingInputWithGeometry(shadingNormal: vec3f, geometricNormal: vec3f, towardViewer: vec3f, towardLight: vec3f, lightColor: vec3f) -> UnifiedLightingInput {
   let view = unifiedSafeNormal(towardViewer, vec3f(0.0, 0.0, 1.0));
   var geometry = unifiedSafeNormal(geometricNormal, vec3f(0.0, 1.0, 0.0));
   if (dot(geometry, view) < 0.0) { geometry = -geometry; }
-  var shading = unifiedSafeNormal(shadingNormal, geometry);
-  if (dot(shading, geometry) < 0.0) { shading = -shading; }
+  let shading = unifiedShadingNormal(shadingNormal, geometry, view);
   return UnifiedLightingInput(shading, geometry, view, unifiedSafeNormal(towardLight, geometry), max(lightColor, vec3f(0.0)));
 }
 
