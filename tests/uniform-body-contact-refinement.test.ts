@@ -7,9 +7,9 @@ import { createUniformSolver, readUniformFields, withUniformDevice } from "./hel
 import { readMixedBuffer } from "./helpers/uniform-mixed-native-fields";
 
 const gpu = { skip: !process.env.WEBGPU_NODE_MODULE };
-test("body contact keeps its wet traction stencil under static coarsening policies, but dry contact retires", gpu, async () => {
+test("static and body contact retain wet or predicted contact detail, but dry contact retires", gpu, async () => {
   await withUniformDevice("body contact refinement policy", async device => {
-    const output = device.createBuffer({ size: 64 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const output = device.createBuffer({ size: 16 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     try {
       const module = device.createShaderModule({ code: `
 @group(0) @binding(0) var<storage,read_write> output:array<u32>;
@@ -21,15 +21,15 @@ fn umKeyStored(t:u32)->bool{return true;}
 fn umTileKind(p:vec3i)->u32{return UM_SOLID;}
 ${uniformSolidRefinementWGSL(0)}
 @compute @workgroup_size(1) fn main(){
- // A static cut tile cannot certify coarse geometry. Toggle only its body
- // contact evidence; keep all liquid, heat and policy inputs independent.
- solidRecord[0].x=0.5;
- for(var c=0u;c<32u;c++){
+ // Whole uniform faces certify; a cut capacity or body contact invalidates
+ // that certificate. Toggle wetness and predicted contact independently.
+ solidRecord[0]=vec4f(1);
+ solidRecord[2]=vec4f(f32(0x999999u));solidRecord[3]=vec4f(f32(0x999999u));
+ for(var c=0u;c<16u;c++){
   let body=(c&1u)!=0u;let wet=(c&2u)!=0u;let band=(c&4u)!=0u;
-  let surface=(c&8u)!=0u;let cold=(c&16u)!=0u;
-  solidRecord[21].z=f32(body);
-  output[2u*c]=u32(umSolidContactActive(0u,wet,band,surface,cold));
-  output[2u*c+1u]=u32(umSolidContactRing(0u,wet,surface,cold));
+  solidRecord[0].x=select(1.0,0.5,(c&8u)!=0u);
+  solidRecord[5].z=f32(body);
+  output[c]=u32(umSolidContactActive(0u,wet,band));
  }
 }` });
       assert.deepEqual((await module.getCompilationInfo()).messages.filter(m => m.type === "error"), []);
@@ -38,16 +38,15 @@ ${uniformSolidRefinementWGSL(0)}
       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
       pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1); pass.end(); device.queue.submit([encoder.finish()]);
       const result = new Uint32Array((await readMixedBuffer(device, output)).buffer);
-      for (let c = 0; c < 32; c++) {
-        const body = !!(c & 1), wet = !!(c & 2), band = !!(c & 4), surface = !!(c & 8), cold = !!(c & 16);
-        assert.equal(result[2 * c], Number(body ? wet || band : !cold && (band || !surface && wet)), `active fixture ${c}`);
-        assert.equal(result[2 * c + 1], Number(body || (!surface || wet) && !cold), `ring fixture ${c}`);
+      for (let c = 0; c < 16; c++) {
+        const body = !!(c & 1), wet = !!(c & 2), band = !!(c & 4), cut = !!(c & 8);
+        assert.equal(result[c], Number((wet || band) && (cut || body)), `active fixture ${c}`);
       }
     } finally { output.destroy(); }
   });
 });
 
-test("a submerged prescribed sphere retains real pressure exchange after motion settles with surface-only solid detail", gpu, async t => {
+test("a submerged prescribed sphere retains real pressure exchange after motion settles with legacy surface-only settings", gpu, async t => {
   await withUniformDevice("submerged rigid contact retention", async device => {
     const scene = createRigidCouplingOracleScene("rigid-hydrostatic");
     scene.voxelDomain.finestCellSize_m = .025;

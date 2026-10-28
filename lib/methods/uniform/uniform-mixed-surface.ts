@@ -797,7 +797,13 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   if(inward*speed>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;travel[axis]=-params.hDt.w*speed/params.hDt[axis];
  }
- if(!contact${this.solid?"||!umOpenAt(interior)":""}){return value;}
+ if(!contact){return value;}
+ // The interior sample must be connected to this wall's open side. A 4h
+ // probe can land in liquid beyond a thin voxel wall even when both ends
+ // are open. Walking only the departure from that probe then imports the
+ // other side's liquid into this air pocket (e.g. between a bath and the
+ // container wall). Use the same solid walk as ordinary surface transport.
+ ${this.solid?"if(umWalk(p,interior).hit){return value;}":""}
  // "clip": the vertex's departure (travel), held in the domain (umPointFrom)
  // and walked against solids from the inside point; "retrace": the inside
  // point's own trace.

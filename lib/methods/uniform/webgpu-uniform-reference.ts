@@ -1230,12 +1230,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // box's; a set past that fails loudly (hostTilePlane).
     const coupledPages=new Set(this.mixedTileWords(promotion.coupled).map(w=>((w>>3)&63)|(((w>>12)&63)<<6)|(((w>>21)&63)<<12))).size;
     const hostPages=Math.min(this.address.pages[0]*this.address.pages[1]*this.address.pages[2],65535,Math.max(1024,2*coupledPages));
-    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,hostPages,this.mixedFrame.solid!.coarse!,this.mixedFrame.nearSettled.solidContact==="surface");
+    this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,hostPages,this.mixedFrame.solid!.coarse!);
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
-    // warmResolution "4h": WARM regions' cut tiles stay 4h (the census reads the tiers).
-    {const warmSolids=this.mixedFrame.nearSettled.warmResolution==="4h";
-     if(this.narrowBandColdCensus==="replay"||warmSolids)this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers,this.narrowBandColdCensus==="replay",warmSolids);}
+    if(this.narrowBandColdCensus==="replay")this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers);
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership,this.mixedFrame.pagePool);
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure});
     // The frame's forces and its samples read the bed-slope lane; the bake is

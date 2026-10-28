@@ -38,17 +38,14 @@ fn umCoarseSolidLowFaceExact(t:u32,axis:u32)->bool{
 fn umSolidBodyContact(t:u32)->bool{
  return solidRecord[${recordCount}u+4u*UM_TILES+2u*t+1u].z>0.5;
 }
-// Static detail policies may coarsen submerged geometry. Rigid traction and
-// displaced-volume exchange only exist on h owners, including at rest.
-// A dry body outside the predicted liquid band still needs no fine owners.
-fn umSolidContactActive(t:u32,wet:bool,band:bool,surfaceOnly:bool,coarseHeat:bool)->bool{
- if(umSolidBodyContact(t)){return wet||band;}
- return !coarseHeat&&!umSolidGeometryExact(t)&&(band||(!surfaceOnly&&wet));
-}
-// The body's full neighbouring stencil must be h even on its dry side;
-// otherwise coarse hanging vertices can erase the fine traction boundary.
-fn umSolidContactRing(t:u32,wet:bool,surfaceOnly:bool,coldNeighbour:bool)->bool{
- return umSolidBodyContact(t)||((!surfaceOnly||wet)&&!coldNeighbour);
+// Geometry is a spatial requirement, independent of surface activity or heat.
+// A cut 4h owner can join liquid and air across a voxel wall; remapping its
+// single corner interpolant then wets the dry side even at zero velocity.
+// Static and moving solids therefore retain native contact wherever liquid
+// is present or the predicted surface band can reach it. Exact whole-cell
+// walls and dry geometry still coarsen.
+fn umSolidContactActive(t:u32,wet:bool,band:bool)->bool{
+ return (wet||band)&&!umSolidGeometryExact(t);
 }
 fn umSolidGeometryExact(t:u32)->bool{
  let capacity=solidRecord[t].x;if(capacity!=0.0&&capacity!=1.0){return false;}

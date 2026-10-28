@@ -8,7 +8,7 @@ import {advanceUniform,createUniformSolver,readUniformFields,withUniformDevice} 
 
 // This measures the emitted mesh, not raw phi: pressure deliberately extends
 // phi into closed portions of a 4h owner. That continuation is not liquid.
-test("trough contact mesh survives coarsening and ball impact",{skip:!process.env.WEBGPU_NODE_MODULE},async t=>{
+test("trough contact mesh retains native voxel contact through ball impact",{skip:!process.env.WEBGPU_NODE_MODULE},async t=>{
  await withUniformDevice("resolution-independent solid contact",async device=>{
   const h=.0125,scene=createUniformTroughScene("settled-tank",h);
   const level=Math.max(...scene.fluid.initialLiquidVolumes!.map(v=>v.shape==="box"?v.max_m.y:0));
@@ -63,7 +63,7 @@ test("trough contact mesh survives coarsening and ball impact",{skip:!process.en
     assert.ok(peak<1e-6,`step ${step}: fixed contact moved ${peak} m`);
     t.diagnostic(`step ${step}: ${points.size} contacts, maximum displacement ${peak} m`);
    }
-   assert.ok(coarseContacts>100,"wall contacts must actually run at 4h");
+   assert.equal(coarseContacts,0,"curved voxel contacts must retain native geometry, including below the surface");
    // The optimized window certificates must retain solid crossings even
    // where all 27 coarse liquid nodes are negative.
    assert.deepEqual(await contacts("full"),await contacts("windows"));

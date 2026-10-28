@@ -8,7 +8,7 @@ import {UNIFORM_MIXED_REGION_LIMIT,UNIFORM_MIXED_REGION_TABLE_WORDS,uniformMixed
 import {UNIFORM_BOUND_CUBE_WORDS,UNIFORM_TILE_BITS_WORDS,uniformBoundCubesWGSL,uniformTileBitsWGSL} from "./uniform-block-tables";
 import {uniformMixedPageCount,uniformMixedTopologyNeighboursWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-source.wgsl";
-import {UNIFORM_REGION_HEAT_DEEP_WORD,UNIFORM_REGION_TIER} from "./uniform-region-heat";
+import {UNIFORM_REGION_HEAT_DEEP_WORD} from "./uniform-region-heat";
 import {UNIFORM_RESIDENCY_PAGE_REACH,UNIFORM_RESIDENCY_LIQUID as PAGE_LIQUID,UNIFORM_RESIDENCY_SEEDED as PAGE_SEEDED} from "./uniform-mixed-residency";
 import {uniformPagePoolWGSL,type UniformPagePool} from "./uniform-page-pool";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS,UniformLiveVisit,uniformLiveDispatch,uniformLiveListsOfWGSL,uniformLiveListsWGSL} from "./uniform-live-lists";
@@ -272,8 +272,6 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
  private readonly decidedOffset:number;
  /** The region heat tiers (attachHeat): the census freezes and replays deep COLD regions. */
  private heatTiers?:GPUBuffer;
- /** attachHeat: deep COLD replay (replay) and 4h solids in WARM regions (warmSolids). */
- private heatReplay=false;private warmSolids=false;
  /** The last encode's params words: a change advances the policy
   * generation (policy.reach.z), which every replay record must match. */
  private readonly policyLast=new Uint32Array(28);
@@ -363,12 +361,7 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   * the census. This includes newly seeded and ballistic particles.
   * solidGeometry: the frame's cached open-cell masks, rebuilt before the
   * census and initialized for new pages before their first classification. */
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source:GPUBuffer,private readonly pool:UniformPagePool,private readonly particles:{readonly buffer:GPUBuffer;readonly offset:number;readonly allocation:GPUBuffer},private readonly hostPages:number,private readonly solidGeometry:UniformMixedSolidCoarse,
-  /** solidContact "surface": a cut tile is active (solidActive) only where
-   * the band already holds it at h, not wherever it is wet; a submerged cut
-   * tile the surface census leaves at 4h runs as a cut 4h owner. Its ring
-   * (solidPromote) takes only wet tiles: a dry one off the band stays 4h. */
-  private readonly solidSurfaceOnly=false){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source:GPUBuffer,private readonly pool:UniformPagePool,private readonly particles:{readonly buffer:GPUBuffer;readonly offset:number;readonly allocation:GPUBuffer},private readonly hostPages:number,private readonly solidGeometry:UniformMixedSolidCoarse){
   const tiles=ownership.capacity.tiles;
   this.words=Math.ceil(tiles/32);
   const address=ownership.capacity.address;
@@ -395,10 +388,9 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   // Every block's bound cubes, then every block's interface bits.
   // Then the deep COLD replay (attachHeat): the region heat's deep flags,
   // non-COLD and deep epochs (3 words a region, one copy per census), and
-  // REPLAY_WORDS a tile key of classify's results. A fourth region word
-  // after the three: the frame's region tier (attachHeat warmSolids).
+  // REPLAY_WORDS a tile key of classify's results.
   this.replayOffset=(UNIFORM_BOUND_CUBE_WORDS+UNIFORM_TILE_BITS_WORDS)*address.blocks;
-  this.replayRecords=this.replayOffset+4*this.pages;
+  this.replayRecords=this.replayOffset+3*this.pages;
   const boundsBytes=(this.replayRecords+REPLAY_WORDS*tiles)*4;
   this.bounds=device.createBuffer({label:"Uniform dynamic ownership bound cubes",size:boundsBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.allocatedBytes=workBytes+boundsBytes+readBytes+112+(2*(this.joinWords+this.planeWords)+UNIFORM_MIXED_REGION_TABLE_WORDS)*4;
@@ -510,8 +502,6 @@ fn interfaceIndex(b:u32,i:u32)->u32{return ${UNIFORM_BOUND_CUBE_WORDS}u*UM_BLOCK
 // under surface authority classify replays their records (REPLAY_WORDS).
 const CC_DEEP:u32=${this.replayOffset}u;
 const CC_EPOCH:u32=CC_DEEP+${2*this.pages}u;
-// The frame's region tiers (attachHeat warmSolids; unread otherwise).
-const CC_TIER:u32=CC_DEEP+${3*this.pages}u;
 const CC_RECORD:u32=${this.replayRecords}u;
 const CC_WORDS:u32=${REPLAY_WORDS}u;
 // decide's own band bit per tile key (before solid promotion), kept across
@@ -1555,9 +1545,7 @@ fn umBit(base:u32,t:u32)->bool{return (atomicLoad(&census[base+t/32u])&(1u<<(t%3
 fn solidActiveTile(tile:u32){
  if(!umTileLive(tile)){return;}
  if(!umSolidTile(umTileCoord(tile))){return;}
- ${this.warmSolids?`let tier=bounds[CC_TIER+umPageOfTile(tile)];
- let coarseHeat=tier==${UNIFORM_REGION_TIER.warm}u||(tier==${UNIFORM_REGION_TIER.cold}u&&umTileWidth(tile)!=1u);`:"let coarseHeat=false;"}
- if(umSolidContactActive(tile,umBit(wetIndex(0u),tile),umBit(${HEADER}u,tile),${this.solidSurfaceOnly},coarseHeat)){
+ if(umSolidContactActive(tile,umBit(wetIndex(0u),tile),umBit(${HEADER}u,tile))){
   atomicOr(&census[activeIndex(tile/32u)],1u<<(tile%32u));
  }
 }
@@ -1579,29 +1567,20 @@ fn solidPromoteTile(tile:u32){
    if(umKeyStored(t)&&solidRecord[t].x>1e-5){let d=abs(q-p);wallDistance=min(wallDistance,d.x+d.y+d.z);}
   }}}
  }
- ${this.warmSolids?`// warmResolution "4h": a COLD region keeps its widths. Its h tile stays h
- // (with or without a cut of its own), and its tiles promote no neighbour:
- // that relayout of the frozen pool warmed the region through the remap's
- // mid-frame raise, whose 4h solids demoted the tiles again at the next
- // census, a two-frame flicker along every COLD/WARM boundary.
- let keep=bounds[CC_TIER+umPageOfTile(tile)]==${UNIFORM_REGION_TIER.cold}u&&umTileWidth(tile)==1u;`:"let keep=false;"}
- // Static surface-only rings need wet neighbours; a wet body's active
- // tile always retains its complete traction/interpolation stencil.
- let wet=umBit(wetIndex(0u),tile);
+ // Every active contact keeps its complete stencil, including dry tiles.
+ // A coarse dry neighbour also owns shared vertices and can interpolate
+ // liquid across a thin wall, so wet-only rings are not safe.
  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
   let t=umTileKey(vec3i(x,y,z));
-  if(!keep){
-   if(!umKeyStored(t)){continue;}
-   // A closed coarse tile must not impose 4h hanging vertices on an h
-   // liquid wall. Exterior SOLID pages have no such vertex authority;
-   // give embedded padding the open neighbour's boundary resolution.
-   // Read decide's frozen bits, not this pass's band writes: promotion
-   // cannot race or recursively spread through the padding.
-   let d=abs(vec3i(x,y,z)-p);
-   let wallSupport=solidRecord[tile].x==0.0&&d.x+d.y+d.z==wallDistance&&solidRecord[t].x>1e-5&&(umBit(CC_DECIDED,t)||umStaticFine(t));
-   ${this.warmSolids?`let coldNeighbour=t!=tile&&bounds[CC_TIER+umPageOfTile(t)]==${UNIFORM_REGION_TIER.cold}u;`:"let coldNeighbour=false;"}
-   if(!wallSupport&&(!umBit(activeIndex(0u),t)||!umSolidContactRing(t,wet,${this.solidSurfaceOnly},coldNeighbour))){continue;}
-  }
+  if(!umKeyStored(t)){continue;}
+  // A closed coarse tile must not impose 4h hanging vertices on an h
+  // liquid wall. Exterior SOLID pages have no such vertex authority;
+  // give embedded padding the open neighbour's boundary resolution.
+  // Read decide's frozen bits, not this pass's band writes: promotion
+  // cannot race or recursively spread through the padding.
+  let d=abs(vec3i(x,y,z)-p);
+  let wallSupport=solidRecord[tile].x==0.0&&d.x+d.y+d.z==wallDistance&&solidRecord[t].x>1e-5&&(umBit(CC_DECIDED,t)||umStaticFine(t));
+  if(!wallSupport&&!umBit(activeIndex(0u),t)){continue;}
   atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
   atomicAdd(&census[2],1u);atomicAdd(&census[19],1u);recordReason(tile,${REASON.solid}u);
   if(umTileWidth(tile)==1u){atomicSub(&census[5],1u);}else{atomicAdd(&census[4],1u);}
@@ -1800,11 +1779,10 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   * pages), read after its head encode: decide keeps a deep COLD region's
   * widths and classify replays its tiles (REPLAY_WORDS). Without it every
   * tile is classified and decided each census. */
- attachHeat(tiers:GPUBuffer,replay=true,warmSolids=false):void{
+ attachHeat(tiers:GPUBuffer):void{
   if(tiers.size<4*(UNIFORM_REGION_HEAT_DEEP_WORD(this.pages)+3*this.pages))throw new Error(`Dynamic ownership: region heat tiers of ${tiers.size} bytes do not hold ${this.pages} regions`);
   if(this.pipelines.size)throw new Error("Dynamic ownership: attachHeat after initialize");
-  if(!replay&&!warmSolids)throw new Error("Dynamic ownership: attachHeat with neither replay nor warmSolids");
-  this.heatTiers=tiers;this.heatReplay=replay;this.warmSolids=warmSolids;
+  this.heatTiers=tiers;
  }
  /** Host join: `tiles` (one uniformMixedTileWord a tile, repeats allowed)
   * are band in the next census, ored with any earlier join it has not
@@ -1942,8 +1920,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   if(this.hostJoin){this.device.queue.writeBuffer(this.joinTiles,this.joinWords*4,hostTilePlane(this.hostJoin,this.hostPages,"join tiles"));this.hostJoin=undefined;this.joinLive=true;}
   // The frame head's deep COLD flags and epochs (one copy: the heat's three
   // region sections are contiguous), before any launch reads them.
-  if(this.heatTiers&&this.heatReplay)encoder.copyBufferToBuffer(this.heatTiers,4*UNIFORM_REGION_HEAT_DEEP_WORD(this.pages),this.bounds,4*this.replayOffset,4*3*this.pages);
-  if(this.heatTiers&&this.warmSolids)encoder.copyBufferToBuffer(this.heatTiers,0,this.bounds,4*(this.replayOffset+3*this.pages),4*this.pages);
+  if(this.heatTiers)encoder.copyBufferToBuffer(this.heatTiers,4*UNIFORM_REGION_HEAT_DEEP_WORD(this.pages),this.bounds,4*this.replayOffset,4*3*this.pages);
   // One pass: every dispatch is its own usage scope, so each reads what
   // the earlier ones wrote.
   const launches=this.launches??=this.censusLaunches(),solids=this.solid||!!this.bodies;

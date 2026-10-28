@@ -40,8 +40,8 @@ var<private> umLastTravel:vec3f;
 fn umWallBlock(p:vec3i,k:u32)->u32{return select(0u,1u,k==4u&&p.z==0);}
 fn umSampleVelocity(p:vec3f)->vec3f{return vec3f(0,0,.01*(p.z-16.0));}
 fn umFastVelocity(p:vec3f)->vec3f{return umSampleVelocity(p);}
-struct Walk {q:vec3f}
-fn umWalk(p:vec3f,q:vec3f)->Walk{return Walk(q);}
+struct Walk {q:vec3f,hit:bool}
+fn umWalk(p:vec3f,q:vec3f)->Walk{return Walk(q,false);}
 fn umTrace(p:vec3f)->vec3f{return p;}
 fn umSampleVertex(p:vec3f)->f32{return -.25+.001*(p.z-16.0)*(p.z-16.0);}
 ${contact}
@@ -63,10 +63,55 @@ ${contact}
     assert.ok(Math.abs(values[4*i]!-(16-.25*.2/.13))<1e-5,`case ${i}: x foot`);
     assert.ok(Math.abs(values[4*i+1]!-(16-.25*.3/.13))<1e-5,`case ${i}: y foot`);
     assert.equal(values[4*i+2],i%2?32:0,"normal foot stays on the wall");
-    const inside=16-(i>=2?4:1);
-    assert.ok(Math.abs(values[4*i+3]!-(-.25+.001*inside*inside))<1e-6,"contact continuation matches at either wall");
+    // Clip mode uses the wall vertex's departure, with the inside probe's
+    // normal velocity; it does not retrace from the probe itself.
+    const departure=.01*(16-(i>=2?4:1))/60;
+    assert.ok(Math.abs(values[4*i+3]!-(-.25+.001*(16-departure)**2))<1e-6,"contact continuation matches at either wall");
    }
   }finally{if(read.mapState==="mapped")read.unmap();read.destroy();output.destroy();}
+ });
+});
+
+test("wall contact cannot sample liquid across a thin solid, at either wall and trace mode",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+ await withUniformDevice("connected wall contact",async device=>{
+  const source=readFileSync(new URL("../lib/methods/uniform/uniform-mixed-surface.ts",import.meta.url),"utf8");
+  const raw=source.slice(source.indexOf("// A vertex on a page wall"),source.indexOf("// The six wall reach words"));
+  const contact=Function("return `"+raw+"`;").call({solid:true}) as string;
+  const walk=source.slice(source.indexOf("struct UMWalk{"),source.indexOf("fn umTrace(p:"));
+  const output=device.createBuffer({size:16*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  try{
+   const module=device.createShaderModule({code:`
+@group(0) @binding(0) var<storage,read_write> output:array<f32>;
+struct Params{hDt:vec4f};var<private> params:Params;
+var<private> barrier:bool;var<private> UM_WALL_CLIP:bool;
+var<private> umLastTravel:vec3f;const umFastSurface=false;
+fn umSolidEnabled()->bool{return true;}
+fn umOpenAt(p:vec3f)->bool{
+ return p.z>=0.0&&p.z<=32.0&&!(barrier&&((p.z>1.0&&p.z<3.0)||(p.z>29.0&&p.z<31.0)));
+}
+${uniformSolidSlideStartWGSL}
+${walk}
+fn umWallBlock(p:vec3i,k:u32)->u32{return u32((k==4u&&p.z==0)||(k==5u&&p.z==32));}
+fn umPointFrom(p:vec3f,q:vec3f)->vec3f{return clamp(q,vec3f(0),vec3f(32));}
+fn umSampleVelocity(p:vec3f)->vec3f{return vec3f(0,0,select(-.1,.1,p.z>16.0));}
+fn umFastVelocity(p:vec3f)->vec3f{return umSampleVelocity(p);}
+fn umTrace(p:vec3f)->vec3f{return p;}
+fn umSampleVertex(p:vec3f)->f32{return select(-.25,.5,barrier&&(p.z<3.0||p.z>29.0));}
+${contact}
+@compute @workgroup_size(16) fn main(@builtin(local_invocation_index) i:u32){
+ barrier=(i&4u)!=0u;UM_WALL_CLIP=(i&8u)!=0u;params.hDt=vec4f(1,1,1,1.0/60.0);
+ output[i]=umWallContact(vec3f(16,16,select(0.0,32.0,(i&1u)!=0u)),.5,select(1u,4u,(i&2u)!=0u));
+}`});
+   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
+   const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
+   const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
+   const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+   try{
+    const e=device.createCommandEncoder(),p=e.beginComputePass();p.setPipeline(pipeline);p.setBindGroup(0,group);p.dispatchWorkgroups(1);p.end();e.copyBufferToBuffer(output,0,read,0,output.size);device.queue.submit([e.finish()]);
+    await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange());
+    for(let i=0;i<16;i++)assert.equal(values[i],(i&4)?0.5:-0.25,`contact case ${i}`);
+   }finally{if(read.mapState==="mapped")read.unmap();read.destroy();}
+  }finally{output.destroy();}
  });
 });
 
