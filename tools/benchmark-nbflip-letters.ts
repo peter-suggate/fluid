@@ -1,9 +1,11 @@
+import {narrowBandRetireCounting} from "../lib/methods/uniform/uniform-narrow-band-flip";
 /** Ferstl et al. 2016, Figure 8 "Letters" on Uniform Narrow-band FLIP, measured
  * the way the paper's Table 1 reports it: time per step split into the
  * projection and the rest, average particle count and memory. Browser GPU must
  * be off.
  *   node --import tsx tools/benchmark-nbflip-letters.ts [name]
- * --steps=N runs fewer than the take's 193 frames (a smoke run).
+ * Defaults to 60 Hz with volume control disabled; --steps=N runs fewer steps
+ * than the full take (193 video frames at 24 fps).
  * --track reads the level set after every step and records the top of each
  *   letter as it falls. It is a readback per step, so a tracked run's wall
  *   times are not the benchmark's; pass timestamps are unaffected.
@@ -26,8 +28,10 @@
  *   else 0): the GPU a paced step starts on has been idle, as the app's is
  *   whenever a step finishes inside its playback interval. Under --pace=0 the
  *   app trace samples only the steps its cadence admits.
+ * --volume-every=N measures current phi every N frames and on the final frame (default 60).
+ * --max-gib=N caps live requested GPU allocations, including construction (default 6).
  * --dt=S steps at another interval than the take's 1/24 s (the app's transport
- *   can: 0.0166667 is its 60 Hz), with --steps counted in those steps.
+ *   can: use 0.016666666666666666 for 60 Hz), with --steps counted in those steps.
  * --host-work counts what the host asks of the device inside each step's
  *   synchronous advance (objects created, queue writes and their bytes,
  *   submits): a row's hostWork. A step that changes nothing should create
@@ -61,10 +65,13 @@
  * synchronous advance that encodes and submits the step. Between is the GPU
  * time outside every pass, the copies and clears encoded between two of them;
  * a row's `before` attributes it to the pass that follows. */
+import { readParticleMassCensus } from "./particle-mass-readback";
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
+import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
+import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 import { GPUPassProfile } from './gpu-pass-profile';
 import { NarrowBandTransferProbe } from './narrow-band-transfer-probe';
 import { NarrowBandDispatchProbe } from './narrow-band-dispatch-probe';
@@ -84,7 +91,7 @@ import { UNIFORM_STAGE_REASON } from '../lib/methods/uniform/uniform-stage-grids
 import { usePerformanceInstrumentationStore } from '../lib/core/stores/performance-instrumentation-store';
 
 const option=(key:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3);
-const steps=Number(option("steps")??NBFLIP_LETTERS_FRAMES),track=process.argv.includes("--track"),plain=process.argv.includes("--plain"),out=option("out")??'docs/verification';
+const steps=Number(option("steps")??Math.floor(NBFLIP_LETTERS_FRAMES*NBFLIP_LETTERS_TIME_STEP_S/Number(option("dt")??1/60))),track=process.argv.includes("--track"),plain=process.argv.includes("--plain"),out=option("out")??'docs/verification';
 // --transfer-probe replays diagnostic shader ablations at frames 40/100/180.
 // It restores production output before continuing; wall times include probes.
 const probeTransfer=process.argv.includes("--transfer-probe");
@@ -101,21 +108,25 @@ const probeFrames=(option("probe-at")??"40,100,180").split(",").map(Number);
 assert.ok(probeFrames.every(n=>Number.isInteger(n)&&n>=1&&(!option("probe-at")||n<=steps)),"Probe frames must be within the take");
 assert.ok(!probeTransfer||!plain,"Transfer probes require pass timestamps");
 assert.ok(!probeDispatch||!plain,"Dispatch probes require pass timestamps");
-const stepInterval=Number(option("dt")??NBFLIP_LETTERS_TIME_STEP_S);
+const stepInterval=Number(option("dt")??1/60);
+const volumeEvery=Number(option("volume-every")??60),maxGiB=Number(option("max-gib")??6);
+assert.ok(Number.isInteger(volumeEvery)&&volumeEvery>0,"--volume-every must be a positive integer");
+assert.ok(Number.isFinite(maxGiB)&&maxGiB>0&&maxGiB<=6,"--max-gib must be in (0, 6]");
 assert.ok(stepInterval>0&&stepInterval<=NBFLIP_LETTERS_TIME_STEP_S,"--dt is a step no longer than the take's");
 assert.ok(Number.isInteger(steps)&&steps>=1&&steps*stepInterval<=NBFLIP_LETTERS_FRAMES*NBFLIP_LETTERS_TIME_STEP_S+1e-9,`--steps must stay inside the take's ${NBFLIP_LETTERS_FRAMES} frames`);
 const name=process.argv.slice(2).find(a=>!a.startsWith("--"))??'current';
 assert.match(name,/^[a-z0-9-]+$/);
 const PROJECTION=/pressure|projection/i;
 const definition=getSceneDefinition(NBFLIP_LETTERS_SCENE_ID),scene=structuredClone(sceneDocument(definition)),dt=stepInterval;
-if(option("dt"))scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
+scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
 // --page-pool={"blocks":210,"permute":7}: the scene's page pool record, the one way a page set other than the whole box reaches the solver.
 if(option("page-pool"))scene.fluid.pagePool=JSON.parse(option("page-pool")!);
 assert.equal(definition.methodProfile?.methodId,uniformNarrowBandMethod.id);
-// The values the app resolves for this scene: the method's app defaults under the scene's own overrides.
+// Resolve the scene profile with the requested clock and uncorrected volume for the gate.
 const sets=Object.fromEntries(process.argv.filter(a=>a.startsWith("--set=")).map(a=>{const [key,...value]=a.slice(6).split("=");const text=value.join("=");return [key!,text!==""&&Number.isFinite(Number(text))?Number(text):text==="true"?true:text==="false"?false:text];}));
 const from=Number(option("from")??1);
-const values=resolveMethodValues(uniformNarrowBandMethod,definition.methodProfile!.quality,{...uniformNarrowBandMethod.appDefaults,...definition.methodProfile!.overrides,...sets});
+const values=resolveMethodValues(uniformNarrowBandMethod,definition.methodProfile!.quality,{...uniformNarrowBandMethod.appDefaults,...definition.methodProfile!.overrides,timeStep:"scene",volumeControlSeconds:0,...sets});
+assert.equal(uniformNarrowBandMethod.effectiveStep_s?.(scene,values)??dt,dt,"--set=timeStep must agree with --dt");
 const [nx,ny,nz]=NBFLIP_LETTERS_GRID,h=scene.voxelDomain.finestCellSize_m;
 // Each letter's highest outline point, as the vertex column under it and the height its liquid starts at.
 const letters=scene.fluid.scheduledDrops!.map((drop,index)=>{
@@ -130,7 +141,9 @@ const mean=(values:number[])=>values.reduce((a,b)=>a+b,0)/values.length;
 try {
  const dawn=await import(pathToFileURL(resolve('node_modules/webgpu/index.js')).href);Object.assign(globalThis,dawn.globals);
  const gpu=createProcessRetainedDawnGPU(dawn,['backend=metal']);const adapter=await gpu.requestAdapter();assert.ok(adapter);
- const raw=await adapter.requestDevice({requiredFeatures:['timestamp-query',...(adapter.features.has('subgroups')?['subgroups' as const]:[])],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+ const requested=await adapter.requestDevice({requiredFeatures:['timestamp-query',...(adapter.features.has('subgroups')?['subgroups' as const]:[])],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+ const allocation=auditUniformGPUAllocations(requested,maxGiB*2**30);
+ const raw=allocation.device;
  // Counted on the device itself, under every wrapper the run stacks on it.
  let work:Record<string,number>={};
  if(hostWork){
@@ -148,6 +161,7 @@ try {
  const selected=transferProbe?.device??dispatchProbe?.device??(plain?raw:profile.device);
  device=managedGPUDevice(selected,{requireWorkerRealm:false});
  device.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
+ if(process.argv.includes("--particle-mass"))narrowBandRetireCounting.on=true;
  const built=performance.now();
  solver=await uniformNarrowBandMethod.createSolverAsync!(device,scene,definition.methodProfile!.quality,values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
  if(recordReasons)solver.setLayoutViewsEnabled(true);
@@ -564,7 +578,10 @@ try {
    hPerY:perSlice,slice:{y,rows:Array.from({length:tz},(_,z)=>Array.from({length:tx},(_,x)=>{const t=at(x,y,z);return required[t]?"#":!fine[t]?".":heat[t]!>0?"c":heat[tiles+t]!>0?"+":"-";}).join(""))}};
  };
 
+ const mixedFrame=(solver as unknown as {mixedFrame:UniformMixedFrame}).mixedFrame;
  for(let frame=1;frame<=steps;frame++){
+  const measureVolume=frame%volumeEvery===0||frame===steps;
+  if(measureVolume)mixedFrame.requestNarrowBandVolumeProbe();
   probeFrame=frame;
   if(dispatchProbe)dispatchProbe.enabled=probeFrames.includes(frame);
   if(pace>0)await new Promise(r=>setTimeout(r,pace));
@@ -589,6 +606,7 @@ try {
   const row:Record<string,unknown>={frame,time_s:frame*dt,wall_ms,encode_ms,projection_ms,rest_ms,gpu_ms:projection_ms+rest_ms,between_ms,before,passes:passes.length,
    particles:flip.particles,particleCapacity:flip.capacity,reseedClipped:flip.reseedClipped,allocatedBytes:solver.info.allocatedBytes,
    fineTiles:solver.info.uniformMixedFineTiles,bandTiles:solver.info.uniformPressureBandTiles,bandCycles:solver.info.uniformPressureBandCycles,bandResidual:solver.info.uniformPressureBandResidual,labels:byLabel};
+  if(measureVolume&&process.argv.includes("--particle-mass"))row.particleMass=await readParticleMassCensus(device,mixedFrame.narrowBandFlip);
   if(renderLoad)row.renderLoad_ms=renderLoadAlone_ms;
   if(hostWork)row.hostWork=advanceWork;
   // The frame's passes in order, each with the gap before it: what a gap follows.
@@ -620,6 +638,7 @@ try {
   }
   if(layoutAt.includes(frame))row.layout=await readLayout(frame);
   if(warmAt.includes(frame)||warmAt.includes(frame-1))row.warm=await readWarm(warmAt.includes(frame-1));
+  if(measureVolume){const stats=await solver.readStats();row.volumeDrift=stats.volumeDrift;row.volumeTelemetrySource=stats.volumeTelemetrySource;}
   rows.push(row);
   if(frame%10===0||frame===steps||track)console.log(JSON.stringify({...row,labels:undefined}));
  }
@@ -631,7 +650,7 @@ try {
   wallMedian_ms:of("wall_ms").sort((a,b)=>a-b)[(steps-from+1)>>1],wallMax_ms:Math.max(...of("wall_ms")),
   particles:mean(of("particles")),particlesMax:Math.max(...of("particles")),particleCapacity:rows.at(-1)!.particleCapacity,
   allocatedBytes:mean(of("allocatedBytes")),allocatedBytesMax:Math.max(...of("allocatedBytes")),
-  volumeDrift:final.volumeDrift,tracked:track,plain,transferProbe:probeTransfer,dispatchProbe:probeDispatch};
+  volumeDrift:final.volumeDrift,volumeEvery,requestedPeakBytes:allocation.snapshot().peakBytes,tracked:track,plain,transferProbe:probeTransfer,dispatchProbe:probeDispatch};
  console.log(JSON.stringify(summary));
  write(`nbflip-letters-${name}.json`,{date:new Date().toISOString(),arguments:process.argv.slice(2),method:uniformNarrowBandMethod.id,values,
   adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description,subgroupMinSize:adapter.info.subgroupMinSize,subgroupMaxSize:adapter.info.subgroupMaxSize},

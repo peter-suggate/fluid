@@ -1,3 +1,4 @@
+import { bulk16PageSlot } from "./uniform-bulk-pages-reference";
 import { uniformAddressHome } from "./uniform-address-plan";
 /** Lattice addressing for the Uniform solver: where a cell, vertex or tile
  * coordinate is stored, which coordinates are stored at all, and what lies
@@ -140,6 +141,7 @@ export interface UniformLatticeAddressSource {
    * the walls fold to it (umFixedBox, umBoxWalls). */
   readonly world?: boolean;
   readonly addressPlan?: boolean;
+  readonly bulk?: boolean;
   /** A u32 expression of b: the h slot of block b, where the h stores
    * place its page (umFineSlot). Omitted: b, every block its own. */
   readonly fine?: string;
@@ -284,7 +286,9 @@ fn umWideVertexPresent(p:vec3i)->bool{return umBlockStored(umWideVertexSlot(p).w
 fn umWideVertexTexel(p:vec3i)->vec3i{${T}let s=umWideVertexSlot(${wideQ});let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 fn umWideVertexStoreTexel(p:vec3i)->vec3i{let s=umWideVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 // Kinds: what a page holds, from the table (an open top is its AIR words).
-fn umPageKind(page:vec3i)->u32{let w=umPageWord(page);return select(select(UM_RESIDENT,UM_SOLID,w>=${blocks}-1u),UM_AIR,w==0u);}
+fn umBulkWord(w:u32)->bool{return ${source.bulk?"(w>>30u)==2u&&(w&0x3fffffffu)!=0u":"false"};}
+fn umPageBulk(page:vec3i)->u32{let w=umPageWord(page);return select(0u,w&0x3fffffffu,umBulkWord(w));}
+fn umPageKind(page:vec3i)->u32{let w=umPageWord(page);return select(select(select(UM_RESIDENT,UM_SOLID,w>=${blocks}-1u),UM_AIR,w==0u),UM_BULK16,umBulkWord(w));}
 fn umCellKind(p:vec3i)->u32{return umPageKind(p>>vec3u(5u));}
 fn umTileKind(p:vec3i)->u32{return umPageKind(p>>vec3u(3u));}
 // Axes on which nothing is stored below origin (a cell, or a tile in tile
@@ -340,7 +344,7 @@ fn umBoxTileCoord(i:u32)->vec3u{${T}return vec3u(i%${t}.x,(i/${t}.x)%${t}.y,i/($
 // Inside the box, whatever is stored there.
 fn umTileInBox(p:vec3i)->bool{${T}return all(p>=vec3i(0))&&all(p<vec3i(${t}));}
 fn umCellInBox(p:vec3i)->bool{${D}return all(p>=vec3i(0))&&all(p<vec3i(${d}));}
-`)}const UM_RESIDENT:u32=0u;const UM_AIR:u32=1u;const UM_SOLID:u32=2u;
+`)}const UM_RESIDENT:u32=0u;const UM_AIR:u32=1u;const UM_SOLID:u32=2u;const UM_BULK16:u32=3u;
 ${pagedBodies}
 fn umKeyStored(k:u32)->bool{return k<${keys};}
 // A cell's key is its tile's key then its index in the tile, x fastest.
@@ -954,7 +958,7 @@ export function uniformBlockStored(a: UniformLatticeAddress, block: number): boo
 /** The kind of the page at a page coordinate (UNIFORM_KIND, umPageKind). */
 export function uniformPageKind(a: UniformLatticeAddress, x: number, y: number, z: number): number {
   const w = uniformPageWord(a, x, y, z);
-  return w === 0 ? UNIFORM_KIND.air : w >= a.blocks - 1 ? UNIFORM_KIND.solid : UNIFORM_KIND.resident;
+  return bulk16PageSlot(w) ? UNIFORM_KIND.bulk : w === 0 ? UNIFORM_KIND.air : w >= a.blocks - 1 ? UNIFORM_KIND.solid : UNIFORM_KIND.resident;
 }
 /** The kind of a cell (umCellKind) and of a tile (umTileKind). */
 export function uniformCellKind(a: UniformLatticeAddress, x: number, y: number, z: number): number {

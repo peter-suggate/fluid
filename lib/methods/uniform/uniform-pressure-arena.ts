@@ -39,7 +39,8 @@ import {uniformStageListsWGSL} from "./uniform-stage-lists";
  * composite residual each cycle and their level 2 correction; the band's
  * levels sum their children's residuals. Prolongation is trilinear over the
  * parents that exist, renormalised. The aggregated operators are the
- * children's aggregation scaled by 0.5 (7-point at every level), baked once
+ * children's inter-aggregate links scaled by 0.5, with their Dirichlet row
+ * sums preserved (7-point at every level), baked once
  * a frame by the level below. */
 export interface UniformPressureArenaSchedule {
  /** V-cycles at most (NB-FLIP bandCycles). */
@@ -57,10 +58,6 @@ export interface UniformPressureArenaSchedule {
   * iterate alternates channels and level 2's up leg reads Y. One leaves the
   * natives at a twin's 0.5 a cycle; three at 0.15. */
  tailCycles:number;
- /** NB-FLIP surfaceImpulse: "energy" bounds the speed a liquid face leaves
-  * into air by its pressure's work, |u| <= sqrt(u0^2+2p/rho); "full" applies
-  * the whole step's impulse dt*p/(rho*theta*h). */
- surfaceImpulse:"energy"|"full";
  /** NB-FLIP pressureTail: the 32h rows' correction. "pages" solves them in
   * one workgroup (at most TAIL_ROWS pages); "superblocks" takes them through
   * 64h (2^3 pages) and 128h (4^3 pages, a row a super-block) and solves the
@@ -79,7 +76,16 @@ export interface UniformPressureArenaSchedule {
   * own sweeps answer it: a period-2 exchange no cycle count removes. */
  nativeSweeps:number;
 }
-export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,surfaceImpulse:"energy",tail:"auto",superScale:0.75,nativeSweeps:0};
+/** The correction prolongation preserves constants. Keep the aggregate's
+ * Dirichlet row sum while rediscretising only its links to other unknowns.
+ * Scaling the entire diagonal weakens free-surface constraints at every level
+ * and overcorrects near-constant errors in weakly open liquid regions. */
+export const uniformPressureAggregateWGSL=/* wgsl */`
+fn pAggregateDiagonal(part:f32,outward:f32,scale:f32)->f32{
+ return (part-outward)+scale*outward;
+}
+`;
+export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,tail:"auto",superScale:0.75,nativeSweeps:0};
 /** bandExit "returns": the band's residual target (1/s, h-equivalent). The
  * band stops at it or at the cycle cap; the strict exit keeps the frame's
  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
@@ -89,8 +95,11 @@ export const UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL=0.05;
  * of pNative) in place of the root buildRhs's: the all-4h mirror's
  * retirement, step 1 (plan §1.10). Off: the root's rows. */
 export const UNIFORM_PRESSURE_ARENA_NATIVE_RHS:boolean=false;
-/** The projected kick's re-solves from its own pressure (encodeSolve). */
-export const UNIFORM_PRESSURE_KICK_RESOLVES=3;
+/** Startup Picard iterations for the pressure-dependent seam heads. Three
+ * re-solves left a depth-dependent hydrostatic transient; 23 keep the full
+ * 1x..2.75x closed-rest ladder stationary to the volume readback precision.
+ * They run once at t=0, with no position or clock advance (encodeSolve). */
+export const UNIFORM_PRESSURE_KICK_RESOLVES=23;
 
 /** Workgroups of the band-tile mark at most (the simulation's buffered h tiles). */
 const LIST_GROUPS=4096;
@@ -392,6 +401,7 @@ const P_C:u32=${C("c0")}u;const P_U:u32=${C("u0")}u;${S?`const P_V:u32=${C("v0")
 const PA_X:u32=${C("xa",1)}u;const PA_Y:u32=${C("ya",1)}u;const PA_R:u32=${C("ra",1)}u;const PA_D:u32=${C("da",1)}u;const PA_K:u32=${C("ka0",1)}u;const PLANE1:u32=${520*a.capacity(1)}u;
 const PB_X:u32=${C("xb",2)}u;const PB_Y:u32=${C("yb",2)}u;const PB_R:u32=${C("rb",2)}u;const PB_D:u32=${C("db",2)}u;const PB_K:u32=${C("kb0",2)}u;const PLANE2:u32=${plane2}u;
 const P_SCALE:f32=${schedule.coarseScale};const T_SCALE:f32=${schedule.tailScale};
+${uniformPressureAggregateWGSL}
 const K_SEAM:u32=6u;
 // The composite's seam coupling on the coarse levels, its one definition. A
 // seam's native row stays 2.5h away at every level, so its coupling k never
@@ -704,7 +714,11 @@ var<workgroup> gCross:array<f32,1536>;
 var<workgroup> gRes:array<f32,512>;
 // Aggregate A (4^3) of a brick's 512 children: its scaled diagonal and couplings.
 fn gChild(A:vec3u,k:u32)->u32{let l=2u*A+vec3u(k&1u,(k>>1u)&1u,k>>2u);return l.x+8u*(l.y+8u*l.z);}
-fn gDiag(A:vec3u)->f32{var s=0.0;for(var k=0u;k<8u;k++){s+=gPart[gChild(A,k)];}return P_SCALE*s;}
+fn gDiag(A:vec3u)->f32{
+ var s=0.0;var outward=0.0;
+ for(var k=0u;k<8u;k++){let i=gChild(A,k);s+=gPart[i];for(var axis=0u;axis<3u;axis++){outward+=gCross[512u*axis+i];}}
+ return pAggregateDiagonal(s,outward,P_SCALE);
+}
 fn gCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if(((k>>axis)&1u)==(f&1u)){s+=gCross[512u*axis+gChild(A,k)];}}return P_SCALE*s;}
 fn gSum(A:vec3u)->f32{var s=0.0;for(var k=0u;k<8u;k++){s+=gRes[gChild(A,k)];}return s;}
 // A coarse child's part: d less its inner couplings, its outer ones by axis.
@@ -1528,7 +1542,11 @@ ${zero}
 // A tile's level-1 cell A (2^3): its 8 children's sum, or the outward
 // couplings on side f, scaled.
 fn rChild(A:vec3u,k:u32)->u32{let l=2u*A+vec3u(k&1u,(k>>1u)&1u,k>>2u);return l.x+4u*(l.y+4u*l.z);}
-fn rDiag(A:vec3u)->f32{var s=0.0;for(var k=0u;k<8u;k++){s+=rPart[rChild(A,k)];}return P_SCALE*s;}
+fn rDiag(A:vec3u)->f32{
+ var s=0.0;var outward=0.0;
+ for(var k=0u;k<8u;k++){let i=rChild(A,k);s+=rPart[i];for(var axis=0u;axis<3u;axis++){outward+=rCross[64u*axis+i];}}
+ return pAggregateDiagonal(s,outward,P_SCALE);
+}
 fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if(((k>>axis)&1u)==(f&1u)){s+=rCross[64u*axis+rChild(A,k)];}}return P_SCALE*s;}
 @compute @workgroup_size(${TILE_WG}) fn pRebase(${lanes}){
  if(lane==0u){pN=pTileCount();atomicStore(&worst,0u);atomicStore(&tileWorst,0u);}
@@ -1714,7 +1732,7 @@ fn tPart(i:u32,l:vec3u,d:f32,k:array<f32,6>){
 fn tBake(at:u32,A:vec3u,s:u32){
  var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
  for(var j=0u;j<8u;j++){let i=tChild(A,j,s);d+=gPart[i];for(var axis=0u;axis<3u;axis++){let bit=(j>>axis)&1u;k[2u*axis+bit]+=gCross[512u*axis+i];}}
- qSet(PT_D,at,T_SCALE*d);for(var f=0u;f<6u;f++){qSet(PT_K+f*PLANE2,at,T_SCALE*k[f]);}
+ var outward=0.0;for(var f=0u;f<6u;f++){outward+=k[f];}qSet(PT_D,at,pAggregateDiagonal(d,outward,T_SCALE));for(var f=0u;f<6u;f++){qSet(PT_K+f*PLANE2,at,T_SCALE*k[f]);}
 }
 @compute @workgroup_size(${WG}) fn pDownB(${lanes}){
  if(lane==0u){cN=select(ubaLevelCount(2u),0u,bConverged());}
@@ -2103,17 +2121,6 @@ override pDst:u32=0u;
 @group(1) @binding(16) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(17) var<storage,read_write> boundary:array<f32>;
 @group(1) @binding(21) var<storage,read_write> presented:array<f32>;
-// A free-surface face's projected velocity: out is the unit direction from
-// its liquid side into air, drop the pressure across it.${schedule.surfaceImpulse==="energy"?/* wgsl */`
-// A free surface does no work but p's: a parcel leaving into air gains at
-// most 2p/rho of squared speed. One step's impulse dt*p/(rho*theta*h) is the
-// ghost-fluid limit only while the face stays open; an impact's kPa across a
-// thin cut (theta << 1) would launch it at tens of m/s. A resting surface
-// never meets the bound: its impulse only cancels gravity's inflow.
-fn bSurface(value:f32,forced:f32,out:f32,drop:f32)->f32{
- let u=out*forced;return out*min(out*value,sqrt(max(u,0.0)*max(u,0.0)+2.0*max(drop,0.0)/params.policy.x));
-}`:/* wgsl */`
-fn bSurface(value:f32,forced:f32,out:f32,drop:f32)->f32{return value;}`}
 // UniformPressureBand's umProject on face f of band cell 'at' at p.
 fn bFace(at:u32,p:vec3i,f:u32)->f32{
  let kinds=pool[P_KINDS+at];let kind=bFaceKind(kinds,f);
@@ -2126,13 +2133,12 @@ fn bFace(at:u32,p:vec3i,f:u32)->f32{
  ${S?"if(kind==K_CLOSED){var low=p;if(sign<0){low[axis]-=1;}return umSolidFaceVelocity(low,axis);}":""}
  let forced=pForced(at,f);let coefficient=pF(P_C+f*PLANE,at)${S?"/pVolume(at,f)":""};let own=pF(P_X,at);let base=pF(P_BASE,at);let scale=params.policy.z;
  if(kind==K_WALL){if(!liquid){return forced;}return forced-scale*f32(sign)*(max(own+pLift(at,f),-base)-own)/h;}
- if(kind==K_OPEN){if(!liquid){return forced;}return bSurface(forced+scale*f32(sign)*(base+own)*coefficient*h,forced,f32(sign),base+own);}
+ if(kind==K_OPEN){if(!liquid){return forced;}return forced+scale*f32(sign)*(base+own)*coefficient*h;}
  var other=0.0;var otherBase=0.0;var otherLiquid=false;
  if(kind==K_BAND){let m=pNear(at,p,f);other=pF(P_X,m);otherBase=pF(P_BASE,m);otherLiquid=bLiquid(pool[P_KINDS+m]);}
  else if(kind==K_SEAM){let m=nAcross(p,f);other=qF(PN_X,m);otherBase=qF(PN_B,m)+bSeamHead(at,f);otherLiquid=true;}
  if(!liquid&&!otherLiquid){return 0.0;}
  let value=forced-scale*f32(sign)*((otherBase-base)+(other-own))*coefficient*h;
- if(liquid!=otherLiquid){let drop=(base+own)-(otherBase+other);return bSurface(value,forced,select(-1.0,1.0,liquid)*f32(sign),select(-drop,drop,liquid));}
  return value;
 }
 // The composite solve couples a native row to the individual h faces.
@@ -2281,7 +2287,7 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
    }
    d+=part;
   }
-  qSet(S6_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){qSet(S6_K+f*CAP6,e,S_SCALE*k[f]);}
+  var outward=0.0;for(var f=0u;f<6u;f++){outward+=k[f];}qSet(S6_D,e,pAggregateDiagonal(d,outward,S_SCALE));for(var f=0u;f<6u;f++){qSet(S6_K+f*CAP6,e,S_SCALE*k[f]);}
   let g=sKey6(e);let o=g&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
   var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
   for(var j=0u;j<8u;j++){let r=select(sRow6(g-o+vec3i(sOctant(j))),e,j==mine);if(r!=UB_NONE_ID){kids[j]=r;first=min(first,j);}}
@@ -2307,7 +2313,7 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
    }
    d+=part;
   }
-  qSet(S7_D,e,S_SCALE*d);for(var f=0u;f<6u;f++){qSet(S7_K+f*CAP7,e,S_SCALE*k[f]);}
+  var outward=0.0;for(var f=0u;f<6u;f++){outward+=k[f];}qSet(S7_D,e,pAggregateDiagonal(d,outward,S_SCALE));for(var f=0u;f<6u;f++){qSet(S7_K+f*CAP7,e,S_SCALE*k[f]);}
  }
 }`,
     // A 64h group a workgroup: its pages' 16h residuals (against the

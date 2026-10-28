@@ -115,7 +115,7 @@ fn ${prefix}WorldSolid(q:vec3i)->bool{
  * lookup is the same rule as uniformWindowWorldWGSL's classification but
  * branch free over the derived header words (24..31): it is inlined at
  * hundreds of call sites per kernel. */
-export function uniformWindowAddressWGSL(buffer: string, table: string, blocks: string, prefix = "um", entries = UNIFORM_DIRECTORY_WORDS): string {
+export function uniformWindowAddressWGSL(buffer: string, table: string, blocks: string, prefix = "um", entries = UNIFORM_DIRECTORY_WORDS, bulk = false): string {
   const w = (i: number) => {
     const raw = `${buffer}[${table}+${entries + i}u]`;
     return i >= 24 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedWorldGeometry)` : i < 3 ? `select(${raw},${prefix}WindowWord${i},${prefix}FixedFrame)` : raw;
@@ -159,7 +159,9 @@ fn ${prefix}PageWord(page:vec3i)->u32{
  // A kept word is a block or AIR wherever the host's SOLID seed reads as AIR
  // (word 31 all ones): clamped below the SOLID sentinel there, a SOLID test
  // of a fixed geometry folds to the world-box compare and drops its load.
- let word=select(raw,min(raw,${blocks}-2u),${prefix}SolidIsBox());
+ // Tagged BULK16 slots are directory identities, never block indices.
+ let bulk=${bulk?"(raw>>30u)==2u&&(raw&0x3fffffffu)!=0u":"false"};
+ let word=select(raw,min(raw,${blocks}-2u),${prefix}SolidIsBox()&&!bulk);
  return select(select(0u,word,keep),0xffffffffu,${prefix}WorldSolid(world));
 }
 // The SOLID pages are exactly those outside the world box: a fixed geometry

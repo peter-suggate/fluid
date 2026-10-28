@@ -2,7 +2,7 @@ import type { MethodParamValues } from "../../core/method-contract";
 import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
 
 /** The NB-FLIP near-settled settings (method params regionTiering,
- * warmResolution, particleSeeding, bandExit, bandCycles, surfaceImpulse, rootReserve, rootCoarse, rootTiles, surfaceSplat), fixed for a solver's life (update
+ * warmResolution, particleSeeding, bandExit, bandCycles, rootReserve, rootCoarse, rootTiles, surfaceSplat), fixed for a solver's life (update
  * "solver": pipeline variants are chosen at attach). Defaults use error-driven update activity and independently selected
  * spatial resolution; comparison options remain available.
  * - regionTiering: "error" bounds omitted transport, momentum and pressure
@@ -19,9 +19,6 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  * - pressureTail: "auto" solves the band's coarsest correction over its 32h
  *   rows (a row a page) up to 4096 pages and over the super-block tail's
  *   128h rows above; "superblocks" always takes the super-block tail.
- * - surfaceImpulse: "energy" bounds the speed liquid leaves a free surface
- *   by its pressure's work (UniformPressureArenaSchedule); "full" applies the
- *   step's whole ghost-fluid impulse.
  * - rootReserve: "fused" runs a reserve traversal in one workgroup;
  *   "parallel" retains the ordinary traversal in every safety slot.
  * - rootCoarse: "fused" joins the 16h and 32h levels in one workgroup;
@@ -125,7 +122,7 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   where no sample lies within a cell (with outerSeeding "uncovered"); "band"
  *   seeds every newly heated cell under its count, over the samples it holds.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly surfaceImpulse:"energy"|"full";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"|"still";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge";readonly sampleSeparation:"off"|"pairs";readonly innerReseed:"sites"|"cells";readonly activationSeeding:"band"|"uncovered"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"|"still";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge";readonly sampleSeparation:"off"|"pairs";readonly innerReseed:"sites"|"cells";readonly activationSeeding:"band"|"uncovered"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -139,7 +136,6 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  rootReserve:values.rootReserve==="parallel"?"parallel":"fused",
  bandCycles:typeof values.bandCycles==="number"&&Number.isInteger(values.bandCycles)?Math.min(8,Math.max(1,values.bandCycles)):4,
  pressureTail:values.pressureTail==="superblocks"?"superblocks":"auto",
- surfaceImpulse:values.surfaceImpulse==="full"?"full":"energy",
  traceSubsteps:values.traceSubsteps==="travel"?"travel":"gradient",
  wallTrace:values.wallTrace==="retrace"?"retrace":"clip",
  surfaceVelocitySampler:values.surfaceVelocitySampler==="software"?"software":"texture32",

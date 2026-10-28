@@ -11,14 +11,14 @@ for (const stride of [12, 28]) {
     for (const i of [0, 2, 3, 4, capacity - 1]) {
       const at = PARTICLE_MASS_HEADER_WORDS + i * stride;
       f[at] = i; f[at + 1] = 5; f[at + 2] = 6; f[at + 3] = 1;
-      f[at + 7] = -2;
+      f.set([1,2,3,-2,4,5,6],at+4);
       if (stride === 28) f[at + 25] = 7;
       else u[at + 11] = 0x80000007; // Ballistic flag does not affect mass.
     }
     const live = [...particleMassRecords(raw, capacity, stride, true)];
     assert.deepEqual(live.map(p => p.x), [0, 2, 3]);
     assert.equal(live.reduce((sum, p) => sum + p.mass, 0), 24);
-    assert.deepEqual(live[0], { x: 0, y: 5, z: 6, depth: -2, mass: 8 });
+    assert.deepEqual(live[0], { x: 0, y: 5, z: 6, depth: -2, mass: 8, vx:1, vy:2, vz:3, bx:4, by:5, bz:6 });
     assert.equal([...particleMassRecords(raw, capacity, stride, false)].reduce((sum, p) => sum + p.mass, 0), 3);
   });
 }

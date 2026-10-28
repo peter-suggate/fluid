@@ -95,7 +95,7 @@ export function createForestWaterfallScene(): SceneDescription {
   scene.nominalResolution = { length_m: h };
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 120;
   scene.fluid = {
-    density_kg_m3: 998.2, dynamicViscosity_Pa_s: .001002, surfaceTension_N_m: 0,
+    density_kg_m3: 998.2, dynamicViscosity_Pa_s: 0, surfaceTension_N_m: 0,
     gravity_m_s2: { x: 0, y: -9.80665, z: 0 }, initialCondition: "tank-fill",
     initialVelocity_m_s: { x: 0, y: 0, z: 0 },
     initialLiquidVolumes: forestWaterfallInitialPool(),

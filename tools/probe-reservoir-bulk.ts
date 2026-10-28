@@ -4,6 +4,9 @@
  * tiers and the bulk owner counts.
  * node --import tsx tools/probe-reservoir-bulk.ts [--cell=0.005] [--steps=1200] [--every=60]
  *   [--values={"bulkTier":"16h"}] [--closed] [--tiers=FILE.json] [--out=PATH.json]
+ * --max-gib=N caps construction and live requested GPU bytes (default and maximum 6).
+ * --stats-only skips dense spatial readback (phi drift remains freshly measured).
+ * --height=N scales the reservoir depth; --pool=N reserves a bounded page pool for rest probes.
  * --tiers: a JSON file of fluid.tiers fields over the scene's (e.g. {"start":"4h","bricks":512}).
  * --water=inviscid zeroes the scene's viscosity and surface tension.
  * --closed fills the throat: the hydrostatic rest gate.
@@ -16,11 +19,12 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import "../lib/methods";
 import { createUniformSolver, readUniformFields, withUniformDevice } from "../tests/helpers/uniform-geometric";
+import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { sceneDocumentAtLattice } from "../lib/core/scene-definition";
-import { RESERVOIR_SEEP_ID } from "../lib/core/reservoir-seep-scene";
+import { createReservoirSeepScene, RESERVOIR_SEEP_ID } from "../lib/core/reservoir-seep-scene";
 import type { MethodParamValues } from "../lib/core/method-contract";
 import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
 
@@ -33,13 +37,20 @@ const stepMs: number[] = [], kernels = new Map<string, number[]>();
 const values: MethodParamValues = JSON.parse(option("values") ?? "{}");
 process.env.WEBGPU_NODE_MODULE ??= resolve("node_modules/webgpu/index.js");
 paceDawnEventPolling();
-const definition = getSceneDefinition(RESERVOIR_SEEP_ID);
+const height=Number(option("height")??1);
+assert.ok(Number.isFinite(height)&&height>0,"--height must be positive");
+const base = getSceneDefinition(RESERVOIR_SEEP_ID);
+const definition = { ...base, buildAt: (l: {cellSize_m:number}) => createReservoirSeepScene(l.cellSize_m,{heightScale:height}) };
 const { scene } = sceneDocumentAtLattice(definition, { cellSize_m: cell });
 if (closed) {
   // The rest gate: the throat and its mouths filled, the passage's wetted
   // start dropped (it would sit inside the wall).
   scene.solidVoxels = scene.solidVoxels!.filter(v => v.operation === "fill");
   scene.fluid.initialLiquidVolumes = scene.fluid.initialLiquidVolumes!.slice(0, 1);
+}
+if(option("pool")!==undefined){
+ const blocks=Number(option("pool"));assert.ok(Number.isSafeInteger(blocks)&&blocks>=4,"--pool must be an integer >= 4");
+ scene.fluid.pagePool={...scene.fluid.pagePool,blocks};
 }
 const tiersFile = option("tiers");
 if (tiersFile !== undefined) scene.fluid.tiers = { ...scene.fluid.tiers, ...JSON.parse(readFileSync(resolve(tiersFile), "utf8")) };
@@ -50,7 +61,10 @@ const tag = Object.entries(values).map(([k, v]) => `${k}-${v}`).join("_") || "de
 const out = resolve(option("out") ?? `artifacts/reservoir-bulk/${closed ? "rest" : "seep"}-${cell * 1000}mm-${tag}.json`);
 const rows: Record<string, unknown>[] = [];
 await withUniformDevice("reservoir bulk probe", async raw => {
-  const timer = gpuKernelTimer(raw), device = timer.device;
+  const maxGiB=Number(option("max-gib")??6);
+  assert.ok(Number.isFinite(maxGiB)&&maxGiB>0&&maxGiB<=6,"--max-gib must be in (0, 6]");
+  const allocation=auditUniformGPUAllocations(raw,maxGiB*2**30);
+  const timer = gpuKernelTimer(allocation.device), device = timer.device;
   device.addEventListener("uncapturederror", event => console.error("GPU validation:", event.error.message));
   const solver = await createUniformSolver(device, scene, { ...definition.methodProfile!.overrides, ...values });
   const frame = (solver as unknown as { mixedFrame: UniformMixedFrame }).mixedFrame;
@@ -66,6 +80,7 @@ await withUniformDevice("reservoir bulk probe", async raw => {
   let wall = 0;
   try {
     for (let step = 1; step <= steps; step++) {
+      if(step%every===0||step===steps)frame.requestNarrowBandVolumeProbe();
       const t = performance.now();
       timer.enabled = step >= kernelsFrom;
       assert.ok(solver.advanceTo(step * scene.numerics.fixedDt_s, []));
@@ -80,17 +95,17 @@ await withUniformDevice("reservoir bulk probe", async raw => {
       const tiers = (await words(frame.heat.tiers, 4 * frame.heat.regions)).slice(0, 3);
       const bulk = frame.bulk ? await frame.bulk.readCounts() : undefined;
       const stats = await solver.readStats();
-      const { density: volume } = await readUniformFields(device, solver);
+      const volume = process.argv.includes("--stats-only") ? undefined : (await readUniformFields(device, solver)).density;
       let escaped = 0, front = -1, total = 0, moment = 0;
       const floor = Math.max(2, Math.round(0.02 / cell));
-      for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+      if(volume) for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
         const v = volume[x + nx * (y + ny * z)]!;
         total += v;
         if (x >= high) { escaped += v; moment += v * x; if (y < floor && v > 0.5 && x > front) front = x; }
       }
       const row = { step, t_s: step * scene.numerics.fixedDt_s, wall_ms: wall / step, tiers, bulk,
         escaped_L: escaped * cell ** 3 * 1000, front_m: front < 0 ? null : (front + 0.5) * cell, mean_x_m: escaped > 0 ? (moment / escaped + 0.5) * cell : null,
-        volume: total, drift: stats.volumeDrift, maxSpeed: stats.maxSpeed_m_s, fine: solver.info.uniformMixedFineTiles,
+        volume: volume?total:undefined, drift: stats.volumeDrift, maxSpeed: stats.maxSpeed_m_s, fine: solver.info.uniformMixedFineTiles,
         residual: stats.uniformPressureAcceptedResidual };
       rows.push(row); console.log(JSON.stringify(row));
     }
@@ -102,5 +117,5 @@ const kernelMedians_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, qua
 const late = stepMs.slice(Math.floor(stepMs.length / 2));
 const timing = { median_ms: quantile(stepMs, 0.5), p95_ms: quantile(stepMs, 0.95), lateHalfMedian_ms: quantile(late, 0.5), lateHalfP95_ms: quantile(late, 0.95) };
 console.log(JSON.stringify(timing));
-writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, steps, closed, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, rows }, null, 2) + "\n");
+writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, height, steps, closed, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, rows }, null, 2) + "\n");
 console.log(JSON.stringify({ out }));

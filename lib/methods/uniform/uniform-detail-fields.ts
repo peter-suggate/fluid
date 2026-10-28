@@ -1052,8 +1052,8 @@ fn drShare(t:u32){
  /** A field's logical values at this point of an encoder (a mid-frame
   * diagnostic capture): the physical texels and the residency they are
   * placed by. Resolve the result after the encoder is submitted. */
- capture(encoder:GPUCommandEncoder,texture:GPUTexture):()=>Promise<Float32Array>{
-  const kind=this.kindOf(texture),[lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1;
+ capture(encoder:GPUCommandEncoder,texture:GPUTexture,atlasOnly=false):()=>Promise<Float32Array>{
+  const kind=atlasOnly?"atlas":this.kindOf(texture),[lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1;
   const source=this.physical(texture);
   const W=source.width,H=source.height,Z=source.depthOrArrayLayers,row=W*comp*4,pitch=Math.ceil(row/256)*256;
   const usage=GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ;
@@ -1093,7 +1093,7 @@ fn drShare(t:u32){
   * outside the ring. A base block alone broadcasts its texels as the
   * accessors load them. */
  private logical(kind:UniformDetailClass,[lx,ly,lz]:Dims,comp:number,image:Float32Array,[W,H]:readonly [number,number],resident:boolean,held:Float32Array|undefined,[bw,bh]:readonly [number,number]):Float32Array{
-  const out=new Float32Array(lx*ly*lz*comp);if(kind==="atlas")return out;
+  const out=new Float32Array(lx*ly*lz*comp);if(kind==="atlas"&&!resident)return out;
   const k=kind==="cell"?"cell":"face";
   for(let z=0;z<lz;z++)for(let y=0;y<ly;y++)for(let x=0;x<lx;x++){
    const jx=(x&3)===3?1:0,jy=(y&3)===3?1:0,jz=(z&3)===3?1:0,j=jx+jy+jz,m=jx+2*jy+3*jz;
@@ -1101,7 +1101,7 @@ fn drShare(t:u32){
    const canonical=((x&3)%3|(y&3)%3|(z&3)%3)===0&&(k==="face"?j<=1:j===0);
    let from=image,src:number;
    if(resident){
-    if(canonical&&held){from=held;src=this.baseIndex(k,x>>2,y>>2,z>>2,m,bw,bh);}else src=this.cellIndex(x,y,z,W,H);
+    if(kind!=="atlas"&&canonical&&held){from=held;src=this.baseIndex(k,x>>2,y>>2,z>>2,m,bw,bh);}else src=this.cellIndex(x,y,z,W,H);
    }else{
     if(k==="face"&&j>1)continue;
     src=this.baseIndex(k,x>>2,y>>2,z>>2,k==="face"?m:0,W,H);

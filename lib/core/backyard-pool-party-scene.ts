@@ -57,8 +57,8 @@ export function createBackyardPoolPartyScene(): SceneDescription {
   scene.voxelDomain = { finestCellSize_m: POOL_PARTY_CELL_M, brickSize_cells: 8 };
   scene.nominalResolution = { length_m: POOL_PARTY_CELL_M };
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 60;
-  scene.fluid = { density_kg_m3: 998.2, dynamicViscosity_Pa_s: 0.001002,
-    surfaceTension_N_m: 0.072, gravity_m_s2: { x: 0, y: -9.80665, z: 0 },
+  scene.fluid = { density_kg_m3: 998.2, dynamicViscosity_Pa_s: 0,
+    surfaceTension_N_m: 0, gravity_m_s2: { x: 0, y: -9.80665, z: 0 },
     initialCondition: "tank-fill", initialVelocity_m_s: { x: 0, y: 0, z: 0 },
     initialLiquidVolumes: [{ shape: "box", min_m: { x: -4, y: 0.2, z: -2 },
       max_m: { x: 4, y: POOL_PARTY_WATERLINE_M, z: 2 } }],

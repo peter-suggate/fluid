@@ -1,3 +1,4 @@
+import type { UniformBulkPages } from "./uniform-bulk-pages";
 import { uniformMixedHangingBytes, uniformMixedHangingSlotCapacity } from "./uniform-mixed-velocity-sampling.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import type { RefinementRegionLattice } from "../../core/refinement-regions";
@@ -113,6 +114,7 @@ export async function compileMixedTiers(compile:(width:1|4)=>Promise<GPUComputeP
  * the h-tile capacity (hangingSlots, fineTiles, owners) changes only between
  * frames, by the host (UniformMixedOwnership.reserveFine). */
 export interface UniformMixedCapacity{
+  readonly bulk?:UniformBulkPages["layout"];
   readonly lattice:RefinementRegionLattice;
   /** Key spaces and texture extents of the lattice. */
   readonly address:UniformLatticeAddress;
@@ -255,16 +257,17 @@ export class UniformMixedOwnership {
   // fixedWorldGeometry promises the seed's world policy and authored bounds
   // remain unchanged for this ownership's lifetime. Standalone page pools,
   // which can be reseeded, keep the default runtime header interpretation.
-  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true, fineTiles = layout.address.poolTiles, readonly fixedWorldGeometry = false) {
+  constructor(private readonly device: GPUDevice, layout: UniformMixedLayout, private readonly sampled = true, fineTiles = layout.address.poolTiles, readonly fixedWorldGeometry = false, readonly bulk?:UniformBulkPages) {
     this.currentLayout = layout;
     const address=layout.address,n=address.tileKeys;
     if(!Number.isInteger(fineTiles)||fineTiles<0||fineTiles>address.poolTiles)throw new Error(`Uniform mixed ownership cannot hold ${fineTiles} h tiles: its page pool stores at most ${address.poolTiles}`);
-    this.held={lattice:layout.lattice,address,tileDimensions:address.tiles,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:layout.boxOwners??63*fineTiles+address.poolTiles};
+    this.held={bulk:bulk?.layout,lattice:layout.lattice,address,tileDimensions:address.tiles,tiles:n,metadataBytes:layout.metadataBytes,hangingSlots:uniformMixedHangingSlotCapacity(n,fineTiles),fineTiles,owners:layout.boxOwners??63*fineTiles+address.poolTiles};
     this.dispatchX = device.limits.maxComputeWorkgroupsPerDimension;
     this.bindLayout = device.createBindGroupLayout({ entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      ...(bulk?[{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
     ] });
     this.hangingLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
     // The tail after the tile words: the page table and block records
@@ -311,6 +314,7 @@ export class UniformMixedOwnership {
     this.bindGroup = device.createBindGroup({ layout: this.bindLayout, entries: [
       { binding: 0, resource: { buffer: this.topology } }, { binding: 1, resource: { buffer: this.counts } },
       { binding: 2, resource: { buffer: this.support } },
+      ...(bulk?[{binding:3,resource:{buffer:bulk.state}}]:[]),
     ] });
   }
 

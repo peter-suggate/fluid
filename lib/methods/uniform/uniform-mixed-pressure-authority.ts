@@ -280,11 +280,11 @@ fn umAuthorityLiquid(o:UMOwner,distance:f32)->bool{return ${uniformMixedPressure
 // a zero that every sample within half a cell of the wall blends in. Unowned,
 // it continues the liquid's tangential velocity (free slip).
 fn umPhase(o:UMOwner,liquid:bool)->f32{
- if(!liquid){return 0.0;}
- ${this.coarse?"return select(0.0,1.0,umCapacity(o)>1e-5);":`// Phase needs only the binary predicate, which the solid record caches.
- // Fractional capacity is still evaluated wherever its value is required.
- if(umSolidEnabled()&&o.width==1u){return select(0.0,1.0,umCellIsOpen(vec3i(umOrigin(o))));}
- return select(0.0,1.0,umCapacity(o)>1e-5);`}
+ ${this.coarse?"let opened=umCapacity(o)>1e-5;":`var opened=true;
+ if(umSolidEnabled()&&o.width==1u){opened=umCellIsOpen(vec3i(umOrigin(o)));}
+ else{opened=umCapacity(o)>1e-5;}`}
+ if(!opened){return -1.0;}
+ return f32(liquid);
 }
 ${this.resident?"@group(1) @binding(9) var<storage,read> umSimulationTiles:array<u32>;":""}
 // V claims a row only where the simulation holds the owner at 4h.

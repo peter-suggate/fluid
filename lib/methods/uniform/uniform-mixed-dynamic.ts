@@ -872,7 +872,19 @@ fn umDepthSample(tile:u32,i:u32)->vec2u{
  let v=vec3i(umTileCoord(tile))+vec3i(umCorner(i,4u))-vec3i(1);
  if(!umWideVertexPresent(v)){return vec2u(0u);}
  let value=umLoadCorner(vec3u(v)*4u);
- return vec2u(orderKey(-value),orderKey(value));
+ // An interior sheet has two free surfaces; a wall film has only one.
+ // Count open incident cells by side so an actual closed half-space, not
+ // merely proximity to an obstacle, selects the one-sided thickness.
+ var low=vec3u(0u);var high=vec3u(0u);
+ for(var k=0u;k<8u;k++){
+  let bit=umCorner(k,2u);let cell=4*v+vec3i(bit)-1;
+  let kind=umCellKind(cell);if(kind==UM_SOLID){continue;}
+  if(kind!=UM_AIR){let t=umTileKey(cell>>vec3u(2u));if(!umCensusCellOpen(umCensusOpenCells(t),cell&vec3i(3))){continue;}}
+  high+=bit;low+=vec3u(1u)-bit;
+ }
+ let wall=any((low==vec3u(0u))&(high!=vec3u(0u)))||any((high==vec3u(0u))&(low!=vec3u(0u)));
+ let thickness=value*select(2.0,1.0,wall);
+ return vec2u(orderKey(-thickness),orderKey(thickness));
 }
 // Interface: an owner whose corner phi changes sign. V/phi disagreement
 // without one is counted, not refined: 4h V error is at or below fine on the
@@ -976,7 +988,7 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
   if(shaped){w1|=triggerBit(SHAPE);}
   let more=!shaped||scoreAll();
   if(more&&thinWanted()&&all(c.deep!=vec2u(0u))){
-   let thickness=2.0*max(min(orderValue(c.deep.x),orderValue(c.deep.y)),0.0)/UM_H;let thin=policy.importance.x;
+   let thickness=max(min(orderValue(c.deep.x),orderValue(c.deep.y)),0.0)/UM_H;let thin=policy.importance.x;
    w0|=scoreByte(thin/max(thickness,0.25*thin))<<8u;
    if(thickness<thin&&criterionOn(THIN)){w1|=triggerBit(THIN);}
   }

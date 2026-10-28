@@ -20,6 +20,27 @@ const previous=new Map<string,Float32Array>(),rows:unknown[]=[];
 let repeatFailure=false;
 paceDawnEventPolling();
 await withUniformDevice('NB-FLIP symmetry',async device=>{
+ if(option('cubic-debug')==='true'){
+  const buffer=device.createBuffer.bind(device);
+  device.createBuffer=d=>buffer({...d,...(d.label==='Uniform mixed surface job claims'?{size:Number(d.size)+4096}:{})});
+  const shader=device.createShaderModule.bind(device);
+  device.createShaderModule=d=>{
+   if(!d.code.includes('fn umCubicPhi('))return shader(d);
+   let code=d.code.replace('fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{',`var<private> debugBase=0xffffffffu;
+fn debugValue(offset:u32,value:f32){if(debugBase!=0xffffffffu){atomicStore(&umClaims[debugBase+offset],bitcast<u32>(value));}}
+fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
+ debugBase=0xffffffffu;if(p.x==6.0&&p.y==9.0&&(p.z==0.0||p.z==16.0)){debugBase=arrayLength(&umClaims)-1024u+select(0u,128u,p.z>0.0);}`);
+   code=code.replace('let width=i32(cell.width);let base=vec3i(cell.origin);let fraction=(q-vec3f(base))/f32(width);',`let width=i32(cell.width);let base=vec3i(cell.origin);let fraction=(q-vec3f(base))/f32(width);
+ for(var a=0u;a<3u;a++){debugValue(a,q[a]);debugValue(3u+a,f32(base[a]));}debugValue(6u,f32(width));debugValue(7u,cell.value);`);
+   code=code.replace('let wx=umHeldWeights',`for(var a=0u;a<3u;a++){debugValue(8u+a,f32(lowHeld[a]));debugValue(11u+a,f32(highHeld[a]));}
+ let wx=umHeldWeights`);
+   code=code.replace('if(buriedWeighted){return cell.value;}','if(buriedWeighted){debugValue(14u,1.0);return cell.value;}');
+   code=code.replace(')))){return cell.value;}',')))){debugValue(14u,2.0);return cell.value;}');
+   code=code.replaceAll('row+=wx[x]*s;','debugValue(32u+x+4u*(y+4u*z),s);row+=wx[x]*s;');
+   code=code.replace('return clamp(value,low,high);','debugValue(15u,value);debugValue(16u,low);debugValue(17u,high);return clamp(value,low,high);');
+   return shader({...d,code});
+  };
+ }
  if(option('exact-surface')==='true'||option('wall-contact')==='off'||option('linear-surface')==='true'){
   const create=device.createShaderModule.bind(device);
   device.createShaderModule=(d:GPUShaderModuleDescriptor)=>{
@@ -50,7 +71,7 @@ await withUniformDevice('NB-FLIP symmetry',async device=>{
    const read=device.createBuffer({size:f.ownership.presentation.buffer.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
    e.copyBufferToBuffer(f.ownership.presentation.buffer,0,read,0,read.size);
    const topology=async()=>{await read.mapAsync(GPUMapMode.READ);const words=new Uint32Array(read.getMappedRange()).slice();read.unmap();read.destroy();return words;};
-   pending.push({topology,name:`${step}-${name==='extended-velocity'?'extra':sequence++}-${name}`,extent:uniformDetailExtent(t),get:uniformDetailField(t)!.storage.capture(e,t)});
+   pending.push({topology,name:`${step}-${name==='extended-velocity'?'extra':sequence++}-${name}`,extent:uniformDetailExtent(t),get:uniformDetailField(t)!.storage.capture(e,t,name==="unit-velocity")});
   };
   const hook=(o:any,key:string,name:string,texture:()=>GPUTexture,before=false)=>{
    const original=o[key].bind(o);o[key]=(...args:any[])=>{if(before)capture(args[0],name,texture());const result=original(...args);if(!before)capture(args[0],name,texture());return result;};
@@ -77,10 +98,42 @@ await withUniformDevice('NB-FLIP symmetry',async device=>{
     });return result;
    };
   }
+  if(option('extension-slots')==='true'){
+   let serial=0;
+   for(const key of ['encode','finishPair']){
+    const original=f.extension[key].bind(f.extension);
+    f.extension[key]=(encoder:GPUCommandEncoder,...args:any[])=>{
+     const result=original(encoder,...args),extension=f.extension;
+     const read=device.createBuffer({size:2*extension.slotArray,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+     encoder.copyBufferToBuffer(extension.slots,0,read,0,read.size);
+     const label=`${run}-${step}-${serial++}-${key}`;
+     pendingBuffers.push(async()=>{await read.mapAsync(GPUMapMode.READ);writeFileSync(`${out}/${label}-slots.bin`,new Uint8Array(read.getMappedRange()));read.unmap();read.destroy();});
+     const address=f.ownership.capacity.address;
+     writeFileSync(`${out}/extension-layout.json`,JSON.stringify({slotArray:extension.slotArray,tiles:address.tileKeys,blocks:address.blocks,lowFaceKeys:address.lowFaceKeys},null,2));
+     for(const name of ['input','output','inputOrigins','outputOrigins']){
+      const texture=f.extension.hierarchy[name] as GPUTexture;
+      const row=Math.ceil(texture.width*16/256)*256;
+      const target=device.createBuffer({size:row*texture.height*texture.depthOrArrayLayers,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      encoder.copyTextureToBuffer({texture},{buffer:target,bytesPerRow:row,rowsPerImage:texture.height},{width:texture.width,height:texture.height,depthOrArrayLayers:texture.depthOrArrayLayers});
+      writeFileSync(`${out}/${label}-${name}.json`,JSON.stringify({width:texture.width,height:texture.height,depth:texture.depthOrArrayLayers,row}));
+      pendingBuffers.push(async()=>{await target.mapAsync(GPUMapMode.READ);writeFileSync(`${out}/${label}-${name}.bin`,new Uint8Array(target.getMappedRange()));target.unmap();target.destroy();});
+     }
+     capture(encoder,`${label}-phase`,f.fields.phase);
+     return result;
+    };
+   }
+  }
   hook(nb,'bootstrap','pre-seed-phi',()=>f.fields.phi,true);
   if(option('capture-extended')==='true'||(option('capture-extended')==='alternate'&&run%2))hook(f.surface,'encode','extended-velocity',()=>f.fields.velocityScratch,true);
   if(option('capture-unit')==='true')hook(f.surface,'encode','unit-velocity',()=>f.hanging.unitVelocity,true);
   hook(f.surface,'encode','advected-phi',()=>f.fields.phiScratch);
+  if(option('cubic-debug')==='true'){
+   const encode=f.surface.encode.bind(f.surface);f.surface.encode=(e:GPUCommandEncoder,...args:any[])=>{
+    const value=encode(e,...args),buffer=device.createBuffer({size:4096,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    e.copyBufferToBuffer(f.surface.claims,f.surface.claims.size-4096,buffer,0,4096);
+    pendingBuffers.push(async()=>{await buffer.mapAsync(GPUMapMode.READ);writeFileSync(`${out}/${run}-${step}-cubic.bin`,new Uint8Array(buffer.getMappedRange()));buffer.unmap();buffer.destroy();});return value;
+   };
+  }
   hook(nb,'reconstruct','reconstructed-phi',()=>f.fields.phi);
   if(option('capture-retired')==='true')hook(nb,'retire','retired-phi',()=>f.fields.phi);
   hook(nb,'redistance','redistanced-phi',()=>f.fields.phi);

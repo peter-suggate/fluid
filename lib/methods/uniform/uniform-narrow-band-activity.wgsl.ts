@@ -1,6 +1,5 @@
 import {UNIFORM_SURFACE_TRANSPORT_ERROR_H} from "./uniform-surface-transport.wgsl";
 import { UNIFORM_STAGE_IMPORTANCE as I } from "./uniform-stage-grids";
-import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
 
 /** EXNB-style heat, driven by the existing resolution/error/contact census.
  * Heat is dimensionless; cooling is per second, not per accepted step. A
@@ -13,13 +12,11 @@ import { UNIFORM_BODY_GEOMETRY_REACH } from "./uniform-mixed-solid.wgsl";
 /** fn nbActivityTriggered(t:u32,criteria:u32)->bool: whether tile key t's
  * triggered criteria (bits in UNIFORM_DETAIL_CRITERIA order: shape, thin,
  * strain, rotation, impact, approach) heat it. "activity": any. "need":
- * strain, rotation, impact or approach; thin geometry and shape near a body
- * also require per-tile deformation above the transport budget: a uniform
- * motion carries a shape unchanged (Sato et al. 2018: translation, e.g. free
- * fall, is no detail), and the grid's transport moves it. Static shape
- * remains spatially refined without refreshing particle heat. Shape elsewhere measures
- * h-versus-4h surface error, which the h tiles it requires already carry:
- * a ripple or a resting wall's meniscus needs h, not particles. */
+ * strain, rotation, impact, approach or shape; thin geometry also requires
+ * per-tile deformation above the transport budget. Shape is the geometric
+ * term (Sato et al. 2018, Eq. 4), which heats whatever the motion: it
+ * "acts to retain sharp corners during the liquid's free-fall". Only their
+ * velocity term (Eq. 3) ignores translation. */
 /** fn nbSourceHeats(q:vec3f)->bool: whether a source at tile centre q heats
  * its tile regardless of the census. "need": never; a smooth stream is held
  * by the grid and heats where it thins, impacts or shears. "always": every
@@ -31,6 +28,9 @@ export function narrowBandActivityTriggerWGSL(seeding:"need"|"activity",sources:
 fn nbActivityTriggered(t:u32,criteria:u32)->bool{
  // Strain, rotation, impact and approach already measure evolution.
  if((criteria&0x3cu)!=0u){return true;}
+ // Shape is the geometric term (Sato et al. 2018, Eq. 4): it heats whatever
+ // the motion, retaining sharp corners during free fall (their Fig. 1).
+ if((criteria&1u)!=0u){return true;}
  // Thin/curved geometry still requests h in the census. It requests particles
  // only when motion can change that shape by more than the transport budget:
  // the velocity's change across the tile, not its speed. A translating
@@ -38,7 +38,7 @@ fn nbActivityTriggered(t:u32,criteria:u32)->bool{
  // every frame at 1.25 cells a step, and seeded ~29k particles.
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
  let changing=params.hDt.w*tuDeformation(t)/h>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
- return changing&&((criteria&2u)!=0u||((criteria&1u)!=0u&&umBodyCount()>0u&&umBodyPoseNearTile(t,${UNIFORM_BODY_GEOMETRY_REACH}u)));
+ return changing&&(criteria&2u)!=0u;
 }`;}
 export const NARROW_BAND_ACTIVITY_WORDS_PER_TILE = 11;
 export const narrowBandActivityWGSL = /* wgsl */`

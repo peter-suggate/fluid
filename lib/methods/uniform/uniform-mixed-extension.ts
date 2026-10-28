@@ -59,13 +59,17 @@ export function uniformExtensionFarValueWGSL(name:string):string{
 // fractions (each zero factor floored to 2^-10, below every positive one, so
 // a positive weight is unchanged). A trailing tile's -face then takes the
 // tile above's known value rather than zero. Zero with none.
+fn ueFarOpen(tile:vec3i)->bool{
+ let cell=4*tile+vec3i(2);if(!umCellPresent(cell)){return false;}
+ let owner=umOwnerAt(cell);return textureLoad(phase,vec3i(umOrigin(owner)),0).x>=0.0;
+}
 fn ${name}(face:UMFace)->f32{
  let point=umFaceCenter(face);var q=point/4.0-vec3f(0.5);q[face.axis]-=0.5;
  let base=vec3i(floor(q));let fraction=fract(q);var sum=0.0;var total=0.0;
  for(var farPass=0u;farPass<2u&&total<=0.0;farPass++){for(var k=0u;k<8u;k++){
   let bit=vec3i(umCorner(k,2u));let w=select(vec3f(1)-fraction,fraction,bit==vec3i(1));if((w.x*w.y*w.z>0.0)!=(farPass==0u)){continue;}
   let floored=max(w,vec3f(0.0009765625));let weight=floored.x*floored.y*floored.z;
-  let texel=umTileStoreTexel(base+bit);if(texel.x<0){continue;}
+  let texel=umTileStoreTexel(base+bit);if(texel.x<0||!ueFarOpen(base+bit)){continue;}
   let state=textureLoad(coarse,texel,0);
   if((u32(round(state.w))&(1u<<face.axis))==0u){continue;}
   sum+=weight*state[face.axis];total+=weight;
@@ -1298,7 +1302,7 @@ var<workgroup> rbFlags:array<u32,192>;
  // face here is finite, so the restriction is the empty one written below.
  // Every slot read below is anchored in this tile: a supported tile whose
  // final mask is empty restricts to the same empty state.
- let supported=inside&&any(ueMaskIn(tile)!=vec2u(0u));
+ let supported=inside&&ueFarOpen(vec3i(gid))&&any(ueMaskIn(tile)!=vec2u(0u));
  rbValues[at]=0.0;rbLower[at]=0u;rbUpper[at]=0u;rbFlags[at]=0u;
  // The tile's +face on a closed wall is seeded, never restricted (umClosedWall).
  var top=origin;top[component]+=3;
@@ -1416,8 +1420,8 @@ fn uePublishFine(owner:UMOwner,lane:u32){
  let required=workgroupUniformLoad(&farRequired);
  if(required==0u){ueHeldFine(owner,value,held);value.w=textureLoad(physical,vec3i(origin),0).w;textureStore(output,vec3i(origin),value);return;}
  if(lane<27u){
-  let texel=umTileStoreTexel(vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1));farKnown[lane]=0u;
-  if(texel.x>=0){let state=textureLoad(coarse,texel,0);farState[lane]=state;farKnown[lane]=u32(round(state.w))&7u;}
+  let tile=vec3i(umTileCoord(farTile))+vec3i(umCorner(lane,3u))-vec3i(1);let texel=umTileStoreTexel(tile);farKnown[lane]=0u;
+  if(texel.x>=0&&ueFarOpen(tile)){let state=textureLoad(coarse,texel,0);farState[lane]=state;farKnown[lane]=u32(round(state.w))&7u;}
  }
  workgroupBarrier();
  for(var axis=0u;axis<3u;axis++){

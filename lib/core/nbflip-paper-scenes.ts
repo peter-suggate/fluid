@@ -59,7 +59,7 @@ export const NBFLIP_METHOD_PROFILE: MethodProfile = {
 /**
  * A closed, free-slip box of `grid` cells (width, height, depth) holding a
  * pool `poolCells` deep, stepped once a frame of `dt` for `frames` frames.
- * Surface tension is zeroed because the paper's solvers have none.
+ * Inviscid water without surface tension matches the paper and realtime presets.
  *
  * `lattice` is the solver's grid where that has to be larger than the box:
  * the box then stands on the floor in the middle of it, and everything
@@ -97,6 +97,7 @@ export function nbflipDomain(
   scene.fluid = {
     ...scene.fluid,
     gravity_m_s2: { x: 0, y: -gravity_m_s2, z: 0 },
+    dynamicViscosity_Pa_s: 0,
     surfaceTension_N_m: 0,
     initialCondition: "tank-fill",
   };

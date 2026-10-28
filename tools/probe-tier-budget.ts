@@ -9,6 +9,8 @@
  * node --import tsx tools/probe-tier-budget.ts NAME --classify [--scene=..] [--cell=..] [--pool=<blocks>] [--steps=.. then runs]
  * node --import tsx tools/probe-tier-budget.ts NAME --print-scene [--reservoir=1,2,4] [--cell=..]  (no GPU)
  *
+ * --tiers=FILE applies a fluid.tiers budget; --water=inviscid disables viscosity and tension.
+ * --max-gib=N enforces a construction and live allocation cap (default and maximum 6).
  * --region=rest|cold|warm|splash|hot runs a region-tier scene
  * (tools/region-tier-scenes.ts, 128 x 32, balanced, as the paired benchmark)
  * in place of --scene. --cell rebuilds the scene through its own buildAt at that h. --pool sets
@@ -74,6 +76,7 @@ import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopo
 import type { UniformMixedOwnership } from "../lib/methods/uniform/uniform-mixed-ownership";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
 
@@ -88,7 +91,12 @@ if (options.includes("--retire")) narrowBandRetireCounting.on = true;
 const retireSplit = options.find(a => a.startsWith("--retireSplit="));
 if (retireSplit) { const [x, y] = retireSplit.slice(14).split(","); narrowBandRetireCounting.on = true; narrowBandRetireCounting.splitX = Number(x); narrowBandRetireCounting.splitY = Number(y ?? 0); }
 assert.match(name, /^[a-z0-9.-]+$/, "usage: probe-tier-budget.ts NAME [--scene=..] [--steps=..] [--every=..] ...");
-for (const a of options) assert.ok(/^(--(?:scene|region|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|ledger|set|out|classes|retireSplit|kernels)=.+|--classify|--print-scene|--heatState|--census|--retire|--particleMass|--cells|--walls)$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^(--(?:scene|region|steps|every|from|cell|pool|reservoir|wallShift|mouths|throat|phiStages|flowStages|ledger|set|out|classes|retireSplit|kernels|tiers|water|max-gib|volume-gate)=.+|--classify|--print-scene|--heatState|--census|--retire|--particleMass|--cells|--walls)$/.test(a), `Unknown option: ${a}`);
+// --volume-gate=0.001: fresh phi volume on EVERY step, independently of
+// --every's spatial reports. Save the complete trace and fail the command
+// if any measurement exceeds the requested fractional drift.
+const volumeGateLimit=option("volume-gate")===undefined?undefined:Number(option("volume-gate"));
+assert.ok(volumeGateLimit===undefined||(Number.isFinite(volumeGateLimit)&&volumeGateLimit>=0));
 // --kernels=A-B[,C-D]: per-dispatch GPU times (tools/gpu-kernel-timer.ts)
 // over those step windows, a median a label each with the window's records.
 // Attribution only: the timer splits every dispatch into its own pass.
@@ -217,10 +225,12 @@ function reshapeThroat(scene: SceneDescription, mouthShape: string, side: number
 }
 
 function buildScene(k: number, pool?: number, dryLiquid = false): SceneDescription {
-  if (region) { const scene = createRegionTierScene(region); if (pool !== undefined) scene.fluid.pagePool = { ...scene.fluid.pagePool, blocks: pool }; return scene; }
-  const base = cell === undefined ? sceneDocument(definition) : sceneDocumentAtLattice(definition, { cellSize_m: cell, detailCellSize_m: cell }).scene;
-  const scene = reshapeThroat(shiftWall(lengthenReservoir(structuredClone(base), k, dryLiquid), dryLiquid ? 0 : wallShift), mouths, throatCells);
+  const base = region ? createRegionTierScene(region) : cell === undefined ? sceneDocument(definition) : sceneDocumentAtLattice(definition, { cellSize_m: cell, detailCellSize_m: cell }).scene;
+  const scene = region ? base : reshapeThroat(shiftWall(lengthenReservoir(structuredClone(base), k, dryLiquid), dryLiquid ? 0 : wallShift), mouths, throatCells);
   if (pool !== undefined) scene.fluid.pagePool = { ...scene.fluid.pagePool, blocks: pool };
+  if(option("tiers"))scene.fluid.tiers={...scene.fluid.tiers,...JSON.parse(readFileSync(resolve(option("tiers")!),"utf8"))};
+  const water=option("water");assert.ok(water===undefined||water==="inviscid","--water=inviscid");
+  if(water==="inviscid"){scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;}
   return scene;
 }
 
@@ -274,7 +284,10 @@ const adapter = await gpu.requestAdapter(); assert.ok(adapter);
 // spares later constructions the cold compile (~150 s on an M1 Max).
 const raw = await adapter.requestDevice({ requiredFeatures: [...(["subgroups", "float32-filterable", "timestamp-query"] as const).filter(f => (f !== "timestamp-query" || kernelWindows.length > 0) && adapter.features.has(f))],
   requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
-const memory = new GPUMemoryProfile(raw);
+const maxGiB=Number(option("max-gib")??6);
+assert.ok(Number.isFinite(maxGiB)&&maxGiB>0&&maxGiB<=6,"--max-gib must be in (0, 6]");
+const allocation=auditUniformGPUAllocations(raw,maxGiB*2**30);
+const memory = new GPUMemoryProfile(allocation.device);
 const timer = kernelWindows.length ? gpuKernelTimer(memory.device) : undefined;
 const device = managedGPUDevice(timer?.device ?? memory.device, { requireWorkerRealm: false });
 let errors: string[] = [];
@@ -344,24 +357,35 @@ const metadata = { name, sceneId, arguments: process.argv.slice(2), date: new Da
 console.log(JSON.stringify({ phase: "start", ...metadata, values: undefined }));
 
 const rows: Record<string, unknown>[] = [], walls: { frame: number; wall_ms: number; afterSample: boolean }[] = [];
+const volumeChecks:{step:number;drift:number}[]=[];
 let c: Awaited<ReturnType<typeof construct>> | undefined, failure: string | undefined, frameReached = 0;
 const LINE = 64, LINE_AT = 44, MOUTH = [6, 5, 5], MOUTH_AT = LINE_AT + 3 * LINE, VLINE = 12, VLINE_AT = MOUTH_AT + 4 * MOUTH[0]! * MOUTH[1]! * MOUTH[2]!, ZONES_AT = VLINE_AT + 4 * VLINE, ORIGIN_AT = ZONES_AT + 22, W = ORIGIN_AT + 3; // probe words: 44 scalars, throat data, zones, then box origin
 try {
   c = await construct(scene);
   const { solver } = c, base = c.base;
   const constructionMemory = since(base);
-  const construction = { construction_ms: c.construction_ms, allocatedBytes: constructionMemory.bytes, byClass: bytesByClass(constructionMemory, g.pool ?? 0, g.boxCells),
+  const allocated=allocation.snapshot();
+  const construction = { requestedPeakBytes:allocated.peakBytes, construction_ms: c.construction_ms, allocatedBytes: constructionMemory.bytes, byClass: bytesByClass(constructionMemory, g.pool ?? 0, g.boxCells),
     grid: [solver.info.nx, solver.info.ny, solver.info.nz] };
   writeFileSync(`${out}/${name}-construction-memory.json`, JSON.stringify({ ...construction, resources: constructionMemory.resources }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "constructed", ...construction }));
-  const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; ownership: UniformMixedOwnership; heat: { counts: { buffer: GPUBuffer; offset: number }; tiers: GPUBuffer; state: GPUBuffer; regions: number }; freeze?: { buffer: GPUBuffer }; solid?: { coarse?: { record: GPUBuffer } } } }).mixedFrame;
+  const frame = (solver as unknown as { mixedFrame: { pagePool: UniformPagePool; ownership: UniformMixedOwnership; requestNarrowBandVolumeProbe():void; heat: { counts: { buffer: GPUBuffer; offset: number }; tiers: GPUBuffer; state: GPUBuffer; regions: number }; freeze?: { buffer: GPUBuffer }; solid?: { coarse?: { record: GPUBuffer } } } }).mixedFrame;
   // The projection's face apertures: the coarse solid record, a vec4 (open, V+x, V+y, V+z) per owner index (umRecordV).
   const solidRecord = frame.solid?.coarse?.record ?? device.createBuffer({ label: "Tier budget no solid record", size: 16, usage: GPUBufferUsage.STORAGE });
   const textures = solver as unknown as { vertexPhiField: GPUTexture; vertexPhiScratch: GPUTexture; velocityA: GPUTexture };
-  // NB-FLIP's cell bins (a sample count a cell key, nbBinCount without a
-  // particle budget): the catch floor's particle mass, eight samples a cell.
-  const flipBins = (frame as unknown as { narrowBandFlip?: { airGateBuffer: GPUBuffer; budget?: unknown } }).narrowBandFlip;
-  const particleBins = flipBins && !flipBins.budget ? flipBins.airGateBuffer : device.createBuffer({ label: "Tier budget no bins", size: 4 * frame.ownership.capacity.address.cellKeys, usage: GPUBufferUsage.STORAGE });
+  // Match the solver's budgeted addressing and physical-mass plane.
+  const flipBins = (frame as unknown as { narrowBandFlip?: { airGateBuffer: GPUBuffer; budget?: unknown; binCells:number; countWords:number; binSlots:number; crowdedCells:string } }).narrowBandFlip;
+  const particleBins = flipBins?.airGateBuffer ?? device.createBuffer({ label: "Tier budget no bins", size: 4, usage: GPUBufferUsage.STORAGE });
+  const coverageCode = !flipBins ? "fn particleMassAt(c:vec3u)->u32{return 0u;}" : `
+fn particleMassAt(c:vec3u)->u32{
+ let cell=umCellAt(c);let tile=cell/64u;
+ if(particleBins[${flipBins.countWords}u+tile]==0u){return 0u;}
+ var bin=cell;
+ ${flipBins.binSlots ? `let brick=64u*(tile>>9u)+((tile>>1u)&3u)+4u*((tile>>4u)&3u)+16u*((tile>>7u)&3u);
+ let slot=particleBins[${flipBins.binCells}u+brick];
+ bin=512u*slot+64u*((tile&1u)+2u*((tile>>3u)&1u)+4u*((tile>>6u)&1u))+cell%64u;` : ""}
+ return particleBins[bin];
+}`;
   // Zone probe: one lane per owner of every tier, as UniformMixedDiagnostics.
   // Each load form (LOADS) runs over the phi field and over its scratch twin:
   // the frame ping-pongs phi through both, and a sample keeps the pair whose
@@ -410,6 +434,7 @@ ${bindings}
 @group(1) @binding(4) var<storage,read> solidRecord:array<vec4f>;
 @group(1) @binding(5) var<storage,read> particleBins:array<u32>;
 ${loads}
+${coverageCode}
 ${levelSetFillWGSL}
 // An owner's liquid in h cells: NB-FLIP's volume measure
 // (uniform-mixed-surface-volume.ts measure): the tetrahedral fill of its
@@ -500,7 +525,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
   // The same over the right chamber's h owners: samples, their excess, the
   // level set's liquid without and with samples.
   if(right&&w==1u){
-   let samples=f32(min(particleBins[umCellAt(window)],8u))/8.0;
+   let samples=f32(min(particleMassAt(window),8u))/8.0;
    atomicAdd(&sums[12],u32(samples*4096.0+0.5));
    atomicAdd(&sums[13],u32(max(samples-liquid,0.0)*4096.0+0.5));
    if(samples==0.0){atomicAdd(&sums[14],fixed);}else{atomicAdd(&sums[15],fixed);}
@@ -510,7 +535,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
    // The h floor band's samples against its level set, cell by cell: the
    // samples' mass (min(count, 8)/8 a cell), where they exceed the level
    // set, the level set's liquid in cells without a sample, and in cells with one.
-   let samples=f32(min(particleBins[umCellAt(window)],8u))/8.0;
+   let samples=f32(min(particleMassAt(window),8u))/8.0;
    atomicAdd(&sums[8],u32(samples*4096.0+0.5));
    atomicAdd(&sums[9],u32(max(samples-liquid,0.0)*4096.0+0.5));
    if(samples==0.0){atomicAdd(&sums[10],fixed);}else{atomicAdd(&sums[11],fixed);}
@@ -914,7 +939,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
     };
   })() : undefined;
   const cells = cellCensus ? (() => {
-    const flip = (frame as unknown as { narrowBandFlip: { particles: readonly [GPUBuffer, GPUBuffer]; state: GPUBuffer; capacity: number; particleStride: number } }).narrowBandFlip;
+    const flip = (frame as unknown as { narrowBandFlip: { particles: readonly [GPUBuffer, GPUBuffer]; state: GPUBuffer; capacity: number; particleStride: number; crowdedCells: string } }).narrowBandFlip;
     const words = flip.particleStride, bytes = particleMassReadbackBytes(flip.capacity, words);
     const buffer = device.createBuffer({ label: "Tier budget cell census", size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     return async () => {
@@ -922,18 +947,26 @@ var<workgroup> sums:array<atomic<u32>,16>;
       encoder.copyBufferToBuffer(flip.state, 0, buffer, 0, 4 * PARTICLE_MASS_HEADER_WORDS);
       encoder.copyBufferToBuffer(flip.particles[1], 0, buffer, 4 * PARTICLE_MASS_HEADER_WORDS, bytes - 4 * PARTICLE_MASS_HEADER_WORDS); device.queue.submit([encoder.finish()]);
       await buffer.mapAsync(GPUMapMode.READ); const raw = buffer.getMappedRange();
-      const byCell = new Map<number, number>(), brick = new Map<number, number>(); let live = 0;
+      const byCell = new Map<number, number>(), byMass = new Map<number, number>(), brick = new Map<number, number>(); let live = 0;
+      const positions=new Map<string,number>();let coincidentRecords=0,maxCoincident=0;
       const key = (x: number, y: number, z: number) => (x + 4096) + 8192 * ((y + 4096) + 8192 * (z + 4096));
-      for (const p of particleMassRecords(raw, flip.capacity, words, false)) {
+      for (const p of particleMassRecords(raw, flip.capacity, words, flip.crowdedCells === "merge")) {
         const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z); live++;
         const c = key(x, y, z), b = key(x >> 3, y >> 3, z >> 3);
-        byCell.set(c, (byCell.get(c) ?? 0) + 1); brick.set(b, (brick.get(b) ?? 0) + 1);
+        byCell.set(c, (byCell.get(c) ?? 0) + 1); byMass.set(c, (byMass.get(c) ?? 0) + p.mass); brick.set(b, (brick.get(b) ?? 0) + 1);
+        const position=`${p.x},${p.y},${p.z}`,count=(positions.get(position)??0)+1;
+        positions.set(position,count);coincidentRecords+=+(count>1);maxCoincident=Math.max(maxCoincident,count);
       }
       buffer.unmap();
       const histogram: Record<string, number> = { "1-8": 0, "9-20": 0, "21-64": 0, "65-256": 0, ">256": 0 }; let maxCell = 0, over256Records = 0, squares = 0;
       for (const n of byCell.values()) { maxCell = Math.max(maxCell, n); squares += n * n; const k = n <= 8 ? "1-8" : n <= 20 ? "9-20" : n <= 64 ? "21-64" : n <= 256 ? "65-256" : ">256"; histogram[k]!++; if (n > 256) over256Records += n; }
+      // The union sees at most eight mass units per cell, regardless of
+      // whether they arrive as unit records or merged particles.
+      let mass=0,hiddenMass=0,maxCellMass=0,cellsOver8Mass=0,cellsOver16Mass=0;
+      for(const m of byMass.values()){mass+=m;hiddenMass+=Math.max(0,m-8);maxCellMass=Math.max(maxCellMass,m);cellsOver8Mass+=+(m>8);cellsOver16Mass+=+(m>16);}
+      const massCensus={mass,hiddenMass,hidden_L:hiddenMass/8*cell3*1000,maxCellMass,cellsOver8Mass,cellsOver16Mass};
       const bricks = [...brick.values()].sort((a, b) => b - a);
-      return { live, cells: byCell.size, maxCell, over256Records, sumSquares: squares, histogram, bricks: bricks.length, maxBrick: bricks[0] ?? 0, top8Bricks: bricks.slice(0, 8), bricksOver2048: bricks.filter(n => n > 2048).length };
+      return { live, mass:massCensus, coincidentRecords,maxCoincident,cells: byCell.size, maxCell, over256Records, sumSquares: squares, histogram, bricks: bricks.length, maxBrick: bricks[0] ?? 0, top8Bricks: bricks.slice(0, 8), bricksOver2048: bricks.filter(n => n > 2048).length };
     };
   })() : undefined;
   const kernelSamples = new Map<string, number[]>(); let kernelParticles: number[] = [], kernelSums: number[] = [], kernelFine: number[] = [];
@@ -1035,12 +1068,19 @@ var<workgroup> sums:array<atomic<u32>,16>;
   const band: number[][] = [];
   for (let step = 1; step <= steps; step++) {
     frameReached = step;
+    if(volumeGateLimit!==undefined||step%every===0||step===steps)frame.requestNarrowBandVolumeProbe();
     phiTaken = phiStageSteps.has(step) ? [] : undefined;
     flowTaken = flowSteps.has(step) ? [] : undefined; flowMeasured = flowTaken ? [] : undefined;
     ledgerOn = !!ledgerRange && step >= ledgerRange[0]! && step <= ledgerRange[1]!;
     const kw = timer ? kernelWindows.find(([a, b]) => step >= a && step <= b) : undefined, timed = !!kw && (step - 1) % every !== 0;
     if (timer) timer.enabled = timed;
     const wall_ms = await advance(step);
+    if(volumeGateLimit!==undefined){
+      const measured=await solver.readStats();
+      assert.equal(measured.volumeTelemetrySource,"narrow-band-phi","The volume gate requires this step's phi measurement");
+      assert.ok(Number.isFinite(measured.volumeDrift),"The volume gate requires finite drift");
+      volumeChecks.push({step,drift:measured.volumeDrift!});
+    }
     if (timer) {
       timer.enabled = false;
       if (timed) { const k = await timer.collect(); let sum = 0; for (const [label, ms] of k.byLabel) { const list = kernelSamples.get(label) ?? []; list.push(ms); kernelSamples.set(label, list); sum += ms; } kernelSums.push(sum); kernelParticles.push(solver.narrowBandFlipInfo?.particles ?? 0); kernelFine.push((solver.info as unknown as Record<string, number | undefined>).uniformMixedFineTiles ?? 0); }
@@ -1096,6 +1136,10 @@ var<workgroup> sums:array<atomic<u32>,16>;
   console.error(`failed at step ${frameReached}: ${failure}`);
 }
 // Summary: fenced step over frames >= from, the frame after a sample apart.
+const worstVolume=volumeChecks.reduce<{step:number;drift:number}|undefined>((worst,row)=>!worst||Math.abs(row.drift)>Math.abs(worst.drift)?row:worst,undefined);
+const volumeGate=volumeGateLimit===undefined?undefined:{limit:volumeGateLimit,measurements:volumeChecks.length,worst:worstVolume,
+  passed:failure===undefined&&volumeChecks.length===steps&&!!worstVolume&&Math.abs(worstVolume.drift)<=volumeGateLimit};
+if(volumeGate&&!volumeGate.passed)failure??=`phi volume gate failed: worst drift ${worstVolume?.drift} at step ${worstVolume?.step}, limit ±${volumeGateLimit}`;
 const timed = walls.filter(w => w.frame >= from && !w.afterSample).map(w => w.wall_ms).sort((a, b) => a - b);
 const pct = (p: number) => timed.length ? timed[Math.min(timed.length - 1, Math.ceil(timed.length * p) - 1)] : undefined;
 const mean = timed.length ? timed.reduce((a, b) => a + b, 0) / timed.length : undefined;
@@ -1106,13 +1150,14 @@ const thirds = [0, 1, 2].map(i => { const w = walls.filter(x => x.frame >= from 
   return s.length ? s.reduce((a, b) => a + b, 0) / s.length : undefined; });
 const lateMean = (path: string) => { const v = rows.map(r => get(r, path)).filter((x): x is number => x !== undefined && Number.isFinite(x)).slice(1);
   const l = v.slice(Math.floor(v.length / 2)); return l.length ? l.reduce((x, y) => x + y, 0) / l.length : undefined; };
-const summary = { steps: frameReached, failure, traceCapped: traceCappedTotal, step_ms: { mean, median: pct(.5), p95: pct(.95), longest: timed[timed.length - 1], thirds },
+const summary = { steps: frameReached, failure, volumeGate, traceCapped: traceCappedTotal, step_ms: { mean, median: pct(.5), p95: pct(.95), longest: timed[timed.length - 1], thirds },
   peaks: { hTiles: peak("tiles.h"), coarseTiles: peak("tiles.coarse"), resident: peak("pool.resident"), particles: peak("particles"),
     hTilesRightFloor: peak("zones.hTilesRightFloor"), hTilesRightJet: peak("zones.hTilesRightJet"), hTilesThroat: peak("zones.hTilesThroat"), hot: peak("regions.hot"), warm: peak("regions.warm"), allocatedBytes: peak("allocatedBytes") },
   final: { tiles: last.tiles, pool: last.pool, regions: last.regions, zones: last.zones, volume: last.volume, liquid_m3: last.liquid_m3, byClass: last.byClass },
   discharge: { cdRightLateHalfMean: lateMean("discharge.cdRight"), cdThroatLateHalfMean: lateMean("discharge.cdInstant"), qThroatLateHalfMean_m3_s: lateMean("discharge.qInstant_m3_s"),
     rightVolume_L: (get(last, "liquid_m3.right") ?? 0) * 1000, torricelliAtStart_m3_s: get(rows[0] ?? {}, "discharge.qTorricelli_m3_s") } };
-writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, summary, rows, walls }, null, 2) + "\n");
+writeFileSync(`${out}/${name}.json`, JSON.stringify({ ...metadata, summary, rows, walls,volumeChecks:volumeGate?volumeChecks:undefined }, null, 2) + "\n");
+if(volumeGate)console.log(JSON.stringify({volumeGate}));
 const fmt = (v: number | undefined, d = 1) => v === undefined ? "-" : v.toFixed(d);
 const gib = (b: number | undefined) => b === undefined ? "-" : (b / 2 ** 30).toFixed(2);
 const byClass = (last.byClass ?? {}) as Record<string, number>;

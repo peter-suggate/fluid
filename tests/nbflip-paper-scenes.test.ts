@@ -23,6 +23,8 @@ function paperScene(id: string): SceneDescription {
   assert.deepEqual(definition.methodProfile, id === NBFLIP_TEASER_SCENE_ID
     ? { ...NBFLIP_METHOD_PROFILE, overrides: {} } : NBFLIP_METHOD_PROFILE, id);
   assert.ok(lattice(scene).every((cells) => cells % 4 === 0), `${id}: the method's tiles are four cells wide`);
+  assert.equal(scene.fluid.dynamicViscosity_Pa_s, 0);
+  assert.equal(scene.fluid.surfaceTension_N_m, 0);
   assert.equal(scene.container.top, "closed");
   assert.equal(scene.container.fluidWallMode, "free-slip");
   return scene;

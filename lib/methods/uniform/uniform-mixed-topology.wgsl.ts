@@ -1,3 +1,5 @@
+import {bulk16ReadWGSL} from "./uniform-bulk-pages-reference";
+import type {UniformBulkPages} from "./uniform-bulk-pages";
 import { uniformAddressPlanWGSL } from "./uniform-address-plan";
 import { uniformCompiledTopologyWGSL } from "./uniform-compiled-topology";
 import { uniformMixedFacesWGSL } from "./uniform-mixed-faces.wgsl";
@@ -72,7 +74,7 @@ export const uniformMixedSupportWords=(tiles:number)=>uniformMixedActiveWord(til
  */
 /** The lattice and tile count a topology shader is specialized for: an
  * ownership's fixed capacity (or a layout, whose tiles are the same lattice). */
-export type UniformMixedTopologyShape = { readonly lattice: UniformMixedLayout["lattice"]; readonly tiles: number | { readonly length: number } };
+export type UniformMixedTopologyShape = { readonly bulk?:UniformBulkPages["layout"]; readonly lattice: UniformMixedLayout["lattice"]; readonly tiles: number | { readonly length: number } };
 /** pagesOf: the namespace of another topology instance of the same lattice
  * in the module, whose buffer holds the page table this one reads: an
  * instance bound to a generation's tile words alone (the layout builder's)
@@ -86,6 +88,7 @@ export function uniformMixedTopologyWGSL(shape: UniformMixedTopologyShape, group
 @group(${group}) @binding(0) var<storage,read> umTopology:array<u32>;
 @group(${group}) @binding(1) var<uniform> umCounts:vec4u;
 @group(${group}) @binding(2) var<storage,read_write> umSupport:array<u32>;
+${shape.bulk?bulk16ReadWGSL(shape.bulk,group,3):""}
 override umCellWidth:u32=1u;
 override umDispatchX:u32=65535u;
 override umRegularFine:bool=false;
@@ -156,7 +159,7 @@ fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*sid
 // the page coordinate) and the block records follow the tile words.
 const UM_PAGE_TABLE:u32=5u*UM_TILES;
 const UM_BLOCK_RECORD:u32=UM_PAGE_TABLE+${UNIFORM_PAGE_TABLE_WORDS}u;
-${pagesOf === undefined ? uniformWindowAddressWGSL("umTopology","UM_PAGE_TABLE","(UM_TILES/512u)").replace("fn umPageWord(","fn umDirectoryPageWord(") + uniformAddressPlanWGSL : /* wgsl */ `fn umFramePage()->vec3i{return ${pagesOf}umFramePage();}
+${pagesOf === undefined ? uniformWindowAddressWGSL("umTopology","UM_PAGE_TABLE","(UM_TILES/512u)","um",undefined,!!shape.bulk).replace("fn umPageWord(","fn umDirectoryPageWord(") + uniformAddressPlanWGSL : /* wgsl */ `fn umFramePage()->vec3i{return ${pagesOf}umFramePage();}
 fn umWorldSolid(world:vec3i)->bool{return ${pagesOf}umWorldSolid(world);}
 fn umWorldLow()->vec3i{return ${pagesOf}umWorldLow();}
 fn umWorldHigh()->vec3i{return ${pagesOf}umWorldHigh();}
@@ -167,7 +170,7 @@ fn umBlockWord(b:u32)->u32{return ${pagesOf}umBlockWord(b);}`}
 // Lattice addressing (uniform-lattice-address.ts): its paged bodies, whose
 // tile key count is UM_TILES. No box: a coordinate resolves through the page table.
 // The h slots (umFineSlot): a word a block before the buffer's last word.
-${uniformLatticeAddressWGSL({ constant: true, paged: { blocks: "(UM_TILES/512u)" }, world: true, addressPlan: pagesOf === undefined,
+${uniformLatticeAddressWGSL({ constant: true, paged: { blocks: "(UM_TILES/512u)" }, world: true, bulk:!!shape.bulk, addressPlan: pagesOf === undefined,
     fine: pagesOf === undefined ? "umTopology[arrayLength(&umTopology)-1u-UM_BLOCKS+b]" : `${pagesOf}umFineSlot(b)` })}
 ${uniformCompiledTopologyWGSL}
 struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}

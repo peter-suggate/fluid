@@ -127,3 +127,152 @@ Levers are fewer fine tiles (band thickness, coarsening rules; this ties to open
 3. Author inviscid, no-tension water into the realtime presets (−3 to −4 ms).
 4. BULK16, the full design, with band-sized particle storage (bet B) in the same pass.
 5. Symmetry (issue 4) whenever `uniform-mixed-extension.ts` is next touched.
+
+## 5. Implementation pass (2026-10-28, incomplete)
+
+This pass does **not** close the seep gate or implement BULK16. The numerical
+prerequisites in §4 remain open; no thin-thickness increase or volume
+correction was introduced.
+
+Implemented:
+
+- Corrected a remaining graded-mass mismatch in P2G. Under `crowdedCells:
+  "merge"`, four deep seeds hold two mass units each, but the expected face
+  mass still fell to four below depth −1. All three transfer paths now expect
+  eight physical mass units there, as uniform seeding does. Legacy unit-mass
+  `retire` mode retains its four-unit expectation. This changes the blend of
+  partially covered deep faces, without changing particle mass or positions.
+- Authored inviscid, zero-tension water into the shared NB-FLIP scene factory,
+  reservoir seep, churning tank, backyard pool (including drift), and forest
+  waterfall factories. Existing physical scales and schedules are retained.
+- Repaired the reconstruction-ownership fixture for the shared heat arrays
+  and the current surface-function signatures. Its GPU comparison passes
+  all three mixed-layout patterns.
+- Repaired letters benchmark time-step selection and volume telemetry. It
+  defaults to 60 Hz and zero volume control, explicitly selects the scene
+  clock, requests phi measurement before each reporting step and the final
+  step, and reports those measurements per row. `--volume-every` defaults to
+  60. Explicit time-step overrides must agree with `--dt`.
+- Reservoir and tier probes also request volume measurement **before** the
+  reported step. Previously their `volume.drift` could belong to the step
+  after the previous report. The tier probe's independent `liquid_m3.total`
+  measures the current surface. `rawVolumeDrift` / `volume.rawDrift` instead
+  measure the pressure fill; they are not independent phi measurements.
+- Added live and construction allocation caps (default/maximum 6 GiB) to
+  letters, reservoir and tier probes, using the existing allocation audit.
+  The tier probe accepts `--tiers` and `--water=inviscid`; `--cells` now counts
+  physical mass over eight per cell as well as record populations. Its
+  `--retire` counters continue to report merges, refused merges and splits.
+
+Validation, all GPU jobs through `tools/gpu/fluid-gpu-run.sh check`:
+
+- Type check clean; unit suite 1253 pass, 0 fail, 133 GPU-skipped.
+- GPU regression for graded transfer mass: pass. Four mass units on a deep
+  face give half coverage in merge mode; graded and uniform mass thresholds
+  agree. Reconstruction ownership: pass.
+- Closed rest, 120 steps, 5 mm, `tiers={"start":"4h","bricks":512}`:
+  drift 0 at 30/60/90/120; endpoint maximum speed 0.01720 m/s. This is the
+  newly authored inviscid scene, so its speed is not the earlier viscous
+  baseline's identical-digit comparison.
+- Letters, 240 steps at exactly 1/60 s: current phi drift at 60/120/180/240
+  is −1.177 / −5.077 / −9.390 / −14.064%. Peak requested allocation 3.005
+  GiB. No gain, but substantial absolute loss remains. These are correctness
+  runs, not exclusive timing evidence.
+- Seep with corrected transfer mass, inviscid, 1200 steps, same tier budget:
+  right tank 3.415 L at 600, 4.622 L at 900 and 4.612 L at 1200 (about 5.62 L
+  delivered). The independent spatial probe, relative to its initial total,
+  peaks at +0.2013% in the sampled rows and ends at −0.2736%: **gate still
+  fails**. Construction peak 2.047
+  GiB. The run predates the reporting-step telemetry repair; use its
+  `liquid_m3.total` relative to the initial total, not its stale
+  `volume.drift` or the pressure-fill `volume.rawDrift`.
+- Reporting fixes: a 150-step tier-probe run completed with physical-mass
+  census output, and the letters benchmark completed two exact requested
+  steps with `--dt=0.0166667` (the previously failing decimal spelling).
+- The same inviscid configuration before the mass fix reached +0.2575% at
+  600 and stopped at step 1079: a transient build needed 4142 fine tiles,
+  beyond the 4096-tile reservation. It is not a completed A/B gate.
+- Symmetry failure reproduced at step 6: reflected surface error
+  2.026297e-4 m. Restricting the direct neighbor fast path to unit requests,
+  disabling the cached fine requests, and admitting one-ulp Godunov cutoff
+  roundoff each left that error unchanged. These experiments were reverted;
+  no speculative extension change remains.
+
+Local evidence is under `artifacts/nbflip-handoff/` (gitignored):
+`handoff-mass*`, `rest.json`, `nbflip-letters-handoff.json`, and
+`symmetry-before/report.json`. The seep invocation was:
+
+```sh
+tools/gpu/fluid-gpu-run.sh check env \
+  WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  node --import tsx tools/probe-tier-budget.ts handoff-mass \
+  --steps=1200 --every=150 --water=inviscid \
+  --tiers=artifacts/nbflip-handoff/tiers.json \
+  --set=volumeControlSeconds:0 --particleMass --cells --retire \
+  --out=artifacts/nbflip-handoff
+```
+
+Still required: balance the h exchange, measure sampled-field divergence in
+crowded cells, fix thin-film resolvability, resolve depth-dependent rest
+loss, implement the full BULK16 lifecycle and band-sized storage across its
+readers, and fix symmetry. The existing optional `fluid.tiers` particle
+budget is usable by the probes; it is not a new BULK16 implementation.
+
+## 6. Continuation checkpoint: seep gate and deep rest
+
+The seep gate now passes three independent 1200-step runs at exactly 1/60 s,
+with inviscid water, zero tension and `volumeControlSeconds: 0`. Every step
+requests and checks a fresh phi measurement against the ±0.1% gate:
+
+| Run | Worst drift (step) | Receiving phi / particle mass at 1200 | Throat Cd |
+|---|---|---|---|
+| `forward-material-arrival` | +0.057253% (811) | 5.459 / 5.496 L | 0.81603 |
+| `forward-material-arrival-r2` | −0.050277% (1200) | 5.420 / 5.417 L | 0.81582 |
+| `forward-material-arrival-r3` | +0.074792% (857) | 5.528 / 5.464 L | 0.81639 |
+
+These are correctness runs, not timing evidence. The third run ends with
+339,053 particles; the three endpoint counts span 334,308–339,053.
+Construction peak is 2,764,034,484 requested bytes. Two seep checks fit below
+6 GiB together. Artifacts and the numerical-source checkpoint are in
+`artifacts/nbflip-handoff/` (gitignored).
+
+The mechanisms addressed are:
+
+- Physical mass is cached separately from record count. Mass bounds and
+  reseeding use the former; sorting and work enumeration use the latter.
+- Particle trajectories integrate the normal-affine face field within each
+  cell, with exact face-crossing events over the one frozen fluid step.
+  The projected liquid MAC divergence is therefore also the trajectory
+  field's divergence. Stable log1p/expm1 evaluations avoid a roundoff-induced
+  missed crossing at large lattice coordinates.
+- The liquid projection alone does not constrain the extrapolated air
+  field: measured near-surface air divergence was −8 to −14/s. An auxiliary
+  extension potential adjusts only air–air faces, preserving liquid and
+  solid boundary fluxes. It greatly reduces the receiving-film piles.
+- Material transfer snapshots the old Eulerian/particle ownership and
+  liquid metric. Quarter-cell material sites owned by Eulerian liquid are
+  transported forward and handed to the active particle band. Existing
+  particle-owned liquid is not seeded again. A known-liquid material site
+  must be allowed to arrive where the advected grid says air: rejecting it
+  there removed genuine transported material. The rejected arrival-clipped
+  trial failed at −0.1611%.
+- Reconstruction applies the physical-mass bound to erasure as well as
+  addition, under the existing seeded-footprint and heat checks. Merging
+  preserves the vertices used by the reconstruction band.
+- Thin-film resolvability uses one-sided depth against a solid wall and
+  two-sided depth in open water. A floor film no longer measures twice its
+  actual thickness and prematurely coarsens.
+
+The rest drift was a startup pressure transient. The pressure-dependent
+seam heads now receive 23 Picard re-solves at t=0 (24 solves total), without
+advancing positions or the clock. In the `bulkTier: "off"` ladder, **all 120
+per-step measurements are zero drift** at heights 1×, 1.5×, 2×, 2.5× and
+2.75×. Maximum speeds over those runs are respectively 1.09e−5, 1.90e−5,
+1.93e−5, 1.93e−5 and 4.03e−5 m/s. This adds startup work; it adds no re-solves
+to ordinary frames.
+
+The remaining work is still active: regression checks, wall symmetry,
+the complete BULK16 lifecycle and consumers, band-sized storage, and
+exclusive performance measurements. The three seep passes above precede
+the subsequent wall-contact interpolation correction and must be repeated
+if that correction changes this scene's transport.

@@ -7,7 +7,6 @@ import { narrowBandAirWGSL, NARROW_BAND_AIR_CHANGED_WORD, NARROW_BAND_AIR_GATE_P
 import { narrowBandParticleStride, narrowBandParticleWGSL, narrowBandApicMomentWGSL, type NarrowBandTransfer } from "./uniform-narrow-band-apic.wgsl";
 import { PARTICLE_RESIDENCY_WORDS, particleResidencyTravelWGSL } from "./uniform-local-residency";
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
-import { narrowBandSeedShellWGSL } from "./uniform-narrow-band-seed.wgsl";
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { narrowBandActivityTriggerWGSL, narrowBandActivityWGSL, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
 import {narrowBandReuseLayout,narrowBandReuseWGSL,type NarrowBandReuseLayout} from "./uniform-narrow-band-reuse.wgsl";
@@ -954,7 +953,7 @@ fn nbMergeAbsorbed(start:u32,i:u32,stride:u32)->bool{
  }
  return m+nbParticleMass(particles[i])<=NB_MASS_MAX;
 }`:""}
-fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",this.gradedDensity)};}
+fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",this.gradedDensity,this.crowdedCells==="merge")};}
 // The samples a cell holds when seeded full: four of the eight sites in a
 // graded band's deep cells (centre depth), else eight.
 fn nbSeedTarget(depth:f32)->u32{return select(8u,4u,NB_GRADED&&depth<=-1.5);}
@@ -1530,10 +1529,18 @@ ${this.separationPrepass?`// sampleSeparation "pairs", ahead of the move: each r
  }
 }
 `:""}
-// Fit the outer lattice to the sphere reconstruction's nodal interface.
-// Keep tangential quarter-cell positions: their known offset determines the
-// seed depth and preserves a resting plane without any volume correction.
-${narrowBandSeedShellWGSL}
+// Jittered sub-cell sampling (Zhu and Bridson 2005; Bridson 2008): a seed
+// lies anywhere in its eighth of the cell, hashed from the cell, the site and
+// the seeding salt. Seeds stay where they are made: projecting the outer
+// sites to one depth stacked the two sites along the normal onto one point,
+// coincident pairs the transport carried and separation then pushed apart.
+var<private> nbSeedSalt:u32=0u;
+fn nbJitter(c:vec3u,k:u32)->vec3f{
+ var h=(c.x*73856093u)^(c.y*19349663u)^(c.z*83492791u)^(k*2654435761u)^(nbSeedSalt*0x9e3779b9u);
+ var r=vec3f(0.0);
+ for(var a=0u;a<3u;a++){h^=h>>16u;h*=0x7feb352du;h^=h>>15u;h*=0x846ca68bu;h^=h>>16u;r[a]=f32(h&0xffffffu)/16777216.0;}
+ return r;
+}
 ${this.outerSeeding==="uncovered"?`// No sample in cell c or the 26 around it (outerSeeding "uncovered").
 fn nbUncovered(c:vec3u)->bool{
  for(var k=0u;k<27u;k++){
@@ -1543,7 +1550,7 @@ fn nbUncovered(c:vec3u)->bool{
  return true;
 }
 `:""}fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
-  let q=vec3f(c)+0.25+0.5*vec3f(umCorner(k,2u));let distance=particleDepth(q);
+  let q=vec3f(c)+0.5*vec3f(umCorner(k,2u))+0.5*nbJitter(c,k);let distance=particleDepth(q);
   if(distance>0.0||distance< -NB_BAND_DEPTH||nbParticleBlocked(q)){return vec4f(-1,0,0,0);}
   // Paper Section 3.3: replenish only the inner [-R,-h] band. The outer
   // layer keeps its transported samples instead of being recreated; a change
@@ -1558,16 +1565,10 @@ fn nbUncovered(c:vec3u)->bool{
   // The heat-one overlap supplies support without authority to erase
   // liquid. Its outer shell only seeds on resolved fine owners.
   if(distance>-1.0&&umOwnerAt(vec3i(c)).width!=1u){return vec4f(-1,0,0,0);}
-  if(distance<=-NB_SURFACE_RADIUS){return vec4f(q,distance);}
-  let shell=seedShell(q,distance);let p=shell.xyz;
-  if(shell.w>0.0||nbParticleBlocked(p)){return vec4f(-1,0,0,0);}
-  // A sample fitted into a page with no storage is the arrival fatal, and is not made.
-  if(!umPointPresent(p)){nbArrived(p);return vec4f(-1,0,0,0);}
-  // A shell sample can land in another cell, whose own seeding decision
-  // does not see it: no count changes here, whatever the dispatch order.
-  // The shell's depth is the depth at its point.
-  return shell;
+  return vec4f(q,distance);
 }
+// The mass of cell c's filed samples, in units (eight a cell).
+fn nbCellMass(c:vec3u)->f32{let run=nbCellRun(vec3i(c));var m=0.0;for(var i=run.x;i<run.y;i++){m+=nbParticleMass(particles[i]);}return m;}
 fn seedCell(c:vec3u,emit:bool){
  // No tile past the reach is within six cells of the surface.
  if((nbBandReach(c)&1u)==0u){return;}
@@ -1611,7 +1612,7 @@ fn nbSeedList()->u32{return NB_LINKS+4u*arrayLength(&particles);}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
  if(!nbParticleCellOpen(vec3i(c))){return;}
  let depth=particleDepth(vec3f(c)+0.5);if(depth>0.9||depth< -NB_BAND_DEPTH-0.5){return;}
- if(nbBinCount(umCellAt(c))>=nbSeedTarget(depth)){return;}
+ if(nbBinCount(umCellAt(c))>=nbSeedTarget(depth)||nbCellMass(c)>=8.0){return;}
  let slot=atomicAdd(&bins[NB_BAND+3u],1u);
  if(slot>=3u*arrayLength(&particles)){atomicStore(&state[3],7u);return;}
  // Bit 31 a source cell, bit 30 a graded band's deep cell (nbSeedTarget 4).
@@ -1622,8 +1623,14 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
  let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))){return empty;}
  let entry=links[nbSeedList()+slot];if(((entry&0x80000000u)!=0u)!=sourcePass){return empty;}
  let c=umCellCoord(entry&0x3fffffffu);let j=lane%8u;let deep=(entry&0x40000000u)!=0u;
- if(j<nbBinCount(umCellAt(c))||j>=select(8u,4u,deep)){return empty;}
+ let n0=nbBinCount(umCellAt(c));if(j<n0||j>=select(8u,4u,deep)){return empty;}
+ // Paper Section 3.3 reseeds cells with fewer than n = 8 unit samples: a
+ // cell's mass, not its record count, once samples carry mass.
+ if(nbCellMass(c)+f32(j-n0)*select(1.0,2.0,deep)>=8.0){return empty;}
  let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
+ // Each step's seed list salts its sites, so a cell reseeded again does not
+ // reuse them.
+ nbSeedSalt=slot+1u+atomicLoad(&bins[NB_BAND+3u]);
  let site=seedSite(c,select(j,array<u32,4>(0u,3u,5u,6u)[j&3u],deep),false,activated);if(site.x<0.0){return empty;}
  ${narrowBandRetireCounting.splitX>=0?`// Diagnostic: seeds at x >= splitX: activated, above the floor band (y 8 past the box), interior, outer.
  if(f32(c.x)>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+8}u+select(select(select(3u,2u,site.w<= -1.0),1u,c.y>=${(narrowBandRetireCounting.splitY+8)}u),0u,activated)],1u);}`:""}
@@ -1680,7 +1687,7 @@ fn transferFace(face:UMFace)->f32{
  }}}
  if(total<1e-5){return original;}return mix(original,momentum/total+umThawFaceTerm(face.anchor,face.axis,face.width),blend*nbTransferBlend(q,depth,total));
 }
-${narrowBandTransferPropertiesSource(this.gradedDensity,this.sharedDeposit?"depositScratch":"bins")}
+${narrowBandTransferPropertiesSource(this.gradedDensity,this.sharedDeposit?"depositScratch":"bins",this.crowdedCells==="merge")}
 ${narrowBandFineTransferSource(subgroups,this.apic,this.gradedDensity,this.crowdedCells==="merge")}
 ${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords},this.sharedDeposit?"depositScratch":"bins",this.crowdedCells==="merge",narrowBandSeparationReach(this.sampleSeparation,this.crowdedCells==="merge"))}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one

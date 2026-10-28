@@ -8,9 +8,10 @@ export const NARROW_BAND_SEED_DEPTH=Math.sqrt(NARROW_BAND_SURFACE_RADIUS**2-0.12
 /** The particle mass a face at depth (cells, WGSL expression) expects when
  * its samples cover it: eight a cell, or with particleDensity "graded" four
  * below a cell deep (seeding fills four sites a cell below 1.5 cells). A
- * face short of it blends in the grid's velocity. */
-export function narrowBandExpectedMassWGSL(depth:string,graded:boolean):string{
- return graded?`max(1.0,select(8.0,4.0,${depth}< -1.0)*clamp(0.5-${depth},0.0,1.0))`:`max(1.0,8.0*clamp(0.5-${depth},0.0,1.0))`;
+ * face short of it blends in the grid's velocity. In merge mode the four
+ * graded seeds carry two units each, so their expected mass stays eight. */
+export function narrowBandExpectedMassWGSL(depth:string,graded:boolean,merge=false):string{
+ return graded&&!merge?`max(1.0,select(8.0,4.0,${depth}< -1.0)*clamp(0.5-${depth},0.0,1.0))`:`max(1.0,8.0*clamp(0.5-${depth},0.0,1.0))`;
 }
 /** The samples' mass bound at vertex q (particleSurfaceFinish), sampleBound
  * "centred": a plane through the open cells around q as if q were their
@@ -298,7 +299,7 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
  * its face blend once, sharing the 5³ metric vertices, and finishes its
  * cells from their six deposit words; any other tile copies its velocity.
  * FIN zeroes the words and flag it read, ready for the next deposit. */
-export function narrowBandTransferPropertiesSource(graded=false,deposit="bins"):string{return /* wgsl */`
+export function narrowBandTransferPropertiesSource(graded=false,deposit="bins",merge=false):string{return /* wgsl */`
 // The deposit's six words a fine cell and a flag a fine tile (NB_DEPOSIT),
 // sized for every h tile the pool stores. A layout past them (a device whose
 // buffer limit holds fewer) takes the general gather (transfer).
@@ -360,7 +361,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
    // The positive MAC face has fraction zero along its normal. Preserve the
    // eight-corner accumulation order while skipping its four zero terms.
    for(var k=0u;k<8u;k++){let bit=umCorner(k,2u);if(bit[axis]!=0u){continue;}let q=low+bit;depth+=0.25*nbTransferDepth[q.x+5u*(q.y+5u*q.z)];}
-   if(depth<=1.5&&depth>=-2.0){var q=vec3f(local)+0.5;q[axis]+=0.5;near=nbTransferTheta(q);expected=${narrowBandExpectedMassWGSL("depth",graded)};}
+   if(depth<=1.5&&depth>=-2.0){var q=vec3f(local)+0.5;q[axis]+=0.5;near=nbTransferTheta(q);expected=${narrowBandExpectedMassWGSL("depth",graded,merge)};}
   }
   needed=needed||near.x>0.0;
   properties[axis]=vec3f(near,expected);
@@ -413,7 +414,7 @@ var<workgroup> nbRuns:array<vec2u,128>;
   var near=vec2f(0.0);var expected=1.0;
   if(width==1u&&umAcrossKind(vec3i(o),axis,1)==UM_RESIDENT&&!umFrozenFace(vec3i(o),axis,1u)){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
-   if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=${narrowBandExpectedMassWGSL("depth",graded)};}
+   if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=${narrowBandExpectedMassWGSL("depth",graded,merge)};}
   }
   nbBlend[6u*team+member]=near.x;nbHot[6u*team+member]=near.y;nbExpected[6u*team+member]=expected;
  }

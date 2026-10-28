@@ -15,13 +15,20 @@ export async function createNbflipVolumeProbe(device:GPUDevice,solver:WebGPUUnif
  const o=frame.ownership,solid=frame.solid,{nx,ny,nz}=solver.info;
  const jobs=Math.ceil(nx*ny*nz/64),gridX=Math.min(jobs,device.limits.maxComputeWorkgroupsPerDimension),gridY=Math.ceil(jobs/gridX);
  const output=device.createBuffer({size:4*nx*ny*nz,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+ const inspectIndex=device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+ device.queue.writeBuffer(inspectIndex,0,new Uint32Array([0xffffffff,0,0,0]));
+ const inspected=device.createBuffer({size:64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
  const layout=uniformDetailBindLayout(device,{entries:[
   {binding:0,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"3d"}},
   {binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
+  {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+  {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
  ]});
  const module=uniformDetailModule(device,{label:"NB phi volume probe",code:uniformMixedTopologyWGSL(o.capacity,0)+`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read_write> result:array<f32>;
+@group(1) @binding(2) var<uniform> inspect:vec4u;
+@group(1) @binding(3) var<storage,read_write> debug:array<vec4f>;
 ${uniformMixedSolidWGSL(2,solid.coarse?.count)}
 ${levelSetFillWGSL}
 @compute @workgroup_size(64) fn measure(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -36,6 +43,12 @@ ${levelSetFillWGSL}
   let p=vec3i(origin+owner.width*umCorner(k,2u));
   if(owner.width==4u){values[k]=/*4h*/textureLoad(phi,p,0).x;}else{values[k]=textureLoad(phi,p,0).x;}
   negative+=u32(values[k]<0.0);
+ }
+ if(i==inspect.x){
+  debug[0]=vec4f(f32(i),f32(owner.width),capacity,f32(negative));
+  debug[1]=vec4f(values[0],values[1],values[2],values[3]);
+  debug[2]=vec4f(values[4],values[5],values[6],values[7]);
+  debug[3]=vec4f(fill(values),vec3f(origin));
  }
  let mass=f32(owner.width*owner.width*owner.width)*capacity;
  if(negative==8u){result[i]=mass;return;}if(negative==0u){return;}
@@ -57,8 +70,12 @@ ${levelSetFillWGSL}
  const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
  if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
  const pipeline=await uniformDetailPipeline(device,o,{layout:device.createPipelineLayout({bindGroupLayouts:[o.bindLayout,layout,solid.tileLayout]}),compute:{module,entryPoint:"measure",constants:{umDispatchX:65535}}});
- const group=uniformDetailGroup(device,{layout,entries:[{binding:0,resource:frame.fields.phi},{binding:1,resource:{buffer:output}}]});
+ const group=uniformDetailGroup(device,{layout,entries:[{binding:0,resource:frame.fields.phi},{binding:1,resource:{buffer:output}},{binding:2,resource:{buffer:inspectIndex}},{binding:3,resource:{buffer:inspected}}]});
  return {async read(){
   const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(uniformDetailPick(pipeline));pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,solid.tileGroup);pass.dispatchWorkgroups(gridX,gridY);pass.end();device.queue.submit([encoder.finish()]);return readMixedBuffer(device,output);
- },destroy(){output.destroy();}};
+ },async inspectCell(index:number){
+  device.queue.writeBuffer(inspectIndex,0,new Uint32Array([index,0,0,0]));
+  await this.read();
+  return [...await readMixedBuffer(device,inspected)];
+ },destroy(){output.destroy();inspectIndex.destroy();inspected.destroy();}};
 }

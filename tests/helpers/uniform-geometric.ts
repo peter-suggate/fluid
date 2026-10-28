@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {auditUniformGPUAllocations} from "../../tools/uniform-gpu-allocation-audit";
 import {pathToFileURL} from "node:url";
 import {managedGPUDevice} from "../../lib/core/gpu-compilation-manager";
 import {requiredFluidDeviceLimits} from "../../lib/core/webgpu-device-limits";
@@ -28,7 +29,10 @@ export async function withUniformDevice(label:string,run:(device:GPUDevice)=>Pro
   // NB-FLIP momentum's default texture32 sampler needs it.
   device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:[...new Set<GPUFeatureName>([...features,"float32-filterable"])].filter(f=>adapter.features.has(f)),requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
   const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);});
-  await run(device);await device.queue.onSubmittedWorkDone();assert.deepEqual(errors,[]);
+  const cap=Number(process.env.FLUID_GPU_MAX_GIB??6);
+  assert.ok(Number.isFinite(cap)&&cap>0&&cap<=6,"GPU allocation cap must be in (0, 6] GiB");
+  const audit=auditUniformGPUAllocations(device,cap*2**30);
+  await run(audit.device);await device.queue.onSubmittedWorkDone();assert.deepEqual(errors,[]);
  }finally{device?.destroy();}
 }
 

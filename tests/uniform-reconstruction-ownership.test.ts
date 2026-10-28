@@ -33,17 +33,22 @@ test('reconstruction enumerates the same vertices across mixed seams and sparse 
    const topology=device.createBuffer({size:words.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(topology,0,words);
    const counts=device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(counts,0,new Uint32Array([layout.fineTiles.length,layout.coarseTiles.length,0,8]));
    const output=device.createBuffer({size:4*125*layout.fineTiles.length,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+   const heat=device.createBuffer({size:8*n,usage:GPUBufferUsage.STORAGE});
    const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
    try{
     const code=uniformMixedTopologyWGSL(layout,0)+uniformMixedTopologyNeighboursWGSL()+authority+`
 @group(1) @binding(0) var<storage,read_write> result:array<atomic<u32>>;
+@group(1) @binding(1) var<storage,read_write> bins:array<atomic<u32>>;
+const NB_ACTIVITY_THETA=0u;const NB_ACTIVITY_SURFACE_HEAT=${n}u;
 var<private> testJob:u32;
+fn umTileOpen(tile:u32)->f32{return 1.0;}
+fn bandPhi(p:vec3f)->f32{return -1.0;}
 struct Params{hDt:vec4f} const params=Params(vec4f(1));
 fn umSolidSkip()->bool{return false;}
 fn nbTileCold(tile:u32)->bool{return false;}
 fn nbVertexCold(p:vec3u)->bool{return false;}
-fn particleSurfaceBulk(tile:u32,origin:vec3i,q:vec3i)->vec3f{return vec3f(0);}
-fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest:f32,heat:f32)->f32{return 0.0;}
+fn particleSurfaceBulk(tile:u32,origin:vec3i,q:vec3i,tiled:bool)->vec3f{return vec3f(0);}
+fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest:f32,heat:f32,tiled:bool)->f32{return 0.0;}
 fn nbCachedSurfaceNearest(q:vec3i)->f32{return 0.0;}
 fn nbStoreReconstructed(q:vec3i,value:f32,width:u32){
  let owner=umAllOwner(vec3u(testJob*64u,0,0));let local=vec3u(q)-4u*umTileCoord(owner.tile);
@@ -54,11 +59,11 @@ fn nbStoreReconstructed(q:vec3i,value:f32,width:u32){
     let expected:Uint32Array|undefined;
     for(const entryPoint of ['reference','coupleFine']){
      const pipeline=await device.createComputePipelineAsync({layout:'auto',compute:{module,entryPoint}});
-     const groups=[device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:topology}},{binding:1,resource:{buffer:counts}}]}),device.createBindGroup({layout:pipeline.getBindGroupLayout(1),entries:[{binding:0,resource:{buffer:output}}]})];
+     const groups=[device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:topology}},{binding:1,resource:{buffer:counts}}]}),device.createBindGroup({layout:pipeline.getBindGroupLayout(1),entries:[{binding:0,resource:{buffer:output}},...(entryPoint==="coupleFine"?[{binding:1,resource:{buffer:heat}}]:[])]})];
      const encoder=device.createCommandEncoder();encoder.clearBuffer(output);const pass=encoder.beginComputePass();pass.setPipeline(pipeline);groups.forEach((group,i)=>pass.setBindGroup(i,group));pass.dispatchWorkgroups(layout.fineTiles.length);pass.end();encoder.copyBufferToBuffer(output,0,read,0,read.size);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);const actual=new Uint32Array(read.getMappedRange()).slice();read.unmap();
      if(expected){for(let i=0;i<actual.length;i++)assert.equal(actual[i],expected[i],`period ${period}, fine tile ${Math.floor(i/125)}, local vertex ${i%125}`);}else expected=actual;
     }
-   }finally{topology.destroy();counts.destroy();output.destroy();read.destroy();}
+   }finally{topology.destroy();counts.destroy();output.destroy();heat.destroy();read.destroy();}
   }
  });
 });

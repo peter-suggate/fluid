@@ -21,6 +21,8 @@ test("reservoir seep opens with localized dynamic detail on an 8-million-cell la
   const query = parseQueryState(`?scene=${RESERVOIR_SEEP_ID}`);
   assert.equal(query.overrides[query.methodId]?.detailPolicy, "dynamic");
   assert.equal(query.overrides[query.methodId]?.detailBudgetPercent, 5);
+  assert.equal(scene.fluid.dynamicViscosity_Pa_s, 0);
+  assert.equal(scene.fluid.surfaceTension_N_m, 0);
   assert.equal(scene.fluid.inflow, undefined);
   assert.equal(scene.rigidBodies.length, 0);
   const region = scene.fluid.refinementRegions![0]!;

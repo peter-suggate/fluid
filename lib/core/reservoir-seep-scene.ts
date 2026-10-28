@@ -14,14 +14,15 @@ export const RESERVOIR_SEEP_CAMERA: Partial<CameraState> = {
  * Keep the throat at h when rebuilding the lattice: this is a resolution
  * stress scene, not a geometrically scaled nozzle benchmark. `widthScale`
  * lengthens both chambers about the middle wall and `depthScale` the span,
- * at the same h and head (the scale ladder's box variants). */
+ * at the same h and head (the scale ladder's box variants). `heightScale`
+ * changes the water depth for the hydrostatic rest ladder. */
 export function createReservoirSeepScene(cellSize_m = RESERVOIR_SEEP_CELL_M,
-  { widthScale = 1, depthScale = 1 }: { readonly widthScale?: number; readonly depthScale?: number } = {}): SceneDescription {
+  { widthScale = 1, depthScale = 1, heightScale = 1 }: { readonly widthScale?: number; readonly depthScale?: number; readonly heightScale?: number } = {}): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = RESERVOIR_SEEP_ID;
   scene.duration_s = 20;
   scene.container = {
-    width_m: 2.56 * widthScale, height_m: 1.28, depth_m: 0.32 * depthScale,
+    width_m: 2.56 * widthScale, height_m: 1.28 * heightScale, depth_m: 0.32 * depthScale,
     fillFraction: 0, top: "open", fluidWallMode: "free-slip",
   };
   scene.voxelDomain = { finestCellSize_m: cellSize_m, brickSize_cells: 8 };
@@ -54,8 +55,8 @@ export function createReservoirSeepScene(cellSize_m = RESERVOIR_SEEP_CELL_M,
     * Math.ceil(ny / 32) * Math.ceil(nz / 32);
   const growthPages = Math.max(Math.ceil(initialPages / 4), 2 * Math.ceil(nx / 32) * Math.ceil(nz / 32));
   scene.fluid = {
-    density_kg_m3: 998.2, dynamicViscosity_Pa_s: 0.001002,
-    surfaceTension_N_m: 0.072, gravity_m_s2: { x: 0, y: -9.80665, z: 0 },
+    density_kg_m3: 998.2, dynamicViscosity_Pa_s: 0,
+    surfaceTension_N_m: 0, gravity_m_s2: { x: 0, y: -9.80665, z: 0 },
     initialCondition: "tank-fill", initialVelocity_m_s: { x: 0, y: 0, z: 0 },
     initialLiquidVolumes: [{ shape: "box", min_m: point(0, 0, 0),
       max_m: point(low, Math.floor(3 * ny / 4), nz) },

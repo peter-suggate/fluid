@@ -164,7 +164,7 @@ export const UNIFORM_PAGE_POOL_AIR=0,UNIFORM_PAGE_POOL_SOLID=0xffffffff;
 /** The block word of a block that holds no page: free, quarantined or a sentinel. */
 export const UNIFORM_PAGE_POOL_FREE=0xffffffff;
 /** What a table entry is (upKind). */
-export const UNIFORM_PAGE_POOL_KIND={resident:0,air:1,solid:2} as const;
+export const UNIFORM_PAGE_POOL_KIND={resident:0,air:1,solid:2,bulk:3} as const;
 /** Mirrors initialize() takes: each is one storage binding of the commit kernels. */
 export const UNIFORM_PAGE_POOL_MIRRORS=4;
 export const UNIFORM_PAGE_POOL_STATUS={generation:0,resident:1,claimed:2,free:3,pending:4,fatal:5,fatalPage:6,fatalGeneration:9,fatalFirst:10,requests:11,fatalDetail:12,superResident:13,superFree:14,superPending:15,words:16} as const;
@@ -584,7 +584,8 @@ fn upWord(q:vec3i)->u32{
 // A block with a page slot: neither sentinel.
 fn upStored(block:u32)->bool{return block-1u<UP_SOLID_BLOCK-1u;}
 // UP_RESIDENT, UP_AIR or UP_SOLID: what q's entry is, without the coordinate check.
-fn upKind(q:vec3i)->u32{let word=upWord(q);return select(select(UP_RESIDENT,UP_SOLID,word==UP_SOLID_WORD),UP_AIR,word==UP_AIR_WORD);}
+fn upBulkWord(word:u32)->bool{return (word>>30u)==2u&&(word&0x3fffffffu)!=0u;}
+fn upKind(q:vec3i)->u32{let word=upWord(q);return select(select(select(UP_RESIDENT,UP_SOLID,word==UP_SOLID_WORD),UP_AIR,word==UP_AIR_WORD),UP_BULK,upBulkWord(word));}
 fn upPageOf(block:u32)->vec3i{let r=UP_AT_RECORDS+8u*block;return vec3i(bitcast<i32>(upState[r]),bitcast<i32>(upState[r+1u]),bitcast<i32>(upState[r+2u]));}
 // The block a read of q resolves to, without the coordinate check: block 0 for AIR, UP_SOLID_BLOCK for SOLID.
 fn upBlockWrapped(q:vec3i)->u32{return min(upWord(q),UP_SOLID_BLOCK);}
@@ -657,7 +658,7 @@ function source(l:UniformPagePoolLayout,group:number,state:number,work:number|un
 const UP_EDGE:u32=${UNIFORM_PAGE_POOL_EDGE}u;const UP_BLOCKS:u32=${l.blocks}u;const UP_SOLID_BLOCK:u32=${l.solidBlock}u;const UP_TABLE:u32=${l.table}u;const UP_NONE:u32=0xffffffffu;
 const UP_TOP:u32=${l.edge}u;const UP_TOP_BITS:u32=${l.edgeBits}u;const UP_TOP_WORDS:u32=${l.entries}u;const UP_SUPER_LAST:u32=${UNIFORM_SUPER_BLOCK_SLOTS-1}u;const UP_AT_SUPERS:u32=${l.state.supers}u;
 const UP_AIR_WORD:u32=0u;const UP_SOLID_WORD:u32=0xffffffffu;const UP_FREE:u32=0xffffffffu;
-const UP_RESIDENT:u32=${K.resident}u;const UP_AIR:u32=${K.air}u;const UP_SOLID:u32=${K.solid}u;
+const UP_RESIDENT:u32=${K.resident}u;const UP_AIR:u32=${K.air}u;const UP_SOLID:u32=${K.solid}u;const UP_BULK:u32=${K.bulk}u;
 const UP_TABLE_BITS:u32=${l.tableBits}u;const UP_REQUESTS:u32=${l.requests}u;const UP_CLOSURE_CAP:u32=${l.closureCap}u;
 const UP_AT_WINDOW:u32=${l.state.window}u;const UP_WORK_BOUNDS:u32=${l.work.bounds}u;
 const UP_AT_TABLE:u32=${l.state.table}u;const UP_AT_BLOCKS:u32=${l.state.blocks}u;const UP_AT_RECORDS:u32=${l.state.records}u;const UP_AT_RESIDENT:u32=${l.state.resident}u;const UP_AT_NEW:u32=${l.state.claimed}u;const UP_AT_RETIRED:u32=${l.state.retired}u;
