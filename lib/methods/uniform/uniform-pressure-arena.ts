@@ -3204,7 +3204,8 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   this.dispatch(pass,"ubaUpdate",UNIFORM_LIVE_KEY_GROUPS);
   this.dispatch(pass,"ubaLists",UNIFORM_LIVE_LANE_GROUPS);
   this.dispatch(pass,"ubaLevel1",Math.min(groupsOf(this.workBricks,64),TABLE_GROUPS));
-  this.dispatch(pass,"ubaRecord",Math.min(groupsOf(32*(2*this.workBricks+blocks),64),4*TABLE_GROUPS));
+  // The level 2 slots are the observed blocks (workLevel2), not the pool's: the launch strides the counts.
+  this.dispatch(pass,"ubaRecord",Math.min(groupsOf(32*(2*this.workBricks+this.workLevel2),64),4*TABLE_GROUPS));
   if(band){this.dispatch(pass,"pRows",this.tileGroups);this.dispatch(pass,"pRowsG",this.tileGroups);}
   pass.end();
  }
@@ -3286,7 +3287,7 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   this.dispatch(pass,"pProjectNative",this.tileGroups);
   this.dispatch(pass,"pCopy",this.tileGroups);this.dispatch(pass,"pProject",this.tileGroups);
   // Leaving slots return to the stack (after every reader of this frame).
-  this.dispatch(pass,"ubaRelease",Math.min(groupsOf(this.arena.fineCapacity,64),TABLE_GROUPS));
+  this.dispatch(pass,"ubaRelease",Math.min(groupsOf(this.workBricks,64),TABLE_GROUPS));
   pass.end();
  }
  encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset:number):void{encoder.copyBufferToBuffer(this.index,0,target,offset,32);}

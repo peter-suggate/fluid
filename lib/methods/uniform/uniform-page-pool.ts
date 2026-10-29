@@ -701,6 +701,10 @@ export function uniformPagePoolWGSL(layout:UniformPagePoolLayout,group:number,st
  * headerUniform (offset in bytes) receives a copy of the window header. */
 export interface UniformPagePoolMirror {readonly buffer:GPUBuffer;readonly offset:number;readonly headerUniform?:{readonly buffer:GPUBuffer;readonly offset:number}}
 
+/** A buffer's words rounded up to a whole 8 bytes, and an array padded to
+ * them (UniformPagePool's buffers: see its constructor). */
+const evenWords=(words:number):number=>words+(words&1);
+const evenArray=(a:Uint32Array<ArrayBuffer>):Uint32Array<ArrayBuffer>=>{if(!(a.length&1))return a;const b=new Uint32Array(a.length+1);b.set(a);return b;};
 /** The pool's buffers and its commit. Construct (every entry AIR, every
  * block free), seed() a resident set, pin() the pages that stay, await
  * initialize, then per step: consumer launches that request and keep,
@@ -755,10 +759,13 @@ export class UniformPagePool {
   const most=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
   if(4*Math.max(l.state.words,l.work.words)>most)throw new RangeError(`Uniform page pool of table ${l.table} and ${l.blocks} blocks exceeds the device buffer limit`);
   const usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST;
-  this.state=device.createBuffer({label:"Uniform page pool state",size:4*l.state.words,usage});
-  this.work=device.createBuffer({label:"Uniform page pool work",size:4*l.work.words,usage});
+  // Whole 8-byte sizes: Dawn (Metal) aborts a writeBuffer past 4 MiB whose
+  // size is an odd number of words (UploadData; a 33-block pool's work
+  // buffer, 1,319,637 words), and upload() writes each buffer whole.
+  this.state=device.createBuffer({label:"Uniform page pool state",size:4*evenWords(l.state.words),usage});
+  this.work=device.createBuffer({label:"Uniform page pool work",size:4*evenWords(l.work.words),usage});
   if(l.published.words){
-   this.published=device.createBuffer({label:"Uniform page pool published pages",size:4*l.published.words,usage});
+   this.published=device.createBuffer({label:"Uniform page pool published pages",size:4*evenWords(l.published.words),usage});
    this.volumePageSource={records:{buffer:this.published},directory:{buffer:this.state,offset:4*l.state.table,size:4*(l.directory+UNIFORM_WINDOW_HEADER_WORDS)}};
   }
   this.allocatedBytes=this.state.size+this.work.size+(this.published?.size??0);
@@ -779,12 +786,12 @@ export class UniformPagePool {
   this.current=seed;this.hostCount=0;this.upload();
  }
  private upload():void{
-  const l=this.layout,seed=this.current,queue=this.device.queue,work=new Uint32Array(l.work.words);
+  const l=this.layout,seed=this.current,queue=this.device.queue,work=new Uint32Array(evenWords(l.work.words));
   this.changes+=2;
   work.fill(0xffffffff,l.work.bounds,l.work.bounds+3);
   work.set(seed.ring,l.work.ring);work.set(seed.superRing,l.work.superRing);work.set(seed.superCount,l.work.counts);work[UNIFORM_PAGE_POOL_WORK.pins]=this.pinCount;work.set(new Uint32Array(this.pins.buffer,0,4*this.pinCount),l.work.pins);
-  queue.writeBuffer(this.state,0,seed.state);queue.writeBuffer(this.work,0,work);
-  if(this.published)queue.writeBuffer(this.published,0,uniformPagePoolPublished(seed,l));
+  queue.writeBuffer(this.state,0,evenArray(seed.state));queue.writeBuffer(this.work,0,work);
+  if(this.published)queue.writeBuffer(this.published,0,evenArray(uniformPagePoolPublished(seed,l)));
   for(const m of this.mirrors){
    queue.writeBuffer(m.buffer,4*m.offset,seed.tail);
    if(m.headerUniform)queue.writeBuffer(m.headerUniform.buffer,m.headerUniform.offset,seed.state.subarray(l.state.window,l.state.window+UNIFORM_WINDOW_HEADER_WORDS));

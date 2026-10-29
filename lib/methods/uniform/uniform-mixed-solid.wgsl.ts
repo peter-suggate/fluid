@@ -250,6 +250,8 @@ export interface UniformMixedSolidCoarse {
 
 /** Workgroups of the bodies-only cut launch's fixed region grid at most. */
 const BODY_REGION_GRID=1024;
+/** buildRegions' 64-workgroup chunks over a pool's resident regions: each round of a chunk takes 64 regions (8 blocks), so 8 chunks take 64 blocks a round. */
+const BODY_REGION_CHUNKS=8;
 const RECORD_PASS:GPUComputePassDescriptor={label:"Uniform mixed all-4h solid record"},WIDTHS_PASS:GPUComputePassDescriptor={label:"Uniform mixed solid simulation widths"};
 const NEW_BLOCKS_PASS:GPUComputePassDescriptor={label:"Uniform mixed solid record of claimed blocks"};
 /** Blocks the claimed-block build's fixed grid holds a workgroup per tile
@@ -554,9 +556,14 @@ fn umBuilderRegionDirty(region:u32)->bool{return region<UM_REGIONS&&(bodyRegions
 // each lane a strided eighth of the tile's 216-cell ring (umCutTile's test,
 // any order). A lane a tile walked the whole ring: the few regions a body
 // reaches ran 216 serial cell tests, 0.35 ms of a drifting-ball frame.
+// With a page pool the items are the resident blocks' (ulResidentBlock): a
+// free block's regions hold no tile, so the launch follows the pool's
+// residents, not its reservation.
+fn umBuilderRegionItems()->u32{return ${pool?"64u*ulResidentCount()":"8u*UM_REGIONS"};}
+fn umBuilderItemRegion(item:u32)->u32{return ${pool?"8u*ulResidentBlock(item>>6u)+((item>>3u)&7u)":"item>>3u"};}
 @compute @workgroup_size(64) fn cutsRegions(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var item=g.x;item<8u*UM_REGIONS;item+=groups.x){
-  let region=item>>3u;
+ for(var item=g.x;item<umBuilderRegionItems();item+=groups.x){
+  let region=umBuilderItemRegion(item);
   if(lane==0u){regionReach=u32(umBuilderRegionDirty(region));atomicStore(&regionCuts,0u);}
   if(workgroupUniformLoad(&regionReach)==0u){continue;}
   let slot=lane>>3u;let t=umSolidRegionTile(region,8u*(item&7u)+slot);
@@ -691,7 +698,26 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
 const UM_BODY_GRID:u32=64u*((UM_REGIONS+63u)/64u);
 var<workgroup> jobBits:array<atomic<u32>,2>;
 var<workgroup> jobMask:vec2u;
+${pool?/* wgsl */`// With a page pool, the regions are the resident blocks' (ulResidentBlock):
+// a free block's regions hold no tile. The grid is a fixed whole number of
+// 64-workgroup chunks; chunk c takes rounds of 64 regions, c + chunks k, a
+// lane a region's word, and tile w % 64 of each dirty one.
 @compute @workgroup_size(64) fn buildRegions(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ let w=g.x+groups.x*g.y;let chunks=(groups.x*groups.y)>>6u;let chunk=w>>6u;if(chunk>=chunks){return;}
+ let regions=8u*ulResidentCount();
+ for(var base=64u*chunk;base<regions;base+=64u*chunks){
+  if(lane<2u){atomicStore(&jobBits[lane],0u);}
+  workgroupBarrier();
+  let v=base+lane;
+  if(v<regions&&umBuilderRegionDirty(8u*ulResidentBlock(v>>3u)+(v&7u))){atomicOr(&jobBits[lane>>5u],1u<<(lane&31u));}
+  workgroupBarrier();
+  if(lane==0u){jobMask=vec2u(atomicLoad(&jobBits[0]),atomicLoad(&jobBits[1]));}
+  let mask=workgroupUniformLoad(&jobMask);
+  for(var k=0u;k<64u;k++){
+   if(((mask[k>>5u]>>(k&31u))&1u)!=0u){let r=base+k;umBuildTile(umSolidRegionTile(8u*ulResidentBlock(r>>3u)+(r&7u),w&63u),lane,true);}
+  }
+ }
+}`:/* wgsl */`@compute @workgroup_size(64) fn buildRegions(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let w=g.x+groups.x*g.y;if(w>=UM_BODY_GRID){return;}
  if(lane<2u){atomicStore(&jobBits[lane],0u);}
  workgroupBarrier();
@@ -702,7 +728,7 @@ var<workgroup> jobMask:vec2u;
  for(var k=0u;k<64u;k++){
   if(((mask[k>>5u]>>(k&31u))&1u)!=0u){umBuildTile(umSolidRegionTile((w>>6u)+k*(UM_BODY_GRID/64u),w&63u),lane,true);}
  }
-}
+}`}
 // Persistent certificate in the cut flag's unused z lane. A true bit proves
 // the exact 27-tile predicate surface advection previously rebuilt each step:
 // every cell whole (open, and none the procedural field cuts: the open bits
@@ -750,7 +776,22 @@ fn umBuildRegionClear(t:u32,lane:u32){
  if(umTileLive(t)){record[umSolidCount()+t].w=select(0.0,1.0,atomicLoad(&regionSolid)==0u);}
 }
 var<workgroup> regionSwept:u32;
-@compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
+${pool?/* wgsl */`// With a page pool a fixed grid strides the resident blocks' regions
+// (ulResidentBlock): a tile no page stores is written by neither helper.
+@compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ // The last launch of a record build: later masks compare against this count.
+ if(g.x==0u&&lane==0u){bodyRegions[UM_REGIONS+1u]=umBodyCount();}
+ for(var visit=g.x;visit<8u*ulResidentCount();visit+=groups.x){
+  let region=8u*ulResidentBlock(visit>>3u)+(visit&7u);
+  // Bodies-only: z reads 27 tiles' open masks (rebuilt within 2h of the swept
+  // support, so z changes within 6h of it) and w the cut flags and current
+  // bodies within 3h. Further regions keep both bits.
+  if(lane==0u){regionSwept=select(0u,bodyRegions[min(region,UM_REGIONS-1u)]&0x100ffu,umBodyTiles);}
+  if(workgroupUniformLoad(&regionSwept)>8u){continue;}
+  let t=umSolidRegionTile(region,lane);
+  umBuildSurfaceClear(t);umBuildRegionClear(t,lane);
+ }
+}`:/* wgsl */`@compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
  let region=g.x+umDispatchX*g.y;
  // The last launch of a record build: later masks compare against this count.
  if(region==0u&&lane==0u){bodyRegions[UM_REGIONS+1u]=umBodyCount();}
@@ -761,7 +802,7 @@ var<workgroup> regionSwept:u32;
  if(workgroupUniformLoad(&regionSwept)>8u){return;}
  let t=umSolidRegionTile(region,lane);
  umBuildSurfaceClear(t);umBuildRegionClear(t,lane);
-}
+}`}
 ${pool?/* wgsl */`// Each tile has exactly one writer, even overlapping new-page halos.
 // No claims means no geometric neighbourhood work. A retirement may retain
 // false (conservative), while every claim refreshes its entire incident halo.
@@ -883,10 +924,12 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
     pass.setPipeline(this.builder.pipeline);pass.dispatchWorkgroups(x,ceilDiv(keys,x));
    }else{
     pass.setPipeline(this.builder.cutsBodies);pass.dispatchWorkgroups(Math.min(8*keys/64,BODY_REGION_GRID));
-    const grid=64*ceilDiv(keys/64,64),bx=Math.min(grid,this.maxGroups);
+    // With a pool, a fixed grid of chunks strides the resident blocks' regions.
+    const grid=64*(this.pool?BODY_REGION_CHUNKS:ceilDiv(keys/64,64)),bx=Math.min(grid,this.maxGroups);
     pass.setPipeline(this.builder.bodies!);pass.dispatchWorkgroups(bx,ceilDiv(grid,bx));
    }
-   pass.setPipeline(this.full?this.builder.surfaceClear:this.builder.surfaceClearBodies);pass.dispatchWorkgroups(gx,gy);
+   pass.setPipeline(this.full?this.builder.surfaceClear:this.builder.surfaceClearBodies);
+   if(this.pool)pass.dispatchWorkgroups(UNIFORM_LIVE_GROUP_GROUPS);else pass.dispatchWorkgroups(gx,gy);
   }
   pass.end();
   if(this.built)return;

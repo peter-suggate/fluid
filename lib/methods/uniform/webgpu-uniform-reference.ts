@@ -1236,7 +1236,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
     if(this.narrowBandColdCensus==="replay")this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers);
     this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership,this.mixedFrame.pagePool);
-    this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure});
+    this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure},this.mixedFrame.pagePool);
     // The frame's forces and its samples read the bed-slope lane; the bake is
     // its only writer. Built with the frame whether or not the scene has a
     // voxel yet: an edit may add the first.

@@ -2,7 +2,8 @@ import { uniformDetailBindLayout, uniformDetailModule, uniformDetailGroup, type 
 import {uniformKeyGroups} from "./uniform-lattice-address";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
-import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
+import {uniformMixedSolidWGSL,type UniformMixedSolid,type UniformMixedSolidPool} from "./uniform-mixed-solid.wgsl";
+import {UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
 
 export interface UniformMixedBodyFields {
  /** The frame's velocity (the projected field when coupling runs). */
@@ -29,7 +30,8 @@ export interface UniformMixedBodyFields {
  * Bodies are h wherever liquid can reach them. The displaced wet volume and
  * ambient probes remain diagnostics in the native fixed-point exchange.
  *
- * markTiles: one lane per tile, ors every tile a body's bounding sphere,
+ * markTiles: one lane per tile (with a page pool, a fixed grid striding the
+ * resident blocks' tile keys: a free block's tile is never marked), ors every tile a body's bounding sphere,
  * dilated by its travel over `horizon` seconds plus one cell, can touch into
  * the census's solid-coupled mask, from the GPU body state (free bodies are
  * integrated on the GPU; the host roster is stale). */
@@ -42,12 +44,12 @@ export class UniformMixedBodies {
  private tilesGroup?:{tiles:GPUBuffer;group:UniformDetailGroup};
  private couplePipeline?:GPUComputePipeline;
  private tilesPipeline?:GPUComputePipeline;
- /** Workgroups of markTiles: one lane per tile key. */
+ /** Workgroups of markTiles without a pool: one lane per tile key. */
  private readonly tileGroups:[number,number];
  /** encodeTiles' horizon words: one array for every write. */
  private readonly horizon=new Float32Array(4);
  readonly allocatedBytes=16;
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly fields:UniformMixedBodyFields){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid:UniformMixedSolid,private readonly fields:UniformMixedBodyFields,private readonly pool?:UniformMixedSolidPool){
   const texture={sampleType:"unfilterable-float" as const,viewDimension:"3d" as const};
   this.tileGroups=uniformKeyGroups(ownership.capacity.address.tileKeys,64,ownership.dispatchX,[0,0]);
   this.coupleLayout=uniformDetailBindLayout(device,{label:"Uniform mixed rigid coupling",entries:[
@@ -58,6 +60,7 @@ export class UniformMixedBodies {
   this.tilesLayout=uniformDetailBindLayout(device,{label:"Uniform mixed rigid body tiles",entries:[
    {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
    {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+   ...(pool?[{binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[]),
   ]});
   this.params=device.createBuffer({label:"Uniform mixed rigid body tiles horizon",size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
  }
@@ -70,6 +73,7 @@ export class UniformMixedBodies {
 @group(1) @binding(5) var<storage,read> bodyPressure:array<f32>;
 @group(1) @binding(3) var<storage,read_write> bodyTiles:array<atomic<u32>>;
 @group(1) @binding(4) var<uniform> bodyHorizon:vec4f;
+${this.pool?uniformLiveListsWGSL(1,6,this.pool.layout):""}
 ${uniformMixedSolidWGSL(2)}
 // Air rows publish zero; closed cells have no physical pressure traction.
 fn umBodyPressure(p:vec3i)->f32{
@@ -141,8 +145,8 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
   atomicAdd(&rigidExchange[base+7u],i32(round(displaced*ambient.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(displaced*ambient.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(displaced*ambient.z*10000.0)));
  }
 }
-@compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u){
- let tile=gid.x+umDispatchX*64u*gid.y;if(!umTileLive(tile)){return;}
+fn umBodyMarkTile(tile:u32){
+ if(!umTileLive(tile)){return;}
  // bodyTiles is a bit per tile key (the census's body words).
  let coord=umTileCoord(tile);
  let h=umSolidParams.cellGravity.xyz;let t=vec3f(coord);
@@ -153,6 +157,9 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
   if(distance(clamp(centre,low,high),centre)<=reach){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
  }
 }
+${this.pool?/* wgsl */`@compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var i=gid.x;i<512u*ulResidentCount();i+=64u*groups.x){umBodyMarkTile(512u*ulResidentBlock(i>>9u)+(i&511u));}
+}`:/* wgsl */`@compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u){umBodyMarkTile(gid.x+umDispatchX*64u*gid.y);}`}
 `,["couple"])});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const couple=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.coupleLayout,this.solid.bindLayout]});
@@ -177,10 +184,10 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
   if(!this.tilesPipeline)throw new Error("Mixed rigid bodies are not initialized");
   if(!Number.isFinite(horizon)||horizon<0)throw new Error(`Mixed rigid body tile horizon must be finite and non-negative: ${horizon}`);
   this.horizon[0]=horizon;this.device.queue.writeBuffer(this.params,0,this.horizon);
-  if(this.tilesGroup?.tiles!==tiles)this.tilesGroup={tiles,group:uniformDetailGroup(this.device,{layout:this.tilesLayout,entries:[{binding:3,resource:{buffer:tiles}},{binding:4,resource:{buffer:this.params}}]})};
+  if(this.tilesGroup?.tiles!==tiles)this.tilesGroup={tiles,group:uniformDetailGroup(this.device,{layout:this.tilesLayout,entries:[{binding:3,resource:{buffer:tiles}},{binding:4,resource:{buffer:this.params}},...(this.pool?[{binding:6,resource:{buffer:this.pool.state}}]:[])]})};
   const pass=encoder.beginComputePass({label:"Uniform mixed rigid body tiles"});
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.tilesGroup.group.group);pass.setBindGroup(2,this.solid.bindGroup);
-  pass.setPipeline(this.tilesPipeline);pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);pass.end();
+  pass.setPipeline(this.tilesPipeline);if(this.pool)pass.dispatchWorkgroups(UNIFORM_LIVE_KEY_GROUPS);else pass.dispatchWorkgroups(this.tileGroups[0],this.tileGroups[1]);pass.end();
  }
  destroy():void{this.params.destroy();}
 }
