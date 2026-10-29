@@ -2,15 +2,14 @@
  * Water depth and normals gate the footprint so separate sheets do not bleed.
  */
 export const waterReflectionFilterWGSL = /* wgsl */ `
-fn filteredWaterReflection(radiance:texture_2d_array<f32>,positions:texture_2d<f32>,normals:texture_2d<f32>,uv:vec2f,origin:vec3f,normal:vec3f,direction:vec3f,cellSize:f32)->vec3f{
+fn waterReflectionKernel(radiance:texture_2d_array<f32>,positions:texture_2d<f32>,normals:texture_2d<f32>,uv:vec2f,origin:vec3f,normal:vec3f,direction:vec3f,cellSize:f32,stride:i32)->vec3f{
   if(screenSpaceReflections==0u){return waterEnvironmentRadiance(direction);}
   let dims=vec2i(textureDimensions(radiance));
   let center=clamp(vec2i(uv*vec2f(dims)),vec2i(0),dims-1);
   let base=textureLoad(radiance,center,0,0);
   if(base.a<0.0){return waterEnvironmentRadiance(direction);}
+  if(stride==0){return base.rgb;}
   let eyeDistance=max(length(origin-u.cameraPosition.xyz),.001);
-  let footprint=waterRoughness()*waterRoughness()*base.a/eyeDistance*f32(dims.y)/max(cameraTanHalfFov(),.01)*.25;
-  let stride=i32(clamp(round(footprint),1.0,8.0));
   var sum=vec3f(0.0);var weightSum=0.0;
   for(var y=-1;y<=1;y+=1){for(var x=-1;x<=1;x+=1){
     let pixel=clamp(center+vec2i(x,y)*stride,vec2i(0),dims-1);
@@ -27,5 +26,24 @@ fn filteredWaterReflection(radiance:texture_2d_array<f32>,positions:texture_2d<f
     sum+=sample.rgb*weight;weightSum+=weight;
   }}
   return select(base.rgb,sum/max(weightSum,1e-6),weightSum>1e-6);
+}
+fn filteredWaterReflection(radiance:texture_2d_array<f32>,positions:texture_2d<f32>,normals:texture_2d<f32>,uv:vec2f,origin:vec3f,normal:vec3f,direction:vec3f,cellSize:f32)->vec3f{
+  if(screenSpaceReflections==0u){return waterEnvironmentRadiance(direction);}
+  let dims=vec2i(textureDimensions(radiance));
+  let center=clamp(vec2i(uv*vec2f(dims)),vec2i(0),dims-1);
+  let base=textureLoad(radiance,center,0,0);
+  if(base.a<0.0){return waterEnvironmentRadiance(direction);}
+  let eyeDistance=max(length(origin-u.cameraPosition.xyz),.001);
+  let footprint=clamp(waterRoughness()*waterRoughness()*base.a/eyeDistance*f32(dims.y)/max(cameraTanHalfFov(),.01)*.25,0.0,8.0);
+  if(footprint==0.0){return base.rgb;}
+  let low=i32(floor(footprint));let high=i32(ceil(footprint));
+  let a=waterReflectionKernel(radiance,positions,normals,uv,origin,normal,direction,cellSize,low);
+  if(low==high){return a;}
+  let b=waterReflectionKernel(radiance,positions,normals,uv,origin,normal,direction,cellSize,high);
+  // The binomial kernel has per-axis second moment stride²/2. Interpolate
+  // that moment, including the zero-radius impulse, so subpixel roughness
+  // neither forces a whole-pixel blur nor jumps when a radius crosses an integer.
+  let fraction=(footprint*footprint-f32(low*low))/f32(high*high-low*low);
+  return mix(a,b,fraction);
 }
 `;

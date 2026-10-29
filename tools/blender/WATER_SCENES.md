@@ -279,8 +279,11 @@ is explicit. The completed v41 crop comparison shows subtle local changes, not a
 new crown-depth gain. Its cached light producer now culls only by geometric
 normal, so a raw optical backface cannot silently publish untraced clear light.
 The full producer is exercised by the same GPU regression file.
-The diffuse environment's radiance/irradiance π normalization is a separate
-open contract audit, not changed to match a particular image.
+A subsequent shared energy-contract correction makes the diffuse environment
+helper return irradianceπL for a constant sky L; its existing Lambert consumers
+divide byπ once. This globally changes diffuse fill, including the GI injection
+consumer. It does not alter specular sky, source albedo, exposure or scene-specific
+lighting. Independent quadrature and CPU/GPU tests cover the corrected units.
 
 The final uncontended v41 frozen pair measures 39.86 ms with native AO off and
 95.39 ms on at 1200×800, 4K shadows and World reflections (World refraction off).

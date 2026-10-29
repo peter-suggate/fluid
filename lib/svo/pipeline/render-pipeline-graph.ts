@@ -480,17 +480,18 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     taps: ["cone-radiance"],
     toggleable: true,
     tip: {
-      summary: "A world-keyed cache of gathered indirect radiance and visibility. Camera motion changes which keys are queried but never invalidates an entry; only a source, scene or lighting change clears it. Off by default: the pass bets that the closure amortises across frames and bills every frame for the bet. Off withholds the fill; the deferred pass keeps querying it and reads a cleared cache, so indirect light goes flat rather than stale.",
+      summary: "Gather indirect radiance and visibility for reduced-rate relighting. Enabling the cache reuses world-keyed closures across frames; disabling it recomputes the same GI each frame. Source, scene and lighting changes invalidate cached entries.",
       writes: "262 144-entry GI closure cache",
       feeds: "deferred lighting",
       gate: "the GI gather, a relight reconstruction, at a reduced cone rate, with cones active",
     },
-    state: (context) => (!context.worldGiCacheEnabled || !context.globalIlluminationEnabled ? "off"
+    state: (context) => (!context.globalIlluminationEnabled ? "off"
       : reduced(context) && isRelightReconstruction(context.tuning.coneRadianceReconstruction) ? "on" : "off"),
-    chip: (context) => (!context.worldGiCacheEnabled ? "off · fill not encoded"
+    chip: (context) => (context.coneTracingMode !== "cones" ? "needs cones"
       : !context.globalIlluminationEnabled ? "needs the GI gather"
+      : !reduced(context) ? "full rate · inline GI"
       : isRelightReconstruction(context.tuning.coneRadianceReconstruction)
-        ? "relight · 262 144 entries" : "upsample · cache idle"),
+        ? context.worldGiCacheEnabled ? "relight · 262 144 entries" : "relight · uncached gather" : "upsample · cache idle"),
   },
   {
     id: "reduced-shade",
@@ -570,7 +571,7 @@ const NODES: readonly RenderPipelineNodeDefinition[] = [
     taps: [],
     toggleable: true,
     tip: {
-      summary: "The indirect gather and its energy balance: how much bounced light, how much broad cone occlusion, and how much analytic sky fill survives beside them. Switching it off withholds the gather and the world-GI cache rather than scaling them to zero, so the frame gets that time back; cone shadows and AO are unaffected.",
+      summary: "The indirect gather and its energy balance: bounced light, broad cone occlusion and retained analytic sky fill. Enabling GI selects cone visibility. Switching GI off withholds the gather rather than scaling it to zero; cone shadows and AO are unaffected.",
       reads: "node-mip pyramid · tetrahedral radiance · cone visibility",
       feeds: "deferred lighting",
       gate: "cones, and a complete derived lighting publication",

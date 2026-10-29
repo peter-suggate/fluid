@@ -272,7 +272,7 @@ function useRenderPipelineBands(): { readonly bands: readonly PipelineBand[]; re
     "seam-closure": renderSeamClosureControls({ silhouetteRefinementStatus }),
     "cone-visibility": renderConeVisibilityControls({ svoConeTracingMode, tuning, updateTuning, modified, resetTuning, svoStageView, svoStageLightSlot, setSvoStageLightSlot, lightingVisibilityStatus }),
     "reduced-shade": renderReducedShadeControls(),
-    "gi-composition": renderGiCompositionControls({ svoGlobalIlluminationEnabled, tuning, updateTuning, modified, resetTuning }),
+    "gi-composition": renderGiCompositionControls({ svoGlobalIlluminationEnabled, svoConeTracingMode, tuning, updateTuning, modified, resetTuning }),
     present: renderPresentControls({ tuning, updateTuning, modified, resetTuning }),
   };
 
@@ -317,7 +317,8 @@ function useRenderPipelineBands(): { readonly bands: readonly PipelineBand[]; re
         cost: { kind: cost.kind, duration_ms: cost.duration_ms, encodedFraction: cost.encodedFraction, explanation: costExplanation(cost) },
         lamp: {
           kind: "switch",
-          checked: state !== "off",
+          checked: node.id === "world-gi-cache" ? svoWorldGiCacheEnabled
+            : node.id === "gi-composition" ? svoGlobalIlluminationEnabled : state !== "off",
           disabled: !node.toggleable || unavailable,
           ariaLabel: node.label,
           title: tip,

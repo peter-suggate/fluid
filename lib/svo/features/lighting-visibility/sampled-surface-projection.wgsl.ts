@@ -53,7 +53,7 @@ fn sampledSurfaceProjection(base:u32,original:vec3f)->SampledSurfaceProjection{
 
 /** Host adapter: only identified, uncut imported receivers have a source field. */
 export const sampledShadowSurfaceWGSL = /* wgsl */ `
-fn drySampledShadowSurface(position:vec3f,normal:vec3f,owner:u32)->SampledSurfaceProjection{
+fn drySampledShadowSurfaceUncached(position:vec3f,normal:vec3f,owner:u32)->SampledSurfaceProjection{
   // Structural SVO receivers may carry sampled materials after owners have
   // been merged. They are valid voxel surfaces, not a particular imported
   // triangle; only an identified source owner can be reconciled.
@@ -71,5 +71,24 @@ fn drySampledShadowSurface(position:vec3f,normal:vec3f,owner:u32)->SampledSurfac
   if(projected.valid==0u){return projected;}
   let q=record.orientation;
   return SampledSurfaceProjection(svoPrimitiveCenter_m(record)+svoQuaternionRotate(q,projected.position),svoQuaternionRotate(q,projected.normal),1u);
+}
+// Invocation-private: all source samples at one receiver need the exact same
+// bounded projection. The full bitwise key also supports compute invocations
+// that shade several receiver positions. No ray result, owner or blocker is
+// cached or ignored; only this source-surface reconciliation is reused.
+var<private> dryProjectionCached:u32;
+var<private> dryProjectionPosition:vec3u;
+var<private> dryProjectionNormal:vec3u;
+var<private> dryProjectionOwner:u32;
+var<private> dryProjectionCuts:u32;
+var<private> dryProjectionResult:SampledSurfaceProjection;
+fn drySampledShadowSurface(position:vec3f,normal:vec3f,owner:u32)->SampledSurfaceProjection{
+  let p=bitcast<vec3u>(position);let n=bitcast<vec3u>(normal);let cuts=svoSculptCutCount();
+  if(dryProjectionCached!=0u&&all(p==dryProjectionPosition)&&all(n==dryProjectionNormal)
+    &&owner==dryProjectionOwner&&cuts==dryProjectionCuts){return dryProjectionResult;}
+  let result=drySampledShadowSurfaceUncached(position,normal,owner);
+  dryProjectionCached=1u;dryProjectionPosition=p;dryProjectionNormal=n;
+  dryProjectionOwner=owner;dryProjectionCuts=cuts;dryProjectionResult=result;
+  return result;
 }
 `;

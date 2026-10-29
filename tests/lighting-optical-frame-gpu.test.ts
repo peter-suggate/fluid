@@ -25,8 +25,8 @@ test("GPU cached visibility does not discard blockers behind raw optical backfac
   // Execute the entire production producer. Only its storage sink is adapted.
   const producer=rasterLightVisibilityWGSL.slice(start,end).replace("textureStore(rasterLightVisibilityOutput,", "storeResult(");
   await withUniformDevice("optical-independent cached visibility",async device=>{
-    const output=device.createBuffer({size:32,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
-    const read=device.createBuffer({size:32,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+    const output=device.createBuffer({size:4*64*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+    const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
     const module=device.createShaderModule({code:`
 struct Hit{normal:vec3f,materialId:u32,ownerId:u32}
 struct Light{identity:vec4u}
@@ -47,19 +47,26 @@ fn dryLightSample(l:Light,i:u32,p:vec3f)->Sample{return Sample(1u,vec3f(0,0,1),3
 fn rasterEvaluateLightVisibility(p:vec3f,n:vec3f,o:u32,l:vec3f,d:f32,i:u32)->vec3f{return vec3f(select(0.0,1.0,p.x>1.0));}
 fn rasterAtlasCoordinate(c:vec2i)->vec2i{return c;}
 fn rasterPackVisibility(v:vec3f)->u32{return u32(round(v.x*1023.0));}
-fn storeResult(c:vec2i,layer:i32,value:vec4u){output[u32(c.x)]=value;}
+fn storeResult(c:vec2i,layer:i32,value:vec4u){output[u32(c.x)*64u+u32(layer)]=value;}
 ${producer}
 @compute @workgroup_size(1) fn main(){
   dry.tuningCounts0=vec4u(0,0,1,1);dry.tuningCounts1=vec4u(1);dryLighting.metadata=vec4u(1,1,0,0);dryLighting.lights[0].identity=vec4u(0,0,0,1);
   rasterProduceLightVisibility(vec2i(0,0),vec4f(0,0,-1,1),1.0);
   rasterProduceLightVisibility(vec2i(1,0),vec4f(0,0,-1,1),1.0);
+  dry.tuningCounts0.z=32u;dry.tuningCounts0.w=2u;dry.tuningCounts1.x=2u;dryLighting.metadata.x=32u;
+  for(var i=0u;i<32u;i++){dryLighting.lights[i].identity=vec4u(SVO_LIGHT_SPHERE_AREA,0,0,1);}
+  rasterProduceLightVisibility(vec2i(2,0),vec4f(0,0,-1,1),1.0);
+  dry.materialPublication.w=16u;
+  rasterProduceLightVisibility(vec2i(3,0),vec4f(0,0,-1,1),1.0);
 }`});
     assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error"),[]);
     const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
     const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
     const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();
-    encoder.copyBufferToBuffer(output,0,read,0,32);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
-    const words=new Uint32Array(read.getMappedRange());assert.equal(words[0],0,"actual blocker is cached despite opposing optical normal");assert.equal(words[4],1023,"traced clear space stays clear");
+    encoder.copyBufferToBuffer(output,0,read,0,read.size);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
+    const words=new Uint32Array(read.getMappedRange());assert.equal(words[0],0,"actual blocker is cached despite opposing optical normal");assert.equal(words[64*4],1023,"traced clear space stays clear");
+    for(let sample=0;sample<64;sample++)assert.equal(words[(128+sample)*4],1023,`all32 area lights retain both visibility samples, slot${sample}`);
+    for(let sample=0;sample<64;sample++)assert.equal(words[(192+sample)*4],1023,`GI preserves both direct visibility samples, slot${sample}`);
     read.unmap();read.destroy();output.destroy();
   });
 });

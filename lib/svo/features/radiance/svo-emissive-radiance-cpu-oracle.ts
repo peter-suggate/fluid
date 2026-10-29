@@ -148,6 +148,7 @@ interface CanonicalLocalLight {
   range_m: number;
   radius_m: number;
   area_m2: number;
+  rectangleOffsets?: readonly [Triple, Triple];
   /** Beam cosines for a spot; see `SvoLightRecord.cone`. */
   cone?: { cosInner: number; cosOuter: number };
 }
@@ -312,9 +313,7 @@ function localLightForProxy(proxy: EnvironmentProxyPrimitive): CanonicalLocalLig
     position_m: [proxy.center_m.x, proxy.center_m.y, proxy.center_m.z] as Triple,
     colorLinear: [...proxy.material.colorLinear] as SvoRadianceRgb,
     intensity: proxy.material.emission,
-    range_m: proxy.tags.includes("point-light")
-      ? Math.min(4.5, Math.max(1, 3 * Math.sqrt(proxy.material.emission)))
-      : Math.max(1, 6 * Math.sqrt(proxy.material.emission)),
+    range_m: 0,
   };
   // The same order `svo-light-abi.ts` classifies in: a spot is read off its
   // reflector's taper before the point and area cases can claim the fixture.
@@ -352,17 +351,29 @@ function localLightForProxy(proxy: EnvironmentProxyPrimitive): CanonicalLocalLig
   const direction = authored ?? [0, 0, 0] as Triple;
   if (!authored) direction[normalAxis] = -1;
   const surface = dimensions.filter((_, axis) => axis !== normalAxis);
-  return { ...common, kind: "rectangle", direction, radius_m: 0, area_m2: 4 * surface[0] * surface[1] };
+  const axes = [0, 1, 2].filter(axis => axis !== normalAxis);
+  const rectangleOffsets = axes.map(axis => [0, 1, 2].map(component => component === axis ? dimensions[axis] : 0) as Triple) as [Triple, Triple];
+  return { ...common, kind: "rectangle", direction, radius_m: 0, area_m2: 4 * surface[0] * surface[1], rectangleOffsets };
 }
 
 interface LocalLightSample { towardLight: Triple; radiance: Triple; shadowDistance_m: number }
 
-function sampleLocalLight(light: CanonicalLocalLight, point: Triple): LocalLightSample | undefined {
-  const offset = light.position_m.map((value, axis) => value - point[axis]) as Triple;
+function sampleLocalLight(light: CanonicalLocalLight, point: Triple, sampleIndex: number): LocalLightSample | undefined {
+  const samplePosition = [...light.position_m] as Triple;
+  const sign = sampleIndex === 0 ? -1 : 1;
+  if (light.kind === "sphere" || light.kind === "spot") {
+    const toward = normalized(light.position_m.map((value, axis) => value - point[axis]) as Triple);
+    const helper: Triple = Math.abs(toward[1]) > .9 ? [1, 0, 0] : [0, 1, 0];
+    const tangent = normalized([toward[1]*helper[2]-toward[2]*helper[1],toward[2]*helper[0]-toward[0]*helper[2],toward[0]*helper[1]-toward[1]*helper[0]]);
+    for (let axis=0;axis<3;axis++) samplePosition[axis] += tangent[axis]*sign*.45*light.radius_m;
+  } else if (light.rectangleOffsets) {
+    for (let axis=0;axis<3;axis++) samplePosition[axis] += sign*(.45*light.rectangleOffsets[0][axis]+.2*light.rectangleOffsets[1][axis]);
+  }
+  const offset = samplePosition.map((value, axis) => value - point[axis]) as Triple;
   const distanceSquared = dot(offset, offset);
-  if (distanceSquared <= 1e-10 || distanceSquared >= light.range_m ** 2) return undefined;
+  if (distanceSquared <= 1e-10 || (light.range_m > 0 && distanceSquared >= light.range_m ** 2)) return undefined;
   const distance = Math.sqrt(distanceSquared), towardLight = offset.map((value) => value / distance) as Triple;
-  const rangeFade = Math.max(0, 1 - distance / light.range_m) ** 2;
+  const rangeFade = light.range_m > 0 ? Math.max(0, 1 - distance / light.range_m) ** 2 : 1;
   let shapeScale = 1 / Math.max(1, distanceSquared);
   if (light.kind === "sphere") shapeScale = light.area_m2 / Math.max(light.area_m2, distanceSquared);
   else if (light.kind === "rectangle") {
@@ -439,16 +450,19 @@ function buildBaseInterior(
         }
         for (const localLight of localLights) {
           if (localLight.source === proxy) continue;
-          const direct = sampleLocalLight(localLight, point);
+          const sampleCount = localLight.kind === "point" ? 1 : 2;
+          for (let sampleIndex=0;sampleIndex<sampleCount;sampleIndex++) {
+          const direct = sampleLocalLight(localLight, point, sampleIndex);
           if (!direct) continue;
           const incidence = Math.max(0, dot(surface.normal, direct.towardLight));
           if (!(incidence > 0)) continue;
           counts.localLightSamples += 1;
           if (visibleToDirectionalLight(point, proxy, occluders, direct.towardLight, direct.shadowDistance_m, localLight.source)) {
             for (let channel = 0; channel < 3; channel += 1) {
-              emitted[channel] += proxy.material.colorLinear[channel] * direct.radiance[channel] * incidence / Math.PI;
+              emitted[channel] += proxy.material.colorLinear[channel] * direct.radiance[channel] * incidence / (Math.PI * sampleCount);
             }
           } else counts.shadowedLocalLightSamples += 1;
+          }
         }
         const sample = svoTetrahedralLambertianEmission(emitted, surface.normal, 1 / sampleCount);
         for (let direction = 0; direction < 4; direction += 1) for (let channel = 0; channel < 3; channel += 1) {

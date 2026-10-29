@@ -1,0 +1,117 @@
+{
+  "change": "Reuse static dry receiver visibility by default, including while water advances",
+  "tuning": "rasterStillViewReuse",
+  "defaultEnabled": true,
+  "reference": "Set rasterStillViewReuse=false in the UI or svoStillReuse=0 in the URL to execute the unchanged full producer path",
+  "ignoredViewWords": {
+    "2": "simulation clock (viewport.z)",
+    "19": "fluid pressure-cell overlay scale (options.w)",
+    "29": "last fluid timestep (environment.y)",
+    "30": "fluid max speed (environment.z)"
+  },
+  "retainedConditions": [
+    "Same viewport, camera/FOV/motion and all other view words",
+    "No rigid bodies",
+    "Water-shadow shader variant disabled",
+    "No diagnostic stage ablations",
+    "Ready unchanged opaque mesh, scene/source revisions and shadow generation",
+    "Unchanged lighting/material/receiver parameters",
+    "Scene animation changes continue to invalidate scene/mesh epochs"
+  ],
+  "additionalCorrectnessFix": "LOD/filter and receiver-band fast paths now invalidate raster screen visibility while preserving the independent world-space GI cache",
+  "instrumentation": "SparseVoxelDrySceneRenderer.rasterVisibilityCacheStatistics exposes reusedFrames,producedFrames,lastFrameReused,viewRevision,inputsRevision,viewEligible,enabled,waterShadows",
+  "validation": {
+    "hostTests": "5/5 pass, including default inheritance and explicit false query round trips",
+    "hostLog": "artifacts/water-scenes/static-visibility-view-unit.log",
+    "typecheck": "Root runs the repository typecheck after the final default change",
+    "actualGpuImageParity": {
+      "frozen": {
+        "artifact": "artifacts/water-scenes/tokyo-rain/shared-lighting-performance/corrected-v2.json",
+        "time_s": 0.8,
+        "width": 1000,
+        "height": 700,
+        "referenceMedian_ms": 929.8938334999984,
+        "reuseMedian_ms": 321.8933954999957,
+        "medianRatio": 2.888825451219955,
+        "wallTimeReduction_percent": 65.38385524200852,
+        "samplesPerVariant": 32,
+        "order": "forward and reverse",
+        "pixelMismatchBytes": 0,
+        "sceneMismatchBytes": 0,
+        "worldMismatchBytes": 0
+      },
+      "advancingWater": {
+        "artifact": "artifacts/water-scenes/tokyo-rain/shared-lighting-performance/live-validation.json",
+        "time_s": 0.9,
+        "width": 1000,
+        "height": 700,
+        "referenceMedian_ms": 927.3550620000024,
+        "reuseMedian_ms": 317.1140834999969,
+        "medianRatio": 2.9243578581082206,
+        "wallTimeReduction_percent": 65.80445867022225,
+        "samplesPerVariant": 32,
+        "order": "forward and reverse",
+        "pixelMismatchBytes": 0,
+        "sceneMismatchBytes": 0,
+        "worldMismatchBytes": 0,
+        "successful": true,
+        "gpuErrors": [],
+        "visibilityBeforeLive": {
+          "reusedFrames": 0,
+          "producedFrames": 28,
+          "lastFrameReused": false,
+          "viewRevision": 1,
+          "inputsRevision": 2,
+          "viewEligible": true,
+          "enabled": false,
+          "waterShadows": false
+        },
+        "visibilityAfterLive": {
+          "reusedFrames": 53,
+          "producedFrames": 29,
+          "lastFrameReused": true,
+          "viewRevision": 1,
+          "inputsRevision": 2,
+          "viewEligible": true,
+          "enabled": true,
+          "waterShadows": false
+        },
+        "prePauseSnapshot": {
+          "time_s": 0.9,
+          "presentations": 3163,
+          "simulationRunning": true
+        },
+        "prePauseVsRecomputedMismatchBytes": {
+          "display": 0,
+          "scene": 0,
+          "world": 0
+        }
+      }
+    },
+    "actualSpeedup": "GPU-fenced host wall time for the same frozen scene; no concurrent test jobs, not GPU-only timing or interactive FPS"
+  },
+  "limitations": [
+    "This reuses AO/visibility producers only; material shading and native per-owner AO still execute",
+    "Camera movement or animated/edited opaque geometry recomputes visibility",
+    "Measured speedup is for the Tokyo scene at 1000x700; benefit depends on how much of a frame is spent producing static visibility.",
+    "Live parity validates the final advancing-water frame at 0.9 seconds against the same solver state recomputed without reuse; it does not compare every intermediate frame."
+  ],
+  "sha256": {
+    "lib/svo/features/lighting-visibility/raster-visibility-view.ts": "d1395e048f016f96f18133b2aef48e2cdbb113285f59bf8d0946dcbd1d2031a1",
+    "lib/core/webgpu-renderer.ts": "06f7e1cd7facce1aa50b58eae9d9a47b0c022033dabe5edcd50f2844a0177bd4",
+    "lib/svo/pipeline/webgpu-svo-dry-scene.ts": "20ad4a650fd6f4caaf7f3e3450728729112e6636319e14fa9054c45aa94cd06b",
+    "lib/svo/features/lighting-visibility/svo-raster-ao.ts": "6e13ff802d11d6d569899d4092785164c1958c3888c51b6cc65c588598c1320f",
+    "tests/raster-visibility-view.test.ts": "3425e39d0d2df9d977b40d5a79a85d391b0b068dc364283e16a6ac24f7f19b0c",
+    "lib/svo/pipeline/svo-render-tuning.ts": "7ee8651cb3842a475eae898d9387514fe31179b1d51692e32dc43b9cbe6f43fa"
+  },
+  "finalRepositoryChecks": {
+    "typecheck": "pass",
+    "unit": {
+      "passed": 1314,
+      "skipped": 181,
+      "failed": 0
+    },
+    "typeLog": "artifacts/water-scenes/tokyo-rain/shared-lighting-performance/types-final.log",
+    "unitLog": "artifacts/water-scenes/tokyo-rain/shared-lighting-performance/unit-final.log"
+  }
+}

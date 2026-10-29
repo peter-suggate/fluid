@@ -15,7 +15,8 @@ import {
 import { SVO_BRICK_LIFECYCLE } from "../construction/svo-brick-occupancy";
 import { completeCooperativeBuild } from "../../../core/cooperative-build";
 import { svoEnvironmentLightingWGSL } from "./svo-environment-lighting";
-import { svoLightWGSL } from "../../contracts/svo-light-abi";
+import { SVO_LIGHT_MAXIMUM_RECORDS, svoLightWGSL } from "../../contracts/svo-light-abi";
+import { RADIANCE_AREA_LIGHT_SAMPLES, radianceLightSamplingWGSL } from "./radiance-light-sampling";
 import { svoMaterialWGSL } from "../../contracts/svo-material-abi";
 import {
   SVO_NODE_MIP_LAYOUT,
@@ -1345,6 +1346,7 @@ ${liveSvoDerivedPageValidityWGSL}
 ${svoMaterialWGSL}
 ${svoEnvironmentLightingWGSL}
 ${svoLightWGSL}
+${radianceLightSamplingWGSL}
 ${svoTetrahedralRadianceWGSL}
 struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,direct:vec4u,reserved:array<vec4u,3>,mappingOrigin:vec4f,mappingCellSize:vec4f,${LIVE_SVO_RADIANCE_PARAMS_FIELDS},bandedLanes:vec4u}
 @group(0) @binding(0) var<storage,read> control:array<u32>;
@@ -1418,7 +1420,24 @@ fn incidentAlong(origin:vec3f,normal:vec3f,index:u32)->vec3f{let direction=hemis
  for(var step=0u;step<4u;step+=1u){var distance=2.5;if(step==1u){distance=6.0;}else if(step==2u){distance=18.0;}else if(step==3u){distance=54.0;}let level=min(step+floorLevel,params.direct.x-1u);let sample=sceneSample(origin+direction*distance*floorScale,level);let coverage=clamp(sample.coverage,0.0,1.0);incident+=transmittance*svoTetraRadianceAlong(sample.radiance,-direction);transmittance*=1.0-coverage;if(transmittance<=0.01){break;}}
  return incident+transmittance*svoEnvironmentDiffuseIrradiance(environment[0],normal)/PI;}
 fn directVisibility(originCells:vec3f,towardLight:vec3f,maximumDistance_m:f32${directOcclusion.parameter})->f32{${directOcclusion.guard}let cellScale=max(params.mappingCellSize.x,max(params.mappingCellSize.y,params.mappingCellSize.z))*exp2(f32(radianceFloorLevel()));var transmittance=1.0;for(var step=0u;step<4u;step+=1u){var distance_m=cellScale*2.5;if(step==1u){distance_m=cellScale*6.0;}else if(step==2u){distance_m=cellScale*18.0;}else if(step==3u){distance_m=cellScale*54.0;}if(maximumDistance_m>0.0){distance_m=min(distance_m,maximumDistance_m*.9);}let position=originCells+towardLight*distance_m/params.mappingCellSize.xyz;let sample=sceneSample(position,min(step+radianceFloorLevel(),params.direct.x-1u));transmittance*=1.0-clamp(sample.coverage,0.0,1.0);}return clamp(transmittance,0.0,1.0);}
-fn directIncident(worldPosition:vec3f,originCells:vec3f,normal:vec3f${directOcclusion.parameter})->vec3f{var result=vec3f(0.0);let count=min(min(params.direct.w,arrayLength(&lights)),4u);for(var index=0u;index<4u;index+=1u){if(index>=count){break;}let light=lights[index];let base=svoLightRadiance(light);var toward=light.directionCone.xyz;var maximumDistance_m=0.0;var attenuation=1.0;if(light.identity.x!=SVO_LIGHT_DIRECTIONAL){let offset=light.positionRange.xyz-worldPosition;let distanceSquared=dot(offset,offset);if(distanceSquared<=1e-10||(light.positionRange.w>0.0&&distanceSquared>=light.positionRange.w*light.positionRange.w)){continue;}maximumDistance_m=sqrt(distanceSquared);toward=offset/maximumDistance_m;let rangeFade=select(1.0,pow(clamp(1.0-maximumDistance_m/max(light.positionRange.w,1e-6),0.0,1.0),2.0),light.positionRange.w>0.0);attenuation=rangeFade/max(1.0,distanceSquared);if(light.identity.x==SVO_LIGHT_SPHERE_AREA){let area=4.0*PI*light.shape.x*light.shape.x;attenuation=rangeFade*area/max(area,distanceSquared);}else if(light.identity.x==SVO_LIGHT_RECTANGLE_AREA){let area=4.0*light.axisUWidth.w*light.axisVHeight.w;attenuation=rangeFade*max(dot(normalize(light.directionCone.xyz),-toward),0.0)*area/max(area,distanceSquared);}else if(light.identity.x==SVO_LIGHT_SPOT){attenuation*=svoLightConeFalloff(light,toward);}}let cosine=max(dot(normal,toward),0.0);if(cosine>0.0&&directVisibility(originCells,toward,maximumDistance_m${directOcclusion.forward})>0.0){result+=base*(attenuation*cosine/PI);}}return result;}
+fn directIncident(worldPosition:vec3f,originCells:vec3f,normal:vec3f${directOcclusion.parameter})->vec3f{
+ var result=vec3f(0.0);
+ let count=min(min(params.direct.w,arrayLength(&lights)),${SVO_LIGHT_MAXIMUM_RECORDS}u);
+ for(var index=0u;index<${SVO_LIGHT_MAXIMUM_RECORDS}u;index+=1u){
+  if(index>=count){break;}let light=lights[index];
+  let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
+  let sampleCount=select(1u,${RADIANCE_AREA_LIGHT_SAMPLES}u,area);
+  for(var sampleIndex=0u;sampleIndex<${RADIANCE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
+   if(sampleIndex>=sampleCount){break;}
+   let sample=radianceLightSample(light,sampleIndex,worldPosition);
+   if(sample.valid==0u){continue;}
+   let cosine=max(dot(normal,sample.towardLight),0.0);if(cosine<=0.0){continue;}
+   let visibility=directVisibility(originCells,sample.towardLight,sample.finiteDistance_m${directOcclusion.forward});
+   result+=sample.radiance*(cosine*visibility/(PI*f32(sampleCount)));
+  }
+ }
+ return result;
+}
 /**
  * Outward normal at the scale of one floor-level texel, from its own opacity page.
  *

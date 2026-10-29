@@ -6,7 +6,7 @@ import {
   type SvoTetrahedralRadiance,
 } from "./svo-tetrahedral-radiance";
 
-export const SVO_TETRAHEDRAL_RADIANCE_CONE_MAXIMUM_STEPS = 64;
+export const SVO_TETRAHEDRAL_RADIANCE_CONE_MAXIMUM_STEPS = 512;
 export const SVO_TETRAHEDRAL_RADIANCE_UNPREMULTIPLY_EPSILON = 1 / 255;
 
 export interface SvoTetrahedralRadianceCone {
@@ -102,7 +102,7 @@ function validateCone(cone: SvoTetrahedralRadianceCone): Required<Pick<SvoTetrah
   if (!Number.isFinite(cone.maximumDistance_m) || cone.maximumDistance_m < 0) {
     throw new RangeError("SVO radiance cone maximum distance must be non-negative");
   }
-  const maximumSteps = cone.maximumSteps ?? SVO_TETRAHEDRAL_RADIANCE_CONE_MAXIMUM_STEPS;
+  const maximumSteps = cone.maximumSteps ?? 64;
   if (!Number.isInteger(maximumSteps) || maximumSteps < 1 || maximumSteps > SVO_TETRAHEDRAL_RADIANCE_CONE_MAXIMUM_STEPS) {
     throw new RangeError(`SVO radiance cone maximum steps must be from 1 to ${SVO_TETRAHEDRAL_RADIANCE_CONE_MAXIMUM_STEPS}`);
   }

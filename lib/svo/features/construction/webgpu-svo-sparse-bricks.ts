@@ -2993,6 +2993,7 @@ export class OctreeSparseBrickWorld {
       },
       tetrahedralRadiance: this.tetrahedralRadiance?.visibleGeneration(),
       derivedLighting,
+      derivedLightingContent: { revision: 0, settled: false },
       derivedRenderAllocationBytes: {
         wideFanout: this.wideFanout?.allocatedBytes ?? 0,
         compactHierarchy: this.compactHierarchy?.allocatedBytes ?? 0,
@@ -4248,6 +4249,7 @@ export class OctreeSparseBrickWorld {
       if (this.liveDerivedRelight) this.planLiveDerivedFrames(0, settleFrames);
     }
     if (this.liveDerivedFramesRemaining <= 0) {
+      if (this.sceneSource.derivedLightingContent) this.sceneSource.derivedLightingContent.settled = true;
       seam?.("world-derived-lighting");
       seam?.("world-radiance-feedback");
       return false;
@@ -4271,6 +4273,8 @@ export class OctreeSparseBrickWorld {
     this.liveDerivedInitial = false;
     this.liveDerivedRelight = false;
     this.liveDerivedFramesRemaining -= 1;
+    const content = this.sceneSource.derivedLightingContent;
+    if (content) { content.revision++; content.settled = this.liveDerivedFramesRemaining <= 0; }
     if (this.liveDerivedDrainFramesRemaining > 0) {
       this.liveDerivedDrainFramesRemaining -= 1;
       if (this.liveDerivedDrainFramesRemaining === 0) this.liveDerivedSeedBound = 0;

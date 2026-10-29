@@ -2,6 +2,7 @@ import { resolveSvoPipelineComposition } from "./composition";
 /** User-facing visibility effects layered over cone-traced global illumination. */
 
 import type { RenderStageSwitchId } from "./render-stage-switches";
+import type { LensBloomOptions } from "../../core/webgpu-lens-bloom";
 
 /**
  * How lighting visibility (shadows, AO, GI) is resolved.
@@ -164,6 +165,11 @@ export type SvoLightingOptions = Readonly<{
   waterReflectionMode?: "screen-space" | "world-space" | "environment";
   /** Optional full-world opaque refraction, verified against actual liquid. */
   waterWorldRefractionEnabled?: boolean;
+  /** Optional HDR camera bloom; disabled by default and independent of physics. */
+  lensBloom?: Partial<LensBloomOptions>;
+  /** Optional radiance-cone specular reflection from the published voxel world. */
+  voxelSpecularReflectionsEnabled?: boolean;
+  voxelSpecularSteps?: number;
   /** Authored image detail on voxel surfaces. Omitted means enabled. */
   surfaceTexturesEnabled?: boolean;
   /** Optional four-ray native FVX contact AO; geometry remains voxel based. */
@@ -196,9 +202,9 @@ export type SvoLightingOptions = Readonly<{
    *
    * Off by default, and a render choice rather than an ablation: the pass is a
    * bet that a world-keyed closure amortises across frames, and the frame it
-   * bills for that bet is every frame. The deferred pass keeps its binding and
-   * reads a cleared cache, so indirect light goes flat rather than stale, and
-   * the machinery stays compiled so turning it on costs a frame, not a rebuild.
+   * bills for that bet is every frame. Disabling it recomputes the same indirect
+   * closure per frame; it never removes bounced light. Full-rate shading gathers
+   * inline and does not use this reduced-relight cache.
    */
   worldGiCacheEnabled?: boolean;
   /**

@@ -62,6 +62,7 @@ export interface SvoLightRecord {
   revision: number;
   kind: SvoLightKind;
   position_m: Vec3Tuple;
+  /** Zero means unbounded physical falloff. Positive values are an explicit authored influence range. */
   range_m: number;
   direction: Vec3Tuple;
   colorLinear: Vec3Tuple;
@@ -277,12 +278,10 @@ function proxyPhysicalLight(proxy: EnvironmentProxyPrimitive, ownerBase: number,
     ownerId: ownerBase + proxy.ownerIndex,
     revision,
     position_m: [proxy.center_m.x, proxy.center_m.y, proxy.center_m.z] as Vec3Tuple,
-    // Point fixtures use a deliberately finite influence radius. This avoids
-    // spending shadow work on negligible contributions outside the authored
-    // garden composition and keeps their inverse-square energy bounded.
-    range_m: proxy.tags.includes("point-light")
-      ? Math.min(4.5, Math.max(1, 3 * Math.sqrt(proxy.material.emission)))
-      : Math.max(1, 6 * Math.sqrt(proxy.material.emission)),
+    // Physical fixtures have inverse-square/finite-area falloff, with no
+    // invented garden-sized influence boundary. Explicit SvoLightRecords can
+    // still author a positive range; zero is the shared unbounded contract.
+    range_m: 0,
     colorLinear: proxy.material.colorLinear,
     intensity: proxy.material.emission,
     sourceKey: proxy.key,

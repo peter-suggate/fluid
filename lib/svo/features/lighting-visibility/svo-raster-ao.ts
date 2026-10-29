@@ -590,6 +590,13 @@ export class SvoRasterAo {
   private fullWidth = 0;
   private fullHeight = 0;
   private visibilityCacheKey?: string;
+  private visibilityReusedFrames = 0;
+  private visibilityProducedFrames = 0;
+  private visibilityLastFrameReused = false;
+  get visibilityCacheStatistics() {
+    return { reusedFrames:this.visibilityReusedFrames, producedFrames:this.visibilityProducedFrames,
+      lastFrameReused:this.visibilityLastFrameReused };
+  }
   invalidateVisibility():void { this.visibilityCacheKey=undefined; }
   visibilityEnabled = true;
   visibilityQueueEnabled = true;
@@ -855,7 +862,9 @@ export class SvoRasterAo {
     // complete receiver-input key. Moving views always execute all producers.
     const reuseVisibility=this.visibilityEnabled&&reuse&&receiverKey!==undefined&&receiverKey===this.visibilityCacheKey;
     this.visibilityCacheKey=receiverKey;
-    if(reuseVisibility)return;
+    this.visibilityLastFrameReused=reuseVisibility;
+    if(reuseVisibility){this.visibilityReusedFrames++;return;}
+    this.visibilityProducedFrames++;
     if(aoEnabled&&this.farAoTaps<36){
       encoder.clearBuffer(this.aoRange);
       const range=encoder.beginComputePass({label:"Normalize visible AO footprint"});

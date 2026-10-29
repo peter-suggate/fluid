@@ -353,6 +353,11 @@ export interface SparseVoxelSceneRenderSource {
     requiredPages: number;
     capacity: number;
   }>;
+  /** Host receipt for all encoded mutations of derived opacity/radiance contents.
+   * Generation alone does not change during feedback settling. Absence forbids
+   * reuse of shaded frames that consume the derived hierarchy.
+   */
+  derivedLightingContent?: { revision: number; settled: boolean };
   /** Renderer-derived allocation telemetry; absent capabilities report zero bytes. */
   derivedRenderAllocationBytes?: Readonly<{
     wideFanout: number;

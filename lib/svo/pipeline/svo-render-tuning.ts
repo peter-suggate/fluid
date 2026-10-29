@@ -296,7 +296,8 @@ export interface SvoRenderTuning {
   readonly surfaceMeshPreserveCloseNormals: boolean;
   readonly primaryLeafVisits: number;
   readonly coneStepBudget: number;
-  /** Total direct emitter samples; area lights may consume two. Default 8. */
+  /** Direct light records to shade. Default32 covers every published record;
+   * each area light independently uses stable/movingAreaLightSamples. */
   readonly maximumShadedLights: number;
   readonly stableAreaLightSamples: number;
   /** Legacy serialized alias; normalized to the same sample budget. */
@@ -319,8 +320,8 @@ export interface SvoRenderTuning {
   /** Minimum screen-space AO budget, in four-tap steps; important receivers receive up to 36. */
   readonly rasterFarAoTaps: number;
   /**
-   * Reuse the raster shadow and AO visibility while the camera is still: paused,
-   * body-free and an unchanged view. Read at encode time only.
+   * Reuse raster shadow and AO visibility for unchanged body-free dry views.
+   * Water may advance when water shadows are disabled. Read at encode time only.
    */
   readonly rasterStillViewReuse: boolean;
   readonly aoConeAperture: number;
@@ -431,7 +432,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   surfaceMeshPreserveCloseNormals: true,
   primaryLeafVisits: 48,
   coneStepBudget: 48,
-  maximumShadedLights: 8,
+  maximumShadedLights: 32,
   stableAreaLightSamples: 2,
   movingAreaLightSamples: 2,
   stableAoSamples: 4,
@@ -447,7 +448,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   rasterCoarseAoStrength: 0.6,
   rasterShadowResolution: 2048,
   rasterFarAoTaps: 0,
-  rasterStillViewReuse: false,
+  rasterStillViewReuse: true,
   aoConeAperture: 0.62,
   shadowConeAperture: 0.065,
   // Off by default.
@@ -457,7 +458,7 @@ const balancedTuning: SvoRenderTuning = Object.freeze({
   // cost and gives back only the image. The default frame is the exact key
   // light with broad cone visibility and sky fill shaping it; bounced colour is
   // opt-in from the panel's Bounce tuning drawer.
-  giBounceStrength: 0,
+  giBounceStrength: 1,
   // Multi-bounce compensation already restores much of the energy hidden by
   // broad cone occlusion. Retaining the old .82 contrast double-darkened room
   // corners and amplified 8-bit opacity contours into visible bands.
@@ -667,7 +668,7 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     aoStrength: bounded(value.aoStrength, 0, 1),
     rasterCoarseAoStrength: bounded(value.rasterCoarseAoStrength ?? DEFAULT_SVO_RENDER_TUNING.rasterCoarseAoStrength, 0, 1),
     rasterFarAoTaps: Math.round(bounded(value.rasterFarAoTaps ?? DEFAULT_SVO_RENDER_TUNING.rasterFarAoTaps, 0, 36) / 4) * 4,
-    rasterStillViewReuse: value.rasterStillViewReuse === true,
+    rasterStillViewReuse: (value.rasterStillViewReuse ?? DEFAULT_SVO_RENDER_TUNING.rasterStillViewReuse) === true,
     rasterShadowResolution: value.rasterShadowResolution === 4096 ? 4096 : 2048,
     aoConeAperture: bounded(value.aoConeAperture, 0.1, 1.4),
     shadowConeAperture: bounded(value.shadowConeAperture, 0.01, 0.25),

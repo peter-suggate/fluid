@@ -13,7 +13,8 @@ function rendererFixture() {
     lightingOptions: { coneTracingMode: "cones" },
     renderTuning: { ...DEFAULT_SVO_RENDER_TUNING, coneRadianceReconstruction: "full-res-relight" },
     coneScale: .5, conePipelineScale: .5, splitPipelineScale: .5,
-    splitPipelineLattice: false, splitPipelineBackdropTerrain: false, splitPipelineRigidBodies: false,
+    splitPipelineLattice: false, splitPipelineGlobalIllumination: false,
+    splitPipelineBackdropTerrain: false, splitPipelineRigidBodies: false,
     rigidBodyCountPublished: true, rigidBodyCount: 0,
     source: { structural: {
       fields: { topology: {}, sceneGeometry: {}, materialOwner: {} },

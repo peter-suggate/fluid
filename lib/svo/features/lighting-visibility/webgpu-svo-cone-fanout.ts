@@ -591,7 +591,7 @@ fn fanoutConeSample(position:vec3f,normal:vec3f,featureId:u32,layer:u32)->f32{
   let light=dryLighting.lights[lightIndex];
   let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;
   let globalIllumination=(dry.materialPublication.w&FANOUT_GI_FLAG)!=0u;
-  let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
+  let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);
   if(sampleIndex>=sampleCount){return FANOUT_INACTIVE;}
   if(light.identity.w!=dryLighting.metadata.y){return 0.0;}
   let sample=fanoutLightSample(light,sampleIndex,position);

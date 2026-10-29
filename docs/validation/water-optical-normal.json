@@ -1,0 +1,49 @@
+{
+  "problem": "Normalized truncated Gaussian derivative has fractional-phase-dependent axis variance. It changes the direction of an affine signed-distance gradient, producing periodic optical normal errors without any real surface curvature.",
+  "change": "Replace only the27-tap optical-normal reconstruction weights with tensor-product quadratic B-spline weights and analytic derivatives. Reuse the same sampling paths, support, ownership, fallback and anisotropic world-cell scaling. Subtract the first sampled phi from every phi before accumulation, without extra field loads, to preserve constants exactly and reduce cancellation.",
+  "invariants": {
+    "partitionOfUnity": "sum_j B2(j-x)=1",
+    "firstMoment": "sum_j j B2(j-x)=x",
+    "secondMoment": "sum_j j*j B2(j-x)=x*x+1/4",
+    "result": "Analytic derivatives reproduce affine gradients and gradients of quadratic fields exactly in real arithmetic. Signed-distance sphere gradients converge as curvature becomes resolved.",
+    "geometry": "No contour crossings, mesh positions, indices, voxel occupancy, solver values or collision fields changed. Only stored optical normals and their visual consumers change.",
+    "boundaries": "Existing sampleLow/sampleHigh clamp and fallback guards retained; weightSum and gradient degeneracy checks retained."
+  },
+  "gpu": {
+    "cases": 4590,
+    "maxima": {
+      "plane": 0.0001824168284740918,
+      "oldPlane": 2.031547531784156,
+      "quadratic": 7.467283519113962e-05,
+      "sphere": {
+        "2": 1.3757375991903864,
+        "4": 0.3498504237447246,
+        "8": 0.08771932848612753,
+        "16": 0.02244775477996813
+      },
+      "oldSphere": {
+        "2": 12.13683410935975,
+        "4": 7.630761768977311,
+        "8": 4.671500833660453,
+        "16": 3.723861446656012
+      }
+    }
+  },
+  "gpuCoverage": [
+    "six production sampler branch configurations, with analytic field-sampling stubs",
+    "125 fractional phases on affine and quadratic sphere fields with anisotropic cells",
+    "128 sphere directions at each radius2,4,8,16cells",
+    "constant-field fallback",
+    "runtime storage-loaded NaN fallback",
+    "boundary fallback"
+  ],
+  "validation": {
+    "command": "bash tools/gpu/fluid-gpu-run.sh timing env WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx --test tests/water-optical-normal.test.ts",
+    "log": "artifacts/water-scenes/normal-audit/gpu.log",
+    "types": "npm run check:types passed",
+    "cpuEvidence": "artifacts/water-scenes/normal-audit/moments.json",
+    "visual": "The v7 scene snapshot, optical diagnostics and exact mesh export passed execution sentinels. The subsequent uncached stress comparison failed; its performance results are rejected. cycles-matched-v7 uses the same captured positions and optical normals. Near-photorealism is not established."
+  },
+  "sourceSha256": "8235a6442931bdfb02044b9382bf2adf2f589b44b82fbf526efd5582a649df86",
+  "beforeSourceSha256": "62c443cd3fd11ba8b6b831abfc67e76b4cafa93067528e9baaebf1568c411dc0"
+}

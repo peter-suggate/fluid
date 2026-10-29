@@ -24,3 +24,25 @@ test("offline water export refuses missing, truncated or non-finite geometry", (
   const bad = new Float32Array(24); bad[9] = NaN;
   assert.throws(() => waterMeshObj(bad, "broken"), /non-finite/);
 });
+
+test("optical OBJ normals preserve the production lane independently of geometric face normals", () => {
+  const vertices = new Float32Array([
+    1, 2, 3, 99, 1, 2, 0, 7,
+    2, 2, 3, 99, 0, 2, 1, 7,
+    1, 2, 2, 99, 0, 3, 0, 7,
+  ]);
+  const legacy = waterMeshObj(vertices, "frame"), optical = waterMeshObj(vertices, "frame", { opticalNormals: true });
+  assert.deepEqual(optical.bounds, legacy.bounds);
+  const lines = (obj: string, prefix: string) => obj.split("\n").filter(line => line.startsWith(prefix));
+  assert.deepEqual(lines(optical.obj, "v "), lines(legacy.obj, "v "), "optics must not change triangle positions");
+  const normals = lines(optical.obj, "vn ").map(line => line.slice(3).split(" ").map(Number));
+  assert.deepEqual(normals, [[1 / Math.sqrt(5), 0, 2 / Math.sqrt(5)], [0, -1 / Math.sqrt(5), 2 / Math.sqrt(5)], [0, 0, 1]]);
+  normals.forEach(normal => assert.ok(Math.abs(Math.hypot(...normal) - 1) < 1e-14));
+  assert.match(optical.obj, /f 1\/\/1 2\/\/2 3\/\/3\n$/);
+  assert.ok(normals[0]![0]! > 0, "preserve tilted phi gradient rather than recomputing the flat face normal");
+  const invalid = vertices.slice(); invalid[4] = NaN;
+  assert.throws(() => waterMeshObj(invalid, "invalid", { opticalNormals: true }), /invalid optical normals/);
+  assert.doesNotThrow(() => waterMeshObj(invalid, "legacy"), "legacy exporter must continue ignoring non-position lanes");
+  invalid[4] = invalid[5] = invalid[6] = 0;
+  assert.throws(() => waterMeshObj(invalid, "zero", { opticalNormals: true }), /invalid optical normals/);
+});

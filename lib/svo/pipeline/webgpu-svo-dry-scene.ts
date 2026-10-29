@@ -1,5 +1,7 @@
 import { SurfaceTextureAtlasGpu } from "../features/materials/surface-texture-atlas-gpu";
 import { SvoWaterWorldReflections, type SvoWaterWorldReflectionInputs } from "../features/shading/water-world-reflections";
+import { ExactDryFrameReuse, dryFrameReuseReason, type DryFrameReuseKey } from "../features/lighting-visibility/dry-frame-reuse";
+import { rasterVisibilityViewsEqual } from "../features/lighting-visibility/raster-visibility-view";
 import { rasterVisibilityLayers } from "../features/lighting-visibility/raster-light-visibility";
 import { planImportedSurfaceGroups, type ImportedSurfaceGroup } from "../features/primary-visibility/imported-surface-groups";
 import { importedSurfaceShadowInstances, type ImportedSurfaceShadowGroup } from "../features/lighting-visibility/imported-surface-shadow";
@@ -243,6 +245,7 @@ export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
   { binding: 26, type: "texture-2d-uint" as const },
   { binding: 27, type: "texture-2d-uint" as const },
   { binding: 28, type: "texture-2d-array-float" as const },
+  { binding: 29, type: "storage" as const },
 ] as const);
 
 export function sparseVoxelDrySceneBindGroupLayoutEntries(
@@ -252,6 +255,9 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
   // inputs, but not material shading or dormant traversal variants.
   // Keeping those fragment-only also stays below WebGPU's per-stage storage
   // binding limit on Apple GPUs.
+  // Specular diagnostics (29) are written only by fragment shading. Exposing
+  // them to compute would push mesh construction from 10 storage buffers to
+  // 11, even though its entry points never access that buffer.
   const computeBindings = new Set([0, 1, 2, 3, 4, 5, 6, 9, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
   // Raster analytic impostors consume the camera/body uniforms, their scene
   // record arena, and the live primitive-count/structural-offset parameters.
@@ -269,6 +275,13 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
     if (type === "filtering-sampler") return { binding, visibility, sampler: { type: "filtering" } };
     return { binding, visibility, buffer: { type } };
     });
+}
+
+export function svoSurfaceMeshComputeBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
+  return [30, 32, 34, 40, 41].map(binding => ({
+    binding, visibility: GPUShaderStage.COMPUTE,
+    buffer: { type: binding === 41 ? "read-only-storage" : "storage" },
+  }));
 }
 
 const CLUSTER_BLOCK_LATTICE_PERIOD_WORD = 5;
@@ -1049,6 +1062,8 @@ interface SvoDrySplitPipelineBundle {
    * use and the visibility the frame feeds them cannot disagree.
    */
   readonly lattice: boolean;
+  /** Whether the active shaders contain the GI gather rather than its zero stub. */
+  readonly globalIlluminationCapable: boolean;
   /** Whether the backdrop terrain hooks were compiled in (false only for a world without one). */
   readonly backdropTerrain: boolean;
   /** Whether the rigid-body loops were compiled in (false only for a frame without bodies). */
@@ -1093,6 +1108,7 @@ export class SparseVoxelDrySceneRenderer {
   private worldGiCacheBuffer?: GPUBuffer;
   private worldGiFrameBuffer?: GPUBuffer;
   private worldGiCacheDirty = true;
+  private worldGiGatherEncoded = false;
   /** Frame-graph stages this frame must not encode. See `render-stage-switches`. */
   private disabledStages: DisabledRenderStages = NO_DISABLED_RENDER_STAGES;
   /** Last body count the host published; picking reads identity only when it is nonzero. */
@@ -1170,6 +1186,7 @@ export class SparseVoxelDrySceneRenderer {
   private latticeStoreFailure?: string;
   /** Whether the active split bundle compiled the lattice lookup; encode follows it. */
   private splitPipelineLattice = false;
+  private splitPipelineGlobalIllumination = false;
   /** Whether the active split bundle compiled the backdrop terrain hooks; see backdropTerrainRequested. */
   private splitPipelineBackdropTerrain = true;
   /** Whether the active split bundle compiled the rigid-body loops; see rigidBodiesRequested. */
@@ -1476,6 +1493,7 @@ export class SparseVoxelDrySceneRenderer {
   private readonly publishedFieldPrograms = new PublishedWords();
   private readonly publishedLighting = new PublishedWords();
   private readonly paramsBuffer: GPUBuffer;
+  private readonly voxelSpecularCounters: GPUBuffer;
   private readonly lightingBuffer: GPUBuffer;
   private readonly rigidMotionUniformBuffer: GPUBuffer;
   private readonly nodeMipFallbackAtlas: GPUTexture;
@@ -1601,6 +1619,8 @@ export class SparseVoxelDrySceneRenderer {
     this.rasterRigidActive = rasterRigidDiscovery
       && (!(this.rasterPrimary && !this.rasterPrimaryDirect) || this.screenSpaceTerminationPixels > 0);
     this.paramsBuffer = device.createBuffer({ label: "Sparse voxel dry scene parameters", size: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.voxelSpecularCounters = device.createBuffer({ label: "Voxel specular diagnostics", size: 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.sceneArenaBuffer = device.createBuffer({
       label: "Live authored scene arena (materials, primitives/BVH)",
       size: SVO_DRY_SCENE_ARENA_LAYOUT.sizeBytes,
@@ -1863,6 +1883,7 @@ export class SparseVoxelDrySceneRenderer {
     this.scenePrimitiveCoverageOverflowPipeline = bundle.scenePrimitiveCoverageOverflow;
     this.latticeKeyPipeline = bundle.latticeKeys;
     this.splitPipelineLattice = bundle.lattice;
+    this.splitPipelineGlobalIllumination = bundle.globalIlluminationCapable;
     this.splitPipelineBackdropTerrain = bundle.backdropTerrain;
     this.splitPipelineRigidBodies = bundle.rigidBodies;
     this.splitPipelineScale = scale;
@@ -2012,13 +2033,7 @@ export class SparseVoxelDrySceneRenderer {
     this.surfaceMeshArena = this.createSurfaceMeshArena(Math.min(SVO_SURFACE_MESH_INITIAL_BYTES, this.surfaceMeshMaximumBytes));
     this.surfaceMeshEmptyMaintenance = this.device.createBuffer({ label: "Absent voxel maintenance list", size: 256, usage: GPUBufferUsage.STORAGE });
     this.surfaceMeshVisible = this.createSurfaceMeshVisible(this.surfaceMeshArena.size);
-    this.surfaceMeshComputeLayout = this.device.createBindGroupLayout({ entries: [
-      { binding: 30, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 32, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 34, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 40, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-      { binding: 41, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-    ] });
+    this.surfaceMeshComputeLayout = this.device.createBindGroupLayout({ entries: svoSurfaceMeshComputeBindGroupLayoutEntries() });
     this.surfaceMeshDrawLayout = this.device.createBindGroupLayout({ entries: [
       // Compute as well: the shadow maps list the quads a partial redraw draws.
       { binding: 31, visibility: GPUShaderStage.VERTEX | GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -3676,7 +3691,7 @@ export class SparseVoxelDrySceneRenderer {
       this.worldGiFrameBuffer = this.device.createBuffer({
         label: "Sparse voxel persistent world GI frame prelude",
         size: SVO_DRY_WORLD_GI_CACHE_CONTRACT.frameBytes,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       });
       this.worldGiCacheDirty = true;
     }
@@ -4221,7 +4236,7 @@ export class SparseVoxelDrySceneRenderer {
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
         scenePrimitiveCoverage, scenePrimitiveLodResolve, scenePrimitiveComputeArgs, scenePrimitiveComputeResolve, scenePrimitiveDepthBridge,
-        scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow, lattice, backdropTerrain, rigidBodies, latticeKeys };
+        scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow, lattice, globalIlluminationCapable, backdropTerrain, rigidBodies, latticeKeys };
       this.splitPipelineBundles.set(variantKey, bundle);
       return bundle;
     })();
@@ -4775,6 +4790,10 @@ export class SparseVoxelDrySceneRenderer {
     }
     if (this.requestedBundleResourceFailure) {
       return { state: "failed", detail: this.requestedBundleResourceFailure };
+    }
+    if (this.shadingPath === "split"
+      && this.splitPipelineGlobalIllumination !== (this.lightingOptions.globalIlluminationEnabled === true)) {
+      return { state: "compiling", detail: "Compiling SVO lighting for the requested GI capability" };
     }
     if (this.shadingPath === "split"
       && this.splitPipelineLattice !== this.latticeVisibilityRequested(this.coneScale, this.lightingOptions.globalIlluminationEnabled === true)) {
@@ -5469,7 +5488,9 @@ export class SparseVoxelDrySceneRenderer {
       this.device.queue.submit([encoder.finish()]);
       previousArena.destroy();
     }
+    const previousSurfaceTextureView = this.surfaceTextures.view;
     this.surfaceTextures.publish(scene.surfaceTextureAtlas);
+    const surfaceTextureBindingChanged = previousSurfaceTextureView !== this.surfaceTextures.view;
     const previous = this.scene;
     // The scene's arrays are what the arena holds, re-posed or not: a publisher
     // that changes a primitive hands over new ones or says which records moved.
@@ -5571,7 +5592,10 @@ export class SparseVoxelDrySceneRenderer {
     }
     if (!previous || scene.clusterBlocks !== previous.clusterBlocks || !primitivesHeld) warnOnUnresolvedClusters(scene);
     this.writeParams(source!, scene);
-    if (!this.bindGroup || arenaGrew) this.rebuild();
+    // Includes the specialized primary groups; World queries receive this
+    // current scene bind group at encode time. An atlas may change without
+    // growing any scene arena or changing imported mesh membership.
+    if (!this.bindGroup || arenaGrew || surfaceTextureBindingChanged) this.rebuild();
     return true;
   }
 
@@ -5718,7 +5742,11 @@ export class SparseVoxelDrySceneRenderer {
     const surfaceTexturesEnabled = options.surfaceTexturesEnabled !== false;
     const nativeAmbientOcclusionEnabled = options.nativeAmbientOcclusionEnabled === true;
     const silhouetteRefinementEnabled = options.silhouetteRefinementEnabled === true;
-    const globalIlluminationEnabled = coneTracingMode !== "raster-ao" && options.globalIlluminationEnabled === true;
+    // Exact/off visibility has no cone GI producer either. Preserve the user's
+    // requested setting in the UI, but never compile or advertise an absent gather.
+    const globalIlluminationEnabled = coneTracingMode === "cones" && options.globalIlluminationEnabled === true;
+    const voxelSpecularReflectionsEnabled = options.voxelSpecularReflectionsEnabled === true;
+    const voxelSpecularSteps = Number.isFinite(options.voxelSpecularSteps) ? Math.max(1,Math.min(512,Math.round(options.voxelSpecularSteps!))) : 128;
     // Opt-in, unlike every other lighting flag here: the cache is off unless
     // this frame asked for it by name.
     const worldGiCacheEnabled = options.worldGiCacheEnabled === true;
@@ -5735,6 +5763,8 @@ export class SparseVoxelDrySceneRenderer {
       && silhouetteRefinementEnabled === this.silhouetteRefinementEnabled
       && coneTracingMode === previousConeTracingMode
       && globalIlluminationEnabled === previousGlobalIllumination
+      && voxelSpecularReflectionsEnabled === (this.lightingOptions.voxelSpecularReflectionsEnabled === true)
+      && voxelSpecularSteps === (this.lightingOptions.voxelSpecularSteps ?? 128)
       && worldGiCacheEnabled === previousWorldGiCache
       && latticeVisibilityEnabled === previousLatticeVisibility
       && coneLightingScale === this.coneScale) return;
@@ -5747,7 +5777,8 @@ export class SparseVoxelDrySceneRenderer {
       || globalIlluminationEnabled !== previousGlobalIllumination
       || worldGiCacheEnabled !== previousWorldGiCache;
     this.lightingOptions = { shadowsEnabled: options.shadowsEnabled, ambientOcclusionEnabled: options.ambientOcclusionEnabled,
-      nativeAmbientOcclusionEnabled, surfaceTexturesEnabled, silhouetteRefinementEnabled, coneTracingMode, globalIlluminationEnabled, worldGiCacheEnabled, latticeVisibilityEnabled };
+      nativeAmbientOcclusionEnabled, surfaceTexturesEnabled, silhouetteRefinementEnabled, coneTracingMode, globalIlluminationEnabled, worldGiCacheEnabled, latticeVisibilityEnabled,
+      voxelSpecularReflectionsEnabled, voxelSpecularSteps };
     this.silhouetteRefinementEnabled = silhouetteRefinementEnabled;
     this.coneScale = coneLightingScale;
     this.requestedBundleFailure = undefined;
@@ -5795,6 +5826,10 @@ export class SparseVoxelDrySceneRenderer {
     return { state: "enabled" };
   }
 
+  private readonly dryFrameReuse = new ExactDryFrameReuse();
+  private dryFrameReuseEligibility = "not-evaluated";
+  private dryFrameControlRevision = 0;
+  private dryFrameTilingEnabled = false;
   private visibilityView?: Float32Array;
   private visibilityViewRevision = 0;
   private visibilityInputsRevision = 0;
@@ -5802,16 +5837,25 @@ export class SparseVoxelDrySceneRenderer {
   /** The caller supplies the entire view uniform, or withdraws reuse. This is
    * opt-in: benchmarks and other consumers without a key always render fresh. */
   setRasterVisibilityView(view:Float32Array|undefined):void {
-    if(!view){this.visibilityViewValid=false;this.rasterAo?.invalidateVisibility();return;}
+    if(!view){this.visibilityViewValid=false;this.rasterAo?.invalidateVisibility();this.dryFrameReuse.invalidate();return;}
     if(!this.visibilityView||this.visibilityView.length!==view.length){this.visibilityView=new Float32Array(view);this.visibilityViewRevision++;}
-    else if(!view.every((value,index)=>Object.is(value,this.visibilityView![index]))){this.visibilityView.set(view);this.visibilityViewRevision++;}
+    else if(!rasterVisibilityViewsEqual(this.visibilityView,view)){this.visibilityView.set(view);this.visibilityViewRevision++;}
     this.visibilityViewValid=true;
+  }
+  /** Read-only counters for controlled reference/cached presentation comparisons. */
+  get rasterVisibilityCacheStatistics() {
+    return { ...this.rasterAo?.visibilityCacheStatistics,
+      dryFrame: { ...this.dryFrameReuse.statistics, eligibility: this.dryFrameReuseEligibility },
+      viewRevision:this.visibilityViewRevision, inputsRevision:this.visibilityInputsRevision,
+      viewEligible:this.visibilityViewValid, enabled:this.renderTuning.rasterStillViewReuse,
+      waterShadows:this.experiments.waterShadows===true };
   }
   private rasterLightVisibilityRequested = true;
   /** Diagnostic reference switch: scene, quality and light budget are unchanged. */
-  setRasterVisibilityQueueEnabled(enabled:boolean):void { if(this.rasterAo)this.rasterAo.visibilityQueueEnabled=enabled; }
-  setRasterVisibilityTilingEnabled(enabled: boolean): void { this.rasterAo?.setVisibilityTilingEnabled(enabled); }
+  setRasterVisibilityQueueEnabled(enabled:boolean):void { if(this.rasterAo&&this.rasterAo.visibilityQueueEnabled!==enabled){this.dryFrameControlRevision++;this.rasterAo.visibilityQueueEnabled=enabled;} }
+  setRasterVisibilityTilingEnabled(enabled: boolean): void { if(this.dryFrameTilingEnabled!==enabled){this.dryFrameControlRevision++;this.dryFrameTilingEnabled=enabled;}this.rasterAo?.setVisibilityTilingEnabled(enabled); }
   setRasterLightVisibilityEnabled(enabled: boolean): void {
+    if(this.rasterLightVisibilityRequested!==enabled)this.dryFrameControlRevision++;
     this.rasterLightVisibilityRequested = enabled;
     this.rasterAo?.setVisibilityEnabled(enabled && this.scene?.opaqueSurfaceOnly === true && this.lightingOptions.globalIlluminationEnabled !== true);
   }
@@ -5837,6 +5881,9 @@ export class SparseVoxelDrySceneRenderer {
       surfaceMeshContourInflation: this.renderTuning.surfaceMeshContourInflation,
     } : tuning);
     if (Object.keys(normalized).every((key) => normalized[key as keyof SvoRenderTuning] === this.renderTuning[key as keyof SvoRenderTuning])) return;
+    // Includes band/LOD and encode-only fast paths, whose narrow writes do not
+    // pass through the whole-uniform revision in writeParams.
+    this.dryFrameControlRevision++;
     // The band is a *visibility* control and nothing else: it decides which pass
     // resolves a pixel, never what a light sees. Lighting reads the node-mip
     // pyramid and the analytic BVH, neither of which the coverage arena touches,
@@ -5847,6 +5894,9 @@ export class SparseVoxelDrySceneRenderer {
       .every((key) => normalized[key] === this.renderTuning[key] || (bandKeys as readonly string[]).includes(key));
     if (bandOnly) {
       this.renderTuning = normalized;
+      // World lighting stays valid, but changing the primary receiver set can
+      // change the screen-space AO and visibility reconstruction.
+      this.rasterAo?.invalidateVisibility();
       this.writeBandParams();
       return;
     }
@@ -5877,6 +5927,9 @@ export class SparseVoxelDrySceneRenderer {
       .every((key) => normalized[key] === this.renderTuning[key] || (lodKeys as readonly string[]).includes(key));
     if (lodOnly) {
       this.renderTuning = normalized;
+      // Mesh LOD / filtering can move screen receivers or their normals even
+      // though the world-space light cache still represents the same solids.
+      this.rasterAo?.invalidateVisibility();
       this.writeLodParams();
       return;
     }
@@ -5989,7 +6042,9 @@ export class SparseVoxelDrySceneRenderer {
       | (scene.flatVoxelNormals ? SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals : 0)
       | (this.lightingOptions.surfaceTexturesEnabled !== false ? SVO_DRY_VISIBILITY_FLAGS.surfaceTextures : 0)
       | (this.lightingOptions.nativeAmbientOcclusionEnabled === true ? SVO_DRY_VISIBILITY_FLAGS.nativeAmbientOcclusion : 0);
-    words.set([materialCount, scene.materialRevision, SVO_MATERIAL_RECORD_STRIDE_BYTES, visibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
+    const effectiveVisibilityFlags = visibilityFlags
+      | (giReady && this.lightingOptions.voxelSpecularReflectionsEnabled === true ? SVO_DRY_VISIBILITY_FLAGS.voxelSpecular : 0);
+    words.set([materialCount, scene.materialRevision, SVO_MATERIAL_RECORD_STRIDE_BYTES, effectiveVisibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
     const tuning = this.renderTuning;
     words.set([
       tuning.primaryLeafVisits, tuning.coneStepBudget, tuning.maximumShadedLights, tuning.stableAreaLightSamples,
@@ -6006,7 +6061,7 @@ export class SparseVoxelDrySceneRenderer {
     floats.set([
       tuning.giBounceStrength, tuning.giOcclusionStrength, tuning.giEnvironmentStrength, tuning.giDirectStrength,
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset);
-    floats.set([tuning.giConeAperture, tuning.giConeCount, 0, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset);
+    floats.set([tuning.giConeAperture, tuning.giConeCount, this.lightingOptions.voxelSpecularSteps ?? 128, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset);
     floats.set(this.rigidBounds, SVO_DRY_SCENE_PARAMS_LAYOUT.rigidBoundsWordOffset);
     const candidates = this.primitiveCandidateArena;
     words.set(candidates
@@ -6241,6 +6296,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 26, resource: nodeMipPageValidity ?? this.nodeMipPageValidityFallbackView },
       { binding: 27, resource: tetrahedralRadiancePageValidity ?? this.tetrahedralRadiancePageValidityFallbackView },
       { binding: 28, resource: this.surfaceTextures.view },
+      { binding: 29, resource: { buffer: this.voxelSpecularCounters } },
     ] });
     this.coneFanoutSceneBindGroup = this.coneFanout && this.coneFanoutSceneLayout
       ? this.device.createBindGroup({
@@ -6394,6 +6450,27 @@ export class SparseVoxelDrySceneRenderer {
     }
     encoder.copyBufferToBuffer(this.coneDerivedFailureSnapshot, 0, target, targetOffsetBytes, 8);
     encoder.copyBufferToBuffer(this.worldGiFrameBuffer, 16, target, targetOffsetBytes + 8, 4);
+    return true;
+  }
+
+  /** Optional actual-frame readback: traced, exhausted, invalid-source, rigid-body fallback.
+   * A cached dry frame performs no new traces; later World shading still counts. */
+  copyVoxelSpecularDiagnostics(encoder: GPUCommandEncoder, target: GPUBuffer, targetOffsetBytes = 0): void {
+    if (!Number.isSafeInteger(targetOffsetBytes) || targetOffsetBytes < 0 || targetOffsetBytes % 4 !== 0
+      || targetOffsetBytes + 16 > target.size) throw new RangeError("Voxel specular diagnostic target exceeds its readback buffer");
+    encoder.copyBufferToBuffer(this.voxelSpecularCounters, 0, target, targetOffsetBytes, 16);
+  }
+
+  /** Optional readback: [invalid GI pages, cones reaching their step budget].
+   * Exhaustion describes finite partial integration, never a page failure.
+   * False means the last encode did not run the reduced GI producer. */
+  copyGlobalIlluminationDiagnostics(encoder: GPUCommandEncoder, target: GPUBuffer, targetOffsetBytes = 0): boolean {
+    if (!this.worldGiGatherEncoded || !this.worldGiFrameBuffer) return false;
+    if (!Number.isSafeInteger(targetOffsetBytes) || targetOffsetBytes < 0 || targetOffsetBytes % 4 !== 0
+      || targetOffsetBytes + 8 > target.size) throw new RangeError("GI diagnostic target exceeds its readback buffer");
+    encoder.copyBufferToBuffer(this.worldGiFrameBuffer, 16, target, targetOffsetBytes, 4);
+    encoder.copyBufferToBuffer(this.worldGiFrameBuffer, SVO_DRY_WORLD_GI_CACHE_CONTRACT.exhaustedConesOffsetBytes,
+      target, targetOffsetBytes + 4, 4);
     return true;
   }
 
@@ -6730,23 +6807,26 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
+    encoder.clearBuffer(this.voxelSpecularCounters);
+    const unavailable = (): false => { this.dryFrameReuse.invalidate(); return false; };
+    this.worldGiGatherEncoded = false;
     if (this.boundRadiance !== this.source?.tetrahedralRadiance) this.setSource(this.source);
-    if ((!this.pipeline && !this.surfaceMeshPipelines) || !this.bindGroup) return false;
+    if ((!this.pipeline && !this.surfaceMeshPipelines) || !this.bindGroup) return unavailable();
     // The coverage volume allocates lazily and only reports itself once a fill
     // has been encoded, so its validity flips mid-session. Refresh the frame
     // every encode rather than relying on a source change to carry it.
     this.refreshFluidCoverageFrame();
     this.copyFluidClip(encoder);
     const gBufferViews = this.gBufferTargets.views;
-    if (!gBufferViews) return false;
+    if (!gBufferViews) return unavailable();
     this.requestedBundleResourceFailure = undefined;
-    if (this.requestedBundleStatus().state !== "ready") return false;
+    if (this.requestedBundleStatus().state !== "ready") return unavailable();
     // A hooked bundle still shading a world that lost its backdrop is correct,
     // only slower, so it keeps presenting while the hookless one compiles; the
     // reverse would drop the terrain, so that frame is rejected.
-    if (this.shadingPath === "split" && !this.splitPipelineBackdropTerrain && this.backdropTerrainRequested()) return false;
+    if (this.shadingPath === "split" && !this.splitPipelineBackdropTerrain && this.backdropTerrainRequested()) return unavailable();
     // Likewise a bodiless kernel would drop the bodies' shadows and contact.
-    if (this.shadingPath === "split" && !this.splitPipelineRigidBodies && this.rigidBodiesRequested()) return false;
+    if (this.shadingPath === "split" && !this.splitPipelineRigidBodies && this.rigidBodiesRequested()) return unavailable();
     const usePrepass = this.coneScale !== 1 && this.conePipelineScale === this.coneScale
       && Boolean(this.conePrepassGeometryPipeline && this.conePrepassVisibilityPipeline
         && this.conePrepassShadePipeline && this.coneReducedPipeline
@@ -6813,17 +6893,48 @@ export class SparseVoxelDrySceneRenderer {
         && this.splitVisibilityBindGroup && this.splitLightingBindGroup && this.splitGeometryView);
     if (this.coneScale !== 1 && !usePrepass) {
       this.requestedBundleResourceFailure = `Requested SVO cone bundle at scale ${this.coneScale} has incomplete frame resources`;
-      return false;
+      return unavailable();
     }
     if (splitRequested && !this.splitDiagnosticsActive && !useSplit) {
       this.requestedBundleResourceFailure = `Requested SVO split bundle at scale ${this.coneScale} has incomplete frame resources`;
-      return false;
+      return unavailable();
     }
     const targetTexture = "width" in target ? target as GPUTexture : undefined;
     let targetView = target as GPUTextureView;
     if (targetTexture) {
       targetView = this.targetViews.get(targetTexture) ?? targetTexture.createView();
       this.targetViews.set(targetTexture, targetView);
+    }
+    // The persistent dry target and all G-buffer planes are read-only to the
+    // subsequent water passes. Never reuse camera imagery for world queries:
+    // encodeWaterWorldReflections still executes separately for each interface.
+    const content = this.source?.derivedLightingContent;
+    const derivedRequired = this.lightingOptions.coneTracingMode === "cones"
+      || this.lightingOptions.globalIlluminationEnabled === true
+      || this.lightingOptions.voxelSpecularReflectionsEnabled === true;
+    this.dryFrameReuseEligibility = dryFrameReuseReason({
+      enabled: this.renderTuning.rasterStillViewReuse,
+      viewValid: this.visibilityViewValid,
+      splitReady: useSplit,
+      meshReady: this.surfaceMeshStatus?.state === "ready" && this.surfaceMeshStatus.drawn === true,
+      derivedSettled: !derivedRequired || content?.settled === true,
+      hasBodies: this.rigidBodiesRequested(), waterShadows: this.experiments.waterShadows === true,
+      diagnostic: this.disabledStages.size > 0 || this.splitDiagnosticsActive || this.experiments.primaryWorkMap === true || this.probeRequest !== undefined || this.identityPlanesInspected,
+      // These optional caches can still converge without changing scene data.
+      evolvingVisibilityCache: this.experiments.voxelLightCache !== false
+        || (usePrepass && (this.splitPipelineLattice || this.lightingOptions.worldGiCacheEnabled === true)),
+    });
+    const dryFrameKey: DryFrameReuseKey | undefined = this.dryFrameReuseEligibility === "eligible"
+      && this.source && this.scene && targetTexture ? {
+      viewRevision: this.visibilityViewRevision, parameterRevision: this.visibilityInputsRevision, controlRevision: this.dryFrameControlRevision,
+      sourceRevision: this.source.revision, sceneRevision: this.scene.renderRevision ?? 0,
+      meshReceipt: this.surfaceMeshShadowReceipt, sceneMaintenanceActivity: this.source.structural?.sceneMaintenance?.activity ?? 0, derivedContentRevision: content?.revision ?? 0,
+      source: this.source, scene: this.scene, bindings: this.bindGroup,
+      pipeline: this.splitLightingPipeline!, optimizedPipeline: this.splitOptimizedLightingPipeline, precomputedPipeline: this.splitPrecomputedLightingPipeline, target: targetTexture, gBuffer: gBufferViews,
+    } : undefined;
+    if (this.dryFrameReuse.matches(dryFrameKey)) {
+      if (this.encodeResult?.sampledTargetView !== targetView) this.encodeResult = { encoded: true, sampledTargetView: targetView };
+      return this.encodeResult;
     }
     if (this.rigidMotionSource) encoder.copyBufferToBuffer(this.rigidMotionSource, 0, this.rigidMotionUniformBuffer, 0, SVO_DRY_RIGID_MOTION_UNIFORM_BYTES);
     if (usePrepass && !useSplit) {
@@ -7119,14 +7230,18 @@ export class SparseVoxelDrySceneRenderer {
           tracePhase?.("cone-fanout");
         }
 
-        if (!reconstructReducedRadiance && this.lightingOptions.globalIlluminationEnabled === true
-          && this.lightingOptions.worldGiCacheEnabled === true) {
+        if (!reconstructReducedRadiance && this.lightingOptions.globalIlluminationEnabled === true) {
           // The cache is world-space and source-owned: camera motion changes
           // which keys are queried but never invalidates entries. Only source,
           // authored-scene, or lighting-contract changes clear it. Its output is
           // a GI closure, not final surface radiance, so only the full-rate
           // relight modes are allowed to consume it as such.
-          if (this.worldGiCacheDirty) {
+          // Cache-off still publishes this frame's GI closure. Only persistent
+          // lookup/insertion is disabled; reduced relight must never read an
+          // empty closure merely because the user disabled the optimization.
+          this.device.queue.writeBuffer(this.worldGiFrameBuffer!, SVO_DRY_WORLD_GI_CACHE_CONTRACT.cacheEnabledOffsetBytes,
+            new Uint32Array([this.lightingOptions.worldGiCacheEnabled === true ? 1 : 0]));
+          if (this.worldGiCacheDirty && this.lightingOptions.worldGiCacheEnabled === true) {
             encoder.clearBuffer(this.worldGiCacheBuffer!);
             this.worldGiCacheDirty = false;
           }
@@ -7144,6 +7259,7 @@ export class SparseVoxelDrySceneRenderer {
           if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
           gi.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
           gi.end();
+          this.worldGiGatherEncoded = true;
           tracePhase?.("world-gi-cache");
         }
       }
@@ -7267,6 +7383,7 @@ export class SparseVoxelDrySceneRenderer {
       if (bandPartitioner) encoder = bandPartitioner.boundary("svo-primary");
     }
     this.lastPickingTarget = targetTexture;
+    this.dryFrameReuse.publish(dryFrameKey);
     if (this.encodeResult?.sampledTargetView !== targetView) this.encodeResult = { encoded: true, sampledTargetView: targetView };
     return this.encodeResult;
   }
@@ -7432,6 +7549,7 @@ export class SparseVoxelDrySceneRenderer {
     this.rasterAo?.destroy();
     this.sceneArenaBuffer.destroy();
     this.paramsBuffer.destroy();
+    this.voxelSpecularCounters.destroy();
     this.surfaceMeshDisposed = true;
     this.surfaceMeshDrawCache = undefined;
     this.surfaceMeshPass = undefined;
@@ -7452,6 +7570,7 @@ export class SparseVoxelDrySceneRenderer {
     this.latticePlaceholder?.destroy();
     this.latticePlaceholder = undefined;
     this.splitPipelineLattice = false;
+    this.splitPipelineGlobalIllumination = false;
     this.surfaceTextures.destroy();
     this.nodeMipFallbackAtlas.destroy();
     this.nodeMipFallbackDirectory.destroy();

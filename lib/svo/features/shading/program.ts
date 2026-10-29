@@ -25,6 +25,7 @@ import { createWebgpuSvoWideFanoutTraversalWGSL } from "../construction/webgpu-s
 import { type SvoPixelTracePrimaryMode } from "../diagnostics/svo-pixel-trace";
 import { createSvoPixelTraceProbeWGSL,type SvoPixelTraceProbeOptions } from "../diagnostics/webgpu-svo-pixel-trace";
 import { SVO_CONTACT_VISIBILITY_CONTRACT, svoSpecularVisibilityWGSL } from "../lighting-visibility/svo-contact-visibility";
+import { voxelSpecularWGSL } from "../radiance/voxel-specular.wgsl";
 import { createSvoScreenSpaceTraversalWGSL,SVO_SCREEN_SPACE_TERMINATION_CONTRACT,svoLodDescentWGSL } from "../lighting-visibility/svo-screen-space-termination";
 import { SVO_VISIBILITY_LIMITS,svoVisibilityRaysWGSL } from "../lighting-visibility/svo-visibility-rays";
 import { SVO_LATTICE_VISIBILITY_CONTRACT,svoLatticeKeyWGSL } from "../lighting-visibility/webgpu-svo-cone-fanout";
@@ -208,6 +209,7 @@ export const SVO_DRY_VISIBILITY_FLAGS = Object.freeze({
   flatVoxelNormals: 1 << 8,
   surfaceTextures: 1 << 9,
   nativeAmbientOcclusion: 1 << 10,
+  voxelSpecular: 1 << 11,
 } as const);
 
 
@@ -1022,6 +1024,8 @@ export const SVO_DRY_WORLD_GI_CACHE_CONTRACT = Object.freeze({
   probeCount: 4,
   allocatedBytes: (1 << 18) * 16,
   frameBytes: 144,
+  cacheEnabledOffsetBytes: 12,
+  exhaustedConesOffsetBytes: 20,
   dynamicInfluenceCells: 12,
   dynamicInfluenceBodyRadii: 3,
 } as const);
@@ -3426,7 +3430,7 @@ fn dryPrepassTraceVisibility(opaque:DryHit,ro:vec3f,rd:vec3f)->vec2u{
       if(light.identity.w!=dryLighting.metadata.y){continue;}
       let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
       let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;
-      let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
+      let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);
       ${voxelLightCache ? "dryCurrentLightSlot=lightIndex;let cachedVoxel=dryVoxelLightVisibility(position,geometricNormal);if(cachedVoxel.y>0.0){let packedVisibility=mix(1.0,cachedVoxel.x,dry.tuningRays0.y);if(lightIndex<3u){visibility0[1u+lightIndex]=packedVisibility;}else if(lightIndex<7u){visibility1[lightIndex-3u]=packedVisibility;}else{visibility2.x=packedVisibility;}continue;}" : ""}
       var visibility=0.0;
       for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
@@ -3480,7 +3484,7 @@ fn drySilhouetteTraceVisibilityExact(opaque:DryHit,ro:vec3f,rd:vec3f)->DrySilhou
     }
   }
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.exactShadow}u)!=0u){let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
-    for(var lightIndex=0u;lightIndex<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u;lightIndex+=1u){if(lightIndex>=lightCount){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);var visibility=0.0;
+    for(var lightIndex=0u;lightIndex<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u;lightIndex+=1u){if(lightIndex>=lightCount){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);var visibility=0.0;
       for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount){continue;}let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(geometricNormal,sample.towardLight)<=0.0){continue;}let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);if(dryDirectionalRayLeavesDomain(maximumDistance)){visibility+=1.0;continue;}let ray=dryBiasedVisibilityRayUnit(position,geometricNormal,sample.towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);dryVisibilityIgnoredBody=opaque.ownerId;dryVisibilityStepInvalidReason=DRY_SILHOUETTE_REASON_NONE;let result=svoTraceVisibility(ray,budget,true,0.001,max(ray.originBias_m,1e-6));dryVisibilityIgnoredBody=DRY_OWNER_NONE;if(result.status==SVO_VIS_STATUS_EXHAUSTED){return DrySilhouetteVisibility(DRY_PREPASS_INVALID_PACKED,DRY_SILHOUETTE_EXACT_EXHAUSTED,DRY_SILHOUETTE_REASON_NONE);}if(result.status==SVO_VIS_STATUS_INVALID){return DrySilhouetteVisibility(DRY_PREPASS_INVALID_PACKED,DRY_SILHOUETTE_EXACT_INVALID,select(dryVisibilityStepInvalidReason,DRY_SILHOUETTE_REASON_TRACE_CONTRACT,dryVisibilityStepInvalidReason==DRY_SILHOUETTE_REASON_NONE));}visibility+=dot(result.transmittance,vec3f(1.0/3.0));}
       let packedVisibility=clamp(visibility/f32(sampleCount),0.0,1.0);if(lightIndex<3u){visibility0[1u+lightIndex]=packedVisibility;}else if(lightIndex<7u){visibility1[lightIndex-3u]=packedVisibility;}else{visibility2.x=packedVisibility;}
     }
@@ -3496,18 +3500,27 @@ fn drySilhouetteTraceVisibilityExact(opaque:DryHit,ro:vec3f,rd:vec3f)->DrySilhou
   return dryPrepassTraceVisibility(opaque,ro,rd);
 }
 fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
+  drySampledReceiver=drySampledMaterial(opaque.materialId);
   let position=ro+rd*opaque.t;var surface=dryEvaluateSurfaceMaterial(opaque,position);
   if(surface.valid==0u){dryVisibilityFailure=2u;return vec3f(0.0);}
   let geometricNormal=dryGeometricNormal(opaque);surface.normal=unifiedShadingNormal(surface.normal,geometricNormal,-rd);
   let closure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);
   var direct=vec3f(0.0);var sampleBudget=0u;let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
-    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}
+    if(lightIndex>=lightCount){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}
     let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
-      if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(surface.normal,sample.towardLight)<=0.0){continue;}
+      if(sampleIndex>=sampleCount){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(surface.normal,sample.towardLight)<=0.0){continue;}
       let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);
-      let rigidBlocked=anyBodyBlockerIgnoring(position,sample.towardLight,opaque.ownerId,maximumDistance);let raw=select(dryPrepassChannel(1u+lightIndex),0.0,rigidBlocked);let visibility=vec3f(mix(1.0,raw,dry.tuningRays0.y));
+      var visibility:vec3f;
+      if(lightIndex<${SVO_DRY_CONE_PREPASS_CONTRACT.maximumPrepassLights}u){
+        let rigidBlocked=anyBodyBlockerIgnoring(position,sample.towardLight,opaque.ownerId,maximumDistance);let raw=select(dryPrepassChannel(1u+lightIndex),0.0,rigidBlocked);visibility=vec3f(mix(1.0,raw,dry.tuningRays0.y));
+      }else{
+        // The compact prepass contains only eight lights. Later records keep
+        // exact inline visibility; they must not alias its final packed lane.
+        dryCurrentLightSlot=lightIndex;
+        visibility=dryLightVisibility(position,geometricNormal,opaque.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);
+      }
       let lighting=unifiedLightingInputWithGeometry(surface.normal,geometricNormal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(closure,lighting);
     }
   }
@@ -3537,7 +3550,9 @@ fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
   // it a second time. Invalid samples carry a negative alpha and are rejected
   // by the full-rate reconstruction, which then falls through to exact relight.
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u){
-    return vec4f(dryPrepassShadeNoGi(opaque,ro,rd),opaque.t);
+    let radiance=dryPrepassShadeNoGi(opaque,ro,rd);
+    if(dryDerivedPageFailure!=0u||dryVisibilityFailure!=0u){return vec4f(0.0,0.0,0.0,-1.0);}
+    return vec4f(radiance,opaque.t);
   }
   {let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(ro+rd*opaque.t,opaque.normal,dryGeometricNormal(opaque),ignoredBodyOwner);
     if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u
@@ -3888,9 +3903,9 @@ struct DryWorldGiFrame{
   bodySignature:u32,
   movingBodyCount:u32,
   bodyCount:u32,
-  reserved:u32,
+  cacheEnabled:u32,
   invalidGiPages:atomic<u32>,
-  reserved1:u32,
+  exhaustedGiCones:atomic<u32>,
   reserved2:u32,
   reserved3:u32,
   cameraPosition:vec4f,
@@ -4001,7 +4016,7 @@ fn dryWorldGiBodyInfluence(position:vec3f,ignoredBodyOwner:u32)->DryWorldGiBodyI
   }
   let origin=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-origin);
   let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
-  dryWorldGiFrame.bodySignature=signature;dryWorldGiFrame.movingBodyCount=movingBodyCount;dryWorldGiFrame.bodyCount=bodyCount;atomicStore(&dryWorldGiFrame.invalidGiPages,0u);
+  dryWorldGiFrame.bodySignature=signature;dryWorldGiFrame.movingBodyCount=movingBodyCount;dryWorldGiFrame.bodyCount=bodyCount;atomicStore(&dryWorldGiFrame.invalidGiPages,0u);atomicStore(&dryWorldGiFrame.exhaustedGiCones,0u);
   dryWorldGiFrame.cameraPosition=vec4f(origin,0.0);
   dryWorldGiFrame.cameraForwardAspect=vec4f(forward,uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov());
   dryWorldGiFrame.cameraRight=vec4f(right,0.0);dryWorldGiFrame.cameraUp=vec4f(up,0.0);
@@ -4021,13 +4036,16 @@ fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
   let opaque=dryPrepassUnpackHit(geometry,identity);
   let ray=dryWorldGiFrameRay(globalId.xy,dimensions);let position=ray[0]+ray[1]*opaque.t;
   let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);
-  let influence=dryWorldGiBodyInfluence(position,ignoredBodyOwner);
+  let influence=dryWorldGiBodyInfluence(position,ignoredBodyOwner);dryGiExhaustedCones=0u;
   // Only a moving body's own bounded neighbourhood is recomputed. A cached
   // static-body neighbourhood is keyed solely by the bodies local to it, so an
   // unrelated moving body cannot invalidate that cache line.
-  if(influence.movingMask!=0u){
+  // Cache-off is the same GI closure evaluated this frame, never an empty
+  // texture accepted by the reduced relight consumer as a valid black gather.
+  if(influence.movingMask!=0u||dryWorldGiFrame.cacheEnabled==0u){
     dryWorldGiIgnoreRigidBodies=0u;dryWorldGiBodyMask=influence.bodyMask;dryPrepassGiState=0u;
     let dynamicValue=dryGlobalIlluminationFaced(position,opaque.normal,dryGeometricNormal(opaque),ignoredBodyOwner);
+    if(dryGiExhaustedCones!=0u){atomicAdd(&dryWorldGiFrame.exhaustedGiCones,dryGiExhaustedCones);}
     if(dynamicValue.valid==0u){atomicAdd(&dryWorldGiFrame.invalidGiPages,1u);}
     textureStore(dryWorldGiOutput,coordinate,vec4f(dynamicValue.radiance,select(-1.0,dynamicValue.visibility,dynamicValue.valid!=0u)));return;
   }
@@ -4036,8 +4054,9 @@ fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
   if(cached.hit!=0u){textureStore(dryWorldGiOutput,coordinate,vec4f(cached.value.radiance,cached.value.visibility));return;}
   dryWorldGiIgnoreRigidBodies=select(1u,0u,bodyAware);dryWorldGiBodyMask=influence.bodyMask;dryPrepassGiState=0u;dryNodeMipAwaitingBuild=0u;
   let value=dryGlobalIlluminationFaced(position,opaque.normal,dryGeometricNormal(opaque),select(DRY_OWNER_NONE,ignoredBodyOwner,bodyAware));
-  // A gather that crossed a page awaiting build is shown this frame and not kept.
-  if(value.valid==0u){atomicAdd(&dryWorldGiFrame.invalidGiPages,1u);}else if(dryNodeMipAwaitingBuild==0u){dryWorldGiInsert(key,cached.claimSlot,cached.claimState,value);}
+  // Incomplete gathers remain visible this frame but are not persisted.
+  if(dryGiExhaustedCones!=0u){atomicAdd(&dryWorldGiFrame.exhaustedGiCones,dryGiExhaustedCones);}
+  if(value.valid==0u){atomicAdd(&dryWorldGiFrame.invalidGiPages,1u);}else if(dryNodeMipAwaitingBuild==0u&&dryGiExhaustedCones==0u){dryWorldGiInsert(key,cached.claimSlot,cached.claimState,value);}
   textureStore(dryWorldGiOutput,coordinate,vec4f(value.radiance,select(-1.0,value.visibility,value.valid!=0u)));
 }
 ` : "";
@@ -4383,6 +4402,7 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
   let uv=svoNodeMipAtlasUv(radianceOrigin,radianceLocal,textureDimensions(tetraRadianceLobe0));
   return SvoTetraRadianceConeSourceSample(opacity.solidMean,svoTetraSample(tetraRadianceLobe0,tetraRadianceLobe1,tetraRadianceLobe2,tetraRadianceLobe3,nodeMipSampler,uv),1u,1u);
 }
+var<private> dryGiExhaustedCones:u32;
 struct DryGlobalIllumination{radiance:vec3f,visibility:f32,valid:u32}
 ${worldGiCacheHelpersWGSL}
 fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryGlobalIllumination{
@@ -4401,7 +4421,7 @@ fn dryGlobalIlluminationFaced(position:vec3f,normal:vec3f,geometricNormal:vec3f,
   ${prepassGiShortcutWGSL}
   let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
   let origin=position+normalize(geometricNormal)*minimumVoxel*max(dry.tuningRays1.z,1.0);var indirect=vec3f(0.0);var visibility=0.0;
-  let coneCount=clamp(u32(round(dry.giCones.y)),3u,4u);let perConeBudget=max(1u,min(64u,dry.tuningCounts0.y)/coneCount);
+  let coneCount=clamp(u32(round(dry.giCones.y)),3u,4u);let perConeBudget=clamp(dry.tuningCounts0.y,1u,64u);
   for(var coneIndex=0u;coneIndex<4u;coneIndex+=1u){
     if(coneIndex>=coneCount){break;}let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0);
     dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
@@ -4419,6 +4439,9 @@ fn dryGlobalIlluminationFaced(position:vec3f,normal:vec3f,geometricNormal:vec3f,
     if(dryWorldGiIgnoreRigidBodies==0u){rigidHit=nearestBodyMaskIgnoring(origin,direction,ignoredBodyOwner,dryWorldGiBodyMask);}
     let rigidBlocked=rigidHit.t<sceneExit;
     let result=svoTetraRadianceConeTrace(SvoTetraRadianceConeConfig(origin,direction,dry.giCones.x,minimumVoxel,min(sceneExit,rigidHit.t),perConeBudget,.995,.0039215686,1u));
+    // Exhaustion is a finite partial gather, not missing data or black radiance.
+    // Report it separately and never persist it as a complete cache closure.
+    if(result.termination==SVO_TETRA_RADIANCE_CONE_TERMINATED_STEP_LIMIT){dryGiExhaustedCones+=1u;}
     let weight=svoTetraRadianceHemisphereWeight(coneIndex,coneCount);
     if(result.valid==0u||result.missingRadianceSamples!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.globalIlluminationPage}u;return DryGlobalIllumination(vec3f(0.0),1.0,0u);}
     let finiteRadiance=all(result.radiance==result.radiance)&&all(abs(result.radiance)<vec3f(65504.0));
@@ -4430,6 +4453,25 @@ fn dryGlobalIlluminationFaced(position:vec3f,normal:vec3f,geometricNormal:vec3f,
   }
   let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u)!=0u);
   return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength),1u);`}
+}
+${voxelSpecularWGSL}
+@group(0) @binding(29) var<storage,read_write> drySpecularCounters:array<atomic<u32>,4>;
+fn dryOpaqueSpecular(position:vec3f,geometricNormal:vec3f,direction:vec3f,roughness:f32,brdf:vec3f,legacyVisibility:f32)->vec3f{
+  let sky=dryEnvironment(direction,roughness);
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.voxelSpecular}u)==0u){return sky*brdf*legacyVisibility;}
+  // The radiance hierarchy contains static voxels only. Until rigid radiance
+  // is published, retain the complete previous closure for every receiver in
+  // scenes with bodies; a centre-ray test cannot mask an entire rough cone.
+  if(uniforms.options.z>0.0){atomicAdd(&drySpecularCounters[3],1u);return sky*brdf*legacyVisibility;}
+  atomicAdd(&drySpecularCounters[0],1u);
+  let cell=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
+  let origin=position+normalize(geometricNormal)*cell*max(dry.tuningRays1.z,1.0);
+  dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
+  dryGiRadiancePageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
+  let result=voxelSpecularTrace(origin,direction,roughness,cell,dryNodeMipSceneExitDistance(origin,direction),u32(round(dry.giCones.z)));
+  if(result.exhausted!=0u){atomicAdd(&drySpecularCounters[1],1u);}
+  if(result.valid==0u){atomicAdd(&drySpecularCounters[2],1u);dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.globalIlluminationPage}u;return sky*brdf*legacyVisibility;}
+  return voxelSpecularCompose(result,sky)*brdf;
 }
 ${svoSpecularVisibilityWGSL}
 fn dryDiffuseMultiBounceVisibility(visibilityIn:f32,albedoIn:vec3f)->vec3f{
@@ -5646,7 +5688,7 @@ fn dryGroundOrSky(ro:vec3f,rd:vec3f)->vec3f{
   }
   let viewDirection=normalize(-rd);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);
   let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u);
-  let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,normal)*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflect(rd,normal),surface.roughness)*environmentBrdf;
+  let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,normal)*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryOpaqueSpecular(position,normal,reflect(rd,normal),surface.roughness,environmentBrdf,1.0);
   let ground=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*dry.giLighting.w,vec3f(0.0));
   let horizon=dryHorizonColor(rd);
   let haze=1.0-exp(-dryGroundFootprintDistance(position.xz)/max(dry.groundPlane.z,1e-6));
@@ -5670,14 +5712,14 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   // GI supplements the authored lighting design; it must not replace every
   // local fixture with whichever record happens to be first (the garden's
   // first record is an intentionally weak dusk directional light). Keep all
-  // configured emitters, while the sample-count selection below still limits
-  // GLOBAL shading to one exact visibility sample per light.
+  // configured emitters and their direct-light sample counts. Enabling the
+  // indirect gather must not degrade area-light integration or soft shadows.
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
-    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
-    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}${experiments.rasterAo ? "rasterCurrentSample=sampleBudget;" : ""}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(surface.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);let lighting=unifiedLightingInputWithGeometry(surface.normal,geometricNormal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
+    if(lightIndex>=lightCount){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);
+    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount){break;}${experiments.rasterAo ? "rasterCurrentSample=sampleBudget;" : ""}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(surface.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);let lighting=unifiedLightingInputWithGeometry(surface.normal,geometricNormal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
-  let viewDirection=normalize(-rd);let reflected=reflect(rd,surface.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(surface.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,surface.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,surface.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf*drySpecularVisibility(dot(contactVisibility,vec3f(1.0/3.0))*gi.visibility,max(dot(surface.normal,viewDirection),0.0),surface.roughness);let indirectDiffuse=diffuseColor*gi.radiance;
+  let viewDirection=normalize(-rd);let reflected=reflect(rd,surface.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(surface.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,surface.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,surface.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryOpaqueSpecular(position,geometricNormal,reflected,surface.roughness,environmentBrdf,drySpecularVisibility(dot(contactVisibility,vec3f(1.0/3.0))*gi.visibility,max(dot(surface.normal,viewDirection),0.0),surface.roughness));let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
   shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t,hit.fieldSource);
   return dryBackdropHaze(hit,position,rd,shaded);

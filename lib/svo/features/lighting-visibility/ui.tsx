@@ -28,7 +28,7 @@ export function SvoLightingVisibilityControlRow() {
   const session = useSession();
   const value = session.ui((state) => state.svoConeTracingMode);
   const onChange = session.ui((state) => state.setSvoConeTracingMode);
-  return <RailSelect label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[0].label}
+  return <RailSelect label={SVO_LIGHTING_VISIBILITY_FEATURE.controls.find(control => control.id === "mode")!.label}
     value={value} onChange={onChange} options={SVO_LIGHTING_VISIBILITY_OPTIONS} />;
 }
 
@@ -37,7 +37,7 @@ export function SvoShadowsControlRow() {
   const checked = session.ui((state) => state.svoShadowsEnabled);
   const onChange = session.ui((state) => state.setSvoShadowsEnabled);
   const disabled = session.ui((state) => state.svoConeTracingMode === "off");
-  return <RailToggle label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[1].label} checked={checked} onChange={onChange} disabled={disabled} />;
+  return <RailToggle label={SVO_LIGHTING_VISIBILITY_FEATURE.controls.find(control => control.id === "shadows")!.label} checked={checked} onChange={onChange} disabled={disabled} />;
 }
 
 export function SvoAmbientOcclusionControlRow() {
@@ -45,7 +45,7 @@ export function SvoAmbientOcclusionControlRow() {
   const checked = session.ui((state) => state.svoAmbientOcclusionEnabled);
   const onChange = session.ui((state) => state.setSvoAmbientOcclusionEnabled);
   const disabled = session.ui((state) => state.svoConeTracingMode === "off");
-  return <RailToggle label={SVO_LIGHTING_VISIBILITY_FEATURE.controls[2].label} checked={checked} onChange={onChange} disabled={disabled} />;
+  return <RailToggle label={SVO_LIGHTING_VISIBILITY_FEATURE.controls.find(control => control.id === "ambient-occlusion")!.label} checked={checked} onChange={onChange} disabled={disabled} />;
 }
 
 export function SvoLatticeVisibilityControlRow() {
@@ -54,7 +54,7 @@ export function SvoLatticeVisibilityControlRow() {
   const onChange = session.ui((state) => state.setSvoLatticeVisibilityEnabled);
   // Only the cone arm samples reduced visibility; EXACT and OFF have no source to choose.
   const disabled = session.ui((state) => state.svoConeTracingMode !== "cones");
-  const control = SVO_LIGHTING_VISIBILITY_FEATURE.controls[3];
+  const control = SVO_LIGHTING_VISIBILITY_FEATURE.controls.find(control => control.id === "lattice")!;
   return <RailToggle label={control.label} hint={control.hint} checked={checked} onChange={onChange} disabled={disabled}
     testId="svo-lattice-visibility" />;
 }
@@ -79,12 +79,10 @@ export function SvoFarAoTapsControlRow({ control }: FeatureControlViewProps) {
   </>;
 }
 
-/** Whether a still camera reuses the last frame's raster shadow and AO visibility. */
+/** Exact settled dry-frame reuse, with visibility-only reuse where eligible. */
 export function SvoStillViewReuseControlRow({ control }: FeatureControlViewProps) {
-  const session = useSession();
-  const disabled = session.ui((state) => state.svoConeTracingMode !== "raster-ao");
   const { value, set } = useSvoRenderTuningValue("rasterStillViewReuse");
-  return <RailToggle label={control.label} checked={value} onChange={set} disabled={disabled} hint={control.hint}
+  return <RailToggle label={control.label} checked={value} onChange={set} hint={control.hint}
     testId="svo-still-view-reuse" />;
 }
 
@@ -103,9 +101,9 @@ export function SvoCloudCoverageControlRow() {
 
 export function SvoDirectLightSamplesControlRow() {
   const { value, set, modified, reset } = useSvoRenderTuningValue("maximumShadedLights");
-  return <RailRange label="Direct light samples" value={value} min={1} max={32} step={1} digits={0} unit="rays"
+  return <RailRange label="Direct lights" value={value} min={1} max={32} step={1} digits={0} unit="lights"
     onChange={set} modified={modified} onReset={reset} testId="direct-light-samples"
-    hint="Total direct emitter samples. Area lights may use two each; set Area samples to one to cover up to 32 sources." />;
+    hint="Light records per receiver. The default of 32 includes every published light; Area samples independently controls samples per area light. Lower limits deliberately omit fixtures." />;
 }
 
 export function SvoSurfaceTexturesControlRow({ control }: FeatureControlViewProps) {

@@ -1,14 +1,16 @@
 import { SVO_LIGHT_KINDS, SVO_LIGHT_RECORD_WORDS } from "../../contracts/svo-light-abi";
 
-/** The existing shader budget counts emitter samples, not texture layers per
- * authored light. Allocate only the samples that this publication can consume. */
-export function rasterVisibilityLayers(records: Uint32Array | undefined, budget: number, areaSamples: number, gi: boolean): number {
+/** The record limit and per-area sample count are independent. Allocate every
+ * selected record's samples, up to32 records ×2 samples, without truncating a
+ * later light when an earlier area light uses its second sample. GI contributes
+ * indirect light without reducing these direct-light samples. */
+export function rasterVisibilityLayers(records: Uint32Array | undefined, budget: number, areaSamples: number, _gi: boolean): number {
   let samples = 0;
   for (let i = 0; records && i < Math.min(budget, records.length / SVO_LIGHT_RECORD_WORDS); i++) {
     const kind = records[i * SVO_LIGHT_RECORD_WORDS + 24];
-    samples += !gi && (kind === SVO_LIGHT_KINDS.spot || kind === SVO_LIGHT_KINDS.sphereArea || kind === SVO_LIGHT_KINDS.rectangleArea) ? areaSamples : 1;
+    samples += (kind === SVO_LIGHT_KINDS.spot || kind === SVO_LIGHT_KINDS.sphereArea || kind === SVO_LIGHT_KINDS.rectangleArea) ? areaSamples : 1;
   }
-  return Math.max(1, Math.min(budget, samples));
+  return Math.max(1, samples);
 }
 
 export const rasterVisibilityTilesWGSL = /* wgsl */ `
@@ -183,17 +185,17 @@ fn rasterProduceLightVisibility(coord:vec2i,g:vec4f,sunVisibility:f32){
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,32u));
   let gi=(dry.materialPublication.w&16u)!=0u;
   for(var lightIndex=0u;lightIndex<32u;lightIndex++){
-    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}
+    if(lightIndex>=lightCount){break;}
     let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}
     let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
-    let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,gi);
+    let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);
     // Cached spot/area maps use the receiver plane, not the emitter sample.
     // Body rays and liquid attenuation do depend on its direction, so those
     // variants keep evaluating every sample independently.
     let sharedMap=!RASTER_VISIBILITY_WATER_SHADOWS&&uniforms.options.z<.5&&rasterSpotSlot(lightIndex)>=0;
     var mapReady=false;var mapVisibility=vec3f(1);
     for(var sampleIndex=0u;sampleIndex<2u;sampleIndex++){
-      if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}
+      if(sampleIndex>=sampleCount){break;}
       let sample=dryLightSample(light,sampleIndex,position);var visibility=vec3f(1);
       // Range, emitter facing, zero radiance and receiver backfaces all reject
       // before a shadow-map lookup or SVO ray. Cull only by geometry: optical

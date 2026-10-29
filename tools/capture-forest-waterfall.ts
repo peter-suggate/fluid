@@ -8,7 +8,8 @@ import { sceneRenderTuning } from "../lib/core/scene-render-profile";
  * water publication and composition all use their ordinary application paths.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { deflateSync } from "node:zlib";
@@ -25,6 +26,7 @@ import type { GPUEulerianInfo } from "../lib/core/webgpu-eulerian";
 import type { SparseVoxelDrySceneRenderer } from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { registerSceneMeshAssets } from "./blender/register-assets";
+import { waterMeshObj } from "./blender/nbflip-water-mesh";
 import { sceneMeshAssetIds, meshAssetVolume } from "../lib/core/imported-assets/asset-library";
 import { surfaceMeshAllowsLiveStartup, surfaceMeshConstructionFailed } from "../lib/svo/features/primary-visibility/svo-surface-mesh";
 import { GPUMemoryProfile } from "./gpu-memory-profile";
@@ -34,6 +36,8 @@ import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode } from "../lib/sv
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import type { RasterWaterPipeline } from "../lib/core/webgpu-water-pipeline";
 import type { WaterReflectionMode } from "../lib/features/surface-display/definition";
+import { DEFAULT_LENS_BLOOM_OPTIONS } from "../lib/core/webgpu-lens-bloom";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 
 const options = new Map(process.argv.slice(2).map(value => {
   const match = /^--([^=]+)(?:=(.*))?$/.exec(value);
@@ -42,12 +46,12 @@ const options = new Map(process.argv.slice(2).map(value => {
 }));
 if (options.has("help")) {
   console.log("Capture a registered scene and narrow-band FLIP method (default forest-waterfall).\n"
-    + "Options: --scene=tokyo-rain --time=3 --width=1200 --height=800 --out=artifacts/forest-waterfall/live-3s.png --timeout=1800 --render-scale=1 --reflections=screen-space|world-space|environment --reflection-comparison --screen-reflection-comparison --supersampling-comparison --reflection-diagnostics --light-samples=32 --area-samples=1 --visibility=raster-ao|cones|exact|off --indirect-lighting --texture-comparison --lighting-comparison --shadow-aperture=0.065 --shadow-resolution=2048|4096 --shadow-resolution-comparison --sun-softness-comparison --shadow-diagnostics --native-sun-diagnostics --lighting-energy-diagnostics --native-ao --native-ao-comparison --world-refraction --world-refraction-comparison --world-refinement-diagnostics\n"
+    + "Options: --scene=tokyo-rain --time=3 --width=1200 --height=800 --export-water-mesh --out=artifacts/forest-waterfall/live-3s.png --timeout=1800 --timing-samples=12 --steady-reuse=off|on --render-scale=1 --reflections=screen-space|world-space|environment --reflection-comparison --screen-reflection-comparison --supersampling-comparison --reflection-diagnostics --light-samples=32 --light-budget-comparison --profile-passes --performance-comparison --live-visibility-validation --area-samples=1 --visibility=raster-ao|cones|exact|off --indirect-lighting --gi-cache=on|off --lattice=on|off --gi-comparison --lens-bloom --bloom-comparison --voxel-reflections --voxel-reflection-comparison --voxel-reflection-steps=128 --bloom-strength=.08 --bloom-threshold=1 --bloom-radius=.03 --texture-comparison --lighting-comparison --shadow-aperture=0.065 --shadow-resolution=2048|4096 --shadow-resolution-comparison --sun-softness-comparison --shadow-diagnostics --native-sun-diagnostics --lighting-energy-diagnostics --native-ao --native-ao-comparison --world-refraction --world-refraction-comparison --world-refinement-diagnostics\n"
     + "Use --time=0 for the initial pool. Render scale can be raised to 2 for supersampling; solver settings remain the registered app defaults.");
   process.exit(0);
 }
 for (const key of options.keys()) {
-  if (!["scene", "time", "width", "height", "out", "timeout", "reflection-comparison", "screen-reflection-comparison", "reflection-diagnostics", "reflections", "render-scale", "supersampling-comparison", "light-samples", "area-samples", "indirect-lighting", "visibility", "texture-comparison", "lighting-comparison", "shadow-aperture", "shadow-resolution", "shadow-resolution-comparison", "sun-softness-comparison", "shadow-diagnostics", "native-sun-diagnostics", "lighting-energy-diagnostics", "native-ao", "native-ao-comparison", "world-refraction", "world-refraction-comparison", "world-refinement-diagnostics"].includes(key)) throw new Error(`Unknown option --${key}`);
+  if (!["steady-reuse", "export-water-mesh", "scene", "time", "width", "height", "out", "timeout", "timing-samples", "reflection-comparison", "screen-reflection-comparison", "reflection-diagnostics", "reflections", "render-scale", "supersampling-comparison", "light-samples", "light-budget-comparison", "profile-passes", "performance-comparison", "live-visibility-validation", "area-samples", "indirect-lighting", "gi-cache", "lattice", "gi-comparison", "lens-bloom", "bloom-comparison", "voxel-reflections", "voxel-reflection-comparison", "voxel-reflection-steps", "bloom-strength", "bloom-threshold", "bloom-radius", "visibility", "texture-comparison", "lighting-comparison", "shadow-aperture", "shadow-resolution", "shadow-resolution-comparison", "sun-softness-comparison", "shadow-diagnostics", "native-sun-diagnostics", "lighting-energy-diagnostics", "native-ao", "native-ao-comparison", "world-refraction", "world-refraction-comparison", "world-refinement-diagnostics"].includes(key)) throw new Error(`Unknown option --${key}`);
 }
 const number = (key: string, fallback: number, minimum: number) => {
   const value = Number(options.get(key) ?? fallback);
@@ -55,26 +59,39 @@ const number = (key: string, fallback: number, minimum: number) => {
   return value;
 };
 const requestedTime_s = number("time", 3, 0);
+if(options.has("live-visibility-validation")){assert.ok(requestedTime_s>0);assert.ok(options.has("performance-comparison"),"Live validation requires the frozen reference matrix");}
 const sceneId = options.get("scene") ?? "forest-waterfall";
 const width = Math.round(number("width", 1200, 16));
 const height = Math.round(number("height", Math.round(width * 2 / 3), 16));
 const renderScale = number("render-scale", 1, .35);
 assert.ok(renderScale <= 2, "--render-scale must be <= 2");
-const lightSamples = options.has("light-samples") ? number("light-samples", 8, 1) : undefined;
+let lightSamples = options.has("light-samples") ? number("light-samples", 8, 1) : undefined;
 const areaSamples = options.has("area-samples") ? number("area-samples", 2, 1) : undefined;
 const shadowAperture = options.has("shadow-aperture") ? number("shadow-aperture", .065, .01) : undefined;
 assert.ok(shadowAperture === undefined || shadowAperture <= .25, "--shadow-aperture must be between .01 and .25 radians");
 const shadowResolution = number("shadow-resolution", 2048, 2048);
 assert.ok(shadowResolution === 2048 || shadowResolution === 4096, "--shadow-resolution must be 2048 or 4096");
-const indirectLighting = options.has("indirect-lighting");
+const indirectLighting = options.has("indirect-lighting") ? options.get("indirect-lighting") !== "off" : DEFAULT_SVO_LIGHTING_OPTIONS.globalIlluminationEnabled;
 const visibilityMode = (options.get("visibility") ?? (indirectLighting ? "cones" : DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode)) as SvoConeTracingMode;
 assert.ok(["raster-ao", "cones", "exact", "off"].includes(visibilityMode), "--visibility must be raster-ao, cones, exact or off");
 assert.ok(!indirectLighting || visibilityMode === "cones", "--indirect-lighting requires cone visibility");
+const latticeEnabled=options.has("lattice")?options.get("lattice")!=="off":DEFAULT_SVO_LIGHTING_OPTIONS.latticeVisibilityEnabled;
+const giCache=options.has("gi-cache")?options.get("gi-cache")!=="off":indirectLighting;
+const voxelReflections=options.has("voxel-reflections");
+const voxelReflectionSteps=number("voxel-reflection-steps",128,1);
+assert.ok(Number.isInteger(voxelReflectionSteps)&&voxelReflectionSteps<=512);
+assert.ok(!(voxelReflections||options.has("voxel-reflection-comparison"))||indirectLighting&&visibilityMode==="cones","Voxel reflection comparison requires cones + GI");
+const lensBloom={...DEFAULT_LENS_BLOOM_OPTIONS,enabled:options.has("lens-bloom"),
+  strength:number("bloom-strength",DEFAULT_LENS_BLOOM_OPTIONS.strength,0),
+  threshold:number("bloom-threshold",DEFAULT_LENS_BLOOM_OPTIONS.threshold,0),
+  radius:number("bloom-radius",DEFAULT_LENS_BLOOM_OPTIONS.radius,.002)};
+assert.ok(lensBloom.strength<=1&&lensBloom.threshold<=64&&lensBloom.radius<=.15,"Invalid lens-bloom setting");
 const selectedReflections = (options.get("reflections") ?? "screen-space") as WaterReflectionMode;
 assert.ok(["screen-space", "world-space", "environment"].includes(selectedReflections), "--reflections must be screen-space, world-space or environment");
 assert.ok(lightSamples === undefined || Number.isInteger(lightSamples) && lightSamples <= 32, "--light-samples must be an integer from1 to32");
 assert.ok(areaSamples === undefined || Number.isInteger(areaSamples) && areaSamples <= 2, "--area-samples must be1 or2");
 const timeout_ms = number("timeout", 1800, 1) * 1000;
+const timingSamples = Math.round(number("timing-samples",12,1));
 const pngPath = resolve(options.get("out") ?? `artifacts/${sceneId}/live-${requestedTime_s}s.png`);
 assert.ok(pngPath.endsWith(".png"), "--out must end in .png");
 const reportPath = pngPath.replace(/\.png$/, ".json");
@@ -153,7 +170,15 @@ let latestInfo: GPUEulerianInfo | undefined, lastMetrics: RendererFrameMetrics |
 let failure: string | undefined, closing = false, completedTime_s = 0, frames = 0;
 let successful = false, lastProgress = 0;
 const liveFrameSamples: { time_s: number; wall_ms: number }[] = [];
+const sourceHashes:Record<string,string>={};
+for(const entry of readdirSync(resolve("lib"),{recursive:true,withFileTypes:true})) {
+  if(!entry.isFile()||! /\.(ts|tsx|wgsl)$/.test(entry.name))continue;
+  const path=resolve(entry.parentPath,entry.name);
+  sourceHashes[path]=createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+sourceHashes[resolve("tools/capture-forest-waterfall.ts")]=createHash("sha256").update(readFileSync(resolve("tools/capture-forest-waterfall.ts"))).digest("hex");
 const report: Record<string, unknown> = {
+  sourceHashes,
   sceneId: definition.id, methodId: method.id, quality: profile.quality, methodValues: values,
   voxelDomain: scene.voxelDomain,
   renderProfile: scene.renderProfile,
@@ -272,21 +297,30 @@ try {
   let ambientOcclusionEnabled: boolean = DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled;
   let reflectionMode: WaterReflectionMode = selectedReflections;
   let captureRenderScale = renderScale;
+  let captureVisibilityMode = visibilityMode;
+  let captureIndirectLighting = indirectLighting;
+  let captureGiCache = giCache;
+  let captureBloomEnabled=lensBloom.enabled;
+  let captureVoxelReflections=voxelReflections;
+  let captureStaticVisibilityReuse:boolean|undefined = undefined;
   let captureShadowAperture = shadowAperture ?? sceneRenderTuning(scene.renderProfile).shadowConeAperture;
   report.shadowAperture_rad = captureShadowAperture;
   const args = (time: number): Parameters<FluidLabRenderer["draw"]> => [
     time, scene, { ...defaultCamera, ...preset.camera }, [], undefined,
     { methodId: method.id, quality: profile.quality, values, simulationEpoch: 0, inFlightDepth: 2 },
-    { axis: "off", position: 0 }, preset.background, preset.presentationMode, "shaded", { ...DEFAULT_SVO_LIGHTING_OPTIONS, waterReflectionMode: reflectionMode, waterWorldRefractionEnabled, coneTracingMode: visibilityMode, surfaceTexturesEnabled, nativeAmbientOcclusionEnabled, shadowsEnabled, ambientOcclusionEnabled,
-      ...(indirectLighting ? {globalIlluminationEnabled:true,worldGiCacheEnabled:true} : {}) }, undefined,
+    { axis: "off", position: 0 }, preset.background, preset.presentationMode, "shaded", { ...DEFAULT_SVO_LIGHTING_OPTIONS, waterReflectionMode: reflectionMode, waterWorldRefractionEnabled, coneTracingMode: captureVisibilityMode, surfaceTexturesEnabled, nativeAmbientOcclusionEnabled, shadowsEnabled, ambientOcclusionEnabled,
+      voxelSpecularReflectionsEnabled:captureVoxelReflections,voxelSpecularSteps:voxelReflectionSteps,latticeVisibilityEnabled:latticeEnabled,globalIlluminationEnabled:captureIndirectLighting,worldGiCacheEnabled:captureGiCache,lensBloom:{...lensBloom,enabled:captureBloomEnabled} }, undefined,
     { ...sceneRenderTuning(scene.renderProfile), resolutionScale: captureRenderScale, shadowConeAperture: captureShadowAperture, rasterShadowResolution: captureShadowResolution,
       ...(lightSamples === undefined ? {} : {maximumShadedLights:lightSamples}),
-      ...(indirectLighting ? {giBounceStrength:1,giEnvironmentStrength:1,giDirectStrength:1,giOcclusionStrength:0} : {}),
+      ...(captureStaticVisibilityReuse === undefined ? {} : {rasterStillViewReuse:captureStaticVisibilityReuse}),
+      ...(captureIndirectLighting ? {giBounceStrength:1} : {}),
       ...(areaSamples === undefined ? {} : {stableAreaLightSamples:areaSamples,movingAreaLightSamples:areaSamples}) },
   ];
   const draw = async (time: number) => {
-    check(); lastMetrics = await renderer!.drawWithDeferredPresentation(args(time)); frames++;
+    check();
+    lastMetrics = await renderer!.drawWithDeferredPresentation(args(time)); frames++;
     await device!.queue.onSubmittedWorkDone();
+    if(captureBloomEnabled&&internals.waterPipeline&&!internals.waterPipeline.lensBloomReady)await internals.waterPipeline.ensureLensBloomReady();
     // Production completion callbacks retire their health receipts before
     // counting a presentation; yield so those callbacks can publish authority.
     await turn();
@@ -310,7 +344,10 @@ try {
   snapshotMemory("initial-presentation");
   const initialWater = await measureWater();
   report.initialWater = initialWater;
+  let liveCachedPlanes:Buffer[]|undefined;
+  let liveIdentity:{solver:GPUSolverInstance;pipeline:SparseVoxelDrySceneRenderer|undefined;time_s:number;steps:number}|undefined;
   if (targetTime_s > 0) {
+    if(options.has("live-visibility-validation")){captureStaticVisibilityReuse=true;report.visibilityBeforeLive=internals.svoDryScenePipeline?.rasterVisibilityCacheStatistics;}
     await renderer.setSimulationRunning(true);
     while (completedTime_s < targetTime_s - dt * .01) {
       // Like the app clock, admit whole fixed steps. Queue fences make this an
@@ -322,8 +359,59 @@ try {
       progress("simulate-live-water");
     }
   }
+  if(options.has("live-visibility-validation")){
+    const cache=internals.svoDryScenePipeline?.rasterVisibilityCacheStatistics;
+    report.visibilityAfterLive=cache;
+    const previous=report.visibilityBeforeLive as {reusedFrames?:number;dryFrame?:{reusedFrames?:number}}|undefined;
+    if(captureVisibilityMode==="cones") {
+      assert.equal(cache?.dryFrame?.eligibility,"eligible","Live cone dry-frame reuse must be eligible");
+      assert.ok((cache?.dryFrame?.reusedFrames??0)>(previous?.dryFrame?.reusedFrames??0),"Advancing water must reuse the unchanged dry frame");
+    } else {
+      assert.ok(cache?.lastFrameReused,"Final advancing-water frame must reuse visibility");
+      assert.ok((cache.reusedFrames??0)>(previous?.reusedFrames??0));
+    }
+    assert.ok(lastMetrics?.presentationSubmitted,"Final live image must be a submitted presentation");
+    assert.ok(internals.waterPipeline?.worldReflectionsApplied,"Live World reflections must have been encoded");
+    if(waterWorldRefractionEnabled)assert.ok(internals.waterPipeline.worldRefractionsApplied);
+    const info=await internals.gpuFluid!.readStats();
+    liveIdentity={solver:internals.gpuFluid!,pipeline:internals.svoDryScenePipeline,time_s:info.completedTime_s!,steps:info.encodedSteps!};
+    liveCachedPlanes=[];
+    for(const stage of ["display","scene","world-reflections"]){
+      const plane=stage==="display"?{texture:swapTexture!,origin:[0,0,0]}:internals.waterPipeline?.diagnosticCaptureTexture(stage);
+      assert.ok(plane,`Missing live ${stage}`);
+      const texture=plane.texture,row=texture.width*(stage==="display"?4:texture.format==="rgba32float"?16:8),stride=Math.ceil(row/256)*256;
+      const staging=device!.createBuffer({size:stride*texture.height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      try{
+        const encoder=device!.createCommandEncoder();encoder.copyTextureToBuffer({texture,origin:plane.origin??[0,0,0]},{buffer:staging,bytesPerRow:stride},[texture.width,texture.height]);
+        device!.queue.submit([encoder.finish()]);await staging.mapAsync(GPUMapMode.READ);
+        const mapped=new Uint8Array(staging.getMappedRange()),packed=Buffer.alloc(row*texture.height);
+        for(let y=0;y<texture.height;y++)packed.set(mapped.subarray(y*stride,y*stride+row),y*row);
+        liveCachedPlanes.push(packed);
+      }finally{if(staging.mapState==="mapped")staging.unmap();staging.destroy();}
+    }
+    report.liveSnapshot={time_s:completedTime_s,presentations:renderer.completedPresentationCount,simulationRunning:true};
+  }
+  // A completed queue fence is not evidence that the backend executed work.
+  // Catch silent zero readbacks before treating them as a physical dry-out.
+  const validateExecution=async(label:string)=>{
+  const expected=(0x13579bdf ^ frames)>>>0;
+  const sentinel=device!.createBuffer({size:4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  const sentinelRead=device!.createBuffer({size:4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try{
+    const module=device!.createShaderModule({code:`@group(0) @binding(0) var<storage,read_write> output:array<u32>; @compute @workgroup_size(1) fn main(){output[0]=${expected}u;}`});
+    const pipeline=await device!.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
+    const encoder=device!.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,device!.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:sentinel}}]}));pass.dispatchWorkgroups(1);pass.end();encoder.copyBufferToBuffer(sentinel,0,sentinelRead,0,4);device!.queue.submit([encoder.finish()]);
+    await sentinelRead.mapAsync(GPUMapMode.READ);const actual=new Uint32Array(sentinelRead.getMappedRange())[0];report.gpuExecutionSentinel={label,expected,actual};
+    ((report.gpuExecutionSentinels ??= []) as unknown[]).push({label,expected,actual});
+    assert.equal(actual,expected,"GPU execution/readback sentinel failed; zero buffers are not valid simulation evidence");
+  }finally{if(sentinelRead.mapState==="mapped")sentinelRead.unmap();sentinel.destroy();sentinelRead.destroy();}
+  };
   const pausedTime_s = await renderer.setSimulationRunning(false) ?? completedTime_s;
   report.pausedTime_s = pausedTime_s;
+  if(options.has("steady-reuse")){
+    assert.ok(options.get("steady-reuse")==="off"||options.get("steady-reuse")==="on");
+    captureStaticVisibilityReuse=options.get("steady-reuse")==="on";
+  }
   // Settle the ordinary paused presentation and its asynchronous diagnostics.
   let settled = 0;
   while (settled < 4) {
@@ -331,14 +419,19 @@ try {
     if (effective?.state === "active" && surfaceMeshAllowsLiveStartup(effective.surfaceMesh) && lastMetrics?.presentationSubmitted) settled++;
     else settled = 0;
     progress("settle-final-presentation");
+    if(options.has("steady-reuse"))await validateExecution(`steady-settle-${settled}`);
   }
   // Fenced wall measurements expose capture-host cost, not GPU-only timing or
   // interactive FPS. Keep the ordinary paused production scene and settings.
   const wallSamples_ms: number[] = [];
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < timingSamples; i++) {
     const frameStart = performance.now();
     await draw(pausedTime_s);
     wallSamples_ms.push(performance.now() - frameStart);
+    if(options.has("steady-reuse")){
+      console.log(JSON.stringify({phase:"steady-diagnostic",sample:i,wall_ms:wallSamples_ms.at(-1)}));
+      await validateExecution(`steady-sample-${i}`);
+    }
     assert.ok(lastMetrics?.presentationSubmitted, "Steady frame did not submit a production presentation");
   }
   const sorted = [...wallSamples_ms].sort((a, b) => a - b);
@@ -346,7 +439,7 @@ try {
     measurement: "Host wall time including production draw, Dawn GPU queue fence, and completion callback yield; not GPU-only timing or interactive FPS",
     sampleCount: wallSamples_ms.length, samples_ms: wallSamples_ms,
     mean_ms: wallSamples_ms.reduce((a, b) => a + b, 0) / wallSamples_ms.length,
-    median_ms: (sorted[5]! + sorted[6]!) / 2, p95_ms: sorted[Math.ceil(sorted.length * .95) - 1],
+    median_ms: (sorted[Math.floor((sorted.length-1)/2)]! + sorted[Math.floor(sorted.length/2)]!) / 2, p95_ms: sorted[Math.ceil(sorted.length * .95) - 1],
     min_ms: sorted[0], max_ms: sorted.at(-1), width, height, renderScale,
     presentationResolution: renderer.presentationResolution, simulationPaused: true,
   };
@@ -357,6 +450,7 @@ try {
   report.worldReflectionStatus = internals.svoDryScenePipeline?.waterWorldReflectionStatus;
   if (selectedReflections === "world-space") assert.equal(report.worldReflectionsApplied, true, "World reflections must actually encode before capture");
   snapshotMemory("final-presentation");
+  await validateExecution("initial-final-frame");
   const finalWater = await measureWater();
   report.finalWater = finalWater;
   assert.ok(finalWater.total_m3 > 0, "The final live scene must contain real Eulerian water");
@@ -376,9 +470,59 @@ try {
     const encoder = device!.createCommandEncoder();
     encoder.copyTextureToBuffer({ texture: swapTexture! }, { buffer: readback, bytesPerRow }, { width, height });
     device!.queue.submit([encoder.finish()]); await readback.mapAsync(GPUMapMode.READ);
-    writeBgraPng(path, new Uint8Array(readback.getMappedRange()), bytesPerRow);
-    readback.unmap();
+    const packed=Buffer.alloc(width*height*4),mapped=new Uint8Array(readback.getMappedRange());
+    writeBgraPng(path, mapped, bytesPerRow);
+    for(let y=0;y<height;y++)packed.set(mapped.subarray(y*bytesPerRow,y*bytesPerRow+width*4),y*width*4);
+    readback.unmap();return packed;
     };
+    const readGiDiagnostics = async () => {
+      const target=device!.createBuffer({size:8,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      try {
+        const encoder=device!.createCommandEncoder();
+        const copied=internals.svoDryScenePipeline?.copyGlobalIlluminationDiagnostics(encoder,target);
+        if(!copied)return {available:false};
+        device!.queue.submit([encoder.finish()]);await target.mapAsync(GPUMapMode.READ);
+        const words=new Uint32Array(target.getMappedRange());return {available:true,invalidPages:words[0],exhaustedCones:words[1]};
+      } finally {if(target.mapState==="mapped")target.unmap();target.destroy();}
+    };
+    const readSpecularDiagnostics=async()=>{
+      const target=device!.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      try{
+        const encoder=device!.createCommandEncoder();
+        const pipeline=internals.svoDryScenePipeline;
+        if(!pipeline)return {available:false};
+        pipeline.copyVoxelSpecularDiagnostics(encoder,target);
+        device!.queue.submit([encoder.finish()]);await target.mapAsync(GPUMapMode.READ);
+        const words=new Uint32Array(target.getMappedRange());return {available:true,traced:words[0],exhausted:words[1],invalidSource:words[2],unsupportedFallback:words[3]};
+      }finally{if(target.mapState==="mapped")target.unmap();target.destroy();}
+    };
+    if(captureVoxelReflections) {
+      // Diagnose a fresh producer, not a retained dry frame. This draw is outside
+      // every timing sample and uses the same frozen camera and solver state.
+      const originalReuse=captureStaticVisibilityReuse;
+      captureStaticVisibilityReuse=false;await draw(pausedTime_s);
+      report.voxelReflectionDiagnostics=await readSpecularDiagnostics();
+      await validateExecution("fresh-voxel-reflection-diagnostics");
+      captureStaticVisibilityReuse=originalReuse;await draw(pausedTime_s);
+    } else report.voxelReflectionDiagnostics=await readSpecularDiagnostics();
+    if(options.has("export-water-mesh")) {
+      assert.ok(internals.waterPipeline,"Missing rendered water pipeline");
+      const mesh=await internals.waterPipeline.readDenseSurfaceExtractionForQA();
+      assert.equal(mesh.vertexCount,mesh.vertexAllocator,"Refuse an overflowed water surface");
+      assert.ok(mesh.vertexCount>0&&mesh.vertexCount%3===0&&mesh.vertices.length===mesh.vertexCount*8);
+      const {obj,bounds}=waterMeshObj(mesh.vertices,`Captured production ${method.id}: ${sceneId} at ${completedTime_s}s`,{opticalNormals:true});
+      const path=pngPath.replace(/\.png$/,".obj");writeFileSync(path,obj);
+      const provenance={sceneId,methodId:method.id,completedTime_s,vertexCount:mesh.vertexCount,triangleCount:mesh.vertexCount/3,
+        activeCubeCount:mesh.activeCubeCount,boundsBlender_m:bounds,objSha256:createHash("sha256").update(obj).digest("hex"),
+        opticalNormals:"Production vertex-normal lane, normalized and rotated to Blender axes",
+        extraction:"Exact water vertex buffer used by this captured frame; no second simulation or surface extraction",
+        captureReport:reportPath,sourceHashes:report.sourceHashes,errors:[...errors]};
+      writeFileSync(path+".json",JSON.stringify(provenance,null,2)+"\n");
+      report.exportedWaterMesh={path,provenancePath:path+".json",...provenance};
+      await validateExecution("export-rendered-water-mesh");
+    }
+    report.giDiagnostics=await readGiDiagnostics();
+    report.staticFrameReuse=internals.svoDryScenePipeline?.rasterVisibilityCacheStatistics;
     const refractionDiagnostics = async () => {
       const plane = internals.waterPipeline?.diagnosticCaptureTexture("world-refractions");
       assert.ok(plane, "Missing World refraction diagnostic plane");
@@ -440,6 +584,7 @@ try {
       const diagnosticStages = options.has("reflection-diagnostics") ? ["scene", "interface-positions", "interfaces", "back-interface-positions", "back-interfaces", "rear-interface-positions", "rear-interfaces", "rear-back-interface-positions", "rear-back-interfaces", "reflections", "rear-reflections"] : ["interface-positions", "reflections"];
       for (const stage of [...diagnosticStages, ...(selectedReflections === "world-space" ? ["world-reflections"] : [])]) {
         const plane = internals.waterPipeline?.diagnosticCaptureTexture(stage);
+        if(!plane&&(stage==="reflections"||stage==="rear-reflections")){report.screenReflectionDiagnosticsUnavailable="SSR-only target is not retained by the applied compact World path";continue;}
         assert.ok(plane, `Missing diagnostic plane ${stage}`);
         const texture = plane.texture, pixelBytes = texture.format === "rgba32float" ? 16 : 8;
         const rowBytes = texture.width * pixelBytes, paddedRowBytes = Math.ceil(rowBytes / 256) * 256;
@@ -456,7 +601,7 @@ try {
           planes.push({ stage, path, width: texture.width, height: texture.height, format: texture.format });
         } finally { if (staging.mapState === "mapped") staging.unmap(); staging.destroy(); }
       }
-      if (selectedReflections === "world-space") {
+      if (selectedReflections === "world-space" && raw.has("reflections")) {
         const position = raw.get("interface-positions")!, screen = raw.get("reflections")!, world = raw.get("world-reflections")!;
         const counts = { visibleWaterSamples: 0, retainedScreenHits: 0, addedWorldHits: 0, skyMisses: 0, failedWorldSamples: 0 };
         for (let i = 0; i < screen.length / 8; i++) {
@@ -506,6 +651,72 @@ try {
           width, height, simulationPaused: true,
         },
       };
+    }
+    if(options.has("voxel-reflection-comparison")) {
+      const variants=[],frozenSolver=internals.gpuFluid,frozenTime=completedTime_s;
+      for(const enabled of [false,true]){
+        captureVoxelReflections=enabled;
+        let readyFrames=0;
+        while(readyFrames<4){await draw(pausedTime_s);readyFrames=effective?.state==="active"&&lastMetrics?.presentationSubmitted?readyFrames+1:0;progress("settle-voxel-reflections");}
+        const samples_ms:number[]=[];
+        for(let i=0;i<timingSamples;i++){const start=performance.now();await draw(pausedTime_s);samples_ms.push(performance.now()-start);}
+        const path=pngPath.replace(/\.png$/,enabled?"-voxel-reflections.png":"-sky-specular.png");await capture(path);
+        await validateExecution(enabled?"voxel-reflections":"sky-specular");
+        assert.equal(internals.gpuFluid,frozenSolver);assert.equal(completedTime_s,frozenTime);
+        const ordered=[...samples_ms].sort((a,b)=>a-b);
+        variants.push({enabled,path,samples_ms,median_ms:(ordered[Math.floor((ordered.length-1)/2)]!+ordered[Math.floor(ordered.length/2)]!)/2,diagnostics:await readSpecularDiagnostics()});
+      }
+      report.voxelReflectionComparison={steps:voxelReflectionSteps,variants,frozenTime_s:frozenTime,measurement:"GPU-fenced host wall samples; same frozen fluid/camera; not interactive FPS"};
+      captureVoxelReflections=voxelReflections;for(let i=0;i<4;i++)await draw(pausedTime_s);
+    }
+    if(options.has("bloom-comparison")) {
+      const variants=[],frozenSolver=internals.gpuFluid,frozenTime=completedTime_s;
+      for(const enabled of [false,true]){
+        captureBloomEnabled=enabled;
+        for(let i=0;i<4;i++)await draw(pausedTime_s);
+        assert.equal(internals.waterPipeline?.lensBloomApplied,enabled&&lensBloom.strength>0,"Requested bloom must actually be composed");
+        const samples_ms:number[]=[];
+        for(let i=0;i<timingSamples;i++){const start=performance.now();await draw(pausedTime_s);samples_ms.push(performance.now()-start);}
+        const path=pngPath.replace(/\.png$/,enabled?"-bloom.png":"-bloom-off.png");await capture(path);
+        await validateExecution(enabled?"bloom-on":"bloom-off");
+        assert.equal(internals.gpuFluid,frozenSolver);assert.equal(completedTime_s,frozenTime);
+        const ordered=[...samples_ms].sort((a,b)=>a-b);
+        variants.push({enabled,path,samples_ms,median_ms:(ordered[Math.floor((ordered.length-1)/2)]!+ordered[Math.floor(ordered.length/2)]!)/2});
+      }
+      report.bloomComparison={options:lensBloom,variants,frozenTime_s:frozenTime,measurement:"GPU-fenced host wall samples; same frozen fluid/camera; not interactive FPS"};
+      captureBloomEnabled=lensBloom.enabled;for(let i=0;i<4;i++)await draw(pausedTime_s);
+    }
+    if(options.has("gi-comparison")) {
+      const frozenSolver=internals.gpuFluid, frozenTime=completedTime_s;
+      const variants=[];
+      for(const variant of [
+        {name:"raster-direct",visibility:"raster-ao",gi:false,cache:false},
+        {name:"cones-direct",visibility:"cones",gi:false,cache:false},
+        {name:"cones-gi-uncached",visibility:"cones",gi:true,cache:false},
+        {name:"cones-gi-cache",visibility:"cones",gi:true,cache:true},
+      ] as const) {
+        captureVisibilityMode=variant.visibility;captureIndirectLighting=variant.gi;captureGiCache=variant.cache;
+        let readyFrames=0;
+        while(readyFrames<4){
+          await draw(pausedTime_s);progress(`settle-${variant.name}`);
+          readyFrames=effective?.state==="active"&&lastMetrics?.presentationSubmitted ? readyFrames+1 : 0;
+        }
+        const samples_ms:number[]=[];
+        for(let i=0;i<timingSamples;i++){const start=performance.now();await draw(pausedTime_s);samples_ms.push(performance.now()-start);}
+        assert.equal(internals.gpuFluid,frozenSolver,"GI comparison replaced the frozen solver");
+        assert.equal(completedTime_s,frozenTime,"GI comparison advanced the fluid");
+        const path=pngPath.replace(/\.png$/,`-${variant.name}.png`);const pixels=await capture(path);
+        await validateExecution(variant.name);
+        const ordered=[...samples_ms].sort((a,b)=>a-b);
+        const result={...variant,path,samples_ms,median_ms:(ordered[Math.floor((ordered.length-1)/2)]!+ordered[Math.floor(ordered.length/2)]!)/2,
+          renderer:effective?.state,worldReflectionsApplied:internals.waterPipeline?.worldReflectionsApplied,
+          displaySha256:createHash("sha256").update(pixels).digest("hex"),giDiagnostics:await readGiDiagnostics()};
+        variants.push(result);console.log(JSON.stringify({phase:"gi-comparison",...result}));
+      }
+      report.giComparison={variants,frozenTime_s:frozenTime,solverIdentityPreserved:true,measurement:"GPU-fenced host wall samples, same frozen fluid and camera; not interactive FPS"};
+      captureVisibilityMode=visibilityMode;captureIndirectLighting=indirectLighting;captureGiCache=giCache;
+      let readyFrames=0;
+      while(readyFrames<4){await draw(pausedTime_s);readyFrames=effective?.state==="active"&&lastMetrics?.presentationSubmitted ? readyFrames+1 : 0;}
     }
     if(options.has("lighting-comparison")) {
       const variants = [];
@@ -591,6 +802,68 @@ try {
       report.nativeAoComparison={variants,frozenTime_s:completedTime_s,measurement:"Host wall time with GPU queue fence; same frozen geometry, not interactive FPS"};
       nativeAmbientOcclusionEnabled=baselineEnabled;for(let i=0;i<4;i++)await draw(pausedTime_s);
     }
+    if(options.has("performance-comparison")) {
+      assert.equal(selectedReflections,"world-space","Performance matrix requires World reflections");
+      const frozenSolver=internals.gpuFluid,frozenPipeline=internals.svoDryScenePipeline,frozenTime=completedTime_s;
+      const originalReuse=captureStaticVisibilityReuse;
+      const variants=[
+        {name:"reference",reuse:false},
+        {name:"visibility-reuse",reuse:true},
+      ];
+      const entries=new Map<string,{name:string;reuse:boolean;samples_ms:number[];path?:string;pixelMismatchBytes?:number;worldMismatchBytes?:number;sceneMismatchBytes?:number;cache?:unknown}>();
+      let referencePixels:Buffer|undefined,referenceWorld:Buffer|undefined,referenceScene:Buffer|undefined;
+      const readPlane=async(stage:string)=>{
+        const plane=internals.waterPipeline?.diagnosticCaptureTexture(stage);assert.ok(plane,`Missing ${stage}`);
+        const texture=plane.texture,row=texture.width*(texture.format==="rgba32float"?16:8),stride=Math.ceil(row/256)*256;
+        const staging=device!.createBuffer({size:stride*texture.height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+        try{const e=device!.createCommandEncoder();e.copyTextureToBuffer({texture,origin:plane.origin??[0,0,0]},{buffer:staging,bytesPerRow:stride},[texture.width,texture.height]);device!.queue.submit([e.finish()]);await staging.mapAsync(GPUMapMode.READ);
+          const mapped=new Uint8Array(staging.getMappedRange()),out=Buffer.alloc(row*texture.height);for(let y=0;y<texture.height;y++)out.set(mapped.subarray(y*stride,y*stride+row),y*row);return out;
+        }finally{if(staging.mapState==="mapped")staging.unmap();staging.destroy();}
+      };
+      const mismatches=(a:Buffer,b:Buffer)=>{assert.equal(a.length,b.length);let count=0;for(let i=0;i<a.length;i++)if(a[i]!==b[i])count++;return count;};
+      const assertFrozen=()=>{
+        assert.equal(internals.gpuFluid,frozenSolver);assert.equal(internals.svoDryScenePipeline,frozenPipeline);assert.equal(completedTime_s,frozenTime);
+        if(liveIdentity){assert.equal(internals.gpuFluid,liveIdentity.solver);assert.equal(internals.svoDryScenePipeline,liveIdentity.pipeline);assert.equal(internals.gpuFluid!.info.completedTime_s,liveIdentity.time_s);assert.equal(internals.gpuFluid!.info.encodedSteps,liveIdentity.steps);}
+      };
+      for(const order of [variants,[...variants].reverse()])for(const variant of order){
+        captureStaticVisibilityReuse=variant.reuse;
+        for(let i=0;i<8;i++){await draw(pausedTime_s);assertFrozen();}
+        assert.ok(internals.waterPipeline?.worldReflectionsApplied,"Measured World reflections must actually encode");
+        const entry=entries.get(variant.name)??{...variant,samples_ms:[]};
+        for(let i=0;i<16;i++){const begin=performance.now();await draw(pausedTime_s);entry.samples_ms.push(performance.now()-begin);assertFrozen();}
+        const path=pngPath.replace(/\.png$/,`-${variant.name}.png`),pixels=await capture(path),world=await readPlane("world-reflections"),dryScene=await readPlane("scene");
+        if(!referencePixels){referencePixels=pixels;referenceWorld=world;referenceScene=dryScene;}
+        entry.path=path;entry.pixelMismatchBytes=Math.max(entry.pixelMismatchBytes??0,mismatches(referencePixels,pixels));entry.worldMismatchBytes=Math.max(entry.worldMismatchBytes??0,mismatches(referenceWorld!,world));entry.sceneMismatchBytes=Math.max(entry.sceneMismatchBytes??0,mismatches(referenceScene!,dryScene));
+        await validateExecution(`performance-${variant.name}`);
+        entry.cache=internals.svoDryScenePipeline?.rasterVisibilityCacheStatistics;entries.set(variant.name,entry);
+        console.log(JSON.stringify({phase:"performance-variant",name:variant.name,samples:entry.samples_ms.length,pixelMismatchBytes:entry.pixelMismatchBytes,worldMismatchBytes:entry.worldMismatchBytes,sceneMismatchBytes:entry.sceneMismatchBytes,cache:entry.cache}));
+      }
+      if(liveCachedPlanes){
+        const differences={display:mismatches(liveCachedPlanes[0]!,referencePixels!),scene:mismatches(liveCachedPlanes[1]!,referenceScene!),world:mismatches(liveCachedPlanes[2]!,referenceWorld!)};
+        report.liveCachedMismatchBytes=differences;
+        assert.ok(Object.values(differences).every(value=>value===0),"Advancing-water cached image/HDR differs from frozen recomputed reference");
+      }
+      const results=[...entries.values()].map(entry=>{const ordered=[...entry.samples_ms].sort((a,b)=>a-b);return {...entry,median_ms:(ordered[15]!+ordered[16]!)/2};});
+      report.performanceComparison={variants:results,frozenTime_s:frozenTime,solverIdentityPreserved:true,scenePipelineIdentityPreserved:true,measurement:"32 GPU-fenced host wall samples per variant, forward/reverse order; no concurrent tests; not interactive FPS",parity:"Byte equality of displayed BGRA, dry scene HDR and World reflection HDR"};
+      captureStaticVisibilityReuse=originalReuse;for(let i=0;i<4;i++)await draw(pausedTime_s);
+      assert.ok(results.every(v=>v.pixelMismatchBytes===0&&v.worldMismatchBytes===0&&v.sceneMismatchBytes===0),"Optimization matrix changed frozen image/HDR bytes");
+    }
+    if(options.has("light-budget-comparison")) {
+      const original=lightSamples, frozenSolver=internals.gpuFluid, frozenTime=completedTime_s;
+      const variants=[];
+      for(const budget of [8,32]) {
+        lightSamples=budget;
+        for(let i=0;i<8;i++)await draw(pausedTime_s);
+        const samples_ms:number[]=[];
+        for(let i=0;i<16;i++){const begin=performance.now();await draw(pausedTime_s);samples_ms.push(performance.now()-begin);}
+        assert.equal(internals.gpuFluid,frozenSolver);assert.equal(completedTime_s,frozenTime);
+        const path=pngPath.replace(/\.png$/,`-lights-${budget}.png`);await capture(path);
+        const sorted=[...samples_ms].sort((a,b)=>a-b);
+        variants.push({budget,path,samples_ms,median_ms:(sorted[7]!+sorted[8]!)/2});
+      }
+      report.lightBudgetComparison={variants,frozenTime_s:frozenTime,measurement:"GPU-fenced host wall time; identical frozen solver state; not interactive FPS"};
+      lightSamples=original;for(let i=0;i<4;i++)await draw(pausedTime_s);
+    }
     if(options.has("texture-comparison")) {
       surfaceTexturesEnabled = false;
       for(let i=0;i<4;i++) await draw(pausedTime_s);
@@ -611,13 +884,29 @@ try {
         measurement:"Paused host wall time with GPU queue fence; not interactive FPS" };
     }
   } finally { readback.destroy(); }
-  report.finalPresentationSettings = { shadowResolutionRequested:captureShadowResolution, shadowResolutionApplied:(internals.svoDryScenePipeline as unknown as {rasterAo?:{shadow:GPUTexture}})?.rasterAo?.shadow.width, reflectionMode, renderScale: captureRenderScale, visibilityMode, indirectLighting, surfaceTexturesEnabled, nativeAmbientOcclusionEnabled };
+  if(options.has("profile-passes")) {
+    const traces=new Map<number,NonNullable<RendererFrameMetrics["presentation"]>>();
+    usePerformanceInstrumentationStore.getState().setMode("timeline");
+    try {
+      for(let i=0;i<36;i++){
+        await draw(pausedTime_s);
+        if(lastMetrics?.presentation)traces.set(lastMetrics.presentation.sampleId,lastMetrics.presentation);
+      }
+    } finally {usePerformanceInstrumentationStore.getState().setMode("off");}
+    report.presentationPassProfiles=[...traces.values()];
+    report.presentationPassProfileNote="Instrumented frames collected separately after wall timing; Metal encoder boundaries may perturb timings.";
+  }
+  report.finalPresentationSettings = {lensBloom:{...lensBloom,enabled:captureBloomEnabled},lensBloomApplied:internals.waterPipeline?.lensBloomApplied,voxelReflections:captureVoxelReflections,voxelReflectionSteps,giCache:captureGiCache,latticeEnabled,shadowResolutionRequested:captureShadowResolution, shadowResolutionApplied:(internals.svoDryScenePipeline as unknown as {rasterAo?:{shadow:GPUTexture}})?.rasterAo?.shadow.width, reflectionMode, renderScale: captureRenderScale, visibilityMode, indirectLighting, surfaceTexturesEnabled, nativeAmbientOcclusionEnabled };
   latestInfo = await internals.gpuFluid.readStats();
   assert.equal(latestInfo.encodedSteps, steps, "Rendering comparisons must not advance or reset the frozen fluid");
+  await validateExecution("all-comparisons-complete");
+  const finalComparisonWater=await measureWater();report.waterAfterComparisons=finalComparisonWater;
+  assert.ok(finalComparisonWater.total_m3>0,"Render comparisons must retain real fluid readbacks");
   check(); successful = true;
   progress("captured-production-live-scene", true);
 } catch (error) {
-  failure = error instanceof Error ? error.message : String(error);
+  failure = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  if(error instanceof Error)report.failureStack=error.stack;
   console.error(failure); process.exitCode = 1;
 } finally {
   report.successful = successful;

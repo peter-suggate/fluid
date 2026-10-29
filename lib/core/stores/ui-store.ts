@@ -2,6 +2,7 @@ import type { VisualLayerState } from "../visual-layers";
 import { uiFeatureQuery } from "../../features/persistence";
 import { surfaceDisplayQuery } from "../../features/surface-display/definition";
 import type { WaterReflectionMode } from "../../features/surface-display/definition";
+import { lensBloomQuery, type LensBloomState } from "../../features/lens-bloom/definition";
 import { resolveSvoPipelineComposition } from "../../svo/pipeline/composition";
 import { create } from "zustand";
 import type { EditorAction } from "../editor-action";
@@ -131,7 +132,7 @@ export interface TracePinRequest {
 }
 
 /** Viewport state: camera, selection, and debug controls. */
-interface UIStore extends FineSurfaceState {
+interface UIStore extends FineSurfaceState, LensBloomState {
   /** Includes the final asynchronous preflight after pointer release. */
   voxelStrokePending: boolean;
   voxelToolId?: string;
@@ -262,6 +263,8 @@ interface UIStore extends FineSurfaceState {
   /** Lighting visibility source: cone marches, exact SVO rays, or none at all. */
   svoConeTracingMode: SvoConeTracingMode;
   /** Whether the indirect gather runs at all. Off withholds the work, not just its exposure. */
+  svoVoxelSpecularReflectionsEnabled: boolean;
+  svoVoxelSpecularSteps: number;
   svoGlobalIlluminationEnabled: boolean;
   /** Whether the persistent world-space GI cache pass is encoded. Off by default. */
   svoWorldGiCacheEnabled: boolean;
@@ -323,6 +326,7 @@ interface UIStore extends FineSurfaceState {
   setFluidSurfaceRenderMode: (mode: FluidSurfaceRenderMode) => void;
   setWaterReflectionMode: (mode: WaterReflectionMode) => void;
   setWaterWorldRefractionEnabled: (enabled: boolean) => void;
+  setLensBloom: (options: Partial<LensBloomState>) => void;
   setFluidParticleDisplay: (display: FluidParticleDisplay) => void;
   /** Merge into the Fine display's sliders. */
   setFineSurface: (patch: Partial<FineSurfaceState>) => void;
@@ -332,6 +336,8 @@ interface UIStore extends FineSurfaceState {
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
   setSvoConeTracingMode: (mode: SvoConeTracingMode) => void;
+  setSvoVoxelSpecularReflectionsEnabled: (enabled: boolean) => void;
+  setSvoVoxelSpecularSteps: (steps: number) => void;
   setSvoGlobalIlluminationEnabled: (enabled: boolean) => void;
   setSvoWorldGiCacheEnabled: (enabled: boolean) => void;
   setSvoLatticeVisibilityEnabled: (enabled: boolean) => void;
@@ -525,6 +531,11 @@ export const createUIStore = () => create<UIStore>((set) => ({
     return { waterReflectionMode };
   }),
   setWaterWorldRefractionEnabled: (waterWorldRefractionEnabled) => set({ waterWorldRefractionEnabled }),
+  setLensBloom: (options) => set(state => {
+    const next={...state,...options};
+    lensBloomQuery.write(new URLSearchParams(),next);
+    return options;
+  }),
   setFluidParticleDisplay: (fluidParticleDisplay) => set(state => {
     surfaceDisplayQuery.write(new URLSearchParams(), { ...surfaceDisplayState(state), fluidParticleDisplay });
     return { fluidParticleDisplay };
@@ -543,7 +554,21 @@ export const createUIStore = () => create<UIStore>((set) => ({
     resolveSvoPipelineComposition({ primaryTraversal: state.svoPrimaryTraversal, coneTracingMode: svoConeTracingMode, coneRadianceReconstruction: state.svoRenderTuning.coneRadianceReconstruction });
     return { svoConeTracingMode, ...(svoConeTracingMode === "raster-ao" ? { svoPrimaryTraversal: "mesh" as const, svoStageView: "off" as const } : {}) };
   }),
-  setSvoGlobalIlluminationEnabled: (svoGlobalIlluminationEnabled) => set({ svoGlobalIlluminationEnabled }),
+  setSvoVoxelSpecularReflectionsEnabled: (svoVoxelSpecularReflectionsEnabled) => set(state => {
+    if (svoVoxelSpecularReflectionsEnabled) resolveSvoPipelineComposition({ primaryTraversal: state.svoPrimaryTraversal,
+      coneTracingMode: "cones", coneRadianceReconstruction: state.svoRenderTuning.coneRadianceReconstruction });
+    return { svoVoxelSpecularReflectionsEnabled, ...(svoVoxelSpecularReflectionsEnabled
+      ? { svoConeTracingMode: "cones" as const, svoGlobalIlluminationEnabled: true } : {}) };
+  }),
+  setSvoVoxelSpecularSteps: (svoVoxelSpecularSteps) => {
+    if (!Number.isInteger(svoVoxelSpecularSteps) || svoVoxelSpecularSteps < 1 || svoVoxelSpecularSteps > 512) throw new RangeError("Voxel reflection steps must be an integer in 1..512");
+    set({ svoVoxelSpecularSteps });
+  },
+  setSvoGlobalIlluminationEnabled: (svoGlobalIlluminationEnabled) => set((state) => {
+    if (svoGlobalIlluminationEnabled) resolveSvoPipelineComposition({ primaryTraversal: state.svoPrimaryTraversal,
+      coneTracingMode: "cones", coneRadianceReconstruction: state.svoRenderTuning.coneRadianceReconstruction });
+    return { svoGlobalIlluminationEnabled, ...(svoGlobalIlluminationEnabled ? { svoConeTracingMode: "cones" as const } : {}) };
+  }),
   setSvoWorldGiCacheEnabled: (svoWorldGiCacheEnabled) => set({ svoWorldGiCacheEnabled }),
   setSvoLatticeVisibilityEnabled: (svoLatticeVisibilityEnabled) => set({ svoLatticeVisibilityEnabled }),
   // Kept in the canonical stage order rather than click order, so the set has

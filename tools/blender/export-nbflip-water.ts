@@ -20,10 +20,12 @@ import type { WebGPUUniformReferenceSolver } from "../../lib/methods/uniform/web
 import { waterMeshObj } from "./nbflip-water-mesh";
 
 const options = new Map(process.argv.slice(2).map(argument => {
-  const match = /^--(scene|time|out)=(.+)$/.exec(argument);
-  assert.ok(match, `Unknown argument ${argument}; use --scene=id --time=seconds --out=file.obj`);
+  const match = /^--(scene|time|out|normals)=(.+)$/.exec(argument);
+  assert.ok(match, `Unknown argument ${argument}; use --scene=id --time=seconds --out=file.obj --normals=none|optical`);
   return [match[1]!, match[2]!];
 }));
+const normalMode = options.get("normals") ?? "none";
+assert.ok(normalMode === "none" || normalMode === "optical", "Normals mode must be none or optical");
 const definition = findSceneDefinition(options.get("scene") ?? "alpine-lake-sunrise");
 assert.ok(definition, "Unknown scene");
 assert.equal(definition.methodProfile?.methodId, method.id);
@@ -86,7 +88,7 @@ try {
   assert.ok(mesh.vertexCount > 0 && mesh.vertexCount % 3 === 0);
   assert.equal(mesh.vertices.length, mesh.vertexCount * 8);
   assert.deepEqual(errors, []);
-  const { obj, bounds } = waterMeshObj(mesh.vertices, `Production ${method.id}: ${definition.id} at ${steps * dt}s`);
+  const { obj, bounds } = waterMeshObj(mesh.vertices, `Production ${method.id}: ${definition.id} at ${steps * dt}s`, { opticalNormals: normalMode === "optical" });
   writeFileSync(output, obj);
   const report = { sceneId: definition.id, methodId: method.id, quality, methodValues: values,
     requestedTime_s, completedTime_s: solver.info.completedTime_s, dt, steps,
@@ -94,6 +96,7 @@ try {
     vertexCount: mesh.vertexCount, triangleCount: mesh.vertexCount / 3, activeCubeCount: mesh.activeCubeCount,
     boundsBlender_m: bounds, objSha256: createHash("sha256").update(obj).digest("hex"),
     output, elapsed_ms: performance.now() - started, errors,
+    opticalNormals: normalMode === "optical" ? "Production phi-gradient vertex lane, normalized exactly as the vertex shader and rotated to Blender axes" : "Not exported; legacy position-only OBJ",
     extraction: "Production RasterWaterPipeline mixed-level-set window contour; no authored water geometry" };
   writeFileSync(output.replace(/\.obj$/, ".json"), JSON.stringify(report, null, 2) + "\n");
   console.log(JSON.stringify(report));

@@ -8,8 +8,8 @@ test("visibility allocation covers the existing light sample budget, including G
   const records = new Uint32Array(kinds.length * SVO_LIGHT_RECORD_WORDS);
   kinds.forEach((kind, i) => { records[i * SVO_LIGHT_RECORD_WORDS + 24] = SVO_LIGHT_KINDS[kind]; });
   assert.equal(rasterVisibilityLayers(records, 8, 2, false), 8);
-  assert.equal(rasterVisibilityLayers(records, 8, 2, true), 5);
-  assert.equal(rasterVisibilityLayers(records, 4, 2, false), 4);
+  assert.equal(rasterVisibilityLayers(records, 8, 2, true), 8);
+  assert.equal(rasterVisibilityLayers(records, 4, 2, false), 6);
   assert.equal(rasterVisibilityLayers(records.subarray(0, 56), 8, 2, false), 3);
   assert.equal(rasterVisibilityLayers(undefined, 8, 2, false), 1);
 });

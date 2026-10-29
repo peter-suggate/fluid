@@ -512,7 +512,7 @@ fn probeLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32){
     let light=dryLighting.lights[lightIndex];
     if(light.identity.w!=dryLighting.metadata.y){continue;}
     let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;
-    let sampleCount=select(select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area),1u,globalIllumination);
+    let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);
     for(var sampleIndex=0u;sampleIndex<${options.areaLightSamples}u;sampleIndex+=1u){
       if(sampleIndex>=sampleCount){break;}
       let sample=dryLightSample(light,sampleIndex,position);

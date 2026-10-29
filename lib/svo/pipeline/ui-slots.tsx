@@ -1,5 +1,9 @@
 "use client";
 
+import { RenderResolutionControlRow } from "../features/presentation/controls";
+import { GiLightingControls } from "../features/radiance/gi-ui";
+import { LensBloomControls } from "../../features/lens-bloom/ui";
+import { VoxelSpecularControls } from "../features/radiance/voxel-specular-ui";
 import { SvoRadianceReconstructionControlRow } from "../features/radiance/ui";
 import { useSession } from "../../core/session/session-context";
 import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/ui/slot";
@@ -11,6 +15,10 @@ import { SvoAoTapOverlayControlRow } from "../features/lighting-visibility/ui";
 /** The SVO package exports its own views; application composition can install
  * them alongside other packages without the SVO host importing the app. */
 export const SVO_FEATURE_VIEWS: FeatureControlViews = {
+  "svo.presentation/resolution": RenderResolutionControlRow,
+  "svo.lighting-visibility/global-illumination": GiLightingControls,
+  "svo.lighting-visibility/lens-bloom": LensBloomControls,
+  "svo.lighting-visibility/voxel-specular": VoxelSpecularControls,
   "svo.lighting-visibility/shadow-resolution": SvoShadowResolutionControlRow,
   "svo.lighting-visibility/native-ao": SvoNativeAmbientOcclusionControlRow,
   "svo.lighting-visibility/surface-textures": SvoSurfaceTexturesControlRow,

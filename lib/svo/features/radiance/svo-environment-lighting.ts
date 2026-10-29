@@ -208,7 +208,8 @@ function dot(left: SvoVec3, right: SvoVec3): number {
   return left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
 }
 
-/** Analytic cosine convolution of the record's vertical radiance gradient. */
+/** Irradiance (radiance × solid-angle integral), not normalized diffuse
+ * radiance. A constant sky L produces πL; Lambertian consumers divide by π. */
 export function evaluateSvoEnvironmentDiffuseIrradiance(
   input: SvoEnvironmentLightingRecord,
   worldNormal: SvoVec3,
@@ -222,7 +223,7 @@ export function evaluateSvoEnvironmentDiffuseIrradiance(
     record.upperRadianceLinear[2] - record.lowerRadianceLinear[2],
   ], normal[1] / 3);
   const horizon = scale(record.accentRadianceLinear, 0.13 * (1 - Math.abs(normal[1])));
-  return scale(add(add(average, gradient), horizon), record.diffuseScale);
+  return scale(add(add(average, gradient), horizon), Math.PI * record.diffuseScale);
 }
 
 /** Image-free roughness-prefiltered sky and authored key-light fallback. */
@@ -331,6 +332,6 @@ fn svoEnvironmentCloudRadiance(baseRadiance:vec3f,direction:vec3f,roughness:f32,
 export const svoEnvironmentLightingWGSL = /* wgsl */ `
 ${svoEnvironmentCloudsWGSL}
 struct SvoEnvironmentLightingRecord{lowerDiffuse:vec4f,upperSpecular:vec4f,accentPower:vec4f,keyColorIntensity:vec4f,keyDirectionSharpness:vec4f,identity:vec4u}
-fn svoEnvironmentDiffuseIrradiance(lighting:SvoEnvironmentLightingRecord,worldNormalIn:vec3f)->vec3f{let worldNormal=normalize(worldNormalIn);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let gradient=(lighting.upperSpecular.xyz-lighting.lowerDiffuse.xyz)*(worldNormal.y/3.0);let horizon=lighting.accentPower.xyz*(.13*(1.0-abs(worldNormal.y)));return max(vec3f(0.0),(average+gradient+horizon)*lighting.lowerDiffuse.w);}
+fn svoEnvironmentDiffuseIrradiance(lighting:SvoEnvironmentLightingRecord,worldNormalIn:vec3f)->vec3f{let worldNormal=normalize(worldNormalIn);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let gradient=(lighting.upperSpecular.xyz-lighting.lowerDiffuse.xyz)*(worldNormal.y/3.0);let horizon=lighting.accentPower.xyz*(.13*(1.0-abs(worldNormal.y)));return max(vec3f(0.0),(average+gradient+horizon)*(3.141592653589793*lighting.lowerDiffuse.w));}
 fn svoEnvironmentPrefilteredSpecular(lighting:SvoEnvironmentLightingRecord,worldDirectionIn:vec3f,roughnessIn:f32)->vec3f{let worldDirection=normalize(worldDirectionIn);let roughness=clamp(roughnessIn,0.0,1.0);let r2=roughness*roughness;let vertical=clamp(worldDirection.y*.5+.5,0.0,1.0);let average=mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,.5);let sky=mix(mix(lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,vertical),average,r2);let cosine=max(0.0,dot(worldDirection,normalize(lighting.keyDirectionSharpness.xyz)));let sharpExponent=mix(lighting.keyDirectionSharpness.w,1.0,r2);let broadExponent=mix(15.0,1.0,r2);let sharpEnergy=(sharpExponent+2.0)/(lighting.keyDirectionSharpness.w+2.0);let broadEnergy=(broadExponent+2.0)/17.0;let sun=lighting.keyColorIntensity.xyz*(lighting.keyColorIntensity.w*pow(cosine,sharpExponent)*sharpEnergy+.22*(lighting.keyColorIntensity.w/2.5)*pow(cosine,broadExponent)*broadEnergy);let accentExponent=mix(lighting.accentPower.w,1.0,r2);let accent=lighting.accentPower.xyz*(.13*pow(1.0-abs(worldDirection.y),accentExponent));return max(vec3f(0.0),svoEnvironmentCloudRadiance(sky+sun+accent,worldDirection,roughness,bitcast<f32>(lighting.identity.w),lighting.lowerDiffuse.xyz,lighting.upperSpecular.xyz,lighting.keyColorIntensity.xyz*lighting.keyColorIntensity.w,normalize(lighting.keyDirectionSharpness.xyz))*lighting.upperSpecular.w);}
 `;

@@ -1,0 +1,79 @@
+{
+  "feature": "Optional opaque voxel reflections",
+  "default": "disabled",
+  "controls": "RHS Lighting: Voxel reflections, Reflection steps; Cones and indirect light expands GI controls; Lens bloom and sliders are in the same menu",
+  "contract": {
+    "requirements": "Ready paired static opacity/radiance hierarchy, Cones, and GI enabled. Scenes with live rigid bodies retain the complete legacy sky closure.",
+    "aperture": "2 atan(roughness squared), full angle in radians",
+    "energy": "(gathered radiance + transmittance * prefiltered sky) * existing environment BRDF, once",
+    "budget": {
+      "default": 128,
+      "maximum": 512,
+      "diffuseGiProductionMaximum": 64,
+      "diffuseGiUiMaximum": 48
+    },
+    "invalidSource": "Legacy sky BRDF and legacy occlusion retained; invalid counter and derived-page failure flag set.",
+    "exhaustion": "Finite partial radiance with remaining sky; separate diagnostic count.",
+    "diagnostics": "copyVoxelSpecularDiagnostics: four uint32 words: traces, exhausted, invalid source, rigid-body fallback. Reset per encoded frame; reused dry frames do not trace again.",
+    "movingBodies": "Feature globally falls back whenever actual uniform body count is positive; no center-ray approximation to full rough-cone body coverage."
+  },
+  "validation": {
+    "initialGpu": "tests/voxel-specular.test.ts passed emitter, empty sky, exhaustion, missing-source tests; full/half production shader validation passed.",
+    "finalGpu": "Exclusive tools/gpu/fluid-gpu-run.sh timing fixture passed 2/2: actual production closure is bit-identical to legacy expression when disabled, when rigid bodies require fallback, and when radiance is invalid; separate trace/invalid/fallback counters verified. Known emissive voxel, empty sky, bounded exhaustion, and missing pages passed. Full-rate and reduced production WGSL validated.",
+    "host": "Controls/query/GI mode host tests 7 passed.",
+    "types": "npm run check:types passed after final UI and fallback changes.",
+    "image": "Valid scene snapshots and diagnostics are recorded below; the later v7 uncached stress run failed and its timings are rejected.",
+    "gpuLog": "artifacts/water-scenes/voxel-specular-tests.log",
+    "actualScene": {
+      "artifact": "artifacts/water-scenes/tokyo-rain/cone-gi-quality/cones-v6.json",
+      "successful": true,
+      "gpuErrors": [],
+      "specular": {
+        "available": true,
+        "traced": 600546,
+        "exhausted": 0,
+        "invalidSource": 0,
+        "unsupportedFallback": 0
+      },
+      "gi": {
+        "available": true,
+        "invalidPages": 0,
+        "exhaustedCones": 0
+      },
+      "waterAfterComparisons_m3": 16.190970997205433,
+      "note": "Fresh frozen dry-frame production draw; all5 GPU execution sentinels passed. Counts establish this scene/budget has no exhausted or invalid gathers, not Cycles equivalence."
+    },
+    "storageBindingRegression": {
+      "problem": "Specular diagnostics were unnecessarily visible to compute and could exceed the granted 10-storage-buffer limit.",
+      "fix": "Binding 29 is fragment-only; shading and diagnostic writes are unchanged.",
+      "test": "tests/svo-storage-binding-limit.test.ts",
+      "result": "24 production mesh compute pipelines compiled across full and half scales on a device explicitly granted maxStorageBuffersPerShaderStage=10; both regression tests passed."
+    }
+  },
+  "sourceSha256": {
+    "lib/svo/features/radiance/voxel-specular.wgsl.ts": "77188c20219fe33adb0d79c042094ff1ae8c5501f58bd8aba3ab0270d409a7ba",
+    "lib/svo/features/radiance/svo-tetrahedral-radiance-cone.ts": "a68ba94e4f42739b77d41c7d603fb1e904b865720339e27042aded4f3d5e1150",
+    "lib/svo/features/shading/program.ts": "362c3aa50a357b85b72449669156300ae1583b3644ee5a852c7e9bda4088cf68",
+    "lib/svo/pipeline/webgpu-svo-dry-scene.ts": "fce4b71df212f5a11cafdc385fab865970b5b05ee70ee66740c0f1b1c41365ae"
+  },
+  "limitations": [
+    "Radiance grid and tetrahedral directional reconstruction limit mirror detail.",
+    "Cone approximation is not a full GGX path integral.",
+    "Finite budget can exhaust before scene exit; diagnostics expose this.",
+    "Static radiance atlas does not publish moving-body radiance; whole-scene fallback preserves previous behavior in those scenes."
+  ],
+  "finalRepositoryChecks": {
+    "types": "pass",
+    "unit": {
+      "passed": 1334,
+      "skipped": 194,
+      "failed": 0
+    },
+    "storageBindingGpu": {
+      "passed": 2,
+      "failed": 0,
+      "productionMeshPipelinesCompiled": 24,
+      "grantedStorageBuffersPerShaderStage": 10
+    }
+  }
+}

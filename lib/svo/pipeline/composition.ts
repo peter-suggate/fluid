@@ -1,3 +1,4 @@
+import { SVO_PRESENTATION_FEATURE } from "../features/presentation/definition";
 import { SVO_RADIANCE_RECONSTRUCTION_FEATURE, type SvoConeRadianceReconstruction } from "../features/radiance/definition";
 import { SVO_SCENE_PUBLICATION_PORT } from "../contracts/ports";
 import { composeFeatures, type FeatureDefinition } from "../../framework/composition";
@@ -11,6 +12,7 @@ export const SVO_PIPELINE_FEATURES = [
   { id: "svo.scene-publication", provides: ["svo.scene-publication"], outputs: [SVO_SCENE_PUBLICATION_PORT] },
   { id: "svo.radiance", requires: ["svo.scene-publication"], provides: ["svo.radiance"] },
   SVO_PRIMARY_VISIBILITY_FEATURE,
+  SVO_PRESENTATION_FEATURE,
   SVO_LIGHTING_VISIBILITY_FEATURE,
   SVO_RADIANCE_RECONSTRUCTION_FEATURE,
 ] as const satisfies readonly FeatureDefinition[];

@@ -1,3 +1,4 @@
+import { HdrLensBloom, DEFAULT_LENS_BLOOM_OPTIONS, resolveLensBloomOptions, type LensBloomOptions } from "./webgpu-lens-bloom";
 import { waterTransmissionWGSL } from "./water-transmission.wgsl";
 import { waterInterfaceSamplingWGSL } from "./water-interface-sampling.wgsl";
 import { waterSolidContactWGSL } from "./water-solid-contact";
@@ -241,17 +242,28 @@ export function activeCubeCapacity(maxVertices: number) {
   return Math.ceil(maxVertices / 3);
 }
 
-/** uniformPhiNormal's 27-sample accumulation around `center`: `sample` is the
- * statement that forms `phi` at the lattice vertex q, `head` declares q. */
+/** A separable quadratic B-spline and its analytic derivative: the 27 taps
+ * reproduce affine gradients exactly at every subcell phase (including
+ * anisotropic cells). The former truncated Gaussian derivative had periodic
+ * axis-dependent variance, bending even plane normals. The first phi is a
+ * constant reference, so constant fields cancel exactly without another load.
+ * This only reconstructs optical normals; contour geometry and sampler
+ * ownership remain unchanged. `sample` forms phi at lattice vertex q. */
 const uniformNormalLoopWGSL = (sample: string, head = "let q=clamp(center+vec3i(ox,oy,oz),sampleLow,sampleHigh);") => `for(var oz=-1;oz<=1;oz+=1){for(var oy=-1;oy<=1;oy+=1){for(var ox=-1;ox<=1;ox+=1){
     ${head}
     let delta=vec3f(q)-x;
-    let weight=exp(-0.5*dot(delta,delta)/(.85*.85));
+    let distance=abs(delta);let shoulder=max(vec3f(1.5)-distance,vec3f(0.0));
+    let w=select(0.5*shoulder*shoulder,vec3f(0.75)-delta*delta,distance<=vec3f(0.5));
+    let d=select(sign(delta)*shoulder,2.0*delta,distance<=vec3f(0.5));
+    let weight=w.x*w.y*w.z;
+    let derivativeWeight=vec3f(d.x*w.y*w.z,w.x*d.y*w.z,w.x*w.y*d.z);
     var phi=0.0;
     ${sample}
     if(!(abs(phi)<1e10)){return fallback;}
-    weightSum+=weight;phiSum+=weight*phi;
-    derivativeWeightSum+=weight*delta;phiDerivativeSum+=weight*phi*delta;
+    if(ox==-1&&oy==-1&&oz==-1){phiReference=phi;}
+    let relativePhi=phi-phiReference;
+    weightSum+=weight;phiSum+=weight*relativePhi;
+    derivativeWeightSum+=derivativeWeight;phiDerivativeSum+=relativePhi*derivativeWeight;
   }}}`;
 /** The extraction's hook in umVertexValue: a vertex off the tile corners, in
  * a tile with a 4h tile in its stencil, of the cube whose corners are being
@@ -626,7 +638,7 @@ fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
   let center=vec3i(round(x));
   // The cube's classification covers the stencil of every centre in b-1..b+1.
   let gather=select(0u,normalCube,uniformNormalGather&&all(abs(center-normalCubeBase)<=vec3i(1)));
-  var weightSum=0.0;var phiSum=0.0;
+  var weightSum=0.0;var phiSum=0.0;var phiReference=0.0;
   var derivativeWeightSum=vec3f(0.0);var phiDerivativeSum=vec3f(0.0);
   if(uniformNormalLoops&&gather==1u){
   ${uniformNormalLoopWGSL("if(all((q&vec3i(3))==vec3i(0))){phi=umVertexValue(vec3u(q));}else{phi=umLoadFineVertex(vec3u(q));}")}
@@ -1670,6 +1682,7 @@ fn causticLanding(origin:vec3f,direction:vec3f)->vec2f{
 export const compositeShader = /* wgsl */ `
 override wireframeOnly:f32=0.0;
 override simpleSurface:f32=0.0;
+override linearHdrOutput:f32=0.0;
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
@@ -1966,7 +1979,7 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
 // blade that used to be painted here in NDC is now an analytic primitive in
 // the scene's own scenery graph, so it parallaxes, occludes and takes light like the rest
 // of the world. Only the lens falloff remains, which belongs to the camera.
-fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayGradeBalanced(c,waterDisplayExposure(),waterDisplayToneCurve(),waterDisplayWhiteBalance()),1);}
+fn finish(color:vec3f,ndc:vec2f)->vec4f{if(linearHdrOutput>.5){return vec4f(color,1);}let c=color*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayGradeBalanced(c,waterDisplayExposure(),waterDisplayToneCurve(),waterDisplayWhiteBalance()),1);}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   udrInit();
   // Full-screen interpolated UV has Y=1 at the top of the render target,
@@ -2088,6 +2101,40 @@ export interface WaterSceneOpticsInput {
 }
 
 export class RasterWaterPipeline {
+  private lensOptions:LensBloomOptions=DEFAULT_LENS_BLOOM_OPTIONS;
+  private lensCamera?:HdrLensBloom;
+  private lensCompositeDescriptor?:GPURenderPipelineDescriptor;
+  private lensCompositePipelines?:{shaded:GPURenderPipeline;environment:GPURenderPipeline};
+  private lensPending?:Promise<void>;
+  private lastLensApplied=false;
+  private lensGrade=resolveDisplayGrade();
+  setLensBloomOptions(options:Partial<LensBloomOptions>){
+    this.lensOptions=resolveLensBloomOptions({...this.lensOptions,...options});
+  }
+  get lensBloomOptions():LensBloomOptions{return this.lensOptions;}
+  get lensBloomReady():boolean{return !this.lensOptions.enabled||this.lensOptions.strength===0||!!this.lensCompositePipelines;}
+  get lensBloomApplied():boolean{return this.lastLensApplied;}
+  get lensBloomLinearComposite():GPUTexture|undefined{return this.lastLensApplied?this.lensCamera?.linearComposite:undefined;}
+  ensureLensBloomReady():Promise<void>{
+    if(!this.lensOptions.enabled||this.lensOptions.strength===0)return Promise.resolve();
+    if(this.lensPending)return this.lensPending;
+    const descriptor=this.lensCompositeDescriptor;
+    if(!descriptor?.fragment)return Promise.reject(new Error("Water optical composite is not initialized"));
+    this.lensCamera??=new HdrLensBloom(this.device,this.targetFormat);
+    const make=(label:string,constants:Record<string,number>)=>this.device.createRenderPipelineAsync({
+      ...descriptor,label,fragment:{...descriptor.fragment!,constants:{linearHdrOutput:1,...constants},targets:[{format:"rgba16float"}]},
+    });
+    this.lensPending=(async()=>{
+      const [shaded,environment]=await Promise.all([
+        make("Linear HDR complete water composite",{}),
+        make("Linear HDR environment water composite",{screenSpaceReflections:0}),
+        this.lensCamera!.ensureReady(),
+      ]);
+      this.lensCompositePipelines={shaded,environment};
+    })();return this.lensPending;
+  }
+  completeLensBloomFrame(completion:Promise<unknown>):void{this.lensCamera?.completeFrame(completion);}
+
   private extractPipeline?: GPUComputePipeline;
   /** Uniform Geometric: one thread per 4h window (extractTilesMain). */
   private collectWindowsPipeline?: GPUComputePipeline;
@@ -2260,6 +2307,7 @@ export class RasterWaterPipeline {
    * call.
    */
   setSceneOptics(input: WaterSceneOpticsInput) {
+    this.lensGrade=resolveDisplayGrade(input.grade);
     const packed = packWaterSceneOptics(
       resolveWaterOptics(input.optics),
       resolveWaterKeyLight(input.directional),
@@ -2462,6 +2510,8 @@ export class RasterWaterPipeline {
     const transmissionRequestPipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.transmissionRequestLayout]});
     const compositePipelineLayout=this.device.createPipelineLayout({ bindGroupLayouts: [this.compositeLayout] });
     const compositeDescriptor:GPURenderPipelineDescriptor={ label:"Composite layered water optics", layout: compositePipelineLayout, vertex: { module: composite, entryPoint: "vertexMain" }, fragment: { module: composite, entryPoint: "fragmentMain", targets: [{ format: this.targetFormat }] }, primitive: { topology: "triangle-list" } };
+
+    this.lensCompositeDescriptor=compositeDescriptor;
 
     type CompileJob = { readonly label: string; readonly run: () => Promise<void> };
     const jobs: CompileJob[] = [];
@@ -3249,14 +3299,22 @@ export class RasterWaterPipeline {
     }
     const compositeBindGroup = this.compositeBindGroupFor(sparseSceneResult ? sparseSceneResult.sampledTargetView : this.sceneTextureView!, worldReflections);
     if (!compositeBindGroup) return false;
-    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});
+    const outputView="createView" in output?output.createView():output;
+    const useLens=this.lensOptions.enabled&&this.lensOptions.strength>0&&!!this.lensCompositePipelines
+      &&surfaceRenderMode==="shaded"&&!this.disabledStages.has("optical-composite");
+    this.lastLensApplied=useLens;
+    const opticalOutput=useLens?this.lensCamera!.ensureSize(this.sceneTexture.width,this.sceneTexture.height,this.lensOptions).createView():outputView;
+    const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:opticalOutput,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});
     // The single final transform every render path shares: withholding it keeps
     // the clear so the presentation target is the background colour rather than
     // a stale composite that would look like the pass still ran.
     if (!this.disabledStages.has("optical-composite")) {
-      composite.setPipeline(surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : surfaceRenderMode === "simple" ? this.simpleCompositePipeline : this.reflectionMode === "environment" ? this.environmentCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
+      composite.setPipeline(useLens
+        ? this.reflectionMode==="environment"?this.lensCompositePipelines!.environment:this.lensCompositePipelines!.shaded
+        : surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : surfaceRenderMode === "simple" ? this.simpleCompositePipeline : this.reflectionMode === "environment" ? this.environmentCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
     }
     composite.end();
+    if(useLens)this.lensCamera!.encode(encoder,outputView,this.lensOptions,this.lensGrade);
     if (surfaceRenderMode === "wireframe" && !this.disabledStages.has("optical-composite")) {
       const sceneView = sparseSceneResult ? sparseSceneResult.sampledTargetView : this.sceneTextureView!;
       const wireframeSceneBindGroup = this.wireframeSceneBindGroupFor(sceneView);
@@ -3273,6 +3331,7 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
+    this.lensCamera?.destroy();
     this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
     for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
