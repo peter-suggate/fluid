@@ -1010,7 +1010,7 @@ const UM_CUBIC_ENTRIES=${this.cubicEntries}u;
 fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
  // Under "clip" the cubic list's wall test below reuses this one.
  let wallVertex=UM_WALL_CLIP&&umSurfaceWallVertex(vec3u(p));umOneStep=wallVertex;
- ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){umFullIdentity=true;return umLoadVertex(vec3u(p))+foot.smoothing;}
+ ${this.solid?/* wgsl */`let clear=umSolidClear(vec3i(p));if(!clear&&umBuried(p)){umFullIdentity=true;return umLatticeLoad(vec3i(p),width)+foot.smoothing;}
  let end=umVertexTrace(foot);let walk=umWalk(p,end);let q=walk.q;`:"let q=umVertexTrace(foot);"}let cell=umVertexCell(q);var value=cell.value;
  let smoothing=umMovedSmoothing(foot.smoothing,p,q,width);
  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
@@ -1347,14 +1347,14 @@ ${this.farGate?/* wgsl */`// A far-marker vertex (at least clearAir's 16 max h) 
 // lifts whatever its advection gives there to the marker, so tracing it is
 // no work. Negative where the vertex is traced. umFarAirKept: the stored
 // value it keeps before umAirSource, negative where it is traced.
-fn umFarAirKept(vertex:vec3u)->f32{
+fn umFarAirKept(vertex:vec3u,width:u32)->f32{
  let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
  if(atomicLoad(&umClaims[${this.claimBytes/4}u+tile])!=0u){return -1.0;}
- let value=umLoadVertex(vertex);
+ let value=umLatticeLoad(vec3i(vertex),width);
  if(value<16.0*max(params.hDt.x,max(params.hDt.y,params.hDt.z))){return -1.0;}
  return value;
-}`:"fn umFarAirKept(vertex:vec3u)->f32{return -1.0;}"}
-fn umFarAir(vertex:vec3u)->f32{let value=umFarAirKept(vertex);if(value<0.0){return -1.0;}return umAirSource(vertex,value);}
+}`:"fn umFarAirKept(vertex:vec3u,width:u32)->f32{return -1.0;}"}
+fn umFarAir(vertex:vec3u,width:u32)->f32{let value=umFarAirKept(vertex,width);if(value<0.0){return -1.0;}return umAirSource(vertex,value);}
 // The cubic at a vertex of width (flags.y 1: every vertex; 2: 4h only;
 // 3, adaptive: 4h, and h where no incident liquid tile has surface heat
 // above 1.5 (strong particle authority); 4: h only; 5: h as 3, 4h none).
@@ -1392,7 +1392,7 @@ fn umCubicAt(vertex:vec3u,width:u32)->bool{
 // the stored value it keeps before umAirSource, negative where traced.
 fn umDeepAirKept(vertex:vec3u,width:u32)->f32{
  let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
- let value=umLoadVertex(vertex);if(!(value>=(6.0+3.0*f32(width))*h)){return -1.0;}
+ let value=umLatticeLoad(vec3i(vertex),width);if(!(value>=(6.0+3.0*f32(width))*h)){return -1.0;}
  let tile=umTileAt(vec3u(umPointCell(vec3f(vertex)))/4u);
  let word=atomicLoad(&umClaims[${this.evidenceBytes/4-this.ownership.capacity.tiles}u+tile])&0x3fffffffu;
  let reach=max(vec3u(word&31u,(word>>5u)&31u,(word>>10u)&31u),vec3u((word>>15u)&31u,(word>>20u)&31u,(word>>25u)&31u));
@@ -1405,7 +1405,7 @@ fn umDeepAir(vertex:vec3u,width:u32)->f32{let value=umDeepAirKept(vertex,width);
 // the far value's source is not kept (negative) the deep one's is not
 // either: the same umAirSource of the same value.
 fn umKeptAir(vertex:vec3u,width:u32,deep:bool)->f32{
- var value=umFarAirKept(vertex);
+ var value=umFarAirKept(vertex,width);
  if(value<0.0&&deep){value=umDeepAirKept(vertex,width);}
  if(value<0.0){return -1.0;}
  return umAirSource(vertex,value);
@@ -1444,7 +1444,7 @@ const UM_TRACE_ENTRIES=${this.traceEntries}u;
 const UM_TRACE_BASE=${this.deferredEntries+5*this.cubicEntries}u;
 fn umListTrace(vertex:vec3u,width:u32){
  let p=vec3f(vertex);
- ${this.solid?"if(!umSolidClear(vec3i(p))&&umBuried(p)){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLoadVertex(vertex));return;}":""}
+ ${this.solid?"if(!umSolidClear(vec3i(p))&&umBuried(p)){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return;}":""}
  umSlow=false;let foot=umVertexFoot(vertex,width);
  let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){umStoreSurface(vertex,width,euler.x);return;}
  let j=atomicAdd(&deferred.header[3],1u);
@@ -1490,8 +1490,8 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  ${this.workControl?`if(umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+20}u],1u);}`:""}
  ${this.solid?/* wgsl */`// Off a clear tile a vertex can be buried: it keeps its value, umAdvected's
  // first exit.
- if(!umSolidClear(vec3i(p))&&umBuried(p)){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLoadVertex(vertex));return;}
- ${this.solid.coarse?"if(reachProof&&umReachAdmission&&umReachBuried(vec3i(vertex))){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLoadVertex(vertex));return;}":""}
+ if(!umSolidClear(vec3i(p))&&umBuried(p)){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return;}
+ ${this.solid.coarse?"if(reachProof&&umReachAdmission&&umReachBuried(vec3i(vertex))){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return;}":""}
  // A hit is evaluated by advectDeferred. Its first-pass phi and source
  // samples are discarded.
  var smoothing=0.0;
@@ -1550,7 +1550,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   if(early.y>0.0){if(umFastSurface){deferred.data[i]=0xffffffffu;}umStoreSurface(vertex,width,early.x);continue;}
   let cheap=umCheapAdvected(vertex,width);
   if(cheap.y>0.0){if(umFastSurface){deferred.data[i]=0xffffffffu;}umStoreSurface(vertex,width,cheap.x);continue;}
-  ${this.solid?"if(coarsePreflight&&!umSolidClear(vec3i(vertex))&&umBuried(vec3f(vertex))){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLoadVertex(vertex));continue;}":""}
+  ${this.solid?"if(coarsePreflight&&!umSolidClear(vec3i(vertex))&&umBuried(vec3f(vertex))){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));continue;}":""}
   // A globally solid-free fast pipeline may evaluate only a currently
   // certified open footprint. Uncertified words remain for the general twin.
   if(localSolidTwin&&!umLocalSolidAdmission){continue;}
@@ -1597,7 +1597,7 @@ var<workgroup> wallBase:u32;
    // The width uses this same face's cell, exactly as the owner path did.
    if(all(vec3u(vertex)%width==vec3u(0))&&umWallPlane(vertex)==face%6u&&umWallBlock(vertex,face%6u)==face/6u){
     if(!umHoldCold(vec3u(vertex),width)){
-     let far=umFarAir(vec3u(vertex));
+     let far=umFarAir(vec3u(vertex),width);
      if(far>=0.0){umRecordRegion(vec3u(vertex),0u);umStoreSurface(vec3u(vertex),width,far);}
      else{
       slot=atomicAdd(&wallListed,1u);
