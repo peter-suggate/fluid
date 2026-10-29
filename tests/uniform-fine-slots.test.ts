@@ -23,9 +23,6 @@ test("h slot capacity: the request, else the need x 1.5 over the floor, to a who
  assert.equal(uniformFineSlotCapacity(20,[2,2,5],12),18);
  assert.equal(uniformFineSlotCapacity(226,[8,8,4],10,100),127);
  assert.ok(UNIFORM_FINE_SLOT_FLOOR>=1);
- // At least a coarse start's ceiling share; a request overrides it.
- assert.equal(uniformFineSlotCapacity(226,[8,8,4],0,undefined,64),127);
- assert.equal(uniformFineSlotCapacity(226,[8,8,4],0,40,64),63);
  assert.throws(()=>uniformFineSlotCapacity(226,[8,8,4],50,20),/fewer blocks than the t=0 detail ring needs/);
  assert.throws(()=>uniformFineSlotCapacity(226,[8,8,4],1,0),/positive whole number/);
 });

@@ -996,9 +996,9 @@ fn drShare(t:u32){
   * the whole block grid): the h stores keep only the blocks the held
   * generation's ring needs, each at a slot (uniform-fine-slots.ts), at a
   * capacity of `requested` blocks (fluid.tiers.fineBlocks) or the need x
-  * 1.5, at least `least`. Reads the need back (setup only). Nothing while no
+  * 1.5 (a coarse start's rule is its request). Reads the need back (setup only). Nothing while no
   * h generation is resident: a later admit stays whole-grid. */
- async compact(requested?:number,least=0):Promise<void>{
+ async compact(requested?:number):Promise<void>{
   if(!this.resident||this.sparse)return;
   if(!this.layout.domain.sparse)throw new Error("Uniform detail storage compacts only under a sparse domain (its modules' slotless loads)");
   if(!this.transfers||!this.installed)throw new Error("Uniform detail storage compacts after its first layout and prepare()");
@@ -1013,7 +1013,7 @@ fn drShare(t:u32){
    await staging.mapAsync(GPUMapMode.READ);need=new Uint32Array(staging.getMappedRange().slice(0));
   }finally{if(staging.mapState==="mapped")staging.unmap();staging.destroy();}
   const blocks:number[]=[];for(let b=1;b<B-1;b++)if(need[b])blocks.push(b);
-  this.slotCapacity=uniformFineSlotCapacity(B,a.blockGrid,blocks.length,requested,least);
+  this.slotCapacity=uniformFineSlotCapacity(B,a.blockGrid,blocks.length,requested);
   const slots=new Uint32Array(B);blocks.forEach((b,i)=>{slots[b]=i+1;});
   // The new h stores: each needed block's texels copied to its slot, the AIR block's to the sentinel (what the
   // t=0 kernels left there, as a whole-grid store holds it), the free slots empty.

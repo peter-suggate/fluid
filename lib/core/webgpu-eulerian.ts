@@ -31,6 +31,8 @@ export interface GPUEulerianInfo {
   uniformMixedRefusedTiles?: number;
   uniformMixedRefusedTileBuilds?: number;
   uniformMixedSlotClaims?: number;
+  /** The h owners a coarse start holds (its h-tile ceiling): the build's tile cut refuses past it. */
+  uniformMixedOwnerCapacity?: number;
   uniformMixedSlotCapacity?: number;
   uniformMixedSlotsUsed?: number;
   uniformMixedSlotPeak?: number;

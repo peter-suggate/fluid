@@ -30,3 +30,32 @@ test("fluid.tiers validates its brick count and density", () => {
   assert.deepEqual(errors({ start: "h" }), []);
   assert.equal(errors({ start: "16h" }).length, 1);
 });
+
+// Letters under a coarse start sized the particle store from the h-tile
+// ceiling ("particle slabs exceed the pool: 897264 records sized of 1048577",
+// then "particle bricks exceed the cell bins' 5088 brick slots"), while
+// particles also live on 4h owners. Under the records rule the slabs hold
+// R records at any spread over every stored brick (64 a block).
+test("a records budget's slabs hold R records spread one a brick over every stored brick", () => {
+  for (const [records, blocks] of [[1000, 226], [989184, 226], [2555460, 311], [100, 4]] as const) {
+    const capacity = narrowBandBudgetCapacity({ fineTiles: 1, perFineCell: 4, records }, blocks);
+    const bricks = Math.min(records, 64 * blocks);
+    assert.ok(capacity - particleSlabSpill(capacity) >= Math.ceil(1.25 * records) + 32 * bricks, `${records} records over ${blocks} blocks`);
+  }
+});
+
+test("the particle record rule: 8 samples a band cell x the shared growth, over the census band", async () => {
+  const { uniformParticleRecordRule, uniformParticleBand } = await import("../lib/methods/uniform/uniform-particle-census");
+  assert.equal(uniformParticleRecordRule(1000), 12000);
+  assert.throws(() => uniformParticleRecordRule(-1), /count of band cells/);
+  // A 64³ lattice of two pages an axis, wet below y = 20: the band is the
+  // 3 wet layers under the free surface (y 17..19), 64 x 64 a layer.
+  const edge = 32, at: (Float32Array | undefined)[] = [];
+  for (let pz = 0; pz < 2; pz++) for (let py = 0; py < 2; py++) for (let px = 0; px < 2; px++) {
+    const page = new Float32Array(edge ** 3);
+    for (let z = 0; z < edge; z++) for (let y = 0; y < edge; y++) for (let x = 0; x < edge; x++) if (edge * py + y < 20) page[x + edge * (y + edge * z)] = 1;
+    at.push(py === 1 && page.every(v => v === 0) ? undefined : page);
+  }
+  // Its h tiles: the layers y 16..19 hold it, 16 x 16 tiles across.
+  assert.deepEqual(uniformParticleBand({ edge, cells: [64, 64, 64], pages: [2, 2, 2], at } as never, 3), { cells: 3 * 64 * 64, tiles: 16 * 16 });
+});

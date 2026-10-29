@@ -26,10 +26,6 @@
 export const UNIFORM_DETAIL_SLOT_VIOLATION=8192;
 /** The default capacity over the t=0 need, and its floor (fluid.tiers.fineBlocks overrides both). */
 export const UNIFORM_FINE_SLOT_GROWTH=1.5,UNIFORM_FINE_SLOT_FLOOR=16;
-/** Under a coarse start the default also holds the h ceiling's tiles at this
- * many a slot: a ring is sparse in its blocks (letters at 4273 h tiles held
- * 98 blocks, 44 a block; the seep's jet 40 at 500 tiles, 12 a block). */
-export const UNIFORM_FINE_SLOT_TILES=32;
 /** The page layers of one column's band (M4b's capacity rule): an h tile's
  * ring box spans 29 cells an axis (fsRingLow, fsRingHigh), so the box of a
  * surface tile and the tile across the interface from it, 33 cells, meets
@@ -77,12 +73,11 @@ export function uniformFineBlocks(tiers?:{readonly fineBlocks?:number|"auto";rea
 }
 export function uniformFineSlotLayers(blockGrid:readonly number[],capacity:number):number{return Math.ceil((capacity+1)/(blockGrid[0]!*blockGrid[1]!));}
 /** Slots for a need: requested (fluid.tiers.fineBlocks) or the need x 1.5 with
- * the floor and at least `least` (a coarse start's ceiling share), rounded up
- * to a whole layer (the texture holds it anyway), and no more than the blocks
+ * the floor, rounded up to a whole layer (the texture holds it anyway), and no more than the blocks
  * that can hold a tile (every block but the two sentinels). */
-export function uniformFineSlotCapacity(blocks:number,blockGrid:readonly number[],need:number,requested?:number,least=0):number{
+export function uniformFineSlotCapacity(blocks:number,blockGrid:readonly number[],need:number,requested?:number):number{
  if(requested!==undefined&&!(Number.isSafeInteger(requested)&&requested>=1))throw new RangeError(`fluid.tiers.fineBlocks must be a positive whole number of blocks, not ${requested}`);
- const want=requested??Math.max(UNIFORM_FINE_SLOT_FLOOR,Math.ceil(UNIFORM_FINE_SLOT_GROWTH*need),least);
+ const want=requested??Math.max(UNIFORM_FINE_SLOT_FLOOR,Math.ceil(UNIFORM_FINE_SLOT_GROWTH*need));
  if(want<need)throw new RangeError(`fluid.tiers.fineBlocks ${want} holds fewer blocks than the t=0 detail ring needs (${need})`);
  const layer=blockGrid[0]!*blockGrid[1]!;
  return Math.min(layer*uniformFineSlotLayers(blockGrid,want)-1,Math.max(1,blocks-2));

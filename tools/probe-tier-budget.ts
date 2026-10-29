@@ -716,12 +716,12 @@ var<workgroup> sums:array<atomic<u32>,16>;
       regions: { cold: all[READ.heat / 4], warm: all[READ.heat / 4 + 1], hot: all[READ.heat / 4 + 2], free: all[READ.heat / 4 + 3] },
       // The build's h-slot claim (M4b): capacity, in use, peak, this build's claims and refused tiles, refused tile-builds so far.
       slots: (() => { const i = solver.info as unknown as Record<string, number | undefined>; return i.uniformMixedSlotCapacity === undefined ? undefined
-        : { capacity: i.uniformMixedSlotCapacity, used: i.uniformMixedSlotsUsed, peak: i.uniformMixedSlotPeak, claims: i.uniformMixedSlotClaims, refused: i.uniformMixedRefusedTiles, refusedBuilds: i.uniformMixedRefusedTileBuilds }; })(),
+        : { owners: i.uniformMixedOwnerCapacity, capacity: i.uniformMixedSlotCapacity, used: i.uniformMixedSlotsUsed, peak: i.uniformMixedSlotPeak, claims: i.uniformMixedSlotClaims, refused: i.uniformMixedRefusedTiles, refusedBuilds: i.uniformMixedRefusedTileBuilds }; })(),
       // coldSurface "still": the liquid's extent along gravity (regions), this frame's fastest travel (h a step), and the frames it reached a region.
       still: { extentRegions: all[READ.still / 4], travel_h: new Float32Array(all.buffer, all.byteOffset + READ.still + 12, 1)[0], breachFrames: all[READ.still / 4 + 4] },
       phi: { source: phiSource, measured, totals, solverCells: stats.volumeCellSum, represented: stats.representedVolumeCellSum, rawDrift: stats.rawVolumeDrift,
         preTotals, throatU, rightMaxU, negativeOwners, points, pointPhi, centreWidth: u[38], host: hostExtents(), extents: Object.fromEntries(probes.map((p, i) => [p.key, [39, 40, 41, 42].map(k => all[W * i + k])])), lowCorner: f[30], boxOriginX: u[31] },
-      particles: solver.narrowBandFlipInfo?.particles, particleMass: particleMass ? await particleMass(Array.from(u.slice(ORIGIN_AT, ORIGIN_AT + 3), word => word | 0)) : undefined, line,
+      particles: solver.narrowBandFlipInfo?.particles, reseedClippedTotal: solver.narrowBandFlipInfo?.reseedClippedTotal, particleMass: particleMass ? await particleMass(Array.from(u.slice(ORIGIN_AT, ORIGIN_AT + 3), word => word | 0)) : undefined, line,
       // The tube's edge vertices from wall.high - 6: x, then phi (h) at (y, z), (y+1, z), (y, z+1), (y+1, z+1).
       vertexLine: Array.from({ length: VLINE }, (_, i) => [wall.high - 6 + i, ...[0, 1, 2, 3].map(e => +(f[VLINE_AT + 4 * i + e]! / h).toFixed(2))]),
       // The outlet mouth as [z][y] rows of x cells (wall.high - 3 ...): "phi(h)/u/V+x/open".

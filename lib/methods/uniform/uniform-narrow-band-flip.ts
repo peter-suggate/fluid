@@ -19,7 +19,7 @@ import { narrowBandNearestEntries, narrowBandNearestControlEntries } from "./uni
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
 import { narrowBandTerrainContactWGSL, narrowBandRigidContactWGSL } from "./uniform-particle-contact.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
-import { NB_SLAB_SORT_MAX_WORD, particleSlabSortEntries, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
+import { NB_SLAB_SEEDS_WORD, NB_SLAB_SORT_MAX_WORD, particleSlabSortEntries, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
 import { particleBrickDepositWGSL } from "./uniform-particle-brick.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
@@ -200,11 +200,21 @@ export interface NarrowBandSurfaceRevisions{readonly buffer:GPUBuffer;readonly l
 const NB_ARENA_WINDOW_FLOOR=2048;
 /** The reuse cache's fewest payload slots under a particle budget. */
 const NB_REUSE_SLOT_FLOOR=256;
-export interface NarrowBandParticleBudget{readonly fineTiles:number;readonly perFineCell:number;readonly bankBytes?:number}
+export interface NarrowBandParticleBudget{readonly fineTiles:number;readonly perFineCell:number;readonly bankBytes?:number;
+ /** The records by rule (uniformParticleRecordRule, M4b): an overlap reseed
+  * past them is deferred (reseedClipped), and the slabs hold them at any
+  * spread: every stored brick may hold a slab. Unset: 64 x fineTiles x perFineCell. */
+ readonly records?:number}
 /** Particle records for a budget: its samples, then the slabs' spill reserve
- * (particleSlabSpill) on top, so the slabs alone hold the budget. */
-export function narrowBandBudgetCapacity(budget:NarrowBandParticleBudget):number{
- const samples=Math.ceil(64*budget.fineTiles*budget.perFineCell);
+ * (particleSlabSpill) on top, so the slabs alone hold the budget. Under
+ * records over `blocks` blocks the slabs are sized for the worst spread:
+ * a scratch slab holds a brick's count and a quarter more, at least 32,
+ * and a current slab its count, an eighth more, at least 16, and its
+ * refused seeds (uniform-particle-slab.wgsl.ts), so R records over B
+ * occupied bricks (B at most R and every stored brick, 64 a block) need
+ * 1.25 R + 32 B. */
+export function narrowBandBudgetCapacity(budget:NarrowBandParticleBudget,blocks=0):number{
+ const samples=budget.records!==undefined?Math.ceil(1.25*budget.records)+32*Math.min(budget.records,64*blocks):Math.ceil(64*budget.fineTiles*budget.perFineCell);
  let capacity=samples+Math.max(4096,Math.ceil(samples/15));
  while(capacity-particleSlabSpill(capacity)<samples)capacity++;
  return capacity;
@@ -256,6 +266,10 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly particleAllocation:GPUBuffer;
  count=0;
  reseedClipped=0;
+ /** Overlap reseeds deferred at the records' rule, summed over steps. */
+ reseedClippedTotal=0;
+ /** The records by rule (NarrowBandParticleBudget.records): 0, none. */
+ private seedBudget=0;
  /** Positive distances in h cells, before union and on the accepted surface.
   * Unresolved samples are reported separately from the resolved liquid band. */
  diagnostics={beforeMaxOutside:NaN,afterMaxOutside:0,outsideSurface:0,unsupported:0,deepInterior:0};
@@ -538,7 +552,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // The particle cell bins (counts in bins, starts in links): a word a cell
   // key; under a budget, 512 a particle brick slot (the sort's slab slot,
   // nbBinTile) and a slot word a brick id after them.
-  this.binSlots=budget?Math.min(64*address.blocks,budget.fineTiles):0;this.binCells=budget?512*this.binSlots:cells;
+  // Under records by rule every stored brick may hold particles (spray
+  // scatters them): its bins hold every brick, the hard bound.
+  this.binSlots=budget?Math.min(64*address.blocks,budget.records!==undefined?Infinity:budget.fineTiles):0;this.binCells=budget?512*this.binSlots:cells;
   this.countWords=budget?this.binCells+64*address.blocks:2*cells;
   this.cells=cells;this.vertices=vertices;this.tiles=address.tileKeys;this.bandWord=this.countWords+cells+vertices+2*this.tiles;
   // The band is a surface, but what a scene's surface grows to is not known
@@ -550,8 +566,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.particleStride=narrowBandParticleStride(this.apic);const particleBytes=4*this.particleStride;
   const deviceRecords=Math.floor(device.limits.maxStorageBufferBindingSize/(this.apic?112:64));
   if(budget&&!(Number.isInteger(budget.fineTiles)&&budget.fineTiles>0&&budget.perFineCell>0))throw new Error(`Narrow-band FLIP particle budget ${JSON.stringify(budget)} needs a positive integer of fine tiles and a positive density`);
-  if(budget&&narrowBandBudgetCapacity(budget)>deviceRecords)throw new Error(`Narrow-band FLIP: fluid.tiers (${budget.fineTiles} h tiles at ${budget.perFineCell} particles a fine cell) needs ${narrowBandBudgetCapacity(budget)} particle records; the device's binding limit holds ${deviceRecords}`);
-  this.capacity=budget?narrowBandBudgetCapacity(budget):Math.min(cells*8,Math.max(2_097_152,cells),deviceRecords);
+  if(budget&&narrowBandBudgetCapacity(budget,address.blocks)>deviceRecords)throw new Error(`Narrow-band FLIP: fluid.tiers (${budget.records!==undefined?`${budget.records} records by rule`:`${budget.fineTiles} h tiles at ${budget.perFineCell} particles a fine cell`}) needs ${narrowBandBudgetCapacity(budget,address.blocks)} particle records; the device's binding limit holds ${deviceRecords}`);
+  this.seedBudget=budget?.records??0;
+  this.capacity=budget?narrowBandBudgetCapacity(budget,address.blocks):Math.min(cells*8,Math.max(2_097_152,cells),deviceRecords);
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.recordBytes=this.capacity*particleBytes;const bankBytes=Math.max(this.recordBytes,budget?.bankBytes??0);
   this.particles=[buffer("particles A",bankBytes),buffer("particles B",bankBytes)];
@@ -588,7 +605,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.bins=buffer("cell counts, surface metrics and persistent regional crossing masks",binBytes);
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
   // The arena's windows follow: a window (9³ vertices) an arena brick (ubWindow).
-  this.arenaWord=this.binCells+7*this.capacity;this.arenaWindows=Math.min(64*address.blocks,budget?Math.max(NB_ARENA_WINDOW_FLOOR,budget.fineTiles):Infinity);
+  this.arenaWord=this.binCells+7*this.capacity;this.arenaWindows=Math.min(64*address.blocks,budget&&budget.records===undefined?Math.max(NB_ARENA_WINDOW_FLOOR,budget.fineTiles):Infinity);
   this.separationPrepass=sampleSeparation==="pairs";this.separationWord=this.arenaWord+729*this.arenaWindows;
   const linkBytes=4*(this.separationWord+(this.separationPrepass?3*this.capacity:0));
   if(linkBytes>limit)throw new Error(`Narrow-band links, arena windows and separation words (${linkBytes} bytes) exceed GPU buffer limit ${limit}`);
@@ -1013,7 +1030,7 @@ fn markSurfaceTiles(position:vec3f,heat:f32){
   atomicMax(&bins[NB_ACTIVITY_THETA+tile],bitcast<u32>(max(heat,0.0)));
  }}}
 }
-${particleSlabWGSL(this.capacity-this.spill,this.spill,this.apic,this.binSlots)}
+${particleSlabWGSL(this.capacity-this.spill,this.spill,this.apic,this.binSlots,this.seedBudget)}
 override nbAdvectScalarCollision:bool=false;
 // With a static solid in the scene the fast launch (umSolidFree) still
 // advects a sample whose trace has no closed cell and no cell the
@@ -1918,7 +1935,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   // The slabs are sized from the last move's, the samples move into them
   // in the scratch bank, and SORT files them by cell into the current bank
   // and marks the tiles they reach.
-  encoder.clearBuffer(this.state,4,8);
+  encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.state,4*NB_SLAB_SEEDS_WORD,4);
   encoder.clearBuffer(this.bins,4*this.countWords+this.tiles*4,this.tiles*4);
   this.clearBrickTable(encoder);this.run(encoder,b.allocate);
   this.run(encoder,b.advect);
@@ -2089,7 +2106,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   this.crossingPass?.end();this.crossingPass=undefined;
  }
  noteReceipt(words:Uint32Array):void{
-  this.count=words[1]!;this.reseedClipped=words[2]!;
+  this.count=words[1]!;this.reseedClipped=words[2]!;this.reseedClippedTotal+=words[2]!;
   const bits=this.receiptBits,distances=this.receiptDistances,d=this.diagnostics;
   bits[0]=words[4]!;bits[1]=words[5]!;
   d.beforeMaxOutside=this.measureTraces?distances[0]!:NaN;d.unsupported=words[7]!;

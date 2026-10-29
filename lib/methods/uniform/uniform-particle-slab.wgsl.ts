@@ -45,6 +45,9 @@ import { particleCanonicalWGSL } from "./uniform-particle-canonical.wgsl";
 export const NB_SLAB_HEADER_WORDS=48;
 /** Maximum cell population for the current sort; reset before slabSort. */
 export const NB_SLAB_SORT_MAX_WORD=25;
+/** The step's seeds (cleared with the move's live count): a records budget
+ * defers an overlap reseed once the live records and the seeds reach it. */
+export const NB_SLAB_SEEDS_WORD=26;
 /** Dispatch boundaries synchronize dense-cell merge rounds across workgroups. */
 export function particleSlabSortEntries(capacity:number):string[]{
  const entries=["slabSort"];
@@ -58,7 +61,7 @@ export function particleSlabSpill(capacity:number):number{return Math.max(4096,M
 /** limit: the slabs' bound; spill: minimum tail headroom. Unused slab space also spills.
  * binSlots: the cell bins' brick slots (nbBinTile), the sort's slab slots;
  * 0 keys them by cell key. */
-export function particleSlabWGSL(limit:number,spill:number,apic=false,binSlots=0):string{return /* wgsl */`
+export function particleSlabWGSL(limit:number,spill:number,apic=false,binSlots=0,seedBudget=0):string{return /* wgsl */`
 ${particleCanonicalWGSL(apic)}
 const NB_SLAB_LIMIT:u32=${limit}u;
 const NB_PARTICLE_CAPACITY:u32=${limit+spill}u;
@@ -115,6 +118,11 @@ fn nbMoveAppend(p:Particle){
 // reserve (the next move takes it first; nothing reads it before). Only a
 // full reserve clips an overlap reseed. Whether the seed was kept.
 fn nbSeedAppend(p:Particle,mandatory:bool)->bool{
+ ${seedBudget?`// The records' rule: an overlap reseed past it is deferred (its cell is
+ // short again next step); a source's or the initial band's seed counts
+ // and is never deferred.
+ let seeds=atomicAdd(&state[${NB_SLAB_SEEDS_WORD}u],1u);
+ if(!mandatory&&atomicLoad(&state[1])+seeds>=${seedBudget}u){atomicAdd(&state[2],1u);return false;}`:""}
  let id=ubBrickAt(vec3i(floor(p.position.xyz)));
  if(nbSlabCurrent(id)){
   let k=atomicAdd(&state[nbSlab(id,7u)],1u);

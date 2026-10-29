@@ -606,10 +606,10 @@ try {
   }
   const flip=solver.narrowBandFlipInfo!;
   const row:Record<string,unknown>={frame,time_s:frame*dt,wall_ms,encode_ms,projection_ms,rest_ms,gpu_ms:projection_ms+rest_ms,between_ms,before,passes:passes.length,
-   particles:flip.particles,particleCapacity:flip.capacity,reseedClipped:flip.reseedClipped,allocatedBytes:solver.info.allocatedBytes,
+   particles:flip.particles,particleCapacity:flip.capacity,reseedClipped:flip.reseedClipped,reseedClippedTotal:flip.reseedClippedTotal,allocatedBytes:solver.info.allocatedBytes,
    fineTiles:solver.info.uniformMixedFineTiles,bandTiles:solver.info.uniformPressureBandTiles,bandCycles:solver.info.uniformPressureBandCycles,bandResidual:solver.info.uniformPressureBandResidual,labels:byLabel};
   // Under the build's slot claim: refusals and the h slots in use.
-  if(solver.info.uniformMixedSlotCapacity!==undefined)row.slots={capacity:solver.info.uniformMixedSlotCapacity,used:solver.info.uniformMixedSlotsUsed,peak:solver.info.uniformMixedSlotPeak,claims:solver.info.uniformMixedSlotClaims,refused:solver.info.uniformMixedRefusedTiles,refusedBuilds:solver.info.uniformMixedRefusedTileBuilds};
+  if(solver.info.uniformMixedSlotCapacity!==undefined)row.slots={owners:solver.info.uniformMixedOwnerCapacity,capacity:solver.info.uniformMixedSlotCapacity,used:solver.info.uniformMixedSlotsUsed,peak:solver.info.uniformMixedSlotPeak,claims:solver.info.uniformMixedSlotClaims,refused:solver.info.uniformMixedRefusedTiles,refusedBuilds:solver.info.uniformMixedRefusedTileBuilds};
   if(measureVolume&&process.argv.includes("--particle-mass"))row.particleMass=await readParticleMassCensus(device,mixedFrame.narrowBandFlip);
   if(renderLoad)row.renderLoad_ms=renderLoadAlone_ms;
   if(hostWork)row.hostWork=advanceWork;

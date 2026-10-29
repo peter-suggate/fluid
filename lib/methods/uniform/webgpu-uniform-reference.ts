@@ -11,7 +11,8 @@ import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
-import { UNIFORM_FINE_SLOT_TILES, uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
+import { uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
+import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
@@ -354,11 +355,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // One record, rewritten by each read: the values are the stage's at the read.
     const info=this.narrowBandFlipRecord??=this.narrowBandFlipInfoOf(stage),d=stage.diagnostics;
     info.adaptiveBudgetPercent=this.narrowBandAdaptiveBudgetPercent;info.adaptiveFadeSeconds=this.narrowBandAdaptiveFadeSeconds;info.sparseParticleLifetime=this.narrowBandSparseParticleLifetime;info.sparseNeighbours=this.narrowBandSparseNeighbours;info.particleCellCap=this.narrowBandParticleCellCap;
-    info.particles=stage.count;info.capacity=stage.capacity;info.reseedClipped=stage.reseedClipped;info.fineGridPadding=this.narrowBandFinePadding;
+    info.particles=stage.count;info.capacity=stage.capacity;info.reseedClipped=stage.reseedClipped;info.reseedClippedTotal=stage.reseedClippedTotal;info.fineGridPadding=this.narrowBandFinePadding;
     let key:keyof typeof d;for(key in d)info[key]=d[key];
     return info;
   }
-  private narrowBandFlipInfoOf(stage:UniformMixedFrame["narrowBandFlip"]){return {adaptiveBudgetPercent:this.narrowBandAdaptiveBudgetPercent,adaptiveFadeSeconds:this.narrowBandAdaptiveFadeSeconds,sparseParticleLifetime:this.narrowBandSparseParticleLifetime,sparseNeighbours:this.narrowBandSparseNeighbours,particleCellCap:this.narrowBandParticleCellCap,particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,transfer:stage.transferMode,flipRatio:stage.transferMode==="apic"?0:0.95,...stage.diagnostics};}
+  private narrowBandFlipInfoOf(stage:UniformMixedFrame["narrowBandFlip"]){return {adaptiveBudgetPercent:this.narrowBandAdaptiveBudgetPercent,adaptiveFadeSeconds:this.narrowBandAdaptiveFadeSeconds,sparseParticleLifetime:this.narrowBandSparseParticleLifetime,sparseNeighbours:this.narrowBandSparseNeighbours,particleCellCap:this.narrowBandParticleCellCap,particles:stage.count,capacity:stage.capacity,reseedClipped:stage.reseedClipped,reseedClippedTotal:stage.reseedClippedTotal,bandWidth:4,fineGridPadding:this.narrowBandFinePadding,transfer:stage.transferMode,flipRatio:stage.transferMode==="apic"?0:0.95,...stage.diagnostics};}
   private narrowBandFlipRecord?:ReturnType<WebGPUUniformReferenceSolver["narrowBandFlipInfoOf"]>;
   private appliedRuntimeValues?: MethodParamValues;
   /** Two-level velocity sampling; off when the lattice has no 4h table. */
@@ -1202,16 +1203,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // particles at it. A build over the ceiling is fatal (followMixedCapacity).
     const tiers=this.scene.fluid.tiers,coarseStart=gpuLayout&&tiers?.start==="4h";
     const seed=this.mixedSeed=coarseStart?this.dynamicSeed():undefined;
-    // M4b: unless fluid.tiers.bricks or fineBlocks gives a figure, a coarse
-    // start holds its h slots by one rule from the census footprint
-    // (uniformFineSlotRule) and its h tiles at UNIFORM_FINE_SLOT_TILES a
-    // slot; the build's claim refuses to 4h what they cannot serve.
+    // M4b: unless fluid.tiers.fineBlocks gives a figure, a coarse start holds
+    // its h slots by one rule from the census footprint (uniformFineSlotRule);
+    // unless fluid.tiers.bricks does, its h owners at the slots' 512 tiles
+    // each (a rule fixed at construction underestimates vertical and spreading
+    // surfaces: the plan's M4b owner-rule experiments) and its particles by
+    // the records' rule over the band's cells (uniformParticleRecordRule). The
+    // build's claim refuses to 4h what the slots cannot serve.
     const cells:[number,number,number]=[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz];
-    const slotRule=this.mixedSlotRule=coarseStart&&tiers?.bricks===undefined&&uniformFineBlocks(tiers)==="auto"
+    const slotRule=this.mixedSlotRule=coarseStart&&uniformFineBlocks(tiers)==="auto"
       ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number],this.pageResidency.air))):undefined;
-    const fineCeiling=Math.min(tiles,slotRule!==undefined?UNIFORM_FINE_SLOT_TILES*slotRule:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiers?.bricks!==undefined?8*tiers.bricks:tiles);
+    const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume):undefined;
+    const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:band?512*slotRule!:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
-    const particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined||coarseStart?{fineTiles:fineCeiling,perFineCell:tiers?.particlesPerFineCell??4}:undefined;
+    const records=band?uniformParticleRecordRule(band.cells):undefined;
+    const particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined||coarseStart?{fineTiles:fineCeiling,perFineCell:tiers?.particlesPerFineCell??4,records}:undefined;
     // The solid record's fraction and aperture slots under fluid.tiers: only a
     // tile within a cell of a solid (the promotion's coupled tiles) or of the
     // box's walls holds one, x 1.5 for edits and bodies; a tile the slots
@@ -1296,9 +1302,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // hold only the blocks the detail ring needs (uniform-fine-slots.ts)
     // when fluid.tiers.fineBlocks asks for it (opt-in). A load at a slotless
     // block reads the field's base (the sparse domain).
-    // "auto" under a ceiling (a coarse start) holds the ceiling's tiles at UNIFORM_FINE_SLOT_TILES a slot.
-    const fineBlocks=uniformFineBlocks(this.scene.fluid?.tiers),ceiling=this.mixedFrame.fineCeiling;
-    if(fineBlocks!==undefined)await detail.compact(this.mixedSlotRule??(fineBlocks==="auto"?undefined:fineBlocks),ceiling<this.address.poolTiles?Math.ceil(ceiling/UNIFORM_FINE_SLOT_TILES):0);
+    const fineBlocks=uniformFineBlocks(this.scene.fluid?.tiers);
+    if(fineBlocks!==undefined)await detail.compact(this.mixedSlotRule??(fineBlocks==="auto"?undefined:fineBlocks));
   }
   private mixedDynamic?: UniformMixedDynamicClassifier;
   /** A coarse start's h slots by M4b's rule (uniformFineSlotRule), when no tiers figure overrides it. */
@@ -1920,7 +1925,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if(this.mixedBuilder!.claiming){
       const capacity=this.detailStorage!.fineSlots.capacity;
       info.uniformMixedRefusedTiles=r[R.refused]!;info.uniformMixedRefusedTileBuilds=r[R.refusedSum]!;info.uniformMixedSlotClaims=r[R.claims]!;
-      info.uniformMixedSlotCapacity=capacity;info.uniformMixedSlotsUsed=capacity-r[R.free]!;info.uniformMixedSlotPeak=r[R.leastFree]===0xffffffff?0:capacity-r[R.leastFree]!;
+      info.uniformMixedOwnerCapacity=this.mixedFrame!.fineCeiling;info.uniformMixedSlotCapacity=capacity;info.uniformMixedSlotsUsed=capacity-r[R.free]!;info.uniformMixedSlotPeak=r[R.leastFree]===0xffffffff?0:capacity-r[R.leastFree]!;
     }
     info.uniformMixedDynamicRefined=r[C+4]!;info.uniformMixedDynamicCoarsened=r[C+5]!;info.uniformMixedDynamicRequiredTiles=r[C+12]!;info.uniformMixedDynamicBoundaryTiles=r[C+16]!;info.uniformMixedDynamicSolidTiles=r[C+19]!;info.uniformMixedDynamicUnresolvedCoarse=r[C+1]!;
     info.uniformMixedDynamicCoarsePartialVolume=r[C+6]!;info.uniformMixedDynamicCoarsePhiCrossing=r[C+7]!;info.uniformMixedDynamicCoarseDryLiquidPhi=r[C+3]!;
