@@ -24,6 +24,7 @@ import { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformBlockStored, uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformLatticeWindowBox, uniformPageWord, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
+import { bulk16SlotCapacity } from "./uniform-bulk-pages";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
 export { uniformDensityPostProcessingEnabled } from "./uniform-options";
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
@@ -34,7 +35,7 @@ import {
 import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
 import { uniformInitialLiquidVelocityPages, uniformLatticeFarPhi, uniformLatticePagedPhi, uniformLatticePagedVolume } from "./uniform-volume-initial";
 import type { LatticePages } from "../../core/initial-liquid-lattice";
-import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "../../core/inflow-boundary";
+import { averageInflowStrength, createInflowGridBoundary, integratedInflowVolume, type InflowGridBoundary } from "../../core/inflow-boundary";
 import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
 import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, LIQUID_EXTRUSION_MAX_EDGES, type LiquidExtrusion } from "../../core/liquid-extrusion";
@@ -1211,7 +1212,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const box=fluidRegionLattice(this.scene).dimensions.map(n=>n/4),inner=box.reduce((n,b)=>n*Math.max(0,b-2),1);
     const solidSlots=coarseStart||tiers?.bricks!==undefined?Math.min(tiles,Math.ceil(1.5*(promotion.coupledTiles+box.reduce((n,b)=>n*b,1)-inner))):undefined;
     if(seed&&seed.fineTiles.length>fineCeiling)throw new Error(`Uniform simulation detail: the coarse start holds ${seed.fineTiles.length} h tiles (its Fine regions); fluid.tiers.bricks ${fineCeiling/8} holds ${fineCeiling}: raise fluid.tiers.bricks`);
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,bulkSlots:this.bulkSlotCapacity(),liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
@@ -2456,6 +2457,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** Pays the reduction the last step skipped, from the fields it left behind. */
 
+
+  /** BULK16 slots: the whole pages the most liquid the scene holds fills
+   * (its initial cells, its scheduled drops and its inflow's schedule;
+   * bulk16SlotCapacity), at most the box's pages. */
+  private bulkSlotCapacity(): number {
+    const c = this.scene.container, cells = this.containerCells, f = this.scene.fluid;
+    const cellVolume = c.width_m * c.height_m * c.depth_m / (cells[0] * cells[1] * cells[2]);
+    const cell_m = Math.min(c.width_m / cells[0], c.height_m / cells[1], c.depth_m / cells[2]);
+    const initial = (this.initialVolume ??= uniformLatticePagedVolume(this.scene, UNIFORM_PAGE_POOL_EDGE)).initial;
+    const drops = (f.scheduledDrops ?? []).reduce((sum, { volume }) => sum + uniformScheduledDrop(volume, cell_m).volume_m3, 0);
+    const inflow = f.inflow ? integratedInflowVolume(f.inflow, f.inflow.start_s, f.inflow.end_s) : 0;
+    const box = this.address.pool.box.pages;
+    return bulk16SlotCapacity(initial + (drops + inflow) / cellVolume, box[0] * box[1] * box[2]);
+  }
 
   private initializeVolumeAndTerrain(): void {
     const { nx, ny, nz } = this.executionInfo;

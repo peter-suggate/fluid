@@ -279,8 +279,8 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
     encoder.clearBuffer(this.record.buffer, this.record.offset + 4 * UNIFORM_BULK_HEADER(this.regions), 4 * 9);
     const pass = encoder.beginComputePass(PASS); pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.group.group);
     pass.setPipeline(uniformDetailPick(this.pipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.regions));
-    // A live slot a workgroup (its count on the GPU): at most the store's capacity.
-    if (this.promotePipeline) { pass.setPipeline(uniformDetailPick(this.promotePipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.fields!.bulkPages!.layout.capacity)); }
+    // A live slot a workgroup, from the store's live count (its live launch, indirect).
+    if (this.promotePipeline) { pass.setPipeline(uniformDetailPick(this.promotePipeline)); pass.dispatchWorkgroupsIndirect(this.fields!.bulkPages!.liveLaunch, 0); }
     pass.end();
   }
   /** Diagnostics (a readback): the last selection's counts. */

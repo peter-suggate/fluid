@@ -114,8 +114,10 @@ await withUniformDevice("reservoir bulk probe", async raw => {
 mkdirSync(dirname(out), { recursive: true });
 const quantile = (list: number[], q: number) => { const s = [...list].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(q * s.length))]! : NaN; };
 const kernelMedians_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, quantile(v, 0.5)] as const).sort((a, b) => b[1] - a[1]));
+// Means too: a frame's kernel time is their sum, which medians of skewed labels understate.
+const kernelMeans_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, v.reduce((s, x) => s + x, 0) / v.length] as const).sort((a, b) => b[1] - a[1]));
 const late = stepMs.slice(Math.floor(stepMs.length / 2));
 const timing = { median_ms: quantile(stepMs, 0.5), p95_ms: quantile(stepMs, 0.95), lateHalfMedian_ms: quantile(late, 0.5), lateHalfP95_ms: quantile(late, 0.95) };
 console.log(JSON.stringify(timing));
-writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, height, steps, closed, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, rows }, null, 2) + "\n");
+writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, height, steps, closed, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, kernelMeans_ms, rows }, null, 2) + "\n");
 console.log(JSON.stringify({ out }));

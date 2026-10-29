@@ -31,3 +31,12 @@ test("sparse remap capacity follows stored tiles and respects the binding limit"
   assert.equal(uniformMixedRemapCapacity(dimensions, 512, maxBytes, false).corners, 1);
   assert.throws(() => uniformMixedRemapCapacity(dimensions, 512, 16, true), /Device cannot hold/);
 });
+
+test("remap capacity follows the pool's pages, not the box: a 4x-wider box holds the same corners", () => {
+  // 260 pages of 512 tiles: 729 vertices a page bound them, under the box's
+  // 4h vertices at 1x and at 4x (the backyard, 320x160x240 cells).
+  const tiles = 260 * 512, narrow = uniformMixedRemapCapacity([320, 160, 240], tiles, 1024 ** 3, true);
+  const wide = uniformMixedRemapCapacity([1280, 160, 240], tiles, 1024 ** 3, true);
+  assert.equal(narrow.corners, 729 * 260);
+  assert.deepEqual(wide, narrow);
+});

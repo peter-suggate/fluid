@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {BULK16_PAGE,BULK16_PAGE_WORDS,BULK16_PHI_TEXELS,BULK16_TAIL_CHANNELS,bulk16FaceIndexWGSL,bulk16PageLayout,bulk16ReadWGSL,bulk16PageSlot,bulk16PageWord,bulk16TransferWGSL,prolongBulk16Page,restrictBulk16Page} from "../lib/methods/uniform/uniform-bulk-pages-reference";
-import {BULK16_STATUS,bulk16Failure,bulk16LifecycleWGSL,bulk16LiveWGSL,UniformBulkPages} from "../lib/methods/uniform/uniform-bulk-pages";
+import {BULK16_STATUS,bulk16Failure,bulk16LifecycleWGSL,bulk16LiveWGSL,bulk16SlotCapacity,UniformBulkPages} from "../lib/methods/uniform/uniform-bulk-pages";
 import {uniformLatticeAddress,uniformPageKind,uniformPageWord,uniformPageBlock,uniformBlockStored,UNIFORM_KIND,UNIFORM_NEAR_SPAN,UNIFORM_PAGE_TABLE_WORDS,uniformBlockHeld,uniformBlockNeighbourLayout,uniformBlockNeighbourWords,uniformNearFrom} from "../lib/methods/uniform/uniform-lattice-address";
 import {UniformBlockNeighbours} from "../lib/methods/uniform/uniform-block-neighbours";
 import {uniformExtrapolationClosedFace} from "../lib/methods/uniform/uniform-velocity-extrapolation-twin";
@@ -157,7 +157,15 @@ test("BULK16 page storage holds its phi block and stays within four KiB per page
  assert.ok(plan.bytes/plan.capacity<=4096);
 });
 
-test("BULK16 GPU slots quarantine retired pages and fail explicitly at fixed capacity",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+test("BULK16 slot capacity is the whole pages of liquid the scene holds, at most the box's",()=>{
+ // A BULK16 page is 32^3 h cells of liquid: 2.5 pages of liquid fill two.
+ assert.equal(bulk16SlotCapacity(2.5*32768,400),2);
+ assert.equal(bulk16SlotCapacity(32767,400),1,"a store keeps one slot");
+ assert.equal(bulk16SlotCapacity(1e9,400),400,"never more than the box's pages");
+ assert.throws(()=>bulk16SlotCapacity(Number.NaN,400));
+});
+
+test("BULK16 GPU slots quarantine retired pages and refuse claims past fixed capacity",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("BULK16 lifecycle",async device=>{
   const pages=new UniformBulkPages(device,3);
   const output=device.createBuffer({size:32,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
@@ -185,12 +193,14 @@ test("BULK16 GPU slots quarantine retired pages and fail explicitly at fixed cap
    };
    const first=await frame([0]);assert.equal(first[BULK16_STATUS.live],2);assert.equal(first[BULK16_STATUS.free],1);assert.equal(bulk16Failure(first),undefined);
    const second=await frame([1,0]);assert.equal(second[BULK16_STATUS.live],2);assert.equal(second[BULK16_STATUS.free],0);assert.equal(second[BULK16_STATUS.pending],1);
-   assert.match(bulk16Failure(second)!,/fixed slot capacity 3 exhausted/);
+   // The claim past the free slots is refused (the page stays 4h), counted, not fatal.
+   assert.equal(second.subarray(pages.state.size/4)[1],0,"the second claim found no free slot");
+   assert.equal(second[BULK16_STATUS.refused],1);assert.equal(bulk16Failure(second),undefined);
    const third=await frame([2]),out=third.subarray(pages.state.size/4);
    assert.equal(out[2],1,"the retired slot is available only in the next frame");
    assert.equal(out[3],0,"reused slots discard the previous pressure and seam state");
    assert.equal(third[BULK16_STATUS.live],3);assert.equal(third[BULK16_STATUS.pending],0);
-   assert.ok(bulk16Failure(third),"capacity failures remain sticky");
+   assert.equal(third[BULK16_STATUS.refused],1,"refusals accumulate across frames");assert.equal(bulk16Failure(third),undefined);
    assert.deepEqual(Array.from(third.subarray(pages.layout.live,pages.layout.live+3)),[1,2,3]);
    // A reader compiled without the capacity (the renderer's) finds the live
    // slots' pages from the status words alone.

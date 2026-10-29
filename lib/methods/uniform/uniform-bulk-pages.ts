@@ -1,7 +1,20 @@
 import {BULK16_PAGE,BULK16_PAGE_WORDS,bulk16FaceIndexWGSL,bulk16PageLayout} from "./uniform-bulk-pages-reference";
 
-export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fatal:6,fatalSlot:7,generation:8,version:9,words:32} as const;
-export const BULK16_FATAL={exhausted:1,invalidSlot:2,invalidTransition:4} as const;
+export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fatal:6,fatalSlot:7,generation:8,version:9,refused:10,words:32} as const;
+export const BULK16_FATAL={invalidSlot:2,invalidTransition:4} as const;
+/** The live launch's most workgroups (liveLaunch): its readers stride the live list. */
+export const BULK16_LIVE_GROUPS=1024;
+
+/** The slots a scene's liquid can fill: a BULK16 page is a whole page of
+ * liquid (every region a 16h member), so no more pages than the most
+ * liquid the scene holds (its initial cells, drops and inflow, in h cells)
+ * fills, and no more than the box's pages. A store at this capacity refuses
+ * only the claims of liquid added at run time (an interactive ball): the
+ * refused page stays 4h (bpClaim). */
+export function bulk16SlotCapacity(liquidCells:number,boxPages:number):number{
+ if(!(liquidCells>=0)||!Number.isInteger(boxPages)||boxPages<1)throw new Error(`BULK16 slot capacity: ${liquidCells} liquid cells, ${boxPages} box pages`);
+ return Math.max(1,Math.min(boxPages,Math.floor(liquidCells/32768)));
+}
 type Layout=ReturnType<typeof bulk16PageLayout>;
 
 /** The live list for a reader compiled without the capacity (the
@@ -20,7 +33,8 @@ fn ${name}LivePage(i:u32)->vec3i{
 `;}
 
 /** The mutable slot allocator. Retired slots are quarantined until the next
- * begin dispatch; allocation never grows a buffer or evicts another page.
+ * begin dispatch; allocation never grows a buffer or evicts another page,
+ * and a claim past the free slots is refused, not fatal.
  * Callers publish directory changes only after the transfer dispatch ends. */
 export function bulk16LifecycleWGSL(layout:Layout,group=0,binding=0):string{
  const H=BULK16_STATUS;
@@ -35,9 +49,10 @@ fn bpWrite(slot:u32,word:u32,value:u32){atomicStore(&bulkPages[bpAt(slot,word)],
 fn bpFail(reason:u32,slot:u32){
  if(atomicOr(&bulkPages[${H.fatal}u],reason)==0u){atomicStore(&bulkPages[${H.fatalSlot}u],slot);}
 }
+// A claim with no free slot is refused (0, counted): the page stays 4h.
 fn bpClaim(page:vec3i)->u32{
  let pop=atomicAdd(&bulkPages[${H.pops}u],1u);
- if(pop>=atomicLoad(&bulkPages[${H.free}u])){bpFail(${BULK16_FATAL.exhausted}u,0u);return 0u;}
+ if(pop>=atomicLoad(&bulkPages[${H.free}u])){atomicAdd(&bulkPages[${H.refused}u],1u);return 0u;}
  let head=atomicLoad(&bulkPages[${H.head}u]);let slot=atomicLoad(&bulkPages[BP_FREE+(head+pop)%BP_CAPACITY]);
  if(slot==0u||slot>BP_CAPACITY){bpFail(${BULK16_FATAL.invalidSlot}u,slot);return 0u;}
  // Clear the prior incarnation, including pressures and seam heads, before
@@ -70,6 +85,9 @@ export class UniformBulkPages{
   * pressure arena's pool B, which the solve's kernels then read without a
   * binding of their own (pNative is at the per-stage storage limit). */
  private store:{buffer:GPUBuffer;offset:number;owned:boolean};
+ /** A launch of one workgroup a live slot (at most BULK16_LIVE_GROUPS),
+  * written by finish: a reader of the live list dispatches it indirect. */
+ readonly liveLaunch:GPUBuffer;
  private begin?:GPUComputePipeline;
  private finish?:GPUComputePipeline;
  private group?:GPUBindGroup;
@@ -80,6 +98,8 @@ export class UniformBulkPages{
   this.layout=bulk16PageLayout(capacity);
   if(this.layout.bytes>Math.min(device.limits.maxBufferSize,device.limits.maxStorageBufferBindingSize))throw new Error(`BULK16 capacity ${capacity} needs ${this.layout.bytes} bytes in one storage binding`);
   this.store={buffer:device.createBuffer({label:"Uniform whole-page BULK16 slots",size:this.layout.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),offset:0,owned:true};
+  this.liveLaunch=device.createBuffer({label:"Uniform BULK16 live launch",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+  device.queue.writeBuffer(this.liveLaunch,0,new Uint32Array([0,1,1,0]));
   this.seed();
  }
  private seed():void{
@@ -101,6 +121,7 @@ export class UniformBulkPages{
  async initialize():Promise<void>{
   const H=BULK16_STATUS;
   const module=this.device.createShaderModule({label:"Uniform BULK16 slot lifecycle",code:bulk16LifecycleWGSL(this.layout)+/* wgsl */`
+@group(0) @binding(1) var<storage,read_write> bpLaunch:array<u32,4>;
 var<workgroup> bpScan:array<u32,256>;
 @compute @workgroup_size(256) fn begin(@builtin(local_invocation_index) lane:u32){
  let pending=atomicLoad(&bulkPages[${H.pending}u]);let free=atomicLoad(&bulkPages[${H.free}u]);let head=atomicLoad(&bulkPages[${H.head}u]);
@@ -125,16 +146,16 @@ var<workgroup> bpScan:array<u32,256>;
  if(lane==255u){
   let free=atomicLoad(&bulkPages[${H.free}u]);let pops=min(free,atomicLoad(&bulkPages[${H.pops}u]));
   atomicStore(&bulkPages[${H.head}u],(atomicLoad(&bulkPages[${H.head}u])+pops)%BP_CAPACITY);
-  atomicStore(&bulkPages[${H.free}u],free-pops);atomicStore(&bulkPages[${H.live}u],bpScan[255]);
+  atomicStore(&bulkPages[${H.free}u],free-pops);atomicStore(&bulkPages[${H.live}u],bpScan[255]);bpLaunch[0]=min(bpScan[255],${BULK16_LIVE_GROUPS}u);
  }
 }
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>m.message).join("\n"));
-  const layout=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+  const layout=this.device.createBindGroupLayout({entries:[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))});
   const pipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[layout]});
   [this.begin,this.finish]=await Promise.all(["begin","finish"].map(entryPoint=>this.device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint}})));
-  this.group=this.device.createBindGroup({layout,entries:[{binding:0,resource:this.binding}]});
+  this.group=this.device.createBindGroup({layout,entries:[{binding:0,resource:this.binding},{binding:1,resource:{buffer:this.liveLaunch}}]});
  }
  private encode(encoder:GPUCommandEncoder,pipeline:GPUComputePipeline|undefined,label:string):void{
   if(!pipeline||!this.group)throw new Error("BULK16 lifecycle is not initialized");
@@ -143,12 +164,11 @@ var<workgroup> bpScan:array<u32,256>;
  encodeBegin(encoder:GPUCommandEncoder):void{this.encode(encoder,this.begin,"BULK16 reclaim quarantine");}
  encodeFinish(encoder:GPUCommandEncoder):void{this.encode(encoder,this.finish,"BULK16 publish live slots");}
  encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset=0):void{encoder.copyBufferToBuffer(this.store.buffer,this.store.offset,target,offset,4*BULK16_STATUS.words);}
- destroy():void{if(this.store.owned)this.store.buffer.destroy();}
+ destroy():void{if(this.store.owned)this.store.buffer.destroy();this.liveLaunch.destroy();}
 }
 
 export function bulk16Failure(receipt:ArrayLike<number>):string|undefined{
  const fatal=receipt[BULK16_STATUS.fatal]??0;if(!fatal)return;
  const slot=receipt[BULK16_STATUS.fatalSlot]??0;
- if(fatal&BULK16_FATAL.exhausted)return `BULK16 fixed slot capacity ${receipt[BULK16_STATUS.capacity]} exhausted`;
  return `BULK16 invalid slot lifecycle (flags ${fatal}, slot ${slot})`;
 }

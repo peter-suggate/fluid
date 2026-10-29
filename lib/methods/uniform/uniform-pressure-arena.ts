@@ -401,14 +401,16 @@ export class UniformPressureArena {
  /** Fixed-lag evidence: band tiles, live bricks, level 1's and 2's bricks
   * and the held blocks (the composite level 2's pages: every held block) of
   * a receipted frame. Launch width only; no evidence of the held blocks
-  * takes them all. */
+  * takes them all. reserve counts h tiles (UNIFORM_WORK_RELAYOUT_RESERVE):
+  * the block widths take the blocks those tiles fill, 512 a block, not that
+  * many blocks (which held every launch at the pool). */
  observeWork(tiles:number,reserve=0,bricks=tiles,level1=bricks,level2=level1,held=this.simulation.capacity.address.blocks):void{
-  const cap=this.arena.fineCapacity,blocks=this.simulation.capacity.address.blocks;
+  const cap=this.arena.fineCapacity,blocks=this.simulation.capacity.address.blocks,blockReserve=Math.ceil(reserve/512);
   this.workBricks=uniformBufferedWork(this.workBricks,Math.min(bricks,tiles),cap,reserve);
   this.workLevel1=uniformBufferedWork(this.workLevel1,Math.min(level1,this.workBricks),cap,reserve);
-  this.workLevel2=uniformBufferedWork(this.workLevel2,Math.min(level2,this.workLevel1,blocks),blocks,reserve);
+  this.workLevel2=uniformBufferedWork(this.workLevel2,Math.min(level2,this.workLevel1,blocks),blocks,blockReserve);
   this.level1Groups=Math.min(this.workLevel1,BRICK_GROUPS);this.level2Groups=Math.min(this.workLevel2,PAGE_GROUPS);
-  this.workHeld=uniformBufferedWork(this.workHeld,Math.min(held,blocks),blocks,reserve);this.pageGroups=Math.min(this.workHeld,PAGE_GROUPS);
+  this.workHeld=uniformBufferedWork(this.workHeld,Math.min(held,blocks),blocks,blockReserve);this.pageGroups=Math.min(this.workHeld,PAGE_GROUPS);
   this.workTiles=uniformBufferedWork(this.workTiles,Math.min(tiles,this.slots),this.slots,reserve);
   this.tileGroups=Math.min(this.workTiles,TILE_GROUPS);this.relaxGroups=Math.min(groupsOf(this.workTiles,2),TILE_GROUPS);
  }
