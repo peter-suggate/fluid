@@ -734,3 +734,28 @@ Separation therefore stays the default.
   That is the source of the clumps separation answers, and so of seep's outward volume (ratio 1.5 at 600, 2.19 at 1200). The fix belongs in velocity sampling or extrapolation (the nearest-source extension's rest velocity at stage points in the air between letter and pool), not in separation. It is deliberately not fixed here.
 - **O2, letters loss.** The −3% loss with separation off at 240 is the clumps' cost, and is the same mechanism.
 - **O3, face-speed spikes.** After the bound's removal (task 5): not investigated in this follow-up.
+
+### Closed (2026-10-30): the seep's receiving ratio above 1
+The ratio above 1 was separation's outward source, not O1's compression.
+In O1, compression made the clumps, but the volume came from the pair
+push's normal part at the free surface. A surface sample has no neighbours
+on the air side, so every overlap pushes it out, and the union keeps what it
+pushes. Within h of the surface the push ran outward:inward 7.07 in a
+channel dam's run-up and 3.48 on a wide dam. It was the measured 4:1 here.
+
+The fix: separation keeps only its tangential part within a cell of the
+surface, d − (d·n)n with n = ∇φ. This is particle shifting's free-surface
+rule: Khayyer et al. 2017 cancel the normal shift at the free surface and
+its neighbourhood; Sun et al. 2019 give it as Eq. 44, after Lind et al.
+2012. Afterwards the ratio is 1.00 and the seep at 1200 is:
+
+| | before | after |
+|---|---|---|
+| worst drift | +1.98% | +0.14% |
+| right tank | 12.77 L | 5.93 L, against the left's 5.46 L loss |
+| late right-volume Cd against throat Cd | 2.46 against 0.78 | 0.79 against 0.78 |
+
+O1 and O2 stay open. Letters at 240 now read −1.38%, where they read
++0.86%: part of the old figure was this source hiding O2's loss. The clump
+share within h is 0.07, against 0.46 with separation off. Details:
+`docs/plans/bulk16-plan-2026-10-28.md`, M4b, "the dam's volume gain".

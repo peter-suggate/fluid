@@ -1165,6 +1165,23 @@ fn nbSeparation(i:u32,q:vec3f,m:f32)->vec3f{
  }
  return d/max(n,1.0);
 }
+// The free surface: a sample within a cell of it (its depth over -1) keeps
+// only the tangential part of its correction, d - (d.n)n with n the level
+// set's normal, the particle-shifting rule at a free surface (Khayyer et al.
+// 2017, which cancels the normal shift at the free surface and its
+// neighbourhood; Sun et al. 2019, Eq. 44; after Lind et al. 2012). A surface
+// sample has no neighbours on the air side, so every overlap pushes it out:
+// the normal part moved the surface itself, outward seven times as far as
+// inward in a dam's run-up (docs/plans/bulk16-plan-2026-10-28.md, M4b), a
+// volume source the union kept. The projection never lengthens d, so
+// NARROW_BAND_SEPARATION_REACH still bounds it.
+fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
+ if(nbMoveDepth(q)<= -1.0){return d;}
+ let a=vec3f(0.25,0.0,0.0);
+ let g=vec3f(nbMoveDepth(q+a.xyz)-nbMoveDepth(q-a.xyz),nbMoveDepth(q+a.yxz)-nbMoveDepth(q-a.yxz),nbMoveDepth(q+a.yzx)-nbMoveDepth(q-a.yzx));
+ let l=length(g);if(!(l>1e-6)){return d;}
+ let n=g/l;return d-dot(d,n)*n;
+}
 `:""}fn nbAdvect(record:Particle,i:u32)->NbMoved{
   nbSlow=false;var p=record;var q=p.position.xyz-nbHeldShift();
   // Whether q and the mass are still the record's own (separationPrepass).
@@ -1280,7 +1297,7 @@ fn nbSeparation(i:u32,q:vec3f,m:f32)->vec3f{
   // Reject nonfinite traces before the wall clamp can hide them. The
   // lattice reach applies to the actual collision-bounded trajectory:
   // a far endpoint behind a tank wall still stops at that wall.
-  ${this.sampleSeparation==="pairs"?"if(!ballistic){"+(this.separationPrepass?"var sepd:vec3f;if(sepShared){let a=NB_SEPARATION+3u*i;sepd=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}else{sepd=nbSeparation(i,q,nbParticleMass(p));}":"let sepd=nbSeparation(i,q,nbParticleMass(p));")+"end+=sepd;}":""}
+  ${this.sampleSeparation==="pairs"?"if(!ballistic){"+(this.separationPrepass?"var sepd:vec3f;if(sepShared){let a=NB_SEPARATION+3u*i;sepd=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}else{sepd=nbSeparation(i,q,nbParticleMass(p));}":"let sepd=nbSeparation(i,q,nbParticleMass(p));")+"end+=nbSurfaceShift(q,sepd);}":""}
   if(!all(abs(end)<vec3f(1e30))){atomicStore(&state[3],2u);return NbMoved(p,1u);}
   let endpoint=nbTraceEndpointIn(vec3i(floor(q)),end,nbSampleRadius(nbParticleMass(p)));
   let reach=abs(endpoint-q);
