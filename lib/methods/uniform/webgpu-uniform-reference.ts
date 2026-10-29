@@ -9,7 +9,7 @@ import { uniformDetailCapacityRule } from "./uniform-detail-policy";
 import { uniformWindowFixedFrame } from "./uniform-window-address";
 import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
-import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, type UniformMixedLayout } from "./uniform-mixed-layout";
+import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
 import { uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
 import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
@@ -1179,8 +1179,38 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * where its criteria ask (its solid contact is liquid-conditional), as it
    * coarsens the h start; the t=0 uploads reach the 4h tiles restricted. */
   private dynamicSeed():UniformMixedLayout{
-    return createUniformMixedLayout(fluidRegionLattice(this.scene),this.scene.fluid.refinementRegions??[],4,undefined,this.address);
+    return createUniformMixedLayout(fluidRegionLattice(this.scene),this.scene.fluid.refinementRegions??[],4,this.thinWallSeed(),this.address);
   }
+  /** The coarse start's thin-wall tiles at h (uniformThinWallTiles: a cut 4h
+   * owner there fills open cells across the solid). The census holds a cut
+   * tile at h where liquid reaches it, with every tile around it
+   * (solidActive, solidPromote: static closure), which a coarse start's
+   * frame 1 promotes from the 4h fill; so the seed holds at h, of the
+   * thin-wall tiles, those the census holds at t=0: a tile beside (3³) one
+   * holding initial liquid. Undefined without a thin-wall tile. */
+  private thinWallSeed():Uint8Array|undefined{
+    if(this.solidVoxelsEmpty&&!sceneHasTerrain(this.scene))return undefined;
+    const lattice=fluidRegionLattice(this.scene),dims=lattice.dimensions as [number,number,number];
+    const thin=uniformThinWallTiles(dims,this.solidMask,this.mixedSolidPromotion().coupled,sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined);
+    const a=this.address,[tx,ty,tz]=dims.map(n=>n/4) as [number,number,number],wet=new Uint8Array(thin.length);
+    const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE),E=volume.edge,[px,py]=volume.pages;
+    for(let i=0;i<volume.at.length;i++){
+      const page=volume.at[i];if(!page)continue;
+      const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
+      for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)
+        if(page[j]!>0&&uniformTileInBox(a,(ox+x)>>2,(oy+y)>>2,(oz+z)>>2))wet[uniformBoxTileIndex(a,(ox+x)>>2,(oy+y)>>2,(oz+z)>>2)]=1;
+    }
+    const seed=new Uint8Array(thin.length),p:[number,number,number]=[0,0,0];let any=false;
+    for(let key=0;key<thin.length;key++){
+      if(!thin[key])continue;uniformBoxTileCoord(a,key,p);
+      for(let z=p[2]-1;z<=p[2]+1&&!seed[key];z++)for(let y=p[1]-1;y<=p[1]+1;y++)for(let x=p[0]-1;x<=p[0]+1;x++)
+        if(x>=0&&y>=0&&z>=0&&x<tx&&y<ty&&z<tz&&uniformTileInBox(a,x,y,z)&&wet[uniformBoxTileIndex(a,x,y,z)]){seed[key]=1;any=true;break;}
+    }
+    this.thinWallInfo={tiles:thin.reduce((n,t)=>n+t,0),seeded:seed.reduce((n,t)=>n+t,0)};
+    return any?seed:undefined;
+  }
+  /** The thin-wall tiles of a coarse start, and those its seed holds at h (thinWallSeed). */
+  thinWallInfo?:{readonly tiles:number;readonly seeded:number};
   private async initializeMixedFrame():Promise<void>{
     this.assertMixedOptions();
     if(!this.vertexPhiField||!this.vertexPhiScratch)throw new Error("Mixed Uniform requires the shared native field arena");

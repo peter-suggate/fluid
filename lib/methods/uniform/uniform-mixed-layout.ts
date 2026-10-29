@@ -173,6 +173,108 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: SolidOccupancyM
   return { forced, coupled, cutCells, coupledTiles };
 }
 
+/** Thin-wall tiles (docs/plans/bulk16-plan-2026-10-28.md, M4b): the cut
+ * tiles a 4h owner cannot represent. A cut 4h owner is one trilinear field
+ * over its open cells, and its corners are shared with the owners around it;
+ * a buried corner reads the owner's plane continued into the solid
+ * (nbflip-analytic-correctness §3), which presumes one side of the solid. A
+ * solid thinner than a tile (a shell, a glass wall) puts open cells on two
+ * sides of it within one owner's reach: a corner that is liquid on one side
+ * fills the dry open cells on the other (the trough's 2h bath shell: +21% in
+ * its cut tiles at t=0). A cut tile is thin-wall where the open cells of the
+ * tile and the open cells incident to its eight corners lie in more than one
+ * open component of the 6³ cells around it (the tile and a cell beyond each
+ * face), and where a buried corner (no open incident cell) is shared by
+ * open cells on more than one side (a wall across a tile face). A property
+ * of the solids alone: cells past the lattice and terrain
+ * columns' full cells are closed. `coupled` (uniformMixedSolidTiles) holds
+ * every cut tile. One byte a tile by box index. */
+export function uniformThinWallTiles(dimensions: Triple, mask: Pick<SolidOccupancyMask, "solid">, coupled: Uint8Array, terrainCells?: Float32Array): Uint8Array {
+  const address = uniformLatticeBox(dimensions), [nx, ny, nz] = dimensions;
+  if (coupled.length !== address.boxTiles) throw new Error("Thin-wall tiles need the coupled mask of the tile lattice");
+  if (terrainCells && terrainCells.length !== nx * nz) throw new Error("Thin-wall tiles' terrain does not match the lattice");
+  const open = (x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz && !mask.solid(x, y, z)
+    && !(terrainCells && y + 1 <= terrainCells[x + nx * z]!);
+  const thin = new Uint8Array(address.boxTiles), p: [number, number, number] = [0, 0, 0];
+  const component = new Int32Array(216), stack: number[] = [], at = (a: number, b: number, c: number) => a + 6 * (b + 6 * c);
+  for (let key = 0; key < address.boxTiles; key++) {
+    if (!coupled[key]) continue;
+    uniformBoxTileCoord(address, key, p);
+    const x0 = 4 * p[0] - 1, y0 = 4 * p[1] - 1, z0 = 4 * p[2] - 1;
+    let cells = 0;
+    for (let q = 0; q < 216; q++) { const a = q % 6, b = (q / 6 | 0) % 6, c = q / 36 | 0; component[q] = open(x0 + a, y0 + b, z0 + c) ? -1 : -2; }
+    for (let c = 1; c <= 4; c++) for (let b = 1; b <= 4; b++) for (let a = 1; a <= 4; a++) if (component[at(a, b, c)] === -1) cells++;
+    if (cells === 0 || cells === 64) continue;
+    // The open components of the 6³ cells, by 6-connected flood.
+    let components = 0;
+    for (let q = 0; q < 216; q++) {
+      if (component[q] !== -1) continue;
+      component[q] = components;stack.push(q);
+      while (stack.length) {
+        const r = stack.pop()!, a = r % 6, b = (r / 6 | 0) % 6, c = r / 36 | 0;
+        if (a > 0 && component[r - 1] === -1) { component[r - 1] = components;stack.push(r - 1); }
+        if (a < 5 && component[r + 1] === -1) { component[r + 1] = components;stack.push(r + 1); }
+        if (b > 0 && component[r - 6] === -1) { component[r - 6] = components;stack.push(r - 6); }
+        if (b < 5 && component[r + 6] === -1) { component[r + 6] = components;stack.push(r + 6); }
+        if (c > 0 && component[r - 36] === -1) { component[r - 36] = components;stack.push(r - 36); }
+        if (c < 5 && component[r + 36] === -1) { component[r + 36] = components;stack.push(r + 36); }
+      }
+      components++;
+    }
+    if (components < 2) continue;
+    // The sides the tile's open cells and its corners' open incident cells lie on.
+    let side = -1, sides = 1;
+    const take = (q: number) => { const m = component[q]!; if (m < 0 || m === side) return; if (side < 0) side = m; else sides = 2; };
+    for (let c = 1; c <= 4; c++) for (let b = 1; b <= 4; b++) for (let a = 1; a <= 4; a++) take(at(a, b, c));
+    for (let k = 0; k < 8 && sides < 2; k++) {
+      const a = 4 * (k & 1), b = 4 * ((k >> 1) & 1), c = 4 * (k >> 2);
+      for (let dc = 0; dc <= 1; dc++) for (let db = 0; db <= 1; db++) for (let da = 0; da <= 1; da++) take(at(a + da, b + db, c + dc));
+    }
+    if (sides > 1) thin[key] = 1;
+  }
+  // A buried corner (no open incident cell) is one value for the eight owners
+  // around it. Where their open cells lie on more than one side of the solid
+  // (a wall thinner than a tile across a tile face), whichever side its value
+  // takes, the owner on the other side fills by it: those cut owners are
+  // thin-wall too. The sides are the open components of the eight tiles' 8³ cells.
+  const T: Triple = [Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)], block = new Int32Array(512);
+  const tileKey = (x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < T[0] && y < T[1] && z < T[2] && uniformTileInBox(address, x, y, z) ? uniformBoxTileIndex(address, x, y, z) : -1;
+  for (let vz = 0; vz <= T[2]; vz++) for (let vy = 0; vy <= T[1]; vy++) for (let vx = 0; vx <= T[0]; vx++) {
+    let near = false;
+    for (let k = 0; k < 8 && !near; k++) { const t = tileKey(vx - 1 + (k & 1), vy - 1 + ((k >> 1) & 1), vz - 1 + (k >> 2)); if (t >= 0 && coupled[t]) near = true; }
+    if (!near) continue;
+    const X = 4 * vx, Y = 4 * vy, Z = 4 * vz;
+    let buried = true;
+    for (let k = 0; k < 8 && buried; k++) if (open(X - 1 + (k & 1), Y - 1 + ((k >> 1) & 1), Z - 1 + (k >> 2))) buried = false;
+    if (!buried) continue;
+    for (let q = 0; q < 512; q++) block[q] = open(X - 4 + (q & 7), Y - 4 + ((q >> 3) & 7), Z - 4 + (q >> 6)) ? -1 : -2;
+    let components = 0;
+    for (let q = 0; q < 512; q++) {
+      if (block[q] !== -1) continue;
+      block[q] = components;stack.push(q);
+      while (stack.length) {
+        const r = stack.pop()!, a = r & 7, b = (r >> 3) & 7, c = r >> 6;
+        if (a > 0 && block[r - 1] === -1) { block[r - 1] = components;stack.push(r - 1); }
+        if (a < 7 && block[r + 1] === -1) { block[r + 1] = components;stack.push(r + 1); }
+        if (b > 0 && block[r - 8] === -1) { block[r - 8] = components;stack.push(r - 8); }
+        if (b < 7 && block[r + 8] === -1) { block[r + 8] = components;stack.push(r + 8); }
+        if (c > 0 && block[r - 64] === -1) { block[r - 64] = components;stack.push(r - 64); }
+        if (c < 7 && block[r + 64] === -1) { block[r + 64] = components;stack.push(r + 64); }
+      }
+      components++;
+    }
+    if (components < 2) continue;
+    for (let k = 0; k < 8; k++) {
+      const t = tileKey(vx - 1 + (k & 1), vy - 1 + ((k >> 1) & 1), vz - 1 + (k >> 2));
+      if (t < 0 || !coupled[t]) continue;
+      let any = false;
+      for (let q = 0; q < 64 && !any; q++) if (block[(4 * (k & 1) + (q & 3)) + 8 * ((4 * ((k >> 1) & 1) + ((q >> 2) & 3)) + 8 * (4 * (k >> 2) + (q >> 4)))]! >= 0) any = true;
+      if (any) thin[t] = 1;
+    }
+  }
+  return thin;
+}
+
 /** Solid promotion of one mask: uniformMixedSolidTiles' result. */
 export interface UniformMixedSolidTiles {
   forced: Uint8Array;
