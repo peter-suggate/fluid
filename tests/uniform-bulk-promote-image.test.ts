@@ -119,7 +119,10 @@ test("BULK16 promote: a promoted block holds deep resident water's image in ever
    const moved=new Map<number,number>(),now=table(promoted.end);
    table(resident.end).forEach((w,p)=>{if(w!==now[p]&&held(w)){assert.ok(held(now[p]!),`page ${p} is resident again`);moved.set(w,now[p]!);}});
    const pairs=[...moved];
-   assert.ok(pairs.length>=3,`the column promotes its whole-16h pages (${pairs.length})`);
+   // The first demote takes the pages whose regions entered first: their
+   // holds start on their own evidence (region heat, not the tier's start-up
+   // HOT), so the column's pages need not enter together.
+   assert.ok(pairs.length>=2,`the column promotes its whole-16h pages (${pairs.length})`);
    t.diagnostic(`promoted blocks ${JSON.stringify(pairs)}`);
    const f32=(w:number)=>new Float32Array(new Uint32Array([w]).buffer)[0]!;
    const failures:string[]=[];
@@ -196,7 +199,9 @@ test("BULK16 promote: a page stays at rest and asks back when its face mean outr
    const pageOf=async(slot:number)=>[...(await read(L.records+BULK16_PAGE_WORDS*slot,3))].map(w=>w|0).join(",");
    const pages=async()=>{const n=await live(),slots=n?[...(await read(L.live,n))]:[];return Promise.all(slots.map(s=>pageOf(s)));};
    let step=0,demoted:string[]=[];
-   for(step=1;step<=60&&!demoted.length;step++){assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();demoted=await pages();}
+   // Every page's entry hold has run by step 60 (the pages need not enter together).
+   for(step=1;step<=60;step++){assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();}
+   demoted=await pages();
    assert.ok(demoted.length>=3,`the column demotes its whole-16h pages by step ${step} (${demoted.length})`);
    // At rest: twenty frames, no page asks back.
    for(const end=step+20;step<end;step++){assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();}
@@ -207,6 +212,221 @@ test("BULK16 promote: a page stays at rest and asks back when its face mean outr
    for(const end=step+2;step<end;step++){assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();}
    assert.equal(solver.info.simulationPipelineError,undefined);
    assert.ok(!(await pages()).includes(page),`page ${page} promoted after its face mean outran the reach`);
+  }finally{solver.destroy();}
+ });
+});
+
+test("BULK16 promote: one page asked back above a BULK16 page takes its vertices from the slot that holds them",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+ await withUniformDevice("BULK16 promote above BULK16",async device=>{
+  // A one-page column at 1 cm, water to 1.30 m: the three pages below the
+  // surface page demote (frame 35). The top one is asked back alone, so the
+  // page below it stays BULK16. The vertices of its low plane on the domain
+  // walls (x or z = 0) are held, in the umWideVertexSlot rule, by the page
+  // below: a promote that reads them from the asked page's own slot reads
+  // texels no page held (positive phi), dries the block's wall tiles, and
+  // the column's pressure collapses (-5.4 kPa, no convergence).
+  const top=1.30,cell=0.01,base=getSceneDefinition(RESERVOIR_SEEP_ID);
+  const {scene}=sceneDocumentAtLattice({...base,buildAt:(l:{cellSize_m:number})=>createReservoirSeepScene(l.cellSize_m,{widthScale:0.125,depthScale:1,heightScale:4})},{cellSize_m:cell});
+  const v=scene.fluid.initialLiquidVolumes![0]! as any,W=scene.container.width_m,D=scene.container.depth_m;scene.solidVoxels=[];
+  scene.fluid.initialLiquidVolumes=[{...v,min_m:{x:-W/2,y:0,z:-D/2},max_m:{x:W/2,y:top,z:D/2}}];
+  scene.fluid.pagePool={...scene.fluid.pagePool,blocks:28};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;
+  const solver=await createUniformSolver(device,scene,{...base.methodProfile!.overrides,bulkTier:"16h",volumeControlSeconds:0});
+  const frame=(solver as unknown as {mixedFrame:Frame}).mixedFrame as any;
+  try{
+   const rd=async(buffer:GPUBuffer,at:number,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,at,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
+   const store=frame.bulkPages,L=store.layout,offset=(store.binding.offset??0) as number;
+   const read=(at:number,n:number)=>rd(store.binding.buffer,offset+4*at,n);
+   const pages=async()=>{const n=(await read(BULK16_STATUS.live,1))[0]!,slots=n?[...(await read(L.live,n))]:[];
+    return new Map(await Promise.all(slots.map(async s=>[s,[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0)] as [number,number[]])));};
+   let step=0;
+   const advance=async()=>{step++;assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
+   for(;step<39;)await advance();
+   const demoted=await pages();
+   assert.equal(demoted.size,3,"the three deep pages demote");
+   const [slot,asked]=[...demoted].reduce((a,b)=>b[1][1]!>a[1][1]!?b:a);
+   device.queue.writeBuffer(store.binding.buffer,offset+4*(L.records+BULK16_PAGE_WORDS*slot+BULK16_PAGE.promote),new Uint32Array([1]));
+   await advance();
+   const pool=frame.pagePool,blocks=pool.layout.blocks as number;
+   const records=()=>rd(pool.state,4*pool.layout.state.records,8*blocks);
+   let rec=await records();
+   const block=[...Array(blocks).keys()].find(b=>rec[8*b+3]===1&&[0,1,2].every(i=>(rec[8*b+i]|0)===asked[i]));
+   assert.ok(block!==undefined,`page ${asked} is resident again`);
+   const phi=frame.levels[0].phi as GPUBufferBinding,tiles=new Float32Array((await rd(phi.buffer,(phi.offset??0)+4*512*block!,512)).buffer);
+   const dry=[...tiles.keys()].filter(t=>!(tiles[t]!<0));
+   assert.deepEqual(dry,[],`every tile of the promoted block is liquid (${dry.slice(0,8).map(t=>`${t}:${tiles[t]!.toFixed(3)}`)})`);
+   for(;step<46;)await advance();
+   rec=await records();
+   // The column stays hydrostatic: each resident deep block's mean pressure
+   // against rho g (top - its centre), the pages that stayed BULK16 untouched.
+   const rhoG=scene.fluid.density_kg_m3*-scene.fluid.gravity_m_s2.y,pr=frame.presentation.pressure;
+   for(let b=0;b<blocks;b++){
+    if(rec[8*b+3]!==1||(rec[8*b+1]|0)>asked[1]!)continue;
+    const p=new Float32Array((await rd(pr.buffer,(pr.offset??0)+4*512*b,512)).buffer),mean=p.reduce((s,x)=>s+x,0)/512;
+    const off=mean-rhoG*(top-((rec[8*b+1]|0)+0.5)*32*cell);
+    assert.ok(Math.abs(off)<100,`block ${b} (page y ${rec[8*b+1]|0}) holds hydrostatic pressure (${off.toFixed(1)} Pa off)`);
+   }
+  }finally{solver.destroy();}
+ });
+});
+
+test("BULK16 promote: a page a particle's closure reaches takes its block back before the particle arrives",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+ await withUniformDevice("BULK16 particle closure promote",async device=>{
+  // The one-page column at 1 cm, water to 1.30 m (pages y0..y2 demote) and
+  // a 0.2 m cube falling from 4.4 m. Before it lands, its lowest sample is
+  // made ballistic at the speed whose second step ends at 0.84 m, inside
+  // BULK16 page y2: some 57 cells a step, past the scan's 4 tiles and its
+  // one-commit lag, as an impact jet is (measured: 11 to 22 m/s jets under
+  // this cube over the wide column reached page y2 before its scan asked it
+  // back, the fatal "arrived in page ..., which holds no storage", about
+  // one run in eight). Its first step ends in the air above the water, and
+  // its record of that step (the census's particle closure for the next)
+  // reaches y2, so that commit takes y2 back; y0 and y1, beyond the
+  // closure, stay BULK16.
+  const top=1.30,cell=0.01,drop=0.2,base=getSceneDefinition(RESERVOIR_SEEP_ID);
+  const {scene}=sceneDocumentAtLattice({...base,buildAt:(l:{cellSize_m:number})=>createReservoirSeepScene(l.cellSize_m,{widthScale:0.125,depthScale:1,heightScale:4})},{cellSize_m:cell});
+  const v=scene.fluid.initialLiquidVolumes![0]! as any,W=scene.container.width_m,D=scene.container.depth_m;scene.solidVoxels=[];
+  scene.fluid.initialLiquidVolumes=[{...v,min_m:{x:-W/2,y:0,z:-D/2},max_m:{x:W/2,y:top,z:D/2}},
+   {shape:"box",min_m:{x:-drop/2,y:4.4,z:-drop/2},max_m:{x:drop/2,y:4.4+drop,z:drop/2}}];
+  scene.fluid.pagePool={...scene.fluid.pagePool,blocks:28};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;
+  const solver=await createUniformSolver(device,scene,{...base.methodProfile!.overrides,bulkTier:"16h",volumeControlSeconds:0});
+  const frame=(solver as unknown as {mixedFrame:Frame}).mixedFrame as any;
+  try{
+   const rd=async(buffer:GPUBuffer,at:number,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,at,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
+   const store=frame.bulkPages,L=store.layout,offset=(store.binding.offset??0) as number;
+   const read=(at:number,n:number)=>rd(store.binding.buffer,offset+4*at,n);
+   const pages=async()=>{const n=(await read(BULK16_STATUS.live,1))[0]!,slots=n?[...(await read(L.live,n))]:[];
+    return (await Promise.all(slots.map(async s=>[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0).join(",")))).sort();};
+   let step=0;
+   const advance=async()=>{step++;assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
+   for(;step<39;)await advance();
+   const deep=["0,0,0","0,1,0","0,2,0"];
+   assert.deepEqual(await pages(),deep,"the three deep pages demote before the drop lands");
+   // The bank's lowest live sample: its slabs fill the records below state
+   // word 0, a live record's heat (position.w) is positive, and positions
+   // sit 32 cells a page from the held frame page (state words 12..14).
+   const nb=frame.narrowBandFlip,stride=nb.particleStride as number,st=await rd(nb.state,0,16),count=st[0]!;
+   const bank=await rd(nb.activeParticles,0,stride*count),f=new Float32Array(bank.buffer);
+   let pick=-1;for(let i=0;i<count;i++)if(f[stride*i+3]!>0&&(pick<0||f[stride*i+1]!<f[stride*pick+1]!))pick=i;
+   assert.ok(pick>=0,"the drop holds a live sample");
+   const y=f[stride*pick+1]!+32*(st[13]!|0),travel=(y-84)/2,dt=scene.numerics.fixedDt_s;
+   assert.ok(y-travel>top/cell+2,`the first step ends above the water (${y.toFixed(1)} cells, ${travel.toFixed(1)} a step)`);
+   const record=bank.slice(stride*pick,stride*pick+stride),fr=new Float32Array(record.buffer);
+   // Ballistic: the mode bit of before.w.
+   fr[4]=0;fr[5]=-travel*cell/dt;fr[6]=0;record[11]=record[11]!|0x80000000;
+   device.queue.writeBuffer(nb.activeParticles,4*stride*pick,record);
+   await advance();
+   assert.deepEqual(await pages(),deep,"the first step's closure is the old record's");
+   await advance();
+   assert.deepEqual(await pages(),["0,0,0","0,1,0"],"page y2 promoted for the sample's closure; y0 and y1 stay BULK16");
+   for(const end=step+3;step<end;)await advance();
+  }finally{solver.destroy();}
+ });
+});
+
+test("BULK16 promote: a falling drop asks back the column's top deep page before it lands, and the page below stays",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+ await withUniformDevice("BULK16 disturbed promote",async device=>{
+  // A one-page column at 1 cm, water to 1.30 m, and a 0.2 m cube of water
+  // 3.1 m above it: the three deep pages demote (frame 35) before the drop
+  // nears (near frame 46) and lands (near 49). Its fall stays under the
+  // residency's reach (a full-section slab from 3 m does not, with or
+  // without BULK16), so the scene is well posed. The falling samples'
+  // closure (a ballistic sample's speed bounds every direction) reaches the
+  // top deep page y2 before they land, and that commit takes it back (its
+  // promote word 0: neither scan asked); the scans may ask more back (1 the
+  // structural scan, 2 the error test). Page y0 stays BULK16.
+  const base=getSceneDefinition(RESERVOIR_SEEP_ID),drop=0.2;
+  const {scene}=sceneDocumentAtLattice({...base,buildAt:(l:{cellSize_m:number})=>createReservoirSeepScene(l.cellSize_m,{widthScale:0.125,depthScale:1,heightScale:4})},{cellSize_m:0.01});
+  const v=scene.fluid.initialLiquidVolumes![0]! as any,W=scene.container.width_m,D=scene.container.depth_m;scene.solidVoxels=[];
+  scene.fluid.initialLiquidVolumes=[{...v,min_m:{x:-W/2,y:0,z:-D/2},max_m:{x:W/2,y:1.30,z:D/2}},
+   {shape:"box",min_m:{x:-drop/2,y:4.4,z:-drop/2},max_m:{x:drop/2,y:4.4+drop,z:drop/2}}];
+  scene.fluid.pagePool={...scene.fluid.pagePool,blocks:28};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;
+  const solver=await createUniformSolver(device,scene,{...base.methodProfile!.overrides,bulkTier:"16h",volumeControlSeconds:0});
+  const frame=(solver as unknown as {mixedFrame:Frame}).mixedFrame as any;
+  try{
+   const store=frame.bulkPages,L=store.layout,offset=(store.binding.offset??0) as number;
+   const read=async(at:number,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(store.binding.buffer,offset+4*at,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
+   const live=async()=>{const n=(await read(BULK16_STATUS.live,1))[0]!;return n?[...(await read(L.live,n))]:[];};
+   const slotOf=new Map<number,{page:string;y:number}>();
+   const pages=async()=>{const slots=await live();for(const s of slots){if(!slotOf.has(s)){const p=[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0);slotOf.set(s,{page:p.join(","),y:p[1]!});}}return slots;};
+   let step=0,demoted:number[]=[];
+   const advance=async()=>{step++;assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
+   for(;step<40;)await advance();
+   demoted=await pages();
+   assert.equal(demoted.length,3,"the column's deep pages demote before the drop nears");
+   // Follow the column through the impact.
+   const promoted=new Map<number,number>();
+   for(;step<110;){await advance();const now=new Set(await pages());for(const s of demoted)if(!now.has(s)&&!promoted.has(s))promoted.set(s,(await read(L.records+BULK16_PAGE_WORDS*s+BULK16_PAGE.promote,1))[0]!);}
+   console.log("disturbed promote",JSON.stringify({demoted:demoted.map(s=>slotOf.get(s)),promoted:[...promoted].map(([s,why])=>({...slotOf.get(s),why}))}));
+   const asked=[...promoted.keys()].map(s=>slotOf.get(s)!.y);
+   assert.ok(asked.includes(2),"the drop asks the top deep page back");
+   assert.ok(!asked.includes(0),"the bottom page stays BULK16");
+  }finally{solver.destroy();}
+ });
+});
+
+test("BULK16 promote: a drop at one side of a wide deep region asks back only the pages within its reach",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+ await withUniformDevice("BULK16 local promote",async device=>{
+  // Four pages across at 1 cm, water to 1.30 m (twelve deep pages demote;
+  // 64 blocks, as the splash climbs: 48 ran out at frame 64 in one run),
+  // and a 0.2 m cube 3.1 m above the middle of page x=0. A page is asked
+  // back for physical causes only, each named by its promote word: the
+  // closure (0) of a sample whose travel reaches it (the census's particle
+  // stage: the sample's tile, its travel of the move rounded up to tiles,
+  // a ballistic sample's speed bounding every direction, and the stage's
+  // two-tile margin, within its region's fastest travel + 16 cells of the
+  // sample; the bank holds the move's end velocity, so this test allows
+  // 24); the scan
+  // (1) of its tiles +-4 (surface, band, cut, AIR, region heat: contact,
+  // Sato et al.'s velocity detail or live particles) or its own face means;
+  // the error test (2) of its own face rows. A promote's claim heat is not
+  // one: chained through the connected bulk, it reached every page. The
+  // splash's fast samples can reach page x=2 (measured: 2,2,0 and 2,1,0 by
+  // closure), the flow under the cavity later asks back the page below the
+  // impact (scan, from its velocity detail) and the spreading flow pages
+  // x=2 and 3 under the surface (error test, from frame 73); the bottom
+  // row, 98 cells under the surface, stays BULK16 over the 70 steps.
+  const base=getSceneDefinition(RESERVOIR_SEEP_ID),drop=0.2;
+  const {scene}=sceneDocumentAtLattice({...base,buildAt:(l:{cellSize_m:number})=>createReservoirSeepScene(l.cellSize_m,{widthScale:0.5,depthScale:1,heightScale:4})},{cellSize_m:0.01});
+  const v=scene.fluid.initialLiquidVolumes![0]! as any,W=scene.container.width_m,D=scene.container.depth_m;scene.solidVoxels=[];
+  const x=-W/2+0.16;
+  scene.fluid.initialLiquidVolumes=[{...v,min_m:{x:-W/2,y:0,z:-D/2},max_m:{x:W/2,y:1.30,z:D/2}},
+   {shape:"box",min_m:{x:x-drop/2,y:4.4,z:-drop/2},max_m:{x:x+drop/2,y:4.4+drop,z:drop/2}}];
+  scene.fluid.pagePool={...scene.fluid.pagePool,blocks:64};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;
+  const solver=await createUniformSolver(device,scene,{...base.methodProfile!.overrides,bulkTier:"16h",volumeControlSeconds:0});
+  const frame=(solver as unknown as {mixedFrame:Frame}).mixedFrame as any;
+  try{
+   const store=frame.bulkPages,L=store.layout,offset=(store.binding.offset??0) as number;
+   const read=async(at:number,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(store.binding.buffer,offset+4*at,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
+   const live=async()=>{const n=(await read(BULK16_STATUS.live,1))[0]!;return n?[...(await read(L.live,n))]:[];};
+   const pageOf=new Map<number,number[]>();
+   const pages=async()=>{const slots=await live();for(const s of slots)if(!pageOf.has(s))pageOf.set(s,[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0));return slots;};
+   let step=0;
+   const advance=async()=>{step++;assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
+   for(;step<40;)await advance();
+   const demoted=await pages();
+   assert.equal(demoted.length,12,"the twelve deep pages demote before the drop nears");
+   // The live samples each step, in box cells (32 a page from the held
+   // frame page, state words 12..14), each with its 16-cell region's
+   // fastest speed for the move: the census keeps one radius a region and
+   // direction, and sweeps every occupied tile of the region by it.
+   const nb=frame.narrowBandFlip,stride=nb.particleStride as number,dt=scene.numerics.fixedDt_s,cell=0.01;
+   const rd=async(buffer:GPUBuffer,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,0,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
+   const samples=async()=>{const st=await rd(nb.state,16),count=st[0]!,out:number[][]=[];if(!count)return out;const f=new Float32Array((await rd(nb.activeParticles,stride*count)).buffer);
+    for(let i=0;i<count;i++){const o=stride*i;if(f[o+3]!>0)out.push([0,1,2].map(a=>f[o+a]!+32*(st[12+a]!|0)).concat(Math.hypot(f[o+4]!,f[o+5]!,f[o+6]!)*dt/cell));}
+    const fastest=new Map<string,number>(),key=(q:number[])=>q.slice(0,3).map(v=>Math.floor(v/16)).join(",");
+    for(const q of out)fastest.set(key(q),Math.max(fastest.get(key(q))??0,q[3]!));
+    return out.map(q=>[q[0]!,q[1]!,q[2]!,fastest.get(key(q))!]);};
+   // A page's gap to the nearest sample's travel: the largest axis gap
+   // between the sample and the page's 32 cells, less the sample's travel.
+   const gap=(page:number[],at:number[][])=>Math.min(Infinity,...at.map(q=>Math.max(...[0,1,2].map(a=>Math.max(0,32*page[a]!-q[a]!,q[a]!-32*page[a]!-32)))-q[3]!));
+   const seen=new Map<number,number[][]>([[step,await samples()]]);
+   const promoted=new Map<number,{step:number;why:number}>();
+   for(;step<110;){await advance();seen.set(step,await samples());const now=new Set(await pages());for(const s of demoted)if(!now.has(s)&&!promoted.has(s))promoted.set(s,{step,why:(await read(L.records+BULK16_PAGE_WORDS*s+BULK16_PAGE.promote,1))[0]!});}
+   const record=[...promoted].map(([s,p])=>({page:pageOf.get(s)!.join(","),...p,gap:Math.round(Math.min(...[p.step-2,p.step-1,p.step].map(k=>gap(pageOf.get(s)!,seen.get(k)!))))}));
+   console.log("local promote",JSON.stringify(record));
+   assert.ok(record.some(p=>p.page.startsWith("0,")),"the impact column asks a page back");
+   assert.deepEqual(record.filter(p=>p.why===0&&p.gap>24),[],"a closure promote lies within its sample's travel");
+   assert.deepEqual(record.filter(p=>p.page.split(",")[1]==="0"),[],"the bottom row stays BULK16");
   }finally{solver.destroy();}
  });
 });

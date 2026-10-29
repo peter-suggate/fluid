@@ -285,14 +285,17 @@ fn umWideVertexPresent(p:vec3i)->bool{return umBlockStored(umWideVertexSlot(p).w
 fn umWideVertexTexel(p:vec3i)->vec3i{${T}let s=umWideVertexSlot(${wideQ});let c=umBlockCoord(min(s.w,${blocks}-1u));return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 fn umWideVertexStoreTexel(p:vec3i)->vec3i{let s=umWideVertexSlot(p);if(!umBlockStored(s.w)){return vec3i(-1);}let c=umBlockCoord(s.w);return (c<<vec3u(3u))+c+vec3i(s.xyz);}
 // Kinds: what a page holds, from the table (an open top is its AIR words).
-// A BULK16 page, which only a solver with the slot store has (the window
-// address's umBulkSlotsOn: a pipeline constant, so off it folds). A raw word
-// (a block neighbour row, umPageRawWord) carries its tag, 0x80000000 | slot;
-// umPageWord of a fixed geometry reads it as umBulk16Word() (blocks-1, which
-// no block holds), elsewhere as its tag.
+// A BULK16 page, which only a solver with the slot store has. A raw word (a
+// block neighbour row, umPageRawWord) carries its tag, 0x80000000 | slot, and
+// every reader decodes it: most of a frame's pipelines take no constants
+// (the runtime header), and one that read the tag as SOLID while the others
+// read liquid split the column's phases (the falling-slab regression). Only
+// the fixed geometry's umPageWord, which folds it to umBulk16Word() (blocks-1,
+// which no block holds), keys the test on the window address's umBulkSlotsOn
+// (uniformDetailPipeline's constant, so off it folds).
 fn umBulk16Word()->u32{return ${blocks}-1u;}
-fn umBulkTag(w:u32)->bool{return umBulkSlotsOn()&&(w>>30u)==2u&&(w&0x3fffffffu)!=0u;}
-fn umBulkWord(w:u32)->bool{return umBulkSlotsOn()&&select(umBulkTag(w),w==umBulk16Word(),umSolidIsBox());}
+fn umBulkTag(w:u32)->bool{return (w>>30u)==2u&&(w&0x3fffffffu)!=0u;}
+fn umBulkWord(w:u32)->bool{return select(umBulkTag(w),umBulkSlotsOn()&&w==umBulk16Word(),umSolidIsBox());}
 fn umPageKind(page:vec3i)->u32{let w=umPageWord(page);return select(select(select(UM_RESIDENT,UM_SOLID,w>=${blocks}-1u),UM_AIR,w==0u),UM_BULK16,umBulkWord(w));}
 fn umCellKind(p:vec3i)->u32{return umPageKind(p>>vec3u(5u));}
 fn umTileKind(p:vec3i)->u32{return umPageKind(p>>vec3u(3u));}

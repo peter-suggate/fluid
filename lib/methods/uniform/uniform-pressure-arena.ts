@@ -14,7 +14,7 @@ import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTR
 import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
-import {UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN,UNIFORM_BULK_WORDS} from "./uniform-bulk-tier-reference";
+import {UNIFORM_BULK_FLOOR,UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN,UNIFORM_BULK_TOLERANCE,UNIFORM_BULK_WORDS} from "./uniform-bulk-tier-reference";
 import {planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS} from "./uniform-live-lists";
 import {uniformStageListsWGSL} from "./uniform-stage-lists";
@@ -2206,19 +2206,79 @@ var<workgroup> bD:array<f32,48>;
 var<workgroup> bW:atomic<u32>;
 // A kick's re-solve keeps the frame's u* (pBulkProject projected the face means from it).
 override pResolve:u32=0u;
+var<workgroup> bSpeed:atomic<u32>;
+var<workgroup> bError:atomic<u32>;
 fn bSum6(v:f32,w:f32,x:f32,y:f32,z:f32,t:f32)->f32{return ((v+w)+(x+y))+(z+t);}
+// Momentum at 16h: one semi-Lagrangian trace a face mean (RK2 midpoint, as
+// momentum's trace: a face mean moves under half a 16h cell a step, below
+// the promote's reach, so one segment is the substep trace). Positions are
+// page-local in 16h cells; component a's nodes sit at integer a and
+// half-integer tangential coordinates. A node off the page reads the BULK16
+// page there, and holds at the page (its nearest own node) elsewhere: the
+// rule every resident reader keeps at a BULK16 page, from this side.
+fn bMean(s:u32,a:u32,m:vec3i)->f32{return bsF(s,BS_U+12u*a+4u*u32(m[a])+u32(m[(a+1u)%3u])+2u*u32(m[(a+2u)%3u]));}
+fn bNode(s:u32,p:vec3i,a:u32,n:vec3i)->f32{
+ var hi=vec3i(1);hi[a]=2;var l=n;
+ if(any(l<vec3i(0))||any(l>hi)){
+  let d=select(select(vec3i(0),vec3i(1),l>hi),vec3i(-1),l<vec3i(0));let o=bsWordSlot(umPageRawWord(p+d));
+  let m=l-2*d;if(o!=0u&&all(m>=vec3i(0))&&all(m<=hi)){return bMean(o,a,m);}
+  l=clamp(l,vec3i(0),hi);
+ }
+ return bMean(s,a,l);
+}
+fn bSample(s:u32,p:vec3i,a:u32,x:vec3f)->f32{
+ var q=x-vec3f(0.5);q[a]=x[a];let b=vec3i(floor(q));let f=q-vec3f(b);
+ var c:array<f32,8>;
+ for(var k=0u;k<8u;k++){c[k]=bNode(s,p,a,b+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}
+ let y0=mix(mix(c[0],c[1],f.x),mix(c[2],c[3],f.x),f.y);let y1=mix(mix(c[4],c[5],f.x),mix(c[6],c[7],f.x),f.y);
+ return mix(y0,y1,f.z);
+}
+fn bVelocity(s:u32,p:vec3i,x:vec3f)->vec3f{return vec3f(bSample(s,p,0u,x),bSample(s,p,1u,x),bSample(s,p,2u,x));}
+// Face mean k (bpFace order) of slot s's page p, advected over dt.
+fn bAdvect(s:u32,p:vec3i,k:u32)->f32{
+ let a=k/12u;var x=vec3f(0.5);x[a]=f32((k%12u)/4u);x[(a+1u)%3u]+=f32(k&1u);x[(a+2u)%3u]+=f32((k>>1u)&1u);
+ let cell=16.0*params.hDt.xyz;let dt=params.hDt.w;
+ let mid=x-0.5*dt*bVelocity(s,p,x)/cell;
+ return bSample(s,p,a,x-dt*bVelocity(s,p,mid)/cell);
+}
 @compute @workgroup_size(64) fn pBulkRows(${lanes}){
  if(lane==0u){bN=bsCount();atomicStore(&bW,0u);}
  let n=workgroupUniformLoad(&bN);
  for(var e=group.x;e<n;e+=groups.x){
   let slot=bsSlot(e);let page=bsPage(slot);
+  if(lane==0u){atomicStore(&bSpeed,0u);atomicStore(&bError,0u);}
+  workgroupBarrier();
   if(lane<36u&&pResolve==0u){
-   let a=lane/12u;let plane=(lane%12u)/4u;var open=true;
-   if(plane!=1u){var d=vec3i(0);d[a]=select(-1,1,plane==2u);let w=umPageRawWord(page+d);open=bsWordSlot(w)!=0u||umBlockStored(w);}
-   let u=bsF(slot,BS_U+lane)+params.hDt.w*params.gravity[a];
-   bsSet(slot,BS_US+lane,select(0.0,u,open));
+   let a=lane/12u;let plane=(lane%12u)/4u;var open=true;var es=slot;var ep=page;var ek=lane;
+   if(plane!=1u){
+    var d=vec3i(0);d[a]=select(-1,1,plane==2u);let w=umPageRawWord(page+d);open=bsWordSlot(w)!=0u||umBlockStored(w);
+    // A face two BULK16 pages share is traced in the low page's frame by
+    // both, so the two copies stay one value.
+    if(plane==0u&&bsWordSlot(w)!=0u){es=bsWordSlot(w);ep=page+d;ek=lane+8u;}
+   }
+   let u=select(0.0,bAdvect(es,ep,ek)+params.hDt.w*params.gravity[a],open);
+   bsSet(slot,BS_US+lane,u);atomicMax(&bSpeed,bitcast<u32>(abs(bsF(slot,BS_U+lane))));
   }
   storageBarrier();workgroupBarrier();
+  // The bulk record's error test one level up (uniform-bulk-tier): the
+  // page's face means, its velocity as a frozen member's stored faces are,
+  // on the middle plane against the linear prolongation of the outer two
+  // on their axis, under UNIFORM_BULK_TOLERANCE of the page's speed plus
+  // UNIFORM_BULK_FLOOR h a step. A member leaves at twice it: the page
+  // asks for its block back (its promote word, the next commit's).
+  if(lane<12u&&pResolve==0u){
+   let k=12u*(lane/4u)+(lane&3u);let lo=bsF(slot,BS_U+k);let mid=bsF(slot,BS_U+k+4u);let hi=bsF(slot,BS_U+k+8u);
+   atomicMax(&bError,bitcast<u32>(abs(mid-0.5*(lo+hi))));
+  }
+  workgroupBarrier();
+  if(lane==0u&&pResolve==0u){
+   let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+   let threshold=${UNIFORM_BULK_TOLERANCE}*bitcast<f32>(atomicLoad(&bSpeed))+${UNIFORM_BULK_FLOOR}*h/params.hDt.w;
+   // Its promote word says why: 1 the structural scan (bulkPromote), 2 this test
+   // (0 when the particles' closure took it back first).
+   let at=bsAt(slot,${BULK16_PAGE.promote}u);
+   if(bitcast<f32>(atomicLoad(&bError))>2.0*threshold&&poolB[at]==0u){poolB[at]=2u;}
+  }
   if(lane<48u){
    let i=lane/6u;let f=lane%6u;let a=f/2u;let near=bNear(slot,page,i,f);let p=bsF(slot,BS_P+i);var d=0.0;var r=0.0;
    if(near.kind==B_REGION){

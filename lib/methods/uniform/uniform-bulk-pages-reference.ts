@@ -7,7 +7,11 @@ export const BULK16_PAGE_SLOT_MASK=0x3fffffff;
 // list words a slot (free, live, quarantine) a demoted page costs 3852 B.
 export const BULK16_PAGE_WORDS=960;
 export const BULK16_PAGE={
- // promote: nonzero when this frame asks the page back to 4h (the next commit's decide).
+ // promote: nonzero when this frame asks the page back to 4h (the next
+ // commit's decide): 1 the structural scan (bulkPromote), 2 the error test
+ // (the arena's pBulkRows). A page the particles' closure reaches (lrAsk's
+ // upPromote) leaves at that commit with the word 0. A retired slot keeps it
+ // until reused.
  page:0,flags:3,generation:4,open:5,promote:6,
  // The pressure solve's rows (UniformPressureArena): the eight 16h
  // pressures are pressure + pressureNext (the solve's correction, folded in

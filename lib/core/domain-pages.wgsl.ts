@@ -40,9 +40,16 @@ fn domainPageCellSize()->vec3f {
   if(bitcast<f32>(viewRecords[b+12u])>0.0){return bitcast<vec3f>(vec3u(viewRecords[b+12u],viewRecords[b+13u],viewRecords[b+14u]));}
   return u.container.xyz/max(u.gridInfo.xyz,vec3f(1));
 }
+// A BULK16 page (uniform-bulk-pages: 0x80000000 | slot, no pool block):
+// deep liquid computed at 16h.
+fn domainPageBulk(q:vec3i)->bool {
+  let world=q+domainFramePage();let w=domainDirectoryWord(world);
+  return !(domainPolicy()!=0u&&domainWorldSolid(world))&&(w>>30u)==2u&&(w&0x3fffffffu)!=0u;
+}
 fn domainPageState(q:vec3i)->u32 {
   let b=u32(layers.control.w);let world=q+domainFramePage();
   if(domainPolicy()!=0u&&domainWorldSolid(world)){return 2u;}
+  if(domainPageBulk(q)){return 1u;}
   let block=domainDirectoryWord(world);
   if(block==0xffffffffu){return select(0u,2u,domainPolicy()==0u);}
   if(block==0u || block>=viewRecords[b+1u]-1u){return 0u;}
@@ -65,6 +72,8 @@ fn domainPageBlock(q:vec3i)->u32 {
 fn domainHeatTier(q:vec3i)->u32 {
   let base=u32(layers.pageView.z);
   if(base==0u){return 3u;}
+  // A BULK16 page's regions are cold, at 16h.
+  if(domainPageBulk(q>>vec3u(1u))){return 0u;}
   let block=domainPageBlock(q>>vec3u(1u));
   if(block==0u){return 3u;}
   let o=vec3u(q&vec3i(1));
@@ -81,7 +90,7 @@ fn domainHeatColor(tier:u32)->vec3f {
 // when any of the region's 64 tiles is h in the bound topology (mixedTopology,
 // the overlay's binding 17: a word a tile key, bit 31 h).
 fn domainHeatResolution(q:vec3i,tier:u32)->u32 {
-  if(tier==0u&&layers.heat.y>0.5){return 2u;}
+  if(tier==0u&&(layers.heat.y>0.5||domainPageBulk(q>>vec3u(1u)))){return 2u;}
   if(tier==1u&&layers.heat.x>0.5){return 1u;}
   let words=arrayLength(&mixedTopology);
   if(words<=1u){return 3u;}

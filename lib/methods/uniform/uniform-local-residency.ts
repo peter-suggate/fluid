@@ -135,6 +135,7 @@ fn lrMeets(record:vec4u,low:vec3i,high:vec3i)->bool{
 
 /** Including module supplies lrRecord(page,stage), the topology and pool WGSL. */
 export const localResidencyRequestWGSL = /* wgsl */ `
+const LR_PARTICLES:u32=${RESIDENCY_STAGES.findIndex(s=>s.name==="particles")}u;
 fn lrAsk(page:u32,stage:u32){
  let record=lrRecord(page,stage);if((record.x|record.y)==0u){return;}
  let negative=lrUnpack(record.z);let positive=lrUnpack(record.w);
@@ -148,7 +149,10 @@ fn lrAsk(page:u32,stage:u32){
   let q=vec3i(x,y,z);let low=8*q-origin;
   if(!lrStageMeets(record,stage,low,low+vec3i(7))){continue;}
   if(upPolicy()==0u&&(any(q<vec3i(0))||any(q>=vec3i(i32(UP_TABLE))))){if(upKind(q)!=UP_SOLID){upFail(UP_FATAL_EDGE,q);}continue;}
-  upRequest(q+upFramePage());
+  // A BULK16 page the particles' closure reaches takes its block back at
+  // this commit: no sample may arrive in a page that holds no storage
+  // (nbArrived). The other stages' support is a BULK16 page's to serve.
+  upRequest(q+upFramePage());if(stage==LR_PARTICLES){upPromote(q+upFramePage());}
  }}}
 }
 `;

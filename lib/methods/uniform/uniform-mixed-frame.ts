@@ -641,7 +641,7 @@ export class UniformMixedFrame {
   this.split.transfer.attachProjectedBand(this.band.index,this.band.slotMapOffset);
   // The bulk record lives in the arena's pool B (pNative's ten bindings).
   if(this.bulk){this.bulk.adopt(this.band.bulkRecord!);this.bulkGroup=this.projection.bindBulk({velocity:f.velocity,negative:{buffer:f.negative},phi:root.phi!,params:this.params.projection,rootTopology,pressure:root.pressure,volume:f.volumeScratch,output:f.velocityScratch,outputNegative:{buffer:f.negativeScratch}});}
-  this.bulk?.bind({params:this.bandParams,velocity:f.velocity,slots:{buffer:this.band.index,word:this.band.slotMapOffset/4},rootPhi:root.phi!,rootTopology,tiers:this.heat.tiers,pressure:root.pressure,bulkPages});
+  this.bulk?.bind({params:this.bandParams,velocity:f.velocity,slots:{buffer:this.band.index,word:this.band.slotMapOffset/4},rootPhi:root.phi!,rootTopology,heat:this.heat.state,pressure:root.pressure,bulkPages});
   if(bulkPages){
    // The BULK16 store too lives in pool B: the composite reads its rows there.
    bulkPages.adopt(this.band.bulkStore!);

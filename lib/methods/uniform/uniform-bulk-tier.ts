@@ -3,7 +3,6 @@ import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, unifo
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedRegionWGSL } from "./uniform-mixed-layout-builder";
-import { UNIFORM_REGION_TIER } from "./uniform-region-heat";
 import {
   UNIFORM_BULK_COUNT, UNIFORM_BULK_DEPTH_CELLS, UNIFORM_BULK_ERROR, UNIFORM_BULK_FACE_TEXELS, UNIFORM_BULK_FACE_WIDTH, UNIFORM_BULK_FLOOR,
   UNIFORM_BULK_HEADER, UNIFORM_BULK_HOLD, UNIFORM_BULK_HOLD_FRAMES, UNIFORM_BULK_LIST, UNIFORM_BULK_MEAN, UNIFORM_BULK_OFFSET, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, UNIFORM_BULK_WORDS,
@@ -11,6 +10,7 @@ import {
 import type { UniformMixedPressureBulk } from "./uniform-mixed-pressure-velocity";
 import { BULK16_PAGE, BULK16_PAGE_WORDS } from "./uniform-bulk-pages-reference";
 import { BULK16_STATUS, type UniformBulkPages } from "./uniform-bulk-pages";
+import { UNIFORM_REGION_HEAT_STATE_WORDS } from "./uniform-region-heat";
 
 const PASS: GPUComputePassDescriptor = { label: "Uniform bulk tier selection" };
 const GROUPS = 1024;
@@ -25,8 +25,8 @@ export interface UniformBulkTierFields {
   slots: { buffer: GPUBuffer; word: number };
   rootPhi: GPUBufferBinding;
   rootTopology?: GPUBufferBinding;
-  /** UniformRegionHeat's tiers (word [region] the tier). */
-  tiers: GPUBuffer;
+  /** UniformRegionHeat's state (UNIFORM_REGION_HEAT_STATE_WORDS a region, word 0 its heat). */
+  heat: GPUBuffer;
   /** The root's warm pressure (by tile key), which a member region's 64 rows start from as their mean. */
   pressure: GPUBufferBinding;
   /** The BULK16 slot store (bulkTier "16h" with whole pages): bulkPromote asks its pages back. */
@@ -39,7 +39,8 @@ export interface UniformBulkTierFields {
  *
  * - structural: every tile of the region's 3^3 neighbourhood (12^3 tiles) is
  *   stored or a SOLID page (the region's own are stored), no h band tile, no
- *   HOT region, no cut tile, and every open tile's phi at least
+ *   region HOT from its own heat (not a claim's one-frame HOT), no cut
+ *   tile, and every open tile's phi at least
  *   UNIFORM_BULK_DEPTH_CELLS min h below the surface (the region's own fully
  *   open, V 1 inside); its fastest face moves under UNIFORM_BULK_REACH_CELLS
  *   h a step. h is then never next to 16h: a full region of 4h parts them.
@@ -107,7 +108,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
     this.group = uniformDetailGroup(device, { label: "Uniform bulk tier", layout: this.layout, entries: [
       { binding: 0, resource: { buffer: f.params, size: 80 } }, { binding: 1, resource: f.velocity },
       { binding: 2, resource: { buffer: f.slots.buffer } }, { binding: 3, resource: f.rootPhi }, ...(f.rootTopology ? [{ binding: 4, resource: f.rootTopology }] : []),
-      { binding: 5, resource: { buffer: f.tiers } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
+      { binding: 5, resource: { buffer: f.heat } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
       { binding: 7, resource: this.record }, { binding: 8, resource: this.faces.createView() }, { binding: 9, resource: { buffer: regions.buffer } }, ...(P ? [{ binding: 10, resource: P.binding }] : [])] });
     const H = UNIFORM_BULK_HEADER(R), C = UNIFORM_BULK_COUNT;
     const code = uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
@@ -117,7 +118,7 @@ struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec
 @group(1) @binding(2) var<storage,read> slots:array<u32>;
 @group(1) @binding(3) var<storage,read> rootPhi:array<f32>;
 ${S ? "@group(1) @binding(4) var<storage,read> rootTopology:array<vec4f>;" : ""}
-@group(1) @binding(5) var<storage,read> tiers:array<u32>;
+@group(1) @binding(5) var<storage,read> heat:array<u32>;
 @group(1) @binding(6) var<storage,read> rootPressure:array<f32>;
 @group(1) @binding(7) var<storage,read_write> record:array<atomic<u32>>;
 @group(1) @binding(8) var faces:texture_storage_2d<r32float,write>;
@@ -126,7 +127,13 @@ ${uniformMixedRegionWGSL("bRegionsAt", i => `bRegions[${regions.offset}u+${i}]`)
 const B_REGIONS:u32=${R}u;const B_SLOTS:u32=${f.slots.word}u;const B_ROOT:u32=${this.rootWord}u;
 const B_MEAN:u32=${UNIFORM_BULK_MEAN(R)}u;const B_OFFSET:u32=${UNIFORM_BULK_OFFSET(R)}u;
 const B_HOLD:u32=${UNIFORM_BULK_HOLD(R)}u;const B_ERROR:u32=${UNIFORM_BULK_ERROR(R)}u;const B_HEADER:u32=${H}u;const B_LIST:u32=${UNIFORM_BULK_LIST(R)}u;
-const B_HOLD_FRAMES:u32=${UNIFORM_BULK_HOLD_FRAMES}u;const B_HOT:u32=${UNIFORM_REGION_TIER.hot}u;
+const B_HOLD_FRAMES:u32=${UNIFORM_BULK_HOLD_FRAMES}u;const B_HEAT:u32=${UNIFORM_REGION_HEAT_STATE_WORDS}u;
+// HOT from the region's own heat (UniformRegionHeat's word 0: body or source
+// contact, tile detail, live particle detail), not the tier: a claim's
+// identity and pending rises are one-frame HOT with no heat, and testing the
+// tier chained one promote through the connected bulk a page a frame
+// (measured: a drop on a deep column).
+fn bHot(region:u32)->bool{return bitcast<f32>(heat[B_HEAT*region])>=1.0;}
 const B_TOLERANCE:f32=${UNIFORM_BULK_TOLERANCE};const B_FLOOR:f32=${UNIFORM_BULK_FLOOR};const B_DEPTH:f32=${UNIFORM_BULK_DEPTH_CELLS};const B_REACH:f32=${UNIFORM_BULK_REACH_CELLS}.0;
 var<workgroup> bFail:atomic<u32>;
 var<workgroup> bError:atomic<u32>;
@@ -156,7 +163,7 @@ fn bFace(t:vec3i,a:u32)->f32{
     // Authored static h tiles are fine detail: their region holds h, never 16h.
     if(own&&(bRegionsAt(vec3u(t))&1u)!=0u){atomicOr(&bFail,1u);continue;}
     let k=umTileAt(vec3u(t));
-    if(slots[B_SLOTS+k]!=0u||tiers[umPageOfTile(k)]==B_HOT){atomicOr(&bFail,1u);continue;}
+    if(slots[B_SLOTS+k]!=0u||bHot(umPageOfTile(k))){atomicOr(&bFail,1u);continue;}
     ${S ? "let top=rootTopology[k];let open=top.x;" : "let open=1.0;"}
     if(open<=1e-5){if(own){atomicOr(&bFail,1u);}continue;}
     if(open<1.0-1e-5||rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,1u);continue;}
@@ -212,10 +219,10 @@ ${P ? /* wgsl */ `
 // Promote (BULK16 pages): a live slot's page asks for its block back (its
 // promote word, which the next commit's decide reads) when any of its eight
 // regions fails the structural test a member must pass: across its 3^3
-// neighbourhood (the page's tiles +-4) an AIR page, an h band tile, a HOT
-// region, a cut tile or one within UNIFORM_BULK_DEPTH_CELLS of the surface;
-// or a face mean moving UNIFORM_BULK_REACH_CELLS h a step. The error test
-// needs 4h faces a slot does not hold: it waits for M3.
+// neighbourhood (the page's tiles +-4) an AIR page, an h band tile, a region
+// HOT from its own heat (bHot), a cut tile or one within
+// UNIFORM_BULK_DEPTH_CELLS of the surface; or a face mean moving
+// UNIFORM_BULK_REACH_CELLS h a step (the error test is pBulkRows').
 @group(1) @binding(10) var<storage,read_write> bStore:array<u32>;
 const BS_LIVE:u32=${P.layout.live}u;const BS_RECORDS:u32=${P.layout.records}u;
 var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
@@ -242,7 +249,7 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
    for(var i=lane;i<ext.x*ext.y*ext.z;i+=64u){
     let t=low+vec3i(vec3u(i%ext.x,(i/ext.x)%ext.y,i/(ext.x*ext.y)));
     let k=umTileAt(vec3u(t));
-    if(slots[B_SLOTS+k]!=0u||tiers[umPageOfTile(k)]==B_HOT){atomicOr(&bFail,1u);continue;}
+    if(slots[B_SLOTS+k]!=0u||bHot(umPageOfTile(k))){atomicOr(&bFail,1u);continue;}
     ${S ? "let open=rootTopology[k].x;" : "let open=1.0;"}
     if(open<=1e-5){continue;}
     if(open<1.0-1e-5||rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,1u);}

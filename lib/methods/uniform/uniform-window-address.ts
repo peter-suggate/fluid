@@ -169,7 +169,7 @@ fn ${prefix}PageWord(page:vec3i)->u32{
  // blocks-1, which no block holds (umBlockStored). The proof that a kept
  // word is below the SOLID sentinel stands, and the kind needs no tag
  // decode (umBulkWord). Its slot is PageRawWord's.
- let word=select(raw,min(raw,select(${blocks}-2u,${blocks}-1u,${prefix}BulkSlots)),${prefix}SolidIsBox());
+ let word=select(raw,min(raw,select(${blocks}-2u,${blocks}-1u,${prefix}BulkSlotsOn())),${prefix}SolidIsBox());
  return select(select(0u,word,keep),0xffffffffu,${prefix}WorldSolid(world));
 }
 // The raw word: a BULK16 page keeps its tag, for the readers that need its

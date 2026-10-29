@@ -76,7 +76,7 @@ export function uniformBulkStep(state: { member: boolean; hold: number }, struct
   return { member: false, hold: 0 };
 }
 
-/** A tile of the structural rule. */
+/** A tile of the structural rule; hot: its region HOT from its own heat (UniformRegionHeat: body or source contact, detail, live particles), not a one-frame HOT a claim raises. */
 export interface UniformBulkTile { kind: "resident" | "air" | "solid"; band?: boolean; hot?: boolean; open?: number; phi?: number }
 /** The structural rule of region `r` (tile origin 4r) on a tile grid (tile(x,y,z), undefined outside: SOLID). */
 export function uniformBulkStructural(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): boolean {

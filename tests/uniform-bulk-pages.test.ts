@@ -305,3 +305,37 @@ test("BULK16 page: GPU readers without the slot store keep its word and hold at 
   }finally{read.destroy();output.destroy();rows.destroy();ownership.destroy();}
  });
 });
+
+// The regression the falling-slab column found (docs/plans/bulk16-plan-2026-10-28.md,
+// M3): most of a frame's pipelines are compiled without uniformDetailPipeline's
+// constants (the census's classify, seed and dilate, the ring's enter, the h
+// slots' mark, the block neighbours' rows, the tile classifier, ...). Each
+// reads the runtime header, so a tagged word there must still read as the
+// BULK16 page it is, never as SOLID: a liquid page read as a wall by some
+// stages and as liquid by others is what sent the column's samples nonfinite.
+test("BULK16 page: a pipeline compiled without the fixed world constants reads the tag as BULK16, not SOLID",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+ await withUniformDevice("BULK16 generic readers",async device=>{
+  const {address}=bulkBox(),dimensions=[96,32,32] as const;
+  const layout=createUniformMixedLayoutFromWidths({dimensions,cellSize_m:[1,1,1],origin_m:{x:0,y:0,z:0}},new Uint8Array(address.boxTiles).fill(4),[],address);
+  const ownership=new UniformMixedOwnership(device,layout,false,0,false);
+  const output=device.createBuffer({size:32,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),read=device.createBuffer({size:32,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try{
+   const module=device.createShaderModule({code:uniformMixedTopologyWGSL(ownership.capacity,0)+`
+@group(1) @binding(0) var<storage,read_write> out:array<u32>;
+@compute @workgroup_size(1) fn main(){
+ let page=vec3i(1,0,0);let raw=umPageRawWord(page);
+ out[0]=umPageKind(page);out[1]=select(0u,raw&0x3fffffffu,umBulkTag(raw));out[2]=u32(umCellPresent(vec3i(40,5,6)));
+ out[3]=umAcrossKind(vec3i(31,5,6),0u,1);out[4]=umPageKind(vec3i(0,0,0));out[5]=umPageKind(vec3i(-1,0,0));
+}`});
+   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
+   const resultLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+   // No constants: the generic consumer's runtime header (no umFixedWorldGeometry, no umBulkSlots).
+   const pipeline=await device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[ownership.bindLayout,resultLayout]}),compute:{module,entryPoint:"main"}});
+   const group=device.createBindGroup({layout:resultLayout,entries:[{binding:0,resource:{buffer:output}}]});
+   const e=device.createCommandEncoder(),p=e.beginComputePass();p.setPipeline(pipeline);p.setBindGroup(0,ownership.bindGroup);p.setBindGroup(1,group);p.dispatchWorkgroups(1);p.end();
+   e.copyBufferToBuffer(output,0,read,0,32);device.queue.submit([e.finish()]);
+   await read.mapAsync(GPUMapMode.READ);const u=Array.from(new Uint32Array(read.getMappedRange()).subarray(0,6));read.unmap();
+   assert.deepEqual(u,[UNIFORM_KIND.bulk,5,0,UNIFORM_KIND.bulk,UNIFORM_KIND.resident,UNIFORM_KIND.solid]);
+  }finally{read.destroy();output.destroy();ownership.destroy();}
+ });
+});

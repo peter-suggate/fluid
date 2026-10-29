@@ -375,6 +375,8 @@ fn latticeValue(p: vec3i) -> f32 {
   if(umPresentationEnabled()){
     let cell=uniformSurfaceCell(p);
     if(umCellKind(cell)==UM_SOLID){return 0.0;}
+    // A BULK16 page is deep liquid (no field is stored there).
+    if(umCellKind(cell)==UM_BULK16){return 1.0;}
     return presentationFieldCell(cell);
   }
   let dims = vec3i(u.gridInfo.xyz);
@@ -920,10 +922,11 @@ var<workgroup> collectedCoarsePhi: array<f32, 343>;
 fn uniformWindowQuiet(b: u32, page: vec3i, g: vec3u, cacheOrigin: vec3i) -> bool {
   if(surfaceWindowHasSolid(vec3i(g))){return false;}
   // Only SOLID pages close the contour; AIR and resident pages stay open.
+  // A BULK16 page (deep liquid) stores no tiles: its vertices are held.
   let low = vec3i(g) - vec3i(1);
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let tile = low + vec3i(umCorner(k, 2u));
-    if (umPageKind(tile >> vec3u(3u)) == UM_SOLID) { continue; }
+    if (umPageKind(tile >> vec3u(3u)) >= UM_SOLID) { continue; }
     if (umTileWidth(umTileAt(vec3u(tile))) != 4u) { return false; }
   }
   let first = umWideVertexNearFromPage(b, page, low);
@@ -1080,7 +1083,7 @@ fn uniformWindowHeader(slot: u32) -> WindowHeader {
   var fine = 0u; var allFine = true; var anyFine = false;
   for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
     let tile = g - vec3i(1) + vec3i(umCorner(k, 2u));
-    if (umPageKind(tile >> vec3u(3u)) == UM_SOLID) { continue; }
+    if (umPageKind(tile >> vec3u(3u)) >= UM_SOLID) { continue; }
     if ((umTopology[2u * umTileCount() + 2u * umTileAt(vec3u(tile))] >> 27u) == 1u) { fine |= 1u << k; } else { allFine = false; }
     let r = vec3u(tile - home + vec3i(1));
     if (((word >> (r.x + 3u * (r.y + 3u * r.z))) & 1u) != 0u) { anyFine = true; }
@@ -1241,6 +1244,7 @@ fn uniformWindowCells(g: vec3i, header: vec4u, lane: u32) {
     // latticeValue's wall halo.
     let cell = uniformSurfaceCell(p);
     if (umCellKind(cell) == UM_SOLID) { windowCell[slot] = 0.0; continue; }
+    if (umCellKind(cell) == UM_BULK16) { windowCell[slot] = 1.0; continue; }
     let tile = cell / 4;
     let e = vec3u(tile - g + vec3i(1));
     var x: array<f32, 8>;

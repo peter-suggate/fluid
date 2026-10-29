@@ -281,16 +281,25 @@ fn btSlotOf(q:vec3i)->u32{
    textureStore(btVelocityOut,btFaceTexel(b,btTile(a,n-1u,i,j),a),texel);textureStore(btVelocityScratchOut,btFaceTexel(b,btTile(a,n-1u,i,j),a),texel);
   }
   // Vertices this block holds: from the stored page that held each before
-  // the commit, else from the slot of its own page, else this one's.
+  // the commit, else from the slot that holds it in btHolder's rule over
+  // the slots (its own page's, else a plane neighbour's in btHolder's
+  // order; this block's own slot ends the search). Measured: a page asked
+  // back above a BULK16 page read its wall-edge low-plane vertices from its
+  // own slot, texels no page held, and dried those tiles.
   for(var t=lane;t<${BULK16_PHI_TEXELS}u;t+=64u){
    let l=vec3u(t%9u,(t/9u)%9u,t/81u);let v=8*page+vec3i(l);
    let now=btHolder(v,false);if(now.w!=b||any(now.xyz!=l)){continue;}
    let before=btHolder(v,true);var value=0.0;
    if(before.w!=UP_NONE){value=textureLoad(btPhi,btPhiTexel(before.w,before.xyz)).x;}
    else{
-    let c=v-vec3i(1);let own=btSlotOf(c>>vec3u(3u));
-    if(own!=0u){value=bitcast<f32>(bpRead(own,BT_PHI+btPhiIndex(vec3u(c&vec3i(7))+vec3u(1u))));}
-    else{value=bitcast<f32>(bpRead(slot,BT_PHI+t));}
+    let c=v-vec3i(1);let near=c>>vec3u(3u);let own=vec3u(c&vec3i(7))+vec3u(1u);
+    let plane=(v&vec3i(7))==vec3i(0);var holder=btSlotOf(near);var at=own;
+    for(var k=1u;k<8u&&holder==0u;k++){
+     let step=vec3<bool>((k&1u)!=0u,(k&2u)!=0u,(k&4u)!=0u);
+     if(any(step&!plane)){continue;}
+     holder=btSlotOf(near+vec3i(step));at=select(own,vec3u(0u),step);
+    }
+    value=bitcast<f32>(bpRead(select(slot,holder,holder!=0u),BT_PHI+btPhiIndex(select(l,at,holder!=0u))));
    }
    textureStore(btPhi,btPhiTexel(b,l),vec4f(value,0.0,0.0,0.0));textureStore(btPhiScratchOut,btPhiTexel(b,l),vec4f(value,0.0,0.0,0.0));
   }
