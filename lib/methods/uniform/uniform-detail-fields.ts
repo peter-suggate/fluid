@@ -15,7 +15,7 @@ import { uniformMixedDetailViolationWord, uniformMixedTopologyWGSL } from "./uni
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockCoord, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachPage, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
 import type { LatticePages } from "../../core/initial-liquid-lattice";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
-import { UniformFineSlots, uniformFineSlotCapacity, uniformFineSlotInitWGSL, uniformFineSlotLayers } from "./uniform-fine-slots";
+import { UniformFineSlots, uniformFineSlotCapacity, uniformFineSlotInitWGSL, uniformFineSlotLayers, type UniformFineSlotWords } from "./uniform-fine-slots";
 import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_BASED, UNIFORM_DETAIL_CANONICAL_LOAD, UNIFORM_DETAIL_FACE_COMPACT, UNIFORM_DETAIL_HEADER_WORDS, UNIFORM_DETAIL_PACKED, UNIFORM_DETAIL_RING_4H_LOAD, registerUniformDetailBase } from "../../core/uniform-detail-abi";
 
 export type UniformDetailClass="cell"|"face"|"vertex"|"atlas";
@@ -958,7 +958,13 @@ fn drShare(t:u32){
  /** After a commit claims blocks, ahead of page initialise: a vertex of a
   * ring tile may move into a claimed block's high plane, which then needs a
   * slot before the next relayout. */
- encodeBlocks(encoder:GPUCommandEncoder):void{if(this.resident&&this.sparse)this.encodeClaim(encoder,this.simulation!.presentation.buffer);}
+ encodeBlocks(encoder:GPUCommandEncoder):void{if(this.resident&&this.sparse&&!this.claimsInBuild)this.encodeClaim(encoder,this.simulation!.presentation.buffer);}
+ /** The layout builder claims the slots its build needs (UniformMixedLayoutBuilder
+  * claims): a claimed block's ring then waits for that build, and the
+  * blocks a commit claims take no slot of their own (encodeBlocks). */
+ claimsInBuild=false;
+ /** The slot state and its word layout, for a layout builder's claim. */
+ get slotClaims():{readonly state:GPUBuffer;readonly words:UniformFineSlotWords;readonly capacity:number}{return {state:this.slots.state,words:this.slots.words,capacity:this.slots.capacity};}
  /** Slots for the blocks the next generation's ring needs, published to
   * every topology that addresses the fields, and cleared to empty. */
  private encodeClaim(encoder:GPUCommandEncoder,next:GPUBuffer):void{
@@ -971,6 +977,7 @@ fn drShare(t:u32){
   const pass=encoder.beginComputePass({label:"Uniform detail h slot init"});
   for(let n=0;n<init.length;n++){pass.setPipeline(init[n]!.pipeline);pass.setBindGroup(0,this.initGroups[n]!);pass.dispatchWorkgroups(UniformFineSlots.initGroups);}
   pass.end();
+  this.slots.encodeInitialized(encoder);
  }
  private initKey?:GPUTexture;
  private initGroups:GPUBindGroup[]=[];

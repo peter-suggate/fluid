@@ -121,6 +121,8 @@ const definition=getSceneDefinition(NBFLIP_LETTERS_SCENE_ID),scene=structuredClo
 scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
 // --page-pool={"blocks":210,"permute":7}: the scene's page pool record, the one way a page set other than the whole box reaches the solver.
 if(option("page-pool"))scene.fluid.pagePool=JSON.parse(option("page-pool")!);
+// --tiers={"start":"4h"}: fluid.tiers fields over the scene's.
+if(option("tiers"))scene.fluid.tiers={...scene.fluid.tiers,...JSON.parse(option("tiers")!)};
 assert.equal(definition.methodProfile?.methodId,uniformNarrowBandMethod.id);
 // Resolve the scene profile with the requested clock and uncorrected volume for the gate.
 const sets=Object.fromEntries(process.argv.filter(a=>a.startsWith("--set=")).map(a=>{const [key,...value]=a.slice(6).split("=");const text=value.join("=");return [key!,text!==""&&Number.isFinite(Number(text))?Number(text):text==="true"?true:text==="false"?false:text];}));
@@ -606,6 +608,8 @@ try {
   const row:Record<string,unknown>={frame,time_s:frame*dt,wall_ms,encode_ms,projection_ms,rest_ms,gpu_ms:projection_ms+rest_ms,between_ms,before,passes:passes.length,
    particles:flip.particles,particleCapacity:flip.capacity,reseedClipped:flip.reseedClipped,allocatedBytes:solver.info.allocatedBytes,
    fineTiles:solver.info.uniformMixedFineTiles,bandTiles:solver.info.uniformPressureBandTiles,bandCycles:solver.info.uniformPressureBandCycles,bandResidual:solver.info.uniformPressureBandResidual,labels:byLabel};
+  // Under the build's slot claim: refusals and the h slots in use.
+  if(solver.info.uniformMixedSlotCapacity!==undefined)row.slots={capacity:solver.info.uniformMixedSlotCapacity,used:solver.info.uniformMixedSlotsUsed,peak:solver.info.uniformMixedSlotPeak,claims:solver.info.uniformMixedSlotClaims,refused:solver.info.uniformMixedRefusedTiles,refusedBuilds:solver.info.uniformMixedRefusedTileBuilds};
   if(measureVolume&&process.argv.includes("--particle-mass"))row.particleMass=await readParticleMassCensus(device,mixedFrame.narrowBandFlip);
   if(renderLoad)row.renderLoad_ms=renderLoadAlone_ms;
   if(hostWork)row.hostWork=advanceWork;

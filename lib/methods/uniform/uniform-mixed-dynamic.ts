@@ -270,6 +270,8 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
  private readonly replayRecords:number;
  /** census words: decide's band bits, a bit a tile key, kept across censuses. */
  private readonly decidedOffset:number;
+ /** Static closure bits (CC_STATIC), a bit a tile key after the decided ones. */
+ private readonly staticOffset:number;
  /** The region heat tiers (attachHeat): the census freezes and replays deep COLD regions. */
  private heatTiers?:GPUBuffer;
  /** The last encode's params words: a change advances the policy
@@ -348,7 +350,7 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
  private joinLive=false;
  /** The band decided by the last encode, for the GPU layout builder. Words
   * [0, HEADER) of the buffer are the census header its receipt carries. */
- get bandBits():UniformMixedBandBits{return this.bandView??={buffer:this.work,wordOffset:HEADER,headerWords:HEADER,auditWord:this.nearOffset+this.words};}
+ get bandBits():UniformMixedBandBits{return this.bandView??={buffer:this.work,wordOffset:HEADER,headerWords:HEADER,auditWord:this.nearOffset+this.words,staticWordOffset:this.staticOffset};}
  /** source: the host's scene uniform (UMSourceParams prefix ABI, as the
   * mixed frame's sourceParams). decide marks every tile this frame's drop or
   * inflow plug can fill (uvSourcePhi, frame dt dimsDt.w) as band, so the
@@ -378,7 +380,11 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   this.localOffset=this.importanceOffset+2*tiles+importanceStateWords(tiles)+narrowBandBudgetWords(tiles);
   // Then decide's own band bits (CC_DECIDED), never cleared.
   this.decidedOffset=this.localOffset+STAGE_RESIDENCY_WORDS*this.pages+1;
-  const workBytes=(this.decidedOffset+this.words)*4,readBytes=(HEADER+this.words)*4;
+  // Then the static closure bits (CC_STATIC): band tiles a join, a source or
+  // solid promotion asks for, whatever the surface does. The layout
+  // builder's slot claim serves them ahead of the surface band.
+  this.staticOffset=this.decidedOffset+this.words;
+  const workBytes=(this.staticOffset+this.words)*4,readBytes=(HEADER+this.words)*4;
   this.work=device.createBuffer({label:"Uniform dynamic ownership census",size:workBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.readback=device.createBuffer({label:"Uniform dynamic ownership readback",size:readBytes,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.params=device.createBuffer({label:"Uniform dynamic ownership policy",size:112,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -507,6 +513,10 @@ const CC_WORDS:u32=${REPLAY_WORDS}u;
 // decide's own band bit per tile key (before solid promotion), kept across
 // censuses: a deep COLD tile keeps it, every other live tile rewrites it.
 const CC_DECIDED:u32=${this.decidedOffset}u;
+// The static closure bit per tile key: decide rewrites it where it rewrites
+// CC_DECIDED (a join or source), solidPromote where it promotes, and a deep
+// COLD tile keeps it with its decision.
+const CC_STATIC:u32=${this.staticOffset}u;
 fn ccDeep(tile:u32)->bool{return bounds[CC_DEEP+umPageOfTile(tile)]!=0u;}
 // The stamp a record written now carries: 0 (write none) unless the region is deep COLD.
 fn ccStamp(tile:u32)->u32{
@@ -1479,7 +1489,7 @@ fn decideTile(tile:u32){
   }else{if(width==1u){atomicAdd(&census[5],1u);}recordReason(tile,${REASON.skipped}u);}
   return;
  }
- atomicAnd(&census[decided],~bit);
+ atomicAnd(&census[decided],~bit);atomicAnd(&census[CC_STATIC+tile/32u],~bit);
  // Intersect the existing selection, including hold, closure and travel,
  // with the allowed distance from actual geometric crossings.
  // Explicit joins, new liquid sources and mandatory solid promotion retain
@@ -1490,6 +1500,7 @@ fn decideTile(tile:u32){
   if(umTileWidth(tile)==1u){atomicAdd(&census[5],1u);}recordReason(tile,${REASON.skipped}u);return;
  }
  let joined=hostJoined||source;
+ if(joined){atomicOr(&census[CC_STATIC+tile/32u],bit);}
  let joinReason=select(${REASON.source}u,${REASON.join}u,hostJoined);
  if(policy.surface.x>0.0){
   let width=umTileWidth(tile);
@@ -1593,11 +1604,12 @@ fn solidPromoteTile(tile:u32){
   let d=abs(vec3i(x,y,z)-p);
   let wallSupport=solidRecord[tile].x==0.0&&d.x+d.y+d.z==wallDistance&&solidRecord[t].x>1e-5&&(umBit(CC_DECIDED,t)||umStaticFine(t));
   if(!wallSupport&&!umBit(activeIndex(0u),t)){continue;}
-  atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));
+  atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));atomicOr(&census[CC_STATIC+tile/32u],1u<<(tile%32u));
   atomicAdd(&census[2],1u);atomicAdd(&census[19],1u);recordReason(tile,${REASON.solid}u);
   if(umTileWidth(tile)==1u){atomicSub(&census[5],1u);}else{atomicAdd(&census[4],1u);}
   return;
  }}}
+ atomicAnd(&census[CC_STATIC+tile/32u],~(1u<<(tile%32u)));
 }
 // Residency certificate (uniformMixedResidencyWord, uniform-mixed-residency.ts),
 // after the band is final. pageSeed: per page, the box of its near tiles, the

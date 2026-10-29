@@ -24,6 +24,16 @@ export interface GPUEulerianInfo {
   uniformMixedDeferredBuilds?: number;
   uniformMixedDeferredTiles?: number;
   uniformMixedCapacityChanges?: number;
+  /** Under the build's slot claim (a coarse start over slotted h stores): the
+   * last build's refused h tiles (kept at 4h for want of a free slot), the
+   * refusals summed over builds, the last build's claims, and the h slots:
+   * capacity, in use after the last claim, and the most in use after any. */
+  uniformMixedRefusedTiles?: number;
+  uniformMixedRefusedTileBuilds?: number;
+  uniformMixedSlotClaims?: number;
+  uniformMixedSlotCapacity?: number;
+  uniformMixedSlotsUsed?: number;
+  uniformMixedSlotPeak?: number;
   /** Completed dynamic ownership changes, including their field remap. */
   uniformMixedDynamicRelayouts?: number;
   uniformMixedRegularTiles?: number;

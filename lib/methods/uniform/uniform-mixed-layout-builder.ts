@@ -6,6 +6,8 @@ import type {UniformMixedGenerationBuffers,UniformMixedOwnership} from "./unifor
 import {UNIFORM_PAGE_TABLE_WORDS,uniformLatticeAddressWGSL} from "./uniform-lattice-address";
 import type {UniformPagePool} from "./uniform-page-pool";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
+import {uniformFineSlotRingWGSL,type UniformFineSlotWords} from "./uniform-fine-slots";
+import {PARTICLE_RESIDENCY_WORDS,RESIDENCY_STAGES} from "./uniform-local-residency";
 
 const BLOCK=256;
 /** Work header: the cleared counters [0, CLEARED), then umCounts at COUNTS
@@ -19,6 +21,11 @@ const CATEGORIES=5;
 const TICKET=6;
 /** Work word counting the h tiles the band and statics ask for (widths). */
 const NEED=7;
+/** Under a slot claim, words after the changed-tile lists: the cut key, the
+ * h-capacity cut key (0: the h tiles asked for fit), spare, then from
+ * CLAIM_WANT a want a block, then the h tiles asked for at each claim level
+ * and 16-cell region (CLAIM_LEVELS x 8 a block). */
+const CLAIM_WANT=8,CLAIM_LEVELS=5;
 
 /** Word layout of a GPU-built generation's changed tiles in the builder's
  * work buffer (UniformMixedGenerationBuffers.changes) for `tiles` tiles.
@@ -51,7 +58,22 @@ fn umDilatedTile(i:u32)->u32{return umChanges[umChangedList()+umChanges[8u]+i];}
  * producer's receipt header (the census's), carried into the builder receipt. */
 export interface UniformMixedBandBits {readonly buffer:GPUBuffer;readonly wordOffset:number;readonly headerWords?:number;
  /** The producer's residency audit word (UNIFORM_MIXED_RESIDENCY_AUDIT): non-zero raises the residency fatal. */
- readonly auditWord?:number}
+ readonly auditWord?:number;
+ /** The producer's static closure bits (a join, a source, solid promotion),
+  * a bit a tile key from this word: the slot claim's second priority. */
+ readonly staticWordOffset?:number}
+
+/** What the build's h-slot claim reads and writes (uniform-fine-slots.ts):
+ * the slot state, NB-FLIP's particle allocation support
+ * (PARTICLE_RESIDENCY_WORDS a 16-cell region: two words of particle tiles,
+ * then the -xyz and +xyz travel in cells, f32) and the region heat's tiers
+ * (a word a region, UNIFORM_REGION_TIER). */
+export interface UniformMixedSlotClaims{
+ readonly state:GPUBuffer;readonly words:UniformFineSlotWords;readonly capacity:number;
+ readonly particles:GPUBuffer;readonly heat:GPUBuffer;
+}
+/** Claim priorities, highest last (0: no claim). */
+export const UNIFORM_MIXED_CLAIM_LEVEL={cold:1,warm:2,hot:3,static:4,particle:5} as const;
 
 /** An authored region as a box of tiles of the 512-tile window: min inclusive,
  * max exclusive. fine: its tiles are h whatever the band holds. coarse: the
@@ -102,8 +124,14 @@ export function uniformMixedRegionWGSL(name:string,word:(index:string)=>string):
  * Persistent: generation, bumped by every build that changed a tile and
  * raised no fatal flag; builds, bumped by every build; fatal, sticky
  * UNIFORM_MIXED_RELAYOUT_FATAL bits; fatalBuild, the build number that first
- * raised one. */
-export const UNIFORM_MIXED_RELAYOUT_RECEIPT={census:0,changed:20,tiers:21,seams:23,need:25,admit:26,audit:27,counts:28,generation:32,builds:33,fatal:34,fatalBuild:35,words:36} as const;
+ * raised one. Under a slot claim (UniformMixedSlotClaims), per build:
+ * refused, the h tiles the build asked for that stay 4h (a block of their
+ * ring found no free slot); claims, the blocks that took a slot; free, the
+ * free slots after the claim (the frame's fewest: release follows the
+ * remap). Persistent: leastFree, the fewest free slots of any build;
+ * refusedSum, refused summed over builds (tile-builds at 4h). */
+export const UNIFORM_MIXED_RELAYOUT_RECEIPT={census:0,changed:20,tiers:21,seams:23,need:25,admit:26,audit:27,counts:28,generation:32,builds:33,fatal:34,fatalBuild:35,
+ refused:36,claims:37,free:38,leastFree:39,refusedSum:40,words:41} as const;
 /** Sticky fatal bits of the relayout receipt, validated on the GPU. A set
  * bit means the built generation must not be adopted or advanced on.
  * hangingCapacity (= UNIFORM_MIXED_OVERFLOW_HANGING): seam tiles exceed the
@@ -148,6 +176,10 @@ export class UniformMixedLayoutBuilder {
  private readonly statics:GPUBuffer;
  private readonly resources:GPUBindGroupLayout;
  private readonly level:Level;
+ private readonly claimResources?:GPUBindGroupLayout;
+ private readonly claimGroup?:GPUBindGroup;
+ /** The build claims its h slots (UniformMixedSlotClaims). */
+ get claiming():boolean{return !!this.claims;}
  private readonly pipelines=new Map<string,GPUComputePipeline>();
  private staticReady=false;
  /** The band producer's receipt header words (UniformMixedBandBits.headerWords),
@@ -169,8 +201,10 @@ export class UniformMixedLayoutBuilder {
  private static readonly PASS:GPUComputePassDescriptor={label:"Uniform mixed layout build"};
  /** ownership: the simulation ownership the built generation replaces.
   * pool: the frame's page pool, whose resident list the per-key launches
-  * stride (uniform-live-lists). */
- constructor(private readonly device:GPUDevice,band:UniformMixedBandBits,ownership:UniformMixedOwnership,private readonly pool:UniformPagePool){
+  * stride (uniform-live-lists). claims: the h slots this build claims for
+  * the tiles it makes h, refusing (keeping at 4h) a tile whose ring a free
+  * slot cannot serve (encode); none, the slots are another's to claim. */
+ constructor(private readonly device:GPUDevice,private readonly band:UniformMixedBandBits,ownership:UniformMixedOwnership,private readonly pool:UniformPagePool,private readonly claims?:UniformMixedSlotClaims){
   const n=ownership.capacity.tiles;
   if(n!==512*pool.layout.blocks)throw new Error(`Mixed layout builder: ${n} tile keys are not the page pool's ${pool.layout.blocks} blocks`);
   this.tiles=n;this.blocks=Math.ceil(n/BLOCK);
@@ -184,17 +218,29 @@ export class UniformMixedLayoutBuilder {
    if(!Number.isSafeInteger(band.headerWords)||band.headerWords<0||band.headerWords>R.changed-R.census)throw new Error(`Band header of ${band.headerWords} words does not fit the relayout receipt`);
    this.headerWords=band.headerWords;
   }
+  if(claims&&band.staticWordOffset===undefined)throw new Error("Mixed layout builder: a slot claim needs the band producer's static closure bits");
+  const C=GPUShaderStage.COMPUTE;
   this.resources=device.createBindGroupLayout({entries:[
-   ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
-   {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-   ...[4,5,6,7,8].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
-   {binding:9,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
+   ...[0,1,2].map(binding=>({binding,visibility:C,buffer:{type:"read-only-storage" as const}})),
+   {binding:3,visibility:C,buffer:{type:"uniform"}},
+   ...[4,5,6,7,8].map(binding=>({binding,visibility:C,buffer:{type:"storage" as const}})),
+   {binding:9,visibility:C,buffer:{type:"read-only-storage"}},
   ]});
+  // The slot claim's launches (widths, tileKeys, slotCut, slotClaim, settle) bind the
+  // slot state, particle allocation and region tiers in place of the support
+  // and hanging slots they do not read: ten storage buffers, the per-stage limit.
+  this.claimResources=claims?device.createBindGroupLayout({entries:[
+   ...[0,1,2].map(binding=>({binding,visibility:C,buffer:{type:"read-only-storage" as const}})),
+   {binding:3,visibility:C,buffer:{type:"uniform"}},
+   ...[4,5,8,10].map(binding=>({binding,visibility:C,buffer:{type:"storage" as const}})),
+   ...[9,11,12].map(binding=>({binding,visibility:C,buffer:{type:"read-only-storage" as const}})),
+  ]}):undefined;
   let bytes=this.statics.size;
   const topology=storage("Uniform layout builder topology",5*n);
   const support=storage("Uniform layout builder support",9*n+24);
   const slots=storage("Uniform layout builder slots",2*n);
-  const work=device.createBuffer({label:"Uniform layout builder work",size:uniformMixedChangedTilesWords(n).words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  // The slot claim's words follow the changed-tile lists (CLAIM_WANT).
+  const work=device.createBuffer({label:"Uniform layout builder work",size:(uniformMixedChangedTilesWords(n).words+(claims?CLAIM_WANT+(1+8*CLAIM_LEVELS)*n/512:0))*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   const params=device.createBuffer({label:"Uniform layout builder params",size:24,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   // Hanging capacity: the ownership's preallocated tap cache.
   // Residency audit word, or none. h-tile capacity: the owner-indexed buffers'.
@@ -204,6 +250,8 @@ export class UniformMixedLayoutBuilder {
   device.queue.writeBuffer(work,COUNTS*4+28,new Uint32Array([n]));
   device.queue.writeBuffer(work,COUNTS*4+32,new Float32Array([...lattice.cellSize_m,Math.min(...lattice.cellSize_m)]));
   const status=device.createBuffer({label:"Uniform layout builder relayout receipt",size:R.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  device.queue.writeBuffer(status,4*R.leastFree,new Uint32Array([0xffffffff]));
+
   // Standalone stages visit everything until a frame census: support[0,4n) = 3.
   device.queue.writeBuffer(support,0,new Uint32Array(4*n).fill(3));
   const group=device.createBindGroup({layout:this.resources,entries:[
@@ -212,6 +260,11 @@ export class UniformMixedLayoutBuilder {
    {binding:6,resource:{buffer:support}},{binding:7,resource:{buffer:slots}},{binding:8,resource:{buffer:status}},
    {binding:9,resource:{buffer:pool.state}},
   ]});
+  this.claimGroup=claims?device.createBindGroup({layout:this.claimResources!,entries:[
+   {binding:0,resource:{buffer:band.buffer}},{binding:1,resource:{buffer:this.statics}},{binding:2,resource:ownership.presentation},
+   {binding:3,resource:{buffer:params}},{binding:4,resource:{buffer:work}},{binding:5,resource:{buffer:topology}},{binding:8,resource:{buffer:status}},
+   {binding:9,resource:{buffer:pool.state}},{binding:10,resource:{buffer:claims.state}},{binding:11,resource:{buffer:claims.particles}},{binding:12,resource:{buffer:claims.heat}},
+  ]}):undefined;
   bytes+=topology.size+support.size+slots.size+work.size+params.size+status.size;
   this.level={current:ownership,topology,support,slots,work,params,group,status};
   this.capacityRevision=ownership.capacityRevision;
@@ -220,7 +273,7 @@ export class UniformMixedLayoutBuilder {
  async initialize():Promise<void>{
   const n=this.tiles,x=this.level.current.dispatchX;
   const flags=RECEIPT,totals=RECEIPT+n,lists=uniformMixedChangedTilesWords(n);
-  const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,F=UNIFORM_MIXED_RELAYOUT_FATAL;
+  const R=UNIFORM_MIXED_RELAYOUT_RECEIPT,F=UNIFORM_MIXED_RELAYOUT_FATAL,claims=this.claims;
   const module=this.device.createShaderModule({label:"Uniform mixed layout builder",code:uniformRuntimeConstantsWGSL(/* wgsl */`
 @group(0) @binding(0) var<storage,read> band:array<u32>;
 @group(0) @binding(1) var<storage,read> statics:array<u32>;
@@ -268,8 +321,10 @@ fn widthOf(t:u32){
  let w=select(4u,1u,fineAt(t));
  topology[t]=w;
  if(w==1u){atomicAdd(&work[NEED],1u);}
- if(w!=wordWidth(current[t])){atomicStore(&work[CHANGED+atomicAdd(&work[0],1u)],t);}
+${claims?` // Under the slot claim the tile asks for its ring's slots; settle lists the changes.
+ if(w==1u){slotWant(t);}`:` if(w!=wordWidth(current[t])){atomicStore(&work[CHANGED+atomicAdd(&work[0],1u)],t);}`}
 }
+${claims?this.claimWGSL(claims):""}
 // Count, then admit: the h tiles this build asks for are known before any
 // tile word is written. Over the admission capacity the build keeps the
 // generation it is against: the staged widths return to it and no tile is
@@ -410,6 +465,8 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
   // is sized for at most this many h tiles. A need over an admission
   // capacity was deferred (admit); this is the generation kept instead.
   if(f>params.fineCapacity){atomicOr(&status[R_FATAL],FATAL_OWNERS);}
+${claims?`  // The refusals settle counted, summed over builds.
+  atomicAdd(&status[${R.refusedSum}u],atomicLoad(&status[${R.refused}u]));`:""}
   var audit=0u;if(params.audit!=0xffffffffu){audit=band[params.audit];}
   atomicStore(&status[${UNIFORM_MIXED_RELAYOUT_RECEIPT.audit}u],audit);
   if(audit!=0u){atomicOr(&status[R_FATAL],FATAL_RESIDENCY);}
@@ -513,7 +570,187 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.resources]});
-  await Promise.all(["widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"].map(async entryPoint=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout,compute:{module,entryPoint}}));}));
+  const claimLayout=this.claimResources&&this.device.createPipelineLayout({bindGroupLayouts:[this.claimResources]});
+  await Promise.all(this.entries().map(async (entryPoint,i)=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout:claimLayout&&i<5?claimLayout:layout,compute:{module,entryPoint}}));}));
+ }
+ /** The slot claim (UniformMixedSlotClaims), between widths and classify.
+  * One rule decides the h tiles and their slots before any tile word is
+  * written (docs/plans/bulk16-plan-2026-10-28.md, M4b):
+  * - a tile widths makes h needs a slot for every stored block of its ring
+  *   box (uniformFineSlotRingWGSL, the box the slot mark keeps);
+  * - a block with none takes the highest level of the tiles asking for it
+  *   (UNIFORM_MIXED_CLAIM_LEVEL): particle closure (a tile a live particle
+  *   holds or reaches this step: its travel in cells, a tile a 4 cells, plus
+  *   the particle stage's margin, RESIDENCY_STAGES), then static closure
+  *   (the band producer's static bits and the authored Fine regions), then
+  *   the band by region heat;
+  * - a block's want is the highest key of the tiles asking for it: the
+  *   level over the tile's 16-cell region, so the tiles of one region ask
+  *   as one;
+  * - slotCut bisects for the least key whose wanting blocks the free slots
+  *   hold, and slotClaim pops a slot for each block wanting one at or above
+  *   it: every tile keyed at or above the cut is served whole, and no slot
+  *   goes to a block only tiles below it want;
+  * - settle keeps at 4h every tile a block of whose box still has no slot
+  *   (refused), then lists the changed tiles.
+  * A claim only takes free slots: a slot frees only through the release
+  * after the remap (a block no admitted h tile's box reaches). */
+ private claimWGSL(claims:UniformMixedSlotClaims):string{
+  const w=claims.words,R=UNIFORM_MIXED_RELAYOUT_RECEIPT,L=UNIFORM_MIXED_CLAIM_LEVEL,P=PARTICLE_RESIDENCY_WORDS;
+  const margin=RESIDENCY_STAGES.find(s=>s.name==="particles")!.margin;
+  return /* wgsl */`@group(0) @binding(10) var<storage,read_write> fsState:array<atomic<u32>>;
+@group(0) @binding(11) var<storage,read> particleAllocation:array<u32>;
+@group(0) @binding(12) var<storage,read> regionTiers:array<u32>;
+${uniformFineSlotRingWGSL}
+const FS_SLOT:u32=${w.slot}u;const FS_FREE:u32=${w.free}u;const FS_STACK:u32=${w.stack}u;const FS_CLAIMED:u32=${w.claimed}u;const FS_LIST:u32=${w.list}u;const FS_CAPACITY:u32=${claims.capacity}u;
+const CLAIMS:u32=DILATED+N;const CLAIM_WANT:u32=CLAIMS+${CLAIM_WANT}u;const CLAIM_TILES:u32=CLAIM_WANT+N/512u;const CLAIM_STATIC:u32=${this.band.staticWordOffset}u;
+fn slotless(b:u32)->bool{return umBlockStored(b)&&atomicLoad(&fsState[FS_SLOT+b])==0u;}
+fn ringSlotless(p:vec3i)->bool{
+ let lo=fsRingLow(p);let hi=fsRingHigh(p);
+ for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){if(slotless(umPageWord(vec3i(x,y,z)))){return true;}}}}
+ return false;
+}
+// A live particle holds tile p or reaches it this step: the 16-cell regions
+// within two of p's, each with its particle tiles and their travel.
+fn particleReach(p:vec3i)->bool{
+ let r=p>>vec3u(2u);
+ for(var z=-2;z<=2;z++){for(var y=-2;y<=2;y++){for(var x=-2;x<=2;x++){
+  let q=r+vec3i(x,y,z);let b=umPageWord(q>>vec3u(1u));if(!umBlockStored(b)){continue;}
+  let o=vec3u(q&vec3i(1));let at=${P}u*(8u*b+o.x+2u*o.y+4u*o.z);
+  var m=vec2u(particleAllocation[at],particleAllocation[at+1u]);if((m.x|m.y)==0u){continue;}
+  let pl=bitcast<vec3f>(vec3u(particleAllocation[at+2u],particleAllocation[at+3u],particleAllocation[at+4u]));
+  let ph=bitcast<vec3f>(vec3u(particleAllocation[at+5u],particleAllocation[at+6u],particleAllocation[at+7u]));
+  let low=vec3i(min(ceil(max(pl,vec3f(0))/4.0),vec3f(1024)))+vec3i(${margin});
+  let high=vec3i(min(ceil(max(ph,vec3f(0))/4.0),vec3f(1024)))+vec3i(${margin});
+  let origin=4*q;
+  if(any(p<origin-low)||any(p>origin+vec3i(3)+high)){continue;}
+  for(var word=0u;word<2u;word++){
+   var bits=m[word];
+   while(bits!=0u){
+    let lane=32u*word+firstTrailingBit(bits);bits&=bits-1u;
+    let c=origin+vec3i(vec3u(lane&3u,(lane>>2u)&3u,lane>>4u));
+    if(all(p>=c-low)&&all(p<=c+high)){return true;}
+   }
+  }
+ }}}
+ return false;
+}
+fn regionOf(t:u32)->u32{return 8u*(t>>9u)+(((t>>2u)&1u)|(((t>>5u)&1u)<<1u)|(((t>>8u)&1u)<<2u));}
+fn claimLevel(t:u32,p:vec3i)->u32{
+ if(particleReach(p)){return ${L.particle}u;}
+ if(((band[CLAIM_STATIC+t/32u]>>(t%32u))&1u)!=0u||(regionsAt(vec3u(p))&1u)!=0u){return ${L.static}u;}
+ return ${L.cold}u+min(regionTiers[regionOf(t)],2u);
+}
+// A tile widths makes h: every block of its ring box with no slot wants one
+// at the tile's key, its level over the 16-cell region the tile lies in. The
+// region is the tie-break within a level: the tiles of one region ask
+// together (their boxes span at most two pages an axis), so a cut between
+// keys serves each of them whole or not at all.
+fn slotWant(t:u32){
+ let p=vec3i(umTileCoord(t));let lo=fsRingLow(p);let hi=fsRingHigh(p);var key=0u;
+ for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
+  let b=umPageWord(vec3i(x,y,z));if(!slotless(b)){continue;}
+  if(key==0u){key=(claimLevel(t,p)<<24u)|regionOf(t);}
+  atomicMax(&work[CLAIM_WANT+b],key);
+ }}}
+}
+// Over the h capacity (more tiles asked for at h than the owners hold),
+// each tile widths made h is counted at its level and region.
+@compute @workgroup_size(64) fn tileKeys(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(atomicLoad(&work[NEED])<=params.fineCapacity){return;}
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){
+  let t=512u*ulResidentBlock(visit>>9u)+(visit&511u);
+  if(!umTileLive(t)||topology[t]!=1u){continue;}
+  atomicAdd(&work[CLAIM_TILES+8u*(N/512u)*(claimLevel(t,vec3i(umTileCoord(t)))-1u)+regionOf(t)],1u);
+ }
+}
+var<workgroup> wanted:atomic<u32>;
+var<workgroup> wantedTotal:u32;
+var<workgroup> freeSlots:u32;
+var<workgroup> askedTiles:u32;
+// The h tiles asked for at a key of at least k (every lane calls it).
+fn tilesFrom(k:u32,lane:u32)->u32{
+ if(lane==0u){atomicStore(&wanted,0u);}
+ workgroupBarrier();
+ var n=0u;
+ for(var i=lane;i<${8*CLAIM_LEVELS}u*ulResidentCount();i+=256u){
+  let level=(i%${8*CLAIM_LEVELS}u)/8u;let region=8u*ulResidentBlock(i/${8*CLAIM_LEVELS}u)+i%8u;
+  if((((level+1u)<<24u)|region)>=k){n+=atomicLoad(&work[CLAIM_TILES+8u*(N/512u)*level+region]);}
+ }
+ if(n!=0u){atomicAdd(&wanted,n);}
+ workgroupBarrier();
+ if(lane==0u){wantedTotal=atomicLoad(&wanted);}
+ return workgroupUniformLoad(&wantedTotal);
+}
+// The blocks wanting a slot at a key of at least k (every lane calls it).
+fn wantedFrom(k:u32,lane:u32)->u32{
+ if(lane==0u){atomicStore(&wanted,0u);}
+ workgroupBarrier();
+ var n=0u;for(var i=lane;i<ulResidentCount();i+=256u){if(atomicLoad(&work[CLAIM_WANT+ulResidentBlock(i)])>=k){n++;}}
+ if(n!=0u){atomicAdd(&wanted,n);}
+ workgroupBarrier();
+ if(lane==0u){wantedTotal=atomicLoad(&wanted);}
+ return workgroupUniformLoad(&wantedTotal);
+}
+// One group finds the cut: the least key whose blocks at or above it the
+// free slots hold (1: all of them). No block at the cut's own tile key is
+// split: every tile whose key is at least the cut is served whole. Over the
+// h capacity, the least key whose tiles at or above it the owners hold is a
+// second cut (the tile cut): settle refuses every tile below it, and the
+// slot cut is never below it.
+@compute @workgroup_size(256) fn slotCut(@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){freeSlots=atomicLoad(&fsState[FS_FREE]);askedTiles=atomicLoad(&work[NEED]);}
+ let free=workgroupUniformLoad(&freeSlots);let asked=workgroupUniformLoad(&askedTiles);
+ var tileCut=0u;
+ if(asked>params.fineCapacity){
+  var low=1u;var high=${L.particle+1}u<<24u;
+  while(high-low>1u){let mid=low+(high-low)/2u;if(tilesFrom(mid,lane)<=params.fineCapacity){high=mid;}else{low=mid;}}
+  tileCut=high;
+ }
+ var cut=max(1u,tileCut);
+ if(wantedFrom(cut,lane)>free){
+  // Bisect: more than the free slots want a key of at least low, no more than them one of at least high.
+  var low=cut;var high=${L.particle+1}u<<24u;
+  while(high-low>1u){let mid=low+(high-low)/2u;if(wantedFrom(mid,lane)<=free){high=mid;}else{low=mid;}}
+  cut=high;
+ }
+ if(lane!=0u){return;}
+ atomicStore(&work[CLAIMS],cut);atomicStore(&work[CLAIMS+1u],tileCut);
+ atomicStore(&status[${R.refused}u],0u);atomicStore(&status[${R.claims}u],0u);
+}
+@compute @workgroup_size(64) fn slotClaim(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var i=gid.x;i<ulResidentCount();i+=64u*groups.x){slotClaimOf(ulResidentBlock(i));}
+}
+fn slotClaimOf(b:u32){
+ // The tile counts tileKeys left (only over the h capacity) are spent.
+ if(atomicLoad(&work[CLAIMS+1u])!=0u){for(var level=0u;level<${CLAIM_LEVELS}u;level++){for(var o=0u;o<8u;o++){atomicStore(&work[CLAIM_TILES+8u*(N/512u)*level+8u*b+o],0u);}}}
+ let w=atomicLoad(&work[CLAIM_WANT+b]);if(w==0u){return;}
+ atomicStore(&work[CLAIM_WANT+b],0u);
+ if(w<atomicLoad(&work[CLAIMS])){return;}
+ let f=atomicSub(&fsState[FS_FREE],1u);
+ if(f==0u||f>FS_CAPACITY){atomicAdd(&fsState[FS_FREE],1u);return;}
+ atomicStore(&fsState[FS_SLOT+b],atomicLoad(&fsState[FS_STACK+f-1u]));
+ let i=atomicAdd(&fsState[FS_CLAIMED],1u);atomicStore(&fsState[FS_LIST+i],b);
+ atomicAdd(&status[${R.claims}u],1u);
+}
+// A tile asked for at h whose ring box still holds a slotless block, or
+// below the tile cut, is refused (4h); then the tiles whose width changed
+// are listed.
+@compute @workgroup_size(64) fn settle(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){settleOf(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+}
+fn settleOf(t:u32){
+ // The slots the claim left free, and the fewest yet.
+ if(t==ulResidentBlock(0u)*512u){let free=atomicLoad(&fsState[FS_FREE]);atomicStore(&status[${R.free}u],free);atomicMin(&status[${R.leastFree}u],free);}
+ if(!umTileLive(t)){return;}
+ var w=topology[t];
+ if(w==1u){
+  let p=vec3i(umTileCoord(t));let tileCut=atomicLoad(&work[CLAIMS+1u]);
+  if(ringSlotless(p)||(tileCut!=0u&&((claimLevel(t,p)<<24u)|regionOf(t))<tileCut)){w=4u;topology[t]=4u;atomicAdd(&status[${R.refused}u],1u);}
+ }
+ if(w!=wordWidth(current[t])){atomicStore(&work[CHANGED+atomicAdd(&work[0],1u)],t);}
+}
+`;
  }
  /** The authored regions (uniformMixedRegionTable), the table the census
   * holds too (UniformMixedDynamicClassifier.setRegions): a build makes every
@@ -549,6 +786,7 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
   * encode's build. */
  setAdmission(tiles?:number):void{
   if(tiles!==undefined&&(!Number.isSafeInteger(tiles)||tiles<0||tiles>this.tiles))throw new Error(`Mixed layout builder admission capacity must be an integer in 0..${this.tiles}: ${tiles}`);
+  if(tiles!==undefined&&this.claims)throw new Error("Mixed layout builder: a slot claim refuses tiles instead of deferring builds (no admission capacity)");
   this.admission=tiles;this.word[0]=tiles??0xffffffff;this.device.queue.writeBuffer(this.level.params,16,this.word);
  }
  private admission?:number;
@@ -560,11 +798,13 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
  /** The ownership capacity the params' hanging and h-tile bounds were written at. */
  private capacityRevision:number;
  /** encode's launches in order, resolved once (apart from encode: a closure there would cost every encode a context). */
- private buildLaunches():readonly GPUComputePipeline[]{return ["widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"].map(entry=>this.pipelines.get(entry)!);}
+ private buildLaunches():readonly GPUComputePipeline[]{return this.entries().map(entry=>this.pipelines.get(entry)!);}
+ /** The entry points, in launch order (admit only under an admission capacity, the claim's under a slot claim). */
+ private entries():readonly string[]{return this.claims?["widths","tileKeys","slotCut","slotClaim","settle","classify","mirror","dilate","scan","scatter","verifyWords"]:["widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"];}
  /** Encode after the band bits are written, while the ownership is still
   * the generation to compare against; encodeClear must precede it. */
  encode(encoder:GPUCommandEncoder):void{
-  if(this.pipelines.size!==8)throw new Error("Mixed layout builder is not initialized");
+  if(this.pipelines.size!==this.entries().length)throw new Error("Mixed layout builder is not initialized");
   if(!this.staticReady)throw new Error("Mixed layout builder has no region table");
   if(!this.cleared)throw new Error("Mixed layout builder encoded without encodeClear");
   this.cleared=false;
@@ -581,16 +821,25 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
    this.word[0]=level.current.capacity.fineTiles;this.device.queue.writeBuffer(level.params,12,this.word);
   }
   const launches=this.launches??=this.buildLaunches();
-  const pass=encoder.beginComputePass(UniformMixedLayoutBuilder.PASS);pass.setBindGroup(0,level.group);
+  const pass=encoder.beginComputePass(UniformMixedLayoutBuilder.PASS);pass.setBindGroup(0,this.claimGroup??level.group);
   // admit is launched only under an admission capacity: without one it could never act.
   pass.setPipeline(launches[0]!);pass.dispatchWorkgroups(keys);
-  if(this.admission!==undefined){pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);}
-  pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(wide);
-  pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(keys);
-  pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(keys);
-  pass.setPipeline(launches[5]!);pass.dispatchWorkgroups(1);
-  pass.setPipeline(launches[6]!);pass.dispatchWorkgroups(wide);
-  pass.setPipeline(launches[7]!);pass.dispatchWorkgroups(verify);
+  let next=1;
+  if(this.claims){
+   // The claim: the tiles count their keys over the h capacity, one group
+   // cuts, the resident blocks claim, the tiles settle.
+   pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);
+   pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(1);
+   pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,Math.ceil(this.tiles/512/64)));
+   pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(keys);
+   pass.setBindGroup(0,level.group);next=5;
+  }else{if(this.admission!==undefined){pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);}next=2;}
+  pass.setPipeline(launches[next]!);pass.dispatchWorkgroups(wide);
+  pass.setPipeline(launches[next+1]!);pass.dispatchWorkgroups(keys);
+  pass.setPipeline(launches[next+2]!);pass.dispatchWorkgroups(keys);
+  pass.setPipeline(launches[next+3]!);pass.dispatchWorkgroups(1);
+  pass.setPipeline(launches[next+4]!);pass.dispatchWorkgroups(wide);
+  pass.setPipeline(launches[next+5]!);pass.dispatchWorkgroups(verify);
   pass.end();
  }
  destroy():void{

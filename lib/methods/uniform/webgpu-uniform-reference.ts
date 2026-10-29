@@ -11,7 +11,7 @@ import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
-import { UNIFORM_FINE_SLOT_TILES, uniformFineBlocks } from "./uniform-fine-slots";
+import { UNIFORM_FINE_SLOT_TILES, uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
@@ -1202,7 +1202,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // particles at it. A build over the ceiling is fatal (followMixedCapacity).
     const tiers=this.scene.fluid.tiers,coarseStart=gpuLayout&&tiers?.start==="4h";
     const seed=this.mixedSeed=coarseStart?this.dynamicSeed():undefined;
-    const fineCeiling=Math.min(tiles,seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiers?.bricks!==undefined?8*tiers.bricks:tiles);
+    // M4b: unless fluid.tiers.bricks or fineBlocks gives a figure, a coarse
+    // start holds its h slots by one rule from the census footprint
+    // (uniformFineSlotRule) and its h tiles at UNIFORM_FINE_SLOT_TILES a
+    // slot; the build's claim refuses to 4h what they cannot serve.
+    const cells:[number,number,number]=[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz];
+    const slotRule=this.mixedSlotRule=coarseStart&&tiers?.bricks===undefined&&uniformFineBlocks(tiers)==="auto"
+      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number],this.pageResidency.air))):undefined;
+    const fineCeiling=Math.min(tiles,slotRule!==undefined?UNIFORM_FINE_SLOT_TILES*slotRule:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiers?.bricks!==undefined?8*tiers.bricks:tiles);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
     const particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined||coarseStart?{fineTiles:fineCeiling,perFineCell:tiers?.particlesPerFineCell??4}:undefined;
     // The solid record's fraction and aperture slots under fluid.tiers: only a
@@ -1235,7 +1242,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
     if(this.narrowBandColdCensus==="replay")this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers);
-    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership,this.mixedFrame.pagePool);
+    // A coarse start over slotted h stores: the build claims the slots of the
+    // tiles it makes h and keeps at 4h a tile no free slot serves (M4b).
+    const slotClaims=coarseStart&&uniformFineBlocks(tiers)!==undefined?{...detail.slotClaims,particles:this.mixedFrame.narrowBandFlip.particleTiles.allocation,heat:this.mixedFrame.heat.tiers}:undefined;
+    this.mixedBuilder=new UniformMixedLayoutBuilder(this.device,this.mixedDynamic.bandBits,this.mixedFrame.ownership,this.mixedFrame.pagePool,slotClaims);
+    detail.claimsInBuild=!!slotClaims;
     this.mixedBodies=new UniformMixedBodies(this.device,this.mixedFrame.ownership,this.mixedFrame.solid!,{velocity:this.velocityA,phi:this.vertexPhiField,exchange:this.rigidExchange,pressure:()=>this.mixedFrame!.rigidPressure},this.mixedFrame.pagePool);
     // The frame's forces and its samples read the bed-slope lane; the bake is
     // its only writer. Built with the frame whether or not the scene has a
@@ -1287,9 +1298,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // block reads the field's base (the sparse domain).
     // "auto" under a ceiling (a coarse start) holds the ceiling's tiles at UNIFORM_FINE_SLOT_TILES a slot.
     const fineBlocks=uniformFineBlocks(this.scene.fluid?.tiers),ceiling=this.mixedFrame.fineCeiling;
-    if(fineBlocks!==undefined)await detail.compact(fineBlocks==="auto"?undefined:fineBlocks,ceiling<this.address.poolTiles?Math.ceil(ceiling/UNIFORM_FINE_SLOT_TILES):0);
+    if(fineBlocks!==undefined)await detail.compact(this.mixedSlotRule??(fineBlocks==="auto"?undefined:fineBlocks),ceiling<this.address.poolTiles?Math.ceil(ceiling/UNIFORM_FINE_SLOT_TILES):0);
   }
   private mixedDynamic?: UniformMixedDynamicClassifier;
+  /** A coarse start's h slots by M4b's rule (uniformFineSlotRule), when no tiers figure overrides it. */
+  private mixedSlotRule?: number;
   /** GPU ownership builder for dynamic relayouts; region edits stay on the CPU path. */
   private mixedBuilder?: UniformMixedLayoutBuilder;
   private mixedBuilderStaticKey?: string;
@@ -1711,7 +1724,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedGrownNeed=-1;private mixedGrown=0;private mixedRoomedNeed=-1;private mixedRoomed=0;
   private admitMixed(tiles?:number,fits=false):void{
     const frame=this.mixedFrame!,capacity=frame.ownership.capacity;
-    if(tiles!==this.mixedReserved){const admit=tiles===undefined?undefined:Math.min(tiles,frame.fineCeiling);this.mixedBuilder!.setAdmission(admit===undefined||admit>=capacity.address.poolTiles?undefined:admit);this.mixedReserved=tiles;this.staleMixed(fits?{tiles:0,reach:0}:undefined);}
+    if(tiles!==this.mixedReserved){const admit=tiles===undefined||this.mixedBuilder!.claiming?undefined:Math.min(tiles,frame.fineCeiling);this.mixedBuilder!.setAdmission(admit===undefined||admit>=capacity.address.poolTiles?undefined:admit);this.mixedReserved=tiles;this.staleMixed(fits?{tiles:0,reach:0}:undefined);}
     this.publishMixedCapacity();
   }
   private publishMixedCapacity():void{
@@ -1904,6 +1917,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     info.uniformMixedLayoutBuild_ms=0;info.uniformMixedLayoutApply_ms=0;
     info.uniformMixedDynamicRelayouts=generation;info.uniformMixedDynamicChangedTiles=r[R.changed]!;
     info.uniformMixedDynamicInterfaceTiles=r[C]!;info.uniformMixedDynamicBandTiles=r[C+2]!;
+    if(this.mixedBuilder!.claiming){
+      const capacity=this.detailStorage!.fineSlots.capacity;
+      info.uniformMixedRefusedTiles=r[R.refused]!;info.uniformMixedRefusedTileBuilds=r[R.refusedSum]!;info.uniformMixedSlotClaims=r[R.claims]!;
+      info.uniformMixedSlotCapacity=capacity;info.uniformMixedSlotsUsed=capacity-r[R.free]!;info.uniformMixedSlotPeak=r[R.leastFree]===0xffffffff?0:capacity-r[R.leastFree]!;
+    }
     info.uniformMixedDynamicRefined=r[C+4]!;info.uniformMixedDynamicCoarsened=r[C+5]!;info.uniformMixedDynamicRequiredTiles=r[C+12]!;info.uniformMixedDynamicBoundaryTiles=r[C+16]!;info.uniformMixedDynamicSolidTiles=r[C+19]!;info.uniformMixedDynamicUnresolvedCoarse=r[C+1]!;
     info.uniformMixedDynamicCoarsePartialVolume=r[C+6]!;info.uniformMixedDynamicCoarsePhiCrossing=r[C+7]!;info.uniformMixedDynamicCoarseDryLiquidPhi=r[C+3]!;
     // The two pairs are this solver's, rewritten in place like the record that holds them.

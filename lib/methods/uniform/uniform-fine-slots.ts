@@ -10,9 +10,13 @@
  * A block needs a slot while it holds a tile of the detail ring, or the
  * texel of a vertex of one (a ring tile on a page's low face has corners in
  * the skirt or the high plane of the page below: umVertexSlot of its eight
- * corners). Slots are claimed from a free stack, fail fast when it is empty
- * (UNIFORM_DETAIL_SLOT_VIOLATION in the detail violation word), and are
- * released once the adopted generation no longer needs them.
+ * corners). The mark takes the stored pages that cover the ring box of each
+ * h tile (uniformFineSlotRingWGSL), which hold all of those; the layout
+ * builder's claim (uniform-mixed-layout-builder.ts) reads the same box, so a
+ * block it claims is a block the mark keeps. Slots are claimed from a free
+ * stack, fail fast when it is empty (UNIFORM_DETAIL_SLOT_VIOLATION in the
+ * detail violation word), and are released once the adopted generation no
+ * longer needs them.
  *
  * State (u32 words, UniformFineSlotWords): the slot of every block, its need
  * mark, the free count and stack, the claimed count and list (the blocks a
@@ -26,6 +30,38 @@ export const UNIFORM_FINE_SLOT_GROWTH=1.5,UNIFORM_FINE_SLOT_FLOOR=16;
  * many a slot: a ring is sparse in its blocks (letters at 4273 h tiles held
  * 98 blocks, 44 a block; the seep's jet 40 at 500 tiles, 12 a block). */
 export const UNIFORM_FINE_SLOT_TILES=32;
+/** The page layers of one column's band (M4b's capacity rule): an h tile's
+ * ring box spans 29 cells an axis (fsRingLow, fsRingHigh), so the box of a
+ * surface tile and the tile across the interface from it, 33 cells, meets
+ * at most three pages of a column. */
+export const UNIFORM_FINE_SLOT_BAND_LAYERS=3;
+/** The h slots a census footprint holds (docs/plans/bulk16-plan-2026-10-28.md,
+ * M4b): UNIFORM_FINE_SLOT_GROWTH x its page columns x the band's page layers,
+ * one rule for every scene. A build that wants more is refused to 4h. */
+export function uniformFineSlotRule(columns:number):number{
+ if(!(Number.isSafeInteger(columns)&&columns>=1))throw new RangeError(`An h slot rule needs a footprint of whole columns, not ${columns}`);
+ return Math.ceil(UNIFORM_FINE_SLOT_GROWTH*columns*UNIFORM_FINE_SLOT_BAND_LAYERS);
+}
+/** The census footprint's page columns: the distinct (x, z) of the box pages
+ * resident at build (liquid and its reachable air: uniformPagePoolResidency's
+ * seed, within its closure margin of the initial liquid, and the sources' pins). */
+export function uniformFineSlotFootprintColumns(pages:readonly [number,number,number],air:readonly (readonly [number,number,number])[]):number{
+ const [px,py,pz]=pages,stored=new Uint8Array(px*py*pz).fill(1);
+ for(const [x,y,z] of air)stored[x+px*(y+py*z)]=0;
+ let columns=0;
+ for(let z=0;z<pz;z++)for(let x=0;x<px;x++){let any=false;for(let y=0;y<py&&!any;y++)any=stored[x+px*(y+py*z)]===1;if(any)columns++;}
+ return columns;
+}
+/** The pages an h tile p's detail ring reaches, inclusive, in page
+ * coordinates: those covering cells [4p - 13, 4p + 15] on each axis. Its
+ * ring is the tiles within three of it (cells [4p - 12, 4p + 15]); a ring
+ * tile's corner vertex v is held at the page of cell v - 1 (down to
+ * 4p - 13), or, where that page is not stored, at a page holding cell v
+ * itself (at most 4p + 12 for a low corner: a high corner's page of v - 1 is
+ * the ring tile's own). At most two pages an axis. */
+export const uniformFineSlotRingWGSL=/* wgsl */`fn fsRingLow(p:vec3i)->vec3i{return (4*p-vec3i(13))>>vec3u(5u);}
+fn fsRingHigh(p:vec3i)->vec3i{return (4*p+vec3i(15))>>vec3u(5u);}
+`;
 /** Workgroups an init launch strides the claimed list with. */
 const INIT_GROUPS=32;
 
@@ -87,17 +123,18 @@ function slotsWGSL(seam:(table:string)=>string,words:UniformFineSlotWords,blocks
 fn drTiles()->vec3u{return drDimensions.xyz;}
 fn drCount()->u32{return 512u*drDimensions.w;}
 ${seam("drHeldWords")}
+${uniformFineSlotRingWGSL}
 const FS_BLOCKS:u32=${blocks}u;const FS_CAPACITY:u32=${capacity}u;
-// A ring tile of the next generation marks its block and the blocks holding its corners.
+// An h tile of the next generation marks the stored pages of its ring box:
+// its ring tiles' blocks and the blocks holding their corners.
 @compute @workgroup_size(64) fn mark(@builtin(global_invocation_id) gid:vec3u){
  let t=gid.x;if(!umTileLive(t)){return;}
- if((drNextWords[2u*drCount()+2u*t+1u]&1u)==0u){return;}
- atomicStore(&fsState[${words.need}u+(t>>9u)],1u);
- let c=vec3i(umTileCoord(t));
- for(var k=0;k<8;k++){
-  let s=umVertexSlot(4*(c+vec3i(k&1,(k>>1)&1,k>>2)));
-  if(umBlockStored(s.w)){atomicStore(&fsState[${words.need}u+s.w],1u);}
- }
+ if((drNextWords[t]&0x80000000u)==0u){return;}
+ let p=vec3i(umTileCoord(t));let lo=fsRingLow(p);let hi=fsRingHigh(p);
+ for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
+  let b=umPageWord(vec3i(x,y,z));
+  if(umBlockStored(b)){atomicStore(&fsState[${words.need}u+b],1u);}
+ }}}
 }
 // A needed block with no slot pops one; an empty stack is fatal.
 @compute @workgroup_size(64) fn claim(@builtin(global_invocation_id) gid:vec3u){
@@ -166,18 +203,23 @@ export class UniformFineSlots{
   return g;
  }
  /** Slots for every block the next generation's ring needs (held: the
-  * topology whose page table places the vertices), the claimed list beside
-  * them. tiles: the tile keys. */
+  * topology whose page table places the vertices), appended to the claimed
+  * list. tiles: the tile keys. The list's init then empties it
+  * (encodeInitialized). */
  encodeClaim(encoder:GPUCommandEncoder,held:GPUBuffer,next:GPUBuffer,tiles:number):void{
   const p=this.pipelines;if(!p)throw new Error("Uniform h slots are not initialized");
   const w=this.words;
-  encoder.clearBuffer(this.state,4*w.need,4*this.blocks);encoder.clearBuffer(this.state,4*w.claimed,4);
+  // The claimed list is not cleared here: a layout builder's claims ahead of
+  // this one are on it, and its init empties it (encodeInitialized).
+  encoder.clearBuffer(this.state,4*w.need,4*this.blocks);
   const pass=encoder.beginComputePass({label:"Uniform detail h slot claim"}),g=this.group(held,next);
   pass.setBindGroup(0,g);
   pass.setPipeline(p.mark);pass.dispatchWorkgroups(Math.ceil(tiles/64));
   pass.setPipeline(p.claim);pass.dispatchWorkgroups(Math.ceil(this.blocks/64));
   pass.end();
  }
+ /** After an init launch over the claimed list: the list is empty again. */
+ encodeInitialized(encoder:GPUCommandEncoder):void{encoder.clearBuffer(this.state,4*this.words.claimed,4);}
  /** After the remap: the blocks the last claim's generation does not need give their slots back. */
  encodeRelease(encoder:GPUCommandEncoder,held:GPUBuffer):void{
   const p=this.pipelines;if(!p)throw new Error("Uniform h slots are not initialized");

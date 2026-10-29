@@ -714,6 +714,9 @@ var<workgroup> sums:array<atomic<u32>,16>;
       tiles: { h: all[READ.work / 4], coarse: all[READ.work / 4 + 1], residentPages: all[READ.work / 4 + 7], probedH: u[19], probedCoarse: u[20] },
       pool: { resident: status[S.resident], free: status[S.free], claimed: status[S.claimed], fatal: uniformPagePoolFatalMessage(frame.pagePool.layout, status) ?? undefined },
       regions: { cold: all[READ.heat / 4], warm: all[READ.heat / 4 + 1], hot: all[READ.heat / 4 + 2], free: all[READ.heat / 4 + 3] },
+      // The build's h-slot claim (M4b): capacity, in use, peak, this build's claims and refused tiles, refused tile-builds so far.
+      slots: (() => { const i = solver.info as unknown as Record<string, number | undefined>; return i.uniformMixedSlotCapacity === undefined ? undefined
+        : { capacity: i.uniformMixedSlotCapacity, used: i.uniformMixedSlotsUsed, peak: i.uniformMixedSlotPeak, claims: i.uniformMixedSlotClaims, refused: i.uniformMixedRefusedTiles, refusedBuilds: i.uniformMixedRefusedTileBuilds }; })(),
       // coldSurface "still": the liquid's extent along gravity (regions), this frame's fastest travel (h a step), and the frames it reached a region.
       still: { extentRegions: all[READ.still / 4], travel_h: new Float32Array(all.buffer, all.byteOffset + READ.still + 12, 1)[0], breachFrames: all[READ.still / 4 + 4] },
       phi: { source: phiSource, measured, totals, solverCells: stats.volumeCellSum, represented: stats.representedVolumeCellSum, rawDrift: stats.rawVolumeDrift,
@@ -1168,7 +1171,7 @@ const lateMean = (path: string) => { const v = rows.map(r => get(r, path)).filte
   const l = v.slice(Math.floor(v.length / 2)); return l.length ? l.reduce((x, y) => x + y, 0) / l.length : undefined; };
 const summary = { steps: frameReached, failure, volumeGate, traceCapped: traceCappedTotal, step_ms: { mean, median: pct(.5), p95: pct(.95), longest: timed[timed.length - 1], thirds },
   peaks: { hTiles: peak("tiles.h"), coarseTiles: peak("tiles.coarse"), resident: peak("pool.resident"), particles: peak("particles"),
-    hTilesRightFloor: peak("zones.hTilesRightFloor"), hTilesRightJet: peak("zones.hTilesRightJet"), hTilesThroat: peak("zones.hTilesThroat"), hot: peak("regions.hot"), warm: peak("regions.warm"), allocatedBytes: peak("allocatedBytes") },
+    hTilesRightFloor: peak("zones.hTilesRightFloor"), hTilesRightJet: peak("zones.hTilesRightJet"), hTilesThroat: peak("zones.hTilesThroat"), hot: peak("regions.hot"), warm: peak("regions.warm"), allocatedBytes: peak("allocatedBytes"), slots: peak("slots.peak"), refusedTiles: peak("slots.refused") },
   final: { tiles: last.tiles, pool: last.pool, regions: last.regions, zones: last.zones, volume: last.volume, liquid_m3: last.liquid_m3, byClass: last.byClass },
   discharge: { cdRightLateHalfMean: lateMean("discharge.cdRight"), cdThroatLateHalfMean: lateMean("discharge.cdInstant"), qThroatLateHalfMean_m3_s: lateMean("discharge.qInstant_m3_s"),
     rightVolume_L: (get(last, "liquid_m3.right") ?? 0) * 1000, torricelliAtStart_m3_s: get(rows[0] ?? {}, "discharge.qTorricelli_m3_s") } };
