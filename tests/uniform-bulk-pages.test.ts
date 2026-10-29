@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {BULK16_PAGE,BULK16_PAGE_WORDS,BULK16_PHI_TEXELS,BULK16_TAIL_CHANNELS,bulk16FaceIndexWGSL,bulk16PageLayout,bulk16ReadWGSL,bulk16PageSlot,bulk16PageWord,bulk16TransferWGSL,prolongBulk16Page,restrictBulk16Page} from "../lib/methods/uniform/uniform-bulk-pages-reference";
-import {BULK16_STATUS,bulk16Failure,bulk16LifecycleWGSL,UniformBulkPages} from "../lib/methods/uniform/uniform-bulk-pages";
+import {BULK16_STATUS,bulk16Failure,bulk16LifecycleWGSL,bulk16LiveWGSL,UniformBulkPages} from "../lib/methods/uniform/uniform-bulk-pages";
 import {uniformLatticeAddress,uniformPageKind,uniformPageWord,uniformPageBlock,uniformBlockStored,UNIFORM_KIND,UNIFORM_NEAR_SPAN,UNIFORM_PAGE_TABLE_WORDS,uniformBlockHeld,uniformBlockNeighbourLayout,uniformBlockNeighbourWords,uniformNearFrom} from "../lib/methods/uniform/uniform-lattice-address";
 import {UniformBlockNeighbours} from "../lib/methods/uniform/uniform-block-neighbours";
 import {uniformExtrapolationClosedFace} from "../lib/methods/uniform/uniform-velocity-extrapolation-twin";
@@ -148,7 +148,7 @@ test("BULK16 pool: a demoted page gives its block back, keeps its word against r
 
 test("BULK16 page storage holds its phi block and stays within four KiB per page at vast-scene scale",()=>{
  assert.ok(BULK16_PAGE.phi+BULK16_PHI_TEXELS<=BULK16_PAGE.tail3);
- assert.ok(BULK16_PAGE.tail5+BULK16_TAIL_CHANNELS<=BULK16_PAGE_WORDS);
+ assert.ok(BULK16_PAGE.tail5+BULK16_TAIL_CHANNELS<=BULK16_PAGE.promoteLevel&&BULK16_PAGE.promoteLevel<BULK16_PAGE_WORDS);
  const plan=bulk16PageLayout(100_000);
  assert.ok(plan.records>=plan.pending+plan.capacity);
  assert.ok(plan.bytes<420_000_000);
@@ -192,6 +192,25 @@ test("BULK16 GPU slots quarantine retired pages and fail explicitly at fixed cap
    assert.equal(third[BULK16_STATUS.live],3);assert.equal(third[BULK16_STATUS.pending],0);
    assert.ok(bulk16Failure(third),"capacity failures remain sticky");
    assert.deepEqual(Array.from(third.subarray(pages.layout.live,pages.layout.live+3)),[1,2,3]);
+   // A reader compiled without the capacity (the renderer's) finds the live
+   // slots' pages from the status words alone.
+   const live=device.createBuffer({size:64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),liveRead=device.createBuffer({size:64,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+   try{
+    const reader=device.createShaderModule({code:`@group(0) @binding(0) var<storage,read> liveStore:array<u32>;
+@group(0) @binding(1) var<storage,read_write> livePages:array<i32>;
+${bulk16LiveWGSL("liveStore")}
+@compute @workgroup_size(1) fn main(){let n=liveStoreLive();livePages[0]=i32(n);for(var i=0u;i<n;i++){let p=liveStoreLivePage(i);livePages[1u+3u*i]=p.x;livePages[2u+3u*i]=p.y;livePages[3u+3u*i]=p.z;}}`});
+    const readerLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+    const pipe=await device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[readerLayout]}),compute:{module:reader,entryPoint:"main"}});
+    const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipe);
+    pass.setBindGroup(0,device.createBindGroup({layout:readerLayout,entries:[{binding:0,resource:pages.binding},{binding:1,resource:{buffer:live}}]}));pass.dispatchWorkgroups(1);pass.end();
+    encoder.copyBufferToBuffer(live,0,liveRead,0,64);device.queue.submit([encoder.finish()]);await liveRead.mapAsync(GPUMapMode.READ);
+    const found=new Int32Array(liveRead.getMappedRange().slice(0));liveRead.unmap();
+    const signed=new Int32Array(third.buffer,third.byteOffset,pages.state.size/4);
+    const expected=[1,2,3].flatMap(slot=>Array.from(signed.subarray(pages.layout.records+BULK16_PAGE_WORDS*slot+BULK16_PAGE.page,pages.layout.records+BULK16_PAGE_WORDS*slot+BULK16_PAGE.page+3)));
+    assert.deepEqual(Array.from(found.subarray(0,10)),[3,...expected]);
+    assert.deepEqual(expected.slice(0,3),[-2,3,4]);
+   }finally{live.destroy();liveRead.destroy();}
   }finally{read.destroy();output.destroy();pages.destroy();}
  });
 });

@@ -4,7 +4,7 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { createReservoirSeepScene, RESERVOIR_SEEP_ID } from "../lib/core/reservoir-seep-scene";
 import { RESIDENCY_STAGES } from "../lib/methods/uniform/uniform-local-residency";
-import { BULK16_PAGE, BULK16_PAGE_WORDS } from "../lib/methods/uniform/uniform-bulk-pages-reference";
+import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_SCAN } from "../lib/methods/uniform/uniform-bulk-pages-reference";
 import { BULK16_STATUS } from "../lib/methods/uniform/uniform-bulk-pages";
 import { UNIFORM_BULK_REACH_CELLS } from "../lib/methods/uniform/uniform-bulk-tier-reference";
 import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
@@ -323,17 +323,85 @@ test("BULK16 promote: a page a particle's closure reaches takes its block back b
  });
 });
 
-test("BULK16 promote: a falling drop asks back the column's top deep page before it lands, and the page below stays",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+// A disturbed deep region: every page asked back has a physical cause,
+// named by its promote word, and none is a cascade.
+//  0 the closure of a live sample whose travel reaches it (the census's
+//    particle stage: the sample's tile, its travel of the move rounded up
+//    to tiles, a ballistic sample's speed bounding every direction, and the
+//    stage's two-tile margin; within its region's fastest travel + 16 cells
+//    of the sample, and the bank holds the move's end velocity, so 24);
+//  1 the structural scan (its tiles +-4: surface, band, cut, AIR, region
+//    heat from contact, Sato et al.'s velocity detail or live particles,
+//    or its own face speed), which records the tests it failed
+//    (BULK16_SCAN's bits in promoteError): a contact the kernel measured.
+//    Its gap to the samples is not a bound: velocity-detail heat under the
+//    impact cavity reaches the page below with no sample near (measured:
+//    0,1,0 from HOT alone at gaps 33 and 40, frames 64 and 65);
+//  2 the error test of its own face rows, whose measured error must exceed
+//    the level it records (twice the member tolerance).
+// A promote's claim heat is not a cause: chained through the connected
+// bulk it reached every page. In an incompressible liquid an impact's
+// pressure reaches the bottom at once, so a deep page may leave by its
+// error test; only a page at rest must stay (the at-rest tests).
+type Promote={page:string;y:number;step:number;why:number;gap:number;error?:number;level?:number;scan?:number};
+async function followPromotes(device:GPUDevice,solver:any,scene:any,demotedCount:number,until:number):Promise<Promote[]>{
+ const frame=solver.mixedFrame,store=frame.bulkPages,L=store.layout,offset=(store.binding.offset??0) as number;
+ const rd=async(buffer:GPUBuffer,at:number,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,at,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
+ const read=(at:number,n:number)=>rd(store.binding.buffer,offset+4*at,n);
+ const live=async()=>{const n=(await read(BULK16_STATUS.live,1))[0]!;return n?[...(await read(L.live,n))]:[];};
+ const pageOf=new Map<number,number[]>();
+ const pages=async()=>{const slots=await live();for(const s of slots)if(!pageOf.has(s))pageOf.set(s,[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0));return slots;};
+ const dt=scene.numerics.fixedDt_s;let step=0;
+ const advance=async()=>{step++;assert.ok(solver.advanceTo(step*dt,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
+ for(;step<40;)await advance();
+ const demoted=await pages();
+ assert.equal(demoted.length,demotedCount,"the deep pages demote before the drop nears");
+ // The live samples each step, in box cells (32 a page from the held frame
+ // page, state words 12..14), each with its 16-cell region's fastest speed
+ // for the move: the census keeps one radius a region and direction.
+ const nb=frame.narrowBandFlip,stride=nb.particleStride as number,cell=scene.voxelDomain?.finestCellSize_m??0.01;
+ const samples=async()=>{const st=await rd(nb.state,0,16),count=st[0]!,out:number[][]=[];if(!count)return out;const f=new Float32Array((await rd(nb.activeParticles,0,stride*count)).buffer);
+  for(let i=0;i<count;i++){const o=stride*i;if(f[o+3]!>0)out.push([0,1,2].map(a=>f[o+a]!+32*(st[12+a]!|0)).concat(Math.hypot(f[o+4]!,f[o+5]!,f[o+6]!)*dt/cell));}
+  const fastest=new Map<string,number>(),key=(q:number[])=>q.slice(0,3).map(v=>Math.floor(v/16)).join(",");
+  for(const q of out)fastest.set(key(q),Math.max(fastest.get(key(q))??0,q[3]!));
+  return out.map(q=>[q[0]!,q[1]!,q[2]!,fastest.get(key(q))!]);};
+ // A page's gap to the nearest sample's travel: the largest axis gap
+ // between the sample and the page's 32 cells, less the sample's travel.
+ const gap=(page:number[],at:number[][])=>Math.min(Infinity,...at.map(q=>Math.max(...[0,1,2].map(a=>Math.max(0,32*page[a]!-q[a]!,q[a]!-32*page[a]!-32)))-q[3]!));
+ const seen=new Map<number,number[][]>([[step,await samples()]]);
+ const promoted=new Map<number,{step:number;why:number;error:number;level:number;scan:number}>();
+ for(;step<until;){
+  await advance();seen.set(step,await samples());const now=new Set(await pages());
+  for(const s of demoted)if(!now.has(s)&&!promoted.has(s)){
+   const at=L.records+BULK16_PAGE_WORDS*s,why=(await read(at+BULK16_PAGE.promote,1))[0]!;
+   const cause=await read(at+BULK16_PAGE.promoteError,1),error=new Float32Array(cause.buffer)[0]!,level=new Float32Array((await read(at+BULK16_PAGE.promoteLevel,1)).buffer)[0]!;
+   promoted.set(s,{step,why,error,level,scan:cause[0]!});
+  }
+ }
+ return [...promoted].map(([s,p])=>{const page=pageOf.get(s)!;return {page:page.join(","),y:page[1]!,step:p.step,why:p.why,
+  gap:Math.round(Math.min(...[p.step-2,p.step-1,p.step].map(k=>gap(page,seen.get(k)!)))),...(p.why===2?{error:p.error,level:p.level}:{}),...(p.why===1?{scan:p.scan}:{})};});
+}
+function assertPromoteCauses(record:Promote[]){
+ assert.deepEqual(record.filter(p=>![0,1,2].includes(p.why)),[],"every promote carries its cause word");
+ assert.deepEqual(record.filter(p=>p.why===0&&p.gap>24),[],"a closure promote lies within a live sample's travel (no cascade)");
+ const known=Object.values(BULK16_SCAN).reduce((a,b)=>a|b,0);
+ assert.deepEqual(record.filter(p=>p.why===1&&!(p.scan!>0&&(p.scan!&~known)===0)),[],"a scan promote records the contact it measured");
+ assert.deepEqual(record.filter(p=>p.why===2&&!(p.level!>0&&p.error!>p.level!)),[],"an error-test promote's measured error exceeds its level");
+}
+
+test("BULK16 promote: a falling drop asks back the column's top deep page before it lands, each page for a physical cause",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("BULK16 disturbed promote",async device=>{
   // A one-page column at 1 cm, water to 1.30 m, and a 0.2 m cube of water
   // 3.1 m above it: the three deep pages demote (frame 35) before the drop
   // nears (near frame 46) and lands (near 49). Its fall stays under the
   // residency's reach (a full-section slab from 3 m does not, with or
   // without BULK16), so the scene is well posed. The falling samples'
-  // closure (a ballistic sample's speed bounds every direction) reaches the
-  // top deep page y2 before they land, and that commit takes it back (its
-  // promote word 0: neither scan asked); the scans may ask more back (1 the
-  // structural scan, 2 the error test). Page y0 stays BULK16.
+  // closure reaches the top deep page y2 before they land, and that commit
+  // takes it back (its promote word 0: neither scan asked). Measured: y1
+  // by its error test or the closure in some runs, y0 by its error test in
+  // two runs of twelve, the one with its cause recorded just over its
+  // level (0.004738 against 0.004709 m/s, 1.006x): a borderline trigger,
+  // the impact's pressure.
   const base=getSceneDefinition(RESERVOIR_SEEP_ID),drop=0.2;
   const {scene}=sceneDocumentAtLattice({...base,buildAt:(l:{cellSize_m:number})=>createReservoirSeepScene(l.cellSize_m,{widthScale:0.125,depthScale:1,heightScale:4})},{cellSize_m:0.01});
   const v=scene.fluid.initialLiquidVolumes![0]! as any,W=scene.container.width_m,D=scene.container.depth_m;scene.solidVoxels=[];
@@ -341,25 +409,11 @@ test("BULK16 promote: a falling drop asks back the column's top deep page before
    {shape:"box",min_m:{x:-drop/2,y:4.4,z:-drop/2},max_m:{x:drop/2,y:4.4+drop,z:drop/2}}];
   scene.fluid.pagePool={...scene.fluid.pagePool,blocks:28};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;
   const solver=await createUniformSolver(device,scene,{...base.methodProfile!.overrides,bulkTier:"16h",volumeControlSeconds:0});
-  const frame=(solver as unknown as {mixedFrame:Frame}).mixedFrame as any;
   try{
-   const store=frame.bulkPages,L=store.layout,offset=(store.binding.offset??0) as number;
-   const read=async(at:number,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(store.binding.buffer,offset+4*at,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
-   const live=async()=>{const n=(await read(BULK16_STATUS.live,1))[0]!;return n?[...(await read(L.live,n))]:[];};
-   const slotOf=new Map<number,{page:string;y:number}>();
-   const pages=async()=>{const slots=await live();for(const s of slots){if(!slotOf.has(s)){const p=[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0);slotOf.set(s,{page:p.join(","),y:p[1]!});}}return slots;};
-   let step=0,demoted:number[]=[];
-   const advance=async()=>{step++;assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
-   for(;step<40;)await advance();
-   demoted=await pages();
-   assert.equal(demoted.length,3,"the column's deep pages demote before the drop nears");
-   // Follow the column through the impact.
-   const promoted=new Map<number,number>();
-   for(;step<110;){await advance();const now=new Set(await pages());for(const s of demoted)if(!now.has(s)&&!promoted.has(s))promoted.set(s,(await read(L.records+BULK16_PAGE_WORDS*s+BULK16_PAGE.promote,1))[0]!);}
-   console.log("disturbed promote",JSON.stringify({demoted:demoted.map(s=>slotOf.get(s)),promoted:[...promoted].map(([s,why])=>({...slotOf.get(s),why}))}));
-   const asked=[...promoted.keys()].map(s=>slotOf.get(s)!.y);
-   assert.ok(asked.includes(2),"the drop asks the top deep page back");
-   assert.ok(!asked.includes(0),"the bottom page stays BULK16");
+   const record=await followPromotes(device,solver,scene,3,110);
+   console.log("disturbed promote",JSON.stringify(record));
+   assert.ok(record.some(p=>p.y===2&&p.why===0),"the drop's closure asks the top deep page back");
+   assertPromoteCauses(record);
   }finally{solver.destroy();}
  });
 });
@@ -368,23 +422,11 @@ test("BULK16 promote: a drop at one side of a wide deep region asks back only th
  await withUniformDevice("BULK16 local promote",async device=>{
   // Four pages across at 1 cm, water to 1.30 m (twelve deep pages demote;
   // 64 blocks, as the splash climbs: 48 ran out at frame 64 in one run),
-  // and a 0.2 m cube 3.1 m above the middle of page x=0. A page is asked
-  // back for physical causes only, each named by its promote word: the
-  // closure (0) of a sample whose travel reaches it (the census's particle
-  // stage: the sample's tile, its travel of the move rounded up to tiles,
-  // a ballistic sample's speed bounding every direction, and the stage's
-  // two-tile margin, within its region's fastest travel + 16 cells of the
-  // sample; the bank holds the move's end velocity, so this test allows
-  // 24); the scan
-  // (1) of its tiles +-4 (surface, band, cut, AIR, region heat: contact,
-  // Sato et al.'s velocity detail or live particles) or its own face means;
-  // the error test (2) of its own face rows. A promote's claim heat is not
-  // one: chained through the connected bulk, it reached every page. The
-  // splash's fast samples can reach page x=2 (measured: 2,2,0 and 2,1,0 by
-  // closure), the flow under the cavity later asks back the page below the
-  // impact (scan, from its velocity detail) and the spreading flow pages
-  // x=2 and 3 under the surface (error test, from frame 73); the bottom
-  // row, 98 cells under the surface, stays BULK16 over the 70 steps.
+  // and a 0.2 m cube 3.1 m above the middle of page x=0. Measured: the
+  // splash's fast samples reach page x=2 (2,2,0 and 2,1,0 by closure), the
+  // flow under the cavity later asks back the page below the impact (scan,
+  // from its velocity detail) and the spreading flow pages x=2 and 3 under
+  // the surface (error test, from frame 73).
   const base=getSceneDefinition(RESERVOIR_SEEP_ID),drop=0.2;
   const {scene}=sceneDocumentAtLattice({...base,buildAt:(l:{cellSize_m:number})=>createReservoirSeepScene(l.cellSize_m,{widthScale:0.5,depthScale:1,heightScale:4})},{cellSize_m:0.01});
   const v=scene.fluid.initialLiquidVolumes![0]! as any,W=scene.container.width_m,D=scene.container.depth_m;scene.solidVoxels=[];
@@ -393,40 +435,11 @@ test("BULK16 promote: a drop at one side of a wide deep region asks back only th
    {shape:"box",min_m:{x:x-drop/2,y:4.4,z:-drop/2},max_m:{x:x+drop/2,y:4.4+drop,z:drop/2}}];
   scene.fluid.pagePool={...scene.fluid.pagePool,blocks:64};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;
   const solver=await createUniformSolver(device,scene,{...base.methodProfile!.overrides,bulkTier:"16h",volumeControlSeconds:0});
-  const frame=(solver as unknown as {mixedFrame:Frame}).mixedFrame as any;
   try{
-   const store=frame.bulkPages,L=store.layout,offset=(store.binding.offset??0) as number;
-   const read=async(at:number,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(store.binding.buffer,offset+4*at,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
-   const live=async()=>{const n=(await read(BULK16_STATUS.live,1))[0]!;return n?[...(await read(L.live,n))]:[];};
-   const pageOf=new Map<number,number[]>();
-   const pages=async()=>{const slots=await live();for(const s of slots)if(!pageOf.has(s))pageOf.set(s,[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0));return slots;};
-   let step=0;
-   const advance=async()=>{step++;assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
-   for(;step<40;)await advance();
-   const demoted=await pages();
-   assert.equal(demoted.length,12,"the twelve deep pages demote before the drop nears");
-   // The live samples each step, in box cells (32 a page from the held
-   // frame page, state words 12..14), each with its 16-cell region's
-   // fastest speed for the move: the census keeps one radius a region and
-   // direction, and sweeps every occupied tile of the region by it.
-   const nb=frame.narrowBandFlip,stride=nb.particleStride as number,dt=scene.numerics.fixedDt_s,cell=0.01;
-   const rd=async(buffer:GPUBuffer,n:number)=>{const r=device.createBuffer({size:4*n,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});const e=device.createCommandEncoder();e.copyBufferToBuffer(buffer,0,r,0,4*n);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);const w=new Uint32Array(r.getMappedRange().slice(0));r.unmap();r.destroy();return w;};
-   const samples=async()=>{const st=await rd(nb.state,16),count=st[0]!,out:number[][]=[];if(!count)return out;const f=new Float32Array((await rd(nb.activeParticles,stride*count)).buffer);
-    for(let i=0;i<count;i++){const o=stride*i;if(f[o+3]!>0)out.push([0,1,2].map(a=>f[o+a]!+32*(st[12+a]!|0)).concat(Math.hypot(f[o+4]!,f[o+5]!,f[o+6]!)*dt/cell));}
-    const fastest=new Map<string,number>(),key=(q:number[])=>q.slice(0,3).map(v=>Math.floor(v/16)).join(",");
-    for(const q of out)fastest.set(key(q),Math.max(fastest.get(key(q))??0,q[3]!));
-    return out.map(q=>[q[0]!,q[1]!,q[2]!,fastest.get(key(q))!]);};
-   // A page's gap to the nearest sample's travel: the largest axis gap
-   // between the sample and the page's 32 cells, less the sample's travel.
-   const gap=(page:number[],at:number[][])=>Math.min(Infinity,...at.map(q=>Math.max(...[0,1,2].map(a=>Math.max(0,32*page[a]!-q[a]!,q[a]!-32*page[a]!-32)))-q[3]!));
-   const seen=new Map<number,number[][]>([[step,await samples()]]);
-   const promoted=new Map<number,{step:number;why:number}>();
-   for(;step<110;){await advance();seen.set(step,await samples());const now=new Set(await pages());for(const s of demoted)if(!now.has(s)&&!promoted.has(s))promoted.set(s,{step,why:(await read(L.records+BULK16_PAGE_WORDS*s+BULK16_PAGE.promote,1))[0]!});}
-   const record=[...promoted].map(([s,p])=>({page:pageOf.get(s)!.join(","),...p,gap:Math.round(Math.min(...[p.step-2,p.step-1,p.step].map(k=>gap(pageOf.get(s)!,seen.get(k)!))))}));
+   const record=await followPromotes(device,solver,scene,12,110);
    console.log("local promote",JSON.stringify(record));
    assert.ok(record.some(p=>p.page.startsWith("0,")),"the impact column asks a page back");
-   assert.deepEqual(record.filter(p=>p.why===0&&p.gap>24),[],"a closure promote lies within its sample's travel");
-   assert.deepEqual(record.filter(p=>p.page.split(",")[1]==="0"),[],"the bottom row stays BULK16");
+   assertPromoteCauses(record);
   }finally{solver.destroy();}
  });
 });

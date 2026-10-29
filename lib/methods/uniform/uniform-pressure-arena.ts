@@ -2276,8 +2276,10 @@ fn bAdvect(s:u32,p:vec3i,k:u32)->f32{
    let threshold=${UNIFORM_BULK_TOLERANCE}*bitcast<f32>(atomicLoad(&bSpeed))+${UNIFORM_BULK_FLOOR}*h/params.hDt.w;
    // Its promote word says why: 1 the structural scan (bulkPromote), 2 this test
    // (0 when the particles' closure took it back first).
-   let at=bsAt(slot,${BULK16_PAGE.promote}u);
-   if(bitcast<f32>(atomicLoad(&bError))>2.0*threshold&&poolB[at]==0u){poolB[at]=2u;}
+   let at=bsAt(slot,${BULK16_PAGE.promote}u);let error=bitcast<f32>(atomicLoad(&bError));
+   if(error>2.0*threshold&&poolB[at]==0u){
+    poolB[at]=2u;poolB[bsAt(slot,${BULK16_PAGE.promoteError}u)]=bitcast<u32>(error);poolB[bsAt(slot,${BULK16_PAGE.promoteLevel}u)]=bitcast<u32>(2.0*threshold);
+   }
   }
   if(lane<48u){
    let i=lane/6u;let f=lane%6u;let a=f/2u;let near=bNear(slot,page,i,f);let p=bsF(slot,BS_P+i);var d=0.0;var r=0.0;

@@ -10,6 +10,7 @@ import { waterReflectionWGSL } from "./water-reflection.wgsl";
 import {UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES} from "../methods/uniform/uniform-open-world-terrain";
 import { uniformMixedPresentationWGSL } from "../methods/uniform/uniform-mixed-presentation.wgsl";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourWGSL } from "../methods/uniform/uniform-lattice-address";
+import { bulk16LiveWGSL } from "../methods/uniform/uniform-bulk-pages";
 import type { FluidSurfaceRenderMode, WaterReflectionMode } from "../features/surface-display/definition";
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
@@ -223,6 +224,9 @@ const WATER_SURFACE_CLASSIFY_ENTRY: Record<WaterSurfaceClassify, string> = { ful
 /** Window-list bound: the address window's full scan or 9^3 windows per
  * storable block, whichever is smaller. Callers use the 2048-cell address
  * window, never the authored seed box: pages may leave that box. */
+/** The most windows a BULK16 page lists (collectBulkWindowsMain): those of
+ * [0, 8]^3 with a local 0 or 8 on some axis, 9^3 - 7^3. */
+export const BULK16_WINDOWS_A_PAGE = 729 - 343;
 export function surfaceWindowCapacity(nx: number, ny: number, nz: number, blocks: number) {
   return Math.min(Math.ceil((nx + 1) / 4) * Math.ceil((ny + 1) / 4) * Math.ceil((nz + 1) / 4), 729 * Math.max(blocks - 2, 0));
 }
@@ -1024,6 +1028,54 @@ fn collectWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(local_invoca
     if (slot < arrayLength(&surfaceWindows.windows)) { surfaceWindows.windows[slot] = (b << 12u) | l.x | (l.y << 4u) | (l.z << 8u); }
   }
 }
+// A BULK16 page (deep liquid, uniform-bulk-pages.ts) stores no tiles, so no
+// block lists a window whose eight tiles hold none: where such a window
+// meets a SOLID or AIR page (a wall, the floor), its surface comes from the
+// slot store's live list instead, a workgroup a live slot (the launch sized
+// by the live count, prepareBulkWindowsMain), its 64 lanes the page's
+// windows l in [0, 8]^3 that leave the page (l = 0 or 8 on an axis; the
+// others' tiles are all BULK16). The listing order is the blocks': the
+// window's own page if BULK16, else the first BULK16 page stepping down from
+// it in the order of the step's bits. Its word is the window itself, with
+// BULK16_WINDOW set: uniformWindowHeader classes it the reference per cube.
+// (A block is below 1 << 19, so no block's word has the bit.)
+const BULK16_WINDOW = 0x80000000u;
+@group(0) @binding(23) var<storage, read> extractBulk: array<u32>;
+${bulk16LiveWGSL("extractBulk")}
+fn bulkWindowListed(page: vec3i, l: vec3u) -> bool {
+  let high = l == vec3u(8u);
+  let plane = (l & vec3u(7u)) == vec3u(0u);
+  let mine = u32(high.x) | (u32(high.y) << 1u) | (u32(high.z) << 2u);
+  for (var k = 0u; k < mine; k += 1u) {
+    let step = vec3<bool>((k & 1u) != 0u, (k & 2u) != 0u, (k & 4u) != 0u);
+    if (any(step & !plane)) { continue; }
+    if (umPageKind(page + vec3i(high) - vec3i(step)) == UM_BULK16) { return false; }
+  }
+  return true;
+}
+@compute @workgroup_size(64)
+fn collectBulkWindowsMain(@builtin(workgroup_id) group: vec3u, @builtin(num_workgroups) groups: vec3u, @builtin(local_invocation_index) lane: u32) {
+  udrInit();
+  let live = extractBulkLive();
+  for (var i = group.x; i < live; i += groups.x) {
+    let page = extractBulkLivePage(i) - umFramePage();
+    if (umPageKind(page) != UM_BULK16) { continue; }
+    for (var w = lane; w < 729u; w += 64u) {
+      let l = vec3u(w % 9u, (w / 9u) % 9u, w / 81u);
+      if (all((l > vec3u(0u)) & (l < vec3u(8u)))) { continue; }
+      let g = 8 * page + vec3i(l);
+      var stored = false; var open = false;
+      for (var k = 0u; k < umPresentationLoopBound(); k += 1u) {
+        let kind = umPageKind((g - vec3i(1) + vec3i(umCorner(k, 2u))) >> vec3u(3u));
+        stored = stored || kind == UM_RESIDENT;
+        open = open || kind == UM_SOLID || kind == UM_AIR;
+      }
+      if (stored || !open || !bulkWindowListed(page, l)) { continue; }
+      let slot = atomicAdd(&surfaceWindows.count, 1u);
+      if (slot < arrayLength(&surfaceWindows.windows)) { surfaceWindows.windows[slot] = BULK16_WINDOW | u32(g.x) | (u32(g.y) << 10u) | (u32(g.z) << 20u); }
+    }
+  }
+}
 // A fixed launch of EXTRACTION_WINDOW_WORKGROUPS workgroups, each a
 // contiguous share of the list, a window at a time: its 64 lanes one cube
 // each as the full scan's are. (One workgroup per slot of the (t + 1)^3
@@ -1083,6 +1135,7 @@ fn uniformWindowHeader(slot: u32) -> WindowHeader {
   // Past the list: no window.
   if (slot >= min(atomicLoad(&surfaceWindows.count), arrayLength(&surfaceWindows.windows))) { return WindowHeader(vec4u(WINDOW_NONE, 0u, 0u, 0u), vec3i(1 << 20u), 0u, vec3i(0), 0u); }
   let window = surfaceWindows.windows[slot];
+  if ((window & BULK16_WINDOW) != 0u) { return WindowHeader(vec4u(window, 0u, 0u, 0u), vec3i(vec3u(window & 1023u, (window >> 10u) & 1023u, (window >> 20u) & 1023u)), 0u, vec3i(0), 0u); }
   let b = window >> 12u;
   let local = vec3i(vec3u(window & 15u, (window >> 4u) & 15u, (window >> 8u) & 15u));
   let page = vec3i(umBlockPage(b));
@@ -1391,6 +1444,18 @@ fn prepareMain() {
   let activeTotal = min(drawArgs.activeCubeCount, arrayLength(&activeCubes));
   dispatchArgs = DispatchArgs((activeTotal + ${EXTRACTION_POLYGONISE_WORKGROUP - 1}u) / ${EXTRACTION_POLYGONISE_WORKGROUP}u, 1u, 1u);
 }
+`;
+
+// Sizes collectBulkWindowsMain's launch from the BULK16 live count: a
+// workgroup a live slot (the per-dimension limit strided). Its own module
+// and bind group, as extractionPrepareShader's.
+export const extractionBulkPrepareShader = /* wgsl */ `
+struct DispatchArgs { x: u32, y: u32, z: u32 }
+@group(0) @binding(0) var<storage, read> prepareBulk: array<u32>;
+@group(0) @binding(1) var<storage, read_write> dispatchArgs: DispatchArgs;
+${bulk16LiveWGSL("prepareBulk")}
+@compute @workgroup_size(1)
+fn prepareBulkWindowsMain() { dispatchArgs = DispatchArgs(min(prepareBulkLive(), 65535u), 1u, 1u); }
 `;
 
 export const WATER_INTERFACE_CULL_MODES = Object.freeze({
@@ -2138,6 +2203,13 @@ export class RasterWaterPipeline {
   private extractPipeline?: GPUComputePipeline;
   /** Uniform Geometric: one thread per 4h window (extractTilesMain). */
   private collectWindowsPipeline?: GPUComputePipeline;
+  private collectBulkWindowsPipeline?: GPUComputePipeline;
+  private bulkPreparePipeline?: GPUComputePipeline;
+  private bulkPrepareLayout?: GPUBindGroupLayout;
+  private bulkPrepareBindGroup?: GPUBindGroup;
+  private bulkWindowsDispatchBuffer?: GPUBuffer;
+  /** The solver's BULK16 slot store, where it has one (mixedBulkPages). */
+  private mixedBulk?: { readonly binding: GPUBufferBinding; readonly capacity: number };
   private extractWindowsPipeline?: GPUComputePipeline;
   private orderWorklistPipeline?: GPUComputePipeline;
   /** Window list of the `windows` classify: a count word, then one word per
@@ -2410,9 +2482,10 @@ export class RasterWaterPipeline {
   async initialize(
     onProgress:(label:string,completed:number,total:number)=>void=()=>{},
   ) {
-    const [extract, prepare, surface, wireframe, caustic, composite, rigidScene] = await Promise.all([
+    const [extract, prepare, bulkPrepare, surface, wireframe, caustic, composite, rigidScene] = await Promise.all([
       checkedModule(this.device, "Water isosurface extraction", surfaceExtractionShader),
       checkedModule(this.device, "Water extraction dispatch prepare", extractionPrepareShader),
+      checkedModule(this.device, "Water BULK16 window dispatch prepare", extractionBulkPrepareShader),
       checkedModule(this.device, "Water interface raster", surfaceRasterShader),
       checkedModule(this.device, "Water surface wireframe", surfaceWireframeShader),
       checkedModule(this.device, "Water caustic projection", causticShader),
@@ -2435,6 +2508,11 @@ export class RasterWaterPipeline {
       ,{ binding: 20, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } }
       ,{ binding: 21, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
       ,{ binding: 22, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+      ,{ binding: 23, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+    ] });
+    this.bulkPrepareLayout = this.device.createBindGroupLayout({ label: "Water BULK16 window prepare bindings", entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } }
     ] });
     this.prepareLayout = this.device.createBindGroupLayout({ label: "Water extraction prepare bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -2484,6 +2562,7 @@ export class RasterWaterPipeline {
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
     this.polygoniseDispatchBuffer = this.device.createBuffer({ label: "Water polygonise dispatch arguments", size: 24, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+    this.bulkWindowsDispatchBuffer = this.device.createBuffer({ label: "Water BULK16 window dispatch arguments", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const surfacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout, this.surfacePeelLayout] });
     const causticPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.causticLayout] });
     const surfaceDescriptor = (label: string, cullMode: GPUCullMode, coverageExpansionPixels = 0, peel = false): GPURenderPipelineDescriptor => ({
@@ -2526,6 +2605,8 @@ export class RasterWaterPipeline {
 
     compute("Classifying liquid surface cubes",{ label: "Classify liquid surface cubes", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractSharedMain" } },pipeline=>{this.extractPipeline=pipeline;});
     compute("Listing liquid surface windows",{ label: "List liquid surface windows", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "collectWindowsMain" } },pipeline=>{this.collectWindowsPipeline=pipeline;});
+    compute("Listing BULK16 surface windows",{ label: "List BULK16 surface windows", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "collectBulkWindowsMain" } },pipeline=>{this.collectBulkWindowsPipeline=pipeline;});
+    compute("Preparing BULK16 window dispatch",{ label: "Prepare BULK16 window dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.bulkPrepareLayout] }), compute: { module: bulkPrepare, entryPoint: "prepareBulkWindowsMain" } },pipeline=>{this.bulkPreparePipeline=pipeline;});
     compute("Classifying liquid surface windows",{ label: "Classify listed liquid surface windows", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "extractWindowsMain" } },pipeline=>{this.extractWindowsPipeline=pipeline;});
     compute("Ordering the surface worklist",{ label: "Order the liquid surface worklist", layout: extractionPipelineLayout, compute: { module: extract, entryPoint: "orderSurfaceWorklistMain" } },pipeline=>{this.orderWorklistPipeline=pipeline;});
     this.extractionModule = extract; this.extractionPipelineLayout = extractionPipelineLayout;
@@ -2625,8 +2706,8 @@ export class RasterWaterPipeline {
     const detail = mixed ? mixed.detailVertexPhi : source?.vertexPhi, ownership = mixed?.mixedOwnership, coarse = mixed?.coarseVertexPhi;
     const blocks = mixed?.mixedBlocks ?? 0;
     if (mixed && (!(blocks > 2) || !mixed.mixedFrame)) throw new Error("Water surface: a mixed level-set source names no page pool blocks (mixedBlocks)");
-    if (!contourChanged && this.denseNormalPhi === detail && this.mixedOwnership === ownership && this.coarseVertexPhi === coarse && this.mixedBlocks === blocks && this.mixedFrame === mixed?.mixedFrame) return false;
-    this.denseNormalPhi = detail; this.mixedOwnership = ownership; this.coarseVertexPhi = coarse; this.mixedBlocks = blocks; this.mixedFrame = mixed?.mixedFrame;
+    if (!contourChanged && this.denseNormalPhi === detail && this.mixedOwnership === ownership && this.coarseVertexPhi === coarse && this.mixedBlocks === blocks && this.mixedFrame === mixed?.mixedFrame && this.mixedBulk === mixed?.mixedBulkPages) return false;
+    this.denseNormalPhi = detail; this.mixedOwnership = ownership; this.coarseVertexPhi = coarse; this.mixedBlocks = blocks; this.mixedFrame = mixed?.mixedFrame; this.mixedBulk = mixed?.mixedBulkPages;
     return true;
   }
 
@@ -2679,6 +2760,10 @@ export class RasterWaterPipeline {
     if (!this.mixedOwnership || !this.coarseVertexPhi) throw new Error("Water surface: the window scan strides a page pool's blocks and needs the mixed presentation bound");
     pass.setPipeline(collector ?? this.collectWindowsPipeline!);
     pass.dispatchWorkgroups(8 * (this.mixedBlocks - 2));
+    if (this.mixedBulk) {
+      pass.setPipeline(this.bulkPreparePipeline!); pass.setBindGroup(0, this.bulkPrepareBindGroup!); pass.dispatchWorkgroups(1);
+      pass.setPipeline(this.collectBulkWindowsPipeline!); pass.setBindGroup(0, this.extractBindGroup!); pass.dispatchWorkgroupsIndirect(this.bulkWindowsDispatchBuffer!, 0);
+    }
     pass.setPipeline(pipeline); pass.dispatchWorkgroups(Math.min(EXTRACTION_WINDOW_WORKGROUPS, surfaceWindowCapacity(2048, 2048, 2048, this.mixedBlocks)));
     if (!countOnly) { pass.setPipeline(this.orderWorklistPipeline!); pass.dispatchWorkgroups(1); }
   }
@@ -2867,7 +2952,7 @@ export class RasterWaterPipeline {
    * Sized when the bound pool changes, never while one is held.
    * Returns whether the buffer is a new one. */
   private ensureSurfaceWindows(nx: number, ny: number, nz: number): boolean {
-    const words = Math.max(1, surfaceWindowCapacity(2048, 2048, 2048, this.mixedBlocks));
+    const words = Math.max(1, surfaceWindowCapacity(2048, 2048, 2048, this.mixedBlocks) + BULK16_WINDOWS_A_PAGE * (this.mixedBulk?.capacity ?? 0));
     if (this.surfaceWindows?.size === 4 * (1 + words)) return false;
     this.surfaceWindows?.destroy();
     this.surfaceWindows = this.device.createBuffer({ label: "Water surface window list", size: 4 * (1 + words), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -3013,7 +3098,11 @@ export class RasterWaterPipeline {
       { binding: 19, resource: this.levelSetSource?.solidBoundary?.mask ?? {buffer:this.fallbackSparseControl,size:4} },
       { binding: 20, resource: (this.levelSetSource?.solidBoundary?.terrain ?? this.fallbackSolidTerrain!).createView() },
       { binding: 21, resource: this.levelSetSource?.solidBoundary?.bodies ?? {buffer:this.fallbackSolidUniform!} },
-      { binding: 22, resource: this.levelSetSource?.solidBoundary?.analyticTerrain ?? {buffer:this.fallbackSolidUniform!} }
+      { binding: 22, resource: this.levelSetSource?.solidBoundary?.analyticTerrain ?? {buffer:this.fallbackSolidUniform!} },
+      { binding: 23, resource: this.mixedBulk?.binding ?? { buffer: this.fallbackSparseControl, size: 4 } }
+    ] });
+    if (this.bulkPrepareLayout && this.bulkWindowsDispatchBuffer && this.fallbackSparseControl) this.bulkPrepareBindGroup = this.device.createBindGroup({ layout: this.bulkPrepareLayout, entries: [
+      { binding: 0, resource: this.mixedBulk?.binding ?? { buffer: this.fallbackSparseControl, size: 4 } }, { binding: 1, resource: { buffer: this.bulkWindowsDispatchBuffer } }
     ] });
     if (this.prepareLayout && this.indirectBuffer && this.activeCubeBuffer && this.polygoniseDispatchBuffer) this.prepareBindGroup = this.device.createBindGroup({ layout: this.prepareLayout, entries: [
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
@@ -3333,6 +3422,6 @@ export class RasterWaterPipeline {
   destroy() {
     this.lensCamera?.destroy();
     this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.bulkWindowsDispatchBuffer,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

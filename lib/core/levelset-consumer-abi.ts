@@ -256,6 +256,10 @@ export interface DenseLevelSetVolumeConsumerSource {
   readonly mixedPressure?: GPUBufferBinding;
   readonly mixedPressurePhi?: GPUBufferBinding;
   readonly mixedSupport?: GPUBufferBinding;
+  /** The BULK16 slot store (uniform-bulk-pages.ts), where the solver has
+   * one: its live slots' pages hold deep liquid and store no tiles, so the
+   * window scan lists their surface windows from it. capacity: its slots. */
+  readonly mixedBulkPages?: { readonly binding: GPUBufferBinding; readonly capacity: number };
   /** Shared vertices; logical dimensions are cell dimensions plus one on
    * every axis (vertex class when packed). */
   readonly vertexPhi: GPUTexture;

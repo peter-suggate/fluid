@@ -3,7 +3,7 @@
  * the all-ones SOLID word is outside the encoding's range. */
 export const BULK16_PAGE_TAG=0x80000000;
 export const BULK16_PAGE_SLOT_MASK=0x3fffffff;
-// A slot's record: its last field (tail5) ends at word 947. With the three
+// A slot's record: its last field (promoteLevel) ends at word 948. With the three
 // list words a slot (free, live, quarantine) a demoted page costs 3852 B.
 export const BULK16_PAGE_WORDS=960;
 export const BULK16_PAGE={
@@ -13,6 +13,11 @@ export const BULK16_PAGE={
  // upPromote) leaves at that commit with the word 0. A retired slot keeps it
  // until reused.
  page:0,flags:3,generation:4,open:5,promote:6,
+ // A record of the cause, read by no kernel. When the error test sets
+ // promote 2: its measured error and the level it exceeded (twice the
+ // member tolerance), as f32 (m/s). When the scan sets promote 1:
+ // promoteError holds the BULK16_SCAN bits of the tests that failed.
+ promoteError:7,
  // The pressure solve's rows (UniformPressureArena): the eight 16h
  // pressures are pressure + pressureNext (the solve's correction, folded in
  // when the next solve starts); rhs is the composite rows' (their
@@ -29,8 +34,13 @@ export const BULK16_PAGE={
  // cell is its own 8h-level unknown), then the 16h and 32h rows' channels
  // (X, Y, R, D, K0..K5 in the arena's tail channel order), eight words a
  // channel at 16h, one at 32h.
- tail3:833,tail4:857,tail5:937,
+ tail3:833,tail4:857,tail5:937,promoteLevel:947,
 } as const;
+/** The structural scan's failed tests (bulkPromote), BULK16_PAGE.promoteError's
+ * bits when promote is 1: an AIR page in its 3^3 neighbourhood; within 4
+ * tiles an h band tile, a HOT region, a cut tile, or a tile within
+ * UNIFORM_BULK_DEPTH_CELLS of the surface; or its own face mean's speed. */
+export const BULK16_SCAN={air:1,band:2,hot:4,cut:8,shallow:16,speed:32} as const;
 /** Words of BULK16_PAGE.tail4 and tail5 a channel. */
 export const BULK16_TAIL_CHANNELS=10;
 /** Texels of a page's 4h vertex block (BULK16_PAGE.phi). */

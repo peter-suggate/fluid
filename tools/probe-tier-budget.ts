@@ -79,6 +79,8 @@ import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu
 import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
+import { BULK16_STATUS, type UniformBulkPages } from "../lib/methods/uniform/uniform-bulk-pages";
+import { BULK16_PAGE_WORDS } from "../lib/methods/uniform/uniform-bulk-pages-reference";
 
 const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
@@ -564,6 +566,17 @@ var<workgroup> sums:array<atomic<u32>,16>;
   // pipeline constants (uniformDetailPipeline); without them a page decode
   // after the first commit does not match the solver's.
   const seed = frame.ownership.capacity.address.seed, at = seed.layout.tail.window;
+  // The BULK16 slot store's live pages (lattice x), bulkTier "16h".
+  const bulkStore = (frame as unknown as { bulkPages?: UniformBulkPages }).bulkPages;
+  const readBulk16 = async () => {
+    if (!bulkStore) return undefined;
+    const { buffer, offset = 0, size } = bulkStore.binding as GPUBufferBinding & { size: number };
+    const copy = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const e = device.createCommandEncoder(); e.copyBufferToBuffer(buffer, offset, copy, 0, size); device.queue.submit([e.finish()]);
+    await copy.mapAsync(GPUMapMode.READ); const w = new Uint32Array(copy.getMappedRange().slice(0)); copy.unmap(); copy.destroy();
+    const L = bulkStore.layout, n = w[BULK16_STATUS.live]!, frameX = seed.tail[at]! | 0;
+    return { pages: Array.from(w.subarray(L.live, L.live + n), slot => (w[L.records + BULK16_PAGE_WORDS * slot]! | 0) - frameX) };
+  };
   const windowHeader = { fixedWorldGeometry: frame.ownership.fixedWorldGeometry, policy: seed.tail[at + UNIFORM_WINDOW_HEADER.policy],
     frame: [0, 1, 2].map(i => seed.tail[at + UNIFORM_WINDOW_HEADER.frame + i]! | 0), box: [0, 1, 2].map(i => seed.tail[at + UNIFORM_WINDOW_HEADER.box + i]! | 0) };
   console.log(JSON.stringify({ phase: "window", ...windowHeader }));
@@ -682,6 +695,9 @@ var<workgroup> sums:array<atomic<u32>,16>;
     const negativeOwners = Object.fromEntries(probes.map((p, i) => [p.key, all[W * i + 33]]));
     const pointPhi = Object.fromEntries(probes.map((p, i) => [p.key, [0, 1, 2, 3].map(k => floatAt(W * i + 34 + k))]));
     const t = step * dt, liquid = { total: wide(u, 0), left: wide(u, 2), right: wide(u, 4), wall: wide(u, 6), rightFloorBand: wide(u, 8) };
+    // BULK16 pages hold no owners: each is 32^3 liquid h cells, by its zone.
+    const bulk16 = await readBulk16();
+    if (bulk16) { liquid.total += 32768 * bulk16.pages.length; for (const x of bulk16.pages) { if (32 * x + 32 <= wall.low) liquid.left += 32768; else if (32 * x >= wall.high) liquid.right += 32768; else liquid.wall += 32768; } }
     const measured = liquid.left > 0 && Math.abs(liquid.total - solverCells) < 0.05 * solverCells;
     const level_m = measured ? liquid.left / reservoirFootprint * h : authoredTop_m, head_m = level_m - throatCentre_m;
     const qT = wall.holeY >= 0 && head_m > 0 ? throatArea_m2 * Math.sqrt(2 * gravity * head_m) : undefined;
@@ -694,7 +710,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
     const line = Array.from({ length: LINE }, (_, i) => { const w = u[LINE_AT + 3 * i + 2]!; if (w === 0xffffffff) return [wall.low - 16 + i, null];
       const page = w >>> 3; return [wall.low - 16 + i, +(f[LINE_AT + 3 * i]! / h).toFixed(3), +f[LINE_AT + 3 * i + 1]!.toFixed(3), w & 7, "CWH"[tiers[page]!] ?? String(tiers[page])]; });
     const snapshot = since(base), status = all.subarray(READ.pool / 4, READ.pool / 4 + S.words);
-    const row = { step, t, wall_ms,
+    const row = { step, t, wall_ms, bulk16Pages: bulk16?.pages.length,
       tiles: { h: all[READ.work / 4], coarse: all[READ.work / 4 + 1], residentPages: all[READ.work / 4 + 7], probedH: u[19], probedCoarse: u[20] },
       pool: { resident: status[S.resident], free: status[S.free], claimed: status[S.claimed], fatal: uniformPagePoolFatalMessage(frame.pagePool.layout, status) ?? undefined },
       regions: { cold: all[READ.heat / 4], warm: all[READ.heat / 4 + 1], hot: all[READ.heat / 4 + 2], free: all[READ.heat / 4 + 3] },

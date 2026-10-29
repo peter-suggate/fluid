@@ -67,7 +67,8 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   and split as they rise, so the union's bound reads a film's liquid whole.
  * - bulkTier: "16h" lets submerged liquid bulk own its pressure and velocity
  *   at 16h (UniformBulkTier: whole 16h regions, deep liquid or SOLID one
- *   region around, smooth velocity, never beside h); "off" keeps two tiers.
+ *   region around, smooth velocity, never beside h), the default; "off"
+ *   keeps two tiers.
  * - coldSurface: "warm" keeps every region whose physical reader is a free
  *   surface (a surface reader, not submerged) at least WARM, so its surface
  *   is transported every step with the solved velocity at its owners' width;
@@ -148,7 +149,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  momentumTrace:values.momentumTrace==="midpoint"?"midpoint":"substep",
  particleBandDepth:typeof values.particleBandDepth==="number"&&Number.isFinite(values.particleBandDepth)?Math.min(4,Math.max(2,values.particleBandDepth)):3,
  particleDensity:values.particleDensity==="uniform"?"uniform":"graded",
- bulkTier:values.bulkTier==="16h"?"16h":"off",
+ bulkTier:values.bulkTier==="off"?"off":"16h",
  coldSurface:values.coldSurface==="budget"?"budget":values.coldSurface==="still"?"still":"warm",
  seedScoring:values.seedScoring==="unshaped"?"unshaped":"every",
  outerSeeding:values.outerSeeding==="retain"?"retain":"uncovered",

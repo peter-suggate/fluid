@@ -8,7 +8,7 @@ import {
   UNIFORM_BULK_HEADER, UNIFORM_BULK_HOLD, UNIFORM_BULK_HOLD_FRAMES, UNIFORM_BULK_LIST, UNIFORM_BULK_MEAN, UNIFORM_BULK_OFFSET, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, UNIFORM_BULK_WORDS,
 } from "./uniform-bulk-tier-reference";
 import type { UniformMixedPressureBulk } from "./uniform-mixed-pressure-velocity";
-import { BULK16_PAGE, BULK16_PAGE_WORDS } from "./uniform-bulk-pages-reference";
+import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_SCAN } from "./uniform-bulk-pages-reference";
 import { BULK16_STATUS, type UniformBulkPages } from "./uniform-bulk-pages";
 import { UNIFORM_REGION_HEAT_STATE_WORDS } from "./uniform-region-heat";
 
@@ -222,7 +222,8 @@ ${P ? /* wgsl */ `
 // neighbourhood (the page's tiles +-4) an AIR page, an h band tile, a region
 // HOT from its own heat (bHot), a cut tile or one within
 // UNIFORM_BULK_DEPTH_CELLS of the surface; or a face mean moving
-// UNIFORM_BULK_REACH_CELLS h a step (the error test is pBulkRows').
+// UNIFORM_BULK_REACH_CELLS h a step (the error test is pBulkRows'). Its
+// promoteError word records which (BULK16_SCAN's bits), read by no kernel.
 @group(1) @binding(10) var<storage,read_write> bStore:array<u32>;
 const BS_LIVE:u32=${P.layout.live}u;const BS_RECORDS:u32=${P.layout.records}u;
 var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
@@ -241,7 +242,7 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
   workgroupBarrier();
   for(var q=0u;q<27u;q++){
    let kind=bKinds[q];
-   if(kind==UM_AIR){if(lane==0u){atomicOr(&bFail,1u);}continue;}
+   if(kind==UM_AIR){if(lane==0u){atomicOr(&bFail,${BULK16_SCAN.air}u);}continue;}
    if(kind!=UM_RESIDENT){continue;}
    // Its tiles within 4 of the page: 4 deep across a face, all 8 along it.
    let d=vec3i(vec3u(q%3u,(q/3u)%3u,q/9u))-vec3i(1);
@@ -249,15 +250,18 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
    for(var i=lane;i<ext.x*ext.y*ext.z;i+=64u){
     let t=low+vec3i(vec3u(i%ext.x,(i/ext.x)%ext.y,i/(ext.x*ext.y)));
     let k=umTileAt(vec3u(t));
-    if(slots[B_SLOTS+k]!=0u||bHot(umPageOfTile(k))){atomicOr(&bFail,1u);continue;}
+    if(slots[B_SLOTS+k]!=0u){atomicOr(&bFail,${BULK16_SCAN.band}u);continue;}
+    if(bHot(umPageOfTile(k))){atomicOr(&bFail,${BULK16_SCAN.hot}u);continue;}
     ${S ? "let open=rootTopology[k].x;" : "let open=1.0;"}
     if(open<=1e-5){continue;}
-    if(open<1.0-1e-5||rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,1u);}
+    if(open<1.0-1e-5){atomicOr(&bFail,${BULK16_SCAN.cut}u);}
+    if(rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,${BULK16_SCAN.shallow}u);}
    }
   }
-  if(lane<36u&&abs(bitcast<f32>(bStore[rec+${BULK16_PAGE.velocity}u+lane]))*dt>B_REACH*h){atomicOr(&bFail,1u);}
+  if(lane<36u&&abs(bitcast<f32>(bStore[rec+${BULK16_PAGE.velocity}u+lane]))*dt>B_REACH*h){atomicOr(&bFail,${BULK16_SCAN.speed}u);}
   workgroupBarrier();
-  if(lane==0u&&atomicLoad(&bFail)!=0u){bStore[rec+${BULK16_PAGE.promote}u]=1u;}
+  let fail=atomicLoad(&bFail);
+  if(lane==0u&&fail!=0u&&bStore[rec+${BULK16_PAGE.promote}u]==0u){bStore[rec+${BULK16_PAGE.promote}u]=1u;bStore[rec+${BULK16_PAGE.promoteError}u]=fail;}
   workgroupBarrier();
  }
 }` : ""}

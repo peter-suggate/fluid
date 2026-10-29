@@ -4,6 +4,21 @@ export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fat
 export const BULK16_FATAL={exhausted:1,invalidSlot:2,invalidTransition:4} as const;
 type Layout=ReturnType<typeof bulk16PageLayout>;
 
+/** The live list for a reader compiled without the capacity (the
+ * renderer's static modules), bulk16PageLayout's offsets taken from the
+ * status capacity word. A binding shorter than the status words (no store
+ * bound) has no live slot. A page is a window page: the frame page is not
+ * yet removed. */
+export function bulk16LiveWGSL(name:string):string{return /* wgsl */`
+fn ${name}Live()->u32{if(arrayLength(&${name})<${BULK16_STATUS.words}u){return 0u;}return ${name}[${BULK16_STATUS.live}u];}
+fn ${name}LivePage(i:u32)->vec3i{
+ let capacity=${name}[${BULK16_STATUS.capacity}u];
+ let records=((${BULK16_STATUS.words}u+3u*capacity+63u)/64u)*64u;
+ let at=records+${BULK16_PAGE_WORDS}u*${name}[${BULK16_STATUS.words}u+capacity+i]+${BULK16_PAGE.page}u;
+ return bitcast<vec3i>(vec3u(${name}[at],${name}[at+1u],${name}[at+2u]));
+}
+`;}
+
 /** The mutable slot allocator. Retired slots are quarantined until the next
  * begin dispatch; allocation never grows a buffer or evicts another page.
  * Callers publish directory changes only after the transfer dispatch ends. */
