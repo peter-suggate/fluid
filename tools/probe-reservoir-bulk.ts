@@ -76,7 +76,10 @@ await withUniformDevice("reservoir bulk probe", async raw => {
   device.addEventListener("uncapturederror", event => console.error("GPU validation:", event.error.message));
   const solver = await createUniformSolver(device, scene, { ...definition.methodProfile!.overrides, ...values });
   const built = allocation.snapshot();
-  memory = { construction: { bytes: built.liveBytes, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
+  // A census or 4h start's t=0 h tiles and the pages that hold them (one h slot each), against the slots by rule.
+  const seedTiles = (solver as unknown as { mixedSeed?: { fineTiles: Uint32Array } }).mixedSeed?.fineTiles;
+  const seed = seedTiles ? { tiles: seedTiles.length, pages: new Set(Array.from(seedTiles, k => k >>> 9)).size, slotCapacity: solver.info.uniformMixedSlotCapacity } : undefined;
+  memory = { construction: { bytes: built.liveBytes, peak: built.peakBytes, seed, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
   const frame = (solver as unknown as { mixedFrame: UniformMixedFrame }).mixedFrame;
   const { nx, ny, nz } = solver.info;
   const high = 16 * Math.floor(nx / 32);
@@ -125,7 +128,7 @@ await withUniformDevice("reservoir bulk probe", async raw => {
       const row = { step, t_s: step * scene.numerics.fixedDt_s, wall_ms: wall / step, tiers, bulk,
         escaped_L: escaped * cell ** 3 * 1000, front_m: front < 0 ? null : (front + 0.5) * cell, mean_x_m: escaped > 0 ? (moment / escaped + 0.5) * cell : null,
         volume: volume?total:undefined, drift: stats.volumeDrift, maxSpeed: stats.maxSpeed_m_s, fine: solver.info.uniformMixedFineTiles,
-        residual: stats.uniformPressureAcceptedResidual, pool, bulk16, slots: stats.uniformMixedSlotsUsed, refused: stats.uniformMixedRefusedTiles,
+        residual: stats.uniformPressureAcceptedResidual, pool, bulk16, slots: stats.uniformMixedSlotsUsed, slotCapacity: stats.uniformMixedSlotCapacity, slotPeak: stats.uniformMixedSlotPeak, refused: stats.uniformMixedRefusedTiles,
         pressure: { cycles: stats.uniformPressureCyclesExecuted, band: stats.uniformPressureBandCycles, bandTiles: stats.uniformPressureBandTiles } };
       rows.push(row); console.log(JSON.stringify(row));
     }

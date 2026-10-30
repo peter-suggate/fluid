@@ -3,6 +3,13 @@ import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { solidOccupancyMaskWGSL } from "../../core/solid-occupancy-mask";
 import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddressWGSL } from "./uniform-lattice-address";
 
+/** Workgroups a row of a t=0 launch over the pool's blocks (storedPageId): 512 a block. */
+export const UNIFORM_T0_ROW = 32768;
+/** A t=0 launch over the pool's blocks: a workgroup a tile of each block but the two sentinels. */
+export function uniformT0Groups(blocks: number): [number, number] {
+  const n = 512 * Math.max(0, blocks - 2);
+  return [Math.max(1, Math.min(n, UNIFORM_T0_ROW)), Math.max(1, Math.ceil(n / UNIFORM_T0_ROW))];
+}
 /** The two dense t=0 passes needed by narrow-band FLIP. */
 export function createUniformReferenceComputeShader(): string {
   return /* wgsl */ `const UNIFORM_REFERENCE_DIMENSION: u32 = 3u;
@@ -137,6 +144,17 @@ fn activeId(gid:vec3u)->vec3i{
   if(any(gid>=activeWindowExtent())){return vec3i(-1);}
   return activeWindowOrigin()+vec3i(gid);
 
+}
+
+// The t=0 launches run over the pool's blocks, a 4x4x4 workgroup a tile of
+// each stored page (UNIFORM_T0_ROW workgroups a row): no launch is sized by
+// the lattice. A cell of no stored page, or past the box, is -1.
+fn storedPageId(wg:vec3u,local:vec3u)->vec3i{
+  let w=wg.x+${UNIFORM_T0_ROW}u*wg.y;let b=1u+(w>>9u);
+  if(!umBlockStored(b)||umBlockWord(b)==UM_FREE){return vec3i(-1);}
+  let t=w&511u;let id=vec3i((umBlockPage(b)<<vec3u(5u))+4u*vec3u(t&7u,(t>>3u)&7u,t>>6u)+local);
+  let o=activeWindowOrigin();if(any(id<o)||any(id>=o+dims())){return vec3i(-1);}
+  return id;
 }
 
 
@@ -391,7 +409,7 @@ fn storeExtrapolationAuthority(id:vec3i){if(!umCellPresent(id)){return;}
 }
 
 @compute @workgroup_size(4,4,4)
-fn buildDenseExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(id.x<0){return;}storeExtrapolationAuthority(id);}
+fn buildDenseExtrapolationAuthority(@builtin(workgroup_id) wg:vec3u,@builtin(local_invocation_id) local:vec3u){let id=storedPageId(wg,local);if(id.x<0){return;}storeExtrapolationAuthority(id);}
 
 fn faceWorld(id:vec3i,axis:u32)->vec3f{
   var world=worldCell(id);world[axis]+=0.5*params.cellGravity.xyz[axis];return world;
@@ -414,8 +432,8 @@ fn uvPhi(position:vec3f)->f32{
 fn uvOpen(id:vec3i)->f32{if(!umCellPresent(id)){return 0.0;}return cellOpenFraction(id);}
 
 @compute @workgroup_size(4,4,4)
-fn uvPublish(@builtin(global_invocation_id)gid:vec3u){
-  let id=activeId(gid);if(!umCellPresent(id)){return;}
+fn uvPublish(@builtin(workgroup_id) wg:vec3u,@builtin(local_invocation_id) local:vec3u){
+  let id=storedPageId(wg,local);if(id.x<0||!umCellPresent(id)){return;}
   let h=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
   let open=uvOpen(id);
   var value=0.5-uvPhi(vec3f(id)+vec3f(0.5))/h;

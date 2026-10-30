@@ -33,7 +33,7 @@ import {
   UNIFORM_VOLUME_TWO_LEVEL_COUNTER_WORDS,
   UNIFORM_VOLUME_TWO_LEVEL_WORDS_PER_TILE,
 } from "./uniform-volume.wgsl";
-import { createUniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
+import { createUniformReferenceComputeShader, uniformT0Groups } from "./webgpu-uniform-reference.wgsl";
 import { uniformInitialLiquidVelocityPages, uniformLatticeFarPhi, uniformLatticePagedPhi, uniformLatticePagedVolume } from "./uniform-volume-initial";
 import type { LatticePages } from "../../core/initial-liquid-lattice";
 import { averageInflowStrength, createInflowGridBoundary, integratedInflowVolume, type InflowGridBoundary } from "../../core/inflow-boundary";
@@ -92,7 +92,7 @@ import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
 import { narrowBandParticleCellCap, narrowBandSparseNeighbours, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
-import { UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
+import { UNIFORM_DETAIL_TWIN_BINDING, UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
@@ -291,6 +291,15 @@ const UNIFORM_REFERENCE_DETAIL_CLASSES: Readonly<Record<string, UniformDetailCla
   velocityOut: "face", volumeIn: "cell", volumeOut: "cell", gammaOut: "cell",
   uvPhiIn: "vertex",
 };
+/** Those fields' bindings and formats in the main layout: a stored field's
+ * twin binds its other home, a loaded one's (sparse domain) its base. */
+const UNIFORM_REFERENCE_DETAIL_BINDINGS: readonly { readonly name: string; readonly binding: number; readonly stored: boolean; readonly format: GPUTextureFormat }[] = [
+  { name: "velocityOut", binding: 1, stored: true, format: "rgba32float" }, { name: "volumeIn", binding: 4, stored: false, format: "r32float" },
+  { name: "volumeOut", binding: 5, stored: true, format: "r32float" }, { name: "gammaOut", binding: 25, stored: true, format: "r32float" },
+  { name: "uvPhiIn", binding: 31, stored: false, format: "r32float" },
+];
+/** The main layout's storage textures the t=0 authority and publication never store. */
+const UNIFORM_REFERENCE_INITIAL_UNSTORED: ReadonlySet<number> = new Set([3, 8, 32]);
 const UNIFORM_PHYSICS_TRACE_CADENCE_MS = 100;
 /** Params lanes the mixed frame's shader still reads as constants: the fine
  * reach and transport margin in 4h tiles, and the phi agreement clamp. */
@@ -556,6 +565,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly rigidSystem: WebGPURigidBodySystem;
   private readonly mainLayout: GPUBindGroupLayout;
   private readonly mainPipelineLayout: GPUPipelineLayout;
+  /** Packed detail storage: the t=0 authority and publication's layout, with their fields' twins. */
+  private readonly initialPipelineLayout?: GPUPipelineLayout;
   private readonly extrapolationAuthorityGroup: GPUBindGroup;
   private readonly wallFilmResolveGroup: GPUBindGroup;
   private pipelines?: UniformReferencePipelines;
@@ -924,6 +935,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.pressureMultigrid = new WebGPUUniformPressureMultigrid(this.pressureSchedule,
       scene.container.depthBoundary !== "symmetry", this.fieldPages);
     this.mainPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.mainLayout] });
+    // Packed detail storage: the t=0 authority and publication bind each
+    // stored field's twin (uniformDetailDenseShader) and, under a sparse
+    // domain, each loaded field's. Their own layout leaves out the main
+    // layout's storage textures they never store, so the twins stay within
+    // the stage's storage-texture limit.
+    const packedDetail = this.detailStorage?.layout.placement === "packed" ? this.detailStorage : undefined;
+    const initialTwins = packedDetail ? UNIFORM_REFERENCE_DETAIL_BINDINGS.filter(f => f.stored || packedDetail.layout.domain.sparse) : [];
+    const initialEntries = packedDetail ? [
+      ...mainEntries.filter(e => !(e.storageTexture && UNIFORM_REFERENCE_INITIAL_UNSTORED.has(e.binding))),
+      ...initialTwins.map(f => ({ binding: f.binding + UNIFORM_DETAIL_TWIN_BINDING, visibility: GPUShaderStage.COMPUTE,
+        ...(f.stored ? { storageTexture: { access: "write-only" as const, format: f.format, viewDimension: "3d" as const } } : { texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } }) })),
+    ] : [];
+    const initialLayout = packedDetail ? device.createBindGroupLayout({ label: "Uniform t=0 detail kernels", entries: initialEntries }) : undefined;
+    if (initialLayout) this.initialPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [initialLayout] });
+    const initialBindings = new Set(initialEntries.map(e => e.binding));
     const sampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     let physicalViews = false;
     const view = (texture: GPUTexture) => this.fieldPages.view(texture, physicalViews);
@@ -933,8 +959,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       reversed = velocityIn, transport = this.transportA, surface = volumeIn,
       gammaRead = this.gammaA, gammaWrite = this.gammaB,
       boundaryRead = this.boundaryVelocityA, boundaryWrite = this.boundaryVelocityB,
-      velocityPhase = volumeIn, reversePhi = false) => this.createPageAwareGroup({
-        layout: this.mainLayout, entries: ([
+      velocityPhase = volumeIn, reversePhi = false, twins?: GPUBindGroupEntry[]) => this.createPageAwareGroup({
+        layout: twins ? initialLayout! : this.mainLayout, entries: ([
           ...([
             { binding: 31, resource: view((reversePhi ? this.vertexPhiScratch! : this.vertexPhiField!)) },
             { binding: 32, resource: view((reversePhi ? this.vertexPhiField! : this.vertexPhiScratch!)) },
@@ -955,7 +981,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 28, resource: { buffer: this.macCormackAuditBinding } },
           { binding: 29, resource: { buffer: this.pages } },
           { binding: 30, resource: { buffer: this.activeScratch } },
-        ] as GPUBindGroupEntry[]),
+        ] as GPUBindGroupEntry[]).filter(e => !twins || initialBindings.has(e.binding)).concat(twins ?? []),
       });
     this.extrapolationAuthorityGroup = group(
       this.velocityA, this.velocityD, this.pressureA, this.pressureB,
@@ -964,12 +990,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.wallFilmResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceB, this.heightB, this.heightA);
     // Packed detail storage: the two t=0 kernels' groups over the fields'
     // physical textures, built at each use (the atlas may have grown).
+    // Each field's twin by its binding (UNIFORM_REFERENCE_DETAIL_BINDINGS): a stored field's other home, a loaded one's base.
+    const twins = (fields: Readonly<Record<string, GPUTexture>>) => initialTwins.map(f => ({ binding: f.binding + UNIFORM_DETAIL_TWIN_BINDING,
+      resource: packedDetail!.twin(fields[f.name]!, !f.stored).createView() }));
     this.initialDetailGroups = () => {
       physicalViews = true;
       try {
+        const phi = this.vertexPhiField!;
         return {
-          authority: group(this.velocityA, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.surfaceA, this.heightB, this.heightA),
-          publish: group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceB, this.heightB, this.heightA),
+          authority: group(this.velocityA, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.surfaceA, this.heightB, this.heightA,
+            undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, false,
+            twins({ velocityOut: this.velocityD, volumeIn: this.volumeA, volumeOut: this.surfaceA, gammaOut: this.gammaB, uvPhiIn: phi })),
+          publish: group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceB, this.heightB, this.heightA,
+            undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, false,
+            twins({ velocityOut: this.velocityB, volumeIn: this.volumeA, volumeOut: this.surfaceB, gammaOut: this.gammaB, uvPhiIn: phi })),
         };
       } finally { physicalViews = false; }
     };
@@ -1268,7 +1302,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // the records' rule over the band's cells (uniformParticleRecordRule). The
     // build's claim refuses to 4h what the slots cannot serve.
     const cells:[number,number,number]=[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz];
-    const slotRule=this.mixedSlotRule=coarseStart&&uniformFineBlocks(tiers)==="auto"
+    const slotRule=coarseStart&&uniformFineBlocks(tiers)==="auto"
       ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number],this.pageResidency.air))):undefined;
     const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume):undefined;
     const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:band?512*slotRule!:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles);
@@ -1281,6 +1315,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // cannot serve reads the solids themselves. Else every key its own.
     const box=fluidRegionLattice(this.scene).dimensions.map(n=>n/4),inner=box.reduce((n,b)=>n*Math.max(0,b-2),1);
     const solidSlots=coarseStart||tiers?.bricks!==undefined?Math.min(tiles,Math.ceil(1.5*(promotion.coupledTiles+box.reduce((n,b)=>n*b,1)-inner))):undefined;
+    // V2b: a coarse start's h stores hold its slots from construction (never
+    // the whole block grid): the slotted textures the frame makes take them,
+    // and the first layout's are claimed before it installs (claimFirst).
+    const fineBlocks=uniformFineBlocks(tiers);
+    if(coarseStart&&fineBlocks!==undefined)detail.slotFromStart(slotRule??(fineBlocks as number));
     if(seed&&seed.fineTiles.length>fineCeiling)throw new Error(`Uniform simulation detail: the coarse start holds ${seed.fineTiles.length} h tiles (its Fine regions); fluid.tiers.bricks ${fineCeiling/8} holds ${fineCeiling}: raise fluid.tiers.bricks`);
     this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,bulkSlots:this.bulkSlotCapacity(),liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
@@ -1350,21 +1389,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // every tile uncut for the life of the frame.
     const deferred=this.detailStorage?.layout.placement==="packed";
     if(deferred)this.writeParams(0,Math.min(this.scene.rigidBodies.length,12),0);
+    if(detail.fineSlots.sparse)await detail.claimFirst(this.mixedSeed!);
     this.syncMixedLayout();
     // t=0: the uploaded phi on the initial layout (a refused or unchanged
     // layout encodes no relayout publish).
     this.mixedFrame.publishCoarseVertexPhi();
     if(deferred)this.encodeInitialPresentationSurface();
-    // The t=0 kernels ran over the whole block grid: from here the h stores
-    // hold only the blocks the detail ring needs (uniform-fine-slots.ts)
-    // when fluid.tiers.fineBlocks asks for it (opt-in). A load at a slotless
-    // block reads the field's base (the sparse domain).
-    const fineBlocks=uniformFineBlocks(this.scene.fluid?.tiers);
-    if(fineBlocks!==undefined)await detail.compact(this.mixedSlotRule??(fineBlocks==="auto"?undefined:fineBlocks));
+    // An h start with fluid.tiers.fineBlocks: the t=0 kernels ran over the
+    // whole block grid, and from here the h stores hold only the blocks the
+    // detail ring needs (uniform-fine-slots.ts). A load at a slotless block
+    // reads the field's base (the sparse domain). A coarse start's hold
+    // them from construction already (compact does nothing).
+    if(fineBlocks!==undefined)await detail.compact(fineBlocks==="auto"?undefined:fineBlocks);
   }
   private mixedDynamic?: UniformMixedDynamicClassifier;
-  /** A coarse start's h slots by M4b's rule (uniformFineSlotRule), when no tiers figure overrides it. */
-  private mixedSlotRule?: number;
   /** GPU ownership builder for dynamic relayouts; region edits stay on the CPU path. */
   private mixedBuilder?: UniformMixedLayoutBuilder;
   private mixedBuilderStaticKey?: string;
@@ -2155,8 +2193,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // through the storage's accessors.
     const packed = this.detailStorage?.layout.placement === "packed" ? this.detailStorage : undefined;
     const shaderModule = compiler.createShaderModule({ label: "Uniform reference kernels",
-      code: packed ? uniformDetailDenseShader(this.shaderSource, UNIFORM_REFERENCE_DETAIL_CLASSES) : this.shaderSource });
-    const layout = this.mainPipelineLayout;
+      code: packed ? uniformDetailDenseShader(this.shaderSource, UNIFORM_REFERENCE_DETAIL_CLASSES, packed.layout.domain.sparse) : this.shaderSource });
+    const layout = this.initialPipelineLayout ?? this.mainPipelineLayout;
     const compiled: Partial<UniformReferencePipelines> = {};
     // Uniform Geometric advances only through the mixed frame: of the native
     // kernels it dispatches just the t=0 dense authority seed (plus uvPublish).
@@ -2219,18 +2257,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // accessors (initializationTasks), which deposit the canonical texels.
     const packed = this.detailStorage?.layout.placement === "packed" ? this.detailStorage : undefined;
     const groups = packed ? this.initialDetailGroups() : { authority: this.extrapolationAuthorityGroup, publish: this.wallFilmResolveGroup };
+    // Both launch over the pool's stored pages (storedPageId), never the lattice.
+    const pages = [...uniformT0Groups(this.address.blocks), 1] as const;
     this.runDirect(encoder, "Uniform initial Sec. 3.3 interface authority",
-      this.pipelines.extrapolationAuthorityDense, groups.authority,
-      [Math.ceil(this.executionInfo.nx / 4), Math.ceil(this.executionInfo.ny / 4), Math.ceil(this.executionInfo.nz / 4)]);
-    {
-      // Use the same page traversal as runtime publication. A dense-shaped
-      // launch cannot cover a page-shaped entry point on a large domain.
-      this.run(encoder, "Uniform Geometric initial page surface publication",
-        this.initialPublishPipeline!, groups.publish);
-    }
-    // The two kernels store through no twin: beside an h generation the
-    // fields' bases take their canonical texels from it.
-    packed?.encodeBaseRefresh(encoder, [this.velocityD, this.velocityB, this.surfaceA, this.surfaceB, this.gammaB]);
+      this.pipelines.extrapolationAuthorityDense, groups.authority, pages);
+    this.runDirect(encoder, "Uniform Geometric initial page surface publication",
+      this.initialPublishPipeline!, groups.publish, pages);
+    // Packed: the two kernels store each canonical texel to its twin too (uniformDetailDenseShader).
     this.device.queue.submit([encoder.finish()]);
   }
 
@@ -2619,20 +2652,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.device.queue.writeTexture({ texture }, packed, { bytesPerRow: padded, rowsPerImage: nz }, { width: nx, height: nz });
   }
 
-  private dispatch(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup): void {
-    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-    pass.dispatchWorkgroups(
-      Math.ceil(this.executionInfo.nx / 4), Math.ceil(this.executionInfo.ny / 4), Math.ceil(this.executionInfo.nz / 4));
-  }
-
   private sharedFaceOpenValid(): boolean {
     return this.velocityTransport !== "maccormack" && !this.symmetryStageAuditFields;
-  }
-
-  private run(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline, group: GPUBindGroup): void {
-    const pass = encoder.beginComputePass({ label });
-    this.dispatch(pass, pipeline, group);
-    pass.end();
   }
 
   private runDirect(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline,

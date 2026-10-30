@@ -83,6 +83,11 @@ export function uniformFineSlotCapacity(blocks:number,blockGrid:readonly number[
  return Math.min(layer*uniformFineSlotLayers(blockGrid,want)-1,Math.max(1,blocks-2));
 }
 
+/** The host assignment of a need: the needed blocks, in block order, take slots 1, 2, ... */
+export function uniformFineSlotsOf(blocks:number,needed:readonly number[]):Uint32Array<ArrayBuffer>{
+ const slots=new Uint32Array(blocks);needed.forEach((b,i)=>{slots[b]=i+1;});return slots;
+}
+
 /** A field an init launch clears: its format, class (a vertex block is 33³, any other 32³) and empty value. */
 export interface UniformFineSlotField{readonly format:"r32float"|"rgba32float";readonly vertex:boolean;readonly empty:number}
 
