@@ -32,7 +32,7 @@ fn umWallPlane(p:vec3i)->u32{for(var f=0u;f<6u;f++){if(umWallBlock(p,f)!=0u){ret
 fn umVertexAt(p:vec3u)->u32{return p.x+33u*p.y+1089u*p.z;}
 fn umStoreSurface(p:vec3u,width:u32,value:f32){atomicAdd(&stored[umVertexAt(p)],1u);}
 fn umHoldCold(p:vec3u,width:u32)->bool{if((p.x+p.y+p.z)%7u!=0u){return false;}umStoreSurface(p,width,0.0);return true;}
-fn umFarAir(p:vec3u)->f32{return select(-1.0,1.0,(p.x+p.y+p.z)%5u==0u);}
+fn umFarAir(p:vec3u,width:u32)->f32{return select(-1.0,1.0,(p.x+p.y+p.z)%5u==0u);}
 fn umRecordRegion(p:vec3u,tier:u32){}
 ${uniformMixedWallFaceWGSL}
 ${listing}`});
