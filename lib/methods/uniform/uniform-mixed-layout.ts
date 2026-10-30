@@ -55,6 +55,17 @@ export function createUniformMixedLayout(
    * region cell-size bounds: forced tiles are h whatever a region says. */
   forcedFine?: Uint8Array, address: UniformLatticeAddress = uniformLatticeAddress(lattice.dimensions),
 ): UniformMixedLayout {
+  const { widths, regions: snapped } = uniformMixedLayoutWidths(lattice, regions, backgroundWidth, forcedFine, address);
+  return packUniformMixedLayout(lattice, address, widths, snapped);
+}
+
+/** createUniformMixedLayout's tile widths (1 or 4, by box index) and snapped
+ * regions, before packing: a stored tile is in the layout's fineTiles exactly
+ * when its width is 1. */
+export function uniformMixedLayoutWidths(
+  lattice: RefinementRegionLattice, regions: readonly FluidRefinementRegion[], backgroundWidth: 1 | 4 = 1,
+  forcedFine?: Uint8Array, address: UniformLatticeAddress = uniformLatticeAddress(lattice.dimensions),
+): { readonly widths: Uint8Array; readonly regions: UniformMixedLayout["regions"] } {
   const axes = ["x", "y", "z"] as const;
   for (let a = 0; a < 3; a++) {
     if (!Number.isSafeInteger(lattice.dimensions[a]) || lattice.dimensions[a]! < 4
@@ -102,8 +113,7 @@ export function createUniformMixedLayout(
     }
     snapped.push({ id: r.id, min, max });
   }
-  const widths = Uint8Array.from(allowed, mask => mask === 1 ? 1 : mask === 2 ? 4 : backgroundWidth);
-  return packUniformMixedLayout(lattice, address, widths, snapped);
+  return { widths: Uint8Array.from(allowed, mask => mask === 1 ? 1 : mask === 2 ? 4 : backgroundWidth), regions: snapped };
 }
 
 /** Ownership from per-tile widths decided elsewhere (the detail planner's

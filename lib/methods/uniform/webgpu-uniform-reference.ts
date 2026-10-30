@@ -9,7 +9,7 @@ import { uniformDetailCapacityRule } from "./uniform-detail-policy";
 import { uniformWindowFixedFrame } from "./uniform-window-address";
 import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
-import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
+import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLayoutWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
 import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformPagePoolRule, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
 import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
@@ -22,7 +22,8 @@ import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixed
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, uniformMixedUp, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
-import { uniformBlockStored, uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformLatticeWindowBox, uniformPageWord, uniformTileInBox, uniformTileNear, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformBlockStored, uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformLatticeWindowBox, uniformPageWord, uniformTileInBox, uniformTileNear, uniformVertexSlot, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformBulkStartFace, uniformBulkStartLowRows, uniformBulkStartPages, uniformBulkStartRecords, uniformBulkStartSource } from "./uniform-bulk-start";
 import { UniformTexturePages } from "./uniform-texture-pages";
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
 import { bulk16SlotCapacity } from "./uniform-bulk-pages";
@@ -720,8 +721,32 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // A walled box with no pool figure: the pool rule (the census plus its ballistic reserve), not one block a box page.
     const pool = scene.fluid.pagePool, ruled = pool?.blocks === undefined && pool?.memory_MiB === undefined && scene.container.walls !== "none"
       ? uniformPagePoolRule(scene, (this.initialVolume ??= uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, residency.air) : undefined;
-    const address = this.address = uniformLatticeAddress([nx, ny, nz], scene.container.top === "open", { ...pool, air: residency.air, ...(ruled === undefined ? {} : { blocks: ruled }) },
-      scene.container.walls === "none" ? { boxPage } : undefined);
+    const latticeAddress = (bulk?: readonly (readonly [number, number, number])[]) => uniformLatticeAddress([nx, ny, nz], scene.container.top === "open",
+      { ...pool, air: residency.air, bulk, ...(ruled === undefined ? {} : { blocks: ruled - (bulk?.length ?? 0) }) }, scene.container.walls === "none" ? { boxPage } : undefined);
+    let address = this.address = latticeAddress();
+    // A procedural solid with voxel collision is drawn smooth and collides as
+    // its generated voxels: the fluid reads no field.
+    this.voxelCollision = scene.solidBoundary?.collision === "voxels";
+    const solidMask = () => {
+      const mask = new SolidOccupancyMask(uniformSolidMaskPages(address, this.voxelCollision));
+      mask.update(solidWorldForFluidLattice(scene));
+      // Slots for the pages partly solid now, and as many again and one a block
+      // the pool stores, for edits: never one a page of the box.
+      mask.seal(Math.min(mask.layout.slots, 2 * mask.slotsHeld + Math.max(64, address.blocks - 2)));
+      return mask;
+    };
+    this.solidMask = solidMask();
+    // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
+    this.solidVoxelsEmpty = this.solidMask.empty;
+    // V2c: a census start's deep pages start in BULK16 slots, holding no
+    // block (uniform-bulk-start): the set and their records on the address
+    // that stores every page the residency does, then the address without them.
+    if (this.narrowBandNearSettled.bulkTier === "16h" && this.detail.policy === "dynamic" && scene.fluid.tiers?.start === "census") {
+      const start = this.bulkStart = this.bulkStartState(cells);
+      const t0 = performance.now();
+      if (start.pages.length) { address = this.address = latticeAddress(start.pages); this.solidMask = solidMask(); }
+      this.bulkStartInfo = { ...this.bulkStartInfo!, rebuild_ms: performance.now() - t0 };
+    }
     // The mixed-ownership frame owns every geometric advance, on native fields over the shared scratch arena.
     this.scratchArena = new UniformScratchArena(device, address, options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));
     this.fieldPages = new UniformTexturePages(device, this.scratchArena);
@@ -806,16 +831,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.transportB = this.fieldPages.createTexture({ label: "Uniform reference transport B", size: [1,1,1], dimension: "3d", format: "rgba32float", usage: transportUsage });
 
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: UNIFORM_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    // A procedural solid with voxel collision is drawn smooth and collides as
-    // its generated voxels: the fluid reads no field.
-    this.voxelCollision = scene.solidBoundary?.collision === "voxels";
-    this.solidMask = new SolidOccupancyMask(uniformSolidMaskPages(address, this.voxelCollision));
-    this.solidMask.update(solidWorldForFluidLattice(scene));
-    // Slots for the pages partly solid now, and as many again and one a block
-    // the pool stores, for edits: never one a page of the box.
-    this.solidMask.seal(Math.min(this.solidMask.layout.slots, 2 * this.solidMask.slotsHeld + Math.max(64, address.blocks - 2)));
-    // No cell off the lattice's walls is solid: a tank's shell lies in wall pages and is not counted.
-    this.solidVoxelsEmpty = this.solidMask.empty;
     // The page pool's tail (a mirror), then the detail storage's h slots (a mirror), each block its own until it publishes them.
     this.pages = device.createBuffer({ label: "Uniform reference page table", size: address.seed.tail.byteLength + 4 * address.blocks, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.pages, 0, address.seed.tail);
@@ -1225,22 +1240,75 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * and Fine regions. Frame 1's census then
    * refines and coarsens it as it does the h start. */
   private censusSeed():UniformMixedLayout{
-    const lattice=fluidRegionLattice(this.scene),a=this.address;
-    const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE);
-    const bodies=initializeRigidBodies(this.scene.rigidBodies).map(b=>({
-      centre:[0,1,2].map(i=>(([b.position_m.x,b.position_m.y,b.position_m.z][i]!)-[lattice.origin_m.x,lattice.origin_m.y,lattice.origin_m.z][i]!)/lattice.cellSize_m[i]!) as [number,number,number],
-      radius:boundingRadius(b)/Math.min(...lattice.cellSize_m)}));
-    // The census's crossing tiles of the initial vertex phi (the upload's, initializeVolumeAndTerrain), on the
-    // pages beside liquid, and its solid contact tiles (coupled, not 4h-exact), open as the thin-wall rule
-    // reads it: the solid mask and the terrain.
-    const [nx,ny,nz]=lattice.dimensions,terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined;
-    const open=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<nx&&y<ny&&z<nz&&!this.solidMask.solid(x,y,z)&&!(terrain&&y+1<=terrain[x+nx*z]!);
-    const phi=uniformLatticePagedPhi(this.scene,UNIFORM_PAGE_POOL_EDGE,uniformCensusSurfacePages(volume),uniformDetailCoarseSolids(this.detail));
-    const tiles=a.tiles as [number,number,number];
-    const solid=this.solidVoxelsEmpty&&!sceneHasTerrain(this.scene)?undefined:uniformCensusInexactSolidTiles(tiles,this.mixedSolidPromotion().coupled,open);
-    const seed=uniformCensusSeedTiles(volume,uniformCensusCrossingTiles(phi,tiles,open),tiles,solid,bodies);
-    return createUniformMixedLayout(lattice,this.scene.fluid.refinementRegions??[],4,seed,a);
+    return createUniformMixedLayout(fluidRegionLattice(this.scene),this.scene.fluid.refinementRegions??[],4,this.censusSeedBoxTiles(),this.address);
   }
+  /** The census seed's box tiles (uniformCensusSeedTiles), the same on every
+   * address of the box (a V2c start builds two): only the layout's tile keys
+   * follow the blocks. Held until the frame's first layout. */
+  private censusSeedBoxTiles():Uint8Array{
+    return this.censusSeedTiles??=(()=>{
+      const lattice=fluidRegionLattice(this.scene),a=this.address;
+      const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE);
+      const bodies=initializeRigidBodies(this.scene.rigidBodies).map(b=>({
+        centre:[0,1,2].map(i=>(([b.position_m.x,b.position_m.y,b.position_m.z][i]!)-[lattice.origin_m.x,lattice.origin_m.y,lattice.origin_m.z][i]!)/lattice.cellSize_m[i]!) as [number,number,number],
+        radius:boundingRadius(b)/Math.min(...lattice.cellSize_m)}));
+      // The census's crossing tiles of the initial vertex phi (the upload's, initializeVolumeAndTerrain), on the
+      // pages beside liquid, and its solid contact tiles (coupled, not 4h-exact), open as the thin-wall rule
+      // reads it: the solid mask and the terrain.
+      const [nx,ny,nz]=lattice.dimensions,terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined;
+      const open=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<nx&&y<ny&&z<nz&&!this.solidMask.solid(x,y,z)&&!(terrain&&y+1<=terrain[x+nx*z]!);
+      const phi=uniformLatticePagedPhi(this.scene,UNIFORM_PAGE_POOL_EDGE,uniformCensusSurfacePages(volume),uniformDetailCoarseSolids(this.detail));
+      const tiles=a.tiles as [number,number,number];
+      const solid=this.solidVoxelsEmpty&&!sceneHasTerrain(this.scene)?undefined:uniformCensusInexactSolidTiles(tiles,this.mixedSolidPromotion().coupled,open);
+      return uniformCensusSeedTiles(volume,uniformCensusCrossingTiles(phi,tiles,open),tiles,solid,bodies);
+    })();
+  }
+  private censusSeedTiles?:Uint8Array;
+  /** V2c: the census start's BULK16 pages and their slot records, held from construction to the first frame. */
+  private bulkStart?:{readonly pages:[number,number,number][];readonly records:Uint32Array<ArrayBuffer>;readonly phi:LatticePages};
+  /** The census start's BULK16 pages (uniformBulkStartPages: the bulk tier's
+   * verdict on the t=0 state, the census seed's h tiles and Fine regions,
+   * the solids as the mask holds them) and the records the first commit's
+   * demote would write (uniformBulkStartRecords), on the address that stores
+   * every page the residency does. The vertex phi on that address is the
+   * upload's (initializeVolumeAndTerrain): it holds a D page's own vertices. */
+  private bulkStartState(cells:readonly number[]):NonNullable<typeof this.bulkStart>{
+    const a=this.address,scene=this.scene,E=UNIFORM_PAGE_POOL_EDGE;
+    const {volume,terrain}=this.initialVolume??=uniformLatticePagedVolume(scene,E);
+    if(sceneHasTerrain(scene))this.mixedTerrainCells=Float32Array.from(terrain,height=>height/(scene.container.height_m/cells[1]!));
+    const stored=(x:number,y:number,z:number)=>uniformBlockStored(a,uniformPageWord(a,x,y,z));
+    const t0=performance.now();
+    const phi=uniformLatticePagedPhi(scene,E,stored,uniformDetailCoarseSolids(this.detail));
+    const t1=performance.now();
+    const velocity=uniformInitialLiquidVelocityPages(scene.fluid.initialVelocity_m_s,volume);
+    const [tx,ty,tz]=a.tiles;
+    const t1b=performance.now();
+    // The seed's box tiles (shared with the frame's layout) and their widths
+    // under the Fine regions: a stored tile is in censusSeed's fineTiles when its width is 1.
+    const seed=this.censusSeedBoxTiles();const t1c=performance.now();
+    const {widths}=uniformMixedLayoutWidths(fluidRegionLattice(scene),scene.fluid.refinementRegions??[],4,seed,a);
+    const t2=performance.now();
+    const [nx,ny,nz]=a.cells,terrainCells=sceneHasTerrain(scene)?this.mixedTerrainCells:undefined;
+    const open=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<nx&&y<ny&&z<nz&&!this.solidMask.solid(x,y,z)&&!(terrainCells&&y+1<=terrainCells[x+nx*z]!);
+    const c=scene.container,h=Math.min(c.width_m/cells[0]!,c.height_m/cells[1]!,c.depth_m/cells[2]!);
+    const face=(x:number,y:number,z:number,axis:number)=>uniformBulkStartFace(velocity,x,y,z,axis);
+    const pages=uniformBulkStartPages(uniformBulkStartSource({pages:a.pages as [number,number,number],openTop:a.openTop,stored,volume,phi,velocity,
+      fine:(x,y,z)=>widths[uniformBoxTileIndex(a,x,y,z)]===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}));
+    const t3=performance.now();
+    // A D page's 4h vertex block as the install leaves it: the vertices it holds (umWideVertexSlot), the far phi elsewhere.
+    const empty=uniformLatticeFarPhi(scene),slot:[number,number,number,number]=[0,0,0,0],[px,py]=a.pages;
+    const records=uniformBulkStartRecords({pages,boxPage:a.boxPage,stored,face,phi:(p,l)=>{
+      const g=[8*p[0]+l[0],8*p[1]+l[1],8*p[2]+l[2]] as const;
+      if(g[0]>tx||g[1]>ty||g[2]>tz)return empty;
+      uniformVertexSlot(a,g[0],g[1],g[2],3,slot);
+      if(slot[3]!==uniformPageWord(a,p[0],p[1],p[2])||slot[0]!==l[0]||slot[1]!==l[1]||slot[2]!==l[2])return empty;
+      return phi.at[p[0]+px*(p[1]+py*p[2])]![4*l[0]+33*(4*l[1]+33*4*l[2])]!;
+    }});
+    this.bulkStartInfo={pages:pages.length,phi_ms:t1-t0,seed_ms:t1c-t1b,layout_ms:t2-t1c,set_ms:t3-t2,records_ms:performance.now()-t3};
+    return {pages,records,phi};
+  }
+  /** The census start's BULK16 pages and the host's time for them (bulkStartState), ms. */
+  bulkStartInfo?:{readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number};
   /** The coarse start's thin-wall tiles at h (uniformThinWallTiles: a cut 4h
    * owner there fills open cells across the solid). The census holds a cut
    * tile at h where liquid reaches it, with every tile around it
@@ -1294,6 +1362,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // fluid.tiers.start "census" (V2a): the same capacities by rule, on frame 1's census at t=0 (censusSeed).
     const tiers=this.scene.fluid.tiers,coarseStart=gpuLayout&&(tiers?.start==="4h"||tiers?.start==="census");
     const seed=this.mixedSeed=coarseStart?(tiers?.start==="census"?this.censusSeed():this.dynamicSeed()):undefined;
+    this.censusSeedTiles=undefined;
     // M4b: unless fluid.tiers.fineBlocks gives a figure, a coarse start holds
     // its h slots by one rule from the census footprint (uniformFineSlotRule);
     // unless fluid.tiers.bricks does, its h owners at the slots' 512 tiles
@@ -1332,6 +1401,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
     },this.address.openTop,this.pressureSchedule);
     this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;this.mixedFrame.narrowBandFlip.sparseNeighbours=this.narrowBandSparseNeighbours;
+    // V2c: the census start's BULK16 pages, live in their slots before the first commit.
+    if(this.bulkStart?.pages.length){
+      if(!this.mixedFrame.bulkPages)throw new Error("Uniform: a census start's BULK16 pages need the BULK16 store");
+      this.mixedFrame.bulkPages.start(this.bulkStart.records);
+    }
+    this.bulkStart=undefined;
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.
@@ -2594,7 +2669,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const cellHeight = c.height_m / this.containerCells[1];
     if (this.vertexPhiField && this.vertexPhiScratch) {
       // Cut 4h solid owners read their plane at corners the h rule buries.
-      const a = this.address, phi = uniformLatticePagedPhi(this.scene, UNIFORM_PAGE_POOL_EDGE, (x, y, z) => uniformBlockStored(a, uniformPageWord(a, x, y, z)), uniformDetailCoarseSolids(this.detail));
+      // A census start's BULK16 pages: the phi of their address, each vertex's value the same on every page that holds it.
+      const a = this.address, phi = this.bulkStart?.phi ?? uniformLatticePagedPhi(this.scene, UNIFORM_PAGE_POOL_EDGE, (x, y, z) => uniformBlockStored(a, uniformPageWord(a, x, y, z)), uniformDetailCoarseSolids(this.detail));
       this.upload3DF32(this.vertexPhiField, phi);
       this.upload3DF32(this.vertexPhiScratch, phi);
     }
@@ -2607,8 +2683,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.upload3DF32(this.gammaA);
     this.upload3DF32(this.gammaB);
     const zeroBoundaryVelocity = new Float32Array(this.executionNegativeBoundaryVelocityBytes / 4);
-    this.device.queue.writeBuffer(this.boundaryVelocityA, 0, zeroBoundaryVelocity);
-    this.device.queue.writeBuffer(this.boundaryVelocityB, 0, zeroBoundaryVelocity);
+    // A census start's BULK16 pages: the rows their demote writes into a stored high neighbour (uniformBulkStartLowRows).
+    const start = this.bulkStart, initialRows = start?.pages.length ? zeroBoundaryVelocity.slice() : zeroBoundaryVelocity;
+    if (start?.pages.length) {
+      const a = this.address;
+      uniformBulkStartLowRows({ pages: start.pages, box: a.pages, block: (x, y, z) => { const w = uniformPageWord(a, x, y, z); return uniformBlockStored(a, w) ? w : 0; },
+        face: (x, y, z, axis) => uniformBulkStartFace(velocity, x, y, z, axis), write: (row, value) => { initialRows[row] = value; } });
+    }
+    this.device.queue.writeBuffer(this.boundaryVelocityA, 0, initialRows);
+    this.device.queue.writeBuffer(this.boundaryVelocityB, 0, initialRows);
     this.device.queue.writeBuffer(this.boundaryVelocityC, 0, zeroBoundaryVelocity, 0, this.boundaryVelocityC.size / 4);
     this.device.queue.writeBuffer(this.boundaryVelocityD, 0, zeroBoundaryVelocity);
     this.referenceVolumeCells = initial;

@@ -99,14 +99,29 @@ export class UniformBulkPages{
   if(this.layout.bytes>Math.min(device.limits.maxBufferSize,device.limits.maxStorageBufferBindingSize))throw new Error(`BULK16 capacity ${capacity} needs ${this.layout.bytes} bytes in one storage binding`);
   this.store={buffer:device.createBuffer({label:"Uniform whole-page BULK16 slots",size:this.layout.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),offset:0,owned:true};
   this.liveLaunch=device.createBuffer({label:"Uniform BULK16 live launch",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
-  device.queue.writeBuffer(this.liveLaunch,0,new Uint32Array([0,1,1,0]));
   this.seed();
  }
+ /** The census start's slots (V2c, uniform-bulk-start): n whole records, slot i+1 the i-th. */
+ private started?:Uint32Array<ArrayBuffer>;
  private seed():void{
-  const capacity=this.layout.capacity;
-  const seed=new Uint32Array(this.layout.free+capacity);seed[BULK16_STATUS.capacity]=capacity;seed[BULK16_STATUS.free]=capacity;seed[BULK16_STATUS.version]=0xb0160001;
+  const capacity=this.layout.capacity,n=(this.started?.length??0)/BULK16_PAGE_WORDS;
+  // As n claims and a finish leave the store: the free ring's head past them, each live.
+  const seed=new Uint32Array(this.layout.live+capacity);seed[BULK16_STATUS.capacity]=capacity;seed[BULK16_STATUS.free]=capacity-n;seed[BULK16_STATUS.head]=n%capacity;
+  seed[BULK16_STATUS.live]=n;seed[BULK16_STATUS.version]=0xb0160001;
   for(let i=0;i<capacity;i++)seed[this.layout.free+i]=i+1;
+  for(let i=0;i<n;i++)seed[this.layout.live+i]=i+1;
   this.device.queue.writeBuffer(this.store.buffer,this.store.offset,seed);
+  if(this.started)this.device.queue.writeBuffer(this.store.buffer,this.store.offset+4*(this.layout.records+BULK16_PAGE_WORDS),this.started);
+  this.device.queue.writeBuffer(this.liveLaunch,0,new Uint32Array([Math.min(n,BULK16_LIVE_GROUPS),1,1,0]));
+ }
+ /** Before any frame: the census start's pages, each a whole record
+  * (BULK16_PAGE_WORDS) as a claim and its demote write them at the first
+  * commit, slot i+1 the i-th, generation 1 (that commit's begin makes the
+  * store's). The store is reseeded with them live. */
+ start(records:Uint32Array<ArrayBuffer>):void{
+  const n=records.length/BULK16_PAGE_WORDS;
+  if(!Number.isInteger(n)||n>this.layout.capacity)throw new Error(`BULK16 start: ${records.length} words are not whole records within the ${this.layout.capacity} slots`);
+  this.started=n?records:undefined;this.seed();
  }
  /** Before any bind (initialize, the readers' groups): move the store into
   * host (layout.bytes at a storage offset), seeded as the constructor's was. */

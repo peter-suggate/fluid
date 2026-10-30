@@ -153,6 +153,7 @@ import { UNIFORM_MOVING_WINDOW_INNER, UNIFORM_MOVING_WINDOW_MARGIN, uniformMovin
 import { UNIFORM_DIRECTORY_FLAT_WORDS, UNIFORM_SUPER_BLOCK_CHILDREN, UNIFORM_SUPER_BLOCK_SLOTS, UNIFORM_WINDOW_HEADER_WORDS, UNIFORM_WINDOW_PAGES, uniformDirectoryFlat, uniformDirectoryWord, uniformSuperBlockLocal, uniformWindowDerivedWords, uniformWindowWorldWGSL } from "./uniform-window-address";
 import type { GPUFluidVolumePageSource } from "../../core/method-view-records";
 import type { LatticePages } from "../../core/initial-liquid-lattice";
+import { bulk16PageWord } from "./uniform-bulk-pages-reference";
 
 const RECORD=8;
 /** upFlat's workgroups a row of its two-dimensional launch. */
@@ -263,8 +264,11 @@ export function uniformPagePoolLayout(options:UniformPagePoolOptions){
   published:{records:UNIFORM_PAGE_POOL_PUBLISHED.records,words:UNIFORM_PAGE_POOL_PUBLISHED.records+4*blocks}} as const;
 }
 
-/** A page of a seed: its signed page coordinate and the block that holds it. */
-export interface UniformPagePoolSeedPage {readonly x:number;readonly y:number;readonly z:number;readonly block:number}
+/** A page of a seed: its signed page coordinate and the block that holds it,
+ * or (block 0) the BULK16 slot that holds it: its entry is that slot's page
+ * word (bulk16PageWord) and it counts in its super-block like a resident
+ * page, as a demote leaves it. */
+export interface UniformPagePoolSeedPage {readonly x:number;readonly y:number;readonly z:number;readonly block:number;readonly slot?:number}
 /** The host copy of a seeded pool, generation 0. Read-only: the arrays are
  * what the buffers were written from. table, blocks, tail and resident are
  * views of state. */
@@ -328,18 +332,21 @@ export function uniformPagePoolSeed(layout:UniformPagePoolLayout,pages:readonly 
   const r=superRecord(slots);signed.set(sb,r);state[r+U.state]=state_;state[r+U.background]=background;table[entry]=slots;
   return slots;
  };
- pages.forEach(({x,y,z,block},i)=>{
+ pages.forEach((page,i)=>{const {x,y,z,block}=page;
   const name=()=>`Uniform page pool seed page ${i} (${x}, ${y}, ${z})`;
   if((x|0)!==x||(y|0)!==y||(z|0)!==z)throw new RangeError(`${name()}: coordinates must be 32-bit integers`);
-  if(!Number.isSafeInteger(block)||block<1||block>l.blocks-2)throw new RangeError(`${name()}: block ${block} is outside 1..${l.blocks-2}`);
+  const bulk=block===0&&page.slot!==undefined?bulk16PageWord(page.slot):0;
+  if(!bulk&&(!Number.isSafeInteger(block)||block<1||block>l.blocks-2))throw new RangeError(`${name()}: block ${block} is outside 1..${l.blocks-2}`);
   const r=record(block),entry=uniformPagePoolEntry(l,x,y,z),sb=[x>>2,y>>2,z>>2];
-  if(state[r+R.state]===B.resident)throw new Error(`${name()}: block ${block} already holds page ${held(block)}`);
+  if(!bulk&&state[r+R.state]===B.resident)throw new Error(`${name()}: block ${block} already holds page ${held(block)}`);
   let slot=table[entry]!;
-  if(slot){const q=superRecord(slot);if(signed[q]!==sb[0]||signed[q+1]!==sb[1]||signed[q+2]!==sb[2])throw new Error(`${name()}: aliases page ${held(first[slot]!)} of block ${first[slot]} in a table of edge ${l.table}`);}
+  if(slot){const q=superRecord(slot);if(signed[q]!==sb[0]||signed[q+1]!==sb[1]||signed[q+2]!==sb[2])throw new Error(`${name()}: aliases ${first[slot]?`page ${held(first[slot]!)} of block ${first[slot]}`:`super-block (${signed[q]}, ${signed[q+1]}, ${signed[q+2]})`} in a table of edge ${l.table}`);}
   else{slot=claim(entry,B.resident,UNIFORM_PAGE_POOL_AIR,sb);first[slot]=block;}
   const child=l.entries+C*slot+uniformSuperBlockLocal(x,y,z),at=table[child]!;
-  if(at)throw new Error(`${name()}: listed twice (blocks ${at} and ${block})`);
-  table[child]=block;superCount[slot]!++;blocks[block]=uniformPagePoolBlockWord(l,x,y,z);
+  if(at)throw new Error(`${name()}: listed twice (words ${at} and ${bulk||block})`);
+  superCount[slot]!++;
+  if(bulk){table[child]=bulk;return;}
+  table[child]=block;blocks[block]=uniformPagePoolBlockWord(l,x,y,z);
   signed[r]=x;signed[r+1]=y;signed[r+2]=z;state[r+R.state]=B.resident;
  });
  let resident=0,free=0;
@@ -375,6 +382,8 @@ export interface UniformPagePoolBoxSeedOptions {
  readonly permute?:number;
  /** The kind of an entry outside the box, by window page coordinate (default SOLID). */
  readonly outside?:(x:number,y:number,z:number)=>number;
+ /** The BULK16 slot of a resident box page held in one (no block), by box coordinate; 0: a block. */
+ readonly bulk?:(x:number,y:number,z:number)=>number;
 }
 /** The resident pages of the layout's box as seed pages, in scan order (x
  * fastest). Without `permute` their blocks are 1, 2, ... in that order, so
@@ -385,6 +394,7 @@ export interface UniformPagePoolBoxSeedOptions {
 export function uniformPagePoolBoxPages(layout:UniformPagePoolLayout,options:UniformPagePoolBoxSeedOptions={}):UniformPagePoolSeedPage[]{
  const {origin,pages:[px,py,pz],count}=layout.box,order=Array.from({length:layout.slots},(_,i)=>i+1),pages:UniformPagePoolSeedPage[]=[];
  if(!count)throw new Error("Uniform page pool layout has no box");
+ let blocks=0;
  if(options.permute!==undefined){
   // Fisher-Yates over a mulberry32 stream.
   let s=options.permute|0;
@@ -393,8 +403,10 @@ export function uniformPagePoolBoxPages(layout:UniformPagePoolLayout,options:Uni
  }
  for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++){
   if(options.resident&&!options.resident(x,y,z))continue;
-  if(pages.length>=layout.slots)throw new RangeError(`Uniform page pool box seed holds more pages than the pool's ${layout.slots} blocks`);
-  pages.push({x:origin[0]+x,y:origin[1]+y,z:origin[2]+z,block:order[pages.length]!});
+  const slot=options.bulk?.(x,y,z)??0;
+  if(slot){pages.push({x:origin[0]+x,y:origin[1]+y,z:origin[2]+z,block:0,slot});continue;}
+  if(blocks>=layout.slots)throw new RangeError(`Uniform page pool box seed holds more pages than the pool's ${layout.slots} blocks`);
+  pages.push({x:origin[0]+x,y:origin[1]+y,z:origin[2]+z,block:order[blocks++]!});
  }
  return pages;
 }

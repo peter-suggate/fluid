@@ -784,6 +784,9 @@ export interface UniformPagePoolScene {
   /** Super-block slots the directory may claim (uniformPagePoolLayout's superBlocks); default 1.5 x the
    * super-blocks a closed box and a page around it cover, and two a block above an open top. */
   readonly superBlocks?: number;
+  /** Box pages that start in BULK16 slots, by box page coordinate: the i-th in slot i + 1, no block
+   * (the census start's demoted pages, uniformBulkStartPages). */
+  readonly bulk?: readonly (readonly [number, number, number])[];
 }
 
 /** What a block of the pool costs, all fields and tables a page takes
@@ -914,7 +917,14 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   // Every policy here is a world box, which umPageWord makes SOLID outside
   // itself (uniformWindowPageWord on the host): the seed stores no SOLID word.
   const layout = uniformPagePoolLayout(pool);
-  const seed = uniformPagePoolSeed(layout, uniformPagePoolBoxPages(layout, { permute: scene.permute, resident: (x, y, z) => !air.has(x + px * (y + py * z)) }));
+  const bulk = new Map<number, number>();
+  (scene.bulk ?? []).forEach(([x, y, z], i) => {
+    const k = x + px * (y + py * z);
+    if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) && x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz) || air.has(k) || bulk.has(k))
+      throw new RangeError(`Uniform page pool: BULK16 page (${x}, ${y}, ${z}) is outside the box's stored pages or listed twice`);
+    bulk.set(k, i + 1);
+  });
+  const seed = uniformPagePoolSeed(layout, uniformPagePoolBoxPages(layout, { permute: scene.permute, resident: (x, y, z) => !air.has(x + px * (y + py * z)), bulk: (x, y, z) => bulk.get(x + px * (y + py * z)) ?? 0 }));
   let liveTiles = 0;
   for (let b = 1; b < blocks - 1; b++) {
     const r = seed.blocks[b]!;
