@@ -11,9 +11,10 @@ import type { UniformMixedPressureBulk } from "./uniform-mixed-pressure-velocity
 import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_SCAN } from "./uniform-bulk-pages-reference";
 import { BULK16_STATUS, type UniformBulkPages } from "./uniform-bulk-pages";
 import { UNIFORM_REGION_HEAT_STATE_WORDS } from "./uniform-region-heat";
+import type { UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_LIVE_GROUP_GROUPS, UniformLiveVisit, uniformLiveDispatch, uniformLiveListsWGSL } from "./uniform-live-lists";
 
 const PASS: GPUComputePassDescriptor = { label: "Uniform bulk tier selection" };
-const GROUPS = 1024;
 
 /** The selection's inputs, all in the pressure root's (all-4h) ownership. */
 export interface UniformBulkTierFields {
@@ -31,6 +32,8 @@ export interface UniformBulkTierFields {
   pressure: GPUBufferBinding;
   /** The BULK16 slot store (bulkTier "16h" with whole pages): bulkPromote asks its pages back. */
   bulkPages?: UniformBulkPages;
+  /** The page pool whose visit list (uniform-live-lists) the selection strides. */
+  pool: UniformPagePool;
 }
 
 /** The 16h bulk tier (bulkTier "16h"; uniform-bulk-tier-reference for the
@@ -71,6 +74,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
   private layout?: GPUBindGroupLayout;
   private fields?: UniformBulkTierFields;
   private rootWord = 0;
+  private visit?: UniformLiveVisit;
   get allocatedBytes(): number { return 4 * this.faces.width * this.faces.height + this.readback.size; }
   constructor(private readonly device: GPUDevice, private readonly ownership: UniformMixedOwnership) {
     if (ownership.layout.tiles.some(word => (word & 0xc0000000) !== 0)) throw new Error("The 16h bulk tier selects on the all-4h pressure root");
@@ -99,7 +103,19 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
     this.layout = uniformDetailBindLayout(device, { label: "Uniform bulk tier", entries: [buffer(0, "uniform"),
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       buffer(2, "read-only-storage"), buffer(3, "read-only-storage"), ...(S ? [buffer(4, "read-only-storage")] : []), buffer(5, "read-only-storage"), buffer(6, "read-only-storage"), buffer(7, "storage"),
-      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }, buffer(9, "read-only-storage"), ...(P ? [buffer(10, "storage")] : [])] });
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }, buffer(9, "read-only-storage"), buffer(10, "read-only-storage")] });
+    // The stage is at the per-stage storage limit (10): the BULK16 store
+    // shares the record's binding (both lie in the arena's pool B, the store
+    // after the record), so binding 10 can take the pool's state.
+    const record = this.record, store = P?.binding;
+    let span: GPUBufferBinding = record, storeWord = 0;
+    if (store) {
+      const at = store.offset ?? 0;
+      if (store.buffer !== record.buffer || at < record.offset + record.size || (at - record.offset) % 4 !== 0) throw new Error("The 16h bulk tier: the BULK16 store must follow the bulk record in its buffer");
+      span = { buffer: record.buffer, offset: record.offset, size: at + store.size! - record.offset };
+      storeWord = (at - record.offset) / 4;
+    }
+    this.visit = new UniformLiveVisit(f.pool);
     // The root pressure's view, aligned down (the arena's rootSpan).
     const p = f.pressure, align = device.limits.minStorageBufferOffsetAlignment, offset = p.offset ?? 0, base = offset - offset % align;
     const size = p.size ?? p.buffer.size - offset;
@@ -109,7 +125,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
       { binding: 0, resource: { buffer: f.params, size: 80 } }, { binding: 1, resource: f.velocity },
       { binding: 2, resource: { buffer: f.slots.buffer } }, { binding: 3, resource: f.rootPhi }, ...(f.rootTopology ? [{ binding: 4, resource: f.rootTopology }] : []),
       { binding: 5, resource: { buffer: f.heat } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
-      { binding: 7, resource: this.record }, { binding: 8, resource: this.faces.createView() }, { binding: 9, resource: { buffer: regions.buffer } }, ...(P ? [{ binding: 10, resource: P.binding }] : [])] });
+      { binding: 7, resource: span }, { binding: 8, resource: this.faces.createView() }, { binding: 9, resource: { buffer: regions.buffer } }, { binding: 10, resource: { buffer: f.pool.state } }] });
     const H = UNIFORM_BULK_HEADER(R), C = UNIFORM_BULK_COUNT;
     const code = uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec4f}
@@ -123,6 +139,7 @@ ${S ? "@group(1) @binding(4) var<storage,read> rootTopology:array<vec4f>;" : ""}
 @group(1) @binding(7) var<storage,read_write> record:array<atomic<u32>>;
 @group(1) @binding(8) var faces:texture_storage_2d<r32float,write>;
 @group(1) @binding(9) var<storage,read> bRegions:array<u32>;
+${uniformLiveListsWGSL(1, 10, f.pool.layout)}
 ${uniformMixedRegionWGSL("bRegionsAt", i => `bRegions[${regions.offset}u+${i}]`)}
 const B_REGIONS:u32=${R}u;const B_SLOTS:u32=${f.slots.word}u;const B_ROOT:u32=${this.rootWord}u;
 const B_MEAN:u32=${UNIFORM_BULK_MEAN(R)}u;const B_OFFSET:u32=${UNIFORM_BULK_OFFSET(R)}u;
@@ -148,15 +165,24 @@ fn bFace(t:vec3i,a:u32)->f32{
  if(umTileKind(t)!=UM_RESIDENT){return 0.0;}
  var q=4*t;q[a]+=3;return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,q,0)[a];
 }
+// A workgroup a region of the pool's visit list (uniform-live-lists): the
+// resident blocks' regions, the latest commit's retired ones and the
+// sentinels'. A region whose block holds no page is not stored: it writes
+// member 0, hold 0, error 0 and a zero texel, a fixed point once it has been
+// visited after it left (a member leaving counts left there, once).
 @compute @workgroup_size(64) fn bulkSelect(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u){
  let dt=params.hDt.w;let h=params.policy.w;
- for(var r=group.x;r<B_REGIONS;r+=groups.x){
+ let sweep=ulSweep(groups);if(group.y!=0u){return;}
+ for(var visit=group.x;visit<8u*ulVisitCount(sweep);visit+=groups.x){
+  let r=ulVisitRegion(visit,sweep);
   if(lane==0u){atomicStore(&bFail,0u);atomicStore(&bError,0u);atomicStore(&bSpeed,0u);}
   workgroupBarrier();
   let origin=vec3i(4u*umPageCoord(r));
   var stored=umTileKind(origin)==UM_RESIDENT;if(stored){stored=(umTileAt(vec3u(origin))>>9u)==(r>>3u);}
   if(stored){
    for(var i=lane;i<1728u;i+=64u){
+    // One failed tile fails the region: the rest of the scan cannot change bFail.
+    if(atomicLoad(&bFail)!=0u){break;}
     let d=vec3i(vec3u(i%12u,(i/12u)%12u,i/144u))-vec3i(4);let t=origin+d;let own=all(d>=vec3i(0))&&all(d<vec3i(4));
     let kind=umTileKind(t);
     if(kind!=UM_RESIDENT){if(own||kind==UM_AIR){atomicOr(&bFail,1u);}continue;}
@@ -224,18 +250,21 @@ ${P ? /* wgsl */ `
 // UNIFORM_BULK_DEPTH_CELLS of the surface; or a face mean moving
 // UNIFORM_BULK_REACH_CELLS h a step (the error test is pBulkRows'). Its
 // promoteError word records which (BULK16_SCAN's bits), read by no kernel.
-@group(1) @binding(10) var<storage,read_write> bStore:array<u32>;
+// The store, in the record's binding after it.
+const BS_BASE:u32=${storeWord}u;
+fn bsLoad(i:u32)->u32{return atomicLoad(&record[BS_BASE+i]);}
+fn bsStoreWord(i:u32,v:u32){atomicStore(&record[BS_BASE+i],v);}
 const BS_LIVE:u32=${P.layout.live}u;const BS_RECORDS:u32=${P.layout.records}u;
 var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
 @compute @workgroup_size(64) fn bulkPromote(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u){
  let dt=params.hDt.w;let h=params.policy.w;
- if(lane==0u){bN=bStore[${BULK16_STATUS.live}u];}
+ if(lane==0u){bN=bsLoad(${BULK16_STATUS.live}u);}
  let n=workgroupUniformLoad(&bN);
  for(var e=group.x;e<n;e+=groups.x){
   if(lane==0u){atomicStore(&bFail,0u);}
   workgroupBarrier();
-  let rec=BS_RECORDS+${BULK16_PAGE_WORDS}u*bStore[BS_LIVE+e];
-  let page=vec3i(bitcast<i32>(bStore[rec]),bitcast<i32>(bStore[rec+1u]),bitcast<i32>(bStore[rec+2u]))-umFramePage();
+  let rec=BS_RECORDS+${BULK16_PAGE_WORDS}u*bsLoad(BS_LIVE+e);
+  let page=vec3i(bitcast<i32>(bsLoad(rec)),bitcast<i32>(bsLoad(rec+1u)),bitcast<i32>(bsLoad(rec+2u)))-umFramePage();
   // The 27 pages first: AIR fails, and only a resident page has tiles to
   // test (a BULK16 or SOLID page has none), so deep water costs 27 reads.
   if(lane<27u){bKinds[lane]=umPageKind(page+vec3i(vec3u(lane%3u,(lane/3u)%3u,lane/9u))-vec3i(1));}
@@ -258,10 +287,10 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
     if(rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,${BULK16_SCAN.shallow}u);}
    }
   }
-  if(lane<36u&&abs(bitcast<f32>(bStore[rec+${BULK16_PAGE.velocity}u+lane]))*dt>B_REACH*h){atomicOr(&bFail,${BULK16_SCAN.speed}u);}
+  if(lane<36u&&abs(bitcast<f32>(bsLoad(rec+${BULK16_PAGE.velocity}u+lane)))*dt>B_REACH*h){atomicOr(&bFail,${BULK16_SCAN.speed}u);}
   workgroupBarrier();
   let fail=atomicLoad(&bFail);
-  if(lane==0u&&fail!=0u&&bStore[rec+${BULK16_PAGE.promote}u]==0u){bStore[rec+${BULK16_PAGE.promote}u]=1u;bStore[rec+${BULK16_PAGE.promoteError}u]=fail;}
+  if(lane==0u&&fail!=0u&&bsLoad(rec+${BULK16_PAGE.promote}u)==0u){bsStoreWord(rec+${BULK16_PAGE.promote}u,1u);bsStoreWord(rec+${BULK16_PAGE.promoteError}u,fail);}
   workgroupBarrier();
  }
 }` : ""}
@@ -278,7 +307,7 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
     if (!this.pipeline || !this.group) throw new Error("The 16h bulk tier is not initialized");
     encoder.clearBuffer(this.record.buffer, this.record.offset + 4 * UNIFORM_BULK_HEADER(this.regions), 4 * 9);
     const pass = encoder.beginComputePass(PASS); pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1, this.group.group);
-    pass.setPipeline(uniformDetailPick(this.pipeline)); pass.dispatchWorkgroups(Math.min(GROUPS, this.regions));
+    pass.setPipeline(uniformDetailPick(this.pipeline)); uniformLiveDispatch(pass, UNIFORM_LIVE_GROUP_GROUPS, this.visit!.sweep());
     // A live slot a workgroup, from the store's live count (its live launch, indirect).
     if (this.promotePipeline) { pass.setPipeline(uniformDetailPick(this.promotePipeline)); pass.dispatchWorkgroupsIndirect(this.fields!.bulkPages!.liveLaunch, 0); }
     pass.end();
