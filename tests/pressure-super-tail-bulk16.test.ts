@@ -17,8 +17,8 @@ import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geomet
  * pages, beside the wall pages that stay 4h), at widths 1, 2 and 4.
  *
  * Each width: rest drift exactly 0; the cycles after the pages enter, flat in
- * width; and the 64h groups of the last solve that cycled each listed once,
- * the BULK16 pages' among them. A group's members find its children through three
+ * width; and the 64h groups of the last solve that cycled with BULK16 pages
+ * live each listed once, the BULK16 pages' among them. A group's members find its children through three
  * sibling paths (block to block, a BULK16 page to its page words, a block to
  * a BULK16 page across its neighbour word), and a member that resolves
  * another set elects a second leader, listing its key twice. */
@@ -73,16 +73,17 @@ test("the super-block tail with BULK16 rows: rest holds, cycles stay flat in wid
     await solver.awaitFrameCompletion();
     const stats = await solver.readStats();
     worst = Math.max(worst, Math.abs(stats.volumeDrift ?? NaN));
-    if (step > AFTER_ENTRY) {
-     const executed = stats.uniformPressureCyclesExecuted ?? NaN;
-     sum += executed; n++;
-     if (executed > 0) cycled = await groups();
-    }
+    const executed = stats.uniformPressureCyclesExecuted ?? NaN;
+    if (step > AFTER_ENTRY) { sum += executed; n++; }
+    // The groups of a solve that cycled with BULK16 pages live. A resting
+    // tank's solves stop cycling once the pages enter (the start residual
+    // sits under the rows' rounding floor), so this is often an entry step.
+    if (executed > 0) { const seen = await groups(); if (seen.live > 0) cycled = seen; }
    }
    assert.equal(solver.info.simulationPipelineError, undefined);
    assert.equal(worst, 0, `w${width}: rest drift ${worst}`);
    cycles.set(width, sum / n);
-   assert.ok(cycled, `w${width}: a solve cycled after entry`);
+   assert.ok(cycled, `w${width}: a solve cycled with BULK16 pages live`);
    const { live, bulkKeys, count6, keys } = cycled;
    assert.ok(live > 0, `w${width}: BULK16 pages entered`);
    assert.ok(count6 > 0 && count6 <= W.capacity6, `w${width}: ${count6} 64h groups`);
