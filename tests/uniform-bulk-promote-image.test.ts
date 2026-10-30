@@ -367,7 +367,8 @@ async function followPromotes(device:GPUDevice,solver:any,scene:any,demotedCount
   return out.map(q=>[q[0]!,q[1]!,q[2]!,fastest.get(key(q))!]);};
  // A page's gap to the nearest sample's travel: the largest axis gap
  // between the sample and the page's 32 cells, less the sample's travel.
- const gap=(page:number[],at:number[][])=>Math.min(Infinity,...at.map(q=>Math.max(...[0,1,2].map(a=>Math.max(0,32*page[a]!-q[a]!,q[a]!-32*page[a]!-32)))-q[3]!));
+ // A loop, not a spread: the band can hold more samples than a call takes arguments.
+ const gap=(page:number[],at:number[][])=>{let g=Infinity;for(const q of at)g=Math.min(g,Math.max(...[0,1,2].map(a=>Math.max(0,32*page[a]!-q[a]!,q[a]!-32*page[a]!-32)))-q[3]!);return g;};
  const seen=new Map<number,number[][]>([[step,await samples()]]);
  const promoted=new Map<number,{step:number;why:number;error:number;level:number;scan:number}>();
  for(;step<until;){
