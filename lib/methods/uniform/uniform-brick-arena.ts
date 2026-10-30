@@ -151,6 +151,7 @@ export class UniformBrickArena{
   * markers), and the counts (just before the build). */
  markClear(base:number):{offset:number;size:number}{return {offset:4*(base+UBA_HEADER),size:4*(this.layout.table-UBA_HEADER)};}
  countClear(base:number):{offset:number;size:number}{return {offset:4*(base+UBA_COUNTS),size:4*(UBA_HEADER-UBA_COUNTS)};}
+ pageCountWord(base:number):number{return base+UBA_COUNTS+4;}
  /** The byte offset of the fatal word (0, or UBA_SEAM | the brick id refused a slot). */
  fatalOffset(base:number):number{return 4*base;}
 
