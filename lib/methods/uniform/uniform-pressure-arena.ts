@@ -15,7 +15,7 @@ import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
 import {UNIFORM_BULK_FLOOR,UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN,UNIFORM_BULK_TOLERANCE,UNIFORM_BULK_WORDS} from "./uniform-bulk-tier-reference";
-import {planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
+import {UNIFORM_PRESSURE_SUPER6_SIDE,planUniformPressureSuper,type UniformPressureSuperWords} from "./uniform-pressure-super";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS} from "./uniform-live-lists";
 import {uniformStageListsWGSL} from "./uniform-stage-lists";
 import {BULK16_PAGE,BULK16_PAGE_WORDS,bulk16FaceIndexWGSL} from "./uniform-bulk-pages-reference";
@@ -118,8 +118,8 @@ const BRICK_GROUPS=2048,TILE_GROUPS=4096,PAGE_GROUPS=1024,TABLE_GROUPS=1024;
  * most PAGE_GROUPS; every reader strides its count): the live slots; the
  * level 2 pages or the live slots, the larger (a loop over both lists); the
  * two lists' sum (the tail's items); the level 2 pages; the live slots eight
- * a workgroup. Byte offsets in the launch buffer. */
-const LAUNCH={live:0,either:16,items:32,level2:48,live8:64,bytes:80} as const;
+ * a workgroup; the items 64 a workgroup. Byte offsets in the launch buffer. */
+const LAUNCH={live:0,either:16,items:32,level2:48,live8:64,items64:80,bytes:96} as const;
 type UniformArenaLaunch=number|"tiles"|{indirect:number};
 /** Fine slots: a share of the lattice's bricks (at least ARENA_SLOTS_MIN). The
  * band's bricks hug the surface: the pour at 1/60 s peaks at 2310 of 8320
@@ -286,13 +286,21 @@ export class UniformPressureArena {
   if(solid&&!solid.coarse)throw new Error("The solid pressure arena needs the all-4h solid record");
   if(!Number.isInteger(schedule.cycles)||schedule.cycles<1||schedule.cycles>=HISTORY)throw new Error(`Pressure arena cycles must be 1..${HISTORY-1}`);
   const address=simulation.capacity.address,blocks=address.blocks;
-  this.superTail=schedule.tail==="superblocks"||(schedule.tail==="auto"&&blocks>TAIL_ROWS);
-  if(!this.superTail&&blocks>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages, over the page tail's ${TAIL_ROWS}; use the super-block tail`);
-  // BULK16 rows join the page tail's 32h rows (one each page). The
-  // super-block tail does not hold them yet (M5): an explicit fatal.
-  if(fields.bulkPages){
-   if(!fields.bulk)throw new Error("Pressure arena: BULK16 pages need the 16h bulk tier");
-   if(this.superTail||blocks+fields.bulkPages.layout.capacity>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages and ${fields.bulkPages.layout.capacity} BULK16 slots exceed the page tail's ${TAIL_ROWS} rows (the super-block tail holds no BULK16 row yet)`);
+  // The coarsest rows: a 32h row a page, a pool block's or a BULK16 slot's.
+  // Up to TAIL_ROWS of them the page tail (pTail, one workgroup) is the
+  // cheaper; past it auto takes the super-block tail, which holds BULK16
+  // rows too.
+  if(fields.bulkPages&&!fields.bulk)throw new Error("Pressure arena: BULK16 pages need the 16h bulk tier");
+  const tailRows=blocks+(fields.bulkPages?.layout.capacity??0);
+  this.superTail=schedule.tail==="superblocks"||(schedule.tail==="auto"&&tailRows>TAIL_ROWS);
+  if(!this.superTail&&tailRows>TAIL_ROWS)throw new Error(`Pressure arena: ${blocks} pages and ${fields.bulkPages?.layout.capacity??0} BULK16 slots, over the page tail's ${TAIL_ROWS} rows; use the super-block tail`);
+  // The super-block tail keys a group by its page coordinate from the box's
+  // low page mod the window's 64 pages (sRel): a box past 64 pages an axis
+  // would fold two groups onto one key. 64 pages a side is 1024 h (5.12 m
+  // at h = 5 mm, 10.24 m at 1 cm).
+  if(this.superTail){
+   const box=address.pool.box.pages,side=2*UNIFORM_PRESSURE_SUPER6_SIDE;
+   if(box.some(n=>n>side))throw new Error(`Pressure arena: the super-block tail's key window holds ${side} pages an axis (${side*16} h), the box ${box.join("x")} pages`);
   }
   if(!(schedule.superScale>0))throw new Error("Pressure arena: the super-block tail's scale must be positive");
   if(!Number.isInteger(schedule.nativeSweeps)||schedule.nativeSweeps<0)throw new Error(`Pressure arena: ${schedule.nativeSweeps} native sweeps`);
@@ -334,7 +342,9 @@ export class UniformPressureArena {
   const limit=device.limits.maxStorageBufferBindingSize;
   // The super-block tail's lists and maps follow the arena table; its rows pool B's channels.
   if(a.poolWords.length!==2)throw new Error("Pressure arena: the channels fill pools A and B");
-  this.super=this.superTail?planUniformPressureSuper(blocks,this.tableWord+a.tableWords,a.poolWords[1]!):undefined;
+  // Its 64h and 128h rows' capacities: a row a group holding a tail item
+  // (a page block or a BULK16 slot), at most one a key of the window.
+  this.super=this.superTail?planUniformPressureSuper(blocks+(fields.bulkPages?.layout.capacity??0),this.tableWord+a.tableWords,a.poolWords[1]!):undefined;
   const indexWords=this.super?.index.end??this.tableWord+a.tableWords,poolWords=[a.poolWords[0]!,this.super?.pool.end??a.poolWords[1]!];
   // The bulk record follows pool B's words at a storage offset.
   const align=device.limits.minStorageBufferOffsetAlignment/4;
@@ -1018,8 +1028,22 @@ const CAP6:u32=${W.capacity6}u;const CAP7:u32=${W.capacity7}u;
 const S_COUNT6:u32=${W.index.count6}u;const S_COUNT7:u32=${W.index.count7}u;const S_LIST6:u32=${W.index.list6}u;const S_LIST7:u32=${W.index.list7}u;const S_MAP6:u32=${W.index.map6}u;const S_MAP7:u32=${W.index.map7}u;
 const S6_X:u32=${W.pool.x6}u;const S6_Y:u32=${W.pool.y6}u;const S6_R:u32=${W.pool.r6}u;const S6_D:u32=${W.pool.d6}u;const S6_K:u32=${W.pool.k6}u;const S6_C:u32=${W.pool.c6}u;
 const S7_X:u32=${W.pool.x7}u;const S7_R:u32=${W.pool.r7}u;const S7_D:u32=${W.pool.d7}u;const S7_K:u32=${W.pool.k7}u;const S7_C:u32=${W.pool.c7}u;
-// A page's coordinate from the box's low page (mod the window).
-fn sRel(block:u32)->vec3i{return vec3i((umBlockPage(block)+vec3u(64u)-S_BOX)&vec3u(63u));}
+// A tail item's (a page block, or BA | a BULK16 slot: tItem's) page
+// coordinate from the box's low page (mod the window).
+fn sRel(item:u32)->vec3i{${BP?"if((item&BA)!=0u){return vec3i((bitcast<vec3u>(bsPage(item&0x7fffffffu))+vec3u(64u)-S_BOX)&vec3u(63u));}":""}return vec3i((umBlockPage(item)+vec3u(64u)-S_BOX)&vec3u(63u));}
+// The tail item of the page d (-1..1 an axis) from item's, UB_NONE_ID: none.
+// tAt's paths (uniformPressureSuperNeighbour, the host twin): a block's
+// level 2 record, else its neighbour word's BULK16 slot; a BULK16 page's
+// page word, a stored block or a slot.
+fn sNeighbour(item:u32,d:vec3i)->u32{
+ let k=u32(13+d.x+3*d.y+9*d.z);
+ ${BP?`var w=0u;
+ if((item&BA)!=0u){w=umPageRawWord(bsPage(item&0x7fffffffu)+d);if(umBlockStored(w)){return w;}}
+ else{let b=ubaLevelRecord(2u,item,k);if(b!=UB_NONE_ID){return b;}w=umBlockNeighbourWord(item,k);}
+ let slot=bsWordSlot(w);return select(BA|slot,UB_NONE_ID,slot==0u);`:"return ubaLevelRecord(2u,item,k);"}
+}
+// The item a 32h cell address (tAt's) belongs to.
+fn sItemOf(at:u32)->u32{${BP?"if(baIs(at)){return BA|baSlot(at);}":""}return (at-72u)/UBA_STRIDE;}
 fn sPack6(g:vec3i)->u32{return u32(g.x)|(u32(g.y)<<5u)|(u32(g.z)<<10u);}
 fn sPack7(g:vec3i)->u32{return u32(g.x)|(u32(g.y)<<4u)|(u32(g.z)<<8u);}
 fn sKey6(e:u32)->vec3i{let k=pIndex(S_LIST6+e);return vec3i(vec3u(k&31u,(k>>5u)&31u,k>>10u));}
@@ -2455,7 +2479,9 @@ fn sRow(block:u32,at:u32,d:f32)->f32{
 @compute @workgroup_size(${lanesTail}) fn pTail(@builtin(local_invocation_index) lane:u32){
  if(lane==0u){tM=ubaLevelCount(2u);tN=select(tCount(tM),0u,bConverged());}
  let P=workgroupUniformLoad(&tN);let n2=workgroupUniformLoad(&tM);if(P==0u){return;}
- // A row's staged index + 1, in its page's spare 32h word of the 8h up channel.
+ // A row's staged index + 1, in its page's spare 32h word of the 8h up
+ // channel (a BULK16 row's BS_T5+1, where the super-block tail's sUp6 puts
+ // its correction: the two tails are exclusive, the constructor's invariant).
  for(var e=lane;e<P;e+=${lanesTail}u){let at=tCell(tItem(e,n2),5u,0u);tSetU(PT_Y,at,select(0u,e+1u,tF(PT_D,at)>0.0));sX[e+1u]=0.0;}
  if(lane==0u){sX[0]=0.0;}
  storageBarrier();workgroupBarrier();
@@ -2814,15 +2840,16 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
     // correction rows are all held this cycle and may release next cycle.
     // Its group's first page lists the 64h row and its children.
     group6:base+/* wgsl */`
+// A thread a tail item (the page list's blocks, then the BULK16 slots).
 @compute @workgroup_size(64) fn sGroup6(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- let n=select(ubaLevelCount(2u),0u,bConverged());
+ let n2=ubaLevelCount(2u);let n=select(tCount(n2),0u,bConverged());
  for(var e=gid.x;e<n;e+=64u*groups.x){
-  let block=ubaLevelSlot(2u,e);if(!tPageLive(block)){continue;}
-  let rel=sRel(block);let o=rel&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
+  let item=tItem(e,n2);if(!tPageLive(item)){continue;}
+  let rel=sRel(item);let o=rel&vec3i(1);let mine=u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u);
   var kids=array<u32,8>(UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID,UB_NONE_ID);var first=8u;
   for(var j=0u;j<8u;j++){
-   let d=vec3i(sOctant(j))-o;var b=block;
-   if(j!=mine){b=ubaLevelRecord(2u,block,u32(13+d.x+3*d.y+9*d.z));}
+   var b=item;
+   if(j!=mine){b=sNeighbour(item,vec3i(sOctant(j))-o);}
    if(b!=UB_NONE_ID&&tPageLive(b)){kids[j]=b;first=min(first,j);}
   }
   if(first!=mine){continue;}
@@ -2841,11 +2868,11 @@ override sList:bool=true;
   var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   for(var j=0u;j<8u;j++){
    let b=sChild6(e,j);if(b==UB_NONE_ID){continue;}
-   let at=UBA_STRIDE*b+72u;var part=qF(PT_D,at);
+   let at=tCell(b,5u,0u);var part=tF(PT_D,at);
    for(var axis=0u;axis<3u;axis++){
     let bit=(j>>axis)&1u;
-    if(sChild6(e,j^(1u<<axis))!=UB_NONE_ID){part-=qF(PT_K+(2u*axis+1u-bit)*PLANE2,at);}
-    k[2u*axis+bit]+=qF(PT_K+(2u*axis+bit)*PLANE2,at);
+    if(sChild6(e,j^(1u<<axis))!=UB_NONE_ID){part-=tF(PT_K+(2u*axis+1u-bit)*PLANE2,at);}
+    k[2u*axis+bit]+=tF(PT_K+(2u*axis+bit)*PLANE2,at);
    }
    d+=part;
   }
@@ -2892,10 +2919,10 @@ var<workgroup> dN:u32;
  for(var e=group.x;e<n;e+=groups.x){
   let page=sChild6(e,lane>>3u);var res=0.0;
   if(page!=UB_NONE_ID){
-   let c=lane&7u;let g4=tLocal(c,2u);let at4=UBA_STRIDE*page+64u+c;let d4=qF(PT_D,at4);
+   let c=lane&7u;let g4=tLocal(c,2u);let at4=tCell(page,4u,c);let d4=tF(PT_D,at4);
    if(d4>0.0){
-    res=qF(PT_R,at4)-d4*qF(PT_X,at4);
-    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(page,4u,q);if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at4)*qF(PT_X,m);}}
+    res=tF(PT_R,at4)-d4*tF(PT_X,at4);
+    for(var f=0u;f<6u;f++){var q=g4;q[f/2u]+=bSign(f);let m=tAt(page,4u,q);if(m!=UB_NONE_ID&&tF(PT_D,m)>0.0){res+=tF(PT_K+f*PLANE2,at4)*tF(PT_X,m);}}
    }
   }
   dR[lane]=res;
@@ -2903,7 +2930,7 @@ var<workgroup> dN:u32;
   var at5=0u;var r5=0.0;var d5=0.0;var k5=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   if(lane<8u){
    let b=sChild6(e,lane);
-   if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;for(var c=0u;c<8u;c++){r5+=dR[8u*lane+c];}qSet(PT_R,at5,r5);d5=qF(PT_D,at5);for(var f=0u;f<6u;f++){k5[f]=qF(PT_K+f*PLANE2,at5);}}
+   if(b!=UB_NONE_ID){at5=tCell(b,5u,0u);for(var c=0u;c<8u;c++){r5+=dR[8u*lane+c];}tSet(PT_R,at5,r5);d5=tF(PT_D,at5);for(var f=0u;f<6u;f++){k5[f]=tF(PT_K+f*PLANE2,at5);}}
    dX[lane]=0.0;
   }
   workgroupBarrier();
@@ -2916,7 +2943,7 @@ var<workgroup> dN:u32;
     workgroupBarrier();
    }
   }
-  if(lane<8u&&d5>0.0){qSet(PT_X,at5,dX[lane]);}
+  if(lane<8u&&d5>0.0){tSet(PT_X,at5,dX[lane]);}
   workgroupBarrier();
  }
 }`,
@@ -2935,9 +2962,9 @@ var<workgroup> dN:u32;
   if(r6!=UB_NONE_ID){
    let page=sChild6(r6,lane&7u);
    if(page!=UB_NONE_ID){
-    let at5=UBA_STRIDE*page+72u;let d5=qF(PT_D,at5);
-    res=qF(PT_R,at5)-d5*qF(PT_X,at5);
-    for(var f=0u;f<6u;f++){let m=tAt(page,5u,sFace(f));if(m!=UB_NONE_ID&&qF(PT_D,m)>0.0){res+=qF(PT_K+f*PLANE2,at5)*qF(PT_X,m);}}
+    let at5=tCell(page,5u,0u);let d5=tF(PT_D,at5);
+    res=tF(PT_R,at5)-d5*tF(PT_X,at5);
+    for(var f=0u;f<6u;f++){let m=tAt(page,5u,sFace(f));if(m!=UB_NONE_ID&&tF(PT_D,m)>0.0){res+=tF(PT_K+f*PLANE2,at5)*tF(PT_X,m);}}
    }
   }
   dR[lane]=res;
@@ -3073,15 +3100,15 @@ fn sProlong6(g:vec3i)->f32{
   if(lane<56u){
    let c=lane/7u;let k=lane%7u;let page=sChild6(e,c);var x=0.0;
    if(page!=UB_NONE_ID){
-    var at=UBA_STRIDE*page+72u;var b=page;
-    if(k>0u){if(sSibling(c,k-1u)<8u){at=UB_NONE_ID;}else{at=tAt(page,5u,sFace(k-1u));b=(at-72u)/UBA_STRIDE;}}
-    if(at!=UB_NONE_ID&&qF(PT_D,at)>0.0){x=qF(PT_X,at)+sProlong6(sRel(b));}
+    var at=tCell(page,5u,0u);var b=page;
+    if(k>0u){if(sSibling(c,k-1u)<8u){at=UB_NONE_ID;}else{at=tAt(page,5u,sFace(k-1u));b=sItemOf(at);}}
+    if(at!=UB_NONE_ID&&tF(PT_D,at)>0.0){x=tF(PT_X,at)+sProlong6(sRel(b));}
    }
    vS[lane]=x;
   }
   workgroupBarrier();
   var at5=0u;var r=0.0;var d=0.0;var k=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
-  if(lane<8u){let b=sChild6(e,lane);if(b!=UB_NONE_ID){at5=UBA_STRIDE*b+72u;r=qF(PT_R,at5);d=qF(PT_D,at5);for(var f=0u;f<6u;f++){k[f]=qF(PT_K+f*PLANE2,at5);}}vX[lane]=vS[7u*lane];}
+  if(lane<8u){let b=sChild6(e,lane);if(b!=UB_NONE_ID){at5=tCell(b,5u,0u);r=tF(PT_R,at5);d=tF(PT_D,at5);for(var f=0u;f<6u;f++){k[f]=tF(PT_K+f*PLANE2,at5);}}vX[lane]=vS[7u*lane];}
   workgroupBarrier();
   for(var s=0u;s<${schedule.sweeps}u;s++){
    for(var col=0u;col<2u;col++){
@@ -3093,7 +3120,9 @@ fn sProlong6(g:vec3i)->f32{
     workgroupBarrier();
    }
   }
-  if(lane<8u&&d>0.0){qSet(PT_Y,at5,vX[lane]);}
+  // Into the 32h Y word pUp4S reads (a BULK16 row's BS_T5+1, which the
+  // page tail's pTail stages its row index in: the two tails are exclusive).
+  if(lane<8u&&d>0.0){tSet(PT_Y,at5,vX[lane]);}
   workgroupBarrier();
  }
 }`,
@@ -3108,6 +3137,11 @@ fn sProlong6(g:vec3i)->f32{
    });
   }
   if(!UNIFORM_PRESSURE_ARENA_NATIVE_RHS)delete sources.nrhs;
+  // The page tail and the super-block tail are exclusive: pTail stages a
+  // row's index in the 32h Y word sUp6 writes its correction to (a BULK16
+  // row's BS_T5+1), so one solve compiles and encodes one of them.
+  if(W)delete sources.tail;
+  if(("tail" in sources)===!!W||(!W&&"up6" in sources))throw new Error("Pressure arena: the page tail and the super-block tail in one solve");
   else if(!S)throw new Error("The native rows' own RHS reads the coarse solid record (solids are always on)");
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={bulk:"bulk",nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
@@ -3193,7 +3227,7 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
 fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1u;launch[at+2u]=1u;launch[at+3u]=0u;}
 @compute @workgroup_size(1) fn pLaunch(){
  let n2=min(state[${this.arena.pageCountWord(this.tableWord)}u],${blocks}u);let live=store[${BULK16_STATUS.live}u];
- put(${LAUNCH.live/4}u,live);put(${LAUNCH.either/4}u,max(n2,live));put(${LAUNCH.items/4}u,n2+live);put(${LAUNCH.level2/4}u,n2);put(${LAUNCH.live8/4}u,(live+7u)/8u);
+ put(${LAUNCH.live/4}u,live);put(${LAUNCH.either/4}u,max(n2,live));put(${LAUNCH.items/4}u,n2+live);put(${LAUNCH.level2/4}u,n2);put(${LAUNCH.live8/4}u,(live+7u)/8u);put(${LAUNCH.items64/4}u,(n2+live+63u)/64u);
 }`});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(`Pressure arena launches: ${errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n")}`);
@@ -3298,14 +3332,18 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
    this.dispatch(pass,"pRebaseC",this.tileGroups);this.dispatch(pass,"pNativeOperator",pages);
    this.dispatch(pass,"pDownA@0",g);this.dispatch(pass,"pDownB@0",pages);if(BP)this.dispatch(pass,"pBulkBake",live);this.dispatch(pass,"pDown2",either);
    // Refresh numeric coarse rows each cycle; super-block topology is frame-local.
-   if(W){if(first)this.dispatch(pass,"sGroup6",Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,first?"sGroup7":"sGroup7C",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
+   if(W){if(first)this.dispatch(pass,"sGroup6",BP?{indirect:LAUNCH.items64}:Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,first?"sGroup7":"sGroup7C",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
    for(let m=0;m<s.tailCycles;m++){
     const y=m%2===1?"Y":"";this.dispatch(pass,"pDown3"+y,either);
     if(W){
      const groups7=Math.min(W.capacity7,PAGE_GROUPS);
-     this.dispatch(pass,"sDown45",pages);this.dispatch(pass,"sDown6",groups7);this.dispatch(pass,"sDown7",Math.min(groupsOf(W.capacity7,8),PAGE_GROUPS));
-     this.dispatch(pass,"sTail7",1);this.dispatch(pass,"sUp7",groups7);this.dispatch(pass,"sUp6",pages);this.dispatch(pass,"pUp4S",pages);
-    }else{this.dispatch(pass,"pDown4",items);this.dispatch(pass,"pTail",1);this.dispatch(pass,"pUp4",items);}
+     this.dispatch(pass,"sDown45",items);this.dispatch(pass,"sDown6",groups7);this.dispatch(pass,"sDown7",Math.min(groupsOf(W.capacity7,8),PAGE_GROUPS));
+     this.dispatch(pass,"sTail7",1);this.dispatch(pass,"sUp7",groups7);this.dispatch(pass,"sUp6",items);this.dispatch(pass,"pUp4S",pages);
+    }else{
+     // The page tail, never with the super-block tail (the constructor's
+     // invariant): its staged index shares sUp6's 32h Y word.
+     this.dispatch(pass,"pDown4",items);this.dispatch(pass,"pTail",1);this.dispatch(pass,"pUp4",items);
+    }
     this.dispatch(pass,"pUp3"+y,either);
    }
    if(BP)this.dispatch(pass,"pBulkLift",level2);this.dispatch(pass,"pUpB",either);this.dispatch(pass,"pUpA",g);

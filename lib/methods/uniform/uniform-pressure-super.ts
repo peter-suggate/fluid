@@ -50,3 +50,58 @@ export function uniformPressureSuperKey(page: readonly [number, number, number],
   const bits = shift === 1 ? 5 : 4, g = page.map((v, a) => ((v + 64 - box[a]!) & 63) >> shift);
   return g[0]! | (g[1]! << bits) | (g[2]! << 2 * bits);
 }
+
+type SuperV3 = readonly [number, number, number];
+/** A tail item: a page block, or UNIFORM_PRESSURE_SUPER_BULK | a BULK16 slot (tItem's). */
+export const UNIFORM_PRESSURE_SUPER_BULK = 0x80000000;
+/** What the sibling paths read of the lattice (the WGSL's names). */
+export interface UniformPressureSuperLattice {
+  /** ubaLevelRecord(2, block, k): the level 2 block toward neighbour k (13 + dx + 3 dy + 9 dz), undefined: none. */
+  record(block: number, k: number): number | undefined;
+  /** umBlockNeighbourWord(block, k). */
+  neighbourWord(block: number, k: number): number;
+  /** umPageRawWord(page), page a lattice page. */
+  pageWord(page: SuperV3): number;
+  /** umBlockStored(word). */
+  stored(word: number): boolean;
+  /** umBlockPage(block) and bsPage(slot): lattice pages. */
+  blockPage(block: number): SuperV3;
+  slotPage(slot: number): SuperV3;
+  /** tPageLive(item). */
+  live(item: number): boolean;
+}
+/** bsWordSlot: a BULK16 page word's slot (umBulkTag), 0 for any other word. */
+export function uniformPressureSuperWordSlot(word: number): number {
+  return word >>> 30 === 2 && (word & 0x3fffffff) !== 0 ? word & 0x3fffffff : 0;
+}
+/** sNeighbour: the tail item of the page d (-1..1 an axis) from item's, undefined: none. */
+export function uniformPressureSuperNeighbour(L: UniformPressureSuperLattice, item: number, d: SuperV3): number | undefined {
+  const k = 13 + d[0] + 3 * d[1] + 9 * d[2];
+  let word: number;
+  if ((item & UNIFORM_PRESSURE_SUPER_BULK) !== 0) {
+    const p = L.slotPage(item & 0x7fffffff);
+    word = L.pageWord([p[0] + d[0], p[1] + d[1], p[2] + d[2]]);
+    if (L.stored(word)) return word;
+  } else {
+    const b = L.record(item, k);
+    if (b !== undefined) return b;
+    word = L.neighbourWord(item, k);
+  }
+  const slot = uniformPressureSuperWordSlot(word);
+  return slot === 0 ? undefined : (UNIFORM_PRESSURE_SUPER_BULK | slot) >>> 0;
+}
+/** sGroup6 for one live item: its 64h key, its group's eight children
+ * (undefined: none) and whether it lists the row (the group's first child). */
+export function uniformPressureSuperGroup(L: UniformPressureSuperLattice, item: number, box: SuperV3): { key: number; children: (number | undefined)[]; leader: boolean } {
+  const page = (item & UNIFORM_PRESSURE_SUPER_BULK) !== 0 ? L.slotPage(item & 0x7fffffff) : L.blockPage(item);
+  const rel = page.map((v, a) => (v + 64 - box[a]!) & 63), o = rel.map(v => v & 1), mine = o[0]! | (o[1]! << 1) | (o[2]! << 2);
+  const children: (number | undefined)[] = [];
+  let first = 8;
+  for (let j = 0; j < 8; j++) {
+    const b = j === mine ? item : uniformPressureSuperNeighbour(L, item, [(j & 1) - o[0]!, ((j >> 1) & 1) - o[1]!, (j >> 2) - o[2]!]);
+    const kid = b !== undefined && L.live(b) ? b : undefined;
+    children.push(kid);
+    if (kid !== undefined) first = Math.min(first, j);
+  }
+  return { key: uniformPressureSuperKey(page as [number, number, number], box as [number, number, number], 1), children, leader: first === mine };
+}

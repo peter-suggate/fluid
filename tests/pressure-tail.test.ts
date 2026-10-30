@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { planUniformPressureSuper, uniformPressureSuperKey, UNIFORM_PRESSURE_SUPER7_SIDE } from "../lib/methods/uniform/uniform-pressure-super";
+import { planUniformPressureSuper, uniformPressureSuperGroup, uniformPressureSuperKey, UNIFORM_PRESSURE_SUPER_BULK, UNIFORM_PRESSURE_SUPER7_SIDE, type UniformPressureSuperLattice } from "../lib/methods/uniform/uniform-pressure-super";
 import { UNIFORM_PRESSURE_ARENA_SCHEDULE, uniformPressureAggregateWGSL } from "../lib/methods/uniform/uniform-pressure-arena";
 import { tailExact, tailHierarchy, tailIterate, tailPages, tailPool, tailSuperblocks, tailLevel, tailResidual, uniformPressureTailAggregate, type TailLevel, type TailV3 } from "./helpers/pressure-tail-twin";
 
@@ -170,4 +170,56 @@ test('GPU coarse correction holds active bounds, retains their Dirichlet links, 
    assert.equal(result[7],1,'unbounded bulk rows stay free even at negative pressure and residual');
   }finally{input.destroy();output.destroy();read.destroy();}
  });
+});
+
+test("a 64h group's members resolve one set of children and one leader across blocks and BULK16 pages", () => {
+  // A hand-built lattice: each page a live block, a block with no rows, a
+  // BULK16 page, AIR or SOLID, from an odd box origin (groups split at odd
+  // coordinates) whose window coordinates wrap past 63.
+  const box: TailV3 = [61, 2, 5], side: TailV3 = [7, 6, 5], at = (p: readonly number[]) => p.map((v, a) => v - box[a]!);
+  let seed = 12345;
+  const random = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 2 ** 32; };
+  const words = new Map<string, number>(), blockPages = new Map<number, TailV3>(), slotPages = new Map<number, TailV3>(), dead = new Set<number>();
+  let blocks = 0, slots = 0;
+  for (let z = 0; z < side[2]; z++) for (let y = 0; y < side[1]; y++) for (let x = 0; x < side[0]; x++) {
+    const page: TailV3 = [box[0] + x, box[1] + y, box[2] + z], r = random();
+    let word = 0;
+    if (r < 0.4) { word = ++blocks; blockPages.set(word, page); if (r < 0.08) dead.add(word); }
+    else if (r < 0.8) { const slot = ++slots; word = (UNIFORM_PRESSURE_SUPER_BULK | slot) >>> 0; slotPages.set(slot, page); }
+    else if (r < 0.9) word = 0xffffffff;
+    words.set(at(page).join(), word);
+  }
+  const capacity = blocks + 2, stored = (w: number) => ((w - 1) >>> 0) < capacity - 2;
+  const wordAt = (page: readonly number[]) => words.get(at(page).join()) ?? 0;
+  const near = (block: number, k: number) => { const p = blockPages.get(block)!; return [p[0] + (k % 3) - 1, p[1] + (Math.floor(k / 3) % 3) - 1, p[2] + Math.floor(k / 9) - 1]; };
+  const L: UniformPressureSuperLattice = {
+    record: (block, k) => { const w = wordAt(near(block, k)); return stored(w) ? w : undefined; },
+    neighbourWord: (block, k) => wordAt(near(block, k)),
+    pageWord: wordAt, stored,
+    blockPage: block => blockPages.get(block)!, slotPage: slot => slotPages.get(slot)!,
+    live: item => (item & UNIFORM_PRESSURE_SUPER_BULK) !== 0 || !dead.has(item),
+  };
+  const items = [...[...blockPages.keys()].filter(b => !dead.has(b)), ...[...slotPages.keys()].map(s => (UNIFORM_PRESSURE_SUPER_BULK | s) >>> 0)];
+  const groups = new Map<number, { children: (number | undefined)[]; leaders: number; members: Set<number> }>();
+  let mixed = 0;
+  for (const item of items) {
+    const g = uniformPressureSuperGroup(L, item, box);
+    const seen = groups.get(g.key);
+    if (seen) assert.deepEqual(g.children, seen.children, `group ${g.key}: item ${item} resolves other children`);
+    const entry = seen ?? { children: g.children, leaders: 0, members: new Set<number>() };
+    entry.leaders += g.leader ? 1 : 0; entry.members.add(item); groups.set(g.key, entry);
+  }
+  for (const [key, g] of groups) {
+    assert.equal(g.leaders, 1, `group ${key}: ${g.leaders} leaders`);
+    assert.deepEqual(new Set(g.children.filter(c => c !== undefined)), g.members, `group ${key}: children are its live items`);
+    const kinds = new Set([...g.members].map(m => (m & UNIFORM_PRESSURE_SUPER_BULK) !== 0));
+    if (kinds.size === 2) mixed++;
+  }
+  // Each child sits at its own octant of the group.
+  for (const g of groups.values()) g.children.forEach((c, j) => {
+    if (c === undefined) return;
+    const p = (c & UNIFORM_PRESSURE_SUPER_BULK) !== 0 ? L.slotPage(c & 0x7fffffff) : L.blockPage(c);
+    assert.equal(p.map((v, a) => ((v + 64 - box[a]!) & 63) & 1).reduce((s, b, a) => s | (b << a), 0), j);
+  });
+  assert.ok(mixed >= 4, `${mixed} groups mix blocks and BULK16 pages`);
 });
