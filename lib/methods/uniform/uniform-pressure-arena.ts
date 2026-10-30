@@ -450,7 +450,9 @@ export class UniformPressureArena {
  async initialize():Promise<void>{
   const layout=this.simulation.layout,S=!!this.solid,schedule=this.schedule,a=this.arena,B=this.fields.bulk,BP=this.fields.bulkPages;
   const cap=a.fineCapacity,blocks=this.simulation.capacity.address.blocks;
-  const plane0=520*cap,plane2=520*blocks,lanesTail=tailLanes(blocks,this.device.limits.maxComputeInvocationsPerWorkgroup);
+  // The tail's rows are the page list's and the BULK16 pages' (tItem): its lanes are sized for both.
+  const plane0=520*cap,plane2=520*blocks,lanesTail=tailLanes(blocks+(BP?.layout.capacity??0),this.device.limits.maxComputeInvocationsPerWorkgroup);
+  if(lanesTail>this.device.limits.maxComputeInvocationsPerWorkgroup)throw new Error(`Pressure arena: the tail's ${lanesTail} lanes are past the device's ${this.device.limits.maxComputeInvocationsPerWorkgroup} invocations a workgroup`);
   const C=(name:string,level:0|1|2=0)=>a.base(name,level);
   const tableWGSL=uniformStageListsWGSL+a.tableWGSL("state",`${this.tableWord}u`,`atomicLoad(&state[MASK+id])`);
   const constants=/* wgsl */`
