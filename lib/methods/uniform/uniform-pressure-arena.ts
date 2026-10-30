@@ -3196,6 +3196,12 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  if(initial){cycle=0u;}
  var residual=pIndex(HISTORY+CYCLES);
  if(cycle<CYCLES){atomicStore(&state[DONE],1u);residual=select(pIndex(HISTORY+cycle),pIndex(INITIAL),initial);}
+ // The cycles the solve ran: the frame encodes as many as the solves
+ // lately ran, plus one (observeCycles), and each that runs measures its
+ // start (its VALID bit). A solve that meets no cycle's measure but meets
+ // the final one ran every cycle encoded; one that misses the final too
+ // reports CYCLES (it needed more than it ran).
+ else if(bMet(HISTORY+CYCLES,1u<<CYCLES)){let ran=countOneBits(pIndex(VALID)&((1u<<CYCLES)-1u));if(ran>0u){cycle=ran;}}
  atomicStore(&state[CYCLE],cycle);atomicStore(&state[2],residual);
  if(!umFrameFailed()){
   if(residual>=0x7f800000u){umLatchFailure(${FAIL.pressureNonfinite}u,residual,0u);}
