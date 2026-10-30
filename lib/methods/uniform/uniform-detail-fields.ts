@@ -1109,6 +1109,8 @@ fn drShare(t:u32){
    let from=image,src:number;
    if(resident){
     if(kind!=="atlas"&&canonical&&held){from=held;src=this.baseIndex(k,x>>2,y>>2,z>>2,m,bw,bh);}else src=this.cellIndex(x,y,z,W,H);
+    // A slotless block of a compacted store holds no h texel: its values are its base's, as the accessors load them.
+    if(src<0){if(kind==="atlas"||!held||(k==="face"&&j>1))continue;from=held;src=this.baseIndex(k,x>>2,y>>2,z>>2,k==="face"?m:0,bw,bh);}
    }else{
     if(k==="face"&&j>1)continue;
     src=this.baseIndex(k,x>>2,y>>2,z>>2,k==="face"?m:0,W,H);
@@ -1122,21 +1124,26 @@ fn drShare(t:u32){
   * alone gives the corners and each hanging vertex's trilinear interpolant. */
  private logicalVertex([lx,ly,lz]:Dims,image:Float32Array,[W,H]:readonly [number,number],resident:boolean,held:Float32Array|undefined,[bw,bh]:readonly [number,number]):Float32Array{
   const out=new Float32Array(lx*ly*lz),f=Math.fround,[tx,ty,tz]=this.layout.tiles,v=new Float64Array(8);
-  if(resident){
-   for(let z=0;z<lz;z++)for(let y=0;y<ly;y++)for(let x=0;x<lx;x++)out[x+lx*(y+ly*z)]=held&&!((x|y|z)&3)?held[this.cornerIndex(x>>2,y>>2,z>>2,bw,bh)]!:image[this.vertexIndex(x,y,z,W,H)]!;
-   return out;
-  }
-  for(let z=0;z<lz;z++)for(let y=0;y<ly;y++)for(let x=0;x<lx;x++){
-   const dst=x+lx*(y+ly*z);
-   if(!((x|y|z)&3)){out[dst]=image[this.cornerIndex(x>>2,y>>2,z>>2,W,H)]!;continue;}
+  // The base's value of a vertex: a tile corner, or a hanging vertex's trilinear interpolant of its home tile's corners.
+  const based=(x:number,y:number,z:number,corners:Float32Array,cw:number,ch:number)=>{
+   if(!((x|y|z)&3))return corners[this.cornerIndex(x>>2,y>>2,z>>2,cw,ch)]!;
    // Hanging vertex: trilinear in its home tile's corners, summed in umVertexSum8 order.
    const hx=Math.min(x>>2,tx-1),hy=Math.min(y>>2,ty-1),hz=Math.min(z>>2,tz-1),ux=(x-4*hx)/4,uy=(y-4*hy)/4,uz=(z-4*hz)/4;
    for(let k=0;k<8;k++){
     const cx=k&1,cy=(k>>1)&1,cz=k>>2,weight=f(f((cx?ux:1-ux)*(cy?uy:1-uy))*(cz?uz:1-uz));
-    v[k]=weight>0?f(weight*image[this.cornerIndex(hx+cx,hy+cy,hz+cz,W,H)]!):0;
+    v[k]=weight>0?f(weight*corners[this.cornerIndex(hx+cx,hy+cy,hz+cz,cw,ch)]!):0;
    }
-   out[dst]=f(f(f(v[0]!+v[5]!)+f(v[1]!+v[4]!))+f(f(v[2]!+v[7]!)+f(v[3]!+v[6]!)));
+   return f(f(f(v[0]!+v[5]!)+f(v[1]!+v[4]!))+f(f(v[2]!+v[7]!)+f(v[3]!+v[6]!)));
+  };
+  if(resident){
+   // A slotless block of a compacted store holds no h texel: its vertices are its base's, as the accessors load them.
+   for(let z=0;z<lz;z++)for(let y=0;y<ly;y++)for(let x=0;x<lx;x++){
+    const i=held&&!((x|y|z)&3)?-2:this.vertexIndex(x,y,z,W,H);
+    out[x+lx*(y+ly*z)]=i===-2?held![this.cornerIndex(x>>2,y>>2,z>>2,bw,bh)]!:i<0&&held?based(x,y,z,held,bw,bh):image[i]!;
+   }
+   return out;
   }
+  for(let z=0;z<lz;z++)for(let y=0;y<ly;y++)for(let x=0;x<lx;x++)out[x+lx*(y+ly*z)]=based(x,y,z,image,W,H);
   return out;
  }
 }
