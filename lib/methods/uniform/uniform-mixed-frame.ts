@@ -1,4 +1,5 @@
 import { settleGPUInitialization } from "../../core/gpu-initialization";
+import { uniformMixedGravitySupport } from "./uniform-mixed-detached-mass.wgsl";
 import { UniformNarrowBandFlip, type NarrowBandParticleBudget } from "./uniform-narrow-band-flip";
 import { NARROW_BAND_AIR_CHANGED_WORD } from "./uniform-narrow-band-air.wgsl";
 import {UNIFORM_MIXED_OVERFLOW_FINE,uniformMixedDetailViolationWord} from "./uniform-mixed-topology.wgsl";
@@ -478,7 +479,7 @@ export class UniformMixedFrame {
   * the cell size and every constant are placed once, here. */
  private readonly words:{readonly frame:Uint32Array<ArrayBuffer>;readonly extension:Float32Array<ArrayBuffer>;readonly surface:Float32Array<ArrayBuffer>;readonly surfaceFlags:Uint32Array<ArrayBuffer>;
   readonly momentum:Float32Array<ArrayBuffer>;readonly momentumFlags:Uint32Array<ArrayBuffer>;readonly forces:Float32Array<ArrayBuffer>;readonly projection:Float32Array<ArrayBuffer>;
-  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>;readonly bandGravity:Float32Array<ArrayBuffer>};
+  readonly band:Float32Array<ArrayBuffer>;readonly bandNative:Float32Array<ArrayBuffer>;readonly bandGravity:Float32Array<ArrayBuffer>;readonly support:Int32Array<ArrayBuffer>};
  /** Byte offset in an ownership's support of its sticky detail violation word. */
  private readonly violationByte:number;
  /** encodeGeometry's options, set in place by each caller that passes any. */
@@ -495,7 +496,7 @@ export class UniformMixedFrame {
   const buffer=(label:string,size:number,usage:number)=>{const b=device.createBuffer({label,size,usage});this.owned.push(b);return b;};
   // STORAGE too: a copy into one is a compute launch (UniformComputeBlit).
   const uniform=(name:string,size:number)=>buffer(`Uniform ${name} parameters`,size,GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST);
-  this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",64),authority:uniform("authority",16),projection:uniform("projection",32)};
+  this.params={extension:uniform("extension",16),surface:uniform("surface",32),momentum:uniform("momentum",32),forces:uniform("forces",64),authority:uniform("authority",32),projection:uniform("projection",48)};
   this.state=buffer("Uniform pressure acceptance",32,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.status=buffer("Uniform mixed frame status",4*UNIFORM_MIXED_STATUS_WORDS,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);
   this.receipts=Array.from({length:UNIFORM_MIXED_RECEIPT_RING},(_,i)=>this.receiptSlot(buffer(`Uniform pressure receipt and mass accounting ${i}`,TRACE_RECEIPT,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ)));
@@ -516,7 +517,7 @@ export class UniformMixedFrame {
   {const h=o.capacity.lattice.cellSize_m,inverse=(x:number)=>Math.fround(1/Math.fround(Math.fround(x)*Math.fround(x)));
    this.words={frame:new Uint32Array(1),extension:new Float32Array([...h,0]),surface:new Float32Array([...h,0]),surfaceFlags:new Uint32Array([0,0,0,4]),
     momentum:new Float32Array([...h,0]),momentumFlags:new Uint32Array([0,0,0,UNIFORM_MIXED_MOMENTUM_LIMITS]),forces:new Float32Array([...h,0,0,0,0,0,0,0,0,0,0,0,0,0]),projection:new Float32Array([...h,0,0,0,0,0]),
-    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1),bandGravity:new Float32Array(4)};}
+    band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1),bandGravity:new Float32Array(4),support:new Int32Array(4)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
@@ -902,6 +903,8 @@ export class UniformMixedFrame {
   forces[3]=dt;forces[5]=density;forces[6]=viscosity;forces[7]=tension;forces[8]=+p.noSlip;forces[9]=open;forces[12]=gx;forces[13]=gy;forces[14]=gz;q.writeBuffer(to.forces,0,forces);
   q.writeBuffer(to.authority,0,AUTHORITY_WORDS);
   projection[3]=dt;projection[4]=density;projection[5]=open;q.writeBuffer(to.projection,0,projection);
+  // Detached mass rests on the cell along gravity (umDetachedMass).
+  uniformMixedGravitySupport(gravity,w.support);q.writeBuffer(to.authority,16,w.support);q.writeBuffer(to.projection,32,w.support);
   band[3]=dt;band[4]=density;band[6]=step;band[8]=Math.min(target,this.nearSettled.bandExit==="returns"?UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL:UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE);q.writeBuffer(this.bandParams,0,band);
   // The composite's native 4h rows stop at the root's target, the band's h rows at band[8]: native residuals scale by their ratio.
   w.bandNative[0]=band[8]!/target;q.writeBuffer(this.bandParams,52,w.bandNative);

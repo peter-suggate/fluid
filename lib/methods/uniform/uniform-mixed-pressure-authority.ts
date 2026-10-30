@@ -227,7 +227,7 @@ export class UniformMixedPressureAuthority {
    ...[f.centerPhi,f.volume,f.targetFill].map((t,binding)=>({binding,resource:t})),
    {binding:3,resource:{...f.phi,size:4*(this.ownership.capacity.owners+(this.coarse?uniformMixedRootMaskWords(this.ownership.layout):0))}},
    {binding:4,resource:f.phase},{binding:5,resource:f.correction},
-   {binding:6,resource:f.scratch?{...f.scratch,size:this.scratchBytes}:{buffer:this.retained!.cut!}},{binding:7,resource:{buffer:f.params,size:16}},
+   {binding:6,resource:f.scratch?{...f.scratch,size:this.scratchBytes}:{buffer:this.retained!.cut!}},{binding:7,resource:{buffer:f.params,size:32}},
    ...(f.fine?[{binding:8,resource:f.fine.phi},{binding:10,resource:{...f.fine.topology,size:topologyBytes}}]:[]),
    ...(f.simulation?[{binding:9,resource:f.simulation}]:[]),
    ...(this.revisions?[{binding:11,resource:{buffer:this.retained!.stamps}},{binding:12,resource:{buffer:this.revisions.buffer}}]:[]),
@@ -244,7 +244,9 @@ export class UniformMixedPressureAuthority {
 @group(1) @binding(4) var phase:texture_storage_3d<r32float,write>;
 @group(1) @binding(5) var correction:texture_storage_3d<r32float,write>;
 @group(1) @binding(6) var<storage,read_write> balance:array<vec2f>;
-@group(1) @binding(7) var<uniform> params:vec4f;
+// support: the step to the cell an owner rests on (uniformMixedGravitySupport).
+struct UMAuthorityParams{x:f32,y:f32,z:f32,w:f32,support:vec4i}
+@group(1) @binding(7) var<uniform> params:UMAuthorityParams;
 ${uniformVolumeCorrectionWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 const UM_HMIN=${Math.min(...this.ownership.capacity.lattice.cellSize_m)};
@@ -301,8 +303,10 @@ fn umOwnerSurfacePhi(o:UMOwner,v:f32,cap:f32)->f32{
  let width=f32(o.width)*UM_HMIN;
  return min(centre,max(width*(1.0-v/cap),-0.5*width));`}
 }
-// Detached mass touches no row: rows has written every owner's phi.
-${uniformMixedDetachedMassWGSL(o=>`umAuthorityLiquid(${o},phi[${o}.index])`,o=>`umOwnerVolume(${o})`,"params.w")}
+// Detached mass touches no row: rows has written every owner's phi. The
+// surface-only pass writes phi and phase together, so it evaluates each
+// neighbour's authority itself.
+${uniformMixedDetachedMassWGSL(o=>this.surfaceOnly?`umAuthorityLiquid(${o},umAuthority(${o},0.0))`:`umAuthorityLiquid(${o},phi[${o}.index])`,o=>`umOwnerVolume(${o})`,"params.w","params.support")}
 ${this.coarse?`@group(1) @binding(8) var vertexPhi:texture_3d<f32>;
 const UM_CUT_BASE=${1+2*(this.groups+this.chunks)}u;
 const pcHeld=${this.surfaceOnly};
@@ -637,15 +641,26 @@ var<workgroup> sums:array<vec4f,64>;
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width!=0u){phi[o.index]=umAuthority(o,umOwnerVolume(o));}
 }
 // NB-FLIP has one liquid authority: reconstructed phi. No mass claims,
-// detached-mass phase flags, balance reductions or recovery source. Its one
-// correction, volume control (params.z x capacity on a liquid owner), is
-// computed by its readers (the root RHS and the band prep) from these phi
-// words and params: no correction texel is written.
+// balance reductions or recovery source. Its one correction, volume control
+// (params.z x capacity on a liquid owner), is computed by its readers (the
+// root RHS and the band prep) from these phi words and params: no correction
+// texel is written.
+// Its phase does take detached mass (umDetachedMass), as the VOF build
+// does. Excluding it assumed every free surface is particle-backed at h, but
+// a 4h free surface (a Coarse region, or tiles a claim refused) has no
+// particles, and the extension's donor is a phase owner. A drop no 4h owner
+// centre lies inside (centre phi, the mean of 8 corners, is positive below
+// a radius of 4.49 cells about a lattice vertex) then had no carrier at all:
+// forces added g dt by its V, the next step's extension handed momentum
+// zero, and a free drop of r 0.2 m held 0.163 m/s for good
+// (tests/uniform-coarse-free-fall.test.ts). Inviscid and without surface
+// tension, a detached drop in free fall is at zero pressure throughout, so
+// free flight (no row, its faces keep their forced velocity) is exact.
 // held: the owner's phi (and phase) are the last pass's (stamp bit 1).
 fn umSurfaceOwner(o:UMOwner,held:bool){
  if(held){return;}
  let distance=umAuthority(o,0.0);phi[o.index]=distance;
- ${this.resident?"":"textureStore(phase,vec3i(umOrigin(o)),vec4f(umPhase(o,umAuthorityLiquid(o,distance))));"}
+ ${this.resident?"":"let liquid=umAuthorityLiquid(o,distance);textureStore(phase,vec3i(umOrigin(o)),vec4f(umPhase(o,liquid||umDetachedMass(o))));"}
 }
 @compute @workgroup_size(64) fn surface(@builtin(global_invocation_id) gid:vec3u){
  let o=${this.resident?"umResidentAllOwner":"umAllOwner"}(gid);if(o.width!=0u){umSurfaceOwner(o,${this.regional&&this.coarse?"(stamps[UM_STAMP_WORDS*umPageOfTile(o.tile)+12u]&2u)!=0u":"false"});}

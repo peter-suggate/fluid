@@ -127,7 +127,7 @@ export class UniformMixedPressureVelocity {
   const address=this.ownership.capacity.address;
   if(f.velocity.format!=="rgba32float"||uniformDetailClass(f.velocity)!=="face")throw new Error("Mixed pressure requires native MAC extent");
   return [{binding:0,resource:f.velocity},{binding:1,resource:this.scalar(f.negative,address.lowFaceKeys)},
-   {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount+(this.coarse?uniformMixedRootMaskWords(this.ownership.layout):0))},{binding:3,resource:{buffer:f.params,size:32}}];
+   {binding:2,resource:this.scalar(f.phi,this.ownership.layout.cellCount+(this.coarse?uniformMixedRootMaskWords(this.ownership.layout):0))},{binding:3,resource:{buffer:f.params,size:48}}];
  }
  private topology(t:GPUTexture|undefined):GPUTexture|undefined{
   if(!!t!==(!!this.solid&&!this.coarse))throw new Error("Mixed solid topology binding does not match stage mode");
@@ -171,7 +171,8 @@ const UM_H=vec3f(${h.join(",")});
 @group(1) @binding(0) var velocity:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read_write> negative:array<f32>;
 @group(1) @binding(2) var<storage,read_write> phi:array<f32>;
-struct UMProjectionParams {hDt:vec4f,policy:vec4f}
+// support: the step to the cell an owner rests on (uniformMixedGravitySupport).
+struct UMProjectionParams {hDt:vec4f,policy:vec4f,support:vec4i}
 @group(1) @binding(3) var<uniform> params:UMProjectionParams;
 \${COLD}
 ${uniformMixedFaceAddressWGSL}
@@ -399,7 +400,7 @@ fn umProjectV(o:UMOwner,face:UMFace)->f32{
 }
 fn umSolidPressure(o:UMOwner)->f32{return select(0.0,umPressure(o),umPressureLiquid(o));}`:""}
 // An absent page's volume is not transferred: it is the certified V=0.
-${uniformMixedDetachedMassWGSL(o=>`umPressureLiquid(${o})`,o=>`select(0.0,${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(volume,vec3i(umOrigin(${o})),0).x,umTileResident(${o}.tile))`,"params.policy.w")}
+${uniformMixedDetachedMassWGSL(o=>`umPressureLiquid(${o})`,o=>`select(0.0,${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(volume,vec3i(umOrigin(${o})),0).x,umTileResident(${o}.tile))`,"params.policy.w","params.support")}
 // The projected value of a face and whether it is a liquid row's (y 1).
 // cold: the face is frozen, its u* the stored F plus umColdAdd.
 fn umProjectRow(o:UMOwner,face:UMFace,cold:bool)->vec2f{
