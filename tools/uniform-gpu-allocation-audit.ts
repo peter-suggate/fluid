@@ -56,3 +56,14 @@ export function auditUniformGPUAllocations(device: GPUDevice, capBytes = Number.
     return { liveBytes, peakBytes, resources: [...groups.values()].sort((a,b) => b.bytes-a.bytes) };
   }};
 }
+
+/** Allocation classes for byte reports, by resource label (the first match wins). */
+export const UNIFORM_GPU_ALLOCATION_CLASSES: readonly (readonly [string, RegExp])[] = [
+  ["particles", /particle|FLIP (cell starts|bins|next|slab)/i],
+  ["pressure", /pressure|arena|multigrid|brick/i],
+  ["h detail fields", /velocity|volume|surface|gamma|phi|detail|unit tap/i],
+  ["ownership/layout", /owner|layout|tile|hanging|seam|census|mixed/i],
+  ["page pool", /page|pool|block/i],
+  ["scratch", /scratch|stage|conditioning/i],
+];
+export const uniformGPUAllocationClass = (label: string) => UNIFORM_GPU_ALLOCATION_CLASSES.find(([, r]) => r.test(label))?.[0] ?? "other";

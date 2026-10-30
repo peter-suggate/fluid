@@ -44,7 +44,7 @@ import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddress, uniformLatticeWindowBo
 import { uniformPageSources, type WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
 import { uniformLatticeInitialVolume } from "../lib/methods/uniform/uniform-volume-initial";
 import { UNIFORM_PAGE_POOL_STATUS as S, uniformPagePoolFatalMessage, uniformPagePoolResidency, type UniformPagePool } from "../lib/methods/uniform/uniform-page-pool";
-import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
+import { auditUniformGPUAllocations, uniformGPUAllocationClass } from "./uniform-gpu-allocation-audit";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
@@ -89,15 +89,7 @@ const failureOf = (phase: string, error: unknown): Failure => {
   return { phase, message, where, numbers: [...message.matchAll(/\d+(?:\.\d+)?(?:e[+-]?\d+)?/g)].map(m => Number(m[0])), stack: stack.split("\n").slice(0, 8).join("\n") };
 };
 // Allocation classes for the byte report, by resource label.
-const classes: [string, RegExp][] = [
-  ["particles", /particle|FLIP (cell starts|bins|next|slab)/i],
-  ["pressure", /pressure|arena|multigrid|brick/i],
-  ["h detail fields", /velocity|volume|surface|gamma|phi|detail|unit tap/i],
-  ["ownership/layout", /owner|layout|tile|hanging|seam|census|mixed/i],
-  ["page pool", /page|pool|block/i],
-  ["scratch", /scratch|stage|conditioning/i],
-];
-const classify = (label: string) => classes.find(([, r]) => r.test(label))?.[0] ?? "other";
+const classify = uniformGPUAllocationClass;
 
 const rows: Record<string, unknown>[] = [];
 let failure: Failure | undefined, construction_ms = NaN, allocation: ReturnType<ReturnType<typeof auditUniformGPUAllocations>["snapshot"]> | undefined;
