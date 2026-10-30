@@ -1,8 +1,12 @@
 import { fluidLatticePagedCellVolumes, type LatticePages } from "../../core/initial-liquid-lattice";
 import type { SceneDescription } from "../../core/model";
+import { proceduralSolidField } from "../../core/procedural-solid";
+import { sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
+import { sampleSolidWorld, solidWorldForScene } from "../../core/solid-world";
+import { terrainColumnHeights } from "../../core/terrain";
 import { liquidExtrusionBounds, liquidExtrusionDistance, liquidExtrusionEdges } from "../../core/liquid-extrusion";
 import { integratedInflowVolume } from "../../core/inflow-boundary";
-import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_SEED_MARGIN } from "./uniform-page-pool";
+import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_SEED_MARGIN, uniformPagePoolRuleBlocks } from "./uniform-page-pool";
 import { UNIFORM_FINE_SLOT_GROWTH } from "./uniform-fine-slots";
 
 /** The particle store's rule (docs/plans/bulk16-plan-2026-10-28.md, M4b):
@@ -108,24 +112,52 @@ export function uniformParticleCensusBand(scene:SceneDescription,depth:number,in
  * fastest speed the scene starts with or can make, v, is the largest of the
  * bodies' initial speeds, the inflow's speed, a drop's (it starts at rest,
  * so its own fall: it reaches no higher than its release) and a dam-break
- * front's 2 sqrt(g H) over the tallest liquid column of the census, H
- * (Ritter 1892; the front runs up a wall to v²/2g = 2H). The head is
+ * front's 2 sqrt(g H) over the tallest census liquid column with an
+ * unsupported free face, H (Ritter 1892; the front runs up a wall to
+ * v²/2g = 2H). A free face is a wet cell beside an open dry cell on a
+ * horizontal axis: liquid held by walls, solids or terrain on every side
+ * makes no front, and a hole in a wall only the column through it. The head is
  * v²/2g plus the census's closure margin (UNIFORM_PAGE_POOL_SEED_MARGIN
  * cells) above the highest liquid, top_m (the initial liquid's, a drop's or
  * the inflow nozzle's). */
 export interface UniformCensusReach{readonly v_m_s:number;readonly head_m:number;readonly top_m:number}
 export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):UniformCensusReach{
  const h=scene.voxelDomain.finestCellSize_m,E=volume.edge,[nx,ny,nz]=volume.cells,[px,py]=volume.pages,g=Math.hypot(scene.fluid.gravity_m_s2.x,scene.fluid.gravity_m_s2.y,scene.fluid.gravity_m_s2.z);
- const column=new Uint32Array(nx*nz);let top=0;
+ const column=new Uint32Array(nx*nz),free=new Uint8Array(nx*nz);let top=0;
+ const liquid=(x:number,y:number,z:number)=>{const page=volume.at[Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E))];return page?page[x%E+E*(y%E+E*(z%E))]!:0;};
+ const cells=sceneLatticeDimensions(scene,Number.MAX_SAFE_INTEGER),[cx,cy,cz]=cells,walled=scene.container.walls!=="none";
+ const solids=solidWorldForScene(scene),boundary=proceduralSolidField(scene),ground=terrainColumnHeights(scene,cx,cz),cellHeight=scene.container.height_m/cy;
+ // An open dry cell: inside the container (past it are its walls, but in an open world), no solid, no procedural boundary, above the ground.
+ const openDry=(x:number,y:number,z:number)=>{
+  if(x<0||z<0||x>=cx||z>=cz)return !walled;
+  if(liquid(x,y,z)>=0.5||sampleSolidWorld(solids,[x,y,z],true).solidFraction>0)return false;
+  return (boundary?.open([x,y,z])??1)>0.5&&(y+0.5)*cellHeight>ground[x+cx*z]!;
+ };
  for(let i=0;i<volume.at.length;i++){
   const page=volume.at[i];if(!page)continue;
   const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
-  for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz){column[ox+x+nx*(oz+z)]!++;top=Math.max(top,(oy+y+1)*h);}
+  for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz){
+   const X=ox+x,Y=oy+y,Z=oz+z,c=X+nx*Z;column[c]!++;top=Math.max(top,(Y+1)*h);
+   if(!free[c]&&page[j]!>=0.5&&(openDry(X-1,Y,Z)||openDry(X+1,Y,Z)||openDry(X,Y,Z-1)||openDry(X,Y,Z+1)))free[c]=1;
+  }
  }
- let tallest=0;for(const n of column)tallest=Math.max(tallest,n*h);
+ let tallest=0;for(let c=0;c<column.length;c++)if(free[c])tallest=Math.max(tallest,column[c]!*h);
  for(const {volume:drop} of scene.fluid.scheduledDrops??[])top=Math.max(top,drop.shape==="sphere"?drop.center_m.y+drop.radius_m:liquidExtrusionBounds(drop).max_m.y);
  if(scene.fluid.inflow)top=Math.max(top,scene.fluid.inflow.center_m.y+scene.fluid.inflow.radius_m);
  const speed=(v:{x:number;y:number;z:number}|undefined)=>v?Math.hypot(v.x,v.y,v.z):0;
  const v=Math.max(2*Math.sqrt(g*tallest),speed(scene.fluid.inflow?.velocity_m_s),...scene.rigidBodies.map(b=>speed(b.linearVelocity_m_s)));
- return {v_m_s:v,head_m:v*v/(2*g)+UNIFORM_PAGE_POOL_SEED_MARGIN*h,top_m:top};
+ // Without gravity nothing at rest climbs, and nothing moving comes back down (an unbounded head).
+ return {v_m_s:v,head_m:(v>0?v*v/(2*g):0)+UNIFORM_PAGE_POOL_SEED_MARGIN*h,top_m:top};
+}
+/** The pool rule's blocks for a walled box (M4b step 3): the census pages
+ * (every box page not in `air`), each footprint column's pages above its top
+ * resident one up to the page of the census liquid's top plus its head
+ * (uniformCensusReach), and the two sentinels. A closed top caps the reserve
+ * at the box's top page; an open top with an unbounded head (no gravity)
+ * has no rule, undefined. */
+export function uniformPagePoolRule(scene:SceneDescription,volume:LatticePages,air:readonly (readonly [number,number,number])[]):number|undefined{
+ const reach=uniformCensusReach(scene,volume),pageHeight=volume.edge*scene.voxelDomain.finestCellSize_m,open=scene.container.top==="open";
+ const reachPage=Math.floor((reach.top_m+reach.head_m)/pageHeight);
+ if(open&&!Number.isFinite(reachPage))return undefined;
+ return uniformPagePoolRuleBlocks(volume.pages,air,reachPage,open?Number.MAX_SAFE_INTEGER:volume.pages[1]-1);
 }

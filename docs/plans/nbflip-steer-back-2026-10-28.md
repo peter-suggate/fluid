@@ -735,6 +735,7 @@ Separation therefore stays the default.
 - **O2, letters loss.** The −3% loss with separation off at 240 is the clumps' cost, and is the same mechanism.
 - **O3, face-speed spikes.** After the bound's removal (task 5): not investigated in this follow-up.
 - **O4, the dam's and the channel's volume gain (parked 2026-10-30).** On the default path, the dam reads +3.7 to +4.8% at 120 and the channel +2.7 to +2.9% at 60. Five measured leads are eliminated: count against mass in reseeding; O1's air path (Sussman's projection, a measured negative result); wall clips and walk stops (at most ~15% of the excess); the deep top-up rectifier (it halves the excess, but the drift is nearly unchanged); and the shallow seed, split and union terms. The remaining lead is separation's outward share one to two cells deep. Details and the next test: `docs/plans/bulk16-plan-2026-10-28.md`, M4b, "O4, parked".
+- **O5, the rest flow grows after frame 60 on the backyard pool-rest scene (open, 2026-10-30).** The hydrostatic pool's peak speed is 2.6e-5 m/s through frame 60, then 5.4e-5 at 90 and 4.5e-4 at 120, against the test's 1e-4. It was unreachable until the pool rule let the scene construct. It is pool-independent: 212 and 260 blocks are bit-identical. Not chased yet. Details: `docs/plans/bulk16-plan-2026-10-28.md`, M4b, "Step 3 wired".
 
 ### Closed (2026-10-30): the seep's receiving ratio above 1
 The ratio above 1 was separation's outward source, not O1's compression.

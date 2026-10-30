@@ -11,7 +11,7 @@ import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
-import { uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
+import { uniformPagePoolRule, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
 import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
@@ -706,7 +706,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The frame is the page table's window: outside the box it is SOLID, but
     // for the column above an open top, which is AIR and claimable, and but in
     // an open world, where every page above the floor is (uniformLatticeAddress).
-    const address = this.address = uniformLatticeAddress([nx, ny, nz], scene.container.top === "open", { ...scene.fluid.pagePool, air: residency.air },
+    // A walled box with no pool figure: the pool rule (the census plus its ballistic reserve), not one block a box page.
+    const pool = scene.fluid.pagePool, ruled = pool?.blocks === undefined && pool?.memory_MiB === undefined && scene.container.walls !== "none"
+      ? uniformPagePoolRule(scene, (this.initialVolume ??= uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, residency.air) : undefined;
+    const address = this.address = uniformLatticeAddress([nx, ny, nz], scene.container.top === "open", { ...pool, air: residency.air, ...(ruled === undefined ? {} : { blocks: ruled }) },
       scene.container.walls === "none" ? { boxPage } : undefined);
     // The mixed-ownership frame owns every geometric advance, on native fields over the shared scratch arena.
     this.scratchArena = new UniformScratchArena(device, address, options.retainStageDiagnosticsForQA,undefined,uniformMixedPressureRootBytes(address));

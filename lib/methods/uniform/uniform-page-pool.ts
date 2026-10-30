@@ -1131,3 +1131,22 @@ const SUPER_PER:u32=${UNIFORM_SUPER_BLOCK_SLOTS/256}u;
  }
  destroy():void{this.state.destroy();this.work.destroy();this.published?.destroy();}
 }
+/** The pool rule (docs/plans/bulk16-plan-2026-10-28.md, M4b step 3): the
+ * census (the box pages resident at build, every box page not in `air`)
+ * plus the ballistic column reserve, plus the two sentinel blocks. The
+ * reserve is, for each page column holding a resident page, the pages above
+ * its highest resident one up to `reachPage` (the page holding the census
+ * liquid's top plus its ballistic head, uniformCensusReach), at most
+ * `ceilingPage` (the box's top page under a closed top, the frame's under an
+ * open one). Exhaustion stays the pool's fatal. */
+export function uniformPagePoolRuleBlocks(pages:readonly [number,number,number],air:readonly (readonly [number,number,number])[],reachPage:number,ceilingPage:number):number{
+ const [px,py,pz]=pages,stored=new Uint8Array(px*py*pz).fill(1);
+ for(const [x,y,z] of air)stored[x+px*(y+py*z)]=0;
+ let resident=0,reserve=0;
+ const reach=Math.min(Math.floor(reachPage),ceilingPage);
+ for(let z=0;z<pz;z++)for(let x=0;x<px;x++){
+  let top=-1;for(let y=0;y<py;y++)if(stored[x+px*(y+py*z)]){resident++;top=y;}
+  if(top>=0)reserve+=Math.max(0,reach-top);
+ }
+ return resident+reserve+2;
+}
