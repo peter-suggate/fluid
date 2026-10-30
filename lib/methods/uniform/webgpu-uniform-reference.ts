@@ -11,7 +11,7 @@ import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
-import { uniformPagePoolRule, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
+import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformPagePoolRule, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
 import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
@@ -1184,6 +1184,29 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private dynamicSeed():UniformMixedLayout{
     return createUniformMixedLayout(fluidRegionLattice(this.scene),this.scene.fluid.refinementRegions??[],4,this.thinWallSeed(),this.address);
   }
+  /** Dynamic's census start (fluid.tiers.start "census"): a 4h background
+   * with h where frame 1's census would hold it on the initial liquid
+   * (uniformCensusSeedTiles: the crossing tiles of the initial vertex phi,
+   * solid contact beside liquid where 4h is not exact, the bodies' balls, with their closure),
+   * and Fine regions. Frame 1's census then
+   * refines and coarsens it as it does the h start. */
+  private censusSeed():UniformMixedLayout{
+    const lattice=fluidRegionLattice(this.scene),a=this.address;
+    const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE);
+    const bodies=initializeRigidBodies(this.scene.rigidBodies).map(b=>({
+      centre:[0,1,2].map(i=>(([b.position_m.x,b.position_m.y,b.position_m.z][i]!)-[lattice.origin_m.x,lattice.origin_m.y,lattice.origin_m.z][i]!)/lattice.cellSize_m[i]!) as [number,number,number],
+      radius:boundingRadius(b)/Math.min(...lattice.cellSize_m)}));
+    // The census's crossing tiles of the initial vertex phi (the upload's, initializeVolumeAndTerrain), on the
+    // pages beside liquid, and its solid contact tiles (coupled, not 4h-exact), open as the thin-wall rule
+    // reads it: the solid mask and the terrain.
+    const [nx,ny,nz]=lattice.dimensions,terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined;
+    const open=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<nx&&y<ny&&z<nz&&!this.solidMask.solid(x,y,z)&&!(terrain&&y+1<=terrain[x+nx*z]!);
+    const phi=uniformLatticePagedPhi(this.scene,UNIFORM_PAGE_POOL_EDGE,uniformCensusSurfacePages(volume),uniformDetailCoarseSolids(this.detail));
+    const tiles=a.tiles as [number,number,number];
+    const solid=this.solidVoxelsEmpty&&!sceneHasTerrain(this.scene)?undefined:uniformCensusInexactSolidTiles(tiles,this.mixedSolidPromotion().coupled,open);
+    const seed=uniformCensusSeedTiles(volume,uniformCensusCrossingTiles(phi,tiles,open),tiles,solid,bodies);
+    return createUniformMixedLayout(lattice,this.scene.fluid.refinementRegions??[],4,seed,a);
+  }
   /** The coarse start's thin-wall tiles at h (uniformThinWallTiles: a cut 4h
    * owner there fills open cells across the solid). The census holds a cut
    * tile at h where liquid reaches it, with every tile around it
@@ -1234,8 +1257,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // its h ceiling from here (fluid.tiers.bricks, 8 h tiles a brick, or the
     // seed's bricks x 1.5 with a floor: uniformFineBrickCapacity), and the
     // particles at it. A build over the ceiling is fatal (followMixedCapacity).
-    const tiers=this.scene.fluid.tiers,coarseStart=gpuLayout&&tiers?.start==="4h";
-    const seed=this.mixedSeed=coarseStart?this.dynamicSeed():undefined;
+    // fluid.tiers.start "census" (V2a): the same capacities by rule, on frame 1's census at t=0 (censusSeed).
+    const tiers=this.scene.fluid.tiers,coarseStart=gpuLayout&&(tiers?.start==="4h"||tiers?.start==="census");
+    const seed=this.mixedSeed=coarseStart?(tiers?.start==="census"?this.censusSeed():this.dynamicSeed()):undefined;
     // M4b: unless fluid.tiers.fineBlocks gives a figure, a coarse start holds
     // its h slots by one rule from the census footprint (uniformFineSlotRule);
     // unless fluid.tiers.bricks does, its h owners at the slots' 512 tiles

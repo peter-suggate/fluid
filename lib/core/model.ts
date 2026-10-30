@@ -380,8 +380,11 @@ export interface SceneDescription {
      * regions, the census refining it; the h capacity is
      * then held at bricks (default: the start's bricks × 1.5, floor 256)
      * from construction, particles with it, and fineBlocks defaults to "auto".
+     * "census": a 4h background with h where frame 1's census holds it on
+     * the initial liquid (its band, solid contact and bodies, with their
+     * closure: uniformCensusSeedTiles), under the capacities of "4h".
      */
-    tiers?: { bricks?: number; particlesPerFineCell?: number; fineBlocks?: number | "auto"; start?: "h" | "4h" };
+    tiers?: { bricks?: number; particlesPerFineCell?: number; fineBlocks?: number | "auto"; start?: "h" | "4h" | "census" };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -698,7 +701,7 @@ export function validateScene(scene: SceneDescription): string[] {
   if (tiers?.bricks !== undefined && !(Number.isInteger(tiers.bricks) && tiers.bricks > 0)) errors.push("fluid.tiers.bricks must be a positive integer");
   if (tiers?.particlesPerFineCell !== undefined && !(tiers.particlesPerFineCell > 0 && tiers.particlesPerFineCell <= 64)) errors.push("fluid.tiers.particlesPerFineCell must be in (0, 64]");
   if (tiers?.fineBlocks !== undefined && tiers.fineBlocks !== "auto" && !(Number.isInteger(tiers.fineBlocks) && tiers.fineBlocks > 0)) errors.push("fluid.tiers.fineBlocks must be a positive integer or \"auto\"");
-  if (tiers?.start !== undefined && tiers.start !== "h" && tiers.start !== "4h") errors.push("fluid.tiers.start must be \"h\" or \"4h\"");
+  if (tiers?.start !== undefined && tiers.start !== "h" && tiers.start !== "4h" && tiers.start !== "census") errors.push("fluid.tiers.start must be \"h\", \"4h\" or \"census\"");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {

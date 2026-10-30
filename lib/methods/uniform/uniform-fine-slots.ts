@@ -67,9 +67,9 @@ export function uniformFineSlotWords(blocks:number,capacity:number):UniformFineS
  return {slot:0,need:blocks,free,stack:free+1,claimed,list:claimed+1,words:claimed+1+capacity};
 }
 /** Blocks of the slot grid on z: slot s sits at umBlockCoord(s), the block grid's width and height a layer. */
-/** The scene's compaction (fluid.tiers.fineBlocks): a coarse start (tiers.start "4h") compacts at "auto" unless told otherwise; undefined keeps the whole-grid stores. */
-export function uniformFineBlocks(tiers?:{readonly fineBlocks?:number|"auto";readonly start?:"h"|"4h"}):number|"auto"|undefined{
- return tiers?.fineBlocks??(tiers?.start==="4h"?"auto":undefined);
+/** The scene's compaction (fluid.tiers.fineBlocks): a coarse or census start (tiers.start "4h" or "census") compacts at "auto" unless told otherwise; undefined keeps the whole-grid stores. */
+export function uniformFineBlocks(tiers?:{readonly fineBlocks?:number|"auto";readonly start?:"h"|"4h"|"census"}):number|"auto"|undefined{
+ return tiers?.fineBlocks??(tiers?.start==="4h"||tiers?.start==="census"?"auto":undefined);
 }
 export function uniformFineSlotLayers(blockGrid:readonly number[],capacity:number):number{return Math.ceil((capacity+1)/(blockGrid[0]!*blockGrid[1]!));}
 /** Slots for a need: requested (fluid.tiers.fineBlocks) or the need x 1.5 with
