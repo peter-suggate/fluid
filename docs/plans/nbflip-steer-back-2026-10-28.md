@@ -734,6 +734,7 @@ Separation therefore stays the default.
   That is the source of the clumps separation answers, and so of seep's outward volume (ratio 1.5 at 600, 2.19 at 1200). The fix belongs in velocity sampling or extrapolation (the nearest-source extension's rest velocity at stage points in the air between letter and pool), not in separation. It is deliberately not fixed here.
 - **O2, letters loss.** The −3% loss with separation off at 240 is the clumps' cost, and is the same mechanism.
 - **O3, face-speed spikes.** After the bound's removal (task 5): not investigated in this follow-up.
+- **O4, the dam's and the channel's volume gain (parked 2026-10-30).** On the default path, the dam reads +3.7 to +4.8% at 120 and the channel +2.7 to +2.9% at 60. Five measured leads are eliminated: count against mass in reseeding; O1's air path (Sussman's projection, a measured negative result); wall clips and walk stops (at most ~15% of the excess); the deep top-up rectifier (it halves the excess, but the drift is nearly unchanged); and the shallow seed, split and union terms. The remaining lead is separation's outward share one to two cells deep. Details and the next test: `docs/plans/bulk16-plan-2026-10-28.md`, M4b, "O4, parked".
 
 ### Closed (2026-10-30): the seep's receiving ratio above 1
 The ratio above 1 was separation's outward source, not O1's compression.
