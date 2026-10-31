@@ -154,6 +154,7 @@ import { UNIFORM_DIRECTORY_FLAT_WORDS, UNIFORM_SUPER_BLOCK_CHILDREN, UNIFORM_SUP
 import type { GPUFluidVolumePageSource } from "../../core/method-view-records";
 import type { LatticePages } from "../../core/initial-liquid-lattice";
 import { bulk16PageWord } from "./uniform-bulk-pages-reference";
+import { RESIDENCY_STAGES, residencyFootprintContains } from "./uniform-local-residency";
 
 const RECORD=8;
 /** upFlat's workgroups a row of its two-dimensional launch. */
@@ -576,11 +577,29 @@ function wetPages(cells:readonly [number,number,number],pages:readonly [number,n
  }
  return flags;
 }
+/** The tile offsets the page request (lrAsk) asks for around a wet tile, as
+ * (dx, dy, dz, surface only) quads: the transport and pressure stages' footprints
+ * (their seeds are the wet tiles), and the surface stage's, whose seeds are the
+ * crossings, here the wet tiles beside open dry ones. Particles' footprint is
+ * transport's; ownership's is the tile itself; legacy is not staged. */
+const WET_FOOTPRINT=(()=>{
+ const stage=(name:string)=>RESIDENCY_STAGES.findIndex(s=>s.name===name),wet=[stage("transport"),stage("pressure"),stage("particles")],surface=stage("surface");
+ const R=Math.max(...[...wet,surface].map(s=>RESIDENCY_STAGES[s]!.core+RESIDENCY_STAGES[s]!.faces)),out:number[]=[];
+ for(let dz=-R;dz<=R;dz++)for(let dy=-R;dy<=R;dy++)for(let dx=-R;dx<=R;dx++){
+  const d=[dx,dy,dz];
+  if(wet.some(s=>residencyFootprintContains(s,d)))out.push(dx,dy,dz,0);
+  else if(residencyFootprintContains(surface,d))out.push(dx,dy,dz,1);
+ }
+ return out;
+})();
 /** One flag per box page: a 4h tile of it lies within ceil(margin / 4)
  * tile steps (26-connected) of a wet tile (a cell's volume above zero)
  * through open tiles (`openTile`): the margin's reachable air (V2d). A
  * wall's closed tiles stop it, so a page past the wall is not reached. Work
- * and memory follow the wet tiles and the margin's band, not the box. */
+ * and memory follow the wet tiles and the margin's band, not the box.
+ * The wet tiles' stage footprints (WET_FOOTPRINT) flag their pages whether
+ * open or solid: the request asks for them, so a wall's page within a
+ * footprint of the liquid is stored. */
 export function uniformPagePoolReachablePages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>|LatticePages,margin:number,openTile:(x:number,y:number,z:number)=>boolean,surface?:Map<number,number[]>):Uint8Array{
  const E=UNIFORM_PAGE_POOL_EDGE,T=E/4,[nx,ny,nz]=cells,[px,py,pz]=pages,flags=new Uint8Array(px*py*pz);
  const [tx,ty,tz]=[Math.ceil(nx/4),Math.ceil(ny/4),Math.ceil(nz/4)];
@@ -611,7 +630,14 @@ export function uniformPagePoolReachablePages(cells:readonly [number,number,numb
     const X=x+dx,Y=y+dy,Z=z+dz;
     if(X>=0&&Y>=0&&Z>=0&&X<tx&&Y<ty&&Z<tz&&!wet(X,Y,Z)){front=true;if(!surface||openTile(X,Y,Z)){air=true;break edge;}}
    }
-   if(front)frontier.push(x,y,z);
+   if(front){
+    frontier.push(x,y,z);
+    // The request's footprints, solid or not: commit 1 claims these pages before it retires any.
+    for(let f=0;f<WET_FOOTPRINT.length;f+=4)if(air||!WET_FOOTPRINT[f+3]){
+     const X=x+WET_FOOTPRINT[f]!,Y=y+WET_FOOTPRINT[f+1]!,Z=z+WET_FOOTPRINT[f+2]!;
+     if(X>=0&&Y>=0&&Z>=0&&X<tx&&Y<ty&&Z<tz)flags[page(X,Y,Z)]=1;
+    }
+   }
    // The surface: a wet tile beside open dry tiles (not a wall's), its page's tile bounds.
    if(air&&surface){const b=surface.get(i);if(!b)surface.set(i,[x,y,z,x,y,z]);else{b[0]=Math.min(b[0]!,x);b[1]=Math.min(b[1]!,y);b[2]=Math.min(b[2]!,z);b[3]=Math.max(b[3]!,x);b[4]=Math.max(b[4]!,y);b[5]=Math.max(b[5]!,z);}}
   }
