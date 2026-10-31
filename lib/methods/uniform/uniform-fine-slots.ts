@@ -32,11 +32,32 @@ export const UNIFORM_FINE_SLOT_GROWTH=1.5,UNIFORM_FINE_SLOT_FLOOR=16;
  * at most three pages of a column. */
 export const UNIFORM_FINE_SLOT_BAND_LAYERS=3;
 /** The h slots a census footprint holds (docs/plans/bulk16-plan-2026-10-28.md,
- * M4b): UNIFORM_FINE_SLOT_GROWTH x its page columns x the band's page layers,
- * one rule for every scene. A build that wants more is refused to 4h. */
-export function uniformFineSlotRule(columns:number):number{
+ * M4b): UNIFORM_FINE_SLOT_GROWTH x (its page columns x the band's page
+ * layers, plus the pages the other t=0 sources of h demand meet:
+ * uniformFineSlotSourcePages), one rule for every scene. A build that wants
+ * more is refused to 4h. */
+export function uniformFineSlotRule(columns:number,sourcePages=0):number{
  if(!(Number.isSafeInteger(columns)&&columns>=1))throw new RangeError(`An h slot rule needs a footprint of whole columns, not ${columns}`);
- return Math.ceil(UNIFORM_FINE_SLOT_GROWTH*columns*UNIFORM_FINE_SLOT_BAND_LAYERS);
+ if(!(Number.isSafeInteger(sourcePages)&&sourcePages>=0))throw new RangeError(`An h slot rule needs whole source pages, not ${sourcePages}`);
+ return Math.ceil(UNIFORM_FINE_SLOT_GROWTH*(columns*UNIFORM_FINE_SLOT_BAND_LAYERS+sourcePages));
+}
+/** The pages the detail rings of the t=0 h sources other than the free
+ * surface meet: a body's census ball, an authored h region (its tiles,
+ * inclusive). The census seed adds each tile's 26 neighbours
+ * (uniformCensusSeedTiles), and an h tile's ring box meets the pages over
+ * cells [4p - 13, 4p + 15] (uniformFineSlotRingWGSL); within the box's pages.
+ * Each source counts on its own: the rule's bound, not their union. */
+export function uniformFineSlotSourcePages(pages:readonly [number,number,number],boxes:readonly {readonly min:readonly number[];readonly max:readonly number[]}[]):number{
+ let n=0;
+ for(const {min,max} of boxes){
+  let count=1;
+  for(let a=0;a<3;a++){
+   const lo=Math.max(0,(4*(min[a]!-1)-13)>>5),hi=Math.min(pages[a]!-1,(4*(max[a]!+1)+15)>>5);
+   count*=Math.max(0,hi-lo+1);
+  }
+  n+=count;
+ }
+ return n;
 }
 /** The census footprint's page columns: the distinct (x, z) of the box pages
  * resident at build (liquid and its reachable air: uniformPagePoolResidency's

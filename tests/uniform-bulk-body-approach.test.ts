@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
+import { UNIFORM_BULK_HOLD_FRAMES } from "../lib/methods/uniform/uniform-bulk-tier-reference";
 import { uniformDetailField } from "../lib/methods/uniform/uniform-detail-fields";
 import { UNIFORM_KIND, uniformPageKind } from "../lib/methods/uniform/uniform-lattice-address";
 import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geometric";
@@ -33,9 +34,9 @@ const gpu = { skip: !process.env.WEBGPU_NODE_MODULE };
 const REFERENCE_MARGIN = 1.5;
 
 /** Runs the stone tank for `held` frames with the stone held still, then
- * 12 frames moving down at 3 m/s; each moving frame checked. Returns the
- * fastest tile travel of each moving frame, m/s. */
-async function stone(t: { diagnostic(message: string): void }, tier: "16h" | "off", depth_m: number | undefined, held: number): Promise<number[]> {
+ * `moving` frames moving down at 3 m/s; each moving frame checked. Returns
+ * the fastest tile travel of each moving frame, m/s. */
+async function stone(t: { diagnostic(message: string): void }, tier: "16h" | "off", depth_m: number | undefined, held: number, moving = 12): Promise<number[]> {
   const { scene, values } = uniformStoneTank(tier, depth_m);
   let travel: number[] = [];
   await withUniformDevice("BULK16 body approach", async device => {
@@ -53,7 +54,7 @@ async function stone(t: { diagnostic(message: string): void }, tier: "16h" | "of
       const stores: GPUTexture[] = field ? [field.storage.physical(velocity), field.storage.baseOf?.(field.handle)].filter(Boolean) : [velocity];
       if (held > 0) { body.held = true; body.linearVelocity_m_s = { x: 0, y: 0, z: 0 }; }
       const faces: number[] = []; travel = [];
-      for (let frame = 1; frame <= held + 12; frame++) {
+      for (let frame = 1; frame <= held + moving; frame++) {
         if (held > 0 && frame === held + 1) { body.held = false; body.linearVelocity_m_s = { ...push }; }
         assert.ok(solver.advanceTo(frame * dt, bodies)); await solver.awaitFrameCompletion();
         assert.equal(solver.info.simulationPipelineError, undefined, `frame ${frame}`);
@@ -69,6 +70,10 @@ async function stone(t: { diagnostic(message: string): void }, tier: "16h" | "of
         }
         travel.push(fastest); faces.push(top);
       }
+      // The slot rule holds the body's ring and the surface band (uniformFineSlotRule's sources).
+      const info = solver.info;
+      if (info.uniformMixedSlotCapacity !== undefined) assert.ok(info.uniformMixedSlotPeak <= info.uniformMixedSlotCapacity, `slot peak ${info.uniformMixedSlotPeak} within the rule's ${info.uniformMixedSlotCapacity}`);
+      t.diagnostic(`${tier}: slots peak ${info.uniformMixedSlotPeak} of ${info.uniformMixedSlotCapacity}`);
       t.diagnostic(`${tier}: D ${D}; fastest tile travel by moving frame (m/s): ${travel.map(s => s.toFixed(2)).join(" ")}`);
       t.diagnostic(`fastest face by moving frame (m/s): ${faces.map(s => s.toFixed(2)).join(" ")}`);
     } finally { solver.destroy(); }
@@ -87,3 +92,13 @@ test("a body approaching deep water promotes its BULK16 pages before it arrives"
   await approach(t, undefined, 0);
 });
 
+// The slot rule (uniformFineSlotRule) holds a body's census ball on top of
+// the surface band: the stone resting 0.4 m deep at t=0 builds, and is held
+// there past the hold (UNIFORM_BULK_HOLD_FRAMES) within the rule's slots.
+// Red on 639b9128: "the first layout's detail ring needs 112 h slots; the
+// slot rule holds 111". Its release is not tested here: pushed from rest to
+// 3 m/s, the tier-off run stops at frame 48 ("Departure travel gives a
+// closure of 33 tiles, over the cap of 32").
+test("a body resting deep in the water at t=0 builds within the slot rule", gpu, async t => {
+  await stone(t, "16h", 0.4, UNIFORM_BULK_HOLD_FRAMES + 10, 0);
+});

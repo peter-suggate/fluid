@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {UNIFORM_FINE_SLOT_FLOOR,uniformFineBlocks,uniformFineSlotCapacity,uniformFineSlotFootprintColumns,uniformFineSlotRule,uniformFineSlotInitWGSL,uniformFineSlotLayers,uniformFineSlotWords} from "../lib/methods/uniform/uniform-fine-slots";
+import {UNIFORM_FINE_SLOT_FLOOR,uniformFineBlocks,uniformFineSlotCapacity,uniformFineSlotFootprintColumns,uniformFineSlotRule,uniformFineSlotSourcePages,uniformFineSlotInitWGSL,uniformFineSlotLayers,uniformFineSlotWords} from "../lib/methods/uniform/uniform-fine-slots";
 
 test("h slot words: slots, need, free stack and claimed list of a capacity",()=>{
  const w=uniformFineSlotWords(10,4);
@@ -54,4 +54,18 @@ test("h slot rule: 1.5 x the census footprint's page columns x three band layers
  assert.equal(uniformFineSlotFootprintColumns([4,2,3],all),11);
  // On a seep-sized grid the rule's 90 rounds up to its layers of 16: 95 slots.
  assert.equal(uniformFineSlotCapacity(226,[4,4,15],0,uniformFineSlotRule(20)),95);
+});
+
+test("h slot rule: every t=0 source of h demand, a body's ball and an h region, adds the pages its tiles' rings meet",()=>{
+ // The rule's sources on top of the band: 1.5 x (20 columns x 3 + 8 pages).
+ assert.equal(uniformFineSlotRule(20,8),102);
+ assert.equal(uniformFineSlotRule(20,0),uniformFineSlotRule(20));
+ assert.throws(()=>uniformFineSlotRule(20,-1),/source pages/);
+ // One tile at (8, 8, 8) (cells 32..35): the closure's neighbours, tiles 7..9, ring cells 15..51 (fsRingLow 4*7-13, fsRingHigh 4*9+15): pages 0..1 an axis.
+ assert.equal(uniformFineSlotSourcePages([4,4,4],[{min:[8,8,8],max:[8,8,8]}]),8);
+ // Tile (12, 12, 12) (cells 48..51): tiles 11..13, cells 31..67, pages 0..2 an axis.
+ assert.equal(uniformFineSlotSourcePages([4,4,4],[{min:[12,12,12],max:[12,12,12]}]),27);
+ // Clipped to the box's pages, and each source counted on its own.
+ assert.equal(uniformFineSlotSourcePages([2,2,2],[{min:[0,0,0],max:[3,3,3]},{min:[12,12,12],max:[12,12,12]}]),1+8);
+ assert.equal(uniformFineSlotSourcePages([4,4,4],[]),0);
 });

@@ -12,7 +12,7 @@ import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLayoutWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
 import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformPagePoolRule, uniformPagePoolRuleReach, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
-import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
+import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule, uniformFineSlotSourcePages } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
@@ -1269,9 +1269,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return this.censusSeedTiles??=(()=>{
       const lattice=fluidRegionLattice(this.scene),a=this.address;
       const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE);
-      const bodies=initializeRigidBodies(this.scene.rigidBodies).map(b=>({
-        centre:[0,1,2].map(i=>(([b.position_m.x,b.position_m.y,b.position_m.z][i]!)-[lattice.origin_m.x,lattice.origin_m.y,lattice.origin_m.z][i]!)/lattice.cellSize_m[i]!) as [number,number,number],
-        radius:boundingRadius(b)/Math.min(...lattice.cellSize_m)}));
+      const bodies=this.censusBodyBalls();
       // The census's crossing tiles of the initial vertex phi (the upload's, initializeVolumeAndTerrain), on the
       // pages beside liquid, and its solid contact tiles (coupled, not 4h-exact), open as the thin-wall rule
       // reads it: the solid mask and the terrain.
@@ -1284,6 +1282,27 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     })();
   }
   private censusSeedTiles?:Uint8Array;
+  /** The bodies at their t=0 pose as the census seed reads them: centre and bounding radius in cells. */
+  private censusBodyBalls():{centre:[number,number,number];radius:number}[]{
+    const lattice=fluidRegionLattice(this.scene);
+    return initializeRigidBodies(this.scene.rigidBodies).map(b=>({
+      centre:[0,1,2].map(i=>(([b.position_m.x,b.position_m.y,b.position_m.z][i]!)-[lattice.origin_m.x,lattice.origin_m.y,lattice.origin_m.z][i]!)/lattice.cellSize_m[i]!) as [number,number,number],
+      radius:boundingRadius(b)/Math.min(...lattice.cellSize_m)}));
+  }
+  /** The t=0 h sources besides the free surface, as tile boxes (inclusive)
+   * for the slot rule (uniformFineSlotSourcePages): each body's census ball
+   * (uniformCensusSeedTiles' bound, grown by a cell) and each authored
+   * region that admits h only (uniformMixedLayoutWidths' h mask). */
+  private slotRuleSources():{min:number[];max:number[]}[]{
+    const boxes=this.censusBodyBalls().map(({centre,radius})=>{const r=radius+1;return {min:centre.map(c=>Math.floor((c-r)/4)),max:centre.map(c=>Math.floor((c+r)/4))};});
+    const lattice=fluidRegionLattice(this.scene);
+    for(const region of this.scene.fluid.refinementRegions??[]){
+      if(!(region.minimumCellSize_cells<=1&&(region.maximumCellSize_cells??Infinity)<4))continue;
+      const t=uniformDetailTileBounds(lattice,{min:region.min_m,max:region.max_m});
+      if(t)boxes.push({min:[...t.min],max:t.max.map(v=>v-1)});
+    }
+    return boxes;
+  }
   /** V2c: the census start's BULK16 pages and their slot records, held from construction to the first frame. */
   private bulkStart?:{readonly pages:[number,number,number][];readonly records:Uint32Array<ArrayBuffer>;readonly phi:LatticePages};
   /** The census start's BULK16 pages (uniformBulkStartPages: the bulk tier's
@@ -1418,8 +1437,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // the records' rule over the band's cells (uniformParticleRecordRule). The
     // build's claim refuses to 4h what the slots cannot serve.
     const cells:[number,number,number]=[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz];
+    const pageDims=cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number];
+    // The rule's sources besides the band: the bodies' balls and the h-only authored regions (slotRuleSources).
     const slotRule=coarseStart&&uniformFineBlocks(tiers)==="auto"
-      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number],this.pageResidency.air))):undefined;
+      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(pageDims,this.pageResidency.air),uniformFineSlotSourcePages(pageDims,this.slotRuleSources()))):undefined;
     const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume):undefined;
     const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:band?512*slotRule!:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
