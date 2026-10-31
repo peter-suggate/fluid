@@ -5,6 +5,8 @@ import { damBreakSignedDistanceAtNode, initialFluidBrickSignedDistanceAtNode,
   sceneInitialLiquidVolumes, INITIAL_FLUID_BRICK_SIZE } from "./initial-fluid";
 import { terrainColumnHeights } from "./terrain";
 import { sampleSolidWorld, solidWorldForScene } from "./solid-world";
+import { quaternionInverseRotate } from "./rigid-body";
+import { sceneShape } from "./scene-shape";
 import type { InitialLiquidBox, SceneDescription } from "./model";
 import { sceneFluidBoxScene, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 
@@ -89,6 +91,37 @@ function buriedVertices(closed: Uint8Array, dimensions: readonly [number, number
   return buried;
 }
 
+/** The rigid bodies' solid in a cell at their authored pose, sampled as the
+ * fluid's body solid samples it (umCellBodyFraction): eight points at 0.4 of
+ * the cell either side of its centre, a closed interior boundary solid outside
+ * its box. 0 where no point is solid, 2 where every one is, 1 between;
+ * undefined without bodies. */
+function bodyCellSolid(scene: SceneDescription, dimensions: readonly [number, number, number]): ((x: number, y: number, z: number) => number) | undefined {
+  const bodies = scene.rigidBodies ?? [];
+  if (bodies.length === 0) return undefined;
+  const [nx, ny, nz] = dimensions, c = scene.container;
+  const h = [c.width_m/nx, c.height_m/ny, c.depth_m/nz], reach = 0.4*Math.hypot(h[0]!, h[1]!, h[2]!);
+  const shapes = bodies.map(body => { const shape = sceneShape(body.shape);
+    return { body, shape, interior: body.fluidBoundary === "interior", radius: shape.boundingRadius_m(body.dimensions_m) }; });
+  return (x, y, z) => {
+    const centre = { x: ((x+0.5)/nx-0.5)*c.width_m, y: (y+0.5)/ny*c.height_m, z: ((z+0.5)/nz-0.5)*c.depth_m };
+    let mask = 0;
+    for (const entry of shapes) {
+      const { body, shape, interior } = entry, p = body.position_m;
+      if (!interior && Math.hypot(centre.x-p.x, centre.y-p.y, centre.z-p.z) > entry.radius+reach) continue;
+      for (let corner=0; corner<8; corner++) {
+        const bit = 1 << corner;
+        if (mask & bit) continue;
+        const local = quaternionInverseRotate(body.orientation, {
+          x: centre.x+(corner&1 ? 0.4 : -0.4)*h[0]!-p.x, y: centre.y+(corner&2 ? 0.4 : -0.4)*h[1]!-p.y, z: centre.z+(corner&4 ? 0.4 : -0.4)*h[2]!-p.z });
+        if (shape.inside(body.dimensions_m, local) !== interior) mask |= bit;
+      }
+      if (mask === 255) return 2;
+    }
+    return mask ? 1 : 0;
+  };
+}
+
 /** Authored voxels close whole cells; native terrain closes only its full cells. */
 function closedCells(scene: SceneDescription, dimensions: readonly [number, number, number]): Uint8Array {
   const [nx, ny, nz] = dimensions, at = closedCell(scene, dimensions);
@@ -116,7 +149,8 @@ function closedCell(scene: SceneDescription, dimensions: readonly [number, numbe
  * most, whatever its depth. Only h vertices are ever redistanced; a 4h corner
  * keeps the magnitude it starts with and its chord puts the surface wherever
  * the nearest seam left it.
- * A face is free where the cell beyond it is open. One inside a solid or past
+ * A face is free where the cell beyond it holds no solid: closed, or a rigid
+ * body's at its authored pose (bodyCellSolid). One against a solid or past
  * the domain is contact, and the liquid continues through it as in
  * damBreakSignedDistanceAtNode. Each axis takes the distance along its lattice
  * lines to their free ends and spreads it across the other two; a z slice has
@@ -147,6 +181,35 @@ function boxUnionVertexPhi(scene: SceneDescription, dimensions: readonly [number
     hi: [lattice((box.max_m.x/c.width_m+0.5)*nx, 0), lattice(box.max_m.y/c.height_m*ny, 1), lattice((box.max_m.z/c.depth_m+0.5)*nz, 2)],
   }));
   const sliced = (axis: number) => axis === 2 && sliceZ !== undefined;
+  // Contact is any solid in the cell: the closed cells, and the rigid bodies
+  // at their authored pose as the fluid's body solid samples them.
+  const bodies = bodyCellSolid(scene, dimensions);
+  const contact = bodies ? (x: number, y: number, z: number) => closed(x, y, z) || bodies(x, y, z) > 0 : closed;
+  const solid = bodies ? (x: number, y: number, z: number) => closed(x, y, z) || bodies(x, y, z) === 2 : closed;
+  // A face inside a cut cell, with solid throughout the cells beyond it, moves
+  // out to the cut cell's far vertex plane. The liquid then continues through
+  // the contact into the solid (Batty, Bertails and Bridson 2007; Ng, Min and
+  // Gibou 2009): the cut cell holds its open part filled, as the liquid
+  // authored up to the wall does, where a level set stopping at the face
+  // fills that open part only in proportion. Only vertices of cells holding
+  // solid change.
+  const cut = [0, 0, 0], beyond = [0, 0, 0];
+  // A box's faces are its own, whatever slice of it is asked for.
+  for (const box of boxes) for (let a=0; a<3; a++) {
+    const b = (a+1)%3, d = (a+2)%3;
+    const span = (axis: number, lo: number, hi: number) => [Math.max(0, Math.floor(lo)), Math.min(cells[axis]!, Math.ceil(hi))-1];
+    const [b0, b1] = span(b, box.lo[b]!, box.hi[b]!), [d0, d1] = span(d, box.lo[d]!, box.hi[d]!);
+    for (const side of [0, 1]) {
+      const face = side ? box.hi[a]! : box.lo[a]!, inner = Math.floor(face), outer = side ? inner+1 : inner-1;
+      if (Number.isInteger(face) || inner < 0 || inner >= cells[a]! || outer < 0 || outer >= cells[a]! || b0 > b1 || d0 > d1) continue;
+      let held = true;
+      for (let id=d0; id<=d1 && held; id++) for (let ib=b0; ib<=b1 && held; ib++) {
+        cut[a] = inner; cut[b] = ib; cut[d] = id; beyond[a] = outer; beyond[b] = ib; beyond[d] = id;
+        held = contact(cut[0]!, cut[1]!, cut[2]!) && solid(beyond[0]!, beyond[1]!, beyond[2]!);
+      }
+      if (held) { if (side) box.hi[a] = inner+1; else box.lo[a] = inner; }
+    }
+  }
   const first = (axis: number, lo: number) => sliced(axis) ? Number(lo > sliceZ!) : Math.max(0, Math.ceil(lo));
   const last = (axis: number, hi: number) => sliced(axis) ? Number(hi >= sliceZ!)-1 : Math.min(cells[axis]!, Math.floor(hi));
   // The vertices the transform runs over, low and size an axis.
@@ -160,7 +223,7 @@ function boxUnionVertexPhi(scene: SceneDescription, dimensions: readonly [number
     for (const cd of sliced(d) ? [Math.floor(sliceZ!)] : [id-1, id]) for (const cb of sliced(b) ? [Math.floor(sliceZ!)] : [ib-1, ib]) {
       if (cb<0 || cd<0 || cb>=cells[b]! || cd>=cells[d]!) continue;
       cell[a] = beyond; cell[b] = cb; cell[d] = cd;
-      if (!closed(cell[0]!, cell[1]!, cell[2]!)) return true;
+      if (!contact(cell[0]!, cell[1]!, cell[2]!)) return true;
     }
     return false;
   };
