@@ -17,6 +17,17 @@ const cuts: SolidWorldVoxelPatch[] = [
   { operation: "clear", affectsScenery: true, kind: "ellipsoid", minimum: [8, 0, 0], maximumExclusive: [16, 4, 8] },
 ];
 
+test("paint and build preserve the packed cut field identity for collision caches", () => {
+  const history = cuts.slice();
+  const local = { origin_m: [17, 0, 23] as const, cellSize_m: [.1, .1, .1] as const };
+  const words = packSvoSculptCuts(history, local);
+  const painted = [...history, { ...cuts[0]!, operation: "paint" as const, materialId: 1 }];
+  assert.equal(packSvoSculptCuts(painted, local), words);
+  const built = [...painted, { ...cuts[0]!, operation: "fill" as const, materialId: 1 }];
+  assert.equal(packSvoSculptCuts(built, local), words);
+  assert.equal(packSvoSculptCuts(history.slice(), local), words, "undoing paint/build keeps the same cut field");
+});
+
 test("scenery cuts are explicit, bounded and expressed in the physical voxel lattice", () => {
   const words = packSvoSculptCuts(cuts, lattice);
   assert.equal(words[0], 2);

@@ -1,3 +1,4 @@
+import { sculptCollisionWGSL } from "./sculpt-collision.wgsl";
 import type { SceneDescription } from "./model";
 import type { Quaternion, Vec3 } from "./model";
 import { boundingRadius, primitiveVolume, type RigidBodyState } from "./rigid-body";
@@ -102,6 +103,7 @@ export interface GPURigidSolidWorldCollisionSource {
 
 /** Shared, edit-aware sampled boundary already resident in the fluid solver. */
 export interface GPURigidProceduralCollisionSource {
+  readonly sculptCollision?: boolean;
   readonly buffer: GPUBuffer;
   readonly pointerWord: number;
   readonly origin_m: readonly [number, number, number];
@@ -112,6 +114,7 @@ function rigidProceduralContactWGSL(source: GPURigidProceduralCollisionSource): 
   const vector = (v: readonly number[]) => `vec3f(${v.map(n => `${n}`).join(",")})`;
   return /* wgsl */ `
 @group(0) @binding(10) var<storage,read> rigidBoundary:array<u32>;
+${source.sculptCollision ? sculptCollisionWGSL("rigidBoundary") : ""}
 ${proceduralSolidRenderWGSL(`rigidBoundary[${source.pointerWord}u]`, "rigidBoundary[index]",
     vector(source.cellSize_m), vector(source.origin_m), "rigidBoundary")}
 fn proceduralContact(body:ptr<function,RigidBody>){
@@ -487,6 +490,18 @@ fn bodyVolume(body: RigidBody) -> f32 {
   return rigidShapeVolume(rigidShapeTag(body),body.dimensions.xyz);
 }
 ${terrainContact ? rigidTerrainContactWGSL : ""}
+${terrainContact && proceduralContact?.sculptCollision ? /* wgsl */ `
+fn editedTerrainContact(body:ptr<function,RigidBody>){
+ let world=(*body).positionShape.xyz;let terrain=terrainPlane(world);
+ var normal=terrain.xyz;var distance=dot(normal,world)-terrain.w;
+ let cut=collisionSculptSample(world);
+ if(cut.distance<1e19&&cut.distance<sculptFieldBand()-1e-7&&-cut.distance>distance){
+  let magnitude=length(cut.normal);if(magnitude<1e-12){return;}
+  normal=-cut.normal/magnitude;distance=-cut.distance/magnitude;
+ }
+ if(dot(normal,normal)<0.5){return;}
+ let radius=supportRadius(*body,normal);resolveStaticContact(body,normal,radius-distance,radius);
+}` : ""}
 ${solidWorldContact ? rigidSolidWorldContactWGSL(solidWorldContact) : ""}
 fn solveBodyPair(aIndex: u32,bIndex: u32) {
   var a=bodies[aIndex];var b=bodies[bIndex];let rho=max(params.step.y,1e-9);
@@ -600,7 +615,7 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
       bodies[index]=body;
     }
   }
-  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);" : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
+  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body);" : "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
   // A held body is the host's to place. Whatever the contact iterations did to
   // it — a pair impulse from a crate it was shoved into, an angular momentum it
   // would spin off the instant it is let go — is rolled back to the pose the

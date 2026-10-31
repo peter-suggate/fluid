@@ -17,7 +17,17 @@ export const SVO_SCULPT_CUT_ARENA_WORDS = SCULPT_ARENA_WORDS;
 // their physical operands once avoids repeatedly decoding old rounded stamps.
 const packedCutRecords = new WeakMap<SolidWorldVoxelPatch, Map<string, Uint32Array>>();
 const packedCutHistories = new WeakMap<readonly SolidWorldVoxelPatch[], Map<string, { length: number; words: Uint32Array<ArrayBuffer> }>>();
-const latestPackedCuts = new Map<string, { patches: WeakRef<readonly SolidWorldVoxelPatch[]>; length: number; words: Uint32Array }>();
+const latestPackedCuts = new Map<string, { patches: WeakRef<readonly SolidWorldVoxelPatch[]>; length: number; words: Uint32Array<ArrayBuffer> }>();
+
+function rememberPackedCuts(patches: readonly SolidWorldVoxelPatch[], latticeKey: string, words: Uint32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> {
+  let byLattice = packedCutHistories.get(patches);
+  if (!byLattice) { byLattice = new Map(); packedCutHistories.set(patches, byLattice); }
+  byLattice.set(latticeKey, { length: patches.length, words });
+  latestPackedCuts.delete(latticeKey);
+  latestPackedCuts.set(latticeKey, { patches: new WeakRef(patches), length: patches.length, words });
+  if (latestPackedCuts.size > 8) latestPackedCuts.delete(latestPackedCuts.keys().next().value!);
+  return words;
+}
 
 /** Explicit sculpt strokes only: legacy voxel clears must not erase scenery.
  * This is the save/undo command stream; the GPU bakes it into sparse pages. */
@@ -32,6 +42,9 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
   }
   const cuts = patches.slice(prefix).filter(p => p.operation === "clear" && p.affectsScenery === true);
   if (!lattice.origin_m.every(Number.isFinite) || !lattice.cellSize_m.every(v => Number.isFinite(v) && v > 0)) throw new RangeError("Scenery sculpt lattice must be finite and positive");
+  // Paint/fill appends and undo of those commands leave the baked cut field
+  // unchanged. Preserve its identity so collision caches need no rebuild.
+  if (previous && cuts.length === 0 && retained === previous.words[0]) return rememberPackedCuts(patches, latticeKey, previous.words);
   const words = new Uint32Array(SVO_SCULPT_CUT_HEADER_WORDS + (retained + cuts.length) * SVO_SCULPT_CUT_RECORD_WORDS + 4);
   const floats = new Float32Array(words.buffer); words[0] = retained + cuts.length; floats.set(lattice.cellSize_m, 1);
   // Trailer keeps the analytic record ABI intact while carrying the exact
@@ -56,13 +69,7 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
     if (!byLattice) { byLattice = new Map(); packedCutRecords.set(patch, byLattice); }
     byLattice.set(latticeKey, words.slice(at, at + SVO_SCULPT_CUT_RECORD_WORDS));
   });
-  let byLattice = packedCutHistories.get(patches);
-  if (!byLattice) { byLattice = new Map(); packedCutHistories.set(patches, byLattice); }
-  byLattice.set(latticeKey, { length: patches.length, words });
-  latestPackedCuts.delete(latticeKey);
-  latestPackedCuts.set(latticeKey, { patches: new WeakRef(patches), length: patches.length, words });
-  if (latestPackedCuts.size > 8) latestPackedCuts.delete(latestPackedCuts.keys().next().value!);
-  return words;
+  return rememberPackedCuts(patches, latticeKey, words);
 }
 
 /** Conservative bounds test for source instances affected by a carve. */

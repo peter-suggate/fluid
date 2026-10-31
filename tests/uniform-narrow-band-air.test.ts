@@ -65,6 +65,8 @@ fn umLoadVertex8(p:vec3u,s:u32)->array<f32,8>{var v:array<f32,8>;for(var k=0u;k<
 fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return umLoadVertex8(p,s);}
 fn umCellOpen(c:vec3i)->f32{return clamp(f32(c.y+1)-2.5,0.0,1.0);}
 fn umSolidHasTerrain()->bool{return true;}
+fn collisionSculptNear(p:vec3f)->bool{return false;}
+fn umSolidTraceWorld(p:vec3f)->vec3f{return p;}
 fn umTerrainSurface(p:vec3f)->vec3f{return vec3f(2.5,0,0);}
 fn nbTrilinear(v:array<f32,8>,q:vec3f)->vec4f{return vec4f(0,0,0,mix(mix(mix(v[0],v[1],q.x),mix(v[2],v[3],q.x),q.y),mix(mix(v[4],v[5],q.x),mix(v[6],v[7],q.x),q.y),q.z));}
 ${narrowBandAirWGSL}

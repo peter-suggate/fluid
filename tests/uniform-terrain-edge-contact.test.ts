@@ -33,6 +33,7 @@ struct Params{hDt:vec4f} const params=Params(vec4f(${fixture.h.join(",")},1.0/60
 fn umFramePage()->vec3i{return vec3i(${fixture.frame.join(",")});}
 fn owHeight(x:f32,z:f32)->f32{return 17.0+${sx}*x+${sz}*z;}
 ${uniformTerrainSamplingWGSL}
+fn umTerrainBoundary(q:vec3f)->vec4f{let s=umTerrainSurface(q);return vec4f(vec3f(-s.y,1,-s.z)*params.hDt.y,(q.y-s.x)*params.hDt.y);}
 fn umBoundaryRecord(c:vec3i)->u32{return 0u;}
 fn umBoundaryBase()->u32{return 0u;}
 fn umBoundarySample(p:vec3f)->vec4f{return vec4f(0,1,0,1);}

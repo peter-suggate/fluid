@@ -1,3 +1,7 @@
+import { WebgpuSculptSubstrate } from "../../svo/features/scene-publication/webgpu-sculpt-substrate";
+import { SCULPT_ARENA_WORDS } from "../../svo/features/scene-publication/svo-sculpt-substrate";
+import { packSvoSculptCuts } from "../../svo/features/scene-publication/svo-sculpt-cuts";
+import { SCULPT_COLLISION_MAGIC } from "../../core/sculpt-collision.wgsl";
 import { UniformSpatialPerformance, UNIFORM_SPATIAL_PERFORMANCE } from "./uniform-spatial-performance";
 import type { FluidStepRequest } from "../../interaction/runtime/physics";
 import type { FluidExchange } from "../../interaction/contracts";
@@ -572,6 +576,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly pages: GPUBuffer;
   private readonly activeScratch: GPUBuffer;
   private readonly solidBoundaryCapacity: number;
+  private readonly sculptCollision: WebgpuSculptSubstrate;
+  private readonly sculptCollisionOffset: number;
+  private sculptCollisionWords?: Uint32Array;
   private readonly voxelCollision: boolean;
   /** Writes the scratch's bed-slope lane from its voxel mask: whole at build, around an edit after it. */
   private bedSlopeBake?: UniformBedSlopeBake;
@@ -880,9 +887,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.solidBedSlopeSlots = { word: this.solidMask.words.length + this.solidBoundaryCapacity, count: bedSlopeSlots.laneSlots, window: bedSlopeSlots.windowSlots, children: bedSlopeSlots.laneChildren, windowChildren: bedSlopeSlots.windowChildren };
     this.activeScratch = device.createBuffer({
       label: "Uniform reference solid page mask, bed-slope lane and tile cut map",
-      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + UNIFORM_BED_SLOPE_CHILD_WORDS * bedSlopeSlots.laneChildren + bedSlopeSlots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS + 2),
+      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + UNIFORM_BED_SLOPE_CHILD_WORDS * bedSlopeSlots.laneChildren + bedSlopeSlots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS + SCULPT_ARENA_WORDS + 4),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
+    this.sculptCollisionOffset = this.activeScratch.size - 16 - SCULPT_ARENA_WORDS * 4;
+    this.sculptCollision = new WebgpuSculptSubstrate(device);
+    device.queue.writeBuffer(this.activeScratch, this.activeScratch.size - 16,
+      new Uint32Array([this.sculptCollisionOffset / 4, SCULPT_COLLISION_MAGIC]));
+    this.publishSculptCollision(scene);
     // Around the lane: the buffer's zeros are the lane's until the bake, and
     // the host's copy of those words is never touched.
     const solidImage = this.solidMask.layout;
@@ -926,8 +938,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.rigidExchange = device.createBuffer({ label: "Uniform reference rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchange,
       this.terrainTexture, [cells[0], cells[2]]);
-    if (this.solidBoundaryCapacity > 0) this.rigidSystem.setProceduralCollisionSource({
-      buffer: this.activeScratch, pointerWord: this.activeScratch.size / 4 - 2,
+    this.rigidSystem.setProceduralCollisionSource({
+      buffer: this.activeScratch, pointerWord: this.activeScratch.size / 4 - 2, sculptCollision: true,
       origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2],
       cellSize_m: [scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]],
     });
@@ -1410,6 +1422,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The thin-wall tiles of a coarse start, and those its seed holds at h (thinWallSeed). */
   thinWallInfo?:{readonly tiles:number;readonly seeded:number};
   private async initializeMixedFrame():Promise<void>{
+    await this.sculptCollision.initialize();
     this.assertMixedOptions();
     if(!this.vertexPhiField||!this.vertexPhiScratch)throw new Error("Mixed Uniform requires the shared native field arena");
     const fine=createUniformMixedLayout(fluidRegionLattice(this.scene),[],1,undefined,this.address);
@@ -3241,8 +3254,24 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
 
-  /** A voxel stroke reaches this solver as solid-mask bits, so only a different lattice is refused. */
+  private sculptWords(scene: SceneDescription): Uint32Array {
+    const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+    return packSvoSculptCuts(scene.solidVoxels, {
+      origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2],
+      cellSize_m: [scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]],
+    });
+  }
+  private publishSculptCollision(scene: SceneDescription): boolean {
+    const words = this.sculptWords(scene);
+    if (words === this.sculptCollisionWords) return false;
+    this.sculptCollision.publish(this.activeScratch, this.sculptCollisionOffset, words);
+    this.sculptCollisionWords = words;
+    return true;
+  }
+
+  /** Validate both the occupancy lattice and the sparse GPU cut-page budget. */
   validateLiveSolidEdit(scene: SceneDescription): void {
+    this.sculptCollision.validate(this.sculptWords(scene));
     if (proceduralSolidKey(scene.solidBoundary) !== proceduralSolidKey(this.scene.solidBoundary)) throw new Error("Procedural surface changed; reset the scene to rebuild its boundary");
     const [nx, ny] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
     if (nx !== this.containerCells[0] || ny !== this.containerCells[1]) throw new Error("This voxel edit changes the fluid lattice; reset the scene to apply it.");
@@ -3259,13 +3288,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   applySceneUniforms(scene: SceneDescription): void {
     // A stroke that moves no solid cell (a paint, a fill over what is already
     // solid) hands over a document that differs from the running one in its
-    // patch list alone, and nothing here is derived from that list but the
-    // occupancy mask. The mask answers for itself without being written, and
+    // patch list alone, and its cut field is unchanged. The occupancy mask
+    // answers for itself without being written, and
     // the document is then taken up with the frame, the layout, the boundary
     // and every cache left exactly as they are. A scene already waiting on the
     // frame in flight is applied first, so nothing overtakes it here.
     if (scene !== this.scene && !this.deferredFrameScene && uniformSceneDiffersInSolidsAlone(scene, this.scene)
       && !scene.solidBoundary && !this.scene.solidBoundary
+      && this.sculptWords(scene) === this.sculptCollisionWords
       && this.solidMask.adoptIfUnchanged(solidWorldForFluidLattice(scene))) {
       // The layout stays synced to the document it was synced to.
       if (this.mixedSynced?.scene === this.scene) this.mixedSynced.scene = scene;
@@ -3285,6 +3315,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         new Uint32Array(boundaryImage ? [this.solidMask.words.length, PROCEDURAL_SOLID_MAGIC] : [0,0]));
       this.mixedFrame?.solid?.invalidate();
       this.mixedSolidMaskStamp++;
+    }
+    if (this.publishSculptCollision(scene)) {
+      this.mixedFrame?.solid?.invalidate(); this.mixedSolidMaskStamp++;
     }
     this.scene = scene; this.sceneRevision++;
     // The mask tells the edit every cell it moves as it folds the scene in;
@@ -3346,6 +3379,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.spatialPerformance?.destroy();
     if (this.disposed) return;
     this.disposed = true;
+    this.sculptCollision?.destroy();
     this.mixedFrame?.destroy();this.mixedPressureGeometry?.target.destroy();this.mixedPressureGeometry?.centerPhi.destroy();
     this.detailStorage?.destroy();
     this.mixedDynamic?.destroy();this.mixedBuilder?.destroy();for(let i=0;i<this.mixedRelayoutReads.size;i++)this.mixedRelayoutReads.at(i).destroy();this.mixedRelayoutRead?.destroy();this.mixedBodies?.destroy();

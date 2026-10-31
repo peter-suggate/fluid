@@ -28,7 +28,7 @@ override nbAirLanes:u32=64u;
 fn nbAirCellWet(c:vec3i,origin:vec3u,width:u32,values:array<f32,8>)->bool{
  if(umCellOpen(c)<=0.0){return false;}
  var bottom=f32(c.y);
- if(umSolidHasTerrain()){
+ if(umSolidHasTerrain()&&!collisionSculptNear(umSolidTraceWorld(vec3f(c)+0.5))){
   var bed=3.0e38;
   for(var z=0u;z<3u;z++){for(var x=0u;x<3u;x++){
    bed=min(bed,umTerrainSurface(vec3f(c)+vec3f(0.5*f32(x),0,0.5*f32(z))).x);

@@ -122,7 +122,7 @@ export function planSculptBake(previous: SculptBakePlan | undefined, words: Uint
   return { words, cell, origin, pages, jobs, proxies, directory, free, slots };
 }
 
-export function sculptSubstrateWGSL(load: string): string {
+export function sculptSubstrateWGSL(load: string, normalizeGradient = true): string {
   return /* wgsl */ `
 fn svoSculptBaked()->bool{return ${load}(1u)==${SCULPT_BAKED_TAG}u;}
 fn sculptFieldCell()->vec3f{return bitcast<vec3f>(vec3u(${load}(${SCULPT_META}u),${load}(${SCULPT_META + 1}u),${load}(${SCULPT_META + 2}u)));}
@@ -149,7 +149,7 @@ fn sculptFieldTrilinear(world:vec3f)->SvoSculptCutSample{
   let value=mix(mix(mix(a,b,t.x),mix(c,d,t.x),t.y),mix(mix(e,f,t.x),mix(g,j,t.x),t.y),t.z);
   var normal=vec3f(mix(mix(b-a,d-c,t.y),mix(f-e,j-g,t.y),t.z),
     mix(mix(c-a,d-b,t.x),mix(g-e,j-f,t.x),t.z),mix(mix(e-a,f-b,t.x),mix(g-c,j-d,t.x),t.y))/h;
-  let magnitude=length(normal);if(magnitude>1e-12){normal/=magnitude;}
+  ${normalizeGradient ? "let magnitude=length(normal);if(magnitude>1e-12){normal/=magnitude;}" : "// Collision needs the derivative of the interpolant, before normalization."}
   return SvoSculptCutSample(value,normal);
 }
 fn sculptFieldSample(world:vec3f)->SvoSculptCutSample{

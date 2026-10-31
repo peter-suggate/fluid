@@ -1,10 +1,9 @@
-/** Continuous heightfield contact for NB-FLIP. Positions are cell coordinates;
+/** Continuous terrain and carved-cavity contact for NB-FLIP. Positions are cell coordinates;
  * velocities and normals are in metres. The solid library supplies the native
  * column texture, voxel mask and rigid-body queries. */
 export const narrowBandTerrainContactWGSL = /* wgsl */ `
 // Height and its two derivatives from the same bilinear patch. Column samples
 // live at cell centres; interior planar inclines are reproduced exactly.
-fn nbTerrainSurface(q:vec3f)->vec3f{return umTerrainSurface(q);}
 fn nbTerrainNormal(s:vec3f)->vec3f{
  let h=params.hDt.xyz;return normalize(vec3f(-s.y/h.x,1.0/h.y,-s.z/h.z));
 }
@@ -15,7 +14,7 @@ fn nbParticleBlocked(q:vec3f)->bool{
  if(record==0u&&!terrain){return umSolidVoxel(c)||umBodyAt(umSolidTraceWorld(q))>=0;}
  var solid:bool;
  if(record!=0u){solid=umBoundarySampleAt(q,c,record).w<0.0;}else{solid=umSolidVoxel(c);}
- return solid||(terrain&&q.y<nbTerrainSurface(q).x)||umBodyAt(umSolidTraceWorld(q))>=0;
+ return solid||(terrain&&umTerrainBoundary(q).w<0.0)||umBodyAt(umSolidTraceWorld(q))>=0;
 }
 fn nbParticleCellOpen(c:vec3i)->bool{
  return umCellOpen(c)>=select(0.5,1e-5,umSolidHasTerrain()||umBoundaryRecord(c)!=0u);
@@ -30,24 +29,22 @@ struct NBTerrainContact{position:vec3f,velocity:vec3f}
 // Every surface sample is at one call site (Metal inlines each): stage 0 the
 // end, 1 the start, 2 the bisection's twelve midpoints, 3 the hit, 4 the
 // slide's up to four re-evaluations after it.
-// inset: the sample's radius in cells, which its centre keeps from the
-// surface along the normal (min(h) a cell): over a patch of gradient s.yz
-// that is inset*min(h)*|(s.y/h.x,1/h.y,s.z/h.z)| cells of height.
-fn nbTerrainClearance(s:vec3f,inset:f32)->f32{
- let h=params.hDt.xyz;return inset*min(h.x,min(h.y,h.z))*length(vec3f(s.y/h.x,1.0/h.y,s.z/h.z));
-}
+// inset: the particle radius in cells (min(h) metres per cell), maintained
+// along the boundary normal on both the terrain top and a carved wall.
 fn nbTerrainContact(startPoint:vec3f,endPoint:vec3f,velocity:vec3f,inset:f32)->NBTerrainContact{
  var q=endPoint;var v=velocity;
  var low=0.0;var high=1.0;var mid=0.0;var stage=0u;var i=0u;var at=endPoint;
  loop{
-  let s=nbTerrainSurface(at);let skin=nbTerrainClearance(s,inset);
-  if(stage==0u){if(at.y-s.x>skin){return NBTerrainContact(q,v);}stage=1u;at=startPoint;continue;}
+  let s=umTerrainBoundary(at);let gradient=s.xyz/params.hDt.xyz;
+  let magnitude=max(length(gradient),1e-12);let distance=s.w/magnitude;
+  let skin=inset*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+  if(stage==0u){if(distance>skin){return NBTerrainContact(q,v);}stage=1u;at=startPoint;continue;}
   if(stage==1u||stage==2u){
-   if(stage==2u){if(at.y-s.x>skin){low=mid;}else{high=mid;}i++;}
-   if((stage==1u&&at.y-s.x>skin)||(stage==2u&&i<12u)){stage=2u;mid=0.5*(low+high);at=mix(startPoint,endPoint,mid);continue;}
+   if(stage==2u){if(distance>skin){low=mid;}else{high=mid;}i++;}
+   if((stage==1u&&distance>skin)||(stage==2u&&i<12u)){stage=2u;mid=0.5*(low+high);at=mix(startPoint,endPoint,mid);continue;}
    stage=3u;at=mix(startPoint,endPoint,low);continue;
   }
-  let n=nbTerrainNormal(s);
+  let n=gradient/magnitude;
   if(stage==3u){
    var travel=(endPoint-at)*params.hDt.xyz;
    travel-=min(dot(travel,n),0.0)*n;
@@ -56,10 +53,10 @@ fn nbTerrainContact(startPoint:vec3f,endPoint:vec3f,velocity:vec3f,inset:f32)->N
    // A segment can cross a patch edge; re-evaluate its normal after sliding.
    stage=4u;i=0u;at=q;continue;
   }
-  // Vertical height difference is signed distance times 1/normal.y.
-  let penetration=(skin+s.x-q.y)*params.hDt.y;
+  // Project out along the implicit boundary's physical gradient, including cut walls.
+  let penetration=skin-distance;
   if(penetration<=0.0){break;}
-  q+=penetration*n.y*n/params.hDt.xyz;
+  q+=penetration*n/params.hDt.xyz;
   v-=min(dot(v,n),0.0)*n;
   i++;if(i>=4u){break;}at=q;
  }

@@ -30,7 +30,7 @@ fn surfaceSolidClearance(q:vec3f)->f32{
    if(closed){distance=max(distance,-reach);}else{distance=min(distance,reach);}
   }}
  }
- if(umSolidHasTerrain()){distance=min(distance,(q.y-umTerrainSurface(q).x)*h.y);}
+ if(umSolidHasTerrain()){distance=min(distance,umTerrainBoundary(q).w);}
  let world=umSolidParams.frame.xyz+q*h;
  for(var i=0u;i<umBodyCount();i++){distance=min(distance,umBodyDistance(i,world));}
  return distance;
