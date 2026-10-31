@@ -77,6 +77,20 @@ export interface UniformPressureArenaSchedule {
   * throat) keeps the residual of the band's real profile, and the band's
   * own sweeps answer it: a period-2 exchange no cycle count removes. */
  nativeSweeps:number;
+ /** Flexible GCR(1) (Orthomin(1) with a variable preconditioner; Vuik & van
+  * der Vorst 1994; Saad, Iterative Methods, 9.4) on the band solve: the
+  * first cycle is the projected V-cycle, which settles the active set; the
+  * set then freezes (Kornhuber's truncation, the cycle's own), and each
+  * later cycle is the preconditioner of one step. The step takes the
+  * cycle's correction z and A z (one operator apply), orthogonalises A z
+  * against the last direction's image and moves the iterate by the
+  * residual-minimising length (q.r)/(q.q). The coarse correction's length
+  * was the band's limit: a fixed 1.25x cut the final residual about 3x on
+  * seep and letters (BULK16 plan, band cap item). GCR rather than CG: on a
+  * block with no Dirichlet row (a sealed full vessel) the operator is
+  * singular, and CG's (p.r)/(p.Ap) divides by the block constant's
+  * vanishing energy (tests/pressure-krylov.test.ts). */
+ krylov:boolean;
 }
 /** A pressure at its lower bound leaves the coarse correction space until
  * its residual asks it to increase. Recomputed after each pre-smoothing. */
@@ -94,7 +108,7 @@ fn pAggregateDiagonal(part:f32,outward:f32,scale:f32)->f32{
  return (part-outward)+scale*outward;
 }
 `;
-export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,tail:"auto",superScale:0.75,nativeSweeps:0};
+export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,tail:"auto",superScale:0.75,nativeSweeps:0,krylov:true};
 /** bandExit "returns": the band's residual target (1/s, h-equivalent). The
  * band stops at it or at the cycle cap; the strict exit keeps the frame's
  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
@@ -148,9 +162,25 @@ const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena proje
  * initial residual. The tile slot+1 map (presentation slots), the
  * per-brick band-tile masks, the band tile list (by presentation slot:
  * brick slot << 3 | tile bit, from the rows) and the arena table follow. */
-const HEADER=37,HISTORY_WORD=8,HISTORY=16,INITIAL_WORD=26,VALID_WORD=25,DONE_WORD=24,BRICKS_WORD=3,LEVEL1_WORD=6,LEVEL2_WORD=7;
+const HEADER=63,HISTORY_WORD=8,HISTORY=16,INITIAL_WORD=26,VALID_WORD=25,DONE_WORD=24,BRICKS_WORD=3,LEVEL1_WORD=6,LEVEL2_WORD=7;
 /** Header words 27 and 28: the native rows' largest initial and final residual (diagnostics). */
 const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29;
+/** Header words 37..57, the Krylov steps' (schedule.krylov): the step's
+ * alpha and beta, the residual 2-norm before and after each step (KRYLOV_L2
+ * + cycle). Then the complementarity the final measure finds (every
+ * schedule): bounded rows at their bound whose residual asks to leave it
+ * (positive) past the target (KRYLOV_SIGN), and rows under their bound
+ * (KRYLOV_BOUND). Then the solve's frozen rows that joined the free set
+ * (KRYLOV_JOIN) and the steps that took a free bounded row under its bound
+ * (KRYLOV_CROSS). Then the feasible step's: the step's first bound hit
+ * along its direction (KRYLOV_LIMIT, a ratio's f32 bits), the rows a hit
+ * put on their bound (KRYLOV_HIT), the restart a hit asks of the next step
+ * (KRYLOV_RESTART) and the restarts taken (KRYLOV_RESTARTS). */
+const KRYLOV_ALPHA_WORD=37,KRYLOV_BETA_WORD=38,KRYLOV_L2_WORD=39,KRYLOV_SIGN_WORD=54,KRYLOV_BOUND_WORD=55,KRYLOV_JOIN_WORD=56,KRYLOV_CROSS_WORD=57;
+const KRYLOV_LIMIT_WORD=58,KRYLOV_HIT_WORD=59,KRYLOV_RESTART_WORD=60,KRYLOV_RESTARTS_WORD=61,KRYLOV_SPREAD_WORD=62;
+/** The Krylov dots' per-workgroup partials: band tiles, native pages and BULK16 slots each a segment. */
+const KRYLOV_PLANES=["x","q","z","p","r","d"] as const;
+const KRYLOV_DOTS=6,KRYLOV_SEGMENTS=[TILE_GROUPS,PAGE_GROUPS,PAGE_GROUPS] as const,KRYLOV_PARTIALS=KRYLOV_SEGMENTS[0]+KRYLOV_SEGMENTS[1]+KRYLOV_SEGMENTS[2];
 /** Header word 33: the tiles pRows routed to its geometry variant. */
 const GEOMETRY_WORD=33;
 /** Kinds bits beyond the band's: an active row (liquid, positive diagonal) and a warm one (its slot held a liquid row last frame). */
@@ -234,6 +264,9 @@ export class UniformPressureArena {
  /** The BULK16 store's range of pool B (fields.bulkPages), for its adopt. */
  readonly bulkStore?:GPUBufferBinding;
  private readonly storeWord:number=0;
+ /** Pool B's words of the Krylov dots' partials and of the BULK16 rows' Krylov vectors (schedule.krylov). */
+ private readonly krylovDotWord:number=0;
+ private readonly krylovBulkWord:number=0;
  /** The BULK16 solve's launches (LAUNCH), written by pLaunch from the
   * counts: its own buffer, as an indirect buffer is no storage binding of
   * the dispatch that reads it. */
@@ -327,7 +360,11 @@ export class UniformPressureArena {
    ...["xa","ya","ra","da"].map(name=>cell(name,1)),...six("ka",1),
    ...["xb","yb","rb","db"].map(name=>cell(name,2)),...six("kb",2),
    ...["nx","nb","nr","nd","nm"].map(name=>cell(name,2)),...six("nk",2),...six("nl",2),
-   ...["xt","yt","rt","dt"].map(name=>cell(name,2)),...six("kt",2)];
+   ...["xt","yt","rt","dt"].map(name=>cell(name,2)),...six("kt",2),
+   // The Krylov step's vectors (schedule.krylov): the step's start, the
+   // direction's image, A z, the direction, the residual, the frozen
+   // diagonal (0 off the free set), for the band's rows and the native rows.
+   ...(schedule.krylov?[...KRYLOV_PLANES.map(name=>cell(`k${name}`,0)),...KRYLOV_PLANES.map(name=>cell(`nk${name}`,2))]:[])];
   const bricks=64*blocks,fineCapacity=Math.max(1,Math.min(bricks,Math.max(ARENA_SLOTS_MIN,Math.ceil(bricks*ARENA_SLOT_SHARE)),Math.ceil((fields.fineTiles??4*bricks)/4)));
   this.arena=new UniformBrickArena({blocks,channels,lists:[{name:"fine",any:UNIFORM_ARENA_CLASS.fine}],level1From:"fine",fineCapacity});
   const a=this.arena;
@@ -351,10 +388,13 @@ export class UniformPressureArena {
   if(fields.bulk){this.bulkWord=Math.ceil(poolWords[1]!/align)*align;poolWords[1]=this.bulkWord+UNIFORM_BULK_WORDS(fields.bulk.regions);}
   if(fields.bulkPages){
    this.storeWord=Math.ceil(poolWords[1]!/align)*align;poolWords[1]=this.storeWord+fields.bulkPages.layout.words;
+   // The BULK16 rows' Krylov vectors: a slot's eight regions, a plane each.
+   if(schedule.krylov){this.krylovBulkWord=poolWords[1]!;poolWords[1]=this.krylovBulkWord+8*KRYLOV_PLANES.length*fields.bulkPages.layout.capacity;}
    // A BULK16 address names a tail channel by its plane (baWord).
    const xt=a.base("xt",2);
    for(const [j,name] of ["xt","yt","rt","dt","kt0","kt1","kt2","kt3","kt4","kt5"].entries())if(a.base(name,2)!==xt+j*UBA_STRIDE*blocks)throw new Error("Pressure arena: the tail channels are not contiguous");
   }
+  if(schedule.krylov){this.krylovDotWord=poolWords[1]!;poolWords[1]=this.krylovDotWord+KRYLOV_DOTS*KRYLOV_PARTIALS;}
   for(const [k,words] of poolWords.entries())if(4*words>Math.min(limit,device.limits.maxBufferSize))throw new Error(`Pressure arena pool ${"AB"[k]} (${4*words} bytes) exceeds the storage binding limit ${Math.min(limit,device.limits.maxBufferSize)}`);
   this.index=device.createBuffer({label:"Uniform pressure arena state",size:4*indexWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.pool=device.createBuffer({label:"Uniform pressure arena pool",size:4*poolWords[0]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -476,7 +516,9 @@ const K_SEAM:u32=6u;
 fn seamCoarse(k:f32)->vec2f{return vec2f(k*(1.0/P_SCALE-1.0),k/P_SCALE);}
 const PN_X:u32=${C("nx",2)}u;const PN_B:u32=${C("nb",2)}u;const PN_R:u32=${C("nr",2)}u;const PN_D:u32=${C("nd",2)}u;const PN_M:u32=${C("nm",2)}u;const PN_K:u32=${C("nk0",2)}u;const PN_L:u32=${C("nl0",2)}u;
 const PT_X:u32=${C("xt",2)}u;const PT_Y:u32=${C("yt",2)}u;const PT_R:u32=${C("rt",2)}u;const PT_D:u32=${C("dt",2)}u;const PT_K:u32=${C("kt0",2)}u;
-const N_KEYS:u32=${512*blocks}u;const N_THETA:u32=${896*blocks}u;const N_SENTINEL:u32=${blocks-1}u;
+${schedule.krylov?`const P_KX:u32=${C("kx")}u;const P_KQ:u32=${C("kq")}u;const P_KZ:u32=${C("kz")}u;const P_KP:u32=${C("kp")}u;const P_KR:u32=${C("kr")}u;const P_KD:u32=${C("kd")}u;
+const PN_KX:u32=${C("nkx",2)}u;const PN_KQ:u32=${C("nkq",2)}u;const PN_KZ:u32=${C("nkz",2)}u;const PN_KP:u32=${C("nkp",2)}u;const PN_KR:u32=${C("nkr",2)}u;const PN_KD:u32=${C("nkd",2)}u;
+`:""}const N_KEYS:u32=${512*blocks}u;const N_THETA:u32=${896*blocks}u;const N_SENTINEL:u32=${blocks-1}u;
 const N_NONE:u32=0u;const N_NATIVE:u32=1u;const N_SEAM:u32=2u;const N_GHOST:u32=3u;const N_WALL:u32=4u;const N_HELD:u32=5u;
 const N_ACTIVE:u32=${1<<20}u;const N_CLOSED:u32=${1<<21}u;
 const NATIVE_INITIAL:u32=${NATIVE_INITIAL_WORD}u;const NATIVE_FINAL:u32=${NATIVE_FINAL_WORD}u;const NATIVE_HISTORY:u32=${NATIVE_HISTORY_WORD}u;
@@ -1063,6 +1105,306 @@ fn sFace(f:u32)->vec3i{var d=vec3i(0);d[f/2u]=bSign(f);return d;}
 fn sSibling(j:u32,f:u32)->u32{let a=f/2u;return select(8u,j^(1u<<a),((j>>a)&1u)!=(f&1u));}
 fn sParity(g:vec3i)->u32{return u32(g.x+g.y+g.z)&1u;}
 fn sWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1)*select(0.75,0.25,d.z==1);}
+`:"";
+  // The Krylov step (schedule.krylov): flexible GCR(1) with the V-cycle as
+  // its preconditioner. kStart* after the first cycle: the active set, its
+  // frozen diagonal (walls linked or bounded as the iterate leaves them),
+  // the true residual on the free rows, the step's start. Then after each
+  // later cycle: kApply* z (the cycle's correction, X - KX, 0 off the free
+  // set) to A z and the dots' partials, kReduce the step's beta and alpha,
+  // kStep* the direction p = z - beta p, its image q = A z - beta q, the
+  // iterate KX + alpha p and the residual r - alpha q. Rows off the free set
+  // keep their start: frozen, as the truncated coarse correction leaves
+  // them. Their p is 0 but their q and r are tracked too (outside the dots),
+  // so r is a frozen row's true residual, and a frozen row joins the free
+  // set when it asks to leave its bound (pCorrectionFree, the cycle's rule).
+  // Its p being 0, q = A p stays exact on the enlarged set: no restart.
+  // KD is the row's linear diagonal, negative while it is frozen. The step
+  // is feasible (Polyak 1969; O'Leary 1980): kBound* finds the first free
+  // bounded row the direction takes onto its bound, alpha stops there, and
+  // that row is frozen on its bound. Its direction was not 0, so the next
+  // step restarts (beta 0). It may join again when its residual asks. The band's iterate is plane kPlane,
+  // where the cycle's post-smoothing ended. Everything reads the history's
+  // stop, as the cycle.
+  const KD=KRYLOV_DOTS,[segT,segN]=KRYLOV_SEGMENTS;
+  const krylovDots=(seg:number)=>/* wgsl */`
+ // The workgroup's dots, one after another through kRed, into its partial.
+ for(var d=0u;d<${KD}u;d++){
+  kRed[lane]=kAcc[d];workgroupBarrier();
+  for(var s=kWidth/2u;s>0u;s>>=1u){if(lane<s){kRed[lane]+=kRed[lane+s];}workgroupBarrier();}
+  if(lane==0u){poolB[K_DOT+${KD}u*(${seg}u+group.x)+d]=bitcast<u32>(kRed[0]);}
+  workgroupBarrier();
+ }`;
+  const krylovWGSL=schedule.krylov?/* wgsl */`
+const K_DOT:u32=${this.krylovDotWord}u;const K_ALPHA:u32=${KRYLOV_ALPHA_WORD}u;const K_BETA:u32=${KRYLOV_BETA_WORD}u;const K_L2:u32=${KRYLOV_L2_WORD}u;const K_JOIN:u32=${KRYLOV_JOIN_WORD}u;const K_CROSS:u32=${KRYLOV_CROSS_WORD}u;
+const K_LIMIT:u32=${KRYLOV_LIMIT_WORD}u;const K_HIT:u32=${KRYLOV_HIT_WORD}u;const K_RESTART:u32=${KRYLOV_RESTART_WORD}u;const K_RESTARTS:u32=${KRYLOV_RESTARTS_WORD}u;
+${BP?`const K_BULK:u32=${this.krylovBulkWord}u;
+// A BULK16 slot's Krylov plane v (KRYLOV_PLANES' order) at region i.
+fn kbAt(slot:u32,v:u32,i:u32)->u32{return K_BULK+${8*KRYLOV_PLANES.length}u*slot+8u*v+i;}
+fn kbF(slot:u32,v:u32,i:u32)->f32{return bitcast<f32>(poolB[kbAt(slot,v,i)]);}
+fn kbSet(slot:u32,v:u32,i:u32,x:f32){poolB[kbAt(slot,v,i)]=bitcast<u32>(x);}
+// A region's z (every region is free: BULK16 rows have no bound).
+fn kZb(slot:u32,i:u32)->f32{return bsF(slot,BS_N+i)-kbF(slot,0u,i);}`:""}
+override kPlane:u32=0u;
+override kCycle:u32=1u;
+var<workgroup> kRed:array<f32,512>;
+var<workgroup> kN:u32;
+var<workgroup> kFlags:u32;
+var<private> kAcc:array<f32,${KD}>;
+fn kX()->u32{return select(P_X,P_X1,kPlane==1u);}
+// A band row's z: its iterate less the step's start, 0 off the free set.
+fn kZt(at:u32)->f32{if(pF(P_KD,at)<=0.0){return 0.0;}return pF(kX(),at)-pF(P_KX,at);}
+// A native row in the free set. A 16h bulk's members are one row, the
+// region's; their lanes' linear diagonals sum to its diagonal, and a member
+// inside its region has 0 (its links there carry nothing). Members are
+// unbounded (bulkSelect takes open cells only), so every member is free.
+fn kFreeN(at2:u32,d:f32)->bool{return d>0.0${B?"||(d==0.0&&(poolB[PN_M+at2]&(N_BULK|N_ACTIVE))==(N_BULK|N_ACTIVE))":""};}
+fn kZn(at2:u32)->f32{if(!kFreeN(at2,qF(PN_KD,at2))){return 0.0;}return qF(PN_X,at2)-qF(PN_KX,at2);}
+// The dots (kReduce's order): Az.q, Az.Az, Az.r, q.q, q.r, r.r.
+// Weighted by the row's inverse volume (an h row 1, a 4h 1/64, a 16h
+// 1/4096): the rows' sums are volume totals, so the 2-norm minimised is the
+// divergence field's over the liquid, as the verdict's max norm scales them.
+fn kAdd(az:f32,q:f32,r:f32,w:f32){kAcc[0]+=w*az*q;kAcc[1]+=w*az*az;kAcc[2]+=w*az*r;kAcc[3]+=w*q*q;kAcc[4]+=w*q*r;kAcc[5]+=w*r*r;}
+fn kClear(){for(var d=0u;d<${KD}u;d++){kAcc[d]=0.0;}}
+fn kAlpha()->f32{return bitcast<f32>(pIndex(K_ALPHA));}
+fn kBeta()->f32{return bitcast<f32>(pIndex(K_BETA));}
+// The feasible step (Polyak; O'Leary): alpha cut at the first free bounded
+// row its direction takes onto its bound (kBound*'s least ratio).
+fn kStepAlpha()->f32{let a=kAlpha();return sign(a)*min(abs(a),bitcast<f32>(pIndex(K_LIMIT)));}
+// A free bounded row's distance to its bound in units of its direction, when
+// the step moves it toward the bound (else none).
+fn kRoom(room:f32,dp:f32,alpha:f32)->f32{if(alpha*dp<0.0&&room>=0.0){return room/abs(dp);}return 3.0e38;}
+
+@compute @workgroup_size(${TILE_WG}) fn kStartT(${lanes}){
+ if(lane==0u){kN=pTileLive();}
+ let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+ for(var j=group.x;j<n;j+=groups.x){
+  let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);let p=vec3i(ubaOrigin(ubaBrick(slot))+lb);
+  let kinds=pool[P_KINDS+at];let x=pF(kX(),at);var r=0.0;var d=0.0;
+  if(pActive(kinds)){
+   let base=pF(P_BASE,at);var off=0.0;d=pF(P_DIAG,at);
+   for(var f=0u;f<6u;f++){
+    let kind=bFaceKind(kinds,f);
+    if(kind==K_BAND){off+=pCoefficient(at,kinds,f)*pF(kX(),pNear(at,p,f));}
+    else if(kind==K_SEAM){off+=pF(P_C+f*PLANE,at)*qF(PN_X,nAcross(p,f));}
+    else if(kind==K_WALL){let c=pF(P_C+f*PLANE,at);let g=pLift(at,f);off+=c*max(x+g,-base);if(x+g>=-base){d-=c;}}
+   }
+   r=pF(P_RHS,at)+off-pF(P_DIAG,at)*x;
+   d=select(-max(d,0.0),d,d>0.0&&pCorrectionFree(bInside(kinds),x+base,r));
+  }
+  pSet(P_KX,at,x);pSet(P_KQ,at,0.0);pSet(P_KZ,at,0.0);pSet(P_KP,at,0.0);pSet(P_KR,at,r);pSet(P_KD,at,d);
+ }
+}
+@compute @workgroup_size(${WG}) fn kStartN(${lanes}){
+ if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];let x=qF(PN_X,at2);var r=0.0;var d=0.0;
+  if((nPage(block)&2u)!=0u&&(m&N_ACTIVE)!=0u){
+   let base=qF(PN_B,at2);d=qF(PN_D,at2);r=qF(PN_R,at2)-d*x;
+   for(var f=0u;f<6u;f++){
+    let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];let c=qF(PN_K+f*PLANE2,at2);
+    if(kind==N_NATIVE){r+=c*qF(PN_X,link);}
+    else if(kind==N_SEAM){let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let v=nStride((axis+2u)%3u);
+     for(var k=0u;k<16u;k++){let h=link+(k&3u)*u+(k>>2u)*v;if(bFaceKind(pool[P_KINDS+h],g)==K_SEAM){r+=pF(P_C+g*PLANE,h)*pF(kX(),h);}}}
+    else if(kind==N_WALL){let g=bitcast<f32>(link);r+=c*max(x+g,-base);if(x+g>=-base){d-=c;}}${BP?`
+    else if(kind==N_BULKN){r+=c*bsF(baSlot(link),BS_N+(link&15u));}`:""}
+   }
+   d=select(-max(d,0.0),d,d>0.0&&pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));
+  }
+  qSet(PN_KX,at2,x);qSet(PN_KQ,at2,0.0);qSet(PN_KZ,at2,0.0);qSet(PN_KP,at2,0.0);qSet(PN_KR,at2,r);qSet(PN_KD,at2,d);
+ }
+}
+${BP?`@compute @workgroup_size(${WG}) fn kStartB(${lanes}){
+ if(lane==0u){kN=select(bsCount(),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=bsSlot(e);let r=bResidual(slot,lane);
+  if(lane<8u){kbSet(slot,0u,lane,bsF(slot,BS_N+lane));kbSet(slot,1u,lane,0.0);kbSet(slot,2u,lane,0.0);kbSet(slot,3u,lane,0.0);kbSet(slot,4u,lane,r);kbSet(slot,5u,lane,bsF(slot,BS_T4+24u+lane));}
+  workgroupBarrier();
+ }
+}`:""}
+@compute @workgroup_size(${TILE_WG}) fn kApplyT(${lanes}){
+ if(lane==0u){kN=pTileLive();}
+ let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);kClear();
+ let kWidth=${TILE_WG}u;
+ for(var j=group.x;j<n;j+=groups.x){
+  let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);let p=vec3i(ubaOrigin(ubaBrick(slot))+lb);
+  let d=pF(P_KD,at);
+  if(d!=0.0){
+   let kinds=pool[P_KINDS+at];var az=d*kZt(at);
+   for(var f=0u;f<6u;f++){
+    let kind=bFaceKind(kinds,f);
+    if(kind==K_BAND){az-=pCoefficient(at,kinds,f)*kZt(pNear(at,p,f));}
+    else if(kind==K_SEAM){az-=pF(P_C+f*PLANE,at)*kZn(nAcross(p,f));}
+   }
+   pSet(P_KZ,at,az);if(d>0.0){kAdd(az,pF(P_KQ,at),pF(P_KR,at),1.0);}
+  }
+ }
+ if(n>0u){${krylovDots(0)}}
+}
+@compute @workgroup_size(${WG}) fn kApplyN(${lanes}){
+ if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);kClear();
+ let kWidth=${WG}u;
+ for(var e=group.x;e<n;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;let d=qF(PN_KD,at2);let m=poolB[PN_M+at2];
+  var az=0.0;var q=0.0;var r=0.0;let free=kFreeN(at2,d);
+  if(d!=0.0||free){
+   az=d*kZn(at2);
+   for(var f=0u;f<6u;f++){
+    let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
+    if(kind==N_NATIVE){az-=qF(PN_K+f*PLANE2,at2)*kZn(link);}
+    else if(kind==N_SEAM){let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let v=nStride((axis+2u)%3u);
+     for(var k=0u;k<16u;k++){let h=link+(k&3u)*u+(k>>2u)*v;if(bFaceKind(pool[P_KINDS+h],g)==K_SEAM){az-=pF(P_C+g*PLANE,h)*kZt(h);}}}${BP?`
+    else if(kind==N_BULKN){az-=qF(PN_K+f*PLANE2,at2)*kZb(baSlot(link),link&15u);}`:""}
+   }
+   qSet(PN_KZ,at2,az);q=qF(PN_KQ,at2);r=qF(PN_KR,at2);
+  }${B?`
+  // A 16h bulk's members are one row (their correction is one): its
+  // residual is theirs summed, every member's, as the verdict measures
+  // their mean. Each member enters with the mean and weight 1/64: the
+  // region's sum at its inverse volume, 1/4096, as a BULK16 region's.
+  if(lane==0u){kFlags=nPage(block);}
+  if((workgroupUniformLoad(&kFlags)&4u)!=0u){let bulk=(m&N_BULK)!=0u;az=nBulkMean(az,bulk,lane);q=nBulkMean(q,bulk,lane);r=nBulkMean(r,bulk,lane);}`:""}
+  if(free){kAdd(az,q,r,1.0/64.0);}
+  workgroupBarrier();
+ }
+ if(n>0u){${krylovDots(segT)}}
+}
+${BP?`var<workgroup> kLink:array<f32,48>;
+@compute @workgroup_size(${WG}) fn kApplyB(${lanes}){
+ if(lane==0u){kN=select(bsCount(),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);kClear();
+ let kWidth=${WG}u;
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=bsSlot(e);let page=bsPage(slot);
+  // Lanes 0..47 a (region, face): the face's sum of k z across it.
+  if(lane<48u){
+   let i=lane/6u;let f=lane%6u;let near=bNear(slot,page,i,f);var s=0.0;
+   if(near.kind==B_REGION){s=bRegionK(f)*kZb(near.slot,near.region);}
+   else if(near.kind==B_BLOCK){for(var k=0u;k<16u;k++){let at=UBA_STRIDE*near.block+bTileLocal(bNativeTile(i,f,k));if(bLinked(at,f)){s+=qF(PN_K+(f^1u)*PLANE2,at)*kZn(at);}}}
+   kLink[lane]=s;
+  }
+  workgroupBarrier();
+  if(lane<8u){
+   let o=6u*lane;let az=kbF(slot,5u,lane)*kZb(slot,lane)-(((kLink[o]+kLink[o+1u])+(kLink[o+2u]+kLink[o+3u]))+(kLink[o+4u]+kLink[o+5u]));
+   kbSet(slot,2u,lane,az);kAdd(az,kbF(slot,1u,lane),kbF(slot,4u,lane),1.0/4096.0);
+  }
+  workgroupBarrier();
+ }
+ if(n>0u){${krylovDots(segT+segN)}}
+}`:""}
+// The step from the dots: beta orthogonalises A z against the last image
+// (GCR), alpha minimises the new residual's 2-norm. A first step (q = 0)
+// takes beta 0. No image (z = 0, or a block A annihilates) takes no step.
+@compute @workgroup_size(256) fn kReduce(@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){kN=u32(bConverged());}
+ if(workgroupUniformLoad(&kN)!=0u){return;}
+ for(var d=0u;d<${KD}u;d++){
+  var s=0.0;for(var g=lane;g<${KRYLOV_PARTIALS}u;g+=256u){s+=bitcast<f32>(poolB[K_DOT+${KD}u*g+d]);}
+  kRed[lane]=s;workgroupBarrier();
+  for(var t=128u;t>0u;t>>=1u){if(lane<t){kRed[lane]+=kRed[lane+t];}workgroupBarrier();}
+  if(lane==0u){kAcc[d]=kRed[0];}
+  workgroupBarrier();
+ }
+ if(lane==0u){
+  let azq=kAcc[0];let azaz=kAcc[1];let azr=kAcc[2];let qq=kAcc[3];let qr=kAcc[4];let rr=kAcc[5];
+  // A hit last step froze rows whose direction was not 0: restart (beta 0).
+  let restart=pIndex(K_RESTART)!=0u;
+  let beta=select(select(0.0,azq/qq,qq>0.0),0.0,restart);
+  let nqq=azaz-2.0*beta*azq+beta*beta*qq;let nqr=azr-beta*qr;
+  let alpha=select(0.0,nqr/nqq,nqq>0.0);
+  atomicStore(&state[K_BETA],bitcast<u32>(beta));atomicStore(&state[K_ALPHA],bitcast<u32>(alpha));
+  atomicStore(&state[K_LIMIT],bitcast<u32>(3.0e38));
+  if(restart){atomicStore(&state[K_RESTART],0u);atomicAdd(&state[K_RESTARTS],1u);}
+  atomicStore(&state[K_L2+kCycle-1u],bitcast<u32>(sqrt(max(rr,0.0))));
+  atomicStore(&state[K_L2+kCycle],bitcast<u32>(sqrt(max(rr-2.0*alpha*nqr+alpha*alpha*nqq,0.0))));
+ }
+}
+// The step's first bound hit: the least ratio over the free bounded rows.
+@compute @workgroup_size(${TILE_WG}) fn kBoundT(${lanes}){
+ if(lane==0u){kN=pTileLive();}
+ let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+ let alpha=kAlpha();let beta=kBeta();
+ for(var j=group.x;j<n;j+=groups.x){
+  let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);let kinds=pool[P_KINDS+at];
+  if(pActive(kinds)&&bInside(kinds)&&pF(P_KD,at)>0.0){
+   let t=kRoom(pF(P_KX,at)+pF(P_BASE,at),kZt(at)-beta*pF(P_KP,at),alpha);
+   if(t<abs(alpha)){atomicMin(&state[K_LIMIT],bitcast<u32>(t));}
+  }
+ }
+}
+@compute @workgroup_size(${WG}) fn kBoundN(${lanes}){
+ if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);let alpha=kAlpha();let beta=kBeta();
+ for(var e=group.x;e<n;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];
+  if((nPage(block)&2u)!=0u&&(m&N_ACTIVE)!=0u&&(m&N_CLOSED)!=0u&&qF(PN_KD,at2)>0.0){
+   let t=kRoom(qF(PN_KX,at2)+qF(PN_B,at2),kZn(at2)-beta*qF(PN_KP,at2),alpha);
+   if(t<abs(alpha)){atomicMin(&state[K_LIMIT],bitcast<u32>(t));}
+  }
+ }
+}
+@compute @workgroup_size(${TILE_WG}) fn kStepT(${lanes}){
+ if(lane==0u){kN=pTileLive();}
+ let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+ let alpha=kStepAlpha();let beta=kBeta();
+ for(var j=group.x;j<n;j+=groups.x){
+  let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);
+  let kinds=pool[P_KINDS+at];
+  if(!pActive(kinds)){continue;}
+  let start=pF(P_KX,at);var x=start;let d=pF(P_KD,at);let base=pF(P_BASE,at);
+  if(d>0.0){
+   let dp=kZt(at)-beta*pF(P_KP,at);let q=pF(P_KZ,at)-beta*pF(P_KQ,at);x=start+alpha*dp;
+   // The row the step's first hit puts on its bound: frozen there (its
+   // direction 0, the next step restarts).
+   let hit=bInside(kinds)&&kRoom(start+base,dp,alpha)<=abs(alpha);
+   if(hit){x=-base;pSet(P_KD,at,-d);atomicAdd(&state[K_HIT],1u);atomicStore(&state[K_RESTART],1u);}
+   pSet(P_KP,at,select(dp,0.0,hit));pSet(P_KQ,at,q);pSet(P_KR,at,pF(P_KR,at)-alpha*q);pSet(P_KX,at,x);
+   if(bInside(kinds)&&start+base>=0.0&&x+base<0.0){atomicAdd(&state[K_CROSS],1u);}
+  }
+  else if(d<0.0){
+   let q=pF(P_KZ,at)-beta*pF(P_KQ,at);let r=pF(P_KR,at)-alpha*q;pSet(P_KQ,at,q);pSet(P_KR,at,r);
+   if(pCorrectionFree(bInside(kinds),start+base,r)){pSet(P_KD,at,-d);atomicAdd(&state[K_JOIN],1u);}
+  }
+  pSet(kX(),at,x);
+ }
+}
+@compute @workgroup_size(${WG}) fn kStepN(${lanes}){
+ if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);let alpha=kStepAlpha();let beta=kBeta();
+ for(var e=group.x;e<n;e+=groups.x){
+  let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;
+  let m=poolB[PN_M+at2];
+  if((nPage(block)&2u)!=0u&&(m&N_ACTIVE)!=0u){
+   let start=qF(PN_KX,at2);var x=start;let d=qF(PN_KD,at2);let base=qF(PN_B,at2);let bounded=(m&N_CLOSED)!=0u;
+   if(kFreeN(at2,d)){
+    let dp=kZn(at2)-beta*qF(PN_KP,at2);let q=qF(PN_KZ,at2)-beta*qF(PN_KQ,at2);x=start+alpha*dp;
+    let hit=bounded&&kRoom(start+base,dp,alpha)<=abs(alpha);
+    if(hit){x=-base;qSet(PN_KD,at2,-d);atomicAdd(&state[K_HIT],1u);atomicStore(&state[K_RESTART],1u);}
+    qSet(PN_KP,at2,select(dp,0.0,hit));qSet(PN_KQ,at2,q);qSet(PN_KR,at2,qF(PN_KR,at2)-alpha*q);qSet(PN_KX,at2,x);
+    if(bounded&&start+base>=0.0&&x+base<0.0){atomicAdd(&state[K_CROSS],1u);}
+   }
+   else if(d<0.0){
+    let q=qF(PN_KZ,at2)-beta*qF(PN_KQ,at2);let r=qF(PN_KR,at2)-alpha*q;qSet(PN_KQ,at2,q);qSet(PN_KR,at2,r);
+    if(pCorrectionFree(bounded,start+base,r)){qSet(PN_KD,at2,-d);atomicAdd(&state[K_JOIN],1u);}
+   }
+   qSet(PN_X,at2,x);
+  }
+ }
+}
+${BP?`@compute @workgroup_size(${WG}) fn kStepB(${lanes}){
+ if(lane==0u){kN=select(bsCount(),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);let alpha=kStepAlpha();let beta=kBeta();
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=bsSlot(e);
+  if(lane<8u){
+   let dp=kZb(slot,lane)-beta*kbF(slot,3u,lane);let q=kbF(slot,2u,lane)-beta*kbF(slot,1u,lane);let x=kbF(slot,0u,lane)+alpha*dp;
+   kbSet(slot,3u,lane,dp);kbSet(slot,1u,lane,q);kbSet(slot,4u,lane,kbF(slot,4u,lane)-alpha*q);kbSet(slot,0u,lane,x);bsSet(slot,BS_N+lane,x);
+  }
+ }
+}`:""}
 `:"";
   const sources:Record<string,string>={
    table:uniformMixedTopologyWGSL(layout,0)+/* wgsl */`
@@ -1706,10 +2048,19 @@ fn nSeamSum(first:u32,f:u32)->f32{
     // Bulk members are fully open (bulkSelect rejects closed/cut cells),
     // hence unbounded: every member lane stays correction-active together.
     if(!pLast){poolB[PN_M+at2]=(m&~N_CORRECT)|select(0u,N_CORRECT,pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));}
+    if(pLast&&(m&N_CLOSED)!=0u){
+     if(x+base<0.0){atomicAdd(&state[${KRYLOV_BOUND_WORD}u],1u);}
+     if(x+base<=0.0&&r*nScale()*nStopScale()>params.solve.x){atomicAdd(&state[${KRYLOV_SIGN_WORD}u],1u);}
+    }
     if((m&N_CLOSED)!=0u&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
     ${B?"if((m&N_BULK)==0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}":"atomicMax(&worst,bResidualMagnitude(r*nScale()));"}
    }
-${B?"   if((workgroupUniformLoad(&rFlags)&4u)!=0u){r=nBulkMean(r,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}}\n":""}   if(!pLast){qSet(PB_R,at2,r);}
+${B?`   if((workgroupUniformLoad(&rFlags)&4u)!=0u){
+    r=nBulkMean(r,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}
+    // The check that a region is one pressure: its members' spread about
+    // their mean, at the end (0 on every path).
+    if(pLast){let xb=qF(PN_X,at2);let mean=nBulkMean(xb,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&state[${KRYLOV_SPREAD_WORD}u],bResidualMagnitude(xb-mean));}}
+   }\n`:""}   if(!pLast){qSet(PB_R,at2,r);}
   }
   workgroupBarrier();
  }
@@ -1800,10 +2151,12 @@ var<workgroup> fSum:array<vec2f,64>;
    }
    if(d0>0.0){
     var r=pF(P_RHS,at)+off-d0*own;
+    if(bInside(kinds)&&own+base<=0.0&&r*params.policy.z>params.solve.x){atomicAdd(&state[${KRYLOV_SIGN_WORD}u],1u);}
     if(bInside(kinds)&&own+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
     atomicMax(&worst,bResidualMagnitude(r*params.policy.z));
    }
   }
+  if(pActive(kinds)&&bInside(kinds)&&own+base<0.0){atomicAdd(&state[${KRYLOV_BOUND_WORD}u],1u);}
   fSum[lane]=select(vec2f(0.0),vec2f(base+own,1.0),bLiquid(kinds));
   workgroupBarrier();
   if(lane==0u){
@@ -1818,6 +2171,7 @@ var<workgroup> fSum:array<vec2f,64>;
    // The rows against their start (UniformPressureBand.rebase), the initial
    // measure (x = 0: each row's own), each region's predictor residual, and
    // level 1's rows: each brick bakes its parent octant.
+   ...(schedule.krylov?{krylov:header()+poolWGSL+store+(B?bulkMean("kRed"):"")+(BP?bulkRows:"")+krylovWGSL}:{}),
    rebase:header()+poolWGSL+/* wgsl */`
 // The kick's first solve stashes each row's RHS ahead of its start's terms
 // in the warm plane (unread until pProject), its re-solves read it back.
@@ -3147,12 +3501,14 @@ fn sProlong6(g:vec3i)->f32{
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={bulk:"bulk",nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
   const entryOf:Record<string,string[]>={bulk:["pBulkRows","pBulkProject","pBulkCommit"],bulkLevels:["pBulkLift"],nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pNativeOperator","pWrite"],residual:["pResidual2","pNativeRelax"],final:["pFinal"],clear2:["pClear2"],
-   rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
+   krylov:["kStartT","kStartN","kApplyT","kApplyN","kReduce","kBoundT","kBoundN","kStepT","kStepN",...(BP?["kStartB","kApplyB","kStepB"]:[])],rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
    pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],pNativeRelax:[["0",{pColour:0}],["1",{pColour:1}],["0X1",{pColour:0,pBand:1}],["1X1",{pColour:1,pBand:1}]],
+   kStartT:[["0",{kPlane:0}],["1",{kPlane:1}]],kStartN:[["0",{kPlane:0}],["1",{kPlane:1}]],kApplyT:[["0",{kPlane:0}],["1",{kPlane:1}]],kApplyN:[["0",{kPlane:0}],["1",{kPlane:1}]],kStepT:[["0",{kPlane:0}],["1",{kPlane:1}]],kBoundT:[["0",{kPlane:0}],["1",{kPlane:1}]],
+   kReduce:Array.from({length:schedule.cycles-1},(_,k)=>[`@${k+1}`,{kCycle:k+1}] as Variant),
    pDownA:[["",{}],["@0",{pBake:1}]],pBulkRows:[["",{}],["P",{pResolve:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}],["C",{pCorrection:1}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
    ...(W?{sGroup7:[["",{}],["C",{sList:0}]] as Variant[],pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
   };
@@ -3318,6 +3674,9 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
   const live:UniformArenaLaunch=BP?{indirect:LAUNCH.live}:pages,either:UniformArenaLaunch=BP?{indirect:LAUNCH.either}:pages;
   const items:UniformArenaLaunch=BP?{indirect:LAUNCH.items}:pages,level2:UniformArenaLaunch=BP?{indirect:LAUNCH.level2}:pages;
   if(W)encoder.clearBuffer(this.index,4*W.index.count6,16);
+  // The Krylov dots' partials (a launch past this solve's leaves its own) and header words.
+  if(s.krylov){encoder.clearBuffer(this.poolB,4*this.krylovDotWord,4*KRYLOV_DOTS*KRYLOV_PARTIALS);encoder.clearBuffer(this.index,4*KRYLOV_ALPHA_WORD,4*(KRYLOV_RESTARTS_WORD+1-KRYLOV_ALPHA_WORD));}
+  encoder.clearBuffer(this.index,4*KRYLOV_SPREAD_WORD,4);
   const pass=encoder.beginComputePass(SOLVE_PASS);
   if(this.launcher){pass.setPipeline(this.launcher.pipeline);pass.setBindGroup(0,this.launcher.group);pass.dispatchWorkgroups(1);this.boundPass=undefined;}
   this.dispatch(pass,init,this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);if(BP)this.dispatch(pass,init==="pInitP"?"pBulkRowsP":"pBulkRows",live);this.dispatch(pass,rebase,this.tileGroups);
@@ -3358,6 +3717,18 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
    // The native rows against the prolonged band (plane post) before its post-smoothing.
    for(let k=0;k<s.nativeSweeps;k++){const band=post?"X1":"";this.dispatch(pass,"pNativeRelax0"+band,pages);this.dispatch(pass,"pNativeRelax1"+band,pages);}
    sweeps(false,post);
+   // The Krylov step on the cycle (flexible GCR(1)): the first cycle's end
+   // starts it, each later one's correction is its direction.
+   if(s.krylov&&cycles>1){
+    const end=post^odd,slots=BP?Math.min(this.fields.bulkPages!.layout.capacity,KRYLOV_SEGMENTS[2]):0;
+    if(first){this.dispatch(pass,"kStartT"+end,this.tileGroups);this.dispatch(pass,"kStartN"+end,pages);if(BP)this.dispatch(pass,"kStartB",slots);}
+    else{
+     this.dispatch(pass,"kApplyT"+end,this.tileGroups);this.dispatch(pass,"kApplyN"+end,pages);if(BP)this.dispatch(pass,"kApplyB",slots);
+     this.dispatch(pass,`kReduce@${cycle}`,1);
+     this.dispatch(pass,"kBoundT"+end,this.tileGroups);this.dispatch(pass,"kBoundN",pages);
+     this.dispatch(pass,"kStepT"+end,this.tileGroups);this.dispatch(pass,"kStepN",pages);if(BP)this.dispatch(pass,"kStepB",slots);
+    }
+   }
   }
   this.dispatch(pass,"pResidual2F",either);this.dispatch(pass,"pFinal",this.tileGroups);this.dispatch(pass,"pWrite",pages);
   if(BP){this.dispatch(pass,"pBulkProject",live);this.dispatch(pass,"pBulkCommit",{indirect:LAUNCH.live8});}
