@@ -1,3 +1,4 @@
+import { WebgpuSculptSubstrate } from "../svo/features/scene-publication/webgpu-sculpt-substrate";
 import { DUAL_GRID_WORDS_PER_VOXEL, dualGridPointWGSL } from "../svo/features/meshing/dual-grid-layout";
 import type { ProceduralSolidField } from "./procedural-solid";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
@@ -3698,6 +3699,7 @@ export class SparseSceneProxyVoxelizer {
   private readonly sculptCutOffsetWords: number;
   private readonly publishedSculptCuts = new PublishedWords();
   private readonly publishedSculptOwners = new PublishedWords();
+  private sculptSubstrate?: WebgpuSculptSubstrate;
   private sculptCutRecords: Uint32Array<ArrayBuffer> = new Uint32Array(4);
   /** The page image on the device, whichever arm draws it: every page, or a terrain scene's edits. */
   private readonly solidWorldPages?: WebgpuSolidWorldPageWriter;
@@ -3927,6 +3929,7 @@ export class SparseSceneProxyVoxelizer {
       this.solidBoundaryPublication = new ProceduralSolidPublication(device.queue,
         this.maintenanceArena, boundaryBaseWords * 4, options.solidBoundary!, boundaryImage);
     }
+    this.sculptSubstrate = new WebgpuSculptSubstrate(device);
     this.setSculptCuts(options.sculptCuts ?? options.solidWorld?.patches ?? []);
     const pageLayout = this.renderTerrainLayout?.editPages ?? this.solidWorldLayout;
     if (pageLayout && options.solidWorldLattice) {
@@ -4003,6 +4006,7 @@ export class SparseSceneProxyVoxelizer {
 
   async initializePipelines(): Promise<void> {
     if (this.invalidatePipeline) return;
+    await this.sculptSubstrate?.initialize();
     this.shaderModule = this.device.createShaderModule({
       label: `${this.label} live maintenance shader`,
       code: sparseSceneProxyVoxelizationShaderFor(
@@ -4044,14 +4048,16 @@ export class SparseSceneProxyVoxelizer {
       if (patches.some(p => p.operation === "clear" && p.affectsScenery)) throw new RangeError("Scenery sculpt needs its physical lattice");
       return;
     }
-    packSvoSculptCuts(patches, this.options.solidWorldLattice);
+    const words = packSvoSculptCuts(patches, this.options.solidWorldLattice);
+    this.sculptSubstrate?.validate(words);
   }
 
   setSculptCuts(patches: readonly SolidWorldVoxelPatch[]): void {
     this.validateSculptCuts(patches);
     this.sculptCutRecords = this.options.solidWorldLattice
       ? packSvoSculptCuts(patches, this.options.solidWorldLattice) : new Uint32Array(4);
-    this.publishedSculptCuts.publish(this.device.queue, this.maintenanceArena,
+    if (this.sculptSubstrate) this.sculptSubstrate.publish(this.maintenanceArena, this.sculptCutOffsetWords * 4, this.sculptCutRecords);
+    else this.publishedSculptCuts.publish(this.device.queue, this.maintenanceArena,
       this.sculptCutOffsetWords * 4, this.sculptCutRecords);
     this.publishSculptedOwners(this.publishedPrimitives ?? []);
   }
@@ -4371,6 +4377,7 @@ export class SparseSceneProxyVoxelizer {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.sculptSubstrate?.destroy();
     this.primitiveBuffer.destroy();
     this.maintenanceArena.destroy();
     this.paramsBuffer.destroy();

@@ -1,3 +1,4 @@
+import { SCULPT_ARENA_WORDS, sculptSubstrateWGSL } from "./svo-sculpt-substrate";
 import type { SolidWorldVoxelPatch } from "../../../core/solid-world";
 import { ellipsoidBounds } from "../../../core/solid-patch/ellipsoid-bounds";
 import { solidPatchKindId, SOLID_PATCH_BOX_KIND, SOLID_PATCH_ELLIPSOID_KIND } from "../../../core/solid-patch/kind";
@@ -10,19 +11,39 @@ export const SVO_SCULPT_CUT_RECORD_WORDS = 8;
 export const SVO_SCULPT_MATERIAL_OFFSET = 8192;
 export const SVO_SCULPT_OWNER_MASK_WORDS = 2048;
 export const SVO_SCULPT_OWNER_MASK_OFFSET_WORDS = SVO_SCULPT_CUT_HEADER_WORDS + SVO_SCULPT_CUT_MAXIMUM_RECORDS * SVO_SCULPT_CUT_RECORD_WORDS;
-export const SVO_SCULPT_CUT_ARENA_WORDS = SVO_SCULPT_OWNER_MASK_OFFSET_WORDS + SVO_SCULPT_OWNER_MASK_WORDS;
+export const SVO_SCULPT_CUT_ARENA_WORDS = SCULPT_ARENA_WORDS;
 
-/** Explicit sculpt strokes only: legacy voxel clears must not erase scenery. */
+// Immutable authored patch objects are shared across accepted prefixes. Packing
+// their physical operands once avoids repeatedly decoding old rounded stamps.
+const packedCutRecords = new WeakMap<SolidWorldVoxelPatch, Map<string, Uint32Array>>();
+const packedCutHistories = new WeakMap<readonly SolidWorldVoxelPatch[], Map<string, { length: number; words: Uint32Array<ArrayBuffer> }>>();
+const latestPackedCuts = new Map<string, { patches: WeakRef<readonly SolidWorldVoxelPatch[]>; length: number; words: Uint32Array }>();
+
+/** Explicit sculpt strokes only: legacy voxel clears must not erase scenery.
+ * This is the save/undo command stream; the GPU bakes it into sparse pages. */
 export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], lattice: SvoSculptLattice): Uint32Array<ArrayBuffer> {
-  const cuts = patches.filter(p => p.operation === "clear" && (p as SolidWorldVoxelPatch & { affectsScenery?: boolean }).affectsScenery === true);
-  if (cuts.length > SVO_SCULPT_CUT_MAXIMUM_RECORDS) throw new RangeError(`Scenery sculpt capacity reached (${SVO_SCULPT_CUT_MAXIMUM_RECORDS} cuts); undo cuts before adding more`);
+  const latticeKey = `${lattice.origin_m.join(",")}:${lattice.cellSize_m.join(",")}`;
+  const held = packedCutHistories.get(patches)?.get(latticeKey);
+  if (held?.length === patches.length) return held.words;
+  const previous = latestPackedCuts.get(latticeKey), previousPatches = previous?.patches.deref();
+  let prefix = 0, retained = 0;
+  if (previousPatches) while (prefix < Math.min(previous!.length, previousPatches.length, patches.length) && previousPatches[prefix] === patches[prefix]) {
+    const patch = patches[prefix++]!; if (patch.operation === "clear" && patch.affectsScenery === true) retained++;
+  }
+  const cuts = patches.slice(prefix).filter(p => p.operation === "clear" && p.affectsScenery === true);
   if (!lattice.origin_m.every(Number.isFinite) || !lattice.cellSize_m.every(v => Number.isFinite(v) && v > 0)) throw new RangeError("Scenery sculpt lattice must be finite and positive");
-  const words = new Uint32Array(SVO_SCULPT_CUT_HEADER_WORDS + cuts.length * SVO_SCULPT_CUT_RECORD_WORDS);
-  const floats = new Float32Array(words.buffer); words[0] = cuts.length;
+  const words = new Uint32Array(SVO_SCULPT_CUT_HEADER_WORDS + (retained + cuts.length) * SVO_SCULPT_CUT_RECORD_WORDS + 4);
+  const floats = new Float32Array(words.buffer); words[0] = retained + cuts.length; floats.set(lattice.cellSize_m, 1);
+  // Trailer keeps the analytic record ABI intact while carrying the exact
+  // voxel-grid origin across worker/publication boundaries.
+  floats.set(lattice.origin_m, words.length - 4);
+  if (retained) words.set(previous!.words.subarray(4, 4 + retained * 8), 4);
   cuts.forEach((patch, i) => {
+    const at = SVO_SCULPT_CUT_HEADER_WORDS + (retained + i) * SVO_SCULPT_CUT_RECORD_WORDS;
+    const cached = packedCutRecords.get(patch)?.get(latticeKey);
+    if (cached) { words.set(cached, at); return; }
     const kind = solidPatchKindId(patch);
     if (kind !== SOLID_PATCH_BOX_KIND && kind !== SOLID_PATCH_ELLIPSOID_KIND) throw new RangeError(`Scenery sculpt does not support ${kind} cuts`);
-    const at = SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS;
     const bounds = kind === SOLID_PATCH_ELLIPSOID_KIND ? ellipsoidBounds(patch) : patch;
     for (let a = 0; a < 3; a++) {
       const lo = lattice.origin_m[a]! + bounds.minimum[a]! * lattice.cellSize_m[a]!;
@@ -31,7 +52,16 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
       floats[at + a] = lo; floats[at + 4 + a] = hi;
     }
     words[at + 3] = kind === SOLID_PATCH_BOX_KIND ? 1 : 2;
+    let byLattice = packedCutRecords.get(patch);
+    if (!byLattice) { byLattice = new Map(); packedCutRecords.set(patch, byLattice); }
+    byLattice.set(latticeKey, words.slice(at, at + SVO_SCULPT_CUT_RECORD_WORDS));
   });
+  let byLattice = packedCutHistories.get(patches);
+  if (!byLattice) { byLattice = new Map(); packedCutHistories.set(patches, byLattice); }
+  byLattice.set(latticeKey, { length: patches.length, words });
+  latestPackedCuts.delete(latticeKey);
+  latestPackedCuts.set(latticeKey, { patches: new WeakRef(patches), length: patches.length, words });
+  if (latestPackedCuts.size > 8) latestPackedCuts.delete(latestPackedCuts.keys().next().value!);
   return words;
 }
 
@@ -106,6 +136,7 @@ export function sampleSvoSculptCuts(words: Uint32Array, point: V3): { distance: 
 export function svoSculptCutsWGSL(load: string): string {
   return /* wgsl */ `
 struct SvoSculptCutSample { distance:f32, normal:vec3f }
+${sculptSubstrateWGSL(load)}
 fn svoSculptCutCount()->u32{return min(${load}(0u),${SVO_SCULPT_CUT_MAXIMUM_RECORDS}u);}
 fn svoSculptCutValue(index:u32,world:vec3f)->SvoSculptCutSample{
   let at=4u+index*8u;
@@ -135,12 +166,16 @@ fn svoSculptCutRecordDistance(index:u32,world:vec3f)->f32{
   let q=abs(p)-r;return length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.);
 }
 fn svoSculptCutSample(world:vec3f)->SvoSculptCutSample{
+  if(svoSculptCutCount()==0u){return SvoSculptCutSample(1e20,vec3f(0));}
+  if(svoSculptBaked()){return sculptFieldSample(world);}
   var nearest=0xffffffffu;var distance=1e20;
   for(var i=0u;i<svoSculptCutCount();i+=1u){let d=svoSculptCutRecordDistance(i,world);if(d<distance){distance=d;nearest=i;}}
   if(nearest==0xffffffffu){return SvoSculptCutSample(distance,vec3f(0));}
   return svoSculptCutValue(nearest,world);
 }
 fn svoSculptCutDistance(world:vec3f)->f32{
+  if(svoSculptCutCount()==0u){return 1e20;}
+  if(svoSculptBaked()){return sculptFieldTrilinear(world).distance;}
   var distance=1e20;
   for(var i=0u;i<svoSculptCutCount();i+=1u){distance=min(distance,svoSculptCutRecordDistance(i,world));}
   return distance;

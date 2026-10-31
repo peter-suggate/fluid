@@ -1,3 +1,4 @@
+import { WebgpuSculptSubstrate } from "../features/scene-publication/webgpu-sculpt-substrate";
 import { SurfaceTextureAtlasGpu } from "../features/materials/surface-texture-atlas-gpu";
 import { SvoWaterWorldReflections, type SvoWaterWorldReflectionInputs } from "../features/shading/water-world-reflections";
 import { ExactDryFrameReuse, dryFrameReuseReason, type DryFrameReuseKey } from "../features/lighting-visibility/dry-frame-reuse";
@@ -1489,6 +1490,7 @@ export class SparseVoxelDrySceneRenderer {
   private primitiveCount = 0;
   private primitiveCandidateArena?: SvoPrimitiveCandidateArena;
   /** Host copies of the regions a publication diffs against before it writes. */
+  private sculptSubstrate?: WebgpuSculptSubstrate;
   private readonly publishedSculptCuts = new PublishedWords();
   private readonly publishedMaterials = new PublishedWords();
   private readonly publishedClusters = new PublishedWords();
@@ -1715,6 +1717,8 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   async initialize(progress?: (label: string, completed: number, total: number) => void): Promise<void> {
+    this.sculptSubstrate = new WebgpuSculptSubstrate(this.device);
+    await this.sculptSubstrate.initialize();
     if (this.experiments.surfaceMesh) await prepareMeshVolumeSurfaces();
     const report = (completed: number) => progress?.(
       SVO_PRESENTATION_STARTUP_STAGES[completed]!, completed, SVO_PRESENTATION_STARTUP_STAGES.length,
@@ -2358,7 +2362,7 @@ export class SparseVoxelDrySceneRenderer {
       || cached.group !== group || cached.planes !== this.source!.structural!.planarBoundaries.count
       || cached.instances !== this.importedSurfaceInstances || cached.imported !== this.importedSurfacePipeline
       || cached.records !== this.importedSurfaceLodRecords || cached.args !== this.importedSurfaceDrawArgs
-      || cached.cuts !== (this.scene?.sculptCuts?.[0] ?? 0) || cached.cutPipeline !== this.importedCutPipeline
+      || cached.cuts !== (this.sculptSubstrate?.proxyCount ?? this.scene?.sculptCuts?.[0] ?? 0) || cached.cutPipeline !== this.importedCutPipeline
       || cached.compact !== compact || cached.rigid !== rigid || cached.rigidPipeline !== this.rasterRigidDirectPipeline
       || cached.rigidGroup !== this.rasterRigidInputBindGroup) {
       this.surfaceMeshDrawCache = this.createSurfaceMeshDrawBundle(usePrepass, group, compact);
@@ -2427,7 +2431,7 @@ export class SparseVoxelDrySceneRenderer {
             }
           }
     }
-    const cuts = this.scene?.sculptCuts?.[0] ?? 0;
+    const cuts = this.sculptSubstrate?.proxyCount ?? this.scene?.sculptCuts?.[0] ?? 0;
     if (cuts && this.importedSurfaceInstances.length && this.importedCutPipeline) {
       draw.setPipeline(primaryPipeline(this.importedCutPipeline));
       draw.setBindGroup(0, this.bindGroup);
@@ -5472,7 +5476,7 @@ export class SparseVoxelDrySceneRenderer {
       pass.setIndexBuffer(mesh.indices,"uint32");
       pass.drawIndexedIndirect(this.rasterAo!.nativeDrawArguments!,index*24);
     }
-    const cuts = this.scene?.sculptCuts?.[0] ?? 0;
+    const cuts = this.sculptSubstrate?.proxyCount ?? this.scene?.sculptCuts?.[0] ?? 0;
     if (cuts && cutPipeline) { pass.setPipeline(cutPipeline); pass.draw(36, cuts); }
   };
 
@@ -5551,7 +5555,10 @@ export class SparseVoxelDrySceneRenderer {
         SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes, scene.fieldProgramBlocks ?? NO_PUBLISHED_WORDS);
     }
     if (!previous || scene.sculptCuts !== previous.sculptCuts) {
-      analyticBytes += this.publishedSculptCuts.publish(queue, this.sceneArenaBuffer,
+      if (this.sculptSubstrate) {
+        this.sculptSubstrate.publish(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.sculptCutOffsetBytes, scene.sculptCuts ?? new Uint32Array(4));
+        analyticBytes += 4;
+      } else analyticBytes += this.publishedSculptCuts.publish(queue, this.sceneArenaBuffer,
         SVO_DRY_SCENE_ARENA_LAYOUT.sculptCutOffsetBytes, scene.sculptCuts ?? NO_PUBLISHED_WORDS);
     }
     if (lightingArena) this.publishedLighting.publish(queue, this.lightingBuffer, 0, lightingArena);
@@ -7406,6 +7413,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   destroy(): void {
+    this.sculptSubstrate?.destroy();
     this.waterWorldReflections?.destroy();
     this.probeBuffers?.destroy();
     this.probeTarget?.destroy();

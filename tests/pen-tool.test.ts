@@ -273,15 +273,16 @@ test("legacy voxel clears do not carve scenery and uncut rays retain exact picks
   assert.deepEqual(scenerySurfaceAt(distant, start), expected);
 });
 
-test("pen refuses scenery cuts beyond the shared arena capacity without losing prior samples", () => {
+test("pen continues after the former cut-history capacity without losing prior samples", () => {
   const base = scene();
   base.solidVoxels = [...base.solidVoxels, ...Array.from({ length: SVO_SCULPT_CUT_MAXIMUM_RECORDS - 1 }, () => ({
     operation: "clear" as const, minimum: [2, 2, 2] as const, maximumExclusive: [3, 3, 3] as const, affectsScenery: true,
   }))];
   const start = ray(base, 8), gesture = penTool.begin({ scene: base, ray: start, values: values(1, 1) })!;
   const first = gesture.update(start)!;
-  assert.throws(() => gesture.update(ray(base, 9)), /Scenery sculpt capacity reached.*4096/);
-  assert.deepEqual(gesture.update(start)!.patches, first.patches);
+  const next = gesture.update(ray(base, 9))!;
+  assert.deepEqual(next.patches.slice(0, first.patches.length), first.patches);
+  assert.ok(next.patches.length > first.patches.length);
 });
 
 

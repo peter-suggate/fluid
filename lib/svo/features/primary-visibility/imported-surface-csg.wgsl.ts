@@ -5,6 +5,7 @@ import { SVO_SCULPT_MATERIAL_OFFSET } from "../scene-publication/svo-sculpt-cuts
  * published fields on the GPU. No edited mesh, CPU extraction or readback. */
 export const importedSurfaceCsgWGSL = /* wgsl */ `
 fn importedSurfaceRemoved(world:vec3f,ownCut:u32)->bool{
+  if(svoSculptBaked()){return svoSculptCutDistance(world)<-1e-6;}
   for(var i=0u;i<svoSculptCutCount();i++){
     if(i==ownCut){continue;}
     let bounds=importedCutBounds(i);
@@ -39,7 +40,37 @@ fn importedCutInterval(cut:u32,ro:vec3f,rd:vec3f)->vec2f{
   }
   return vec2f(near,far);
 }
+fn importedBakedCutHit(page:u32,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
+  let interval=importedCutInterval(page,ro,rd);let end=min(interval.y,tMax);var t=max(interval.x,tMin);
+  if(t>end){return missHit();}
+  let h=sculptFieldCell();let epsilon=max(1e-6,min(h.x,min(h.y,h.z))*0.001);
+  for(var step=0u;step<256u&&t<=end;step++){
+    let world=ro+rd*t;let cut=svoSculptCutSample(world);
+    if(abs(cut.distance)<epsilon&&dot(cut.normal,cut.normal)>0.5){
+      var owner=0xffffffffu;var distance=0.0;
+      for(var i=0u;i<dry.metadata.x;i++){
+        let record=dryPrimitive(i);if(svoPrimitiveKind(record)!=SVO_KIND_FIELD_PROGRAM){continue;}
+        let reference=svoPrimitiveFieldProgramReference(record);
+        if(reference<DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET||drySceneWord(reference)!=0xfffffffeu){continue;}
+        let base=DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET+drySceneWord(reference+1u);
+        let d=dryFieldProgramBlockVolumeDistance(base,svoPrimitiveLocalPoint(record,world));
+        if(d<distance){distance=d;owner=i;}
+      }
+      if(owner!=0xffffffffu){
+        let record=dryPrimitive(owner);let reference=svoPrimitiveFieldProgramReference(record);
+        let surface=dryFieldProgramBlockSurface((reference-DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET)/DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS,svoPrimitiveLocalPoint(record,world));
+        let material=select(svoPrimitiveMaterialId(record),surface.material,surface.material!=0u)+${SVO_SCULPT_MATERIAL_OFFSET}u;
+        return DryHit(t,-cut.normal,material,svoPrimitiveOwnerId(record),SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+      }
+    }
+    // Trilinear distance is sampled at the substrate's resolution. A bounded
+    // step cannot jump across a thin exposed wall between lattice samples.
+    t+=max(epsilon, min(abs(cut.distance)*0.5,min(h.x,min(h.y,h.z))));
+  }
+  return missHit();
+}
 fn importedCutHit(cut:u32,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
+  if(svoSculptBaked()){return importedBakedCutHit(cut,ro,rd,tMin,tMax);}
   let interval=importedCutInterval(cut,ro,rd);
   if(interval.x>interval.y){return missHit();}
   for(var side=0u;side<2u;side++){

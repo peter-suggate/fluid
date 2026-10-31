@@ -28,7 +28,7 @@ test("scenery cuts are explicit, bounded and expressed in the physical voxel lat
   assert.equal(intersectsSvoSculptPrimitiveBounds(words, [10, 1, 0], [.1, .1, .1]), false);
   assert.equal(packSvoSculptCuts([{ ...cuts[0]!, affectsScenery: undefined }], lattice)[0], 0);
   assert.equal(packSvoSculptCuts([{ ...cuts[0]!, operation: "fill" }], lattice)[0], 0);
-  assert.throws(() => packSvoSculptCuts(Array(SVO_SCULPT_CUT_MAXIMUM_RECORDS + 1).fill(cuts[0]), lattice), /capacity/);
+  assert.equal(packSvoSculptCuts(Array(SVO_SCULPT_CUT_MAXIMUM_RECORDS + 1).fill(cuts[0]), lattice)[0], SVO_SCULPT_CUT_MAXIMUM_RECORDS + 1);
   assert.throws(() => packSvoSculptCuts([{ ...cuts[0]!, kind: "cylinder" }], lattice), /does not support/);
   assert.throws(() => packSvoSculptCuts([{ ...cuts[0]!, maximumExclusive: [0, 0, 0] }], lattice), /nonempty/);
 });
@@ -50,12 +50,12 @@ test("voxelizer cut publication retains its arena and restores affected native o
   const mask = offset + SVO_SCULPT_OWNER_MASK_OFFSET_WORDS + (owner >>> 5);
   assert.equal((image[mask]! >>> (owner & 31)) & 1, 1);
   const published = image.slice();
-  assert.throws(() => voxelizer.setSculptCuts(Array(SVO_SCULPT_CUT_MAXIMUM_RECORDS + 1).fill(cuts[0])), /capacity/);
+  assert.throws(() => voxelizer.setSculptCuts([{ ...cuts[0]!, maximumExclusive: [0, 0, 0] }]), /nonempty/);
   assert.deepEqual(image, published, "refused edits must not change the arena");
   voxelizer.setSculptCuts([]);
   assert.equal(image[offset], 0);
   assert.equal(image[mask], 0, "undo restores native visibility and unmirrored materials together");
-  assert.ok(image.every(word => word === 0), "retired records are cleared");
+  assert.ok(image.subarray(offset + 8).every(word => word === 0), "retired records are cleared; the header retains the physical lattice");
 });
 
 test("native sculpt union distances and cut normals match CPU for box/ellipsoid CSG", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {

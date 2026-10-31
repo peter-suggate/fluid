@@ -483,15 +483,16 @@ climb its own new geometry. A later stroke picks the newly edited surface.
 Leaving the surface breaks the stroke rather than drawing across empty space.
 
 Scenery carving is explicitly tagged in the saved patch history. Old voxel
-clears retain their original meaning. The GPU subtracts rounded or box brush
-records from scenery distances during occupancy, contour and DMC construction.
+clears retain their original meaning. The GPU bakes rounded or box brush
+records into a sparse cut-distance substrate used by occupancy, contour and DMC construction.
 Cuts also affect analytic visibility. Affected imported instances use their
 edited SVO mesh at the scene's voxel resolution; untouched instances keep their
 native mesh. Independent mirrored material IDs preserve each imported PBR
 palette without exposing the unedited proxies. The palette is prepared at scene
-load, avoiding a large material upload on the first cut. The cut arena is fixed
-capacity (4,096 stamps) and is diff-uploaded, including undo. Capacity refusal
-happens before publication.
+load, avoiding a large material upload on the first cut. The current substrate has a fixed spatial page
+budget, with incremental GPU updates and local undo rebakes. Capacity refusal
+happens before publication. The historical measurements below used the earlier
+4,096-record analytic cut arena; the baking implementation is described at the end.
 
 The live transaction holds one acceptance in flight and coalesces pending
 proposals. CPU work still owns picking, the authored voxel-page edits used by
@@ -779,3 +780,73 @@ in that unit-suite pass. `git diff --check` passes.
 Before committing, the isolated task snapshot (excluding concurrent forest,
 rendering and fluid-memory changes) also passed `npm run check:types` and
 `npm run test:unit`: 1,076 passing, 111 skipped and zero failing tests.
+
+
+### Baking live sculpt cuts into sparse voxel pages
+
+Scenery carving now publishes a persistent GPU cut-distance substrate instead
+of sampling the accumulated brush list during voxel construction and visibility.
+The original source supplies untouched geometry, material and owner identity;
+the baked field supplies the carved volume, including explicitly empty regions.
+Both construction and rendering use the same physical lattice and trilinear
+field. Native imported exteriors retain their original mesh detail. Exposed cut
+walls are reconstructed at the scene's voxel resolution.
+
+Each page covers eight cells per axis and stores nine cell-centred samples per
+axis, including the shared boundary samples. A brush updates only its pages and
+a two-cell exterior halo. Appending evaluates only the new operands in a GPU
+compute pass and takes their minimum with the stored cut distance. Render-time
+lookup is a sparse page-table lookup and eight samples; cut normals use central
+differences of that field. Imported cavity proxies are per baked page, not per
+historical stamp. No geometry extraction or GPU readback occurs during editing.
+The operand buffer and bind group are reused across normal updates. Large
+initial loads and undo rebakes stream through bounded batches.
+
+The saved patch stream remains the replay/undo log. It is not sampled by the
+production GPU after baking. Removing or replacing edits rebuilds only affected
+pages from their local retained operands; unchanged pages remain resident. Empty
+pages leave the directory, and redo or branching reuses their slots. Stroke
+publication, rollback and the single undo entry on release are unchanged. A
+fresh renderer rehydrates the substrate from the saved log once.
+
+Synchronous editor picking uses a small CPU mirror of only the lattice samples
+queried by pointer rays. It shares unchanged pages, updates queried samples with
+new operands, and no longer rebuilds a cut BVH per object per interpolated sample.
+CPU bookkeeping still includes command packing, page-address planning, history
+comparison and existing terrain/solid-world publication. This is not a claim
+that all editor work is GPU-resident or that whole-frame time is constant.
+
+The former 4,096-stamp acceptance limit is removed. The substrate instead has a
+2,048-page spatial budget (about 6 MiB per construction/render arena), checked
+before publication. More history over the same region does not consume more
+field pages. Growing the edited region can still increase rendering cost and
+reach this explicit capacity limit. Finite-resolution baking can change a
+subcell cut's shape compared with the previous analytic CSG surface.
+
+Regression coverage lives in `tests/svo-sculpt-substrate.test.ts`: append work
+independent of a 4,200-stamp history, CPU/GPU field agreement, translated and
+anisotropic lattices, one-cell cuts, overlap, immutable picking snapshots,
+capacity refusal, undo, redo, branching and imported cavity visibility.
+
+A controlled native microbenchmark separates GPU baking and 65,536 field
+queries from CPU packing/publication. It compares histories of 32 and 4,096
+stamps in both orders, with startup and warmup excluded:
+
+```sh
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+  bash tools/gpu/fluid-gpu-run.sh timing \
+  node --import tsx tools/benchmark-sculpt-substrate.ts /tmp/sculpt-substrate.json
+```
+
+The recorded [history benchmark](validation/sculpt-substrate-history.json) keeps
+both histories at eight pages. Every append updates eight page operands and
+5,832 samples. Across both run orders, median GPU bake time is 0.0161–0.0164 ms
+and 65,536 field queries take 0.0243–0.0247 ms. CPU packing takes 0.005–0.011 ms
+at 32 stamps and 0.027–0.048 ms at 4,096; CPU publication takes 0.125–0.160 ms
+and 0.183–1.080 ms respectively. The GPU work is independent of accumulated
+history in this fixed-region case; CPU metadata costs and timing variability
+remain visible in the report.
+
+This measures the substrate, not end-to-end browser frame rate. Run the native
+pen/scene probes above for full publication, reconstruction and presentation
+costs; do not infer sustained 60 fps from the microbenchmark alone.

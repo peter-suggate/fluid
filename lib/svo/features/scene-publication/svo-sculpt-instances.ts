@@ -28,7 +28,7 @@ export function classifySvoSculptInstances(primitives: readonly SvoPrimitiveDesc
       retained = new Set(previous.indices);
       testedCuts = new Uint32Array(SVO_SCULPT_CUT_HEADER_WORDS + (count - oldCount) * SVO_SCULPT_CUT_RECORD_WORDS);
       testedCuts[0] = count - oldCount;
-      testedCuts.set(cuts.subarray(oldEnd), SVO_SCULPT_CUT_HEADER_WORDS);
+      testedCuts.set(cuts.subarray(oldEnd, SVO_SCULPT_CUT_HEADER_WORDS + count * SVO_SCULPT_CUT_RECORD_WORDS), SVO_SCULPT_CUT_HEADER_WORDS);
     }
   }
   const indices: number[] = [];

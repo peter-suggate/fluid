@@ -4,7 +4,6 @@ import type { Vec3 } from "../../model";
 import { sceneCellSizes_m } from "../../scene-lattice";
 import { sceneWithSolidStroke, type SolidWorldCoordinate as Cell, type SolidWorldVoxelPatch as Patch } from "../../solid-world";
 import { subcellEllipsoidPatch } from "../../solid-patch/ellipsoid-bounds";
-import { SVO_SCULPT_CUT_MAXIMUM_RECORDS } from "../../../svo/features/scene-publication/svo-sculpt-cuts";
 import { materialControl, operationTone, shellControl, toolMaterialId } from "../controls";
 import { MAX_STROKE_PATCHES, MAX_STROKE_VOXELS, shapePatches, strokeHighlight, toolPassesThrough,
   voxelToolUnavailable } from "../geometry";
@@ -65,7 +64,6 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
       diameter === 1 ? "box" : "sphere", 1, { materialId: toolMaterialId(context.values) })[0]!;
     return carve ? { ...patch, affectsScenery: true } : patch;
   };
-  const existingCuts = context.scene.solidVoxels.filter(p => p.operation === "clear" && p.affectsScenery === true).length;
   const patches: Patch[] = [], keys = new Set<string>();
   // Stamps under the brush stay out of picking until the brush leaves them.
   // This keeps a sweep level, but lets a later pass work on the edited surface.
@@ -108,9 +106,6 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
         additions.push(patch); addedKeys.add(key);
         nextActive.push({ patch, point: hit.point });
         additionalVoxels += patch.minimum.reduce((volume, v, a) => volume * (patch.maximumExclusive[a]! - v), 1);
-        if (carve && existingCuts + patches.length + additions.length > SVO_SCULPT_CUT_MAXIMUM_RECORDS) {
-          throw new Error(`Scenery sculpt capacity reached (${SVO_SCULPT_CUT_MAXIMUM_RECORDS} cuts); undo cuts before adding more.`);
-        }
         if (patches.length + additions.length > MAX_STROKE_PATCHES || voxels + additionalVoxels > MAX_STROKE_VOXELS) {
           throw new Error("Stroke is full; release and start another stroke.");
         }

@@ -1,0 +1,109 @@
+{
+  "note": "GPU timestamp microbenchmark; excludes scene reconstruction, physics and presentation. CPU includes metadata planning, upload and submission. Four warmup iterations discarded.",
+  "reports": [
+    {
+      "historyLength": 32,
+      "pages": 8,
+      "proxies": 8,
+      "update": {
+        "pages": 8,
+        "records": 8,
+        "samples": 5832
+      },
+      "gpuBake": {
+        "median_ms": 0.016373,
+        "p95_ms": 0.021956
+      },
+      "gpuSample65536": {
+        "median_ms": 0.024414,
+        "p95_ms": 0.071408
+      },
+      "cpuPack": {
+        "median_ms": 0.010749999999916326,
+        "p95_ms": 0.01695900000004258
+      },
+      "cpuPublish": {
+        "median_ms": 0.16041599999994105,
+        "p95_ms": 0.18849999999997635
+      }
+    },
+    {
+      "historyLength": 4096,
+      "pages": 8,
+      "proxies": 8,
+      "update": {
+        "pages": 8,
+        "records": 8,
+        "samples": 5832
+      },
+      "gpuBake": {
+        "median_ms": 0.016123,
+        "p95_ms": 0.507404
+      },
+      "gpuSample65536": {
+        "median_ms": 0.024664,
+        "p95_ms": 0.036996
+      },
+      "cpuPack": {
+        "median_ms": 0.04825000000005275,
+        "p95_ms": 0.24129099999981918
+      },
+      "cpuPublish": {
+        "median_ms": 1.0798330000000078,
+        "p95_ms": 1.1898329999999078
+      }
+    },
+    {
+      "historyLength": 4096,
+      "pages": 8,
+      "proxies": 8,
+      "update": {
+        "pages": 8,
+        "records": 8,
+        "samples": 5832
+      },
+      "gpuBake": {
+        "median_ms": 0.016333,
+        "p95_ms": 0.016582
+      },
+      "gpuSample65536": {
+        "median_ms": 0.024291,
+        "p95_ms": 0.02504
+      },
+      "cpuPack": {
+        "median_ms": 0.027290999999877386,
+        "p95_ms": 0.033875000000080036
+      },
+      "cpuPublish": {
+        "median_ms": 0.1825420000000122,
+        "p95_ms": 0.19904099999985192
+      }
+    },
+    {
+      "historyLength": 32,
+      "pages": 8,
+      "proxies": 8,
+      "update": {
+        "pages": 8,
+        "records": 8,
+        "samples": 5832
+      },
+      "gpuBake": {
+        "median_ms": 0.016249,
+        "p95_ms": 0.016499
+      },
+      "gpuSample65536": {
+        "median_ms": 0.024416,
+        "p95_ms": 0.024914
+      },
+      "cpuPack": {
+        "median_ms": 0.005167000000028565,
+        "p95_ms": 0.010999999999967258
+      },
+      "cpuPublish": {
+        "median_ms": 0.1253750000000764,
+        "p95_ms": 0.14208299999995688
+      }
+    }
+  ]
+}

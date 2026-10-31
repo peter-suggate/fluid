@@ -1,4 +1,4 @@
-import { prepareSvoSculptCutDistance } from "../svo/features/scene-publication/svo-sculpt-distance";
+import { planSculptBake, SculptPickingField } from "../svo/features/scene-publication/svo-sculpt-substrate";
 import { oakTreeControlGroups, OAK_MATERIALS } from "./oak-tree-controls";
 import { planOakV2 } from "./voxel-scenery/oak-v2";
 import { add, sub } from "./math";
@@ -38,8 +38,7 @@ import { intersectSvoPrimitive, prepareSvoPrimitiveDistance, sampleSvoPrimitive,
   type SvoFinitePrimitiveDescriptor, type SvoPrimitiveRayHit } from "../svo/contracts/svo-primitive-abi";
 import { SVO_PRIMITIVE_KIND_TABLE } from "../svo/contracts/svo-primitive-kinds";
 import { sceneCellSizes_m } from "./scene-lattice";
-import { packSvoSculptCuts, sampleSvoSculptCuts, SVO_SCULPT_CUT_HEADER_WORDS,
-  SVO_SCULPT_CUT_RECORD_WORDS } from "../svo/features/scene-publication/svo-sculpt-cuts";
+import { packSvoSculptCuts } from "../svo/features/scene-publication/svo-sculpt-cuts";
 import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "../svo/features/scene-publication/svo-scene-primitives";
 import type { SceneryPropKind } from "./stores/ui-store";
 import {
@@ -365,13 +364,15 @@ interface SceneryPickTarget {
 }
 
 const pickTargetCache = new WeakMap<object, readonly SceneryPickTarget[]>();
-interface SceneryCutQuery { readonly words: Uint32Array; readonly distance: (point_m: Vec3) => number }
+interface SceneryCutQuery { readonly field: SculptPickingField; readonly distance: (point_m: Vec3) => number }
 interface SceneryPickCuts {
   readonly document: readonly unknown[];
   readonly words: Uint32Array;
+  readonly field: SculptPickingField;
   readonly targets: Map<SceneryPickTarget, SceneryCutQuery | null>;
 }
 const sculptPickCache = new WeakMap<SceneDescription, SceneryPickCuts>();
+let latestSculptField: SculptPickingField | undefined;
 
 function sceneryPickCuts(scene: SceneDescription): SceneryPickCuts {
   const cellSize_m = sceneCellSizes_m(scene);
@@ -381,31 +382,30 @@ function sceneryPickCuts(scene: SceneDescription): SceneryPickCuts {
   const words = packSvoSculptCuts(scene.solidVoxels, {
     origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2], cellSize_m,
   });
-  const prepared = { document, words, targets: new Map<SceneryPickTarget, SceneryCutQuery | null>() };
+  const field = new SculptPickingField(planSculptBake(latestSculptField?.plan, words, false), latestSculptField);
+  latestSculptField = field;
+  const prepared = { document, words, field, targets: new Map<SceneryPickTarget, SceneryCutQuery | null>() };
   sculptPickCache.set(scene, prepared);
   return prepared;
 }
 
-/** Prepare only overlapping cuts and avoid per-cut scratch allocations while marching. */
+/** Classify against baked pages, not every historical brush operand. */
 function cutsForTarget(cuts: SceneryPickCuts, target: SceneryPickTarget): SceneryCutQuery | null {
   if (!cuts.words[0]) return null;
   if (cuts.targets.has(target)) return cuts.targets.get(target)!;
-  const f = new Float32Array(cuts.words.buffer, cuts.words.byteOffset, cuts.words.length), selected: number[] = [];
-  for (let i = 0; i < cuts.words[0]!; i++) {
-    const at = SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS;
-    if (target.aabb_m.max.x >= f[at]! && target.aabb_m.min.x <= f[at + 4]!
-      && target.aabb_m.max.y >= f[at + 1]! && target.aabb_m.min.y <= f[at + 5]!
-      && target.aabb_m.max.z >= f[at + 2]! && target.aabb_m.min.z <= f[at + 6]!) selected.push(at);
+  const { cell, origin, pages } = cuts.field.plan;
+  const lo = [target.aabb_m.min.x, target.aabb_m.min.y, target.aabb_m.min.z];
+  const hi = [target.aabb_m.max.x, target.aabb_m.max.y, target.aabb_m.max.z];
+  for (const page of pages.values()) {
+    if (![0, 1, 2].every(a => hi[a]! >= origin[a]! + (page.coordinate[a]! * 8 + .5) * cell[a]!
+      && lo[a]! <= origin[a]! + (page.coordinate[a]! * 8 + 8.5) * cell[a]!)) continue;
+    const query: SceneryCutQuery = { field: cuts.field,
+      distance: point => cuts.field.distance([point.x, point.y, point.z]) };
+    cuts.targets.set(target, query);
+    return query;
   }
-  if (!selected.length) { cuts.targets.set(target, null); return null; }
-  const words = new Uint32Array(SVO_SCULPT_CUT_HEADER_WORDS + selected.length * SVO_SCULPT_CUT_RECORD_WORDS);
-  words[0] = selected.length;
-  selected.forEach((at, i) => {
-    words.set(cuts.words.subarray(at, at + SVO_SCULPT_CUT_RECORD_WORDS), SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS);
-  });
-  const query: SceneryCutQuery = { words, distance: prepareSvoSculptCutDistance(words) };
-  cuts.targets.set(target, query);
-  return query;
+  cuts.targets.set(target, null);
+  return null;
 }
 
 /** Trace the retained CSG field, including cut walls behind an erased original face. */
@@ -418,14 +418,26 @@ function intersectSculptedTarget(target: SceneryPickTarget, cuts: SceneryCutQuer
   let distance_m = Math.max(0, span.near_m);
   target.distance ??= prepareSvoPrimitiveDistance(descriptor);
   for (let step = 0; step < 512 && distance_m <= end; step++) {
-    const point = { x: ray.origin.x + ray.direction.x * distance_m,
+    let point = { x: ray.origin.x + ray.direction.x * distance_m,
       y: ray.origin.y + ray.direction.y * distance_m, z: ray.origin.z + ray.direction.z * distance_m };
-    const original = target.distance(point), cutDistance = cuts.distance(point);
+    let original = target.distance(point), cutDistance = cuts.distance(point);
     const retained = Math.max(original, -cutDistance);
     const epsilon = Math.max(1e-6, Math.abs(distance_m) * 1e-5);
     if (Math.abs(retained) <= epsilon) {
+      // Refine the zero crossing rather than returning the march tolerance
+      // above it. Single-cell pens must land inside the newly exposed cell,
+      // even when the wall coincides exactly with a lattice plane.
+      const step = epsilon * 2;
+      const ahead = { x: point.x + ray.direction.x * step, y: point.y + ray.direction.y * step, z: point.z + ray.direction.z * step };
+      const slope = (Math.max(target.distance(ahead), -cuts.distance(ahead)) - retained) / step;
+      const corrected = distance_m - retained / slope;
+      if (Math.abs(slope) > 1e-6 && Math.abs(corrected - distance_m) <= step * 4 && corrected >= Math.max(0, span.near_m) && corrected <= end) {
+        distance_m = corrected;
+        point = { x: ray.origin.x + ray.direction.x * distance_m, y: ray.origin.y + ray.direction.y * distance_m, z: ray.origin.z + ray.direction.z * distance_m };
+        original = target.distance(point); cutDistance = cuts.distance(point);
+      }
       const cutSurface = -cutDistance >= original;
-      const cut = cutSurface ? sampleSvoSculptCuts(cuts.words, [point.x, point.y, point.z]) : undefined;
+      const cut = cutSurface ? cuts.field.sample([point.x, point.y, point.z]) : undefined;
       const sampled = cutSurface ? undefined : sampleSvoPrimitive(descriptor, point);
       const normal = cut ? { x: -cut.normal[0], y: -cut.normal[1], z: -cut.normal[2] } : sampled?.normal;
       if (!normal) return undefined;
@@ -434,7 +446,9 @@ function intersectSculptedTarget(target: SceneryPickTarget, cuts: SceneryCutQuer
         featureId: sampled?.featureId ?? 0, primitiveKind: descriptor.kind,
         primitiveId: descriptor.primitiveId, materialId: descriptor.materialId, ownerId: descriptor.ownerId ?? 0xffff };
     }
-    distance_m += Math.max(Math.abs(retained), 1e-7);
+    // Trilinear reconstruction can have a steeper gradient than the sampled
+    // source SDF. Match the GPU's conservative step through baked cut walls.
+    distance_m += Math.max(Math.abs(retained) * .5, 1e-7);
   }
   return undefined;
 }
