@@ -21,12 +21,12 @@ import {UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES,uniformOpenWorldTerrainSampleWGS
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {sceneShapeWgsl} from "../../core/scene-shape";
-import {SOLID_MASK_DIRECTORY_WORDS,SOLID_MASK_FULL,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
+import {SOLID_MASK_TABLE_WORDS,SOLID_MASK_FULL,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
 import {UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS,UNIFORM_BED_SLOPE_LAYERS} from "./uniform-bed-slope-bake";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformDetailPick} from "./uniform-detail-fields";
-import {UNIFORM_PAGE_TABLE_WORDS,UNIFORM_PAGE_WINDOW,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,uniformLatticeWallTable,type UniformLatticeAddress} from "./uniform-lattice-address";
+import {UNIFORM_PAGE_TABLE_WORDS,UNIFORM_PAGE_WINDOW,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,type UniformLatticeAddress} from "./uniform-lattice-address";
 import {uniformPagePoolWGSL,type UniformPagePoolLayout} from "./uniform-page-pool";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsOfWGSL} from "./uniform-live-lists";
 import { uniformSolidBoundaryWGSL } from "./uniform-solid-boundary.wgsl";
@@ -116,10 +116,10 @@ export const UNIFORM_SOLID_BED_SLOPE_UNITS=254;
  * the same offsets. */
 export function uniformSolidScratchLayout():{bedSlopeBaseWord:number;bedSlopeWords:number;cutMapOffsetWords:number}{
  const bedSlopeWords=UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS;
- return {bedSlopeBaseWord:SOLID_MASK_DIRECTORY_WORDS,bedSlopeWords,cutMapOffsetWords:SOLID_MASK_DIRECTORY_WORDS+bedSlopeWords};
+ return {bedSlopeBaseWord:SOLID_MASK_TABLE_WORDS,bedSlopeWords,cutMapOffsetWords:SOLID_MASK_TABLE_WORDS+bedSlopeWords};
 }
 /** What the solver sizes its solid mask by (SolidOccupancyMask): the
- * lattice's page table and tile keys, the bed-slope lane's directory, and
+ * lattice's walls (umWorldSolid's rule) and tile keys, the bed-slope lane's directory, and
  * at most a slot for every page of the box and of the first layer of pages
  * above an open top, and in an open world one for each block the pool can
  * store a page in, as many as a directory word can name. The solver seals
@@ -129,8 +129,9 @@ export function uniformSolidScratchLayout():{bedSlopeBaseWord:number;bedSlopeWor
  * address.boxPage. */
 export function uniformSolidMaskPages(address:UniformLatticeAddress,halfSolid=false):SolidOccupancyMaskPages{
  const [x,y,z]=address.pages;
- const laneWords=uniformSolidScratchLayout().bedSlopeWords,firstSlot=Math.ceil((SOLID_MASK_DIRECTORY_WORDS+laneWords+address.tileKeys)/1024);
- return {table:uniformLatticeWallTable(address),tileKeys:address.tileKeys,slots:Math.max(0,Math.min(SOLID_MASK_FULL-firstSlot,x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0))),
+ const laneWords=uniformSolidScratchLayout().bedSlopeWords,firstSlot=Math.ceil((SOLID_MASK_TABLE_WORDS+laneWords+address.tileKeys)/1024);
+ const walls={policy:address.world?3:address.openTop?2:1,origin:address.boxPage,pages:address.pages} as const;
+ return {walls,tileKeys:address.tileKeys,slots:Math.max(0,Math.min(SOLID_MASK_FULL-firstSlot,x*y*z+(address.openTop?x*z:0)+(address.world?address.blocks-2:0))),
   laneWords,separateTerrain:true,halfSolid,origin:address.boxPage};
 }
 /** A bed slope as its lane entry: 16 bits, x in the low byte, each rounded
@@ -1234,7 +1235,7 @@ fn umSolidValid(p:vec3i)->bool{return umSolidPage(p)!=${SOLID_MASK_WALL}u;}
 // z, in cells per cell and pointing uphill, for an open cell that sits on a
 // solid voxel's top face. Zero for every other cell: a voxel tread is then
 // the level floor it looks like.
-fn umBedSlopeBase()->u32{return ${SOLID_MASK_DIRECTORY_WORDS}u;}
+fn umBedSlopeBase()->u32{return ${SOLID_MASK_TABLE_WORDS}u;}
 // The tile cut map's first word: after the lane's directory.
 fn umSolidCutMap()->u32{return ${uniformSolidScratchLayout().cutMapOffsetWords}u;}
 fn umBedSlope(p:vec3i)->vec2f{

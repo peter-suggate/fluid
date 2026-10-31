@@ -82,7 +82,7 @@ fn bsRoot(v:u32)->u32{
 const BUILD=(l:UniformBedSlopeBakeLayout)=>/* wgsl */`
 // The solid mask's image (SolidOccupancyMask) by page: a cell of a page the
 // lattice walls off is solid, so the lattice's walls and floor are.
-${solidOccupancyMaskWGSL("bsMask","bsWindowPage","bsWindowSolid")}
+${solidOccupancyMaskWGSL("bsMask","bsWindowPage","bsWindowSolid",false,l.walls)}
 // A cell of the lattice, which lies at BS_ORIGIN in the image's window.
 const BS_ORIGIN=vec3i(${l.origin[0]},${l.origin[1]},${l.origin[2]});
 fn bsSolid(p:vec3i)->bool{return bsWindowSolid(p+BS_ORIGIN);}

@@ -74,7 +74,7 @@
  *
  * A column holds `layers` floor cells (4, at most 8), its lowest; a floor
  * cell above them stays level. */
-import { SOLID_MASK_EMPTY, SOLID_MASK_FULL, SOLID_MASK_WALL } from "../../core/solid-occupancy-mask";
+import { SOLID_MASK_EMPTY, SOLID_MASK_FULL, SOLID_MASK_WALL, solidOccupancyMaskPage, type SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
 import { uniformBedSlopeBakeWGSL } from "./uniform-bed-slope-bake.wgsl";
 
 /** Region bakes one submit can hold: each takes a params record of its own. */
@@ -103,6 +103,8 @@ export interface UniformBedSlopeBakeOptions{
  readonly windowSlots?:number;
  /** The lattice's low cell in the mask image's window (address.boxPage, in cells; default 0). */
  readonly origin?:readonly [number,number,number];
+ /** The mask's walls, for a mask that does not fit its flat directory (SolidOccupancyMask.fitsFlat): its reader then takes both levels and the walls by their rule. */
+ readonly walls?:SolidOccupancyMaskWalls;
  /** Floor cells a column holds (default 4, at most 8). */
  readonly layers?:number;
  /** Spread passes, even (default 96). */
@@ -111,6 +113,7 @@ export interface UniformBedSlopeBakeOptions{
 export interface UniformBedSlopeBakeLayout{
  readonly size:readonly [number,number,number];
  readonly origin:readonly [number,number,number];
+ readonly walls?:SolidOccupancyMaskWalls;
  /** Haloed cells, and a dense lane of them two a word: what an emulation holds (never allocated here). */
  readonly cells:number;
  readonly denseLaneWords:number;
@@ -152,7 +155,7 @@ export function uniformBedSlopeBakeLayout(options:UniformBedSlopeBakeOptions):Un
  const origin=options.origin??[0,0,0];
  if(origin.some(n=>!Number.isSafeInteger(n)||n<0))throw new RangeError(`Uniform bed-slope bake: origin ${origin.join(",")}`);
  const reach=passes+RELAX+2,laneRadius=Math.ceil((passes+1)/32),columns=1024*windowSlots;
- return {size:[size[0],size[1],size[2]],origin:[origin[0],origin[1],origin[2]],cells,denseLaneWords:Math.ceil(cells/2),pages,laneBaseWord,laneSlotBaseWord,laneSlots,laneSlotWords:1024*layers,windowSlots,
+ return {size:[size[0],size[1],size[2]],origin:[origin[0],origin[1],origin[2]],walls:options.walls,cells,denseLaneWords:Math.ceil(cells/2),pages,laneBaseWord,laneSlotBaseWord,laneSlots,laneSlotWords:1024*layers,windowSlots,
   laneRadius,windowRadius:laneRadius+Math.ceil(reach/32),layers,passes,relax:RELAX,reach,columns,
   launches:passes+RELAX+4,scratchBytes:36*layers*columns+4*UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS+256*(1+UNIFORM_BED_SLOPE_BAKE_REGIONS),minRun:MIN_RUN,band4:BAND4,minSlope2:MIN_SLOPE2,maxSlope2:MAX_SLOPE2};
 }
@@ -163,7 +166,7 @@ export function uniformBedSlopeBakeLayout(options:UniformBedSlopeBakeOptions):Un
 export function uniformBedSlopePartialColumns(words:ArrayLike<number>,size:readonly [number,number,number],origin:readonly [number,number,number]=[0,0,0]):Uint8Array{
  const out=new Uint8Array(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS),o=origin.map(n=>n>>5),py=Math.ceil(size[1]/32);
  for(let z=0;z<Math.ceil(size[2]/32);z++)for(let x=0;x<Math.ceil(size[0]/32);x++)for(let y=0;y<py&&!out[x+64*z];y++){
-  const word=words[((x+o[0]!)&63)|(((y+o[1]!)&63)<<6)|(((z+o[2]!)&63)<<12)]!,code=word&0xffff;
+  const word=solidOccupancyMaskPage(words,32*(x+o[0]!),32*(y+o[1]!),32*(z+o[2]!)),code=word&0xffff;
   if(word!==SOLID_MASK_WALL&&code!==SOLID_MASK_EMPTY&&code!==SOLID_MASK_FULL)out[x+64*z]=1;
  }
  return out;

@@ -947,23 +947,6 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   };
 }
 
-/** Pages an axis of the solid mask's window (SolidOccupancyMask), the page table's before the directory. */
-const WALL_WINDOW = 64;
-/** The solid mask's 64³ page table: SOLID (0xffffffff) where the lattice
- * walls a page off, 0 elsewhere, entry x | y<<6 | z<<12 a window page's
- * residue. The pool's seed stores no SOLID (umPageWord takes it from the
- * world box), so this is the box's walls as the 64³ table seeded them: the
- * box AIR, an open top's column up to the frame's floor AIR, an open world
- * AIR above its floor. A box past 62 pages an axis is beyond this window
- * (the solid mask's own limit, not the directory's). */
-export function uniformLatticeWallTable(a: UniformLatticeAddress): Uint32Array<ArrayBuffer> {
-  const W = WALL_WINDOW, m = W - 1, floor = W - UNIFORM_FRAME_FLOOR_PAGES, table = new Uint32Array(W ** 3), [px, py, pz] = a.pages, o = a.boxPage;
-  for (let z = 0; z < W; z++) for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
-    if (((x - o[0]) & m) < px && ((y - o[1]) & m) < py && ((z - o[2]) & m) < pz) continue;
-    if (a.world ? y >= floor : !(a.openTop && x < px && z < pz && y >= py && y < floor)) table[x | (y << 6) | (z << 12)] = 0xffffffff;
-  }
-  return table;
-}
 /** A box page's table word (umPageWord), read at its world page under any frame: its block, 0 (AIR) or 0xffffffff (SOLID). */
 export function uniformPageWord(a: UniformLatticeAddress, x: number, y: number, z: number): number {
   const o = a.boxPage;

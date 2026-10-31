@@ -1508,6 +1508,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // its only writer. Built with the frame whether or not the scene has a
     // voxel yet: an edit may add the first.
     const bedSlopeBake=new UniformBedSlopeBake(this.device,this.activeScratch,{size:[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz],laneBaseWord:this.solidBedSlopeBaseWord,origin:this.frame.boxCell,
+      walls:this.solidMask.fitsFlat?undefined:this.solidMask.walls,
       laneSlotBaseWord:this.solidBedSlopeSlots.word,laneSlots:this.solidBedSlopeSlots.count,windowSlots:this.solidBedSlopeSlots.window});
     // One concurrent compile: serial stages left a first load waiting on
     // each uncached pipeline in turn.
