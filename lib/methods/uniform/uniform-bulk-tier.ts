@@ -34,6 +34,8 @@ export interface UniformBulkTierFields {
   bulkPages?: UniformBulkPages;
   /** The page pool whose visit list (uniform-live-lists) the selection strides. */
   pool: UniformPagePool;
+  /** UniformMixedSolid's params (UMSolidParams, 272 bytes) and its rigid body mirror (12 UMRigidBody): the body bound of bulkSelect and bulkPromote. */
+  bodies?: { params: GPUBufferBinding; bodies: GPUBufferBinding };
 }
 
 /** The 16h bulk tier (bulkTier "16h"; uniform-bulk-tier-reference for the
@@ -98,12 +100,13 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
   async initialize(): Promise<void> {
     const f = this.fields; if (!f) throw new Error("The 16h bulk tier is not bound");
     const regions = this.regionTable; if (!regions) throw new Error("The 16h bulk tier has no region table (attachRegions)");
-    const device = this.device, R = this.regions, S = !!f.rootTopology, P = f.bulkPages;
+    const device = this.device, R = this.regions, S = !!f.rootTopology, P = f.bulkPages, Q = !!f.bodies;
     const buffer = (binding: number, type: GPUBufferBindingType) => ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: { type } });
     this.layout = uniformDetailBindLayout(device, { label: "Uniform bulk tier", entries: [buffer(0, "uniform"),
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       buffer(2, "read-only-storage"), buffer(3, "read-only-storage"), ...(S ? [buffer(4, "read-only-storage")] : []), buffer(5, "read-only-storage"), buffer(6, "read-only-storage"), buffer(7, "storage"),
-      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }, buffer(9, "read-only-storage"), buffer(10, "read-only-storage")] });
+      { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }, buffer(9, "read-only-storage"), buffer(10, "read-only-storage"),
+      ...(Q ? [buffer(11, "uniform"), buffer(12, "uniform")] : [])] });
     // The stage is at the per-stage storage limit (10): the BULK16 store
     // shares the record's binding (both lie in the arena's pool B, the store
     // after the record), so binding 10 can take the pool's state.
@@ -125,7 +128,8 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
       { binding: 0, resource: { buffer: f.params, size: 80 } }, { binding: 1, resource: f.velocity },
       { binding: 2, resource: { buffer: f.slots.buffer } }, { binding: 3, resource: f.rootPhi }, ...(f.rootTopology ? [{ binding: 4, resource: f.rootTopology }] : []),
       { binding: 5, resource: { buffer: f.heat } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
-      { binding: 7, resource: span }, { binding: 8, resource: this.faces.createView() }, { binding: 9, resource: { buffer: regions.buffer } }, { binding: 10, resource: { buffer: f.pool.state } }] });
+      { binding: 7, resource: span }, { binding: 8, resource: this.faces.createView() }, { binding: 9, resource: { buffer: regions.buffer } }, { binding: 10, resource: { buffer: f.pool.state } },
+      ...(Q ? [{ binding: 11, resource: f.bodies!.params }, { binding: 12, resource: f.bodies!.bodies }] : [])] });
     const H = UNIFORM_BULK_HEADER(R), C = UNIFORM_BULK_COUNT;
     const code = uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec4f}
@@ -159,6 +163,42 @@ var<workgroup> bU:array<f32,240>;
 var<workgroup> bMean:array<f32,6>;
 var<workgroup> bSum:array<f32,64>;
 var<workgroup> bState:u32;
+${Q ? /* wgsl */ `
+// The rigid bodies, as UniformMixedSolid's own kernels read them: its params
+// (UMSolidParams: cellGravity.xyz h at 1, frame.xyz the lattice's world
+// origin at 2, boundary.z the body count at 4) and its mirror, written at the
+// frame's head from the poses the last frame integrated.
+struct BBody {positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,
+ angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
+@group(1) @binding(11) var<uniform> bSolid:array<vec4f,17>;
+@group(1) @binding(12) var<uniform> bBodies:array<BBody,12>;
+// A 16h region holds one pressure: it cannot carry a body's concentrated
+// load within a few cells, and the band over it carries it sideways instead
+// (measured: a 3 m/s stone put 74 m/s tangential faces over BULK16 pages).
+// So a body fails a region (bulkSelect) or a BULK16 page (bulkPromote) that
+// it can come within 4 tiles of (the margin the HOT and band tests hold)
+// before the change takes effect, by the finite-propagation bound the
+// ballistic reserve uses, over the latency L = 2 frames. The promote: this
+// scan runs in frame n, before the band solve, from the poses at n's head;
+// frame n+1's relayout head commits the promote (due every frame on a live
+// pool, plain and pipelined alike: the same GPU order); frame n+1's solve is
+// the first it serves, and that step moves the body to its pose at n+2,
+// 2 dt after the one read here. The demote: a page whose regions are
+// members at frame n is a BULK16 slot from frame n+1's commit, and its first
+// scan's promote serves frame n+2's solve, so a demote must not happen with
+// a body within the same 2 dt (a member serves its own frame's solve, inside
+// that). The reach in T = L dt: the bounding radius r, plus (|v| + |w| r) T
+// (a spinning body's surface speed), plus the fall 1/2 |g| T^2. A slot with
+// no body has bounding radius 0. lo, ext: the box's low cell and its cells.
+const B_LATENCY:f32=2.0;
+fn bBodyReaches(i:u32,lo:vec3i,ext:f32,dt:f32)->bool{
+ if(i>=min(u32(max(round(bSolid[4].z),0.0)),12u)){return false;}
+ let b=bBodies[i];let r=b.dimensions.w;if(r<=0.0){return false;}
+ let h=bSolid[1].xyz;let low=bSolid[2].xyz+vec3f(lo)*h;let hi=low+ext*h;
+ let T=B_LATENCY*dt;let p=b.positionShape.xyz;
+ let reach=r+(length(b.linearVelocity.xyz)+length(b.angularVelocity.xyz)*r)*T+0.5*length(params.gravity.xyz)*T*T;
+ return distance(clamp(p,low,hi),p)<=reach;
+}` : ""}
 fn bTexel(i:u32)->vec2u{return vec2u(i%${UNIFORM_BULK_FACE_WIDTH}u,i/${UNIFORM_BULK_FACE_WIDTH}u);}
 // The +face of tile t on axis a (0 where t is not stored: a wall).
 fn bFace(t:vec3i,a:u32)->f32{
@@ -195,6 +235,8 @@ fn bFace(t:vec3i,a:u32)->f32{
     if(open<1.0-1e-5||rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,1u);continue;}
     ${S ? "if(own){for(var a=0u;a<3u;a++){if(d[a]<3&&top[a+1u]<1.0-1e-5){atomicOr(&bFail,1u);}}}" : ""}
    }
+   // A body within reach of its 3^3 neighbourhood before a demote's first promote serves (bBodyReaches).
+   ${Q ? "if(lane<12u&&bBodyReaches(lane,4*origin-vec3i(16),48.0,dt)){atomicOr(&bFail,1u);}" : ""}
    // Its 4h faces, 80 an axis: plane k (0..4) between its tiles k-1 and k.
    for(var i=lane;i<240u;i+=64u){
     let a=i/80u;let k=(i/16u)%5u;let j=i%16u;
@@ -248,8 +290,10 @@ ${P ? /* wgsl */ `
 // neighbourhood (the page's tiles +-4) an AIR page, an h band tile, a region
 // HOT from its own heat (bHot), a cut tile or one within
 // UNIFORM_BULK_DEPTH_CELLS of the surface; or a face mean moving
-// UNIFORM_BULK_REACH_CELLS h a step (the error test is pBulkRows'). Its
-// promoteError word records which (BULK16_SCAN's bits), read by no kernel.
+// UNIFORM_BULK_REACH_CELLS h a step (the error test is pBulkRows'); or a
+// rigid body that can come within those 4 tiles before the promote takes
+// effect (bBodyReaches). Its promoteError word records which (BULK16_SCAN's
+// bits), read by no kernel.
 // The store, in the record's binding after it.
 const BS_BASE:u32=${storeWord}u;
 fn bsLoad(i:u32)->u32{return atomicLoad(&record[BS_BASE+i]);}
@@ -288,6 +332,7 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
    }
   }
   if(lane<36u&&abs(bitcast<f32>(bsLoad(rec+${BULK16_PAGE.velocity}u+lane)))*dt>B_REACH*h){atomicOr(&bFail,${BULK16_SCAN.speed}u);}
+  ${Q ? `if(lane<12u&&bBodyReaches(lane,32*page-vec3i(16),64.0,dt)){atomicOr(&bFail,${BULK16_SCAN.body}u);}` : ""}
   workgroupBarrier();
   let fail=atomicLoad(&bFail);
   if(lane==0u&&fail!=0u&&bsLoad(rec+${BULK16_PAGE.promote}u)==0u){bsStoreWord(rec+${BULK16_PAGE.promote}u,1u);bsStoreWord(rec+${BULK16_PAGE.promoteError}u,fail);}

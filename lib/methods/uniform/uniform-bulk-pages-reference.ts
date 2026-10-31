@@ -39,8 +39,9 @@ export const BULK16_PAGE={
 /** The structural scan's failed tests (bulkPromote), BULK16_PAGE.promoteError's
  * bits when promote is 1: an AIR page in its 3^3 neighbourhood; within 4
  * tiles an h band tile, a HOT region, a cut tile, or a tile within
- * UNIFORM_BULK_DEPTH_CELLS of the surface; or its own face mean's speed. */
-export const BULK16_SCAN={air:1,band:2,hot:4,cut:8,shallow:16,speed:32} as const;
+ * UNIFORM_BULK_DEPTH_CELLS of the surface; its own face mean's speed; or
+ * a rigid body's ballistic bound over the promote latency within 4 tiles. */
+export const BULK16_SCAN={air:1,band:2,hot:4,cut:8,shallow:16,speed:32,body:64} as const;
 /** Words of BULK16_PAGE.tail4 and tail5 a channel. */
 export const BULK16_TAIL_CHANNELS=10;
 /** Texels of a page's 4h vertex block (BULK16_PAGE.phi). */
