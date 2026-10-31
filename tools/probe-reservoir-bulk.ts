@@ -26,6 +26,7 @@ import { auditUniformGPUAllocations, uniformGPUAllocationClass } from "./uniform
 import { UNIFORM_PAGE_POOL_STATUS as S } from "../lib/methods/uniform/uniform-page-pool";
 import { BULK16_STATUS } from "../lib/methods/uniform/uniform-bulk-pages";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
+import { readInitializationCensus } from "../lib/core/gpu-initialization";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { sceneDocumentAtLattice } from "../lib/core/scene-definition";
@@ -66,6 +67,10 @@ scene.duration_s = Math.max(scene.duration_s, steps * scene.numerics.fixedDt_s);
 const tag = Object.entries(values).map(([k, v]) => `${k}-${v}`).join("_") || "default";
 const out = resolve(option("out") ?? `artifacts/reservoir-bulk/${closed ? "rest" : "seep"}-${cell * 1000}mm-${tag}.json`);
 const rows: Record<string, unknown>[] = [];
+// The authored liquid boxes: their volume and their top faces' area (the t=0 free surface; overlaps not removed).
+const boxes = (scene.fluid.initialLiquidVolumes ?? []).filter(v => v.shape === "box") as { min_m: { x: number; y: number; z: number }; max_m: { x: number; y: number; z: number } }[];
+const liquid = { m3: boxes.reduce((n, b) => n + (b.max_m.x - b.min_m.x) * (b.max_m.y - b.min_m.y) * (b.max_m.z - b.min_m.z), 0),
+  surface_m2: boxes.reduce((n, b) => n + (b.max_m.x - b.min_m.x) * (b.max_m.z - b.min_m.z), 0) };
 /** Requested bytes by allocation class (uniformGPUAllocationClass), at construction and at the end. */
 type Snapshot = ReturnType<ReturnType<typeof auditUniformGPUAllocations>["snapshot"]>;
 const byClass = (s: Snapshot) => { const c: Record<string, number> = {}; for (const r of s.resources) c[uniformGPUAllocationClass(r.label)] = (c[uniformGPUAllocationClass(r.label)] ?? 0) + r.bytes; return c; };
@@ -84,7 +89,12 @@ await withUniformDevice("reservoir bulk probe", async raw => {
   // A census or 4h start's t=0 h tiles and the pages that hold them (one h slot each), against the slots by rule.
   const seedTiles = (solver as unknown as { mixedSeed?: { fineTiles: Uint32Array } }).mixedSeed?.fineTiles;
   const seed = seedTiles ? { tiles: seedTiles.length, pages: new Set(Array.from(seedTiles, k => k >>> 9)).size, slotCapacity: solver.info.uniformMixedSlotCapacity } : undefined;
-  memory = { construction: { ms: built_ms, bulkStart, bytes: built.liveBytes, peak: built.peakBytes, seed, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
+  // FLUID_GPU_INIT_CENSUS=1: construction's GPU tasks by phase and the slowest (lib/core/gpu-initialization); the rest of ms is the host's.
+  const census = readInitializationCensus(), stages = census.length ? {
+    tasks_ms: census.reduce((n, e) => n + e.elapsed_ms, 0),
+    byPhase: Object.fromEntries(census.reduce((m, e) => m.set(e.phase, (m.get(e.phase) ?? 0) + e.elapsed_ms), new Map<string, number>())),
+    slowest: [...census].sort((a, b) => b.elapsed_ms - a.elapsed_ms).slice(0, 15).map(e => [e.taskId, e.elapsed_ms]) } : undefined;
+  memory = { construction: { ms: built_ms, stages, bulkStart, bytes: built.liveBytes, peak: built.peakBytes, seed, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
   const frame = (solver as unknown as { mixedFrame: UniformMixedFrame }).mixedFrame;
   const { nx, ny, nz } = solver.info;
   const high = 16 * Math.floor(nx / 32);
@@ -149,5 +159,5 @@ const kernelMeans_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, v.red
 const late = stepMs.slice(Math.floor(stepMs.length / 2));
 const timing = { median_ms: quantile(stepMs, 0.5), p95_ms: quantile(stepMs, 0.95), lateHalfMedian_ms: quantile(late, 0.5), lateHalfP95_ms: quantile(late, 0.95) };
 console.log(JSON.stringify(timing));
-writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, height, width, depth, steps, closed, memory, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, kernelMeans_ms, rows }, null, 2) + "\n");
+writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, height, width, depth, steps, closed, liquid, memory, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, kernelMeans_ms, rows }, null, 2) + "\n");
 console.log(JSON.stringify({ out }));
