@@ -2,7 +2,7 @@ import type { EditorRay } from "../../editor-entity";
 import { scenerySurfaceAt } from "../../editor-scenery";
 import type { Vec3 } from "../../model";
 import { sceneCellSizes_m } from "../../scene-lattice";
-import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../../solid-world";
+import { sceneWithSolidStroke, type SolidWorldCoordinate as Cell, type SolidWorldVoxelPatch as Patch } from "../../solid-world";
 import { subcellEllipsoidPatch } from "../../solid-patch/ellipsoid-bounds";
 import { SVO_SCULPT_CUT_MAXIMUM_RECORDS } from "../../../svo/features/scene-publication/svo-sculpt-cuts";
 import { materialControl, operationTone, shellControl, toolMaterialId } from "../controls";
@@ -14,8 +14,8 @@ import { toolReader, type ToolChoiceControl, type ToolContext, type ToolGesture,
 export const penModeControl: ToolChoiceControl = {
   id: "mode", kind: "choice", label: "Pen", initial: 0,
   options: [
-    { value: 0, label: "Draw", hint: "Add a rounded stroke along the surface as you drag.", shortcut: "t", tone: "body" },
-    { value: 1, label: "Carve", hint: "Cut a rounded stroke into solids, terrain or scenery as you drag.", shortcut: "r", tone: "inflow" },
+    { value: 0, label: "Draw", hint: "Add a rounded stroke as you drag. Move away and return to build higher.", shortcut: "t", tone: "body" },
+    { value: 1, label: "Carve", hint: "Cut into solids, terrain or scenery. Move away and return to carve deeper.", shortcut: "r", tone: "inflow" },
   ],
 };
 export const penDiameterControl: ToolNumberControl = {
@@ -67,24 +67,59 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
   };
   const existingCuts = context.scene.solidVoxels.filter(p => p.operation === "clear" && p.affectsScenery === true).length;
   const patches: Patch[] = [], keys = new Set<string>();
+  // Stamps under the brush stay out of picking until the brush leaves them.
+  // This keeps a sweep level, but lets a later pass work on the edited surface.
+  let pickingContext = context;
+  let active: { readonly patch: Patch; readonly point: Vec3 }[] = [];
   let voxels = 0;
   let last: { readonly ray: EditorRay; readonly surface: PenSurface } | undefined;
   let published: readonly Patch[] = patches;
   let shown: { key: string; update: ToolUpdate } | undefined;
   const caption = `${carve ? "CARVE" : "DRAW"} · ${diameter} voxel diameter`;
   return { surface: true, update(ray): ToolUpdate | undefined {
-    const surface = surfaceAt(context, ray, false);
-    if (!surface) {
-      // A later re-entry begins a fresh segment, even when two endpoints would
-      // otherwise span an editable surface behind the off-surface excursion.
-      last = undefined;
-      shown = undefined;
-      return patches.length ? { patches: published, highlight: { kind: "paths", paths: [] },
-        tone: operationTone(operation), caption } : undefined;
-    }
-    const landed: PenSurface[] = [];
-    if (last) {
-      const delta = axes.map((axis, a) => (surface.point[axis] - last!.surface.point[axis]) / cell[a]!);
+    // Stage picking changes as well as geometry: a rejected update must leave
+    // the previous accepted stroke usable, including its brush footprint.
+    let nextContext = pickingContext, nextActive = active.slice();
+    const additions: Patch[] = [], addedKeys = new Set<string>();
+    let additionalVoxels = 0;
+    const retire = (departed: typeof active): void => {
+      if (departed.length) nextContext = { ...nextContext,
+        scene: sceneWithSolidStroke(nextContext.scene, departed.map(entry => entry.patch)) };
+    };
+    const sample = (sampleRay: EditorRay): PenSurface | undefined => {
+      // Measure across the ray in voxel units, so a changing depth alone never
+      // counts as leaving. One diameter separates overlapping brush footprints.
+      const direction = axes.map((axis, a) => sampleRay.direction[axis] / cell[a]!);
+      const lengthSquared = direction.reduce((sum, v) => sum + v * v, 0);
+      const departed: typeof active = [];
+      nextActive = nextActive.filter(entry => {
+        const offset = axes.map((axis, a) => (entry.point[axis] - sampleRay.origin[axis]) / cell[a]!);
+        const t = lengthSquared > 0
+          ? Math.max(0, offset.reduce((sum, v, a) => sum + v * direction[a]!, 0) / lengthSquared) : 0;
+        const distance = Math.hypot(...offset.map((v, a) => v - t * direction[a]!));
+        if (distance > diameter) { departed.push(entry); return false; }
+        return true;
+      });
+      retire(departed);
+      const hit = surfaceAt(nextContext, sampleRay, false);
+      if (!hit) { retire(nextActive); nextActive = []; return undefined; }
+      const patch = stamp(hit), key = `${patch.minimum.join(",")}:${patch.payload ?? ""}`;
+      if (!keys.has(key) && !addedKeys.has(key)) {
+        additions.push(patch); addedKeys.add(key);
+        nextActive.push({ patch, point: hit.point });
+        additionalVoxels += patch.minimum.reduce((volume, v, a) => volume * (patch.maximumExclusive[a]! - v), 1);
+        if (carve && existingCuts + patches.length + additions.length > SVO_SCULPT_CUT_MAXIMUM_RECORDS) {
+          throw new Error(`Scenery sculpt capacity reached (${SVO_SCULPT_CUT_MAXIMUM_RECORDS} cuts); undo cuts before adding more.`);
+        }
+        if (patches.length + additions.length > MAX_STROKE_PATCHES || voxels + additionalVoxels > MAX_STROKE_VOXELS) {
+          throw new Error("Stroke is full; release and start another stroke.");
+        }
+      }
+      return hit;
+    };
+    const target = surfaceAt(pickingContext, ray, false);
+    if (last && target) {
+      const delta = axes.map((axis, a) => (target.point[axis] - last!.surface.point[axis]) / cell[a]!);
       const distance = diameter > 1 ? Math.hypot(...delta) : Math.max(...delta.map(Math.abs));
       if (distance > 1024) throw new Error("Stroke span exceeds 1,024 voxels; use shorter strokes.");
       const span = Math.ceil(distance / (diameter > 1 ? .5 : 1));
@@ -93,29 +128,21 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
       });
       for (let i = 1; i < span; i++) {
         const t = i / span;
-        const crossed = surfaceAt(context, { origin: mix(last.ray.origin, ray.origin, t),
-          direction: mix(last.ray.direction, ray.direction, t) }, false);
-        if (crossed) landed.push(crossed);
+        sample({ origin: mix(last.ray.origin, ray.origin, t),
+          direction: mix(last.ray.direction, ray.direction, t) });
       }
     }
-    landed.push(surface);
-    const nib = stamp(surface), nibKey = `${nib.minimum.join(",")}:${nib.payload ?? ""}`;
-    const additions: Patch[] = [], addedKeys = new Set<string>();
-    let additionalVoxels = 0;
-    for (const hit of landed) {
-      const patch = hit === surface ? nib : stamp(hit), key = `${patch.minimum.join(",")}:${patch.payload ?? ""}`;
-      if (keys.has(key) || addedKeys.has(key)) continue;
-      additions.push(patch); addedKeys.add(key);
-      additionalVoxels += patch.minimum.reduce((volume, v, a) => volume * (patch.maximumExclusive[a]! - v), 1);
-    }
-    if (carve && existingCuts + patches.length + additions.length > SVO_SCULPT_CUT_MAXIMUM_RECORDS) {
-      throw new Error(`Scenery sculpt capacity reached (${SVO_SCULPT_CUT_MAXIMUM_RECORDS} cuts); undo cuts before adding more.`);
-    }
-    if (patches.length + additions.length > MAX_STROKE_PATCHES || voxels + additionalVoxels > MAX_STROKE_VOXELS) {
-      throw new Error("Stroke is full; release and start another stroke.");
-    }
+    const surface = sample(ray);
     patches.push(...additions); for (const key of addedKeys) keys.add(key); voxels += additionalVoxels;
     if (additions.length) published = patches.slice();
+    pickingContext = nextContext; active = nextActive;
+    if (!surface) {
+      // A miss breaks interpolation and arms all accepted stamps for re-entry.
+      last = undefined; shown = undefined;
+      return patches.length ? { patches: published, highlight: { kind: "paths", paths: [] },
+        tone: operationTone(operation), caption } : undefined;
+    }
+    const nib = stamp(surface), nibKey = `${nib.minimum.join(",")}:${nib.payload ?? ""}`;
     last = { ray, surface };
     if (!additions.length && shown?.key === nibKey) return shown.update;
     // Only the nib is outlined. Accepted geometry is already live, and no

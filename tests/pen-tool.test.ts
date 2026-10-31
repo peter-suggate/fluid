@@ -61,6 +61,62 @@ test("pen fills fast-motion gaps with surface samples and never creates a select
   assert.equal(base.solidVoxels.length, 1, "geometry plugin leaves publication to the live host");
 });
 
+test("Draw and Carve accumulate on a return pass within the same drag", () => {
+  for (const size of [1, 5]) for (const mode of [0, 1]) for (const stepped of [false, true]) {
+    const base = scene();
+    base.solidVoxels = [{ operation: "fill", minimum: [2, 1, 2], maximumExclusive: [30, 16, 30] }];
+    const start = ray(base, 8.125), gesture = penTool.begin({ scene: base, ray: start, values: values(size, mode) })!;
+    const first = gesture.update(start)!;
+    const height = (patch: typeof first.patches[number]) => ellipsoidBounds(patch).minimum[1];
+    const initialHeight = height(first.patches[0]!);
+    assert.equal(gesture.update(start), first, "holding still reuses the preview without accumulating");
+    if (stepped) for (let x = 9; x < 20; x++) gesture.update(ray(base, x + .125));
+    const outward = gesture.update(ray(base, 20.125))!;
+    assert.ok(outward.patches.every(p => height(p) === initialHeight),
+      `a single sweep keeps its depth: size=${size}, mode=${mode}, stepped=${stepped}`);
+    if (stepped) for (let x = 19; x > 8; x--) gesture.update(ray(base, x + .125));
+    const returned = gesture.update(start)!;
+    assert.deepEqual(returned.patches.slice(0, outward.patches.length), outward.patches,
+      "a return pass preserves the accepted prefix for live publication and undo");
+    const finalHeight = height(returned.patches.at(-1)!);
+    assert.ok(mode === 1 ? finalHeight < initialHeight : finalHeight > initialHeight,
+      `${mode === 1 ? "carve deepens" : "draw builds"} with diameter ${size}, stepped=${stepped}`);
+    assert.equal(gesture.update(start), returned, "pausing after a return pass does not accumulate again");
+    assert.equal(base.solidVoxels.length, 1, "picking does not mutate the original document");
+  }
+});
+
+test("leaving the surface and returning adds another layer without releasing", () => {
+  for (const mode of [0, 1]) {
+    const base = scene(), start = ray(base, 8);
+    const gesture = penTool.begin({ scene: base, ray: start, values: values(1, mode) })!;
+    gesture.update(start);
+    const miss = { ...start, direction: { x: 0, y: 1, z: 0 } };
+    gesture.update(miss);
+    const second = gesture.update(start)!;
+    assert.deepEqual(second.patches.map(p => p.minimum[1]), mode === 1 ? [3, 2] : [4, 5]);
+    gesture.update(miss);
+    const third = gesture.update(start)!;
+    assert.deepEqual(third.patches.map(p => p.minimum[1]), mode === 1 ? [3, 2, 1] : [4, 5, 6]);
+    assert.equal(gesture.update(start), third);
+  }
+});
+
+test("small rounded-brush motion does not repeatedly deepen the same footprint", () => {
+  for (const mode of [0, 1]) {
+    const base = scene(), start = ray(base, 10);
+    const gesture = penTool.begin({ scene: base, ray: start, values: values(5, mode) })!;
+    const first = gesture.update(start)!;
+    for (let i = 0; i < 3; i++) {
+      gesture.update(ray(base, 10.25));
+      const returned = gesture.update(start)!;
+      assert.equal(returned.patches.length, 2);
+      assert.ok(returned.patches.every(p => ellipsoidBounds(p).minimum[1]
+        === ellipsoidBounds(first.patches[0]!).minimum[1]));
+    }
+  }
+});
+
 test("each interpolated pen sample follows the actual stepped surface", () => {
   const base = scene();
   base.solidVoxels = [...base.solidVoxels, { operation: "fill", minimum: [16, 4, 2], maximumExclusive: [30, 8, 30], materialId: 2 }];
@@ -183,6 +239,25 @@ test("consecutive scenery strokes pick the newly carved cut face then reveal the
   assert.equal(next.patches[0]!.minimum[1], 3, "the terrain below becomes the nearest editable surface");
   const fromCavity = scenerySurfaceAt(cut, { origin: { x: .025, y: .65, z: .025 }, direction: { x: 0, y: -1, z: 0 } })!;
   assert.ok(Math.abs(fromCavity.position_m.y - cap.position_m.y) < 1e-4, "a ray beginning inside the cavity finds its near cut wall");
+});
+
+test("a return pass within one carve drag picks the exposed scenery cut face", () => {
+  const base = scene();
+  base.scenery = { ...base.scenery!, nodes: [minimalRoomSceneryGraph.nodes[0]!, { kind: "box", id: "block",
+    place: { units: "metres", position: { x: 0, y: .6, z: 0 } }, halfSize: { x: .2, y: .1, z: .2 },
+    material: { colorLinear: [1, 1, 1] } }] };
+  const start = { origin: { x: .025, y: 2, z: .025 }, direction: { x: 0, y: -1, z: 0 } };
+  const gesture = penTool.begin({ scene: base, ray: start, values: values(2, 1) })!;
+  const first = gesture.update(start)!;
+  gesture.update({ ...start, origin: { ...start.origin, x: .325 } });
+  const returned = gesture.update(start)!;
+  assert.ok(ellipsoidBounds(returned.patches.at(-1)!).minimum[1]
+    < ellipsoidBounds(first.patches[0]!).minimum[1]);
+  const firstFace = scenerySurfaceAt(sceneWithSolidStroke(base, first.patches), start)!;
+  const returnedFace = scenerySurfaceAt(sceneWithSolidStroke(base, returned.patches), start)!;
+  assert.ok(returnedFace.position_m.y < firstFace.position_m.y - .02,
+    "published geometry deepens the cavity as well as the brush preview");
+  assert.equal(gesture.update(start), returned);
 });
 
 test("legacy voxel clears do not carve scenery and uncut rays retain exact picks", () => {
