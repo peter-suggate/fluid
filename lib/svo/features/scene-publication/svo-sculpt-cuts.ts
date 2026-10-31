@@ -35,7 +35,7 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
   return words;
 }
 
-/** Conservative bounds test for replacing native imported draws with carved voxel geometry. */
+/** Conservative bounds test for source instances affected by a carve. */
 export function intersectsSvoSculptCuts(words: Uint32Array, minimum: V3, maximum: V3): boolean {
   const f = new Float32Array(words.buffer, words.byteOffset, words.length);
   for (let i = 0; i < words[0]!; i++) {

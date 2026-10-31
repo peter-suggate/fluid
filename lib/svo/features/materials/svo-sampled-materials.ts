@@ -60,8 +60,9 @@ export function writeSculptMaterialMirrors(table: Uint32Array, count: number): n
   }
   return end;
 }
-/** Independent palette identities let an edited instance use the SVO mesh
- * while other instances of the same asset keep their original native mesh. */
+/** Interior palette identities carry PBR without projecting exterior textures
+ * onto new cut walls. Coarse voxel views use these same mirrored identities;
+ * native rendering keeps the source identity on surviving exterior surfaces. */
 export function sculptMaterialTable(base: Uint32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> {
   const cached = sculptMaterialMirrors.get(base); if (cached) return cached;
   const count = base.length / SVO_MATERIAL_RECORD_WORDS;

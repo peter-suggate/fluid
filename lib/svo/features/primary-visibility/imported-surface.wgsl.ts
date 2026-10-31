@@ -1,6 +1,10 @@
-/** A native asset is extracted once. Hardware depth handles visibility; the
- * fragment performs one source normal/PBR lookup, never a field ray march. */
+import { importedCutPrimaryWGSL } from "./imported-surface-csg.wgsl";
+
+/** Cached source boundaries and live cut walls share the published field and
+ * edit list. Surviving source fragments keep their original normal/PBR lookup;
+ * hardware depth composes them with the analytic cavity walls. */
 export const importedSurfaceWGSL = /* wgsl */ `
+${importedCutPrimaryWGSL}
 @group(1) @binding(80) var<storage,read> importedLodRecords:array<vec4u>;
 @group(1) @binding(81) var<storage,read_write> importedDrawArgs:array<atomic<u32>>;
 @group(1) @binding(82) var<storage,read_write> importedInstanceIds:array<u32>;
@@ -56,12 +60,14 @@ struct ImportedSurfaceOut {
   @location(2) geometry:vec4f,@location(3) opaqueIdentity:vec2u,
 }
 @fragment fn importedSurfaceFragment(input:ImportedSurfaceVertex)->ImportedSurfaceOut{
+  if(importedSurfaceRemoved(input.world,0xffffffffu)){discard;}
   let record=dryPrimitive(input.primitive);
   let reference=svoPrimitiveFieldProgramReference(record);
   let surface=dryFieldProgramBlockSurface((reference-DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET)/DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS,input.local);
   let normal=normalize(svoQuaternionRotate(record.orientation,surface.normal));
+  let material=select(svoPrimitiveMaterialId(record),surface.material,surface.material!=0u);
   let camera=dryRasterPrimaryCamera();let rd=normalize(input.world-camera[0]);
-  let hit=DryHit(length(input.world-camera[0]),normal,select(svoPrimitiveMaterialId(record),surface.material,surface.material!=0u),svoPrimitiveOwnerId(record),SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+  let hit=DryHit(length(input.world-camera[0]),normal,material,svoPrimitiveOwnerId(record),SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
   let out=dryRasterPrimarySurface(hit,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);
   return ImportedSurfaceOut(out.packedSurface,out.identityMedia,out.geometry,out.opaqueIdentity);
 }

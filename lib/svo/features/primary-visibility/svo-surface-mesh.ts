@@ -1,3 +1,4 @@
+import { SVO_SCULPT_MATERIAL_OFFSET } from "../scene-publication/svo-sculpt-cuts";
 import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
 import { svoMeshPlanarRasterWGSL } from "./svo-mesh-planar-raster";
 import { svoAuthoredSurfaceNormalsWGSL } from "./svo-authored-surface-normals";
@@ -683,8 +684,27 @@ fn meshRegionAt(p:vec3f)->MeshRegion {
   }
   return MeshRegion(origin,size,0u,0u,SVO_INVALID);
 }
+// Imported geometry owns its primary surface independently of voxel proxies.
+// A conservative occupied proxy must not withhold the entire cached world mesh
+// when the eye is still in the source field's air. Keep the fallback for actual
+// source interiors and unavailable or invalid source evidence.
+fn meshCameraInsideSampledSource(world:vec3f)->bool{
+  if(svoSculptCutDistance(world)<-1e-5){return false;}
+  var known=false;
+  for(var i=0u;i<dry.metadata.x;i++){
+    let record=dryPrimitive(i);
+    if(svoPrimitiveKind(record)!=SVO_KIND_FIELD_PROGRAM||!drySampledMaterial(svoPrimitiveMaterialId(record))){continue;}
+    let reference=svoPrimitiveFieldProgramReference(record);
+    if(reference<DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET||drySceneWord(reference)!=0xfffffffeu){return true;}
+    let distance=svoFieldProgramReferenceSample(reference,svoPrimitiveLocalPoint(record,world)).distance_m;
+    if(!(distance>1e-5&&distance<1e19)){return true;}
+    known=true;
+  }
+  return !known;
+}
 fn meshPointSolid(p:vec3f)->bool{
   let region=meshRegionAt(p);if(!sceneIdentitySolid(region.identity)){return false;}
+  if(drySampledMaterial(sceneIdentityMaterial(region.identity)%${SVO_SCULPT_MATERIAL_OFFSET}u)){return meshCameraInsideSampledSource(dry.mapping.worldOrigin+p*dry.mapping.cellSize);}
   ${contours ? `if(region.contour!=0u){
     let clip=cellContour(sceneIdentityNormal(region.identity),dry.mapping.cellSize*region.size,region.contour);
     return dot(clip.normal,(p-region.origin)/region.size-vec3f(0.5))<=clip.high;
@@ -788,17 +808,18 @@ var<private> meshEntry:u32;
 var<private> meshEmitBase:u32;
 var<private> meshEmitCount:u32;
 fn meshAppend(origin:vec3u,extent:vec3u,packedFace:u32,identity:u32){
-  // Native sampled surfaces replace these proxy faces at draw time. Reject in
+  // Native sampled surfaces, including carved instances, replace these proxy
+  // faces. Mirrored sculpt IDs still refer to the same native source owner. Reject in
   // BOTH count and emit phases, before reserving arena space or paying culling,
   // vertex and fragment work. Their voxel occupancy remains for lighting.
-  ${retainSampledShadowCasters ? "// Raster shadow maps still consume the proxy casters." : `if((dryMaterial(sceneIdentityMaterial(identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){return;}`}
+  ${retainSampledShadowCasters ? "// Raster shadow maps still consume the proxy casters." : `if((dryMaterial(sceneIdentityMaterial(identity)%${SVO_SCULPT_MATERIAL_OFFSET}u).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){return;}`}
   if(meshPhase==0u){meshJobCount+=1u;return;}
   let slot=atomicAdd(&meshWork[meshScratchAt(meshEntry)+1u],1u);
   // The two phases traverse the same published voxels; a mismatch is an
   // extraction fault, reported rather than written past the brick's range.
   if(slot>=meshEmitCount){atomicOr(&meshState[${W.errorFlags}],2u);return;}
   meshArena[meshEmitBase+slot]=SurfaceQuad(origin,identity,extent,packedFace);
-  if((dryMaterial(sceneIdentityMaterial(identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)==0u){
+  if((dryMaterial(sceneIdentityMaterial(identity)%${SVO_SCULPT_MATERIAL_OFFSET}u).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)==0u){
     let leaf=atomicLoad(&meshWork[meshListAt(meshEntry)]);
     atomicOr(&meshWork[meshTableAt(leaf)+9u],1u);
   }
@@ -1490,7 +1511,7 @@ fn surfaceMeshPrimaryCandidates(@builtin(global_invocation_id) id:vec3u,@builtin
   if(index<atomicLoad(&meshState[${W.cullQuads}])){
     let quad=meshArena[index];
     visible=!meshQuadDead(quad);
-    ${retainSampledShadowCasters ? `visible=visible&&(dryMaterial(sceneIdentityMaterial(quad.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)==0u;` : ""}
+    ${retainSampledShadowCasters ? `visible=visible&&(dryMaterial(sceneIdentityMaterial(quad.identity)%${SVO_SCULPT_MATERIAL_OFFSET}u).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)==0u;` : ""}
   }
   ${subgroups ? `meshCompact(index,visible,true);` : `
   if(lane==0u){atomicStore(&meshCullCount,0u);}workgroupBarrier();
@@ -1615,7 +1636,7 @@ ${(adaptiveNormals ? [false,true] : [false]).map(far => /* wgsl */ `
   // Native assets draw their own surface. Cull any retained shadow-only proxy
   // before rasterization, including the unculled benchmark arm. Keeping this
   // out of the fragment entry point lets the tile GPU treat the mesh as opaque.
-  if((dryMaterial(sceneIdentityMaterial(quad.identity)).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){position=vec4f(0.0,0.0,0.0,1.0);}
+  if((dryMaterial(sceneIdentityMaterial(quad.identity)%${SVO_SCULPT_MATERIAL_OFFSET}u).identity.w&${SVO_MATERIAL_FLAGS.sampledVolume}u)!=0u){position=vec4f(0.0,0.0,0.0,1.0);}
   ${culling ? "" : "// Without the cull pass, an unselected or freed quad collapses to a zero-area strip.\n  if(meshQuadDead(quad)||!meshQuadSelectedRead(quad)){position=vec4f(0.0,0.0,0.0,1.0);}"}
   var normal=vec3f(0.0);normal[axis]=select(-1.0,1.0,(face&1u)!=0u);
   ${contours ? `if(meshTriangle(quad)){
@@ -1736,6 +1757,7 @@ ${svoMeshPlanarRasterWGSL}
   let undrawn=meshHeader[${W.usable}]==0u||meshHeader[${W.withheld}]!=0u||(meshHeader[${W.errorFlags}]&2u)!=0u;
   let masked=!undrawn&&meshHeader[${W.boxCount}]!=0u&&meshRayCrossesDirtyBox(camera[0],rd);
   if(undrawn||masked){
+    dryNativePrimaryRaster=true;
     let current=traceStatic(camera[0],rd);
     if(current.t<hit.t){hit=current;producer=SVO_GBUFFER_PRODUCER_BRICK;}
   }else{

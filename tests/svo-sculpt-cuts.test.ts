@@ -164,8 +164,7 @@ test("native imported paver voxelization carves cells, preserves palette, bakes 
       const distantCut: SolidWorldVoxelPatch = { operation: "clear", affectsScenery: true, minimum: [24, 0, 0], maximumExclusive: [28, 8, 8] };
       const mirrored = await publish([distantCut], true);
       const expectedMirror = baseline.slice();
-      for (let i = base; i < base + tree.voxelCapacity; i++) if ((expectedMirror[i]! & 65535) !== 0) expectedMirror[i]! += 8192;
-      assert.deepEqual(mirrored, expectedMirror, "distant native transition changes only existing palette identities, preserving every geometry and normal word");
+      assert.deepEqual(mirrored, expectedMirror, "a distant cut leaves existing palette identities and geometry unchanged");
       assert.deepEqual(await readDual(), baselineDual, "identity-only transition retains every DMC point and field value byte");
       assert.deepEqual(await publish([distantCut], true), expectedMirror, "repeated identity repair is idempotent");
       assert.deepEqual(await publish([], true), baseline, "identity-only undo restores the original palette exactly");
@@ -175,7 +174,8 @@ test("native imported paver voxelization carves cells, preserves palette, bakes 
       const removed = at(6, 3, 3), retained = at(1, 3, 3), cap = at(dmc ? 4 : 3, 3, 3);
       assert.ok((baseline[removed]! & 65535) > 0, "the original imported paver occupies the cut interior");
       assert.equal(carved[removed]! & 65535, 0, "the marked cut erases imported solid cells");
-      assert.equal(carved[retained]! & 65535, (baseline[retained]! & 65535) + 8192, "retained imported cells keep their PBR palette identity in the sculpt mirror");
+      assert.equal(carved[retained]! & 65535, baseline[retained]! & 65535, "retained imported cells keep their original PBR palette identity");
+      assert.ok((carved[cap]! & 65535) >= 8192, "only a newly exposed cavity uses an interior palette");
       const normal = decodeSvoGBufferNormalOct8(carved[cap]! >>> 16);
       assert.ok(normal[0] > .98, `cut cap faces into cavity: ${JSON.stringify(normal)}`);
       if (dmc) {

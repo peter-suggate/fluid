@@ -3074,8 +3074,7 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
     // palette, normal, distance, coverage and dual vertex completely intact.
     let previous=${readPayload("materialOffset")};let oldMaterial=previous&0xffffu;
     if(oldMaterial!=0u){
-      var material=oldMaterial%${SVO_SCULPT_MATERIAL_OFFSET}u;
-      if(bestPrimitive!=INVALID_INDEX&&primitiveHasSculptedNativeSurface(primitives[bestPrimitive])){material+=${SVO_SCULPT_MATERIAL_OFFSET}u;}
+      let material=oldMaterial%${SVO_SCULPT_MATERIAL_OFFSET}u;
       ${writePayload("materialOffset", "(previous&0xffff0000u)|material")}
     }
     return;
@@ -3156,12 +3155,10 @@ ${dual && dualMarchingCubes ? `
       let cut=svoSculptCutSample(surfacePoint);
       if(primitiveReceivesSculptCuts(primitive)&&-cut.distance>=primitiveUncutDistance(primitive,surfacePoint)){
         bestNormal=-cut.normal;
+        if(primitiveHasSculptedNativeSurface(primitive)){bestMaterial+=${SVO_SCULPT_MATERIAL_OFFSET}u;}
       }`}
     }
   }
-  ${sculptCutOffsetWords === undefined ? "" : `if(bestPrimitive!=INVALID_INDEX&&primitiveHasSculptedNativeSurface(primitives[bestPrimitive])){
-    bestMaterial+=${SVO_SCULPT_MATERIAL_OFFSET}u;
-  }`}
   // The scene lane is exclusively owned by this transaction. Fluid and
   // velocity live in disjoint payload lanes, so every material ID—including
   // terrain and rigid-body IDs below the scenery range—can update atomically.

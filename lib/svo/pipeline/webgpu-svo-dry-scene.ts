@@ -1040,6 +1040,7 @@ interface SvoDrySplitPipelineBundle {
   readonly brickCoverageOverflow?: GPURenderPipeline;
   readonly scenePrimitiveRaster?: GPURenderPipeline;
   readonly importedSurface?: GPURenderPipeline;
+  readonly importedCut?: GPURenderPipeline;
   readonly importedSurfaceSelect?: GPUComputePipeline;
   readonly importedSurfaceReset?: GPUComputePipeline;
   readonly scenePrimitiveCoverage?: GPURenderPipeline;
@@ -1292,6 +1293,7 @@ export class SparseVoxelDrySceneRenderer {
   private surfaceMeshDrawGroup?: GPUBindGroup;
   private sampledVolumePrimitiveIndices: number[] = [];
   private importedSurfacePipeline?: GPURenderPipeline;
+  private importedCutPipeline?: GPURenderPipeline;
   private importedSurfaceSelectPipeline?: GPUComputePipeline;
   private importedSurfaceResetPipeline?: GPUComputePipeline;
   private importedSurfaceInstanceIds?: GPUBuffer;
@@ -1872,6 +1874,7 @@ export class SparseVoxelDrySceneRenderer {
     this.brickCoverageOverflowPipeline = bundle.brickCoverageOverflow;
     this.scenePrimitiveRasterPipeline = bundle.scenePrimitiveRaster;
     this.importedSurfacePipeline = bundle.importedSurface;
+    this.importedCutPipeline = bundle.importedCut;
     this.importedSurfaceSelectPipeline = bundle.importedSurfaceSelect;
     this.importedSurfaceResetPipeline = bundle.importedSurfaceReset;
     this.scenePrimitiveCoveragePipeline = bundle.scenePrimitiveCoverage;
@@ -2355,6 +2358,7 @@ export class SparseVoxelDrySceneRenderer {
       || cached.group !== group || cached.planes !== this.source!.structural!.planarBoundaries.count
       || cached.instances !== this.importedSurfaceInstances || cached.imported !== this.importedSurfacePipeline
       || cached.records !== this.importedSurfaceLodRecords || cached.args !== this.importedSurfaceDrawArgs
+      || cached.cuts !== (this.scene?.sculptCuts?.[0] ?? 0) || cached.cutPipeline !== this.importedCutPipeline
       || cached.compact !== compact || cached.rigid !== rigid || cached.rigidPipeline !== this.rasterRigidDirectPipeline
       || cached.rigidGroup !== this.rasterRigidInputBindGroup) {
       this.surfaceMeshDrawCache = this.createSurfaceMeshDrawBundle(usePrepass, group, compact);
@@ -2423,6 +2427,12 @@ export class SparseVoxelDrySceneRenderer {
             }
           }
     }
+    const cuts = this.scene?.sculptCuts?.[0] ?? 0;
+    if (cuts && this.importedSurfaceInstances.length && this.importedCutPipeline) {
+      draw.setPipeline(primaryPipeline(this.importedCutPipeline));
+      draw.setBindGroup(0, this.bindGroup);
+      draw.draw(36, cuts);
+    }
     draw.setPipeline(primaryPipeline(pipelines.draw));
     if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
     draw.setBindGroup(group, this.surfaceMeshDrawGroup!);
@@ -2436,7 +2446,7 @@ export class SparseVoxelDrySceneRenderer {
       draw.setBindGroup(0, this.rasterRigidInputBindGroup!);
       draw.draw(SVO_RIGID_RASTER_CONTRACT.verticesPerProxy, SVO_RIGID_RASTER_CONTRACT.maximumBodies);
     }
-    return { bundles: [draw.finish()], compact, main: this.bindGroup, pipelines, mesh: this.surfaceMeshDrawGroup,
+    return { bundles: [draw.finish()], cuts, cutPipeline: this.importedCutPipeline, compact, main: this.bindGroup, pipelines, mesh: this.surfaceMeshDrawGroup,
       prepass: usePrepass ? this.conePrepassBindGroup : undefined, group,
       planes: this.source!.structural!.planarBoundaries.count, instances: this.importedSurfaceInstances,
       imported: this.importedSurfacePipeline, records: this.importedSurfaceLodRecords, args: this.importedSurfaceDrawArgs,
@@ -4230,8 +4240,15 @@ export class SparseVoxelDrySceneRenderer {
         primitive: { topology: "triangle-list", cullMode: "back" },
         depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
       }) : undefined;
+      const importedCut = this.experiments.surfaceMesh ? await this.compileMeshPrimaryPipeline({
+        label: "Live native CSG cut walls", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        vertex: { module, entryPoint: "importedCutVertex" },
+        fragment: { module, entryPoint: "importedCutFragment", targets: rasterPrimaryTargets },
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
+      }) : undefined;
       const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!, this.experiments.nativeAssetShadows !== false);
-      const bundle = { rasterAo, importedSurface, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, precomputedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      const bundle = { rasterAo, importedSurface, importedCut, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, precomputedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
@@ -5357,7 +5374,6 @@ export class SparseVoxelDrySceneRenderer {
   private publishImportedSurfaces(scene: SparseVoxelDrySceneData): void {
     this.sampledVolumePrimitiveIndices = [];
     const instances: typeof this.importedSurfaceInstances = [];
-    const sculpted = new Set(scene.sculptedPrimitiveIndices);
     let geometryChanged = false;
     const fieldBase = SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4;
     for (let i = 0; i < scene.primitiveRecords.length / SVO_PRIMITIVE_RECORD_WORDS; i++) {
@@ -5365,7 +5381,6 @@ export class SparseVoxelDrySceneRenderer {
       if (scene.primitiveRecords[at + 3] !== SVO_PRIMITIVE_KINDS.fieldProgram) continue;
       const offset = scene.primitiveRecords[at + 13]! - fieldBase;
       if (scene.fieldProgramBlocks?.[offset] === SVO_SAMPLED_VOLUME_TAG) {
-        if (sculpted.has(i)) continue;
         this.sampledVolumePrimitiveIndices.push(i);
         if (this.experiments.surfaceMesh) {
           const asset = Object.keys(MESH_ASSETS)[scene.fieldProgramBlocks[offset + 3]! - 1]!;
@@ -5448,7 +5463,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   /** Finest asset meshes cast independently of the camera's compact LOD list. */
-  private readonly drawImportedShadows = (pass: GPURenderPassEncoder): void => {
+  private readonly drawImportedShadows = (pass: GPURenderPassEncoder, cutPipeline?: GPURenderPipeline): void => {
     if (!this.importedShadowInstances) return;
     for (const [index,group] of this.importedShadowGroups.entries()) {
       const mesh=this.importedSurfaceMeshes.get(group.asset)!;
@@ -5457,6 +5472,8 @@ export class SparseVoxelDrySceneRenderer {
       pass.setIndexBuffer(mesh.indices,"uint32");
       pass.drawIndexedIndirect(this.rasterAo!.nativeDrawArguments!,index*24);
     }
+    const cuts = this.scene?.sculptCuts?.[0] ?? 0;
+    if (cuts && cutPipeline) { pass.setPipeline(cutPipeline); pass.draw(36, cuts); }
   };
 
   /**
@@ -7444,6 +7461,7 @@ export class SparseVoxelDrySceneRenderer {
     this.brickCoverageHeight = 0;
     this.scenePrimitiveRasterPipeline = undefined;
     this.importedSurfacePipeline = undefined;
+    this.importedCutPipeline = undefined;
     this.importedSurfaceSelectPipeline = undefined;
     this.importedSurfaceLodRecords?.destroy(); this.importedSurfaceDrawArgs?.destroy();
       this.importedSurfaceInstanceIds?.destroy(); this.importedSurfaceGroupRecords?.destroy();

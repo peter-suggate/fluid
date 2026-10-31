@@ -86,7 +86,7 @@ fn rasterShadowRectangle(c:vec3f,h:vec3f,l:u32)->vec4f{
  let lo=min((c.xy-r)/(c.z-r),(c.xy-r)/(c.z+r));
  let hi=max((c.xy+r)/(c.z-r),(c.xy+r)/(c.z+r));return vec4f((lo+hi)*.5,(hi-lo)*.5);
 }
-${importedSurfaceShadowWGSL}
+${importedSurfaceShadowWGSL.split("struct RasterNativeShadowVertex")[0]}
 struct Case {centreRadius:vec4f,layerMode:vec4f}
 @group(0) @binding(0) var<storage,read> cases:array<Case>;
 @group(0) @binding(1) var<storage,read_write> result:array<u32>;

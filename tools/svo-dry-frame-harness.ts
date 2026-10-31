@@ -1,6 +1,5 @@
+import { svoRenderScenePublication, type SvoRenderScenePublication } from "../lib/svo/features/scene-publication/svo-render-scene-publication";
 import { BUB_RENDER_SHAPE, robotRenderExtent, robotRenderRadius } from '../lib/interaction/features/robot/render';
-import { markSampledVolumeOwnerMaterials, sampledVolumeMaterialRecords } from "../lib/svo/features/materials/svo-sampled-materials";
-import { publishOpaqueSurfaceCapability } from "../lib/svo/features/shading/deferred-specialization";
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
 import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
 /**
@@ -43,25 +42,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { environmentIndex, type EnvironmentId } from "../lib/core/environments";
 import { cameraPosition } from "../lib/core/math";
 import { sceneryGraphForEnvironment } from "../lib/core/scenery-presets";
-import { sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "../lib/core/model";
+import { type CameraState, type SceneDescription } from "../lib/core/model";
 import { cameraTanHalfFov } from "../lib/core/webgpu-camera";
 import { boundingRadius, initializeRigidBodies } from "../lib/core/rigid-body";
-import { SCENE_ENVIRONMENT_OWNER_BASE } from "../lib/core/webgpu-rigid-body";
 import { SCENE_SHAPE_PALETTE_LINEAR, sceneShapeCode, sceneShapeRenderHalfExtent_m } from "../lib/core/scene-shape";
-import {
-  buildDefaultSvoMaterialRecords,
-  packSvoMaterialTable,
-  svoMaterialFromEnvironmentProxyMaterial,
-  svoMaterialFunctionIdForEnvironmentProxy,
-} from "../lib/svo/contracts/svo-material-abi";
 import { svoPrimitiveCandidateBounds } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
-import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/features/scene-publication/svo-scene-primitives";
-import { sceneSvoGroundPlane, sceneTerrainSurfaceModel } from "../lib/svo/features/materials/svo-terrain-material";
+import { type SvoScenePrimitiveBuild } from "../lib/svo/features/scene-publication/svo-scene-primitives";
+import { sceneTerrainSurfaceModel } from "../lib/svo/features/materials/svo-terrain-material";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME, svoDryRigidBounds } from "../lib/core/webgpu-renderer";
-import {
-  buildSparseVoxelDrySceneLightingMirrors,
-} from "../lib/svo/pipeline/webgpu-svo-dry-scene";
 import type { SparseVoxelSceneRenderSource } from "../lib/core/webgpu-voxel-debug";
 
 /** Floats in the 416-byte view uniform block (`FluidLabRenderer`, webgpu-renderer.ts). */
@@ -248,6 +237,7 @@ export function packSvoDryRigidBodies(scene: SceneDescription) {
 // ---------------------------------------------------------------------------
 
 export interface SvoDrySceneAssembly {
+  readonly publication: SvoRenderScenePublication;
   readonly drySceneData: SparseVoxelDrySceneData;
   readonly scenePrimitives: SvoScenePrimitiveBuild;
   readonly terrainSurface: ReturnType<typeof sceneTerrainSurfaceModel>;
@@ -261,52 +251,13 @@ export function buildSvoDrySceneAssembly(
   scene: SceneDescription,
   source: SparseVoxelSceneRenderSource,
 ): SvoDrySceneAssembly {
-  const scenePrimitives = buildSvoScenePrimitives(scene);
-  const terrainSurface = sceneTerrainSurfaceModel(scene);
-  const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, 1);
-  const drySceneData: SparseVoxelDrySceneData = {
-    renderRevision: 1,
-    primitiveRecords: scenePrimitives.packedRecords,
-    primitiveCandidates: scenePrimitives.primitiveCandidates!,
-    materialRecords: packSvoMaterialTable([
-      ...buildDefaultSvoMaterialRecords(1, { terrainSurface }),
-      ...scenePrimitives.metadata.map((primitive) => svoMaterialFromEnvironmentProxyMaterial(
-        primitive.materialId,
-        primitive.material,
-        1,
-        // Keep the headless production mirror on the same scene-wide closure
-        // as FluidLabRenderer. Otherwise a porcelain scene silently falls back
-        // to per-object semantic materials here (for example, granite coping),
-        // invalidating every material and primary-visibility comparison.
-        svoMaterialFunctionIdForEnvironmentProxy(primitive, terrainSurface),
-      )),
-      ...sampledVolumeMaterialRecords(scenePrimitives.fieldPrograms, 1),
-    ]),
-    materialRevision: 1,
-    ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,
-    skippedOwnerId: scenePrimitives.openShellOwnerId,
-    // The same door, for the aggregate kind. Without it every cluster record
-    // names a zeroed arena block, the shader reads that as "not resolved", and
-    // the crown of the hero's bonsai draws as nothing at all — which is what a
-    // headless frame showed before this line existed.
-    clusterBlocks: scenePrimitives.clusterBlocks,
-    // And the same door for the tape kind, which fails identically without it:
-    // every `field-program` record would name a zeroed block and draw nothing.
-    fieldProgramBlocks: scenePrimitives.fieldProgramBlocks,
-    ...lightingMirrors,
-    rasterAoContrast: scene.lighting?.rasterAoContrast,
-    // Presentation policy is scene data too. Omitting this made every headless
-    // fidelity frame silently exercise the default baked analytic normals even
-    // when the product document requested voxel-flat surfaces.
-    flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
-    // And the ground beyond the set, for the same reason: a headless frame of a
-    // terrain-shell scene without it is the floating-slab picture the product
-    // no longer draws.
-    groundPlane: sceneSvoGroundPlane(scene),
-  };
-  markSampledVolumeOwnerMaterials(drySceneData.materialRecords, scenePrimitives.descriptors);
-  drySceneData.opaqueSurfaceOnly = publishOpaqueSurfaceCapability(scene, drySceneData.materialRecords, drySceneData.primitiveRecords);
-  return { drySceneData, scenePrimitives, terrainSurface };
+  // Use the production publication directly. The former hand-built mirror
+  // omitted sculpt cuts, interior palettes and texture atlases, so a capture
+  // could silently render an unedited, untextured scene.
+  const publication = svoRenderScenePublication(scene, 1, undefined);
+  assert.ok(publication, "The scene's lighting publication must be available");
+  return { publication, drySceneData: { ...publication.data, renderRevision: 1 },
+    scenePrimitives: publication.primitives, terrainSurface: publication.terrainSurface };
 }
 
 // ---------------------------------------------------------------------------

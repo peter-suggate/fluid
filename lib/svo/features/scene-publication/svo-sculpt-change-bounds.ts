@@ -27,9 +27,9 @@ export function sceneryPrimitiveAffectedBySculptCuts(cuts: Uint32Array, primitiv
 }
 
 /** Scenery clears need publication even when their voxel pages were already empty.
- * A native import changes representation as a whole on its first/last cut, so
- * those transitions dirty its whole bound. Subsequent stamps dirty only their
- * own volumes. The same rule restores planar proxies on undo. */
+ * Native surfaces retain their source identities; only newly exposed cut walls
+ * use interior materials, so first/last cuts are local too. Exact planar slabs
+ * still need their whole bounds when changing between planar and voxel views. */
 export function svoSculptChangeBounds(scene: SceneLattice, previous: readonly SolidWorldVoxelPatch[],
   next: readonly SolidWorldVoxelPatch[], primitives: readonly EnvironmentProxyPrimitive[]) {
   const before = previous.filter(p => p.operation === "clear" && p.affectsScenery === true);
@@ -51,13 +51,13 @@ export function svoSculptChangeBounds(scene: SceneLattice, previous: readonly So
   dirtyBounds.push(...cutBounds);
   const oldCuts = sceneSculptCuts(scene, before), newCuts = sceneSculptCuts(scene, after);
   for (const primitive of primitives) {
+    if (primitive.kind === "field-program" && primitive.program.sampledVolume) continue;
     const wasAffected = sceneryPrimitiveAffectedBySculptCuts(oldCuts, primitive);
     const isAffected = sceneryPrimitiveAffectedBySculptCuts(newCuts, primitive);
     if (wasAffected === isAffected) continue;
     const bounds = sculptPrimitiveBounds(primitive);
     relistPlanar ||= primitive.kind === "box";
-    dirtyBounds.push(primitive.kind === "field-program" && primitive.program.sampledVolume
-      ? { ...bounds, identityOnly: true } : bounds);
+    dirtyBounds.push(bounds);
     if (isAffected) addedPrimitiveBounds.push(bounds);
   }
   return { changed: true, dirtyBounds, addedPrimitiveBounds, cutBounds, relistPlanar };

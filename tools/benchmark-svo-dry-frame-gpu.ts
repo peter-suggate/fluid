@@ -973,6 +973,9 @@ const catalogScene = (): SceneDescription => {
   }).scene;
 };
 const scene = sceneModule?.createScene ? sceneModule.createScene() : catalogScene();
+// Node has no origin for the browser's /assets URLs. Register the same FVX
+// and native surface payloads before building imported scenes such as Tokyo.
+await (await import("./blender/register-assets")).registerSceneMeshAssets(scene);
 if (process.env.FLUID_SVO_DRY_FRAME_SURFACE_STYLE === "voxel-flat") scene.surfaceStyle = "voxel-flat";
 if (process.env.FLUID_SVO_DRY_FRAME_SURFACE_STYLE === "smooth") scene.surfaceStyle = "smooth";
 /**
@@ -1071,7 +1074,7 @@ if (cellContourCensus) log(`Cell contours: ${JSON.stringify(cellContourCensus)}`
 
 // Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly,
 // shared with tools/run-svo-dry-render-smoke.ts through the harness.
-const { drySceneData, scenePrimitives } = buildSvoDrySceneAssembly(scene, source);
+const { drySceneData, scenePrimitives, publication: initialPublication } = buildSvoDrySceneAssembly(scene, source);
 assert.ok(canConsumeSparseVoxelPbrMaterials(source), "PBR material publication unavailable");
 assert.ok(canEncodeSparseVoxelDryScene(source, drySceneData), "production dry-scene contract rejected the garden source");
 const nodeMip = source.nodeMipPyramid;
@@ -1132,7 +1135,9 @@ assert.ok(!(surfaceExperiments&&nativeLod),"Run surface and LOD sweeps separatel
 const normalSources={terrain:!!source.structural?.sceneMaintenance?.renderTerrain,boundary:!!source.structural?.sceneMaintenance?.solidBoundary};
 if(surfaceExperiments)log(`Primary normal sources: ${JSON.stringify(normalSources)}`);
 const surfaceStudy=surfaceExperiments?await primarySurfaceStudy(lightingReference?.device??primaryAblation?.device??device,surfaceExperiments.split(","),normalSources):undefined;
-const renderer = new SparseVoxelDrySceneRenderer(surfaceStudy?.device ?? nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
+const sculptProbeDevice = process.env.FLUID_SVO_DRY_FRAME_SCULPT_LIVE_STUDY
+  ? (await import("./probe-native-sculpt-live")).nativeSculptProbeDevice(device) : undefined;
+const renderer = new SparseVoxelDrySceneRenderer(sculptProbeDevice ?? surfaceStudy?.device ?? nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   surfaceStudy ? { ...optimizationExperiments, surfaceMeshCompactTargets: false, surfaceMeshAdaptiveNormals: false } : optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
@@ -1265,6 +1270,18 @@ if (coneScale !== 1 && profileSeconds <= 0) {
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during warmup");
 log(`Warmup complete (${Math.max(1, warmups)} frames per variant)`);
+if (process.env.FLUID_SVO_DRY_FRAME_SCULPT_LIVE_STUDY) {
+  const { probeNativeSculptLive } = await import("./probe-native-sculpt-live");
+  await probeNativeSculptLive({ device, renderer, solver, scene, initialPublication, target, width, height, encodeFrame,
+    directory: process.env.FLUID_SVO_DRY_FRAME_SCULPT_LIVE_STUDY,
+    png: rows => { const pixels = decodePixels(rows), rgb = new Uint8Array(width * height * 3);
+      for (let i = 0; i < width * height; i++) rgb.set(displayPixel(pixels, i), i * 3);
+      return encodePng(width, height, rgb); } });
+  assert.deepEqual(validationErrors, [], "GPU validation during live native carving");
+  renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy();
+  process.exit(0);
+}
+
 
 if(process.env.FLUID_SVO_DRY_FRAME_CHECK_PRIMARY_TARGETS==="1"){
   assert.ok(optimizationExperiments.surfaceMesh&&!surfaceStudy,"Check production mesh targets without experimental replay");

@@ -82,12 +82,12 @@ test("native sampled surfaces omit duplicate mesh faces but raster shadow maps r
   assert.match(rasterShadows, /meshArena\[meshEmitBase\+slot\]=SurfaceQuad/);
   const cull = svoSurfaceMeshWGSL(3, 1 << 7, true, true, true)
     .split("fn surfaceMeshPrimaryCandidates(")[1]!.split("fn surfaceMeshCullDispatch")[0]!;
-  assert.match(cull, /dryMaterial\(sceneIdentityMaterial\(quad.identity\)\).identity.w&4u/,
+  assert.match(cull, /dryMaterial\(sceneIdentityMaterial\(quad.identity\)%8192u\).identity.w&4u/,
     "geometry compaction excludes shadow proxies from camera candidates");
   for (const culling of [true, false]) {
     const source = svoSurfaceMeshWGSL(3, 1 << 7, culling, true, true);
     const [vertex, fragment] = source.split("@vertex fn surfaceMeshVertex")[1]!.split("@fragment fn surfaceMeshFragment");
-    assert.match(vertex!, /if\(\(dryMaterial\(sceneIdentityMaterial\(quad.identity\)\).identity.w&4u\)!=0u\)\{position=vec4f\(0\.0,0\.0,0\.0,1\.0\);\}/,
+    assert.match(vertex!, /if\(\(dryMaterial\(sceneIdentityMaterial\(quad.identity\)%8192u\).identity.w&4u\)!=0u\)\{position=vec4f\(0\.0,0\.0,0\.0,1\.0\);\}/,
       "retained proxies collapse before rasterization, including without compaction");
     assert.doesNotMatch(fragment!.split("\n}")[0]!, /discard/,
       "opaque mesh fragments must not retain the proxy rejection discard");

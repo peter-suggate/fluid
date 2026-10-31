@@ -1,3 +1,4 @@
+import { packSvoSculptCuts } from "../lib/svo/features/scene-publication/svo-sculpt-cuts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MESH_ASSETS, registerMeshAsset } from "../lib/core/imported-assets/asset-library";
@@ -35,6 +36,7 @@ for (const nativeShadows of [false, true]) test(`imported surface publication re
   });
   const scene = (index = 0) => {
     const records = new Uint32Array((index + 1) * SVO_PRIMITIVE_RECORD_WORDS);
+    new Float32Array(records.buffer)[index * SVO_PRIMITIVE_RECORD_WORDS + 11] = 1;
     records[index * SVO_PRIMITIVE_RECORD_WORDS + 3] = SVO_PRIMITIVE_KINDS.fieldProgram;
     records[index * SVO_PRIMITIVE_RECORD_WORDS + 13] = SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4;
     return { primitiveRecords: records, fieldProgramBlocks: new Uint32Array([
@@ -75,13 +77,21 @@ for (const nativeShadows of [false, true]) test(`imported surface publication re
     assert.equal(resources.length, 16 + 3 * shadowAllocation);
 
     const shadowRecords = renderer.importedShadowInstances;
-    renderer.publishImportedSurfaces({ ...scene(1), sculptedPrimitiveIndices: [1] });
-    if (nativeShadows) assert.equal(shadowRecords.destroyed, true, "sculpting retires the original native shadow record");
-    assert.equal(renderer.importedShadowInstances, undefined);
-    assert.equal(renderer.importedSurfaceInstances.length, 0, "sculpted instance yields to its edited SVO surface");
-    assert.deepEqual(renderer.sampledVolumePrimitiveIndices, []);
+    const carved = { ...scene(1), sculptedPrimitiveIndices: [1], sculptCuts: packSvoSculptCuts([
+      { operation: "clear", affectsScenery: true, minimum: [0, 0, 0], maximumExclusive: [1, 1, 1] },
+    ], { origin_m: [0, 0, 0], cellSize_m: [.1, .1, .1] }) };
+    renderer.publishImportedSurfaces(carved);
+    assert.equal(renderer.importedShadowInstances, shadowRecords, "carving retains the native shadow resources");
+    assert.equal(renderer.importedSurfaceInstances.length, 1, "carving retains the native field surface");
+    assert.deepEqual(renderer.sampledVolumePrimitiveIndices, [1]);
+    assert.equal(resources.length, 16 + 3 * shadowAllocation, "first cut allocates no mesh or GPU resources");
+    const vertices = renderer.importedSurfaceMeshes.get(asset).vertices;
+    for (const next of [{ ...carved, sculptCuts: carved.sculptCuts.slice() }, scene(1), carved]) {
+      renderer.publishImportedSurfaces(next);
+      assert.equal(resources.length, 16 + 3 * shadowAllocation, "edits, undo and redo need no geometry allocation");
+      assert.equal(renderer.importedSurfaceMeshes.get(asset).vertices, vertices);
+    }
     renderer.publishImportedSurfaces(scene(1));
-    assert.equal(renderer.importedSurfaceInstances.length, 1, "undo restores original imported geometry");
     const resourcesBeforeRemoval = resources.length;
     const groupsBeforeRemoval = groups;
     const finalRecords = renderer.importedSurfaceLodRecords;

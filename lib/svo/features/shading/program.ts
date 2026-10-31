@@ -1,6 +1,7 @@
 import { sampledSurfaceTexturesWGSL } from "../materials/sampled-surface-textures.wgsl";
-import { SVO_SCULPT_CUT_ARENA_WORDS, svoSculptCutsWGSL } from "../scene-publication/svo-sculpt-cuts";
+import { SVO_SCULPT_CUT_ARENA_WORDS, SVO_SCULPT_MATERIAL_OFFSET, svoSculptCutsWGSL } from "../scene-publication/svo-sculpt-cuts";
 import { robotShaderLibrary } from '../../../interaction/features/robot/render';
+import { importedSurfaceCsgWGSL } from "../primary-visibility/imported-surface-csg.wgsl";
 import { importedSurfaceWGSL } from "../primary-visibility/imported-surface.wgsl";
 import { svoVoxelLightHashWGSL, SVO_VOXEL_LIGHT_CACHE_BYTES_PER_ENTRY } from "../lighting-visibility/svo-voxel-light-cache";
 import { rasterAoConsumerWGSL, rasterAoProducerWGSL } from "../lighting-visibility/svo-raster-ao";
@@ -1317,10 +1318,16 @@ fn drySceneFractionOfVoxel(voxel:u32)->f32{
    *
    * `onSolid` runs with `identity` in scope.
    */
-  const cellSolidGateWGSL = (index: string, onSolid: string): string =>
-    leafPayloadMode === "dense"
-      ? `let identity=sceneIdentityOf(identitySource,${index});if(sceneIdentitySolid(identity)){${onSolid}}`
-      : `if(sceneIdentitySolidAt(${index})){let identity=sceneIdentityAt(${index});${onSolid}}`;
+  // A rebuilding voxel mesh may trace its dirty regions. Imported surfaces
+  // are already drawn from their source plus live cuts in the same pass;
+  // their conservative voxel proxy must never cover that detailed surface.
+  const cellSolidGateWGSL = (index: string, onSolid: string): string => {
+    const resolve = experiments.surfaceMesh
+      ? `if(!dryNativePrimaryRaster||!drySampledMaterial(sceneIdentityMaterial(identity)%${SVO_SCULPT_MATERIAL_OFFSET}u)){${onSolid}}` : onSolid;
+    return leafPayloadMode === "dense"
+      ? `let identity=sceneIdentityOf(identitySource,${index});if(sceneIdentitySolid(identity)){${resolve}}`
+      : `if(sceneIdentitySolidAt(${index})){let identity=sceneIdentityAt(${index});${resolve}}`;
+  };
   const fastDeferred = split && experiments.opaqueConeLighting === true;
   const voxelLightCache = split && experiments.voxelLightCache !== false;
   const edgeReceiverRecovery = reduced && experiments.edgeReceiverRecovery !== false;
@@ -4262,6 +4269,7 @@ fn dryClusterPacking(record:SvoPrimitiveRecord)->SvoClusterPacking{
 }
 fn drySculptCutWord(index:u32)->u32{return drySceneArena[${SVO_DRY_SCENE_ARENA_LAYOUT.sculptCutOffsetBytes / 4}u+index];}
 ${svoSculptCutsWGSL("drySculptCutWord")}
+${experiments.rasterAo || experiments.surfaceMesh ? importedSurfaceCsgWGSL : ""}
 fn drySceneWord(offset:u32)->u32{return drySceneArena[offset];}
 ${svoFieldProgramWGSL({
   functionName: "dryFieldProgramBlock",
@@ -4545,6 +4553,7 @@ fn drySampledMaterial(materialId:u32)->bool{
 }
 var<private> drySampledReceiver:bool;
 var<private> drySampledShadowRay:bool;
+${experiments.surfaceMesh ? "var<private> dryNativePrimaryRaster:bool;" : ""}
 const DRY_OPAQUE_FACE_VALID:u32=134217728u;const DRY_OPAQUE_FACE_SHIFT:u32=28u;const DRY_OPAQUE_FACE_MASK:u32=2013265920u;
 // Zero unless the face differs from the shading normal *and* is exactly axis
 // aligned. Anything else keeps the bits clear and reads back as the shading

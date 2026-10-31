@@ -53,13 +53,13 @@ const imported = {
 const stamp: SolidWorldVoxelPatch = { operation: "clear", kind: "ellipsoid", affectsScenery: true,
   minimum: [12, 10, 10], maximumExclusive: [13, 11, 11] };
 
-test("first and last imported cuts dirty the full owner using shared conservative ownership bounds", () => {
+test("first, subsequent and undone imported cuts dirty only the edited volume", () => {
   const base = scene();
   // x=.10..15 touches the padded native box boundary.
   assert.equal(sceneryPrimitiveAffectedBySculptCuts(sceneSculptCuts(base, [stamp]), imported), true);
   const first = svoSculptChangeBounds(base, [], [stamp], [imported]);
-  assert.deepEqual(first.dirtyBounds, [solidWorldVoxelPatchBounds_m(base, stamp), { ...sculptPrimitiveBounds(imported), identityOnly: true }]);
-  assert.deepEqual(first.addedPrimitiveBounds, [sculptPrimitiveBounds(imported)]);
+  assert.deepEqual(first.dirtyBounds, [solidWorldVoxelPatchBounds_m(base, stamp)]);
+  assert.deepEqual(first.addedPrimitiveBounds, []);
   const second = { ...stamp, minimum: [10, 10, 10] as const, maximumExclusive: [11, 11, 11] as const };
   assert.deepEqual(svoSculptChangeBounds(base, [stamp], [stamp, second], [imported]).dirtyBounds,
     [solidWorldVoxelPatchBounds_m(base, second)], "continuing a stroke updates only its new volume");

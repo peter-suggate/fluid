@@ -17,6 +17,12 @@ test('native surface and camera-independent ranges compile in the production mes
     await device.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'importedSurfaceVertex',buffers:[{arrayStride:12,attributes:[{shaderLocation:0,offset:0,format:'float32x3'}]},{arrayStride:128,stepMode:'instance',attributes:[{shaderLocation:1,offset:0,format:'uint32'}]}]},
       fragment:{module,entryPoint:'importedSurfaceFragment',targets:[{format:G.packedSurfaceFormat},{format:G.identityMediaFormat},{format:'rgba32float'},{format:'rg32uint'}]},
       primitive:{topology:'triangle-list'},depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'greater'}});
+    await device.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'importedCutVertex'},
+      fragment:{module,entryPoint:'importedCutFragment',targets:[{format:G.packedSurfaceFormat},{format:G.identityMediaFormat},{format:'rgba32float'},{format:'rg32uint'}]},
+      primitive:{topology:'triangle-list'},depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'greater'}});
+    await device.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'rasterNativeCutVertex'},
+      fragment:{module,entryPoint:'rasterNativeCutFragment',targets:[]},primitive:{topology:'triangle-list'},
+      depthStencil:{format:'depth32float',depthWriteEnabled:true,depthCompare:'less'}});
   },["subgroups"]);
 });
 

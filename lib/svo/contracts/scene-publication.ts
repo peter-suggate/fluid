@@ -43,7 +43,7 @@ export interface SparseVoxelDrySceneData {
   surfaceTextureAtlas?: import("../../core/imported-assets/surface-texture-atlas").SurfaceTextureAtlas;
   /** Explicit prop carving CSG; fixed-capacity region shared with the voxelizer. */
   sculptCuts?: Uint32Array<ArrayBuffer>;
-  /** Imported instances rendered from their edited SVO surface instead of their source mesh. */
+  /** Imported instances whose native source field must be composed with sculptCuts. */
   sculptedPrimitiveIndices?: readonly number[];
   /** CPU-built mirror of the producer's bounded 112-byte light publication. */
   lightRecords?: Uint32Array<ArrayBuffer>;
