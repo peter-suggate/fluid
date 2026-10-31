@@ -29,5 +29,7 @@ test("under a sparse domain each loaded field binds its base twin, which a slotl
   assert.match(code, new RegExp(`@group\\(0\\) @binding\\(${4 + UNIFORM_DETAIL_TWIN_BINDING}\\) var udb_volumeIn:texture_3d<f32>;`));
   const load = /fn udLoad_volumeIn\(q:vec3i\)->vec4f\{([\s\S]*?)\n\}/.exec(code)?.[1];
   assert.ok(load, "the load accessor");
-  assert.match(load, /umCellSlotless\(q\)\)\{return textureLoad\(udb_volumeIn,/);
+  // One resolution serves the slotless test and the h texel.
+  assert.match(load, /let s=umCellSlotOf\(q\);if\(umBlockStored\(s\.x\)&&s\.y==0u\)\{return textureLoad\(udb_volumeIn,/);
+  assert.match(load, /textureLoad\(volumeIn,umCellTexelAt\(q,s\.y\),0\)/);
 });

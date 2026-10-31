@@ -1337,13 +1337,18 @@ fn udVertexSlot(v:vec3i,bits:u32)->vec4u{
   const twin=twins?.get(name),other=(v:string)=>A.store(v,"(1u-b)");
   if(!storage||type.includes("read_write")){
    // Compacted stores: an h texture holds no texel of a slotless block, whose values are its base's.
-   const slotless=kind==="vertex"?`${pf}umVertexSlotless(q)`:`${pf}umCellSlotless(q)`;
-   const check=sparse&&twin&&kind!=="atlas"?`if(b==0u&&${slotless}){return textureLoad(${twin},${home("q")}${level});}
- `:"";
+   // The h load resolves its block (a vertex's walk) once, for the slotless test and the texel both
+   // (umCellSlotOf, umVertexSlotTexel): the same texels as umCellSlotless/umVertexSlotless then at(q).
+   const resolve=kind==="vertex"?`let s=${pf}umVertexSlotTexel(q);if(s.w!=0){return textureLoad(${twin},${home("q")}${level});}`
+    :`let s=${pf}umCellSlotOf(q);if(${pf}umBlockStored(s.x)&&s.y==0u){return textureLoad(${twin},${kind==="face"?`udFace(${pf}umCellTexelAt(q,s.x),1u)`:`(${pf}umCellTexelAt(q,s.x)>>vec3u(2u*1u))`}${level});}`;
+   const hTexel=kind==="vertex"?"s.xyz":`${pf}umCellTexelAt(q,s.y)`;
+   const sparseLoad=sparse&&!!twin&&kind!=="atlas";
    const load=`textureLoad(${name},${at("q")}${level})`;
    out+=`fn udLoad_${name}${sfx}(q:vec3i${site})->vec4f{
  ${mode}
- ${check}${kind==="atlas"?`return select(textureLoad(${name},${stored("q")}${level}),vec4f(0.0),b!=0u);`
+ ${sparseLoad?`if(b==0u){${resolve}let v=textureLoad(${name},${hTexel}${level});${watch?`udWatch(q,v.x${pass});`:""}return v;}
+ return ${load};`
+   :kind==="atlas"?`return select(textureLoad(${name},${stored("q")}${level}),vec4f(0.0),b!=0u);`
    :watch?`let v=${load};if(b==0u){udWatch(q,v.x${pass});}return v;`:`return ${load};`}
 }
 `;

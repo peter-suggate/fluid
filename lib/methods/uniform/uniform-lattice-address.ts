@@ -234,6 +234,11 @@ fn umCellTexelOf(p:vec3i,fine:bool)->vec3i{${cellLet}var b=umBlockOf(${cellQ}>>v
 fn umCellStoreTexelOf(p:vec3i,fine:bool)->vec3i{let w=umPageWord(p>>vec3u(5u));if(!umBlockStored(w)){return vec3i(-1);}var b=w;if(fine){b=umFineSlot(w);if(b==0u){return vec3i(-1);}}return (umBlockCoord(b)<<vec3u(5u))|(p&vec3i(31));}
 // A cell (vertex below) of a stored block that has no h slot: compacted h stores hold no texel of it.
 fn umCellSlotless(p:vec3i)->bool{${cellLet}let b=umBlockOf(${cellQ}>>vec3u(5u));return umBlockStored(b)&&umFineSlot(b)==0u;}
+// A compacted h store's load resolves its cell once: x the block (umBlockOf), y its h slot (umFineSlot). Slotless:
+// umBlockStored(x) && y == 0. TexelAt: the cell's texel in a cell texture that places a block at block w's place
+// (umCellTexelOf(p, false) of w = x, umCellTexelOf(p, true) of w = y).
+fn umCellSlotOf(p:vec3i)->vec2u{${cellLet}let b=umBlockOf(${cellQ}>>vec3u(5u));return vec2u(b,umFineSlot(b));}
+fn umCellTexelAt(p:vec3i,w:u32)->vec3i{${cellLet}return (umBlockCoord(w)<<vec3u(5u))|(${cellQ}&vec3i(31));}
 // The block of a cell${boxed(" of the box")}.
 fn umCellBlock(p:vec3u)->u32{return umBlockOf(vec3i(p>>vec3u(5u)));}
 // Vertices of the h lattice: one more plane per axis than the cells. A page
@@ -266,6 +271,8 @@ fn umVertexSlot(v:vec3i)->vec4u{
 fn umVertexPresent(p:vec3i)->bool{return umBlockStored(umVertexSlot(p).w);}
 fn umVertexTexel(p:vec3i)->vec3i{${D}let s=umVertexSlot(${vertexQ});let c=umFineCoord(min(s.w,${blocks}-1u));return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 fn umVertexSlotless(p:vec3i)->bool{${D}let s=umVertexSlot(${vertexQ});return umBlockStored(s.w)&&umFineSlot(s.w)==0u;}
+// A compacted h store's load resolves its vertex once, by one walk: xyz umVertexTexel(p), w 1 where umVertexSlotless(p).
+fn umVertexSlotTexel(p:vec3i)->vec4i{${D}let s=umVertexSlot(${vertexQ});let f=umFineSlot(min(s.w,${blocks}-1u));let c=umBlockCoord(f);return vec4i((c<<vec3u(5u))+c+vec3i(s.xyz),i32(umBlockStored(s.w)&&f==0u));}
 fn umVertexStoreTexel(p:vec3i)->vec3i{let s=umVertexSlot(p);let f=umFineSlot(s.w);if(!umBlockStored(s.w)||f==0u){return vec3i(-1);}let c=umBlockCoord(f);return (c<<vec3u(5u))+c+vec3i(s.xyz);}
 // Vertices of the 4h lattice (tile corners), in tile units: 9³ blocks.
 fn umWideVertexSlot(v:vec3i)->vec4u{
