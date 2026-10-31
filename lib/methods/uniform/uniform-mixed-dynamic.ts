@@ -1691,7 +1691,8 @@ fn residencyRadius()->u32{return u32(ceil(departureTravel()/4.0))+${RESIDENCY_MA
 ${localResidencyMarkWGSL}
 // pageMark, after the commit: the same exact occupied-tile dilation as
 // the request. The largest local radius only bounds the seed search; it
-// never expands an individual region. Claimed blocks had zero seed masks.
+// never expands an individual region. Claimed blocks had zero seed masks;
+// their authored h tiles mark their own regions here.
 // A workgroup a page of the pool's visit list (uniform-live-lists; a free
 // page's flag is 0), strided over a fixed grid (lrResidentLane).
 @compute @workgroup_size(64) fn pageMark(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
@@ -1703,6 +1704,10 @@ ${localResidencyMarkWGSL}
   if(lane==0u){atomicStore(&lrMarks,0u);}
   workgroupBarrier();
   lrResidentLane(page,min(radius,${4*UNIFORM_RESIDENCY_PAGE_REACH}u),lane);
+  // The page's authored h tiles (a refinement region's, umStaticFine) seed
+  // ownership as pageSeed seeds them, without a record: a block this commit
+  // claimed has none yet, and the layout makes them h at once. Lane j: tile j.
+  {let t=umPageTile(page,lane);if(umBlockStored(page>>3u)&&umTileLive(t)&&umStaticFine(t)){atomicOr(&lrMarks,1u);}}
   workgroupBarrier();
   if(lane==0u){umSupport[UM_RESIDENCY+4u+page]=atomicLoad(&lrMarks);}
  }

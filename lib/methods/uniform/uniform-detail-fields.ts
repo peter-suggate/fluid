@@ -1636,6 +1636,19 @@ export function uniformDetailModule(device:GPUDevice,descriptor:GPUShaderModuleD
  }
  return module;
 }
+/** How a solver with fixed world geometry compiles its page lookups, from
+ * its seed: frame, the frame is a constant (a closed tank); inside, the
+ * world box lies in the window's pages 0..windowLast, so a page off the
+ * window is off the box; narrow, a narrow pool, whose stored pages always
+ * lie in the flat window (FlatWindow in every module); flat, a fixed frame
+ * whose world box lies in lattice pages -1..62, the flat window's (FlatWindow
+ * in the modules that read no runtime world). */
+export function uniformFixedWindowSelection(seed:{readonly layout:{readonly wide:boolean;readonly tail:{readonly window:number}};readonly tail:ArrayLike<number>}):{frame:boolean;inside:boolean;narrow:boolean;flat:boolean}{
+ const at=seed.layout.tail.window,frame=uniformWindowFixedFrame(seed.tail[at+UNIFORM_WINDOW_HEADER.policy]!);
+ const word=(i:number)=>seed.tail[at+i]!|0,last=word(UNIFORM_WINDOW_HEADER.windowLast)>>>0;
+ const within=(edge:number,from:number)=>[0,1,2].every(a=>{const f=word(UNIFORM_WINDOW_HEADER.frame+a)+from,lo=word(UNIFORM_WINDOW_HEADER.solidLow+a),hi=word(UNIFORM_WINDOW_HEADER.solidHigh+a);return lo>=f&&hi<=f+edge;});
+ return {frame,inside:within(last+1,0),narrow:!seed.layout.wide,flat:frame&&within(UNIFORM_DIRECTORY_FLAT_EDGE,-1)};
+}
 const storageOf=new WeakMap<UniformMixedOwnership,UniformDetailStorage>();
 /** Every pipeline is compiled once. */
 export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwnership,descriptor:GPUComputePipelineDescriptor):Promise<GPUComputePipeline>{
@@ -1645,10 +1658,7 @@ export function uniformDetailPipeline(device:GPUDevice,ownership:UniformMixedOwn
  }
  const prefixes=ownership.fixedWorldGeometry?fixedWorldPrefixes.get(descriptor.compute.module):undefined;
  if(prefixes?.length){
-  const seed=ownership.capacity.address.seed,at=seed.layout.tail.window,frame=uniformWindowFixedFrame(seed.tail[at+UNIFORM_WINDOW_HEADER.policy]!);
-  const word=(i:number)=>seed.tail[at+i]!|0,last=word(UNIFORM_WINDOW_HEADER.windowLast)>>>0;
-  const within=(edge:number,from:number)=>[0,1,2].every(a=>{const f=word(UNIFORM_WINDOW_HEADER.frame+a)+from,lo=word(UNIFORM_WINDOW_HEADER.solidLow+a),hi=word(UNIFORM_WINDOW_HEADER.solidHigh+a);return lo>=f&&hi<=f+edge;});
-  const inside=within(last+1,0),narrow=!seed.layout.wide,flat=frame&&within(UNIFORM_DIRECTORY_FLAT_EDGE,-1);
+  const seed=ownership.capacity.address.seed,at=seed.layout.tail.window,{frame,inside,narrow,flat}=uniformFixedWindowSelection(seed);
   const constants:Record<string,number>={};
   for(const prefix of prefixes){
    constants[`${prefix}FixedWorldGeometry`]=1;if(narrow)constants[`${prefix}FlatWindow`]=1;
