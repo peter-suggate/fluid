@@ -50,7 +50,7 @@ class Rig {
   private constructor(l: UniformBedSlopeBakeLayout) {
     // The canaries are the words after the lane's directory (the image's cut map) and after its slots.
     this.directoryEnd = l.laneBaseWord + 4096; this.slots = imageLayoutOf(l.size, CANARY).words;
-    this.slotsEnd = this.slots + l.laneSlots * l.laneSlotWords; this.words = this.slotsEnd + CANARY;
+    this.slotsEnd = this.slots + l.laneWords; this.words = this.slotsEnd + CANARY;
     this.buffer = device.createBuffer({ label: `solid scratch ${l.size.join("x")}`, size: 4 * this.words, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.read = device.createBuffer({ size: 4 * this.words, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.buffer, 4 * this.directoryEnd, new Uint32Array(CANARY).fill(DEAD)); device.queue.writeBuffer(this.buffer, 4 * this.slotsEnd, new Uint32Array(CANARY).fill(DEAD));
@@ -68,7 +68,8 @@ class Rig {
     device.queue.writeBuffer(this.buffer, 0, image, 0, this.l.laneBaseWord); device.queue.writeBuffer(this.buffer, 4 * slots, image, slots);
     return this.bake.plan(partialOf(mask));
   }
-  poison(): void { device.queue.writeBuffer(this.buffer, 4 * this.slots, new Uint32Array(this.slotsEnd - this.slots).fill(POISON)); }
+  /** The slots, not the child tables before them that the plan wrote. */
+  poison(): void { const first = this.l.laneSlotFirstWord; device.queue.writeBuffer(this.buffer, 4 * first, new Uint32Array(this.slotsEnd - first).fill(POISON)); }
   /** Run `encode`, then the lane; the mask and the canaries must be as they were. */
   async lane(name: string, mask: Mask, encode: (encoder: GPUCommandEncoder) => void): Promise<Uint32Array> {
     const encoder = device.createCommandEncoder(); encode(encoder);

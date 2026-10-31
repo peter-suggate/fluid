@@ -14,7 +14,7 @@ import { SOLID_MASK_DIRECTORY_WORDS, SOLID_MASK_EMPTY, SOLID_MASK_WALL, SolidOcc
 import { uniformLatticeAddress } from "../lib/methods/uniform/uniform-lattice-address";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "../lib/methods/uniform/uniform-mixed-solid.wgsl";
 import { fluidSolidWorldForScene } from "../lib/core/solid-world";
-import { uniformBedSlopeBakeLayout, type UniformBedSlopeBakeBox, type UniformBedSlopeBakeLayout } from "../lib/methods/uniform/uniform-bed-slope-bake";
+import { uniformBedSlopeBakeLayout, uniformBedSlopeDirectoryWord, type UniformBedSlopeBakeBox, type UniformBedSlopeBakeLayout } from "../lib/methods/uniform/uniform-bed-slope-bake";
 
 export type Size = readonly [number, number, number];
 export interface Mask { readonly size: Size; readonly words: Uint32Array }
@@ -36,21 +36,21 @@ export function maskOf(size: Size, solid: (x: number, y: number, z: number) => b
 /** A rig's mask image for a lattice (SolidOccupancyMask's layout): the lane's directory after the directory, `tail` words after it, then a slot a page of the lattice. */
 export const imageLayoutOf = (size: Size, tail = 0): SolidOccupancyMaskLayout =>
   solidOccupancyMaskLayout(tail, Math.ceil(size[0] / 32) * Math.ceil(size[1] / 32) * Math.ceil(size[2] / 32), uniformSolidScratchLayout().bedSlopeWords);
-/** The page columns (x + 64 z) holding a page of the lattice with both solid and open cells: what the bake places its lane by (uniformBedSlopePartialColumns of the mask's image). */
+/** The page columns (x + pages along x times z) holding a page of the lattice with both solid and open cells: what the bake places its lane by (uniformBedSlopePartialColumns of the mask's image). */
 export function partialOf(mask: Mask): Uint8Array {
-  const [nx, ny, nz] = mask.size, solid = solidIn(mask), out = new Uint8Array(4096);
-  for (let pz = 0; pz < Math.ceil(nz / 32); pz++) for (let px = 0; px < Math.ceil(nx / 32); px++) for (let py = 0; py < Math.ceil(ny / 32) && !out[px + 64 * pz]; py++) {
+  const [nx, ny, nz] = mask.size, solid = solidIn(mask), pagesX = Math.ceil(nx / 32), out = new Uint8Array(pagesX * Math.ceil(nz / 32));
+  for (let pz = 0; pz < Math.ceil(nz / 32); pz++) for (let px = 0; px < pagesX; px++) for (let py = 0; py < Math.ceil(ny / 32) && !out[px + pagesX * pz]; py++) {
     let seen = 0;
     for (let z = 32 * pz; z < Math.min(nz, 32 * pz + 32) && seen !== 3; z++) for (let y = 32 * py; y < Math.min(ny, 32 * py + 32) && seen !== 3; y++) for (let x = 32 * px; x < Math.min(nx, 32 * px + 32); x++) seen |= solid(x, y, z) ? 1 : 2;
-    if (seen === 3) out[px + 64 * pz] = 1;
+    if (seen === 3) out[px + pagesX * pz] = 1;
   }
   return out;
 }
-/** The sparse lane of a mask buffer's words (its directory at l.laneBaseWord, its slots where that names) as the dense lane of the emulation: two cells a word over the haloed lattice. */
+/** The sparse lane of a mask buffer's words (its top table at l.laneBaseWord, its child tables and slots where those name) as the dense lane of the emulation: two cells a word over the haloed lattice. */
 export function denseLaneOf(words: ArrayLike<number>, l: UniformBedSlopeBakeLayout): Uint32Array {
   const [nx, ny, nz] = l.size, lane = new Uint32Array(l.denseLaneWords);
   for (let z = 0; z < nz; z++) for (let x = 0; x < nx; x++) {
-    const slot = words[l.laneBaseWord + (x >> 5) + 64 * (z >> 5)]!;
+    const slot = uniformBedSlopeDirectoryWord(words, l.laneBaseWord, x >> 5, z >> 5);
     if (slot) for (let k = 0; k < l.layers; k++) {
       const w = words[slot + l.layers * ((x & 31) + 32 * (z & 31)) + k]!;
       if (!w) continue;

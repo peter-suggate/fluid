@@ -46,7 +46,7 @@ import {
   NBFLIP_RAMP_CELL_SIZE_M, NBFLIP_RAMP_GRID, NBFLIP_RAMP_LENGTH, NBFLIP_RAMP_VARIANTS,
   createNbflipRamp, nbflipRampBed, nbflipRampEmittedCells, nbflipRampShape, type NbflipRampVariant,
 } from "../lib/core/nbflip-ramp-scene";
-import { UNIFORM_BED_SLOPE_LAYERS, UniformBedSlopeBake, uniformBedSlopeBakeCapacity, uniformBedSlopePartialColumns } from "../lib/methods/uniform/uniform-bed-slope-bake";
+import { UNIFORM_BED_SLOPE_CHILD_WORDS, UNIFORM_BED_SLOPE_LAYERS, UniformBedSlopeBake, uniformBedSlopeBakeCapacity, uniformBedSlopePartialColumns } from "../lib/methods/uniform/uniform-bed-slope-bake";
 import { UNIFORM_SOLID_BED_SLOPE_UNITS, uniformSolidBedSlopeAt, uniformSolidBedSlopeEntry, uniformSolidMaskPages, uniformSolidScratchLayout } from "../lib/methods/uniform/uniform-mixed-solid.wgsl";
 import { advanceUniform, createUniformSolver, readUniformFields, withUniformDevice } from "../tests/helpers/uniform-geometric";
 import { readMixedBuffer, readMixedTexture } from "../tests/helpers/uniform-mixed-native-fields";
@@ -103,7 +103,7 @@ await withUniformDevice("ramp residue probe", async device => {
     const started = performance.now();
     if (option.get("lane") === "check") {
       const layout = uniformSolidScratchLayout(), partial = uniformBedSlopePartialColumns(mask.words, NBFLIP_RAMP_GRID), slots = uniformBedSlopeBakeCapacity(NBFLIP_RAMP_GRID, partial);
-      const extent = mask.words.length + slots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS;
+      const extent = mask.words.length + UNIFORM_BED_SLOPE_CHILD_WORDS * slots.laneChildren + slots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS;
       const scratch = device.createBuffer({ label: "Ramp probe solid scratch", size: 4 * extent, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
       const bake = new UniformBedSlopeBake(device, scratch, { size: NBFLIP_RAMP_GRID, laneBaseWord: layout.bedSlopeBaseWord, laneSlotBaseWord: mask.words.length, ...slots });
       try {

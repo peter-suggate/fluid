@@ -45,7 +45,7 @@ import { liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3, 
 import { UNIFORM_PARAMS_BYTES, UNIFORM_PARAMS_HEAD_BYTES, UNIFORM_SOURCE_PLUG_OVERLAP_CELLS } from "./uniform-source.wgsl";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { UniformMixedBodies } from "./uniform-mixed-bodies";
-import { UNIFORM_BED_SLOPE_LAYERS, UniformBedSlopeBake, uniformBedSlopeBakeCapacity, uniformBedSlopePartialColumns } from "./uniform-bed-slope-bake";
+import { UNIFORM_BED_SLOPE_CHILD_WORDS, UNIFORM_BED_SLOPE_LAYERS, UniformBedSlopeBake, uniformBedSlopeBakeCapacity, uniformBedSlopePartialColumns } from "./uniform-bed-slope-bake";
 import { UNIFORM_OPEN_WORLD_TERRAIN_COLUMNS, UniformOpenWorldTerrain } from "./uniform-open-world-terrain";
 import { UniformPrescribedSolidMotion } from "./uniform-prescribed-solid-motion";
 import { samplePrescribedRigidBody } from "../../core/prescribed-rigid-motion";
@@ -524,7 +524,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The bed-slope lane of the solid scratch (uniformSolidScratchLayout): its directory, `words` u32 from word `baseWord` of `buffer`, and its slots,
    * all within the buffer's first `extentWords` (uniformSolidBedSlopeAt reads a copy of those). The bake writes it; a probe reads it back or zeroes its directory. */
   get solidBedSlopeLane(): { buffer: GPUBuffer; baseWord: number; words: number; extentWords: number } {
-    return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords, extentWords: this.solidBedSlopeSlots.word + this.solidBedSlopeSlots.count * 1024 * UNIFORM_BED_SLOPE_LAYERS };
+    return { buffer: this.activeScratch, baseWord: this.solidBedSlopeBaseWord, words: this.solidBedSlopeWords, extentWords: this.solidBedSlopeSlots.word + UNIFORM_BED_SLOPE_CHILD_WORDS * this.solidBedSlopeSlots.children + this.solidBedSlopeSlots.count * 1024 * UNIFORM_BED_SLOPE_LAYERS };
   }
   get physicsFieldsForQA(): {pressure:GPUTexture;gamma:GPUTexture;latticeOrigin:[number,number,number];latticeDimensions:[number,number,number]} {
     return { pressure: this.pressureMultigrid.pressureTexture, gamma: this.live(this.gammaA),
@@ -564,7 +564,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly solidBedSlopeBaseWord: number;
   private readonly solidBedSlopeWords: number;
   /** The bed-slope lane's slots (past the procedural boundary) and the bake's window slots, sized by the build's partly solid page columns. */
-  private readonly solidBedSlopeSlots: { word: number; count: number; window: number };
+  private readonly solidBedSlopeSlots: { word: number; count: number; window: number; children: number; windowChildren: number };
   private readonly reductions: GPUBuffer;
   private readonly conditioningScratch: GPUBuffer;
   /** The page table and block words the native kernels address through: a
@@ -877,10 +877,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       || boundaryField.source.cellSize_m.some((v,a)=>Math.abs(v-[scene.container.width_m/this.containerCells[0],scene.container.height_m/this.containerCells[1],scene.container.depth_m/this.containerCells[2]][a]!)>1e-9)))
       throw new Error("Procedural boundary lattice changed; regenerate the procedural solid at this resolution");
     this.solidBoundaryCapacity = boundaryImage?.length ?? 0;
-    this.solidBedSlopeSlots = { word: this.solidMask.words.length + this.solidBoundaryCapacity, count: bedSlopeSlots.laneSlots, window: bedSlopeSlots.windowSlots };
+    this.solidBedSlopeSlots = { word: this.solidMask.words.length + this.solidBoundaryCapacity, count: bedSlopeSlots.laneSlots, window: bedSlopeSlots.windowSlots, children: bedSlopeSlots.laneChildren, windowChildren: bedSlopeSlots.windowChildren };
     this.activeScratch = device.createBuffer({
       label: "Uniform reference solid page mask, bed-slope lane and tile cut map",
-      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + bedSlopeSlots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS + 2),
+      size: this.solidMask.words.byteLength + 4 * (this.solidBoundaryCapacity + UNIFORM_BED_SLOPE_CHILD_WORDS * bedSlopeSlots.laneChildren + bedSlopeSlots.laneSlots * 1024 * UNIFORM_BED_SLOPE_LAYERS + 2),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     // Around the lane: the buffer's zeros are the lane's until the bake, and
@@ -1509,7 +1509,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // voxel yet: an edit may add the first.
     const bedSlopeBake=new UniformBedSlopeBake(this.device,this.activeScratch,{size:[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz],laneBaseWord:this.solidBedSlopeBaseWord,origin:this.frame.boxCell,
       walls:this.solidMask.fitsFlat?undefined:this.solidMask.walls,
-      laneSlotBaseWord:this.solidBedSlopeSlots.word,laneSlots:this.solidBedSlopeSlots.count,windowSlots:this.solidBedSlopeSlots.window});
+      laneSlotBaseWord:this.solidBedSlopeSlots.word,laneSlots:this.solidBedSlopeSlots.count,windowSlots:this.solidBedSlopeSlots.window,
+      laneChildren:this.solidBedSlopeSlots.children,windowChildren:this.solidBedSlopeSlots.windowChildren});
     // One concurrent compile: serial stages left a first load waiting on
     // each uncached pipeline in turn.
     const dynamic=this.mixedDynamic,builder=this.mixedBuilder,mixedBodies=this.mixedBodies;

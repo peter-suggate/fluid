@@ -58,7 +58,7 @@
  * the window, so nothing outside it is read, and what a region bake writes is
  * what a full bake would.
  *
- * Sparse by page column (32x32 columns, x + 64 z of the lattice's pages). A
+ * Sparse by page column (32x32 columns of the lattice's pages). A
  * riser of one cell has a partly solid page in its own column or the one
  * beside it, so a cell with a bed height lies within passes + 1 columns of a
  * page column that holds a partly solid page: the lane's page columns are
@@ -68,11 +68,21 @@
  * full bake over the lattice leaves both. plan() places the two sets from
  * the mask; when an edit moves either, the next bake is a full one.
  *
- * The lane: a directory word a page column (its slot's first word in the
- * mask buffer, 0 for none), then the slots, `layers` words a column, a word a
- * floor cell, lowest first: (y + 1) << 16 | entry, 0 for a level one.
+ * The directories follow the lattice's: a top word a super-block column (4x4
+ * page columns, x + 64 z of the window's 64x64), the first word of its child
+ * table or 0 for none, and a child table of 16 words (x&3 + 4 (z&3)) only
+ * for a super-block column that holds one of the set's page columns. The
+ * child tables are counted at build from the scene's partly solid page
+ * columns (uniformBedSlopeBakeCapacity), so what the lane and the window
+ * cost follows the columns that hold a bed, whatever the lattice's width.
  *
- * A column holds `layers` floor cells (4, at most 8), its lowest; a floor
+ * The lane: its top table in the mask image, then its child tables and its
+ * slots past the image (laneSlotBaseWord). A child word is its page column's
+ * slot's first word in the mask buffer, 0 for none; a slot is `layers` words
+ * a column, a word a floor cell, lowest first: (y + 1) << 16 | entry, 0 for a
+ * level one.
+ *
+ * A column holds `layers` floor cells (4, at most 4), its lowest; a floor
  * cell above them stays level. */
 import { SOLID_MASK_EMPTY, SOLID_MASK_FULL, SOLID_MASK_WALL, solidOccupancyMaskPage, type SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
 import { uniformBedSlopeBakeWGSL } from "./uniform-bed-slope-bake.wgsl";
@@ -81,8 +91,12 @@ import { uniformBedSlopeBakeWGSL } from "./uniform-bed-slope-bake.wgsl";
 export const UNIFORM_BED_SLOPE_BAKE_REGIONS=8;
 /** Floor cells a column of the solver's lane holds: umBedSlope reads this many words a column. */
 export const UNIFORM_BED_SLOPE_LAYERS=4;
-/** The lane's directory: a word a page column of the 64x64 window. */
+/** The lane's top table, in the mask image: a word a super-block column (4x4 page columns) of the 256-page window, x + 64 z. */
 export const UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS=4096;
+/** Words of a child table: a word a page column of its super-block column, (x&3) + 4 (z&3). */
+export const UNIFORM_BED_SLOPE_CHILD_WORDS=16;
+/** Cells a lattice may span on an axis: the lattice address's (UNIFORM_LATTICE_MAX_PAGES pages). */
+const MAX_CELLS=32*252;
 const RELAX=8;
 /** Runs of two cells or more, in 1/128 cell. */
 const MIN_RUN=256;
@@ -96,16 +110,19 @@ export interface UniformBedSlopeBakeOptions{
  readonly size:readonly [number,number,number];
  /** The lane directory's first word in the mask image (uniformSolidScratchLayout). */
  readonly laneBaseWord:number;
- /** The lane slots' first word in the mask buffer, and how many (default: one a page column of the lattice). */
+ /** The lane's child tables' and then its slots' first word in the mask buffer, and how many slots (default: one a page column of the lattice). */
  readonly laneSlotBaseWord?:number;
  readonly laneSlots?:number;
  /** Page columns the bake holds state for at once (default: every one of the lattice). */
  readonly windowSlots?:number;
+ /** Child tables of the lane's and of the window's directories (default: one a super-block column of the lattice). */
+ readonly laneChildren?:number;
+ readonly windowChildren?:number;
  /** The lattice's low cell in the mask image's window (address.boxPage, in cells; default 0). */
  readonly origin?:readonly [number,number,number];
  /** The mask's walls, for a mask that does not fit its flat directory (SolidOccupancyMask.fitsFlat): its reader then takes both levels and the walls by their rule. */
  readonly walls?:SolidOccupancyMaskWalls;
- /** Floor cells a column holds (default 4, at most 8). */
+ /** Floor cells a column holds (default 4, at most 4). */
  readonly layers?:number;
  /** Spread passes, even (default 96). */
  readonly passes?:number;
@@ -125,6 +142,11 @@ export interface UniformBedSlopeBakeLayout{
  /** Words of a lane slot: `layers` a column. */
  readonly laneSlotWords:number;
  readonly windowSlots:number;
+ readonly laneChildren:number;
+ readonly windowChildren:number;
+ /** The lane's first slot's word (past its child tables), and the words from laneSlotBaseWord its child tables and slots take. */
+ readonly laneSlotFirstWord:number;
+ readonly laneWords:number;
  /** Pages past a page column with a partly solid page that can hold a slope, and that the bake keeps state for. */
  readonly laneRadius:number;
  readonly windowRadius:number;
@@ -142,50 +164,71 @@ export interface UniformBedSlopeBakeLayout{
 }
 export function uniformBedSlopeBakeLayout(options:UniformBedSlopeBakeOptions):UniformBedSlopeBakeLayout{
  const {size,laneBaseWord}=options,layers=options.layers??UNIFORM_BED_SLOPE_LAYERS,passes=options.passes??96;
- // A nosing is twelve bits an axis in half cells, a level eleven.
- if(size.length!==3||size.some(n=>!Number.isSafeInteger(n)||n<1)||size[0]>2047||size[1]>2046||size[2]>2047)throw new RangeError(`Uniform bed-slope bake: a lattice of ${size.join("x")} cells`);
- if(!Number.isSafeInteger(layers)||layers<1||layers>8)throw new RangeError(`Uniform bed-slope bake: ${layers} layers a column, not 1 to 8`);
+ // The lattice address's extent: a level is thirteen bits of a link word.
+ if(size.length!==3||size.some(n=>!Number.isSafeInteger(n)||n<1||n>MAX_CELLS))throw new RangeError(`Uniform bed-slope bake: a lattice of ${size.join("x")} cells, past ${MAX_CELLS} on an axis`);
+ // A link names its neighbour's slot in two bits.
+ if(!Number.isSafeInteger(layers)||layers<1||layers>4)throw new RangeError(`Uniform bed-slope bake: ${layers} layers a column, not 1 to 4`);
  // Even: the spread ends in the buffer it started from. 256: a nosing's squared distance in 1/128 cell stays a u32.
  if(!Number.isSafeInteger(passes)||passes<2||passes>256||passes%2!==0)throw new RangeError(`Uniform bed-slope bake: ${passes} spread passes, not an even count from 2 to 256`);
- const cells=(size[0]+2)*(size[1]+2)*(size[2]+2),pages:[number,number]=[Math.ceil(size[0]/32),Math.ceil(size[2]/32)];
- if(pages[0]>64||pages[1]>64)throw new RangeError(`Uniform bed-slope bake: ${pages.join("x")} page columns pass the 64x64 window`);
+ // A nosing is held relative to the cell that holds it, twelve bits an axis
+ // in half cells about 2048: a spread pass carries it one link, so after
+ // `passes` it lies within 2 passes + 1 half cells of its cell.
+ if(2*passes+1>=2048)throw new RangeError(`Uniform bed-slope bake: ${passes} spread passes carry a nosing past a relative point's reach`);
+ const cells=(size[0]+2)*(size[1]+2)*(size[2]+2),pages:[number,number]=[Math.ceil(size[0]/32),Math.ceil(size[2]/32)],supers=Math.ceil(pages[0]/4)*Math.ceil(pages[1]/4);
  const laneSlots=options.laneSlots??pages[0]*pages[1],windowSlots=options.windowSlots??pages[0]*pages[1],laneSlotBaseWord=options.laneSlotBaseWord??0;
- for(const [name,n] of [["lane base word",laneBaseWord],["lane slot base word",laneSlotBaseWord],["lane slots",laneSlots],["window slots",windowSlots]] as const)
+ const laneChildren=options.laneChildren??supers,windowChildren=options.windowChildren??supers;
+ for(const [name,n] of [["lane base word",laneBaseWord],["lane slot base word",laneSlotBaseWord],["lane slots",laneSlots],["window slots",windowSlots],["lane child tables",laneChildren],["window child tables",windowChildren]] as const)
   if(!Number.isSafeInteger(n)||n<0)throw new RangeError(`Uniform bed-slope bake: ${name} ${n}`);
  const origin=options.origin??[0,0,0];
  if(origin.some(n=>!Number.isSafeInteger(n)||n<0))throw new RangeError(`Uniform bed-slope bake: origin ${origin.join(",")}`);
- const reach=passes+RELAX+2,laneRadius=Math.ceil((passes+1)/32),columns=1024*windowSlots;
+ const reach=passes+RELAX+2,laneRadius=Math.ceil((passes+1)/32),columns=1024*windowSlots,laneSlotFirstWord=laneSlotBaseWord+UNIFORM_BED_SLOPE_CHILD_WORDS*laneChildren;
  return {size:[size[0],size[1],size[2]],origin:[origin[0],origin[1],origin[2]],walls:options.walls,cells,denseLaneWords:Math.ceil(cells/2),pages,laneBaseWord,laneSlotBaseWord,laneSlots,laneSlotWords:1024*layers,windowSlots,
+  laneChildren,windowChildren,laneSlotFirstWord,laneWords:UNIFORM_BED_SLOPE_CHILD_WORDS*laneChildren+1024*layers*laneSlots,
   laneRadius,windowRadius:laneRadius+Math.ceil(reach/32),layers,passes,relax:RELAX,reach,columns,
-  launches:passes+RELAX+4,scratchBytes:36*layers*columns+4*UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS+256*(1+UNIFORM_BED_SLOPE_BAKE_REGIONS),minRun:MIN_RUN,band4:BAND4,minSlope2:MIN_SLOPE2,maxSlope2:MAX_SLOPE2};
+  launches:passes+RELAX+4,scratchBytes:36*layers*columns+4*(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS+UNIFORM_BED_SLOPE_CHILD_WORDS*windowChildren)+256*(1+UNIFORM_BED_SLOPE_BAKE_REGIONS),minRun:MIN_RUN,band4:BAND4,minSlope2:MIN_SLOPE2,maxSlope2:MAX_SLOPE2};
+}
+/** A page column's word of a two-level directory of `words` (top table at `top`): its child word, 0 where its super-block column has no child. */
+export function uniformBedSlopeDirectoryWord(words:ArrayLike<number>,top:number,px:number,pz:number):number{
+ if(px<0||pz<0||px>=256||pz>=256)return 0;
+ const child=words[top+(px>>2)+64*(pz>>2)]??0;
+ return child?words[child+(px&3)+4*(pz&3)]??0:0;
 }
 
-/** The page columns (x + 64 z) of the lattice that hold a partly solid page
- * of a mask image (SolidOccupancyMask: neither EMPTY, FULL nor a wall), the
- * lattice's low cell at `origin` cells of its window. */
+/** The page columns (x + pages along x times z) of the lattice that hold a
+ * partly solid page of a mask image (SolidOccupancyMask: neither EMPTY, FULL
+ * nor a wall), the lattice's low cell at `origin` cells of its window. */
 export function uniformBedSlopePartialColumns(words:ArrayLike<number>,size:readonly [number,number,number],origin:readonly [number,number,number]=[0,0,0]):Uint8Array{
- const out=new Uint8Array(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS),o=origin.map(n=>n>>5),py=Math.ceil(size[1]/32);
- for(let z=0;z<Math.ceil(size[2]/32);z++)for(let x=0;x<Math.ceil(size[0]/32);x++)for(let y=0;y<py&&!out[x+64*z];y++){
+ const px=Math.ceil(size[0]/32),pz=Math.ceil(size[2]/32),out=new Uint8Array(px*pz),o=origin.map(n=>n>>5),py=Math.ceil(size[1]/32);
+ for(let z=0;z<pz;z++)for(let x=0;x<px;x++)for(let y=0;y<py&&!out[x+px*z];y++){
   const word=solidOccupancyMaskPage(words,32*(x+o[0]!),32*(y+o[1]!),32*(z+o[2]!)),code=word&0xffff;
-  if(word!==SOLID_MASK_WALL&&code!==SOLID_MASK_EMPTY&&code!==SOLID_MASK_FULL)out[x+64*z]=1;
+  if(word!==SOLID_MASK_WALL&&code!==SOLID_MASK_EMPTY&&code!==SOLID_MASK_FULL)out[x+px*z]=1;
  }
  return out;
 }
-/** The page columns within `radius` pages of a flagged one, cut to the lattice's, and their count. */
-function uniformBedSlopeGrown(partial:ArrayLike<number>,pages:readonly [number,number],radius:number):{flags:Uint8Array;count:number}{
- const flags=new Uint8Array(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS);let count=0;
+/** The page columns within `radius` pages of a flagged one, cut to the
+ * lattice's, keyed as `partial` is, and their count; the super-block columns
+ * (x + 64 z) that hold one, and theirs. */
+function uniformBedSlopeGrown(partial:ArrayLike<number>,pages:readonly [number,number],radius:number):{flags:Uint8Array;count:number;supers:Uint8Array;superCount:number}{
+ const flags=new Uint8Array(pages[0]*pages[1]),supers=new Uint8Array(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS);let count=0,superCount=0;
  for(let z=0;z<pages[1];z++)for(let x=0;x<pages[0];x++){
-  if(!partial[x+64*z])continue;
-  for(let j=Math.max(0,z-radius);j<=Math.min(pages[1]-1,z+radius);j++)for(let i=Math.max(0,x-radius);i<=Math.min(pages[0]-1,x+radius);i++)if(!flags[i+64*j]){flags[i+64*j]=1;count++;}
+  if(!partial[x+pages[0]*z])continue;
+  for(let j=Math.max(0,z-radius);j<=Math.min(pages[1]-1,z+radius);j++)for(let i=Math.max(0,x-radius);i<=Math.min(pages[0]-1,x+radius);i++)if(!flags[i+pages[0]*j]){
+   flags[i+pages[0]*j]=1;count++;
+   const s=(i>>2)+64*(j>>2);if(!supers[s]){supers[s]=1;superCount++;}
+  }
  }
- return {flags,count};
+ return {flags,count,supers,superCount};
 }
-/** Slots for the lane and the window of `partial` (uniformBedSlopePartialColumns)
- * and of one more lone partly solid page column, for edits: never more than the lattice's page columns. */
-export function uniformBedSlopeBakeCapacity(size:readonly [number,number,number],partial:ArrayLike<number>,passes?:number):{laneSlots:number;windowSlots:number}{
- const l=uniformBedSlopeBakeLayout({size,laneBaseWord:0,passes}),all=l.pages[0]*l.pages[1],spare=(r:number)=>(2*r+1)**2;
- return {laneSlots:Math.min(all,uniformBedSlopeGrown(partial,l.pages,l.laneRadius).count+spare(l.laneRadius)),
-  windowSlots:Math.min(all,uniformBedSlopeGrown(partial,l.pages,l.windowRadius).count+spare(l.windowRadius))};
+/** Slots and child tables for the lane and the window of `partial`
+ * (uniformBedSlopePartialColumns) and of one more lone partly solid page
+ * column, for edits: never more than the lattice's page and super-block columns. */
+export function uniformBedSlopeBakeCapacity(size:readonly [number,number,number],partial:ArrayLike<number>,passes?:number):{laneSlots:number;windowSlots:number;laneChildren:number;windowChildren:number}{
+ const l=uniformBedSlopeBakeLayout({size,laneBaseWord:0,passes}),all=l.pages[0]*l.pages[1],supers=Math.ceil(l.pages[0]/4)*Math.ceil(l.pages[1]/4);
+ // A lone column's set: 2r+1 page columns an axis, which meet at most ceil(2r/4)+1 super-block columns.
+ const spare=(r:number)=>(2*r+1)**2,spareSupers=(r:number)=>(Math.ceil(2*r/4)+1)**2;
+ const lane=uniformBedSlopeGrown(partial,l.pages,l.laneRadius),window=uniformBedSlopeGrown(partial,l.pages,l.windowRadius);
+ return {laneSlots:Math.min(all,lane.count+spare(l.laneRadius)),windowSlots:Math.min(all,window.count+spare(l.windowRadius)),
+  laneChildren:Math.min(supers,lane.superCount+spareSupers(l.laneRadius)),windowChildren:Math.min(supers,window.superCount+spareSupers(l.windowRadius))};
 }
 
 /** An edited range of cells of the lattice (its halo's cells included: -1 and the size are cells). */
@@ -223,7 +266,7 @@ export class UniformBedSlopeBake{
  private readonly meta:GPUBuffer;
  private readonly a:GPUBuffer;
  private readonly b:GPUBuffer;
- /** A word a page column: its window slot plus one, 0 for none. */
+ /** The window's directory: a top word a super-block column, its child's first word here or 0, then the child tables, a word a page column, its window slot plus one or 0. */
  private readonly directory:GPUBuffer;
  /** The lane's and the window's page columns as last placed (plan). */
  private held?:{lane:Uint8Array;window:Uint8Array};
@@ -239,8 +282,8 @@ export class UniformBedSlopeBake{
  private static readonly PASS:GPUComputePassDescriptor={label:"Uniform bed-slope bake"};
  constructor(private readonly device:GPUDevice,private readonly mask:GPUBuffer,options:UniformBedSlopeBakeOptions){
   const l=this.layout=uniformBedSlopeBakeLayout(options);
-  if(4*(l.laneBaseWord+UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS)>mask.size||4*(l.laneSlotBaseWord+l.laneSlots*l.laneSlotWords)>mask.size)
-   throw new RangeError(`Uniform bed-slope bake: ${mask.label} of ${mask.size} bytes does not hold a lane directory at word ${l.laneBaseWord} and ${l.laneSlots} slots of ${l.laneSlotWords} words at word ${l.laneSlotBaseWord}`);
+  if(4*(l.laneBaseWord+UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS)>mask.size||4*(l.laneSlotBaseWord+l.laneWords)>mask.size)
+   throw new RangeError(`Uniform bed-slope bake: ${mask.label} of ${mask.size} bytes does not hold a lane directory at word ${l.laneBaseWord} and ${l.laneChildren} child tables and ${l.laneSlots} slots of ${l.laneSlotWords} words at word ${l.laneSlotBaseWord}`);
   // COPY_DST: a full bake clears the lane, the halo's entries with it.
   if(!(mask.usage&GPUBufferUsage.STORAGE)||!(mask.usage&GPUBufferUsage.COPY_DST))throw new Error(`Uniform bed-slope bake: ${mask.label} needs STORAGE and COPY_DST usage`);
   if(device.limits.minUniformBufferOffsetAlignment>256)throw new RangeError(`Uniform bed-slope bake: uniform records ${device.limits.minUniformBufferOffsetAlignment} bytes apart, more than 256`);
@@ -248,7 +291,7 @@ export class UniformBedSlopeBake{
   this.meta=device.createBuffer({label:"Uniform bed-slope bake links",size:4*slots,usage});
   this.a=device.createBuffer({label:"Uniform bed-slope bake nosings A",size:16*slots,usage});
   this.b=device.createBuffer({label:"Uniform bed-slope bake nosings B",size:16*slots,usage});
-  this.directory=device.createBuffer({label:"Uniform bed-slope bake window directory",size:4*UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS,usage:usage|GPUBufferUsage.COPY_DST});
+  this.directory=device.createBuffer({label:"Uniform bed-slope bake window directory",size:4*(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS+UNIFORM_BED_SLOPE_CHILD_WORDS*l.windowChildren),usage:usage|GPUBufferUsage.COPY_DST});
   this.params=device.createBuffer({label:"Uniform bed-slope bake params",size:256*(1+UNIFORM_BED_SLOPE_BAKE_REGIONS),usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   device.queue.writeBuffer(this.params,0,new Uint32Array([0,0,l.size[0],l.size[2],0,0,l.size[0],l.size[2]]));
   this.offsets=Array.from({length:1+UNIFORM_BED_SLOPE_BAKE_REGIONS},(_,i)=>[256*i]);
@@ -303,14 +346,24 @@ export class UniformBedSlopeBake{
   * (uniformBedSlopePartialColumns): slots in ascending page column, the
   * lane directory written into the mask buffer. True when either set moved:
   * the lane is then a full bake's to write (encode). More page columns than
-  * the slots sized at build is refused. */
+  * the slots or child tables sized at build is refused. */
  plan(partial:ArrayLike<number>):boolean{
   const l=this.layout,lane=uniformBedSlopeGrown(partial,l.pages,l.laneRadius),window=uniformBedSlopeGrown(partial,l.pages,l.windowRadius),held=this.held;
   if(held&&lane.flags.every((f,i)=>f===held.lane[i])&&window.flags.every((f,i)=>f===held.window[i]))return false;
-  if(lane.count>l.laneSlots||window.count>l.windowSlots)throw new Error(`Uniform bed-slope bake: the solids need ${lane.count} lane and ${window.count} window page columns; the bake was built for ${l.laneSlots} and ${l.windowSlots}. Rebuild the solver to take this edit`);
-  const laneWords=new Uint32Array(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS),windowWords=new Uint32Array(UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS);
-  for(let i=0,a=0,b=0;i<laneWords.length;i++){if(lane.flags[i])laneWords[i]=l.laneSlotBaseWord+l.laneSlotWords*a++;if(window.flags[i])windowWords[i]=++b;}
-  this.device.queue.writeBuffer(this.mask,4*l.laneBaseWord,laneWords);this.device.queue.writeBuffer(this.directory,0,windowWords);
+  if(lane.count>l.laneSlots||window.count>l.windowSlots||lane.superCount>l.laneChildren||window.superCount>l.windowChildren)
+   throw new Error(`Uniform bed-slope bake: the solids need ${lane.count} lane and ${window.count} window page columns in ${lane.superCount} and ${window.superCount} super-block columns; the bake was built for ${l.laneSlots} and ${l.windowSlots} in ${l.laneChildren} and ${l.windowChildren}. Rebuild the solver to take this edit`);
+  const C=UNIFORM_BED_SLOPE_CHILD_WORDS,TOP=UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS;
+  const laneTop=new Uint32Array(TOP),laneChildren=new Uint32Array(C*l.laneChildren),windowWords=new Uint32Array(TOP+C*l.windowChildren);
+  // Child tables in ascending super-block column, then slots in ascending page column (z, then x) within the set.
+  for(let s=0,a=0,b=0;s<TOP;s++){if(lane.supers[s])laneTop[s]=l.laneSlotBaseWord+C*a++;if(window.supers[s])windowWords[s]=TOP+C*b++;}
+  for(let z=0,a=0,b=0;z<l.pages[1];z++)for(let x=0;x<l.pages[0];x++){
+   const i=x+l.pages[0]*z,s=(x>>2)+64*(z>>2),c=(x&3)+4*(z&3);
+   if(lane.flags[i])laneChildren[laneTop[s]!-l.laneSlotBaseWord+c]=l.laneSlotFirstWord+l.laneSlotWords*a++;
+   if(window.flags[i])windowWords[windowWords[s]!+c]=++b;
+  }
+  this.device.queue.writeBuffer(this.mask,4*l.laneBaseWord,laneTop);
+  if(laneChildren.length)this.device.queue.writeBuffer(this.mask,4*l.laneSlotBaseWord,laneChildren);
+  this.device.queue.writeBuffer(this.directory,0,windowWords);
   this.held={lane:lane.flags,window:window.flags};
   return true;
  }
@@ -321,7 +374,7 @@ export class UniformBedSlopeBake{
   if(!this.pipelines)throw new Error("Uniform bed-slope bake is not initialized");
   if(!this.held)throw new Error("Uniform bed-slope bake has no plan");
   const l=this.layout;
-  if(l.laneSlots)encoder.clearBuffer(this.mask,4*l.laneSlotBaseWord,4*l.laneSlots*l.laneSlotWords);
+  if(l.laneSlots)encoder.clearBuffer(this.mask,4*l.laneSlotFirstWord,4*l.laneSlots*l.laneSlotWords);
   this.launch(encoder,0,l.size[0],l.size[2],l.size[0],l.size[2]);
  }
  /** The lane again where an edit of `box` can have changed it: after the

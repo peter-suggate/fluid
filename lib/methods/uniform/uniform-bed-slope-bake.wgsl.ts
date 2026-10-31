@@ -3,21 +3,29 @@
  * workgroups of 8x8 columns over a window of columns given by the params
  * block; a column's floor cells are its slots, lowest first.
  *
- * State only for the page columns of the bake's directory (a word a page
- * column x + 64 z: its window slot plus one, 0 for none); a column without
- * any is no neighbour and no kernel's. Scratch, by slot
- * s = layers*(1024*(window slot) + (x&31) + 32*(z&31)) + k:
- *   meta   one word: bits 0..10 the floor cell's y, bit 11 a drop beside it,
- *          then five bits a direction (-x, +x, -z, +z): the neighbour's slot
- *          in its column (3 bits) and the step in y plus one (2 bits; 3 for
+ * State only for the page columns of the bake's directory (a top word a
+ * super-block column, x>>2 + 64 (z>>2) of the page columns, naming its child
+ * table, and a child word a page column, (x&3) + 4 (z&3): its window slot
+ * plus one, 0 for none); a column without any is no neighbour and no
+ * kernel's. Scratch, by slot s = layers*(1024*(window slot) + (x&31) +
+ * 32*(z&31)) + k:
+ *   meta   one word: bits 0..12 the floor cell's y, bit 13 a drop beside it,
+ *          then four bits a direction (-x, +x, -z, +z): the neighbour's slot
+ *          in its column (2 bits) and the step in y plus one (2 bits; 3 for
  *          no neighbour). All ones for a slot with no floor cell.
  *   a, b   four words: the nearest nosing of the levels y-1, y, y+1 and y+2,
- *          each X | Z<<12 in half cells (a cell's centre is (2x+1, 2z+1)),
- *          all ones in 24 bits for none; bit 31 of the first word is the
- *          drop flag of the cell's tread. The spread reads one and writes the
- *          other. Before the links b's first word is the slot's y; after the
- *          spread b's first two words are the bed heights, which the
- *          relaxation takes from one to the other.
+ *          each X | Z<<12 in half cells relative to the cell that holds it,
+ *          about 2048 (the cell's centre is (2048, 2048)), all ones in 24
+ *          bits for none; bit 31 of the first word is the drop flag of the
+ *          cell's tread. The spread reads one and writes the other, carrying
+ *          a neighbour's nosing into its own cell's frame. Before the links
+ *          b's first word is the slot's y; after the spread b's first two
+ *          words are the bed heights, which the relaxation takes from one to
+ *          the other.
+ *
+ * A nosing nearer than another is so in any frame, and a tie goes to the
+ * smaller point: Z first, then X, which a shared frame keeps. So the lane is
+ * the one absolute points gave, whatever the lattice's width.
  */
 import { solidOccupancyMaskWGSL } from "../../core/solid-occupancy-mask";
 import type { UniformBedSlopeBakeLayout } from "./uniform-bed-slope-bake";
@@ -51,24 +59,34 @@ const BS_LANE:u32=${l.laneBaseWord}u;
 const BS_NONE:u32=0xffffffffu;
 const BS_POINT:u32=0xffffffu;
 const BS_STEP=array<vec2i,4>(vec2i(-1,0),vec2i(1,0),vec2i(0,-1),vec2i(0,1));
-fn bsPage(x:u32,z:u32)->u32{return (x>>5u)+64u*(z>>5u);}
+/** The super-block column of column (x, z): its top word's index. */
+fn bsSuper(x:u32,z:u32)->u32{return (x>>7u)+64u*(z>>7u);}
+/** The page column's index in its child table. */
+fn bsChild(x:u32,z:u32)->u32{return ((x>>5u)&3u)+4u*((z>>5u)&3u);}
 /** A column's index in the bake's state, BS_NONE for one it holds none for. */
 fn bsColumn(x:u32,z:u32)->u32{
- let d=bsDirectory[bsPage(x,z)];
+ let t=bsDirectory[bsSuper(x,z)];
+ if(t==0u){return BS_NONE;}
+ let d=bsDirectory[t+bsChild(x,z)];
  if(d==0u){return BS_NONE;}
  return 1024u*(d-1u)+(x&31u)+32u*(z&31u);
 }
-fn bsLink(info:u32,d:u32)->u32{return (info>>(12u+5u*d))&31u;}
+const BS_LINK_NONE:u32=12u;
+fn bsLink(info:u32,d:u32)->u32{return (info>>(14u+4u*d))&15u;}
 /** The slot a link names, in the column one step along d. */
 fn bsNeighbour(x:u32,z:u32,d:u32,link:u32)->u32{
  let q=vec2i(i32(x),i32(z))+BS_STEP[d];
- return BS_LAYERS*bsColumn(u32(q.x),u32(q.y))+(link&7u);
+ return BS_LAYERS*bsColumn(u32(q.x),u32(q.y))+(link&3u);
 }
-/** A nosing nearer the cell centre c than the one held; a tie goes to the smaller point, whichever way it arrived. */
-fn bsBetter(cand:u32,held:u32,c:vec2i)->bool{
+/** A cell's own centre, in the frame its nosings are held in. */
+const BS_CENTRE=vec2i(2048);
+/** A neighbour's nosing (not BS_POINT) in this cell's frame: the neighbour one step along d is two half cells further. */
+fn bsCarried(p:u32,d:u32)->u32{return u32(i32(p)+2*BS_STEP[d].x+8192*BS_STEP[d].y);}
+/** A nosing nearer the cell's centre than the one held; a tie goes to the smaller point, whichever way it arrived. */
+fn bsBetter(cand:u32,held:u32)->bool{
  if(cand==BS_POINT){return false;}
  if(held==BS_POINT){return true;}
- let a=vec2i(i32(cand&4095u),i32(cand>>12u))-c;let b=vec2i(i32(held&4095u),i32(held>>12u))-c;
+ let a=vec2i(i32(cand&4095u),i32(cand>>12u))-BS_CENTRE;let b=vec2i(i32(held&4095u),i32(held>>12u))-BS_CENTRE;
  let da=dot(a,a);let db=dot(b,b);
  return da<db||(da==db&&cand<held);
 }
@@ -106,7 +124,6 @@ fn bsSolid(p:vec3i)->bool{return bsWindowSolid(p+BS_ORIGIN);}
  let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
  if(column==BS_NONE){return;}
  let base=BS_LAYERS*column;
- let c=vec2i(i32(2u*x+1u),i32(2u*z+1u));
  let low=vec2i(bsParams.window.xy);let high=low+vec2i(bsParams.window.zw);
  for(var k=0u;k<BS_LAYERS;k++){
   let s=base+k;let y=bsB[4u*s];
@@ -114,7 +131,7 @@ fn bsSolid(p:vec3i)->bool{return bsWindowSolid(p+BS_ORIGIN);}
   var word=y;var drop=0u;var own=BS_POINT;var up=BS_POINT;
   let openAbove=!bsSolid(vec3i(i32(x),i32(y)+1,i32(z)));
   for(var d=0u;d<4u;d++){
-   let q=vec2i(i32(x),i32(z))+BS_STEP[d];var link=24u;
+   let q=vec2i(i32(x),i32(z))+BS_STEP[d];var link=BS_LINK_NONE;
    let openBeside=!bsSolid(vec3i(q.x,i32(y),q.y));
    // A column outside the window is no neighbour: the window is grown past
    // every column whose state can reach a cell the bake writes.
@@ -124,23 +141,23 @@ fn bsSolid(p:vec3i)->bool{return bsWindowSolid(p+BS_ORIGIN);}
      let y1=bsB[4u*(other+j)];
      if(y1==BS_NONE){break;}
      // Level, one up over a riser this cell's own air clears, or one down over the neighbour's.
-     if(y1==y||(y1==y+1u&&openAbove)||(y1+1u==y&&openBeside)){link=j|((y1+1u-y)<<3u);break;}
+     if(y1==y||(y1==y+1u&&openAbove)||(y1+1u==y&&openBeside)){link=j|((y1+1u-y)<<2u);break;}
     }
    }
-   let rise=link>>3u;let point=u32(c.x+BS_STEP[d].x)|(u32(c.y+BS_STEP[d].y)<<12u);
-   if(rise==0u&&bsBetter(point,own,c)){own=point;}
-   if(rise==2u&&bsBetter(point,up,c)){up=point;}
+   let rise=link>>2u;let point=u32(BS_CENTRE.x+BS_STEP[d].x)|(u32(BS_CENTRE.y+BS_STEP[d].y)<<12u);
+   if(rise==0u&&bsBetter(point,own)){own=point;}
+   if(rise==2u&&bsBetter(point,up)){up=point;}
    // Open beside and below that: a fall of a cell or more that is not this tread's own riser.
    if(openBeside&&rise!=0u&&!bsSolid(vec3i(q.x,i32(y)-1,q.y))){drop=1u;}
-   word|=link<<(12u+5u*d);
+   word|=link<<(14u+4u*d);
   }
-  bsMeta[s]=word|(drop<<11u);
+  bsMeta[s]=word|(drop<<13u);
   bsA[4u*s]=BS_POINT|(drop<<31u);bsA[4u*s+1u]=own;bsA[4u*s+2u]=up;bsA[4u*s+3u]=BS_POINT;
  }
 }
-/** A nosing's distance from the centre c, in 1/128 cell, rounded down. */
-fn bsReach(p:u32,c:vec2i)->i32{
- let a=vec2i(i32(p&4095u),i32(p>>12u))-c;
+/** A nosing's distance from the cell's centre, in 1/128 cell, rounded down. */
+fn bsReach(p:u32)->i32{
+ let a=vec2i(i32(p&4095u),i32(p>>12u))-BS_CENTRE;
  return i32(bsRoot(u32(dot(a,a))*4096u));
 }
 /** The bed height of every floor cell from its nosings, in 1/4096 cell above the lattice's floor less one. */
@@ -149,23 +166,22 @@ fn bsReach(p:u32,c:vec2i)->i32{
  let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
  if(column==BS_NONE){return;}
  let base=BS_LAYERS*column;
- let c=vec2i(i32(2u*x+1u),i32(2u*z+1u));
  for(var k=0u;k<BS_LAYERS;k++){
   let s=base+k;let info=bsMeta[s];
   if(info==BS_NONE){break;}
   let first=bsA[4u*s];let below=first&BS_POINT;let own=bsA[4u*s+1u]&BS_POINT;let up=bsA[4u*s+2u]&BS_POINT;let above=bsA[4u*s+3u]&BS_POINT;
-  var height=BS_NONE;let level=i32(((info&2047u)+1u)*4096u);
+  var height=BS_NONE;let level=i32(((info&8191u)+1u)*4096u);
   if(own!=BS_POINT&&up!=BS_POINT){
    // Between its own nosing and the riser above: the tread's place on the chord from one to the other.
-   let d=bsReach(own,c);let u=bsReach(up,c);
+   let d=bsReach(own);let u=bsReach(up);
    if(u+d>=${l.minRun}){height=u32(level+(d*8192+u+d)/(2*(u+d)));}
   }else if(own!=BS_POINT&&below!=BS_POINT){
    // The top landing: the run of the tread below, carried up from its own nosing.
-   let d=bsReach(own,c);let run=bsReach(below,c)-d;
+   let d=bsReach(own);let run=bsReach(below)-d;
    if(run>=${l.minRun}&&4*d<=${4+l.band4}*run){height=u32(level+(d*8192+run)/(2*run));}
   }else if(up!=BS_POINT&&above!=BS_POINT&&(first>>31u)!=0u){
    // The last tread before a drop: the run of the tread above, carried down from the riser.
-   let u=bsReach(up,c);let run=bsReach(above,c)-u;
+   let u=bsReach(up);let run=bsReach(above)-u;
    if(run>=${l.minRun}&&4*u<=${4+l.band4}*run){height=u32(level+4096-(u*8192+run)/(2*run));}
   }
   bsB[4u*s]=height;
@@ -184,7 +200,7 @@ fn bsRelax(id:vec3u,src:u32,dst:u32){
    var sum=0u;var axes=0u;
    for(var axis=0u;axis<2u;axis++){
     let a=bsLink(info,2u*axis);let b=bsLink(info,2u*axis+1u);
-    if(a>=24u||b>=24u){continue;}
+    if(a>=BS_LINK_NONE||b>=BS_LINK_NONE){continue;}
     let low=bsB[4u*bsNeighbour(x,z,2u*axis,a)+src];let high=bsB[4u*bsNeighbour(x,z,2u*axis+1u,b)+src];
     // An axis with a height on one side only is left out: a height that is linear across its neighbours never moves.
     if(low!=BS_NONE&&high!=BS_NONE){sum+=low+high;axes++;}
@@ -204,22 +220,23 @@ const SPREAD=/* wgsl */`
  let x=bsParams.window.x+id.x;let z=bsParams.window.y+id.y;let column=bsColumn(x,z);
  if(column==BS_NONE){return;}
  let base=BS_LAYERS*column;
- let c=vec2i(i32(2u*x+1u),i32(2u*z+1u));
  for(var k=0u;k<BS_LAYERS;k++){
   let s=base+k;let info=bsMeta[s];
   if(info==BS_NONE){break;}
   let first=bsFrom[4u*s];var drop=first>>31u;
   var f=array<u32,4>(first&BS_POINT,bsFrom[4u*s+1u],bsFrom[4u*s+2u],bsFrom[4u*s+3u]);
   for(var d=0u;d<4u;d++){
-   let link=bsLink(info,d);let rise=link>>3u;
+   let link=bsLink(info,d);let rise=link>>2u;
    if(rise==3u){continue;}
    let n=4u*bsNeighbour(x,z,d,link);
    for(var i=0u;i<4u;i++){
     // Level i here is level i+1-rise there; out of the four (the subtraction wraps), not held.
     let j=i+1u-rise;
     if(j>3u){continue;}
-    let cand=bsFrom[n+j]&BS_POINT;
-    if(bsBetter(cand,f[i],c)){f[i]=cand;}
+    let held=bsFrom[n+j]&BS_POINT;
+    if(held==BS_POINT){continue;}
+    let cand=bsCarried(held,d);
+    if(bsBetter(cand,f[i])){f[i]=cand;}
    }
    // The drop flag belongs to a tread: it crosses level links alone.
    if(rise==1u){drop|=bsFrom[n]>>31u;}
@@ -232,7 +249,7 @@ const RESOLVE=(l:UniformBedSlopeBakeLayout)=>/* wgsl */`
 const BS_HEIGHT:u32=${l.relax&1}u;
 fn bsSide(info:u32,x:u32,z:u32,d:u32)->u32{
  let link=bsLink(info,d);
- if(link>=24u){return BS_NONE;}
+ if(link>=BS_LINK_NONE){return BS_NONE;}
  return bsB[4u*bsNeighbour(x,z,d,link)+BS_HEIGHT];
 }
 /** A floor cell's lane word: (y + 1) << 16 | the height's gradient, 0 for none or level. */
@@ -257,14 +274,16 @@ fn bsEntry(s:u32,info:u32,x:u32,z:u32)->u32{
   }
   let size=min((254*abs(g)+4096)/8192,vec2i(127));let lane=select(size,-size,g<vec2i(0));
   let entry=(u32(lane.x)&255u)|((u32(lane.y)&255u)<<8u);
-  return select(0u,entry|(((info&2047u)+1u)<<16u),entry!=0u);
+  return select(0u,entry|(((info&8191u)+1u)<<16u),entry!=0u);
 }
 /** The lane of a column with one: a word a floor cell, zero but for one with a bed height, the height's gradient. */
 @compute @workgroup_size(8,8,1) fn bsResolve(@builtin(global_invocation_id) id:vec3u){
  if(any(id.xy>=bsParams.bake.zw)){return;}
  let x=bsParams.bake.x+id.x;let z=bsParams.bake.y+id.y;let column=bsColumn(x,z);
- let slot=atomicLoad(&bsLane[BS_LANE+bsPage(x,z)]);
- if(slot==0u||column==BS_NONE){return;}
+ let top=atomicLoad(&bsLane[BS_LANE+bsSuper(x,z)]);
+ if(top==0u||column==BS_NONE){return;}
+ let slot=atomicLoad(&bsLane[top+bsChild(x,z)]);
+ if(slot==0u){return;}
  let at=slot+BS_LAYERS*((x&31u)+32u*(z&31u));let base=BS_LAYERS*column;
  for(var k=0u;k<BS_LAYERS;k++){
   let s=base+k;let info=bsMeta[s];

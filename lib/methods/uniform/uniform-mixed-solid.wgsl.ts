@@ -22,7 +22,7 @@ import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {sceneShapeWgsl} from "../../core/scene-shape";
 import {SOLID_MASK_TABLE_WORDS,SOLID_MASK_FULL,SOLID_MASK_WALL,solidOccupancyMaskWGSL,type SolidOccupancyMaskPages} from "../../core/solid-occupancy-mask";
-import {UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS,UNIFORM_BED_SLOPE_LAYERS} from "./uniform-bed-slope-bake";
+import {UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS,UNIFORM_BED_SLOPE_LAYERS,uniformBedSlopeDirectoryWord} from "./uniform-bed-slope-bake";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformDetailPick} from "./uniform-detail-fields";
@@ -99,10 +99,12 @@ export const UNIFORM_SOLID_BED_SLOPE_UNITS=254;
 /** The parts of the solid mask image (SolidOccupancyMask) this library
  * places, in u32 words, whatever the lattice:
  *
- *   bedSlope  after the directory, the bed-slope lane's directory
- *             (uniform-bed-slope-bake): a word a page column x + 64 z of
- *             the lattice, the first word of its slot in the mask's buffer,
- *             0 for none. A slot holds UNIFORM_BED_SLOPE_LAYERS words a
+ *   bedSlope  after the directory, the bed-slope lane's top table
+ *             (uniform-bed-slope-bake): a word a super-block column (4x4
+ *             page columns) x + 64 z of the lattice, the first word of its
+ *             child table in the mask's buffer, 0 for none; a child word a
+ *             page column (x&3) + 4 (z&3), the first word of its slot, 0
+ *             for none. A slot holds UNIFORM_BED_SLOPE_LAYERS words a
  *             column (x&31) + 32 (z&31), a word a floor cell, lowest first:
  *             (y + 1) << 16 | its entry, 0 for a level one. An entry's low
  *             byte is the bed height's gradient along x and its high byte
@@ -111,8 +113,8 @@ export const UNIFORM_SOLID_BED_SLOPE_UNITS=254;
  *             solid voxel's top face near a partly solid page (umBedSlope).
  *   cutMap    after the lane's directory, a word per tile key
  *
- * The lane's directory is the mask's `laneWords`; its slots lie past the
- * image, where the owner places them. umBedSlope and umSolidCutMap derive
+ * The lane's top table is the mask's `laneWords`; its child tables and
+ * slots lie past the image, where the owner places them. umBedSlope and umSolidCutMap derive
  * the same offsets. */
 export function uniformSolidScratchLayout():{bedSlopeBaseWord:number;bedSlopeWords:number;cutMapOffsetWords:number}{
  const bedSlopeWords=UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS;
@@ -144,8 +146,8 @@ export function uniformSolidBedSlopeEntry(slopeX:number,slopeZ:number):number{
  * read, of `words` the mask buffer's from word 0 (or any copy that holds
  * the lane's directory and slots at their words). */
 export function uniformSolidBedSlopeAt(words:ArrayLike<number>,x:number,y:number,z:number):[x:number,z:number]{
- if(x<0||z<0||x>=2048||z>=2048)return [0,0];
- const slot=words[uniformSolidScratchLayout().bedSlopeBaseWord+(x>>5)+64*(z>>5)]??0;
+ if(x<0||z<0||x>=8192||z>=8192)return [0,0];
+ const slot=uniformBedSlopeDirectoryWord(words,uniformSolidScratchLayout().bedSlopeBaseWord,x>>5,z>>5);
  let entry=0;
  if(slot)for(let k=0,at=slot+UNIFORM_BED_SLOPE_LAYERS*((x&31)+32*(z&31));k<UNIFORM_BED_SLOPE_LAYERS;k++){const w=words[at+k]!;if(w>>>16===y+1){entry=w;break;}}
  return [(entry<<24>>24)/UNIFORM_SOLID_BED_SLOPE_UNITS,(entry<<16>>24)/UNIFORM_SOLID_BED_SLOPE_UNITS];
@@ -1242,7 +1244,9 @@ fn umBedSlope(p:vec3i)->vec2f{
  if(!umSolidEnabled()||umBoundaryRecord(p)!=0u){return vec2f(0);}
  let q=p-umSolidBoxCell();
  if(any(q<vec3i(0))||any(vec3u(q)>=umSolidDimensions())){return vec2f(0);}
- let slot=umSolidScratch[umBedSlopeBase()+u32(q.x>>5u)+64u*u32(q.z>>5u)];
+ let top=umSolidScratch[umBedSlopeBase()+u32(q.x>>7u)+64u*u32(q.z>>7u)];
+ if(top==0u){return vec2f(0);}
+ let slot=umSolidScratch[top+u32((q.x>>5u)&3)+4u*u32((q.z>>5u)&3)];
  if(slot==0u){return vec2f(0);}
  let at=slot+${UNIFORM_BED_SLOPE_LAYERS}u*u32((q.x&31)+32*(q.z&31));var entry=0u;
  for(var k=0u;k<${UNIFORM_BED_SLOPE_LAYERS}u;k++){let w=umSolidScratch[at+k];if(w>>16u==u32(q.y)+1u){entry=w;break;}}
