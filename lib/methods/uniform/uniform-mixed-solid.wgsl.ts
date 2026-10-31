@@ -1,3 +1,4 @@
+import { sculptCollisionWGSL } from "../../core/sculpt-collision.wgsl";
 import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
 import type { LevelSetSolidBoundarySource } from "../../core/levelset-consumer-abi";
 import { uniformRigidCoverageWGSL } from "./uniform-rigid-coverage.wgsl";
@@ -174,9 +175,14 @@ export function uniformSolidBedSlopeAt(words:ArrayLike<number>,x:number,y:number
  * built with (the previous head), new the current mirror. A frame's own tail
  * integration reaches the next head's mask.
  * Header: [present bodies now, present bodies at the last build, moved-slot
- * bitmask, any moved]. */
+ * bitmask, any moved]. After it, two words a region: bit k is the
+ * bodies-only rebuild's test of the region's tile k (umSolidRegionTile), set
+ * where the region's swept reach is at most 2 and a moved body, as last built
+ * or now, comes within 2h of the tile (UNIFORM_BODY_TILE_WORDS). */
 export const UNIFORM_BODY_REGION_HEADER_WORDS=4;
 export const UNIFORM_BODY_REGION_UNKNOWN=0x10000;
+/** The per-tile bits after the header: two words per region. */
+export const UNIFORM_BODY_TILE_WORDS=2;
 /** Derived geometry reads the record's open fractions and capacities (rebuilt
  * within 2h of a moved body's swept support, tile by tile) and each owner's
  * own cells: a region beyond this swept reach keeps its geometry (the work
@@ -365,7 +371,7 @@ export class UniformMixedSolid {
    // The free stack (pooled slots): [top, tiles the stack could not serve, 0, 0, slot ids].
    this.slotState=device.createBuffer({label:"Uniform mixed solid record slots",size:4*(4+(slots<tiles?slots:0)),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    if(slots<tiles){const stack=new Uint32Array(4+slots);stack[0]=slots;for(let i=0;i<slots;i++)stack[4+i]=i;device.queue.writeBuffer(this.slotState,0,stack);}
-   this.bodyMask=device.createBuffer({label:"Uniform mixed swept-body region mask",size:4*(tiles/64+UNIFORM_BODY_REGION_HEADER_WORDS),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+   this.bodyMask=device.createBuffer({label:"Uniform mixed swept-body region mask",size:4*((1+UNIFORM_BODY_TILE_WORDS)*tiles/64+UNIFORM_BODY_REGION_HEADER_WORDS),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    if(recordBytes>device.limits.maxStorageBufferBindingSize)throw new RangeError(`Solid cell-fraction record needs ${recordBytes} bytes, above this device's storage binding limit ${device.limits.maxStorageBufferBindingSize}`);
    const record=device.createBuffer({label:"Uniform mixed all-4h solid record",size:recordBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    // Epoch 1 (a zeroed stamp never matches): a key's aperture rows hold only from its build.
@@ -458,16 +464,25 @@ fn umBodyMoved(i:u32)->bool{
  return any(bitcast<vec4u>(a.positionShape)!=bitcast<vec4u>(b.positionShape))||any(bitcast<vec4u>(a.dimensions)!=bitcast<vec4u>(b.dimensions))||any(bitcast<vec4u>(a.orientation)!=bitcast<vec4u>(b.orientation));
 }
 fn umBuilderRegionOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
-fn umBodyTileDirty(t:u32,tc:vec3u)->bool{
- // The region's swept reach bounds every tile in it from below.
- if((bodyRegions[umBuilderRegionOfTile(t)]&0xffu)>2u){return false;}
+// The tile near a moved body: one moved-slot bitmask, the tile's 4h box.
+fn umBodyTileSwept(tc:vec3u,moved:u32)->bool{
  let h=umSolidParams.cellGravity.xyz;let lo=umSolidWorldCell(vec3i(tc*4u))-0.5*h;let hi=lo+4.0*h;
  let margin=2.0*max(h.x,max(h.y,h.z));
  for(var i=0u;i<12u;i++){
-  if(!umBodyMoved(i)){continue;}
+  if(((moved>>i)&1u)==0u){continue;}
   if((umBodyPresentNow(i)&&umBodyTileNear(umSolidBodies[i],lo,hi,margin))||(umBodyPresentBuilt(i)&&umBodyTileNear(umBuiltBodies[i],lo,hi,margin))){return true;}
  }
  return false;
+}
+// The bodies-only rebuild's test of tile t, as bodyMask wrote it this head
+// (its region's swept reach at most 2, then umBodyTileSwept). Evaluated in
+// the builders themselves, inlined ahead of umBuildTile, the test made
+// buildRegions' Metal compile take 110-150 s of a cold construction; read as
+// a bit it takes under a second.
+const UM_BODY_TILE_BITS:u32=UM_REGIONS+${UNIFORM_BODY_REGION_HEADER_WORDS}u;
+fn umBodyTileDirty(t:u32)->bool{
+ let k=(t&3u)|(((t>>3u)&3u)<<2u)|(((t>>6u)&3u)<<4u);
+ return ((bodyRegions[UM_BODY_TILE_BITS+${UNIFORM_BODY_TILE_WORDS}u*umBuilderRegionOfTile(t)+(k>>5u)]>>(k&31u))&1u)!=0u;
 }
 // Distance from a box to a segment's points: convex along the segment, so a
 // ternary search brackets its minimum; the bracket width times the length
@@ -487,7 +502,8 @@ fn umBodyReach(d:f32,hmax:f32)->u32{
  if(!(d>0.0)){return 0u;}return u32(min(floor(d/hmax),255.0));
 }
 // One lane per 16h region: the swept/pose reaches (UniformMixedSolid.bodyRegions
-// and its mirror at umBodyRegionBase in the record).
+// and its mirror at umBodyRegionBase in the record), then the region's tile
+// bits (umBodyTileDirty): a region beyond a swept reach of 2 has none set.
 @compute @workgroup_size(64) fn bodyMask(@builtin(global_invocation_id) g:vec3u){
  let region=g.x+umDispatchX*64u*g.y;
  if(region==0u){
@@ -498,14 +514,16 @@ fn umBodyReach(d:f32,hmax:f32)->u32{
  }
  if(region>=UM_REGIONS){return;}
  let first=umSolidRegionTile(region,0u);
- if(!umTileLive(first)){bodyRegions[region]=${UNIFORM_BODY_REGION_UNKNOWN}u;record[umBodyRegionBase()+region]=vec4f(0.0,0.0,1.0,0.0);return;}
+ let bits=UM_BODY_TILE_BITS+${UNIFORM_BODY_TILE_WORDS}u*region;
+ if(!umTileLive(first)){bodyRegions[region]=${UNIFORM_BODY_REGION_UNKNOWN}u;record[umBodyRegionBase()+region]=vec4f(0.0,0.0,1.0,0.0);bodyRegions[bits]=0u;bodyRegions[bits+1u]=0u;return;}
  let h=umSolidParams.cellGravity.xyz;let hmax=max(h.x,max(h.y,h.z));
  let lo=umSolidWorldCell(vec3i(umTileCoord(first)*4u))-0.5*h;let hi=lo+16.0*h;
- var swept=3.402823e38;var pose=3.402823e38;
+ var swept=3.402823e38;var pose=3.402823e38;var moved=0u;
  for(var i=0u;i<12u;i++){
   let now=umBodyPresentNow(i);let b=umSolidBodies[i];
   if(now){let p=b.positionShape.xyz;pose=min(pose,distance(clamp(p,lo,hi),p)-b.dimensions.w);}
   if(!umBodyMoved(i)){continue;}
+  moved|=1u<<i;
   let built=umBodyPresentBuilt(i);let o=umBuiltBodies[i];
   if(now&&built){swept=min(swept,umBoxSegmentDistance(lo,hi,o.positionShape.xyz,b.positionShape.xyz)-max(o.dimensions.w,b.dimensions.w));}
   else if(now){let p=b.positionShape.xyz;swept=min(swept,distance(clamp(p,lo,hi),p)-b.dimensions.w);}
@@ -513,6 +531,9 @@ fn umBodyReach(d:f32,hmax:f32)->u32{
  }
  let s=umBodyReach(swept,hmax);let q=umBodyReach(pose,hmax);
  bodyRegions[region]=s|(q<<8u);record[umBodyRegionBase()+region]=vec4f(f32(s),f32(q),0.0,0.0);
+ var tiles=vec2u(0u);
+ if(s<=2u){for(var k=0u;k<64u;k++){if(umBodyTileSwept(umTileCoord(umSolidRegionTile(region,k)),moved)){tiles[k>>5u]|=1u<<(k&31u);}}}
+ bodyRegions[bits]=tiles.x;bodyRegions[bits+1u]=tiles.y;
 }
 var<workgroup> sums:array<vec4f,64>;
 var<workgroup> lows:array<vec4f,64>;
@@ -537,7 +558,7 @@ fn umSolidHalo(t:u32,axis:u32,side:u32)->u32{return umSolidTiles()+umFaceTile(t>
 // holds no tile.
 fn umCutTile(t:u32){
  if(!umTileLive(t)){return;}
- let tc=umTileCoord(t);if(umBodyTiles&&!umBodyTileDirty(t,tc)){return;}
+ let tc=umTileCoord(t);if(umBodyTiles&&!umBodyTileDirty(t)){return;}
  var cut=0u;
  for(var i=0u;i<216u&&cut==0u;i++){
   let q=vec3i(tc*4u)-vec3i(1)+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));
@@ -571,7 +592,7 @@ fn umBuilderItemRegion(item:u32)->u32{return ${pool?"8u*ulResidentBlock(item>>6u
   if(workgroupUniformLoad(&regionReach)==0u){continue;}
   let slot=lane>>3u;let t=umSolidRegionTile(region,8u*(item&7u)+slot);
   var live=umTileLive(t);var tc=vec3u(0u);
-  if(live){tc=umTileCoord(t);live=!(umBodyTiles&&!umBodyTileDirty(t,tc));}
+  if(live){tc=umTileCoord(t);live=!(umBodyTiles&&!umBodyTileDirty(t));}
   if(live){
    for(var i=lane&7u;i<216u;i+=8u){
     let q=vec3i(tc*4u)-vec3i(1)+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));
@@ -605,7 +626,7 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  if(!umTileLive(t)){return;}
  let tc=umTileCoord(t);let row=t;
  // The mask is read_write storage here: decide on one lane, exit uniformly.
- if(umBodyTiles){if(lane==0u){buildDirty=u32(umBodyTileDirty(t,tc));}if(workgroupUniformLoad(&buildDirty)==0u){return;}}
+ if(umBodyTiles){if(lane==0u){buildDirty=u32(umBodyTileDirty(t));}if(workgroupUniformLoad(&buildDirty)==0u){return;}}
  let l=vec3u(lane%4u,(lane/4u)%4u,lane/16u);let c=vec3i(tc*4u+l);
  if(lane==0u){for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);atomicStore(&fieldCut[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}atomicStore(&slotOdd,0u);}
  var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);var face=vec3f(0.0);var lowFace=vec3f(0.0);
@@ -1051,6 +1072,8 @@ fn umVertexBuried(p:vec3i)->bool{
 export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,writable=false):string{
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
+fn collisionSculptNear(world:vec3f)->bool{return false;}
+fn umTerrainBoundary(q:vec3f)->vec4f{return vec4f(0,1,0,1e6);}
 fn umSolidRegionClearAtBuild(p:vec3i)->bool{return true;}
 fn umSolidPresent()->bool{return false;}
 fn umSolidSkip()->bool{return false;}
@@ -1254,6 +1277,15 @@ fn umBedSlope(p:vec3i)->vec2f{
 }
 fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
 ${uniformTerrainSamplingWGSL}
+${sculptCollisionWGSL("umSolidScratch")}
+// Positive in fluid space, gradient in lattice coordinates, value in metres.
+fn umTerrainBoundary(q:vec3f)->vec4f{
+ let h=umSolidParams.cellGravity.xyz;let surface=umTerrainSurface(q);
+ let terrain=(q.y-surface.x)*h.y;let world=umSolidParams.frame.xyz+q*h;
+ let cut=collisionSculptSample(world);
+ if(cut.distance<1e19&&cut.distance<sculptFieldBand()-1e-7&&-cut.distance>terrain){return vec4f(-cut.normal*h,-cut.distance);}
+ return vec4f(vec3f(-surface.y,1,-surface.z)*h.y,terrain);
+}
 ${geometricPlaneBoxWGSL.replaceAll("geometric", "umTerrain")}
 ${coarse!==undefined&&gated?uniformSolidBoundaryWGSL.replace("fn umBoundaryRecord(p:vec3i)->u32{","fn umBoundaryRecordGeometry(p:vec3i)->u32{")+/* wgsl */`
 // The record is static boundary geometry, independent of rigid-body pose.
@@ -1295,12 +1327,12 @@ fn umTerrainBoxOpen(q:vec3f,width:vec3f)->f32{
  var open=0.0;let part=width*vec3f(0.5,1,0.5);
  for(var k=0u;k<4u;k++){
   let at=q+vec3f(select(-0.25,0.25,(k&1u)!=0u)*width.x,0,select(-0.25,0.25,(k&2u)!=0u)*width.z);
-  let s=umTerrainSurface(at);
-  open+=0.25*umTerrainPlaneBoxFraction(vec3f(s.y,-1,s.z),at.y-s.x,part);
+  let s=umTerrainBoundary(at);
+  open+=0.25*umTerrainPlaneBoxFraction(s.xyz,s.w,part);
  }
  return open;
 }
-fn umCellInsideTerrain(p:vec3i)->bool{if(!umSolidHasTerrain()){return false;}return f32(p.y)+0.5<umSolidTerrainHeight(p.x,p.z);}
+fn umCellInsideTerrain(p:vec3i)->bool{if(!umSolidHasTerrain()){return false;}return umTerrainBoundary(vec3f(p)+0.5).w<0.0;}
 // The unit box at q: x umTerrainBoxOpen, and y umBoundaryBoxOpen where
 // boundary (else 0), through one umTerrainPlaneBoxFraction site (Metal
 // inlines every site, and umCellOpenGeometry is inlined at every umCellOpen).
@@ -1311,7 +1343,7 @@ fn umUnitBoxOpen(q:vec3f,boundary:bool)->vec2f{
   var normal=vec3f(0);var offset=0.0;var part=width*0.5;var weight=0.125;
   if(j<4u){
    let at=q+vec3f(select(-0.25,0.25,(j&1u)!=0u)*width.x,0,select(-0.25,0.25,(j&2u)!=0u)*width.z);
-   let s=umTerrainSurface(at);normal=vec3f(s.y,-1,s.z);offset=at.y-s.x;part=width*vec3f(0.5,1,0.5);weight=0.25;
+   let s=umTerrainBoundary(at);normal=s.xyz;offset=s.w;part=width*vec3f(0.5,1,0.5);weight=0.25;
   }else{
    let k=j-4u;let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let at=q+select(vec3f(-0.25),vec3f(0.25),bit!=vec3u(0))*width;
    let s=umBoundarySample(at);normal=s.xyz;offset=s.w;
@@ -1437,7 +1469,7 @@ fn umSolidTerrainAtWorld(world:vec3f)->bool{
  let x=clamp(i32(floor((world.x-umSolidParams.frame.x)/h.x)),0,d.x-1);
  let z=clamp(i32(floor((world.z-umSolidParams.frame.z)/h.z)),0,d.z-1);
  let q=vec3f((world.x-umSolidParams.frame.x)/h.x,(world.y-umSolidParams.frame.y)/h.y,(world.z-umSolidParams.frame.z)/h.z);
- return q.y<umTerrainSurface(q).x;
+ return umTerrainBoundary(q).w<0.0;
 }
 fn umSolidAtWorld(world:vec3f)->bool{return umSolidVoxelAtWorld(world)||umSolidTerrainAtWorld(world)||umBodyAt(world)>=0;}
 // insideAnyTraceSolid for a lattice-coordinate point: voxels and bodies
