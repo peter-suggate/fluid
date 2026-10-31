@@ -74,7 +74,7 @@ struct RasterNativeCutVertex { @builtin(position) position:vec4f, @location(0) @
   if(layer>=2u){return RasterNativeCutVertex(rasterSpotClip(world,rasterLighting.spots[layer-2u]),cut,world);}
   return RasterNativeCutVertex(vec4f(rasterShadowPosition(world,layer),1),cut,world);
 }
-@fragment fn rasterNativeCutFragment(input:RasterNativeCutVertex)->@builtin(frag_depth) f32{
+fn rasterNativeCutDepth(input:RasterNativeCutVertex)->f32{
   let layer=rasterLighting.control.y;
   if(layer>=2u){
     let spot=rasterLighting.spots[layer-2u];let basis=rasterSpotBasis(spot);
@@ -87,6 +87,20 @@ struct RasterNativeCutVertex { @builtin(position) position:vec4f, @location(0) @
   let origin=input.world+basis[2]*(rasterLighting.depthCell.x*.5-dot(input.world-centre,basis[2]));
   let hit=importedCutHit(input.cut,origin,-basis[2],0.0,rasterLighting.depthCell.x);
   if(hit.t>=DRY_MISS){discard;}return clamp(hit.t/rasterLighting.depthCell.x,0.0,1.0);
+}
+@fragment fn rasterNativeCutFragment(input:RasterNativeCutVertex)->@builtin(frag_depth) f32{return rasterNativeCutDepth(input);}
+struct RasterCachedWallVertex { @builtin(position) position:vec4f,@location(0) world:vec3f,@location(1) @interpolate(flat) material:u32,@location(2) @interpolate(flat) owner:u32 }
+@vertex fn rasterCachedWallVertex(@location(0) world:vec3f,@location(1) material:u32,@location(2) normal:vec3f,@location(3) owner:u32)->RasterCachedWallVertex{
+  let layer=rasterLighting.control.y;
+  if(rasterShadowRedraw.minimum.w==0u){return RasterCachedWallVertex(vec4f(2,2,2,1),world,material,owner);}
+  if(layer>=2u){return RasterCachedWallVertex(rasterSpotClip(world,rasterLighting.spots[layer-2u]),world,material,owner);}
+  return RasterCachedWallVertex(vec4f(rasterShadowPosition(world,layer),1),world,material,owner);
+}
+@fragment fn rasterCachedWallFragment(input:RasterCachedWallVertex)->@builtin(frag_depth) f32{
+  if(input.material==0xffffffffu){return rasterNativeCutDepth(RasterNativeCutVertex(input.position,input.owner,input.world));}
+  let layer=rasterLighting.control.y;
+  if(layer>=2u){let spot=rasterLighting.spots[layer-2u];if(spot.rangeRadiusIndex.w>0.0&&distance(input.world,spot.positionNear.xyz)<=spot.rangeRadiusIndex.y){discard;}}
+  return input.position.z;
 }
 `;
 

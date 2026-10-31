@@ -1,3 +1,4 @@
+import { sculptWallMeshWGSL, sculptWallPrimaryWGSL } from "./sculpt-wall-mesh";
 import { importedCutPrimaryWGSL } from "./imported-surface-csg.wgsl";
 
 /** Cached source boundaries and live cut walls share the published field and
@@ -5,6 +6,8 @@ import { importedCutPrimaryWGSL } from "./imported-surface-csg.wgsl";
  * hardware depth composes them with the analytic cavity walls. */
 export const importedSurfaceWGSL = /* wgsl */ `
 ${importedCutPrimaryWGSL}
+${sculptWallMeshWGSL}
+${sculptWallPrimaryWGSL}
 @group(1) @binding(80) var<storage,read> importedLodRecords:array<vec4u>;
 @group(1) @binding(81) var<storage,read_write> importedDrawArgs:array<atomic<u32>>;
 @group(1) @binding(82) var<storage,read_write> importedInstanceIds:array<u32>;

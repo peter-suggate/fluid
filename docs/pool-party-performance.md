@@ -850,3 +850,71 @@ remain visible in the report.
 This measures the substrate, not end-to-end browser frame rate. Run the native
 pen/scene probes above for full publication, reconstruction and presentation
 costs; do not infer sustained 60 fps from the microbenchmark alone.
+
+### Cached GPU triangles for carved imported surfaces
+
+Imported cut walls now extract their triangles on the GPU when a baked page
+changes. A six-tetrahedra cell decomposition finds the cut boundary; clipping
+against the imported source volume keeps only cavity walls inside the source.
+Positions, normals, mirrored material IDs and owner IDs are retained in GPU
+vertex buffers. Primary visibility and shadow maps share these buffers and
+GPU-written indirect draw counts. Ordinary moving-camera frames do not run the
+extractor or march the cut field per pixel.
+
+The cache follows the substrate's immutable page revisions. Append, undo, redo
+and branch edits rebuild changed pages, while undo-all releases their buffers.
+Changes to imported field programs or primitive records invalidate the source
+intersection too. No geometry, triangle counts or GPU completion fences are
+read back during production edits. Each live page reserves about 256 KiB for
+8,190 vertices. If a pathological page exceeds that bound, the GPU publishes a
+complete field proxy for that page instead of truncating its surface; that
+page retains the previous ray-marching cost. The camera benchmark checks that
+its edited scene uses actual triangles with zero overflow pages.
+
+`tests/sculpt-wall-mesh.test.ts` exercises native GPU extraction, source clipping,
+material/owner retention, buffer reuse without camera rebuilds, undo/redo,
+undo-all/branching and the overflow publication path. The production lighthouse
+camera benchmark compares ray marching and cached triangles in ABBA order,
+using identical edits, orbit samples and lighting. It also captures intact,
+carved, undo and redo geometry and images. Run it with the shared GPU timing
+lock:
+
+```sh
+WEBGPU_NODE_MODULE="$PWD/node_modules/webgpu/index.js" \
+FLUID_SVO_DRY_FRAME_SCENE=atlantic-lighthouse \
+FLUID_SVO_DRY_FRAME_TRAVERSAL=raster-primary \
+FLUID_SVO_DRY_FRAME_SURFACE_MESH=1 \
+FLUID_SVO_DRY_FRAME_CONE_TRACING=raster-ao \
+FLUID_SVO_DRY_FRAME_CONE_SCALE=1 \
+FLUID_SVO_DRY_FRAME_SCULPT_CAMERA=1 \
+FLUID_SVO_DRY_FRAME_WIDTH=1280 FLUID_SVO_DRY_FRAME_HEIGHT=720 \
+FLUID_SVO_DRY_FRAME_CYCLES=8 FLUID_SVO_DRY_FRAME_TIMING=gpu \
+FLUID_SVO_DRY_FRAME_OUT=/tmp/sculpt-wall-camera/report.json \
+  bash tools/gpu/fluid-gpu-run.sh timing \
+  node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
+```
+
+The measurement covers the production dry renderer, including its lighting,
+but excludes fluid simulation, water and browser presentation. Triangulation
+and source clipping approximate curved boundaries at the baked lattice's
+resolution; the image comparison reports those differences rather than
+requiring analytic-ray and triangle images to be identical.
+
+The [recorded lighthouse camera run](validation/sculpt-wall-camera/report.json)
+uses an Apple M1 Max at 1280×720 with 16 edits and 16 timed moving frames per
+arm. Median GPU frame time falls from **41.943 ms** for page ray marching to
+**8.520 ms** for cached triangles (**4.92× faster**, 79.7% less GPU time). P95
+falls from 48.890 ms to 12.452 ms. CPU encode medians are 0.412 and 0.494 ms.
+The scene contains 63 baked pages and 1,048 cached cut-wall triangles, with zero
+overflow pages. The wall build counter stays unchanged throughout camera motion.
+Undo and redo each restore the captured geometry with zero differing pixels.
+
+The [ray-marched](validation/sculpt-wall-camera/raymarch.png) and
+[cached-triangle](validation/sculpt-wall-camera/cached.png) captures differ in
+1,190 geometry/normal pixels out of 921,600 (0.129%); the carve itself changes
+5,474 pixels relative to the [intact scene](validation/sculpt-wall-camera/intact.png).
+The report's `maxDepth` includes the miss sentinel at silhouette changes and
+must not be interpreted as a physical distance error. Both arms use the same
+working-tree lighthouse assets and lighting; this isolates the wall renderer,
+not unrelated changes to those assets. The 8.52 ms result is a dry-render GPU
+measurement, not a claim of 117 fps for the full browser application.

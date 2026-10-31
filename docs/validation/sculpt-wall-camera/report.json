@@ -1,0 +1,192 @@
+{
+  "scene": "atlantic-lighthouse",
+  "width": 1280,
+  "height": 720,
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "device": "apple-m1-max",
+    "description": "Metal driver on macOS Version 26.6.2 (Build 25G83)"
+  },
+  "stamps": 16,
+  "camera": {
+    "azimuth_rad": -0.65,
+    "elevation_rad": -0.09,
+    "distance_m": 36,
+    "target_m": {
+      "x": 8,
+      "y": 8.4,
+      "z": 0
+    },
+    "tanHalfFov": 0.34
+  },
+  "scope": "Complete production dry-renderer GPU spans during camera orbit; excludes fluid simulation, water and browser presentation. Same lighting, geometry and camera sequence in ABBA order. Four warmup frames per arm. Meshing excluded from steady camera timings.",
+  "result": {
+    "raymarch": {
+      "gpuMedian_ms": 41.94304,
+      "gpuP95_ms": 48.889856,
+      "cpuEncodeMedian_ms": 0.4123749999998836,
+      "samples": [
+        {
+          "gpu_ms": 30.14656,
+          "encode_ms": 0.5849169999928563
+        },
+        {
+          "gpu_ms": 35.979264,
+          "encode_ms": 0.4020830000008573
+        },
+        {
+          "gpu_ms": 37.02784,
+          "encode_ms": 0.40495799999916926
+        },
+        {
+          "gpu_ms": 40.108032,
+          "encode_ms": 0.4145000000062282
+        },
+        {
+          "gpu_ms": 42.729472,
+          "encode_ms": 0.40154200000688434
+        },
+        {
+          "gpu_ms": 41.94304,
+          "encode_ms": 0.41449999999895226
+        },
+        {
+          "gpu_ms": 48.758784,
+          "encode_ms": 0.41599999999743886
+        },
+        {
+          "gpu_ms": 43.450368,
+          "encode_ms": 0.41795799999817973
+        },
+        {
+          "gpu_ms": 30.277632,
+          "encode_ms": 0.4119170000049053
+        },
+        {
+          "gpu_ms": 36.0448,
+          "encode_ms": 0.4123749999998836
+        },
+        {
+          "gpu_ms": 37.552128,
+          "encode_ms": 0.4028330000001006
+        },
+        {
+          "gpu_ms": 40.566784,
+          "encode_ms": 0.40720799999689916
+        },
+        {
+          "gpu_ms": 42.5984,
+          "encode_ms": 0.3953330000003916
+        },
+        {
+          "gpu_ms": 44.498944,
+          "encode_ms": 0.43908400000509573
+        },
+        {
+          "gpu_ms": 48.889856,
+          "encode_ms": 0.4287079999994603
+        },
+        {
+          "gpu_ms": 44.171264,
+          "encode_ms": 0.3892909999995027
+        }
+      ]
+    },
+    "cached": {
+      "gpuMedian_ms": 8.51968,
+      "gpuP95_ms": 12.45184,
+      "cpuEncodeMedian_ms": 0.49399999999877764,
+      "samples": [
+        {
+          "gpu_ms": 8.51968,
+          "encode_ms": 0.5078749999956926
+        },
+        {
+          "gpu_ms": 8.84736,
+          "encode_ms": 0.49649999999383
+        },
+        {
+          "gpu_ms": 8.323072,
+          "encode_ms": 0.49454100000002654
+        },
+        {
+          "gpu_ms": 8.192,
+          "encode_ms": 0.49399999999877764
+        },
+        {
+          "gpu_ms": 8.323072,
+          "encode_ms": 0.47758299999986775
+        },
+        {
+          "gpu_ms": 12.45184,
+          "encode_ms": 0.4996670000036829
+        },
+        {
+          "gpu_ms": 8.912896,
+          "encode_ms": 0.4988329999978305
+        },
+        {
+          "gpu_ms": 8.585216,
+          "encode_ms": 0.5062910000051488
+        },
+        {
+          "gpu_ms": 10.027008,
+          "encode_ms": 0.505790999995952
+        },
+        {
+          "gpu_ms": 8.257536,
+          "encode_ms": 0.47058300000207964
+        },
+        {
+          "gpu_ms": 9.043968,
+          "encode_ms": 0.48412500000267755
+        },
+        {
+          "gpu_ms": 9.17504,
+          "encode_ms": 0.4644579999949201
+        },
+        {
+          "gpu_ms": 7.929856,
+          "encode_ms": 0.46649999999499414
+        },
+        {
+          "gpu_ms": 8.257536,
+          "encode_ms": 0.4416669999991427
+        },
+        {
+          "gpu_ms": 8.126464,
+          "encode_ms": 0.4410839999982272
+        },
+        {
+          "gpu_ms": 8.192,
+          "encode_ms": 0.4079580000034184
+        }
+      ]
+    }
+  },
+  "parity": {
+    "intactToCarved": {
+      "pixels": 5474,
+      "maxDepth": 3.4028230607370965e+38
+    },
+    "undo": {
+      "pixels": 0,
+      "maxDepth": 0
+    },
+    "redo": {
+      "pixels": 0,
+      "maxDepth": 0
+    },
+    "rayToTriangles": {
+      "pixels": 1190,
+      "maxDepth": 3.4028230607370965e+38
+    }
+  },
+  "mesh": {
+    "pages": 63,
+    "builtPages": 126,
+    "cachedTriangles": 1048,
+    "overflowPages": 0
+  }
+}

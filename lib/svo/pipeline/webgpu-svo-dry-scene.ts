@@ -1,3 +1,4 @@
+import { SculptWallMesh, sculptWallVertexLayout, type SculptWallPipelines } from "../features/primary-visibility/sculpt-wall-mesh";
 import { WebgpuSculptSubstrate } from "../features/scene-publication/webgpu-sculpt-substrate";
 import { SurfaceTextureAtlasGpu } from "../features/materials/surface-texture-atlas-gpu";
 import { SvoWaterWorldReflections, type SvoWaterWorldReflectionInputs } from "../features/shading/water-world-reflections";
@@ -1042,6 +1043,8 @@ interface SvoDrySplitPipelineBundle {
   readonly scenePrimitiveRaster?: GPURenderPipeline;
   readonly importedSurface?: GPURenderPipeline;
   readonly importedCut?: GPURenderPipeline;
+  readonly sculptWall?: GPURenderPipeline;
+  readonly sculptWallBuild?: SculptWallPipelines;
   readonly importedSurfaceSelect?: GPUComputePipeline;
   readonly importedSurfaceReset?: GPUComputePipeline;
   readonly scenePrimitiveCoverage?: GPURenderPipeline;
@@ -1491,6 +1494,20 @@ export class SparseVoxelDrySceneRenderer {
   private primitiveCandidateArena?: SvoPrimitiveCandidateArena;
   /** Host copies of the regions a publication diffs against before it writes. */
   private sculptSubstrate?: WebgpuSculptSubstrate;
+  private sculptWallMesh?: SculptWallMesh;
+  private sculptWallPipeline?: GPURenderPipeline;
+  private sculptWallBuild?: SculptWallPipelines;
+  private sculptWallMeshEnabled = true;
+  private sculptWallSourceKey?: readonly unknown[];
+  /** Diagnostic A/B; production always uses the cached mesh. */
+  setSculptWallMeshEnabled(enabled: boolean): void {
+    if (this.sculptWallMeshEnabled === enabled) return;
+    this.sculptWallMeshEnabled = enabled; this.surfaceMeshDrawCache = undefined;
+    this.dryFrameReuse.invalidate(); this.rasterAo?.invalidateVisibility(); this.rasterAo?.invalidateNativeGeometry();
+  }
+  get sculptWallStatistics(): { pages: number; builtPages: number } {
+    return { pages: this.sculptWallMesh?.pages.size ?? 0, builtPages: this.sculptWallMesh?.builtPages ?? 0 };
+  }
   private readonly publishedSculptCuts = new PublishedWords();
   private readonly publishedMaterials = new PublishedWords();
   private readonly publishedClusters = new PublishedWords();
@@ -1717,6 +1734,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   async initialize(progress?: (label: string, completed: number, total: number) => void): Promise<void> {
+    this.sculptWallMesh = new SculptWallMesh(this.device);
     this.sculptSubstrate = new WebgpuSculptSubstrate(this.device);
     await this.sculptSubstrate.initialize();
     if (this.experiments.surfaceMesh) await prepareMeshVolumeSurfaces();
@@ -1879,6 +1897,8 @@ export class SparseVoxelDrySceneRenderer {
     this.scenePrimitiveRasterPipeline = bundle.scenePrimitiveRaster;
     this.importedSurfacePipeline = bundle.importedSurface;
     this.importedCutPipeline = bundle.importedCut;
+    this.sculptWallPipeline = bundle.sculptWall;
+    this.sculptWallBuild = bundle.sculptWallBuild;
     this.importedSurfaceSelectPipeline = bundle.importedSurfaceSelect;
     this.importedSurfaceResetPipeline = bundle.importedSurfaceReset;
     this.scenePrimitiveCoveragePipeline = bundle.scenePrimitiveCoverage;
@@ -2362,6 +2382,7 @@ export class SparseVoxelDrySceneRenderer {
       || cached.group !== group || cached.planes !== this.source!.structural!.planarBoundaries.count
       || cached.instances !== this.importedSurfaceInstances || cached.imported !== this.importedSurfacePipeline
       || cached.records !== this.importedSurfaceLodRecords || cached.args !== this.importedSurfaceDrawArgs
+      || cached.wallRevision !== this.sculptWallMesh?.revision || cached.wallPipeline !== this.sculptWallPipeline
       || cached.cuts !== (this.sculptSubstrate?.proxyCount ?? this.scene?.sculptCuts?.[0] ?? 0) || cached.cutPipeline !== this.importedCutPipeline
       || cached.compact !== compact || cached.rigid !== rigid || cached.rigidPipeline !== this.rasterRigidDirectPipeline
       || cached.rigidGroup !== this.rasterRigidInputBindGroup) {
@@ -2433,9 +2454,10 @@ export class SparseVoxelDrySceneRenderer {
     }
     const cuts = this.sculptSubstrate?.proxyCount ?? this.scene?.sculptCuts?.[0] ?? 0;
     if (cuts && this.importedSurfaceInstances.length && this.importedCutPipeline) {
-      draw.setPipeline(primaryPipeline(this.importedCutPipeline));
       draw.setBindGroup(0, this.bindGroup);
-      draw.draw(36, cuts);
+      if (this.sculptWallMeshEnabled && this.sculptWallPipeline && this.sculptWallMesh) {
+        draw.setPipeline(primaryPipeline(this.sculptWallPipeline)); this.sculptWallMesh.draw(draw);
+      } else { draw.setPipeline(primaryPipeline(this.importedCutPipeline)); draw.draw(36, cuts); }
     }
     draw.setPipeline(primaryPipeline(pipelines.draw));
     if (usePrepass) draw.setBindGroup(1, this.conePrepassBindGroup!);
@@ -2450,7 +2472,7 @@ export class SparseVoxelDrySceneRenderer {
       draw.setBindGroup(0, this.rasterRigidInputBindGroup!);
       draw.draw(SVO_RIGID_RASTER_CONTRACT.verticesPerProxy, SVO_RIGID_RASTER_CONTRACT.maximumBodies);
     }
-    return { bundles: [draw.finish()], cuts, cutPipeline: this.importedCutPipeline, compact, main: this.bindGroup, pipelines, mesh: this.surfaceMeshDrawGroup,
+    return { bundles: [draw.finish()], wallRevision: this.sculptWallMesh?.revision, wallPipeline: this.sculptWallPipeline, cuts, cutPipeline: this.importedCutPipeline, compact, main: this.bindGroup, pipelines, mesh: this.surfaceMeshDrawGroup,
       prepass: usePrepass ? this.conePrepassBindGroup : undefined, group,
       planes: this.source!.structural!.planarBoundaries.count, instances: this.importedSurfaceInstances,
       imported: this.importedSurfacePipeline, records: this.importedSurfaceLodRecords, args: this.importedSurfaceDrawArgs,
@@ -4251,8 +4273,16 @@ export class SparseVoxelDrySceneRenderer {
         primitive: { topology: "triangle-list", cullMode: "none" },
         depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
       }) : undefined;
+      const sculptWall = this.experiments.surfaceMesh ? await this.compileMeshPrimaryPipeline({
+        label: "Cached sculpt wall triangles", layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        vertex: { module, entryPoint: "sculptWallVertex", buffers: [sculptWallVertexLayout] },
+        fragment: { module, entryPoint: "sculptWallFragment", targets: rasterPrimaryTargets },
+        primitive: { topology: "triangle-list", cullMode: "none" },
+        depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
+      }) : undefined;
+      const sculptWallBuild = this.experiments.surfaceMesh ? await this.sculptWallMesh?.compile(module, layout) : undefined;
       const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!, this.experiments.nativeAssetShadows !== false);
-      const bundle = { rasterAo, importedSurface, importedCut, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, precomputedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      const bundle = { rasterAo, importedSurface, importedCut, sculptWall, sculptWallBuild, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, precomputedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
         brickCoverageOverflow, scenePrimitiveRaster,
@@ -5477,7 +5507,10 @@ export class SparseVoxelDrySceneRenderer {
       pass.drawIndexedIndirect(this.rasterAo!.nativeDrawArguments!,index*24);
     }
     const cuts = this.sculptSubstrate?.proxyCount ?? this.scene?.sculptCuts?.[0] ?? 0;
-    if (cuts && cutPipeline) { pass.setPipeline(cutPipeline); pass.draw(36, cuts); }
+    if (cuts && cutPipeline) {
+      if (this.sculptWallMeshEnabled && cachedPipeline && this.sculptWallMesh && this.sculptWallBuild) { pass.setPipeline(cachedPipeline); this.sculptWallMesh.draw(pass); }
+      else { pass.setPipeline(cutPipeline); pass.draw(36, cuts); }
+    }
   };
 
   /**
@@ -5704,6 +5737,7 @@ export class SparseVoxelDrySceneRenderer {
     this.writeScenePrimitiveOverflowPublication();
     this.primitiveCandidateArena = arena;
     this.scene = { ...this.scene, renderRevision, primitiveRecords: records, primitiveCandidates: candidates };
+    this.sculptWallSourceKey = undefined;
     this.writeParams(this.source, this.scene);
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
@@ -6956,6 +6990,12 @@ export class SparseVoxelDrySceneRenderer {
       source: this.source, scene: this.scene, bindings: this.bindGroup,
       pipeline: this.splitLightingPipeline!, optimizedPipeline: this.splitOptimizedLightingPipeline, precomputedPipeline: this.splitPrecomputedLightingPipeline, target: targetTexture, gBuffer: gBufferViews,
     } : undefined;
+    if (this.sculptWallMesh && this.sculptWallBuild) {
+      if (this.sculptWallSourceKey?.[0] !== this.scene?.fieldProgramBlocks || this.sculptWallSourceKey?.[1] !== this.scene?.primitiveRecords) {
+        this.sculptWallSourceKey = [this.scene?.fieldProgramBlocks, this.scene?.primitiveRecords];
+      }
+      this.sculptWallMesh.encode(encoder, this.sculptSubstrate?.bakePlan, this.sculptWallSourceKey, this.bindGroup, this.sculptWallBuild);
+    }
     if (this.dryFrameReuse.matches(dryFrameKey)) {
       if (this.encodeResult?.sampledTargetView !== targetView) this.encodeResult = { encoded: true, sampledTargetView: targetView };
       return this.encodeResult;
@@ -7413,6 +7453,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   destroy(): void {
+    this.sculptWallMesh?.destroy();
     this.sculptSubstrate?.destroy();
     this.waterWorldReflections?.destroy();
     this.probeBuffers?.destroy();

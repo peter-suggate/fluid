@@ -47,6 +47,7 @@ export class WebgpuSculptSubstrate {
   /** Useful in diagnostics: sampling cost depends on pages, never brush count. */
   lastUpdate = { pages: 0, records: 0, samples: 0 };
   constructor(private readonly device: GPUDevice) {}
+  get bakePlan(): SculptBakePlan | undefined { return this.pending ?? this.plan; }
   get proxyCount(): number { return (this.pending ?? this.plan)?.proxies[0] ?? 0; }
   get pageCount(): number { return (this.pending ?? this.plan)?.pages.size ?? 0; }
   validate(words: Uint32Array): void {

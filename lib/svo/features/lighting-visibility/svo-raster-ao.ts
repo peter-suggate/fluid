@@ -1,3 +1,4 @@
+import { sculptWallVertexLayout } from "../primary-visibility/sculpt-wall-mesh";
 import { rasterHorizonBudgetWGSL, rasterHorizonRangeProducerWGSL, rasterHorizonImportanceWGSL, rasterAoImportanceMipWGSL } from "./raster-ao-budget";
 export { rasterHorizonBudgetWGSL } from "./raster-ao-budget";
 import { RASTER_MAX_SPOT_LIGHTS, rasterSpotLights } from "./raster-spot-lights";
@@ -21,6 +22,7 @@ export interface RasterAoPipelines {
   shadow: GPURenderPipeline;
   nativeShadow?: GPURenderPipeline;
   nativeCut?: GPURenderPipeline;
+  nativeCachedCut?: GPURenderPipeline;
   terrain: GPURenderPipeline;
   casters: GPUComputePipeline;
   ao: GPUComputePipeline;
@@ -708,7 +710,11 @@ export class SvoRasterAo {
       this.device.createComputePipelineAsync({label:"Inline visibility reference",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.lightLayout]}),compute:{module,entryPoint:"rasterInlineEdgesMain"}}),
       this.device.createComputePipelineAsync({label:"Exact receiver contact AO",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.lightLayout]}),compute:{module,entryPoint:"rasterExactContactMain"}}),
       this.device.createComputePipelineAsync({label:"Normalize visible AO footprint",layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,split,this.classifyLayout]}),compute:{module,entryPoint:"rasterAoRangeMain"}}),
-    ]);return {shadow,terrain,casters,ao,nativeShadow,nativeCut,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges,exactContact,aoRange};
+    ]);
+    const nativeCachedCut = nativeShadows ? await this.device.createRenderPipelineAsync({label:"Cached sculpt wall shadow triangles",layout,
+      vertex:{module,entryPoint:"rasterCachedWallVertex",buffers:[sculptWallVertexLayout]},fragment:{module,entryPoint:"rasterCachedWallFragment",targets:[]},
+      primitive:{topology:"triangle-list",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}}) : undefined;
+    return {shadow,terrain,casters,ao,nativeShadow,nativeCut,nativeCachedCut,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges,exactContact,aoRange};
   }
   /** Membership/asset changes alter caster geometry even when the camera does not move. */
   invalidateNativeGeometry():void{
@@ -837,7 +843,7 @@ export class SvoRasterAo {
   private readonly aoPassDescriptor: GPUComputePassDescriptor = { label: "Half-resolution sun visibility and horizon AO" };
   private renderedSettledGeneration = -1;
 
-  encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,arenaQuads:number,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void,settledMeshKey?:string,drawNative?:(pass:GPURenderPassEncoder,cutPipeline?:GPURenderPipeline)=>void,receiverKey?:string):void{
+  encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,arenaQuads:number,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void,settledMeshKey?:string,drawNative?:(pass:GPURenderPassEncoder,cutPipeline?:GPURenderPipeline,cachedPipeline?:GPURenderPipeline)=>void,receiverKey?:string):void{
     if(state!==this.meshState){this.renderedSettledKey=undefined;this.meshState=state;this.cacheGroup=this.device.createBindGroup({layout:this.cacheLayout,entries:[{binding:0,resource:{buffer:state}},{binding:1,resource:{buffer:this.params,offset:0,size:64}},{binding:2,resource:{buffer:this.cache}},{binding:3,resource:{buffer:this.redraw}}]});}
     const settledKey=settledMeshKey;
     const reuse=settledKey!==undefined&&settledKey===this.renderedSettledKey&&this.renderedSettledGeneration===this.generation;
@@ -854,7 +860,7 @@ export class SvoRasterAo {
     for(let layer=0;layer<this.shadowLayerCount;layer++){
       const pass=encoder.beginRenderPass({label:layer<2?`Cached sun shadow ${layer}`:`Cached spot shadow ${layer-2}`,colorAttachments:[],depthStencilAttachment:{view:this.shadowViews[layer],depthLoadOp:"load",depthStoreOp:"store"}});
       pass.setBindGroup(0,scene);pass.setBindGroup(1,mesh);pass.setBindGroup(2,this.shadowGroups[layer]);pass.setPipeline(pipelines.terrain);pass.drawIndirect(this.cache,0);pass.setPipeline(pipelines.shadow);pass.drawIndirect(this.cache,16);
-      if(pipelines.nativeShadow&&drawNative){pass.setPipeline(pipelines.nativeShadow);drawNative(pass,pipelines.nativeCut);}pass.end();
+      if(pipelines.nativeShadow&&drawNative){pass.setPipeline(pipelines.nativeShadow);drawNative(pass,pipelines.nativeCut,pipelines.nativeCachedCut);}pass.end();
     }
     this.renderedSettledKey=settledKey;this.renderedSettledGeneration=this.generation;
     shadowComplete?.();

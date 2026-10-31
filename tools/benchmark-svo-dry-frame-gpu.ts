@@ -1135,7 +1135,7 @@ assert.ok(!(surfaceExperiments&&nativeLod),"Run surface and LOD sweeps separatel
 const normalSources={terrain:!!source.structural?.sceneMaintenance?.renderTerrain,boundary:!!source.structural?.sceneMaintenance?.solidBoundary};
 if(surfaceExperiments)log(`Primary normal sources: ${JSON.stringify(normalSources)}`);
 const surfaceStudy=surfaceExperiments?await primarySurfaceStudy(lightingReference?.device??primaryAblation?.device??device,surfaceExperiments.split(","),normalSources):undefined;
-const sculptProbeDevice = process.env.FLUID_SVO_DRY_FRAME_SCULPT_LIVE_STUDY
+const sculptProbeDevice = (process.env.FLUID_SVO_DRY_FRAME_SCULPT_LIVE_STUDY || process.env.FLUID_SVO_DRY_FRAME_SCULPT_CAMERA)
   ? (await import("./probe-native-sculpt-live")).nativeSculptProbeDevice(device) : undefined;
 const renderer = new SparseVoxelDrySceneRenderer(sculptProbeDevice ?? surfaceStudy?.device ?? nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
@@ -1245,6 +1245,14 @@ if (optimizationExperiments.surfaceMesh) {
   }
   surfaceMeshBuild_ms = performance.now() - started;
   log(`  [mesh ready] ${surfaceMeshBuild_ms.toFixed(3)} ms`);
+}
+
+if (process.env.FLUID_SVO_DRY_FRAME_SCULPT_CAMERA === "1") {
+  const { benchmarkSculptWallCamera } = await import("./benchmark-sculpt-wall-camera");
+  await benchmarkSculptWallCamera({ device, renderer, solver, scene, initialPublication, target, uniforms: uniformBuffer,
+    view: { scene, camera, environmentId, info: solver.info, bodyCount: bodies.count, width, height }, outPath, cycles, adapterInfo });
+  assert.deepEqual(validationErrors, [], "GPU validation during sculpt camera study");
+  renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy(); process.exit(0);
 }
 
 // Warmup + first-frame validation for every variant this process will time.
