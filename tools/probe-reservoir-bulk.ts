@@ -6,7 +6,8 @@
  *   [--values={"bulkTier":"16h"}] [--closed] [--tiers=FILE.json] [--out=PATH.json]
  * --max-gib=N caps construction and live requested GPU bytes (default and maximum 6).
  * --stats-only skips dense spatial readback (phi drift remains freshly measured).
- * --height=N scales the reservoir depth; --pool=N reserves a bounded page pool for rest probes.
+ * --height=N scales the reservoir depth; --pool=N reserves a bounded page pool for rest probes
+ * (--pool=rule: the scene's pool by rule, uniformPagePoolRule).
  * --width=N and --depth=N scale the box (the scene's widthScale and depthScale: both chambers about
  * the middle wall, and the span), at the same h and head.
  * --tiers: a JSON file of fluid.tiers fields over the scene's (e.g. {"start":"4h","bricks":512}).
@@ -52,7 +53,8 @@ if (closed) {
   scene.solidVoxels = scene.solidVoxels!.filter(v => v.operation === "fill");
   scene.fluid.initialLiquidVolumes = scene.fluid.initialLiquidVolumes!.slice(0, 1);
 }
-if(option("pool")!==undefined){
+if(option("pool")==="rule")delete scene.fluid.pagePool;
+else if(option("pool")!==undefined){
  const blocks=Number(option("pool"));assert.ok(Number.isSafeInteger(blocks)&&blocks>=4,"--pool must be an integer >= 4");
  scene.fluid.pagePool={...scene.fluid.pagePool,blocks};
 }
@@ -74,12 +76,15 @@ await withUniformDevice("reservoir bulk probe", async raw => {
   const allocation=auditUniformGPUAllocations(raw,maxGiB*2**30);
   const timer = gpuKernelTimer(allocation.device), device = timer.device;
   device.addEventListener("uncapturederror", event => console.error("GPU validation:", event.error.message));
+  const built_t0 = performance.now();
   const solver = await createUniformSolver(device, scene, { ...definition.methodProfile!.overrides, ...values });
-  const built = allocation.snapshot();
+  const built = allocation.snapshot(), built_ms = performance.now() - built_t0;
+  // A census start's BULK16 pages and the host's time for them (V2c).
+  const bulkStart = (solver as unknown as { bulkStartInfo?: Record<string, number> }).bulkStartInfo;
   // A census or 4h start's t=0 h tiles and the pages that hold them (one h slot each), against the slots by rule.
   const seedTiles = (solver as unknown as { mixedSeed?: { fineTiles: Uint32Array } }).mixedSeed?.fineTiles;
   const seed = seedTiles ? { tiles: seedTiles.length, pages: new Set(Array.from(seedTiles, k => k >>> 9)).size, slotCapacity: solver.info.uniformMixedSlotCapacity } : undefined;
-  memory = { construction: { bytes: built.liveBytes, peak: built.peakBytes, seed, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
+  memory = { construction: { ms: built_ms, bulkStart, bytes: built.liveBytes, peak: built.peakBytes, seed, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
   const frame = (solver as unknown as { mixedFrame: UniformMixedFrame }).mixedFrame;
   const { nx, ny, nz } = solver.info;
   const high = 16 * Math.floor(nx / 32);
@@ -113,10 +118,10 @@ await withUniformDevice("reservoir bulk probe", async raw => {
       { const encoder = device.createCommandEncoder(); frame.pagePool.encodeReceipt(encoder, read, 0); device.queue.submit([encoder.finish()]);
         await read.mapAsync(GPUMapMode.READ); const w = new Uint32Array(read.getMappedRange().slice(0, 4 * S.words)); read.unmap(); pool = { resident: w[S.resident]!, free: w[S.free]! }; }
       // The BULK16 store's receipt: whole pages held in 16h slots (no pool block).
-      let bulk16: { live: number; capacity: number; refused: number } | undefined;
+      let bulk16: { live: number; capacity: number; refused: number; promoteRefused: number } | undefined;
       if (frame.bulkPages) { const encoder = device.createCommandEncoder(); frame.bulkPages.encodeReceipt(encoder, read, 0); device.queue.submit([encoder.finish()]);
         await read.mapAsync(GPUMapMode.READ); const w = new Uint32Array(read.getMappedRange().slice(0, 4 * BULK16_STATUS.words)); read.unmap();
-        bulk16 = { live: w[BULK16_STATUS.live]!, capacity: w[BULK16_STATUS.capacity]!, refused: w[BULK16_STATUS.refused]! }; }
+        bulk16 = { live: w[BULK16_STATUS.live]!, capacity: w[BULK16_STATUS.capacity]!, refused: w[BULK16_STATUS.refused]!, promoteRefused: w[BULK16_STATUS.promoteRefused]! }; }
       const volume = process.argv.includes("--stats-only") ? undefined : (await readUniformFields(device, solver)).density;
       let escaped = 0, front = -1, total = 0, moment = 0;
       const floor = Math.max(2, Math.round(0.02 / cell));

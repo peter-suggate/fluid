@@ -34,7 +34,8 @@ import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geomet
  *  - the bulk tier record's entry hold;
  *  - a tile word's owner index (its low 30 bits): the compact owner list's
  *    position, which follows block order, so a block that moves moves it.
- * Two compare to a bound: faces to 1e-4 m/s (a demote restricts them by
+ * Three compare to a bound: the presented pressure to the root solve's step
+ * (rootStep: the images lie one frame's solve apart); faces to 1e-4 m/s (a demote restricts them by
  * area to 16h means, dropping sub-16h components, which at rest are noise);
  * the certificate's radii cover deep water's (the promote seeds the travel
  * bound bulk membership guarantees; the next census rewrites them). */
@@ -137,7 +138,10 @@ test("BULK16 promote: a promoted block holds deep resident water's image in ever
    };
    const exact=(a:number,b:number)=>a===b;
    const face=(a:number,b:number)=>Math.abs(f32(a)-f32(b))<=FACE_TOLERANCE;
-   const pressure=(a:number,b:number)=>Math.abs(f32(a)-f32(b))<=1e-5*Math.max(1,Math.abs(f32(a)));
+   // Deep rows are the 4h root's, which accepts a residual r up to 5 1/s h-equivalent (uniform-pressure-arena.ts, UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL's note):
+   // from u = u* - (dt/rho) dp/h, a frame's solve may move them by rho r h^2/dt (7.5 Pa at 5 mm), and the images lie one frame's solve apart.
+   const rootStep=scene.fluid.density_kg_m3*5*0.005*0.005/scene.numerics.fixedDt_s!;
+   const pressure=(a:number,b:number)=>Math.abs(f32(a)-f32(b))<=rootStep;
    const range=(from:number,n:number)=>Array.from({length:n},(_,i)=>from+i);
    // The 4h bases: a block's texels at its block coordinate (UniformDetailFields).
    // centerPhi's texel at an h tile holds the h owner's value (its lane 0);

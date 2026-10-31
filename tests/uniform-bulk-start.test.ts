@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { uniformBulkStartPages, type UniformBulkStartSource } from "../lib/methods/uniform/uniform-bulk-start";
+import { uniformBulkStartPages, uniformBulkStartShell, type UniformBulkStartSource } from "../lib/methods/uniform/uniform-bulk-start";
 import { UNIFORM_BULK_REACH_CELLS } from "../lib/methods/uniform/uniform-bulk-tier-reference";
 import { bulk16PageWord } from "../lib/methods/uniform/uniform-bulk-pages-reference";
 import { UNIFORM_KIND, uniformLatticeAddress, uniformPageKind, uniformPageWord } from "../lib/methods/uniform/uniform-lattice-address";
@@ -61,4 +61,25 @@ test("BULK16 start: the seed holds a start page in its slot, no block, counted i
   assert.equal(uniformPageWord(a, 0, 1, 1), 1 + 11);
   assert.deepEqual([...a.seed.superCount], [...plain.seed.superCount]);
   assert.throws(() => uniformLatticeAddress([96, 96, 96], false, { bulk: [[1, 1, 1], [1, 1, 1]] }), /listed twice/);
+});
+
+test("V2d: the closure reserve holds the start's BULK16 pages within the reach of the surface", () => {
+  // A 7x1x1-page row of 32-cell pages, pages 0..5 BULK16. The surface: page
+  // 6's wet tiles beside open dry ones, tiles 50..55 on x (cells 200..223).
+  // Cell gaps from cell 200: page 5 (cells 160..191) 9, page 4 41, page 3 73.
+  const surface = new Map([[6, [50, 0, 0, 55, 0, 0]]]), bulk = [0, 1, 2, 3, 4, 5].map(x => [x, 0, 0] as const);
+  assert.equal(uniformBulkStartShell([7, 1, 1], surface, bulk, 56, 32), 2);
+  assert.equal(uniformBulkStartShell([7, 1, 1], surface, bulk, 72, 32), 2);
+  assert.equal(uniformBulkStartShell([7, 1, 1], surface, bulk, 73, 32), 3);
+  assert.equal(uniformBulkStartShell([7, 1, 1], surface, bulk, 8, 32), 0);
+  assert.equal(uniformBulkStartShell([7, 1, 1], surface, bulk, 9, 32), 1);
+  assert.equal(uniformBulkStartShell([7, 1, 1], surface, bulk, 1e9, 32), 6);
+  // No surface (a liquid against walls only): no closure reaches a BULK16 page.
+  assert.equal(uniformBulkStartShell([7, 1, 1], new Map(), bulk, 1e9, 32), 0);
+  // Chebyshev: the surface's corner tile (cells 0..3) is within 56 cells of
+  // page (1, 1, 1) (gap 29 on each axis), not of (2, 2, 0) (gap 61 on two).
+  const corner = new Map([[0, [0, 0, 0, 0, 0, 0]]]);
+  assert.equal(uniformBulkStartShell([3, 3, 3], corner, [[1, 1, 1], [2, 2, 0]], 56, 32), 1);
+  assert.equal(uniformBulkStartShell([3, 3, 3], corner, [[1, 1, 1], [2, 2, 0]], 29, 32), 1);
+  assert.equal(uniformBulkStartShell([3, 3, 3], corner, [[1, 1, 1], [2, 2, 0]], 28, 32), 0);
 });

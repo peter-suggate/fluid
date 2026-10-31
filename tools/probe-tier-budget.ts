@@ -710,7 +710,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
     const line = Array.from({ length: LINE }, (_, i) => { const w = u[LINE_AT + 3 * i + 2]!; if (w === 0xffffffff) return [wall.low - 16 + i, null];
       const page = w >>> 3; return [wall.low - 16 + i, +(f[LINE_AT + 3 * i]! / h).toFixed(3), +f[LINE_AT + 3 * i + 1]!.toFixed(3), w & 7, "CWH"[tiers[page]!] ?? String(tiers[page])]; });
     const snapshot = since(base), status = all.subarray(READ.pool / 4, READ.pool / 4 + S.words);
-    const row = { step, t, wall_ms, bulk16Pages: bulk16?.pages.length,
+    const row = { step, t, wall_ms, bulk16Pages: bulk16?.pages.length, bulk16: (solver as unknown as { bulk16Info?: object }).bulk16Info ? { ...(solver as unknown as { bulk16Info: object }).bulk16Info } : undefined,
       tiles: { h: all[READ.work / 4], coarse: all[READ.work / 4 + 1], residentPages: all[READ.work / 4 + 7], probedH: u[19], probedCoarse: u[20] },
       pool: { resident: status[S.resident], free: status[S.free], claimed: status[S.claimed], fatal: uniformPagePoolFatalMessage(frame.pagePool.layout, status) ?? undefined },
       regions: { cold: all[READ.heat / 4], warm: all[READ.heat / 4 + 1], hot: all[READ.heat / 4 + 2], free: all[READ.heat / 4 + 3] },

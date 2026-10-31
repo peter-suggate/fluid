@@ -492,6 +492,10 @@ export interface UniformPagePoolResidency {
  readonly air:[number,number,number][];
  /** The pinned pages (UniformPagePool.pin), by box page coordinate. */
  readonly pins:{x:number;y:number;z:number}[];
+ /** The liquid's surface at build where it was walked (an open tile rule):
+  * by box page index, the 4h tile bounds [x0,y0,z0,x1,y1,z1] (inclusive) of
+  * its wet tiles beside open dry ones. */
+ readonly surface?:ReadonlyMap<number,readonly number[]>;
 }
 /** The one rule for a scene's stored set, from its box in cells, its page
  * pool record (SceneDescription.fluid.pagePool), its sources' cell boxes
@@ -506,23 +510,34 @@ export interface UniformPagePoolResidency {
  * Resident at build: the box less record.air where the record lists one;
  * otherwise, live, the pages within UNIFORM_PAGE_POOL_SEED_MARGIN cells of a
  * wet cell of the initial liquid and the pinned; otherwise every box page.
+ * With `openTile` (whether a box 4h tile holds an open cell) the margin is
+ * measured through open tiles (V2d): a page past a solid wall is not
+ * reachable air (uniformPagePoolReachablePages).
  * liquid: the initial cell volumes, x fastest or by page (LatticePages of
  * UNIFORM_PAGE_POOL_EDGE cells), asked for only by the wet-cell case. origin: the box's low page in the window. The sources'
  * cell boxes and the pins are the window's, the AIR pages the box's. */
-export function uniformPagePoolResidency(cells:readonly [number,number,number],record:{readonly blocks?:number;readonly air?:readonly (readonly [number,number,number])[]}|undefined,sources:readonly UniformPagePoolCellBox[],follows:boolean,liquid:()=>ArrayLike<number>|LatticePages,origin:readonly [number,number,number]=[0,0,0]):UniformPagePoolResidency{
+export function uniformPagePoolResidency(cells:readonly [number,number,number],record:{readonly blocks?:number;readonly air?:readonly (readonly [number,number,number])[]}|undefined,sources:readonly UniformPagePoolCellBox[],follows:boolean,liquid:()=>ArrayLike<number>|LatticePages,origin:readonly [number,number,number]=[0,0,0],openTile?:(x:number,y:number,z:number)=>boolean):UniformPagePoolResidency{
  const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,count=px*py*pz;
  const live=follows,resident=new Uint8Array(count).fill(1),pinned=new Uint8Array(count);
+ let surface:Map<number,number[]>|undefined;
  const coordinates=(flags:Uint8Array,set:number)=>{const out:[number,number,number][]=[];for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++)if(flags[i]===set)out.push([x,y,z]);return out;};
  if(live){
   for(const {x,y,z} of uniformPagePoolSourcePages(cells,sources,origin))pinned[x-origin[0]+px*(y-origin[1]+py*(z-origin[2]))]=1;
-  if(!record?.air){resident.set(wetPages(cells,pages,liquid(),UNIFORM_PAGE_POOL_SEED_MARGIN));for(let i=0;i<count;i++)if(pinned[i])resident[i]=1;}
+  if(!record?.air){
+   const volume=liquid();resident.set(wetPages(cells,pages,volume,UNIFORM_PAGE_POOL_SEED_MARGIN));
+   surface=new Map();
+   if(openTile){const reached=uniformPagePoolReachablePages(cells,pages,volume,UNIFORM_PAGE_POOL_SEED_MARGIN,openTile,surface);for(let i=0;i<count;i++)resident[i]&=reached[i]!;}
+   // No solid: the surface alone (no walk), every dry tile open.
+   else uniformPagePoolReachablePages(cells,pages,volume,0,()=>true,surface);
+   for(let i=0;i<count;i++)if(pinned[i])resident[i]=1;
+  }
  }
  for(const [x,y,z] of record?.air??[]){
   if(!(Number.isInteger(x)&&Number.isInteger(y)&&Number.isInteger(z)&&x>=0&&y>=0&&z>=0&&x<px&&y<py&&z<pz))throw new RangeError(`Uniform page pool: AIR page (${x}, ${y}, ${z}) is outside the box of ${px}x${py}x${pz} pages`);
   resident[x+px*(y+py*z)]=0;
  }
  if(!live)pinned.set(resident);
- return {live,air:coordinates(resident,0),pins:coordinates(pinned,1).map(([x,y,z])=>({x:x+origin[0],y:y+origin[1],z:z+origin[2]}))};
+ return {live,air:coordinates(resident,0),pins:coordinates(pinned,1).map(([x,y,z])=>({x:x+origin[0],y:y+origin[1],z:z+origin[2]})),surface:record?.air?undefined:surface};
 }
 /** The box pages a live pool pins for its sources' cell boxes, each grown by
  * UNIFORM_PAGE_POOL_PIN_MARGIN: every page once, in the window (the box's
@@ -561,6 +576,59 @@ function wetPages(cells:readonly [number,number,number],pages:readonly [number,n
  }
  return flags;
 }
+/** One flag per box page: a 4h tile of it lies within ceil(margin / 4)
+ * tile steps (26-connected) of a wet tile (a cell's volume above zero)
+ * through open tiles (`openTile`): the margin's reachable air (V2d). A
+ * wall's closed tiles stop it, so a page past the wall is not reached. Work
+ * and memory follow the wet tiles and the margin's band, not the box. */
+export function uniformPagePoolReachablePages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>|LatticePages,margin:number,openTile:(x:number,y:number,z:number)=>boolean,surface?:Map<number,number[]>):Uint8Array{
+ const E=UNIFORM_PAGE_POOL_EDGE,T=E/4,[nx,ny,nz]=cells,[px,py,pz]=pages,flags=new Uint8Array(px*py*pz);
+ const [tx,ty,tz]=[Math.ceil(nx/4),Math.ceil(ny/4),Math.ceil(nz/4)];
+ // Each wet page's wet tiles (a byte a tile of the page).
+ const wetTiles=new Map<number,Uint8Array>();
+ const mark=(x:number,y:number,z:number)=>{
+  const i=Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E));let m=wetTiles.get(i);
+  if(!m){m=new Uint8Array(T*T*T);wetTiles.set(i,m);}
+  m[((x%E)>>2)+T*(((y%E)>>2)+T*((z%E)>>2))]=1;
+ };
+ if("edge" in volume){
+  for(let i=0;i<volume.at.length;i++){
+   const page=volume.at[i];if(!page)continue;
+   const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
+   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz)mark(ox+x,oy+y,oz+z);
+  }
+ }else for(let z=0,i=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++,i++)if(volume[i]!>0)mark(x,y,z);
+ const wet=(x:number,y:number,z:number)=>wetTiles.get(Math.floor(x/T)+px*(Math.floor(y/T)+py*Math.floor(z/T)))?.[x%T+T*(y%T+T*(z%T))]===1;
+ const page=(x:number,y:number,z:number)=>Math.floor(x/T)+px*(Math.floor(y/T)+py*Math.floor(z/T));
+ // The wet tiles beside a tile that is not wet start the walk.
+ let frontier:number[]=[];const seen=new Set<number>(),key=(x:number,y:number,z:number)=>x+tx*(y+ty*z);
+ for(const [i,m] of wetTiles){
+  flags[i]=1;const ox=T*(i%px),oy=T*(Math.floor(i/px)%py),oz=T*Math.floor(i/(px*py));
+  for(let c=0;c<m.length;c++){
+   if(!m[c])continue;const x=ox+c%T,y=oy+Math.floor(c/T)%T,z=oz+Math.floor(c/(T*T));
+   let front=false,air=false;
+   edge:for(let dz=-1;dz<=1;dz++)for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+    const X=x+dx,Y=y+dy,Z=z+dz;
+    if(X>=0&&Y>=0&&Z>=0&&X<tx&&Y<ty&&Z<tz&&!wet(X,Y,Z)){front=true;if(!surface||openTile(X,Y,Z)){air=true;break edge;}}
+   }
+   if(front)frontier.push(x,y,z);
+   // The surface: a wet tile beside open dry tiles (not a wall's), its page's tile bounds.
+   if(air&&surface){const b=surface.get(i);if(!b)surface.set(i,[x,y,z,x,y,z]);else{b[0]=Math.min(b[0]!,x);b[1]=Math.min(b[1]!,y);b[2]=Math.min(b[2]!,z);b[3]=Math.max(b[3]!,x);b[4]=Math.max(b[4]!,y);b[5]=Math.max(b[5]!,z);}}
+  }
+ }
+ for(let step=0;step<Math.ceil(margin/4)&&frontier.length;step++){
+  const next:number[]=[];
+  for(let f=0;f<frontier.length;f+=3)for(let dz=-1;dz<=1;dz++)for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+   const X=frontier[f]!+dx,Y=frontier[f+1]!+dy,Z=frontier[f+2]!+dz;
+   if(X<0||Y<0||Z<0||X>=tx||Y>=ty||Z>=tz||wet(X,Y,Z))continue;
+   const k=key(X,Y,Z);if(seen.has(k))continue;seen.add(k);
+   if(!openTile(X,Y,Z))continue;
+   flags[page(X,Y,Z)]=1;next.push(X,Y,Z);
+  }
+  frontier=next;
+ }
+ return flags;
+}
 /** The message of the pool's first fatal, from the status words at word
  * `offset` of `status` (a mapped receipt of encodeReceipt); null, with
  * nothing allocated, while no bit is set. */
@@ -570,7 +638,7 @@ export function uniformPagePoolFatalMessage(layout:UniformPagePoolLayout,status:
  const first=status[offset+S.fatalFirst]!,commit=status[offset+S.fatalGeneration]!,detail=status[offset+S.fatalDetail]!,at=offset+S.fatalPage;
  const page=`page (${status[at]!|0}, ${status[at+1]!|0}, ${status[at+2]!|0})`;
  switch(first){
-  case F.exhausted:return `Page pool exhausted at commit ${commit}: ${page} requested with ${detail} of ${layout.slots} blocks resident and the other ${layout.slots-detail} claimed by the same commit. Raise pagePool.memory_MiB or pagePool.blocks (about 10 MiB a block, UNIFORM_PAGE_BLOCK_MiB) or shrink the scene.`;
+  case F.exhausted:return `Page pool exhausted at commit ${commit}: ${page} requested with ${detail} of ${layout.slots} blocks resident and the other ${layout.slots-detail} claimed by the same commit. Raise pagePool.memory_MiB or pagePool.blocks (about 10 MiB a block, UNIFORM_PAGE_BLOCK_MiB) or shrink the scene. The pool rule holds a block for each BULK16 page within v T_hold (the scene's speed over the 30-frame hold) plus the closure margin of the pages stored at build, and for the ballistic columns: a scene that brings the surface to more deep water than that must author pagePool.blocks.`;
   case F.requests:return `More than claimsPerStep (${layout.requests}) pages were requested in commit ${commit} (first dropped: ${page}).`;
   case F.alias:return `Two pages name one page directory entry (${page}, commit ${commit}): the resident set is wider than the directory's ${layout.table} pages (super-blocks of 4 pages ${layout.edge} apart share a top entry), or an allocator bug.`;
   case F.superBlocks:return `Super-block slots exhausted at commit ${commit}: ${page} needed one with ${detail} of ${layout.superBlocks} held before the commit and the rest claimed by it. Raise pagePool.superBlocks (at most ${UNIFORM_SUPER_BLOCK_SLOTS-2}, a slot for each 4x4x4 pages holding a resident page) or shrink the scene.`;
@@ -1161,4 +1229,31 @@ export function uniformPagePoolRuleBlocks(pages:readonly [number,number,number],
   if(top>=0)reserve+=Math.max(0,reach-top);
  }
  return resident+reserve+2;
+}
+/** The pool rule's pages (uniformPagePoolRuleBlocks without the sentinels),
+ * a flag a box page: the census pages (1) and the reserve above each column's
+ * top one (2), the reserve's pages past the box's top (an open top) not
+ * flagged. */
+export function uniformPagePoolRulePages(pages:readonly [number,number,number],air:readonly (readonly [number,number,number])[],reachPage:number,ceilingPage:number):Uint8Array{
+ const [px,py,pz]=pages,flags=new Uint8Array(px*py*pz).fill(1);
+ for(const [x,y,z] of air)flags[x+px*(y+py*z)]=0;
+ const reach=Math.min(Math.floor(reachPage),ceilingPage,py-1);
+ for(let z=0;z<pz;z++)for(let x=0;x<px;x++){
+  let top=-1;for(let y=0;y<py;y++)if(flags[x+px*(y+py*z)])top=y;
+  if(top>=0)for(let y=top+1;y<=reach;y++)flags[x+px*(y+py*z)]=2;
+ }
+ return flags;
+}
+/** The tiles of the box's outer layer of 4h tiles (those beside its walls)
+ * that lie in a flagged page (`flags`, a byte a box page): `tiles`, the box's
+ * tiles an axis, UNIFORM_PAGE_POOL_EDGE / 4 a page edge. */
+export function uniformBoxShellTilesIn(pages:readonly [number,number,number],flags:Uint8Array,tiles:readonly [number,number,number]):number{
+ const T=UNIFORM_PAGE_POOL_EDGE/4,[px,py,pz]=pages;
+ // On axis a, a page's tiles inside the box, and those of them off the box's two outer layers.
+ const span=(a:number,p:number)=>{const lo=T*p,hi=Math.min(T*(p+1),tiles[a]!);return [Math.max(0,hi-lo),Math.max(0,Math.min(hi,tiles[a]!-1)-Math.max(lo,1))];};
+ let n=0;
+ for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++)if(flags[x+px*(y+py*z)]){
+  const [ax,ix]=span(0,x),[ay,iy]=span(1,y),[az,iz]=span(2,z);n+=ax*ay*az-ix*iy*iz;
+ }
+ return n;
 }

@@ -204,3 +204,25 @@ export function uniformBulkStartLowRows(o:{
   }
  }
 }
+/** V2d, the promote reserve for closure and scan promotes (docs/plans/
+ * bulk16-plan-2026-10-28.md, the pool rule): those of the start's BULK16
+ * pages (`bulk`) within `reach` cells (Chebyshev, cell to cell) of the
+ * liquid's surface at build (`surface`: by box page index, the 4h tile
+ * bounds [x0,y0,z0,x1,y1,z1] of its wet tiles beside open dry ones;
+ * uniformPagePoolResidency). The surface band or air reaches a deep page no
+ * faster than the scene's speed v (uniformCensusReach), and a closure asks
+ * the pages within its margin of the band, so within a hold window T those
+ * within v T plus the closure margin are the pages a closure or scan promote
+ * can take back before any page it promoted can demote again: finite
+ * propagation, as the ballistic reserve. `edge`: a page's cells. The work
+ * follows the surface pages, never the box. */
+export function uniformBulkStartShell(pages:readonly [number,number,number],surface:ReadonlyMap<number,readonly number[]>,bulk:readonly (readonly [number,number,number])[],reach:number,edge:number):number{
+ const [px,py,pz]=pages,size=[px,py,pz],near=new Set<number>();
+ for(const b of surface.values()){
+  // Per axis, the pages whose cells come within reach of the bounds' cells [4 b0, 4 b1 + 3].
+  const range=[0,1,2].map(a=>{const lo=4*b[a]!,hi=4*b[a+3]!+3;return [Math.max(0,Math.ceil((lo-reach-edge+1)/edge)),Math.min(size[a]!-1,Math.floor((hi+reach)/edge))] as const;});
+  for(let z=range[2]![0];z<=range[2]![1];z++)for(let y=range[1]![0];y<=range[1]![1];y++)for(let x=range[0]![0];x<=range[0]![1];x++)near.add(x+px*(y+py*z));
+ }
+ let held=0;for(const [x,y,z] of bulk)if(near.has(x+px*(y+py*z)))held++;
+ return held;
+}

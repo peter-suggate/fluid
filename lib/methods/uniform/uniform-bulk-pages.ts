@@ -1,6 +1,6 @@
 import {BULK16_PAGE,BULK16_PAGE_WORDS,bulk16FaceIndexWGSL,bulk16PageLayout} from "./uniform-bulk-pages-reference";
 
-export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fatal:6,fatalSlot:7,generation:8,version:9,refused:10,words:32} as const;
+export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fatal:6,fatalSlot:7,generation:8,version:9,refused:10,promoteClaims:11,promoteRefused:12,promoteAsked:13,words:32} as const;
 export const BULK16_FATAL={invalidSlot:2,invalidTransition:4} as const;
 /** The live launch's most workgroups (liveLaunch): its readers stride the live list. */
 export const BULK16_LIVE_GROUPS=1024;
@@ -145,7 +145,7 @@ var<workgroup> bpScan:array<u32,256>;
   atomicStore(&bulkPages[BP_FREE+(head+free+i)%BP_CAPACITY],slot);
  }
  storageBarrier();
- if(lane==0u){atomicStore(&bulkPages[${H.free}u],free+pending);atomicStore(&bulkPages[${H.pending}u],0u);atomicStore(&bulkPages[${H.pops}u],0u);atomicAdd(&bulkPages[${H.generation}u],1u);}
+ if(lane==0u){atomicStore(&bulkPages[${H.free}u],free+pending);atomicStore(&bulkPages[${H.pending}u],0u);atomicStore(&bulkPages[${H.pops}u],0u);atomicStore(&bulkPages[${H.promoteClaims}u],0u);atomicAdd(&bulkPages[${H.generation}u],1u);}
 }
 @compute @workgroup_size(256) fn finish(@builtin(local_invocation_index) lane:u32){
  let per=(BP_CAPACITY+255u)/256u;let first=min(lane*per,BP_CAPACITY)+1u;let last=min((lane+1u)*per,BP_CAPACITY)+1u;

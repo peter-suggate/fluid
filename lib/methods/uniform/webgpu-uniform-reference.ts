@@ -11,7 +11,7 @@ import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLayoutWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
-import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformPagePoolRule, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
+import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformPagePoolRule, uniformPagePoolRuleReach, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
 import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
@@ -23,9 +23,10 @@ import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, un
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
 import { uniformBlockStored, uniformBoxTileCoord, uniformBoxTileIndex, uniformLatticeAddress, uniformLatticeWindowBox, uniformPageWord, uniformTileInBox, uniformTileNear, uniformVertexSlot, type UniformLatticeAddress } from "./uniform-lattice-address";
-import { uniformBulkStartFace, uniformBulkStartLowRows, uniformBulkStartPages, uniformBulkStartRecords, uniformBulkStartSource } from "./uniform-bulk-start";
+import { uniformBulkStartFace, uniformBulkStartLowRows, uniformBulkStartPages, uniformBulkStartRecords, uniformBulkStartShell, uniformBulkStartSource } from "./uniform-bulk-start";
+import { UNIFORM_BULK_HOLD_FRAMES } from "./uniform-bulk-tier-reference";
 import { UniformTexturePages } from "./uniform-texture-pages";
-import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
+import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_PIN_MARGIN, UNIFORM_PAGE_POOL_SEED_MARGIN, uniformPagePoolDropAhead, uniformPagePoolResidency, uniformPagePoolRulePages, uniformPagePoolRuleBlocks, uniformBoxShellTilesIn, uniformPagePoolSourcePages, type UniformPagePoolCellBox, type UniformPagePoolResidency } from "./uniform-page-pool";
 import { bulk16SlotCapacity } from "./uniform-bulk-pages";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
 export { uniformDensityPostProcessingEnabled } from "./uniform-options";
@@ -89,7 +90,7 @@ export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
-import { solidWorldForFluidLattice } from "../../core/solid-world";
+import { sampleSolidWorld, solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
 import { narrowBandParticleCellCap, narrowBandSparseNeighbours, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
@@ -211,6 +212,21 @@ function uniformInjectedDrop(ball: InjectedLiquidBall): UniformLiquidDrop {
     : (4 / 3) * Math.PI * ball.radius_m ** 3 };
 }
 
+/** V2d: whether a box 4h tile holds a cell not wholly solid (the solid world
+ * on the fluid lattice, terrain included), for the residency's margin
+ * through open cells; undefined where the scene has no solid. */
+export function uniformOpenTile(scene: SceneDescription): ((x: number, y: number, z: number) => boolean) | undefined {
+  const world = solidWorldForFluidLattice(scene);
+  if (!world.pages.length && !world.ground && !world.regions?.length) return undefined;
+  const at: [number, number, number] = [0, 0, 0];
+  return (x, y, z) => {
+    for (let k = 0; k < 64; k++) {
+      at[0] = 4 * x + (k & 3); at[1] = 4 * y + ((k >> 2) & 3); at[2] = 4 * z + (k >> 4);
+      if (sampleSolidWorld(world, at).solidFraction < 1) return true;
+    }
+    return false;
+  };
+}
 /** The cell boxes the scene's sources write liquid in every step: the
  * nozzle's plug over a step of `step_s` and its overlap past it
  * (UNIFORM_SOURCE_PLUG_OVERLAP_CELLS). A live page pool pins their pages.
@@ -359,6 +375,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private phiCoarseAdvection: "cubic" | "trilinear";
   get particleSource(){return this.mixedFrame?.narrowBandFlip?.particleSource;}
   get pagePoolInfo(){return this.mixedFrame?.pagePoolInfo;}
+  get bulk16Info(){return this.mixedFrame?.bulkPages?this.mixedFrame.bulk16Info:undefined;}
   get workDomainInfo(){return this.mixedFrame?.workDomainInfo;}
   get narrowBandFlipInfo(){
     const stage=this.mixedFrame?.narrowBandFlip;if(!stage)return undefined;
@@ -714,15 +731,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const boxPage = sceneFluidBoxPage(scene);
     const residency = this.pageResidency = uniformPagePoolResidency([nx, ny, nz], scene.fluid.pagePool,
       uniformPageSources(scene, this.inflowBoundary, Math.max(this.fixedStep_s ?? 0, scene.numerics.maxDt_s)), this.detail.policy === "dynamic",
-      () => (this.initialVolume = uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, boxPage);
+      () => (this.initialVolume = uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, boxPage, uniformOpenTile(scene));
     // The frame is the page table's window: outside the box it is SOLID, but
     // for the column above an open top, which is AIR and claimable, and but in
     // an open world, where every page above the floor is (uniformLatticeAddress).
     // A walled box with no pool figure: the pool rule (the census plus its ballistic reserve), not one block a box page.
     const pool = scene.fluid.pagePool, ruled = pool?.blocks === undefined && pool?.memory_MiB === undefined && scene.container.walls !== "none"
-      ? uniformPagePoolRule(scene, (this.initialVolume ??= uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, residency.air) : undefined;
+      ? uniformPagePoolRule(scene, (this.initialVolume ??= uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, residency.air, this.poolRuleReach()) : undefined;
+    // V2d: of the start's BULK16 pages (bulk), the pool holds blocks for those a
+    // closure or scan promote can take back within one hold window
+    // (uniformBulkStartShell); an error promote past what is spare is refused.
     const latticeAddress = (bulk?: readonly (readonly [number, number, number])[]) => uniformLatticeAddress([nx, ny, nz], scene.container.top === "open",
-      { ...pool, air: residency.air, bulk, ...(ruled === undefined ? {} : { blocks: ruled - (bulk?.length ?? 0) }) }, scene.container.walls === "none" ? { boxPage } : undefined);
+      { ...pool, air: residency.air, bulk, ...(ruled === undefined ? {} : { blocks: ruled - (bulk?.length ?? 0) + this.bulkStartShell(bulk ?? [], [nx, ny, nz]) }) }, scene.container.walls === "none" ? { boxPage } : undefined);
     let address = this.address = latticeAddress();
     // A procedural solid with voxel collision is drawn smooth and collides as
     // its generated voxels: the fluid reads no field.
@@ -1272,6 +1292,33 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * demote would write (uniformBulkStartRecords), on the address that stores
    * every page the residency does. The vertex phi on that address is the
    * upload's (initializeVolumeAndTerrain): it holds a D page's own vertices. */
+  /** V2d: the start's BULK16 pages within the closure reach of the liquid's
+   * surface at build, v T_hold plus the closure margin (uniformBulkStartShell). */
+  private bulkStartShell(bulk:readonly (readonly [number,number,number])[],cells:readonly number[]):number{
+    if(!bulk.length)return 0;
+    const E=UNIFORM_PAGE_POOL_EDGE,pages=cells.map(n=>Math.ceil(n/E)) as [number,number,number],surface=this.pageResidency?.surface;
+    const h=this.scene.voxelDomain.finestCellSize_m,T=UNIFORM_BULK_HOLD_FRAMES*(this.fixedStep_s??this.scene.numerics.maxDt_s);
+    const reach=(this.poolRuleReach()?.v_m_s??0)*T/h+UNIFORM_PAGE_POOL_SEED_MARGIN;
+    // No surface walked (authored AIR pages): every BULK16 page is held.
+    const held=surface?uniformBulkStartShell(pages,surface,bulk,reach,E):bulk.length;
+    this.bulkStartInfo={...this.bulkStartInfo!,shell:held,shellReach_cells:reach};
+    return held;
+  }
+  /** V2d: the blocks an error promote may not take (UniformBulkPageTransfer.promoteReserve): the
+   * pool rule's ballistic columns (its blocks past the census pages and the sentinels) and the
+   * start's closure shell (uniformBulkStartShell). None where the rule is undefined. */
+  private promoteReserve():number{
+    const reach=this.poolRuleReach(),volume=this.initialVolume?.volume;
+    if(!reach||!volume)return this.bulkStartInfo?.shell??0;
+    const [px,py,pz]=volume.pages,air=this.pageResidency.air;
+    return uniformPagePoolRuleBlocks(volume.pages,air,reach.reachPage,reach.ceilingPage)-(px*py*pz-air.length)-2+(this.bulkStartInfo?.shell??0);
+  }
+  /** The pool rule's reserve reach (uniformPagePoolRuleReach), once: the pool and the solid record's slots read it. */
+  private poolRuleReach():ReturnType<typeof uniformPagePoolRuleReach>{
+    if(!this.ruleReach)this.ruleReach={value:uniformPagePoolRuleReach(this.scene,(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume)};
+    return this.ruleReach.value;
+  }
+  private ruleReach?:{readonly value:ReturnType<typeof uniformPagePoolRuleReach>};
   private bulkStartState(cells:readonly number[]):NonNullable<typeof this.bulkStart>{
     const a=this.address,scene=this.scene,E=UNIFORM_PAGE_POOL_EDGE;
     const {volume,terrain}=this.initialVolume??=uniformLatticePagedVolume(scene,E);
@@ -1308,7 +1355,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return {pages,records,phi};
   }
   /** The census start's BULK16 pages and the host's time for them (bulkStartState), ms. */
-  bulkStartInfo?:{readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number};
+  bulkStartInfo?:{readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number;readonly shell?:number;readonly shellReach_cells?:number};
   /** The coarse start's thin-wall tiles at h (uniformThinWallTiles: a cut 4h
    * owner there fills open cells across the solid). The census holds a cut
    * tile at h where liquid reaches it, with every tile around it
@@ -1382,8 +1429,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // tile within a cell of a solid (the promotion's coupled tiles) or of the
     // box's walls holds one, x 1.5 for edits and bodies; a tile the slots
     // cannot serve reads the solids themselves. Else every key its own.
-    const box=fluidRegionLattice(this.scene).dimensions.map(n=>n/4),inner=box.reduce((n,b)=>n*Math.max(0,b-2),1);
-    const solidSlots=coarseStart||tiers?.bricks!==undefined?Math.min(tiles,Math.ceil(1.5*(promotion.coupledTiles+box.reduce((n,b)=>n*b,1)-inner))):undefined;
+    // The walls' tiles are those of the box's outer layer in the pool rule's
+    // pages (V2d), the census pages and its reserve: a page past them holds
+    // no liquid unless an authored pool claims it, and then reads the solids.
+    const box=fluidRegionLattice(this.scene).dimensions.map(n=>n/4) as [number,number,number],inner=box.reduce((n,b)=>n*Math.max(0,b-2),1);
+    const ruleReach=coarseStart||tiers?.bricks!==undefined?this.poolRuleReach():undefined,volume=ruleReach&&(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume;
+    const walls=ruleReach&&volume?uniformBoxShellTilesIn(volume.pages,uniformPagePoolRulePages(volume.pages,this.pageResidency.air,ruleReach.reachPage,ruleReach.ceilingPage),box):box.reduce((n,b)=>n*b,1)-inner;
+    const solidSlots=coarseStart||tiers?.bricks!==undefined?Math.min(tiles,Math.ceil(1.5*(promotion.coupledTiles+walls))):undefined;
     // V2b: a coarse start's h stores hold its slots from construction (never
     // the whole block grid): the slotted textures the frame makes take them,
     // and the first layout's are claimed before it installs (claimFirst).
@@ -1407,6 +1459,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedFrame.bulkPages.start(this.bulkStart.records);
     }
     this.bulkStart=undefined;
+    // V2d: an error promote may not take the pool rule's ballistic columns or closure shell.
+    if(this.mixedFrame.bulkTransfer)this.mixedFrame.bulkTransfer.promoteReserve=this.promoteReserve();
     this.mixedFrame.solid!.present=solids||bodies>0;
     this.mixedDiagnostics=new UniformMixedDiagnostics(this.device,this.mixedFrame.ownership,this.volumeA,this.velocityA,this.vertexPhiField);
     // The scene uniform: the census marks this frame's drop and inflow plug band on the GPU.

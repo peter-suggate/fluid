@@ -42,7 +42,7 @@ import {UniformMixedPressureAuthority,uniformMixedRootMaskWords,uniformMixedRoot
 import {uniformMixedPressureStorage} from "./uniform-mixed-pressure-boundary.wgsl";
 import {UniformMixedPressureVelocity} from "./uniform-mixed-pressure-velocity";
 import {UniformBulkTier} from "./uniform-bulk-tier";
-import { UniformBulkPages } from "./uniform-bulk-pages";
+import { BULK16_STATUS, UniformBulkPages } from "./uniform-bulk-pages";
 import { UniformBulkPageTransfer, type UniformBulkResidencyRecords } from "./uniform-bulk-page-transfer";
 import type {UniformMixedPressureTopology} from "./uniform-mixed-pressure-topology.wgsl";
 import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
@@ -142,7 +142,9 @@ const FLIP_RECEIPT=ROOT_WORK_RECEIPT+4;
 const POOL_RECEIPT=FLIP_RECEIPT+48;
 // The region heat header (UniformColdFrame's evidence).
 const HEAT_RECEIPT=POOL_RECEIPT+4*UNIFORM_PAGE_POOL_STATUS.words;
-const TRACE_RECEIPT=HEAT_RECEIPT+4*UNIFORM_COLD_FRAME_HEAT_WORDS;
+// The BULK16 store's status (BULK16_STATUS): its live slots and refusals.
+const BULK_RECEIPT=HEAT_RECEIPT+4*UNIFORM_COLD_FRAME_HEAT_WORDS;
+const TRACE_RECEIPT=BULK_RECEIPT+4*BULK16_STATUS.words;
 // A source's added volume is the scalar budget's alone (beginStep): the
 // source itself writes liquid after the head, inside the frame it is due in,
 // so a frame with a drop starts from the last tail's extension like any other.
@@ -279,6 +281,9 @@ export class UniformMixedFrame {
  readonly pagePool:UniformPagePool;
  /** Last completed frame's existing pool receipt; updated without another GPU readback. */
  readonly pagePoolInfo={frame:-1,generation:0,residentPages:0,claimedPages:0,retiredPages:0,freePages:0};
+ /** The BULK16 store's, from the same receipt: live slots, and the refusals
+  * so far of demotes (no free slot) and of error promotes (no spare block). */
+ readonly bulk16Info={frame:-1,capacity:0,liveSlots:0,refusedDemotes:0,refusedPromotes:0};
  /** Work counts already returned with each frame. Dependency regions are
   * the union certificate (ownership/stage consumers), not liquid-only pages. */
  readonly workDomainInfo={fineTiles:0,coarseTiles:0,seamFineTiles:0,seamCoarseTiles:0,regularCoarseTiles:0,dependencyRegions16:0,pressureListedOctants:0,remapJobs:0,transferPairs:0};
@@ -1282,6 +1287,7 @@ export class UniformMixedFrame {
    this.remap.encodeWorkReceipt(encoder,readback,REMAP_WORK_RECEIPT);
    encoder.copyBufferToBuffer(this.narrowBandFlip.state,0,readback,FLIP_RECEIPT,48);this.pagePool.encodeReceipt(encoder,readback,POOL_RECEIPT);
    encoder.copyBufferToBuffer(this.heat.tiers,4*this.heat.regions,readback,HEAT_RECEIPT,4*UNIFORM_COLD_FRAME_HEAT_WORDS);
+   this.bulkPages?.encodeReceipt(encoder,readback,BULK_RECEIPT);
    // The next head's census and advection read this extension: it is the
    // frame's velocity extension, priced there, not the census's.
    // Rigid integration changes body state, not the canonical fluid inputs
@@ -1350,7 +1356,9 @@ export class UniformMixedFrame {
     page.retiredPages=mapped[base+status.pending]!;page.freePages=mapped[base+status.free]!;
     const d=this.workDomainInfo,w=slot.work;
     d.fineTiles=w[0]!;d.coarseTiles=w[1]!;d.seamFineTiles=w[4]!;d.seamCoarseTiles=w[5]!;d.regularCoarseTiles=w[6]!;d.dependencyRegions16=w[7]!;
-    d.pressureListedOctants=0;d.remapJobs=mapped[REMAP_WORK_RECEIPT/4]!;d.transferPairs=slot.flip[9]!;}
+    d.pressureListedOctants=0;d.remapJobs=mapped[REMAP_WORK_RECEIPT/4]!;d.transferPairs=slot.flip[9]!;
+    if(this.bulkPages){const b=this.bulk16Info,at=BULK_RECEIPT/4,B=BULK16_STATUS;b.frame=frame;b.capacity=mapped[at+B.capacity]!;
+     b.liveSlots=mapped[at+B.live]!;b.refusedDemotes=mapped[at+B.refused]!;b.refusedPromotes=mapped[at+B.promoteRefused]!;}}
    // The page pool's sticky fatal explains every later failure: a page the frame needed was never stored.
    // It precedes the particles' verdict: a capped closure strands samples
    // in pages it never claimed, which FLIP then reports as an arrival.

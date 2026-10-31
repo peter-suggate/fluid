@@ -610,6 +610,8 @@ try {
    fineTiles:solver.info.uniformMixedFineTiles,bandTiles:solver.info.uniformPressureBandTiles,bandCycles:solver.info.uniformPressureBandCycles,bandResidual:solver.info.uniformPressureBandResidual,labels:byLabel};
   // Under the build's slot claim: refusals and the h slots in use.
   if(solver.info.uniformMixedSlotCapacity!==undefined)row.slots={owners:solver.info.uniformMixedOwnerCapacity,capacity:solver.info.uniformMixedSlotCapacity,used:solver.info.uniformMixedSlotsUsed,peak:solver.info.uniformMixedSlotPeak,claims:solver.info.uniformMixedSlotClaims,refused:solver.info.uniformMixedRefusedTiles,refusedBuilds:solver.info.uniformMixedRefusedTileBuilds};
+  // The BULK16 store: live slots and the refusals so far (demotes with no slot, error promotes with no spare block).
+  const bulk16=(solver as unknown as {bulk16Info?:object}).bulk16Info;if(bulk16)row.bulk16={...bulk16};
   if(measureVolume&&process.argv.includes("--particle-mass"))row.particleMass=await readParticleMassCensus(device,mixedFrame.narrowBandFlip);
   if(renderLoad)row.renderLoad_ms=renderLoadAlone_ms;
   if(hostWork)row.hostWork=advanceWork;

@@ -4,7 +4,7 @@ import {createBackyardPoolPartyScene} from "../lib/core/backyard-pool-party-scen
 import {createUniformTroughScene} from "../lib/core/uniform-trough-scenes";
 import {sceneFluidBoxPage, sceneFluidLatticeDimensions, sceneLatticeDimensions} from "../lib/core/scene-lattice";
 import {createInflowGridBoundary} from "../lib/core/inflow-boundary";
-import {UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_SEED_MARGIN, uniformPagePoolResidency, uniformPagePoolRuleBlocks} from "../lib/methods/uniform/uniform-page-pool";
+import {UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_SEED_MARGIN, uniformBoxShellTilesIn, uniformPagePoolResidency, uniformPagePoolRuleBlocks, uniformPagePoolRulePages} from "../lib/methods/uniform/uniform-page-pool";
 import {uniformCensusReach, uniformPagePoolRule} from "../lib/methods/uniform/uniform-particle-census";
 import {uniformLatticePagedVolume} from "../lib/methods/uniform/uniform-volume-initial";
 import {uniformPageSources} from "../lib/methods/uniform/webgpu-uniform-reference";
@@ -52,4 +52,29 @@ test("without gravity the head is the closure margin at rest, and unbounded for 
  assert.equal(uniformCensusReach(yard,c.volume).head_m,Infinity);
  assert.equal(yard.container.top,"open");
  assert.equal(uniformPagePoolRule(yard,c.volume,c.air),undefined,"an open top with no bound keeps the box default");
+});
+
+test("the rule's pages are the census and its reserve, as many as its blocks less the sentinels",()=>{
+ const air=[[0,1,0],[0,2,0]] as const;
+ for(const [reach,ceiling] of [[2,2],[9,2],[0,2],[1,2]] as const){
+  const flags=uniformPagePoolRulePages([2,3,1],air,reach,ceiling);
+  assert.equal(flags.reduce((n,f)=>n+(f?1:0),0),uniformPagePoolRuleBlocks([2,3,1],air,reach,ceiling)-2);
+ }
+ assert.deepEqual([...uniformPagePoolRulePages([2,3,1],air,1,2)],[1,1,2,1,0,1]);
+ // An open top's reserve past the box's top page holds no box page.
+ assert.deepEqual([...uniformPagePoolRulePages([2,3,1],air,9,Number.MAX_SAFE_INTEGER)],[1,1,2,1,2,1]);
+});
+
+test("V2d: the walls' solid-record tiles are those of the rule's pages, so they follow the water, not the box",()=>{
+ const shell=(t:readonly number[])=>t.reduce((n,b)=>n*b,1)-t.reduce((n,b)=>n*Math.max(0,b-2),1);
+ // Every page flagged: the box's whole outer layer, a partial last page included.
+ for(const tiles of [[16,24,8],[13,24,8],[16,17,3]] as const)
+  assert.equal(uniformBoxShellTilesIn([2,3,1],new Uint8Array(6).fill(1),tiles),shell(tiles));
+ // One bottom page of a 2x3x1-page box: its floor, its low x face and both z faces.
+ assert.equal(uniformBoxShellTilesIn([2,3,1],Uint8Array.of(1,0,0,0,0,0),[16,24,8]),8*8*8-7*7*6);
+ // The same water in a box four times as wide: the wide box's extra pages are AIR, outside the rule.
+ const narrow=uniformBoxShellTilesIn([2,3,1],uniformPagePoolRulePages([2,3,1],[[0,2,0],[1,2,0]],1,2),[16,24,8]);
+ const wideAir:[number,number,number][]=[];for(let y=0;y<3;y++)for(let x=0;x<8;x++)if(x>=2||y===2)wideAir.push([x,y,0]);
+ const wide=uniformBoxShellTilesIn([8,3,1],uniformPagePoolRulePages([8,3,1],wideAir,1,2),[64,24,8]);
+ assert.ok(wide<=narrow&&narrow<shell([16,24,8]),`${wide} wide, ${narrow} narrow, ${shell([64,24,8])} wide box`);
 });

@@ -155,11 +155,18 @@ export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):U
  * (uniformCensusReach), and the two sentinels. A closed top caps the reserve
  * at the box's top page; an open top with an unbounded head (no gravity)
  * has no rule, undefined. */
-export function uniformPagePoolRule(scene:SceneDescription,volume:LatticePages,air:readonly (readonly [number,number,number])[]):number|undefined{
+export function uniformPagePoolRule(scene:SceneDescription,volume:LatticePages,air:readonly (readonly [number,number,number])[],reach=uniformPagePoolRuleReach(scene,volume)):number|undefined{
+ return reach&&uniformPagePoolRuleBlocks(volume.pages,air,reach.reachPage,reach.ceilingPage);
+}
+/** The pool rule's reserve columns' reach (uniformPagePoolRule): the page of
+ * the census liquid's top plus its head, and the page that caps it (the box's
+ * top under a closed top), and the census speed v; undefined for an open top
+ * with an unbounded head. */
+export function uniformPagePoolRuleReach(scene:SceneDescription,volume:LatticePages):{readonly reachPage:number;readonly ceilingPage:number;readonly v_m_s:number}|undefined{
  const reach=uniformCensusReach(scene,volume),pageHeight=volume.edge*scene.voxelDomain.finestCellSize_m,open=scene.container.top==="open";
  const reachPage=Math.floor((reach.top_m+reach.head_m)/pageHeight);
  if(open&&!Number.isFinite(reachPage))return undefined;
- return uniformPagePoolRuleBlocks(volume.pages,air,reachPage,open?Number.MAX_SAFE_INTEGER:volume.pages[1]-1);
+ return {reachPage,ceilingPage:open?Number.MAX_SAFE_INTEGER:volume.pages[1]-1,v_m_s:reach.v_m_s};
 }
 /** A body's bound in lattice cells: its centre and bounding radius (boundingRadius). */
 export interface UniformCensusBodyBall{readonly centre:readonly [number,number,number];readonly radius:number}

@@ -28,7 +28,7 @@
  * The slot store's begin and finish run around them (UniformBulkPages). */
 import { BULK16_PAGE, BULK16_PHI_TEXELS, bulk16TransferWGSL } from "./uniform-bulk-pages-reference";
 import { BULK16_STATUS, bulk16LifecycleWGSL, type UniformBulkPages } from "./uniform-bulk-pages";
-import { UNIFORM_PAGE_POOL_RECORD, uniformPagePoolWGSL, type UniformPagePool } from "./uniform-page-pool";
+import { UNIFORM_PAGE_POOL_RECORD, UNIFORM_PAGE_POOL_STATUS, uniformPagePoolWGSL, type UniformPagePool } from "./uniform-page-pool";
 import { RESIDENCY_STAGES } from "./uniform-local-residency";
 import { UNIFORM_BULK_REACH_CELLS } from "./uniform-bulk-tier-reference";
 import { uniformMixedRegionWGSL } from "./uniform-mixed-layout-builder";
@@ -114,7 +114,8 @@ ${bulk16LifecycleWGSL(store.layout,0,2)}
 @group(0) @binding(5) var<storage,read_write> btNegative:array<f32>;
 @group(0) @binding(6) var<storage,read_write> btNegativeScratch:array<f32>;
 @group(0) @binding(7) var<storage,read_write> btPressure:array<f32>;
-// x: 1 while a cycle is asked for; yzw unused. gradient: rho g h (Pa a cell).
+// x: 1 while a cycle is asked for, 2 the runtime; y: the blocks an error
+// promote may not take (promoteReserve); zw unused. gradient: rho g h (Pa a cell).
 struct BTParams{mode:vec4u,gradient:vec4f}
 @group(0) @binding(8) var<uniform> btParams:BTParams;
 @group(0) @binding(9) var<storage,read_write> btMap:array<u32>;
@@ -160,6 +161,8 @@ fn btHolder(v:vec3i,skip:bool)->vec4u{
 }
 
 const DECIDE=/* wgsl */`
+// The requests the frame listed before decide: what an error promote counts as taken.
+@compute @workgroup_size(1) fn btDecideAsked(){atomicStore(&bulkPages[${BULK16_STATUS.promoteAsked}u],atomicLoad(&upWork[0u]));}
 // Mode 2 (the runtime): promote every live slot its frame asked to (the
 // slot's promote word, BULK16_PAGE.promote), and demote each resident page
 // whose eight regions are all 16h members (membership already keeps h out
@@ -170,7 +173,16 @@ const DECIDE=/* wgsl */`
  let live=atomicLoad(&bulkPages[${BULK16_STATUS.live}u]);
  for(var i=gid.x;i<live;i+=${64*GROUPS}u){
   let slot=atomicLoad(&bulkPages[BP_LIVE+i]);
-  if(btParams.mode.x==1u||bpRead(slot,${BULK16_PAGE.promote}u)!=0u){
+  let word=bpRead(slot,${BULK16_PAGE.promote}u);
+  if(btParams.mode.x==1u||word!=0u){
+   // V2d: an error promote (2) takes a block only past the reserve, counting
+   // the requests listed before this pass (btDecideAsked) and the error
+   // promotes before it; else it is
+   // refused: its word cleared, so the next frame's error test asks again, and
+   // the page stays a consistent 16h solve. Closure and scan promotes always ask.
+   if(btParams.mode.x==2u&&word==2u&&atomicAdd(&bulkPages[${BULK16_STATUS.promoteClaims}u],1u)+atomicLoad(&bulkPages[${BULK16_STATUS.promoteAsked}u])+btParams.mode.y>=upState[${UNIFORM_PAGE_POOL_STATUS.free}u]+upState[${UNIFORM_PAGE_POOL_STATUS.pending}u]){
+    bpWrite(slot,${BULK16_PAGE.promote}u,0u);atomicAdd(&bulkPages[${BULK16_STATUS.promoteRefused}u],1u);continue;
+   }
    upPromote(vec3i(bitcast<i32>(bpRead(slot,0u)),bitcast<i32>(bpRead(slot,1u)),bitcast<i32>(bpRead(slot,2u))));
   }
  }
@@ -341,10 +353,14 @@ export class UniformBulkPageTransfer{
  /** Test only (M2's lifecycle harness): demote every whole-16h page at one
   * commit, promote them all at the next, and again. No runtime setting. */
  cycle=false;
+ /** V2d: the free blocks an error promote may not take, the pool rule's
+  * ballistic columns and closure shell (the solver sets it); an error promote
+  * past them is refused (BULK16_STATUS.promoteRefused). */
+ promoteReserve=0;
  private readonly params:GPUBuffer;
  private readonly map:GPUBuffer;
  private readonly words=new ArrayBuffer(32);
- private pipelines?:{decide:GPUComputePipeline;demote:GPUComputePipeline;map:GPUComputePipeline;seed:GPUComputePipeline;promote:GPUComputePipeline;cells:GPUComputePipeline;liquid:GPUComputePipeline};
+ private pipelines?:{asked:GPUComputePipeline;decide:GPUComputePipeline;demote:GPUComputePipeline;map:GPUComputePipeline;seed:GPUComputePipeline;promote:GPUComputePipeline;cells:GPUComputePipeline;liquid:GPUComputePipeline};
  private groups?:{decide:GPUBindGroup;demote:GPUBindGroup;map:GPUBindGroup;seed:GPUBindGroup;promote:GPUBindGroup;cells:GPUBindGroup;liquid:GPUBindGroup};
  private records?:UniformBulkResidencyRecords;
  /** The census's certificate records, before initialize (the frame's registerCertificate). */
@@ -385,18 +401,18 @@ export class UniformBulkPageTransfer{
    map:bind("Uniform BULK16 promoted slots",[0,1,2,9]),seed:bind("Uniform BULK16 promoted seeds",[0,1,2,9,14,15,16]),promote:bind("Uniform BULK16 promote",[0,1,2,5,6,7,8,9,10,11,12,13],written),
    cells:bind("Uniform BULK16 promoted cells",[0,1,2,9,10,17,18,19]),liquid:bind("Uniform BULK16 promoted liquid",[0,1,2,9,20,21])};
   const pipeline=(stage:keyof typeof stages,module:GPUShaderModule,entryPoint:string)=>d.createComputePipelineAsync({label:`Uniform BULK16 ${stage}`,layout:stages[stage].layout,compute:{module,entryPoint}});
-  const [decide,demote,map,seed,promote,cells,liquid]=await Promise.all([pipeline("decide",early,"btDecidePages"),pipeline("demote",early,"btDemotePages"),pipeline("map",late,"btMapPromoted"),pipeline("seed",late,"btSeedPromoted"),pipeline("promote",late,"btPromotePages"),pipeline("cells",late,"btPromoteCells"),pipeline("liquid",late,"btPromoteLiquid")]);
-  this.pipelines={decide,demote,map,seed,promote,cells,liquid};
+  const [asked,decide,demote,map,seed,promote,cells,liquid]=await Promise.all([pipeline("decide",early,"btDecideAsked"),pipeline("decide",early,"btDecidePages"),pipeline("demote",early,"btDemotePages"),pipeline("map",late,"btMapPromoted"),pipeline("seed",late,"btSeedPromoted"),pipeline("promote",late,"btPromotePages"),pipeline("cells",late,"btPromoteCells"),pipeline("liquid",late,"btPromoteLiquid")]);
+  this.pipelines={asked,decide,demote,map,seed,promote,cells,liquid};
   this.groups={decide:stages.decide.group,demote:stages.demote.group,map:stages.map.group,seed:stages.seed.group,promote:stages.promote.group,cells:stages.cells.group,liquid:stages.liquid.group};
  }
  /** Before the pool commit: rho g h is the hydrostatic pressure step of a cell (Pa). */
  encodeBefore(encoder:GPUCommandEncoder,gradient:readonly [number,number,number]):void{
   const p=this.pipelines,g=this.groups;if(!p||!g)throw new Error("BULK16 transfer is not initialized");
-  new Uint32Array(this.words,0,4).set([this.cycle?1:2,0,0,0]);new Float32Array(this.words,16,4).set([...gradient,0]);
+  new Uint32Array(this.words,0,4).set([this.cycle?1:2,this.promoteReserve,0,0]);new Float32Array(this.words,16,4).set([...gradient,0]);
   this.device.queue.writeBuffer(this.params,0,this.words);
   this.store.encodeBegin(encoder);
   const pass=encoder.beginComputePass(PASS);
-  pass.setBindGroup(0,g.decide);pass.setPipeline(p.decide);pass.dispatchWorkgroups(GROUPS);pass.setBindGroup(0,g.demote);pass.setPipeline(p.demote);pass.dispatchWorkgroups(GROUPS);pass.end();
+  pass.setBindGroup(0,g.decide);pass.setPipeline(p.asked);pass.dispatchWorkgroups(1);pass.setPipeline(p.decide);pass.dispatchWorkgroups(GROUPS);pass.setBindGroup(0,g.demote);pass.setPipeline(p.demote);pass.dispatchWorkgroups(GROUPS);pass.end();
  }
  /** After the commit, before the certificate's pageMark: the promoted pages' slots and seed records. */
  encodeClaimed(encoder:GPUCommandEncoder):void{
