@@ -8,6 +8,7 @@ import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_SCAN } from "../lib/methods/unif
 import { BULK16_STATUS } from "../lib/methods/uniform/uniform-bulk-pages";
 import { UNIFORM_BULK_REACH_CELLS } from "../lib/methods/uniform/uniform-bulk-tier-reference";
 import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
+import { UBA_STRIDE } from "../lib/methods/uniform/uniform-brick-arena";
 import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geometric";
 
 /* M2 (docs/plans/bulk16-plan-2026-10-28.md): a block that a promote claims
@@ -356,7 +357,17 @@ async function followPromotes(device:GPUDevice,solver:any,scene:any,demotedCount
  const pageOf=new Map<number,number[]>();
  const pages=async()=>{const slots=await live();for(const s of slots)if(!pageOf.has(s))pageOf.set(s,[...(await read(L.records+BULK16_PAGE_WORDS*s,3))].map(w=>w|0));return slots;};
  const dt=scene.numerics.fixedDt_s;let step=0;
- const advance=async()=>{step++;assert.ok(solver.advanceTo(step*dt,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);};
+ // A failed frame (2 of 13 runs of the falling drop, 2026-10-31, nonfinite
+ // pressure after the landing) prints the promotes so far and where the
+ // arena's pools hold nonfinite words before it throws.
+ const advance=async()=>{step++;assert.ok(solver.advanceTo(step*dt,[]));let failure:unknown;
+  try{await solver.awaitFrameCompletion();}catch(error){failure=error;}
+  failure??=solver.info.simulationPipelineError;
+  if(failure!==undefined){
+   console.info(`promotes before the failure ${JSON.stringify([...promoted].map(([s,p])=>({page:pageOf.get(s)?.join(","),...p})))}`);
+   await reportNonfinite(frame.band,frame.status,rd,step);
+   throw failure instanceof Error?failure:new Error(String(failure));
+  }};
  for(;step<40;)await advance();
  const demoted=await pages();
  assert.equal(demoted.length,demotedCount,"the deep pages demote before the drop nears");
@@ -385,6 +396,31 @@ async function followPromotes(device:GPUDevice,solver:any,scene:any,demotedCount
  }
  return [...promoted].map(([s,p])=>{const page=pageOf.get(s)!;return {page:page.join(","),y:page[1]!,step:p.step,why:p.why,
   gap:Math.round(Math.min(...[p.step-2,p.step-1,p.step].map(k=>gap(page,seen.get(k)!)))),...(p.why===2?{error:p.error,level:p.level}:{}),...(p.why===1?{scan:p.scan}:{})};});
+}
+/** The arena at a failed frame: its solve state (cycle, residual, the
+ * residual history), the frame's status words, and per pool channel the
+ * nonfinite words, the first's offset and its slots (UBA_STRIDE words a
+ * slot). The channel names its writers; the dump is after the frame, so it
+ * cannot name which of them wrote first. */
+async function reportNonfinite(band:any,status:GPUBuffer,rd:(buffer:GPUBuffer,at:number,n:number)=>Promise<Uint32Array>,step:number){
+ const w=await rd(band.index,0,32),f=new Float32Array(w.buffer),st=await rd(status,0,16);
+ console.info(`arena at step ${step} ${JSON.stringify({cycle:w[4],residual:f[2],history:Array.from(f.slice(8,24),x=>+x.toPrecision(4)),status:Array.from(st.slice(0,10))})}`);
+ const bases=[...(band.arena.bases as Map<string,number>)],pools=band.arena.pools as Map<string,number>;
+ const marks:Record<string,number>={bulkWord:band.bulkWord,storeWord:band.storeWord,krylovBulkWord:band.krylovBulkWord,krylovDotWord:band.krylovDotWord};
+ for(const [name,index] of [["pool",0],["poolB",1]] as const){
+  const buffer=band[name] as GPUBuffer,words=await rd(buffer,0,buffer.size/4),floats=new Float32Array(words.buffer);
+  const starts=bases.filter(([n])=>pools.get(n.split("/")[0]!)===index);
+  if(index===1)for(const [n,v] of Object.entries(marks))if(v)starts.push([`@${n}`,v]);
+  starts.sort((a,b)=>a[1]-b[1]);
+  const by:Record<string,{words:number;first:number;slots:number[]}>={};
+  for(let i=0,c=0;i<floats.length;i++){
+   if(Number.isFinite(floats[i]!))continue;
+   while(c+1<starts.length&&starts[c+1]![1]<=i)c++;
+   const [channel,base]=starts[c]??["?",0],entry=by[channel]??={words:0,first:i-base,slots:[]},slot=Math.floor((i-base)/UBA_STRIDE);
+   entry.words++;if(entry.slots.length<16&&!entry.slots.includes(slot))entry.slots.push(slot);
+  }
+  console.info(`nonfinite ${name} ${JSON.stringify(by)}`);
+ }
 }
 function assertPromoteCauses(record:Promote[]){
  assert.deepEqual(record.filter(p=>![0,1,2].includes(p.why)),[],"every promote carries its cause word");
