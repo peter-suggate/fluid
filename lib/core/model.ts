@@ -374,8 +374,8 @@ export interface SceneDescription {
      * (uniformFineSlotCapacity), or "auto" for 1.5 × the t=0 detail ring's
      * with a floor of 16 (under start "4h", at least the h ceiling at 32
      * tiles a block). Unset, every block keeps its h storage (the stores
-     * the size of the block grid), unless start is "4h".
-     * start: Dynamic detail's t=0 layout. "h" (default): every stored tile
+     * the size of the block grid), unless start is "4h" or "census".
+     * start: Dynamic detail's t=0 layout. "h": every stored tile
      * at h, frame 1's census coarsening it. "4h": every tile at 4h but Fine
      * regions, the census refining it; the h capacity is
      * then held at bricks (default: the start's bricks × 1.5, floor 256)
@@ -383,6 +383,8 @@ export interface SceneDescription {
      * "census": a 4h background with h where frame 1's census holds it on
      * the initial liquid (its band, solid contact and bodies, with their
      * closure: uniformCensusSeedTiles), under the capacities of "4h".
+     * Unset: "census" under Dynamic detail, "h" under any other policy
+     * (uniformTierStart).
      */
     tiers?: { bricks?: number; particlesPerFineCell?: number; fineBlocks?: number | "auto"; start?: "h" | "4h" | "census" };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */

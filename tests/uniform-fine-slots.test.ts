@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {UNIFORM_FINE_SLOT_FLOOR,uniformFineBlocks,uniformFineSlotCapacity,uniformFineSlotFootprintColumns,uniformFineSlotRule,uniformFineSlotSourcePages,uniformFineSlotInitWGSL,uniformFineSlotLayers,uniformFineSlotWords} from "../lib/methods/uniform/uniform-fine-slots";
+import {UNIFORM_FINE_SLOT_FLOOR,uniformFineBlocks,uniformTierStart,uniformFineSlotCapacity,uniformFineSlotFootprintColumns,uniformFineSlotRule,uniformFineSlotSourcePages,uniformFineSlotInitWGSL,uniformFineSlotLayers,uniformFineSlotWords} from "../lib/methods/uniform/uniform-fine-slots";
 
 test("h slot words: slots, need, free stack and claimed list of a capacity",()=>{
  const w=uniformFineSlotWords(10,4);
@@ -33,6 +33,16 @@ test("h slot compaction: fineBlocks as set, else \"auto\" under a coarse start, 
  assert.equal(uniformFineBlocks({start:"4h"}),"auto");
  assert.equal(uniformFineBlocks({start:"4h",fineBlocks:40}),40);
  assert.equal(uniformFineBlocks({fineBlocks:"auto"}),"auto");
+});
+
+test("tier start: the scene's, else the census start under Dynamic and h under any other policy",()=>{
+ assert.equal(uniformTierStart(undefined,true),"census");
+ assert.equal(uniformTierStart({},true),"census");
+ assert.equal(uniformTierStart({start:"h"},true),"h");
+ assert.equal(uniformTierStart({start:"4h"},false),"4h");
+ assert.equal(uniformTierStart(undefined,false),"h");
+ // The resolved start compacts as an explicit one does.
+ assert.equal(uniformFineBlocks({start:uniformTierStart(undefined,true)}),"auto");
 });
 
 test("h slot init: every texel of a claimed slot, 32³ a cell or face block and 33³ a vertex block",()=>{

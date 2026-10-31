@@ -12,7 +12,7 @@ import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLayoutWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
 import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformPagePoolRule, uniformPagePoolRuleReach, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
-import { uniformFineBlocks, uniformFineSlotCapacity, uniformFineSlotFootprintColumns, uniformFineSlotRule, uniformFineSlotSourcePages } from "./uniform-fine-slots";
+import { uniformFineBlocks, uniformFineSlotCapacity, uniformTierStart, uniformFineSlotFootprintColumns, uniformFineSlotRule, uniformFineSlotSourcePages } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
@@ -395,6 +395,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly twoLevelShellReach: number;
   /** Derived from detail.policy: "dynamic" is the census with its importance criteria, "regions" requests only. */
   private detail: UniformDetailSettings;
+  /** The scene's fluid.tiers with its start resolved at construction (uniformTierStart). */
+  private readonly tiers: NonNullable<NonNullable<SceneDescription["fluid"]>["tiers"]> & { readonly start: "h" | "4h" | "census" };
   private detailPlanner?: UniformDetailPlanner;
   /** Latest transient focus, and the one the accepted plan used. */
   private detailFocusPending?: SolverDetailFocus;
@@ -723,6 +725,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.inflowBoundary = scene.fluid.inflow
       ? createInflowGridBoundary(scene.fluid.inflow, scene.container, cells) : undefined;
     this.detail = options.detail ?? uniformDetailSettings({});
+    // fluid.tiers with its start resolved: unset, Dynamic starts on the census (uniformTierStart).
+    this.tiers = { ...scene.fluid?.tiers, start: uniformTierStart(scene.fluid?.tiers, this.detail.policy === "dynamic") };
     // Refuse a lattice past the page window before the residency's host
     // passes over every cell (100 s at 2048 cells an axis).
     uniformLatticeWindowBox([nx, ny, nz]);
@@ -761,7 +765,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // V2c: a census start's deep pages start in BULK16 slots, holding no
     // block (uniform-bulk-start): the set and their records on the address
     // that stores every page the residency does, then the address without them.
-    if (this.narrowBandNearSettled.bulkTier === "16h" && this.detail.policy === "dynamic" && scene.fluid.tiers?.start === "census") {
+    if (this.narrowBandNearSettled.bulkTier === "16h" && this.detail.policy === "dynamic" && this.tiers.start === "census") {
       const start = this.bulkStart = this.bulkStartState(cells);
       const t0 = performance.now();
       if (start.pages.length) { address = this.address = latticeAddress(start.pages); this.solidMask = solidMask(); }
@@ -795,7 +799,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Geometric h fields come from the detail storage, registered with the
     // page layer by their logical dims; their bytes are the storage's (refreshMixedAllocation).
     // fluid.tiers.fineBlocks (or a coarse start) compacts the h stores after t=0: every module then reads a slotless block's base.
-    const detailStorage = this.detailStorage = new UniformDetailStorage(device, address, { sparse: uniformFineBlocks(scene.fluid?.tiers) !== undefined });
+    const detailStorage = this.detailStorage = new UniformDetailStorage(device, address, { sparse: uniformFineBlocks(this.tiers) !== undefined });
     // Vertex phi where nothing is stored: the initial level set's value far from liquid (uniformLatticeInitialPhi).
     const emptyPhi = uniformLatticeFarPhi(scene);
     const field = (label: string, kind: UniformDetailClass, perTile = false) =>
@@ -1426,7 +1430,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // seed's bricks x 1.5 with a floor: uniformFineBrickCapacity), and the
     // particles at it. A build over the ceiling is fatal (followMixedCapacity).
     // fluid.tiers.start "census" (V2a): the same capacities by rule, on frame 1's census at t=0 (censusSeed).
-    const tiers=this.scene.fluid.tiers,coarseStart=gpuLayout&&(tiers?.start==="4h"||tiers?.start==="census");
+    const tiers=this.tiers,coarseStart=gpuLayout&&(tiers.start==="4h"||tiers.start==="census");
     const seed=this.mixedSeed=coarseStart?(tiers?.start==="census"?this.censusSeed():this.dynamicSeed()):undefined;
     this.censusSeedTiles=undefined;
     // M4b: unless fluid.tiers.fineBlocks gives a figure, a coarse start holds

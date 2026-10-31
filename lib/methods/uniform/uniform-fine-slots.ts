@@ -88,6 +88,8 @@ export function uniformFineSlotWords(blocks:number,capacity:number):UniformFineS
  return {slot:0,need:blocks,free,stack:free+1,claimed,list:claimed+1,words:claimed+1+capacity};
 }
 /** Blocks of the slot grid on z: slot s sits at umBlockCoord(s), the block grid's width and height a layer. */
+/** Dynamic detail's t=0 layout (fluid.tiers.start): the scene's, and unset the census start under Dynamic (an h start under any other policy, which no census lays out). */
+export function uniformTierStart(tiers:{readonly start?:"h"|"4h"|"census"}|undefined,dynamic:boolean):"h"|"4h"|"census"{return tiers?.start??(dynamic?"census":"h");}
 /** The scene's compaction (fluid.tiers.fineBlocks): a coarse or census start (tiers.start "4h" or "census") compacts at "auto" unless told otherwise; undefined keeps the whole-grid stores. */
 export function uniformFineBlocks(tiers?:{readonly fineBlocks?:number|"auto";readonly start?:"h"|"4h"|"census"}):number|"auto"|undefined{
  return tiers?.fineBlocks??(tiers?.start==="4h"||tiers?.start==="census"?"auto":undefined);
