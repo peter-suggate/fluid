@@ -898,10 +898,17 @@ fn remapSample(p:vec3u,plane:i32,axis:u32)->f32{
 // flux its pressure row sums from them, and a divergence-free h field
 // coarsens to a divergence-free 4h one. The plain mean of a face the solid
 // shuts a row of handed that row's share of the flux to the next solve.
+// A face's first footprint cell: its anchor, except a low face over no
+// stored cell (umFaceLow: the domain wall, a SOLID or BULK16 page), whose
+// cell is its owner's above it (ueLowCell's rule), the old owner holding it
+// in its low-face rows. Measured: a tile changing width over a BULK16 page
+// sampled the cell below, in a page that stores none (old owner width 0),
+// and wrote a nonfinite low-face row.
+fn remapFootprint(f:UMFace)->vec3u{var p=max(f.anchor,umWallLow());if(umFaceLow(f.anchor,f.axis)){p[f.axis]=f.anchor[f.axis]+1;}return vec3u(p);}
 fn remapFace(f:UMFace,cut:bool)->f32{
  let axis=f.axis;let u=(axis+1u)%3u;let v=(axis+2u)%3u;var value=0.0;var weight=0.0;
  for(var y=0u;y<f.width;y++){for(var x=0u;x<f.width;x++){
-  var p=vec3u(max(f.anchor,umWallLow()));p[u]+=x;p[v]+=y;var w=1.0;
+  var p=remapFootprint(f);p[u]+=x;p[v]+=y;var w=1.0;
   if(cut&&f.width>1u){var low=vec3i(p);low[axis]=f.anchor[axis];w=umPressureFaceV(low,axis);}
   value+=w*remapSample(p,f.anchor[axis],axis);weight+=w;
  }}
@@ -916,7 +923,7 @@ fn remapReleased(f:UMFace)->bool {
  let axis=f.axis;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
  let bit=axis+select(0u,3u,f.sign<0);
  for(var y=0u;y<f.width;y++){for(var x=0u;x<f.width;x++){
-  var p=vec3u(max(f.anchor,umWallLow()));p[u]+=x;p[v]+=y;
+  var p=remapFootprint(f);p[u]+=x;p[v]+=y;
   let o=oldumOwnerAt(vec3i(p));var anchor=oldumOrigin(o);
   anchor[axis]+=o.width-1u;
   if((u32(round(textureLoad(velocity,vec3i(anchor),0).w))&(1u<<bit))==0u){return false;}
