@@ -1244,7 +1244,9 @@ const SUPER_PER:u32=${UNIFORM_SUPER_BLOCK_SLOTS/256}u;
  * its highest resident one up to `reachPage` (the page holding the census
  * liquid's top plus its ballistic head, uniformCensusReach), at most
  * `ceilingPage` (the box's top page under a closed top, the frame's under an
- * open one). Exhaustion stays the pool's fatal. */
+ * open one), and at least the one block a pool holds besides its sentinels
+ * (uniformPagePoolLayout's minimum: a box with no liquid at build). Exhaustion
+ * stays the pool's fatal. */
 export function uniformPagePoolRuleBlocks(pages:readonly [number,number,number],air:readonly (readonly [number,number,number])[],reachPage:number,ceilingPage:number):number{
  const [px,py,pz]=pages,stored=new Uint8Array(px*py*pz).fill(1);
  for(const [x,y,z] of air)stored[x+px*(y+py*z)]=0;
@@ -1254,7 +1256,7 @@ export function uniformPagePoolRuleBlocks(pages:readonly [number,number,number],
   let top=-1;for(let y=0;y<py;y++)if(stored[x+px*(y+py*z)]){resident++;top=y;}
   if(top>=0)reserve+=Math.max(0,reach-top);
  }
- return resident+reserve+2;
+ return Math.max(1,resident+reserve)+2;
 }
 /** The pool rule's pages (uniformPagePoolRuleBlocks without the sentinels),
  * a flag a box page: the census pages (1) and the reserve above each column's

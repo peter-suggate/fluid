@@ -25,6 +25,8 @@ test("a reserve column reaches the head above its top resident page, capped by a
  assert.equal(uniformPagePoolRuleBlocks([2,3,1],air,9,2),4+2+2);
  assert.equal(uniformPagePoolRuleBlocks([2,3,1],air,9,Number.MAX_SAFE_INTEGER),4+(9-0)+(9-2)+2);
  assert.equal(uniformPagePoolRuleBlocks([2,3,1],air,0,2),4+2);
+ // No resident page (an empty box): the pool's one block besides the sentinels.
+ assert.equal(uniformPagePoolRuleBlocks([2,3,1],[[0,0,0],[1,0,0],[0,1,0],[1,1,0],[0,2,0],[1,2,0]],2,2),1+2);
 });
 
 test("liquid held by walls on every side makes no dam front; a dam's free face does",()=>{
