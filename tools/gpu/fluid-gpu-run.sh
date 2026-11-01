@@ -46,6 +46,17 @@ aged_waiter() {
   done
   return 1
 }
+# timing_waiting: true if a live timing run is queued. A timing run's pending file
+# outlives it when it is killed while queued (its EXIT trap is gone once it execs
+# lockf), so a file whose pid is gone is stale: remove it rather than yield to it.
+timing_waiting() {
+  local f live=1
+  for f in "$PENDING".*; do
+    [ -e "$f" ] || continue
+    if kill -0 "${f##*.}" 2>/dev/null; then live=0; else rm -f "$f"; fi
+  done
+  return $live
+}
 case "$mode" in
   timing)
     while aged_waiter; do sleep 5; done
@@ -69,7 +80,7 @@ case "$mode" in
     start=$SECONDS
     while :; do
       # Yield to a waiting timing run, unless this run has waited AGED seconds.
-      if [ $((SECONDS-start)) -lt "$AGED" ] && ls "$PENDING".* >/dev/null 2>&1; then sleep 2; continue; fi
+      if [ $((SECONDS-start)) -lt "$AGED" ] && timing_waiting; then sleep 2; continue; fi
       slots="1 2 3"
       if [ "$mode" = check ] && ls "$GATE".* >/dev/null 2>&1; then slots="3"; fi
       if [ "$mode" = gate ] && ls "$CHECKWAIT".* >/dev/null 2>&1; then slots="1 2"; fi
