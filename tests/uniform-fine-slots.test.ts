@@ -56,7 +56,9 @@ test("h slot init: every texel of a claimed slot, 32³ a cell or face block and 
 test("h slot rule: 1.5 x the census footprint's page columns x three band layers, one rule for every scene",()=>{
  assert.equal(uniformFineSlotRule(20),90);
  assert.equal(uniformFineSlotRule(1),5);
- assert.throws(()=>uniformFineSlotRule(0),/whole columns/);
+ // No footprint (an empty box): the one slot a store holds.
+ assert.equal(uniformFineSlotRule(0),1);
+ assert.throws(()=>uniformFineSlotRule(-1),/whole columns/);
  // A 4x2x3 box with one column wholly AIR and another resident only at its top.
  const air:[number,number,number][]=[[0,0,0],[0,1,0],[1,0,2]];
  assert.equal(uniformFineSlotFootprintColumns([4,2,3],air),11);

@@ -34,12 +34,13 @@ export const UNIFORM_FINE_SLOT_BAND_LAYERS=3;
 /** The h slots a census footprint holds (docs/plans/bulk16-plan-2026-10-28.md,
  * M4b): UNIFORM_FINE_SLOT_GROWTH x (its page columns x the band's page
  * layers, plus the pages the other t=0 sources of h demand meet:
- * uniformFineSlotSourcePages), one rule for every scene. A build that wants
- * more is refused to 4h. */
+ * uniformFineSlotSourcePages), one rule for every scene, and at least the
+ * one slot a store holds (uniformFineSlotCapacity's minimum: a box with no
+ * liquid at build has no footprint). A build that wants more is refused to 4h. */
 export function uniformFineSlotRule(columns:number,sourcePages=0):number{
- if(!(Number.isSafeInteger(columns)&&columns>=1))throw new RangeError(`An h slot rule needs a footprint of whole columns, not ${columns}`);
+ if(!(Number.isSafeInteger(columns)&&columns>=0))throw new RangeError(`An h slot rule needs a footprint of whole columns, not ${columns}`);
  if(!(Number.isSafeInteger(sourcePages)&&sourcePages>=0))throw new RangeError(`An h slot rule needs whole source pages, not ${sourcePages}`);
- return Math.ceil(UNIFORM_FINE_SLOT_GROWTH*(columns*UNIFORM_FINE_SLOT_BAND_LAYERS+sourcePages));
+ return Math.max(1,Math.ceil(UNIFORM_FINE_SLOT_GROWTH*(columns*UNIFORM_FINE_SLOT_BAND_LAYERS+sourcePages)));
 }
 /** The pages the detail rings of the t=0 h sources other than the free
  * surface meet: a body's census ball, an authored h region (its tiles,
