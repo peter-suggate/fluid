@@ -3,7 +3,7 @@ import type { SceneDescription } from "../../core/model";
 import { proceduralSolidField } from "../../core/procedural-solid";
 import { sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import { sampleSolidWorld, solidWorldForScene } from "../../core/solid-world";
-import { terrainColumnHeights } from "../../core/terrain";
+import { sceneHasTerrain, terrainColumnHeights } from "../../core/terrain";
 import { liquidExtrusionBounds, liquidExtrusionDistance, liquidExtrusionEdges } from "../../core/liquid-extrusion";
 import { integratedInflowVolume } from "../../core/inflow-boundary";
 import { UNIFORM_PAGE_POOL_EDGE, UNIFORM_PAGE_POOL_SEED_MARGIN, uniformPagePoolRuleBlocks } from "./uniform-page-pool";
@@ -127,24 +127,25 @@ export function uniformParticleCensusBand(scene:SceneDescription,depth:number,in
 export interface UniformCensusReach{readonly v_m_s:number;readonly head_m:number;readonly top_m:number}
 export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):UniformCensusReach{
  const h=scene.voxelDomain.finestCellSize_m,E=volume.edge,[nx,ny,nz]=volume.cells,[px,py]=volume.pages,g=Math.hypot(scene.fluid.gravity_m_s2.x,scene.fluid.gravity_m_s2.y,scene.fluid.gravity_m_s2.z);
- const column=new Uint32Array(nx*nz),free=new Uint8Array(nx*nz);let top=0;
+ // By wet column (x + nx z): its wet cells, and whether one has a free face. No array a box column.
+ const column=new Map<number,number>(),free=new Set<number>();let top=0;
  const liquid=(x:number,y:number,z:number)=>{const page=volume.at.get(Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E)));return page?page[x%E+E*(y%E+E*(z%E))]!:0;};
  const cells=sceneLatticeDimensions(scene,Number.MAX_SAFE_INTEGER),[cx,cy,cz]=cells,walled=scene.container.walls!=="none";
- const solids=solidWorldForScene(scene),boundary=proceduralSolidField(scene),ground=terrainColumnHeights(scene,cx,cz),cellHeight=scene.container.height_m/cy;
+ const solids=solidWorldForScene(scene),boundary=proceduralSolidField(scene),ground=sceneHasTerrain(scene)?terrainColumnHeights(scene,cx,cz):undefined,cellHeight=scene.container.height_m/cy;
  // An open dry cell: inside the container (past it are its walls, but in an open world), no solid, no procedural boundary, above the ground.
  const openDry=(x:number,y:number,z:number)=>{
   if(x<0||z<0||x>=cx||z>=cz)return !walled;
   if(liquid(x,y,z)>=0.5||sampleSolidWorld(solids,[x,y,z],true).solidFraction>0)return false;
-  return (boundary?.open([x,y,z])??1)>0.5&&(y+0.5)*cellHeight>ground[x+cx*z]!;
+  return (boundary?.open([x,y,z])??1)>0.5&&(y+0.5)*cellHeight>(ground?ground[x+cx*z]!:0);
  };
  for(const [i,page] of volume.at){
   const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz){
-   const X=ox+x,Y=oy+y,Z=oz+z,c=X+nx*Z;column[c]!++;top=Math.max(top,(Y+1)*h);
-   if(!free[c]&&page[j]!>=0.5&&(openDry(X-1,Y,Z)||openDry(X+1,Y,Z)||openDry(X,Y,Z-1)||openDry(X,Y,Z+1)))free[c]=1;
+   const X=ox+x,Y=oy+y,Z=oz+z,c=X+nx*Z;column.set(c,(column.get(c)??0)+1);top=Math.max(top,(Y+1)*h);
+   if(!free.has(c)&&page[j]!>=0.5&&(openDry(X-1,Y,Z)||openDry(X+1,Y,Z)||openDry(X,Y,Z-1)||openDry(X,Y,Z+1)))free.add(c);
   }
  }
- let tallest=0;for(let c=0;c<column.length;c++)if(free[c])tallest=Math.max(tallest,column[c]!*h);
+ let tallest=0;for(const c of free)tallest=Math.max(tallest,column.get(c)!*h);
  for(const {volume:drop} of scene.fluid.scheduledDrops??[])top=Math.max(top,drop.shape==="sphere"?drop.center_m.y+drop.radius_m:liquidExtrusionBounds(drop).max_m.y);
  if(scene.fluid.inflow)top=Math.max(top,scene.fluid.inflow.center_m.y+scene.fluid.inflow.radius_m);
  const speed=(v:{x:number;y:number;z:number}|undefined)=>v?Math.hypot(v.x,v.y,v.z):0;

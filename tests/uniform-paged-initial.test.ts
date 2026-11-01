@@ -3,6 +3,7 @@ import test from "node:test";
 import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { sceneFluidLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
+import { sceneHasTerrain } from "../lib/core/terrain";
 import type { LatticePages } from "../lib/core/initial-liquid-lattice";
 import type { SceneDescription } from "../lib/core/model";
 import { UNIFORM_PAGE_POOL_EDGE, uniformPagePoolResidency } from "../lib/methods/uniform/uniform-page-pool";
@@ -45,7 +46,9 @@ for (const [id, coarsen] of SCENES) test(`paged initial conditions match the den
     if (bits(dense.volume[i]!) !== bits(paged(v, 1, false, x, y, z) ?? 0)) assert.fail(`volume (${x}, ${y}, ${z}): ${dense.volume[i]} by page ${paged(v, 1, false, x, y, z)}`);
   assert.equal(byPage.initial, dense.initial);
   assert.deepEqual([byPage.wetMinimum, byPage.wetMaximum], [dense.wetMinimum, dense.wetMaximum]);
-  assert.deepEqual([...byPage.terrain], [...dense.terrain]);
+  // By page, no terrain holds no column array: every column at zero.
+  assert.deepEqual([...byPage.terrain ?? new Float32Array(vx * vz)], [...dense.terrain]);
+  assert.equal(byPage.terrain === undefined, !sceneHasTerrain(s));
   assert.deepEqual(byPage.dam, dense.dam);
   // The wet-page scan reads the same liquid.
   assert.deepEqual(uniformPagePoolResidency([vx, vy, vz], undefined, [], true, () => v), uniformPagePoolResidency([vx, vy, vz], undefined, [], true, () => dense.volume));

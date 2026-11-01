@@ -3,7 +3,7 @@ import { initialHeightFieldHeight } from "./initial-height-field";
 import { damBreakSignedDistanceAtNode, initialFluidBrickSignedDistanceAtNode,
   initialLiquidVolumesSignedDistance, baseInitialLiquidFractionAtCell, damBreakBoxContains, initialLiquidFractionAtCell, sceneDamBreakBox,
   sceneInitialLiquidVolumes, INITIAL_FLUID_BRICK_SIZE } from "./initial-fluid";
-import { terrainColumnHeights } from "./terrain";
+import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { sampleSolidWorld, solidWorldForScene } from "./solid-world";
 import { quaternionInverseRotate } from "./rigid-body";
 import { sceneShape } from "./scene-shape";
@@ -133,11 +133,12 @@ function closedCell(scene: SceneDescription, dimensions: readonly [number, numbe
   const [nx, ny, nz] = dimensions;
   const world = solidWorldForScene(scene);
   const boundary = proceduralSolidField(scene);
-  const terrain = terrainColumnHeights(scene, nx, nz), hy = scene.container.height_m / ny;
+  // A scene with no terrain has every column at zero, and holds no column array.
+  const terrain = sceneHasTerrain(scene) ? terrainColumnHeights(scene, nx, nz) : undefined, hy = scene.container.height_m / ny;
   const cell: [number, number, number] = [0, 0, 0];
   return (x, y, z) => (cell[0] = x, cell[1] = y, cell[2] = z,
     boundary?.open(cell) ?? Number(sampleSolidWorld(world,cell,true).solidFraction === 0)) <= 1e-5
-    || Math.fround(terrain[x+nx*z]! / hy) >= y + 1;
+    || (terrain !== undefined && Math.fround(terrain[x+nx*z]! / hy) >= y + 1);
 }
 
 /**
@@ -297,7 +298,7 @@ function spreadSquaredDistance(field: Float64Array, size: readonly number[], str
 export function initialLiquidCellVolumes(scene: SceneDescription, dimensions: readonly [number, number, number], geometric = true, sliceZ?: number) {
   const [nx,ny,nz]=dimensions;
   const volume=new Float32Array(nx*ny*(sliceZ === undefined ? nz : 1));
-  const {density:at,terrain,dam}=cellVolumeSampler(scene,dimensions,geometric);
+  const {density:at,terrain=new Float32Array(nx*nz),dam}=cellVolumeSampler(scene,dimensions,geometric);
   let initial=0;
   const wetMinimum=[nx,ny,nz];
   const wetMaximum=[0,0,0];
@@ -318,13 +319,14 @@ export function initialLiquidCellVolumes(scene: SceneDescription, dimensions: re
 function cellVolumeSampler(scene: SceneDescription, dimensions: readonly [number, number, number], geometric: boolean) {
   const [nx,ny,nz]=dimensions;
   const c=scene.container;
-  const terrain=terrainColumnHeights(scene,nx,nz);
+  // The column heights, or undefined with no terrain (every column at zero): no array a box column.
+  const terrain=sceneHasTerrain(scene)?terrainColumnHeights(scene,nx,nz):undefined;
   const cellHeight=c.height_m/ny;
   const solidWorld=solidWorldForScene(scene);
   const boundary=geometric?proceduralSolidField(scene):undefined;
   const dam=sceneDamBreakBox(scene);
   const density=(x: number, y: number, z: number): number => {
-    const aboveGround=(y+0.5)*cellHeight>terrain[x+nx*z];
+    const ground=terrain?terrain[x+nx*z]!:0,aboveGround=(y+0.5)*cellHeight>ground;
     const solidFraction=sampleSolidWorld(solidWorld,[x,y,z],geometric).solidFraction;
     // Authored voxels retain whole-cell occupancy. Terrain is represented
     // separately by the same fractional column capacity the GPU reads.
@@ -336,7 +338,7 @@ function cellVolumeSampler(scene: SceneDescription, dimensions: readonly [number
     // to zero in SolidWorld's u8 mask while still reducing GPU cell capacity.
     // This matters more as a finely resolved pond exposes more shore cells.
     const terrainOpen=geometric ? Math.fround(1-Math.max(0,Math.min(1,
-      Math.fround(terrain[x+nx*z]!/cellHeight)-y))) : 1;
+      Math.fround(ground/cellHeight)-y))) : 1;
     return Math.fround(Math.min(solidOpen,terrainOpen,liquidFraction));
   };
   return {density,terrain,dam};
@@ -505,8 +507,12 @@ export function fluidLatticePagedCellVolumes(scene: SceneDescription, edge: numb
     const page = at.get(x+px*(qy+py*qz))!, line = edge*(y%edge+edge*(z%edge));
     for (let i=0; i<Math.min(edge, cx-x*edge); i++) initial += page[line+i]!;
   }
-  const terrain = new Float32Array(nx*nz);
-  for (let z=0; z<nz; z++) for (let x=0; x<nx; x++) terrain[x+nx*z] = inner[Math.min(x,cx-1)+cx*Math.min(z,cz-1)]!;
+  // The lattice's column heights where the scene has terrain; undefined, every column at zero, where it has none.
+  let terrain: Float32Array | undefined;
+  if (inner) {
+    terrain = new Float32Array(nx*nz);
+    for (let z=0; z<nz; z++) for (let x=0; x<nx; x++) terrain[x+nx*z] = inner[Math.min(x,cx-1)+cx*Math.min(z,cz-1)]!;
+  }
   const volume: LatticePages = { edge, cells: [nx, ny, nz], pages, at };
   return {volume, terrain, initial, wetMinimum, wetMaximum, dam};
 }
