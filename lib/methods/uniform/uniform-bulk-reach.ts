@@ -68,6 +68,10 @@ export function bulkReachKey(r: BulkReachVec): number {
 }
 function slotOf(key: number, capacity: number): number { return (Math.imul(key, 0x9e3779b1) >>> 0) >>> (32 - Math.log2(capacity)); }
 
+/** The regions whose 12^3 neighbourhood (own tiles -4..+7) meets a given
+ * page: 4 a side (2p-1..2p+2). */
+export const BULK_REACH_PAGE_REGIONS = 64;
+
 /** The key slots a table of n masks takes: a power of two over twice n, so
  * a probe always meets an empty slot. 0 without masks (no table). */
 export function bulkReachCapacity(n: number): number { return n === 0 ? 0 : 2 ** Math.ceil(Math.log2(2 * n + 2)); }

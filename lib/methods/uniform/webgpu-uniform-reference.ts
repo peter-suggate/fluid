@@ -93,8 +93,8 @@ import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX
 export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
-import { SOLID_MASK_EMPTY, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
-import { bulkReachCapacity, bulkReachKey, bulkReachTable, uniformBulkRegionReach } from "./uniform-bulk-reach";
+import { SOLID_MASK_EMPTY, SOLID_MASK_FULL, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
+import { BULK_REACH_PAGE_REGIONS, bulkReachCapacity, bulkReachKey, bulkReachTable, uniformBulkRegionReach } from "./uniform-bulk-reach";
 import { sampleSolidWorld, solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
@@ -1388,7 +1388,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(slot[3]!==uniformPageWord(a,p[0],p[1],p[2])||slot[0]!==l[0]||slot[1]!==l[1]||slot[2]!==l[2])return empty;
       return phi.at.get(p[0]+px*(p[1]+py*p[2]))![4*l[0]+33*(4*l[1]+33*4*l[2])]!;
     }});
-    this.bulkStartInfo={pages:pages.length,phi_ms:t1-t0,seed_ms:t1c-t1b,layout_ms:t2-t1c,set_ms:t3-t2,records_ms:performance.now()-t3,reach_ms:this.bulkReach!.ms,reachMasks:this.bulkReach!.masks.size};
+    this.bulkStartInfo={pages:pages.length,phi_ms:t1-t0,seed_ms:t1c-t1b,layout_ms:t2-t1c,set_ms:t3-t2,records_ms:performance.now()-t3,reach_ms:this.bulkReach!.ms,reachMasks:this.bulkReach!.masks.size,reachSlots:this.bulkReach!.capacity};
     return {pages,records,phi};
   }
   /** The reach masks past static walls (uniform-bulk-reach) by bulkReachKey, the
@@ -1403,9 +1403,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * from, each its reach mask (uniformBulkRegionReach). The candidates follow
    * the solids, not the box: the regions within 4 tiles of a closed tile with
    * an open face neighbour (the solid's skin), from the tiles of the pages
-   * the solid mask holds and, over each column of tiles, the closed tiles the
-   * bed's top and its neighbours' tops cross. A tile is closed when its 64
-   * cells are static solid (the mask or the terrain), or past the box. */
+   * the solid mask holds partly solid and, over each column of tiles, the
+   * closed tiles the bed's top and its neighbours' tops cross. A tile is
+   * closed when its 64 cells are static solid (the mask or the terrain), or
+   * past the box. A whole solid page's skin is no candidate: without a mask
+   * its region tests every tile (the box rule, stricter, never wrong), so the
+   * key slots are a rule: 64 regions (each the neighbourhood of 4 a side
+   * reaches the page) for each page slot the sealed solid mask can hand out,
+   * and the bed's candidates, which no edit changes. An edit the mask accepts
+   * never fills the table. */
   private bulkReachMasks(previous?:number):{masks:Map<number,Uint32Array>;capacity:number;ms:number}{
     const t0=performance.now();
     const a=this.address,[nx,ny,nz]=a.cells,mask=this.solidMask,[PX,PY,PZ]=a.pages;
@@ -1419,17 +1425,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(c===undefined){c=true;for(let i=0;i<64&&c;i++)c=solid(4*x+(i&3),4*y+((i>>2)&3),4*z+(i>>4));memo.set(k,c);}
       return c;
     };
-    const regions=new Set<number>();
-    const skin=(x:number,y:number,z:number)=>{
+    const regions=new Set<number>(),bed=new Set<number>();
+    const skin=(x:number,y:number,z:number,into=regions)=>{
       if(!closedAt(x,y,z))return;
       if(closedAt(x+1,y,z)&&closedAt(x-1,y,z)&&closedAt(x,y+1,z)&&closedAt(x,y-1,z)&&closedAt(x,y,z+1)&&closedAt(x,y,z-1))return;
       // The regions whose neighbourhood (own tiles -4..+7) holds tile (x,y,z).
       for(let rz=Math.max(0,Math.ceil((z-7)/4));rz<=Math.min(RZ-1,Math.floor((z+4)/4));rz++)
         for(let ry=Math.max(0,Math.ceil((y-7)/4));ry<=Math.min(RY-1,Math.floor((y+4)/4));ry++)
-          for(let rx=Math.max(0,Math.ceil((x-7)/4));rx<=Math.min(RX-1,Math.floor((x+4)/4));rx++)regions.add(rx+RX*(ry+RY*rz));
+          for(let rx=Math.max(0,Math.ceil((x-7)/4));rx<=Math.min(RX-1,Math.floor((x+4)/4));rx++)into.add(rx+RX*(ry+RY*rz));
     };
     mask.eachSolidPage((px,py,pz,word)=>{
-      if(px<0||py<0||pz<0||px>=PX||py>=PY||pz>=PZ||(word&0xffff)===SOLID_MASK_EMPTY)return;
+      if(px<0||py<0||pz<0||px>=PX||py>=PY||pz>=PZ||(word&0xffff)===SOLID_MASK_EMPTY||(word&0xffff)>=SOLID_MASK_FULL)return;
       for(let i=0;i<512;i++)skin(8*px+(i&7),8*py+((i>>3)&7),8*pz+(i>>6));
     });
     if(terrain){
@@ -1440,21 +1446,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       for(let z=0;z<TZc;z++)for(let x=0;x<TXc;x++){
         // A closed tile here (4y+4 <= its lowest top) is skin only where a face neighbour is open: above it, or beside it under a lower column.
         const self=lo(x,z),under=Math.min(self,lo(x+1,z),lo(x-1,z),lo(x,z+1),lo(x,z-1));
-        for(let y=Math.max(0,Math.floor(under/4)-1);y<=Math.min(TY-1,Math.floor(self/4));y++)skin(x,y,z);
+        for(let y=Math.max(0,Math.floor(under/4)-1);y<=Math.min(TY-1,Math.floor(self/4));y++)skin(x,y,z,bed);
       }
     }
     const masks=new Map<number,Uint32Array>();
+    for(const r of bed)regions.add(r);
     for(const r of regions){
       const region=[r%RX,Math.floor(r/RX)%RY,Math.floor(r/(RX*RY))] as const;
       const m=uniformBulkRegionReach(t=>closedAt(t[0],t[1],t[2]),region);
       if(m)masks.set(bulkReachKey(region),m);
     }
-    return {masks,capacity:previous??bulkReachCapacity(masks.size),ms:performance.now()-t0};
+    return {masks,capacity:previous??bulkReachCapacity(BULK_REACH_PAGE_REGIONS*mask.layout.slots+bed.size),ms:performance.now()-t0};
   }
   /** The census start's deep 16h regions (uniformBulkRegionDeep), for the particle band: none without a BULK16 start. */
   private bulkStartDeep?:(x:number,y:number,z:number)=>boolean;
   /** The census start's BULK16 pages and the host's time for them (bulkStartState), ms. */
-  bulkStartInfo?:{readonly reach_ms?:number;readonly reachMasks?:number;readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number;readonly shell?:number;readonly shellReach_cells?:number};
+  bulkStartInfo?:{readonly reach_ms?:number;readonly reachMasks?:number;readonly reachSlots?:number;readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number;readonly shell?:number;readonly shellReach_cells?:number};
   /** The coarse start's thin-wall tiles at h (uniformThinWallTiles: a cut 4h
    * owner there fills open cells across the solid). The census holds a cut
    * tile at h where liquid reaches it, with every tile around it

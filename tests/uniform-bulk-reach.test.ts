@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bulkReachCapacity, bulkReachKey, bulkReachLookup, bulkReachTable, bulkReached, uniformBulkRegionReach } from "../lib/methods/uniform/uniform-bulk-reach";
+import { BULK_REACH_PAGE_REGIONS, bulkReachCapacity, bulkReachKey, bulkReachLookup, bulkReachTable, bulkReached, uniformBulkRegionReach } from "../lib/methods/uniform/uniform-bulk-reach";
 import { uniformBulkRegionClass, uniformBulkRegionDeep, type UniformBulkTile } from "../lib/methods/uniform/uniform-bulk-tier-reference";
 
 type V = [number, number, number];
@@ -71,4 +71,13 @@ test("Reach: the GPU table finds every mask by its key and nothing else", () => 
   for (const [key, m] of masks) assert.deepEqual([...bulkReachLookup(table, capacity, key)!], [...m]);
   assert.equal(bulkReachLookup(table, capacity, bulkReachKey([500, 1, 1])), undefined);
   assert.throws(() => bulkReachTable(masks, 32), /key slots/);
+});
+
+test("Reach: a page meets the neighbourhoods of BULK_REACH_PAGE_REGIONS regions, the key slots' rule", () => {
+  // Region r's neighbourhood holds tiles 4r-4..4r+7 a side; page p holds 8p..8p+7.
+  for (const p of [1, 5]) {
+    let side = 0;
+    for (let r = 0; r < 4 * p + 8; r++) if (4 * r - 4 <= 8 * p + 7 && 4 * r + 7 >= 8 * p) side++;
+    assert.equal(side ** 3, BULK_REACH_PAGE_REGIONS);
+  }
 });
