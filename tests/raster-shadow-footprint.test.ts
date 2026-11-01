@@ -33,6 +33,9 @@ struct Lighting{control:vec4u,farCenterExtent:vec4f,depthCell:vec4f,sun:vec4f,sp
 var<private> uniforms:Uniforms;var<private> dry:Dry;var<private> rasterLighting:Lighting;
 @group(0) @binding(1) var rasterSunDepth:texture_depth_2d_array;
 @group(0) @binding(2) var<storage,read_write> result:vec4f;
+@group(0) @binding(3) var rasterSunSampler:sampler;
+fn rasterMapResolution(layer:u32)->f32{return f32(textureDimensions(rasterSunDepth).x);}
+fn rasterAtlasTile(layer:u32)->vec3u{return vec3u(0,0,layer);}
 ${rasterReceiverPlaneWGSL}${sampling}
 @compute @workgroup_size(1) fn main(){
  uniforms.container=vec4f(64,8,80,0);rasterLighting.farCenterExtent=vec4f(0,0,0,64);rasterLighting.depthCell=vec4f(256,.25,0,0);rasterLighting.sun=vec4f(0,0,1,0);
@@ -48,7 +51,7 @@ ${rasterReceiverPlaneWGSL}${sampling}
  result=vec4f(v,0,0,0);
 }`});
       const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module:receiver,entryPoint:"main"}});
-      const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:depth.createView({dimension:"2d-array"})},{binding:2,resource:{buffer:output}}]});
+      const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:depth.createView({dimension:"2d-array"})},{binding:2,resource:{buffer:output}},{binding:3,resource:device.createSampler({})}]});
       const measurements=[];
       for(const mode of [0,1])for(const blocked of [false,true])for(const offset of [[0,0],[1,0],[0,1],[1,1]]){
         const receiverXY=[1000.75,1000.75],blocker=[1000+offset[0]!,1000+offset[1]!];

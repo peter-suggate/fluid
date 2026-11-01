@@ -9,8 +9,20 @@ import {
   surfaceMeshBuildBricks,
   surfaceMeshBuildPresentations,
   surfaceMeshConstructionFailed,
+  surfaceMeshGeometrySettled,
   surfaceMeshWorkBytes,
 } from "../lib/svo/features/primary-visibility/svo-surface-mesh";
+
+test("camera withholding preserves settled geometry while pending and failed publications do not",()=>{
+  assert.equal(surfaceMeshGeometrySettled(undefined),false);
+  assert.equal(surfaceMeshGeometrySettled({state:"ready"}),true);
+  for(const fallbackReason of ["inside-solid","smooth"] as const){
+    assert.equal(surfaceMeshGeometrySettled({state:"blocked",fallbackReason,requirementComplete:true}),true);
+    assert.equal(surfaceMeshGeometrySettled({state:"blocked",fallbackReason,requirementComplete:false}),false);
+    assert.equal(surfaceMeshGeometrySettled({state:"pending",fallbackReason,requirementComplete:true}),false,"a host invalidation overrides an old complete receipt");
+  }
+  for(const fallbackReason of ["publication","budget","extraction"] as const)assert.equal(surfaceMeshGeometrySettled({state:"blocked",fallbackReason,requirementComplete:true}),false);
+});
 
 test("a build's first presentation extracts the cheap initial brick count", () => {
   assert.equal(surfaceMeshBuildBricks(0, true), SVO_SURFACE_MESH_BUILD_BRICKS_INITIAL);

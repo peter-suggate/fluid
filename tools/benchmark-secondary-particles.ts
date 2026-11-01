@@ -1,3 +1,4 @@
+import { WATER_INTERFACE_DEPTH } from "../lib/core/water-interface-depth";
 import { pathToFileURL } from "node:url";
 import {
   SECONDARY_PARTICLE_STRIDE_BYTES,
@@ -75,7 +76,7 @@ struct FragmentOut { @location(0) position:vec4f, @location(1) normal:vec4f, @bu
 fn forward()->vec3f{return normalize(view.cameraTarget.xyz-view.cameraPosition.xyz);}
 fn right()->vec3f{return normalize(cross(forward(),vec3f(0,1,0)));}
 fn up()->vec3f{return normalize(cross(right(),forward()));}
-fn project(world:vec3f)->vec4f{let relative=world-view.cameraPosition.xyz;let eyeDepth=dot(relative,forward());let aspect=view.viewport.x/max(view.viewport.y,1.0);let ndc=vec2f(dot(relative,right())/(max(eyeDepth,.001)*aspect*.72),dot(relative,up())/(max(eyeDepth,.001)*.72));return vec4f(ndc*eyeDepth,clamp(eyeDepth/50.0,0.0,1.0)*eyeDepth,eyeDepth);}
+fn project(world:vec3f)->vec4f{let relative=world-view.cameraPosition.xyz;let eyeDepth=dot(relative,forward());let aspect=view.viewport.x/max(view.viewport.y,1.0);let ndc=vec2f(dot(relative,right())/(max(eyeDepth,.001)*aspect*.72),dot(relative,up())/(max(eyeDepth,.001)*.72));return vec4f(ndc*eyeDepth,${WATER_INTERFACE_DEPTH.near_m},eyeDepth);}
 @vertex fn sphereVertex(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->VertexOut{var corners=array<vec2f,6>(vec2f(-1.05,-1.05),vec2f(1.05,-1.05),vec2f(-1.05,1.05),vec2f(-1.05,1.05),vec2f(1.05,-1.05),vec2f(1.05,1.05));let particle=particles[instance];var out:VertexOut;out.local=corners[vertex];out.center=particle.positionRadius.xyz;out.radius=particle.positionRadius.w;out.enabled=particle.shape.z;if(out.enabled<.5||out.radius<=0){out.clip=vec4f(2,2,2,1);out.enabled=0;return out;}out.clip=project(out.center+(right()*out.local.x+up()*out.local.y)*out.radius);return out;}
 fn sphereInterface(input:VertexOut,back:bool)->FragmentOut{let radius2=dot(input.local,input.local);if(input.enabled<.5||radius2>1){discard;}let z=sqrt(max(0.0,1.0-radius2));let facing=select(-1.0,1.0,back);let normal=normalize(right()*input.local.x+up()*input.local.y+forward()*(facing*z));let world=input.center+normal*input.radius;let clip=project(world);return FragmentOut(vec4f(world,1),vec4f(normal,1),clamp(clip.z/max(clip.w,.001),0.0,1.0));}
 @fragment fn sphereFront(input:VertexOut)->FragmentOut{return sphereInterface(input,false);}
@@ -89,9 +90,9 @@ const spherePipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [sp
 const sphereDescriptor = (entryPoint: "sphereFront" | "sphereBack"): GPURenderPipelineDescriptor => ({
   layout: spherePipelineLayout,
   vertex: { module: sphereModule, entryPoint: "sphereVertex" },
-  fragment: { module: sphereModule, entryPoint, targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
+  fragment: { module: sphereModule, entryPoint, targets: [{ format: "rgba32float" }, { format: "rgba16float" }] },
   primitive: { topology: "triangle-list" },
-  depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
+  depthStencil: { format: WATER_INTERFACE_DEPTH.format, depthWriteEnabled: true, depthCompare: WATER_INTERFACE_DEPTH.compare }
 });
 const [sphereFrontPipeline, sphereBackPipeline] = await Promise.all([
   device.createRenderPipelineAsync(sphereDescriptor("sphereFront")),
@@ -102,9 +103,9 @@ const sphereBindGroup = device.createBindGroup({ layout: sphereLayout, entries: 
   { binding: 1, resource: { buffer: particleBuffer } }
 ] });
 
-const position = device.createTexture({ size: [width, height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+const position = device.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT });
 const normal = device.createTexture({ size: [width, height], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT });
-const depth = device.createTexture({ size: [width, height], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+const depth = device.createTexture({ size: [width, height], format: WATER_INTERFACE_DEPTH.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
 const positionView = position.createView(), normalView = normal.createView(), depthView = depth.createView();
 
 function encodeSide(encoder: GPUCommandEncoder, side: "front" | "back") {
@@ -113,7 +114,7 @@ function encodeSide(encoder: GPUCommandEncoder, side: "front" | "back") {
       { view: positionView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
       { view: normalView, clearValue: { r: 0, g: 1, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }
     ],
-    depthStencilAttachment: { view: depthView, depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" }
+    depthStencilAttachment: { view: depthView, depthClearValue: WATER_INTERFACE_DEPTH.clearValue, depthLoadOp: "clear", depthStoreOp: "store" }
   });
   if (shapeMode === "ellipsoid") pipeline.encodeOpticalInterface(pass, side);
   else {

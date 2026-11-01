@@ -28,11 +28,11 @@ test("native shadow records reject malformed identities and unbounded casters", 
 
 test("native sun and spot casters share the settled cache and invalidate on membership changes", () => {
   let nativeDraws=0, shadowPasses=0, writes=0, cacheClears=0;
-  const pass={setPipeline(){},setBindGroup(){},dispatchWorkgroups(){},drawIndirect(){},end(){}};
+  const pass={setViewport(){},setScissorRect(){},setPipeline(){},setBindGroup(){},dispatchWorkgroups(){},drawIndirect(){},end(){}};
   const encoder={beginComputePass:()=>pass,beginRenderPass:()=>{shadowPasses++;return pass;},clearBuffer:()=>cacheClears++};
   const state={};
   const ao=Object.assign(Object.create(SvoRasterAo.prototype), {
-    device:{queue:{writeBuffer:()=>writes++}}, generation:7, shadowLayerCount:4,
+    device:{queue:{writeBuffer:()=>writes++}}, generation:7, shadowLayerCount:4, localViews:[],spotCount:2,shadowResolution:2048,
     meshState:state, cacheGroup:{}, cache:{}, params:{}, ao:{width:8,height:8},
     shadowGroups:[{},{},{},{}], shadowViews:[{},{},{},{}],
   });
@@ -130,8 +130,8 @@ test("GPU shadow cache gate zeroes and restores every indirect group without cha
 test("moving a light invalidates cached native shadows while identical light publications retain them", () => {
   let writes=0;
   const shadow=Object.assign(Object.create(SvoRasterAo.prototype),{
-    device:{queue:{writeBuffer:()=>writes++}},generation:0,key:"",shadowLayerCount:2,
-    shadow:{depthOrArrayLayers:2},params:{},coarseAoStrength:0,aoContrast:1,
+    device:{queue:{writeBuffer:()=>writes++}},generation:0,key:"",shadowLayerCount:2,mapsComplete:false,
+    shadow:{depthOrArrayLayers:2,createView:()=>({})},shadowPhysicalLayers:2,shadowResolution:2048,localViews:[],spotCount:0,params:{},coarseAoStrength:0,aoContrast:1,
   });
   const update=(direction:number[])=>shadow.update([-40,0,-48],[80,35,96],[.125,.125,.125],direction);
   update([0,1,0]);assert.equal(shadow.generation,1);assert.equal(writes,2);

@@ -1,3 +1,4 @@
+import { RASTER_LIGHTING_PARAM_BYTES } from "../lib/svo/features/lighting-visibility/raster-local-shadows";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SvoRasterAo, rasterAoConsumerWGSL, rasterAoProducerWGSL } from "../lib/svo/features/lighting-visibility/svo-raster-ao";
@@ -53,7 +54,7 @@ test("GPU shadow resizing preserves screen targets and native casters, with matc
 @group(0) @binding(1) var<storage,read_write> output:vec4u;
 @compute @workgroup_size(1) fn main(){output=vec4u(u32(rasterShadowMapSize()),rasterLighting.control.w&1u,rasterLighting.control.w&2u,rasterLighting.control.x);}`});
       const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
-      const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:raster.params,offset:0,size:256}},{binding:1,resource:{buffer:output}}]});
+      const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:raster.params,offset:0,size:RASTER_LIGHTING_PARAM_BYTES}},{binding:1,resource:{buffer:output}}]});
       let generation=0;
       for(const size of [2048,4096,2048]){
         const prior=raster.shadow,priorConsumer=raster.consumer;
@@ -70,7 +71,7 @@ test("GPU shadow resizing preserves screen targets and native casters, with matc
           assert.equal(values[2],enabled?2:0);assert.ok(values[3]!>=generation);generation=values[3]!;
         }
       }
-      assert.ok(rasterAoProducerWGSL(true).includes("pixel.xy/rasterShadowMapSize()"));
+      assert.ok(rasterAoProducerWGSL(true).includes("pixel.xy-vec2f(rasterAtlasTile(layer).xy)"));
     }finally{output.destroy();raster.destroy();}
   });
 });

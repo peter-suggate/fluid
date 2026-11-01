@@ -45,3 +45,10 @@ public/assets/pool-party/verification.json
 # Regenerable Blender garden previews and backups.
 assets/hero-garden-blender/*.blend[0-9]*
 public/assets/hero-garden-blender/*preview.png
+
+# Local scratch space for agents and one-off probes.
+/scratchpad/
+
+# Whitewash maps are written deterministically by lighthouse_weathering.py and
+# packed into storm-lighthouse.blend; the loose PNGs are duplicates.
+assets/atlantic-lighthouse/textures/

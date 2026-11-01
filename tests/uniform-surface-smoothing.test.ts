@@ -27,6 +27,13 @@ test("surface smoothing requires an interface without suppressing supported smoo
    // Rejected z taps cannot make the all-air x stencil eligible.
    {name:"invalid axis cannot admit a new crossing",c,t:air.map((v,i)=>i===4?-10:v),h,width:4,eps:1/120,walls:0,closed:0,expected:0},
    {name:"both axes remain air",c:0.01,t:[0.01,0.01,0.01,0.01,0.01,0.01,1,1,1,1],h:1,width:1,eps:1/32,walls:0,closed:0,expected:0},
+   // O6: evaluate a physical cubic at both lattice widths. The damper's
+   // polynomial nullspace is independent of width; signed distance around
+   // a sphere or the rim of a film is not a cubic on this stencil.
+   ...[1,4].map(width=>{
+    const h=0.05,w=width*h,f=(x:number)=>0.002+0.2*x+0.3*x*x+0.2*x*x*x,c=f(0);
+    return {name:`physical cubic at ${width}h`,c,t:[f(-w),f(w),c,c,c,c,f(-2*w),f(2*w),c,c],h,width,eps:1/120,walls:4,closed:0,expected:0};
+   }),
   ];
   const data=new Float32Array(16*cases.length);
   cases.forEach((s,i)=>data.set([s.c,s.eps,s.h,s.width,...s.t,s.closed,s.walls],16*i));

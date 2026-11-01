@@ -9,10 +9,16 @@ import { solidVoxelPatchesKey } from "../../lib/core/solid-world";
 
 const bytes = readFileSync(new URL("../../public/assets/atlantic-lighthouse/atlantic-lighthouse-tower.fvx.gz", import.meta.url));
 const volume = decodeMeshVolume(gunzipSync(bytes)), h = .25;
-const offset = [112, 16, 88] as const;
-const dimensions = [24, 64, 16] as const;
 const fullGrid = [192, 96, 192] as const;
 const header = volume.header;
+// Include the actual asset bounds, including the projecting entry steps and
+// galleries; a fixed crop silently omitted additions outside the old tower.
+const base = [7, 5.8, 0], domainOrigin = [-24, 0, -24];
+const offset = header.origin.map((v, axis) => Math.max(0,
+  8 * Math.floor(((v + base[axis]! - domainOrigin[axis]!) / h - 2) / 8))) as [number, number, number];
+const dimensions = header.dimensions.map((n, axis) => Math.min(fullGrid[axis]!,
+  8 * Math.ceil(((header.origin[axis]! + n * header.cellSize + base[axis]! - domainOrigin[axis]!) / h + 2) / 8))
+  - offset[axis]!) as [number, number, number];
 function distance(q: readonly [number, number, number]) {
   const p = [-24 + (q[0] + offset[0]) * h - 7, (q[1] + offset[1]) * h - 5.8, -24 + (q[2] + offset[2]) * h];
   const outside = Math.hypot(...p.map((value, axis) => Math.max(header.origin[axis]! - value,

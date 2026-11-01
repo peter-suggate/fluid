@@ -15,9 +15,11 @@ from pathlib import Path
 
 import bpy
 import bmesh
-from mathutils import Vector
+from mathutils import Vector, noise
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from lighthouse_rock_material import photographed_rock_material, assign_rock_uv
+from lighthouse_terrain import terrain_height
+from lighthouse_weathering import whitewash_material, tower_uv
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--water-mesh', type=Path)
@@ -46,7 +48,7 @@ scene.render.resolution_percentage = 100
 scene.render.image_settings.file_format = 'PNG'
 scene.view_settings.view_transform = 'AgX'
 scene.view_settings.look = 'AgX - Medium High Contrast'
-scene.view_settings.exposure = .3
+scene.view_settings.exposure = .55
 scene['water_provenance'] = str(args.water_mesh.resolve()) if args.water_mesh else 'DRY PREVIEW — NO WATER'
 scene['water_method'] = 'DRY PREVIEW — NO WATER' if args.dry_preview else 'uniform-narrow-band-flip; imported simulated free surface'
 
@@ -117,97 +119,115 @@ def rod(name, a, b, radius, mat):
     return ob
 
 
-def terrain_height(x, y):
-    z = -y
-    height = .15
-    for r in rock_layout:
-        dx,dz=x-r['x'],z-r['z'];c,s=math.cos(r['yaw']),math.sin(r['yaw'])
-        u,v=(c*dx+s*dz)/r['rx'],(-s*dx+c*dz)/r['rz']
-        q=max(abs(u),abs(v),abs(u+v)*.65,abs(u-v)*.65)
-        top=r['height']+dx*r['tiltX']+dz*r['tiltZ']
-        height=max(height,top-max(0,q-r['core'])*r['height']/(1-r['core']))
-    height+=.07*math.sin(x*3.1+z*1.7)*math.sin(z*2.3-x*.4)*min(1,max(0,height-.15))
-    return 5.8 if math.hypot(x-7,z)<1.55 else height
-
-
-# Identical 25 cm lattice to the physical collision heightfield.
-rock_layout=json.loads((Path(__file__).resolve().parents[2]/'lib/core/imported-assets/atlantic-lighthouse-rock-layout.json').read_text())
-verts = [(x*.25-20, y*.25-16, terrain_height(x*.25-20, y*.25-16)) for y in range(129) for x in range(161)]
-faces = [(i, i+1, i+162, i+161) for y in range(128) for x in range(160) for i in [x+161*y]]
-rock_shelf=mesh('Authoritative simulated rock shelf', verts, faces, rock, True)
+# Dry geometry is sampled at 6.25 cm, independently of the 25 cm fluid lattice.
+# The same sculpted height function is sampled more coarsely for fluid collision.
+step = .0625
+nx, ny = 385, 321
+verts = [(-5+x*step, -10+y*step, terrain_height(-5+x*step, -10+y*step))
+         for y in range(ny) for x in range(nx)]
+faces = [(i, i+1, i+nx+1, i+nx) for y in range(ny-1) for x in range(nx-1) for i in [x+nx*y]]
+rock_shelf = mesh('Authoritative simulated rock shelf', verts, faces, rock, True)
 assign_rock_uv(rock_shelf.data)
 
-# Individual curved masonry blocks retain real recessed joints and bevels.
+# A closed tapered masonry shell with actual chipped plaster relief, not rows
+# of identical decorative blocks. Its cavity remains open for fluid collision.
 base = 5.8
-cylinder('Foundation footing embedded in bedrock', 1.52, .5, (7, 0, 5.85), stone[2])
-# Real pointing closes the joints without filling the hollow tower. The former
-# empty cracks became deep black gaps when sampled on the native 4 cm lattice.
-segments=128
-mortar_vertices=[]
-for z in [base,base+43*.208]:
-    outer=1.35-(z-base)*.049-.012
-    for radius in [outer,outer-.19]:
-        for i in range(segments):
-            a=i*math.tau/segments
-            mortar_vertices.append((7+radius*math.cos(a),radius*math.sin(a),z))
-mortar_faces=[]
-for i in range(segments):
-    j=(i+1)%segments;n=segments
-    mortar_faces.extend([(i,j,2*n+j,2*n+i),(n+j,n+i,3*n+i,3*n+j),
-                         (i,n+i,n+j,j),(2*n+j,3*n+j,3*n+i,2*n+i)])
-mesh('Recessed lime mortar masonry shell',mortar_vertices,mortar_faces,mortar,True)
-for course in range(43):
-    z0 = base + course*.208; z1 = z0+.202
-    radius0 = 1.35-(z0-base)*.049; radius1 = 1.35-(z1-base)*.049
-    count = 25
-    for block in range(count):
-        a0 = (block+(course%2)*.5)*math.tau/count+.004
-        a1 = a0+math.tau/count-.008
-        pts = []
-        for z, radius in [(z0, radius0), (z1, radius1)]:
-            for rad in [radius-.2, radius]:
-                for j in range(4):
-                    a = a0+(a1-a0)*j/3
-                    pts.append((7+rad*math.cos(a), rad*math.sin(a), z))
-        fs = []
-        for j in range(3):
-            fs.extend([(4+j, 5+j, 13+j, 12+j), (j, 8+j, 9+j, 1+j), (j, 1+j, 5+j, 4+j), (8+j, 12+j, 13+j, 9+j)])
-        fs.extend([(0, 4, 12, 8), (3, 11, 15, 7)])
-        ob = mesh('Masonry %02d-%02d' % (course, block), pts, fs, random.choice(stone))
-        bevel = ob.modifiers.new('Salt softened arris', 'BEVEL'); bevel.width = .009; bevel.segments = 1
+body_height = 8.6
+whitewash = whitewash_material()
+def tower_radius(z):
+    t = max(0, min(body_height, z-base))
+    return 1.60 - .058*t - .035*math.sin(math.pi*t/body_height)
 
-# Belt courses, door, small recessed window, lantern and gallery.
-for z, radius in [(6.05, 1.44), (9.1, 1.24), (14.58, 1.04), (14.85, 1.38)]:
-    cylinder('Stone stringcourse', radius, .19, (7, 0, z), stone[4])
-bpy.ops.mesh.primitive_cube_add(size=1, location=(6.74, -1.25, 6.68))
-door = bpy.context.object; door.name = 'Salt-blackened oak entrance'; door.scale = (.64, .1, 1.53); door.data.materials.append(iron)
-for z in [9.4, 12.1]:
-    bpy.ops.mesh.primitive_cube_add(size=1, location=(6.8, -(1.35-(z-base)*.049), z))
-    ob = bpy.context.object; ob.name = 'Deep narrow window'; ob.scale = (.31, .05, .68); ob.data.materials.append(iron)
-    rod('Window mullion', (6.8, ob.location.y-.04, z-.31), (6.8, ob.location.y-.04, z+.31), .014, rust)
-    for x,zz,scale,name in [(6.8-.18,z,(.055,.13,.8),'jamb'),(6.8+.18,z,(.055,.13,.8),'jamb'),
-                             (6.8,z+.4,(.46,.15,.13),'lintel'),(6.8,z-.4,(.48,.24,.13),'drip sill')]:
-        bpy.ops.mesh.primitive_cube_add(size=1,location=(x,ob.location.y-.04,zz))
-        frame=bpy.context.object;frame.name='Stone window '+name;frame.scale=scale;frame.data.materials.append(stone[2])
-        bevel=frame.modifiers.new('Salt worn sill edge','BEVEL');bevel.width=.015;bevel.segments=2
-cylinder('Lantern plinth', .98, .28, (7, 0, 15.13), iron)
-cylinder('Lantern glazing', .8, 1.3, (7, 0, 15.88), glass, 16)
-cylinder('Roof eave', 1.04, .12, (7, 0, 16.58), iron)
-cylinder('Conical copper lantern roof', 1.04, .75, (7, 0, 17), iron, 64, .06)
-rod('Lightning conductor', (7, 0, 17.35), (7, 0, 18), .025, iron)
+cylinder('Foundation footing embedded in bedrock', 1.72, .42, (7, 0, 5.86), stone[2])
+segments, rings = 192, 145
+vertices = []
+for side in range(2):
+    for row in range(rings+1):
+        z = base + row/rings*body_height
+        radius = tower_radius(z)
+        for col in range(segments):
+            a = col*math.tau/segments
+            chip = noise.noise_vector(Vector((math.cos(a)*13, math.sin(a)*13, z*7)))[0]
+            weather = noise.noise_vector(Vector((math.cos(a)*4, math.sin(a)*4, z*.8)))[0]
+            relief = -.026*max(0, chip+.24)*max(0, weather+.4) + .004*chip
+            r = radius + relief if side == 0 else radius-.24
+            vertices.append((7+r*math.cos(a), r*math.sin(a), z))
+faces = []
+layer = segments*(rings+1)
+for row in range(rings):
+    for col in range(segments):
+        i = row*segments+col; j = row*segments+(col+1)%segments
+        faces.extend([(i,j,j+segments,i+segments), (layer+i+segments,layer+j+segments,layer+j,layer+i)])
+for col in range(segments):
+    j = (col+1)%segments; top = rings*segments
+    faces.extend([(col,layer+col,layer+j,j), (top+j,layer+top+j,layer+top+col,top+col)])
+shell = mesh('Whitewashed chipped masonry shell', vertices, faces, whitewash, True)
+tower_uv(shell.data)
+
+# Staggered deep windows follow the stair inside the tower; the entry is part
+# of the tower masonry, not a detached keeper house.
+openings=[(6.7,-1.15,.62,1.62),(9,-1.05,.34,.70),(10.7,-2.15,.34,.74),
+          (12.55,-2.4,.32,.68),(12.55,-1.12,.32,.68)]
+for z,a,width,height in openings:
+    r=tower_radius(z); c,s=math.cos(a),math.sin(a); rotation=a-math.pi/2
+    bpy.ops.mesh.primitive_cube_add(size=1,location=(7+r*c,r*s,z))
+    cutter=bpy.context.object;cutter.scale=(width,.85,height);cutter.rotation_euler.z=rotation
+    bpy.context.view_layer.objects.active=cutter;bpy.ops.object.transform_apply(location=False,rotation=False,scale=True)
+    cut=shell.modifiers.new('Deep masonry opening','BOOLEAN');cut.operation='DIFFERENCE';cut.object=cutter
+    bpy.context.view_layer.objects.active=shell;bpy.ops.object.modifier_apply(modifier=cut.name)
+    bpy.data.objects.remove(cutter,do_unlink=True)
+    bpy.ops.mesh.primitive_cube_add(size=1,location=(7+(r-.2)*c,(r-.2)*s,z))
+    pane=bpy.context.object;pane.name='Salt-blackened entry' if z<7 else 'Deep narrow window'
+    pane.scale=(width-.035,.07,height-.03);pane.rotation_euler.z=rotation;pane.data.materials.append(iron)
+    for tangent,dz,w,h,label in [(-width/2-.035,0,.065,height+.16,'jamb'),
+                                 (width/2+.035,0,.065,height+.16,'jamb'),
+                                 (0,height/2+.045,width+.2,.13,'lintel'),
+                                 (0,-height/2-.055,width+.23,.12,'drip sill')]:
+        bpy.ops.mesh.primitive_cube_add(size=1,location=(7+(r+.035)*c-tangent*s,(r+.035)*s+tangent*c,z+dz))
+        frame=bpy.context.object;frame.name='Stone opening '+label;frame.scale=(w,.18,h);frame.rotation_euler.z=rotation
+        frame.data.materials.append(whitewash);bevel=frame.modifiers.new('Worn stone edge','BEVEL');bevel.width=.016;bevel.segments=2
+
+# Projecting gabled doorway surround, anchored to the tower itself.
+a=-1.15;c,s=math.cos(a),math.sin(a)
+def entrance_point(t,r,z):return (7+r*c-t*s,r*s+t*c,z)
+for t in [-.43,.43]:
+    bpy.ops.mesh.primitive_cube_add(size=1,location=entrance_point(t,1.65,6.66))
+    ob=bpy.context.object;ob.name='Stone entry pier';ob.scale=(.18,.56,1.68);ob.rotation_euler.z=a-math.pi/2;ob.data.materials.append(whitewash)
+v=[entrance_point(t,r,z) for r in [1.36,1.96] for t,z in [(-.57,7.47),(.57,7.47),(0,7.87)]]
+mesh('Stone entry gabled canopy',v,[(0,2,1),(3,4,5),(0,1,4,3),(1,2,5,4),(2,0,3,5)],whitewash)
+for i in range(3):
+    bpy.ops.mesh.primitive_cube_add(size=1,location=entrance_point(0,1.8+i*.24,5.92-i*.07))
+    ob=bpy.context.object;ob.name='Stone threshold step';ob.scale=(1.05,.34,.18);ob.rotation_euler.z=a-math.pi/2;ob.data.materials.append(stone[2])
+
+# A substantial dark watch room between two distinct gallery levels.
+for z,r,depth in [(6.04,1.65,.16),(14.24,1.18,.16),(14.43,1.48,.18)]:
+    cylinder('Stone cornice and stringcourse',r,depth,(7,0,z),whitewash)
+cylinder('Black iron watch room',1.10,.9,(7,0,14.99),iron,96)
+cylinder('Lower gallery iron lip',1.49,.10,(7,0,14.55),iron)
+cylinder('Upper lantern gallery deck',1.36,.14,(7,0,15.51),iron)
+cylinder('Lantern plinth',.95,.20,(7,0,15.65),iron)
+cylinder('Lantern glazing',.86,1.25,(7,0,16.32),glass,16)
+cylinder('Roof eave',1.06,.12,(7,0,17.0),iron)
+cylinder('Conical copper lantern roof',1.06,.68,(7,0,17.39),iron,64,.08)
+cylinder('Roof finial ball',.11,.19,(7,0,17.81),iron,32,.06)
+rod('Lightning conductor',(7,0,17.87),(7,0,18.4),.022,iron)
 for i in range(16):
-    a = i*math.tau/16; x, y = 7+.81*math.cos(a), .81*math.sin(a)
-    rod('Lantern glazing bar', (x,y,15.24), (x,y,16.55), .025, iron)
-    x,y = 7+1.27*math.cos(a), 1.27*math.sin(a)
-    rod('Gallery stanchion', (x,y,14.92), (x,y,15.64), .022, iron)
-for z in [15.2, 15.63]:
-    bpy.ops.mesh.primitive_torus_add(major_radius=1.27, minor_radius=.022, major_segments=96, minor_segments=8, location=(7,0,z))
-    bpy.context.object.name='Continuous iron gallery rail'; bpy.context.object.data.materials.append(iron)
-bulb = bpy.data.materials.new('Warm Fresnel lamp'); bulb.use_nodes=True
-bp=bulb.node_tree.nodes.get('Principled BSDF'); bp.inputs['Emission Color'].default_value=(1,.4,.09,1); bp.inputs['Emission Strength'].default_value=2.2
-cylinder('Fresnel lens', .12, .4, (7,0,15.87), bulb)
-for z in [15.58+i*.06 for i in range(11)]:
-    bpy.ops.mesh.primitive_torus_add(major_radius=.265, minor_radius=.022, major_segments=48, minor_segments=8, location=(7,0,z))
+    a=i*math.tau/16;c,s=math.cos(a),math.sin(a)
+    rod('Lantern glazing bar',(7+.87*c,.87*s,15.72),(7+.87*c,.87*s,16.96),.025,iron)
+    for r,low,high in [(1.40,14.54,15.18),(1.28,15.57,16.09)]:
+        rod('Gallery stanchion',(7+r*c,r*s,low),(7+r*c,r*s,high),.025,iron)
+        cylinder('Gallery post base collar',.052,.07,(7+r*c,r*s,low+.03),iron,16)
+    rod('Gallery radial corbel',(7+1.12*c,1.12*s,13.97),(7+1.43*c,1.43*s,14.38),.06,iron)
+    rod('Watch room panel seam',(7+1.105*c,1.105*s,14.61),(7+1.105*c,1.105*s,15.41),.014,rust)
+    rod('Standing seam roof rib',(7+1.03*c,1.03*s,17.07),(7+.10*c,.10*s,17.74),.022,iron)
+for r,z in [(1.40,14.84),(1.40,15.18),(1.28,15.83),(1.28,16.09)]:
+    bpy.ops.mesh.primitive_torus_add(major_radius=r,minor_radius=.022,major_segments=96,minor_segments=8,location=(7,0,z))
+    bpy.context.object.name='Continuous iron gallery rail';bpy.context.object.data.materials.append(iron)
+bulb=bpy.data.materials.new('Warm Fresnel lamp');bulb.use_nodes=True
+bp=bulb.node_tree.nodes.get('Principled BSDF');bp.inputs['Emission Color'].default_value=(1,.4,.09,1);bp.inputs['Emission Strength'].default_value=3
+cylinder('Fresnel lens',.16,.4,(7,0,16.3),bulb)
+for z in [16.03+i*.055 for i in range(11)]:
+    bpy.ops.mesh.primitive_torus_add(major_radius=.265,minor_radius=.022,major_segments=48,minor_segments=8,location=(7,0,z))
     bpy.context.object.data.materials.append(glass)
 
 # Only imported fluid geometry is allowed to carry the water material.
@@ -253,7 +273,7 @@ for ob in water_objects:
 world=bpy.data.worlds.new('Atlantic storm cloud cover'); scene.world=world; world.use_nodes=True
 n,l=world.node_tree.nodes,world.node_tree.links
 bg=n.get('Background'); bg.inputs['Strength'].default_value=.018
-sky=n.new('ShaderNodeTexSky'); sky.sky_type='MULTIPLE_SCATTERING'; sky.sun_elevation=.16; sky.sun_rotation=-2.35; sky.aerosol_density=3
+sky=n.new('ShaderNodeTexSky'); sky.sky_type='MULTIPLE_SCATTERING'; sky.sun_elevation=.27; sky.sun_rotation=-1.03; sky.aerosol_density=3
 l.new(sky.outputs['Color'],bg.inputs['Color'])
 for i,(location,scale) in enumerate([((0,65,31),(185,60,27)), ((-65,110,26),(160,70,22))]):
     cloud=bpy.data.materials.new('Atlantic volumetric storm bank '+str(i)); cloud.use_nodes=True
@@ -270,25 +290,33 @@ for i,(location,scale) in enumerate([((0,65,31),(185,60,27)), ((-65,110,26),(160
     cl.new(sep.outputs['Z'],falloff.inputs[0]);mult=cn.new('ShaderNodeMath');mult.operation='MULTIPLY'
     cl.new(density.outputs[0],mult.inputs[0]);cl.new(falloff.outputs[0],mult.inputs[1]);cl.new(mult.outputs[0],vol.inputs['Density']);cl.new(vol.outputs[0],out.inputs['Volume'])
     bpy.ops.mesh.primitive_cube_add(size=1,location=location);ob=bpy.context.object;ob.name='Volumetric storm bank '+str(i);ob.scale=scale;ob.data.materials.append(cloud)
-ld=bpy.data.lights.new('Late afternoon break in storm', 'SUN'); ld.energy=2.6; ld.angle=.04; ld.color=(1,.94,.85)
-lo=bpy.data.objects.new(ld.name,ld); scene.collection.objects.link(lo); lo.rotation_euler=Vector((.55,.55,-.63)).to_track_quat('-Z','Y').to_euler()
-ld=bpy.data.lights.new('Soft sky fill', 'AREA'); ld.energy=2400; ld.shape='DISK'; ld.size=22; ld.color=(.55,.7,1)
+ld=bpy.data.lights.new('Late afternoon break in storm', 'SUN'); ld.energy=6; ld.angle=.055; ld.color=(1,.43,.13)
+lo=bpy.data.objects.new(ld.name,ld); scene.collection.objects.link(lo); lo.rotation_euler=Vector((-.7,.67,-.25)).to_track_quat('-Z','Y').to_euler()
+ld=bpy.data.lights.new('Soft sky fill', 'AREA'); ld.energy=1100; ld.shape='DISK'; ld.size=22; ld.color=(.55,.7,1)
 lo=bpy.data.objects.new(ld.name,ld); scene.collection.objects.link(lo); lo.location=(-4,-3,20)
 
 # Thin maritime haze gives distance a measurable optical depth.
 mist=bpy.data.materials.new('Salt haze'); mist.use_nodes=True
 mn=mist.node_tree.nodes; mn.clear(); mo=mn.new('ShaderNodeOutputMaterial'); mv=mn.new('ShaderNodeVolumeScatter')
-mv.inputs['Color'].default_value=(.62,.71,.8,1); mv.inputs['Density'].default_value=.0035; mv.inputs['Anisotropy'].default_value=.28
+mv.inputs['Color'].default_value=(.62,.71,.8,1); mv.inputs['Density'].default_value=.0012; mv.inputs['Anisotropy'].default_value=.28
 mist.node_tree.links.new(mv.outputs[0],mo.inputs['Volume'])
 bpy.ops.mesh.primitive_cube_add(size=1, location=(0,0,20))
 ob=bpy.context.object; ob.name='Maritime atmospheric haze'; ob.scale=(160,160,60); ob.data.materials.append(mist)
 
-bpy.ops.object.camera_add(location=(-17.3,-25.4,5.5))
-cam=bpy.context.object; cam.name='Storm photograph — 36 mm'; target=Vector((2,0,8.4))
+bpy.ops.object.camera_add(location=(-12.9,-28.5,5.16))
+cam=bpy.context.object; cam.name='Storm photograph — 36 mm'; target=Vector((8,0,8.4))
 cam.rotation_euler=(target-cam.location).to_track_quat('-Z','Y').to_euler(); cam.data.lens=36
 cam.data.dof.use_dof=False
 scene.camera=cam
 scene.render.filepath=str(args.output.resolve())
+scene['dry_geometry_spacing_m']=.0625
+scene['fluid_geometry_spacing_m']=.25
+scene['reference']='Weathered white lighthouse on fractured rocks, low warm sunlight; no keeper house'
+scene.cycles.device='GPU'
+preferences=bpy.context.preferences.addons['cycles'].preferences
+preferences.compute_device_type='METAL'
+preferences.get_devices()
+for device in preferences.devices: device.use=(device.type=='METAL')
 bpy.ops.wm.save_as_mainfile(filepath=str(args.output.with_suffix('.blend').resolve()))
 bpy.ops.render.render(write_still=True)
 args.output.with_suffix('.json').write_text(json.dumps({'scene':'atlantic-lighthouse','waterMesh':str(args.water_mesh.resolve()) if args.water_mesh else None,

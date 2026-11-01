@@ -127,6 +127,9 @@ ${rasterVisibilityTilesWGSL}
 var<private> rasterVisibilityWeights:vec4f;
 var<private> rasterVisibilityCoordinates:array<vec2i,4>;
 var<private> rasterVisibilityWeight:f32;
+var<private> rasterVisibilityExactCoordinate:vec2i;
+var<private> rasterVisibilityGatherable:bool;
+var<private> rasterVisibilityQuadUV:vec2f;
 var<private> rasterCurrentSample:u32;
 ${rasterVisibilityPackingWGSL}
 ${rasterAtlasLayoutWGSL}
@@ -136,12 +139,19 @@ fn rasterAtlasCoordinate(c:vec2i)->vec2i{
 fn rasterRepresentative(c:vec2i)->vec2i{
   let stride=i32(rasterVisibilityStride());return min(c*stride+vec2i(stride/2),vec2i(textureDimensions(drySplitGeometryRead))-1);
 }
+fn rasterPrepareLightQuad(base:vec2i,dims:vec2i){
+  rasterVisibilityTriplet=0xffffffffu;
+  rasterVisibilityGatherable=all(base>=vec2i(0))&&all(base+vec2i(1)<dims);
+  rasterVisibilityQuadUV=(vec2f(base)+1.0)/vec2f(textureDimensions(drySplitGeometryRead));
+}
 // Shared by the edge producer and material consumer. A zero-weight receiver
 // is evaluated exactly in compute, never silently replaced by unshadowed light.
 fn rasterPrepareVisibility(position:vec3f,normal:vec3f)->vec2f{
+  rasterVisibilityExactCoordinate=rasterAtlasCoordinate(vec2i(rasterPixel));
   let depth=length(position-uniforms.cameraPosition.xyz);
   let stride=f32(rasterVisibilityStride());let q=(rasterPixel-(floor(stride*.5)+.5))/stride;let base=vec2i(floor(q));let f=fract(q);
   let dims=vec2i(textureDimensions(rasterContact));
+  rasterPrepareLightQuad(base,dims);
   let identity=rasterVisibilityIdentityAt(vec2i(rasterPixel));
   rasterVisibilityWeights=vec4f(0);rasterVisibilityWeight=0.0;
   var total=vec2f(0);
@@ -149,7 +159,7 @@ fn rasterPrepareVisibility(position:vec3f,normal:vec3f)->vec2f{
     let index=u32(y*2+x);
     let bilinear=select(1.0-f.x,f.x,x==1)*select(1.0-f.y,f.y,y==1);if(bilinear==0.0){continue;}
     let c=clamp(base+vec2i(x,y),vec2i(0),dims-1);
-    let representative=rasterRepresentative(c);rasterVisibilityCoordinates[index]=representative;
+    let representative=rasterRepresentative(c);rasterVisibilityCoordinates[index]=c;
     // Identity includes owner, feature and motion class, preventing reuse
     // across touching surfaces whose depth and normal happen to agree.
     let representativeIdentity=drySplitIdentityAt(representative).xy;
@@ -164,16 +174,74 @@ fn rasterPrepareVisibility(position:vec3f,normal:vec3f)->vec2f{
   return vec2f(1);
 }
 fn rasterCachedLightVisibility(sample:u32)->vec3f{
-  if(rasterVisibilityWeight<=1e-4){return rasterUnpackVisibility(textureLoad(rasterLightVisibility,rasterAtlasCoordinate(vec2i(rasterPixel)),i32(sample),0).x);}
+  if(rasterVisibilityMonochrome()){return rasterCachedMonochromeVisibility(sample);}
+  if(rasterVisibilityWeight<=1e-4){return rasterUnpackVisibility(textureLoad(rasterLightVisibility,rasterVisibilityExactCoordinate,i32(sample),0).x);}
   var value=vec3f(0);
-  for(var i=0u;i<4u;i++){
-    if(rasterVisibilityWeights[i]>0.0){value+=rasterUnpackVisibility(textureLoad(rasterLightVisibility,rasterAtlasCoordinate(rasterVisibilityCoordinates[i]),i32(sample),0).x)*rasterVisibilityWeights[i];}
+  if(rasterVisibilityGatherable){
+    let quad=textureGather(0,rasterLightVisibility,rasterSunSampler,rasterVisibilityQuadUV,i32(sample)).wzxy;
+    value+=rasterUnpackVisibility(quad.x)*rasterVisibilityWeights.x;
+    value+=rasterUnpackVisibility(quad.y)*rasterVisibilityWeights.y;
+    value+=rasterUnpackVisibility(quad.z)*rasterVisibilityWeights.z;
+    value+=rasterUnpackVisibility(quad.w)*rasterVisibilityWeights.w;
+    return value/rasterVisibilityWeight;
   }
+  // The four atlas addresses are view-dependent, but independent of the
+  // light. Resolve them once and keep fixed indices in this hot light loop.
+  if(rasterVisibilityWeights[0]>0.0){value+=rasterUnpackVisibility(textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[0],i32(sample),0).x)*rasterVisibilityWeights[0];}
+  if(rasterVisibilityWeights[1]>0.0){value+=rasterUnpackVisibility(textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[1],i32(sample),0).x)*rasterVisibilityWeights[1];}
+  if(rasterVisibilityWeights[2]>0.0){value+=rasterUnpackVisibility(textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[2],i32(sample),0).x)*rasterVisibilityWeights[2];}
+  if(rasterVisibilityWeights[3]>0.0){value+=rasterUnpackVisibility(textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[3],i32(sample),0).x)*rasterVisibilityWeights[3];}
   return value/rasterVisibilityWeight;
+}
+// Mapped opaque shadows have identical R/G/B transmission. Store three light
+// samples per RGB10 word, preserving the original ten-bit value of each. A
+// light triplet shares its fetched quad even when some samples are backfacing.
+var<private> rasterVisibilityTriplet:u32=0xffffffffu;
+var<private> rasterVisibilityTripletQuad:vec4u;
+fn rasterCachedMonochromeVisibility(sample:u32)->vec3f{
+  let triplet=sample/3u;let shift=(sample%3u)*10u;
+  if(triplet!=rasterVisibilityTriplet){
+    rasterVisibilityTriplet=triplet;
+    if(rasterVisibilityWeight<=1e-4){rasterVisibilityTripletQuad=vec4u(textureLoad(rasterLightVisibility,rasterVisibilityExactCoordinate,i32(triplet),0).x);}
+    else if(rasterVisibilityGatherable){rasterVisibilityTripletQuad=textureGather(0,rasterLightVisibility,rasterSunSampler,rasterVisibilityQuadUV,i32(triplet)).wzxy;}
+    else{
+      rasterVisibilityTripletQuad=vec4u(0);
+      if(rasterVisibilityWeights.x>0.0){rasterVisibilityTripletQuad.x=textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[0],i32(triplet),0).x;}
+      if(rasterVisibilityWeights.y>0.0){rasterVisibilityTripletQuad.y=textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[1],i32(triplet),0).x;}
+      if(rasterVisibilityWeights.z>0.0){rasterVisibilityTripletQuad.z=textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[2],i32(triplet),0).x;}
+      if(rasterVisibilityWeights.w>0.0){rasterVisibilityTripletQuad.w=textureLoad(rasterLightVisibility,rasterVisibilityCoordinates[3],i32(triplet),0).x;}
+    }
+  }
+  let values=vec4f((rasterVisibilityTripletQuad>>vec4u(shift))&vec4u(1023u))/1023.0;
+  if(rasterVisibilityWeight<=1e-4){return vec3f(values.x);}
+  // Match the colour path's addition order, including quantized guide weights.
+  var value=values.x*rasterVisibilityWeights.x;
+  value+=values.y*rasterVisibilityWeights.y;
+  value+=values.z*rasterVisibilityWeights.z;
+  value+=values.w*rasterVisibilityWeights.w;
+  return vec3f(value/rasterVisibilityWeight);
 }
 fn rasterVisibilityHit(coord:vec2i,g:vec4f)->DryHit{
   let identity=rasterVisibilityIdentityAt(coord);let metadata=identity.y;
   return DryHit(g.w,normalize(g.xyz),identity.x,dryOpaqueOwner(metadata),(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u,metadata,0u));
+}
+// Opaque point-map queries need a receiver plane, not a normalized light ray.
+// Return (visibility, handled); unsupported cases retain the full evaluator.
+fn rasterPointMappedVisibility(light:SvoLightRecord,position:vec3f,normal:vec3f,slot:i32)->vec2f{
+  if(RASTER_VISIBILITY_WATER_SHADOWS||uniforms.options.z>=.5||slot<0
+    ||light.identity.x!=SVO_LIGHT_POINT||light.positionRange.w!=0.0){return vec2f(0);}
+  let offset=light.positionRange.xyz-position;let distanceSquared=dot(offset,offset);
+  if(distanceSquared<=1e-10){return vec2f(1);}
+  let radiance=svoLightRadiance(light)*(1.0/max(1.0,distanceSquared));
+  if(max(max(radiance.x,radiance.y),radiance.z)<=0.0){return vec2f(1);}
+  let terms=normal*offset;let facing=dot(terms,vec3f(1));
+  let error=1e-5*dot(abs(terms),vec3f(1));
+  if(facing < -error){return vec2f(1);}
+  // Keep the normalized reference test at grazing angles, where cancellation
+  // could otherwise turn a skipped query into a falsely clear sample.
+  if(facing<=error){return vec2f(0);}
+  if((dry.materialPublication.w&2u)==0u){return vec2f(1);}
+  return vec2f(mix(1.0,rasterSpotVisibility(position,normal,u32(slot)),dry.tuningRays0.y),1);
 }
 fn rasterProduceLightVisibility(coord:vec2i,g:vec4f,sunVisibility:f32){
   let hit=rasterVisibilityHit(coord,g);let position=rasterWorldAt(vec2f(coord)+.5,g.w);
@@ -181,7 +249,8 @@ fn rasterProduceLightVisibility(coord:vec2i,g:vec4f,sunVisibility:f32){
   dryVisibilityIgnoredBody=DRY_OWNER_NONE;
   drySampledReceiver=drySampledMaterial(hit.materialId);
   rasterResolvedVisibility=vec2f(1,sunVisibility);
-  var sampleBudget=0u;
+  var sampleBudget=0u;var packedTriplet=0u;
+  let monochrome=rasterVisibilityMonochrome();let atlasCoord=rasterAtlasCoordinate(coord);
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,32u));
   let gi=(dry.materialPublication.w&16u)!=0u;
   for(var lightIndex=0u;lightIndex<32u;lightIndex++){
@@ -192,11 +261,15 @@ fn rasterProduceLightVisibility(coord:vec2i,g:vec4f,sunVisibility:f32){
     // Cached spot/area maps use the receiver plane, not the emitter sample.
     // Body rays and liquid attenuation do depend on its direction, so those
     // variants keep evaluating every sample independently.
-    let sharedMap=!RASTER_VISIBILITY_WATER_SHADOWS&&uniforms.options.z<.5&&rasterSpotSlot(lightIndex)>=0;
+    let mapSlot=rasterSpotSlot(lightIndex,position);
+    let sharedMap=!RASTER_VISIBILITY_WATER_SHADOWS&&uniforms.options.z<.5&&mapSlot>=0;
+    let pointMap=rasterPointMappedVisibility(light,position,geometricNormal,mapSlot);
     var mapReady=false;var mapVisibility=vec3f(1);
     for(var sampleIndex=0u;sampleIndex<2u;sampleIndex++){
       if(sampleIndex>=sampleCount){break;}
-      let sample=dryLightSample(light,sampleIndex,position);var visibility=vec3f(1);
+      var visibility=vec3f(pointMap.x);
+      if(pointMap.y==0.0){
+      let sample=dryLightSample(light,sampleIndex,position);visibility=vec3f(1);
       // Range, emitter facing, zero radiance and receiver backfaces all reject
       // before a shadow-map lookup or SVO ray. Cull only by geometry: optical
       // detail can be reoriented by the shared BSDF frame and must not cause a
@@ -209,20 +282,27 @@ fn rasterProduceLightVisibility(coord:vec2i,g:vec4f,sunVisibility:f32){
           if(sharedMap&&dot(geometricNormal,sample.towardLight)>0.0){mapReady=true;mapVisibility=visibility;}
         }
       }
-      textureStore(rasterLightVisibilityOutput,rasterAtlasCoordinate(coord),i32(sampleBudget),vec4u(rasterPackVisibility(visibility)));
+      }
+      if(monochrome){
+        packedTriplet|=u32(round(clamp(visibility.x,0.0,1.0)*1023.0))<<((sampleBudget%3u)*10u);
+        if(sampleBudget%3u==2u){textureStore(rasterLightVisibilityOutput,atlasCoord,i32(sampleBudget/3u),vec4u(packedTriplet));packedTriplet=0u;}
+      }else{textureStore(rasterLightVisibilityOutput,atlasCoord,i32(sampleBudget),vec4u(rasterPackVisibility(visibility)));}
       sampleBudget++;
     }
   }
+  if(monochrome&&sampleBudget%3u!=0u){textureStore(rasterLightVisibilityOutput,atlasCoord,i32(sampleBudget/3u),vec4u(packedTriplet));}
 }
 fn rasterLoadVisibilityGuide()->vec2f{
+  rasterVisibilityExactCoordinate=rasterAtlasCoordinate(vec2i(rasterPixel));
   let guide=textureLoad(rasterGuide,vec2i(rasterPixel),0).xy;
   rasterVisibilityWeights=unpack4x8unorm(guide.y);
   rasterVisibilityWeight=dot(rasterVisibilityWeights,vec4f(1));
   let stride=f32(rasterVisibilityStride());let base=vec2i(floor((rasterPixel-(floor(stride*.5)+.5))/stride));let dims=vec2i(textureDimensions(rasterContact));
-  rasterVisibilityCoordinates[0]=rasterRepresentative(clamp(base,vec2i(0),dims-1));
-  rasterVisibilityCoordinates[1]=rasterRepresentative(clamp(base+vec2i(1,0),vec2i(0),dims-1));
-  rasterVisibilityCoordinates[2]=rasterRepresentative(clamp(base+vec2i(0,1),vec2i(0),dims-1));
-  rasterVisibilityCoordinates[3]=rasterRepresentative(clamp(base+vec2i(1,1),vec2i(0),dims-1));
+  rasterPrepareLightQuad(base,dims);
+  rasterVisibilityCoordinates[0]=clamp(base,vec2i(0),dims-1);
+  rasterVisibilityCoordinates[1]=clamp(base+vec2i(1,0),vec2i(0),dims-1);
+  rasterVisibilityCoordinates[2]=clamp(base+vec2i(0,1),vec2i(0),dims-1);
+  rasterVisibilityCoordinates[3]=clamp(base+vec2i(1,1),vec2i(0),dims-1);
   return unpack2x16float(guide.x);
 }
 @compute @workgroup_size(8,8) fn rasterLightsMain(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_id) local:vec3u){

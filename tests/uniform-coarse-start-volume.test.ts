@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import "../lib/methods";
 import { createBackyardPoolPartyScene } from "../lib/core/backyard-pool-party-scene";
+import { NBFLIP_STAIR_CUBE_ID } from "../lib/core/nbflip-stair-cube-scene";
+import { getScenePreset } from "../lib/core/scenes";
+import { interactionScene } from "../lib/interaction/adapters/scene";
+import { SceneInteractionHost } from "../lib/interaction/runtime/host";
 import type { SceneDescription } from "../lib/core/model";
 import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { createUniformSolver, withUniformDevice } from "./helpers/uniform-geometric";
@@ -46,4 +51,30 @@ test("a coarse start keeps the h start's liquid through the first step (impact, 
   }
   assert.ok(Number.isFinite(drift.h) && Math.abs(drift.h!) < 0.05, `h start drift ${drift.h}`);
   assert.ok(Math.abs(drift["4h"]! - drift.h!) < 0.01, `step-1 drift: 4h ${drift["4h"]} against h ${drift.h}`);
+});
+
+// The coarse start in a sealed rigid vessel (nbflip-stair-cube, docs/plans/bulk16-plan-2026-10-28.md,
+// "the coarse-start default"): the liquid fills the vessel's interior to its walls, which cut 4h tiles
+// off the tile grid. Under {start: "4h"} the liquid was 5.3% short after the first steps and stayed so;
+// under the h start, or the 4h start with a Fine region over the vessel, it was 0.3% short.
+test("a coarse start keeps the h start's liquid in a sealed rigid vessel (stair cube)", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+  const drift: Record<string, number> = {};
+  for (const start of ["h", "4h"] as const) {
+    await withUniformDevice(`coarse start vessel ${start}`, async device => {
+      const scene = getScenePreset(NBFLIP_STAIR_CUBE_ID).create();
+      scene.fluid.tiers = { ...scene.fluid.tiers, start };
+      const solver = await createUniformSolver(device, interactionScene(scene), { rigidCoupling: "on" });
+      const host = new SceneInteractionHost(scene, { fluid: { step: async request => solver.advanceExternalRigidStep(request) } });
+      try {
+        await host.ready;
+        for (let step = 1; step <= 2; step++) await host.advance(1 / 60);
+        assert.equal(solver.info.simulationPipelineError, undefined);
+        const stats = await solver.readStats();
+        assert.equal(stats.volumeTelemetrySource, "narrow-band-phi");
+        drift[start] = stats.volumeDrift!;
+      } finally { solver.destroy(); }
+    });
+  }
+  assert.ok(Number.isFinite(drift.h) && Math.abs(drift.h!) < 0.02, `h start drift ${drift.h}`);
+  assert.ok(Math.abs(drift["4h"]! - drift.h!) < 0.01, `drift after two steps: 4h ${drift["4h"]} against h ${drift.h}`);
 });

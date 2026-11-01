@@ -54,7 +54,8 @@ test("GPU production shading loop reaches all32 records even with64 area samples
       fn dryLightVisibility(p:vec3f,n:vec3f,o:u32,d:vec3f,t:f32,i:u32)->vec3f{return vec3f(1);}
       fn unifiedLightingInputWithGeometry(a:vec3f,b:vec3f,c:vec3f,d:vec3f,r:vec3f)->vec3f{return r;}
       fn shadeUnifiedSurface(c:f32,l:vec3f)->vec3f{return l;}
-      fn shade(budget:u32,area:bool,globalIllumination:bool)->vec2f{sampleCalls=0u;for(var i=0u;i<32u;i++){dryLighting.lights[i].identity.x=select(2u,3u,area);}let surface=hit;dry.tuningCounts0=vec4u(0,0,budget,2);dry.tuningCounts1=vec4u(2);var direct=vec3f(0);var sampleBudget=0u;let position=vec3f(0);let geometricNormal=vec3f(0,1,0);let rd=vec3f(0,-1,0);let directClosure=0.0;
+      fn shadeUnifiedDirectSurfaceUnit(c:f32,d:vec3f,l:vec3f)->vec3f{return l;}
+      fn shade(budget:u32,area:bool,globalIllumination:bool)->vec2f{sampleCalls=0u;for(var i=0u;i<32u;i++){dryLighting.lights[i].identity.x=select(2u,3u,area);}let surface=hit;dry.tuningCounts0=vec4u(0,0,budget,2);dry.tuningCounts1=vec4u(2);var direct=vec3f(0);var sampleBudget=0u;let position=vec3f(0);let geometricNormal=vec3f(0,1,0);let rd=vec3f(0,-1,0);let directClosure=0.0;let directSurface=0.0;
         ${loop} return vec2f(direct.x,f32(sampleCalls));}
       @group(0) @binding(0) var<storage,read_write> result:array<vec2f,6>;
       @compute @workgroup_size(1) fn main(){dryLighting.metadata=vec4u(32,1,0,0);for(var i=0u;i<32u;i++){dryLighting.lights[i]=Light(vec4u(2,i+1u,0,1));}result[0]=shade(8u,false,false);result[1]=shade(32u,false,false);result[2]=shade(32u,true,false);result[3]=shade(8u,true,false);result[4]=shade(32u,true,true);result[5]=shade(8u,true,true);}`});

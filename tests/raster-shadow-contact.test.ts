@@ -55,8 +55,10 @@ struct RasterSpot {positionNear:vec4f,directionTan:vec4f,rangeRadiusIndex:vec4f}
 struct Lighting {control:vec4u,farCenterExtent:vec4f,depthCell:vec4f,sun:vec4f,spots:array<RasterSpot,1>}
 var<private> uniforms:Uniforms;var<private> dry:Dry;var<private> rasterLighting:Lighting;
 @group(0) @binding(1) var rasterSunDepth:texture_depth_2d_array;
-@group(0) @binding(2) var rasterSunSampler:sampler_comparison;
+@group(0) @binding(2) var rasterSunSampler:sampler;
 @group(0) @binding(3) var<storage,read_write> result:vec4f;
+fn rasterMapResolution(layer:u32)->f32{return f32(textureDimensions(rasterSunDepth).x);}
+fn rasterAtlasTile(layer:u32)->vec3u{return vec3u(0,0,layer);}
 ${rasterReceiverPlaneWGSL}
 ${sampling}
 @compute @workgroup_size(1) fn main(){
@@ -75,13 +77,13 @@ ${sampling}
     const layout=device.createBindGroupLayout({entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"depth",viewDimension:"2d-array"}},
-      {binding:2,visibility:GPUShaderStage.COMPUTE,sampler:{type:"comparison"}},
+      {binding:2,visibility:GPUShaderStage.COMPUTE,sampler:{type:"non-filtering"}},
       {binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
     ]});
     const pipeline=await device.createComputePipelineAsync({layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module:receiver,entryPoint:"main"}});
     const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[
       {binding:0,resource:{buffer:input}},{binding:1,resource:depth.createView({dimension:"2d-array"})},
-      {binding:2,resource:device.createSampler({compare:"less-equal",minFilter:"linear",magFilter:"linear"})},{binding:3,resource:{buffer:output}},
+      {binding:2,resource:device.createSampler({})},{binding:3,resource:{buffer:output}},
     ]});
     const measurements:number[]=[];
     try{

@@ -7,7 +7,7 @@ import { svoMaterialWGSL } from "../lib/svo/contracts/svo-material-abi";
 test("sampled PBR reconstruction preserves linear fields, air boundaries and cell continuity on GPU",
   { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   await withUniformDevice("sampled PBR interpolation", async device => {
-    const patterns = [[1, 2], [1, 0], [0, 0], [1, 3]];
+    const patterns = [[1, 2], [1, 0], [0, 0], [1, 3], [1, 1], [2, 2], [3, 3], [0, 2]];
     const stride = 20 + 729 * 2, words = new Uint32Array(stride * patterns.length), floats = new Float32Array(words.buffer);
     for (let caseIndex = 0; caseIndex < patterns.length; caseIndex++) {
       const base = caseIndex * stride;

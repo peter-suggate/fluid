@@ -741,7 +741,11 @@ fn unifiedLightingInputWithGeometry(shadingNormal: vec3f, geometricNormal: vec3f
 }
 
 fn unifiedSchlick(cosine: f32, f0: vec3f) -> vec3f {
-  let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+  // Schlick has a fixed integer exponent; avoid a general log/exp power
+  // operation for every light and preserve the exact zero/one endpoints.
+  let complement = 1.0 - clamp(cosine, 0.0, 1.0);
+  let squared = complement * complement;
+  let grazing = squared * squared * complement;
   return f0 + (vec3f(1.0) - f0) * grazing;
 }
 
@@ -830,6 +834,47 @@ fn shadeUnifiedSurface(material: UnifiedLightingMaterial, input: UnifiedLighting
   let rimRemaining = vec3f(1.0) - unifiedSchlick(nDotV, f0);
   let rim = material.rimColor * material.rimWeight * rimRemaining * pow(1.0 - nDotV, 3.0);
   return max(direct + ambient + rim + material.emissive, vec3f(0.0));
+}
+
+// Direct-light invariants belong to the receiver, not to each emitter. Keep
+// the generic closure above for ambient/emissive/rim callers; the opaque light
+// loop prepares this direct-only closure once per pixel.
+struct UnifiedDirectSurface {
+  normal:vec3f, nDotV:f32,
+  geometricNormal:vec3f, geometricDotV:f32,
+  towardViewer:vec3f, alphaSquared:f32,
+  f0:vec3f, viewVisibilityRoot:f32,
+  diffuseColor:vec3f,
+}
+fn unifiedPrepareDirectSurface(material:UnifiedLightingMaterial,shadingNormal:vec3f,geometricNormal:vec3f,towardViewer:vec3f)->UnifiedDirectSurface {
+  let frame=unifiedLightingInputWithGeometry(shadingNormal,geometricNormal,towardViewer,geometricNormal,vec3f(0));
+  let nDotV=max(dot(frame.normal,frame.towardViewer),0.0);
+  let alpha=material.roughness*material.roughness;let alphaSquared=alpha*alpha;
+  let v=clamp(nDotV,0.0,1.0);
+  return UnifiedDirectSurface(frame.normal,nDotV,frame.geometricNormal,max(dot(frame.geometricNormal,frame.towardViewer),0.0),frame.towardViewer,alphaSquared,
+    mix(material.specularF0*material.specularWeight,material.baseColor,material.metallic),sqrt(v*v*(1.0-alphaSquared)+alphaSquared),material.baseColor*(1.0-material.metallic));
+}
+fn shadeUnifiedDirectSurface(surface:UnifiedDirectSurface,towardLight:vec3f,lightColor:vec3f)->vec3f {
+  return shadeUnifiedDirectSurfaceUnit(surface,unifiedSafeNormal(towardLight,surface.geometricNormal),lightColor);
+}
+// dryLightSample already returns a unit direction. Its per-emitter loop can
+// use this contract without normalizing that same direction a second time.
+fn shadeUnifiedDirectSurfaceUnit(surface:UnifiedDirectSurface,light:vec3f,lightColor:vec3f)->vec3f {
+  let geometricDotL=max(dot(surface.geometricNormal,light),0.0);
+  let nDotL=max(dot(surface.normal,light),0.0);
+  if(geometricDotL<=0.0||nDotL<=UNIFIED_EPSILON||surface.nDotV<=UNIFIED_EPSILON||surface.geometricDotV<=UNIFIED_EPSILON){return vec3f(0);}
+  let halfVector=unifiedSafeNormal(surface.towardViewer+light,surface.normal);
+  let nDotH=clamp(max(dot(surface.normal,halfVector),0.0),0.0,1.0);
+  let fresnel=unifiedSchlick(max(dot(light,halfVector),0.0),surface.f0);
+  let diffuse=surface.diffuseColor*(vec3f(1)-fresnel)/UNIFIED_PI;
+  let denominator=nDotH*nDotH*(surface.alphaSquared-1.0)+1.0;
+  let distribution=surface.alphaSquared/max(UNIFIED_PI*denominator*denominator,UNIFIED_EPSILON);
+  let l=clamp(nDotL,0.0,1.0);let v=clamp(surface.nDotV,0.0,1.0);
+  let viewTerm=l*surface.viewVisibilityRoot;
+  let lightTerm=v*sqrt(l*l*(1.0-surface.alphaSquared)+surface.alphaSquared);
+  let visibility=0.5/max(viewTerm+lightTerm,UNIFIED_EPSILON);
+  let correction=clamp((geometricDotL*surface.nDotV)/max(nDotL*surface.geometricDotV,UNIFIED_EPSILON),0.0,1.0);
+  return max((diffuse+distribution*visibility*fresnel)*max(lightColor,vec3f(0))*geometricDotL*correction,vec3f(0));
 }
 
 fn unifiedBeerLambert(absorption: vec3f, distance: f32) -> vec3f {

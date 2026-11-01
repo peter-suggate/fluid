@@ -1266,6 +1266,9 @@ export class GPUPassTimestampRecorder {
     /** Two counters per pass. */
     private readonly capacity = 512,
     private readonly label = "pass timestamps",
+    /** Diagnostic copies force encoder boundaries. Disable only for whole-frame
+     * timing comparisons; individual pass attribution then remains untrusted. */
+    private readonly encoderBreaks = true,
   ) {
     this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
     this.resolveBuffer = device.createBuffer({
@@ -1297,7 +1300,7 @@ export class GPUPassTimestampRecorder {
       if (occupied || this.disposed || 2 * (this.labels.length + 1) > this.capacity) return undefined;
       const base = 2 * this.labels.length;
       this.labels.push({ label: descriptorLabel ?? `pass ${this.labels.length}`, kind });
-      target.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
+      if (this.encoderBreaks) target.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
       return { querySet: this.querySet, beginningOfPassWriteIndex: base, endOfPassWriteIndex: base + 1 };
     };
     return new Proxy(encoder, {
@@ -1373,7 +1376,7 @@ export class GPUPassTimestampRecorder {
       let trustedSum_ms = 0;
       for (let index = 0; index < this.labels.length; index += 1) {
         const { label, kind } = this.labels[index];
-        const trusted = kind === "compute";
+        const trusted = this.encoderBreaks && kind === "compute";
         const begin = stamps[2 * index];
         const end = stamps[2 * index + 1];
         if (begin === 0n || end === 0n) {

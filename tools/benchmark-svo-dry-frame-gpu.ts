@@ -1255,6 +1255,17 @@ if (process.env.FLUID_SVO_DRY_FRAME_SCULPT_CAMERA === "1") {
   renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy(); process.exit(0);
 }
 
+if (process.env.FLUID_SVO_DRY_FRAME_CAMERA_BUDGET === "1") {
+  const { benchmarkCameraLighting } = await import("./benchmark-camera-lighting");
+  await benchmarkCameraLighting({ device, renderer, uniforms: uniformBuffer, target,
+    view: { scene, camera, environmentId, info: solver.info, bodyCount: bodies.count, width, height },
+    tuning: configuredRenderTuning, mode: coneTracingMode, adapterInfo, outPath, cycles,
+    ready: () => awaitPresentationBundle(renderer) });
+  assert.deepEqual(validationErrors, [], "GPU validation during camera lighting study");
+  renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy();
+  process.exit(0);
+}
+
 // Warmup + first-frame validation for every variant this process will time.
 for (let index = 0; index < Math.max(1, warmups); index += 1) {
   const encoder = device.createCommandEncoder({ label: `Bench warmup ${index}` });

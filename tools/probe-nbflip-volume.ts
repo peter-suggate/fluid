@@ -8,7 +8,10 @@ import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, un
 import { levelSetFillWGSL } from "../lib/core/level-set-fill.wgsl";
 import { readMixedBuffer } from "../tests/helpers/uniform-mixed-native-fields";
 
-export async function createNbflipVolumeProbe(device:GPUDevice,solver:WebGPUUniformReferenceSolver){
+/** `gauge` matches volumeCellSum's six-tetrahedron quadrature on full 4h
+ * owners. The default retains the subdivided spatial diagnostic. `phi`
+ * and encode/output allow snapshots inside a frame without submitting it. */
+export async function createNbflipVolumeProbe(device:GPUDevice,solver:WebGPUUniformReferenceSolver,options:{phi?:GPUTexture;gauge?:boolean}={}){
  // Field rewrites are registered on the solver initialization device wrapper.
  device=(solver as unknown as {device:GPUDevice}).device;
  const frame=(solver as unknown as {mixedFrame:{ownership:UniformMixedOwnership;solid:UniformMixedSolid;fields:{phi:GPUTexture}}}).mixedFrame;
@@ -54,7 +57,7 @@ ${levelSetFillWGSL}
  if(negative==8u){result[i]=mass;return;}if(negative==0u){return;}
  // A 4h owner, full or cut, sums its 64 h subcells: fill()'s one 6-tet split
  // is orientation-biased (an aligned 16^3 block read 7.68 of 8.192 L).
- if(owner.width==1u){result[i]=fill(values)*mass;return;}
+ if(owner.width==1u${options.gauge?"||capacity>=0.99999":""}){result[i]=fill(values)*mass;return;}
  var sum=0.0;
  for(var s=0u;s<64u;s++){
   let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umCellOpen(c+vec3i(cell));if(open<=0.0){continue;}
@@ -70,9 +73,12 @@ ${levelSetFillWGSL}
  const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
  if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
  const pipeline=await uniformDetailPipeline(device,o,{layout:device.createPipelineLayout({bindGroupLayouts:[o.bindLayout,layout,solid.tileLayout]}),compute:{module,entryPoint:"measure",constants:{umDispatchX:65535}}});
- const group=uniformDetailGroup(device,{layout,entries:[{binding:0,resource:frame.fields.phi},{binding:1,resource:{buffer:output}},{binding:2,resource:{buffer:inspectIndex}},{binding:3,resource:{buffer:inspected}}]});
- return {async read(){
-  const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(uniformDetailPick(pipeline));pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,solid.tileGroup);pass.dispatchWorkgroups(gridX,gridY);pass.end();device.queue.submit([encoder.finish()]);return readMixedBuffer(device,output);
+ const group=uniformDetailGroup(device,{layout,entries:[{binding:0,resource:options.phi??frame.fields.phi},{binding:1,resource:{buffer:output}},{binding:2,resource:{buffer:inspectIndex}},{binding:3,resource:{buffer:inspected}}]});
+ const encode=(encoder:GPUCommandEncoder)=>{
+  const pass=encoder.beginComputePass();pass.setPipeline(uniformDetailPick(pipeline));pass.setBindGroup(0,o.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,solid.tileGroup);pass.dispatchWorkgroups(gridX,gridY);pass.end();
+ };
+ return {output,encode,async read(){
+  const encoder=device.createCommandEncoder();encode(encoder);device.queue.submit([encoder.finish()]);return readMixedBuffer(device,output);
  },async inspectCell(index:number){
   device.queue.writeBuffer(inspectIndex,0,new Uint32Array([index,0,0,0]));
   await this.read();

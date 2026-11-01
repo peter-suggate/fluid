@@ -81,7 +81,7 @@ svoLatticeLookupBindGroupLayoutEntries,
 svoLatticeVisibilitySizing,
 svoLatticeWorkerBindGroupLayoutEntries,
 } from "../features/lighting-visibility/webgpu-svo-cone-fanout";
-import { SVO_SURFACE_MESH_BUILD_BRICKS_INITIAL,SVO_SURFACE_MESH_INITIAL_BYTES,SVO_SURFACE_MESH_HEADER_BYTES,SVO_SURFACE_MESH_INGEST_GROUPS,SVO_SURFACE_MESH_MODE,SVO_SURFACE_MESH_QUAD_BYTES,SVO_SURFACE_MESH_STATE,SVO_SURFACE_MESH_STATE_BYTES,type SvoSurfaceMeshStatus,interpretSurfaceMeshState,surfaceMeshBuildBricks,surfaceMeshJobsPerBrick,surfaceMeshReserveQuads,surfaceMeshWorkBytes } from "../features/primary-visibility/svo-surface-mesh";
+import { SVO_SURFACE_MESH_BUILD_BRICKS_INITIAL,SVO_SURFACE_MESH_INITIAL_BYTES,SVO_SURFACE_MESH_HEADER_BYTES,SVO_SURFACE_MESH_INGEST_GROUPS,SVO_SURFACE_MESH_MODE,SVO_SURFACE_MESH_QUAD_BYTES,SVO_SURFACE_MESH_STATE,SVO_SURFACE_MESH_STATE_BYTES,type SvoSurfaceMeshStatus,interpretSurfaceMeshState,surfaceMeshBuildBricks, surfaceMeshGeometrySettled,surfaceMeshJobsPerBrick,surfaceMeshReserveQuads,surfaceMeshWorkBytes } from "../features/primary-visibility/svo-surface-mesh";
 import {
 createSvoBrickRasterCullWGSL,
 createSvoRasterCoverageOverflowArgsWGSL,
@@ -2311,7 +2311,7 @@ export class SparseVoxelDrySceneRenderer {
     // stays pending. While the drawn mesh is complete the build passes are
     // left out: a build the GPU starts on its own (a publication the host did
     // not make) is discovered by the bounded status poll.
-    const pending = this.surfaceMeshStatus?.state !== "ready";
+    const pending = !surfaceMeshGeometrySettled(this.surfaceMeshStatus);
     const drawn = this.surfaceMeshStatus?.drawn === true;
     const bricks = pending ? surfaceMeshBuildBricks(this.surfaceMeshBuildPresentations, drawn) : SVO_SURFACE_MESH_BUILD_BRICKS_INITIAL;
     this.surfaceMeshBuildPresentations = pending ? this.surfaceMeshBuildPresentations + 1 : 0;
@@ -4220,12 +4220,14 @@ export class SparseVoxelDrySceneRenderer {
       // the same draw, with no asynchronous capability transition.
       let optimizedLighting: GPURenderPipeline | undefined;
       let precomputedLighting: GPURenderPipeline | undefined;
+      let mappedVisibilityModule: GPUShaderModule | undefined;
       if ((scale !== 1 || this.experiments.rasterAo) && !globalIlluminationCapable && this.experiments.specializedDeferredLighting) {
         for (const precomputedRasterVisibility of this.experiments.rasterAo ? [false, true] : [false]) {
           const optimizedModule = await checkedModule(this.device, "Specialized opaque deferred lighting",
             createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split",
               this.screenSpaceTerminationPixels, false, false,
               this.coneFanout, { ...shaderExperiments, opaqueConeLighting: !this.experiments.rasterAo, opaqueRasterLighting: this.experiments.rasterAo, precomputedRasterVisibility }));
+          if(this.experiments.rasterAo&&!precomputedRasterVisibility)mappedVisibilityModule=optimizedModule;
           const pipeline = await this.device.createRenderPipelineAsync({
             label: "Specialized opaque deferred lighting",
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout!, ...cacheConsumerLayouts] }),
@@ -4281,7 +4283,7 @@ export class SparseVoxelDrySceneRenderer {
         depthStencil: { format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat, depthWriteEnabled: true, depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare },
       }) : undefined;
       const sculptWallBuild = this.experiments.surfaceMesh ? await this.sculptWallMesh?.compile(module, layout) : undefined;
-      const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!, this.experiments.nativeAssetShadows !== false);
+      const rasterAo = await this.rasterAo?.compile(module, layout, this.surfaceMeshDrawLayout!, this.splitLightingLayout!, this.experiments.nativeAssetShadows !== false, mappedVisibilityModule);
       const bundle = { rasterAo, importedSurface, importedCut, sculptWall, sculptWallBuild, importedSurfaceSelect, importedSurfaceReset, optimizedLighting, precomputedLighting, surfaceMesh, visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
         brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
@@ -6047,7 +6049,7 @@ export class SparseVoxelDrySceneRenderer {
   private writeParams(source: SparseVoxelSceneRenderSource, scene: SparseVoxelDrySceneData): void {
     const structural = source.structural!;
     this.rasterAo?.setVisibilityEnabled(this.rasterLightVisibilityRequested && scene.opaqueSurfaceOnly === true && this.lightingOptions.globalIlluminationEnabled !== true);
-    this.rasterAo?.setVisibilityLayers(rasterVisibilityLayers(scene.lightRecords, this.renderTuning.maximumShadedLights, Math.max(this.renderTuning.stableAreaLightSamples, this.renderTuning.movingAreaLightSamples), this.lightingOptions.globalIlluminationEnabled === true));
+    this.rasterAo?.setVisibilityLayers(rasterVisibilityLayers(scene.lightRecords, this.renderTuning.maximumShadedLights, Math.max(this.renderTuning.stableAreaLightSamples, this.renderTuning.movingAreaLightSamples), this.lightingOptions.globalIlluminationEnabled === true), this.experiments.waterShadows === true);
     this.rasterAo?.setShadowResolution(this.renderTuning.rasterShadowResolution);
     this.rasterAo?.setCoarseAoStrength(this.renderTuning.rasterCoarseAoStrength);
     this.rasterAo?.setFarAoTaps(this.renderTuning.rasterFarAoTaps);
@@ -7203,7 +7205,7 @@ export class SparseVoxelDrySceneRenderer {
         this.rasterAo.encode(encoder, this.rasterAoPipelines, this.bindGroup, this.surfaceMeshDrawGroup!,
           this.splitLightingBindGroup!, this.surfaceMeshState!, this.surfaceMeshArena!.size / 32, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
           this.completeRasterShadows, this.completeRasterAo,
-          this.experiments.rasterShadowPassReuse !== false && this.surfaceMeshStatus?.state === "ready"
+          this.experiments.rasterShadowPassReuse !== false && surfaceMeshGeometrySettled(this.surfaceMeshStatus)
             ? this.shadowReuseKey : undefined, this.drawImportedShadows,
           this.visibilityViewValid && this.renderTuning.rasterStillViewReuse && !this.experiments.waterShadows && this.disabledStages.size===0 && !this.rigidBodiesRequested()
             ? `${this.visibilityViewRevision}:${this.visibilityInputsRevision}` : undefined);

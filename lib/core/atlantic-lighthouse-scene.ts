@@ -12,19 +12,40 @@ export const ATLANTIC_LIGHTHOUSE_CELL_M = .25;
 export const ATLANTIC_LIGHTHOUSE_GRID = [192, 96, 192] as const;
 export const ATLANTIC_LIGHTHOUSE_WATERLINE_M = 1.6;
 
-/** Shared with tools/blender/atlantic_lighthouse.py. Application Y is up.
- * The visible rock is the collision heightfield, including its broken shelves. */
+/** Shared with tools/blender/lighthouse_terrain.py. Application Y is up.
+ * Dry geometry samples this sculpt at 6.25 cm; fluid collision uses 25 cm. */
 export function atlanticLighthouseTerrainHeight(x: number, z: number): number {
   let height = .15;
+  let relief = 0;
   for (const rock of rockLayout) {
     const dx = x - rock.x, dz = z - rock.z, c = Math.cos(rock.yaw), s = Math.sin(rock.yaw);
     const u = (c * dx + s * dz) / rock.rx, v = (-s * dx + c * dz) / rock.rz;
     const q = Math.max(Math.abs(u), Math.abs(v), Math.abs(u + v) * .65, Math.abs(u - v) * .65);
+    if (rock.relief !== undefined) {
+      relief = Math.max(relief, Math.max(0, Math.min(1, (1 - q) / (1 - rock.core)))
+        * Math.max(0, rock.relief + dx * rock.tiltX + dz * rock.tiltZ));
+      continue;
+    }
     const top = rock.height + dx * rock.tiltX + dz * rock.tiltZ;
-    height = Math.max(height, top - Math.max(0, q - rock.core) * rock.height / (1 - rock.core));
+    const fall = Math.max(0, Math.min(1, (q - rock.core) / (1 - rock.core)));
+    // Full tidal-boulder shoulders, with the larger bedding slabs kept planar.
+    const block = rock.height < 3.5
+      ? .15 + (top - .15) * Math.pow(Math.max(0, 1 - fall * fall), 1.2)
+      : top - Math.max(0, q - rock.core) * rock.height / (1 - rock.core);
+    height = Math.max(height, block);
   }
   height += .07 * Math.sin(x * 3.1 + z * 1.7) * Math.sin(z * 2.3 - x * .4) * Math.min(1, Math.max(0, height - .15));
-  return Math.hypot(x - 7, z) < 1.55 ? 5.8 : height;
+  const dry = Math.min(1, Math.max(0, (height - 1.8) / 1.4));
+  const seam = Math.abs(Math.sin(x * 2.7 + z * .83 + .75 * Math.sin(z * 2.1) + .38 * Math.sin(x * 1.3)));
+  const cross = Math.abs(Math.sin(z * 3.4 - x * .61 + .6 * Math.sin(x * 2.4)));
+  let detail = .18 * Math.sin(x * 2.3 + z * .8 + 1.7 * Math.sin(z * 1.5)) * Math.sin(z * 2.1 - x * .4 + .8 * Math.sin(x * .7));
+  detail += .025 * Math.sin(x * 11 + z * 7) * Math.sin(z * 9 - x * 3);
+  detail -= .16 * Math.max(0, 1 - seam / .32) + .11 * Math.max(0, 1 - cross / .26);
+  height += dry * (detail + relief);
+  const r = Math.hypot(x - 7, z);
+  let footing = Math.max(0, Math.min(1, (2.2 - r) / .45));
+  footing = footing * footing * (3 - 2 * footing);
+  return height * (1 - footing) + 5.8 * footing;
 }
 
 export function atlanticLighthouseTerrain(): TerrainDescription {
@@ -41,7 +62,7 @@ export function atlanticLighthouseTerrain(): TerrainDescription {
 export function atlanticLighthouseImportedNodes(): SceneryNode[] {
   return [
     { id: "atlantic-lighthouse-rock", base: { x: 7, y: 0, z: 0 }, color: [.055, .065, .075] as const },
-    { id: "atlantic-lighthouse-tower", base: { x: 7, y: 5.8, z: 0 }, color: [.31, .30, .25] as const },
+    { id: "atlantic-lighthouse-tower", base: { x: 7, y: 5.8, z: 0 }, color: [.7, .69, .63] as const },
   ].map(({ id, base, color }) => {
     const header = meshAssetHeader(id);
     const offset = header.origin.map((value, axis) => value + header.dimensions[axis]! * header.cellSize / 2);
@@ -91,18 +112,20 @@ export function createAtlanticLighthouseScene(): SceneDescription {
       material: { colorLinear: [.045, .052, .06], surface: "stone" } },
     ...atlanticLighthouseImportedNodes(),
     { kind: "cylinder", id: "atlantic/lantern-light", radius: .21, halfHeight: .32,
-      place: { units: "metres", position: { x: 7, y: 15.87, z: 0 } }, material: { colorLinear: [1, .4, .09], emission: 8 } },
+      place: { units: "metres", position: { x: 7, y: 16.3, z: 0 } }, material: { colorLinear: [1, .4, .09], emission: 8 } },
   ] };
   scene.surfaceStyle = "smooth";
   scene.lighting = {
-    directional: { direction: [-.55, .63, .55], colorLinear: [1, .86, .68], intensity: 4 },
-    environment: { diffuseScale: .7, specularScale: 1, cloudCoverage: .85, lowerRadianceLinear: [.035, .055, .075], upperRadianceLinear: [.13, .18, .24] },
+    directional: { direction: [.7, .25, .67], colorLinear: [1, .43, .13], intensity: 6 },
+    environment: { diffuseScale: .6, specularScale: 1, cloudCoverage: .42,
+      lowerRadianceLinear: [.11, .15, .21], upperRadianceLinear: [.28, .40, .58],
+      accentRadianceLinear: [.8, .38, .12] },
     grade: { toneCurve: "agx", exposure: .8, whiteBalance: [1, 1, 1] },
   };
   return scene;
 }
 
 export const atlanticLighthouseCamera: Partial<CameraState> = {
-  azimuth_rad: -.65, elevation_rad: -.09, distance_m: 32, tanHalfFov: .34,
-  target_m: { x: 2, y: 8.4, z: 0 },
+  azimuth_rad: -.65, elevation_rad: -.09, distance_m: 36, tanHalfFov: .34,
+  target_m: { x: 8, y: 8.4, z: 0 },
 };

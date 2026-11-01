@@ -5499,7 +5499,8 @@ fn dryLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->DryLight
     let signValue=select(-1.0,1.0,sampleIndex!=0u);samplePosition+=light.axisUWidth.xyz*(signValue*.45*light.axisUWidth.w)+light.axisVHeight.xyz*(signValue*.2*light.axisVHeight.w);
   }
   let offset=samplePosition-position;let distanceSquared=dot(offset,offset);if(distanceSquared<=1e-10){return dryInvalidLightSample();}if(light.positionRange.w>0.0&&distanceSquared>=light.positionRange.w*light.positionRange.w){return dryInvalidLightSample();}let distance=sqrt(distanceSquared);let towardLight=offset/distance;
-  let rangeFade=select(1.0,pow(clamp(1.0-distance/max(light.positionRange.w,1e-6),0.0,1.0),2.0),light.positionRange.w>0.0);
+  var rangeFade=1.0;
+  if(light.positionRange.w>0.0){rangeFade=pow(clamp(1.0-distance/max(light.positionRange.w,1e-6),0.0,1.0),2.0);}
   var shapeScale=1.0/max(1.0,distanceSquared);
   if(light.identity.x==SVO_LIGHT_SPHERE_AREA){let area=4.0*UNIFIED_PI*light.shape.x*light.shape.x;shapeScale=area/max(area,distanceSquared);}
   if(light.identity.x==SVO_LIGHT_RECTANGLE_AREA){let area=4.0*light.axisUWidth.w*light.axisVHeight.w;let emitterFacing=max(dot(normalize(light.directionCone.xyz),-towardLight),0.0);shapeScale=emitterFacing*area/max(area,distanceSquared);}
@@ -5717,6 +5718,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   let geometricNormal=dryGeometricNormal(hit);
   surface.normal=unifiedShadingNormal(surface.normal,geometricNormal,-rd);
   let directClosure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);var direct=vec3f(0.0);var sampleBudget=0u;
+  let directSurface=unifiedPrepareDirectSurface(directClosure,surface.normal,geometricNormal,-rd);
   let globalIllumination=(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u;
   // GI supplements the authored lighting design; it must not replace every
   // local fixture with whichever record happens to be first (the garden's
@@ -5724,9 +5726,11 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   // configured emitters and their direct-light sample counts. Enabling the
   // indirect gather must not degrade area-light integration or soft shadows.
   let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
+  // This direct-only closure has no ambient, emissive or rim contribution:
+  // a fully occluded sample can skip the BRDF without changing the result.
   for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
     if(lightIndex>=lightCount){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA||light.identity.x==SVO_LIGHT_SPOT;let sampleCount=select(1u,max(dry.tuningCounts1.x,dry.tuningCounts0.w),area);
-    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount){break;}${experiments.rasterAo ? "rasterCurrentSample=sampleBudget;" : ""}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(surface.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);let lighting=unifiedLightingInputWithGeometry(surface.normal,geometricNormal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
+    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount){break;}${experiments.rasterAo ? "rasterCurrentSample=sampleBudget;" : ""}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(surface.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,geometricNormal,hit.ownerId,sample.towardLight,sample.finiteDistance_m,lightIndex);if(all(visibility<=vec3f(0.0))){continue;}direct+=shadeUnifiedDirectSurfaceUnit(directSurface,sample.towardLight,sample.radiance*visibility/f32(sampleCount));}
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,surface.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(surface.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,geometricNormal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIlluminationFaced(position,surface.normal,geometricNormal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,surface.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryOpaqueSpecular(position,geometricNormal,reflected,surface.roughness,environmentBrdf,drySpecularVisibility(dot(contactVisibility,vec3f(1.0/3.0))*gi.visibility,max(dot(surface.normal,viewDirection),0.0),surface.roughness));let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
@@ -5779,12 +5783,17 @@ ${experiments.rasterAo ? rasterAoConsumerWGSL(experiments.precomputedRasterVisib
 fn dryLightVisibilitySolid(position:vec3f,normal:vec3f,owner:u32,towardLight:vec3f,distance:f32,lightIndex:u32)->vec3f{
   if(dot(normal,towardLight)<=0.0){return vec3f(0);}
   if((dry.materialPublication.w&2u)==0u){return vec3f(1);}
-  let slot=rasterSpotSlot(lightIndex);
+  let slot=rasterSpotSlot(lightIndex,position);
   let cachedSun=lightIndex==0u&&dryLighting.lights[0].identity.x==SVO_LIGHT_DIRECTIONAL;
 ${experiments.opaqueRasterLighting ? "" : "  if(slot<0&&!cachedSun){return dryReferenceLightVisibilitySolid(position,normal,owner,towardLight,distance);}"}
   var cached=rasterResolvedVisibility.y;
   if(slot>=0){cached=rasterSpotVisibility(position,normal,u32(slot));}
-  let maximumDistance=select(directionalLightSceneExitDistance(position,towardLight),distance,distance>0.0);
+  // With no rigid bodies the map is already the complete solid visibility.
+  // Avoid constructing a biased body ray and intersecting the scene bounds
+  // for every local-light sample merely to discover there is no body to test.
+  if(uniforms.options.z<.5){return vec3f(mix(1.0,cached,dry.tuningRays0.y));}
+  var maximumDistance=distance;
+  if(distance<=0.0){maximumDistance=directionalLightSceneExitDistance(position,towardLight);}
   let ray=dryBiasedVisibilityRayUnit(position,normal,towardLight,maximumDistance,dry.mapping.cellSize,dry.tuningRays0.x);
   let blocker=nearestBodyIgnoring(ray.origin_m,towardLight,owner);
   let visibility=select(cached,0.0,blocker.t<ray.tMax_m);

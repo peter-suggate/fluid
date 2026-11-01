@@ -1,3 +1,4 @@
+import { RASTER_LIGHTING_PARAM_BYTES, RASTER_MAX_LOCAL_SHADOW_VIEWS, rasterShadowAtlasWGSL } from "../lib/svo/features/lighting-visibility/raster-local-shadows";
 /** Read-only native self-shadow comparison over actual crown receivers. */
 import {rasterAoConsumerWGSL,rasterReceiverPlaneWGSL} from "../lib/svo/features/lighting-visibility/svo-raster-ao";
 import {SVO_GBUFFER_NORMAL_OCT8_WGSL} from "../lib/svo/contracts/svo-gbuffer";
@@ -27,7 +28,7 @@ export async function probeNativeSun(device:GPUDevice,pipeline:unknown,viewWords
 struct Dry {metadata:vec4u,tuningRays0:vec4f,tuningRays1:vec4f}var<private> dry:Dry;
 struct Uniforms {container:vec4f}var<private> uniforms:Uniforms;
 struct RasterSpot {positionNear:vec4f,directionTan:vec4f,rangeRadiusIndex:vec4f}
-struct Lighting {control:vec4u,farCenterExtent:vec4f,depthCell:vec4f,sun:vec4f,spots:array<RasterSpot,1>}
+struct Lighting {control:vec4u,farCenterExtent:vec4f,depthCell:vec4f,sun:vec4f,spots:array<RasterSpot,${RASTER_MAX_LOCAL_SHADOW_VIEWS}>,lightSlots:array<vec4u,32>,localLayout:vec4u}
 @group(0) @binding(6) var<uniform> rasterLighting:Lighting;
 @group(0) @binding(7) var rasterSunDepth:texture_depth_2d_array;
 @group(0) @binding(8) var visibilityGuide:texture_2d<u32>;
@@ -43,6 +44,7 @@ ${sampledSurfaceProjectionWGSL("drySceneWord")}
 ${sampledAmbientVisibilityWGSL("drySceneWord",1024)}
 ${rasterReceiverPlaneWGSL}
 ${SVO_GBUFFER_NORMAL_OCT8_WGSL}
+${rasterShadowAtlasWGSL}
 ${sampling}
 ${adapter}
 fn receiverNormal(n:vec3f,metadata:u32)->vec3f{
@@ -90,7 +92,7 @@ fn receiverNormal(n:vec3f,metadata:u32)->vec3f{
   try{
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(JSON.stringify(errors.map(e=>({message:e.message,line:e.lineNum,column:e.linePos}))));
     const compute=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
-    const group=device.createBindGroup({layout:compute.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:p.sceneArenaBuffer}},{binding:1,resource:{buffer:p.paramsBuffer}},{binding:2,resource:geometry.createView()},{binding:3,resource:p.splitOpaqueIdentity.createView()},{binding:4,resource:{buffer:view}},{binding:5,resource:{buffer:output}},{binding:6,resource:{buffer:p.rasterAo.params,offset:0,size:256}},{binding:7,resource:p.rasterAo.shadow.createView({dimension:"2d-array"})},{binding:8,resource:p.rasterAo.guide.createView()}]});
+    const group=device.createBindGroup({layout:compute.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:p.sceneArenaBuffer}},{binding:1,resource:{buffer:p.paramsBuffer}},{binding:2,resource:geometry.createView()},{binding:3,resource:p.splitOpaqueIdentity.createView()},{binding:4,resource:{buffer:view}},{binding:5,resource:{buffer:output}},{binding:6,resource:{buffer:p.rasterAo.params,offset:0,size:RASTER_LIGHTING_PARAM_BYTES}},{binding:7,resource:p.rasterAo.shadow.createView({dimension:"2d-array"})},{binding:8,resource:p.rasterAo.guide.createView()}]});
     const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(compute);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(count/32));pass.end();encoder.copyBufferToBuffer(output,0,read,0,output.size);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);
     const data=new Float32Array(read.getMappedRange().slice(0)),statusNames=["clear","occluded","exhausted","invalidProjectionOrField","notApplicable"],counts:Record<string,number>={};
     const samples=Array.from({length:count},(_,i)=>{const a=i*16,status=statusNames[data[a+3]!]??"unknown";counts[status]=(counts[status]??0)+1;

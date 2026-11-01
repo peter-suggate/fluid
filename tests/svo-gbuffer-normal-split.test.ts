@@ -85,7 +85,7 @@ test("the deferred lighting biases rays along the face and shades with the norma
   assert.match(source, /dryContactVisibility\(position,geometricNormal,hit\.featureId,hit\.ownerId\)/);
   // All lobes and the light-facing gate share the resolved optical frame.
   assert.match(source, /surface\.normal=unifiedShadingNormal\(surface\.normal,geometricNormal,-rd\);/);
-  assert.match(source, /unifiedLightingInputWithGeometry\(surface\.normal,geometricNormal,-rd,/);
+  assert.match(source, /unifiedPrepareDirectSurface\(directClosure,surface\.normal,geometricNormal,-rd\)/);
   assert.match(source, /svoEnvironmentDiffuseIrradiance\(dryLighting\.environment,surface\.normal\)/);
   assert.doesNotMatch(source, /dot\(geometricNormal,sample\.towardLight\)<=0\.0\)\{continue;\}let visibility=/);
 });

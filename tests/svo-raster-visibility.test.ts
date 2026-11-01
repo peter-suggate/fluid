@@ -3,6 +3,77 @@ import test from "node:test";
 import { SVO_LIGHT_KINDS, SVO_LIGHT_RECORD_WORDS } from "../lib/svo/contracts/svo-light-abi";
 import { rasterVisibilityLayers, rasterVisibilityPackingWGSL, rasterVisibilityTilesWGSL } from "../lib/svo/features/lighting-visibility/raster-light-visibility";
 
+test("GPU cached light reconstruction preserves exact pixels and weighted atlas borders", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+  const { withUniformDevice } = await import("./helpers/uniform-geometric");
+  const { readMixedBuffer } = await import("./helpers/uniform-mixed-native-fields");
+  const { rasterLightVisibilityWGSL: source, rasterAtlasLayoutWGSL } = await import("../lib/svo/features/lighting-visibility/raster-light-visibility");
+  const section = (start:string,end:string) => source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
+  await withUniformDevice("cached light atlas coordinates", async device => {
+    for (const monochrome of [false,true]) for (const [width,height] of [[7,5],[8,6]] as const) {
+      const samples=8,layers=monochrome?Math.ceil(samples/3):samples;
+      const textures = [
+        device.createTexture({size:[width,height],format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING}),
+        device.createTexture({size:[Math.ceil(width/2),Math.ceil(height/2)],format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING}),
+        device.createTexture({size:[width,height],format:"rg32uint",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST}),
+        device.createTexture({size:[width,height,layers],format:"r32uint",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST}),
+      ];
+      const output=device.createBuffer({size:width*height*samples*16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+      try {
+        const module=device.createShaderModule({code:`
+@group(0) @binding(0) var drySplitGeometryRead:texture_2d<f32>;
+@group(0) @binding(1) var rasterContact:texture_2d<f32>;
+@group(0) @binding(2) var rasterGuide:texture_2d<u32>;
+@group(0) @binding(3) var rasterLightVisibility:texture_2d_array<u32>;
+@group(0) @binding(4) var<storage,read_write> output:array<vec4f>;
+@group(0) @binding(5) var rasterSunSampler:sampler;
+var<private> rasterPixel:vec2f;
+var<private> rasterVisibilityWeights:vec4f;
+var<private> rasterVisibilityWeight:f32;
+var<private> rasterVisibilityCoordinates:array<vec2i,4>;
+var<private> rasterVisibilityExactCoordinate:vec2i;
+var<private> rasterVisibilityGatherable:bool;
+var<private> rasterVisibilityQuadUV:vec2f;
+fn rasterVisibilityStride()->u32{return 2u;}
+fn rasterVisibilityMonochrome()->bool{return ${monochrome};}
+${rasterAtlasLayoutWGSL}${rasterVisibilityPackingWGSL}
+${section("fn rasterAtlasCoordinate", "// Shared by the edge producer")}
+${section("fn rasterCachedLightVisibility", "fn rasterVisibilityHit")}
+${section("fn rasterLoadVisibilityGuide", "@compute @workgroup_size(8,8) fn rasterLightsMain")}
+@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3u){
+  rasterPixel=vec2f(id.xy)+.5;let guide=rasterLoadVisibilityGuide();
+  // Revisit and skip triplets, then read all samples in the production order.
+  let skipped=rasterCachedLightVisibility(7u)+rasterCachedLightVisibility(3u)+rasterCachedLightVisibility(1u);
+  for(var sample=0u;sample<${samples}u;sample++){output[(sample*${height}u+id.y)*${width}u+id.x]=vec4f(rasterCachedLightVisibility(sample),1);}
+
+}`});
+        assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
+        const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
+        const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[...textures.map((t,binding)=>({binding,resource:t.createView({dimension:binding===3?"2d-array":"2d"})})),{binding:4,resource:{buffer:output}},{binding:5,resource:device.createSampler({})}]});
+        const guide=new Uint32Array(width*height*2),atlas=new Uint32Array(width*height*layers);
+        const value=(x:number,y:number,layer:number)=>(layer*127+y*31+x*13)%1024;
+        for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+          guide[(y*width+x)*2+1]=(x+y)%3===0?0:(51|(102<<8)|(102<<24))>>>0;
+          for(let sample=0;sample<samples;sample++){
+            const v=value(x,y,sample),layer=monochrome?Math.floor(sample/3):sample;
+            if(monochrome)atlas[(layer*height+y)*width+x]!|=v<<((sample%3)*10);
+            else atlas[(layer*height+y)*width+x]=v|((1023-v)<<10)|(v<<20);
+          }
+        }
+        device.queue.writeTexture({texture:textures[2]!},guide,{bytesPerRow:width*8},[width,height]);
+        device.queue.writeTexture({texture:textures[3]!},atlas,{bytesPerRow:width*4,rowsPerImage:height},[width,height,layers]);
+        const e=device.createCommandEncoder(),p=e.beginComputePass();p.setPipeline(pipeline);p.setBindGroup(0,group);p.dispatchWorkgroups(width,height);p.end();device.queue.submit([e.finish()]);
+        const actual=await readMixedBuffer(device,output);
+        const compact=(c:number,d:number)=>Math.floor(c/2)+(c===Math.min(Math.floor(c/2)*2+1,d-1)?0:Math.ceil(d/2));
+        for(let layer=0;layer<samples;layer++)for(let y=0;y<height;y++)for(let x=0;x<width;x++){
+          const expected=(x+y)%3===0?value(compact(x,width),compact(y,height),layer):[.2,.4,0,.4].reduce((sum,w,i)=>sum+w*value(Math.max(0,Math.min(Math.ceil(width/2)-1,Math.floor((x-1)/2)+(i%2))),Math.max(0,Math.min(Math.ceil(height/2)-1,Math.floor((y-1)/2)+Math.floor(i/2))),layer),0);
+          const at=((layer*height+y)*width+x)*4;
+          for(const [channel,v] of [expected,monochrome?expected:1023-expected,expected].entries())assert.ok(Math.abs(actual[at+channel]!-v/1023)<2e-6,`${width}x${height}, ${x},${y}, light ${layer}, channel ${channel}`);
+        }
+      } finally { textures.forEach(t=>t.destroy());output.destroy(); }
+    }
+  });
+});
+
 test("visibility allocation covers the existing light sample budget, including GI", () => {
   const kinds = ["directional", "rectangleArea", "point", "spot", "sphereArea"] as const;
   const records = new Uint32Array(kinds.length * SVO_LIGHT_RECORD_WORDS);
@@ -186,5 +257,55 @@ test("GPU atlas permutation keeps representatives compact and exact receivers co
         assert.equal(seen.size, width * height); read.unmap();
       }
     } finally { output.destroy(); read.destroy(); dimensions.destroy(); }
+  });
+});
+
+test("GPU monochrome producer packs all light samples with unchanged ten-bit precision", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+  const { withUniformDevice } = await import("./helpers/uniform-geometric");
+  const { readMixedBuffer } = await import("./helpers/uniform-mixed-native-fields");
+  const { rasterLightVisibilityWGSL: source } = await import("../lib/svo/features/lighting-visibility/raster-light-visibility");
+  const producer=source.slice(source.indexOf("fn rasterProduceLightVisibility("),source.indexOf("fn rasterLoadVisibilityGuide")).replaceAll("textureStore(rasterLightVisibilityOutput,","storeResult(");
+  await withUniformDevice("monochrome light triplets",async device=>{
+    const output=device.createBuffer({size:64*4*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+    try {
+      const module=device.createShaderModule({code:`
+struct Hit{materialId:u32,ownerId:u32}
+struct Light{identity:vec4u}
+struct Lighting{metadata:vec4u,lights:array<Light,32>}
+struct Dry{tuningCounts0:vec4u,tuningCounts1:vec4u,materialPublication:vec4u}
+struct Uniforms{options:vec4f}
+struct Sample{valid:u32,towardLight:vec3f,finiteDistance_m:f32}
+var<private> dry:Dry;var<private> dryLighting:Lighting;var<private> uniforms:Uniforms;
+var<private> dryVisibilityIgnoredBody:u32;var<private> drySampledReceiver:bool;var<private> rasterResolvedVisibility:vec2f;
+const DRY_OWNER_NONE=65535u;const SVO_LIGHT_SPHERE_AREA=2u;const SVO_LIGHT_RECTANGLE_AREA=3u;const SVO_LIGHT_SPOT=4u;const RASTER_VISIBILITY_WATER_SHADOWS=false;
+@group(0) @binding(0) var<storage,read_write> output:array<f32>;
+fn rasterVisibilityHit(c:vec2i,g:vec4f)->Hit{return Hit(0u,12u);}
+fn rasterWorldAt(c:vec2f,t:f32)->vec3f{return vec3f(c,0);}
+fn dryGeometricNormal(h:Hit)->vec3f{return vec3f(0,0,1);}
+fn drySampledMaterial(m:u32)->bool{return false;}
+fn rasterSpotSlot(i:u32,p:vec3f)->i32{return -1;}
+fn rasterVisibilityMonochrome()->bool{return true;}
+fn dryLightSample(l:Light,i:u32,p:vec3f)->Sample{return Sample(1u,vec3f(0,0,1),f32(i));}
+fn rasterPointMappedVisibility(light:Light,p:vec3f,n:vec3f,s:i32)->vec2f{return vec2f(0);}
+fn rasterEvaluateLightVisibility(p:vec3f,n:vec3f,o:u32,l:vec3f,d:f32,i:u32)->vec3f{return vec3f(f32((i*79u+u32(d)*31u)%1024u)/1023.0);}
+fn rasterAtlasCoordinate(c:vec2i)->vec2i{return c;}
+${rasterVisibilityPackingWGSL}
+fn storeResult(c:vec2i,layer:i32,value:vec4u){for(var i=0u;i<3u;i++){let slot=u32(layer)*3u+i;if(slot<64u){output[u32(c.x)*64u+slot]=f32((value.x>>(i*10u))&1023u);}}}
+${producer}
+@compute @workgroup_size(1) fn main(){
+  dry.tuningCounts0=vec4u(0,0,32,2);dry.tuningCounts1=vec4u(2);dryLighting.metadata=vec4u(32,1,0,0);
+  for(var i=0u;i<32u;i++){dryLighting.lights[i].identity=vec4u(SVO_LIGHT_SPHERE_AREA,0,0,1);}
+  let counts=array<u32,4>(1,2,31,32);
+  for(var i=0u;i<4u;i++){dry.tuningCounts0.z=counts[i];rasterProduceLightVisibility(vec2i(i32(i),0),vec4f(0,0,1,1),1.0);}
+}`});
+      assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
+      const pipeline=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
+      const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:output}}]});
+      const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);pass.end();device.queue.submit([encoder.finish()]);
+      const values=await readMixedBuffer(device,output);
+      for(const [caseIndex,count] of [1,2,31,32].entries()) for(let light=0;light<count;light++) for(let sample=0;sample<2;sample++){
+        assert.equal(values[caseIndex*64+light*2+sample],(light*79+sample*31)%1024,`case ${caseIndex}, light ${light}, sample ${sample}`);
+      }
+    }finally{output.destroy();}
   });
 });

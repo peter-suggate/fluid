@@ -1,4 +1,5 @@
 import { initializeRigidBodies } from "../lib/core/rigid-body";
+import { GPUPassTimestampRecorder } from "../lib/core/performance-trace";
 import { sceneRenderTuning } from "../lib/core/scene-render-profile";
 /** Capture a registered live scene through the production app renderer.
  *
@@ -47,12 +48,12 @@ const options = new Map(process.argv.slice(2).map(value => {
 }));
 if (options.has("help")) {
   console.log("Capture a registered scene and narrow-band FLIP method (default forest-waterfall).\n"
-    + "Options: --scene=tokyo-rain --time=3 --width=1200 --height=800 --export-water-mesh --out=artifacts/forest-waterfall/live-3s.png --timeout=1800 --timing-samples=12 --steady-reuse=off|on --render-scale=1 --reflections=screen-space|world-space|environment --reflection-comparison --screen-reflection-comparison --supersampling-comparison --reflection-diagnostics --light-samples=32 --light-budget-comparison --profile-passes --performance-comparison --live-visibility-validation --area-samples=1 --visibility=raster-ao|cones|exact|off --indirect-lighting --gi-cache=on|off --lattice=on|off --gi-comparison --lens-bloom --bloom-comparison --voxel-reflections --voxel-reflection-comparison --voxel-reflection-steps=128 --bloom-strength=.08 --bloom-threshold=1 --bloom-radius=.03 --texture-comparison --lighting-comparison --shadow-aperture=0.065 --shadow-resolution=2048|4096 --shadow-resolution-comparison --sun-softness-comparison --shadow-diagnostics --native-sun-diagnostics --lighting-energy-diagnostics --native-ao --native-ao-comparison --world-refraction --world-refraction-comparison --world-refinement-diagnostics\n"
+    + "Options: --camera=<JSON CameraState overrides> --scene=tokyo-rain --time=3 --width=1200 --height=800 --export-water-mesh --out=artifacts/forest-waterfall/live-3s.png --timeout=1800 --timing-samples=12 --camera-benchmark --camera-native-timestamps --camera-frames=120 --camera-stress --camera-probes --steady-reuse=off|on --render-scale=1 --reflections=screen-space|world-space|environment --reflection-comparison --screen-reflection-comparison --supersampling-comparison --reflection-diagnostics --light-samples=32 --light-budget-comparison --profile-passes --performance-comparison --live-visibility-validation --area-samples=1 --visibility=raster-ao|cones|exact|off --indirect-lighting --gi-cache=on|off --lattice=on|off --gi-comparison --lens-bloom --bloom-comparison --voxel-reflections --voxel-reflection-comparison --voxel-reflection-steps=128 --bloom-strength=.08 --bloom-threshold=1 --bloom-radius=.03 --texture-comparison --lighting-comparison --shadow-aperture=0.065 --shadow-resolution=2048|4096 --shadow-resolution-comparison --sun-softness-comparison --shadow-diagnostics --native-sun-diagnostics --lighting-energy-diagnostics --native-ao --native-ao-comparison --world-refraction --world-refraction-comparison --world-refinement-diagnostics\n"
     + "Use --time=0 for the initial pool. Render scale can be raised to 2 for supersampling; solver settings remain the registered app defaults.");
   process.exit(0);
 }
 for (const key of options.keys()) {
-  if (!["steady-reuse", "export-water-mesh", "scene", "time", "width", "height", "out", "timeout", "timing-samples", "reflection-comparison", "screen-reflection-comparison", "reflection-diagnostics", "reflections", "render-scale", "supersampling-comparison", "light-samples", "light-budget-comparison", "profile-passes", "performance-comparison", "live-visibility-validation", "area-samples", "indirect-lighting", "gi-cache", "lattice", "gi-comparison", "lens-bloom", "bloom-comparison", "voxel-reflections", "voxel-reflection-comparison", "voxel-reflection-steps", "bloom-strength", "bloom-threshold", "bloom-radius", "visibility", "texture-comparison", "lighting-comparison", "shadow-aperture", "shadow-resolution", "shadow-resolution-comparison", "sun-softness-comparison", "shadow-diagnostics", "native-sun-diagnostics", "lighting-energy-diagnostics", "native-ao", "native-ao-comparison", "world-refraction", "world-refraction-comparison", "world-refinement-diagnostics"].includes(key)) throw new Error(`Unknown option --${key}`);
+  if (!["camera", "camera-benchmark", "camera-native-timestamps", "camera-frames", "camera-stress", "camera-probes", "steady-reuse", "export-water-mesh", "scene", "time", "width", "height", "out", "timeout", "timing-samples", "reflection-comparison", "screen-reflection-comparison", "reflection-diagnostics", "reflections", "render-scale", "supersampling-comparison", "light-samples", "light-budget-comparison", "profile-passes", "performance-comparison", "live-visibility-validation", "area-samples", "indirect-lighting", "gi-cache", "lattice", "gi-comparison", "lens-bloom", "bloom-comparison", "voxel-reflections", "voxel-reflection-comparison", "voxel-reflection-steps", "bloom-strength", "bloom-threshold", "bloom-radius", "visibility", "texture-comparison", "lighting-comparison", "shadow-aperture", "shadow-resolution", "shadow-resolution-comparison", "sun-softness-comparison", "shadow-diagnostics", "native-sun-diagnostics", "lighting-energy-diagnostics", "native-ao", "native-ao-comparison", "world-refraction", "world-refraction-comparison", "world-refinement-diagnostics"].includes(key)) throw new Error(`Unknown option --${key}`);
 }
 const number = (key: string, fallback: number, minimum: number) => {
   const value = Number(options.get(key) ?? fallback);
@@ -155,11 +156,12 @@ const profile = definition.methodProfile, method = getMethod(profile.methodId);
 const scene = markSceneRevision(structuredClone(sceneDocument(definition)));
 const values = resolveMethodValues(method, profile.quality, { ...method.appDefaults, ...profile.overrides });
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
-const steps = Math.ceil(requestedTime_s / dt - 1e-9), targetTime_s = steps * dt;
+const steps = Math.max(0, Math.ceil(requestedTime_s / dt - 1e-9)), targetTime_s = steps * dt;
 const assetIds = sceneMeshAssetIds(scene);
 assert.ok(assetIds.length || scene.rigidBodies.some(body => body.appearance), "The actual Blender environment or moving model must be attached");
 assert.ok(scene.container.fillFraction > 0 || scene.fluid.initialLiquidVolumes?.length, "The registered scene must contain real initial water");
 const started = performance.now(), errors: string[] = [], statuses: Record<string, unknown>[] = [];
+let cameraRecorder: GPUPassTimestampRecorder | undefined;
 let device: GPUDevice | undefined, swapTexture: GPUTexture | undefined;
 let memory: GPUMemoryProfile | undefined;
 const memorySnapshots: { phase: string; time_s: number; process: NodeJS.MemoryUsage; gpu: ReturnType<GPUMemoryProfile["snapshot"]> }[] = [];
@@ -235,7 +237,12 @@ try {
     requestAdapter: async () => ({ features: adapter.features, limits: adapter.limits, info: adapter.info,
       requestDevice: async (descriptor: GPUDeviceDescriptor) => {
         memory = new GPUMemoryProfile(await adapter.requestDevice(descriptor));
-        device = memory.device;
+        device = new Proxy(memory.device, {get(target,key){
+          if(key==="createCommandEncoder")return (descriptor?:GPUCommandEncoderDescriptor)=>{
+            const encoder=target.createCommandEncoder(descriptor);return cameraRecorder?.instrument(encoder)??encoder;
+          };
+          const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+        }});
         managedGPUDevice(device, { requireWorkerRealm: false });
         device.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); });
         void device.lost.then(info => { if (!closing) failure = `GPU lost: ${info.message || info.reason}`; });
@@ -306,9 +313,16 @@ try {
   let captureStaticVisibilityReuse:boolean|undefined = undefined;
   let captureShadowAperture = shadowAperture ?? sceneRenderTuning(scene.renderProfile).shadowConeAperture;
   report.shadowAperture_rad = captureShadowAperture;
+  const cameraOverride = options.has("camera") ? JSON.parse(options.get("camera")!) : {};
+  let captureCamera = { ...defaultCamera, ...preset.camera, ...cameraOverride,
+    target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m), ...cameraOverride.target_m } };
+  for (const value of [captureCamera.azimuth_rad, captureCamera.elevation_rad, captureCamera.distance_m,
+    captureCamera.tanHalfFov, ...Object.values(captureCamera.target_m)]) assert.ok(Number.isFinite(value), "Camera values must be finite");
+  assert.ok(captureCamera.distance_m > 0 && captureCamera.tanHalfFov > 0, "Camera distance and field of view must be positive");
+  report.camera = captureCamera;
   const captureBodies = initializeRigidBodies(scene.rigidBodies);
   const args = (time: number): Parameters<FluidLabRenderer["draw"]> => [
-    time, scene, { ...defaultCamera, ...preset.camera }, captureBodies, undefined,
+    time, scene, captureCamera, captureBodies, undefined,
     { methodId: method.id, quality: profile.quality, values, simulationEpoch: 0, inFlightDepth: 2 },
     { axis: "off", position: 0 }, preset.background, preset.presentationMode, "shaded", { ...DEFAULT_SVO_LIGHTING_OPTIONS, waterReflectionMode: reflectionMode, waterWorldRefractionEnabled, coneTracingMode: captureVisibilityMode, surfaceTexturesEnabled, nativeAmbientOcclusionEnabled, shadowsEnabled, ambientOcclusionEnabled,
       voxelSpecularReflectionsEnabled:captureVoxelReflections,voxelSpecularSteps:voxelReflectionSteps,latticeVisibilityEnabled:latticeEnabled,globalIlluminationEnabled:captureIndirectLighting,worldGiCacheEnabled:captureGiCache,lensBloom:{...lensBloom,enabled:captureBloomEnabled} }, undefined,
@@ -445,6 +459,58 @@ try {
     min_ms: sorted[0], max_ms: sorted.at(-1), width, height, renderScale,
     presentationResolution: renderer.presentationResolution, simulationPaused: true,
   };
+  if(options.has("camera-benchmark")) {
+    assert.ok(GPUPassTimestampRecorder.supported(device!),"Camera benchmark requires GPU timestamps");
+    const originalCamera=captureCamera, results=[];
+    const frames=Math.round(number("camera-frames",120,1));
+    assert.ok(frames<=3600,"--camera-frames must be at most 3600");
+    for(const motion of ["stationary","orbit","pan-zoom",...(options.has("camera-stress")?["wide-orbit"]:[])]) {
+      const moving=motion!=="stationary";
+      const gpu:number[]=[],host:number[]=[],compute:Record<string,number[]>={},slowFrames:unknown[]=[];
+      for(let i=-8;i<frames;i++){
+        captureCamera=moving?{...originalCamera,azimuth_rad:originalCamera.azimuth_rad+.12*Math.sin(i*.07),elevation_rad:originalCamera.elevation_rad+.04*Math.cos(i*.05)}:originalCamera;
+        if(motion==="pan-zoom")captureCamera={...originalCamera,
+          azimuth_rad:originalCamera.azimuth_rad+.4*Math.sin(i*.03),
+          elevation_rad:originalCamera.elevation_rad+.12*Math.cos(i*.025),
+          distance_m:originalCamera.distance_m*(1+.2*Math.sin(i*.02)),
+          target_m:{...originalCamera.target_m,x:originalCamera.target_m.x+.8*Math.sin(i*.017)}};
+        if(motion==="wide-orbit")captureCamera={...originalCamera,
+          azimuth_rad:originalCamera.azimuth_rad+2*Math.PI*i/frames,
+          elevation_rad:originalCamera.elevation_rad+.15*Math.sin(4*Math.PI*i/frames),
+          distance_m:originalCamera.distance_m*(.85+.15*Math.cos(2*Math.PI*i/frames))};
+        const start=performance.now();
+        const recorder=new GPUPassTimestampRecorder(device!,1024,"Complete Tokyo camera frame",!options.has("camera-native-timestamps"));
+        cameraRecorder=recorder;
+        try{await draw(pausedTime_s);}finally{cameraRecorder=undefined;}
+        const elapsed=performance.now()-start;
+        assert.ok(lastMetrics?.presentationSubmitted,"Camera frame must submit");
+        const resolve=device!.createCommandEncoder();const resolved=recorder.resolve(resolve);
+        device!.queue.submit([resolve.finish()]);
+        const reading=resolved?await recorder.read():undefined;
+        assert.ok(reading,"Complete presentation must return valid GPU timestamps");
+        if(options.has("camera-native-timestamps")){
+          if(i===-8)console.log(JSON.stringify({phase:"native-timestamp-coverage",motion,first:reading.passes[0],last:reading.passes.at(-1),missing:reading.passes.filter(pass=>!pass.sampled).map(pass=>pass.label)}));
+          // Internal markers can be absent when Metal coalesces encoders. The
+          // frame envelope remains usable only with both encoded endpoints;
+          // per-pass attribution is explicitly disabled in this mode.
+          assert.ok(reading.passes[0]?.sampled&&reading.passes.at(-1)?.sampled,"Native frame timing requires both frame endpoints");
+        }
+        if(i<0)continue;
+        host.push(elapsed);gpu.push(reading.span_ms);
+        for(const pass of reading.passes)if(pass.trusted)(compute[pass.label]??=[]).push(pass.duration_ms);
+        if(reading.span_ms>1000/60)slowFrames.push({frame:i,gpu_ms:reading.span_ms,host_ms:elapsed,mesh:effective?.surfaceMesh,passes:reading.passes});
+      }
+      const q=(a:number[],p:number)=>[...a].sort((a,b)=>a-b)[Math.ceil(a.length*p)-1]!;
+      const result={motion,moving,gpuMedian_ms:q(gpu,.5),gpuP95_ms:q(gpu,.95),gpuMax_ms:Math.max(...gpu),gpuOver60FpsBudget:gpu.filter(ms=>ms>1000/60).length,
+        hostMedian_ms:q(host,.5),hostP95_ms:q(host,.95),hostMax_ms:Math.max(...host),hostOver60FpsBudget:host.filter(ms=>ms>1000/60).length,gpuSamples_ms:gpu,
+        slowFrames,computeMedian_ms:Object.fromEntries(Object.entries(compute).map(([name,values])=>[name,q(values,.5)])),cache:internals.svoDryScenePipeline?.rasterVisibilityCacheStatistics};
+      results.push(result);console.log(JSON.stringify({phase:"complete-camera-frame",...result,slowFrames:slowFrames.length}));
+    }
+    report.cameraBenchmark={framesPerMotion:frames,presentationResolution:renderer.presentationResolution,simulationPaused:true,width,height,renderScale:captureRenderScale,reflectionMode,
+      scope:"Complete production draw with water and display, GPU pass timestamp span; host includes Dawn translation, queue fence and event-loop yield",
+      diagnosticEncoderBreaks:!options.has("camera-native-timestamps"),results};
+    captureCamera=originalCamera;for(let i=0;i<4;i++)await draw(pausedTime_s);
+  }
   report.importedSurfaceDrawStatus = internals.svoDryScenePipeline?.importedSurfaceDrawStatus;
   report.worldRefractionsApplied = internals.waterPipeline?.worldRefractionsApplied ?? false;
   if(waterWorldRefractionEnabled)assert.equal(report.worldRefractionsApplied,true,"Requested World refraction must actually encode");
@@ -552,6 +618,25 @@ try {
       } finally {if(staging.mapState==="mapped")staging.unmap();staging.destroy();}
     };
     await capture(pngPath);
+    if(options.has("camera-probes")){
+      const original={...defaultCamera,...preset.camera},probes=[];
+      for(const [motion,frame] of [["orbit",0],["orbit",198],["orbit",206],["pan-zoom",848],["pan-zoom",850],["pan-zoom",851]] as const){
+        captureCamera={...original,azimuth_rad:original.azimuth_rad+.12*Math.sin(frame*.07),elevation_rad:original.elevation_rad+.04*Math.cos(frame*.05)};
+        if(motion==="pan-zoom")captureCamera={...original,azimuth_rad:original.azimuth_rad+.4*Math.sin(frame*.03),elevation_rad:original.elevation_rad+.12*Math.cos(frame*.025),distance_m:original.distance_m*(1+.2*Math.sin(frame*.02)),target_m:{...original.target_m,x:original.target_m.x+.8*Math.sin(frame*.017)}};
+        for(let i=0;i<32;i++)await draw(pausedTime_s);
+        const path=pngPath.replace(/\.png$/,`-${motion}-${frame}.png`);await capture(path);
+        const receipt=device!.createBuffer({size:64,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+        let meshHeader:number[]=[];
+        try{
+          const encoder=device!.createCommandEncoder();
+          assert.ok(internals.svoDryScenePipeline?.copySurfaceMeshDiagnostics(encoder,receipt));
+          device!.queue.submit([encoder.finish()]);await receipt.mapAsync(GPUMapMode.READ);
+          meshHeader=[...new Uint32Array(receipt.getMappedRange())];receipt.unmap();
+        }finally{receipt.destroy();}
+        probes.push({motion,frame,path,camera:captureCamera,mesh:effective?.surfaceMesh,meshHeader});
+      }
+      report.cameraProbes=probes;captureCamera=original;for(let i=0;i<4;i++)await draw(pausedTime_s);
+    }
     if(waterWorldRefractionEnabled)report.worldRefractionSamples=await refractionDiagnostics();
     report.primaryPresentationResolution = renderer.presentationResolution;
     if(options.has("lighting-energy-diagnostics")) {
@@ -893,6 +978,7 @@ try {
     usePerformanceInstrumentationStore.getState().setMode("timeline");
     try {
       for(let i=0;i<36;i++){
+        if(options.has("camera-benchmark"))captureCamera={...captureCamera,azimuth_rad:captureCamera.azimuth_rad+.004};
         await draw(pausedTime_s);
         if(lastMetrics?.presentation)traces.set(lastMetrics.presentation.sampleId,lastMetrics.presentation);
       }

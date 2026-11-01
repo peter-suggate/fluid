@@ -1,3 +1,4 @@
+import { RASTER_LIGHTING_PARAM_BYTES, RASTER_MAX_LOCAL_SHADOW_VIEWS, rasterShadowAtlasWGSL } from "../lib/svo/features/lighting-visibility/raster-local-shadows";
 /** Optional, read-only probe of production receiver and shadow publications. */
 import { rasterAoConsumerWGSL, rasterReceiverPlaneWGSL } from "../lib/svo/features/lighting-visibility/svo-raster-ao";
 import { SVO_GBUFFER_NORMAL_OCT8_WGSL } from "../lib/svo/contracts/svo-gbuffer";
@@ -16,7 +17,7 @@ export async function probeRasterShadow(device:GPUDevice,pipeline:unknown,viewWo
   const module=device.createShaderModule({code:`
 struct Uniforms {container:vec4f} struct Dry {tuningRays0:vec4f,tuningRays1:vec4f}
 struct RasterSpot {positionNear:vec4f,directionTan:vec4f,rangeRadiusIndex:vec4f}
-struct Lighting {control:vec4u,farCenterExtent:vec4f,depthCell:vec4f,sun:vec4f,spots:array<RasterSpot,1>}
+struct Lighting {control:vec4u,farCenterExtent:vec4f,depthCell:vec4f,sun:vec4f,spots:array<RasterSpot,${RASTER_MAX_LOCAL_SHADOW_VIEWS}>,lightSlots:array<vec4u,32>,localLayout:vec4u}
 var<private> uniforms:Uniforms;var<private> dry:Dry;
 @group(0) @binding(0) var geometry:texture_2d<f32>;
 @group(0) @binding(1) var identities:texture_2d<u32>;
@@ -26,6 +27,7 @@ var<private> uniforms:Uniforms;var<private> dry:Dry;
 @group(0) @binding(5) var<storage,read_write> result:array<vec4f>;
 ${rasterReceiverPlaneWGSL}
 ${SVO_GBUFFER_NORMAL_OCT8_WGSL}
+${rasterShadowAtlasWGSL}
 ${sampling}
 fn worldAt(c:vec2i)->vec3f{
  let dimensions=vec2f(textureDimensions(geometry));let uv=(vec2f(c)+.5)/dimensions*vec2f(2,-2)+vec2f(-1,1);
@@ -65,7 +67,7 @@ fn geometricNormal(normal:vec3f,metadata:u32)->vec3f{
     const compute=await device.createComputePipelineAsync({layout:"auto",compute:{module,entryPoint:"main"}});
     const group=device.createBindGroup({layout:compute.getBindGroupLayout(0),entries:[
       {binding:0,resource:geometry.createView()},{binding:1,resource:p.splitOpaqueIdentity.createView()},
-      {binding:2,resource:ao.shadow.createView({dimension:"2d-array"})},{binding:3,resource:{buffer:ao.params,offset:0,size:256}},
+      {binding:2,resource:ao.shadow.createView({dimension:"2d-array"})},{binding:3,resource:{buffer:ao.params,offset:0,size:RASTER_LIGHTING_PARAM_BYTES}},
       {binding:4,resource:{buffer:input}},{binding:5,resource:{buffer:output}},
     ]});
     const encoder=device.createCommandEncoder(),pass=encoder.beginComputePass();pass.setPipeline(compute);pass.setBindGroup(0,group);pass.dispatchWorkgroups(Math.ceil(count/32));pass.end();encoder.copyBufferToBuffer(output,0,read,0,output.size);device.queue.submit([encoder.finish()]);await read.mapAsync(GPUMapMode.READ);

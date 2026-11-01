@@ -386,6 +386,13 @@ export interface SvoSurfaceMeshReceipt {
  * (it may during a whole build and until that build's reserve is in place;
  * an edit never enlarges it).
  */
+/** Camera-dependent withholding does not invalidate completed world geometry.
+ * Pending publications and construction failures still require the GPU check. */
+export function surfaceMeshGeometrySettled(status: Pick<SvoSurfaceMeshStatus,"state"|"fallbackReason"|"requirementComplete"> | undefined): boolean {
+  return status?.state==="ready" || status?.state==="blocked" && status.requirementComplete===true
+    && (status.fallbackReason==="inside-solid" || status.fallbackReason==="smooth");
+}
+
 export function interpretSurfaceMeshState(words: ArrayLike<number>, context: { arenaBytes: number; maximumBytes: number; growable: boolean }): SvoSurfaceMeshReceipt {
   const W = SVO_SURFACE_MESH_STATE;
   const word = (index: number) => words[index] ?? 0;

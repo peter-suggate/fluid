@@ -1,3 +1,4 @@
+import { WATER_INTERFACE_DEPTH, waterInterfaceDepthWGSL } from "./water-interface-depth";
 /** Optical rendering for the retained secondary-particle source ABI. */
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 
@@ -13,6 +14,7 @@ export interface GPUSecondaryParticleSource {
 }
 
 export const secondaryParticleOpticalShader = /* wgsl */ `
+${waterInterfaceDepthWGSL}
 struct ViewUniforms {
   viewport: vec4f,
   cameraPosition: vec4f,
@@ -67,7 +69,7 @@ fn project(world: vec3f) -> vec4f {
   let eyeDepth = dot(relative, forward);
   let aspect = view.viewport.x / max(view.viewport.y, 1.0);
   let ndc = vec2f(dot(relative, cameraRight()) / (max(eyeDepth, 0.001) * aspect * cameraTanHalfFov()), dot(relative, cameraUp()) / (max(eyeDepth, 0.001) * cameraTanHalfFov()));
-  return vec4f(ndc * eyeDepth, clamp(eyeDepth / 50.0, 0.0, 1.0) * eyeDepth, eyeDepth);
+  return vec4f(ndc * eyeDepth, WATER_INTERFACE_NEAR_M, eyeDepth);
 }
 
 @vertex
@@ -186,7 +188,7 @@ export class SecondaryParticleRenderPipeline {
       vertex: { module: opticalModule, entryPoint: "ellipsoidVertex" },
       fragment: { module: opticalModule, entryPoint, targets: [{ format: "rgba32float" }, { format: "rgba16float" }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
-      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
+      depthStencil: { format: WATER_INTERFACE_DEPTH.format, depthWriteEnabled: true, depthCompare: WATER_INTERFACE_DEPTH.compare }
     });
     [this.opticalFrontPipeline, this.opticalBackPipeline] = await Promise.all([
       this.device.createRenderPipelineAsync(opticalDescriptor("Secondary spray front interfaces", "ellipsoidFront")),

@@ -14,6 +14,22 @@ fn sampledMaterialPbr(volumeBase:u32,paletteBase:u32,point:vec3f)->SampledMateri
   var result:SampledMaterialPbr;
   if(paletteBase==0u){return result;}
   let samples=sampledMaterialWeights(volumeBase,point);
+  // Most imported faces have one authored material at every contributing
+  // corner. Resolve that common case once, retaining partial weights at air.
+  var sharedId=0u;var total=0.0;var mixed=false;
+  for(var corner=0u;corner<8u;corner++){
+    let localId=samples.ids[corner];let w=samples.weights[corner];
+    if(localId==0u||w<=0.0){continue;}
+    if(sharedId!=0u&&sharedId!=localId){mixed=true;break;}
+    sharedId=localId;total+=w;
+  }
+  if(!mixed){
+    if(sharedId==0u){return result;}
+    let id=paletteBase+sharedId-1u;let material=${loadMaterial}(id);
+    if(!${validMaterial}(material,id)){return result;}
+    return SampledMaterialPbr(material.baseColorOpacity.xyz,material.emissiveRoughness.w,
+      material.emissiveRoughness.xyz,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,total);
+  }
   for(var corner=0u;corner<8u;corner++){
     let w=samples.weights[corner];let localId=samples.ids[corner];
     if(localId==0u||w<=0.0){continue;}

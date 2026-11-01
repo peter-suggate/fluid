@@ -10,7 +10,7 @@ import struct
 
 ROOT=Path(__file__).resolve().parents[2]
 TEXTURES=ROOT/'assets/alpine-lake/textures'
-ROCK_FACTOR=(.45,.49,.51,1)
+ROCK_FACTOR=(.58,.55,.50,1)
 
 
 def photographed_rock_material():

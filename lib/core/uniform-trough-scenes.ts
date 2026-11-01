@@ -1,6 +1,6 @@
 import { cameraPosition } from "./math";
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
-import { sceneLatticeDimensions } from "./scene-lattice-dimensions";
+import { LATTICE_PAGE_CELLS, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 import { bathInteriorContains, bathSolidContains, bathVoxelBoxes, BATH_FLOOR_HEIGHT_M } from "./voxel-bath";
 
 export type UniformTroughMode = "dam-break" | "settled-tank" | "hose-fill";
@@ -84,6 +84,17 @@ export function createUniformTroughScene(
         z: (box.maximumExclusive[2] + 0.25) * cell[2] - 0.6 },
     }));
   } else {
+    // The empty bath's census only sees the nozzle. Its default column
+    // reserve cannot cover the water spreading across the rest of the bath.
+    // Hold the full footprint, with two support layers above the open brim
+    // for the surface certificate, and the AIR/SOLID sentinel blocks.
+    const pages = dimensions.map(n => Math.ceil(n / LATTICE_PAGE_CELLS));
+    const growthPages = pages[0]! * (pages[1]! + 2) * pages[2]!;
+    scene.fluid.pagePool = { blocks: growthPages + 2 };
+    // Detail's automatic footprint is also only the nozzle's. Keep room
+    // for its surface and curved-wall contact as the bath fills, including
+    // the h owners (64 eight-cell bricks per page) at rebuilt resolutions.
+    scene.fluid.tiers = { fineBlocks: growthPages, bricks: 64 * growthPages };
     scene.fluid.inflow = {
       center_m: { x: -1.1, y: 0.9 + BATH_FLOOR_HEIGHT_M, z: 0 },
       radius_m: 0.1,

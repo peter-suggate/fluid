@@ -477,9 +477,9 @@ investigation are under `artifacts/svo-build-edit/`.
 Select **Pen** in the sculpt rail, choose **Draw** or **Carve**, and drag over a
 surface. Diameter is adjustable from 1 to 64 voxels, including with brackets.
 The pen publishes accepted samples during the drag, without a region selection;
-release makes one undo entry, and Escape rolls the whole stroke back. It picks
-and interpolates against the document at the start of the stroke so it does not
-climb its own new geometry. A later stroke picks the newly edited surface.
+release makes one undo entry, and Escape rolls the whole stroke back. Picking
+holds the current footprint steady until the brush leaves it; a return pass
+then follows the edited surface and deepens the cut or builds another layer.
 Leaving the surface breaks the stroke rather than drawing across empty space.
 
 Scenery carving is explicitly tagged in the saved patch history. Old voxel

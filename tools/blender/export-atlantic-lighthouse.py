@@ -15,6 +15,8 @@ import bmesh
 from mathutils import Vector, noise
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from lighthouse_rock_material import photographed_rock_material, assign_rock_uv, write_glb_rock_factor
+from lighthouse_terrain import terrain_height as height
+from lighthouse_weathering import tower_uv
 
 ROOT = Path(__file__).resolve().parents[2]
 parser=argparse.ArgumentParser(description=__doc__)
@@ -54,7 +56,10 @@ def export(name,objects,cell,origin):
         for v in data.vertices:v.co=source.matrix_world@v.co-Vector(origin)
         ob=bpy.data.objects.new(name+'/'+source.name,data);bpy.context.scene.collection.objects.link(ob)
         data.materials.clear()
-        if 'mortar' in source.name.lower():data.materials.append(mortar)
+        if any(m and m.name == 'Atlantic salt-weathered whitewash' for m in source.data.materials):
+            data.materials.append(bpy.data.materials['Atlantic salt-weathered whitewash'])
+            if not data.uv_layers: tower_uv(data,origin)
+        elif 'mortar' in source.name.lower():data.materials.append(mortar)
         elif 'Masonry' in source.name or 'Stone' in source.name or 'Foundation' in source.name:
             for m in stone:data.materials.append(m)
             data.update()
@@ -70,8 +75,21 @@ def export(name,objects,cell,origin):
             data.materials.append(rock)
             assign_rock_uv(data,origin)
         else:data.materials.append(black)
+        # One explicit TEXCOORD_0 convention across primitives. Otherwise
+        # glTF duplicates shared whitewash with texCoord=1 on some fittings.
+        if data.uv_layers:
+            active=data.uv_layers.active
+            for layer in list(data.uv_layers):
+                if layer != active:data.uv_layers.remove(layer)
+            data.uv_layers[0].name='UVMap'
+            data.uv_layers.active_index=0
+            data.uv_layers[0].active_render=True
         bm=bmesh.new();bm.from_mesh(data)
-        bmesh.ops.remove_doubles(bm,verts=list(bm.verts),dist=.000001)
+        # Boolean reveals create sub-micron slivers. Clean and triangulate
+        # before glTF float32 conversion so the solid stays closed on import.
+        bmesh.ops.remove_doubles(bm,verts=list(bm.verts),dist=.00001)
+        bmesh.ops.triangulate(bm,faces=list(bm.faces))
+        bmesh.ops.dissolve_degenerate(bm,dist=.00001,edges=list(bm.edges))
         bmesh.ops.recalc_face_normals(bm,faces=list(bm.faces))
         bad=sum(not edge.is_manifold for edge in bm.edges)
         if bad:raise ValueError(source.name+': '+str(bad)+' nonmanifold edges')
@@ -93,25 +111,12 @@ tower=[o for o in original if o.type=='MESH' and not any(s in o.name for s in ['
        and not any(m and m.name.startswith('Lantern glass') for m in o.data.materials)
        # Native FVX is opaque: preserve the glazing/lens aperture, including rings.
        and min((o.matrix_world@Vector(c)).z for c in o.bound_box)>5.4]
-if args.asset != 'atlantic-lighthouse-rock':export('atlantic-lighthouse-tower',tower,.04,(7,0,5.8))
+if args.asset != 'atlantic-lighthouse-rock':export('atlantic-lighthouse-tower',tower,.025,(7,0,5.8))
 
 
-rock_layout=json.loads((ROOT/'lib/core/imported-assets/atlantic-lighthouse-rock-layout.json').read_text())
-def height(x,y):
-    z=-y
-    h=.15
-    for r in rock_layout:
-        dx,dz=x-r['x'],z-r['z'];c,s=math.cos(r['yaw']),math.sin(r['yaw'])
-        u,v=(c*dx+s*dz)/r['rx'],(-s*dx+c*dz)/r['rz']
-        q=max(abs(u),abs(v),abs(u+v)*.65,abs(u-v)*.65)
-        top=r['height']+dx*r['tiltX']+dz*r['tiltZ']
-        h=max(h,top-max(0,q-r['core'])*r['height']/(1-r['core']))
-    h+=.07*math.sin(x*3.1+z*1.7)*math.sin(z*2.3-x*.4)*min(1,max(0,h-.15))
-    return 5.8 if math.hypot(x-7,z)<1.55 else h
-
-
-nx,ny=73,81
-verts=[(-2+x*.25,-10+y*.25,height(-2+x*.25,-10+y*.25)) for y in range(ny) for x in range(nx)]
+# Independent dry mesh resolution: 6.25 cm, versus 25 cm fluid collision.
+nx,ny=385,321
+verts=[(-5+x*.0625,-10+y*.0625,height(-5+x*.0625,-10+y*.0625)) for y in range(ny) for x in range(nx)]
 faces=[(x+nx*y,x+1+nx*y,x+1+nx*(y+1),x+nx*(y+1)) for y in range(ny-1) for x in range(nx-1)]
 edge=list(range(nx))+[nx-1+nx*y for y in range(1,ny)]+[x+nx*(ny-1) for x in range(nx-2,-1,-1)]+[nx*y for y in range(ny-2,0,-1)]
 bottom=[]
@@ -123,7 +128,7 @@ faces.append(tuple(reversed(bottom)))
 data=bpy.data.meshes.new('Closed authoritative rock mesh');data.from_pydata(verts,[],faces);data.update()
 ob=bpy.data.objects.new('Fractured rock island',data);bpy.context.scene.collection.objects.link(ob)
 for p in data.polygons:p.use_smooth=True
-if args.asset != 'atlantic-lighthouse-tower':export('atlantic-lighthouse-rock',[ob],.125,(7,0,0))
+if args.asset != 'atlantic-lighthouse-tower':export('atlantic-lighthouse-rock',[ob],.08,(7,0,0))
 bpy.data.objects.remove(ob,do_unlink=True)
 if args.asset and (OUT/'manifest.json').exists():
     existing=json.loads((OUT/'manifest.json').read_text())['assets']

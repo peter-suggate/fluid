@@ -5,18 +5,18 @@
   "asset": "atlantic-lighthouse-tower",
   "source": "atlantic-lighthouse-tower.glb",
   "origin": [
-    -1.56,
-    -0.28,
-    -1.56
+    -1.75,
+    -0.2,
+    -1.75
   ],
   "dimensions": [
-    80,
-    320,
-    80
+    144,
+    520,
+    176
   ],
-  "cellSize": 0.04,
-  "bandWidth": 0.04,
-  "brickCount": 2117,
+  "cellSize": 0.025,
+  "bandWidth": 0.025,
+  "brickCount": 8239,
   "brickCells": 8,
   "nodeStrideBytes": 16,
   "materials": [
@@ -31,11 +31,11 @@
       "metallic": 0.6499999761581421
     },
     {
-      "name": "Runtime | Weathered granite 2",
+      "name": "Runtime | Weathered granite 1",
       "baseColorLinear": [
-        0.11800000071525574,
-        0.11599999666213989,
-        0.10499999672174454
+        0.09399999678134918,
+        0.09350000321865082,
+        0.08500000089406967
       ],
       "roughness": 0.699999988079071,
       "metallic": 0.0
@@ -111,16 +111,6 @@
       "metallic": 0.0
     },
     {
-      "name": "Runtime | Weathered granite 10",
-      "baseColorLinear": [
-        0.3100000023841858,
-        0.29600000381469727,
-        0.26499998569488525
-      ],
-      "roughness": 0.699999988079071,
-      "metallic": 0.0
-    },
-    {
       "name": "Runtime | Dark reflective glazing",
       "baseColorLinear": [
         0.054999999701976776,
@@ -131,68 +121,1303 @@
       "metallic": 0.44999998807907104
     },
     {
-      "name": "Runtime | Weathered granite 11",
+      "name": "Atlantic salt-weathered whitewash",
       "baseColorLinear": [
-        0.33399999141693115,
-        0.31850001215934753,
-        0.2849999964237213
+        0.6908572316169739,
+        0.679962694644928,
+        0.6353392004966736
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Runtime | Weathered granite 10",
+      "baseColorLinear": [
+        0.3100000023841858,
+        0.29600000381469727,
+        0.26499998569488525
       ],
       "roughness": 0.699999988079071,
       "metallic": 0.0
     },
     {
-      "name": "Runtime | Weathered granite 12",
+      "name": "Atlantic salt-weathered whitewash/27,27,26/r0.857",
       "baseColorLinear": [
-        0.3580000102519989,
-        0.3409999907016754,
-        0.3050000071525574
+        0.7311797490658588,
+        0.7311797490658588,
+        0.6715302834483289
       ],
-      "roughness": 0.699999988079071,
+      "roughness": 0.8571428571428571,
       "metallic": 0.0
     },
     {
-      "name": "Runtime | Weathered granite 13",
+      "name": "Atlantic salt-weathered whitewash/26,26,25/r0.857",
       "baseColorLinear": [
-        0.38199999928474426,
-        0.3634999990463257,
-        0.32499998807907104
+        0.6715302834483289,
+        0.6715302834483289,
+        0.6148203434699
       ],
-      "roughness": 0.699999988079071,
+      "roughness": 0.8571428571428571,
       "metallic": 0.0
     },
     {
-      "name": "Runtime | Weathered granite 1",
+      "name": "Atlantic salt-weathered whitewash/28,27,26/r0.857",
       "baseColorLinear": [
-        0.09399999678134918,
-        0.09350000321865082,
-        0.08500000089406967
+        0.7938107350904249,
+        0.7311797490658588,
+        0.6715302834483289
       ],
-      "roughness": 0.699999988079071,
+      "roughness": 0.8571428571428571,
       "metallic": 0.0
     },
     {
-      "name": "Runtime | Weathered granite 14",
+      "name": "Atlantic salt-weathered whitewash/28,27,27/r0.857",
       "baseColorLinear": [
-        0.4059999883174896,
-        0.38600000739097595,
-        0.3449999988079071
+        0.7938107350904249,
+        0.7311797490658588,
+        0.7311797490658588
       ],
-      "roughness": 0.699999988079071,
+      "roughness": 0.8571428571428571,
       "metallic": 0.0
     },
     {
-      "name": "Runtime | Recessed salt-aged lime mortar",
+      "name": "Atlantic salt-weathered whitewash/27,26,26/r0.857",
       "baseColorLinear": [
-        0.23499999940395355,
-        0.23000000417232513,
-        0.20499999821186066
+        0.7311797490658588,
+        0.6715302834483289,
+        0.6715302834483289
       ],
-      "roughness": 0.8999999761581421,
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/28,28,27/r0.857",
+      "baseColorLinear": [
+        0.7938107350904249,
+        0.7938107350904249,
+        0.7311797490658588
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/26,25,24/r0.714",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.6148203434699,
+        0.5610070143871524
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/27,26,25/r0.857",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.6715302834483289,
+        0.6148203434699
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,25,23/r0.857",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.6148203434699,
+        0.5100464056783279
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,25,24/r0.857",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.6148203434699,
+        0.5610070143871524
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,22,21/r0.857",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.461893589520877,
+        0.41650253270397164
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,24,23/r0.714",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5610070143871524,
+        0.5100464056783279
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,25,24/r0.714",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.6148203434699,
+        0.5610070143871524
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,24,23/r0.714",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5610070143871524,
+        0.5100464056783279
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,24,24/r0.714",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5610070143871524,
+        0.5610070143871524
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,23,23/r0.714",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.5100464056783279
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,23,22/r0.714",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5100464056783279,
+        0.461893589520877
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,22,20/r0.714",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,23,21/r0.714",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5100464056783279,
+        0.41650253270397164
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,21,20/r0.714",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.41650253270397164,
+        0.373826020963952
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,22,21/r0.714",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.461893589520877,
+        0.41650253270397164
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/26,26,24/r0.857",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.6715302834483289,
+        0.5610070143871524
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/26,25,24/r0.857",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.6148203434699,
+        0.5610070143871524
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,20,18/r0.714",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.373826020963952,
+        0.29642135334252967
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,22,21/r0.714",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.461893589520877,
+        0.41650253270397164
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,21,19/r0.714",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.41650253270397164,
+        0.33381557452228633
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,20,18/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.29642135334252967
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,19,17/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,19,18/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.29642135334252967
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,23,22/r0.714",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.461893589520877
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/26,25,25/r0.857",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.6148203434699,
+        0.6148203434699
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,20,19/r0.714",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.373826020963952,
+        0.33381557452228633
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,18,16/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,23,22/r0.857",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.461893589520877
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,21,19/r0.857",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.41650253270397164,
+        0.33381557452228633
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,23,21/r0.857",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.41650253270397164
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,22,20/r0.857",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/26,25,25/r0.714",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.6148203434699,
+        0.6148203434699
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/26,26,25/r0.714",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.6715302834483289,
+        0.6148203434699
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,17,15/r0.714",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/17,16,14/r0.714",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/17,16,15/r0.714",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/16,15,14/r0.714",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.1719559031258607
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/16,15,13/r0.714",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,18,17/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.26159205028716875
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,18,16/r0.714",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,17,16/r0.714",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,19,17/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,22,22/r0.714",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.461893589520877,
+        0.461893589520877
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,21,20/r0.714",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.41650253270397164,
+        0.373826020963952
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/16,16,14/r0.714",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,21,21/r0.714",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.41650253270397164,
+        0.41650253270397164
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/17,17,15/r0.714",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,20,19/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.33381557452228633
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,19,18/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.29642135334252967
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,23,21/r0.857",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5100464056783279,
+        0.41650253270397164
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,24,23/r0.857",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5610070143871524,
+        0.5100464056783279
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,24,23/r0.857",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5610070143871524,
+        0.5100464056783279
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,20,17/r0.857",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.373826020963952,
+        0.26159205028716875
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,20,18/r0.857",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.373826020963952,
+        0.29642135334252967
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,19,17/r0.857",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,23,23/r0.714",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5100464056783279,
+        0.5100464056783279
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,24,22/r0.857",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5610070143871524,
+        0.461893589520877
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,18,15/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/27,27,25/r0.857",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.7311797490658588,
+        0.6148203434699
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,24,22/r0.714",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5610070143871524,
+        0.461893589520877
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,21,20/r0.857",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.41650253270397164,
+        0.373826020963952
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,19,18/r0.857",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.29642135334252967
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,21,19/r0.714",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.41650253270397164,
+        0.33381557452228633
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,23,23/r0.857",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.5100464056783279
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,25,23/r0.714",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.6148203434699,
+        0.5100464056783279
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,24,24/r0.857",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5610070143871524,
+        0.5610070143871524
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/27,26,25/r0.714",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.6715302834483289,
+        0.6148203434699
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,23,22/r0.857",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.5100464056783279,
+        0.461893589520877
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/27,26,26/r0.714",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.6715302834483289,
+        0.6715302834483289
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/27,27,26/r0.714",
+      "baseColorLinear": [
+        0.7311797490658588,
+        0.7311797490658588,
+        0.6715302834483289
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,22,20/r0.857",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,20,19/r0.857",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.373826020963952,
+        0.33381557452228633
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,21,19/r0.857",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.41650253270397164,
+        0.33381557452228633
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,18,16/r0.857",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,19,17/r0.857",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,18,15/r0.857",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,17,15/r0.857",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,19,17/r0.857",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,19,16/r0.857",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,20,18/r0.857",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.29642135334252967
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,18,16/r0.857",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,22,21/r0.857",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.461893589520877,
+        0.41650253270397164
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,18,17/r0.857",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.29642135334252967,
+        0.26159205028716875
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,18,16/r0.857",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,18,17/r0.714",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.26159205028716875
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,17,15/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,16,14/r0.714",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,19,16/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/26,26,24/r0.714",
+      "baseColorLinear": [
+        0.6715302834483289,
+        0.6715302834483289,
+        0.5610070143871524
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,21,20/r0.857",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.41650253270397164,
+        0.373826020963952
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/23,22,20/r0.714",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,17,15/r0.857",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,17,16/r0.857",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,21,18/r0.857",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.41650253270397164,
+        0.29642135334252967
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,21,18/r0.857",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.41650253270397164,
+        0.29642135334252967
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,16,14/r0.857",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/17,16,14/r0.857",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.1719559031258607
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,17,14/r0.714",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,18,16/r0.714",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.29642135334252967,
+        0.229274769922375
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/17,16,15/r0.857",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.229274769922375,
+        0.19941489015347055
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,20,19/r0.857",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.33381557452228633
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,17,14/r0.857",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,17,16/r0.857",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/20,20,17/r0.857",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.373826020963952,
+        0.26159205028716875
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/17,17,15/r0.857",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.19941489015347055
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/25,24,22/r0.857",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5610070143871524,
+        0.461893589520877
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,20,18/r0.857",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.373826020963952,
+        0.29642135334252967
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/22,22,22/r0.714",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.461893589520877,
+        0.461893589520877
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,18,15/r0.714",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,19,16/r0.857",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/18,18,15/r0.857",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,20,20/r0.714",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.373826020963952,
+        0.373826020963952
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/16,15,14/r0.857",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.1719559031258607
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/16,15,13/r0.857",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/24,23,21/r0.714",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.41650253270397164
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/15,15,13/r0.714",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/17,17,16/r0.714",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.26159205028716875,
+        0.229274769922375
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/15,14,12/r0.714",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.1240040094060311
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/15,14,13/r0.714",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.14683923082122904
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/19,19,16/r0.714",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic salt-weathered whitewash/21,19,17/r0.714",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.33381557452228633,
+        0.26159205028716875
+      ],
+      "roughness": 0.7142857142857143,
       "metallic": 0.0
     }
   ],
   "sign": "negative-inside",
-  "texturePolicy": "Closest-triangle UV linear base colour, roughness and tangent normal maps; independent geometric gradient; metallic retained",
-  "uniqueNodes": 1151380,
-  "insideNodes": 303299
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 4425229,
+  "insideNodes": 1768252,
+  "surfaceMapping": {
+    "url": "/assets/atlantic-lighthouse/atlantic-lighthouse-tower.fvm.gz",
+    "sha256": "7922c372b18ae805cb9a90899c1350a221a23d532da1506d1baf22514bb23bc0"
+  }
 }
