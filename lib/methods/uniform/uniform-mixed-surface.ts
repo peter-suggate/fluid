@@ -1579,13 +1579,15 @@ fn umAdvectStore(vertex:vec3u,width:u32){
 // store them (the wall continuations are then the identity).
 ${uniformMixedWallFaceWGSL}
 var<workgroup> wallListed:atomic<u32>;
+var<workgroup> wallDeep:atomic<u32>;
 var<workgroup> wallBase:u32;
+var<workgroup> wallDeepBase:u32;
 @compute @workgroup_size(64) fn advectWalls(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let lanes=select(0u,1089u*umWallFaceCount(),params.hDt.w>0.0);
  for(var first=0u;first<lanes;first+=64u*groups.x){
-  if(lane==0u){atomicStore(&wallListed,0u);}
+  if(lane==0u){atomicStore(&wallListed,0u);atomicStore(&wallDeep,0u);}
   workgroupBarrier();
-  let i=first+gid.x;var word=0xffffffffu;var slot=0u;
+  let i=first+gid.x;var word=0xffffffffu;var slot=0u;var deep=false;
   if(i<lanes){
    let face=umWallFace(i/1089u);let vertex=umWallFaceVertex(face,i%1089u);
    var width=1u;
@@ -1601,7 +1603,10 @@ var<workgroup> wallBase:u32;
      let far=umFarAir(vec3u(vertex),width);
      if(far>=0.0){umRecordRegion(vec3u(vertex),0u);umStoreSurface(vec3u(vertex),width,far);}
      else{
-      slot=atomicAdd(&wallListed,1u);
+      // As umQueueVertex: a vertex two widths from the surface joins the
+      // list's end, so a SIMD group of advectDeferred holds one path.
+      deep=abs(umLatticeLoad(vertex,width))>=2.0*f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+      if(deep){slot=atomicAdd(&wallDeep,1u);}else{slot=atomicAdd(&wallListed,1u);}
       word=umVertexAt(vec3u(vertex))|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);
      }
     }
@@ -1609,9 +1614,9 @@ var<workgroup> wallBase:u32;
   }
   workgroupBarrier();
   // One list atomic per group and round.
-  if(lane==0u){let n=atomicLoad(&wallListed);if(n>0u){wallBase=atomicAdd(&deferred.header[0],n);}}
+  if(lane==0u){let n=atomicLoad(&wallListed);if(n>0u){wallBase=atomicAdd(&deferred.header[0],n);}let d=atomicLoad(&wallDeep);if(d>0u){wallDeepBase=atomicAdd(&deferred.header[5],d);}}
   workgroupBarrier();
-  if(word!=0xffffffffu){deferred.data[wallBase+slot]=word;}
+  if(word!=0xffffffffu){if(deep){deferred.data[UM_CUBIC_BASE-1u-(wallDeepBase+slot)]=word;}else{deferred.data[wallBase+slot]=word;}}
  }
 }
 // Six samples through one sampler call site: low then high per axis. The
