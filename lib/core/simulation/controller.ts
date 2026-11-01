@@ -1362,6 +1362,22 @@ export class SimulationController {
   }
 
   /**
+   * A control widget's write: runtime input, not authoring. The document takes
+   * it, so a save keeps the throttle where the user left it, but no history is
+   * recorded and nothing reseeds — a control that would need a reset is a
+   * provider bug, refused here rather than quietly restarting the run.
+   */
+  applyRuntimeControl(patch: Partial<SceneDescription>, paneId: PaneId = PRIMARY_PANE_ID) {
+    const sceneStore = this.session(paneId).scene.getState();
+    const before = sceneStore.scene;
+    if (sceneEditRequiresReset(before, { ...before, ...patch }, this.session(paneId).method.getState().methodId)) {
+      throw new Error("A runtime control cannot change what the solver was built from");
+    }
+    sceneStore.patchScene(patch);
+    this.adoptRigidBodies(this.session(paneId).scene.getState().scene, paneId);
+  }
+
+  /**
    * Reconcile the running roster with an edit that did not take a reset.
    *
    * `reset` is the only other place a pane's roster is built, so without this a

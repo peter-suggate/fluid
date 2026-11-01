@@ -42,11 +42,22 @@ function same(a: ActionValue, b: ActionValue): boolean {
 
 const clamp = (value: number) => Math.max(-1, Math.min(1, value));
 
+/** A key code as its cap reads, for prompts and on-screen buttons. */
+export function keyLabel(code: string): string {
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  if (code.startsWith("Shift")) return "Shift";
+  if (code.startsWith("Arrow")) return code.slice(5);
+  return code;
+}
+
 export class ViewportInputRouter {
   private bindings: readonly Binding[] = [];
   private readonly keys = new Set<string>();
   private readonly buttons = new Set<number>();
   private motion: [number, number] = [0, 0];
+  /** On-screen widgets, by action key: one more held input beside the keys. */
+  private readonly virtuals = new Map<string, ActionValue>();
   /** The last value each held action was reported with. */
   private readonly sent = new Map<string, { readonly binding: Binding; readonly value: ActionValue }>();
 
@@ -72,6 +83,9 @@ export class ViewportInputRouter {
       }
     }
     this.bindings = bindings;
+    // A widget cannot hold what is no longer drivable; `sample` releases what was sent.
+    const live = new Set(bindings.map((binding) => key({ ...binding, actionId: binding.action.id })));
+    for (const id of [...this.virtuals.keys()]) if (!live.has(id)) this.virtuals.delete(id);
   }
 
   /** Whether a key belongs to play right now: bound, or held from when it was. */
@@ -92,6 +106,19 @@ export class ViewportInputRouter {
     const binding = this.bindings.find((candidate) => candidate.entityId === entityId && candidate.behaviorId === behaviorId && candidate.action.id === actionId);
     const input = binding?.action.bindings.find((candidate) => candidate.device === "keyboard");
     return input?.device === "keyboard" ? input.code : undefined;
+  }
+
+  /**
+   * An on-screen control's value for one action, summed with the keys like
+   * another held input. The resting value lets go. Returns whether the action
+   * is drivable right now.
+   */
+  virtual(entityId: string, behaviorId: string, actionId: string, value: ActionValue): boolean {
+    const binding = this.bindings.find((candidate) => candidate.entityId === entityId && candidate.behaviorId === behaviorId && candidate.action.id === actionId);
+    const id = key({ entityId, behaviorId, actionId });
+    if (!binding || binding.delta) { this.virtuals.delete(id); return false; }
+    if (same(value, resting(binding.action.kind))) this.virtuals.delete(id); else this.virtuals.set(id, value);
+    return true;
   }
 
   /** Returns whether the key was claimed. Auto-repeat is claimed but changes nothing. */
@@ -118,6 +145,10 @@ export class ViewportInputRouter {
     const kind = binding.action.kind;
     let on = false;
     let sum: [number, number] = [0, 0];
+    const virtual = this.virtuals.get(key({ ...binding, actionId: binding.action.id }));
+    if (typeof virtual === "boolean") on = virtual;
+    else if (typeof virtual === "number") sum = [virtual, 0];
+    else if (virtual) sum = [virtual[0], virtual[1]];
     for (const input of binding.action.bindings) {
       let value: ActionValue | undefined;
       if (input.device === "keyboard" && this.keys.has(input.code)) value = input.value;
@@ -178,12 +209,13 @@ export class ViewportInputRouter {
     this.sent.clear();
     this.keys.clear();
     this.buttons.clear();
+    this.virtuals.clear();
     this.motion = [0, 0];
     return out;
   }
 
   /** Anything held right now, for asserting the "nothing stuck" rule. */
   holding(): boolean {
-    return this.keys.size > 0 || this.buttons.size > 0 || this.sent.size > 0;
+    return this.keys.size > 0 || this.buttons.size > 0 || this.virtuals.size > 0 || this.sent.size > 0;
   }
 }

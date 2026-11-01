@@ -17,6 +17,8 @@ import {
 } from "./editor-entity";
 import type { EditorAxis } from "./editor-axis-constraint";
 import { boundingRadius } from "./rigid-body";
+import { rigidControlOwnerId } from "./rigid-motor";
+import { rigidAppearanceSkin } from "./rigid-appearance";
 import type { RigidBodyDescription, RigidShape, SceneDescription, Vec3 } from "./model";
 
 /**
@@ -180,6 +182,11 @@ function rigidBodyEntityFor(
     editLabel: (handle) => handle.space === "world"
       ? `Moved ${description.name}` : `Resized ${description.name}`,
     fields: [
+      ...(context.scene.rigidBodies.some(body => body.motorAttachment?.parentId === description.id) ? [{
+        id: "motor-strength", label: "Motor strength", tag: "Motor", unit: "%",
+        value: (description.motorStrength ?? 1) * 100, step: 5, min: -100, max: 100,
+        apply: (value: number) => rigidBodyPatch(context.scene, description.id, { motorStrength: Math.max(-1, Math.min(1, value / 100)) }),
+      }] : []),
       ...positionFields(frame.origin_m,
         (position_m) => rigidBodyPatch(context.scene, description.id, { position_m })),
       {
@@ -239,7 +246,7 @@ function rigidBodyEntityFor(
     ],
     remove: () => ({
       ...context.scene,
-      rigidBodies: context.scene.rigidBodies.filter((body) => body.id !== description.id),
+      rigidBodies: context.scene.rigidBodies.filter((body) => rigidControlOwnerId(body) !== description.id),
     }),
   };
 }
@@ -252,10 +259,11 @@ function rigidBodyEntityFor(
  */
 export const rigidBodyEntity: EditorEntityDefinition = {
   kind: "body",
-  instances: (context) => context.scene.rigidBodies.map(
+  instances: (context) => context.scene.rigidBodies.filter(body => !body.motorAttachment).map(
     (description) => rigidBodyEntityFor(context, description)),
   find: (context, id) => {
-    const description = context.scene.rigidBodies.find((body) => body.id === id);
+    const selected = context.scene.rigidBodies.find((body) => body.id === id);
+    const description = selected && context.scene.rigidBodies.find(body => body.id === rigidControlOwnerId(selected));
     return description && rigidBodyEntityFor(context, description);
   },
   /**
@@ -292,17 +300,18 @@ export const rigidBodyEntity: EditorEntityDefinition = {
   pick: (context, ray, exclude) => {
     let nearest: { id: string; distance_m: number } | undefined;
     for (const description of context.scene.rigidBodies) {
-      if (pickExcluded(exclude, "body", description.id)) continue;
+      const ownerId = rigidControlOwnerId(description);
+      if (description.renderHidden || pickExcluded(exclude, "body", ownerId)) continue;
       const pose = context.bodies.find((body) => body.id === description.id);
       const centre = pose?.position_m ?? description.position_m;
-      const radius = boundingRadius(description);
+      const radius = rigidAppearanceSkin(description)?.radius ?? boundingRadius(description);
       const box: BoxExtent = {
         min: { x: centre.x - radius, y: centre.y - radius, z: centre.z - radius },
         max: { x: centre.x + radius, y: centre.y + radius, z: centre.z + radius },
       };
       const distance_m = pickSolidBox(ray, box);
       if (distance_m !== undefined && (!nearest || distance_m < nearest.distance_m)) {
-        nearest = { id: description.id, distance_m };
+        nearest = { id: ownerId, distance_m };
       }
     }
     return nearest && { selection: { kind: "body", id: nearest.id }, distance_m: nearest.distance_m };

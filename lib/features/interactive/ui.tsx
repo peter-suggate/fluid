@@ -8,6 +8,7 @@ import { viewportProjector, viewportRayForPointer } from "../../core/webgpu-came
 import { editorEntityContext } from "../../core/editor-entity-catalog";
 import { targetAtRay, targetSurfaceNormal } from "../../core/editor-probe-catalog";
 import { useSession } from "../../core/session/session-context";
+import { keyLabel } from "./input-router";
 import { simulation } from "../../core/simulation/controller";
 import type { PaneSession } from "../../core/session/session";
 import type {
@@ -74,13 +75,7 @@ function modalOpen(session: PaneSession): boolean {
     || (typeof document !== "undefined" && document.querySelector("[aria-modal='true'], dialog[open]") !== null);
 }
 
-export function keyLabel(code: string): string {
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  if (code.startsWith("Shift")) return "Shift";
-  if (code.startsWith("Arrow")) return code.slice(5);
-  return code;
-}
+export { keyLabel };
 
 function bindingLabel(action: ActionDefinition | undefined): string | undefined {
   const binding = action?.bindings.find((candidate) => candidate.device !== "pointer-motion");

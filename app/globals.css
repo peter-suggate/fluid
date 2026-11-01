@@ -2660,3 +2660,48 @@ button.rail-cost-name:not(:disabled):hover, button.rail-cost-name[aria-expanded=
 .interactive-inspector-menus { display: flex; gap: 6px; padding: 2px 4px; pointer-events: auto; }
 .interactive-missing, .interactive-field-error { margin: 0; max-width: 240px; padding: 3px 5px; color: var(--red); font: var(--text-micro); pointer-events: auto; }
 .interactive-missing code { font-family: var(--mono); }
+
+/* ---- control widgets: one card per drivable thing, where the scene or the user put it ---- */
+.control-widget-layer { position: absolute; inset: 0; z-index: 8; pointer-events: none; --widget-inset-x: 16px; --widget-inset-top: 64px; --widget-inset-bottom: 16px; }
+.control-widget-group { position: absolute; display: flex; gap: 8px; align-items: flex-end; }
+.control-widget-group:not([style])[data-anchor^="top"] { top: var(--widget-inset-top); align-items: flex-start; }
+.control-widget-group:not([style])[data-anchor^="bottom"] { bottom: var(--widget-inset-bottom); }
+.control-widget-group:not([style])[data-anchor$="left"] { left: var(--widget-inset-x); }
+.control-widget-group:not([style])[data-anchor$="right"] { right: var(--widget-inset-x); }
+.control-widget-group:not([style])[data-anchor="top"], .control-widget-group:not([style])[data-anchor="bottom"] { left: 50%; transform: translateX(-50%); }
+.control-widget-group:not([style])[data-anchor="left"], .control-widget-group:not([style])[data-anchor="right"], .control-widget-group:not([style])[data-anchor="center"] { top: 50%; flex-direction: column; transform: translateY(-50%); }
+.control-widget-group:not([style])[data-anchor="center"] { left: 50%; transform: translate(-50%, -50%); }
+/* A card is the tool rail's chrome, not a look of its own: the viewport under it is the
+   renderer's dark clear in either page theme, so it resolves the dark half of every token
+   (see `.toolstrip`), at the strip's compact control scale, on the same frosted layer. The
+   accent says which thing a card drives — a marker and the lever's fill, nothing more. */
+.control-widget { --widget-accent: var(--accent); position: relative; display: grid; gap: 5px; padding: 4px 6px 6px; color-scheme: dark; color: var(--muted); font: var(--text-micro); pointer-events: auto; touch-action: none; user-select: none;
+  --control-height: 20px; --control-inline-padding: 6px; --control-font-size: var(--size-2); }
+.control-widget::before, .control-widget-menu::before { content: ""; position: absolute; inset: 0; z-index: -1; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--chrome); box-shadow: var(--shadow-card); backdrop-filter: var(--frost-chip); pointer-events: none; }
+.control-widget[data-dragging] { z-index: 1; }
+.control-widget-head { display: flex; align-items: center; gap: 5px; min-height: 18px; }
+.control-widget-head strong { color: var(--muted); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.control-widget-marker { width: 6px; height: 6px; border-radius: 50%; background: var(--widget-accent); }
+.control-widget-grip { display: inline-grid; place-items: center; width: 12px; height: 16px; margin-left: -2px; color: var(--dim); cursor: grab; }
+.control-widget-grip:hover { color: var(--ink); }
+.control-widget[data-dragging] .control-widget-grip { cursor: grabbing; }
+.control-widget-body { display: flex; align-items: flex-end; gap: 8px; }
+.control-widget-buttons { display: grid; gap: 3px; }
+.control-widget-hold { justify-content: space-between; }
+.control-widget-hold[aria-pressed="true"] { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.control-widget-hold kbd { padding: 0 3px; border: 1px solid var(--ui-hair); border-radius: var(--radius-s); color: var(--dim); font: var(--text-tag); }
+.control-widget-caption { color: var(--dim); font: var(--text-tag); letter-spacing: var(--track-wide); text-transform: uppercase; }
+.control-widget-lever, .control-widget-stick-wrap { display: grid; justify-items: center; gap: 2px; }
+/* The lever is the range control stood on end: its 3px line, the thumb's ring. */
+.control-widget-lever-track { position: relative; width: 22px; cursor: ns-resize; background: linear-gradient(0deg, var(--accent-line), var(--accent-wash)) center / 3px 100% no-repeat; }
+.control-widget-lever-track:focus-visible { outline: none; }
+.control-widget-lever-track:focus-visible .control-widget-lever-knob { box-shadow: 0 0 0 3px var(--accent-line); }
+.control-widget-lever-fill { position: absolute; bottom: 0; left: calc(50% - 1.5px); width: 3px; background: var(--widget-accent); }
+.control-widget-lever-zero { position: absolute; left: 3px; right: 3px; height: 1px; background: var(--line-strong); }
+.control-widget-lever-knob { position: absolute; left: calc(50% - 6px); width: 11px; height: 11px; margin-bottom: -3px; border: 1px solid var(--accent); border-radius: 50%; background: var(--well); box-shadow: 0 0 0 3px var(--accent-wash); }
+.control-widget-stick { position: relative; display: grid; place-items: center; border: 1px solid var(--ui-hair); border-radius: 50%; background: var(--well); cursor: grab; }
+.control-widget-stick[data-held] { border-color: var(--accent-line); cursor: grabbing; }
+.control-widget-stick-knob { width: 22px; height: 22px; border: 1px solid var(--accent); border-radius: 50%; background: var(--well); box-shadow: 0 0 0 3px var(--accent-wash); }
+.control-widget-menu { position: absolute; z-index: 2; display: grid; min-width: 150px; padding: 4px; color-scheme: dark; pointer-events: auto; }
+.control-widget-menu button { height: 22px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-s); background: none; color: var(--muted); font: var(--text-micro); text-align: left; cursor: pointer; }
+.control-widget-menu button:hover { background: var(--hover); color: var(--ink); }

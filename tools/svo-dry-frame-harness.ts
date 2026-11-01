@@ -1,3 +1,4 @@
+import { paddleboatSkin } from "../lib/core/paddleboat-render";
 import { svoRenderScenePublication, type SvoRenderScenePublication } from "../lib/svo/features/scene-publication/svo-render-scene-publication";
 import { BUB_RENDER_SHAPE, robotRenderExtent, robotRenderRadius } from '../lib/interaction/features/robot/render';
 import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
@@ -221,11 +222,12 @@ export function packSvoDryRigidBodies(scene: SceneDescription) {
   bodies.slice(0, 12).forEach((body, index) => {
     const offset = index * 16;
     const shape = body.description.shape;
+    const skin = paddleboatSkin(body.description);
     const robotExtent = robotRenderExtent(body);
-    const half = robotExtent ?? sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
+    const half = skin?.half ?? robotExtent ?? sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
     const color = SCENE_SHAPE_PALETTE_LINEAR[sceneShapeCode(shape)];
-    bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, robotRenderRadius(body) ?? boundingRadius(body)], offset);
-    bodyData.set([half[0], half[1], half[2], robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape)], offset + 4);
+    bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, skin?.radius ?? robotRenderRadius(body) ?? boundingRadius(body)], offset);
+    bodyData.set([half[0], half[1], half[2], skin?.shape ?? (robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape))], offset + 4);
     bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
     bodyData.set([color[0], color[1], color[2], body.description.renderHidden ? -1 : 0], offset + 12);
   });

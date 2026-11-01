@@ -1,3 +1,4 @@
+import { RIGID_MOTOR_FLOATS, rigidMotorWGSL, rigidControlOwnerId, updateRigidMotorDrive, type RigidMotorDrive } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import { sculptCollisionWGSL } from "./sculpt-collision.wgsl";
 import type { SceneDescription } from "./model";
@@ -435,7 +436,7 @@ ${terrainContact ? rigidTerrainBindingWGSL : ""}
 @group(0) @binding(8) var<storage, read_write> immersedVolumes: array<f32>;
 ${solidWorldContact ? rigidSolidWorldBindingWGSL : ""}
 
-@group(0) @binding(11) var<uniform> rigidSkins: array<vec4f,12>;
+${rigidMotorWGSL}
 fn qConjugate(q: vec4f) -> vec4f { return vec4f(q.x, -q.yzw); }
 fn qMultiply(a: vec4f, b: vec4f) -> vec4f {
   return vec4f(a.x*b.x-dot(a.yzw,b.yzw), a.x*b.yzw+b.x*a.yzw+cross(a.yzw,b.yzw));
@@ -506,6 +507,7 @@ fn editedTerrainContact(body:ptr<function,RigidBody>){
 }` : ""}
 ${solidWorldContact ? rigidSolidWorldContactWGSL(solidWorldContact) : ""}
 fn solveBodyPair(aIndex: u32,bIndex: u32) {
+  if(motors[aIndex].pivotParent.w>.5||motors[bIndex].pivotParent.w>.5){return;}
   var a=bodies[aIndex];var b=bodies[bIndex];let rho=max(params.step.y,1e-9);
   let inverseA=a.inverseMassInertia.x/rho;let inverseB=b.inverseMassInertia.x/rho;let inverseTotal=inverseA+inverseB;
   if(inverseTotal<=0.0){return;}
@@ -527,7 +529,7 @@ fn solveBodyPair(aIndex: u32,bIndex: u32) {
 }
 fn publish(index: u32) {
   let body=bodies[index];let shape=rigidShapeTag(body);
-  let skin=rigidSkins[index];
+  let skin=motors[index].renderHalfShape;
   let half=select(rigidShapeRenderHalf(shape,body.dimensions.xyz),skin.xyz,skin.w>0.0);
   let color=rigidShapePalette(shape);
   renderBodies[index]=RenderBody(vec4f(body.positionShape.xyz,select(body.dimensions.w,length(half),skin.w>0.0)),vec4f(half,select(body.positionShape.w,skin.w,skin.w>0.0)),body.orientation,vec4f(color,body.material.w));
@@ -546,7 +548,7 @@ fn publishMotion(index:u32,previousBody:RigidBody,currentBody:RigidBody,dt:f32){
   let old=rigidMotion[index];let generation=bitcast<u32>(currentBody.material.y);let previousGeneration=old.publication.x;
   let currentQ=svoPrimitiveMotionQuaternionNormalize(motionQuaternionXyzw(currentBody.orientation));var previousQ=svoPrimitiveMotionQuaternionNormalize(motionQuaternionXyzw(previousBody.orientation));var flags=0u;
   if(dot(previousQ,currentQ)<0.0){previousQ=-previousQ;flags|=SVO_PRIMITIVE_MOTION_SHORTEST_FLIP;}
-  let deltaPosition=currentBody.positionShape.xyz-previousBody.positionShape.xyz;let rotationDot=clamp(abs(dot(previousQ,currentQ)),0.0,1.0);let angularDisplacement=2.0*acos(rotationDot);let radius=max(max(currentBody.dimensions.w,length(rigidSkins[index].xyz)),1e-6);let maximumDisplacement=length(deltaPosition)+2.0*radius*sin(.5*angularDisplacement);let motionLimit=min(.5,2.0*max(params.coupling.w,1e-6));
+  let deltaPosition=currentBody.positionShape.xyz-previousBody.positionShape.xyz;let rotationDot=clamp(abs(dot(previousQ,currentQ)),0.0,1.0);let angularDisplacement=2.0*acos(rotationDot);let skinRadius=length(motors[index].renderHalfShape.xyz);let radius=max(max(currentBody.dimensions.w,skinRadius),1e-6);let maximumDisplacement=length(deltaPosition)+2.0*radius*sin(.5*angularDisplacement);let motionLimit=min(.5,2.0*max(params.coupling.w,1e-6));
   let generationContinuous=generation!=0u&&generation==previousGeneration;let revisionContinuous=generationContinuous&&motionTransformMatches(old,previousBody);let teleport=maximumDisplacement>motionLimit;let valid=dt>1e-8&&generationContinuous&&revisionContinuous&&!teleport;
   if(valid){flags|=SVO_PRIMITIVE_MOTION_VALID;}if(length(deltaPosition)<=1e-8&&angularDisplacement<=1e-8){flags|=SVO_PRIMITIVE_MOTION_STATIC;}if(revisionContinuous){flags|=SVO_PRIMITIVE_MOTION_REVISION_CONTINUOUS;}if(generationContinuous){flags|=SVO_PRIMITIVE_MOTION_GENERATION_CONTINUOUS;}if(teleport){flags|=SVO_PRIMITIVE_MOTION_TELEPORT;}
   let previousRevision=old.identityRevision.z;let currentRevision=previousRevision+1u;let linearVelocity=select(vec3f(0.0),currentBody.linearVelocity.xyz,valid);let angularVelocity=select(vec3f(0.0),currentBody.angularVelocity.xyz,valid);let shape=i32(round(currentBody.positionShape.w));
@@ -581,15 +583,16 @@ fn pickRigidBody(@builtin(global_invocation_id) id: vec3u) {
 @compute @workgroup_size(1)
 fn integrate(@builtin(global_invocation_id) id: vec3u) {
   if(any(id!=vec3u(0))){return;}let count=u32(round(params.step.z));let dt=params.step.x;let rho=max(params.step.y,1e-9);let snapshots=max(params.step.w,1.0);
+  gatherMotorTraction(count);
   var previousBodies:array<RigidBody,12>;for(var index=0u;index<12u;index++){previousBodies[index]=bodies[index];}
   for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];
     let base=index*12u;let wet=f32(atomicLoad(&exchange[base+6u]))/65536.0/snapshots;let displaced=min(max(0.0,wet*params.coupling.x),bodyVolume(body));
     // Static bodies retain the analytic authored-waterline volume uploaded by
-    // syncBodies. Only an integrating pose needs a recurring immersed update.
+    // syncBodies. Free, held and motor-attached poses need a recurring immersed update.
     // A held body is on the moving side of that line and not the integrating
     // one: a cup carried into the tank has to keep displacing water even while
     // the hand holding it refuses gravity.
-    if(body.material.z>0.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}}
+    if(body.material.z>0.5||motors[index].pivotParent.w>.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}}
     if(body.material.z>0.5&&body.material.z<1.5){
       let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;
       let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;
@@ -624,6 +627,7 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
   // would spin off the instant it is let go — is rolled back to the pose the
   // pointer authored. It still pushes its neighbours; nothing pushes back.
   for(var index=0u;index<12u;index++){if(index>=count){break;}if(bodies[index].material.z>1.5){bodies[index]=previousBodies[index];}}
+  for(var index=0u;index<count;index++){attachMotor(index,params.gravity.w,dt);}
   for(var index=0u;index<12u;index++){if(index<count){publish(index);publishMotion(index,previousBodies[index],bodies[index],dt);}else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}}
 }
 `;
@@ -645,7 +649,11 @@ export class WebGPURigidBodySystem {
   private readonly stateScratch: GPUBuffer;
   private readonly renderScratch: GPUBuffer;
   private readonly motionScratch: GPUBuffer;
-  private readonly skinBuffer: GPUBuffer;
+  private readonly motorBuffer: GPUBuffer;
+  private motorTime_s = 0;
+  private motorStrengths: number[] = [];
+  private motorDrives = new Map<string, RigidMotorDrive>();
+  private selectionOwners: number[] = [];
   private readonly paramsBuffer: GPUBuffer;
   private pipeline!: GPUComputePipeline;
   private bindGroup!: GPUBindGroup;
@@ -690,7 +698,7 @@ export class WebGPURigidBodySystem {
     this.stateScratch = device.createBuffer({ label: "GPU rigid-body roster scratch", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderScratch = device.createBuffer({ label: "GPU rigid render roster scratch", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionScratch = device.createBuffer({ label: "GPU rigid motion roster scratch", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.skinBuffer = device.createBuffer({ label: "Rigid appearance bounds", size: GPU_RIGID_BODY_CAPACITY * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.motorBuffer = device.createBuffer({label:"Rigid motor attachments and skins",size:12*RIGID_MOTOR_FLOATS*4,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.paramsBuffer = device.createBuffer({ label: "GPU rigid-body step parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickParamsBuffer = device.createBuffer({ label: "GPU rigid-body pick ray", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickResultBuffer = device.createBuffer({ label: "GPU rigid-body pick result", size: GPU_RIGID_PICK_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -724,7 +732,7 @@ export class WebGPURigidBodySystem {
       { binding: 3, resource: { buffer: this.paramsBuffer } },
       { binding: 7, resource: { buffer: this.motionBuffer } },
       { binding: 8, resource: { buffer: this.immersedVolumeBuffer } },
-      { binding: 11, resource: { buffer: this.skinBuffer } },
+      { binding: 11, resource: { buffer: this.motorBuffer } },
     ];
     if (this.terrainTexture) entries.push({ binding: 4,
       resource: this.terrainTexture.createView() });
@@ -852,13 +860,29 @@ export class WebGPURigidBodySystem {
   private uploadBodies(bodies: readonly RigidBodyState[]) {
     const active = bodies.slice(0, GPU_RIGID_BODY_CAPACITY);
     const ids = active.map((body) => body.description.id);
-    const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion,body.description.renderHidden,body.description.fluidBoundary,body.description.appearance]));
+    const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion,body.description.renderHidden,body.description.fluidBoundary,body.description.motorAttachment,body.description.appearance]));
     const authored = active.map((body) => JSON.stringify([body.description.position_m,body.description.orientation,body.description.linearVelocity_m_s,body.description.angularVelocity_rad_s]));
     const commands = active.map((body) => JSON.stringify([body.position_m,body.orientation,body.linearVelocity_m_s,body.angularVelocity_rad_s,Boolean(body.held)]));
-    if (JSON.stringify([ids,structural,authored,commands]) === JSON.stringify([this.bodyIds,this.structuralSignatures,this.authoredTransformSignatures,this.commandSignatures])) return;
-    const skins = new Float32Array(GPU_RIGID_BODY_CAPACITY * 4);
-    active.forEach((body,index) => { const skin=rigidAppearanceSkin(body.description); if(skin)skins.set([...skin.half,skin.shape],index*4); });
-    this.device.queue.writeBuffer(this.skinBuffer,0,skins);
+    const sameBodies = JSON.stringify([ids,structural,authored,commands]) === JSON.stringify([this.bodyIds,this.structuralSignatures,this.authoredTransformSignatures,this.commandSignatures]);
+    const strengths = active.map(body => body.description.motorStrength ?? 1);
+    if (sameBodies && JSON.stringify(strengths) === JSON.stringify(this.motorStrengths)) return;
+    this.motorStrengths = strengths;
+    this.selectionOwners = active.map(body => ids.indexOf(rigidControlOwnerId(body.description)));
+    const nextDrives = new Map<string, RigidMotorDrive>();
+    const motorData = new Float32Array(12*RIGID_MOTOR_FLOATS);
+    active.forEach((body,index) => {
+      const m=body.description.motorAttachment, at=index*RIGID_MOTOR_FLOATS, skin=rigidAppearanceSkin(body.description);
+      if(m){const parent=ids.indexOf(m.parentId);if(parent<0)throw new Error(`Missing motor parent ${m.parentId}`);
+        const drive = updateRigidMotorDrive(m, strengths[parent]!, this.motorTime_s, this.motorDrives.get(body.description.id));
+        nextDrives.set(body.description.id, drive);
+        motorData.set([m.pivot_m.x,m.pivot_m.y,m.pivot_m.z,parent+1,m.offset_m.x,m.offset_m.y,m.offset_m.z,m.phase_rad + drive.phaseOffset_rad,
+          m.axis.x,m.axis.y,m.axis.z,m.angularSpeed_rad_s * drive.strength,m.orientation.w,m.orientation.x,m.orientation.y,m.orientation.z,m.startTime_s,m.rampUp_s,0,0],at);}
+      if(skin)motorData.set([...skin.half,skin.shape],at+20);
+    });
+    this.device.queue.writeBuffer(this.motorBuffer,0,motorData);
+    this.motorDrives = nextDrives;
+    // A drive command touches neither body poses nor momentum, even when paused.
+    if (sameBodies) return;
     this.bodyCount = active.length;
     this.hiddenBodies = active.map(body => Boolean(body.description.renderHidden));
     const stateStorage = new ArrayBuffer(GPU_RIGID_STATE_BYTES), state = new Float32Array(stateStorage), stateWords = new Uint32Array(stateStorage);
@@ -889,7 +913,7 @@ export class WebGPURigidBodySystem {
       // cup was packed with a bounding sphere it does not have.
       const radius = boundingRadius(body.description);
       // The render-only selection lane uses -1 for invisible collision bodies.
-      const selection = body.description.renderHidden ? -1 : index === this.selectedIndex ? 1 : 0;
+      const selection = body.description.renderHidden ? -1 : this.selectionOwners[index] === this.selectedIndex ? 1 : 0;
       // A held body is immovable rather than weightless: zero inverse mass and
       // inertia is what makes `planeContact` return early and `applyImpulse` a
       // no-op, so a wall or a neighbouring crate cannot push the thing in the
@@ -949,10 +973,13 @@ export class WebGPURigidBodySystem {
   }
 
   setSelectedIndex(index: number) {
-    const next = index >= 0 && index < this.bodyCount && !this.hiddenBodies[index] ? index : -1;
+    const next = index >= 0 && index < this.bodyCount && !this.hiddenBodies[index] ? this.selectionOwners[index]! : -1;
     if (next === this.selectedIndex) return;
     const write = (bodyIndex: number, selected: number) => { if (bodyIndex < 0) return; selected = this.hiddenBodies[bodyIndex] ? -1 : selected; this.device.queue.writeBuffer(this.stateBuffer, bodyIndex * GPU_RIGID_STATE_FLOATS * 4 + 31 * 4, new Float32Array([selected])); this.device.queue.writeBuffer(this.renderBuffer, bodyIndex * GPU_RIGID_RENDER_FLOATS * 4 + 15 * 4, new Float32Array([selected])); };
-    write(this.selectedIndex,0);write(next,1);this.selectedIndex=next;
+    for (let i = 0; i < this.bodyCount; i++) {
+      if (this.selectionOwners[i] === this.selectedIndex || this.selectionOwners[i] === next) write(i, this.selectionOwners[i] === next ? 1 : 0);
+    }
+    this.selectedIndex=next;
   }
 
   /**
@@ -993,17 +1020,22 @@ export class WebGPURigidBodySystem {
       await readback.mapAsync(GPUMapMode.READ);
       const bytes=readback.getMappedRange(),words=new Uint32Array(bytes),values=new Float32Array(bytes);
       if(words[1]===0||words[0]>=this.bodyCount)return undefined;
-      return {bodyIndex:words[0],distance_m:values[2],position_m:{x:values[4],y:values[5],z:values[6]},orientation:{w:values[8],x:values[9],y:values[10],z:values[11]}};
+      const hitIndex = words[0], bodyIndex = this.selectionOwners[hitIndex] ?? hitIndex;
+      const pick = {bodyIndex,distance_m:values[2],position_m:{x:values[4],y:values[5],z:values[6]},orientation:{w:values[8],x:values[9],y:values[10],z:values[11]}};
+      if (bodyIndex === hitIndex) return pick;
+      const parent = (await this.readPoses())?.[bodyIndex];
+      return parent ? { ...pick, position_m: parent.position_m, orientation: parent.orientation } : undefined;
     } catch { return undefined; }
     finally { if(readback.mapState==="mapped")readback.unmap();readback.destroy(); }
   }
 
   encode(encoder: GPUCommandEncoder, dt_s: number, cellVolume_m3: number, snapshotCount = 1, cellHeight_m = 1) {
+    this.motorTime_s += dt_s;
     const c=this.scene.container,g=this.scene.fluid.gravity_m_s2;
     const solid=this.solidWorldCollisionSource;
-    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,0,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),0]));
+    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,this.motorTime_s,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),0]));
     const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(1);pass.end();
   }
 
-  destroy() { this.skinBuffer.destroy();this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
+  destroy() { this.motorBuffer.destroy();this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
 }

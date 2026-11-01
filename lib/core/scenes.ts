@@ -1,3 +1,4 @@
+import { PADDLEBOATS_SCENE_ID, createPaddleboatsScene, paddleboatsCamera, paddleboatsWidgets } from "./paddleboats-scene";
 import { createInteractivePlayground } from "../interaction/playground";
 import type { SceneRenderProfile } from "./scene-render-profile";
 import { cloneScene, defaultCamera, defaultScene, type CameraState, type SceneDescription } from "./model";
@@ -1475,6 +1476,12 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       return scene;
     },
     camera: studioStageCamera,
+  }),
+  defineScene({
+    id: PADDLEBOATS_SCENE_ID, name: "Paddleboats · head to head",
+    blurb: "Two Blender-authored sternwheel launches face one another in a still tank. Only their paddlewheels are motor driven: narrow-band FLIP pressure floats and propels the free hulls. Watch the wakes meet, the boats approach and their hulls collide. Water resolves at 2.5 cm. Press Play to start.",
+    audience: "explore", shelf: "Tanks", environment: "stage", build: createPaddleboatsScene, camera: paddleboatsCamera, widgets: paddleboatsWidgets,
+    methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced", overrides: { rigidCoupling: "on" } },
   }),
   defineScene({
     id: CHURNING_TANK_SCENE_ID,

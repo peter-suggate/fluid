@@ -167,6 +167,11 @@ export const bundledAssetPlugins = [
       { "id":"hero-rosette","name":"Hero Rosette","meshUrl":"/assets/hero-garden-blender/hero-rosette.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-rosette.fvx.gz", header: header59 as unknown as MeshVolumeHeader } },
       { "id":"hero-hose-and-nozzle","name":"Hero Hose And Nozzle","meshUrl":"/assets/hero-garden-blender/hero-hose-and-nozzle.glb","sourceFiles":["assets/hero-garden-blender/hero-garden.blend"], volume: { url: "/assets/hero-garden-blender/hero-hose-and-nozzle.fvx.gz", header: header60 as unknown as MeshVolumeHeader } },
     ] },
+  { id: "paddleboats", label: "Paddleboats", sources: ["assets/paddleboats/paddleboats.blend"], assets: [
+      { "id":"paddleboat","name":"Paddleboat","meshUrl":"/assets/paddleboats/paddleboat.glb","sourceFiles":["assets/paddleboats/paddleboats.blend"] },
+      { "id":"paddlewheel-quarter","name":"Paddlewheel Quarter","meshUrl":"/assets/paddleboats/paddlewheel-quarter.glb","sourceFiles":["assets/paddleboats/paddleboats.blend"] },
+      { "id":"test-basin","name":"Test Basin","meshUrl":"/assets/paddleboats/test-basin.glb","sourceFiles":["assets/paddleboats/paddleboats.blend"] },
+    ] },
   { id: "pool-party", label: "Pool Party", sources: ["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], assets: [
       { "id":"teak-lounger","name":"Teak Lounger","meshUrl":"/assets/pool-party/teak-lounger.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/teak-lounger.fvx.gz", header: header61 as unknown as MeshVolumeHeader } },
       { "id":"garden-parasol","name":"Garden Parasol","meshUrl":"/assets/pool-party/garden-parasol.glb","sourceFiles":["assets/pool-party/pool-party-architecture.blend","assets/pool-party/pool-party-assets.blend","assets/pool-party/pool-party-landscape.blend"], volume: { url: "/assets/pool-party/garden-parasol.fvx.gz", header: header62 as unknown as MeshVolumeHeader } },

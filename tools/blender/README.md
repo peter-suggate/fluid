@@ -312,6 +312,62 @@ All fourteen GLB/FVX assets pass the sign, cavity, gradient, shared-node and
 SolidWorld-adapter verification. The service close-up also checks the production
 25 mm world setting with the new geometry still drawn at its native 6.25 mm.
 
+## Paddleboat tank
+
+`paddleboats` (Tanks → Paddleboats · head to head) uses two free hulls and four
+motor-driven paddle flights per sternwheel. The only prescribed quantity is
+wheel rotation: an immediate start with a quarter-second smooth ramp. Full
+throttle is 11.4 rad/s; the boats open at one third (the original 3.8 rad/s).
+Each boat's throttle widget sits on its own side of the pane (Ember bottom-left,
+Jade bottom-right) and runs from −100% (reverse) through Stop to +100%. The same
+**Motor strength** is in the object's controls in Edit mode. Zero stops the
+wheel; the hull remains free to coast. Strength scales the kinematic wheel
+speed, not a synthetic thrust. Changes preserve wheel phase and the running
+fluid state, and add no undo entries. Any rigid assembly with motor attachments
+gets the same controls, independent of scene or skin.
+The 12.8 × 2.4 m tank holds 0.6 m of initially still water on the 25 mm NB-FLIP
+lattice. There is no hull trajectory, inflow, thrust coefficient, wake texture,
+or Blender water simulation in the running scene.
+
+`tools/blender/paddleboats.py` authors the launch, wheel quarter and basin in
+Blender. Rebuild with the Blender executable above and `--background
+--python-exit-code 1 --python tools/blender/paddleboats.py`. The editable,
+origin-space collections are in `assets/paddleboats/paddleboats.blend`; GLBs
+are in `public/assets/paddleboats/`. The generated JSON contains those same
+box, ellipsoid and cylinder transforms, materials and a BVH. The live moving
+skin intersects those solids directly, including shadows and reflections;
+it does not substitute the GLB bounding box for the visible model. Four copies
+of the quarter form each complete wheel. The basin's exported boxes become
+ordinary scenery. `preview.png` is a Blender presentation with still preview
+water, not a simulation capture.
+
+Physics uses a box displacement hull and four resolvable box paddle colliders.
+Cabin/trim/rail details are presentation only. The hull's mass and box inertia
+represent the complete assembly; attached paddle fixtures have no independent
+rigid mass. The GPU transfers every paddle's NB-FLIP pressure impulse to its
+parent, translating its torque by the paddle-to-hull moment arm. The axle then
+places the paddle relative to the current free parent pose. Assembly contacts
+use the existing hull contact approximation; the massless motor fixtures do
+not solve separate rigid contacts. This is a resolved paddle propulsion test,
+not a detailed ship hydrostatics or joint-inertia model.
+
+Verification commands:
+
+```sh
+npm run check:types
+npm run test:unit
+WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_PADDLEBOAT_GPU=1 \
+  node --import tsx --test tests/paddleboats-scene.test.ts tests/rigid-motor-gpu.test.ts
+WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
+  node --import tsx tools/capture-forest-waterfall.ts --scene=paddleboats \
+  --time=3 --width=1200 --height=800 --timing-samples=1 \
+  --out=artifacts/paddleboats-live/water-3s.png
+```
+
+The motor test checks zero dry thrust and conservation of an injected paddle
+impulse/torque. The full fluid test runs six simulated seconds, checking inward
+travel, upright flotation and attachment transforms during propulsion.
+
 ## Beach
 
 `beach` (Water landscapes → Beach · afternoon surf) starts from the editable

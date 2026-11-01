@@ -1,5 +1,7 @@
 "use client";
 
+import { rigidControlOwnerId } from "../lib/core/rigid-motor";
+
 import { useEffect, useRef, useState , useMemo} from "react";
 import { createBrowserFrameBenchmark } from "../lib/core/browser-frame-benchmark";
 import { useVoxelToolGesture } from "./useVoxelToolGesture";
@@ -2367,7 +2369,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         if (t > 0 && (!nearest || t < nearest.t)) nearest = { body, t };
       }
       if (nearest) {
-        beginBodyDrag(event.pointerId,event.timeStamp,event.clientX,event.clientY,ray,nearest.body,nearest.body.position_m,nearest.body.orientation);
+        const owner = drawnBodies(session.diagnostics).find(body => body.description.id === rigidControlOwnerId(nearest.body.description));
+        if (!owner) return;
+        beginBodyDrag(event.pointerId,event.timeStamp,event.clientX,event.clientY,ray,owner,owner.position_m,owner.orientation);
         return;
       }
       pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,

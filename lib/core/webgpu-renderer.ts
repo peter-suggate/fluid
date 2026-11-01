@@ -1,3 +1,4 @@
+import { rigidControlOwnerId } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import { boundedPresentationScale } from "./presentation-resolution";
 import { svoEnvironmentLightingRecord } from "../svo/features/radiance/svo-environment-lighting";
@@ -1392,11 +1393,14 @@ export class FluidLabRenderer {
         this.gpuFluid?.readRigidBodyPoses?.(),
       ]);
       if (!this.svoPickingAvailable || this.svoDryScenePipeline !== pipeline || picked.status !== "hit") return undefined;
-      const body = bodies[picked.bodyIndex];
+      const hitBody = bodies[picked.bodyIndex];
+      if (!hitBody) return undefined;
+      const bodyIndex = bodies.findIndex(body => body.description.id === rigidControlOwnerId(hitBody.description));
+      const body = bodies[bodyIndex];
       if (!body) return undefined;
-      const live = poses?.[picked.bodyIndex];
+      const live = poses?.[bodyIndex];
       return {
-        bodyIndex: picked.bodyIndex,
+        bodyIndex,
         distance_m: picked.depth_m,
         position_m: live?.position_m ?? body.position_m,
         orientation: live?.orientation ?? body.orientation,
@@ -3014,7 +3018,7 @@ export class FluidLabRenderer {
         bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, rigidAppearanceSkin(body.description)?.radius ?? robotRenderRadius(body) ?? boundingRadius(body)], offset);
         bodyData.set([half[0], half[1], half[2], skin?.shape ?? (robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape))], offset + 4);
         bodyData.set([orientation.w, orientation.x, orientation.y, orientation.z], offset + 8);
-        bodyData.set([color[0], color[1], color[2], body.description.renderHidden ? -1 : body.description.id === selectedBodyId ? 1 : 0], offset + 12);
+        bodyData.set([color[0], color[1], color[2], body.description.renderHidden ? -1 : rigidControlOwnerId(body.description) === selectedBodyId ? 1 : 0], offset + 12);
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }

@@ -14,6 +14,12 @@ import { FrameCostLines, FrameMoreLines } from "../../svo/pipeline/ui";
 import { composeFeatureUI } from "./composition";
 import type { FeatureComposition } from "../../framework/composition";
 import { ComposedFeatureSlot, type FeatureControlViews } from "../../framework/ui/slot";
+import type { WidgetProvider } from "../../framework/widgets";
+import type { PaneId } from "../../core/session/session";
+import type { WidgetContext } from "../control-widgets/context";
+import { interactionEntityWidgets } from "../control-widgets/interaction-entity";
+import { rigidMotorWidgets } from "../control-widgets/rigid-motor";
+import { ControlWidgetLayer, type WidgetViews } from "../control-widgets/ui";
 
 /** Only application composition knows the installed React implementations. */
 export const applicationViews: FeatureControlViews = {
@@ -58,4 +64,13 @@ export function useFeatureComposition(): FeatureComposition {
 
 export function FeatureSlot({ slot }: { readonly slot: string }) {
   return <ComposedFeatureSlot composition={useFeatureComposition()} views={applicationViews} slot={slot} />;
+}
+
+/** Everything in a scene that can be driven from an on-screen widget; a new kind is one more provider. */
+export const applicationWidgetProviders: readonly WidgetProvider<WidgetContext>[] = [interactionEntityWidgets, rigidMotorWidgets];
+/** Bespoke widget renderers by `ControlWidget.view`; a widget without one is drawn channel by channel. */
+export const applicationWidgetViews: WidgetViews = {};
+
+export function PaneControlWidgets({ paneId }: { readonly paneId: PaneId }) {
+  return <ControlWidgetLayer paneId={paneId} providers={applicationWidgetProviders} views={applicationWidgetViews} />;
 }

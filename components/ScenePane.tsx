@@ -14,6 +14,7 @@ import { ViewRail } from "./ViewRail";
 import { VoxelToolRail } from "./VoxelToolRail";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { InteractionLayer } from "../lib/features/interactive/ui";
+import { PaneControlWidgets } from "../lib/features/ui/FeatureSlot";
 
 /**
  * One pane of scene: a canvas and everything drawn over it.
@@ -64,6 +65,8 @@ export function ScenePane({ paneId, tagged = false, focused = false, onFocus }: 
       <WebGPUViewport paneId={paneId} />
       {/* Inert unless this pane has an interaction binding (`?interactive=demo`). */}
       <InteractionLayer paneId={paneId} focused={focused} />
+      {/* Throttles, sticks and buttons for whatever in the scene can be driven; nothing when nothing can. */}
+      <PaneControlWidgets paneId={paneId} />
       <EditorModeChip />
       <VoxelToolRail />
       <ViewRail />

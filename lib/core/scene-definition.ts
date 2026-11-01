@@ -5,6 +5,7 @@ import { defaultCamera } from "./model";
 import type { EnvironmentId } from "./environments";
 import { environmentIds } from "./environments";
 import type { MethodProfile } from "./method-contract";
+import type { WidgetPlacementOverrides } from "../framework/widgets";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { studioStageFits } from "./studio-stage-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "./voxel-environments";
@@ -147,6 +148,8 @@ export interface SceneDefinition {
   /** Omit the generated container shell when the scene authors its own voxel vessel. */
   readonly containerShell?: "generated" | "authored";
   readonly camera?: Partial<CameraState>;
+  /** Where this scene stands its control widgets, by widget id; the user's own arrangement wins. */
+  readonly widgets?: WidgetPlacementOverrides;
   /**
    * Solver profile a numerical lane or probe runs this scene under.
    *

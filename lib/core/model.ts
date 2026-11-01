@@ -86,7 +86,26 @@ export interface RigidBodyDescription {
    * Only an externally integrated enclosure may own this boundary. */
   fluidBoundary?: "interior";
   /** Presentation skin; physics and fluid displacement still use shape. */
-  appearance?: "bub" | "seaweed";
+  appearance?: "bub" | "paddleboat-red" | "paddleboat-teal" | "paddleboat-wheel" | "seaweed";
+  /** Massless motor fixture on a free parent. Parent mass/inertia includes the
+   * assembly; fluid traction on the fixture is returned to that parent. */
+  motorAttachment?: RigidMotorAttachment;
+  /** Normalized drive command for this body's attached motors, in [-1, 1].
+   * Omitted means full drive; zero stops the motors without constraining the
+   * free parent; negative turns them backwards. */
+  motorStrength?: number;
+}
+
+export interface RigidMotorAttachment {
+  parentId: string;
+  pivot_m: Vec3;
+  offset_m: Vec3;
+  axis: Vec3;
+  orientation: Quaternion;
+  phase_rad: number;
+  angularSpeed_rad_s: number;
+  startTime_s: number;
+  rampUp_s: number;
 }
 
 export interface RigidPoseTrack {
@@ -96,7 +115,7 @@ export interface RigidPoseTrack {
 
 /** A motor resists forces like a static body, but its geometry moves each frame. */
 export function rigidBodyHasFixedPose(body: RigidBodyDescription): boolean {
-  return body.motion === "static" && !body.prescribedMotion && !body.poseTrack;
+  return body.motion === "static" && !body.prescribedMotion && !body.poseTrack && !body.motorAttachment;
 }
 
 export function rigidBodyHasVisibleFixedPose(body: RigidBodyDescription): boolean {
@@ -937,7 +956,20 @@ export function validateScene(scene: SceneDescription): string[] {
       if (!body.id || ids.has(body.id)) errors.push("Rigid body IDs must be unique and non-empty");
       ids.add(body.id);
       if (!SCENE_SHAPES_BY_CODE.some(shape => shape.name === body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
-      if (body.appearance !== undefined && !(body.appearance === 'bub' && body.shape === 'capsule') && !(body.appearance === 'seaweed' && body.shape === 'box')) errors.push(`Unsupported appearance for body ${body.id}`);
+      if (body.appearance !== undefined && !(body.appearance === 'bub' && body.shape === 'capsule')
+        && !(['paddleboat-red', 'paddleboat-teal', 'paddleboat-wheel', 'seaweed'].includes(body.appearance) && body.shape === 'box')) errors.push(`Unsupported appearance for body ${body.id}`);
+      if (body.motorAttachment) {
+        const motor = body.motorAttachment, parent = scene.rigidBodies.find(p => p.id === motor.parentId);
+        if (!parent || parent === body || parent.motion === 'static' || parent.motorAttachment) errors.push(`Body ${body.id} motor needs a free, unparented body`);
+        if (body.motion !== 'static' || body.poseTrack || body.prescribedMotion || scene.interaction?.entities.length) errors.push(`Body ${body.id} motor has conflicting motion authority`);
+        const q = motor.orientation, a = motor.axis;
+        const pivot = motor.pivot_m, offset = motor.offset_m;
+        if (![pivot?.x, pivot?.y, pivot?.z, offset?.x, offset?.y, offset?.z, a?.x, a?.y, a?.z,
+          q?.w, q?.x, q?.y, q?.z, motor.phase_rad, motor.angularSpeed_rad_s, motor.startTime_s, motor.rampUp_s].every(Number.isFinite)
+          || Math.abs(Math.hypot(a.x, a.y, a.z) - 1) > 1e-6 || Math.abs(Math.hypot(q.w, q.x, q.y, q.z) - 1) > 1e-6
+          || motor.startTime_s < 0 || !(motor.rampUp_s > 0)) errors.push(`Body ${body.id} motor needs finite geometry, unit axes and positive ramp`);
+      }
+      if (body.motorStrength !== undefined && (!Number.isFinite(body.motorStrength) || body.motorStrength < -1 || body.motorStrength > 1)) errors.push(`Body ${body.id} motor strength must be in [-1, 1]`);
       if (!(body.dimensions_m.x > 0) || !(body.dimensions_m.y > 0) || !(body.dimensions_m.z > 0)) errors.push(`Body ${body.id} dimensions must be positive`);
       if (!(body.density_kg_m3 > 0)) errors.push(`Body ${body.id} density must be positive`);
       if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);
