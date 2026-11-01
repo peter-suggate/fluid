@@ -1107,12 +1107,12 @@ fn sParity(g:vec3i)->u32{return u32(g.x+g.y+g.z)&1u;}
 fn sWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1)*select(0.75,0.25,d.z==1);}
 `:"";
   // The Krylov step (schedule.krylov): flexible GCR(1) with the V-cycle as
-  // its preconditioner. kStart* after the first cycle: the active set, its
+  // its preconditioner. kStart after the first cycle: the active set, its
   // frozen diagonal (walls linked or bounded as the iterate leaves them),
   // the true residual on the free rows, the step's start. Then after each
   // later cycle: kApply* z (the cycle's correction, X - KX, 0 off the free
   // set) to A z and the dots' partials, kReduce the step's beta and alpha,
-  // kStep* the direction p = z - beta p, its image q = A z - beta q, the
+  // kStep the direction p = z - beta p, its image q = A z - beta q, the
   // iterate KX + alpha p and the residual r - alpha q. Rows off the free set
   // keep their start: frozen, as the truncated coarse correction leaves
   // them. Their p is 0 but their q and r are tracked too (outside the dots),
@@ -1120,21 +1120,46 @@ fn sWeight(d:vec3i)->f32{return select(0.75,0.25,d.x==1)*select(0.75,0.25,d.y==1
   // set when it asks to leave its bound (pCorrectionFree, the cycle's rule).
   // Its p being 0, q = A p stays exact on the enlarged set: no restart.
   // KD is the row's linear diagonal, negative while it is frozen. The step
-  // is feasible (Polyak 1969; O'Leary 1980): kBound* finds the first free
+  // is feasible (Polyak 1969; O'Leary 1980): kBound finds the first free
   // bounded row the direction takes onto its bound, alpha stops there, and
   // that row is frozen on its bound. Its direction was not 0, so the next
   // step restarts (beta 0). It may join again when its residual asks. The band's iterate is plane kPlane,
   // where the cycle's post-smoothing ended. Everything reads the history's
   // stop, as the cycle.
-  const KD=KRYLOV_DOTS,[segT,segN]=KRYLOV_SEGMENTS;
-  const krylovDots=(seg:number)=>/* wgsl */`
+  const KD=KRYLOV_DOTS,[segT,segN]=KRYLOV_SEGMENTS,krylovSlots=BP?Math.min(BP.layout.capacity,KRYLOV_SEGMENTS[2]):0;
+  const krylovDots=(seg:number,group="group.x")=>/* wgsl */`
  // The workgroup's dots, one after another through kRed, into its partial.
  for(var d=0u;d<${KD}u;d++){
   kRed[lane]=kAcc[d];workgroupBarrier();
   for(var s=kWidth/2u;s>0u;s>>=1u){if(lane<s){kRed[lane]+=kRed[lane+s];}workgroupBarrier();}
-  if(lane==0u){poolB[K_DOT+${KD}u*(${seg}u+group.x)+d]=bitcast<u32>(kRed[0]);}
+  if(lane==0u){poolB[K_DOT+${KD}u*(${seg}u+${group})+d]=bitcast<u32>(kRed[0]);}
   workgroupBarrier();
  }`;
+  // kApplyN's pages, e from its group by stride (its dispatch's width).
+  const kApplyNLoop=(stride:string,group="group.x")=>/* wgsl */` for(var e=${group};e<n;e+=${stride}){
+  let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;let d=qF(PN_KD,at2);let m=poolB[PN_M+at2];
+  var az=0.0;var q=0.0;var r=0.0;let free=kFreeN(at2,d);
+  if(d!=0.0||free){
+   az=d*kZn(at2);
+   for(var f=0u;f<6u;f++){
+    let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
+    if(kind==N_NATIVE){az-=qF(PN_K+f*PLANE2,at2)*kZn(link);}
+    else if(kind==N_SEAM){let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let v=nStride((axis+2u)%3u);
+     for(var k=0u;k<16u;k++){let h=link+(k&3u)*u+(k>>2u)*v;if(bFaceKind(pool[P_KINDS+h],g)==K_SEAM){az-=pF(P_C+g*PLANE,h)*kZt(h);}}}${BP?`
+    else if(kind==N_BULKN){az-=qF(PN_K+f*PLANE2,at2)*kZb(baSlot(link),link&15u);}`:""}
+   }
+   qSet(PN_KZ,at2,az);q=qF(PN_KQ,at2);r=qF(PN_KR,at2);
+  }${B?`
+  // A 16h bulk's members are one row (their correction is one): its
+  // residual is theirs summed, every member's, as the verdict measures
+  // their mean. Each member enters with the mean and weight 1/64: the
+  // region's sum at its inverse volume, 1/4096, as a BULK16 region's.
+  if(lane==0u){kFlags=nPage(block);}
+  if((workgroupUniformLoad(&kFlags)&4u)!=0u){let bulk=(m&N_BULK)!=0u;az=nBulkMean(az,bulk,lane);q=nBulkMean(q,bulk,lane);r=nBulkMean(r,bulk,lane);}`:""}
+  if(free){kAdd(az,q,r,1.0/64.0);}
+  workgroupBarrier();
+ }
+`;
   const krylovWGSL=schedule.krylov?/* wgsl */`
 const K_DOT:u32=${this.krylovDotWord}u;const K_ALPHA:u32=${KRYLOV_ALPHA_WORD}u;const K_BETA:u32=${KRYLOV_BETA_WORD}u;const K_L2:u32=${KRYLOV_L2_WORD}u;const K_JOIN:u32=${KRYLOV_JOIN_WORD}u;const K_CROSS:u32=${KRYLOV_CROSS_WORD}u;
 const K_LIMIT:u32=${KRYLOV_LIMIT_WORD}u;const K_HIT:u32=${KRYLOV_HIT_WORD}u;const K_RESTART:u32=${KRYLOV_RESTART_WORD}u;const K_RESTARTS:u32=${KRYLOV_RESTARTS_WORD}u;
@@ -1169,16 +1194,25 @@ fn kClear(){for(var d=0u;d<${KD}u;d++){kAcc[d]=0.0;}}
 fn kAlpha()->f32{return bitcast<f32>(pIndex(K_ALPHA));}
 fn kBeta()->f32{return bitcast<f32>(pIndex(K_BETA));}
 // The feasible step (Polyak; O'Leary): alpha cut at the first free bounded
-// row its direction takes onto its bound (kBound*'s least ratio).
+// row its direction takes onto its bound (kBound's least ratio).
 fn kStepAlpha()->f32{let a=kAlpha();return sign(a)*min(abs(a),bitcast<f32>(pIndex(K_LIMIT)));}
 // A free bounded row's distance to its bound in units of its direction, when
 // the step moves it toward the bound (else none).
 fn kRoom(room:f32,dp:f32,alpha:f32)->f32{if(alpha*dp<0.0&&room>=0.0){return room/abs(dp);}return 3.0e38;}
 
-@compute @workgroup_size(${TILE_WG}) fn kStartT(${lanes}){
- if(lane==0u){kN=pTileLive();}
- let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
- for(var j=group.x;j<n;j+=groups.x){
+// kStart, kBound and kStep each take every row once (their writes are the
+// row's own, their reductions order-free atomics), so one dispatch runs the
+// band's tiles (eight to a workgroup, 64 lanes each), the native pages and
+// the BULK16 slots: kCounts() loads their counts.
+var<workgroup> kNN:u32;
+var<workgroup> kNB:u32;
+fn kCounts(lane:u32)->vec3u{
+ if(lane==0u){kN=pTileLive();kNN=select(ubaLevelCount(2u),0u,bConverged());${BP?"kNB=select(bsCount(),0u,bConverged());":"kNB=0u;"}}
+ return vec3u(workgroupUniformLoad(&kN),workgroupUniformLoad(&kNN),workgroupUniformLoad(&kNB));
+}
+@compute @workgroup_size(${WG}) fn kStart(${lanes}){
+ let n=kCounts(lane);let tl=lane&63u;let l=vec3u(tl&3u,(tl>>2u)&3u,tl>>4u);
+ for(var j=8u*group.x+(lane>>6u);j<n.x;j+=8u*groups.x){
   let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);let p=vec3i(ubaOrigin(ubaBrick(slot))+lb);
   let kinds=pool[P_KINDS+at];let x=pF(kX(),at);var r=0.0;var d=0.0;
   if(pActive(kinds)){
@@ -1194,11 +1228,7 @@ fn kRoom(room:f32,dp:f32,alpha:f32)->f32{if(alpha*dp<0.0&&room>=0.0){return room
   }
   pSet(P_KX,at,x);pSet(P_KQ,at,0.0);pSet(P_KZ,at,0.0);pSet(P_KP,at,0.0);pSet(P_KR,at,r);pSet(P_KD,at,d);
  }
-}
-@compute @workgroup_size(${WG}) fn kStartN(${lanes}){
- if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
- let n=workgroupUniformLoad(&kN);
- for(var e=group.x;e<n;e+=groups.x){
+ for(var e=group.x;e<n.y;e+=groups.x){
   let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];let x=qF(PN_X,at2);var r=0.0;var d=0.0;
   if((nPage(block)&2u)!=0u&&(m&N_ACTIVE)!=0u){
    let base=qF(PN_B,at2);d=qF(PN_D,at2);r=qF(PN_R,at2)-d*x;
@@ -1213,17 +1243,13 @@ fn kRoom(room:f32,dp:f32,alpha:f32)->f32{if(alpha*dp<0.0&&room>=0.0){return room
    d=select(-max(d,0.0),d,d>0.0&&pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));
   }
   qSet(PN_KX,at2,x);qSet(PN_KQ,at2,0.0);qSet(PN_KZ,at2,0.0);qSet(PN_KP,at2,0.0);qSet(PN_KR,at2,r);qSet(PN_KD,at2,d);
- }
-}
-${BP?`@compute @workgroup_size(${WG}) fn kStartB(${lanes}){
- if(lane==0u){kN=select(bsCount(),0u,bConverged());}
- let n=workgroupUniformLoad(&kN);
- for(var e=group.x;e<n;e+=groups.x){
+ }${BP?`
+ for(var e=group.x;e<n.z;e+=groups.x){
   let slot=bsSlot(e);let r=bResidual(slot,lane);
   if(lane<8u){kbSet(slot,0u,lane,bsF(slot,BS_N+lane));kbSet(slot,1u,lane,0.0);kbSet(slot,2u,lane,0.0);kbSet(slot,3u,lane,0.0);kbSet(slot,4u,lane,r);kbSet(slot,5u,lane,bsF(slot,BS_T4+24u+lane));}
   workgroupBarrier();
- }
-}`:""}
+ }`:""}
+}
 @compute @workgroup_size(${TILE_WG}) fn kApplyT(${lanes}){
  if(lane==0u){kN=pTileLive();}
  let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);kClear();
@@ -1243,41 +1269,24 @@ ${BP?`@compute @workgroup_size(${WG}) fn kStartB(${lanes}){
  }
  if(n>0u){${krylovDots(0)}}
 }
-@compute @workgroup_size(${WG}) fn kApplyN(${lanes}){
- if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
- let n=workgroupUniformLoad(&kN);kClear();
- let kWidth=${WG}u;
- for(var e=group.x;e<n;e+=groups.x){
-  let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;let d=qF(PN_KD,at2);let m=poolB[PN_M+at2];
-  var az=0.0;var q=0.0;var r=0.0;let free=kFreeN(at2,d);
-  if(d!=0.0||free){
-   az=d*kZn(at2);
-   for(var f=0u;f<6u;f++){
-    let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
-    if(kind==N_NATIVE){az-=qF(PN_K+f*PLANE2,at2)*kZn(link);}
-    else if(kind==N_SEAM){let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let v=nStride((axis+2u)%3u);
-     for(var k=0u;k<16u;k++){let h=link+(k&3u)*u+(k>>2u)*v;if(bFaceKind(pool[P_KINDS+h],g)==K_SEAM){az-=pF(P_C+g*PLANE,h)*kZt(h);}}}${BP?`
-    else if(kind==N_BULKN){az-=qF(PN_K+f*PLANE2,at2)*kZb(baSlot(link),link&15u);}`:""}
-   }
-   qSet(PN_KZ,at2,az);q=qF(PN_KQ,at2);r=qF(PN_KR,at2);
-  }${B?`
-  // A 16h bulk's members are one row (their correction is one): its
-  // residual is theirs summed, every member's, as the verdict measures
-  // their mean. Each member enters with the mean and weight 1/64: the
-  // region's sum at its inverse volume, 1/4096, as a BULK16 region's.
-  if(lane==0u){kFlags=nPage(block);}
-  if((workgroupUniformLoad(&kFlags)&4u)!=0u){let bulk=(m&N_BULK)!=0u;az=nBulkMean(az,bulk,lane);q=nBulkMean(q,bulk,lane);r=nBulkMean(r,bulk,lane);}`:""}
-  if(free){kAdd(az,q,r,1.0/64.0);}
-  workgroupBarrier();
- }
- if(n>0u){${krylovDots(segT)}}
-}
 ${BP?`var<workgroup> kLink:array<f32,48>;
-@compute @workgroup_size(${WG}) fn kApplyB(${lanes}){
- if(lane==0u){kN=select(bsCount(),0u,bConverged());}
- let n=workgroupUniformLoad(&kN);kClear();
+// The BULK16 slots' and the native pages' kApply in one dispatch: the
+// first K_SLOTS workgroups are kApplyB's, the rest kApplyN's (as many as
+// its own dispatch), each with its own partials. The slots go first so
+// their longer rows start in the first wave.
+const K_SLOTS:u32=${krylovSlots}u;
+@compute @workgroup_size(${WG}) fn kApplyNB(${lanes}){
+ let gN=groups.x-K_SLOTS;
+ if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());kNB=select(bsCount(),0u,bConverged());}
+ let nN=workgroupUniformLoad(&kN);let nB=workgroupUniformLoad(&kNB);kClear();
  let kWidth=${WG}u;
- for(var e=group.x;e<n;e+=groups.x){
+ if(group.x>=K_SLOTS){
+  let n=nN;
+${kApplyNLoop("gN","(group.x-K_SLOTS)")}  if(n>0u){${krylovDots(segT,"(group.x-K_SLOTS)")}}
+ }
+ else{
+  let n=nB;
+ for(var e=group.x;e<n;e+=K_SLOTS){
   let slot=bsSlot(e);let page=bsPage(slot);
   // Lanes 0..47 a (region, face): the face's sum of k z across it.
   if(lane<48u){
@@ -1293,8 +1302,14 @@ ${BP?`var<workgroup> kLink:array<f32,48>;
   }
   workgroupBarrier();
  }
- if(n>0u){${krylovDots(segT+segN)}}
-}`:""}
+  if(n>0u){${krylovDots(segT+segN)}}
+ }
+}`:`@compute @workgroup_size(${WG}) fn kApplyN(${lanes}){
+ if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
+ let n=workgroupUniformLoad(&kN);kClear();
+ let kWidth=${WG}u;
+${kApplyNLoop("groups.x")} if(n>0u){${krylovDots(segT)}}
+}`}
 // The step from the dots: beta orthogonalises A z against the last image
 // (GCR), alpha minimises the new residual's 2-norm. A first step (q = 0)
 // takes beta 0. No image (z = 0, or a block A annihilates) takes no step.
@@ -1323,22 +1338,17 @@ ${BP?`var<workgroup> kLink:array<f32,48>;
  }
 }
 // The step's first bound hit: the least ratio over the free bounded rows.
-@compute @workgroup_size(${TILE_WG}) fn kBoundT(${lanes}){
- if(lane==0u){kN=pTileLive();}
- let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+@compute @workgroup_size(${WG}) fn kBound(${lanes}){
+ let n=kCounts(lane);let tl=lane&63u;let l=vec3u(tl&3u,(tl>>2u)&3u,tl>>4u);
  let alpha=kAlpha();let beta=kBeta();
- for(var j=group.x;j<n;j+=groups.x){
+ for(var j=8u*group.x+(lane>>6u);j<n.x;j+=8u*groups.x){
   let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);let kinds=pool[P_KINDS+at];
   if(pActive(kinds)&&bInside(kinds)&&pF(P_KD,at)>0.0){
    let t=kRoom(pF(P_KX,at)+pF(P_BASE,at),kZt(at)-beta*pF(P_KP,at),alpha);
    if(t<abs(alpha)){atomicMin(&state[K_LIMIT],bitcast<u32>(t));}
   }
  }
-}
-@compute @workgroup_size(${WG}) fn kBoundN(${lanes}){
- if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
- let n=workgroupUniformLoad(&kN);let alpha=kAlpha();let beta=kBeta();
- for(var e=group.x;e<n;e+=groups.x){
+ for(var e=group.x;e<n.y;e+=groups.x){
   let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];
   if((nPage(block)&2u)!=0u&&(m&N_ACTIVE)!=0u&&(m&N_CLOSED)!=0u&&qF(PN_KD,at2)>0.0){
    let t=kRoom(qF(PN_KX,at2)+qF(PN_B,at2),kZn(at2)-beta*qF(PN_KP,at2),alpha);
@@ -1346,11 +1356,10 @@ ${BP?`var<workgroup> kLink:array<f32,48>;
   }
  }
 }
-@compute @workgroup_size(${TILE_WG}) fn kStepT(${lanes}){
- if(lane==0u){kN=pTileLive();}
- let n=workgroupUniformLoad(&kN);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+@compute @workgroup_size(${WG}) fn kStep(${lanes}){
+ let n=kCounts(lane);let tl=lane&63u;let l=vec3u(tl&3u,(tl>>2u)&3u,tl>>4u);
  let alpha=kStepAlpha();let beta=kBeta();
- for(var j=group.x;j<n;j+=groups.x){
+ for(var j=8u*group.x+(lane>>6u);j<n.x;j+=8u*groups.x){
   let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);let at=pAddr(slot,lb);
   let kinds=pool[P_KINDS+at];
   if(!pActive(kinds)){continue;}
@@ -1370,11 +1379,7 @@ ${BP?`var<workgroup> kLink:array<f32,48>;
   }
   pSet(kX(),at,x);
  }
-}
-@compute @workgroup_size(${WG}) fn kStepN(${lanes}){
- if(lane==0u){kN=select(ubaLevelCount(2u),0u,bConverged());}
- let n=workgroupUniformLoad(&kN);let alpha=kStepAlpha();let beta=kBeta();
- for(var e=group.x;e<n;e+=groups.x){
+ for(var e=group.x;e<n.y;e+=groups.x){
   let block=ubaLevelSlot(2u,e);let at2=UBA_STRIDE*block+lane;
   let m=poolB[PN_M+at2];
   if((nPage(block)&2u)!=0u&&(m&N_ACTIVE)!=0u){
@@ -1392,19 +1397,15 @@ ${BP?`var<workgroup> kLink:array<f32,48>;
    }
    qSet(PN_X,at2,x);
   }
- }
-}
-${BP?`@compute @workgroup_size(${WG}) fn kStepB(${lanes}){
- if(lane==0u){kN=select(bsCount(),0u,bConverged());}
- let n=workgroupUniformLoad(&kN);let alpha=kStepAlpha();let beta=kBeta();
- for(var e=group.x;e<n;e+=groups.x){
+ }${BP?`
+ for(var e=group.x;e<n.z;e+=groups.x){
   let slot=bsSlot(e);
   if(lane<8u){
    let dp=kZb(slot,lane)-beta*kbF(slot,3u,lane);let q=kbF(slot,2u,lane)-beta*kbF(slot,1u,lane);let x=kbF(slot,0u,lane)+alpha*dp;
    kbSet(slot,3u,lane,dp);kbSet(slot,1u,lane,q);kbSet(slot,4u,lane,kbF(slot,4u,lane)-alpha*q);kbSet(slot,0u,lane,x);bsSet(slot,BS_N+lane,x);
   }
- }
-}`:""}
+ }`:""}
+}
 `:"";
   const sources:Record<string,string>={
    table:uniformMixedTopologyWGSL(layout,0)+/* wgsl */`
@@ -3501,13 +3502,13 @@ fn sProlong6(g:vec3i)->f32{
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={bulk:"bulk",nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
   const entryOf:Record<string,string[]>={bulk:["pBulkRows","pBulkProject","pBulkCommit"],bulkLevels:["pBulkLift"],nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pNativeOperator","pWrite"],residual:["pResidual2","pNativeRelax"],final:["pFinal"],clear2:["pClear2"],
-   krylov:["kStartT","kStartN","kApplyT","kApplyN","kReduce","kBoundT","kBoundN","kStepT","kStepN",...(BP?["kStartB","kApplyB","kStepB"]:[])],rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
+   krylov:["kStart","kApplyT",BP?"kApplyNB":"kApplyN","kReduce","kBound","kStep"],rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
    pRelax:[["0",{pSrc:0}],["1",{pSrc:1}],["S0",{pSettle:1,pSrc:0}],["S1",{pSettle:1,pSrc:1}]],pProlong0:[["0",{pDst:0}],["1",{pDst:1}]],pRestrict0:Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),
    pResidual2:[...Array.from({length:schedule.cycles},(_,k)=>[`@${k}`,{pCycle:k}] as Variant),["F",{pCycle:schedule.cycles,pLast:1}]],pNativeRelax:[["0",{pColour:0}],["1",{pColour:1}],["0X1",{pColour:0,pBand:1}],["1X1",{pColour:1,pBand:1}]],
-   kStartT:[["0",{kPlane:0}],["1",{kPlane:1}]],kStartN:[["0",{kPlane:0}],["1",{kPlane:1}]],kApplyT:[["0",{kPlane:0}],["1",{kPlane:1}]],kApplyN:[["0",{kPlane:0}],["1",{kPlane:1}]],kStepT:[["0",{kPlane:0}],["1",{kPlane:1}]],kBoundT:[["0",{kPlane:0}],["1",{kPlane:1}]],
+   ...Object.fromEntries(["kStart","kApplyT","kApplyN","kApplyNB","kBound","kStep"].map(k=>[k,[["0",{kPlane:0}],["1",{kPlane:1}]] as Variant[]])),
    kReduce:Array.from({length:schedule.cycles-1},(_,k)=>[`@${k+1}`,{kCycle:k+1}] as Variant),
    pDownA:[["",{}],["@0",{pBake:1}]],pBulkRows:[["",{}],["P",{pResolve:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}],["C",{pCorrection:1}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
    ...(W?{sGroup7:[["",{}],["C",{sList:0}]] as Variant[],pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
@@ -3720,13 +3721,14 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
    // The Krylov step on the cycle (flexible GCR(1)): the first cycle's end
    // starts it, each later one's correction is its direction.
    if(s.krylov&&cycles>1){
-    const end=post^odd,slots=BP?Math.min(this.fields.bulkPages!.layout.capacity,KRYLOV_SEGMENTS[2]):0;
-    if(first){this.dispatch(pass,"kStartT"+end,this.tileGroups);this.dispatch(pass,"kStartN"+end,pages);if(BP)this.dispatch(pass,"kStartB",slots);}
+    // kStart, kBound and kStep: the tiles eight to a workgroup, the pages
+    // and slots one each. kApplyNB: the slots' groups, then the pages'.
+    const end=post^odd,slots=BP?Math.min(this.fields.bulkPages!.layout.capacity,KRYLOV_SEGMENTS[2]):0,rows=Math.max(groupsOf(this.tileGroups,8),pages,slots);
+    if(first)this.dispatch(pass,"kStart"+end,rows);
     else{
-     this.dispatch(pass,"kApplyT"+end,this.tileGroups);this.dispatch(pass,"kApplyN"+end,pages);if(BP)this.dispatch(pass,"kApplyB",slots);
+     this.dispatch(pass,"kApplyT"+end,this.tileGroups);if(BP)this.dispatch(pass,"kApplyNB"+end,pages+slots);else this.dispatch(pass,"kApplyN"+end,pages);
      this.dispatch(pass,`kReduce@${cycle}`,1);
-     this.dispatch(pass,"kBoundT"+end,this.tileGroups);this.dispatch(pass,"kBoundN",pages);
-     this.dispatch(pass,"kStepT"+end,this.tileGroups);this.dispatch(pass,"kStepN",pages);if(BP)this.dispatch(pass,"kStepB",slots);
+     this.dispatch(pass,"kBound"+end,rows);this.dispatch(pass,"kStep"+end,rows);
     }
    }
   }
