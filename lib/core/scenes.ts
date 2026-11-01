@@ -484,6 +484,10 @@ export function createHighResolutionDamBreakScene(): SceneDescription {
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 8,
   };
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
+  // Particles authored from a full-length run at this size: 1.71M slab records
+  // at peak (step 48) of 8.9M. Sized at x 1.25 the brick overflow filled the
+  // bank at step 51. The h ceiling stays the rule's (4096 bricks).
+  scene.fluid.tiers = { ...scene.fluid.tiers, bricks: 4096, particlesPerFineCell: 4 };
   return scene;
 }
 
@@ -580,6 +584,11 @@ export function createSparseCM12LongDamBreakScene(): SceneDescription {
   delete scene.fluid.initialDamBreakOrigin_m;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
+  // Pool and particles authored from full-length runs of this scene and the
+  // ladder's long-dam rung: 15 blocks resident at peak (step 69) and 237k
+  // slab records (step 59), each x 1.25. The h ceiling stays the rule's (576 bricks).
+  scene.fluid.pagePool = { blocks: 19 };
+  scene.fluid.tiers = { ...scene.fluid.tiers, bricks: 576, particlesPerFineCell: 1.01 };
   return scene;
 }
 
@@ -601,6 +610,8 @@ export function createSparseGeometricRitterDamBreakScene(): SceneDescription {
   scene.fluid.surfaceTension_N_m = 0;
   // Replace the inherited mini shell after changing the physical lattice.
   scene.solidVoxels = [...solidVoxelShellForScene(scene)];
+  // Authored from a full-length run: 10 blocks resident at peak (step 34), x 1.25.
+  scene.fluid.pagePool = { blocks: 13 };
   return scene;
 }
 
@@ -831,6 +842,9 @@ export function createTallCellsHillsideDamBreakScene(): SceneDescription {
   scene.rigidBodies = [];
   // Section 4 uses a 1/30 s simulation step for every example.
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
+  // The front spreads past the pool rule's reserve. Authored from a
+  // full-length run: 64 blocks resident at peak (step 278), x 1.25.
+  scene.fluid.pagePool = { blocks: 80 };
   return scene;
 }
 
@@ -1771,7 +1785,13 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // ordering with no arrow pointing backwards. Appending rather than mutating
     // matters too: `scene.scenery` is a module-level constant shared by every
     // document the factory produces.
-    build: () => createHeroGardenHoseFillingScene(),
+    // The pond fills past the pool rule's reserve. Authored from a full-length
+    // run: 35 blocks resident at peak (step 80), x 1.25.
+    build: () => {
+      const scene = createHeroGardenHoseFillingScene();
+      scene.fluid.pagePool = { blocks: 44 };
+      return scene;
+    },
     // The one route to this scene at another lattice, and the reason it is a
     // member of the definition rather than a call somewhere: the terrain bake,
     // the layout composed against it and every generator's legibility floor are
