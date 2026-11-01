@@ -1483,6 +1483,23 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       overrides: { detailPolicy: "dynamic", detailNearFocus: "off", detailBudgetPercent: 5,
         regionTiering: "error", warmResolution: "h" } },
   }),
+  defineScene({
+    id: "reservoir-seep-vast",
+    name: "Deep reservoir · vast seep",
+    blurb: "The tiny seep's tank widened 7.875x and deepened 2x at 1 cm: 20.2 × 1.28 × 0.64 m, 6.1 m³ of water over a 2016×128×64 lattice. Quiet deep water is held at 16h, the page pool is sized by rule, and volume control is off. Press Play to start.",
+    audience: "explore", shelf: "Tanks", environment: "stage",
+    // One lattice only: the V5 rung (docs/plans/bulk16-plan-2026-10-28.md), 4.55 GiB at 1 cm.
+    build: () => {
+      const scene = createReservoirSeepScene(0.01, { widthScale: 7.875, depthScale: 2 });
+      scene.sceneId = "reservoir-seep-vast";
+      delete scene.fluid.pagePool;
+      return scene;
+    },
+    camera: { distance_m: 16, target_m: { x: 0, y: 0.55, z: 0 }, azimuth_rad: 0.22, elevation_rad: 0.32 },
+    methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
+      overrides: { detailPolicy: "dynamic", detailNearFocus: "off", detailBudgetPercent: 5,
+        regionTiering: "error", warmResolution: "h", bulkTier: "16h", volumeControlSeconds: 0 } },
+  }),
   ...([false, true] as const).map(wet => defineScene({
     id: wet ? "interactive-pool" : "interactive-playground",
     name: wet ? "Interactive pool" : "Interactive playground",
