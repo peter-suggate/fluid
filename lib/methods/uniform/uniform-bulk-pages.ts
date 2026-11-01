@@ -1,3 +1,4 @@
+import {bulkReachTableWords} from "./uniform-bulk-reach";
 import {BULK16_PAGE,BULK16_PAGE_WORDS,bulk16FaceIndexWGSL,bulk16PageLayout} from "./uniform-bulk-pages-reference";
 
 export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fatal:6,fatalSlot:7,generation:8,version:9,refused:10,promoteClaims:11,promoteRefused:12,promoteAsked:13,openRegions:14,words:32} as const;
@@ -100,8 +101,8 @@ export class UniformBulkPages{
  get state():GPUBuffer{return this.store.buffer;}
  get binding():GPUBufferBinding{return {buffer:this.store.buffer,offset:this.store.offset,size:this.layout.bytes};}
  get allocatedBytes():number{return this.store.owned?this.store.buffer.size:0;}
- constructor(private readonly device:GPUDevice,capacity:number){
-  this.layout=bulk16PageLayout(capacity);
+ constructor(private readonly device:GPUDevice,capacity:number,reachSlots=0){
+  this.layout=bulk16PageLayout(capacity,reachSlots);
   if(this.layout.bytes>Math.min(device.limits.maxBufferSize,device.limits.maxStorageBufferBindingSize))throw new Error(`BULK16 capacity ${capacity} needs ${this.layout.bytes} bytes in one storage binding`);
   this.store={buffer:device.createBuffer({label:"Uniform whole-page BULK16 slots",size:this.layout.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),offset:0,owned:true};
   this.liveLaunch=device.createBuffer({label:"Uniform BULK16 live launch",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
@@ -120,6 +121,15 @@ export class UniformBulkPages{
   this.device.queue.writeBuffer(this.store.buffer,this.store.offset,seed);
   if(this.started)this.device.queue.writeBuffer(this.store.buffer,this.store.offset+4*(this.layout.records+BULK16_PAGE_WORDS),this.started);
   this.device.queue.writeBuffer(this.liveLaunch,0,new Uint32Array([Math.min(n,BULK16_LIVE_GROUPS),1,1,0]));
+  if(this.reachTable)this.device.queue.writeBuffer(this.store.buffer,this.store.offset+4*this.layout.reach,this.reachTable);
+ }
+ private reachTable?:Uint32Array<ArrayBuffer>;
+ /** The reach table past static walls (bulkReachTable, layout.reachSlots
+  * key slots): at construction, and again after a solid edit. */
+ reach(table:Uint32Array<ArrayBuffer>):void{
+  if(table.length!==bulkReachTableWords(this.layout.reachSlots))throw new Error(`BULK16 reach: ${table.length} words for ${this.layout.reachSlots} key slots`);
+  this.reachTable=table.length?table:undefined;
+  if(this.reachTable)this.device.queue.writeBuffer(this.store.buffer,this.store.offset+4*this.layout.reach,this.reachTable);
  }
  /** Before any frame: the census start's pages, each a whole record
   * (BULK16_PAGE_WORDS) as a claim and its demote write them at the first

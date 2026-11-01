@@ -45,6 +45,8 @@ export interface UniformBulkStartSource {
  readonly face:(x:number,y:number,z:number,a:number)=>number;
  /** The cell (m) and the step (s). */
  readonly h:number;readonly dt:number;
+ /** Box region (x,y,z)'s reach mask past static walls (uniform-bulk-reach), undefined: all of it. */
+ readonly reach?:(x:number,y:number,z:number)=>Uint32Array|undefined;
 }
 
 /** The census start's BULK16 pages (box page coordinates, x fastest): those
@@ -88,12 +90,12 @@ export function uniformBulkStartPages(s:UniformBulkStartSource,open?:number[],de
  const faces=new Float64Array(80);
  if(deep)for(const [x,y,z] of s.candidates)if(s.stored(x,y,z))for(let o=0;o<8;o++){
   const r:BulkVec=[2*x+(o&1),2*y+((o>>1)&1),2*z+(o>>2)];
-  if(uniformBulkRegionDeep(tile,r,s.h))deep.add(r[0]+2*px*(r[1]+2*py*r[2]));
+  if(uniformBulkRegionDeep(tile,r,s.h,s.reach?.(r[0],r[1],r[2])))deep.add(r[0]+2*px*(r[1]+2*py*r[2]));
  }
  // A region's verdict: 1 a member, 2 closed (no speed or error test: a
  // static wall holds no row), 0 neither.
  const admitted=(r:BulkVec)=>{
-  const shape=uniformBulkRegionClass(tile,r,s.h);
+  const shape=uniformBulkRegionClass(tile,r,s.h,s.reach?.(r[0],r[1],r[2]));
   if(shape!=="open")return shape==="closed"?2:0;
   let speed=0,error=0;
   for(let a=0;a<3;a++){
@@ -152,10 +154,11 @@ export function uniformBulkStartSource(o:{
  readonly volume:LatticePages;readonly phi:LatticePages;readonly velocity?:LatticePages;
  readonly fine:(x:number,y:number,z:number)=>boolean;readonly hot?:(x:number,y:number,z:number)=>boolean;
  readonly cellOpen:(x:number,y:number,z:number)=>boolean;readonly h:number;readonly dt:number;
+ readonly reach?:(x:number,y:number,z:number)=>Uint32Array|undefined;
 }):UniformBulkStartSource{
  const [px,py]=o.volume.pages,candidates:[number,number,number][]=[];
  for(const i of o.volume.at.keys())candidates.push([i%px,Math.floor(i/px)%py,Math.floor(i/(px*py))]);
- return {pages:o.pages,openTop:o.openTop,stored:o.stored,candidates,fine:o.fine,hot:o.hot,h:o.h,dt:o.dt,
+ return {pages:o.pages,openTop:o.openTop,stored:o.stored,candidates,fine:o.fine,hot:o.hot,h:o.h,dt:o.dt,reach:o.reach,
   open:(x,y,z)=>{let n=0;for(let k=0;k<64;k++)if(o.cellOpen(4*x+(k&3),4*y+((k>>2)&3),4*z+(k>>4)))n++;return n/64;},
   phi:(x,y,z)=>uniformBulkStartCentrePhi(o.phi,x,y,z),
   face:(x,y,z,a)=>uniformBulkStartFace(o.velocity,x,y,z,a)};

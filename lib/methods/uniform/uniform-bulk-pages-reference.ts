@@ -1,3 +1,4 @@
+import {bulkReachTableWords} from "./uniform-bulk-reach";
 /** The storage ABI of a whole 32h page represented by eight 16h cells.
  * Page words carry a slot, never a 4h block index. Slot zero is reserved;
  * the all-ones SOLID word is outside the encoding's range. */
@@ -164,12 +165,14 @@ export function prolongBulk16Page(faces:ArrayLike<number>,pressure:ArrayLike<num
 
 /** Slot records plus free, live and quarantine lists; every capacity is
  * fixed at construction. No allocation is proportional to 4h rows. */
-export function bulk16PageLayout(capacity:number){
+export function bulk16PageLayout(capacity:number,reachSlots=0){
  if(!Number.isSafeInteger(capacity)||capacity<1||capacity>BULK16_PAGE_SLOT_MASK)throw new Error("Invalid BULK16 capacity");
+ if(!Number.isSafeInteger(reachSlots)||reachSlots<0||(reachSlots&(reachSlots-1))!==0)throw new Error("Invalid BULK16 reach slots");
  const free=32,live=free+capacity,pending=live+capacity,records=Math.ceil((pending+capacity)/64)*64;
- const words=records+BULK16_PAGE_WORDS*(capacity+1);
+ // The reach table (uniform-bulk-reach) after the records: its keys, then its masks.
+ const reach=records+BULK16_PAGE_WORDS*(capacity+1),words=reach+bulkReachTableWords(reachSlots);
  if(!Number.isSafeInteger(4*words))throw new Error("BULK16 storage is too large");
- return {capacity,free,live,pending,records,words,bytes:4*words};
+ return {capacity,free,live,pending,records,reach,reachSlots,words,bytes:4*words};
 }
 
 /** Shared read-only binding for simulation and pressure ownership. Slot

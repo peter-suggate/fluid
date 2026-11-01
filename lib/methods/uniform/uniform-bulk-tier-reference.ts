@@ -24,6 +24,8 @@
  * region: [0] member flag, [1+f] face f's mean velocity, [8+16f+j] subface
  * j's projected value (3e38: the 4h projection's own). */
 
+import { bulkReached } from "./uniform-bulk-reach";
+
 export const UNIFORM_BULK_HOLD_FRAMES = 30;
 /** Restrict-prolong error over local speed below which a region may coarsen (and twice it refines). */
 export const UNIFORM_BULK_TOLERANCE = 0.1;
@@ -84,19 +86,28 @@ export interface UniformBulkTile { kind: "resident" | "air" | "solid"; band?: bo
  * fully open (a member may form), "closed" where every own tile is closed (a
  * static wall inside a BULK16 page: no row, no flux), undefined where it
  * fails. Either way its 3^3 neighbourhood must be clean: stored, no band or
- * HOT tile, no cut tile, every open tile UNIFORM_BULK_DEPTH_CELLS deep. */
-export function uniformBulkRegionClass(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): "open" | "closed" | undefined {
-  let closed = 0;
+ * HOT tile, no cut tile, every open tile UNIFORM_BULK_DEPTH_CELLS deep.
+ * `reach` (uniform-bulk-reach) names the neighbourhood tiles its surface can
+ * reach past static walls; the rest are not tested. A closed region holds no
+ * surface, so AIR fails it nowhere: its readers are the resident tiles
+ * around it, and water comes to them through a band or shallow tile first.
+ * A resident open tile the depth into air (phi >= the depth) is AIR. */
+export function uniformBulkRegionClass(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number, reach?: Uint32Array): "open" | "closed" | undefined {
+  let closed = 0, air = false;
   for (let z = -4; z < 8; z++) for (let y = -4; y < 8; y++) for (let x = -4; x < 8; x++) {
     const own = x >= 0 && x < 4 && y >= 0 && y < 4 && z >= 0 && z < 4;
+    if (!own && !bulkReached(reach, [x, y, z])) continue;
     const t = tile([4 * region[0] + x, 4 * region[1] + y, 4 * region[2] + z]) ?? { kind: "solid" as const };
-    if (t.kind !== "resident") { if (own || t.kind === "air") return undefined; continue; }
+    if (t.kind !== "resident") { if (own) return undefined; if (t.kind === "air") air = true; continue; }
     if (t.band || t.hot) return undefined;
     const open = t.open ?? 1;
     if (open <= 1e-5) { if (own) closed++; continue; }
-    if (open < 1 - 1e-5 || (t.phi ?? -Infinity) > -UNIFORM_BULK_DEPTH_CELLS * minH) return undefined;
+    // Deep water, or deep air (AIR to the region): the surface is the depth away either way.
+    const phi = t.phi ?? -Infinity;
+    if (open < 1 - 1e-5 || Math.abs(phi) < UNIFORM_BULK_DEPTH_CELLS * minH) return undefined;
+    if (phi > 0) air = true;
   }
-  return closed === 0 ? "open" : closed === 64 ? "closed" : undefined;
+  return closed === 64 ? "closed" : closed === 0 && !air ? "open" : undefined;
 }
 /** The structural rule of a member: region `r` is clean and fully open (uniformBulkRegionClass). */
 export function uniformBulkStructural(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): boolean {
@@ -277,14 +288,18 @@ export class UniformBulkComposite {
  * region holds no h tile and lies more than the particle band's depth from
  * any free surface, so its band cells are solid contact alone: the particle
  * band does not count them (uniformParticleBand's `deep`). */
-export function uniformBulkRegionDeep(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): boolean {
+export function uniformBulkRegionDeep(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number, reach?: Uint32Array): boolean {
+  let closed = 0, air = false;
   for (let z = -4; z < 8; z++) for (let y = -4; y < 8; y++) for (let x = -4; x < 8; x++) {
     const own = x >= 0 && x < 4 && y >= 0 && y < 4 && z >= 0 && z < 4;
+    if (!own && !bulkReached(reach, [x, y, z])) continue;
     const t = tile([4 * region[0] + x, 4 * region[1] + y, 4 * region[2] + z]) ?? { kind: "solid" as const };
-    if (t.kind !== "resident") { if (own || t.kind === "air") return false; continue; }
+    if (t.kind !== "resident") { if (own) return false; if (t.kind === "air") air = true; continue; }
     if (t.band || t.hot) return false;
-    if ((t.open ?? 1) <= 1e-5) continue;
-    if ((t.phi ?? -Infinity) > -UNIFORM_BULK_DEPTH_CELLS * minH) return false;
+    if ((t.open ?? 1) <= 1e-5) { if (own) closed++; continue; }
+    const phi = t.phi ?? -Infinity;
+    if (Math.abs(phi) < UNIFORM_BULK_DEPTH_CELLS * minH) return false;
+    if (phi > 0) air = true;
   }
-  return true;
+  return !air || closed === 64;
 }

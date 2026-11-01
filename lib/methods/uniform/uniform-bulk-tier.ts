@@ -10,6 +10,7 @@ import {
 import type { UniformMixedPressureBulk } from "./uniform-mixed-pressure-velocity";
 import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_SCAN } from "./uniform-bulk-pages-reference";
 import { BULK16_STATUS, type UniformBulkPages } from "./uniform-bulk-pages";
+import { BULK_REACH_WORDS, bulkReachWGSL } from "./uniform-bulk-reach";
 import { UNIFORM_REGION_HEAT_STATE_WORDS } from "./uniform-region-heat";
 import type { UniformPagePool } from "./uniform-page-pool";
 import { UNIFORM_LIVE_GROUP_GROUPS, UniformLiveVisit, uniformLiveDispatch, uniformLiveListsWGSL } from "./uniform-live-lists";
@@ -157,6 +158,12 @@ const B_HOLD_FRAMES:u32=${UNIFORM_BULK_HOLD_FRAMES}u;const B_HEAT:u32=${UNIFORM_
 fn bHot(region:u32)->bool{return bitcast<f32>(heat[B_HEAT*region])>=1.0;}
 const B_TOLERANCE:f32=${UNIFORM_BULK_TOLERANCE};const B_FLOOR:f32=${UNIFORM_BULK_FLOOR};const B_DEPTH:f32=${UNIFORM_BULK_DEPTH_CELLS};const B_REACH:f32=${UNIFORM_BULK_REACH_CELLS}.0;
 var<workgroup> bFail:atomic<u32>;
+// AIR met in the reached neighbourhood: a fail unless every own tile is closed.
+var<workgroup> bAir:atomic<u32>;
+// The region's reach past static walls (uniform-bulk-reach): bit i its neighbourhood tile i.
+var<workgroup> bReachM:array<u32,${BULK_REACH_WORDS}>;
+// The reach table, the BULK16 store's (record binding, after the record).
+${bulkReachWGSL(P?.layout.reachSlots ?? 0, i => `atomicLoad(&record[${storeWord + (P?.layout.reach ?? 0)}u+${i}])`)}
 // The region's own tiles: bit 0 an open one, bit 1 a closed one (open <= 1e-5).
 var<workgroup> bShape:atomic<u32>;
 var<workgroup> bError:atomic<u32>;
@@ -217,7 +224,8 @@ fn bFace(t:vec3i,a:u32)->f32{
  let sweep=ulSweep(groups);if(group.y!=0u){return;}
  for(var visit=group.x;visit<8u*ulVisitCount(sweep);visit+=groups.x){
   let r=ulVisitRegion(visit,sweep);
-  if(lane==0u){atomicStore(&bFail,0u);atomicStore(&bShape,0u);atomicStore(&bError,0u);atomicStore(&bSpeed,0u);}
+  if(lane==0u){atomicStore(&bFail,0u);atomicStore(&bAir,0u);atomicStore(&bShape,0u);atomicStore(&bError,0u);atomicStore(&bSpeed,0u);}
+  if(lane<${BULK_REACH_WORDS}u){bReachM[lane]=bReachWord(bReachSlot(vec3i(umPageCoord(r))+2*umFramePage()),lane);}
   workgroupBarrier();
   let origin=vec3i(4u*umPageCoord(r));
   var stored=umTileKind(origin)==UM_RESIDENT;if(stored){stored=(umTileAt(vec3u(origin))>>9u)==(r>>3u);}
@@ -226,8 +234,10 @@ fn bFace(t:vec3i,a:u32)->f32{
     // One failed tile fails the region: the rest of the scan cannot change bFail.
     if(atomicLoad(&bFail)!=0u){break;}
     let d=vec3i(vec3u(i%12u,(i/12u)%12u,i/144u))-vec3i(4);let t=origin+d;let own=all(d>=vec3i(0))&&all(d<vec3i(4));
+    // A tile a static wall hides from the region's own tiles is no margin of its.
+    if(!own&&((bReachM[i>>5u]>>(i&31u))&1u)==0u){continue;}
     let kind=umTileKind(t);
-    if(kind!=UM_RESIDENT){if(own||kind==UM_AIR){atomicOr(&bFail,1u);}continue;}
+    if(kind!=UM_RESIDENT){if(own){atomicOr(&bFail,1u);}else if(kind==UM_AIR){atomicOr(&bAir,1u);}continue;}
     // Authored static h tiles are fine detail: their region holds h, never 16h.
     if(own&&(bRegionsAt(vec3u(t))&1u)!=0u){atomicOr(&bFail,1u);continue;}
     let k=umTileAt(vec3u(t));
@@ -235,7 +245,10 @@ fn bFace(t:vec3i,a:u32)->f32{
     ${S ? "let top=rootTopology[k];let open=top.x;" : "let open=1.0;"}
     if(open<=1e-5){if(own){atomicOr(&bShape,2u);}continue;}
     if(own){atomicOr(&bShape,1u);}
-    if(open<1.0-1e-5||rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,1u);continue;}
+    // An open tile with the surface UNIFORM_BULK_DEPTH_CELLS away is deep
+    // water, or deep air: AIR to the region (a fail unless it is closed).
+    if(open<1.0-1e-5||abs(rootPhi[k])<B_DEPTH*h){atomicOr(&bFail,1u);continue;}
+    if(rootPhi[k]>0.0){atomicOr(&bAir,1u);}
     ${S ? "if(own){for(var a=0u;a<3u;a++){if(d[a]<3&&top[a+1u]<1.0-1e-5){atomicOr(&bFail,1u);}}}" : ""}
    }
    // A body within reach of its 3^3 neighbourhood before a demote's first promote serves (bBodyReaches).
@@ -262,7 +275,8 @@ fn bFace(t:vec3i,a:u32)->f32{
    // static wall a BULK16 page may hold (uniformBulkRegionClass): bit 1, no
    // member, no error test (it has no flux). A region with both open and
    // closed own tiles fails.
-   let shape=atomicLoad(&bShape);let clean=stored&&atomicLoad(&bFail)==0u;let closed=clean&&shape==2u;
+   // AIR fails an open region; a closed one holds no surface (uniformBulkRegionClass).
+   let shape=atomicLoad(&bShape);let clean=stored&&atomicLoad(&bFail)==0u&&(atomicLoad(&bAir)==0u||shape==2u);let closed=clean&&shape==2u;
    let speed=bitcast<f32>(atomicLoad(&bSpeed));let error=select(bitcast<f32>(atomicLoad(&bError)),0.0,closed);
    let structural=!clean||shape!=1u||speed*dt>B_REACH*h;
    let threshold=B_TOLERANCE*speed+B_FLOOR*h/dt;
@@ -309,6 +323,19 @@ fn bsLoad(i:u32)->u32{return atomicLoad(&record[BS_BASE+i]);}
 fn bsStoreWord(i:u32,v:u32){atomicStore(&record[BS_BASE+i],v);}
 const BS_LIVE:u32=${P.layout.live}u;const BS_RECORDS:u32=${P.layout.records}u;
 var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
+// The page's eight regions' reach (bReachM's, region o at ${BULK_REACH_WORDS} o) and its open mask.
+var<workgroup> bPM:array<u32,${8 * BULK_REACH_WORDS}>;var<workgroup> bPS:array<u32,8>;var<workgroup> bPOpen:u32;
+// Tile t (window) against page's regions: bit 0 one reaches it, bit 1 an open one does.
+fn bPageReach(page:vec3i,t:vec3i)->u32{
+ var got=0u;
+ for(var o=0u;o<8u;o++){
+  let d=t-(8*page+4*vec3i(vec3u(o&1u,(o>>1u)&1u,o>>2u)));
+  if(any(d<vec3i(-4))||any(d>=vec3i(8))){continue;}
+  let b=u32(d.x+4)+12u*(u32(d.y+4)+12u*u32(d.z+4));
+  if(((bPM[${BULK_REACH_WORDS}u*o+(b>>5u)]>>(b&31u))&1u)!=0u){got|=select(1u,3u,((bPOpen>>o)&1u)!=0u);}
+ }
+ return got;
+}
 @compute @workgroup_size(64) fn bulkPromote(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) groups:vec3u){
  let dt=params.hDt.w;let h=params.policy.w;
  if(lane==0u){bN=bsLoad(${BULK16_STATUS.live}u);}
@@ -317,27 +344,37 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
   if(lane==0u){atomicStore(&bFail,0u);}
   workgroupBarrier();
   let rec=BS_RECORDS+${BULK16_PAGE_WORDS}u*bsLoad(BS_LIVE+e);
-  let page=vec3i(bitcast<i32>(bsLoad(rec)),bitcast<i32>(bsLoad(rec+1u)),bitcast<i32>(bsLoad(rec+2u)))-umFramePage();
-  // The 27 pages first: AIR fails, and only a resident page has tiles to
-  // test (a BULK16 or SOLID page has none), so deep water costs 27 reads.
+  let boxPage=vec3i(bitcast<i32>(bsLoad(rec)),bitcast<i32>(bsLoad(rec+1u)),bitcast<i32>(bsLoad(rec+2u)));
+  let page=boxPage-umFramePage();
+  if(lane<8u){bPS[lane]=bReachSlot(2*boxPage+vec3i(vec3u(lane&1u,(lane>>1u)&1u,lane>>2u)));}
+  if(lane==0u){bPOpen=bsLoad(rec+${BULK16_PAGE.open}u);}
+  workgroupBarrier();
+  for(var i=lane;i<${8 * BULK_REACH_WORDS}u;i+=64u){bPM[i]=bReachWord(bPS[i/${BULK_REACH_WORDS}u],i%${BULK_REACH_WORDS}u);}
+  // The 27 pages first: only a resident or AIR page has tiles to test (a
+  // BULK16 or SOLID page has none), so deep water costs 27 reads. A tile
+  // no region of the page reaches past a static wall is not tested; AIR
+  // fails where an open region reaches it (bulkSelect's rule).
   if(lane<27u){bKinds[lane]=umPageKind(page+vec3i(vec3u(lane%3u,(lane/3u)%3u,lane/9u))-vec3i(1));}
   workgroupBarrier();
   for(var q=0u;q<27u;q++){
    let kind=bKinds[q];
-   if(kind==UM_AIR){if(lane==0u){atomicOr(&bFail,${BULK16_SCAN.air}u);}continue;}
-   if(kind!=UM_RESIDENT){continue;}
+   if(kind!=UM_RESIDENT&&kind!=UM_AIR){continue;}
    // Its tiles within 4 of the page: 4 deep across a face, all 8 along it.
    let d=vec3i(vec3u(q%3u,(q/3u)%3u,q/9u))-vec3i(1);
    let low=8*page+select(select(vec3i(8),vec3i(0),d==vec3i(0)),vec3i(-4),d==vec3i(-1));let ext=select(vec3u(4u),vec3u(8u),d==vec3i(0));
    for(var i=lane;i<ext.x*ext.y*ext.z;i+=64u){
     let t=low+vec3i(vec3u(i%ext.x,(i/ext.x)%ext.y,i/(ext.x*ext.y)));
+    let reach=bPageReach(page,t);
+    if(kind==UM_AIR){if((reach&2u)!=0u){atomicOr(&bFail,${BULK16_SCAN.air}u);}continue;}
+    if(reach==0u){continue;}
     let k=umTileAt(vec3u(t));
     if(slots[B_SLOTS+k]!=0u){atomicOr(&bFail,${BULK16_SCAN.band}u);continue;}
     if(bHot(umPageOfTile(k))){atomicOr(&bFail,${BULK16_SCAN.hot}u);continue;}
     ${S ? "let open=rootTopology[k].x;" : "let open=1.0;"}
     if(open<=1e-5){continue;}
     if(open<1.0-1e-5){atomicOr(&bFail,${BULK16_SCAN.cut}u);}
-    if(rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,${BULK16_SCAN.shallow}u);}
+    if(abs(rootPhi[k])<B_DEPTH*h){atomicOr(&bFail,${BULK16_SCAN.shallow}u);}
+    else if(rootPhi[k]>0.0&&(reach&2u)!=0u){atomicOr(&bFail,${BULK16_SCAN.air}u);}
    }
   }
   if(lane<36u&&abs(bitcast<f32>(bsLoad(rec+${BULK16_PAGE.velocity}u+lane)))*dt>B_REACH*h){atomicOr(&bFail,${BULK16_SCAN.speed}u);}

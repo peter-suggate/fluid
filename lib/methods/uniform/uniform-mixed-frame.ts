@@ -266,7 +266,9 @@ export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;b
  fineCeiling?:number;
  /** BULK16 slots (bulk16SlotCapacity: the whole pages of liquid the scene
   * holds): absent, the box's pages. */
- bulkSlots?:number}
+ bulkSlots?:number;
+ /** Key slots of the BULK16 store's reach table (bulkReachCapacity: past static walls), absent 0. */
+ bulkReach?:number}
 
 export class UniformMixedFrame {
  /** The NB-FLIP near-settled settings, fixed for the frame's life. */
@@ -514,7 +516,7 @@ export class UniformMixedFrame {
   this.pagePool=new UniformPagePool(device,{...layout.address.pool,closureCap:f.residency.live?4*UNIFORM_RESIDENCY_PAGE_REACH:0xffffffff});this.pagePool.seed(layout.address.seed);this.pagePool.pin(f.residency.pins);
   const solid=this.solid=new UniformMixedSolid(device,f.solid,coarseLayout,this.pagePool);
   this.coarseCache=caches[0]!;
-  const bulkPages=this.bulkPages=this.nearSettled.bulkTier==="16h"?new UniformBulkPages(device,capacity.bulkSlots??layout.address.pool.box.pages[0]*layout.address.pool.box.pages[1]*layout.address.pool.box.pages[2]):undefined;
+  const bulkPages=this.bulkPages=this.nearSettled.bulkTier==="16h"?new UniformBulkPages(device,capacity.bulkSlots??layout.address.pool.box.pages[0]*layout.address.pool.box.pages[1]*layout.address.pool.box.pages[2],capacity.bulkReach??0):undefined;
   const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles,capacity.fixedWorldGeometry,bulkPages);
   this.fineCeiling=capacity.fineCeiling??o.capacity.address.poolTiles;
   if(!Number.isInteger(this.fineCeiling)||this.fineCeiling<capacity.fineTiles||this.fineCeiling>o.capacity.address.poolTiles)throw new Error(`A mixed frame's h ceiling ${this.fineCeiling} must be in ${capacity.fineTiles}..${o.capacity.address.poolTiles}: its reservation to the tiles its pool stores`);

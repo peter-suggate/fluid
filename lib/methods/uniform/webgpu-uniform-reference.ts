@@ -94,6 +94,7 @@ export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SOLID_MASK_EMPTY, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
+import { bulkReachCapacity, bulkReachKey, bulkReachTable, uniformBulkRegionReach } from "./uniform-bulk-reach";
 import { sampleSolidWorld, solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
@@ -1375,7 +1376,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const face=(x:number,y:number,z:number,axis:number)=>uniformBulkStartFace(velocity,x,y,z,axis);
     const regions:number[]=[],deep=new Set<number>(),[dx,dy]=a.pages;
     const pages=uniformBulkStartPages(uniformBulkStartSource({pages:a.pages as [number,number,number],openTop:a.openTop,stored,volume,phi,velocity,
-      fine:(x,y,z)=>width(x,y,z)===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}),regions,deep);
+      fine:(x,y,z)=>width(x,y,z)===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s,reach:this.bulkReachOf()}),regions,deep);
     this.bulkStartDeep=(x,y,z)=>deep.has(x+2*dx!*(y+2*dy!*z));
     const t3=performance.now();
     // A D page's 4h vertex block as the install leaves it: the vertices it holds (umWideVertexSlot), the far phi elsewhere.
@@ -1387,13 +1388,73 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(slot[3]!==uniformPageWord(a,p[0],p[1],p[2])||slot[0]!==l[0]||slot[1]!==l[1]||slot[2]!==l[2])return empty;
       return phi.at.get(p[0]+px*(p[1]+py*p[2]))![4*l[0]+33*(4*l[1]+33*4*l[2])]!;
     }});
-    this.bulkStartInfo={pages:pages.length,phi_ms:t1-t0,seed_ms:t1c-t1b,layout_ms:t2-t1c,set_ms:t3-t2,records_ms:performance.now()-t3};
+    this.bulkStartInfo={pages:pages.length,phi_ms:t1-t0,seed_ms:t1c-t1b,layout_ms:t2-t1c,set_ms:t3-t2,records_ms:performance.now()-t3,reach_ms:this.bulkReach!.ms,reachMasks:this.bulkReach!.masks.size};
     return {pages,records,phi};
+  }
+  /** The reach masks past static walls (uniform-bulk-reach) by bulkReachKey, the
+   * key slots the BULK16 store holds for them, and the host ms they took. */
+  private bulkReach?:{masks:Map<number,Uint32Array>;capacity:number;ms:number};
+  /** Box region (x,y,z)'s reach mask (bulkReachMasks), undefined: all of its neighbourhood. */
+  private bulkReachOf():(x:number,y:number,z:number)=>Uint32Array|undefined{
+    const masks=(this.bulkReach??=this.bulkReachMasks()).masks;
+    return (x,y,z)=>masks.get(bulkReachKey([x,y,z]));
+  }
+  /** The regions whose surface a static wall hides some of their neighbourhood
+   * from, each its reach mask (uniformBulkRegionReach). The candidates follow
+   * the solids, not the box: the regions within 4 tiles of a closed tile with
+   * an open face neighbour (the solid's skin), from the tiles of the pages
+   * the solid mask holds and, over each column of tiles, the closed tiles the
+   * bed's top and its neighbours' tops cross. A tile is closed when its 64
+   * cells are static solid (the mask or the terrain), or past the box. */
+  private bulkReachMasks(previous?:number):{masks:Map<number,Uint32Array>;capacity:number;ms:number}{
+    const t0=performance.now();
+    const a=this.address,[nx,ny,nz]=a.cells,mask=this.solidMask,[PX,PY,PZ]=a.pages;
+    const TX=8*PX,TY=8*PY,TZ=8*PZ,RX=2*PX,RY=2*PY,RZ=2*PZ;
+    const terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined;
+    const solid=(x:number,y:number,z:number)=>x>=nx||y>=ny||z>=nz||mask.solid(x,y,z)||(terrain!==undefined&&y+1<=terrain[x+nx*z]!);
+    const memo=new Map<number,boolean>();
+    const closedAt=(x:number,y:number,z:number)=>{
+      if(x<0||y<0||z<0||x>=TX||y>=TY||z>=TZ)return true;
+      const k=x+TX*(y+TY*z);let c=memo.get(k);
+      if(c===undefined){c=true;for(let i=0;i<64&&c;i++)c=solid(4*x+(i&3),4*y+((i>>2)&3),4*z+(i>>4));memo.set(k,c);}
+      return c;
+    };
+    const regions=new Set<number>();
+    const skin=(x:number,y:number,z:number)=>{
+      if(!closedAt(x,y,z))return;
+      if(closedAt(x+1,y,z)&&closedAt(x-1,y,z)&&closedAt(x,y+1,z)&&closedAt(x,y-1,z)&&closedAt(x,y,z+1)&&closedAt(x,y,z-1))return;
+      // The regions whose neighbourhood (own tiles -4..+7) holds tile (x,y,z).
+      for(let rz=Math.max(0,Math.ceil((z-7)/4));rz<=Math.min(RZ-1,Math.floor((z+4)/4));rz++)
+        for(let ry=Math.max(0,Math.ceil((y-7)/4));ry<=Math.min(RY-1,Math.floor((y+4)/4));ry++)
+          for(let rx=Math.max(0,Math.ceil((x-7)/4));rx<=Math.min(RX-1,Math.floor((x+4)/4));rx++)regions.add(rx+RX*(ry+RY*rz));
+    };
+    mask.eachSolidPage((px,py,pz,word)=>{
+      if(px<0||py<0||pz<0||px>=PX||py>=PY||pz>=PZ||(word&0xffff)===SOLID_MASK_EMPTY)return;
+      for(let i=0;i<512;i++)skin(8*px+(i&7),8*py+((i>>3)&7),8*pz+(i>>6));
+    });
+    if(terrain){
+      // Each tile column's lowest bed height, cells; past the box, none.
+      const TXc=Math.ceil(nx/4),TZc=Math.ceil(nz/4),low=new Float64Array(TXc*TZc).fill(Infinity);
+      for(let z=0;z<nz;z++)for(let x=0;x<nx;x++){const k=(x>>2)+TXc*(z>>2);low[k]=Math.min(low[k]!,terrain[x+nx*z]!);}
+      const lo=(x:number,z:number)=>x<0||z<0||x>=TXc||z>=TZc?Infinity:low[x+TXc*z]!;
+      for(let z=0;z<TZc;z++)for(let x=0;x<TXc;x++){
+        // A closed tile here (4y+4 <= its lowest top) is skin only where a face neighbour is open: above it, or beside it under a lower column.
+        const self=lo(x,z),under=Math.min(self,lo(x+1,z),lo(x-1,z),lo(x,z+1),lo(x,z-1));
+        for(let y=Math.max(0,Math.floor(under/4)-1);y<=Math.min(TY-1,Math.floor(self/4));y++)skin(x,y,z);
+      }
+    }
+    const masks=new Map<number,Uint32Array>();
+    for(const r of regions){
+      const region=[r%RX,Math.floor(r/RX)%RY,Math.floor(r/(RX*RY))] as const;
+      const m=uniformBulkRegionReach(t=>closedAt(t[0],t[1],t[2]),region);
+      if(m)masks.set(bulkReachKey(region),m);
+    }
+    return {masks,capacity:previous??bulkReachCapacity(masks.size),ms:performance.now()-t0};
   }
   /** The census start's deep 16h regions (uniformBulkRegionDeep), for the particle band: none without a BULK16 start. */
   private bulkStartDeep?:(x:number,y:number,z:number)=>boolean;
   /** The census start's BULK16 pages and the host's time for them (bulkStartState), ms. */
-  bulkStartInfo?:{readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number;readonly shell?:number;readonly shellReach_cells?:number};
+  bulkStartInfo?:{readonly reach_ms?:number;readonly reachMasks?:number;readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number;readonly shell?:number;readonly shellReach_cells?:number};
   /** The coarse start's thin-wall tiles at h (uniformThinWallTiles: a cut 4h
    * owner there fills open cells across the solid). The census holds a cut
    * tile at h where liquid reaches it, with every tile around it
@@ -1478,7 +1539,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const fineBlocks=uniformFineBlocks(tiers);
     if(coarseStart&&fineBlocks!==undefined)detail.slotFromStart(slotRule??(fineBlocks as number));
     if(seed&&seed.fineTiles.length>fineCeiling)throw new Error(`Uniform simulation detail: the coarse start holds ${seed.fineTiles.length} h tiles (its Fine regions); fluid.tiers.bricks ${fineCeiling/8} holds ${fineCeiling}: raise fluid.tiers.bricks`);
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,bulkSlots:this.bulkSlotCapacity(),liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,bulkSlots:this.bulkSlotCapacity(),bulkReach:(this.bulkReach??=this.bulkReachMasks()).capacity,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
@@ -1495,6 +1556,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.mixedFrame.bulkPages.start(this.bulkStart.records);
     }
     this.bulkStart=undefined;
+    // The reach masks bulkSelect and bulkPromote read past static walls.
+    if(this.mixedFrame.bulkPages&&this.bulkReach)this.mixedFrame.bulkPages.reach(bulkReachTable(this.bulkReach.masks,this.bulkReach.capacity));
     // V2d: an error promote may not take the pool rule's ballistic columns or closure shell.
     if(this.mixedFrame.bulkTransfer)this.mixedFrame.bulkTransfer.promoteReserve=this.promoteReserve();
     this.mixedFrame.solid!.present=solids||bodies>0;
@@ -3353,6 +3416,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Dynamic coarsening joins the edit's tiles on the GPU (the next head
     // adopts them); a requests-only layout takes the scene's request.
     if (dirty && edit) this.editMixedSolids(edit);
+    // Reach past static walls follows the edit, in the key slots held since construction.
+    if (dirty && this.bulkReach && this.mixedFrame?.bulkPages) {
+      this.bulkReach = this.bulkReachMasks(this.bulkReach.capacity);
+      this.mixedFrame.bulkPages.reach(bulkReachTable(this.bulkReach.masks, this.bulkReach.capacity));
+    }
     this.syncMixedLayout();
     // The directory words and the page slots the edit rewrote; the buffer is never resized.
     if (dirty) for (const range of dirty) this.device.queue.writeBuffer(this.activeScratch, range.firstWord * 4, this.solidMask.words, range.firstWord, range.wordCount);
