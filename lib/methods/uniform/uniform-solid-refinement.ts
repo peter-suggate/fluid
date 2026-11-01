@@ -54,8 +54,15 @@ fn umSolidGeometryExact(t:u32)->bool{
  for(var a=0u;a<3u;a++){
   var d=vec3i(0);d[a]=1;let n=umTileKey(c-d);
   if(!umCoarseSolidFaceExact(t,a)){return false;}
+  // A BULK16 page certifies as a SOLID page does: its regions hold whole
+  // tiles only (every tile fully open or fully closed, the slot's member
+  // test), so its geometry is exact on the 4h lattice. Measured: a wall
+  // tile above a closed BULK16 region read it as unknown, asked its
+  // contact tiles h, and their low-plane h vertices (the BULK16 page's to
+  // hold) read AIR: a crossing, then a retired surface at the wall.
   if(!umKeyStored(n)){
-   if(umTileKind(c-d)!=UM_SOLID||!umCoarseSolidLowFaceExact(t,a)){return false;}
+   let kind=umTileKind(c-d);
+   if((kind!=UM_SOLID&&kind!=UM_BULK16)||!umCoarseSolidLowFaceExact(t,a)){return false;}
    continue;
   }
   if(!umCoarseSolidFaceExact(n,a)){return false;}

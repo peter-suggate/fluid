@@ -11,7 +11,8 @@
  * (UniformBulkTier). W6 moves it into a 16h slot without changing the rules.
  *
  * The record (one storage buffer, R regions):
- *  [0, R)        flags: bit 0 member
+ *  [0, R)        flags: bit 0 member, bit 1 closed (uniformBulkRegionClass:
+ *                a static wall region a BULK16 page may hold; never a member)
  *  [R, 2R)       hold: consecutive passing frames of a non-member
  *  [2R, 3R)      the last error test, err / threshold (f32 bits)
  *  [3R, 3R+8)    counts (UNIFORM_BULK_COUNT)
@@ -37,7 +38,7 @@ export const UNIFORM_BULK_FACE_WIDTH = 4096;
 /** Sentinel face value: no override (the head table's "no seam" too). */
 export const UNIFORM_BULK_NONE = 3e38;
 export const UNIFORM_BULK_NONE_BITS = 0x7f61b1e6;
-export const UNIFORM_BULK_COUNT = { members: 0, eligible: 1, structural: 2, error: 3, entered: 4, left: 5 } as const;
+export const UNIFORM_BULK_COUNT = { members: 0, eligible: 1, structural: 2, error: 3, entered: 4, left: 5, closed: 6 } as const;
 export const UNIFORM_BULK_HOLD = (regions: number) => regions;
 export const UNIFORM_BULK_ERROR = (regions: number) => 2 * regions;
 export const UNIFORM_BULK_HEADER = (regions: number) => 3 * regions;
@@ -78,18 +79,28 @@ export function uniformBulkStep(state: { member: boolean; hold: number }, struct
 
 /** A tile of the structural rule; hot: its region HOT from its own heat (UniformRegionHeat: body or source contact, detail, live particles), not a one-frame HOT a claim raises. */
 export interface UniformBulkTile { kind: "resident" | "air" | "solid"; band?: boolean; hot?: boolean; open?: number; phi?: number }
-/** The structural rule of region `r` (tile origin 4r) on a tile grid (tile(x,y,z), undefined outside: SOLID). */
-export function uniformBulkStructural(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): boolean {
+/** The structural class of region `r` (tile origin 4r) on a tile grid
+ * (tile(x,y,z), undefined outside: SOLID): "open" where every own tile is
+ * fully open (a member may form), "closed" where every own tile is closed (a
+ * static wall inside a BULK16 page: no row, no flux), undefined where it
+ * fails. Either way its 3^3 neighbourhood must be clean: stored, no band or
+ * HOT tile, no cut tile, every open tile UNIFORM_BULK_DEPTH_CELLS deep. */
+export function uniformBulkRegionClass(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): "open" | "closed" | undefined {
+  let closed = 0;
   for (let z = -4; z < 8; z++) for (let y = -4; y < 8; y++) for (let x = -4; x < 8; x++) {
     const own = x >= 0 && x < 4 && y >= 0 && y < 4 && z >= 0 && z < 4;
     const t = tile([4 * region[0] + x, 4 * region[1] + y, 4 * region[2] + z]) ?? { kind: "solid" as const };
-    if (t.kind !== "resident") { if (own || t.kind === "air") return false; continue; }
-    if (t.band || t.hot) return false;
+    if (t.kind !== "resident") { if (own || t.kind === "air") return undefined; continue; }
+    if (t.band || t.hot) return undefined;
     const open = t.open ?? 1;
-    if (open <= 1e-5) { if (own) return false; continue; }
-    if (open < 1 - 1e-5 || (t.phi ?? -Infinity) > -UNIFORM_BULK_DEPTH_CELLS * minH) return false;
+    if (open <= 1e-5) { if (own) closed++; continue; }
+    if (open < 1 - 1e-5 || (t.phi ?? -Infinity) > -UNIFORM_BULK_DEPTH_CELLS * minH) return undefined;
   }
-  return true;
+  return closed === 0 ? "open" : closed === 64 ? "closed" : undefined;
+}
+/** The structural rule of a member: region `r` is clean and fully open (uniformBulkRegionClass). */
+export function uniformBulkStructural(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): boolean {
+  return uniformBulkRegionClass(tile, region, minH) === "open";
 }
 
 /** A composite pressure system of 4h cells (n, multiples of 4) with member

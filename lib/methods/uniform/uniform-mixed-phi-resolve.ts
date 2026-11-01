@@ -1,13 +1,16 @@
 import { uniformCompiledVertexResolveWGSL } from "./uniform-compiled-topology";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { UNIFORM_DETAIL_GUARD_LOAD } from "../../core/uniform-detail-abi";
+import { UNIFORM_DETAIL_CANONICAL_LOAD, UNIFORM_DETAIL_GUARD_LOAD } from "../../core/uniform-detail-abi";
 import { UNIFORM_MIXED_COUNTED, uniformMixedCountedEntriesWGSL, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVertexSamplingWGSL } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 import { uniformRegionHeatWGSL } from "./uniform-region-heat";
 
 const RESOLVE_PASS: GPUComputePassDescriptor = { label: "Uniform mixed phi resolve" };
+const TWIN_PASS: GPUComputePassDescriptor = { label: "Uniform mixed phi twins" };
+/** encodeTwins' grid: groups stride the listed blocks. */
+const TWIN_GROUPS = 64;
 
 /** Writes umVertexValue into every unstored texel of the tiles with a mixed
  * stencil, in place. Readers compiled with the resolved vertex sampler then
@@ -45,7 +48,10 @@ export class UniformMixedPhiResolve {
   /** resolve behind a gate word (encodeGated): every group returns while it is zero. */
   private gated?: GPUComputePipeline;
   private readonly gateResources: GPUBindGroupLayout;
-  private gateGroup?: { readonly source: GPUBuffer; readonly group: UniformDetailGroup };
+  /** The gate group of each source buffer (the narrow band's state, the BULK16 promote list). */
+  private readonly gateGroups = new Map<GPUBuffer, UniformDetailGroup>();
+  /** encodeTwins: a listed block's canonical vertices to both homes. */
+  private twins?: GPUComputePipeline;
   private readonly resources: GPUBindGroupLayout;
   private readonly listResources: GPUBindGroupLayout;
   private listGroup?: { readonly changes: GPUBuffer; readonly group: UniformDetailGroup };
@@ -155,10 +161,27 @@ var<workgroup> umResolveOpen:u32;`, gateTest = `
     const gateModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve (gated)", code: source("resolve", header, gateWGSL, gateTest) });
     const heldModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve (held)", code: source("resolve", header, heldWGSL(2), "", heldTest) });
     const heldGateModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi resolve (gated, held)", code: source("resolve", header, gateWGSL + heldWGSL(3), gateTest, heldTest) });
-    const errors = [...(await module.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages, ...(await gateModule.getCompilationInfo()).messages,
+    // A listed block's canonical (4h lattice) vertices, each from the base to
+    // both homes: the store of a canonical texel (uniformDetailModule's
+    // udStore) also writes the h texture's copy, which a store straight to
+    // the base (a BULK16 promote) leaves as the claim's image.
+    const twinModule = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed phi twins", code: uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
+@group(1) @binding(0) var field:texture_storage_3d<r32float,read_write>;
+@group(2) @binding(0) var<storage,read> umTwinList:array<u32>;
+@compute @workgroup_size(64) fn twins(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ for(var i=group.x;i<umTwinList[${this.gateWord}u];i+=${TWIN_GROUPS}u){
+  let block=umTwinList[${this.gateWord + 1}u+i];let origin=vec3i(umTileCoord(512u*block));
+  // The vertices the block holds (umWideVertexSlot): those the promote wrote.
+  for(var t=lane;t<729u;t+=64u){
+   let v=origin+vec3i(vec3u(t%9u,(t/9u)%9u,t/81u));
+   if(umWideVertexSlot(v).w==block){textureStore(field,4*v,${UNIFORM_DETAIL_CANONICAL_LOAD}textureLoad(field,4*v));}
+  }
+ }
+}` });
+    const errors = [...(await module.getCompilationInfo()).messages, ...(await twinModule.getCompilationInfo()).messages, ...(await listModule.getCompilationInfo()).messages, ...(await gateModule.getCompilationInfo()).messages,
       ...(await heldModule.getCompilationInfo()).messages, ...(await heldGateModule.getCompilationInfo()).messages].filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
-    [this.pipeline, this.listed, this.gated, this.heldPipeline, this.heldGated] = await Promise.all([
+    [this.pipeline, this.listed, this.gated, this.heldPipeline, this.heldGated, this.twins] = await Promise.all([
       uniformDetailPipeline(this.device,this.ownership,{
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources] }),
         compute: { module, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.fused } },
@@ -178,6 +201,10 @@ var<workgroup> umResolveOpen:u32;`, gateTest = `
       uniformDetailPipeline(this.device,this.ownership,{
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, this.gateResources, this.heldResources] }),
         compute: { module: heldGateModule, entryPoint: "resolve", constants: { umDispatchX: this.ownership.dispatchX, umCountedJobs: UNIFORM_MIXED_COUNTED.fused } },
+      }),
+      uniformDetailPipeline(this.device,this.ownership,{
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, this.gateResources] }),
+        compute: { module: twinModule, entryPoint: "twins" },
       }),
     ]);
   }
@@ -215,15 +242,31 @@ var<workgroup> umResolveOpen:u32;`, gateTest = `
     if(this.ownership.capacity.fineTiles===0)return;
     if (!this.gated || !this.heldGated) throw new Error("Mixed phi resolve is not initialized");
     if (held) this.checkHeld(group);
-    if (this.gateGroup?.source !== source) this.gateGroup = { source, group: uniformDetailGroup(this.device,{ layout: this.gateResources, entries: [{ binding: 0, resource: { buffer: source } }] }) };
     // A gated non-held launch of the live field: its open groups may write, so
     // every held stretch ends (a closed gate writes nothing).
     if (!held && group === this.heldField) encoder.clearBuffer(this.held);
     const pass = encoder.beginComputePass(RESOLVE_PASS);
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); pass.setBindGroup(2,this.gateGroup.group.group);
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); pass.setBindGroup(2,this.gateGroup(source).group);
     if (held) pass.setBindGroup(3, this.heldGroup!);
     this.ownership.dispatchFusedCounted(pass, held ? this.heldGated : this.gated);
     pass.end();
+  }
+
+  /** The canonical vertices of the blocks a list names (u32 gateWord of
+   * list: their count; the blocks follow) to both homes, from the base:
+   * each vertex a listed block holds, the value it holds. */
+  encodeTwins(encoder: GPUCommandEncoder, group: UniformDetailGroup, list: GPUBuffer): void {
+    if(this.ownership.capacity.fineTiles===0)return;
+    if (!this.twins) throw new Error("Mixed phi resolve is not initialized");
+    const pass = encoder.beginComputePass(TWIN_PASS);
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); pass.setBindGroup(2,this.gateGroup(list).group);
+    pass.setPipeline(this.twins); pass.dispatchWorkgroups(TWIN_GROUPS); pass.end();
+  }
+
+  private gateGroup(source: GPUBuffer): UniformDetailGroup {
+    let gate = this.gateGroups.get(source);
+    if (!gate) this.gateGroups.set(source, gate = uniformDetailGroup(this.device,{ layout: this.gateResources, entries: [{ binding: 0, resource: { buffer: source } }] }));
+    return gate;
   }
 
   private checkHeld(group: UniformDetailGroup, changes?: GPUBuffer): void {

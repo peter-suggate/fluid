@@ -175,11 +175,11 @@ test("BULK16 GPU slots quarantine retired pages and refuse claims past fixed cap
    const module=device.createShaderModule({code:bulk16LifecycleWGSL(pages.layout)+`
 @group(0) @binding(1) var<storage,read_write> result:array<u32>;
 @compute @workgroup_size(1) fn claimTwo(){
- result[0]=bpClaim(vec3i(4,5,6));result[1]=bpClaim(vec3i(7,8,9));
+ result[0]=bpClaim(vec3i(4,5,6),255u);result[1]=bpClaim(vec3i(7,8,9),255u);
  if(result[0]!=0u){bpWrite(result[0],500u,42u);}
 }
 @compute @workgroup_size(1) fn retireOne(){bpRetire(result[0]);}
-@compute @workgroup_size(1) fn reclaim(){result[2]=bpClaim(vec3i(-2,3,4));result[3]=bpRead(result[2],500u);}
+@compute @workgroup_size(1) fn reclaim(){result[2]=bpClaim(vec3i(-2,3,4),255u);result[3]=bpRead(result[2],500u);}
 `});
    const layout=device.createBindGroupLayout({entries:[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))});
    const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});

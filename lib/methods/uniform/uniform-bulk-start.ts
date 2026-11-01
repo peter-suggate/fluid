@@ -16,10 +16,10 @@
  * tile neighbourhoods, each tile once (memoised), so the work is the
  * candidates' and their neighbours' tiles, never the box's. */
 import {
-  UNIFORM_BULK_FLOOR, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, uniformBulkAxisError, uniformBulkRegionDeep, uniformBulkStructural,
+  UNIFORM_BULK_FLOOR, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, uniformBulkAxisError, uniformBulkRegionClass, uniformBulkRegionDeep,
   type BulkVec, type UniformBulkTile,
 } from "./uniform-bulk-tier-reference";
-import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_PHI_TEXELS, restrictBulk16Page } from "./uniform-bulk-pages-reference";
+import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_PHI_TEXELS, bulk16FaceOpen, restrictBulk16Page } from "./uniform-bulk-pages-reference";
 import type { LatticePages } from "../../core/initial-liquid-lattice";
 
 /** What the D set reads, all on box coordinates (pages of 8^3 tiles, tiles of 4^3 cells). */
@@ -48,10 +48,12 @@ export interface UniformBulkStartSource {
 }
 
 /** The census start's BULK16 pages (box page coordinates, x fastest): those
- * whose eight regions bulkSelect admits on the t=0 state. `deep`, when
- * given, takes the candidates' deep regions (uniformBulkRegionDeep), keyed
- * x + 2px(y + 2py z). */
-export function uniformBulkStartPages(s:UniformBulkStartSource,deep?:Set<number>):[number,number,number][]{
+ * whose eight regions bulkSelect admits on the t=0 state, each a member or a
+ * closed static wall (uniformBulkRegionClass), at least one a member. `open`,
+ * when given, takes each page's open-region mask (bit x + 2y + 4z: a member),
+ * the slot's BULK16_PAGE.open. `deep`, when given, takes the candidates'
+ * deep regions (uniformBulkRegionDeep), keyed x + 2px(y + 2py z). */
+export function uniformBulkStartPages(s:UniformBulkStartSource,open?:number[],deep?:Set<number>):[number,number,number][]{
  const [px,py,pz]=s.pages,T=[8*px,8*py,8*pz] as const;
  const inBox=(t:BulkVec)=>t.every((v,a)=>v>=0&&v<T[a]!);
  const hot=new Map<number,boolean>(),tiles=new Map<number,UniformBulkTile|undefined>();
@@ -88,8 +90,11 @@ export function uniformBulkStartPages(s:UniformBulkStartSource,deep?:Set<number>
   const r:BulkVec=[2*x+(o&1),2*y+((o>>1)&1),2*z+(o>>2)];
   if(uniformBulkRegionDeep(tile,r,s.h))deep.add(r[0]+2*px*(r[1]+2*py*r[2]));
  }
+ // A region's verdict: 1 a member, 2 closed (no speed or error test: a
+ // static wall holds no row), 0 neither.
  const admitted=(r:BulkVec)=>{
-  if(!uniformBulkStructural(tile,r,s.h))return false;
+  const shape=uniformBulkRegionClass(tile,r,s.h);
+  if(shape!=="open")return shape==="closed"?2:0;
   let speed=0,error=0;
   for(let a=0;a<3;a++){
    for(let k=0;k<5;k++)for(let j=0;j<16;j++){
@@ -98,16 +103,18 @@ export function uniformBulkStartPages(s:UniformBulkStartSource,deep?:Set<number>
    }
    error=Math.max(error,uniformBulkAxisError(faces));
   }
-  return speed*s.dt<=UNIFORM_BULK_REACH_CELLS*s.h&&error<UNIFORM_BULK_TOLERANCE*speed+UNIFORM_BULK_FLOOR*s.h/s.dt;
+  return speed*s.dt<=UNIFORM_BULK_REACH_CELLS*s.h&&error<UNIFORM_BULK_TOLERANCE*speed+UNIFORM_BULK_FLOOR*s.h/s.dt?1:0;
  };
- const out:[number,number,number][]=[];
+ const out:[number,number,number,number][]=[];
  for(const [x,y,z] of s.candidates){
   if(!s.stored(x,y,z))continue;
-  let whole=true;
-  for(let o=0;o<8&&whole;o++)whole=admitted([2*x+(o&1),2*y+((o>>1)&1),2*z+(o>>2)]);
-  if(whole)out.push([x,y,z]);
+  let whole=true,mask=0;
+  for(let o=0;o<8&&whole;o++){const v=admitted([2*x+(o&1),2*y+((o>>1)&1),2*z+(o>>2)]);whole=v!==0;if(v===1)mask|=1<<o;}
+  if(whole&&mask!==0)out.push([x,y,z,mask]);
  }
- return out.sort((p,q)=>p[2]-q[2]||p[1]-q[1]||p[0]-q[0]);
+ out.sort((p,q)=>p[2]-q[2]||p[1]-q[1]||p[0]-q[0]);
+ if(open)open.push(...out.map(p=>p[3]));
+ return out.map(([x,y,z])=>[x,y,z]);
 }
 
 /** A box tile's +face velocity on axis a as the t=0 install leaves a 4h
@@ -162,6 +169,8 @@ export function uniformBulkStartSource(o:{
  * still do); a low neighbour that does not gives the low-face rows' 0. */
 export function uniformBulkStartRecords(o:{
  readonly pages:readonly (readonly [number,number,number])[];readonly boxPage:readonly number[];
+ /** Each page's open-region mask (uniformBulkStartPages' open); all open by default. */
+ readonly open?:readonly number[];
  readonly stored:(x:number,y:number,z:number)=>boolean;
  readonly face:(x:number,y:number,z:number,a:number)=>number;
  readonly phi:(page:readonly [number,number,number],texel:readonly [number,number,number])=>number;
@@ -171,7 +180,8 @@ export function uniformBulkStartRecords(o:{
  o.pages.forEach((p,s)=>{
   const at=W*s;
   for(let a=0;a<3;a++)i32[at+BULK16_PAGE.page+a]=p[a]!+o.boxPage[a]!;
-  out[at+BULK16_PAGE.flags]=1;out[at+BULK16_PAGE.generation]=1;out[at+BULK16_PAGE.open]=255;
+  const open=o.open?.[s]??255;
+  out[at+BULK16_PAGE.flags]=1;out[at+BULK16_PAGE.generation]=1;out[at+BULK16_PAGE.open]=open;
   for(let a=0;a<3;a++){
    const u=(a+1)%3,v=(a+2)%3,low:[number,number,number]=[p[0],p[1],p[2]];low[a]--;
    const lowStored=low[a]>=0&&o.stored(low[0],low[1],low[2]);
@@ -181,7 +191,8 @@ export function uniformBulkStartRecords(o:{
    }
   }
   const r=restrictBulk16Page(faces,pressure);
-  for(let k=0;k<36;k++)f32[at+BULK16_PAGE.velocity+k]=r.faces[k]!;
+  // A face mean with a closed region on either side is a wall's: 0 (btFaceOpen).
+  for(let k=0;k<36;k++)f32[at+BULK16_PAGE.velocity+k]=bulk16FaceOpen(open,k)?r.faces[k]!:0;
   for(let k=0;k<8;k++)f32[at+BULK16_PAGE.pressure+k]=r.pressure[k]!;
   for(let k=0;k<BULK16_PHI_TEXELS;k++)f32[at+BULK16_PAGE.phi+k]=o.phi(p,[k%9,Math.floor(k/9)%9,Math.floor(k/81)]);
  });

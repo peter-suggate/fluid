@@ -943,6 +943,8 @@ fn baWord(base:u32,at:u32)->u32{
 }
 // The region of slot across face f of its region i (none: 8u), and of a 4h tile t of a page across a face of normal a.
 fn bsRegion(t:vec3u)->u32{return (t.x>>2u)|((t.y>>2u)<<1u)|((t.z>>2u)<<2u);}
+// Region i of slot is open (BULK16_PAGE.open); a closed one is a static wall: no row, no flux.
+fn bsOpen(slot:u32,i:u32)->bool{return ((poolB[bsAt(slot,${BULK16_PAGE.open}u)]>>i)&1u)!=0u;}
 `:"";
   // A BULK16 tail item: the page list's resident blocks, then the live slots (BA | slot).
   const items=BP?/* wgsl */`
@@ -998,11 +1000,13 @@ const B_NONE:u32=0u;const B_REGION:u32=1u;const B_BLOCK:u32=2u;
 struct BNear {kind:u32,slot:u32,region:u32,block:u32}
 fn bRegionCoord(i:u32)->vec3u{return vec3u(i&1u,(i>>1u)&1u,i>>2u);}
 fn bRegionIndex(r:vec3u)->u32{return r.x+2u*r.y+4u*r.z;}
+// A closed region (bsOpen), or a face toward one, is a wall: B_NONE.
 fn bNear(slot:u32,page:vec3i,i:u32,f:u32)->BNear{
  let a=f/2u;let side=f&1u;var r=bRegionCoord(i);
- if(r[a]!=side){r[a]=side;return BNear(B_REGION,slot,bRegionIndex(r),0u);}
+ if(!bsOpen(slot,i)){return BNear(B_NONE,0u,0u,0u);}
+ if(r[a]!=side){r[a]=side;let j=bRegionIndex(r);if(!bsOpen(slot,j)){return BNear(B_NONE,0u,0u,0u);}return BNear(B_REGION,slot,j,0u);}
  var d=vec3i(0);d[a]=bSign(f);let w=umPageRawWord(page+d);r[a]=1u-side;
- let other=bsWordSlot(w);if(other!=0u){return BNear(B_REGION,other,bRegionIndex(r),0u);}
+ let other=bsWordSlot(w);if(other!=0u){let j=bRegionIndex(r);if(!bsOpen(other,j)){return BNear(B_NONE,0u,0u,0u);}return BNear(B_REGION,other,j,0u);}
  if(umBlockStored(w)){return BNear(B_BLOCK,0u,i,w);}
  return BNear(B_NONE,0u,0u,0u);
 }
@@ -1053,9 +1057,10 @@ fn bResidual(slot:u32,lane:u32)->f32{
   const bulkSweeps=(arr:string,r:string,d:string)=>/* wgsl */`
   for(var s=0u;s<${schedule.sweeps}u;s++){
    for(var col=0u;col<2u;col++){
-    if(lane<8u&&(countOneBits(lane)&1u)==col){
+    // A closed region (d 0) has no row: its iterate stays 0, and no open row couples to it.
+    if(lane<8u&&(countOneBits(lane)&1u)==col&&${d}>0.0){
      var off=${r};let c=bRegionCoord(lane);
-     for(var f=0u;f<6u;f++){if(c[f/2u]!=(f&1u)){off+=bRegionK(f)*${arr}[lane^(1u<<(f/2u))];}}
+     for(var f=0u;f<6u;f++){let j=lane^(1u<<(f/2u));if(c[f/2u]!=(f&1u)&&bsOpen(slot,j)){off+=bRegionK(f)*${arr}[j];}}
      ${arr}[lane]=off/${d};
     }
     workgroupBarrier();
@@ -1745,15 +1750,16 @@ ${B?"    if(member&&(umTileCoord(k)[axis]&3u)==select(0u,3u,side==1u)){poolB[N_R
     if(across>=N_SENTINEL){
      // A SOLID page: the root's wall slot, free (held) or bounded at 0.
      let s=N_KEYS+umFaceTile(block,f,l);let fraction=${S?"rootTopology[s].x":"0.5"};
-${BP?`     let bslot=bsWordSlot(across);
-     if(bslot!=0u){
+${BP?`     let bslot=bsWordSlot(across);var t=l;t[axis]=select(7u,0u,side==1u);let region=bsRegion(t);
+     // A closed region across (bsOpen) is a static wall: the SOLID page's wall slot below.
+     if(bslot!=0u&&bsOpen(bslot,region)){
       // A BULK16 page: its region's 16h row across the face, 10h from this
       // row's centre (member to member 16h, as nBulkLink's). The slot's
       // row sees this row's start less its head (a member's: its region's
       // start), q, which the wall slot's bound word keeps for pBulkRows
       // and pWrite; buildRhs left the face's flux in its RHS word.
       if(fraction>1e-6){
-       let w=fraction/(h4*h4);var t=l;t[axis]=select(7u,0u,side==1u);let region=bsRegion(t);
+       let w=fraction/(h4*h4);
        var q=start-nBulkHead(k,axis,false);c=25.6*w;
        if(member){q=nBulkStart(k);c=16.0*w;}
        kind=N_BULKN;link=baOf(bslot,false,region);level2=c;diagonal+=c;
@@ -2667,9 +2673,14 @@ fn bAdvect(s:u32,p:vec3i,k:u32)->f32{
   if(lane==0u){atomicStore(&bSpeed,0u);atomicStore(&bError,0u);}
   workgroupBarrier();
   if(lane<36u&&pResolve==0u){
-   let a=lane/12u;let plane=(lane%12u)/4u;var open=true;var es=slot;var ep=page;var ek=lane;
+   let a=lane/12u;let plane=(lane%12u)/4u;var es=slot;var ep=page;var ek=lane;
+   // Open: the face's regions on this page open (a closed one's faces are
+   // walls), and across the page a BULK16 page's open region or a stored block.
+   var r=vec3u(0u);r[(a+1u)%3u]=lane&1u;r[(a+2u)%3u]=(lane>>1u)&1u;var lo=r;var hi=r;hi[a]=1u;
+   var open=select(bsOpen(slot,bRegionIndex(lo)),true,plane==2u)&&select(bsOpen(slot,bRegionIndex(hi)),true,plane==0u);
    if(plane!=1u){
-    var d=vec3i(0);d[a]=select(-1,1,plane==2u);let w=umPageRawWord(page+d);open=bsWordSlot(w)!=0u||umBlockStored(w);
+    var d=vec3i(0);d[a]=select(-1,1,plane==2u);let w=umPageRawWord(page+d);let o=bsWordSlot(w);
+    open=open&&select(umBlockStored(w),bsOpen(o,bRegionIndex(select(lo,hi,plane==0u))),o!=0u);
     // A face two BULK16 pages share is traced in the low page's frame by
     // both, so the two copies stay one value.
     if(plane==0u&&bsWordSlot(w)!=0u){es=bsWordSlot(w);ep=page+d;ek=lane+8u;}
@@ -2684,9 +2695,11 @@ fn bAdvect(s:u32,p:vec3i,k:u32)->f32{
   // on their axis, under UNIFORM_BULK_TOLERANCE of the page's speed plus
   // UNIFORM_BULK_FLOOR h a step. A member leaves at twice it: the page
   // asks for its block back (its promote word, the next commit's).
+  // A line through a closed region has no linear profile to test (its faces are walls).
   if(lane<12u&&pResolve==0u){
-   let k=12u*(lane/4u)+(lane&3u);let lo=bsF(slot,BS_U+k);let mid=bsF(slot,BS_U+k+4u);let hi=bsF(slot,BS_U+k+8u);
-   atomicMax(&bError,bitcast<u32>(abs(mid-0.5*(lo+hi))));
+   let a=lane/4u;let k=12u*a+(lane&3u);let lo=bsF(slot,BS_U+k);let mid=bsF(slot,BS_U+k+4u);let hi=bsF(slot,BS_U+k+8u);
+   var r=vec3u(0u);r[(a+1u)%3u]=lane&1u;r[(a+2u)%3u]=(lane>>1u)&1u;let i=bRegionIndex(r);r[a]=1u;
+   if(bsOpen(slot,i)&&bsOpen(slot,bRegionIndex(r))){atomicMax(&bError,bitcast<u32>(abs(mid-0.5*(lo+hi))));}
   }
   workgroupBarrier();
   if(lane==0u&&pResolve==0u){
@@ -2743,6 +2756,8 @@ fn bAdvect(s:u32,p:vec3i,k:u32)->f32{
    // its u* flux (pBulkRows' term), in velocity. Toward a wall: zero.
    if(low!=0u&&high!=0u){
     let jl=bRegionIndex(rl);let jh=bRegionIndex(rh);
+    // A face of a closed region is a wall.
+    if(!bsOpen(low,jl)||!bsOpen(high,jh)){bsSet(slot,BS_U+lane,0.0);continue;}
     let rise=(bsF(high,BS_P+jh)+bsF(high,BS_N+jh))-(bsF(low,BS_P+jl)+bsF(low,BS_N+jl));
     bsSet(slot,BS_U+lane,bsF(slot,BS_US+lane)-params.hDt.w/params.policy.x*rise/(16.0*params.hDt[a]));
    }else{

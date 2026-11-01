@@ -124,8 +124,9 @@ export class UniformMixedSurfaceVolume {
 override parity:u32=0u;
 @group(1) @binding(5) var<storage,read_write> budget:array<f32>;
 @group(1) @binding(6) var<uniform> budgetParams:vec4f;
-// A BULK16 page is deep, fully open liquid (16h membership): 32^3 h cells.
-${this.bulkPages?`@group(1) @binding(7) var<storage,read> svBulk:array<u32>;\nfn svBulkVolume()->f32{return 32768.0*f32(svBulk[${BULK16_STATUS.live}u]);}`:"fn svBulkVolume()->f32{return 0.0;}"}
+// A BULK16 slot's open regions are deep, fully open liquid (16h
+// membership): 16^3 h cells each; a closed region is static solid.
+${this.bulkPages?`@group(1) @binding(7) var<storage,read> svBulk:array<u32>;\nfn svBulkVolume()->f32{return 4096.0*f32(svBulk[${BULK16_STATUS.openRegions}u]);}`:"fn svBulkVolume()->f32{return 0.0;}"}
 override captureBudget:bool=false;override gaugeBudget:bool=false;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner, and below a 4h owner's own texel (its tile origin): the

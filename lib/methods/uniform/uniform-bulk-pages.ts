@@ -1,19 +1,21 @@
 import {BULK16_PAGE,BULK16_PAGE_WORDS,bulk16FaceIndexWGSL,bulk16PageLayout} from "./uniform-bulk-pages-reference";
 
-export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fatal:6,fatalSlot:7,generation:8,version:9,refused:10,promoteClaims:11,promoteRefused:12,promoteAsked:13,words:32} as const;
+export const BULK16_STATUS={capacity:0,free:1,head:2,pending:3,pops:4,live:5,fatal:6,fatalSlot:7,generation:8,version:9,refused:10,promoteClaims:11,promoteRefused:12,promoteAsked:13,openRegions:14,words:32} as const;
 export const BULK16_FATAL={invalidSlot:2,invalidTransition:4} as const;
 /** The live launch's most workgroups (liveLaunch): its readers stride the live list. */
 export const BULK16_LIVE_GROUPS=1024;
 
-/** The slots a scene's liquid can fill: a BULK16 page is a whole page of
- * liquid (every region a 16h member), so no more pages than the most
- * liquid the scene holds (its initial cells, drops and inflow, in h cells)
- * fills, and no more than the box's pages. A store at this capacity refuses
- * only the claims of liquid added at run time (an interactive ball): the
- * refused page stays 4h (bpClaim). */
-export function bulk16SlotCapacity(liquidCells:number,boxPages:number):number{
- if(!(liquidCells>=0)||!Number.isInteger(boxPages)||boxPages<1)throw new Error(`BULK16 slot capacity: ${liquidCells} liquid cells, ${boxPages} box pages`);
- return Math.max(1,Math.min(boxPages,Math.floor(liquidCells/32768)));
+/** The slots a scene's liquid can fill. A BULK16 page with no closed
+ * region is a whole page of liquid (every region a 16h member), so there
+ * are no more of those than the most liquid the scene holds (its initial
+ * cells, drops and inflow, in h cells) fills; a page with a closed region
+ * (static solid) is one of the `wallPages` the static solid cuts. No more
+ * than the box's pages. A store at this capacity refuses only the claims of
+ * liquid added at run time (an interactive ball): the refused page stays 4h
+ * (bpClaim). */
+export function bulk16SlotCapacity(liquidCells:number,boxPages:number,wallPages=0):number{
+ if(!(liquidCells>=0)||!Number.isInteger(boxPages)||boxPages<1||!Number.isInteger(wallPages)||wallPages<0)throw new Error(`BULK16 slot capacity: ${liquidCells} liquid cells, ${boxPages} box pages, ${wallPages} wall pages`);
+ return Math.max(1,Math.min(boxPages,Math.floor(liquidCells/32768)+wallPages));
 }
 type Layout=ReturnType<typeof bulk16PageLayout>;
 
@@ -50,7 +52,9 @@ fn bpFail(reason:u32,slot:u32){
  if(atomicOr(&bulkPages[${H.fatal}u],reason)==0u){atomicStore(&bulkPages[${H.fatalSlot}u],slot);}
 }
 // A claim with no free slot is refused (0, counted): the page stays 4h.
-fn bpClaim(page:vec3i)->u32{
+// open: its open regions (BULK16_PAGE.open, bit r region r; the others are
+// closed walls), counted into the live open regions.
+fn bpClaim(page:vec3i,open:u32)->u32{
  let pop=atomicAdd(&bulkPages[${H.pops}u],1u);
  if(pop>=atomicLoad(&bulkPages[${H.free}u])){atomicAdd(&bulkPages[${H.refused}u],1u);return 0u;}
  let head=atomicLoad(&bulkPages[${H.head}u]);let slot=atomicLoad(&bulkPages[BP_FREE+(head+pop)%BP_CAPACITY]);
@@ -60,7 +64,8 @@ fn bpClaim(page:vec3i)->u32{
  for(var w=0u;w<BP_STRIDE;w++){bpWrite(slot,w,0u);}
  for(var a=0u;a<3u;a++){bpWrite(slot,a,bitcast<u32>(page[a]));}
  bpWrite(slot,${BULK16_PAGE.generation}u,atomicLoad(&bulkPages[${H.generation}u]));
- bpWrite(slot,${BULK16_PAGE.open}u,255u);bpWrite(slot,${BULK16_PAGE.flags}u,1u);
+ bpWrite(slot,${BULK16_PAGE.open}u,open);bpWrite(slot,${BULK16_PAGE.flags}u,1u);
+ atomicAdd(&bulkPages[${H.openRegions}u],countOneBits(open));
  return slot;
 }
 fn bpRetire(slot:u32){
@@ -70,6 +75,7 @@ fn bpRetire(slot:u32){
   if(changed.exchanged){break;}
   if(changed.old_value!=1u){bpFail(${BULK16_FATAL.invalidTransition}u,slot);return;}
  }
+ atomicSub(&bulkPages[${H.openRegions}u],countOneBits(bpRead(slot,${BULK16_PAGE.open}u)));
  let i=atomicAdd(&bulkPages[${H.pending}u],1u);
  atomicStore(&bulkPages[BP_PENDING+i],slot);
 }
@@ -108,6 +114,7 @@ export class UniformBulkPages{
   // As n claims and a finish leave the store: the free ring's head past them, each live.
   const seed=new Uint32Array(this.layout.live+capacity);seed[BULK16_STATUS.capacity]=capacity;seed[BULK16_STATUS.free]=capacity-n;seed[BULK16_STATUS.head]=n%capacity;
   seed[BULK16_STATUS.live]=n;seed[BULK16_STATUS.version]=0xb0160001;
+  for(let i=0;i<n;i++){let o=this.started![BULK16_PAGE_WORDS*i+BULK16_PAGE.open]!;while(o){seed[BULK16_STATUS.openRegions]+=o&1;o>>>=1;}}
   for(let i=0;i<capacity;i++)seed[this.layout.free+i]=i+1;
   for(let i=0;i<n;i++)seed[this.layout.live+i]=i+1;
   this.device.queue.writeBuffer(this.store.buffer,this.store.offset,seed);

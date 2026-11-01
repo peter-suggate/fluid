@@ -1584,6 +1584,11 @@ export class UniformMixedFrame {
   // Detail storage admits the generation's patches ahead of the remap.
   this.fields.detail?.encodeAdmit(encoder,relayout.generation.topology);
   this.remap.applyGpu(encoder,relayout.generation,relayout.receipt,true,this.relayoutAdopted);
+  // A block the commit promoted into holds its phi in the base alone: the
+  // h copies of its canonical vertices (an h tile's beside it) are the
+  // claim's AIR image until stored to both homes, ahead of the resolve
+  // that hangs the h texels beside them and of every reader.
+  if(this.bulkTransfer){const list=this.bulkTransfer.promoted;this.phiResolve.encodeTwins(encoder,this.phiResolveGroups.phi,list);this.phiResolve.encodeTwins(encoder,this.phiResolveGroups.scratch,list);}
   this.geometryCurrent=false;
   trace?.phase(encoder,A.resolutionCensus);
   // Only tiles whose neighbourhood changed width can hang differently.

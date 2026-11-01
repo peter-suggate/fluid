@@ -68,12 +68,15 @@ function encodeImage(device:GPUDevice,encoder:GPUCommandEncoder,buffers:Record<s
  };
 }
 
-test("BULK16 promote: a promoted block holds deep resident water's image in every block-keyed field",{skip:!process.env.WEBGPU_NODE_MODULE},async t=>{
+/** wall: the column keeps the scene's dam wall (its throat filled): one
+ * 16h region thick in x and full height, so each column page holds four
+ * closed regions (uniformBulkRegionClass) beside four open ones. */
+const promoteImage=(wall:boolean)=>async(t:{diagnostic:(m:string)=>void})=>{
  await withUniformDevice("BULK16 promote image",async device=>{
   const base=getSceneDefinition(RESERVOIR_SEEP_ID);
   const {scene}=sceneDocumentAtLattice({...base,buildAt:(l:{cellSize_m:number})=>createReservoirSeepScene(l.cellSize_m,COLUMN)},{cellSize_m:0.005});
-  // The closed tank: no internal wall, the reservoir's water across the box.
-  const v=scene.fluid.initialLiquidVolumes![0]! as any;scene.solidVoxels=[];
+  // The closed tank: no throat, the reservoir's water across the box.
+  const v=scene.fluid.initialLiquidVolumes![0]! as any;scene.solidVoxels=wall?scene.solidVoxels!.filter(s=>s.operation==="fill"):[];
   scene.fluid.initialLiquidVolumes=[{...v,min_m:{...v.min_m,x:-scene.container.width_m/2},max_m:{...v.max_m,x:scene.container.width_m/2}}];
   scene.fluid.pagePool={...scene.fluid.pagePool,blocks:16};scene.fluid.dynamicViscosity_Pa_s=0;scene.fluid.surfaceTension_N_m=0;
   const solver=await createUniformSolver(device,scene,{...base.methodProfile!.overrides,bulkTier:"16h",volumeControlSeconds:0});
@@ -113,7 +116,22 @@ test("BULK16 promote: a promoted block holds deep resident water's image in ever
     assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,[]));
     const image=await capture();assert.equal(solver.info.simulationPipelineError,undefined);
     const bulk=[...table(image.end)].filter(w=>w!==0xffffffff&&(w&0x80000000)!==0).length;
-    if(bulk>0){assert.ok(resident,"a demote follows a resident frame");demoted=true;continue;}
+    // A census start may hold pages in BULK16 from the first frame (the
+    // wall's: its closed regions are members); the scan asks them back, and
+    // that promote, of a block no resident frame held, runs here too. The
+    // compared cycle starts at the first resident frame.
+    if(bulk>0&&!resident)continue;
+    if(bulk>0){
+     if(!demoted){
+      // The live slots' open regions: four of each page's eight with the wall.
+      const store=frame.bulkPages,r=device.createBuffer({size:4*BULK16_STATUS.words,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ}),e=device.createCommandEncoder();
+      e.copyBufferToBuffer(store.binding.buffer,store.binding.offset??0,r,0,4*BULK16_STATUS.words);device.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);
+      const w=new Uint32Array(r.getMappedRange().slice(0));r.destroy();
+      t.diagnostic(`BULK16 live ${w[BULK16_STATUS.live]}, open regions ${w[BULK16_STATUS.openRegions]}`);
+      assert.equal(w[BULK16_STATUS.openRegions],(wall?4:8)*w[BULK16_STATUS.live]!,"each live slot's open regions");
+     }
+     demoted=true;continue;
+    }
     if(demoted)promoted=image;else resident=image;
    }
    assert.ok(resident&&promoted,`the cycle demoted and promoted whole-16h pages by step ${step}`);
@@ -123,18 +141,19 @@ test("BULK16 promote: a promoted block holds deep resident water's image in ever
    const pairs=[...moved];
    // The first demote takes the pages whose regions entered first: their
    // holds start on their own evidence (region heat, not the tier's start-up
-   // HOT), so the column's pages need not enter together.
-   assert.ok(pairs.length>=2,`the column promotes its whole-16h pages (${pairs.length})`);
+   // HOT), so the column's pages need not enter together. With the wall the
+   // measured cycle demotes one page (one live slot, four open regions).
+   assert.ok(pairs.length>=(wall?1:2),`the column promotes its whole-16h pages (${pairs.length})`);
    t.diagnostic(`promoted blocks ${JSON.stringify(pairs)}`);
    const f32=(w:number)=>new Float32Array(new Uint32Array([w]).buffer)[0]!;
    const failures:string[]=[];
    type Point="claim"|"remap"|"end";
    const compare=(label:string,source:string,index:(b:number)=>number[],check:(a:number,b:number)=>boolean,points:readonly Point[]=["claim","remap","end"],keep?:(point:Point,old:number,i:number)=>boolean)=>{
     for(const point of points){
-     const before=resident![point].words.get(source)!,after=promoted![point].words.get(source)!;let bad=0,first="";
+     const before=resident![point].words.get(source)!,after=promoted![point].words.get(source)!;let bad=0,first="";let worst={d:0,at:""};
      for(const [old,now] of pairs){const ia=index(old),ib=index(now);
-      for(let i=0;i<ia.length;i++){if(keep&&!keep(point,old,i))continue;const a=before[ia[i]!]!,b=after[ib[i]!]!;if(!check(a,b)){if(!bad)first=`block ${old}->${now} word ${i}: ${a.toString(16)} vs ${b.toString(16)} (${f32(a)} vs ${f32(b)})`;bad++;}}}
-     if(bad)failures.push(`${label} (${point}): ${bad} words differ; first ${first}`);
+      for(let i=0;i<ia.length;i++){if(keep&&!keep(point,old,i))continue;const a=before[ia[i]!]!,b=after[ib[i]!]!;if(!check(a,b)){if(!bad)first=`block ${old}->${now} word ${i}: ${a.toString(16)} vs ${b.toString(16)} (${f32(a)} vs ${f32(b)})`;const d=Math.abs(f32(a)-f32(b));if(d>worst.d)worst={d,at:`block ${old}->${now} word ${i}`};bad++;}}}
+     if(bad)failures.push(`${label} (${point}): ${bad} words differ; first ${first}; largest float difference ${worst.d} at ${worst.at}`);
     }
    };
    const exact=(a:number,b:number)=>a===b;
@@ -181,7 +200,9 @@ test("BULK16 promote: a promoted block holds deep resident water's image in ever
    assert.deepEqual(failures,[],failures.join("\n"));
   }finally{solver.destroy();}
  });
-});
+};
+test("BULK16 promote: a promoted block holds deep resident water's image in every block-keyed field",{skip:!process.env.WEBGPU_NODE_MODULE},promoteImage(false));
+test("BULK16 promote: a page holding a closed wall region demotes, and its promoted block holds the resident image",{skip:!process.env.WEBGPU_NODE_MODULE},promoteImage(true));
 
 /* M2's promote trigger (b) (UniformBulkTier's bulkPromote): at rest no
  * BULK16 page asks back, and a page whose face mean moves more than

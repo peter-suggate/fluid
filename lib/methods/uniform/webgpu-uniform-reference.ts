@@ -93,7 +93,7 @@ import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX
 export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
-import { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
+import { SOLID_MASK_EMPTY, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { sampleSolidWorld, solidWorldForFluidLattice } from "../../core/solid-world";
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
@@ -1373,14 +1373,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const open=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<nx&&y<ny&&z<nz&&!this.solidMask.solid(x,y,z)&&!(terrainCells&&y+1<=terrainCells[x+nx*z]!);
     const c=scene.container,h=Math.min(c.width_m/cells[0]!,c.height_m/cells[1]!,c.depth_m/cells[2]!);
     const face=(x:number,y:number,z:number,axis:number)=>uniformBulkStartFace(velocity,x,y,z,axis);
-    const deep=new Set<number>(),[dx,dy]=a.pages;
+    const regions:number[]=[],deep=new Set<number>(),[dx,dy]=a.pages;
     const pages=uniformBulkStartPages(uniformBulkStartSource({pages:a.pages as [number,number,number],openTop:a.openTop,stored,volume,phi,velocity,
-      fine:(x,y,z)=>width(x,y,z)===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}),deep);
+      fine:(x,y,z)=>width(x,y,z)===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}),regions,deep);
     this.bulkStartDeep=(x,y,z)=>deep.has(x+2*dx!*(y+2*dy!*z));
     const t3=performance.now();
     // A D page's 4h vertex block as the install leaves it: the vertices it holds (umWideVertexSlot), the far phi elsewhere.
     const empty=uniformLatticeFarPhi(scene),slot:[number,number,number,number]=[0,0,0,0],[px,py]=a.pages;
-    const records=uniformBulkStartRecords({pages,boxPage:a.boxPage,stored,face,phi:(p,l)=>{
+    const records=uniformBulkStartRecords({pages,boxPage:a.boxPage,open:regions,stored,face,phi:(p,l)=>{
       const g=[8*p[0]+l[0],8*p[1]+l[1],8*p[2]+l[2]] as const;
       if(g[0]>tx||g[1]>ty||g[2]>tz)return empty;
       uniformVertexSlot(a,g[0],g[1],g[2],3,slot);
@@ -2725,7 +2725,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   /** BULK16 slots: the whole pages the most liquid the scene holds fills
    * (its initial cells, its scheduled drops and its inflow's schedule;
-   * bulk16SlotCapacity), at most the box's pages. */
+   * bulk16SlotCapacity), plus the pages a static wall cuts (bulkWallPages),
+   * at most the box's pages. */
   private bulkSlotCapacity(): number {
     const c = this.scene.container, cells = this.containerCells, f = this.scene.fluid;
     const cellVolume = c.width_m * c.height_m * c.depth_m / (cells[0] * cells[1] * cells[2]);
@@ -2734,7 +2735,42 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const drops = (f.scheduledDrops ?? []).reduce((sum, { volume }) => sum + uniformScheduledDrop(volume, cell_m).volume_m3, 0);
     const inflow = f.inflow ? integratedInflowVolume(f.inflow, f.inflow.start_s, f.inflow.end_s) : 0;
     const box = this.address.pool.box.pages;
-    return bulk16SlotCapacity(initial + (drops + inflow) / cellVolume, box[0] * box[1] * box[2]);
+    return bulk16SlotCapacity(initial + (drops + inflow) / cellVolume, box[0] * box[1] * box[2], this.bulkWallPages());
+  }
+
+  /** The box pages a BULK16 slot may hold with a closed region: some 16h
+   * region all static solid (the solid mask and the terrain), in the box,
+   * and some not (uniformBulkRegionClass: a region past the box is never a
+   * member). The candidates follow the solids, not the box: the pages the
+   * solid mask holds, and over each column of pages the ones the bed's top
+   * crosses (a page wholly under its lowest column is closed through). A
+   * region's cells are read up to its first open one. */
+  private bulkWallPages(): number {
+    const a = this.address, [nx, ny, nz] = a.cells, [px, py, pz] = a.pages, mask = this.solidMask;
+    const terrain = sceneHasTerrain(this.scene) ? this.mixedTerrainCells : undefined;
+    const solid = (x: number, y: number, z: number) => x < nx && y < ny && z < nz && (mask.solid(x, y, z) || (terrain !== undefined && y + 1 <= terrain[x + nx * z]!));
+    const closedRegion = (x0: number, y0: number, z0: number) => {
+      for (let z = z0; z < z0 + 16; z++) for (let y = y0; y < y0 + 16; y++) for (let x = x0; x < x0 + 16; x++) if (!solid(x, y, z)) return false;
+      return true;
+    };
+    const pages = new Set<number>();
+    const add = (x: number, y: number, z: number) => { if (x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz) pages.add(x + px * (y + py * z)); };
+    mask.eachSolidPage((x, y, z, word) => { if ((word & 0xffff) !== SOLID_MASK_EMPTY) add(x, y, z); });
+    if (terrain) for (let qz = 0; qz < pz; qz++) for (let qx = 0; qx < px; qx++) {
+      let lo = Infinity, hi = 0;
+      for (let z = 32 * qz; z < Math.min(nz, 32 * qz + 32); z++) for (let x = 32 * qx; x < Math.min(nx, 32 * qx + 32); x++) {
+        const h = terrain[x + nx * z]!;lo = Math.min(lo, h);hi = Math.max(hi, h);
+      }
+      for (let y = Math.max(0, Math.floor(lo / 32)); y < Math.min(py, Math.ceil(hi / 32)); y++) add(qx, y, qz);
+    }
+    let n = 0;
+    for (const k of pages) {
+      const x = k % px, y = Math.floor(k / px) % py, z = Math.floor(k / (px * py));
+      let closed = 0;
+      for (let r = 0; r < 8; r++) if (closedRegion(32 * x + 16 * (r & 1), 32 * y + 16 * ((r >> 1) & 1), 32 * z + 16 * (r >> 2))) closed++;
+      if (closed > 0 && closed < 8) n++;
+    }
+    return n;
   }
 
   private initializeVolumeAndTerrain(): void {

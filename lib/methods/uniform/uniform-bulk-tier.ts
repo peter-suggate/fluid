@@ -157,6 +157,8 @@ const B_HOLD_FRAMES:u32=${UNIFORM_BULK_HOLD_FRAMES}u;const B_HEAT:u32=${UNIFORM_
 fn bHot(region:u32)->bool{return bitcast<f32>(heat[B_HEAT*region])>=1.0;}
 const B_TOLERANCE:f32=${UNIFORM_BULK_TOLERANCE};const B_FLOOR:f32=${UNIFORM_BULK_FLOOR};const B_DEPTH:f32=${UNIFORM_BULK_DEPTH_CELLS};const B_REACH:f32=${UNIFORM_BULK_REACH_CELLS}.0;
 var<workgroup> bFail:atomic<u32>;
+// The region's own tiles: bit 0 an open one, bit 1 a closed one (open <= 1e-5).
+var<workgroup> bShape:atomic<u32>;
 var<workgroup> bError:atomic<u32>;
 var<workgroup> bSpeed:atomic<u32>;
 var<workgroup> bU:array<f32,240>;
@@ -215,7 +217,7 @@ fn bFace(t:vec3i,a:u32)->f32{
  let sweep=ulSweep(groups);if(group.y!=0u){return;}
  for(var visit=group.x;visit<8u*ulVisitCount(sweep);visit+=groups.x){
   let r=ulVisitRegion(visit,sweep);
-  if(lane==0u){atomicStore(&bFail,0u);atomicStore(&bError,0u);atomicStore(&bSpeed,0u);}
+  if(lane==0u){atomicStore(&bFail,0u);atomicStore(&bShape,0u);atomicStore(&bError,0u);atomicStore(&bSpeed,0u);}
   workgroupBarrier();
   let origin=vec3i(4u*umPageCoord(r));
   var stored=umTileKind(origin)==UM_RESIDENT;if(stored){stored=(umTileAt(vec3u(origin))>>9u)==(r>>3u);}
@@ -231,7 +233,8 @@ fn bFace(t:vec3i,a:u32)->f32{
     let k=umTileAt(vec3u(t));
     if(slots[B_SLOTS+k]!=0u||bHot(umPageOfTile(k))){atomicOr(&bFail,1u);continue;}
     ${S ? "let top=rootTopology[k];let open=top.x;" : "let open=1.0;"}
-    if(open<=1e-5){if(own){atomicOr(&bFail,1u);}continue;}
+    if(open<=1e-5){if(own){atomicOr(&bShape,2u);}continue;}
+    if(own){atomicOr(&bShape,1u);}
     if(open<1.0-1e-5||rootPhi[k]>-B_DEPTH*h){atomicOr(&bFail,1u);continue;}
     ${S ? "if(own){for(var a=0u;a<3u;a++){if(d[a]<3&&top[a+1u]<1.0-1e-5){atomicOr(&bFail,1u);}}}" : ""}
    }
@@ -255,19 +258,25 @@ fn bFace(t:vec3i,a:u32)->f32{
   }
   workgroupBarrier();
   if(lane==0u){
-   let speed=bitcast<f32>(atomicLoad(&bSpeed));let error=bitcast<f32>(atomicLoad(&bError));
-   let structural=!stored||atomicLoad(&bFail)!=0u||speed*dt>B_REACH*h;
+   // A closed region (every own tile closed, its neighbourhood clean) is a
+   // static wall a BULK16 page may hold (uniformBulkRegionClass): bit 1, no
+   // member, no error test (it has no flux). A region with both open and
+   // closed own tiles fails.
+   let shape=atomicLoad(&bShape);let clean=stored&&atomicLoad(&bFail)==0u;let closed=clean&&shape==2u;
+   let speed=bitcast<f32>(atomicLoad(&bSpeed));let error=select(bitcast<f32>(atomicLoad(&bError)),0.0,closed);
+   let structural=!clean||shape!=1u||speed*dt>B_REACH*h;
    let threshold=B_TOLERANCE*speed+B_FLOOR*h/dt;
    let was=(atomicLoad(&record[r])&1u)!=0u;var hold=atomicLoad(&record[B_HOLD+r]);var member=was;
    if(was){if(structural||error>2.0*threshold){member=false;hold=0u;atomicAdd(&record[B_HEADER+${C.left}u],1u);}}
    else if(!structural&&error<threshold){hold=min(hold+1u,B_HOLD_FRAMES);if(hold>=B_HOLD_FRAMES){member=true;atomicAdd(&record[B_HEADER+${C.entered}u],1u);}}
    else{hold=0u;}
    if(stored){
-    if(structural){atomicAdd(&record[B_HEADER+${C.structural}u],1u);}
+    if(closed){atomicAdd(&record[B_HEADER+${C.closed}u],1u);}
+    else if(structural){atomicAdd(&record[B_HEADER+${C.structural}u],1u);}
     else if(error>=threshold){atomicAdd(&record[B_HEADER+${C.error}u],1u);}
     else{atomicAdd(&record[B_HEADER+${C.eligible}u],1u);}
    }
-   atomicStore(&record[r],u32(member));atomicStore(&record[B_HOLD+r],hold);atomicStore(&record[B_ERROR+r],bitcast<u32>(error/max(threshold,1e-30)));
+   atomicStore(&record[r],u32(member)|select(0u,2u,closed));atomicStore(&record[B_HOLD+r],hold);atomicStore(&record[B_ERROR+r],bitcast<u32>(error/max(threshold,1e-30)));
    if(member){atomicAdd(&record[B_HEADER+${C.members}u],1u);let at=atomicAdd(&record[B_LIST],1u);atomicStore(&record[B_LIST+1u+at],r);}
    bState=u32(member);
    textureStore(faces,bTexel(${UNIFORM_BULK_FACE_TEXELS}u*r),vec4f(f32(member),0.0,0.0,0.0));
@@ -364,7 +373,7 @@ var<workgroup> bN:u32;var<workgroup> bKinds:array<u32,27>;
     this.device.queue.submit([encoder.finish()]); await this.readback.mapAsync(GPUMapMode.READ);
     const w = new Uint32Array(this.readback.getMappedRange().slice(0, 36)); this.readback.unmap();
     const C = UNIFORM_BULK_COUNT;
-    return { members: w[C.members]!, eligible: w[C.eligible]!, structural: w[C.structural]!, error: w[C.error]!, entered: w[C.entered]!, left: w[C.left]!, listed: w[8]! };
+    return { members: w[C.members]!, eligible: w[C.eligible]!, structural: w[C.structural]!, error: w[C.error]!, entered: w[C.entered]!, left: w[C.left]!, closed: w[C.closed]!, listed: w[8]! };
   }
   destroy(): void { this.faces.destroy(); this.readback.destroy(); }
 }

@@ -85,7 +85,7 @@ test("V2d: the closure reserve holds the start's BULK16 pages within the reach o
 });
 
 test("BULK16 start: the deep regions (uniformBulkRegionDeep) admit cuts, never air, h or a shallow tile", () => {
-  const deep = (o: Partial<UniformBulkStartSource>) => { const d = new Set<number>(); uniformBulkStartPages(box(o), d); return d; };
+  const deep = (o: Partial<UniformBulkStartSource>) => { const d = new Set<number>(); uniformBulkStartPages(box(o), undefined, d); return d; };
   const key = (x: number, y: number, z: number) => x + 6 * (y + 6 * z);
   assert.equal(deep({}).size, 216, "deep still water: every region");
   // A cut tile fails every page that sees it, but its regions stay deep.

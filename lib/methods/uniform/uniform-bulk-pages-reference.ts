@@ -11,7 +11,9 @@ export const BULK16_PAGE={
  // commit's decide): 1 the structural scan (bulkPromote), 2 the error test
  // (the arena's pBulkRows). A page the particles' closure reaches (lrAsk's
  // upPromote) leaves at that commit with the word 0. A retired slot keeps it
- // until reused.
+ // until reused. open: bit r (x + 2y + 4z) set where 16h region r is open
+ // liquid (a member); a clear bit is a closed region, all static solid: a
+ // wall with no row, its faces' means 0 (bulk16FaceOpen).
  page:0,flags:3,generation:4,open:5,promote:6,
  // A record of the cause, read by no kernel. When the error test sets
  // promote 2: its measured error and the level it exceeded (twice the
@@ -60,6 +62,14 @@ export function bulk16FaceIndex(axis:number,normal:number,u:number,v:number):num
  if(!Number.isInteger(axis)||axis<0||axis>2||!Number.isInteger(normal)||normal<0||normal>2||
   !Number.isInteger(u)||u<0||u>1||!Number.isInteger(v)||v<0||v>1)throw new Error("Invalid BULK16 face");
  return 12*axis+4*normal+u+2*v;
+}
+/** Whether face mean k (bulk16FaceIndex order) is open under a slot's open
+ * mask: plane 0 its high region's, plane 2 its low region's, plane 1 both.
+ * The twin of btFaceOpen. */
+export function bulk16FaceOpen(open:number,k:number):boolean{
+ const a=Math.floor(k/12),n=Math.floor(k/4)%3,r=[0,0,0];r[(a+1)%3]=k&1;r[(a+2)%3]=(k>>1)&1;
+ const at=(c:number)=>{const q=[...r];q[a]=c;return ((open>>(q[0]!+2*q[1]!+4*q[2]!))&1)!==0;};
+ return n===0?at(1):n===2?at(0):at(0)&&at(1);
 }
 export const bulk16FaceIndexWGSL=/* wgsl */`
 fn bpFace(axis:u32,normal:u32,u:u32,v:u32)->u32{return 12u*axis+4u*normal+u+2u*v;}

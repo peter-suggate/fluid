@@ -32,6 +32,7 @@ import { UNIFORM_PAGE_POOL_RECORD, UNIFORM_PAGE_POOL_STATUS, uniformPagePoolWGSL
 import { RESIDENCY_STAGES } from "./uniform-local-residency";
 import { UNIFORM_BULK_REACH_CELLS } from "./uniform-bulk-tier-reference";
 import { uniformMixedRegionWGSL } from "./uniform-mixed-layout-builder";
+import { NARROW_BAND_AIR_CHANGED_WORD } from "./uniform-narrow-band-air.wgsl";
 
 const GROUPS=64;
 const PASS:GPUComputePassDescriptor={label:"Uniform BULK16 page transfer"};
@@ -83,6 +84,9 @@ ${uniformMixedRegionWGSL("btRegionsAt",i=>`btRegions[${records.regions.offset}u+
   let region=8u*b+(i%8u);let o=i%8u;
   // The region's tiles (lane x+4y+16z) authored static h: ownership's seeds.
   let origin=8*upNewPage(i/8u)+4*vec3i(i32(o&1u),i32((o>>1u)&1u),i32(o>>2u));
+  // A closed region (all static solid) seeds no stage past ownership: the
+  // census finds no liquid there.
+  let closed=((bpRead(btMap[b],${BULK16_PAGE.open}u)>>o)&1u)==0u;
   var fine=vec2u(0u);
   for(var lane=0u;lane<64u;lane++){
    let c=origin+vec3i(i32(lane&3u),i32((lane>>2u)&3u),i32(lane>>4u));
@@ -91,6 +95,7 @@ ${uniformMixedRegionWGSL("btRegionsAt",i=>`btRegions[${records.regions.offset}u+
   for(var stage=0u;stage<${RESIDENCY_STAGES.length}u;stage++){
    var mask=select(vec2u(0u),vec2u(0xffffffffu),select(stage==5u,stage==1u||stage==2u,staged));
    if(staged&&stage==0u){mask=fine;}
+   if(closed&&stage!=0u){mask=vec2u(0u);}
    let seeded=(mask.x|mask.y)!=0u;
    let margin=array<u32,${RESIDENCY_STAGES.length}>(${RESIDENCY_STAGES.map(s=>s.margin+"u").join(",")})[stage];
    // lrRadii's: none for ownership, else the travel bound plus the margin.
@@ -134,6 +139,14 @@ fn btFaceTexel(b:u32,c:vec3u,a:u32)->vec3i{return btBlockCoord(b)*vec3i(8,8,32)+
 fn btLowRow(b:u32,a:u32,c:vec3u)->u32{let l=4u*c;let uv=select(select(l.xy,l.xz,a==1u),l.yz,a==0u);return ((b*3u+a)<<10u)|uv.x|(uv.y<<5u);}
 fn btPhiTexel(b:u32,l:vec3u)->vec3i{return btBlockCoord(b)*9+vec3i(l);}
 fn btPhiIndex(l:vec3u)->u32{return l.x+9u*(l.y+9u*l.z);}
+// Whether face k (bpFace order) of a page with open regions open (BULK16_PAGE.open)
+// borders only open regions of its own page: a face of a closed region is a wall.
+fn btFaceOpen(open:u32,k:u32)->bool{
+ let a=k/12u;let n=(k/4u)%3u;var r=vec3u(0u);r[(a+1u)%3u]=k&1u;r[(a+2u)%3u]=(k>>1u)&1u;
+ var lo=r;lo[a]=0u;var hi=r;hi[a]=1u;
+ let l=(open>>(lo.x+2u*lo.y+4u*lo.z))&1u;let h=(open>>(hi.x+2u*hi.y+4u*hi.z))&1u;
+ return select(select(l!=0u&&h!=0u,l!=0u,n==2u),h!=0u,n==0u);
+}
 fn btDemoting(b:u32)->bool{return upBulkWord(atomicLoad(&upWork[UP_WORK_KEEP+b]));}
 fn btNew(b:u32)->bool{return upState[UP_AT_RECORDS+8u*b+${G}u]==upGeneration();}
 // The block that holds page q now, else UP_NONE; with skip, not one that
@@ -165,8 +178,9 @@ const DECIDE=/* wgsl */`
 @compute @workgroup_size(1) fn btDecideAsked(){atomicStore(&bulkPages[${BULK16_STATUS.promoteAsked}u],atomicLoad(&upWork[0u]));}
 // Mode 2 (the runtime): promote every live slot its frame asked to (the
 // slot's promote word, BULK16_PAGE.promote), and demote each resident page
-// whose eight regions are all 16h members (membership already keeps h out
-// of each region's 3^3). Mode 1 (the test cycle): promote every live slot,
+// whose eight regions are all 16h members or closed static walls, at least
+// one a member (membership and the closed class keep h out of each
+// region's 3^3). Mode 1 (the test cycle): promote every live slot,
 // else demote as the runtime does.
 @compute @workgroup_size(64) fn btDecidePages(@builtin(global_invocation_id) gid:vec3u){
  if(btParams.mode.x==0u){return;}
@@ -190,9 +204,10 @@ const DECIDE=/* wgsl */`
  for(var i=gid.x;i<upResidentCount();i+=${64*GROUPS}u){
   let b=upResidentBlock(i);let q=upPageOf(b);
   if(upBlockOf(q)!=b){continue;}
-  var whole=true;for(var o=0u;o<8u;o++){whole=whole&&(btRecord[8u*b+o]&1u)!=0u;}
-  if(!whole){continue;}
-  let slot=bpClaim(q);if(slot!=0u){upDemote(b,0x80000000u|slot);}
+  // Each region a member (bit 0) or closed (bit 1: a static wall), at least one a member.
+  var whole=true;var open=0u;for(var o=0u;o<8u;o++){let w=btRecord[8u*b+o];whole=whole&&(w&3u)!=0u;open|=(w&1u)<<o;}
+  if(!whole||open==0u){continue;}
+  let slot=bpClaim(q,open);if(slot!=0u){upDemote(b,0x80000000u|slot);}
  }
 }
 `;
@@ -212,7 +227,9 @@ var<private> btBlock:u32;var<private> btPage:vec3i;
   let b=upResidentBlock(i);let word=atomicLoad(&upWork[UP_WORK_KEEP+b]);
   if(!upBulkWord(word)){continue;}
   let slot=word&0x3fffffffu;btBlock=b;btPage=upPageOf(b);
-  if(lane<36u){bpWrite(slot,BT_VELOCITY+lane,bitcast<u32>(bpRestrictFace(lane)));}
+  // A closed region's faces are walls: zero.
+  let open=bpRead(slot,${BULK16_PAGE.open}u);
+  if(lane<36u){bpWrite(slot,BT_VELOCITY+lane,bitcast<u32>(select(0.0,bpRestrictFace(lane),btFaceOpen(open,lane))));}
   else if(lane<44u){bpWrite(slot,BT_PRESSURE+lane-36u,bitcast<u32>(bpRestrictPressure(lane-36u)));}
   // The vertex block as it stands; a vertex it holds passes to the stored
   // page that holds it once this page is not stored.
@@ -236,15 +253,19 @@ var<private> btBlock:u32;var<private> btPage:vec3i;
 `;
 
 const PROMOTE=/* wgsl */`
+// The promote list (promoted): word ${NARROW_BAND_AIR_CHANGED_WORD} the count of
+// the blocks this commit promoted into, the blocks after it.
+@group(0) @binding(4) var<storage,read_write> btGate:array<atomic<u32>>;
 // The new blocks that hold promoted pages, each its slot (zero for any other claim).
 @compute @workgroup_size(256) fn btMapPromoted(@builtin(local_invocation_index) lane:u32){
  for(var i=lane;i<upNewCount();i+=256u){btMap[upNewBlock(i)]=0u;}
+ if(lane==0u){atomicStore(&btGate[${NARROW_BAND_AIR_CHANGED_WORD}u],0u);}
  storageBarrier();workgroupBarrier();
  let live=atomicLoad(&bulkPages[${BULK16_STATUS.live}u]);
  for(var i=lane;i<live;i+=256u){
   let slot=atomicLoad(&bulkPages[BP_LIVE+i]);
   let q=vec3i(bitcast<i32>(bpRead(slot,0u)),bitcast<i32>(bpRead(slot,1u)),bitcast<i32>(bpRead(slot,2u)));
-  let b=upBlockOf(q);if(b!=UP_NONE&&btNew(b)){btMap[b]=slot;}
+  let b=upBlockOf(q);if(b!=UP_NONE&&btNew(b)){btMap[b]=slot;atomicStore(&btGate[${NARROW_BAND_AIR_CHANGED_WORD+1}u+atomicAdd(&btGate[${NARROW_BAND_AIR_CHANGED_WORD}u],1u)],b);}
  }
 }
 fn bpFineFace(a:u32,n:u32,i:u32,j:u32)->f32{return 0.0;}
@@ -255,6 +276,9 @@ fn bpFinePressure(c:vec3u)->f32{return 0.0;}
 @group(0) @binding(20) var btPhaseOut:texture_storage_3d<r32float,write>;
 @group(0) @binding(21) var btVolumeScratchOut:texture_storage_3d<r32float,write>;
 fn btCellTexel(b:u32,c:vec3u)->vec3i{return btBlockCoord(b)*8+vec3i(c);}
+// Whether tile c's 16h region is open in the slot (a closed region is all
+// static solid: the resident image's solid tiles, volume 0, phase -1, pressure 0).
+fn btTileOpen(slot:u32,c:vec3u)->bool{return ((bpRead(slot,${BULK16_PAGE.open}u)>>((c.x>>2u)+2u*(c.y>>2u)+4u*(c.z>>2u)))&1u)!=0u;}
 fn btSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 var<workgroup> btFace:array<f32,36>;var<workgroup> btP:array<f32,8>;var<workgroup> btShared:u32;
 // The slot that holds page q's own vertex block now: a promoted page's
@@ -262,6 +286,31 @@ var<workgroup> btFace:array<f32,36>;var<workgroup> btP:array<f32,8>;var<workgrou
 fn btSlotOf(q:vec3i)->u32{
  let b=upBlockOf(q);if(b!=UP_NONE){return select(0u,btMap[b],btNew(b));}
  return bpSlot(upWord(q));
+}
+// The pressure the resident image holds at closed tile c. A solid tile with
+// an open face neighbour is a row whose pressure zeroes that face's flux: at
+// rest the hydrostatic field at its centre, continued from the neighbour (its
+// 16h region's prolongation, or a resident tile's pressure); a solid tile
+// with no open neighbour holds no row, and 0.
+fn btClosedPressure(slot:u32,page:vec3i,c:vec3u,pressure:ptr<function,array<f32,8>>)->f32{
+ let g=btParams.gradient.xyz;
+ for(var f=0u;f<6u;f++){
+  let axis=f/2u;let dir=select(-1,1,(f&1u)!=0u);var n=vec3i(c);n[axis]+=dir;
+  let step=-4.0*f32(dir)*g[axis];
+  if(all(n>=vec3i(0))&&all(n<vec3i(8))){
+   if(btTileOpen(slot,vec3u(n))){return bpProlongPressure(pressure,vec3u(n),g)+step;}
+   continue;
+  }
+  var q=page;q[axis]+=dir;let u=vec3u(n&vec3i(7));let other=btSlotOf(q);
+  if(other!=0u){
+   if(!btTileOpen(other,u)){continue;}
+   var near:array<f32,8>;for(var r=0u;r<8u;r++){near[r]=bitcast<f32>(bpRead(other,BT_PRESSURE+r));}
+   return bpProlongPressure(&near,u,g)+step;
+  }
+  let b=upBlockOf(q);
+  if(b!=UP_NONE&&!btNew(b)){let v=btPressure[512u*b+u.x+8u*u.y+64u*u.z];if(v>0.0){return v+step;}}
+ }
+ return 0.0;
 }
 @compute @workgroup_size(64) fn btPromotePages(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var i=group.x;i<upNewCount();i+=${GROUPS}u){
@@ -275,7 +324,7 @@ fn btSlotOf(q:vec3i)->u32{
   for(var k=0u;k<36u;k++){face[k]=btFace[k];}for(var r=0u;r<8u;r++){pressure[r]=btP[r];}
   for(var t=lane;t<512u;t+=64u){
    let c=vec3u(t&7u,(t>>3u)&7u,t>>6u);
-   btPressure[512u*b+t]=bpProlongPressure(&pressure,c,btParams.gradient.xyz);
+   btPressure[512u*b+t]=select(btClosedPressure(slot,page,c,&pressure),bpProlongPressure(&pressure,c,btParams.gradient.xyz),btTileOpen(slot,c));
   }
   // Faces: planes 1..8 in this block's base; the high plane from a stored
   // high neighbour's low-face rows where it holds them; the low plane in this
@@ -323,11 +372,13 @@ fn btSlotOf(q:vec3i)->u32{
 // After btPromotePages: each promoted block's 4h owners as the geometry
 // writes deep liquid (gcEvaluate): the centre phi, the mean of its eight
 // corners in d4Sum8's order, and a fill of 1 (every corner below -1e-20,
-// fully open: bulk membership). Its volume, volume scratch and phase: 1.
+// fully open: bulk membership). Its volume, volume scratch and phase: 1, or
+// in a closed region 0, 0 and -1 (the resident solid tile's).
 @compute @workgroup_size(64) fn btPromoteCells(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var i=group.x;i<upNewCount();i+=${GROUPS}u){
   let b=upNewBlock(i);if(lane==0u){btShared=btMap[b];}
-  if(workgroupUniformLoad(&btShared)==0u){continue;}
+  let slot=workgroupUniformLoad(&btShared);
+  if(slot==0u){continue;}
   let page=upPageOf(b);
   for(var t=lane;t<512u;t+=64u){
    let c=vec3u(t&7u,(t>>3u)&7u,t>>6u);var centre:array<f32,8>;var negative=true;
@@ -336,15 +387,19 @@ fn btSlotOf(q:vec3i)->u32{
     let value=textureLoad(btPhi,btPhiTexel(at.w,at.xyz)).x;negative=negative&&value< -1e-20;centre[j]=value*0.125;
    }
    let texel=btCellTexel(b,c);
-   textureStore(btCentreOut,texel,vec4f(btSum8(centre)));textureStore(btTargetOut,texel,vec4f(select(0.0,1.0,negative)));textureStore(btVolumeOut,texel,vec4f(1.0));
+   textureStore(btCentreOut,texel,vec4f(btSum8(centre)));textureStore(btTargetOut,texel,vec4f(select(0.0,1.0,negative)));textureStore(btVolumeOut,texel,vec4f(select(0.0,1.0,btTileOpen(slot,c))));
   }
  }
 }
 @compute @workgroup_size(64) fn btPromoteLiquid(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var i=group.x;i<upNewCount();i+=${GROUPS}u){
   let b=upNewBlock(i);if(lane==0u){btShared=btMap[b];}
-  if(workgroupUniformLoad(&btShared)==0u){continue;}
-  for(var t=lane;t<512u;t+=64u){let texel=btCellTexel(b,vec3u(t&7u,(t>>3u)&7u,t>>6u));textureStore(btPhaseOut,texel,vec4f(1.0));textureStore(btVolumeScratchOut,texel,vec4f(1.0));}
+  let slot=workgroupUniformLoad(&btShared);
+  if(slot==0u){continue;}
+  for(var t=lane;t<512u;t+=64u){
+   let c=vec3u(t&7u,(t>>3u)&7u,t>>6u);let texel=btCellTexel(b,c);let open=btTileOpen(slot,c);
+   textureStore(btPhaseOut,texel,vec4f(select(-1.0,1.0,open)));textureStore(btVolumeScratchOut,texel,vec4f(select(0.0,1.0,open)));
+  }
  }
 }
 `;
@@ -359,16 +414,27 @@ export class UniformBulkPageTransfer{
  promoteReserve=0;
  private readonly params:GPUBuffer;
  private readonly map:GPUBuffer;
+ /** The blocks the last commit promoted into: their count at word
+  * NARROW_BAND_AIR_CHANGED_WORD (the phi resolve's gate word), the blocks
+  * after it; at most one a live slot. The promote writes a block's phi to
+  * the base alone; an h tile beside it reads the h texture's copy of a
+  * canonical vertex the block holds (its high planes), which the claim made
+  * the AIR image (UniformMixedPhiResolve.encodeTwins stores both homes).
+  * Measured: the dam-wall column's h tiles above a promoted wall page read
+  * +1.28 there, and the advected surface made a free surface of the deep
+  * wall corner. */
+ readonly promoted:GPUBuffer;
  private readonly words=new ArrayBuffer(32);
  private pipelines?:{asked:GPUComputePipeline;decide:GPUComputePipeline;demote:GPUComputePipeline;map:GPUComputePipeline;seed:GPUComputePipeline;promote:GPUComputePipeline;cells:GPUComputePipeline;liquid:GPUComputePipeline};
  private groups?:{decide:GPUBindGroup;demote:GPUBindGroup;map:GPUBindGroup;seed:GPUBindGroup;promote:GPUBindGroup;cells:GPUBindGroup;liquid:GPUBindGroup};
  private records?:UniformBulkResidencyRecords;
  /** The census's certificate records, before initialize (the frame's registerCertificate). */
  attachRecords(records:UniformBulkResidencyRecords):void{this.records=records;}
- get allocatedBytes():number{return this.params.size+this.map.size;}
+ get allocatedBytes():number{return this.params.size+this.map.size+this.promoted.size;}
  constructor(private readonly device:GPUDevice,private readonly pool:UniformPagePool,private readonly store:UniformBulkPages,private readonly blockBits:number,private readonly fields:UniformBulkPageTransferFields){
   this.params=device.createBuffer({label:"Uniform BULK16 transfer params",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   this.map=device.createBuffer({label:"Uniform BULK16 promoted slots",size:4*pool.layout.blocks,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+  this.promoted=device.createBuffer({label:"Uniform BULK16 promote list",size:4*(NARROW_BAND_AIR_CHANGED_WORD+1+store.layout.capacity),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
  }
  async initialize():Promise<void>{
   const d=this.device,f=this.fields,records=this.records;
@@ -376,7 +442,7 @@ export class UniformBulkPageTransfer{
   const buffer=(type:GPUBufferBindingType):Omit<GPUBindGroupLayoutEntry,"binding">=>({visibility:GPUShaderStage.COMPUTE,buffer:{type}});
   // Each entry point's layout holds only the bindings it uses: the storage
   // buffers and textures of one stage stay inside the per-stage limit.
-  const kinds:Record<number,Omit<GPUBindGroupLayoutEntry,"binding">>={0:buffer("read-only-storage"),1:buffer("storage"),2:buffer("storage"),3:buffer("storage"),
+  const kinds:Record<number,Omit<GPUBindGroupLayoutEntry,"binding">>={0:buffer("read-only-storage"),1:buffer("storage"),2:buffer("storage"),3:buffer("storage"),4:buffer("storage"),
    5:buffer("storage"),6:buffer("storage"),7:buffer("storage"),8:buffer("uniform"),9:buffer("storage"),
    10:{visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"read-write",format:"r32float",viewDimension:"3d"}},
    12:{visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}},
@@ -387,7 +453,7 @@ export class UniformBulkPageTransfer{
   const sampled={visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}};
   const written={visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only" as const,format:"rgba32float" as const,viewDimension:"3d" as const}};
   const resources:Record<number,GPUBindingResource>={0:{buffer:this.pool.state},1:{buffer:this.pool.work},2:this.store.binding,
-   3:f.record,5:{buffer:f.negative},6:{buffer:f.negativeScratch},7:f.pressure,8:{buffer:this.params},9:{buffer:this.map},10:f.phiBase.createView(),11:f.velocityBase.createView(),12:f.phiScratchBase.createView(),13:f.velocityScratchBase.createView(),14:{buffer:records.census},15:{buffer:records.policy,size:112},16:{buffer:records.regions.buffer},
+   3:f.record,4:{buffer:this.promoted},5:{buffer:f.negative},6:{buffer:f.negativeScratch},7:f.pressure,8:{buffer:this.params},9:{buffer:this.map},10:f.phiBase.createView(),11:f.velocityBase.createView(),12:f.phiScratchBase.createView(),13:f.velocityScratchBase.createView(),14:{buffer:records.census},15:{buffer:records.policy,size:112},16:{buffer:records.regions.buffer},
    17:f.cells.centerPhi.createView(),18:f.cells.target.createView(),19:f.cells.volume.createView(),20:f.cells.phase.createView(),21:f.cells.volumeScratch.createView()};
   const bind=(label:string,bindings:number[],velocity?:Omit<GPUBindGroupLayoutEntry,"binding">)=>{
    const layout=d.createBindGroupLayout({label,entries:bindings.map(binding=>({binding,...(binding===11?velocity!:kinds[binding]!)}))});
@@ -398,7 +464,7 @@ export class UniformBulkPageTransfer{
    compile(uniformBulkPageTransferWGSL(this.pool,this.store,this.blockBits,false)+bulk16TransferWGSL+DECIDE+DEMOTE,"Uniform BULK16 decide and demote"),
    compile(uniformBulkPageTransferWGSL(this.pool,this.store,this.blockBits,true)+bulk16TransferWGSL+PROMOTE+seedRecordsWGSL(records),"Uniform BULK16 promote")]);
   const stages={decide:bind("Uniform BULK16 decide",[0,1,2,3,8]),demote:bind("Uniform BULK16 demote",[0,1,2,5,6,7,10,11],sampled),
-   map:bind("Uniform BULK16 promoted slots",[0,1,2,9]),seed:bind("Uniform BULK16 promoted seeds",[0,1,2,9,14,15,16]),promote:bind("Uniform BULK16 promote",[0,1,2,5,6,7,8,9,10,11,12,13],written),
+   map:bind("Uniform BULK16 promoted slots",[0,1,2,4,9]),seed:bind("Uniform BULK16 promoted seeds",[0,1,2,9,14,15,16]),promote:bind("Uniform BULK16 promote",[0,1,2,5,6,7,8,9,10,11,12,13],written),
    cells:bind("Uniform BULK16 promoted cells",[0,1,2,9,10,17,18,19]),liquid:bind("Uniform BULK16 promoted liquid",[0,1,2,9,20,21])};
   const pipeline=(stage:keyof typeof stages,module:GPUShaderModule,entryPoint:string)=>d.createComputePipelineAsync({label:`Uniform BULK16 ${stage}`,layout:stages[stage].layout,compute:{module,entryPoint}});
   const [asked,decide,demote,map,seed,promote,cells,liquid]=await Promise.all([pipeline("decide",early,"btDecideAsked"),pipeline("decide",early,"btDecidePages"),pipeline("demote",early,"btDemotePages"),pipeline("map",late,"btMapPromoted"),pipeline("seed",late,"btSeedPromoted"),pipeline("promote",late,"btPromotePages"),pipeline("cells",late,"btPromoteCells"),pipeline("liquid",late,"btPromoteLiquid")]);
@@ -428,5 +494,5 @@ export class UniformBulkPageTransfer{
   pass.setBindGroup(0,g.cells);pass.setPipeline(p.cells);pass.dispatchWorkgroups(GROUPS);pass.setBindGroup(0,g.liquid);pass.setPipeline(p.liquid);pass.dispatchWorkgroups(GROUPS);pass.end();
   this.store.encodeFinish(encoder);
  }
- destroy():void{this.params.destroy();this.map.destroy();}
+ destroy():void{this.params.destroy();this.map.destroy();this.promoted.destroy();}
 }

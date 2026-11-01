@@ -80,7 +80,7 @@ import { auditUniformGPUAllocations } from "./uniform-gpu-allocation-audit";
 import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
 import { BULK16_STATUS, type UniformBulkPages } from "../lib/methods/uniform/uniform-bulk-pages";
-import { BULK16_PAGE_WORDS } from "../lib/methods/uniform/uniform-bulk-pages-reference";
+import { BULK16_PAGE, BULK16_PAGE_WORDS } from "../lib/methods/uniform/uniform-bulk-pages-reference";
 
 const options = process.argv.slice(3);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
@@ -575,7 +575,8 @@ var<workgroup> sums:array<atomic<u32>,16>;
     const e = device.createCommandEncoder(); e.copyBufferToBuffer(buffer, offset, copy, 0, size); device.queue.submit([e.finish()]);
     await copy.mapAsync(GPUMapMode.READ); const w = new Uint32Array(copy.getMappedRange().slice(0)); copy.unmap(); copy.destroy();
     const L = bulkStore.layout, n = w[BULK16_STATUS.live]!, frameX = seed.tail[at]! | 0;
-    return { pages: Array.from(w.subarray(L.live, L.live + n), slot => (w[L.records + BULK16_PAGE_WORDS * slot]! | 0) - frameX) };
+    const slots = Array.from(w.subarray(L.live, L.live + n));
+    return { pages: slots.map(slot => (w[L.records + BULK16_PAGE_WORDS * slot]! | 0) - frameX), open: slots.map(slot => w[L.records + BULK16_PAGE_WORDS * slot + BULK16_PAGE.open]!) };
   };
   const windowHeader = { fixedWorldGeometry: frame.ownership.fixedWorldGeometry, policy: seed.tail[at + UNIFORM_WINDOW_HEADER.policy],
     frame: [0, 1, 2].map(i => seed.tail[at + UNIFORM_WINDOW_HEADER.frame + i]! | 0), box: [0, 1, 2].map(i => seed.tail[at + UNIFORM_WINDOW_HEADER.box + i]! | 0) };
@@ -695,9 +696,11 @@ var<workgroup> sums:array<atomic<u32>,16>;
     const negativeOwners = Object.fromEntries(probes.map((p, i) => [p.key, all[W * i + 33]]));
     const pointPhi = Object.fromEntries(probes.map((p, i) => [p.key, [0, 1, 2, 3].map(k => floatAt(W * i + 34 + k))]));
     const t = step * dt, liquid = { total: wide(u, 0), left: wide(u, 2), right: wide(u, 4), wall: wide(u, 6), rightFloorBand: wide(u, 8) };
-    // BULK16 pages hold no owners: each is 32^3 liquid h cells, by its zone.
+    // BULK16 pages hold no owners: each open region (bit r of the slot's
+    // open word, x + 2y + 4z) is 16^3 liquid h cells, by its zone; a closed
+    // region is static solid.
     const bulk16 = await readBulk16();
-    if (bulk16) { liquid.total += 32768 * bulk16.pages.length; for (const x of bulk16.pages) { if (32 * x + 32 <= wall.low) liquid.left += 32768; else if (32 * x >= wall.high) liquid.right += 32768; else liquid.wall += 32768; } }
+    if (bulk16) bulk16.pages.forEach((x, i) => { for (let r = 0; r < 8; r++) { if (((bulk16.open[i]! >> r) & 1) === 0) continue; const low = 32 * x + 16 * (r & 1); liquid.total += 4096; if (low + 16 <= wall.low) liquid.left += 4096; else if (low >= wall.high) liquid.right += 4096; else liquid.wall += 4096; } });
     const measured = liquid.left > 0 && Math.abs(liquid.total - solverCells) < 0.05 * solverCells;
     const level_m = measured ? liquid.left / reservoirFootprint * h : authoredTop_m, head_m = level_m - throatCentre_m;
     const qT = wall.holeY >= 0 && head_m > 0 ? throatArea_m2 * Math.sqrt(2 * gravity * head_m) : undefined;
