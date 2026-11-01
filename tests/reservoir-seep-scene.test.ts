@@ -7,6 +7,8 @@ import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
 import { getSceneDefinition, getScenePreset } from "../lib/core/scenes";
 import { sceneCardForDefinition, sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { parseQueryState } from "../lib/core/url-state";
+import { resolveMethodValues } from "../lib/core/method-contract";
+import { uniformNarrowBandMethod } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { uniformPagePoolResidency, UNIFORM_PAGE_POOL_SEED_MARGIN } from "../lib/methods/uniform/uniform-page-pool";
 import { advanceUniform, createUniformSolver, readUniformLiveAddress, withUniformDevice } from "./helpers/uniform-geometric";
 import { readMixedTexture } from "./helpers/uniform-mixed-native-fields";
@@ -19,7 +21,8 @@ test("reservoir seep opens with localized dynamic detail on an 8-million-cell la
   assert.deepEqual(parseScene(serializeScene(scene)), scene);
   assert.deepEqual(sceneCardForDefinition(definition).open().methodProfile, definition.methodProfile);
   const query = parseQueryState(`?scene=${RESERVOIR_SEEP_ID}`);
-  assert.equal(query.overrides[query.methodId]?.detailPolicy, "dynamic");
+  // Dynamic detail is the default: the profile authors only what differs from it.
+  assert.equal(resolveMethodValues(uniformNarrowBandMethod, query.quality, { ...uniformNarrowBandMethod.appDefaults, ...query.overrides[query.methodId] }).detailPolicy, "dynamic");
   assert.equal(query.overrides[query.methodId]?.detailBudgetPercent, 5);
   assert.equal(scene.fluid.dynamicViscosity_Pa_s, 0);
   assert.equal(scene.fluid.surfaceTension_N_m, 0);

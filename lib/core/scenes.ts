@@ -1480,8 +1480,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     buildAt: lattice => createReservoirSeepScene(lattice.cellSize_m),
     camera: RESERVOIR_SEEP_CAMERA,
     methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
-      overrides: { detailPolicy: "dynamic", detailNearFocus: "off", detailBudgetPercent: 5,
-        regionTiering: "error", warmResolution: "h" } },
+      overrides: { detailBudgetPercent: 5 } },
   }),
   defineScene({
     id: "reservoir-seep-vast",
@@ -1497,8 +1496,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     },
     camera: { distance_m: 16, target_m: { x: 0, y: 0.55, z: 0 }, azimuth_rad: 0.22, elevation_rad: 0.32 },
     methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
-      overrides: { detailPolicy: "dynamic", detailNearFocus: "off", detailBudgetPercent: 5,
-        regionTiering: "error", warmResolution: "h", bulkTier: "16h", volumeControlSeconds: 0 } },
+      overrides: { detailBudgetPercent: 5, volumeControlSeconds: 0 } },
   }),
   ...([false, true] as const).map(wet => defineScene({
     id: wet ? "interactive-pool" : "interactive-playground",
