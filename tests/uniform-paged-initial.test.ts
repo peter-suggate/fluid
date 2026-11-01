@@ -30,7 +30,7 @@ const bits = (v: number) => new Uint32Array(Float32Array.of(v).buffer)[0]!;
 function paged(p: LatticePages, comp: number, vertex: boolean, x: number, y: number, z: number, c = 0): number | undefined {
   const E = p.edge, n = vertex ? E + 1 : E, [px, py] = p.pages, e = (v: number) => vertex ? Math.max(0, Math.ceil(v / E) - 1) : Math.floor(v / E);
   // A vertex on a page's high face is that page's (its 33rd); every page's own vertices are tested below.
-  const qx = e(x), qy = e(y), qz = e(z), page = p.at[qx + px * (qy + py * qz)];
+  const qx = e(x), qy = e(y), qz = e(z), page = p.at.get(qx + px * (qy + py * qz));
   if (!page) return undefined;
   return page[comp * ((x - qx * E) + n * ((y - qy * E) + n * (z - qz * E))) + c];
 }
@@ -65,8 +65,8 @@ for (const [id, coarsen] of SCENES) test(`paged initial conditions match the den
     const rest = uniformLatticePagedPhi(s, UNIFORM_PAGE_POOL_EDGE, (x, y, z) => (x + y + z) % 2 === 1, coarseSolids);
     const E = UNIFORM_PAGE_POOL_EDGE, [px, py, pz] = held.pages;
     for (let qz = 0; qz < pz; qz++) for (let qy = 0; qy < py; qy++) for (let qx = 0; qx < px; qx++) {
-      const mine = (qx + qy + qz) % 2 === 0 ? held : rest, other = mine === held ? rest : held, page = mine.at[qx + px * (qy + py * qz)]!;
-      assert.equal(other.at[qx + px * (qy + py * qz)], undefined);
+      const mine = (qx + qy + qz) % 2 === 0 ? held : rest, other = mine === held ? rest : held, page = mine.at.get(qx + px * (qy + py * qz))!;
+      assert.equal(other.at.get(qx + px * (qy + py * qz)), undefined);
       for (let k = 0; k <= E; k++) for (let j = 0; j <= E; j++) for (let i = 0; i <= E; i++) {
         const x = qx * E + i, y = qy * E + j, z = qz * E + k;
         if (x > vx || y > vy || z > vz) continue;

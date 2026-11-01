@@ -43,25 +43,27 @@ export function uniformInitialLiquidVelocityPages(velocity: { x: number; y: numb
   if (![velocity.x, velocity.y, velocity.z].every(Number.isFinite)) throw new Error(`Initial liquid velocity must be finite: ${JSON.stringify(velocity)}`);
   const { edge: E, cells: [nx, ny, nz], pages: [px, py, pz] } = volume, T = E / 4, tx = Math.ceil(nx / 4), ty = Math.ceil(ny / 4), tz = Math.ceil(nz / 4);
   if (E % 4) throw new Error(`Initial liquid velocity: pages of ${E} cells are not whole 4h tiles`);
-  const wet = volume.at.map(page => {
-    if (!page) return undefined;
+  const wet = new Map<number, Uint8Array>(), close = new Set<number>();
+  for (const [key, page] of volume.at) {
     const tiles = new Uint8Array(T ** 3);
     for (let z = 0, i = 0; z < E; z++) for (let y = 0; y < E; y++) for (let x = 0; x < E; x++, i++) if (page[i]! > 0) tiles[(x >> 2) + T * ((y >> 2) + T * (z >> 2))] = 1;
-    return tiles;
-  });
-  const wetTile = (i: number, j: number, k: number) => wet[((i / T) | 0) + px * (((j / T) | 0) + py * ((k / T) | 0))]?.[i % T + T * (j % T + T * (k % T))] === 1;
-  const at: (Float32Array | undefined)[] = new Array(px * py * pz).fill(undefined);
-  for (let z = 0; z < pz; z++) for (let y = 0; y < py; y++) for (let x = 0; x < px; x++) {
-    let field: Float32Array | undefined, close = false;
+    wet.set(key, tiles);
+    // The pages beside (3³) a page held: the only ones a wet tile can be near.
+    const x = key % px, y = Math.floor(key / px) % py, z = Math.floor(key / (px * py));
     for (let c = Math.max(0, z - 1); c <= Math.min(pz - 1, z + 1); c++) for (let b = Math.max(0, y - 1); b <= Math.min(py - 1, y + 1); b++)
-      for (let a = Math.max(0, x - 1); a <= Math.min(px - 1, x + 1); a++) close ||= !!wet[a + px * (b + py * c)];
-    if (!close) continue;
+      for (let a = Math.max(0, x - 1); a <= Math.min(px - 1, x + 1); a++) close.add(a + px * (b + py * c));
+  }
+  const wetTile = (i: number, j: number, k: number) => wet.get(((i / T) | 0) + px * (((j / T) | 0) + py * ((k / T) | 0)))?.[i % T + T * (j % T + T * (k % T))] === 1;
+  const at = new Map<number, Float32Array>();
+  for (const key of [...close].sort((p, q) => p - q)) {
+    const x = key % px, y = Math.floor(key / px) % py, z = Math.floor(key / (px * py));
+    let field: Float32Array | undefined;
     for (let k = z * T; k < Math.min(tz, (z + 1) * T); k++) for (let j = y * T; j < Math.min(ty, (y + 1) * T); j++) for (let i = x * T; i < Math.min(tx, (x + 1) * T); i++) {
       let near = false;
       for (let c = Math.max(0, k - 1); c <= Math.min(tz - 1, k + 1) && !near; c++) for (let b = Math.max(0, j - 1); b <= Math.min(ty - 1, j + 1) && !near; b++)
         for (let a = Math.max(0, i - 1); a <= Math.min(tx - 1, i + 1) && !near; a++) near = wetTile(a, b, c);
       if (!near) continue;
-      field ??= at[x + px * (y + py * z)] = new Float32Array(4 * E ** 3);
+      if (!field) at.set(key, field = new Float32Array(4 * E ** 3));
       for (let w = 4 * k; w < Math.min(nz, 4 * k + 4); w++) for (let v = 4 * j; v < Math.min(ny, 4 * j + 4); v++) for (let u = 4 * i; u < Math.min(nx, 4 * i + 4); u++) {
         const o = 4 * (u - E * x + E * (v - E * y + E * (w - E * z)));
         field[o] = velocity.x; field[o + 1] = velocity.y; field[o + 2] = velocity.z;

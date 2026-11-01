@@ -38,19 +38,19 @@ const tileKey=(cells:readonly [number,number,number],x:number,y:number,z:number)
 export function uniformParticleBand(volume:LatticePages,depth:number,tiles=new Set<number>(),deep?:(x:number,y:number,z:number)=>boolean):UniformParticleBand{
  if(!(Number.isInteger(depth)&&depth>=1&&depth<volume.edge))throw new RangeError(`A particle band of ${depth} cells needs a whole depth under the page edge ${volume.edge}`);
  const E=volume.edge,[nx,ny,nz]=volume.cells,[px,py,pz]=volume.pages;
- const page=(x:number,y:number,z:number)=>x<0||y<0||z<0||x>=px||y>=py||z>=pz?undefined:volume.at[x+px*(y+py*z)];
- // A page wet in every lattice cell it covers.
- const full=new Uint8Array(px*py*pz);
- for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++){
-  const p=volume.at[i];if(!p)continue;let wet=true;
+ const page=(x:number,y:number,z:number)=>x<0||y<0||z<0||x>=px||y>=py||z>=pz?undefined:volume.at.get(x+px*(y+py*z));
+ // The pages wet in every lattice cell they cover.
+ const full=new Set<number>();
+ for(const [i,p] of volume.at){
+  const x=i%px,y=Math.floor(i/px)%py,z=Math.floor(i/(px*py));let wet=true;
   for(let c=0,k=0;c<E&&wet;c++)for(let b=0;b<E&&wet;b++)for(let a=0;a<E;a++,k++){if(E*x+a<nx&&E*y+b<ny&&E*z+c<nz&&!(p[k]!>0)){wet=false;break;}}
-  full[i]=wet?1:0;
+  if(wet)full.add(i);
  }
- const fullAt=(x:number,y:number,z:number)=>x<0||y<0||z<0||x>=px||y>=py||z>=pz||full[x+px*(y+py*z)]===1;
+ const fullAt=(x:number,y:number,z:number)=>x<0||y<0||z<0||x>=px||y>=py||z>=pz||full.has(x+px*(y+py*z));
  const W=E+2*depth,dry=new Uint8Array(W*W*W),near=new Uint8Array(W*W*W),pass=new Uint8Array(W*W*W);
  let band=0;
- for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++){
-  if(!page(x,y,z))continue;
+ for(const i of volume.at.keys()){
+  const x=i%px,y=Math.floor(i/px)%py,z=Math.floor(i/(px*py));
   let interior=true;for(let c=-1;c<=1&&interior;c++)for(let b=-1;b<=1&&interior;b++)for(let a=-1;a<=1;a++)if(!fullAt(x+a,y+b,z+c)){interior=false;break;}
   if(interior)continue;
   // The page and its apron of `depth` cells: dry where a lattice cell holds no volume.
@@ -128,7 +128,7 @@ export interface UniformCensusReach{readonly v_m_s:number;readonly head_m:number
 export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):UniformCensusReach{
  const h=scene.voxelDomain.finestCellSize_m,E=volume.edge,[nx,ny,nz]=volume.cells,[px,py]=volume.pages,g=Math.hypot(scene.fluid.gravity_m_s2.x,scene.fluid.gravity_m_s2.y,scene.fluid.gravity_m_s2.z);
  const column=new Uint32Array(nx*nz),free=new Uint8Array(nx*nz);let top=0;
- const liquid=(x:number,y:number,z:number)=>{const page=volume.at[Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E))];return page?page[x%E+E*(y%E+E*(z%E))]!:0;};
+ const liquid=(x:number,y:number,z:number)=>{const page=volume.at.get(Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E)));return page?page[x%E+E*(y%E+E*(z%E))]!:0;};
  const cells=sceneLatticeDimensions(scene,Number.MAX_SAFE_INTEGER),[cx,cy,cz]=cells,walled=scene.container.walls!=="none";
  const solids=solidWorldForScene(scene),boundary=proceduralSolidField(scene),ground=terrainColumnHeights(scene,cx,cz),cellHeight=scene.container.height_m/cy;
  // An open dry cell: inside the container (past it are its walls, but in an open world), no solid, no procedural boundary, above the ground.
@@ -137,8 +137,7 @@ export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):U
   if(liquid(x,y,z)>=0.5||sampleSolidWorld(solids,[x,y,z],true).solidFraction>0)return false;
   return (boundary?.open([x,y,z])??1)>0.5&&(y+0.5)*cellHeight>ground[x+cx*z]!;
  };
- for(let i=0;i<volume.at.length;i++){
-  const page=volume.at[i];if(!page)continue;
+ for(const [i,page] of volume.at){
   const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz){
    const X=ox+x,Y=oy+y,Z=oz+z,c=X+nx*Z;column[c]!++;top=Math.max(top,(Y+1)*h);
@@ -213,8 +212,8 @@ export function uniformCensusCrossingTiles(phi:LatticePages,tiles:readonly [numb
  const [tx,ty,tz]=tiles,E=phi.edge,n=E+1,[px,py,pz]=phi.pages,crossing=new Uint8Array(tx*ty*tz);
  if(E%4!==0)throw new Error(`Census crossing: a page edge of ${E} cells holds no whole tile`);
  const cellOpen=new Uint8Array(64);
- for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++){
-  const page=phi.at[x+px*(y+py*z)];if(!page)continue;
+ for(const [i,page] of phi.at){
+  const x=i%px,y=Math.floor(i/px)%py,z=Math.floor(i/(px*py));
   for(let c=0;c<E/4;c++)for(let b=0;b<E/4;b++)for(let a=0;a<E/4;a++){
    const T=[(E*x>>2)+a,(E*y>>2)+b,(E*z>>2)+c] as const;if(T[0]>=tx||T[1]>=ty||T[2]>=tz)continue;
    const o=[4*a,4*b,4*c] as const,g=[4*T[0],4*T[1],4*T[2]] as const;let all=true;
@@ -244,11 +243,11 @@ export function uniformCensusCrossingTiles(phi:LatticePages,tiles:readonly [numb
  * liquid or beside (3³) one that does, but not one whose 3³ neighbourhood is wet in every cell,
  * which holds no crossing. */
 export function uniformCensusSurfacePages(volume:LatticePages):(x:number,y:number,z:number)=>boolean{
- const E=volume.edge,[nx,ny,nz]=volume.cells,[px,py,pz]=volume.pages,full=new Uint8Array(px*py*pz);
- for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++){
-  const p=volume.at[i];if(!p)continue;let wet=true;
+ const E=volume.edge,[nx,ny,nz]=volume.cells,[px,py,pz]=volume.pages,full=new Set<number>();
+ for(const [i,p] of volume.at){
+  const x=i%px,y=Math.floor(i/px)%py,z=Math.floor(i/(px*py));let wet=true;
   for(let c=0,k=0;c<E&&wet;c++)for(let b=0;b<E&&wet;b++)for(let a=0;a<E;a++,k++){if(E*x+a<nx&&E*y+b<ny&&E*z+c<nz&&!(p[k]!>0)){wet=false;break;}}
-  full[i]=wet?1:0;
+  if(wet)full.add(i);
  }
  const inside=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<px&&y<py&&z<pz;
  return (x,y,z)=>{
@@ -256,7 +255,7 @@ export function uniformCensusSurfacePages(volume:LatticePages):(x:number,y:numbe
   for(let c=-1;c<=1;c++)for(let b=-1;b<=1;b++)for(let a=-1;a<=1;a++){
    const X=x+a,Y=y+b,Z=z+c;
    if(!inside(X,Y,Z))continue;
-   const i=X+px*(Y+py*Z);if(volume.at[i])near=true;if(!full[i])interior=false;
+   const i=X+px*(Y+py*Z);if(volume.at.has(i))near=true;if(!full.has(i))interior=false;
   }
   return near&&!interior;
  };
@@ -281,8 +280,7 @@ export function uniformCensusSeedTiles(volume:LatticePages,crossing:Uint8Array,t
  if(solid&&solid.length!==count)throw new Error("Census seed: the solid contact does not match the box's tiles");
  if(crossing.length!==count)throw new Error("Census seed: the crossing tiles do not match the box's tiles");
  const wet=new Uint8Array(count);
- for(let i=0;i<volume.at.length;i++){
-  const page=volume.at[i];if(!page)continue;
+ for(const [i,page] of volume.at){
   const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++){
    const X=ox+x,Y=oy+y,Z=oz+z;

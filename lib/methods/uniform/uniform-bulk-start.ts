@@ -119,7 +119,7 @@ export function uniformBulkStartFace(velocity:LatticePages|undefined,x:number,y:
  if(!velocity)return 0;
  const E=velocity.edge,o=[4*x,4*y,4*z],d=velocity.cells,[px,py]=velocity.pages;
  if(o[a]!+3>=d[a]!)return 0;
- const src=velocity.at[Math.floor(o[0]!/E)+px*(Math.floor(o[1]!/E)+py*Math.floor(o[2]!/E))];if(!src)return 0;
+ const src=velocity.at.get(Math.floor(o[0]!/E)+px*(Math.floor(o[1]!/E)+py*Math.floor(o[2]!/E)));if(!src)return 0;
  const u=(a+1)%3,v=(a+2)%3,q=[0,0,0];let sum=0;
  for(let j=0;j<4;j++)for(let i=0;i<4;i++){q[a]=o[a]!+3;q[u]=o[u]!+i;q[v]=o[v]!+j;sum=Math.fround(sum+src[4*((q[0]!%E)+E*((q[1]!%E)+E*(q[2]!%E)))+a]!);}
  return Math.fround(sum/16);
@@ -129,7 +129,7 @@ export function uniformBulkStartFace(velocity:LatticePages|undefined,x:number,y:
  * d4Sum8 in f32. `phi`: vertex phi by page (fluidLatticePagedVertexPhi), on
  * the tile's own page. */
 export function uniformBulkStartCentrePhi(phi:LatticePages,x:number,y:number,z:number):number{
- const E=phi.edge,n=E+1,[px,py]=phi.pages,p=[x>>3,y>>3,z>>3],page=phi.at[p[0]!+px*(p[1]!+py*p[2]!)];
+ const E=phi.edge,n=E+1,[px,py]=phi.pages,p=[x>>3,y>>3,z>>3],page=phi.at.get(p[0]!+px*(p[1]!+py*p[2]!));
  if(!page)throw new Error(`BULK16 start: tile (${x}, ${y}, ${z}) has no vertex phi`);
  const c=new Array<number>(8);
  for(let j=0;j<8;j++){const i=4*(x&7)+4*(j&1),k=4*(y&7)+4*((j>>1)&1),l=4*(z&7)+4*(j>>2);c[j]=Math.fround(page[i+n*(k+n*l)]!*0.125);}
@@ -147,7 +147,7 @@ export function uniformBulkStartSource(o:{
  readonly cellOpen:(x:number,y:number,z:number)=>boolean;readonly h:number;readonly dt:number;
 }):UniformBulkStartSource{
  const [px,py]=o.volume.pages,candidates:[number,number,number][]=[];
- o.volume.at.forEach((page,i)=>{if(page)candidates.push([i%px,Math.floor(i/px)%py,Math.floor(i/(px*py))]);});
+ for(const i of o.volume.at.keys())candidates.push([i%px,Math.floor(i/px)%py,Math.floor(i/(px*py))]);
  return {pages:o.pages,openTop:o.openTop,stored:o.stored,candidates,fine:o.fine,hot:o.hot,h:o.h,dt:o.dt,
   open:(x,y,z)=>{let n=0;for(let k=0;k<64;k++)if(o.cellOpen(4*x+(k&3),4*y+((k>>2)&3),4*z+(k>>4)))n++;return n/64;},
   phi:(x,y,z)=>uniformBulkStartCentrePhi(o.phi,x,y,z),

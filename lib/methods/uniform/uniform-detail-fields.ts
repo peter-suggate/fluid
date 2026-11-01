@@ -499,7 +499,7 @@ export class UniformDetailStorage{
  upload(texture:GPUTexture,values?:Float32Array|LatticePages):void{
   const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,kind=this.kindOf(texture),d=this.layout.dims,p=this.layout.address.pages;
   if(values instanceof Float32Array&&values.length!==comp*lx*ly*lz)throw new Error(`${texture.label}: upload needs ${comp*lx*ly*lz} values, not ${values.length}`);
-  if(values&&!(values instanceof Float32Array)&&(values.edge!==32||values.cells.some((n,a)=>n!==d[a])||values.pages.some((n,a)=>n!==p[a])||values.at.some(v=>v&&v.length!==comp*(kind==="vertex"?33:32)**3)))
+  if(values&&!(values instanceof Float32Array)&&(values.edge!==32||values.cells.some((n,a)=>n!==d[a])||values.pages.some((n,a)=>n!==p[a])||[...values.at.values()].some(v=>v.length!==comp*(kind==="vertex"?33:32)**3)))
    throw new Error(`${texture.label}: an upload by page holds the ${p.join("x")} pages of 32 cells of the ${d.join("x")} box`);
 
   if(!this.installed){this.pending.set(texture,values);return;}
@@ -520,7 +520,7 @@ export class UniformDetailStorage{
   * held until another is asked for. */
  private pages(texture:GPUTexture,values:Float32Array|LatticePages):(x:number,y:number,z:number)=>Float32Array|undefined{
   const [px,py]=this.layout.address.pages;
-  if(!(values instanceof Float32Array))return (x,y,z)=>values.at[x+px*(y+py*z)];
+  if(!(values instanceof Float32Array))return (x,y,z)=>values.at.get(x+px*(y+py*z));
   const [lx,ly,lz]=this.logicalOf(texture),comp=texture.format==="rgba32float"?4:1,n=this.kindOf(texture)==="vertex"?33:32,page=new Float32Array(comp*n**3);let held=-1;
   return (x,y,z)=>{
    const key=x+px*(y+py*z);if(key===held)return page;held=key;page.fill(0);

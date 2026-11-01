@@ -387,16 +387,26 @@ export function initialLiquidCellBounds(scene: SceneDescription, dimensions: rea
 }
 
 /**
- * A lattice field page by page: the page at (x, y, z) of `pages` is at[x +
- * pages[0] (y + pages[1] z)], edge^3 cells x fastest (a vertex field's
- * (edge + 1)^3 vertices from the page's low corner), or undefined where it
- * holds zero throughout.
+ * A lattice field page by page, sparse: the page at (x, y, z) of `pages` is
+ * at.get(x + pages[0] (y + pages[1] z)), edge^3 cells x fastest (a vertex
+ * field's (edge + 1)^3 vertices from the page's low corner), absent where it
+ * holds zero throughout. Its keys ascend, so a walk of `at` is the lattice's
+ * page order, and its size follows the pages held, never the box.
  */
 export interface LatticePages {
   readonly edge: number;
   readonly cells: readonly [number, number, number];
   readonly pages: readonly [number, number, number];
-  readonly at: readonly (Float32Array | undefined)[];
+  readonly at: ReadonlyMap<number, Float32Array>;
+}
+/** The page keys (x + pages[0] (y + pages[1] z)) a set of cell boxes [lo, hi) of `edge`-cell pages meets, ascending, each once. */
+export function latticeBoxPageKeys(boxes: readonly (readonly [readonly number[], readonly number[]])[], edge: number, pages: readonly [number, number, number]): number[] {
+  const [px, py, pz] = pages, keys = new Set<number>();
+  for (const [lo, hi] of boxes) {
+    const a = lo.map(v => Math.max(0, Math.floor(v/edge))), b = hi.map((v, k) => Math.min(pages[k]!-1, Math.ceil(v/edge)-1));
+    for (let z=a[2]!; z<=b[2]! && z<pz; z++) for (let y=a[1]!; y<=b[1]! && y<py; y++) for (let x=a[0]!; x<=b[0]! && x<px; x++) keys.add(x+px*(y+py*z));
+  }
+  return [...keys].sort((p, q) => p-q);
 }
 
 /**
@@ -464,9 +474,11 @@ export function fluidLatticePagedCellVolumes(scene: SceneDescription, edge: numb
   const {density, terrain: inner, dam} = cellVolumeSampler(scene, cells, true);
   const pages: [number, number, number] = [Math.ceil(nx/edge), Math.ceil(ny/edge), Math.ceil(nz/edge)], [px, py, pz] = pages;
   const bounds = initialLiquidCellBounds(scene, cells) ?? [[[0, 0, 0], [cx, cy, cz]]];
-  const at: (Float32Array | undefined)[] = new Array(px*py*pz).fill(undefined);
+  const at = new Map<number, Float32Array>();
   const wetMinimum = [cx, cy, cz], wetMaximum = [0, 0, 0];
-  for (let z=0; z<pz; z++) for (let y=0; y<py; y++) for (let x=0; x<px; x++) {
+  // The pages the bounds meet, in the lattice's order: work follows the liquid, not the box.
+  for (const key of latticeBoxPageKeys(bounds, edge, pages)) {
+    const x = key%px, y = Math.floor(key/px)%py, z = Math.floor(key/(px*py));
     const o = [x*edge, y*edge, z*edge], e = [Math.min(cx, o[0]!+edge), Math.min(cy, o[1]!+edge), Math.min(cz, o[2]!+edge)];
     if (!bounds.some(([lo, hi]) => [0, 1, 2].every(a => lo[a]! < e[a]! && o[a]! < hi[a]!))) continue;
     const page = new Float32Array(edge**3);
@@ -480,14 +492,18 @@ export function fluidLatticePagedCellVolumes(scene: SceneDescription, edge: numb
         wetMaximum[0] = Math.max(wetMaximum[0]!, i+1); wetMaximum[1] = Math.max(wetMaximum[1]!, j+1); wetMaximum[2] = Math.max(wetMaximum[2]!, k+1);
       }
     }
-    if (any) at[x+px*(y+py*z)] = page;
+    if (any) at.set(key, page);
   }
+  // The sum in the lattice's order (z, then y, then x), over the rows of the pages held:
+  // the pages of a slab (qy, qz) in x order, the slabs in (qz, qy) order.
+  const slabs = new Map<number, number[]>();
+  for (const key of at.keys()) { const qx = key%px, slab = (key-qx)/px; let row = slabs.get(slab); if (!row) slabs.set(slab, row = []); row.push(qx); }
+  const layers = new Map<number, [number, number[]][]>();
+  for (const [slab, row] of slabs) { const qz = Math.floor(slab/py); let held = layers.get(qz); if (!held) layers.set(qz, held = []); held.push([slab%py, row]); }
   let initial = 0;
-  for (let z=0; z<cz; z++) for (let y=0; y<cy; y++) for (let x=0; x<px; x++) {
-    const page = at[x+px*((y/edge|0)+py*(z/edge|0))];
-    if (!page) continue;
-    const row = edge*(y%edge+edge*(z%edge));
-    for (let i=0; i<Math.min(edge, cx-x*edge); i++) initial += page[row+i]!;
+  for (const [qz, held] of layers) for (let z=qz*edge; z<Math.min(cz, (qz+1)*edge); z++) for (const [qy, row] of held) for (let y=qy*edge; y<Math.min(cy, (qy+1)*edge); y++) for (const x of row) {
+    const page = at.get(x+px*(qy+py*qz))!, line = edge*(y%edge+edge*(z%edge));
+    for (let i=0; i<Math.min(edge, cx-x*edge); i++) initial += page[line+i]!;
   }
   const terrain = new Float32Array(nx*nz);
   for (let z=0; z<nz; z++) for (let x=0; x<nx; x++) terrain[x+nx*z] = inner[Math.min(x,cx-1)+cx*Math.min(z,cz-1)]!;
@@ -550,10 +566,10 @@ export function fluidLatticePagedVertexPhi(scene: SceneDescription, edge: number
   const inner = (x: number, y: number, z: number) => Math.fround(buried(x, y, z) ? empty : sample(x, y, z, z));
   const same = nx === cx && ny === cy && nz === cz, cellHeight = c.height_m/cy, rows = c.top === "open" ? ny : cy;
   const pages: [number, number, number] = [Math.ceil(nx/edge), Math.ceil(ny/edge), Math.ceil(nz/edge)], [px, py, pz] = pages, n = edge+1;
-  const at: (Float32Array | undefined)[] = new Array(px*py*pz).fill(undefined);
+  const at = new Map<number, Float32Array>();
   for (let z=0; z<pz; z++) for (let y=0; y<py; y++) for (let x=0; x<px; x++) {
     if (!stored(x, y, z)) continue;
-    const page = at[x+px*(y+py*z)] = new Float32Array(n**3);
+    const page = new Float32Array(n**3); at.set(x+px*(y+py*z), page);
     for (let k=0; k<n && z*edge+k<=nz; k++) for (let j=0; j<n && y*edge+j<=ny; j++) for (let i=0; i<n && x*edge+i<=nx; i++) {
       const X = x*edge+i, Y = y*edge+j, Z = z*edge+k;
       page[i+n*(j+n*k)] = same ? inner(X, Y, Z) : X<=cx && Z<=cz && Y<=rows ? inner(X, Math.min(Y,cy), Z) + Math.max(0,Y-cy)*cellHeight : far;

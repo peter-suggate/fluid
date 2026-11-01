@@ -17,7 +17,7 @@ import { createReservoirSeepScene } from "../lib/core/reservoir-seep-scene";
 /** A 64³ lattice (two pages an axis) of vertex phi `phi` and the cells it holds liquid at (phi at
  * the cell's centre below zero, outside `solid`), with its crossing tiles. */
 function lattice(phi: (x: number, y: number, z: number) => number, solid: (x: number, y: number, z: number) => boolean = () => false) {
-  const edge = 32, at: (Float32Array | undefined)[] = [], vertices: Float32Array[] = [];
+  const edge = 32, at = new Map<number, Float32Array>(), vertices = new Map<number, Float32Array>();
   for (let pz = 0; pz < 2; pz++) for (let py = 0; py < 2; py++) for (let px = 0; px < 2; px++) {
     const page = new Float32Array(edge ** 3), v = new Float32Array((edge + 1) ** 3);
     for (let z = 0; z < edge; z++) for (let y = 0; y < edge; y++) for (let x = 0; x < edge; x++) {
@@ -26,7 +26,9 @@ function lattice(phi: (x: number, y: number, z: number) => number, solid: (x: nu
     }
     for (let z = 0; z <= edge; z++) for (let y = 0; y <= edge; y++) for (let x = 0; x <= edge; x++)
       v[x + (edge + 1) * (y + (edge + 1) * z)] = phi(edge * px + x, edge * py + y, edge * pz + z);
-    at.push(page.some(c => c > 0) ? page : undefined); vertices.push(v);
+    const i = px + 2 * (py + 2 * pz);
+    if (page.some(c => c > 0)) at.set(i, page);
+    vertices.set(i, v);
   }
   const volume = { edge, cells: [64, 64, 64] as const, pages: [2, 2, 2] as const, at };
   const crossing = uniformCensusCrossingTiles({ ...volume, at: vertices }, [T, T, T], (x, y, z) => !solid(x, y, z));
@@ -130,7 +132,6 @@ test("a census start's h tiles on the closed reservoir grow with its surface are
     // The surface's tile columns: a tile column (x, z) with liquid in any cell under it.
     const [px, py] = volume.pages, E = volume.edge, wet = new Set<number>();
     volume.at.forEach((page, i) => {
-      if (!page) return;
       const ox = E * (i % px), oz = E * Math.floor(i / (px * py));
       for (let z = 0, j = 0; z < E; z++) for (let y = 0; y < E; y++) for (let x = 0; x < E; x++, j++) if (page[j]! > 0) wet.add(((ox + x) >> 2) + tiles[0] * ((oz + z) >> 2));
     });

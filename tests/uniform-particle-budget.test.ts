@@ -50,11 +50,11 @@ test("the particle record rule: 8 samples a band cell x the shared growth, over 
   assert.throws(() => uniformParticleRecordRule(-1), /count of band cells/);
   // A 64³ lattice of two pages an axis, wet below y = 20: the band is the
   // 3 wet layers under the free surface (y 17..19), 64 x 64 a layer.
-  const edge = 32, at: (Float32Array | undefined)[] = [];
+  const edge = 32, at = new Map<number, Float32Array>();
   for (let pz = 0; pz < 2; pz++) for (let py = 0; py < 2; py++) for (let px = 0; px < 2; px++) {
     const page = new Float32Array(edge ** 3);
     for (let z = 0; z < edge; z++) for (let y = 0; y < edge; y++) for (let x = 0; x < edge; x++) if (edge * py + y < 20) page[x + edge * (y + edge * z)] = 1;
-    at.push(py === 1 && page.every(v => v === 0) ? undefined : page);
+    if (!(py === 1 && page.every(v => v === 0))) at.set(px + 2 * (py + 2 * pz), page);
   }
   // Its h tiles: the layers y 16..19 hold it, 16 x 16 tiles across.
   assert.deepEqual(uniformParticleBand({ edge, cells: [64, 64, 64], pages: [2, 2, 2], at } as never, 3), { cells: 3 * 64 * 64, tiles: 16 * 16 });

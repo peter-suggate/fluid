@@ -1386,7 +1386,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(g[0]>tx||g[1]>ty||g[2]>tz)return empty;
       uniformVertexSlot(a,g[0],g[1],g[2],3,slot);
       if(slot[3]!==uniformPageWord(a,p[0],p[1],p[2])||slot[0]!==l[0]||slot[1]!==l[1]||slot[2]!==l[2])return empty;
-      return phi.at[p[0]+px*(p[1]+py*p[2])]![4*l[0]+33*(4*l[1]+33*4*l[2])]!;
+      return phi.at.get(p[0]+px*(p[1]+py*p[2]))![4*l[0]+33*(4*l[1]+33*4*l[2])]!;
     }});
     this.bulkStartInfo={pages:pages.length,phi_ms:t1-t0,seed_ms:t1c-t1b,layout_ms:t2-t1c,set_ms:t3-t2,records_ms:performance.now()-t3};
     return {pages,records,phi};
@@ -1408,8 +1408,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const thin=uniformThinWallTiles(dims,this.solidMask,this.mixedSolidPromotion().coupled,sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined);
     const a=this.address,[tx,ty,tz]=dims.map(n=>n/4) as [number,number,number],wet=new Uint8Array(thin.length);
     const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE),E=volume.edge,[px,py]=volume.pages;
-    for(let i=0;i<volume.at.length;i++){
-      const page=volume.at[i];if(!page)continue;
+    for(const [i,page] of volume.at){
       const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
       for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)
         if(page[j]!>0&&uniformTileInBox(a,(ox+x)>>2,(oy+y)>>2,(oz+z)>>2))wet[uniformBoxTileIndex(a,(ox+x)>>2,(oy+y)>>2,(oz+z)>>2)]=1;

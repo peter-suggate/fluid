@@ -559,8 +559,7 @@ function wetPages(cells:readonly [number,number,number],pages:readonly [number,n
  };
  if("edge" in volume){
   if(volume.edge!==E||volume.cells.some((n,a)=>n!==cells[a]))throw new RangeError(`Uniform page pool: the initial liquid's pages are of ${volume.edge} cells over ${volume.cells.join("x")}, not ${E} over the lattice's ${cells.join("x")}`);
-  for(let i=0;i<count;i++){
-   const page=volume.at[i];if(!page)continue;
+  for(const [i,page] of volume.at){
    const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
    for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz)wet(3*i,ox+x,oy+y,oz+z);
   }
@@ -611,8 +610,7 @@ export function uniformPagePoolReachablePages(cells:readonly [number,number,numb
   m[((x%E)>>2)+T*(((y%E)>>2)+T*((z%E)>>2))]=1;
  };
  if("edge" in volume){
-  for(let i=0;i<volume.at.length;i++){
-   const page=volume.at[i];if(!page)continue;
+  for(const [i,page] of volume.at){
    const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
    for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz)mark(ox+x,oy+y,oz+z);
   }
