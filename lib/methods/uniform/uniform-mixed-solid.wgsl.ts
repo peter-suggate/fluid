@@ -1,7 +1,8 @@
+import {uniformSolidCutMaskWGSL} from "./uniform-solid-cut-mask.wgsl";
 import { sculptCollisionWGSL } from "../../core/sculpt-collision.wgsl";
 import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
 import type { LevelSetSolidBoundarySource } from "../../core/levelset-consumer-abi";
-import { uniformRigidCoverageWGSL } from "./uniform-rigid-coverage.wgsl";
+import { uniformRigidCoverageSource } from "./uniform-rigid-coverage.wgsl";
 import { uniformTerrainSamplingWGSL } from "./uniform-terrain-sampling.wgsl";
 /** Embedded solids for fine mixed owners: the paged voxel mask
  * (SolidOccupancyMask's image, the host's active scratch, with the bed-slope lane in it), the terrain
@@ -54,12 +55,14 @@ fn umSolidApertureStampRow(t:u32)->u32{return umSolidCount()+7u*umSolidTiles()+t
 // per 16h region after the 8 per-tile rows, then the pending/count header.
 fn umBodyRegionBase()->u32{return umSolidCount()+8u*umSolidTiles();}
 // The epoch the host advances with every solid edit, after the mask's header.
+// y certifies that the record was built at the currently published body pose.
+// Publishing bodies clears it; the last full/body record-build dispatch sets it.
 fn umSolidApertureEpochRow()->u32{return umBodyRegionBase()+umSolidTiles()/64u+1u;}
 // A tile slot's 77 rows, after the epoch: the exact 64 h-cell open fractions
 // (16 rows, four cells a vec4 in x+4y+16z order), then the h face apertures
 // (umPressureFaceV's value of each cell's +x, +y and +z face, four cells a
 // vec4 in x+4y+16z order, 16 rows an axis), the slot's owner (x: its key + 1,
-// 0 free), then the tile's low faces (4 rows an axis, the face's cell at
+// 0 free; yzw: exact valid-cell cut mask, packed 24+24+16 bits), then the tile's low faces (4 rows an axis, the face's cell at
 // l[axis+1]+4l[axis+2]: a face whose low cell no page stores reads them).
 // Only a tile whose fractions or apertures are not all 1 holds a slot
 // (UniformMixedSolid's slot capacity: every key, or the tiles solids and the
@@ -395,7 +398,12 @@ export class UniformMixedSolid {
  get allocatedBytes():number{return (this.coarse?.record.size??0)+(this.slotState?.size??0)+(this.bodyMask?.size??0)+this.bodies.size+(this.builtBodies?.size??0)+(this.ownsAnalyticTerrain?this.analyticTerrain.size:0);}
  /** Mirror the rigid state into the library: at a frame's head, and after
   * the rigid integration for the census that follows it. */
- encodeBodies(encoder:GPUCommandEncoder):void{encoder.copyBufferToBuffer(this.bodySource,0,this.bodies,0,12*128);}
+ encodeBodies(encoder:GPUCommandEncoder):void{
+  encoder.copyBufferToBuffer(this.bodySource,0,this.bodies,0,12*128);
+  // Invalidate in queue order, including publication after tail integration.
+  // A host write here could invalidate an earlier frame still in flight.
+  if(this.coarse)encoder.clearBuffer(this.coarse.record,this.epochByte+4,4);
+ }
  async initialize():Promise<void>{
   const layout=this.coarseLayout,coarse=this.coarse;if(!layout||!coarse||this.builder)return;
   const dispatchX=this.device.limits.maxComputeWorkgroupsPerDimension;
@@ -556,13 +564,40 @@ fn umSolidHalo(t:u32,axis:u32,side:u32)->u32{return umSolidTiles()+umFaceTile(t>
 // cut map): an h cell of the tile or of its one-cell ring has open < 1. A
 // cell of a page the lattice walls off cuts nothing. Nothing for a key that
 // holds no tile.
+// Fraction builds precede cut classification. Their exact valid-cell cut
+// masks replace 216 repeated geometric tests with 27 subset intersections.
+// Missing/stale/overflow rows retain the geometric predicate. The old and
+// new body support already rebuild with a two-cell guard, so unchanged
+// neighbors retain valid masks.
+${uniformSolidCutMaskWGSL}
+fn umCutNeighbor(tc:vec3u,i:u32)->bool{
+ let d=vec3i(i32(i%3u)-1,i32((i/3u)%3u)-1,i32(i/9u)-1);
+ let origin=4*(vec3i(tc)+d);let t=umTileKey(origin>>vec3u(2u));
+ if(umTileLive(t)){
+  let stamp=record[umSolidApertureStampRow(t)];
+  if(all(vec3i(stamp.xyz)==umSolidApertureCoord(t))&&stamp.w==record[umSolidApertureEpochRow()].x){
+   let slot=umSolidSlotOfWord(record[umSolidBoundaryRow(t)+1u].w);
+   if(slot==UM_SOLID_WHOLE){return false;}
+   if(slot!=UM_SOLID_GEOMETRY){
+    let mask=umUnpackCutMask(record[umSolidApertureSlotRow(slot)+48u].yzw);
+    return any((mask&umCutRingMasks[i])!=vec2u(0u));
+   }
+  }
+ }
+ // Only the neighbor's subset belongs to this tile's ring.
+ let lo=select(vec3i(0),vec3i(3),d<vec3i(0));
+ let hi=select(vec3i(4),vec3i(1),d>vec3i(0));
+ for(var z=lo.z;z<hi.z;z++){for(var y=lo.y;y<hi.y;y++){for(var x=lo.x;x<hi.x;x++){
+  let q=origin+vec3i(x,y,z);if(umSolidValid(q)&&umCellOpen(q)<1.0){return true;}
+ }}}
+ return false;
+}
 fn umCutTile(t:u32){
  if(!umTileLive(t)){return;}
  let tc=umTileCoord(t);if(umBodyTiles&&!umBodyTileDirty(t)){return;}
  var cut=0u;
- for(var i=0u;i<216u&&cut==0u;i++){
-  let q=vec3i(tc*4u)-vec3i(1)+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));
-  if(umSolidValid(q)&&umCellOpen(q)<1.0){cut=1u;}
+ for(var i=0u;i<27u&&cut==0u;i++){
+  if(umCutNeighbor(tc,i)){cut=1u;}
  }
  record[umSolidCount()+t].x=f32(cut);
  umSolidScratch[umSolidCutMap()+t]=cut;
@@ -577,9 +612,8 @@ var<workgroup> regionReach:u32;
 var<workgroup> regionCuts:atomic<u32>;
 fn umBuilderRegionDirty(region:u32)->bool{return region<UM_REGIONS&&(bodyRegions[region]&0x100ffu)<=2u;}
 // An item is an eighth of a region: eight of its tiles, eight lanes a tile,
-// each lane a strided eighth of the tile's 216-cell ring (umCutTile's test,
-// any order). A lane a tile walked the whole ring: the few regions a body
-// reaches ran 216 serial cell tests, 0.35 ms of a drifting-ball frame.
+// each lane a strided eighth of the tile's 27 neighbor subsets (umCutTile's
+// test, any order). The existing lane assignment and launch sizes stay fixed.
 // With a page pool the items are the resident blocks' (ulResidentBlock): a
 // free block's regions hold no tile, so the launch follows the pool's
 // residents, not its reservation.
@@ -594,9 +628,8 @@ fn umBuilderItemRegion(item:u32)->u32{return ${pool?"8u*ulResidentBlock(item>>6u
   var live=umTileLive(t);var tc=vec3u(0u);
   if(live){tc=umTileCoord(t);live=!(umBodyTiles&&!umBodyTileDirty(t));}
   if(live){
-   for(var i=lane&7u;i<216u;i+=8u){
-    let q=vec3i(tc*4u)-vec3i(1)+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));
-    if(umSolidValid(q)&&umCellOpen(q)<1.0){atomicOr(&regionCuts,1u<<slot);break;}
+   for(var i=lane&7u;i<27u;i+=8u){
+    if(umCutNeighbor(tc,i)){atomicOr(&regionCuts,1u<<slot);break;}
    }
   }
   workgroupBarrier();
@@ -617,10 +650,12 @@ fn umBuilderItemRegion(item:u32)->u32{return ${pool?"8u*ulResidentBlock(item>>6u
 // whose topology is the live ownership); a claimed block's tiles read 4h
 // until encodeSimulation.
 var<workgroup> buildDirty:u32;
+var<workgroup> buildBodyCandidates:u32;
 var<workgroup> apertures:array<vec3f,64>;
 var<workgroup> lowApertures:array<vec3f,64>;
 // Some fraction or aperture of the tile is not 1; the tile's slot word.
 var<workgroup> slotOdd:atomic<u32>;
+var<workgroup> fractionCut:array<atomic<u32>,2>;
 var<workgroup> slotWord:f32;
 fn umBuildTile(t:u32,lane:u32,widths:bool){
  if(!umTileLive(t)){return;}
@@ -628,7 +663,12 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  // The mask is read_write storage here: decide on one lane, exit uniformly.
  if(umBodyTiles){if(lane==0u){buildDirty=u32(umBodyTileDirty(t));}if(workgroupUniformLoad(&buildDirty)==0u){return;}}
  let l=vec3u(lane%4u,(lane/4u)%4u,lane/16u);let c=vec3i(tc*4u+l);
- if(lane==0u){for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);atomicStore(&fieldCut[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}atomicStore(&slotOdd,0u);}
+ if(lane==0u){for(var i=0u;i<2u;i++){atomicStore(&openCells[i],0u);atomicStore(&fieldCut[i],0u);atomicStore(&fractionCut[i],0u);}for(var i=0u;i<8u;i++){atomicStore(&patchCodes[i],0u);}atomicStore(&slotOdd,0u);}
+ // Share the roster rejection across all fractions and face queries of
+ // this tile. The three-cell radius covers its one-cell neighbor queries
+ // and their sampling margins; each query retains its original near test.
+ if(lane==0u){buildBodyCandidates=umBodyTileCandidates(tc);}
+ umSolidQueryBodies=workgroupUniformLoad(&buildBodyCandidates);
  var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);var face=vec3f(0.0);var lowFace=vec3f(0.0);
  // Every cell's +faces (the aperture rows; a tile's own +faces also feed its
  // sums and patch codes), then the tile's low faces (its low aperture rows;
@@ -642,6 +682,7 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  apertures[lane]=face;lowApertures[lane]=lowFace;
  workgroupBarrier();
  if(own.x>1e-5){atomicOr(&openCells[lane>>5u],1u<<(lane&31u));}
+ if(umSolidValid(c)&&own.x<1.0){atomicOr(&fractionCut[lane>>5u],1u<<(lane&31u));}
  let fieldRecord=umBoundaryRecord(c);
  if(fieldRecord!=0u){
   let n=vec3u(c)&vec3u(7u);var lowest=1e30;
@@ -672,6 +713,7 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
   let axis=lane/16u;let first=4u*(lane%16u);
   record[umSolidApertureSlotRow(s)+lane]=vec4f(apertures[first][axis],apertures[first+1u][axis],apertures[first+2u][axis],apertures[first+3u][axis]);
  }
+ if(slotted&&lane==48u){record[umSolidApertureSlotRow(s)+48u]=vec4f(f32(t+1u),umPackCutMask(vec2u(atomicLoad(&fractionCut[0]),atomicLoad(&fractionCut[1]))));}
  if(lane==48u){record[umSolidApertureStampRow(t)]=vec4f(vec3f(umSolidApertureCoord(t)),record[umSolidApertureEpochRow()].x);}
  if(slotted&&lane>48u&&lane<61u){
   let axis=(lane-49u)/4u;var v=vec4f(0.0);
@@ -691,7 +733,7 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
   let boundaryRow=umSolidBoundaryRow(t);
   record[boundaryRow]=vec4f(vec4u(pointer&65535u,pointer>>16u,valid.x&65535u,valid.x>>16u));
   // z: a body of this build's mirror reaches within one cell of the tile
-  // (umCellOpen then evaluates its cells' geometry instead of the record).
+  // (after pose publication, umCellOpen falls back to geometry there).
   let bh=umSolidParams.cellGravity.xyz;let blo=umSolidWorldCell(vec3i(tc*4u))-0.5*bh;let bhi=blo+4.0*bh;var touched=0u;
   for(var i=0u;i<umBodyCount();i++){if(umBodyTileNear(umSolidBodies[i],blo,bhi,max(bh.x,max(bh.y,bh.z)))){touched=1u;}}
   record[boundaryRow+1u]=vec4f(vec3f(vec3u(valid.y&65535u,valid.y>>16u,touched)),word);
@@ -804,7 +846,7 @@ ${pool?/* wgsl */`// With a page pool a fixed grid strides the resident blocks' 
 // (ulResidentBlock): a tile no page stores is written by neither helper.
 @compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  // The last launch of a record build: later masks compare against this count.
- if(g.x==0u&&lane==0u){bodyRegions[UM_REGIONS+1u]=umBodyCount();}
+ if(g.x==0u&&lane==0u){bodyRegions[UM_REGIONS+1u]=umBodyCount();record[umSolidApertureEpochRow()].y=1.0;}
  for(var visit=g.x;visit<8u*ulResidentCount();visit+=groups.x){
   let region=8u*ulResidentBlock(visit>>3u)+(visit&7u);
   // Bodies-only: z reads 27 tiles' open masks (rebuilt within 2h of the swept
@@ -818,7 +860,7 @@ ${pool?/* wgsl */`// With a page pool a fixed grid strides the resident blocks' 
 }`:/* wgsl */`@compute @workgroup_size(64) fn surfaceClear(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
  let region=g.x+umDispatchX*g.y;
  // The last launch of a record build: later masks compare against this count.
- if(region==0u&&lane==0u){bodyRegions[UM_REGIONS+1u]=umBodyCount();}
+ if(region==0u&&lane==0u){bodyRegions[UM_REGIONS+1u]=umBodyCount();record[umSolidApertureEpochRow()].y=1.0;}
  // Bodies-only: z reads 27 tiles' open masks (rebuilt within 2h of the swept
  // support, so z changes within 6h of it) and w the cut flags and current
  // bodies within 3h. Further regions keep both bits.
@@ -859,7 +901,7 @@ ${pool?/* wgsl */`// The tiles of the blocks the last commit claimed (the pool's
  for(var job=g.x+groups.x*g.y;job<jobs;job+=groups.x*groups.y){umBuildTile(512u*upNewBlock(job>>9u)+(job&511u),lane,false);}
 }
 // Their cut flags: the same jobs on the same grid, a workgroup a tile, its
-// lanes over the 216 cells of the tile and its ring (umCutTile's set).
+// lanes over the 27 neighbor subsets of the tile and its ring (umCutTile's set).
 var<workgroup> cutAny:atomic<u32>;
 @compute @workgroup_size(64) fn cutsNew(@builtin(workgroup_id) g:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let jobs=512u*upNewCount();
@@ -868,8 +910,8 @@ var<workgroup> cutAny:atomic<u32>;
   if(lane==0u){atomicStore(&cutAny,0u);}
   workgroupBarrier();
   if(live){
-   let o=vec3i(umTileCoord(t)*4u)-vec3i(1);
-   for(var i=lane;i<216u;i+=64u){let q=o+vec3i(vec3u(i%6u,(i/6u)%6u,i/36u));if(umSolidValid(q)&&umCellOpen(q)<1.0){atomicOr(&cutAny,1u);break;}}
+   let tc=umTileCoord(t);
+   for(var i=lane;i<27u;i+=64u){if(umCutNeighbor(tc,i)){atomicOr(&cutAny,1u);break;}}
   }
   workgroupBarrier();
   if(live&&lane==0u){let cut=atomicLoad(&cutAny);record[umSolidCount()+t].x=f32(cut);umSolidScratch[umSolidCutMap()+t]=cut;}
@@ -944,13 +986,13 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
    // (buildRegions), each skipping a region the mask puts beyond reach.
    if(this.builder.slotsReclaim){pass.setPipeline(this.builder.slotsReclaim);pass.dispatchWorkgroups(this.slotGroups);}
    if(this.full){
-    pass.setPipeline(this.builder.cuts);pass.dispatchWorkgroups(gx,gy);
     pass.setPipeline(this.builder.pipeline);pass.dispatchWorkgroups(x,ceilDiv(keys,x));
+    pass.setPipeline(this.builder.cuts);pass.dispatchWorkgroups(gx,gy);
    }else{
-    pass.setPipeline(this.builder.cutsBodies);pass.dispatchWorkgroups(Math.min(8*keys/64,BODY_REGION_GRID));
     // With a pool, a fixed grid of chunks strides the resident blocks' regions.
     const grid=64*(this.pool?BODY_REGION_CHUNKS:ceilDiv(keys/64,64)),bx=Math.min(grid,this.maxGroups);
     pass.setPipeline(this.builder.bodies!);pass.dispatchWorkgroups(bx,ceilDiv(grid,bx));
+    pass.setPipeline(this.builder.cutsBodies);pass.dispatchWorkgroups(Math.min(8*keys/64,BODY_REGION_GRID));
    }
    pass.setPipeline(this.full?this.builder.surfaceClear:this.builder.surfaceClearBodies);
    if(this.pool)pass.dispatchWorkgroups(UNIFORM_LIVE_GROUP_GROUPS);else pass.dispatchWorkgroups(gx,gy);
@@ -975,9 +1017,9 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   const claimed=this.builder?.claimed,cuts=this.builder?.cutsClaimed;if(!claimed||!cuts)throw new Error("The coarse solid record builds claimed blocks only with a page pool, once initialized");
   const pass=encoder.beginComputePass(NEW_BLOCKS_PASS);
   pass.setBindGroup(0,this.recordSolids!.group);pass.setBindGroup(1,this.builderGroup(topology));
-  pass.setPipeline(cuts);pass.dispatchWorkgroups(this.claimedGroups,1);
   if(this.builder!.slotsReclaimNew){pass.setPipeline(this.builder!.slotsReclaimNew);pass.dispatchWorkgroups(this.slotGroups);}
   pass.setPipeline(claimed);pass.dispatchWorkgroups(this.claimedGroups,1);
+  pass.setPipeline(cuts);pass.dispatchWorkgroups(this.claimedGroups,1);
   pass.setPipeline(this.builder!.surfaceClearNew!);pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_GROUP_GROUPS,this.coarseLayout.tiles.length/64));pass.end();
  }
  /** A record kernel reads tile keys through the page table and block records after the topology's tile words. */
@@ -1072,6 +1114,7 @@ fn umVertexBuried(p:vec3i)->bool{
 export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,writable=false):string{
  if(group===undefined)return /* wgsl */ `
 fn umSolidEnabled()->bool{return false;}
+fn umSolidBodyPoseCurrent()->bool{return false;}
 fn collisionSculptNear(world:vec3f)->bool{return false;}
 fn umTerrainBoundary(q:vec3f)->vec4f{return vec4f(0,1,0,1e6);}
 fn umSolidRegionClearAtBuild(p:vec3i)->bool{return true;}
@@ -1088,7 +1131,7 @@ fn umCellOpen(p:vec3i)->f32{return select(0.0,1.0,umSolidValid(p));}
 fn umCellIsOpen(p:vec3i)->bool{return umSolidValid(p);}
 fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{return umSolidValid(p);}
 fn umCellInsideSolid(p:vec3i)->bool{return false;}
-fn umFaceOpen(id:vec3i,axis:u32)->f32{return 1.0;}
+fn umFaceOpen(id:vec3i,axis:u32,candidates:u32)->f32{return 1.0;}
 fn umPressureFaceV(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umPressureFaceVRecorded(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umSolidAperturesServe(p:vec3i)->u32{return 0u;}
@@ -1109,6 +1152,7 @@ fn umBodySweptNearTile(t:u32,margin:u32)->bool{return false;}
 fn umBodyPoseNearTile(t:u32,margin:u32)->bool{return false;}
 fn umBodyEvidencePending()->bool{return false;}
 `;
+ const bodyLoop=writable?"var bodyCandidates=umSolidQueryBodies&((1u<<umBodyCount())-1u);while(bodyCandidates!=0u){let i=firstTrailingBit(bodyCandidates);bodyCandidates&=bodyCandidates-1u;":"for(var i=0u;i<umBodyCount();i++){";
  return /* wgsl */ `
 struct UMSolidParams {
  dimsDt:vec4f,cellGravity:vec4f,frame:vec4f,physical:vec4f,boundary:vec4f,
@@ -1226,6 +1270,10 @@ fn umBodyPoseNearTile(t:u32,margin:u32)->bool{
 fn umBodyEvidencePending()->bool{return umSolidEnabled()&&umSolidRecord[umBodyRegionBase()+umSolidTiles()/64u].x>0.5;}
 // A body of the record's build mirror reached within a cell of tile t.
 fn umSolidBodyBuilt(t:u32)->bool{return umSolidRecord[umSolidBoundaryRow(t)+1u].z>0.5;}
+// This certificate survives page claims and derived-geometry consumers, but
+// not body publication. It permits exact reuse even beside a moving body:
+// between its record rebuild and its next integration the pose is unchanged.
+fn umSolidBodyPoseCurrent()->bool{return umSolidRecord[umSolidApertureEpochRow()].y>0.5;}
 // Stored tile t's slot (umSolidSlotOfWord).
 fn umSolidTileSlot(t:u32)->u32{return umSolidSlotOfWord(umSolidRecord[umSolidBoundaryRow(t)+1u].w);}
 // The recorded open fraction of h cell p of stored tile t, or -1 where no
@@ -1386,8 +1434,20 @@ fn umBodyCount()->u32{if(!umSolidEnabled()){return 0u;}return min(u32(max(round(
 fn umBodyRegionOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
 // Any present body's bounding sphere within margin of a world point: every
 // body sample a helper takes lies within its own margin of that point.
+${writable?/* wgsl */`// Only the record builder restricts the roster. Other writable entry
+// points start with every bit set and retain the unrestricted behavior.
+var<private> umSolidQueryBodies:u32=0xfffu;
+fn umBodyTileCandidates(tc:vec3u)->u32{
+ let h=umSolidParams.cellGravity.xyz;let centre=umSolidWorldCell(vec3i(tc*4u))+1.5*h;var mask=0u;
+ for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,centre,length(3.0*h))){mask|=1u<<i;}}
+ return mask;
+}`:""}
+fn umBodyCandidates(world:vec3f,margin:f32)->u32{
+ var mask=0u;${bodyLoop}if(umBodyNear(i,world,margin)){mask|=1u<<i;}}
+ return mask;
+}
 fn umAnyBodyNear(world:vec3f,margin:f32)->bool{
- for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,world,margin)){return true;}}
+ ${bodyLoop}if(umBodyNear(i,world,margin)){return true;}}
  return false;
 }
 fn umQuatRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
@@ -1398,10 +1458,19 @@ fn umBodyDistance(i:u32,world:vec3f)->f32{let b=umSolidBodies[i];return fluidRig
 fn umBodyVelocity(i:u32,world:vec3f)->vec3f{let b=umSolidBodies[i];return b.linearVelocity.xyz+cross(b.angularVelocity.xyz,world-b.positionShape.xyz);}
 // rigidBodyIndexAt: the first body containing the point, -1 for none.
 fn umBodyAt(world:vec3f)->i32{
- for(var i=0u;i<umBodyCount();i++){if(umInsideBody(i,world)){return i32(i);}}
+ ${bodyLoop}if(umInsideBody(i,world)){return i32(i);}}
  return -1;
 }
-${uniformRigidCoverageWGSL}
+// A query's conservative body set is reused by all of its sample points.
+// Visit bits in roster order: overlapping solids keep the same first owner.
+fn umBodyAtCandidates(world:vec3f,candidates:u32)->i32{
+ var remaining=candidates;
+ while(remaining!=0u){let i=firstTrailingBit(remaining);remaining&=remaining-1u;
+  if(umInsideBody(i,world)){return i32(i);}
+ }
+ return -1;
+}
+${uniformRigidCoverageSource(writable?"umSolidQueryBodies":undefined)}
 // cellOpenFraction.
 fn umCellOpenGeometry(p:vec3i)->f32{
  if(!umSolidEnabled()){return select(0.0,1.0,umSolidValid(p));}
@@ -1416,13 +1485,13 @@ fn umCellOpenGeometry(p:vec3i)->f32{
 }
 fn umCellOpen(p:vec3i)->f32{
  ${coarse!==undefined&&gated?`// Bodies may move after the record rebuild (the tail's integration).
- // The record is authoritative for a cell no body reached at its tile's
- // build and none reaches now; entered and vacated cells need geometry.
+ // At the built pose, the exact record also serves cells beside bodies.
+ // After publication, entered and vacated cells need geometry until rebuilt.
  if(umSolidEnabled()){
   let tile=umTileKey(p>>vec3u(2u));
   if(umKeyStored(tile)){
    let h=umSolidParams.cellGravity.xyz;
-   if(umBodyCount()==0u||(!umSolidBodyBuilt(tile)&&!umAnyBodyNear(umSolidWorldCell(p),length(0.5*h)))){
+   if(umSolidBodyPoseCurrent()||umBodyCount()==0u||(!umSolidBodyBuilt(tile)&&!umAnyBodyNear(umSolidWorldCell(p),length(0.5*h)))){
     let open=umSolidRecordedOpen(tile,p);if(open>=0.0){return open;}
    }
   }
@@ -1495,19 +1564,22 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
  var neighbor=id;neighbor[axis]+=1;
  if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;let reach=max(h.x,max(h.y,h.z));
- var near=false;
- for(var i=0u;i<umBodyCount();i++){near=near||umBodyNear(i,world,2.0*reach);}
- if(!near){return 0.0;}
+ // Keep the existing broad-phase reach, retaining its candidate identities.
+ // Every dual-cell sample is within 0.4*sqrt(3)*reach, and the nearest-wall
+ // fallback reaches one cell: both are contained in this same 2*reach set.
+ let candidates=umBodyCandidates(world,2.0*reach);
+ if(candidates==0u){return 0.0;}
  var solid=0.0;var velocity=0.0;
  for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
   let sampleWorld=world+vec3f(select(-0.4,0.4,(sampleIndex&1u)!=0u)*h.x,select(-0.4,0.4,(sampleIndex&2u)!=0u)*h.y,select(-0.4,0.4,(sampleIndex&4u)!=0u)*h.z);
   if(umSolidVoxelAtWorld(sampleWorld)||umSolidTerrainAtWorld(sampleWorld)){solid+=1.0;continue;}
-  let body=umBodyAt(sampleWorld);
+  let body=umBodyAtCandidates(sampleWorld,candidates);
   if(body>=0){solid+=1.0;velocity+=umBodyVelocity(u32(body),world)[axis];}
  }
  if(solid>0.0){return velocity/solid;}
  var nearest=reach;var result=0.0;
- for(var i=0u;i<umBodyCount();i++){
+ var remaining=candidates;
+ while(remaining!=0u){let i=firstTrailingBit(remaining);remaining&=remaining-1u;
   let d=abs(umBodyDistance(i,world));
   if(d<=nearest){nearest=d;result=umBodyVelocity(i,world)[axis];}
  }
@@ -1517,7 +1589,7 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
 // reaches (its samples lie within 0.35 sqrt(2) h of the face centre) that is
 // neither clear nor beside a voxel: umPressureFaceV's rigid contact, its one
 // caller, has taken those forms.
-fn umFaceOpen(id:vec3i,axis:u32)->f32{
+fn umFaceOpen(id:vec3i,axis:u32,candidates:u32)->f32{
  if(!umSolidEnabled()){return 1.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
  let tangentA=(axis+1u)%3u;let tangentB=(axis+2u)%3u;var solid=0.0;
@@ -1525,7 +1597,7 @@ fn umFaceOpen(id:vec3i,axis:u32)->f32{
   var sampleWorld=world;
   sampleWorld[tangentA]+=select(-0.35,0.35,(sampleIndex&1u)!=0u)*h[tangentA];
   sampleWorld[tangentB]+=select(-0.35,0.35,(sampleIndex&2u)!=0u)*h[tangentB];
-  solid+=select(0.0,1.0,umSolidAtWorld(sampleWorld));
+  solid+=select(0.0,1.0,umSolidVoxelAtWorld(sampleWorld)||umSolidTerrainAtWorld(sampleWorld)||umBodyAtCandidates(sampleWorld,candidates)>=0);
  }
  return 1.0-solid*0.25;
 }
@@ -1542,7 +1614,7 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
  // past every 0.4h dual-cell sample) takes the body-free evaluation, so a
  // distant body changes no aperture.
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
- let bodyNear=umAnyBodyNear(world,length(0.5*h));
+ let candidates=umBodyCandidates(world,length(0.5*h));let bodyNear=candidates!=0u;
  // One terrain, boundary and umCellOpen site each: Metal inlines every site,
  // and this function is inlined at every face a kernel weighs.
  let boxed=!bodyNear&&umBoundaryTouchesBox(q,vec3f(1));
@@ -1557,7 +1629,7 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
   // one side of a completely blocked face; treating that volume as an open
   // face couples the fluid to ghost liquid inside the body at the waterline.
   // Gravity then creates velocity through the body even while it is fixed.
-  if(bodyNear){return umFaceOpen(id,axis);}
+  if(bodyNear){return umFaceOpen(id,axis,candidates);}
  }
  let box=umUnitBoxOpen(q,boxed);
  if(boxed){return min(box.y,box.x);}
@@ -1574,7 +1646,7 @@ fn umSolidApertureCell(id:vec3i,axis:u32)->vec3i{
 // umSolidApertureCell's cell; umSolidApertureRecord reads them, a lean read
 // with no geometry inlined): 0 they are; 1 the geometry must serve their
 // faces (no page stores the tile, no record is bound, or a body reached the
-// tile at its build or reaches its region now); 2 the rows are stale (a claim
+// tile at its build or reaches its region after pose publication); 2 the rows are stale (a claim
 // or an edit the record missed): the caller latches its stage's fatal.
 fn umSolidAperturesServe(p:vec3i)->u32{
  ${coarse!==undefined&&gated?`if(!umSolidEnabled()){return 0u;}
@@ -1582,7 +1654,7 @@ fn umSolidAperturesServe(p:vec3i)->u32{
  let stamp=umSolidRecord[umSolidApertureStampRow(t)];
  if(any(vec3i(stamp.xyz)!=umSolidApertureCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return 2u;}
  if(umSolidTileSlot(t)==UM_SOLID_GEOMETRY){return 1u;}
- if(umBodyCount()>0u&&(umSolidBodyBuilt(t)||umBodyPoseNearTile(t,2u))){return 1u;}
+ if(!umSolidBodyPoseCurrent()&&umBodyCount()>0u&&(umSolidBodyBuilt(t)||umBodyPoseNearTile(t,2u))){return 1u;}
  return 0u;`:"return select(0u,1u,umSolidEnabled());"}
 }
 // The aperture rows of the face of cell id normal to axis on its high side
@@ -1622,7 +1694,7 @@ fn umPressureFaceVRecorded(id:vec3i,axis:u32)->f32{
    let stamp=umSolidRecord[umSolidApertureStampRow(t)];
    if(any(vec3i(stamp.xyz)!=umSolidApertureCoord(t))||stamp.w!=umSolidRecord[umSolidApertureEpochRow()].x){return -1.0;}
    let slot=umSolidTileSlot(t);
-   if(slot!=UM_SOLID_GEOMETRY&&(umBodyCount()==0u||(!umSolidBodyBuilt(t)&&!umAnyBodyNear(umSolidFaceWorld(id,axis),length(0.5*umSolidParams.cellGravity.xyz))))){
+   if(slot!=UM_SOLID_GEOMETRY&&(umSolidBodyPoseCurrent()||umBodyCount()==0u||(!umSolidBodyBuilt(t)&&!umAnyBodyNear(umSolidFaceWorld(id,axis),length(0.5*umSolidParams.cellGravity.xyz))))){
     if(slot==UM_SOLID_WHOLE){return 1.0;}
     return umSolidApertureAt(umSolidApertureSlotRow(slot)|select(0u,0x80000000u,any(rowCell!=id)),id,axis);
    }

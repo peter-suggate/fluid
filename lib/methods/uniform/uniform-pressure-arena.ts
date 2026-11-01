@@ -873,21 +873,22 @@ fn pNeighbourX(at:u32,slot:u32,lb:vec3u,f:u32,black:bool)->f32{
 // UniformPressureBand's relaxation of a row from its neighbours' iterate; a
 // row with walls solves its own halos' clamps exactly (four active-set passes).
 fn pRelaxRow(at:u32,slot:u32,lb:vec3u,kinds:u32,black:bool)->f32{
- var off=pF(P_RHS,at);var walls=false;
+ var off=pF(P_RHS,at);var walls=0u;
  for(var f=0u;f<6u;f++){
   let kind=bFaceKind(kinds,f);
   if(kind==K_BAND){off+=pCoefficient(at,kinds,f)*pNeighbourX(at,slot,lb,f,black);}
   else if(kind==K_SEAM){off+=pF(P_C+f*PLANE,at)*qF(PN_X,nAcross(vec3i(ubaOrigin(ubaBrick(slot))+lb),f));}
-  else if(kind==K_WALL){walls=true;}
+  else if(kind==K_WALL){walls|=1u<<f;}
  }
  let d0=pF(P_DIAG,at);var v=off/d0;
- if(walls||bInside(kinds)){
+ if(walls!=0u||bInside(kinds)){
   let base=pF(P_BASE,at);
-  if(walls){
+  if(walls!=0u){
    for(var it=0u;it<4u;it++){
     var d=d0;var o=off;
-    for(var f=0u;f<6u;f++){
-     if(bFaceKind(kinds,f)!=K_WALL){continue;}
+    // Ascending bits preserve the original face accumulation order.
+    var remaining=walls;while(remaining!=0u){
+     let f=firstTrailingBit(remaining);remaining&=remaining-1u;
      let w=pF(P_C+f*PLANE,at);let g=pLift(at,f);
      if(v+g>=-base){d-=w;o+=w*g;}else{o-=w*base;}
     }
@@ -2104,7 +2105,7 @@ override pBand:u32=0u;
   if((workgroupUniformLoad(&rFlags)&2u)!=0u){
    let at2=UBA_STRIDE*block+lane;let m=poolB[PN_M+at2];
    if((m&N_ACTIVE)!=0u&&((l.x+l.y+l.z)&1u)==pColour${B?"&&(m&N_BULK)==0u":""}){
-    let base=qF(PN_B,at2);let d0=qF(PN_D,at2);var off=qF(PN_R,at2);var walls=false;
+    let base=qF(PN_B,at2);let d0=qF(PN_D,at2);var off=qF(PN_R,at2);var walls=0u;
     for(var f=0u;f<6u;f++){
      let kind=nKind(m,f);let link=poolB[PN_L+f*PLANE2+at2];
      if(kind==N_NATIVE){off+=qF(PN_K+f*PLANE2,at2)*qF(PN_X,link);}${BP?`
@@ -2113,14 +2114,14 @@ override pBand:u32=0u;
       let g=f^1u;let axis=f/2u;let u=nStride((axis+1u)%3u);let w=nStride((axis+2u)%3u);let plane=select(P_X,P_X1,pBand==1u);
       for(var j=0u;j<16u;j++){let at=link+(j&3u)*u+(j>>2u)*w;if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){off+=pF(P_C+g*PLANE,at)*pF(plane,at);}}
      }
-     else if(kind==N_WALL){walls=true;}
+     else if(kind==N_WALL){walls|=1u<<f;}
     }
     var v=off/d0;
-    if(walls){
+    if(walls!=0u){
      for(var it=0u;it<4u;it++){
       var d=d0;var o=off;
-      for(var f=0u;f<6u;f++){
-       if(nKind(m,f)!=N_WALL){continue;}
+      var remaining=walls;while(remaining!=0u){
+       let f=firstTrailingBit(remaining);remaining&=remaining-1u;
        let w=qF(PN_K+f*PLANE2,at2);let g=bitcast<f32>(poolB[PN_L+f*PLANE2+at2]);
        if(v+g>=-base){d-=w;o+=w*g;}else{o-=w*base;}
       }

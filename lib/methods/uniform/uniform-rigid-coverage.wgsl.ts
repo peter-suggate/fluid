@@ -1,5 +1,5 @@
 /** Cell coverage is the union of solid samples, including compound seams. */
-export const uniformRigidCoverageWGSL = /* wgsl */ `
+export function uniformRigidCoverageSource(bodyMask?:string):string{return /* wgsl */ `
 // Individual coverage is still needed for that body's pressure feedback.
 fn umBodyFraction(i:u32,p:vec3i)->f32{
  let h=umSolidParams.cellGravity.xyz;let centre=umSolidWorldCell(p);
@@ -14,7 +14,7 @@ fn umBodyFraction(i:u32,p:vec3i)->f32{
 fn umCellBodyFraction(p:vec3i)->f32{
  let h=umSolidParams.cellGravity.xyz;let centre=umSolidWorldCell(p);
  var mask=0u;
- for(var i=0u;i<umBodyCount();i++){
+ ${bodyMask?`var bodyCandidates=${bodyMask}&((1u<<umBodyCount())-1u);while(bodyCandidates!=0u){let i=firstTrailingBit(bodyCandidates);bodyCandidates&=bodyCandidates-1u;`:"for(var i=0u;i<umBodyCount();i++){"}
   if(!umBodyNear(i,centre,length(0.4*h))){continue;}
   for(var corner=0u;corner<8u;corner++){
    let bit=1u<<corner;if((mask&bit)!=0u){continue;}
@@ -25,4 +25,5 @@ fn umCellBodyFraction(p:vec3i)->f32{
  }
  return f32(countOneBits(mask))/8.0;
 }
-`;
+`;}
+export const uniformRigidCoverageWGSL=uniformRigidCoverageSource();
