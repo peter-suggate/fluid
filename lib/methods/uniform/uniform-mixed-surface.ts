@@ -793,7 +793,8 @@ fn umWallContact(p:vec3f,value:f32,width:u32)->f32{
   }`:""}
   if(!contactWall){continue;}
   var probe=p;probe[axis]+=inward*f32(width);
-  var speed=0.0;if(umFastSurface){speed=umFastVelocity(probe)[axis];}else{speed=umSampleVelocity(probe)[axis];}
+  // One component: umSampleVelocity's axis loop with the other two unused.
+  var speed=0.0;if(umFastSurface){speed=umFastVelocity(probe)[axis];}else{speed=umSampleVelocityComponent(probe,axis);}
   if(inward*speed>=-1e-6){continue;}
   interior[axis]+=inward*f32(width);contact=true;travel[axis]=-params.hDt.w*speed/params.hDt[axis];
  }
