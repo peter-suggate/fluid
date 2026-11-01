@@ -1,3 +1,4 @@
+import { UNIFORM_WINDOW_PAGES } from "./uniform-window-address";
 /** Exact tile occupancy and directional support for one 16-cell residency
  * region. Four words: two occupancy masks, then -xyz and +xyz radii in
  * tiles (one byte each). The numerical stencil margin is included in each
@@ -169,7 +170,7 @@ fn lrResidentLane(page:u32,radius:u32,lane:u32){
  let block=page>>3u;if(!umBlockStored(block)||umBlockWord(block)==UM_FREE){return;}
  let q=vec3i(umPageCoord(page));let qa=4*q;
  let reach=i32((radius+3u)/4u);
- let a=max(q-vec3i(reach),vec3i(0))>>vec3u(1u);let b=min(q+vec3i(reach),vec3i(127))>>vec3u(1u);
+ let a=max(q-vec3i(reach),vec3i(0))>>vec3u(1u);let b=min(q+vec3i(reach),vec3i(${2*UNIFORM_WINDOW_PAGES-1}))>>vec3u(1u);
  let d=vec3u(b-a)+vec3u(1u);var stages=0u;
  for(var j=lane;j<d.x*d.y*d.z;j+=64u){
   let at=a+vec3i(vec3u(j%d.x,(j/d.x)%d.y,j/(d.x*d.y)));

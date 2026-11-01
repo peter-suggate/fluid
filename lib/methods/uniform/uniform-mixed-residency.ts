@@ -9,7 +9,7 @@
  *
  * A residency page is 16 cells (4 tiles) an axis, eight a pool block: page
  * 8·block + octant, the octant x | y<<1 | z<<2 of the block's halves. Its
- * coordinate (16-cell pages of the 64-page window, 0..127 an axis) is twice
+ * coordinate (16-cell pages of the window, 0..2·UNIFORM_WINDOW_PAGES-1 an axis) is twice
  * its block's page plus the octant; tile lane l of it (umCorner(l, 4)) is a
  * key of its block.
  *
@@ -99,8 +99,8 @@ export function uniformResidencyRequests(pages: UniformResidencyPages, seeds: Ar
     const word = seeds[page]!;
     if (!word) continue;
     seedBox(uniformResidencyPageCoord(pages, page, s), word, box);
-    // Past the frame (window pages 0..63) nothing is asked: the kernel raises the edge fatal there unless the entry is SOLID.
-    const a = [0, 1, 2].map(k => Math.max(box[k]! - d, 0) >> 3), b = [0, 1, 2].map(k => Math.min(box[3 + k]! + d, 511) >> 3);
+    // Past the frame (window pages 0..UNIFORM_WINDOW_PAGES-1) nothing is asked: the kernel raises the edge fatal there unless the entry is SOLID.
+    const a = [0, 1, 2].map(k => Math.max(box[k]! - d, 0) >> 3), b = [0, 1, 2].map(k => Math.min(box[3 + k]! + d, 8 * UNIFORM_WINDOW_PAGES - 1) >> 3);
     for (let z = a[2]!; z <= b[2]!; z++) for (let y = a[1]!; y <= b[1]!; y++) for (let x = a[0]!; x <= b[0]!; x++) ask(x, y, z);
   }
   return true;
@@ -184,7 +184,7 @@ fn rsResident(page:u32,r:u32)->bool{
  let reach=i32((r+3u)/4u);if(reach>i32(RS_REACH)){return true;}
  let q=vec3i(umPageCoord(page));let qa=4*q;let qb=qa+vec3i(3);
  // The 32-cell pages of the window that hold a page within reach.
- let a=max(q-vec3i(reach),vec3i(0))>>vec3u(1u);let b=min(q+vec3i(reach),vec3i(127))>>vec3u(1u);
+ let a=max(q-vec3i(reach),vec3i(0))>>vec3u(1u);let b=min(q+vec3i(reach),vec3i(${2*UNIFORM_WINDOW_PAGES-1}))>>vec3u(1u);
  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
   let n=umPageWord(vec3i(x,y,z));if(!umBlockStored(n)){continue;}
   for(var o=0u;o<8u;o++){

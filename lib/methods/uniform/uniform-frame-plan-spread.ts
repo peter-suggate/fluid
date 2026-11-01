@@ -1,3 +1,7 @@
+import { UNIFORM_WINDOW_PAGES } from "./uniform-window-address";
+
+/** The window's last tile an axis. */
+const WINDOW_TILE_LAST = 8 * UNIFORM_WINDOW_PAGES - 1;
 /** A separable maximum needs its intermediate samples. With sparse,
  * directional allocation, an AIR hole can cut a path between two stored
  * tiles. Propagate an unbounded certificate through that hole so the
@@ -15,7 +19,7 @@ fn spread${axis}Tile(tile:u32,reach:i32){
  if(!umTileLive(tile)){return;}
  let base=${axis === 1 ? "UM_TILES" : "0u"};let into=${axis === 1 ? "0u" : "UM_TILES"};
  let p=vec3i(umTileCoord(tile));var plus=vec3u(0);var minus=vec3u(0);
- let first=clamp(p-vec3i(reach),vec3i(0),vec3i(511));let last=clamp(p+vec3i(reach),vec3i(0),vec3i(511));
+ let first=clamp(p-vec3i(reach),vec3i(0),vec3i(${WINDOW_TILE_LAST}));let last=clamp(p+vec3i(reach),vec3i(0),vec3i(${WINDOW_TILE_LAST}));
  for(var q=first.${"xyz"[axis]};q<=last.${"xyz"[axis]};q++){
   var r=p;r.${"xyz"[axis]}=q;let k=umTileKey(r);
   if(!umKeyStored(k)){

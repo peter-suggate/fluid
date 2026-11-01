@@ -11,6 +11,7 @@ import {UNIFORM_PARAMS_BYTES,uniformMixedSourceWGSL} from "./uniform-mixed-sourc
 import {UNIFORM_REGION_HEAT_DEEP_WORD} from "./uniform-region-heat";
 import {UNIFORM_RESIDENCY_PAGE_REACH,UNIFORM_RESIDENCY_LIQUID as PAGE_LIQUID,UNIFORM_RESIDENCY_SEEDED as PAGE_SEEDED} from "./uniform-mixed-residency";
 import {uniformPagePoolWGSL,type UniformPagePool} from "./uniform-page-pool";
+import {UNIFORM_WINDOW_PAGES} from "./uniform-window-address";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS,UniformLiveVisit,uniformLiveDispatch,uniformLiveListsOfWGSL,uniformLiveListsWGSL} from "./uniform-live-lists";
 import {uniformPageInitBlocksWGSL,uniformPageInitGroups,type UniformPageInitBlocks} from "./uniform-page-initialise";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
@@ -526,9 +527,10 @@ fn ccStamp(tile:u32)->u32{
  return bounds[CC_EPOCH+region]+1u;
 }
 fn ccValid(tile:u32)->bool{let stamp=ccStamp(tile);let r=CC_RECORD+CC_WORDS*tile;return stamp!=0u&&bounds[r+8u]==stamp&&bounds[r+9u]==policy.reach.z;}
-// A tile of the window: a box of tiles is held to its 64 pages, never to a box
-// of the scene's, and a tile nothing stores answers nothing.
-fn umWindowTile(p:vec3i)->vec3i{return clamp(p,vec3i(0),vec3i(511));}
+// A tile of the window: a box of tiles is held to its UNIFORM_WINDOW_PAGES
+// pages an axis, never to a box of the scene's, and a tile nothing stores
+// answers nothing.
+fn umWindowTile(p:vec3i)->vec3i{return clamp(p,vec3i(0),vec3i(${8*UNIFORM_WINDOW_PAGES-1}));}
 // Per required tile: cells between each face and the nearest crossing owner,
 // one nibble per face (-x,-y,-z,+x,+y,+z), and its own travel in whole h
 // cells per step in the top byte; all ones for a tile that is not required.
