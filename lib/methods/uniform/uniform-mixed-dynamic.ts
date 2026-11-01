@@ -1097,27 +1097,59 @@ fn umReplayTile(tile:u32){
 // Single-owner (4h) tiles: one lane per tile. A workgroup per tile left 63
 // of its 64 lanes idle over most of the domain. A fixed grid strides the 4h
 // list, 64 tiles a workgroup at a time; umCounts is uniform, so the loop
-// keeps its barriers.
+// keeps its barriers. A crossing tile's surface error (8 corners) and depth
+// (64 vertices) are the workgroup's: each lane classifies its tile and
+// queues them, every lane takes a share of the queued samples, and each
+// lane finishes its own tile from their maxima (non-negative, ordered as
+// bits: the serial loop's values). A lane's serial 64 depth samples made a
+// group with one crossing tile as slow as one with 64.
+var<workgroup> cqTile:array<u32,64>;
+var<workgroup> cqErrors:atomic<u32>;
+var<workgroup> cqError:array<u32,64>;
+var<workgroup> cqDeeps:atomic<u32>;
+var<workgroup> cqDeep:array<u32,64>;
+var<workgroup> cqWorst:array<atomic<u32>,64>;
+var<workgroup> cqCurve:array<atomic<u32>,64>;
+var<workgroup> cqDeepest:array<array<atomic<u32>,2>,64>;
 @compute @workgroup_size(64) fn classifyCoarse(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var first=64u*group.x;first<umCounts.y;first+=64u*groups.x){
- if(lane==0u){resetGroupCensus();}
+ if(lane==0u){resetGroupCensus();atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);}
+ atomicStore(&cqWorst[lane],0u);atomicStore(&cqCurve[lane],0u);atomicStore(&cqDeepest[lane][0],0u);atomicStore(&cqDeepest[lane][1],0u);
  workgroupBarrier();
  let index=first+lane;
+ var c=umEmptyClass();var classified=false;var tile=0u;
  if(index<umCounts.y){
-  let tile=umTopology[UM_TILES+umCounts.x+index];
+  tile=umTopology[UM_TILES+umCounts.x+index];cqTile[lane]=tile;
   if(ccValid(tile)){umReplayTile(tile);}
   else{
-   var c=umEmptyClass();umClassifyOwner(tile,4u,0u,&c);
-   if((c.flags&2u)!=0u&&policy.step.y>0.0){
-    var error=0.0;coarseCurve=0.0;for(var l=0u;l<8u;l++){error=max(error,umResolutionError(tile,l,4u,0u));}
-    // A moving curve or corner (umCurveError), halved like the corners'
-    // second differences: refined at twice the error an h tile keeps.
-    if(shapeDisplacement()&&umClassMoving(c)){error=max(error,0.5*VOLUME_SHAPE*coarseCurve);}
-    c.error=bitcast<u32>(error);
-   }
-   if((c.flags&2u)!=0u&&thinWanted()){for(var i=0u;i<64u;i++){c.deep=max(c.deep,umDepthSample(tile,i));}}
-   umFinishTile(tile,4u,c);
+   classified=true;umClassifyOwner(tile,4u,0u,&c);
+   if((c.flags&2u)!=0u&&policy.step.y>0.0){cqError[atomicAdd(&cqErrors,1u)]=lane;}
+   if((c.flags&2u)!=0u&&thinWanted()){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;}
   }
+ }
+ workgroupBarrier();
+ let errors=atomicLoad(&cqErrors);
+ for(var j=lane;j<8u*errors;j+=64u){
+  let owner=cqError[j/8u];coarseCurve=0.0;
+  let error=umResolutionError(cqTile[owner],j%8u,4u,0u);
+  atomicMax(&cqWorst[owner],bitcast<u32>(error));atomicMax(&cqCurve[owner],bitcast<u32>(coarseCurve));
+ }
+ let deeps=atomicLoad(&cqDeeps);
+ for(var j=lane;j<64u*deeps;j+=64u){
+  let owner=cqDeep[j/64u];let d=umDepthSample(cqTile[owner],j%64u);
+  atomicMax(&cqDeepest[owner][0],d.x);atomicMax(&cqDeepest[owner][1],d.y);
+ }
+ workgroupBarrier();
+ if(classified){
+  if((c.flags&2u)!=0u&&policy.step.y>0.0){
+   var error=bitcast<f32>(atomicLoad(&cqWorst[lane]));coarseCurve=bitcast<f32>(atomicLoad(&cqCurve[lane]));
+   // A moving curve or corner (umCurveError), halved like the corners'
+   // second differences: refined at twice the error an h tile keeps.
+   if(shapeDisplacement()&&umClassMoving(c)){error=max(error,0.5*VOLUME_SHAPE*coarseCurve);}
+   c.error=bitcast<u32>(error);
+  }
+  if((c.flags&2u)!=0u&&thinWanted()){c.deep=vec2u(atomicLoad(&cqDeepest[lane][0]),atomicLoad(&cqDeepest[lane][1]));}
+  umFinishTile(tile,4u,c);
  }
  workgroupBarrier();
  if(lane==0u){flushGroupCensus();}
