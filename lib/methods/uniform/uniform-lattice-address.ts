@@ -786,6 +786,9 @@ export interface UniformPagePoolScene {
   readonly permute?: number;
   /** Box pages seeded AIR, by box page coordinate; every other box page is resident. */
   readonly air?: readonly (readonly [number, number, number])[];
+  /** Instead of air: the box pages resident, by box page coordinate, each once in box index order
+   * (x fastest; uniformPagePoolResidency's stored); every other box page is seeded AIR. */
+  readonly stored?: readonly (readonly [number, number, number])[];
   /** Instead of blocks: the memory budget the pool is sized from (uniformPagePoolBlocksForMemory). */
   readonly memory_MiB?: number;
   /** Super-block slots the directory may claim (uniformPagePoolLayout's superBlocks); default 1.5 x the
@@ -906,10 +909,14 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   const blockGrid: Extent = [1 << blockBits, 1 << blockBits, Math.ceil(blocks / 4 ** blockBits)];
   // 33 texels of a vertex texture per block: 62 blocks stay inside a 2048-texel 3D texture.
   if (blockGrid[2] > 62) throw new RangeError(`Uniform lattice ${box.cells.join("x")} needs ${blocks} blocks, past a block grid of ${blockGrid[0]}x${blockGrid[1]}x62`);
-  const air = new Set((scene.air ?? []).map(([x, y, z]) => {
-    if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) && x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz)) throw new RangeError(`Uniform page pool: AIR page (${x}, ${y}, ${z}) is outside the box of ${px}x${py}x${pz} pages`);
+  if (scene.air && scene.stored) throw new RangeError("Uniform page pool: a box lists its AIR pages or its stored ones, not both");
+  const boxKey = (kind: string) => ([x, y, z]: readonly [number, number, number]) => {
+    if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) && x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz)) throw new RangeError(`Uniform page pool: ${kind} page (${x}, ${y}, ${z}) is outside the box of ${px}x${py}x${pz} pages`);
     return x + px * (y + py * z);
-  }));
+  };
+  const air = new Set((scene.air ?? []).map(boxKey("AIR"))), stored = scene.stored && scene.stored.map(boxKey("stored"));
+  if (stored?.some((k, i) => i > 0 && k <= stored[i - 1]!)) throw new RangeError("Uniform page pool: the stored pages are not in box index order, each once");
+  const held = stored && new Set(stored), resident = (k: number) => held ? held.has(k) : !air.has(k);
   // The census certifies the next frame's full travel and stencil support.
   // An unrequested page is disposable at this commit; the allocator still
   // quarantines its block until the following commit before reuse.
@@ -927,11 +934,11 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   const bulk = new Map<number, number>();
   (scene.bulk ?? []).forEach(([x, y, z], i) => {
     const k = x + px * (y + py * z);
-    if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) && x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz) || air.has(k) || bulk.has(k))
+    if (!(Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) && x >= 0 && y >= 0 && z >= 0 && x < px && y < py && z < pz) || !resident(k) || bulk.has(k))
       throw new RangeError(`Uniform page pool: BULK16 page (${x}, ${y}, ${z}) is outside the box's stored pages or listed twice`);
     bulk.set(k, i + 1);
   });
-  const seed = uniformPagePoolSeed(layout, uniformPagePoolBoxPages(layout, { permute: scene.permute, resident: (x, y, z) => !air.has(x + px * (y + py * z)), bulk: (x, y, z) => bulk.get(x + px * (y + py * z)) ?? 0 }));
+  const seed = uniformPagePoolSeed(layout, uniformPagePoolBoxPages(layout, { permute: scene.permute, pages: stored, resident: (x, y, z) => resident(x + px * (y + py * z)), bulk: (x, y, z) => bulk.get(x + px * (y + py * z)) ?? 0 }));
   let liveTiles = 0;
   for (let b = 1; b < blocks - 1; b++) {
     const r = seed.blocks[b]!;

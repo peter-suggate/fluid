@@ -134,7 +134,7 @@ test("the doubled fluid lattice admits its pond and reserves the full domain plu
   const residency = uniformPagePoolResidency(lattice, scene.fluid.pagePool,
     uniformPageSources(scene, source, scene.numerics.maxDt_s), true,
     () => uniformLatticeInitialVolume(scene).volume, sceneFluidBoxPage(scene));
-  const resident = lattice.reduce((pages, n) => pages * n / 32, 1) - residency.air.length;
+  const resident = residency.stored.length;
   const available = uniformPagePoolBlocksForMemory(scene.fluid.pagePool!.memory_MiB!) - 2;
   assert.ok(resident > uniformPagePoolBlocksForMemory(1024) - 2,
     "the old 1 GiB budget cannot admit the doubled-resolution pond");
@@ -142,5 +142,5 @@ test("the doubled fluid lattice admits its pond and reserves the full domain plu
   const topLayerPages = lattice[0] * lattice[2] / 32 ** 2;
   assert.ok(available >= domainPages + topLayerPages,
     "the entire authored box and its first open-top layer can coexist in the pool");
-  assert.doesNotThrow(() => uniformLatticeAddress(lattice, true, { ...scene.fluid.pagePool, air: residency.air }));
+  assert.doesNotThrow(() => uniformLatticeAddress(lattice, true, { ...scene.fluid.pagePool, stored: residency.stored }));
 });

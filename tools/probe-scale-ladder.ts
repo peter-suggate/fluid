@@ -143,17 +143,17 @@ if (process.argv.includes("--plan")) {
     catch (error) { checks.push({ check: name, owner, ok: false, detail: (error as Error).message }); }
   };
   check("page window, per axis", "W7", () => { uniformLatticeWindowBox(lattice); return `${header.boxPages.join("x")} pages`; });
-  let air: [number, number, number][] | undefined, resident = NaN;
+  let stored: [number, number, number][] | undefined, resident = NaN;
   if (!process.argv.includes("--no-seed")) check("seed residency (host pass over every cell)", "W1", () => {
     const t = performance.now(), residency = uniformPagePoolResidency(lattice, scene.fluid.pagePool,
       uniformPageSources(scene, undefined, dt), values.detailPolicy === "dynamic", () => uniformLatticeInitialVolume(scene).volume, [0, 0, 0]);
-    air = residency.air.map(p => [...p] as [number, number, number]);
-    resident = header.boxPages.reduce((a, b) => a * b, 1) - residency.air.length;
+    stored = residency.stored.map(p => [...p] as [number, number, number]);
+    resident = residency.stored.length;
     if (resident > blocks - 2) throw new Error(`seed holds ${resident} resident pages; the pool stores ${blocks - 2}`);
     return `${resident} resident pages of ${blocks - 2} slots, ${Math.round(performance.now() - t)} ms host`;
   });
   check("lattice address: window y, block grid (<= 3968 blocks)", "W7", () => {
-    const a = uniformLatticeAddress(lattice, scene.container.top === "open", { ...scene.fluid.pagePool, air: air ?? [] });
+    const a = uniformLatticeAddress(lattice, scene.container.top === "open", { ...scene.fluid.pagePool, ...(stored ? { air: undefined, stored } : { air: [] }) });
     return `${a.blocks} blocks, block grid ${a.blockGrid.join("x")}`;
   });
   // The address checks the block grid too, but after the window; this one stands alone. The box-sized

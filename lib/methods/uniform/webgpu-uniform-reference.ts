@@ -748,12 +748,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // an open world, where every page above the floor is (uniformLatticeAddress).
     // A walled box with no pool figure: the pool rule (the census plus its ballistic reserve), not one block a box page.
     const pool = scene.fluid.pagePool, ruled = pool?.blocks === undefined && pool?.memory_MiB === undefined && scene.container.walls !== "none"
-      ? uniformPagePoolRule(scene, (this.initialVolume ??= uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, residency.air, this.poolRuleReach()) : undefined;
+      ? uniformPagePoolRule(scene, (this.initialVolume ??= uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE)).volume, residency.stored, this.poolRuleReach()) : undefined;
     // V2d: of the start's BULK16 pages (bulk), the pool holds blocks for those a
     // closure or scan promote can take back within one hold window
     // (uniformBulkStartShell); an error promote past what is spare is refused.
     const latticeAddress = (bulk?: readonly (readonly [number, number, number])[]) => uniformLatticeAddress([nx, ny, nz], scene.container.top === "open",
-      { ...pool, air: residency.air, bulk, ...(ruled === undefined ? {} : { blocks: ruled - (bulk?.length ?? 0) + this.bulkStartShell(bulk ?? [], [nx, ny, nz]) }) }, scene.container.walls === "none" ? { boxPage } : undefined);
+      { ...pool, air: undefined, stored: residency.stored, bulk, ...(ruled === undefined ? {} : { blocks: ruled - (bulk?.length ?? 0) + this.bulkStartShell(bulk ?? [], [nx, ny, nz]) }) }, scene.container.walls === "none" ? { boxPage } : undefined);
     let address = this.address = latticeAddress();
     // A procedural solid with voxel collision is drawn smooth and collides as
     // its generated voxels: the fluid reads no field.
@@ -1345,8 +1345,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private promoteReserve():number{
     const reach=this.poolRuleReach(),volume=this.initialVolume?.volume;
     if(!reach||!volume)return this.bulkStartInfo?.shell??0;
-    const [px,py,pz]=volume.pages,air=this.pageResidency.air;
-    return uniformPagePoolRuleBlocks(volume.pages,air,reach.reachPage,reach.ceilingPage)-(px*py*pz-air.length)-2+(this.bulkStartInfo?.shell??0);
+    const stored=this.pageResidency.stored;
+    return uniformPagePoolRuleBlocks(volume.pages,stored,reach.reachPage,reach.ceilingPage)-stored.length-2+(this.bulkStartInfo?.shell??0);
   }
   /** The pool rule's reserve reach (uniformPagePoolRuleReach), once: the pool and the solid record's slots read it. */
   private poolRuleReach():ReturnType<typeof uniformPagePoolRuleReach>{
@@ -1461,7 +1461,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const pageDims=cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number];
     // The rule's sources besides the band: the bodies' balls and the h-only authored regions (slotRuleSources).
     const slotRule=coarseStart&&uniformFineBlocks(tiers)==="auto"
-      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(pageDims,this.pageResidency.air),uniformFineSlotSourcePages(pageDims,this.slotRuleSources()))):undefined;
+      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(pageDims,this.pageResidency.stored),uniformFineSlotSourcePages(pageDims,this.slotRuleSources()))):undefined;
     const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume,this.bulkStartDeep):undefined;
     const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:band?512*slotRule!:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
@@ -1476,7 +1476,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // no liquid unless an authored pool claims it, and then reads the solids.
     const box=fluidRegionLattice(this.scene).dimensions.map(n=>n/4) as [number,number,number],inner=box.reduce((n,b)=>n*Math.max(0,b-2),1);
     const ruleReach=coarseStart||tiers?.bricks!==undefined?this.poolRuleReach():undefined,volume=ruleReach&&(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume;
-    const walls=ruleReach&&volume?uniformBoxShellTilesIn(volume.pages,uniformPagePoolRulePages(volume.pages,this.pageResidency.air,ruleReach.reachPage,ruleReach.ceilingPage),box):box.reduce((n,b)=>n*b,1)-inner;
+    const walls=ruleReach&&volume?uniformBoxShellTilesIn(volume.pages,uniformPagePoolRulePages(volume.pages,this.pageResidency.stored,ruleReach.reachPage,ruleReach.ceilingPage),box):box.reduce((n,b)=>n*b,1)-inner;
     const solidSlots=coarseStart||tiers?.bricks!==undefined?Math.min(tiles,Math.ceil(1.5*(promotion.coupledTiles+walls))):undefined;
     // V2b: a coarse start's h stores hold its slots from construction (never
     // the whole block grid): the slotted textures the frame makes take them,

@@ -20,11 +20,11 @@ const gpu = { skip: !process.env.WEBGPU_NODE_MODULE };
 test("the rule's stored set holds the wall pages the wet tiles' stage footprints reach", () => {
   const scene = createBackyardPoolPartyScene(), cells = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const { volume } = uniformLatticePagedVolume(scene, UNIFORM_PAGE_POOL_EDGE);
-  const { air } = uniformPagePoolResidency(cells, scene.fluid.pagePool, uniformPageSources(scene, undefined, 1 / 60), true, () => volume, sceneFluidBoxPage(scene), uniformOpenTile(scene));
-  const absent = new Set(air.map(p => p.join(",")));
-  for (let x = 2; x <= 7; x++) assert.ok(!absent.has(`${x},0,5`), `deck page (${x}, 0, 5) beside the water's last tile row is stored`);
+  const { stored } = uniformPagePoolResidency(cells, scene.fluid.pagePool, uniformPageSources(scene, undefined, 1 / 60), true, () => volume, sceneFluidBoxPage(scene), uniformOpenTile(scene));
+  const held = new Set(stored.map(p => p.join(",")));
+  for (let x = 2; x <= 7; x++) assert.ok(held.has(`${x},0,5`), `deck page (${x}, 0, 5) beside the water's last tile row is stored`);
   // The deck pages no wet tile's footprint reaches stay AIR (one page past the wall, and under the decks).
-  for (const page of ["2,0,6", "0,0,3", "9,0,3", "2,0,1"]) assert.ok(absent.has(page), `page (${page}) stays AIR`);
+  for (const page of ["2,0,6", "0,0,3", "9,0,3", "2,0,1"]) assert.ok(!held.has(page), `page (${page}) stays AIR`);
 });
 
 test("the backyard pool sized by the rule runs its first commits", gpu, async () => {

@@ -47,7 +47,7 @@ test("reservoir page budget covers initial residency with at least 25% growth ro
   });
   const residency = uniformPagePoolResidency(dimensions, undefined, [], true, () => volume as unknown as ArrayLike<number>);
   assert.ok(UNIFORM_PAGE_POOL_SEED_MARGIN <= 64, "the scene's two-page collar must cover the solver seed margin");
-  const allPages = nx / 32 * (ny / 32) * (nz / 32), live = allPages - residency.air.length;
+  const allPages = nx / 32 * (ny / 32) * (nz / 32), live = residency.stored.length;
   const usable = scene.fluid.pagePool!.blocks! - 2;
   assert.ok(usable >= Math.ceil(1.25 * live));
   assert.ok(usable < allPages, "do not reserve the entire empty catch chamber");

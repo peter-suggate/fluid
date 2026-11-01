@@ -63,12 +63,8 @@ export function uniformFineSlotSourcePages(pages:readonly [number,number,number]
 /** The census footprint's page columns: the distinct (x, z) of the box pages
  * resident at build (liquid and its reachable air: uniformPagePoolResidency's
  * seed, within its closure margin of the initial liquid, and the sources' pins). */
-export function uniformFineSlotFootprintColumns(pages:readonly [number,number,number],air:readonly (readonly [number,number,number])[]):number{
- const [px,py,pz]=pages,stored=new Uint8Array(px*py*pz).fill(1);
- for(const [x,y,z] of air)stored[x+px*(y+py*z)]=0;
- let columns=0;
- for(let z=0;z<pz;z++)for(let x=0;x<px;x++){let any=false;for(let y=0;y<py&&!any;y++)any=stored[x+px*(y+py*z)]===1;if(any)columns++;}
- return columns;
+export function uniformFineSlotFootprintColumns(pages:readonly [number,number,number],stored:readonly (readonly [number,number,number])[]):number{
+ return new Set(stored.map(([x,,z])=>x+pages[0]*z)).size;
 }
 /** The pages an h tile p's detail ring reaches, inclusive, in page
  * coordinates: those covering cells [4p - 13, 4p + 15] on each axis. Its

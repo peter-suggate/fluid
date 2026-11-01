@@ -153,13 +153,13 @@ export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):U
  return {v_m_s:v,head_m:(v>0?v*v/(2*g):0)+UNIFORM_PAGE_POOL_SEED_MARGIN*h,top_m:top};
 }
 /** The pool rule's blocks for a walled box (M4b step 3): the census pages
- * (every box page not in `air`), each footprint column's pages above its top
+ * (`stored`, the box pages resident at build), each footprint column's pages above its top
  * resident one up to the page of the census liquid's top plus its head
  * (uniformCensusReach), and the two sentinels. A closed top caps the reserve
  * at the box's top page; an open top with an unbounded head (no gravity)
  * has no rule, undefined. */
-export function uniformPagePoolRule(scene:SceneDescription,volume:LatticePages,air:readonly (readonly [number,number,number])[],reach=uniformPagePoolRuleReach(scene,volume)):number|undefined{
- return reach&&uniformPagePoolRuleBlocks(volume.pages,air,reach.reachPage,reach.ceilingPage);
+export function uniformPagePoolRule(scene:SceneDescription,volume:LatticePages,stored:readonly (readonly [number,number,number])[],reach=uniformPagePoolRuleReach(scene,volume)):number|undefined{
+ return reach&&uniformPagePoolRuleBlocks(volume.pages,stored,reach.reachPage,reach.ceilingPage);
 }
 /** The pool rule's reserve columns' reach (uniformPagePoolRule): the page of
  * the census liquid's top plus its head, and the page that caps it (the box's

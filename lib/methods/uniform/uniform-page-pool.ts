@@ -379,6 +379,8 @@ export function uniformPagePoolSeed(layout:UniformPagePoolLayout,pages:readonly 
 export interface UniformPagePoolBoxSeedOptions {
  /** Which box pages are resident, by box coordinate (0..pages-1 an axis); default: all. */
  readonly resident?:(x:number,y:number,z:number)=>boolean;
+ /** The box pages to walk, by box index ascending, in place of the whole box (each still asked `resident`). */
+ readonly pages?:readonly number[];
  /** A number that fixes a shuffle of the blocks; omitted: the blocks are in scan order. */
  readonly permute?:number;
  /** The kind of an entry outside the box, by window page coordinate (default SOLID). */
@@ -402,13 +404,15 @@ export function uniformPagePoolBoxPages(layout:UniformPagePoolLayout,options:Uni
   const next=()=>{s=(s+0x6d2b79f5)|0;let t=Math.imul(s^(s>>>15),1|s);t=(t+Math.imul(t^(t>>>7),61|t))^t;return ((t^(t>>>14))>>>0)/4294967296;};
   for(let i=order.length-1;i>0;i--){const j=Math.floor(next()*(i+1)),o=order[i]!;order[i]=order[j]!;order[j]=o;}
  }
- for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++){
-  if(options.resident&&!options.resident(x,y,z))continue;
+ const visit=(x:number,y:number,z:number)=>{
+  if(options.resident&&!options.resident(x,y,z))return;
   const slot=options.bulk?.(x,y,z)??0;
-  if(slot){pages.push({x:origin[0]+x,y:origin[1]+y,z:origin[2]+z,block:0,slot});continue;}
+  if(slot){pages.push({x:origin[0]+x,y:origin[1]+y,z:origin[2]+z,block:0,slot});return;}
   if(blocks>=layout.slots)throw new RangeError(`Uniform page pool box seed holds more pages than the pool's ${layout.slots} blocks`);
   pages.push({x:origin[0]+x,y:origin[1]+y,z:origin[2]+z,block:order[blocks++]!});
- }
+ };
+ if(options.pages)for(const i of options.pages)visit(i%px,Math.floor(i/px)%py,Math.floor(i/(px*py)));
+ else for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++)visit(x,y,z);
  return pages;
 }
 /** The seed of a resident set inside the layout's box
@@ -489,8 +493,9 @@ export interface UniformPagePoolResidency {
   * reaches them and retired when idle. False: every seeded page is pinned,
   * so no commit claims or retires one. */
  readonly live:boolean;
- /** The box pages seeded AIR, by box page coordinate; every other is resident. */
- readonly air:[number,number,number][];
+ /** The box pages resident at build, by box page coordinate, in box index
+  * order (x fastest); every other box page is seeded AIR. */
+ readonly stored:[number,number,number][];
  /** The pinned pages (UniformPagePool.pin), by box page coordinate. */
  readonly pins:{x:number;y:number;z:number}[];
  /** The liquid's surface at build where it was walked (an open tile rule):
@@ -519,26 +524,30 @@ export interface UniformPagePoolResidency {
  * cell boxes and the pins are the window's, the AIR pages the box's. */
 export function uniformPagePoolResidency(cells:readonly [number,number,number],record:{readonly blocks?:number;readonly air?:readonly (readonly [number,number,number])[]}|undefined,sources:readonly UniformPagePoolCellBox[],follows:boolean,liquid:()=>ArrayLike<number>|LatticePages,origin:readonly [number,number,number]=[0,0,0],openTile?:(x:number,y:number,z:number)=>boolean):UniformPagePoolResidency{
  const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,count=px*py*pz;
- const live=follows,resident=new Uint8Array(count).fill(1),pinned=new Uint8Array(count);
+ const live=follows,pinned=new Set<number>();
  let surface:Map<number,number[]>|undefined;
- const coordinates=(flags:Uint8Array,set:number)=>{const out:[number,number,number][]=[];for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++)if(flags[i]===set)out.push([x,y,z]);return out;};
+ // The resident set by box index: every box page (less record.air), or, live with no record.air, the wet pages' margin.
+ let resident:Set<number>|undefined;
  if(live){
-  for(const {x,y,z} of uniformPagePoolSourcePages(cells,sources,origin))pinned[x-origin[0]+px*(y-origin[1]+py*(z-origin[2]))]=1;
+  for(const {x,y,z} of uniformPagePoolSourcePages(cells,sources,origin))pinned.add(x-origin[0]+px*(y-origin[1]+py*(z-origin[2])));
   if(!record?.air){
-   const volume=liquid();resident.set(wetPages(cells,pages,volume,UNIFORM_PAGE_POOL_SEED_MARGIN));
+   const volume=liquid();resident=wetPages(cells,pages,volume,UNIFORM_PAGE_POOL_SEED_MARGIN);
    surface=new Map();
-   if(openTile){const reached=uniformPagePoolReachablePages(cells,pages,volume,UNIFORM_PAGE_POOL_SEED_MARGIN,openTile,surface);for(let i=0;i<count;i++)resident[i]&=reached[i]!;}
+   if(openTile){const reached=uniformPagePoolReachablePages(cells,pages,volume,UNIFORM_PAGE_POOL_SEED_MARGIN,openTile,surface);for(const i of resident)if(!reached.has(i))resident.delete(i);}
    // No solid: the surface alone (no walk), every dry tile open.
    else uniformPagePoolReachablePages(cells,pages,volume,0,()=>true,surface);
-   for(let i=0;i<count;i++)if(pinned[i])resident[i]=1;
+   for(const i of pinned)resident.add(i);
   }
  }
+ const air=new Set<number>();
  for(const [x,y,z] of record?.air??[]){
   if(!(Number.isInteger(x)&&Number.isInteger(y)&&Number.isInteger(z)&&x>=0&&y>=0&&z>=0&&x<px&&y<py&&z<pz))throw new RangeError(`Uniform page pool: AIR page (${x}, ${y}, ${z}) is outside the box of ${px}x${py}x${pz} pages`);
-  resident[x+px*(y+py*z)]=0;
+  air.add(x+px*(y+py*z));
  }
- if(!live)pinned.set(resident);
- return {live,air:coordinates(resident,0),pins:coordinates(pinned,1).map(([x,y,z])=>({x:x+origin[0],y:y+origin[1],z:z+origin[2]})),surface:record?.air?undefined:surface};
+ const keys=resident?[...resident].sort((a,b)=>a-b):Array.from({length:count},(_,i)=>i).filter(i=>!air.has(i));
+ const at=(i:number):[number,number,number]=>[i%px,Math.floor(i/px)%py,Math.floor(i/(px*py))];
+ const stored=keys.map(at),pins=(live?[...pinned].sort((a,b)=>a-b):keys).map(i=>{const [x,y,z]=at(i);return {x:x+origin[0],y:y+origin[1],z:z+origin[2]};});
+ return {live,stored,pins,surface:record?.air?undefined:surface};
 }
 /** The box pages a live pool pins for its sources' cell boxes, each grown by
  * UNIFORM_PAGE_POOL_PIN_MARGIN: every page once, in the window (the box's
@@ -547,32 +556,34 @@ export function uniformPagePoolSourcePages(cells:readonly [number,number,number]
  const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,box={origin,pages,count:px*py*pz},seen=new Uint8Array(box.count);
  return sources.flatMap(s=>cellBoxPages(box,s.low,s.high,UNIFORM_PAGE_POOL_PIN_MARGIN)).filter(({x,y,z})=>{const i=x-origin[0]+px*(y-origin[1]+py*(z-origin[2])),first=!seen[i];seen[i]=1;return first;});
 }
-/** One flag per box page: a wet cell (volume above zero) lies within `margin`
- * cells of it on every axis. Each page keeps the box of its wet cells, so a
- * page is tested against boxes, not cells: never fewer pages than the cells give.
- * By page, only the pages that hold liquid are read. */
-function wetPages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>|LatticePages,margin:number):Uint8Array{
- const E=UNIFORM_PAGE_POOL_EDGE,[nx,ny,nz]=cells,[px,py,pz]=pages,count=px*py*pz,low=new Int32Array(3*count).fill(0x7fffffff),high=new Int32Array(3*count).fill(-1),flags=new Uint8Array(count);
+/** The box pages (by box index) a wet cell (volume above zero) lies within
+ * `margin` cells of on every axis. Each wet page keeps the box of its wet
+ * cells, so a page is tested against boxes, not cells: never fewer pages than
+ * the cells give. Work and memory follow the wet pages and their margin; by
+ * page, only the pages that hold liquid are read. */
+function wetPages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>|LatticePages,margin:number):Set<number>{
+ const E=UNIFORM_PAGE_POOL_EDGE,[nx,ny,nz]=cells,[px,py,pz]=pages,bounds=new Map<number,Int32Array>(),flags=new Set<number>();
+ // A wet page's cell box: low x, y, z then high x, y, z (inclusive).
  const wet=(p:number,x:number,y:number,z:number)=>{
-  if(x<low[p]!)low[p]=x;if(y<low[p+1]!)low[p+1]=y;if(z<low[p+2]!)low[p+2]=z;
-  if(x>high[p]!)high[p]=x;if(y>high[p+1]!)high[p+1]=y;if(z>high[p+2]!)high[p+2]=z;
+  let b=bounds.get(p);if(!b)bounds.set(p,b=Int32Array.of(x,y,z,x,y,z));
+  if(x<b[0]!)b[0]=x;if(y<b[1]!)b[1]=y;if(z<b[2]!)b[2]=z;
+  if(x>b[3]!)b[3]=x;if(y>b[4]!)b[4]=y;if(z>b[5]!)b[5]=z;
  };
  if("edge" in volume){
   if(volume.edge!==E||volume.cells.some((n,a)=>n!==cells[a]))throw new RangeError(`Uniform page pool: the initial liquid's pages are of ${volume.edge} cells over ${volume.cells.join("x")}, not ${E} over the lattice's ${cells.join("x")}`);
   for(const [i,page] of volume.at){
    const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
-   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz)wet(3*i,ox+x,oy+y,oz+z);
+   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz)wet(i,ox+x,oy+y,oz+z);
   }
  }else{
   if(volume.length!==nx*ny*nz)throw new RangeError(`Uniform page pool: the initial liquid holds ${volume.length} cells, not the lattice's ${nx*ny*nz}`);
-  for(let z=0,i=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++,i++)if(volume[i]!>0)wet(3*(Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E))),x,y,z);
+  for(let z=0,i=0;z<nz;z++)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++,i++)if(volume[i]!>0)wet(Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E)),x,y,z);
  }
- const reach=Math.ceil(margin/E),gap=(p:number,k:number,a:number)=>Math.max(low[p+k]!-(a+E-1),a-high[p+k]!,0);
- for(let z=0,i=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++,i++){
-  near:for(let sz=Math.max(z-reach,0);sz<=Math.min(z+reach,pz-1);sz++)for(let sy=Math.max(y-reach,0);sy<=Math.min(y+reach,py-1);sy++)for(let sx=Math.max(x-reach,0);sx<=Math.min(x+reach,px-1);sx++){
-   const p=3*(sx+px*(sy+py*sz));
-   if(high[p]!>=0&&Math.max(gap(p,0,E*x),gap(p,1,E*y),gap(p,2,E*z))<=margin){flags[i]=1;break near;}
-  }
+ const reach=Math.ceil(margin/E),gap=(b:Int32Array,k:number,a:number)=>Math.max(b[k]!-(a+E-1),a-b[k+3]!,0);
+ for(const [i,b] of bounds){
+  const sx=i%px,sy=Math.floor(i/px)%py,sz=Math.floor(i/(px*py));
+  for(let z=Math.max(sz-reach,0);z<=Math.min(sz+reach,pz-1);z++)for(let y=Math.max(sy-reach,0);y<=Math.min(sy+reach,py-1);y++)for(let x=Math.max(sx-reach,0);x<=Math.min(sx+reach,px-1);x++)
+   if(Math.max(gap(b,0,E*x),gap(b,1,E*y),gap(b,2,E*z))<=margin)flags.add(x+px*(y+py*z));
  }
  return flags;
 }
@@ -591,7 +602,7 @@ const WET_FOOTPRINT=(()=>{
  }
  return out;
 })();
-/** One flag per box page: a 4h tile of it lies within ceil(margin / 4)
+/** The box pages (by box index) a 4h tile of which lies within ceil(margin / 4)
  * tile steps (26-connected) of a wet tile (a cell's volume above zero)
  * through open tiles (`openTile`): the margin's reachable air (V2d). A
  * wall's closed tiles stop it, so a page past the wall is not reached. Work
@@ -599,8 +610,8 @@ const WET_FOOTPRINT=(()=>{
  * The wet tiles' stage footprints (WET_FOOTPRINT) flag their pages whether
  * open or solid: the request asks for them, so a wall's page within a
  * footprint of the liquid is stored. */
-export function uniformPagePoolReachablePages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>|LatticePages,margin:number,openTile:(x:number,y:number,z:number)=>boolean,surface?:Map<number,number[]>):Uint8Array{
- const E=UNIFORM_PAGE_POOL_EDGE,T=E/4,[nx,ny,nz]=cells,[px,py,pz]=pages,flags=new Uint8Array(px*py*pz);
+export function uniformPagePoolReachablePages(cells:readonly [number,number,number],pages:readonly [number,number,number],volume:ArrayLike<number>|LatticePages,margin:number,openTile:(x:number,y:number,z:number)=>boolean,surface?:Map<number,number[]>):Set<number>{
+ const E=UNIFORM_PAGE_POOL_EDGE,T=E/4,[nx,ny,nz]=cells,[px,py]=pages,flags=new Set<number>();
  const [tx,ty,tz]=[Math.ceil(nx/4),Math.ceil(ny/4),Math.ceil(nz/4)];
  // Each wet page's wet tiles (a byte a tile of the page).
  const wetTiles=new Map<number,Uint8Array>();
@@ -620,7 +631,7 @@ export function uniformPagePoolReachablePages(cells:readonly [number,number,numb
  // The wet tiles beside a tile that is not wet start the walk.
  let frontier:number[]=[];const seen=new Set<number>(),key=(x:number,y:number,z:number)=>x+tx*(y+ty*z);
  for(const [i,m] of wetTiles){
-  flags[i]=1;const ox=T*(i%px),oy=T*(Math.floor(i/px)%py),oz=T*Math.floor(i/(px*py));
+  flags.add(i);const ox=T*(i%px),oy=T*(Math.floor(i/px)%py),oz=T*Math.floor(i/(px*py));
   for(let c=0;c<m.length;c++){
    if(!m[c])continue;const x=ox+c%T,y=oy+Math.floor(c/T)%T,z=oz+Math.floor(c/(T*T));
    let front=false,air=false;
@@ -633,7 +644,7 @@ export function uniformPagePoolReachablePages(cells:readonly [number,number,numb
     // The request's footprints, solid or not: commit 1 claims these pages before it retires any.
     for(let f=0;f<WET_FOOTPRINT.length;f+=4)if(air||!WET_FOOTPRINT[f+3]){
      const X=x+WET_FOOTPRINT[f]!,Y=y+WET_FOOTPRINT[f+1]!,Z=z+WET_FOOTPRINT[f+2]!;
-     if(X>=0&&Y>=0&&Z>=0&&X<tx&&Y<ty&&Z<tz)flags[page(X,Y,Z)]=1;
+     if(X>=0&&Y>=0&&Z>=0&&X<tx&&Y<ty&&Z<tz)flags.add(page(X,Y,Z));
     }
    }
    // The surface: a wet tile beside open dry tiles (not a wall's), its page's tile bounds.
@@ -647,7 +658,7 @@ export function uniformPagePoolReachablePages(cells:readonly [number,number,numb
    if(X<0||Y<0||Z<0||X>=tx||Y>=ty||Z>=tz||wet(X,Y,Z))continue;
    const k=key(X,Y,Z);if(seen.has(k))continue;seen.add(k);
    if(!openTile(X,Y,Z))continue;
-   flags[page(X,Y,Z)]=1;next.push(X,Y,Z);
+   flags.add(page(X,Y,Z));next.push(X,Y,Z);
   }
   frontier=next;
  }
@@ -1236,49 +1247,50 @@ const SUPER_PER:u32=${UNIFORM_SUPER_BLOCK_SLOTS/256}u;
  destroy():void{this.state.destroy();this.work.destroy();this.published?.destroy();}
 }
 /** The pool rule (docs/plans/bulk16-plan-2026-10-28.md, M4b step 3): the
- * census (the box pages resident at build, every box page not in `air`)
- * plus the ballistic column reserve, plus the two sentinel blocks. The
+ * census (the box pages resident at build, `stored`, each once) plus the
+ * ballistic column reserve, plus the two sentinel blocks. The
  * reserve is, for each page column holding a resident page, the pages above
  * its highest resident one up to `reachPage` (the page holding the census
  * liquid's top plus its ballistic head, uniformCensusReach), at most
  * `ceilingPage` (the box's top page under a closed top, the frame's under an
  * open one), and at least the one block a pool holds besides its sentinels
  * (uniformPagePoolLayout's minimum: a box with no liquid at build). Exhaustion
- * stays the pool's fatal. */
-export function uniformPagePoolRuleBlocks(pages:readonly [number,number,number],air:readonly (readonly [number,number,number])[],reachPage:number,ceilingPage:number):number{
- const [px,py,pz]=pages,stored=new Uint8Array(px*py*pz).fill(1);
- for(const [x,y,z] of air)stored[x+px*(y+py*z)]=0;
- let resident=0,reserve=0;
- const reach=Math.min(Math.floor(reachPage),ceilingPage);
- for(let z=0;z<pz;z++)for(let x=0;x<px;x++){
-  let top=-1;for(let y=0;y<py;y++)if(stored[x+px*(y+py*z)]){resident++;top=y;}
-  if(top>=0)reserve+=Math.max(0,reach-top);
- }
- return Math.max(1,resident+reserve)+2;
+ * stays the pool's fatal. Work and memory follow the stored pages. */
+export function uniformPagePoolRuleBlocks(pages:readonly [number,number,number],stored:readonly (readonly [number,number,number])[],reachPage:number,ceilingPage:number):number{
+ const reach=Math.min(Math.floor(reachPage),ceilingPage);let reserve=0;
+ for(const top of columnTops(pages,stored).values())reserve+=Math.max(0,reach-top);
+ return Math.max(1,stored.length+reserve)+2;
 }
-/** The pool rule's pages (uniformPagePoolRuleBlocks without the sentinels),
- * a flag a box page: the census pages (1) and the reserve above each column's
- * top one (2), the reserve's pages past the box's top (an open top) not
- * flagged. */
-export function uniformPagePoolRulePages(pages:readonly [number,number,number],air:readonly (readonly [number,number,number])[],reachPage:number,ceilingPage:number):Uint8Array{
- const [px,py,pz]=pages,flags=new Uint8Array(px*py*pz).fill(1);
- for(const [x,y,z] of air)flags[x+px*(y+py*z)]=0;
+/** Each stored page column's highest stored page, by column (x + pages.x z). */
+function columnTops(pages:readonly [number,number,number],stored:readonly (readonly [number,number,number])[]):Map<number,number>{
+ const tops=new Map<number,number>();
+ for(const [x,y,z] of stored){const c=x+pages[0]*z;tops.set(c,Math.max(tops.get(c)??-1,y));}
+ return tops;
+}
+/** The pool rule's pages (uniformPagePoolRuleBlocks without the sentinels)
+ * by box page index: the census pages (1) and the reserve above each
+ * column's top one (2), the reserve's pages past the box's top (an open top)
+ * not held. */
+export function uniformPagePoolRulePages(pages:readonly [number,number,number],stored:readonly (readonly [number,number,number])[],reachPage:number,ceilingPage:number):Map<number,1|2>{
+ const [px,py]=pages,flags=new Map<number,1|2>();
+ for(const [x,y,z] of stored)flags.set(x+px*(y+py*z),1);
  const reach=Math.min(Math.floor(reachPage),ceilingPage,py-1);
- for(let z=0;z<pz;z++)for(let x=0;x<px;x++){
-  let top=-1;for(let y=0;y<py;y++)if(flags[x+px*(y+py*z)])top=y;
-  if(top>=0)for(let y=top+1;y<=reach;y++)flags[x+px*(y+py*z)]=2;
+ for(const [c,top] of columnTops(pages,stored)){
+  const x=c%px,z=(c-x)/px;
+  for(let y=top+1;y<=reach;y++)flags.set(x+px*(y+py*z),2);
  }
  return flags;
 }
 /** The tiles of the box's outer layer of 4h tiles (those beside its walls)
- * that lie in a flagged page (`flags`, a byte a box page): `tiles`, the box's
+ * that lie in a held page (`flags`'s keys, box page indices): `tiles`, the box's
  * tiles an axis, UNIFORM_PAGE_POOL_EDGE / 4 a page edge. */
-export function uniformBoxShellTilesIn(pages:readonly [number,number,number],flags:Uint8Array,tiles:readonly [number,number,number]):number{
- const T=UNIFORM_PAGE_POOL_EDGE/4,[px,py,pz]=pages;
+export function uniformBoxShellTilesIn(pages:readonly [number,number,number],flags:ReadonlyMap<number,number>,tiles:readonly [number,number,number]):number{
+ const T=UNIFORM_PAGE_POOL_EDGE/4,[px,py]=pages;
  // On axis a, a page's tiles inside the box, and those of them off the box's two outer layers.
  const span=(a:number,p:number)=>{const lo=T*p,hi=Math.min(T*(p+1),tiles[a]!);return [Math.max(0,hi-lo),Math.max(0,Math.min(hi,tiles[a]!-1)-Math.max(lo,1))];};
  let n=0;
- for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++)if(flags[x+px*(y+py*z)]){
+ for(const i of flags.keys()){
+  const x=i%px,y=Math.floor(i/px)%py,z=Math.floor(i/(px*py));
   const [ax,ix]=span(0,x),[ay,iy]=span(1,y),[az,iz]=span(2,z);n+=ax*ay*az-ix*iy*iz;
  }
  return n;

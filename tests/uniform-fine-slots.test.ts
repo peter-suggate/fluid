@@ -60,10 +60,10 @@ test("h slot rule: 1.5 x the census footprint's page columns x three band layers
  assert.equal(uniformFineSlotRule(0),1);
  assert.throws(()=>uniformFineSlotRule(-1),/whole columns/);
  // A 4x2x3 box with one column wholly AIR and another resident only at its top.
- const air:[number,number,number][]=[[0,0,0],[0,1,0],[1,0,2]];
- assert.equal(uniformFineSlotFootprintColumns([4,2,3],air),11);
- const all:[number,number,number][]=[];for(let y=0;y<2;y++)all.push([2,y,1]);
- assert.equal(uniformFineSlotFootprintColumns([4,2,3],all),11);
+ // The stored pages are the box's less its AIR pages.
+ const stored=(air:readonly (readonly number[])[])=>{const out:[number,number,number][]=[];for(let z=0;z<3;z++)for(let y=0;y<2;y++)for(let x=0;x<4;x++)if(!air.some(p=>p[0]===x&&p[1]===y&&p[2]===z))out.push([x,y,z]);return out;};
+ assert.equal(uniformFineSlotFootprintColumns([4,2,3],stored([[0,0,0],[0,1,0],[1,0,2]])),11);
+ assert.equal(uniformFineSlotFootprintColumns([4,2,3],stored([[2,0,1],[2,1,1]])),11);
  // On a seep-sized grid the rule's 90 rounds up to its layers of 16: 95 slots.
  assert.equal(uniformFineSlotCapacity(226,[4,4,15],0,uniformFineSlotRule(20)),95);
 });
