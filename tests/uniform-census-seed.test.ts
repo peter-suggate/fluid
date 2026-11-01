@@ -35,8 +35,11 @@ function lattice(phi: (x: number, y: number, z: number) => number, solid: (x: nu
   return { volume, crossing };
 }
 const T = 16, key = (x: number, y: number, z: number) => x + T * (y + T * z);
-const layers = (seed: Uint8Array) => { const out = new Set<number>(); for (let k = 0; k < seed.length; k++) if (seed[k]) out.add(Math.floor(k / T) % T); return [...out].sort((a, b) => a - b); };
-const seedOf = (l: ReturnType<typeof lattice>, solid?: Uint8Array, bodies: Parameters<typeof uniformCensusSeedTiles>[4] = []) => uniformCensusSeedTiles(l.volume, l.crossing, [T, T, T], solid, bodies);
+/** A set of the box's tiles as a byte a tile (this small lattice's), and back. */
+const dense = (tiles: ReadonlySet<number>) => { const out = new Uint8Array(T ** 3); for (const k of tiles) out[k] = 1; return out; };
+const sparse = (tiles: Uint8Array) => { const out = new Set<number>(); tiles.forEach((v, k) => { if (v) out.add(k); }); return out; };
+const layers = (seed: Uint8Array | ReadonlySet<number>) => { const out = new Set<number>(); for (const k of seed instanceof Uint8Array ? sparse(seed) : seed) out.add(Math.floor(k / T) % T); return [...out].sort((a, b) => a - b); };
+const seedOf = (l: ReturnType<typeof lattice>, solid?: Uint8Array, bodies: Parameters<typeof uniformCensusSeedTiles>[4] = []) => dense(uniformCensusSeedTiles(l.volume, l.crossing, [T, T, T], solid && sparse(solid), bodies));
 const flat = (_x: number, y: number) => y - 30;
 
 test("a census start holds the free surface's crossing tiles and their closure at h, and the deep water and air at 4h", () => {
@@ -77,9 +80,9 @@ test("a census start's solid contact is the coupled tiles 4h cannot hold exactly
   };
   const inside = (x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < 4 * T && y < 4 * T && z < 4 * T;
   const aligned = (x: number) => x >= 32 && x < 36, moved = (x: number) => x >= 33 && x < 37;
-  const exact = uniformCensusInexactSolidTiles([T, T, T], coupledOf(aligned), (x, y, z) => inside(x, y, z) && !aligned(x));
+  const exact = dense(uniformCensusInexactSolidTiles([T, T, T], sparse(coupledOf(aligned)), (x, y, z) => inside(x, y, z) && !aligned(x)));
   assert.equal(exact.reduce((n, s) => n + s, 0), 0, "a tile-aligned wall: every coupled tile 4h-exact");
-  const cut = uniformCensusInexactSolidTiles([T, T, T], coupledOf(moved), (x, y, z) => inside(x, y, z) && !moved(x));
+  const cut = dense(uniformCensusInexactSolidTiles([T, T, T], sparse(coupledOf(moved)), (x, y, z) => inside(x, y, z) && !moved(x)));
   assert.equal(cut[key(8, 2, 8)], 1);
   assert.equal(cut[key(9, 2, 8)], 1);
   assert.equal(cut.reduce((n, s) => n + s, 0), 2 * T * T, "tiles 8 and 9 in every row");
@@ -103,7 +106,7 @@ test("a census start keeps an uncut wall's wet face under the water at 4h, and i
   // inside the wall is the buried vertices' far value, as fluidLatticePagedVertexPhi gives it.
   const wall = (x: number) => x >= 32 && x < 36, buried = (x: number) => x > 32 && x < 36;
   const l = lattice((x, y) => buried(x) ? 64 : y - 30, (x) => wall(x)), seed = seedOf(l);
-  assert.equal(l.crossing[key(8, 2, 8)], 0, "the wall's own tile: no open edge changes sign");
+  assert.equal(l.crossing.has(key(8, 2, 8)), false, "the wall's own tile: no open edge changes sign");
   assert.equal(seed[key(7, 2, 8)], 0, "the wall's wet face, deep: 4h");
   assert.equal(seed[key(9, 2, 8)], 0, "the far face, deep: 4h");
   assert.equal(seed[key(7, 7, 8)], 1, "the contact line at the free surface: h");
@@ -135,7 +138,7 @@ test("a census start's h tiles on the closed reservoir grow with its surface are
       const ox = E * (i % px), oz = E * Math.floor(i / (px * py));
       for (let z = 0, j = 0; z < E; z++) for (let y = 0; y < E; y++) for (let x = 0; x < E; x++, j++) if (page[j]! > 0) wet.add(((ox + x) >> 2) + tiles[0] * ((oz + z) >> 2));
     });
-    return { area: wet.size, crossing: crossing.reduce((n, s) => n + s, 0), seed: uniformCensusSeedTiles(volume, crossing, tiles, solid).reduce((n, s) => n + s, 0) };
+    return { area: wet.size, crossing: crossing.size, seed: uniformCensusSeedTiles(volume, crossing, tiles, solid).size };
   };
   const shallow = count({ heightScale: 1 }), deep = count({ heightScale: 2 }), wide = count({ widthScale: 4, depthScale: 2 });
   assert.ok(shallow.seed > 0);

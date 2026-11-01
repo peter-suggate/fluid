@@ -11,9 +11,9 @@ import { uniformBoxTileIndex, uniformLatticeBox } from "../lib/methods/uniform/u
 test("thin-wall tiles: a wall thinner than a tile, and not a thick one", () => {
   const dims = [32, 32, 32] as const, box = uniformLatticeBox(dims);
   const solid = (x: number) => (x >= 9 && x <= 10) || (x >= 20 && x <= 27);
-  const coupled = new Uint8Array(box.boxTiles).fill(1);
+  const coupled = new Set(Array.from({ length: box.boxTiles }, (_, t) => t));
   const thin = uniformThinWallTiles(dims, { solid: (x, _y, _z) => solid(x) }, coupled);
-  const at = (tx: number) => thin[uniformBoxTileIndex(box, tx, 3, 3)];
+  const at = (tx: number) => thin.has(uniformBoxTileIndex(box, tx, 3, 3)) ? 1 : 0;
   // Tile 2 holds the wall (cells 8 and 11 open on its two sides).
   assert.equal(at(2), 1);
   // Tiles 1 and 3 are uncut (all 64 open): never thin-wall, though a corner of each is the shared plane x = 8 or 12.
@@ -24,16 +24,16 @@ test("thin-wall tiles: a wall thinner than a tile, and not a thick one", () => {
   // A wall at x = 8..9 on tile 2's low face: its open cells (10, 11) lie on one side, its low corners' open incident
   // cell (7, in tile 1) on the other: the corner tile 1 makes liquid fills tile 2's dry cells (the trough's shell).
   const face = uniformThinWallTiles(dims, { solid: (x, _y, _z) => x >= 8 && x <= 9 }, coupled);
-  assert.equal(face[uniformBoxTileIndex(box, 2, 3, 3)], 1);
-  assert.equal(face[uniformBoxTileIndex(box, 1, 3, 3)], 0);
+  assert.equal((face.has(uniformBoxTileIndex(box, 2, 3, 3)) ? 1 : 0), 1);
+  assert.equal((face.has(uniformBoxTileIndex(box, 1, 3, 3)) ? 1 : 0), 0);
   // A wall at x = 7..8 across tiles 1 and 2: each tile's open cells lie on one side, but their shared corners
   // (x = 8) are buried, one value for the open cells on both sides: both tiles are thin-wall (the dam's residual).
   const across = uniformThinWallTiles(dims, { solid: (x, _y, _z) => x >= 7 && x <= 8 }, coupled);
-  assert.equal(across[uniformBoxTileIndex(box, 1, 3, 3)], 1);
-  assert.equal(across[uniformBoxTileIndex(box, 2, 3, 3)], 1);
-  assert.equal(across[uniformBoxTileIndex(box, 0, 3, 3)], 0);
-  assert.equal(across[uniformBoxTileIndex(box, 3, 3, 3)], 0);
+  assert.equal((across.has(uniformBoxTileIndex(box, 1, 3, 3)) ? 1 : 0), 1);
+  assert.equal((across.has(uniformBoxTileIndex(box, 2, 3, 3)) ? 1 : 0), 1);
+  assert.equal((across.has(uniformBoxTileIndex(box, 0, 3, 3)) ? 1 : 0), 0);
+  assert.equal((across.has(uniformBoxTileIndex(box, 3, 3, 3)) ? 1 : 0), 0);
   // A wall at x = 7..11: the buried corner x = 8 has open cells on one side only (tile 2 is solid): none.
   const thick = uniformThinWallTiles(dims, { solid: (x, _y, _z) => x >= 7 && x <= 11 }, coupled);
-  for (const tx of [0, 1, 2, 3, 4]) assert.equal(thick[uniformBoxTileIndex(box, tx, 3, 3)], 0, `tile ${tx}`);
+  for (const tx of [0, 1, 2, 3, 4]) assert.equal((thick.has(uniformBoxTileIndex(box, tx, 3, 3)) ? 1 : 0), 0, `tile ${tx}`);
 });

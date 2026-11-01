@@ -183,23 +183,22 @@ export interface UniformCensusBodyBall{readonly centre:readonly [number,number,n
  * of its low neighbour's low face (whole cells, uniform patches). That is no weaker than the
  * census's test (equal patch codes), so the seed holds every tile the census does. `open` is whether
  * a lattice cell is open; a cell off the box is closed. */
-export function uniformCensusInexactSolidTiles(tiles:readonly [number,number,number],coupled:Uint8Array,open:(x:number,y:number,z:number)=>boolean):Uint8Array{
+export function uniformCensusInexactSolidTiles(tiles:readonly [number,number,number],coupled:ReadonlySet<number>,open:(x:number,y:number,z:number)=>boolean):Set<number>{
  const [tx,ty,tz]=tiles,count=tx*ty*tz;
- if(coupled.length!==count)throw new Error("Census seed: the solid coupling does not match the box's tiles");
- const out=new Uint8Array(count),c:[number,number,number]=[0,0,0];
+ for(const k of coupled)if(!(k>=0&&k<count))throw new Error("Census seed: the solid coupling does not match the box's tiles");
+ const out=new Set<number>(),c:[number,number,number]=[0,0,0];
  // The 16 cells of layer l (a cell index on axis a) over the tile's other two axes.
  const layer=(o:readonly number[],a:number,l:number)=>{
   const b=(a+1)%3,d=(a+2)%3;let first:boolean|undefined;
   for(let j=0;j<4;j++)for(let i=0;i<4;i++){c[a]=l;c[b]=o[b]!+i;c[d]=o[d]!+j;const v=open(c[0],c[1],c[2]);if(first===undefined)first=v;else if(v!==first)return false;}
   return true;
  };
- for(let k=0;k<count;k++){
-  if(!coupled[k])continue;
+ for(const k of coupled){
   const o=[4*(k%tx),4*(Math.floor(k/tx)%ty),4*Math.floor(k/(tx*ty))];
   let exact=true;const v0=open(o[0]!,o[1]!,o[2]!);
   for(let z=0;z<4&&exact;z++)for(let y=0;y<4&&exact;y++)for(let x=0;x<4;x++)if(open(o[0]!+x,o[1]!+y,o[2]!+z)!==v0){exact=false;break;}
   for(let a=0;a<3&&exact;a++)exact=layer(o,a,o[a]!-1)&&layer(o,a,o[a]!-4)&&layer(o,a,o[a]!-5);
-  if(!exact)out[k]=1;
+  if(!exact)out.add(k);
  }
  return out;
 }
@@ -209,8 +208,8 @@ export function uniformCensusInexactSolidTiles(tiles:readonly [number,number,num
  * when one of its four incident cells inside the tile is open (umCensusEdgeOpen): a solid is not
  * air, so a wall's wet face holds no crossing. `phi` holds vertex phi by page (fluidLatticePagedVertexPhi);
  * a page it leaves undefined holds none. `open` is whether a lattice cell is open (no solid). */
-export function uniformCensusCrossingTiles(phi:LatticePages,tiles:readonly [number,number,number],open:(x:number,y:number,z:number)=>boolean):Uint8Array{
- const [tx,ty,tz]=tiles,E=phi.edge,n=E+1,[px,py,pz]=phi.pages,crossing=new Uint8Array(tx*ty*tz);
+export function uniformCensusCrossingTiles(phi:LatticePages,tiles:readonly [number,number,number],open:(x:number,y:number,z:number)=>boolean):Set<number>{
+ const [tx,ty,tz]=tiles,E=phi.edge,n=E+1,[px,py,pz]=phi.pages,crossing=new Set<number>();
  if(E%4!==0)throw new Error(`Census crossing: a page edge of ${E} cells holds no whole tile`);
  const cellOpen=new Uint8Array(64);
  for(const [i,page] of phi.at){
@@ -235,7 +234,7 @@ export function uniformCensusCrossingTiles(phi:LatticePages,tiles:readonly [numb
      found=true;
     }
    }
-   if(found)crossing[T[0]+tx*(T[1]+ty*T[2])]=1;
+   if(found)crossing.add(T[0]+tx*(T[1]+ty*T[2]));
   }
  }
  return crossing;
@@ -275,38 +274,46 @@ export function uniformCensusSurfacePages(volume:LatticePages):(x:number,y:numbe
  * Then the 26 neighbours of every such tile: frame 1's surface moves under a tile from rest, and
  * the closure keeps the tiles it can reach at h. Every other tile starts at 4h: deep liquid, which
  * the restriction of the t=0 upload holds exactly, and air. */
-export function uniformCensusSeedTiles(volume:LatticePages,crossing:Uint8Array,tiles:readonly [number,number,number],solid?:Uint8Array,bodies:readonly UniformCensusBodyBall[]=[]):Uint8Array{
- const [tx,ty,tz]=tiles,count=tx*ty*tz,E=volume.edge,[px,py]=volume.pages;
+export function uniformCensusSeedTiles(volume:LatticePages,crossing:ReadonlySet<number>,tiles:readonly [number,number,number],solid?:ReadonlySet<number>,bodies:readonly UniformCensusBodyBall[]=[]):Set<number>{
+ const [tx,ty,tz]=tiles,count=tx*ty*tz;
  if(volume.cells.some((n,a)=>Math.ceil(n/4)!==tiles[a]))throw new Error(`Census seed: the lattice ${volume.cells.join("x")} is not the box's tiles ${tiles.join("x")} at 4 cells a tile`);
- if(solid&&solid.length!==count)throw new Error("Census seed: the solid contact does not match the box's tiles");
- if(crossing.length!==count)throw new Error("Census seed: the crossing tiles do not match the box's tiles");
- const wet=new Uint8Array(count);
- for(const [i,page] of volume.at){
-  const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
-  for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++){
-   const X=ox+x,Y=oy+y,Z=oz+z;
-   if(page[j]!>0&&X<volume.cells[0]&&Y<volume.cells[1]&&Z<volume.cells[2])wet[(X>>2)+tx*((Y>>2)+ty*(Z>>2))]=1;
-  }
- }
- const dilate=(src:Uint8Array)=>{
-  const out=new Uint8Array(count);
-  for(let z=0,k=0;z<tz;z++)for(let y=0;y<ty;y++)for(let x=0;x<tx;x++,k++){
-   if(!src[k])continue;
-   for(let c=Math.max(0,z-1);c<=Math.min(tz-1,z+1);c++)for(let b=Math.max(0,y-1);b<=Math.min(ty-1,y+1);b++)for(let a=Math.max(0,x-1);a<=Math.min(tx-1,x+1);a++)out[a+tx*(b+ty*c)]=1;
+ if(solid)for(const k of solid)if(!(k>=0&&k<count))throw new Error("Census seed: the solid contact does not match the box's tiles");
+ for(const k of crossing)if(!(k>=0&&k<count))throw new Error("Census seed: the crossing tiles do not match the box's tiles");
+ const wet=uniformCensusWetTiles(volume,tiles);
+ // The 26-neighbour dilation of a set of tiles, held to the box.
+ const dilate=(src:Iterable<number>)=>{
+  const out=new Set<number>();
+  for(const k of src){
+   const x=k%tx,y=Math.floor(k/tx)%ty,z=Math.floor(k/(tx*ty));
+   for(let c=Math.max(0,z-1);c<=Math.min(tz-1,z+1);c++)for(let b=Math.max(0,y-1);b<=Math.min(ty-1,y+1);b++)for(let a=Math.max(0,x-1);a<=Math.min(tx-1,x+1);a++)out.add(a+tx*(b+ty*c));
   }
   return out;
  };
- const nearWet=dilate(wet),seed=new Uint8Array(count);
- for(let k=0;k<count;k++)if(crossing[k])seed[k]=1;
- if(solid){const active=new Uint8Array(count);for(let k=0;k<count;k++)if(solid[k]&&nearWet[k])active[k]=1;dilate(active).forEach((v,k)=>{if(v)seed[k]=1;});}
+ const nearWet=dilate(wet),seed=new Set<number>(crossing);
+ if(solid){const active:number[]=[];for(const k of solid)if(nearWet.has(k))active.push(k);for(const k of dilate(active))seed.add(k);}
  for(const {centre,radius} of bodies){
   // A tile meets the ball when its nearest cell point lies within the radius (plus a cell).
   const r=radius+1,lo=centre.map(c=>Math.max(0,Math.floor((c-r)/4))),hi=centre.map((c,a)=>Math.min(tiles[a]!-1,Math.floor((c+r)/4)));
   for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++){
-   const k=x+tx*(y+ty*z);if(!nearWet[k])continue;
+   const k=x+tx*(y+ty*z);if(!nearWet.has(k))continue;
    const d=[x,y,z].map((t,a)=>Math.max(4*t-centre[a]!,0,centre[a]!-4*(t+1)));
-   if(Math.hypot(d[0]!,d[1]!,d[2]!)<=r)seed[k]=1;
+   if(Math.hypot(d[0]!,d[1]!,d[2]!)<=r)seed.add(k);
   }
  }
  return dilate(seed);
+}
+/** The box tiles (by box index over `tiles`) holding a cell of liquid in `volume`: the liquid's
+ * tiles, gathered a page at a time. */
+export function uniformCensusWetTiles(volume:LatticePages,tiles:readonly [number,number,number]):Set<number>{
+ const [tx,ty]=tiles,E=volume.edge,[px,py]=volume.pages,[nx,ny,nz]=volume.cells,wet=new Set<number>();
+ if(E%4!==0)throw new Error(`Census seed: a page edge of ${E} cells holds no whole tile`);
+ const e=E/4,held=new Uint8Array(e*e*e);
+ for(const [i,page] of volume.at){
+  const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));held.fill(0);
+  for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++){
+   if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz)held[(x>>2)+e*((y>>2)+e*(z>>2))]=1;
+  }
+  for(let c=0,k=0;c<e;c++)for(let b=0;b<e;b++)for(let a=0;a<e;a++,k++)if(held[k])wet.add(((ox>>2)+a)+tx*(((oy>>2)+b)+ty*((oz>>2)+c)));
+ }
+ return wet;
 }

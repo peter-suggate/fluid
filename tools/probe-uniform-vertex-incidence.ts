@@ -26,7 +26,7 @@ const errors:string[]=[];device.addEventListener("uncapturederror",e=>{e.prevent
 for(const scenario of ["fine","coarse","mixed","air-seam"]){
  const dimensions:[number,number,number]=[64,64,64],lattice={dimensions,cellSize_m:[1,1,1] as [number,number,number],origin_m:{x:0,y:0,z:0}};
  const address=uniformLatticeAddress(dimensions,true,{blocks:12,permute:7,...(scenario==="air-seam"?{air:[[1,1,0] as [number,number,number]]}:{})});
- const fine=new Uint8Array(16**3);if(scenario==="mixed"||scenario==="air-seam")for(let i=0;i<fine.length;i++)fine[i]=((i%16+Math.floor(i/16)%16+Math.floor(i/256))%3===0)?1:0;
+ const fine=new Set<number>();if(scenario==="mixed"||scenario==="air-seam")for(let i=0;i<16**3;i++)if((i%16+Math.floor(i/16)%16+Math.floor(i/256))%3===0)fine.add(i);
  const layout=createUniformMixedLayout(lattice,[],scenario==="fine"?1:4,fine,address),ownership=new UniformMixedOwnership(device,layout,false);
  const count=65**3,bytes=count*4,output=device.createBuffer({size:bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
  const bindLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]}),bind=device.createBindGroup({layout:bindLayout,entries:[{binding:0,resource:{buffer:output}}]});

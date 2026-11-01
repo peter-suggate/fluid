@@ -13,8 +13,8 @@ export function mixedCellWidth(word: number): 1 | 4 {
 type Triple = readonly [number, number, number];
 /** Per-tile arrays here are indexed by tile key (uniformTileKey) and hold
  * zero at a key with no tile; the lists hold tile keys. Per-tile inputs (the
- * widths and solid masks below) are indexed by box index
- * (uniformBoxTileIndex). */
+ * widths and solid sets below) name tiles by box index
+ * (uniformBoxTileIndex): a set holds its tiles, never a box of them. */
 export interface UniformMixedLayout {
   readonly lattice: RefinementRegionLattice;
   /** The lattice's storage: the solver's one address, the same object in
@@ -53,19 +53,23 @@ export function createUniformMixedLayout(
   lattice: RefinementRegionLattice, regions: readonly FluidRefinementRegion[], backgroundWidth: 1 | 4 = 1,
   /** Tiles that must be h, from uniformMixedSolidTiles. Solids override
    * region cell-size bounds: forced tiles are h whatever a region says. */
-  forcedFine?: Uint8Array, address: UniformLatticeAddress = uniformLatticeAddress(lattice.dimensions),
+  forcedFine?: ReadonlySet<number>, address: UniformLatticeAddress = uniformLatticeAddress(lattice.dimensions),
 ): UniformMixedLayout {
-  const { widths, regions: snapped } = uniformMixedLayoutWidths(lattice, regions, backgroundWidth, forcedFine, address);
-  return packUniformMixedLayout(lattice, address, widths, snapped);
+  const { width, regions: snapped } = uniformMixedLayoutWidths(lattice, regions, backgroundWidth, forcedFine, address);
+  return packUniformMixedLayout(lattice, address, width, snapped);
 }
 
-/** createUniformMixedLayout's tile widths (1 or 4, by box index) and snapped
- * regions, before packing: a stored tile is in the layout's fineTiles exactly
- * when its width is 1. */
+/** A tile's owner width, 1 or 4, by its box tile coordinates. */
+export type UniformMixedTileWidth = (x: number, y: number, z: number) => number;
+
+/** createUniformMixedLayout's tile widths (1 or 4, a tile of the box at a
+ * time) and snapped regions, before packing: a stored tile is in the
+ * layout's fineTiles exactly when its width is 1. A tile's width is read
+ * from the forced set and the regions over it, so nothing is held a tile. */
 export function uniformMixedLayoutWidths(
   lattice: RefinementRegionLattice, regions: readonly FluidRefinementRegion[], backgroundWidth: 1 | 4 = 1,
-  forcedFine?: Uint8Array, address: UniformLatticeAddress = uniformLatticeAddress(lattice.dimensions),
-): { readonly widths: Uint8Array; readonly regions: UniformMixedLayout["regions"] } {
+  forcedFine?: ReadonlySet<number>, address: UniformLatticeAddress = uniformLatticeAddress(lattice.dimensions),
+): { readonly width: UniformMixedTileWidth; readonly regions: UniformMixedLayout["regions"] } {
   const axes = ["x", "y", "z"] as const;
   for (let a = 0; a < 3; a++) {
     if (!Number.isSafeInteger(lattice.dimensions[a]) || lattice.dimensions[a]! < 4
@@ -75,13 +79,11 @@ export function uniformMixedLayoutWidths(
     }
   }
   if (address.cells.some((n, a) => n !== lattice.dimensions[a])) throw new Error("Mixed layout address does not match the lattice");
-  const count = address.boxTiles;
-  // Temporary two-bit allowed-scale mask by box index; discarded after topology construction.
-  const allowed = new Uint8Array(count).fill(3);
-  if (forcedFine && forcedFine.length !== count) throw new Error("Solid promotion mask does not match the tile lattice");
-  if (forcedFine) for (let key = 0; key < count; key++) if (forcedFine[key]) allowed[key] = 1;
+  if (forcedFine) for (const key of forcedFine) if (!(key >= 0 && key < address.boxTiles)) throw new Error("Solid promotion mask does not match the tile lattice");
   const ids = new Set<string>();
   const snapped: { id: string; min: Triple; max: Triple }[] = [];
+  // Each region's two-bit allowed-scale mask over its tiles, folded in list order.
+  const masks: number[] = [];
   for (const r of regions) {
     if (!r.id || ids.has(r.id)) throw new Error(`Duplicate or empty region id: ${r.id}`);
     ids.add(r.id);
@@ -104,26 +106,32 @@ export function uniformMixedLayoutWidths(
     const tileCoordinate=(v:number)=>{const q=v/4,n=Math.round(q);return Math.abs(q-n)<=8*Number.EPSILON*Math.max(1,Math.abs(q))?n:q;};
     const min = bounds.min.map(v => Math.floor(tileCoordinate(v))) as unknown as Triple;
     const max = bounds.max.map(v => Math.ceil(tileCoordinate(v))) as unknown as Triple;
-    for (let z = min[2]; z < max[2]; z++) for (let y = min[1]; y < max[1]; y++) for (let x = min[0]; x < max[0]; x++) {
-      const key = uniformBoxTileIndex(address, x, y, z);
-      if (forcedFine?.[key]) continue;
+    snapped.push({ id: r.id, min, max });masks.push(mask);
+  }
+  const width = (x: number, y: number, z: number): number => {
+    if (forcedFine?.has(uniformBoxTileIndex(address, x, y, z))) return 1;
+    let allowed = 3;
+    for (let i = 0; i < snapped.length; i++) {
+      const { min, max } = snapped[i]!;
       // Overlapping Fine and Coarse boxes: fine wins, as it does for solids.
       // Coarse is a cost hint; refusing here threw mid-advance in the app.
-      allowed[key] = allowed[key]! & mask || 1;
+      if (x >= min[0] && x < max[0] && y >= min[1] && y < max[1] && z >= min[2] && z < max[2]) allowed = allowed & masks[i]! || 1;
     }
-    snapped.push({ id: r.id, min, max });
-  }
-  return { widths: Uint8Array.from(allowed, mask => mask === 1 ? 1 : mask === 2 ? 4 : backgroundWidth), regions: snapped };
+    return allowed === 1 ? 1 : allowed === 2 ? 4 : backgroundWidth;
+  };
+  return { width, regions: snapped };
 }
 
 /** Ownership from per-tile widths decided elsewhere (the detail planner's
- * admitted h tiles plus solid promotion), by box index, with the snapped
- * authored boxes as metadata. Precedence is the caller's, not region list order. */
-export function createUniformMixedLayoutFromWidths(lattice: RefinementRegionLattice, widths: Uint8Array,
+ * admitted h tiles plus solid promotion), a tile at a time (or a byte a box
+ * tile by box index, a small test's lattice), with the snapped authored boxes
+ * as metadata. Precedence is the caller's, not region list order. */
+export function createUniformMixedLayoutFromWidths(lattice: RefinementRegionLattice, widths: UniformMixedTileWidth | Uint8Array,
   regions: UniformMixedLayout["regions"], address: UniformLatticeAddress = uniformLatticeAddress(lattice.dimensions)): UniformMixedLayout {
   if (lattice.dimensions.some(n => !Number.isSafeInteger(n) || n < 4 || n % 4 !== 0)) throw new Error("Mixed layout requires dimensions divisible by four");
-  if (address.cells.some((n, a) => n !== lattice.dimensions[a]) || widths.length !== address.boxTiles) throw new Error("Mixed tile widths do not match the lattice");
-  return packUniformMixedLayout(lattice, address, widths, regions);
+  if (address.cells.some((n, a) => n !== lattice.dimensions[a]) || (typeof widths !== "function" && widths.length !== address.boxTiles)) throw new Error("Mixed tile widths do not match the lattice");
+  const width = typeof widths === "function" ? widths : (x: number, y: number, z: number) => widths[uniformBoxTileIndex(address, x, y, z)]!;
+  return packUniformMixedLayout(lattice, address, width, regions);
 }
 
 /** Solid promotion. A cut cell has open fraction below one: a voxel of the
@@ -133,22 +141,23 @@ export function createUniformMixedLayoutFromWidths(lattice: RefinementRegionLatt
  * one cell (faces, dual cells, phi contact, pressure continuation) therefore
  * never meet solid in a 4h owner or in an interface (seam) tile. A page
  * the lattice walls off cuts nothing; domain walls are owned by every width.
- * The masks returned hold a byte per tile by box index. */
-export function uniformMixedSolidTiles(dimensions: Triple, mask: SolidOccupancyMask,
+ * The sets returned hold tiles by box index: the solids' tiles, never the box's. */
+export function uniformMixedSolidTiles(dimensions: Triple, mask: Pick<SolidOccupancyMask, "words" | "eachSolidPage">,
   terrainCells?: Float32Array): UniformMixedSolidTiles {
   if (dimensions.some(n => !Number.isSafeInteger(n) || n % 4 !== 0)) throw new Error("Solid promotion requires dimensions divisible by four");
   const address = uniformLatticeBox(dimensions), [nx, ny, nz] = dimensions, words = mask.words;
-  const coupled = new Uint8Array(address.boxTiles);let cutCells = 0;
+  const coupled = new Set<number>();let cutCells = 0;
   const mark = (x: number, y: number, z: number) => {
     cutCells++;
     for (let tz = (z - 1) >> 2; tz <= (z + 1) >> 2; tz++) for (let ty = (y - 1) >> 2; ty <= (y + 1) >> 2; ty++)
-      for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) if (uniformTileInBox(address, tx, ty, tz)) coupled[uniformBoxTileIndex(address, tx, ty, tz)] = 1;
+      for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) if (uniformTileInBox(address, tx, ty, tz)) coupled.add(uniformBoxTileIndex(address, tx, ty, tz));
   };
-  // The box's pages: a full page is every cell of it, a slot is a word a row along x (bit x of word y + 32 z).
-  // The mask's directory is by window page, the box's from its origin (an open world's box sits mid-window).
-  for (let pz = 0; pz < address.pages[2]; pz++) for (let py = 0; py < address.pages[1]; py++) for (let px = 0; px < address.pages[0]; px++) {
-    const code = mask.pageWord(32 * px, 32 * py, 32 * pz) & 0xffff;
-    if (code === SOLID_MASK_EMPTY) continue;
+  // The mask's solid pages in the box (a page of the box is never walled): a full page is every cell of it,
+  // a slot is a word a row along x (bit x of word y + 32 z). The pages come in the world's pages, the box's.
+  mask.eachSolidPage((px, py, pz, word) => {
+    if (px < 0 || py < 0 || pz < 0 || px >= address.pages[0] || py >= address.pages[1] || pz >= address.pages[2]) return;
+    const code = word & 0xffff;
+    if (code === SOLID_MASK_EMPTY) return;
     for (let row = 0; row < 1024; row++) {
       let bits = code >= SOLID_MASK_FULL ? 0xffffffff : words[(code << 10) + row]!;
       while (bits) {
@@ -157,7 +166,7 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: SolidOccupancyM
         if (uniformCellInBox(address, x, y, z)) mark(x, y, z);
       }
     }
-  }
+  });
   if (terrainCells) {
     if (terrainCells.length !== nx * nz) throw new Error("Solid promotion terrain does not match the lattice");
     for (let z = 0; z < nz; z++) for (let x = 0; x < nx; x++) {
@@ -167,19 +176,17 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: SolidOccupancyM
       if (!(height > 0)) continue;
       const top = Math.min(ny - 1, Math.ceil(height) - 1);cutCells += top + 1;
       for (let tz = (z - 1) >> 2; tz <= (z + 1) >> 2; tz++) for (let ty = 0; ty <= (top + 1) >> 2; ty++)
-        for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) if (uniformTileInBox(address, tx, ty, tz)) coupled[uniformBoxTileIndex(address, tx, ty, tz)] = 1;
+        for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) if (uniformTileInBox(address, tx, ty, tz)) coupled.add(uniformBoxTileIndex(address, tx, ty, tz));
     }
   }
-  const forced = new Uint8Array(coupled.length), p: [number, number, number] = [0, 0, 0];let coupledTiles = 0;
-  for (let key = 0; key < address.boxTiles; key++) {
-    if (!coupled[key]) continue;
-    coupledTiles++;
+  const forced = new Set<number>(), p: [number, number, number] = [0, 0, 0];
+  for (const key of coupled) {
     uniformBoxTileCoord(address, key, p);
     const tx = p[0], ty = p[1], tz = p[2];
     for (let z = tz - 1; z <= tz + 1; z++) for (let y = ty - 1; y <= ty + 1; y++)
-      for (let x = tx - 1; x <= tx + 1; x++) if (uniformTileInBox(address, x, y, z)) forced[uniformBoxTileIndex(address, x, y, z)] = 1;
+      for (let x = tx - 1; x <= tx + 1; x++) if (uniformTileInBox(address, x, y, z)) forced.add(uniformBoxTileIndex(address, x, y, z));
   }
-  return { forced, coupled, cutCells, coupledTiles };
+  return { forced, coupled, cutCells, coupledTiles: coupled.size };
 }
 
 /** Thin-wall tiles (docs/plans/bulk16-plan-2026-10-28.md, M4b): the cut
@@ -197,17 +204,16 @@ export function uniformMixedSolidTiles(dimensions: Triple, mask: SolidOccupancyM
  * open cells on more than one side (a wall across a tile face). A property
  * of the solids alone: cells past the lattice and terrain
  * columns' full cells are closed. `coupled` (uniformMixedSolidTiles) holds
- * every cut tile. One byte a tile by box index. */
-export function uniformThinWallTiles(dimensions: Triple, mask: Pick<SolidOccupancyMask, "solid">, coupled: Uint8Array, terrainCells?: Float32Array): Uint8Array {
+ * every cut tile. The set returned holds tiles by box index. */
+export function uniformThinWallTiles(dimensions: Triple, mask: Pick<SolidOccupancyMask, "solid">, coupled: ReadonlySet<number>, terrainCells?: Float32Array): Set<number> {
   const address = uniformLatticeBox(dimensions), [nx, ny, nz] = dimensions;
-  if (coupled.length !== address.boxTiles) throw new Error("Thin-wall tiles need the coupled mask of the tile lattice");
+  for (const key of coupled) if (!(key >= 0 && key < address.boxTiles)) throw new Error("Thin-wall tiles need the coupled mask of the tile lattice");
   if (terrainCells && terrainCells.length !== nx * nz) throw new Error("Thin-wall tiles' terrain does not match the lattice");
   const open = (x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz && !mask.solid(x, y, z)
     && !(terrainCells && y + 1 <= terrainCells[x + nx * z]!);
-  const thin = new Uint8Array(address.boxTiles), p: [number, number, number] = [0, 0, 0];
+  const thin = new Set<number>(), p: [number, number, number] = [0, 0, 0];
   const component = new Int32Array(216), stack: number[] = [], at = (a: number, b: number, c: number) => a + 6 * (b + 6 * c);
-  for (let key = 0; key < address.boxTiles; key++) {
-    if (!coupled[key]) continue;
+  for (const key of coupled) {
     uniformBoxTileCoord(address, key, p);
     const x0 = 4 * p[0] - 1, y0 = 4 * p[1] - 1, z0 = 4 * p[2] - 1;
     let cells = 0;
@@ -239,19 +245,23 @@ export function uniformThinWallTiles(dimensions: Triple, mask: Pick<SolidOccupan
       const a = 4 * (k & 1), b = 4 * ((k >> 1) & 1), c = 4 * (k >> 2);
       for (let dc = 0; dc <= 1; dc++) for (let db = 0; db <= 1; db++) for (let da = 0; da <= 1; da++) take(at(a + da, b + db, c + dc));
     }
-    if (sides > 1) thin[key] = 1;
+    if (sides > 1) thin.add(key);
   }
   // A buried corner (no open incident cell) is one value for the eight owners
   // around it. Where their open cells lie on more than one side of the solid
   // (a wall thinner than a tile across a tile face), whichever side its value
   // takes, the owner on the other side fills by it: those cut owners are
   // thin-wall too. The sides are the open components of the eight tiles' 8³ cells.
+  // The vertices to try are the corners of the coupled tiles, each once.
   const T: Triple = [Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4)], block = new Int32Array(512);
   const tileKey = (x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < T[0] && y < T[1] && z < T[2] && uniformTileInBox(address, x, y, z) ? uniformBoxTileIndex(address, x, y, z) : -1;
-  for (let vz = 0; vz <= T[2]; vz++) for (let vy = 0; vy <= T[1]; vy++) for (let vx = 0; vx <= T[0]; vx++) {
-    let near = false;
-    for (let k = 0; k < 8 && !near; k++) { const t = tileKey(vx - 1 + (k & 1), vy - 1 + ((k >> 1) & 1), vz - 1 + (k >> 2)); if (t >= 0 && coupled[t]) near = true; }
-    if (!near) continue;
+  const corners = new Set<number>(), VX = T[0] + 1, VY = T[1] + 1;
+  for (const key of coupled) {
+    uniformBoxTileCoord(address, key, p);
+    for (let k = 0; k < 8; k++) corners.add((p[0] + (k & 1)) + VX * ((p[1] + ((k >> 1) & 1)) + VY * (p[2] + (k >> 2))));
+  }
+  for (const v of corners) {
+    const vx = v % VX, vy = Math.floor(v / VX) % VY, vz = Math.floor(v / (VX * VY));
     const X = 4 * vx, Y = 4 * vy, Z = 4 * vz;
     let buried = true;
     for (let k = 0; k < 8 && buried; k++) if (open(X - 1 + (k & 1), Y - 1 + ((k >> 1) & 1), Z - 1 + (k >> 2))) buried = false;
@@ -275,10 +285,10 @@ export function uniformThinWallTiles(dimensions: Triple, mask: Pick<SolidOccupan
     if (components < 2) continue;
     for (let k = 0; k < 8; k++) {
       const t = tileKey(vx - 1 + (k & 1), vy - 1 + ((k >> 1) & 1), vz - 1 + (k >> 2));
-      if (t < 0 || !coupled[t]) continue;
+      if (t < 0 || !coupled.has(t)) continue;
       let any = false;
       for (let q = 0; q < 64 && !any; q++) if (block[(4 * (k & 1) + (q & 3)) + 8 * ((4 * ((k >> 1) & 1) + ((q >> 2) & 3)) + 8 * (4 * (k >> 2) + (q >> 4)))]! >= 0) any = true;
-      if (any) thin[t] = 1;
+      if (any) thin.add(t);
     }
   }
   return thin;
@@ -286,8 +296,9 @@ export function uniformThinWallTiles(dimensions: Triple, mask: Pick<SolidOccupan
 
 /** Solid promotion of one mask: uniformMixedSolidTiles' result. */
 export interface UniformMixedSolidTiles {
-  forced: Uint8Array;
-  coupled: Uint8Array;
+  /** Tiles by box index. */
+  forced: ReadonlySet<number>;
+  coupled: ReadonlySet<number>;
   cutCells: number;
   /** Tiles set in `coupled`. */
   coupledTiles: number;
@@ -306,12 +317,9 @@ export interface UniformMixedSolidEdit {
 }
 
 /** The tiles a mask edit touches, gathered from the cells the mask reports
- * as it folds the edit (cell). `touched` is the caller's scratch, one byte
- * per tile by box index and zero on entry; it holds one for each tile
- * gathered. */
-export function uniformMixedSolidEdit(dimensions: Triple, touched: Uint8Array): UniformMixedSolidEdit {
-  const address = uniformLatticeBox(dimensions);
-  if (touched.length !== address.boxTiles) throw new Error("Solid edit scratch does not match the tile lattice");
+ * as it folds the edit (cell). */
+export function uniformMixedSolidEdit(dimensions: Triple): UniformMixedSolidEdit {
+  const address = uniformLatticeBox(dimensions), touched = new Set<number>();
   const tiles: number[] = [];
   const edit: UniformMixedSolidEdit = { tiles, cutCells: 0, cell(x, y, z, solid) {
     // The promotion counts interior cells.
@@ -320,7 +328,7 @@ export function uniformMixedSolidEdit(dimensions: Triple, touched: Uint8Array): 
       for (let tx = (x - 1) >> 2; tx <= (x + 1) >> 2; tx++) {
         if (!uniformTileInBox(address, tx, ty, tz)) continue;
         const key = uniformBoxTileIndex(address, tx, ty, tz);
-        if (!touched[key]) { touched[key] = 1;tiles.push(key); }
+        if (!touched.has(key)) { touched.add(key);tiles.push(key); }
       }
   } };
   return edit;
@@ -332,14 +340,12 @@ export function uniformMixedSolidEdit(dimensions: Triple, touched: Uint8Array): 
  * the cells within one cell of it, so only a touched tile's can have moved;
  * `forced` is the 26-neighbourhood of `coupled`, so only the tiles around a
  * tile whose coupling moved can have. `terrainCells` must be the heights
- * `held` was scanned with. New arrays: `held` is left as it was. */
+ * `held` was scanned with. New sets: `held` is left as it was. */
 export function uniformMixedSolidTilesAfterEdit(held: UniformMixedSolidTiles, dimensions: Triple, mask: SolidOccupancyMask,
   edit: UniformMixedSolidEdit, terrainCells?: Float32Array): UniformMixedSolidTiles {
   const address = uniformLatticeBox(dimensions), [nx, ny, nz] = dimensions, p: [number, number, number] = [0, 0, 0];
-  const count = address.boxTiles;
-  if (held.coupled.length !== count || held.forced.length !== count) throw new Error("Held solid promotion does not match the tile lattice");
   if (terrainCells && terrainCells.length !== nx * nz) throw new Error("Solid promotion terrain does not match the lattice");
-  const coupled = held.coupled.slice(), forced = held.forced.slice();let coupledTiles = held.coupledTiles;
+  const coupled = new Set(held.coupled), forced = new Set(held.forced);
   const uncoupled: number[] = [];
   for (const key of edit.tiles) {
     uniformBoxTileCoord(address, key, p);
@@ -355,12 +361,11 @@ export function uniformMixedSolidTilesAfterEdit(held: UniformMixedSolidTiles, di
       // Cells 0..top of the column are cut: it couples the tiles up to (top+1)>>2.
       if (height > 0 && ty <= (Math.min(ny - 1, Math.ceil(height) - 1) + 1) >> 2) cut = 1;
     }
-    const now = cut ? 1 : 0;
-    if (now === coupled[key]) continue;
-    coupled[key] = now;coupledTiles += now ? 1 : -1;
-    if (!now) { uncoupled.push(key);continue; }
+    if ((cut === 1) === coupled.has(key)) continue;
+    if (!cut) { coupled.delete(key);uncoupled.push(key);continue; }
+    coupled.add(key);
     for (let z = tz - 1; z <= tz + 1; z++) for (let y = ty - 1; y <= ty + 1; y++)
-      for (let x = tx - 1; x <= tx + 1; x++) if (uniformTileInBox(address, x, y, z)) forced[uniformBoxTileIndex(address, x, y, z)] = 1;
+      for (let x = tx - 1; x <= tx + 1; x++) if (uniformTileInBox(address, x, y, z)) forced.add(uniformBoxTileIndex(address, x, y, z));
   }
   // A tile that stopped being coupled leaves its neighbours forced only by another coupled tile.
   for (const key of uncoupled) {
@@ -368,23 +373,27 @@ export function uniformMixedSolidTilesAfterEdit(held: UniformMixedSolidTiles, di
     const tx = p[0], ty = p[1], tz = p[2];
     for (let z = tz - 1; z <= tz + 1; z++) for (let y = ty - 1; y <= ty + 1; y++) for (let x = tx - 1; x <= tx + 1; x++) {
       if (!uniformTileInBox(address, x, y, z)) continue;
-      let near = 0;
+      let near = false;
       for (let k = z - 1; k <= z + 1 && !near; k++) for (let j = y - 1; j <= y + 1 && !near; j++)
-        for (let i = x - 1; i <= x + 1 && !near; i++) if (uniformTileInBox(address, i, j, k)) near = coupled[uniformBoxTileIndex(address, i, j, k)]!;
-      forced[uniformBoxTileIndex(address, x, y, z)] = near;
+        for (let i = x - 1; i <= x + 1 && !near; i++) if (uniformTileInBox(address, i, j, k)) near = coupled.has(uniformBoxTileIndex(address, i, j, k));
+      const t = uniformBoxTileIndex(address, x, y, z);
+      if (near) forced.add(t); else forced.delete(t);
     }
   }
-  return { forced, coupled, cutCells: held.cutCells + edit.cutCells, coupledTiles };
+  return { forced, coupled, cutCells: held.cutCells + edit.cutCells, coupledTiles: coupled.size };
 }
 
 /** Loud ownership certificate: no 4h owner may cover a promoted tile. */
-export function assertUniformMixedSolidPromotion(layout: UniformMixedLayout, forced: Uint8Array): void {
-  const address = layout.address;
-  if (forced.length !== address.boxTiles) throw new Error("Solid promotion mask does not match the ownership layout");
-  uniformEachTile(address, (key, x, y, z) => {
-    if (forced[uniformBoxTileIndex(address, x, y, z)] && mixedCellWidth(layout.tiles[key]!) !== 1)
+export function assertUniformMixedSolidPromotion(layout: UniformMixedLayout, forced: ReadonlySet<number>): void {
+  const address = layout.address, p: [number, number, number] = [0, 0, 0];
+  for (const t of forced) {
+    if (!(t >= 0 && t < address.boxTiles)) throw new Error("Solid promotion mask does not match the ownership layout");
+    const [x, y, z] = uniformBoxTileCoord(address, t, p);
+    if (!uniformTileStored(address, x, y, z)) continue;
+    const key = uniformTileKey(address, x, y, z);
+    if (mixedCellWidth(layout.tiles[key]!) !== 1)
       throw new Error(`Mixed ownership places a ${mixedCellWidth(layout.tiles[key]!)}h owner on solid-coupled tile ${x},${y},${z}`);
-  });
+  }
 }
 
 /** The all-4h shape on the same lattice: the pressure root's ownership. Only
@@ -399,24 +408,26 @@ export function uniformMixedAllCoarseLayout(layout: UniformMixedLayout): Uniform
     boxOwners: count, metadataBytes: count * 20, regions: layout.regions };
 }
 
-/** widths: a byte per tile by box index; a tile with nothing stored takes no
- * part. Owners are numbered in ascending tile key, the h tiles' first (the
+/** width: a stored tile's width, read once a tile into a byte a tile key; a
+ * tile with nothing stored takes no part. Owners are numbered in ascending tile key, the h tiles' first (the
  * GPU builder's order), with or without an h tile: at most 63 an h tile past
  * the stored tiles, never a box's worth. */
-function packUniformMixedLayout(lattice: RefinementRegionLattice, address: UniformLatticeAddress, widths: Uint8Array,
+function packUniformMixedLayout(lattice: RefinementRegionLattice, address: UniformLatticeAddress, width: UniformMixedTileWidth,
   regions: UniformMixedLayout["regions"]): UniformMixedLayout {
   const count = address.tileKeys;
   // A tile word holds its first owner's index in 30 bits and any tile may be h (64 owners): 32,767 pages of 512 tiles.
   if (count * 64 > MIXED_CELL_MASK) throw new Error(`Mixed tile words index owners in 30 bits: ${count} tile keys exceed ${Math.floor(MIXED_CELL_MASK / 64)} (32,767 pages of 512)`);
   const tiles = new Uint32Array(count);
   const fine: number[] = [], coarse: number[] = [];
+  // The stored tiles' widths by tile key (a key with no tile holds zero).
+  const widths = new Uint8Array(count);
   let fineCount = 0;
-  uniformEachTile(address, (_key, x, y, z) => { if (widths[uniformBoxTileIndex(address, x, y, z)] === 1) fineCount++; });
+  uniformEachTile(address, (key, x, y, z) => { const w = widths[key] = width(x, y, z); if (w === 1) fineCount++; });
   const cellCount = 63 * fineCount + address.liveTiles;
   let fineBase = 0, coarseBase = fineCount * 64;
-  uniformEachTile(address, (key, x, y, z) => {
-    const index = uniformBoxTileIndex(address, x, y, z), isFine = widths[index] === 1;
-    if (!isFine && widths[index] !== 4) throw new Error("Mixed ownership is h/4h");
+  uniformEachTile(address, key => {
+    const isFine = widths[key] === 1;
+    if (!isFine && widths[key] !== 4) throw new Error("Mixed ownership is h/4h");
     tiles[key] = ((isFine ? fineBase : coarseBase) | (isFine ? MIXED_FINE_TILE : 0)) >>> 0;
     (isFine ? fine : coarse).push(key);
     if (isFine) fineBase += 64; else coarseBase += 1;
@@ -433,17 +444,18 @@ function packUniformMixedLayout(lattice: RefinementRegionLattice, address: Unifo
  * tile outside the ring lives in its base block alone. */
 export const UNIFORM_MIXED_DETAIL_RING = 1;
 /** Freeze geometric stencil decisions with ownership. Physics stages reuse
- * these masks for arbitrary sample locations, including long departures. */
+ * these masks for arbitrary sample locations, including long departures.
+ * widths: by tile key. */
 function mixedStencils(address: UniformLatticeAddress, widths: Uint8Array): Uint32Array<ArrayBuffer> {
   const count = address.tileKeys, stencils = new Uint32Array(count * 2);
   uniformEachTile(address, (key, tx, ty, tz) => {
-    const own = widths[uniformBoxTileIndex(address, tx, ty, tz)]!;
+    const own = widths[key]!;
     let maximum = own, minimum = own, valid = 0;
     for (let z = -1; z <= 1; z++) for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) {
       const qx = tx + x, qy = ty + y, qz = tz + z;
       if (!uniformTileStored(address, qx, qy, qz)) continue;
       valid |= 1 << ((x + 1) + 3 * ((y + 1) + 3 * (z + 1)));
-      const width = widths[uniformBoxTileIndex(address, qx, qy, qz)]!;
+      const width = widths[uniformTileKey(address, qx, qy, qz)]!;
       maximum = Math.max(maximum, width);minimum = Math.min(minimum, width);
       if (width === 1) stencils[2 * key]! |= 1 << ((x + 1) + 3 * ((y + 1) + 3 * (z + 1)));
     }
@@ -451,7 +463,7 @@ function mixedStencils(address: UniformLatticeAddress, widths: Uint8Array): Uint
     let farPositive = 0;
     for (let axis = 0; axis < 3; axis++) {
       const qx = tx + (axis === 0 ? 2 : 0), qy = ty + (axis === 1 ? 2 : 0), qz = tz + (axis === 2 ? 2 : 0);
-      if (uniformTileStored(address, qx, qy, qz) && widths[uniformBoxTileIndex(address, qx, qy, qz)] === 1) farPositive |= 1 << axis;
+      if (uniformTileStored(address, qx, qy, qz) && widths[uniformTileKey(address, qx, qy, qz)] === 1) farPositive |= 1 << axis;
     }
     stencils[2 * key + 1]! = (minimum << 27) | (farPositive << 24) | compileUniformStencil(stencils[2 * key]!, valid);
   });

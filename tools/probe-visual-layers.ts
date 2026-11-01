@@ -54,8 +54,8 @@ if (benchmark && process.argv.includes("--mixed")) {
   const { createUniformMixedLayout } = await import("../lib/methods/uniform/uniform-mixed-layout");
   const { UniformMixedOwnership } = await import("../lib/methods/uniform/uniform-mixed-ownership");
   const { UniformDetailStorage } = await import("../lib/methods/uniform/uniform-detail-fields");
-  const forced = new Uint8Array((cells/4)**3);
-  for (let i=0;i<forced.length;i++) forced[i] = i%(cells/4)<cells/8 ? 1 : 0;
+  const forced = new Set<number>();
+  for (let i=0;i<(cells/4)**3;i++) if (i%(cells/4)<cells/8) forced.add(i);
   const layout = createUniformMixedLayout({ dimensions: [cells,cells,cells], cellSize_m: [4/cells,3/cells,4/cells], origin_m: {x:-2,y:0,z:-2} }, [], 4, forced);
   const ownership = new UniformMixedOwnership(device, layout, false);
   const storage = new UniformDetailStorage(device, layout.address);

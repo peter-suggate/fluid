@@ -553,8 +553,8 @@ export function uniformPagePoolResidency(cells:readonly [number,number,number],r
  * UNIFORM_PAGE_POOL_PIN_MARGIN: every page once, in the window (the box's
  * low page at origin). */
 export function uniformPagePoolSourcePages(cells:readonly [number,number,number],sources:readonly UniformPagePoolCellBox[],origin:readonly [number,number,number]=[0,0,0]):{x:number;y:number;z:number}[]{
- const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,box={origin,pages,count:px*py*pz},seen=new Uint8Array(box.count);
- return sources.flatMap(s=>cellBoxPages(box,s.low,s.high,UNIFORM_PAGE_POOL_PIN_MARGIN)).filter(({x,y,z})=>{const i=x-origin[0]+px*(y-origin[1]+py*(z-origin[2])),first=!seen[i];seen[i]=1;return first;});
+ const E=UNIFORM_PAGE_POOL_EDGE,pages:[number,number,number]=[Math.ceil(cells[0]/E),Math.ceil(cells[1]/E),Math.ceil(cells[2]/E)],[px,py,pz]=pages,box={origin,pages,count:px*py*pz},seen=new Set<number>();
+ return sources.flatMap(s=>cellBoxPages(box,s.low,s.high,UNIFORM_PAGE_POOL_PIN_MARGIN)).filter(({x,y,z})=>{const i=x-origin[0]+px*(y-origin[1]+py*(z-origin[2])),first=!seen.has(i);seen.add(i);return first;});
 }
 /** The box pages (by box index) a wet cell (volume above zero) lies within
  * `margin` cells of on every axis. Each wet page keeps the box of its wet

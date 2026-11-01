@@ -14,7 +14,9 @@
  *
  * plan() never mutates: a candidate that is not accepted leaves the planner
  * at its last accepted state; commit() adopts one. Every iteration is in
- * world-key order, so equal inputs give identical plans.
+ * world-key order, so equal inputs give identical plans. Per-tile state is
+ * held by the tiles it names (sets and maps by box index), never a box of
+ * them: a value a map leaves out is its zero.
  */
 import type { RefinementRegionLattice } from "../../core/refinement-regions";
 import { UNIFORM_DETAIL_POLICY, type UniformDetailPolicy } from "./uniform-detail-policy";
@@ -93,16 +95,17 @@ export interface UniformDetailPlanDiagnostics {
 export interface UniformDetailPlan {
   readonly step: number;
   readonly tileDimensions: Triple;
-  readonly fine: Uint8Array;
-  readonly support: Uint8Array;
-  readonly reasons: Uint8Array;
+  /** By box index. */
+  readonly fine: ReadonlySet<number>;
+  readonly support: ReadonlySet<number>;
+  readonly reasons: ReadonlyMap<number, number>;
   /** Resident world patch keys, ascending. */
   readonly patches: Uint32Array;
   /** Manual request ids deferred whole by capacity. */
   readonly deferred: readonly string[];
   readonly diagnostics: UniformDetailPlanDiagnostics;
   /** The automatic state commit() adopts. */
-  readonly next: { readonly members: Uint8Array; readonly sources: Uint8Array; readonly low: Uint8Array };
+  readonly next: { readonly members: ReadonlySet<number>; readonly sources: ReadonlyMap<number, number>; readonly low: ReadonlyMap<number, number> };
 }
 
 export class UniformDetailPlanner {
@@ -113,9 +116,9 @@ export class UniformDetailPlanner {
   readonly domainPatches: number;
   private readonly address: UniformLatticeBox;
   private readonly coord: [number, number, number] = [0, 0, 0];
-  private members: Uint8Array;
-  private sources: Uint8Array;
-  private low: Uint8Array;
+  private members: ReadonlySet<number> = new Set();
+  private sources: ReadonlyMap<number, number> = new Map();
+  private low: ReadonlyMap<number, number> = new Map();
   /** Members counting toward retirement, kept by commit(); `settled` is read every frame. */
   private counting = 0;
   private acceptedStep = -Infinity;
@@ -128,11 +131,10 @@ export class UniformDetailPlanner {
     this.tilesPerPatch = policy.patchCells / 4;
     this.patchDimensions = this.tileDimensions.map(n => Math.ceil(n / this.tilesPerPatch)) as unknown as Triple;
     this.domainPatches = this.patchDimensions[0] * this.patchDimensions[1] * this.patchDimensions[2];
-    this.members = new Uint8Array(this.tiles);this.sources = new Uint8Array(this.tiles);this.low = new Uint8Array(this.tiles);
   }
   /** No automatic member is counting toward retirement: an unchanged input replans to the same set. */
   get settled(): boolean { return this.counting === 0; }
-  get automaticTiles(): number { let n = 0; for (const m of this.members) n += m; return n; }
+  get automaticTiles(): number { return this.members.size; }
   patchKeyOfTile(t: number): number {
     const [x, y, z] = uniformBoxTileCoord(this.address, t, this.coord), p = this.tilesPerPatch;
     return Math.floor(x / p) + this.patchDimensions[0] * (Math.floor(y / p) + this.patchDimensions[1] * Math.floor(z / p));
@@ -150,39 +152,50 @@ export class UniformDetailPlanner {
     const capacity = Math.max(0, Math.floor(input.capacityPatches ?? this.domainPatches));
     const budgetTiles = Math.floor(Math.min(100, Math.max(0, input.budgetPercent)) / 100 * n);
     const churnLimit = Math.max(1, Math.ceil(policy.churnFraction * this.domainPatches));
-    const patchOf = new Uint32Array(n);for (let t = 0; t < n; t++) patchOf[t] = this.patchKeyOfTile(t);
+    const p = this.tilesPerPatch, [ppx, ppy] = this.patchDimensions;
+    const patchOf = (t: number) => this.patchKeyOfTile(t);
     // Closure tracker: coverage counts, closure size and per-patch residency.
-    const cover = new Uint32Array(n), patchCount = new Uint32Array(this.domainPatches);
+    const cover = new Map<number, number>(), patchCount = new Map<number, number>();
     let closure = 0, resident = 0;
     const visit = (t: number, delta: 1 | -1) => {
       const [x, y, z] = uniformBoxTileCoord(address, t, coord);
       for (let k = z - radius; k <= z + radius; k++) for (let j = y - radius; j <= y + radius; j++)
         for (let i = x - radius; i <= x + radius; i++) {
           if (!uniformTileInBox(address, i, j, k)) continue;
-          const q = uniformBoxTileIndex(address, i, j, k), p = patchOf[q]!;
-          if (delta > 0) { if (cover[q]++ === 0) { closure++; if (patchCount[p]++ === 0) resident++; } }
-          else if (--cover[q] === 0) { closure--; if (--patchCount[p] === 0) resident--; }
+          const q = uniformBoxTileIndex(address, i, j, k), patch = Math.floor(i / p) + ppx * (Math.floor(j / p) + ppy * Math.floor(k / p));
+          const c = cover.get(q) ?? 0;
+          if (delta > 0) {
+            cover.set(q, c + 1);
+            if (c === 0) { closure++; const m = patchCount.get(patch) ?? 0; patchCount.set(patch, m + 1); if (m === 0) resident++; }
+          } else if (c === 1) {
+            cover.delete(q); closure--;
+            const m = patchCount.get(patch)!;
+            if (m === 1) { patchCount.delete(patch); resident--; } else patchCount.set(patch, m - 1);
+          } else cover.set(q, c - 1);
         }
     };
-    const fine = new Uint8Array(n), reasons = new Uint8Array(n), requested = new Uint8Array(n);
+    const fine = new Set<number>(), reasons = new Map<number, number>(), requested = new Set<number>();
+    const or = (map: Map<number, number>, t: number, bits: number) => { const v = (map.get(t) ?? 0) | bits; if (v) map.set(t, v); };
     // Manual requests: whole requests, priority first, ids break ties; Full and Fine regions.
     const manual = input.requests.filter(r => MANUAL.has(r.source)).sort((a, b) => b.priority - a.priority || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const deferred: string[] = [];let deferredTiles = 0;
     for (const request of manual) {
       const tiles = this.tilesOf(request.bounds_m), added: number[] = [];
-      for (const t of tiles) { requested[t] = 1; if (!fine[t]) { fine[t] = 1; added.push(t); visit(t, 1); } }
+      for (const t of tiles) { requested.add(t); if (!fine.has(t)) { fine.add(t); added.push(t); visit(t, 1); } }
       if (resident > capacity) {
-        for (const t of added) { fine[t] = 0; visit(t, -1); }
+        for (const t of added) { fine.delete(t); visit(t, -1); }
         deferred.push(request.id);deferredTiles += added.length;continue;
       }
-      for (const t of tiles) reasons[t]! |= UNIFORM_DETAIL_REASON[request.source];
+      for (const t of tiles) or(reasons, t, UNIFORM_DETAIL_REASON[request.source]);
     }
-    const manualTiles = fine.reduce((s, v) => s + v, 0), manualClosure = closure;
+    const manualTiles = fine.size, manualClosure = closure;
     // Automatic: suppression (explicit Coarse), promotion masks, retention boxes and rank.
     const enabled = [...(input.automaticSources ?? [])].reduce((bits, s) => bits | UNIFORM_DETAIL_REASON[s], 0);
-    const suppressed = new Uint8Array(n);
-    for (const s of input.suppressions ?? []) for (const t of this.tilesOf(s.bounds_m)) suppressed[t] = 1;
-    const candidate = new Uint8Array(n), retain = new Uint8Array(n), priority = new Float64Array(n).fill(-Infinity), score = new Float64Array(n);
+    const suppressed = new Set<number>();
+    for (const s of input.suppressions ?? []) for (const t of this.tilesOf(s.bounds_m)) suppressed.add(t);
+    // A tile no request ranks has priority -Infinity and score 0.
+    const candidate = new Map<number, number>(), retain = new Map<number, number>(), priority = new Map<number, number>(), score = new Map<number, number>();
+    const priorityOf = (t: number) => priority.get(t) ?? -Infinity, scoreOf = (t: number) => score.get(t) ?? 0;
     const centre = (t: number, a: number) => this.lattice.origin_m[(["x", "y", "z"] as const)[a]!] + ((uniformBoxTileCoord(address, t, coord)[a]! + 0.5) * 4) * this.lattice.cellSize_m[a]!;
     for (const request of input.requests) {
       if (MANUAL.has(request.source)) continue;
@@ -191,63 +204,65 @@ export class UniformDetailPlanner {
       const half = [(b.max.x - b.min.x) / 2, (b.max.y - b.min.y) / 2, (b.max.z - b.min.z) / 2];
       const tiles = this.tilesOf(b);
       for (const t of tiles) {
-        if (suppressed[t] || fine[t]) continue;
-        requested[t] = 1;candidate[t]! |= bit;
+        if (suppressed.has(t) || fine.has(t)) continue;
+        requested.add(t);or(candidate, t, bit);
         let d = 0;for (let a = 0; a < 3; a++) d = Math.max(d, Math.abs(centre(t, a) - mid[a]!) / Math.max(half[a]!, 1e-30));
-        const s = 1 / Math.max(d, 1e-9);
-        if (request.priority > priority[t]! || (request.priority === priority[t] && s > score[t]!)) { priority[t] = request.priority; score[t] = s; }
+        const s = 1 / Math.max(d, 1e-9), held = priorityOf(t);
+        if (request.priority > held || (request.priority === held && s > scoreOf(t))) { priority.set(t, request.priority); score.set(t, s); }
       }
       const r = 1 / policy.retireRatio, outer = { min: { x: mid[0]! - r * half[0]!, y: mid[1]! - r * half[1]!, z: mid[2]! - r * half[2]! },
         max: { x: mid[0]! + r * half[0]!, y: mid[1]! + r * half[1]!, z: mid[2]! + r * half[2]! } };
-      for (const t of this.tilesOf(outer)) if (!suppressed[t]) retain[t]! |= bit;
+      for (const t of this.tilesOf(outer)) if (!suppressed.has(t)) or(retain, t, bit);
     }
-    const members = this.members.slice(), sources = this.sources.slice(), low = this.low.slice(), advanced = input.acceptedStep > this.acceptedStep;
-    const touched = new Uint8Array(this.domainPatches);let churn = 0, churnDeferred = 0;
-    const churnAllows = (t: number) => touched[patchOf[t]!] !== 0 || churn < churnLimit;
-    const spendChurn = (t: number) => { if (!touched[patchOf[t]!]) { touched[patchOf[t]!] = 1; churn++; } };
+    const members = new Set(this.members), sources = new Map(this.sources), low = new Map(this.low), advanced = input.acceptedStep > this.acceptedStep;
+    const setLow = (t: number, v: number) => { if (v) low.set(t, v); else low.delete(t); };
+    const drop = (t: number) => { members.delete(t);sources.delete(t);low.delete(t); };
+    const touched = new Set<number>();let churn = 0, churnDeferred = 0;
+    const churnAllows = (t: number) => touched.has(patchOf(t)) || churn < churnLimit;
+    const spendChurn = (t: number) => { const q = patchOf(t); if (!touched.has(q)) { touched.add(q); churn++; } };
+    const ascending = (set: ReadonlySet<number>) => [...set].sort((a, b) => a - b);
     // Immediate drops (user actions, not churn): sources switched off, Coarse-suppressed, now manual.
-    for (let t = 0; t < n; t++) {
-      if (!members[t]) continue;
-      sources[t]! &= enabled;
-      if (!sources[t] || suppressed[t] || fine[t]) { members[t] = 0;sources[t] = 0;low[t] = 0;continue; }
-      sources[t]! |= candidate[t]!;
+    for (const t of ascending(members)) {
+      const source = (sources.get(t) ?? 0) & enabled;
+      if (!source || suppressed.has(t) || fine.has(t)) { drop(t);continue; }
+      sources.set(t, source | (candidate.get(t) ?? 0));
       // Only an accepted step counts toward retirement; a paused replan does not.
-      low[t] = retain[t] ? 0 : advanced ? Math.min(255, low[t]! + 1) : low[t]!;
+      setLow(t, retain.get(t) ? 0 : advanced ? Math.min(255, (low.get(t) ?? 0) + 1) : low.get(t) ?? 0);
       visit(t, 1);
     }
-    const rank = (a: number, b: number) => priority[b]! - priority[a]! || score[b]! - score[a]! || a - b;
-    const retire = (t: number) => { members[t] = 0;sources[t] = 0;low[t] = 0;visit(t, -1);spendChurn(t); };
+    const rank = (a: number, b: number) => priorityOf(b) - priorityOf(a) || scoreOf(b) - scoreOf(a) || a - b;
+    const retire = (t: number) => { drop(t);visit(t, -1);spendChurn(t); };
     // Hysteresis retirement, churn-limited, world-key order.
-    for (let t = 0; t < n; t++) if (members[t] && low[t]! >= policy.retireSteps) { if (churnAllows(t)) retire(t); else churnDeferred++; }
+    for (const t of ascending(members)) if ((low.get(t) ?? 0) >= policy.retireSteps) { if (churnAllows(t)) retire(t); else churnDeferred++; }
     // Hard capacity, then the soft budget: evict the lowest-ranked members.
-    const ranked = () => { const list: number[] = [];for (let t = 0; t < n; t++) if (members[t]) list.push(t);return list.sort(rank); };
-    if (resident > capacity) for (const t of ranked().reverse()) { if (resident <= capacity) break;members[t] = 0;sources[t] = 0;low[t] = 0;visit(t, -1);spendChurn(t); }
+    const ranked = () => [...members].sort(rank);
+    if (resident > capacity) for (const t of ranked().reverse()) { if (resident <= capacity) break;drop(t);visit(t, -1);spendChurn(t); }
     if (closure - manualClosure > budgetTiles) for (const t of ranked().reverse()) {
       if (closure - manualClosure <= budgetTiles) break;
       if (churnAllows(t)) retire(t); else churnDeferred++;
     }
     // Predictive promotion by rank, within budget, capacity and churn.
     let budgetClipped = 0, capacityDeferred = 0;
-    const promotions: number[] = [];for (let t = 0; t < n; t++) if (candidate[t] && !members[t]) promotions.push(t);
+    const promotions: number[] = [];for (const t of candidate.keys()) if (!members.has(t)) promotions.push(t);
     for (const t of promotions.sort(rank)) {
       visit(t, 1);
       if (resident > capacity) { visit(t, -1);capacityDeferred++;continue; }
       if (closure - manualClosure > budgetTiles) { visit(t, -1);budgetClipped++;continue; }
       if (!churnAllows(t)) { visit(t, -1);churnDeferred++;continue; }
-      spendChurn(t);members[t] = 1;sources[t] = candidate[t]!;low[t] = 0;
+      spendChurn(t);members.add(t);sources.set(t, candidate.get(t)!);low.delete(t);
     }
-    let automaticTiles = 0;
-    for (let t = 0; t < n; t++) if (members[t]) { fine[t] = 1;reasons[t]! |= sources[t]!;automaticTiles++; }
-    const support = new Uint8Array(n), patches: number[] = [];let supportTiles = 0;
-    for (let t = 0; t < n; t++) if (cover[t] && !fine[t]) { support[t] = 1;supportTiles++; }
-    for (let p = 0; p < this.domainPatches; p++) if (patchCount[p]) patches.push(p);
-    const count = (bit: number) => reasons.reduce((s, r) => s + (r & bit ? 1 : 0), 0);
+    for (const t of members) { fine.add(t);or(reasons, t, sources.get(t) ?? 0); }
+    const automaticTiles = members.size;
+    const support = new Set<number>();
+    for (const t of cover.keys()) if (!fine.has(t)) support.add(t);
+    const supportTiles = support.size, patches = [...patchCount.keys()].sort((a, b) => a - b);
+    const count = (bit: number) => { let c = 0; for (const r of reasons.values()) if (r & bit) c++; return c; };
     const admittedTiles = manualTiles + automaticTiles, patchVolume = policy.patchCells ** 3;
     return {
       step: input.acceptedStep, tileDimensions: this.tileDimensions, fine, support, reasons, patches: Uint32Array.from(patches), deferred,
       next: { members, sources, low },
       diagnostics: {
-        tiles: n, requestedTiles: requested.reduce((s, v) => s + v, 0), admittedTiles, manualTiles, automaticTiles, supportTiles,
+        tiles: n, requestedTiles: requested.size, admittedTiles, manualTiles, automaticTiles, supportTiles,
         deferredTiles, budgetClippedTiles: budgetClipped, churnDeferredTiles: churnDeferred, capacityDeferredTiles: capacityDeferred,
         budgetTiles, automaticCostTiles: closure - manualClosure, churnPatches: churn, churnLimitPatches: churnLimit,
         patchCells: policy.patchCells, domainPatches: this.domainPatches, residentPatches: resident,
@@ -261,9 +276,10 @@ export class UniformDetailPlanner {
   /** Adopt an accepted plan's automatic state. Plans must be committed in accepted-step order. */
   commit(plan: UniformDetailPlan): void {
     if (plan.step < this.acceptedStep) throw new Error(`Detail plan for step ${plan.step} is older than accepted step ${this.acceptedStep}`);
-    if (plan.next.members.length !== this.tiles) throw new Error("Detail plan does not match the planner's tile lattice");
-    this.members = plan.next.members.slice();this.sources = plan.next.sources.slice();this.low = plan.next.low.slice();this.acceptedStep = plan.step;
-    let counting = 0;for (const v of this.low) if (v) counting++;this.counting = counting;
+    for (const t of plan.next.members) if (!(t >= 0 && t < this.tiles)) throw new Error("Detail plan does not match the planner's tile lattice");
+    this.members = new Set(plan.next.members);this.sources = new Map(plan.next.sources);this.low = new Map(plan.next.low);this.acceptedStep = plan.step;
+    // A low count of zero is never held.
+    this.counting = this.low.size;
   }
 }
 
@@ -276,14 +292,16 @@ type ManualSource = "region" | "full";
 export class UniformDetailRequestTiles {
   readonly tileDimensions: Triple;
   readonly tiles: number;
-  /** 1 where a request holds the tile. */
-  readonly fine: Uint8Array;
-  /** Per tile: UNIFORM_DETAIL_REASON bits of the sources holding it. */
-  readonly reasons: Uint8Array;
-  private readonly holds: Partial<Record<ManualSource, Uint16Array>> = {};
-  /** Admitted tiles within the support radius of each tile; resident tiles per patch. */
-  private readonly cover: Uint16Array;
-  private readonly patchCount: Uint32Array;
+  /** The tiles a request holds, by box index. */
+  readonly fine = new Set<number>();
+  /** Per held tile: UNIFORM_DETAIL_REASON bits of the sources holding it. */
+  readonly reasons = new Map<number, number>();
+  /** Per source, the boxes holding each tile it holds. */
+  private readonly holds: Partial<Record<ManualSource, Map<number, number>>> = {};
+  /** Admitted tiles within the support radius of each tile; resident tiles per patch (only those not zero). */
+  private readonly cover = new Map<number, number>();
+  private readonly patchCount = new Map<number, number>();
+  private readonly domainPatches: number;
   private readonly radius: number;
   private readonly tilesPerPatch: number;
   private readonly patchDimensions: Triple;
@@ -301,8 +319,7 @@ export class UniformDetailRequestTiles {
     this.tiles = this.address.boxTiles;
     this.tilesPerPatch = policy.patchCells / 4;this.radius = Math.max(0, Math.round(policy.supportRadiusTiles));
     this.patchDimensions = this.tileDimensions.map(n => Math.ceil(n / this.tilesPerPatch)) as unknown as Triple;
-    this.fine = new Uint8Array(this.tiles);this.reasons = new Uint8Array(this.tiles);this.cover = new Uint16Array(this.tiles);
-    this.patchCount = new Uint32Array(this.patchDimensions[0] * this.patchDimensions[1] * this.patchDimensions[2]);
+    this.domainPatches = this.patchDimensions[0] * this.patchDimensions[1] * this.patchDimensions[2];
   }
   private visit(t: number, delta: 1 | -1): void {
     const address = this.address, r = this.radius, p = this.tilesPerPatch, [px, py] = this.patchDimensions, cover = this.cover, patchCount = this.patchCount;
@@ -311,8 +328,15 @@ export class UniformDetailRequestTiles {
       for (let i = x - r; i <= x + r; i++) {
         if (!uniformTileInBox(address, i, j, k)) continue;
         const q = uniformBoxTileIndex(address, i, j, k), patch = Math.floor(i / p) + px * (Math.floor(j / p) + py * Math.floor(k / p));
-        if (delta > 0) { if (cover[q]!++ === 0) { this.closure++; if (patchCount[patch]!++ === 0) this.resident++; } }
-        else if (--cover[q]! === 0) { this.closure--; if (--patchCount[patch]! === 0) this.resident--; }
+        const c = cover.get(q) ?? 0;
+        if (delta > 0) {
+          cover.set(q, c + 1);
+          if (c === 0) { this.closure++; const m = patchCount.get(patch) ?? 0; patchCount.set(patch, m + 1); if (m === 0) this.resident++; }
+        } else if (c === 1) {
+          cover.delete(q); this.closure--;
+          const m = patchCount.get(patch)!;
+          if (m === 1) { patchCount.delete(patch); this.resident--; } else patchCount.set(patch, m - 1);
+        } else cover.set(q, c - 1);
       }
   }
   /** Make the set these requests' tiles (manual sources only). Returns the
@@ -333,20 +357,23 @@ export class UniformDetailRequestTiles {
     };
     for (const [key, b] of next) {
       const add = b.count - (this.boxes.get(key)?.count ?? 0);if (add <= 0) continue;
-      const holds = this.holds[b.source] ??= new Uint16Array(this.tiles), bit = UNIFORM_DETAIL_REASON[b.source];
+      const holds = this.holds[b.source] ??= new Map(), bit = UNIFORM_DETAIL_REASON[b.source];
       each(b, t => {
-        const before = holds[t]!;holds[t] = before + add;if (before) return;
-        this.held[b.source]++;const other = reasons[t]!;reasons[t] = other | bit;
-        if (!other) { fine[t] = 1;this.admitted++;entered.push(t);this.visit(t, 1); }
+        const before = holds.get(t) ?? 0;holds.set(t, before + add);if (before) return;
+        this.held[b.source]++;const other = reasons.get(t) ?? 0;reasons.set(t, other | bit);
+        if (!other) { fine.add(t);this.admitted++;entered.push(t);this.visit(t, 1); }
       });
     }
     for (const [key, b] of this.boxes) {
       const drop = b.count - (next.get(key)?.count ?? 0);if (drop <= 0) continue;
       const holds = this.holds[b.source]!, bit = UNIFORM_DETAIL_REASON[b.source];
       each(b, t => {
-        if ((holds[t] = holds[t]! - drop)) return;
-        this.held[b.source]--;
-        if (!(reasons[t] = reasons[t]! & ~bit)) { fine[t] = 0;this.admitted--;left.push(t);this.visit(t, -1); }
+        const after = holds.get(t)! - drop;
+        if (after) { holds.set(t, after);return; }
+        holds.delete(t);this.held[b.source]--;
+        const other = reasons.get(t)! & ~bit;
+        if (other) reasons.set(t, other);
+        else { reasons.delete(t);fine.delete(t);this.admitted--;left.push(t);this.visit(t, -1); }
       });
     }
     this.boxes = next;
@@ -354,7 +381,7 @@ export class UniformDetailRequestTiles {
   }
   get admittedTiles(): number { return this.admitted; }
   diagnostics(budgetPercent: number): UniformDetailPlanDiagnostics {
-    const n = this.tiles, policy = this.policy, domainPatches = this.patchCount.length, patchVolume = policy.patchCells ** 3, support = this.closure - this.admitted;
+    const n = this.tiles, policy = this.policy, domainPatches = this.domainPatches, patchVolume = policy.patchCells ** 3, support = this.closure - this.admitted;
     return {
       tiles: n, requestedTiles: this.admitted, admittedTiles: this.admitted, manualTiles: this.admitted, automaticTiles: 0, supportTiles: support,
       deferredTiles: 0, budgetClippedTiles: 0, churnDeferredTiles: 0, capacityDeferredTiles: 0,

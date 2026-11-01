@@ -250,9 +250,9 @@ test("production 16h current models and retained geometry handle coverage, colli
 
 test("current slope evidence encloses native trilinear derivatives through resolved h/4h seams",gpu,async()=>{
  await withUniformDevice("native edge work bounds",async device=>{
-  const dimensions:[number,number,number]=[32,32,32],address=uniformLatticeAddress(dimensions),forced=new Uint8Array(address.boxTiles);
+  const dimensions:[number,number,number]=[32,32,32],address=uniformLatticeAddress(dimensions),forced=new Set<number>();
   // A slab crosses all four lower/upper16h region boundaries in y and z.
-  for(let tile=0;tile<forced.length;tile++)if((tile%8)>=3&&(tile%8)<=4)forced[tile]=1;
+  for(let tile=0;tile<address.boxTiles;tile++)if((tile%8)>=3&&(tile%8)<=4)forced.add(tile);
   const layout=createUniformMixedLayout({dimensions,cellSize_m:[1,1,1],origin_m:{x:0,y:0,z:0}},[],4,forced,address);
   const ownership=new UniformMixedOwnership(device,layout,true,layout.fineTiles.length),storage=new UniformDetailStorage(device,address);storage.attach(ownership);
   const phi=storage.createField("native edge phi","vertex","r32float"),control=new UniformSurfaceWorkControl(device,ownership,phi),resolve=new UniformMixedPhiResolve(device,ownership),resolved=resolve.bind(phi);

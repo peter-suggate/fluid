@@ -254,8 +254,8 @@ export class SolidOccupancyMask {
   /** Units given back, the last taken first; then the next never held, below which every held unit lies. */
   private readonly freed: number[] = [];
   private fresh: number;
-  /** Pages off the wall whose code is not EMPTY. */
-  private occupied = 0;
+  /** Pages off the wall whose code is not EMPTY, by window page x | y << 8 | z << 16. */
+  private readonly occupied = new Set<number>();
   readonly walls: SolidOccupancyMaskWalls;
   /** The box and its halo lie in the flat directory (solidOccupancyMaskFitsFlat). */
   readonly fitsFlat: boolean;
@@ -312,7 +312,16 @@ export class SolidOccupancyMask {
   describes(world: SolidWorld): boolean { return this.world === world; }
 
   /** No cell off the wall is solid. */
-  get empty(): boolean { return this.occupied === 0; }
+  get empty(): boolean { return this.occupied.size === 0; }
+
+  /** Each page off the wall that holds a solid cell, in the world's pages, with its directory word: the mask's own pages, never a box of them. */
+  eachSolidPage(visit: (x: number, y: number, z: number, word: number) => void): void {
+    const o = this.origin, words = this.image;
+    for (const k of this.occupied) {
+      const px = k & 255, py = (k >> 8) & 255, pz = k >> 16;
+      visit(px - o[0], py - o[1], pz - o[2], words[this.wordOf(px, py, pz)]!);
+    }
+  }
 
   /** Page slots in use: the pages that are partly solid. */
   get slotsHeld(): number { return this.fresh - this.shape.firstSlot - this.freed.length; }
@@ -567,7 +576,7 @@ export class SolidOccupancyMask {
       dirty.slotLow = Math.min(dirty.slotLow, first); dirty.slotHigh = Math.max(dirty.slotHigh, first + SOLID_MASK_UNIT_WORDS - 1);
     } else if (slot >= 0) this.freed.push(code);
     if (next !== code) {
-      this.occupied += (next !== SOLID_MASK_EMPTY ? 1 : 0) - (code !== SOLID_MASK_EMPTY ? 1 : 0);
+      if (next !== SOLID_MASK_EMPTY) this.occupied.add(k); else this.occupied.delete(k);
       words[e] = ((held & 0xffff0000) | next) >>> 0;
       if (e < SOLID_MASK_DIRECTORY_WORDS) { dirty.directoryLow = Math.min(dirty.directoryLow, e); dirty.directoryHigh = Math.max(dirty.directoryHigh, e); }
       else { dirty.slotLow = Math.min(dirty.slotLow, e); dirty.slotHigh = Math.max(dirty.slotHigh, e); }

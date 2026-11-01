@@ -15,7 +15,7 @@ import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLayoutWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
-import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformPagePoolRule, uniformPagePoolRuleReach, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
+import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformCensusWetTiles, uniformPagePoolRule, uniformPagePoolRuleReach, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
 import { uniformFineBlocks, uniformFineSlotCapacity, uniformTierStart, uniformFineSlotFootprintColumns, uniformFineSlotRule, uniformFineSlotSourcePages } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
@@ -407,9 +407,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private detailFocus?: SolverDetailFocus;
   /** Accepted mixed frames: the planner's step clock (hysteresis, expiry). */
   private detailAcceptedStep = 0;
-  /** The last committed plan, its Coarse-suppressed tiles and unconstrained-region count. */
+  /** The last committed plan and unconstrained-region count. */
   private detailPlan?: UniformDetailPlan;
-  private detailSuppressed?: Uint8Array;
   private detailUnconstrained = 0;
   /** Split pressure's own surface target and centre phi (UniformMixedFrameFields.pressureGeometry). */
   private mixedPressureGeometry?: { target: GPUTexture; centerPhi: GPUTexture };
@@ -1254,7 +1253,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined,held=this.mixedSolidTiles;
     if(held&&held.stamp===this.mixedSolidMaskStamp&&held.terrain===terrain)return held.tiles;
     const solid=uniformMixedSolidTiles(fluidRegionLattice(this.scene).dimensions as [number,number,number],this.solidMask,terrain);
-    const tiles={...solid,any:solid.coupled.some(c=>c!==0)};
+    const tiles={...solid,any:solid.coupled.size>0};
     this.mixedSolidTiles={stamp:this.mixedSolidMaskStamp,terrain,tiles};
     return tiles;
   }
@@ -1281,7 +1280,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The census seed's box tiles (uniformCensusSeedTiles), the same on every
    * address of the box (a V2c start builds two): only the layout's tile keys
    * follow the blocks. Held until the frame's first layout. */
-  private censusSeedBoxTiles():Uint8Array{
+  private censusSeedBoxTiles():Set<number>{
     return this.censusSeedTiles??=(()=>{
       const lattice=fluidRegionLattice(this.scene),a=this.address;
       const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE);
@@ -1297,7 +1296,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       return uniformCensusSeedTiles(volume,uniformCensusCrossingTiles(phi,tiles,open),tiles,solid,bodies);
     })();
   }
-  private censusSeedTiles?:Uint8Array;
+  private censusSeedTiles?:Set<number>;
   /** The bodies at their t=0 pose as the census seed reads them: centre and bounding radius in cells. */
   private censusBodyBalls():{centre:[number,number,number];radius:number}[]{
     const lattice=fluidRegionLattice(this.scene);
@@ -1368,7 +1367,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The seed's box tiles (shared with the frame's layout) and their widths
     // under the Fine regions: a stored tile is in censusSeed's fineTiles when its width is 1.
     const seed=this.censusSeedBoxTiles();const t1c=performance.now();
-    const {widths}=uniformMixedLayoutWidths(fluidRegionLattice(scene),scene.fluid.refinementRegions??[],4,seed,a);
+    const {width}=uniformMixedLayoutWidths(fluidRegionLattice(scene),scene.fluid.refinementRegions??[],4,seed,a);
     const t2=performance.now();
     const [nx,ny,nz]=a.cells,terrainCells=sceneHasTerrain(scene)?this.mixedTerrainCells:undefined;
     const open=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<nx&&y<ny&&z<nz&&!this.solidMask.solid(x,y,z)&&!(terrainCells&&y+1<=terrainCells[x+nx*z]!);
@@ -1376,7 +1375,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const face=(x:number,y:number,z:number,axis:number)=>uniformBulkStartFace(velocity,x,y,z,axis);
     const deep=new Set<number>(),[dx,dy]=a.pages;
     const pages=uniformBulkStartPages(uniformBulkStartSource({pages:a.pages as [number,number,number],openTop:a.openTop,stored,volume,phi,velocity,
-      fine:(x,y,z)=>widths[uniformBoxTileIndex(a,x,y,z)]===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}),deep);
+      fine:(x,y,z)=>width(x,y,z)===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}),deep);
     this.bulkStartDeep=(x,y,z)=>deep.has(x+2*dx!*(y+2*dy!*z));
     const t3=performance.now();
     // A D page's 4h vertex block as the install leaves it: the vertices it holds (umWideVertexSlot), the far phi elsewhere.
@@ -1402,25 +1401,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * frame 1 promotes from the 4h fill; so the seed holds at h, of the
    * thin-wall tiles, those the census holds at t=0: a tile beside (3³) one
    * holding initial liquid. Undefined without a thin-wall tile. */
-  private thinWallSeed():Uint8Array|undefined{
+  private thinWallSeed():Set<number>|undefined{
     if(this.solidVoxelsEmpty&&!sceneHasTerrain(this.scene))return undefined;
     const lattice=fluidRegionLattice(this.scene),dims=lattice.dimensions as [number,number,number];
     const thin=uniformThinWallTiles(dims,this.solidMask,this.mixedSolidPromotion().coupled,sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined);
-    const a=this.address,[tx,ty,tz]=dims.map(n=>n/4) as [number,number,number],wet=new Uint8Array(thin.length);
-    const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE),E=volume.edge,[px,py]=volume.pages;
-    for(const [i,page] of volume.at){
-      const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
-      for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)
-        if(page[j]!>0&&uniformTileInBox(a,(ox+x)>>2,(oy+y)>>2,(oz+z)>>2))wet[uniformBoxTileIndex(a,(ox+x)>>2,(oy+y)>>2,(oz+z)>>2)]=1;
+    const a=this.address,[tx,ty,tz]=dims.map(n=>n/4) as [number,number,number];
+    const {volume}=this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE),wet=uniformCensusWetTiles(volume,a.tiles as [number,number,number]);
+    const seed=new Set<number>(),p:[number,number,number]=[0,0,0];
+    for(const key of thin){
+      uniformBoxTileCoord(a,key,p);
+      for(let z=p[2]-1;z<=p[2]+1&&!seed.has(key);z++)for(let y=p[1]-1;y<=p[1]+1;y++)for(let x=p[0]-1;x<=p[0]+1;x++)
+        if(x>=0&&y>=0&&z>=0&&x<tx&&y<ty&&z<tz&&uniformTileInBox(a,x,y,z)&&wet.has(uniformBoxTileIndex(a,x,y,z))){seed.add(key);break;}
     }
-    const seed=new Uint8Array(thin.length),p:[number,number,number]=[0,0,0];let any=false;
-    for(let key=0;key<thin.length;key++){
-      if(!thin[key])continue;uniformBoxTileCoord(a,key,p);
-      for(let z=p[2]-1;z<=p[2]+1&&!seed[key];z++)for(let y=p[1]-1;y<=p[1]+1;y++)for(let x=p[0]-1;x<=p[0]+1;x++)
-        if(x>=0&&y>=0&&z>=0&&x<tx&&y<ty&&z<tz&&uniformTileInBox(a,x,y,z)&&wet[uniformBoxTileIndex(a,x,y,z)]){seed[key]=1;any=true;break;}
-    }
-    this.thinWallInfo={tiles:thin.reduce((n,t)=>n+t,0),seeded:seed.reduce((n,t)=>n+t,0)};
-    return any?seed:undefined;
+    this.thinWallInfo={tiles:thin.size,seeded:seed.size};
+    return seed.size?seed:undefined;
   }
   /** The thin-wall tiles of a coarse start, and those its seed holds at h (thinWallSeed). */
   thinWallInfo?:{readonly tiles:number;readonly seeded:number};
@@ -1491,7 +1485,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
       pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),sourceParams:this.params,
       // Live edits and rigid bodies share the pipelines built at setup.
-      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.reduce((n,c)=>n+c,0),paramsWritten:()=>this.paramsWritten,slots:solidSlots},
+      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.size,paramsWritten:()=>this.paramsWritten,slots:solidSlots},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
     },this.address.openTop,this.pressureSchedule);
     this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;this.mixedFrame.narrowBandFlip.sparseNeighbours=this.narrowBandSparseNeighbours;
@@ -1586,8 +1580,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedRequest?:{
     /** The requests' tiles (the plan of a manual-only list), moved by difference. */
     tiles:UniformDetailRequestTiles;
-    /** Per tile, bit 0: a request holds it; bit 1: a solid can promote it. */
-    mask:Uint8Array;count:number;coupled?:Uint8Array;
+    /** By box tile, bit 0: a request holds it; bit 1: a solid can promote it (only tiles with a bit). */
+    mask:Map<number,number>;count:number;coupled?:ReadonlySet<number>;
     /** What it answers: set again, a candidate that was not accepted returns to it. */
     input:{requests:readonly DetailRequest[];solid?:ReturnType<WebGPUUniformReferenceSolver["mixedSolidPromotion"]>};
     /** Tiles whose request bit moved since the builder's statics were written from `tiles`. */
@@ -1598,8 +1592,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The request tiles the builder's static masks mirror (editStatic follows them by `moved`). */
   private mixedStaticsOf?:UniformDetailRequestTiles;
   /** The coupled mask the census holds (setSolid). */
-  private mixedSolidSet?:Uint8Array;
-  private mixedNoSolid?:Uint8Array;
+  private mixedSolidSet?:ReadonlySet<number>;
+  private readonly mixedNoSolid:ReadonlySet<number>=new Set();
   /** The build that is due answers request edits only (mixedRequest.edit,
    * summed): the frame keeps its launch budgets and adds this bound.
    * Absent: any other cause, and the budgets start again at the ceilings. */
@@ -1624,7 +1618,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
   /** The h tiles of the last host layout (hostMixedLayout): zero is all-4h, the layout a request's attach edits. */
   private mixedHostFine=-1;
-  private mixedEditSeen?:{stamp:number;tiles:Uint32Array};
   /** The layout is due a build. edit: a request edit's bound; any cause without one makes the build an unknown one. */
   private staleMixed(edit?:UniformWorkEdit):void{
     this.mixedStaleCount++;
@@ -1636,17 +1629,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedEditReach(...lists:readonly number[][]):number{
     const a=this.address,n=a.boxTiles,p=this.mixedEditTile,total=lists.reduce((sum,l)=>sum+l.length,0);
     if(27*total>=n)return n;
-    let seen=this.mixedEditSeen;
-    if(!seen||seen.tiles.length!==n||seen.stamp===0xffffffff)seen=this.mixedEditSeen={stamp:0,tiles:new Uint32Array(n)};
-    const stamp=++seen.stamp,tiles=seen.tiles;let count=0;
+    const seen=new Set<number>();
     for(const list of lists)for(const t of list){
       const [x,y,z]=uniformBoxTileCoord(a,t,p);
-      for(let k=z-1;k<=z+1;k++)for(let j=y-1;j<=y+1;j++)for(let i=x-1;i<=x+1;i++){
-        if(!uniformTileInBox(a,i,j,k))continue;
-        const q=uniformBoxTileIndex(a,i,j,k);if(tiles[q]!==stamp){tiles[q]=stamp;count++;}
-      }
+      for(let k=z-1;k<=z+1;k++)for(let j=y-1;j<=y+1;j++)for(let i=x-1;i<=x+1;i++)if(uniformTileInBox(a,i,j,k))seen.add(uniformBoxTileIndex(a,i,j,k));
     }
-    return count;
+    return seen.size;
   }
   private readonly mixedEditTile:[number,number,number]=[0,0,0];
   /** The attached relayout is Dynamic's census: the importance criteria on,
@@ -1688,7 +1676,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * the tiles go when it was admitted; deferred, the join and the
    * displacement are made again for the next build (takeMixedReceipts), so
    * no edit's displacement is retired before its tiles exist. */
-  private mixedEditJoin?:{tiles:Uint8Array;build?:number};
+  private mixedEditJoin?:{tiles:ReadonlySet<number>;build?:number};
   /** A host (CPU) layout, between frames. Three uses remain: the t = 0
    * layout (the uploads are h data, deposited once on it), zero detail (no
    * relayout is attached), and the return of h-tile capacity (a GPU-built
@@ -1697,12 +1685,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * Dynamic's start (Coarse regions at 4h, solid contact at h, the rest at
    * h; under fluid.tiers.start "4h" the coarse seed the frame's capacity was
    * sized for: dynamicSeed). Returns the frame's refusal, with nothing changed. */
-  private hostMixedLayout(mask?:Uint8Array):string|undefined{
+  private hostMixedLayout(mask?:ReadonlyMap<number,number>):string|undefined{
     const started=performance.now(),lattice=fluidRegionLattice(this.scene),regions=this.scene.fluid.refinementRegions??[];
     let layout,reserve:number|undefined;
     if(mask){
       const snapped=regions.flatMap(r=>{const box=uniformDetailTileBounds(lattice,{min:r.min_m,max:r.max_m});return box?[{id:r.id,...box}]:[];});
-      layout=createUniformMixedLayoutFromWidths(lattice,Uint8Array.from(mask,m=>m?1:4),snapped,this.address);
+      const a=this.address;
+      layout=createUniformMixedLayoutFromWidths(lattice,(x,y,z)=>mask.has(uniformBoxTileIndex(a,x,y,z))?1:4,snapped,this.address);
     }else{
       const forced=this.mixedSolidPromotion().forced;
       // A coarse seed holds the ceiling the relayout reserves next: the first layout's detail storage is resident.
@@ -1736,15 +1725,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private setMixedRequest(input:NonNullable<WebGPUUniformReferenceSolver["mixedRequest"]>["input"]):boolean{
     let request=this.mixedRequest;const lattice=fluidRegionLattice(this.scene),held=request?.tiles.lattice;
     // Another lattice names other tiles: its request starts empty.
-    if(!request||!held||JSON.stringify(held)!==JSON.stringify(lattice)){const tiles=new UniformDetailRequestTiles(lattice);request=this.mixedRequest={tiles,mask:new Uint8Array(tiles.tiles),count:0,input:{requests:[]},moved:[]};}
+    if(!request||!held||JSON.stringify(held)!==JSON.stringify(lattice)){const tiles=new UniformDetailRequestTiles(lattice);request=this.mixedRequest={tiles,mask:new Map(),count:0,input:{requests:[]},moved:[]};}
     const {mask,tiles,moved}=request,{entered,left}=tiles.set(input.requests),forced=input.solid?.forced,solids=forced!==request.input.solid?.forced;
     if(solids){
-      const fine=tiles.fine;let count=0;
-      for(let t=0;t<mask.length;t++){const m=fine[t]!|(forced?forced[t]!<<1:0);mask[t]=m;if(m)count++;}
-      request.count=count;
+      mask.clear();
+      for(const t of tiles.fine)mask.set(t,1);
+      if(forced)for(const t of forced)mask.set(t,(mask.get(t)??0)|2);
+      request.count=mask.size;
     }else{
-      for(const t of entered){if(!mask[t])request.count++;mask[t]!|=1;}
-      for(const t of left)if(!(mask[t]!&=2))request.count--;
+      for(const t of entered){const m=mask.get(t)??0;if(!m)request.count++;mask.set(t,m|1);}
+      for(const t of left){const m=(mask.get(t)??0)&2;if(m)mask.set(t,m);else{mask.delete(t);request.count--;}}
     }
     if(this.mixedStaticsOf===tiles){for(const t of entered)moved.push(t);for(const t of left)moved.push(t);}
     request.coupled=input.solid?.any?input.solid.coupled:undefined;request.input=input;
@@ -1789,13 +1779,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(advancing&&!this.detailStaticCurrent()){
         const before=this.detailPlan?.fine;this.refreshMixedBuilderStatics(this.mixedSolidPromotion());
         const after=this.detailPlan!.fine;let added=0;
-        for(let t=0;t<after.length;t++)if(after[t]&&!before?.[t])added++;
+        for(const t of after)if(!before?.has(t))added++;
         if(added)this.mixedStaticsAdded={tiles:added+(this.mixedStaticsAdded?.tiles??0),build:this.mixedBuilds};
       }
       const swept=bodies.length?this.mixedBodyTiles(bodies,dt):undefined,joined=this.mixedEditJoin?.tiles;
       let extra=this.mixedStaticsAdded?.tiles??0;
       // The swept count is the marking's own; only a live edit's join scans the tiles.
-      if(joined){for(let t=0;t<tiles;t++)if(swept?.[t]||joined[t])extra++;}else if(swept)extra+=this.mixedBodySwept;
+      if(joined){extra+=joined.size;if(swept)for(const t of swept)if(!joined.has(t))extra++;}else if(swept)extra+=swept.size;
       // The bound is the capacity the attach reserved, every tile the pool
       // can store or the frame's h ceiling: nothing grows here. A census has
       // no generation to fall back to.
@@ -1854,7 +1844,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // frame with no liquid moving, over whatever the receipts count.
     const mask=request.mask,swept=bodies.length&&request.count<tiles?this.mixedBodyTiles(bodies,dt):undefined,joined=this.mixedEditJoin?.tiles;
     let need=request.count,extra=0;
-    if(swept||joined)for(let t=0;t<tiles;t++){if(!mask[t]&&(swept?.[t]||joined?.[t])){need++;extra++;}else if(joined?.[t])extra++;}
+    // Each tile of the two once: not requested, it adds to the need and the extra; requested, a joined one to the extra.
+    const visit=(t:number)=>{if(!mask.has(t)){need++;extra++;}else if(joined?.has(t))extra++;};
+    if(joined)for(const t of joined)visit(t);
+    if(swept)for(const t of swept)if(!joined?.has(t))visit(t);
     need=Math.min(tiles,need);
     // The liquid moves the need: solid contact over solids, bodies.
     const live=request.count<tiles&&(bodies.length>0||!!request.coupled);
@@ -1892,7 +1885,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         // their reach bound the build, and the frame keeps its budgets.
         let counted:UniformWorkEdit|undefined;
         if(!first&&this.mixedHostFine===0&&!bodies.length&&!request.coupled&&!this.mixedEditJoin){
-          const listed:number[]=[];for(let t=0;t<mask.length;t++)if(mask[t])listed.push(t);
+          const listed=[...mask.keys()].sort((p,q)=>p-q);
           counted={tiles:listed.length,reach:this.mixedEditReach(listed)};
         }
         frame.setRelayout(this.mixedRelayout(),frame.ownership.capacity.fineTiles,!!counted);this.mixedGpuLayout=true;this.staleMixed();this.mixedEdit=counted;
@@ -2015,9 +2008,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const set=buildUniformDetailRequests({settings:this.detail,regions:this.scene.fluid.refinementRegions??[],domain:uniformDetailDomain(refinementRegionLattice(this.scene)),acceptedStep:step,focus});
     const plan=planner.plan({requests:set.requests,suppressions:set.suppressions,automaticSources:set.automaticSources,acceptedStep:step,budgetPercent:this.detail.budgetPercent});
     planner.commit(plan);
-    const suppressed=new Uint8Array(planner.tiles);
-    for(const box of set.suppressions)for(const t of planner.tilesOf(box.bounds_m))suppressed[t]=1;
-    this.detailPlan=plan;this.detailSuppressed=suppressed;this.detailFocus=focus;this.detailUnconstrained=set.unconstrainedRegions.length;
+    this.detailPlan=plan;this.detailFocus=focus;this.detailUnconstrained=set.unconstrainedRegions.length;
     return plan;
   }
   /** The accepted plan's diagnostics, beside what this solver adds outside it. */
@@ -2209,17 +2200,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * .encodeTiles via setBodies, liquid-conditional). The roster's poses and
    * speeds may be older than the GPU's: a census that needs more defers its
    * build and its receipt grows the capacity (readMixedRelayout). */
-  private mixedBodyScratch?:Uint8Array;
-  /** The tiles the last marking set (cleared one by one, not by a fill of
-   * every box tile), and how many. Grown, never per frame once the reach is seen. */
-  private mixedBodyMarked=new Uint32Array(64);
-  private mixedBodySwept=0;
-  private mixedBodyTiles(bodies:readonly RigidBodyState[],dt:number):Uint8Array{
+  private readonly mixedBodyScratch=new Set<number>();
+  private mixedBodyTiles(bodies:readonly RigidBodyState[],dt:number):ReadonlySet<number>{
     const {cellSize_m,origin_m}=fluidRegionLattice(this.scene);
-    const a=this.address,count=a.boxTiles,wx=4*cellSize_m[0],wy=4*cellSize_m[1],wz=4*cellSize_m[2],cell=Math.max(cellSize_m[0],cellSize_m[1],cellSize_m[2]);
+    const a=this.address,wx=4*cellSize_m[0],wy=4*cellSize_m[1],wz=4*cellSize_m[2],cell=Math.max(cellSize_m[0],cellSize_m[1],cellSize_m[2]);
     // One scratch mask per solver: the callers count it and keep nothing.
-    let tiles=this.mixedBodyScratch,marked=this.mixedBodyMarked,swept=0;
-    if(tiles?.length===count){for(let i=0;i<this.mixedBodySwept;i++)tiles[marked[i]!]=0;}else tiles=this.mixedBodyScratch=new Uint8Array(count);
+    const tiles=this.mixedBodyScratch;tiles.clear();
     for(const body of bodies){
       const v=body.linearVelocity_m_s,reach=boundingRadius(body)+Math.hypot(v.x,v.y,v.z)*dt+cell;
       const cx=body.position_m.x-origin_m.x,cy=body.position_m.y-origin_m.y,cz=body.position_m.z-origin_m.z;
@@ -2228,12 +2214,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const y0=uniformTileNear(a,1,Math.floor((cy-reach)/wy)-1),y1=uniformTileNear(a,1,Math.floor((cy+reach)/wy)+1);
       const z0=uniformTileNear(a,2,Math.floor((cz-reach)/wz)-1),z1=uniformTileNear(a,2,Math.floor((cz+reach)/wz)+1);
       for(let z=z0;z<=z1;z++)for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){
-        const t=uniformBoxTileIndex(a,x,y,z);if(tiles[t])continue;tiles[t]=1;
-        if(swept===marked.length){const grown=new Uint32Array(2*marked.length);grown.set(marked);marked=this.mixedBodyMarked=grown;}
-        marked[swept++]=t;
+        tiles.add(uniformBoxTileIndex(a,x,y,z));
       }
     }
-    this.mixedBodySwept=swept;
     return tiles;
   }
   /** A live voxel edit on the mixed path, as the tiles the mask reported
@@ -2246,54 +2229,50 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * syncMixedLayout): the solid mask of the next census, when contact is
    * requested, and cut 4h owners otherwise. */
   private editMixedSolids(edit:ReturnType<typeof uniformMixedSolidEdit>):void{
-    const frame=this.mixedFrame!,touched=this.mixedSolidTouched!;
+    const frame=this.mixedFrame!;
     const dimensions=fluidRegionLattice(this.scene).dimensions as [number,number,number];
-    try{
-      // The promotion held for the mask before this edit (the caller has
-      // stamped the edited one) follows it by the touched tiles. A first
-      // build or another terrain is the lattice scan (mixedSolidPromotion).
-      const terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined,promotion=this.mixedSolidTiles;
-      if(promotion&&promotion.stamp===this.mixedSolidMaskStamp-1&&promotion.terrain===terrain){
-        const solid=uniformMixedSolidTilesAfterEdit(promotion.tiles,dimensions,this.solidMask,edit,terrain);
-        this.mixedSolidTiles={stamp:this.mixedSolidMaskStamp,terrain,tiles:{...solid,any:solid.coupledTiles>0}};
-      }
-      if(this.mixedGpuLayout&&this.detail.policy==="dynamic"){
-        const solid=this.mixedSolidPromotion();
-        // Refresh the builder statics and census solid mask now: the next census reads them.
-        this.refreshMixedBuilderStatics(solid);
-        this.joinMixedEdit(solid.coupled,edit.tiles);
-      }else if(this.detail.policy!=="dynamic"&&true){
-        // Requests only: nothing else asks for a new solid's tiles when solid
-        // contact is off, and a dry promotion skips them when it is on. The
-        // join holds them at h for the build that displaces (syncMixedLayout
-        // counts them into the capacity before it).
-        this.joinMixedEdit(this.mixedSolidPromotion().coupled,edit.tiles);
-      }
-    }finally{for(const t of edit.tiles)touched[t]=0;}
+    // The promotion held for the mask before this edit (the caller has
+    // stamped the edited one) follows it by the touched tiles. A first
+    // build or another terrain is the lattice scan (mixedSolidPromotion).
+    const terrain=sceneHasTerrain(this.scene)?this.mixedTerrainCells:undefined,promotion=this.mixedSolidTiles;
+    if(promotion&&promotion.stamp===this.mixedSolidMaskStamp-1&&promotion.terrain===terrain){
+      const solid=uniformMixedSolidTilesAfterEdit(promotion.tiles,dimensions,this.solidMask,edit,terrain);
+      this.mixedSolidTiles={stamp:this.mixedSolidMaskStamp,terrain,tiles:{...solid,any:solid.coupledTiles>0}};
+    }
+    if(this.mixedGpuLayout&&this.detail.policy==="dynamic"){
+      const solid=this.mixedSolidPromotion();
+      // Refresh the builder statics and census solid mask now: the next census reads them.
+      this.refreshMixedBuilderStatics(solid);
+      this.joinMixedEdit(solid.coupled,edit.tiles);
+    }else if(this.detail.policy!=="dynamic"&&true){
+      // Requests only: nothing else asks for a new solid's tiles when solid
+      // contact is off, and a dry promotion skips them when it is on. The
+      // join holds them at h for the build that displaces (syncMixedLayout
+      // counts them into the capacity before it).
+      this.joinMixedEdit(this.mixedSolidPromotion().coupled,edit.tiles);
+    }
     frame.editSolids();
   }
-  /** One byte per tile, zero between edits: the tiles of the edit being applied (editMixedSolids). */
-  private mixedSolidTouched?:Uint8Array;
   /** The edit's join: its touched tiles and, liquid-conditional promotion's
    * rule with those as the liquid (the census's solidActive and
    * solidPromote), the 26
    * neighbours of each that is solid-coupled, over the tiles a join already
    * holds. Walked from the touched tiles: the edit's cost, not the lattice's. */
-  private joinMixedEdit(coupled:Uint8Array,tiles:readonly number[]):void{
-    const a=this.address,p=this.mixedEditTile,held=this.mixedEditJoin,join=held?held.tiles.slice():new Uint8Array(a.boxTiles);
+  private joinMixedEdit(coupled:ReadonlySet<number>,tiles:readonly number[]):void{
+    const a=this.address,p=this.mixedEditTile,held=this.mixedEditJoin,join=new Set(held?.tiles);
     for(const t of tiles){
-      join[t]=1;
-      if(!coupled[t])continue;
+      join.add(t);
+      if(!coupled.has(t))continue;
       const [tx,ty,tz]=uniformBoxTileCoord(a,t,p);
       for(let z=tz-1;z<=tz+1;z++)for(let y=ty-1;y<=ty+1;y++)
-        for(let x=tx-1;x<=tx+1;x++)if(uniformTileInBox(a,x,y,z))join[uniformBoxTileIndex(a,x,y,z)]=1;
+        for(let x=tx-1;x<=tx+1;x++)if(uniformTileInBox(a,x,y,z))join.add(uniformBoxTileIndex(a,x,y,z));
     }
     this.mixedDynamic!.join(this.mixedTileWords(join));this.mixedEditJoin={tiles:join};
   }
-  /** The set tiles of a box-shaped tile mask as tile words of the window (uniformMixedTileWord). */
-  private mixedTileWords(mask:Uint8Array):number[]{
+  /** A set of box tiles as tile words of the window (uniformMixedTileWord), in ascending box index. */
+  private mixedTileWords(tiles:ReadonlySet<number>):number[]{
     const a=this.address,p=this.mixedEditTile,words:number[]=[];
-    for(let t=0;t<mask.length;t++)if(mask[t]){uniformBoxTileCoord(a,t,p);words.push(uniformMixedTileWord(p[0],p[1],p[2]));}
+    for(const t of [...tiles].sort((i,j)=>i-j)){uniformBoxTileCoord(a,t,p);words.push(uniformMixedTileWord(p[0],p[1],p[2]));}
     return words;
   }
   /** The scene's Fine and Coarse regions as the builder's and the census's region table. */
@@ -2322,10 +2301,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * solid contact is requested; a solid mask the census holds is not written
    * again. */
   private refreshRequestStatics(request:NonNullable<WebGPUUniformReferenceSolver["mixedRequest"]>):void{
-    const builder=this.mixedBuilder!,dynamic=this.mixedDynamic!,fine=request.tiles.fine;
+    const builder=this.mixedBuilder!,dynamic=this.mixedDynamic!;
     if(this.mixedStaticsOf!==request.tiles){const table=this.mixedRegionTable();builder.setRegions(table);dynamic.setRegions(table);this.mixedStaticsOf=request.tiles;}
     request.moved.length=0;
-    const coupled=request.coupled??(this.mixedNoSolid?.length===fine.length?this.mixedNoSolid:this.mixedNoSolid=new Uint8Array(fine.length));
+    const coupled=request.coupled??this.mixedNoSolid;
     if(coupled!==this.mixedSolidSet){dynamic.setSolid(this.mixedTileWords(coupled));this.mixedSolidSet=coupled;}
     this.holdDetailStaticKey();
   }
@@ -3328,8 +3307,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The mask tells the edit every cell it moves as it folds the scene in;
     // the columns of those cells are the bed-slope lane's to bake again.
     // Edit tiles share the running solver's page-padded storage dimensions.
-    const edit = this.mixedFrame ? uniformMixedSolidEdit(this.address.cells,
-      this.mixedSolidTouched ??= new Uint8Array(this.address.boxTiles)) : undefined;
+    const edit = this.mixedFrame ? uniformMixedSolidEdit(this.address.cells) : undefined;
     let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
     const dirty = this.solidMask.update(solidWorldForFluidLattice(scene), (x, y, z, solid) => {
       edit?.cell(x, y, z, solid);

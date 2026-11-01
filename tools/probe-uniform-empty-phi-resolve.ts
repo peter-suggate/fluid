@@ -47,7 +47,7 @@ for(const groups of [512,1024]){
 }
 // A real mixed tile exercises the nonempty path with nonconstant canonical
 // values; compare every resulting logical vertex after restoring the upload.
-const forced=new Uint8Array(address.boxTiles);forced[3+8*(3+8*3)]=1;
+const forced=new Set([3+8*(3+8*3)]);
 const mixed=createUniformMixedLayout(lattice,[],4,forced,address);ownership.update(mixed);
 const volume=storage.createField('fixture volume','cell','r32float'),velocity=storage.createField('fixture velocity','face','rgba32float'),velocityScratch=storage.createField('fixture velocity scratch','face','rgba32float');
 await storage.prepare(ownership);
