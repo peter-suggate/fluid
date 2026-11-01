@@ -1438,7 +1438,8 @@ fn umCellOpen(p:vec3i)->f32{
 // either form.
 fn umCellIsOpen(p:vec3i)->bool{
  ${coarse!==undefined&&gated?`if(!umSolidEnabled()){return umSolidValid(p);}
- let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return umCellOpen(p)>1e-5;}
+ // An unstored tile's cell of a wall page: umCellOpenGeometry's voxel 0.
+ let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){if(!umSolidValid(p)){return false;}return umCellOpen(p)>1e-5;}
  return umStoredCellIsOpen(p,t);`:"return umCellOpen(p)>1e-5;"}
 }
 // umCellIsOpen(p) where t, the key of p's tile, is stored: the record's bit,
