@@ -1546,7 +1546,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const fineBlocks=uniformFineBlocks(tiers);
     if(coarseStart&&fineBlocks!==undefined)detail.slotFromStart(slotRule??(fineBlocks as number));
     if(seed&&seed.fineTiles.length>fineCeiling)throw new Error(`Uniform simulation detail: the coarse start holds ${seed.fineTiles.length} h tiles (its Fine regions); fluid.tiers.bricks ${fineCeiling/8} holds ${fineCeiling}: raise fluid.tiers.bricks`);
-    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,bulkSlots:this.bulkSlotCapacity(),bulkReach:(this.bulkReach??=this.bulkReachMasks()).capacity,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
+    this.mixedFrame=new UniformMixedFrame(this.device,fine,{fineTiles:gpuLayout?(coarseStart?fineCeiling:tiles):0,fineCeiling:coarseStart?fineCeiling:undefined,particles,bulkSlots:this.bulkSlotCapacity(),bulkReach:this.narrowBandNearSettled.bulkTier==="16h"?(this.bulkReach??=this.bulkReachMasks()).capacity:0,liquidBand:gpuLayout,particleTransfer:this.narrowBandTransfer,fixedWorldGeometry:true,coldRegions:this.narrowBandColdRegions,coldFrameSkip:this.narrowBandColdFrameSkip,nearSettled:this.narrowBandNearSettled},{
       arena:this.scratchArena,volume:this.volumeA,volumeScratch:this.volumeB,
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
@@ -3419,15 +3419,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       edit?.cell(x, y, z, solid);
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z;
     });
+    // Reach past static walls follows the edit, in the key slots held since
+    // construction: counted from the mask before the frame takes the edit, so
+    // an edit past them (the key-slot rule makes none) is refused as the mask
+    // refuses one, not left half applied.
+    const reach = dirty && this.bulkReach && this.mixedFrame?.bulkPages ? this.bulkReachMasks(this.bulkReach.capacity) : undefined;
+    const reachTable = reach ? bulkReachTable(reach.masks, reach.capacity) : undefined;
     if (dirty) { this.solidVoxelsEmpty = this.solidMask.empty; this.mixedSolidMaskStamp++; }
     // Dynamic coarsening joins the edit's tiles on the GPU (the next head
     // adopts them); a requests-only layout takes the scene's request.
     if (dirty && edit) this.editMixedSolids(edit);
-    // Reach past static walls follows the edit, in the key slots held since construction.
-    if (dirty && this.bulkReach && this.mixedFrame?.bulkPages) {
-      this.bulkReach = this.bulkReachMasks(this.bulkReach.capacity);
-      this.mixedFrame.bulkPages.reach(bulkReachTable(this.bulkReach.masks, this.bulkReach.capacity));
-    }
+    if (reach && reachTable) { this.bulkReach = reach; this.mixedFrame!.bulkPages!.reach(reachTable); }
     this.syncMixedLayout();
     // The directory words and the page slots the edit rewrote; the buffer is never resized.
     if (dirty) for (const range of dirty) this.device.queue.writeBuffer(this.activeScratch, range.firstWord * 4, this.solidMask.words, range.firstWord, range.wordCount);

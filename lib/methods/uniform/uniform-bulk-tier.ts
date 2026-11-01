@@ -107,7 +107,8 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       buffer(2, "read-only-storage"), buffer(3, "read-only-storage"), ...(S ? [buffer(4, "read-only-storage")] : []), buffer(5, "read-only-storage"), buffer(6, "read-only-storage"), buffer(7, "storage"),
       { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d" } }, buffer(9, "read-only-storage"), buffer(10, "read-only-storage"),
-      ...(Q ? [buffer(11, "uniform"), buffer(12, "uniform")] : [])] });
+      ...(Q ? [buffer(11, "uniform"), buffer(12, "uniform")] : []),
+      ...(P ? [{ binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "uint" as const, viewDimension: "2d" as const } }] : [])] });
     // The stage is at the per-stage storage limit (10): the BULK16 store
     // shares the record's binding (both lie in the arena's pool B, the store
     // after the record), so binding 10 can take the pool's state.
@@ -130,7 +131,8 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
       { binding: 2, resource: { buffer: f.slots.buffer } }, { binding: 3, resource: f.rootPhi }, ...(f.rootTopology ? [{ binding: 4, resource: f.rootTopology }] : []),
       { binding: 5, resource: { buffer: f.heat } }, { binding: 6, resource: { buffer: p.buffer, offset: base, size: size + offset - base } },
       { binding: 7, resource: span }, { binding: 8, resource: this.faces.createView() }, { binding: 9, resource: { buffer: regions.buffer } }, { binding: 10, resource: { buffer: f.pool.state } },
-      ...(Q ? [{ binding: 11, resource: f.bodies!.params }, { binding: 12, resource: f.bodies!.bodies }] : [])] });
+      ...(Q ? [{ binding: 11, resource: f.bodies!.params }, { binding: 12, resource: f.bodies!.bodies }] : []),
+      ...(P ? [{ binding: 13, resource: P.reachTexture.createView() }] : [])] });
     const H = UNIFORM_BULK_HEADER(R), C = UNIFORM_BULK_COUNT;
     const code = uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec4f}
@@ -163,7 +165,8 @@ var<workgroup> bAir:atomic<u32>;
 // The region's reach past static walls (uniform-bulk-reach): bit i its neighbourhood tile i.
 var<workgroup> bReachM:array<u32,${BULK_REACH_WORDS}>;
 // The reach table, the BULK16 store's (record binding, after the record).
-${bulkReachWGSL(P?.layout.reachSlots ?? 0, i => `atomicLoad(&record[${storeWord + (P?.layout.reach ?? 0)}u+${i}])`)}
+${P ? "@group(1) @binding(13) var bReachTable:texture_2d<u32>;" : ""}
+${bulkReachWGSL(P?.reachSlots ?? 0, i => `textureLoad(bReachTable,vec2u((${i})%${P!.reachWidth}u,(${i})/${P!.reachWidth}u),0).x`)}
 // The region's own tiles: bit 0 an open one, bit 1 a closed one (open <= 1e-5).
 var<workgroup> bShape:atomic<u32>;
 var<workgroup> bError:atomic<u32>;

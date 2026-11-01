@@ -101,8 +101,17 @@ export class UniformBulkPages{
  get state():GPUBuffer{return this.store.buffer;}
  get binding():GPUBufferBinding{return {buffer:this.store.buffer,offset:this.store.offset,size:this.layout.bytes};}
  get allocatedBytes():number{return this.store.owned?this.store.buffer.size:0;}
+ /** The reach table past static walls (bulkReachTable): reachSlots key
+  * slots, in a texture of its own (r32uint, reachWidth texels a row), out of
+  * the store's binding and of the stage's storage-buffer bindings. */
+ readonly reachSlots:number;readonly reachWidth:number;readonly reachTexture:GPUTexture;
  constructor(private readonly device:GPUDevice,capacity:number,reachSlots=0){
-  this.layout=bulk16PageLayout(capacity,reachSlots);
+  this.layout=bulk16PageLayout(capacity);
+  if(!Number.isSafeInteger(reachSlots)||reachSlots<0||(reachSlots&(reachSlots-1))!==0)throw new Error("Invalid BULK16 reach slots");
+  const words=bulkReachTableWords(this.reachSlots=reachSlots),side=device.limits.maxTextureDimension2D;
+  const width=this.reachWidth=Math.max(1,Math.min(4096,side,words)),height=Math.max(1,Math.ceil(words/width));
+  if(height>side)throw new Error(`BULK16 reach table: ${reachSlots} key slots (bulkReachCapacity(64 S + B): 64 regions a page slot of the sealed solid mask, and the bed's) need ${4*words} bytes, past the device's ${side}x${side} texture`);
+  this.reachTexture=device.createTexture({label:"Uniform BULK16 reach table",size:[width,height],format:"r32uint",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
   if(this.layout.bytes>Math.min(device.limits.maxBufferSize,device.limits.maxStorageBufferBindingSize))throw new Error(`BULK16 capacity ${capacity} needs ${this.layout.bytes} bytes in one storage binding`);
   this.store={buffer:device.createBuffer({label:"Uniform whole-page BULK16 slots",size:this.layout.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}),offset:0,owned:true};
   this.liveLaunch=device.createBuffer({label:"Uniform BULK16 live launch",size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
@@ -121,15 +130,14 @@ export class UniformBulkPages{
   this.device.queue.writeBuffer(this.store.buffer,this.store.offset,seed);
   if(this.started)this.device.queue.writeBuffer(this.store.buffer,this.store.offset+4*(this.layout.records+BULK16_PAGE_WORDS),this.started);
   this.device.queue.writeBuffer(this.liveLaunch,0,new Uint32Array([Math.min(n,BULK16_LIVE_GROUPS),1,1,0]));
-  if(this.reachTable)this.device.queue.writeBuffer(this.store.buffer,this.store.offset+4*this.layout.reach,this.reachTable);
  }
- private reachTable?:Uint32Array<ArrayBuffer>;
- /** The reach table past static walls (bulkReachTable, layout.reachSlots
-  * key slots): at construction, and again after a solid edit. */
+ /** The reach table (bulkReachTable, reachSlots key slots): at construction, and again after a solid edit. */
  reach(table:Uint32Array<ArrayBuffer>):void{
-  if(table.length!==bulkReachTableWords(this.layout.reachSlots))throw new Error(`BULK16 reach: ${table.length} words for ${this.layout.reachSlots} key slots`);
-  this.reachTable=table.length?table:undefined;
-  if(this.reachTable)this.device.queue.writeBuffer(this.store.buffer,this.store.offset+4*this.layout.reach,this.reachTable);
+  if(table.length!==bulkReachTableWords(this.reachSlots))throw new Error(`BULK16 reach: ${table.length} words for ${this.reachSlots} key slots`);
+  if(!table.length)return;
+  const width=this.reachWidth,rows=Math.floor(table.length/width),rest=table.length-rows*width;
+  if(rows)this.device.queue.writeTexture({texture:this.reachTexture},table,{bytesPerRow:4*width},[width,rows]);
+  if(rest)this.device.queue.writeTexture({texture:this.reachTexture,origin:[0,rows]},table,{offset:4*rows*width,bytesPerRow:4*rest},[rest,1]);
  }
  /** Before any frame: the census start's pages, each a whole record
   * (BULK16_PAGE_WORDS) as a claim and its demote write them at the first
@@ -196,7 +204,7 @@ var<workgroup> bpScan:array<u32,256>;
  encodeBegin(encoder:GPUCommandEncoder):void{this.encode(encoder,this.begin,"BULK16 reclaim quarantine");}
  encodeFinish(encoder:GPUCommandEncoder):void{this.encode(encoder,this.finish,"BULK16 publish live slots");}
  encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset=0):void{encoder.copyBufferToBuffer(this.store.buffer,this.store.offset,target,offset,4*BULK16_STATUS.words);}
- destroy():void{if(this.store.owned)this.store.buffer.destroy();this.liveLaunch.destroy();}
+ destroy():void{if(this.store.owned)this.store.buffer.destroy();this.liveLaunch.destroy();this.reachTexture.destroy();}
 }
 
 export function bulk16Failure(receipt:ArrayLike<number>):string|undefined{
