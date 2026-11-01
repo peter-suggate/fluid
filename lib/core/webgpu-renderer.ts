@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { rigidControlOwnerId } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import { boundedPresentationScale } from "./presentation-resolution";
@@ -960,7 +961,7 @@ export class FluidLabRenderer {
   private svoPipelineAvailable = false;
   private readonly surfaceTuningCache = new SvoSurfaceTuningCache();
   private readonly viewUniformWords = new Float32Array(104);
-  private readonly bodyUploadWords = new Float32Array(12 * 16);
+  private readonly bodyUploadWords = new Float32Array(GPU_RIGID_BODY_CAPACITY * 16);
   private readonly rigidBoundsScratch: { centre_m: [number, number, number]; radius_m: number } = { centre_m: [0, 0, 0], radius_m: 0 };
   /**
    * Owner range of the object under the editor cursor, for the hover rim.
@@ -1701,7 +1702,7 @@ export class FluidLabRenderer {
     this.upscalePipeline=upscalePipeline;
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
     this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 416, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: GPU_RIGID_BODY_CAPACITY * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.columnBaseTexture = device.createTexture({ label: "Uniform-grid tall-cell fallback", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.gridCellTexture = device.createTexture({ label: "Uniform-grid adaptive-cell fallback", size: [1, 1, 1], dimension: "3d", format: "rg32uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -2967,7 +2968,7 @@ export class FluidLabRenderer {
     packed[15] = scene.container.height_m * scene.container.fillFraction;
     packed[16] = activeSvoDiagnostics.maximumTraversalDepth * 512 + activeSvoDiagnostics.maximumNodeVisits;
     packed[17] = scene.voxelDomain.finestCellSize_m;
-    packed[18] = Math.min(bodies.length, 12);
+    packed[18] = Math.min(bodies.length, GPU_RIGID_BODY_CAPACITY);
     // Largest represented pressure-cell width, for the grid overlay palette.
     packed[19] = gpuInfo?.quadtreeMaximumFluidScale ?? 1;
     packed[20] = gpuInfo?.tankCells?.[0] ?? gpuInfo?.nx ?? 1;
@@ -3007,7 +3008,7 @@ export class FluidLabRenderer {
     } else {
       const bodyData = this.bodyUploadWords;
       bodyData.fill(0);
-      bodies.slice(0, 12).forEach((body, index) => {
+      bodies.slice(0, GPU_RIGID_BODY_CAPACITY).forEach((body, index) => {
         const offset = index * 16;
         const shape = body.description.shape;
         const skin = rigidAppearanceSkin(body.description);
@@ -3120,7 +3121,7 @@ export class FluidLabRenderer {
       fluidSource?.encodeSceneMaintenance?.(encoder, closeStage);
       if (sparseSceneProducer !== fluidSource) sparseSceneProducer?.encodeSceneMaintenance?.(encoder, closeStage);
     }
-    if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
+    if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, GPU_RIGID_BODY_CAPACITY * 16 * 4);
     // The same records, on their way to the host. See `publishRigidBodyPoses`.
     //
     // Issued while the simulation runs, which is the whole point: the solver
@@ -3254,7 +3255,7 @@ export class FluidLabRenderer {
       });
     }
     this.svoPickingAvailable = svoEncoded;
-    this.lastSvoPickingBodies = this.svoPickingAvailable ? bodies.slice(0, 12) : [];
+    this.lastSvoPickingBodies = this.svoPickingAvailable ? bodies.slice(0, GPU_RIGID_BODY_CAPACITY) : [];
     const silhouetteRefinementStatus = this.svoDryScenePipeline?.silhouetteRefinementStatus;
     const lightingVisibilityStatus = this.svoDryScenePipeline?.lightingVisibilityStatus;
     const worldWaterStatus = worldWaterRequested ? this.svoDryScenePipeline?.waterWorldReflectionStatus : undefined;
@@ -3443,7 +3444,7 @@ export class FluidLabRenderer {
         this.onStatus({ state: "unavailable", label: `GPU submission failed: ${error instanceof Error ? error.message : String(error)}`, failure: error instanceof SimulationFailureError ? error.failure : undefined, resource: webGPUPlatformResourcePlugin });
       }
     });
-    if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, 12).map((body) => body.description.id));
+    if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, GPU_RIGID_BODY_CAPACITY).map((body) => body.description.id));
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read({ onSubmittedWorkDone: () => presentationCompletion });
     const presentationStageTraceRead = presentationTraceResolved && presentationTrace

@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../lib/core/rigid-capacity";
 import assert from "node:assert/strict";
 import "../../lib/methods";
 import { findSceneDefinition } from "../../lib/core/scenes";
@@ -212,7 +213,7 @@ try {
     { x: Math.fround(-0.08), y: Math.fround(0.68), z: Math.fround(0.02) });
 
   const renderRecords = packRustRigidRenderRecords(bodies, frame.rigidBodies);
-  assert.equal(renderRecords.length, 12 * 16);
+  assert.equal(renderRecords.length, GPU_RIGID_BODY_CAPACITY * 16);
   assert.deepEqual([...renderRecords.slice(0, 3)], [-0.08, 0.68, 0.02].map(Math.fround));
   assert.equal(frame.revision.commandSequence, sequence);
 

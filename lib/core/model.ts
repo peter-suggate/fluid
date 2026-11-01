@@ -94,10 +94,14 @@ export interface RigidBodyDescription {
    * Omitted means full drive; zero stops the motors without constraining the
    * free parent; negative turns them backwards. */
   motorStrength?: number;
+  /** Independent named drives; missing channels inherit motorStrength. */
+  motorStrengths?: Record<string, number>;
 }
 
 export interface RigidMotorAttachment {
   parentId: string;
+  /** Optional independent drive on the parent (for example left/right). */
+  channel?: string;
   pivot_m: Vec3;
   offset_m: Vec3;
   axis: Vec3;
@@ -962,6 +966,7 @@ export function validateScene(scene: SceneDescription): string[] {
         const motor = body.motorAttachment, parent = scene.rigidBodies.find(p => p.id === motor.parentId);
         if (!parent || parent === body || parent.motion === 'static' || parent.motorAttachment) errors.push(`Body ${body.id} motor needs a free, unparented body`);
         if (body.motion !== 'static' || body.poseTrack || body.prescribedMotion || scene.interaction?.entities.length) errors.push(`Body ${body.id} motor has conflicting motion authority`);
+        if (motor.channel !== undefined && (typeof motor.channel !== 'string' || !motor.channel.trim())) errors.push(`Body ${body.id} motor channel must be non-empty`);
         const q = motor.orientation, a = motor.axis;
         const pivot = motor.pivot_m, offset = motor.offset_m;
         if (![pivot?.x, pivot?.y, pivot?.z, offset?.x, offset?.y, offset?.z, a?.x, a?.y, a?.z,
@@ -970,6 +975,8 @@ export function validateScene(scene: SceneDescription): string[] {
           || motor.startTime_s < 0 || !(motor.rampUp_s > 0)) errors.push(`Body ${body.id} motor needs finite geometry, unit axes and positive ramp`);
       }
       if (body.motorStrength !== undefined && (!Number.isFinite(body.motorStrength) || body.motorStrength < -1 || body.motorStrength > 1)) errors.push(`Body ${body.id} motor strength must be in [-1, 1]`);
+      if (body.motorStrengths !== undefined && (!body.motorStrengths || typeof body.motorStrengths !== 'object' || Array.isArray(body.motorStrengths)
+        || Object.entries(body.motorStrengths).some(([channel, strength]) => !channel.trim() || !Number.isFinite(strength) || strength < -1 || strength > 1))) errors.push(`Body ${body.id} motor strengths must be named values in [-1, 1]`);
       if (!(body.dimensions_m.x > 0) || !(body.dimensions_m.y > 0) || !(body.dimensions_m.z > 0)) errors.push(`Body ${body.id} dimensions must be positive`);
       if (!(body.density_kg_m3 > 0)) errors.push(`Body ${body.id} density must be positive`);
       if (body.restitution < 0 || body.restitution > 1) errors.push(`Body ${body.id} restitution must be in [0, 1]`);

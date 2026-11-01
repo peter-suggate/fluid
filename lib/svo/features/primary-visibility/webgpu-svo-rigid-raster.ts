@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../../core/rigid-capacity";
 import { seaweedShaderLibrary } from "../../../core/seaweed-render";
 import { paddleboatShaderLibrary } from "../../../core/paddleboat-render";
 import { robotShaderLibrary } from '../../../interaction/features/robot/render';
@@ -12,27 +13,11 @@ import { VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
  * camera uniform and live BodyGPU buffer, then draws 36 vertices per body.
  */
 export const SVO_RIGID_RASTER_CONTRACT = Object.freeze({
-  /**
-   * Bodies this pass can draw, and the *soft* half of a two-part ceiling.
-   *
-   * Twelve is a shape three things agree on and can be moved together: the
-   * `rigidMotion` uniform array, `bodyBufferBytes`, and the instance count the
-   * dry scene draws (`lib/webgpu-svo-dry-scene.ts:7719`, `:7731`). Raising it
-   * costs one uniform slot and one proxy instance per body.
-   *
-   * `maximumAddressableBodies` below is the *hard* half and does not move with
-   * it: the current-frame primary-geometry certificate packs the owner into
-   * four bits (`rigidPackPrimaryGeometryMetadata`), so body 16 would be read
-   * back as body 0 by the split bridge — the one aliasing failure in this file.
-   * Past twelve and up to sixteen, `assertSvoRigidRasterBodyCount` is what turns
-   * the vertex stage's silent `min(bodyCount, RIGID_RASTER_MAX_BODIES)` clamp
-   * (bodies simply stop being drawn) into a message.
-   */
-  maximumBodies: 12,
-  /** Four bits of owner in the certificate word; see `maximumBodies`. */
-  maximumAddressableBodies: 16,
+  /** Five owner bits in the primary certificate; all consumers share this limit. */
+  maximumBodies: GPU_RIGID_BODY_CAPACITY,
+  maximumAddressableBodies: 32,
   bodyStrideBytes: 64,
-  bodyBufferBytes: 12 * 64,
+  bodyBufferBytes: GPU_RIGID_BODY_CAPACITY * 64,
   bodySourcePolicy: "bind-live-buffer-directly" as const,
   bodyBufferRequiredUsage: Object.freeze(["UNIFORM", "STORAGE", "COPY_DST"] as const),
   verticesPerProxy: 36,
@@ -168,7 +153,7 @@ export const SVO_RIGID_RASTER_INTEGRATION = Object.freeze({
  * The loud check for a live body count, before the vertex stage drops the tail.
  *
  * `rigidRasterVertex` clamps to `min(options.z, RIGID_RASTER_MAX_BODIES)`, so a
- * thirteenth body is not drawn and nothing anywhere says so — a "loud" row in
+ * body past the capacity is not drawn and nothing anywhere says so — a "loud" row in
  * the capacity table whose loud half only fires if someone happens to call
  * `packSvoRigidRasterSplitIdentity`. Call this once where the scene's body
  * count becomes known and the drop becomes a message that names both ceilings.
@@ -183,8 +168,8 @@ export function assertSvoRigidRasterBodyCount(bodyCount: number, context = "scen
       `Rigid raster body overflow: ${context} has ${bodyCount} bodies and the pass draws ${maximumBodies}. `
       + `Bodies past the ceiling are silently not drawn by rigidRasterVertex. Raise `
       + `SVO_RIGID_RASTER_CONTRACT.maximumBodies (with bodyBufferBytes and the rigidMotion uniform array, which `
-      + `derive from it) up to at most ${maximumAddressableBodies}; past that the split bridge's four-bit owner `
-      + `field aliases body n onto body n & 15 and the certificate must widen first.`);
+      + `derive from it) up to at most ${maximumAddressableBodies}; past that the split bridge's five-bit owner `
+      + `field aliases body n onto body n & 31 and the certificate must widen first.`);
   }
 }
 
@@ -193,7 +178,7 @@ export function packSvoRigidRasterSplitIdentity(bodyIndex: number, featureId: nu
   if (!Number.isInteger(bodyIndex) || bodyIndex < 0 || bodyIndex >= SVO_RIGID_RASTER_CONTRACT.maximumBodies) {
     throw new RangeError(`Rigid raster body index must be from 0 to ${SVO_RIGID_RASTER_CONTRACT.maximumBodies - 1};`
       + ` raise SVO_RIGID_RASTER_CONTRACT.maximumBodies (hard ceiling`
-      + ` ${SVO_RIGID_RASTER_CONTRACT.maximumAddressableBodies}, the certificate's four-bit owner field)`);
+      + ` ${SVO_RIGID_RASTER_CONTRACT.maximumAddressableBodies}, the certificate's five-bit owner field)`);
   }
   if (!Number.isInteger(featureId) || featureId < 0 || featureId > 0xf) {
     throw new RangeError("Rigid raster feature ID must fit four bits");
@@ -264,7 +249,7 @@ struct BodyGPU{
 @group(0) @binding(0) var<uniform> rigidUniforms:RigidRasterUniforms;
 ${cameraApertureShaderLibrary("rigidUniforms")}
 @group(0) @binding(1) var<storage,read> rigidBodies:array<BodyGPU>;
-@group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>;
+@group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,${GPU_RIGID_BODY_CAPACITY}>;
 @group(1) @binding(0) var rigidPackedSurfaceRead:texture_2d<u32>;
 @group(1) @binding(1) var rigidIdentityMediaRead:texture_2d<u32>;
 @group(1) @binding(2) var rigidSplitGeometryWrite:texture_storage_2d<rgba32float,write>;
@@ -278,10 +263,10 @@ fn rigidQinv(q:vec4f,v:vec3f)->vec3f{return rigidQrot(vec4f(q.x,-q.yzw),v);}
 fn rigidPackPrimaryGeometryMetadata(normalIn:vec3f,bodyIndex:u32,featureId:u32,motionValid:u32)->u32{
   let normal=normalize(normalIn);let inverseL1=1.0/(abs(normal.x)+abs(normal.y)+abs(normal.z));var oct=normal.xy*inverseL1;
   if(normal.z<0.0){let original=oct;oct=(vec2f(1.0)-abs(original.yx))*select(vec2f(-1.0),vec2f(1.0),original>=vec2f(0.0));}
-  let encoded=vec2u(round(clamp(oct*0.5+0.5,vec2f(0.0),vec2f(1.0))*4095.0));return encoded.x|(encoded.y<<12u)|((bodyIndex&15u)<<24u)|((featureId&7u)<<28u)|((motionValid&1u)<<31u);
+  let encoded=vec2u(round(clamp(oct*0.5+0.5,vec2f(0.0),vec2f(1.0))*vec2f(4095.0,2047.0)));return encoded.x|(encoded.y<<12u)|((bodyIndex&31u)<<23u)|((featureId&7u)<<28u)|((motionValid&1u)<<31u);
 }
 fn rigidUnpackPrimaryNormal(packed:u32)->vec3f{
-  let encoded=vec2f(f32(packed&0xfffu),f32((packed>>12u)&0xfffu))/4095.0*2.0-1.0;var normal=vec3f(encoded,1.0-abs(encoded.x)-abs(encoded.y));
+  let encoded=vec2f(f32(packed&0xfffu),f32((packed>>12u)&0x7ffu))/vec2f(4095.0,2047.0)*2.0-1.0;var normal=vec3f(encoded,1.0-abs(encoded.x)-abs(encoded.y));
   if(normal.z<0.0){let original=normal.xy;normal=vec3f((vec2f(1.0)-abs(original.yx))*select(vec2f(-1.0),vec2f(1.0),original>=vec2f(0.0)),normal.z);}return normalize(normal);
 }
 fn rigidProxyExtent(body:BodyGPU)->vec3f{
@@ -436,7 +421,7 @@ struct RigidDirectFragmentOut{
 // while the primary G-buffer attachments are still resident in the tile.
 @fragment fn rigidDirectFragment(input:RigidRasterVertexOut)->RigidDirectFragmentOut{
   let hit=rigidRasterSurface(input);let word=hit.primaryGeometry.y;
-  let owner=(word>>24u)&15u;let feature=(word>>28u)&7u;let motionValid=word>>31u;
+  let owner=(word>>23u)&31u;let feature=(word>>28u)&7u;let motionValid=word>>31u;
   let metadata=owner|(feature<<16u)|(RIGID_RASTER_FIELD_ANALYTIC<<20u)|(RIGID_RASTER_MOTION_RIGID<<24u)|(motionValid<<26u);
   return RigidDirectFragmentOut(hit.packedSurface,hit.identityMedia,
     vec4f(rigidUnpackPrimaryNormal(word),bitcast<f32>(hit.primaryGeometry.x)),
@@ -450,7 +435,7 @@ struct RigidSplitBridgeFragmentOut{
 @fragment fn rigidSplitBridgeFragment(input:RigidRasterVertexOut)->RigidSplitBridgeFragmentOut{
   let dimensions=textureDimensions(rigidPrimaryGeometryRead);let coordinate=vec2i(input.position.xy);
   if(any(coordinate<vec2i(0))||any(coordinate>=vec2i(dimensions))){discard;}
-  let geometry=textureLoad(rigidPrimaryGeometryRead,coordinate,0);if(geometry.x==0u){discard;}let owner=(geometry.y>>24u)&15u;if(owner!=input.bodyIndex){discard;}
+  let geometry=textureLoad(rigidPrimaryGeometryRead,coordinate,0);if(geometry.x==0u){discard;}let owner=(geometry.y>>23u)&31u;if(owner!=input.bodyIndex){discard;}
   let feature=(geometry.y>>28u)&7u;let motionValid=geometry.y>>31u;let metadata=owner|(feature<<16u)|(RIGID_RASTER_FIELD_ANALYTIC<<20u)|(RIGID_RASTER_MOTION_RIGID<<24u)|(motionValid<<26u);
   return RigidSplitBridgeFragmentOut(
     vec4f(rigidUnpackPrimaryNormal(geometry.y),bitcast<f32>(geometry.x)),

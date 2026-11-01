@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 /** Native GPU regression for composed 3D visual layers. Run with:
  * node --import tsx tools/probe-visual-layers.ts
  * --benchmark times the 3D grid at 512x384; --reference-grid uses the generic
@@ -23,7 +24,7 @@ const referenceGrid = benchmark && process.argv.includes("--reference-grid");
 const width = benchmark ? 512 : 128, height = benchmark ? 384 : 128;
 const cells = benchmark ? 64 : 8;
 const uniform = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-const bodies = device.createBuffer({ size: 12 * 64, usage: GPUBufferUsage.STORAGE });
+const bodies = device.createBuffer({ size: GPU_RIGID_BODY_CAPACITY * 64, usage: GPUBufferUsage.STORAGE });
 const values = new Float32Array(32);
 values.set([width, height, 0, 0]);
 values.set(benchmark ? [3.6, 2.7, 4.2, 0.5] : [6, 5, 7, 0.5], 4); values.set([0, 1.5, 0, 0], 8);

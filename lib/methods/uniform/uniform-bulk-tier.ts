@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPick, uniformDetailPipeline, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -35,7 +36,7 @@ export interface UniformBulkTierFields {
   bulkPages?: UniformBulkPages;
   /** The page pool whose visit list (uniform-live-lists) the selection strides. */
   pool: UniformPagePool;
-  /** UniformMixedSolid's params (UMSolidParams, 272 bytes) and its rigid body mirror (12 UMRigidBody): the body bound of bulkSelect and bulkPromote. */
+  /** UniformMixedSolid's params (UMSolidParams, 272 bytes) and its rigid body mirror (shared roster capacity): the body bound of bulkSelect and bulkPromote. */
   bodies?: { params: GPUBufferBinding; bodies: GPUBufferBinding };
 }
 
@@ -183,7 +184,7 @@ ${Q ? /* wgsl */ `
 struct BBody {positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,
  angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
 @group(1) @binding(11) var<uniform> bSolid:array<vec4f,17>;
-@group(1) @binding(12) var<uniform> bBodies:array<BBody,12>;
+@group(1) @binding(12) var<uniform> bBodies:array<BBody,${GPU_RIGID_BODY_CAPACITY}>;
 // A 16h region holds one pressure: it cannot carry a body's concentrated
 // load within a few cells, and the band over it carries it sideways instead
 // (measured: a 3 m/s stone put 74 m/s tangential faces over BULK16 pages).
@@ -204,7 +205,7 @@ struct BBody {positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVeloc
 // no body has bounding radius 0. lo, ext: the box's low cell and its cells.
 const B_LATENCY:f32=2.0;
 fn bBodyReaches(i:u32,lo:vec3i,ext:f32,dt:f32)->bool{
- if(i>=min(u32(max(round(bSolid[4].z),0.0)),12u)){return false;}
+ if(i>=min(u32(max(round(bSolid[4].z),0.0)),${GPU_RIGID_BODY_CAPACITY}u)){return false;}
  let b=bBodies[i];let r=b.dimensions.w;if(r<=0.0){return false;}
  let h=bSolid[1].xyz;let low=bSolid[2].xyz+vec3f(lo)*h;let hi=low+ext*h;
  let T=B_LATENCY*dt;let p=b.positionShape.xyz;
@@ -255,7 +256,7 @@ fn bFace(t:vec3i,a:u32)->f32{
     ${S ? "if(own){for(var a=0u;a<3u;a++){if(d[a]<3&&top[a+1u]<1.0-1e-5){atomicOr(&bFail,1u);}}}" : ""}
    }
    // A body within reach of its 3^3 neighbourhood before a demote's first promote serves (bBodyReaches).
-   ${Q ? "if(lane<12u&&bBodyReaches(lane,4*origin-vec3i(16),48.0,dt)){atomicOr(&bFail,1u);}" : ""}
+   ${Q ? `if(lane<${GPU_RIGID_BODY_CAPACITY}u&&bBodyReaches(lane,4*origin-vec3i(16),48.0,dt)){atomicOr(&bFail,1u);}` : ""}
    // Its 4h faces, 80 an axis: plane k (0..4) between its tiles k-1 and k.
    for(var i=lane;i<240u;i+=64u){
     let a=i/80u;let k=(i/16u)%5u;let j=i%16u;
@@ -381,7 +382,7 @@ fn bPageReach(page:vec3i,t:vec3i)->u32{
    }
   }
   if(lane<36u&&abs(bitcast<f32>(bsLoad(rec+${BULK16_PAGE.velocity}u+lane)))*dt>B_REACH*h){atomicOr(&bFail,${BULK16_SCAN.speed}u);}
-  ${Q ? `if(lane<12u&&bBodyReaches(lane,32*page-vec3i(16),64.0,dt)){atomicOr(&bFail,${BULK16_SCAN.body}u);}` : ""}
+  ${Q ? `if(lane<${GPU_RIGID_BODY_CAPACITY}u&&bBodyReaches(lane,32*page-vec3i(16),64.0,dt)){atomicOr(&bFail,${BULK16_SCAN.body}u);}` : ""}
   workgroupBarrier();
   let fail=atomicLoad(&bFail);
   if(lane==0u&&fail!=0u&&bsLoad(rec+${BULK16_PAGE.promote}u)==0u){bsStoreWord(rec+${BULK16_PAGE.promote}u,1u);bsStoreWord(rec+${BULK16_PAGE.promoteError}u,fail);}

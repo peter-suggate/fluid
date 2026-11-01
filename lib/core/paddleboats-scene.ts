@@ -6,20 +6,20 @@ import { rigidMotorPose } from './rigid-motor';
 import type { WidgetPlacementOverrides } from '../framework/widgets';
 
 export const PADDLEBOATS_SCENE_ID = 'paddleboats';
-export const paddleboatsCamera = { distance_m: 11.5, tanHalfFov: .55, target_m: { x: 0, y: .65, z: 0 }, elevation_rad: .62, azimuth_rad: .7 };
-/** Each boat's throttle on its own side of the screen: from this camera Ember (-x) is on the left. */
+export const paddleboatsCamera = { distance_m: 12.5, tanHalfFov: .55, target_m: { x: 0, y: .65, z: 0 }, elevation_rad: .62, azimuth_rad: .7 };
+/** Each boat's pair of throttles on its own side of the screen: from this camera Ember (-x) is on the left. */
 export const paddleboatsWidgets = {
   'motor:paddleboat-0': { anchor: 'bottom-left' }, 'motor:paddleboat-1': { anchor: 'bottom-right' },
 } as const satisfies WidgetPlacementOverrides;
 
 /** Two free assemblies. Only wheel angle is prescribed: the NB-FLIP pressure
  * solve supplies buoyancy, wakes and propulsion. Hull mass includes the cabin,
- * axle and motor; the four paddle fixtures carry no independent rigid mass. */
+ * axle and motor; the eight paddle fixtures carry no independent rigid mass. */
 export function createPaddleboatsScene(): SceneDescription {
   const scene = cloneScene(defaultScene);
   scene.sceneId = PADDLEBOATS_SCENE_ID;
   scene.duration_s = 30;
-  scene.container = { width_m: 12.8, height_m: .8, depth_m: 2.4, fillFraction: .75, top: 'open', fluidWallMode: 'no-slip' };
+  scene.container = { width_m: 12.8, height_m: .8, depth_m: 4.8, fillFraction: .75, top: 'open', fluidWallMode: 'no-slip' };
   scene.voxelDomain = { finestCellSize_m: .025, brickSize_cells: 8 };
   scene.nominalResolution = { length_m: .025 };
   scene.solidVoxels = [];
@@ -40,20 +40,22 @@ export function createPaddleboatsScene(): SceneDescription {
       appearance: index ? 'paddleboat-teal' : 'paddleboat-red' };
     // The wheels are rated for three times their cruising speed: the boats open
     // at one third throttle, and the fixtures below carry no drive of their own.
-    scene.rigidBodies.push({ ...hull, motorStrength: 1 / 3 });
-    for (let blade = 0; blade < 4; blade++) {
-      const motorAttachment = { parentId: hull.id, pivot_m: { x: -1.0, y: .075, z: 0 }, offset_m: { x: .235, y: 0, z: 0 },
+    scene.rigidBodies.push({ ...hull, motorStrengths: { left: 1 / 3, right: 1 / 3 } });
+    for (const [channel, z] of [['left', -.28], ['right', .28]] as const) for (let blade = 0; blade < 4; blade++) {
+      const motorAttachment = { parentId: hull.id, channel, pivot_m: { x: -1.0, y: .075, z }, offset_m: { x: .235, y: 0, z: 0 },
         axis: { x: 0, y: 0, z: 1 }, orientation: { w: 1, x: 0, y: 0, z: 0 }, phase_rad: blade * Math.PI / 2,
         angularSpeed_rad_s: -11.4, startTime_s: 0, rampUp_s: .25 };
-      scene.rigidBodies.push({ ...hull, id: `${hull.id}-paddle-${blade}`, name: `${hull.name.split(' ·')[0]} · paddle ${blade + 1}`,
+      scene.rigidBodies.push({ ...hull, id: `${hull.id}-${channel}-paddle-${blade}`, name: `${hull.name.split(' ·')[0]} · ${channel} paddle ${blade + 1}`,
         motion: 'static', dimensions_m: { x: .13, y: .05, z: .5 }, density_kg_m3: 650,
         ...rigidMotorPose(hull, motorAttachment, 0), motorAttachment, appearance: 'paddleboat-wheel' });
     }
   }
   const stage = studioStageSceneryGraph(scene);
+  // Widen the authored 2.4 m basin by extending spans and moving its sides;
+  // retain the wall/coping thickness and every original material and detail.
   scene.scenery = { ...stage, nodes: [...stage.nodes.filter(node => node.kind === "room-shell" || node.id === "stage/floor"), ...assets.basin.map((part, index): SceneryNode => ({
-    kind: 'box', id: `paddleboat-basin-${index}`, place: { units: 'metres', position: { x: part.p[0]!, y: part.p[1]!, z: part.p[2]! } },
-    halfSize: { x: part.d[0]!, y: part.d[1]!, z: part.d[2]! }, material: { colorLinear: part.color as [number, number, number], surface: 'ceramic' },
+    kind: 'box', id: `paddleboat-basin-${index}`, place: { units: 'metres', position: { x: part.p[0]!, y: part.p[1]!, z: part.p[2]! === 0 ? 0 : part.p[2]! + Math.sign(part.p[2]!) * 1.2 } },
+    halfSize: { x: part.d[0]!, y: part.d[1]!, z: part.p[2]! === 0 ? part.d[2]! + 1.2 : part.d[2]! }, material: { colorLinear: part.color as [number, number, number], surface: 'ceramic' },
   }))] };
   scene.surfaceStyle = 'smooth';
   scene.lighting = {

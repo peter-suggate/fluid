@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 /** Measure the production raster renderer only after its complete mesh is published. */
 import assert from "node:assert/strict";
 import {writeFile} from "node:fs/promises";
@@ -14,8 +15,8 @@ export async function benchmarkRasterSteady(device:GPUDevice, renderer:SparseVox
  renderer.setRenderTuning(DEFAULT_SVO_RENDER_TUNING);renderer.ensureSize(width,height);
  device.queue.writeBuffer(uniforms,0,packSvoDryViewUniforms({...view,width,height}));
  const movingScene={...view.scene,rigidBodies:[...view.scene.rigidBodies,{...view.scene.rigidBodies[0]!,id:"benchmark-moving-body",motion:"dynamic" as const,position_m:{x:0,y:0.3,z:0}}]};
- const motion=device.createBuffer({size:12*128,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
- const motionWords=new Float32Array(12*32);motionWords[view.bodyCount*32+19]=0.01;
+ const motion=device.createBuffer({size:GPU_RIGID_BODY_CAPACITY*128,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+ const motionWords=new Float32Array(GPU_RIGID_BODY_CAPACITY*32);motionWords[view.bodyCount*32+19]=0.01;
  device.queue.writeBuffer(motion,0,motionWords);
  const readback=device.createBuffer({size:64,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
  const median=(xs:number[])=>[...xs].sort((a,b)=>a-b)[Math.floor(xs.length/2)]!;

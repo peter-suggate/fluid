@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../rigid-capacity";
 import { sceneRenderTuning } from "../scene-render-profile";
 import { SceneInteractionHost } from "../../interaction/runtime/host";
 import type { InteractionFluidDriver } from "../../interaction/runtime/physics";
@@ -74,7 +75,7 @@ import { sharePaneStep } from "./shared-pane-step";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
-const MAX_BODIES = 12;
+const MAX_BODIES = GPU_RIGID_BODY_CAPACITY;
 
 /**
  * The mutable runtime one pane's document owns.

@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import type { SpatialPerformanceReport } from "./spatial-performance";
 import type { SimulationFailure } from "./simulation-failure";
 import type { PerformanceTrace } from "./performance-trace";
@@ -427,7 +428,7 @@ export interface GPURigidLoad {
   meanFluidVelocity_m_s: { x: number; y: number; z: number };
 }
 
-export const GPU_RIGID_BODY_LIMIT = 12;
+export const GPU_RIGID_BODY_LIMIT = GPU_RIGID_BODY_CAPACITY;
 export const GPU_RIGID_EXCHANGE_WORDS = 12;
 export const GPU_RIGID_EXCHANGE_BYTES = GPU_RIGID_BODY_LIMIT * GPU_RIGID_EXCHANGE_WORDS * Int32Array.BYTES_PER_ELEMENT;
 

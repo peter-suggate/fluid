@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPaddleboatsScene } from '../lib/core/paddleboats-scene';
@@ -9,25 +10,38 @@ import { rigidMotorPose } from '../lib/core/rigid-motor';
 test('GPU motors create no dry thrust, and axle returns paddle traction with the translated torque', { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   await withUniformDevice('motor momentum transfer', async device => {
     const scene = createPaddleboatsScene();scene.fluid.gravity_m_s2 = { x: 0, y: 0, z: 0 };
+    for (const body of scene.rigidBodies.filter(body => !body.motorAttachment)) body.motorStrengths = { left: 1, right: 1 };
     const bodies = initializeRigidBodies(scene.rigidBodies);
-    const exchange = device.createBuffer({ size: 12*12*4, usage: GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
+    const exchange = device.createBuffer({ size: GPU_RIGID_BODY_CAPACITY*12*4, usage: GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
     const terrain = device.createTexture({ size: [1,1], format: 'r32float', usage: GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST });
     device.queue.writeTexture({ texture: terrain }, new Float32Array([0]), { bytesPerRow: 4 }, [1,1]);
     const rigid = new WebGPURigidBodySystem(device, scene, exchange, terrain);
     try {
       for (const task of rigid.initializationTasks()) await task.run(new AbortController().signal);
       rigid.syncBodies(bodies);
+      const last = bodies.at(-1)!;
+      assert.equal((await rigid.pick({ x: last.position_m.x, y: last.position_m.y, z: -3 }, { x: 0, y: 0, z: 1 }))?.bodyIndex, 9,
+        'the second boat’s outer wheel remains selectable past the old body limit');
       for (let i=0;i<240;i++) { const e=device.createCommandEncoder();rigid.encode(e,1/60,.025**3,1,.025);device.queue.submit([e.finish()]); }
       const poses = await rigid.readPoses();
       assert.ok(poses);
-      for (const root of [0,5]) {
+      assert.equal(poses.length, 18);
+      for (let index = 0; index < bodies.length; index++) {
+        const attachment = bodies[index]!.description.motorAttachment;
+        if (!attachment) continue;
+        const parent = bodies.findIndex(body => body.description.id === attachment.parentId);
+        const expected = rigidMotorPose(poses[parent]!, attachment, 4);
+        assert.ok(Math.hypot(...(['x','y','z'] as const).map(a => expected.position_m[a] - poses[index]!.position_m[a])) < 1e-5,
+          `wheel fixture ${index} remains attached and driven`);
+      }
+      for (const root of [0,9]) {
         assert.ok(Math.abs(poses[root]!.position_m.x-bodies[root]!.position_m.x)<1e-6, 'a wheel in air cannot propel its hull');
         assert.ok(Math.abs(poses[root]!.position_m.y-bodies[root]!.position_m.y)<1e-6);
       }
       const expected = rigidMotorPose(poses[0]!,scene.rigidBodies[1]!.motorAttachment!,4);
       assert.ok(Math.hypot(...(['x','y','z'] as const).map(a=>expected.position_m[a]-poses[1]!.position_m[a]))<1e-5);
       // One Newton-second on a paddle: the parent receives precisely J and r×J.
-      const load=new Int32Array(12*12);load[12]=1_000_000;load[22]=1;
+      const load=new Int32Array(GPU_RIGID_BODY_CAPACITY*12);load[12]=1_000_000;load[22]=1;
       device.queue.writeBuffer(exchange,0,load);
       const before=poses;const e=device.createCommandEncoder();rigid.encode(e,1/60,.025**3,1,.025);device.queue.submit([e.finish()]);
       const read=device.createBuffer({size:GPU_RIGID_STATE_BYTES,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
@@ -36,23 +50,29 @@ test('GPU motors create no dry thrust, and axle returns paddle traction with the
       assert.ok(Math.abs(state[12]!-1/bodies[0]!.mass_kg)<1e-6);
       const rz=-(before[1]!.position_m.y-before[0]!.position_m.y);
       assert.ok(Math.abs(state[26]!-rz)<2e-6, 'axle torque includes the paddle offset');
-      assert.ok(Math.abs(state[5*32+12]!)<1e-9, 'other boat receives no fabricated thrust');
+      assert.ok(Math.abs(state[9*32+12]!)<1e-9, 'other boat receives no fabricated thrust');
+
+      assert.ok(Math.abs(state[25]! - (before[1]!.position_m.z - before[0]!.position_m.z)) < 2e-6,
+        'off-centre paddle traction produces yaw torque for steering');
 
       // Live commands operate on the parent and leave all resident poses intact.
-      device.queue.writeBuffer(exchange, 0, new Int32Array(12*12));
+      device.queue.writeBuffer(exchange, 0, new Int32Array(GPU_RIGID_BODY_CAPACITY*12));
       const stopTime = 4 + 1 / 60;
       const beforeStop = await rigid.readPoses();
-      const stopped = bodies.map((body, i) => i === 0 ? { ...body, description: { ...body.description, motorStrength: 0 } } : body);
+      const stopped = bodies.map((body, i) => i === 0 ? { ...body, description: { ...body.description, motorStrengths: { left: 0, right: 1 } } } : body);
       rigid.syncBodies(stopped);
       assert.deepEqual(await rigid.readPoses(), beforeStop, 'setting strength does not teleport or restart bodies');
       for (let i=0;i<60;i++) { const e=device.createCommandEncoder();rigid.encode(e,1/60,.025**3,1,.025);device.queue.submit([e.finish()]); }
       const afterStop = (await rigid.readPoses())!;
-      for (const [root, time] of [[0, stopTime], [5, stopTime + 1]] as const) {
+      for (const [root, time] of [[0, stopTime], [9, stopTime + 1]] as const) {
         const expected = rigidMotorPose(afterStop[root]!, scene.rigidBodies[root+1]!.motorAttachment!, time);
         assert.ok(Math.hypot(...(['x','y','z'] as const).map(a=>expected.position_m[a]-afterStop[root+1]!.position_m[a]))<1e-5,
           root === 0 ? 'zero strength stops the selected wheel' : 'the other wheel keeps turning');
       }
-      const halfStrength = stopped.map((body, i) => i === 0 ? { ...body, description: { ...body.description, motorStrength: .5 } } : body);
+      const rightExpected = rigidMotorPose(afterStop[0]!, scene.rigidBodies[5]!.motorAttachment!, stopTime + 1);
+      assert.ok(Math.hypot(...(['x','y','z'] as const).map(a => rightExpected.position_m[a] - afterStop[5]!.position_m[a])) < 1e-5,
+        'the same boat’s right wheel keeps turning while its left wheel stops');
+      const halfStrength = stopped.map((body, i) => i === 0 ? { ...body, description: { ...body.description, motorStrengths: { left: .5, right: 1 } } } : body);
       rigid.syncBodies(halfStrength);
       assert.deepEqual(await rigid.readPoses(), afterStop, 'resuming preserves the stopped phase');
       for (let i=0;i<60;i++) { const e=device.createCommandEncoder();rigid.encode(e,1/60,.025**3,1,.025);device.queue.submit([e.finish()]); }

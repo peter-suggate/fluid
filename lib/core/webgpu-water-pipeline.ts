@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { WATER_INTERFACE_DEPTH, waterInterfaceDepthWGSL } from "./water-interface-depth";
 import { HdrLensBloom, DEFAULT_LENS_BLOOM_OPTIONS, resolveLensBloomOptions, type LensBloomOptions } from "./webgpu-lens-bloom";
 import { waterTransmissionWGSL } from "./water-transmission.wgsl";
@@ -92,8 +93,8 @@ export function causticReceiverContentKey(
 /** Raster/body depth separation that activates the local implicit resolver. */
 export const CONTACT_RESOLVE_BAND_CELLS = 1.5;
 
-/** The rigid buffer this pipeline is handed holds twelve records; see `bodyBuffer`. */
-export const RASTER_WATER_MAXIMUM_BODIES = 12;
+/** The rigid buffer this pipeline is handed uses the shared roster capacity; see `bodyBuffer`. */
+export const RASTER_WATER_MAXIMUM_BODIES = GPU_RIGID_BODY_CAPACITY;
 
 /**
  * The fluid-only backdrop.
@@ -1761,7 +1762,7 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(4) var backPosition:texture_2d<f32>;
 @group(0) @binding(5) var backNormal:texture_2d<f32>;
 @group(0) @binding(6) var linearSampler:sampler;
-@group(0) @binding(7) var<storage,read> bodies:array<BodyGPU,12>;
+@group(0) @binding(7) var<storage,read> bodies:array<BodyGPU,${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(8) var liquidField:texture_3d<f32>;
 @group(0) @binding(10) var rearFrontPosition:texture_2d<f32>;
 @group(0) @binding(11) var rearFrontNormal:texture_2d<f32>;
@@ -2673,7 +2674,7 @@ export class RasterWaterPipeline {
     this.sampler = this.device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.fallbackSparseControl = this.device.createBuffer({ label: "Water disabled storage binding", size: WATER_DISABLED_STORAGE_BYTES, usage: GPUBufferUsage.STORAGE });
     this.fallbackSolidTerrain=this.device.createTexture({label:"Water unread solid terrain",size:[1,1],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING});
-    this.fallbackSolidUniform=this.device.createBuffer({label:"Water disabled solid uniforms",size:Math.max(1536,UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES),usage:GPUBufferUsage.UNIFORM});
+    this.fallbackSolidUniform=this.device.createBuffer({label:"Water disabled solid uniforms",size:Math.max(GPU_RIGID_BODY_CAPACITY*128,UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES),usage:GPUBufferUsage.UNIFORM});
     this.fallbackField = this.device.createTexture({ label: "Water unread field binding", size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING });
     this.waterSceneOpticsBuffer = this.device.createBuffer({ label: "Water scene optics and caustic receiver", size: WATER_SCENE_OPTICS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     // Allocated unconditionally: the composite declares the receiver whether or

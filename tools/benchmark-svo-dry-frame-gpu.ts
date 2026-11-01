@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 import { sceneLinearToDisplay, resolveDisplayGrade } from "../lib/core/webgpu-lighting";
 import { svoSceneLighting } from "../lib/svo/features/lighting-visibility/svo-dry-scene-lighting";
 import { censusSvoCellContours } from "../lib/harness/svo-cell-contour-census";
@@ -645,7 +646,7 @@ if (recordScaleMultipliers) {
     });
     const armBodyBuffer = device.createBuffer({
       label: `Record-scale x${multiplier} rigid bodies`,
-      size: 12 * 64,
+      size: GPU_RIGID_BODY_CAPACITY * 64,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const armBodies = packSvoDryRigidBodies(armScene);
@@ -1089,7 +1090,7 @@ const uniformBuffer = device.createBuffer({
   size: SVO_VIEW_UNIFORM_FLOATS * Float32Array.BYTES_PER_ELEMENT,
   usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
-const bodyBuffer = device.createBuffer({ label: "Bench rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+const bodyBuffer = device.createBuffer({ label: "Bench rigid bodies", size: GPU_RIGID_BODY_CAPACITY * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 const bodies = packSvoDryRigidBodies(scene);
 device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count));
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);

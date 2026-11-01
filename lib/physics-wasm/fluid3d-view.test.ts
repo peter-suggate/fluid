@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../core/rigid-capacity";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { decodeFluid3DPublication } from "./fluid3d-view";
@@ -123,7 +124,7 @@ test("Rust rigid poses pack the renderer's established 16-float ABI", () => {
   }], 0);
   assert.deepEqual([...packed.slice(0, 12)], [1, 2, 3, 0.5, 0.5, 0.5, 0.5, 0, 1, 0, 0, 0]);
   assert.equal(packed[15], 1);
-  assert.equal(packed.length, 12 * 16);
+  assert.equal(packed.length, GPU_RIGID_BODY_CAPACITY * 16);
 });
 
 test("renderer info reports sparse Rust physics and includes adapter presentation allocations", () => {
@@ -137,7 +138,7 @@ test("renderer info reports sparse Rust physics and includes adapter presentatio
   assert.equal(info.cellCount, 3);
   assert.equal(info.equivalentUniformCells, 24);
   assert.equal(info.compressionRatio, 0.125);
-  assert.equal(info.allocatedBytes, 2_384);
+  assert.equal(info.allocatedBytes, 1_616 + GPU_RIGID_BODY_CAPACITY * 64);
   assert.equal(info.encodedSteps, 7,
     "the Rust frame revision must invalidate retained dense water geometry");
   assert.equal(info.surfaceRevision, revision.surfaceRevision,

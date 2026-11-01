@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import type { RigidBodyDescription, RigidMotorAttachment } from './model';
 import { quaternionMultiply, quaternionRotate, type RigidBodyState } from './rigid-body';
 
@@ -10,6 +11,20 @@ export function rigidMotorAngle(m: RigidMotorAttachment, time: number): number {
 /** Every fixture belongs to its free parent for selection and controls. */
 export function rigidControlOwnerId(body: RigidBodyDescription): string {
   return body.motorAttachment?.parentId ?? body.id;
+}
+
+/** Named wheel drives inherit the legacy assembly throttle when omitted. */
+export function rigidMotorStrength(parent: RigidBodyDescription, channel?: string): number {
+  return (channel === undefined ? undefined : parent.motorStrengths?.[channel]) ?? parent.motorStrength ?? 1;
+}
+
+export function rigidMotorChannels(bodies: readonly RigidBodyDescription[], parentId: string): (string | undefined)[] {
+  return [...new Set(bodies.filter(body => body.motorAttachment?.parentId === parentId).map(body => body.motorAttachment!.channel))];
+}
+
+export function rigidMotorStrengthPatch(parent: RigidBodyDescription, channel: string | undefined, strength: number): Partial<RigidBodyDescription> {
+  const value = Math.max(-1, Math.min(1, strength));
+  return channel === undefined ? { motorStrength: value } : { motorStrengths: { ...parent.motorStrengths, [channel]: value } };
 }
 
 export interface RigidMotorDrive {
@@ -41,7 +56,7 @@ export function rigidMotorPose(parent: Pick<RigidBodyState, 'position_m' | 'orie
 export const RIGID_MOTOR_FLOATS = 32;
 export const rigidMotorWGSL = /* wgsl */ `
 struct RigidMotor { pivotParent:vec4f, offsetPhase:vec4f, axisSpeed:vec4f, orientation:vec4f, timing:vec4f, renderHalfShape:vec4f, spare0:vec4f, spare1:vec4f }
-@group(0) @binding(11) var<uniform> motors:array<RigidMotor,12>;
+@group(0) @binding(11) var<uniform> motors:array<RigidMotor,${GPU_RIGID_BODY_CAPACITY}>;
 fn motorAngle(m:RigidMotor,time:f32)->f32 {
  let t=max(0.0,time-m.timing.x);let ramp=max(m.timing.y,1e-6);let u=min(1.0,t/ramp);
  return m.offsetPhase.w+m.axisSpeed.w*(ramp*(u*u*u-.5*u*u*u*u)+max(0.0,t-ramp));

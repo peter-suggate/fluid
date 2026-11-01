@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 /**
  * The GPU render-health lane for dry SVO scenes, and the hero garden's gate.
  *
@@ -692,7 +693,7 @@ const uniformBuffer = device.createBuffer({
 });
 const bodyBuffer = device.createBuffer({
   label: "Smoke rigid bodies",
-  size: 12 * 64,
+  size: GPU_RIGID_BODY_CAPACITY * 64,
   usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
 const bodies = packSvoDryRigidBodies(scene);

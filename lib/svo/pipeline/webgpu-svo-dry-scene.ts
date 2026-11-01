@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { SculptWallMesh, sculptWallVertexLayout, type SculptWallPipelines } from "../features/primary-visibility/sculpt-wall-mesh";
 import { WebgpuSculptSubstrate } from "../features/scene-publication/webgpu-sculpt-substrate";
 import { SurfaceTextureAtlasGpu } from "../features/materials/surface-texture-atlas-gpu";
@@ -218,7 +219,7 @@ SparseVoxelPixelTraceBuffers
 
 
 
-export const SVO_DRY_RIGID_MOTION_CAPACITY = 12;
+export const SVO_DRY_RIGID_MOTION_CAPACITY = GPU_RIGID_BODY_CAPACITY;
 export const SVO_DRY_RIGID_MOTION_UNIFORM_BYTES = SVO_DRY_RIGID_MOTION_CAPACITY * SVO_PRIMITIVE_MOTION_STRIDE_BYTES;
 /** Single source of truth for every group-0 declaration and production layout entry. */
 export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([

@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 /** Native GPU check of the real page overlay pipeline with signed origins,
  * AIR/SOLID/resident pages, missing records and both presentation modes,
  * and of the work heat layer over the same pages (both modes, all tiers).
@@ -22,7 +23,7 @@ const errors: string[] = [];
 device.addEventListener("uncapturederror", event => { event.preventDefault(); errors.push(event.error.message); console.error(event.error.message); });
 const width = 640, height = 480;
 const uniform = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-const bodies = device.createBuffer({ size: 12 * 64, usage: GPUBufferUsage.STORAGE });
+const bodies = device.createBuffer({ size: GPU_RIGID_BODY_CAPACITY * 64, usage: GPUBufferUsage.STORAGE });
 const values = new Float32Array(32);
 values.set([width, height, 0, 0]);
 values.set([6, 5, 7, 0.5], 4); values.set([0, 1.5, 0, 0], 8);

@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { solidOccupancyMaskWGSL } from "../../core/solid-occupancy-mask";
@@ -102,7 +103,7 @@ struct RigidBody {
   material: vec4f,
 }
 
-@group(0) @binding(10) var<storage,read> rigidBodies:array<RigidBody,12>;
+@group(0) @binding(10) var<storage,read> rigidBodies:array<RigidBody,${GPU_RIGID_BODY_CAPACITY}>;
 
 @group(0) @binding(13) var reversedVelocityIn: texture_3d<f32>;
 
@@ -307,7 +308,7 @@ fn rigidSignedDistance(body:RigidBody,world:vec3f)->f32{
 
 fn rigidBodyIndexAt(world:vec3f)->i32{
   let bodyCount=u32(round(params.boundary.z));
-  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],world)){return i32(bodyIndex);}}
+  for(var bodyIndex=0u;bodyIndex<${GPU_RIGID_BODY_CAPACITY}u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}if(insideRigid(rigidBodies[bodyIndex],world)){return i32(bodyIndex);}}
   return -1;
 }
 
@@ -334,7 +335,7 @@ fn bodySolidFraction(body:RigidBody,p:vec3i)->f32{
 
 fn bodySolidFractionAt(p:vec3i)->f32{
   let bodyCount=u32(round(params.boundary.z));var fraction=0.0;
-  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}fraction=max(fraction,bodySolidFraction(rigidBodies[bodyIndex],p));}
+  for(var bodyIndex=0u;bodyIndex<${GPU_RIGID_BODY_CAPACITY}u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}fraction=max(fraction,bodySolidFraction(rigidBodies[bodyIndex],p));}
   return fraction;
 }
 
@@ -357,7 +358,7 @@ fn solidVelocitySample(world:vec3f,velocityPoint:vec3f)->vec4f{
 fn extrapolatedRigidVelocityAtFace(world:vec3f)->vec3f{
   let bodyCount=u32(round(params.boundary.z));let radius=max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
   var nearest=radius;var result=vec3f(0.0);
-  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+  for(var bodyIndex=0u;bodyIndex<${GPU_RIGID_BODY_CAPACITY}u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}let distance=abs(rigidSignedDistance(rigidBodies[bodyIndex],world));
     if(distance<=nearest){nearest=distance;result=rigidVelocityAt(i32(bodyIndex),world);}
   }

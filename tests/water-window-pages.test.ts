@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene } from "../lib/core/model";
@@ -19,7 +20,7 @@ test("window extraction retains coarse liquid across Y and Z page boundaries", {
     scene.fluid = { ...scene.fluid, initialCondition: "tank-fill", initialLiquidVolumes: [],
       refinementRegions: [], tiers: { start: "4h" }, surfaceTension_N_m: 0 };
     const uniform = device.createBuffer({ size: 416, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const bodies = device.createBuffer({ size: 768, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM });
+    const bodies = device.createBuffer({ size: GPU_RIGID_BODY_CAPACITY * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM });
     const words = new Float32Array(104);
     words.set([extent, extent, extent, 0], 12); words.set([n, n, n, 1], 20);
     device.queue.writeBuffer(uniform, 0, words);

@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../../core/rigid-capacity";
 import { svoSculptPlanarWGSL } from "../scene-publication/svo-sculpt-planar";
 import { seaweedShaderLibrary } from "../../../core/seaweed-render";
 import { paddleboatShaderLibrary } from "../../../core/paddleboat-render";
@@ -1027,7 +1028,7 @@ export const SVO_DRY_WORLD_GI_CACHE_CONTRACT = Object.freeze({
   payloadBytes: 8,
   probeCount: 4,
   allocatedBytes: (1 << 18) * 16,
-  frameBytes: 144,
+  frameBytes: 96 + GPU_RIGID_BODY_CAPACITY * 4,
   cacheEnabledOffsetBytes: 12,
   exhaustedConesOffsetBytes: 20,
   dynamicInfluenceCells: 12,
@@ -2699,7 +2700,7 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
   // fetched: rigid bodies occupy a small part of a scene, and contact rays are
   // short. The bound is published per frame, so it costs nothing to consult.
   if(!svoRigidBoundsIntersect(ro,rd,tMax)){return false;}
-  for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,tMax)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,tMax)){continue;}if(bodyHit(ro,rd,body).t<tMax){return true;}}
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,tMax)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,tMax)){continue;}if(bodyHit(ro,rd,body).t<tMax){return true;}}
   return false;
 }
 ` : "";
@@ -3922,7 +3923,7 @@ struct DryWorldGiFrame{
   cameraForwardAspect:vec4f,
   cameraRight:vec4f,
   cameraUp:vec4f,
-  bodySignatures:array<u32,12>,
+  bodySignatures:array<u32,${GPU_RIGID_BODY_CAPACITY}>,
 }
 @group(2) @binding(7) var<storage,read_write> dryWorldGiCache:DryWorldGiCache;
 @group(2) @binding(8) var dryWorldGiOutput:texture_storage_2d<rgba16float,write>;
@@ -3990,9 +3991,9 @@ fn dryWorldGiInsert(key:DryWorldGiCacheKey,slot:u32,claimState:u32,value:DryGlob
 }
 fn dryWorldGiBodyInfluence(position:vec3f,ignoredBodyOwner:u32)->DryWorldGiBodyInfluence{
   let minimumVoxel=max(dry.mapping.cellSize.x,max(dry.mapping.cellSize.y,dry.mapping.cellSize.z));
-  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : "min(u32(round(max(uniforms.options.z,0.0))),12u)"};
+  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : `min(u32(round(max(uniforms.options.z,0.0))),${GPU_RIGID_BODY_CAPACITY}u)`};
   var bodyMask=0u;var movingMask=0u;var signature=0x4f1bbcdcu;
-  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+  for(var bodyIndex=0u;bodyIndex<${GPU_RIGID_BODY_CAPACITY}u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}if(bodyIndex==ignoredBodyOwner){continue;}let body=bodies[bodyIndex];
     let influence=body.positionRadius.w+max(
       minimumVoxel*${SVO_DRY_WORLD_GI_CACHE_CONTRACT.dynamicInfluenceCells}.0,
@@ -4010,9 +4011,9 @@ fn dryWorldGiBodyInfluence(position:vec3f,ignoredBodyOwner:u32)->DryWorldGiBodyI
 ` : "";
   const worldGiCacheEntryWGSL = reduced && split ? /* wgsl */ `
 @compute @workgroup_size(1) fn dryWorldGiFrameMain(){
-  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : "min(u32(round(max(uniforms.options.z,0.0))),12u)"};
+  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : `min(u32(round(max(uniforms.options.z,0.0))),${GPU_RIGID_BODY_CAPACITY}u)`};
   var signature=dryWorldGiHashAdd(0x27d4eb2du,bodyCount);var movingBodyCount=0u;
-  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+  for(var bodyIndex=0u;bodyIndex<${GPU_RIGID_BODY_CAPACITY}u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}let body=bodies[bodyIndex];let motion=rigidMotion[bodyIndex];
     var bodySignature=dryWorldGiHashAdd(0x85ebca6bu,bodyIndex);
     bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.positionRadius.x));bodySignature=dryWorldGiHashAdd(bodySignature,bitcast<u32>(body.positionRadius.y));
@@ -4198,7 +4199,7 @@ struct DryHit {
 
 @group(0) @binding(0) var<uniform> uniforms:Uniforms;
 ${cameraApertureShaderLibrary()}
-@group(0) @binding(1) var<uniform> bodies:array<BodyGPU,12>;
+@group(0) @binding(1) var<uniform> bodies:array<BodyGPU,${GPU_RIGID_BODY_CAPACITY}>;
 // The whole scene payload arena, not the owner lane's slice.
 //
 // Identity stopped being a lane when the banded leaf payload landed: it is an
@@ -4211,7 +4212,7 @@ ${cameraApertureShaderLibrary()}
 @group(0) @binding(6) var<storage,read> dryPlanarBoundaries:array<PlanarBoundaryPatch>;
 @group(0) @binding(9) var<uniform> dry:DryParams;
 @group(0) @binding(13) var<uniform> dryLighting:DryLightingArena;
-@group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>;
+@group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(16) var nodeMipAtlas:texture_3d<f32>;
 @group(0) @binding(17) var nodeMipSampler:sampler;
 @group(0) @binding(18) var nodeMipDirectory:texture_2d<u32>;
@@ -4723,7 +4724,7 @@ fn bodyBoundingSphereVisible(ro:vec3f,rd:vec3f,body:BodyGPU,tMin:f32,tMax:f32)->
 }
 
 fn nearestBodyMaskIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32,bodyMask:u32)->DryHit {
-  ${experiments.rigidBodiesAbsent ? "return missHit();" : ""}var best=missHit(); for(var index=0u;index<12u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner||(bodyMask&(1u<<index))==0u){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
+  ${experiments.rigidBodiesAbsent ? "return missHit();" : ""}var best=missHit(); for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index+=1u){if(index>=u32(round(uniforms.options.z))){break;}if(index==ignoredOwner||(bodyMask&(1u<<index))==0u){continue;}let body=bodies[index];if(!bodyBoundingSphereVisible(ro,rd,body,0.0,best.t)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ro,rd,body,0.0,best.t)){continue;}let hit=bodyHit(ro,rd,body);if(hit.t<best.t){best=hit;best.materialId=0x80000000u|index;best.ownerId=index;}} return best;
 }
 fn nearestBodyIgnoring(ro:vec3f,rd:vec3f,ignoredOwner:u32)->DryHit{return nearestBodyMaskIgnoring(ro,rd,ignoredOwner,0xffffffffu);}
 ${prepassBodyBlockerWGSL}
@@ -5162,8 +5163,8 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
   if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){dryVisibilityStepInvalidReason=1u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,0u,0u,0u,DRY_MISS);}
   var nodeVisits=0u;var leafVisits=0u;var workItems=0u;var bestT=ray.tMax_m;var found=false;
 
-  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : "min(u32(round(max(uniforms.options.z,0.0))),12u)"};
-  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+  let bodyCount=${experiments.rigidBodiesAbsent ? "0u" : `min(u32(round(max(uniforms.options.z,0.0))),${GPU_RIGID_BODY_CAPACITY}u)`};
+  for(var bodyIndex=0u;bodyIndex<${GPU_RIGID_BODY_CAPACITY}u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}if(bodyIndex==dryVisibilityIgnoredBody){continue;}if(workItems>=remaining.workItems){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}workItems+=1u;
     let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){bestT=candidate.t;found=true;}
   }
@@ -5754,7 +5755,7 @@ struct DryFragmentOut{
 fn dryPublicationGeneration()->u32{return dry.primitiveCandidates.w;}
 struct DryRigidMotionSurface{velocity_m_s:vec3f,generation:u32,valid:u32}
 fn dryRigidMotionSurface(hit:DryHit,worldSurfacePosition_m:vec3f)->DryRigidMotionSurface{
-  if(hit.motionKind!=DRY_GBUFFER_MOTION_RIGID||hit.ownerId>=12u||hit.ownerId>=u32(round(uniforms.options.z))){return DryRigidMotionSurface(vec3f(0.0),dryPublicationGeneration(),0u);}
+  if(hit.motionKind!=DRY_GBUFFER_MOTION_RIGID||hit.ownerId>=${GPU_RIGID_BODY_CAPACITY}u||hit.ownerId>=u32(round(uniforms.options.z))){return DryRigidMotionSurface(vec3f(0.0),dryPublicationGeneration(),0u);}
   let record=rigidMotion[hit.ownerId];let generation=svoPrimitiveMotionGeneration(record);let identityValid=record.identityRevision.x==hit.ownerId&&svoPrimitiveMotionOwnerId(record)==hit.ownerId&&svoPrimitiveMotionMaterialId(record)==dryResolvedMaterialId(hit)&&generation!=0u;let transformValid=distance(record.currentPositionDt.xyz,bodies[hit.ownerId].positionRadius.xyz)<=1e-5;let velocity=svoPrimitiveMotionVelocityAt(record,worldSurfacePosition_m);let valid=identityValid&&transformValid&&velocity.valid!=0u;
   return DryRigidMotionSurface(select(vec3f(0.0),velocity.velocity_m_s,valid),select(dryPublicationGeneration(),generation,generation!=0u),select(0u,1u,valid));
 }

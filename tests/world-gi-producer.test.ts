@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createSvoDrySceneFragmentWGSL, SVO_DRY_WORLD_GI_CACHE_CONTRACT } from "../lib/svo/features/shading/program";
@@ -12,7 +13,7 @@ function producerBody():string{
 
 test("GI cache preference has a dedicated existing frame lane without moving diagnostics",()=>{
   assert.equal(SVO_DRY_WORLD_GI_CACHE_CONTRACT.cacheEnabledOffsetBytes,12);
-  assert.equal(SVO_DRY_WORLD_GI_CACHE_CONTRACT.frameBytes,144);
+  assert.equal(SVO_DRY_WORLD_GI_CACHE_CONTRACT.frameBytes,96 + 4 * GPU_RIGID_BODY_CAPACITY);
   assert.equal(SVO_DRY_WORLD_GI_CACHE_CONTRACT.exhaustedConesOffsetBytes,20);
 });
 

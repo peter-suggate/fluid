@@ -17,7 +17,7 @@ import {
 } from "./editor-entity";
 import type { EditorAxis } from "./editor-axis-constraint";
 import { boundingRadius } from "./rigid-body";
-import { rigidControlOwnerId } from "./rigid-motor";
+import { rigidControlOwnerId, rigidMotorChannels, rigidMotorStrength, rigidMotorStrengthPatch } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import type { RigidBodyDescription, RigidShape, SceneDescription, Vec3 } from "./model";
 
@@ -182,11 +182,12 @@ function rigidBodyEntityFor(
     editLabel: (handle) => handle.space === "world"
       ? `Moved ${description.name}` : `Resized ${description.name}`,
     fields: [
-      ...(context.scene.rigidBodies.some(body => body.motorAttachment?.parentId === description.id) ? [{
-        id: "motor-strength", label: "Motor strength", tag: "Motor", unit: "%",
-        value: (description.motorStrength ?? 1) * 100, step: 5, min: -100, max: 100,
-        apply: (value: number) => rigidBodyPatch(context.scene, description.id, { motorStrength: Math.max(-1, Math.min(1, value / 100)) }),
-      }] : []),
+      ...rigidMotorChannels(context.scene.rigidBodies, description.id).map(channel => ({
+        id: channel === undefined ? "motor-strength" : `motor-strength:${channel}`,
+        label: channel === undefined ? "Motor strength" : `${channel[0]!.toUpperCase()}${channel.slice(1)} paddle`, tag: "Motor", unit: "%",
+        value: rigidMotorStrength(description, channel) * 100, step: 5, min: -100, max: 100,
+        apply: (value: number) => rigidBodyPatch(context.scene, description.id, rigidMotorStrengthPatch(description, channel, value / 100)),
+      })),
       ...positionFields(frame.origin_m,
         (position_m) => rigidBodyPatch(context.scene, description.id, { position_m })),
       {

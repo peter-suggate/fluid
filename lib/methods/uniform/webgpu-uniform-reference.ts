@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { WebgpuSculptSubstrate } from "../../svo/features/scene-publication/webgpu-sculpt-substrate";
 import { SCULPT_ARENA_WORDS } from "../../svo/features/scene-publication/svo-sculpt-substrate";
 import { packSvoSculptCuts } from "../../svo/features/scene-publication/svo-sculpt-cuts";
@@ -661,8 +662,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** No lattice cell (halo excluded) set in the static solid voxel mask; see uvSolidFree. */
   private solidVoxelsEmpty = true;
   private readonly prescribedSolidMotion = new UniformPrescribedSolidMotion();
-  /** The last advance's roster poses (position, orientation; 12 bodies at most) and count. */
-  private coldRosterPoses = new Float64Array(12 * 7);
+  /** The last advance's roster poses (position, orientation; bounded by the shared rigid capacity) and count. */
+  private coldRosterPoses = new Float64Array(GPU_RIGID_BODY_CAPACITY * 7);
   private coldRosterCount = 0;
   /** The pinned advance of a fixed-step mode; undefined runs the scene's maxDt. */
   private fixedStep_s: number | undefined;
@@ -1625,7 +1626,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // t=0 publication has by now; built from a zero block the record holds
     // every tile uncut for the life of the frame.
     const deferred=this.detailStorage?.layout.placement==="packed";
-    if(deferred)this.writeParams(0,Math.min(this.scene.rigidBodies.length,12),0);
+    if(deferred)this.writeParams(0,Math.min(this.scene.rigidBodies.length,GPU_RIGID_BODY_CAPACITY),0);
     if(detail.fineSlots.sparse)await detail.claimFirst(this.mixedSeed!);
     this.syncMixedLayout();
     // t=0: the uploaded phi on the initial layout (a refused or unchanged
@@ -2470,7 +2471,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private encodeInitialPresentationSurface(): void {
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
-    this.writeParams(0, Math.min(this.scene.rigidBodies.length, 12), 0);
+    this.writeParams(0, Math.min(this.scene.rigidBodies.length, GPU_RIGID_BODY_CAPACITY), 0);
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference t=0 surface reconstruction" });
     // Seed static rho'/face-open authority once across the lattice. Runtime
     // updates only need the rolling active box; untouched air keeps this exact
@@ -3092,8 +3093,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.executionInfo.lastDt_s = dt;
     this.executionInfo.lastSubsteps = 1;
     this.executionInfo.encodedSteps = (this.executionInfo.encodedSteps ?? 0) + 1;
-    // The first twelve bodies, in a roster this solver keeps (the sample reads it and keeps nothing).
-    const roster = this.advanceRoster, rostered = Math.min(12, bodies.length);
+    // The active bodies, in a roster this solver keeps (the sample reads it and keeps nothing).
+    const roster = this.advanceRoster, rostered = Math.min(GPU_RIGID_BODY_CAPACITY, bodies.length);
     for (let i = 0; i < rostered; i++) roster[i] = bodies[i]!;
     if (roster.length !== rostered) roster.length = rostered;
     const activeBodies = this.scene.interaction?.entities.length ? roster : this.prescribedSolidMotion.sample(roster, dt, stepEnd_s);

@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../../core/rigid-capacity";
 import {
   SVO_PIXEL_TRACE_GI_STATE,
   SVO_PIXEL_TRACE_DEFAULT_RECORD_CAPACITY,
@@ -615,8 +616,8 @@ fn probeGlobalIllumination(position:vec3f,normal:vec3f){
 // per-body loop. A pierced sphere is a proxy that reached the analytic test;
 // only the nearest of them becomes the pixel.
 fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
-  let bodyCount=min(u32(round(uniforms.options.z)),12u);
-  for(var index=0u;index<12u;index+=1u){
+  let bodyCount=min(u32(round(uniforms.options.z)),${GPU_RIGID_BODY_CAPACITY}u);
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index+=1u){
     if(index>=bodyCount){break;}
     let body=bodies[index];
     if(!bodyBoundingSphereVisible(ro,rd,body,0.0,DRY_MISS)){continue;}

@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 /** Shading experiment entrypoint. Builds production depth-3 resources and waits for complete mesh publication before timing. */
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
@@ -83,7 +84,7 @@ if(process.env.FLUID_SHADING_SHADER?.includes('one-light')){
 }
 const bodies=packSvoDryRigidBodies(scene),width=Number(process.env.FLUID_PROBE_WIDTH??64),height=Number(process.env.FLUID_PROBE_HEIGHT??64);
 const uniforms=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-const body=device.createBuffer({size:768,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+const body=device.createBuffer({size:GPU_RIGID_BODY_CAPACITY*64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
 device.queue.writeBuffer(uniforms,0,packSvoDryViewUniforms({scene,camera:{...defaultCamera,...preset.camera},environmentId:scene.environment??'default',info:world.info,bodyCount:bodies.count,width,height}));
 device.queue.writeBuffer(body,0,bodies.data);
 const productionLighting=process.env.FLUID_PROBE_LIGHTING==='1';

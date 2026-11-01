@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { withUniformDevice } from "./helpers/uniform-geometric";
@@ -6,7 +7,7 @@ import { RasterWaterPipeline, surfaceExtractionShader } from "../lib/core/webgpu
 test("shared dense water samples preserve the reference triangle multiset", {skip:!process.env.WEBGPU_NODE_MODULE}, async()=>{
   await withUniformDevice("shared water classification",async device=>{
     const uniform=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    const bodies=device.createBuffer({size:768,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM});
+    const bodies=device.createBuffer({size:GPU_RIGID_BODY_CAPACITY*64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM});
     const water=new RasterWaterPipeline(device,"rgba8unorm",uniform,bodies);
     const textures:GPUTexture[]=[];
     try {

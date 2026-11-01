@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 /** Exact cached solid predicate versus geometric evaluation, and the voxel
  * read of the paged mask image versus its host twin, including a one-cell
  * halo of wall pages, terrain at the cutoff, voxels, every rigid shape,
@@ -28,7 +29,7 @@ const gpu=createProcessRetainedDawnGPU(dawn,["backend=metal"]),adapter=await gpu
 const device=await adapter.requestDevice({requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
 device.addEventListener("uncapturederror",e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
 const params=device.createBuffer({size:272,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-const bodies=device.createBuffer({size:12*128,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+const bodies=device.createBuffer({size:GPU_RIGID_BODY_CAPACITY*128,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
 const terrain=device.createTexture({size:[dims[0],dims[2]],format:"r32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
 const output=device.createBuffer({size:16*cells,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
 const read=device.createBuffer({size:output.size,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
@@ -64,7 +65,7 @@ ${uniformMixedSolidWGSL(0,solid.coarse!.count)}
  const solids=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:Object.entries(resourceMap).map(([binding,resource])=>({binding:+binding,resource}))});
  if(compileOnly){assert.deepEqual(errors,[]);console.log("Solid lifecycle shaders and bindings compiled");}
  else{
- const bodyWords=new Float32Array(12*32),heights=new Float32Array(dims[0]*dims[2]);
+ const bodyWords=new Float32Array(GPU_RIGID_BODY_CAPACITY*32),heights=new Float32Array(dims[0]*dims[2]);
  const run=async(name:string,bodyOnly=false)=>{
   device.queue.writeBuffer(params,0,words);device.queue.writeBuffer(bodies,0,bodyWords);
   if(!bodyOnly){device.queue.writeBuffer(scratch,0,image.words);device.queue.writeTexture({texture:terrain},heights,{bytesPerRow:4*dims[0]},[dims[0],dims[2]]);}

@@ -1,4 +1,5 @@
-import { RIGID_MOTOR_FLOATS, rigidMotorWGSL, rigidControlOwnerId, updateRigidMotorDrive, type RigidMotorDrive } from "./rigid-motor";
+import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
+import { RIGID_MOTOR_FLOATS, rigidMotorWGSL, rigidControlOwnerId, rigidMotorStrength, updateRigidMotorDrive, type RigidMotorDrive } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import { sculptCollisionWGSL } from "./sculpt-collision.wgsl";
 import type { SceneDescription } from "./model";
@@ -18,7 +19,7 @@ import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import { proceduralSolidRenderWGSL } from "./procedural-solid-render.wgsl";
 import type { GPUInitializationTask } from "./gpu-initialization";
 
-export const GPU_RIGID_BODY_CAPACITY = 12;
+export { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 /**
  * The first owner id that is *not* a rigid body.
  *
@@ -425,14 +426,14 @@ struct Params {
 }
 struct PickParams { originCount: vec4f, direction: vec4f }
 struct PickResult { index: u32, hit: u32, distance: f32, pad: f32, position: vec4f, orientation: vec4f }
-@group(0) @binding(0) var<storage, read_write> bodies: array<RigidBody, 12>;
+@group(0) @binding(0) var<storage, read_write> bodies: array<RigidBody, ${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(1) var<storage, read_write> exchange: array<atomic<i32>>;
-@group(0) @binding(2) var<storage, read_write> renderBodies: array<RenderBody, 12>;
+@group(0) @binding(2) var<storage, read_write> renderBodies: array<RenderBody, ${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(3) var<uniform> params: Params;
 ${terrainContact ? rigidTerrainBindingWGSL : ""}
 @group(0) @binding(5) var<uniform> pickParams: PickParams;
 @group(0) @binding(6) var<storage, read_write> pickResult: PickResult;
-@group(0) @binding(7) var<storage, read_write> rigidMotion: array<SvoPrimitiveMotionRecord, 12>;
+@group(0) @binding(7) var<storage, read_write> rigidMotion: array<SvoPrimitiveMotionRecord, ${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(8) var<storage, read_write> immersedVolumes: array<f32>;
 ${solidWorldContact ? rigidSolidWorldBindingWGSL : ""}
 
@@ -562,7 +563,7 @@ fn pickRigidBody(@builtin(global_invocation_id) id: vec3u) {
   let direction=safeNormalize(pickParams.direction.xyz,vec3f(0,0,-1));
   var bestIndex=0xffffffffu;
   var bestDistance=1e30;
-  for(var index=0u;index<12u;index++){
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){
     if(index>=count){break;}
     let body=bodies[index];
     if(body.material.w<0.0){continue;}
@@ -584,8 +585,8 @@ fn pickRigidBody(@builtin(global_invocation_id) id: vec3u) {
 fn integrate(@builtin(global_invocation_id) id: vec3u) {
   if(any(id!=vec3u(0))){return;}let count=u32(round(params.step.z));let dt=params.step.x;let rho=max(params.step.y,1e-9);let snapshots=max(params.step.w,1.0);
   gatherMotorTraction(count);
-  var previousBodies:array<RigidBody,12>;for(var index=0u;index<12u;index++){previousBodies[index]=bodies[index];}
-  for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];
+  var previousBodies:array<RigidBody,${GPU_RIGID_BODY_CAPACITY}>;for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){previousBodies[index]=bodies[index];}
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}var body=bodies[index];
     let base=index*12u;let wet=f32(atomicLoad(&exchange[base+6u]))/65536.0/snapshots;let displaced=min(max(0.0,wet*params.coupling.x),bodyVolume(body));
     // Static bodies retain the analytic authored-waterline volume uploaded by
     // syncBodies. Free, held and motor-attached poses need a recurring immersed update.
@@ -621,14 +622,14 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
       bodies[index]=body;
     }
   }
-  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body);" : "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
+  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body);" : "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
   // A held body is the host's to place. Whatever the contact iterations did to
   // it — a pair impulse from a crate it was shoved into, an angular momentum it
   // would spin off the instant it is let go — is rolled back to the pose the
   // pointer authored. It still pushes its neighbours; nothing pushes back.
-  for(var index=0u;index<12u;index++){if(index>=count){break;}if(bodies[index].material.z>1.5){bodies[index]=previousBodies[index];}}
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}if(bodies[index].material.z>1.5){bodies[index]=previousBodies[index];}}
   for(var index=0u;index<count;index++){attachMotor(index,params.gravity.w,dt);}
-  for(var index=0u;index<12u;index++){if(index<count){publish(index);publishMotion(index,previousBodies[index],bodies[index],dt);}else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}}
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index<count){publish(index);publishMotion(index,previousBodies[index],bodies[index],dt);}else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}}
 }
 `;
 
@@ -698,7 +699,7 @@ export class WebGPURigidBodySystem {
     this.stateScratch = device.createBuffer({ label: "GPU rigid-body roster scratch", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderScratch = device.createBuffer({ label: "GPU rigid render roster scratch", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionScratch = device.createBuffer({ label: "GPU rigid motion roster scratch", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.motorBuffer = device.createBuffer({label:"Rigid motor attachments and skins",size:12*RIGID_MOTOR_FLOATS*4,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.motorBuffer = device.createBuffer({label:"Rigid motor attachments and skins",size:GPU_RIGID_BODY_CAPACITY*RIGID_MOTOR_FLOATS*4,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     this.paramsBuffer = device.createBuffer({ label: "GPU rigid-body step parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickParamsBuffer = device.createBuffer({ label: "GPU rigid-body pick ray", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickResultBuffer = device.createBuffer({ label: "GPU rigid-body pick result", size: GPU_RIGID_PICK_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -864,16 +865,20 @@ export class WebGPURigidBodySystem {
     const authored = active.map((body) => JSON.stringify([body.description.position_m,body.description.orientation,body.description.linearVelocity_m_s,body.description.angularVelocity_rad_s]));
     const commands = active.map((body) => JSON.stringify([body.position_m,body.orientation,body.linearVelocity_m_s,body.angularVelocity_rad_s,Boolean(body.held)]));
     const sameBodies = JSON.stringify([ids,structural,authored,commands]) === JSON.stringify([this.bodyIds,this.structuralSignatures,this.authoredTransformSignatures,this.commandSignatures]);
-    const strengths = active.map(body => body.description.motorStrength ?? 1);
+    const strengths = active.map(body => {
+      const m = body.description.motorAttachment;
+      const parent = m && active.find(candidate => candidate.description.id === m.parentId);
+      return rigidMotorStrength(parent ? parent.description : body.description, m?.channel);
+    });
     if (sameBodies && JSON.stringify(strengths) === JSON.stringify(this.motorStrengths)) return;
     this.motorStrengths = strengths;
     this.selectionOwners = active.map(body => ids.indexOf(rigidControlOwnerId(body.description)));
     const nextDrives = new Map<string, RigidMotorDrive>();
-    const motorData = new Float32Array(12*RIGID_MOTOR_FLOATS);
+    const motorData = new Float32Array(GPU_RIGID_BODY_CAPACITY*RIGID_MOTOR_FLOATS);
     active.forEach((body,index) => {
       const m=body.description.motorAttachment, at=index*RIGID_MOTOR_FLOATS, skin=rigidAppearanceSkin(body.description);
       if(m){const parent=ids.indexOf(m.parentId);if(parent<0)throw new Error(`Missing motor parent ${m.parentId}`);
-        const drive = updateRigidMotorDrive(m, strengths[parent]!, this.motorTime_s, this.motorDrives.get(body.description.id));
+        const drive = updateRigidMotorDrive(m, strengths[index]!, this.motorTime_s, this.motorDrives.get(body.description.id));
         nextDrives.set(body.description.id, drive);
         motorData.set([m.pivot_m.x,m.pivot_m.y,m.pivot_m.z,parent+1,m.offset_m.x,m.offset_m.y,m.offset_m.z,m.phase_rad + drive.phaseOffset_rad,
           m.axis.x,m.axis.y,m.axis.z,m.angularSpeed_rad_s * drive.strength,m.orientation.w,m.orientation.x,m.orientation.y,m.orientation.z,m.startTime_s,m.rampUp_s,0,0],at);}
@@ -993,7 +998,7 @@ export class WebGPURigidBodySystem {
    * rather than trust that roster, or it starts the drag from a body that
    * settled seconds ago.
    *
-   * User-triggered and bounded, like `pick`: one 768-byte copy per gesture.
+   * User-triggered and bounded, like `pick`: one bounded rigid-buffer copy per gesture.
    */
   async readPoses(): Promise<GPURigidBodyPose[] | undefined> {
     if (this.bodyCount === 0) return undefined;

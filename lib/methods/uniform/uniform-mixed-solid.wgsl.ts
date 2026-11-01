@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import {uniformSolidCutMaskWGSL} from "./uniform-solid-cut-mask.wgsl";
 import { sculptCollisionWGSL } from "../../core/sculpt-collision.wgsl";
 import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
@@ -206,7 +207,7 @@ export interface UniformMixedSolidResources {
   * word a tile key, all cut as the host uploads it; the record build
   * writes it) and the page slots. */
  scratch:GPUBuffer;terrain:GPUTexture;
- /** WebGPURigidBodySystem.stateBuffer: twelve 128-byte body records,
+ /** WebGPURigidBodySystem.stateBuffer: capacity-sized 128-byte body records,
   * copied into the library's uniform mirror by encodeBodies (a storage
   * binding would exceed the band's per-stage storage budget). */
  bodies:GPUBuffer;
@@ -328,7 +329,7 @@ export class UniformMixedSolid {
   * of each claimed block is then built by encodeNewBlocks. */
  constructor(private readonly device:GPUDevice,resources:UniformMixedSolidResources,private readonly coarseLayout?:UniformMixedLayout,pool?:UniformMixedSolidPool){
   if(resources.params.size<272||resources.terrain.format!=="r32float")throw new Error("Mixed solids require the native parameter block and terrain heightfield");
-  if(resources.bodies.size<12*128)throw new Error("Mixed solids require the rigid-body state buffer");
+  if(resources.bodies.size<GPU_RIGID_BODY_CAPACITY*128)throw new Error("Mixed solids require the rigid-body state buffer");
   if(!Number.isSafeInteger(resources.coupledTiles)||resources.coupledTiles<0)throw new Error("Mixed solids require the host's coupled tile count");
   this.coupledTiles=resources.coupledTiles;this.maxGroups=device.limits.maxComputeWorkgroupsPerDimension;
   this.params=resources.params;
@@ -337,7 +338,7 @@ export class UniformMixedSolid {
   if(coarseLayout&&!resources.paramsWritten)throw new Error("The coarse solid record requires the host's parameter-block write receipt");
   this.paramsWritten=resources.paramsWritten;
   this.bodySource=resources.bodies;
-  this.bodies=device.createBuffer({label:"Uniform mixed solid body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  this.bodies=device.createBuffer({label:"Uniform mixed solid body mirror",size:GPU_RIGID_BODY_CAPACITY*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const bodies=this.bodies;
   this.surfaceBoundary={params:{buffer:resources.params,size:272},mask:{buffer:resources.scratch},terrain:resources.terrain,
    bodies:{buffer:bodies},analyticTerrain:{buffer:this.analyticTerrain}};
@@ -399,7 +400,7 @@ export class UniformMixedSolid {
  /** Mirror the rigid state into the library: at a frame's head, and after
   * the rigid integration for the census that follows it. */
  encodeBodies(encoder:GPUCommandEncoder):void{
-  encoder.copyBufferToBuffer(this.bodySource,0,this.bodies,0,12*128);
+  encoder.copyBufferToBuffer(this.bodySource,0,this.bodies,0,GPU_RIGID_BODY_CAPACITY*128);
   // Invalidate in queue order, including publication after tail integration.
   // A host write here could invalidate an earlier frame still in flight.
   if(this.coarse)encoder.clearBuffer(this.coarse.record,this.epochByte+4,4);
@@ -412,7 +413,7 @@ export class UniformMixedSolid {
 ${uniformMixedSolidWGSL(0,undefined,false,true)}
 @group(1) @binding(0) var<storage,read_write> record:array<vec4f>;
 override umDispatchX:u32=65535u;
-@group(1) @binding(1) var<uniform> umBuiltBodies:array<UMRigidBody,12>;
+@group(1) @binding(1) var<uniform> umBuiltBodies:array<UMRigidBody,${GPU_RIGID_BODY_CAPACITY}>;
 @group(1) @binding(2) var<storage,read> topology:array<u32>;
 ${solidRecordAddressWGSL(layout,"topology")}
 ${pool?uniformPagePoolWGSL(pool.layout,1,3)+uniformLiveListsOfWGSL("upState",pool.layout):""}
@@ -476,7 +477,7 @@ fn umBuilderRegionOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&
 fn umBodyTileSwept(tc:vec3u,moved:u32)->bool{
  let h=umSolidParams.cellGravity.xyz;let lo=umSolidWorldCell(vec3i(tc*4u))-0.5*h;let hi=lo+4.0*h;
  let margin=2.0*max(h.x,max(h.y,h.z));
- for(var i=0u;i<12u;i++){
+ for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i++){
   if(((moved>>i)&1u)==0u){continue;}
   if((umBodyPresentNow(i)&&umBodyTileNear(umSolidBodies[i],lo,hi,margin))||(umBodyPresentBuilt(i)&&umBodyTileNear(umBuiltBodies[i],lo,hi,margin))){return true;}
  }
@@ -515,7 +516,7 @@ fn umBodyReach(d:f32,hmax:f32)->u32{
 @compute @workgroup_size(64) fn bodyMask(@builtin(global_invocation_id) g:vec3u){
  let region=g.x+umDispatchX*64u*g.y;
  if(region==0u){
-  var moved=0u;for(var i=0u;i<12u;i++){if(umBodyMoved(i)){moved|=1u<<i;}}
+  var moved=0u;for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i++){if(umBodyMoved(i)){moved|=1u<<i;}}
   bodyRegions[UM_REGIONS]=umBodyCount();bodyRegions[UM_REGIONS+2u]=moved;bodyRegions[UM_REGIONS+3u]=u32(moved!=0u);
   // Pending: the first derived-geometry consumer after this head takes the swept evidence.
   record[umBodyRegionBase()+UM_REGIONS]=vec4f(1.0,f32(moved!=0u),f32(umBodyCount()),0.0);
@@ -527,7 +528,7 @@ fn umBodyReach(d:f32,hmax:f32)->u32{
  let h=umSolidParams.cellGravity.xyz;let hmax=max(h.x,max(h.y,h.z));
  let lo=umSolidWorldCell(vec3i(umTileCoord(first)*4u))-0.5*h;let hi=lo+16.0*h;
  var swept=3.402823e38;var pose=3.402823e38;var moved=0u;
- for(var i=0u;i<12u;i++){
+ for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i++){
   let now=umBodyPresentNow(i);let b=umSolidBodies[i];
   if(now){let p=b.positionShape.xyz;pose=min(pose,distance(clamp(p,lo,hi),p)-b.dimensions.w);}
   if(!umBodyMoved(i)){continue;}
@@ -926,7 +927,7 @@ var<workgroup> cutAny:atomic<u32>;
   const build=(entryPoint:string,umBodyTiles:number)=>this.device.createComputePipelineAsync({layout:builderLayout,compute:{module,entryPoint,constants:{umDispatchX:dispatchX,umBodyTiles}}});
   const [pipeline,bodies,cuts,cutsBodies,claimed,cutsClaimed,surfaceClear,surfaceClearNew,surfaceClearBodies,bodyMask]=await Promise.all([build("build",0),build("buildRegions",1),build("cuts",0),build("cutsRegions",1),pool?build("buildNew",0):undefined,pool?build("cutsNew",0):undefined,build("surfaceClear",0),pool?build("surfaceClearNew",0):undefined,build("surfaceClear",1),build("bodyMask",0)]);
   const [slotsReclaim,slotsReclaimNew]=pooled?await Promise.all([build("slotsReclaim",0),pool?build("slotsReclaimNew",0):undefined]):[];
-  const built=this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  const built=this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:GPU_RIGID_BODY_CAPACITY*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   this.builder={bodies,pipeline,claimed,cuts,cutsBodies,cutsClaimed,surfaceClear,surfaceClearBodies,surfaceClearNew,bodyMask,slotsReclaim,slotsReclaimNew,layout:output};
   const flagModule=this.device.createShaderModule({label:"Uniform mixed solid simulation widths",code:/* wgsl */`
 ${solidRecordRowsWGSL(layout.tiles.length)}
@@ -999,7 +1000,7 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   }
   pass.end();
   if(this.built)return;
-  encoder.copyBufferToBuffer(this.bodies,0,this.builtBodies!,0,12*128);this.full=false;
+  encoder.copyBufferToBuffer(this.bodies,0,this.builtBodies!,0,GPU_RIGID_BODY_CAPACITY*128);this.full=false;
   this.built=true;
  }
  /** The first derived-geometry consumer after a head takes the mask's swept
@@ -1173,7 +1174,7 @@ struct UMRigidBody {
  positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,
  angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f,
 }
-@group(${group}) @binding(4) var<uniform> umSolidBodies:array<UMRigidBody,12>;
+@group(${group}) @binding(4) var<uniform> umSolidBodies:array<UMRigidBody,${GPU_RIGID_BODY_CAPACITY}>;
 // lean.x certifies that voxels, terrain and the live body roster are empty.
 ${gated?`// A pipeline compiled with umSolidFree has its solid code folded away: its
 // kernel runs only while umSolidPresent() is false (it tests the gate
@@ -1430,13 +1431,13 @@ fn umSolidFaceClear(id:vec3i,neighbor:vec3i,axis:u32)->bool{return umSolidTileCl
 // interior has an unbounded solid exterior and cannot take that rejection.
 ${sceneShapeWgsl()}
 ${fluidRigidBoundaryWGSL}
-fn umBodyCount()->u32{if(!umSolidEnabled()){return 0u;}return min(u32(max(round(umSolidParams.boundary.z),0.0)),12u);}
+fn umBodyCount()->u32{if(!umSolidEnabled()){return 0u;}return min(u32(max(round(umSolidParams.boundary.z),0.0)),${GPU_RIGID_BODY_CAPACITY}u);}
 fn umBodyRegionOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
 // Any present body's bounding sphere within margin of a world point: every
 // body sample a helper takes lies within its own margin of that point.
 ${writable?/* wgsl */`// Only the record builder restricts the roster. Other writable entry
 // points start with every bit set and retain the unrestricted behavior.
-var<private> umSolidQueryBodies:u32=0xfffu;
+var<private> umSolidQueryBodies:u32=${(2 ** GPU_RIGID_BODY_CAPACITY - 1)}u;
 fn umBodyTileCandidates(tc:vec3u)->u32{
  let h=umSolidParams.cellGravity.xyz;let centre=umSolidWorldCell(vec3i(tc*4u))+1.5*h;var mask=0u;
  for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,centre,length(3.0*h))){mask|=1u<<i;}}

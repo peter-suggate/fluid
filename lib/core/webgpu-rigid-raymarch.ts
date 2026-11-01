@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { seaweedShaderLibrary } from "./seaweed-render";
 import { robotShaderLibrary } from '../interaction/features/robot/render';
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
@@ -9,7 +10,7 @@ import { unifiedLightingShaderLibrary, waterSceneOpticsShaderLibrary } from "./w
  * that has to answer "what body is along this ray?".
  *
  * The including shader must expose the standard `u: Uniforms` binding — only
- * `options.z`, the body count, is read — and a `bodies: array<BodyGPU,12>`
+ * `options.z`, the body count, is read — and a `bodies: array<BodyGPU,${GPU_RIGID_BODY_CAPACITY}>`
  * binding whose element layout is (positionRadius, halfSizeShape, orientation,
  * colorSelected). Both are the conventions `environmentShaderLibrary` already
  * establishes, and both are already true of every shader that binds the
@@ -57,7 +58,7 @@ fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU)->RigidHit{
   else{hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,true);}
   return RigidHit(hit.t,normalize(qrot(body.orientation,hit.n)));
 }
-fn pickNearestRigid(ro:vec3f,rd:vec3f)->RigidPick{var best=RigidPick(1e20,vec3f(0,1,0),0u);for(var i=0u;i<12u;i+=1u){if(i>=u32(round(u.options.z))){break;}let hit=bodyRigidHit(ro,rd,bodies[i]);if(hit.t<best.t){best=RigidPick(hit.t,hit.n,i);}}return best;}
+fn pickNearestRigid(ro:vec3f,rd:vec3f)->RigidPick{var best=RigidPick(1e20,vec3f(0,1,0),0u);for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i+=1u){if(i>=u32(round(u.options.z))){break;}let hit=bodyRigidHit(ro,rd,bodies[i]);if(hit.t<best.t){best=RigidPick(hit.t,hit.n,i);}}return best;}
 fn nearestRigid(ro:vec3f,rd:vec3f)->RigidHit{let pick=pickNearestRigid(ro,rd);return RigidHit(pick.t,pick.n);}
 `;
 
@@ -107,7 +108,7 @@ export const fluidOnlyRigidSceneShader = /* wgsl */ `
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
-@group(0) @binding(1) var<storage,read> bodies:array<BodyGPU,12>;
+@group(0) @binding(1) var<storage,read> bodies:array<BodyGPU,${GPU_RIGID_BODY_CAPACITY}>;
 ${waterSceneOpticsShaderLibrary(0, 2, 3)}
 ${cameraApertureShaderLibrary("u")}
 ${rigidBodyRaymarchShaderLibrary}

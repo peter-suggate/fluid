@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 /** Full scan/window-list oracle. Diagnostic GPU reads only; run under lockf.
  * <scene> <steps> [--outside] [--overlay-only] [--compare-cache]. Default trough/40, or open/120
  * with --outside. Every failure prints FAIL and exits nonzero. */
@@ -34,7 +35,7 @@ try{
  const buffer=(size:number,usage:number)=>{const b=d.createBuffer({size,usage});owned.push(b);return b;};
  const read=async(b:GPUBuffer,offset=0,size=b.size-offset)=>{const r=d.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=d.createCommandEncoder();e.copyBufferToBuffer(b,offset,r,0,size);d.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);return r.getMappedRange().slice(0);}finally{r.unmap();r.destroy();}};
  const u=buffer(416,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
- if(!overlayOnly){water=new RasterWaterPipeline(d,'bgra8unorm',u,buffer(12*64,GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM));await water.initialize();}
+ if(!overlayOnly){water=new RasterWaterPipeline(d,'bgra8unorm',u,buffer(GPU_RIGID_BODY_CAPACITY*64,GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM));await water.initialize();}
  console.log('water ready');
  solver=await method.createSolverAsync!(d,scene,'balanced',{...method.appDefaults,timeStep:'scene'},undefined,()=>{}) as WebGPUUniformReferenceSolver;
  const pool=(solver as unknown as {mixedFrame:{pagePool:UniformPagePool}}).mixedFrame.pagePool;

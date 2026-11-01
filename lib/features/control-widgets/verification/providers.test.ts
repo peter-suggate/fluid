@@ -9,20 +9,39 @@ import type { InteractionPane } from "../../interactive/pane";
 import type { WidgetContext } from "../context";
 import { interactionEntityWidgets } from "../interaction-entity";
 import { rigidMotorWidgets } from "../rigid-motor";
+import { simulation } from "../../../core/simulation/controller";
 
 const identity = { x: 0, y: 0, z: 0, w: 1 };
 
-test("one throttle per motor-carrying hull, placed on its own side by the scene", () => {
+test("two independent throttles per motor-carrying hull, placed on its own side by the scene", () => {
   const scene = createPaddleboatsScene();
-  scene.rigidBodies[0] = { ...scene.rigidBodies[0]!, motorStrength: -.35 };
+  scene.rigidBodies[0] = { ...scene.rigidBodies[0]!, motorStrengths: { left: -.35, right: .6 } };
   const widgets = collectWidgets([rigidMotorWidgets], { paneId: "a", scene } satisfies WidgetContext);
   assert.deepEqual(widgets.map(widget => [widget.id, widget.label]), [["motor:paddleboat-0", "Ember"], ["motor:paddleboat-1", "Jade"]]);
-  assert.deepEqual(widgets[0]!.channels[0], { kind: "axis1", id: "strength", label: "Motor", min: -100, max: 100, step: 5, unit: "%", value: -35, zeroLabel: "Stop" });
+  assert.deepEqual(widgets[0]!.channels[0], { kind: "axis1", id: "strength:left", label: "Left paddle", min: -100, max: 100, step: 5, unit: "%", value: -35, zeroLabel: "Stop" });
+  assert.deepEqual(widgets[0]!.channels[1], { kind: "axis1", id: "strength:right", label: "Right paddle", min: -100, max: 100, step: 5, unit: "%", value: 60, zeroLabel: "Stop" });
+  assert.equal(widgets[1]!.channels.length, 2);
   // The boats open at one third of the wheels' rated speed.
   assert.equal(widgets[1]!.channels[0]!.kind === "axis1" && widgets[1]!.channels[0]!.value, 33);
   assert.equal(findSceneDefinition("paddleboats")?.widgets, paddleboatsWidgets);
   const groups = resolveWidgetLayout(widgets, paddleboatsWidgets);
   assert.deepEqual(groups.map(group => [group.anchor, group.widgets[0]!.id]), [["bottom-left", "motor:paddleboat-0"], ["bottom-right", "motor:paddleboat-1"]]);
+});
+
+test("live paddle inputs preserve the other wheel and the other boat between renders", t => {
+  let scene = createPaddleboatsScene();
+  const rendered = { paneId: "a", scene } satisfies WidgetContext;
+  t.mock.method(simulation, "session", () => ({ scene: { getState: () => ({ scene }) } }) as ReturnType<typeof simulation.session>);
+  const apply = t.mock.method(simulation, "applyRuntimeControl", (patch: Parameters<typeof simulation.applyRuntimeControl>[0], paneId: Parameters<typeof simulation.applyRuntimeControl>[1]) => {
+    assert.equal(paneId, "a");scene = { ...scene, ...patch };
+  });
+  rigidMotorWidgets.input(rendered, "motor:paddleboat-0", "strength:left", -50);
+  rigidMotorWidgets.input(rendered, "motor:paddleboat-0", "strength:right", 0);
+  assert.deepEqual(scene.rigidBodies[0]!.motorStrengths, { left: -.5, right: 0 });
+  assert.deepEqual(scene.rigidBodies[9]!.motorStrengths, { left: 1 / 3, right: 1 / 3 });
+  rigidMotorWidgets.input(rendered, "motor:paddleboat-0", "strength:absent", 100);
+  rigidMotorWidgets.input(rendered, "motor:paddleboat-0", "strength:left", NaN);
+  assert.equal(apply.mock.callCount(), 2);
 });
 
 function robotView(controlled: boolean): InteractionView {

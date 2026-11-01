@@ -244,9 +244,9 @@ fn svoStageDecodeOct8(packed:u32)->vec3f{
   }
   return normalize(result);
 }
-/** Mirrors the rigid pass's own 12-bit octahedral unpack, bit for bit. */
+/** Mirrors the rigid pass's own 12/11-bit octahedral unpack, bit for bit. */
 fn svoStageRigidNormal(packed:u32)->vec3f{
-  let encoded=vec2f(f32(packed&0xfffu),f32((packed>>12u)&0xfffu))/4095.0*2.0-1.0;
+  let encoded=vec2f(f32(packed&0xfffu),f32((packed>>12u)&0x7ffu))/vec2f(4095.0,2047.0)*2.0-1.0;
   var normal=vec3f(encoded,1.0-abs(encoded.x)-abs(encoded.y));
   if(normal.z<0.0){
     let original=normal.xy;

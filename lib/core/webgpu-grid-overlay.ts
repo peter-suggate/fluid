@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { gridStructure3DWGSL } from "./grid-structure-3d.wgsl";
 import { SpatialPerformanceOverlay } from "../features/spatial-performance/overlay";
 import { DEFAULT_PERFORMANCE_VIEW } from "../features/spatial-performance/view";
@@ -123,7 +124,7 @@ struct BodyGPU {
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 ${cameraApertureShaderLibrary("u")}
-@group(0) @binding(1) var<storage, read> bodies: array<BodyGPU, 12>;
+@group(0) @binding(1) var<storage, read> bodies: array<BodyGPU, ${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(2) var fluidField: texture_3d<f32>;
 @group(0) @binding(3) var tallCellBases: texture_2d<f32>;
 @group(0) @binding(4) var adaptiveCells: texture_3d<u32>;

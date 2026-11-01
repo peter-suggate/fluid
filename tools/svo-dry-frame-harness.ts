@@ -1,3 +1,4 @@
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 import { paddleboatSkin } from "../lib/core/paddleboat-render";
 import { svoRenderScenePublication, type SvoRenderScenePublication } from "../lib/svo/features/scene-publication/svo-render-scene-publication";
 import { BUB_RENDER_SHAPE, robotRenderExtent, robotRenderRadius } from '../lib/interaction/features/robot/render';
@@ -205,7 +206,7 @@ export function packSvoDryViewUniforms(inputs: SvoDryViewUniformInputs): Float32
     position.x, position.y, position.z, cameraTanHalfFov(camera),
     camera.target_m.x, camera.target_m.y, camera.target_m.z, overlay ? overlay.opacity : 0.82,
     scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-    diagnosticControl, scene.voxelDomain.finestCellSize_m, Math.min(bodyCount, 12), 1,
+    diagnosticControl, scene.voxelDomain.finestCellSize_m, Math.min(bodyCount, GPU_RIGID_BODY_CAPACITY), 1,
     info.nx, info.ny, info.nz, 3,
     0, 0.5, 1, 0,
     environmentIndex(environmentId), 0, 0, 0,
@@ -218,8 +219,8 @@ export function packSvoDryViewUniforms(inputs: SvoDryViewUniformInputs): Float32
 /** Mirror of the FluidLabRenderer CPU rigid-body packing (webgpu-renderer.ts). */
 export function packSvoDryRigidBodies(scene: SceneDescription) {
   const bodies = initializeRigidBodies(scene.rigidBodies);
-  const bodyData = new Float32Array(12 * 16);
-  bodies.slice(0, 12).forEach((body, index) => {
+  const bodyData = new Float32Array(GPU_RIGID_BODY_CAPACITY * 16);
+  bodies.slice(0, GPU_RIGID_BODY_CAPACITY).forEach((body, index) => {
     const offset = index * 16;
     const shape = body.description.shape;
     const skin = paddleboatSkin(body.description);
