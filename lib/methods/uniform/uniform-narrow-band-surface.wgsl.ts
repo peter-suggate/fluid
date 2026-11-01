@@ -197,7 +197,8 @@ fn nbCoupleFineVertex(t:NBCoupleFine,lane:u32,round:u32)->vec4i{
   let q=vertex.xyz;
   let bulk=particleSurfaceBulk(owner.tile,origin,q,true);var value=bulk.x;
   if(bulk.y>0.0){value=particleSurfaceFinish(origin>>vec3u(2u),q,bulk.x,nbCachedSurfaceNearest(q),bulk.z,true);}
-  nbStoreReconstructed(q,value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),1u);
+  // nbCoupleFineVertex left no COLD vertex.
+  nbStoreReconstructedWarm(q,value*min(params.hDt.x,min(params.hDt.y,params.hDt.z)),1u);
  }
 }
 `;

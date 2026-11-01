@@ -258,6 +258,10 @@ fn nbMarkPhiChanged(p:vec3u){
 }
 fn nbStoreReconstructed(p:vec3i,value:f32,width:u32){
  if(nbVertexCold(vec3u(p))){return;}
+ nbStoreReconstructedWarm(p,value,width);
+}
+// nbStoreReconstructed at a vertex its caller has found not COLD (nbVertexCold) this launch.
+fn nbStoreReconstructedWarm(p:vec3i,value:f32,width:u32){
  if(nbReuseEnabled()){
   var old=0.0;if(width==4u){old=umLoadCorner(vec3u(p));}else{old=umLoadVertex(vec3u(p));}
   if(bitcast<u32>(old)!=bitcast<u32>(value)){nbMarkPhiChanged(vec3u(p));}

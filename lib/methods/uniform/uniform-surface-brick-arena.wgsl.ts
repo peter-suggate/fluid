@@ -735,8 +735,9 @@ fn nbArenaCanonicalPublish(p:vec3u,l:vec3u,t0:vec3i,block:u32,page:vec3i,window:
   if(lane<27u){atomicStore(&nbCanonicalRegions[lane],0u);}
   if(lane==0u){atomicStore(&nbCanonicalFine,0u);}workgroupBarrier();
   let q=t0+vec3i(umCorner(lane&63u,4u))-1;var key=UM_TILES;
-  if(lane<64u){key=umTileKey(q);if(umKeyStored(key)&&umTileWidth(key)==1u){atomicOr(&nbCanonicalFine,1u);}}
-  // Only an incident fine writer publishes.
+  if(lane<64u){key=umTileKey(q);if(umKeyStored(key)&&umTileWidth(key)==1u&&!nbRegionCold(umPageOfTile(key))){atomicOr(&nbCanonicalFine,1u);}}
+  // Only an incident fine writer publishes, and a COLD one never does
+  // (nbArenaCanonicalWriter): a writer is a stored h tile among these.
   if(nbArenaUniform(atomicLoad(&nbCanonicalFine),lane)==0u){continue;}
   if(lane<64u){
    var bits=0u;var mask=vec2u(0u);var incident=0u;
