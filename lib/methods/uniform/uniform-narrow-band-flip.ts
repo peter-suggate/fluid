@@ -248,6 +248,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  readonly particleStride:number;
  /** The records' bytes in a bank, its binding (arrayLength) size: a budget's bank buffer can be larger (bankBytes). */
  private readonly recordBytes:number;
+ /** A bank buffer's bytes: the records, or a budget's larger bank (the extension companion's). */
+ private readonly bankBytes:number;
  private get apic():boolean{return this.transferMode==="apic";}
  readonly particles:readonly [GPUBuffer,GPUBuffer];
  readonly state:GPUBuffer;
@@ -570,7 +572,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.seedBudget=budget?.records??0;
   this.capacity=budget?narrowBandBudgetCapacity(budget,address.blocks):Math.min(cells*8,Math.max(2_097_152,cells),deviceRecords);
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-  this.recordBytes=this.capacity*particleBytes;const bankBytes=Math.max(this.recordBytes,budget?.bankBytes??0);
+  this.recordBytes=this.capacity*particleBytes;const bankBytes=this.bankBytes=Math.max(this.recordBytes,budget?.bankBytes??0);
   this.particles=[buffer("particles A",bankBytes),buffer("particles B",bankBytes)];
   // The receipt, then the slab records (uniform-particle-slab.wgsl).
   this.state=buffer("receipt, particle frame and brick slabs",4*particleSlabWords(address.blocks));
@@ -598,7 +600,10 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // (reserveFine), and the pour's late frames hold over 12k: the deposit's
   // words are sized for the pool, so no layout leaves the fast deposit.
   // Under a particle budget its h tiles bound the deposit: a layout past them takes the general gather.
-  const deposit=particleDepositStorage(this.coarseListWord+4+2*this.coarseListCapacity,budget?Math.min(budget.fineTiles,address.poolTiles):address.poolTiles,limit,this.recordBytes);
+  // The deposit fits the scratch bank by the buffer's bytes, not its records'
+  // (a budget's bank is the companion's): SORT has drained it, and the tail
+  // extension's companion is written only after the transfer reads it.
+  const deposit=particleDepositStorage(this.coarseListWord+4+2*this.coarseListCapacity,budget?Math.min(budget.fineTiles,address.poolTiles):address.poolTiles,limit,bankBytes);
   this.depositWord=deposit.offsetWords;this.depositTiles=deposit.tiles;this.sharedDeposit=deposit.shared;
   const binBytes=deposit.binsBytes;
   if(binBytes>limit)throw new Error(`Narrow-band bins and bounded crossing reuse (${binBytes} bytes) exceed GPU buffer limit ${limit}`);
@@ -694,7 +699,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
    this.groups[name]=[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
-    {binding:0,resource:{buffer:this.particles[parity]!,size:this.recordBytes}},{binding:1,resource:{buffer:this.particles[1-parity]!,size:this.recordBytes}},
+    // Binding 0 spans the bank when it holds the shared deposit (depositScratch aliases it; no shader reads source's length).
+    {binding:0,resource:{buffer:this.particles[parity]!,size:this.sharedDeposit?this.bankBytes:this.recordBytes}},{binding:1,resource:{buffer:this.particles[1-parity]!,size:this.recordBytes}},
     {binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
     {binding:5,resource:{buffer:negative}},{binding:6,resource:{buffer:this.params}},
     {binding:7,resource:name==="reconstruct"||name==="redistanceStore"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
