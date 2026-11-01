@@ -1,3 +1,4 @@
+import { sculptCylinderDistance } from "./sculpt-cut-cylinder";
 /** Sparse persistent cut-distance pages. Brush history is a document/undo log,
  * never the field sampled by production rendering. GPU updates only new stamps;
  * undo rebuilds the changed pages from their local records. */
@@ -196,7 +197,8 @@ export class SculptPickingField {
       const at = 4 + index * 8;
       const rx = (f[at + 4]! - f[at]!) / 2, ry = (f[at + 5]! - f[at + 1]!) / 2, rz = (f[at + 6]! - f[at + 2]!) / 2;
       const x = point[0] - (f[at]! + f[at + 4]!) / 2, y = point[1] - (f[at + 1]! + f[at + 5]!) / 2, z = point[2] - (f[at + 2]! + f[at + 6]!) / 2;
-      if (this.plan.words[at + 3] === 2) distance = Math.min(distance, (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz));
+      if (this.plan.words[at + 3]! >= 3) distance = Math.min(distance, sculptCylinderDistance(this.plan.words[at + 3]!, [x, y, z], [rx, ry, rz]));
+      else if (this.plan.words[at + 3] === 2) distance = Math.min(distance, (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz));
       else {
         const a = Math.abs(x) - rx, b = Math.abs(y) - ry, c = Math.abs(z) - rz;
         distance = Math.min(distance, Math.hypot(Math.max(a, 0), Math.max(b, 0), Math.max(c, 0)) + Math.min(Math.max(a, b, c), 0));

@@ -1,7 +1,7 @@
 import type { EditorRay } from "../../editor-entity";
 import type { SolidWorldVoxelPatch as Patch } from "../../solid-world";
 import { OPERATION_OPPOSITE, depthControl, materialControl, mirrorControls, operationCaption, operationControl,
-  operationTone, shapeControl, shellControl, sizeControl, toolMaterialId, toolPatchOperation } from "../controls";
+  operationTone, shapeControl, sizeControl, toolMaterialId, toolPatchOperation } from "../controls";
 import { MAX_STROKE_PATCHES, MAX_STROKE_VOXELS, faceBox, mirroredPatches, patchesSize, shapePatches,
   strokeHighlight, toolSurface, voxelToolUnavailable, type ToolSurface } from "../geometry";
 import type { ToolContext, ToolGesture, ToolNumberControl, ToolUpdate, VoxelToolPlugin } from "../plugin";
@@ -98,7 +98,7 @@ export const voxelBrushTool: VoxelToolPlugin = {
   ui: { label: "Voxel", hint: "Drag across solids to add to, cut into or repaint the surface under the pointer.", group: "Brush", order: 0,
     opposite: OPERATION_OPPOSITE,
     icon: "M12 3 20 7.5v9L12 21l-8-4.5v-9ZM4 7.5 12 12l8-4.5M12 12v9",
-    controls: [operationControl, sizeControl, reachControl, shape.control, materialControl, ...mirrorControls, shellControl] },
+    controls: [operationControl, sizeControl, reachControl, shape.control, materialControl, ...mirrorControls] },
   unavailable: voxelToolUnavailable,
   begin: beginVoxelStroke,
 };

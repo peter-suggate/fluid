@@ -20,7 +20,7 @@ import { voxelTools } from "../lib/core/voxel-editor/registry";
 
 function scene(): SceneDescription {
   const result = createEmptyScene();
-  result.scenery = { ...minimalRoomSceneryGraph, nodes: [minimalRoomSceneryGraph.nodes[0]!] };
+  result.scenery = { ...minimalRoomSceneryGraph, nodes: [{ ...minimalRoomSceneryGraph.nodes.find(node => node.kind === "room-shell")!, faces: [] }] };
   result.solidVoxels = [{ operation: "fill", minimum: [2, 1, 2], maximumExclusive: [30, 4, 30], materialId: 2 }];
   return result;
 }

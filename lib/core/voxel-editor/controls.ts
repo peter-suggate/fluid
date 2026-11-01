@@ -23,11 +23,10 @@ import type { ToolChoiceControl, ToolContext, ToolNumberControl, ToolValues } fr
 export const sizeControl: ToolNumberControl = { id: "size", label: "Width · voxels", short: "W", adjust: "primary", min: 1, max: 64, step: 1, initial: 1 };
 export const depthControl: ToolNumberControl = { id: "depth", label: "Depth · voxels", short: "D", adjust: "secondary", min: 1, max: 128, step: 1, initial: 1 };
 /**
- * Whether a stroke may land on the tank's own walls. Off, a pick passes through
- * them to what stands inside. The editor's, like the mirrors: it is a fact
- * about what the hand may touch, and it should not change with the brush.
+ * Whether voxel region searches may include the collision shell. Surface
+ * picks always stop at visible geometry; this never enables picking through it.
  */
-export const shellControl: ToolNumberControl = { id: "shell", kind: "toggle", scope: "shared", label: "Edit tank walls", short: "Walls", shortcut: "w", min: 0, max: 1, step: 1, initial: 0 };
+export const shellControl: ToolNumberControl = { id: "shell", kind: "toggle", scope: "shared", label: "Include tank shell in selections", short: "Shell", shortcut: "w", min: 0, max: 1, step: 1, initial: 0 };
 /** Keep a search to the material it starts on. Each tool that searches keeps its own. */
 export const byMaterialControl: ToolNumberControl = { id: "byMaterial", kind: "toggle", label: "Stop at a change of material", short: "By material", min: 0, max: 1, step: 1, initial: 0 };
 

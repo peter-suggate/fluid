@@ -5,6 +5,7 @@ import { growSceneryGenerator, type SceneryGeneratorRequest } from "./scenery-ge
 import { sceneryMaximumSwayExcursion_m } from "./scenery-sway";
 import {
   isSceneryShellNode,
+  validateSceneryGraph,
   type SceneryClusterNode,
   type SceneryGeneratorNode,
   type SceneryGraph,
@@ -340,6 +341,7 @@ function emitPrimitiveGeometry(
     }
     default:
       node satisfies never;
+      throw new Error("Unsupported scenery primitive: a visible surface must support hit testing and sculpting");
   }
 }
 
@@ -544,6 +546,8 @@ export function expandSceneryGraph(
   graph: SceneryGraph,
   context: EnvironmentSceneryContext,
 ): SceneryExpansion {
+  const errors = validateSceneryGraph(graph);
+  if (errors.length) throw new Error(errors.join("; "));
   const shellNode = graph.nodes.find(isSceneryShellNode);
   if (!shellNode) throw new Error("A scenery graph needs exactly one shell node");
   const shell = emitShell(builder, shellNode, context, graph);

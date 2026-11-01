@@ -1,3 +1,4 @@
+import { svoSculptPlanarWGSL } from "../scene-publication/svo-sculpt-planar";
 import { seaweedShaderLibrary } from "../../../core/seaweed-render";
 import { sampledSurfaceTexturesWGSL } from "../materials/sampled-surface-textures.wgsl";
 import { SVO_SCULPT_CUT_ARENA_WORDS, SVO_SCULPT_MATERIAL_OFFSET, svoSculptCutsWGSL } from "../scene-publication/svo-sculpt-cuts";
@@ -4770,6 +4771,8 @@ fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->
   return DryHit(t,normal,material,svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
 
+${svoSculptPlanarWGSL}
+
 // The patch half of a planar terminal: one exact finite slab out of the
 // immutable structural catalogue, never the 8^3 DDA, and no source primitive
 // ordering participating in a hit.
@@ -4783,12 +4786,7 @@ fn dryPlanarPatchHit(ro:vec3f,rd:vec3f,patchIndex:u32,tEnter:f32,tExit:f32)->Dry
   if(dry.planarBoundaries.y==0u||dry.planarBoundaries.z!=${PLANAR_BOUNDARY_PATCH_BYTES}u
     ||patchIndex>=dry.planarBoundaries.x||patchIndex>=arrayLength(&dryPlanarBoundaries)){return missHit();}
   let boundary=dryPlanarBoundaries[patchIndex];
-  let exact=intersectPlanarBoundary(boundary,ro,rd,max(tEnter,1e-4),tExit);
-  if(exact.valid==0u||svoSculptCutDistance(ro+rd*exact.tHit)<0.){return missHit();}
-  let identity=planarBoundaryIdentity(boundary);
-  return DryHit(exact.tHit,exact.normal,identity&0xffffu,identity>>16u,
-    SVO_FEATURE_BOX_X+exact.featureAxis,DRY_GBUFFER_FIELD_ANALYTIC,
-    DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+  return dryPlanarBoundaryHit(boundary,ro,rd,max(tEnter,1e-4),tExit);
 }
 // Geometry and leaf index are accepted together: the node's leaf link, the
 // leaf's back-reference and its terminal kind all have to agree before the
@@ -4815,14 +4813,9 @@ fn dryPlanarCatalogHit(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->DryHit{
   for(var boundaryIndex=0u;boundaryIndex<count;boundaryIndex+=1u){
     ${primaryWorkMap ? "dryPrimaryWorkPlanarTests+=1u;" : ""}
     let boundary=dryPlanarBoundaries[boundaryIndex];
-    let exact=intersectPlanarBoundary(boundary,ro,rd,max(tMin,1e-4),best.t);
-    if(exact.valid==0u||svoSculptCutDistance(ro+rd*exact.tHit)<0.){continue;}
-    let identity=planarBoundaryIdentity(boundary);
-    let owner=identity>>16u;
-    if(dryOpaqueOwnerSuppressed(owner)){continue;}
-    best=DryHit(exact.tHit,exact.normal,identity&0xffffu,owner,
-      SVO_FEATURE_BOX_X+exact.featureAxis,DRY_GBUFFER_FIELD_ANALYTIC,
-      DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+    let hit=dryPlanarBoundaryHit(boundary,ro,rd,max(tMin,1e-4),best.t);
+    if(hit.t>=best.t||dryOpaqueOwnerSuppressed(hit.ownerId)){continue;}
+    best=hit;
   }
   return best;
 }

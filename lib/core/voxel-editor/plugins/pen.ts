@@ -1,13 +1,13 @@
 import type { EditorRay } from "../../editor-entity";
-import { scenerySurfaceAt } from "../../editor-scenery";
+import { visibleToolSurface } from "../surface";
 import type { Vec3 } from "../../model";
 import { sceneCellSizes_m } from "../../scene-lattice";
 import { sceneWithSolidStroke, type SolidWorldCoordinate as Cell, type SolidWorldVoxelPatch as Patch } from "../../solid-world";
 import { subcellEllipsoidPatch } from "../../solid-patch/ellipsoid-bounds";
-import { materialControl, operationTone, shellControl, toolMaterialId } from "../controls";
-import { MAX_STROKE_PATCHES, MAX_STROKE_VOXELS, shapePatches, strokeHighlight, toolPassesThrough,
+import { materialControl, operationTone, toolMaterialId } from "../controls";
+import { MAX_STROKE_PATCHES, MAX_STROKE_VOXELS, shapePatches, strokeHighlight,
   voxelToolUnavailable } from "../geometry";
-import { toolReader, type ToolChoiceControl, type ToolContext, type ToolGesture, type ToolNumberControl,
+import { type ToolChoiceControl, type ToolContext, type ToolGesture, type ToolNumberControl,
   type ToolUpdate, type VoxelToolPlugin } from "../plugin";
 
 export const penModeControl: ToolChoiceControl = {
@@ -24,14 +24,7 @@ interface PenSurface { readonly point: Vec3; readonly normal: Vec3 }
 
 /** A real, nearest surface. The pen never invents a ground plane after a miss. */
 function surfaceAt(context: ToolContext, ray: EditorRay, press: boolean): PenSurface | undefined {
-  const voxel = toolReader(context).pick(ray, { rejectBudgetExhaustion: press,
-    skip: coordinate => toolPassesThrough(context, coordinate) });
-  const scenery = scenerySurfaceAt(context.scene, ray, voxel?.distance_m);
-  if (scenery) return { point: scenery.position_m, normal: scenery.normal };
-  if (!voxel) return undefined;
-  const normal = { x: 0, y: 0, z: 0 };
-  normal[(["x", "y", "z"] as const)[voxel.faceAxis]] = voxel.faceSign;
-  return { point: voxel.point_m, normal };
+  return visibleToolSurface(context.scene, ray, press);
 }
 
 function beginPen(context: ToolContext): ToolGesture | undefined {
@@ -153,7 +146,7 @@ export const penTool: VoxelToolPlugin = {
   ui: { label: "Pen", hint: "Draw or carve directly on a surface while dragging. Brackets adjust the diameter.",
     opposite: "draw ↔ carve",
     group: "Brush", order: -1, icon: "m4 20 4-1 12-12-3-3L5 16Zm10-13 3 3M4 20l1-4 3 3",
-    controls: [penModeControl, penDiameterControl, materialControl, shellControl] },
+    controls: [penModeControl, penDiameterControl, materialControl] },
   unavailable: voxelToolUnavailable,
   begin: beginPen,
 };

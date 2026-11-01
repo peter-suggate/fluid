@@ -94,7 +94,7 @@ test("scenery-only cut staging uploads originals and publishes dirty regions acr
   for (const dirty of regions) assert.ok((dirty as unknown[]).length > 0);
 });
 
-test("a cut temporarily restores an affected planar proxy to the live voxel list", () => {
+test("a cut retains the exact planar source through edit and undo", () => {
   const base = scene(), carved = sceneWithSolidStroke(base, [stamp]);
   const plate = { kind: "box", key: "plate", ownerIndex: 0, group: "test", tags: [],
     center_m: { x: 0, y: .5, z: 0 }, halfSize_m: { x: .4, y: .01, z: .4 },
@@ -107,13 +107,14 @@ test("a cut temporarily restores an affected planar proxy to the live voxel list
   const before = world.listLivePrimitives(base, [plate], [], []);
   assert.equal(before.primitives.size, 0, "the intact plate uses its exact planar representation");
   const cuts = svoSculptChangeBounds(base, [], [stamp], [plate]);
-  assert.equal(cuts.relistPlanar, true);
-  assert.deepEqual(cuts.addedPrimitiveBounds, [sculptPrimitiveBounds(plate)]);
+  assert.equal(cuts.relistPlanar, false);
+  assert.deepEqual(cuts.addedPrimitiveBounds, []);
+  assert.deepEqual(cuts.dirtyBounds, [solidWorldVoxelPatchBounds_m(base, stamp)]);
   const during = world.listLivePrimitives(carved, [plate], [], []);
-  assert.equal(during.primitives.has("plate"), true, "the voxel proxy supplies newly cut faces");
+  assert.equal(during.primitives.has("plate"), false, "the exact CSG intersector supplies cut faces without a voxel copy");
   world.liveScenePrimitiveStates = during.states; world.liveScenePrimitives = during.primitives;
   const dirty: unknown[] = [];
   const undo = world.listLivePrimitives(base, [plate], dirty, []);
   assert.equal(undo.primitives.size, 0);
-  assert.equal(dirty.length, 1, "undo invalidates the removed voxel copy");
+  assert.equal(dirty.length, 0, "undo never swaps representations or invalidates the whole source");
 });

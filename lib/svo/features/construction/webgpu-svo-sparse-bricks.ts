@@ -187,7 +187,7 @@ import {
   type SvoRenderResidual,
 } from "../scene-publication/svo-planar-boundary";
 
-import { sceneSculptCuts, sceneryPrimitiveAffectedBySculptCuts, svoSculptChangeBounds } from "../scene-publication/svo-sculpt-change-bounds";
+import { svoSculptChangeBounds } from "../scene-publication/svo-sculpt-change-bounds";
 
 export interface OctreeSparseBrickWorldOptions {
   surfaceContours?: boolean;
@@ -1832,7 +1832,6 @@ export class OctreeSparseBrickWorld {
         .then(field => { renderTerrain = field; });
       renderTerrain ??= yield* buildSvoRenderTerrainFieldSteps(scene, renderCellSize, SOLID_WORLD_TERRAIN_MATERIAL_ID);
     }
-    const initialCuts = sceneSculptCuts(scene, scene.solidVoxels);
     const planarCatalog = buildSvoPlanarBoundaryCatalog(environmentPrimitives, (primitive) => ({
         materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
         ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
@@ -1885,8 +1884,7 @@ export class OctreeSparseBrickWorld {
             primitive.aabb_m.min.z] as const,
           maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y,
             primitive.aabb_m.max.z] as const,
-          planarSourceIndex: sceneryPrimitiveAffectedBySculptCuts(initialCuts, primitive)
-            ? undefined : planarCatalog.patchIndexByOwner.get(primitive.ownerIndex),
+          planarSourceIndex: planarCatalog.patchIndexByOwner.get(primitive.ownerIndex),
         })),
         // Terrain lives in pages, so its blockers are the pages of what is
         // drawn: the residual, which no longer holds the physics-only shell.
@@ -3300,9 +3298,7 @@ export class OctreeSparseBrickWorld {
     dirtyRegions: SparseSceneAxisAlignedBounds[],
     newBounds: SparseSceneAxisAlignedBounds[],
   ): { primitives: Map<string, LiveScenePrimitiveEntry>; states: Map<string, LiveScenePrimitiveState>; changed: boolean } {
-    const cuts = sceneSculptCuts(scene, scene.solidVoxels);
-    const planarCatalog = buildSvoPlanarBoundaryCatalog(authored.filter(primitive =>
-      !sceneryPrimitiveAffectedBySculptCuts(cuts, primitive)), primitive => ({
+    const planarCatalog = buildSvoPlanarBoundaryCatalog(authored, primitive => ({
       materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
       ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
     }));

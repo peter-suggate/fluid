@@ -385,7 +385,8 @@ function canonicalShellSources(
       remaining.delete(shellPatchSignature(patch));
       unmatched = remaining;
     }
-    if (patch.operation !== "clear") continue;
+    // A scenery cut edits its visible owner; never reveal a second physics-only wall.
+    if (patch.operation !== "clear" || patch.affectsScenery) continue;
     anyClear = true;
     for (let slabIndex = 0; slabIndex < expected.length; slabIndex += 1) {
       if (cut[slabIndex] === 0 && overlapsVolume(patch, expected[slabIndex]!)) cut[slabIndex] = 1;

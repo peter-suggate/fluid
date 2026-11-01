@@ -1,10 +1,11 @@
+import { sculptCylinderDistance } from "./sculpt-cut-cylinder";
 import type { Vec3 } from "../../../core/model";
 import { SVO_SCULPT_CUT_HEADER_WORDS, SVO_SCULPT_CUT_RECORD_WORDS } from "./svo-sculpt-cuts";
 
 interface Cut {
   x: number; y: number; z: number;
   rx: number; ry: number; rz: number;
-  round: boolean;
+  kind: number;
 }
 interface Node {
   lo: number[]; hi: number[];
@@ -22,7 +23,7 @@ export function prepareSvoSculptCutDistance(words: Uint32Array): (point: Vec3) =
     const at = SVO_SCULPT_CUT_HEADER_WORDS + i * SVO_SCULPT_CUT_RECORD_WORDS;
     return { x: .5 * (f[at]! + f[at + 4]!), y: .5 * (f[at + 1]! + f[at + 5]!), z: .5 * (f[at + 2]! + f[at + 6]!),
       rx: .5 * (f[at + 4]! - f[at]!), ry: .5 * (f[at + 5]! - f[at + 1]!), rz: .5 * (f[at + 6]! - f[at + 2]!),
-      round: words[at + 3] === 2 };
+      kind: words[at + 3]! };
   });
   if (!cuts.length) return () => 1e20;
   function build(begin: number, end: number): Node {
@@ -33,7 +34,7 @@ export function prepareSvoSculptCutDistance(words: Uint32Array): (point: Vec3) =
       for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a]!, centre[a]! - radius[a]!); hi[a] = Math.max(hi[a]!, centre[a]! + radius[a]!); }
       const small = Math.min(...radius);
       depth = Math.max(depth, small);
-      if (c.round) scale = Math.min(scale, small / Math.max(...radius));
+      if (c.kind >= 2) scale = Math.min(scale, small / Math.max(...radius));
     }
     const node: Node = { lo, hi, scale, depth, begin, end };
     if (end - begin > 8) {
@@ -70,7 +71,8 @@ export function prepareSvoSculptCutDistance(words: Uint32Array): (point: Vec3) =
       for (let i = node.begin; i < node.end; i++) {
         const c = cuts[i]!, x = point.x - c.x, y = point.y - c.y, z = point.z - c.z;
         let distance: number;
-        if (c.round) distance = (Math.hypot(x / c.rx, y / c.ry, z / c.rz) - 1) * Math.min(c.rx, c.ry, c.rz);
+        if (c.kind >= 3) distance = sculptCylinderDistance(c.kind, [x, y, z], [c.rx, c.ry, c.rz]);
+        else if (c.kind === 2) distance = (Math.hypot(x / c.rx, y / c.ry, z / c.rz) - 1) * Math.min(c.rx, c.ry, c.rz);
         else {
           const qx = Math.abs(x) - c.rx, qy = Math.abs(y) - c.ry, qz = Math.abs(z) - c.rz;
           distance = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0);

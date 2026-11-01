@@ -91,7 +91,7 @@ export const patternTool: VoxelToolPlugin = {
   ui: { label: "Pattern", hint: "Stamp the copied voxels against the face under the pointer.", group: "Brush", order: 5,
     opposite: OPERATION_OPPOSITE,
     icon: "M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z",
-    controls: [operationControl, turnsControl, ...mirrorControls, shellControl] },
+    controls: [operationControl, turnsControl, ...mirrorControls] },
   unavailable: (context: ToolAvailabilityContext) => context.clipboard ? voxelToolUnavailable(context) : EMPTY_CLIPBOARD,
   begin: beginPattern,
 };

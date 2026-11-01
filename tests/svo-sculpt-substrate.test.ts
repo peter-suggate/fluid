@@ -144,6 +144,14 @@ ${svoSculptCutsWGSL("load")}
       const shifted = await query(), shiftedCpu = new SculptPickingField(planSculptBake(undefined, translated));
       points.forEach((p, i) => assert.ok(Math.abs(shifted[i * 4 + 3]!
         - shiftedCpu.distance(p.slice(0, 3) as [number, number, number])) < 2e-7, `translated distance ${i}`));
+      for (const axis of [0, 1, 2] as const) {
+        const cylinder: SolidWorldVoxelPatch = { ...box(0), kind: "cylinder", axis };
+        const cylinderWords = packed([cylinder]);
+        field.publish(arena, 0, cylinderWords);
+        const sampled = await query(), reference = new SculptPickingField(planSculptBake(undefined, cylinderWords));
+        points.forEach((p, i) => assert.ok(Math.abs(sampled[i * 4 + 3]!
+          - reference.distance(p.slice(0, 3) as [number, number, number])) < 2e-7, `cylinder ${axis} distance ${i}`));
+      }
       field.publish(arena, 0, packed([]));
       const empty = await query(); for (let i = 3; i < empty.length; i += 4) assert.ok(empty[i]! > 0);
     } finally { arena.destroy(); input.destroy(); output.destroy(); read.destroy(); }

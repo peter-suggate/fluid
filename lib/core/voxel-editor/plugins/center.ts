@@ -1,7 +1,7 @@
 import type { SolidWorldCoordinate as Cell } from "../../solid-world";
 import { subcellEllipsoidPatch } from "../../solid-patch/ellipsoid-bounds";
 import { OPERATION_OPPOSITE, depthControl, materialControl, mirrorControls, operationCaption, operationControl,
-  operationTone, shapeControl, shellControl, toolMaterialId, toolPatchOperation } from "../controls";
+  operationTone, shapeControl, toolMaterialId, toolPatchOperation } from "../controls";
 import { assertStrokeCaps, faceBox, faceCell, facePoint, mirroredPatches, patchesSize, shapePatches, strokeHighlight,
   toolSurface, voxelToolUnavailable } from "../geometry";
 import type { ToolContext, ToolGesture, ToolNumberControl, ToolUpdate, VoxelToolPlugin } from "../plugin";
@@ -47,7 +47,7 @@ function beginCenter(context: ToolContext): ToolGesture | undefined {
     // A radius of nothing is the one cell, whole, whatever the shape.
     const patches = mirroredPatches(context, which === "sphere" && roundCentre && radius > .5
       ? [{ ...subcellEllipsoidPatch(roundCentre.map(v => v - radius) as unknown as Cell,
-        roundCentre.map(v => v + radius) as unknown as Cell, operation), ...(operation === "clear" ? {} : { materialId }) }]
+        roundCentre.map(v => v + radius) as unknown as Cell, operation), ...(operation === "clear" ? { affectsScenery: true } : { materialId }) }]
       : shapePatches(box.minimum, box.maximumExclusive, operation, radius <= .5 ? "box" : which, axis, { materialId }));
     assertStrokeCaps(patches, "Use a smaller radius, or fewer mirror planes.");
     const update: ToolUpdate = { patches, tone: operationTone(operation), highlight: strokeHighlight(scene, patches),
@@ -61,7 +61,7 @@ export const centerTool: VoxelToolPlugin = {
   ui: { label: "Center", hint: "Press where the centre goes and drag out to the radius: a sphere, a box, or a cylinder along the face normal.", group: "Brush", order: 4,
     opposite: OPERATION_OPPOSITE,
     icon: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2M12 12h9",
-    controls: [operationControl, lengthControl, shape.control, materialControl, ...mirrorControls, shellControl] },
+    controls: [operationControl, lengthControl, shape.control, materialControl, ...mirrorControls] },
   unavailable: voxelToolUnavailable,
   begin: beginCenter,
 };

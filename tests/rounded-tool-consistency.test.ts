@@ -15,7 +15,7 @@ import { patternTool } from "../lib/core/voxel-editor/plugins/pattern";
 
 function fixture() {
   const scene = createEmptyScene();
-  scene.scenery = { ...scene.scenery!, nodes: [scene.scenery!.nodes[0]!] };
+  scene.scenery = { ...scene.scenery!, nodes: [{ ...scene.scenery!.nodes.find(node => node.kind === "room-shell")!, faces: [] }] };
   scene.solidVoxels = [{ operation: "fill", minimum: [2, 1, 2], maximumExclusive: [30, 4, 30], materialId: 2 }];
   const h = sceneCellSizes_m(scene);
   const ray = (x: number, z = 8.625) => ({ origin: { x: -scene.container.width_m / 2 + x * h[0], y: 2,

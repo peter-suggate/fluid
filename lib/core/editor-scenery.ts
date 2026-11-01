@@ -31,7 +31,7 @@ import {
   withSceneryPlacement,
   withoutSceneryNode,
 } from "./scenery-edit";
-import type { SceneryNode, SceneryPlacement } from "./scenery-graph";
+import { isSceneryShellNode, walkSceneryNodes, type SceneryNode, type SceneryPlacement } from "./scenery-graph";
 import { sceneryLightFixture, withSceneryLightColor, withSceneryLightStrength } from "./scenery-lights";
 import { kelvinToLinear } from "./light-color";
 import { intersectSvoPrimitive, prepareSvoPrimitiveDistance, sampleSvoPrimitive,
@@ -482,12 +482,16 @@ function pickTargets(scene: SceneDescription) {
     for (let index = span.from; index < span.to; index += 1) ownedBy.set(index, span.nodeId);
   }
   const targets: SceneryPickTarget[] = [];
-  catalog.primitives.forEach((primitive, index) => {
-    const nodeId = ownedBy.get(index);
+  const shellId = [...walkSceneryNodes(sceneSceneryGraph(scene).nodes)].find(({ node }) => isSceneryShellNode(node))?.node.id;
+  [...catalog.primitives, ...catalog.shell.primitives].forEach((primitive, index) => {
+    const nodeId = index < catalog.primitives.length ? ownedBy.get(index) : shellId;
     if (nodeId === undefined) return;
     // Shell faces are the room, not an object in it: picking them would put
     // a gizmo on the floor every time a click missed everything else.
-    if (primitive.tags.includes("shell")) return;
+    // The open front face is absent from rendering as well. Other room faces
+    // are valid sculpt surfaces, even though selection omits their gizmos.
+    if (primitive.tags.includes("shell") && primitive.tags.includes("wall")
+      && primitive.key.endsWith("/shell/wall-front")) return;
     // A first camera drag must not compile descriptors for the entire garden.
     // Keep the authored bounds cheap; materialize only shapes this ray reaches.
     targets.push({ nodeId, primitive, aabb_m: primitive.aabb_m });
@@ -498,7 +502,7 @@ function pickTargets(scene: SceneDescription) {
 
 /** Exact scenery surface for tools that follow it, using the same cached picks as selection. */
 export function scenerySurfaceAt(scene: SceneDescription, input: EditorRay, maximumDistance_m = Infinity,
-  exclude?: EditorSelection): (SvoPrimitiveRayHit & { readonly nodeId: string }) | undefined {
+  exclude?: EditorSelection, includeShell = false): (SvoPrimitiveRayHit & { readonly nodeId: string }) | undefined {
   const length = Math.hypot(input.direction.x, input.direction.y, input.direction.z);
   if (!(length > 0) || !Number.isFinite(length)) return undefined;
   const ray = { origin: input.origin, direction: {
@@ -507,6 +511,7 @@ export function scenerySurfaceAt(scene: SceneDescription, input: EditorRay, maxi
   const cuts = sceneryPickCuts(scene);
   let nearest: (SvoPrimitiveRayHit & { readonly nodeId: string }) | undefined;
   for (const target of pickTargets(scene)) {
+    if (!includeShell && target.primitive.tags.includes("shell")) continue;
     if (pickExcluded(exclude, "scenery", scenerySelectionId(target.nodeId))) continue;
     const maximum = nearest?.t_m ?? maximumDistance_m;
     if (!raySpansAabb(target.aabb_m, ray, maximum)) continue;

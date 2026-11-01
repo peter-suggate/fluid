@@ -39,12 +39,8 @@ struct MeshPlanarVertexOut {
 @fragment fn meshPlanarFragment(input:MeshPlanarVertexOut)->DryRasterPrimaryOut{
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let rd=dryRasterPrimaryRay(input.position.xy,camera);
   let boundary=dryPlanarBoundaries[input.index];
-  let exact=intersectPlanarBoundary(boundary,camera[0],rd,1e-4,DRY_MISS);
-  if(exact.valid==0u){discard;}
-  let identity=planarBoundaryIdentity(boundary);
-  let hit=DryHit(exact.tHit,exact.normal,identity&0xffffu,identity>>16u,
-    SVO_FEATURE_BOX_X+exact.featureAxis,DRY_GBUFFER_FIELD_ANALYTIC,
-    DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
+  let hit=dryPlanarBoundaryHit(boundary,camera[0],rd,1e-4,DRY_MISS);
+  if(hit.t>=DRY_MISS){discard;}
   return dryRasterPrimarySurface(hit,camera[0],rd,camera[1],SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND);
 }
 `;

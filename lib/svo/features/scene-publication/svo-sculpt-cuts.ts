@@ -1,7 +1,8 @@
+import { sculptCylinderDistance, sculptCylinderWGSL } from "./sculpt-cut-cylinder";
 import { SCULPT_ARENA_WORDS, sculptSubstrateWGSL } from "./svo-sculpt-substrate";
 import type { SolidWorldVoxelPatch } from "../../../core/solid-world";
 import { ellipsoidBounds } from "../../../core/solid-patch/ellipsoid-bounds";
-import { solidPatchKindId, SOLID_PATCH_BOX_KIND, SOLID_PATCH_ELLIPSOID_KIND } from "../../../core/solid-patch/kind";
+import { solidPatchKindId, SOLID_PATCH_BOX_KIND, SOLID_PATCH_ELLIPSOID_KIND, SOLID_PATCH_CYLINDER_KIND } from "../../../core/solid-patch/kind";
 
 type V3 = readonly [number, number, number];
 export interface SvoSculptLattice { readonly origin_m: V3; readonly cellSize_m: V3 }
@@ -56,7 +57,7 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
     const cached = packedCutRecords.get(patch)?.get(latticeKey);
     if (cached) { words.set(cached, at); return; }
     const kind = solidPatchKindId(patch);
-    if (kind !== SOLID_PATCH_BOX_KIND && kind !== SOLID_PATCH_ELLIPSOID_KIND) throw new RangeError(`Scenery sculpt does not support ${kind} cuts`);
+    if (kind !== SOLID_PATCH_BOX_KIND && kind !== SOLID_PATCH_ELLIPSOID_KIND && kind !== SOLID_PATCH_CYLINDER_KIND) throw new RangeError(`Scenery sculpt does not support ${kind} cuts`);
     const bounds = kind === SOLID_PATCH_ELLIPSOID_KIND ? ellipsoidBounds(patch) : patch;
     for (let a = 0; a < 3; a++) {
       const lo = lattice.origin_m[a]! + bounds.minimum[a]! * lattice.cellSize_m[a]!;
@@ -64,7 +65,8 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
       if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo) || !(Math.fround(hi) > Math.fround(lo))) throw new RangeError("Scenery sculpt bounds must be finite and nonempty");
       floats[at + a] = lo; floats[at + 4 + a] = hi;
     }
-    words[at + 3] = kind === SOLID_PATCH_BOX_KIND ? 1 : 2;
+    if (kind === SOLID_PATCH_CYLINDER_KIND && ![0, 1, 2].includes(patch.axis ?? 1)) throw new RangeError("Invalid sculpt cylinder axis");
+    words[at + 3] = kind === SOLID_PATCH_BOX_KIND ? 1 : kind === SOLID_PATCH_ELLIPSOID_KIND ? 2 : 3 + (patch.axis ?? 1);
     let byLattice = packedCutRecords.get(patch);
     if (!byLattice) { byLattice = new Map(); packedCutRecords.set(patch, byLattice); }
     byLattice.set(latticeKey, words.slice(at, at + SVO_SCULPT_CUT_RECORD_WORDS));
@@ -116,7 +118,8 @@ export function sampleSvoSculptCuts(words: Uint32Array, point: V3): { distance: 
     const y = point[1] - (f[at + 5]! + f[at + 1]!) * .5;
     const z = point[2] - (f[at + 6]! + f[at + 2]!) * .5;
     let d: number;
-    if (words[at + 3] === 2) d = (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz);
+    if (words[at + 3]! >= 3) d = sculptCylinderDistance(words[at + 3]!, [x, y, z], [rx, ry, rz]);
+    else if (words[at + 3] === 2) d = (Math.hypot(x / rx, y / ry, z / rz) - 1) * Math.min(rx, ry, rz);
     else {
       const qx = Math.abs(x) - rx, qy = Math.abs(y) - ry, qz = Math.abs(z) - rz;
       d = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0);
@@ -127,7 +130,11 @@ export function sampleSvoSculptCuts(words: Uint32Array, point: V3): { distance: 
   const r = [0, 1, 2].map(a => (f[nearest + 4 + a]! - f[nearest + a]!) * .5);
   const p = [0, 1, 2].map(a => point[a]! - (f[nearest + 4 + a]! + f[nearest + a]!) * .5);
   let n: number[];
-  if (words[nearest + 3] === 2) n = p.map((v, a) => v / (r[a]! * r[a]!));
+  if (words[nearest + 3]! >= 3) n = p.map((_, a) => {
+    const lo = [...p], hi = [...p]; lo[a]! -= 1e-5; hi[a]! += 1e-5;
+    return sculptCylinderDistance(words[nearest + 3]!, hi, r) - sculptCylinderDistance(words[nearest + 3]!, lo, r);
+  });
+  else if (words[nearest + 3] === 2) n = p.map((v, a) => v / (r[a]! * r[a]!));
   else {
     const q = p.map((v, a) => Math.abs(v) - r[a]!);
     const outside = q.map(v => Math.max(v, 0));
@@ -142,6 +149,7 @@ export function sampleSvoSculptCuts(words: Uint32Array, point: V3): { distance: 
 /** `load` reads an arena-relative u32. No bindings are introduced here. */
 export function svoSculptCutsWGSL(load: string): string {
   return /* wgsl */ `
+${sculptCylinderWGSL}
 struct SvoSculptCutSample { distance:f32, normal:vec3f }
 ${sculptSubstrateWGSL(load)}
 fn svoSculptCutCount()->u32{return min(${load}(0u),${SVO_SCULPT_CUT_MAXIMUM_RECORDS}u);}
@@ -151,7 +159,11 @@ fn svoSculptCutValue(index:u32,world:vec3f)->SvoSculptCutSample{
   let hi=bitcast<vec3f>(vec3u(${load}(at+4u),${load}(at+5u),${load}(at+6u)));
   let r=max(.5*(hi-lo),vec3f(1e-20));let p=world-.5*(hi+lo);
   var d=0.;var normal=vec3f(0.);
-  if(${load}(at+3u)==2u){
+  if(${load}(at+3u)>=3u){
+    let kind=${load}(at+3u);d=sculptCylinderDistance(kind,p,r);
+    for(var a=0u;a<3u;a++){var offset=vec3f(0);offset[a]=1e-5;
+      normal[a]=sculptCylinderDistance(kind,p+offset,r)-sculptCylinderDistance(kind,p-offset,r);}
+  }else if(${load}(at+3u)==2u){
     d=(length(p/r)-1.)*min(r.x,min(r.y,r.z));normal=p/(r*r);
   }else{
     let q=abs(p)-r;let outside=max(q,vec3f(0));let magnitude=length(outside);
@@ -169,6 +181,7 @@ fn svoSculptCutRecordDistance(index:u32,world:vec3f)->f32{
   let lo=bitcast<vec3f>(vec3u(${load}(at),${load}(at+1u),${load}(at+2u)));
   let hi=bitcast<vec3f>(vec3u(${load}(at+4u),${load}(at+5u),${load}(at+6u)));
   let r=max(.5*(hi-lo),vec3f(1e-20));let p=world-.5*(hi+lo);
+  if(${load}(at+3u)>=3u){return sculptCylinderDistance(${load}(at+3u),p,r);}
   if(${load}(at+3u)==2u){return (length(p/r)-1.)*min(r.x,min(r.y,r.z));}
   let q=abs(p)-r;return length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.);
 }

@@ -1,6 +1,6 @@
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../../solid-world";
 import { OPERATION_OPPOSITE, depthControl, materialControl, mirrorControls, operationCaption, operationControl,
-  operationTone, shellControl, sizeControl, toolMaterialId, toolPatchOperation } from "../controls";
+  operationTone, sizeControl, toolMaterialId, toolPatchOperation } from "../controls";
 import { assertStrokeCaps, faceCell, interpolateCells, mirroredPatches, patchesSize, shapePatches, strokeHighlight,
   toolSurface, voxelToolUnavailable, type ToolSurface } from "../geometry";
 import type { ToolContext, ToolGesture, ToolNumberControl, ToolUpdate, VoxelToolPlugin } from "../plugin";
@@ -60,7 +60,7 @@ export const lineTool: VoxelToolPlugin = {
   ui: { label: "Line", hint: "Drag from one point to another: a wall when attaching, a channel when erasing. Width and height set its section.", group: "Brush", order: 3,
     opposite: OPERATION_OPPOSITE,
     icon: "M4 20 20 4M4 14 14 4",
-    controls: [operationControl, sizeControl, heightControl, materialControl, ...mirrorControls, shellControl] },
+    controls: [operationControl, sizeControl, heightControl, materialControl, ...mirrorControls] },
   unavailable: voxelToolUnavailable,
   begin: beginLine,
 };

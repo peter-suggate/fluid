@@ -1,3 +1,4 @@
+import { sculptCylinderWGSL } from "./sculpt-cut-cylinder";
 import { SCULPT_META, SCULPT_TABLE, SCULPT_VALUES, SCULPT_PAGE_SAMPLES,
   planSculptBake, type SculptBakePlan } from "./svo-sculpt-substrate";
 import { PublishedWords } from "./svo-table-upload";
@@ -5,6 +6,7 @@ import { PublishedWords } from "./svo-table-upload";
 /** One workgroup per page row. The existing field is the starting point for
  * append edits; history is consulted only to restore a page on undo/load. */
 export const sculptBakeWGSL = /* wgsl */ `
+${sculptCylinderWGSL}
 @group(0) @binding(0) var<storage,read_write> arena:array<u32>;
 @group(0) @binding(1) var<storage,read> jobs:array<u32>;
 @compute @workgroup_size(64) fn bake(@builtin(global_invocation_id) id:vec3u){
@@ -22,7 +24,8 @@ export const sculptBakeWGSL = /* wgsl */ `
     let lo=bitcast<vec3f>(vec3u(jobs[record],jobs[record+1u],jobs[record+2u]));
     let hi=bitcast<vec3f>(vec3u(jobs[record+4u],jobs[record+5u],jobs[record+6u]));
     let r=.5*(hi-lo);let p=point-.5*(hi+lo);var d=0.0;
-    if(jobs[record+3u]==2u){d=(length(p/r)-1.0)*min(r.x,min(r.y,r.z));}
+    if(jobs[record+3u]>=3u){d=sculptCylinderDistance(jobs[record+3u],p,r);}
+    else if(jobs[record+3u]==2u){d=(length(p/r)-1.0)*min(r.x,min(r.y,r.z));}
     else{let q=abs(p)-r;d=length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.0);}
     distance=min(distance,d);
   }

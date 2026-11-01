@@ -1,3 +1,4 @@
+import { svoSculptPlanarWGSL } from "../lib/svo/features/scene-publication/svo-sculpt-planar";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { packPlanarBoundaryPatches, planarBoundaryWGSL, type PlanarBoundaryPatch } from "../lib/core/planar-boundary";
@@ -37,6 +38,13 @@ fn dryRasterPrimaryRay(pixel:vec2f,camera:mat4x3f)->vec3f{
 fn dryRasterPrimarySurface(hit:DryHit,ro:vec3f,rd:vec3f,forward:vec3f,producer:u32)->DryRasterPrimaryOut{
  return DryRasterPrimaryOut(vec4u(bitcast<u32>(hit.t),hit.material|(hit.owner<<16u),bitcast<u32>(hit.normal.x),bitcast<u32>(hit.normal.y)),clamp(.001/(hit.t*dot(rd,forward)),0.0,1.0));
 }
+const SVO_FEATURE_SMOOTH=3u;
+fn missHit()->DryHit{return DryHit(DRY_MISS,vec3f(0),0,0,0,0,0,0,0,vec3u(0));}
+struct CutSample {distance:f32,normal:vec3f}
+fn svoSculptCutCount()->u32{return 0u;}
+fn svoSculptCutDistance(p:vec3f)->f32{return 1e20;}
+fn svoSculptCutSample(p:vec3f)->CutSample{return CutSample(1e20,vec3f(0));}
+${svoSculptPlanarWGSL}
 ${svoMeshPlanarRasterWGSL}
 @vertex fn fullVertex(@builtin(vertex_index) vertex:u32)->@builtin(position) vec4f{
  let corners=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));return vec4f(corners[vertex],0,1);

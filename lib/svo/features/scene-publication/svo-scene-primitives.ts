@@ -224,7 +224,9 @@ function descriptorForProxy(
       program: primitive.program,
     };
   }
-  return { ...base, kind: "ellipsoid", radii_m: { ...primitive.radius_m } };
+  if (primitive.kind === "ellipsoid") return { ...base, kind: "ellipsoid", radii_m: { ...primitive.radius_m } };
+  primitive satisfies never;
+  throw new Error("Scenery needs a shared render, hit-test and sculpt descriptor");
 }
 
 function frontOpenShell(primitive: EnvironmentProxyPrimitive): boolean {

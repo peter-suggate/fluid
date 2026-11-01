@@ -1,3 +1,4 @@
+import { visibleToolSurface } from "./surface";
 import type { EditorRay } from "../editor-entity";
 import { containerShellContains, solidVoxelWorldBox } from "../editor-solid-voxel";
 import { takesLiveSolidEdits } from "../method-contract";
@@ -132,7 +133,7 @@ export function shapePatches(minimum: Cell, maximumExclusive: Cell, operation: P
   const kind = shape === "sphere" ? { kind: SOLID_PATCH_ELLIPSOID_KIND }
     : shape === "cylinder" ? { kind: SOLID_PATCH_CYLINDER_KIND, axis: normalAxis as 0 | 1 | 2 } : {};
   const patch = (min: Cell, max: Cell, apply: Patch["operation"]): Patch => ({ operation: apply, minimum: min,
-    maximumExclusive: max, ...(apply === "clear" ? {} : { materialId }), ...kind });
+    maximumExclusive: max, ...(apply === "clear" ? { affectsScenery: true } : { materialId }), ...kind });
   const extent = minimum.map((v, axis) => maximumExclusive[axis]! - v);
   if (extent.some((v) => v < 1 || !Number.isSafeInteger(v))
     || extent.reduce((a, b) => a * b, 1) > MAX_STROKE_VOXELS) {
@@ -261,27 +262,22 @@ export function toolPassesThrough(context: Pick<ToolContext, "scene" | "values">
   return context.values[shellControl.id] !== 1 && coordinate[1] >= 0
     && containerShellContains(context.scene, coordinate);
 }
-/**
- * What a ray lands on: the first solid cell along it, read from the scene the
- * gesture began on — so a stroke never chases the surface it is itself
- * proposing — and, where it meets nothing, the ground plane.
- *
- * The tank's own walls are passed through unless the shared walls switch is
- * on; the floor is always a surface. `press` is the sample a gesture begins
- * on: a ray too long to walk is refused there, and merely lands on nothing at
- * a later sample, which a drag that swings past the horizon produces freely.
- */
+/** First visible scenery, terrain or voxel surface. A miss has no editing
+ * target. Physics-only shells are excluded by the shared visibility query,
+ * never by a switch that can cast through visible foreground geometry. */
 export function toolSurface(context: Pick<ToolContext, "scene" | "values">, ray: EditorRay,
   press = true): ToolSurface | undefined {
   const { scene } = context;
-  const hit = toolReader(context).pick(ray, {
-    rejectBudgetExhaustion: press,
-    skip: (coordinate) => toolPassesThrough(context, coordinate),
-  });
-  if (hit) return { coordinate: hit.coordinate, faceAxis: hit.faceAxis, faceSign: hit.faceSign, picked: true };
-  const ground = { coordinate: [0, -1, 0], faceAxis: 1, faceSign: 1 } as const;
-  const coordinate = faceCell(scene, ground, ray);
-  return coordinate && { ...ground, coordinate, picked: false };
+  const hit = visibleToolSurface(scene, ray, press);
+  if (!hit) return undefined;
+  const normal = [hit.normal.x, hit.normal.y, hit.normal.z];
+  let faceAxis: 0 | 1 | 2 = 0;
+  for (const axis of [1, 2] as const) if (Math.abs(normal[axis]!) > Math.abs(normal[faceAxis]!)) faceAxis = axis;
+  const faceSign = normal[faceAxis]! < 0 ? -1 : 1;
+  const origin = worldOrigin(scene), h = sceneCellSizes_m(scene);
+  const coordinate = [hit.point.x, hit.point.y, hit.point.z].map((v, a) =>
+    Math.floor((v - origin[a]!) / h[a]! - normal[a]! * 1e-5)) as unknown as Cell;
+  return { coordinate, faceAxis, faceSign, picked: true };
 }
 /**
  * What the "do the opposite" modifier samples while the hand paints: the

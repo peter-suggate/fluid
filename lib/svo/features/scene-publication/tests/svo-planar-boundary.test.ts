@@ -323,7 +323,7 @@ test("the production shader binds and resolves the accepted planar catalogue", (
   const start = shader.indexOf("fn dryPlanarPatchHit(");
   const end = shader.indexOf("\nfn ", start + 1);
   const terminalFunction = shader.slice(start, end);
-  assert.match(terminalFunction, /intersectPlanarBoundary\(boundary/);
+  assert.match(terminalFunction, /dryPlanarBoundaryHit\(boundary/);
   assert.doesNotMatch(terminalFunction, /dryPrimitive\(/);
   assert.match(shader, /fn dryPlanarTerminalHit\(/);
   assert.match(shader, /fn dryLeafStructuralPlanar\(hit:SvoTraversalHit\)->bool/);

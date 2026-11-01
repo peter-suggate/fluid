@@ -40,7 +40,7 @@ export const boxTool: VoxelToolPlugin = {
   id: "box", version: 1,
   ui: { label: "Box", hint: "Drag a footprint on a face and let go. Then pull out to build or push in to cut, and click.", group: "Brush", order: 2,
     icon: "M4 9h11v11H4ZM9 9V4h11v11h-5", opposite: PAINT_SAMPLES,
-    controls: [operationControl, materialControl, ...mirrorControls, shellControl] },
+    controls: [operationControl, materialControl, ...mirrorControls] },
   unavailable: voxelToolUnavailable,
   begin: beginBox,
 };

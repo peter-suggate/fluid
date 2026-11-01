@@ -753,6 +753,15 @@ export function sceneryNodeGroup(node: SceneryNode, path: readonly string[]): st
   return node.group ?? path[path.length - 1] ?? node.id;
 }
 
+/** All admitted node kinds expand into the shared editable geometry catalog.
+ * A new authoring kind must explicitly join this contract; parsed unknown
+ * kinds may never silently disappear or become presentation-only geometry. */
+export const EDITABLE_SCENERY_NODE_KINDS = {
+  box: true, cylinder: true, ellipsoid: true, capsule: true, torus: true, cone: true,
+  cluster: true, "field-program": true, group: true, "recursive-shape": true,
+  tree: true, generator: true, "room-shell": true, "terrain-shell": true,
+} satisfies Record<SceneryNode["kind"], true>;
+
 export function validateSceneryGraph(graph: SceneryGraph): string[] {
   const errors: string[] = [];
   if (graph.terrainSurface !== undefined && graph.terrainSurface !== "scenery")
@@ -762,6 +771,10 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
   const ids = new Set<string>();
   let shells = 0;
   for (const { node } of walkSceneryNodes(graph.nodes)) {
+    if (!Object.hasOwn(EDITABLE_SCENERY_NODE_KINDS, node.kind)) {
+      errors.push(`Scenery node ${node.id}: unsupported editable geometry kind ${String(node.kind)}`);
+      continue;
+    }
     if (!node.id?.trim()) errors.push("Every scenery node needs a non-empty id");
     else if (ids.has(node.id)) errors.push(`Duplicate scenery node id ${node.id}`);
     ids.add(node.id);

@@ -1,3 +1,4 @@
+import { isSvoPlanarBoundaryProxy } from "./svo-planar-boundary";
 import type { SceneDescription } from "../../../core/model";
 import { sceneCellSizes_m } from "../../../core/scene-lattice";
 import { sameSolidPatchList } from "../../../core/solid-patch-list";
@@ -29,7 +30,7 @@ export function sceneryPrimitiveAffectedBySculptCuts(cuts: Uint32Array, primitiv
 /** Scenery clears need publication even when their voxel pages were already empty.
  * Native surfaces retain their source identities; only newly exposed cut walls
  * use interior materials, so first/last cuts are local too. Exact planar slabs
- * still need their whole bounds when changing between planar and voxel views. */
+ * retain their representation and only need the local cut bounds republished. */
 export function svoSculptChangeBounds(scene: SceneLattice, previous: readonly SolidWorldVoxelPatch[],
   next: readonly SolidWorldVoxelPatch[], primitives: readonly EnvironmentProxyPrimitive[]) {
   const before = previous.filter(p => p.operation === "clear" && p.affectsScenery === true);
@@ -37,7 +38,7 @@ export function svoSculptChangeBounds(scene: SceneLattice, previous: readonly So
   const dirtyBounds: (ReturnType<typeof sculptPrimitiveBounds> & { identityOnly?: boolean })[] = [];
   const addedPrimitiveBounds: ReturnType<typeof sculptPrimitiveBounds>[] = [];
   const cutBounds: ReturnType<typeof sculptPrimitiveBounds>[] = [];
-  let relistPlanar = false;
+  const relistPlanar = false;
   if (sameSolidPatchList(before, after)) return { changed: false, dirtyBounds, addedPrimitiveBounds, cutBounds, relistPlanar };
   let start = 0, beforeEnd = before.length, afterEnd = after.length;
   const same = (a: SolidWorldVoxelPatch, b: SolidWorldVoxelPatch) => a === b || sameSolidPatchList([a], [b]);
@@ -52,11 +53,11 @@ export function svoSculptChangeBounds(scene: SceneLattice, previous: readonly So
   const oldCuts = sceneSculptCuts(scene, before), newCuts = sceneSculptCuts(scene, after);
   for (const primitive of primitives) {
     if (primitive.kind === "field-program" && primitive.program.sampledVolume) continue;
+    if (primitive.kind === "box" && isSvoPlanarBoundaryProxy(primitive)) continue;
     const wasAffected = sceneryPrimitiveAffectedBySculptCuts(oldCuts, primitive);
     const isAffected = sceneryPrimitiveAffectedBySculptCuts(newCuts, primitive);
     if (wasAffected === isAffected) continue;
     const bounds = sculptPrimitiveBounds(primitive);
-    relistPlanar ||= primitive.kind === "box";
     dirtyBounds.push(bounds);
     if (isAffected) addedPrimitiveBounds.push(bounds);
   }

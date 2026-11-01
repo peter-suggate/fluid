@@ -40,7 +40,7 @@ test("scenery cuts are explicit, bounded and expressed in the physical voxel lat
   assert.equal(packSvoSculptCuts([{ ...cuts[0]!, affectsScenery: undefined }], lattice)[0], 0);
   assert.equal(packSvoSculptCuts([{ ...cuts[0]!, operation: "fill" }], lattice)[0], 0);
   assert.equal(packSvoSculptCuts(Array(SVO_SCULPT_CUT_MAXIMUM_RECORDS + 1).fill(cuts[0]), lattice)[0], SVO_SCULPT_CUT_MAXIMUM_RECORDS + 1);
-  assert.throws(() => packSvoSculptCuts([{ ...cuts[0]!, kind: "cylinder" }], lattice), /does not support/);
+  assert.throws(() => packSvoSculptCuts([{ ...cuts[0]!, kind: "block" }], lattice), /does not support/);
   assert.throws(() => packSvoSculptCuts([{ ...cuts[0]!, maximumExclusive: [0, 0, 0] }], lattice), /nonempty/);
 });
 
@@ -219,7 +219,7 @@ test("native renderer primitiveHit finds cavity caps before source exits and res
   const { createSvoDrySceneFragmentWGSL } = await import("../lib/svo/features/shading/program");
   const production = createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, false, false, {});
   const start = production.indexOf("fn primitiveHit(record:");
-  const end = production.indexOf("// The patch half", start);
+  const end = production.indexOf("\nfn ", start + 1);
   assert.ok(start >= 0 && end > start);
   // Execute the actual renderer function against a simple analytic box oracle;
   // the full production shader is compiled separately by imported-surface-gpu.
@@ -264,6 +264,7 @@ ${rayFunction}
  for(var i=0u;i<7u;i+=1u){let hit=primitiveHit(record,vec3f(origins[i],0,0),vec3f(1,0,0),0.,limits[i]);results[i]=vec4f(hit.normal,hit.t);}
 }` });
     try {
+      assert.deepEqual((await module.getCompilationInfo()).messages.filter(m => m.type === "error"), []);
       device.queue.writeBuffer(records, 0, words);
       const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "check" } });
       const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [records, output].map((buffer, binding) => ({ binding, resource: { buffer } })) });
@@ -300,6 +301,21 @@ test("sculpt ownership uses rotated boxes without withdrawing distant flat or ta
       const twice = [y * cross[2]! - z * cross[1]!, z * cross[0]! - x * cross[2]!, x * cross[1]! - y * cross[0]!];
       const rotated = p.map((v, axis) => v + 2 * (w * cross[axis]! + twice[axis]!));
       assert.equal(intersectsSvoSculptPrimitiveBounds(at(rotated), [0, 0, 0], extent, q), true);
+    }
+  }
+});
+
+test("cylindrical sculpt tools agree across analytic queries, accelerated picks and the baked picking field", async () => {
+  const { prepareSvoSculptCutDistance } = await import("../lib/svo/features/scene-publication/svo-sculpt-distance");
+  const { planSculptBake, SculptPickingField } = await import("../lib/svo/features/scene-publication/svo-sculpt-substrate");
+  for (const axis of [0, 1, 2] as const) {
+    const words = packSvoSculptCuts([{ operation: "clear", affectsScenery: true, kind: "cylinder", axis,
+      minimum: [-8, -8, -8], maximumExclusive: [8, 8, 8] }], { origin_m: [0, 0, 0], cellSize_m: [.1, .1, .1] });
+    const distance = prepareSvoSculptCutDistance(words), baked = new SculptPickingField(planSculptBake(undefined, words));
+    for (const p of [[.05, .05, .05], [.65, .65, .65], [.75, .05, .05], [.05, .85, .05]] as const) {
+      const value = sampleSvoSculptCuts(words, p);
+      assert.ok(Math.abs(distance({ x: p[0], y: p[1], z: p[2] }) - value.distance) < 1e-6);
+      assert.ok(Math.abs(baked.distance(p) - Math.max(-1e20, Math.min(.15, value.distance))) < 1e-6);
     }
   }
 });
