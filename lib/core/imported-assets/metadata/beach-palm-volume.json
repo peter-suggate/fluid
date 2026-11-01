@@ -1,0 +1,219 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "beach-palm",
+  "source": "beach-palm.glb",
+  "origin": [
+    -2.9125,
+    -0.0125,
+    -3.7625
+  ],
+  "dimensions": [
+    552,
+    696,
+    568
+  ],
+  "cellSize": 0.0125,
+  "bandWidth": 0.0125,
+  "brickCount": 41477,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Old coconut leaf sheath",
+      "baseColorLinear": [
+        0.2199999988079071,
+        0.14000000059604645,
+        0.06499999761581421
+      ],
+      "roughness": 0.8700000047683716,
+      "metallic": 0.0
+    },
+    {
+      "name": "Green coconuts",
+      "baseColorLinear": [
+        0.2199999988079071,
+        0.25,
+        0.07000000029802322
+      ],
+      "roughness": 0.6000000238418579,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut leaf 0",
+      "baseColorLinear": [
+        0.06499999761581421,
+        0.14000000059604645,
+        0.01600000075995922
+      ],
+      "roughness": 0.5699999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut leaf 1",
+      "baseColorLinear": [
+        0.09000000357627869,
+        0.1899999976158142,
+        0.02500000037252903
+      ],
+      "roughness": 0.5699999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut leaf 2",
+      "baseColorLinear": [
+        0.12999999523162842,
+        0.2199999988079071,
+        0.03500000014901161
+      ],
+      "roughness": 0.5699999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut leaf 3",
+      "baseColorLinear": [
+        0.17000000178813934,
+        0.25,
+        0.04699999839067459
+      ],
+      "roughness": 0.5699999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut leaf 4",
+      "baseColorLinear": [
+        0.20000000298023224,
+        0.23000000417232513,
+        0.06499999761581421
+      ],
+      "roughness": 0.5699999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut leaf 5",
+      "baseColorLinear": [
+        0.12999999523162842,
+        0.17000000178813934,
+        0.02500000037252903
+      ],
+      "roughness": 0.5699999928474426,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars",
+      "baseColorLinear": [
+        0.5873486995697021,
+        0.5310128331184387,
+        0.45335716009140015
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/24,23,22/r0.880",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.461893589520877
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/24,23,21/r0.880",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.41650253270397164
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/25,24,22/r0.880",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5610070143871524,
+        0.461893589520877
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/24,24,22/r0.880",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5610070143871524,
+        0.461893589520877
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/25,23,22/r0.880",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5100464056783279,
+        0.461893589520877
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/24,23,20/r0.880",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.5100464056783279,
+        0.373826020963952
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/24,22,20/r0.880",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/24,22,21/r0.880",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.461893589520877,
+        0.41650253270397164
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/25,24,23/r0.880",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.5610070143871524,
+        0.5100464056783279
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    },
+    {
+      "name": "Coconut trunk | fibrous leaf scars/23,22,20/r0.880",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.461893589520877,
+        0.373826020963952
+      ],
+      "roughness": 0.8799999952316284,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 22710420,
+  "insideNodes": 1289297
+}

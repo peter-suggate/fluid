@@ -1,0 +1,37 @@
+{
+  "collection": {
+    "id": "beach",
+    "label": "Beach"
+  },
+  "source": "beach.blend",
+  "assets": [
+    {
+      "id": "beach-sand",
+      "mesh": "beach-sand.glb",
+      "volume": "beach-sand.fvx.gz",
+      "cellSize": 0.125,
+      "bandCells": 1
+    },
+    {
+      "id": "beach-dunes",
+      "mesh": "beach-dunes.glb",
+      "volume": "beach-dunes.fvx.gz",
+      "cellSize": 0.025,
+      "bandCells": 1
+    },
+    {
+      "id": "beach-palm",
+      "mesh": "beach-palm.glb",
+      "volume": "beach-palm.fvx.gz",
+      "cellSize": 0.0125,
+      "bandCells": 1
+    },
+    {
+      "id": "beach-rocks",
+      "mesh": "beach-rocks.glb",
+      "volume": "beach-rocks.fvx.gz",
+      "cellSize": 0.04,
+      "bandCells": 1
+    }
+  ]
+}

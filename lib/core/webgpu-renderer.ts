@@ -1,3 +1,4 @@
+import { rigidAppearanceSkin } from "./rigid-appearance";
 import { boundedPresentationScale } from "./presentation-resolution";
 import { svoEnvironmentLightingRecord } from "../svo/features/radiance/svo-environment-lighting";
 import { svoDerivedRadianceRequired } from "../svo/features/lighting-visibility/derived-lighting-demand";
@@ -693,7 +694,7 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[], output?: { 
   let lx = Infinity, ly = Infinity, lz = Infinity;
   let hx = -Infinity, hy = -Infinity, hz = -Infinity;
   for (const body of bodies) {
-    const radius = robotRenderRadius(body) ?? boundingRadius(body);
+    const radius = rigidAppearanceSkin(body.description)?.radius ?? robotRenderRadius(body) ?? boundingRadius(body);
     const p = body.position_m;
     lx = Math.min(lx, p.x - radius); hx = Math.max(hx, p.x + radius);
     ly = Math.min(ly, p.y - radius); hy = Math.max(hy, p.y + radius);
@@ -704,7 +705,7 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[], output?: { 
   for (const body of bodies) {
     const p = body.position_m;
     radius = Math.max(radius, Math.hypot(p.x - x, p.y - y, p.z - z)
-      + (robotRenderRadius(body) ?? boundingRadius(body)));
+      + (rigidAppearanceSkin(body.description)?.radius ?? robotRenderRadius(body) ?? boundingRadius(body)));
   }
   const result = output ?? { centre_m: [0, 0, 0] as [number, number, number], radius_m: 0 };
   result.centre_m[0] = x; result.centre_m[1] = y; result.centre_m[2] = z;
@@ -3005,12 +3006,13 @@ export class FluidLabRenderer {
       bodies.slice(0, 12).forEach((body, index) => {
         const offset = index * 16;
         const shape = body.description.shape;
+        const skin = rigidAppearanceSkin(body.description);
         const robotExtent = robotRenderExtent(body);
-        const half = robotExtent ?? sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
+        const half = skin?.half ?? robotExtent ?? sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
         const orientation = body.renderOrientation ?? body.orientation;
         const color = SCENE_SHAPE_PALETTE_LINEAR[sceneShapeCode(shape)];
-        bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, robotRenderRadius(body) ?? boundingRadius(body)], offset);
-        bodyData.set([half[0], half[1], half[2], robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape)], offset + 4);
+        bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, rigidAppearanceSkin(body.description)?.radius ?? robotRenderRadius(body) ?? boundingRadius(body)], offset);
+        bodyData.set([half[0], half[1], half[2], skin?.shape ?? (robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape))], offset + 4);
         bodyData.set([orientation.w, orientation.x, orientation.y, orientation.z], offset + 8);
         bodyData.set([color[0], color[1], color[2], body.description.renderHidden ? -1 : body.description.id === selectedBodyId ? 1 : 0], offset + 12);
       });

@@ -302,16 +302,29 @@ function smoothCloud(a: number, b: number, x: number): number {
 export function evaluateSvoEnvironmentCloudRadiance(base: LinearRgb, direction: SvoVec3, roughness: number,
   coverage: number, lower: LinearRgb, upper: LinearRgb, keyColor: LinearRgb, keyDirection: SvoVec3): LinearRgb {
   if (coverage <= 0) return base;
-  let x = direction[0] * 1.8 / (Math.max(direction[1], 0) + .18) + 17.3;
-  let y = direction[2] * 1.8 / (Math.max(direction[1], 0) + .18) - 9.2;
-  let noise = 0, amplitude = .5333333333;
-  for (let octave = 0; octave < 4; octave++) { noise += cloudNoise(x, y) * amplitude; x = x * 2.03 + 11.7; y = y * 2.03 - 5.2; amplitude *= .5; }
+  let x = direction[0] * 1.2 / (Math.max(direction[1], 0) + .18) + 17.3;
+  let y = direction[2] * 1.2 / (Math.max(direction[1], 0) + .18) - 9.2;
+  let noise = 0, amplitude = .5079365079;
+  for (let octave = 0; octave < 6; octave++) { noise += cloudNoise(x, y) * amplitude; x = x * 2.03 + 11.7; y = y * 2.03 - 5.2; amplitude *= .5; }
   const edge = 1 - coverage * .85;
   const density = smoothCloud(edge - .18, edge + .12, noise);
   const detail = density * (1 - roughness * roughness) + coverage * .65 * roughness * roughness;
   const amount = detail * smoothCloud(-.03, .14, direction[1]);
-  const silver = Math.pow(Math.max(0, dot(direction, keyDirection)), 8) * .15;
-  const cloud = add(mix(scale(lower, .75), scale(upper, 1.15), .55), scale(keyColor, silver));
+  // Dense cloud undersides attenuate the sky fill; thinner edges scatter the
+  // authored sun. A constant cloud color collapsed overcast skies to a flat
+  // gradient when that color was close to the underlying hemisphere.
+  // Keep optical thickness continuous after silhouette opacity saturates.
+  // Otherwise broad, fully cloudy regions become uniform flat patches.
+  const thickness = Math.max(0, noise - edge + .12) * (1 - roughness * roughness)
+    + coverage * .3 * roughness * roughness;
+  const bodyShade = .18 + 1.05 * Math.exp(-3.5 * thickness);
+  const silver = Math.pow(Math.max(0, dot(direction, keyDirection)), 8)
+    * (.03 + .22 * (1 - detail) * (1 - roughness * roughness));
+  // Broad sunlight scattered by the cloud body remains visible away from the
+  // solar disc. Without it, sunny clouds inherit only the blue sky fill and
+  // disappear against it. Zero-key overcast lighting remains unchanged.
+  const scatteredSun = .45 * Math.max(0, keyDirection[1]) * bodyShade;
+  const cloud = add(scale(mix(scale(lower, .6), scale(upper, 1.15), .65), bodyShade), scale(keyColor, silver + scatteredSun));
   return mix(base, cloud, amount * .94);
 }
 
@@ -321,10 +334,10 @@ fn svoCloudHash(p:vec2i)->f32{var h=bitcast<u32>(p.x)*374761393u+bitcast<u32>(p.
 fn svoCloudNoise(p:vec2f)->f32{let i=vec2i(floor(p));let f=fract(p);let u=f*f*(vec2f(3.0)-2.0*f);return mix(mix(svoCloudHash(i),svoCloudHash(i+vec2i(1,0)),u.x),mix(svoCloudHash(i+vec2i(0,1)),svoCloudHash(i+vec2i(1,1)),u.x),u.y);}
 fn svoEnvironmentCloudRadiance(baseRadiance:vec3f,direction:vec3f,roughness:f32,coverage:f32,lower:vec3f,upper:vec3f,keyColor:vec3f,keyDirection:vec3f)->vec3f{
   if(coverage<=0.0){return baseRadiance;}
-  var p=direction.xz*(1.8/(max(direction.y,0.0)+.18))+vec2f(17.3,-9.2);var noise=0.0;var amplitude=.5333333333;
-  for(var octave=0u;octave<4u;octave+=1u){noise+=svoCloudNoise(p)*amplitude;p=p*2.03+vec2f(11.7,-5.2);amplitude*=.5;}
+  var p=direction.xz*(1.2/(max(direction.y,0.0)+.18))+vec2f(17.3,-9.2);var noise=0.0;var amplitude=.5079365079;
+  for(var octave=0u;octave<6u;octave+=1u){noise+=svoCloudNoise(p)*amplitude;p=p*2.03+vec2f(11.7,-5.2);amplitude*=.5;}
   let edge=1.0-coverage*.85;let density=smoothstep(edge-.18,edge+.12,noise);let detail=mix(density,coverage*.65,roughness*roughness);let amount=detail*smoothstep(-.03,.14,direction.y);
-  let silver=pow(max(0.0,dot(direction,keyDirection)),8.0)*.15;let cloud=mix(lower*.75,upper*1.15,.55)+keyColor*silver;return mix(baseRadiance,cloud,amount*.94);
+  let thickness=mix(max(0.0,noise-edge+.12),coverage*.3,roughness*roughness);let bodyShade=.18+1.05*exp(-3.5*thickness);let silver=pow(max(0.0,dot(direction,keyDirection)),8.0)*(.03+.22*(1.0-detail)*(1.0-roughness*roughness));let scatteredSun=.45*max(0.0,keyDirection.y)*bodyShade;let cloud=mix(lower*.6,upper*1.15,.65)*bodyShade+keyColor*(silver+scatteredSun);return mix(baseRadiance,cloud,amount*.94);
 }
 `;
 

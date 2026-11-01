@@ -1,3 +1,4 @@
+import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { sceneRenderTuning } from "../lib/core/scene-render-profile";
 /** Capture a registered live scene through the production app renderer.
  *
@@ -156,7 +157,7 @@ const values = resolveMethodValues(method, profile.quality, { ...method.appDefau
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 const steps = Math.ceil(requestedTime_s / dt - 1e-9), targetTime_s = steps * dt;
 const assetIds = sceneMeshAssetIds(scene);
-assert.ok(assetIds.length, "The actual Blender environment must be attached");
+assert.ok(assetIds.length || scene.rigidBodies.some(body => body.appearance), "The actual Blender environment or moving model must be attached");
 assert.ok(scene.container.fillFraction > 0 || scene.fluid.initialLiquidVolumes?.length, "The registered scene must contain real initial water");
 const started = performance.now(), errors: string[] = [], statuses: Record<string, unknown>[] = [];
 let device: GPUDevice | undefined, swapTexture: GPUTexture | undefined;
@@ -305,8 +306,9 @@ try {
   let captureStaticVisibilityReuse:boolean|undefined = undefined;
   let captureShadowAperture = shadowAperture ?? sceneRenderTuning(scene.renderProfile).shadowConeAperture;
   report.shadowAperture_rad = captureShadowAperture;
+  const captureBodies = initializeRigidBodies(scene.rigidBodies);
   const args = (time: number): Parameters<FluidLabRenderer["draw"]> => [
-    time, scene, { ...defaultCamera, ...preset.camera }, [], undefined,
+    time, scene, { ...defaultCamera, ...preset.camera }, captureBodies, undefined,
     { methodId: method.id, quality: profile.quality, values, simulationEpoch: 0, inFlightDepth: 2 },
     { axis: "off", position: 0 }, preset.background, preset.presentationMode, "shaded", { ...DEFAULT_SVO_LIGHTING_OPTIONS, waterReflectionMode: reflectionMode, waterWorldRefractionEnabled, coneTracingMode: captureVisibilityMode, surfaceTexturesEnabled, nativeAmbientOcclusionEnabled, shadowsEnabled, ambientOcclusionEnabled,
       voxelSpecularReflectionsEnabled:captureVoxelReflections,voxelSpecularSteps:voxelReflectionSteps,latticeVisibilityEnabled:latticeEnabled,globalIlluminationEnabled:captureIndirectLighting,worldGiCacheEnabled:captureGiCache,lensBloom:{...lensBloom,enabled:captureBloomEnabled} }, undefined,
@@ -516,7 +518,9 @@ try {
         activeCubeCount:mesh.activeCubeCount,boundsBlender_m:bounds,objSha256:createHash("sha256").update(obj).digest("hex"),
         opticalNormals:"Production vertex-normal lane, normalized and rotated to Blender axes",
         extraction:"Exact water vertex buffer used by this captured frame; no second simulation or surface extraction",
-        captureReport:reportPath,sourceHashes:report.sourceHashes,errors:[...errors]};
+        captureReport:reportPath,sourceHashes:report.sourceHashes,errors:[...errors],
+        rigidBodies:(await (internals.gpuFluid as WebGPUUniformReferenceSolver).readRigidBodyPoses())?.map((pose,index)=>({...pose,
+          id:scene.rigidBodies[index]?.id,appearance:scene.rigidBodies[index]?.appearance}))};
       writeFileSync(path+".json",JSON.stringify(provenance,null,2)+"\n");
       report.exportedWaterMesh={path,provenancePath:path+".json",...provenance};
       await validateExecution("export-rendered-water-mesh");

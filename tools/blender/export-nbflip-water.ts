@@ -18,6 +18,7 @@ import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../../lib/ha
 import { uniformNarrowBandMethod as method } from "../../lib/methods/uniform/uniform-narrow-band-method";
 import type { WebGPUUniformReferenceSolver } from "../../lib/methods/uniform/webgpu-uniform-reference";
 import { waterMeshObj } from "./nbflip-water-mesh";
+import { initializeRigidBodies } from "../../lib/core/rigid-body";
 
 const options = new Map(process.argv.slice(2).map(argument => {
   const match = /^--(scene|time|out|normals)=(.+)$/.exec(argument);
@@ -30,6 +31,7 @@ const definition = findSceneDefinition(options.get("scene") ?? "alpine-lake-sunr
 assert.ok(definition, "Unknown scene");
 assert.equal(definition.methodProfile?.methodId, method.id);
 const scene = structuredClone(sceneDocument(definition));
+const bodies = initializeRigidBodies(scene.rigidBodies);
 const quality = definition.methodProfile!.quality;
 const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile!.overrides });
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
@@ -62,7 +64,7 @@ try {
   }) as WebGPUUniformReferenceSolver;
   console.log(JSON.stringify({ phase: "solver-ready", scene: definition.id, steps, dt, allocatedBytes: solver.info.allocatedBytes }));
   for (let step = 1; step <= steps; step++) {
-    assert.ok(solver.advanceTo(step * dt, []));
+    assert.ok(solver.advanceTo(step * dt, bodies));
     await solver.awaitFrameCompletion();
     assert.equal(solver.info.simulationPipelineError, undefined);
     assert.deepEqual(errors, []);
@@ -96,6 +98,8 @@ try {
     vertexCount: mesh.vertexCount, triangleCount: mesh.vertexCount / 3, activeCubeCount: mesh.activeCubeCount,
     boundsBlender_m: bounds, objSha256: createHash("sha256").update(obj).digest("hex"),
     output, elapsed_ms: performance.now() - started, errors,
+    rigidBodies: (await solver.readRigidBodyPoses())?.map((pose, index) => ({ ...pose,
+      id: scene.rigidBodies[index]?.id, appearance: scene.rigidBodies[index]?.appearance })),
     opticalNormals: normalMode === "optical" ? "Production phi-gradient vertex lane, normalized exactly as the vertex shader and rotated to Blender axes" : "Not exported; legacy position-only OBJ",
     extraction: "Production RasterWaterPipeline mixed-level-set window contour; no authored water geometry" };
   writeFileSync(output.replace(/\.obj$/, ".json"), JSON.stringify(report, null, 2) + "\n");

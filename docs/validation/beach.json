@@ -1,0 +1,115 @@
+{
+  "sceneId": "beach",
+  "methodId": "uniform-narrow-band-flip",
+  "completedTime_s": 7.999999999999975,
+  "renderProfile": {
+    "environmentRefinementDepth": 2,
+    "fluidSurfaceRenderMode": "shaded",
+    "fluidParticleDisplay": "off"
+  },
+  "cellSize_m": 0.125,
+  "successful": true,
+  "gpuErrors": [],
+  "initialWater_m3": 597.2431035590339,
+  "finalWater_m3": 596.1844343507602,
+  "volumeChange_percent": -0.1772593441372594,
+  "sampledAssetPublications": [
+    {
+      "id": "beach-sand",
+      "cellSize": 0.125,
+      "brickCount": 2678
+    },
+    {
+      "id": "beach-dunes",
+      "cellSize": 0.025,
+      "brickCount": 3137
+    },
+    {
+      "id": "beach-rocks",
+      "cellSize": 0.04,
+      "brickCount": 1167
+    },
+    {
+      "id": "beach-palm",
+      "cellSize": 0.0125,
+      "brickCount": 41477
+    }
+  ],
+  "importedSurfaceDrawStatus": {
+    "instances": 6,
+    "assets": 4,
+    "groups": 28,
+    "batched": true,
+    "drawCalls": 28,
+    "instanceBytes": 168,
+    "argumentBytes": 560,
+    "nativeShadowGroups": 4,
+    "nativeShadowInstanceBytes": 48,
+    "finestTrianglesAcrossInstances": 14820399,
+    "sharedNativeMeshBytes": 303397464
+  },
+  "motionValidation": {
+    "duration_s": 16,
+    "verified": true,
+    "metrics": {
+      "maxSeaweedY_m": 2.5224215984344482,
+      "minSeaweedY_m": 1.8016046285629272,
+      "maxPistonError_m": 4.7121464419319636e-07,
+      "firstOffshoreCrest_s": 1,
+      "offshoreCrest_m": 0.6490349389149541,
+      "shoreMinimum_m": 2.0875594114936273,
+      "shoreMaximum_m": 2.8679847070231195
+    },
+    "report": "artifacts/beach/motion-current-base.json",
+    "gpuErrors": []
+  },
+  "validationBases": {
+    "unitAndCapture": "f1e46d184e53624a4d5a689da8f9b11cf30a0bca",
+    "finalMotionAndTypes": "48622ecddef1d402cc2dc28da247189c11dfd378"
+  },
+  "sourceHashes": {
+    "lib/core/beach-scene.ts": "4fa454f0800ad42958a9174e29f8247cf1b7933c4616b06931e743b4a70c1f76",
+    "lib/core/seaweed-render.ts": "d21c7637041bd8e1c012d2ae076e51d6d12c3cb25bc255accacf2d29d1bf723a",
+    "lib/core/imported-assets/beach-terrain.json": "1325511b18c2f1ec6275876c92ceb1f54999239e8beb2b70c32d9417931c4844",
+    "lib/core/imported-assets/beach-seaweed.generated.json": "39e89ce350e7a11a5ba1a7b965bf89d1beab120bbe6a8b0b40ef7a5080ee54c4",
+    "lib/svo/features/radiance/svo-environment-lighting.ts": "65f3e70d885f94b7b5a9a67326f2c5d87b118fba2fc1c873299ed8e437d3a024",
+    "tools/blender/beach.py": "01a33a369d2881ba085545dbbcee4a1a4a267d35c41dd12b615fe1184b94554d",
+    "tools/blender/beach_palms.py": "596d99e4bb3798eafbd312edbbf536487a51d32037b01f56a72d0ee895555f8e",
+    "tools/probe-beach-motion.ts": "b20315e5818c64711d209984b5dbd3656265d2759ac222cd1b13739be01265ff",
+    "public/assets/beach/beach-dunes.fvx.gz": "8ad478432c3ae450107c366d505658139eed77502ef43997f64b7b11866a8364",
+    "public/assets/beach/beach-palm.fvx.gz": "ed1636c6232f36749ec769027fde90a1a6b7e9412fdc7ed1fc47867f10ef23d6",
+    "public/assets/beach/beach-rocks.fvx.gz": "557ec039773b6d860c79611b10953f61492218dc38a3070e5264e3300bc76e92",
+    "public/assets/beach/beach-sand.fvx.gz": "fded714e0bfe1bdc4af6fd11848d4c7c9b6ef376916ad4abb6f7919e2cbfd003"
+  },
+  "capture": "artifacts/beach/live-fixed.png",
+  "captureReport": "artifacts/beach/live-fixed.json",
+  "blenderSource": "assets/beach/beach.blend",
+  "checks": {
+    "types": "pass",
+    "unit": {
+      "pass": 1401,
+      "skipped": 233,
+      "fail": 0
+    },
+    "assets": "pass",
+    "gpuCloudOracle": "pass",
+    "gpuSeaweedIntersectionAndResidentSkin": "pass",
+    "fullDurationWaveAndFlotation": "pass"
+  },
+  "fixedIssues": [
+    "Reproduced the original 350 kg/m3, 160 mm proxy launching a seaweed centre to 5.86 m at one second.",
+    "Replaced it with a 375 mm, 950 kg/m3 proxy at hydrostatic draft, clear of the bed; Blender aligns visible blades with its waterline.",
+    "Shortened the piston startup from 6.4 s to 0.8 s and reframed the camera to show the water."
+  ],
+  "visualReview": [
+    "Native 12.5 mm palms retain substantially more continuous leaflet coverage than the 25 mm bake.",
+    "Photographed mineral colour survives GLB import and FVX baking instead of falling back to grey .8.",
+    "The eight-second live capture shows floating seaweed and wave fronts in the foreground."
+  ],
+  "limits": [
+    "Single-pixel foliage still aliases, and live lighting/water differ from Cycles; complete photorealism is not established.",
+    "Seaweed uses resolved buoyant rigid proxies; individual blades do not deform.",
+    "Finite closed coastal domain; no absorbing offshore boundary.",
+    "The measured volume drift is reported above; no exact volume-conservation claim."
+  ]
+}

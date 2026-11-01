@@ -311,3 +311,12 @@ panel is 19.25 MiB shared by nineteen placements. The mesh reserves a separate
 All fourteen GLB/FVX assets pass the sign, cavity, gradient, shared-node and
 SolidWorld-adapter verification. The service close-up also checks the production
 25 mm world setting with the new geometry still drawn at its native 6.25 mm.
+
+## Beach
+
+`beach` (Water landscapes → Beach · afternoon surf) starts from the editable
+`assets/beach/beach.blend`. Its palms, photographed coastal rocks and shore
+export to native sampled volumes, with 12.5 mm palm detail and SVO depth 2.
+A moving offshore piston generates the waves in full narrow-band FLIP; four
+buoyant seaweed clumps follow the fluid. See [BEACH.md](BEACH.md) for rebuilding,
+capturing the production water, rendering it in Cycles and current limitations.

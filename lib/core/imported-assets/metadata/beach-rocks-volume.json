@@ -1,0 +1,479 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "beach-rocks",
+  "source": "beach-rocks.glb",
+  "origin": [
+    -2.92,
+    0.84,
+    -6.88
+  ],
+  "dimensions": [
+    304,
+    64,
+    392
+  ],
+  "cellSize": 0.04,
+  "bandWidth": 0.04,
+  "brickCount": 1167,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs",
+      "baseColorLinear": [
+        0.04826565831899643,
+        0.04331740736961365,
+        0.03495613485574722
+      ],
+      "roughness": 0.5,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/6,6,5/r0.857",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/7,7,5/r0.857",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/7,7,6/r0.857",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.03113008990948415
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/10,9,9/r0.714",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.06853841290915133,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/7,6,5/r0.857",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.03113008990948415,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/8,7,6/r0.857",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.03113008990948415
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/9,9,8/r0.714",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/9,8,7/r0.714",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/10,9,8/r0.714",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.06853841290915133,
+        0.05416457340265298
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/10,10,9/r0.714",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/8,8,7/r0.857",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/9,8,8/r0.714",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/8,7,7/r0.857",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/7,6,6/r0.857",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/6,5,4/r0.857",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.02229888300503533,
+        0.01513350723396306
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/5,5,4/r0.857",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.02229888300503533,
+        0.01513350723396306
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/6,5,5/r0.857",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.02229888300503533,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/8,8,7/r0.714",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/6,6,6/r0.857",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.03113008990948415,
+        0.03113008990948415
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/5,5,5/r0.857",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.02229888300503533,
+        0.02229888300503533
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/11,11,10/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/11,11,9/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/11,10,9/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.0849214566468118,
+        0.06853841290915133
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/7,7,7/r0.857",
+      "baseColorLinear": [
+        0.041722573919128626,
+        0.041722573919128626,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/5,4,4/r0.857",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.01513350723396306,
+        0.01513350723396306
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/5,4,3/r0.857",
+      "baseColorLinear": [
+        0.02229888300503533,
+        0.01513350723396306,
+        0.009529478582354435
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/4,4,3/r0.857",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.01513350723396306,
+        0.009529478582354435
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/11,10,10/r0.714",
+      "baseColorLinear": [
+        0.10338683447877332,
+        0.0849214566468118,
+        0.0849214566468118
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/12,11,10/r0.714",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/12,11,10/r0.571",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.0849214566468118
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/12,12,11/r0.571",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/12,12,10/r0.571",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/6,6,4/r0.857",
+      "baseColorLinear": [
+        0.03113008990948415,
+        0.03113008990948415,
+        0.01513350723396306
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/12,11,11/r0.571",
+      "baseColorLinear": [
+        0.1240040094060311,
+        0.10338683447877332,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/8,8,6/r0.857",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.03113008990948415
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/9,8,7/r0.857",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.041722573919128626
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/10,10,8/r0.714",
+      "baseColorLinear": [
+        0.0849214566468118,
+        0.0849214566468118,
+        0.05416457340265298
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/8,8,8/r0.714",
+      "baseColorLinear": [
+        0.05416457340265298,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/9,9,7/r0.714",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.06853841290915133,
+        0.041722573919128626
+      ],
+      "roughness": 0.7142857142857143,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/4,4,4/r0.857",
+      "baseColorLinear": [
+        0.01513350723396306,
+        0.01513350723396306,
+        0.01513350723396306
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/13,12,11/r0.571",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.10338683447877332
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/13,13,12/r0.571",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.14683923082122904,
+        0.1240040094060311
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/9,8,8/r0.857",
+      "baseColorLinear": [
+        0.06853841290915133,
+        0.05416457340265298,
+        0.05416457340265298
+      ],
+      "roughness": 0.8571428571428571,
+      "metallic": 0.0
+    },
+    {
+      "name": "Atlantic coastal rock \u2014 CC0 mineral photographs/13,12,12/r0.571",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.1240040094060311
+      ],
+      "roughness": 0.5714285714285714,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 639955,
+  "insideNodes": 240886
+}

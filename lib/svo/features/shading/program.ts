@@ -1,3 +1,4 @@
+import { seaweedShaderLibrary } from "../../../core/seaweed-render";
 import { sampledSurfaceTexturesWGSL } from "../materials/sampled-surface-textures.wgsl";
 import { SVO_SCULPT_CUT_ARENA_WORDS, SVO_SCULPT_MATERIAL_OFFSET, svoSculptCutsWGSL } from "../scene-publication/svo-sculpt-cuts";
 import { robotShaderLibrary } from '../../../interaction/features/robot/render';
@@ -4667,12 +4668,14 @@ fn dryDirectionalRayLeavesDomain(maximumDistance:f32)->bool{return !(maximumDist
 // that document query is not part of this renderer.
 
 ${robotShaderLibrary}
+${seaweedShaderLibrary}
 fn bodyHit(ro:vec3f,rd:vec3f,body:BodyGPU)->DryHit {
   if(body.colorSelected.w<0.0){return missHit();}
   let localOrigin=qinvWxyz(body.orientation,ro-body.positionRadius.xyz);
   let localDirection=qinvWxyz(body.orientation,rd);
   let shape=i32(round(body.halfSizeShape.w)); var t=DRY_MISS; var normal=vec3f(0.0,1.0,0.0);var featureId=SVO_FEATURE_SMOOTH;
   if(shape==5){let robot=bubHit(localOrigin,localDirection,body.halfSizeShape.xyz);t=select(DRY_MISS,robot.t,robot.t<1e19);normal=robot.normal;}
+  else if(shape==9){let weed=seaweedHit(localOrigin,localDirection);t=select(DRY_MISS,weed.t,weed.t<1e19);normal=weed.normal;}
   else if (shape==0) {
     let radius=body.halfSizeShape.x; let b=dot(localOrigin,localDirection); let discriminant=b*b-dot(localOrigin,localOrigin)+radius*radius;
     if (discriminant>=0.0) { let root=sqrt(discriminant); t=-b-root; if(t<=1e-4){t=-b+root;} if(t>1e-4){normal=normalize(localOrigin+localDirection*t);}else{t=DRY_MISS;} }
@@ -5585,9 +5588,10 @@ fn dryImageSurfaceNormal(hit:DryHit,position:vec3f)->vec3f{
 // is introduced by filtering the authored palette values.
 fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   var materialId=dryResolvedMaterialId(hit);var baseOverride=vec3f(0.0);var useBaseOverride=false;var selectedEmission=vec3f(0.0);
-  if((hit.materialId&0x80000000u)!=0u){let body=bodies[hit.materialId&0x7fffffffu];baseOverride=body.colorSelected.xyz;if(i32(round(body.halfSizeShape.w))==5){baseOverride=bubColor(qinvWxyz(body.orientation,position-body.positionRadius.xyz),body.halfSizeShape.xyz);}useBaseOverride=true;selectedEmission=body.colorSelected.w*vec3f(.12,.42,.32);}
+  if((hit.materialId&0x80000000u)!=0u){let body=bodies[hit.materialId&0x7fffffffu];baseOverride=body.colorSelected.xyz;if(i32(round(body.halfSizeShape.w))==5){baseOverride=bubColor(qinvWxyz(body.orientation,position-body.positionRadius.xyz),body.halfSizeShape.xyz);}if(body.halfSizeShape.w==9.0){baseOverride=seaweedColor(qinvWxyz(body.orientation,position-body.positionRadius.xyz));}useBaseOverride=true;selectedEmission=body.colorSelected.w*vec3f(.12,.42,.32);}
   if(materialId>=dry.materialPublication.x){return dryInvalidSurfaceMaterial();}let material=dryMaterial(materialId);if(!dryPublishedMaterialValid(material,materialId)){return dryInvalidSurfaceMaterial();}
   var base=select(material.baseColorOpacity.xyz,baseOverride,useBaseOverride);var roughness=material.emissiveRoughness.w;var regionId=DRY_SURFACE_REGION_NONE;var variationFlags=0u;
+  if((hit.materialId&0x80000000u)!=0u){if(bodies[hit.materialId&0x7fffffffu].halfSizeShape.w==9.0){roughness=SEAWEED_ROUGHNESS;}}
   var emission=material.emissiveRoughness.xyz;var metallic=material.surface.x;var shadingNormal=hit.normal;
   var specularF0=vec3f(svoMaterialDielectricF0(material));var specularWeight=material.surface.y;
   if(!useBaseOverride&&(material.identity.w&SVO_MATERIAL_FLAG_SAMPLED_VOLUME)!=0u){

@@ -1,0 +1,599 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "beach-sand",
+  "source": "beach-sand.glb",
+  "origin": [
+    -16.125,
+    -0.375,
+    -12.125
+  ],
+  "dimensions": [
+    264,
+    40,
+    200
+  ],
+  "cellSize": 0.125,
+  "bandWidth": 0.125,
+  "brickCount": 2678,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune",
+      "baseColorLinear": [
+        0.3050824999809265,
+        0.2278624027967453,
+        0.13764066994190216
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/20,17,14/r0.780",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/13,11,8/r0.780",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/14,12,9/r0.780",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/20,18,14/r0.780",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/13,11,9/r0.780",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/13,12,9/r0.780",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.1240040094060311,
+        0.06853841290915133
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/14,12,10/r0.780",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.1240040094060311,
+        0.0849214566468118
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/15,13,11/r0.780",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/14,13,10/r0.780",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/15,13,10/r0.780",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/15,14,11/r0.780",
+      "baseColorLinear": [
+        0.19941489015347055,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/16,14,11/r0.780",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/16,14,12/r0.780",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.1240040094060311
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/17,15,12/r0.780",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/17,15,11/r0.780",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/18,16,12/r0.780",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.229274769922375,
+        0.1240040094060311
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/18,15,12/r0.780",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/18,16,13/r0.780",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/19,16,13/r0.780",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.229274769922375,
+        0.14683923082122904
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/19,17,13/r0.780",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.26159205028716875,
+        0.14683923082122904
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/21,18,14/r0.780",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.29642135334252967,
+        0.1719559031258607
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/21,19,15/r0.780",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/22,19,15/r0.780",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.33381557452228633,
+        0.19941489015347055
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/22,20,16/r0.780",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.373826020963952,
+        0.229274769922375
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/20,17,13/r0.780",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.26159205028716875,
+        0.14683923082122904
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/19,16,12/r0.780",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.229274769922375,
+        0.1240040094060311
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/21,18,15/r0.780",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.29642135334252967,
+        0.19941489015347055
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/22,20,15/r0.780",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.373826020963952,
+        0.19941489015347055
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/21,19,14/r0.780",
+      "baseColorLinear": [
+        0.41650253270397164,
+        0.33381557452228633,
+        0.1719559031258607
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/23,20,16/r0.780",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.373826020963952,
+        0.229274769922375
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/23,21,17/r0.780",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.41650253270397164,
+        0.26159205028716875
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/24,21,17/r0.780",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.41650253270397164,
+        0.26159205028716875
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/24,22,17/r0.780",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.461893589520877,
+        0.26159205028716875
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/23,21,16/r0.780",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.41650253270397164,
+        0.229274769922375
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/24,21,16/r0.780",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.41650253270397164,
+        0.229274769922375
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/25,22,17/r0.780",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.461893589520877,
+        0.26159205028716875
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/25,22,18/r0.780",
+      "baseColorLinear": [
+        0.6148203434699,
+        0.461893589520877,
+        0.29642135334252967
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/13,11,7/r0.780",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.10338683447877332,
+        0.041722573919128626
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/23,20,15/r0.780",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.373826020963952,
+        0.19941489015347055
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/24,22,18/r0.780",
+      "baseColorLinear": [
+        0.5610070143871524,
+        0.461893589520877,
+        0.29642135334252967
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/14,11,9/r0.780",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.10338683447877332,
+        0.06853841290915133
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/16,15,12/r0.780",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.19941489015347055,
+        0.1240040094060311
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/18,15,13/r0.780",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/17,15,13/r0.780",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.19941489015347055,
+        0.14683923082122904
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/17,14,12/r0.780",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1719559031258607,
+        0.1240040094060311
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/17,14,11/r0.780",
+      "baseColorLinear": [
+        0.26159205028716875,
+        0.1719559031258607,
+        0.10338683447877332
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/22,19,16/r0.780",
+      "baseColorLinear": [
+        0.461893589520877,
+        0.33381557452228633,
+        0.229274769922375
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/18,15,11/r0.780",
+      "baseColorLinear": [
+        0.29642135334252967,
+        0.19941489015347055,
+        0.10338683447877332
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/16,14,10/r0.780",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.1719559031258607,
+        0.0849214566468118
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/16,13,11/r0.780",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.14683923082122904,
+        0.10338683447877332
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/16,13,10/r0.780",
+      "baseColorLinear": [
+        0.229274769922375,
+        0.14683923082122904,
+        0.0849214566468118
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/23,20,17/r0.780",
+      "baseColorLinear": [
+        0.5100464056783279,
+        0.373826020963952,
+        0.26159205028716875
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/13,10,7/r0.780",
+      "baseColorLinear": [
+        0.14683923082122904,
+        0.0849214566468118,
+        0.041722573919128626
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/14,11,8/r0.780",
+      "baseColorLinear": [
+        0.1719559031258607,
+        0.10338683447877332,
+        0.05416457340265298
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/19,17,14/r0.780",
+      "baseColorLinear": [
+        0.33381557452228633,
+        0.26159205028716875,
+        0.1719559031258607
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    },
+    {
+      "name": "Quartz sand | dark wet foreshore to dry dune/20,18,13/r0.780",
+      "baseColorLinear": [
+        0.373826020963952,
+        0.29642135334252967,
+        0.14683923082122904
+      ],
+      "roughness": 0.7799999713897705,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 1439545,
+  "insideNodes": 789991
+}

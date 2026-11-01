@@ -5497,7 +5497,7 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   /** Finest asset meshes cast independently of the camera's compact LOD list. */
-  private readonly drawImportedShadows = (pass: GPURenderPassEncoder, cutPipeline?: GPURenderPipeline): void => {
+  private readonly drawImportedShadows = (pass: GPURenderPassEncoder, cutPipeline?: GPURenderPipeline, cachedPipeline?: GPURenderPipeline): void => {
     if (!this.importedShadowInstances) return;
     for (const [index,group] of this.importedShadowGroups.entries()) {
       const mesh=this.importedSurfaceMeshes.get(group.asset)!;

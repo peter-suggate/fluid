@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "units": "metres",
+  "upAxis": "Y",
+  "asset": "beach-dunes",
+  "source": "beach-dunes.glb",
+  "origin": [
+    7.4,
+    2.75,
+    -11.625
+  ],
+  "dimensions": [
+    344,
+    96,
+    928
+  ],
+  "cellSize": 0.025,
+  "bandWidth": 0.025,
+  "brickCount": 3137,
+  "brickCells": 8,
+  "nodeStrideBytes": 16,
+  "materials": [
+    {
+      "name": "Marram grass 1",
+      "baseColorLinear": [
+        0.25999999046325684,
+        0.25,
+        0.10000000149011612
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Marram grass 0",
+      "baseColorLinear": [
+        0.11999999731779099,
+        0.14000000059604645,
+        0.04500000178813934
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Marram grass 2",
+      "baseColorLinear": [
+        0.3799999952316284,
+        0.3199999928474426,
+        0.14000000059604645
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    },
+    {
+      "name": "Salt bleached driftwood",
+      "baseColorLinear": [
+        0.25999999046325684,
+        0.20000000298023224,
+        0.13500000536441803
+      ],
+      "roughness": 0.800000011920929,
+      "metallic": 0.0
+    }
+  ],
+  "sign": "negative-inside",
+  "solidRule": "even-odd",
+  "texturePolicy": "Closest-triangle UV footprint-aware linear-color and roughness area mips; tangent-space unit-vector normal mips renormalized after filtering; isotropic largest-Jacobian-axis LOD; independent geometric gradient; metallic retained",
+  "uniqueNodes": 1797680,
+  "insideNodes": 33839
+}

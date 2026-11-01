@@ -7,7 +7,7 @@ import { validateSceneryGraph, walkSceneryNodes } from "../lib/core/scenery-grap
 import { meshAssetHeader, sceneMeshAssetIds } from "../lib/core/imported-assets/asset-library";
 import { buildSvoSceneLights } from "../lib/svo/contracts/svo-light-abi";
 
-for (const id of ["tokyo-rain", "alpine-lake-sunrise", "atlantic-lighthouse"]) {
+for (const id of ["tokyo-rain", "alpine-lake-sunrise", "atlantic-lighthouse", "beach"]) {
   test(`${id} is a valid live NB-FLIP landscape with one terrain shell and registered Blender assets`, () => {
     const definition = getSceneDefinition(id), scene = sceneDocument(definition);
     assert.equal(definition.methodProfile?.methodId, "uniform-narrow-band-flip");

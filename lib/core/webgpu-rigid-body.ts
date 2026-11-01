@@ -1,3 +1,4 @@
+import { rigidAppearanceSkin } from "./rigid-appearance";
 import { sculptCollisionWGSL } from "./sculpt-collision.wgsl";
 import type { SceneDescription } from "./model";
 import type { Quaternion, Vec3 } from "./model";
@@ -434,6 +435,7 @@ ${terrainContact ? rigidTerrainBindingWGSL : ""}
 @group(0) @binding(8) var<storage, read_write> immersedVolumes: array<f32>;
 ${solidWorldContact ? rigidSolidWorldBindingWGSL : ""}
 
+@group(0) @binding(11) var<uniform> rigidSkins: array<vec4f,12>;
 fn qConjugate(q: vec4f) -> vec4f { return vec4f(q.x, -q.yzw); }
 fn qMultiply(a: vec4f, b: vec4f) -> vec4f {
   return vec4f(a.x*b.x-dot(a.yzw,b.yzw), a.x*b.yzw+b.x*a.yzw+cross(a.yzw,b.yzw));
@@ -525,9 +527,10 @@ fn solveBodyPair(aIndex: u32,bIndex: u32) {
 }
 fn publish(index: u32) {
   let body=bodies[index];let shape=rigidShapeTag(body);
-  let half=rigidShapeRenderHalf(shape,body.dimensions.xyz);
+  let skin=rigidSkins[index];
+  let half=select(rigidShapeRenderHalf(shape,body.dimensions.xyz),skin.xyz,skin.w>0.0);
   let color=rigidShapePalette(shape);
-  renderBodies[index]=RenderBody(vec4f(body.positionShape.xyz,body.dimensions.w),vec4f(half,body.positionShape.w),body.orientation,vec4f(color,body.material.w));
+  renderBodies[index]=RenderBody(vec4f(body.positionShape.xyz,select(body.dimensions.w,length(half),skin.w>0.0)),vec4f(half,select(body.positionShape.w,skin.w,skin.w>0.0)),body.orientation,vec4f(color,body.material.w));
 }
 fn motionQuaternionXyzw(qWxyz:vec4f)->vec4f{return vec4f(qWxyz.yzw,qWxyz.x);}
 fn motionTransformMatches(record:SvoPrimitiveMotionRecord,body:RigidBody)->bool{
@@ -543,7 +546,7 @@ fn publishMotion(index:u32,previousBody:RigidBody,currentBody:RigidBody,dt:f32){
   let old=rigidMotion[index];let generation=bitcast<u32>(currentBody.material.y);let previousGeneration=old.publication.x;
   let currentQ=svoPrimitiveMotionQuaternionNormalize(motionQuaternionXyzw(currentBody.orientation));var previousQ=svoPrimitiveMotionQuaternionNormalize(motionQuaternionXyzw(previousBody.orientation));var flags=0u;
   if(dot(previousQ,currentQ)<0.0){previousQ=-previousQ;flags|=SVO_PRIMITIVE_MOTION_SHORTEST_FLIP;}
-  let deltaPosition=currentBody.positionShape.xyz-previousBody.positionShape.xyz;let rotationDot=clamp(abs(dot(previousQ,currentQ)),0.0,1.0);let angularDisplacement=2.0*acos(rotationDot);let radius=max(currentBody.dimensions.w,1e-6);let maximumDisplacement=length(deltaPosition)+2.0*radius*sin(.5*angularDisplacement);let motionLimit=min(.5,2.0*max(params.coupling.w,1e-6));
+  let deltaPosition=currentBody.positionShape.xyz-previousBody.positionShape.xyz;let rotationDot=clamp(abs(dot(previousQ,currentQ)),0.0,1.0);let angularDisplacement=2.0*acos(rotationDot);let radius=max(max(currentBody.dimensions.w,length(rigidSkins[index].xyz)),1e-6);let maximumDisplacement=length(deltaPosition)+2.0*radius*sin(.5*angularDisplacement);let motionLimit=min(.5,2.0*max(params.coupling.w,1e-6));
   let generationContinuous=generation!=0u&&generation==previousGeneration;let revisionContinuous=generationContinuous&&motionTransformMatches(old,previousBody);let teleport=maximumDisplacement>motionLimit;let valid=dt>1e-8&&generationContinuous&&revisionContinuous&&!teleport;
   if(valid){flags|=SVO_PRIMITIVE_MOTION_VALID;}if(length(deltaPosition)<=1e-8&&angularDisplacement<=1e-8){flags|=SVO_PRIMITIVE_MOTION_STATIC;}if(revisionContinuous){flags|=SVO_PRIMITIVE_MOTION_REVISION_CONTINUOUS;}if(generationContinuous){flags|=SVO_PRIMITIVE_MOTION_GENERATION_CONTINUOUS;}if(teleport){flags|=SVO_PRIMITIVE_MOTION_TELEPORT;}
   let previousRevision=old.identityRevision.z;let currentRevision=previousRevision+1u;let linearVelocity=select(vec3f(0.0),currentBody.linearVelocity.xyz,valid);let angularVelocity=select(vec3f(0.0),currentBody.angularVelocity.xyz,valid);let shape=i32(round(currentBody.positionShape.w));
@@ -642,6 +645,7 @@ export class WebGPURigidBodySystem {
   private readonly stateScratch: GPUBuffer;
   private readonly renderScratch: GPUBuffer;
   private readonly motionScratch: GPUBuffer;
+  private readonly skinBuffer: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
   private pipeline!: GPUComputePipeline;
   private bindGroup!: GPUBindGroup;
@@ -686,6 +690,7 @@ export class WebGPURigidBodySystem {
     this.stateScratch = device.createBuffer({ label: "GPU rigid-body roster scratch", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderScratch = device.createBuffer({ label: "GPU rigid render roster scratch", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionScratch = device.createBuffer({ label: "GPU rigid motion roster scratch", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.skinBuffer = device.createBuffer({ label: "Rigid appearance bounds", size: GPU_RIGID_BODY_CAPACITY * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.paramsBuffer = device.createBuffer({ label: "GPU rigid-body step parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickParamsBuffer = device.createBuffer({ label: "GPU rigid-body pick ray", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickResultBuffer = device.createBuffer({ label: "GPU rigid-body pick result", size: GPU_RIGID_PICK_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -719,6 +724,7 @@ export class WebGPURigidBodySystem {
       { binding: 3, resource: { buffer: this.paramsBuffer } },
       { binding: 7, resource: { buffer: this.motionBuffer } },
       { binding: 8, resource: { buffer: this.immersedVolumeBuffer } },
+      { binding: 11, resource: { buffer: this.skinBuffer } },
     ];
     if (this.terrainTexture) entries.push({ binding: 4,
       resource: this.terrainTexture.createView() });
@@ -846,10 +852,13 @@ export class WebGPURigidBodySystem {
   private uploadBodies(bodies: readonly RigidBodyState[]) {
     const active = bodies.slice(0, GPU_RIGID_BODY_CAPACITY);
     const ids = active.map((body) => body.description.id);
-    const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion,body.description.renderHidden,body.description.fluidBoundary]));
+    const structural = active.map((body) => JSON.stringify([body.description.shape,body.description.dimensions_m,body.description.density_kg_m3,body.description.restitution,body.description.friction,body.description.motion,body.description.renderHidden,body.description.fluidBoundary,body.description.appearance]));
     const authored = active.map((body) => JSON.stringify([body.description.position_m,body.description.orientation,body.description.linearVelocity_m_s,body.description.angularVelocity_rad_s]));
     const commands = active.map((body) => JSON.stringify([body.position_m,body.orientation,body.linearVelocity_m_s,body.angularVelocity_rad_s,Boolean(body.held)]));
     if (JSON.stringify([ids,structural,authored,commands]) === JSON.stringify([this.bodyIds,this.structuralSignatures,this.authoredTransformSignatures,this.commandSignatures])) return;
+    const skins = new Float32Array(GPU_RIGID_BODY_CAPACITY * 4);
+    active.forEach((body,index) => { const skin=rigidAppearanceSkin(body.description); if(skin)skins.set([...skin.half,skin.shape],index*4); });
+    this.device.queue.writeBuffer(this.skinBuffer,0,skins);
     this.bodyCount = active.length;
     this.hiddenBodies = active.map(body => Boolean(body.description.renderHidden));
     const stateStorage = new ArrayBuffer(GPU_RIGID_STATE_BYTES), state = new Float32Array(stateStorage), stateWords = new Uint32Array(stateStorage);
@@ -895,7 +904,8 @@ export class WebGPURigidBodySystem {
       state.set([body.position_m.x,body.position_m.y,body.position_m.z,fluidShape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,inverseMass,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,inverseMass,inverseInertia.x,inverseInertia.y,inverseInertia.z,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,rigidMotionLane(body),selection],o);
       stateWords[o+29]=nextMotionGenerations[index];
       const half = sceneShapeRenderHalfExtent_m(body.description.shape, d);
-      render.set([body.position_m.x,body.position_m.y,body.position_m.z,state[o+7],half[0],half[1],half[2],shape,q.w,q.x,q.y,q.z,...palette[shape],selection],index*GPU_RIGID_RENDER_FLOATS);
+      const skin=rigidAppearanceSkin(body.description), renderHalf=skin?.half??half;
+      render.set([body.position_m.x,body.position_m.y,body.position_m.z,skin?.radius??state[o+7],renderHalf[0],renderHalf[1],renderHalf[2],skin?.shape??shape,q.w,q.x,q.y,q.z,...palette[shape],selection],index*GPU_RIGID_RENDER_FLOATS);
       const volume = primitiveVolume(body.description.shape, body.description.dimensions_m);
       const waterline = this.scene.container.fillFraction * this.scene.container.height_m;
       if (body.description.shape === "sphere") {
@@ -995,5 +1005,5 @@ export class WebGPURigidBodySystem {
     const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(1);pass.end();
   }
 
-  destroy() { this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
+  destroy() { this.skinBuffer.destroy();this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
 }

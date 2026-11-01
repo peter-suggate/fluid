@@ -50,6 +50,23 @@ test("authored directional key drives primary and reflected environment publicat
   assert.equal(svoEnvironmentLightingRecord("garden",1,svoSceneEnvironmentLightingOptions({...scene,lighting:undefined})).sunIntensity,2.5);
 });
 
+test("overcast skies retain cloud depth when the base sky and fill have the same radiance",()=>{
+  const neutral=[.25,.25,.25] as const;
+  const ring=Array.from({length:64},(_,i):SvoVec3=>[Math.cos(i*Math.PI/32)*.8,.6,Math.sin(i*Math.PI/32)*.8]);
+  const values=ring.map(d=>evaluateSvoEnvironmentCloudRadiance(neutral,d,0,.8,neutral,neutral,[0,0,0],[0,1,0])[0]);
+  assert.ok(Math.max(...values)-Math.min(...values)>.05,"Dense undersides must remain distinct from thin cloud edges");
+  assert.ok(values.every(value=>Number.isFinite(value)&&value>=0));
+});
+
+test("sunlit cloud bodies scatter daylight away from the solar disc",()=>{
+  const lower=[.04,.13,.30] as const,upper=[.025,.16,.54] as const;
+  // All sightlines face away from the sun, excluding the forward silver rim.
+  const directions=Array.from({length:32},(_,i):SvoVec3=>[-Math.cos((i-16)*.025)*.8,.6,Math.sin((i-16)*.025)*.8]);
+  const lit=directions.map(direction=>evaluateSvoEnvironmentCloudRadiance(upper,direction,0,.65,lower,upper,[4,4,4],[.8,.6,0]));
+  const unlit=directions.map(direction=>evaluateSvoEnvironmentCloudRadiance(upper,direction,0,.65,lower,upper,[0,0,0],[.8,.6,0]));
+  assert.ok(lit.some((color,i)=>color[0]-unlit[i]![0]>.15),"Sunlit cloud bodies must brighten independently of forward scattering");
+});
+
 test("GPU visible/reflected sky evaluator agrees with CPU for cloud coverage and roughness",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
   const {withUniformDevice}=await import("./helpers/uniform-geometric");
   await withUniformDevice("environment clouds CPU GPU oracle",async device=>{

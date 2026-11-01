@@ -57,6 +57,7 @@ import { FOREST_WATERFALL_ID, createForestWaterfallScene, forestWaterfallCamera 
 import { ALPINE_LAKE_SCENE_ID, createAlpineLakeScene, alpineLakeCamera } from "./alpine-lake-scene";
 import { TOKYO_RAIN_ID, createTokyoRainScene, tokyoRainCamera } from "./tokyo-rain-scene";
 import { ATLANTIC_LIGHTHOUSE_ID, createAtlanticLighthouseScene, atlanticLighthouseCamera } from "./atlantic-lighthouse-scene";
+import { BEACH_SCENE_ID, createBeachScene, beachCamera } from "./beach-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { createReservoirSeepScene, RESERVOIR_SEEP_CAMERA, RESERVOIR_SEEP_ID } from "./reservoir-seep-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
@@ -1683,6 +1684,20 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     renderProfile: { environmentRefinementDepth: 0 },
     build: createTokyoRainScene,
     camera: tokyoRainCamera,
+  }),
+  defineScene({
+    id: BEACH_SCENE_ID,
+    name: "Beach · afternoon surf",
+    blurb: "Generated surf meets a sandy shore, feather palms and weathered rocks beneath a blue, cloudy sky. Full narrow-band FLIP drives the waves and floating seaweed through Blender-authored scenery.",
+    audience: "explore",
+    shelf: "Water landscapes",
+    environment: "garden",
+    containerShell: "authored",
+    presentationMode: "full-scene",
+    methodProfile: { ...NBFLIP_METHOD_PROFILE, overrides: { rigidCoupling: "on" } },
+    renderProfile: { environmentRefinementDepth: 2, fluidSurfaceRenderMode: "shaded", fluidParticleDisplay: "off" },
+    build: createBeachScene,
+    camera: beachCamera,
   }),
   defineScene({
     id: ATLANTIC_LIGHTHOUSE_ID,
