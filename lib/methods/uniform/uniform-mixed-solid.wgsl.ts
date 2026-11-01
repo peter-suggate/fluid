@@ -1170,10 +1170,14 @@ fn umTileOpen(t:u32)->f32{
  if(!umSolidEnabled()){return 1.0;}
  return umSolidRecord[t].x;
 }
-// The same of the tile at p, whatever its page.
+// The same of the tile at p, whatever its page. An unstored tile of a page
+// the lattice walls off is closed throughout: each of its cells' umCellOpen
+// is umCellOpenGeometry's voxel answer, 0 (no tile clearance or boundary
+// record off a stored valid page), so their mean is 0 without the 64.
 fn umTileOpenAt(p:vec3i)->f32{
  let t=umTileKey(p);if(umKeyStored(t)){return umTileOpen(t);}
  if(!umSolidEnabled()){return 1.0;}
+ if(umSolidPage(4*p)==${SOLID_MASK_WALL}u){return 0.0;}
  return umTileOpenCells(p);
 }
 // An all-4h owner or halo slot of the record (the all-4h layout's own index):
