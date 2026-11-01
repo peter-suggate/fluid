@@ -64,7 +64,9 @@ export const UNIFORM_MOMENTUM_TIER_PASS:GPUComputePassDescriptor={label:"Uniform
  *
  * WARM: affine where the error is bounded, else full. A WARM region whose
  * 27 regions are all stored (no wall, SOLID or AIR page: no departure is
- * held) at one width has a least squares model M(p) = u0 + G (p - centre)
+ * held) at one width, and whose own faces are all pressure rows (no air
+ * face: M models the liquid, and the extension's air values are no samples
+ * of it), has a least squares model M(p) = u0 + G (p - centre)
  * of its own faces; r is max |u - M| over every face its traces can read
  * (its own and a halo of UNIFORM_MOMENTUM_AFFINE_HALO cells, measured). A
  * face then runs the momentum's one midpoint step on M: with
@@ -262,6 +264,14 @@ fn umFitRegion(region:u32)->vec3u{let origin=16u*umPageCoord(region);return vec3
      let d=vec3i(i32((k/64u)%3u)-1,i32((k/192u)%3u)-1,i32(k/576u)-1);
      let key=umTileKey(vec3i(origin/4u)+4*d);
      if(!umKeyStored(key)||umTileWidth(umPageTile(umPageOfTile(key),k%64u))!=width){atomicOr(&umFitFlag,1u);}
+    }
+    // The model is the liquid's: every face it fits is a pressure row (a
+    // cell on either side live). An air face's extended value is no sample
+    // of it; a fit through the extension's decay above a surface
+    // overshoots the liquid row (O5: x1.11 a step at rest).
+    for(var k=lane;k<3u*n*n*n;k+=256u){
+     let axis=k%3u;let cell=vec3i(origin)+i32(width)*vec3i(umCorner(k/3u,n));var across=cell;across[axis]+=i32(width);
+     if(!umPredictionCellLive(umOwnerAt(cell))&&!umPredictionCellLive(umOwnerAt(across))){atomicOr(&umFitFlag,1u);}
     }
    }else{
     // The grid's centre is the region's, but half a width up its own axis.

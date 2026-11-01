@@ -14,11 +14,15 @@ test("a hydrostatic voxel pool does not seed wall particles or develop edge flow
   const bodies=initializeRigidBodies(scene.rigidBodies),solver=await createUniformSolver(device,scene);
   const {mixedFrame:frame}=solver as unknown as {mixedFrame:UniformMixedFrame};
   try{
-   for(let step=1;step<=120;step++){
+   // 150 frames: O5 (docs/plans/bulk16-plan-2026-10-28.md) was a surface-row swirl
+   // growing x1.1 a frame from about frame 60, which reached 2e-3 m/s at 120 and
+   // 4e-2 at 150. The WARM affine momentum tier had fitted surface regions'
+   // models over their air faces' extended values.
+   for(let step=1;step<=150;step++){
     assert.ok(solver.advanceTo(step/60,bodies));await solver.awaitFrameCompletion();
     assert.equal(solver.info.simulationPipelineError,undefined);
     assert.equal(frame.narrowBandFlip!.count,0,`frame ${step}: no physical interface detail requires particles`);
-    if(step!==1&&step!==10&&step!==120)continue;
+    if(step!==1&&step!==10&&step!==120&&step!==150)continue;
     const velocity=await readMixedTexture(device,solver.velocityTexture);
     let peak=0;
     for(let i=0;i<velocity.length;i++)if(i%4!==3){assert.ok(Number.isFinite(velocity[i]));peak=Math.max(peak,Math.abs(velocity[i]!));}
