@@ -58,4 +58,10 @@ test("the particle record rule: 8 samples a band cell x the shared growth, over 
   }
   // Its h tiles: the layers y 16..19 hold it, 16 x 16 tiles across.
   assert.deepEqual(uniformParticleBand({ edge, cells: [64, 64, 64], pages: [2, 2, 2], at } as never, 3), { cells: 3 * 64 * 64, tiles: 16 * 16 });
+  // A deep region's band cells are not counted: here the free surface's own
+  // regions (y 16..31) are passed as deep, so only those below them remain:
+  // none, as the surface's band lies wholly in y 16..19.
+  assert.deepEqual(uniformParticleBand({ edge, cells: [64, 64, 64], pages: [2, 2, 2], at } as never, 3, new Set(), (_x, y) => y === 1), { cells: 0, tiles: 0 });
+  // Deep regions elsewhere (below y 16) leave the band as it is.
+  assert.deepEqual(uniformParticleBand({ edge, cells: [64, 64, 64], pages: [2, 2, 2], at } as never, 3, new Set(), (_x, y) => y === 0), { cells: 3 * 64 * 64, tiles: 16 * 16 });
 });

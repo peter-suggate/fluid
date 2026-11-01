@@ -83,3 +83,18 @@ test("V2d: the closure reserve holds the start's BULK16 pages within the reach o
   assert.equal(uniformBulkStartShell([3, 3, 3], corner, [[1, 1, 1], [2, 2, 0]], 29, 32), 1);
   assert.equal(uniformBulkStartShell([3, 3, 3], corner, [[1, 1, 1], [2, 2, 0]], 28, 32), 0);
 });
+
+test("BULK16 start: the deep regions (uniformBulkRegionDeep) admit cuts, never air, h or a shallow tile", () => {
+  const deep = (o: Partial<UniformBulkStartSource>) => { const d = new Set<number>(); uniformBulkStartPages(box(o), d); return d; };
+  const key = (x: number, y: number, z: number) => x + 6 * (y + 6 * z);
+  assert.equal(deep({}).size, 216, "deep still water: every region");
+  // A cut tile fails every page that sees it, but its regions stay deep.
+  const cut = deep({ open: (x, y, z) => x === 12 && y === 12 && z === 12 ? 0.5 : 1 });
+  assert.equal(cut.size, 216);
+  // The surface at cell 80: as the pages, the regions whose neighbourhood stays 5.5 h deep (y 0 to 2).
+  const surface = deep({ phi: (_x, y) => 4 * y + 2 - 80 });
+  assert.deepEqual(new Set([...surface].map(k => Math.floor(k / 6) % 6)), new Set([0, 1, 2]));
+  // AIR and h fail it as they fail the pages.
+  assert.ok(!deep({ stored: (x, y, z) => !(x === 2 && y === 2 && z === 2) }).has(key(3, 3, 3)));
+  assert.ok(!deep({ fine: (x, y, z) => x === 12 && y === 12 && z === 12 }).has(key(3, 3, 3)));
+});

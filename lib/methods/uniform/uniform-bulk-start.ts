@@ -16,7 +16,7 @@
  * tile neighbourhoods, each tile once (memoised), so the work is the
  * candidates' and their neighbours' tiles, never the box's. */
 import {
-  UNIFORM_BULK_FLOOR, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, uniformBulkAxisError, uniformBulkStructural,
+  UNIFORM_BULK_FLOOR, UNIFORM_BULK_REACH_CELLS, UNIFORM_BULK_TOLERANCE, uniformBulkAxisError, uniformBulkRegionDeep, uniformBulkStructural,
   type BulkVec, type UniformBulkTile,
 } from "./uniform-bulk-tier-reference";
 import { BULK16_PAGE, BULK16_PAGE_WORDS, BULK16_PHI_TEXELS, restrictBulk16Page } from "./uniform-bulk-pages-reference";
@@ -48,8 +48,10 @@ export interface UniformBulkStartSource {
 }
 
 /** The census start's BULK16 pages (box page coordinates, x fastest): those
- * whose eight regions bulkSelect admits on the t=0 state. */
-export function uniformBulkStartPages(s:UniformBulkStartSource):[number,number,number][]{
+ * whose eight regions bulkSelect admits on the t=0 state. `deep`, when
+ * given, takes the candidates' deep regions (uniformBulkRegionDeep), keyed
+ * x + 2px(y + 2py z). */
+export function uniformBulkStartPages(s:UniformBulkStartSource,deep?:Set<number>):[number,number,number][]{
  const [px,py,pz]=s.pages,T=[8*px,8*py,8*pz] as const;
  const inBox=(t:BulkVec)=>t.every((v,a)=>v>=0&&v<T[a]!);
  const hot=new Map<number,boolean>(),tiles=new Map<number,UniformBulkTile|undefined>();
@@ -82,6 +84,10 @@ export function uniformBulkStartPages(s:UniformBulkStartSource):[number,number,n
  // bFace: the +face of tile t on axis a, 0 where t is not stored (a wall).
  const face=(t:BulkVec,a:number)=>tile(t)?.kind==="resident"?s.face(t[0],t[1],t[2],a):0;
  const faces=new Float64Array(80);
+ if(deep)for(const [x,y,z] of s.candidates)if(s.stored(x,y,z))for(let o=0;o<8;o++){
+  const r:BulkVec=[2*x+(o&1),2*y+((o>>1)&1),2*z+(o>>2)];
+  if(uniformBulkRegionDeep(tile,r,s.h))deep.add(r[0]+2*px*(r[1]+2*py*r[2]));
+ }
  const admitted=(r:BulkVec)=>{
   if(!uniformBulkStructural(tile,r,s.h))return false;
   let speed=0,error=0;

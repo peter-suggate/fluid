@@ -256,3 +256,24 @@ export class UniformBulkComposite {
     return d;
   }
 }
+
+/** Whether region `r` is deep: its 3^3 neighbourhood passes the structural
+ * rule's depth, band and residency tests with cut tiles admitted (an AIR tile,
+ * a band or HOT tile, or an open tile shallower than UNIFORM_BULK_DEPTH_CELLS
+ * fails; a closed tile and SOLID past the box are skipped; the region's own
+ * tiles may be open, cut or closed). uniformBulkRegionClass's verdict, open or
+ * closed, implies it, and so must any rule that admits cut regions. A deep
+ * region holds no h tile and lies more than the particle band's depth from
+ * any free surface, so its band cells are solid contact alone: the particle
+ * band does not count them (uniformParticleBand's `deep`). */
+export function uniformBulkRegionDeep(tile: (t: BulkVec) => UniformBulkTile | undefined, region: BulkVec, minH: number): boolean {
+  for (let z = -4; z < 8; z++) for (let y = -4; y < 8; y++) for (let x = -4; x < 8; x++) {
+    const own = x >= 0 && x < 4 && y >= 0 && y < 4 && z >= 0 && z < 4;
+    const t = tile([4 * region[0] + x, 4 * region[1] + y, 4 * region[2] + z]) ?? { kind: "solid" as const };
+    if (t.kind !== "resident") { if (own || t.kind === "air") return false; continue; }
+    if (t.band || t.hot) return false;
+    if ((t.open ?? 1) <= 1e-5) continue;
+    if ((t.phi ?? -Infinity) > -UNIFORM_BULK_DEPTH_CELLS * minH) return false;
+  }
+  return true;
+}

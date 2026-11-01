@@ -30,8 +30,12 @@ const tileKey=(cells:readonly [number,number,number],x:number,y:number,z:number)
  * surface); a cell inside a solid holds no volume and counts as dry, so a
  * solid's contact is counted too (an over-count, never an under-count). A
  * page that is wet throughout, with every page around it wet throughout or
- * past the lattice, holds no band cell and is not visited. */
-export function uniformParticleBand(volume:LatticePages,depth:number,tiles=new Set<number>()):UniformParticleBand{
+ * past the lattice, holds no band cell and is not visited. `deep`, when
+ * given, says whether the 16h region (cell >> 4 on each axis) is deep at t=0
+ * (uniformBulkRegionDeep): its band cells are solid contact alone, where no
+ * particle lives (no h tile, no free surface within the band), and are not
+ * counted. */
+export function uniformParticleBand(volume:LatticePages,depth:number,tiles=new Set<number>(),deep?:(x:number,y:number,z:number)=>boolean):UniformParticleBand{
  if(!(Number.isInteger(depth)&&depth>=1&&depth<volume.edge))throw new RangeError(`A particle band of ${depth} cells needs a whole depth under the page edge ${volume.edge}`);
  const E=volume.edge,[nx,ny,nz]=volume.cells,[px,py,pz]=volume.pages;
  const page=(x:number,y:number,z:number)=>x<0||y<0||z<0||x>=px||y>=py||z>=pz?undefined:volume.at[x+px*(y+py*z)];
@@ -68,7 +72,7 @@ export function uniformParticleBand(volume:LatticePages,depth:number,tiles=new S
   for(let c=0;c<E;c++)for(let b=0;b<E;b++)for(let a=0;a<E;a++){
    const gx=E*x+a,gy=E*y+b,gz=E*z+c;if(gx>=nx||gy>=ny||gz>=nz)continue;
    const k=(a+depth)+W*((b+depth)+W*(c+depth));
-   if(dry[k]===0&&near[k]===1){band++;tiles.add(tileKey(volume.cells,gx,gy,gz));}
+   if(dry[k]===0&&near[k]===1&&!deep?.(gx>>4,gy>>4,gz>>4)){band++;tiles.add(tileKey(volume.cells,gx,gy,gz));}
   }
  }
  return {cells:band,tiles:tiles.size};
@@ -81,10 +85,10 @@ export function uniformParticleBand(volume:LatticePages,depth:number,tiles=new S
  * sphere's, or an extrusion's: liquidExtrusionDistance). An inflow adds its
  * whole integrated volume as band cells, and those cells packed into whole
  * tiles. `initial` is the initial liquid by page, where the caller holds
- * it. */
-export function uniformParticleCensusBand(scene:SceneDescription,depth:number,initial?:LatticePages):UniformParticleBand{
+ * it; `deep`, the initial liquid's deep regions (uniformParticleBand). */
+export function uniformParticleCensusBand(scene:SceneDescription,depth:number,initial?:LatticePages,deep?:(x:number,y:number,z:number)=>boolean):UniformParticleBand{
  const volume=initial??fluidLatticePagedCellVolumes(scene,UNIFORM_PAGE_POOL_EDGE).volume,tiles=new Set<number>();
- let cells=uniformParticleBand(volume,depth,tiles).cells,packed=0;
+ let cells=uniformParticleBand(volume,depth,tiles,deep).cells,packed=0;
  const c=scene.container,lattice=volume.cells;
  // The fluid box's cells are the container's, from its low corner (sceneFluidBox): a box past the container is padding.
  const h=scene.voxelDomain.finestCellSize_m,size=[h,h,h] as const,reach=depth*h;

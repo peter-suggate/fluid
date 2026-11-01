@@ -1374,8 +1374,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const open=(x:number,y:number,z:number)=>x>=0&&y>=0&&z>=0&&x<nx&&y<ny&&z<nz&&!this.solidMask.solid(x,y,z)&&!(terrainCells&&y+1<=terrainCells[x+nx*z]!);
     const c=scene.container,h=Math.min(c.width_m/cells[0]!,c.height_m/cells[1]!,c.depth_m/cells[2]!);
     const face=(x:number,y:number,z:number,axis:number)=>uniformBulkStartFace(velocity,x,y,z,axis);
+    const deep=new Set<number>(),[dx,dy]=a.pages;
     const pages=uniformBulkStartPages(uniformBulkStartSource({pages:a.pages as [number,number,number],openTop:a.openTop,stored,volume,phi,velocity,
-      fine:(x,y,z)=>widths[uniformBoxTileIndex(a,x,y,z)]===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}));
+      fine:(x,y,z)=>widths[uniformBoxTileIndex(a,x,y,z)]===1,cellOpen:open,h,dt:this.fixedStep_s??scene.numerics.maxDt_s}),deep);
+    this.bulkStartDeep=(x,y,z)=>deep.has(x+2*dx!*(y+2*dy!*z));
     const t3=performance.now();
     // A D page's 4h vertex block as the install leaves it: the vertices it holds (umWideVertexSlot), the far phi elsewhere.
     const empty=uniformLatticeFarPhi(scene),slot:[number,number,number,number]=[0,0,0,0],[px,py]=a.pages;
@@ -1389,6 +1391,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.bulkStartInfo={pages:pages.length,phi_ms:t1-t0,seed_ms:t1c-t1b,layout_ms:t2-t1c,set_ms:t3-t2,records_ms:performance.now()-t3};
     return {pages,records,phi};
   }
+  /** The census start's deep 16h regions (uniformBulkRegionDeep), for the particle band: none without a BULK16 start. */
+  private bulkStartDeep?:(x:number,y:number,z:number)=>boolean;
   /** The census start's BULK16 pages and the host's time for them (bulkStartState), ms. */
   bulkStartInfo?:{readonly pages:number;readonly phi_ms:number;readonly seed_ms:number;readonly layout_ms:number;readonly set_ms:number;readonly records_ms:number;readonly rebuild_ms?:number;readonly shell?:number;readonly shellReach_cells?:number};
   /** The coarse start's thin-wall tiles at h (uniformThinWallTiles: a cut 4h
@@ -1451,14 +1455,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // unless fluid.tiers.bricks does, its h owners at the slots' 512 tiles
     // each (a rule fixed at construction underestimates vertical and spreading
     // surfaces: the plan's M4b owner-rule experiments) and its particles by
-    // the records' rule over the band's cells (uniformParticleRecordRule). The
+    // the records' rule over the band's cells (uniformParticleRecordRule), less
+    // the solid contact of a BULK16 start's deep regions (bulkStartDeep). The
     // build's claim refuses to 4h what the slots cannot serve.
     const cells:[number,number,number]=[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz];
     const pageDims=cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number];
     // The rule's sources besides the band: the bodies' balls and the h-only authored regions (slotRuleSources).
     const slotRule=coarseStart&&uniformFineBlocks(tiers)==="auto"
       ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(pageDims,this.pageResidency.air),uniformFineSlotSourcePages(pageDims,this.slotRuleSources()))):undefined;
-    const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume):undefined;
+    const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume,this.bulkStartDeep):undefined;
     const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:band?512*slotRule!:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
     const records=band?uniformParticleRecordRule(band.cells):undefined;
