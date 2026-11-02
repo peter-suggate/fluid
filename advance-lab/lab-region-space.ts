@@ -145,6 +145,22 @@ export function labRegionIsDrawn(record: RefinementRegionRecord): boolean {
 }
 
 /**
+ * A drag on a box, for as long as it has a handle to hear its pointer come up:
+ * the box is still there, still selected and still editable. A box that stops
+ * being any of those takes its handles with it, and an unmounted handle never
+ * hears the release, so the drag is dropped rather than left to revive the next
+ * time that box is editable again.
+ */
+export function labRegionDragAlive<D extends { readonly id: string }>(drag: D | null, state: {
+  readonly editing: boolean;
+  readonly selectedId?: string;
+  readonly records: readonly { readonly id: string }[];
+}): D | null {
+  return drag && state.editing && state.selectedId === drag.id
+    && state.records.some(record => record.id === drag.id) ? drag : null;
+}
+
+/**
  * The next free box id, derived from the list rather than from a counter.
  *
  * A counter in a ref survives a scene change that empties the list, so the

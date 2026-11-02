@@ -5,7 +5,7 @@ import {
 } from "../lib/core/visual-layers";
 import { VisualLayerLines } from "../lib/features/field-view/layers-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RunScope, type Run } from "../lib/core/run-scope";
+import { ownedBy, RunScope, type Run } from "../lib/core/run-scope";
 import { useStore } from "zustand";
 import { LabSceneSelector } from "./LabSceneSelector";
 import { addFluidBall } from "../lib/core/editor-fluid-volume";
@@ -449,11 +449,8 @@ function UniformRun({ session }: { session: PaneSession }) {
         const scene = session.scene.getState().scene;
         const limitation = uniformLabSceneLimitation(scene);
         if (limitation) throw new Error(limitation);
-        owner = await UniformLabController.create();
-        if (!run.current()) {
-          await owner.destroy();
-          return;
-        }
+        owner = await ownedBy(run, UniformLabController.create(), (created) => created.destroy());
+        if (!owner) return;
         controller.current = { owner, run };
         const initial = await owner.load(scene, { volumeControlSeconds, phiFineAdvection }, sliceDepth_m);
         if (run.current()) {

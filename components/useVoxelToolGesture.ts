@@ -10,34 +10,12 @@ import { beginToolTransaction } from "../lib/core/voxel-editor/transaction";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
 import { sessionToolHost } from "../lib/core/voxel-editor/session-host";
 import { solidEditQueue } from "../lib/core/voxel-editor/solid-edit-queue";
+import { VoxelStroke } from "../lib/core/voxel-editor/stroke";
 import { startVoxelIndexPreparation } from "../lib/core/voxel-editor/voxel-index";
 import { useSession } from "../lib/core/session/session-context";
 import type { SceneDescription } from "../lib/core/model";
 import type { SolidWorldVoxelPatch } from "../lib/core/solid-world";
 
-type Transaction = NonNullable<ReturnType<typeof beginToolTransaction>>;
-/**
- * Where a stroke is, one phase at a time:
- *
- *     dragging ──up──► releasing ──advance──► hovering ──press──► ending ──► concluded
- *        │                 └──────no further phase──────────────────┘
- *        └───────────── cancel, Escape, lost capture, blur ─────────┘
- *
- * - `releasing`: the pointer came up and the gesture has not yet said whether it continues.
- * - `hovering`: a later phase follows the bare pointer; the next press commits it.
- * - `ending`: no more samples are taken; the queue drains and the stroke concludes.
- * - `concluded`: handed to the edit queue or abandoned: the pointer is no longer this stroke's.
- *
- * Ending is reachable from every phase before `concluded`, and a release that
- * answers after the stroke was ended does not take it back to `hovering`.
- */
-type StrokePhase = "dragging" | "releasing" | "hovering" | "ending" | "concluded";
-interface Stroke {
-  id: number; transaction: Transaction; queued?: EditorRay; phase: StrokePhase;
-  /** A pump is running; the next one waits for it rather than interleaving. */
-  busy: boolean;
-  releaseOnly: boolean; cancelled: boolean; frame?: number; element: HTMLCanvasElement;
-}
 /**
  * What a press means while a tool is armed: the tool took it, nothing here
  * wants it, or it is the camera's — Shift, the middle button, a held Space, or
@@ -93,9 +71,9 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   const viewportMode = session.ui((state) => state.viewportMode);
   const gpuState = session.diagnostics((state) => state.gpuStatus.state);
   /** The stroke that has the pointer. One being accepted has let go of it and is not here. */
-  const active = useRef<Stroke | undefined>(undefined);
+  const active = useRef<VoxelStroke | undefined>(undefined);
   /** The stroke whose outline is up: it stays over an edit being accepted until that is answered or a newer stroke draws. */
-  const outlined = useRef<Stroke | undefined>(undefined);
+  const outlined = useRef<VoxelStroke | undefined>(undefined);
   const mounted = useRef(true);
   /** The last bare-pointer sample, kept so the ghost can be redrawn when a key changes what it means. */
   const hover = useRef<{ ray: EditorRay; alt: boolean } | undefined>(undefined);
@@ -106,7 +84,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   /** Whether a press where the pointer rests would stroke, or orbit. */
   const [aim, setAim] = useState<"tool" | "camera" | undefined>(undefined);
   const showPreview = (update: ToolUpdate | null) => { if (mounted.current) preview(update); };
-  const outline = (stroke: Stroke, update: ToolUpdate | null) => { outlined.current = stroke; showPreview(update); };
+  const outline = (stroke: VoxelStroke, update: ToolUpdate | null) => { outlined.current = stroke; showPreview(update); };
   /** The bare pointer's ghost, which never draws over the outline of an edit still being accepted. */
   const ghost = (update: ToolUpdate | null) => { if (!outlined.current) showPreview(update); };
   const armedPlugin = () => {
@@ -138,68 +116,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     } catch { ghost(null); setAim("tool"); }
   };
   const notice = (error: unknown) => session.runtime.getState().setNotice(error instanceof Error ? error.message : String(error), "warn");
-  /**
-   * The stroke is over for the pointer: free it for the next press now, and let
-   * the edit be accepted behind it. Its outline stays up until that is answered.
-   */
-  const conclude = async (stroke: Stroke) => {
-    stroke.phase = "concluded";
-    if (stroke.frame !== undefined) { cancelAnimationFrame(stroke.frame); stroke.frame = undefined; }
-    if (active.current === stroke) active.current = undefined;
-    if (stroke.element.hasPointerCapture(stroke.id)) stroke.element.releasePointerCapture(stroke.id);
-    // The sample the ghost was last drawn from predates the stroke.
-    hover.current = undefined;
-    try { await stroke.transaction.finish(stroke.cancelled); }
-    catch (error) { notice(error); }
-    if (outlined.current !== stroke) return;
-    outlined.current = undefined;
-    showPreview(null);
-    if (hover.current) rehover();
-  };
-  /**
-   * Run what the stroke has waiting: its latest sample, then the release, then
-   * the end. Samples resolve within the turn, so a stroke that ends has let go
-   * of the pointer before the next press can arrive.
-   */
-  const pump = async (stroke: Stroke) => {
-    if (stroke.busy || stroke.phase === "concluded") return;
-    stroke.busy = true;
-    try {
-      const sample = stroke.queued;
-      stroke.queued = undefined;
-      if (sample && !stroke.cancelled) {
-        const result = await stroke.transaction.update(sample);
-        if (!stroke.cancelled && (result || stroke.releaseOnly)) outline(stroke, result ?? null);
-      }
-      if (stroke.phase === "releasing" && !stroke.queued) {
-        const continues = await stroke.transaction.advance();
-        // Escape or a lost runtime may have ended it while the gesture answered.
-        if (stroke.phase === "releasing") stroke.phase = continues ? "hovering" : "ending";
-      }
-    } catch (error) {
-      if (stroke.releaseOnly) outline(stroke, null);
-      // Author tools retain their last proposal. Live validation failures
-      // roll the stroke back; a failed rollback keeps its accepted prefix undoable.
-      notice(error);
-    }
-    stroke.busy = false;
-    if (stroke.phase === "ending" && !stroke.queued) await conclude(stroke);
-    else if (stroke.phase === "ending" || stroke.phase === "releasing") await pump(stroke);
-    else if (stroke.queued) schedule(stroke);
-  };
-  /** Samples of a drag are taken once a frame, the latest winning; a press, a release and an end are not made to wait for one. */
-  const schedule = (stroke: Stroke) => {
-    if (stroke.frame !== undefined || stroke.phase === "concluded") return;
-    stroke.frame = requestAnimationFrame(() => { stroke.frame = undefined; void pump(stroke); });
-  };
-  const endStroke = (cancelled: boolean) => {
-    const stroke = active.current;
-    if (!stroke) return;
-    stroke.cancelled ||= cancelled;
-    stroke.phase = "ending";
-    if (cancelled) stroke.queued = undefined;
-    void pump(stroke);
-  };
+  /** End the stroke in flight; see `VoxelStroke.end`. */
+  const endStroke = (cancelled: boolean) => active.current?.end(cancelled);
   /** Step the armed tool's first number, or its second, by whole steps within the control's own range. */
   const resize = (secondary: boolean, steps: number): boolean => {
     const plugin = armedPlugin();
@@ -257,7 +175,6 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   const toolKeyUpFromEffect = useEffectEvent(toolKeyUp);
   const rehoverFromEffect = useEffectEvent(rehover);
   const endFromEffect = useEffectEvent(endStroke);
-  const noticeFromEffect = useEffectEvent(notice);
   useEffect(() => {
     // Switching tools or leaving edit mode commits the accepted stroke once.
     if (active.current) endFromEffect(active.current.releaseOnly); else rehoverFromEffect();
@@ -272,8 +189,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     if (["unavailable", "lost", "blocked", "stopping"].includes(gpuState)) {
       // A failed runtime cannot validate more samples. Preserve the last
       // accepted geometry and finish its history so it can still be saved.
-      if (active.current) active.current.queued = undefined;
-      endFromEffect(active.current?.releaseOnly ?? false);
+      active.current?.end(active.current.releaseOnly, true);
     }
   }, [gpuState]);
   useEffect(() => {
@@ -294,7 +210,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     const lost = (event: globalThis.PointerEvent) => {
       const stroke = active.current;
       // The browser drops capture at every release; only losing it mid-drag abandons the stroke.
-      if (stroke && stroke.id === event.pointerId && stroke.phase === "dragging") endFromEffect(true);
+      if (stroke && stroke.pointerId === event.pointerId && stroke.phase === "dragging") endFromEffect(true);
     };
     const blur = () => {
       spaceHeld.current = false; setNavigating(false);
@@ -312,15 +228,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
       window.removeEventListener("lostpointercapture", lost, true);
       window.removeEventListener("blur", blur);
       const stroke = active.current;
-      if (stroke) {
-        if (stroke.frame !== undefined) cancelAnimationFrame(stroke.frame);
-        stroke.queued = undefined;
-        stroke.phase = "concluded";
-        active.current = undefined;
-        // Transaction serialization waits for any outstanding preflight, even
-        // after React has removed the canvas and animation frames stop firing.
-        void stroke.transaction.finish(stroke.cancelled || stroke.releaseOnly).catch(noticeFromEffect);
-      }
+      active.current = undefined;
+      stroke?.abandon();
     };
   }, [session]);
   return {
@@ -334,7 +243,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
       const hovering = active.current;
       if (hovering?.phase === "hovering") {
         // The press that ends a bare-pointer phase: primary commits what is shown, anything else abandons it.
-        if (event.button === 0) { hovering.queued = ray(event); hovering.phase = "ending"; void pump(hovering); }
+        if (event.button === 0) hovering.commit(ray(event));
         else { secondaryCancelAt.current = event.timeStamp; endStroke(true); }
         return true;
       }
@@ -393,11 +302,29 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
         if (transaction) {
           try { event.currentTarget.setPointerCapture(event.pointerId); }
           catch (error) { void transaction.finish(true).catch(notice); throw error; }
-          const stroke: Stroke = { id: event.pointerId, transaction, queued: initial, phase: "dragging", busy: false, releaseOnly: plugin.execution === "release", cancelled: false, element: event.currentTarget };
+          const element = event.currentTarget;
+          const stroke: VoxelStroke = new VoxelStroke(event.pointerId, transaction, plugin.execution === "release", {
+            outline: update => outline(stroke, update),
+            notice,
+            frame: run => { const id = requestAnimationFrame(run); return () => cancelAnimationFrame(id); },
+            released: () => {
+              if (active.current === stroke) active.current = undefined;
+              if (element.hasPointerCapture(stroke.pointerId)) element.releasePointerCapture(stroke.pointerId);
+              // The sample the ghost was last drawn from predates the stroke.
+              hover.current = undefined;
+            },
+            // Its outline stays up until the edit is answered, unless a newer stroke has drawn since.
+            settled: () => {
+              if (outlined.current !== stroke) return;
+              outlined.current = undefined;
+              showPreview(null);
+              if (hover.current) rehover();
+            },
+          });
           active.current = stroke;
           // The ghost that promised this stroke is its outline from here on.
           outlined.current = stroke;
-          void pump(stroke);
+          stroke.begin(initial);
         }
       } catch (error) { notice(error); }
       return true;
@@ -405,7 +332,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     move(event: PointerEvent<HTMLCanvasElement>): boolean {
       const stroke = active.current;
       if (stroke) {
-        if (stroke.phase === "hovering" || (stroke.id === event.pointerId && stroke.phase !== "ending")) { stroke.queued = ray(event); schedule(stroke); }
+        stroke.sample(ray(event), event.pointerId);
         return true;
       }
       if (!armedPlugin()) { hover.current = undefined; return false; }
@@ -421,13 +348,9 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     },
     up(event: PointerEvent<HTMLCanvasElement>): boolean {
       const stroke = active.current;
-      if (!stroke || stroke.id !== event.pointerId) return false;
-      if (stroke.phase !== "dragging") return true;
-      stroke.cancelled ||= event.type === "pointercancel";
-      stroke.queued = stroke.cancelled ? undefined : ray(event);
-      // A cancelled pointer ends the stroke; a released one first asks the gesture whether it continues.
-      stroke.phase = stroke.cancelled ? "ending" : "releasing";
-      void pump(stroke); return true;
+      if (!stroke || stroke.pointerId !== event.pointerId) return false;
+      if (stroke.phase === "dragging") stroke.release(ray(event), event.type === "pointercancel");
+      return true;
     },
     /** Alt + wheel sizes the armed tool where the pointer is; Shift sizes its second number. The bare wheel stays the camera's. */
     wheel(event: WheelEvent<HTMLCanvasElement>): boolean {

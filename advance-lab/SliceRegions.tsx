@@ -7,7 +7,7 @@ import {
 } from "../lib/features/refinement-region/policy";
 import styles from "./AdvanceLab.module.css";
 import {
-  labRegionCanvasBox, labRegionFromCanvasBox, labRegionSpace, type LabRegionDocument,
+  labRegionCanvasBox, labRegionDragAlive, labRegionFromCanvasBox, labRegionSpace, type LabRegionDocument,
 } from "./lab-region-space";
 
 /**
@@ -137,12 +137,7 @@ export function SliceRegions(props: SliceRegionsProps) {
   const [held, setDrag] = useState<RegionDrag | null>(null);
   const { doc, scale } = props;
   const records = labRegionSpace.list(doc);
-  // A drag lives only as long as the handle it pressed: a box that stops being
-  // editable, selected or there at all takes its handles with it, and an
-  // unmounted handle never hears its pointer come up. Dropped here rather than
-  // left to revive the next time that box is editable again.
-  const drag = held && props.editing && props.selectedId === held.id
-    && records.some(record => record.id === held.id) ? held : null;
+  const drag = labRegionDragAlive(held, { editing: props.editing, selectedId: props.selectedId, records });
   if (held && !drag) setDrag(null);
   // The canvas frame has the same extents as the solver's — the flip is a
   // reflection — so one lattice serves both and the resize never needs to know

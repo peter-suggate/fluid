@@ -4,11 +4,12 @@ import { rigidControlOwnerId } from "../lib/core/rigid-motor";
 
 import { useEffect, useRef, useState , useMemo} from "react";
 import { useVoxelToolGesture } from "./useVoxelToolGesture";
+import { pickLanding } from "./viewport-pick";
 import type { PixelTraceConfig, PixelTraceStatus } from "../lib/core/webgpu-renderer";
 import type { FluidLabRendererHandle } from "../lib/core/webgpu-render-worker-client";
 import {
-  resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
-  type SvoPixelTrace, type SvoPixelTracePinRequest,
+  resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, settleSvoPixelTracePin, svoPixelTracePinClick,
+  svoPixelTracePinnedAim, type SvoPixelTrace, type SvoPixelTracePin,
 } from "../lib/svo/features/diagnostics/svo-pixel-trace";
 import { PixelTraceHud } from "./PixelTraceHud";
 import { getMethod } from "@/lib/core/method-registry";
@@ -72,18 +73,6 @@ import {
   type SolidVoxelClearRegion,
 } from "../lib/core/editor-solid-voxel";
 import { voxelDragAnchor, voxelRegionHighlight, voxelRegionSweepHighlight } from "../lib/core/editor-voxel-region";
-import {
-  advanceCarryPlane,
-  carryOrientation,
-  carryPlane,
-  carryPlaneHit,
-  carryPositionFor,
-  carryVelocity,
-  clampCarryPosition,
-  clampCarryTilt,
-  CARRY_TILT_STEP_RAD,
-  type CarryPlane,
-} from "../lib/core/editor-carry";
 import {
   refinementRegionBox,
   refinementRegionCapacityRemaining,
@@ -307,11 +296,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * belonged to. The store's `pixelTracePinned` is the switch the HUD reads; this
    * is the aim behind it, dropped as soon as the switch goes off.
    */
-  const tracePinRef = useRef<
-    | { phase: "requested"; request: SvoPixelTracePinRequest }
-    | { phase: "pinned"; aim: { normalizedX: number; normalizedY: number; cameraKey: string } }
-    | null
-  >(null);
+  const tracePinRef = useRef<SvoPixelTracePin>(null);
   /** Press origin of a gesture that could still turn out to be a pinning click. */
   const tracePinGestureRef = useRef<{ id: number; downX: number; downY: number } | null>(null);
   /** Pin transitions restart the reveal sweep; live hover always shows it whole. */
@@ -335,11 +320,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
 
   const pixelTraceDrawConfig = (
     ui: Parameters<GPUViewportRenderBinding["pixelTraceDrawConfig"]>[0],
-    renderer: FluidLabRendererHandle,
   ): PixelTraceConfig | undefined => {
     const pin = tracePinRef.current;
     if (!ui.pixelTraceEnabled) { tracePinRef.current = null; return undefined; }
-    const pinnedAt = ui.pixelTracePinned && pin?.phase === "pinned" ? pin.aim : null;
+    const pinnedAt = svoPixelTracePinnedAim(pin, ui.pixelTracePinned);
     const requested = pin?.phase === "requested" ? pin.request : null;
     // A pinned ray traces its own pixel, not the pointer's, so a refresh answers
     // the ray that is frozen rather than wherever the mouse happens to be. A
@@ -424,32 +408,22 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       }
     }
     const pin = tracePinRef.current;
-    if (pin?.phase === "requested") {
-      const pinRequest = pin.request;
-      // The probe has been tracing the clicked pixel since the click; freeze it
-      // only once that pixel is what came back.
-      const resolution = resolveSvoPixelTracePin(pinRequest, {
-        answered: renderer.pixelTraceAnswersRequest,
-        cameraKey: pixelTraceCameraKey(session.ui.getState().camera),
-        probeCanAnswer: status !== "unsupported" && status !== "path-inactive",
-        revision,
-      });
-      if (resolution === "pin") {
-        // Keep the aim so the frozen ray retains its recorded view.
-        const { normalizedX, normalizedY, cameraKey } = pinRequest;
-        tracePinRef.current = { phase: "pinned", aim: { normalizedX, normalizedY, cameraKey } };
-        setPixelTracePinned(true);
-      } else if (resolution !== "wait") {
-        tracePinRef.current = null;
-      }
-    }
-    const pinnedNow = session.ui.getState().pixelTracePinned;
+    // The probe has been tracing the clicked pixel since the click; freeze it
+    // only once that pixel is what came back.
+    const resolution = pin?.phase === "requested" ? resolveSvoPixelTracePin(pin.request, {
+      answered: renderer.pixelTraceAnswersRequest,
+      cameraKey: pixelTraceCameraKey(session.ui.getState().camera),
+      probeCanAnswer: status !== "unsupported" && status !== "path-inactive",
+      revision,
+    }) : undefined;
     // A pin with no aim on record can never be refreshed, so it must never be
     // possible: an aim invented from the current pointer and camera would let a
     // later refresh answer a ray the user never pinned. Controls outside the
     // viewport therefore ask, and the ask is honoured through the same handshake
     // a click uses.
-    if (!pinnedNow && tracePinRef.current?.phase === "pinned") tracePinRef.current = null;
+    tracePinRef.current = settleSvoPixelTracePin(pin, { resolution, pinned: session.ui.getState().pixelTracePinned });
+    if (resolution === "pin") setPixelTracePinned(true);
+    const pinnedNow = session.ui.getState().pixelTracePinned;
     // Staleness worth reporting is the kind no refresh can fix; everything else
     // resolves itself on the next frame.
     const { stale } = resolveSvoPixelTracePinnedFrame({
@@ -514,29 +488,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       }).request,
     };
   };
-  /**
-   * The object in the user's hand.
-   *
-   * A ref and not state: it changes on every pointer move, and a React render
-   * per move would cost the frame the gesture is being judged by. What the rest
-   * of the shell needs to know — that something is being carried, and how far it
-   * is tilted — is in the UI store, written only when it changes.
-   *
-   * `plane` is the vertical sheet the body slides on, `anchor` is the pointer/
-   * body pair the current gear was engaged at, and `origin_m` is where the body
-   * was when the carry began, which is where Escape puts it back.
-   */
-  const carryRef = useRef<{
-    bodyId: string;
-    plane: CarryPlane;
-    anchor: { pointer_m: Vec3; body_m: Vec3 };
-    origin_m: Vec3;
-    position_m: Vec3;
-    lastPointer_m: Vec3;
-    lastTime_ms: number;
-    tilt_rad: number;
-    fine: boolean;
-  } | null>(null);
 
   const pointerRef = useRef<
     // `x`/`y` track the last move; `downX`/`downY` stay at the press origin.
@@ -954,74 +905,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   };
 
   /**
-   * Drive the carried body to where the pointer is.
-   *
-   * The one place the carry arithmetic meets the solver. Everything about
-   * *where* it goes is in `editor-carry.ts`; what is here is the part that
-   * needs the frame: the ray, the clock, and the kinematic command.
-   *
-   * The velocity handed over is a finite difference rather than zero, because
-   * the water has to see the cup move. A dip that told the solver the cup was
-   * stationary at each new place would displace no water at all — the surface
-   * would open and close around it without a splash.
+   * The carry is the controller's (`beginCarry` and the rest); the viewport
+   * only hands it the pointer ray, the wheel and the keys. What is here is the
+   * part that needs the frame: the ray and the event clock.
    */
-  const updateCarry = (ray: { origin: Vec3; direction: Vec3 }, timeStamp: number) => {
-    const carry = carryRef.current;
-    if (!carry) return;
-    const description = session.scene.getState().scene.rigidBodies
-      .find((body) => body.id === carry.bodyId);
-    if (!description) { finishCarry(); return; }
-    const hit = carryPlaneHit(carry.plane, ray);
-    if (!hit) return;
-    const position = clampCarryPosition(session.scene.getState().scene, description,
-      carryPositionFor(carry.anchor, hit, carry.fine));
-    const velocity = carryVelocity(carry.position_m, position,
-      (timeStamp - carry.lastTime_ms) / 1000);
-    carryRef.current = { ...carry, position_m: position, lastPointer_m: hit, lastTime_ms: timeStamp };
-    simulation.dragBody(carry.bodyId, position, velocity, "move",
-      carryOrientation(session.ui.getState().camera, carry.tilt_rad), paneId);
-  };
-
-  /**
-   * Put it down, or put it back.
-   *
-   * `restore` is Escape: the body returns to where it was picked up, which is
-   * the only way out of a carry that has gone somewhere unintended. An ordinary
-   * click ends the carry where the body already is, and hands it to gravity by
-   * ending the kinematic constraint.
-   */
-  const finishCarry = (restore = false) => {
-    session.ui.getState().endCarry();
-    releaseCarry(restore);
-  };
-
-  /** End the kinematic hold, whatever the store says next. */
-  const releaseCarry = (restore = false) => {
-    const carry = carryRef.current;
-    carryRef.current = null;
-    if (!carry) return;
-    const at = restore ? carry.origin_m : carry.position_m;
-    simulation.dragBody(carry.bodyId, at, { x: 0, y: 0, z: 0 }, "end",
-      restore ? { w: 1, x: 0, y: 0, z: 0 } : carryOrientation(session.ui.getState().camera, carry.tilt_rad), paneId);
-  };
-
-  /** Re-anchor without moving anything — how a gear change avoids a jump. */
-  const reanchorCarry = (fine: boolean) => {
-    const carry = carryRef.current;
-    if (!carry || carry.fine === fine) return;
-    carryRef.current = { ...carry, fine, anchor: { pointer_m: carry.lastPointer_m, body_m: carry.position_m } };
-  };
-
-  const tiltCarry = (steps: number) => {
-    const carry = carryRef.current;
-    if (!carry) return;
-    const tilt_rad = clampCarryTilt(carry.tilt_rad + steps * CARRY_TILT_STEP_RAD);
-    if (tilt_rad === carry.tilt_rad) return;
-    carryRef.current = { ...carry, tilt_rad };
-    session.ui.getState().setCarryTilt(Math.round((tilt_rad * 180) / Math.PI));
-    simulation.dragBody(carry.bodyId, carry.position_m, { x: 0, y: 0, z: 0 }, "move",
-      carryOrientation(session.ui.getState().camera, tilt_rad), paneId);
-  };
+  const carrying = () => simulation.carrying(paneId);
 
   /**
    * Right-click: ask whatever is under the pointer what it offers.
@@ -1049,7 +937,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     event.preventDefault();
     // While carrying, the ring would be a second thing competing for the click
     // that puts the object down.
-    if (carryRef.current) return;
+    if (carrying()) return;
     // The same button abandons a sculpt stroke in flight, and that press was an
     // answer to the stroke rather than a question about what is under it.
     if (voxelGesture.swallowsContextMenu(event.timeStamp)) return;
@@ -1095,52 +983,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   // flips, not on the next pointer event.
   const viewportMode = session.ui((state) => state.viewportMode);
 
-  /**
-   * Pick the body up when the store says something is being carried, and put it
-   * down when it stops saying so.
-   *
-   * The store is the mode and the viewport is the mechanism, which is what lets
-   * a wedge in the radial menu — or anything else — start a carry without
-   * knowing that a carry is a plane, an anchor and a kinematic command. Starting
-   * here rather than at the wedge also means the carry begins from the pose the
-   * user can *see*: during a run the GPU owns rigid motion, and picking up from
-   * the authored position would teleport a settled cup back to where it was
-   * placed.
-   */
-  useEffect(() => {
-    if (carryRef.current?.bodyId === carrySession?.bodyId) return;
-    // Carrying something else — or nothing — puts the previous body down where
-    // it is first. Picking up a second one used to leave the first held by a
-    // kinematic command nobody would ever end.
-    releaseCarry();
-    if (!carrySession) return;
-    // The published pose first, the authored one as the fallback, and never a
-    // cancellation: a carry that ends itself is a body dropped without a click,
-    // and the roster is empty for a whole rebuild — long enough to lose one.
-    // The document always has the body, or the session could not name it.
-    const pose = drawnBodies(session.diagnostics).find((body) => body.description.id === carrySession.bodyId)
-      ?? session.scene.getState().scene.rigidBodies
-        .find((body) => body.id === carrySession.bodyId);
-    if (!pose) return;
-    const plane = carryPlane(session.ui.getState().camera, pose.position_m);
-    carryRef.current = {
-      bodyId: carrySession.bodyId,
-      plane,
-      anchor: { pointer_m: pose.position_m, body_m: pose.position_m },
-      origin_m: pose.position_m,
-      position_m: pose.position_m,
-      lastPointer_m: pose.position_m,
-      lastTime_ms: performance.now(),
-      tilt_rad: 0,
-      fine: false,
-    };
-    simulation.dragBody(carrySession.bodyId, pose.position_m, { x: 0, y: 0, z: 0 }, "start",
-      carryOrientation(session.ui.getState().camera, 0), paneId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [carrySession?.bodyId, session]);
-  // A viewport that goes away mid-carry lets go of the body with it.
+  // A viewport that goes away mid-carry (or mid-throw) lets go of the body with it.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => () => releaseCarry(), [session]);
+  useEffect(() => () => simulation.releaseBodyHold(paneId), [session]);
 
   /**
    * The keys a carry answers to.
@@ -1155,15 +1000,15 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (!carrySession) return;
     const keyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key === "Shift") { reanchorCarry(true); return; }
+      if (event.key === "Shift") { simulation.gearCarry(true, paneId); return; }
       const key = event.key.toLowerCase();
-      if (key === "escape") { event.preventDefault(); finishCarry(true); return; }
+      if (key === "escape") { event.preventDefault(); simulation.endCarry(true, paneId); return; }
       // Q tips the near rim down and E the far one, about the camera's right —
       // so "pour towards me" is the same key from every side of the tank.
-      if (key === "q") { event.preventDefault(); tiltCarry(-1); return; }
-      if (key === "e") { event.preventDefault(); tiltCarry(1); return; }
+      if (key === "q") { event.preventDefault(); simulation.tiltCarry(-1, paneId); return; }
+      if (key === "e") { event.preventDefault(); simulation.tiltCarry(1, paneId); return; }
     };
-    const keyUp = (event: KeyboardEvent) => { if (event.key === "Shift") reanchorCarry(false); };
+    const keyUp = (event: KeyboardEvent) => { if (event.key === "Shift") simulation.gearCarry(false, paneId); };
     window.addEventListener("keydown", keyDown);
     window.addEventListener("keyup", keyUp);
     return () => {
@@ -1748,7 +1593,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // means "put it down" and nothing else. A carry that could be ended only by
     // finding the right mode again would be a trap, and the mode underneath is
     // still there when the hand is empty.
-    if (carryRef.current && event.button === 0) { finishCarry(); return; }
+    if (carrying() && event.button === 0) { simulation.endCarry(false, paneId); return; }
     // The secondary button belongs to the ring and to nothing else. Without this
     // the same press also starts an orbit and clears the selection, so the menu
     // would open over a viewport that had just discarded the thing it is about.
@@ -1931,19 +1776,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
           normalizedY:(event.clientY-rect.top)/Math.max(rect.height,1),
         });
         const active=pointerRef.current;
-        if(active?.action!=="pick"||active.pick!==pick)return;
-        const body=picked?session.diagnostics.getState().bodies[picked.bodyIndex]:undefined;
-        if(body&&picked&&selectOnClick?.kind!=="inflow"){
-          // A pointer already released cannot be dragged, so a fast click on a
-          // body selects it without opening a throw that never ends.
-          if(active.released){pointerRef.current=null;session.ui.getState().selectBody(body.description.id);return;}
-          beginBodyDrag(pointerId,timeStamp,x,y,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;
-        }
-        // No body under the cursor: a released pointer was a click on whatever
-        // the analytic pick found there — an entity, or the background — and a
-        // held one becomes the orbit fallback that decides the same thing when
-        // it comes up.
-        if(active.released){pointerRef.current=null;session.ui.getState().select(selectOnClick);return;}
+        const body=picked&&selectOnClick?.kind!=="inflow"?session.diagnostics.getState().bodies[picked.bodyIndex]:undefined;
+        // See `pickLanding`: the answer is this press's or nobody's.
+        const landing=pickLanding(active,pick,body!==undefined);
+        if(active?.action!=="pick"||landing==="stale")return;
+        if(landing==="select-body"&&body){pointerRef.current=null;session.ui.getState().selectBody(body.description.id);return;}
+        if(landing==="throw"&&body&&picked){beginBodyDrag(pointerId,timeStamp,x,y,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;}
+        if(landing==="select"){pointerRef.current=null;session.ui.getState().select(selectOnClick);return;}
         pointerRef.current={...active,action:"orbit",selectOnClick};
         return;
       }
@@ -1979,7 +1818,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       setHoverTarget(target); publishHoverHighlight(target); setHandleHover(null);
       return;
     }
-    if (carryRef.current) { updateCarry(pointerRay(event), event.timeStamp); return; }
+    if (carrying()) { simulation.carryTo(pointerRay(event), event.timeStamp, paneId); return; }
     const active = pointerRef.current;
     // The pixel-trace probe follows the pointer whatever else the gesture is
     // doing: a ref, so tracking it costs no React render per move.
@@ -2142,7 +1981,6 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (active.action === "body") {
       if (!active.dragging) {
         if (pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) return;
-        session.ui.getState().endCarry();
         simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "start", active.orientation, paneId);
       }
       const ray = pointerRay(event), position = add(planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal), active.grabOffset);
@@ -2339,12 +2177,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         // The wheel is the carry's one extra degree of freedom: a single pointer
         // cannot say "further away", and reaching across the tank is most of
         // what carrying something is for.
-        const carry = carryRef.current;
-        if (carry) {
+        if (carrying()) {
           event.preventDefault();
-          const plane = advanceCarryPlane(carry.plane, event.deltaY);
-          carryRef.current = { ...carry, plane };
-          updateCarry(pointerRay(event), event.timeStamp);
+          simulation.walkCarry(event.deltaY, pointerRay(event), event.timeStamp, paneId);
           return;
         }
         if (voxelGesture.wheel(event)) { event.preventDefault(); return; }

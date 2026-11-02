@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentType, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { Button } from "../../../components/ui";
 import { findSceneDefinition } from "../../core/scenes";
@@ -14,6 +14,7 @@ import {
 import { useInteractionPane } from "../interactive/ui";
 import type { InteractionPane } from "../interactive/pane";
 import type { WidgetContext } from "./context";
+import { controlHold } from "./hold";
 import { widgetLayoutStore } from "./layout-store";
 
 /**
@@ -65,6 +66,7 @@ export function ControlWidgetLayer({ paneId, providers, views }: {
   const layoutStore = widgetLayoutStore(paneId);
   const layouts = useStore(layoutStore, (state) => state.layouts);
   const layer = useRef<HTMLDivElement>(null);
+  /** The open widget menu, placed where it was asked for in the layer's own frame. */
   const [menu, setMenu] = useState<{ widgetId: string; x: number; y: number }>();
 
   const context = useMemo<WidgetContext>(() => ({ paneId, scene, interaction }), [paneId, scene, interaction]);
@@ -101,12 +103,16 @@ export function ControlWidgetLayer({ paneId, providers, views }: {
         const View = (widget.view && views[widget.view]) || ChannelsView;
         return <WidgetFrame key={widget.id} widget={widget} onDrop={drop}
           onReset={() => layoutStore.getState().reset(scene.sceneId, widget.id)}
-          onMenu={(x, y) => setMenu({ widgetId: widget.id, x, y })}>
+          onMenu={(x, y) => {
+            // Measured at the click, in the layer's own frame, rather than read off the DOM while rendering.
+            const box = layer.current?.getBoundingClientRect();
+            setMenu({ widgetId: widget.id, x: x - (box?.left ?? 0), y: y - (box?.top ?? 0) });
+          }}>
           <View widget={widget} onInput={input(widget)} />
         </WidgetFrame>;
       })}
     </div>)}
-    {menu && <div className="control-widget-menu" role="menu" style={{ left: menu.x - (layer.current?.getBoundingClientRect().left ?? 0), top: menu.y - (layer.current?.getBoundingClientRect().top ?? 0) }}>
+    {menu && <div className="control-widget-menu" role="menu" style={{ left: menu.x, top: menu.y }}>
       <button type="button" role="menuitem" onClick={() => { layoutStore.getState().reset(scene.sceneId, menu.widgetId); setMenu(undefined); }}>Reset this widget</button>
       <button type="button" role="menuitem" onClick={() => { layoutStore.getState().reset(scene.sceneId); setMenu(undefined); }}>Reset widget layout</button>
     </div>}
@@ -210,31 +216,14 @@ function Channel({ channel, label, onInput }: { readonly channel: WidgetChannel;
     testId={`control-widget-action-${channel.id}`} onClick={() => onInput(true)}>{channel.label}</Button>;
 }
 
-/**
- * A held control's one release: the pointer coming up, a cancel, the window
- * losing focus or the control unmounting mid-press, whichever comes first. The
- * rest is sent once per press however many of those arrive.
- */
+/** A held control's one release, unmounting included. See `controlHold`. */
 function useHold(release: () => void): { readonly grab: () => void; readonly letGo: () => void } {
   const latest = useRef(release);
-  latest.current = release;
-  const [hold] = useState(() => {
-    let holding = false;
-    const letGo = () => {
-      if (!holding) return;
-      holding = false;
-      window.removeEventListener("blur", letGo);
-      latest.current();
-    };
-    const grab = () => {
-      if (holding) return;
-      holding = true;
-      window.addEventListener("blur", letGo);
-    };
-    return { grab, letGo };
-  });
+  // After the commit, so a release runs the latest render's: no pointer event arrives mid-render.
+  useLayoutEffect(() => { latest.current = release; });
+  const [hold] = useState(() => controlHold(window));
   useEffect(() => hold.letGo, [hold]);
-  return hold;
+  return { grab: () => hold.grab(() => latest.current()), letGo: hold.letGo };
 }
 
 const LEVER_TRAVEL_PX = 96;

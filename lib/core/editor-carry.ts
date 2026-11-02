@@ -20,9 +20,10 @@ import { boundingRadius } from "./rigid-body";
  * along the view, which is the one degree of freedom a single pointer cannot
  * carry, and Q and E tilt about the camera's right axis, which is what pours.
  *
- * Everything here is pure. The mode itself lives in the UI store and the
- * pointer wiring in the viewport; this file is the arithmetic both agree on,
- * and is the reason the behaviour can be tested without a canvas.
+ * Everything here is pure. The mode itself is the controller's (a carry is one
+ * of the holds in `simulation/body-hold.ts`) and the viewport only forwards the
+ * pointer to it; this file is the arithmetic the hold is made of, and is the
+ * reason the behaviour can be tested without a canvas.
  */
 
 /** Held-shift multiplier: enough to be a different gear, not so little it feels stuck. */

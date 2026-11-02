@@ -52,3 +52,15 @@ export class RunScope {
 
   get disposed(): boolean { return this.closed; }
 }
+
+/**
+ * What a run created — a controller, a device — or nothing, when the run ended
+ * while it was being created. A superseded run's creation is destroyed here
+ * rather than adopted by a run that never asked for it.
+ */
+export async function ownedBy<T>(run: Run, created: Promise<T>, destroy: (value: T) => unknown): Promise<T | undefined> {
+  const value = await created;
+  if (run.current()) return value;
+  await destroy(value);
+  return undefined;
+}

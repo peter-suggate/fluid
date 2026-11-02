@@ -113,6 +113,23 @@ export interface LabState {
 
 export type LabStore = UseBoundStore<StoreApi<LabState>>;
 
+/** A run as the address names one: the scene, under a transport. */
+export interface LabRun {
+  readonly sceneId: string;
+  readonly transport: AdvanceTransportExperiment;
+}
+
+/**
+ * The run the address names when it is not the one loaded — a back/forward, or
+ * a link pasted over this one. Nothing while the boot is still loading the
+ * first run: the boot reads the address when its controller arrives, so a run
+ * named during the boot is the one it loads rather than a second load racing it.
+ */
+export function labRunToReload(loaded: LabRun | null, address: LabRun): LabRun | undefined {
+  if (!loaded) return undefined;
+  return loaded.sceneId !== address.sceneId || loaded.transport !== address.transport ? address : undefined;
+}
+
 export function createLabStore(): LabStore {
   return create<LabState>((set) => ({
     sceneId: DEFAULT_LAB_SCENE_ID,

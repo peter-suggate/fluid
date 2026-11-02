@@ -54,31 +54,18 @@ import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { FineSurfaceState, FluidParticleDisplay, FluidSurfaceRenderMode, SurfaceDisplayState } from "../../features/surface-display/definition";
 
 /**
- * The object currently in the user's hand.
- *
- * A mode, not a gesture: it outlives the press that started it and ends on the
- * next click. Only what something outside the viewport has to read lives here —
- * which body, what to call it, and how far it is tilted, for the chip that says
- * so. The carried *position* stays in the viewport, because it changes with
- * every pointer move and a store write per move would re-render the shell at
- * pointer rate to say nothing new.
+ * The object currently in the user's hand, as the simulation controller
+ * publishes it. The controller owns the carry (see `BodyHold`); this is only
+ * what something outside the viewport has to read — which body, what to call
+ * it, and how far it is tilted, for the chip that says so — written when one of
+ * those changes, never at pointer rate.
  */
 export interface CarrySession {
   readonly bodyId: string;
-  /**
-   * What the chip calls it, when whoever started the carry knew. A carry that
-   * begins from a selection does not: the store that holds the selection has no
-   * business reading the scene document to name a body, so the chip resolves the
-   * name itself and this stays absent.
-   */
+  /** What the chip calls it, when whoever started the carry knew; otherwise the chip resolves the name. */
   readonly label?: string;
-  /** Degrees, for display; the radians the solver sees are the viewport's. */
+  /** Degrees, for display; the radians the solver sees are the controller's. */
   readonly tiltDegrees: number;
-}
-
-/** Selection can retain an explicit carry, but never starts one. */
-function carryForSelection(current: CarrySession | undefined, bodyId: string | undefined): CarrySession | undefined {
-  return current?.bodyId === bodyId ? current : undefined;
 }
 
 /**
@@ -200,7 +187,7 @@ interface UIStore extends FineSurfaceState, LensBloomState {
    */
   voxelClipboard?: VoxelClipboard;
   setVoxelClipboard: (clipboard: VoxelClipboard | undefined) => void;
-  /** The body bound to the cursor, or undefined when both hands are free. */
+  /** The body bound to the cursor, or undefined when both hands are free. Controller-published. */
   carry?: CarrySession;
   /** The contextual ring, or undefined when it is closed. */
   radialMenu?: RadialMenuState;
@@ -310,9 +297,6 @@ interface UIStore extends FineSurfaceState, LensBloomState {
   closeRadialMenu: () => void;
   setSelectionControlsOpen: (open: boolean) => void;
   setSceneSelectorOpen: (open: boolean) => void;
-  beginCarry: (bodyId: string, label: string) => void;
-  setCarryTilt: (tiltDegrees: number) => void;
-  endCarry: () => void;
   setPlacementShape: (shape: RigidShape) => void;
   setWaterShape: (toolId: string) => void;
   setPlacementDimensions: (shape: RigidShape, dimensions_m: PlacementDimensions[RigidShape]) => void;
@@ -476,14 +460,12 @@ export const createUIStore = () => create<UIStore>((set) => ({
     // what ends the sweep, so the box goes with it rather than being left
     // outlined over a scene that has moved on.
     voxelRegion: selection?.kind === "voxel-region" ? state.voxelRegion : undefined,
-    carry: carryForSelection(state.carry, selectedBodyIdOf(selection)),
     selectionControlsOpen: state.selection?.id === selection?.id && state.selection?.kind === selection?.kind
       ? state.selectionControlsOpen : false,
   })),
   selectBody: (selectedBodyId) => set((state) => ({
     selectedBodyId,
     selection: bodySelection(selectedBodyId),
-    carry: carryForSelection(state.carry, selectedBodyId),
     selectionControlsOpen: state.selectedBodyId === selectedBodyId ? state.selectionControlsOpen : false,
   })),
   openRadialMenu: (radialMenu) => set({ radialMenu }),
@@ -493,14 +475,6 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // right-click, and the ring's own wedge is one of the ways here.
   setSceneSelectorOpen: (sceneSelectorOpen) => set(
     sceneSelectorOpen ? { sceneSelectorOpen, radialMenu: undefined } : { sceneSelectorOpen }),
-  // Carrying arms nothing and disarms nothing: the tool decides what a click on
-  // the scene means, and while something is in hand the click means "put it
-  // down" whatever is armed underneath. Restoring the tool on release is what
-  // makes the carry a parenthesis rather than a mode change.
-  beginCarry: (bodyId, label) => set({ carry: { bodyId, label, tiltDegrees: 0 } }),
-  setCarryTilt: (tiltDegrees) => set((state) => state.carry
-    ? { carry: { ...state.carry, tiltDegrees } } : {}),
-  endCarry: () => set({ carry: undefined }),
   setPlacementShape: (placementShape) => set({ placementShape }),
   setWaterShape: (waterShape) => set({ waterShape }),
   // Per shape, so switching to a box and back finds the sphere the reader sized

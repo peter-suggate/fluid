@@ -37,7 +37,9 @@ import { gpuStatusAcceptsRebuild } from "../gpu-status";
 import { takesLiveSolidEdits, type MethodParamValue } from "../method-contract";
 import { sameSolidPatchList } from "../solid-patch-list";
 import { solidEditQueue } from "../voxel-editor/solid-edit-queue";
-import { emptyPerformanceReport } from "../stores/diagnostics-store";
+import { drawnBodies, emptyPerformanceReport } from "../stores/diagnostics-store";
+import { carryOrientation } from "../editor-carry";
+import { carryAlong, carryGear, carryHold, carryTilt, carryTiltDegrees, carryWalk, type BodyHold, type CarryHold } from "./body-hold";
 import {
   gpuPhysicsPerformanceActivityFrameId,
   synthesizePerformanceActivityFrame,
@@ -165,8 +167,10 @@ interface PaneRuntime {
   interactionWatch?: () => void;
   /** Rigid states the renderer advances; rebuilt by `reset`, adopted by edits. */
   bodies: RigidBodyState[];
-  /** The carry / gizmo constraint, re-applied every step it survives. */
-  kinematicDrag: { bodyId: string; position: RigidBodyState["position_m"]; velocity: RigidBodyState["linearVelocity_m_s"] } | null;
+  /** The pane's one kinematic hold (carry, throw or gizmo), re-applied every step it survives; see `BodyHold`. */
+  hold?: BodyHold;
+  /** Ends a carry when the selection leaves the carried body; set only while carrying. */
+  holdWatch?: () => void;
   /** The open direct-manipulation gesture; see `EditGesture`. */
   gesture?: OpenEditGesture;
   acceptLiveSolidEdit?: (next: SceneDescription, base: SceneDescription) => Promise<void>;
@@ -188,7 +192,6 @@ interface PaneRuntime {
 function createPaneRuntime(): PaneRuntime {
   return {
     bodies: [],
-    kinematicDrag: null,
     lastPerformanceReportAt_ms: 0,
     lastPerformanceReportContext: "",
   };
@@ -451,7 +454,6 @@ export class SimulationController {
       simulationTime?: number;
       gpuCompletedTime?: number;
       bodies?: RigidBodyState[];
-      kinematicDrag?: PaneRuntime["kinematicDrag"];
       lastPerformanceReportAt_ms?: number;
       lastPerformanceReportContext?: string;
     };
@@ -461,16 +463,14 @@ export class SimulationController {
       this.paneSessions = new Map<PaneId, PaneSession>([[PRIMARY_PANE_ID, defaultSession]]);
     }
     // Same for the document runtime, but this one carries live state a refresh
-    // must not drop: the rigid roster the GPU is mid-advance on, and the carry
-    // whose hand is still on the cursor. A controller from before the runtime
-    // was per pane held them as three fields; migrate the single slot into
+    // must not drop: the rigid roster the GPU is mid-advance on. A controller
+    // from before the runtime was per pane held it as fields; migrate it into
     // pane A's rather than starting the roster empty, which would strand the
     // draw loop on a scene with no bodies until the next reset.
     if (!(retained.paneRuntimes instanceof Map) || retained.paneRuntimes.size === 0) {
       this.paneRuntimes = new Map<PaneId, PaneRuntime>([[PRIMARY_PANE_ID, {
         ...createPaneRuntime(),
         bodies: Array.isArray(retained.bodies) ? retained.bodies : [],
-        kinematicDrag: retained.kinematicDrag ?? null,
         lastPerformanceReportAt_ms: retained.lastPerformanceReportAt_ms ?? 0,
         lastPerformanceReportContext: retained.lastPerformanceReportContext ?? "",
       }]]);
@@ -731,7 +731,7 @@ export class SimulationController {
     // Every pane's carry, not pane A's: the step the barrier just opened is a
     // step for both documents, and a body held in B has to be held through it.
     if (this.clock.advance(elapsed, dt, [...this.paneSessions.values()].some(p => Boolean(p.scene.getState().scene.interaction?.entities.length))) > 0) {
-      for (const paneId of this.paneRuntimes.keys()) this.applyDragConstraint(paneId);
+      for (const paneId of this.paneRuntimes.keys()) this.applyBodyHold(paneId);
     }
     this.advanceInteractions(dt);
     if (this.rateWallClock === 0) { this.rateWallClock = now; this.rateSimTime = this.clock.completedTime(); }
@@ -745,12 +745,12 @@ export class SimulationController {
     }
   }
 
-  private applyDragConstraint(paneId: PaneId = PRIMARY_PANE_ID) {
+  private applyBodyHold(paneId: PaneId = PRIMARY_PANE_ID) {
     const runtime = this.runtime(paneId);
-    const drag = runtime.kinematicDrag;
-    if (!drag) return;
-    const body = runtime.bodies.find((candidate) => candidate.description.id === drag.bodyId);
-    if (body) { body.held = true; body.position_m = { ...drag.position }; body.linearVelocity_m_s = { ...drag.velocity }; body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 }; }
+    const hold = runtime.hold;
+    if (!hold) return;
+    const body = runtime.bodies.find((candidate) => candidate.description.id === hold.bodyId);
+    if (body) { body.held = true; body.position_m = { ...hold.position_m }; body.linearVelocity_m_s = { ...hold.velocity_m_s }; body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 }; }
   }
 
   /**
@@ -890,17 +890,17 @@ export class SimulationController {
     // survives into the new roster, and re-applied before the publish below so
     // the body stands where the hand is rather than snapping back to the pose
     // it was authored at.
-    const heldId = paneRuntime.kinematicDrag?.bodyId;
+    const heldId = paneRuntime.hold?.bodyId;
     if (heldId !== undefined && !paneRuntime.bodies.some((body) => body.description.id === heldId)) {
-      paneRuntime.kinematicDrag = null;
+      this.dropHold(paneId);
     }
-    // The constraint is the only thing that may hold a body, so anything still
+    // The hold is the only thing that may hold a body, so anything still
     // flagged without one is a release the roster outlived: a gesture whose
     // body was replaced by an edit, or a drag ended while it was off-roster.
     for (const body of paneRuntime.bodies) {
-      if (body.held && body.description.id !== paneRuntime.kinematicDrag?.bodyId) body.held = false;
+      if (body.held && body.description.id !== paneRuntime.hold?.bodyId) body.held = false;
     }
-    this.applyDragConstraint(paneId);
+    this.applyBodyHold(paneId);
     if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
     const diagnosticsStore = this.session(paneId).diagnostics.getState();
     if (runtimePlan.fluidSolver
@@ -1424,10 +1424,10 @@ export class SimulationController {
       label, snapshot: this.documentSnapshot(label, paneId), draft: subject !== undefined, reseedOwed: false,
     };
     paneRuntime.gesture = gesture;
-    const controller = this;
+    const isOpen = () => this.paneRuntimes.get(paneId)?.gesture === gesture;
     return {
       label,
-      get open() { return controller.paneRuntimes.get(paneId)?.gesture === gesture; },
+      get open() { return isOpen(); },
       commit: (options = {}) => this.closeGesture(gesture, options, paneId),
       cancel: () => { this.closeGesture(gesture, undefined, paneId); },
     };
@@ -1828,40 +1828,196 @@ export class SimulationController {
     this.session(paneId).runtime.getState().setNotice("Body released with buoyancy, drag, torque, and fluid reaction enabled");
   }
 
-  /** Kinematic constraint shared by the physics drag and the editor gizmo. */
-  private applyBodyManipulation(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {
-    const paneRuntime = this.runtime(paneId);
-    if (phase === "end") paneRuntime.kinematicDrag = null;
-    else paneRuntime.kinematicDrag = { bodyId, position: { ...position }, velocity: { ...velocity } };
-    const body = paneRuntime.bodies.find((candidate) => candidate.description.id === bodyId);
+  // ---- body holds -------------------------------------------------------
+
+  /** The pane's kinematic hold, if any; see `BodyHold`. */
+  bodyHold(paneId: PaneId = PRIMARY_PANE_ID): BodyHold | undefined {
+    return this.runtime(paneId).hold;
+  }
+
+  carrying(paneId: PaneId = PRIMARY_PANE_ID): boolean {
+    return this.runtime(paneId).hold?.kind === "carry";
+  }
+
+  /**
+   * Pick a body up and keep it in hand until it is put down.
+   *
+   * From the pose the user can see: during a run the GPU owns rigid motion, and
+   * picking up from the authored position would teleport a settled cup back to
+   * where it was placed. The published pose first and the authored one as the
+   * fallback, because the roster is empty for a whole rebuild. Carrying selects
+   * the body, and selecting anything else puts it down where it is. It arms and
+   * disarms nothing: while something is in hand a click means "put it down"
+   * whatever tool is armed underneath, which makes the carry a parenthesis.
+   */
+  beginCarry(bodyId: string, label?: string, paneId: PaneId = PRIMARY_PANE_ID): boolean {
+    const session = this.session(paneId);
+    const current = this.runtime(paneId).hold;
+    if (current?.kind === "carry" && current.bodyId === bodyId) return true;
+    const pose_m = drawnBodies(session.diagnostics).find((body) => body.description.id === bodyId)?.position_m
+      ?? session.scene.getState().scene.rigidBodies.find((body) => body.id === bodyId)?.position_m;
+    if (!pose_m) return false;
+    const ui = session.ui.getState();
+    if (ui.selectedBodyId !== bodyId) ui.selectBody(bodyId);
+    const hold = carryHold(bodyId, label, ui.camera, pose_m, performance.now());
+    this.beginHold(hold, carryOrientation(ui.camera, 0), paneId);
+    const runtime = this.runtime(paneId);
+    runtime.holdWatch = session.ui.subscribe((state) => {
+      if (state.selectedBodyId !== bodyId) this.endCarry(false, paneId);
+    });
+    return true;
+  }
+
+  /** Drive the carried body to where the pointer ray meets its carry plane. */
+  carryTo(ray: { origin: Vec3; direction: Vec3 }, timeStamp_ms: number, paneId: PaneId = PRIMARY_PANE_ID) {
+    const hold = this.carryHoldOf(paneId);
+    if (!hold) return;
+    const scene = this.session(paneId).scene.getState().scene;
+    const description = scene.rigidBodies.find((body) => body.id === hold.bodyId);
+    if (!description) { this.endCarry(false, paneId); return; }
+    const next = carryAlong(hold, ray, timeStamp_ms, scene, description);
+    if (next) this.driveCarry(next, paneId);
+  }
+
+  /** The wheel walks the carry plane along the view, then follows the pointer onto it. */
+  walkCarry(wheelDeltaY: number, ray: { origin: Vec3; direction: Vec3 }, timeStamp_ms: number, paneId: PaneId = PRIMARY_PANE_ID) {
+    const hold = this.carryHoldOf(paneId);
+    if (!hold) return;
+    this.runtime(paneId).hold = carryWalk(hold, wheelDeltaY);
+    this.carryTo(ray, timeStamp_ms, paneId);
+  }
+
+  /** Shift: the fine gear, re-anchored where the body already is so nothing jumps. */
+  gearCarry(fine: boolean, paneId: PaneId = PRIMARY_PANE_ID) {
+    const hold = this.carryHoldOf(paneId);
+    if (hold) this.runtime(paneId).hold = carryGear(hold, fine);
+  }
+
+  /** Q/E: tip about the camera's right, so "pour towards me" is the same key from every side. */
+  tiltCarry(steps: number, paneId: PaneId = PRIMARY_PANE_ID) {
+    const hold = this.carryHoldOf(paneId);
+    const next = hold && carryTilt(hold, steps);
+    if (!next) return;
+    this.driveCarry(next, paneId);
+    this.publishCarry(paneId);
+  }
+
+  /**
+   * Put it down, or put it back. `restore` is Escape: the body returns to where
+   * it was picked up, upright. An ordinary put-down leaves it where it is and
+   * hands it to gravity.
+   */
+  endCarry(restore = false, paneId: PaneId = PRIMARY_PANE_ID): boolean {
+    const hold = this.carryHoldOf(paneId);
+    if (!hold) return false;
+    if (restore) this.runtime(paneId).hold = { ...hold, position_m: hold.grip.origin_m, grip: { ...hold.grip, tilt_rad: 0 } };
+    this.releaseHold(paneId);
+    return true;
+  }
+
+  /** Let go of whatever the pane holds, where it is; for a viewport going away. */
+  releaseBodyHold(paneId: PaneId = PRIMARY_PANE_ID) {
+    this.releaseHold(paneId);
+  }
+
+  /**
+   * The throw: a press-drag on a body. Velocity is the pointer's, so a fling
+   * leaves the hand moving. A move or end for a throw that is no longer the
+   * pane's hold (a carry or gizmo took over) does nothing.
+   */
+  dragBody(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {
+    this.manipulate("throw", bodyId, position, velocity, phase, orientation, paneId);
+  }
+
+  /**
+   * Gizmo manipulation. Same hold as the throw, with no imposed velocity. The
+   * pose lives in runtime state only until the gesture commits it to the document.
+   */
+  manipulateBody(bodyId: string, position: RigidBodyState["position_m"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {
+    this.manipulate("gizmo", bodyId, position, { x: 0, y: 0, z: 0 }, phase, orientation, paneId);
+  }
+
+  private manipulate(kind: "throw" | "gizmo", bodyId: string, position_m: Vec3, velocity_m_s: Vec3, phase: BodyDragPhase, orientation: RigidBodyState["orientation"] | undefined, paneId: PaneId) {
+    if (phase === "start") { this.beginHold({ kind, bodyId, position_m, velocity_m_s }, orientation, paneId); return; }
+    const current = this.runtime(paneId).hold;
+    if (current?.kind !== kind || current.bodyId !== bodyId) return;
+    if (phase === "move") { this.driveHold({ kind, bodyId, position_m, velocity_m_s }, orientation, paneId); return; }
+    this.runtime(paneId).hold = { kind, bodyId, position_m, velocity_m_s };
+    this.releaseHold(paneId, orientation);
+  }
+
+  private carryHoldOf(paneId: PaneId): CarryHold | undefined {
+    const hold = this.runtime(paneId).hold;
+    return hold?.kind === "carry" ? hold : undefined;
+  }
+
+  private driveCarry(hold: CarryHold, paneId: PaneId) {
+    this.driveHold(hold, carryOrientation(this.session(paneId).ui.getState().camera, hold.grip.tilt_rad), paneId);
+  }
+
+  /** Release the previous hold, then take this one. */
+  private beginHold(hold: BodyHold, orientation: RigidBodyState["orientation"] | undefined, paneId: PaneId) {
+    this.releaseHold(paneId);
+    this.driveHold(hold, orientation, paneId);
+    if (hold.kind === "carry") this.publishCarry(paneId);
+    // Preserve the transport state so carrying or dragging a body while paused
+    // does not advance the simulation.
+    if (hold.kind !== "gizmo") this.session(paneId).runtime.getState().setNotice("Kinematic drag active · GPU immersed boundary coupling");
+  }
+
+  /**
+   * Command the held pose. Held is the whole of "no gravity": the pose is a
+   * command, and a body that also integrated would sink out of the hand
+   * between the frames where the pointer happens not to move.
+   */
+  private driveHold(hold: BodyHold, orientation: RigidBodyState["orientation"] | undefined, paneId: PaneId) {
+    const runtime = this.runtime(paneId);
+    runtime.hold = hold;
+    const body = runtime.bodies.find((candidate) => candidate.description.id === hold.bodyId);
     if (!body) return;
-    // Held is the whole of "no gravity": the pose below is a command, and a
-    // body that also integrated would sink out of the hand between the frames
-    // where the pointer happens not to move.
-    body.held = phase !== "end";
-    body.position_m = { ...position };
+    body.held = true;
+    body.position_m = { ...hold.position_m };
     if (orientation) body.orientation = { ...orientation };
-    body.linearVelocity_m_s = phase === "end" ? { x: 0, y: 0, z: 0 } : { ...velocity };
+    body.linearVelocity_m_s = { ...hold.velocity_m_s };
     body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 };
     this.publishBodies(undefined, paneId);
   }
 
-  dragBody(bodyId: string, position: RigidBodyState["position_m"], velocity: RigidBodyState["linearVelocity_m_s"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {
-    this.applyBodyManipulation(bodyId, position, velocity, phase, orientation, paneId);
-    const runtime = this.session(paneId).runtime.getState();
-    // Preserve the transport state so explicitly carrying or dragging a body
-    // while paused does not advance the simulation.
-    if (phase === "start") runtime.setNotice("Kinematic drag active · GPU immersed boundary coupling");
-    if (phase === "end") runtime.setNotice("Body released to buoyancy, drag, and collision response");
+  /** End the pane's hold where it stands and hand the body to gravity. */
+  private releaseHold(paneId: PaneId, orientation?: RigidBodyState["orientation"]) {
+    const runtime = this.runtime(paneId);
+    const hold = runtime.hold;
+    if (!hold) return;
+    const settled = orientation ?? (hold.kind === "carry"
+      ? carryOrientation(this.session(paneId).ui.getState().camera, hold.grip.tilt_rad) : undefined);
+    const wasCarry = hold.kind === "carry";
+    this.dropHold(paneId);
+    const body = runtime.bodies.find((candidate) => candidate.description.id === hold.bodyId);
+    if (body) {
+      body.held = false;
+      body.position_m = { ...hold.position_m };
+      if (settled) body.orientation = { ...settled };
+      body.linearVelocity_m_s = { x: 0, y: 0, z: 0 };
+      body.angularVelocity_rad_s = { x: 0, y: 0, z: 0 }; body.angularMomentum_kg_m2_s = { x: 0, y: 0, z: 0 };
+      this.publishBodies(undefined, paneId);
+    }
+    if (wasCarry || hold.kind === "throw") this.session(paneId).runtime.getState().setNotice("Body released to buoyancy, drag, and collision response");
   }
 
-  /**
-   * Gizmo manipulation. Same kinematic constraint and transport behavior as
-   * `dragBody`, with no imposed velocity. The pose
-   * lives in runtime state only until the gesture commits it to the document.
-   */
-  manipulateBody(bodyId: string, position: RigidBodyState["position_m"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {
-    this.applyBodyManipulation(bodyId, position, { x: 0, y: 0, z: 0 }, phase, orientation, paneId);
+  /** Forget the hold without touching the body (it is gone, or about to be released). */
+  private dropHold(paneId: PaneId) {
+    const runtime = this.runtime(paneId);
+    const carry = runtime.hold?.kind === "carry";
+    runtime.hold = undefined;
+    runtime.holdWatch?.();
+    runtime.holdWatch = undefined;
+    if (carry) this.session(paneId).ui.setState({ carry: undefined });
+  }
+
+  /** What the chip reads about a carry; written only when it changes. */
+  private publishCarry(paneId: PaneId) {
+    const hold = this.carryHoldOf(paneId);
+    this.session(paneId).ui.setState({ carry: hold && { bodyId: hold.bodyId, label: hold.label, tiltDegrees: carryTiltDegrees(hold) } });
   }
 
   // ---- renderer callbacks ------------------------------------------------

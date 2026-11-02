@@ -133,7 +133,7 @@ import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import type { EditorActionEffect } from "../lib/core/editor-action";
 import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
 import { createPaneSession, type PaneSession } from "../lib/core/session/session";
-import { RunScope, type Run } from "../lib/core/run-scope";
+import { ownedBy, RunScope, type Run } from "../lib/core/run-scope";
 import { EditorHostProvider } from "../lib/core/session/host-context";
 import { Toolstrip, ToolstripTitle } from "../components/toolstrip";
 import {
@@ -180,7 +180,7 @@ import {
 } from "./lenses";
 import { labEditorHost } from "./lab-host";
 import { LAB_SCENE_IDS, labAuthoredScene } from "./lab-scenes";
-import { createLabStore, type LabStore } from "./lab-store";
+import { createLabStore, labRunToReload, type LabRun, type LabStore } from "./lab-store";
 import {
   labRegionsFromQuery, labRegionsToQuery, startLabQueryStateSync,
 } from "./lab-url-state";
@@ -790,7 +790,7 @@ function AdvanceSlice({ session, lab }: {
   const [runs] = useState(() => new RunScope());
   /* What the current run loaded, so a back/forward that names another one
    * reloads it rather than leaving the address and the water disagreeing. */
-  const loaded = useRef<{ readonly sceneId: string; readonly transport: AdvanceTransportExperiment } | null>(null);
+  const loaded = useRef<LabRun | null>(null);
 
   /** The one way a view reaches the page. Undefined when its run has ended. */
   const publish = useCallback((run: Run, next: AdvanceView): Readings | undefined => {
@@ -842,8 +842,8 @@ function AdvanceSlice({ session, lab }: {
   useEffect(() => {
     const run = runs.start();
     let handle = 0, last = 0;
-    void AdvanceLabController.create().then(async nextController => {
-      if (!run.current()) { await nextController.destroy(); return; }
+    void ownedBy(run, AdvanceLabController.create(), created => created.destroy()).then(async nextController => {
+      if (!nextController) return;
       controller.current = nextController;
       // Read now rather than at mount: a back/forward during the boot has
       // already named the run the reader wants.
@@ -1015,10 +1015,8 @@ function AdvanceSlice({ session, lab }: {
   /* The address names a run — a back/forward, or a link pasted over this one.
    * Whatever it names that is not what is loaded is loaded. */
   useEffect(() => {
-    const current = loaded.current;
-    if (current && (current.sceneId !== sceneId || current.transport !== transportExperiment)) {
-      chooseRun(sceneId, transportExperiment);
-    }
+    const named = labRunToReload(loaded.current, { sceneId, transport: transportExperiment });
+    if (named) chooseRun(named.sceneId, named.transport);
   }, [sceneId, transportExperiment, chooseRun]);
 
   /**

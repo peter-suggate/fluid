@@ -53,7 +53,7 @@ export function performEditorAction(
       // the ring and dropping one from the placement row put down the same cup.
       const created = simulation.addBodyAt(effect.shape, effect.point_m,
         { autoRun: false, dimensions_m: ui.placementDimensions[effect.shape] }, session.id);
-      if (created && effect.carry) ui.beginCarry(created.id, created.name);
+      if (created && effect.carry) simulation.beginCarry(created.id, created.name, session.id);
       return;
     }
     // The two placements that were modes. Both are single clicks at a point the
@@ -78,12 +78,11 @@ export function performEditorAction(
       const description = session.scene.getState().scene.rigidBodies
         .find((body) => body.id === effect.bodyId);
       if (!description) return;
-      ui.selectBody(description.id);
-      ui.beginCarry(description.id, description.name);
+      simulation.beginCarry(description.id, description.name, session.id);
       return;
     }
     case "release": {
-      if (ui.carry?.bodyId === effect.bodyId) ui.endCarry();
+      if (simulation.bodyHold(session.id)?.bodyId === effect.bodyId) simulation.endCarry(false, session.id);
       simulation.dropBody(effect.bodyId, session.id);
       return;
     }

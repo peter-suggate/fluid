@@ -10,7 +10,7 @@ import {
 import type { AdvanceRefinementRegion } from "../lib/physics-wasm/advance-controller";
 import { ADVANCE_BRICK_FINE } from "../lib/physics-wasm/advance-view";
 import {
-  labNextRegionId, labRegionAt, labRegionCanvasBox, labRegionFromCanvasBox,
+  labNextRegionId, labRegionAt, labRegionCanvasBox, labRegionDragAlive, labRegionFromCanvasBox,
   labRegionFromRecord, labRegionIsDrawn, labRegionRecord, labRegionSpace,
   labSolverCell, type LabRegionDocument,
 } from "./lab-region-space";
@@ -173,4 +173,16 @@ test("the tag reads in cells, because this host has no metres to quote", () => {
 test("a region selected here is the same kind of selection as one selected in the studio", () => {
   assert.equal(refinementRegionSelectionId("advance-region-1"),
     "refinement-region-advance-region-1");
+});
+
+test("a box drag is dropped when its box stops being there, selected or editable", () => {
+  const drag = { id: "advance-region-1", pointer: 1 };
+  const records = [{ id: "advance-region-1" }, { id: "advance-region-2" }];
+  const live = { editing: true, selectedId: "advance-region-1", records };
+  assert.equal(labRegionDragAlive(drag, live), drag);
+  assert.equal(labRegionDragAlive(null, live), null);
+  assert.equal(labRegionDragAlive(drag, { ...live, editing: false }), null, "a stroke armed or LOOK took the handles away");
+  assert.equal(labRegionDragAlive(drag, { ...live, selectedId: "advance-region-2" }), null);
+  assert.equal(labRegionDragAlive(drag, { ...live, selectedId: undefined }), null);
+  assert.equal(labRegionDragAlive(drag, { ...live, records: [{ id: "advance-region-2" }] }), null, "the box was deleted mid-drag");
 });

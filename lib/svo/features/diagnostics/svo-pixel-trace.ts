@@ -1795,6 +1795,44 @@ export function resolveSvoPixelTracePin(
 }
 
 /**
+ * The probe's hold on one pixel. `requested`: a click (or the HUD's or the
+ * ring's ask, which become the same request) whose pixel the probe traces until
+ * it comes back. `pinned`: the ray that came back and the view it belonged to,
+ * which lasts exactly as long as the UI's pin switch. `null`: the probe follows
+ * the pointer.
+ */
+export type SvoPixelTracePin =
+  | { readonly phase: "requested"; readonly request: SvoPixelTracePinRequest }
+  | { readonly phase: "pinned"; readonly aim: Omit<SvoPixelTracePinRequest, "revision"> }
+  | null;
+
+/** The frozen aim the probe traces, only while the pin switch is on. */
+export function svoPixelTracePinnedAim(pin: SvoPixelTracePin, pinned: boolean): Omit<SvoPixelTracePinRequest, "revision"> | null {
+  return pinned && pin?.phase === "pinned" ? pin.aim : null;
+}
+
+/**
+ * A pin after one frame. A request settles on its `resolution` — frozen at its
+ * own aim once its pixel came back (the caller turns the switch on), dropped
+ * when it never can be — and a frozen aim is dropped the moment the switch is
+ * off: an aim kept past its pin would let a later pin refresh a ray nobody
+ * aimed at.
+ */
+export function settleSvoPixelTracePin(pin: SvoPixelTracePin, state: {
+  readonly resolution?: SvoPixelTracePinResolution;
+  readonly pinned: boolean;
+}): SvoPixelTracePin {
+  if (pin?.phase === "requested") {
+    if (state.resolution === "pin") {
+      const { normalizedX, normalizedY, cameraKey } = pin.request;
+      return { phase: "pinned", aim: { normalizedX, normalizedY, cameraKey } };
+    }
+    return state.resolution === "abandon" ? null : pin;
+  }
+  return pin?.phase === "pinned" && !state.pinned ? null : pin;
+}
+
+/**
  * What to do with a pinned ray when the scene it was traced against changes —
  * another light, a republished topology, a new traversal budget, or simply the
  * simulation advancing a step.

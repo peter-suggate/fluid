@@ -9,6 +9,7 @@ import { editorEntityContext } from "../../core/editor-entity-catalog";
 import { targetAtRay, targetSurfaceNormal } from "../../core/editor-probe-catalog";
 import { useSession } from "../../core/session/session-context";
 import { keyLabel } from "./input-router";
+import { latestRefusal, pressRelease } from "./press";
 import { simulation } from "../../core/simulation/controller";
 import { RunScope } from "../../core/run-scope";
 import type { PaneSession } from "../../core/session/session";
@@ -341,37 +342,29 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
       if (current.draft) pane.hoverPlacement(surfaceHit(session, pane, ray));
     };
 
+    // A pointercancel ends the press too, but as abandoned rather than
+    // completed: see `pressRelease`. The browser's own release is not the
+    // layer's to claim then, and the play button it held comes up wherever the
+    // pointer was.
     const up = (event: PointerEvent) => {
+      const cancelled = event.type === "pointercancel";
       const held = press.current;
-      const current = pane.state;
-      if (current.view.context === "play" && onCanvas(event)) {
-        claim(event);
+      if (pane.state.view.context === "play" && (cancelled || onCanvas(event))) {
+        if (!cancelled) claim(event);
         if (pane.router.button(event.button, false)) pane.pumpInput();
       }
       if (!held || held.pointerId !== event.pointerId) return;
-      claim(event);
+      if (!cancelled) claim(event);
       press.current = undefined;
-      if (held.kind === "placement" && !held.dragged) {
+      const pose = movePoseRef.current;
+      if (held.kind === "move") setMovePose(undefined);
+      const release = pressRelease(held, cancelled);
+      if (release === "place") {
         const ray = rayAt(event.clientX, event.clientY);
         if (ray) pane.hoverPlacement(surfaceHit(session, pane, ray));
         void pane.commitPlacement();
       }
-      if (held.kind === "move") {
-        const pose = movePoseRef.current;
-        setMovePose(undefined);
-        if (pose && held.dragged) void pane.move(pose.entityId, pose.transform);
-      }
-    };
-
-    // The browser took the pointer away (a system gesture, a lost capture): the
-    // press is abandoned, not completed. Ending it as a release placed the draft
-    // or moved the entity to wherever the pointer last was.
-    const cancel = (event: PointerEvent) => {
-      if (pane.state.view.context === "play" && pane.router.button(event.button, false)) pane.pumpInput();
-      const held = press.current;
-      if (!held || held.pointerId !== event.pointerId) return;
-      press.current = undefined;
-      if (held.kind === "move") setMovePose(undefined);
+      if (release === "move" && pose) void pane.move(pose.entityId, pose.transform);
     };
 
     const context = (event: MouseEvent) => {
@@ -395,13 +388,13 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
     shell.addEventListener("pointerdown", down, true);
     shell.addEventListener("pointermove", move, true);
     shell.addEventListener("pointerup", up, true);
-    shell.addEventListener("pointercancel", cancel, true);
+    shell.addEventListener("pointercancel", up, true);
     shell.addEventListener("contextmenu", context, true);
     return () => {
       shell.removeEventListener("pointerdown", down, true);
       shell.removeEventListener("pointermove", move, true);
       shell.removeEventListener("pointerup", up, true);
-      shell.removeEventListener("pointercancel", cancel, true);
+      shell.removeEventListener("pointercancel", up, true);
       shell.removeEventListener("contextmenu", context, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -467,7 +460,6 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
     };
     document.addEventListener("pointerlockchange", change);
     return () => document.removeEventListener("pointerlockchange", change);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pane]);
 
   // ---- control: the camera stays where it is ---------------------------------------------
@@ -475,7 +467,6 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
   useEffect(() => {
     if (controlled) { session.ui.getState().setViewportMode("camera"); return; }
     if (document.pointerLockElement && document.pointerLockElement === canvas()) document.exitPointerLock();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controlled, session]);
 
   async function releaseControl() {
@@ -779,7 +770,7 @@ function TransformRows({pane,entity,running,upright}:{pane:InteractionPane;entit
   const requests=useLatestRequest(entity.transform);
   useEffect(()=>{setDraft(entity.transform);setError(undefined);},[entity.transform]);
   const angles=upright?{x:0,y:Math.atan2(2*(draft.orientation.w*draft.orientation.y),1-2*draft.orientation.y**2)*180/Math.PI,z:0}:rotationDegrees(draft.orientation);
-  const commit=async()=>{const request=requests.start();const result=await pane.move(entity.id,draft);if(!result.accepted&&request.current())setError(result.reason);};
+  const commit=async()=>{const refused=await latestRefusal(requests,()=>pane.move(entity.id,draft));if(refused!==undefined)setError(refused);};
   return <>
     {(['x','y','z'] as const).map(axis=><ToolstripRow key={`p${axis}`} tag={`Position ${axis.toUpperCase()}`} name={`Position ${axis.toUpperCase()}`} after={<NumberInput ariaLabel={`Position ${axis.toUpperCase()}`} value={draft.position_m[axis]} step={snap||.001} unit="m" disabled={running}
       onChange={value=>setDraft({...draft,position_m:{...draft.position_m,[axis]:snap?Math.round(value/snap)*snap:value}})} />} />)}
@@ -815,12 +806,12 @@ function ConfigRows({ pane, entityId, behaviorId, controls, config, running }: {
   const shown = pending ?? config;
   const change = async (setting: string, value: JsonValue) => {
     const next = { ...shown, [setting]: value };
-    const request = requests.start();
     const errors = pane.configErrors(entityId, behaviorId, next);
-    if (errors.length) { setPending(next); setError(errors.join("; ")); return; }
+    // A change refused here supersedes one still in flight just as a sent one does.
+    if (errors.length) { requests.cancel(); setPending(next); setError(errors.join("; ")); return; }
     setPending(next); setError(undefined);
-    const result = await pane.configure(entityId, behaviorId, next);
-    if (!result.accepted && request.current()) setError(result.reason);
+    const refused = await latestRefusal(requests, () => pane.configure(entityId, behaviorId, next));
+    if (refused !== undefined) setError(refused);
   };
   return <>
     {controls.map((control) => {

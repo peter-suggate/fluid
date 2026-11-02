@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { PaneId } from "../session/session";
 import { simulation, type EditGesture } from "./controller";
 
@@ -16,15 +16,15 @@ import { simulation, type EditGesture } from "./controller";
  */
 export function useHeldEdit(paneId: PaneId, options: { readonly reseed: boolean }) {
   const gesture = useRef<EditGesture | undefined>(undefined);
-  const { reseed } = options;
-  const end = () => {
+  // Read at the release, which may be the unmount, so it is the latest render's.
+  const reseed = useRef(options.reseed);
+  useLayoutEffect(() => { reseed.current = options.reseed; });
+  const end = useCallback(() => {
     const open = gesture.current;
     gesture.current = undefined;
-    open?.commit({ reseed });
-  };
-  const endRef = useRef(end);
-  endRef.current = end;
-  useEffect(() => () => endRef.current(), []);
+    open?.commit({ reseed: reseed.current });
+  }, []);
+  useEffect(() => end, [end]);
   const begin = (label: string) => {
     if (!gesture.current?.open) gesture.current = simulation.beginEdit(label, paneId);
   };
