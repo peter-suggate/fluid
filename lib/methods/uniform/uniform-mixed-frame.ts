@@ -52,6 +52,7 @@ import type {GPUTimestampPhase} from "../../core/performance-trace";
 import {UNIFORM_ADVANCE_PHASE as A} from "./uniform-stages";
 import {UNIFORM_VOLUME_PHASE as V,NARROW_BAND_SURFACE_PHASE as S} from "./uniform-volume-stages";
 import {UniformMixedSolid,type UniformMixedSolidResources} from "./uniform-mixed-solid.wgsl";
+import {UNIFORM_MIXED_REACHES,type UniformMixedCache,type UniformMixedHostChange} from "./uniform-mixed-invalidation";
 import {UNIFORM_PAGE_POOL_STATUS,UniformPagePool,uniformPagePoolFatalMessage,type UniformPagePoolMirror,type UniformPagePoolResidency} from "./uniform-page-pool";
 import {UniformPageInitialise,UniformPageTileWords,uniformPageTopology,type UniformPageInitBlocks} from "./uniform-page-initialise";
 import {UNIFORM_STAGE_GRID_HEADER_WORDS,UNIFORM_STAGE_VIEWS,uniformStageBandWords,uniformStageGridHeader,uniformStageGridWords,uniformStageViewWord} from "./uniform-stage-grids";
@@ -447,15 +448,17 @@ export class UniformMixedFrame {
  /** The slot list of the first UNIFORM_MIXED_RECEIPT_RING frames: conservative. */
  /** Surface-crossing tiles of the current phi: the stage grids' band bits. */
  private readonly surfaceBand:UniformPressureSurfaceBand;
- private ready=false;
+ /** uninit until initialize; encoding inside advance's synchronous encode;
+  * failed (sticky) once an encode or a receipt rejects. Advances, extensions
+  * and host layouts run only when ready; capacity and relayout changes
+  * anywhere but inside an encode. */
+ private phase:"uninit"|"ready"|"encoding"|"failed"="uninit";
  /** The simulation authority's pressure phi, one word per simulation owner
   * the capacity holds. */
  private authorityPhi:GPUBuffer;
  /** See UniformMixedFrameCapacity: a GPU relayout sets it, detaching clears it. */
  private liquidBand:boolean;
  private readonly byteBudget?:number;
- private busy=false;
- private failed=false;
  readonly narrowBandFlip:UniformNarrowBandFlip;
  get narrowBandVolumeBudget():GPUBuffer|undefined{return this.surfaceVolume?.budget;}
  /** The budget's shift and measured volumes are those of the last step that
@@ -470,7 +473,7 @@ export class UniformMixedFrame {
   let bytes=this.geometry.allocatedBytes+this.surfaceWorkControl.allocatedBytes+(this.narrowBandFlip.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+this.phiResolve.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.ownership.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.pagePool.allocatedBytes+this.dynamics.allocatedBytes+this.heat.allocatedBytes+(this.freeze?.allocatedBytes??0)+this.extension.allocatedBytes+this.momentum.allocatedBytes+this.split.authority.allocatedBytes+(this.bulk?.allocatedBytes??0)+(this.bulkPages?.allocatedBytes??0)+(this.bulkTransfer?.allocatedBytes??0);
   for(let i=0;i<this.levels.length;i++){const o=this.levels[i]!.ownership;if(o!==this.ownership)bytes+=o.allocatedBytes;}
   for(let i=0;i<this.owned.length;i++){const r=this.owned[i]!;bytes+="size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16;}
-  if(this.ready)this.allocatedTotal=bytes;
+  if(this.phase!=="uninit")this.allocatedTotal=bytes;
   return bytes;
  }
  private readonly queue:GPUQueue;
@@ -772,12 +775,12 @@ export class UniformMixedFrame {
   * exact under an attached relayout: fewer tiles than held is the caller's
   * claim that a build receipt confirms the running generation fits them. */
  reserveFine(need:number,liquidBand=this.liquidBand,exact=false):string|undefined{
-  if(this.busy)throw new Error("The mixed capacity cannot change during an advance");
+  if(this.phase==="encoding")throw new Error("The mixed capacity cannot change during an advance");
   const r=this.fineReservation(need,liquidBand,exact);if(r.refusal)return r.refusal;
   this.liquidBand=liquidBand;
   const o=this.ownership,n=o.capacity.tiles,owners=o.capacity.fineTiles!==r.fineTiles,band=this.stageBandTiles!==r.bandTiles;
   if(!owners&&!band)return undefined;
-  this.allocatedTotal=undefined;this.cold.trigger();
+  this.allocatedTotal=undefined;this.invalidate("capacity");
   const retired:GPUBuffer[]=[];
   const replace=(old:GPUBuffer,size:number)=>{const b=this.device.createBuffer({label:old.label,size,usage:old.usage});this.owned[this.owned.indexOf(old)]=b;retired.push(old);return b;};
   if(owners){
@@ -817,7 +820,7 @@ export class UniformMixedFrame {
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,this.surfaceWorkControl,...this.pageOwners]});
   await settleGPUInitialization([...Object.values(this.liveCopies),this.blit,this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip,this.bulk,this.bulkPages,this.bulkTransfer]
    .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership,this.pagePool),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
-  this.ready=true;
+  if(this.phase==="uninit")this.phase="ready";
  }
  /** The last advance's extension key (write), once there has been one, and
   * the support policy it holds. */
@@ -835,16 +838,39 @@ export class UniformMixedFrame {
  /** A body frame's head found the last extension reusable but for the
   * bodies: its extension rebuilds only the regions they reached. */
  private bodyExtension=false;
- /** Any state, parameter or ownership change between frames. */
- invalidateExtension():void{this.cold.trigger();this.reusableExtension=false;this.geometryCurrent=false;this.split.authority.invalidate();}
+ /** A host change between frames: every cache UNIFORM_MIXED_REACHES maps it
+  * to. epoch: a census's work epoch (the last frame before its first build). */
+ invalidate(change:UniformMixedHostChange,epoch=this.frameIndex):void{
+  const reaches=UNIFORM_MIXED_REACHES[change];
+  for(let i=0;i<reaches.length;i++)this.reach(reaches[i]!,epoch);
+ }
+ private reach(cache:UniformMixedCache,epoch:number):void{
+  switch(cache){
+   case "cold":this.cold.trigger();return;
+   case "workControl":this.surfaceWorkControl.invalidate();return;
+   case "dynamics":this.dynamics.invalidate();return;
+   case "heat":this.heat.invalidate();return;
+   case "heldAuthority":this.authority.invalidate();return;
+   case "splitAuthority":this.split.authority.invalidate();return;
+   case "extension":this.reusableExtension=false;return;
+   case "geometry":this.geometryCurrent=false;return;
+   case "solidRecord":this.solid?.invalidate();return;
+   case "solidWidths":this.solidWidthsStale=true;return;
+   case "workEpoch":this.workEpoch=epoch;return;
+   case "bandWork":this.band.observeWork(this.band.capacity);return;
+   case "bandCycles":this.band.forgetCycles();return;
+   case "ownershipWork":this.ownership.forgetWork();return;
+   case "residency":this.pressureOwnership.observeResidency();return;
+   case "remapWork":this.remap.forgetWork();return;
+  }
+ }
  /** A live voxel edit rewrote the host's solid mask: rebuild the all-4h
   * record and the cut widths, and displace liquid out of newly solid h
   * cells at the next frame's head. The host has already promoted every
   * tile the edit touches to h (its CPU relayout). */
  editSolids():void{
-  this.surfaceWorkControl.invalidate();this.dynamics.invalidate();
   if(!this.solid)throw new Error("This mixed frame was built without solids");
-  this.solid.invalidate();this.solidWidthsStale=true;this.invalidateExtension();this.solidEditPending=true;
+  this.invalidate("solids");this.solidEditPending=true;
  }
  /** The simulation target and centre phi were built from the current phi by
   * the last completed advance's gather: nothing has written phi, solids or
@@ -858,7 +884,7 @@ export class UniformMixedFrame {
  /** The last advance's simulation authority wrote phase on the live layout
   * (under its key); false when rigid bodies moved after it. While geometryCurrent holds, nothing has written volume,
   * phi, solids or ownership since either (every such edit goes through
-  * invalidateExtension), and the split's all-4h authority writes no phase:
+  * invalidate), and the split's all-4h authority writes no phase:
   * a head's phase launch would store the same values again. */
  private phaseKeyed=false;
  /** same: this advance's key is the last one's (write). */
@@ -872,7 +898,7 @@ export class UniformMixedFrame {
   * the live layout: the field the next advance's surface trace samples.
   * The dynamic census bounds departures from it between frames. */
  encodeExtension(encoder:GPUCommandEncoder):void{
-  if(!this.ready||this.busy||this.failed||!this.keyed)throw new Error("Mixed extension needs a completed advance");
+  if(this.phase!=="ready"||!this.keyed)throw new Error("Mixed extension needs a completed advance");
   this.encodeExtensionOf(encoder,this.key.supportPolicy,this.key.extensionSweeps);
  }
  /** phase=false: this advance's simulation authority already wrote phase
@@ -985,14 +1011,16 @@ export class UniformMixedFrame {
   * rejects naming its frame and fails the frame for every later advance.
   * kick: kick()'s encode, ahead of a frame of this step; it takes no frame index. */
  advance(p:UniformMixedFrameParameters,trace?:UniformMixedFrameTrace,extendTail=false,bodies?:UniformMixedFrameBodies,kick=0):Promise<UniformMixedFrameReceipt>{
-  if(trace){const measured=trace;trace={...measured,phase:(encoder,phase)=>{this.blit.finishStage(encoder);measured.phase(encoder,phase);}};}
-  if(bodies&&!this.solid)throw new Error("This mixed frame was built without solids; rigid bodies need the solid library");
-  if(!this.ready||this.busy||this.failed)throw new Error("Unified frame is not ready for an advance");
   let slot:ReceiptSlot|undefined;
   for(let i=0;i<this.receipts.length&&!slot;i++)if(!this.receipts[i]!.unchecked)slot=this.receipts[i];
-  if(!slot)throw new Error(`Uniform mixed frame has ${this.receipts.length} unchecked receipts; the host must check one before encoding frame ${this.frameIndex+1}`);
+  // A refused advance closes the caller's trace: it opened for this frame.
+  const refusal=bodies&&!this.solid?"This mixed frame was built without solids; rigid bodies need the solid library"
+   :this.phase!=="ready"?`Unified frame is not ready for an advance (${this.phase})`
+   :!slot?`Uniform mixed frame has ${this.receipts.length} unchecked receipts; the host must check one before encoding frame ${this.frameIndex+1}`:undefined;
+  if(refusal!==undefined||!slot){trace?.abort();throw new Error(refusal);}
+  if(trace){const measured=trace;trace={...measured,phase:(encoder,phase)=>{this.blit.finishStage(encoder);measured.phase(encoder,phase);}};}
   const readback=slot.readback;
-  this.busy=true;const frame=kick?this.frameIndex:++this.frameIndex;
+  this.phase="encoding";const frame=kick?this.frameIndex:++this.frameIndex;
   // The frame a failure latched in this advance is recorded as.
   this.words.frame[0]=frame;this.queue.writeBuffer(this.status,4*UNIFORM_MIXED_STATUS.currentFrame,this.words.frame);
   let held=0;
@@ -1008,7 +1036,7 @@ export class UniformMixedFrame {
    // carry its count until the receipt of the frame that built it is the one observed.
    const edit=relayout?.edit?.(),firstCensus=relayout!==undefined&&!this.censused;
    if(edit)this.noteEdit(frame,edit);
-   else if(relayout&&!this.censused){this.workEpoch=frame-1;this.band.observeWork(this.band.capacity);this.band.forgetCycles();this.ownership.forgetWork();this.pressureOwnership.observeResidency();this.remap.forgetWork();}
+   else if(relayout&&!this.censused)this.invalidate("census",frame-1);
    const edited=this.editedBy(frame);
    const work=!kick&&frame-UNIFORM_MIXED_RECEIPT_RING>this.workEpoch?this.laggedOf(frame-UNIFORM_MIXED_RECEIPT_RING):undefined;
    // Under a census the budgets keep a reserve: it admits tiles the receipts report two frames late.
@@ -1304,7 +1332,7 @@ export class UniformMixedFrame {
    trace?.submit(encoder,this.fields.negative);this.submit(encoder);trace?.submitted();
    slot.frame=frame;slot.encoded=this.band.schedule.cycles;slot.kick=kick>0;slot.target=this.pressureTarget;slot.unchecked=true;
    return this.check(slot);
-  }catch(error){trace?.abort();this.failed=true;throw error;}finally{for(let i=0;i<held;i++)this.releases[i]!();this.busy=false;}
+  }catch(error){trace?.abort();this.phase="failed";throw error;}finally{for(let i=0;i<held;i++)this.releases[i]!();if(this.phase==="encoding")this.phase="ready";}
  }
  /** The frame encoders' copies and clears run as compute launches (UniformComputeBlit). */
  private readonly blit:UniformComputeBlit;
@@ -1334,7 +1362,7 @@ export class UniformMixedFrame {
  /** The slot's frame's receipt: fail fast on a rejected or unconverged solve. */
  private check(slot:ReceiptSlot):Promise<UniformMixedFrameReceipt>{
   let mapped:Promise<undefined>;
-  try{mapped=slot.readback.mapAsync(GPUMapMode.READ);}catch(error){this.failed=true;slot.unchecked=false;return Promise.reject(error);}
+  try{mapped=slot.readback.mapAsync(GPUMapMode.READ);}catch(error){this.phase="failed";slot.unchecked=false;return Promise.reject(error);}
   return mapped.then(slot.accept,slot.reject);
  }
  /** Its own function: one holding a closure allocates that closure's context at every entry, and receive runs every frame. */
@@ -1342,15 +1370,16 @@ export class UniformMixedFrame {
   if(detail&UNIFORM_DETAIL_SLOT_VIOLATION)return new Error(`Uniform detail storage: the detail ring needs more blocks than the h stores' ${this.fields.detail?.fineSlots.capacity} slots (raise fluid.tiers.fineBlocks)${failure?`; ${failure}`:""}`);
   return new Error(`Uniform detail storage: a store a non-resident tile cannot hold (${Object.entries(UNIFORM_DETAIL_VIOLATION).filter(([,bit])=>detail&bit).map(([kind])=>kind).join(", ")} field; simulation ${simulation}, pressure ${pressure})${failure?`; ${failure}`:""}`);
  }
- private refuse(slot:ReceiptSlot,error:unknown):never{this.failed=true;slot.unchecked=false;throw error;}
+ private refuse(slot:ReceiptSlot,error:unknown):never{this.phase="failed";slot.unchecked=false;throw error;}
  private receive(slot:ReceiptSlot):UniformMixedFrameReceipt{
   const mapped=slot.words,floats=slot.floats,frame=slot.frame,kick=slot.kick;
   try{mapped.set(new Uint32Array(slot.readback.getMappedRange(),0,TRACE_RECEIPT/4));slot.readback.unmap();}
-  catch(error){this.failed=true;throw error;}finally{slot.unchecked=false;}
+  catch(error){this.phase="failed";throw error;}finally{slot.unchecked=false;}
   try{
    const page=this.pagePoolInfo,base=POOL_RECEIPT/4,status=UNIFORM_PAGE_POOL_STATUS;
    // Receipts can finish out of order with multiple frames in flight.
-   if(frame>=page.frame){page.frame=frame;page.generation=mapped[base+status.generation]!;
+   const latest=frame>=page.frame;
+   if(latest){page.frame=frame;page.generation=mapped[base+status.generation]!;
     page.residentPages=mapped[base+status.resident]!;page.claimedPages=mapped[base+status.claimed]!;
     page.retiredPages=mapped[base+status.pending]!;page.freePages=mapped[base+status.free]!;
     const d=this.workDomainInfo,w=slot.work;
@@ -1362,7 +1391,7 @@ export class UniformMixedFrame {
    // It precedes the particles' verdict: a capped closure strands samples
    // in pages it never claimed, which FLIP then reports as an arrival.
    const pool=uniformPagePoolFatalMessage(this.pagePool.layout,mapped,POOL_RECEIPT/4);if(pool)throw new Error(pool);
-   this.narrowBandFlip.noteReceipt(slot.flip);
+   this.narrowBandFlip.noteReceipt(slot.flip,latest);
    // The GPU's own verdict first: it names the first failing frame.
    const failure=describeUniformMixedFrameStatus(slot.status);
    // A detail-storage violation explains every later failure.
@@ -1386,7 +1415,7 @@ export class UniformMixedFrame {
    receipt.cycles=count;receipt.encoded=slot.encoded;receipt.residual=residual;receipt.dustOwners=mapped[13]!+mapped[18]!;receipt.orphanDustOwners=mapped[18]!;
    receipt.bandTiles=bandTiles;receipt.bandCycles=mapped[26]!;receipt.bandResidual=bandResidual;
    return receipt;
-  }catch(error){this.failed=true;throw new Error(`Uniform mixed ${kick?`kick before frame ${frame+1}`:`frame ${frame}`}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
+  }catch(error){this.phase="failed";throw new Error(`Uniform mixed ${kick?`kick before frame ${frame+1}`:`frame ${frame}`}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
  }
  /** NB occupancy is a measurement, including immediately after a relayout.
   * No consumer may see stale independently remapped or displaced mass: the
@@ -1410,16 +1439,15 @@ export class UniformMixedFrame {
   * start holds the ceiling the relayout attached next reserves, so the first
   * layout's detail storage is resident even with no h tile yet. */
  updateLayout(layout:UniformMixedLayout,reserve=layout.fineTiles.length):string|undefined{
-  if(!this.ready||this.busy||this.failed)throw new Error("Ownership edits require a completed frame");
+  if(this.phase!=="ready")throw new Error(`Ownership edits require a completed frame (${this.phase})`);
   if(this.relayout)throw new Error("A GPU relayout owns the mixed layout: detach it (setRelayout()) before a host relayout");
   if(reserve<layout.fineTiles.length)throw new Error(`A host layout of ${layout.fineTiles.length} h tiles cannot reserve ${reserve}`);
   const refusal=this.reserveFine(reserve);if(refusal)return refusal;
-  this.cold.trigger();this.surfaceWorkControl.invalidate();this.dynamics.invalidate();
+  this.invalidate("layout");
   // An authored refinement is immediate evidence of possible new band work;
   // reserve launch parallelism before its first frame, ahead of the lagged
   // liquid-band receipts. The actual band may occupy fewer of these tiles.
   this.band.observeWork(layout.fineTiles.length);
-  this.reusableExtension=false;this.geometryCurrent=false;this.solidWidthsStale=true;
   // The remap reads the all-4h solid record (umTileOpen): a relayout ahead of
   // the first frame builds it. A pending live edit keeps the record of the
   // solids the GPU still holds (the host publishes the mask after this).
@@ -1492,7 +1520,7 @@ export class UniformMixedFrame {
   * layout's receipts and budgets stand and the edit's count is added: a
   * small request arriving launches a small frame. */
  setRelayout(relayout?:UniformMixedFrameRelayout,reserved?:number,counted=false):void{
-  if(this.busy)throw new Error("The mixed relayout cannot change during an advance");
+  if(this.phase==="encoding")throw new Error("The mixed relayout cannot change during an advance");
   // A census's first build has no receipt to size from: storage at the
   // ceiling, the band at its liquid bound, unless the host reserved for its
   // requests. Detached, host layouts reserve their own
@@ -1501,12 +1529,12 @@ export class UniformMixedFrame {
    const refusal=reserved===undefined?this.reserveFine(this.fineCeiling,true):this.reserveFine(reserved,false);
    if(refusal)throw new Error(`A GPU relayout holds ${reserved===undefined?`its ceiling's ${this.fineCeiling} tiles`:`${reserved} tiles`} at h: ${refusal}`);
   }else{this.liquidBand=false;if(this.censused){this.ownership.resetResidency();this.censused=false;}}
-  this.relayout=relayout;this.relayoutAdopted=relayout?.adopted?.bind(relayout);this.cold.trigger();
+  this.relayout=relayout;this.relayoutAdopted=relayout?.adopted?.bind(relayout);this.invalidate("relayout");
   // The census may admit any tile in its first frame and its counts reach
   // the host UNIFORM_MIXED_RECEIPT_RING frames late: launch at the ceilings
   // until a receipt of this owner arrives. A budget left at the host
   // layout's (one group from all-4h) runs the new h tiles on a few lanes.
-  if(relayout&&!counted){this.workEpoch=this.frameIndex;this.band.observeWork(this.band.capacity);this.ownership.forgetWork();this.pressureOwnership.observeResidency();this.remap.forgetWork();}
+  if(relayout&&!counted)this.invalidate("census");
   // markChanged latches a builder fatal into this frame's record.
   this.remap.bindStatus(this.status);
  }
@@ -1613,8 +1641,8 @@ export class UniformMixedFrame {
  /** Publishes the 4h vertex base from the live phi: t=0 and any host write
   * of phi outside an advance or a relayout. */
  publishCoarseVertexPhi():void{
-  if(!this.ready||this.busy)throw new Error("The 4h vertex phi base publishes between frames");
-  this.surfaceWorkControl.invalidate();this.dynamics.invalidate();
+  if(this.phase!=="ready")throw new Error(`The 4h vertex phi base publishes between frames (${this.phase})`);
+  this.invalidate("coarsePhi");
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }

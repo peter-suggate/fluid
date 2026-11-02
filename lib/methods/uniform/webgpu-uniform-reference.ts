@@ -8,6 +8,7 @@ import type { FluidStepRequest } from "../../interaction/runtime/physics";
 import type { FluidExchange } from "../../interaction/contracts";
 import { proceduralSolidField, proceduralSolidKey, PROCEDURAL_SOLID_MAGIC } from "../../core/procedural-solid";
 import { gpuInitializationDevice } from "../../core/gpu-initialization-device";
+import { StagedReadback } from "../../core/staged-readback";
 import {UniformMixedDiagnostics} from "./uniform-mixed-diagnostics";
 import { UNIFORM_MIXED_RECEIPT_RING, UniformMixedFrame, type UniformMixedFrameBodies, type UniformMixedFrameParameters, type UniformMixedFrameReceipt, type UniformMixedFrameRelayout, type UniformMixedFrameTrace } from "./uniform-mixed-frame";
 import { uniformDetailCapacityRule } from "./uniform-detail-policy";
@@ -341,6 +342,10 @@ const UNIFORM_PHI_AGREEMENT_CLAMP = 0.02;
 /** Relayout receipts (UNIFORM_MIXED_RELAYOUT_RECEIPT) in flight to the host
  * for diagnostics; a frame that finds none free reports nothing. */
 const UNIFORM_MIXED_RELAYOUT_READS = 3;
+/** Who builds the mixed layout (WebGPUUniformReference.mixedLayout). */
+type UniformMixedLayoutMode={readonly kind:"host"}|{readonly kind:"requests";readonly live:boolean}|{readonly kind:"census"};
+const MIXED_HOST:UniformMixedLayoutMode={kind:"host"},MIXED_CENSUS:UniformMixedLayoutMode={kind:"census"};
+const MIXED_REQUESTS:UniformMixedLayoutMode={kind:"requests",live:false},MIXED_LIVE_REQUESTS:UniformMixedLayoutMode={kind:"requests",live:true};
 
 /** A stack over a store it keeps. An array popped or shifted to empty drops
  * its store and the next push allocates another: once a step, for a pool
@@ -599,14 +604,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly wallFilmResolveGroup: GPUBindGroup;
   private pipelines?: UniformReferencePipelines;
   private inflowBoundary?: InflowGridBoundary;
-  private statsReadback?: GPUBuffer;
-  private readbackPending = false;
+  private statsReadback?: StagedReadback;
   private lastTime = 0;
   private referenceVolumeCells = 0;
-  /** A ball waiting for a step to wet its cells. See `injectLiquidBall`. */
-  private pendingDrop?: UniformLiquidDrop;
-  /** A step has asked for the pending ball's pages: it lands on the next one. */
-  private pendingDropPaged = false;
+  /** A ball waiting for a step to wet its cells (`injectLiquidBall`); none
+   * when absent. paged: a step has asked for its pages, and it lands on the
+   * next one; until then only requested. */
+  private injectedDrop?: { readonly drop: UniformLiquidDrop; paged: boolean };
   /** The drop this step adds: each census of the step asks the page pool for its pages. */
   private pageDrop?: UniformLiquidDrop;
   /** The scheduled drop the next step adds (uniformPagePoolDropAhead): asked for with this step's, so its pages are stored when its own step's census runs. */
@@ -638,11 +642,19 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedKicked = false;
   /** Settles once every mixed frame submitted so far is checked and adopted. */
   private mixedFrameChain: Promise<void> = Promise.resolve();
-  /** The GPU relayout is attached (UniformMixedFrame.setRelayout): a frame
-   * head runs the census, builder and adopt. Dynamic: every frame, over
-   * every tile. Requested and Full: requests only (syncMixedLayout), while
-   * they request an h tile. No host layout runs until it is detached. */
-  private mixedGpuLayout = false;
+  /** Who builds the mixed layout. host: the CPU, between frames
+   * (hostMixedLayout). Otherwise the GPU relayout is attached
+   * (UniformMixedFrame.setRelayout) and a frame head runs the census,
+   * builder and adopt; no host layout runs until it is detached. census:
+   * Dynamic's, every frame over every tile, the importance criteria on and
+   * the pressure band at its liquid bound. requests: Requested and Full's
+   * (syncMixedLayout), while they request an h tile; live: it must run
+   * every frame (bodies, or solid contact over solids). A live solid edit's
+   * join (mixedEditJoin) holds under any of them. */
+  private mixedLayout = MIXED_HOST;
+  private get mixedGpuLayout():boolean{return this.mixedLayout.kind!=="host";}
+  private get mixedCensus():boolean{return this.mixedLayout.kind==="census";}
+  private get mixedLive():boolean{return this.mixedLayout.kind==="requests"&&this.mixedLayout.live;}
   /** Free relayout receipt reads, and the one this frame's head copied into. */
   private readonly mixedRelayoutReads = new KeptStack<GPUBuffer>();
   private mixedRelayoutRead?: GPUBuffer;
@@ -1734,9 +1746,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return seen.size;
   }
   private readonly mixedEditTile:[number,number,number]=[0,0,0];
-  /** The attached relayout is Dynamic's census: the importance criteria on,
-   * the pressure band at its liquid bound. */
-  private mixedCensus=false;
   /** The builder's admission capacity: the h tiles the storage holds. undefined: detached. */
   private mixedReserved?:number;
   /** The largest need a deferred build reported that the storage does not hold yet. */
@@ -1756,8 +1765,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private mixedDeferrals={builds:0,tiles:0,changes:0};
   /** Bumped when the request changes: an older receipt's need is another request's. */
   private mixedRequestEpoch=0;
-  /** A requests-only census must run every frame: bodies, or solid contact over solids. */
-  private mixedLive=false;
   /** The next head must build: the request, the capacity or the roster changed since the last build. */
   private mixedStale=false;
   private mixedRosterKey="";
@@ -1868,8 +1875,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         // on the all-h start, and a census's build may ask for any stored
         // tile.
         frame.setRelayout(this.mixedRelayout());this.watchMixedAllocation();
-        this.mixedGpuLayout=true;this.mixedCensus=true;this.mixedRequest=undefined;this.resetMixedCapacity();
-        this.mixedBuilderStaticKey=undefined;this.mixedBuilderStaticOf=undefined;this.mixedRegionKey="";this.mixedRefusedKey="";this.mixedLive=false;this.mixedSynced=undefined;this.mixedEditJoin=undefined;
+        this.mixedLayout=MIXED_CENSUS;this.mixedRequest=undefined;this.resetMixedCapacity();
+        this.mixedBuilderStaticKey=undefined;this.mixedBuilderStaticOf=undefined;this.mixedRegionKey="";this.mixedRefusedKey="";this.mixedSynced=undefined;this.mixedEditJoin=undefined;
       }
       // Static h tiles reach the builder here, ahead of the build that reads
       // them, so the capacity holds the new ones before any receipt counts them.
@@ -1946,7 +1953,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if(joined)for(const t of joined)visit(t);
     if(swept)for(const t of swept)if(!joined?.has(t))visit(t);
     need=Math.min(tiles,need);
-    // The liquid moves the need: solid contact over solids, bodies.
+    // The liquid moves the need: solid contact over solids, bodies. Every tile already h (Full): nothing for a census to follow.
     const live=request.count<tiles&&(bodies.length>0||!!request.coupled);
     const refuse=(refusal:string)=>{
       // Nothing accepted yet: there is no generation to keep running.
@@ -1956,19 +1963,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.executionInfo.uniformDetail={...this.executionInfo.uniformDetail!,rejected:refusal};
       return false;
     };
-    // Haloed patches (QA) hold their first layout: no relayout of either kind.
-    const patch=false;
     if(this.mixedGpuLayout&&need===0){
       // Nothing is requested: zero detail is the host's all-4h layout, C = 0.
-      frame.setRelayout(undefined);this.mixedGpuLayout=false;this.mixedCensus=false;this.mixedReserved=undefined;
+      frame.setRelayout(undefined);this.mixedLayout=MIXED_HOST;this.mixedReserved=undefined;
       const refusal=this.hostMixedLayout(mask);
       if(refusal)throw new Error(`Uniform simulation detail: ${refusal}`);
       this.publishMixedCapacity();
-    }else if(!this.mixedGpuLayout&&(first||(fresh&&(need===0||patch)))){
+    }else if(!this.mixedGpuLayout&&(first||(fresh&&need===0))){
       const refusal=this.hostMixedLayout(mask);if(refusal)return refuse(refusal);
       this.publishMixedCapacity();
     }
-    if(need>0&&!patch){
+    if(need>0){
       // Admission before the request changes anything: the capacity its bound needs.
       let refusal=this.followMixedCapacity(need,extra,live,false);
       // Dynamic's generation stays; its band was the liquid's, a request's is every h tile.
@@ -1985,14 +1990,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           const listed=[...mask.keys()].sort((p,q)=>p-q);
           counted={tiles:listed.length,reach:this.mixedEditReach(listed)};
         }
-        frame.setRelayout(this.mixedRelayout(),frame.ownership.capacity.fineTiles,!!counted);this.mixedGpuLayout=true;this.staleMixed();this.mixedEdit=counted;
+        frame.setRelayout(this.mixedRelayout(),frame.ownership.capacity.fineTiles,!!counted);this.staleMixed();this.mixedEdit=counted;
       }else if(fresh||census)this.refreshRequestStatics(request);
-      this.mixedCensus=false;this.publishMixedCapacity();
+      // Attached here, or Dynamic's census the requests take over where it stands.
+      this.mixedLayout=live?MIXED_LIVE_REQUESTS:MIXED_REQUESTS;this.publishMixedCapacity();
     }
     if(fresh){this.mixedRegionKey=key;this.mixedRefusedKey="";this.publishDetail({diagnostics:request.tiles.diagnostics(this.detail.budgetPercent)});}
     else if(!this.mixedRefusedKey&&this.executionInfo.uniformDetail?.rejected)this.executionInfo.uniformDetail={...this.executionInfo.uniformDetail,rejected:undefined};
-    // Every tile already h (Full): nothing for a census to follow.
-    this.mixedLive=this.mixedGpuLayout&&live;
     this.mixedSynced={scene:this.scene,detail:this.detail,stamp:this.mixedSolidMaskStamp};
     return true;
   }
@@ -2214,10 +2218,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       {const h=this.mixedCensusHeld;h.stale=this.mixedStaleCount;h.revision=this.sceneRevision;h.dt=Math.fround(dt);h.bodies=this.mixedCensusBodies;
        h.padding=this.narrowBandFinePadding;h.percent=this.narrowBandAdaptiveBudgetPercent;h.fade=this.narrowBandAdaptiveFadeSeconds;h.sparse=this.narrowBandSparseParticleLifetime;}
     },adopted:encoder=>{
-      // Diagnostics only: a free read takes this build's receipt; mapped
-      // once the frame submits (readMixedRelayout), never awaited.
+      // A free read takes this build's receipt; mapped once the frame
+      // submits (readMixedRelayout), never awaited. Its need, admission and
+      // join release size the capacity (takeMixedReceipts): with every read
+      // still mapping, the layout is stale and the next head builds again.
       const read=this.mixedRelayoutReads.take();
-      if(read){const r=builder.receipt;encoder.copyBufferToBuffer(r.buffer,r.offset,read,0,r.words*4);this.mixedRelayoutRead=read;}
+      if(!read){this.staleMixed();return;}
+      const r=builder.receipt;encoder.copyBufferToBuffer(r.buffer,r.offset,read,0,r.words*4);this.mixedRelayoutRead=read;
     }};
   }
   /** The census's importance policy for these settings and this lattice
@@ -2341,7 +2348,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // Refresh the builder statics and census solid mask now: the next census reads them.
       this.refreshMixedBuilderStatics(solid);
       this.joinMixedEdit(solid.coupled,edit.tiles);
-    }else if(this.detail.policy!=="dynamic"&&true){
+    }else if(this.detail.policy!=="dynamic"){
       // Requests only: nothing else asks for a new solid's tiles when solid
       // contact is off, and a dry promotion skips them when it is on. The
       // join holds them at h for the build that displaces (syncMixedLayout
@@ -2700,24 +2707,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * lands when the clock next runs.
    */
   injectLiquidBall(ball: InjectedLiquidBall): void {
-    this.mixedFrame?.invalidateExtension();
-   
     if (!(ball.radius_m > 0)) return;
-    this.pendingDrop = uniformInjectedDrop(ball);
-    this.pendingDropPaged = false;
+    this.mixedFrame?.invalidate("fluid");
+    this.injectedDrop = { drop: uniformInjectedDrop(ball), paged: false };
   }
 
   /** The editor's water shapes, as far as the one-step drop source reaches: a ball, added. */
   async editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
-    this.mixedFrame?.invalidateExtension();
-   
     if (edit.operation !== "add" || edit.shape !== "ball") {
       return { accepted: false, reason: "This fluid method adds water as balls only; choose Sparse Geometric to remove water or drop other shapes." };
     }
     const frame = this.frame;
     const refusal = liveFluidEditRefusal(edit, { origin_m: frame.container_m, cellSize_m: frame.cellSize_m, dimensions: frame.cells });
     if (refusal) return { accepted: false, reason: refusal };
-    if (this.pendingDrop) return { accepted: false, reason: "The previous drop lands when the clock next runs; run the simulation first." };
+    if (this.injectedDrop) return { accepted: false, reason: "The previous drop lands when the clock next runs; run the simulation first." };
     this.injectLiquidBall({ centre_m: edit.center_m, radius_m: edit.radius_m });
     return { accepted: true };
   }
@@ -2741,7 +2744,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       return;
     }
     if (this.mixedFrameInFlight) { this.deferredFrameValues = {...values}; return; }
-    this.mixedFrame?.invalidateExtension();
+    this.mixedFrame?.invalidate("values");
     // The renderer reapplies the latest values before the next advance.
     const finite = (key: string, fallback: number, minimum: number, maximum: number) => {
       const value = Number(values[key]);
@@ -2926,8 +2929,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Initialization hook for manufactured GPU boundary fixtures. Public textures
    * are read-only presentation adapters when fields use page storage. */
   initializeVelocityForQA(values: Float32Array): void {
-    this.mixedFrame?.invalidateExtension();
     if(this.lastTime!==0 || values.length!==4*this.executionInfo.cellCount)throw new Error("Velocity fixture must initialize the complete field at t=0");
+    this.mixedFrame?.invalidate("fluid");
     this.upload3DF32(this.velocityA,values);
   }
 
@@ -3150,15 +3153,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // tiles of blocks stored when it runs, so pages first claimed by the
     // ball's own commit stay unmarked and the next census audits its liquid
     // there as absent.
-    const injected = !scheduled && this.pendingDropPaged ? this.pendingDrop : undefined;
+    const injected = !scheduled && this.injectedDrop?.paged ? this.injectedDrop.drop : undefined;
     const drop = scheduled ?? injected;
-    if (injected) { this.pendingDrop = undefined; this.pendingDropPaged = false; }
+    if (injected) this.injectedDrop = undefined;
     this.pageDrop = drop;
     // The scheduled drop the next step adds: its pages are asked for a step
     // early, so the census of its own step finds them stored.
     const schedule = this.scene.fluid.scheduledDrops, ahead = schedule ? uniformPagePoolDropAhead(schedule, stepEnd_s, dt, fixedStep_s ?? this.scene.numerics.maxDt_s) : -1;
     this.pageDropAhead = ahead < 0 ? undefined : this.scheduledDrops!.drops[ahead];
-    this.pageInjectedAhead = this.pendingDrop; this.pendingDropPaged = this.pendingDrop !== undefined;
+    const waiting = this.injectedDrop; this.pageInjectedAhead = waiting?.drop; if (waiting) waiting.paged = true;
     if (drop) {
       const cellVolume = c.width_m * c.height_m * c.depth_m
         / (this.containerCells[0] * this.containerCells[1] * this.containerCells[2]);
@@ -3336,45 +3339,46 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     await this.awaitFrameCompletion();
     this.refreshMixedAllocation();
     if(this.mixedFrame){
-      if(this.disposed||this.readbackPending)return this.executionInfo;
-      this.readbackPending=true;
-      this.statsReadback??=this.device.createBuffer({label:"Uniform diagnostics readback",size:264,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-      const totals=this.mixedDiagnostics!.totals;
-      try{
-        const encoder=this.device.createCommandEncoder();this.mixedDiagnostics!.encode(encoder);
+      const stats=this.statsReadback??=new StagedReadback(this.device,{label:"Uniform diagnostics readback",size:264});
+      // One read at a time; a read the solver's destroy cuts short answers the last info.
+      if(this.disposed||!stats.idle)return this.executionInfo;
+      const frame=this.mixedFrame,totals=this.mixedDiagnostics!.totals,budget=frame.narrowBandVolumeBudget;
+      const encoder=this.device.createCommandEncoder();this.mixedDiagnostics!.encode(encoder);
+      stats.encode(encoder,(e,staging)=>{
         // Words 0-5 the diagnostics' totals, 24-25 the carries of represented and fill.
-        encoder.copyBufferToBuffer(totals,0,this.statsReadback,0,24);encoder.copyBufferToBuffer(totals,24,this.statsReadback,96,8);
-        encoder.copyBufferToBuffer(this.params,32,this.statsReadback,80,12);
-        encoder.copyBufferToBuffer(this.mixedFrame.ownership.support,this.mixedFrame.ownership.capacity.tiles*16,this.statsReadback,24,16);
-        const budget=this.mixedFrame.narrowBandVolumeBudget;
-        if(budget){encoder.copyBufferToBuffer(budget,0,this.statsReadback,40,36);this.mixedFrame.requestNarrowBandVolumeProbe();}
-        this.device.queue.submit([encoder.finish()]);
-        await this.statsReadback.mapAsync(GPUMapMode.READ);const words=new Uint32Array(this.statsReadback.getMappedRange(),0,26).slice();
-        const represented=(words[0]!+4294967296*words[24]!)/2048,fill=(words[3]!+4294967296*words[25]!)/2048;
-        // The liquid's volume is the budget's measurement of phi, from the
-        // last step that took it (this read requests the next). The V
-        // texture is the pressure fill: an uncut, non-planar owner's is an
-        // eight-probe vote, an eighth of the owner per probe, so on a 4h
-        // surface its sum strays from phi's volume by percents.
-        let measured:number|undefined;
-        if(budget){const b=new Float32Array(words.buffer,40,9);if(b[1]!>0){if(b[4]!>0)measured=b[4]!;Object.assign(this.executionInfo,{
-          narrowBandVolumeControlRate_per_s:this.narrowBandVolumeControlSeconds>0?b[8]:0,
-          narrowBandTargetVolume_cells:b[0],narrowBandOutflowVolume_cells:b[2],
-          narrowBandVolumeShift_cells:b[3]!/Math.min(...this.mixedFrame.ownership.capacity.lattice.cellSize_m),
-          narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],
-          narrowBandVolumeBudgetDrift:((measured??fill)-b[0]!)/Math.max(1,b[0]!),
-        });}}
-        const volume=measured??fill,reference=Math.max(1,this.referenceVolumeCells);
-        Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
-          representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(fill-reference)/reference,volumeDrift:(volume-reference)/reference,
-          volumeTelemetrySource:measured===undefined?"dense-volume":"narrow-band-phi",frontTelemetrySource:"dense-volume",
-          front_m:new Float32Array(words.buffer)[20]!+words[1]!*this.frame.cellSize_m[0],
-          maxSpeed_m_s:new Float32Array(words.buffer)[2],uniformTwoLevelVelocity:this.twoLevelEnabled,
-          uniformTwoLevelFineReach:UNIFORM_TWO_LEVEL_FINE_REACH,uniformTwoLevelShellReach:this.twoLevelShellReach,
-          uniformTwoLevelFineTiles:words[4],uniformTwoLevelShellTiles:words[5],uniformTwoLevelTilesTotal:this.address.boxTiles,
-          uniformTwoLevelExtensionTiles:this.twoLevelEnabled,uniformMixedRegularTiles:words[7],uniformMixedGeneralTiles:words[8]});
-        return this.executionInfo;
-      }finally{if(this.statsReadback.mapState==="mapped")this.statsReadback.unmap();this.readbackPending=false;}
+        e.copyBufferToBuffer(totals,0,staging,0,24);e.copyBufferToBuffer(totals,24,staging,96,8);
+        e.copyBufferToBuffer(this.params,32,staging,80,12);
+        e.copyBufferToBuffer(frame.ownership.support,frame.ownership.capacity.tiles*16,staging,24,16);
+        if(budget)e.copyBufferToBuffer(budget,0,staging,40,36);
+      });
+      try{this.device.queue.submit([encoder.finish()]);}catch(error){stats.discard();throw error;}
+      if(budget)frame.requestNarrowBandVolumeProbe();
+      const words=await stats.read(bytes=>new Uint32Array(bytes,0,26).slice());
+      if(!words||this.disposed)return this.executionInfo;
+      const represented=(words[0]!+4294967296*words[24]!)/2048,fill=(words[3]!+4294967296*words[25]!)/2048;
+      // The liquid's volume is the budget's measurement of phi, from the
+      // last step that took it (this read requests the next). The V
+      // texture is the pressure fill: an uncut, non-planar owner's is an
+      // eight-probe vote, an eighth of the owner per probe, so on a 4h
+      // surface its sum strays from phi's volume by percents.
+      let measured:number|undefined;
+      if(budget){const b=new Float32Array(words.buffer,40,9);if(b[1]!>0){if(b[4]!>0)measured=b[4]!;Object.assign(this.executionInfo,{
+        narrowBandVolumeControlRate_per_s:this.narrowBandVolumeControlSeconds>0?b[8]:0,
+        narrowBandTargetVolume_cells:b[0],narrowBandOutflowVolume_cells:b[2],
+        narrowBandVolumeShift_cells:b[3]!/Math.min(...frame.ownership.capacity.lattice.cellSize_m),
+        narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],
+        narrowBandVolumeBudgetDrift:((measured??fill)-b[0]!)/Math.max(1,b[0]!),
+      });}}
+      const volume=measured??fill,reference=Math.max(1,this.referenceVolumeCells);
+      Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,
+        representedVolumeDrift:(represented-reference)/reference,rawVolumeDrift:(fill-reference)/reference,volumeDrift:(volume-reference)/reference,
+        volumeTelemetrySource:measured===undefined?"dense-volume":"narrow-band-phi",frontTelemetrySource:"dense-volume",
+        front_m:new Float32Array(words.buffer)[20]!+words[1]!*this.frame.cellSize_m[0],
+        maxSpeed_m_s:new Float32Array(words.buffer)[2],uniformTwoLevelVelocity:this.twoLevelEnabled,
+        uniformTwoLevelFineReach:UNIFORM_TWO_LEVEL_FINE_REACH,uniformTwoLevelShellReach:this.twoLevelShellReach,
+        uniformTwoLevelFineTiles:words[4],uniformTwoLevelShellTiles:words[5],uniformTwoLevelTilesTotal:this.address.boxTiles,
+        uniformTwoLevelExtensionTiles:this.twoLevelEnabled,uniformMixedRegularTiles:words[7],uniformMixedGeneralTiles:words[8]});
+      return this.executionInfo;
     }
     return this.executionInfo;
   }
@@ -3406,7 +3410,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Fence paused remapping so the renderer invalidates its retained surface
    * and publishes resolution status without advancing simulation time. */
   async refreshSceneTopology():Promise<void>{
-    this.mixedFrame?.invalidateExtension();
+    this.mixedFrame?.invalidate("scene");
     if(!this.mixedFrame)return;
     await this.awaitFrameCompletion();await this.device.queue.onSubmittedWorkDone();
   }
@@ -3428,9 +3432,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.scene = scene; this.rigidSystem.setScene(scene);
       return;
     }
-    this.mixedFrame?.invalidateExtension();
     this.appliedRuntimeValues = undefined;
     if (this.mixedFrameInFlight) { this.deferredFrameScene = scene; return; }
+    this.mixedFrame?.invalidate("scene");
     if ((scene.solidBoundary?.collision === "voxels") !== this.voxelCollision) throw new Error("Procedural collision changed; reset the scene to apply it");
     const boundaryImage = this.voxelCollision ? undefined : proceduralSolidField(scene)?.pack();
     if ((boundaryImage?.length ?? 0) > this.solidBoundaryCapacity) throw new Error("Procedural boundary capacity changed; reset the scene to apply it");
@@ -3496,8 +3500,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private inflowBoundaryOf?: { inflow: SceneDescription["fluid"]["inflow"]; container: SceneDescription["container"] };
 
   syncRigidBodies(bodies: readonly RigidBodyState[]): void {
-    this.mixedFrame?.invalidateExtension();
     if (this.mixedFrameInFlight) { this.deferredFrameBodies = structuredClone([...bodies]); return; }
+    this.mixedFrame?.invalidate("bodies");
     this.rigidSystem.syncBodies(bodies.some(body => body.description.prescribedMotion || body.description.poseTrack)
       ? bodies.map(body => samplePrescribedRigidBody(body, this.lastTime, 0)) : bodies);
   }
@@ -3514,7 +3518,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.sculptCollision?.destroy();
     this.mixedFrame?.destroy();this.mixedPressureGeometry?.target.destroy();this.mixedPressureGeometry?.centerPhi.destroy();
     this.detailStorage?.destroy();
+    // Every relayout read: free, just copied, or mapping (each mapped one has a slot).
     this.mixedDynamic?.destroy();this.mixedBuilder?.destroy();for(let i=0;i<this.mixedRelayoutReads.size;i++)this.mixedRelayoutReads.at(i).destroy();this.mixedRelayoutRead?.destroy();this.mixedBodies?.destroy();
+    for(const read of this.mixedRelayoutSlots.keys())read.destroy();
     for (const texture of new Set([
       this.velocityA, this.velocityB, this.velocityC, this.velocityD,
       this.pressureA, this.pressureB, this.volumeA, this.volumeB,
@@ -3540,7 +3546,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.fieldPages.destroy();
     this.rigidSystem.destroy(); this.rigidExchange.destroy();
     this.statsReadback?.destroy();
-    // An outstanding map rejects on destroy; `readPressureCycleDemand` catches
-    // it and the `disposed` guard keeps it from touching a dead solver.
+    // An outstanding map rejects on destroy: the frame receipts' handlers
+    // (failMixedFrame), the relayout reads' (failMixedRelayout) and readStats
+    // check `disposed` first. Nothing waits on frames that will never settle.
+    const idle=this.mixedFramesIdle;this.mixedFramesIdle=undefined;idle?.resolve();
   }
 }

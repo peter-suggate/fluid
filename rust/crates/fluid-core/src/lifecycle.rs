@@ -265,6 +265,14 @@ fn prepare_candidate_impl(
     next_arena
         .free_leaf_ids
         .retain(|id| !active_ids.contains(id));
+    // Releases still waiting for publication carry over, oldest first: a
+    // second transition before it must not drop them (their leaves would
+    // never be freed). One the candidate activates again is live, not pending.
+    let mut pending = std::mem::take(&mut next_arena.retirement.pending_dynamic_release_ids);
+    pending.retain(|id| {
+        !active_ids.contains(id) && !retirement.pending_dynamic_release_ids.contains(id)
+    });
+    retirement.pending_dynamic_release_ids.splice(0..0, pending);
     next_arena.retirement = retirement;
     Ok((candidate, next_arena))
 }
@@ -310,6 +318,40 @@ mod tests {
         commit_candidate(&mut accepted, reuse, &mut arena).unwrap();
         assert!(arena.free_leaf_ids.is_empty());
         assert_eq!(accepted.topology.bricks[1].seed.key, 19);
+    }
+    #[test]
+    fn pending_releases_survive_an_unpublished_transition() {
+        let mut accepted = state(serde_json::json!([brick(0, 0, 0, true)]));
+        let mut arena = LeafArena::new(&accepted.topology, Some(1)).unwrap();
+        let generation = |bricks: serde_json::Value, generation: u32| {
+            let mut s = state(bricks);
+            s.topology.graph.topology_generation = generation;
+            s
+        };
+        let retired = || serde_json::json!([brick(0, 0, 0, true), brick(1, 1, 1, false)]);
+        commit_candidate(&mut accepted, generation(serde_json::json!([brick(0, 0, 0, true), brick(1, 1, 1, true)]), 2), &mut arena).unwrap();
+        commit_candidate(&mut accepted, generation(retired(), 3), &mut arena).unwrap();
+        // A second transition before publication keeps the first one's release.
+        commit_candidate(&mut accepted, generation(retired(), 4), &mut arena).unwrap();
+        assert_eq!(arena.retirement.pending_dynamic_release_ids, vec![1]);
+        arena.release_after_publication().unwrap();
+        assert_eq!(arena.free_leaf_ids, vec![1]);
+    }
+    #[test]
+    fn a_pending_release_activated_again_is_live() {
+        let mut accepted = state(serde_json::json!([brick(0, 0, 0, true)]));
+        let mut arena = LeafArena::new(&accepted.topology, Some(1)).unwrap();
+        let generation = |active: bool, generation: u32| {
+            let mut s = state(serde_json::json!([brick(0, 0, 0, true), brick(1, 1, 1, active)]));
+            s.topology.graph.topology_generation = generation;
+            s
+        };
+        commit_candidate(&mut accepted, generation(true, 2), &mut arena).unwrap();
+        commit_candidate(&mut accepted, generation(false, 3), &mut arena).unwrap();
+        commit_candidate(&mut accepted, generation(true, 4), &mut arena).unwrap();
+        assert!(arena.retirement.pending_dynamic_release_ids.is_empty());
+        arena.release_after_publication().unwrap();
+        assert!(arena.free_leaf_ids.is_empty());
     }
     #[test]
     fn failed_capacity_transfer_preserves_accepted_generation_and_fields() {

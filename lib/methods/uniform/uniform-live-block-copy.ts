@@ -28,6 +28,9 @@ export class UniformLiveBlockCopy{
  private readonly next=new Uint32Array(4*SPANS);
  private pipeline?:GPUComputePipeline;
  private bound?:{source:Binding;target:Binding;group:GPUBindGroup};
+ /** The spans moved since the last encode: a visit copies only the blocks
+  * the live lists name, so the new spans' other blocks need the sweep. */
+ private spansMoved=false;
  constructor(private readonly device:GPUDevice,private readonly pool:UniformPagePool,private readonly label:string,spans:readonly UniformBlockSpan[]){
   this.visit=new UniformLiveVisit(pool);
   this.params=device.createBuffer({label,size:16*SPANS,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -49,12 +52,12 @@ export class UniformLiveBlockCopy{
   for(let i=0;i<spans.length;i++){const s=spans[i]!;next[4*i]=s.from;next[4*i+1]=s.to;next[4*i+2]=s.words;}
   let changed=false;for(let i=0;i<next.length;i++)if(next[i]!==this.words[i])changed=true;
   if(!changed)return;
-  this.words.set(next);this.device.queue.writeBuffer(this.params,0,this.words);
+  this.words.set(next);this.device.queue.writeBuffer(this.params,0,this.words);this.spansMoved=true;
  }
  /** Copies the spans' visited blocks from source to target. */
  encode(encoder:GPUCommandEncoder,source:Binding,target:Binding):void{
   if(!this.pipeline)throw new Error(`${this.label} is not initialized`);
-  let sweep=this.visit.sweep();
+  let sweep=this.visit.sweep()||this.spansMoved;this.spansMoved=false;
   if(!this.bound||!same(this.bound.source,source)||!same(this.bound.target,target)){
    this.bound={source,target,group:this.device.createBindGroup({label:this.label,layout:this.layout,entries:[
     {binding:0,resource:{buffer:this.pool.state}},{binding:1,resource:bindingOf(source)},{binding:2,resource:bindingOf(target)},{binding:3,resource:{buffer:this.params}}]})};

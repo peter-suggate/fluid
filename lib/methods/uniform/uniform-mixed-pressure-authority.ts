@@ -815,7 +815,7 @@ ${this.resident?`// A group per page (fixed grid, strided): the 4h owners of an 
    ...(this.resident?["absent"]:[]),...(this.bodyRegional?["surfaceRegions"]:[]),...(this.heldRegional?["surfaceHeld"]:[])];
  }
  /** Every region's retained results are rebuilt by the next pass: a host
-  * write of phi, solids, volume or ownership (invalidateExtension). */
+  * write of phi, solids, volume or ownership (UniformMixedFrame.invalidate). */
  invalidate():void{this.forced=true;}
  /** A frame head encoded rigid bodies: the swept-body mask is this head's.
   * Two heads before one regional pass would lose the first's support. */

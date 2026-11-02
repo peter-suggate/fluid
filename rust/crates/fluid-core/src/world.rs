@@ -1466,10 +1466,8 @@ impl World {
         .map_err(|e| ValidationError(format!("resolution: {e:?}")))?;
         self.view_history
             .capture_activity(&self.state, &decision.receipt);
-        self.resolution_policy = decision.state;
         let changed =
             decision.receipt.candidate_generation > self.state.topology.graph.topology_generation;
-        self.resolution_receipt = Some(decision.receipt);
         if changed {
             if level_set_volume && decision.candidate_bricks.iter().any(|b| {
                 b.active && self.state.topology.bricks.iter().any(|old|
@@ -1483,6 +1481,10 @@ impl World {
             self.transition(decision.candidate_bricks, dt_s)?;
             observe("resolution-transfer-after", &self.state.topology.graph, &self.state.fields);
         }
+        // The decision's history and receipt describe the generation it
+        // planned: committed once that generation is the accepted one.
+        self.resolution_policy = decision.state;
+        self.resolution_receipt = Some(decision.receipt);
         self.refresh_surface()?;
         self.arena.release_after_publication()?;
         self.stage_timings.resolution_publication = resolution_clock.elapsed_nanoseconds();
@@ -1598,9 +1600,8 @@ impl World {
         receipt.bricks_promoted = decision.receipt.promoted_brick_count;
         self.view_history
             .capture_activity(&self.state, &decision.receipt);
-        self.resolution_policy = decision.state;
-        self.resolution_receipt = Some(decision.receipt.clone());
         if decision.receipt.candidate_generation > generation {
+            // A refused transition keeps the accepted decision state; its fault is published.
             if let Err(error) = self.transition(decision.candidate_bricks, self.timestep_s) {
                 receipt.fault = Some(crate::NumericalFault {
                     stage: format!("injection-transfer: {error}"),
@@ -1612,6 +1613,8 @@ impl World {
                 return Ok(());
             }
         }
+        self.resolution_policy = decision.state;
+        self.resolution_receipt = Some(decision.receipt);
         let dose = apply_dose(&self.state.topology.graph, &mut self.state.fields, drop)?;
         if let Some(surface) = injected_surface {
             // Accepted, so the ball now stands in both authorities. The derived

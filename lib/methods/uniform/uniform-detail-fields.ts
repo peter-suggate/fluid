@@ -594,11 +594,8 @@ export class UniformDetailStorage{
   if(this.installed)throw new Error("Uniform detail storage installs its first layout once");
   this.installed=true;
 
-  let all:boolean;
-  {
-   // Nothing is deposited yet: an h capacity takes the uploads as they are.
-   all=this.held()>0;if(all){this.installing=true;try{this.admit();}finally{this.installing=false;}}
-  }
+  // Nothing is deposited yet: an h capacity takes the uploads as they are.
+  const all=this.held()>0;if(all)this.admit();
   if(this.pending.has(live.velocityScratch))throw new Error("The scratch velocity has no initial upload");
   // Slots from the start (slotFromStart): a slotless block holds no h texel
   // for the remap from h to coarsen, so the bases take the layout's 4h tiles
@@ -652,18 +649,23 @@ export class UniformDetailStorage{
  }
 
  // The domain placement (UniformDetailDomain): one generation of every field at a time.
+ /** base: the fields are their base blocks (C = 0). resident: their
+  * logical h textures. retiring: the capacity returned to zero under a
+  * resident generation, and the remap that coarsens its last h tiles still
+  * reads it (encodeRetire). retired: that remap is encoded; commitRetire
+  * drops the generation. A capacity above zero again before the commit
+  * keeps it resident (follow).
+  *
+  *   base ─admit→ resident ─follow(0)→ retiring ─encodeRetire→ retired ─commitRetire→ base
+  *                    ↑──────────── follow(C > 0) ─────────────┘ */
+ private residency:"base"|"resident"|"retiring"|"retired"="base";
  /** The fields are their logical h textures (else their base blocks). */
- private resident=false;
+ private get resident():boolean{return this.residency!=="base";}
  /** The ownership whose h-tile capacity residency follows (prepare). */
  private simulation?:UniformMixedOwnership;
  /** The page pool whose blocks the ring kernels visit (prepare; none: every tile key). */
  private pool?:UniformPagePool;
  private transfers?:DomainKernels;
- /** The capacity is zero under a resident generation: the remap that
-  * coarsens its last h tiles still reads it (encodeRetire). */
- private retiring=false;
- /** That remap is encoded: commitRetire drops the generation. */
- private retired=false;
  private held():number{
   if(!this.simulation)throw new Error("Uniform detail storage: the domain placement follows a prepared ownership's capacity");
   return this.simulation.capacity.fineTiles;
@@ -708,8 +710,8 @@ export class UniformDetailStorage{
   const want=this.held()>0;
   if(want&&!this.resident)this.admit();
   // A retirement that was never committed: the h generation stays.
-  if(want)this.retired=false;
-  this.retiring=!want&&this.resident;
+  else if(want)this.residency="resident";
+  else if(this.residency==="resident")this.residency="retiring";
  }
 
  /** The previous generation's textures, destroyed once the work submitted
@@ -730,11 +732,8 @@ export class UniformDetailStorage{
   // Compacted h stores come back with no block holding a slot: the relayout's claim gives them
   // (slots from the start: the first layout's, claimFirst).
   if(this.sparse){this.writeSlots(this.firstSlots??new Uint32Array(this.layout.address.blocks));this.firstSlots=undefined;}
-  this.resident=true;this.publishTable();this.rebind();this.resized();
-  // QA: a fresh h generation is poison throughout (the first layout's uploads fill it instead).
-
+  this.residency="resident";this.publishTable();this.rebind();this.resized();
  }
- private installing=false;
  private ringGroups=new WeakMap<GPUBuffer,{key:GPUTexture;groups:GPUBindGroup[]}>();
  private other():UniformMixedOwnership{
   const others=[...this.ownerships].filter(o=>o!==this.simulation);
@@ -780,16 +779,16 @@ export class UniformDetailStorage{
   * bases already hold every canonical texel. The fields stay the h textures
   * until commitRetire. */
  private encodeRestriction(_encoder:GPUCommandEncoder):void{
-  if(this.retiring)this.retired=true;
+  if(this.residency==="retiring")this.residency="retired";
  }
  /** After the encoder of encodeRetire is submitted: the bases are the
   * fields, every group binds them, and the h textures go once the work
   * that read them is done. Without a pending retirement, nothing. */
  commitRetire():void{
-  if(!this.retired)return;
-  this.retired=false;this.retiring=false;const old:GPUTexture[]=[];
+  if(this.residency!=="retired")return;
+  const old:GPUTexture[]=[];
   for(const h of this.following){old.push(this.physicals.get(h)!);this.physicals.set(h,this.bases.get(h)!);}
-  this.resident=false;this.publishTable();this.rebind();this.resized();this.release(old);
+  this.residency="base";this.publishTable();this.rebind();this.resized();this.release(old);
  }
  private kernelsOfDomain():DomainKernels{return this.transfers!;}
  /** The ring kernels and the h slots' init are built with the storage:
@@ -961,6 +960,7 @@ fn drShare(t:u32){
   if(!this.transfers||!this.installed)throw new Error("Uniform detail storage compacts after its first layout and prepare()");
   const device=this.device,a=this.layout.address,B=a.blocks,held=this.simulation!.presentation.buffer;
   const blocks=await this.need(held,held);
+  if(!this.resident||this.sparse)throw new Error("Uniform detail storage: the h generation retired or compacted while compact read its need");
   this.slotCapacity=uniformFineSlotCapacity(B,a.blockGrid,blocks.length,requested);
   const slots=uniformFineSlotsOf(B,blocks);
   // The new h stores: each needed block's texels copied to its slot, the AIR block's to the sentinel (what the
@@ -1027,6 +1027,7 @@ fn drShare(t:u32){
   const next=device.createBuffer({label:"Uniform detail first layout tile words",size:4*layout.tiles.length,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   let blocks:number[];
   try{device.queue.writeBuffer(next,0,Uint32Array.from(layout.tiles));blocks=await this.need(this.simulation!.presentation.buffer,next);}finally{next.destroy();}
+  if(this.resident||this.installed)throw new Error("Uniform detail storage: the first layout installed while claimFirst read its need");
   if(blocks.length>this.slotCapacity)throw new RangeError(`Uniform detail storage: the first layout's detail ring needs ${blocks.length} h slots; the slot rule holds ${this.slotCapacity}`);
   const slots=uniformFineSlotsOf(B,blocks);this.firstSlots=slots;this.writeSlots(slots);
  }
@@ -1038,7 +1039,8 @@ fn drShare(t:u32){
   * retirement is marked for commitRetire. */
  encodeRetire(encoder:GPUCommandEncoder):void{
   this.encodeRestriction(encoder);
-  if(this.resident&&this.sparse){this.slots.encodeRelease(encoder,this.simulation!.presentation.buffer);this.encodePublish(encoder);}
+  // The release moves the slots on the GPU: the host's assignment is stale (as after a claim).
+  if(this.resident&&this.sparse){this.hostSlots=undefined;this.slots.encodeRelease(encoder,this.simulation!.presentation.buffer);this.encodePublish(encoder);}
  }
  /** Logical readback (tight, as upload takes it): loads as the accessors do. */
  async read(texture:GPUTexture):Promise<Float32Array>{

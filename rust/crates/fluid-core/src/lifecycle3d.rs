@@ -381,6 +381,14 @@ pub fn prepare_candidate_3d(
     next_arena
         .free_leaf_ids
         .retain(|id| !active_ids.contains(id));
+    // Releases still waiting for publication carry over, oldest first: a
+    // second transition before it must not drop them (their leaves would
+    // never be freed). One the candidate activates again is live, not pending.
+    let mut pending = std::mem::take(&mut next_arena.retirement.pending_dynamic_release_ids);
+    pending.retain(|id| {
+        !active_ids.contains(id) && !retirement.pending_dynamic_release_ids.contains(id)
+    });
+    retirement.pending_dynamic_release_ids.splice(0..0, pending);
     next_arena.retirement = retirement;
     Ok((candidate, next_arena))
 }
@@ -583,6 +591,22 @@ mod tests {
             parent.state_volume().to_bits()
         );
         assert!(arena.authored_leaf_ids.contains(&0));
+    }
+
+    #[test]
+    fn merged_children_stay_pending_through_an_unpublished_transition() {
+        let parent = parent_or_children(false, 1);
+        let mut arena = LeafArena::new_3d(&parent.topology, Some(8)).unwrap();
+        arena.free_leaf_ids = (1..=8).collect();
+        let (split, arena) = prepare_candidate_3d(&parent, parent_or_children(true, 2), &arena).unwrap();
+        let (merged, arena) = prepare_candidate_3d(&split, parent_or_children(false, 3), &arena).unwrap();
+        let (_, mut arena) = prepare_candidate_3d(&merged, parent_or_children(false, 4), &arena).unwrap();
+        assert_eq!(
+            arena.retirement.pending_dynamic_release_ids,
+            (1..=8).collect::<Vec<_>>()
+        );
+        arena.release_after_publication().unwrap();
+        assert_eq!(arena.free_leaf_ids, (1..=8).collect::<Vec<_>>());
     }
 
     #[test]

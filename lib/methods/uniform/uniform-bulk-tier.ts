@@ -1,4 +1,5 @@
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
+import { StagedReadback } from "../../core/staged-readback";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPick, uniformDetailPipeline, type UniformDetailGroup } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -71,7 +72,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
   /** The record: words the pressure arena holds after its pool B (adopt). */
   get record(): { buffer: GPUBuffer; offset: number; size: number } { if (!this.held) throw new Error("The 16h bulk tier has no record"); return this.held; }
   readonly faces: GPUTexture;
-  private readonly readback: GPUBuffer;
+  private readonly readback: StagedReadback;
   private pipeline?: GPUComputePipeline;
   private promotePipeline?: GPUComputePipeline;
   private group?: UniformDetailGroup;
@@ -86,7 +87,7 @@ export class UniformBulkTier implements UniformMixedPressureBulk {
     const texels = UNIFORM_BULK_FACE_TEXELS * this.regions, rows = Math.ceil(texels / UNIFORM_BULK_FACE_WIDTH);
     if (rows > device.limits.maxTextureDimension2D) throw new Error(`The 16h bulk faces need ${rows} rows`);
     this.faces = device.createTexture({ label: "Uniform bulk tier faces", size: [UNIFORM_BULK_FACE_WIDTH, rows], format: "r32float", usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC });
-    this.readback = device.createBuffer({ label: "Uniform bulk tier counts", size: 64, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    this.readback = new StagedReadback(device, { label: "Uniform bulk tier counts", size: 64 });
   }
   /** Once, when the pressure arena exists: its record words (bulkRecord). */
   adopt(record: { buffer: GPUBuffer; offset: number; size: number }): void {
@@ -409,10 +410,11 @@ fn bPageReach(page:vec3i,t:vec3i)->u32{
   }
   /** Diagnostics (a readback): the last selection's counts. */
   async readCounts(): Promise<Record<keyof typeof UNIFORM_BULK_COUNT, number> & { listed: number }> {
-    const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(this.record.buffer, this.record.offset + 4 * UNIFORM_BULK_HEADER(this.regions), this.readback, 0, 36);
-    this.device.queue.submit([encoder.finish()]); await this.readback.mapAsync(GPUMapMode.READ);
-    const w = new Uint32Array(this.readback.getMappedRange().slice(0, 36)); this.readback.unmap();
+    const encoder = this.device.createCommandEncoder(), from = this.record.offset + 4 * UNIFORM_BULK_HEADER(this.regions);
+    if (!this.readback.encode(encoder, (e, staging) => e.copyBufferToBuffer(this.record.buffer, from, staging, 0, 36))) throw new Error("Uniform bulk tier counts: a read is already in flight");
+    this.device.queue.submit([encoder.finish()]);
+    const w = await this.readback.read(bytes => new Uint32Array(bytes.slice(0, 36)));
+    if (!w) throw new Error("Uniform bulk tier counts: the tier was destroyed during the read");
     const C = UNIFORM_BULK_COUNT;
     return { members: w[C.members]!, eligible: w[C.eligible]!, structural: w[C.structural]!, error: w[C.error]!, entered: w[C.entered]!, left: w[C.left]!, closed: w[C.closed]!, listed: w[8]! };
   }

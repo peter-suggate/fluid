@@ -665,7 +665,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   * as its launches would: move, reconstruct, clearAir, retire, redistance,
   * transfer, snapshot and refine are not encoded. activity is: its
   * plane is the region heat's particle evidence, which ends an idle run. */
- private quiet=false;private quietLast=false;
+ private quiet=false;
  private particleGroups=NARROW_BAND_PARTICLE_GRID;
  private idleNow=false;
  get idle():boolean{return this.idleNow;}
@@ -675,8 +675,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   // HOT/unknown frames retain the populated-throughput grid. The smaller
   // direct grid still strides every sample if work grows before its receipt.
   this.particleGroups=cold.ceiling<UNIFORM_REGION_TIER.hot?NARROW_BAND_QUIET_PARTICLE_GRID:NARROW_BAND_PARTICLE_GRID;
-  this.idleNow=quiet&&this.quietLast&&this.freeze!==undefined&&this.started;
-  this.quiet=quiet;this.quietLast=quiet;
+  // this.quiet is still the last advance's here.
+  this.idleNow=quiet&&this.quiet&&this.freeze!==undefined&&this.started;
+  this.quiet=quiet;
  }
  attachFreeze(freeze:UniformColdFreeze|undefined):void{
   if(Object.keys(this.groups).length||this.freeze)throw new Error("Narrow-band FLIP: the freeze attaches once, before bind");
@@ -2142,13 +2143,19 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   if(!this.previousCrossings)this.run(encoder,planned?this.crossingSearches.get(batch)??batch:batch,this.crossingPass);
   this.crossingPass?.end();this.crossingPass=undefined;
  }
- noteReceipt(words:Uint32Array):void{
-  this.count=words[1]!;this.reseedClipped=words[2]!;this.reseedClippedTotal+=words[2]!;
-  const bits=this.receiptBits,distances=this.receiptDistances,d=this.diagnostics;
-  bits[0]=words[4]!;bits[1]=words[5]!;
-  d.beforeMaxOutside=this.measureTraces?distances[0]!:NaN;d.unsupported=words[7]!;
-  // The surface census runs while traces are measured (the deposit's).
-  d.afterMaxOutside=this.measureTraces?distances[1]!:NaN;d.outsideSurface=this.measureTraces?words[6]!:NaN;d.deepInterior=this.measureTraces?words[8]!:NaN;
+ /** latest: no later frame's receipt was noted (receipts can finish out of
+  * order): only then are its counts the current ones. Every receipt is
+  * checked and adds its clipped reseeds. */
+ noteReceipt(words:Uint32Array,latest:boolean):void{
+  this.reseedClippedTotal+=words[2]!;
+  if(latest){
+   this.count=words[1]!;this.reseedClipped=words[2]!;
+   const bits=this.receiptBits,distances=this.receiptDistances,d=this.diagnostics;
+   bits[0]=words[4]!;bits[1]=words[5]!;
+   d.beforeMaxOutside=this.measureTraces?distances[0]!:NaN;d.unsupported=words[7]!;
+   // The surface census runs while traces are measured (the deposit's).
+   d.afterMaxOutside=this.measureTraces?distances[1]!:NaN;d.outsideSurface=this.measureTraces?words[6]!:NaN;d.deepInterior=this.measureTraces?words[8]!:NaN;
+  }
   // Persistent samples own the budget first. At capacity optional reseeding
   // is deferred (reseedClipped); never destroy a surface to make room for it.
   // Liquid a source or the initial band must add has no such deferral.
