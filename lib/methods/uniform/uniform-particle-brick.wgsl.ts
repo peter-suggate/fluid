@@ -119,7 +119,7 @@ fn nbRefineDirect(s:Particle){
  let home=umTileAt(vec3u(s.position.xyz)/4u);
  nbRefineJoins(nbRefineBox(s,ballistic,home,(atomicLoad(&bins[NB_BAND_REACH+home])&1u)!=0u));
 }
-const PB_ALONG:i32=7;const PB_ACROSS:i32=6;const PB_WINDOW:u32=252u;const PB_NODES:u32=756u;const PB_LANES:u32=192u;
+const PB_ALONG:i32=7;const PB_ACROSS:i32=6;const PB_WINDOW:u32=252u;const PB_NODES:u32=756u;override PB_LANES:u32=192u;
 // Momentum in 1/8192 of the velocity unit, weight in 1/65536: an i32 node sum
 // holds weight 32768 and momentum 262144 (velocity times weight).
 const PB_MOMENTUM:f32=8192.0;const PB_WEIGHT:f32=65536.0;
@@ -154,7 +154,9 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}${merge?",mass:f32":""
  }
 }
 // Fixed direct groups stride the occupied tile list's current GPU count.
-@compute @workgroup_size(192) fn transferDeposit(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+// The launch and all staging/particle/flush strides share PB_LANES.
+// FLIP specializes to 128; APIC retains the validated 192-lane shape.
+@compute @workgroup_size(PB_LANES) fn transferDeposit(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  // Uniforms: both are uniform control flow.
  if(!nbParticlesLive()){return;}
  let fits=nbTransferFits();

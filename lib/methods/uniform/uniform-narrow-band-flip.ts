@@ -17,7 +17,9 @@ import { narrowBandArenaWGSL, narrowBandArenaCanonicalWGSL } from "./uniform-sur
 import { UNIFORM_BRICK_TABLE_ENTRIES, uniformBrickTableClear, uniformBrickTableWGSL, uniformBrickTableWords } from "./uniform-brick-table";
 import { narrowBandNearestEntries, narrowBandNearestControlEntries } from "./uniform-narrow-band-nearest.wgsl";
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
-import { narrowBandTerrainContactWGSL, narrowBandRigidContactWGSL } from "./uniform-particle-contact.wgsl";
+import { narrowBandTerrainContactSource, narrowBandRigidContactSource } from "./uniform-particle-contact.wgsl";
+import { narrowBandBodyWindowWGSL } from "./uniform-particle-body-window.wgsl";
+import { narrowBandClearWalkWGSL } from "./uniform-particle-clear-walk.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { NB_SLAB_SEEDS_WORD, NB_SLAB_SORT_MAX_WORD, particleSlabSortEntries, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, NARROW_BAND_SURFACE_RADIUS, narrowBandSurfaceWGSL, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
@@ -865,8 +867,8 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
 ${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined,unitTaps&&!slots?"unitHalo":undefined)}
 ${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
 ${uniformMixedVertexBuriedWGSL}
-${narrowBandTerrainContactWGSL}
-${narrowBandRigidContactWGSL}
+${narrowBandTerrainContactSource("nbMoveBodyAt(q)")}
+${narrowBandRigidContactSource("nbMoveBodyMask(point)")}
 ${uniformMixedSourceWGSL(16)}
 // Allocation and scheduling cannot select different sampling arithmetic.
 // Every particle uses the same compiled general interpolant.
@@ -1089,6 +1091,8 @@ ${unitTaps&&!slots?"var<workgroup> nbWinHome:array<vec4i,64>;":""}
 var<private> nbWinLo:vec3i;
 var<private> nbWinOn:bool=false;
 fn nbWinIndex(t:vec3i)->u32{let l=t-nbWinLo;if(!nbWinOn||any(l<vec3i(0))||any(l>vec3i(3))){return 64u;}return u32(l.x+4*l.y+16*l.z);}
+${narrowBandBodyWindowWGSL}
+${narrowBandClearWalkWGSL}
 fn nbWinStage(lane:u32){
  let t=nbWinLo+vec3i(umCorner(lane,4u));let at=umTileAt(vec3u(t));let key=umTileKey(t);var flags=0u;
  ${unitTaps&&!slots?"if(umCachedFineTile(at)){flags|=NB_WIN_FINE;}nbWinHome[lane]=umUnitHaloHome(UMSampleTile(vec3f(0.0),t,at));":""}
@@ -1098,6 +1102,7 @@ fn nbWinStage(lane:u32){
  }
  if(nbTileCold(key)){flags|=NB_WIN_COLD;}
  if((atomicLoad(&bins[NB_BAND_REACH+at])&1u)!=0u){flags|=NB_WIN_REACH;}
+ flags|=nbBodyTileMask(t)<<8u;
  nbWinFlags[lane]=flags;nbWinHeat[lane]=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+at]));
 }
 // nbTargetHeat, nbSampleCold and the depth's reach, through the window.
@@ -1343,7 +1348,12 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
    // gains nothing along an axis a wall has stopped, so it rests in a corner.
    let stride=travel/f32(walk);var landed=false;var floorCell=vec3i(0);var free=vec3f(1);
    let inset=nbSampleRadius(nbParticleMass(p));
+   let clearWalk=nbClearWalk();
    for(var j=1u;j<=walk;j++){
+    if(clearWalk){
+     for(var axis=0u;axis<3u;axis++){var point=q;point[axis]+=stride[axis];q=point;}
+     continue;
+    }
     let start=q;
     // Bodies matter only where a present body's pose lies within two cells
     // of the start's 16h region (the head's body region mask). Elsewhere the
@@ -1377,11 +1387,11 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
      if(!nbVoxelBlocked(rigidContact.position)){q=rigidContact.position;p.velocity=vec4f(rigidContact.velocity,p.velocity.w);}
     }
     let boundaryContact=nbProceduralContact(start,q,p.velocity.xyz,inset);
-    if(!nbVoxelBlocked(boundaryContact.position)&&(!bodyNear||umBodyAt(umSolidTraceWorld(boundaryContact.position))<0)){q=boundaryContact.position;p.velocity=vec4f(boundaryContact.velocity*free,p.velocity.w);}
+    if(!nbVoxelBlocked(boundaryContact.position)&&(!bodyNear||nbMoveBodyAt(boundaryContact.position)<0)){q=boundaryContact.position;p.velocity=vec4f(boundaryContact.velocity*free,p.velocity.w);}
     if(umSolidHasTerrain()){
      let contact=nbTerrainContact(start,q,p.velocity.xyz,inset);
      // A normal correction must not cross an authored voxel or a body.
-     if(!nbVoxelBlocked(contact.position)&&(!bodyNear||umBodyAt(umSolidTraceWorld(contact.position))<0)){q=contact.position;}
+     if(!nbVoxelBlocked(contact.position)&&(!bodyNear||nbMoveBodyAt(contact.position)<0)){q=contact.position;}
      p.velocity=vec4f(contact.velocity*free,p.velocity.w);
     }
    }
@@ -1835,7 +1845,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   await Promise.all([...(this.separationPrepass?["separationPrepass"]:[]),"activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare",...particleSlabSortEntries(this.capacity),"surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine",...(this.sharedDeposit?["transferClear"]:[])].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources","separationPrepass"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="slabSortMerge"?{nbCanonicalWidth:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="slabSortMerge"?{nbCanonicalWidth:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.deltaResources){

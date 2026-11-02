@@ -4,44 +4,59 @@
  * dispatch runs and its outputs are kept, then each variant runs once from the
  * same inputs (outputs compared word by word, with the largest f32 ULP gap),
  * then timed passes alternate the variants in rotating order, each pass
- * dispatching its pipeline `inner` times back to back (Dawn timestamps are
- * quantized to 65.536 us, so one dispatch is too coarse). Production outputs
+ * dispatching its pipeline `inner` times back to back. Timestamp quantization
+ * is disabled; accumulating kernels require inner=1. Production outputs
  * are restored before the frame continues.
  * node --import tsx tools/probe-nbflip-variant-replay.ts --scene=sparse-cm12-long-dam-break \
- *   --frames=60 --entries=advectParticles --variants=aa,ctx --repeats=5 --inner=8 [--dump=DIR] [--nth=0] [--scene-file=JSON]
+ *   --frames=60 --entries=advectParticles --variants=aa,ctx --repeats=5 --inner=1 [--dump=DIR] [--nth=0] [--scene-file=JSON] [--assert-parity] [--root=SNAPSHOT]
  * Variants live in tools/probe-nbflip-variants.ts. Run with the shared GPU lock. */
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {mkdirSync,readFileSync,writeFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {resolveMethodValues} from '../lib/core/method-contract';
-import {sceneDocument} from '../lib/core/scene-definition';
-import {getSceneDefinition} from '../lib/core/scenes';
-import {managedGPUDevice} from '../lib/core/gpu-compilation-manager';
 import {requiredFluidDeviceLimits} from '../lib/core/webgpu-device-limits';
 import {createProcessRetainedDawnGPU,paceDawnEventPolling} from '../lib/harness/node-dawn-provider';
-import {uniformNarrowBandMethod as method} from '../lib/methods/uniform/uniform-narrow-band-method';
 import type {WebGPUUniformReferenceSolver} from '../lib/methods/uniform/webgpu-uniform-reference';
 import {probeVariants} from './probe-nbflip-variants';
+import {pressureTilePacket} from './nbflip-stage-replay-variants';
+import {hotVariants} from './nbflip-hot-variants';
+import {fluidExecutionDeviceFeatures} from '../lib/core/gpu-startup';
 import {GPUPassProfile} from './gpu-pass-profile';
+const replayVariants:typeof probeVariants={...probeVariants,...hotVariants,pressuretile:code=>pressureTilePacket(code)};
 const option=(key:string)=>process.argv.find(a=>a.startsWith(`--${key}=`))?.slice(key.length+3);
+const root=resolve(option('root')??'.');
+const load=(file:string)=>import(pathToFileURL(resolve(root,file)).href);
+const [{resolveMethodValues},{sceneDocument},{getSceneDefinition},{managedGPUDevice},{uniformNarrowBandMethod:method}]=await Promise.all([
+ load('lib/core/method-contract.ts'), load('lib/core/scene-definition.ts'), load('lib/core/scenes.ts'), load('lib/core/gpu-compilation-manager.ts'), load('lib/methods/uniform/uniform-narrow-band-method.ts')
+]);
 const selected=(option('entries')??'advectParticles').split(',');
+// Knock-outs remain useful diagnostics; equivalent rewrites can opt into a
+// hard regression gate, including failure when the requested entry never ran.
+const assertParity=process.argv.includes('--assert-parity');
 const variantNames=(option('variants')??'aa').split(',');
-for(const name of variantNames)assert.ok(name==='aa'||probeVariants[name],`unknown variant ${name}`);
-const frames=(option('frames')??'60').split(',').map(Number).sort((a,b)=>a-b),repeats=Number(option('repeats')??5),inner=Number(option('inner')??8),nth=Number(option('nth')??0);
+for(const name of variantNames)assert.ok(name==='aa'||name==='transfer192'||replayVariants[name],`unknown variant ${name}`);
+const frames=(option('frames')??'60').split(',').map(Number).sort((a,b)=>a-b),repeats=Number(option('repeats')??5),inner=Number(option('inner')??1),nth=Number(option('nth')??0);
+assert.ok(inner===1||!selected.some(e=>['transferDeposit','advectParticles','advectParticlesDeferred','advectWalk'].includes(e)),'Accumulating kernels require --inner=1 and restored inputs');
 const dump=option('dump');if(dump)mkdirSync(dump,{recursive:true});
 assert.ok(frames.every(n=>Number.isInteger(n)&&n>0)&&repeats>0&&inner>0);
 paceDawnEventPolling();
 const dawn=await import(pathToFileURL(resolve('node_modules/webgpu/index.js')).href);Object.assign(globalThis,dawn.globals);
-const gpu=createProcessRetainedDawnGPU(dawn,['backend=metal']),adapter=await gpu.requestAdapter();assert.ok(adapter);
-const rawDevice=await adapter.requestDevice({requiredFeatures:['timestamp-query',...(adapter.features.has('subgroups')?['subgroups' as const]:[])],requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+const gpu=createProcessRetainedDawnGPU(dawn,['backend=metal','disable-dawn-features=timestamp_quantization']),adapter=await gpu.requestAdapter();assert.ok(adapter);
+console.log(JSON.stringify({root,adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},scene:option('scene')??'sparse-cm12-long-dam-break',frames,variants:variantNames,repeats,inner,assertParity}));
+const rawDevice=await adapter.requestDevice({requiredFeatures:option('features')==='legacy'?['timestamp-query',...(adapter.features.has('subgroups')?['subgroups' as const]:[])]:fluidExecutionDeviceFeatures(adapter.features),requiredLimits:requiredFluidDeviceLimits(adapter.limits)});
+console.log(JSON.stringify({features:[...rawDevice.features],traces:option('traces')==='true',transfer:option('transfer')??'scene default'}));
 const splitFrames=(option('split-frames')??'').split(',').filter(Boolean).map(Number),entryOf=new WeakMap<GPUComputePipeline,string>();
-const profileFrames=[...(option('profile-frames')??'').split(',').filter(Boolean).map(Number),...splitFrames],profiler=profileFrames.length?new GPUPassProfile(rawDevice):undefined,raw=profiler?.device??rawDevice;
-const sources=new WeakMap<GPUShaderModule,string>(),variantsOf=new WeakMap<GPUComputePipeline,{entry:string;writable:Set<string>;pipelines:GPUComputePipeline[]}>();
+const explicitProfileFrames=(option('profile-frames')??'').split(',').filter(Boolean).map(Number);
+assert.ok(explicitProfileFrames.every(frame=>!frames.includes(frame)), 'Use separate replay and profile frames: both own timestamp queries');
+const profileFrames=[...explicitProfileFrames,...splitFrames],profiler=profileFrames.length?new GPUPassProfile(rawDevice):undefined,raw=profiler?.device??rawDevice;
+type ParticleParity={capacity:number;recordWords:number;walkOffset:number};
+const particleParity=process.argv.includes('--particle-parity');
+const sources=new WeakMap<GPUShaderModule,string>(),variantsOf=new WeakMap<GPUComputePipeline,{entry:string;writable:Set<string>;pipelines:GPUComputePipeline[];particle?:ParticleParity}>();
 const entries=new WeakMap<GPUBindGroup,readonly GPUBindGroupEntry[]>(),textures=new WeakMap<GPUTextureView,GPUTexture>();
 let frame=0;const seen=new Map<string,number>();const captured=new Set<string>();
 type Part={name:string;bytes:number;words:number};
-type Probe={entry:string;frame:number;results:GPUBuffer[];times:GPUBuffer;queries:GPUQuerySet;resources:GPUBuffer[];parts:Part[];total:number};
+type Probe={entry:string;frame:number;results:GPUBuffer[];times:GPUBuffer;queries:GPUQuerySet;resources:GPUBuffer[];parts:Part[];total:number;particle?:ParticleParity};
 const pending:Probe[]=[];const dumped=new Set<string>();
 /** group:binding of every resource the module declares writable. */
 function writableBindings(code:string):Set<string>{
@@ -62,21 +77,31 @@ const intercepted=new Proxy(raw,{get(target,key){
  if(key==='createComputePipelineAsync')return async(d:GPUComputePipelineDescriptor)=>{
   const pipeline=await target.createComputePipelineAsync(d),source=sources.get(d.compute.module),entry=d.compute.entryPoint??'';entryOf.set(pipeline,entry);
   if(selected.includes(entry)&&source){
+   console.log(JSON.stringify({entry,sourceSha256:createHash('sha256').update(source).digest('hex'),constants:d.compute.constants??{}}));
    if(dump&&!dumped.has(entry)){dumped.add(entry);writeFileSync(`${dump}/${entry}.wgsl`,source);writeFileSync(`${dump}/${entry}.constants.json`,JSON.stringify(d.compute.constants??{}));}
    const pipelines:GPUComputePipeline[]=[];
    for(const name of variantNames){
     if(name==='aa'){pipelines.push(await target.createComputePipelineAsync({...d,label:`QA ${entry} aa`}));continue;}
-    const code=probeVariants[name]!(source,entry);
-    if(code===source){console.log(JSON.stringify({warning:'variant leaves the source unchanged',entry,variant:name}));}
+    const code:string=name==='transfer192'?source:replayVariants[name]!(source,entry);
+    if(name==='transfer192')assert.ok(entry==='transferDeposit'&&source.includes('override PB_LANES'), 'transfer192 requires the parameterized product shader');
+    if(code===source&&name!=='transfer192'){console.log(JSON.stringify({warning:'variant leaves the source unchanged',entry,variant:name}));}
     const module=target.createShaderModule({label:`QA ${entry} ${name}`,code});
     const failures=(await module.getCompilationInfo()).messages.filter(message=>message.type==='error');
     if(failures.length){const path=`${dump??'/tmp'}/variant-${name}-${entry}.wgsl`;writeFileSync(path,code);throw new Error(`${path}: ${failures.map(message=>`${message.lineNum}:${message.linePos}: ${message.message}`).join('\n')}`);}
     if(dump)writeFileSync(`${dump}/variant-${name}-${entry}.wgsl`,code);
     const started=performance.now();
-    pipelines.push(await target.createComputePipelineAsync({...d,label:`QA ${entry} ${name}`,compute:{...d.compute,module}}));
+    pipelines.push(await target.createComputePipelineAsync({...d,label:`QA ${entry} ${name}`,compute:{...d.compute,module,...(name==='transfer192'?{constants:{...d.compute.constants,PB_LANES:192}}:{})}}));
     console.log(JSON.stringify({compiled:name,entry,ms:Math.round(performance.now()-started)}));
    }
-   variantsOf.set(pipeline,{entry,writable:writableBindings(source),pipelines});
+   let particle:ParticleParity|undefined;
+   if(particleParity&&entry==='advectParticlesDeferred'){
+    const capacity=Number(source.match(/const NB_PARTICLE_CAPACITY:u32=(\d+)u/)?.[1]);
+    const links=Number(source.match(/const NB_LINKS:u32=(\d+)u/)?.[1]);
+    const recordWords=4*(source.match(/struct Particle\{([^}]+)\}/)?.[1]?.match(/vec4f/g)?.length??0);
+    assert.ok(capacity>0&&links>0&&[12,28].includes(recordWords),'particle layout for exact multiset check');
+    particle={capacity,recordWords,walkOffset:links+2*capacity};
+   }
+   variantsOf.set(pipeline,{entry,writable:writableBindings(source),pipelines,particle});
   }return pipeline;
  };
  if(key==='createCommandEncoder')return (d?:GPUCommandEncoderDescriptor)=>{
@@ -134,7 +159,7 @@ const intercepted=new Proxy(raw,{get(target,key){
      }
      restore(saved);
      e.resolveQuerySet(queries,0,2*passes,resolved,0);e.copyBufferToBuffer(resolved,0,times,0,16*passes);
-     pending.push({entry:info.entry,frame,results:[production,...results],times,queries,resources:[initial,saved,resolved],parts,total});
+     pending.push({entry:info.entry,frame,results:[production,...results],times,queries,resources:[initial,saved,resolved],parts,total,particle:info.particle});
      pass=e.beginComputePass();bind();
     };
     return new Proxy(pass,{get(_p,key){
@@ -150,36 +175,60 @@ const intercepted=new Proxy(raw,{get(target,key){
  };
  const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;
 }});
-const device=managedGPUDevice(intercepted,{requireWorkerRealm:false}),errors:string[]=[];
+const device:GPUDevice=managedGPUDevice(intercepted,{requireWorkerRealm:false}),errors:string[]=[];
 device.addEventListener('uncapturederror',event=>{event.preventDefault();errors.push(event.error.message);});
 let solver:WebGPUUniformReferenceSolver|undefined;
 const ulp=(a:number,b:number)=>{const x=a|0,y=b|0;const fa=x<0?(0x80000000-x)|0:x,fb=y<0?(0x80000000-y)|0:y;return Math.abs(fa-fb);};
 try{
  const definition=getSceneDefinition(option('scene')??'sparse-cm12-long-dam-break'),quality=definition.methodProfile?.quality??'balanced',scene=option('scene-file')?JSON.parse(readFileSync(option('scene-file')!,'utf8')):structuredClone(sceneDocument(definition));scene.numerics.fixedDt_s=scene.numerics.maxDt_s=1/60;
- const values=resolveMethodValues(method,quality,{...method.appDefaults,...definition.methodProfile?.overrides}),dt=method.effectiveStep_s?.(scene,values)??scene.numerics.fixedDt_s;
+ if(option('pool-blocks'))scene.fluid.pagePool={...scene.fluid.pagePool,blocks:Number(option('pool-blocks'))};
+ const values=resolveMethodValues(method,quality,{...method.appDefaults,...definition.methodProfile?.overrides,...(option('transfer')?{particleTransfer:option('transfer')}:{})}),dt=method.effectiveStep_s?.(scene,values)??scene.numerics.fixedDt_s;
  const started=performance.now();
  solver=await method.createSolverAsync!(device,scene,quality,values,undefined,()=>{}) as WebGPUUniformReferenceSolver;
+ if(option('traces')==='true')(solver as unknown as {mixedFrame:{narrowBandFlip:{measureTraces:boolean}}}).mixedFrame.narrowBandFlip.measureTraces=true;
  console.log(JSON.stringify({constructed_ms:Math.round(performance.now()-started),dt}));
  for(frame=1;frame<=frames.at(-1)!;frame++){
   if(profiler&&profileFrames.includes(frame))profiler.start();
   assert.ok(solver.advanceTo(frame*dt,[]));await solver.awaitFrameCompletion();
   if(profiler&&profileFrames.includes(frame)){const passes=await profiler.finish();const sum=new Map<string,number>();for(const p of passes)sum.set(p.label,(sum.get(p.label)??0)+p.ms);console.log(JSON.stringify({profile:frame,total:+passes.reduce((a,p)=>a+p.ms,0).toFixed(2),passes:[...sum].sort((a,b)=>b[1]-a[1]).map(([l,ms])=>[l,+ms.toFixed(3)])}));}assert.equal(solver.info.simulationPipelineError,undefined);
   if(!frames.includes(frame))continue;
-  for(const entry of selected)if(!captured.has(`${frame}:${entry}`))console.log(JSON.stringify({warning:'not captured',entry,frame,dispatches:seen.get(`${frame}:${entry}`)??0}));
+  for(const entry of selected)if(!captured.has(`${frame}:${entry}`)){
+   console.log(JSON.stringify({warning:'not captured',entry,frame,dispatches:seen.get(`${frame}:${entry}`)??0}));
+   assert.ok(!assertParity,`Requested entry ${entry} was not captured at frame ${frame}`);
+  }
   for(const probe of pending.splice(0)){
    await Promise.all([...probe.results.map(buffer=>buffer.mapAsync(GPUMapMode.READ)),probe.times.mapAsync(GPUMapMode.READ)]);
    const words=probe.results.map(buffer=>new Int32Array(buffer.getMappedRange())),stamps=new BigUint64Array(probe.times.getMappedRange());
+   // Atomic appends may permute whole records and the deferred-walk index
+   // queue. Compare their exact multisets, including duplicates; every other
+   // word (input records, counters, metadata, scratch tails) remains exact.
+   let recordKeys:string[][]|undefined,walkQueues:Uint32Array[]|undefined;
+   let sourceAt=-1,linksAt=-1,stateAt=-1;
+   if(probe.particle){
+    let at=0;for(const p of probe.parts){if(p.name==='1:0 buffer')sourceAt=at;if(p.name==='1:3 buffer')linksAt=at;if(p.name==='1:4 buffer')stateAt=at;at+=Math.ceil(p.bytes/256)*256/4;}
+    assert.ok(sourceAt>=0&&linksAt>=0&&stateAt>=0);
+    const {capacity,recordWords,walkOffset}=probe.particle;
+    recordKeys=words.map(w=>{const bytes=Buffer.from(w.buffer,w.byteOffset+4*sourceAt,4*capacity*recordWords);return Array.from({length:capacity},(_,i)=>bytes.subarray(4*i*recordWords,4*(i+1)*recordWords).toString('hex')).sort();});
+    walkQueues=words.map(w=>{const n=w[stateAt+23]!;assert.ok(n>=0&&n<=capacity);return new Uint32Array(w.buffer,w.byteOffset+4*(linksAt+walkOffset),n).slice().sort();});
+   }
    const variants=variantNames.map((name,v)=>{
     let cursor=0;const parts=probe.parts.map(part=>{let count=0,worst=0,abs=0;const a=words[0]!,b=words[v+1]!,fa=new Float32Array(a.buffer,a.byteOffset,a.length),fb=new Float32Array(b.buffer,b.byteOffset,b.length);
-     for(let i=cursor;i<cursor+part.words;i++)if(a[i]!==b[i]){count++;worst=Math.max(worst,ulp(a[i]!,b[i]!));const d=Math.abs(fa[i]!-fb[i]!);if(Number.isFinite(d))abs=Math.max(abs,d);}
+     for(let i=cursor;i<cursor+part.words;i++){
+      if(probe.particle&&i>=sourceAt&&i<sourceAt+probe.particle.capacity*probe.particle.recordWords)continue;
+      if(probe.particle&&i>=linksAt+probe.particle.walkOffset&&i<linksAt+probe.particle.walkOffset+walkQueues![0]!.length&&walkQueues![0]!.length===walkQueues![v+1]!.length)continue;
+      if(a[i]!==b[i]){count++;worst=Math.max(worst,ulp(a[i]!,b[i]!));const d=Math.abs(fa[i]!-fb[i]!);if(Number.isFinite(d))abs=Math.max(abs,d);}
+     }
      cursor+=Math.ceil(part.bytes/256)*256/4;return count?{part:part.name,mismatches:count,maxUlp:worst,maxAbs:abs}:undefined;}).filter(Boolean);
     const ms:number[]=[];
     for(let slot=0;slot<repeats*variantNames.length;slot++){const repeat=Math.floor(slot/variantNames.length),k=slot%variantNames.length;if((k+repeat)%variantNames.length===v)ms.push(Number(stamps[2*slot+1]!-stamps[2*slot]!)/1e6/inner);}
     const sorted=[...ms].sort((x,y)=>x-y);
-    return {variant:name,min_ms:+sorted[0]!.toFixed(4),median_ms:+sorted[Math.floor(sorted.length/2)]!.toFixed(4),ms:ms.map(x=>+x.toFixed(4)),diff:parts};
+    if(recordKeys){let n=0;for(let i=0;i<recordKeys[0]!.length;i++)n+=Number(recordKeys[0]![i]!==recordKeys[v+1]![i]);if(n)parts.push({part:'particle record multiset',mismatches:n,maxUlp:0,maxAbs:0});}
+    if(walkQueues){const a=walkQueues[0]!,b=walkQueues[v+1]!;let n=Math.abs(a.length-b.length);for(let i=0;i<Math.min(a.length,b.length);i++)n+=Number(a[i]!==b[i]);if(n)parts.push({part:'deferred walk multiset',mismatches:n,maxUlp:0,maxAbs:0});}
+    return {variant:name,min_ms:+sorted[0]!.toFixed(4),median_ms:+sorted[Math.floor(sorted.length/2)]!.toFixed(4),ms:ms.map(x=>+x.toFixed(4)),diff:parts,...(probe.particle?{parity:'exact record/queue multisets; all remaining writable words exact'}:{})};
    });
    console.log(JSON.stringify({entry:probe.entry,frame,inner,parts:probe.parts.map(p=>`${p.name} ${p.bytes}`),variants}));
    for(const result of probe.results){result.unmap();result.destroy();}probe.times.unmap();probe.times.destroy();probe.queries.destroy();for(const resource of probe.resources)resource.destroy();
+   if(assertParity)for(const variant of variants)assert.deepEqual(variant.diff,[],`${probe.entry} frame ${frame}: ${variant.variant} must match every writable word`);
   }
   assert.deepEqual(errors,[]);
  }

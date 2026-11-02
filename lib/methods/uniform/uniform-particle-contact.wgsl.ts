@@ -1,7 +1,7 @@
 /** Continuous terrain and carved-cavity contact for NB-FLIP. Positions are cell coordinates;
  * velocities and normals are in metres. The solid library supplies the native
  * column texture, voxel mask and rigid-body queries. */
-export const narrowBandTerrainContactWGSL = /* wgsl */ `
+export function narrowBandTerrainContactSource(bodyAt="umBodyAt(umSolidTraceWorld(q))"):string{return /* wgsl */ `
 // Height and its two derivatives from the same bilinear patch. Column samples
 // live at cell centres; interior planar inclines are reproduced exactly.
 fn nbTerrainNormal(s:vec3f)->vec3f{
@@ -11,10 +11,10 @@ fn nbTerrainNormal(s:vec3f)->vec3f{
 // call, and this runs in advectParticles beside the trace.
 fn nbParticleBlocked(q:vec3f)->bool{
  let c=vec3i(floor(q));let record=umBoundaryRecord(c);let terrain=umSolidHasTerrain();
- if(record==0u&&!terrain){return umSolidVoxel(c)||umBodyAt(umSolidTraceWorld(q))>=0;}
+ if(record==0u&&!terrain){return umSolidVoxel(c)||${bodyAt}>=0;}
  var solid:bool;
  if(record!=0u){solid=umBoundarySampleAt(q,c,record).w<0.0;}else{solid=umSolidVoxel(c);}
- return solid||(terrain&&umTerrainBoundary(q).w<0.0)||umBodyAt(umSolidTraceWorld(q))>=0;
+ return solid||(terrain&&umTerrainBoundary(q).w<0.0)||${bodyAt}>=0;
 }
 fn nbParticleCellOpen(c:vec3i)->bool{
  return umCellOpen(c)>=select(0.5,1e-5,umSolidHasTerrain()||umBoundaryRecord(c)!=0u);
@@ -138,12 +138,13 @@ fn nbProceduralContact(start:vec3f,end:vec3f,velocity:vec3f,inset:f32)->NBTerrai
  if(!umPointPresent(q)){return NBTerrainContact(at,v);}
  return NBTerrainContact(q,v);
 }
-`;
+`;}
+export const narrowBandTerrainContactWGSL=narrowBandTerrainContactSource();
 
 /** Moving rigid contact. A body may have overtaken a sample since the last
  * fluid step. Retain it, move it outside the analytic surface, and enforce
  * non-penetration relative to the wall velocity (including rotation). */
-export const narrowBandRigidContactWGSL = /* wgsl */ `
+export function narrowBandRigidContactSource(bodyMask?:string):string{return /* wgsl */ `
 struct NBRigidContact{position:vec3f,velocity:vec3f}
 // inset: the sample's radius in cells (min(h) a cell), which its centre keeps
 // from the body's surface; the gradient's central difference steps a
@@ -151,7 +152,9 @@ struct NBRigidContact{position:vec3f,velocity:vec3f}
 fn nbRigidContact(point:vec3f,velocity:vec3f,inset:f32)->NBRigidContact{
  let h=params.hDt.xyz;let cell=min(h.x,min(h.y,h.z));let skin=inset*cell;let step=0.01*cell;
  var world=umSolidTraceWorld(point);var v=velocity;
- for(var i=0u;i<umBodyCount();i++){
+ ${bodyMask?`var candidates=${bodyMask};
+ while(candidates!=0u){let i=firstTrailingBit(candidates);candidates&=candidates-1u;let before=world;`:
+ "for(var i=0u;i<umBodyCount();i++){"}
   if(!umBodyNear(i,world,skin)){continue;}
   for(var iteration=0u;iteration<4u;iteration++){
    let distance=umBodyDistance(i,world);if(distance>skin){break;}
@@ -166,7 +169,11 @@ fn nbRigidContact(point:vec3f,velocity:vec3f,inset:f32)->NBRigidContact{
    let wall=umBodyVelocity(i,world);
    v-=min(dot(v-wall,normal),0.0)*normal;
   }
+  ${bodyMask?`// A contact can move into a body excluded at the original point.
+  // Restore every later body, retaining the original roster order.
+  if(any(world!=before)){candidates=((1u<<umBodyCount())-1u)&~((1u<<(i+1u))-1u);}`:""}
  }
  return NBRigidContact(point+(world-umSolidTraceWorld(point))/h,v);
 }
-`;
+`;}
+export const narrowBandRigidContactWGSL=narrowBandRigidContactSource();

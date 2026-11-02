@@ -11,7 +11,78 @@ export function fnSpan(code:string,name:string):[number,number]{
 }
 export function replaceFn(code:string,name:string,text:string):string{const [a,b]=fnSpan(code,name);return code.slice(0,a)+text+code.slice(b);}
 export function replaceOnce(code:string,a:string,b:string):string{assert.equal(code.split(a).length,2,`one occurrence: ${a.slice(0,80)}`);return code.replace(a,b);}
+// Scene specialization can replace these constants with accessor functions.
+function splatSceneNames(code:string,text:string):string{
+ return text.replace(/\b(NB_OCCUPIED|NB_BAND|UM_TILES)\b/g,name=>new RegExp(`\\bfn ${name}\\s*\\(`).test(code)?`${name}()`:name);
+}
 export const probeVariants:Record<string,(code:string,entry:string)=>string>={
+ separationselect:code=>{
+  const [a,b]=fnSpan(code,'nbSeparation');let body=code.slice(a,b);
+  body=replaceOnce(body,`var runs=array<vec2u,2>(nbRun(c,vec3i(stop,c.y,c.z)),vec2u(0u));
+  if(stop<base.x+1){runs[1]=nbRun(vec3i(stop+1,c.y,c.z),vec3i(base.x+1,c.y,c.z));}
+  for(var r=0u;r<2u;r++){
+   for(var j=runs[r].x;j<runs[r].y;j++){`,
+  `let first=nbRun(c,vec3i(stop,c.y,c.z));var second=vec2u(0u);
+  if(stop<base.x+1){second=nbRun(vec3i(stop+1,c.y,c.z),vec3i(base.x+1,c.y,c.z));}
+  for(var r=0u;r<2u;r++){
+   let run=select(first,second,r==1u);
+   for(var j=run.x;j<run.y;j++){`);
+  return replaceFn(code,'nbSeparation',body);
+ },
+ separationruns:code=>{
+  const [a,b]=fnSpan(code,'nbSeparation');let body=code.slice(a,b);
+  body=replaceOnce(body,`var runs=array<vec2u,2>(nbRun(c,vec3i(stop,c.y,c.z)),vec2u(0u));
+  if(stop<base.x+1){runs[1]=nbRun(vec3i(stop+1,c.y,c.z),vec3i(base.x+1,c.y,c.z));}
+  for(var r=0u;r<2u;r++){
+   for(var j=runs[r].x;j<runs[r].y;j++){`,
+  `var run=nbRun(c,vec3i(stop,c.y,c.z));
+  for(var r=0u;r<2u;r++){
+   if(r==1u){if(stop==base.x+1){break;}run=nbRun(vec3i(stop+1,c.y,c.z),vec3i(base.x+1,c.y,c.z));}
+   for(var j=run.x;j<run.y;j++){`);
+  return replaceFn(code,'nbSeparation',body);
+ },
+ splatchunk256:code=>replaceOnce(code,'const NB_SURFACE_CHUNK:u32=512u;','const NB_SURFACE_CHUNK:u32=256u;'),
+ splatchunk1024:code=>replaceOnce(code,'const NB_SURFACE_CHUNK:u32=512u;','const NB_SURFACE_CHUNK:u32=1024u;'),
+ splatchunk2048:code=>replaceOnce(code,'const NB_SURFACE_CHUNK:u32=512u;','const NB_SURFACE_CHUNK:u32=2048u;'),
+ splat64chunk1024:code=>probeVariants.splat64!(probeVariants.splatchunk1024!(code,''),''),
+ splatplan:code=>replaceFn(code,'surfaceSplatPlan',splatSceneNames(code,`fn surfaceSplatPlan(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){nbPlanCount=min(atomicLoad(&bins[NB_OCCUPIED]),UM_TILES);}
+ let count=workgroupUniformLoad(&nbPlanCount);
+ for(var base=64u*group.x;base<count;base+=64u*groups.x){
+  if(lane==0u){atomicStore(&nbPlanTotal,0u);}workgroupBarrier();
+  var tile=0u;var start=0u;var jobs=0u;
+  if(base+lane<count){
+   tile=atomicLoad(&bins[NB_OCCUPIED+4u+base+lane]);
+   if(umTileLive(tile)){let bin=nbBinTile(tile);start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);jobs=(end-start+NB_SURFACE_CHUNK-1u)/NB_SURFACE_CHUNK;}
+  }
+  var rank=0u;if(jobs!=0u){rank=atomicAdd(&nbPlanTotal,jobs);}workgroupBarrier();
+  if(lane==0u){let n=atomicLoad(&nbPlanTotal);if(n!=0u){nbPlanFirst=atomicAdd(&bins[NB_BAND+3u],n);}}
+  workgroupBarrier();let first=nbPlanFirst+rank;
+  for(var k=0u;k<jobs;k++){let at=nbSurfaceCells()+2u*(first+k);links[at]=tile;links[at+1u]=start+k*NB_SURFACE_CHUNK;}
+ }
+}`))+'\nvar<workgroup> nbPlanCount:u32;var<workgroup> nbPlanTotal:atomic<u32>;var<workgroup> nbPlanFirst:u32;\n',
+ splatcold:code=>replaceOnce(code,
+  splatSceneNames(code,'let tile=atomicLoad(&bins[NB_OCCUPIED+4u+j]);if(!umTileLive(tile)){continue;}'),
+  splatSceneNames(code,`let tile=atomicLoad(&bins[NB_OCCUPIED+4u+j]);if(!umTileLive(tile)){continue;}
+  let local=umTileCoord(tile)&vec3u(3u);
+  if(all(local>=vec3u(1u))&&all(local<=vec3u(2u))&&nbTileCold(tile)){continue;}`)),
+ // Surface distances only decrease during a job. A stale load can cause an
+ // extra atomicMin, but cannot suppress a contribution that would win.
+ splatguard:code=>code.replaceAll('atomicMin(&nbSurfaceWindow[w],bitcast<u32>(d2));',
+  'if(bitcast<u32>(d2)<atomicLoad(&nbSurfaceWindow[w])){atomicMin(&nbSurfaceWindow[w],bitcast<u32>(d2));}')
+  .replaceAll('atomicMin(&nbSurfaceWindowHot[w],bitcast<u32>(d2));',
+  'if(bitcast<u32>(d2)<atomicLoad(&nbSurfaceWindowHot[w])){atomicMin(&nbSurfaceWindowHot[w],bitcast<u32>(d2));}'),
+ splat64:code=>{
+  const [a,b]=fnSpan(code,'surfaceSplatOccupied');
+  return replaceOnce(code.slice(0,a)+code.slice(a,b).replaceAll('128u','64u')+code.slice(b),
+   '@workgroup_size(128) fn surfaceSplatOccupied','@workgroup_size(64) fn surfaceSplatOccupied');
+ },
+ splat256:code=>{
+  const [a,b]=fnSpan(code,'surfaceSplatOccupied');
+  return replaceOnce(code.slice(0,a)+code.slice(a,b).replaceAll('128u','256u')+code.slice(b),
+   '@workgroup_size(128) fn surfaceSplatOccupied','@workgroup_size(256) fn surfaceSplatOccupied');
+ },
+ splatguard64:code=>probeVariants.splatguard!(probeVariants.splat64!(code,''),''),
  ctx:code=>fineSampleContext(code),
  // Sample-scoped atlas home with no page-crossing fallback: what a haloed unit cache would cost (values near seams wrong).
  koctx:code=>{
