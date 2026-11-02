@@ -34,8 +34,11 @@ test("a reserve column reaches the head above its top resident page, capped by a
 
 test("liquid held by walls on every side makes no dam front; a dam's free face does",()=>{
  const tank=createUniformTroughScene("settled-tank"),dam=createUniformTroughScene("dam-break");
- assert.equal(uniformCensusReach(tank,census(tank).volume).v_m_s,0);
+ const still=uniformCensusReach(tank,census(tank).volume);
+ assert.equal(still.v_m_s,0);assert.equal(still.freeTiles,0);
  const reach=uniformCensusReach(dam,census(dam).volume),h=dam.voxelDomain.finestCellSize_m;
+ // The dam's free face: its tiles span the column's height on the face.
+ assert.ok(reach.freeTiles>=Math.floor((reach.top_m/h)/4),`${reach.freeTiles}`);
  // Ritter: 2 sqrt(g H) over the dam column, H within a cell of the liquid's top above the floor.
  assert.ok(reach.v_m_s>2*Math.sqrt(g*(reach.top_m-4*h))&&reach.v_m_s<=2*Math.sqrt(g*reach.top_m)+1e-9,`${reach.v_m_s}`);
 });

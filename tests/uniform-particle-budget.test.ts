@@ -65,3 +65,18 @@ test("the particle record rule: 8 samples a band cell x the shared growth, over 
   // Deep regions elsewhere (below y 16) leave the band as it is.
   assert.deepEqual(uniformParticleBand({ edge, cells: [64, 64, 64], pages: [2, 2, 2], at } as never, 3, new Set(), (_x, y) => y === 0), { cells: 3 * 64 * 64, tiles: 16 * 16 });
 });
+
+test("a census band counts its sources' band tiles apart: a drop's own tiles, the initial liquid's not among them", async () => {
+  const { uniformParticleCensusBand } = await import("../lib/methods/uniform/uniform-particle-census");
+  const scene = createReservoirSeepScene();
+  const still = uniformParticleCensusBand(scene, 3);
+  assert.equal(still.sourceTiles, 0);
+  // A sphere in the air above the reservoir: its 3-cell band shell, wholly its own tiles.
+  const h = scene.voxelDomain.finestCellSize_m, r = 12 * h;
+  scene.fluid.scheduledDrops = [{ time_s: 0.5, volume: { shape: "sphere", center_m: { x: 0, y: scene.container.height_m - 2 * r, z: 0 }, radius_m: r } }];
+  const dropped = uniformParticleCensusBand(scene, 3);
+  assert.ok(dropped.sourceTiles! > 0);
+  assert.equal(dropped.tiles - still.tiles, dropped.sourceTiles);
+  // The shell's tiles lie within the sphere's bounding tiles (4 cells a tile, a tile of slack an end).
+  assert.ok(dropped.sourceTiles! <= (Math.ceil(2 * 12 / 4) + 2) ** 3);
+});

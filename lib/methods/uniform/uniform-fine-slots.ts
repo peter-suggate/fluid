@@ -26,21 +26,71 @@
 export const UNIFORM_DETAIL_SLOT_VIOLATION=8192;
 /** The default capacity over the t=0 need, and its floor (fluid.tiers.fineBlocks overrides both). */
 export const UNIFORM_FINE_SLOT_GROWTH=1.5,UNIFORM_FINE_SLOT_FLOOR=16;
-/** The page layers of one column's band (M4b's capacity rule): an h tile's
- * ring box spans 29 cells an axis (fsRingLow, fsRingHigh), so the box of a
- * surface tile and the tile across the interface from it, 33 cells, meets
- * at most three pages of a column. */
-export const UNIFORM_FINE_SLOT_BAND_LAYERS=3;
-/** The h slots a census footprint holds (docs/plans/bulk16-plan-2026-10-28.md,
- * M4b): UNIFORM_FINE_SLOT_GROWTH x (its page columns x the band's page
- * layers, plus the pages the other t=0 sources of h demand meet:
- * uniformFineSlotSourcePages), one rule for every scene, and at least the
- * one slot a store holds (uniformFineSlotCapacity's minimum: a box with no
- * liquid at build has no footprint). A build that wants more is refused to 4h. */
-export function uniformFineSlotRule(columns:number,sourcePages=0):number{
- if(!(Number.isSafeInteger(columns)&&columns>=0))throw new RangeError(`An h slot rule needs a footprint of whole columns, not ${columns}`);
+/** The growth over the t=0 detail ring's own pages (uniformFineSlotRingPages):
+ * the pool's authored margin (ceil(peak x 1.25)). A layout past the slots
+ * refuses its tiles to 4h; a scene whose band spreads past it authors
+ * fluid.tiers.fineBlocks from a measured peak, as its pool. */
+export const UNIFORM_FINE_SLOT_RING_GROWTH=1.25;
+/** The h slots a census start holds (docs/plans/bulk16-plan-2026-10-28.md,
+ * "Memory: slots by the t=0 ring"): UNIFORM_FINE_SLOT_RING_GROWTH x the pages
+ * the census seed's detail rings meet, plus UNIFORM_FINE_SLOT_GROWTH x the
+ * pages the other t=0 sources of h demand meet (uniformFineSlotSourcePages:
+ * bodies move, so their balls keep the wider margin), and at least the one
+ * slot a store holds. The former rule (1.5 x columns x three band layers)
+ * held 2.5x the measured peak on the pure tank and the vast seep. */
+export function uniformFineSlotRule(ringPages:number,sourcePages=0):number{
+ if(!(Number.isSafeInteger(ringPages)&&ringPages>=0))throw new RangeError(`An h slot rule needs whole ring pages, not ${ringPages}`);
  if(!(Number.isSafeInteger(sourcePages)&&sourcePages>=0))throw new RangeError(`An h slot rule needs whole source pages, not ${sourcePages}`);
- return Math.max(1,Math.ceil(UNIFORM_FINE_SLOT_GROWTH*(columns*UNIFORM_FINE_SLOT_BAND_LAYERS+sourcePages)));
+ return Math.max(1,Math.ceil(UNIFORM_FINE_SLOT_RING_GROWTH*ringPages+UNIFORM_FINE_SLOT_GROWTH*sourcePages));
+}
+/** h owners a slot holds at most under the rule (the frame's h ceiling, its
+ * owner-indexed buffers, the arena's bricks and the particles' deposit are
+ * sized by it): a slot holds a page's 512 tiles, but the band is a sheet.
+ * Measured peaks (docs/plans/bulk16-plan-2026-10-28.md, "Memory: slots by
+ * the t=0 ring"): 19 a slot on the vast seep, 44 on the seep, 73 on letters
+ * at its authored slots. A build past the ceiling is fatal, so a scene that
+ * fills its pages with h authors fluid.tiers.bricks. */
+export const UNIFORM_FINE_TILES_PER_SLOT=128;
+/** The h ceiling of `slots` slots: UNIFORM_FINE_TILES_PER_SLOT each, and at
+ * least one whole slot's 512 tiles (a one-slot box can be all h). Given the
+ * census start's t=0 h tiles (`seedTiles`: its band, solid contact, bodies
+ * and Fine regions, the most h a calm start holds before frame 1's census
+ * coarsens it), the drops' and inflow's band tiles (`sourceTiles`: they
+ * arrive after t=0 and a drop that lands makes more surface than its shell, at
+ * UNIFORM_FINE_SOURCE_SPLASH) and the start's free-face tiles (`frontTiles`,
+ * uniformCensusReach: a front or a hole's jet spreads a sheet over the pages
+ * past it, so each is budgeted one slot's sheet, UNIFORM_FINE_TILES_PER_SLOT),
+ * at most the ring growth over that sum (with a front, up to the slots'
+ * whole 512 tiles each rather than the sheet's per-slot figure), and
+ * never less than the ring growth over the seed itself (a build past the
+ * ceiling is fatal, and the start builds the seed). Measured: vast seep 2744 h
+ * tiles against a 12257-tile seed, seep 1943 against 3233; letters at 1/60 s
+ * 9999 against 6144 of seed and 2230 of drop shells (1.73 x the shells past
+ * the seed); the garden dam break 1034 from a seed under 410 tiles and 8
+ * free-face tiles; the dam-break boxes fill 8 slots past 1347 tiles. */
+export const UNIFORM_FINE_SOURCE_SPLASH=2;
+export function uniformFineTileCeiling(slots:number,seedTiles?:number,sourceTiles=0,frontTiles=0):number{
+ if(!(Number.isSafeInteger(slots)&&slots>=1))throw new RangeError(`An h ceiling needs whole slots, not ${slots}`);
+ const perSlot=Math.max(512,UNIFORM_FINE_TILES_PER_SLOT*slots);
+ if(seedTiles===undefined)return perSlot;
+ if(!(Number.isSafeInteger(seedTiles)&&seedTiles>=0&&Number.isSafeInteger(sourceTiles)&&sourceTiles>=0&&Number.isSafeInteger(frontTiles)&&frontTiles>=0))throw new RangeError(`An h ceiling needs whole seed, source and front tiles, not ${seedTiles}, ${sourceTiles} and ${frontTiles}`);
+ const grown=Math.ceil(UNIFORM_FINE_SLOT_RING_GROWTH*(seedTiles+UNIFORM_FINE_SOURCE_SPLASH*sourceTiles+UNIFORM_FINE_TILES_PER_SLOT*frontTiles));
+ // A front folds its surface (a dam break in a small box fills its slots): the slots' own 512 tiles cap it.
+ return Math.max(512,Math.ceil(UNIFORM_FINE_SLOT_RING_GROWTH*seedTiles),Math.min(frontTiles>0?512*slots:perSlot,grown));
+}
+/** The box pages the detail rings of a set of box tiles meet (key
+ * x + tx (y + ty z), 4 cells a tile): each tile p's ring box covers the pages
+ * over cells [4p - 13, 4p + 15] an axis (uniformFineSlotRingWGSL), clipped to
+ * the box. The first layout's claim marks no page outside it, so this bounds
+ * its slot need from above. */
+export function uniformFineSlotRingPages(pages:readonly [number,number,number],tiles:readonly [number,number,number],keys:Iterable<number>):number{
+ const [tx,ty]=tiles,[px,py]=pages,held=new Set<number>();
+ for(const k of keys){
+  const p=[k%tx,Math.floor(k/tx)%ty,Math.floor(k/(tx*ty))];
+  const lo=p.map((t,a)=>Math.max(0,(4*t-13)>>5)),hi=p.map((t,a)=>Math.min(pages[a]!-1,(4*t+15)>>5));
+  for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++)held.add(x+px*(y+py*z));
+ }
+ return held.size;
 }
 /** The pages the detail rings of the t=0 h sources other than the free
  * surface meet: a body's census ball, an authored h region (its tiles,

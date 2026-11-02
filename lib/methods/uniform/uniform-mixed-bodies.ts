@@ -31,10 +31,12 @@ export interface UniformMixedBodyFields {
  * ambient probes remain diagnostics in the native fixed-point exchange.
  *
  * markTiles: one lane per tile (with a page pool, a fixed grid striding the
- * resident blocks' tile keys: a free block's tile is never marked), ors every tile a body's bounding sphere,
- * dilated by its travel over `horizon` seconds plus one cell, can touch into
+ * resident blocks' tile keys: a free block's tile is never marked), ors every tile a body's shape,
+ * dilated by its surface's travel over `horizon` seconds plus one cell, can touch into
  * the census's solid-coupled mask, from the GPU body state (free bodies are
- * integrated on the GPU; the host roster is stale). */
+ * integrated on the GPU; the host roster is stale). The bounding sphere is
+ * only the prefilter: a long flat hull's sphere holds whole columns of wet
+ * tiles its surface never reaches. */
 export class UniformMixedBodies {
  private readonly coupleLayout:GPUBindGroupLayout;
  private readonly tilesLayout:GPUBindGroupLayout;
@@ -151,10 +153,17 @@ fn umBodyMarkTile(tile:u32){
  let coord=umTileCoord(tile);
  let h=umSolidParams.cellGravity.xyz;let t=vec3f(coord);
  let low=umSolidParams.frame.xyz+4.0*t*h;let high=low+4.0*h;
+ let middle=0.5*(low+high);let half=length(2.0*h);let cell=max(h.x,max(h.y,h.z));
  for(var i=0u;i<umBodyCount();i++){
-  let b=umSolidBodies[i];let centre=b.positionShape.xyz;
-  let reach=max(b.dimensions.w,0.0)+length(b.linearVelocity.xyz)*bodyHorizon.x+max(h.x,max(h.y,h.z));
-  if(distance(clamp(centre,low,high),centre)<=reach){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
+  let b=umSolidBodies[i];let centre=b.positionShape.xyz;let radius=max(b.dimensions.w,0.0);
+  let travel=length(b.linearVelocity.xyz)*bodyHorizon.x;
+  if(distance(clamp(centre,low,high),centre)>radius+travel+cell){continue;}
+  // Within the ball: the shape's own 1-Lipschitz distance bounds every point
+  // of the tile below by its centre's less the half diagonal. The surface
+  // moves at most (|v| + |w| radius) over the horizon. An inverted shape's
+  // solid lies outside its ball, so the ball alone decides.
+  let margin=(length(b.linearVelocity.xyz)+length(b.angularVelocity.xyz)*radius)*bodyHorizon.x+cell;
+  if(b.positionShape.w<0.0||umBodyDistance(i,middle)-half<=margin){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
  }
 }
 ${this.pool?/* wgsl */`@compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){

@@ -394,9 +394,8 @@ export interface SceneDescription {
      * these; optional reseeding at capacity is deferred. The persistent fine
      * brick store (uniformFineBrickCapacity) reads bricks the same way.
      * fineBlocks: compacted h stores (opt-in) holding this many blocks
-     * (uniformFineSlotCapacity), or "auto" for 1.5 × the t=0 detail ring's
-     * with a floor of 16 (under start "4h", at least the h ceiling at 32
-     * tiles a block). Unset, every block keeps its h storage (the stores
+     * (uniformFineSlotCapacity), or "auto" for 1.25 × the pages the t=0
+     * band's detail rings touch, plus the sources' pages (uniformFineSlotRule). Unset, every block keeps its h storage (the stores
      * the size of the block grid), unless start is "4h" or "census".
      * start: Dynamic detail's t=0 layout. "h": every stored tile
      * at h, frame 1's census coarsening it. "4h": every tile at 4h but Fine

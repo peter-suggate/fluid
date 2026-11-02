@@ -61,6 +61,7 @@ import { ATLANTIC_LIGHTHOUSE_ID, createAtlanticLighthouseScene, atlanticLighthou
 import { BEACH_SCENE_ID, createBeachScene, beachCamera } from "./beach-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
 import { createReservoirSeepScene, RESERVOIR_SEEP_CAMERA, RESERVOIR_SEEP_ID } from "./reservoir-seep-scene";
+import { BULK_REST_TANK_CAMERA, BULK_REST_TANK_ID, createBulkRestTankScene } from "./bulk-rest-tank-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt, type TerrainDescription, type TerrainGrid } from "./terrain";
 import type { EnvironmentId } from "./environments";
@@ -1519,6 +1520,16 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: { distance_m: 16, target_m: { x: 0, y: 0.55, z: 0 }, azimuth_rad: 0.22, elevation_rad: 0.32 },
     methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
       overrides: { detailBudgetPercent: 5, volumeControlSeconds: 0 } },
+  }),
+  defineScene({
+    id: BULK_REST_TANK_ID,
+    name: "Deep tank · BULK16 rest",
+    blurb: "Still water 2.48 m deep in a plain 2.56 × 2.88 × 1.28 m box at 1 cm: no walls inside, no bodies, no refinement. Every page below the surface layer is held in a 16h slot, so this measures the bulk tier and the surface band alone. Press Play to start.",
+    audience: "explore", shelf: "Tanks", environment: "stage",
+    build: () => createBulkRestTankScene(),
+    camera: BULK_REST_TANK_CAMERA,
+    methodProfile: { methodId: "uniform-narrow-band-flip", quality: "balanced",
+      overrides: { volumeControlSeconds: 0 } },
   }),
   ...([false, true] as const).map(wet => defineScene({
     id: wet ? "interactive-pool" : "interactive-playground",

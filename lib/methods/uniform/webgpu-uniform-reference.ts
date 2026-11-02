@@ -17,7 +17,7 @@ import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLayoutWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
 import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformCensusWetTiles, uniformPagePoolRule, uniformPagePoolRuleReach, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
-import { uniformFineBlocks, uniformFineSlotCapacity, uniformTierStart, uniformFineSlotFootprintColumns, uniformFineSlotRule, uniformFineSlotSourcePages } from "./uniform-fine-slots";
+import { uniformFineBlocks, uniformFineSlotCapacity, uniformTierStart, uniformFineSlotFootprintColumns, uniformFineSlotRingPages, uniformFineSlotRule, uniformFineSlotSourcePages, uniformFineTileCeiling, UNIFORM_FINE_SLOT_RING_GROWTH } from "./uniform-fine-slots";
 import { sameUniformDetailSettings, UNIFORM_DETAIL_PARAM_KEYS, uniformDetailCoarseSolids, uniformDetailImportance, uniformDetailSettings, uniformDetailValues, type UniformDetailSettings } from "./uniform-detail-policy";
 import { buildUniformDetailRequests, uniformDetailDomain, uniformDetailRequestKey, uniformRegionDetailTier, type DetailRequest } from "./uniform-detail-requests";
 import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBounds, type UniformDetailPlan } from "./uniform-detail-planner";
@@ -1300,6 +1300,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     })();
   }
   private censusSeedTiles?:Set<number>;
+  /** The slot rule's band term: the pages the t=0 seed's detail rings meet
+   * (uniformFineSlotRingPages). A census start's seed is its box tiles; a 4h
+   * start has no census, so it keeps the footprint's columns x three layers. */
+  private slotRingPages(pageDims:[number,number,number]):number{
+    if(this.tiers.start==="census")return uniformFineSlotRingPages(pageDims,this.address.tiles as [number,number,number],this.censusSeedBoxTiles());
+    return 3*uniformFineSlotFootprintColumns(pageDims,this.pageResidency.stored);
+  }
   /** The bodies at their t=0 pose as the census seed reads them: centre and bounding radius in cells. */
   private censusBodyBalls():{centre:[number,number,number];radius:number}[]{
     const lattice=fluidRegionLattice(this.scene);
@@ -1317,6 +1324,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     for(const region of this.scene.fluid.refinementRegions??[]){
       if(!(region.minimumCellSize_cells<=1&&(region.maximumCellSize_cells??Infinity)<4))continue;
       const t=uniformDetailTileBounds(lattice,{min:region.min_m,max:region.max_m});
+      if(t)boxes.push({min:[...t.min],max:t.max.map(v=>v-1)});
+    }
+    // A scheduled drop brings its own surface after t=0 (the pool and particle
+    // rules count it too: uniformParticleCensusBand): its bounds at release.
+    for(const {volume:drop} of this.scene.fluid.scheduledDrops??[]){
+      const b=drop.shape==="sphere"?{min:{x:drop.center_m.x-drop.radius_m,y:drop.center_m.y-drop.radius_m,z:drop.center_m.z-drop.radius_m},max:{x:drop.center_m.x+drop.radius_m,y:drop.center_m.y+drop.radius_m,z:drop.center_m.z+drop.radius_m}}
+        :(({min_m,max_m})=>({min:min_m,max:max_m}))(liquidExtrusionBounds(drop));
+      const t=uniformDetailTileBounds(lattice,b);
       if(t)boxes.push({min:[...t.min],max:t.max.map(v=>v-1)});
     }
     return boxes;
@@ -1356,6 +1371,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return this.ruleReach.value;
   }
   private ruleReach?:{readonly value:ReturnType<typeof uniformPagePoolRuleReach>};
+  /** The rule's h ceiling (uniformFineTileCeiling) over the seed, the drops' and inflow's band tiles
+   * and the start's free-face tiles. A start without a pool rule reach (no gravity in an open box) has
+   * no bounded front, so the per-slot ceiling stands, never below the seed's ring growth. */
+  private fineCeilingRule(slots:number,seedTiles:number|undefined,bandSources:number):number{
+    const reach=seedTiles===undefined?undefined:this.poolRuleReach();
+    return reach?uniformFineTileCeiling(slots,seedTiles,bandSources,reach.freeTiles):Math.max(uniformFineTileCeiling(slots),Math.ceil(UNIFORM_FINE_SLOT_RING_GROWTH*(seedTiles??0)));
+  }
   private bulkStartState(cells:readonly number[]):NonNullable<typeof this.bulkStart>{
     const a=this.address,scene=this.scene,E=UNIFORM_PAGE_POOL_EDGE;
     const {volume,terrain}=this.initialVolume??=uniformLatticePagedVolume(scene,E);
@@ -1514,20 +1536,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const seed=this.mixedSeed=coarseStart?(tiers?.start==="census"?this.censusSeed():this.dynamicSeed()):undefined;
     this.censusSeedTiles=undefined;
     // M4b: unless fluid.tiers.fineBlocks gives a figure, a coarse start holds
-    // its h slots by one rule from the census footprint (uniformFineSlotRule);
-    // unless fluid.tiers.bricks does, its h owners at the slots' 512 tiles
-    // each (a rule fixed at construction underestimates vertical and spreading
-    // surfaces: the plan's M4b owner-rule experiments) and its particles by
+    // its h slots by one rule from the t=0 seed's detail rings (uniformFineSlotRule);
+    // unless fluid.tiers.bricks does, its h owners at UNIFORM_FINE_TILES_PER_SLOT
+    // a slot (uniformFineTileCeiling: the band is a sheet, measured at 19-73 a
+    // slot against a page's 512), at most the ring growth over the census seed's
+    // h tiles and the sources' tiles (drops', inflow's and free faces'), and its particles by
     // the records' rule over the band's cells (uniformParticleRecordRule), less
     // the solid contact of a BULK16 start's deep regions (bulkStartDeep). The
     // build's claim refuses to 4h what the slots cannot serve.
     const cells:[number,number,number]=[this.executionInfo.nx,this.executionInfo.ny,this.executionInfo.nz];
     const pageDims=cells.map(n=>Math.ceil(n/UNIFORM_PAGE_POOL_EDGE)) as [number,number,number];
     // The rule's sources besides the band: the bodies' balls and the h-only authored regions (slotRuleSources).
-    const slotRule=coarseStart&&uniformFineBlocks(tiers)==="auto"
-      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,uniformFineSlotRule(uniformFineSlotFootprintColumns(pageDims,this.pageResidency.stored),uniformFineSlotSourcePages(pageDims,this.slotRuleSources()))):undefined;
+    // An authored figure (fluid.tiers.fineBlocks, from a measured peak) takes the rule's place and keeps its path.
+    const authoredSlots=uniformFineBlocks(tiers);
+    const slotRule=coarseStart&&authoredSlots!==undefined
+      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,authoredSlots==="auto"?uniformFineSlotRule(this.slotRingPages(pageDims),uniformFineSlotSourcePages(pageDims,this.slotRuleSources())):authoredSlots):undefined;
     const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume,this.bulkStartDeep):undefined;
-    const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:band?512*slotRule!:seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles);
+    const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:band?this.fineCeilingRule(slotRule!,seed?.fineTiles.length,band.sourceTiles??0):seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
     const records=band?uniformParticleRecordRule(band.cells):undefined;
     const particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined||coarseStart?{fineTiles:fineCeiling,perFineCell:tiers?.particlesPerFineCell??4,records}:undefined;

@@ -20,8 +20,11 @@ export function uniformParticleRecordRule(bandCells:number):number{
  if(!(Number.isSafeInteger(bandCells)&&bandCells>=0))throw new RangeError(`A particle record rule needs a count of band cells, not ${bandCells}`);
  return Math.ceil(UNIFORM_FINE_SLOT_GROWTH*UNIFORM_PARTICLE_SAMPLES_PER_CELL*bandCells);
 }
-/** A census band: its cells, and the h tiles (4 cells an edge) holding one. */
-export interface UniformParticleBand{readonly cells:number;readonly tiles:number}
+/** A census band: its cells, and the h tiles (4 cells an edge) holding one;
+ * sourceTiles, of a census band, the h tiles the sources' own bands hold
+ * (scheduled drops' tiles, inflow packed 64 cells a tile), counted apart
+ * from the initial liquid's. */
+export interface UniformParticleBand{readonly cells:number;readonly tiles:number;readonly sourceTiles?:number}
 const tileKey=(cells:readonly [number,number,number],x:number,y:number,z:number)=>(x>>2)+Math.ceil(cells[0]/4)*((y>>2)+Math.ceil(cells[1]/4)*(z>>2));
 
 /** The band cells of a liquid given by page (LatticePages of cell volumes):
@@ -88,7 +91,7 @@ export function uniformParticleBand(volume:LatticePages,depth:number,tiles=new S
  * it; `deep`, the initial liquid's deep regions (uniformParticleBand). */
 export function uniformParticleCensusBand(scene:SceneDescription,depth:number,initial?:LatticePages,deep?:(x:number,y:number,z:number)=>boolean):UniformParticleBand{
  const volume=initial??fluidLatticePagedCellVolumes(scene,UNIFORM_PAGE_POOL_EDGE).volume,tiles=new Set<number>();
- let cells=uniformParticleBand(volume,depth,tiles,deep).cells,packed=0;
+ let cells=uniformParticleBand(volume,depth,tiles,deep).cells,packed=0;const sources=new Set<number>();
  const c=scene.container,lattice=volume.cells;
  // The fluid box's cells are the container's, from its low corner (sceneFluidBox): a box past the container is padding.
  const h=scene.voxelDomain.finestCellSize_m,size=[h,h,h] as const,reach=depth*h;
@@ -102,14 +105,14 @@ export function uniformParticleCensusBand(scene:SceneDescription,depth:number,in
   for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++){
    const p={x:centre(0,x),y:centre(1,y),z:centre(2,z)};
    const d=drop.shape==="sphere"?Math.hypot(p.x-drop.center_m.x,p.y-drop.center_m.y,p.z-drop.center_m.z)-drop.radius_m:liquidExtrusionDistance(drop,p,edges);
-   if(d<=0&&d>-reach){cells++;tiles.add(tileKey(lattice,x,y,z));}
+   if(d<=0&&d>-reach){cells++;const k=tileKey(lattice,x,y,z);tiles.add(k);sources.add(k);}
   }
  }
  const inflow=scene.fluid.inflow;
  if(inflow){
   const volume=Math.ceil(integratedInflowVolume(inflow,inflow.start_s,inflow.end_s)/(size[0]*size[1]*size[2]));cells+=volume;packed=Math.ceil(volume/64);
  }
- return {cells,tiles:tiles.size+packed};
+ return {cells,tiles:tiles.size+packed,sourceTiles:sources.size+packed};
 }
 
 /** The census liquid's ballistic reach (M4b step 3, the pool rule): the
@@ -123,12 +126,15 @@ export function uniformParticleCensusBand(scene:SceneDescription,depth:number,in
  * makes no front, and a hole in a wall only the column through it. The head is
  * v²/2g plus the census's closure margin (UNIFORM_PAGE_POOL_SEED_MARGIN
  * cells) above the highest liquid, top_m (the initial liquid's, a drop's or
- * the inflow nozzle's). */
-export interface UniformCensusReach{readonly v_m_s:number;readonly head_m:number;readonly top_m:number}
+ * the inflow nozzle's). freeTiles counts the 4h tiles holding a free-face
+ * cell: the surface a front or a hole's jet makes after t=0 grows from them
+ * (uniformFineTileCeiling). */
+export interface UniformCensusReach{readonly v_m_s:number;readonly head_m:number;readonly top_m:number;readonly freeTiles:number}
 export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):UniformCensusReach{
  const h=scene.voxelDomain.finestCellSize_m,E=volume.edge,[nx,ny,nz]=volume.cells,[px,py]=volume.pages,g=Math.hypot(scene.fluid.gravity_m_s2.x,scene.fluid.gravity_m_s2.y,scene.fluid.gravity_m_s2.z);
  // By wet column (x + nx z): its wet cells, and whether one has a free face. No array a box column.
- const column=new Map<number,number>(),free=new Set<number>();let top=0;
+ const column=new Map<number,number>(),free=new Set<number>(),faceTiles=new Set<number>();let top=0;
+ const tileX=Math.ceil(nx/4),tileY=Math.ceil(ny/4);
  const liquid=(x:number,y:number,z:number)=>{const page=volume.at.get(Math.floor(x/E)+px*(Math.floor(y/E)+py*Math.floor(z/E)));return page?page[x%E+E*(y%E+E*(z%E))]!:0;};
  const cells=sceneLatticeDimensions(scene,Number.MAX_SAFE_INTEGER),[cx,cy,cz]=cells,walled=scene.container.walls!=="none";
  const solids=solidWorldForScene(scene),boundary=proceduralSolidField(scene),ground=sceneHasTerrain(scene)?terrainColumnHeights(scene,cx,cz):undefined,cellHeight=scene.container.height_m/cy;
@@ -142,7 +148,8 @@ export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):U
   const ox=E*(i%px),oy=E*(Math.floor(i/px)%py),oz=E*Math.floor(i/(px*py));
   for(let z=0,j=0;z<E;z++)for(let y=0;y<E;y++)for(let x=0;x<E;x++,j++)if(page[j]!>0&&ox+x<nx&&oy+y<ny&&oz+z<nz){
    const X=ox+x,Y=oy+y,Z=oz+z,c=X+nx*Z;column.set(c,(column.get(c)??0)+1);top=Math.max(top,(Y+1)*h);
-   if(!free.has(c)&&page[j]!>=0.5&&(openDry(X-1,Y,Z)||openDry(X+1,Y,Z)||openDry(X,Y,Z-1)||openDry(X,Y,Z+1)))free.add(c);
+   const tile=(X>>2)+tileX*((Y>>2)+tileY*(Z>>2));
+   if((!free.has(c)||!faceTiles.has(tile))&&page[j]!>=0.5&&(openDry(X-1,Y,Z)||openDry(X+1,Y,Z)||openDry(X,Y,Z-1)||openDry(X,Y,Z+1))){free.add(c);faceTiles.add(tile);}
   }
  }
  let tallest=0;for(const c of free)tallest=Math.max(tallest,column.get(c)!*h);
@@ -151,7 +158,7 @@ export function uniformCensusReach(scene:SceneDescription,volume:LatticePages):U
  const speed=(v:{x:number;y:number;z:number}|undefined)=>v?Math.hypot(v.x,v.y,v.z):0;
  const v=Math.max(2*Math.sqrt(g*tallest),speed(scene.fluid.inflow?.velocity_m_s),...scene.rigidBodies.map(b=>speed(b.linearVelocity_m_s)));
  // Without gravity nothing at rest climbs, and nothing moving comes back down (an unbounded head).
- return {v_m_s:v,head_m:(v>0?v*v/(2*g):0)+UNIFORM_PAGE_POOL_SEED_MARGIN*h,top_m:top};
+ return {v_m_s:v,head_m:(v>0?v*v/(2*g):0)+UNIFORM_PAGE_POOL_SEED_MARGIN*h,top_m:top,freeTiles:faceTiles.size};
 }
 /** The pool rule's blocks for a walled box (M4b step 3): the census pages
  * (`stored`, the box pages resident at build), each footprint column's pages above its top
@@ -166,11 +173,11 @@ export function uniformPagePoolRule(scene:SceneDescription,volume:LatticePages,s
  * the census liquid's top plus its head, and the page that caps it (the box's
  * top under a closed top), and the census speed v; undefined for an open top
  * with an unbounded head. */
-export function uniformPagePoolRuleReach(scene:SceneDescription,volume:LatticePages):{readonly reachPage:number;readonly ceilingPage:number;readonly v_m_s:number}|undefined{
+export function uniformPagePoolRuleReach(scene:SceneDescription,volume:LatticePages):{readonly reachPage:number;readonly ceilingPage:number;readonly v_m_s:number;readonly freeTiles:number}|undefined{
  const reach=uniformCensusReach(scene,volume),pageHeight=volume.edge*scene.voxelDomain.finestCellSize_m,open=scene.container.top==="open";
  const reachPage=Math.floor((reach.top_m+reach.head_m)/pageHeight);
  if(open&&!Number.isFinite(reachPage))return undefined;
- return {reachPage,ceilingPage:open?Number.MAX_SAFE_INTEGER:volume.pages[1]-1,v_m_s:reach.v_m_s};
+ return {reachPage,ceilingPage:open?Number.MAX_SAFE_INTEGER:volume.pages[1]-1,v_m_s:reach.v_m_s,freeTiles:reach.freeTiles};
 }
 /** A body's bound in lattice cells: its centre and bounding radius (boundingRadius). */
 export interface UniformCensusBodyBall{readonly centre:readonly [number,number,number];readonly radius:number}
