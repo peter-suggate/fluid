@@ -575,6 +575,7 @@ function packViewUniforms(
 const f16Requested = optimizationExperiments.halfPrecisionLighting === true;
 const { adapterInfo, device: unprofiledDevice, timestampsSupported, validationErrors } = await createDawnRenderDevice({
   modulePath,
+  disabledDawnFeatures: process.env.FLUID_SVO_MAIN_KERNEL_STUDY ? ["timestamp_quantization"] : [],
   dawnFeatures: (process.env.FLUID_WEBGPU_DAWN_FEATURES ?? "").split(","),
   // FLUID_SVO_DRY_FRAME_TIMING=gpu asked for hardware timestamps, so a wall-time
   // fallback would silently report a different measurement than the one requested.
@@ -988,7 +989,7 @@ if (process.env.FLUID_SVO_DRY_FRAME_SURFACE_STYLE === "smooth") scene.surfaceSty
 // the solver lattice as the app's does for Uniform (`svoRenderRefinementPermitted`);
 // the document-derived depth is zero there by construction, so take the request.
 const environmentRefinementDepth = requestedRefinementDepth === undefined
-  ? 0
+  ? process.env.FLUID_SVO_MAIN_KERNEL_STUDY ? DEFAULT_SVO_RENDER_TUNING.environmentRefinementDepth : 0
   : scene.systems?.fluid !== false ? requestedRefinementDepth
     : svoEnvironmentTreeRefinementDepth(scene.voxelDomain, { fluid: false });
 const presetCamera = sceneModule ? sceneModule.camera : preset.camera;
@@ -1022,6 +1023,10 @@ const solver = await WebGPULiveSvoScene.create(
 // than throwing, which is right for a tab and wrong for a measurement: a
 // profile labelled "depth 3" that allocated depth 2 attributes its milliseconds
 // to a rung the frame never drew. An explicit request is therefore checked.
+if (process.env.FLUID_SVO_MAIN_KERNEL_STUDY) {
+  assert.equal(solver.builtRefinementDepth, environmentRefinementDepth,
+    "Main-path kernel experiments require the requested geometry resolution");
+}
 if (requestedRefinementDepth !== undefined) {
   log(`Environment refinement depth ${environmentRefinementDepth}`
     + ` — set drawn at ${solver.sparseVoxelSceneSource.structural!.domain.cellSize_m[0] * 1000} mm`
@@ -1138,7 +1143,9 @@ if(surfaceExperiments)log(`Primary normal sources: ${JSON.stringify(normalSource
 const surfaceStudy=surfaceExperiments?await primarySurfaceStudy(lightingReference?.device??primaryAblation?.device??device,surfaceExperiments.split(","),normalSources):undefined;
 const sculptProbeDevice = (process.env.FLUID_SVO_DRY_FRAME_SCULPT_LIVE_STUDY || process.env.FLUID_SVO_DRY_FRAME_SCULPT_CAMERA)
   ? (await import("./probe-native-sculpt-live")).nativeSculptProbeDevice(device) : undefined;
-const renderer = new SparseVoxelDrySceneRenderer(sculptProbeDevice ?? surfaceStudy?.device ?? nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
+const kernelStudy = process.env.FLUID_SVO_MAIN_KERNEL_STUDY
+  ? (await import("./svo-main-kernel-study")).captureMainKernels(device) : undefined;
+const renderer = new SparseVoxelDrySceneRenderer(kernelStudy?.device ?? sculptProbeDevice ?? surfaceStudy?.device ?? nativeLod?.device ?? lightingReference?.device ?? primaryAblation?.device ?? device, uniformBuffer, bodyBuffer, "rgba16float", traversalMode, brickOccupancyMode,
   shadingPath, screenSpaceTerminationPixels, rasterRigidDiscovery, coneFanout,
   surfaceStudy ? { ...optimizationExperiments, surfaceMeshCompactTargets: false, surfaceMeshAdaptiveNormals: false } : optimizationExperiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
@@ -1246,6 +1253,13 @@ if (optimizationExperiments.surfaceMesh) {
   }
   surfaceMeshBuild_ms = performance.now() - started;
   log(`  [mesh ready] ${surfaceMeshBuild_ms.toFixed(3)} ms`);
+}
+
+if (kernelStudy) {
+  await kernelStudy.run({ renderer, uniforms: uniformBuffer, target, adapterInfo,
+    view: { scene, camera, environmentId, info: solver.info, bodyCount: bodies.count, width, height },
+    directory: process.env.FLUID_SVO_MAIN_KERNEL_STUDY!, validationErrors });
+  renderer.destroy(); target.destroy(); uniformBuffer.destroy(); bodyBuffer.destroy(); solver.destroy(); device.destroy(); process.exit(0);
 }
 
 if (process.env.FLUID_SVO_DRY_FRAME_SCULPT_CAMERA === "1") {

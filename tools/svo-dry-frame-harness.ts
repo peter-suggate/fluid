@@ -71,6 +71,7 @@ export interface DawnRenderDeviceOptions {
   readonly modulePath?: string;
   /** `enable-dawn-features=` list, e.g. `["skip_validation"]`. */
   readonly dawnFeatures?: readonly string[];
+  readonly disabledDawnFeatures?: readonly string[];
   /** Fail closed rather than fall back to wall timing. */
   readonly requireTimestampQuery?: boolean;
   readonly requireShaderF16?: boolean;
@@ -133,6 +134,7 @@ export async function createDawnRenderDevice(options: DawnRenderDeviceOptions = 
   const dawnFeatures = (options.dawnFeatures ?? []).map((feature) => feature.trim()).filter(Boolean);
   const gpu = create([
     "backend=metal",
+    ...(options.disabledDawnFeatures?.length ? [`disable-dawn-features=${options.disabledDawnFeatures.join(",")}`] : []),
     ...(dawnFeatures.length > 0 ? [`enable-dawn-features=${dawnFeatures.join(",")}`] : []),
   ]);
   retainedDawnInstances.push(gpu);
