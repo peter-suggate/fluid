@@ -402,3 +402,35 @@ The body gate removes the wake's particles but the falling letters lose
 2.7% more volume: their corners need shape heat (Sato's point). Letting
 shape only start heat does not cool the wake: tiles re-heat as they cool.
 Neither is committed.
+
+**Shape heat gated on surface speed** (dt·|u|_max/h > 0.02, the tile's max
+component speed in the FLIP copy's unused defect word): rejected. rest-step
+got worse (surface 0.04 → 0.28 h, late speed 0.041 → 0.069 m/s, 7.9k
+particles stay): the particles' own stirring holds the tile above the
+threshold. Boats particles were unchanged (467k).
+
+**APIC's growth is retained wake, not a fault** (`--particle-census`,
+paddleboats step 600): live 1.0M against FLIP's 0.58M, almost all of it slow
+deep collar samples (heat ≤ 1, depth < −1: 640k against 323k; mean speed
+0.156 against 0.216 m/s). Shape-hot tiles grow only 796 → 993; heated tiles
+1643 → 2476. APIC dissipates the wake's shape less than FLIP 95%, so the
+shape criterion keeps more of it hot. The pressure residual at step 600 is
+no worse (0.013 against 0.015); the earlier 0.196 was a single report-step
+spike, which FLIP shows too (1.23 at step 100). So the wake's cost is the
+shape criterion's, under either transfer.
+
+**A lattice-aligned corner at rest coarsens and loses volume** (parked).
+The dam break loses 0.53% in frame 1 with no particles; held at zero
+gravity, it still loses 0.38% (66 cells) in one step and then holds. The
+free top-front corner tile coarsens at the first census: 4h carries a corner
+on its lattice exactly, the displacement test reads zero, and the curve and
+corner terms count only for moving surfaces (umClassMoving). One step later
+its corner phi reads (16,28) −h/30, (12,32) −h/30, (16,32) +h/15 (all were
+0). With the surface along both coarse faces, that swings the 4h zero set
+across two thirds of each face: the owner's fill is 0.87. Counting the
+curve and corner terms at rest too fixes the column (frame 1 +0.02%, frame 3
+−0.14% against −0.95%) but is far too broad: boats 63 → 143 ms with 1.8M
+particles, rest-step 0.29 m/s, dam energy rise 3.4 → 11.8%. The right fix
+is whatever perturbs a resting coarse corner's phi (not yet found; not
+nbBuildDistance, which keeps an exact zero). It is worth 0.5% of the dam
+break's 3.6%: the rest is lost during the collapse, with particles.

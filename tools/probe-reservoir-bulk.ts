@@ -186,6 +186,29 @@ await withUniformDevice("reservoir bulk probe", async raw => {
       // --criteria: the census's verdict a tile (the importance flags NB-FLIP
       // copies beside its heat) and its particle heat: the wet band tiles each
       // criterion triggers, those required at h, and the tiles holding heat.
+      // --particle-census: the live records by state (ballistic, coupled), heat (hot > 1, collar <= 1), depth and speed.
+      let particleCensus: Record<string, number> | undefined;
+      if (flip && process.argv.includes("--particle-census")) {
+        const f = flip as unknown as { activeParticles: GPUBuffer; particleStride: number };
+        const stride = f.particleStride, bytes = Math.min(f.activeParticles.size, 4 * stride * Math.ceil(1.5 * flip.count + 1024));
+        const read = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        { const e = device.createCommandEncoder(); e.copyBufferToBuffer(f.activeParticles, 0, read, 0, bytes); device.queue.submit([e.finish()]); }
+        await read.mapAsync(GPUMapMode.READ); const a = new Float32Array(read.getMappedRange().slice(0)), u = new Uint32Array(a.buffer); read.unmap(); read.destroy();
+        const c: Record<string, number> = { found: 0, ballistic: 0, hot: 0, collar: 0, deep: 0, shallow: 0, air: 0, fast: 0, speedSum: 0, ballisticSpeedSum: 0 };
+        const apic = stride === 28;
+        for (let o = 0; o + stride <= a.length; o += stride) {
+          if (!(a[o]! > 0 && a[o + 3]! > 0)) continue;
+          c.found!++;
+          const ballistic = apic ? a[o + 11] === 1 : (u[o + 11]! >>> 31) === 1;
+          const speed = Math.hypot(a[o + 4]!, a[o + 5]!, a[o + 6]!), depth = a[o + 7]!;
+          if (ballistic) { c.ballistic!++; c.ballisticSpeedSum! += speed; }
+          if (a[o + 3]! > 1) c.hot!++; else c.collar!++;
+          if (depth < -1) c.deep!++; else if (depth <= 0.5) c.shallow!++; else c.air!++;
+          if (speed > 1) c.fast!++; c.speedSum! += speed;
+        }
+        c.meanSpeed = c.speedSum! / Math.max(1, c.found!); c.ballisticMeanSpeed = c.ballisticSpeedSum! / Math.max(1, c.ballistic!);
+        delete c.speedSum; delete c.ballisticSpeedSum; particleCensus = c;
+      }
       let criteria: Record<string, number> | undefined;
       if (flip && process.argv.includes("--criteria")) {
         const f = flip as unknown as { activityWord: number; activityHeatWord: number; tiles: number; bins: GPUBuffer };
@@ -412,7 +435,7 @@ await withUniformDevice("reservoir bulk probe", async raw => {
         volume: volume?total:undefined, drift: stats.volumeDrift, maxSpeed: stats.maxSpeed_m_s, fine: solver.info.uniformMixedFineTiles,
         finePeak, fineCeiling: frame.fineCeiling, residual: stats.uniformPressureAcceptedResidual, pool, bulk16, slots: stats.uniformMixedSlotsUsed, slotCapacity: stats.uniformMixedSlotCapacity, slotPeak: stats.uniformMixedSlotPeak, refused: stats.uniformMixedRefusedTiles,
         pressure: { cycles: stats.uniformPressureCyclesExecuted, band: stats.uniformPressureBandCycles, bandTiles: stats.uniformPressureBandTiles }, dispatches,
-        criteria, particles: flip ? { live: flip.count, peak: particlePeak, capacity: flip.capacity, clipped: flip.reseedClippedTotal, bricks, brickPeak, binSlots: flip.binSlots, arenaPeak, arenaWindows: (flip as unknown as { arenaWindows: number }).arenaWindows } : undefined };
+        criteria, particleCensus, particles: flip ? { live: flip.count, peak: particlePeak, capacity: flip.capacity, clipped: flip.reseedClippedTotal, bricks, brickPeak, binSlots: flip.binSlots, arenaPeak, arenaWindows: (flip as unknown as { arenaWindows: number }).arenaWindows } : undefined };
       rows.push(row); console.log(JSON.stringify(row));
     }
     const live = allocation.snapshot();
