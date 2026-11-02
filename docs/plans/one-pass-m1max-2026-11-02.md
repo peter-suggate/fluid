@@ -309,3 +309,68 @@ The h ceiling (uniformFineTileCeiling):
 - garden-dam-break: refused 560 → 0, peak 666/1380.
 - dam-break-boxes: peak 1689/4096, refused 0.
 - seep under `--pool=rule`: 0.969 GiB (was 0.965).
+
+## 9. Why the wake's particles never retire (2026-11-02)
+
+`--criteria --phi-profile` on paddleboats (app profile, shape 0.5 h, step
+600) classifies crossing h tiles as core (heat), collar (spread heat only),
+carried or cold, and replays the census's four terms on the CPU from the
+end-step phi:
+
+| class | plane-fit rms | worst | census median: worst / vol / curve |
+|---|---|---|---|
+| core | 0.21-0.25 h | 0.5-0.6 h | 0.41 / 0.51 / 1.05 h |
+| collar | 0.03-0.05 h | 0.08-0.1 h | 0.08 / 0.07 / 0.29 h |
+| cold h | 0.01 h | 0.03 h | 0.03 / 0.02 / 0.18 h |
+
+- The core tiles' surface is the particles' union of spheres. It carries
+  about 0.2 h rms of bumps on a nearly flat surface (slope 0.12), and 12%
+  of core tiles hold spray blobs above it. The same water, once cooled,
+  is flat to about 0.03 h. One binomial pass only halves the bumps, so
+  they are not just grid-Nyquist noise.
+- The census measures those bumps as 4h error at or above the 0.5 h
+  tolerance. That keeps the tile hot and its particles alive, and the
+  particles keep the bumps: a latch. The worst term's 0.41 h median is
+  about what the maximum of ~50 crossings drawn from 0.2 h noise gives.
+- The churning tank's core tiles read the same (rms 0.2 h). The small dam
+  box cools completely, so the latch needs continued forcing.
+
+**The curve term now uses the level set's curvature,**
+div(grad phi/|grad phi|) (uniform-level-set-curvature.wgsl.ts), not
+laplacian(phi). Interface vertices keep the magnitude that places their
+zero (arenaStore), so phi_nn there is no geometry:
+- Smooth h tiles above 1 h on the curve term: 12-16% → 3-5% (CPU replay).
+- Wake core curve median: 1.05 → 0.53 h.
+- tests/uniform-level-set-curvature.test.ts: a sphere's distance field, the
+  same field scaled 3x, and r^2 - R^2 all give 2/r within 4%.
+
+A/B, one exclusive run each (`tools/gpu/fluid-gpu-run.sh timing`), default
+tolerance, base → curvature:
+
+| scene | median ms | drift |
+|---|---|---|
+| seep (pool rule) | 30.5 → 32.2 | +2.6e-4 → −1e-5 |
+| letters 120 | 52.6 → 54.5 | −1.60% → −1.54% |
+| vast | 26.1 → 24.6 | −3e-5 → −4e-5 |
+| dam | 13.1 → 12.9 | −0.27% → +0.05% |
+| churning tank | 16.3 → 16.0 | −0.85% → −0.85% |
+
+The paddleboats wake changes within run-to-run noise: 67.3 → 69.6 ms, core
+tiles 1290 → 1363, 519k → 659k particles against a band of 422-610k. So
+this is a correctness fix of the measure, not the wake fix. The remaining
+cause is the particle surface's own roughness, which sits at the tolerance.
+
+**Where the bumps come from** (paddleboats, step 600, same configuration):
+- Particles alone (`--zb` replays the sort's positions on the CPU): the union
+  of spheres reads 0.19 h median rms in core and 0.22 h in collar.
+  Zhu & Bridson's averaged surface reads 0.135 h at R = 1.5 h and 0.105 h
+  at R = 2 h. The particles' placement is irregular everywhere. The collar
+  is smooth only because the coupling keeps the grid's phi' there.
+- Widening the coupling's ripple slack (0.076 → 0.25 → 0.5 h, so particles
+  correct phi' less) makes core rougher: 0.27 → 0.31 → 0.375 h. The
+  particles damp the bumps; phi' carries them. So the source is the
+  particle-transferred velocity.
+- APIC transfer (particleTransfer "apic") halves core rms (0.21 → 0.11 h)
+  and the worst crossing (0.41 → 0.30 h median). In that run particles and
+  h tiles grew instead (1.28M, 12k h tiles at step 600, against ~0.4M and
+  ~5k), which needs explaining before APIC can be judged.

@@ -1,4 +1,5 @@
 import {uniformSolidRefinementWGSL} from "./uniform-solid-refinement";
+import {UNIFORM_LEVEL_SET_CURVATURE_WGSL} from "./uniform-level-set-curvature.wgsl";
 import { STAGE_RESIDENCY_WORDS, RESIDENCY_STAGES, RESIDENCY_STENCIL_TILES, localResidencyWGSL, localResidencyRequestWGSL, localResidencyMarkWGSL } from "./uniform-local-residency";
 import { narrowBandBudgetWGSL, narrowBandBudgetWords, NARROW_BAND_BUDGET_ENTRIES } from "./uniform-narrow-band-budget.wgsl";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
@@ -648,6 +649,13 @@ fn umWideShared(wide:u32,local:vec3u)->bool{
  }}}
  return false;
 }
+// Every cell incident to interior vertex v is open: its 3^3 stencil holds liquid-domain values.
+fn umCensusVertexOpen(mask:vec2u,v:vec3u)->bool{
+ if(all(mask==vec2u(0xffffffffu))){return true;}
+ for(var k=0u;k<8u;k++){if(!umCensusCellOpen(mask,vec3i(v)-vec3i(umCorner(k,2u)))){return false;}}
+ return true;
+}
+${UNIFORM_LEVEL_SET_CURVATURE_WGSL}
 // How far an h tile's surface moves when its eight 4h corners carry it, in
 // h: at every zero crossing of an h edge, the corners' trilinear phi over
 // its gradient (the distance to their zero set, to first order). Signed
@@ -664,16 +672,14 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
  for(var i=lane;i<125u;i+=64u){
   let v=umCorner(i,5u);let value=umLoadFine(origin+v);
   // An interior vertex within 1.5 h of the surface: the mean displacement a
-  // 4h lattice makes of it anywhere, (L^2/12) phi_aa per axis with L = 4
-  // cells, 4/3 of the h second differences (umCurveError).
-  if(all(v>=vec3u(1u))&&all(v<=vec3u(3u))&&abs(value)<=1.5*UM_H){
-   var sum=0.0;var closed=false;
-   for(var a=0u;a<3u;a++){
-    var below=v;below[a]-=1u;var above=v;above[a]+=1u;
-    if(!umCensusEdgeOpen(open,below,a)||!umCensusEdgeOpen(open,v,a)){closed=true;break;}
-    sum+=umLoadFine(origin+below)+umLoadFine(origin+above)-2.0*value;
-   }
-   if(!closed){curve+=sum*(4.0/3.0)/UM_H;curves++;}
+  // 4h lattice makes of it anywhere, (L^2/12) kappa h^2 with L = 4 cells,
+  // 4/3 h kappa (umCurveError). kappa is the level set's own curvature
+  // (umLevelSetCurvature), not laplacian(phi): the two agree only where phi
+  // is a distance, and an interface vertex keeps the magnitude that places
+  // its zero (arenaStore), so phi_nn there is no geometry.
+  if(all(v>=vec3u(1u))&&all(v<=vec3u(3u))&&abs(value)<=1.5*UM_H&&umCensusVertexOpen(open,v)){
+   let kappa=umLevelSetCurvature(origin+v,value);
+   if(kappa.y>0.0){curve+=kappa.x*(4.0/3.0)*UM_H;curves++;}
   }
   // A tile corner: no h stencil fits, so its curvature is the 4h lattice's
   // there, as a 4h tile measures its own (umResolutionError).

@@ -29,7 +29,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import "../lib/methods";
-import { createUniformSolver, readUniformFields, withUniformDevice } from "../tests/helpers/uniform-geometric";
+import { createUniformSolver, readUniformFields, readUniformLiveAddress, withUniformDevice } from "../tests/helpers/uniform-geometric";
+import { uniformTileKey } from "../lib/methods/uniform/uniform-lattice-address";
 import { auditUniformGPUAllocations, uniformGPUAllocationClass } from "./uniform-gpu-allocation-audit";
 import { UNIFORM_PAGE_POOL_STATUS as S } from "../lib/methods/uniform/uniform-page-pool";
 import { BULK16_STATUS } from "../lib/methods/uniform/uniform-bulk-pages";
@@ -188,12 +189,13 @@ await withUniformDevice("reservoir bulk probe", async raw => {
       let criteria: Record<string, number> | undefined;
       if (flip && process.argv.includes("--criteria")) {
         const f = flip as unknown as { activityWord: number; activityHeatWord: number; tiles: number; bins: GPUBuffer };
-        const big = device.createBuffer({ size: 12 * f.tiles, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        // Scores (2 words), heat, its spread target, new, theta, then the particles' surface heat: 7 words a tile.
+        const big = device.createBuffer({ size: 28 * f.tiles, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
         const encoder = device.createCommandEncoder();
-        encoder.copyBufferToBuffer(f.bins, 4 * f.activityWord, big, 0, 8 * f.tiles);
-        encoder.copyBufferToBuffer(f.bins, 4 * f.activityHeatWord, big, 8 * f.tiles, 4 * f.tiles);
+        encoder.copyBufferToBuffer(f.bins, 4 * f.activityWord, big, 0, 28 * f.tiles);
         device.queue.submit([encoder.finish()]); await big.mapAsync(GPUMapMode.READ);
         const range = big.getMappedRange(), scores = new Uint32Array(range, 0, 2 * f.tiles), heat = new Float32Array(range, 8 * f.tiles, f.tiles);
+        const target = new Float32Array(range, 12 * f.tiles, f.tiles), carried = new Float32Array(range, 24 * f.tiles, f.tiles);
         criteria = { wet: 0, crossing: 0, required: 0, held: 0, dropped: 0, heated: 0, hot: 0, shape: 0, thin: 0, strain: 0, rotation: 0, impact: 0, approach: 0, only_shape: 0, only_thin: 0, only_strain: 0, only_rotation: 0, only_impact: 0, only_approach: 0 };
         const names = ["shape", "thin", "strain", "rotation", "impact", "approach"];
         for (let t = 0; t < f.tiles; t++) {
@@ -201,6 +203,186 @@ await withUniformDevice("reservoir bulk probe", async raw => {
           if (w & (1 << 29)) criteria.wet!++; if (w & (1 << 28)) criteria.crossing!++; if (w & (1 << 25)) criteria.required!++; if (w & (1 << 26)) criteria.held!++; if (w & (1 << 27)) criteria.dropped!++;
           for (let c = 0; c < 6; c++) if (bits & (1 << c)) { criteria[names[c]!]!++; if (bits === 1 << c) criteria[`only_${names[c]}`]!++; }
           if (heat[t]! > 0) criteria.heated!++; if (heat[t]! >= 2) criteria.hot!++;
+          // Crossing tiles by particle state: core (heat), collar (spread heat only), carried (particle heat
+          // in a cold tile), cold (none). Their shape scores (byte 0 of word 0, 64 = 1) and shape triggers.
+          if (w & (1 << 28)) {
+            const cls = heat[t]! > 0 ? "core" : target[t]! > 0 ? "collar" : carried[t]! > 0 ? "carried" : "cold";
+            const score = (scores[2 * t]! & 255) / 64;
+            criteria[`${cls}_n`] = (criteria[`${cls}_n`] ?? 0) + 1;
+            criteria[`${cls}_shape`] = (criteria[`${cls}_shape`] ?? 0) + ((bits & 1) ? 1 : 0);
+            criteria[`${cls}_score`] = (criteria[`${cls}_score`] ?? 0) + score;
+            const bucket = score < 0.25 ? "lt025" : score < 0.5 ? "lt05" : score < 1 ? "lt1" : score < 2 ? "lt2" : "ge2";
+            criteria[`${cls}_${bucket}`] = (criteria[`${cls}_${bucket}`] ?? 0) + 1;
+          }
+        }
+        // --phi-profile (last row): phi along each crossing tile's centre column, in h, k vertices
+        // from the lowest vertex below its first crossing, averaged by particle class. A signed
+        // distance reads k - 0.5 on average; the h tiles' raw vertices, the 4h tiles' trilinear ones.
+        if (process.argv.includes("--phi-profile") && step === steps) {
+          const fields = await readUniformFields(device, solver), address = await readUniformLiveAddress(device, solver);
+          const { nx, ny, nz } = solver.info, h = scene.voxelDomain.finestCellSize_m, K = 5;
+          const raw = (x: number, y: number, z: number) => fields.phi[x + (nx + 1) * (y + (ny + 1) * z)]!;
+          // PHI_SMOOTH=1: the same measures on the field after one [1 2 1]/4 binomial pass an axis.
+          const plain = (x: number, y: number, z: number) => { x = Math.max(0, Math.min(nx, x)); y = Math.max(0, Math.min(ny, y)); z = Math.max(0, Math.min(nz, z)); return fields.widthAt(Math.min(x, nx - 1), Math.min(y, ny - 1), Math.min(z, nz - 1)) === 1 ? raw(x, y, z) : fields.vertex(x, y, z); };
+          const W = [0.25, 0.5, 0.25], field = process.env.PHI_SMOOTH === "1" ? (x: number, y: number, z: number) => { let v = 0; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let d = -1; d <= 1; d++) v += W[a + 1]! * W[b + 1]! * W[d + 1]! * plain(x + a, y + b, z + d); return v; } : plain;
+          const sums: Record<string, { n: number; at: number[]; rough?: number; worst?: number; fit?: number; slope?: number; tn?: number; tmean?: number; tworst?: number; tplane?: number; cw?: number; cv?: number; cc?: number; ck?: number; cn?: number; multi?: number; blobs?: number; pockets?: number; terms?: number[][] }> = {};
+          for (let tz = 0; 4 * tz < nz; tz++) for (let ty = 0; 4 * ty < ny; ty++) for (let tx = 0; 4 * tx < nx; tx++) {
+            const t = uniformTileKey(address, tx, ty, tz);
+            if (!(t >= 0 && t < f.tiles) || !(scores[2 * t + 1]! & (1 << 28))) continue;
+            const x = 4 * tx + 2, z = 4 * tz + 2, fine = fields.widthAt(x, 4 * ty, z) === 1, phiAt = (y: number) => fine ? raw(x, y, z) : fields.vertex(x, y, z);
+            let base = -1;
+            for (let y = 4 * ty; y < 4 * ty + 4 && y < ny; y++) if ((phiAt(y) < 0) !== (phiAt(y + 1) < 0)) { base = y; break; }
+            if (base < K || base + K + 1 > ny) continue;
+            const cls = `${heat[t]! > 0 ? "core" : target[t]! > 0 ? "collar" : carried[t]! > 0 ? "carried" : "cold"}_${fine ? "h" : "4h"}`;
+            const sum = sums[cls] ??= { n: 0, at: new Array(2 * K + 2).fill(0) };
+            const sign = phiAt(base) < 0 ? 1 : -1; sum.n++;
+            for (let k = -K; k <= K + 1; k++) sum.at[k + K]! += sign * phiAt(base + k) / h;
+            // Roughness: the first crossing height of each of the tile's 5x5 vertex columns
+            // (searched from a vertex below the tile to one above), a least-squares plane through
+            // them, and its RMS and worst residual in h; and the tile-corner bilinear plane's worst.
+            const heights: [number, number, number][] = [];
+            for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++) {
+              const cx = 4 * tx + i, cz = 4 * tz + j, at = (y: number) => field(cx, y, cz);
+              for (let y = Math.max(0, 4 * ty - 2); y < Math.min(ny, 4 * ty + 6); y++) { const a = at(y), b = at(y + 1); if ((a < 0) !== (b < 0)) { heights.push([i, j, y + a / (a - b)]); break; } }
+            }
+            // The census's four terms (umSurfaceDisplacement, umVolumeError, umCurveError, umCornerCurveError), in h, on this field.
+            if (fine) {
+              const o = [4 * tx, 4 * ty, 4 * tz], F = (a: number, b: number, d: number) => field(o[0]! + a, o[1]! + b, o[2]! + d);
+              const c8 = [0, 1].map(a => [0, 1].map(b => [0, 1].map(d => F(4 * a, 4 * b, 4 * d))));
+              const tri = (x: number, y: number, z: number) => { let v = 0; for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let d = 0; d < 2; d++) v += (a ? x : 1 - x) * (b ? y : 1 - y) * (d ? z : 1 - z) * c8[a]![b]![d]!; return v; };
+              let worstD = 0, along = 0, crossings = 0, curve = 0, curves = 0, corner = 0, kappa = 0;
+              for (let a = 0; a <= 4; a++) for (let b = 0; b <= 4; b++) for (let d = 0; d <= 4; d++) {
+                const v = [a, b, d], value = F(a, b, d);
+                if (a >= 1 && a <= 3 && b >= 1 && b <= 3 && d >= 1 && d <= 3 && Math.abs(value) <= 1.5 * h) {
+                  curve += (F(a - 1, b, d) + F(a + 1, b, d) + F(a, b - 1, d) + F(a, b + 1, d) + F(a, b, d - 1) + F(a, b, d + 1) - 6 * value) * (4 / 3) / h; curves++;
+                  // The level set's own curvature, div(grad phi / |grad phi|) = (|g|^2 tr H - g.H.g) / |g|^3, in cells.
+                  const P = (x: number, y: number, z: number) => F(a + x, b + y, d + z) / h;
+                  const g = [(P(1, 0, 0) - P(-1, 0, 0)) / 2, (P(0, 1, 0) - P(0, -1, 0)) / 2, (P(0, 0, 1) - P(0, 0, -1)) / 2];
+                  const e = (i: number) => [i === 0 ? 1 : 0, i === 1 ? 1 : 0, i === 2 ? 1 : 0];
+                  const Hm = [0, 1, 2].map(i => [0, 1, 2].map(j => { if (i === j) { const u = e(i); return P(u[0]!, u[1]!, u[2]!) + P(-u[0]!, -u[1]!, -u[2]!) - 2 * P(0, 0, 0); } const u = e(i), w = e(j); return (P(u[0]! + w[0]!, u[1]! + w[1]!, u[2]! + w[2]!) - P(u[0]! - w[0]!, u[1]! - w[1]!, u[2]! - w[2]!) - P(-u[0]! + w[0]!, -u[1]! + w[1]!, -u[2]! + w[2]!) + P(-u[0]! - w[0]!, -u[1]! - w[1]!, -u[2]! - w[2]!)) / 4; }));
+                  const gg = g[0]! ** 2 + g[1]! ** 2 + g[2]! ** 2, tr = Hm[0]![0]! + Hm[1]![1]! + Hm[2]![2]!;
+                  let gHg = 0; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) gHg += g[i]! * Hm[i]![j]! * g[j]!;
+                  if (gg > 1e-6) kappa += (gg * tr - gHg) / gg ** 1.5 * (4 / 3);
+                }
+                if (a % 4 === 0 && b % 4 === 0 && d % 4 === 0 && Math.abs(value) <= 2 * h) {
+                  const lap = F(a + 4, b, d) + F(a - 4, b, d) + F(a, b + 4, d) + F(a, b - 4, d) + F(a, b, d + 4) + F(a, b, d - 4) - 6 * value;
+                  corner = Math.max(corner, Math.abs(lap) / (12 * h));
+                }
+                for (let ax = 0; ax < 3; ax++) {
+                  if (v[ax]! >= 4) continue; const n = [...v]; n[ax]!++; const next = F(n[0]!, n[1]!, n[2]!);
+                  if ((value < 0) === (next < 0)) continue;
+                  const t = v.map(q => q / 4); t[ax]! += 0.25 * value / (value - next);
+                  const e = 1e-3, g = [0, 1, 2].map(q => { const u = [...t], w = [...t]; u[q]! = Math.min(1, u[q]! + e); w[q]! = Math.max(0, w[q]! - e); return (tri(u[0]!, u[1]!, u[2]!) - tri(w[0]!, w[1]!, w[2]!)) / (u[q]! - w[q]!); });
+                  const dd = 4 * tri(t[0]!, t[1]!, t[2]!) / Math.max(Math.hypot(g[0]!, g[1]!, g[2]!), 4e-3 * h);
+                  worstD = Math.max(worstD, Math.abs(dd)); along += dd; crossings++;
+                }
+              }
+              // Columns (vertical vertex lines of the tile, 5x5, y over the tile and two vertices either side) with
+              // three or more crossings: a blob above or a pocket below the first surface. Their sign: a liquid blob in air or an air pocket.
+              let multi = 0, blobs = 0, pockets = 0;
+              for (let a = 0; a <= 4; a++) for (let d = 0; d <= 4; d++) {
+                const signs: boolean[] = []; for (let b = -2; b <= 6; b++) signs.push(F(a, b, d) < 0);
+                let flips = 0; for (let q = 1; q < signs.length; q++) if (signs[q] !== signs[q - 1]) flips++;
+                if (flips >= 3) { multi++; if (signs[0]) blobs++; else pockets++; }
+              }
+              sum.multi = (sum.multi ?? 0) + (multi > 0 ? 1 : 0); sum.blobs = (sum.blobs ?? 0) + blobs; sum.pockets = (sum.pockets ?? 0) + pockets;
+              const vol = crossings ? 4 * Math.abs(along / crossings) : 0, cur = curves ? 4 * Math.abs(curve / curves) : 0;
+              (sum.terms ??= []).push([worstD, vol, cur, 4 * corner, multi > 0 ? 1 : 0, curves ? 4 * Math.abs(kappa / curves) : 0]); sum.cw = (sum.cw ?? 0) + worstD; sum.cv = (sum.cv ?? 0) + vol; sum.cc = (sum.cc ?? 0) + cur; sum.ck = (sum.ck ?? 0) + 4 * corner; sum.cn = (sum.cn ?? 0) + 1;
+            }
+            if (heights.length >= 20) {
+              // Normal equations for z = p + q i + r j.
+              let s = 0, si = 0, sj = 0, sii = 0, sjj = 0, sij = 0, sz = 0, siz = 0, sjz = 0;
+              for (const [i, j, y] of heights) { s++; si += i; sj += j; sii += i * i; sjj += j * j; sij += i * j; sz += y; siz += i * y; sjz += j * y; }
+              const M = [[s, si, sj], [si, sii, sij], [sj, sij, sjj]], v = [sz, siz, sjz];
+              const det = (m: number[][]) => m[0]![0]! * (m[1]![1]! * m[2]![2]! - m[1]![2]! * m[2]![1]!) - m[0]![1]! * (m[1]![0]! * m[2]![2]! - m[1]![2]! * m[2]![0]!) + m[0]![2]! * (m[1]![0]! * m[2]![1]! - m[1]![1]! * m[2]![0]!);
+              const D = det(M), c = [0, 1, 2].map(k => det(M.map((row, r) => row.map((e, q) => q === k ? v[r]! : e))) / D);
+              let rms = 0, worst = 0;
+              for (const [i, j, y] of heights) { const e = y - (c[0]! + c[1]! * i + c[2]! * j); rms += e * e; worst = Math.max(worst, Math.abs(e)); }
+              sum.rough = (sum.rough ?? 0) + Math.sqrt(rms / heights.length); sum.worst = (sum.worst ?? 0) + worst; sum.fit = (sum.fit ?? 0) + 1;
+              sum.slope = (sum.slope ?? 0) + Math.hypot(c[1]!, c[2]!);
+              // The census's view: the tile's 4h corners (the field at its corner vertices) interpolated
+              // trilinearly, its zero in each column against the h crossing; mean signed and worst, in h.
+              const corner = (a: number, b: number, d: number) => field(4 * tx + 4 * a, 4 * ty + 4 * b, 4 * tz + 4 * d);
+              const C = [0, 1].map(a => [0, 1].map(b => [0, 1].map(d => corner(a, b, d))));
+              let dn = 0, dm = 0, dw = 0, pw = 0;
+              for (const [i, j, y] of heights) {
+                const u = i / 4, w = j / 4, bl = (b: number) => (1 - u) * (1 - w) * C[0]![b]![0]! + u * (1 - w) * C[1]![b]![0]! + (1 - u) * w * C[0]![b]![1]! + u * w * C[1]![b]![1]!;
+                const A = bl(0), B = bl(1); if ((A < 0) === (B < 0) || y < 4 * ty || y > 4 * ty + 4) continue;
+                const tri = 4 * ty + 4 * A / (A - B), d = tri - y, pd = tri - (c[0]! + c[1]! * i + c[2]! * j);
+                dn++; dm += d; dw = Math.max(dw, Math.abs(d)); pw = Math.max(pw, Math.abs(pd));
+              }
+              if (dn > 0) { sum.tn = (sum.tn ?? 0) + 1; sum.tmean = (sum.tmean ?? 0) + Math.abs(dm / dn); sum.tworst = (sum.tworst ?? 0) + dw; sum.tplane = (sum.tplane ?? 0) + pw; }
+            }
+          }
+          for (const [cls, { n, at, rough, worst, fit, slope, tn, tmean, tworst, tplane, cw, cv, cc, ck, cn, multi, blobs, pockets, terms }] of Object.entries(sums)) { if (terms?.length) { const med = (k: number) => terms.map(t => t[k]!).sort((a, b) => a - b)[terms.length >> 1]!.toFixed(2), over = (k: number, single?: number) => (100 * terms.filter(t => t[k]! > 1 && (single === undefined || t[4] === single)).length / terms.length).toFixed(0); console.log(`terms ${cls.padEnd(12)} median worst ${med(0)} vol ${med(1)} curve ${med(2)} corner ${med(3)} | >1h worst ${over(0)}% vol ${over(1)}% curve ${over(2)}% corner ${over(3)}% | >1h among single-surface: worst ${over(0, 0)}% vol ${over(1, 0)}% curve ${over(2, 0)}% | kappa median ${med(5)} >1h ${over(5)}% >0.5h ${(100 * terms.filter(t => t[5]! > 0.5).length / terms.length).toFixed(0)}% | any>0.5h ${(100 * terms.filter(t => Math.max(t[0]!, t[1]!, t[2]!, t[3]!) > 0.5).length / terms.length).toFixed(0)}% any>1h ${(100 * terms.filter(t => Math.max(t[0]!, t[1]!, t[2]!, t[3]!) > 1).length / terms.length).toFixed(0)}% any(kappa)>1h ${(100 * terms.filter(t => Math.max(t[0]!, t[1]!, t[5]!, t[3]!) > 1).length / terms.length).toFixed(0)}%`); } console.log(`phi ${cls.padEnd(12)} n ${String(n).padStart(5)} k=-${K}..${K + 1}: ${at.map(v => (v / n).toFixed(2)).join(" ")}  plane rms ${((rough ?? 0) / (fit || 1)).toFixed(3)}h worst ${((worst ?? 0) / (fit || 1)).toFixed(3)}h slope ${((slope ?? 0) / (fit || 1)).toFixed(2)} | tri |mean| ${((tmean ?? 0) / (tn || 1)).toFixed(3)}h worst ${((tworst ?? 0) / (tn || 1)).toFixed(3)}h vs plane ${((tplane ?? 0) / (tn || 1)).toFixed(3)}h | census worst ${((cw ?? 0) / (cn || 1)).toFixed(2)} vol ${((cv ?? 0) / (cn || 1)).toFixed(2)} curve ${((cc ?? 0) / (cn || 1)).toFixed(2)} corner ${((ck ?? 0) / (cn || 1)).toFixed(2)} | multi-crossing tiles ${(100 * (multi ?? 0) / (cn || 1)).toFixed(0)}% blob cols ${blobs ?? 0} pocket cols ${pockets ?? 0}`); }
+          // --zb: the particle surfaces of the same tiles, from the live particles alone (cell units): the union
+          // of 0.875-cell spheres (what reconstruct pins to) against Zhu & Bridson 2005's averaged surface
+          // |x - xbar| - r, xbar the (1 - s^2)^3-weighted mean position within R. Plane-fit rms of each column's first
+          // crossing (0.125-cell samples) for up to 300 tiles a class.
+          if (process.argv.includes("--zb")) {
+            // The sort's position copy (nbPosition): links (the next buffer) from word NB_LINKS = binCells, four words a particle.
+            const fl = flip as unknown as { next: GPUBuffer; binCells: number };
+            const live = flip!.count, stride = 4;
+            const pread = device.createBuffer({ size: Math.max(16, 16 * live), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+            { const e = device.createCommandEncoder(); e.copyBufferToBuffer(fl.next, 4 * fl.binCells, pread, 0, Math.max(16, 16 * live)); device.queue.submit([e.finish()]); }
+            await pread.mapAsync(GPUMapMode.READ); const P = new Float32Array(pread.getMappedRange().slice(0)); pread.unmap(); pread.destroy();
+            // The window's offset (box cell 0 sits at lattice cell 32 * a frame page): the multiple of 32 an axis
+            // that holds every particle in the box and puts the most of them in crossing tiles.
+            const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity], dims = [nx, ny, nz];
+            for (let q = 0; q < live; q++) { P[stride * q + 3] = P[stride * q]! < 0 ? 0 : 1; if (!P[stride * q + 3]) continue; for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a]!, P[stride * q + a]!); hi[a] = Math.max(hi[a]!, P[stride * q + a]!); } }
+            const choices = [0, 1, 2].map(a => { const c: number[] = []; for (let o = 32 * Math.floor((lo[a]! - dims[a]!) / 32); o <= hi[a]!; o += 32) c.push(o); return c; });
+            let best = [0, 0, 0], bestCount = -1;
+            for (const ox of choices[0]!) for (const oy of choices[1]!) for (const oz of choices[2]!) {
+              let count = 0;
+              for (let q = 0; q < live; q += 37) { if (!P[stride * q + 3]) continue; const t = uniformTileKey(address, Math.floor((P[stride * q]! - ox) / 4), Math.floor((P[stride * q + 1]! - oy) / 4), Math.floor((P[stride * q + 2]! - oz) / 4)); if (t >= 0 && t < f.tiles && (scores[2 * t + 1]! & (1 << 28))) count++; }
+              if (count > bestCount) { bestCount = count; best = [ox, oy, oz]; }
+            }
+            console.log(`zb offset ${best.join(",")} (${bestCount} sampled particles in crossing tiles; choices ${choices.map(c => c.length).join("x")})`);
+            for (let q = 0; q < live; q++) for (let a = 0; a < 3; a++) P[stride * q + a]! -= best[a]!;
+            const grid = new Map<number, number[]>(), key = (x: number, y: number, z: number) => x + 4096 * (y + 4096 * z);
+            for (let q = 0; q < live; q++) { if (!(P[stride * q + 3]! > 0)) continue; const k = key(Math.floor(P[stride * q]!), Math.floor(P[stride * q + 1]!), Math.floor(P[stride * q + 2]!)); let list = grid.get(k); if (!list) grid.set(k, list = []); list.push(q); }
+            const radii = [1.5, 2], out: Record<string, { n: number; rough: number[] }> = {};
+            const taken: Record<string, number> = {};
+            for (let tz = 0; 4 * tz < nz; tz++) for (let ty = 0; 4 * ty < ny; ty++) for (let tx = 0; 4 * tx < nx; tx++) {
+              const t = uniformTileKey(address, tx, ty, tz);
+              if (!(t >= 0 && t < f.tiles) || !(scores[2 * t + 1]! & (1 << 28)) || fields.widthAt(4 * tx, 4 * ty, 4 * tz) !== 1) continue;
+              const cls = heat[t]! > 0 ? "core" : target[t]! > 0 ? "collar" : null; if (!cls || (taken[cls] ?? 0) >= 300) continue;
+              const per: [number, number, number][][] = [[], [], []];
+              for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++) {
+                const cx = 4 * tx + i, cz = 4 * tz + j, near: number[] = [];
+                for (let a = cx - 3; a <= cx + 2; a++) for (let b = 4 * ty - 5; b <= 4 * ty + 8; b++) for (let d = cz - 3; d <= cz + 2; d++) { const list = grid.get(key(a, b, d)); if (list) near.push(...list); }
+                const evals = (y: number) => {
+                  let u = 3; const sw = [0, 0], sx = [[0, 0, 0], [0, 0, 0]];
+                  for (const q of near) {
+                    const dx = cx - P[stride * q]!, dy = y - P[stride * q + 1]!, dz = cz - P[stride * q + 2]!, d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 < 9) u = Math.min(u, Math.sqrt(d2) - 0.875);
+                    for (let r = 0; r < 2; r++) { const s2 = d2 / (radii[r]! * radii[r]!); if (s2 < 1) { const w = (1 - s2) ** 3; sw[r]! += w; sx[r]![0]! += w * P[stride * q]!; sx[r]![1]! += w * P[stride * q + 1]!; sx[r]![2]! += w * P[stride * q + 2]!; } }
+                  }
+                  return [u, ...[0, 1].map(r => sw[r]! > 0 ? Math.hypot(cx - sx[r]![0]! / sw[r]!, y - sx[r]![1]! / sw[r]!, cz - sx[r]![2]! / sw[r]!) - 0.5 * radii[r]! : 3)];
+                };
+                let prev = evals(4 * ty - 2);
+                const found = [false, false, false];
+                for (let y = 4 * ty - 2 + 0.125; y <= 4 * ty + 6; y += 0.125) {
+                  const now = evals(y);
+                  for (let m = 0; m < 3; m++) if (!found[m] && prev[m]! < 0 && now[m]! >= 0) { found[m] = true; per[m]!.push([i, j, y - 0.125 + 0.125 * prev[m]! / (prev[m]! - now[m]!)]); }
+                  prev = now; if (found.every(Boolean)) break;
+                }
+              }
+              if (per.some(h => h.length < 20)) continue;
+              taken[cls] = (taken[cls] ?? 0) + 1;
+              const names = ["union", "zb1.5", "zb2"];
+              for (let m = 0; m < 3; m++) {
+                const hs = per[m]!; let s = 0, si = 0, sj = 0, sii = 0, sjj = 0, sij = 0, sz = 0, siz = 0, sjz = 0;
+                for (const [a, b, y] of hs) { s++; si += a; sj += b; sii += a * a; sjj += b * b; sij += a * b; sz += y; siz += a * y; sjz += b * y; }
+                const M = [[s, si, sj], [si, sii, sij], [sj, sij, sjj]], v = [sz, siz, sjz];
+                const det = (q: number[][]) => q[0]![0]! * (q[1]![1]! * q[2]![2]! - q[1]![2]! * q[2]![1]!) - q[0]![1]! * (q[1]![0]! * q[2]![2]! - q[1]![2]! * q[2]![0]!) + q[0]![2]! * (q[1]![0]! * q[2]![1]! - q[1]![1]! * q[2]![0]!);
+                const D = det(M), c = [0, 1, 2].map(k => det(M.map((row, r) => row.map((e, qq) => qq === k ? v[r]! : e))) / D);
+                let rms = 0; for (const [a, b, y] of hs) rms += (y - (c[0]! + c[1]! * a + c[2]! * b)) ** 2;
+                (out[`${cls} ${names[m]}`] ??= { n: 0, rough: [] }).rough.push(Math.sqrt(rms / hs.length));
+              }
+            }
+            for (const [name, { rough }] of Object.entries(out)) { const sorted = [...rough].sort((a, b) => a - b); console.log(`zb ${name.padEnd(14)} tiles ${rough.length} rms mean ${(rough.reduce((a, b) => a + b, 0) / rough.length).toFixed(3)}h median ${sorted[sorted.length >> 1]!.toFixed(3)}h p90 ${sorted[Math.floor(0.9 * sorted.length)]!.toFixed(3)}h`); }
+          }
         }
         big.unmap(); big.destroy();
       }
