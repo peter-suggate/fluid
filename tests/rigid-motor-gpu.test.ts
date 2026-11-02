@@ -83,3 +83,40 @@ test('GPU motors create no dry thrust, and axle returns paddle traction with the
     } finally { rigid.destroy();exchange.destroy();terrain.destroy(); }
   });
 });
+
+test('native contacts publish hull, independent wheels and motion before the next GPU step', { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+  await withUniformDevice('native motor contacts', async device => {
+    const scene=createPaddleboatsScene();scene.fluid.gravity_m_s2={x:0,y:0,z:0};
+    scene.rigidBodies=scene.rigidBodies.slice(0,9);
+    scene.rigidBodies[0].position_m={x:0,y:.6,z:1.5};scene.rigidBodies[0].linearVelocity_m_s={x:0,y:0,z:3};
+    scene.rigidBodies[0].motorStrengths={left:0,right:-.5};
+    const exchange=device.createBuffer({size:GPU_RIGID_BODY_CAPACITY*12*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+    const terrain=device.createTexture({size:[1,1],format:'r32float',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+    const rigid=new WebGPURigidBodySystem(device,scene,exchange,terrain);rigid.enableNativeMotorContacts=true;
+    try {
+      for(const task of rigid.initializationTasks())await task.run(new AbortController().signal);
+      rigid.syncBodies(initializeRigidBodies(scene.rigidBodies));
+      for(let i=0;i<45;i++) {
+        const e=device.createCommandEncoder();rigid.encode(e,1/60,.025**3,1,.025);device.queue.submit([e.finish()]);
+        const completion=rigid.finishNativeStep();
+        if(i===1)rigid.setSelectedIndex(0);
+        assert.equal(await completion,true);
+      }
+      const poses=(await rigid.readPoses())!;
+      assert.ok(poses[0].position_m.z<1.95,'wheel contact stops the boat before its buoyancy box reaches the wall');
+      for(const [index,strength] of [[1,0],[5,-.5]]) {
+        const m=scene.rigidBodies[index].motorAttachment!;
+        const expected=rigidMotorPose(poses[0],{...m,angularSpeed_rad_s:m.angularSpeed_rad_s*strength},.75);
+        assert.ok(Math.hypot(...(['x','y','z'] as const).map(a=>poses[index].position_m[a]-expected.position_m[a]))<1e-5);
+      }
+      const read=device.createBuffer({size:rigid.motionBuffer.size+rigid.renderBuffer.size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      const e=device.createCommandEncoder();e.copyBufferToBuffer(rigid.motionBuffer,0,read,0,rigid.motionBuffer.size);
+      e.copyBufferToBuffer(rigid.renderBuffer,0,read,rigid.motionBuffer.size,rigid.renderBuffer.size);device.queue.submit([e.finish()]);
+      await read.mapAsync(GPUMapMode.READ);const motion=new Float32Array(read.getMappedRange().slice(0));read.unmap();read.destroy();
+      assert.equal(motion[2],poses[0].position_m.z,'motion sidecar publishes the corrected contact pose');
+      assert.ok(Math.abs(motion[3]-1/60)<1e-7);
+      assert.ok(Math.abs(motion[6]-motion[2])<.05,'previous pose belongs to the same native step');
+      assert.equal(motion[rigid.motionBuffer.size/4+15],1,'selection during native handoff survives publication');
+    }finally{rigid.destroy();exchange.destroy();terrain.destroy();}
+  });
+});

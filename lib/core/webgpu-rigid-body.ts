@@ -2,7 +2,8 @@ import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { RIGID_MOTOR_FLOATS, rigidMotorWGSL, rigidControlOwnerId, rigidMotorStrength, updateRigidMotorDrive, type RigidMotorDrive } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import { sculptCollisionWGSL } from "./sculpt-collision.wgsl";
-import type { SceneDescription } from "./model";
+import type { RigidBodyDescription, SceneDescription } from "./model";
+import { Box3DMotorContacts } from "../interaction/adapters/box3d/motor-contacts";
 import type { Quaternion, Vec3 } from "./model";
 import { boundingRadius, primitiveVolume, type RigidBodyState } from "./rigid-body";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "../svo/features/scene-publication/svo-primitive-motion";
@@ -435,6 +436,7 @@ ${terrainContact ? rigidTerrainBindingWGSL : ""}
 @group(0) @binding(6) var<storage, read_write> pickResult: PickResult;
 @group(0) @binding(7) var<storage, read_write> rigidMotion: array<SvoPrimitiveMotionRecord, ${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(8) var<storage, read_write> immersedVolumes: array<f32>;
+@group(0) @binding(12) var<storage, read> nativePrevious: array<RigidBody, ${GPU_RIGID_BODY_CAPACITY}>;
 ${solidWorldContact ? rigidSolidWorldBindingWGSL : ""}
 
 ${rigidMotorWGSL}
@@ -615,13 +617,15 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
       let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);
       body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);
       body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);
-      body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);
+      if(params.solidCell.w<.5){body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);}
       body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);
       let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);
-      body.orientation=normalize(body.orientation+.5*dt*derivative);
+      if(params.solidCell.w<.5){body.orientation=normalize(body.orientation+.5*dt*derivative);}
       bodies[index]=body;
     }
   }
+  // Native motor assemblies consume the kicked velocities and own contacts/drift.
+  if(params.solidCell.w>.5){return;}
   for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body);" : "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
   // A held body is the host's to place. Whatever the contact iterations did to
   // it — a pair impulse from a crate it was shoved into, an angular momentum it
@@ -631,6 +635,15 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
   for(var index=0u;index<count;index++){attachMotor(index,params.gravity.w,dt);}
   for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index<count){publish(index);publishMotion(index,previousBodies[index],bodies[index],dt);}else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}}
 }
+@compute @workgroup_size(1)
+fn publishNative() {
+  let count=u32(round(params.step.z));let dt=params.step.x;
+  for(var index=0u;index<count;index++){attachMotor(index,params.gravity.w,dt);}
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){
+    if(index<count){publish(index);publishMotion(index,nativePrevious[index],bodies[index],dt);}
+    else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}
+  }
+}
 `;
 
 /** Heightfield-contact variant retained by solvers that have not cut over to SolidWorld. */
@@ -638,7 +651,8 @@ export const gpuRigidBodyShader = gpuRigidBodyShaderSource(true);
 
 
 
-/** Authoritative GPU rigid state. CPU writes only explicit reset/edit/drag commands. */
+/** Resident rigid state. Motor assemblies finish each pressure kick through
+ * Box3D before publishing their corrected poses; other bodies integrate on GPU. */
 export class WebGPURigidBodySystem {
   readonly stateBuffer: GPUBuffer;
   readonly renderBuffer: GPUBuffer;
@@ -657,6 +671,18 @@ export class WebGPURigidBodySystem {
   private selectionOwners: number[] = [];
   private readonly paramsBuffer: GPUBuffer;
   private pipeline!: GPUComputePipeline;
+  private nativePipeline!: GPUComputePipeline;
+  private nativeBindings!: GPUBindGroup;
+  private nativeContacts?: Box3DMotorContacts;
+  private nativeDescriptions: RigidBodyDescription[] = [];
+  private nativeSignature = '';
+  private nativeScene?: SceneDescription;
+  private nativeStepDt = 0;
+  private disposed = false;
+  /** Opt in only where the caller completes the native step before advancing. */
+  enableNativeMotorContacts = false;
+  get nativeMotorContacts(): boolean { return this.enableNativeMotorContacts && this.nativeDescriptions.some(b => b.motorAttachment); }
+
   private bindGroup!: GPUBindGroup;
   private pickPipeline!: GPUComputePipeline;
   private pickBindGroup!: GPUBindGroup;
@@ -680,7 +706,7 @@ export class WebGPURigidBodySystem {
     this.proceduralCollisionSource = source;
   }
 
-  // No `deferPipelineCompilation` parameter: the two rigid pipelines are always
+  // No `deferPipelineCompilation` parameter: the rigid pipelines are always
   // compiled through `initializationTasks`, because a scene that starts without
   // bodies is a scene that can still be given one, and the first body dropped
   // into a running bodyless scene used to reach `encode` with no pipeline at
@@ -696,7 +722,7 @@ export class WebGPURigidBodySystem {
     this.immersedVolumeBuffer = device.createBuffer({ label: "GPU rigid immersed volumes",
       size: GPU_RIGID_IMMERSED_VOLUME_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.stateScratch = device.createBuffer({ label: "GPU rigid-body roster scratch", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.stateScratch = device.createBuffer({ label: "GPU rigid-body roster scratch", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderScratch = device.createBuffer({ label: "GPU rigid render roster scratch", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionScratch = device.createBuffer({ label: "GPU rigid motion roster scratch", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motorBuffer = device.createBuffer({label:"Rigid motor attachments and skins",size:GPU_RIGID_BODY_CAPACITY*RIGID_MOTOR_FLOATS*4,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -708,7 +734,7 @@ export class WebGPURigidBodySystem {
   /** Adopt authored scene scalars and roster metadata without replacing GPU state. */
   setScene(scene: SceneDescription): void { this.scene = scene; }
 
-  private descriptor(entryPoint: "integrate" | "pickRigidBody"): GPUComputePipelineDescriptor {
+  private descriptor(entryPoint: "integrate" | "pickRigidBody" | "publishNative"): GPUComputePipelineDescriptor {
     if (!this.terrainTexture && !this.solidWorldCollisionSource) {
       throw new Error("Rigid-body static contact requires terrain or SolidWorld occupancy");
     }
@@ -717,8 +743,7 @@ export class WebGPURigidBodySystem {
       code: gpuRigidBodyShaderSource(this.terrainTexture !== undefined,
         this.solidWorldCollisionSource, this.proceduralCollisionSource),
     });
-    return { label: entryPoint === "integrate"
-      ? "GPU resident rigid-body integrate/contact" : "GPU resident rigid-body ray pick",
+    return { label: `GPU rigid-body ${entryPoint}`,
       layout: "auto", compute: { module: this.shaderModule, entryPoint } };
   }
 
@@ -835,12 +860,19 @@ export class WebGPURigidBodySystem {
    * had to force a rebuild, so removing it is what actually makes
    * `adoptsRigidRosterShape` true rather than merely declared.
    *
-   * The cost is two small pipelines from one module for a scene that never
+   * The cost is three small pipelines from one module for a scene that never
    * gains a body, next to the several hundred a solver already compiles.
    */
   initializationTasks(): GPUInitializationTask[] {
     if (!this.pipelinesDeferred) return [];
     return [
+      { id: "rigid.pipeline.native", phase: "solver-pipelines", label: "Compile native rigid publication",
+        run: async () => {
+          this.nativePipeline = await this.device.createComputePipelineAsync(this.descriptor("publishNative"));
+          this.nativeBindings = this.device.createBindGroup({ layout: this.nativePipeline.getBindGroupLayout(0), entries:
+            [[0,this.stateBuffer],[2,this.renderBuffer],[3,this.paramsBuffer],[7,this.motionBuffer],[11,this.motorBuffer],[12,this.stateScratch]].map(([binding, buffer]) =>
+              ({ binding: binding as number, resource: { buffer: buffer as GPUBuffer } })) });
+        } },
       { id: "rigid.pipeline.integrate", phase: "solver-pipelines",
         label: "Compile rigid-body integration",
         run: async () => { this.pipeline = await this.device.createComputePipelineAsync(
@@ -852,6 +884,7 @@ export class WebGPURigidBodySystem {
   }
 
   syncBodies(bodies: readonly RigidBodyState[]) {
+    if (this.enableNativeMotorContacts) this.nativeDescriptions = bodies.slice(0, GPU_RIGID_BODY_CAPACITY).map(b => b.description);
     // No body held and none given: the signatures are empty on both sides, so
     // a scene without bodies builds none of them each step. The upload is its
     // own function: its closures would cost this one a context on every call.
@@ -1035,12 +1068,58 @@ export class WebGPURigidBodySystem {
   }
 
   encode(encoder: GPUCommandEncoder, dt_s: number, cellVolume_m3: number, snapshotCount = 1, cellHeight_m = 1) {
+    if (this.nativeStepDt) throw new Error("Finish the native rigid step before encoding another");
+    if (this.nativeMotorContacts) {
+      this.nativeStepDt = dt_s;
+      encoder.copyBufferToBuffer(this.stateBuffer, 0, this.stateScratch, 0, GPU_RIGID_STATE_BYTES);
+    }
     this.motorTime_s += dt_s;
     const c=this.scene.container,g=this.scene.fluid.gravity_m_s2;
     const solid=this.solidWorldCollisionSource;
-    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,this.motorTime_s,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),0]));
+    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,this.motorTime_s,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),this.nativeMotorContacts?1:0]));
     const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(1);pass.end();
   }
 
-  destroy() { this.motorBuffer.destroy();this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
+  /** The readback is bounded to 3 KiB. Keep presentation and the next fluid
+   * step behind the returned publication; they must see contacts and motors together. */
+  async finishNativeStep(): Promise<boolean> {
+    if (!this.nativeStepDt || this.disposed) return false;
+    const dt = this.nativeStepDt;
+    const readback = this.device.createBuffer({ label: "Native rigid velocity handoff", size: GPU_RIGID_STATE_BYTES,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.stateBuffer, 0, readback, 0, GPU_RIGID_STATE_BYTES);
+      this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      const values = new Float32Array(readback.getMappedRange().slice(0)); readback.unmap();
+      if (this.disposed) return false;
+      const signature = JSON.stringify(this.nativeDescriptions.map(b => [b.id,b.shape,b.dimensions_m,b.density_kg_m3,b.friction,b.restitution,b.appearance,b.motorAttachment]));
+      if (!this.nativeContacts || this.nativeSignature !== signature) {
+        const next = await Box3DMotorContacts.create(this.scene, this.nativeDescriptions);
+        if (this.disposed) { next.destroy(); return false; }
+        this.nativeContacts?.destroy(); this.nativeContacts = next;
+        this.nativeSignature = signature; this.nativeScene = this.scene;
+      } else if (this.nativeScene !== this.scene) {
+        this.nativeContacts.updateSolids(this.scene); this.nativeScene = this.scene;
+      }
+      this.nativeContacts.step(values, this.nativeDescriptions, dt);
+      // Selection can change while the readback is outstanding. Preserve the
+      // material/command lanes and let attachMotor publish every fixture.
+      for (let i = 0; i < this.nativeDescriptions.length; i++) {
+        if (this.nativeDescriptions[i].motorAttachment || values[i*GPU_RIGID_STATE_FLOATS+30] !== 1) continue;
+        this.device.queue.writeBuffer(this.stateBuffer, i*GPU_RIGID_STATE_FLOATS*4,
+          values, i*GPU_RIGID_STATE_FLOATS, 28);
+      }
+      const publish = this.device.createCommandEncoder({ label: "Publish native boat contacts and wheel poses" });
+      const pass = publish.beginComputePass(); pass.setPipeline(this.nativePipeline); pass.setBindGroup(0,this.nativeBindings);
+      pass.dispatchWorkgroups(1); pass.end(); this.device.queue.submit([publish.finish()]);
+      return true;
+    } finally {
+      this.nativeStepDt = 0;
+      if (readback.mapState === "mapped") readback.unmap(); readback.destroy();
+    }
+  }
+
+  destroy() { this.disposed = true; this.nativeContacts?.destroy(); this.motorBuffer.destroy();this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
 }

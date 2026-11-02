@@ -1,6 +1,7 @@
 import { fluidSolidWorldForScene, sampleSolidWorld, type SolidWorld, type SolidWorldPage } from '../../../core/solid-world';
 import { proceduralSolidField, sampleSolidNodes } from '../../../core/procedural-solid';
 import { sceneCellSizes_m } from '../../../core/scene-lattice-dimensions';
+import { solidPatchKindId, SOLID_PATCH_BOX_KIND } from '../../../core/solid-patch/kind';
 import type { SceneDescription, Vec3 } from '../../../core/model';
 export type CollisionShape = { kind: 'box'; center: Vec3; half: Vec3 } | { kind: 'hull'; points: Vec3[] };
 type HullShape = Extract<CollisionShape, { kind: 'hull' }>;
@@ -48,9 +49,14 @@ function mergeConvexSlice(shapes: HullShape[], planes: Plane[]): HullShape[] {
 export function compileSolidChunks(scene: SceneDescription, positions: readonly Vec3[] = [], cache?: SolidCollisionCache): CollisionChunk[] {
   const world = fluidSolidWorldForScene(scene), field = proceduralSolidField(scene), h = sceneCellSizes_m(scene);
   const origin = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
-  cache?.prepare(JSON.stringify([origin, h, world.regions]), world.ground);
+  cache?.prepare(JSON.stringify([origin, h, world.regions, Boolean(field)]), world.ground);
   const sourcePages = cache ? new Map(world.pages.map(page => [page.coordinate.join(','), page])) : undefined;
   const pages = new Set<string>(world.pages.map(page => page.coordinate.join(',')));
+  // Large scenery slabs are already exact boxes. Expanding the studio floor
+  // into tens of thousands of chunks adds no contact detail. Region fills have
+  // final precedence over pages, so publish them once and omit covered cells.
+  const boxRegions = !field && world.regions?.every(r => r.operation === 'fill'
+    && solidPatchKindId(r) === SOLID_PATCH_BOX_KIND) ? world.regions : undefined;
   for (const brick of scene.solidBoundary?.bricks ?? []) pages.add(brick.origin.map(v => Math.floor(v / 8)).join(','));
   const addBox = (lo: readonly number[], hi: readonly number[]) => {
     for (let z = Math.floor(lo[2] / 8); z <= Math.floor(hi[2] / 8); z++) for (let y = Math.floor(lo[1] / 8); y <= Math.floor(hi[1] / 8); y++) for (let x = Math.floor(lo[0] / 8); x <= Math.floor(hi[0] / 8); x++) {
@@ -58,7 +64,7 @@ export function compileSolidChunks(scene: SceneDescription, positions: readonly 
       if (pages.size > 32768) throw new Error('Interactive collision coverage exceeds 32768 chunks');
     }
   };
-  for (const region of world.regions ?? []) addBox(region.minimum, region.maximumExclusive.map(v => v - 1));
+  if (!boxRegions) for (const region of world.regions ?? []) addBox(region.minimum, region.maximumExclusive.map(v => v - 1));
   if (world.ground) for (const p of positions) {
     const c = [p.x, p.y, p.z].map((v, a) => (v - origin[a]) / h[a]);
     const r = h.map(v => Math.ceil(3 / v));
@@ -66,6 +72,12 @@ export function compileSolidChunks(scene: SceneDescription, positions: readonly 
   }
   const point = (p: readonly number[]): Vec3 => ({ x: origin[0] + p[0] * h[0], y: origin[1] + p[1] * h[1], z: origin[2] + p[2] * h[2] });
   const result: CollisionChunk[] = [];
+  for (const [i, region] of (boxRegions ?? []).entries()) {
+    const lo = region.minimum, hi = region.maximumExclusive;
+    const shape: CollisionShape = { kind: 'box', center: point(lo.map((v, a) => (v + hi[a]) / 2)),
+      half: { x: (hi[0]-lo[0])*h[0]/2, y: (hi[1]-lo[1])*h[1]/2, z: (hi[2]-lo[2])*h[2]/2 } };
+    result.push({ key: `region:${i}`, signature: JSON.stringify(shape), shapes: [shape] });
+  }
   for (const key of [...pages].sort()) {
     const page = sourcePages?.get(key), sampled = field?.bricks.get(key), retained = cache?.get(key, page, sampled);
     if (retained) { if (retained.chunk) result.push(retained.chunk); continue; }
@@ -77,6 +89,7 @@ export function compileSolidChunks(scene: SceneDescription, positions: readonly 
     for (let z = 0; z < 8; z++) for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
       const slice = slices[z];
       const c = [base[0] + x, base[1] + y, base[2] + z] as const, at = field?.at(c);
+      if (boxRegions?.some(r => c.every((v, a) => v >= r.minimum[a] && v < r.maximumExclusive[a]))) { slice.complete = false; continue; }
       if (!at) { slice.complete = false; full[x + 8 * (y + 8 * z)] = sampleSolidWorld(world, c).solidFraction > 0 ? 1 : 0; continue; }
       // Exact surface nodes can acquire roundoff-sized signed distances.
       // Snap these before clipping to avoid effectively zero-volume hulls.

@@ -3,6 +3,7 @@ import assets from "./imported-assets/paddleboats.generated.json";
 import type { SceneryNode } from "./scenery-graph";
 import { cloneScene, defaultScene, type RigidBodyDescription, type SceneDescription } from './model';
 import { rigidMotorPose } from './rigid-motor';
+import { solidVoxelShellForScene } from './scene-lattice';
 import type { WidgetPlacementOverrides } from '../framework/widgets';
 
 export const PADDLEBOATS_SCENE_ID = 'paddleboats';
@@ -22,7 +23,7 @@ export function createPaddleboatsScene(): SceneDescription {
   scene.container = { width_m: 12.8, height_m: .8, depth_m: 4.8, fillFraction: .75, top: 'open', fluidWallMode: 'no-slip' };
   scene.voxelDomain = { finestCellSize_m: .025, brickSize_cells: 8 };
   scene.nominalResolution = { length_m: .025 };
-  scene.solidVoxels = [];
+  scene.solidVoxels = [...solidVoxelShellForScene(scene)];
   delete scene.terrain;
   scene.fluid = { density_kg_m3: 998.2, dynamicViscosity_Pa_s: 0, surfaceTension_N_m: 0,
     optics: { indexOfRefraction: 1.333, absorption_mInv: [.22, .055, .035], roughness: .04 },

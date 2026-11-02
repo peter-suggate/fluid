@@ -8,6 +8,7 @@ export interface B3Body extends B3Handle {
   setTransform(position: Vec3, rotation: Quaternion): void;
   setTargetTransform(target: { position: Vec3; rotation: Quaternion }, dt: number, wake: boolean): void;
   setLinearVelocity(value: Vec3): void; setAngularVelocity(value: Vec3): void;
+  setType(value: string): void;
   applyLinearImpulseToCenter(value: Vec3, wake: boolean): void;
   applyAngularImpulse(value: Vec3, wake: boolean): void;
   getMass(): number; getUserData(): number;

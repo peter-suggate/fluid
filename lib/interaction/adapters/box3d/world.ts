@@ -21,14 +21,14 @@ export class Box3DWorld {
   private lastFluidTick = -1;
   private grab?: { entityId: string; anchor: B3Body; joint: B3Joint };
   private constructor(private world: B3World, private scene: SceneDescription, readonly generation: number) {}
-  static async create(scene: SceneDescription, entities: readonly { entity: EntityRecord; recipe: BodyRecipe }[], generation: number) {
+  static async create(scene: SceneDescription, entities: readonly { entity: EntityRecord; recipe: BodyRecipe }[], generation: number, bodyCapacity = 12) {
     const module = await loadBox3D();
     const native = new module.World({ gravity: scene.fluid.gravity_m_s2, enableContinuous: true });
     const result = new Box3DWorld(native, scene, generation);
     try {
       for (const body of scene.rigidBodies) result.add(body.id, body);
       for (const { entity, recipe } of entities) result.add(entity.id, shapeDescription(entity, recipe), recipe);
-      if (result.renderBodies().length > 12) throw new Error('Interactive rendering and fluid coupling currently support 12 physical bodies per scene');
+      if (result.renderBodies().length > bodyCapacity) throw new Error(`Interactive rendering and fluid coupling support ${bodyCapacity} physical bodies per scene`);
       result.updateSolids(scene);
       return result;
     } catch (error) { result.destroy(); throw error; }

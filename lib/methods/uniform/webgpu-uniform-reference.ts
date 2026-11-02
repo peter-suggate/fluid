@@ -939,6 +939,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.rigidExchange = device.createBuffer({ label: "Uniform reference rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchange,
       this.terrainTexture, [cells[0], cells[2]]);
+    this.rigidSystem.enableNativeMotorContacts = !scene.interaction?.entities.length;
     this.rigidSystem.setProceduralCollisionSource({
       buffer: this.activeScratch, pointerWord: this.activeScratch.size / 4 - 2, sculptCollision: true,
       origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2],
@@ -2998,7 +2999,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * deferred edit is draining the pipeline. Each frame adopts its own
    * layout at its head, so no census gates admission. */
   get framePending(): boolean {
-    return this.mixedFramesInFlight >= UNIFORM_MIXED_RECEIPT_RING
+    return (this.mixedFrameInFlight && this.rigidSystem.nativeMotorContacts)
+      || this.mixedFramesInFlight >= UNIFORM_MIXED_RECEIPT_RING
       || (this.mixedFrameInFlight && this.deferredFrameEdit);
   }
   /** Scene, value and body edits wait for every submitted frame. */
@@ -3006,13 +3008,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private get deferredFrameEdit(): boolean {
     return this.deferredFrameScene !== undefined || this.deferredFrameValues !== undefined || this.deferredFrameBodies !== undefined;
   }
-  // advance() submits the complete frame before returning. Its receipt ring
+  // GPU-only advance() submits the complete frame before returning. Its receipt ring
   // limits admission of another advance, not presentation of this one: a
   // draw queued behind it sees the final fields by WebGPU queue ordering.
   // Treating a full ring as deferred publication drains both frames before
   // submitting the second image and repeatedly starves the GPU pipeline.
-  get deferredFramePublication(): boolean { return false; }
-  get presentationPending(): boolean { return this.pressureFrameFailure !== undefined; }
+  // Native motor contacts split submission: publish the corrected poses first.
+  get deferredFramePublication(): boolean { return this.rigidSystem.nativeMotorContacts; }
+  get presentationPending(): boolean { return this.pressureFrameFailure !== undefined || (this.mixedFrameInFlight && this.rigidSystem.nativeMotorContacts); }
   async awaitFrameCompletion(): Promise<void> {
    
     await this.mixedFrameChain;
@@ -3208,6 +3211,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // The step's completion record (its time, with handlers built once) is
       // its receipt's alone until one of them has run.
       const completion=this.mixedCompletions.take()??this.mixedCompletion();completion.time_s=stepEnd_s;
+      if (this.rigidSystem.nativeMotorContacts) receipt = receipt.then(async result => {
+        if (await this.rigidSystem.finishNativeStep()) {
+          const publish = this.device.createCommandEncoder({ label: "Native contact solid publication" });
+          this.mixedFrame!.solid!.encodeBodies(publish); this.device.queue.submit([publish.finish()]);
+        }
+        return result;
+      });
       const handled=receipt.then(completion.accepted,completion.failed);
       // awaitFrameCompletion's fence: this frame's handling while it is the
       // only one unhandled, else one promise for every frame until none is.
@@ -3390,7 +3400,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       && this.solidMask.adoptIfUnchanged(solidWorldForFluidLattice(scene))) {
       // The layout stays synced to the document it was synced to.
       if (this.mixedSynced?.scene === this.scene) this.mixedSynced.scene = scene;
-      this.scene = scene;
+      this.scene = scene; this.rigidSystem.setScene(scene);
       return;
     }
     this.mixedFrame?.invalidateExtension();
@@ -3410,7 +3420,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.publishSculptCollision(scene)) {
       this.mixedFrame?.solid?.invalidate(); this.mixedSolidMaskStamp++;
     }
-    this.scene = scene; this.sceneRevision++;
+    this.scene = scene; this.sceneRevision++; this.rigidSystem.setScene(scene);
     // The mask tells the edit every cell it moves as it folds the scene in;
     // the columns of those cells are the bed-slope lane's to bake again.
     // Edit tiles share the running solver's page-padded storage dimensions.
