@@ -10,6 +10,7 @@ import { targetAtRay, targetSurfaceNormal } from "../../core/editor-probe-catalo
 import { useSession } from "../../core/session/session-context";
 import { keyLabel } from "./input-router";
 import { simulation } from "../../core/simulation/controller";
+import { RunScope } from "../../core/run-scope";
 import type { PaneSession } from "../../core/session/session";
 import type {
   ActionDefinition,
@@ -363,6 +364,17 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
       }
     };
 
+    // The browser took the pointer away (a system gesture, a lost capture): the
+    // press is abandoned, not completed. Ending it as a release placed the draft
+    // or moved the entity to wherever the pointer last was.
+    const cancel = (event: PointerEvent) => {
+      if (pane.state.view.context === "play" && pane.router.button(event.button, false)) pane.pumpInput();
+      const held = press.current;
+      if (!held || held.pointerId !== event.pointerId) return;
+      press.current = undefined;
+      if (held.kind === "move") setMovePose(undefined);
+    };
+
     const context = (event: MouseEvent) => {
       if (!onCanvas(event)) return;
       const current = pane.state;
@@ -384,13 +396,13 @@ function InteractionLayerBody({ pane, focused }: { pane: InteractionPane; focuse
     shell.addEventListener("pointerdown", down, true);
     shell.addEventListener("pointermove", move, true);
     shell.addEventListener("pointerup", up, true);
-    shell.addEventListener("pointercancel", up, true);
+    shell.addEventListener("pointercancel", cancel, true);
     shell.addEventListener("contextmenu", context, true);
     return () => {
       shell.removeEventListener("pointerdown", down, true);
       shell.removeEventListener("pointermove", move, true);
       shell.removeEventListener("pointerup", up, true);
-      shell.removeEventListener("pointercancel", up, true);
+      shell.removeEventListener("pointercancel", cancel, true);
       shell.removeEventListener("contextmenu", context, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -750,12 +762,25 @@ function Inspector({ pane, entity, view, anchor }: {
   </Toolstrip>;
 }
 
+/**
+ * The latest of a row's requests. An answer to one that was superseded, sent
+ * before the record it edits changed, or sent by a row that has since closed is
+ * dropped — a stale refusal used to put its reason over a value that was
+ * accepted after it.
+ */
+function useLatestRequest(record: unknown): RunScope {
+  const [requests] = useState(() => new RunScope());
+  useEffect(() => () => requests.cancel(), [requests, record]);
+  return requests;
+}
+
 function TransformRows({pane,entity,running,upright}:{pane:InteractionPane;entity:EntityRecord;running:boolean;upright:boolean}) {
   const [draft,setDraft]=useState<Transform>(entity.transform),[error,setError]=useState<string>();
   const snap=useStore(pane.store,s=>s.snap_m);
+  const requests=useLatestRequest(entity.transform);
   useEffect(()=>{setDraft(entity.transform);setError(undefined);},[entity.transform]);
   const angles=upright?{x:0,y:Math.atan2(2*(draft.orientation.w*draft.orientation.y),1-2*draft.orientation.y**2)*180/Math.PI,z:0}:rotationDegrees(draft.orientation);
-  const commit=async()=>{const result=await pane.move(entity.id,draft);if(!result.accepted)setError(result.reason);};
+  const commit=async()=>{const request=requests.start();const result=await pane.move(entity.id,draft);if(!result.accepted&&request.current())setError(result.reason);};
   return <>
     {(['x','y','z'] as const).map(axis=><ToolstripRow key={`p${axis}`} tag={`Position ${axis.toUpperCase()}`} name={`Position ${axis.toUpperCase()}`} after={<NumberInput ariaLabel={`Position ${axis.toUpperCase()}`} value={draft.position_m[axis]} step={snap||.001} unit="m" disabled={running}
       onChange={value=>setDraft({...draft,position_m:{...draft.position_m,[axis]:snap?Math.round(value/snap)*snap:value}})} />} />)}
@@ -786,15 +811,17 @@ function ConfigRows({ pane, entityId, behaviorId, controls, config, running }: {
 }) {
   const [pending, setPending] = useState<JsonObject>();
   const [error, setError] = useState<string>();
+  const requests = useLatestRequest(config);
   useEffect(() => { setPending(undefined); setError(undefined); }, [config]);
   const shown = pending ?? config;
   const change = async (setting: string, value: JsonValue) => {
     const next = { ...shown, [setting]: value };
+    const request = requests.start();
     const errors = pane.configErrors(entityId, behaviorId, next);
     if (errors.length) { setPending(next); setError(errors.join("; ")); return; }
     setPending(next); setError(undefined);
     const result = await pane.configure(entityId, behaviorId, next);
-    if (!result.accepted) setError(result.reason);
+    if (!result.accepted && request.current()) setError(result.reason);
   };
   return <>
     {controls.map((control) => {

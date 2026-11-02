@@ -55,7 +55,7 @@ test('wet body rebuild uses a new per-body feedback generation without resetting
 
 test('real scene history duplicates, transforms, imports, undoes, redoes and saves exact connections',async()=>{
  const controller=new SimulationController(),session=createPaneSession('a'),scene=createInteractivePlayground();scene.scenery=undefined;
- session.scene.getState().setScene(scene);controller.attachPaneSession('a',session);const h=controller.interaction('a');
+ session.scene.getState().setScene(scene);controller.attachPane('a',session);const h=controller.interaction('a');
  try{await h.ready;const initial=structuredClone(h.getView().document);
  await accepted(h,{kind:'duplicate',entityIds:['switch','lift'],offset_m:{x:0,y:0,z:-2}});
  assert.equal(session.history.getState().past.length,1);const duplicated=structuredClone(session.scene.getState().scene.interaction!);
@@ -86,7 +86,7 @@ test('production binding lazily imports into the real store and exposes its hist
  const {createLiveInteractionBinding}=await import('../../features/interactive/live-binding');
  const controller=new SimulationController(),session=createPaneSession('a');
  const scene=createInteractivePlayground();scene.scenery=undefined;scene.interaction={schemaVersion:1,entities:[],connections:[]};
- session.scene.getState().setScene(scene);controller.attachPaneSession('a',session);
+ session.scene.getState().setScene(scene);controller.attachPane('a',session);
  const binding=createLiveInteractionBinding('a',controller);
  try{assert.equal(binding.host.getView().generation,0);
  const result=await binding.load!(createInteractivePlayground().interaction);assert.ok(result.accepted,JSON.stringify(result));

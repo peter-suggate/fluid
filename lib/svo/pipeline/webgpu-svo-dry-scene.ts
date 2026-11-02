@@ -1,4 +1,6 @@
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
+import { StagedReadback } from "../../core/staged-readback";
+import { Compiled } from "../../core/compiled";
 import { SculptWallMesh, sculptWallVertexLayout, type SculptWallPipelines } from "../features/primary-visibility/sculpt-wall-mesh";
 import { WebgpuSculptSubstrate } from "../features/scene-publication/webgpu-sculpt-substrate";
 import { SurfaceTextureAtlasGpu } from "../features/materials/surface-texture-atlas-gpu";
@@ -1184,10 +1186,8 @@ export class SparseVoxelDrySceneRenderer {
   /** Source-side inputs compared at encode: identity, revision, node-mip publication. */
   private latticeSourceInputs?: readonly unknown[];
   /** Non-blocking copy of the sticky overflow word; grows the store on demand. */
-  private latticeOverflowStaging?: GPUBuffer;
-  private latticeOverflowCopied = false;
+  private latticeOverflowReadback?: StagedReadback;
   private latticeOverflowFrame = 0;
-  private latticeOverflowReading = false;
   private latticeMinimumSlots = 0;
   private latticeStoreFailure?: string;
   /** Whether the active split bundle compiled the lattice lookup; encode follows it. */
@@ -1231,7 +1231,6 @@ export class SparseVoxelDrySceneRenderer {
   private splitDiagnosticsActive = false;
   private rasterRigidActive: boolean;
   /** Raster-assisted primary visibility (traversal mode `raster-primary`). */
-  private surfaceMeshDisposed = false;
   private surfaceMeshDrawCache?: ReturnType<SparseVoxelDrySceneRenderer["createSurfaceMeshDrawBundle"]>;
   private readonly compactMeshPrimaryPipelines = new WeakMap<GPURenderPipeline, GPURenderPipeline>();
   private surfaceMeshPass?: GPURenderPassDescriptor;
@@ -1248,9 +1247,7 @@ export class SparseVoxelDrySceneRenderer {
   private shadowReuseKey?: string;
   private readonly importedSurfaceSelectDescriptor: GPUComputePassDescriptor = { label: "Native asset screen-error selection" };
   private surfaceMeshMaximumBytes = 0;
-  private surfaceMeshReadback?: GPUBuffer;
-  private surfaceMeshReadbackPending = false;
-  private surfaceMeshReadbackCopied = false;
+  private surfaceMeshReadback?: StagedReadback;
   /** Arena size bound when the pending receipt's copy was encoded: what its counters were measured against. */
   private surfaceMeshReceiptArenaBytes = 0;
   /** A reset invalidates copied and mapping receipts from the old builder. */
@@ -1347,7 +1344,7 @@ export class SparseVoxelDrySceneRenderer {
   private primaryEntrySeedView?: GPUTextureView;
   private primaryEntryDepth?: GPUTexture;
   private primaryEntryDepthView?: GPUTextureView;
-  private primaryEntryCompilation?: Promise<void>;
+  private readonly primaryEntry = new Compiled(() => this.compilePrimaryEntryPrepassPipelines());
   /** Exact historical direct-fragment arm retained as a benchmark control. */
   private readonly rasterPrimaryDirect: boolean;
   /** The same control for the scene-primitive arm, selectable on its own. */
@@ -1424,9 +1421,7 @@ export class SparseVoxelDrySceneRenderer {
   private coverageOverflowReported = false;
   /** Sampled per-pixel arena pressure, and the one-frame-late read that reports it. */
   private coverageAuditBuffer?: GPUBuffer;
-  private coverageAuditStaging?: GPUBuffer;
-  private coverageAuditCopied = false;
-  private coverageAuditReading = false;
+  private coverageAuditReadback?: StagedReadback;
   private coverageAuditFrame = 0;
   private brickCandidateBuffer?: GPUBuffer;
   private brickInstanceBuffer?: GPUBuffer;
@@ -1439,7 +1434,7 @@ export class SparseVoxelDrySceneRenderer {
   private brickCoverageWidth = 0;
   private brickCoverageHeight = 0;
   private brickLeafCapacity = 0;
-  private brickCullCompilation?: Promise<void>;
+  private readonly brickCull = new Compiled(() => this.compileBrickCullPipelines());
   /**
    * Raster-primary pixel probe: reads this frame's own instance list and cull
    * counters to explain how the depth test found the pixel. Compiled on first
@@ -1449,8 +1444,7 @@ export class SparseVoxelDrySceneRenderer {
   private brickProbeBindGroup?: GPUBindGroup;
   private brickProbePipeline?: GPUComputePipeline;
   private brickProbeBuffers?: SparseVoxelBrickRasterProbeBuffers;
-  private brickProbeCompilation?: Promise<void>;
-  private brickProbeReadPending = false;
+  private readonly brickProbe = new Compiled(() => this.compileBrickRasterProbe());
   private waterWorldReflections?: SvoWaterWorldReflections;
   private layout?: GPUBindGroupLayout;
   private bindGroup?: GPUBindGroup;
@@ -1462,7 +1456,15 @@ export class SparseVoxelDrySceneRenderer {
   private readonly conePipelineCompiles = new Map<SvoConeLightingScale, Promise<SvoDryConePipelineBundle>>();
   private requestedBundleFailure?: { readonly scale: SvoConeLightingScale; readonly detail: string };
   private requestedBundleResourceFailure?: string;
-  private coneScalePrewarmStarted = false;
+  /**
+   * The production moving/settled tiers. Keeping both bundles resident makes a
+   * camera-state transition a pointer swap plus target resize, never a Metal
+   * shader compilation at the moment of motion. A failed prewarm is retried by
+   * the next warmup.
+   */
+  private readonly coneScalePrewarm = new Compiled(async () => {
+    await Promise.all(([0.25, 0.5] as const).map((scale) => this.ensureConeLightingScale(scale)));
+  });
   private conePrepassGeometryPipeline?: GPURenderPipeline;
   private conePrepassVisibilityPipeline?: GPURenderPipeline;
   private conePrepassShadePipeline?: GPURenderPipeline;
@@ -1567,13 +1569,12 @@ export class SparseVoxelDrySceneRenderer {
   private probeBuffers?: SparseVoxelPixelTraceBuffers;
   private probeTarget?: GPUTexture;
   private probeTargetView?: GPUTextureView;
-  private probeCompilation?: Promise<void>;
-  private probeCompilationFailed = false;
+  private readonly pixelProbe = new Compiled(() => this.compilePixelProbe());
   private probeRequest?: { pixelX: number; pixelY: number; token: number };
-  private probeEncodedToken = 0;
-  private probeReadPending = false;
-  /** Whether the frame the pending probe was encoded beside ran the cone prepass. */
-  private probeEncodedConePrepass = false;
+  /** Whether this frame ran the cone prepass; the probe encoded after its passes keeps it. */
+  private frameConePrepass = false;
+  /** Whether the frame the unread probe was encoded beside ran the cone prepass. */
+  private probeConePrepass = false;
 
   constructor(
     private readonly device: GPUDevice,
@@ -1668,10 +1669,9 @@ export class SparseVoxelDrySceneRenderer {
         size: SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
       });
-      this.coverageAuditStaging = device.createBuffer({
+      this.coverageAuditReadback = new StagedReadback(device, {
         label: "Sparse voxel scene-primitive coverage audit readback",
         size: SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
       this.scenePrimitiveOverflowPublicationBuffer = device.createBuffer({
         label: "Sparse voxel scene-primitive overflow instance publication",
@@ -2049,7 +2049,7 @@ export class SparseVoxelDrySceneRenderer {
   private ensureSurfaceMeshBuffers(): void {
     if (!this.experiments.surfaceMesh || this.surfaceMeshState) return;
     this.surfaceMeshStatus = { state: "pending" };
-    this.surfaceMeshReadback = this.device.createBuffer({ label: "Voxel mesh status", size: SVO_SURFACE_MESH_STATE_BYTES, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    this.surfaceMeshReadback = new StagedReadback(this.device, { label: "Voxel mesh status", size: SVO_SURFACE_MESH_STATE_BYTES });
     this.surfaceMeshState = this.device.createBuffer({ label: "Voxel surface mesh publication",
       size: SVO_SURFACE_MESH_STATE_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -2275,19 +2275,15 @@ export class SparseVoxelDrySceneRenderer {
     usePrepass: boolean, group: number, tracePhase?: RenderFrameSeam<"svo">): void {
     this.ensureSurfaceMeshWork();
     // Poll only a copy encoded in the preceding submitted frame.
-    if (this.surfaceMeshReadbackCopied && !this.surfaceMeshReadbackPending) {
-      this.surfaceMeshReadbackCopied = false; this.surfaceMeshReadbackPending = true;
-      const staging = this.surfaceMeshReadback!;
+    const readback = this.surfaceMeshReadback!;
+    if (readback.state === "copied") {
       const arenaBytes = this.surfaceMeshReceiptArenaBytes;
       const epoch = this.surfaceMeshReceiptEpoch;
       const presentation = this.surfaceMeshReceiptPresentation;
-      void staging.mapAsync(GPUMapMode.READ).then(() => {
-        const words = this.surfaceMeshReceiptWords;
-        words.set(new Uint32Array(staging.getMappedRange())); staging.unmap();
-        if (this.surfaceMeshDisposed) return;
-        this.applySurfaceMeshReceipt(words, arenaBytes, epoch, presentation);
-      }).catch(() => { /* Destruction or device loss cancels the diagnostic. */ })
-        .finally(() => { this.surfaceMeshReadbackPending = false; });
+      const words = this.surfaceMeshReceiptWords;
+      // Destruction resolves the read empty; device loss cancels the diagnostic.
+      void readback.read(bytes => { words.set(new Uint32Array(bytes)); return true; })
+        .then(read => { if (read) this.applySurfaceMeshReceipt(words, arenaBytes, epoch, presentation); }, () => {});
     }
     const pipelines = this.surfaceMeshPipelines!;
     const state = this.surfaceMeshState!;
@@ -2398,14 +2394,12 @@ export class SparseVoxelDrySceneRenderer {
     // Known maintenance above marks pending immediately, so edits never wait
     // for this telemetry cadence to begin extraction.
     const receiptNow = performance.now();
-    if (!this.surfaceMeshReadbackPending && !this.surfaceMeshReadbackCopied
-      && (pending || receiptNow - this.surfaceMeshReadbackAt_ms >= 250)) {
+    if (readback.idle && (pending || receiptNow - this.surfaceMeshReadbackAt_ms >= 250)) {
       this.surfaceMeshReadbackAt_ms = receiptNow;
-      encoder.copyBufferToBuffer(state, 0, this.surfaceMeshReadback!, 0, SVO_SURFACE_MESH_STATE_BYTES);
+      readback.encode(encoder, (encoder, staging) => encoder.copyBufferToBuffer(state, 0, staging, 0, SVO_SURFACE_MESH_STATE_BYTES));
       this.surfaceMeshReceiptArenaBytes = this.surfaceMeshArena!.size;
       this.surfaceMeshReceiptEpoch = this.surfaceMeshEpoch;
       this.surfaceMeshReceiptPresentation = this.surfaceMeshPresentation;
-      this.surfaceMeshReadbackCopied = true;
     }
     this.surfaceMeshPresentation += 1;
     tracePhase?.("surface-mesh-draw");
@@ -2498,104 +2492,105 @@ export class SparseVoxelDrySceneRenderer {
 
   private async ensureBrickCullPipelines(): Promise<void> {
     if (!this.rasterPrimary || this.brickEmitPipeline) return;
-    this.brickCullCompilation ??= (async () => {
-      this.brickCullLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel brick instance emission bindings",
-        entries: svoBrickRasterCullBindGroupLayoutEntries(),
-      });
-      this.brickDrawLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel brick instance draw bindings",
-        entries: svoBrickRasterDrawBindGroupLayoutEntries(),
-      });
-      this.brickCoverageLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel conservative brick coverage bindings",
-        entries: svoBrickRasterCoverageBindGroupLayoutEntries(),
-      });
-      this.brickCoverageResolveLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel conservative brick resolve bindings",
-        entries: [...svoBrickRasterCoverageBindGroupLayoutEntries(), {
-          binding: SVO_BRICK_RASTER_CONTRACT.lodKeyBinding,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint" },
-        }],
-      });
-      this.scenePrimitiveCoverageLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel scene-primitive occlusion coverage bindings",
-        entries: [...svoBrickRasterCoverageBindGroupLayoutEntries(), {
-          binding: SVO_BRICK_RASTER_CONTRACT.primaryGeometryBinding,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "unfilterable-float" },
-        }, {
-          binding: SVO_BRICK_RASTER_CONTRACT.primaryIdentityBinding,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint" },
-        }],
-      });
-      // Binding 6 joins the resolve set because `traceLeafPayload` resolves
-      // accepted planar terminal records, including from raster-generated hits.
-      const resolveBindings = new Set([0, 1, 2, 3, 4, 6, 9, 14, 28]);
-      this.brickResolveSceneLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel conservative brick resolve scene bindings",
-          entries: sparseVoxelDrySceneBindGroupLayoutEntries(this.traversalMode).filter((entry) => resolveBindings.has(entry.binding)),
-      });
-      this.bandComputeLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel near-field band selection bindings",
-        entries: svoScenePrimitiveBandComputeBindGroupLayoutEntries(),
-      });
-      this.bandReadLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel near-field band membership binding",
-        entries: [
-          ...svoScenePrimitiveBandReadBindGroupLayoutEntries(),
-          ...(this.screenSpaceTerminationPixels > 0
-            ? [{ binding: 8, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
-              buffer: { type: "storage" as const } }]
-            : []),
-        ],
-      });
-      this.coverageOverflowArgsLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel coverage overflow draw-args bindings",
-        entries: svoRasterCoverageOverflowArgsBindGroupLayoutEntries(),
-      });
-      // One module for both arms: the brick proxy and the authored-SDF proxy are
-      // the same thirty-six vertices, and the instance count each arm publishes
-      // comes from its own publication buffer rather than from the shader.
-      const overflowArgsModule = await checkedModule(this.device, "Sparse voxel coverage overflow draw args",
-        createSvoRasterCoverageOverflowArgsWGSL({
-          verticesPerInstance: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy,
-        }));
-      this.coverageOverflowArgsPipeline = await this.device.createComputePipelineAsync({
-        label: "Sparse voxel coverage overflow draw args",
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.coverageOverflowArgsLayout] }),
-        compute: { module: overflowArgsModule, entryPoint: SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.entryPoints.publishArgs },
-      });
-      const bandModule = await checkedModule(this.device, "Sparse voxel near-field analytic band",
-        createSvoScenePrimitiveBandWGSL({
-          primitiveWordOffset: SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4,
-        }));
-      const bandLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.bandComputeLayout] });
-      [this.bandClassifyPipeline, this.bandResolvePipeline] = await Promise.all(
-        ([SVO_SCENE_PRIMITIVE_BAND_CONTRACT.entryPoints.classify,
-          SVO_SCENE_PRIMITIVE_BAND_CONTRACT.entryPoints.resolve] as const).map((entryPoint) =>
-          this.device.createComputePipelineAsync({
-            label: `Sparse voxel near-field band ${entryPoint}`,
-            layout: bandLayout,
-            compute: { module: bandModule, entryPoint },
-          })));
-      const module = await checkedModule(this.device, "Sparse voxel brick instance emission",
-        createSvoBrickRasterCullWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M }));
-      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.brickCullLayout] });
-      const [emit, scan, scatter] = await Promise.all(
-        ([SVO_BRICK_RASTER_CONTRACT.entryPoints.emit, SVO_BRICK_RASTER_CONTRACT.entryPoints.scan,
-          SVO_BRICK_RASTER_CONTRACT.entryPoints.scatter] as const).map((entryPoint) =>
-          this.device.createComputePipelineAsync({
-            label: `Sparse voxel brick instance ${entryPoint}`, layout, compute: { module, entryPoint },
-          })));
-      this.brickEmitPipeline = emit;
-      this.brickScanPipeline = scan;
-      this.brickScatterPipeline = scatter;
-      this.ensureBrickRasterBuffers();
-    })();
-    await this.brickCullCompilation;
+    await this.brickCull.ensure();
+  }
+
+  private async compileBrickCullPipelines(): Promise<void> {
+    this.brickCullLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel brick instance emission bindings",
+      entries: svoBrickRasterCullBindGroupLayoutEntries(),
+    });
+    this.brickDrawLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel brick instance draw bindings",
+      entries: svoBrickRasterDrawBindGroupLayoutEntries(),
+    });
+    this.brickCoverageLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel conservative brick coverage bindings",
+      entries: svoBrickRasterCoverageBindGroupLayoutEntries(),
+    });
+    this.brickCoverageResolveLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel conservative brick resolve bindings",
+      entries: [...svoBrickRasterCoverageBindGroupLayoutEntries(), {
+        binding: SVO_BRICK_RASTER_CONTRACT.lodKeyBinding,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "uint" },
+      }],
+    });
+    this.scenePrimitiveCoverageLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel scene-primitive occlusion coverage bindings",
+      entries: [...svoBrickRasterCoverageBindGroupLayoutEntries(), {
+        binding: SVO_BRICK_RASTER_CONTRACT.primaryGeometryBinding,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "unfilterable-float" },
+      }, {
+        binding: SVO_BRICK_RASTER_CONTRACT.primaryIdentityBinding,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "uint" },
+      }],
+    });
+    // Binding 6 joins the resolve set because `traceLeafPayload` resolves
+    // accepted planar terminal records, including from raster-generated hits.
+    const resolveBindings = new Set([0, 1, 2, 3, 4, 6, 9, 14, 28]);
+    this.brickResolveSceneLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel conservative brick resolve scene bindings",
+        entries: sparseVoxelDrySceneBindGroupLayoutEntries(this.traversalMode).filter((entry) => resolveBindings.has(entry.binding)),
+    });
+    this.bandComputeLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel near-field band selection bindings",
+      entries: svoScenePrimitiveBandComputeBindGroupLayoutEntries(),
+    });
+    this.bandReadLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel near-field band membership binding",
+      entries: [
+        ...svoScenePrimitiveBandReadBindGroupLayoutEntries(),
+        ...(this.screenSpaceTerminationPixels > 0
+          ? [{ binding: 8, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+            buffer: { type: "storage" as const } }]
+          : []),
+      ],
+    });
+    this.coverageOverflowArgsLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel coverage overflow draw-args bindings",
+      entries: svoRasterCoverageOverflowArgsBindGroupLayoutEntries(),
+    });
+    // One module for both arms: the brick proxy and the authored-SDF proxy are
+    // the same thirty-six vertices, and the instance count each arm publishes
+    // comes from its own publication buffer rather than from the shader.
+    const overflowArgsModule = await checkedModule(this.device, "Sparse voxel coverage overflow draw args",
+      createSvoRasterCoverageOverflowArgsWGSL({
+        verticesPerInstance: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy,
+      }));
+    this.coverageOverflowArgsPipeline = await this.device.createComputePipelineAsync({
+      label: "Sparse voxel coverage overflow draw args",
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.coverageOverflowArgsLayout] }),
+      compute: { module: overflowArgsModule, entryPoint: SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.entryPoints.publishArgs },
+    });
+    const bandModule = await checkedModule(this.device, "Sparse voxel near-field analytic band",
+      createSvoScenePrimitiveBandWGSL({
+        primitiveWordOffset: SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4,
+      }));
+    const bandLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.bandComputeLayout] });
+    [this.bandClassifyPipeline, this.bandResolvePipeline] = await Promise.all(
+      ([SVO_SCENE_PRIMITIVE_BAND_CONTRACT.entryPoints.classify,
+        SVO_SCENE_PRIMITIVE_BAND_CONTRACT.entryPoints.resolve] as const).map((entryPoint) =>
+        this.device.createComputePipelineAsync({
+          label: `Sparse voxel near-field band ${entryPoint}`,
+          layout: bandLayout,
+          compute: { module: bandModule, entryPoint },
+        })));
+    const module = await checkedModule(this.device, "Sparse voxel brick instance emission",
+      createSvoBrickRasterCullWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M }));
+    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.brickCullLayout] });
+    const [emit, scan, scatter] = await Promise.all(
+      ([SVO_BRICK_RASTER_CONTRACT.entryPoints.emit, SVO_BRICK_RASTER_CONTRACT.entryPoints.scan,
+        SVO_BRICK_RASTER_CONTRACT.entryPoints.scatter] as const).map((entryPoint) =>
+        this.device.createComputePipelineAsync({
+          label: `Sparse voxel brick instance ${entryPoint}`, layout, compute: { module, entryPoint },
+        })));
+    this.brickEmitPipeline = emit;
+    this.brickScanPipeline = scan;
+    this.brickScatterPipeline = scatter;
+    this.ensureBrickRasterBuffers();
   }
 
   /** Instance arenas are sized by published leaf capacity, not by leaf count. */
@@ -2713,52 +2708,56 @@ export class SparseVoxelDrySceneRenderer {
    */
   private async ensureBrickRasterProbe(): Promise<void> {
     if (!this.rasterPrimary || this.experiments.surfaceMesh || this.brickProbePipeline) return;
-    this.brickProbeCompilation ??= (async () => {
-      try {
-        this.brickProbeLayout = this.device.createBindGroupLayout({
-          label: "Sparse voxel raster-primary probe bindings",
-          entries: svoBrickRasterProbeBindGroupLayoutEntries(),
-        });
-        const module = await checkedModule(this.device, "Sparse voxel raster-primary probe",
-          createSvoBrickRasterProbeWGSL({
-            // The shipping brick fragment writes its own depth unless the
-            // experiment removes it, and that is exactly what decides whether
-            // the covering-proxy count is exact or an upper bound.
-            fragmentDepthWritten: !this.experiments.rasterPrimaryHsrProbe
-              && !this.experiments.rasterPrimaryNoFragmentDepth,
-            primitiveWordOffset: SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4,
-            sortStateWordOffset: this.brickSortStateOffsetBytes / 4,
-            instanceWordOffset: this.brickInstanceOffsetBytes / 4,
-            paramsWordCount: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes / 4,
-            payloadLaneWordOffset: SVO_DRY_SCENE_PARAMS_LAYOUT.payloadLaneWordOffset,
-            // The ordinary coverage primary has already published the exact
-            // candidate list for every pixel. Direct and screen-space LOD arms
-            // do not, so they keep the diagnostic's whole-list fallback.
-            coverageAccelerated: !this.rasterPrimaryDirect
-              && this.screenSpaceTerminationPixels === 0,
-            // The world's own block, not this renderer's opinion of it. The probe
-            // reads the lane *addresses* from the uniform for staleness, but which
-            // decode to compile is a property of the layout and cannot change
-            // under a live module.
-            scenePayload: this.source?.structural?.scenePayloadLanes,
-          }));
-        this.brickProbeBuffers = new SparseVoxelBrickRasterProbeBuffers(this.device);
-        this.brickProbePipeline = await this.device.createComputePipelineAsync({
-          label: "Sparse voxel raster-primary probe",
-          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickProbeLayout] }),
-          compute: { module, entryPoint: SVO_BRICK_RASTER_PROBE_CONTRACT.entryPoint },
-        });
-        this.rebuildBrickRasterBindGroups();
-      } catch (error) {
-        // A missing primary probe degrades the diagnostic to its lighting half
-        // rather than failing it: the ray probe still explains the shading.
-        this.brickProbePipeline = undefined;
-        this.brickProbeBuffers?.destroy();
-        this.brickProbeBuffers = undefined;
-        console.warn("Sparse voxel raster-primary probe unavailable", error);
-      }
-    })();
-    await this.brickProbeCompilation;
+    // A missing primary probe degrades the diagnostic to its lighting half
+    // rather than failing it: the ray probe still explains the shading. The
+    // failure is kept, and a compile that failed on this device is not retried.
+    if (this.brickProbe.error !== undefined) return;
+    await this.brickProbe.ensure().catch(() => {});
+  }
+
+  private async compileBrickRasterProbe(): Promise<void> {
+    try {
+      this.brickProbeLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel raster-primary probe bindings",
+        entries: svoBrickRasterProbeBindGroupLayoutEntries(),
+      });
+      const module = await checkedModule(this.device, "Sparse voxel raster-primary probe",
+        createSvoBrickRasterProbeWGSL({
+          // The shipping brick fragment writes its own depth unless the
+          // experiment removes it, and that is exactly what decides whether
+          // the covering-proxy count is exact or an upper bound.
+          fragmentDepthWritten: !this.experiments.rasterPrimaryHsrProbe
+            && !this.experiments.rasterPrimaryNoFragmentDepth,
+          primitiveWordOffset: SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4,
+          sortStateWordOffset: this.brickSortStateOffsetBytes / 4,
+          instanceWordOffset: this.brickInstanceOffsetBytes / 4,
+          paramsWordCount: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes / 4,
+          payloadLaneWordOffset: SVO_DRY_SCENE_PARAMS_LAYOUT.payloadLaneWordOffset,
+          // The ordinary coverage primary has already published the exact
+          // candidate list for every pixel. Direct and screen-space LOD arms
+          // do not, so they keep the diagnostic's whole-list fallback.
+          coverageAccelerated: !this.rasterPrimaryDirect
+            && this.screenSpaceTerminationPixels === 0,
+          // The world's own block, not this renderer's opinion of it. The probe
+          // reads the lane *addresses* from the uniform for staleness, but which
+          // decode to compile is a property of the layout and cannot change
+          // under a live module.
+          scenePayload: this.source?.structural?.scenePayloadLanes,
+        }));
+      this.brickProbeBuffers = new SparseVoxelBrickRasterProbeBuffers(this.device);
+      this.brickProbePipeline = await this.device.createComputePipelineAsync({
+        label: "Sparse voxel raster-primary probe",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickProbeLayout] }),
+        compute: { module, entryPoint: SVO_BRICK_RASTER_PROBE_CONTRACT.entryPoint },
+      });
+      this.rebuildBrickRasterBindGroups();
+    } catch (error) {
+      this.brickProbePipeline = undefined;
+      this.brickProbeBuffers?.destroy();
+      this.brickProbeBuffers = undefined;
+      console.warn("Sparse voxel raster-primary probe unavailable", error);
+      throw error;
+    }
   }
 
   /**
@@ -2770,47 +2769,48 @@ export class SparseVoxelDrySceneRenderer {
    */
   private async ensurePrimaryEntryPrepassPipelines(): Promise<void> {
     if (!this.primaryEntryPrepassEnabled || this.primaryEntryCullPipeline) return;
-    this.primaryEntryCompilation ??= (async () => {
-      this.primaryEntryCullLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel primary entry proxy emission bindings",
-        entries: svoPrimaryEntryCullBindGroupLayoutEntries(),
-      });
-      this.primaryEntryDrawLayout = this.device.createBindGroupLayout({
-        label: "Sparse voxel primary entry depth draw bindings",
-        entries: svoPrimaryEntryDrawBindGroupLayoutEntries(),
-      });
-      const module = await checkedModule(this.device, "Sparse voxel primary entry prepass",
-        createSvoPrimaryEntryPrepassWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M }));
-      const [cull, draw] = await Promise.all([
-        this.device.createComputePipelineAsync({
-          label: "Sparse voxel primary entry proxy emission",
-          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.primaryEntryCullLayout] }),
-          compute: { module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.emit },
-        }),
-        this.device.createRenderPipelineAsync({
-          label: "Sparse voxel primary entry depth",
-          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.primaryEntryDrawLayout] }),
-          vertex: { module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.vertex },
-          fragment: {
-            module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.fragment,
-            targets: [{ format: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedFormat }],
-          },
-          primitive: { topology: "triangle-list", cullMode: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.cullMode },
-          // The same reversed-Z convention the G-buffer uses, on a private
-          // depth plane: nearest entry wins under `greater`, and the primary
-          // pass must be free to write its own farther surface depth after.
-          depthStencil: {
-            format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
-            depthWriteEnabled: true,
-            depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
-          },
-        }),
-      ]);
-      this.primaryEntryCullPipeline = cull;
-      this.primaryEntryDrawPipeline = draw;
-      this.ensurePrimaryEntryBuffers();
-    })();
-    await this.primaryEntryCompilation;
+    await this.primaryEntry.ensure();
+  }
+
+  private async compilePrimaryEntryPrepassPipelines(): Promise<void> {
+    this.primaryEntryCullLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel primary entry proxy emission bindings",
+      entries: svoPrimaryEntryCullBindGroupLayoutEntries(),
+    });
+    this.primaryEntryDrawLayout = this.device.createBindGroupLayout({
+      label: "Sparse voxel primary entry depth draw bindings",
+      entries: svoPrimaryEntryDrawBindGroupLayoutEntries(),
+    });
+    const module = await checkedModule(this.device, "Sparse voxel primary entry prepass",
+      createSvoPrimaryEntryPrepassWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M }));
+    const [cull, draw] = await Promise.all([
+      this.device.createComputePipelineAsync({
+        label: "Sparse voxel primary entry proxy emission",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.primaryEntryCullLayout] }),
+        compute: { module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.emit },
+      }),
+      this.device.createRenderPipelineAsync({
+        label: "Sparse voxel primary entry depth",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.primaryEntryDrawLayout] }),
+        vertex: { module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.vertex },
+        fragment: {
+          module, entryPoint: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.entryPoints.fragment,
+          targets: [{ format: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.seedFormat }],
+        },
+        primitive: { topology: "triangle-list", cullMode: SVO_PRIMARY_ENTRY_PREPASS_CONTRACT.cullMode },
+        // The same reversed-Z convention the G-buffer uses, on a private
+        // depth plane: nearest entry wins under `greater`, and the primary
+        // pass must be free to write its own farther surface depth after.
+        depthStencil: {
+          format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+          depthWriteEnabled: true,
+          depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+        },
+      }),
+    ]);
+    this.primaryEntryCullPipeline = cull;
+    this.primaryEntryDrawPipeline = draw;
+    this.ensurePrimaryEntryBuffers();
   }
 
   /** Instance arena sized by published leaf capacity, not by leaf count. */
@@ -3378,12 +3378,9 @@ export class SparseVoxelDrySceneRenderer {
     // then the caller has submitted this frame, so the map resolves against real
     // numbers rather than an unsubmitted copy.
     this.coverageAuditFrame += 1;
-    if (!this.coverageAuditCopied && !this.coverageAuditReading
-      && this.coverageAuditFrame % SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_PERIOD_FRAMES === 0
-      && this.coverageAuditStaging) {
-      encoder.copyBufferToBuffer(this.coverageAuditBuffer!, 0, this.coverageAuditStaging, 0,
-        SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES);
-      this.coverageAuditCopied = true;
+    if (this.coverageAuditFrame % SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_PERIOD_FRAMES === 0) {
+      this.coverageAuditReadback?.encode(encoder, (encoder, staging) =>
+        encoder.copyBufferToBuffer(this.coverageAuditBuffer!, 0, staging, 0, SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES));
     }
     tracePhase?.("scene-primitive-visibility");
   }
@@ -3404,15 +3401,8 @@ export class SparseVoxelDrySceneRenderer {
    * stride. `copyCoverageOverflowCount` exposes the exact number beside it.
    */
   private pollCoverageAudit(): void {
-    if (!this.coverageAuditCopied || this.coverageAuditReading || !this.coverageAuditStaging) return;
-    this.coverageAuditCopied = false;
-    this.coverageAuditReading = true;
-    const staging = this.coverageAuditStaging;
-    void staging.mapAsync(GPUMapMode.READ).then(() => {
-      const words = new Uint32Array(staging.getMappedRange().slice(0));
-      staging.unmap();
-      this.coverageAuditReading = false;
-      const audit = readSvoScenePrimitiveCoverageAudit(words);
+    void this.coverageAuditReadback?.read(bytes => readSvoScenePrimitiveCoverageAudit(new Uint32Array(bytes))).then(audit => {
+      if (!audit) return;
       this.lastCoverageAudit = audit;
       const status = svoRasterCoverageOverflowStatus({
         coveredPixels: audit.coveredPixels,
@@ -3429,7 +3419,7 @@ export class SparseVoxelDrySceneRenderer {
       console.warn(`${status.message} (mean ${audit.meanCandidates.toFixed(1)} candidates, `
         + `max ${audit.maximumCandidates}, 1-in-${audit.samplingStride} pixel sample of `
         + `${this.primitiveCount} records)`);
-    }).catch(() => { this.coverageAuditReading = false; });
+    }, () => {});
   }
 
   /**
@@ -4609,10 +4599,9 @@ export class SparseVoxelDrySceneRenderer {
       size: 4 * (contract.headerWords + slots),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    this.latticeOverflowStaging = this.device.createBuffer({
+    this.latticeOverflowReadback = new StagedReadback(this.device, {
       label: "Sparse voxel lattice visibility overflow readback",
       size: Uint32Array.BYTES_PER_ELEMENT,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
     this.latticeGenerationWritten = 0;
     this.latticeStoreFailure = undefined;
@@ -4649,14 +4638,13 @@ export class SparseVoxelDrySceneRenderer {
     this.latticeCorners?.destroy();
     this.latticeRecords?.destroy();
     this.latticeControl?.destroy();
-    // A pending map on the staging buffer rejects on destroy; its handler only clears the flag.
-    this.latticeOverflowStaging?.destroy();
+    // A read in flight resolves empty, so it cannot grow the store that replaces this one.
+    this.latticeOverflowReadback?.destroy();
     this.latticeBuckets = undefined;
     this.latticeCorners = undefined;
     this.latticeRecords = undefined;
     this.latticeControl = undefined;
-    this.latticeOverflowStaging = undefined;
-    this.latticeOverflowCopied = false;
+    this.latticeOverflowReadback = undefined;
     this.latticeKeyBindGroup = undefined;
     this.latticeWorkerBindGroup = undefined;
   }
@@ -4728,25 +4716,19 @@ export class SparseVoxelDrySceneRenderer {
    * is still being encoded.
    */
   private pollLatticeOverflow(encoder: GPUCommandEncoder): void {
-    const staging = this.latticeOverflowStaging;
+    const readback = this.latticeOverflowReadback;
     this.latticeOverflowFrame += 1;
-    if (!staging || this.latticeOverflowReading) return;
+    if (!readback) return;
     const phase = this.latticeOverflowFrame % SVO_LATTICE_OVERFLOW_POLL_FRAMES;
-    if (!this.latticeOverflowCopied) {
-      if (phase !== 0) return;
-      encoder.copyBufferToBuffer(this.latticeControl!, 4 * SVO_LATTICE_VISIBILITY_CONTRACT.overflowWord, staging, 0, Uint32Array.BYTES_PER_ELEMENT);
-      this.latticeOverflowCopied = true;
+    if (phase === 0) {
+      readback.encode(encoder, (encoder, staging) => encoder.copyBufferToBuffer(this.latticeControl!,
+        4 * SVO_LATTICE_VISIBILITY_CONTRACT.overflowWord, staging, 0, Uint32Array.BYTES_PER_ELEMENT));
       return;
     }
-    if (phase !== SVO_LATTICE_OVERFLOW_POLL_FRAMES / 2) return;
-    this.latticeOverflowCopied = false;
-    this.latticeOverflowReading = true;
-    void staging.mapAsync(GPUMapMode.READ).then(() => {
-      const overflow = new Uint32Array(staging.getMappedRange())[0];
-      staging.unmap();
-      this.latticeOverflowReading = false;
-      if (staging !== this.latticeOverflowStaging) return;
-      if (overflow === 0 || this.latticeStoreFailure) return;
+    if (phase !== SVO_LATTICE_OVERFLOW_POLL_FRAMES / 2 || readback.state !== "copied") return;
+    // Grown after the read unmaps: reallocation retires this readback.
+    void readback.read(bytes => new Uint32Array(bytes)[0]).then(overflow => {
+      if (!overflow || this.latticeStoreFailure) return;
       const contract = SVO_LATTICE_VISIBILITY_CONTRACT;
       const slots = (this.latticeRecords!.size - contract.recordHeaderBytes) / contract.recordBytes;
       const grown = svoLatticeVisibilitySizing(this.conePrepassWidth * this.conePrepassHeight,
@@ -4766,8 +4748,6 @@ export class SparseVoxelDrySceneRenderer {
       this.latticeStoreFailure = `Lattice visibility store overflowed: ${overflow} requests turned away by a bucket pair full of current-frame keys or by exhausted claims`;
       console.error(this.latticeStoreFailure);
     }).catch(error => {
-      this.latticeOverflowReading = false;
-      if (staging !== this.latticeOverflowStaging) return;
       this.latticeStoreFailure = `Lattice visibility recovery failed: ${error instanceof Error ? error.message : String(error)}`;
       console.error(this.latticeStoreFailure);
     });
@@ -4994,24 +4974,8 @@ export class SparseVoxelDrySceneRenderer {
 
   async ensureConeLightingPrepass(): Promise<void> {
     if (this.coneScale === 1) return;
-    const requestedScale = this.coneScale;
-    await this.ensureConeLightingScale(requestedScale);
-    if (!this.coneScalePrewarmStarted) {
-      this.coneScalePrewarmStarted = true;
-      // These are the production moving/settled tiers. Keeping both bundles
-      // resident makes a camera-state transition a pointer swap plus target
-      // resize, never a Metal shader compilation at the moment of motion.
-      try {
-        await Promise.all(([0.25, 0.5] as const)
-          .filter((scale) => scale !== requestedScale)
-          .map((scale) => this.ensureConeLightingScale(scale)));
-      } catch (error) {
-        // A transient device/compiler failure must not permanently suppress a
-        // later explicit warmup attempt.
-        this.coneScalePrewarmStarted = false;
-        throw error;
-      }
-    }
+    await this.ensureConeLightingScale(this.coneScale);
+    await this.coneScalePrewarm.ensure();
   }
 
   private ensureConePrepassTargets(): void {
@@ -6670,7 +6634,7 @@ export class SparseVoxelDrySceneRenderer {
    * opens the diagnostic never pays for it.
    */
   requestPixelTrace(pixelX: number, pixelY: number): void {
-    if (this.probeCompilationFailed) return;
+    if (this.pixelTraceUnsupported) return;
     if (!Number.isSafeInteger(pixelX) || !Number.isSafeInteger(pixelY)) return;
     const width = this.targetWidth, height = this.targetHeight;
     if (width < 1 || height < 1) return;
@@ -6711,83 +6675,87 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   get pixelTraceReady(): boolean { return Boolean(this.probePipeline && this.probeBuffers); }
+  /** A probe was encoded and its readback is waiting for `readPixelTrace`. */
+  get pixelTraceCopied(): boolean { return this.probeBuffers?.copied === true; }
 
   /** True once the probe has been refused for this device; never retried. */
-  get pixelTraceUnsupported(): boolean { return this.probeCompilationFailed; }
+  get pixelTraceUnsupported(): boolean { return this.pixelProbe.error !== undefined; }
 
   /** True while a request exists but its pipelines are still being built. */
   get pixelTraceCompiling(): boolean {
-    return Boolean(this.probeRequest) && !this.probeCompilationFailed && !this.probePipeline;
+    return Boolean(this.probeRequest) && !this.pixelTraceUnsupported && !this.probePipeline;
   }
 
   private async ensurePixelProbe(): Promise<void> {
-    if (this.probePipeline || this.probeCompilationFailed) return;
-    this.probeCompilation ??= (async () => {
-      this.device.pushErrorScope("validation");
-      let errorScopeOpen = true;
-      try {
-        if (!this.layout || !this.vertexModule) throw new Error("Dry-scene pipelines are not initialized");
-        // Records go to a storage texture precisely because the dry pass already
-        // spends the whole ten-storage-buffer budget browsers report here. The
-        // inline path binds no storage texture, so one slot is always free; the
-        // gate stays anyway so an unusual device refuses cleanly.
-        if (this.device.limits.maxStorageTexturesPerShaderStage < 1) {
-          throw new Error("Pixel-trace probe needs one storage-texture binding; this device allows none");
-        }
-        const module = await checkedModule(
-          this.device,
-          `Sparse voxel pixel-trace probe (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
-          createSvoDrySceneFragmentWGSL(1, this.experiments.surfaceMesh ? "canonical-parametric" : this.traversalMode, this.brickOccupancyMode, "inline", 0, true),
-        );
-        this.probeLayout = this.device.createBindGroupLayout({
-          label: "Sparse voxel pixel-trace probe records",
-          entries: [
-            { binding: 0, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: "r32uint" } },
-            { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-          ],
-        });
-        this.probeBuffers = new SparseVoxelPixelTraceBuffers(this.device);
-        this.probeBindGroup = this.device.createBindGroup({
-          label: "Sparse voxel pixel-trace probe bind group",
-          layout: this.probeLayout,
-          entries: [
-            { binding: 0, resource: this.probeBuffers.recordsView },
-            { binding: 1, resource: { buffer: this.probeBuffers.request } },
-          ],
-        });
-        // A one-pixel target: the probe's output colour is unused, and the guard
-        // in the entry point relies on there being exactly one covered pixel.
-        this.probeTarget = this.device.createTexture({
-          label: "Sparse voxel pixel-trace probe target",
-          size: [1, 1],
-          format: "rgba8unorm",
-          usage: GPUTextureUsage.RENDER_ATTACHMENT,
-        });
-        this.probeTargetView = this.probeTarget.createView();
-        this.probePipeline = await this.device.createRenderPipelineAsync({
-          label: "Sparse voxel pixel-trace probe",
-          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.probeLayout] }),
-          vertex: { module: this.vertexModule, entryPoint: "vertexMain" },
-          fragment: { module, entryPoint: "dryProbeMain", targets: [{ format: "rgba8unorm" }] },
-          primitive: { topology: "triangle-list" },
-        });
-        errorScopeOpen = false;
-        const validation = await this.device.popErrorScope();
-        if (validation) throw new Error(validation.message);
-      } catch (error) {
-        if (errorScopeOpen) void this.device.popErrorScope().catch(() => undefined);
-        this.probeCompilationFailed = true;
-        this.probePipeline = undefined;
-        this.probeBuffers?.destroy();
-        this.probeBuffers = undefined;
-        this.probeTarget?.destroy();
-        this.probeTarget = undefined;
-        this.probeTargetView = undefined;
-        this.probeBindGroup = undefined;
-        console.warn("Sparse voxel pixel-trace probe unavailable", error);
+    // Refused for this device once: the failure is kept and not retried.
+    if (this.probePipeline || this.pixelProbe.error !== undefined) return;
+    await this.pixelProbe.ensure().catch(() => {});
+  }
+
+  private async compilePixelProbe(): Promise<void> {
+    this.device.pushErrorScope("validation");
+    let errorScopeOpen = true;
+    try {
+      if (!this.layout || !this.vertexModule) throw new Error("Dry-scene pipelines are not initialized");
+      // Records go to a storage texture precisely because the dry pass already
+      // spends the whole ten-storage-buffer budget browsers report here. The
+      // inline path binds no storage texture, so one slot is always free; the
+      // gate stays anyway so an unusual device refuses cleanly.
+      if (this.device.limits.maxStorageTexturesPerShaderStage < 1) {
+        throw new Error("Pixel-trace probe needs one storage-texture binding; this device allows none");
       }
-    })();
-    await this.probeCompilation;
+      const module = await checkedModule(
+        this.device,
+        `Sparse voxel pixel-trace probe (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
+        createSvoDrySceneFragmentWGSL(1, this.experiments.surfaceMesh ? "canonical-parametric" : this.traversalMode, this.brickOccupancyMode, "inline", 0, true),
+      );
+      this.probeLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel pixel-trace probe records",
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: "write-only", format: "r32uint" } },
+          { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        ],
+      });
+      this.probeBuffers = new SparseVoxelPixelTraceBuffers(this.device);
+      this.probeBindGroup = this.device.createBindGroup({
+        label: "Sparse voxel pixel-trace probe bind group",
+        layout: this.probeLayout,
+        entries: [
+          { binding: 0, resource: this.probeBuffers.recordsView },
+          { binding: 1, resource: { buffer: this.probeBuffers.request } },
+        ],
+      });
+      // A one-pixel target: the probe's output colour is unused, and the guard
+      // in the entry point relies on there being exactly one covered pixel.
+      this.probeTarget = this.device.createTexture({
+        label: "Sparse voxel pixel-trace probe target",
+        size: [1, 1],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      this.probeTargetView = this.probeTarget.createView();
+      this.probePipeline = await this.device.createRenderPipelineAsync({
+        label: "Sparse voxel pixel-trace probe",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layout, this.probeLayout] }),
+        vertex: { module: this.vertexModule, entryPoint: "vertexMain" },
+        fragment: { module, entryPoint: "dryProbeMain", targets: [{ format: "rgba8unorm" }] },
+        primitive: { topology: "triangle-list" },
+      });
+      errorScopeOpen = false;
+      const validation = await this.device.popErrorScope();
+      if (validation) throw new Error(validation.message);
+    } catch (error) {
+      if (errorScopeOpen) void this.device.popErrorScope().catch(() => undefined);
+      this.probePipeline = undefined;
+      this.probeBuffers?.destroy();
+      this.probeBuffers = undefined;
+      this.probeTarget?.destroy();
+      this.probeTarget = undefined;
+      this.probeTargetView = undefined;
+      this.probeBindGroup = undefined;
+      console.warn("Sparse voxel pixel-trace probe unavailable", error);
+      throw error;
+    }
   }
 
   /**
@@ -6797,7 +6765,12 @@ export class SparseVoxelDrySceneRenderer {
   encodePixelTrace(encoder: GPUCommandEncoder): boolean {
     const request = this.probeRequest;
     if (!request || !this.probePipeline || !this.probeBindGroup || !this.probeBuffers
-      || !this.probeTargetView || !this.bindGroup || this.probeReadPending) return false;
+      || !this.probeTargetView || !this.bindGroup || !this.probeBuffers.idle) {
+      // The raster half answers this frame's pixel only; merged into a later
+      // lighting half it would describe a different frame.
+      this.brickProbeBuffers?.discard();
+      return false;
+    }
     this.probeBuffers.writeRequest(request);
     const pass = encoder.beginRenderPass({
       label: "Sparse voxel pixel-trace probe",
@@ -6808,16 +6781,17 @@ export class SparseVoxelDrySceneRenderer {
     pass.setBindGroup(SVO_DRY_SCENE_PIXEL_PROBE_GROUP, this.probeBindGroup);
     pass.draw(3);
     pass.end();
-    if (!this.probeBuffers.encodeReadback(encoder)) return false;
-    this.probeEncodedToken = request.token;
-    this.probeReadPending = true;
+    this.probeBuffers.encodeReadback(encoder);
+    this.probeConePrepass = this.frameConePrepass;
     return true;
   }
 
   private encodeBrickRasterProbe(encoder: GPUCommandEncoder): void {
     const request = this.probeRequest;
     if (!request || !this.rasterPrimary || !this.brickProbePipeline || !this.brickProbeBindGroup
-      || !this.brickProbeBuffers || !this.probeBuffers || this.brickProbeReadPending) return;
+      || !this.brickProbeBuffers || !this.probeBuffers) return;
+    // A half no lighting half was encoded beside is stale; this frame's replaces it.
+    this.brickProbeBuffers.discard();
     // This pass is deliberately encoded next to the raster primary, before the
     // candidate arena is reused. The queue write still precedes the eventual
     // command-buffer submit, and both probe halves therefore read one request.
@@ -6830,7 +6804,7 @@ export class SparseVoxelDrySceneRenderer {
     // instance-list fallback. Ordering and election remain a lane-zero epilogue.
     pass.dispatchWorkgroups(1);
     pass.end();
-    this.brickProbeReadPending = this.brickProbeBuffers.encodeReadback(encoder);
+    this.brickProbeBuffers.encodeReadback(encoder);
   }
 
   /**
@@ -6839,7 +6813,7 @@ export class SparseVoxelDrySceneRenderer {
    * pointer is moving.
    */
   async readPixelTrace(): Promise<SvoPixelTrace | undefined> {
-    if (!this.probeBuffers || !this.probeReadPending) return undefined;
+    if (!this.probeBuffers?.copied) return undefined;
     // Queue order makes this a valid snapshot of the scene that was encoded.
     // In-place animation may advance the scene epoch before mapAsync resolves;
     // that makes the answer stale, not invalid. Only replacement of the actual
@@ -6848,23 +6822,17 @@ export class SparseVoxelDrySceneRenderer {
     const brickProbeBuffers = this.brickProbeBuffers;
     const current = () => this.probeBuffers === probeBuffers
       && this.brickProbeBuffers === brickProbeBuffers;
-    try {
-      // Both halves are mapped together and folded into one account of the
-      // pixel. The raster half is optional throughout: in traced mode it never
-      // runs, and if its pipeline failed the lighting half still stands alone.
-      const [lighting, primary] = await Promise.all([
-        probeBuffers.read(current),
-        this.brickProbeReadPending && brickProbeBuffers
-          ? brickProbeBuffers.read(current)
-          : Promise.resolve(undefined),
-      ]);
-      // The prepass flag is the host's to add: the probe is composed inline at
-      // full rate, so from inside it the reduced pass beside it is invisible.
-      return withSvoPixelTraceConePrepass(mergeSvoPixelTrace(lighting, primary), this.probeEncodedConePrepass);
-    } finally {
-      this.probeReadPending = false;
-      this.brickProbeReadPending = false;
-    }
+    // The prepass flag is the host's to add: the probe is composed inline at
+    // full rate, so from inside it the reduced pass beside it is invisible.
+    const conePrepass = this.probeConePrepass;
+    // Both halves are mapped together and folded into one account of the
+    // pixel. The raster half is optional throughout: in traced mode it never
+    // runs, and if its pipeline failed the lighting half still stands alone.
+    const [lighting, primary] = await Promise.all([
+      probeBuffers.read(current),
+      brickProbeBuffers?.read(current),
+    ]);
+    return withSvoPixelTraceConePrepass(mergeSvoPixelTrace(lighting, primary), conePrepass);
   }
 
   encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, tracePhase?: RenderFrameSeam<"svo">, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
@@ -6898,7 +6866,7 @@ export class SparseVoxelDrySceneRenderer {
     const effectiveScale: SvoConeLightingScale = usePrepass ? this.coneScale : 1;
     // Recorded for the probe, which is encoded after this frame's passes and
     // cannot observe the reduced pass from inside its own full-rate composition.
-    this.probeEncodedConePrepass = usePrepass;
+    this.frameConePrepass = usePrepass;
     const splitRequested = this.shadingPath === "split";
     // A withheld rigid tier must also withdraw the rigid-reading visibility
     // variant: the dearer shader would otherwise keep running against a plane
@@ -7467,12 +7435,10 @@ export class SparseVoxelDrySceneRenderer {
     this.probeBindGroup = undefined;
     this.probePipeline = undefined;
     this.probeRequest = undefined;
-    this.probeReadPending = false;
     this.brickProbeBuffers?.destroy();
     this.brickProbeBuffers = undefined;
     this.brickProbeBindGroup = undefined;
     this.brickProbePipeline = undefined;
-    this.brickProbeReadPending = false;
     this.brickCandidateBuffer?.destroy();
     this.brickRasterPublicationBuffer?.destroy();
     this.brickCoverageCountBuffer?.destroy();
@@ -7480,7 +7446,7 @@ export class SparseVoxelDrySceneRenderer {
     this.bandStateBuffer?.destroy();
     this.bandParamsBuffer?.destroy();
     this.coverageAuditBuffer?.destroy();
-    if (!this.coverageAuditReading) this.coverageAuditStaging?.destroy();
+    this.coverageAuditReadback?.destroy();
     this.scenePrimitiveOverflowPublicationBuffer?.destroy();
     this.coverageOverflowIndirectBuffer?.destroy();
     this.scenePrimitiveOverflowPublicationBuffer = undefined;
@@ -7491,7 +7457,7 @@ export class SparseVoxelDrySceneRenderer {
     this.bandStateBuffer = undefined;
     this.bandParamsBuffer = undefined;
     this.coverageAuditBuffer = undefined;
-    this.coverageAuditStaging = undefined;
+    this.coverageAuditReadback = undefined;
     this.bandComputeBindGroup = undefined;
     this.bandReadBindGroup = undefined;
     this.bandClassifyPipeline = undefined;
@@ -7542,7 +7508,7 @@ export class SparseVoxelDrySceneRenderer {
     this.primaryEntryDrawBindGroup = undefined;
     this.primaryEntryCullPipeline = undefined;
     this.primaryEntryDrawPipeline = undefined;
-    this.primaryEntryCompilation = undefined;
+    this.primaryEntry.reset();
     this.primaryEntryLeafCapacity = 0;
     this.splitGeometry?.destroy();
     this.splitOpaqueIdentity?.destroy();
@@ -7620,7 +7586,6 @@ export class SparseVoxelDrySceneRenderer {
     this.sceneArenaBuffer.destroy();
     this.paramsBuffer.destroy();
     this.voxelSpecularCounters.destroy();
-    this.surfaceMeshDisposed = true;
     this.surfaceMeshDrawCache = undefined;
     this.surfaceMeshPass = undefined;
     this.deferredLightingPass = undefined;

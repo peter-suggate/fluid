@@ -1,4 +1,5 @@
 import { SVO_BRICK_OCCUPANCY } from "../construction/svo-brick-occupancy";
+import { StagedReadback } from "../../../core/staged-readback";
 import { svoFieldProgramAbsentWGSL, svoPrimitiveWGSL } from "../../contracts/svo-primitive-abi";
 import {
   SVO_PIXEL_TRACE_FLAGS,
@@ -633,8 +634,7 @@ export class SparseVoxelBrickRasterProbeBuffers {
   readonly records: GPUTexture;
   readonly recordsView: GPUTextureView;
   private readonly rows = svoBrickRasterProbeTextureRows();
-  private readonly staging: { buffer: GPUBuffer; pending: boolean }[];
-  private pendingSlot?: { buffer: GPUBuffer; pending: boolean };
+  private readonly readback: StagedReadback;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice) {
@@ -645,51 +645,32 @@ export class SparseVoxelBrickRasterProbeBuffers {
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
     });
     this.recordsView = this.records.createView();
-    const size = svoBrickRasterProbeBufferBytes();
-    this.staging = Array.from({ length: 2 }, (_, index) => ({
-      buffer: device.createBuffer({
-        label: `Sparse voxel raster-primary probe readback ${index + 1}/2`,
-        size,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-      }),
-      pending: false,
-    }));
+    this.readback = new StagedReadback(device, { label: "Sparse voxel raster-primary probe readback", size: svoBrickRasterProbeBufferBytes() });
   }
 
-  /** Copy the records into a free staging slot. False when both are in flight. */
+  /** Copy the records for the next read. False while the last copy is unread or mapping. */
   encodeReadback(encoder: GPUCommandEncoder): boolean {
-    if (this.destroyed) return false;
-    const slot = this.staging.find((candidate) => !candidate.pending);
-    if (!slot) return false;
-    slot.pending = true;
-    encoder.copyTextureToBuffer(
+    return this.readback.encode(encoder, (encoder, buffer) => encoder.copyTextureToBuffer(
       { texture: this.records },
-      { buffer: slot.buffer, bytesPerRow: SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS * 4, rowsPerImage: this.rows },
+      { buffer, bytesPerRow: SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS * 4, rowsPerImage: this.rows },
       { width: SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS, height: this.rows, depthOrArrayLayers: 1 },
-    );
-    this.pendingSlot = slot;
-    return true;
+    ));
   }
+
+  /** Forget a copy that will not be read: one whose lighting half was never encoded beside it. */
+  discard(): void { this.readback.discard(); }
 
   /**
-   * Resolve the most recently encoded readback. Decoded with the shared decoder
-   * because the probe writes the shared ABI; a malformed buffer returns
-   * `undefined` so the overlay draws nothing rather than drawing a lie.
+   * Resolve the encoded readback, or `undefined` when none waits. Decoded with
+   * the shared decoder because the probe writes the shared ABI; a malformed
+   * buffer returns `undefined` so the overlay draws nothing rather than drawing
+   * a lie.
    */
   async read(isCurrent: () => boolean): Promise<SvoPixelTrace | undefined> {
-    const slot = this.pendingSlot;
-    this.pendingSlot = undefined;
-    if (!slot || this.destroyed) return undefined;
     try {
-      await slot.buffer.mapAsync(GPUMapMode.READ);
-      if (this.destroyed || !isCurrent()) return undefined;
-      const bytes = slot.buffer.getMappedRange();
-      return decodeSvoPixelTrace(new Uint32Array(bytes), new Float32Array(bytes));
+      return await this.readback.read((bytes) => isCurrent() ? decodeSvoPixelTrace(new Uint32Array(bytes), new Float32Array(bytes)) : undefined);
     } catch {
       return undefined;
-    } finally {
-      try { slot.buffer.unmap(); } catch { /* Device loss or destruction. */ }
-      slot.pending = false;
     }
   }
 
@@ -697,6 +678,6 @@ export class SparseVoxelBrickRasterProbeBuffers {
     if (this.destroyed) return;
     this.destroyed = true;
     try { this.records.destroy(); } catch { /* Device loss. */ }
-    for (const slot of this.staging) { try { slot.buffer.destroy(); } catch { /* Device loss. */ } }
+    try { this.readback.destroy(); } catch { /* Device loss. */ }
   }
 }

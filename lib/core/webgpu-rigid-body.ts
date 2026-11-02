@@ -677,7 +677,8 @@ export class WebGPURigidBodySystem {
   private nativeDescriptions: RigidBodyDescription[] = [];
   private nativeSignature = '';
   private nativeScene?: SceneDescription;
-  private nativeStepDt = 0;
+  /** The native step `encode` owes `finishNativeStep`; concurrent finishers share its one completion. */
+  private nativeStep?: { readonly dt_s: number; finishing?: Promise<boolean> };
   private disposed = false;
   /** Opt in only where the caller completes the native step before advancing. */
   enableNativeMotorContacts = false;
@@ -1034,7 +1035,7 @@ export class WebGPURigidBodySystem {
    * User-triggered and bounded, like `pick`: one bounded rigid-buffer copy per gesture.
    */
   async readPoses(): Promise<GPURigidBodyPose[] | undefined> {
-    if (this.bodyCount === 0) return undefined;
+    if (this.bodyCount === 0 || this.disposed) return undefined;
     const readback = this.device.createBuffer({ label: "GPU rigid-body pose readback", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read GPU resident rigid-body poses" });
     encoder.copyBufferToBuffer(this.renderBuffer, 0, readback, 0, GPU_RIGID_RENDER_BYTES);
@@ -1048,7 +1049,7 @@ export class WebGPURigidBodySystem {
 
   /** A bounded, user-triggered readback used only to begin mouse interaction. */
   async pick(origin: Vec3, direction: Vec3): Promise<GPURigidBodyPick | undefined> {
-    if (this.bodyCount === 0) return undefined;
+    if (this.bodyCount === 0 || this.disposed) return undefined;
     this.device.queue.writeBuffer(this.pickParamsBuffer,0,new Float32Array([origin.x,origin.y,origin.z,this.bodyCount,direction.x,direction.y,direction.z,0]));
     const readback=this.device.createBuffer({label:"GPU rigid-body pick readback",size:GPU_RIGID_PICK_BYTES,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
     const encoder=this.device.createCommandEncoder({label:"Pick GPU resident rigid body"});
@@ -1068,9 +1069,9 @@ export class WebGPURigidBodySystem {
   }
 
   encode(encoder: GPUCommandEncoder, dt_s: number, cellVolume_m3: number, snapshotCount = 1, cellHeight_m = 1) {
-    if (this.nativeStepDt) throw new Error("Finish the native rigid step before encoding another");
+    if (this.nativeStep) throw new Error("Finish the native rigid step before encoding another");
     if (this.nativeMotorContacts) {
-      this.nativeStepDt = dt_s;
+      this.nativeStep = { dt_s };
       encoder.copyBufferToBuffer(this.stateBuffer, 0, this.stateScratch, 0, GPU_RIGID_STATE_BYTES);
     }
     this.motorTime_s += dt_s;
@@ -1082,9 +1083,13 @@ export class WebGPURigidBodySystem {
 
   /** The readback is bounded to 3 KiB. Keep presentation and the next fluid
    * step behind the returned publication; they must see contacts and motors together. */
-  async finishNativeStep(): Promise<boolean> {
-    if (!this.nativeStepDt || this.disposed) return false;
-    const dt = this.nativeStepDt;
+  finishNativeStep(): Promise<boolean> {
+    const step = this.nativeStep;
+    if (!step || this.disposed) return Promise.resolve(false);
+    return step.finishing ??= this.runNativeStep(step.dt_s).finally(() => { this.nativeStep = undefined; });
+  }
+
+  private async runNativeStep(dt: number): Promise<boolean> {
     const readback = this.device.createBuffer({ label: "Native rigid velocity handoff", size: GPU_RIGID_STATE_BYTES,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     try {
@@ -1116,7 +1121,6 @@ export class WebGPURigidBodySystem {
       pass.dispatchWorkgroups(1); pass.end(); this.device.queue.submit([publish.finish()]);
       return true;
     } finally {
-      this.nativeStepDt = 0;
       if (readback.mapState === "mapped") readback.unmap(); readback.destroy();
     }
   }

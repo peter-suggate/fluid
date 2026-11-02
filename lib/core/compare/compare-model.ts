@@ -200,6 +200,9 @@ export interface CompareAdoptions {
   readonly onSceneAdopted?: CompareSceneAdopt;
 }
 
+/** Passes one mirror may take before it is a loop rather than a cascade. */
+const MIRROR_PASS_LIMIT = 8;
+
 /**
  * Bind pane B to pane A through the diff, for as long as compare mode is open.
  *
@@ -210,6 +213,7 @@ export interface CompareAdoptions {
  * lets a pass observe what the previous pass wrote and settles when nothing
  * moves — which for a round-tripping serializer is always the second pass.
  */
+
 export function startCompareSync(
   a: PaneSession,
   b: PaneSession,
@@ -296,18 +300,27 @@ export function startCompareSync(
   };
 
   const pass = (fromB: boolean) => {
+    if (stopped) return;
     pending = true;
     pendingFromB ||= fromB;
     if (running) return;
     running = true;
     try {
       let guard = 0;
-      while (pending && guard++ < 8) {
+      while (pending && guard++ < MIRROR_PASS_LIMIT) {
         pending = false;
         const reconcile = pendingFromB;
         pendingFromB = false;
         if (reconcile) reconcileFromB();
         mirrorAtoB();
+      }
+      // A mirror that has not settled in this many passes is two subscribers
+      // undoing each other, and the panes are no longer the pair the strip
+      // claims. Said, rather than left to drift.
+      if (pending) {
+        pending = false;
+        pendingFromB = false;
+        console.error(`Compare mirror did not settle after ${MIRROR_PASS_LIMIT} passes; the panes may disagree until the next edit.`);
       }
       lastB = paneSearch(b, layerB);
     } finally {

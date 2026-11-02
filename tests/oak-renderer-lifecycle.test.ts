@@ -16,7 +16,7 @@ const config: SimulationRunConfig = { methodId: "uniform-volume", quality: "bala
 type RendererAccess = {
   solverKey(scene: SceneDescription, config: SimulationRunConfig, mode: "full-scene"): string;
   beginGPUFluidInitialization(scene: SceneDescription, config: SimulationRunConfig, key: string, mode: "full-scene"): void;
-  gpuFluidPending?: Promise<void>;
+  solverBuild?: { settled?: Promise<void>; abort: AbortController };
   gpuFluid: unknown;
   svoSceneSidecar: unknown;
   gpuFluidKey: string;
@@ -51,7 +51,7 @@ test("successful scenery rebuild swaps only the sidecar, preserving live fluid a
   const access = renderer as unknown as RendererAccess;
   const beforeGeneration = access.gpuFluidGeneration;
   access.beginGPUFluidInitialization(withOakParameters(scene, node.id, { seed: 20 }), config, "edited", "full-scene");
-  await access.gpuFluidPending;
+  await access.solverBuild?.settled;
   assert.equal(access.gpuFluid, solver);
   assert.equal(solver.info.encodedSteps, 42);
   assert.equal(access.gpuFluidGeneration, beforeGeneration);
@@ -71,7 +71,7 @@ test("a refused display rebuild never destroys the retained fluid", async contex
     attachedSolverDocumentKey: gpuSceneSolverKey(scene, config) });
   const access = renderer as unknown as RendererAccess;
   access.beginGPUFluidInitialization(scene, config, "edited", "full-scene");
-  await access.gpuFluidPending;
+  await access.solverBuild?.settled;
   assert.equal(access.gpuFluid, solver);
   assert.equal(access.svoSceneSidecar, oldSidecar);
   assert.ok(statuses.some(label => label.includes("Test allocation refusal")));
@@ -90,9 +90,9 @@ test("a superseded display candidate is retired without touching the live solver
     attachedSolverDocumentKey: gpuSceneSolverKey(scene, config) });
   const access = renderer as unknown as RendererAccess;
   access.beginGPUFluidInitialization(scene, config, "edited", "full-scene");
-  const pending = access.gpuFluidPending;
+  const pending = access.solverBuild?.settled;
   await began;
-  Object.assign(renderer, { gpuFluidRequestGeneration: 99 });
+  access.solverBuild!.abort.abort();
   finish({ destroy() { destroyed++; } } as unknown as WebGPULiveSvoScene);
   await pending;
   assert.equal(destroyed, 1);

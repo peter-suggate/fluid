@@ -40,11 +40,20 @@ export function createLiveInteractionBinding(paneId: PaneId, controller: Simulat
   const listeners = new Set<() => void>();
   let host: (InteractionHost & Partial<CameraClearance> & { ready?: Promise<void> }) | undefined;
   let detach: (() => void) | undefined;
+  /*
+   * The bring-up the first command started. Every command stamped against the
+   * placeholder — the first and any sent while it was coming up — waits for it
+   * and is restamped; only the first used to, so a second click raced ahead as
+   * stale against a world that did not exist yet.
+   */
+  let bringUp: Promise<void> | undefined;
+  let disposed = false;
 
   const notify = () => { for (const listener of [...listeners]) listener(); };
 
   /** The pane's current service, attaching to it if it changed. `create` brings it up. */
   function current(create: boolean) {
+    if (disposed) return undefined;
     if (!host && !create && !sceneHasEntities()) return undefined;
     let next: typeof host;
     try { next = controller.interaction(paneId); } catch { return host; }
@@ -69,7 +78,11 @@ export function createLiveInteractionBinding(paneId: PaneId, controller: Simulat
       const target = current(true);
       if (!target) return { accepted: false, reason: "The interactive runtime is not available for this pane" };
       if (fresh) {
-        await target.ready?.catch(() => undefined);
+        const started = bringUp = (target.ready ?? Promise.resolve()).catch(() => undefined)
+          .finally(() => { if (bringUp === started) bringUp = undefined; });
+      }
+      if (bringUp) {
+        await bringUp;
         const view = target.getView();
         return target.dispatch({ ...envelope, generation: view.generation, documentRevision: view.documentRevision });
       }
@@ -88,6 +101,6 @@ export function createLiveInteractionBinding(paneId: PaneId, controller: Simulat
     },
     cameraPosition: (focus, desired, clearance_m) => host?.cameraPosition?.(focus, desired, clearance_m) ?? desired,
     // The service is the controller's: the binding lets go of it, never disposes it.
-    dispose: () => { detach?.(); detach = undefined; host = undefined; listeners.clear(); },
+    dispose: () => { disposed = true; detach?.(); detach = undefined; host = undefined; listeners.clear(); },
   };
 }

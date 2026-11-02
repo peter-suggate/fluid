@@ -15,8 +15,8 @@ export function GravityRow() {
   const control = gravityFeature.controls[0];
   const toggle = () => {
     const current = session.scene.getState().scene;
-    simulation.beginEdit(gravityEnabled(current.fluid.gravity_m_s2) ? "Disable gravity" : "Enable gravity", session.id);
-    simulation.commitEdit({ fluid: toggleGravity(current.fluid) }, { reseed: true }, session.id);
+    simulation.edit(gravityEnabled(current.fluid.gravity_m_s2) ? "Disable gravity" : "Enable gravity",
+      { fluid: toggleGravity(current.fluid) }, { reseed: true }, session.id);
   };
   return <ToolstripRow
     icon={<ArrowDown width={14} height={14} strokeWidth={1.7} aria-hidden />}
@@ -44,8 +44,7 @@ export function GravityYRow() {
       onChange={value => {
         const fluid = session.scene.getState().scene.fluid;
         if (value === fluid.gravity_m_s2.y) return;
-        simulation.beginEdit(`Set ${control.label}`, session.id);
-        simulation.commitEdit({ fluid: setGravity(fluid, { ...fluid.gravity_m_s2, y: value }) },
+        simulation.edit(`Set ${control.label}`, { fluid: setGravity(fluid, { ...fluid.gravity_m_s2, y: value }) },
           { reseed: true }, session.id);
       }} />}
   />;
@@ -65,7 +64,6 @@ function GravityDirectionControl() {
     options={GRAVITY_DIRECTIONS.map(choice => ({ value: choice.id, label: choice.label }))}
     onChange={value => {
       const current = session.scene.getState().scene.fluid;
-      simulation.beginEdit("Change gravity direction", session.id);
-      simulation.commitEdit({ fluid: setGravityDirection(current, value) }, { reseed: true }, session.id);
+      simulation.edit("Change gravity direction", { fluid: setGravityDirection(current, value) }, { reseed: true }, session.id);
     }} />;
 }

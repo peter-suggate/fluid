@@ -117,6 +117,37 @@ test("a release the runtime rejects leaves the document and history untouched", 
   assert.deepEqual(f.events, ["begin", "preflight", "cancel"]);
 });
 
+test("a release resolves only once the host's rollback has", async () => {
+  const f = fixture(async () => { throw new Error("capacity"); });
+  const rollback = deferred();
+  const events: string[] = [];
+  const { publishSolidPatches } = await import("../lib/core/voxel-editor/transaction");
+  const host: ToolHost = {
+    scene: () => f.base,
+    publish: async () => { throw new Error("capacity"); },
+    begin: () => {}, finish: () => {},
+    cancel: async () => { await rollback.promise; events.push("rolled back"); },
+  };
+  const published = publishSolidPatches(host, f.base, [{ operation: "fill", minimum: [0, 0, 0], maximumExclusive: [1, 1, 1] }]);
+  const settled = published.then(() => events.push("published"), () => events.push("rejected"));
+  await new Promise(resolve => setTimeout(resolve));
+  assert.deepEqual(events, []);
+  rollback.resolve();
+  await settled;
+  assert.deepEqual(events, ["rolled back", "rejected"]);
+});
+
+test("a cancel after the release was decided does not change it", async () => {
+  const gate = deferred();
+  const f = fixture(() => gate.promise);
+  await f.transaction.update(ray());
+  const release = f.transaction.finish();
+  await new Promise(resolve => setTimeout(resolve));
+  assert.equal(f.transaction.finish(true), release);
+  gate.resolve();
+  await release;
+  assert.deepEqual(f.events, ["begin", "preflight", "publish", "finish"]);
+});
 
 test("abandoning a gesture before its first sample clears the pending state", async () => {
   const f = fixture();

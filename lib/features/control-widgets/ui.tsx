@@ -210,16 +210,31 @@ function Channel({ channel, label, onInput }: { readonly channel: WidgetChannel;
     testId={`control-widget-action-${channel.id}`} onClick={() => onInput(true)}>{channel.label}</Button>;
 }
 
-/** Let go of a held control when the window loses focus mid-press. */
-function useReleaseOnBlur(held: boolean, release: () => void) {
+/**
+ * A held control's one release: the pointer coming up, a cancel, the window
+ * losing focus or the control unmounting mid-press, whichever comes first. The
+ * rest is sent once per press however many of those arrive.
+ */
+function useHold(release: () => void): { readonly grab: () => void; readonly letGo: () => void } {
   const latest = useRef(release);
   latest.current = release;
-  useEffect(() => {
-    if (!held) return;
-    const blur = () => latest.current();
-    window.addEventListener("blur", blur);
-    return () => window.removeEventListener("blur", blur);
-  }, [held]);
+  const [hold] = useState(() => {
+    let holding = false;
+    const letGo = () => {
+      if (!holding) return;
+      holding = false;
+      window.removeEventListener("blur", letGo);
+      latest.current();
+    };
+    const grab = () => {
+      if (holding) return;
+      holding = true;
+      window.addEventListener("blur", letGo);
+    };
+    return { grab, letGo };
+  });
+  useEffect(() => hold.letGo, [hold]);
+  return hold;
 }
 
 const LEVER_TRAVEL_PX = 96;
@@ -244,11 +259,10 @@ function Lever({ channel, label, onInput }: { readonly channel: WidgetAxis1; rea
     const fraction = 1 - Math.max(0, Math.min(1, (clientY - box.top) / box.height));
     return channel.min + fraction * (channel.max - channel.min);
   };
-  const release = () => {
+  const { grab, letGo } = useHold(() => {
     setHeld(undefined);
     if (channel.rest !== undefined) onInput(channel.rest);
-  };
-  useReleaseOnBlur(held !== undefined, release);
+  });
   // A range across zero is one two-way lever: the fill grows from the zero line,
   // up forward and down in reverse, and a drag catches on zero within a step.
   const twoWay = channel.min < 0 && channel.max > 0;
@@ -263,9 +277,9 @@ function Lever({ channel, label, onInput }: { readonly channel: WidgetAxis1; rea
     <div ref={track} className="control-widget-lever-track" role="slider" tabIndex={0}
       aria-label={`${label} ${channel.label}`} aria-valuemin={channel.min} aria-valuemax={channel.max} aria-valuenow={value}
       aria-valuetext={shown} data-testid={`control-widget-lever-${channel.id}`} style={{ height: LEVER_TRAVEL_PX }}
-      onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); event.currentTarget.focus(); setHeld(set(detent(fromPointer(event.clientY)))); }}
+      onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); event.currentTarget.focus(); grab(); setHeld(set(detent(fromPointer(event.clientY)))); }}
       onPointerMove={(event) => { if (held !== undefined) setHeld(set(detent(fromPointer(event.clientY)))); }}
-      onPointerUp={release} onPointerCancel={release}
+      onPointerUp={letGo} onPointerCancel={letGo} onLostPointerCapture={letGo}
       onWheel={(event) => { if (channel.rest === undefined) set(value + (event.deltaY < 0 ? step : -step)); }}
       onKeyDown={(event) => {
         const next = event.key === "ArrowUp" || event.key === "ArrowRight" ? value + step
@@ -301,15 +315,14 @@ function Stick({ channel, label, onInput }: { readonly channel: WidgetAxis2; rea
     return [Number(x.toFixed(3)), Number(y.toFixed(3))];
   };
   const set = (next: readonly [number, number]) => { setHeld(next); onInput(next); };
-  const release = () => { setHeld(undefined); onInput([0, 0]); };
-  useReleaseOnBlur(held !== undefined, release);
+  const { grab, letGo } = useHold(() => { setHeld(undefined); onInput([0, 0]); });
   return <div className="control-widget-stick-wrap">
     <div ref={pad} className="control-widget-stick" role="application" aria-label={`${label} ${channel.label}`}
       data-testid={`control-widget-stick-${channel.id}`} data-held={held ? "" : undefined}
       style={{ width: 2 * STICK_RADIUS_PX + 16, height: 2 * STICK_RADIUS_PX + 16 }}
-      onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); set(fromPointer(event.clientX, event.clientY)); }}
+      onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); grab(); set(fromPointer(event.clientX, event.clientY)); }}
       onPointerMove={(event) => { if (held) set(fromPointer(event.clientX, event.clientY)); }}
-      onPointerUp={release} onPointerCancel={release}>
+      onPointerUp={letGo} onPointerCancel={letGo} onLostPointerCapture={letGo}>
       <div className="control-widget-stick-knob" style={{ translate: `${value[0] * STICK_RADIUS_PX}px ${value[1] * STICK_RADIUS_PX}px` }} />
     </div>
     <span className="control-widget-caption">{channel.label}</span>
@@ -319,11 +332,10 @@ function Stick({ channel, label, onInput }: { readonly channel: WidgetAxis2; rea
 function HoldButton({ channel, onInput }: { readonly channel: WidgetButton; readonly onInput: (value: boolean) => void }) {
   const [held, setHeld] = useState(false);
   const pressed = held || channel.pressed;
-  const release = () => { if (!held) return; setHeld(false); onInput(false); };
-  useReleaseOnBlur(held, release);
+  const { grab, letGo } = useHold(() => { setHeld(false); onInput(false); });
   return <button type="button" className="ui-button control-widget-hold" aria-pressed={pressed} data-testid={`control-widget-button-${channel.id}`}
-    onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); setHeld(true); onInput(true); }}
-    onPointerUp={release} onPointerCancel={release} onLostPointerCapture={release}>
+    onPointerDown={(event) => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); grab(); setHeld(true); onInput(true); }}
+    onPointerUp={letGo} onPointerCancel={letGo} onLostPointerCapture={letGo}>
     {channel.label}{channel.shortcut && <kbd>{channel.shortcut}</kbd>}
   </button>;
 }

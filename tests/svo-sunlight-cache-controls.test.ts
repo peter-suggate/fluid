@@ -20,7 +20,7 @@ test("a cache toggle during compilation retires the old bundle after publication
     requestedPrimaryTraversal: "traced", requestedPrimaryWorkMap: false,
     requestedSunlightCache: false,
     optionalPipelineTasks: new Map([["svo-dry-scene", Promise.resolve()]]),
-    failedOptionalPipelines: new Set(), optionalPipelineFailures: new Map(),
+    optionalPipelineFailures: new Map(),
     svoDryScenePipeline: { destroy: () => { destroyed += 1; } },
   });
   const request = () => renderer.applyPrimaryTraversalRequest("traced",

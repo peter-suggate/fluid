@@ -16,9 +16,8 @@ test("replacing a pending initializer retires the superseded resource's progress
   const abort = new AbortController();
   const pending = new Promise<void>(() => {});
   Object.assign(renderer, {
-    device: {}, gpuFluidPending: pending,
-    gpuFluidInitializationAbort: abort,
-    gpuFluidInitializationResource: liveSvoSceneResourcePlugin,
+    device: {},
+    solverBuild: { serial: 1, key: "old", resource: liveSvoSceneResourcePlugin, abort, drainOwed: false, settled: pending },
   });
   const config = { methodId: "uniform-narrow-band-flip", quality: "balanced", values: {} } as SimulationRunConfig;
   const access = renderer as unknown as {

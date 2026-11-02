@@ -78,6 +78,8 @@ export class ShapeLabPool {
   private readonly idle: Worker[] = [];
   private queue: PendingTile[] = [];
   private generation = 0;
+  /** The render last reported as failed, so one failure is told once however many workers saw it. */
+  private failed = -1;
   private sceneId = "";
   private started = 0;
   private done = 0;
@@ -95,7 +97,7 @@ export class ShapeLabPool {
         name: `shape-lab-trace-${index}`,
       });
       worker.addEventListener("message", (event: MessageEvent<ShapeLabResponse>) => this.receive(worker, event.data));
-      worker.addEventListener("error", (event) => this.onError(event.message || "Shape lab worker failed"));
+      worker.addEventListener("error", (event) => this.retire(worker, event.message || "Shape lab worker failed"));
       this.workers.push(worker);
       this.idle.push(worker);
     }
@@ -188,8 +190,7 @@ export class ShapeLabPool {
     this.idle.push(worker);
     if (response.generation === this.generation) {
       if (response.type === "failed") {
-        this.queue = [];
-        this.onError(response.message);
+        this.fail(response.message);
       } else if (response.type === "tile") {
         this.done += 1;
         this.onTile({
@@ -210,6 +211,28 @@ export class ShapeLabPool {
       }
     }
     this.pump();
+  }
+
+  private fail(message: string): void {
+    this.queue = [];
+    if (this.failed === this.generation) return;
+    this.failed = this.generation;
+    this.onError(message);
+  }
+
+  /**
+   * A worker that threw is gone, and so is the tile it held: the render it was
+   * serving can never complete, so it fails once, and the pool carries on with
+   * the workers it has left rather than handing tiles to a dead one.
+   */
+  private retire(worker: Worker, message: string): void {
+    worker.terminate();
+    const index = this.workers.indexOf(worker);
+    if (index < 0) return;
+    this.workers.splice(index, 1);
+    const idle = this.idle.indexOf(worker);
+    if (idle >= 0) this.idle.splice(idle, 1);
+    this.fail(this.workers.length > 0 ? message : `${message}; no tracing workers remain`);
   }
 }
 

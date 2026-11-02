@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import { simulation } from "../lib/core/simulation/controller";
+import { useHeldEdit } from "../lib/core/simulation/use-held-edit";
 import {
   sceneStoneNode,
   stoneDials,
@@ -22,8 +22,8 @@ import { useSession } from "../lib/core/session/session-context";
  *
  * A held slider is one gesture: the document is patched live for preview (a
  * scenery edit revoxelizes only its own dirty region and never reseeds the
- * solver), while `beginEdit`/`commitEdit` bracket the drag so undo gets one
- * entry per adjustment, not one per pointer-move.
+ * solver), while one held edit brackets the drag so undo gets one entry per
+ * adjustment, not one per pointer-move.
  */
 const DIALS: readonly { id: keyof StoneDials; label: string; hint: string }[] = [
   { id: "size", label: "SIZE", hint: "The whole stone's scale, cap and seating together" },
@@ -34,41 +34,27 @@ const DIALS: readonly { id: keyof StoneDials; label: string; hint: string }[] = 
 export function StoneDialRows({ nodeId }: { nodeId: string }) {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
-  const gestureOpen = useRef(false);
-  const endGesture = () => {
-    if (!gestureOpen.current) return;
-    gestureOpen.current = false;
-    simulation.commitEdit(undefined, { reseed: true }, session.id);
-  };
-  // Deselecting mid-drag must still close the gesture, or the next edit's
-  // undo snapshot would be this one's.
-  useEffect(() => endGesture, []);
+  const held = useHeldEdit(session.id, { reseed: true });
 
   const stone = sceneStoneNode(scene, nodeId);
   if (stone === undefined) return null;
   const dials = stoneDials(stone.params);
 
   const setDial = (id: keyof StoneDials, value: number) => {
-    if (!gestureOpen.current) {
-      gestureOpen.current = true;
-      simulation.beginEdit(`Adjusted ${nodeId}`, session.id);
-    }
+    held.begin(`Adjusted ${nodeId}`);
     const current = session.scene.getState().scene;
-    const held = sceneStoneNode(current, nodeId);
-    if (held === undefined) return;
+    const node = sceneStoneNode(current, nodeId);
+    if (node === undefined) return;
     session.scene.getState().patchScene(
-      withStoneDials(current, nodeId, { ...stoneDials(held.params), [id]: value }),
+      withStoneDials(current, nodeId, { ...stoneDials(node.params), [id]: value }),
     );
   };
 
   // A press is its own complete gesture: one undo entry, one revoxelize.
   const reroll = () => {
-    endGesture();
-    simulation.beginEdit(`Re-rolled ${nodeId}`, session.id);
-    session.scene.getState().patchScene(
-      withStoneSeedRerolled(session.scene.getState().scene, nodeId),
-    );
-    simulation.commitEdit(undefined, { reseed: true }, session.id);
+    held.end();
+    simulation.edit(`Re-rolled ${nodeId}`,
+      withStoneSeedRerolled(session.scene.getState().scene, nodeId), { reseed: true }, session.id);
   };
 
   return <>
@@ -77,7 +63,7 @@ export function StoneDialRows({ nodeId }: { nodeId: string }) {
       values={dials}
       testPrefix="stone"
       onSet={setDial}
-      onEndGesture={endGesture}
+      onEndGesture={held.end}
     />
     {/* A verb, not a setting — so it is a row that acts on the click rather
         than one that opens a control. */}

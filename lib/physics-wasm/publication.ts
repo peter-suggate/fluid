@@ -61,7 +61,12 @@ export class DecodedPhysicsPublication {
   }
 }
 
+/** Decode in place. A publication refused here is released, so its worker slot is never stranded. */
 export function decodePhysicsPublication(source: PhysicsPublication): DecodedPhysicsPublication {
+  try { return decodeHeldPublication(source); } catch (error) { source.release(); throw error; }
+}
+
+function decodeHeldPublication(source: PhysicsPublication): DecodedPhysicsPublication {
   if (!littleEndian) throw new Error("Zero-copy physics publications require a little-endian host");
   const bytes = source.bytes;
   if (bytes.byteOffset !== 0) throw new RangeError("Physics publication must start at its ArrayBuffer origin");

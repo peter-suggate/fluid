@@ -5,6 +5,7 @@ import {
 } from "../lib/core/visual-layers";
 import { VisualLayerLines } from "../lib/features/field-view/layers-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { RunScope, type Run } from "../lib/core/run-scope";
 import { useStore } from "zustand";
 import { LabSceneSelector } from "./LabSceneSelector";
 import { addFluidBall } from "../lib/core/editor-fluid-volume";
@@ -356,6 +357,12 @@ function draw(
 
 }
 
+/* Commands answer out of order with the advance; the later command wins. */
+const newerView = (next: UniformView) => (previous: UniformView | undefined) =>
+  !previous || next.revision.commandSequence >= previous.revision.commandSequence
+    ? next
+    : previous;
+
 export function UniformLab() {
   const [session] = useState(() => createPaneSession("a"));
   return (
@@ -404,7 +411,10 @@ function UniformRun({ session }: { session: PaneSession }) {
   const [stageId, setStageId] = useState(stages[0]!.id),
     [probe, setProbe] = useState<number>(),
     [pinned, setPinned] = useState(false);
-  const controller = useRef<UniformLabController>(undefined),
+  /* The controller of the current load and the run it belongs to. Whatever a
+   * superseded load's controller answers — an edit, an advance — is dropped. */
+  const [loads] = useState(() => new RunScope());
+  const controller = useRef<{ readonly owner: UniformLabController; readonly run: Run }>(undefined),
     inflight = useRef(false),
     canvas = useRef<HTMLCanvasElement>(null);
   const pan = useRef<{ x: number; y: number; camera: Camera } | undefined>(
@@ -430,7 +440,7 @@ function UniformRun({ session }: { session: PaneSession }) {
     [store, session, beginLoad],
   );
   useEffect(() => {
-    let alive = true;
+    const run = loads.start();
     let owner: UniformLabController | undefined;
     void (async () => {
       try {
@@ -440,18 +450,18 @@ function UniformRun({ session }: { session: PaneSession }) {
         const limitation = uniformLabSceneLimitation(scene);
         if (limitation) throw new Error(limitation);
         owner = await UniformLabController.create();
-        if (!alive) {
+        if (!run.current()) {
           await owner.destroy();
           return;
         }
-        controller.current = owner;
+        controller.current = { owner, run };
         const initial = await owner.load(scene, { volumeControlSeconds, phiFineAdvection }, sliceDepth_m);
-        if (alive) {
+        if (run.current()) {
           setView(initial);
           setLoading(false);
         }
       } catch (e) {
-        if (alive) {
+        if (run.current()) {
           setError(String(e instanceof Error ? e.message : e));
           setLoading(false);
           setPlaying(false);
@@ -459,52 +469,43 @@ function UniformRun({ session }: { session: PaneSession }) {
       }
     })();
     return () => {
-      alive = false;
-      if (controller.current === owner) controller.current = undefined;
+      loads.cancel("reloaded");
+      if (controller.current?.run === run) controller.current = undefined;
       if (owner) void owner.destroy().catch(() => {});
     };
-  }, [sceneId, volumeControlSeconds, phiFineAdvection, sliceDepth_m, restart, session.scene]);
+  }, [loads, sceneId, volumeControlSeconds, phiFineAdvection, sliceDepth_m, restart, session.scene]);
   const edit = (
-    operation: (owner: UniformLabController) => Promise<UniformView>,
+    operation: (owner: UniformLabController, run: Run) => Promise<UniformView>,
   ) => {
-    const owner = controller.current;
-    if (!owner) return;
+    const loaded = controller.current;
+    if (!loaded) return;
+    const { owner, run } = loaded;
     editTail.current = editTail.current.then(async () => {
-      if (controller.current !== owner) return;
+      if (!run.current()) return;
       try {
-        const next = await operation(owner);
-        if (controller.current === owner)
-          setView((previous) =>
-            !previous ||
-            next.revision.commandSequence >= previous.revision.commandSequence
-              ? next
-              : previous,
-          );
+        const next = await operation(owner, run);
+        if (run.current()) setView(newerView(next));
       } catch (e) {
-        if (controller.current === owner)
+        if (run.current())
           setError(String(e instanceof Error ? e.message : e));
       }
     });
   };
   const advance = useCallback(async () => {
-    const owner = controller.current;
-    if (!owner || inflight.current) return;
+    const loaded = controller.current;
+    if (!loaded || inflight.current) return;
+    const { owner, run } = loaded;
     inflight.current = true;
     setBusy(true);
     const start = performance.now();
     try {
       const next = await owner.advance(store.getState().dt);
-      if (controller.current === owner) {
-        setView((previous) =>
-          !previous ||
-          next.revision.commandSequence >= previous.revision.commandSequence
-            ? next
-            : previous,
-        );
+      if (run.current()) {
+        setView(newerView(next));
         setCost(performance.now() - start);
       }
     } catch (e) {
-      if (controller.current === owner) {
+      if (run.current()) {
         setError(String(e instanceof Error ? e.message : e));
         setPlaying(false);
       }
@@ -611,14 +612,14 @@ function UniformRun({ session }: { session: PaneSession }) {
       performance.now() - stroke.time < 100
         ? stroke.velocity
         : { x: 0, y: 0, z: 0 };
-    edit(async (owner) => {
+    edit(async (owner, run) => {
       const next = await owner.setRigidPose(
         stroke.id,
         stroke.last,
         velocity,
         false,
       );
-      if (controller.current !== owner) return next;
+      if (!run.current()) return next;
       const scene = session.scene.getState().scene;
       session.scene.getState().patchScene({
         rigidBodies: scene.rigidBodies.map((body) =>
@@ -826,7 +827,7 @@ function UniformRun({ session }: { session: PaneSession }) {
                       z: 0,
                     },
                   };
-                  edit(async (owner) => {
+                  edit(async (owner, run) => {
                     if (hit)
                       return owner.setRigidPose(
                         body.id,
@@ -835,7 +836,7 @@ function UniformRun({ session }: { session: PaneSession }) {
                         true,
                       );
                     const next = await owner.addRigidBody(body, true);
-                    if (controller.current !== owner) return next;
+                    if (!run.current()) return next;
                     const scene = session.scene.getState().scene;
                     session.scene.getState().patchScene({
                       rigidBodies: [...scene.rigidBodies, body],
@@ -865,12 +866,12 @@ function UniformRun({ session }: { session: PaneSession }) {
               const drop = dropStroke.current;
               if (drop) {
                 dropStroke.current = undefined;
-                edit(async (owner) => {
+                edit(async (owner, run) => {
                   const next = await owner.injectLiquid(
                     drop.centre_m,
                     drop.radius_m,
                   );
-                  if (controller.current !== owner) return next;
+                  if (!run.current()) return next;
                   const scene = session.scene.getState().scene;
                   const patch = addFluidBall(
                     {
@@ -1189,9 +1190,9 @@ function UniformRun({ session }: { session: PaneSession }) {
               velocity: { x: 0, y: 0, z: 0 },
               offset: { x: 0, y: 0, z: 0 },
             };
-            edit(async (owner) => {
+            edit(async (owner, run) => {
               const next = await owner.addRigidBody(body, true);
-              if (controller.current !== owner) return next;
+              if (!run.current()) return next;
               const scene = session.scene.getState().scene;
               session.scene
                 .getState()
@@ -1207,9 +1208,9 @@ function UniformRun({ session }: { session: PaneSession }) {
                   !effect.scene.rigidBodies.some((next) => next.id === b.id),
               );
             for (const body of removed)
-              edit(async (owner) => {
+              edit(async (owner, run) => {
                 const next = await owner.removeRigidBody(body.id);
-                if (controller.current !== owner) return next;
+                if (!run.current()) return next;
                 session.scene.getState().patchScene({
                   rigidBodies: session.scene
                     .getState()

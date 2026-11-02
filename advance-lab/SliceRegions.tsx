@@ -134,9 +134,16 @@ interface RegionDrag {
 }
 
 export function SliceRegions(props: SliceRegionsProps) {
-  const [drag, setDrag] = useState<RegionDrag | null>(null);
+  const [held, setDrag] = useState<RegionDrag | null>(null);
   const { doc, scale } = props;
   const records = labRegionSpace.list(doc);
+  // A drag lives only as long as the handle it pressed: a box that stops being
+  // editable, selected or there at all takes its handles with it, and an
+  // unmounted handle never hears its pointer come up. Dropped here rather than
+  // left to revive the next time that box is editable again.
+  const drag = held && props.editing && props.selectedId === held.id
+    && records.some(record => record.id === held.id) ? held : null;
+  if (held && !drag) setDrag(null);
   // The canvas frame has the same extents as the solver's — the flip is a
   // reflection — so one lattice serves both and the resize never needs to know
   // which way up it is working.
@@ -221,7 +228,7 @@ export function SliceRegions(props: SliceRegionsProps) {
             onPointerDown={event => begin(record, "body", event)}
             onPointerMove={event => move(record, event)}
             onPointerUp={event => end(record, event)}
-            onPointerCancel={() => setDrag(null)} />}
+            onLostPointerCapture={() => setDrag(null)} />}
           {selected && props.editing && SLICE_RESIZE_HANDLES.map(handle => {
             const [fx, fy] = handleAnchor(handle);
             const cx = (box.min[0] ?? 0) + fx * width;
@@ -233,7 +240,7 @@ export function SliceRegions(props: SliceRegionsProps) {
               onPointerDown={event => begin(record, handle, event)}
               onPointerMove={event => move(record, event)}
               onPointerUp={event => end(record, event)}
-              onPointerCancel={() => setDrag(null)} />;
+              onLostPointerCapture={() => setDrag(null)} />;
           })}
         </g>;
       })}

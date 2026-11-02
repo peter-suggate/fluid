@@ -1,10 +1,9 @@
 "use client";
-import { useEffect, useRef } from "react";
 import { Waves } from "lucide-react";
 import { getMethod } from "../../core/method-registry";
 import { useSession } from "../../core/session/session-context";
 import { PARTICLE_DISPLAY_OPTIONS } from "../../core/visual-layers";
-import { simulation } from "../../core/simulation/controller";
+import { useHeldEdit } from "../../core/simulation/use-held-edit";
 import { resolveWaterOptics, WATER_ROUGHNESS_MIN } from "../../core/webgpu-lighting";
 import { ToolstripRow } from "../../../components/toolstrip";
 import { RailChoice, RailRange, RailSub, RailToggle } from "../../../components/rail";
@@ -98,23 +97,10 @@ function FineSlider({ setting, label, ariaLabel, min, max, step, hint, onInput }
 function WaterRoughnessControl({ rail = false }: { rail?: boolean }) {
   const session = useSession();
   const roughness = session.scene(state => resolveWaterOptics(state.scene.fluid.optics).roughness);
-  const editing = useRef(false);
-  const finish = () => {
-    if (!editing.current) return;
-    editing.current = false;
-    simulation.commitEdit(undefined, { reseed: false }, session.id);
-  };
-  useEffect(() => () => {
-    if (editing.current) {
-      editing.current = false;
-      simulation.commitEdit(undefined, { reseed: false }, session.id);
-    }
-  }, [session]);
+  const held = useHeldEdit(session.id, { reseed: false });
+  const finish = held.end;
   const change = (value: number) => {
-    if (!editing.current) {
-      simulation.beginEdit("Change water roughness", session.id);
-      editing.current = true;
-    }
+    held.begin("Change water roughness");
     const store = session.scene.getState();
     store.patchFluid({ optics: { ...store.scene.fluid.optics, roughness: value } });
   };

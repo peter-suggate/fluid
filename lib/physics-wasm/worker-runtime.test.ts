@@ -106,3 +106,41 @@ test("worker waits for one of three checked-out publication buffers", async () =
   await tick();
   assert.equal(output.filter(message => message.type === "publication").length, 4);
 });
+
+test("a refused load enters its epoch, so later commands fail as unloaded rather than stale", async () => {
+  const output: PhysicsWorkerResponse[] = [];
+  const { wasmModule, freed } = fixture();
+  const accept = wasmModule.FluidWorld.from_scene;
+  const runtime = new PhysicsWasmWorkerRuntime(message => output.push(message), async () => wasmModule);
+  runtime.receive({ type: "initialize", requestId: 1, moduleUrl: "fixture", artifact: "scalar", threadCount: 1 });
+  runtime.receive({ type: "load", requestId: 2, sequence: 1, runEpoch: 1, sceneJson: "{}", optionsJson: "{}" });
+  await tick();
+  wasmModule.FluidWorld.from_scene = () => { throw new Error("scene refused"); };
+  runtime.receive({ type: "load", requestId: 3, sequence: 2, runEpoch: 2, sceneJson: "{}", optionsJson: "{}" });
+  runtime.receive({ type: "snapshot", requestId: 4, sequence: 3, runEpoch: 2, viewMask: 0 });
+  await tick();
+  assert.equal(freed(), 1, "the epoch-1 world is freed with the load that replaced it");
+  const failure = output.find(message => message.type === "request-failed" && message.requestId === 4);
+  assert.ok(failure?.type === "request-failed");
+  assert.match(failure.message, /world 2 failed to load: scene refused/);
+  wasmModule.FluidWorld.from_scene = accept;
+  runtime.receive({ type: "load", requestId: 5, sequence: 4, runEpoch: 3, sceneJson: "{}", optionsJson: "{}" });
+  await tick();
+  assert.ok(output.some(message => message.type === "receipt" && message.requestId === 5));
+});
+
+test("a disposed worker refuses every later request", async () => {
+  const output: PhysicsWorkerResponse[] = [];
+  const { wasmModule } = fixture();
+  const runtime = new PhysicsWasmWorkerRuntime(message => output.push(message), async () => wasmModule);
+  runtime.receive({ type: "initialize", requestId: 1, moduleUrl: "fixture", artifact: "scalar", threadCount: 1 });
+  runtime.receive({ type: "dispose", requestId: 2 });
+  runtime.receive({ type: "load", requestId: 3, sequence: 1, runEpoch: 1, sceneJson: "{}", optionsJson: "{}" });
+  runtime.receive({ type: "initialize", requestId: 4, moduleUrl: "fixture", artifact: "scalar", threadCount: 1 });
+  await tick();
+  for (const requestId of [3, 4]) {
+    const failure = output.find(message => message.type === "request-failed" && message.requestId === requestId);
+    assert.ok(failure?.type === "request-failed");
+    assert.match(failure.message, /disposed/);
+  }
+});

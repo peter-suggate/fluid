@@ -1,4 +1,6 @@
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
+import { RuntimeLifecycle } from "./runtime-lifecycle";
+import { StagedReadback } from "./staged-readback";
 import { rigidControlOwnerId } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import { boundedPresentationScale } from "./presentation-resolution";
@@ -733,6 +735,23 @@ export interface RendererFrameMetrics {
   waterSurfacePresentation?: WaterSurfacePresentationDiagnostics;
 }
 
+/**
+ * One solver build, begun by `beginGPUFluidInitialization` and ended by its
+ * attachment, its failure or the build that supersedes it. Every way a build
+ * stops being wanted — a newer build, a terminal status, device loss, destroy —
+ * aborts `abort`, so its continuations check that one signal.
+ */
+interface SolverBuild {
+  readonly serial: number;
+  readonly key: string;
+  readonly resource: ResourcePluginDefinition;
+  readonly abort: AbortController;
+  /** The previous solver must be drained and destroyed before this build allocates. */
+  drainOwed: boolean;
+  /** Resolves (never rejects) once the build attached, failed or was abandoned. */
+  settled?: Promise<void>;
+}
+
 interface PendingGPUAdvanceCompletion {
   readonly solver: GPUSolverInstance;
   readonly solverGeneration: number;
@@ -746,7 +765,7 @@ class PendingLiveSvoPresentation {
     readonly solver: GPUSolverInstance,
     readonly source: NonNullable<GPUSolverInstance["sparseVoxelSceneSource"]>,
     readonly solverGeneration: number,
-    readonly requestGeneration: number,
+    readonly buildSerial: number,
     readonly startedAt_ms: number,
   ) {}
 
@@ -822,10 +841,10 @@ export function createProductionSparseVoxelDrySceneRenderer(
 
 export class FluidLabRenderer {
   private device?: GPUDevice;
-  private disposed = false;
+  /** starting → live → failed | lost | disposed; every failure reaches it through `onStatus`. */
+  private readonly lifecycle = new RuntimeLifecycle();
   private initializationPromise?: Promise<void>;
   private shutdownPromise?: Promise<void>;
-  private deviceLost = false;
   private context?: GPUCanvasContext;
   private upscalePipeline?: GPURenderPipeline;
   private upscaleSampler?: GPUSampler;
@@ -853,6 +872,8 @@ export class FluidLabRenderer {
   /** Deduplicates a visible failed-closed diagnostic while the previous pose remains authoritative. */
   private liveSceneAnimationFailure?: string;
   private svoPublicationFailure?: string;
+  /** The publication attempt last refused: a frame retries only once its scene, source or pipeline moved. */
+  private refusedPublication?: { readonly sceneKey: string; readonly stamp: number; readonly source: unknown; readonly pipeline: unknown };
   private gridOverlayPipeline?: GridOverlayPipeline;
   /** Registered by the running method; core never names an overlay module. */
   private decorationOverlayPipeline?: DecorationOverlay;
@@ -864,7 +885,6 @@ export class FluidLabRenderer {
   private pixelTraceRevisionValue = 0;
   /** Identity of the assembled decorations currently uploaded. */
   private decorationGeometryKey = "";
-  private pixelTraceReadInFlight = false;
   /**
    * Everything a trace's answer depends on except the camera and the pixel: the
    * scene epoch, the presentation, and the traversal tuning. The revision is what
@@ -881,8 +901,6 @@ export class FluidLabRenderer {
   private pixelTraceEncodedAt_ms = Number.NEGATIVE_INFINITY;
   /** Optional programs compile only after their explicit presentation mode is used. */
   private readonly optionalPipelineTasks = new Map<OptionalRendererPipeline, Promise<void>>();
-  /** A compile failure is sticky for this device; do not hammer a fragile driver every frame. */
-  private readonly failedOptionalPipelines = new Set<OptionalRendererPipeline>();
   /** The sticky failure remains inspectable; a failed pipeline is never silent. */
   private readonly optionalPipelineFailures = new Map<OptionalRendererPipeline, string>();
   /**
@@ -928,11 +946,17 @@ export class FluidLabRenderer {
   private svoSceneSidecar?: WebGPULiveSvoScene;
   private readonly retiredGPUFluids = new Set<GPUSolverInstance>();
   private gpuFluidKey = "";
-  private gpuFluidPendingKey = "";
-  private gpuFluidPending?: Promise<void>;
-  private gpuFluidInitializationAbort?: AbortController;
-  private gpuFluidInitializationResource?: ResourcePluginDefinition;
-  private gpuFluidRequestGeneration = 0;
+  /** The solver build in flight, if any; see `SolverBuild`. */
+  private solverBuild?: SolverBuild;
+  /** Builds begun; a presentation or re-seed opened under an older count is stale. */
+  private solverBuildSerial = 0;
+  /**
+   * A t=0 reset orphaned the attached solver: the next build must drain the
+   * queue and destroy it before allocating, never overlap its allocation.
+   * Handed to that build at `beginGPUFluidInitialization`, which pays it or
+   * passes it on to the build that supersedes it.
+   */
+  private resetDrainOwed = false;
   private adapterName = "WebGPU adapter";
   private gpuInfoCallback?: (info: GPUEulerianInfo) => void;
   /** Lens the last published receipt described, so the clearing post fires once. */
@@ -952,7 +976,7 @@ export class FluidLabRenderer {
    * does not publish — the host's copy is one frame older, which nothing here
    * can tell apart from the frame it is already behind.
    */
-  private rigidPoseStaging: { buffer: GPUBuffer; pending: boolean }[] = [];
+  private rigidPoseReadbacks: StagedReadback[] = [];
   private latestRigidBodyPoses: readonly DrawnRigidBodyPose[] = [];
   private latestRigidBodyPoseRevision = 0;
   private svoSourceAvailable = false;
@@ -1005,22 +1029,13 @@ export class FluidLabRenderer {
   /** Polled by the paused viewport; each successful transactional source attach requests one repaint. */
   private pausedPresentationRevision = 0;
   private lensBloomPreparation?: Promise<void>;
-  private runtimeFailure?: string;
-  /** A t=0 rebuild must not overlap the old solver's queue or allocation. */
-  private timelineResetPending = false;
   /** CSS viewport supplied by the main thread when this renderer owns an
    * OffscreenCanvas. HTML canvases continue to derive it locally. */
   private workerViewport?: { width: number; height: number; devicePixelRatio: number };
 
-  private simulationFault?: SimulationFailureError;
-
   stopAfterSimulationFailure(error: SimulationFailureError): void {
-    if (this.simulationFault) return;
-    this.simulationFault = error;
-    this.simulationRunning = false;
-    this.gpuFluidInitializationAbort?.abort();
     this.onStatus({ state: "unavailable", label: error.message, failure: error.failure,
-      resource: webGPUPlatformResourcePlugin });
+      resource: webGPUPlatformResourcePlugin }, error);
   }
 
   get presentationRevision(): number { return this.pausedPresentationRevision; }
@@ -1029,16 +1044,23 @@ export class FluidLabRenderer {
 
   /** Worker exceptions use the same terminal path as asynchronous GPU failures. */
   stopAfterFailure(error: unknown): void {
-    this.onStatus({ state: "unavailable", label: error instanceof Error ? error.message : String(error), failure: error instanceof SimulationFailureError ? error.failure : undefined, resource: webGPUPlatformResourcePlugin });
+    this.onStatus({ state: "unavailable", label: error instanceof Error ? error.message : String(error), failure: error instanceof SimulationFailureError ? error.failure : undefined, resource: webGPUPlatformResourcePlugin }, error);
   }
 
-  /** First failure wins; no later asynchronous ready event can reopen admission. */
-  private onStatus(status: GPUStatus): void {
-    if (this.runtimeFailure) return;
-    if (status.state === "lost" || status.state === "unavailable" || status.state === "blocked") {
-      this.runtimeFailure = status.label;
+  /**
+   * The one status path, and so the one terminal path: a lost, unavailable or
+   * blocked status ends the lifecycle, stops admission and aborts the build in
+   * flight. First failure wins; nothing is published once the renderer ended,
+   * so no later asynchronous ready event can reopen admission.
+   */
+  private onStatus(status: GPUStatus, cause?: unknown): void {
+    if (!this.lifecycle.open) return;
+    if (status.state === "ready") this.lifecycle.ready();
+    else if (status.state === "lost") this.lifecycle.lose(status.label);
+    else if (status.state === "unavailable" || status.state === "blocked") this.lifecycle.fail(status.label, cause);
+    if (!this.lifecycle.open) {
       this.simulationRunning = false;
-      this.gpuFluidInitializationAbort?.abort();
+      this.solverBuild?.abort.abort();
     }
     this.statusCallback(status);
   }
@@ -1113,7 +1135,6 @@ export class FluidLabRenderer {
     this.requestedSunlightCache = sunlightCacheEnabled;
     this.requestedWaterShadows = waterShadowsEnabled;
     this.requestedRasterAo = rasterAo;
-    this.failedOptionalPipelines.delete("svo-dry-scene");
     this.optionalPipelineFailures.delete("svo-dry-scene");
     const retired = this.svoDryScenePipeline;
     if (!retired) return;
@@ -1132,19 +1153,18 @@ export class FluidLabRenderer {
     destroy: (pipeline: T) => void = () => {},
   ): T | undefined {
     const device = this.device;
-    if (current || !device || this.disposed || this.runtimeFailure || this.deviceLost || this.failedOptionalPipelines.has(key) || this.optionalPipelineTasks.has(key)) return current;
+    if (current || !device || !this.lifecycle.open || this.optionalPipelineTasks.has(key)) return current;
     let candidate: T;
     try {
       candidate = create(device);
     } catch (error) {
-      this.failedOptionalPipelines.add(key);
       this.optionalPipelineFailures.set(key, error instanceof Error ? error.message : String(error));
       this.stopAfterFailure(`Render pipeline ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
       if (key === "svo-dry-scene") this.failPendingLiveSvoPresentation(error);
       return undefined;
     }
     const task = initialize(candidate).then(() => {
-      if (this.disposed || this.runtimeFailure || this.deviceLost || this.device !== device) {
+      if (!this.lifecycle.open || this.device !== device) {
         try { destroy(candidate); } catch { /* Device loss may invalidate resources first. */ }
         return;
       }
@@ -1153,8 +1173,7 @@ export class FluidLabRenderer {
       this.pausedPresentationRevision += 1;
     }).catch((error: unknown) => {
       try { destroy(candidate); } catch { /* Best-effort cleanup after compile failure. */ }
-      if (this.device === device && !this.disposed && !this.deviceLost) {
-        this.failedOptionalPipelines.add(key);
+      if (this.device === device && this.lifecycle.open) {
         this.optionalPipelineFailures.set(key, error instanceof Error ? error.message : String(error));
         this.stopAfterFailure(`Render pipeline ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
         if (key === "svo-dry-scene") this.failPendingLiveSvoPresentation(error);
@@ -1194,7 +1213,7 @@ export class FluidLabRenderer {
    */
   private attachSparsePresentationSource(
     solver: GPUSolverInstance,
-    requestGeneration: number,
+    buildSerial: number,
     startedAt_ms: number,
     source = solver.sparseVoxelSceneSource,
   ): void {
@@ -1205,11 +1224,10 @@ export class FluidLabRenderer {
     this.svoDryScenePipeline?.setSource(source);
     this.pendingLiveSvoPresentation = source
       ? new PendingLiveSvoPresentation(
-        solver, source, this.gpuFluidGeneration, requestGeneration, startedAt_ms)
+        solver, source, this.gpuFluidGeneration, buildSerial, startedAt_ms)
       : undefined;
     if (!source) return;
-    if (this.failedOptionalPipelines.has("svo-dry-scene")) this.failPendingLiveSvoPresentation();
-    else if (this.svoDryScenePipeline) this.reportLiveSvoAttachment();
+    if (this.svoDryScenePipeline) this.reportLiveSvoAttachment();
     else {
       const pipelineProgress = this.svoPipelineProgress ?? {
         label: SVO_PRESENTATION_STARTUP_STAGES[0],
@@ -1331,21 +1349,14 @@ export class FluidLabRenderer {
 
   /** Queue this frame's pose copy into a free staging slot, if there is one. */
   private encodeRigidBodyPoseReadback(encoder: GPUCommandEncoder, source: GPUBuffer) {
-    if (this.rigidPoseStaging.length === 0 && this.device) {
-      this.rigidPoseStaging = [0, 1].map((index) => ({
-        buffer: this.device!.createBuffer({
-          label: `Rigid pose readback ${index + 1}/2`,
-          size: GPU_RIGID_RENDER_BYTES,
-          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-        }),
-        pending: false,
+    if (this.rigidPoseReadbacks.length === 0 && this.device) {
+      this.rigidPoseReadbacks = [0, 1].map((index) => new StagedReadback(this.device!, {
+        label: `Rigid pose readback ${index + 1}/2`, size: GPU_RIGID_RENDER_BYTES,
       }));
     }
-    const slot = this.rigidPoseStaging.find((candidate) => !candidate.pending);
-    if (!slot) return undefined;
-    slot.pending = true;
-    encoder.copyBufferToBuffer(source, 0, slot.buffer, 0, GPU_RIGID_RENDER_BYTES);
-    return slot;
+    const readback = this.rigidPoseReadbacks.find((candidate) => candidate.idle);
+    readback?.encode(encoder, (encoder, staging) => encoder.copyBufferToBuffer(source, 0, staging, 0, GPU_RIGID_RENDER_BYTES));
+    return readback;
   }
 
   /**
@@ -1357,19 +1368,13 @@ export class FluidLabRenderer {
    * object than the one whose pose was copied, which is a gizmo drawn around the
    * wrong crate for as long as it takes the next readback to land.
    */
-  private publishRigidBodyPoses(slot: { buffer: GPUBuffer; pending: boolean }, ids: readonly string[]) {
-    void slot.buffer.mapAsync(GPUMapMode.READ).then(() => {
-      const poses = decodeGPURigidBodyPoses(new Float32Array(slot.buffer.getMappedRange()), ids.length);
+  private publishRigidBodyPoses(readback: StagedReadback, ids: readonly string[]) {
+    void readback.read((bytes) => decodeGPURigidBodyPoses(new Float32Array(bytes), ids.length)).then((poses) => {
       // A stale device's frame must not overwrite the live one's poses.
-      if (!this.disposed && !this.deviceLost) {
-        this.latestRigidBodyPoses = poses.map((pose, index) => ({ id: ids[index], ...pose }));
-        this.latestRigidBodyPoseRevision += 1;
-      }
-    }).catch(() => { /* Device loss or a destroyed buffer: the host keeps the last poses. */ })
-      .finally(() => {
-        try { if (slot.buffer.mapState === "mapped") slot.buffer.unmap(); } catch { /* Destroyed. */ }
-        slot.pending = false;
-      });
+      if (!poses || !this.lifecycle.open) return;
+      this.latestRigidBodyPoses = poses.map((pose, index) => ({ id: ids[index], ...pose }));
+      this.latestRigidBodyPoseRevision += 1;
+    }, () => { /* Device loss: the host keeps the last poses. */ });
   }
 
   /** Resolve a click against live GPU poses without restoring a CPU pose mirror. */
@@ -1411,7 +1416,7 @@ export class FluidLabRenderer {
       };
     }
     const fluid=this.gpuFluid,generation=this.gpuFluidGeneration;
-    if(!fluid?.pickRigidBody||this.disposed||this.runtimeFailure||this.deviceLost)return undefined;
+    if(!fluid?.pickRigidBody||!this.lifecycle.open)return undefined;
     const picked=await fluid.pickRigidBody(origin,direction);
     return this.gpuFluid===fluid&&this.gpuFluidGeneration===generation?picked:undefined;
   }
@@ -1474,18 +1479,17 @@ export class FluidLabRenderer {
 
   private pumpPixelTraceReadback(): void {
     const pipeline = this.svoDryScenePipeline;
-    if (!pipeline || this.pixelTraceReadInFlight) return;
-    this.pixelTraceReadInFlight = true;
+    // One read per encoded probe: the pipeline's readback says whether one waits.
+    if (!pipeline?.pixelTraceCopied) return;
     const encodedSceneRevision = this.pixelTraceEncodedSceneRevision;
     void pipeline.readPixelTrace().then((trace) => {
-      if (this.disposed || this.runtimeFailure || this.deviceLost || this.svoDryScenePipeline !== pipeline || !trace) return;
+      if (!this.lifecycle.open || this.svoDryScenePipeline !== pipeline || !trace) return;
       this.latestPixelTraceValue = trace;
       // The trace answers the scene it was encoded against, not the one that
       // happens to be current when its readback resolves.
       this.pixelTraceSceneRevisionOfTrace = encodedSceneRevision;
       this.pixelTraceRevisionValue += 1;
-    }).catch(() => { /* A superseded or unmapped readback is not a frame error. */ })
-      .finally(() => { this.pixelTraceReadInFlight = false; });
+    }).catch(() => { /* A superseded or unmapped readback is not a frame error. */ });
   }
 
   /**
@@ -1594,9 +1598,10 @@ export class FluidLabRenderer {
   }
 
   initialize(): Promise<void> {
-    if (this.simulationFault) return Promise.reject(this.simulationFault);
-    if (this.runtimeFailure) return Promise.reject(new Error(this.runtimeFailure));
-    if (this.disposed) return Promise.resolve();
+    const phase = this.lifecycle.phase;
+    if (phase.kind === "failed") return Promise.reject(phase.cause instanceof SimulationFailureError ? phase.cause : new Error(phase.reason));
+    if (phase.kind === "lost") return Promise.reject(new Error(phase.reason));
+    if (phase.kind === "disposed") return Promise.resolve();
     if (this.initializationPromise) return this.initializationPromise;
     const task = this.initializeInternal();
     const pending = task.finally(() => {
@@ -1621,7 +1626,7 @@ export class FluidLabRenderer {
       return;
     }
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-    if (this.disposed) return;
+    if (!this.lifecycle.open) return;
     if (!adapter) {
       this.onStatus({ state: "unavailable", label: "The browser did not provide a WebGPU adapter; no scene resources were allocated. If WebGPU worked earlier, check the browser GPU diagnostics for a GPU reset or blocked access.", resource: webGPUPlatformResourcePlugin });
       return;
@@ -1630,7 +1635,7 @@ export class FluidLabRenderer {
     const requiredFeatures = fluidExecutionDeviceFeatures(adapter.features);
     const requiredLimits = requiredFluidDeviceLimits(adapter.limits);
     const rawDevice = await adapter.requestDevice({ requiredFeatures, requiredLimits });
-    if (this.disposed) { rawDevice.destroy(); return; }
+    if (!this.lifecycle.open) { rawDevice.destroy(); return; }
     observeGPUQueue(rawDevice.queue);
     const context = this.canvas.getContext("webgpu") as GPUCanvasContext | null;
     if (!context) {
@@ -1643,24 +1648,24 @@ export class FluidLabRenderer {
     this.context = context;
     this.format = navigator.gpu.getPreferredCanvasFormat();
     device.addEventListener("uncapturederror", (event) => {
-      if (this.disposed || this.device !== device) return;
+      if (!this.lifecycle.open || this.device !== device) return;
       const label = `WebGPU validation failed: ${event.error.message}`;
       console.error(label);
       this.onStatus({ state: "unavailable", label, resource: webGPUPlatformResourcePlugin });
     });
     void device.lost.then((info) => {
-      if (this.disposed || this.device !== device || this.deviceLost) return;
+      // Loss after the renderer ended is the teardown's own: `destroy` releases.
+      if (!this.lifecycle.open || this.device !== device) return;
       const compilation = gpuCompilationManagerFor(device).snapshot();
       const pendingBatches = this.gpuPendingBatches;
       const duringCompilation = compilation.state === "compiling" && compilation.progress
         ? ` while compiling ${compilation.progress.label}` : "";
       const diagnostics = { reason: info.reason, message: info.message,
-        compilation, pendingBatches, initializingScene: Boolean(this.gpuFluidPending),
+        compilation, pendingBatches, initializingScene: Boolean(this.solverBuild),
         recentCompilations: gpuCompilationManagerFor(device).compilationTimings().slice(-12),
         allocatedSolverBytes: this.gpuFluid?.info.allocatedBytes };
       console.error("GPU device lost", diagnostics);
       invalidateGPUCompilationManager(device, info.message || info.reason);
-      this.deviceLost = true;
       const fluid = this.gpuFluid;
       const sidecar = this.svoSceneSidecar;
       this.gpuFluid = undefined;
@@ -1669,16 +1674,13 @@ export class FluidLabRenderer {
       this.pendingLiveSvoPresentation = undefined;
       this.gpuFluidKey = "";
       this.attachedStructuralKey = "";
-      this.gpuFluidPendingKey = "";
-      this.gpuFluidInitializationAbort?.abort();
-      this.gpuFluidInitializationAbort = undefined;
-      this.gpuFluidPending = undefined;
+      // A solver build pending on the lost device must never attach after
+      // recovery: its resources belong to the dead device and any bind group
+      // mixing them with the replacement device fails validation.
+      this.solverBuild?.abort.abort();
+      this.solverBuild = undefined;
       this.resetGPUQueueTracking();
       this.gpuFluidGeneration += 1;
-      // A solver initialization pending on the lost device must never attach
-      // after recovery: its resources belong to the dead device and any bind
-      // group mixing them with the replacement device fails validation.
-      this.gpuFluidRequestGeneration += 1;
       try { fluid?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
       try { sidecar?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
       // Breadcrumbs for hang diagnosis: the last known solver state narrows a
@@ -1687,7 +1689,7 @@ export class FluidLabRenderer {
       this.onStatus({ state: "lost", label: `GPU device lost${duringCompilation}: ${info.message || info.reason}`, diagnostics, resource: webGPUPlatformResourcePlugin });
       // Device loss is terminal. A new session requires an explicit reload.
     }).catch((error: unknown) => {
-      if (!this.disposed) console.error("Unable to observe WebGPU device loss", error);
+      if (this.lifecycle.open) console.error("Unable to observe WebGPU device loss", error);
     });
     // GPUCanvasContext performs an implementation-level GPUDevice brand check;
     // the managed capability is intentionally a Proxy and cannot cross this
@@ -1698,7 +1700,7 @@ export class FluidLabRenderer {
     progress("Compiling presentation upscale",2);
     const upscaleModule=device.createShaderModule({label:"Presentation upscale shader",code:upscaleShader});
     const upscalePipeline=await device.createRenderPipelineAsync({label:"Presentation upscale",layout:"auto",vertex:{module:upscaleModule,entryPoint:"vertexMain"},fragment:{module:upscaleModule,entryPoint:"fragmentMain",targets:[{format:this.format}]},primitive:{topology:"triangle-list"}});
-    if (this.disposed || this.device !== device || this.deviceLost) return;
+    if (!this.lifecycle.open || this.device !== device) return;
     this.upscalePipeline=upscalePipeline;
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
     this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 416, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -1719,7 +1721,7 @@ export class FluidLabRenderer {
       waterPipeline.destroy();
       throw error;
     }
-    if (this.disposed || this.device !== device || this.deviceLost) { waterPipeline.destroy(); return; }
+    if (!this.lifecycle.open || this.device !== device) { waterPipeline.destroy(); return; }
     this.waterPipeline = waterPipeline;
     this.updateRenderSources();
 
@@ -1731,7 +1733,7 @@ export class FluidLabRenderer {
 
   private updateRenderSources(texture = this.fluidTexture, columnSource?: GPUTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture, pressureSamples = this.pressureSamplesFallbackTexture, divergence = this.scalarFallbackTexture, pressure = this.scalarFallbackTexture, density = this.scalarFallbackTexture) {
     const columnBases = columnSource ?? this.columnBaseTexture;
-    if (!this.device || this.disposed || this.runtimeFailure || this.deviceLost || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure || !density) return;
+    if (!this.device || !this.lifecycle.open || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure || !density) return;
     this.attachedSurfaceTexture = texture;
     this.waterPipeline?.setVolume(texture, this.gpuFluid?.denseLevelSetVolumeSource);
     this.waterPipeline?.setFluidDomain(this.gpuFluid?.fluidDomain);
@@ -1765,35 +1767,37 @@ export class FluidLabRenderer {
     const solver=this.gpuFluid;
     if(!solver?.reseed||this.reseedInFlight)return false;
     if(gpuSceneStructuralKey(scene,config)!==this.attachedStructuralKey)return false;
-    const generation=this.gpuFluidGeneration,requestGeneration=this.gpuFluidRequestGeneration;
+    const generation=this.gpuFluidGeneration,buildSerial=this.solverBuildSerial;
     this.reseedInFlight=true;
     const resource=getMethod(config.methodId).resource;
     this.onStatus({state:"initializing",label:"Re-seeding fenced t=0 solver authority",phase:"warmup",completed:0,total:1,startedAt_ms:performance.now(),kind:"rebuild",retainingPrevious:false,resource});
     void solver.reseed(scene).then((reseeded)=>{
       // Anything that replaced or invalidated the solver mid-flight wins.
-      if(this.disposed||this.gpuFluid!==solver||this.gpuFluidGeneration!==generation
-        ||this.gpuFluidRequestGeneration!==requestGeneration)return;
+      if(!this.lifecycle.open||this.gpuFluid!==solver||this.gpuFluidGeneration!==generation
+        ||this.solverBuildSerial!==buildSerial)return;
       if(!reseeded){this.beginGPUFluidInitialization(scene,config,key,presentationMode);return;}
+      // The solver now belongs to the new timeline; no build owes it a drain.
+      this.resetDrainOwed=false;
       this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
       this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();
       // Re-seeding can retain both texture identity and surface revision zero.
       // The retained mesh still belongs to the previous seed in that case.
       this.waterPipeline?.invalidateSurface();
       if(presentationMode === "full-scene")this.attachSparsePresentationSource(
-        solver,requestGeneration,performance.now(),solver.sparseVoxelSceneSource);
+        solver,buildSerial,performance.now(),solver.sparseVoxelSceneSource);
       solver.info.initialRasterSurfaceReady=true;
       solver.info.initialRasterSurfaceState="gpu-authoritative";
       solver.info.initialRasterSurfaceDiagnostic="Direct solver field attached after re-seed";
       this.gpuInfoCallback?.({...solver.info});
       this.onStatus({state:"ready",label:"Re-seeded solver ready",adapter:this.adapterName,resource});
     }).catch(()=>{
-      if(!this.disposed&&this.gpuFluid===solver&&this.gpuFluidGeneration===generation
-        &&this.gpuFluidRequestGeneration===requestGeneration)this.beginGPUFluidInitialization(scene,config,key,presentationMode);
+      if(this.lifecycle.open&&this.gpuFluid===solver&&this.gpuFluidGeneration===generation
+        &&this.solverBuildSerial===buildSerial)this.beginGPUFluidInitialization(scene,config,key,presentationMode);
     }).finally(()=>{
       this.reseedInFlight=false;
       // Both success and failure need another paused draw: success submits the
       // t=0 raster fence; failure falls through to the full rebuild path.
-      if(!this.disposed)this.pausedPresentationRevision+=1;
+      if(this.lifecycle.open)this.pausedPresentationRevision+=1;
     });
     return true;
   }
@@ -1823,7 +1827,7 @@ export class FluidLabRenderer {
    * answers rather than silently doing nothing.
    */
   injectLiquidBall(ball: InjectedLiquidBall): boolean {
-    if (this.disposed || this.runtimeFailure || this.deviceLost
+    if (!this.lifecycle.open
       || !this.sparseDeviceReady(this.gpuFluid)
       || !this.gpuFluid?.injectLiquidBall) return false;
     this.gpuFluid.injectLiquidBall(ball);
@@ -1837,21 +1841,21 @@ export class FluidLabRenderer {
   }
 
   async editFluid(input: LiveFluidEdit): Promise<LiveFluidEditResult> {
-    if (this.disposed || this.runtimeFailure || this.deviceLost || !this.sparseDeviceReady(this.gpuFluid)
+    if (!this.lifecycle.open || !this.sparseDeviceReady(this.gpuFluid)
       || !this.gpuFluid?.editFluid) return { accepted: false, reason: "Live fluid editing needs a ready fluid simulation." };
     try {
       const owner = this.gpuFluid;
       const result = await owner.editFluid!(validateLiveFluidEdit(input));
-      if (this.gpuFluid !== owner || this.disposed) return { accepted: false, reason: "The fluid scene changed before the edit completed." };
+      if (this.gpuFluid !== owner || !this.lifecycle.open) return { accepted: false, reason: "The fluid scene changed before the edit completed." };
       if (result.accepted) { this.waterPipeline?.invalidateSurface(); this.pausedPresentationRevision += 1; }
       return result;
     } catch (error) { return { accepted: false, reason: error instanceof Error ? error.message : "Fluid edit failed." }; }
   }
 
   resetSimulationTimeline(): void {
-    if (this.disposed || this.runtimeFailure || this.deviceLost) return;
+    if (!this.lifecycle.open) return;
     this.simulationRunning = false;
-    this.timelineResetPending = true;
+    this.resetDrainOwed = true;
 
     // Every admitted completion captures this generation. Advancing it here,
     // rather than at replacement attachment, makes old callbacks stale at the
@@ -1863,8 +1867,7 @@ export class FluidLabRenderer {
 
   /** Change simulation admission while preserving already-submitted queue work. */
   async setSimulationRunning(running: boolean): Promise<number | undefined> {
-    if (this.simulationFault) return this.gpuFluid?.info.submittedTime_s;
-    if (this.runtimeFailure) return this.gpuFluid?.info.submittedTime_s;
+    if (!this.lifecycle.open) return this.gpuFluid?.info.submittedTime_s;
     const changed = running !== this.simulationRunning;
     if (changed) this.resetPresentationTrace();
     this.simulationRunning = running;
@@ -1875,7 +1878,7 @@ export class FluidLabRenderer {
     if (changed && !running && this.gpuFluid) {
       const fluid = this.gpuFluid;
       void frameCompletion.then(() => fluid.readStats()).then((info) => {
-        if (!this.disposed && !this.deviceLost && this.gpuFluid === fluid && !this.simulationRunning) {
+        if (this.lifecycle.open && this.gpuFluid === fluid && !this.simulationRunning) {
           this.gpuInfoCallback?.({ ...info });
         }
       }).catch(() => { /* Device loss is reported by device.lost. */ });
@@ -1948,9 +1951,19 @@ export class FluidLabRenderer {
     };
   }
 
+  /** Compile lens bloom off the frame. A failure is terminal, reported like any other. */
+  private prepareLensBloom(pipeline: RasterWaterPipeline): void {
+    if (!pipeline.lensBloomOptions.enabled || pipeline.lensBloomReady || this.lensBloomPreparation) return;
+    this.lensBloomPreparation=pipeline.ensureLensBloomReady().then(()=>{
+      if(this.waterPipeline===pipeline&&this.lifecycle.open)this.pausedPresentationRevision+=1;
+    }).catch(error=>{
+      if(this.waterPipeline===pipeline)this.onStatus({state:"unavailable",label:`Lens bloom preparation failed: ${error instanceof Error?error.message:String(error)}`,resource:webGPUPlatformResourcePlugin},error);
+    }).finally(()=>{this.lensBloomPreparation=undefined;});
+  }
+
   private retireGPUFluid(fluid: GPUSolverInstance) {
     const device = this.device;
-    if (!device || this.deviceLost) { fluid.destroy(); return; }
+    if (!device || !this.lifecycle.open) { fluid.destroy(); return; }
     this.retiredGPUFluids.add(fluid);
     // A method switch can occur after a frame encoded the old solver's
     // textures but before that frame submits. Defer the queue fence to the
@@ -1968,62 +1981,62 @@ export class FluidLabRenderer {
   }
 
   private beginGPUFluidInitialization(scene:SceneDescription,config:SimulationRunConfig,key:string,presentationMode:ScenePresentationMode){
-    if(!this.device||this.disposed||this.runtimeFailure||this.deviceLost)return;
+    if(!this.device||!this.lifecycle.open)return;
     const method=getMethod(config.methodId);if(!canInitializeGPUSceneSource(scene,config.methodId))return;
     const rendererOnlyScene=!planSceneRuntime(scene).fluidSolver;
     const initializationResource=rendererOnlyScene?liveSvoSceneResourcePlugin:method.resource;
-    this.gpuFluidInitializationAbort?.abort();
-    if (this.gpuFluidPending && this.gpuFluidInitializationResource) {
-      // The superseded generation can no longer publish progress. Retire its
-      // activity too, especially when the new scene has a different owner.
-      this.onStatus({ state: "cancelled", label: "Previous scene initialization superseded",
-        resource: this.gpuFluidInitializationResource });
-    }
-    this.gpuFluidInitializationResource = initializationResource;
     /**
      * The build this one replaces, so this one can wait for it to let go.
      *
      * A live-SVO build is now interruptible *and* interleaved: it returns to
      * the event loop between slices, which is what lets the worker see the
      * message that supersedes it at all. The cost of that is an overlap window
-     * — the abort above only takes effect at the superseded build's next slice,
+     * — the abort below only takes effect at the superseded build's next slice,
      * and until then it still holds every arena it has allocated. Starting the
      * replacement inside that window means two refined worlds resident on one
      * device, which at environment refinement depth 3 is the difference between
      * an allocation that fits and one that steps the refinement ladder down.
      *
-     * So the replacement waits. The wait is bounded by the superseded build's
-     * slice, not by its remaining work, and it is a `catch(() => {})` because
-     * the thing being waited for has just been told to fail.
+     * So the replacement waits on its `settled`, which never rejects. The wait
+     * is bounded by the superseded build's slice, not by its remaining work.
      */
-    const supersededBuild=this.gpuFluidPending;
-    const abort=new AbortController();this.gpuFluidInitializationAbort=abort;
-    const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
+    const superseded=this.solverBuild;
+    if (superseded) {
+      superseded.abort.abort();
+      // The superseded build can no longer publish progress. Retire its
+      // activity too, especially when the new scene has a different owner.
+      this.onStatus({ state: "cancelled", label: "Previous scene initialization superseded",
+        resource: superseded.resource });
+    }
+    const device=this.device,startedAt_ms=performance.now();
     const previous=this.gpuFluid;
     const previousSidecar=this.svoSceneSidecar;
-    const drainPreviousForReset=this.timelineResetPending&&Boolean(previous);
+    // The drain obligation moves to this build: a reset's, or one a superseded
+    // build had not paid yet. It is cleared only once paid.
+    const build:SolverBuild={serial:++this.solverBuildSerial,key,resource:initializationResource,abort:new AbortController(),
+      drainOwed:Boolean(previous)&&(this.resetDrainOwed||superseded?.drainOwed===true)};
+    this.resetDrainOwed=false;
+    this.solverBuild=build;
+    const abort=build.abort,generation=build.serial;
     // Sparse CM12's display world is separate from its fluid authority. A
     // scenery-only rebuild replaces that sidecar while retaining the solver.
     const retainSimulation = !rendererOnlyScene && Boolean(previous && previousSidecar)
-      && !drainPreviousForReset && this.attachedPresentationMode === presentationMode
+      && !build.drainOwed && this.attachedPresentationMode === presentationMode
       && this.attachedSolverDocumentKey === gpuSceneSolverKey(scene, config);
-    // Keep the drain obligation until preparation finishes. A superseding
-    // request must still retire the old allocations before building its own.
-    this.pendingLiveSvoPresentation=undefined;
     // The active solver remains attached for presentation throughout the
     // transaction. Only the warmed candidate is allowed to replace it.
-    this.gpuFluidPendingKey=key;
+    this.pendingLiveSvoPresentation=undefined;
     let reportedCompleted=0,reportedTotal=1;
-    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number;work?:GPUInitializationWork})=>{if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
+    const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number;work?:GPUInitializationWork})=>{if(abort.signal.aborted)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
     let previousDestroyedForReset=false;
     let previousSidecarDestroyedForReset=false;
     const prepare=async()=>{
-      if(supersededBuild)await supersededBuild.catch(()=>{});
-      if(abort.signal.aborted||this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
-      if(!drainPreviousForReset||!previous){this.timelineResetPending=false;return;}
+      if(superseded)await superseded.settled;
+      if(abort.signal.aborted)throw new DOMException("GPU initialization superseded","AbortError");
+      if(!build.drainOwed||!previous)return;
       report({phase:"drain",taskId:"solver.drain",label:"Drain previous GPU work",completed:0,total:1});
       await device.queue.onSubmittedWorkDone();
-      if(abort.signal.aborted||this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
+      if(abort.signal.aborted)throw new DOMException("GPU initialization superseded","AbortError");
       // Reset does not need the previous frame as a live fallback. Detach every
       // presentation binding before destroying the old solver so the new
       // allocation never overlaps its large field set on the same device.
@@ -2038,11 +2051,11 @@ export class FluidLabRenderer {
         previousSidecar.destroy();previousSidecarDestroyedForReset=true;
       }
       this.resetGPUQueueTracking();
-      this.timelineResetPending=false;
+      build.drainOwed=false;
       report({phase:"drain",taskId:"solver.drain",label:"Previous GPU work drained",completed:1,total:1});
     };
     const create:Promise<{solver:GPUSolverInstance;sidecar?:WebGPULiveSvoScene}>=prepare().then(async ()=>{
-      if(abort.signal.aborted||this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
+      if(abort.signal.aborted)throw new DOMException("GPU initialization superseded","AbortError");
       let solver:GPUSolverInstance;
       if (retainSimulation) solver = previous!;
       else if (!planSceneRuntime(scene).fluidSolver) {
@@ -2085,12 +2098,12 @@ export class FluidLabRenderer {
         throw error;
       }
     });
-    this.gpuFluidPending=create.then(({solver,sidecar})=>{
-      if(this.disposed||this.runtimeFailure||this.deviceLost||generation!==this.gpuFluidRequestGeneration){if(!retainSimulation)solver.destroy();sidecar?.destroy();return;}
+    build.settled=create.then(({solver,sidecar})=>{
+      if(abort.signal.aborted){if(!retainSimulation)solver.destroy();sidecar?.destroy();return;}
+      this.solverBuild=undefined;
       if (retainSimulation && sidecar) {
         this.svoSceneSidecar = sidecar;
         this.gpuFluidKey = key;
-        this.gpuFluidPendingKey = "";
         this.attachSparsePresentationSource(solver, generation, startedAt_ms, sidecar.sparseVoxelSceneSource);
         this.pausedPresentationRevision += 1;
         if (previousSidecar) this.retireGPUFluid(previousSidecar);
@@ -2104,7 +2117,7 @@ export class FluidLabRenderer {
       solver.applyRuntimeValues?.(config.values);
       if (config.detailFocus) solver.applyDetailInput?.({ focus: config.detailFocus });
       this.attachedSolverDocumentKey = gpuSceneSolverKey(scene, config);
-      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;
+      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;
       solver.info.initialRasterSurfaceReady=true;
       solver.info.initialRasterSurfaceState="gpu-authoritative";
       solver.info.initialRasterSurfaceDiagnostic=rendererOnlyScene
@@ -2125,7 +2138,7 @@ export class FluidLabRenderer {
       if(previousSidecar&&previousSidecar!==sidecar&&!previousSidecarDestroyedForReset)this.retireGPUFluid(previousSidecar);
       this.gpuInfoCallback?.(solver.info);
       if(!rendererOnlyScene)this.onStatus({state:"ready",label:"WebGPU direct-field solver ready",adapter:this.adapterName,resource:method.resource});
-    }).catch((error:unknown)=>{if(this.disposed||generation!==this.gpuFluidRequestGeneration)return;this.gpuFluidPendingKey="";this.pendingLiveSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(error instanceof SimulationFailureError){this.stopAfterSimulationFailure(error);return;}this.onStatus({state:"unavailable",label:`GPU ${previous ? "rebuild" : "initialization"} failed: ${error instanceof Error ? error.message : String(error)}`,failure:error instanceof SimulationFailureError ? error.failure : undefined,resource:initializationResource});}).finally(()=>{if(generation===this.gpuFluidRequestGeneration){this.gpuFluidPending=undefined;if(this.gpuFluidInitializationAbort===abort)this.gpuFluidInitializationAbort=undefined;}});
+    }).catch((error:unknown)=>{if(abort.signal.aborted)return;this.solverBuild=undefined;this.pendingLiveSvoPresentation=undefined;if(isGPUInitializationAbort(error))return;if(error instanceof SimulationFailureError){this.stopAfterSimulationFailure(error);return;}this.onStatus({state:"unavailable",label:`GPU ${previous ? "rebuild" : "initialization"} failed: ${error instanceof Error ? error.message : String(error)}`,failure:error instanceof SimulationFailureError ? error.failure : undefined,resource:initializationResource});});
   }
 
   /**
@@ -2146,7 +2159,7 @@ export class FluidLabRenderer {
   /** Preflight both consumers without submitting work or pausing the fluid clock. */
   validateLiveSolidEdit(scene: SceneDescription): void {
     const solver = this.gpuFluid;
-    if (this.gpuFluidPending || this.simulationFault || this.runtimeFailure) {
+    if (this.solverBuild || !this.lifecycle.open) {
       throw new Error("Wait for the scene to be ready before editing voxels.");
     }
     if (planSceneRuntime(scene).fluidSolver) {
@@ -2201,7 +2214,7 @@ export class FluidLabRenderer {
    * nothing changed; the gesture keeps its outline.
    */
   previewLiveSolidEdit(scene: SceneDescription, committed: SceneDescription): boolean {
-    if (this.gpuFluidPending || this.simulationFault || this.runtimeFailure) return false;
+    if (this.solverBuild || !this.lifecycle.open) return false;
     const display = this.svoSceneSidecar ?? this.gpuFluid;
     if (!display?.stageSceneUpdate || !display.validateLiveSolidEdit) return false;
     // A display that is also the fluid solver would hand the proposal to the simulation.
@@ -2286,30 +2299,23 @@ export class FluidLabRenderer {
       try {
         solver.stageSceneUpdate(scene);
       } catch (error) {
-        if (this.gpuFluidPendingKey) return;
+        if (this.solverBuild) return;
         throw error;
       }
     }
     const source = solver?.sparseVoxelSceneSource ?? this.svoDrySceneSource;
-    if (!source) {
-      this.svoSourceAvailable = false;
-      this.svoPublicationFailure = sparseVoxelDrySceneContractFailure(undefined, undefined);
-      this.svoDrySceneData = undefined;
-      this.svoDryScenePipeline?.setSource(undefined);
-      return;
-    }
+    const attempt = { sceneKey, stamp: stampedRevision ?? 0, source, pipeline: this.svoDryScenePipeline };
+    const refused = this.refusedPublication;
+    if (refused && refused.sceneKey === attempt.sceneKey && refused.stamp === attempt.stamp
+      && refused.source === source && refused.pipeline === attempt.pipeline) return;
+    // Waiting for a source is not a fault: the attached build publishes one.
+    if (!source) { this.refusePublication(attempt, sparseVoxelDrySceneContractFailure(undefined, undefined) ?? "no sparse scene source is attached"); return; }
     try {
     // The publication this one follows, while the renderer still presents it
     // from the same world. Its parts are what the next one is compared with.
     const published = this.svoDrySceneData && this.svoDrySceneSource === source ? this.renderPublication : undefined;
     const next = svoRenderScenePublication(scene, source.revision, published);
-    if (!next) {
-      this.svoSourceAvailable = false;
-      this.svoPublicationFailure = "lighting mirror construction failed";
-      this.svoDrySceneData = undefined;
-      this.svoDryScenePipeline?.setSource(undefined);
-      return;
-    }
+    if (!next) { this.refusePublication(attempt, "lighting mirror construction failed", "Live sparse presentation rejected"); return; }
     if (next.change === "none") {
       // The document changed nothing the dry scene reads: the arenas, the
       // revision and whatever was cached against it stand.
@@ -2336,28 +2342,18 @@ export class FluidLabRenderer {
     this.svoLightingSupported = canConsumeSparseVoxelLighting(publication);
     const supported = this.svoMaterialsSupported && this.svoLightingSupported;
     const contractFailure = sparseVoxelDrySceneContractFailure(source, publication);
-    this.svoSourceAvailable = supported && !contractFailure;
-    if (!this.svoSourceAvailable) {
-      const reason = contractFailure ?? "authored scene capabilities are unsupported";
-      if (reason !== this.svoPublicationFailure) {
-        this.svoPublicationFailure = reason;
-        console.error(`Live sparse presentation rejected: ${reason}`);
-        this.onStatus({ state: "blocked", label: `Live sparse presentation rejected: ${reason}`, resource: svoPresentationResourcePlugin });
-      }
-      this.svoDrySceneData = undefined;
-      this.svoDryScenePipeline?.setSource(undefined);
+    if (!supported || contractFailure) {
+      this.refusePublication(attempt, contractFailure ?? "authored scene capabilities are unsupported", "Live sparse presentation rejected");
       return;
     }
+    this.svoSourceAvailable = true;
     this.svoPublicationFailure = undefined;
+    this.refusedPublication = undefined;
     this.svoDrySceneSource = source;
     this.svoDrySceneData = publication;
     this.svoDryScenePipeline?.setSource(source);
     if (this.svoDryScenePipeline && !this.svoDryScenePipeline.publishScene(publication)) {
-      this.svoSourceAvailable = false;
-      this.svoPublicationFailure = sparseVoxelDrySceneContractFailure(source, publication)
-        ?? "live SVO renderer rejected the scene arena publication";
-      this.svoDrySceneData = undefined;
-      this.svoDryScenePipeline.setSource(undefined);
+      this.refusePublication(attempt, "live SVO renderer rejected the scene arena publication", "Live sparse presentation rejected");
       return;
     }
     if (!posed) {
@@ -2380,16 +2376,26 @@ export class FluidLabRenderer {
     } catch (error) {
       // The authored live scene is the sole authority. Retaining the prior
       // complete image would silently present a different scene.
-      this.svoSourceAvailable = false;
-      const reason = error instanceof Error ? error.message : "scene publication threw an unknown error";
-      if (reason !== this.svoPublicationFailure) {
-        this.svoPublicationFailure = reason;
-        console.error("Live sparse presentation publication failed", error);
-        this.onStatus({ state: "blocked", label: `Live sparse presentation publication failed: ${reason}`, resource: svoPresentationResourcePlugin });
-      }
-      this.svoDrySceneData = undefined;
-      this.svoDryScenePipeline?.setSource(undefined);
+      this.refusePublication(attempt, error instanceof Error ? error.message : "scene publication threw an unknown error",
+        "Live sparse presentation publication failed", error);
     }
+  }
+
+  /**
+   * Every way a publication fails ends here: presentation drops the source,
+   * the attempt is remembered so the next frame does not repeat it, and a
+   * fault (anything but waiting for a source) is reported once per reason.
+   */
+  private refusePublication(attempt: NonNullable<FluidLabRenderer["refusedPublication"]>, reason: string, fault?: string, error?: unknown): void {
+    this.svoSourceAvailable = false;
+    this.svoDrySceneData = undefined;
+    this.svoDryScenePipeline?.setSource(undefined);
+    this.refusedPublication = attempt;
+    if (reason === this.svoPublicationFailure) return;
+    this.svoPublicationFailure = reason;
+    if (!fault) return;
+    console.error(`${fault}: ${reason}`, ...(error === undefined ? [] : [error]));
+    this.onStatus({ state: "blocked", label: `${fault}: ${reason}`, resource: svoPresentationResourcePlugin });
   }
 
   /** Refit bounded authored motion through the exact render arena only. */
@@ -2459,19 +2465,19 @@ export class FluidLabRenderer {
   private refreshEditedTopology(solver: GPUSolverInstance): void {
     if (!solver.refreshSceneTopology) return;
     void solver.refreshSceneTopology().then(() => {
-      if (this.disposed || this.gpuFluid !== solver) return;
+      if (!this.lifecycle.open || this.gpuFluid !== solver) return;
       this.waterPipeline?.invalidateSurface();
       this.pausedPresentationRevision += 1;
       this.gpuInfoCallback?.({ ...solver.info });
     }).catch(error => {
-      if (this.disposed || this.gpuFluid !== solver) return;
+      if (this.gpuFluid !== solver) return;
       if (error instanceof SimulationFailureError) this.stopAfterSimulationFailure(error);
       else this.stopAfterFailure(error);
     });
   }
 
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig, presentationMode: ScenePresentationMode) {
-    if (!this.device || this.disposed || this.simulationFault || this.runtimeFailure || this.deviceLost) return undefined;
+    if (!this.device || !this.lifecycle.open) return undefined;
     if (!canInitializeGPUSceneSource(scene, config.methodId)) return undefined;
     const key=this.solverKey(scene,config,presentationMode);
     if(!this.gpuFluid||key!==this.gpuFluidKey){
@@ -2483,8 +2489,8 @@ export class FluidLabRenderer {
       // of rebuilding it. The attempt is fire-and-forget against a generation
       // guard; if it declines or the solver moved on, the ordinary rebuild
       // below still runs, so this can only make the path faster, never wrong.
-      if(this.gpuFluid&&this.attachedPresentationMode===presentationMode&&this.gpuFluidPendingKey!==key&&this.attachedSolverDocumentKey!==gpuSceneSolverKey(scene,config)&&this.tryReseedGPUFluid(scene,config,key,presentationMode))return undefined;
-      if(this.gpuFluidPendingKey!==key)this.beginGPUFluidInitialization(scene,config,key,presentationMode);
+      if(this.gpuFluid&&this.attachedPresentationMode===presentationMode&&this.solverBuild?.key!==key&&this.attachedSolverDocumentKey!==gpuSceneSolverKey(scene,config)&&this.tryReseedGPUFluid(scene,config,key,presentationMode))return undefined;
+      if(this.solverBuild?.key!==key)this.beginGPUFluidInitialization(scene,config,key,presentationMode);
       return undefined;
     }
     // A timeline reset is represented by simulationEpoch in the key above.
@@ -2508,7 +2514,7 @@ export class FluidLabRenderer {
         this.appliedSceneUniformKey = sceneUniformKey;
       } else if (this.appliedSceneUniformKey) {
         const rebuildKey = `${key}:${sceneUniformKey}`;
-        if (this.gpuFluidPendingKey !== rebuildKey) this.beginGPUFluidInitialization(scene, config, rebuildKey, presentationMode);
+        if (this.solverBuild?.key !== rebuildKey) this.beginGPUFluidInitialization(scene, config, rebuildKey, presentationMode);
         return undefined;
       } else this.appliedSceneUniformKey = sceneUniformKey;
     }
@@ -2525,9 +2531,9 @@ export class FluidLabRenderer {
   }
 
   private settleLiveSvoPresentation(pending: PendingLiveSvoPresentation) {
-    if (this.disposed || this.runtimeFailure || this.deviceLost || this.pendingLiveSvoPresentation !== pending
+    if (!this.lifecycle.open || this.pendingLiveSvoPresentation !== pending
       || this.gpuFluid !== pending.solver || this.gpuFluidGeneration !== pending.solverGeneration
-      || this.gpuFluidRequestGeneration !== pending.requestGeneration || !pending.attached || !pending.submitted) return;
+      || this.solverBuildSerial !== pending.buildSerial || !pending.attached || !pending.submitted) return;
     this.pendingLiveSvoPresentation = undefined;
     this.pausedPresentationRevision += 1;
     this.onStatus({ state: "ready", label: "Live SVO renderer ready", adapter: this.adapterName, resource: svoPresentationResourcePlugin });
@@ -2536,7 +2542,7 @@ export class FluidLabRenderer {
   private retireGPUAdvances(completions: readonly PendingGPUAdvanceCompletion[]) {
     for (const completion of completions) {
       const { solver: fluid, solverGeneration: generation, submittedTime_s: submittedTime } = completion;
-      if (this.disposed || this.runtimeFailure || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) continue;
+      if (!this.lifecycle.open || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) continue;
       this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
       fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
@@ -2552,7 +2558,7 @@ export class FluidLabRenderer {
     const fluid = this.gpuFluid;
     if (!fluid?.advanceExternalRigidStep || fluid.simulationReady === false) throw new Error("The active fluid method has no ready interactive coupling adapter");
     const result = await fluid.advanceExternalRigidStep(request);
-    if (this.gpuFluid !== fluid || this.disposed) throw new Error("Fluid generation changed during interactive step");
+    if (this.gpuFluid !== fluid || !this.lifecycle.open) throw new Error("Fluid generation changed during interactive step");
     this.gpuAccountedSubmittedTime_s = request.time_s;
     this.gpuInfoCallback?.({ ...fluid.info });
     return result;
@@ -2616,7 +2622,7 @@ export class FluidLabRenderer {
   }
 
   resize(renderScale = 1): void {
-    if (this.disposed || this.runtimeFailure || this.deviceLost) return;
+    if (!this.lifecycle.open) return;
     const htmlCanvas = "clientWidth" in this.canvas ? this.canvas : undefined;
     const ratio = this.workerViewport?.devicePixelRatio
       ?? Math.min(globalThis.devicePixelRatio || 1, 2);
@@ -2671,10 +2677,10 @@ export class FluidLabRenderer {
     try {
       await solver.awaitFrameCompletion();
     } catch (error) {
-      if (this.disposed || this.gpuFluid !== solver || this.gpuFluidGeneration !== generation || !isCurrent()) return metrics;
+      if (!this.lifecycle.open || this.gpuFluid !== solver || this.gpuFluidGeneration !== generation || !isCurrent()) return metrics;
       throw error;
     }
-    if (this.disposed || this.runtimeFailure || this.simulationFault || this.deviceLost
+    if (!this.lifecycle.open
       || this.gpuFluid !== solver || this.gpuFluidGeneration !== generation || !isCurrent()
       || !completedFrameAwaitsPresentation(solver, this.deferredPresentedTimes.get(solver) ?? 0)) return metrics;
     return this.draw(...args);
@@ -2711,7 +2717,7 @@ export class FluidLabRenderer {
         { id: "frame-control", label: "Frame control + physics submission" },
       )
       : undefined;
-    if (!this.device || this.disposed || this.simulationFault || this.runtimeFailure || this.deviceLost || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
+    if (!this.device || !this.lifecycle.open || !this.context || !this.uniformBuffer || !this.bodyBuffer || !this.waterPipeline) return this.currentFrameMetrics(config.methodId, config.methodId, false, cpuTrace?.finish());
     const smoothRaster = !sceneUsesFlatVoxelNormals(scene)
       && !svoRenderStageUsesPrimaryWorkMap(svoDiagnostics.stageView)
       && resolveSvoPrimaryTraversal(svoLightingOptions.primaryTraversal ?? DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal) === "mesh";
@@ -3043,14 +3049,7 @@ export class FluidLabRenderer {
     this.waterPipeline.setReflectionMode(svoLightingOptions.waterReflectionMode ?? "screen-space");
     this.waterPipeline.setWorldRefractionEnabled(svoLightingOptions.waterWorldRefractionEnabled === true);
     this.waterPipeline.setLensBloomOptions(svoLightingOptions.lensBloom ?? { enabled: false });
-    if (this.waterPipeline.lensBloomOptions.enabled && !this.waterPipeline.lensBloomReady && !this.lensBloomPreparation) {
-      const pipeline=this.waterPipeline;
-      this.lensBloomPreparation=pipeline.ensureLensBloomReady().then(()=>{
-        if(this.waterPipeline===pipeline&&!this.disposed)this.pausedPresentationRevision+=1;
-      }).catch(error=>{
-        if(this.waterPipeline===pipeline&&!this.disposed)this.runtimeFailure=`Lens bloom preparation failed: ${error instanceof Error?error.message:String(error)}`;
-      }).finally(()=>{this.lensBloomPreparation=undefined;});
-    }
+    this.prepareLensBloom(this.waterPipeline);
     const worldWaterRequested = sparsePresentationRequired && (svoLightingOptions.waterReflectionMode === "world-space" || svoLightingOptions.waterWorldRefractionEnabled === true);
     if (worldWaterRequested && this.svoDryScenePipeline) {
       void this.svoDryScenePipeline.ensureWaterWorldReflections().catch(() => { /* Status publishes the compilation error below. */ });
@@ -3425,7 +3424,7 @@ export class FluidLabRenderer {
     const presentationCompletion = completedPresentationDevice.queue.onSubmittedWorkDone();
     const validatedFluid = this.gpuFluid;
     void presentationCompletion.then(async ()=>{
-      if(this.disposed||this.simulationFault||this.runtimeFailure||this.deviceLost
+      if(!this.lifecycle.open
         ||this.device!==completedPresentationDevice||this.gpuFluid!==validatedFluid){
         retirePresentation();
         return;
@@ -3433,13 +3432,13 @@ export class FluidLabRenderer {
       if (presentationHealth) await presentationHealth;
       else await validatedFluid?.assertSimulationHealthy?.(presentationCompletion);
       retirePresentation();
-      if(!this.disposed&&!this.runtimeFailure&&!this.deviceLost&&this.device===completedPresentationDevice&&this.gpuFluid===validatedFluid){
+      if(this.lifecycle.open&&this.device===completedPresentationDevice&&this.gpuFluid===validatedFluid){
         this.completedPresentations+=1;
         this.retireGPUAdvances(completedGPUAdvances);
       }
     }).catch((error: unknown) => {
       retirePresentation();
-      if (!this.disposed && this.device === completedPresentationDevice) {
+      if (this.device === completedPresentationDevice) {
         if (error instanceof SimulationFailureError) { this.stopAfterSimulationFailure(error); return; }
         this.onStatus({ state: "unavailable", label: `GPU submission failed: ${error instanceof Error ? error.message : String(error)}`, failure: error instanceof SimulationFailureError ? error.failure : undefined, resource: webGPUPlatformResourcePlugin });
       }
@@ -3463,7 +3462,7 @@ export class FluidLabRenderer {
       const sampledContext = presentationContext;
       void Promise.all([presentationTraceRead, presentationStageTraceRead, presentationQueueTraceRead]).then(([trace, stages, queue]) => {
         const instrumentation = usePerformanceInstrumentationStore.getState();
-        if (!trace || this.disposed || this.runtimeFailure || this.deviceLost || this.presentationContext !== sampledContext
+        if (!trace || !this.lifecycle.open || this.presentationContext !== sampledContext
           || !instrumentation.enabled || instrumentation.enabledAt_ms > traceRequestedAt_ms) return;
         this.latestPresentationTrace = trace;
         this.latestPresentationStageTrace = stages;
@@ -3483,7 +3482,7 @@ export class FluidLabRenderer {
     if(initialLiveSvoSubmission){
       const presentationDevice=this.device;
       void presentationCompletion.then(async()=>{
-        if(this.disposed||this.runtimeFailure||this.deviceLost||this.device!==presentationDevice)return;
+        if(!this.lifecycle.open||this.device!==presentationDevice)return;
         if(initialLiveSvoSubmission)this.settleLiveSvoPresentation(initialLiveSvoSubmission);
 
       }).catch(()=>{ /* Device loss is reported by device.lost. */ });
@@ -3497,8 +3496,8 @@ export class FluidLabRenderer {
   }
 
   destroy(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+    // Dispose succeeds once, after a failure too, so teardown runs exactly once.
+    if (!this.lifecycle.dispose()) return;
     const fluid = this.gpuFluid;
     const sidecar = this.svoSceneSidecar;
     this.gpuFluid = undefined;
@@ -3507,10 +3506,8 @@ export class FluidLabRenderer {
     this.pendingLiveSvoPresentation = undefined;
     this.svoPickingAvailable = false;
     this.lastSvoPickingBodies = [];
-    this.gpuFluidRequestGeneration += 1;
-    this.gpuFluidInitializationAbort?.abort();
-    this.gpuFluidInitializationAbort = undefined;
-    this.gpuFluidPendingKey = "";
+    this.solverBuild?.abort.abort();
+    this.solverBuild = undefined;
     this.resetGPUQueueTracking();
     this.gpuFluidGeneration += 1;
     try { fluid?.destroy(); } catch { /* Device loss can invalidate solver resources first. */ }
@@ -3522,10 +3519,10 @@ export class FluidLabRenderer {
     try { this.particleOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.particleSurfacePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseStaging.map((slot) => slot.buffer)]) {
+    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseReadbacks]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
     }
-    this.rigidPoseStaging = [];
+    this.rigidPoseReadbacks = [];
     if (this.device) invalidateGPUCompilationManager(this.device, "renderer destroyed");
     try { this.device?.destroy(); } catch { /* The device may already be lost. */ }
   }
@@ -3538,7 +3535,7 @@ export class FluidLabRenderer {
   shutdown(): Promise<void> {
     if (this.shutdownPromise) return this.shutdownPromise;
     const initialization = this.initializationPromise;
-    const solverInitialization = this.gpuFluidPending;
+    const solverInitialization = this.solverBuild?.settled;
     const optionalInitializations = [...this.optionalPipelineTasks.values()];
     this.destroy();
     this.shutdownPromise = Promise.allSettled([

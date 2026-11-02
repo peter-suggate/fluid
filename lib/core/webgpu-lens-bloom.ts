@@ -1,3 +1,4 @@
+import { Compiled } from "./compiled";
 import { SCENE_TONE_CURVE_CODES, type ResolvedDisplayGrade, unifiedDisplayTransferShaderLibrary } from "./webgpu-lighting";
 
 /** Camera-space highlight scatter. Radius is a fraction of the shorter image side. */
@@ -72,11 +73,7 @@ fn scattered(uv:vec2f)->vec3f{
 
 /** Optional post-optical camera pass. All buffers/textures are allocated only on use. */
 export class HdrLensBloom {
-  private layout?: GPUBindGroupLayout;
-  private sampler?: GPUSampler;
-  private uniform?: GPUBuffer;
-  private pipelines?: {extract:GPURenderPipeline;downsample:GPURenderPipeline;upsample:GPURenderPipeline;display:GPURenderPipeline};
-  private pending?: Promise<void>;
+  private readonly programs=new Compiled(()=>this.compile());
   private disposed=false;
   private key="";
   private source?: GPUTexture;
@@ -85,30 +82,28 @@ export class HdrLensBloom {
   private weights:GPUBuffer[]=[];
   private retired:(GPUTexture|GPUBuffer)[]=[];
   constructor(private readonly device:GPUDevice,private readonly targetFormat:GPUTextureFormat){}
-  get ready(){return !!this.pipelines;}
+  get ready(){return this.programs.ready;}
   get linearComposite(){return this.source;}
   get blurredHighlights(){return this.down.length>1?this.up[0]:this.down[0];}
-  ensureReady():Promise<void>{
-    if(this.pending)return this.pending;
-    this.pending=(async()=>{
+  ensureReady():Promise<void>{return this.programs.ensure().then(()=>{});}
+  private async compile(){
       const module=this.device.createShaderModule({label:"HDR camera lens scatter",code:lensBloomShader});
       const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
       if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}:${m.linePos} ${m.message}`).join("\n"));
-      this.layout=this.device.createBindGroupLayout({entries:[
+      const bindGroupLayout=this.device.createBindGroupLayout({entries:[
         {binding:0,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float"}},
         {binding:1,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float"}},
         {binding:2,visibility:GPUShaderStage.FRAGMENT,sampler:{type:"filtering"}},
         {binding:3,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
         {binding:4,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
       ]});
-      const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.layout]});
+      const layout=this.device.createPipelineLayout({bindGroupLayouts:[bindGroupLayout]});
       const create=(entryPoint:string,format:GPUTextureFormat)=>this.device.createRenderPipelineAsync({label:`Camera ${entryPoint}`,layout,vertex:{module,entryPoint:"vertexMain"},fragment:{module,entryPoint,targets:[{format}]},primitive:{topology:"triangle-list"}});
       const [extract,downsample,upsample,display]=await Promise.all([create("extract","rgba16float"),create("downsample","rgba16float"),create("upsample","rgba16float"),create("display",this.targetFormat)]);
-      this.sampler=this.device.createSampler({minFilter:"linear",magFilter:"linear",addressModeU:"clamp-to-edge",addressModeV:"clamp-to-edge"});
-      this.uniform=this.device.createBuffer({label:"HDR camera parameters",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-      if(this.disposed){this.uniform.destroy();throw new Error("HDR camera destroyed during preparation");}
-      this.pipelines={extract,downsample,upsample,display};
-    })();return this.pending;
+      const sampler=this.device.createSampler({minFilter:"linear",magFilter:"linear",addressModeU:"clamp-to-edge",addressModeV:"clamp-to-edge"});
+      const uniform=this.device.createBuffer({label:"HDR camera parameters",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+      if(this.disposed){uniform.destroy();throw new Error("HDR camera destroyed during preparation");}
+      return {layout:bindGroupLayout,sampler,uniform,extract,downsample,upsample,display};
   }
   ensureSize(width:number,height:number,options:LensBloomOptions):GPUTexture{
     if(!this.ready)throw new Error("HDR camera is not compiled");
@@ -129,22 +124,23 @@ export class HdrLensBloom {
     }return this.source!;
   }
   encode(encoder:GPUCommandEncoder,output:GPUTextureView,options:LensBloomOptions,grade:ResolvedDisplayGrade):void{
-    if(!this.source||!this.pipelines||!this.layout||!this.uniform||!this.sampler)throw new Error("HDR camera target is not ready");
-    this.device.queue.writeBuffer(this.uniform,0,new Float32Array([options.threshold,options.strength,grade.exposure,SCENE_TONE_CURVE_CODES[grade.toneCurve],...grade.whiteBalance,0]));
+    const programs=this.programs.value;
+    if(!this.source||!programs)throw new Error("HDR camera target is not ready");
+    this.device.queue.writeBuffer(programs.uniform,0,new Float32Array([options.threshold,options.strength,grade.exposure,SCENE_TONE_CURVE_CODES[grade.toneCurve],...grade.whiteBalance,0]));
     const draw=(label:string,pipeline:GPURenderPipeline,source:GPUTexture,coarse:GPUTexture,target:GPUTextureView,weight:GPUBuffer)=>{
-      const group=this.device.createBindGroup({layout:this.layout!,entries:[{binding:0,resource:source.createView()},{binding:1,resource:coarse.createView()},{binding:2,resource:this.sampler!},{binding:3,resource:{buffer:this.uniform!}},{binding:4,resource:{buffer:weight}}]});
+      const group=this.device.createBindGroup({layout:programs.layout,entries:[{binding:0,resource:source.createView()},{binding:1,resource:coarse.createView()},{binding:2,resource:programs.sampler},{binding:3,resource:{buffer:programs.uniform}},{binding:4,resource:{buffer:weight}}]});
       const pass=encoder.beginRenderPass({label,colorAttachments:[{view:target,clearValue:{r:0,g:0,b:0,a:1},loadOp:"clear",storeOp:"store"}]});pass.setPipeline(pipeline);pass.setBindGroup(0,group);pass.draw(3);pass.end();
     };
     for(let i=0;i<this.down.length;i++){
-      const source=i===0?this.source:this.down[i-1];draw(`Lens highlight ${i}`,i===0?this.pipelines.extract:this.pipelines.downsample,source,source,this.down[i].createView(),this.weights[i]);
+      const source=i===0?this.source:this.down[i-1];draw(`Lens highlight ${i}`,i===0?programs.extract:programs.downsample,source,source,this.down[i].createView(),this.weights[i]);
     }
     let blurred=this.down[this.down.length-1];
-    for(let i=this.down.length-2;i>=0;i--){draw(`Lens normalized upsample ${i}`,this.pipelines.upsample,this.down[i],blurred,this.up[i].createView(),this.weights[i]);blurred=this.up[i];}
-    draw("Lens scatter and single display grade",this.pipelines.display,this.source,blurred,output,this.weights[0]);
+    for(let i=this.down.length-2;i>=0;i--){draw(`Lens normalized upsample ${i}`,programs.upsample,this.down[i],blurred,this.up[i].createView(),this.weights[i]);blurred=this.up[i];}
+    draw("Lens scatter and single display grade",programs.display,this.source,blurred,output,this.weights[0]);
   }
   /** Retire only after the submission containing the last use has completed. */
   completeFrame(completion:Promise<unknown>):void{
     const retired=this.retired.splice(0);if(retired.length)void completion.catch(()=>{}).then(()=>{for(const r of retired)r.destroy();});
   }
-  destroy():void{this.disposed=true;for(const r of [this.source,this.uniform,...this.down,...this.up,...this.weights,...this.retired])r?.destroy();this.retired=[];}
+  destroy():void{this.disposed=true;for(const r of [this.source,this.programs.value?.uniform,...this.down,...this.up,...this.weights,...this.retired])r?.destroy();this.retired=[];}
 }

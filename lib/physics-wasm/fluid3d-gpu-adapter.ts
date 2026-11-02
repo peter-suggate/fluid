@@ -334,24 +334,24 @@ export class RustFluid3DGPUSolverAdapter implements GPUSolverInstance {
 
   setTopologyFrozen(frozen: boolean): void {
     if (frozen === this.topologyFrozen) return;
-    this.topologyFrozen = frozen;
     void this.queueCommand({ type: "set-topology-frozen", frozen });
+    this.topologyFrozen = frozen;
   }
 
   stageSceneUpdate(scene: SceneDescription): void {
     const stamp = JSON.stringify(scene);
     if (stamp === this.sceneStamp) return;
-    this.sceneStamp = stamp;
     void this.queueCommand({ type: "set-scene", scene }, () => {
       this.authoredBodies = scene.rigidBodies;
     });
+    this.sceneStamp = stamp;
   }
 
   applyRuntimeValues(values: MethodParamValues): void {
     const stamp = JSON.stringify(values);
     if (stamp === this.runtimeValuesStamp) return;
-    this.runtimeValuesStamp = stamp;
     void this.queueCommand({ type: "set-runtime-values", values });
+    this.runtimeValuesStamp = stamp;
   }
 
   destroy(): void {
@@ -364,6 +364,11 @@ export class RustFluid3DGPUSolverAdapter implements GPUSolverInstance {
     void this.client.destroy();
   }
 
+  /**
+   * Throws, before anything is sent, once the adapter has ended; callers record
+   * the state a command carries only after this accepts it, and a command that
+   * then fails ends the adapter, so no recorded stamp outlives a refusal.
+   */
   private queueCommand(command: unknown, beforeUpload?: () => void): Promise<boolean> {
     this.assertLive();
     const work = this.client.applyCommand(command, this.viewMask).then(result => {

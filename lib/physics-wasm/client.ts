@@ -1,3 +1,4 @@
+import { RuntimeLifecycle } from "../core/runtime-lifecycle";
 import { detectPhysicsWasmCapabilities } from "./capabilities";
 import type { PhysicsCommandReceipt, PhysicsPublication, PhysicsWasmArtifact,
   PhysicsWorkerRequest, PhysicsWorkerResponse } from "./protocol";
@@ -30,7 +31,10 @@ export class PhysicsWasmClient {
   private requestId = 0;
   private commandSequence = 0;
   private runEpoch = 0;
-  private stopped = false;
+  /** A worker error fails the client; `destroy` disposes it. Either rejects every pending request. */
+  private readonly lifecycle = new RuntimeLifecycle(phase => this.failAll(new Error(
+    phase.kind === "disposed" ? "Physics Wasm client is destroyed" : phase.reason)));
+  private destroying?: Promise<void>;
   private commandTail: Promise<void> = Promise.resolve();
   private readonly pending = new Map<number, {
     resolve(value: PendingResult): void; reject(error: Error): void;
@@ -39,10 +43,9 @@ export class PhysicsWasmClient {
   private constructor(worker: WorkerPort) {
     this.worker = worker;
     worker.addEventListener("message", event => this.receive(event.data));
-    worker.addEventListener("error", event => this.failAll(new Error(
-      "message" in event && typeof event.message === "string" ? event.message : "Physics Wasm worker failed",
-    )));
-    worker.addEventListener("messageerror", () => this.failAll(new Error("Physics Wasm worker returned invalid data")));
+    worker.addEventListener("error", event => this.lifecycle.fail(
+      "message" in event && typeof event.message === "string" ? event.message : "Physics Wasm worker failed"));
+    worker.addEventListener("messageerror", () => this.lifecycle.fail("Physics Wasm worker returned invalid data"));
   }
 
   static async create(options: PhysicsWasmClientOptions = {}): Promise<PhysicsWasmClient> {
@@ -59,8 +62,11 @@ export class PhysicsWasmClient {
       { type: "module", name: "fluid-rust-physics" },
     );
     const client = new PhysicsWasmClient(worker);
-    await client.request<void>({ type: "initialize", requestId: client.nextRequestId(),
-      moduleUrl: options.moduleUrl ?? DEFAULT_MODULES[artifact], artifact, threadCount: threads });
+    try {
+      await client.request<void>({ type: "initialize", requestId: client.nextRequestId(),
+        moduleUrl: options.moduleUrl ?? DEFAULT_MODULES[artifact], artifact, threadCount: threads });
+    } catch (error) { await client.destroy(); throw error; }
+    client.lifecycle.ready();
     return client;
   }
 
@@ -87,12 +93,12 @@ export class PhysicsWasmClient {
       sequence, runEpoch: this.runEpoch, viewMask: viewMask >>> 0 }));
   }
 
-  async destroy(): Promise<void> {
-    if (this.stopped) return;
-    await this.request<void>({ type: "dispose", requestId: this.nextRequestId() });
-    this.stopped = true;
-    this.worker.terminate();
-    this.failAll(new Error("Physics Wasm client is destroyed"));
+  /** Concurrent callers share one teardown; a failed worker is terminated without a handshake. */
+  destroy(): Promise<void> {
+    if (this.destroying) return this.destroying;
+    const handshake = this.lifecycle.open
+      ? this.request<void>({ type: "dispose", requestId: this.nextRequestId() }).catch(() => undefined) : Promise.resolve();
+    return this.destroying = handshake.then(() => { this.lifecycle.dispose(); this.worker.terminate(); });
   }
 
   private command<T extends PendingResult>(make: (requestId: number, sequence: number) => PhysicsWorkerRequest): Promise<T> {
@@ -103,7 +109,9 @@ export class PhysicsWasmClient {
   }
 
   private request<T extends PendingResult>(message: PhysicsWorkerRequest): Promise<T> {
-    if (this.stopped) return Promise.reject(new Error("Physics Wasm client is destroyed"));
+    if (!this.lifecycle.open || this.destroying) {
+      return Promise.reject(new Error(this.lifecycle.failure ?? "Physics Wasm client is destroyed"));
+    }
     return new Promise<T>((resolve, reject) => {
       if (!("requestId" in message)) throw new Error("Internal physics request has no request id");
       this.pending.set(message.requestId, { resolve: resolve as (value: PendingResult) => void, reject });

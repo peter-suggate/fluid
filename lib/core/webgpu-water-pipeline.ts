@@ -1,3 +1,5 @@
+import { Compiled } from "./compiled";
+import { StagedReadback } from "./staged-readback";
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { WATER_INTERFACE_DEPTH, waterInterfaceDepthWGSL } from "./water-interface-depth";
 import { HdrLensBloom, DEFAULT_LENS_BLOOM_OPTIONS, resolveLensBloomOptions, type LensBloomOptions } from "./webgpu-lens-bloom";
@@ -2177,34 +2179,32 @@ export class RasterWaterPipeline {
   private lensOptions:LensBloomOptions=DEFAULT_LENS_BLOOM_OPTIONS;
   private lensCamera?:HdrLensBloom;
   private lensCompositeDescriptor?:GPURenderPipelineDescriptor;
-  private lensCompositePipelines?:{shaded:GPURenderPipeline;environment:GPURenderPipeline};
-  private lensPending?:Promise<void>;
+  private readonly lensComposite=new Compiled(async()=>{
+    const descriptor=this.lensCompositeDescriptor;
+    if(!descriptor?.fragment)throw new Error("Water optical composite is not initialized");
+    this.lensCamera??=new HdrLensBloom(this.device,this.targetFormat);
+    const make=(label:string,constants:Record<string,number>)=>this.device.createRenderPipelineAsync({
+      ...descriptor,label,fragment:{...descriptor.fragment!,constants:{linearHdrOutput:1,...constants},targets:[{format:"rgba16float"}]},
+    });
+    const [shaded,environment]=await Promise.all([
+      make("Linear HDR complete water composite",{}),
+      make("Linear HDR environment water composite",{screenSpaceReflections:0}),
+      this.lensCamera.ensureReady(),
+    ]);
+    return {shaded,environment};
+  });
   private lastLensApplied=false;
   private lensGrade=resolveDisplayGrade();
   setLensBloomOptions(options:Partial<LensBloomOptions>){
     this.lensOptions=resolveLensBloomOptions({...this.lensOptions,...options});
   }
   get lensBloomOptions():LensBloomOptions{return this.lensOptions;}
-  get lensBloomReady():boolean{return !this.lensOptions.enabled||this.lensOptions.strength===0||!!this.lensCompositePipelines;}
+  get lensBloomReady():boolean{return !this.lensOptions.enabled||this.lensOptions.strength===0||this.lensComposite.ready;}
   get lensBloomApplied():boolean{return this.lastLensApplied;}
   get lensBloomLinearComposite():GPUTexture|undefined{return this.lastLensApplied?this.lensCamera?.linearComposite:undefined;}
   ensureLensBloomReady():Promise<void>{
     if(!this.lensOptions.enabled||this.lensOptions.strength===0)return Promise.resolve();
-    if(this.lensPending)return this.lensPending;
-    const descriptor=this.lensCompositeDescriptor;
-    if(!descriptor?.fragment)return Promise.reject(new Error("Water optical composite is not initialized"));
-    this.lensCamera??=new HdrLensBloom(this.device,this.targetFormat);
-    const make=(label:string,constants:Record<string,number>)=>this.device.createRenderPipelineAsync({
-      ...descriptor,label,fragment:{...descriptor.fragment!,constants:{linearHdrOutput:1,...constants},targets:[{format:"rgba16float"}]},
-    });
-    this.lensPending=(async()=>{
-      const [shaded,environment]=await Promise.all([
-        make("Linear HDR complete water composite",{}),
-        make("Linear HDR environment water composite",{screenSpaceReflections:0}),
-        this.lensCamera!.ensureReady(),
-      ]);
-      this.lensCompositePipelines={shaded,environment};
-    })();return this.lensPending;
+    return this.lensComposite.ensure().then(()=>{});
   }
   completeLensBloomFrame(completion:Promise<unknown>):void{this.lensCamera?.completeFrame(completion);}
 
@@ -2348,8 +2348,8 @@ export class RasterWaterPipeline {
   private extraSurface?: { group: GPUBindGroup; vertices: GPUBuffer; indirect: GPUBuffer; offset: number };
   private fluidDomain?: FluidDomain;
   private fallbackSparseControl?: GPUBuffer;
-  private surfaceDiagnosticReadback?: GPUBuffer;
-  private surfaceDiagnosticPending = false;
+  /** Created on the first capture and reused by every later one. */
+  private surfaceDiagnosticReadback?: StagedReadback;
   /** Vertices the mesh held when the pending receipt was encoded. */
   private surfaceDiagnosticCapacity = 0;
   /** A receipt whose extraction asked for more vertices than the mesh holds
@@ -2696,8 +2696,7 @@ export class RasterWaterPipeline {
     const volumeChanged = this.volume !== texture;
     if (!this.adoptLevelSetSource(source) && !volumeChanged) return;
     this.volume = texture;
-    this.extractedRevision = -1; this.surfaceExtractionReason = volumeChanged ? "volume binding changed" : "normal phi binding changed";
-    this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
+    this.invalidateExtraction(volumeChanged ? "volume binding changed" : "normal phi binding changed"); this.rebuildBindGroups();
   }
 
   /** Follows the solver's source every frame: its object changes identity
@@ -2705,8 +2704,7 @@ export class RasterWaterPipeline {
    * (the solver's h-tile capacity leaving or reaching zero). */
   setDenseLevelSetVolumeSource(source: DenseLevelSetVolumeConsumerSource | undefined) {
     if (!this.adoptLevelSetSource(source)) return;
-    this.extractedRevision = -1; this.surfaceExtractionReason = "level-set source changed";
-    this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
+    this.invalidateExtraction("level-set source changed"); this.rebuildBindGroups();
   }
 
   /** The mixed presentation (ownership and 4h base) binds the detail field
@@ -2733,7 +2731,7 @@ export class RasterWaterPipeline {
       && previous.dimensions.every((value, axis) => value === domain.dimensions[axis])) return;
     if (!previous && !domain) return;
     this.fluidDomain = domain;
-    this.extractedRevision = -1; this.surfaceExtractionReason = "domain changed";
+    this.invalidateExtraction("domain changed");
   }
 
   /**
@@ -2745,10 +2743,12 @@ export class RasterWaterPipeline {
    * extracted before the edit. Invalidating here makes the next presentation
    * extract exactly once from the newly published field.
    */
-  invalidateSurface() {
-    this.extractedRevision = -1; this.surfaceExtractionReason = "field edit";
-    this.lastExtractionAt_ms = -Infinity;
-    this.causticsValid = false;
+  invalidateSurface() { this.invalidateExtraction("field edit"); }
+
+  /** The retained mesh and the caustics lit from it no longer describe the field: extract on the next presentation. */
+  private invalidateExtraction(reason: string) {
+    this.extractedRevision = -1; this.surfaceExtractionReason = reason;
+    this.lastExtractionAt_ms = -Infinity; this.causticsValid = false;
   }
 
   /** The dense classifier in use: the window scan whenever the mixed
@@ -2827,7 +2827,7 @@ export class RasterWaterPipeline {
       pass.setPipeline(polygoniser ?? this.polygonisePipeline); pass.setBindGroup(0, this.extractBindGroup); pass.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer, 0);
     }
     pass.end();
-    this.extractedRevision = -1;
+    this.invalidateExtraction("QA extraction replaced the mesh");
   }
 
   /** QA: the extraction pipeline layout, for a benchmark's own classifier. */
@@ -2896,7 +2896,8 @@ export class RasterWaterPipeline {
   }
 
   private encodeSurfaceDiagnostics(encoder: GPUCommandEncoder, force = false): boolean {
-    if (this.surfaceDiagnosticPending || !this.indirectBuffer) return false;
+    const indirect = this.indirectBuffer;
+    if (!indirect || (this.surfaceDiagnosticReadback && !this.surfaceDiagnosticReadback.idle)) return false;
     const now_ms = performance.now();
     // The normal UI needs failure evidence, not a frame-rate-synchronous
     // telemetry stream. Match the solver's bounded 250 ms readback cadence;
@@ -2904,11 +2905,9 @@ export class RasterWaterPipeline {
     if (!force && !this.surfaceDiagnosticsFullRateRequested()
       && now_ms - this.lastSurfaceDiagnosticEncodeAt_ms < 250) return false;
     this.lastSurfaceDiagnosticEncodeAt_ms = now_ms;
-    this.surfaceDiagnosticReadback?.destroy();
-    this.surfaceDiagnosticReadback = this.device.createBuffer({ label: "Water render diagnostics", size: 32, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    encoder.copyBufferToBuffer(this.indirectBuffer, 0, this.surfaceDiagnosticReadback, 0, 32);
+    (this.surfaceDiagnosticReadback ??= new StagedReadback(this.device, { label: "Water render diagnostics", size: 32 }))
+      .encode(encoder, (encoder, staging) => encoder.copyBufferToBuffer(indirect, 0, staging, 0, 32));
     this.surfaceDiagnosticCapacity = (this.vertexBuffer?.size ?? 0) / 32;
-    this.surfaceDiagnosticPending = true;
     return true;
   }
 
@@ -2916,10 +2915,9 @@ export class RasterWaterPipeline {
   completeSurfaceDiagnostics(submissionCompletion?: Promise<void>): Promise<WaterRenderDiagnostics | undefined> {
     if (this.surfaceDiagnosticCompletion) return this.surfaceDiagnosticCompletion;
     const readback = this.surfaceDiagnosticReadback;
-    if (!readback || !this.surfaceDiagnosticPending) return Promise.resolve(undefined);
-    const completion = (submissionCompletion ?? this.device.queue.onSubmittedWorkDone()).then(async () => {
-      await readback.mapAsync(GPUMapMode.READ);
-      const words = new Uint32Array(readback.getMappedRange());
+    if (readback?.state !== "copied") return Promise.resolve(undefined);
+    const completion = (submissionCompletion ?? this.device.queue.onSubmittedWorkDone()).then(() => readback.read(bytes => {
+      const words = new Uint32Array(bytes);
       // The allocator counts every vertex polygonise asked for; past the
       // whole triangles the mesh holds, it dropped the rest.
       const capacity = this.surfaceDiagnosticCapacity;
@@ -2931,11 +2929,12 @@ export class RasterWaterPipeline {
         sourceFrameCounts: { ...this.surfaceSourceFrameCounts },
       };
       console.info("Water render diagnostics", JSON.stringify(this.lastSurfaceDiagnostics));
-      const result = this.lastSurfaceDiagnostics;
-      readback.unmap();
-      return result;
-    }).catch(() => undefined).finally(() => {
-      this.surfaceDiagnosticPending = false;
+      return this.lastSurfaceDiagnostics;
+    })).catch(() => {
+      // A submission that failed never filled the copy; the next capture takes a fresh one.
+      readback.discard();
+      return undefined;
+    }).finally(() => {
       if (this.surfaceDiagnosticCompletion === completion) this.surfaceDiagnosticCompletion = undefined;
     });
     this.surfaceDiagnosticCompletion = completion;
@@ -2991,7 +2990,7 @@ export class RasterWaterPipeline {
     this.device.queue.writeBuffer(this.indirectBuffer, 28, new Uint32Array([0xffff_ffff]));
     this.indirectResetTemplate = this.createIndirectResetTemplate();
     this.activeCubeBuffer = this.device.createBuffer({ label: "Water surface cube worklist", size: activeCubeCapacity(maxVertices) * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    this.geometryKey = key; this.extractedRevision = -1; this.surfaceExtractionReason = "geometry allocation changed"; this.lastExtractionAt_ms = -Infinity; this.causticsValid = false; this.rebuildBindGroups();
+    this.geometryKey = key; this.invalidateExtraction("geometry allocation changed"); this.rebuildBindGroups();
   }
 
   ensureSize(width: number, height: number) {
@@ -3409,7 +3408,8 @@ export class RasterWaterPipeline {
     const compositeBindGroup = this.compositeBindGroupFor(sparseSceneResult ? sparseSceneResult.sampledTargetView : this.sceneTextureView!, worldReflections);
     if (!compositeBindGroup) return false;
     const outputView="createView" in output?output.createView():output;
-    const useLens=this.lensOptions.enabled&&this.lensOptions.strength>0&&!!this.lensCompositePipelines
+    const lensComposite=this.lensComposite.value;
+    const useLens=this.lensOptions.enabled&&this.lensOptions.strength>0&&!!lensComposite
       &&surfaceRenderMode==="shaded"&&!this.disabledStages.has("optical-composite");
     this.lastLensApplied=useLens;
     const opticalOutput=useLens?this.lensCamera!.ensureSize(this.sceneTexture.width,this.sceneTexture.height,this.lensOptions).createView():outputView;
@@ -3419,7 +3419,7 @@ export class RasterWaterPipeline {
     // a stale composite that would look like the pass still ran.
     if (!this.disabledStages.has("optical-composite")) {
       composite.setPipeline(useLens
-        ? this.reflectionMode==="environment"?this.lensCompositePipelines!.environment:this.lensCompositePipelines!.shaded
+        ? this.reflectionMode==="environment"?lensComposite!.environment:lensComposite!.shaded
         : surfaceRenderMode === "wireframe" ? this.wireframeCompositePipeline : surfaceRenderMode === "simple" ? this.simpleCompositePipeline : this.reflectionMode === "environment" ? this.environmentCompositePipeline : this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
     }
     composite.end();

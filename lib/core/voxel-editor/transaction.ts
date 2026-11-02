@@ -47,11 +47,11 @@ export interface ToolHost {
  */
 export async function publishSolidPatches(host: ToolHost, base: SceneDescription,
   patches: readonly SolidWorldVoxelPatch[]): Promise<boolean> {
-  if (patches.length === 0) { host.cancel(); return false; }
+  if (patches.length === 0) { await host.cancel(); return false; }
   // A host rejects a stale preflight rather than overwrite another editor's
   // document, so a publish that resolves is the document standing.
   try { await host.publish(sceneWithSolidStroke(base, patches), base); }
-  catch (error) { host.cancel(); throw error; }
+  catch (error) { await host.cancel(); throw error; }
   host.finish();
   return true;
 }
@@ -95,14 +95,14 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
     displayed = key;
     host.preview(key === undefined ? undefined : patches, base);
   };
-  const abandon = () => { if (!closed) { closed = true; display(undefined); host.cancel(); } };
+  const abandon = async () => { if (!closed) { closed = true; display(undefined); await host.cancel(); } };
   host.begin(plugin.ui.label);
   return {
     update(input: EditorRay): Promise<ToolUpdate | undefined> {
       if (closed || finishing) return Promise.resolve(undefined);
-      const operation = pending.then(() => {
+      const operation = pending.then(async () => {
         if (closed) return undefined;
-        if (!ownsDocument()) { abandon(); return undefined; }
+        if (!ownsDocument()) { await abandon(); return undefined; }
         // A transient action must never execute a shape the pointer has left;
         // an authored stroke keeps the geometry it had already been shown.
         if (plugin.execution === "release") preview = undefined;
@@ -124,13 +124,19 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
       pending = operation.catch(() => {});
       return operation;
     },
+    /**
+     * Close the stroke: commit its last accepted sample, or with `cancelled`
+     * take it down. A cancel may still upgrade a release that is queued behind
+     * a sample; once the outcome is decided (`closed`), a later call returns the
+     * same completion and changes nothing.
+     */
     finish(cancelled = false): Promise<void> {
-      cancellationRequested ||= cancelled;
+      if (!closed) cancellationRequested ||= cancelled;
       if (completion) return completion;
       finishing = true;
       completion = pending.then(async () => {
         if (closed) return;
-        if (!ownsDocument()) { abandon(); return; }
+        if (!ownsDocument()) { await abandon(); return; }
         closed = true;
         if (plugin.execution === "release") {
           try {
@@ -140,13 +146,13 @@ export function beginToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
             }
           } finally {
             // Moving water is not an authored-scene undo entry, even after success.
-            host.cancel();
+            await host.cancel();
           }
           return;
         }
-        if (cancellationRequested || !preview) { display(undefined); host.cancel(); return; }
+        if (cancellationRequested || !preview) { display(undefined); await host.cancel(); return; }
         const selection = preview.selection;
-        if (selection && !host.select) { display(undefined); host.cancel(); throw new Error("This runtime cannot hold a voxel selection."); }
+        if (selection && !host.select) { display(undefined); await host.cancel(); throw new Error("This runtime cannot hold a voxel selection."); }
         let published = false;
         // The accepted edit is the preview the display already holds; anything else takes it down.
         try { published = await publishSolidPatches(host, base, preview.patches); }
@@ -219,7 +225,8 @@ function beginLiveToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
     },
     advance(): Promise<boolean> { return Promise.resolve(false); },
     finish(abort = false): Promise<void> {
-      cancelled ||= abort;
+      // As above: a cancel upgrades a release still draining, never a decided one.
+      if (!closed) cancelled ||= abort;
       if (cancelled) latest = undefined;
       if (completion) return completion;
       finishing = true;

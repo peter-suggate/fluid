@@ -93,7 +93,7 @@ test("switching the lighting backend during compilation retires the prior render
   Object.assign(renderer, { requestedPrimaryTraversal: "mesh", requestedPrimaryWorkMap: false,
     requestedSunlightCache: false, requestedWaterShadows: false, requestedRasterAo: false,
     optionalPipelineTasks: new Map([["svo-dry-scene", Promise.resolve()]]),
-    failedOptionalPipelines: new Set(), optionalPipelineFailures: new Map(),
+    optionalPipelineFailures: new Map(),
     svoDryScenePipeline: { destroy: () => destroyed++ } });
   const request = () => renderer.applyPrimaryTraversalRequest("traced", {}, false, false, false, true);
   request(); assert.equal(destroyed, 0); assert.equal(renderer.requestedRasterAo, false);

@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { simulation } from "../lib/core/simulation/controller";
+import { useHeldEdit } from "../lib/core/simulation/use-held-edit";
 import {
   canopyDials,
   sceneCanopyPads,
@@ -22,8 +21,8 @@ import { useSession } from "../lib/core/session/session-context";
  *
  * A held slider is one gesture: the document is patched live for preview (a
  * canopy edit revoxelizes only its own dirty region and never reseeds the
- * solver), while `beginEdit`/`commitEdit` bracket the drag so undo gets one
- * entry per adjustment, not one per pointer-move.
+ * solver), while one held edit brackets the drag so undo gets one entry per
+ * adjustment, not one per pointer-move.
  */
 const DIALS: readonly { id: keyof CanopyDials; label: string; hint: string }[] = [
   { id: "coverage", label: "LEAVES", hint: "Foliage coverage: lower opens sky between the clumps" },
@@ -34,15 +33,7 @@ const DIALS: readonly { id: keyof CanopyDials; label: string; hint: string }[] =
 export function CanopyDialRows({ nodeId }: { nodeId: string }) {
   const session = useSession();
   const scene = session.scene((state) => state.scene);
-  const gestureOpen = useRef(false);
-  const endGesture = () => {
-    if (!gestureOpen.current) return;
-    gestureOpen.current = false;
-    simulation.commitEdit(undefined, { reseed: true }, session.id);
-  };
-  // Deselecting mid-drag must still close the gesture, or the next edit's
-  // undo snapshot would be this one's.
-  useEffect(() => endGesture, []);
+  const held = useHeldEdit(session.id, { reseed: true });
 
   const pads = sceneCanopyPads(scene, nodeId);
   if (pads.length === 0) return null;
@@ -51,12 +42,7 @@ export function CanopyDialRows({ nodeId }: { nodeId: string }) {
   const dials = canopyDials(pads[0]!);
 
   const setDial = (id: keyof CanopyDials, value: number) => {
-    if (!gestureOpen.current) {
-      // Opened here rather than on pointerdown so keyboard nudges are
-      // bracketed too; closed on release/blur either way.
-      gestureOpen.current = true;
-      simulation.beginEdit(`Adjusted ${nodeId} canopy`, session.id);
-    }
+    held.begin(`Adjusted ${nodeId} canopy`);
     const current = session.scene.getState().scene;
     session.scene.getState().patchScene(
       withCanopyDials(current, nodeId, { ...canopyDials(sceneCanopyPads(current, nodeId)[0]!), [id]: value }),
@@ -68,6 +54,6 @@ export function CanopyDialRows({ nodeId }: { nodeId: string }) {
     values={dials}
     testPrefix="canopy"
     onSet={setDial}
-    onEndGesture={endGesture}
+    onEndGesture={held.end}
   />;
 }

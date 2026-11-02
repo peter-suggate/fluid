@@ -16,6 +16,7 @@ import type { GPUStatus } from "./gpu-status";
 import type { EffectiveRendererStatus } from "./renderer-status";
 import type { FluidLabRenderer, RendererFrameMetrics } from "./webgpu-renderer";
 import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
+import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { usePerformanceInstrumentationStore, type PerformanceInstrumentationMode } from "./stores/performance-instrumentation-store";
 import type { WorkerLoadSample } from "./system-load";
 
@@ -188,9 +189,12 @@ export class WebGPURenderWorkerClient {
   private queuedFrame?: Extract<WebGPURenderWorkerRequest, { type: "draw" }>;
   private completedMetrics?: RendererFrameMetrics;
   private snapshot: WebGPURenderWorkerSnapshot = EMPTY_SNAPSHOT;
-  private stopped = false;
-  private failed = false;
-  private runtimeUnavailable?: string;
+  /** The worker's runtime: ended by its first terminal status, a broken channel, or `shutdown`. */
+  private readonly lifecycle = new RuntimeLifecycle();
+  /** False once the worker itself has failed: nothing sent to it will be answered, a shutdown included. */
+  private workerAnswers = true;
+  /** The one teardown, whichever phase it began in. */
+  private stopping?: Promise<void>;
   private lastRuntimeStatus?: GPUStatus;
   /** One fixed translation keeps an activity's start time stable across progress messages. */
   private workerClockOffset_ms?: number;
@@ -209,18 +213,8 @@ export class WebGPURenderWorkerClient {
     });
     useRemoteEnvironmentCatalogs();
     this.worker.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerResponse>) => this.receive(event.data));
-    this.worker.addEventListener("error", (event) => {
-      const error = new Error(event.message || "WebGPU runtime worker failed");
-      this.failed = true;
-      this.rejectAll(error);
-      this.callbacks.onStatus({ state: "unavailable", label: error.message, resource: webGPUPlatformResourcePlugin });
-    });
-    this.worker.addEventListener("messageerror", () => {
-      const error = new Error("WebGPU runtime worker returned an unserializable result");
-      this.failed = true;
-      this.rejectAll(error);
-      this.callbacks.onStatus({ state: "unavailable", label: error.message, resource: webGPUPlatformResourcePlugin });
-    });
+    this.worker.addEventListener("error", (event) => this.workerFailed(event.message || "WebGPU runtime worker failed"));
+    this.worker.addEventListener("messageerror", () => this.workerFailed("WebGPU runtime worker returned an unserializable result"));
     const offscreen = canvas.transferControlToOffscreen();
     this.worker.postMessage({ type: "attach", canvas: offscreen } satisfies WebGPURenderWorkerRequest, [offscreen]);
   }
@@ -398,7 +392,7 @@ export class WebGPURenderWorkerClient {
    * does not hold is not sent; the gesture keeps its outline.
    */
   previewLiveSolidEdit(patches: readonly SolidWorldVoxelPatch[] | undefined, base: SceneDescription): void {
-    if (this.stopped || this.failed || this.runtimeUnavailable) return;
+    if (!this.lifecycle.open) return;
     if (!patches?.length) {
       if (this.queuedPreview?.base === base) this.queuedPreview = undefined;
       // Only the gesture whose proposal is up can take it down.
@@ -443,15 +437,31 @@ export class WebGPURenderWorkerClient {
   }
 
   shutdown(): Promise<void> {
-    if (this.stopped) return Promise.resolve();
-    this.stopped = true;
+    if (this.stopping) return this.stopping;
+    this.lifecycle.dispose();
     this.rejectAll(new Error("WebGPU runtime stopped; the last accepted scene is retained."));
-    if (this.failed) {
-      this.worker.terminate();
-      return Promise.resolve();
-    }
-    return this.request<void>({ type: "shutdown", requestId: this.nextRequestId() })
+    // A runtime that ended still drains its GPU work before the worker goes; a worker that failed cannot.
+    this.stopping = (this.workerAnswers ? this.request<void>({ type: "shutdown", requestId: this.nextRequestId() }) : Promise.resolve())
       .finally(() => { this.worker.terminate(); });
+    return this.stopping;
+  }
+
+  /** The worker itself failed: everything waiting on it is rejected, the shutdown handshake too. */
+  private workerFailed(label: string): void {
+    this.workerAnswers = false;
+    this.rejectAll(new Error(label));
+    if (this.lifecycle.fail(label)) this.callbacks.onStatus({ state: "unavailable", label, resource: webGPUPlatformResourcePlugin });
+  }
+
+  /**
+   * The runtime ended. Authoring requests are rejected from here; a shutdown
+   * handshake is not, because the worker may still need to drain and destroy
+   * its GPU resources.
+   */
+  private runtimeEnded(status: Extract<GPUStatus, { state: "unavailable" | "lost" | "blocked" }>): boolean {
+    const ended = status.state === "lost" ? this.lifecycle.lose(status.label) : this.lifecycle.fail(status.label);
+    this.rejectAll(new Error(status.label), true);
+    return ended;
   }
 
   private nextRequestId() { return ++this.requestId; }
@@ -527,8 +537,8 @@ export class WebGPURenderWorkerClient {
   }
 
   private request<T>(message: Extract<WebGPURenderWorkerRequest, { requestId: number }>): Promise<T> {
-    if (this.failed || (message.type !== "shutdown" && (this.stopped || this.runtimeUnavailable))) {
-      return Promise.reject(new Error(this.runtimeUnavailable ?? "WebGPU runtime is no longer available."));
+    if (!this.workerAnswers || (message.type !== "shutdown" && !this.lifecycle.open)) {
+      return Promise.reject(new Error(this.lifecycle.failure ?? "WebGPU runtime is no longer available."));
     }
     return new Promise<T>((resolve, reject) => {
       this.requests.set(message.requestId, { kind: message.type, resolve: (value) => resolve(value as T), reject });
@@ -541,11 +551,11 @@ export class WebGPURenderWorkerClient {
   }
 
   private post(message: WebGPURenderWorkerRequest): void {
-    if (!this.stopped) this.worker.postMessage(message);
+    if (!this.stopping) this.worker.postMessage(message);
   }
 
   private sendFrame(message: Extract<WebGPURenderWorkerRequest, { type: "draw" }>): void {
-    if (this.stopped) return;
+    if (this.stopping) return;
     this.frameInFlight = true;
     this.worker.postMessage(message);
   }
@@ -573,10 +583,9 @@ export class WebGPURenderWorkerClient {
           this.sceneryCatalog = applyDocumentDelta(this.sceneryCatalog, message.entries);
         } catch (error) {
           // Every later catalog would be changes over the same absent one.
-          const label = `GPU runtime stopped: ${error instanceof Error ? error.message : String(error)}`;
-          this.runtimeUnavailable = label;
-          this.rejectAll(new Error(label), true);
-          this.callbacks.onStatus({ state: "unavailable", label, resource: webGPUPlatformResourcePlugin });
+          const status = { state: "unavailable", label: `GPU runtime stopped: ${error instanceof Error ? error.message : String(error)}`,
+            resource: webGPUPlatformResourcePlugin } as const;
+          if (this.runtimeEnded(status)) this.callbacks.onStatus(status);
           return;
         }
       }
@@ -605,11 +614,9 @@ export class WebGPURenderWorkerClient {
           presentationResolution: this.snapshot.presentationResolution,
           ...(status.state === "lost" && { diagnostics: status.diagnostics }),
         }));
-        this.runtimeUnavailable = status.label;
-        // The worker may still need to drain/destroy GPU resources. Reject
-        // authoring requests now without interrupting that shutdown handshake.
-        this.rejectAll(new Error(status.label), true);
+        this.runtimeEnded(status);
       }
+      else if (status.state === "ready") this.lifecycle.ready();
       this.lastRuntimeStatus = status;
       this.callbacks.onStatus(status);
     }

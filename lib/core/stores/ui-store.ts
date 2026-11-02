@@ -373,6 +373,16 @@ interface UIStore extends FineSurfaceState, LensBloomState {
  */
 export const DEFAULT_GRID_OVERLAY_AXIS: Exclude<GridOverlayConfig["axis"], "off"> = "z";
 
+/**
+ * What the pointer holds in INTERACT: one armed gesture or one sculpt tool,
+ * never both, and no axis lock left over from the last gesture. Every verb that
+ * arms — and LOOK, which puts everything down — takes its fields from here, so
+ * the exclusivity is stated once.
+ */
+function armed(hold: { readonly armedGesture?: EditorGestureId; readonly voxelToolId?: string }) {
+  return { armedGesture: hold.armedGesture, voxelToolId: hold.voxelToolId, axisConstraint: undefined };
+}
+
 export const createUIStore = () => create<UIStore>((set) => ({
   voxelStrokePending: false,
   voxelToolId: undefined,
@@ -382,10 +392,13 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // work beside one and the selection tools exist to make one, so a selection
   // that went whenever the hand changed tools could be neither built nor used.
   // An id the registry does not know arms nothing, rather than a tool no host can find.
-  setVoxelTool: (id) => set((state) => ({
-    voxelToolId: voxelTools.get(id)?.id, viewportMode: "interact", armedGesture: undefined,
-    selection: state.selection?.kind === "voxel-region" ? state.selection : undefined,
-  })),
+  setVoxelTool: (id) => set((state) => {
+    const voxelToolId = voxelTools.get(id)?.id;
+    return voxelToolId ? {
+      ...armed({ voxelToolId }), viewportMode: "interact",
+      selection: state.selection?.kind === "voxel-region" ? state.selection : undefined,
+    } : { voxelToolId };
+  }),
   setVoxelToolValue: (id, key, value) => set((state) => ({ voxelToolValues: {
     ...state.voxelToolValues, [id]: { ...state.voxelToolValues[id], [key]: value },
   } })),
@@ -434,8 +447,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
     selectedBodyId: undefined,
     voxelRegion: undefined,
     selectionControlsOpen: false,
-    armedGesture: undefined,
-    axisConstraint: undefined,
+    ...armed({}),
     radialMenu: undefined,
   }),
   // Arming drops the axis lock: it is only ever drawn while handles are on
@@ -444,9 +456,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // And it puts a sculpt tool away, as arming one puts the gesture away
   // (`setVoxelTool`): the next drag has exactly one meaning, and the tool is
   // asked first, so one left armed would silently swallow the stroke just armed.
-  setArmedGesture: (armedGesture) => set(armedGesture
-    ? { armedGesture, axisConstraint: undefined, voxelToolId: undefined }
-    : { armedGesture, axisConstraint: undefined }),
+  setArmedGesture: (armedGesture) => set(armedGesture ? armed({ armedGesture }) : { armedGesture, axisConstraint: undefined }),
   setAxisConstraint: (axisConstraint) => set({ axisConstraint }),
   // One call, because the box and the selection that names it must land in the
   // same update: a render between the two would draw a selection whose entity

@@ -16,7 +16,7 @@ import { ToolstripRow, useToolstripSection } from "./toolstrip";
  *
  * A held slider is one gesture: the document is patched live for preview — a
  * scenery edit revoxelizes only its own dirty region — while the caller's
- * `beginEdit`/`commitEdit` bracket the drag so undo gets one entry per
+ * held edit (`useHeldEdit`) brackets the drag so undo gets one entry per
  * adjustment rather than one per pointer-move. The slider's `onGestureEnd`
  * closes that bracket however the gesture ends, including a drag brought back
  * to where it started, which commits no value but did open an edit.

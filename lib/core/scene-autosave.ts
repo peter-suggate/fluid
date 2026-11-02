@@ -534,7 +534,9 @@ export function createSceneAutosave(options: SceneAutosaveOptions = {}): SceneAu
   };
 
   const commit = (root: Part, head: AutosaveHead, working: SceneAutosaveDocument) => {
-    if (!database) return;
+    // Closed under the pass by another tab's upgrade: the parts are on disk, so
+    // the redo is a pass with nothing to write but this head.
+    if (!database) { pending ??= working; open(); return; }
     const keys = new Set<string>();
     partKeys(root, keys);
     let missing = false;
@@ -576,13 +578,15 @@ export function createSceneAutosave(options: SceneAutosaveOptions = {}): SceneAu
       basis = undefined;
       uncommitted = undefined;
       pending ??= working;
-      begin();
+      advance();
     };
   };
 
   const slice = () => {
     const current = pass;
-    if (!current || !database) return;
+    if (!current) return;
+    // Closed between slices: the pass resumes where it stopped once it reopens.
+    if (!database) { open(); return; }
     const batch: Part[] = [];
     let transaction: IDBTransaction;
     try {
@@ -619,9 +623,15 @@ export function createSceneAutosave(options: SceneAutosaveOptions = {}): SceneAu
     if (opening || database) return;
     opening = true;
     openParts(options.database, (opened) => {
+      opening = false;
       database = opened;
-      opened.onversionchange = () => opened.close();
-      advance();
+      // Another tab is upgrading the store. Let it, and open again for the next
+      // write rather than writing into a connection that is closed.
+      opened.onversionchange = () => {
+        opened.close();
+        if (database === opened) database = undefined;
+      };
+      if (pass) slice(); else advance();
     }, fail);
   };
 
@@ -725,6 +735,8 @@ export function createSceneAutosave(options: SceneAutosaveOptions = {}): SceneAu
       if (timer !== undefined) clearTimeout(timer);
       timer = undefined;
       pending = undefined;
+      // What was asked was not written, so asking for it again is not a repeat.
+      asked = undefined;
     },
   };
 }

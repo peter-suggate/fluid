@@ -19,22 +19,26 @@ interface Call { readonly name: string; readonly args: readonly unknown[] }
 function recordingController(log: Call[]): StudioEditorHostController {
   const note = (name: string) => (...args: unknown[]) => { log.push({ name, args }); return true; };
   return {
-    beginEdit: note("beginEdit"),
-    commitEdit: note("commitEdit"),
-    beginDraft: note("beginDraft"),
-    commitDraft: note("commitDraft"),
-    cancelDraft: note("cancelDraft"),
+    edit: (label: string, change: unknown, options: unknown, paneId: unknown) => {
+      log.push({ name: "edit", args: [label, options, paneId] });
+      if (typeof change === "function") change();
+      return true;
+    },
+    beginDraft: (...args: unknown[]) => {
+      log.push({ name: "beginDraft", args });
+      return { label: String(args[1]), open: true, commit: note("commit"), cancel: note("cancel") };
+    },
     undo: note("undo"),
     redo: note("redo"),
     setMethodParam: note("setMethodParam"),
   } as unknown as StudioEditorHostController;
 }
 
-test("a studio commit is beginEdit, then the document, then commitEdit", () => {
+test("a studio commit writes the document inside one edit", () => {
   const session = createPaneSession("b");
   const log: Call[] = [];
-  // The document write is the middle of the sandwich, and the only way to see
-  // it in order is to have the store itself report where it landed.
+  // The document write must happen inside the edit, after its snapshot, or
+  // the edit would be un-undoable; the store reports where it landed.
   const setScene = session.scene.getState().setScene;
   const scene = session.scene.getState().scene;
   session.scene.setState({
@@ -45,10 +49,9 @@ test("a studio commit is beginEdit, then the document, then commitEdit", () => {
   const next: SceneDescription = { ...scene, sceneId: "renamed" };
   host.commit("Renamed the scene", next, { reseed: true });
 
-  assert.deepEqual(log.map((call) => call.name), ["beginEdit", "setScene", "commitEdit"]);
-  assert.deepEqual(log[0]!.args, ["Renamed the scene", "b"]);
+  assert.deepEqual(log.map((call) => call.name), ["edit", "setScene"]);
+  assert.deepEqual(log[0]!.args, ["Renamed the scene", { reseed: true }, "b"]);
   assert.equal(log[1]!.args[0], next);
-  assert.deepEqual(log[2]!.args, [undefined, { reseed: true }, "b"]);
   assert.equal(session.scene.getState().scene.sceneId, "renamed");
 });
 
@@ -60,10 +63,9 @@ test("a studio patch commit re-seeds unless the caller says otherwise", () => {
   host.commitPatch!("Set REGION-1 Min", { sceneId: "patched" });
   host.commitPatch!("Set REGION-1 Max", { sceneId: "again" }, { reseed: false });
 
-  assert.deepEqual(log.map((call) => call.name),
-    ["beginEdit", "commitEdit", "beginEdit", "commitEdit"]);
-  assert.deepEqual(log[1]!.args[1], { reseed: true });
-  assert.deepEqual(log[3]!.args[1], { reseed: false });
+  assert.deepEqual(log.map((call) => call.name), ["edit", "edit"]);
+  assert.deepEqual(log[0]!.args[1], { reseed: true });
+  assert.deepEqual(log[1]!.args[1], { reseed: false });
 });
 
 test("every studio host operation addresses its own pane", () => {
@@ -71,16 +73,18 @@ test("every studio host operation addresses its own pane", () => {
   const log: Call[] = [];
   const host = studioEditorHost(session, recordingController(log));
 
-  host.draft!.begin("refinement-region", "Drew a region");
-  host.draft!.commit({ reseed: true, announceRebuild: "Rebuilding" });
-  host.draft!.cancel();
+  const gesture = host.draft!.begin("refinement-region", "Drew a region");
+  gesture!.commit({ reseed: true, announceRebuild: "Rebuilding" });
+  gesture!.cancel();
   host.history!.undo();
   host.history!.redo();
   host.params!.set("pressureIterations", 64);
 
   assert.deepEqual(log.map((call) => call.name),
-    ["beginDraft", "commitDraft", "cancelDraft", "undo", "redo", "setMethodParam"]);
-  for (const call of log) assert.equal(call.args.at(-1), "b", `${call.name} addressed the wrong pane`);
+    ["beginDraft", "commit", "cancel", "undo", "redo", "setMethodParam"]);
+  for (const call of log.filter((call) => call.name !== "commit" && call.name !== "cancel")) {
+    assert.equal(call.args.at(-1), "b", `${call.name} addressed the wrong pane`);
+  }
   assert.equal(host.id, "b");
 });
 

@@ -489,6 +489,15 @@ export function combineMainThreadPerformanceTraces(
  * One-shot WebGPU boundary chain. The recorder deliberately owns its query
  * resources so an asynchronous map can never observe a later frame's resolve.
  */
+/**
+ * Every timestamp recorder's lifecycle: passes are instrumented only while
+ * `recording`; `resolve` stages the readback; the one `read` maps it and
+ * destroys the recorder. A read in any other phase answers nothing and ends a
+ * recorder that was never resolved, but leaves alone one another read is
+ * already mapping.
+ */
+type TraceRecorderPhase = "recording" | "resolved" | "reading" | "disposed";
+
 export class GPUPerformanceTraceRecorder {
   private readonly querySet: GPUQuerySet;
   private readonly resolveBuffer: GPUBuffer;
@@ -497,7 +506,7 @@ export class GPUPerformanceTraceRecorder {
   private readonly encoderBreakTarget: GPUBuffer;
   private markerResources?: DynamicTraceMarkerResources;
   private boundaryCount = 0;
-  private disposed = false;
+  private phase: TraceRecorderPhase = "recording";
 
   static supported(device: GPUDevice): boolean {
     return device.features.has("timestamp-query");
@@ -539,6 +548,7 @@ export class GPUPerformanceTraceRecorder {
   }
 
   boundary(encoder: GPUCommandEncoder, label: string): void {
+    if (this.phase !== "recording") throw new Error(`GPU trace is ${this.phase}`);
     if (this.boundaryCount > this.phases.length) throw new Error("Too many GPU trace boundaries");
     // Empty marker passes collapse to zero on Dawn/Metal. Match the dynamic
     // recorder's observable stage boundary so presentation traces work on the
@@ -561,15 +571,19 @@ export class GPUPerformanceTraceRecorder {
   }
 
   resolve(encoder: GPUCommandEncoder): void {
+    if (this.phase !== "recording") throw new Error(`GPU trace is ${this.phase}`);
     if (this.boundaryCount !== this.phases.length + 1) {
       throw new Error(`GPU trace has ${this.boundaryCount} boundaries; expected ${this.phases.length + 1}`);
     }
     const bytes = (this.phases.length + 1) * 8;
     encoder.resolveQuerySet(this.querySet, 0, this.phases.length + 1, this.resolveBuffer, 0);
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
+    this.phase = "resolved";
   }
 
   async read(): Promise<PerformanceTrace | undefined> {
+    if (this.phase !== "resolved") { if (this.phase !== "reading") this.destroy(); return undefined; }
+    this.phase = "reading";
     try {
       await this.readBuffer.mapAsync(GPUMapMode.READ);
       const timestamps = new BigUint64Array(this.readBuffer.getMappedRange().slice(0));
@@ -588,8 +602,8 @@ export class GPUPerformanceTraceRecorder {
   }
 
   destroy(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+    if (this.phase === "disposed") return;
+    this.phase = "disposed";
     this.querySet.destroy();
     this.resolveBuffer.destroy();
     this.readBuffer.destroy();
@@ -668,7 +682,7 @@ export class DynamicGPUPerformanceTraceRecorder {
   private readonly markerResources: DynamicTraceMarkerResources;
   private readonly phases: GPUTimestampPhase[] = [];
   private boundaryCount = 0;
-  private disposed = false;
+  private phase: TraceRecorderPhase = "recording";
 
   private constructor(
     private readonly device: GPUDevice,
@@ -714,11 +728,13 @@ export class DynamicGPUPerformanceTraceRecorder {
   }
 
   begin(encoder: GPUCommandEncoder): void {
+    if (this.phase !== "recording") throw new Error(`GPU trace is ${this.phase}`);
     if (this.boundaryCount !== 0) throw new Error("GPU trace already started");
     this.writeBoundary(encoder, "GPU trace start");
   }
 
   completePhase(encoder: GPUCommandEncoder, phase: GPUTimestampPhase): void {
+    if (this.phase !== "recording") throw new Error(`GPU trace is ${this.phase}`);
     if (this.boundaryCount === 0) throw new Error("GPU trace has not started");
     if (this.boundaryCount >= this.capacity) throw new Error("GPU trace capacity exceeded");
     this.phases.push(phase);
@@ -744,15 +760,19 @@ export class DynamicGPUPerformanceTraceRecorder {
   }
 
   resolve(encoder: GPUCommandEncoder): void {
+    if (this.phase !== "recording") throw new Error(`GPU trace is ${this.phase}`);
     if (this.boundaryCount !== this.phases.length + 1 || this.phases.length === 0) {
       throw new Error("GPU trace is not a complete boundary chain");
     }
     const bytes = this.boundaryCount * 8;
     encoder.resolveQuerySet(this.querySet, 0, this.boundaryCount, this.resolveBuffer, 0);
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
+    this.phase = "resolved";
   }
 
   async read(): Promise<PerformanceTrace | undefined> {
+    if (this.phase !== "resolved") { if (this.phase !== "reading") this.destroy(); return undefined; }
+    this.phase = "reading";
     try {
       await this.readBuffer.mapAsync(GPUMapMode.READ);
       const bytes = this.boundaryCount * 8;
@@ -782,8 +802,8 @@ export class DynamicGPUPerformanceTraceRecorder {
   }
 
   destroy(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+    if (this.phase === "disposed") return;
+    this.phase = "disposed";
     this.querySet.destroy();
     this.resolveBuffer.destroy();
     this.readBuffer.destroy();
@@ -841,10 +861,13 @@ export class GPUStageTimestampRecorder {
   private queryCount = 0;
   private finalPhaseClosesOnNextPass = false;
   private finalBoundaryAnchor?: { readonly source: GPUBuffer; readonly offset: number };
-  private started = false;
-  private resolved = false;
-  private overflowed = false;
-  private disposed = false;
+  /**
+   * `idle` until `begin`; `overflowed` keeps accepting stages but claims no
+   * more counters, and resolves to `discarded`, which reads as nothing.
+   */
+  private phase: "idle" | "overflowed" | "discarded" | TraceRecorderPhase = "idle";
+  private get open(): boolean { return this.phase === "recording" || this.phase === "overflowed"; }
+  private overflow(): void { if (this.phase === "recording") this.phase = "overflowed"; }
 
   static supported(device: GPUDevice): boolean {
     return device.features.has("timestamp-query");
@@ -933,8 +956,8 @@ export class GPUStageTimestampRecorder {
 
   /** Open the first stage. Its boundary lands on the frame's first pass. */
   begin(): void {
-    if (this.started) throw new Error("GPU stage trace already started");
-    this.started = true;
+    if (this.phase !== "idle") throw new Error("GPU stage trace already started");
+    this.phase = "recording";
     this.armedBoundaries = 1;
   }
 
@@ -944,8 +967,8 @@ export class GPUStageTimestampRecorder {
    * boundary deliberately waits for the next pass that does real work.
    */
   completePhase(_encoder: GPUCommandEncoder, phase: GPUTimestampPhase): void {
-    if (!this.started) throw new Error("GPU stage trace has not started");
-    if (this.phases.length + 1 >= this.capacity) { this.overflowed = true; return; }
+    if (!this.open) throw new Error(`GPU stage trace is ${this.phase}`);
+    if (this.phases.length + 1 >= this.capacity) { this.overflow(); return; }
     this.phases.push(phase);
     if (this.armedBoundaries === 0 && this.lastComputeEnd !== undefined) {
       this.boundarySlots.push(this.lastComputeEnd);
@@ -960,9 +983,9 @@ export class GPUStageTimestampRecorder {
    * render pass cannot close a valid monotonic chain.
    */
   completeFinalPhaseOnNextPass(phase: GPUTimestampPhase): void {
-    if (!this.started) throw new Error("GPU stage trace has not started");
+    if (!this.open) throw new Error(`GPU stage trace is ${this.phase}`);
     if (this.finalPhaseClosesOnNextPass) throw new Error("GPU stage trace final phase is already armed");
-    if (this.phases.length + 1 >= this.capacity) { this.overflowed = true; return; }
+    if (this.phases.length + 1 >= this.capacity) { this.overflow(); return; }
     this.phases.push(phase);
     this.finalPhaseClosesOnNextPass = true;
   }
@@ -974,7 +997,7 @@ export class GPUStageTimestampRecorder {
    * timestamp a trustworthy final boundary.
    */
   anchorFinalBoundary(source: GPUBuffer, offset = 0): void {
-    if (this.resolved) throw new Error("GPU stage trace is already resolved");
+    if (this.phase !== "idle" && !this.open) throw new Error(`GPU stage trace is ${this.phase}`);
     if (offset < 0 || offset % 4 !== 0) {
       throw new RangeError("GPU stage trace final anchor offset must be nonnegative/aligned");
     }
@@ -989,14 +1012,14 @@ export class GPUStageTimestampRecorder {
    * armed for the pass after it.
    */
   private claimBoundary(encoder: GPUCommandEncoder, occupied: boolean, compute: boolean) {
-    if (!this.started || this.resolved || this.disposed || this.overflowed) return undefined;
+    if (this.phase !== "recording") return undefined;
     const breaks = this.closedOnLastPass;
     this.closedOnLastPass = false;
     if (breaks) encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
     if (occupied || (!compute && this.armedBoundaries === 0)) { this.lastComputeEnd = undefined; return undefined; }
     const opens = this.armedBoundaries > 0, closes = compute || this.finalPhaseClosesOnNextPass;
     const querySlots = (opens ? 1 : 0) + (closes ? 1 : 0);
-    if (this.queryCount + querySlots > this.capacity) { this.overflowed = true; return undefined; }
+    if (this.queryCount + querySlots > this.capacity) { this.overflow(); return undefined; }
     const beginningOfPassWriteIndex = opens ? this.queryCount : undefined;
     if (opens) {
       this.queryCount += 1;
@@ -1029,17 +1052,15 @@ export class GPUStageTimestampRecorder {
    * ever encodes.
    */
   resolve(encoder: GPUCommandEncoder): void {
-    if (!this.started || this.resolved) throw new Error("GPU stage trace is not open");
-    this.resolved = true;
-    if (this.finalPhaseClosesOnNextPass) { this.overflowed = true; return; }
-    if (this.phases.length === 0) { this.overflowed = true; return; }
+    if (!this.open) throw new Error(`GPU stage trace is ${this.phase}`);
+    if (this.phase === "overflowed" || this.finalPhaseClosesOnNextPass || this.phases.length === 0) { this.phase = "discarded"; return; }
     // The last completed stage already armed the closing boundary. It has no
     // following work to ride, so this is the one pass the recorder encodes.
     // Metal/Dawn can resolve a final pass's *beginning* timestamp to zero even
     // when the pass performs an observable atomic write. Its end timestamp is
     // reliable, so the closing boundary owns an end-of-pass query directly.
     if (this.armedBoundaries > 0) {
-      if (this.queryCount >= this.capacity) { this.overflowed = true; return; }
+      if (this.queryCount >= this.capacity) { this.phase = "discarded"; return; }
       const endOfPassWriteIndex = this.queryCount;
       this.queryCount += 1;
       for (let boundary = 0; boundary < this.armedBoundaries; boundary += 1) {
@@ -1048,7 +1069,7 @@ export class GPUStageTimestampRecorder {
       this.armedBoundaries = 0;
       encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
       if (this.finalBoundaryAnchor) {
-        if (!this.markerResources) { this.overflowed = true; return; }
+        if (!this.markerResources) { this.phase = "discarded"; return; }
         encoder.copyBufferToBuffer(this.finalBoundaryAnchor.source,
           this.finalBoundaryAnchor.offset, this.markerResources.buffer, 0, 4);
       }
@@ -1063,15 +1084,17 @@ export class GPUStageTimestampRecorder {
       }
       marker.end();
     }
-    if (this.boundarySlots.length !== this.phases.length + 1) { this.overflowed = true; return; }
+    if (this.boundarySlots.length !== this.phases.length + 1) { this.phase = "discarded"; return; }
     const bytes = this.queryCount * 8;
     encoder.resolveQuerySet(this.querySet, 0, this.queryCount, this.resolveBuffer, 0);
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, bytes);
+    this.phase = "resolved";
   }
 
   async read(allowZeroDuration = false): Promise<PerformanceTrace | undefined> {
+    if (this.phase !== "resolved") { if (this.phase !== "reading") this.destroy(); return undefined; }
+    this.phase = "reading";
     try {
-      if (!this.resolved || this.overflowed) return undefined;
       const bytes = this.queryCount * 8;
       await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
       const resolved = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
@@ -1112,8 +1135,8 @@ export class GPUStageTimestampRecorder {
   }
 
   destroy(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+    if (this.phase === "disposed") return;
+    this.phase = "disposed";
     this.querySet.destroy();
     this.resolveBuffer.destroy();
     this.readBuffer.destroy();
@@ -1254,8 +1277,7 @@ export class GPUPassTimestampRecorder {
     endPass: number;
   }> = [];
   private semanticPhaseStart = 0;
-  private resolved = false;
-  private disposed = false;
+  private phase: TraceRecorderPhase = "recording";
 
   static supported(device: GPUDevice): boolean {
     return device.features.has("timestamp-query");
@@ -1297,7 +1319,7 @@ export class GPUPassTimestampRecorder {
   instrument(encoder: GPUCommandEncoder): GPUCommandEncoder {
     const claim = (target: GPUCommandEncoder, descriptorLabel: string | undefined, occupied: boolean,
       kind: "compute" | "render") => {
-      if (occupied || this.disposed || 2 * (this.labels.length + 1) > this.capacity) return undefined;
+      if (occupied || this.phase !== "recording" || 2 * (this.labels.length + 1) > this.capacity) return undefined;
       const base = 2 * this.labels.length;
       this.labels.push({ label: descriptorLabel ?? `pass ${this.labels.length}`, kind });
       if (this.encoderBreaks) target.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
@@ -1325,6 +1347,7 @@ export class GPUPassTimestampRecorder {
 
   /** Close one semantic stage over the passes encoded since the prior seam. */
   completePhase(phase: GPUTimestampPhase): void {
+    if (this.phase !== "recording") throw new Error(`GPU pass trace is ${this.phase}`);
     this.semanticPhases.push({
       phase,
       firstPass: this.semanticPhaseStart,
@@ -1335,11 +1358,11 @@ export class GPUPassTimestampRecorder {
 
   /** False when the instrumented encoder opened no pass at all. */
   resolve(encoder: GPUCommandEncoder): boolean {
-    if (this.labels.length === 0 || this.disposed) return false;
-    this.resolved = true;
+    if (this.labels.length === 0 || this.phase !== "recording") return false;
     const count = 2 * this.labels.length;
     encoder.resolveQuerySet(this.querySet, 0, count, this.resolveBuffer, 0);
     encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, count * 8);
+    this.phase = "resolved";
     return true;
   }
 
@@ -1355,8 +1378,9 @@ export class GPUPassTimestampRecorder {
    * itself rather than declining to answer.
    */
   async read(): Promise<GPUPassTimestampReading | undefined> {
+    if (this.phase !== "resolved") { if (this.phase !== "reading") this.destroy(); return undefined; }
+    this.phase = "reading";
     try {
-      if (!this.resolved || this.disposed) return undefined;
       const bytes = 2 * this.labels.length * 8;
       await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
       const stamps = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
@@ -1516,8 +1540,8 @@ export class GPUPassTimestampRecorder {
   }
 
   destroy(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+    if (this.phase === "disposed") return;
+    this.phase = "disposed";
     this.querySet.destroy();
     this.resolveBuffer.destroy();
     this.readBuffer.destroy();

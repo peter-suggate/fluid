@@ -61,8 +61,8 @@ fn tierColor(t:f32)->vec3f {if(t<.5){return vec3f(.25,.58,.94);}if(t<1.5){return
  return vec4f(color,alpha);
 }`;
 export class SpatialPerformanceOverlay {
-  private pipeline?: GPURenderPipeline;
-  private volumePipeline?: GPURenderPipeline;
+  /** Both views or neither: compiled together, so the 3D view can never draw before its pipeline exists. */
+  private pipelines?: { slice: GPURenderPipeline; volume: GPURenderPipeline };
   private depth?: GPUTexture;
   private width = 0;
   private height = 0;
@@ -87,20 +87,22 @@ export class SpatialPerformanceOverlay {
       { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
     ] })] });
     const module = this.device.createShaderModule({ label: "Spatial performance overlay", code: spatialPerformanceWGSL });
-    this.pipeline = await this.device.createRenderPipelineAsync({ label: "Spatial performance overlay", layout,
+    const slice = this.device.createRenderPipelineAsync({ label: "Spatial performance overlay", layout,
       vertex: { module, entryPoint: "vertexMain" }, fragment: { module, entryPoint: "fragmentMain", targets: [{ format: this.format,
         blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } } }] }, primitive: { topology: "triangle-list" }, depthStencil: { format: "depth24plus", depthCompare: "less", depthWriteEnabled: true } });
     // X-ray volume view: every depth contributes; no front box can hide the
     // interior. Share the slice bind layout so changing views needs no rebind.
-    this.volumePipeline = await this.device.createRenderPipelineAsync({ label: "Spatial performance transparent volume",
+    const volume = this.device.createRenderPipelineAsync({ label: "Spatial performance transparent volume",
       layout,
       vertex: { module, entryPoint: "vertexMain" }, fragment: { module, entryPoint: "fragmentMain", targets: [{ format: this.format,
         blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } } }] },
       primitive: { topology: "triangle-list" }, depthStencil: { format: "depth24plus", depthCompare: "always", depthWriteEnabled: false } });
+    const [slicePipeline, volumePipeline] = await Promise.all([slice, volume]);
+    this.pipelines = { slice: slicePipeline, volume: volumePipeline };
   }
   set(snapshot: SpatialCostSnapshot | undefined, view: PerformanceView, opacity: number, width = 1, height = 1): void {
     this.shown = opacity > 0 && !!snapshot;this.view = view;
-    if (!snapshot || !this.pipeline || !this.shown) return;
+    if (!snapshot || !this.pipelines || !this.shown) return;
     if (width !== this.width || height !== this.height) {
       this.width = width; this.height = height;this.depth?.destroy();
       this.depth = this.device.createTexture({ label: "Performance diagnostic depth", size: [Math.max(1,width), Math.max(1,height)], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
@@ -121,7 +123,7 @@ export class SpatialPerformanceOverlay {
     if (!this.instances || this.instances.size < instances.byteLength) {
       this.instances?.destroy();this.instances = this.device.createBuffer({ label: "Spatial performance owners", size: instances.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     }
-    this.group = this.device.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: [
+    this.group = this.device.createBindGroup({ layout: this.pipelines.slice.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: this.camera } }, { binding: 1, resource: { buffer: this.settings } },
       { binding: 2, resource: { buffer: this.buffer } }, { binding: 3, resource: { buffer: this.instances } },
     ] });
@@ -132,9 +134,9 @@ export class SpatialPerformanceOverlay {
     this.device.queue.writeBuffer(this.settings, 0, new Float32Array([opacity, +(view.dimension === "3d"), +(view.grain === "cell"), +(view.paint === "tiers"), snapshot.report.wall_ms / Math.max(1, data.entities), Math.cbrt(Math.max(1, data.entities)), 0, 0, ...low, 0, ...high, 0]));
   }
   encode(encoder: GPUCommandEncoder, target: GPUTextureView): boolean {
-    if (!this.shown || !this.count || !this.pipeline || !this.group) return false;
+    if (!this.shown || !this.count || !this.pipelines || !this.group) return false;
     const pass = encoder.beginRenderPass({ label: "Spatial performance overlay", colorAttachments: [{ view: target, loadOp: "load", storeOp: "store" }], depthStencilAttachment: { view: this.depth!.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "discard" } });
-    pass.setPipeline(this.view.dimension === "3d" ? this.volumePipeline! : this.pipeline);pass.setBindGroup(0, this.group);
+    pass.setPipeline(this.view.dimension === "3d" ? this.pipelines.volume : this.pipelines.slice);pass.setBindGroup(0, this.group);
     pass.draw(this.view.dimension === "3d" ? 36 : 6, this.instanceCount);pass.end();return true;
   }
   destroy(): void { this.depth?.destroy(); this.instances?.destroy(); this.buffer?.destroy();this.settings.destroy(); }

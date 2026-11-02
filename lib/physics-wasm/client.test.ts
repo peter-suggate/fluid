@@ -68,3 +68,48 @@ test("client serializes commands and returns publication buffers to the worker",
   await client.destroy();
   assert.equal(worker.terminated, true);
 });
+
+/** A worker that answers `initialize` and `dispose` and can be made to crash. */
+class ScriptedWorker implements WorkerPort {
+  private message?: (event: MessageEvent<PhysicsWorkerResponse>) => void;
+  private error?: (event: Event) => void;
+  readonly requests: PhysicsWorkerRequest[] = [];
+  terminated = 0;
+  postMessage(message: PhysicsWorkerRequest): void {
+    this.requests.push(message);
+    if (message.type === "initialize") this.answer({ type: "initialized", requestId: message.requestId, artifact: "scalar", threadCount: 1 });
+    if (message.type === "dispose") this.answer({ type: "disposed", requestId: message.requestId });
+  }
+  addEventListener(type: "message" | "error" | "messageerror",
+    listener: ((event: MessageEvent<PhysicsWorkerResponse>) => void) | ((event: Event) => void)): void {
+    if (type === "message") this.message = listener as (event: MessageEvent<PhysicsWorkerResponse>) => void;
+    if (type === "error") this.error = listener as (event: Event) => void;
+  }
+  terminate(): void { this.terminated++; }
+  crash(message: string): void { this.error?.({ message } as unknown as Event); }
+  private answer(response: PhysicsWorkerResponse): void {
+    queueMicrotask(() => this.message?.({ data: response } as MessageEvent<PhysicsWorkerResponse>));
+  }
+}
+
+test("a worker error fails pending and later requests with its reason", async () => {
+  const worker = new ScriptedWorker();
+  const client = await PhysicsWasmClient.create({ artifact: "scalar", moduleUrl: "fixture", workerFactory: () => worker });
+  const pending = client.snapshot();
+  await Promise.resolve();
+  worker.crash("wasm trap");
+  await assert.rejects(pending, /wasm trap/);
+  await assert.rejects(client.advance(0.1), /wasm trap/);
+  await client.destroy();
+  assert.equal(worker.requests.filter(request => request.type === "dispose").length, 0, "no handshake with a failed worker");
+  assert.equal(worker.terminated, 1);
+});
+
+test("concurrent destroys share one dispose handshake", async () => {
+  const worker = new ScriptedWorker();
+  const client = await PhysicsWasmClient.create({ artifact: "scalar", moduleUrl: "fixture", workerFactory: () => worker });
+  await Promise.all([client.destroy(), client.destroy()]);
+  assert.equal(worker.requests.filter(request => request.type === "dispose").length, 1);
+  assert.equal(worker.terminated, 1);
+  await assert.rejects(client.snapshot(), /destroyed/);
+});

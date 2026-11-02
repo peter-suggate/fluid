@@ -20,3 +20,31 @@ test("a runtime failure is terminal, preserves its first cause, and cannot resta
     { state: "unavailable", label: "Invalid bind group in pressure solve" },
   ]);
 });
+
+test("a lens-bloom compile failure is reported once and ends the renderer", async () => {
+  const statuses: GPUStatus[] = [];
+  const renderer = new FluidLabRenderer({} as HTMLCanvasElement, (status) => statuses.push(status));
+  const pipeline = {
+    lensBloomOptions: { enabled: true }, lensBloomReady: false,
+    ensureLensBloomReady: () => Promise.reject(new Error("bloom shader")),
+  };
+  Object.assign(renderer, { waterPipeline: pipeline });
+  const access = renderer as unknown as { prepareLensBloom(pipeline: unknown): void; lensBloomPreparation?: Promise<void> };
+  access.prepareLensBloom(pipeline);
+  await access.lensBloomPreparation;
+  renderer.stopAfterFailure(new Error("device lost later"));
+  assert.deepEqual(statuses.map(({ state, label }) => ({ state, label })), [
+    { state: "unavailable", label: "Lens bloom preparation failed: bloom shader" },
+  ]);
+  await assert.rejects(renderer.initialize(), /Lens bloom preparation failed: bloom shader/);
+});
+
+test("destroy after a failure still releases resources exactly once", () => {
+  const renderer = new FluidLabRenderer({} as HTMLCanvasElement, () => {});
+  let destroyed = 0;
+  Object.assign(renderer, { waterPipeline: { destroy: () => { destroyed += 1; } } });
+  renderer.stopAfterFailure(new Error("validation"));
+  renderer.destroy();
+  renderer.destroy();
+  assert.equal(destroyed, 1);
+});

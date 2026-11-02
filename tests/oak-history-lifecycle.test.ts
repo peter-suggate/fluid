@@ -16,9 +16,8 @@ test("tree commit, undo and redo retain selection and the running timeline", con
   session.ui.getState().select(selection);
   session.runtime.getState().setRunState("running");
   context.mock.method(simulation, "reset", () => { assert.fail("Scenery history reset the fluid timeline"); });
-  simulation.beginEdit("Changed oak");
   const edited = withOakParameters(initial, node.id, { twigDepth: 1 });
-  simulation.commitEdit(edited, { reseed: true });
+  simulation.edit("Changed oak", edited, { reseed: true });
   assert.equal(session.history.getState().past.length, 1);
   assert.equal(simulation.undo(), true);
   assert.deepEqual(session.scene.getState().scene.scenery, initial.scenery);

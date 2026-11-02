@@ -14,10 +14,10 @@ import {
 /**
  * Entering and leaving the mode, as four verbs.
  *
- * Kept apart from `compare-model.ts` because these are the only compare
- * operations that touch the *host clock*: opening compare is what puts the
- * transport into lockstep, and the model has no business knowing that. Nothing
- * here is reachable from a CPU test, and nothing in the model needs it.
+ * Kept apart from `compare-model.ts` because these are the compare operations
+ * that reach the *host*: opening compare is what puts the transport into
+ * lockstep (through `CompareHost`, the pane's one membership owner), keeping
+ * or swapping a pane re-seeds it, and the model has no business knowing that.
  */
 
 /** The second pane's id. Pane A is the session and is never registered or dropped. */
@@ -30,32 +30,27 @@ export function compareModeActive(): boolean {
 /**
  * Open the second pane.
  *
- * The clock is not touched beyond the registration: a running scene keeps
- * running and a paused one stays paused, because the mode is a second view of
- * the same experiment rather than a new one. Registering is what puts the host
- * into lockstep — see `PaneClockHost.lockstep`.
+ * Only the record changes here. Pane B joins the host — its realm and its place
+ * on the clock, in one `simulation.attachPane` — from `CompareHost`'s effect,
+ * the one path a compare *link* takes too. The clock is not otherwise touched:
+ * a running scene keeps running and a paused one stays paused, because the mode
+ * is a second view of the same experiment rather than a new one. Joining is
+ * what puts the host into lockstep — see `PaneClockHost.lockstep`.
  */
-export function openCompareMode(sessionB?: PaneSession): void {
+export function openCompareMode(): void {
   if (compareModeActive()) return;
   useShellStore.getState().setCompareActive(true);
-  // The host attaches and registers pane B from its own effect, which is the
-  // path a compare *link* takes too. Doing it here as well is deliberate: a
-  // caller that already holds the realm should not have to wait a commit for
-  // the clock to know about it.
-  if (sessionB) simulation.attachPaneSession(SECOND_PANE_ID, sessionB);
-  simulation.registerPane(SECOND_PANE_ID);
 }
 
 /** Close it, keeping pane A. The diff and the padlocks go with the mode. */
 export function closeCompareMode(): void {
   if (!compareModeActive()) return;
-  simulation.unregisterPane(SECOND_PANE_ID);
   useShellStore.getState().setCompareActive(false);
 }
 
-export function toggleCompareMode(sessionB?: PaneSession): void {
+export function toggleCompareMode(): void {
   if (compareModeActive()) closeCompareMode();
-  else openCompareMode(sessionB);
+  else openCompareMode();
 }
 
 /**

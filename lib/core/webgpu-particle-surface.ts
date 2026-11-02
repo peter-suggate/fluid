@@ -1,3 +1,4 @@
+import { StagedReadback } from "./staged-readback";
 import type { GPUFluidParticleSource } from "./webgpu-particle-overlay";
 
 /**
@@ -629,8 +630,7 @@ export class ParticleSurface {
   /** What the pool was last built from: revision, greed, smoothing, thickness, container x, z. */
   private readonly built = new Float64Array(7).fill(NaN);
   private readonly liveWord = new Uint32Array(1);
-  private statsReadback?: GPUBuffer;
-  private statsPending = false;
+  private statsReadback?: StagedReadback;
   private reportedOverflow = 0;
   private lastStats?: ParticleSurfaceStats;
   private destroyed = false;
@@ -685,7 +685,7 @@ export class ParticleSurface {
     this.vertexPool = this.device.createBuffer({ label: "Fine particle surface vertices", size: SURFACE_VERTEX_BYTES * PARTICLE_SURFACE_VERTEX_CAPACITY, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     // Bound while a source has no frame: the origin flag is zero then and no stage reads it.
     this.fallbackFrame = this.device.createBuffer({ label: "Fine particle surface frame fallback", size: 48, usage: GPUBufferUsage.UNIFORM });
-    this.statsReadback = this.device.createBuffer({ label: "Fine particle surface stats", size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statsReadback = new StagedReadback(this.device, { label: "Fine particle surface stats", size: 16 });
   }
 
   get ready(): boolean { return Boolean(this.chain && this.layout && this.uniforms); }
@@ -782,21 +782,17 @@ export class ParticleSurface {
       pass.dispatchWorkgroups(groups);
     }
     pass.end();
-    if (!this.statsPending) {
-      encoder.copyBufferToBuffer(this.counters!, 4, this.statsReadback!, 0, 12);
-      this.statsPending = true;
-    }
+    if (this.statsReadback!.idle) this.statsReadback!.encode(encoder, (encoder, staging) => encoder.copyBufferToBuffer(this.counters!, 4, staging, 0, 12));
     return true;
   }
 
   /** Maps the counts copied by the last rebuild once that submit completes; never blocks. */
   pumpStats(): void {
     const readback = this.statsReadback;
-    if (!this.statsPending || !readback || readback.mapState !== "unmapped") return;
-    readback.mapAsync(GPUMapMode.READ).then(() => {
-      const [bricks, vertices, overflow] = new Uint32Array(readback.getMappedRange().slice(0));
-      readback.unmap();
-      this.statsPending = false;
+    if (readback?.state !== "copied") return;
+    void readback.read(bytes => new Uint32Array(bytes, 0, 3).slice()).then(words => {
+      if (!words) return;
+      const [bricks, vertices, overflow] = words;
       this.lastStats = { bricks: bricks!, vertices: vertices!, overflow: overflow! };
       const fresh = overflow! & ~this.reportedOverflow;
       if (fresh) {
@@ -804,7 +800,7 @@ export class ParticleSurface {
         const names = Object.entries(PARTICLE_SURFACE_OVERFLOW).filter(([, bit]) => fresh & bit).map(([name]) => name);
         console.error(`Fine particle surface overflowed its ${names.join(", ")} pool: parts of the skin are missing (${bricks} bricks, ${vertices} vertices).`);
       }
-    }).catch(() => { this.statsPending = false; });
+    }, () => {});
   }
 
   destroy(): void {

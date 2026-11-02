@@ -13,6 +13,9 @@ export interface InteractionHostOptions {
   fluid?: InteractionFluidDriver;
 }
 const copy = <T>(value: T): T => structuredClone(value);
+/** The context is what the run state says it is, never a separate write a failure path can forget. */
+const contextOf = (view: Pick<InteractionView, 'controlledEntityId' | 'running'>): InteractionView['context'] =>
+  view.controlledEntityId ? 'play' : view.running ? 'observe' : 'edit';
 /** Concrete pane host. All structural mutations and steps serialize on one queue. */
 export class SceneInteractionHost implements InteractionHost {
   private view: InteractionView;
@@ -37,13 +40,24 @@ export class SceneInteractionHost implements InteractionHost {
   readonly ready: Promise<void>;
   constructor(private scene: SceneDescription, private options: InteractionHostOptions = {}) {
     this.view = { generation: 0, documentRevision: 0, document: scene.interaction ?? EMPTY_INTERACTIONS, readiness: { state: 'preparing', reasons: [] }, running: false, context: 'edit', controlCandidates: [] };
-    this.setFluidDriver(options.fluid);
+    this.attachFluid(options.fluid);
     this.ready = this.enqueue(() => this.rebuild(scene));
     this.ready.catch(() => undefined);
   }
   getView = (): InteractionView => this.view;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  private publish(patch: Partial<InteractionView>) { this.view = { ...this.view, ...patch }; for (const listener of this.listeners) listener(); }
+  /** Nothing is published once disposed: a queued operation finishing late must not reach a pane that let go. */
+  private publish(patch: Partial<Omit<InteractionView, 'context'>>) {
+    if (this.disposed) return;
+    const view = { ...this.view, ...patch };
+    this.view = { ...view, context: contextOf(view) };
+    for (const listener of this.listeners) listener();
+  }
+  /** Stop running and let go of control: every failure ends play the same way. */
+  private halt(readiness: InteractionView['readiness']) {
+    this.clearInput();
+    this.publish({ running: false, controlledEntityId: undefined, target: undefined, readiness });
+  }
   private enqueue<T>(operation: () => Promise<T> | T): Promise<T> {
     const task = this.tail.then(() => { if (this.disposed) throw new Error('Interaction host disposed'); return operation(); });
     this.tail = task.catch(() => undefined); return task;
@@ -71,7 +85,7 @@ export class SceneInteractionHost implements InteractionHost {
     this.world?.destroy(); for (const r of this.runtimes.values()) r.dispose();
     this.world = built.world; this.runtimes = built.runtimes; this.plan = built.plan; this.scene = scene;
     this.generation++; this.solidRevision++; this.commandIds.clear(); this.lastSequence = -1; this.clearInput(); this.events = []; this.sensors = [];
-    this.publish({ generation: this.generation, document: built.plan.document, snapshot: undefined, documentRevision: this.revision, readiness: { state: 'preparing', reasons: [] }, running: false, controlledEntityId: undefined, context: "edit",
+    this.publish({ generation: this.generation, document: built.plan.document, snapshot: undefined, documentRevision: this.revision, readiness: { state: 'preparing', reasons: [] }, running: false, controlledEntityId: undefined,
       controlCandidates: built.plan.document.entities.filter(e => e.behaviors.some(b => interactionCatalog.behaviorType(b.type)?.provides?.includes("controllable"))).map(e => ({ entityId: e.id, availability: { available: true as const } })), target: undefined });
     this.updateReadiness(); this.publishSnapshot(0, 0);
   }
@@ -90,13 +104,13 @@ export class SceneInteractionHost implements InteractionHost {
   }
   currentBodies(): RigidBodyState[] { return this.world?.renderBodies() ?? []; }
   private async rebuild(scene: SceneDescription) {
-    this.publish({ readiness: { state: 'preparing', reasons: [] }, running: false, controlledEntityId: undefined, context: 'edit' });
+    this.halt({ state: 'preparing', reasons: [] });
     try {
       const built = await this.build(scene, this.generation + 1);
       if (this.disposed) { built.world.destroy(); for (const r of built.runtimes.values()) r.dispose(); return; }
       this.adopt(scene, built);
     } catch (error) {
-      this.publish({ readiness: { state: 'unavailable', reasons: [error instanceof Error ? error.message : String(error)] }, running: false });
+      this.halt({ state: 'unavailable', reasons: [error instanceof Error ? error.message : String(error)] });
       throw error;
     }
   }
@@ -104,8 +118,7 @@ export class SceneInteractionHost implements InteractionHost {
     if (!this.world || this.disposed || (this.view.readiness.state === 'failed' && !recoverSceneEdit)) return;
     const failure = this.scene.systems?.fluid !== false ? this.options.fluid?.failureReason?.() : undefined;
     if (failure) {
-      this.clearInput();
-      this.publish({ running: false, readiness: { state: 'failed', reasons: [failure] } });
+      this.halt({ state: 'failed', reasons: [failure] });
       this.options.transport?.('pause');
       return;
     }
@@ -115,18 +128,32 @@ export class SceneInteractionHost implements InteractionHost {
       : { state: 'ready', reasons: [] };
     if (JSON.stringify(readiness) !== JSON.stringify(this.view.readiness)) this.publish({ readiness });
   }
-  setFluidDriver(driver: InteractionFluidDriver | undefined) {
+  private attachFluid(driver: InteractionFluidDriver | undefined) {
     this.detachFluidReadiness?.();
     this.options.fluid = driver;
     this.detachFluidReadiness = driver?.subscribeReadiness?.(() => this.updateReadiness());
     this.updateReadiness();
   }
-  setRunning(running: boolean) {
-    if (!running) this.clearInput();
-    this.publish({ running, context: this.view.controlledEntityId ? 'play' : running ? 'observe' : 'edit' });
+  /*
+   * The three run-state writes from outside go through the queue, so each lands
+   * after the step or rebuild in flight rather than being overwritten by it: a
+   * play pressed during a rebuild used to be undone by the rebuild's adopt.
+   * They never reject; after dispose there is nothing left to change.
+   */
+  setFluidDriver(driver: InteractionFluidDriver | undefined): Promise<void> {
+    return this.enqueue(() => this.attachFluid(driver)).catch(() => undefined);
+  }
+  setRunning(running: boolean): Promise<void> {
+    return this.enqueue(() => {
+      if (!running) this.clearInput();
+      this.publish({ running });
+    }).catch(() => undefined);
   }
   clearInput() { this.held.clear(); this.edges = []; this.world?.releaseGrab(); }
-  releaseInput() { this.clearInput(); this.publish({ controlledEntityId: undefined, target: undefined, context: this.view.running ? 'observe' : 'edit' }); }
+  releaseInput(): Promise<void> {
+    return this.enqueue(() => this.releaseControl()).catch(() => undefined);
+  }
+  private releaseControl() { this.clearInput(); this.publish({ controlledEntityId: undefined, target: undefined }); }
   validateSolidEdit(scene: SceneDescription) { this.world?.validateSolidEdit(scene); }
   replaceScene(scene: SceneDescription, reset = false): Promise<void> {
     return this.enqueue(async () => {
@@ -136,7 +163,7 @@ export class SceneInteractionHost implements InteractionHost {
       }
       this.revision++; await this.rebuild(scene);
     }).catch(error => {
-      this.publish({ running: false, readiness: { state: 'failed', reasons: [String(error)] } });
+      this.halt({ state: 'failed', reasons: [String(error)] });
       this.options.transport?.('pause'); throw error;
     });
   }
@@ -150,15 +177,19 @@ export class SceneInteractionHost implements InteractionHost {
         if (command.kind === 'possess' || command.kind === 'transport') this.updateReadiness();
         if (command.kind === 'transport') {
           if (command.action === 'reset') await this.rebuild(this.scene);
-          else { if (command.action === 'play' && this.view.readiness.state !== 'ready') throw new Error(this.view.readiness.reasons.join('; ')); this.setRunning(command.action === 'play'); }
+          else {
+            if (command.action === 'play' && this.view.readiness.state !== 'ready') throw new Error(this.view.readiness.reasons.join('; '));
+            if (command.action === 'pause') this.clearInput();
+            this.publish({ running: command.action === 'play' });
+          }
           this.options.transport?.(command.action);
           return { accepted: true, documentRevision: this.revision, impact: command.action === 'reset' ? 'reset' : 'live' };
         }
         if (command.kind === 'possess') {
           if (!this.view.controlCandidates.some(c => c.entityId === command.entityId && c.availability.available)) throw new Error('Entity is not controllable');
           if (this.view.readiness.state !== 'ready') throw new Error(this.view.readiness.reasons.join('; '));
-          this.clearInput(); this.publish({ controlledEntityId: command.entityId, context: 'play', running: true }); this.options.transport?.('play');
-        } else if (command.kind === 'release-control') this.releaseInput();
+          this.clearInput(); this.publish({ controlledEntityId: command.entityId, running: true }); this.options.transport?.('play');
+        } else if (command.kind === 'release-control') this.releaseControl();
         else if (command.kind === 'aim') {
           const d = command.direction;
           if (![...Object.values(d), ...Object.values(command.origin_m)].every(Number.isFinite) || Math.abs(Math.hypot(d.x, d.y, d.z) - 1) > 1e-5) throw new Error('Aim needs a finite origin and unit direction');
@@ -201,7 +232,7 @@ export class SceneInteractionHost implements InteractionHost {
             if(command.kind!=='import'&&command.kind!=='remove')throw new Error('Resolve missing plugins before editing their configuration');
             this.world?.destroy();this.world=undefined;for(const runtime of this.runtimes.values())runtime.dispose();this.runtimes.clear();this.plan=undefined;
             this.scene={...this.scene,interaction:inspection.document};this.generation++;this.revision++;this.clearInput();this.commandIds.clear();this.lastSequence=-1;this.events=[];this.sensors=[];
-            this.publish({generation:this.generation,documentRevision:this.revision,document:inspection.document,snapshot:undefined,running:false,context:'edit',controlledEntityId:undefined,target:undefined,controlCandidates:[],readiness:{state:'unavailable',reasons:inspection.unavailable.map(x=>x.reason)}});
+            this.publish({generation:this.generation,documentRevision:this.revision,document:inspection.document,snapshot:undefined,running:false,controlledEntityId:undefined,target:undefined,controlCandidates:[],readiness:{state:'unavailable',reasons:inspection.unavailable.map(x=>x.reason)}});
             this.options.commitScene?.(this.scene,`Interactive ${command.kind}`,'reset');
             this.options.published?.([],{generation:this.generation,tick:0,solidRevision:this.solidRevision,time_s:0,bodies:[]});
             return {accepted:true,documentRevision:this.revision,impact:'reset'};
@@ -238,6 +269,7 @@ export class SceneInteractionHost implements InteractionHost {
           // Build before committing: failed configurations never enter history.
           const candidate = await this.build(scene, this.generation + 1);
           try {
+            if (this.disposed) throw new Error('Interaction host disposed');
             if (command.kind === 'place') candidate.world.validatePlacement(command.entity.id);
             else if(command.kind==='duplicate'||command.kind==='import')for(const entity of validated.entities) {
               if(command.kind==='import'||!doc.entities.some(e=>e.id===entity.id))candidate.world.validatePlacement(entity.id);
@@ -253,6 +285,7 @@ export class SceneInteractionHost implements InteractionHost {
   }
   private publishSnapshot(tick: number, time_s: number) {
     if (!this.world) return;
+    if (this.disposed) return;
     const snapshot: WorldSnapshot = { generation: this.generation, tick, solidRevision: this.solidRevision, time_s, bodies: this.world.snapshots() };
     this.publish({ snapshot }); this.options.published?.(this.world.renderBodies(), snapshot);
   }
@@ -294,7 +327,7 @@ export class SceneInteractionHost implements InteractionHost {
         this.sensors = world.step(dt_s); this.publishSnapshot(tick, time_s); run('after-physics');
         if (commands.length) throw new Error('Physics commands must be submitted before physics');
         this.events = outgoing;
-      } catch (error) { this.publish({ running: false, readiness: { state: 'failed', reasons: [error instanceof Error ? error.message : String(error)] } }); this.options.transport?.('pause'); throw error; }
+      } catch (error) { this.halt({ state: 'failed', reasons: [error instanceof Error ? error.message : String(error)] }); this.options.transport?.('pause'); throw error; }
     });
   }
   async dispose() { this.disposed = true; this.detachFluidReadiness?.(); this.detachFluidReadiness = undefined; await this.tail; this.world?.destroy(); this.world = undefined; for (const r of this.runtimes.values()) r.dispose(); this.runtimes.clear(); this.listeners.clear(); }

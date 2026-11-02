@@ -211,6 +211,9 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       renderScene.revision = message.revision;
     }
   } else if (message.type === "draw") {
+    // Every draw is answered, a failed one too: the window sends the next frame
+    // only once this one has replied, and a draw that never replied would hold
+    // its frame pump and live previews for good.
     void (async () => {
       if (!renderScene || renderScene.revision !== message.sceneRevision) {
         throw new Error(`Render scene revision ${message.sceneRevision} has not been published`);
@@ -225,13 +228,9 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
         [time_s, renderScene.document, ...args],
         () => renderer === runtime && renderScene?.revision === message.sceneRevision,
       );
-      if (renderer !== runtime) return;
       // A scene edit can be accepted while the pressure receipt is pending.
       // The next queued request owns that document; this one only retires.
-      if (!renderScene || renderScene.revision !== message.sceneRevision) {
-        post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) });
-        return;
-      }
+      if (renderer !== runtime || !renderScene || renderScene.revision !== message.sceneRevision) return metrics;
       const catalog = cachedEnvironmentProxyCatalog(renderScene.document);
       const assetFields = catalog && needsSceneryCatalog
         ? loadedSceneMeshAssetDistanceFields(renderScene.document) : undefined;
@@ -254,10 +253,11 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
         sentSceneryCatalog = catalog;
         needsSceneryCatalog = false;
       }
-      post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) });
+      return metrics;
     })().catch((error: unknown) => {
       runtime.stopAfterFailure(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
-    });
+      return { context: "webgpu-worker-failed", methodId: message.args[4].methodId, presentationSubmitted: false };
+    }).then(metrics => post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) }));
   } else if (message.type === "set-simulation-scene") {
     runtime.setSimulationScene(message.scene ? markSceneRevision(message.scene) : undefined);
   }

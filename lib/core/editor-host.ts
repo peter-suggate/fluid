@@ -34,7 +34,12 @@ export interface EditorCommitOptions {
 
 /** An open gesture's transient document — a drag, before the pointer comes up. */
 export interface EditorHostDraft {
-  begin(subject: string, label: string): void;
+  /** Undefined when the host refused it: another gesture is still open. */
+  begin(subject: string, label: string): EditorHostGesture | undefined;
+}
+
+/** The gesture `EditorHostDraft.begin` opened; only it can close itself. */
+export interface EditorHostGesture {
   commit(options?: EditorCommitOptions): void;
   cancel(): void;
 }

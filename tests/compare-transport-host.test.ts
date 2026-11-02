@@ -77,12 +77,12 @@ test("a reset of one pane re-seeds every other pane's clock", () => {
   ]);
 });
 
-test("a pane re-seeded by someone else's reset keeps the run state it had", () => {
+test("a pane re-seeded by someone else's reset keeps its selection and stays quiet", () => {
   const plan = paneResetPlan(["a", "b"], "a");
   const bystander = plan.find((step) => step.id === "b");
   assert.ok(bystander, "pane B was left out of pane A's reset");
   assert.equal(bystander.resynchronizing, true,
-    "choosing a scene in one pane stopped the other");
+    "choosing a scene in one pane cleared the other's selection");
 });
 
 test("a single-pane reset is exactly the reset that shipped", () => {

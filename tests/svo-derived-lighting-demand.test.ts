@@ -11,7 +11,7 @@ const config = (enabled?: boolean): SimulationRunConfig => ({ methodId: "uniform
 type RendererAccess = {
   solverKey(scene: SceneDescription, config: SimulationRunConfig, mode: "full-scene" | "fluid-only"): string;
   beginGPUFluidInitialization(scene: SceneDescription, config: SimulationRunConfig, key: string, mode: "full-scene"): void;
-  gpuFluidPending?: Promise<void>;
+  solverBuild?: { settled?: Promise<void> };
   gpuFluid: unknown;
   svoSceneSidecar: unknown;
   gpuFluidGeneration: number;
@@ -50,7 +50,7 @@ test("radiance allocation toggles replace only the sidecar of a running fluid so
   const access = renderer as unknown as RendererAccess;
   const generation = access.gpuFluidGeneration;
   access.beginGPUFluidInitialization(defaultScene, config(true), "lighting enabled", "full-scene");
-  await access.gpuFluidPending;
+  await access.solverBuild?.settled;
   assert.equal(access.gpuFluid, solver);
   assert.equal(solver.info.encodedSteps, 360);
   assert.equal(access.gpuFluidGeneration, generation);

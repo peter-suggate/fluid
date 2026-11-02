@@ -1,3 +1,4 @@
+import { Compiled } from "../../../core/compiled";
 import { SPARSE_SCENE_CANDIDATE_SCRATCH_BRICKS } from "../../../core/webgpu-sparse-scene-proxies";
 import { buriedSolidClassifier } from "./svo-buried-solid";
 import { meshAssetHeader, sampledVolumeExtraWords, sampledVolumeHorizontalSlab, sampledVolumeSupport } from "../../../core/imported-assets/asset-library";
@@ -1468,6 +1469,13 @@ export class OctreeSparseBrickWorld {
    * Lighting frames still owed. The queue, its cursors and the feedback
    * windows live on the GPU and are never read back, so the host only counts:
    * frames certain to drain what was journaled, then the feedback window.
+   *
+   * Invariant: never fewer than `liveDerivedDrainFramesRemaining`. Lighting
+   * stops when this reaches zero, so a drain frame it did not cover would be
+   * skipped, and with it the reset of `liveDerivedSeedBound` that drain owes.
+   * Every write keeps it: `planLiveDerivedFrames` raises both together, a
+   * lighting frame lowers both by one, and dropping the feedback window lowers
+   * this to the drain exactly.
    */
   private liveDerivedFramesRemaining = 0;
   /** How many of those may still change opacity, and so republish the pyramid. */
@@ -1566,7 +1574,8 @@ export class OctreeSparseBrickWorld {
   private pendingTopologyRecords = 0;
   private sceneRevision = 0;
   private topologyPublished = false;
-  private pipelineInitialization?: Promise<void>;
+  /** Compiled once; a failed compile is retried by the next `initializePipelines`. */
+  private readonly pipelines = new Compiled(() => this.compilePipelines());
   private destroyed = false;
   /**
    * The suspended build, when `deferBuild` asked for one.
@@ -3020,41 +3029,39 @@ export class OctreeSparseBrickWorld {
   /** Compile this world's structural programs and every owned maintenance pipeline. */
   initializePipelines(): Promise<void> {
     if (this.destroyed) return Promise.reject(new Error("Cannot initialize a destroyed sparse-brick world"));
-    this.pipelineInitialization ??= (async () => {
-      this.structuralModule = this.device.createShaderModule({
-        label: "Sparse voxel structural publication finalizer",
-        code: structuralPublicationFinalizeShader(
-          this.proxyVoxelizer.maintenanceBinding.stateOffsetBytes / 4),
-      });
-      const structuralPipelines = Promise.all([
-        this.device.createComputePipelineAsync({
-          label: "Finalize live sparse voxel physics publication",
-          layout: this.structuralPipelineLayout,
-          compute: { module: this.structuralModule, entryPoint: "finalizePhysics" },
-        }),
-        this.device.createComputePipelineAsync({
-          label: "Finalize live sparse voxel scene publication",
-          layout: this.structuralPipelineLayout,
-          compute: { module: this.structuralModule, entryPoint: "finalizeScene" },
-        }),
-      ] as const);
-      const [, compiledStructuralPipelines] = await Promise.all([
-        Promise.all([
-          this.tree.initializePipelines(),
-          this.brickOccupancyBuilder.initializePipelines(),
-          this.proxyVoxelizer.initializePipelines(),
-          this.topologyMutator.initializePipelines(),
-          this.liveDerivedPlanner?.initializePipelines(),
-          this.liveDerivedBuilder?.initializePipelines(),
-        ]),
-        structuralPipelines,
-      ]);
-      [this.structuralPhysicsPipeline, this.structuralScenePipeline] = compiledStructuralPipelines;
-    })().catch((error) => {
-      this.pipelineInitialization = undefined;
-      throw error;
+    return this.pipelines.ensure();
+  }
+
+  private async compilePipelines(): Promise<void> {
+    this.structuralModule = this.device.createShaderModule({
+      label: "Sparse voxel structural publication finalizer",
+      code: structuralPublicationFinalizeShader(
+        this.proxyVoxelizer.maintenanceBinding.stateOffsetBytes / 4),
     });
-    return this.pipelineInitialization;
+    const structuralPipelines = Promise.all([
+      this.device.createComputePipelineAsync({
+        label: "Finalize live sparse voxel physics publication",
+        layout: this.structuralPipelineLayout,
+        compute: { module: this.structuralModule, entryPoint: "finalizePhysics" },
+      }),
+      this.device.createComputePipelineAsync({
+        label: "Finalize live sparse voxel scene publication",
+        layout: this.structuralPipelineLayout,
+        compute: { module: this.structuralModule, entryPoint: "finalizeScene" },
+      }),
+    ] as const);
+    const [, compiledStructuralPipelines] = await Promise.all([
+      Promise.all([
+        this.tree.initializePipelines(),
+        this.brickOccupancyBuilder.initializePipelines(),
+        this.proxyVoxelizer.initializePipelines(),
+        this.topologyMutator.initializePipelines(),
+        this.liveDerivedPlanner?.initializePipelines(),
+        this.liveDerivedBuilder?.initializePipelines(),
+      ]),
+      structuralPipelines,
+    ]);
+    [this.structuralPhysicsPipeline, this.structuralScenePipeline] = compiledStructuralPipelines;
   }
 
   get allocatedBytes(): number { return this.baseAllocatedBytes; }
@@ -4143,9 +4150,12 @@ export class OctreeSparseBrickWorld {
     // Publish and mutate are the topology half: they change which bricks exist.
     // Everything after this seam changes what is *in* them.
     seam?.("world-topology-publish");
-    if (this.pendingScenePublication) {
-      this.proxyVoxelizer.publish(this.pendingScenePublication);
+    const publication = this.pendingScenePublication;
+    if (publication) {
+      // Taken before it is handed over: one the voxelizer refuses fails this
+      // frame, not every frame after it.
       this.pendingScenePublication = undefined;
+      this.proxyVoxelizer.publish(publication);
     }
     encoded = this.proxyVoxelizer.encodeMaintenance(encoder) || encoded;
     if (!encoded) {

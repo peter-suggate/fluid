@@ -1,3 +1,4 @@
+import { StagedReadback } from "../../../core/staged-readback";
 import {
   reconstructSvoGBufferWorldPosition,
   SVO_GBUFFER_FLAGS,
@@ -90,21 +91,15 @@ export function decodeSvoGpuPickingSample(
   };
 }
 
-interface ReadbackSlot { buffer: GPUBuffer; pending: boolean }
-
 /** Three request slots bound outstanding map work without blocking presentation or allocating per click. */
 export class SparseVoxelGpuPickingReadbackRing {
-  private readonly slots: ReadbackSlot[];
+  private readonly slots: StagedReadback[];
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice) {
-    this.slots = Array.from({ length: SVO_GPU_PICKING_READBACK_SLOTS }, (_, index) => ({
-      buffer: device.createBuffer({
-        label: `Sparse voxel pick readback ${index + 1}/${SVO_GPU_PICKING_READBACK_SLOTS}`,
-        size: SVO_GPU_PICKING_BUFFER_BYTES,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-      }),
-      pending: false,
+    this.slots = Array.from({ length: SVO_GPU_PICKING_READBACK_SLOTS }, (_, index) => new StagedReadback(device, {
+      label: `Sparse voxel pick readback ${index + 1}/${SVO_GPU_PICKING_READBACK_SLOTS}`,
+      size: SVO_GPU_PICKING_BUFFER_BYTES,
     }));
   }
 
@@ -119,47 +114,43 @@ export class SparseVoxelGpuPickingReadbackRing {
         || request.pixelX < 0 || request.pixelY < 0 || request.pixelX >= gBuffer.width || request.pixelY >= gBuffer.height) {
       return { status: "invalid", reason: "coordinates" };
     }
-    const slot = this.slots.find((candidate) => !candidate.pending);
+    const slot = this.slots.find((candidate) => candidate.idle);
     if (!slot) return { status: "busy" };
-    slot.pending = true;
     const origin = { x: request.pixelX, y: request.pixelY, z: 0 };
     const copySize = { width: 1, height: 1, depthOrArrayLayers: 1 };
     const encoder = this.device.createCommandEncoder({ label: "Read one sparse voxel G-buffer pick sample" });
-    encoder.copyTextureToBuffer({ texture: radianceDepth, origin }, {
-      buffer: slot.buffer, offset: SVO_GPU_PICKING_OFFSETS.radianceDepth,
-      bytesPerRow: SVO_GPU_PICKING_BYTES_PER_ROW, rowsPerImage: 1,
-    }, copySize);
-    encoder.copyTextureToBuffer({ texture: gBuffer.packedSurface, origin }, {
-      buffer: slot.buffer, offset: SVO_GPU_PICKING_OFFSETS.packedSurface,
-      bytesPerRow: SVO_GPU_PICKING_BYTES_PER_ROW, rowsPerImage: 1,
-    }, copySize);
-    encoder.copyTextureToBuffer({ texture: gBuffer.identityMedia, origin }, {
-      buffer: slot.buffer, offset: SVO_GPU_PICKING_OFFSETS.identityMedia,
-      bytesPerRow: SVO_GPU_PICKING_BYTES_PER_ROW, rowsPerImage: 1,
-    }, copySize);
+    slot.encode(encoder, (encoder, buffer) => {
+      encoder.copyTextureToBuffer({ texture: radianceDepth, origin }, {
+        buffer, offset: SVO_GPU_PICKING_OFFSETS.radianceDepth,
+        bytesPerRow: SVO_GPU_PICKING_BYTES_PER_ROW, rowsPerImage: 1,
+      }, copySize);
+      encoder.copyTextureToBuffer({ texture: gBuffer.packedSurface, origin }, {
+        buffer, offset: SVO_GPU_PICKING_OFFSETS.packedSurface,
+        bytesPerRow: SVO_GPU_PICKING_BYTES_PER_ROW, rowsPerImage: 1,
+      }, copySize);
+      encoder.copyTextureToBuffer({ texture: gBuffer.identityMedia, origin }, {
+        buffer, offset: SVO_GPU_PICKING_OFFSETS.identityMedia,
+        bytesPerRow: SVO_GPU_PICKING_BYTES_PER_ROW, rowsPerImage: 1,
+      }, copySize);
+    });
     this.device.queue.submit([encoder.finish()]);
     try {
-      await slot.buffer.mapAsync(GPUMapMode.READ);
-      if (this.destroyed || !isFrameCurrent()) return { status: "invalid", reason: "generation" };
-      const bytes = slot.buffer.getMappedRange();
-      const packed: SvoPackedGBufferPixel = {
+      const sample = await slot.read((bytes) => isFrameCurrent() ? decodeSvoGpuPickingSample({
         radianceDepth: Uint16Array.from(new Uint16Array(bytes, SVO_GPU_PICKING_OFFSETS.radianceDepth, 4)),
         packedSurface: Uint32Array.from(new Uint32Array(bytes, SVO_GPU_PICKING_OFFSETS.packedSurface, 4)),
         identityMedia: Uint16Array.from(new Uint16Array(bytes, SVO_GPU_PICKING_OFFSETS.identityMedia, 4)),
         debugSidecar: new Uint32Array(4),
-      };
-      return decodeSvoGpuPickingSample(packed, request);
+      }, request) : undefined);
+      // Destroyed, or the frame moved on, while the sample was mapping.
+      return sample ?? { status: "invalid", reason: "generation" };
     } catch {
       return { status: "invalid", reason: "malformed-gbuffer" };
-    } finally {
-      try { slot.buffer.unmap(); } catch { /* Device loss or destruction. */ }
-      slot.pending = false;
     }
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    for (const slot of this.slots) { try { slot.buffer.destroy(); } catch { /* Device loss. */ } }
+    for (const slot of this.slots) { try { slot.destroy(); } catch { /* Device loss. */ } }
   }
 }

@@ -9,6 +9,18 @@ const MIME_CANDIDATES = [
   "video/webm"
 ];
 
+/**
+ * Where a capture is:
+ *
+ *   idle ─start→ starting ─→ frames | wall-clock ─stop→ stopping ─→ idle
+ *   any ─fail→ idle
+ *
+ * One field rather than "is there a recorder, is there a frame output": a frame
+ * capture has no recorder, so a second START during one used to open a second
+ * encoder over the first, and a second STOP finalized the same output twice.
+ */
+type RecordingPhase = "idle" | "starting" | "frames" | "wall-clock" | "stopping";
+
 /** Records the presentation canvas on a 60 Hz simulation-time timeline, with
  * a wall-clock compatibility path calibrated against simulation time. */
 class SimulationRecordingController {
@@ -19,6 +31,7 @@ class SimulationRecordingController {
    * constructor argument; until then every read and write is pane A's.
    */
   private get session() { return resolveSession(); }
+  private phase: RecordingPhase = "idle";
   private recorder: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
   private chunks: Blob[] = [];
@@ -40,8 +53,11 @@ class SimulationRecordingController {
     return Boolean(canvas) && (typeof VideoEncoder !== "undefined" || (typeof MediaRecorder !== "undefined" && typeof canvas?.captureStream === "function"));
   }
 
+  get capturing(): RecordingPhase { return this.phase; }
+
   async start(simulationTime_s: number): Promise<boolean> {
-    if (this.recorder || this.session.recording.getState().status === "processing") return false;
+    if (this.phase !== "idle") return false;
+    this.phase = "starting";
     const canvas = document.querySelector<HTMLCanvasElement>("[data-testid='gpu-viewport']");
     if (!canvas) {
       this.fail("Video capture is not supported in this browser.");
@@ -54,6 +70,7 @@ class SimulationRecordingController {
       const height = Math.max(2, canvas.height - canvas.height % 2);
       if (typeof VideoEncoder !== "undefined" && await canEncodeVideo("avc", { width, height, bitrate: QUALITY_HIGH })) {
         await this.startSimulationFrameCapture(canvas, simulationTime_s, width, height);
+        this.phase = "frames";
         return true;
       }
     } catch {
@@ -116,7 +133,7 @@ class SimulationRecordingController {
   }
 
   capturePresentedState(canvas: HTMLCanvasElement, currentSimulation_s: number): void {
-    if (!this.frameOutput || !this.frameSource) return;
+    if (this.phase !== "frames") return;
     if (currentSimulation_s <= this.latestPresentedSimulation_s + 1e-9) return;
     this.latestPresentedSimulation_s = currentSimulation_s;
     const due = simulationFramesDue(currentSimulation_s, this.nextFrameSimulation_s);
@@ -156,6 +173,7 @@ class SimulationRecordingController {
         }
       });
       this.recorder.start(1000);
+      this.phase = "wall-clock";
       this.session.recording.getState().set({
         status: "recording",
         startedAtSimulation_s: simulationTime_s,
@@ -171,12 +189,14 @@ class SimulationRecordingController {
   }
 
   stop(simulationTime_s: number): void {
-    if (this.frameOutput) {
+    if (this.phase === "frames") {
+      this.phase = "stopping";
       void this.stopSimulationFrameCapture();
       return;
     }
     const recorder = this.recorder;
-    if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
+    if (this.phase !== "wall-clock" || !recorder) return;
+    this.phase = "stopping";
     this.finishActiveSegment();
     this.unsubscribeRuntime?.();
     this.unsubscribeRuntime = null;
@@ -190,6 +210,7 @@ class SimulationRecordingController {
       const mimeType = recorder.mimeType || this.chunks[0]?.type || "video/webm";
       const blob = new Blob(this.chunks, { type: mimeType });
       this.releaseRecorder();
+      this.phase = "idle";
       if (blob.size === 0 || simulationDuration_s <= 0) {
         this.fail(simulationDuration_s <= 0 ? "Record at least one simulation step before stopping." : "No video frames were captured.");
         return;
@@ -252,6 +273,7 @@ class SimulationRecordingController {
       const previous = this.session.recording.getState().recording;
       if (previous) URL.revokeObjectURL(previous.url);
       await this.releaseFrameCapture(false);
+      this.phase = "idle";
       this.session.recording.getState().set({ status: "ready", recording, modalOpen: true, error: null });
       this.session.runtime.getState().setNotice(`Encoded ${recording.frameCount} frames · 1 video second per simulated second`);
     } catch (error) {
@@ -304,6 +326,7 @@ class SimulationRecordingController {
   }
 
   private fail(message: string): void {
+    this.phase = "idle";
     this.unsubscribeRuntime?.();
     this.unsubscribeRuntime = null;
     if (this.recorder && this.recorder.state !== "inactive") {

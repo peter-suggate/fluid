@@ -33,6 +33,7 @@ import { useShellStore } from "../stores/shell-store";
 import { defaultSession, type PaneId, type PaneSession } from "../session/session";
 import { historySceneCopy, type EditorHistorySnapshot } from "../stores/history-store";
 import type { GPUQuality } from "../gpu-quality";
+import { gpuStatusAcceptsRebuild } from "../gpu-status";
 import { takesLiveSolidEdits, type MethodParamValue } from "../method-contract";
 import { sameSolidPatchList } from "../solid-patch-list";
 import { solidEditQueue } from "../voxel-editor/solid-edit-queue";
@@ -53,8 +54,7 @@ import { addSceneryNode, createSceneryNodeAt, scenerySelectionId, sceneryIdFromS
 import { findSceneryNode, withoutSceneryNode } from "../scenery-edit";
 import { scaleScene as scaleSceneBy, sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../scene-scale";
 import { sceneLatticeDimensions } from "../scene-lattice";
-import { fluidBodyBox, fluidBodyBoxPatch, scaleFluidBodyVolume, type FluidBodyBox } from "../editor-fluid-body";
-import { tankResizeIsStructural, tankResizePatch } from "../editor-tank";
+import { fluidBodyBox, fluidBodyBoxPatch, scaleFluidBodyVolume } from "../editor-fluid-body";
 import type { SceneDraftSubject } from "../stores/scene-draft-store";
 import type { SceneryPropKind } from "../stores/ui-store";
 import {
@@ -112,6 +112,50 @@ export interface OpenSceneCardOptions {
   readonly retainConfiguration?: boolean;
 }
 
+/** What closing an edit gesture may ask for. */
+export interface EditCommitOptions {
+  /** Merged onto the document before the gesture is judged. */
+  readonly patch?: Partial<SceneDescription>;
+  /** Asks for a re-seed; `sceneEditRequiresReset` decides (see `EditGesture.commit`). */
+  readonly reseed?: boolean;
+  /** Names the pause a lattice rebuild costs, for drafts that move the lattice. */
+  readonly announceRebuild?: string;
+}
+
+/**
+ * An open direct-manipulation gesture, as `beginEdit`/`beginDraft` hand it out.
+ *
+ * A pane holds at most one. Only the handle that opened it can close it, so a
+ * continuation that resumes after its gesture ended some other way — a scene
+ * opened over it, a realm swapped under it — closes nothing, instead of
+ * closing whatever gesture happens to be open by then.
+ */
+export interface EditGesture {
+  readonly label: string;
+  /** True until the gesture is committed, cancelled or abandoned. */
+  readonly open: boolean;
+  /**
+   * Land the gesture: its draft, then `patch`, onto the document, judged
+   * against the pre-gesture snapshot — one undo entry and one re-seed decision,
+   * or nothing when the document ends where it began.
+   */
+  commit(options?: EditCommitOptions): boolean;
+  /**
+   * Drop the draft. Document writes the gesture already made — a held dial's,
+   * or an edit that joined it — stay, and are recorded like a commit's.
+   */
+  cancel(): void;
+}
+
+/** The pane's open gesture: the document as it stood when the gesture began. */
+interface OpenEditGesture {
+  readonly label: string;
+  readonly snapshot: EditorHistorySnapshot;
+  readonly draft: boolean;
+  /** An edit that joined this gesture asked for a re-seed. */
+  reseedOwed: boolean;
+}
+
 interface PaneRuntime {
   interaction?: SceneInteractionHost;
   interactionScene?: SceneDescription;
@@ -124,8 +168,8 @@ interface PaneRuntime {
   bodies: RigidBodyState[];
   /** The carry / gizmo constraint, re-applied every step it survives. */
   kinematicDrag: { bodyId: string; position: RigidBodyState["position_m"]; velocity: RigidBodyState["linearVelocity_m_s"] } | null;
-  /** Document captured when a direct-manipulation gesture opened. */
-  pendingEdit?: { label: string; snapshot: EditorHistorySnapshot };
+  /** The open direct-manipulation gesture; see `EditGesture`. */
+  gesture?: OpenEditGesture;
   acceptLiveSolidEdit?: (next: SceneDescription, base: SceneDescription) => Promise<void>;
   /**
    * The newest document the compare mirror handed this pane whose solids it has
@@ -293,6 +337,15 @@ export class SimulationController {
   private pendingCpuTickTrace?: PerformanceTrace;
   private sharedPaneStep?: ReturnType<typeof sharePaneStep>;
 
+  /**
+   * Safe bring-up allows one bounded STEP per page load, and this latch is the
+   * only record of it: the transport reads it back rather than keeping its own
+   * flag, which locked the button on a click the barrier had refused.
+   */
+  safeBrowserStepSpent(): boolean {
+    return this.safeBrowserStepConsumed;
+  }
+
   private safeBrowserBringup(): boolean {
     return typeof location !== "undefined" && safeBrowserGPUBringupEnabled(location.search);
   }
@@ -400,7 +453,6 @@ export class SimulationController {
       gpuCompletedTime?: number;
       bodies?: RigidBodyState[];
       kinematicDrag?: PaneRuntime["kinematicDrag"];
-      pendingEdit?: PaneRuntime["pendingEdit"];
       lastPerformanceReportAt_ms?: number;
       lastPerformanceReportContext?: string;
     };
@@ -420,7 +472,6 @@ export class SimulationController {
         ...createPaneRuntime(),
         bodies: Array.isArray(retained.bodies) ? retained.bodies : [],
         kinematicDrag: retained.kinematicDrag ?? null,
-        pendingEdit: retained.pendingEdit,
         lastPerformanceReportAt_ms: retained.lastPerformanceReportAt_ms ?? 0,
         lastPerformanceReportContext: retained.lastPerformanceReportContext ?? "",
       }]]);
@@ -471,11 +522,28 @@ export class SimulationController {
   }
 
   /**
-   * Hand a pane its realm. Compare mode does this before registering the pane
-   * on the clock, so the first thing the new pane's transport reports already
-   * lands in its own stores rather than in pane A's.
+   * Admit a pane: its realm, then its place on the host clock, in that order,
+   * so the first thing the new pane's transport reports already lands in its
+   * own stores rather than in pane A's.
+   *
+   * One call and one owner (compare mode). The realm and the clock used to be
+   * joined by two components, and a viewport remount unregistered a pane from
+   * the clock while the controller still held its realm: the host left
+   * lockstep with two panes attached.
    */
-  attachPaneSession(paneId: PaneId, session: PaneSession) {
+  attachPane(paneId: PaneId, session: PaneSession) {
+    this.attachPaneSession(paneId, session);
+    if (this.clock.registerPane(paneId)) this.publishSimulationTime();
+  }
+
+  /** Leaving compare mode. Pane A is the session and never leaves. */
+  detachPane(paneId: PaneId): boolean {
+    if (paneId === PRIMARY_PANE_ID) return false;
+    if (this.clock.unregisterPane(paneId)) this.publishSimulationTime();
+    return this.detachPaneSession(paneId);
+  }
+
+  private attachPaneSession(paneId: PaneId, session: PaneSession) {
     // A fresh document runtime with a *new* realm, and only then: re-attaching
     // the realm a pane already holds is what an effect re-running does, and
     // that must not drop the roster mid-carry. A pane handed a different realm
@@ -501,9 +569,7 @@ export class SimulationController {
       ? sharePaneStep([...this.paneSessions.values()]) : undefined;
   }
 
-  /** Leaving compare mode. Pane A's realm is the session and never detaches. */
-  detachPaneSession(paneId: PaneId): boolean {
-    if (paneId === PRIMARY_PANE_ID) return false;
+  private detachPaneSession(paneId: PaneId): boolean {
     this.paneRuntimes.get(paneId)?.interactionWatch?.();
     void this.paneRuntimes.get(paneId)?.interaction?.dispose();
     this.paneRuntimes.delete(paneId);
@@ -525,22 +591,6 @@ export class SimulationController {
     for (const session of this.paneSessions.values()) {
       session.runtime.getState().setSimulationTime(completed);
     }
-  }
-
-  /**
-   * Admit a pane to the host clock. Pane A is registered at construction; a
-   * second registration puts the host in lockstep, where the target advances
-   * one step at a time and only once every pane has reached it.
-   */
-  registerPane(paneId: PaneId) {
-    if (!this.clock.registerPane(paneId)) return;
-    this.publishSimulationTime();
-  }
-
-  /** Leaving compare mode. Pane A is the session and is never unregistered. */
-  unregisterPane(paneId: PaneId) {
-    if (!this.clock.unregisterPane(paneId)) return;
-    this.publishSimulationTime();
   }
 
   paneIds(): readonly string[] { return this.clock.paneIds(); }
@@ -777,16 +827,21 @@ export class SimulationController {
    * mode's most visible failure — one RESET and the pair froze, pane B still
    * showing the water it had reached while both clocks read t = 0.
    *
-   * The pane that was asked pauses, as a reset always has. The others keep the
-   * run state they were in, so a scene chosen in pane B does not stop pane A.
+   * A reset pauses, as it always has — the host, not the pane. The run state
+   * is the transport's: a reset that paused only the pane it was asked of left
+   * the other one reading "running" behind a lockstep barrier the paused pane
+   * would never pass. `pause: false` is for a re-seed nobody asked for, such as
+   * a mirrored edit, which keeps the host running if it was.
    * With one pane attached the fan-out is empty and this is the reset that
    * shipped.
    */
-  reset(source?: SceneDescription, presetId?: string, paneId: PaneId = PRIMARY_PANE_ID) {
+  reset(source?: SceneDescription, presetId?: string, paneId: PaneId = PRIMARY_PANE_ID,
+    options: { readonly pause?: boolean } = {}) {
     for (const step of paneResetPlan(this.paneSessions.keys(), paneId)) {
       this.resetPane(step.id, step.id === paneId ? source : undefined,
         step.id === paneId ? presetId : undefined, step.resynchronizing);
     }
+    if (options.pause !== false) this.setRunState("paused");
   }
 
   /**
@@ -800,9 +855,10 @@ export class SimulationController {
     for (const step of hostResetPlan(this.paneSessions.keys())) {
       this.resetPane(step.id, undefined, undefined, step.resynchronizing);
     }
+    this.setRunState("paused");
   }
 
-  /** Everything a reset does to one pane. */
+  /** Everything a reset does to one pane but its run state, which is the host's. */
   private resetPane(
     paneId: PaneId,
     source?: SceneDescription,
@@ -849,7 +905,8 @@ export class SimulationController {
     if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
     const diagnosticsStore = this.session(paneId).diagnostics.getState();
     if (runtimePlan.fluidSolver
-      && diagnosticsStore.resourceReadiness.fluid.state !== "preparing") {
+      && diagnosticsStore.resourceReadiness.fluid.state !== "preparing"
+      && gpuStatusAcceptsRebuild(diagnosticsStore.gpuStatus)) {
       diagnosticsStore.set({ gpuStatus: {
         state: "initializing",
         label: "Preparing fenced t=0 fluid resources",
@@ -869,12 +926,8 @@ export class SimulationController {
     // this synchronous epoch edge to reject completions from the old queue.
     runtime.resetSimulationTime();
     runtime.setSimRate(null);
-    // A pane re-seeded because *another* pane reset keeps running if it was
-    // running: its clock had to return to zero with the host's, but nobody
-    // asked it to stop.
-    if (!resynchronizing) runtime.setRunState("paused");
     // A reset lands on a fresh scene, so nothing carries a selection into it.
-    // commitEdit({ reseed: true }) restores the user's selection afterwards.
+    // A committed gesture that re-seeds restores the user's selection afterwards.
     // A re-seeded pane's document did not change, so its selection still names
     // something and is left alone.
     if (!resynchronizing) this.session(paneId).ui.getState().select(undefined);
@@ -913,6 +966,8 @@ export class SimulationController {
         error instanceof Error ? error.message : `${card.name} failed validation`, "warn");
       return false;
     }
+    // The document every open gesture was editing is about to be replaced.
+    this.abandonGesture(paneId);
     this.recordHistory(`open ${card.name}`, undefined, paneId);
     // A card is a clean scene entry, not a continuation of whichever hidden
     // studio state happened to be retained behind the library. Reset both
@@ -1252,6 +1307,7 @@ export class SimulationController {
    * are applied to the live GPU solver without changing the simulation clock. */
   private announceGPURebuild(operation: string, paneId: PaneId = PRIMARY_PANE_ID) {
     const current = this.session(paneId).diagnostics.getState().gpuStatus;
+    if (!gpuStatusAcceptsRebuild(current)) return;
     this.session(paneId).diagnostics.getState().set({ gpuStatus: {
       state: "initializing",
       label: "Preparing GPU work plan",
@@ -1306,60 +1362,132 @@ export class SimulationController {
   /**
    * Push the pre-edit document onto the undo stack. `coalesceKey` groups a
    * continuing gesture — a held slider, a repeated nudge — into one entry.
-   * An open `beginEdit` gesture already holds the pre-gesture snapshot, so
-   * document writes made during one record nothing until it commits.
+   * An open gesture already holds the pre-gesture snapshot, so document writes
+   * made during one join it and are recorded when it closes.
    */
   private recordHistory(label: string, coalesceKey?: string, paneId: PaneId = PRIMARY_PANE_ID) {
-    if (this.runtime(paneId).pendingEdit) return;
+    if (this.runtime(paneId).gesture) return;
     this.session(paneId).history.getState().record(this.documentSnapshot(label, paneId), { coalesceKey });
   }
 
   /**
    * Direct manipulation is a live-preview / commit-on-release split: the drag
    * touches only runtime state the renderer already owns (`manipulateBody`),
-   * and the document changes once, here, when the pointer is released. That
-   * keeps one undo entry per gesture and one solver invalidation per edit.
+   * and the document changes once, when the gesture commits. That keeps one
+   * undo entry per gesture and one solver invalidation per edit.
    *
-   * Sparse CM12 commits fluid geometry through resident shape edits. Lattice
-   * and unsupported seed changes still use the renderer's solver-key path.
+   * Refused (undefined, with a notice) while another gesture is open: two
+   * gestures sharing one pre-gesture snapshot is how an edit used to land with
+   * no undo entry. Sparse CM12 commits fluid geometry through resident shape
+   * edits. Lattice and unsupported seed changes still use the renderer's
+   * solver-key path.
    */
-  beginEdit(label: string, paneId: PaneId = PRIMARY_PANE_ID) {
-    this.runtime(paneId).pendingEdit = { label, snapshot: this.documentSnapshot(label, paneId) };
+  beginEdit(label: string, paneId: PaneId = PRIMARY_PANE_ID): EditGesture | undefined {
+    return this.openGesture(label, undefined, paneId);
   }
 
   /**
-   * Close the gesture; a patch that changed nothing records no undo entry.
-   *
-   * `reseed` asks for the solver to be started again from the edited document.
-   * Scene fields the solver cannot adopt live reach it no other way, and an edit
-   * that the renderer shows but the physics ignores is the worst possible
-   * outcome for a WYSIWYG editor.
-   *
-   * It is a request, not an instruction: `sceneEditRequiresReset` decides. An
-   * edit confined to the uniform tier — aiming the hose, changing density — is
-   * adopted by the running solver through `applySceneUniforms`, so resetting for
-   * it would throw away the simulation the user is editing in order to apply a
-   * buffer write. Call sites keep asking; only the ones that need it now pay.
+   * Open a gesture whose proposals go to the draft store; the document is not
+   * touched until the gesture commits.
    */
-  commitEdit(patch?: Partial<SceneDescription>, options: { reseed?: boolean } = {}, paneId: PaneId = PRIMARY_PANE_ID) {
+  beginDraft(subject: SceneDraftSubject, label: string, paneId: PaneId = PRIMARY_PANE_ID): EditGesture | undefined {
+    return this.openGesture(label, subject, paneId);
+  }
+
+  /**
+   * One edit in one call: a gesture opened, written and committed. Inside an
+   * open gesture the write joins that gesture instead — its snapshot already
+   * holds the pre-gesture document — and a re-seed it asks for is owed when
+   * that gesture closes.
+   */
+  edit(
+    label: string,
+    change: Partial<SceneDescription> | (() => void),
+    options: { reseed?: boolean } = {},
+    paneId: PaneId = PRIMARY_PANE_ID,
+  ): boolean {
+    const open = this.runtime(paneId).gesture;
+    const gesture = open ? undefined : this.openGesture(label, undefined, paneId);
+    if (typeof change === "function") change();
+    else this.session(paneId).scene.getState().patchScene(change);
+    if (open) { open.reseedOwed ||= options.reseed === true; return true; }
+    return gesture!.commit({ reseed: options.reseed });
+  }
+
+  private openGesture(label: string, subject: SceneDraftSubject | undefined, paneId: PaneId): EditGesture | undefined {
     const paneRuntime = this.runtime(paneId);
-    const pending = paneRuntime.pendingEdit;
-    paneRuntime.pendingEdit = undefined;
-    const sceneStore = this.session(paneId).scene.getState();
-    if (patch) sceneStore.patchScene(patch);
-    if (!pending) return false;
-    const committed = this.session(paneId).scene.getState().scene;
-    if (!documentChangedSince(pending.snapshot, committed)) return false;
-    this.session(paneId).history.getState().record(pending.snapshot);
-    if (options.reseed && sceneEditRequiresReset(pending.snapshot.scene, committed, this.session(paneId).method.getState().methodId)) {
+    if (paneRuntime.gesture) {
+      this.session(paneId).runtime.getState().setNotice(`Finish ${paneRuntime.gesture.label.toLowerCase()} first`, "warn");
+      return undefined;
+    }
+    if (subject) this.session(paneId).sceneDraft.getState().beginDraft(subject, label);
+    const gesture: OpenEditGesture = {
+      label, snapshot: this.documentSnapshot(label, paneId), draft: subject !== undefined, reseedOwed: false,
+    };
+    paneRuntime.gesture = gesture;
+    const controller = this;
+    return {
+      label,
+      get open() { return controller.paneRuntimes.get(paneId)?.gesture === gesture; },
+      commit: (options = {}) => this.closeGesture(gesture, options, paneId),
+      cancel: () => { this.closeGesture(gesture, undefined, paneId); },
+    };
+  }
+
+  /**
+   * Close `gesture` — committed with `options`, or cancelled without — if it is
+   * still the pane's open one. `reseed` is a request, not an instruction:
+   * `sceneEditRequiresReset` decides. An edit confined to the uniform tier —
+   * aiming the hose, changing density — is adopted by the running solver
+   * through `applySceneUniforms`, so resetting for it would throw away the
+   * simulation the user is editing in order to apply a buffer write. Scene
+   * fields the solver cannot adopt live reach it no other way, and an edit the
+   * renderer shows but the physics ignores is the worst outcome for a WYSIWYG
+   * editor.
+   */
+  private closeGesture(gesture: OpenEditGesture, options: EditCommitOptions | undefined, paneId: PaneId): boolean {
+    const paneRuntime = this.runtime(paneId);
+    if (paneRuntime.gesture !== gesture) return false;
+    paneRuntime.gesture = undefined;
+    const session = this.session(paneId);
+    const sceneStore = session.scene.getState();
+    if (gesture.draft) {
+      const draftStore = session.sceneDraft.getState();
+      const draft = draftStore.draft;
+      draftStore.clearDraft();
+      if (options && draft) {
+        if (options.announceRebuild) this.announceGPURebuild(options.announceRebuild, paneId);
+        sceneStore.patchScene(draft.patch);
+      }
+    }
+    if (options?.patch) sceneStore.patchScene(options.patch);
+    const committed = session.scene.getState().scene;
+    if (!documentChangedSince(gesture.snapshot, committed)) return false;
+    session.history.getState().record(gesture.snapshot);
+    if ((options?.reseed || gesture.reseedOwed)
+      && sceneEditRequiresReset(gesture.snapshot.scene, committed, session.method.getState().methodId)) {
       // reset() re-selects the first body; an editor gesture must keep the
       // thing the user is still holding selected.
-      const selection = this.session(paneId).ui.getState().selection;
+      const selection = session.ui.getState().selection;
       this.reset(undefined, undefined, paneId);
-      this.session(paneId).ui.getState().select(selection);
+      session.ui.getState().select(selection);
     } else this.adoptRigidBodies(committed, paneId);
-    this.session(paneId).runtime.getState().setNotice(pending.label);
+    session.runtime.getState().setNotice(gesture.label);
     return true;
+  }
+
+  /**
+   * End the open gesture without recording it, because the document it was
+   * about is being replaced. Its handle goes stale, so its owner's late commit
+   * or cancel does nothing.
+   */
+  private abandonGesture(paneId: PaneId) {
+    const paneRuntime = this.runtime(paneId);
+    const gesture = paneRuntime.gesture;
+    if (!gesture) return;
+    paneRuntime.gesture = undefined;
+    if (gesture.draft) this.session(paneId).sceneDraft.getState().clearDraft();
+    this.session(paneId).runtime.getState().setNotice(`${gesture.label} was interrupted`, "warn");
   }
 
   /**
@@ -1397,7 +1525,7 @@ export class SimulationController {
   /**
    * Adopt a document some other authority wrote straight into a pane's store.
    *
-   * `commitEdit`'s tail without the gesture. The compare mirror is the one such
+   * A gesture commit's tail without the gesture. The compare mirror is the one such
    * authority: pane B's document is pane A's plus a diff, so an edit in A is
    * mirrored by *writing B's scene store* — which moves B's drawing and moves
    * neither B's running rigid roster nor B's solver. A sphere placed in A then
@@ -1437,18 +1565,14 @@ export class SimulationController {
     // anything it still owed.
     this.runtime(paneId).mirroredSolidEdit = undefined;
     if (sceneEditRequiresReset(previous, committed, this.session(paneId).method.getState().methodId)) {
-      // Same care `commitEdit` takes: reset() re-selects the first body, and a
+      // Same care a gesture commit takes: reset() re-selects the first body, and a
       // mirrored edit must not steal the selection out of the receiving pane.
       const selection = this.session(paneId).ui.getState().selection;
-      // The transport is the host's, not the document's. `reset` pauses the pane
-      // it re-seeds, which is right for the pane the reader edited and wrong for
-      // the pane merely keeping up with it: under a lockstep clock a pane that
-      // stops submitting stalls *both*, so a mirror that paused the receiver
-      // would freeze the comparison it exists to keep running.
-      const runState = this.session(paneId).runtime.getState().runState;
-      this.reset(undefined, undefined, paneId);
+      // Nor does it pause: the pane is keeping up with an edit, and the host
+      // keeps running if it was — a mirror that paused would freeze the
+      // comparison it exists to keep running.
+      this.reset(undefined, undefined, paneId, { pause: false });
       this.session(paneId).ui.getState().select(selection);
-      this.session(paneId).runtime.getState().setRunState(runState);
     } else this.adoptRigidBodies(committed, paneId);
     return true;
   }
@@ -1498,9 +1622,6 @@ export class SimulationController {
     });
   }
 
-  /** Abandon a gesture without recording it; runtime preview state is kept. */
-  cancelEdit(paneId: PaneId = PRIMARY_PANE_ID) { this.runtime(paneId).pendingEdit = undefined; }
-
   private applyHistorySnapshot(entry: EditorHistorySnapshot, verb: string, paneId: PaneId = PRIMARY_PANE_ID) {
     const current = this.session(paneId).scene.getState().scene;
     const next = historySceneCopy(entry.scene);
@@ -1549,6 +1670,10 @@ export class SimulationController {
   private moveHistory(direction: "undo" | "redo", paneId: PaneId): boolean {
     const session = this.session(paneId);
     if (session.ui.getState().voxelStrokePending) return false;
+    // A history move under an open gesture would leave it holding a snapshot
+    // of a document that is no longer the one it is editing.
+    const open = this.runtime(paneId).gesture;
+    if (open) { session.runtime.getState().setNotice(`Finish ${open.label.toLowerCase()} before ${direction === "undo" ? "undoing" : "redoing"}`, "warn"); return false; }
     const history = session.history.getState();
     const stack = direction === "undo" ? history.past : history.future;
     const entry = stack[stack.length - 1];
@@ -1559,7 +1684,6 @@ export class SimulationController {
     const voxelOnly = sceneEqualExcept(current, next, ["solidVoxels"]);
     const solidChanged = !sameSolidPatchList(current.solidVoxels, next.solidVoxels);
     const verb = direction === "undo" ? "Undid" : "Redid";
-    this.runtime(paneId).pendingEdit = undefined;
     if (voxelOnly && solidChanged && takesLiveSolidEdits(session.method.getState().methodId)) {
       const accept = this.runtime(paneId).acceptLiveSolidEdit;
       if (!accept) { session.runtime.getState().setNotice("Wait for the scene to be ready before changing voxel history.", "warn"); return false; }
@@ -1735,7 +1859,7 @@ export class SimulationController {
   /**
    * Gizmo manipulation. Same kinematic constraint and transport behavior as
    * `dragBody`, with no imposed velocity. The pose
-   * lives in runtime state only until `commitEdit` writes the document.
+   * lives in runtime state only until the gesture commits it to the document.
    */
   manipulateBody(bodyId: string, position: RigidBodyState["position_m"], phase: BodyDragPhase, orientation?: RigidBodyState["orientation"], paneId: PaneId = PRIMARY_PANE_ID) {
     this.applyBodyManipulation(bodyId, position, { x: 0, y: 0, z: 0 }, phase, orientation, paneId);
@@ -1852,41 +1976,6 @@ export class SimulationController {
     }
   }
 
-  // ---- draft manipulation --------------------------------------------------
-
-  /**
-   * Open a direct-manipulation gesture: the draft store takes the proposals,
-   * and the document is not touched until `commitDraft`.
-   */
-  beginDraft(subject: SceneDraftSubject, label: string, paneId: PaneId = PRIMARY_PANE_ID) {
-    this.session(paneId).sceneDraft.getState().beginDraft(subject, label);
-    this.beginEdit(label, paneId);
-  }
-
-  /**
-   * Land the open draft on the document — one write, one re-seed, one undo
-   * entry — or drop it if the gesture was interrupted.
-   *
-   * `announceRebuild` is for the gestures that move the lattice (the tank), so
-   * the status line names the edit that is costing the pause instead of
-   * reporting an anonymous rebuild.
-   */
-  commitDraft(options: { announceRebuild?: string; reseed?: boolean } = {}, paneId: PaneId = PRIMARY_PANE_ID) {
-    const draftStore = this.session(paneId).sceneDraft.getState();
-    const draft = draftStore.draft;
-    draftStore.clearDraft();
-    if (!draft) { this.cancelEdit(paneId); return false; }
-    if (options.announceRebuild) this.announceGPURebuild(options.announceRebuild, paneId);
-    this.session(paneId).scene.getState().patchScene(draft.patch);
-    return this.commitEdit(undefined, { reseed: options.reseed ?? true }, paneId);
-  }
-
-  /** Abandon the open gesture, leaving the committed scene untouched. */
-  cancelDraft(paneId: PaneId = PRIMARY_PANE_ID) {
-    this.session(paneId).sceneDraft.getState().clearDraft();
-    this.cancelEdit(paneId);
-  }
-
   // ---- scene scale ---------------------------------------------------------
 
   /**
@@ -1906,9 +1995,7 @@ export class SimulationController {
     }
     const label = `${factor > 1 ? "Doubled" : "Halved"} the ${axis === "world" ? "world size" : "detail"}`;
     if (axis === "detail") this.announceGPURebuild(label, paneId);
-    this.beginEdit(label, paneId);
-    sceneStore.setScene(next, sceneStore.presetId);
-    this.commitEdit(undefined, { reseed: true }, paneId);
+    this.edit(label, () => sceneStore.setScene(next, sceneStore.presetId), { reseed: true }, paneId);
     const [nx, ny, nz] = sceneLatticeDimensions(next);
     this.session(paneId).runtime.getState().setNotice(`${label} · ${nx}×${ny}×${nz} cells at ${next.voxelDomain.finestCellSize_m.toFixed(4)} m`);
     return true;
@@ -1917,46 +2004,16 @@ export class SimulationController {
   // ---- initial water body --------------------------------------------------
 
   /**
-   * Reshape the initial water body.
-   *
-   * Called once, when a shape gesture is released. There is deliberately no
-   * per-move variant: the water body lives in the solver's seed tier, so every
-   * document write asks the renderer to re-seed, and writing on each pointer
-   * move turned a smooth drag into dozens of re-seeds a second. The viewport
-   * previews the box itself and spends the one re-seed here.
-   */
-  shapeFluidBody(box: FluidBodyBox, paneId: PaneId = PRIMARY_PANE_ID) {
-    const sceneStore = this.session(paneId).scene.getState();
-    sceneStore.patchScene(fluidBodyBoxPatch(sceneStore.scene, box));
-    this.commitEdit(undefined, { reseed: true }, paneId);
-  }
-
-  /**
-   * Resize the tank to a dragged box. Structural — the lattice moves — so this
-   * is announced and, like `shapeFluidBody`, only ever called on release.
-   */
-  resizeTank(box: FluidBodyBox, paneId: PaneId = PRIMARY_PANE_ID) {
-    const sceneStore = this.session(paneId).scene.getState();
-    const extents = {
-      width_m: box.max.x - box.min.x,
-      height_m: box.max.y - box.min.y,
-      depth_m: box.max.z - box.min.z,
-    };
-    if (tankResizeIsStructural(sceneStore.scene, extents)) this.announceGPURebuild("Resize the tank", paneId);
-    sceneStore.patchScene(tankResizePatch(sceneStore.scene, extents));
-    this.commitEdit(undefined, { reseed: true }, paneId);
-  }
-
-  /**
    * Grow or shrink the water body about its own centre, without a drag.
-   * `volumeFactor` is a volume, so ×2 is twice the water.
+   * `volumeFactor` is a volume, so ×2 is twice the water. The water body lives
+   * in the solver's seed tier, so the one document write re-seeds.
    */
   scaleFluidBody(volumeFactor: number, paneId: PaneId = PRIMARY_PANE_ID) {
-    const sceneStore = this.session(paneId).scene.getState();
-    const box = fluidBodyBox(sceneStore.scene);
+    const scene = this.session(paneId).scene.getState().scene;
+    const box = fluidBodyBox(scene);
     if (!box) { this.session(paneId).runtime.getState().setNotice("No water body to resize"); return false; }
-    this.beginEdit(volumeFactor > 1 ? "Grew the water body" : "Shrank the water body", paneId);
-    this.shapeFluidBody(scaleFluidBodyVolume(box, volumeFactor, sceneStore.scene), paneId);
+    this.edit(volumeFactor > 1 ? "Grew the water body" : "Shrank the water body",
+      fluidBodyBoxPatch(scene, scaleFluidBodyVolume(box, volumeFactor, scene)), { reseed: true }, paneId);
     return true;
   }
 
@@ -1989,10 +2046,10 @@ export class SimulationController {
    */
   removeEntity(label: string, next: SceneDescription, paneId: PaneId = PRIMARY_PANE_ID) {
     const sceneStore = this.session(paneId).scene.getState();
-    this.beginEdit(label, paneId);
-    sceneStore.setScene(next, sceneStore.presetId);
-    this.session(paneId).ui.getState().select(undefined);
-    this.commitEdit(undefined, { reseed: true }, paneId);
+    this.edit(label, () => {
+      sceneStore.setScene(next, sceneStore.presetId);
+      this.session(paneId).ui.getState().select(undefined);
+    }, { reseed: true }, paneId);
     this.session(paneId).runtime.getState().setNotice(label);
   }
 
@@ -2087,9 +2144,8 @@ export class SimulationController {
       // Through the editor gesture rather than `reset`, so that clearing an
       // override the running solver can already adopt — a density, the hose —
       // does not throw away the simulation being watched to apply it.
-      this.beginEdit(label, paneId);
-      sceneStore.setScene(plan.scene);
-      this.commitEdit(undefined, { reseed: true }, paneId);
+      const scene = plan.scene;
+      this.edit(label, () => sceneStore.setScene(scene), { reseed: true }, paneId);
     }
     const ui = this.session(paneId).ui.getState();
     if (Object.keys(plan.ui).length > 0) this.session(paneId).ui.setState(plan.ui);

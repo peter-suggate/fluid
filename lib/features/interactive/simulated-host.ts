@@ -112,7 +112,7 @@ export function createSimulatedInteractionHost(options: {
     ? catalog.inspectDocument(options.initial).document
     : { schemaVersion: 1, entities: [], connections: [] };
   let documentRevision = 0;
-  let generation = 1;
+  let generation = 0;
   let running = false;
   let preparingUntil = 0;
   let controlledEntityId: string | undefined;
@@ -204,8 +204,14 @@ export function createSimulatedInteractionHost(options: {
     }
   }
 
-  /** A new world: every runtime and body from the document, at tick 0. */
+  /**
+   * A new world: every runtime and body from the document, at tick 0, under a
+   * new generation. Every path to a new world comes through here — an authoring
+   * reset used to keep the old generation, so commands prepared against the
+   * world it replaced were still admitted, and its pump kept ticking.
+   */
   function resetWorld() {
+    generation += 1;
     for (const runtime of runtimes.values()) runtime.dispose();
     runtimes = new Map();
     bodies = new Map();
@@ -215,7 +221,7 @@ export function createSimulatedInteractionHost(options: {
     lastSequence = -1;
     tick = 0; time_s = 0;
     controlledEntityId = undefined;
-    running = false;
+    setRunning(false);
     replan();
     if (plan) for (const entity of document.entities) rebuildEntity(entity);
     startPreparing();
@@ -625,7 +631,7 @@ export function createSimulatedInteractionHost(options: {
         return unchanged();
       }
       case "transport": {
-        if (command.action === "reset") { resetWorld(); generation += 1; return unchanged("reset"); }
+        if (command.action === "reset") { resetWorld(); return unchanged("reset"); }
         if (command.action === "pause") { setRunning(false); heldActions.clear(); edgeQueue = []; return unchanged(); }
         const ready = readiness();
         if (ready.state !== "ready") return { accepted: false, reason: ready.reasons[0] ?? "Not ready" };
@@ -652,7 +658,6 @@ export function createSimulatedInteractionHost(options: {
   }
 
   resetWorld();
-  generation = 1;
   view = buildView();
 
   return {
@@ -675,7 +680,6 @@ export function createSimulatedInteractionHost(options: {
         documentRevision += 1;
         historyEntries.push({ revision: documentRevision, label: "Imported interactive entities" });
         resetWorld();
-        generation += 1;
         emit();
         return { accepted: true, documentRevision, impact: "reset" };
       } catch (error) {

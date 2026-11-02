@@ -84,6 +84,15 @@ test("opening compare with an empty diff makes B a copy of A", () => {
   sync.stop();
 });
 
+test("a stopped mirror stays stopped: refresh does not copy A over B", () => {
+  const { a, b } = panes();
+  const sync = startCompareSync(a, b, fakeStore());
+  sync.stop();
+  a.ui.getState().setGridOverlayAxis("z");
+  sync.refresh();
+  assert.notEqual(b.ui.getState().gridOverlayAxis, "z");
+});
+
 test("a solver key is config: it never moves both panes, whatever the padlocks say", () => {
   assert.equal(compareGroupForKey("method"), "config");
   assert.equal(compareGroupForKey("scene.container.width_m"), "config");

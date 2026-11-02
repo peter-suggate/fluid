@@ -1,3 +1,4 @@
+import { Compiled } from "../../../core/compiled";
 import {
   SPARSE_BRICK_GPU_LAYOUT,
   SPARSE_BRICK_NO_OWNER,
@@ -1604,8 +1605,13 @@ export class WebGpuLiveSvoDerivedBuilder {
   private readonly params: GPUBuffer;
   private readonly feedbackParams?: GPUBuffer;
   private readonly feedbackSampler?: GPUSampler;
-  private pipelineState?: LiveSvoDerivedBuilderPipelineState;
-  private pipelineInitialization?: Promise<void>;
+  /** Compiled on first initialization; a failed compile is retried by the next. */
+  private readonly pipelines = new Compiled(async () => {
+    const state = await this.compilePipelineState();
+    if (this.destroyed) throw new Error("Live SVO derived builder was destroyed during pipeline initialization");
+    return state;
+  });
+  private get pipelineState(): LiveSvoDerivedBuilderPipelineState | undefined { return this.pipelines.value; }
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoDerivedBuilderOptions) {
@@ -1725,20 +1731,9 @@ export class WebGpuLiveSvoDerivedBuilder {
   }
 
   async initializePipelines(): Promise<void> {
-    if (this.pipelineState) return;
+    if (this.pipelines.ready) return;
     if (this.destroyed) throw new Error("Cannot initialize destroyed live SVO derived builder");
-    if (!this.pipelineInitialization) {
-      this.pipelineInitialization = this.compilePipelineState().then((state) => {
-        if (this.destroyed) throw new Error("Live SVO derived builder was destroyed during pipeline initialization");
-        this.pipelineState = state;
-      });
-    }
-    try {
-      await this.pipelineInitialization;
-    } catch (error) {
-      this.pipelineInitialization = undefined;
-      throw error;
-    }
+    await this.pipelines.ensure();
   }
 
   private async compilePipelineState(): Promise<LiveSvoDerivedBuilderPipelineState> {
@@ -1956,8 +1951,13 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
   private readonly queueHeaderBytes: number;
   private readonly pageCapacityByLevel: readonly number[];
   private readonly stepLeafCapacity: number;
-  private pipelineState?: LiveSvoDerivedPlannerPipelineState;
-  private pipelineInitialization?: Promise<void>;
+  /** Compiled on first initialization; a failed compile is retried by the next. */
+  private readonly pipelines = new Compiled(async () => {
+    const state = await this.compilePipelineState();
+    if (this.destroyed) throw new Error("Live SVO derived worklist planner was destroyed during pipeline initialization");
+    return state;
+  });
+  private get pipelineState(): LiveSvoDerivedPlannerPipelineState | undefined { return this.pipelines.value; }
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoDerivedWorklistPlannerOptions) {
@@ -2073,20 +2073,9 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
   stepDrainFrames(seedLeaves: number): number { return this.drainFrames(seedLeaves + this.stepLeafCapacity); }
 
   async initializePipelines(): Promise<void> {
-    if (this.pipelineState) return;
+    if (this.pipelines.ready) return;
     if (this.destroyed) throw new Error("Cannot initialize destroyed live SVO derived worklist planner");
-    if (!this.pipelineInitialization) {
-      this.pipelineInitialization = this.compilePipelineState().then((state) => {
-        if (this.destroyed) throw new Error("Live SVO derived worklist planner was destroyed during pipeline initialization");
-        this.pipelineState = state;
-      });
-    }
-    try {
-      await this.pipelineInitialization;
-    } catch (error) {
-      this.pipelineInitialization = undefined;
-      throw error;
-    }
+    await this.pipelines.ensure();
   }
 
   private async compilePipelineState(): Promise<LiveSvoDerivedPlannerPipelineState> {

@@ -56,8 +56,8 @@ export function applyHostRunState(panes: Iterable<TransportPane>, runState: RunS
  *
  * `resynchronizing` marks a pane re-seeded as a *consequence* of someone else's
  * reset rather than as the subject of one: its clock has to return to zero with
- * the host's, but nobody asked it to stop, to drop its selection, or to say so
- * in the notice line.
+ * the host's, but nobody asked it to drop its selection or to say so in the
+ * notice line.
  */
 export interface PaneResetStep<Id extends string = string> {
   readonly id: Id;
@@ -75,8 +75,8 @@ export interface PaneResetStep<Id extends string = string> {
  * and the transport dies for both panes. Re-seeding the others is not a
  * courtesy — it is what makes the one-clock claim true.
  *
- * The pane that was asked pauses, as a reset always has. The others keep the
- * run state they were in, so choosing a scene in pane B does not stop pane A.
+ * Run state is not part of the plan: it is the host's, and the controller
+ * pauses the host once for the whole reset.
  */
 export function paneResetPlan<Id extends string>(paneIds: Iterable<Id>, paneId: Id): PaneResetStep<Id>[] {
   const plan: PaneResetStep<Id>[] = [{ id: paneId, resynchronizing: false }];

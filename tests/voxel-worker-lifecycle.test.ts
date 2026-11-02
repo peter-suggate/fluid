@@ -122,8 +122,34 @@ test("a crashed worker rejects future requests and terminates without waiting fo
     const rejected = assert.rejects(pending, /unserializable/);
     worker.dispatchEvent(new Event("messageerror"));
     await rejected;
-    await assert.rejects(client.validateLiveSolidEdit(defaultScene, defaultScene), /no longer available/);
+    await assert.rejects(client.validateLiveSolidEdit(defaultScene, defaultScene), /unserializable/);
     await client.shutdown();
+    assert.equal(worker.terminated, true);
+  });
+});
+
+test("a worker that crashes after its runtime ended still terminates without a handshake", async () => {
+  const statuses: GPUStatus[] = [];
+  await withClient(async (client, worker) => {
+    worker.emit({ type: "status", status: { state: "unavailable", label: "Solver halted", resource: webGPUPlatformResourcePlugin }, workerNow_ms: 0 });
+    const shutdown = client.shutdown();
+    worker.dispatchEvent(new Event("error"));
+    await assert.rejects(shutdown, /worker failed/);
+    assert.equal(worker.terminated, true);
+    // The first failure is the one reported and the one requests are refused with.
+    await assert.rejects(client.validateLiveSolidEdit(defaultScene, defaultScene), /Solver halted/);
+  }, status => statuses.push(status));
+  assert.deepEqual(statuses.map(status => status.label), ["Solver halted"]);
+});
+
+test("concurrent shutdowns share one handshake", async () => {
+  await withClient(async (client, worker) => {
+    const first = client.shutdown();
+    const second = client.shutdown();
+    assert.equal(first, second);
+    assert.equal(worker.messages.filter(message => message.type === "shutdown").length, 1);
+    worker.finishShutdown();
+    await first;
     assert.equal(worker.terminated, true);
   });
 });

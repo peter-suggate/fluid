@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { RuntimeLifecycle } from "../lib/core/runtime-lifecycle";
 
 import {
   canQueuePreparedGPUAdvance,
@@ -172,7 +173,7 @@ function deferredPresentationFixture() {
   };
   let draws = 0;
   const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    gpuFluid: solver, gpuFluidGeneration: 1, deferredPresentedTimes: new WeakMap(),
+    lifecycle: new RuntimeLifecycle(), gpuFluid: solver, gpuFluidGeneration: 1, deferredPresentedTimes: new WeakMap(),
     draw: () => ({ context: "test", methodId: "uniform-volume", presentationSubmitted: ++draws > 1 }),
   }) as FluidLabRenderer;
   return {
@@ -233,7 +234,7 @@ test("NB-FLIP receipt backpressure does not defer an already-submitted image or 
   assert.equal(presentationHeldByPendingFrame(solver.framePending, true), false);
   const metrics = { context: "test", methodId: "uniform-narrow-band-flip", presentationSubmitted: false };
   const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    gpuFluid: solver, draw: () => metrics,
+    lifecycle: new RuntimeLifecycle(), gpuFluid: solver, draw: () => metrics,
   }) as FluidLabRenderer;
   assert.equal(await renderer.drawWithDeferredPresentation([] as unknown as Parameters<FluidLabRenderer["draw"]>), metrics,
     "a later request at the full-ring gate returns instead of awaiting the entire queue");

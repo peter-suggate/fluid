@@ -78,9 +78,10 @@ export function CompareHost() {
   const shellRef = useRef<HTMLElement>(null);
   const ghostRef = useRef<HTMLDivElement>(null);
 
-  // Attached and registered here rather than only in the ring's verb, so a
-  // compare *link* restores the pair too: the URL sets the record directly and
-  // never goes through `openCompareMode`.
+  // Pane B's one membership owner: realm and clock join and leave together,
+  // here rather than in the ring's verb, so a compare *link* restores the pair
+  // too — the URL sets the record directly and never goes through
+  // `openCompareMode`.
   //
   // The attach is what makes pane B a pane at all. Everything the controller
   // does for a named pane — `setMethod`, the transport, the published clock —
@@ -89,12 +90,8 @@ export function CompareHost() {
   // control mounted under B would read B's stores and write A's.
   useEffect(() => {
     if (!active) return;
-    simulation.attachPaneSession(SECOND_PANE_ID, sessionB);
-    simulation.registerPane(SECOND_PANE_ID);
-    return () => {
-      simulation.unregisterPane(SECOND_PANE_ID);
-      simulation.detachPaneSession(SECOND_PANE_ID);
-    };
+    simulation.attachPane(SECOND_PANE_ID, sessionB);
+    return () => { simulation.detachPane(SECOND_PANE_ID); };
   }, [active, sessionB]);
 
   // B is A plus the diff, for as long as the mode is open. Started after the

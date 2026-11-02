@@ -39,3 +39,15 @@ export type GPUStatus =
       diagnostics?: { reason: GPUDeviceLostReason; message: string; compilation: GPUCompilationSnapshot;
         recentCompilations: readonly GPUCompilationTiming[];
         pendingBatches: number; initializingScene: boolean; allocatedSolverBytes?: number } };
+
+/**
+ * Whether a host-side rebuild may announce itself over `status`.
+ *
+ * Only a session that holds (or is bringing up) a device can rebuild. A pane
+ * that is waiting for an explicit start, stopping, stopped or lost leaves those
+ * states only through a new session, so a reset or a setting change must not
+ * relabel it as preparing work that nothing will run.
+ */
+export function gpuStatusAcceptsRebuild(status: GPUStatus): boolean {
+  return status.state === "initializing" || status.state === "ready" || status.state === "cancelled";
+}

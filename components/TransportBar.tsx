@@ -217,7 +217,7 @@ export function TransportBar({ hostBlockReason, viewSession, sessions }: {
   const safeBringup = safeBringupPolicy === true;
   const browserPolicyPending = safeBringupPolicy === null;
   const browserSafetyLocked = safeBringupPolicy !== false;
-  const [safeStepRequested, setSafeStepRequested] = useState(false);
+  const [safeStepSpent, setSafeStepSpent] = useState(() => simulation.safeBrowserStepSpent());
   const interaction = resourceInteractionGates(resourceReadiness, fluidRequired);
   // The controls never narrate work: loading, compiling and topology states are
   // the work section's (see `usePaneActivity`). Here they are only a lock,
@@ -226,7 +226,7 @@ export function TransportBar({ hostBlockReason, viewSession, sessions }: {
   const transportLocked = Boolean(hostBlockReason) || rendererOnlyScene || !interaction.transportInteractive
     || fluidRequired && (!readiness.initialSceneReady || !readiness.simulationReady);
   const transportLockedReason = hostBlockReason ?? transportLockReason(readiness, gpuInfo);
-  const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
+  const safeStepLocked = safeBringup && (safeStepSpent || (gpuInfo?.encodedSteps ?? 0) >= 1);
   // A simulated interaction host (`?interactive=demo`) is not wired to the
   // controller, so it follows the transport by command. The production host
   // follows the controller's run state and needs nothing here.
@@ -285,7 +285,7 @@ export function TransportBar({ hostBlockReason, viewSession, sessions }: {
         <button
           type="button"
           disabled={browserPolicyPending || transportLocked || safeStepLocked}
-          onClick={() => { if (safeBringup) setSafeStepRequested(true); simulation.singleStep(); }}
+          onClick={() => { simulation.singleStep(); setSafeStepSpent(simulation.safeBrowserStepSpent()); }}
           aria-label={stepLabel}
           title={stepLabel}
         ><StepForward width={15} height={15} strokeWidth={1.8} aria-hidden /></button>

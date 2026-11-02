@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { StagedReadback } from '../lib/core/staged-readback';
 import { SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_PARAMS_LAYOUT } from '../lib/svo/pipeline/webgpu-svo-dry-scene';
 import { DEFAULT_SVO_RENDER_TUNING, SvoSurfaceTuningCache } from '../lib/svo/pipeline/svo-render-tuning';
 import { SVO_SURFACE_MESH_STATE, SVO_SURFACE_MESH_STATE_BYTES } from '../lib/svo/features/primary-visibility/svo-surface-mesh';
@@ -41,10 +42,14 @@ function meshFixture() {
   const bundleDescriptors: GPURenderBundleEncoderDescriptor[] = [], boundPipelines: unknown[] = [];
   const indirect: { buffer: unknown; offset: number }[] = [];
   const commands = { setPipeline(pipeline: unknown) { boundPipelines.push(pipeline); }, setBindGroup() {}, setVertexBuffer() {}, setIndexBuffer() {}, draw() {}, drawIndirect(buffer: unknown, offset: number) { indirect.push({ buffer, offset }); }, drawIndexedIndirect() {}, finish() { return {}; } };
+  Object.assign(globalThis, { GPUBufferUsage: { COPY_DST: 8, MAP_READ: 1 }, GPUMapMode: { READ: 1 } });
+  // A receipt map that never lands stays in flight for the rest of the fixture.
+  const staging = { mapAsync: () => new Promise(() => {}), getMappedRange() {}, unmap() {}, destroy() {} };
+  const surfaceMeshReadback = new StagedReadback({ createBuffer: () => staging } as unknown as GPUDevice, { label: 'Voxel mesh status', size: SVO_SURFACE_MESH_STATE_BYTES });
   const renderer = Object.assign(Object.create(SparseVoxelDrySceneRenderer.prototype), {
     device: { queue: { writeBuffer() { writes++; } }, createRenderBundleEncoder(descriptor: GPURenderBundleEncoderDescriptor) { bundles++; bundleDescriptors.push(descriptor); return commands; } },
     source: { structural: { domain: { brickSize: 8 }, planarBoundaries: { count: 2 }, sceneMaintenance: { activity: 0 } } },
-    surfaceMeshState: {}, surfaceMeshArena: { size: 4096 }, surfaceMeshCullIndirect: {}, surfaceMeshReadback: {},
+    surfaceMeshState: {}, surfaceMeshArena: { size: 4096 }, surfaceMeshCullIndirect: {}, surfaceMeshReadback,
     surfaceMeshPipelines: Object.fromEntries(['prepare', 'publish', 'select', 'candidates', 'cullDispatch', 'cull', 'ingest', 'schedule', 'count', 'allocate', 'emit', 'boxes', 'background', 'planar', 'draw'].map(key => [key, {}])),
     surfaceMeshComputeGroup: {}, surfaceMeshDrawGroup: {}, bindGroup: {},
     surfaceMeshStatus: { state: 'ready', drawn: true }, surfaceMeshSeenActivity: 0,
@@ -58,7 +63,7 @@ function meshFixture() {
   const encoder = {
     beginComputePass(descriptor: GPUComputePassDescriptor) { compute.push(descriptor); return { ...commands, dispatchWorkgroups() {}, dispatchWorkgroupsIndirect() {}, end() {} }; },
     beginRenderPass(descriptor: GPURenderPassDescriptor) { render.push(descriptor); return { executeBundles() { draws++; }, end() {} }; },
-    copyBufferToBuffer(_a: unknown, _b: number, target: unknown, _d: number, size: number) { if (target === renderer.surfaceMeshReadback) { assert.equal(size, SVO_SURFACE_MESH_STATE_BYTES); receipts++; } },
+    copyBufferToBuffer(_a: unknown, _b: number, target: unknown, _d: number, size: number) { if (target === staging) { assert.equal(size, SVO_SURFACE_MESH_STATE_BYTES); receipts++; } },
   };
   const views = { hardwareDepth: {}, packedSurface: {}, identityMedia: {} };
   return { renderer, views, frame: () => renderer.encodeSurfaceMesh(encoder, views, false, 1), compute, render, bundleDescriptors, boundPipelines, indirect,
@@ -77,8 +82,8 @@ test('warm primary replays commands and descriptors, still culls every frame, an
   f.renderer.surfaceMeshReadbackAt_ms = performance.now() - 251;
   f.frame(); assert.equal(f.counts().receipts, 1);
   // An in-flight receipt never blocks the next draw or starts a duplicate map.
-  f.renderer.surfaceMeshReadbackCopied = false; f.renderer.surfaceMeshReadbackPending = true;
   f.frame(); assert.equal(f.counts().receipts, 1);
+  assert.equal(f.renderer.surfaceMeshReadback.state, 'mapping');
   f.renderer.source.structural.sceneMaintenance.activity++;
   f.frame();
   assert.equal(f.renderer.surfaceMeshStatus.state, 'pending');

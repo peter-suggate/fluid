@@ -73,8 +73,7 @@ function TankRow() {
   const down = step(0.5), up = step(2);
   const commit = (field: EditorField, value: number) => {
     if (value === field.value) return;
-    simulation.beginEdit(`Set tank ${field.label}`, session.id);
-    simulation.commitEdit(field.apply(value), { reseed: true }, session.id);
+    simulation.edit(`Set tank ${field.label}`, field.apply(value), { reseed: true }, session.id);
   };
   return <ToolstripRow
     icon={<Cuboid width={14} height={14} strokeWidth={1.7} aria-hidden />}

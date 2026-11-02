@@ -76,3 +76,10 @@ test("decoder rejects metadata from a different world revision", () => {
     revision: { ...fixture.publication.revision, commandSequence: 2 } };
   assert.throws(() => decodePhysicsPublication(inconsistent), /disagrees on commandSequence/);
 });
+
+test("a publication refused at its header is released, so the worker gets its slot back", () => {
+  const fixture = encoded([{ id: PhysicsPlane.Density, kind: 1, offset: 256, count: 2 }]);
+  fixture.publication.bytes[0] = 0;
+  assert.throws(() => decodePhysicsPublication(fixture.publication), /magic/);
+  assert.equal(fixture.released(), 1);
+});

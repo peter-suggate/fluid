@@ -13,6 +13,7 @@ import {
   sceneEditRequiresReset,
   type SimulationRunConfig,
 } from "../lib/core/webgpu-renderer";
+import { RuntimeLifecycle } from "../lib/core/runtime-lifecycle";
 import { WebGPULiveSvoScene } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";
 
 test("draws wait for an in-place reset before considering another GPU allocation", async () => {
@@ -21,7 +22,7 @@ test("draws wait for an in-place reset before considering another GPU allocation
   let rebuilds = 0;
   const solver = { info: {}, reseed: () => new Promise<boolean>(resolve => { finish = resolve; }) };
   const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    device: {}, gpuFluid: solver, gpuFluidKey: "old", gpuFluidRequestGeneration: 0,
+    device: {}, gpuFluid: solver, gpuFluidKey: "old", lifecycle: new RuntimeLifecycle(), solverBuildSerial: 0,
     gpuFluidGeneration: 0, attachedPresentationMode: "fluid-only",
     attachedStructuralKey: gpuSceneStructuralKey(defaultScene, config),
     attachedSolverDocumentKey: "old", pausedPresentationRevision: 0,
@@ -48,7 +49,7 @@ test("a superseding reset drains the previous GPU world before allocation", asyn
     device: { queue: { onSubmittedWorkDone: () => drained } },
     gpuFluid: { destroy: () => { events.push("destroy solver"); } },
     svoSceneSidecar: { destroy: () => { events.push("destroy sidecar"); } },
-    gpuFluidRequestGeneration: 0, timelineResetPending: true,
+    lifecycle: new RuntimeLifecycle(), solverBuildSerial: 0, resetDrainOwed: true,
     onStatus: () => {}, updateRenderSources: () => {}, resetGPUQueueTracking: () => {},
   });
   t.mock.method(WebGPULiveSvoScene, "create", async () => {
@@ -58,10 +59,47 @@ test("a superseding reset drains the previous GPU world before allocation", asyn
   const config: SimulationRunConfig = { methodId: "uniform-volume", quality: "balanced", values: {} };
   renderer.beginGPUFluidInitialization(scene, config, "first", "full-scene");
   renderer.beginGPUFluidInitialization(scene, config, "second", "full-scene");
+  const second = renderer.solverBuild;
   drain();
-  await renderer.gpuFluidPending;
+  await second.settled;
   assert.deepEqual(events, ["destroy solver", "destroy sidecar", "allocate"]);
-  assert.equal(renderer.timelineResetPending, false);
+  assert.equal(renderer.resetDrainOwed, false);
+  assert.equal(second.drainOwed, false, "the build that drained paid the obligation");
+});
+
+test("a reset during a build that owes no drain still drains before the next allocation", async (t) => {
+  // Z is superseded by A; a reset lands while A waits on Z; A then prepares
+  // with nothing owed. The reset's drain must survive A for the build after it.
+  const scene = cloneScene(defaultScene);
+  scene.systems = { ...scene.systems, fluid: false };
+  const events: string[] = [];
+  const creates: ((value: unknown) => void)[] = [];
+  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
+    device: { queue: { onSubmittedWorkDone: async () => { events.push("drain"); } } },
+    gpuFluid: { destroy: () => { events.push("destroy solver"); } },
+    lifecycle: new RuntimeLifecycle(), solverBuildSerial: 0, resetDrainOwed: false, simulationRunning: true,
+    gpuFluidGeneration: 0,
+    onStatus: () => {}, updateRenderSources: () => {}, resetGPUQueueTracking: () => {}, resetPresentationTrace: () => {},
+  });
+  t.mock.method(WebGPULiveSvoScene, "create", () => {
+    events.push(`allocate ${creates.length}`);
+    return new Promise(resolve => { creates.push(resolve); });
+  });
+  const config: SimulationRunConfig = { methodId: "uniform-volume", quality: "balanced", values: {} };
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  renderer.beginGPUFluidInitialization(scene, config, "z", "full-scene");
+  await settle();
+  renderer.beginGPUFluidInitialization(scene, config, "a", "full-scene");
+  renderer.resetSimulationTimeline();
+  creates[0]({ sparseVoxelSceneSource: {}, destroy: () => { events.push("destroy z candidate"); } });
+  await settle();
+  assert.deepEqual(events, ["allocate 0", "destroy z candidate", "allocate 1"], "A owes no drain and allocates");
+  renderer.beginGPUFluidInitialization(scene, config, "b", "full-scene");
+  creates[1]({ sparseVoxelSceneSource: {}, destroy: () => { events.push("destroy a candidate"); } });
+  await settle();
+  assert.deepEqual(events.slice(3), ["destroy a candidate", "drain", "destroy solver", "allocate 2"],
+    "B drains the reset's orphaned solver before allocating");
+  assert.equal(renderer.resetDrainOwed, false);
 });
 
 test("Sparse CM12 refinement regions are a live policy edit", () => {
@@ -119,8 +157,7 @@ test("a live liquid edit retires the retained water mesh", () => {
   let injected = 0;
   let invalidated = 0;
   const renderer = Object.create(FluidLabRenderer.prototype) as {
-    disposed: boolean;
-    deviceLost: boolean;
+    lifecycle: RuntimeLifecycle;
     gpuFluid: {
       simulationReady: boolean;
       injectLiquidBall: () => void;
@@ -128,8 +165,7 @@ test("a live liquid edit retires the retained water mesh", () => {
     waterPipeline: { invalidateSurface: () => void };
     pausedPresentationRevision: number;
   };
-  renderer.disposed = false;
-  renderer.deviceLost = false;
+  renderer.lifecycle = new RuntimeLifecycle();
   renderer.gpuFluid = {
     simulationReady: true,
     injectLiquidBall: () => { injected += 1; },
@@ -155,7 +191,7 @@ test("async region publication invalidates the paused mesh and ignores detached 
   let invalidated = 0;
   const solver = { info: {}, refreshSceneTopology: () => new Promise<void>(resolve => { complete = resolve; }) };
   const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    disposed: false, gpuFluid: solver, pausedPresentationRevision: 0,
+    lifecycle: new RuntimeLifecycle(), gpuFluid: solver, pausedPresentationRevision: 0,
     waterPipeline: { invalidateSurface: () => { invalidated++; } },
   });
   renderer.refreshEditedTopology(solver);

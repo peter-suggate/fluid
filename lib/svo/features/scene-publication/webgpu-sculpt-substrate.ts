@@ -2,6 +2,7 @@ import { sculptCylinderWGSL } from "./sculpt-cut-cylinder";
 import { SCULPT_META, SCULPT_TABLE, SCULPT_VALUES, SCULPT_PAGE_SAMPLES,
   planSculptBake, type SculptBakePlan } from "./svo-sculpt-substrate";
 import { PublishedWords } from "./svo-table-upload";
+import { Compiled } from "../../../core/compiled";
 
 /** One workgroup per page row. The existing field is the starting point for
  * append edits; history is consulted only to restore a page on undo/load. */
@@ -37,13 +38,17 @@ export class WebgpuSculptSubstrate {
   private plan?: SculptBakePlan;
   private pending?: SculptBakePlan;
   private validated?: { base?: SculptBakePlan; next: SculptBakePlan };
-  private pipeline?: GPUComputePipeline;
+  /** A failed compile is retried by the next `initialize`. */
+  private readonly baker = new Compiled(async () => {
+    const module = this.device.createShaderModule({ label: "Bake sculpt substrate", code: sculptBakeWGSL });
+    return this.device.createComputePipelineAsync({ label: "Bake sculpt substrate", layout: "auto", compute: { module, entryPoint: "bake" } });
+  });
+  private get pipeline(): GPUComputePipeline | undefined { return this.baker.value; }
   private arena?: GPUBuffer;
   private offset = 0;
   private readonly proxies = new PublishedWords();
   private readonly directory = new PublishedWords();
   private readonly metadata = new PublishedWords();
-  private initialization?: Promise<void>;
   private input?: GPUBuffer;
   private group?: GPUBindGroup;
   private groupArena?: GPUBuffer;
@@ -58,12 +63,7 @@ export class WebgpuSculptSubstrate {
     this.validated = { base: this.plan, next: planSculptBake(this.plan, words) };
   }
   initialize(): Promise<void> {
-    return this.initialization ??= (async () => {
-      const module = this.device.createShaderModule({ label: "Bake sculpt substrate", code: sculptBakeWGSL });
-      this.pipeline = await this.device.createComputePipelineAsync({ label: "Bake sculpt substrate", layout: "auto",
-        compute: { module, entryPoint: "bake" } });
-      this.flush();
-    })();
+    return this.baker.ensure().then(() => this.flush());
   }
   publish(arena: GPUBuffer, offsetBytes: number, words: Uint32Array): number {
     if (words === this.plan?.words && arena === this.arena && offsetBytes / 4 === this.offset) return 0;

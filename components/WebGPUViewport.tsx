@@ -3,26 +3,22 @@
 import { rigidControlOwnerId } from "../lib/core/rigid-motor";
 
 import { useEffect, useRef, useState , useMemo} from "react";
-import { createBrowserFrameBenchmark } from "../lib/core/browser-frame-benchmark";
 import { useVoxelToolGesture } from "./useVoxelToolGesture";
 import type { PixelTraceConfig, PixelTraceStatus } from "../lib/core/webgpu-renderer";
-import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
-import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "../lib/core/webgpu-render-worker-client";
+import type { FluidLabRendererHandle } from "../lib/core/webgpu-render-worker-client";
 import {
   resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
   type SvoPixelTrace, type SvoPixelTracePinRequest,
 } from "../lib/svo/features/diagnostics/svo-pixel-trace";
 import { PixelTraceHud } from "./PixelTraceHud";
-import { defaultMethodId, getMethod } from "@/lib/core/method-registry";
-import { canonicalScene, type CameraState, type RunState } from "../lib/core/model";
+import { getMethod } from "@/lib/core/method-registry";
+import type { CameraState } from "../lib/core/model";
 import { add, cameraBasis, dot, length, orbitAbout, pan, scale, sub, zoomToward } from "../lib/core/math";
 import { boundingRadius, type RigidBodyState } from "../lib/core/rigid-body";
 import { placementBodyDescription, placementDimensionsForRadius } from "../lib/core/editor-placement";
 import type { RigidBodyDescription } from "../lib/core/model";
 import { resourceInteractionGates } from "../lib/core/resource-readiness";
-import { PRIMARY_PANE_ID, simulation } from "../lib/core/simulation/controller";
-import { createInteractionFluidDriver } from "../lib/core/simulation/interaction-fluid-driver";
-import { simulationRecording } from "../lib/core/simulation/recording";
+import { PRIMARY_PANE_ID, simulation, type EditGesture } from "../lib/core/simulation/controller";
 import { cameraTanHalfFov, projectToViewport, viewportRayForPointer, viewportWorldPerPixel } from "../lib/core/webgpu-camera";
 import { gesturePivot, WHEEL_GESTURE_GAP_MS, WHEEL_GESTURE_TRAVEL_PX } from "../lib/core/camera-pivot";
 import {
@@ -108,15 +104,10 @@ import {
 } from "../lib/core/editor-terrain";
 import { ContainerToolstrip, EntityToolstrip } from "./SceneToolstrip";
 import { publishFrameRate } from "../lib/core/frame-rate-readout";
-import { applySceneDraft, displaySceneSnapshot, useDisplayScene, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
-import { resolvedMethodValues } from "../lib/core/stores/method-store";
-import { createDetailFocusCoalescer } from "../lib/core/solver-detail";
+import { displaySceneSnapshot, useDisplayScene } from "../lib/core/stores/scene-draft-store";
 import { drawnBodies, mergeDrawnPoses } from "../lib/core/stores/diagnostics-store";
 import { samePublishedBodyPoses, type GPURigidBodyPose } from "../lib/core/webgpu-rigid-body";
-import type { UIStoreHook } from "../lib/core/stores/ui-store";
 import { useSession } from "../lib/core/session/session-context";
-import { SmoothedFrameRate } from "../lib/core/frame-rate-meter";
-import { getScenePreset } from "../lib/core/scenes";
 import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   SVO_RENDER_STAGE_DEFINITIONS,
@@ -124,88 +115,18 @@ import {
   svoRenderStageUsesLightSlot,
 } from "../lib/svo/features/diagnostics/svo-render-diagnostics";
 import { projectViewportFailure, viewportFailureIndicator } from "../lib/core/viewport-failure-diagnostics";
+import type { PaneId } from "../lib/core/gpu-startup";
+import { RunScope, type Run } from "../lib/core/run-scope";
 import {
-  GPU_MANUAL_START_EVENT,
-  GPU_MANUAL_STOP_EVENT,
-  manualGPUControlTargetsPane,
-  resolveGPUStartupMode,
-  safeBrowserGPUBringupEnabled,
-  safeBrowserGPUBringupViolations,
-  safeBrowserSimulationEpochChanged,
-  shutdownBrowserGPUSession,
-  type PaneId,
-} from "../lib/core/gpu-startup";
-import { acquirePaneGPULease } from "../lib/core/session/pane-lease";
+  GPU_VIEWPORT_RUNTIME_ABI,
+  GPUViewportSession,
+  gpuViewportLifecycles,
+  type GPUViewportLifecycle,
+  type GPUViewportRenderBinding,
+  type GPUViewportWindow,
+} from "./gpu-viewport-session";
 
 type Vec3 = RigidBodyState["position_m"];
-
-interface GPUViewportLifecycle {
-  /**
-   * Compatibility of the retained renderer, its worker messages and every GPU
-   * resource ABI it compiled. Fast Refresh may reclaim a session only when the
-   * module that created it and the module doing the reclaim agree exactly.
-   */
-  readonly runtimeAbi: string;
-  readonly canvas: HTMLCanvasElement;
-  readonly renderer: FluidLabRendererHandle;
-  /** Point the retained render loop at the current component's refs/state. */
-  readonly rebind: (binding: GPUViewportRenderBinding) => void;
-  /** Cancel the teardown queued by React's development effect replay. */
-  readonly cancelDeferredCleanup: () => boolean;
-  /** Give an HMR/RSC replacement time to reclaim this GPU session. */
-  readonly deferCleanup: () => void;
-  /** Tear down immediately when the retained canvas really changes. */
-  readonly cleanupImmediately: () => Promise<void>;
-}
-
-/**
- * The UI state a draw reads, named rather than derived from a store
- * singleton: the shape is the same in every pane, and this declaration sits
- * above the component, where no session is in scope.
- */
-type UIViewState = ReturnType<UIStoreHook["getState"]>;
-
-interface GPUViewportRenderBinding {
-  readonly publishFrameRate: (fps: number | undefined) => void;
-  readonly pixelTraceDrawConfig: (
-    ui: UIViewState,
-    renderer: FluidLabRendererHandle,
-  ) => PixelTraceConfig | undefined;
-  readonly publishPixelTrace: (renderer: FluidLabRendererHandle) => void;
-  readonly publishBodyPoses: (renderer: FluidLabRendererHandle) => void;
-}
-
-type GPUViewportWindow = Window & {
-  /**
-   * Survives Vinext RSC program reloads, which can replace the React ref.
-   *
-   * Keyed by pane, because compare mode mounts two viewports in one page and a
-   * single slot made the second mount reclaim — or tear down — the first one's
-   * device. The retain-on-canvas-identity rule is per pane and unchanged.
-   */
-  __fluidLabGPUViewportLifecycle?: Map<PaneId, GPUViewportLifecycle>;
-};
-
-/**
- * The pane ledger, tolerating a slot written by a module version that predates
- * pane keying (a single lifecycle object rather than a map).
- */
-function gpuViewportLifecycles(host: GPUViewportWindow): Map<PaneId, GPUViewportLifecycle> {
-  const retained = host.__fluidLabGPUViewportLifecycle;
-  if (retained instanceof Map) return retained;
-  const lifecycles = new Map<PaneId, GPUViewportLifecycle>();
-  host.__fluidLabGPUViewportLifecycle = lifecycles;
-  return lifecycles;
-}
-
-const GPU_DEVELOPMENT_REBIND_GRACE_MS = 1_000;
-// Bump whenever a hot update changes a scene field consumed by the renderer,
-// worker message arguments, pipeline bindings, or an encode method signature.
-// Schema 2's authoritative wall field landed alongside new terrain/water and
-// render-stage ABIs; retaining a pre-change renderer made the next frame read
-// the new document through stale code and fail with an unrelated `height_m`
-// access. A cold page was sound because it never crossed that ABI boundary.
-const GPU_VIEWPORT_RUNTIME_ABI = "scene-v3-solid-world-render-stages-v1";
 
 /** Duration of the pinned trace's self-drawing sweep. */
 const PIXEL_TRACE_REVEAL_MS = 1100;
@@ -213,22 +134,6 @@ const PIXEL_TRACE_REVEAL_MS = 1100;
 const PIXEL_TRACE_HUD_INTERVAL_MS = 110;
 /** Do not replay a long ray while the pointer is still sweeping across pixels. */
 const PIXEL_TRACE_POINTER_SETTLE_MS = 100;
-
-/**
- * Which open gestures the renderer is allowed to draw.
- *
- * A terrain proposal redraws the ground immediately; it cannot move the lattice,
- * so presenting it against the committed solver is safe. A prop is safer still —
- * it is render-only and outside the solver's keys entirely, and so is the sun. Every other draft is
- * overlay-only: reshaping the tank or the water does change the geometry the
- * solver owns, and drawing the fluid at a size it was not allocated for would
- * tear. Those wait for the release, and preview as the wireframe box instead.
- *
- * Declared as a list rather than a condition because the answer is a property of
- * each subject, and the next entity has to state its own rather than being
- * folded into somebody else's boolean.
- */
-const PRESENTED_DRAFT_SUBJECTS: ReadonlySet<SceneDraftSubject> = new Set<SceneDraftSubject>(["terrain", "scenery", "lighting"]);
 
 /** Where a box's panel docks when none of its top corners is in front of the camera. */
 const TOP_RIGHT_DOCK = Object.freeze({ leftFraction: 1, topFraction: 0 });
@@ -278,6 +183,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   const session = useSession();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<FluidLabRendererHandle | null>(null);
+  /** The GPU pick readback in flight; a newer press supersedes it. */
+  const [picks] = useState(() => new RunScope());
   const gpuLifecycleRef = useRef<GPUViewportLifecycle | null>(null);
   const camera = session.ui((state) => state.camera);
   const setCamera = session.ui((state) => state.setCamera);
@@ -387,18 +294,24 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     normalizedY: number;
     movedAt_ms?: number;
   } | null>(null);
-  /**
-   * A click waiting for the probe to answer its own pixel. While one is held the
-   * probe traces the clicked position rather than the live pointer, so the ray
-   * that ends up frozen is the one the user aimed at.
-   */
   const bodyPoseRevisionRef = useRef(-1);
-  const tracePinRequestRef = useRef<SvoPixelTracePinRequest | null>(null);
   /**
-   * Where the pinned ray was aimed, and from which view. The position is what the
-   * frozen answer names; the camera key records the view that ray belonged to.
+   * The pin, one phase at a time.
+   *
+   * `requested`: a click waiting for the probe to answer its own pixel. While
+   * one is held the probe traces the clicked position rather than the live
+   * pointer, so the ray that ends up frozen is the one the user aimed at.
+   *
+   * `pinned`: where the frozen ray was aimed, and from which view. The position
+   * is what the frozen answer names; the camera key records the view that ray
+   * belonged to. The store's `pixelTracePinned` is the switch the HUD reads; this
+   * is the aim behind it, dropped as soon as the switch goes off.
    */
-  const tracePinnedRef = useRef<{ normalizedX: number; normalizedY: number; cameraKey: string } | null>(null);
+  const tracePinRef = useRef<
+    | { phase: "requested"; request: SvoPixelTracePinRequest }
+    | { phase: "pinned"; aim: { normalizedX: number; normalizedY: number; cameraKey: string } }
+    | null
+  >(null);
   /** Press origin of a gesture that could still turn out to be a pinning click. */
   const tracePinGestureRef = useRef<{ id: number; downX: number; downY: number } | null>(null);
   /** Pin transitions restart the reveal sweep; live hover always shows it whole. */
@@ -421,16 +334,18 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     `${view.azimuth_rad}|${view.elevation_rad}|${view.distance_m}|${view.target_m.x},${view.target_m.y},${view.target_m.z}`;
 
   const pixelTraceDrawConfig = (
-    ui: UIViewState,
+    ui: Parameters<GPUViewportRenderBinding["pixelTraceDrawConfig"]>[0],
     renderer: FluidLabRendererHandle,
   ): PixelTraceConfig | undefined => {
-    if (!ui.pixelTraceEnabled) { tracePinRequestRef.current = null; tracePinnedRef.current = null; return undefined; }
-    const pinnedAt = ui.pixelTracePinned ? tracePinnedRef.current : null;
+    const pin = tracePinRef.current;
+    if (!ui.pixelTraceEnabled) { tracePinRef.current = null; return undefined; }
+    const pinnedAt = ui.pixelTracePinned && pin?.phase === "pinned" ? pin.aim : null;
+    const requested = pin?.phase === "requested" ? pin.request : null;
     // A pinned ray traces its own pixel, not the pointer's, so a refresh answers
     // the ray that is frozen rather than wherever the mouse happens to be. A
     // pending click outranks the live pointer for the same reason: the probe must
     // stay on the clicked pixel until that pixel comes back.
-    const pointer = pinnedAt ?? tracePinRequestRef.current ?? tracePointerRef.current;
+    const pointer = pinnedAt ?? requested ?? tracePointerRef.current;
     if (!pointer) return undefined;
     const now_ms = performance.now();
     if (ui.pixelTracePinned !== traceRevealRef.current.pinned) {
@@ -449,9 +364,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       pinned: ui.pixelTracePinned,
       // A click-to-pin is an explicit query. It bypasses the lower-frequency
       // hover cadence so the frozen answer still feels immediate.
-      urgent: tracePinRequestRef.current !== null,
+      urgent: requested !== null,
       settled: pinnedAt !== null
-        || tracePinRequestRef.current !== null
+        || requested !== null
         || now_ms - ("movedAt_ms" in pointer
           ? pointer.movedAt_ms ?? Number.NEGATIVE_INFINITY
           : Number.NEGATIVE_INFINITY) >= PIXEL_TRACE_POINTER_SETTLE_MS,
@@ -494,23 +409,23 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // re-aim later. The ring carries its own — the pixel it was opened on —
     // and everything else is aimed here, at the live pointer, because it has none.
     const ui = session.ui.getState();
-    if (ui.pixelTracePinRequest && !ui.pixelTracePinned && !tracePinRequestRef.current) {
+    if (ui.pixelTracePinRequest && !ui.pixelTracePinned && tracePinRef.current?.phase !== "requested") {
       const aim = ui.pixelTracePinRequest.aim ?? tracePointerRef.current;
       if (aim) {
         // The ring's aim is a pointer observation in its own right: without this
         // a probe reached from a wedge before the pointer ever moved over the
         // canvas would report itself as having nothing to trace.
         tracePointerRef.current = { ...aim };
-        tracePinRequestRef.current = svoPixelTracePinClick({
-          ...aim,
-          cameraKey: pixelTraceCameraKey(ui.camera),
-          revision,
-        }).request;
+        tracePinRef.current = {
+          phase: "requested",
+          request: svoPixelTracePinClick({ ...aim, cameraKey: pixelTraceCameraKey(ui.camera), revision }).request,
+        };
         session.ui.setState({ pixelTracePinRequest: null });
       }
     }
-    const pinRequest = tracePinRequestRef.current;
-    if (pinRequest) {
+    const pin = tracePinRef.current;
+    if (pin?.phase === "requested") {
+      const pinRequest = pin.request;
       // The probe has been tracing the clicked pixel since the click; freeze it
       // only once that pixel is what came back.
       const resolution = resolveSvoPixelTracePin(pinRequest, {
@@ -519,17 +434,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         probeCanAnswer: status !== "unsupported" && status !== "path-inactive",
         revision,
       });
-      if (resolution !== "wait") {
-        tracePinRequestRef.current = null;
-        if (resolution === "pin") {
-          // Keep the aim so the frozen ray retains its recorded view.
-          tracePinnedRef.current = {
-            normalizedX: pinRequest.normalizedX,
-            normalizedY: pinRequest.normalizedY,
-            cameraKey: pinRequest.cameraKey,
-          };
-          setPixelTracePinned(true);
-        }
+      if (resolution === "pin") {
+        // Keep the aim so the frozen ray retains its recorded view.
+        const { normalizedX, normalizedY, cameraKey } = pinRequest;
+        tracePinRef.current = { phase: "pinned", aim: { normalizedX, normalizedY, cameraKey } };
+        setPixelTracePinned(true);
+      } else if (resolution !== "wait") {
+        tracePinRef.current = null;
       }
     }
     const pinnedNow = session.ui.getState().pixelTracePinned;
@@ -538,7 +449,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // later refresh answer a ray the user never pinned. Controls outside the
     // viewport therefore ask, and the ask is honoured through the same handshake
     // a click uses.
-    if (!pinnedNow) tracePinnedRef.current = null;
+    if (!pinnedNow && tracePinRef.current?.phase === "pinned") tracePinRef.current = null;
     // Staleness worth reporting is the kind no refresh can fix; everything else
     // resolves itself on the next frame.
     const { stale } = resolveSvoPixelTracePinnedFrame({
@@ -594,11 +505,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // pending request, so a probe left pinned would go on tracing the old pixel
     // and the new request could never be answered.
     if (ui.pixelTracePinned) ui.setPixelTracePinned(false);
-    tracePinRequestRef.current = svoPixelTracePinClick({
-      ...pointer,
-      cameraKey: pixelTraceCameraKey(ui.camera),
-      revision: rendererRef.current?.pixelTraceRevision ?? 0,
-    }).request;
+    tracePinRef.current = {
+      phase: "requested",
+      request: svoPixelTracePinClick({
+        ...pointer,
+        cameraKey: pixelTraceCameraKey(ui.camera),
+        revision: rendererRef.current?.pixelTraceRevision ?? 0,
+      }).request,
+    };
   };
   /**
    * The object in the user's hand.
@@ -641,15 +555,19 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     | { id: number; x: number; y: number; downX: number; downY: number; action: "orbit" | "pan"; selectOnClick?: EditorSelection; claimed?: true }
     // `released` records a pointerup that arrived while the GPU pick readback
     // was still in flight, so a fast click still resolves instead of being
-    // dropped along with the gesture.
-    | { id: number; x: number; y: number; downX: number; downY: number; action: "pick"; released?: boolean }
+    // dropped along with the gesture. `pick` names the readback: a mouse
+    // reuses one pointer id for every press, so the id alone let a late
+    // answer to the previous click act on the next one.
+    | { id: number; x: number; y: number; downX: number; downY: number; action: "pick"; pick: Run; released?: boolean }
     // A body grab is a throw until the release says otherwise, so it carries the
     // press origin too: selecting on the press would drop a bounding box around
     // everything the user only meant to fling, and only the release knows which
     // gesture this was.
     | { id: number; action: "body"; bodyId: string; dragging: boolean; orientation?: RigidBodyState["orientation"]; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
-    | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
-    | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
+    // Every arm that edits the document carries the gesture it opened, and
+    // closes that one: never whichever gesture the pane has open by then.
+    | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3; gesture: EditGesture }
+    | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string; gesture: EditGesture }
     // A face-locked box swept across solids. It carries no `baseSolids`: the
     // release makes a *selection*, not an edit, so there is no patch to build
     // against a pre-drag document. See `editor-voxel-region.ts`.
@@ -663,7 +581,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // this tool armed can turn out to be: it goes true the first time the
     // pointer has travelled far enough to name an area, and a release without
     // it commits nothing — a click is a selection, never a draw.
-    | { id: number; action: "region-draw"; anchor: Vec3; regionId: string; drawn: boolean }
+    | { id: number; action: "region-draw"; anchor: Vec3; regionId: string; drawn: boolean; gesture: EditGesture }
     // A ball being dropped. `anchor` is the point under the press — the ball
     // rests on it and its surface passes through it — and `hover` is the
     // surface that anchor came from, kept so the ball can be re-rested as it
@@ -671,8 +589,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // what separates the two gestures this tool has: a click drops a default
     // ball, a drag sizes one.
     | { id: number; action: "body-place"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; template: RigidBodyDescription; dimensions_m: Vec3; position: Vec3 }
-    | { id: number; action: "fluid-ball"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string }
-    | { id: number; action: "fill-level" }
+    | { id: number; action: "fluid-ball"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string; gesture: EditGesture }
+    | { id: number; action: "fill-level"; gesture: EditGesture }
     // One arm for every editable thing. `entity` is the entity as it stood when
     // the gesture opened, resolved against the committed scene: re-resolving it
     // against its own output would let the handle walk away from the pointer.
@@ -682,7 +600,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // position the renderer is already showing, and the description that lands
     // on release. Both are absent for everything authored, which commits its
     // draft instead.
-    | { id: number; action: "entity-handle"; entity: EditorEntity; handle: EditorHandle; grabOffset: Vec3; lastRay?: { origin: Vec3; direction: Vec3 }; pose?: Vec3; described?: Partial<RigidBodyDescription> }
+    | { id: number; action: "entity-handle"; entity: EditorEntity; handle: EditorHandle; grabOffset: Vec3; lastRay?: { origin: Vec3; direction: Vec3 }; pose?: Vec3; described?: Partial<RigidBodyDescription>; gesture: EditGesture }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
@@ -874,396 +792,46 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const lifecycleWindow = window as GPUViewportWindow;
-    const lifecycles = gpuViewportLifecycles(lifecycleWindow);
-    const renderBinding: GPUViewportRenderBinding = {
+    const lifecycles = gpuViewportLifecycles(window as GPUViewportWindow);
+    const binding: GPUViewportRenderBinding = {
       publishFrameRate: (fps) => publishFrameRate(paneId, fps),
       pixelTraceDrawConfig,
       publishPixelTrace,
-    publishBodyPoses,
+      publishBodyPoses,
     };
     // React Fast Refresh deliberately cleans up and replays effects, including
     // effects with an empty dependency list. Vinext's RSC program reload can
     // also replace this component's hook state asynchronously, so the live
-    // lifecycle is retained on the document's Window as well as in the ref.
+    // session is retained on the document's Window as well as in the ref.
     // In particular, this leaves compiled shader and pipeline objects alone;
     // shader edits take effect on a real page reload instead of sacrificing the
     // browser's current GPU access.
     // Only ever this pane's slot. A second pane mounting must not find — and
     // must not tear down — the first pane's live session.
-    const retainedLifecycle = gpuLifecycleRef.current ?? lifecycles.get(paneId);
-    const retainedRuntimeIncompatible = Boolean(retainedLifecycle
-      && retainedLifecycle.runtimeAbi !== GPU_VIEWPORT_RUNTIME_ABI);
-    if (retainedLifecycle?.canvas === canvas
-      && retainedLifecycle.runtimeAbi === GPU_VIEWPORT_RUNTIME_ABI
-      && retainedLifecycle.cancelDeferredCleanup()) {
-      // A session created by the immediately previous hot module version does
-      // not have rebind yet. Preserve it during this one-time migration too.
-      retainedLifecycle.rebind?.(renderBinding);
-      gpuLifecycleRef.current = retainedLifecycle;
-      lifecycles.set(paneId, retainedLifecycle);
-      rendererRef.current = retainedLifecycle.renderer;
-      return retainedLifecycle.deferCleanup;
+    const retained = gpuLifecycleRef.current ?? lifecycles.get(paneId);
+    if (retained?.canvas === canvas
+      && retained.runtimeAbi === GPU_VIEWPORT_RUNTIME_ABI
+      && retained.cancelDeferredCleanup()) {
+      retained.rebind(binding);
+      gpuLifecycleRef.current = retained;
+      lifecycles.set(paneId, retained);
+      rendererRef.current = retained.renderer;
+      return retained.deferCleanup;
     }
-    const previousShutdown = retainedLifecycle?.cleanupImmediately();
-    if (retainedLifecycle) {
-      gpuLifecycleRef.current = null;
-    }
-    const diagnostics = session.diagnostics.getState();
-    const safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
-    const canonicalSafeMethodValues = resolvedMethodValues({ methodId: defaultMethodId(), quality: "balanced", overrides: {} });
-    const startupMode = () => resolveGPUStartupMode(window.location.search, {
-      presetId: session.scene.getState().presetId,
-      methodId: session.method.getState().methodId,
-    });
-    if (startupMode() === "off") {
-      diagnostics.set({ gpuStatus: { state: "unavailable", label: "WebGPU disabled by gpu=off (UI-only mode)", resource: webGPUPlatformResourcePlugin } });
-      return;
-    }
-    let running = true;
-    let releaseGPULease: (() => void) | undefined;
-    const renderer = new WebGPURenderWorkerClient(canvas, {
-      onStatus: (status) => {
-        if (status.state === "lost" || status.state === "unavailable" || status.state === "blocked") {
-          if (status.state === "unavailable" && status.failure) diagnostics.set({ gpuStatus: status });
-          running = false;
-          queueMicrotask(() => { if (initializationStarted && !stopping && !stopped) void stopGPU(status.label); });
-          return;
-        }
-        if (stopping || stopped) return;
-        const current = session.diagnostics.getState().gpuStatus;
-        // The controller publishes the user's intent before the next render
-        // can start expensive work. Preserve that context as detailed task
-        // progress arrives from the renderer.
-        const rendererOnlyReady = status.state === "ready" && status.label === "WebGPU renderer ready"
-          && getMethod(session.method.getState().methodId).backend === "webgpu";
-        // Close the platform plugin before opening the fluid plugin. Replacing
-        // this event used to leave the completed 4/4 renderer task permanently
-        // active while its label claimed the solver was being prepared.
-        if (rendererOnlyReady) session.diagnostics.getState().set({ gpuStatus: status });
-        const reportedStatus = rendererOnlyReady
-          ? { state: "initializing" as const, label: "Renderer ready; preparing fenced t=0 solver authority", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup" as const, resource: getMethod(session.method.getState().methodId).resource }
-          : status;
-        const gpuStatus = reportedStatus.state === "initializing" && current.state === "initializing" && current.operation
-          ? { ...reportedStatus, operation: current.operation, kind: reportedStatus.kind ?? current.kind, retainingPrevious: reportedStatus.retainingPrevious ?? current.retainingPrevious }
-          : reportedStatus;
-        session.diagnostics.getState().set({ gpuStatus });
+    gpuLifecycleRef.current = null;
+    const gpu = GPUViewportSession.start({
+      canvas, paneId, session, binding, lifecycles,
+      previousShutdown: retained?.cleanupImmediately(),
+      onReleased: (released) => {
+        if (rendererRef.current === released.renderer) rendererRef.current = null;
+        if (gpuLifecycleRef.current === released) gpuLifecycleRef.current = null;
       },
-      onGPUInfo: (info) => session.diagnostics.getState().set({ gpuInfo: info }),
-      // Named, because the host's completed time is the *minimum* over the
-      // panes: an unattributed completion would let one pane's progress
-      // stand for the other's and break the barrier it exists to keep.
-      onGPUAdvanceCompleted: (time_s) => simulation.gpuAdvanceCompleted(time_s, paneId),
-      onEffectiveRendererStatus: (effectiveRendererStatus) => session.diagnostics.getState().set({ effectiveRendererStatus }),
-      onLoad: (sample) => session.diagnostics.getState().pushWorkerLoad(sample),
     });
-    const detachInteractionFluid = simulation.attachInteractionFluid(paneId,
-      createInteractionFluidDriver(session.diagnostics, request => renderer.advanceInteractionFluid(request)));
-    let safeSimulationEpoch: number | undefined;
-    // This pane's orbit target as a transient detail focus: a new revision
-    // only when it moves, never written to the document or the address.
-    const detailFocus = createDetailFocusCoalescer();
-    let runStateSyncRevision = 0;
-    const syncRunState = (runState: RunState) => {
-      const revision = ++runStateSyncRevision;
-      void renderer.setSimulationRunning(runState === "running").then((submittedTime_s) => {
-        if (revision !== runStateSyncRevision
-          || runState !== "paused"
-          || session.runtime.getState().runState !== "paused") return;
-        simulation.gpuSchedulingPaused(submittedTime_s, paneId);
-      }).catch(() => {
-        // Worker failure is published through the renderer status callback.
-      });
-    };
-    syncRunState(session.runtime.getState().runState);
-    const unsubscribeRunState = session.runtime.subscribe((state, previous) => {
-      if (state.simulationEpoch !== previous.simulationEpoch) {
-        if (safeBrowserSimulationEpochChanged(safeBringup, initializationStarted, safeSimulationEpoch, state.simulationEpoch)) {
-          void stopGPU("Safe WebGPU session stopped after a reset/rebuild attempt");
-          return;
-        }
-        renderer.resetSimulationTimeline();
-      }
-      if (state.runState !== previous.runState) syncRunState(state.runState);
-    });
-    rendererRef.current = renderer;
-    let frame = 0;
-    const frameBenchmark = createBrowserFrameBenchmark();
-    let alive = true;
-    let activeBinding = renderBinding;
-    const frameRate = new SmoothedFrameRate(5);
-    let initializationStarted = false;
-    let stopping = false;
-    let stopped = false;
-    let stopPromise: Promise<void> | undefined;
-    const safeViolations = () => {
-      const sceneState = session.scene.getState(), methodState = session.method.getState(), ui = session.ui.getState();
-      return safeBrowserGPUBringupViolations({
-        presetId: sceneState.presetId,
-        methodId: methodState.methodId,
-        quality: methodState.quality,
-        methodValues: resolvedMethodValues(methodState),
-        canonicalMethodValues: canonicalSafeMethodValues,
-        exactScene: canonicalScene(sceneState.scene) === canonicalScene(getScenePreset("water-box-dam-break").create()),
-        gridOverlayAxis: ui.gridOverlayAxis,
-        armedGesture: ui.armedGesture,
-        search: window.location.search,
-      });
-    };
-    function stopGPU(label = "WebGPU stopped; device released — safe to close this tab", publishStatus = true): Promise<void> {
-      if (stopPromise) return stopPromise;
-      const priorStatus = session.diagnostics.getState().gpuStatus;
-      const failure = priorStatus.state === "unavailable" ? priorStatus.failure
-        : session.diagnostics.getState().gpuInfo?.simulationFailure;
-      stopping = true;
-      running = false;
-      simulation.setRunState("paused");
-      cancelAnimationFrame(frame);
-      if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: `${label} — stopping WebGPU and draining pending work`, resource: webGPUPlatformResourcePlugin } });
-      const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
-      stopPromise = (async () => {
-        await shutdownBrowserGPUSession(renderer, releaseGPULease, previousShutdown);
-        releaseGPULease = undefined;
-        stopping = false;
-        stopped = true;
-        if (publishStatus) diagnostics.set({ gpuStatus: { state: "unavailable", label: releasedLabel, failure, resource: webGPUPlatformResourcePlugin } });
-      })();
-      return stopPromise;
-    }
-    const beginInitialization = async () => {
-      if (initializationStarted || !alive || stopping || stopped) return;
-      if (safeBringup) {
-        const violations = safeViolations();
-        if (violations.length > 0) {
-          diagnostics.set({ gpuStatus: { state: "manual", label: `Safe WebGPU start refused: ${violations.join("; ")}`, resource: webGPUPlatformResourcePlugin } });
-          return;
-        }
-        session.runtime.getState().setRunState("paused");
-        safeSimulationEpoch = session.runtime.getState().simulationEpoch;
-      }
-      initializationStarted = true;
-      window.removeEventListener(GPU_MANUAL_START_EVENT, manualStart);
-      unsubscribeAutomaticStart();
-      if (previousShutdown) {
-        diagnostics.set({ gpuStatus: { state: "initializing", label: "Waiting for the previous WebGPU session to finish", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
-        await previousShutdown;
-        if (!alive || stopping || stopped) return;
-      }
-      const lease = acquirePaneGPULease(paneId);
-      if (lease.status !== "acquired") {
-        initializationStarted = false;
-        diagnostics.set({ gpuStatus: { state: "manual", label: `WebGPU start refused: ${lease.message}`, resource: webGPUPlatformResourcePlugin } });
-        window.addEventListener(GPU_MANUAL_START_EVENT, manualStart);
-        return;
-      }
-      releaseGPULease = lease.release;
-      diagnostics.set({ gpuStatus: { state: "initializing", label: "Initializing WebGPU", phase: "planning", completed: 0, total: 0, startedAt_ms: performance.now(), kind: "startup", resource: webGPUPlatformResourcePlugin } });
-      void renderer.initialize().then(async () => {
-      if (!alive || stopping || stopped) return;
-      const status = session.diagnostics.getState().gpuStatus;
-      if (status.state === "lost" || status.state === "unavailable" || status.state === "blocked") {
-        await stopGPU(status.label);
-        return;
-      }
-      const render = () => {
-        if (!alive || !running) return;
-        frame = requestAnimationFrame(render);
-        const sceneState = session.scene.getState();
-        const scene = sceneState.scene;
-        const draft = session.sceneDraft.getState().draft;
-        const presentationScene = PRESENTED_DRAFT_SUBJECTS.has(draft?.subject as SceneDraftSubject)
-          ? applySceneDraft(scene, draft)
-          : scene;
-        renderer.setSimulationScene(presentationScene === scene ? undefined : scene);
-        const ui = session.ui.getState();
-        const method = session.method.getState();
-        const state = session.diagnostics.getState();
-        const runtime = session.runtime.getState();
-        const scenePreset = getScenePreset(sceneState.presetId);
-        // Pausing freezes simulation time, not presentation. Attempt every
-        // browser animation frame; the renderer's double buffer bounds latency
-        // without changing cadence for camera motion or simulation state.
-        let metrics;
-        const drawStarted = frameBenchmark ? performance.now() : 0;
-        try {
-          metrics = renderer.draw(
-            simulation.time(), presentationScene, frameBenchmark?.camera(ui.camera) ?? ui.camera, state.bodies, ui.selectedBodyId,
-            {
-              methodId: method.methodId,
-              quality: method.quality,
-              values: resolvedMethodValues(method),
-              simulationEpoch: runtime.simulationEpoch,
-              // Read every frame rather than captured: entering compare mode
-              // pins the window to one advance, and a depth captured at mount
-              // would leave this pane two deep inside the barrier.
-              inFlightDepth: simulation.inFlightDepth(),
-              detailFocus: detailFocus(ui.camera.target_m),
-            },
-            {
-              axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode, layers: ui.visualLayers, particles: ui.fluidParticleDisplay,
-              particleSurface: {
-                greed: ui.fineSurfaceGreed, smoothing: ui.fineSurfaceSmoothing, thickness: ui.fineSurfaceThickness,
-                spraySize: ui.fineSpraySize, sprayOpacity: ui.fineSprayOpacity, merge: ui.fineSurfaceMerge,
-              },
-            },
-            scenePreset.background,
-            scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
-            ui.fluidSurfaceRenderMode,
-            {
-              surfaceTexturesEnabled: ui.svoSurfaceTexturesEnabled,
-              nativeAmbientOcclusionEnabled: ui.svoNativeAmbientOcclusionEnabled,
-              shadowsEnabled: ui.svoShadowsEnabled,
-              waterReflectionMode: ui.waterReflectionMode,
-              waterWorldRefractionEnabled: ui.waterWorldRefractionEnabled,
-              lensBloom: { enabled: ui.lensBloomEnabled, strength: ui.lensBloomStrength,
-                threshold: ui.lensBloomThreshold, radius: ui.lensBloomRadius },
-              ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
-              silhouetteRefinementEnabled: ui.silhouetteRefinementEnabled,
-              coneTracingMode: ui.svoConeTracingMode,
-              globalIlluminationEnabled: ui.svoGlobalIlluminationEnabled,
-              voxelSpecularReflectionsEnabled: ui.svoVoxelSpecularReflectionsEnabled,
-              voxelSpecularSteps: ui.svoVoxelSpecularSteps,
-              worldGiCacheEnabled: ui.svoWorldGiCacheEnabled,
-              latticeVisibilityEnabled: ui.svoLatticeVisibilityEnabled,
-              primaryTraversal: ui.svoPrimaryTraversal,
-              disabledStages: ui.disabledRenderStages,
-            },
-            {
-              stageView: ui.svoStageView,
-              lightSlot: ui.svoStageLightSlot,
-              maximumTraversalDepth: ui.svoMaximumTraversalDepth,
-              maximumNodeVisits: ui.svoMaximumNodeVisits,
-            },
-            ui.svoRenderTuning,
-            activeBinding.pixelTraceDrawConfig(ui, renderer),
-          );
-        } catch (error: unknown) {
-          void stopGPU(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
-          return;
-        }
-        activeBinding.publishBodyPoses(renderer);
-        frameBenchmark?.sample(renderer.completedPresentationCount, performance.now() - drawStarted, metrics, renderer.presentationResolution, {
-          scene: sceneState.presetId, runState: runtime.runState, camera: ui.camera,
-          shadows: ui.svoShadowsEnabled, ao: ui.svoAmbientOcclusionEnabled, gi: ui.svoGlobalIlluminationEnabled,
-          lighting: ui.svoConeTracingMode, primary: ui.svoPrimaryTraversal, water: ui.fluidSurfaceRenderMode,
-          disabledStages: ui.disabledRenderStages, tuning: ui.svoRenderTuning,
-          effectiveRenderer: state.effectiveRendererStatus,
-          readiness: { gpu: state.gpuStatus, svo: state.resourceReadiness.svo, fluid: state.resourceReadiness.fluid },
-        }, state.effectiveRendererStatus.state === "active"
-          && (ui.svoPrimaryTraversal !== "mesh" || state.effectiveRendererStatus.surfaceMesh?.state === "ready")
-          && state.effectiveRendererStatus.lightingVisibility?.state === ui.svoConeTracingMode
-          && state.resourceReadiness.platform.state === "ready"
-          && state.resourceReadiness.svo.state === "ready"
-          && state.resourceReadiness.fluid.state === "ready");
-        activeBinding.publishPixelTrace(renderer);
-        simulation.recordFrame(metrics, renderer.presentationResolution, paneId);
-        activeBinding.publishFrameRate(frameRate.sampleCompleted(renderer.completedPresentationCount, performance.now()));
-        if (metrics.presentationSubmitted) {
-          simulationRecording.capturePresentedState(canvas, runtime.simulationTime);
-        }
-      };
-      frame = requestAnimationFrame(render);
-      }).catch((error: unknown) => {
-      if (!stopping && !stopped) void stopGPU(error instanceof Error ? error.message : "WebGPU initialization failed");
-      });
-    };
-    // A START request that names no pane starts every pane; one that names a
-    // pane is that pane's alone.
-    const manualStart = (event: Event) => {
-      if (manualGPUControlTargetsPane(event, paneId)) void beginInitialization();
-    };
-    const maybeStartAutomatically = () => {
-      if (startupMode() === "automatic") beginInitialization();
-    };
-    const unsubscribeScene = session.scene.subscribe(maybeStartAutomatically);
-    const unsubscribeMethod = session.method.subscribe(maybeStartAutomatically);
-    const unsubscribeAutomaticStart = () => { unsubscribeScene(); unsubscribeMethod(); };
-    const enforceSafeConfiguration = () => {
-      if (!safeBringup || !initializationStarted || stopped) return;
-      const violations = safeViolations();
-      if (violations.length > 0) stopGPU(`Safe WebGPU session stopped after configuration drift: ${violations.join("; ")}`);
-    };
-    const unsubscribeSafeScene = session.scene.subscribe(enforceSafeConfiguration);
-    const unsubscribeSafeMethod = session.method.subscribe(enforceSafeConfiguration);
-    const unsubscribeSafeUI = session.ui.subscribe(enforceSafeConfiguration);
-    const manualStop = (event: Event) => {
-      if (manualGPUControlTargetsPane(event, paneId)) void stopGPU();
-    };
-    window.addEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
-    const pageHide = () => { void stopGPU("WebGPU stopped during page close", false); };
-    window.addEventListener("pagehide", pageHide, { once: true });
-    if (startupMode() === "manual" || startupMode() === "safe") {
-      diagnostics.set({ gpuStatus: { state: "manual", label: "WebGPU is waiting for explicit startup", resource: webGPUPlatformResourcePlugin } });
-      window.addEventListener(GPU_MANUAL_START_EVENT, manualStart);
-    } else beginInitialization();
-    let cleanupTimer: number | undefined;
-    let cleanupCompleted = false;
-    const cleanupImmediately = (): Promise<void> => {
-      if (cleanupCompleted) return stopPromise!;
-      cleanupCompleted = true;
-      frameBenchmark?.dispose();
-      if (cleanupTimer !== undefined) window.clearTimeout(cleanupTimer);
-      cleanupTimer = undefined;
-      alive = false;
-      running = false;
-      window.removeEventListener(GPU_MANUAL_START_EVENT, manualStart);
-      window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
-      window.removeEventListener("pagehide", pageHide);
-      unsubscribeAutomaticStart();
-      unsubscribeSafeScene();
-      unsubscribeSafeMethod();
-      unsubscribeSafeUI();
-      detachInteractionFluid();
-      unsubscribeRunState();
-      cancelAnimationFrame(frame);
-      if (rendererRef.current === renderer) rendererRef.current = null;
-      if (gpuLifecycleRef.current?.renderer === renderer) gpuLifecycleRef.current = null;
-      // Keep the draining lifecycle discoverable by a replacement canvas. Its
-      // lease remains held until outstanding compilation and teardown finish.
-      const shutdown = stopGPU("WebGPU stopped during component cleanup", false);
-      void shutdown.then(() => {
-        if (lifecycles.get(paneId)?.renderer === renderer) lifecycles.delete(paneId);
-      });
-      return shutdown;
-    };
-    const lifecycle: GPUViewportLifecycle = {
-      runtimeAbi: GPU_VIEWPORT_RUNTIME_ABI,
-      canvas,
-      renderer,
-      rebind: (binding) => { activeBinding = binding; },
-      cancelDeferredCleanup: () => {
-        if (cleanupCompleted) return false;
-        if (cleanupTimer !== undefined) window.clearTimeout(cleanupTimer);
-        cleanupTimer = undefined;
-        return true;
-      },
-      deferCleanup: () => {
-        if (cleanupCompleted || cleanupTimer !== undefined) return;
-        cleanupTimer = window.setTimeout(
-          cleanupImmediately,
-          process.env.NODE_ENV === "development" ? GPU_DEVELOPMENT_REBIND_GRACE_MS : 0,
-        );
-      },
-      cleanupImmediately,
-    };
-    gpuLifecycleRef.current = lifecycle;
-    lifecycles.set(paneId, lifecycle);
-    return lifecycle.deferCleanup;
+    if (!gpu) return;
+    rendererRef.current = gpu.renderer;
+    gpuLifecycleRef.current = gpu;
+    return gpu.deferCleanup;
   }, [paneId, session]);
-
-  /**
-   * Join the host clock for as long as this pane is mounted.
-   *
-   * Pane A is registered at the controller's construction and is never
-   * unregistered — it is the session. A second pane registering is precisely
-   * what puts the host in lockstep, so unmounting it must hand the clock back
-   * to the single-pane arithmetic rather than leave a barrier no one can pass.
-   */
-  useEffect(() => {
-    if (paneId === PRIMARY_PANE_ID) return;
-    simulation.registerPane(paneId);
-    return () => simulation.unregisterPane(paneId);
-  }, [paneId]);
 
   // Any event that carries a viewport pixel: pointer moves, and the wheel while
   // something is being carried.
@@ -1423,9 +991,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * ending the kinematic constraint.
    */
   const finishCarry = (restore = false) => {
+    session.ui.getState().endCarry();
+    releaseCarry(restore);
+  };
+
+  /** End the kinematic hold, whatever the store says next. */
+  const releaseCarry = (restore = false) => {
     const carry = carryRef.current;
     carryRef.current = null;
-    session.ui.getState().endCarry();
     if (!carry) return;
     const at = restore ? carry.origin_m : carry.position_m;
     simulation.dragBody(carry.bodyId, at, { x: 0, y: 0, z: 0 }, "end",
@@ -1535,11 +1108,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * placed.
    */
   useEffect(() => {
-    if (!carrySession) {
-      if (carryRef.current) finishCarry();
-      return;
-    }
-    if (carryRef.current?.bodyId === carrySession.bodyId) return;
+    if (carryRef.current?.bodyId === carrySession?.bodyId) return;
+    // Carrying something else — or nothing — puts the previous body down where
+    // it is first. Picking up a second one used to leave the first held by a
+    // kinematic command nobody would ever end.
+    releaseCarry();
+    if (!carrySession) return;
     // The published pose first, the authored one as the fallback, and never a
     // cancellation: a carry that ends itself is a body dropped without a click,
     // and the roster is empty for a whole rebuild — long enough to lose one.
@@ -1564,6 +1138,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       carryOrientation(session.ui.getState().camera, 0), paneId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [carrySession?.bodyId, session]);
+  // A viewport that goes away mid-carry lets go of the body with it.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => () => releaseCarry(), [session]);
 
   /**
    * The keys a carry answers to.
@@ -1613,8 +1190,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       event.clientY - rect.top - projection.topFraction * rect.height,
     );
     if (distance_px > FILL_HANDLE_TOLERANCE_PX) return false;
-    pointerRef.current = { id: event.pointerId, action: "fill-level" };
-    simulation.beginDraft("fill-level", "Set fill level", paneId);
+    // A refused gesture still claims the press: the handle was hit.
+    const gesture = simulation.beginDraft("fill-level", "Set fill level", paneId);
+    if (gesture) pointerRef.current = { id: event.pointerId, action: "fill-level", gesture };
     return true;
   };
 
@@ -1673,20 +1251,21 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const grabPoint = handle.space === "world"
       ? entityHandlePoint(entity, handle, ui.axisConstraint, pointerRay(event))
       : undefined;
+    const label = entity.editLabel(handle);
+    // A simulated entity is already drawn from the solver, so its gesture is a
+    // runtime manipulation and the document waits for the release.
+    const gesture = entity.simulatedBodyId
+      ? simulation.beginEdit(label, paneId)
+      : simulation.beginDraft(entity.draftSubject, label, paneId);
+    if (!gesture) return true;
     pointerRef.current = {
       id: event.pointerId, action: "entity-handle", entity, handle,
-      grabOffset: grabPoint ? sub(handle.position_m, grabPoint) : { x: 0, y: 0, z: 0 },
+      grabOffset: grabPoint ? sub(handle.position_m, grabPoint) : { x: 0, y: 0, z: 0 }, gesture,
     };
     setHandleHover(null);
     setHandleDrag({ handleId: handle.id });
-    const label = entity.editLabel(handle);
     if (entity.simulatedBodyId) {
-      // The renderer is already drawing this from the solver, so the gesture
-      // opens a runtime manipulation and the document waits for the release.
-      simulation.beginEdit(label, paneId);
       simulation.manipulateBody(entity.simulatedBodyId, entity.frame.origin_m, "start", entity.frame.orientation, paneId);
-    } else {
-      simulation.beginDraft(entity.draftSubject, label, paneId);
     }
     return true;
   };
@@ -1757,8 +1336,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       }
     }
     if (!best) return false;
-    pointerRef.current = { id: event.pointerId, action: "terrain-handle", index, kind: best.kind, anchor: best.anchor };
-    simulation.beginDraft("terrain", `Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`, paneId);
+    const gesture = simulation.beginDraft("terrain", `Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`, paneId);
+    if (gesture) pointerRef.current = { id: event.pointerId, action: "terrain-handle", index, kind: best.kind, anchor: best.anchor, gesture };
     return true;
   };
 
@@ -1891,9 +1470,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       ?? planeHit(ray.origin, ray.direction, { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
     if (!anchor || !Number.isFinite(anchor.x)) return;
     const regionId = nextRefinementRegionId(scene);
-    simulation.beginDraft("refinement-region", "Drew a refinement region", paneId);
+    const gesture = simulation.beginDraft("refinement-region", "Drew a refinement region", paneId);
+    if (!gesture) return;
     pointerRef.current = {
-      id: event.pointerId, action: "region-draw", anchor, regionId, drawn: false,
+      id: event.pointerId, action: "region-draw", anchor, regionId, drawn: false, gesture,
     };
   };
 
@@ -2006,11 +1586,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const radius_m = defaultFluidBallRadius_m(scene);
     const anchor = restFluidInWorld(scene, ray, hover, radius_m);
     if (!anchor) return;
-    simulation.beginDraft("fluid-body", "Dropped a ball of water", paneId);
+    const gesture = simulation.beginDraft("fluid-body", "Dropped a ball of water", paneId);
+    if (!gesture) return;
     pointerRef.current = {
       id: event.pointerId, action: "fluid-ball", anchor, ray, hover,
       downX: event.clientX, downY: event.clientY, moved: false, radius_m,
-      selectionId: addFluidBall(scene, anchor, radius_m).id,
+      selectionId: addFluidBall(scene, anchor, radius_m).id, gesture,
     };
     updateFluidBallDraft(ray, hover, radius_m);
   };
@@ -2033,6 +1614,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    */
   const finishFluidBallDrop = async (active: {
     anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; radius_m: number; selectionId: string;
+    gesture: EditGesture;
   }) => {
     const committed = session.scene.getState().scene;
     const authored = () => {
@@ -2040,7 +1622,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // that enables fluid. Let the renderer warm the new solver while keeping
       // the refined dry SVO visible; a hard simulation reset drains that SVO
       // first and presents an empty viewport for the whole build.
-      simulation.commitDraft({ reseed: committed.systems?.fluid !== false }, paneId);
+      if (!active.gesture.commit({ reseed: committed.systems?.fluid !== false })) return;
       session.ui.getState().select({ kind: "fluid-body", id: active.selectionId });
     };
     const centre = fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor;
@@ -2062,16 +1644,19 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       radius_m: drop.radius_m,
       ...(drop.shape === "cylinder" ? { halfHeight_m: drop.halfHeight_m } : {}),
     });
+    // The injection outlived the gesture: a scene opened over it, or the pane
+    // was handed another realm. Whatever it decided belongs to nobody now.
+    if (!active.gesture.open) return;
     if (!taken) {
       if (containerContains(committed, centre)) { authored(); return; }
-      simulation.cancelDraft(paneId);
+      active.gesture.cancel();
       session.runtime.getState().setNotice(
         "Open-world liquid placement requires a ready sparse fluid solve");
       return;
     }
     // Nothing to record: the document did not change, and the water is now part
     // of the field like every other litre in it.
-    simulation.cancelDraft(paneId);
+    active.gesture.cancel();
     session.runtime.getState().setNotice("Dropped a ball of water into the running solve");
   };
 
@@ -2281,9 +1866,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
           // there is no fill handle to hit while nothing is armed.
           if (beginFillLevelDrag(event)) return;
           const erase = gesture === "fluid-erase";
-          simulation.beginDraft("fluid-body", erase ? "Erased water" : "Painted water", paneId);
+          const paint = simulation.beginDraft("fluid-body", erase ? "Erased water" : "Painted water", paneId);
+          if (!paint) return;
           pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase,
-            lastBrickKey: paintFluidAt(ray, erase) };
+            lastBrickKey: paintFluidAt(ray, erase), gesture: paint };
           return;
         }
         // Resolved below, where the GPU pick can refine the grab point and the
@@ -2337,14 +1923,15 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // The GPU pick reads the published frame, so it answers to the same gate.
       if (pickingInteractive && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
-        pointerRef.current={id:pointerId,x,y,downX:x,downY:y,action:"pick"};
+        const pick=picks.start();
+        pointerRef.current={id:pointerId,x,y,downX:x,downY:y,action:"pick",pick};
         const rect=event.currentTarget.getBoundingClientRect();
         const picked=await rendererRef.current.pickRigidBody(ray.origin,ray.direction,{
           normalizedX:(event.clientX-rect.left)/Math.max(rect.width,1),
           normalizedY:(event.clientY-rect.top)/Math.max(rect.height,1),
         });
         const active=pointerRef.current;
-        if(!active||active.id!==pointerId||active.action!=="pick")return;
+        if(active?.action!=="pick"||active.pick!==pick)return;
         const body=picked?session.diagnostics.getState().bodies[picked.bodyIndex]:undefined;
         if(body&&picked&&selectOnClick?.kind!=="inflow"){
           // A pointer already released cannot be dragged, so a fast click on a
@@ -2619,8 +2206,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     }
     // Terrain reaches the solver only through a re-seed.
     if (active.action === "terrain-handle") {
-      if (cancelled) { simulation.cancelDraft(paneId); return; }
-      simulation.commitDraft(undefined, paneId);
+      if (cancelled) active.gesture.cancel();
+      else active.gesture.commit({ reseed: true });
       return;
     }
     // Brick seeds and fill fraction are already in the solver key, so the
@@ -2635,26 +2222,20 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         // pinned to a gesture that is over.
         const landed = active.pose ?? active.entity.frame.origin_m;
         simulation.manipulateBody(bodyId, landed, "end", undefined, paneId);
-        if (cancelled || !active.described) { simulation.cancelEdit(paneId); return; }
+        if (cancelled || !active.described) { active.gesture.cancel(); return; }
         simulation.updateBody(bodyId, { ...active.described, linearVelocity_m_s: { x: 0, y: 0, z: 0 } }, undefined, paneId);
-        simulation.commitEdit(undefined, undefined, paneId);
+        active.gesture.commit();
         return;
       }
       // A cancelled gesture keeps the scene it started with; only a real
       // release is allowed to spend a re-seed.
-      if (cancelled) { simulation.cancelDraft(paneId); return; }
-      simulation.commitDraft(active.entity.announceRebuild
-        ? { announceRebuild: active.entity.announceRebuild } : {}, paneId);
+      if (cancelled) { active.gesture.cancel(); return; }
+      active.gesture.commit({ reseed: true, announceRebuild: active.entity.announceRebuild });
       return;
     }
-    if (active.action === "fill-level") {
-      if (cancelled) { simulation.cancelDraft(paneId); return; }
-      simulation.commitDraft(undefined, paneId);
-      return;
-    }
-    if (active.action === "fluid-paint") {
-      if (cancelled) { simulation.cancelDraft(paneId); return; }
-      simulation.commitDraft(undefined, paneId);
+    if (active.action === "fill-level" || active.action === "fluid-paint") {
+      if (cancelled) active.gesture.cancel();
+      else active.gesture.commit({ reseed: true });
       return;
     }
     // The sweep becomes the selection, and the verbs it offers arrive with it:
@@ -2690,7 +2271,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     }
     if (active.action === "fluid-ball") {
       setCursorDrop(null);
-      if (cancelled) { simulation.cancelDraft(paneId); return; }
+      if (cancelled) { active.gesture.cancel(); return; }
       void finishFluidBallDrop(active);
       return;
     }
@@ -2709,8 +2290,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // do *nothing*: the snap guarantees a step of thickness, so committing
       // would leave a one-brick region nobody drew — and the tool stays armed,
       // because the reader is about to make the drag they just fumbled.
-      if (cancelled || !active.drawn) { simulation.cancelDraft(paneId); return; }
-      simulation.commitDraft(undefined, paneId);
+      if (cancelled || !active.drawn) { active.gesture.cancel(); return; }
+      active.gesture.commit({ reseed: true });
       session.ui.getState().setArmedGesture(undefined);
       session.ui.getState().select({
         kind: "refinement-region", id: refinementRegionSelectionId(active.regionId),

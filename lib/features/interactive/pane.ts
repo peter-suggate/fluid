@@ -71,6 +71,7 @@ export interface InteractionPaneState {
   readonly snap_m: number;
   readonly selectedEntityId?: string;
   readonly notice?: PaneNotice;
+  /** Some placement or control request is in flight. */
   readonly busy: boolean;
 }
 
@@ -95,6 +96,9 @@ export class InteractionPane {
   private readonly prefix = `ui:${Math.random().toString(36).slice(2, 8)}`;
   private lastAim?: { origin: Vec3; direction: Vec3; generation: number };
   private readonly unsubscribe: () => void;
+  /** Requests in flight; `busy` is this count, so one finishing cannot clear another's. */
+  private inFlight = 0;
+  private disposed = false;
 
   constructor(readonly paneId: string, readonly binding: InteractionBinding) {
     const view = binding.host.getView();
@@ -139,7 +143,18 @@ export class InteractionPane {
     return dropped && view.running ? releases : [];
   }
 
+  private async whileBusy<T>(work: () => Promise<T>): Promise<T> {
+    this.inFlight += 1;
+    this.store.setState({ busy: true });
+    try { return await work(); }
+    finally {
+      this.inFlight -= 1;
+      if (!this.disposed) this.store.setState({ busy: this.inFlight > 0 });
+    }
+  }
+
   private notify(tone: PaneNotice["tone"], text: string) {
+    if (this.disposed) return;
     noticeId += 1;
     this.store.setState({ notice: { tone, text, id: noticeId } });
   }
@@ -150,6 +165,7 @@ export class InteractionPane {
 
   /** One envelope against the host's current generation and revision. */
   async send(command: InteractionCommand, options: { readonly quiet?: boolean } = {}): Promise<CommandResult> {
+    if (this.disposed) return { accepted: false, reason: "This pane's interactions were closed" };
     const view = this.binding.host.getView();
     this.commandCount += 1;
     const id = `${this.prefix}:${this.paneId}:${this.commandCount}`;
@@ -215,16 +231,14 @@ export class InteractionPane {
       this.store.setState({ draft: { ...draft, reason: error instanceof Error ? error.message : String(error) } });
       return undefined;
     }
-    this.store.setState({ busy: true });
-    const result = await this.send({ kind: "place", entity }, { quiet: true });
+    const result = await this.whileBusy(() => this.send({ kind: "place", entity }, { quiet: true }));
+    if (this.disposed) return result;
     const current = this.state.draft;
     if (!result.accepted) {
       if (current) this.store.setState({ draft: { ...current, reason: result.reason } });
-      this.store.setState({ busy: false });
       return result;
     }
     this.store.setState({
-      busy: false,
       draft: this.state.repeat && current ? { ...current, reason: undefined } : undefined,
       selectedEntityId: this.state.repeat ? undefined : entity.id,
     });
@@ -322,9 +336,9 @@ export class InteractionPane {
   }
 
   /** Control: wait for readiness, possess, and run. Each step's refusal is shown, not swallowed. */
-  async control(entityId: string): Promise<CommandResult> {
-    this.store.setState({ busy: true, draft: undefined, selectedEntityId: undefined });
-    try {
+  control(entityId: string): Promise<CommandResult> {
+    this.store.setState({ draft: undefined, selectedEntityId: undefined });
+    return this.whileBusy(async () => {
       if (!(await this.waitForReady())) {
         const reason = this.binding.host.getView().readiness.reasons[0] ?? "The simulation is not ready";
         this.notify("error", reason);
@@ -333,10 +347,8 @@ export class InteractionPane {
       this.dropInput();
       const possessed = await this.send({ kind: "possess", entityId });
       if (!possessed.accepted || this.binding.host.getView().running) return possessed;
-      return await this.send({ kind: "transport", action: "play" });
-    } finally {
-      this.store.setState({ busy: false });
-    }
+      return this.send({ kind: "transport", action: "play" });
+    });
   }
 
   release(): Promise<CommandResult> {
@@ -355,10 +367,12 @@ export class InteractionPane {
 
   /** Sequence and dispatch. Refusals are quiet: input that lost its target is not an error to shout about. */
   async sendSamples(samples: readonly UnsequencedSample[]): Promise<void> {
-    for (const sample of samples) {
-      this.sequence += 1;
-      await this.send({ kind: "action", action: { ...sample, sequence: this.sequence } }, { quiet: true });
-    }
+    for (const sample of samples) await this.sendSample(sample);
+  }
+
+  private sendSample(sample: UnsequencedSample): Promise<CommandResult> {
+    this.sequence += 1;
+    return this.send({ kind: "action", action: { ...sample, sequence: this.sequence } }, { quiet: true });
   }
 
   /** Every key and button let go now. Blur, hidden tab, lock loss, pane switch, pause, release. */
@@ -374,8 +388,15 @@ export class InteractionPane {
     return result;
   }
 
+  /**
+   * Let go of every held input, then of the host. Idempotent. The releases are
+   * all handed over before the pane closes — the host's queue orders them — so
+   * none is refused for arriving after it.
+   */
   dispose() {
-    this.dropInput();
+    if (this.disposed) return;
+    for (const sample of this.router.clear()) void this.sendSample(sample);
+    this.disposed = true;
     this.unsubscribe();
     this.binding.dispose?.();
   }

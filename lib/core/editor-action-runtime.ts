@@ -37,9 +37,8 @@ export function performEditorAction(
     case "scene": {
       // Whole scene rather than a patch, because the effects that use this are
       // removals and a merge patch cannot express an absence.
-      simulation.beginEdit(effect.label, session.id);
-      session.scene.getState().setScene(effect.scene);
-      simulation.commitEdit(undefined, { reseed: effect.reseed }, session.id);
+      simulation.edit(effect.label, () => session.scene.getState().setScene(effect.scene),
+        { reseed: effect.reseed }, session.id);
       return;
     }
     case "arm": {
@@ -65,14 +64,14 @@ export function performEditorAction(
     }
     case "place-inflow": {
       const sceneStore = session.scene.getState();
-      simulation.beginEdit(sceneStore.scene.fluid.inflow ? "Moved the hose" : "Placed a hose", session.id);
-      sceneStore.patchFluid({
-        inflow: createInflowAt(effect.point_m, effect.normal, sceneStore.scene),
-      });
-      ui.select({ kind: "inflow", id: INFLOW_SELECTION_ID });
       // The nozzle is a boundary condition, so the run restarts from a defined
       // t=0 rather than continuing against a wall that changed under it.
-      simulation.commitEdit(undefined, { reseed: true }, session.id);
+      simulation.edit(sceneStore.scene.fluid.inflow ? "Moved the hose" : "Placed a hose", () => {
+        sceneStore.patchFluid({
+          inflow: createInflowAt(effect.point_m, effect.normal, sceneStore.scene),
+        });
+        ui.select({ kind: "inflow", id: INFLOW_SELECTION_ID });
+      }, { reseed: true }, session.id);
       return;
     }
     case "carry": {

@@ -1,6 +1,7 @@
 import type { ActionDefinition, ActionSample, ActionValue, InteractionCommand } from '../contracts';
 import { interactionCatalog } from '../installed';
 import type { SceneInteractionHost } from './host';
+import { RunScope } from '../../core/run-scope';
 
 let nextRouterId = 0;
 let inputSequence = 0;
@@ -12,7 +13,9 @@ export class InteractionInputRouter {
   private sent = new Map<string, ActionSample>();
   private readonly routerId = ++nextRouterId;
   private command = 0;
-  private epoch = 0;
+  /** Input held since the last reset; a reset supersedes everything sent under it. */
+  private readonly holds = new RunScope();
+  private hold = this.holds.start();
   private pending: Promise<void> = Promise.resolve();
   private unsubscribe: () => void;
   constructor(private readonly host: SceneInteractionHost) {
@@ -23,15 +26,18 @@ export class InteractionInputRouter {
       if (invalidate) this.reset(false);
     });
   }
-  dispose() { this.unsubscribe(); this.reset(); }
+  dispose() { this.unsubscribe(); this.reset(); this.holds.dispose(); }
   private dispatch(command: InteractionCommand) {
-    const epoch = this.epoch;
+    const hold = this.hold;
+    // A refusal resets only the hold it was sent under: one that comes back
+    // after a newer reset must not clear keys pressed since.
+    const refused = () => { if (hold.current()) this.reset(false); };
     this.pending = this.pending.then(async () => {
-      if (epoch !== this.epoch) return;
+      if (!hold.current()) return;
       const view = this.host.getView();
       const result = await this.host.dispatch({ id: `input:${this.routerId}:${++this.command}`, generation: view.generation, documentRevision: view.documentRevision, command });
-      if (!result.accepted) this.reset(false);
-    }).catch(() => this.reset(false));
+      if (!result.accepted) refused();
+    }).catch(refused);
   }
   /** Return true only for gameplay-owned bindings; callers preventDefault only then. */
   key(code: string, down: boolean, blocked = false): boolean {
@@ -79,8 +85,9 @@ export class InteractionInputRouter {
   }
   /** Blur, hidden tab, modal, pane switch, pointer-lock loss and unmount. */
   reset(releaseControl = true) {
-    this.epoch++; this.keys.clear(); this.pointer.clear(); this.sent.clear();
-    if (releaseControl) this.host.releaseInput(); else this.host.clearInput();
+    if (this.holds.disposed) return;
+    this.hold = this.holds.start(); this.keys.clear(); this.pointer.clear(); this.sent.clear();
+    if (releaseControl) void this.host.releaseInput(); else this.host.clearInput();
   }
   settled(): Promise<void> { return this.pending; }
 }

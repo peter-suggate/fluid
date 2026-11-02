@@ -1,4 +1,5 @@
 import { GPU_RIGID_BODY_CAPACITY } from "../../../core/rigid-capacity";
+import { StagedReadback } from "../../../core/staged-readback";
 import {
   SVO_PIXEL_TRACE_GI_STATE,
   SVO_PIXEL_TRACE_DEFAULT_RECORD_CAPACITY,
@@ -768,9 +769,8 @@ export interface SvoPixelTraceRequest {
 
 /**
  * Owns the record texture the probe writes, the uniform that carries the
- * request in, and the mapped copies the records are read back through. Two
- * staging slots are enough: the probe runs at most once per frame and a request
- * is superseded rather than queued.
+ * request in, and the one readback the records come back through: the probe
+ * runs at most once per frame and a request is superseded rather than queued.
  */
 export class SparseVoxelPixelTraceBuffers {
   readonly recordCapacity: number;
@@ -778,7 +778,7 @@ export class SparseVoxelPixelTraceBuffers {
   readonly recordsView: GPUTextureView;
   readonly request: GPUBuffer;
   private readonly rows: number;
-  private readonly staging: { buffer: GPUBuffer; pending: boolean }[];
+  private readonly readback: StagedReadback;
   private readonly requestWords = new Uint32Array(new ArrayBuffer(16));
   private destroyed = false;
 
@@ -797,16 +797,13 @@ export class SparseVoxelPixelTraceBuffers {
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    const size = svoPixelTraceBufferBytes(this.recordCapacity);
-    this.staging = Array.from({ length: 2 }, (_, index) => ({
-      buffer: device.createBuffer({
-        label: `Sparse voxel pixel-trace readback ${index + 1}/2`,
-        size,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-      }),
-      pending: false,
-    }));
+    this.readback = new StagedReadback(device, { label: "Sparse voxel pixel-trace readback", size: svoPixelTraceBufferBytes(this.recordCapacity) });
   }
+
+  /** No copy is waiting to be read or mapping: the next probe may be encoded. */
+  get idle(): boolean { return this.readback.idle; }
+  /** A copy was encoded and not yet read. */
+  get copied(): boolean { return this.readback.state === "copied"; }
 
   /** Publish the request the next probe pass answers. */
   writeRequest(request: SvoPixelTraceRequest): void {
@@ -819,47 +816,34 @@ export class SparseVoxelPixelTraceBuffers {
     this.device.queue.writeBuffer(this.request, 0, this.requestWords);
   }
 
-  /** Copy the records into a free staging slot. False when both are in flight. */
+  /** Copy the records for the next read. False while the last copy is unread or mapping. */
   encodeReadback(encoder: GPUCommandEncoder): boolean {
-    if (this.destroyed) return false;
-    const slot = this.staging.find((candidate) => !candidate.pending);
-    if (!slot) return false;
-    slot.pending = true;
     // One row is exactly 1024 bytes, so the copy needs no padding and the
     // destination is the flat word array the decode expects.
-    encoder.copyTextureToBuffer(
+    return this.readback.encode(encoder, (encoder, buffer) => encoder.copyTextureToBuffer(
       { texture: this.records },
-      { buffer: slot.buffer, bytesPerRow: SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS * 4, rowsPerImage: this.rows },
+      { buffer, bytesPerRow: SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS * 4, rowsPerImage: this.rows },
       { width: SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS, height: this.rows, depthOrArrayLayers: 1 },
-    );
-    this.pendingSlot = slot;
-    return true;
+    ));
   }
 
-  private pendingSlot?: { buffer: GPUBuffer; pending: boolean };
+  /** Forget a copy that will not be read. */
+  discard(): void { this.readback.discard(); }
 
   /**
-   * Resolve the most recently encoded readback. `isCurrent` is re-checked after
-   * the map completes so a trace whose camera or topology has moved on is
-   * dropped rather than drawn against a stale scene.
+   * Resolve the encoded readback. `isCurrent` is re-checked after the map
+   * completes so a trace whose camera or topology has moved on is dropped
+   * rather than drawn against a stale scene.
    */
   async read(isCurrent: () => boolean): Promise<SvoPixelTrace | undefined> {
-    const slot = this.pendingSlot;
-    this.pendingSlot = undefined;
-    if (!slot || this.destroyed) return undefined;
     try {
-      await slot.buffer.mapAsync(GPUMapMode.READ);
-      if (this.destroyed || !isCurrent()) return undefined;
-      const bytes = slot.buffer.getMappedRange();
-      const words = new Uint32Array(bytes);
-      const floats = new Float32Array(bytes);
-      const trace = decodeSvoPixelTrace(words, floats);
-      return trace && trace.status !== SVO_PIXEL_TRACE_STATUS.pending ? trace : undefined;
+      return await this.readback.read((bytes) => {
+        if (!isCurrent()) return undefined;
+        const trace = decodeSvoPixelTrace(new Uint32Array(bytes), new Float32Array(bytes));
+        return trace && trace.status !== SVO_PIXEL_TRACE_STATUS.pending ? trace : undefined;
+      });
     } catch {
       return undefined;
-    } finally {
-      try { slot.buffer.unmap(); } catch { /* Device loss or destruction. */ }
-      slot.pending = false;
     }
   }
 
@@ -868,6 +852,6 @@ export class SparseVoxelPixelTraceBuffers {
     this.destroyed = true;
     try { this.records.destroy(); } catch { /* Device loss. */ }
     try { this.request.destroy(); } catch { /* Device loss. */ }
-    for (const slot of this.staging) { try { slot.buffer.destroy(); } catch { /* Device loss. */ } }
+    try { this.readback.destroy(); } catch { /* Device loss. */ }
   }
 }

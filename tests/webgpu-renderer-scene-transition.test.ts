@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { RuntimeLifecycle } from "../lib/core/runtime-lifecycle";
 import test from "node:test";
 
 import "../lib/methods";
@@ -17,7 +18,7 @@ for (const mode of ["fluid-only", "full-scene"] as const) {
       let ready = false;
       let sourceRequests = 0;
       const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-        device: {}, context: {}, uniformBuffer: {}, bodyBuffer: {},
+        lifecycle: new RuntimeLifecycle(), device: {}, context: {}, uniformBuffer: {}, bodyBuffer: {},
         waterPipeline: {
           setFluidDomain: () => assert.fail("must not alter retained water bindings"),
           encode: () => assert.fail("must not extract the old field with fallback dimensions"),
@@ -50,7 +51,7 @@ test("an in-place reseed invalidates the mesh even with unchanged textures and r
   let invalidations = 0;
   const solver = { info: { surfaceRevision: 0 }, reseed: () => new Promise<boolean>(resolve => { finish = resolve; }) };
   const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    device: {}, gpuFluid: solver, gpuFluidGeneration: 1, gpuFluidRequestGeneration: 1,
+    device: {}, gpuFluid: solver, gpuFluidGeneration: 1, solverBuildSerial: 1, lifecycle: new RuntimeLifecycle(),
     attachedStructuralKey: gpuSceneStructuralKey(defaultScene, config),
     waterPipeline: { invalidateSurface: () => { invalidations++; } },
     onStatus: () => {}, resetGPUQueueTracking: () => {}, pausedPresentationRevision: 0,
@@ -64,4 +65,21 @@ test("an in-place reseed invalidates the mesh even with unchanged textures and r
   assert.equal(solver.info.surfaceRevision, 0);
   assert.equal(invalidations, 1);
   assert.equal(renderer.pausedPresentationRevision, 1, "wake the paused renderer to extract the new seed");
+});
+
+test("a refused scene publication reports once and is not retried until the scene or source moves", () => {
+  const statuses: string[] = [];
+  let reads = 0;
+  const source = { get revision(): number { reads++; throw new Error("arena refused"); } };
+  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
+    lifecycle: new RuntimeLifecycle(), renderSceneKey: "", renderSceneStamp: 0, renderSceneRevision: 0,
+    statusCallback: (status: { label: string }) => statuses.push(status.label),
+  });
+  const solver = { sparseVoxelSceneSource: source };
+  renderer.publishRenderScene(defaultScene, solver);
+  renderer.publishRenderScene(defaultScene, solver);
+  assert.equal(reads, 1, "the same refused attempt is not repeated every frame");
+  assert.deepEqual(statuses, ["Live sparse presentation publication failed: arena refused"]);
+  renderer.publishRenderScene(defaultScene, { sparseVoxelSceneSource: { get revision(): number { reads++; return 0; } } });
+  assert.ok(reads > 1, "a new source is tried");
 });

@@ -133,6 +133,7 @@ import { CM12_PAPER_DT_S } from "../lib/core/cm12-numerics";
 import type { EditorActionEffect } from "../lib/core/editor-action";
 import { getEditorGesture } from "../lib/core/editor-gesture-catalog";
 import { createPaneSession, type PaneSession } from "../lib/core/session/session";
+import { RunScope, type Run } from "../lib/core/run-scope";
 import { EditorHostProvider } from "../lib/core/session/host-context";
 import { Toolstrip, ToolstripTitle } from "../components/toolstrip";
 import {
@@ -741,8 +742,11 @@ function AdvanceSlice({ session, lab }: {
    * because the row that sets it is the studio's row and the studio's release
    * handler reads the same field. See `UIState.regionDraft`. */
   const regionDraft = session.ui(state => state.regionDraft);
+  /* The press in flight, and what it was a press *of*: the mode is taken when
+     the pointer lands, so arming the other tool mid-drag cannot turn a ball
+     into half a box or a box into a drop. */
   const dragging = useRef<{ pointer: number; anchor: readonly [number, number];
-    moved: boolean } | null>(null);
+    moved: boolean; region: boolean } | null>(null);
   const [room, setRoom] = useState({ width: 960, height: 560 });
   /* The pan in flight: which pointer owns it and where it was last measured
    * from, because a drag is a run of deltas and not one displacement. */
@@ -779,36 +783,84 @@ function AdvanceSlice({ session, lab }: {
    */
   useLayoutEffect(() => startLabQueryStateSync(session, lab), [session, lab]);
 
+  /* Each load — the opening one, another scene, the same scene from t=0 — is a
+   * run, and every answer the controller gives belongs to the run that asked
+   * for it. An advance, a drop or a region edit that resolves after the reader
+   * has chosen another run is dropped here, not painted over the new water. */
+  const [runs] = useState(() => new RunScope());
+  /* What the current run loaded, so a back/forward that names another one
+   * reloads it rather than leaving the address and the water disagreeing. */
+  const loaded = useRef<{ readonly sceneId: string; readonly transport: AdvanceTransportExperiment } | null>(null);
+
+  /** The one way a view reaches the page. Undefined when its run has ended. */
+  const publish = useCallback((run: Run, next: AdvanceView): Readings | undefined => {
+    if (!run.current()) return undefined;
+    view.current = next;
+    setPublishedView(next);
+    const nextReadings = read(next);
+    setReadings(nextReadings);
+    setRuntimeFault(null);
+    if (nextReadings.fault) {
+      live.current.playing = false;
+      setPlaying(false);
+      setFolds(current => new Set(current).add("failure"));
+    }
+    return nextReadings;
+  }, []);
+
+  const fail = useCallback((run: Run, error: unknown): void => {
+    if (run.current()) setRuntimeFault(error instanceof Error ? error.message : String(error));
+  }, []);
+
+  /** A request inside the current run: published if that run still is. */
+  const request = useCallback((work: (active: AdvanceLabController) => Promise<AdvanceView>,
+    published?: (readings: Readings) => void): void => {
+    const active = controller.current, run = runs.active;
+    if (!active || !run) return;
+    void work(active).then(next => {
+      const nextReadings = publish(run, next);
+      if (nextReadings) published?.(nextReadings);
+    }, error => fail(run, error));
+  }, [runs, publish, fail]);
+
+  /** One advance, at most one in flight. The loop and the Step button share it. */
+  const advance = useCallback((dtS: number): void => {
+    const active = controller.current, run = runs.active;
+    if (!active || !run || advanceBusy.current) return;
+    const began = performance.now();
+    advanceBusy.current = true;
+    void active.advance(dtS).then(next => {
+      if (publish(run, next)) noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
+    }, error => {
+      if (!run.current()) return;
+      live.current.playing = false;
+      setPlaying(false);
+      fail(run, error);
+    }).finally(() => { advanceBusy.current = false; });
+  }, [runs, publish, fail]);
+
   useEffect(() => {
-    const linked = lab.getState();
-    const initialId = linked.sceneId;
-    const initialTransport = linked.transport;
-    const initialBudget = linked.budget;
-    let handle = 0, last = 0, cancelled = false;
-    const publish = (next: AdvanceView): void => {
-      if (cancelled) return;
-      view.current = next;
-      setPublishedView(next);
-      const nextReadings = read(next);
-      setReadings(nextReadings);
-      if (nextReadings.fault) {
-        live.current.playing = false;
-        setPlaying(false);
-        setFolds(current => new Set(current).add("failure"));
-      }
-    };
+    const run = runs.start();
+    let handle = 0, last = 0;
     void AdvanceLabController.create().then(async nextController => {
-      if (cancelled) { await nextController.destroy(); return; }
+      if (!run.current()) { await nextController.destroy(); return; }
       controller.current = nextController;
+      // Read now rather than at mount: a back/forward during the boot has
+      // already named the run the reader wants.
+      const linked = lab.getState();
+      const initialId = linked.sceneId;
+      const initialTransport = linked.transport;
+      loaded.current = { sceneId: initialId, transport: initialTransport };
       const scene = labAuthoredScene(initialId);
       if (!scene) throw new Error(`Unknown Advance Lab scene ${initialId}`);
       setAuthored(scene);
-      const initialView = await nextController.load(scene, { pressureIterations: initialBudget,
+      const initialView = await nextController.load(scene, { pressureIterations: linked.budget,
         adaptiveSdf: linked.adaptiveSdf,
         pressureRelativeTolerance: pressureTolerance(initialTransport),
         transportExperiment: initialTransport === "cellwise-remap"
           ? CELLWISE_REMAP_OPTION : initialTransport,
         production: { dtS: live.current.dt, timeStep: "paper" } });
+      if (!run.current()) return;
       /* The lattice a link's percentages and its camera were measured against
        * only exists now, two awaits after hydration — so this is where both are
        * applied. A run chosen later has its lattice in hand already, which is
@@ -826,37 +878,27 @@ function AdvanceSlice({ session, lab }: {
         });
       }
       store.clearLinked();
-      publish(linkedRegions === null ? initialView
+      publish(run, linkedRegions === null ? initialView
         : await nextController.setRefinementRegions(boxes));
-    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
+    }).catch(error => fail(run, error));
 
     const loop = (time: number): void => {
       handle = requestAnimationFrame(loop);
       if (!live.current.playing || time - last < FRAME_MS) return;
-      const current = view.current, active = controller.current;
-      if (!current || !active || advanceBusy.current) return;
+      const current = view.current;
+      if (!current || advanceBusy.current) return;
       if (!advancePresentationReady(paintedPresentationRevision.current, current)) return;
       last = time;
-      const began = performance.now();
-      advanceBusy.current = true;
-      void active.advance(live.current.dt).then(next => {
-        publish(next);
-        noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
-        setRuntimeFault(null);
-      }).catch(error => {
-        const message = error instanceof Error ? error.message : String(error);
-        live.current.playing = false;
-        setPlaying(false);
-        setRuntimeFault(message);
-      }).finally(() => { advanceBusy.current = false; });
+      advance(live.current.dt);
     };
     handle = requestAnimationFrame(loop);
-    return () => { cancelled = true; cancelAnimationFrame(handle);
+    return () => { runs.cancel("unmounted"); cancelAnimationFrame(handle);
       const active = controller.current; controller.current = null; view.current = null;
+      loaded.current = null;
       if (active) void active.destroy(); };
     // The store is a prop, built once beside the session, so the boot still
     // runs exactly once per mount.
-  }, [lab]);
+  }, [lab, runs, publish, fail, advance]);
 
   /* The picture is sized to the room it is given, so the water is the page at
    * any window rather than a fixed postage stamp in the middle of one. */
@@ -935,6 +977,8 @@ function AdvanceSlice({ session, lab }: {
     nextTransport: AdvanceTransportExperiment = transportExperiment): void => {
     const active = controller.current, scene = labAuthoredScene(id);
     if (!active || !scene || !LAB_SCENE_IDS.has(id)) return;
+    const run = runs.start();
+    loaded.current = { sceneId: id, transport: nextTransport };
     lab.getState().setSceneId(id);
     setAuthored(null);
     lab.getState().setRegions([]);
@@ -962,10 +1006,20 @@ function AdvanceSlice({ session, lab }: {
       transportExperiment: nextTransport === "cellwise-remap"
         ? CELLWISE_REMAP_OPTION : nextTransport,
       production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
-      view.current = next; setPublishedView(next); setAuthored(scene);
-      lab.getState().setRegions(seedRegions(lab, scene, next)); setReadings(read(next));
-    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-  }, [lab, session.ui, transportExperiment]);
+      if (!publish(run, next)) return;
+      setAuthored(scene);
+      lab.getState().setRegions(seedRegions(lab, scene, next));
+    }, error => fail(run, error));
+  }, [lab, session.ui, transportExperiment, runs, publish, fail]);
+
+  /* The address names a run — a back/forward, or a link pasted over this one.
+   * Whatever it names that is not what is loaded is loaded. */
+  useEffect(() => {
+    const current = loaded.current;
+    if (current && (current.sceneId !== sceneId || current.transport !== transportExperiment)) {
+      chooseRun(sceneId, transportExperiment);
+    }
+  }, [sceneId, transportExperiment, chooseRun]);
 
   /**
    * The same run from t=0. Only the clock and the water go back: the boxes
@@ -979,6 +1033,7 @@ function AdvanceSlice({ session, lab }: {
   const resetRun = useCallback((): void => {
     const active = controller.current;
     if (!active) return;
+    const run = runs.start();
     setPinned(null);
     setHover(null);
     setAim(null);
@@ -998,20 +1053,15 @@ function AdvanceSlice({ session, lab }: {
       pressureRelativeTolerance: pressureTolerance(transportExperiment),
       transportExperiment: transportExperiment === "cellwise-remap"
         ? CELLWISE_REMAP_OPTION : transportExperiment,
-      production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => {
-      view.current = next; setPublishedView(next); setReadings(read(next));
-    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-  }, [lab, transportExperiment, session.ui]);
+      production: { dtS: live.current.dt, timeStep: "paper" } }).then(next => publish(run, next),
+      error => fail(run, error));
+  }, [lab, transportExperiment, session.ui, runs, publish, fail]);
 
   /** Re-time the next advance. The water keeps its state; only the clock moves. */
   const retime = useCallback((next: number): void => {
     setDt(next);
-    const active = controller.current;
-    if (!active) return;
-    void active.setTimeStep(next).then(nextView => {
-      view.current = nextView; setPublishedView(nextView); setReadings(read(nextView)); setRuntimeFault(null);
-    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
-  }, []);
+    request(active => active.setTimeStep(next));
+  }, [request]);
 
   const toggleFold = useCallback((id: string): void => setFolds(current => {
     const next = new Set(current);
@@ -1420,30 +1470,19 @@ function AdvanceSlice({ session, lab }: {
   };
 
   const commitDrop = (at: readonly [number, number], radius: number): void => {
-    const active = controller.current, s = view.current;
-    if (!active || !s) return;
-    void active.injectLiquid([at[0], s.ny - at[1]], radius).then(next => {
-      view.current = next;
-      setPublishedView(next);
-      const nextReadings = read(next);
-      setReadings(nextReadings);
+    const s = view.current;
+    if (!s) return;
+    request(active => active.injectLiquid([at[0], s.ny - at[1]], radius), nextReadings => {
       if (nextReadings.drop && !nextReadings.drop.accepted) {
         setFolds(current => new Set(current).add("drop"));
       }
-      setRuntimeFault(null);
-    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
+    });
   };
 
   const updateRegions = (next: readonly AdvanceRefinementRegion[]): void => {
-    const active = controller.current;
-    if (!active) return;
+    if (!controller.current) return;
     setRegionState(next);
-    void active.setRefinementRegions(next).then(nextView => {
-      view.current = nextView;
-      setPublishedView(nextView);
-      setReadings(read(nextView));
-      setRuntimeFault(null);
-    }).catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
+    request(active => active.setRefinementRegions(next));
   };
 
   /**
@@ -1580,16 +1619,7 @@ function AdvanceSlice({ session, lab }: {
   const applyBudget = (iterations: number): void => {
     pressureBudgetTouched.current = true;
     setBudget(iterations);
-    const active = controller.current;
-    if (!active) return;
-    void active.setPressureBudget(iterations, pressureTolerance(transportExperiment))
-      .then(next => {
-        view.current = next;
-        setPublishedView(next);
-        setReadings(read(next));
-        setRuntimeFault(null);
-      })
-      .catch(error => setRuntimeFault(error instanceof Error ? error.message : String(error)));
+    request(active => active.setPressureBudget(iterations, pressureTolerance(transportExperiment)));
   };
 
   /** `0`: frame the whole slice, measured off the live world rather than off
@@ -1725,29 +1755,8 @@ function AdvanceSlice({ session, lab }: {
           disabled={Boolean(readings.fault || levelSetCapability)}
           onChange={setPlaying}>
           {playing ? "Pause" : "Play"}</ToggleButton>
-        <button type="button" disabled={Boolean(readings.fault || levelSetCapability)} onClick={() => {
-          const active = controller.current;
-          if (!active || advanceBusy.current) return;
-          const began = performance.now();
-          advanceBusy.current = true;
-          void active.advance(dt).then(next => {
-            view.current = next;
-            setPublishedView(next);
-            noteStepCost(stepCosts.current, performance.now() - began, setStepMs);
-            setRuntimeFault(null);
-            const nextReadings = read(next);
-            setReadings(nextReadings);
-            if (nextReadings.fault) {
-              live.current.playing = false;
-              setPlaying(false);
-              setFolds(current => new Set(current).add("failure"));
-            }
-          }).catch(error => {
-            setPlaying(false);
-            live.current.playing = false;
-            setRuntimeFault(error instanceof Error ? error.message : String(error));
-          }).finally(() => { advanceBusy.current = false; });
-        }}>Step</button>
+        <button type="button" disabled={Boolean(readings.fault || levelSetCapability)}
+          onClick={() => advance(dt)}>Step</button>
         <button type="button"
           title="Put the water back to t=0. The enforcement regions drawn on it stay."
           onClick={resetRun}>Reset</button>
@@ -1869,7 +1878,7 @@ function AdvanceSlice({ session, lab }: {
                * mode. A box has no meaning until it has two corners, so it is
                * the one gesture here that the drag is required for. */
               event.currentTarget.setPointerCapture(event.pointerId);
-              dragging.current = { pointer: event.pointerId, anchor: at, moved: false };
+              dragging.current = { pointer: event.pointerId, anchor: at, moved: false, region: drawingRegion };
               if (drawingRegion) setSketch({ anchor: at, at });
               else setAim(proposeAim(at, defaultDropRadius(displayNx, displayNy)));
             }}
@@ -1893,11 +1902,11 @@ function AdvanceSlice({ session, lab }: {
                 probe, px: event.clientX - host.left, py: event.clientY - host.top,
                 width: host.width, height: host.height,
               } : null);
-              if (!stroking) return;
+              const active = dragging.current;
+              if (!stroking && !active) return;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
               if (!at) return;
-              const active = dragging.current;
-              if (drawingRegion) {
+              if (active?.region ?? drawingRegion) {
                 if (active) setSketch({ anchor: active.anchor, at });
                 return;
               }
@@ -1921,7 +1930,7 @@ function AdvanceSlice({ session, lab }: {
               if (!active || active.pointer !== event.pointerId) return;
               dragging.current = null;
               const at = aimAt(event.currentTarget, event.clientX, event.clientY);
-              if (drawingRegion) {
+              if (active.region) {
                 setSketch(null);
                 /* The band the reader was watching, committed as it stood —
                  * literally the same record, snapped once when it was drawn, so
