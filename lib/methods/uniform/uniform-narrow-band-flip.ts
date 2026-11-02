@@ -1634,7 +1634,11 @@ fn seedCell(c:vec3u,emit:bool){
  // Count first: each seed's brick takes it as demand and is listed, so the
  // slabs that follow hold the whole initial band.
  for(var k=0u;k<seedCount;k++){
-  if(emit){nbMoveAppend(nbWithMass(nbSeedParticle(seeds[k],heat),f32(8u/nbSeedTarget(d))));continue;}
+  // An emitted seed is a seed too (nbSeedFirst): its first G2P takes the
+  // grid's velocity. Unmarked, flipDelta "swept" read its before.xyz (its
+  // velocity, the travel the residency prediction needs) as a delta and
+  // doubled it: translation 0.75 -> 1.46 m/s in one step.
+  if(emit){var s=nbWithMass(nbSeedParticle(seeds[k],heat),f32(8u/nbSeedTarget(d)));${this.apic?"s.lifetime.x=nbSeedFirst();":"s.before.w=nbParticleRestate(s,nbSeedFirst(),0.0);"}nbMoveAppend(s);continue;}
   let id=ubBrickAt(vec3i(floor(seeds[k].xyz)));
   if(id!=UB_NONE){atomicAdd(&state[nbSlab(id,10u)],1u);ubMark(id,UB_PARTICLES_CORE);}
  }
