@@ -53,6 +53,7 @@ const sceneId = option("scene");
 const cell = Number(option("cell") ?? 0.005), steps = Number(option("steps") ?? 1200), every = Number(option("every") ?? 60);
 const closed = process.argv.includes("--closed");
 const pipelined = process.argv.includes("--pipelined");
+let dispatchesByLabel: Record<string, { direct: number; indirect: number; workgroups: number }> | undefined;
 const kernelsFrom = option("kernels") === undefined ? Infinity : Number(option("kernels"));
 const stepMs: number[] = [], kernels = new Map<string, number[]>();
 const values: MethodParamValues = JSON.parse(option("values") ?? "{}");
@@ -170,7 +171,8 @@ await withUniformDevice("reservoir bulk probe", async raw => {
       else while (solver.framePending) await new Promise(r => setImmediate(r));
       timer.enabled = false;
       // A pipelined step's passes are those encoded during it (its advance), not those it waited for.
-      const counts = counter ? Object.values(counter.take()) : undefined;
+      const byLabel = counter ? counter.take() : undefined; if (byLabel) dispatchesByLabel = byLabel;
+      const counts = byLabel && Object.values(byLabel);
       if (counter) counter.enabled = false;
       const dispatches = counts && counts.reduce((n, c) => ({ direct: n.direct + c.direct, indirect: n.indirect + c.indirect, workgroups: n.workgroups + c.workgroups }), { direct: 0, indirect: 0, workgroups: 0 });
       const ms = performance.now() - t; wall += ms; stepMs.push(ms);
@@ -450,5 +452,5 @@ const kernelMeans_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, v.red
 const late = stepMs.slice(Math.floor(stepMs.length / 2));
 const timing = { median_ms: quantile(stepMs, 0.5), p95_ms: quantile(stepMs, 0.95), lateHalfMedian_ms: quantile(late, 0.5), lateHalfP95_ms: quantile(late, 0.95) };
 console.log(JSON.stringify(timing));
-writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, pure: pure ? pages : undefined, height, width, depth, boxWidth, steps, closed, liquid, memory, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, kernelMeans_ms, rows }, null, 2) + "\n");
+writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, pure: pure ? pages : undefined, height, width, depth, boxWidth, steps, closed, liquid, memory, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, kernelMeans_ms, dispatchesByLabel, rows }, null, 2) + "\n");
 console.log(JSON.stringify({ out }));

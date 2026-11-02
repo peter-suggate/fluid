@@ -74,7 +74,7 @@ for (const [x, y, z] of wetCoords) for (let dz = -CAP; dz <= CAP; dz++) for (let
 }
 const census = { h: new Array(CAP + 2).fill(0), c: new Array(CAP + 2).fill(0) };
 let stored = 0;
-const columns = new Map<string, { h: number; c: number; wet: number }>();
+const columns = new Map<string, { h: number; c: number; wet: number; reasons?: Record<string, number>; ylo?: number; yhi?: number }>();
 for (let b = 0; b < blocks; b++) {
   const r = words[recordBase + b]!;
   if (r === 0xffffffff || b === 0 || b === blocks - 1) continue;
@@ -88,7 +88,8 @@ for (let b = 0; b < blocks; b++) {
     const r = speeds[512 * b + l]!; if (r === (2 | 2 << 5 | 2 << 10 | 2 << 15 | 2 << 20 | 2 << 25)) still[fine ? "h" : "c"][d]++;
     if (d >= 5) { const w = speeds[n + 512 * b + l]! & 0x3fffffff; const m = Math.max(...[0, 5, 10, 15, 20, 25].map(k => (w >>> k) & 31)), lm = Math.max(...[0, 5, 10, 15, 20, 25].map(k => (r >>> k) & 31)); const key = `${fine ? "h" : "c"}${d} spread${m} local${lm}`; reachHist.set(key, (reachHist.get(key) ?? 0) + 1); }
     const col = key(t[0]! >> 2, 0, t[2]! >> 2), e = columns.get(col) ?? { h: 0, c: 0, wet: 0 };
-    if (fine) e.h++; if (d === 0) e.wet++; columns.set(col, e);
+    if (fine) { e.h++; const name = reasonNames[reasons[512 * b + l]!] ?? "?"; (e.reasons ??= {})[name] = (e.reasons[name] ?? 0) + 1; e.ylo = Math.min(e.ylo ?? 1e9, t[1]!); e.yhi = Math.max(e.yhi ?? -1, t[1]!); }
+    if (d === 0) e.wet++; columns.set(col, e);
   }
 }
 console.log(JSON.stringify({ storedBlocks: stored, hTilesByDistanceToWet: census.h, coarseTilesByDistanceToWet: census.c, zeroSpeedH: still.h, zeroSpeedCoarse: still.c }));
@@ -104,4 +105,12 @@ for (const field of ["h", "wet"] as const) {
     console.log(row);
   }
 }
+// The h tiles' dominant census reason a column (its first letter: crossing, join, travel, closure, solid...).
+console.log("dominant h reason per column (x across, z down)");
+for (let z = 0; z < sz; z++) {
+  let row = "";
+  for (let x = 0; x < sx; x++) { const r = columns.get(key(x, 0, z))?.reasons; row += r ? Object.entries(r).sort((a, b) => b[1] - a[1])[0]![0][0]! : "."; }
+  console.log(row);
+}
+console.log("h columns (x,z: tiles, y range, reasons):", [...columns].filter(([, e]) => e.h > 0).slice(0, 12).map(([k, e]) => `${k} ${e.h} y${e.ylo}-${e.yhi} ${JSON.stringify(e.reasons)}`).join(" | "));
 solver.destroy(); await device.queue.onSubmittedWorkDone(); device.destroy();

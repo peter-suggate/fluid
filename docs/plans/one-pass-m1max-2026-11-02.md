@@ -461,3 +461,61 @@ particles, rest-step 0.29 m/s, dam energy rise 3.4 → 11.8%. The right fix
 is whatever perturbs a resting coarse corner's phi (not yet found; not
 nbBuildDistance, which keeps an exact zero). It is worth 0.5% of the dam
 break's 3.6%: the rest is lost during the collapse, with particles.
+
+## 10. Where the move and the vast seep's time goes (2026-11-03)
+
+**Letters move: occupancy confirmed (xctrace counters, 35 advances).** The
+frame schedule merges the move with its neighbours into one encoder label,
+so the move was found as the interval right after the local speed
+certificate whose length grows with particle count, from 9.2 to 17.0 ms. Its
+counters:
+
+| counter | value |
+|---|---|
+| compute occupancy | 13.2% |
+| ALU utilisation | 18.9% |
+| last-level cache | 27.7% |
+| read bandwidth | 21 GB/s |
+| partition placement | 1.0× (spread evenly over all four) |
+
+That is about 400 threads a core, starved per core. It matches the
+register cap of 384 threads that nbflip-particle-scaling-2026-10-27
+follow-up 2 found offline.
+
+**Solid-free twin of the move: no lever.** One run of `advectParticlesDeferred{umSolidFree=1}`:
+
+- move 10.68 ms against 11.02 ms;
+- the other kernels in that run were about 7% slower, so this is within noise.
+
+The sampler, `particleDepthIn`, `nbFinish` and `nbRigidContact` each cap the
+kernel at 384 threads on their own, and the body alone caps it at 512.
+Folding away the solid code leaves the sampler's cap in place. Reverted; the
+twin was also rejected in e4041e9a. The lever is the live state of all four,
+which can raise occupancy by at most 33% (384 → 512 threads).
+
+**Vast seep (`reservoir-seep-vast`, 80 steps, kernels from step 60).**
+
+- **Step time:** median 22.8 ms; serialised kernel sum 33.5 ms over 286 kernels.
+- **Workgroups:** 339k direct workgroups a step (`--dispatches` now saves
+  `dispatchesByLabel`). At about 1 ns each on the §7 microbenchmark, that is
+  about 0.3 ms, so empty launches are not the cost.
+- **h tiles:** `probe-nbflip-occupancy` now maps the dominant census reason
+  per column. The 1,108 h tiles at frame 60 lie between the dividing wall
+  (reason solid) and the catch chamber's jet and splash (join, travel,
+  crossing). That is real detail, not a census artefact.
+- **Pressure arena:** the largest group, 5.8 ms a step. It hits its 4-cycle
+  cap every step, at residual 0.069 against the 0.05 target. The header
+  history (words 8–12) per frame:
+
+  | frame | after cycle 1 | 2 | 3 | 4 | final |
+  |---|---|---|---|---|---|
+  | 20 | 90.1 | 3.61 | 0.819 | 0.153 | 0.052 |
+  | 40 | 25.8 | 3.76 | 1.29 | 0.46 | 0.075 |
+  | 60 | 25.9 | 3.47 | 1.05 | 0.41 | 0.069 |
+
+  The cycle factor degrades from about 0.13 to 0.30–0.39 after the first
+  cycle. The Krylov step then takes the last one by about 0.17. At a steady
+  0.13 a cycle, three cycles would reach the target and save about 1.45 ms
+  a step on the vast seep and about 2.5 ms on letters. That slow mode after
+  cycle 1 (seams? the frozen active set?) is the next lever, measurable from
+  the history words without any timing run.
