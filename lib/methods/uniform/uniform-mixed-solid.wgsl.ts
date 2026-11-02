@@ -29,7 +29,7 @@ import {UNIFORM_BED_SLOPE_LANE_DIRECTORY_WORDS,UNIFORM_BED_SLOPE_LAYERS,uniformB
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformDetailPick} from "./uniform-detail-fields";
-import {UNIFORM_PAGE_TABLE_WORDS,UNIFORM_PAGE_WINDOW,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,type UniformLatticeAddress} from "./uniform-lattice-address";
+import {UNIFORM_PAGE_TABLE_WORDS,uniformBlockFaceWGSL,uniformFaceTileSlots,uniformLatticeAddressWGSL,type UniformLatticeAddress} from "./uniform-lattice-address";
 import {uniformPagePoolWGSL,type UniformPagePoolLayout} from "./uniform-page-pool";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsOfWGSL} from "./uniform-live-lists";
 import { uniformSolidBoundaryWGSL } from "./uniform-solid-boundary.wgsl";
@@ -320,7 +320,6 @@ export class UniformMixedSolid {
  private full=true;
  private simulation?:{pipeline:GPUComputePipeline;layout:GPUBindGroupLayout;group?:GPUBindGroup;topology?:GPUBuffer;
   listed?:GPUComputePipeline;listLayout:GPUBindGroupLayout;list?:{readonly topology:GPUBuffer;readonly changes:GPUBuffer;readonly group:GPUBindGroup}};
- private readonly params:GPUBuffer;
  private built=false;
  private readonly paramsWritten?:()=>boolean;
  /** The device's workgroups per dimension: read once, the limits object is the device's to rebuild. */
@@ -332,7 +331,6 @@ export class UniformMixedSolid {
   if(resources.bodies.size<GPU_RIGID_BODY_CAPACITY*128)throw new Error("Mixed solids require the rigid-body state buffer");
   if(!Number.isSafeInteger(resources.coupledTiles)||resources.coupledTiles<0)throw new Error("Mixed solids require the host's coupled tile count");
   this.coupledTiles=resources.coupledTiles;this.maxGroups=device.limits.maxComputeWorkgroupsPerDimension;
-  this.params=resources.params;
   this.ownsAnalyticTerrain=!resources.analyticTerrain;
   this.analyticTerrain=resources.analyticTerrain??device.createBuffer({label:"Inactive analytic terrain",size:UNIFORM_OPEN_WORLD_TERRAIN_PARAMS_BYTES,usage:GPUBufferUsage.UNIFORM});
   if(coarseLayout&&!resources.paramsWritten)throw new Error("The coarse solid record requires the host's parameter-block write receipt");
@@ -927,7 +925,7 @@ var<workgroup> cutAny:atomic<u32>;
   const build=(entryPoint:string,umBodyTiles:number)=>this.device.createComputePipelineAsync({layout:builderLayout,compute:{module,entryPoint,constants:{umDispatchX:dispatchX,umBodyTiles}}});
   const [pipeline,bodies,cuts,cutsBodies,claimed,cutsClaimed,surfaceClear,surfaceClearNew,surfaceClearBodies,bodyMask]=await Promise.all([build("build",0),build("buildRegions",1),build("cuts",0),build("cutsRegions",1),pool?build("buildNew",0):undefined,pool?build("cutsNew",0):undefined,build("surfaceClear",0),pool?build("surfaceClearNew",0):undefined,build("surfaceClear",1),build("bodyMask",0)]);
   const [slotsReclaim,slotsReclaimNew]=pooled?await Promise.all([build("slotsReclaim",0),pool?build("slotsReclaimNew",0):undefined]):[];
-  const built=this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:GPU_RIGID_BODY_CAPACITY*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  this.builtBodies=this.device.createBuffer({label:"Uniform mixed solid record body mirror",size:GPU_RIGID_BODY_CAPACITY*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
   this.builder={bodies,pipeline,claimed,cuts,cutsBodies,cutsClaimed,surfaceClear,surfaceClearBodies,surfaceClearNew,bodyMask,slotsReclaim,slotsReclaimNew,layout:output};
   const flagModule=this.device.createShaderModule({label:"Uniform mixed solid simulation widths",code:/* wgsl */`
 ${solidRecordRowsWGSL(layout.tiles.length)}

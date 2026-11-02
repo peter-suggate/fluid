@@ -4,7 +4,7 @@ import {uniformCompiledTopologyWGSL} from "./uniform-compiled-topology";
 import {uniformMixedVelocitySamplingWGSL} from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformDetailRuntimeWGSL } from "../../core/uniform-detail-abi";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformLatticeAddressWGSL } from "./uniform-lattice-address";
+import { uniformLatticeAddressWGSL } from "./uniform-lattice-address";
 
 /** Every eight-tap loop in a presentation copy of the samplers runs to an
  * opaque bound. With literal bounds Metal unrolls the nested reconstruction

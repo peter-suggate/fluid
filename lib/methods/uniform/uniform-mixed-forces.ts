@@ -77,7 +77,7 @@ export class UniformMixedForces {
   private regularCoarsePipeline?: GPUComputePipeline;
   /** vectorViscosity must be true: the fine owners' viscosity is the vector
    * evaluator (the scalar one is the face kernels'). */
-  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false,private readonly vectorViscosity=true,private readonly retainedNormals=false,private readonly boundedNormals=true,private readonly zeroCurvatureSeams=true,private readonly dynamics?:UniformMixedRegionDynamics,
+  constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership, private readonly cachedGeometry=false,private readonly sourceParams?:GPUBuffer,private readonly solid?:UniformMixedSolid,private readonly cachedCurvature=false,vectorViscosity=true,private readonly retainedNormals=false,private readonly boundedNormals=true,private readonly zeroCurvatureSeams=true,private readonly dynamics?:UniformMixedRegionDynamics,
     /** COLD freeze: frozen owners hold; a frozen face keeps its advected (frozen) value. */
     private readonly freeze?:UniformColdFreeze) {
     if(!vectorViscosity)throw new Error("Mixed forces: the scalar fine viscosity evaluator was removed");

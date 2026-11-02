@@ -449,7 +449,6 @@ export function createSimulatedInteractionHost(options: {
   }
 
   function commitDocument(next: InteractionDocument, label: string, impact: UpdateImpact, touched: readonly string[]): CommandResult {
-    const before = new Map(document.entities.map((entity) => [entity.id, entity]));
     document = next;
     documentRevision += 1;
     historyEntries.push({ revision: documentRevision, label });

@@ -27,7 +27,6 @@ import { SOLID_PATCH_BLOCK_KIND, type VoxelBlock } from "./kind";
  */
 const PAYLOAD_PREFIX = "vb1:";
 const LAYOUT_VERSION = 1;
-const PALETTE_ENTRY_BYTES = 5;
 
 /**
  * The largest block a payload may describe: 256 cubed. A decoded block is five

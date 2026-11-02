@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import "../lib/methods";
 import { sceneDocument } from "../lib/core/scene-definition";
-import { getSceneDefinition, defaultScenePresetId } from "../lib/core/scenes";
-import { parseScene, serializeScene, validateScene } from "../lib/core/model";
+import { getSceneDefinition } from "../lib/core/scenes";
 import { initialHeightFieldFractionAtCell } from "../lib/core/initial-height-field";
 import { initialLiquidFractionAtCell } from "../lib/core/initial-fluid";
-import { parseQueryState } from "../lib/core/url-state";
 
 const dims = [48, 32, 40] as const;
 

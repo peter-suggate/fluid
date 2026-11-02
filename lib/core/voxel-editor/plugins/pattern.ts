@@ -1,6 +1,6 @@
 import { solidFractionOccupies, type VoxelBlock } from "../../solid-patch/kind";
 import type { SolidPatchOperation, SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../../solid-world";
-import { OPERATION_OPPOSITE, mirrorControls, operationCaption, operationControl, operationTone, shellControl,
+import { OPERATION_OPPOSITE, mirrorControls, operationCaption, operationControl, operationTone, 
   toolPatchOperation } from "../controls";
 import { assertStrokeCaps, faceBox, mirroredPatches, strokeHighlight, toolSurface, voxelToolUnavailable } from "../geometry";
 import type { ToolAvailabilityContext, ToolContext, ToolGesture, ToolNumberControl, ToolUpdate, VoxelToolPlugin } from "../plugin";

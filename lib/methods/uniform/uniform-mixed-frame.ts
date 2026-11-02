@@ -601,7 +601,7 @@ export class UniformMixedFrame {
   this.momentum=new UniformMixedMomentum(device,o,this.heat.tiers,true,true,f.sourceParams,this.freeze,sampler,"shared",this.nearSettled.momentumTrace);
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true,true,true,true,true,this.dynamics,this.freeze);
   this.stageBandTiles=this.bandTilesAt(o.capacity.fineTiles,capacity.liquidBand);
-  this.stageScratch=buffer("Uniform mixed stage scratch",this.stageBytesAt(o.capacity.fineTiles,this.stageBandTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
+  this.stageScratch=buffer("Uniform mixed stage scratch",this.stageBytesAt(o.capacity.fineTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
   // Held mode: quiet regions (UniformRegionHeat) keep their owners' values.
   this.authority=new UniformMixedPressureAuthority(device,o,solid,false,false,true,{...this.surfaceWorkControl.revisions,generation:()=>this.surfaceWorkControl.generation});this.authorityGroup=this.bindAuthority();
   // Pressure couples the all-4h owners through the static coarse record.
@@ -673,10 +673,9 @@ export class UniformMixedFrame {
     band:copy("presented band slots",[{from:map,to:this.stageBandWord,words:512}]),transport:copy("transport grid",[{from:0,to:this.stageGridAt("transport"),words:512}]),grid:copy("pressure grid",[{from:0,to:this.stageGridAt("pressure"),words:512}])};
   }
  }
- /** The stage scratch at `fineTiles` h tiles and `bandTiles` band tiles: the
-  * largest of its consumers, each of which checks the buffer against its
-  * own need when it binds. */
- private stageBytesAt(fineTiles:number,bandTiles:number):number{
+ /** The stage scratch at `fineTiles` h tiles: the largest of its consumers,
+  * each of which checks the buffer against its own need when it binds. */
+ private stageBytesAt(fineTiles:number):number{
   const n=this.ownership.capacity.tiles;
   // The extension's slots are its prefix: they hold from the tail's
   // extension to the next head's, when no other consumer runs (useSlots).
@@ -737,7 +736,7 @@ export class UniformMixedFrame {
   * `bandTiles` band tiles: label and bytes. Each is one storage binding. */
  private capacityBuffers(fineTiles:number,bandTiles:number):[string,number][]{
   const n=this.ownership.capacity.tiles,owners=63*fineTiles+this.ownership.capacity.address.poolTiles;
-  return [["stage scratch",this.stageBytesAt(fineTiles,bandTiles)],["retained normals and curvature",this.geometry.normalBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
+  return [["stage scratch",this.stageBytesAt(fineTiles)],["retained normals and curvature",this.geometry.normalBytesAt(fineTiles)],["velocity tap cache",uniformMixedHangingBytes(n,fineTiles)],["pressure phi",4*owners],
    ["presented pressure phi",4*(this.stageBandWord+uniformStageBandWords(n,bandTiles)+uniformStageGridWords(n))]];
  }
  /** The capacity reserveFine(need) would adopt, or why the device cannot
@@ -793,7 +792,7 @@ export class UniformMixedFrame {
    this.authorityGroup=this.bindAuthority();
   }
   // The band's rows are in the stage scratch: either capacity sizes it.
-  const stageBytes=this.stageBytesAt(r.fineTiles,r.bandTiles);
+  const stageBytes=this.stageBytesAt(r.fineTiles);
   if(owners||stageBytes!==this.stageScratch.size){this.stageScratch=replace(this.stageScratch,stageBytes);this.bindStage();}
   if(band){
    // The record ends the buffer (readers find it from the length), so the band section in front of it moves it.

@@ -409,7 +409,7 @@ export class WebGpuLiveSvoTetrahedralRadiance {
   private pendingPlan?: SvoNodeMipPyramidPlan;
   private destroyed = false;
 
-  constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoTetrahedralRadianceOptions) {
+  constructor(device: GPUDevice, private readonly options: WebGpuLiveSvoTetrahedralRadianceOptions) {
     if (!Number.isSafeInteger(options.pageCapacity) || options.pageCapacity <= 0) throw new RangeError("Live radiance page capacity must be positive");
     if (options.atlasTexels.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new RangeError("Live radiance atlas dimensions must be positive integers");
     this.atlasPageCapacity = options.atlasPageCapacity ?? options.pageCapacity;

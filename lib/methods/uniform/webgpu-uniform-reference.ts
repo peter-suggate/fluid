@@ -2874,7 +2874,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   private initializeVolumeAndTerrain(): void {
-    const { nx, ny, nz } = this.executionInfo;
+    const { nx, nz } = this.executionInfo;
     const c = this.scene.container;
     // By page: the stored pages' values alone (uniformLatticePagedVolume, uniformLatticePagedPhi).
     const {volume,terrain,initial,dam} = this.initialVolume ?? uniformLatticePagedVolume(this.scene, UNIFORM_PAGE_POOL_EDGE);

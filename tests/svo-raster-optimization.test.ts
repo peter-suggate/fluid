@@ -3,7 +3,6 @@ import test from "node:test";
 import { canUseOpaqueRasterLighting } from "../lib/svo/features/shading/deferred-specialization";
 import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publication";
 import { buildSvoPrimitiveCandidates } from "../lib/svo/features/scene-publication/svo-primitive-candidates";
-import { SvoRasterAo } from "../lib/svo/features/lighting-visibility/svo-raster-ao";
 import { rasterSpotLights } from "../lib/svo/features/lighting-visibility/raster-spot-lights";
 
 const sunScene = (): SparseVoxelDrySceneData => {

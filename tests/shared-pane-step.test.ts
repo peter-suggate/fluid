@@ -21,7 +21,7 @@ function setup() {
 }
 
 test("shared edits reach both panes and survive scene changes", () => {
-  const { a, b, shared, check } = setup();
+  const { b, shared, check } = setup();
   try {
     shared.setStepSize(0.012);
     check(0.012);

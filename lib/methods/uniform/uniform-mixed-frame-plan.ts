@@ -84,7 +84,6 @@ export class UniformMixedFramePlan {
     this.heldGroup=this.device.createBindGroup({label:"Uniform frame plan held seed flags",layout:this.heldResources,entries:[{binding:8,resource:{buffer:this.held}},{binding:9,resource:{buffer:tiers}}]});
   }
   async initialize():Promise<void>{
-    const h=this.ownership.capacity.lattice.cellSize_m;
     // The generator reads the lattice and tile count only (fixed by capacity).
     const topology=uniformMixedTopologyWGSL(this.ownership.capacity,0).replace('umSupport:array<u32>','umSupport:array<atomic<u32>>').replace(/umSupport\[([^\]]+)\]/g,'atomicLoad(&umSupport[$1])')+uniformMixedTopologyNeighboursWGSL();
     // seed and localSpeed stride the GPU-counted owners of every tier

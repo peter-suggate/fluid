@@ -10,7 +10,6 @@ import { successorEnvironmentCatalog } from "../svo/features/scene-publication/s
 import { FluidLabRenderer } from "./webgpu-renderer";
 import { reuseSolidWorld } from "./solid-world";
 import { createWorkerSolidEditAcceptance, SolidEditBaseMismatchError, SolidEditReferenceError } from "./voxel-editor/worker-solid-edit-acceptance";
-import { webGPUPlatformResourcePlugin } from "./webgpu-platform-resource";
 import { markSceneRevision, type SceneDescription } from "./model";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 import { LOAD_SAMPLE_INTERVAL_MS, observedGPUQueue, startThreadStallMeter } from "./system-load";

@@ -310,7 +310,7 @@ export function createSvoEnvironmentCoarsening(
 ): SvoEnvironmentCoarsening {
   const {
     primitives, regions = [], worldOrigin_m: worldOrigin, nodeEdge_m,
-    brickSize, maximumDepth, crowdingTarget,
+    brickSize, crowdingTarget,
   } = options;
   const statistics: SvoEnvironmentCoarseningStatistics = {
     nodes: 0, emptyLeaves: 0, resolvedLeaves: 0,

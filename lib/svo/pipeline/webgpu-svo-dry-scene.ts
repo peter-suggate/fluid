@@ -129,7 +129,6 @@ buildSvoEnvironmentLighting,
 SVO_ENVIRONMENT_LIGHTING_RECORD_STRIDE_BYTES,
 SVO_ENVIRONMENT_LIGHTING_VERSION
 } from "../features/radiance/svo-environment-lighting";
-import { SVO_NODE_MIP_LAYOUT } from "../features/radiance/svo-node-mip-pyramid";
 import {
 packSvoFieldProgramArena,
 SVO_FIELD_PROGRAM_BLOCK_WORDS, SVO_SAMPLED_VOLUME_TAG,
@@ -159,7 +158,7 @@ svoScenePrimitiveBandReadBindGroupLayoutEntries,
 type SvoScenePrimitiveCoverageAudit
 } from "../features/scene-publication/svo-scene-primitive-band";
 import { SVO_FLUID_COVERAGE_BOUNDS_BYTES, type WebGpuSvoFluidCoverage } from "../features/scene-publication/webgpu-svo-fluid-coverage";
-import { CLUSTER_BLOCK_COUNT_WORD,CLUSTER_BLOCK_FIELD_WORD,CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD,CLUSTER_BLOCK_LOBE_SPAN_WORD,CLUSTER_BLOCK_POINTS_WORD,CLUSTER_BLOCK_SEED_WORD,CLUSTER_BLOCK_SMOOTH_RADIUS_WORD,createSvoDryConeMarcherWGSL,createSvoDrySceneFragmentWGSL,drySceneShader,drySceneVertexShader,SVO_DRY_CONE_PREPASS_CONTRACT,SVO_DRY_NODE_MIP_PUBLICATION_MODE,SVO_DRY_SCENE_ARENA_LAYOUT,SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES,SVO_DRY_SCENE_CLUSTER_CAPACITY,SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES,SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY,SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES,SVO_DRY_SCENE_PIXEL_PROBE_GROUP,SVO_DRY_SCENE_REVERSED_Z_NEAR_M,SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT,SVO_DRY_VISIBILITY_FLAGS,SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT,SVO_DRY_WORLD_GI_CACHE_CONTRACT,SVO_SCENE_PRIMITIVE_COVERAGE_MAXIMUM_RECORDS,SVO_SCENE_PRIMITIVE_RASTER_CONTRACT,svoVisibilityTraceOffset,type SvoBrickOccupancyMode,type SvoConeLightingScale,type SvoDryOptimizationExperiments,type SvoDryShadingPath,type SvoDryTraversalMode } from "../features/shading/program";
+import { CLUSTER_BLOCK_COUNT_WORD,CLUSTER_BLOCK_FIELD_WORD,CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD,CLUSTER_BLOCK_LOBE_SPAN_WORD,CLUSTER_BLOCK_POINTS_WORD,CLUSTER_BLOCK_SEED_WORD,CLUSTER_BLOCK_SMOOTH_RADIUS_WORD,createSvoDryConeMarcherWGSL,createSvoDrySceneFragmentWGSL,drySceneShader,drySceneVertexShader,SVO_DRY_CONE_PREPASS_CONTRACT,SVO_DRY_NODE_MIP_PUBLICATION_MODE,SVO_DRY_SCENE_ARENA_LAYOUT,SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES,SVO_DRY_SCENE_CLUSTER_CAPACITY,SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY,SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES,SVO_DRY_SCENE_PIXEL_PROBE_GROUP,SVO_DRY_SCENE_REVERSED_Z_NEAR_M,SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT,SVO_DRY_VISIBILITY_FLAGS,SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT,SVO_DRY_WORLD_GI_CACHE_CONTRACT,SVO_SCENE_PRIMITIVE_COVERAGE_MAXIMUM_RECORDS,SVO_SCENE_PRIMITIVE_RASTER_CONTRACT,svoVisibilityTraceOffset,type SvoBrickOccupancyMode,type SvoConeLightingScale,type SvoDryOptimizationExperiments,type SvoDryShadingPath,type SvoDryTraversalMode } from "../features/shading/program";
 import { resolveSvoPipelineComposition } from "./composition";
 import {
 disabledRenderStagesEqual,
@@ -1580,7 +1579,7 @@ export class SparseVoxelDrySceneRenderer {
     private readonly device: GPUDevice,
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer,
-    private readonly targetFormat: GPUTextureFormat = "rgba16float",
+    targetFormat: GPUTextureFormat = "rgba16float",
     private readonly traversalMode: SvoDryTraversalMode = "hybrid",
     private readonly brickOccupancyMode: SvoBrickOccupancyMode = "bounds",
     private readonly shadingPath: SvoDryShadingPath = "inline",
@@ -3972,9 +3971,6 @@ export class SparseVoxelDrySceneRenderer {
         compute: { module, entryPoint: "dryVoxelLightPopulateMain" },
       }) : Promise.resolve(undefined),
       ]);
-      const coverageLayouts = () => this.device.createPipelineLayout({
-        bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!],
-      });
       // The scene-primitive arm carries one group more than the brick arm: the
       // band's membership words, which its vertex stage reads and the brick
       // proxies have no use for.

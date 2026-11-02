@@ -216,7 +216,7 @@ export function uniformCensusInexactSolidTiles(tiles:readonly [number,number,num
  * air, so a wall's wet face holds no crossing. `phi` holds vertex phi by page (fluidLatticePagedVertexPhi);
  * a page it leaves undefined holds none. `open` is whether a lattice cell is open (no solid). */
 export function uniformCensusCrossingTiles(phi:LatticePages,tiles:readonly [number,number,number],open:(x:number,y:number,z:number)=>boolean):Set<number>{
- const [tx,ty,tz]=tiles,E=phi.edge,n=E+1,[px,py,pz]=phi.pages,crossing=new Set<number>();
+ const [tx,ty,tz]=tiles,E=phi.edge,n=E+1,[px,py]=phi.pages,crossing=new Set<number>();
  if(E%4!==0)throw new Error(`Census crossing: a page edge of ${E} cells holds no whole tile`);
  const cellOpen=new Uint8Array(64);
  for(const [i,page] of phi.at){

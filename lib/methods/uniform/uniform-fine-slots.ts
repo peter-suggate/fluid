@@ -87,7 +87,7 @@ export function uniformFineSlotRingPages(pages:readonly [number,number,number],t
  const [tx,ty]=tiles,[px,py]=pages,held=new Set<number>();
  for(const k of keys){
   const p=[k%tx,Math.floor(k/tx)%ty,Math.floor(k/(tx*ty))];
-  const lo=p.map((t,a)=>Math.max(0,(4*t-13)>>5)),hi=p.map((t,a)=>Math.min(pages[a]!-1,(4*t+15)>>5));
+  const lo=p.map(t=>Math.max(0,(4*t-13)>>5)),hi=p.map((t,a)=>Math.min(pages[a]!-1,(4*t+15)>>5));
   for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++)held.add(x+px*(y+py*z));
  }
  return held.size;

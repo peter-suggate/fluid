@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HdrLensBloom, DEFAULT_LENS_BLOOM_OPTIONS, resolveLensBloomOptions, lensBloomShader } from "../lib/core/webgpu-lens-bloom";
+import { HdrLensBloom, DEFAULT_LENS_BLOOM_OPTIONS, resolveLensBloomOptions } from "../lib/core/webgpu-lens-bloom";
 import { compositeShader, RasterWaterPipeline } from "../lib/core/webgpu-water-pipeline";
 import { resolveDisplayGrade, sceneLinearToDisplay, unifiedDisplayTransferShaderLibrary } from "../lib/core/webgpu-lighting";
 

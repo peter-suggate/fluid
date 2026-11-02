@@ -7,12 +7,8 @@ import test from "node:test";
 import "../lib/methods";
 
 import {
-  compareDiffRows,
-  dropCompareOverride,
   moveCompareOverrideToA,
-  promoteCompareDiff,
   startCompareSync,
-  swapComparePanes,
   type CompareStateStore,
 } from "../lib/core/compare/compare-model";
 import {
@@ -66,12 +62,6 @@ function panes() {
   return { a: createPaneSession("a"), b: createPaneSession("b") };
 }
 
-/** A registered method that is not the one a fresh pane opens on. */
-function otherMethodId(session: PaneSession): string {
-  const current = session.method.getState().methodId;
-  const other = current === "uniform" ? "uniform-volume" : "uniform";
-  return other;
-}
 
 test("opening compare with an empty diff makes B a copy of A", () => {
   const { a, b } = panes();

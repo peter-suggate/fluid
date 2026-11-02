@@ -10,7 +10,7 @@ import { uniformMixedCountedEntriesWGSL, uniformMixedTopologyNeighboursWGSL, uni
 import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_LIVE_GROUP_GROUPS } from "./uniform-live-lists";
 import { uniformStageListsWGSL } from "./uniform-stage-lists";
-import { UNIFORM_MIXED_HANGING_TAPS, UNIFORM_UNIT_HALO_EDGE, uniformMixedHangingTapWGSL, uniformMixedVelocitySamplingSource, uniformUnitHaloWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
+import { UNIFORM_MIXED_HANGING_TAPS, UNIFORM_UNIT_HALO_EDGE, uniformMixedHangingTapWGSL, uniformUnitHaloWGSL } from "./uniform-mixed-velocity-sampling.wgsl";
 
 /** Workgroups a block of the unit halo fill: one a z-plane of its texels. */
 const HALO_SLICES=UNIFORM_UNIT_HALO_EDGE;

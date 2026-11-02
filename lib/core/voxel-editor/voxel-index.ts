@@ -2,11 +2,10 @@ import type { SceneDescription } from "../model";
 import { composeSolidPatch, validateSolidPatch, type SolidPatchPageStore } from "../solid-patch/compose";
 import { solidFractionOccupies } from "../solid-patch/kind";
 import { solidPatchListExtends } from "../solid-patch-list";
-import { SOLID_WORLD_BRICK_CELLS, SOLID_WORLD_VOXELS_PER_PAGE, solidGroundForScene, type SolidGround,
+import { SOLID_WORLD_VOXELS_PER_PAGE, solidGroundForScene, type SolidGround,
   type SolidWorldCoordinate, type SolidWorldPage, type SolidWorldVoxelPatch } from "../solid-world";
 import { EDITOR_HISTORY_LIMIT } from "../stores/history-store";
 
-const B = SOLID_WORLD_BRICK_CELLS;
 /** Pages along the edge of a node, so a node is 64 cells across. */
 const NODE_PAGES = 8;
 /** Nodes either side of the origin whose coordinates pack exactly into one number. */

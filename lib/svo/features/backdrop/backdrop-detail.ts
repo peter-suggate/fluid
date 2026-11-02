@@ -126,10 +126,6 @@ export function backdropDetailRing(detail: BackdropDetail, m: number): number {
   return m <= detail.halfWidth0_m ? 0 : Math.min(detail.rings - 1, Math.ceil(Math.log2(m / detail.halfWidth0_m)));
 }
 
-function insideFootprint(detail: BackdropDetail, x: number, z: number): boolean {
-  const [minX, minZ, maxX, maxZ] = detail.footprint_m;
-  return x > minX && x < maxX && z > minZ && z < maxZ;
-}
 
 function footprintDistance(detail: BackdropDetail, x: number, z: number): number {
   const [minX, minZ, maxX, maxZ] = detail.footprint_m;

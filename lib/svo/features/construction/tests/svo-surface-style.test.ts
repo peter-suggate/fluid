@@ -4,7 +4,6 @@ import "../../../../methods";
 import { sceneUsesFlatVoxelNormals } from "../../../../core/model";
 import { defaultScenePresetId } from "../../../../core/scenes";
 import { parseQueryState, serializeQueryState } from "../../../../core/url-state";
-import { createSvoDrySceneFragmentWGSL } from "../../shading/program";
 
 test("SVO surface style defaults to smooth reconstruction and keeps voxel faces selectable", () => {
   assert.equal(sceneUsesFlatVoxelNormals({}), false);

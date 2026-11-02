@@ -380,7 +380,6 @@ export class SvoNodeMipAddressPlan {
   /** `x, y, z, level` of the page in each slot; zero where the slot is free. */
   readonly slotPages: Uint32Array<ArrayBuffer>;
 
-  private readonly levelDimensions: readonly (readonly [number, number, number])[];
   private readonly slotState: Uint8Array;
   /** Resident child pages of each slot's page. A page with none and no seed of its own is returned. */
   private readonly childCounts: Uint8Array;
@@ -409,7 +408,6 @@ export class SvoNodeMipAddressPlan {
   constructor(shape: SvoNodeMipAddressPlanShape, discovery: PageDiscovery | undefined) {
     this.levelCount = shape.levelCount;
     this.basePageDimensions = shape.basePageDimensions;
-    this.levelDimensions = shape.levelDimensions;
     this.opacityFloorLevel = shape.opacityFloorLevel;
     this.radianceFloorLevel = shape.radianceFloorLevel;
     this.residentPageLimit = shape.residentPageLimit;

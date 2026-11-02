@@ -7,7 +7,6 @@ import {BULK16_STATUS} from "./uniform-bulk-pages";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedPageCount,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {levelSetFillWGSL} from "../../core/level-set-fill.wgsl";
-import {type UniformLatticeAddress} from "./uniform-lattice-address";
 import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
 import {uniformStageListsWGSL} from "./uniform-stage-lists";
 import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,uniformMixedVertexBuriedWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
@@ -80,7 +79,6 @@ export class UniformMixedSurfaceVolume {
  private readonly tiles:number;
  /** Residency pages: the bound of the page launches. */
  private readonly pages:number;
- private readonly address:UniformLatticeAddress;
  /** clearBand's fixed grid, a lane a live tile (strided). */
  private readonly clearGroups:number;
  private readonly resources:GPUBindGroupLayout;
@@ -89,8 +87,7 @@ export class UniformMixedSurfaceVolume {
   * corner is then a stored or resolved texel; resolveScale completes the
   * corner scales the same way after metric. */
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly solid?:UniformMixedSolid,private readonly bulkPages?:UniformBulkPages){
-  const lattice=ownership.capacity.lattice;
-  const address=this.address=ownership.capacity.address;
+  const address=ownership.capacity.address;
   this.vertices=address.vertexKeys;
   this.tiles=ownership.capacity.tiles;this.pages=uniformMixedPageCount(this.tiles);
   this.clearGroups=UNIFORM_LIVE_KEY_GROUPS;
@@ -106,7 +103,6 @@ export class UniformMixedSurfaceVolume {
  }
  /** The stage measures phi and volume and writes neither. */
  bind(phi:GPUTexture,volume:GPUTexture,scratch:GPUBufferBinding):UniformDetailGroup{
-  const address=this.address;
   for(const [i,t] of [phi,volume].entries())if(t.format!=="r32float"||uniformDetailClass(t)!==(i===1?"cell":"vertex"))throw new Error("Mixed surface constraint requires native vertex and cell fields");
   if((scratch.size??scratch.buffer.size-(scratch.offset??0))<this.scratchBytes)throw new Error("Mixed surface constraint needs sufficient scratch");
   const work={...scratch,size:this.scratchBytes};

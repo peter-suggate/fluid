@@ -11,12 +11,12 @@ import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import type { UniformPagePool } from "./uniform-page-pool";
 import { UNIFORM_LIVE_KEY_GROUPS, uniformLiveListsWGSL } from "./uniform-live-lists";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
-import { uniformMixedDetailViolationWord, uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockCoord, uniformBlockStored, uniformCellStored, uniformCellTexel, uniformEachPage, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileStored, uniformTileTexel, uniformVertexSlot, uniformVertexStored, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
+import { uniformMixedDetailViolationWord } from "./uniform-mixed-topology.wgsl";
+import { uniformBlockCoord, uniformCellTexel, uniformEachPage, uniformEachTile, uniformLatticeAddressWGSL, uniformLatticeRunWGSL, uniformTileTexel, uniformVertexSlot, uniformVertexTexel, uniformWideVertexTexel, type UniformLatticeAddress } from "./uniform-lattice-address";
 import type { LatticePages } from "../../core/initial-liquid-lattice";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import { UniformFineSlots, uniformFineSlotCapacity, uniformFineSlotInitWGSL, uniformFineSlotLayers, uniformFineSlotsOf, type UniformFineSlotWords } from "./uniform-fine-slots";
-import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_BASED, UNIFORM_DETAIL_CANONICAL_LOAD, UNIFORM_DETAIL_FACE_COMPACT, UNIFORM_DETAIL_HEADER_WORDS, UNIFORM_DETAIL_PACKED, UNIFORM_DETAIL_RING_4H_LOAD, registerUniformDetailBase } from "../../core/uniform-detail-abi";
+import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_BASED, UNIFORM_DETAIL_FACE_COMPACT, UNIFORM_DETAIL_HEADER_WORDS, UNIFORM_DETAIL_PACKED, UNIFORM_DETAIL_RING_4H_LOAD, registerUniformDetailBase } from "../../core/uniform-detail-abi";
 
 export type UniformDetailClass="cell"|"face"|"vertex"|"atlas";
 type Dims=readonly [number,number,number];
@@ -241,7 +241,6 @@ function liveLayout(device:GPUDevice,tiles:number):UniformDetailLayout|undefined
  return found[0]?.layout;
 }
 
-const DOMAIN_FLAGS=["checked","compact","parity","unpinned","poison","survey","untwinned","unwrapped"];
 
 /** Workgroups of each transfer launch: their lanes stride the GPU lists. */
 
@@ -617,7 +616,7 @@ export class UniformDetailStorage{
   return all&&!this.sparse;
  }
  private coarse(layout:UniformMixedLayout,visit:(o:Dims)=>void):void{
-  const address=this.layout.address,c:[number,number,number]=[0,0,0];
+  const address=this.layout.address;
   uniformEachTile(address,(t,x,y,z)=>{if(!(layout.tiles[t]!&0x80000000))visit([4*x,4*y,4*z]);});
  }
  private coarsenCells(layout:UniformMixedLayout,values:Float32Array|LatticePages,image:Float32Array,texture:GPUTexture):void{
@@ -793,7 +792,7 @@ export class UniformDetailStorage{
  private kernelsOfDomain():DomainKernels{return this.transfers!;}
  /** The ring kernels and the h slots' init are built with the storage:
   * any state with h tiles may run them. */
- private async compileDomain(domain:UniformDetailDomain):Promise<DomainKernels>{
+ private async compileDomain():Promise<DomainKernels>{
   const device=this.device,C=GPUShaderStage.COMPUTE,compiler=gpuCompilationManagerFor(device);
   const init=await Promise.all(this.ringSets().map(async(handles,n)=>{
    const format=handles[0]!.format as "r32float"|"rgba32float";
@@ -805,7 +804,7 @@ export class UniformDetailStorage{
    return {handles,layout,pipeline:await compiler.compileComputePipeline({label:`Uniform detail h slot init ${n}`,layout:device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint:"init"}},{priority:"visible"})};
   }));
   await this.slots.initialize(t=>this.seam(t),this.ringDimensions,this.simulation!.support,uniformMixedDetailViolationWord(this.layout.address.tileKeys));
-  return {ring:await this.compileRing(domain),init};
+  return {ring:await this.compileRing(),init};
  }
  /** The following fields in launches of up to BATCH of one format (the ring's and the slot init's). */
  private ringSets():GPUTexture[][]{
@@ -824,7 +823,7 @@ ${uniformLatticeAddressWGSL({constant:false,paged:{blocks:"drDimensions.w"},fine
   * texels from the base blocks (the h texture held nothing current for it).
   * The first batch also hands the target's ring bit to the other ownership
   * (the all-4h pressure root, whose kernels store these fields too). */
- private async compileRing(domain:UniformDetailDomain):Promise<DomainKernels["ring"]>{
+ private async compileRing():Promise<DomainKernels["ring"]>{
   const device=this.device,C=GPUShaderStage.COMPUTE,N=this.layout.address.tileKeys,compiler=gpuCompilationManagerFor(device),pool=this.pool;
   if(Math.ceil(N/64)>device.limits.maxComputeWorkgroupsPerDimension)throw new Error(`Uniform detail storage: the ring kernels launch ${Math.ceil(N/64)} workgroups, past one dispatch dimension`);
   const sets=this.ringSets(),seam=(table:string)=>this.seam(table);
@@ -902,7 +901,7 @@ fn drShare(t:u32){
  }
 
  /** pool: the page pool whose blocks the ring kernels visit (none: every tile key). */
- async prepare(ownership:UniformMixedOwnership,pool?:UniformPagePool):Promise<void>{if(this.transfers)return;this.simulation=ownership;this.pool=pool;this.transfers=await this.compileDomain(this.layout.domain!);}
+ async prepare(ownership:UniformMixedOwnership,pool?:UniformPagePool):Promise<void>{if(this.transfers)return;this.simulation=ownership;this.pool=pool;this.transfers=await this.compileDomain();}
  /** Before a remap, in its encoder: the tiles the target generation
   * (target: its topology) brings into the detail ring take their canonical
   * texels from the bases. */
@@ -1477,30 +1476,6 @@ ${pair(texture!,lv)}
  for(const [name,{kind,type}] of kinds)out+=one(name,kind,type,"");
  return out;
 }
-type DetailKinds=ReadonlyMap<string,{kind:UniformDetailClass;type:string}>;
-/** Haloed patches: the other resident boxes that can hold texel `p` of home
- * patch n: one direction per axis, so the non-empty submasks of the near
- * axes (one for a texel near a face, three near an edge, seven at a corner).
- * A loop, not blocks: Metal flattens every call, and this text is paid at
- * every site. */
-
-/** Haloed patches: address helpers. The directory is the only table read.
- * udFind_<class>(p): the texel of logical p with no home in hand; w = 0 the
- * base (canonical: current by write-through), 1 a resident box (its home
- * patch's, else for a vertex or atlas texel a neighbour's halo), -1 no texel
- * (xyz: the base address). */
-
-/** Haloed patches: the write-through store of one field. Every resident box
- * that holds q, then the base when canonical; returns whether any did. */
-
-/** Haloed patches: the dense kernels' accessors (no home): a load finds its
- * texel from the directory and, where a tile has none, takes what packed
- * storage loads there (the tile's value, its parity face, the corners'
- * interpolant); a store that lands nowhere is dropped. */
-
-/** A work item's owner comes from one of these (by job, lane or tile); an
- * owner looked up by position is a neighbour, never the home. */
-const PATCH_OWNER=/fn (\w+)\(([^)]*)\)\s*->\s*(\w*)UMOwner\s*\{/g,PATCH_NEIGHBOUR=/(OwnerAt|VertexAuthority|StageOwner)$/;
 /** Haloed patches: the mixed kernels' rewrite (UniformDetailPatch). The
  * work item's home is resolved once, where it takes its owner; with none
  * resolved the box is empty and every load is a base or directory load. */

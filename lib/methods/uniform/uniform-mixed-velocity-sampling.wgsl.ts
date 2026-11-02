@@ -105,7 +105,7 @@ const blend = (key: string) => /* wgsl */ `if(umRegularFine){return 1.0;}
   fine=max(fine,max(0.0,1.0-distance/2.0));
  }
  return fine;`;
-const fineTile = unitTexture ? "umCachedFineTile" : "umFineStencilTile", fineSample = unitTexture ? "umSampleVelocity1" : "umSampleVelocityFine";
+const fineTile = unitTexture ? "umCachedFineTile" : "umFineStencilTile";
 if (hangingGroup !== undefined && !unitTexture) throw new Error("Hanging fine taps are read from the unit velocity texture");
 return (hangingGroup !== undefined ? uniformMixedHangingTapWGSL(hangingGroup) : "") + /* wgsl */ `
 struct UMVelocitySite {face:UMFace,width:u32,interior:bool}

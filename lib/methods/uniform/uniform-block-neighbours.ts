@@ -1,5 +1,5 @@
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
-import { UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_WINDOW, uniformBlockNeighbourLayout } from "./uniform-lattice-address";
+import { UNIFORM_PAGE_TABLE_WORDS, uniformBlockNeighbourLayout } from "./uniform-lattice-address";
 import type { UniformPagePoolMirror } from "./uniform-page-pool";
 
 /** The block neighbour rows and the wall-face list of a topology's tail
@@ -27,7 +27,7 @@ import type { UniformPagePoolMirror } from "./uniform-page-pool";
  *
  * table: the buffer's word that holds the page table's first. */
 export function uniformBlockNeighboursWGSL(blocks: number, table: number): string {
-  const l = uniformBlockNeighbourLayout(blocks), w = UNIFORM_PAGE_WINDOW;
+  const l = uniformBlockNeighbourLayout(blocks);
   return /* wgsl */ `
 // A topology: from BN_TABLE, the page table, the block records, then the rows, the wall count and the wall list.
 @group(0) @binding(0) var<storage,read_write> bnTail:array<u32>;

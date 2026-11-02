@@ -6,7 +6,6 @@ import test from "node:test";
 import "../../../../methods";
 import { presentationModeForScene, SCENE_ENVIRONMENT_PAYLOAD_BUDGET_BYTES } from "../../../../core/scene-definition";
 import { SCENE_CATALOG } from "../../../../core/scenes";
-import { studioStageSceneryGraph } from "../../../../core/studio-stage-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../../../../core/voxel-environments";
 import type { EnvironmentProxyPrimitive } from "../../../../core/voxel-environments";
 import {

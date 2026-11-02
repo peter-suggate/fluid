@@ -2964,7 +2964,7 @@ export class RasterWaterPipeline {
    * list, after the count; one word, never written, where no pool is bound.
    * Sized when the bound pool changes, never while one is held.
    * Returns whether the buffer is a new one. */
-  private ensureSurfaceWindows(nx: number, ny: number, nz: number): boolean {
+  private ensureSurfaceWindows(): boolean {
     const words = Math.max(1, surfaceWindowCapacity(2048, 2048, 2048, this.mixedBlocks) + BULK16_WINDOWS_A_PAGE * (this.mixedBulk?.capacity ?? 0));
     if (this.surfaceWindows?.size === 4 * (1 + words)) return false;
     this.surfaceWindows?.destroy();
@@ -2973,7 +2973,7 @@ export class RasterWaterPipeline {
   }
 
   private ensureGeometry(nx: number, ny: number, nz: number) {
-    const windows = this.ensureSurfaceWindows(nx, ny, nz);
+    const windows = this.ensureSurfaceWindows();
     const key = `${nx}x${ny}x${nz}`;
     if (key === this.geometryKey) { if (windows) this.rebuildBindGroups(); return; }
     this.vertexBuffer?.destroy(); this.indirectBuffer?.destroy(); this.indirectResetTemplate?.destroy(); this.activeCubeBuffer?.destroy();

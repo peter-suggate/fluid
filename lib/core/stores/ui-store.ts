@@ -48,7 +48,7 @@ import {
 } from "../../svo/pipeline/svo-render-options";
 import { RENDER_STAGE_SWITCH_IDS, type RenderStageSwitchId } from "../../svo/pipeline/render-stage-switches";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, svoRenderStageUsesPrimaryWorkMap, type SvoRenderStageView } from "../../svo/features/diagnostics/svo-render-diagnostics";
-import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../../svo/pipeline/svo-render-tuning";
+import { normalizeSvoRenderTuning, type SvoRenderTuning } from "../../svo/pipeline/svo-render-tuning";
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/features/diagnostics/svo-pixel-trace";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 import type { FineSurfaceState, FluidParticleDisplay, FluidSurfaceRenderMode, SurfaceDisplayState } from "../../features/surface-display/definition";
@@ -528,7 +528,7 @@ export const createUIStore = () => create<UIStore>((set) => ({
   // stage's reading of itself, so "phase 3" of the projection means nothing on
   // the transport lens; carrying it over would open the new lens on a viewpoint
   // nobody chose, and on a lens with fewer phases, on none at all.
-  setGridOverlayMode: (gridOverlayMode) => set((state) => ({
+  setGridOverlayMode: (gridOverlayMode) => set(() => ({
     gridOverlayMode,
     visualLayers: undefined,
   })),

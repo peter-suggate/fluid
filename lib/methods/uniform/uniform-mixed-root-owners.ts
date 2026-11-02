@@ -1,7 +1,7 @@
 import { uniformWindowAddressWGSL } from "./uniform-window-address";
 import { compileUniformStencil, uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {
-  UNIFORM_KIND, UNIFORM_PAGE_TABLE_WORDS, UNIFORM_PAGE_WINDOW, uniformFaceTile, uniformFaceTileSlots, uniformLatticeAddressWGSL,
+  UNIFORM_KIND, uniformFaceTile, uniformFaceTileSlots, uniformLatticeAddressWGSL,
   uniformTileCoord, uniformTileKey, uniformTileKind, uniformTileLive, type UniformLatticeAddress,
 } from "./uniform-lattice-address";
 import { UNIFORM_MIXED_DETAIL_RING } from "./uniform-mixed-layout";

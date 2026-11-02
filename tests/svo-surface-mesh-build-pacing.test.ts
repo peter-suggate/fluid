@@ -10,7 +10,6 @@ import {
   surfaceMeshBuildPresentations,
   surfaceMeshConstructionFailed,
   surfaceMeshGeometrySettled,
-  surfaceMeshWorkBytes,
 } from "../lib/svo/features/primary-visibility/svo-surface-mesh";
 
 test("camera withholding preserves settled geometry while pending and failed publications do not",()=>{

@@ -637,7 +637,7 @@ export class SparseVoxelBrickRasterProbeBuffers {
   private readonly readback: StagedReadback;
   private destroyed = false;
 
-  constructor(private readonly device: GPUDevice) {
+  constructor(device: GPUDevice) {
     this.records = device.createTexture({
       label: "Sparse voxel raster-primary probe records",
       size: [SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS, this.rows],

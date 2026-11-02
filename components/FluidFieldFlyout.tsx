@@ -1,5 +1,4 @@
 "use client";
-import type { KeyboardEvent } from "react";
 import { getMethod } from "../lib/core/method-registry";
 import type { MethodParamSpec, SelectParamSpec } from "../lib/core/method-contract";
 import type { GPUQuality } from "../lib/core/gpu-quality";

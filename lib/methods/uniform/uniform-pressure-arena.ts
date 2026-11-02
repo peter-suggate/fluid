@@ -295,7 +295,7 @@ export class UniformPressureArena {
  readonly superTail:boolean;
  private readonly super?:UniformPressureSuperWords;
  get slotMapOffset():number{return 4*HEADER;}
- private workBricks=1;private workLevel1=1;private level1Groups=1;private workLevel2=1;private level2Groups=1;private workHeld=1;private pageGroups=PAGE_GROUPS;
+ private workBricks=1;private workLevel1=1;private level1Groups=1;private workLevel2=1;private workHeld=1;private pageGroups=PAGE_GROUPS;
  private workTiles=1;private tileGroups=1;private relaxGroups=1;
  private readonly recentCycles=new Uint32Array(BAND_CYCLE_WINDOW);
  private recentCount=0;
@@ -472,7 +472,7 @@ export class UniformPressureArena {
   this.workBricks=uniformBufferedWork(this.workBricks,Math.min(bricks,tiles),cap,reserve);
   this.workLevel1=uniformBufferedWork(this.workLevel1,Math.min(level1,this.workBricks),cap,reserve);
   this.workLevel2=uniformBufferedWork(this.workLevel2,Math.min(level2,this.workLevel1,blocks),blocks,blockReserve);
-  this.level1Groups=Math.min(this.workLevel1,BRICK_GROUPS);this.level2Groups=Math.min(this.workLevel2,PAGE_GROUPS);
+  this.level1Groups=Math.min(this.workLevel1,BRICK_GROUPS);
   this.workHeld=uniformBufferedWork(this.workHeld,Math.min(held,blocks),blocks,blockReserve);this.pageGroups=Math.min(this.workHeld,PAGE_GROUPS);
   this.workTiles=uniformBufferedWork(this.workTiles,Math.min(tiles,this.slots),this.slots,reserve);
   this.tileGroups=Math.min(this.workTiles,TILE_GROUPS);this.relaxGroups=Math.min(groupsOf(this.workTiles,2),TILE_GROUPS);
@@ -3646,7 +3646,7 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
    encoder.clearBuffer(this.index,0,4*HEADER);
   }else{encoder.clearBuffer(this.index,0,4*this.tableWord);this.indexClean=true;}
   encoder.clearBuffer(this.index,step.offset,step.size);
-  const blocks=this.simulation.capacity.address.blocks,band=!this.empty;
+  const band=!this.empty;
   const pass=encoder.beginComputePass(PREPARE_PASS);
   this.clearLevel2(pass);
   if(band)this.dispatch(pass,"pMark","tiles");

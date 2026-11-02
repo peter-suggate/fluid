@@ -12,7 +12,7 @@ import { environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "../l
 import { successorEnvironmentCatalog } from "../lib/svo/features/scene-publication/scene-environment-catalog";
 import { OctreeSparseBrickWorld } from "../lib/svo/features/construction/webgpu-svo-sparse-bricks";
 import { svoRenderResidual } from "../lib/svo/features/scene-publication/svo-planar-boundary";
-import { sceneSculptCuts, sceneryPrimitiveAffectedBySculptCuts, sculptPrimitiveBounds, svoSculptChangeBounds } from "../lib/svo/features/scene-publication/svo-sculpt-change-bounds";
+import { sceneSculptCuts, sceneryPrimitiveAffectedBySculptCuts, svoSculptChangeBounds } from "../lib/svo/features/scene-publication/svo-sculpt-change-bounds";
 
 const legacy: SolidWorldVoxelPatch = { operation: "clear", minimum: [1, 2, 3], maximumExclusive: [4, 5, 6] };
 const cut: SolidWorldVoxelPatch = { ...legacy, affectsScenery: true };

@@ -29,7 +29,6 @@ export class UniformMixedDiagnostics {
   ]});
  }
  async initialize():Promise<void>{
-  const h=this.ownership.capacity.lattice.cellSize_m;
   // One lane per GPU-counted owner of every tier (umAllOwner), a partial per job.
   const module=uniformDetailModule(this.device,{label:"Uniform mixed diagnostics",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var volume:texture_3d<f32>;

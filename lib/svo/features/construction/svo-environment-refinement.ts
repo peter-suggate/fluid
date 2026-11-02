@@ -386,7 +386,7 @@ export function createSvoEnvironmentRefinement(
 ): SvoEnvironmentRefinement {
   const {
     primitives, descriptorFor, worldOrigin_m: worldOrigin, nodeEdge_m,
-    brickSize, maximumDepth, crowdingTarget,
+    brickSize, crowdingTarget,
     planarExemption = false,
   } = options;
   const surfaces = [

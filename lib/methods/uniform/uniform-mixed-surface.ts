@@ -148,7 +148,7 @@ export class UniformMixedSurface {
     private readonly wallTrace:"clip"|"retrace"="clip",
     /** surfaceVelocitySampler "texture32": umFastVelocity's unit interpolant is
      * one filtered sample a component of the halo (float32-filterable). */
-    private readonly velocitySampler:"texture32"|"software"="software",
+    velocitySampler:"texture32"|"software"="software",
     /** surfaceTraceSubsteps "off": every surface trace is one step (UM_SURFACE_ONE_STEP). */
     private readonly oneStepTrace=false,
     /** A COLD freeze holds deep-COLD regions: advect enumerates the active

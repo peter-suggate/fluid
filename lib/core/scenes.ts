@@ -881,7 +881,6 @@ export function createLargePowerDamBreakScene(): SceneDescription {
 
 
 export function createLargePowerHydrostaticScene(): SceneDescription {
-  const mini = createMinimalPowerDamBreakScene();
   const scene = createLargePowerDamBreakScene();
   scene.sceneId = "large-power-hydrostatic";
   scene.duration_s = 1;

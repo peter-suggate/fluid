@@ -2674,7 +2674,7 @@ export function stoneSetBoulderNodes(spec: StoneSetSpec): SceneryNode[] {
 }
 
 /** Plan footprint a boulder claims, so the beds can be laid around it. */
-function boulderFootprints(spec: StoneSetSpec, rail: PlanRail): StoneFootprint[] {
+function boulderFootprints(rail: PlanRail): StoneFootprint[] {
   return HERO_BOULDERS.map((placement) => {
     const at = railTurnAt(rail, placement.turn, placement.offset_m);
     // **The stem's foot, not the cap and not the plinth.** This used to be 0.88
@@ -2701,7 +2701,7 @@ export function stoneSetPebbleNodes(spec: StoneSetSpec): SceneryNode[] {
   const rail = planRail(pondVesselPlanCurve(spec.vessel));
   const rimHalfWidth = spec.vessel.rimHalfWidth_m;
   const groundHeightAt = vesselGround(spec);
-  const avoid = boulderFootprints(spec, rail);
+  const avoid = boulderFootprints(rail);
 
   const bankWidthAt = (turn: number): number =>
     HERO_PEBBLE_DRIFTS.reduce((widest, drift) =>

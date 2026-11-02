@@ -39,7 +39,7 @@ export class WebGpuSvoCompactHierarchy {
   private readonly nodes: GPUBuffer;
   private destroyed = false;
 
-  constructor(private readonly device: GPUDevice, private readonly hierarchy: SvoCompactHierarchy) {
+  constructor(device: GPUDevice, private readonly hierarchy: SvoCompactHierarchy) {
     const hotNodes = new Uint32Array(hierarchy.nodeCount * 4);
     for (let node = 0; node < hierarchy.nodeCount; node += 1) {
       hotNodes.set(hierarchy.nodes.subarray(node * 5, node * 5 + 4), node * 4);

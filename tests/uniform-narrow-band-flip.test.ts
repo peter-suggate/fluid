@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import "../lib/methods";
-import { defaultMethodId, getMethod, registeredSimulationMethods } from "../lib/core/method-registry";
+import { getMethod } from "../lib/core/method-registry";
 import { methodConfigurationImpact } from "../lib/core/method-lifecycle";
 import { resolveMethodValues } from "../lib/core/method-contract";
-import { narrowBandAdaptiveDetail } from "../lib/methods/uniform/uniform-narrow-band-method";
-import { uniformGeometricSolverOptions } from "../lib/methods/uniform/uniform-geometric-options";
 import { FluidLabRenderer, type SimulationRunConfig } from "../lib/core/webgpu-renderer";
 import { defaultScene, type SceneDescription } from "../lib/core/model";
 import type { MethodParamValues } from "../lib/core/method-contract";

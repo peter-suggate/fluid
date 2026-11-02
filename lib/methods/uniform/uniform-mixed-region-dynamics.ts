@@ -103,7 +103,7 @@ export function uniformRegionForceStoreBytes(regions:number,fineSlots:number,til
  *   fn umForceKept(retain)->vec3f, umForceKeep(owner,retain,axis,drive)
  * Classify sets each region's mode (umRdForce) before the forces run. */
 export function uniformRegionForceWGSL(group:number,binding:number,regions:number,fineSlots:number,tiles:number):string{
-  const M=UNIFORM_REGION_MIRROR_WORDS,W=UNIFORM_REGION_MIRROR,F=UNIFORM_FORCE_MODE,T=UNIFORM_FORCE_TIER,H=UNIFORM_REGION_TIER;
+  const M=UNIFORM_REGION_MIRROR_WORDS,W=UNIFORM_REGION_MIRROR,F=UNIFORM_FORCE_MODE;
   return /* wgsl */`
 @group(${group}) @binding(${binding}) var<storage,read_write> umForceStore:array<u32>;
 const UM_FORCE_REGIONS:u32=${regions}u;
@@ -209,7 +209,6 @@ export class UniformMixedRegionDynamics {
     this.pressureHistory=device.createBuffer({label:"Uniform region dynamics pressure history",size:8*tiles,usage:GPUBufferUsage.STORAGE});
     // All ones: no tag matches, no region is primed, tiers read exact until classify.
     this.forceFineSlots=64*Math.min(ownership.capacity.address.poolTiles,UNIFORM_FORCE_STORE_FINE_TILES);
-    const mirror=UNIFORM_REGION_MIRROR_WORDS*this.regions;
     this.forceStore=device.createBuffer({label:"Uniform region force store",size:uniformRegionForceStoreBytes(this.regions,this.forceFineSlots,tiles),usage:GPUBufferUsage.STORAGE,mappedAtCreation:true});
     {const w=new Uint32Array(this.forceStore.getMappedRange());w.fill(0xffffffff);for(let i=0;i<this.regions;i++)w[UNIFORM_REGION_MIRROR_WORDS*i+UNIFORM_REGION_MIRROR.primed]=0;this.forceStore.unmap();}
     const storage=(binding:number,type:GPUBufferBindingType)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type}});

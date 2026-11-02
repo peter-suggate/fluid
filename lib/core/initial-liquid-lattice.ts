@@ -474,7 +474,7 @@ export function fluidLatticePagedCellVolumes(scene: SceneDescription, edge: numb
   const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER), [cx, cy, cz] = cells;
   const [nx, ny, nz] = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const {density, terrain: inner, dam} = cellVolumeSampler(scene, cells, true);
-  const pages: [number, number, number] = [Math.ceil(nx/edge), Math.ceil(ny/edge), Math.ceil(nz/edge)], [px, py, pz] = pages;
+  const pages: [number, number, number] = [Math.ceil(nx/edge), Math.ceil(ny/edge), Math.ceil(nz/edge)], [px, py] = pages;
   const bounds = initialLiquidCellBounds(scene, cells) ?? [[[0, 0, 0], [cx, cy, cz]]];
   const at = new Map<number, Float32Array>();
   const wetMinimum = [cx, cy, cz], wetMaximum = [0, 0, 0];

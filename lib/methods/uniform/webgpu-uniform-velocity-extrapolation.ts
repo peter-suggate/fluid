@@ -6,8 +6,6 @@ import { UNIFORM_EXTRAPOLATION_BLOCK_SWEEPS, UNIFORM_EXTRAPOLATION_WORK_WORDS, u
 type Dims3 = readonly [number, number, number];
 /** The 4h, 8h, 16h and 32h levels: 8, 4, 2 and 1 cells a block axis. */
 const LEVEL_EDGES = [8, 4, 2, 1] as const;
-/** Cells a kernel workgroup covers (three component lanes each). */
-const GROUP_CELLS = 64;
 
 interface MixedPipelines { readonly restrict?: GPUComputePipeline; readonly sweep?: GPUComputePipeline; readonly prolong?: GPUComputePipeline; readonly replay?: GPUComputePipeline }
 /** The caller's work words (heWork): two gate words, the held block count,

@@ -1,4 +1,4 @@
-import { getMethod, defaultMethodId } from "../method-registry";
+import { defaultMethodId } from "../method-registry";
 import type { PaneSession } from "../session/session";
 import { sameSolidPatchList } from "../solid-patch-list";
 import { useShellStore } from "../stores/shell-store";
@@ -539,7 +539,6 @@ export function compareDiffRows(
  * straight through.
  */
 export function compareOverlayModeDrawable(mode: string, methodId: string): boolean {
-  const method = getMethod(methodId);
   return true;
 }
 

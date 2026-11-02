@@ -1,5 +1,5 @@
 import type { ToolContext, ToolGesture, VoxelToolPlugin } from "../plugin";
-import { PAINT_SAMPLES, materialControl, mirrorControls, operationCaption, operationControl, operationTone, shellControl,
+import { PAINT_SAMPLES, materialControl, mirrorControls, operationCaption, operationControl, operationTone, 
   toolMaterialId, toolOperation } from "../controls";
 import { assertStrokeCaps, beginFootprintGesture, boxHighlight, faceBox, mirroredPatches, shapePatches,
   voxelToolUnavailable } from "../geometry";

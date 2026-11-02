@@ -365,7 +365,7 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   * the census. This includes newly seeded and ballistic particles.
   * solidGeometry: the frame's cached open-cell masks, rebuilt before the
   * census and initialized for new pages before their first classification. */
- constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source:GPUBuffer,private readonly pool:UniformPagePool,private readonly particles:{readonly buffer:GPUBuffer;readonly offset:number;readonly allocation:GPUBuffer},private readonly hostPages:number,private readonly solidGeometry:UniformMixedSolidCoarse){
+ constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,volume:GPUTexture,phi:GPUTexture,extended:GPUTexture,source:GPUBuffer,private readonly pool:UniformPagePool,particles:{readonly buffer:GPUBuffer;readonly offset:number;readonly allocation:GPUBuffer},private readonly hostPages:number,private readonly solidGeometry:UniformMixedSolidCoarse){
   const tiles=ownership.capacity.tiles;
   this.words=Math.ceil(tiles/32);
   const address=ownership.capacity.address;

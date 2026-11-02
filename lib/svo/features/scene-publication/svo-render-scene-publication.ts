@@ -1,6 +1,5 @@
 import { meshSurfaceTextureAtlas } from "../../../core/imported-assets/surface-texture-atlas";
 import { sceneCellSizes_m } from "../../../core/scene-lattice-dimensions";
-import { SVO_MATERIAL_FLAGS } from "../../contracts/svo-material-flags";
 import { packSvoSculptCuts } from "./svo-sculpt-cuts";
 import { classifySvoSculptInstances } from "./svo-sculpt-instances";
 import { sceneUsesFlatVoxelNormals, type SceneDescription } from "../../../core/model";

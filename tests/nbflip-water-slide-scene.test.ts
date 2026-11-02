@@ -68,7 +68,7 @@ function assertEmptyClosedNbflipBox(id: string, grid: readonly [number, number, 
 
 const scene = sceneDocument(getSceneDefinition(NBFLIP_SLIDE_SCENE_ID));
 const [nx, ny] = NBFLIP_SLIDE_GRID, h = scene.voxelDomain.finestCellSize_m;
-const { patches: drum, top, topAt } = slideColumns(scene, NBFLIP_SLIDE_GRID);
+const { top, topAt } = slideColumns(scene, NBFLIP_SLIDE_GRID);
 /** The centreline every quarter cell or finer, from the source's outlet to the channel's end. */
 function* centreline() {
   const inflow = scene.fluid.inflow!, x = inflow.center_m.x / h + nx / 2;

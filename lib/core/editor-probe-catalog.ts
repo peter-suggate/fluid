@@ -3,8 +3,6 @@ import {
   boxFaceCorners,
   containerContains,
   pickRoomExitFace,
-  pickSolidBox,
-  type BoxExtent,
   type EditorEntity,
   type EditorEntityContext,
   type EditorRay,
@@ -260,29 +258,6 @@ function wallLabel(axis: "x" | "y" | "z", sign: -1 | 1): string {
   return sign > 0 ? "tank wall · +Z" : "tank wall · −Z";
 }
 
-/**
- * Which face of a box a point on its surface sits on.
- *
- * Derived from the point rather than returned by the slab test, because the
- * only caller needs it once and a second slab implementation next to
- * `intersectBox` would be one more place for the two to disagree. A ray that
- * started inside the box reports the face it leaves through, which is the face
- * the reader is looking at from in there.
- */
-function boxFaceNormalAt(box: BoxExtent, point_m: Vec3): Vec3 {
-  const normal = { x: 0, y: 0, z: 0 };
-  let nearest = Number.POSITIVE_INFINITY;
-  for (const axis of ["x", "y", "z"] as const) {
-    for (const sign of [-1, 1] as const) {
-      const gap = Math.abs(point_m[axis] - (sign < 0 ? box.min[axis] : box.max[axis]));
-      if (gap >= nearest) continue;
-      nearest = gap;
-      normal.x = 0; normal.y = 0; normal.z = 0;
-      normal[axis] = sign;
-    }
-  }
-  return normal;
-}
 
 // ---- terrain --------------------------------------------------------------
 

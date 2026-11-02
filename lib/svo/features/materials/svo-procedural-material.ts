@@ -243,9 +243,6 @@ export function evaluateSvoProceduralMaterial(
   };
 }
 
-const wgslPolicies = SVO_PROCEDURAL_MATERIAL_POLICIES.map((policy, index) => `${index === 0 ? "if" : "else if"}(functionId==${policy.functionId}u){
-    frequency=vec3f(${policy.frequency_mInv.map((value) => value.toFixed(8)).join(",")});seed=${policy.seed}u;colorAmplitude=${policy.colorAmplitude.toFixed(8)};roughnessAmplitude=${policy.roughnessAmplitude.toFixed(8)};detailOctave=${policy.detailOctave.toFixed(8)};detailWeight=${policy.detailWeight.toFixed(8)};fleckThreshold=${policy.fleckThreshold.toFixed(8)};fleckAmplitude=${policy.fleckAmplitude.toFixed(8)};
-  }`).join("\n  ");
 
 /**
  * The hash and the value noise on their own, without the material table.

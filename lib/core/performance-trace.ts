@@ -513,7 +513,7 @@ export class GPUPerformanceTraceRecorder {
   }
 
   constructor(
-    private readonly device: GPUDevice,
+    device: GPUDevice,
     private readonly sampleId: number,
     private readonly lane: "physics" | "presentation",
     private readonly context: string,
@@ -685,7 +685,7 @@ export class DynamicGPUPerformanceTraceRecorder {
   private phase: TraceRecorderPhase = "recording";
 
   private constructor(
-    private readonly device: GPUDevice,
+    device: GPUDevice,
     private readonly sampleId: number,
     private readonly lane: "physics" | "presentation",
     private readonly context: string,
@@ -892,7 +892,7 @@ export class GPUStageTimestampRecorder {
   }
 
   constructor(
-    private readonly device: GPUDevice,
+    device: GPUDevice,
     private readonly sampleId: number,
     private readonly lane: "physics" | "presentation",
     private readonly context: string,
@@ -1284,10 +1284,10 @@ export class GPUPassTimestampRecorder {
   }
 
   constructor(
-    private readonly device: GPUDevice,
+    device: GPUDevice,
     /** Two counters per pass. */
     private readonly capacity = 512,
-    private readonly label = "pass timestamps",
+    label = "pass timestamps",
     /** Diagnostic copies force encoder boundaries. Disable only for whole-frame
      * timing comparisons; individual pass attribution then remains untrusted. */
     private readonly encoderBreaks = true,

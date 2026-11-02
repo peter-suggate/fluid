@@ -131,7 +131,6 @@ export class UniformMixedSurfaceGeometry {
     ]});
   }
   bind(phi:GPUTexture,targetFill:GPUTexture,centerPhi:GPUTexture,pressure:{target:GPUTexture;centerPhi:GPUTexture},mirror:GPUTexture):UniformDetailGroup{
-    const address=this.ownership.capacity.address;
     const outputs=[targetFill,centerPhi,pressure.target,pressure.centerPhi,mirror];
     for(const [i,t] of [phi,...outputs].entries())
       if(t.format!=="r32float"||uniformDetailClass(t)!==(i===0?"vertex":"cell"))throw new Error("Mixed geometry requires native cell and vertex fields");

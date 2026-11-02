@@ -59,7 +59,6 @@ import type { SceneDraftSubject } from "../stores/scene-draft-store";
 import type { SceneryPropKind } from "../stores/ui-store";
 import {
   browserSceneLibraryStorage,
-  loadSceneFromLibrary,
   readSceneLibrary,
   saveSceneToLibrary,
   type SceneLibraryEntry,

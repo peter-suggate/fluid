@@ -1,10 +1,8 @@
 import "../lib/methods";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sceneryConstructionKey } from "../lib/core/scenery-construction-key";
 import { createEmptyScene } from "../lib/core/empty-scene";
-import { FluidLabRenderer, gpuSceneSolverKey, type SimulationRunConfig } from "../lib/core/webgpu-renderer";
-import type { GPUSolverInstance } from "../lib/core/method-contract";
+import { FluidLabRenderer, type SimulationRunConfig } from "../lib/core/webgpu-renderer";
 import type { SceneDescription } from "../lib/core/model";
 import { initialResourceReadiness, reduceGPUResourceStatus, reduceGPUResourceEvidence, resourceActivities } from "../lib/core/resource-readiness";
 import { liveSvoSceneResourcePlugin } from "../lib/svo/features/scene-publication/webgpu-live-svo-scene";

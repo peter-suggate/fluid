@@ -29,20 +29,20 @@ import {
   waterKeyDirectionalFromSceneLights,
 } from "../svo/contracts/svo-light-abi";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
-import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, SCENE_ENVIRONMENT_OWNER_BASE, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
+import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { GPUQuality } from "./gpu-quality";
 import { getMethod, svoRenderRefinementPermitted } from "./method-registry";
 import { takesScheduledDrops, type GPUSolverInstance, type InjectedLiquidBall, type MethodParamValues } from "./method-contract";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
-import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
+import { RasterWaterPipeline, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./environments";
 import type { ScenePresentationMode } from "./scene-definition";
 import { sceneHasTerrain, terrainContentStamp } from "./terrain";
 import { solidVoxelPatchesKey, solidWorldContentStamp } from "./solid-world";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
-import { cameraTanHalfFov, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
+import { cameraTanHalfFov, viewportAspect } from "./webgpu-camera";
 import {
   type SvoPixelTrace,
   type SvoPixelTraceLayer,
@@ -869,8 +869,6 @@ export class FluidLabRenderer {
     readonly refitPlan: SvoPrimitiveCandidateRefitPlan;
     origin_ms?: number;
   };
-  /** Deduplicates a visible failed-closed diagnostic while the previous pose remains authoritative. */
-  private liveSceneAnimationFailure?: string;
   private svoPublicationFailure?: string;
   /** The publication attempt last refused: a frame retries only once its scene, source or pipeline moved. */
   private refusedPublication?: { readonly sceneKey: string; readonly stamp: number; readonly source: unknown; readonly pipeline: unknown };
@@ -938,8 +936,6 @@ export class FluidLabRenderer {
   private scalarFallbackTexture?: GPUTexture;
   private gpuFluid?: GPUSolverInstance;
   private readonly deferredPresentedTimes = new WeakMap<GPUSolverInstance, number>();
-  /** The app worker's choice (enableSolverPipelineWarmup): harness hosts compile only what their states need. */
-  private readonly warmedSolvers = new WeakSet<GPUSolverInstance>();
   /** Newest submitted solver time each solver's last presentation carried. */
   private readonly presentedStateTimes = new WeakMap<GPUSolverInstance, number>();
   /** Renderer-owned sparse source for fluid methods that do not publish one. */
@@ -1249,10 +1245,7 @@ export class FluidLabRenderer {
     this.onStatus({ state: "blocked", label: `Sparse garden renderer unavailable${detail}`, resource: svoPresentationResourcePlugin });
   }
 
-  private ensureRequestedOptionalPipelines(
-    requested: readonly OptionalRendererPipeline[],
-    methodId: string,
-  ) {
+  private ensureRequestedOptionalPipelines(requested: readonly OptionalRendererPipeline[]) {
     const wants = new Set(requested);
     // The two technique overlays are the running method's own passes, resolved
     // by registration key. A method that registers nothing under a key compiles
@@ -2043,7 +2036,7 @@ export class FluidLabRenderer {
       if(this.gpuFluid===previous){
         this.gpuFluid=undefined;this.gpuFluidKey="";
         this.updateRenderSources();
-        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.liveSceneAnimation=undefined;this.liveSceneAnimationFailure=undefined;this.renderSceneKey="";this.renderSceneStamp=0;this.svoDryScenePipeline?.setSource(undefined);
+        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.liveSceneAnimation=undefined;this.renderSceneKey="";this.renderSceneStamp=0;this.svoDryScenePipeline?.setSource(undefined);
         previous.destroy();previousDestroyedForReset=true;
       }
       if(this.svoSceneSidecar===previousSidecar&&previousSidecar){
@@ -2448,11 +2441,9 @@ export class FluidLabRenderer {
       derivedLighting: "unchanged",
     })) {
       const reason = "the analytic primitive arena is not ready for the live render generation";
-      this.liveSceneAnimationFailure = reason;
       this.onStatus({ state: "blocked", label: `Live scene update failed closed: ${reason}`, resource: svoPresentationResourcePlugin });
       return;
     }
-    this.liveSceneAnimationFailure = undefined;
     this.renderSceneRevision = revision;
     this.svoDrySceneData = { ...this.svoDrySceneData, renderRevision: revision, primitiveRecords: records, primitiveCandidates: candidates };
   }
@@ -2838,7 +2829,7 @@ export class FluidLabRenderer {
       sparsePresentationRequired && activeSvoDiagnostics.stageView !== "off",
       sparsePresentationRequired,
       sceneVesselPresentation(scene) === "outline",
-    ), config.methodId);
+    ));
     // The probe's answer depends on the scene epoch, the presentation, and the
     // traversal tuning as much as on the pixel. Tracking them as one revision is
     // what lets a pinned ray notice that its numbers describe a frame that has

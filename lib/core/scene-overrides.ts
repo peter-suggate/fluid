@@ -8,7 +8,7 @@ import {
 } from "./compare/compare-query";
 import { withRefinementRegionsFromQuery, refinementRegionsToQuery } from "./editor-refinement-region";
 import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
-import { defaultMethodId, getMethod, registeredSimulationMethods } from "./method-registry";
+import { defaultMethodId, getMethod } from "./method-registry";
 import type { MethodParamValue } from "./method-contract";
 import type { SceneDescription } from "./model";
 import { cameraForPreset, findSceneDefinition, getScenePreset } from "./scenes";

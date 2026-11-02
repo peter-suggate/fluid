@@ -3,7 +3,7 @@ import {uniformRuntimeConstantsWGSL} from "./uniform-scene-constants";
 import { uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING} from "./uniform-mixed-topology.wgsl";
 import type {UniformMixedGenerationBuffers,UniformMixedOwnership} from "./uniform-mixed-ownership";
-import {UNIFORM_PAGE_TABLE_WORDS,uniformLatticeAddressWGSL} from "./uniform-lattice-address";
+import {uniformLatticeAddressWGSL} from "./uniform-lattice-address";
 import type {UniformPagePool} from "./uniform-page-pool";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
 import {uniformFineSlotRingWGSL,type UniformFineSlotWords} from "./uniform-fine-slots";

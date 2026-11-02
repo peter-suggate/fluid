@@ -53,7 +53,6 @@ import {
 import {
   SparseBrickOctreeGPU,
   SPARSE_BRICK_GPU_LAYOUT,
-  SPARSE_BRICK_SCENE_GEOMETRY_FORMATS,
   SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES,
   SPARSE_BRICK_LEAF_TERMINAL,
   octreeLiveSceneLeafPayloadMode,
@@ -133,7 +132,7 @@ import { planSparseSceneDomain } from "../../../core/sparse-scene-domain";
 import { SCENE_ENVIRONMENT_OWNER_BASE } from "../../../core/webgpu-rigid-body";
 import { BATH_SOLID_DISTANCE_WGSL } from "../../../core/voxel-bath";
 import { sweptFlumeSurfaceWGSL } from "../../../core/swept-flume-surface";
-import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "../../../core/voxel-scene";
+import { VOXEL_MATERIAL_IDS, materialIdForRigidShape } from "../../../core/voxel-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyCatalog, type EnvironmentProxyPrimitive } from "../../../core/voxel-environments";
 import {
   SparseSceneProxyVoxelizer,

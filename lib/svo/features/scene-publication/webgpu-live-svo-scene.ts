@@ -228,7 +228,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
   }
 
   private constructor(
-    private readonly device: GPUDevice,
+    device: GPUDevice,
     scene: SceneDescription,
     quality: GPUQuality,
     dimensions: readonly [number, number, number],

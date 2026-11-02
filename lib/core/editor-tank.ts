@@ -1,6 +1,6 @@
 import { sceneAtContainerExtents } from "./scene-scale";
 import { latticeAxisDimension, DEFAULT_MAXIMUM_LATTICE_DIMENSION, MINIMUM_LATTICE_DIMENSION } from "./scene-lattice";
-import { cloneScene, type SceneDescription, type Vec3 } from "./model";
+import { type SceneDescription, type Vec3 } from "./model";
 import {
   boxHandles,
   pickRoomInterior,
@@ -20,7 +20,6 @@ import {
   fluidRingActions,
   fluidStartChoice,
 } from "./editor-fluid-body";
-import type { EditorAction } from "./editor-action";
 
 /**
  * Direct manipulation of the tank itself.

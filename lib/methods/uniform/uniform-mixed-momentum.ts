@@ -10,7 +10,7 @@ import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-so
 import { uniformVelocityDepartureWGSL, uniformVelocitySegmentedDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { uniformTileContextSidesWGSL } from "./uniform-tile-context";
-import { UNIFORM_MOMENTUM_RESIDUAL_PARTS, UNIFORM_MOMENTUM_TIER, UNIFORM_MOMENTUM_TIER_PASS, UNIFORM_MOMENTUM_FIT_GRID, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
+import { UNIFORM_MOMENTUM_TIER, UNIFORM_MOMENTUM_TIER_PASS, UNIFORM_MOMENTUM_FIT_GRID, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
 
 export interface UniformMixedMomentumFields {
   extended: GPUTexture;

@@ -215,7 +215,6 @@ export class UniformMixedPressureAuthority {
  bind(f:UniformMixedPressureAuthorityFields):UniformDetailGroup{
   if(this.regional!==!f.scratch)throw new Error("Mixed pressure authority: regional mode owns its workspace, and only it");
   if(f.scratch&&(f.scratch.size??f.scratch.buffer.size-(f.scratch.offset??0))<this.scratchBytes)throw new Error("Mixed pressure authority scratch is too small");
-  const address=this.ownership.capacity.address;
   for(const t of [f.centerPhi,f.volume,f.targetFill,f.phase,f.correction])if(t.format!=="r32float"||uniformDetailClass(t)!=="cell")throw new Error("Mixed pressure authority requires native scalar fields");
   if([f.centerPhi,f.volume,f.targetFill].some(t=>t===f.phase||t===f.correction)||f.phase===f.correction)throw new Error("Mixed pressure authority outputs must be disjoint");
   if(!!f.fine!==this.coarse)throw new Error("Coarse mixed pressure authority needs the h simulation vertex phi, and only it");

@@ -9,7 +9,7 @@ import { SessionProvider } from "../lib/core/session/session-context";
 import { composeFeatures } from "../lib/framework/composition";
 import { ComposedFeatureSlot } from "../lib/framework/ui/slot";
 import {
-  ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS, ADVANCE_TRANSPORT_EXPERIMENT_ORDER,
+  ADVANCE_SLICE_SETTINGS, ADVANCE_SURFACE_VIEWS,
   advanceSliceFeature,
 } from "./definition";
 import {

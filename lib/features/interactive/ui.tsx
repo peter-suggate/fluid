@@ -52,7 +52,6 @@ import { interactiveEntityActions } from "./ring";
 
 const ROTATE_STEP_RAD = Math.PI / 12;
 const DRAG_THRESHOLD_PX = 4;
-const UP: Vec3 = { x: 0, y: 1, z: 0 };
 
 // ---- hooks ------------------------------------------------------------------
 
