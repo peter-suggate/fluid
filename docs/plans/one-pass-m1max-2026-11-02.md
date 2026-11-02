@@ -263,6 +263,33 @@ timestamps and no solver.
   Measure cycles to the arena's accepted residual on the tank, and on the
   seep throat's page set.
 
+**Result (2026-11-02, `tools/bench-one-pass-page.ts`, timestamps unquantised, one exclusive run).**
+Medians of 60 steps, µs. E: 14 dispatches of a one-load, one-store kernel
+over A's grid. E1: the same, one workgroup each (the launch floor).
+
+| pages | A (14 dispatches) | B (one pass) | A/B | E | E1 |
+|---|---|---|---|---|---|
+| 64 | 152 | 48 | 3.2 | 55 | 57 |
+| 128 | 379 | 83 | 4.6 | 51 | 36 |
+| 512 | 452 | 270 | 1.7 | 104 | 39 |
+| 1,536 | 1,224 | 784 | 1.6 | 181 | 56 |
+
+- **Go/no-go: no-go as written.** B is under 5x better at 64 and 512 pages.
+  It does meet its absolute targets: 48 µs at 64 pages, 0.50 µs a page.
+- **A launch costs 3–4 µs** (E1), not 20. Synthetic A spends about 11 µs a
+  dispatch at 64 pages, so most of that is the kernel's own work and latency.
+- **B is throughput-bound at scale.** Its 24 KB of threadgroup memory allows
+  one 512-thread group a core, and its 20 barriers serialise the chain. At
+  1,536 pages it is only 1.6x ahead.
+- **The solver's mean is 26 µs a dispatch** on the pure tank's 64 resident
+  pages (§1). That is about 2.4x this A's 11 µs over the same set and work
+  shape. If every solver kernel cost what A's do, 397 dispatches would be
+  about 4.4 ms against 8.9; the launch floor is about 1.4 ms of that.
+- **So the per-kernel cost is the larger lever.** Fusing stages pays where a
+  chain is latency-bound at small N (up to 3x). It does not pay a 5x rewrite
+  of the step. Next: the pure tank's top kernels against A's equivalents
+  (their address chains and loads a cell).
+
 ## 8. Addendum: particle and h tiles on the paddleboats wake (2026-11-02)
 
 `tools/probe-reservoir-bulk.ts --scene=paddleboats --bodies --criteria`, 600
