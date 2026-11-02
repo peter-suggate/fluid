@@ -374,3 +374,31 @@ cause is the particle surface's own roughness, which sits at the tolerance.
   and the worst crossing (0.41 → 0.30 h median). In that run particles and
   h tiles grew instead (1.28M, 12k h tiles at step 600, against ~0.4M and
   ~5k), which needs explaining before APIC can be judged.
+
+**The analytic suite found a Galilean bug instead** (`probe-nbflip-analytic.ts`,
+FLIP default against APIC). FLIP failed pure translation: centroid 15.7 h,
+velocity error 0.62 m/s, 2.6 J of internal KE in 20 frames; APIC 0.05 h.
+Bisected to 3500c506 (2026-10-28), which ungated shape heat: before it the
+translating block had no particles and the grid carried it exactly. With
+particles, the initial band's seeds (seedCell's emit, seedInitial) lacked
+the nbSeedFirst mark, so swept FLIP read their before.xyz (their velocity,
+kept as residency travel) as a delta: 0.75 → 1.46 m/s in one step. Fixed in
+13b1996b (tests/nbflip-galilean-seeds.test.ts): translation 0.044 h, free
+fall 0.006 h, six-scene sweep within noise. The wake is unchanged by it
+(flipDelta "extended" on paddleboats: core rms 0.237 h).
+
+**Shape heat and the wake.** 3500c506 made shape heat particles whatever the
+motion (Sato Eq. 4); before, only near a moving body. A/B against the fixed
+build (one exclusive run each):
+
+| | ungated (HEAD) | body gate (pre-10-28) | shape starts heat on cold tiles only |
+|---|---|---|---|
+| boats particles / ms | 474k / 63.1 | 280k / 58.1 | 558k / (GPU contended) |
+| letters drift / ms | −1.54% / 53.5 | **−4.21%** / 40.4 | −1.54% / (contended) |
+| rest-step late speed, surface | 0.041 m/s, 0.04 h | 7e-6 m/s, 5e-5 h | 0.061 m/s, 0.50 h |
+| free fall / dam energy rise | 4.3% / 3.4% | 5.75% / 5.5% | 4.0% / 3.9% |
+
+The body gate removes the wake's particles but the falling letters lose
+2.7% more volume: their corners need shape heat (Sato's point). Letting
+shape only start heat does not cool the wake: tiles re-heat as they cool.
+Neither is committed.
