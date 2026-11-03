@@ -1,0 +1,383 @@
+diff --git a/lib/methods/uniform/uniform-mixed-surface.ts b/lib/methods/uniform/uniform-mixed-surface.ts
+index 3e5210cf..603f2ed8 100644
+--- a/lib/methods/uniform/uniform-mixed-surface.ts
++++ b/lib/methods/uniform/uniform-mixed-surface.ts
+@@ -81,6 +81,17 @@ export class UniformMixedSurface {
+   private readonly tierWord:number;
+   /** A copy of UniformRegionHeat's deep-COLD flags, a word per region after the tiers. */
+   private readonly deepWord:number;
++  /** The far certificate's words (umFarFineCertified, umFarCoarseCertified)
++   * at the buffer's end: two a tile key (an h tile's good cells), then three
++   * planes of a word a tile key (a 4h tile clean, and the separable spread's
++   * two planes). */
++  private readonly farWord:number;
++  /** farSpread's three axis launches. */
++  private readonly farSpreadPipelines:GPUComputePipeline[]=[];
++  /** farSpeed: a lane a 16h region (64 a group). */
++  private readonly regionLaneGroups:[number,number]=[0,0];
++  /** The frame plan's 16h region velocity extrema, where the ownership samples velocity. */
++  private readonly regionVelocity?:GPUBuffer;
+   get regionCounters(){return {buffer:this.claims,offset:4*this.regionCounterWord,regions:this.workControl?.regions??0,wordsPerRegion:5,labels:["identity","affine","middle","fullLinear","fullCubic"] as const};}
+   readonly workCounterWords=22;
+   /** Trial diagnostics: admitted fast-fine attempts and direct/cubic-listed results. */
+@@ -188,7 +199,12 @@ export class UniformMixedSurface {
+     this.deepWord=this.tierWord+(workControl?.regions??0);
+     this.predictorFineCapacity=0;
+     this.predictorCacheBytes=0;
+-    this.allocatedBytes=this.evidenceBytes+(workControl?4*(8*workControl.regions+this.workCounterWords)+this.predictorCacheBytes:0);
++    const farBytes=this.evidenceBytes+(workControl?4*(8*workControl.regions+this.workCounterWords)+this.predictorCacheBytes:0);
++    this.farWord=farBytes/4;
++    // Per tile: two mask words and three planes; per 16h region (a 64th of
++    // the tiles): the six velocity extrema copied in, and their speed bound.
++    this.allocatedBytes=farBytes+20*ownership.capacity.tiles+28*(ownership.capacity.tiles/64);
++    try{this.regionVelocity=ownership.regionVelocity;}catch{this.regionVelocity=undefined;}
+     const claimsLimit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
+     if(this.allocatedBytes>claimsLimit)throw new Error(`Uniform mixed surface claims and 16h support tables require ${this.allocatedBytes} bytes, exceeding the device buffer limit ${claimsLimit}; reduce scene capacity or resolution`);
+     this.claims=device.createBuffer({label:"Uniform mixed surface job claims",size:this.allocatedBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+@@ -203,7 +219,7 @@ export class UniformMixedSurface {
+     this.traceGrid=Math.max(1,Math.min(1024,Math.ceil(this.traceEntries/64)));
+     this.wallGroups=Math.min(WALL_REACH_GRID,wallFaces(address));
+     this.deferredWallGroups=Math.min(WALL_VERTEX_GRID,Math.ceil(1089*wallFaces(address)/64));
+-    uniformKeyGroups(address.tileKeys,64,ownership.dispatchX,this.tileLaneGroups);uniformKeyGroups(address.tileKeys,1,ownership.dispatchX,this.tileGroups);
++    uniformKeyGroups(address.tileKeys,64,ownership.dispatchX,this.tileLaneGroups);uniformKeyGroups(ownership.capacity.tiles/64,64,ownership.dispatchX,this.regionLaneGroups);uniformKeyGroups(address.tileKeys,1,ownership.dispatchX,this.tileGroups);
+   }
+   /** bind()'s evidence scratch from a 256-aligned offset: the tile words,
+    * then the deferred advect list and the cubic list. */
+@@ -1411,6 +1427,95 @@ fn umKeptAir(vertex:vec3u,width:u32,deep:bool)->f32{
+  if(value<0.0){return -1.0;}
+  return umAirSource(vertex,value);
+ }
++// The far certificate (narrow-band transport): a vertex whose departure
++// stencil, and every neighbour's, lies in cells whose corners all share its
++// strict sign at two widths or more from the surface keeps its value. Every
++// characteristic from the vertex's region moves at most umFarTravelAt()
++// cells (its 27 regions' velocity bound, never past the frame plan's), so
++// its trilinear taps lie in that box and carry its sign at two widths or
++// more: no cubic (under two widths), and no smoothing (its taps, two widths
++// out, share the sign). A foot moves only the trace's start: the departure
++// is the trace's end displaced back to the vertex, inside the same box, and
++// phi is read there alone. Its sign is then the traced one, and no neighbour
++// changes sign either, so it is no corner of a crossing cell after the step:
++// arena publication writes exact distance from the crossings within reach,
++// and beyond it the field holds sign and at least 5h (arenaFar). Closed
++// cells, unstored or AIR tiles never certify; SOLID pages (walls) hold no
++// stencil tap. The released walls (tested at value - 2 widths, a neighbour's
++// reach) and the source (whose min only lowers values, so an unchanged air
++// vertex keeps its neighbours' sign) must leave the vertex unchanged.
++const UM_FAR_MASK:u32=${this.farWord}u;
++const UM_FAR_CLEAN:u32=${this.farWord+2*this.ownership.capacity.tiles}u;
++const UM_FAR_SPREAD:u32=${this.farWord+3*this.ownership.capacity.tiles}u;
++const UM_FAR_SPREAD2:u32=${this.farWord+4*this.ownership.capacity.tiles}u;
++// The frame plan's region velocity extrema (6 order words a 16h region) and
++// farSpeed's bound over each region's 27 (f32 bits).
++const UM_FAR_VELOCITY:u32=${this.farWord+5*this.ownership.capacity.tiles}u;
++const UM_FAR_SPEED:u32=${this.farWord+5*this.ownership.capacity.tiles+6*(this.ownership.capacity.tiles/64)}u;
++const UM_FAR_REGIONS:u32=${this.ownership.capacity.tiles/64}u;
++const UM_FAR_LOCAL:bool=${this.regionVelocity?"true":"false"};
++override umFarAxis:u32=0u;
++var<private> umFarCertified:bool=false;
++// Cells the fastest characteristic of the frame crosses (NaN or infinite
++// speed: never certified).
++fn umFarTravelOf(speed:f32)->f32{
++ let h=min(params.hDt.x,min(params.hDt.y,params.hDt.z));
++ return speed*params.hDt.w/h*1.0001;
++}
++fn umFarTravel()->f32{return umFarTravelOf(bitcast<f32>(umSupport[4u*UM_TILES]));}
++// The travel bound of characteristics from a tile's 16h region: the
++// fastest velocity of that region's 27 (every point and sampler tap within
++// four tiles of the tile), and never past the global one. A NaN or
++// infinite global bound certifies nothing.
++fn umFarTravelAt(tile:u32)->f32{
++ let global=umFarTravel();if(!(global<=3.0e38)||!UM_FAR_LOCAL){return global;}
++ return min(global,umFarTravelOf(bitcast<f32>(atomicLoad(&umClaims[UM_FAR_SPEED+umPageOfTile(tile)]))));
++}
++fn umFarKeep(vertex:vec3u,width:u32)->bool{
++ let p=vec3f(vertex);let value=umLatticeLoad(vec3i(vertex),width);
++ if(umReleasedMayChange(p,value-2.0*f32(width)*max(params.hDt.x,max(params.hDt.y,params.hDt.z)))){return false;}
++ ${this.sourceParams?"if(umSourceuvSourcePhi(p,value)!=value){return false;}":""}
++ umRecordRegion(vertex,0u);umStoreSurface(vertex,width,value);return true;
++}
++// A tile's good cells (bit x+4y+16z of 64) for an h vertex's box: an h
++// tile's own (farFine), every cell of a clean 4h tile (farClean: its
++// trilinear keeps its corners' sign at 8h), all of a SOLID page's, none of
++// any other.
++fn umFarFineMask(n:vec3i)->vec2u{
++ if(!umTilePresent(n)){return select(vec2u(0u),vec2u(0xffffffffu),umTileKind(n)==UM_SOLID);}
++ let k=umTileKey(n);if(!umTileLive(k)){return vec2u(0u);}
++ if(umTileWidth(k)==1u){return vec2u(atomicLoad(&umClaims[UM_FAR_MASK+2u*k]),atomicLoad(&umClaims[UM_FAR_MASK+2u*k+1u]));}
++ return select(vec2u(0u),vec2u(0xffffffffu),atomicLoad(&umClaims[UM_FAR_CLEAN+k])!=0u);
++}
++// The cells lo..hi of tile offset o along one axis, as a 4-bit mask.
++fn umFarAxisBits(lo:i32,hi:i32,o:i32)->u32{
++ let a=max(lo-4*o,0);let b=min(hi-4*o,3);if(a>b){return 0u;}
++ return (0xfu>>u32(3-b))&(0xfu<<u32(a));
++}
++var<workgroup> umFarMasks:array<vec2u,27>;
++// An h vertex (local to its tile) whose r-cell box (cells local-r ..
++// local+r-1) holds only good cells of the 27 staged tile masks.
++fn umFarFineCertified(local:vec3i,r:i32)->bool{
++ let lo=local-vec3i(r);let hi=local+vec3i(r-1);
++ for(var k=0u;k<27u;k++){
++  let o=vec3i(umCorner(k,3u))-vec3i(1);
++  let bx=umFarAxisBits(lo.x,hi.x,o.x);let by=umFarAxisBits(lo.y,hi.y,o.y);let bz=umFarAxisBits(lo.z,hi.z,o.z);
++  if(bx==0u||by==0u||bz==0u){continue;}
++  var row=0u;for(var y=0u;y<4u;y++){if((by&(1u<<y))!=0u){row|=bx<<(4u*y);}}
++  var m=vec2u(0u);for(var z=0u;z<4u;z++){if((bz&(1u<<z))!=0u){m[z>>1u]|=row<<(16u*(z&1u));}}
++  if(any((m&~umFarMasks[k])!=vec2u(0u))){return false;}
++ }
++ return true;
++}
++// A 4h vertex 4t: every tile of [t-2, t+1] (its incident tiles and its 4h
++// neighbours') clean, the spread's word at t-1 (farSpread: [c-1, c+2]).
++// A characteristic then stays within its incident tiles (under 4 cells).
++fn umFarCoarseCertified(vertex:vec3u)->bool{
++ let n=vec3i(vertex>>vec3u(2u))-vec3i(1);
++ if(!umTilePresent(n)){return false;}
++ let key=umTileKey(n);
++ return umFarTravelAt(key)<=3.0&&atomicLoad(&umClaims[UM_FAR_SPREAD+key])!=0u;
++}
+ override umDeferTraced:bool=false;
+ // The cubic list's first word in deferred.data: past the deferred list's
+ // words (deferredEntries), which both its ends together never pass.
+@@ -1469,6 +1574,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
+  // queue before any transport proof, solid walk or characteristic work.
+  if(!wall&&umDeferTraced){
+   if(umVertexTier(vertex)==UM_TIER_COLD){umStoreCold(vertex,width);return;}
++  if(width==4u&&umFarCoarseCertified(vertex)&&umFarKeep(vertex,width)){return;}
+   umQueueVertex(vertex,width);return;
+  }
+  // One umHoldCold and one umAirSource site for both paths (Metal inlines
+@@ -1476,6 +1582,7 @@ fn umAdvectStore(vertex:vec3u,width:u32){
+  if(umHoldCold(vertex,width)){return;}
+  {let air=umKeptAir(vertex,width,!wall);if(air>=0.0){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,air);return;}}
+  if(wall){umQueueVertex(vertex,width);return;}
++ if(umFarCertified&&umFarKeep(vertex,width)){return;}
+  {let early=umEarlyFarAdvected(vertex,width);if(early.y>0.0){umStoreSurface(vertex,width,early.x);return;}}
+  {let cheap=umCheapAdvected(vertex,width);if(cheap.y>0.0){umStoreSurface(vertex,width,cheap.x);return;}}
+  // A grid-stride foot launch over the vertices past here measured slower
+@@ -1795,10 +1902,88 @@ override umCubicSolidList:bool=false;
+   umRecordRegion(vertex,select(3u,4u,cubic));umStoreSurface(vertex,1u,value+moved);
+  }
+ }
++// The far certificate's tables, ahead of advect. farClean: a 4h tile is
++// clean where its eight corners share a strict sign at 8h or more (two
++// widths: the 4h cubic's threshold) and no cell of it is closed.
++// farSpeed: a region's speed bound, the largest |velocity| extremum of its
++// 27 regions. A region never written (no owner) or nonfinite, or an AIR or
++// unstored page among them, bounds nothing; a SOLID page holds no velocity.
++fn umFarDecode(w:u32)->f32{return bitcast<f32>(select(~w,w^0x80000000u,(w&0x80000000u)!=0u));}
++@compute @workgroup_size(64) fn farSpeed(@builtin(global_invocation_id) gid:vec3u){
++ let r=gid.x+64u*umDispatchX*gid.y;if(r>=UM_FAR_REGIONS){return;}
++ var speed=3.402823e38;
++ if(umTileLive(umPageTile(r,0u))){
++  speed=0.0;let rc=vec3i(umPageCoord(r));
++  for(var k=0u;k<27u;k++){
++   let n=4*(rc+vec3i(umCorner(k,3u))-1);
++   if(!umTilePresent(n)){if(umTileKind(n)!=UM_SOLID){speed=3.402823e38;}continue;}
++   let m=umPageOfTile(umTileKey(n));
++   for(var j=0u;j<6u;j++){
++    let w=atomicLoad(&umClaims[UM_FAR_VELOCITY+6u*m+j]);var v=abs(umFarDecode(w));
++    if(w==0u||!(v<=3.0e38)){v=3.402823e38;}
++    speed=max(speed,v);
++   }
++  }
++ }
++ atomicStore(&umClaims[UM_FAR_SPEED+r],bitcast<u32>(speed));
++}
++@compute @workgroup_size(64) fn farClean(@builtin(global_invocation_id) gid:vec3u){
++ let tile=gid.x+64u*umDispatchX*gid.y;if(tile>=UM_TILES){return;}
++ var clean=false;
++ if(umTileLive(tile)&&umTileWidth(tile)==4u){
++  let corners=umLoadCorner8(umTileCoord(tile)*4u,4u);let h=8.0*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
++  clean=${this.solid?"umTileOpen(tile)>=1.0":"true"};
++  for(var k=0u;k<8u;k++){clean=clean&&abs(corners[k])>=h&&((corners[k]<0.0)==(corners[0]<0.0));}
++ }
++ atomicStore(&umClaims[UM_FAR_CLEAN+tile],u32(clean));
++}
++// farSpread (umFarAxis 0, 1, 2): a tile's word ANDs tiles c-1 .. c+2 along
++// the axis (clean -> spread -> spread2 -> spread). A SOLID page is clean,
++// an AIR or unstored one not.
++fn umFarSpreadWord(n:vec3i,base:u32)->u32{
++ if(!umTilePresent(n)){return u32(umTileKind(n)==UM_SOLID);}
++ return atomicLoad(&umClaims[base+umTileKey(n)]);
++}
++@compute @workgroup_size(64) fn farSpread(@builtin(global_invocation_id) gid:vec3u){
++ let tile=gid.x+64u*umDispatchX*gid.y;if(tile>=UM_TILES){return;}
++ let source=select(select(UM_FAR_SPREAD2,UM_FAR_SPREAD,umFarAxis==1u),UM_FAR_CLEAN,umFarAxis==0u);
++ let into=select(UM_FAR_SPREAD,UM_FAR_SPREAD2,umFarAxis==1u);
++ var clean=0u;
++ if(umTileLive(tile)){
++  clean=1u;let t=vec3i(umTileCoord(tile));
++  for(var o=-1;o<=2;o++){var n=t;n[umFarAxis]+=o;clean&=umFarSpreadWord(n,source);}
++ }
++ atomicStore(&umClaims[into+tile],clean);
++}
++// farFine: an h tile's good cells: eight corners sharing a strict sign at
++// 2h or more, and the cell open. Bit x+4y+16z is lane x+4y+16z's cell.
++var<workgroup> umFarPhi:array<f32,125>;
++var<workgroup> umFarBits:array<atomic<u32>,2>;
++@compute @workgroup_size(64) fn farFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
++ let owner=umTileJobOwner(group);
++ umLoadAddressPlan(owner.tile>>9u,lane);
++ let fine=owner.width==1u;let base=umTileCoord(owner.tile)*4u;
++ if(fine){for(var k=lane;k<125u;k+=64u){umFarPhi[k]=umLoadVertex(base+umCorner(k,5u));}}
++ if(lane<2u){atomicStore(&umFarBits[lane],0u);}
++ workgroupBarrier();
++ if(fine){
++  let c=umCorner(lane,4u);let h=2.0*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
++  let first=umFarPhi[c.x+5u*c.y+25u*c.z];var good=${this.solid?"umCellOpen(vec3i(base+c))>=1.0":"true"};
++  for(var k=0u;k<8u;k++){let q=c+umCorner(k,2u);let v=umFarPhi[q.x+5u*q.y+25u*q.z];good=good&&abs(v)>=h&&((v<0.0)==(first<0.0));}
++  if(good){atomicOr(&umFarBits[lane>>5u],1u<<(lane&31u));}
++ }
++ workgroupBarrier();
++ if(fine&&lane<2u){atomicStore(&umClaims[UM_FAR_MASK+2u*owner.tile+lane],atomicLoad(&umFarBits[lane]));}
++}
+ @compute @workgroup_size(64) fn advectFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+  umStagePlaneReach(lane);
+  let owner=umTileJobOwner(group);
+  umLoadAddressPlan(owner.tile>>9u,lane);
++ // The far certificate's box: at most 4 cells (3 of travel), so a vertex's
++ // (local 0..4) lies within the 27 tiles around this one.
++ let travel=umFarTravelAt(owner.tile);let far=travel<=3.0;let r=max(2,i32(ceil(travel))+1);
++ if(far&&owner.width!=0u&&lane<27u){umFarMasks[lane]=umFarFineMask(vec3i(umTileCoord(owner.tile))+vec3i(umCorner(lane,3u))-vec3i(1));}
++ workgroupBarrier();
+  if(owner.width==0u){return;}
+  let tile=umTileCoord(owner.tile);let wide=umFineWideMask(umTileAt(tile));
+  let low=umTileLowOpen(vec3i(tile));let rounds=select(1u,3u,any(low));
+@@ -1807,7 +1992,7 @@ override umCubicSolidList:bool=false;
+  let deep=umRegionDeepCold(umPageOfTile(owner.tile));
+  for(var round=0u;round<rounds;round++){
+   let vertex=umFineVertex(tile,lane,round,wide,low);
+-  if(vertex.x!=UM_NO_VERTEX.x&&(!deep||all((vertex&vec3u(3u))==vec3u(0u)))){umAdvectStore(vertex,1u);}
++  if(vertex.x!=UM_NO_VERTEX.x&&(!deep||all((vertex&vec3u(3u))==vec3u(0u)))){umFarCertified=far&&umFarFineCertified(vec3i(vertex)-vec3i(tile*4u),r);umAdvectStore(vertex,1u);}
+  }
+ }
+ // Merged jobs without the general h list (umMergedCoarse): a seam 4h tile's
+@@ -1862,7 +2047,7 @@ override umCubicSolidList:bool=false;
+   if(owned){umAdvectStore(vertex,owner.width);}
+  }
+ }
+-`,["advect","advectFine","advectOwners"],"umClaims")});
++`,["advect","advectFine","advectOwners","farFine"],"umClaims")});
+     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
+     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[]),this.ownership.hangingLayout]});
+@@ -1874,6 +2059,10 @@ override umCubicSolidList:bool=false;
+       // Dispatched only under solids (encode: solid.present): no solid-free twin.
+       ...(this.solid?["solidClosed","solidClear"]:[]).map(entryPoint=>keyed(entryPoint,{},true)),
+       keyed("wallReach"),
++      keyed("farClean"),
++      keyed("farSpeed"),
++      keyed("farFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:3,...UNIFORM_DETAIL_H_STORE}),
++      Promise.all([0,1,2].map(umFarAxis=>compile("farSpread",{umFarAxis}))).then(spread=>{this.farSpreadPipelines.push(...spread);}),
+       keyed("advect",{umMergedTiles:1,umMergedCoarse:1,umMergedPack:8,umCertifiedJobs:2,umClaimWord:2,umDeferTraced:1,umActiveCoarse:+this.activeCoarse}),
+       // Solid-aware (umSplitTrace): its traces run in advectTrace, the rest of
+       // umAdvected in advectFinish, and a solid's cubic taps in advectCubic.
+@@ -1895,6 +2084,8 @@ override umCubicSolidList:bool=false;
+   encode(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
+     const pipeline=this.pipelines.get("advect");if(!pipeline)throw new Error("Mixed surface stage is not initialized");
+     encoder.clearBuffer(this.claims,0,this.claimBytes);
++    encoder.clearBuffer(this.claims,4*this.farWord,8*this.ownership.capacity.tiles);
++    if(this.regionVelocity)encoder.copyBufferToBuffer(this.regionVelocity,0,this.claims,4*this.farWord+20*this.ownership.capacity.tiles,24*(this.ownership.capacity.tiles/64));
+     const tiles=4*this.ownership.capacity.tiles;
+     if(this.farGate){encoder.copyBufferToBuffer(this.farGate.buffer,4*this.farGate.word,this.claims,this.claimBytes,tiles);encoder.copyBufferToBuffer(this.farGate.buffer,4*this.farGate.heatWord,this.claims,this.claimBytes+tiles,tiles);}
+     encoder.copyBufferToBuffer(this.ownership.speeds,tiles,this.claims,this.evidenceBytes-tiles,tiles);
+@@ -1913,6 +2104,12 @@ override umCubicSolidList:bool=false;
+     }
+     // Buffered direct grids; the claim loops consume the full current lists.
+     const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);
++    // The far certificate's tables (umFarFineCertified, umFarCoarseCertified).
++    {const lanes=this.tileLaneGroups;
++     pass.setPipeline(this.variant(this.pipelines.get("farClean")!));pass.dispatchWorkgroups(lanes[0],lanes[1]);
++     pass.setPipeline(this.variant(this.pipelines.get("farSpeed")!));pass.dispatchWorkgroups(this.regionLaneGroups[0],this.regionLaneGroups[1]);
++     if(this.ownership.capacity.fineTiles>0)this.ownership.dispatchBuffered(pass,this.variant(this.pipelines.get("farFine")!),"fine",grid);
++     for(const spread of this.farSpreadPipelines){pass.setPipeline(this.variant(spread));pass.dispatchWorkgroups(lanes[0],lanes[1]);}}
+     this.ownership.dispatchBuffered(pass,this.variant(this.pipelines.get("advectOwners")!),"fine",grid);
+     this.ownership.dispatchBuffered(pass,this.variant(this.pipelines.get("advectFine")!),"fine",grid);
+     pass.setPipeline(this.variant(this.pipelines.get("advectTrace")!));pass.dispatchWorkgroups(this.traceGrid);
+diff --git atests/uniform-surface-far-certificate.test.ts btests/uniform-surface-far-certificate.test.ts
+new file mode 100644
+index 00000000..a326e15b
+--- /dev/null
++++ btests/uniform-surface-far-certificate.test.ts
+@@ -0,0 +1,80 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import {createRigidCouplingOracleScene} from "../lib/core/scenes";
++import type {UniformMixedFramePlan} from "../lib/methods/uniform/uniform-mixed-frame-plan";
++import type {UniformMixedHangingTaps,UniformMixedMomentumCache} from "../lib/methods/uniform/uniform-mixed-momentum-cache";
++import {uniformDetailField} from "../lib/methods/uniform/uniform-detail-fields";
++import type {UniformMixedSurface} from "../lib/methods/uniform/uniform-mixed-surface";
++import type {UniformMixedFrame} from "../lib/methods/uniform/uniform-mixed-frame";
++import {createUniformSolver,withUniformDevice,advanceUniform} from "./helpers/uniform-geometric";
++import {readMixedTexture} from "./helpers/uniform-mixed-native-fields";
++
++// The far certificate (umFarFineCertified, umFarCoarseCertified): a vertex
++// whose departure box and its neighbours' holds one strict sign at two
++// widths keeps its input bits; every other vertex is the full trace's,
++// bit-exactly. Disabling it (a NaN global speed) is the reference.
++test("far certificate keeps far vertices bit-identical and leaves the band to the full trace",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
++ await withUniformDevice("surface far certificate",async device=>{
++  const scene=createRigidCouplingOracleScene("rigid-hydrostatic");
++  scene.voxelDomain.finestCellSize_m=.0125;
++  scene.rigidBodies=[];scene.solidVoxels=[{operation:"fill",minimum:[2,2,2],maximumExclusive:[4,4,4],materialId:1}];scene.solidBoundary=undefined;
++  scene.numerics.fixedDt_s=scene.numerics.maxDt_s=1/60;scene.fluid.dynamicViscosity_Pa_s=0;
++  const solver=await createUniformSolver(device,scene);
++  const frame=(solver as unknown as {mixedFrame:UniformMixedFrame}).mixedFrame;
++  type Seam={plan:UniformMixedFramePlan;cache:UniformMixedMomentumCache;cacheGroup:Parameters<UniformMixedMomentumCache["encode"]>[1];hanging:UniformMixedHangingTaps;hangingGroup:Parameters<UniformMixedHangingTaps["encode"]>[1];fields:{phi:GPUTexture;phiScratch:GPUTexture};surface:UniformMixedSurface;surfaceGroup:Parameters<UniformMixedSurface["encode"]>[1]};
++  const seam=frame as unknown as Seam;
++  try{
++   // A settling tank: liquid below, air above, and a little motion everywhere.
++   for(let i=1;i<=3;i++)await advanceUniform(solver,i/60);
++   const h=scene.voxelDomain.finestCellSize_m;
++   const [px,py,pz]=uniformDetailField(seam.fields.phi)!.logical;
++   frame.surfaceWorkControl.enabled=false;frame.surfaceWorkControl.invalidate();
++   const input=await readMixedTexture(device,seam.fields.phi);
++   const speedWord=16*frame.ownership.capacity.tiles;
++   // speed: the frame plan's global speed (umSupport[4 tiles]) and every
++   // region's the run sees, in place of the current field's (a NaN global
++   // speed never certifies).
++   const run=async(speed?:number)=>{
++    const e=device.createCommandEncoder();seam.plan.encodeCertificate(e,1/60);seam.cache.encode(e,seam.cacheGroup);if(frame.ownership.capacity.fineTiles>0)seam.hanging.encode(e,seam.hangingGroup);device.queue.submit([e.finish()]);
++    if(speed!==undefined){
++     device.queue.writeBuffer(frame.ownership.support,speedWord,new Float32Array([speed]));
++     // Every region's extrema (order words: a non-negative value's bits with the sign bit set) at that speed too.
++     if(Number.isFinite(speed)){const words=new Uint32Array(frame.ownership.regionVelocity.size/4);words.fill((new Uint32Array(new Float32Array([speed]).buffer)[0]!|0x80000000)>>>0);device.queue.writeBuffer(frame.ownership.regionVelocity,0,words);}
++    }
++    const s=device.createCommandEncoder();seam.surface.encode(s,seam.surfaceGroup);device.queue.submit([s.finish()]);await device.queue.onSubmittedWorkDone();
++    return readMixedTexture(device,seam.fields.phiScratch);
++   };
++   const bits=(a:Float32Array)=>new Uint32Array(a.buffer,a.byteOffset,a.length);
++   const off=await run(Number.NaN),on=await run();
++   const onBits=bits(on),offBits=bits(off),inBits=bits(input);
++   let kept=0,liquid=0,air=0;
++   for(let z=0;z<pz;z++)for(let y=0;y<py;y++)for(let x=0;x<px;x++){
++    const i=x+px*(y+py*z);
++    if(onBits[i]===offBits[i])continue;
++    // A certified vertex: its input bits, its traced sign, two cells out.
++    assert.equal(onBits[i],inBits[i],`vertex ${x},${y},${z} changed by the certificate`);
++    assert.equal(Math.sign(on[i]!),Math.sign(off[i]!),`vertex ${x},${y},${z} certified across the surface`);
++    assert.ok(Math.abs(input[i]!)>=2*h,`vertex ${x},${y},${z} certified within two cells of the surface`);
++    // No corner of a crossing cell after the step.
++    for(let k=0;k<27;k++){
++     const nx=x+k%3-1,ny=y+Math.floor(k/3)%3-1,nz=z+Math.floor(k/9)-1;
++     if(nx<0||ny<0||nz<0||nx>=px||ny>=py||nz>=pz)continue;
++     const j=nx+px*(ny+py*nz);if(!Number.isFinite(off[j]!))continue;
++     assert.equal(Math.sign(off[j]!),Math.sign(off[i]!),`vertex ${x},${y},${z} is a crossing cell's corner after the step`);
++    }
++    kept++;if(input[i]!<0)liquid++;else air++;
++   }
++   let deepLiquid=0,deepAir=0;for(const v of input){if(v<=-8*h)deepLiquid++;else if(v>=8*h)deepAir++;}
++   console.log(JSON.stringify({fixture:"far-certificate",kept,liquid,air,deepLiquid,deepAir,vertices:input.length}));
++   assert.ok(liquid>0&&air>0,`far liquid and air vertices must both be certified (liquid ${liquid}, air ${air})`);
++   // The band is the full trace's, bit for bit.
++   for(let i=0;i<input.length;i++)if(Math.abs(input[i]!)<2*h)assert.equal(onBits[i],offBits[i]);
++   // Past the limit (a bound of 3.2 cells a step) nothing certifies.
++   const fast=bits(await run(3.2*h*60));
++   for(let i=0;i<fast.length;i++)if(fast[i]!==offBits[i]){
++    const x=i%px,y=Math.floor(i/px)%py,z=Math.floor(i/(px*py));
++    assert.fail(`vertex ${x},${y},${z} certified past the speed limit`);
++   }
++  }finally{solver.destroy();}
++ });
++});
