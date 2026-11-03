@@ -8,7 +8,7 @@ import {GPU_RIGID_BODY_CAPACITY} from "../../core/rigid-capacity";
 
 /** The rigid coupling kernel (couple) and its per-body face fraction, over
  * the solid library and the helpers its module defines: umBodyPressure,
- * umBodyOwnerWet, umBodyOwnerVelocity, umBodyAmbient, rigidExchange and
+ * umBodyOwnerWet, rigidExchange and
  * umAllOwner over the h list (its job is an h tile, a lane a cell). Exported
  * for the all-body reference test. */
 export const uniformMixedCoupleWGSL=/* wgsl */`
@@ -75,13 +75,12 @@ fn coupleAdd(word:u32,value:i32){if(value!=0){atomicAdd(&coupleSum[word],value);
   }
   var fraction=select(0.0,1.0,distance<0.0);if(!clear){fraction=umBodyFraction(owner,id);}
   if(fraction==0.0){continue;}
-  let displaced=umBodyOwnerWet(o)*fraction;
-  // A dry cell displaces nothing and weighs no ambient velocity.
-  if(displaced==0.0){continue;}
-  coupleAdd(base+6u,i32(round(displaced*65536.0)));
-  coupleAdd(base+11u,i32(round(displaced*65536.0)));
-  let ambient=umBodyAmbient(owner,id,umBodyOwnerVelocity(o));
-  coupleAdd(base+7u,i32(round(displaced*ambient.x*10000.0)));coupleAdd(base+8u,i32(round(displaced*ambient.y*10000.0)));coupleAdd(base+9u,i32(round(displaced*ambient.z*10000.0)));
+  // The displaced wet volume (word 6). No ambient velocity (words 7-9, its
+  // weight 11): the integrator reads it only for the drag of a body no cell
+  // couples by pressure (webgpu-rigid-body.ts: drag 0 where word 10 is set),
+  // and every body this kernel would weigh it for is one some cell is near,
+  // which sets word 10. Its six probes a displacing cell were dead work.
+  coupleAdd(base+6u,i32(round(umBodyOwnerWet(o)*fraction*65536.0)));
  }
  workgroupBarrier();
  let near=atomicLoad(&coupleNear);
@@ -115,8 +114,9 @@ export interface UniformMixedBodyFields {
  * reaction: its drag depended on extension into the solid and removed
  * momentum without a corresponding fluid impulse.
  *
- * Bodies are h wherever liquid can reach them. The displaced wet volume and
- * ambient probes remain diagnostics in the native fixed-point exchange.
+ * Bodies are h wherever liquid can reach them. The displaced wet volume
+ * remains a diagnostic in the native fixed-point exchange; the ambient
+ * velocity (the drag of a body no pressure couples) is not sampled.
  *
  * markTiles: one lane per tile (with a page pool, a fixed grid striding the
  * resident blocks' tile keys: a free block's tile is never marked), ors every tile a body's shape,
@@ -158,7 +158,7 @@ export class UniformMixedBodies {
   // couple strides the GPU-counted owners of every tier (umAllOwner); markTiles covers the lattice.
   const module=uniformDetailModule(this.device,{label:"Uniform mixed rigid bodies",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var bodyPhi:texture_3d<f32>;
-@group(1) @binding(1) var bodyVelocity:texture_3d<f32>;
+// binding 1 (the velocity) fed the ambient probes, no longer sampled.
 @group(1) @binding(2) var<storage,read_write> rigidExchange:array<atomic<i32>>;
 @group(1) @binding(5) var<storage,read> bodyPressure:array<f32>;
 @group(1) @binding(3) var<storage,read_write> bodyTiles:array<atomic<u32>>;
@@ -182,26 +182,6 @@ fn umBodyOwnerWet(o:UMOwner)->f32{
 // Average opposing MAC faces at the owner centre, where the rigid velocity
 // and torque arm are evaluated. A positive-face sample biases impact forces
 // and spins a vertically falling sphere toward the positive grid diagonal.
-fn umBodyOwnerVelocity(o:UMOwner)->vec3f{
- let origin=vec3i(umOrigin(o));let last=i32(o.width)-1;
- return 0.5*vec3f(
-  textureLoad(bodyVelocity,origin+vec3i(last,0,0),0).x+textureLoad(bodyVelocity,origin-vec3i(1,0,0),0).x,
-  textureLoad(bodyVelocity,origin+vec3i(0,last,0),0).y+textureLoad(bodyVelocity,origin-vec3i(0,1,0),0).y,
-  textureLoad(bodyVelocity,origin+vec3i(0,0,last),0).z+textureLoad(bodyVelocity,origin-vec3i(0,0,1),0).z);
-}
-// ambientFluidVelocity: six wet, open probes beyond the bounding sphere.
-fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
- let h=umSolidParams.cellGravity.xyz;let radius=max(umSolidBodies[i].dimensions.w,0.0);
- let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
- var total=vec3f(0.0);var weight=0.0;
- for(var n=0u;n<6u;n++){
-  let axis=n/2u;var q=p;q[axis]+=select(-reach[axis],reach[axis],(n&1u)!=0u);
-  if(umSolidVoxel(q)||umBodyAt(umSolidWorldCell(q))>=0||umCellInsideTerrain(q)){continue;}
-  let o=umOwnerAt(q);if(o.width==0u){continue;}
-  let wet=umBodyOwnerWet(o);total+=wet*umBodyOwnerVelocity(o);weight+=wet;
- }
- return select(fallback,total/max(weight,1e-6),weight>0.0);
-}
 ${uniformMixedCoupleWGSL}
 fn umBodyMarkTile(tile:u32){
  if(!umTileLive(tile)){return;}

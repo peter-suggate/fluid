@@ -42,9 +42,7 @@ const reference=/* wgsl */`
   let fraction=umBodyFraction(owner,id);if(fraction==0.0){continue;}
   let displaced=umBodyOwnerWet(o)*fraction;
   atomicAdd(&rigidExchange[base+6u],i32(round(displaced*65536.0)));
-  atomicAdd(&rigidExchange[base+11u],i32(round(displaced*65536.0)));
-  let ambient=umBodyAmbient(owner,id,umBodyOwnerVelocity(o));
-  atomicAdd(&rigidExchange[base+7u],i32(round(displaced*ambient.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(displaced*ambient.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(displaced*ambient.z*10000.0)));
+  // No ambient velocity (words 7-9 and 11): dead under pressure coupling.
  }
 }`;
 
@@ -79,8 +77,6 @@ fn unit(p:vec3i,k:u32)->f32{return f32(hash(p,k)&0xffffu)/65535.0;}
 // Air rows and closed cells read zero pressure; a dry owner zero wet.
 fn umBodyPressure(p:vec3i)->f32{if(hash(p,1u)%5u==0u){return 0.0;}return 2000.0*unit(p,2u)-300.0;}
 fn umBodyOwnerWet(o:UMOwner)->f32{let p=vec3i(umOrigin(o));if(hash(p,3u)%4u==0u){return 0.0;}return unit(p,4u);}
-fn umBodyOwnerVelocity(o:UMOwner)->vec3f{let p=vec3i(umOrigin(o));return vec3f(unit(p,5u),unit(p,6u),unit(p,7u))-0.5;}
-fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{if(hash(p,8u+i)%3u==0u){return fallback;}return vec3f(unit(p,9u),unit(p,10u),unit(p,11u))*2.0-1.0;}
 ${functions}\n${coverage}
 ${uniformMixedCertifiedEntriesWGSL(uniformMixedCoupleWGSL,["couple"],"settings.z")}
 ${reference}`;
