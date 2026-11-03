@@ -75,14 +75,10 @@ import type {
 import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
 import { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
 import {
-  UNIFORM_CM11A_FULL_CYCLES,
-  UNIFORM_CM11A_POST_SWEEPS,
-  UNIFORM_CM11A_PRE_SWEEPS,
   UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
-  UNIFORM_CM11A_V_CYCLES,
   WebGPUUniformPressureMultigrid,
-  type UniformCM11aSchedule,
 } from "./webgpu-uniform-pressure-multigrid";
+import { UNIFORM_PRESSURE_ARENA_SCHEDULE } from "./uniform-pressure-arena";
 import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
 import {
   GPUStageTimestampRecorder,
@@ -91,8 +87,6 @@ import { usePerformanceInstrumentationStore } from "../../core/stores/performanc
 import { gpuPhysicsPerformanceActivityFrameId } from "../../core/gpu-performance-activity";
 export { UNIFORM_ADVANCE_PHASE } from "./uniform-stages";
 export { UNIFORM_FLUID_PIPELINE } from "./uniform-pipeline";
-import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
-export { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS } from "./parameters";
 import { uniformFixedAdvanceReady, uniformFixedStep_s } from "./uniform-paper";
 import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
 import { SOLID_MASK_EMPTY, SOLID_MASK_FULL, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
@@ -159,14 +153,10 @@ export interface WebGPUUniformReferenceOptions {
   velocityTransport?: GPUVelocityTransport;
   /** Reject hierarchy-only air samples when updating liquid momentum. */
   liquidOnlyVelocityAdvection?: boolean;
-  /** Ordered six-pass Sec. 3.4 iterations; zero cleanly bypasses the stage. */
-  gammaDiffusionIterations?: number;
-  /** Sec. 3.6 cut-cell excess redistribution. */
-  solidExcessCorrection?: boolean;
   /** Two-way fluid/body exchange and rigid integration. */
   rigidCoupling?: boolean;
-  /** CM11a cycle and smoothing schedule. */
-  pressureSchedule?: UniformCM11aSchedule;
+  /** The all-4h root's acceptance bound (1/s, absolute L-infinity). */
+  pressureResidualTolerance?: number;
   /**
    * "lagged" encodes only as many cycles as the last observed step needed;
    * "fixed" encodes the whole configured schedule, which is what the solver
@@ -632,10 +622,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** The scene's scheduled drops in source form, built once per schedule. */
   private scheduledDrops?: { readonly schedule: readonly ScheduledLiquidDrop[]; readonly drops: readonly UniformLiquidDrop[] };
   private densityPostProcessing: boolean;
-  private gammaDiffusionIterations: number;
-  private solidExcessCorrection: boolean;
   private rigidCoupling: boolean;
-  private readonly pressureSchedule: UniformCM11aSchedule;
   /** Mixed frames submitted whose receipt is unhandled. */
   private mixedFramesInFlight = 0;
   /** The seeded velocity took its half-step kick (UniformMixedFrame.kick), ahead of the first frame. */
@@ -717,17 +704,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.retainStageDiagnosticsForQA=options.retainStageDiagnosticsForQA===true;
 
     this.densityPostProcessing = options.densityPostProcessing === true;
-    this.gammaDiffusionIterations = Math.round(Math.min(UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS,
-      Math.max(0, options.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS)));
-    this.solidExcessCorrection = options.solidExcessCorrection !== false;
     this.rigidCoupling = options.rigidCoupling !== false;
-    this.pressureSchedule = options.pressureSchedule ?? {
-      fullCycles: UNIFORM_CM11A_FULL_CYCLES,
-      vCycles: UNIFORM_CM11A_V_CYCLES,
-      preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
-      postSweeps: UNIFORM_CM11A_POST_SWEEPS,
-      residualTolerance: UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
-    };
     this.pressureCycleBudgetLagged = options.pressureCycleBudget !== "fixed";
     this.fixedStep_s = uniformFixedStep_s(options.timeStep);
     this.velocityTransport = options.velocityTransport === "maccormack"
@@ -997,7 +974,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     ];
     mainEntries.push(...this.fieldPages.layout([]));
     this.mainLayout = device.createBindGroupLayout({ entries: mainEntries });
-    this.pressureMultigrid = new WebGPUUniformPressureMultigrid(this.pressureSchedule,
+    this.pressureMultigrid = new WebGPUUniformPressureMultigrid(options.pressureResidualTolerance ?? UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
       scene.container.depthBoundary !== "symmetry", this.fieldPages);
     this.mainPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.mainLayout] });
     // Packed detail storage: the t=0 authority and publication bind each
@@ -1082,7 +1059,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]),
-      pressureIterations: 0, pressureSolver: `CM11a LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post ${"projected Jacobi; V-first adaptive"})`,
+      pressureIterations: 0, pressureSolver: `Composite multigrid, h band + all-4h root (${this.narrowBandNearSettled.bandCycles} cycles, ${UNIFORM_PRESSURE_ARENA_SCHEDULE.sweeps} sweeps per level${UNIFORM_PRESSURE_ARENA_SCHEDULE.krylov ? ", Krylov-accelerated" : ""})`,
       allocatedBytes: 3*boundaryVelocityBytes + 16 + [this.velocityC, this.transportA, this.transportB].reduce((n,t)=>n+textureBytes(t,16),0)
         + textureBytes(this.pressureA,4) + textureBytes(this.pressureB,4) + textureBytes(this.heightA,8) + textureBytes(this.heightB,8) + textureBytes(this.terrainTexture,4)
         + this.scratchArena.byteLength + this.scratchArena.conditioningBytes + this.pressureMultigrid.allocatedBytes + (8 * address.vertexKeys + 12)
@@ -1594,7 +1571,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // Live edits and rigid bodies share the pipelines built at setup.
       solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.size,paramsWritten:()=>this.paramsWritten,slots:solidSlots},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
-    },this.address.openTop,this.pressureSchedule);
+    },this.address.openTop);
     this.mixedFrame.narrowBandFlip.particleCellCap=this.narrowBandParticleCellCap;this.mixedFrame.narrowBandFlip.sparseNeighbours=this.narrowBandSparseNeighbours;
     // V2c: the census start's BULK16 pages, live in their slots before the first commit.
     if(this.bulkStart?.pages.length){
@@ -2771,11 +2748,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     );
     const refreshPresentation = postProcessing !== this.densityPostProcessing;
     this.densityPostProcessing = postProcessing;
-    this.gammaDiffusionIterations = values.gammaDiffusion === "off" ? 0 : Math.round(finite(
-      "gammaDiffusionIterations", UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, 1,
-      UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS,
-    ));
-    this.solidExcessCorrection = values.solidExcessCorrection !== "off";
     this.rigidCoupling = values.rigidCoupling !== "off";
     this.fixedStep_s = uniformFixedStep_s(values.timeStep);
     if(values.velocityTransport === "maccormack") assertUniformMixedOptions({ velocityTransport: "maccormack", liquidOnlyVelocityAdvection: false });
@@ -2810,9 +2782,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if (values.phiCubicAdvection !== undefined) this.phiCubicAdvection = values.phiCubicAdvection === "on";
       // NB-FLIP's surface advection level owns the cubic switch.
       if (values.surfaceAdvection !== undefined) this.phiCubicAdvection = narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).cubic;
-      this.solidExcessCorrection = false;
       this.densityPostProcessing = false;
-      this.gammaDiffusionIterations = 0;
     }
     if (refreshPresentation && this.pipelines) {
       this.encodeInitialPresentationSurface();
@@ -2977,7 +2947,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       multigridLevels: this.pressureMultigrid.levelCount,
       multigridPasses,
       multigridPassesTotal: 0,
-      pressureSchedule: this.pressureSchedule,
     };
   }
 
@@ -3307,7 +3276,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     info.narrowBandFlipParticles=flip?.count;info.narrowBandFlipReseedClipped=flip?.reseedClipped;info.narrowBandFlipUnsupportedParticles=flip?.diagnostics.unsupported;info.narrowBandFlipMaxSurfaceDistance=flip?.diagnostics.afterMaxOutside;
     info.simulatedTime_s=time_s;info.completedTime_s=time_s;
     info.uniformPressureAcceptedResidual=receipt.residual;info.uniformPressureCyclesExecuted=receipt.cycles;info.uniformPressureCyclesConverged=true;
-    info.uniformPressureCyclesEncoded=receipt.encoded;info.uniformPressureCyclesConfigured=this.pressureSchedule.fullCycles+this.pressureSchedule.vCycles;
+    info.uniformPressureCyclesEncoded=receipt.encoded;info.uniformPressureCyclesConfigured=this.narrowBandNearSettled.bandCycles;
     info.uniformVolumeDustCells=receipt.dustOwners;info.uniformVolumeDustMass_cells=receipt.dustMass_cells;
     info.uniformVolumeOrphanDustCells=receipt.orphanDustOwners;info.uniformVolumeOrphanDustMass_cells=receipt.orphanDustMass_cells;
     info.uniformPressureBandTiles=receipt.bandTiles;info.uniformPressureBandCycles=receipt.bandCycles;info.uniformPressureBandResidual=receipt.bandResidual;

@@ -47,7 +47,7 @@ import { UniformBulkPageTransfer, type UniformBulkResidencyRecords } from "./uni
 import type {UniformMixedPressureTopology} from "./uniform-mixed-pressure-topology.wgsl";
 import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
 import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
-import {DEFAULT_UNIFORM_CM11A_SCHEDULE,UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE,type UniformCM11aSchedule} from "./pressure-policy";
+import {UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE} from "./pressure-policy";
 import type {GPUTimestampPhase} from "../../core/performance-trace";
 import {UNIFORM_ADVANCE_PHASE as A} from "./uniform-stages";
 import {UNIFORM_VOLUME_PHASE as V,NARROW_BAND_SURFACE_PHASE as S} from "./uniform-volume-stages";
@@ -496,7 +496,7 @@ export class UniformMixedFrame {
   * buffers hold until a layout reserves its own, independent of that seed.
   * openTop: the top is open, for the frame's life: both ownerships' page
   * tables hold AIR above the box and pressure is built on it (write). */
- constructor(private readonly device:GPUDevice,layout:UniformMixedLayout,capacity:UniformMixedFrameCapacity,private readonly fields:UniformMixedFrameFields,private readonly openTop:boolean,private readonly schedule:UniformCM11aSchedule=DEFAULT_UNIFORM_CM11A_SCHEDULE){
+ constructor(private readonly device:GPUDevice,layout:UniformMixedLayout,capacity:UniformMixedFrameCapacity,private readonly fields:UniformMixedFrameFields,private readonly openTop:boolean){
   const f=fields;
   this.nearSettled=capacity.nearSettled??uniformNearSettled();
   this.liquidBand=capacity.liquidBand;this.byteBudget=capacity.byteBudget;this.queue=device.queue;this.blit=new UniformComputeBlit(device);this.cold=new UniformColdFrame(capacity.coldFrameSkip!=="off");

@@ -58,19 +58,18 @@ export class UniformComputeBlit {
  /** Enabled only for the sealed frame schedule. Dispatch boundaries still
   * synchronize dependent storage; native commands and timestamped passes fence. */
  private sharing=false;
- private pass?:GPUComputePassEncoder;
- private passEncoder?:GPUCommandEncoder;
- private endPass?:()=>void;
+ /** The open shared pass, its encoder, and its real end (the pass's own is a no-op). */
+ private shared?:{readonly pass:GPUComputePassEncoder;readonly encoder:GPUCommandEncoder;readonly end:()=>void};
  private boundMask=0;
  private pendingMask=0;
  setSharedSchedule(enabled:boolean):void{if(this.sharing!==enabled){this.closePass();this.sharing=enabled;}}
- private closePass():void{this.endPass?.();this.pass=undefined;this.passEncoder=undefined;this.endPass=undefined;this.boundMask=0;this.pendingMask=0;}
+ private closePass():void{this.shared?.end();this.shared=undefined;this.boundMask=0;this.pendingMask=0;}
  private compute(encoder:GPUCommandEncoder,descriptor?:GPUComputePassDescriptor):GPUComputePassEncoder{
   if(!this.sharing||descriptor?.timestampWrites){this.closePass();return this.native!.beginComputePass.call(encoder,descriptor);}
-  if(this.passEncoder!==encoder)this.closePass();
-  if(!this.pass){
+  if(this.shared?.encoder!==encoder)this.closePass();
+  if(!this.shared){
    const pass=this.native!.beginComputePass.call(encoder,{label:"Uniform shared frame schedule"});
-   this.endPass=pass.end.bind(pass);pass.end=()=>{};this.pass=pass;this.passEncoder=encoder;
+   this.shared={pass,encoder,end:pass.end.bind(pass)};pass.end=()=>{};
    const setGroup=pass.setBindGroup.bind(pass),dispatch=pass.dispatchWorkgroups.bind(pass);
    // Reset only resources the next stage does not replace. Clearing every
    // slot at every stage adds hundreds of host/driver commands per frame.
@@ -85,9 +84,10 @@ export class UniformComputeBlit {
     this.boundMask&=~this.pendingMask;this.pendingMask=0;dispatch(x,y,z);
    };
   }
-  passEpochs.set(this.pass,(passEpochs.get(this.pass)??0)+1);
+  const pass=this.shared.pass;
+  passEpochs.set(pass,(passEpochs.get(pass)??0)+1);
   this.pendingMask=this.boundMask;
-  return this.pass;
+  return pass;
  }
  private readonly buffers:number;
  private readonly tables:GPUBuffer;

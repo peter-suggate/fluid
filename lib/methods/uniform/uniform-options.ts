@@ -24,18 +24,9 @@ export function uniformReferenceSolverOptions(
   const whole = (key: string) => Math.round(numberValue(values, params, key));
   return {
     activeRegion: values.activeRegion === "on",
-    gammaDiffusionIterations: values.gammaDiffusion === "off"
-      ? 0 : whole("gammaDiffusionIterations"),
-    solidExcessCorrection: values.solidExcessCorrection !== "off",
     rigidCoupling: values.rigidCoupling !== "off",
     extensionFrontSweeps: whole("extensionFrontSweeps"),
-    pressureSchedule: {
-      residualTolerance: numberValue(values, params, "pressureResidualTolerance"),
-      fullCycles: whole("pressureFullCycles"),
-      vCycles: whole("pressureVCycles"),
-      preSweeps: whole("pressureSweeps"),
-      postSweeps: whole("pressureSweeps"),
-    },
+    pressureResidualTolerance: numberValue(values, params, "pressureResidualTolerance"),
     pressureCycleBudget: values.pressureCycleBudget === "fixed" ? "fixed" : "lagged",
     pressureBudgetHeadroom: whole("pressureBudgetHeadroom"),
     densityPostProcessing: uniformDensityPostProcessingEnabled(

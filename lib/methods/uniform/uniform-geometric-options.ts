@@ -20,7 +20,6 @@ export function uniformGeometricSolverOptions(overrides: MethodParamValues = {},
       phiDrain: values.phiDrain === "on",
       phiPreserveSurface: values.phiPreserveSurface === "on",
       activeRegion:false,
-      gammaDiffusionIterations: 0, densityPostProcessing: false,
-      solidExcessCorrection: false,
+      densityPostProcessing: false,
   };
 }

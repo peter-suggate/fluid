@@ -1,5 +1,4 @@
 import type { UniformTexturePages } from "./uniform-texture-pages";
-import { UNIFORM_PRESSURE_RESIDUAL_TOLERANCE, type UniformCM11aSchedule } from "./pressure-policy";
 import { UNIFORM_PRESSURE_PAGE_LEVELS } from "./pressure-plan";
 export * from "./pressure-policy";
 export * from "./pressure-plan";
@@ -21,7 +20,7 @@ export class WebGPUUniformPressureMultigrid {
   private symmetric = false;
   private isDestroyed = false;
 
-  constructor(schedule: UniformCM11aSchedule,
+  constructor(residualTolerance: number,
     /** List the root's jobs for the caller's cycles. The caller vouches
      * that the scene has no depth symmetry. */
     private readonly listable: boolean, private readonly scratchFields: UniformTexturePages) {
@@ -29,7 +28,7 @@ export class WebGPUUniformPressureMultigrid {
     this.pressureTexture = scratchFields.createTexture({ label: "Uniform CM11a L0 pressure A", size: [1, 1, 1], dimension: "3d",
       format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
         | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
-    this.setResidualTolerance(schedule.residualTolerance ?? UNIFORM_PRESSURE_RESIDUAL_TOLERANCE);
+    this.setResidualTolerance(residualTolerance);
   }
 
   setResidualTolerance(value: number): void { this.activeResidualTolerance = Number.isFinite(value) ? Math.max(0, value) : 0; }

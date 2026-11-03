@@ -189,12 +189,11 @@ export class UniformMixedExtension {
  private readonly markLayout:GPUBindGroupLayout;
  private markGroups?:readonly GPUBindGroup[];
  private markPipelines?:{stamp:GPUComputePipeline;classify:GPUComputePipeline};
- /** The slot arrays hold the final slots of the last swept encode and the
-  * stamp its topology: a regional encode may keep the slots of its clean
-  * regions. Cleared by bind() and invalidateRetained(). */
- private retained=false;
- /** The array holding them: the last swept encode's sweep count's parity. */
- private retainedParity=0;
+ /** Set while the slot arrays hold the final slots of the last swept encode
+  * and the stamp its topology, so a regional encode may keep the slots of its
+  * clean regions: the array holding them, the sweep count's parity. Cleared
+  * by bind() and invalidateRetained(). */
+ private retainedParity?:number;
  /** Per canonical slot the value its last publication from swept slots
   * stored (any publication but a held region's): what a held region
   * publishes for its unknown faces. Allocated with the slots (useSlots). */
@@ -269,7 +268,7 @@ export class UniformMixedExtension {
   const bytes=this.slotBufferBytesAt(this.ownership.capacity.fineTiles);
   if(buffer.size<bytes)throw new Error(`Mixed extension slots need ${bytes} bytes; the lent buffer holds ${buffer.size}`);
   if(this.slots===buffer&&this.slotArray===bytes/2)return;
-  this.slots=buffer;this.slotArray=bytes/2;this.retained=false;this.heldReady=false;
+  this.slots=buffer;this.slotArray=bytes/2;this.retainedParity=undefined;this.heldReady=false;
   const heldBytes=this.heldBytesAt(this.ownership.capacity.fineTiles);
   if(this.held?.size!==heldBytes){this.held?.destroy();this.held=this.device.createBuffer({label:"Uniform mixed extension held values",size:heldBytes,usage:GPUBufferUsage.STORAGE});}
   const array=this.slotArray;
@@ -281,11 +280,11 @@ export class UniformMixedExtension {
  }
  /** The next swept encode rebuilds every region (pages were claimed or
   * recycled since the last: a key's slots are never inherited). */
- invalidateRetained():void{this.retained=false;}
+ invalidateRetained():void{this.retainedParity=undefined;}
  bind(f:Fields):readonly [UniformDetailGroup,UniformDetailGroup]{
   for(const [i,t] of [f.physical,f.phase,f.output].entries())if(t.format!==(i===1?"r32float":"rgba32float")||uniformDetailClass(t)!==(i===1?"cell":"face"))throw new Error("Mixed extension requires native canonical fields");
   if(f.physical===f.output||f.negative===f.outputNegative)throw new Error("Mixed extension outputs must be disjoint");
-  const slots=this.slots,size=this.slotArray;this.retained=false;this.heldReady=false;
+  const slots=this.slots,size=this.slotArray;this.retainedParity=undefined;this.heldReady=false;
   if(!slots||size!==this.slotBufferBytesAt(this.ownership.capacity.fineTiles)/2)throw new Error("Mixed extension slots are not lent at this capacity (useSlots)");
   const companionSize=this.companionBytesAt(this.ownership.capacity.fineTiles)/2;
   if(f.companion&&!this.supportsPair)throw new Error("Paired extension is unsupported by this device or mode");
@@ -1618,9 +1617,9 @@ ${["publishList"].map(name=>patchOnce(uniformMixedFaceDispatchWGSL(name,"umPubli
    // Final slots: groups[sweeps%2]'s stateIn, array sweeps%2.
    // The tail's pair encode holds its quiet regions once every region's
    // validity word is current (heldReady): their slots are not retained.
-   const parity=sweeps%2,marks=encoder.beginComputePass(MARK_PASS);regional=regional&&this.retained&&this.retainedParity===parity;
+   const parity=sweeps%2,marks=encoder.beginComputePass(MARK_PASS);regional=regional&&this.retainedParity===parity;
    const held=mode==="pair"&&this.heldReady;this.encodeMarks(marks,held?"held":regional?"regional":"full",parity);marks.end();
-   this.retained=true;this.retainedParity=parity;this.heldReady=true;this.heldTail=held;
+   this.retainedParity=parity;this.heldReady=true;this.heldTail=held;
   }
   const pass=encoder.beginComputePass(EXTENSION_PASS);pass.setBindGroup(0,this.ownership.bindGroup);
   if(swept){this.encodeStage(pass,"seed",groups[1],mode,replayPublication);for(let i=0;i<sweeps;i++)this.encodeStage(pass,"sweep",groups[i%2]!,mode,replayPublication);}

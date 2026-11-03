@@ -18,19 +18,6 @@ export const ALGORITHM_PARAMS: MethodParamSpec[] = [
   {
     ...runtimeUpdate,
     kind: "select",
-    key: "gammaDiffusion",
-    label: "Gamma diffusion",
-    default: "on",
-    tier: "fine",
-    options: [
-      { value: "on", label: "On · axis-Jacobi diffusion" },
-      { value: "off", label: "Off · retain transported gamma" },
-    ],
-    hint: "Ablates Sec. 3.4's snapshot axis diffusion. The conservative density transport still publishes a complete rho/gamma state for downstream stages.",
-  },
-  {
-    ...runtimeUpdate,
-    kind: "select",
     key: "densitySharpening",
     label: "Interface sharpening",
     default: "on",
@@ -53,19 +40,6 @@ export const ALGORITHM_PARAMS: MethodParamSpec[] = [
       { value: "off", label: "Off · raw density correction" },
     ],
     hint: "Controls Algorithm 2 separately from the density correction. Off keeps the sharpened field but omits the scatter/resolve that returns removed mass locally.",
-  },
-  {
-    ...runtimeUpdate,
-    kind: "select",
-    key: "solidExcessCorrection",
-    label: "Partial-solid excess",
-    default: "on",
-    tier: "fine",
-    options: [
-      { value: "on", label: "On · Sec. 3.6" },
-      { value: "off", label: "Off · retain cut-cell excess" },
-    ],
-    hint: "Ablates the conservative redistribution of density that exceeds a cut cell's open fraction.",
   },
   {
     ...runtimeUpdate,

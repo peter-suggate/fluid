@@ -1,4 +1,7 @@
-/** Backend-neutral CM11a schedule and tolerances. */
+/** Backend-neutral CM11a schedule constants and pressure tolerances. The
+ * schedule constants feed the native geometric port's generated contract
+ * (tools/wasm/generate-uniform-geometric-contract.ts); the WebGPU mixed frame
+ * solves its root inside the composite band arena instead (3e1db823). */
 export const UNIFORM_CM11A_FULL_CYCLES = 3;
 export const UNIFORM_CM11A_V_CYCLES = 4;
 // Retain the validated six pre/post sweeps. Full-depth bounds and the
@@ -37,19 +40,3 @@ export const UNIFORM_PRESSURE_RELATIVE_REDUCTION = 0.1;
 // kick must establish hydrostatic pressure before transport sees that error;
 // later frames retain their normal absolute/relative stopping policy.
 export const UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE = UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE;
-
-export interface UniformCM11aSchedule {
-  readonly fullCycles: number;
-  readonly vCycles: number;
-  readonly preSweeps: number;
-  readonly postSweeps: number;
-  readonly residualTolerance?: number;
-}
-
-export const DEFAULT_UNIFORM_CM11A_SCHEDULE: UniformCM11aSchedule = Object.freeze({
-  fullCycles: UNIFORM_CM11A_FULL_CYCLES,
-  vCycles: UNIFORM_CM11A_V_CYCLES,
-  preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
-  postSweeps: UNIFORM_CM11A_POST_SWEEPS,
-  residualTolerance: UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
-});

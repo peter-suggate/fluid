@@ -4,9 +4,6 @@ import { UNIFORM_PRESSURE_RESIDUAL_TOLERANCE } from "./pressure-policy";
 
 const runtimeUpdate = { update: "runtime" as const };
 
-export const UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS = 1;
-export const UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS = 7;
-
 export const UNIFORM_PARAMS: MethodParamSpec[] = [
   ...ALGORITHM_PARAMS,
   {
@@ -32,20 +29,6 @@ export const UNIFORM_PARAMS: MethodParamSpec[] = [
     label: "Extension front sweeps", default: 16, tier: "fine",
     min: 1, max: 16, step: 1, digits: 0, unit: "sweeps",
     hint: "Sec. 3.3 FIM sweep budget for the two-cell accurate band. Each sweep is an update and a dispatch-gate pass whether or not work remains; sixteen covers the band's full dependency diameter. Fewer sweeps resolve an unconverged front and leave unreached band faces to the hierarchy fill.",
-  },
-  {
-    ...runtimeUpdate,
-    kind: "number",
-    key: "gammaDiffusionIterations",
-    label: "Gamma iterations",
-    default: UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS,
-    tier: "fine",
-    unit: "iterations",
-    min: 1,
-    max: UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS,
-    step: 1,
-    digits: 0,
-    hint: "Each paper iteration is three snapshot axis passes. One is the reference default; additional repetitions deliberately apply more diffusion.",
   },
   {
     ...runtimeUpdate,

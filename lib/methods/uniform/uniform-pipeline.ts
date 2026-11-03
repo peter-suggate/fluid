@@ -1,7 +1,6 @@
 import type { FluidPipelineContext, FluidPipelineGraph, FluidPipelineStage } from "../../core/fluid-pipeline";
 import { UNIFORM_ADVANCE_PHASE } from "./uniform-stages";
 import { uniformDensityPostProcessingEnabled } from "./uniform-options";
-import { UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS } from "./parameters";
 import { UNIFORM_CM11A_FULL_CYCLES, UNIFORM_CM11A_V_CYCLES, UNIFORM_CM11A_PRE_SWEEPS, UNIFORM_CM11A_POST_SWEEPS } from "./pressure-policy";
 
 /**
@@ -96,35 +95,6 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     chip: () => "3 passes · mass-conserving",
   },
   {
-    id: "gamma-diffusion",
-    band: "surface",
-    side: "right",
-    label: "Gamma diffusion",
-    phaseLabels: [UNIFORM_ADVANCE_PHASE.gammaDiffusion.label],
-    tip: {
-      summary: "Sec. 3.4: each axis gathers neighbouring half-fluxes from one Jacobi snapshot while transferring the matching donor density; completed axes feed the next axis.",
-      reads: "surface density, gamma",
-      writes: "surface density, gamma",
-      feeds: "interface sharpening",
-    },
-    toggle: {
-      param: "gammaDiffusion", on: "on", off: "off",
-      hint: "Toggle Sec. 3.4 axis-Jacobi gamma diffusion. Density transport remains complete when it is off.",
-    },
-    controls: [{
-      kind: "param-range",
-      param: "gammaDiffusionIterations",
-      label: "Iterations",
-      min: 1, max: 7, step: 1,
-      hint: "One iteration is three snapshot axis passes; the paper permits one through seven.",
-      enabled: (context) => context.values.gammaDiffusion !== "off",
-    }],
-    state: (context) => context.values.gammaDiffusion === "off" ? "off" : "on",
-    chip: (context) => context.values.gammaDiffusion === "off"
-      ? "off · identity handoff"
-      : `${3 * Number(context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS)} passes · ${context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS} iterations`,
-  },
-  {
     id: "interface-sharpening",
     band: "surface",
     side: "left",
@@ -189,29 +159,6 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       : context.values.sharpeningMassCorrection === "off"
         ? "off · non-conservative ablation"
         : `2 passes · D ${Number(context.values.sharpeningDistance ?? 2.1).toFixed(1)} cells`,
-  },
-  {
-    id: "solid-excess",
-    band: "surface",
-    side: "right",
-    label: "Partial-solid excess",
-    phaseLabels: [UNIFORM_ADVANCE_PHASE.solidExcess.label],
-    tip: {
-      summary: "Sec. 3.6: current density is reconciled before transport can mask newly covered donors, then checked again after sharpening. Excess beyond a cut cell's open fraction is scattered to open neighbours and resolved conservatively; genuinely enclosed excess is published as telemetry.",
-      reads: "surface density, solid fractions",
-      writes: "surface density",
-      gate: "the scene has rigid bodies or terrain",
-    },
-    toggle: {
-      param: "solidExcessCorrection", on: "on", off: "off",
-      hint: "Toggle Sec. 3.6 cut-cell excess redistribution in scenes that contain solids.",
-    },
-    state: (context) => context.bodyCount > 0 || context.hasTerrain
-      ? context.values.solidExcessCorrection === "off" ? "off" : "on"
-      : "unavailable",
-    chip: (context) => context.bodyCount > 0 || context.hasTerrain
-      ? context.values.solidExcessCorrection === "off" ? "off · excess retained" : "4 passes · entry + post-sharpening"
-      : "no solids in scene",
   },
   {
     id: "velocity-advection",
@@ -366,11 +313,10 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     state: () => "on",
     chip: (context) => {
       const facts = uniformFacts(context);
-      const configured = facts?.pressureSchedule;
-      const fullCycles = configured?.fullCycles ?? Number(context.values.pressureFullCycles ?? UNIFORM_CM11A_FULL_CYCLES);
-      const vCycles = configured?.vCycles ?? Number(context.values.pressureVCycles ?? UNIFORM_CM11A_V_CYCLES);
-      const preSweeps = configured?.preSweeps ?? Number(context.values.pressureSweeps ?? UNIFORM_CM11A_PRE_SWEEPS);
-      const postSweeps = configured?.postSweeps ?? Number(context.values.pressureSweeps ?? UNIFORM_CM11A_POST_SWEEPS);
+      const fullCycles = Number(context.values.pressureFullCycles ?? UNIFORM_CM11A_FULL_CYCLES);
+      const vCycles = Number(context.values.pressureVCycles ?? UNIFORM_CM11A_V_CYCLES);
+      const preSweeps = Number(context.values.pressureSweeps ?? UNIFORM_CM11A_PRE_SWEEPS);
+      const postSweeps = Number(context.values.pressureSweeps ?? UNIFORM_CM11A_POST_SWEEPS);
       const schedule = `${fullCycles} full + ${vCycles} V · ${preSweeps}+${postSweeps} sweeps`;
       const cyclePasses = facts
         ? facts.multigridPasses["full-cycle"] + facts.multigridPasses["v-cycle"] : undefined;

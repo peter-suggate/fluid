@@ -21,7 +21,7 @@ export const uniformGeometricSurfaceVolumeRounds = (value: unknown): number => {
   const n = Number(value);
   return Number.isFinite(n) ? Math.round(Math.min(UNIFORM_GEOMETRIC_SURFACE_VOLUME_MAX_ROUNDS, Math.max(0, n))) : UNIFORM_GEOMETRIC_SURFACE_VOLUME_ROUNDS;
 };
-const omitted = new Set(["gammaDiffusion", "gammaDiffusionIterations", "sharpeningMassCorrection", "solidExcessCorrection", "densityPostProcessing", "activeRegion", "pressureCycleBudget", "pressureBudgetHeadroom"]);
+const omitted = new Set(["sharpeningMassCorrection", "densityPostProcessing", "activeRegion", "pressureCycleBudget", "pressureBudgetHeadroom"]);
 // Retired controls: hardwired in the adapter. Unlike `omitted`, a saved value is
 // ignored like any other undeclared key, so old configurations still load.
 const retired = new Set(["sharpeningStrength", "velocityTransport", "liquidOnlyVelocityAdvection"]);
