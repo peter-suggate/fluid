@@ -131,3 +131,55 @@ Not done, with measurements (stub A/B, paddleboats):
 - the level-2 composite with the 7-point native 4h rows, which then need a consistent 27-point form.
 
 It is a hierarchy redesign, not started here. The expected gain, from the coarseScale response, is about 0.2–0.4 cycles (0.4–0.8 ms). Reaching 2 cycles needs about 0.03 per cycle, so it may also need a better initial guess.
+
+## P10: Galerkin and box-residual prototypes, 2026-11-03 (nothing landed)
+
+**Goal.** Cut V-cycles from 3 to 2 on paddleboats and from 4 on letters, with the final residual equal or better.
+
+**CPU prototype.** CSR multigrid with the same hierarchy and transfers: sum R, trilinear renormalised P, flexible GCR(1), exact coarsest solve. Pool and hull scenes. Per-cycle contraction, geo-mean:
+
+| Coarse operator | Per-cycle contraction | Decades per cycle | Verdict |
+|---|---|---|---|
+| Lumped 7-point (current) | ~15× | 1.18 | — |
+| Galerkin R·A·P, 27-point | 22–26× | 1.38 | — |
+| Full P^T·A·P, ~125-point | 42–45× | 1.64 | — |
+| Energy-minimising step length | no gain | — | rejected |
+| W-cycle, lumped | ~27× | — | 2× the coarse work, rejected |
+| RAP on level 1, lumped below ("face7") | 6.5× | — | worse, rejected |
+
+**Emulating the GPU's overlapping 12^3 box smoothing at levels 1 and 2.**
+
+| Variant | Contraction |
+|---|---|
+| Lumped with boxes | 10× (matches the GPU's ~10× per cycle) |
+| Boxes off at both levels | 16× |
+| Boxes off at level 2 only | 11.3× |
+| Level-1 residual taken from neighbours' kept cores instead of the box view ("l1global") | 13–14× |
+| RAP with boxes and l1global | ~15× |
+
+What this shows:
+- The box at level 1 is what holds the GPU's contraction down. The defect is that its residual reads the box's own view of the neighbour cells, which no up leg ever sees.
+- With boxes in place, RAP is not worth a hierarchy redesign (15× against 13–14×).
+- A more exact tail changes nothing.
+
+**GPU probes on a clean export.** `probe-pressure-classes`, frames 31–90:
+
+| Variant | Paddleboats cycles | Geo final | Worst | Letters cycles | Geo final | Worst |
+|---|---|---|---|---|---|---|
+| Base | 3.217 | 0.0248 | 0.187 | 3.817 | 0.0368 | 0.101 |
+| tailCycles 5 | 3.35 | 0.037 | 1.00 | | | |
+| tailCycles 9 | 3.233 | 0.034 | 1.58 | | | |
+| tailScale 1 | 3.15 | 0.0278 | 0.226 | | | |
+| tailScale 1, tailCycles 9 | 3.167 | 0.0276 | 0.131 | | | |
+| Scale 0.4 at level 1 | 2.983 | 0.0242 | 0.405 | | | |
+| Scale 0.4 at level 2 | 3.15 | 0.0202 | 0.190 | | | |
+| Scale 0.4 at level 3 | 3.133 | 0.0255 | 0.315 | | | |
+| x1: level-1 residual from neighbour cores (pDownR) | 3.067 | 0.0202 | 0.070 | 3.783 | 0.0388 | 1.60 |
+
+- **x1 (pDownR)** costs one extra dispatch, about 0.04 ms per cycle.
+  - On paddleboats it saves 0.15 cycles, roughly 0.15 ms net. That is under the 0.3 ms bar.
+  - It fails the equal-or-better rule on letters (worst 0.10 → 1.6).
+  - Reverted.
+- **The scale changes** are fitted constants, so they are not landable.
+- **Reaching 2 cycles** needs about 1.25 decades per cycle where the GPU now gets about 0.95. Only the full P^T·A·P coarse operator reached that on the CPU, and that would be a hierarchy redesign. The CPU also suggests it is mostly lost again under box smoothing unless the level-1 smoother becomes global.
+- **Prototypes:** `scratchpad/pl-proto/{mg.ts,gpu.ts}`. They are not checked in.
