@@ -125,13 +125,17 @@ const UM_D=vec3u(2048u);const UM_T=UM_D/4u;const UM_TILES:u32=${512 * BLOCKS}u;
 fn umPageWord(page:vec3i)->u32{let e=vec3u(page)&vec3u(63u);return tailWords[e.x|(e.y<<6u)|(e.z<<12u)];}
 fn umBlockWord(b:u32)->u32{return tailWords[${TABLE}u+b];}
 fn umBlockNeighbourWord(b:u32,i:u32)->u32{return tailWords[${TABLE + BLOCKS}u+27u*b+i];}
+// The probe's pool has no box solid and no bulk slots (umBulkWord's switches).
+fn umSolidIsBox()->bool{return false;}
+fn umBulkSlotsOn()->bool{return false;}
 ${uniformLatticeAddressWGSL({ cells: "UM_D", tiles: "UM_T", constant: true, paged: { blocks: `${BLOCKS}u` } })}
 struct UMFace{anchor:vec3i,width:u32,axis:u32}
 fn umFaceCenter(face:UMFace)->vec3f{var center=vec3f(face.anchor)+vec3f(0.5*f32(face.width));center[face.axis]=f32(face.anchor[face.axis]+1);return center;}
 fn umCorner(k:u32,side:u32)->vec3u{return vec3u(k%side,(k/side)%side,k/(side*side));}
 const UM_INF=1e20;const h=vec4f(1.0,1.0,1.0,0.0);
 ${uniformExtensionSourceBoundsWGSL}
-${uniformExtensionFarValueWGSL("umFarValue")}
+// The probe binds no phase: every stored tile is a liquid owner's (ueFarOpen).
+${uniformExtensionFarValueWGSL("umFarValue").replace(/fn ueFarOpen\(tile:vec3i\)->bool\{[^]*?\n\}/,"fn ueFarOpen(tile:vec3i)->bool{return true;}")}
 @compute @workgroup_size(64) fn lookup(@builtin(global_invocation_id) gid:vec3u){
  if(gid.x>=arrayLength(&faces)){return;}
  let f=faces[gid.x];far[gid.x]=umFarValue(UMFace(f.xyz,u32(f.w)>>2u,u32(f.w)&3u));
