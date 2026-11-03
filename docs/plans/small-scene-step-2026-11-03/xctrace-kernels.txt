@@ -1,0 +1,589 @@
+# paddleboats, xctrace counters, split dispatches (serialised: read occ/limiters, not wall). 44 advances, clean baseline 68.66 ms/advance.
+# ms/adv, dispatches/adv, us/dispatch, Compute Occupancy %, ALU %, LLC %, read GB/s, write GB/s, MMU, TLB-miss, n samples, label
+ 4.515   1.2   3611.9 occ  10.5 alu  14.3 llc  25.1 rd  12.9 wr   6.8 n=200  Narrow-band FLIP advectParticles / advectParticlesDeferred umCountedJobs=0
+ 2.100   1.0   2200.0 occ  15.3 alu  15.8 llc  10.0 rd   0.7 wr   0.1 n=118  Uniform mixed rigid coupling / couple umCountedJobs=3 & Uniform compute copy
+ 1.691   1.0   1730.2 occ  10.1 alu  13.9 llc  27.8 rd  13.8 wr   5.5 n=82  Uniform mixed surface advect deferred / advectDeferred umMergedTiles=1 umSolidTwinned=1
+ 1.519   1.0   1591.2 occ  10.9 alu  16.8 llc  20.8 rd   9.1 wr  10.7 n=108  Uniform pressure arena marks and rows / pRows
+ 1.441   1.0   1474.4 occ  10.9 alu  20.6 llc  16.5 rd   4.2 wr   0.8 n=89  Narrow-band FLIP surface reconstruction / coupleFine umSolidTwinned=1 umCountedJobs=0
+ 1.334   1.0   1334.4 occ   8.4 alu  17.9 llc   7.3 rd   0.3 wr   0.4 n=68  Uniform mixed all-4h solid record / buildRegions
+ 1.295   1.0   1324.7 occ  17.1 alu  32.6 llc   8.3 rd   5.8 wr   0.1 n=92  Narrow-band FLIP surface canonical metric and publication / arenaDistance umCountedJobs=0
+ 1.254   1.0   1313.3 occ  11.3 alu  15.5 llc  18.5 rd   2.8 wr   0.1 n=94  Uniform dynamic ownership census / classify
+ 1.252   1.0   1280.7 occ  12.0 alu  25.9 llc  18.0 rd   3.4 wr   4.0 n=63  Uniform mixed surface advect / advectFine umFastSurface=1
+ 1.230  23.9     51.5 occ  23.1 alu  19.8 llc  41.9 rd  60.0 wr   6.3 n=106  Uniform pressure arena solve / pRelax
+ 1.209   1.0   1237.4 occ  22.9 alu  42.1 llc  39.7 rd  39.5 wr   0.9 n=61  Narrow-band FLIP advectParticles / separationPrepass umCountedJobs=0
+ 1.165   1.0   1220.0 occ  15.6 alu  17.9 llc  12.9 rd   3.2 wr   0.5 n=68  Uniform pressure arena projection / pProjectNative
+ 1.117   1.0   1143.0 occ  11.5 alu  13.4 llc   5.6 rd   2.6 wr   0.4 n=72  Narrow-band FLIP surface canonical metric and publication / arenaPublishCanonical umCountedJobs=0
+ 1.055   1.9    552.8 occ  11.8 alu  21.6 llc  13.6 rd   4.6 wr   2.9 n=83  Uniform mixed extension / pair_sweepSeams sweep=2
+ 0.980   2.0    501.5 occ  11.8 alu  21.6 llc  21.2 rd  18.7 wr   2.1 n=79  Uniform mixed geometric fill / geometryRegional
+ 0.865   1.0    906.7 occ  14.3 alu  28.9 llc  13.4 rd   7.6 wr   1.8 n=61  Uniform local speed certificate / localSpeed umCountedJobs=3
+ 0.765   1.0    764.9 occ  11.6 alu  24.7 llc  23.3 rd   5.9 wr   1.9 n=48  Uniform mixed surface advect / advectFinish
+ 0.753   1.0    789.3 occ  11.1 alu  16.9 llc  26.1 rd  13.0 wr  18.9 n=64  Uniform mixed pressure project / project umCountedJobs=10
+ 0.690   4.8    144.5 occ  21.4 alu  30.1 llc  31.8 rd  30.0 wr   5.8 n=59  Uniform pressure arena solve / pRebase
+ 0.688   1.0    720.8 occ  12.4 alu  27.9 llc   9.1 rd   3.6 wr   3.3 n=47  Uniform mixed momentum / momentumStep umMergedTiles=1 & Uniform compute copy
+ 0.664   2.9    226.5 occ  24.2 alu  37.0 llc  11.6 rd   5.0 wr   2.1 n=48  Uniform mixed phi resolve / resolve umCountedJobs=5 & Uniform compute copy
+ 0.651   1.0    682.2 occ  17.4 alu  17.5 llc  35.4 rd  35.0 wr  17.0 n=38  Narrow-band FLIP particle sort / slabSort umCountedJobs=0
+ 0.643   1.0    673.6 occ  12.1 alu  27.0 llc  29.6 rd   7.1 wr   0.1 n=43  Uniform dynamic ownership census / classifyCoarse
+ 0.633   1.0    662.7 occ  13.7 alu  21.2 llc  14.9 rd   6.2 wr   1.3 n=56  Narrow-band FLIP transfer / transferSeams umCountedJobs=0
+ 0.605   1.9    317.1 occ  10.3 alu  15.8 llc  17.7 rd   4.9 wr   8.9 n=43  NB-FLIP surface pressure authority / surfaceHeld & Uniform compute copy
+ 0.563   1.0    590.0 occ  10.6 alu  19.9 llc  21.0 rd  12.9 wr   4.7 n=54  Uniform pressure arena projection / pProject
+ 0.560   5.7     97.7 occ  11.3 alu  20.2 llc  11.1 rd   5.9 wr   4.6 n=54  Uniform mixed extension / mixedProlongUnknownVelocity
+ 0.540   1.0    565.4 occ  15.2 alu  36.7 llc  27.7 rd  10.4 wr  11.5 n=41  Narrow-band FLIP transfer / transferDeposit umCountedJobs=0
+ 0.528   1.0    540.6 occ  10.2 alu  14.0 llc  10.9 rd   2.0 wr   3.0 n=24  Uniform mixed remap / remapFaces umSolidTwinned=1 & Uniform compute copy
+ 0.528  15.3     34.6 occ  17.6 alu   5.8 llc   8.8 rd  16.4 wr   1.2 n=44  Uniform pressure arena solve / pNativeRelax
+ 0.525   1.0    549.8 occ  10.3 alu  14.5 llc  10.6 rd   1.5 wr   2.6 n=36  Uniform mixed remap / remapFaces umSolidTwinned=1
+ 0.509   3.8    133.3 occ  22.6 alu  14.6 llc   7.9 rd   5.1 wr   1.3 n=47  Uniform pressure arena solve / pDownA
+ 0.495   1.0    506.9 occ  10.3 alu  16.9 llc  12.4 rd   1.1 wr   1.0 n=33  NB-FLIP surface pressure authority / surfaceRegions
+ 0.487   1.0    510.4 occ  11.9 alu  20.2 llc  26.1 rd   1.8 wr   3.4 n=41  Uniform mixed body forces / forces umMergedTiles=1 umCountedJobs=6
+ 0.480   1.0    503.2 occ  13.4 alu  24.6 llc  14.9 rd   9.5 wr   0.2 n=48  Narrow-band FLIP seed / seed umCountedJobs=0 & Uniform compute copy
+ 0.430   1.0    440.2 occ  16.1 alu  42.5 llc   7.2 rd   5.4 wr   0.1 n=27  Narrow-band FLIP surface arena search / arenaNearest umCountedJobs=0 & Uniform compute copy
+ 0.417   1.0    437.3 occ  14.1 alu  19.7 llc  27.2 rd  12.3 wr   3.2 n=31  Narrow-band FLIP transfer / transferProperties umCountedJobs=0
+ 0.415   1.0    424.9 occ  15.0 alu  28.3 llc   5.7 rd   5.9 wr   2.2 n=30  Uniform mixed momentum / momentumTrace
+ 0.413   1.9    213.8 occ  11.7 alu  18.1 llc  18.7 rd   7.8 wr   2.6 n=38  Uniform mixed extension / pair_sweepSeams sweep=1
+ 0.405   1.0    424.3 occ   0.6 alu   2.9 llc   0.3 rd   0.1 wr   0.1 n=33  Uniform mixed all-4h solid record / bodyMask
+ 0.402   1.0    421.2 occ   7.7 alu  19.4 llc  10.3 rd   7.1 wr   2.9 n=36  NB-FLIP surface pressure authority / wetRegions
+ 0.373  11.5     32.6 occ   1.9 alu   1.3 llc   0.7 rd   0.8 wr   0.1 n=31  Uniform pressure arena solve / pTail
+ 0.369   1.0    386.1 occ  22.9 alu  37.0 llc  19.9 rd   8.2 wr   5.3 n=34  Uniform mixed extension / publishSeams & Uniform compute copy & Uniform compute copy
+ 0.360   1.9    188.7 occ   8.4 alu  14.9 llc   7.2 rd   2.8 wr   0.3 n=27  Uniform mixed extension / sweepSeams sweep=2
+ 0.359   3.8     93.4 occ  19.0 alu  13.6 llc   9.3 rd   5.1 wr   1.0 n=21  Uniform pressure arena solve / pDownB
+ 0.358   1.0    375.0 occ  13.2 alu  28.4 llc  22.2 rd  31.4 wr   2.5 n=36  Uniform mixed 4h sampling cache / cache
+ 0.353   1.0    370.1 occ   3.1 alu   3.3 llc   0.4 rd   0.1 wr   0.1 n=21  Uniform mixed remap / planeSums
+ 0.352   1.0    368.4 occ  23.6 alu  39.1 llc  22.1 rd   9.9 wr   6.6 n=18  Uniform mixed extension / publishSeams
+ 0.335   2.9    117.1 occ  24.8 alu  19.2 llc   8.4 rd  10.9 wr   0.5 n=31  Uniform pressure arena solve / kApplyNB
+ 0.333   2.9    114.5 occ  12.8 alu  28.0 llc  20.9 rd   5.2 wr   4.2 n=16  Blit Command 6
+ 0.333   1.0    340.8 occ  17.7 alu  18.6 llc  16.5 rd  36.3 wr   0.1 n=26  Narrow-band FLIP regional air update / airPlanPropagate umCountedJobs=0
+ 0.332   1.0    339.8 occ  22.9 alu  36.0 llc   7.0 rd   5.2 wr   0.2 n=21  Uniform mixed momentum tiers / momentumAffineFit
+ 0.325   1.9    170.5 occ  13.4 alu  31.2 llc  11.9 rd   3.1 wr   1.5 n=14  Uniform mixed geometric fill / geometryChanged
+ 0.325   1.9    170.4 occ  15.6 alu  25.7 llc  15.1 rd   6.8 wr   1.6 n=30  Uniform mixed extension / pair_sweep umRegularFine=1 umCountedJobs=1
+ 0.325   1.0    340.6 occ  11.7 alu   6.7 llc   6.0 rd   4.9 wr   3.6 n=25  Uniform pressure arena solve / pNative
+ 0.320   2.9    111.8 occ  29.1 alu  30.8 llc  26.7 rd  27.4 wr   2.5 n=29  Uniform pressure arena solve / kApplyT
+ 0.316   1.0    323.4 occ  24.1 alu  34.6 llc  12.6 rd   4.4 wr   1.9 n=27  Uniform mixed phi resolve / resolve umCountedJobs=5
+ 0.315   1.0    330.3 occ   5.4 alu   9.4 llc  10.5 rd   4.7 wr   0.3 n=18  Uniform dynamic ownership census / decide
+ 0.315  11.5     27.5 occ  13.3 alu  11.1 llc   2.3 rd   2.2 wr   0.1 n=29  Uniform pressure arena solve / pUp3
+ 0.305   1.0    319.5 occ  24.7 alu  34.2 llc   8.2 rd   5.3 wr   6.8 n=18  Uniform mixed hanging fine taps / unitVelocityTaps
+ 0.299   1.9    156.8 occ  15.6 alu  31.1 llc  12.8 rd   9.2 wr   0.3 n=13  Uniform shared frame plan / seed umCountedJobs=10
+ 0.299   5.7     52.2 occ  10.5 alu   0.6 llc   0.8 rd   0.3 wr   0.7 n=19  Uniform mixed extension / mixedSweepBlocks
+ 0.297   1.0    304.0 occ  11.3 alu   7.3 llc   1.8 rd   1.3 wr   0.1 n=19  Narrow-band FLIP surface canonical metric and publication / arenaPublishFinish umCountedJobs=0
+ 0.289   1.0    296.1 occ  32.3 alu  56.3 llc   6.0 rd   5.6 wr   0.1 n=18  Narrow-band FLIP surface reconstruction / surfaceSplatOccupied umCountedJobs=0
+ 0.289   1.0    302.9 occ   8.6 alu  18.9 llc  13.6 rd   5.2 wr   7.7 n=23  Uniform mixed body forces / forcesRegularCoarse umCountedJobs=4
+ 0.285   1.0    291.9 occ  22.8 alu  23.2 llc   7.8 rd   3.8 wr   3.9 n=25  Uniform mixed momentum / momentumFine
+ 0.284   1.0    290.8 occ  15.7 alu  38.9 llc  43.0 rd  28.1 wr   7.4 n=22  Uniform mixed surface advect / advectTrace umFastSurface=1
+ 0.282   3.8     73.9 occ  30.0 alu  27.6 llc  12.9 rd  13.4 wr   0.8 n=23  Uniform pressure arena solve / pUpA
+ 0.279   1.9    146.2 occ  14.5 alu  22.6 llc  11.1 rd   3.5 wr   0.8 n=17  Uniform mixed extension / sweep umRegularFine=1 umCountedJobs=1
+ 0.276   1.0    282.6 occ   9.4 alu  25.1 llc   9.4 rd   3.1 wr   0.6 n=20  Uniform mixed surface advect / advectCubic umSolidFree=1
+ 0.274   1.0    286.8 occ  23.8 alu  45.3 llc  33.4 rd  38.0 wr  12.4 n=21  Narrow-band FLIP snapshot / recordDelta
+ 0.267   4.8     55.9 occ  15.9 alu   5.1 llc   6.8 rd  12.0 wr   0.6 n=25  Uniform pressure arena solve / pResidual2
+ 0.266   1.0    271.9 occ  10.9 alu  26.5 llc  14.2 rd   7.8 wr   1.8 n=17  Uniform mixed pressure rhs / buildRhs umCountedJobs=10 & Uniform compute copy
+ 0.263   1.0    269.1 occ   4.1 alu   9.4 llc   9.8 rd   3.4 wr   0.1 n=17  Narrow-band FLIP coarse retirement / depthCoarse umCountedJobs=0
+ 0.256   1.0    268.7 occ  25.5 alu  50.0 llc  27.9 rd  22.7 wr  23.6 n=23  Uniform mixed hanging fine taps / fillUnitHalo
+ 0.253  11.5     22.1 occ   5.9 alu   5.5 llc   2.2 rd   2.5 wr   0.2 n=20  Uniform pressure arena solve / pDown3
+ 0.253   1.0    265.3 occ   9.8 alu  14.4 llc   1.7 rd   3.1 wr   0.1 n=13  NB-FLIP surface pressure authority / cutRegions
+ 0.240   1.0    251.7 occ  11.2 alu  24.2 llc   8.3 rd   6.8 wr   5.0 n=25  Uniform mixed body forces / forcesFine umSolidTwinned=1 umCountedJobs=8
+ 0.239   1.0    250.5 occ  13.2 alu  20.3 llc  16.0 rd  15.6 wr   0.1 n=24  Narrow-band FLIP transfer / transferRefine umCountedJobs=0
+ 0.233   1.0    238.7 occ  23.3 alu  46.3 llc  13.7 rd   3.5 wr   5.9 n=18  Narrow-band FLIP surface canonical view / arenaGather umCountedJobs=0
+ 0.233   1.0    243.8 occ  10.1 alu  16.1 llc   6.8 rd  18.2 wr   0.1 n=22  Uniform dynamic ownership residency / pageMark
+ 0.225   3.8     59.0 occ  24.0 alu  21.3 llc  14.6 rd  11.1 wr   0.4 n=16  Uniform pressure arena solve / pUpB
+ 0.222   1.0    232.2 occ   9.4 alu  18.8 llc  10.1 rd  11.3 wr   0.4 n=17  Uniform bulk tier selection / bulkSelect
+ 0.217  11.5     19.0 occ   7.5 alu   5.4 llc   1.2 rd   0.9 wr   0.2 n=18  Uniform pressure arena solve / pUp4
+ 0.215   1.0    220.0 occ  12.5 alu  16.7 llc  29.5 rd  15.8 wr   8.7 n=13  Blit Command 21
+ 0.214   1.9    112.2 occ  11.9 alu  16.8 llc  10.0 rd   4.9 wr   0.4 n=16  Uniform mixed extension / sweepSeams sweep=1
+ 0.214   1.0    219.2 occ  13.3 alu  23.7 llc  15.8 rd   9.6 wr   1.3 n=9  Uniform mixed surface advect / advect umMergedTiles=1
+ 0.209   1.0    214.1 occ   2.1 alu   4.4 llc   2.1 rd   1.0 wr   0.5 n=24  Uniform mixed surface advect / advectCubic
+ 0.207   1.0    217.2 occ  13.4 alu  25.9 llc   6.2 rd   7.3 wr   1.2 n=24  Uniform mixed transfer to pressure / toPressureFine
+ 0.207   1.0    211.4 occ  13.0 alu  21.6 llc  28.2 rd  14.5 wr   7.6 n=8  Blit Command 19
+ 0.206   1.0    210.4 occ  24.0 alu  55.7 llc  10.7 rd   7.1 wr   9.0 n=18  Narrow-band FLIP surface arena search / arenaGather umCountedJobs=0
+ 0.201   1.0    205.3 occ   9.8 alu  21.6 llc  16.1 rd  13.4 wr   2.1 n=21  Narrow-band FLIP surface reconstruction / couple umCountedJobs=0
+ 0.198   1.0    202.6 occ  11.0 alu  16.4 llc  25.2 rd  12.4 wr   7.8 n=8  Blit Command 23
+ 0.196   2.9     67.5 occ  12.5 alu  27.0 llc  19.2 rd   3.6 wr   4.0 n=14  Blit Command 2
+ 0.193   1.0    197.3 occ  14.6 alu  21.0 llc  13.3 rd   2.3 wr   0.3 n=12  Uniform mixed surface advect / advectWalls
+ 0.188   3.8     49.2 occ  22.2 alu  26.2 llc  26.6 rd  39.1 wr   5.0 n=11  Uniform pressure arena solve / pRestrict0
+ 0.187   5.7     32.7 occ   6.3 alu   5.2 llc   6.0 rd   7.1 wr   0.8 n=17  Uniform mixed extension / mixedRestrictKnownVelocity
+ 0.185   1.0    193.9 occ  13.4 alu  26.3 llc  12.7 rd  25.2 wr   0.4 n=8  Narrow-band FLIP seed / seedCells umCountedJobs=0
+ 0.184   1.0    188.6 occ  12.4 alu  16.2 llc  31.0 rd  16.4 wr   9.2 n=5  Blit Command 25
+ 0.177   1.9     93.0 occ  22.7 alu  38.4 llc  17.1 rd  14.6 wr   7.7 n=9  Uniform mixed extension / publishFine umRegularFine=1 umCountedJobs=1
+ 0.173   1.0    181.0 occ  30.3 alu  45.8 llc  20.0 rd   7.2 wr  16.2 n=14  Uniform mixed extension / pair_seedSeams
+ 0.170   5.8     29.5 occ  12.5 alu  26.2 llc  19.9 rd   3.3 wr   3.7 n=4  Blit Command 0
+ 0.170   1.9     89.1 occ  20.1 alu  29.2 llc  17.1 rd  24.5 wr   5.7 n=10  Uniform mixed extension / restrictBand
+ 0.170   1.0    173.9 occ  15.9 alu  22.3 llc   4.8 rd   9.6 wr   0.1 n=14  Narrow-band FLIP surface arena search / arenaCross umCountedJobs=0
+ 0.169   2.9     58.2 occ  14.7 alu  30.3 llc  13.9 rd   4.9 wr   1.0 n=11  Blit Command 24
+ 0.162   2.9     55.8 occ  13.2 alu  26.9 llc  11.2 rd   2.0 wr   1.0 n=13  Blit Command 26
+ 0.162   3.8     42.4 occ  14.4 alu   5.3 llc   2.7 rd   4.0 wr   0.7 n=17  Uniform pressure arena solve / pDown2
+ 0.161   1.0    165.2 occ  13.2 alu  16.1 llc   4.0 rd   3.8 wr   2.6 n=18  Narrow-band FLIP surface canonical far metric / arenaFar umCountedJobs=0
+ 0.156   1.0    159.7 occ  21.3 alu  50.9 llc  13.7 rd   1.8 wr   0.1 n=10  Narrow-band FLIP surface reconstruction / surfaceClear umCountedJobs=0
+ 0.155   1.0    158.6 occ  11.3 alu  17.0 llc  26.5 rd  14.6 wr   6.4 n=6  Blit Command 17
+ 0.153   2.9     52.7 occ  13.6 alu  25.5 llc  16.7 rd   6.3 wr   0.9 n=7  Blit Command 28
+ 0.152  11.5     13.3 occ   4.1 alu   3.0 llc   2.1 rd   2.4 wr   0.1 n=16  Uniform pressure arena solve / pDown4
+ 0.152   1.9     79.4 occ  24.6 alu  40.2 llc  41.7 rd  35.5 wr   2.8 n=11  Blit Command 330
+ 0.148   1.0    155.4 occ  15.1 alu  34.6 llc  17.0 rd  10.2 wr   0.1 n=9  Uniform dynamic ownership census / solidPromote
+ 0.146   1.0    149.8 occ  10.5 alu  16.1 llc  10.1 rd   9.1 wr   0.1 n=12  Narrow-band FLIP regional air update / airPlanSeeds umCountedJobs=0
+ 0.144   1.0    151.3 occ  26.9 alu  40.2 llc  19.9 rd  21.2 wr  44.3 n=15  Uniform pressure arena projection / pCopyNative
+ 0.137   1.0    139.7 occ  12.3 alu  16.4 llc  29.8 rd  15.3 wr   8.0 n=7  Blit Command 33
+ 0.136   2.9     46.8 occ  12.8 alu  28.9 llc  18.7 rd   4.0 wr   3.2 n=4  Blit Command 8
+ 0.135   1.0    138.6 occ  12.5 alu  16.0 llc  31.8 rd  17.1 wr   9.6 n=2  Blit Command 31
+ 0.134   2.9     46.8 occ  36.6 alu   8.2 llc  20.3 rd  35.9 wr  14.8 n=10  Uniform pressure arena solve / kStep
+ 0.132   1.0    135.3 occ  14.7 alu  20.1 llc  26.7 rd  13.7 wr   8.0 n=6  Blit Command 27
+ 0.132   1.0    137.9 occ  26.6 alu  32.9 llc  19.5 rd   7.3 wr  10.9 n=9  Uniform mixed extension / seedSeams
+ 0.132  22.0      6.0 occ   6.2 alu   2.0 llc   0.5 rd   0.2 wr   0.1 n=10  Narrow-band FLIP particle sort / slabSortMerge umCountedJobs=0
+ 0.130   2.9     44.6 occ  14.9 alu  28.8 llc  13.7 rd   7.3 wr   0.8 n=8  Blit Command 30
+ 0.129   1.9     66.9 occ  16.6 alu  25.5 llc  12.9 rd  17.6 wr  11.1 n=4  Uniform mixed extension / publishList umRegularFine=0 umCountedJobs=4
+ 0.129   3.8     33.8 occ  18.7 alu   9.8 llc  18.6 rd  24.7 wr   5.3 n=12  Uniform pressure arena solve / pNativeOperator
+ 0.126   1.0    129.3 occ  12.1 alu  16.6 llc  28.9 rd  14.9 wr   7.8 n=7  Blit Command 35
+ 0.122   1.0    125.3 occ  11.1 alu  20.3 llc  20.8 rd   6.9 wr   4.7 n=9  Blit Command 11
+ 0.121   1.9     63.2 occ  26.8 alu  43.7 llc  41.3 rd  35.7 wr   0.7 n=15  Blit Command 328
+ 0.120   1.0    125.5 occ  13.9 alu  20.2 llc  33.7 rd  20.8 wr  10.0 n=9  Blit Command 29
+ 0.118   1.9     61.9 occ   2.0 alu   7.1 llc   1.3 rd   0.9 wr   1.1 n=9  Uniform mixed extension regions / classifyRegions
+ 0.118   1.2    101.7 occ  10.9 alu  15.6 llc  27.1 rd   5.0 wr   2.6 n=14  ?unlabelled
+ 0.116   1.0    119.0 occ  11.5 alu  18.6 llc  23.3 rd   7.9 wr   4.9 n=5  Blit Command 9
+ 0.115   1.0    121.0 occ  18.9 alu  40.5 llc  13.6 rd   7.3 wr  10.6 n=10  Uniform mixed extension / pair_seedList umRegularFine=0 umCountedJobs=4
+ 0.114   2.9     39.3 occ  17.5 alu  30.3 llc  12.2 rd   9.0 wr   0.6 n=7  Blit Command 36
+ 0.114   2.9     39.2 occ  12.7 alu  24.7 llc   9.5 rd   3.6 wr   1.0 n=9  Blit Command 32
+ 0.110   1.0    115.3 occ  11.6 alu  37.2 llc   6.6 rd   4.4 wr   2.6 n=6  Uniform mixed layout build / mirror
+ 0.109   1.9     56.9 occ  10.5 alu  18.6 llc   8.1 rd   1.9 wr   1.4 n=3  Uniform mixed remap publish / copyFaces
+ 0.107   1.0    111.6 occ  34.8 alu  20.6 llc  37.9 rd  41.4 wr  27.7 n=6  Uniform pressure arena solve / kStart
+ 0.106   2.9     36.5 occ  11.9 alu  25.6 llc  19.4 rd   4.9 wr   3.7 n=14  Blit Command 10
+ 0.106   2.9     37.0 occ   0.2 alu   0.3 llc   0.6 rd   0.4 wr   0.2 n=5  Uniform pressure arena solve / kReduce
+ 0.105   1.0    107.4 occ   4.2 alu   5.6 llc  11.5 rd   1.1 wr   1.2 n=12  Uniform mixed surface advect / advectOwners umRegularFine=1
+ 0.105   3.8     27.5 occ  22.8 alu  19.3 llc  16.0 rd  24.9 wr   3.8 n=9  Uniform pressure arena solve / pProlong0
+ 0.104   1.0    109.4 occ  34.7 alu  43.1 llc  22.2 rd  35.6 wr   6.6 n=8  Uniform mixed extension retain / retainCoarse
+ 0.104   1.0    109.1 occ  28.1 alu  54.2 llc   8.5 rd   1.7 wr   0.2 n=11  Uniform mixed layout build / classify
+ 0.103   1.0    108.0 occ   8.5 alu  28.4 llc   1.6 rd   1.5 wr   2.5 n=11  Uniform pressure root owners / roKeys & Uniform compute copy
+ 0.103   2.9     35.3 occ  16.8 alu  35.2 llc  13.6 rd   6.1 wr   0.7 n=10  Blit Command 38
+ 0.101   2.9     34.8 occ  16.0 alu  29.6 llc  15.7 rd   6.8 wr   2.2 n=7  Blit Command 40
+ 0.099   1.0    104.0 occ  15.3 alu  29.8 llc  17.6 rd  12.5 wr  23.5 n=7  Uniform mixed transfer to simulation / toSimulationCoarse umCountedJobs=11
+ 0.097   1.9     50.6 occ  11.5 alu  17.1 llc  21.6 rd  10.7 wr  11.1 n=7  Blit Command 136
+ 0.095   1.0     99.5 occ   6.4 alu   9.3 llc   6.2 rd   1.1 wr   0.4 n=7  Uniform mixed remap / remapCells
+ 0.094   2.9     32.5 occ  14.8 alu  29.1 llc  14.6 rd   5.9 wr   0.9 n=11  Blit Command 34
+ 0.093   1.0     97.9 occ   9.7 alu  16.8 llc  10.0 rd  10.4 wr  12.2 n=2  Uniform mixed transfer to pressure / toPressureCoarse umCountedJobs=11
+ 0.092   2.9     31.7 occ  19.2 alu  44.1 llc  39.0 rd  24.4 wr   8.0 n=4  Blit Command 16
+ 0.091   1.0     93.1 occ  14.3 alu  22.0 llc  29.9 rd  16.3 wr  10.1 n=9  Blit Command 37
+ 0.090   1.9     46.9 occ  21.9 alu  30.4 llc  31.8 rd  28.8 wr   3.8 n=5  Blit Command 338
+ 0.090   1.9     46.9 occ  12.4 alu  19.7 llc  20.3 rd   7.4 wr   8.3 n=14  Blit Command 134
+ 0.089   1.0     91.3 occ   1.7 alu   0.9 llc   4.1 rd   0.7 wr   0.2 n=8  Uniform mixed surface advect deferred / advectDeferred umRegularFine=1 umSolidTwinned=1 & Uniform compute copy
+ 0.089   1.0     91.0 occ  12.5 alu  21.2 llc  24.5 rd  10.1 wr   5.4 n=5  Blit Command 13
+ 0.089   1.0     93.2 occ   6.8 alu  13.7 llc   4.0 rd   5.4 wr   0.1 n=4  Uniform dynamic ownership census / importance
+ 0.086   2.9     29.7 occ  17.8 alu  33.5 llc   8.7 rd   5.7 wr   0.1 n=7  Blit Command 42
+ 0.085   1.0     89.6 occ  43.4 alu   4.3 llc  27.1 rd  67.2 wr  14.6 n=7  Narrow-band FLIP particle sort / slabSortFinish umCountedJobs=0 & Uniform compute copy
+ 0.084   2.9     29.2 occ   4.2 alu   2.6 llc   3.5 rd   8.6 wr   0.4 n=8  Uniform detail ring enter / enter
+ 0.083   1.0     87.3 occ   0.5 alu   2.9 llc   0.4 rd   0.1 wr   0.1 n=2  Uniform dynamic ownership census / pageRequest & Uniform compute copy
+ 0.082   1.0     84.3 occ  30.5 alu  13.2 llc  12.7 rd   0.6 wr   0.1 n=4  Uniform mixed momentum tiers / momentumAffineResidual
+ 0.082   1.0     86.1 occ  24.5 alu   3.7 llc  17.8 rd  52.4 wr   4.0 n=8  Fluid particle display energy / capture
+ 0.081   2.9     27.8 occ  15.5 alu  29.9 llc  12.7 rd   6.7 wr   0.6 n=8  Blit Command 44
+ 0.081   1.0     84.5 occ  19.9 alu  31.1 llc  13.3 rd   5.4 wr   8.2 n=7  Uniform mixed extension / pair_seed umRegularFine=1 umCountedJobs=1
+ 0.080   2.9     27.7 occ  18.8 alu  37.4 llc   9.3 rd   6.2 wr   0.1 n=2  Blit Command 46
+ 0.078   1.0     82.1 occ   1.1 alu   3.1 llc   2.7 rd   4.0 wr   0.1 n=6  Uniform dynamic ownership census / pageSeed
+ 0.077   1.0     79.0 occ  21.2 alu  39.0 llc   8.4 rd   9.9 wr   0.1 n=5  Narrow-band FLIP surface reconstruction / coarseCorners umCountedJobs=0
+ 0.077   1.0     78.4 occ  11.4 alu  15.4 llc  28.2 rd  15.1 wr   8.2 n=3  Blit Command 41
+ 0.076   1.0     80.1 occ  16.3 alu  21.9 llc   6.3 rd   3.7 wr   0.6 n=7  Uniform mixed phi resolve / resolveListed
+ 0.076   1.9     39.7 occ   6.6 alu   6.1 llc   5.6 rd   5.2 wr   4.1 n=6  Uniform mixed extension regions / stampRegions
+ 0.075   4.8     15.7 occ   5.2 alu   5.6 llc   2.3 rd   3.4 wr   1.9 n=3  Uniform live block copy / copy
+ 0.075   1.0     78.7 occ  22.0 alu  33.4 llc  14.2 rd   6.2 wr   7.1 n=6  Uniform mixed extension / seed umRegularFine=1 umCountedJobs=1
+ 0.074   1.0     76.1 occ  12.5 alu  22.1 llc  22.9 rd   9.2 wr   5.1 n=2  Blit Command 7
+ 0.074   1.0     77.8 occ   7.1 alu  10.8 llc  12.0 rd  12.7 wr  10.4 n=7  Uniform pressure arena solve / pInit
+ 0.074   1.0     77.5 occ   5.1 alu   6.4 llc   3.0 rd   1.8 wr   0.2 n=2  Uniform mixed all-4h solid record / cutsRegions
+ 0.074   2.9     25.3 occ  17.6 alu  33.5 llc  11.9 rd   6.3 wr   0.4 n=6  Blit Command 48
+ 0.072   1.9     37.5 occ  10.5 alu  14.5 llc  17.1 rd   5.6 wr   6.7 n=4  Blit Command 130
+ 0.068   2.9     23.5 occ  17.4 alu  35.7 llc  12.1 rd   6.0 wr   0.5 n=5  Blit Command 50
+ 0.067   1.0     70.3 occ  12.2 alu  13.3 llc  11.3 rd  16.3 wr   9.0 n=6  Narrow-band FLIP transfer / transferOwners umCountedJobs=0
+ 0.066   1.0     67.8 occ  12.0 alu  16.3 llc  29.1 rd  15.0 wr   8.1 n=3  Blit Command 39
+ 0.066   2.9     22.7 occ  14.1 alu  29.1 llc  10.6 rd   3.7 wr   3.6 n=8  Blit Command 22
+ 0.066   1.0     67.4 occ  12.5 alu  17.3 llc  29.2 rd  15.0 wr   7.4 n=4  Blit Command 15
+ 0.065   1.0     67.0 occ  15.3 alu  20.5 llc  11.6 rd  16.0 wr   0.1 n=2  Narrow-band FLIP coarse retirement / redistanceCoarse umCountedJobs=0
+ 0.065   1.0     67.9 occ   0.0 alu   0.0 llc   0.2 rd   0.1 wr   0.1 n=1  GPU resident rigid-body integration and contacts / integrate & Uniform compute copy
+ 0.065   1.0     66.1 occ   9.7 alu   7.1 llc  10.9 rd  15.1 wr   0.3 n=4  Uniform region work heat / heat
+ 0.064   1.9     33.6 occ  21.5 alu  35.8 llc  36.3 rd  38.9 wr   2.8 n=6  Blit Command 340
+ 0.064   1.9     33.4 occ  17.1 alu  24.7 llc  30.2 rd  23.3 wr   4.4 n=8  Blit Command 332
+ 0.064   1.9     33.3 occ  18.4 alu  18.1 llc  20.7 rd  15.8 wr   3.3 n=8  Blit Command 336
+ 0.063   1.9     33.2 occ   5.7 alu  14.7 llc   3.3 rd   5.7 wr   0.1 n=3  Uniform shared frame plan / dilate2 & Uniform compute copy
+ 0.062   1.0     65.1 occ  17.1 alu  39.6 llc   5.6 rd   1.6 wr   9.6 n=5  Uniform mixed transfer to simulation / toSimulationFine
+ 0.062   1.9     32.5 occ  12.2 alu  20.6 llc  19.2 rd   7.8 wr   8.3 n=8  Blit Command 132
+ 0.062   1.9     32.2 occ   0.1 alu   0.2 llc   0.4 rd   0.1 wr   0.2 n=8  Uniform block neighbours / bnRows
+ 0.061   1.0     62.3 occ   5.3 alu   9.1 llc  14.0 rd   4.4 wr   0.2 n=2  Uniform mixed all-4h solid record / surfaceClear & Uniform compute copy
+ 0.061   1.9     31.8 occ  20.8 alu  20.0 llc  13.8 rd   4.3 wr   2.1 n=2  Blit Command 230
+ 0.060   1.0     63.4 occ   0.0 alu   0.0 llc   0.0 rd   0.0 wr   0.1 n=1  Narrow-band FLIP activity / activitySpread umCountedJobs=0
+ 0.060   2.9     21.1 occ  19.3 alu   4.0 llc   3.1 rd   6.6 wr   0.1 n=7  Uniform pressure arena solve / kBound
+ 0.060   1.9     31.6 occ  10.1 alu  15.4 llc  14.8 rd   4.1 wr   4.4 n=6  Blit Command 148
+ 0.060   1.0     63.1 occ   8.2 alu   8.8 llc   5.4 rd   5.6 wr   5.2 n=4  Uniform mixed extension / seedList umRegularFine=0 umCountedJobs=4
+ 0.060   1.9     31.4 occ  12.3 alu  18.3 llc  24.3 rd  10.0 wr  12.7 n=3  Blit Command 140
+ 0.059   2.9     20.2 occ  17.6 alu  33.9 llc   9.5 rd   7.1 wr   0.1 n=4  Blit Command 52
+ 0.057   1.0     58.7 occ  57.2 alu   5.8 llc  12.4 rd   0.0 wr   0.1 n=7  Narrow-band FLIP transfer / transferClear umCountedJobs=0
+ 0.057   1.9     29.8 occ  14.9 alu  18.8 llc  18.9 rd   7.4 wr   6.8 n=4  Blit Command 144
+ 0.057   1.9     29.7 occ  15.8 alu  19.9 llc  13.2 rd   3.0 wr   2.4 n=5  Blit Command 228
+ 0.056   1.9     29.2 occ  12.3 alu  19.5 llc  20.5 rd   6.5 wr   7.9 n=3  Blit Command 138
+ 0.056   1.9     29.1 occ  17.3 alu  21.1 llc   9.0 rd   4.7 wr   0.4 n=3  Blit Command 170
+ 0.055   1.0     57.3 occ  12.9 alu  16.0 llc   9.0 rd  10.3 wr  15.2 n=5  Uniform mixed extension retain / retainFine
+ 0.054   1.0     55.6 occ  12.4 alu  16.5 llc  29.4 rd  14.5 wr   7.3 n=2  Blit Command 43
+ 0.054   1.9     28.1 occ  12.5 alu  19.2 llc  16.4 rd   3.6 wr   2.9 n=5  Blit Command 146
+ 0.053   1.9     28.0 occ  12.2 alu  19.3 llc  23.7 rd  10.0 wr  11.8 n=3  Blit Command 142
+ 0.053   1.0     55.9 occ  11.3 alu  28.9 llc   0.8 rd   0.1 wr   0.1 n=5  Uniform mixed rigid body tiles / markTiles & Uniform compute copy
+ 0.053   1.0     54.2 occ   9.3 alu   3.1 llc   2.4 rd   6.1 wr   0.1 n=5  Narrow-band FLIP surface arena search / arenaMark umCountedJobs=0
+ 0.052   1.0     54.4 occ  22.3 alu  24.0 llc   8.1 rd  11.8 wr   9.4 n=5  Uniform mixed geometric fill / mirror umCountedJobs=3 & Uniform compute copy
+ 0.051   2.9     17.6 occ  16.2 alu  31.3 llc  10.5 rd   5.9 wr   0.3 n=5  Blit Command 54
+ 0.051   1.0     52.3 occ  34.7 alu  38.5 llc  12.3 rd  19.4 wr  13.0 n=5  Uniform mixed geometric fill / mirrorRegional & Uniform compute copy
+ 0.051   3.9     13.2 occ  22.8 alu  15.1 llc   5.0 rd   6.0 wr   4.7 n=5  Uniform compute copy
+ 0.051   1.0     52.3 occ  10.2 alu  19.2 llc  22.0 rd   7.6 wr   3.2 n=4  Blit Command 45
+ 0.050   1.9     26.4 occ  12.5 alu  18.4 llc  13.0 rd   1.7 wr   3.2 n=1  Blit Command 234
+ 0.050   1.9     26.2 occ  16.2 alu  27.3 llc  25.1 rd  28.0 wr   0.7 n=2  Blit Command 334
+ 0.050   1.9     26.1 occ   6.2 alu  14.1 llc   2.9 rd   4.9 wr   0.1 n=2  Uniform shared frame plan / dilate0
+ 0.050   1.0     52.3 occ   0.0 alu   0.0 llc   0.0 rd   0.0 wr   0.1 n=3   / publishNative
+ 0.050   1.9     26.1 occ  12.3 alu  20.1 llc  22.7 rd   8.5 wr   9.1 n=7  Blit Command 150
+ 0.050   1.0     52.0 occ   0.0 alu   0.0 llc   0.0 rd   0.0 wr   0.1 n=1  Narrow-band FLIP particle slabs / slabAllocate umCountedJobs=0
+ 0.049   1.0     50.4 occ   5.5 alu   3.3 llc   1.3 rd   1.3 wr   0.1 n=2  Uniform mixed momentum / momentumRegularStep umRegularFine=1
+ 0.049   1.9     25.7 occ   7.3 alu  12.1 llc  10.9 rd   3.1 wr   3.4 n=4  Blit Command 152
+ 0.048   1.0     50.4 occ  10.2 alu  13.7 llc  41.7 rd  25.5 wr  16.4 n=3  Uniform local speed certificate / tileError
+ 0.048   1.9     25.2 occ   3.9 alu   3.1 llc   0.5 rd   0.2 wr   0.1 n=3  Uniform mixed remap / remapFaces umSolidFree=1
+ 0.048   1.0     48.7 occ  10.6 alu  25.1 llc   7.2 rd  10.1 wr   0.6 n=5  Uniform mixed hanging fine taps / markUnitHalo
+ 0.047   1.9     24.7 occ  13.9 alu  27.0 llc  18.0 rd   7.9 wr   6.6 n=4  Blit Command 126
+ 0.047   1.0     48.1 occ  22.2 alu  41.1 llc  41.1 rd  37.5 wr   1.5 n=5  Blit Command 53
+ 0.046   1.0     48.7 occ   1.7 alu   0.9 llc   1.9 rd   0.2 wr   6.5 n=5  Uniform page pool commit / upPublish & Uniform compute copy
+ 0.046   1.9     24.3 occ  18.7 alu  16.5 llc  11.4 rd   3.5 wr   1.9 n=2  Blit Command 236
+ 0.046   1.9     24.3 occ   7.3 alu  18.5 llc   3.2 rd   4.4 wr   0.1 n=4  Uniform shared frame plan / dilate1
+ 0.046   1.9     24.1 occ   9.3 alu  15.6 llc  17.1 rd   5.7 wr   8.7 n=5  Blit Command 154
+ 0.046   2.9     15.7 occ  13.3 alu  26.0 llc  19.1 rd  11.3 wr   2.5 n=4  Blit Command 12
+ 0.046   1.0     47.8 occ   0.7 alu   0.6 llc   1.3 rd   3.0 wr   0.1 n=4  Uniform dynamic ownership census / interfaceBlocks
+ 0.044   2.9     15.2 occ  13.8 alu  23.8 llc  20.2 rd   8.1 wr   8.3 n=4  Blit Command 56
+ 0.043   1.0     45.0 occ  17.2 alu  12.2 llc   6.1 rd  15.2 wr   0.2 n=5  Uniform pressure arena solve / pFinal
+ 0.043   1.9     22.3 occ  12.3 alu  19.3 llc  23.8 rd  10.3 wr  11.6 n=3  Blit Command 162
+ 0.042   1.9     21.9 occ  16.1 alu  15.4 llc  11.8 rd   4.4 wr   2.0 n=5  Blit Command 232
+ 0.042   1.0     43.8 occ  25.3 alu  26.7 llc   3.5 rd   6.7 wr   0.1 n=6  Uniform mixed global surface volume / measureInitial umCountedJobs=10
+ 0.042   1.0     42.6 occ   5.3 alu   4.2 llc   3.2 rd   0.7 wr   1.8 n=3  Uniform pressure arena marks and rows / pClear2
+ 0.041   2.9     14.0 occ  11.8 alu  28.5 llc  21.2 rd  14.8 wr   4.1 n=4  Blit Command 18
+ 0.041   1.9     21.2 occ  10.9 alu  11.0 llc  24.5 rd  29.2 wr  12.7 n=2  Blit Command 342
+ 0.040   2.9     13.8 occ  15.4 alu  26.5 llc  22.0 rd  13.1 wr   2.1 n=2  Blit Command 58
+ 0.040   2.9     14.0 occ   0.8 alu   0.9 llc   2.0 rd   2.6 wr   1.0 n=1  NB-FLIP surface pressure authority / stampHeld
+ 0.039   1.9     20.6 occ  19.7 alu  27.1 llc  12.8 rd   6.3 wr   0.2 n=1  Blit Command 172
+ 0.039   1.9     20.6 occ   4.8 alu   5.2 llc   2.9 rd   3.8 wr   3.1 n=4  Uniform live block copy / copy & Uniform compute copy
+ 0.039   1.9     20.6 occ  43.1 alu  11.4 llc  40.1 rd  64.5 wr  41.8 n=1  Blit Command 384
+ 0.039   1.0     41.0 occ  13.7 alu  14.3 llc  22.0 rd  13.4 wr  15.8 n=4  Blit Command 448
+ 0.039   1.9     20.3 occ  14.4 alu  16.5 llc   8.5 rd   3.2 wr   1.5 n=4  Blit Command 226
+ 0.039   1.9     20.2 occ  11.5 alu  18.1 llc  22.2 rd   9.3 wr  10.7 n=3  Blit Command 156
+ 0.038   2.9     13.2 occ   7.8 alu  13.8 llc  10.8 rd   2.5 wr   2.8 n=2  Blit Command 4
+ 0.038   1.9     20.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 128
+ 0.038   1.0     39.8 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed remap / planeFinish
+ 0.038   2.9     13.3 occ   0.4 alu   0.2 llc   0.6 rd   0.7 wr   1.7 n=6  NB-FLIP surface pressure authority / stamp
+ 0.038   2.9     13.0 occ  12.1 alu  14.8 llc  31.4 rd  14.9 wr   4.7 n=1  Blit Command 64
+ 0.038   1.0     38.5 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 1
+ 0.038   1.0     39.3 occ  42.9 alu  27.1 llc  12.5 rd  19.0 wr  13.4 n=3  BULK16 publish live slots / finish & Uniform compute copy
+ 0.037   1.9     19.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 174
+ 0.036   1.0     38.2 occ   4.6 alu   4.3 llc   5.4 rd   5.9 wr   0.1 n=2  Uniform region dynamics publish / publishPressure
+ 0.036   1.0     38.1 occ   1.0 alu   2.7 llc   2.2 rd   1.7 wr   0.1 n=2  Uniform region dynamics classify / regionDecide
+ 0.036   1.0     36.6 occ   6.0 alu   4.6 llc   2.7 rd   4.2 wr   4.1 n=3  Uniform mixed surface advect / wallReach
+ 0.036   1.0     37.5 occ   6.6 alu   5.8 llc   1.4 rd   1.2 wr   0.1 n=3  Narrow-band FLIP seed / seedSources umCountedJobs=0
+ 0.036   1.0     37.2 occ   4.8 alu   7.3 llc   0.8 rd   0.5 wr   0.2 n=1  Uniform mixed body forces / forcesFine umSolidFree=1 umCountedJobs=8
+ 0.035   1.9     18.6 occ  15.3 alu  33.8 llc  20.8 rd   9.3 wr   7.2 n=2  Blit Command 120
+ 0.035   1.9     18.5 occ  12.3 alu  18.8 llc  24.4 rd   9.6 wr  12.0 n=5  Blit Command 158
+ 0.035   1.9     18.2 occ  16.7 alu  31.7 llc  22.5 rd   4.5 wr   5.1 n=2  Blit Command 74
+ 0.035   1.9     18.4 occ   8.7 alu  11.0 llc  13.1 rd   6.2 wr  10.0 n=3  Blit Command 178
+ 0.035   1.0     36.0 occ   0.9 alu   2.2 llc   1.0 rd   1.2 wr   1.8 n=5  Uniform mixed momentum tiers / decide
+ 0.035   1.9     18.4 occ  12.5 alu  34.9 llc  19.8 rd  11.5 wr   5.8 n=1  Blit Command 108
+ 0.035   1.0     36.6 occ  17.3 alu  25.0 llc   3.3 rd   5.6 wr   0.5 n=5  Uniform pressure arena projection / pCopy
+ 0.035   1.0     36.6 occ  12.5 alu  20.5 llc  29.9 rd  14.6 wr  19.3 n=2  Blit Command 444
+ 0.034   3.8      9.0 occ  14.6 alu   9.2 llc   2.0 rd   2.0 wr   0.2 n=3  Uniform pressure arena solve / pBulkLift
+ 0.034   1.9     18.1 occ  16.8 alu  17.8 llc  25.1 rd  13.4 wr   5.4 n=7  Blit Command 344
+ 0.034   1.0     35.8 occ   1.8 alu   0.9 llc   3.8 rd   3.3 wr   0.1 n=2  Narrow-band FLIP particle placement / slabPlace umCountedJobs=0
+ 0.034   2.9     11.7 occ   9.3 alu   8.2 llc   4.2 rd   2.1 wr   0.1 n=2  Blit Command 60
+ 0.033   1.0     34.7 occ   2.3 alu   5.9 llc   1.3 rd   0.4 wr   1.0 n=7  Uniform mixed layout build / dilate
+ 0.033   1.9     17.3 occ  12.2 alu  18.6 llc  24.2 rd  11.1 wr  13.2 n=2  Blit Command 166
+ 0.033   1.9     17.3 occ  14.8 alu  19.1 llc  23.1 rd  12.0 wr  12.3 n=5  Blit Command 168
+ 0.033   1.9     17.2 occ   0.7 alu   1.5 llc   1.5 rd   1.0 wr   0.1 n=3  Uniform region work heat / deep
+ 0.033   2.9     11.2 occ  12.8 alu  26.0 llc  16.8 rd   8.5 wr   2.5 n=4  Blit Command 14
+ 0.032   1.9     17.0 occ  20.1 alu  20.7 llc  26.1 rd  19.3 wr   5.4 n=3  Blit Command 380
+ 0.032   1.9     17.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 382
+ 0.032   1.0     33.7 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed layout build / scan
+ 0.032   2.9     10.9 occ  13.9 alu  19.6 llc  13.2 rd   3.2 wr   0.9 n=2  Blit Command 66
+ 0.032   1.0     33.1 occ  21.3 alu  11.1 llc  15.1 rd  25.4 wr   6.3 n=4  Blit Command 442
+ 0.031   1.9     16.4 occ  10.9 alu  19.8 llc  19.2 rd   8.1 wr   7.9 n=6  Blit Command 164
+ 0.031   1.0     32.6 occ   0.8 alu   0.6 llc   0.6 rd   0.8 wr   0.1 n=1  Uniform mixed global surface volume / solve & Uniform compute copy
+ 0.031   1.0     32.6 occ   5.4 alu   6.0 llc   1.9 rd   2.9 wr   0.2 n=3  Uniform local speed certificate / certify & Uniform compute copy
+ 0.031   1.9     16.2 occ  18.1 alu  20.2 llc  42.4 rd  40.2 wr  18.1 n=3  Blit Command 348
+ 0.030   1.0     31.2 occ   2.3 alu   1.1 llc   2.1 rd   0.7 wr   0.3 n=5  Uniform mixed surface advect deferred / advectDeferred umMergedTiles=1 umFastSurface=1 umSolidFree=1
+ 0.030   2.9     10.5 occ  15.3 alu  25.8 llc  21.6 rd  16.6 wr   4.6 n=2  Blit Command 20
+ 0.030   2.9     10.4 occ  12.9 alu  23.0 llc  10.4 rd   4.0 wr   3.0 n=4  Blit Command 68
+ 0.030   1.9     15.9 occ   6.8 alu  10.2 llc  12.6 rd   5.0 wr   6.1 n=2  Blit Command 160
+ 0.030   1.9     15.7 occ  16.6 alu  38.6 llc  19.0 rd   3.4 wr   2.2 n=3  Blit Command 84
+ 0.030   1.9     15.7 occ  22.8 alu  31.8 llc  19.1 rd   8.5 wr   7.6 n=3  Blit Command 180
+ 0.030   1.0     31.3 occ  10.8 alu  15.4 llc  22.4 rd  12.6 wr  16.6 n=5  Blit Command 446
+ 0.029   1.0     30.7 occ   2.1 alu   0.9 llc   2.4 rd   1.5 wr   6.2 n=3  Uniform cold freeze / accumulate
+ 0.029   1.9     15.2 occ  12.8 alu  23.4 llc  14.5 rd   2.7 wr   2.2 n=3  Blit Command 86
+ 0.029   1.0     30.6 occ  11.5 alu  17.6 llc  26.4 rd  15.3 wr  17.1 n=4  Blit Command 452
+ 0.029   1.9     15.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 184
+ 0.029   1.0     29.6 occ  13.9 alu  14.7 llc   8.6 rd  14.4 wr   0.1 n=7  Narrow-band FLIP crossing search / depthPlanExpand umCountedJobs=0 & Uniform compute copy
+ 0.029   1.0     30.1 occ   5.1 alu   5.0 llc   1.6 rd   0.5 wr   0.7 n=3  Uniform mixed layout build / widths
+ 0.029   1.9     15.0 occ  35.5 alu  32.7 llc  15.1 rd  22.4 wr   0.3 n=1  Blit Command 372
+ 0.029   1.0     30.0 occ   5.2 alu  15.6 llc   4.2 rd   3.7 wr   1.7 n=6  Uniform local speed certificate / spread2
+ 0.028   1.9     14.9 occ  17.5 alu  21.4 llc  11.7 rd   8.8 wr   7.2 n=5  Blit Command 176
+ 0.028   1.0     29.0 occ   9.9 alu  24.6 llc  10.7 rd   2.1 wr   1.9 n=4  Blit Command 81
+ 0.028   1.9     14.7 occ  12.7 alu  16.1 llc  17.6 rd   9.9 wr   5.7 n=6  Blit Command 346
+ 0.028   1.0     29.2 occ   6.4 alu  18.0 llc  10.6 rd   8.7 wr   7.6 n=4  Uniform local speed certificate / spread0
+ 0.028   1.0     29.1 occ   7.6 alu  22.5 llc   2.0 rd   3.1 wr   0.1 n=2  Uniform local speed certificate / spread1
+ 0.028   1.9     14.7 occ   9.8 alu  11.1 llc   6.2 rd   1.7 wr   1.3 n=3  Blit Command 224
+ 0.027   1.0     28.7 occ  10.9 alu   6.9 llc   6.6 rd  15.2 wr   1.6 n=2  NB-FLIP surface pressure authority / surface umCountedJobs=10
+ 0.027   1.0     28.0 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP surface reconstruction / coupleFine umSolidFree=1 umCountedJobs=0
+ 0.027   1.0     28.5 occ  12.3 alu  20.2 llc  30.9 rd  13.7 wr  22.8 n=3  Blit Command 454
+ 0.027   1.0     28.5 occ   2.4 alu   0.4 llc   2.5 rd   3.7 wr   0.1 n=1  Uniform mixed remap adopt / adopt
+ 0.027   1.0     28.2 occ  14.1 alu  15.4 llc   3.1 rd   3.7 wr   3.2 n=5  Uniform mixed geometric fill / mirrorListed & Uniform compute copy
+ 0.027   2.9      9.2 occ  14.7 alu  27.5 llc  15.2 rd   3.4 wr   0.6 n=4  Blit Command 70
+ 0.027   2.9      9.2 occ  15.6 alu  27.8 llc  16.4 rd   9.0 wr   6.0 n=2  Blit Command 62
+ 0.027   1.0     27.8 occ   2.7 alu   1.1 llc   0.5 rd   0.3 wr   0.1 n=1  Uniform shared regional frame plan / expand
+ 0.026   1.9     13.9 occ  13.8 alu  21.0 llc  14.8 rd   5.3 wr   3.4 n=4  Blit Command 186
+ 0.026   1.0     27.2 occ   3.5 alu   2.0 llc   0.7 rd   0.3 wr   0.1 n=2  Uniform mixed solid record of claimed blocks / buildNew
+ 0.026   1.0     26.5 occ  12.4 alu  25.9 llc  25.2 rd   7.0 wr   2.3 n=1  Blit Command 47
+ 0.026   1.0     27.1 occ   4.2 alu   4.7 llc   1.4 rd   2.3 wr   0.1 n=2  Uniform mixed layout build / settle
+ 0.026   1.0     27.1 occ   2.1 alu   1.8 llc   2.3 rd   1.3 wr   0.2 n=1  Uniform mixed remap / markListed
+ 0.026   1.0     27.1 occ   4.2 alu   2.9 llc   0.6 rd   0.2 wr   0.8 n=3  Uniform pressure arena marks and rows / pRowsG
+ 0.026   1.9     13.4 occ  12.5 alu  10.4 llc  15.4 rd   5.9 wr   5.9 n=1  Blit Command 122
+ 0.025   1.0     26.7 occ   3.7 alu   3.6 llc   0.5 rd   0.2 wr   0.1 n=5  Narrow-band FLIP transfer / transfer umCountedJobs=3
+ 0.025   1.0     26.1 occ  16.1 alu  14.0 llc   3.7 rd   5.4 wr   0.6 n=1  Uniform pressure arena marks and rows / pMark
+ 0.025   1.9     12.8 occ  33.3 alu  43.3 llc  26.9 rd  10.7 wr  14.1 n=3  Blit Command 182
+ 0.024   1.9     12.8 occ   8.1 alu  11.0 llc  12.2 rd  13.4 wr   1.9 n=4  Blit Command 300
+ 0.024   1.0     25.5 occ  12.5 alu  20.8 llc  31.6 rd  16.8 wr  20.2 n=1  Blit Command 450
+ 0.024   1.0     24.9 occ   6.8 alu   9.6 llc  16.1 rd   8.5 wr   4.5 n=2  Blit Command 5
+ 0.024   1.9     12.6 occ   9.0 alu  15.0 llc  12.6 rd   7.5 wr   6.9 n=2  Blit Command 106
+ 0.024   1.9     12.5 occ  12.5 alu  27.8 llc  18.7 rd   7.2 wr   4.0 n=2  Blit Command 110
+ 0.024   2.9      8.2 occ   9.3 alu  18.2 llc   6.9 rd   2.8 wr   0.0 n=1  Blit Command 72
+ 0.024   1.0     24.8 occ  16.8 alu  17.6 llc  17.1 rd   4.5 wr   3.5 n=3  Blit Command 472
+ 0.024   1.0     24.7 occ   3.7 alu   1.5 llc   0.8 rd   0.5 wr   0.2 n=3  Uniform mixed remap / planeList
+ 0.023   1.0     23.7 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP advectParticles / advectWalk umCountedJobs=0
+ 0.023   1.0     24.2 occ  12.5 alu  20.8 llc  31.8 rd  15.2 wr  23.1 n=5  Blit Command 424
+ 0.023   1.9     12.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 320
+ 0.023   1.0     24.0 occ   3.5 alu   2.1 llc   0.9 rd   0.3 wr   0.6 n=3  Uniform mixed pressure bulk faces / bulkFaces
+ 0.023   1.0     23.3 occ   5.6 alu   5.1 llc   3.0 rd   6.1 wr   0.1 n=4  Narrow-band FLIP coarse retirement / coarseBuilds umCountedJobs=0
+ 0.023   1.0     23.6 occ   5.8 alu   2.7 llc  16.4 rd  51.0 wr   0.8 n=3  Uniform dynamic ownership census / boundCubes
+ 0.022   1.0     22.9 occ   3.3 alu   1.2 llc   0.9 rd   0.3 wr   0.6 n=1  Uniform mixed surface advect deferred / advectCubicDeferred umMergedTiles=1
+ 0.022   1.9     11.7 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 118
+ 0.022   1.0     23.4 occ  17.2 alu  11.7 llc  17.3 rd  48.5 wr   0.1 n=1  Narrow-band FLIP activity / activity umCountedJobs=0
+ 0.022   1.9     11.7 occ   0.1 alu   0.1 llc   0.4 rd   0.2 wr   0.4 n=1  Uniform block neighbours / bnWalls
+ 0.022   1.9     11.7 occ   0.4 alu   0.1 llc   0.4 rd   0.2 wr   0.1 n=4  Uniform mixed phi twins / twins
+ 0.022   1.0     23.1 occ  21.3 alu  15.2 llc   5.9 rd   3.1 wr   8.7 n=1  Uniform mixed layout build / scatter
+ 0.022   1.0     22.4 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed surface advect deferred / advectDeferred umMergedTiles=1 umSolidFree=1
+ 0.022   1.0     22.2 occ   9.8 alu  16.9 llc  21.0 rd  11.9 wr   4.2 n=2  Blit Command 3
+ 0.022   1.9     11.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 104
+ 0.022   1.9     11.4 occ  14.6 alu  28.4 llc  19.4 rd  10.5 wr   3.1 n=1  Blit Command 304
+ 0.021   3.8      5.6 occ   3.3 alu   0.2 llc   0.4 rd   0.1 wr   0.1 n=2  Uniform page initialise / piFields
+ 0.021   1.9     11.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 386
+ 0.021   1.0     21.8 occ   3.4 alu   1.9 llc   1.0 rd   0.3 wr   0.8 n=1  Uniform mixed surface advect deferred / advectDeferred umRegularFine=1 umSolidFree=1
+ 0.021   1.9     11.2 occ  16.5 alu  15.6 llc  10.7 rd   7.1 wr   4.2 n=3  Blit Command 286
+ 0.021   1.9     11.0 occ  21.6 alu  29.1 llc  32.1 rd  30.8 wr   4.0 n=2  Blit Command 310
+ 0.021   1.0     21.9 occ   1.1 alu   0.7 llc   2.1 rd   0.9 wr   1.7 n=2  Uniform page pool commit / upSuperSlots
+ 0.021   1.0     21.7 occ  33.4 alu   3.1 llc  21.6 rd  66.3 wr   4.4 n=1  Blit Command 440
+ 0.021   1.9     10.8 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 374
+ 0.020   1.0     21.1 occ  15.1 alu  23.2 llc   5.3 rd  10.4 wr   0.1 n=1  Uniform pressure arena marks and rows / ubaUpdate
+ 0.020   1.0     21.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 456
+ 0.020   1.9     10.5 occ   9.2 alu  24.4 llc  14.3 rd   7.1 wr   4.2 n=2  Blit Command 112
+ 0.020   1.0     21.0 occ   5.2 alu   3.2 llc   2.9 rd   5.9 wr   0.1 n=2  Uniform detail h slot claim / mark
+ 0.020   1.0     20.8 occ   8.3 alu   7.7 llc  11.4 rd  16.3 wr   0.8 n=2  Uniform region work heat / spread
+ 0.020   1.0     20.6 occ  11.6 alu   8.9 llc   5.3 rd   6.4 wr  12.6 n=3  Uniform mixed layout build / verifyWords & Uniform compute copy
+ 0.019   1.9     10.1 occ  13.1 alu  25.8 llc  16.6 rd   2.9 wr   3.2 n=3  Blit Command 80
+ 0.019   1.0     20.2 occ     - alu     - llc     - rd     - wr     - n=0  Uniform local speed certificate / coarseBlocks
+ 0.019   1.9     10.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 124
+ 0.019   1.9      9.9 occ  35.4 alu  32.5 llc  14.1 rd  20.7 wr   0.3 n=1  Blit Command 376
+ 0.019   1.9      9.7 occ  12.3 alu  32.3 llc  13.1 rd   4.0 wr   4.1 n=4  Blit Command 114
+ 0.018   1.9      9.5 occ  12.5 alu  26.5 llc  11.8 rd   0.0 wr   0.0 n=1  Blit Command 76
+ 0.018   1.0     19.2 occ   8.4 alu   2.1 llc   2.7 rd   0.4 wr   0.1 n=2  Uniform mixed geometric fill / compactBodies
+ 0.018   1.0     18.6 occ   8.1 alu   2.3 llc   4.1 rd   0.5 wr   0.4 n=2  Uniform region dynamics classify / regionKey
+ 0.018   1.9      9.5 occ  15.3 alu  17.2 llc  33.5 rd  19.6 wr  12.8 n=3  Blit Command 350
+ 0.018   1.0     18.8 occ   4.0 alu   2.4 llc   2.3 rd   2.7 wr   0.1 n=3  Uniform16h remap producer revisions / publish & Uniform compute copy
+ 0.018   1.0     18.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 51
+ 0.018   1.0     18.7 occ  12.5 alu  19.9 llc  32.5 rd  15.5 wr  24.6 n=2  Blit Command 458
+ 0.018   1.0     18.5 occ   8.8 alu   4.4 llc   9.3 rd   1.2 wr  11.0 n=1  Uniform page pool commit / upFlat
+ 0.018   1.0     18.5 occ  15.0 alu  19.7 llc  24.6 rd   9.9 wr  12.4 n=1  Uniform local speed certificate / coarseBits
+ 0.017   1.0     17.9 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP surface arena search / brickTableList umCountedJobs=0
+ 0.017   1.0     18.3 occ   8.3 alu   4.4 llc   3.1 rd   6.2 wr   0.5 n=1  NB-FLIP surface pressure authority / absent
+ 0.017   1.9      9.1 occ   0.3 alu   0.1 llc   0.7 rd   1.1 wr   1.9 n=1  Uniform mixed extension / blocksList
+ 0.017   1.9      9.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 316
+ 0.017   1.0     18.0 occ   0.0 alu   0.0 llc   0.1 rd   0.0 wr   0.1 n=1  Uniform dynamic ownership census / solidActive
+ 0.017   1.0     17.9 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP particle slabs / brickTableList umCountedJobs=0
+ 0.017   1.9      8.9 occ   9.2 alu  21.6 llc   9.9 rd   7.1 wr   1.3 n=4  Blit Command 102
+ 0.017   1.9      8.9 occ   0.1 alu   0.1 llc   0.3 rd   0.1 wr   0.1 n=1  Uniform detail h slot init / init
+ 0.017   1.0     17.7 occ   0.9 alu   0.3 llc   2.6 rd   3.0 wr   0.1 n=1  Uniform shared regional frame plan / seed
+ 0.016   1.9      8.5 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 196
+ 0.016   1.9      8.2 occ  12.4 alu  21.3 llc  22.2 rd  13.7 wr  11.8 n=1  Blit Command 116
+ 0.016   1.0     16.5 occ  18.4 alu  22.4 llc  23.9 rd  14.4 wr  12.3 n=3  Blit Command 460
+ 0.016   1.9      8.1 occ  23.9 alu  18.6 llc  12.4 rd  11.7 wr   2.5 n=2  Blit Command 324
+ 0.015   1.9      7.9 occ  28.0 alu  14.9 llc   6.8 rd  10.4 wr   2.1 n=1  Blit Command 194
+ 0.015   1.0     15.8 occ  12.5 alu  20.1 llc  31.2 rd  16.6 wr  23.0 n=2  Blit Command 436
+ 0.015   1.9      7.9 occ  12.5 alu  16.3 llc  30.4 rd  15.3 wr   8.1 n=3  Blit Command 352
+ 0.015   1.0     15.1 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP crossing search / depthPlanSeed umCountedJobs=0
+ 0.015   1.0     15.4 occ  12.5 alu  20.6 llc  31.8 rd  15.5 wr  21.9 n=2  Blit Command 438
+ 0.015   1.9      7.6 occ  25.0 alu  37.4 llc  41.5 rd  40.9 wr   7.7 n=1  Blit Command 190
+ 0.014   1.9      7.5 occ   6.3 alu  16.4 llc   8.2 rd   4.4 wr   5.5 n=2  Blit Command 192
+ 0.014   1.0     14.7 occ  26.5 alu  15.6 llc   5.3 rd   2.5 wr   1.1 n=2  Blit Command 430
+ 0.014   1.0     14.7 occ   3.1 alu   1.9 llc   2.9 rd   7.1 wr   0.9 n=3  Uniform mixed all-4h solid record / slotsReclaim
+ 0.014   1.9      7.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 326
+ 0.014   1.0     14.6 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 412
+ 0.014   1.9      7.2 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed geometric fill / normalTags
+ 0.014   1.9      7.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 188
+ 0.014   1.9      7.2 occ  35.4 alu  16.7 llc  27.2 rd  33.9 wr   0.6 n=1  Blit Command 378
+ 0.014   1.0     14.4 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed global surface volume / clearBand
+ 0.013   1.9      7.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 198
+ 0.013   1.9      7.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 370
+ 0.013   1.0     13.7 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 432
+ 0.013   1.0     13.3 occ  12.5 alu  25.7 llc  25.3 rd   6.8 wr   2.5 n=1  Blit Command 49
+ 0.013   1.0     13.5 occ   0.0 alu   0.1 llc   0.6 rd   0.1 wr   6.1 n=1  Uniform pressure arena unmark / pUnmark & Uniform compute copy
+ 0.013   1.0     13.5 occ  11.4 alu  14.8 llc  16.9 rd   7.2 wr  10.2 n=3  Blit Command 476
+ 0.013   1.0     13.5 occ  15.8 alu  20.2 llc  21.7 rd  23.4 wr   3.6 n=1  Blit Command 404
+ 0.013   1.9      6.7 occ  19.7 alu  23.4 llc  24.0 rd  28.8 wr   2.7 n=2  Blit Command 306
+ 0.013   1.9      6.7 occ  21.0 alu  13.6 llc  14.1 rd  14.2 wr   3.0 n=3  Blit Command 318
+ 0.013   1.0     13.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 416
+ 0.013   1.9      6.7 occ  29.1 alu  20.5 llc  14.4 rd   7.6 wr   0.9 n=2  Blit Command 322
+ 0.012   1.0     13.0 occ  11.6 alu  18.4 llc  29.9 rd  12.9 wr  23.5 n=2  Blit Command 462
+ 0.012   1.0     12.9 occ   0.1 alu   0.1 llc   0.2 rd   0.1 wr   0.1 n=1  Uniform page pool commit / upWindow
+ 0.012   1.0     12.9 occ   8.7 alu  12.2 llc  17.0 rd  10.0 wr  11.9 n=3  Blit Command 464
+ 0.012   1.0     12.9 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP particle placement / slabPrepare umCountedJobs=0 & Uniform compute copy
+ 0.012   1.0     12.9 occ   2.4 alu   1.5 llc   1.6 rd   3.5 wr   0.1 n=2  Uniform dynamic ownership census / interfaceBits
+ 0.012   1.9      6.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 354
+ 0.012   1.9      6.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 312
+ 0.012   1.0     12.5 occ  12.5 alu  20.6 llc  31.9 rd  16.1 wr  20.5 n=1  Blit Command 426
+ 0.012   1.0     12.1 occ  12.4 alu  28.0 llc  22.3 rd   6.9 wr   1.8 n=2  Blit Command 55
+ 0.012   1.0     12.4 occ     - alu     - llc     - rd     - wr     - n=0  Uniform pressure arena solve / pWrite
+ 0.012   1.0     12.3 occ     - alu     - llc     - rd     - wr     - n=0  Uniform page pool commit / upSlots
+ 0.012   1.0     12.0 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP surface arena search / brickTableRecord umCountedJobs=0
+ 0.012   1.0     12.3 occ  17.6 alu   9.0 llc  13.8 rd  23.0 wr   5.3 n=3  Blit Command 470
+ 0.012   1.0     12.3 occ     - alu     - llc     - rd     - wr     - n=0  Uniform dynamic ownership residency / pageCompact
+ 0.012   1.9      6.1 occ  16.1 alu  10.7 llc   7.5 rd   5.1 wr   0.4 n=3  Blit Command 222
+ 0.012   1.0     12.0 occ   0.4 alu   1.4 llc   0.9 rd   0.2 wr   0.1 n=1  Narrow-band FLIP surface reconstruction / surfaceSplatPlan umCountedJobs=0
+ 0.012   1.9      6.1 occ  13.1 alu   4.3 llc   8.5 rd  13.6 wr   0.2 n=2  Blit Command 272
+ 0.012   1.0     11.9 occ   6.5 alu  10.6 llc  15.6 rd   5.9 wr   2.9 n=1  Blit Command 59
+ 0.012   1.9      6.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 204
+ 0.012   1.9      6.1 occ  36.9 alu  73.6 llc  11.4 rd   2.0 wr   0.2 n=1  Blit Command 206
+ 0.012   1.0     12.1 occ   1.2 alu   0.3 llc   0.7 rd   0.1 wr   9.6 n=1  Blit Command 482
+ 0.012   1.0     12.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 418
+ 0.011   1.9      6.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 358
+ 0.011   1.9      6.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 214
+ 0.011   1.9      6.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 284
+ 0.011   1.9      5.9 occ  19.2 alu  25.5 llc   2.4 rd   6.2 wr   0.1 n=2  Blit Command 90
+ 0.011   1.9      5.9 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 200
+ 0.011   1.9      5.9 occ  33.2 alu  39.0 llc  32.9 rd  33.0 wr   3.2 n=1  Blit Command 280
+ 0.011   1.0     11.7 occ   5.2 alu   3.3 llc   2.2 rd   2.4 wr   0.1 n=1  Uniform pressure arena marks and rows / ubaRecord
+ 0.011   1.9      5.9 occ  25.2 alu  22.0 llc  18.8 rd  29.3 wr   2.8 n=1  Blit Command 282
+ 0.011   1.9      5.8 occ  31.0 alu  19.3 llc  44.3 rd  68.1 wr  10.0 n=3  Blit Command 302
+ 0.011   1.9      5.8 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 202
+ 0.011   1.0     11.6 occ   1.9 alu   0.3 llc   0.7 rd   0.3 wr   0.1 n=1  Uniform BULK16 page transfer / btPromotePages
+ 0.011   1.9      5.8 occ  33.5 alu  27.5 llc  58.7 rd  88.6 wr   6.4 n=1  Blit Command 278
+ 0.011   1.9      5.8 occ  29.1 alu  54.6 llc  45.5 rd  61.6 wr   2.9 n=2  Blit Command 360
+ 0.011   1.0     11.4 occ   5.4 alu   2.3 llc   8.4 rd   1.1 wr   0.7 n=1  Blit Command 480
+ 0.011   1.0     11.4 occ  25.8 alu  32.5 llc  33.3 rd  42.3 wr   5.5 n=3  Blit Command 414
+ 0.011   1.9      5.7 occ  16.8 alu  19.5 llc  18.4 rd  17.6 wr   1.8 n=2  Blit Command 368
+ 0.011   1.9      5.7 occ  15.6 alu  11.1 llc  13.1 rd  11.2 wr   7.6 n=3  Blit Command 238
+ 0.011   1.9      5.6 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 314
+ 0.011   1.0     11.2 occ   0.4 alu   0.2 llc   0.3 rd   0.3 wr   0.1 n=2  Uniform page pool commit / upHost
+ 0.011   1.9      5.6 occ   2.5 alu   5.3 llc   2.5 rd   1.2 wr   0.1 n=2  Blit Command 100
+ 0.011   1.0     10.9 occ   5.9 alu   1.9 llc   2.8 rd   5.9 wr   0.1 n=1  Narrow-band FLIP surface arena search / depthLists umCountedJobs=0
+ 0.011   1.9      5.5 occ  23.0 alu   7.6 llc  12.8 rd  23.2 wr   5.4 n=1  Blit Command 268
+ 0.010   1.9      5.4 occ   0.3 alu   0.7 llc   1.5 rd   2.3 wr   0.1 n=1  Blit Command 82
+ 0.010   1.0     10.9 occ   6.1 alu  10.2 llc   9.8 rd  10.3 wr   1.7 n=1  Uniform region dynamics publish / rememberPressure
+ 0.010   1.9      5.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 94
+ 0.010   1.0     10.9 occ  12.5 alu  20.2 llc  31.5 rd  16.9 wr  20.7 n=1  Blit Command 478
+ 0.010   1.9      5.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 96
+ 0.010   1.0     10.8 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 396
+ 0.010   1.0     10.8 occ   0.4 alu   0.6 llc   0.6 rd   0.3 wr   0.1 n=1  Uniform region work heat / publish & Uniform compute copy
+ 0.010   1.9      5.3 occ  24.3 alu  27.7 llc  35.7 rd  56.7 wr   3.4 n=2  Blit Command 298
+ 0.010   1.0     10.6 occ  15.0 alu   8.3 llc   6.5 rd   5.8 wr   3.1 n=1  Blit Command 406
+ 0.010   1.0     10.4 occ   5.0 alu   2.2 llc   2.5 rd   0.2 wr   0.1 n=1  Uniform mixed momentum tiers / affine
+ 0.010   1.0     10.6 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed solid record of claimed blocks / cutsNew
+ 0.010   1.0     10.6 occ  22.8 alu  33.2 llc  34.5 rd  34.1 wr   4.9 n=2  Blit Command 398
+ 0.010   1.0     10.4 occ   8.1 alu  10.6 llc  17.6 rd   9.0 wr  12.0 n=2  Blit Command 466
+ 0.010   1.0     10.4 occ     - alu     - llc     - rd     - wr     - n=0  Uniform detail h slot release / release & Uniform compute copy
+ 0.010   1.0     10.4 occ   5.4 alu  12.4 llc   3.4 rd   7.5 wr   0.1 n=1  Uniform pressure arena marks and rows / ubaLists
+ 0.010   1.0     10.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 474
+ 0.010   1.9      5.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 98
+ 0.010   1.0     10.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 402
+ 0.010   1.9      5.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 88
+ 0.010   1.9      5.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 210
+ 0.010   1.9      5.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 274
+ 0.010   1.0     10.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 410
+ 0.010   1.9      5.0 occ  25.0 alu  37.4 llc  37.4 rd  37.4 wr   5.8 n=1  Blit Command 288
+ 0.010   1.0     10.1 occ     - alu     - llc     - rd     - wr     - n=0  Uniform detail h slot init / init & Uniform compute copy
+ 0.010   1.0     10.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 422
+ 0.010   1.0     10.0 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed geometric fill / compactChanged
+ 0.010   1.9      5.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 292
+ 0.009   1.0      9.9 occ   6.0 alu   3.8 llc   3.5 rd   2.8 wr   0.1 n=1  Uniform detail h slot claim / claim & Uniform compute copy
+ 0.009   1.9      4.9 occ  33.3 alu  37.9 llc  34.1 rd  33.2 wr   2.6 n=1  Blit Command 366
+ 0.009   1.0      9.9 occ   2.6 alu   0.8 llc   0.3 rd   0.2 wr   0.1 n=1  Narrow-band FLIP particle placement / slabOverflow umCountedJobs=0
+ 0.009   1.0      9.5 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 468
+ 0.009   1.9      4.7 occ  14.1 alu   2.4 llc   1.1 rd   0.5 wr   2.0 n=1  Blit Command 294
+ 0.009   1.0      9.3 occ     - alu     - llc     - rd     - wr     - n=0  Uniform BULK16 page transfer / btDemotePages
+ 0.009   1.0      9.3 occ     - alu     - llc     - rd     - wr     - n=0  Narrow-band FLIP particle slabs / slabMark umCountedJobs=0
+ 0.009   1.0      9.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 71
+ 0.009   1.0      9.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 434
+ 0.009   1.0      9.2 occ  25.0 alu  37.7 llc  39.8 rd  38.5 wr   7.8 n=1  Blit Command 392
+ 0.009   1.9      4.5 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 220
+ 0.009   1.9      4.6 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 92
+ 0.009   1.0      9.1 occ     - alu     - llc     - rd     - wr     - n=0  Uniform BULK16 page transfer / btDecidePages
+ 0.009   1.9      4.5 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 308
+ 0.009   1.9      4.5 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 240
+ 0.009   1.9      4.5 occ  20.4 alu  19.7 llc  13.3 rd  15.4 wr   2.2 n=1  Blit Command 264
+ 0.008   1.9      4.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 296
+ 0.008   1.0      8.8 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 400
+ 0.008   1.9      4.4 occ  20.1 alu  20.0 llc  19.4 rd  16.2 wr   5.6 n=3  Blit Command 362
+ 0.008   1.9      4.4 occ  23.3 alu  21.4 llc  30.3 rd  45.6 wr   5.0 n=2  Blit Command 276
+ 0.008   1.9      4.4 occ  24.7 alu  21.8 llc  10.6 rd   9.5 wr   1.7 n=3  Blit Command 364
+ 0.008   1.9      4.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 290
+ 0.008   1.9      4.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 242
+ 0.008   1.0      8.7 occ     - alu     - llc     - rd     - wr     - n=0  Uniform pressure arena verdict / pVerdict
+ 0.008   1.9      4.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 248
+ 0.008   1.9      4.3 occ  37.2 alu  36.9 llc  22.4 rd  26.1 wr   0.3 n=1  Blit Command 356
+ 0.008   1.9      4.3 occ   6.2 alu   1.5 llc   1.3 rd   1.4 wr   1.0 n=2  Blit Command 208
+ 0.008   1.9      4.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 246
+ 0.008   1.9      4.2 occ  48.7 alu  53.7 llc  18.9 rd  29.1 wr  19.3 n=1  Blit Command 78
+ 0.008   1.0      8.4 occ   1.2 alu   0.4 llc   0.4 rd   0.1 wr   0.5 n=3  Uniform bulk tier selection / bulkPromote & Uniform compute copy
+ 0.008   1.0      8.3 occ   0.3 alu   0.1 llc   0.2 rd   0.4 wr   0.1 n=2  Uniform mixed global surface volume / reduce
+ 0.008   1.0      8.3 occ     - alu     - llc     - rd     - wr     - n=0  Uniform region dynamics publish / publishBegin
+ 0.008   1.0      8.2 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed layout build / slotCut
+ 0.008   1.0      8.2 occ   0.0 alu   0.0 llc   0.1 rd   0.1 wr   0.1 n=1  Uniform mixed layout build / slotClaim
+ 0.008   1.0      8.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 420
+ 0.008   1.9      4.0 occ  34.7 alu  13.0 llc  22.7 rd  37.3 wr  18.6 n=2  Blit Command 216
+ 0.007   1.9      3.9 occ  16.5 alu  16.2 llc   9.0 rd  10.6 wr   0.2 n=2  Blit Command 260
+ 0.007   1.9      3.8 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 266
+ 0.007   1.9      3.8 occ   0.5 alu   0.1 llc   0.5 rd   0.2 wr   0.1 n=1  Blit Command 244
+ 0.007   1.9      3.7 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 218
+ 0.007   1.0      7.3 occ   0.0 alu   0.0 llc   0.2 rd   0.0 wr   0.1 n=2  Uniform pressure arena projection / ubaRelease
+ 0.007   1.0      7.0 occ  13.6 alu  41.8 llc   8.4 rd   2.1 wr   0.1 n=1  Blit Command 83
+ 0.007   1.0      7.1 occ   0.2 alu   0.1 llc   0.8 rd   0.6 wr   1.2 n=1  Uniform cold freeze / head
+ 0.007   1.0      6.9 occ   1.4 alu   0.4 llc   0.6 rd   0.7 wr   0.2 n=1  Uniform mixed solid simulation widths / widthsListed
+ 0.006   1.9      3.4 occ  16.7 alu  57.7 llc  10.0 rd   7.9 wr   0.1 n=1  Blit Command 212
+ 0.006   1.0      6.7 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed solid record of claimed blocks / surfaceClearNew
+ 0.006   0.9      6.9 occ   6.9 alu   2.7 llc   2.1 rd   0.2 wr   2.7 n=1  Blit Command 428
+ 0.006   1.0      6.7 occ     - alu     - llc     - rd     - wr     - n=0  Uniform pressure arena marks and rows / ubaLevel1
+ 0.006   1.9      3.3 occ  32.0 alu  27.4 llc  36.3 rd  45.9 wr   2.8 n=2  Blit Command 270
+ 0.006   1.0      6.5 occ   2.6 alu   0.1 llc   0.4 rd   0.3 wr   0.1 n=1  Uniform mixed layout build / tileKeys
+ 0.006   1.0      6.2 occ  11.3 alu  15.4 llc  26.9 rd  13.3 wr   6.7 n=1  Blit Command 61
+ 0.006   1.9      3.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 262
+ 0.006   1.0      6.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 390
+ 0.006   1.0      6.3 occ  22.4 alu  17.7 llc  36.2 rd  54.4 wr   2.6 n=1  Blit Command 394
+ 0.006   1.0      6.3 occ     - alu     - llc     - rd     - wr     - n=0  Uniform region work heat / publish
+ 0.006   1.0      6.3 occ     - alu     - llc     - rd     - wr     - n=0  Uniform BULK16 page transfer / btMapPromoted
+ 0.006   1.0      6.2 occ     - alu     - llc     - rd     - wr     - n=0  Uniform 16h work evidence page claims / initialize
+ 0.006   1.9      3.1 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 250
+ 0.006   1.0      6.2 occ  17.2 alu  13.1 llc  28.2 rd  41.6 wr   1.4 n=1  Blit Command 388
+ 0.006   1.9      3.0 occ   0.2 alu   0.1 llc   0.8 rd   0.5 wr   1.2 n=1  Blit Command 256
+ 0.006   1.9      3.0 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 254
+ 0.006   1.0      6.0 occ   0.1 alu   0.2 llc   0.5 rd   0.1 wr   9.2 n=1  BULK16 reclaim quarantine / begin
+ 0.006   1.0      5.9 occ     - alu     - llc     - rd     - wr     - n=0  Uniform page pool commit / upClaimSuper
+ 0.006   1.0      5.9 occ  26.5 alu  13.0 llc   0.4 rd   0.2 wr   0.1 n=1  Blit Command 408
+ 0.006   1.0      5.8 occ     - alu     - llc     - rd     - wr     - n=0  Uniform BULK16 page transfer / btPromoteCells
+ 0.005   1.0      5.6 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 57
+ 0.005   1.0      5.6 occ     - alu     - llc     - rd     - wr     - n=0  Uniform page pool commit / upClaim
+ 0.005   1.9      2.8 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 252
+ 0.005   1.0      5.5 occ   3.1 alu   1.3 llc   0.6 rd   0.1 wr   1.0 n=1  Uniform pressure arena solve / pLaunch
+ 0.005   1.0      5.4 occ   2.5 alu   3.4 llc   0.9 rd   2.0 wr   0.1 n=1  Uniform BULK16 page transfer / btSeedPromoted
+ 0.005   1.9      2.7 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 258
+ 0.005   1.0      5.3 occ     - alu     - llc     - rd     - wr     - n=0  Uniform BULK16 page transfer / btPromoteLiquid
+ 0.005   1.0      5.2 occ   1.3 alu   0.1 llc   0.6 rd   0.2 wr   0.1 n=1  Narrow-band FLIP page words / nbInitBlocks
+ 0.005   1.0      5.2 occ     - alu     - llc     - rd     - wr     - n=0  Uniform page tile words / piTileWords
+ 0.005   1.0      5.2 occ     - alu     - llc     - rd     - wr     - n=0  Uniform mixed solid record of claimed blocks / slotsReclaimNew
+ 0.005   1.0      5.2 occ     - alu     - llc     - rd     - wr     - n=0  Uniform dynamic ownership page words / censusInitBlocks
+ 0.005   1.0      5.0 occ     - alu     - llc     - rd     - wr     - n=0  Uniform BULK16 page transfer / btDecideAsked
+ 0.005   1.0      4.7 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 69
+ 0.005   1.0      4.6 occ   8.1 alu  15.9 llc  17.4 rd   4.7 wr   1.8 n=2  Blit Command 67
+ 0.005   1.0      4.6 occ   0.5 alu   1.0 llc   1.0 rd   0.1 wr   0.1 n=1  Blit Command 63
+ 0.004   1.0      4.3 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 75
+ 0.004   1.0      4.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 65
+ 0.004   1.0      3.8 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 85
+ 0.004   1.0      3.7 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 484
+ 0.003   1.0      3.4 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 87
+ 0.003   1.0      3.3 occ   1.0 alu   1.6 llc   2.0 rd   0.2 wr   0.1 n=1  Blit Command 79
+ 0.003   1.0      3.2 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 73
+ 0.003   1.0      2.9 occ     - alu     - llc     - rd     - wr     - n=0  Blit Command 89
+ 0.002   1.0      2.5 occ     - alu     - llc     - rd     - wr     - n=0  Uniform pressure arena solve / pBulkProject
+ 0.002   1.0      2.5 occ   9.4 alu  13.5 llc  22.2 rd   9.8 wr   4.7 n=1  Blit Command 77
+ 0.001   1.0      1.4 occ   0.0 alu   0.0 llc   0.5 rd   0.0 wr   7.8 n=1  Uniform pressure arena solve / pBulkRows
+ 0.001   1.0      1.3 occ   8.5 alu   3.6 llc   1.6 rd   3.3 wr   0.9 n=1  Uniform pressure arena solve / pBulkCommit

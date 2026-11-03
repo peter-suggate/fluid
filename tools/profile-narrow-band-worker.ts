@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { createPassEncoderIsolationScratch, isolateComputePassEncoders } from "../lib/harness/webgpu-pass-encoder-isolation";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { mooredMotorBodies } from "./moored-motor-bodies";
 
 // Keep the capture harness fixed while profiling historical solver sources.
 // This avoids copying modern solver helpers into the pre-regression baseline.
@@ -83,6 +84,8 @@ if (captureBridge) {
 assert.ok(transfer===undefined||transfer==="flip"||transfer==="apic");
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isFinite(dt) && dt > 0);
 scene.numerics = { ...scene.numerics, fixedDt_s: dt, maxDt_s: dt };
+// FLUID_PROFILE_BODIES=1: drive motor fixtures and hold the rest (a moored boat's wheels).
+const bodiesAt = process.env.FLUID_PROFILE_BODIES === "1" ? mooredMotorBodies(scene, dt) : () => [];
 const started = performance.now();
 const solver = await uniformNarrowBandMethod.createSolverAsync!(device, scene, "balanced",
   { ...uniformNarrowBandMethod.appDefaults, timeStep: "scene",...(transfer?{particleTransfer:transfer}:{}) }, undefined, () => {});
@@ -97,7 +100,7 @@ try {
   // advances are outside the capture and its reported stepping interval.
   for(let frame=1;frame<=warmupSteps;frame++){
     simulationFrame = frame;
-    assert.ok(solver.advanceTo(frame*dt,[]));await solver.awaitFrameCompletion?.();
+    assert.ok(solver.advanceTo(frame*dt,bodiesAt(frame*dt)));await solver.awaitFrameCompletion?.();
     assert.equal(solver.info.simulationPipelineError,undefined);
   }
   console.log(JSON.stringify({phase:"capture-state",sourceRoot,warmupSteps,time_s:warmupSteps*dt,transfer}));
@@ -114,7 +117,7 @@ try {
     const capture = simulationFrame === captureFrame ? captureBridge : undefined;
     if (capture) capture.start(process.env.FLUID_METAL_CAPTURE_OUTPUT!);
     try {
-      solver.advanceTo((warmupSteps+frame) * dt, []);
+      solver.advanceTo((warmupSteps+frame) * dt, bodiesAt((warmupSteps+frame) * dt));
       await solver.awaitFrameCompletion?.();
     } finally {
       capture?.stop();

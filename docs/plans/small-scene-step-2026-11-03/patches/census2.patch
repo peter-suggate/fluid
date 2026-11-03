@@ -1,0 +1,53 @@
+--- a/lib/methods/uniform/uniform-mixed-bodies.ts
++++ b/lib/methods/uniform/uniform-mixed-bodies.ts
+@@ -123,7 +123,16 @@
+  }
+  return select(fallback,total/max(weight,1e-6),weight>0.0);
+ }
+-@compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
++var<workgroup> coupleSum:array<atomic<i32>,288>;
++@compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
++ let words=12u*min(umBodyCount(),24u);
++ for(var i=lane;i<words;i+=64u){atomicStore(&coupleSum[i],0);}
++ workgroupBarrier();
++ coupleLane(gid);
++ workgroupBarrier();
++ for(var i=lane;i<words;i+=64u){let v=atomicLoad(&coupleSum[i]);if(v!=0){if(i%12u==10u){atomicStore(&rigidExchange[i],1);}else{atomicAdd(&rigidExchange[i],v);}}}
++}
++fn coupleLane(gid:vec3u){
+  let o=umAllOwner(gid);if(o.width!=1u){return;}
+  let id=vec3i(umOrigin(o));let h=umSolidParams.cellGravity.xyz;let world=umSolidWorldCell(id);
+  for(var owner=0u;owner<umBodyCount();owner++){
+@@ -136,15 +145,15 @@
+   }
+   let reaction=pressure*area*umSolidParams.dimsDt.w;
+   let torque=cross(world-umSolidBodies[owner].positionShape.xyz,reaction);
+-  atomicAdd(&rigidExchange[base],i32(round(reaction.x*1000000.0)));atomicAdd(&rigidExchange[base+1u],i32(round(reaction.y*1000000.0)));atomicAdd(&rigidExchange[base+2u],i32(round(reaction.z*1000000.0)));
+-  atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1000000.0)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1000000.0)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1000000.0)));
+-  atomicStore(&rigidExchange[base+10u],1);
++  atomicAdd(&coupleSum[base],i32(round(reaction.x*1000000.0)));atomicAdd(&coupleSum[base+1u],i32(round(reaction.y*1000000.0)));atomicAdd(&coupleSum[base+2u],i32(round(reaction.z*1000000.0)));
++  atomicAdd(&coupleSum[base+3u],i32(round(torque.x*1000000.0)));atomicAdd(&coupleSum[base+4u],i32(round(torque.y*1000000.0)));atomicAdd(&coupleSum[base+5u],i32(round(torque.z*1000000.0)));
++  atomicStore(&coupleSum[base+10u],1);
+   let fraction=umBodyFraction(owner,id);if(fraction==0.0){continue;}
+   let displaced=umBodyOwnerWet(o)*fraction;
+-  atomicAdd(&rigidExchange[base+6u],i32(round(displaced*65536.0)));
+-  atomicAdd(&rigidExchange[base+11u],i32(round(displaced*65536.0)));
++  atomicAdd(&coupleSum[base+6u],i32(round(displaced*65536.0)));
++  atomicAdd(&coupleSum[base+11u],i32(round(displaced*65536.0)));
+   let ambient=umBodyAmbient(owner,id,umBodyOwnerVelocity(o));
+-  atomicAdd(&rigidExchange[base+7u],i32(round(displaced*ambient.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(displaced*ambient.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(displaced*ambient.z*10000.0)));
++  atomicAdd(&coupleSum[base+7u],i32(round(displaced*ambient.x*10000.0)));atomicAdd(&coupleSum[base+8u],i32(round(displaced*ambient.y*10000.0)));atomicAdd(&coupleSum[base+9u],i32(round(displaced*ambient.z*10000.0)));
+  }
+ }
+ fn umBodyMarkTile(tile:u32){
+--- a/lib/methods/uniform/uniform-mixed-solid.wgsl.ts
++++ b/lib/methods/uniform/uniform-mixed-solid.wgsl.ts
+@@ -264,7 +264,7 @@
+ /** Workgroups of the bodies-only cut launch's fixed region grid at most. */
+ const BODY_REGION_GRID=1024;
+ /** buildRegions' 64-workgroup chunks over a pool's resident regions: each round of a chunk takes 64 regions (8 blocks), so 8 chunks take 64 blocks a round. */
+-const BODY_REGION_CHUNKS=8;
++const BODY_REGION_CHUNKS=64;
+ const RECORD_PASS:GPUComputePassDescriptor={label:"Uniform mixed all-4h solid record"},WIDTHS_PASS:GPUComputePassDescriptor={label:"Uniform mixed solid simulation widths"};
+ const NEW_BLOCKS_PASS:GPUComputePassDescriptor={label:"Uniform mixed solid record of claimed blocks"};
+ /** Blocks the claimed-block build's fixed grid holds a workgroup per tile

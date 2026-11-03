@@ -44,8 +44,7 @@ import { sceneDocument, sceneDocumentAtLattice } from "../lib/core/scene-definit
 import { createReservoirSeepScene, RESERVOIR_SEEP_ID } from "../lib/core/reservoir-seep-scene";
 import { createBulkRestTankScene, BULK_REST_TANK_ID } from "../lib/core/bulk-rest-tank-scene";
 import type { MethodParamValues } from "../lib/core/method-contract";
-import { initializeRigidBodies, quaternionRotate, type RigidBodyState } from "../lib/core/rigid-body";
-import { rigidMotorAngle, rigidMotorPose, rigidMotorStrength } from "../lib/core/rigid-motor";
+import { mooredMotorBodies } from "./moored-motor-bodies";
 import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
 
 const option = (name: string) => process.argv.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3);
@@ -142,23 +141,7 @@ await withUniformDevice("reservoir bulk probe", async raw => {
   // motor fixture (a paddle) turned on its parent at the parent's throttle by
   // its authored drive (rigidMotorPose), with the drive's velocity: a moored
   // boat's wheels. Without it the fluid sees no bodies.
-  const bodies: RigidBodyState[] = process.argv.includes("--bodies") ? initializeRigidBodies(scene.rigidBodies) : [];
-  const parents = new Map(bodies.map(b => [b.description.id, b] as const));
-  const poseBodies = (time: number) => {
-    for (const body of bodies) {
-      const m = body.description.motorAttachment;
-      if (!m) { body.held = true; continue; }
-      const parent = parents.get(m.parentId)!, strength = rigidMotorStrength(parent.description, m.channel);
-      const drive = { ...m, angularSpeed_rad_s: strength * m.angularSpeed_rad_s }, dt = scene.numerics.fixedDt_s;
-      const now = rigidMotorPose(parent, drive, time), before = rigidMotorPose(parent, drive, time - dt);
-      body.position_m = now.position_m; body.orientation = now.orientation;
-      body.linearVelocity_m_s = { x: (now.position_m.x - before.position_m.x) / dt, y: (now.position_m.y - before.position_m.y) / dt, z: (now.position_m.z - before.position_m.z) / dt };
-      const omega = (rigidMotorAngle(drive, time) - rigidMotorAngle(drive, time - dt)) / dt;
-      const axis = quaternionRotate(parent.orientation, m.axis);
-      body.angularVelocity_rad_s = { x: omega * axis.x, y: omega * axis.y, z: omega * axis.z };
-    }
-    return bodies;
-  };
+  const poseBodies = process.argv.includes("--bodies") ? mooredMotorBodies(scene, scene.numerics.fixedDt_s) : () => [];
   try {
     for (let step = 1; step <= steps; step++) {
       if(step%every===0||step===steps)frame.requestNarrowBandVolumeProbe();

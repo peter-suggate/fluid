@@ -26,7 +26,7 @@ export class NarrowBandDispatchProbe {
       const dispatch=(kind:"dispatchWorkgroups"|"dispatchWorkgroupsIndirect",args:unknown[])=>{
        if(!pipeline)throw new Error("Dispatch probe requires a pipeline");
        const grid=process.env.NB_SPLIT_GRID==="1"&&kind==="dispatchWorkgroups"?` [${args.map(a=>a??1).join("x")}]`:"";
-       const pass=e.beginComputePass({...descriptor,label:`${descriptor!.label} / ${this.names.get(pipeline)??pipeline.label}${grid}`});
+       const pass=e.beginComputePass({...descriptor,label:`${label} / ${this.names.get(pipeline)??pipeline.label}${grid}`});
        pass.setPipeline(pipeline);
        for(const [index,values] of bindings)Reflect.apply(pass.setBindGroup,pass,[index,...values]);
        Reflect.apply(pass[kind],pass,args);pass.end();

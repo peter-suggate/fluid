@@ -1,0 +1,62 @@
+diff --git a/lib/methods/uniform/uniform-pressure-arena.ts b/lib/methods/uniform/uniform-pressure-arena.ts
+index 41667ae0..4e58089a 100644
+--- a/lib/methods/uniform/uniform-pressure-arena.ts
++++ b/lib/methods/uniform/uniform-pressure-arena.ts
+@@ -1524,7 +1524,7 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
+   let lb=pTileCell(bit,l);let at=pAddr(slot,lb);
+   let warm=(ubaClass(slot)&UBA_ENTERING)==0u&&bLiquid(pool[P_KINDS+at]);
+   let p=vec3i(ubaOrigin(id)+lb);
+-  let own=bPhiH(p);let liquid=bWet(own,1.0);${S?`
++  let ownOwner=umOwnerAt(p);let own=phi[ownOwner.index];let liquid=bWet(own,1.0);${S?`
+   let solidClear=bLocalSolidWork&&umSolidRegionClearAtBuild(p);
+   var shut=false;var inside=false;if(!solidClear){shut=!umCellIsOpen(p);inside=umCellInsideSolid(p);}
+   // One umCellOpen site for p and one umCellIsOpen site for q (Metal inlines each).
+@@ -1546,7 +1546,8 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
+    // seam links: a Neumann face here also removes the native row's link
+    // in pNative, disconnecting its gravity RHS from the live surface.
+    else{
+-    let n=bNeighbour(q);
++    let inner=ownOwner.width==1u&&l[axis]!=select(0u,3u,sign>0);var n:BNeighbour;
++    if(inner){let b=phi[u32(i32(ownOwner.index)+sign*i32(select(select(16u,4u,axis==1u),1u,axis==0u)))];let wet=bWet(b,1.0);n=BNeighbour(b,wet,wet);}else{n=bNeighbour(q);}
+     var theta=1.0;${S?`
+     // q's closure, where a row reads it: a face between liquid and air.
+     var acrossShut=false;if(!solidClear&&liquid!=n.wet){acrossShut=!umCellIsOpen(q);}`:""}
+@@ -1555,7 +1556,7 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
+      ${S?"else if(inside&&umCellInsideSolid(q)&&open<0.1&&umCellOpen(q)<0.1){theta=1.0;}":""}
+      else{theta=bFaceTheta(bFacePhi(p,axis,sign),own,liquid,n.phi,n.wet);}
+     }
+-    if(pBandCell(q)){kind=K_BAND;coefficient=1.0/(h*h*theta);}
++    if(inner||pBandCell(q)){kind=K_BAND;coefficient=1.0/(h*h*theta);}
+     // A seam: the native 4h row's centre lies 2.5h away (a liquid cell meets
+     // it at theta 1, an air one at its surface fraction).
+     else if(bNative(q)){kind=K_SEAM;coefficient=1.0/(2.5*h*h*select(theta,1.0,liquid));}
+@@ -1696,7 +1697,7 @@ var<workgroup> pCopyFineTiles:vec2u;
+   let w=pIndex(TLIST+j);let slot=pTileSlot(w);let lb=pTileCell(w,l);
+   let p=vec3i(ubaOrigin(ubaBrick(slot))+lb);
+   for(var axis=0u;axis<3u;axis++){
+-   var q=p;q[axis]-=1;if(!umCellPresent(q)||pBandCell(q)){continue;}
++   if((lb[axis]&3u)!=0u){continue;}var q=p;q[axis]-=1;if(!umCellPresent(q)||pBandCell(q)){continue;}
+    var first=true;for(var b=0u;b<axis;b++){var r=q;r[b]+=1;if(pBandCell(r)){first=false;}}
+    if(first){textureStore(copied,q,textureLoad(velocity,q,0));}
+   }
+@@ -3110,9 +3111,10 @@ fn bRootFace(p:vec3i,axis:u32,sign:i32)->f32{
+  }
+  var sum=0.0;var weight=0.0;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
+  let f=2u*axis+select(1u,0u,sign>0);
++ let rootSlot=ubaSlot(ubaBrickAt(other));
+  for(var j=0u;j<16u;j++){
+   var q=other;q[axis]+=select(3,0,sign>0);q[u]+=i32(j&3u);q[v]+=i32(j>>2u);
+-  let at=pAt(q);let w=pVolume(at,f);sum+=w*bFace(at,q,f);weight+=w;
++  let at=pAddr(rootSlot,vec3u(q)&vec3u(7u));let w=pVolume(at,f);sum+=w*bFace(at,q,f);weight+=w;
+  }
+  return select(0.0,sum/max(weight,1e-30),weight>1e-6);
+ }
+@@ -3195,7 +3197,7 @@ fn bReleased(at:u32,p:vec3i,f:u32,value:f32)->bool{
+   texel.w=f32(released);textureStore(output,p,texel);
+   // A non-band texel below this cell: the first band cell along x, then y, then z writes its band faces.
+   for(var axis=0u;axis<3u;axis++){
+-   var q=p;q[axis]-=1;if(!umCellPresent(q)||pBandCell(q)){continue;}
++   if((lb[axis]&3u)!=0u){continue;}var q=p;q[axis]-=1;if(!umCellPresent(q)||pBandCell(q)){continue;}
+    var first=true;for(var b=0u;b<axis;b++){var r=q;r[b]+=1;if(pBandCell(r)){first=false;}}
+    if(!first){continue;}
+    var t=textureLoad(field,q,0);

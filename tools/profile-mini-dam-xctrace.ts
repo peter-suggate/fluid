@@ -19,6 +19,7 @@
  *
  *   --lane=mini|large               narrow-band dam size (default mini)
  *   --scene=ID                       override the scene
+ *   --bodies                         drive motor fixtures, hold other bodies (tools/moored-motor-bodies.ts)
  *   --warmup-steps=N                 advance before the attach gate (default 0)
  *   --time-step=S                    fixed simulation step in seconds
  *   --transfer=flip|apic              override particle transfer
@@ -376,6 +377,7 @@ if(flag("time-step")){
  const dt=Number(flag("time-step"));if(!Number.isFinite(dt)||dt<=0)throw new Error("--time-step must be positive");
  laneEnvironment.FLUID_MAX_DT=String(dt);
 }
+if(process.argv.includes("--bodies"))laneEnvironment.FLUID_PROFILE_BODIES="1";
 if(flag("transfer")){
  if(!["flip","apic"].includes(flag("transfer")!))throw new Error("--transfer must be flip or apic");
  laneEnvironment.FLUID_PROFILE_TRANSFER=flag("transfer")!;
