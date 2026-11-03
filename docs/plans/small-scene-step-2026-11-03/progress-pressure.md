@@ -234,3 +234,176 @@ The real hierarchy (native 4h rows at level 2, seams, page tail) is not in the m
 **Verdict:** under the 1 ms bar even in the best case. Not built.
 
 The structural fact: once θ is in the band, a Galerkin hierarchy pays its operator every step, and level-1 global sweeps cost dispatches. The per-cycle work has to come down, not the cycle count.
+
+## P12: cheaper cycles, 2026-11-03 (pDownR landed; tailCycles 1 held; launch merges priced, not built)
+
+**Where the solve's time goes (paddleboats).** GPUPassProfile gives the solve pass 5.8–6.0 ms of GPU time at 3.1–3.2 cycles, over 171 dispatches. All passes come to about 41 ms of a ~45 ms step, so the step is GPU-bound. The kernel timer gives each dispatch its own pass, which inflates short kernels, so its numbers are for attribution only.
+
+| Part, per step | Kernel timer ms |
+|---|---|
+| Level 0 smoothing (pRelax) | 0.93 |
+| Native rows' smoothing (pNativeRelax; nativeSweeps is 1 in composite mode) | 0.58 |
+| Tail ladder (pDown3, pDown4, pTail, pUp4, pUp3; 3 tail cycles, 15 dispatches a cycle) | 1.51 |
+| Levels 1–2 transfers (pDownA/B, pDown2, pUpA/B, pRestrict0, pResidual2, pProlong0, pNativeOperator) | 1.58 |
+| Krylov GCR(1) (kStart, kApplyT, kApplyNB, kReduce, kBound, kStep) | 0.91 |
+| pRebase (initial and correction) | 0.43 |
+
+The pressure authority's `encode` (1.30 ms, 16 dispatches) is work-bound: surfaceHeld 0.47, wetRegions 0.41, cutRegions 0.24 ms. It is not dispatch-bound.
+
+**pDownR (landed).** Level 2's RHS now sums the residual of level 1's cores, each read against its neighbours' kept cores (P10's x1), and no longer uses the box's own view. That costs one extra level-1 dispatch per cycle.
+- In P10 I rejected x1 on letters' worst final. Worst final is not a usable statistic: across repeat runs on HEAD it swung from 0.12 to 2.7. The geometric mean is stable to about 5%.
+- `probe-pressure-classes`, frames 31–90:
+
+  | Run | Paddleboats cycles | Paddleboats geo final | Letters cycles | Letters geo final |
+  |---|---|---|---|---|
+  | HEAD (three runs) | 3.217 | 0.0267–0.0294 | 3.77–3.80 | 0.039–0.042 |
+  | pDownR | 3.133 | 0.0187 | 3.80 | 0.0340 |
+
+- The regression test `tests/pressure-residual-history.test.ts` runs 90 frames of paddleboats (moored, motors driven) and letters through `createUniformSolver`, and covers frames 31–90:
+
+  | Tree | Paddleboats cycles | Paddleboats geo | Letters cycles | Letters geo |
+  |---|---|---|---|---|
+  | HEAD | 3.15 | 0.0286 | 4.00 | 0.1035 |
+  | pDownR | 3.05 | 0.0219 | 4.00 | 0.0840 |
+
+  Its bounds sit between the two: paddleboats at most 3.1 cycles and 0.025, letters at most 0.093. The box view fails the test and pDownR passes it.
+- Whole-pass profile, solve pass:
+
+  | Tree | Run | ms | Cycles |
+  |---|---|---|---|
+  | HEAD | A3c | 5.820 | 3.133 |
+  | HEAD | E0 | 5.840 | 3.133 |
+  | HEAD | D0 | 6.022 | 3.200 |
+  | pDownR | X3 | 5.829 | 3.100 |
+  | pDownR | X3b | 5.808 | 3.083 |
+
+  175 dispatches against 171. The time is neutral: the extra dispatch is paid for by the cycles saved. The win is accuracy at no cost.
+
+**Gate for pDownR** (one run each, clean export of df4934c5 plus pDownR and the test):
+
+| Scene | Drift | Step median / late median ms | Final residual | Cycles |
+|---|---|---|---|---|
+| seep 300, inviscid, pipelined | +0.00011 | 30.0 / 31.1 | 0.0101 | 3 |
+| letters 120 | −0.01116 | 90.6 / 99.3 | 0.0446 | 4 |
+| paddleboats 90 | −0.00669 | 45.4 / 49.2 | 0.0372 | 3 |
+
+Drift matches the earlier gates: seep +0.0003, letters −0.0112, paddleboats −0.0067. `npm run check:types` and `npm run test:unit` pass (1585 pass, 0 fail). The residual-history test passes on the export: paddleboats 3.05 cycles, geo 0.0220; letters geo 0.0816.
+
+**tailCycles 1 (held, not landed; the decision is the user's).**
+- Solve pass: 5.01 ms against 5.91 ms with 3 tail cycles, a saving of 0.9 ms of GPU time per step on paddleboats.
+- Convergence, frames 31–90:
+
+  | Tree | Paddleboats cycles | Paddleboats geo | Letters geo |
+  |---|---|---|---|
+  | HEAD, tail cycles 3 | 3.217 | ~0.028 | 0.039–0.042 |
+  | HEAD, tail cycles 1 | 3.217 | 0.0279 | 0.052–0.055 |
+  | pDownR, tail cycles 3 | 3.133 | 0.0187 | 0.0340 |
+  | pDownR, tail cycles 1 | 3.150 | 0.0231 | 0.0479 |
+
+- Paddleboats holds its cycles. Letters, which runs to the 4-cycle cap, ends about 25–40% looser in geometric mean, so it fails equal-or-better on letters.
+- Interleaved step A/B (2 pairs, tail cycles 3 against 1): medians 43.6/50.1 against 50.2/48.9 ms. That is ±3 ms of noise, so it cannot resolve 0.9 ms.
+- tailCycles must stay odd: the arena throws at 2, because level 2's up leg reads the odd cycles' channel.
+
+**Krylov off** (`krylov:false`, pDownR tree): paddleboats 3.43 cycles, geo 0.0355; letters geo 0.208. Off, letters ends 6× looser in geometric mean and paddleboats needs 0.3 more cycles. The kernel timer puts GCR(1) at 0.91 ms, but that is inflated and its real cost was not separated here. It stays on accuracy alone.
+
+**Exact launch merges (priced, not built).**
+- Independent pairs, by data flow:
+  - pResidual2 ‖ pRestrict0. Both read the post-smoothed iterate and write disjoint words. pRestrict0 flips only P_CORRECT, and pResidual2 reads only face kinds.
+  - pRebaseC ‖ pNativeOperator. Both read both correction sets and write PA_D/PA_K and PB_K/PB_D respectively.
+  - kApplyT ‖ kApplyNB. These are separate dot segments.
+  - Everything else in a cycle is a dependent chain.
+- Each merge needs a workgroup-size reconciliation:
+  - 64-lane tiles inside 512-lane workgroups, as eight virtual 64-lane groups, keeping each tile's reduction tree.
+  - For the Krylov pair, the tile stride and partial index must equal today's `tileGroups`. That value is per-frame, so it has to come in by buffer.
+  - pNativeOperator is in the `native` bind layout, but pRebaseC is in `solver`.
+- The estimate of ~0.4 ms assumed about 25 µs per removed launch. I measured instead:
+  - **Empty launches.** Ten empty tile dispatches added per cycle (40 a step) cost 0.28 and 0.37 ms of solve-pass time. After the cycle-count difference that is about **4–7 µs per launch**, so the removed launches are worth about 11 × 5 µs ≈ 0.05 ms.
+  - **Ceiling from overlap.** Dispatching pRestrict0, pNativeOperator and kApplyT twice each cost +0.36 to +0.55 ms (D1/D1b 6.385/6.376 ms against D0/E0 6.022/5.840 ms). So the three shorter kernels' serial time is about 0.45 ms. Merging can save at most that, and only if the shorter kernel of each pair overlaps fully.
+  - With up to 4096 tile workgroups in several waves, the overlap is mostly the head and tail of a wave.
+  - **Projection:** 0.05 ms + a fraction of 0.45 ms, about 0.15–0.25 ms. That is under the 0.3 ms bar. Not built.
+
+**Dispatches and GPU time per pass, whole step** (paddleboats, HEAD df4934c5, GPUPassProfile mean over frames 31–90, run A3c, 3.13 cycles):
+
+| Pass | Dispatches per step | GPU ms per step |
+|---|---|---|
+| Uniform pressure arena solve | 171 | 5.820 |
+| Narrow-band FLIP advectParticles | 3 | 3.607 |
+| Uniform mixed extension | 40 | 3.377 |
+| Uniform mixed surface advect | 9 | 1.930 |
+| Uniform dynamic ownership census | 11 | 1.923 |
+| Narrow-band FLIP surface canonical metric and publication | 3 | 1.680 |
+| Uniform mixed surface advect deferred | 6 | 1.493 |
+| NB-FLIP surface pressure authority | 16 | 1.300 |
+| Narrow-band FLIP surface reconstruction | 7 | 1.293 |
+| Narrow-band FLIP transfer | 7 | 1.257 |
+| Uniform mixed geometric fill | 11 | 1.168 |
+| Uniform mixed all-4h solid record | 5 | 1.145 |
+| Uniform mixed remap | 9 | 0.997 |
+| Uniform pressure arena marks and rows | 8 | 0.980 |
+| Uniform mixed momentum | 4 | 0.956 |
+| Uniform mixed pressure project | 1 | 0.850 |
+| Uniform local speed certificate | 8 | 0.772 |
+| Uniform mixed body forces | 4 | 0.755 |
+| Uniform mixed phi resolve | 5 | 0.675 |
+| Uniform pressure arena projection | 5 | 0.609 |
+| Narrow-band FLIP surface arena search | 7 | 0.607 |
+| Narrow-band FLIP particle sort | 25 | 0.519 |
+| Uniform mixed hanging fine taps | 3 | 0.451 |
+| Narrow-band FLIP regional air update | 2 | 0.442 |
+| Uniform mixed momentum tiers | 4 | 0.437 |
+| Narrow-band FLIP seed | 3 | 0.427 |
+| Uniform mixed layout build | 11 | 0.374 |
+| Uniform shared frame plan | 8 | 0.345 |
+| Narrow-band FLIP coarse retirement | 3 | 0.304 |
+| Uniform mixed 4h sampling cache | 1 | 0.292 |
+| Uniform mixed pressure rhs | 1 | 0.252 |
+| Uniform dynamic ownership residency | 2 | 0.245 |
+| Uniform mixed transfer to pressure | 2 | 0.223 |
+| Uniform bulk tier selection | 2 | 0.220 |
+| Narrow-band FLIP snapshot | 1 | 0.199 |
+| BULK16 reclaim quarantine | 1 | 0.189 |
+| Uniform mixed extension regions | 4 | 0.188 |
+| Uniform mixed rigid coupling | 1 | 0.177 |
+| Narrow-band FLIP surface canonical view | 1 | 0.151 |
+| Uniform mixed transfer to simulation | 2 | 0.135 |
+| Uniform mixed extension retain | 2 | 0.118 |
+| Narrow-band FLIP surface canonical far metric | 1 | 0.117 |
+| Uniform page pool commit | 8 | 0.116 |
+| Uniform region work heat | 6 | 0.115 |
+| Uniform live block copy | 7 | 0.115 |
+| Uniform pressure root owners | 1 | 0.104 |
+| Narrow-band FLIP activity | 2 | 0.081 |
+| Uniform detail ring enter | 3 | 0.081 |
+| Uniform mixed remap publish | 2 | 0.079 |
+| Uniform block neighbours | 4 | 0.078 |
+| GPU resident rigid-body integration and contacts | 1 | 0.063 |
+| Uniform mixed global surface volume | 4 | 0.059 |
+| Narrow-band FLIP particle slabs | 3 | 0.059 |
+| Fluid particle display energy | 1 | 0.059 |
+| Uniform region dynamics classify | 2 | 0.054 |
+| unlabelled | 1 | 0.054 |
+| Uniform mixed rigid body tiles | 1 | 0.052 |
+| Uniform region dynamics publish | 3 | 0.047 |
+| Uniform BULK16 page transfer | 8 | 0.046 |
+| Narrow-band FLIP crossing search | 2 | 0.045 |
+| Uniform mixed solid record of claimed blocks | 4 | 0.043 |
+| Narrow-band FLIP particle placement | 3 | 0.039 |
+| Uniform cold freeze | 2 | 0.038 |
+| Uniform shared regional frame plan | 2 | 0.038 |
+| Uniform mixed phi twins | 2 | 0.031 |
+| Uniform detail h slot init | 3 | 0.028 |
+| Uniform mixed remap adopt | 1 | 0.025 |
+| Uniform mixed pressure bulk faces | 1 | 0.024 |
+| Uniform16h remap producer revisions | 1 | 0.019 |
+| Uniform page initialise | 4 | 0.017 |
+| Uniform detail h slot claim | 2 | 0.015 |
+| Uniform pressure arena verdict | 1 | 0.014 |
+| BULK16 publish live slots | 1 | 0.012 |
+| Uniform pressure arena unmark | 1 | 0.010 |
+| Narrow-band FLIP page words | 1 | 0.008 |
+| Uniform mixed solid simulation widths | 1 | 0.005 |
+| Uniform dynamic ownership page words | 1 | 0.004 |
+| Uniform 16h work evidence page claims | 1 | 0.002 |
+| Uniform page tile words | 1 | 0.001 |
+| Uniform detail h slot release | 1 | 0.001 |
+| **All 80 passes** | **513** | **40.68** |

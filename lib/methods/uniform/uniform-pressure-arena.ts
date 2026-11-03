@@ -37,7 +37,11 @@ import {BULK16_STATUS,type UniformBulkPages} from "./uniform-bulk-pages";
  * the last sweep's; neighbours across
  * a brick face through the brick's record). Levels 1 and 2 smooth with an
  * overlapping box: a brick stages its cells two deep around it, red-black
- * sweeps all but the outer ring and keeps its own 8^3. Native rows take the
+ * sweeps all but the outer ring and keeps its own 8^3. Each level's
+ * residual is measured against the neighbour bricks' kept cores, never the
+ * box's own view of them (which no up leg sees). At level 1 (pDownR) the box
+ * view left paddleboats at 3.22 cycles, geo-mean final 0.028, against 3.13 and
+ * 0.019, and letters' capped final at 0.040 against 0.034. Native rows take the
  * composite residual each cycle and their level 2 correction; the band's
  * levels sum their children's residuals. Prolongation is trilinear over the
  * parents that exist, renormalised. The aggregated operators are the
@@ -2343,8 +2347,9 @@ var<workgroup> rRes:array<f32,64>;
  workgroupBarrier();
  if(lane==0u&&n>0u){let m=atomicLoad(&worst);if(m>pIndex(HISTORY+pCycle)){atomicMax(&state[HISTORY+pCycle],m);}if(group.x==0u){atomicOr(&state[VALID],1u<<pCycle);}}
 }`,
-   // Level 1 down: the box from zero, the box-local residual's sum into
-   // level 2's RHS; with pBake first level 2's rows (the octant's).
+   // Level 1 down: the box from zero, its core kept; with pBake level 2's
+   // rows (the octant's). pDownR then sums the cores' residual into level
+   // 2's RHS.
    downA:header()+poolWGSL+coarse(1)+bakeArrays+/* wgsl */`
 override pBake:bool=false;
 @compute @workgroup_size(${WG}) fn pDownA(${lanes}){
@@ -2358,10 +2363,9 @@ override pBake:bool=false;
   cSweeps(red,cR0,black,cB0);
   let c=cCore(lane);let at=cAddr(c);let core=cCell(at);let d=core.d;let x=cX[cBox(c)];
   ubaStore1(CX,slot,lane,x);
-  var r=0.0;if(d>0.0){r=core.r+cOff(c,core)-d*x;}
   workgroupBarrier();
-  gRes[lane]=r;
-  if(pBake){
+  if(!pBake){continue;}
+  {
    gCoarseChild(lane,vec3u(c),at,d,CK,CPL);
    // Restore a missing level 1 link only when it crosses a real native
    // seam. An absent liquid correction row remains a fixed-zero boundary.
@@ -2377,11 +2381,31 @@ override pBake:bool=false;
    let parent=ubaParent(1u,slot);let A=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);let o=parent.y;
    let at2=pAddr(parent.x,4u*vec3u(o&1u,(o>>1u)&1u,o>>2u)+A);
    // A native row's level 2 row is its own (pNative, pResidual2).
-   if((poolB[PN_M+at2]&N_ACTIVE)==0u){
-    qSet(PB_R,at2,gSum(A));
-    if(pBake){qSet(PB_D,at2,gDiag(A));for(var f=0u;f<6u;f++){qSet(PB_K+f*PLANE2,at2,gCouple(A,f));}}
-   }
+   if((poolB[PN_M+at2]&N_ACTIVE)==0u){qSet(PB_D,at2,gDiag(A));for(var f=0u;f<6u;f++){qSet(PB_K+f*PLANE2,at2,gCouple(A,f));}}
   }
+ }
+}
+// Level 1's residual against the neighbour bricks' cores (every brick's
+// pDownA has stored its own), its children's sums into level 2's RHS.
+@compute @workgroup_size(${WG}) fn pDownR(${lanes}){
+ if(lane==0u){cN=select(ubaLevelCount(1u),0u,bConverged());}
+ let n=workgroupUniformLoad(&cN);
+ for(var e=group.x;e<n;e+=groups.x){
+  let slot=ubaLevelSlot(1u,e);cRecords(slot,lane);
+  let c=cCore(lane);let at=cAddr(c);let core=cCell(at);var r=0.0;
+  if(core.d>0.0){
+   var off=0.0;
+   for(var f=0u;f<6u;f++){if(core.k[f]!=0.0){var q=c;q[f/2u]+=bSign(f);let m=cAddr(q);if(cDiag(m)>0.0){off+=core.k[f]*qF(CX,m);}}}
+   r=core.r+off-core.d*qF(CX,at);
+  }
+  gRes[lane]=r;
+  workgroupBarrier();
+  if(lane<64u){
+   let parent=ubaParent(1u,slot);let A=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);let o=parent.y;
+   let at2=pAddr(parent.x,4u*vec3u(o&1u,(o>>1u)&1u,o>>2u)+A);
+   if((poolB[PN_M+at2]&N_ACTIVE)==0u){qSet(PB_R,at2,gSum(A));}
+  }
+  workgroupBarrier();
  }
 }`,
    // Level 2 down (a page a brick): the box from zero, its core kept; with
@@ -3606,7 +3630,7 @@ fn sProlong6(g:vec3i)->f32{
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={bulk:"bulk",nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
   const entryOf:Record<string,string[]>={bulk:["pBulkRows","pBulkProject","pBulkCommit"],bulkLevels:["pBulkLift"],nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pNativeOperator","pWrite"],residual:["pResidual2","pNativeRelax"],final:["pFinal"],clear2:["pClear2"],
-   krylov:["kStart","kApplyT",BP?"kApplyNB":"kApplyN","kReduce","kBound","kStep"],rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative",...(UniformPressureArena.reference?["pProjectNativeRef"]:[])],
+   krylov:["kStart","kApplyT",BP?"kApplyNB":"kApplyN","kReduce","kBound","kStep"],rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA","pDownR"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative",...(UniformPressureArena.reference?["pProjectNativeRef"]:[])],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
@@ -3801,7 +3825,7 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
    for(let k=0;k<s.nativeSweeps;k++){this.dispatch(pass,"pNativeRelax0",pages);this.dispatch(pass,"pNativeRelax1",pages);}
    this.dispatch(pass,this.residuals[cycle]!,either);this.dispatch(pass,this.restricts[cycle]!,this.tileGroups);
    this.dispatch(pass,"pRebaseC",this.tileGroups);this.dispatch(pass,"pNativeOperator",pages);
-   this.dispatch(pass,"pDownA@0",g);this.dispatch(pass,"pDownB@0",pages);this.dispatch(pass,"pDown2",either);
+   this.dispatch(pass,"pDownA@0",g);this.dispatch(pass,"pDownR",g);this.dispatch(pass,"pDownB@0",pages);this.dispatch(pass,"pDown2",either);
    // Refresh numeric coarse rows each cycle; super-block topology is frame-local.
    if(W){if(first)this.dispatch(pass,"sGroup6",BP?{indirect:LAUNCH.items64}:Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,first?"sGroup7":"sGroup7C",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
    for(let m=0;m<s.tailCycles;m++){
