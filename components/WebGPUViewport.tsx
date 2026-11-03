@@ -555,6 +555,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
+  // Render reads whether a press is held, never the gesture itself: handlers
+  // write the ref every move, and only a press or release re-renders (React
+  // drops a set to the same value).
+  const [pointerHeld, setPointerHeld] = useState(false);
+  const setPointer = (next: typeof pointerRef.current) => {
+    pointerRef.current = next;
+    setPointerHeld(next !== null);
+  };
   // A brush stroke lands on the surface the ray meets, so the brush is only
   // armed once there is a published surface for it to land on.
   const fluidToolArmed = pickingInteractive
@@ -901,7 +909,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // only crossing the drag threshold may hold or move the body.
     const basis = cameraBasis(session.ui.getState().camera);
     const dragPoint = planeHit(ray.origin, ray.direction, surfacePosition, basis.forward), grabOffset = sub(position, dragPoint);
-    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, dragging: false, orientation, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
+    setPointer({ id: pointerId, action: "body", bodyId: body.description.id, dragging: false, orientation, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp });
   };
 
   /**
@@ -1037,7 +1045,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (distance_px > FILL_HANDLE_TOLERANCE_PX) return false;
     // A refused gesture still claims the press: the handle was hit.
     const gesture = simulation.beginDraft("fill-level", "Set fill level", paneId);
-    if (gesture) pointerRef.current = { id: event.pointerId, action: "fill-level", gesture };
+    if (gesture) setPointer({ id: event.pointerId, action: "fill-level", gesture });
     return true;
   };
 
@@ -1103,10 +1111,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       ? simulation.beginEdit(label, paneId)
       : simulation.beginDraft(entity.draftSubject, label, paneId);
     if (!gesture) return true;
-    pointerRef.current = {
+    setPointer({
       id: event.pointerId, action: "entity-handle", entity, handle,
       grabOffset: grabPoint ? sub(handle.position_m, grabPoint) : { x: 0, y: 0, z: 0 }, gesture,
-    };
+    });
     setHandleHover(null);
     setHandleDrag({ handleId: handle.id });
     if (entity.simulatedBodyId) {
@@ -1145,7 +1153,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (!described) return;
     const current = pointerRef.current;
     if (current?.action === "entity-handle") {
-      pointerRef.current = { ...current, pose: described.position_m, described };
+      setPointer({ ...current, pose: described.position_m, described });
     }
     simulation.manipulateBody(bodyId, described.position_m, "move", undefined, paneId);
   };
@@ -1182,7 +1190,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     }
     if (!best) return false;
     const gesture = simulation.beginDraft("terrain", `Shaped terrain ${terrain.features[index]?.kind ?? "feature"}`, paneId);
-    if (gesture) pointerRef.current = { id: event.pointerId, action: "terrain-handle", index, kind: best.kind, anchor: best.anchor, gesture };
+    if (gesture) setPointer({ id: event.pointerId, action: "terrain-handle", index, kind: best.kind, anchor: best.anchor, gesture });
     return true;
   };
 
@@ -1253,7 +1261,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const region: SolidVoxelClearRegion = { minimum: [...anchor.coordinate],
       maximumExclusive: anchor.coordinate.map((value) => value + 1) as
         unknown as SolidVoxelClearRegion["maximumExclusive"] };
-    pointerRef.current = {
+    setPointer({
       id: event.pointerId,
       action: "solid-voxel-region",
       anchor,
@@ -1264,7 +1272,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // have moved under a long hold, and a click must select what was pointed
       // at when the button went down.
       selectOnClick: target.selection,
-    };
+    });
     previewSolidVoxelRegion(region);
     return true;
   };
@@ -1317,9 +1325,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const regionId = nextRefinementRegionId(scene);
     const gesture = simulation.beginDraft("refinement-region", "Drew a refinement region", paneId);
     if (!gesture) return;
-    pointerRef.current = {
+    setPointer({
       id: event.pointerId, action: "region-draw", anchor, regionId, drawn: false, gesture,
-    };
+    });
   };
 
   /**
@@ -1433,11 +1441,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (!anchor) return;
     const gesture = simulation.beginDraft("fluid-body", "Dropped a ball of water", paneId);
     if (!gesture) return;
-    pointerRef.current = {
+    setPointer({
       id: event.pointerId, action: "fluid-ball", anchor, ray, hover,
       downX: event.clientX, downY: event.clientY, moved: false, radius_m,
       selectionId: addFluidBall(scene, anchor, radius_m).id, gesture,
-    };
+    });
     updateFluidBallDraft(ray, hover, radius_m);
   };
 
@@ -1554,11 +1562,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       ui.placementShape, ui.placementDimensions, 1, scene.container.height_m);
     const position = restInContainer(scene, ray, surface, boundingRadius(template));
     if (!position) return;
-    pointerRef.current = {
+    setPointer({
       id: event.pointerId, action: "body-place", anchor: position, ray, hover: surface,
       downX: event.clientX, downY: event.clientY, moved: false,
       template, dimensions_m: template.dimensions_m, position,
-    };
+    });
     setCursorDrop({ centre_m: position, radius_m: boundingRadius(template), tone: "body" });
   };
 
@@ -1611,9 +1619,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // the whole cost of hover for a reader who is only watching. See
     // `editor-viewport-mode.ts`.
     if (session.ui.getState().viewportMode !== "interact") {
-      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
+      setPointer({ id: event.pointerId, x: event.clientX, y: event.clientY,
         downX: event.clientX, downY: event.clientY,
-        action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
+        action: event.shiftKey || event.button === 1 ? "pan" : "orbit" });
       return;
     }
     // The armed tool gave this press to the camera, so for its length EDIT
@@ -1622,9 +1630,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // click on the room either.
     if (voxelClaim === "camera") {
       setHoverTarget(null); publishHoverHighlight(null);
-      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
+      setPointer({ id: event.pointerId, x: event.clientX, y: event.clientY,
         downX: event.clientX, downY: event.clientY,
-        action: event.shiftKey || event.button === 1 ? "pan" : "orbit", claimed: true };
+        action: event.shiftKey || event.button === 1 ? "pan" : "orbit", claimed: true });
       return;
     }
     // Arm before any of the early returns below claim the press: the release, not
@@ -1655,8 +1663,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (probeClaim) {
       setHandleHover(null);
       setCursorDrop(null);
-      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
-        downX: event.clientX, downY: event.clientY, action: "orbit", claimed: true };
+      setPointer({ id: event.pointerId, x: event.clientX, y: event.clientY,
+        downX: event.clientX, downY: event.clientY, action: "orbit", claimed: true });
       return;
     }
     if (event.button === 0 && !event.shiftKey) {
@@ -1671,7 +1679,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // which is exactly where the tank-wall probe answers, so a sweep would
       // swallow it on every scene with the grid overlay up.
       const grab = sliceGrabHit(ray.origin, ray.direction);
-      if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: session.ui.getState().gridOverlaySlice }; return; }
+      if (grab) { setPointer({ id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: session.ui.getState().gridOverlaySlice }); return; }
       // What the press landed on, resolved once and used twice below: to pick
       // the gesture, and to decide what a click would select — so the ring, the
       // highlight and the click all name the same thing.
@@ -1713,8 +1721,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
           const erase = gesture === "fluid-erase";
           const paint = simulation.beginDraft("fluid-body", erase ? "Erased water" : "Painted water", paneId);
           if (!paint) return;
-          pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase,
-            lastBrickKey: paintFluidAt(ray, erase), gesture: paint };
+          setPointer({ id: event.pointerId, action: "fluid-paint", erase,
+            lastBrickKey: paintFluidAt(ray, erase), gesture: paint });
           return;
         }
         // Resolved below, where the GPU pick can refine the grab point and the
@@ -1769,7 +1777,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       if (pickingInteractive && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
         const pick=picks.start();
-        pointerRef.current={id:pointerId,x,y,downX:x,downY:y,action:"pick",pick};
+        setPointer({id:pointerId,x,y,downX:x,downY:y,action:"pick",pick});
         const rect=event.currentTarget.getBoundingClientRect();
         const picked=await rendererRef.current.pickRigidBody(ray.origin,ray.direction,{
           normalizedX:(event.clientX-rect.left)/Math.max(rect.width,1),
@@ -1780,10 +1788,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         // See `pickLanding`: the answer is this press's or nobody's.
         const landing=pickLanding(active,pick,body!==undefined);
         if(active?.action!=="pick"||landing==="stale")return;
-        if(landing==="select-body"&&body){pointerRef.current=null;session.ui.getState().selectBody(body.description.id);return;}
+        if(landing==="select-body"&&body){setPointer(null);session.ui.getState().selectBody(body.description.id);return;}
         if(landing==="throw"&&body&&picked){beginBodyDrag(pointerId,timeStamp,x,y,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;}
-        if(landing==="select"){pointerRef.current=null;session.ui.getState().select(selectOnClick);return;}
-        pointerRef.current={...active,action:"orbit",selectOnClick};
+        if(landing==="select"){setPointer(null);session.ui.getState().select(selectOnClick);return;}
+        setPointer({...active,action:"orbit",selectOnClick});
         return;
       }
       // The analytic body pick is the non-WebGPU fallback for the block above
@@ -1800,12 +1808,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         beginBodyDrag(event.pointerId,event.timeStamp,event.clientX,event.clientY,ray,owner,owner.position_m,owner.orientation);
         return;
       }
-      pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY,
+      setPointer({ id: event.pointerId, x: event.clientX, y: event.clientY,
         downX: event.clientX, downY: event.clientY, action: "orbit", selectOnClick,
-        claimed: armed === undefined ? undefined : true };
+        claimed: armed === undefined ? undefined : true });
       return;
     }
-    pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
+    setPointer({ id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" });
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!pointerRef.current && voxelGesture.move(event)) {
@@ -1881,7 +1889,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (active.id !== event.pointerId) return;
     if (active.action === "pick") return;
     if (active.action === "fluid-paint") {
-      pointerRef.current = { ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) };
+      setPointer({ ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) });
       return;
     }
     if (active.action === "solid-voxel-region") {
@@ -1893,14 +1901,14 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         && region.maximumExclusive.every((value, axis) =>
           value === active.region.maximumExclusive[axis]))) return;
       previewSolidVoxelRegion(region);
-      pointerRef.current = { ...active, region };
+      setPointer({ ...active, region });
       return;
     }
     if (active.action === "region-draw") {
       const ray = pointerRay(event);
       const drawn = updateRegionDraft(active.anchor,
         planeHit(ray.origin, ray.direction, active.anchor, { x: 0, y: 1, z: 0 }), active.regionId);
-      if (drawn && !active.drawn) pointerRef.current = { ...active, drawn };
+      if (drawn && !active.drawn) setPointer({ ...active, drawn });
       return;
     }
     if (active.action === "body-place") {
@@ -1915,7 +1923,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       const radius_m = boundingRadius({ ...active.template, dimensions_m });
       const position = restInContainer(scene, active.ray, active.hover, radius_m);
       if (!position) return;
-      pointerRef.current = { ...active, moved, dimensions_m, position };
+      setPointer({ ...active, moved, dimensions_m, position });
       setCursorDrop({ centre_m: position, radius_m, tone: "body" });
       return;
     }
@@ -1924,13 +1932,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         || Math.hypot(event.clientX - active.downX, event.clientY - active.downY) > CLICK_SLOP_PX;
       if (!moved) return;
       const radius_m = dropDragRadius(active, pointerRay(event));
-      pointerRef.current = { ...active, moved, radius_m: radius_m ?? active.radius_m };
+      setPointer({ ...active, moved, radius_m: radius_m ?? active.radius_m });
       if (radius_m !== undefined) updateFluidBallDraft(active.ray, active.hover, radius_m);
       return;
     }
     if (active.action === "entity-handle") {
       const ray = pointerRay(event);
-      pointerRef.current = { ...active, lastRay: ray };
+      setPointer({ ...active, lastRay: ray });
       applyEntityDrag(active, ray);
       return;
     }
@@ -1985,12 +1993,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       }
       const ray = pointerRay(event), position = add(planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal), active.grabOffset);
       const dt = Math.max((event.timeStamp - active.lastTime) / 1000, 1 / 240), rawVelocity = scale(sub(position, active.lastPosition), 1 / dt), speed = length(rawVelocity), velocity = speed > 6 ? scale(rawVelocity, 6 / speed) : rawVelocity;
-      pointerRef.current = { ...active, dragging: true, lastPosition: position, lastTime: event.timeStamp };
+      setPointer({ ...active, dragging: true, lastPosition: position, lastTime: event.timeStamp });
       simulation.dragBody(active.bodyId, position, velocity, "move", undefined, paneId); return;
     }
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
-    pointerRef.current = { ...active, x: event.clientX, y: event.clientY };
+    setPointer({ ...active, x: event.clientX, y: event.clientY });
     // The first sample of the drag decides what the drag is *about*: the
     // surface under the *press*, which is what the reader grabbed. Resolved
     // here rather than at the press so a click that never moved costs no probe
@@ -2024,11 +2032,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (active.action === "pick") {
       const travelled = Math.hypot(event.clientX - active.downX, event.clientY - active.downY);
       if (!cancelled && travelled <= CLICK_SLOP_PX) {
-        pointerRef.current = { ...active, released: true };
+        setPointer({ ...active, released: true });
         return;
       }
     }
-    pointerRef.current = null;
+    setPointer(null);
     // A throw and a click on a body are the same press, and only the release can
     // tell them apart. Selecting on the press put a bounding box and a set of
     // handles around every fling; selecting here means the box appears when the
@@ -2229,7 +2237,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       // claims the press and `pointerMove` never revises it while one is
       // running, so a held pointer already has nothing hovered.
       target={viewportMode === "interact" && !voxelStrokePending ? hoverTarget ?? undefined : undefined}
-      showHoverWithHeld={!voxelStrokePending && !pointerRef.current}
+      showHoverWithHeld={!voxelStrokePending && !pointerHeld}
       // A sweep is about the region it is making, not about the cell it started
       // on, so it carries its own tone rather than inheriting the anchor's.
       held={heldHighlight ? { ...heldHighlight, tone: voxelSweep?.tone ?? "region" } : undefined}
@@ -2300,7 +2308,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
             />;
         }))}
     </svg>}
-    {handleHover && !pointerRef.current && <div
+    {handleHover && !pointerHeld && <div
       className={`entity-hover-chip tone-${handleHover.tone}`}
       data-testid="entity-hover-chip"
       style={{ left: `${handleHover.leftFraction * 100}%`, top: `${handleHover.topFraction * 100}%` }}
@@ -2370,7 +2378,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         flip it with the pointer sitting still over a lit object: a chip that
         survived until the next move would name a thing the mode no longer
         reaches. */}
-    {viewportMode === "interact" && hoverTarget && hoverProjection?.visible && !pointerRef.current && <div
+    {viewportMode === "interact" && hoverTarget && hoverProjection?.visible && !pointerHeld && <div
       className={`editor-hover-chip kind-${hoverTarget.kind}`}
       data-testid="editor-hover-chip"
       data-tone={hoverTarget.tone}
