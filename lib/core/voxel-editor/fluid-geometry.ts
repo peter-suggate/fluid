@@ -3,11 +3,13 @@ import type { EditorRay } from "../editor-entity";
 import type { InitialLiquidVolume, SceneDescription, Vec3 } from "../model";
 import type { LiveFluidEdit } from "../live-fluid-edit";
 import { sceneCellSizes_m } from "../scene-lattice";
+import { focusOrPick, type FocusPoint } from "../editor-focus/focus";
 import type { ToolContext, ToolControl, ToolGesture, ToolUpdate, ToolValues } from "./plugin";
 
 export const fluidSizeControl: ToolControl = { id: "size", label: "Diameter · voxels", short: "Ø", adjust: "primary", min: 2, max: 24, step: 1, initial: 6 };
 export const fluidHeightControl: ToolControl = { id: "height", label: "Height above floor · voxels", short: "H", adjust: "secondary", min: 0, max: 128, step: 1, initial: 2 };
-export const fluidRemoveControl: ToolControl = { id: "remove", kind: "toggle", label: "Remove water", short: "Remove", shortcut: "x", min: 0, max: 1, step: 1, initial: 0 };
+// No letter: X, Y and Z are the scene-focus locks, and Alt already removes for one drop.
+export const fluidRemoveControl: ToolControl = { id: "remove", kind: "toggle", label: "Remove water", short: "Remove", min: 0, max: 1, step: 1, initial: 0 };
 export const fluidTubeControl: ToolControl = { id: "thickness", label: "Tube thickness · voxels", short: "T", min: 1, max: 10, step: 1, initial: 2 };
 /** What the "do the opposite" modifier does to a water shape, for a legend: a drop removes, a removal drops. */
 export const FLUID_OPPOSITE = "opposite";
@@ -76,7 +78,12 @@ export function fluidShapeHighlight(edit: LiveFluidEdit): EditorHighlight {
   return { kind: "paths", paths, anchor_m: c };
 }
 
-/** Drop stamps move over a frozen horizontal plane; releasing applies exactly one command. */
+/**
+ * Drop stamps move over a frozen horizontal plane; releasing applies exactly one command.
+ * With a scene-focus lock up the drop's centre is the focus instead, anchored
+ * where the press met that plane: `Y` lifts it straight up or down, the plane
+ * locks slide it through a vertical plane (docs/plans/scene-focus.md).
+ */
 export function beginFluidShapeGesture(context: ToolContext, shape: LiveFluidEdit["shape"]): ToolGesture | undefined {
   const { scene, values } = context;
   const voxel = Math.min(...sceneCellSizes_m(scene));
@@ -89,12 +96,20 @@ export function beginFluidShapeGesture(context: ToolContext, shape: LiveFluidEdi
   const bottom = (values.height ?? 2) * voxel;
   const halfHeight = shape === "torus" ? tube : radius;
   const centerY = bottom + halfHeight;
-  const project = (ray: EditorRay): Vec3 | undefined => {
+  const plane = (ray: EditorRay): FocusPoint | undefined => {
     if (Math.abs(ray.direction.y) < 1e-8) return undefined;
     const t = (centerY - ray.origin.y) / ray.direction.y;
     if (!(t > 0)) return undefined;
+    return { point: { x: ray.origin.x + t * ray.direction.x, y: centerY, z: ray.origin.z + t * ray.direction.z },
+      normal: { x: 0, y: 1, z: 0 }, distance_m: t };
+  };
+  const project = (ray: EditorRay): Vec3 | undefined => {
+    const focus = focusOrPick(context.focus, ray, plane);
+    if (!focus) return undefined;
     const snap = (value: number) => Math.round(value / voxel) * voxel;
-    return { x: snap(ray.origin.x + t * ray.direction.x), y: centerY, z: snap(ray.origin.z + t * ray.direction.z) };
+    // Off the drop plane only a lock puts it, and then its bottom keeps to the voxel grid as the Height control's does.
+    const y = Math.abs(focus.point.y - centerY) <= voxel * 1e-9 ? centerY : snap(focus.point.y - halfHeight) + halfHeight;
+    return { x: snap(focus.point.x), y, z: snap(focus.point.z) };
   };
   const first = project(context.ray);
   if (!first) return undefined;

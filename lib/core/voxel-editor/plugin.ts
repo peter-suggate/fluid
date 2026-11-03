@@ -1,6 +1,7 @@
 import { normalizeControlNumber, type ControlMetadata } from "../../framework/controls";
 import type { EditorEntityTone, EditorRay } from "../editor-entity";
 import type { EditorHighlight } from "../editor-target";
+import type { ToolFocus } from "../editor-focus/focus";
 import type { LiveFluidEdit } from "../live-fluid-edit";
 import type { SceneDescription } from "../model";
 import type { SolidWorldVoxelPatch } from "../solid-world";
@@ -111,6 +112,13 @@ export interface ToolContext {
    * of running it on every move.
    */
   readonly hover?: boolean;
+  /**
+   * The scene focus (docs/plans/scene-focus.md): resolve every position as
+   * `focusOrPick(context.focus, ray, pick)`. Unlocked it is the tool's own pick,
+   * untouched; with an axis or plane lock up it projects onto the lock. Absent
+   * for a scripted caller, which gets the pick alone.
+   */
+  readonly focus?: ToolFocus;
 }
 export type ToolAction = { readonly kind: "fluid"; readonly edit: LiveFluidEdit };
 /**

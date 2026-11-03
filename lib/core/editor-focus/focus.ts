@@ -171,6 +171,13 @@ export class FocusSession implements ToolFocus {
 }
 
 /** Resolve through a tool context's focus when it has one, otherwise the pick alone. */
-export function focusOrPick(focus: ToolFocus | undefined, ray: EditorRay, pick: FocusPick): FocusPoint | undefined {
+export function focusOrPick<T extends FocusPoint>(focus: ToolFocus | undefined, ray: EditorRay,
+  pick: (ray: EditorRay) => T | undefined): T | FocusPoint | undefined {
   return focus ? focus.resolve(ray, pick) : pick(ray);
+}
+
+/** How far a locked focus may stray from its anchor, and how long its guide is drawn: a few vessels' worth. */
+export function focusReach_m(container: { readonly width_m: number; readonly height_m: number; readonly depth_m: number }): number {
+  const extent = Math.max(container.width_m, container.height_m, container.depth_m);
+  return Number.isFinite(extent) && extent > 0 ? 8 * extent : 64;
 }

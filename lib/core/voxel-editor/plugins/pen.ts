@@ -1,5 +1,6 @@
 import type { EditorRay } from "../../editor-entity";
 import { visibleToolSurface } from "../surface";
+import { focusOrPick } from "../../editor-focus/focus";
 import type { Vec3 } from "../../model";
 import { sceneCellSizes_m } from "../../scene-lattice";
 import { sceneWithSolidStroke, type SolidWorldCoordinate as Cell, type SolidWorldVoxelPatch as Patch } from "../../solid-world";
@@ -17,9 +18,13 @@ export const penDiameterControl: ToolNumberControl = {
 interface PenSurface { readonly point: Vec3; readonly normal: Vec3; readonly scenery?: string }
 const PAINT_SCENERY = "Paint recolours voxels; scenery keeps its own materials. Erase still cuts it.";
 
-/** A real, nearest surface. The pen never invents a ground plane after a miss. */
+/**
+ * A real, nearest surface. The pen never invents a ground plane after a miss.
+ * With a focus lock up the stamp stands on the lock instead (scene-focus.md):
+ * in open air, Draw builds there and Erase cuts only where it meets solid.
+ */
 function surfaceAt(context: ToolContext, ray: EditorRay, press: boolean): PenSurface | undefined {
-  return visibleToolSurface(context.scene, ray, press);
+  return focusOrPick(context.focus, ray, (r: EditorRay) => visibleToolSurface(context.scene, r, press));
 }
 
 /**

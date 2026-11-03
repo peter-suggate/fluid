@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { editorAxisForKey, toggleAxisConstraint } from "./editor-axis-constraint";
+import { focusKeys, focusLockKeysLive } from "./editor-focus/keys";
 import { toggledViewportMode, VIEWPORT_MODE_SHORTCUT } from "./editor-viewport-mode";
 import { cameraForFraming, cameraFramingForKey } from "./editor-camera-framing";
 import { toggleCompareMode } from "./compare/compare-mode";
@@ -108,14 +108,20 @@ export function useEditorShortcuts(focused?: PaneSession): void {
       // adjustments is actually made. The one casualty is `y` for ERASE while
       // something is selected, which the toolbar and every other tool key still
       // reach.
-      if (ui.selection) {
-        const axis = editorAxisForKey(event.key);
-        if (axis) {
+      //
+      // The same letters lock the scene focus while a placing tool is armed —
+      // the Pen, the water shapes, BALL and DRAG (docs/plans/scene-focus.md) —
+      // so a drop can be held at one height or lifted straight off a surface,
+      // and a stroke drawn straight. A tap latches; a hold springs back on
+      // release (`focusKeys`), and a held key's repeats are not more taps.
+      if (focusLockKeysLive(ui)) {
+        const next = focusKeys.down(event, ui.axisConstraint);
+        if (next !== "ignore") {
           event.preventDefault();
-          ui.setAxisConstraint(toggleAxisConstraint(
-            ui.axisConstraint, axis, event.shiftKey ? "plane" : "axis"));
+          ui.setAxisConstraint(next);
           return;
         }
+        if (event.repeat && ["x", "y", "z"].includes(event.key.toLowerCase())) { event.preventDefault(); return; }
       }
       if (event.key === "Escape") {
         event.preventDefault();
@@ -257,7 +263,19 @@ export function useEditorShortcuts(focused?: PaneSession): void {
         ui.setArmedGesture(ui.armedGesture === gesture ? undefined : gesture);
       }
     };
+    // A lock key held past a tap springs its lock back when it is let go.
+    const onKeyUp = (event: KeyboardEvent) => {
+      const ui = session.ui.getState();
+      if (focusKeys.up(event, ui.axisConstraint) === "release") ui.setAxisConstraint(undefined);
+    };
+    const onBlur = () => focusKeys.reset();
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
   }, [session]);
 }

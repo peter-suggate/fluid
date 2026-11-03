@@ -1,6 +1,9 @@
 "use client";
 import { useEffect, useEffectEvent, useRef, useState, type PointerEvent, type WheelEvent } from "react";
 import type { EditorRay } from "../lib/core/editor-entity";
+import { editorAxisForKey } from "../lib/core/editor-axis-constraint";
+import { FocusSession, focusAxes, focusKeys, focusReach_m, type FocusLock } from "../lib/core/editor-focus";
+import type { Vec3 } from "../lib/core/model";
 import { voxelToolKeyControls } from "../lib/core/editor-voxel-tool-actions";
 import { adjustableControl, controlForKey, controlValueOwner, storedToolValues, toolValues, type ToolAction,
   type ToolUpdate, type ToolValues, type VoxelToolPlugin } from "../lib/core/voxel-editor/plugin";
@@ -45,6 +48,10 @@ const typing = (target: EventTarget | null) => {
  *   declares. This listener runs in the capture phase, so those letters — T, R
  *   and G for the operation — win over the editor's own while a tool that
  *   lists them is armed;
+ * - X, Y and Z lock the hand to a world axis through where it stands, and
+ *   Shift+X/Y/Z to the plane holding that axis (docs/plans/scene-focus.md):
+ *   this host resolves the focus and hands it to the tool as `context.focus`,
+ *   and leaves the letters to the editor's lock keys rather than to a tool;
  * - the camera never goes away: the empty room orbits, Shift or the middle
  *   button pans, and holding Space lends the whole pointer to the camera for as
  *   long as it is down, over solids included;
@@ -81,6 +88,23 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   const wheelTravel = useRef(0);
   const secondaryCancelAt = useRef(Number.NEGATIVE_INFINITY);
   const [navigating, setNavigating] = useState(false);
+  const axisConstraint = session.ui((state) => state.axisConstraint);
+  /** The focus of the stroke in flight; its anchor is what the guide is drawn through. */
+  const strokeFocus = useRef<FocusSession | undefined>(undefined);
+  /** The last stroke's anchor: where a press over open air stands while a lock is up. */
+  const lastAnchor = useRef<Vec3 | undefined>(undefined);
+  /** The lock as the hand would meet it now, for the guide: the stroke's, or the one a press here would make. */
+  const [focusLock, setFocusLock] = useState<FocusLock | undefined>(undefined);
+  /** A fresh focus over the document a press would be authored against. */
+  const focusSession = (scene: SceneDescription) => new FocusSession({
+    constraint: () => session.ui.getState().axisConstraint,
+    fallback: lastAnchor.current, reach_m: focusReach_m(scene.container),
+  });
+  /** With a lock up and nothing anchored here, the guide stands on the last anchor. */
+  const restingLock = (): FocusLock | undefined => {
+    const axes = focusAxes(session.ui.getState().axisConstraint);
+    return axes && lastAnchor.current ? { axes, anchor: lastAnchor.current } : undefined;
+  };
   /** Whether a press where the pointer rests would stroke, or orbit. */
   const [aim, setAim] = useState<"tool" | "camera" | undefined>(undefined);
   const showPreview = (update: ToolUpdate | null) => { if (mounted.current) preview(update); };
@@ -99,21 +123,27 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     if (active.current || !mounted.current) return;
     const plugin = armedPlugin();
     const sample = hover.current;
-    if (!plugin || !sample || spaceHeld.current) { ghost(null); setAim(plugin && sample ? "camera" : undefined); return; }
+    if (!plugin || !sample || spaceHeld.current) {
+      ghost(null); setAim(plugin && sample ? "camera" : undefined); setFocusLock(plugin ? restingLock() : undefined); return;
+    }
+    let focus: FocusSession | undefined;
     try {
       // What a press would be authored against: the document with the edits in flight applied.
       const scene = solidEditQueue(session).head();
+      // The ghost resolves its focus the way the press would, so the guide it leaves is the press's.
+      focus = focusSession(scene);
       // Under paint the modifier samples, and the ghost is the cell it would sample.
       const sampled = sample.alt ? sampledMaterial(plugin, { scene, values: currentValues(plugin, scene) }, sample.ray) : undefined;
       if (sampled) { ghost(sampled.preview); setAim("tool"); return; }
       // `hover` tells a tool whose press is a search that this is only the ghost.
       const gesture = plugin.begin({ scene, ray: sample.ray, values: currentValues(plugin, scene), invert: sample.alt,
-        clipboard: session.ui.getState().voxelClipboard, hover: true });
+        clipboard: session.ui.getState().voxelClipboard, hover: true, focus });
       // Nothing under the pointer: the press would orbit, so nothing is promised there.
       const lands = gesture !== undefined && gesture.surface !== false;
       ghost(lands ? gesture.update(sample.ray) ?? null : null);
       setAim(lands ? "tool" : "camera");
     } catch { ghost(null); setAim("tool"); }
+    setFocusLock(focus?.lock ?? restingLock());
   };
   const notice = (error: unknown) => session.runtime.getState().setNotice(error instanceof Error ? error.message : String(error), "warn");
   /** End the stroke in flight; see `VoxelStroke.end`. */
@@ -151,6 +181,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
       return resize(event.shiftKey, event.code === "BracketRight" ? 1 : -1) ? take() : false;
     }
     if (event.shiftKey) return false;
+    // X, Y and Z are the focus locks (`use-editor-shortcuts`), whichever tool is up.
+    if (editorAxisForKey(event.key)) return false;
     // A switch flips on its letter, and a choice takes the option whose letter
     // it is — the rail's own switch included, under every tool that stands there.
     const keyed = controlForKey(voxelToolKeyControls(plugin.id), event.key.toLowerCase(),
@@ -183,6 +215,12 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   // Apart from the effect above on purpose: a stroke in flight keeps the values
   // it began with, and sizing the brush mid-drag must not end it.
   useEffect(() => { rehoverFromEffect(); }, [armedValues]);
+  // A lock taken or let go moves the ghost and its guide where the pointer rests;
+  // a stroke in flight meets it on its next sample.
+  useEffect(() => {
+    if (!active.current) rehoverFromEffect();
+    else setFocusLock(strokeFocus.current?.lock);
+  }, [axisConstraint]);
   // This pane's index of its solids, built before its first pointer move asks for it.
   useEffect(() => startVoxelIndexPreparation(session.scene), [session]);
   useEffect(() => {
@@ -235,6 +273,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
   return {
     /** A press where the pointer rests would stroke (`"tool"`) or orbit (`"camera"`); undefined with no tool armed. */
     aim: armed !== undefined && viewportMode === "interact" ? (navigating ? "camera" as const : aim) : undefined,
+    /** The focus lock the guide is drawn for — the stroke's, or the one a press where the pointer rests would make. */
+    focusLock: armed !== undefined && viewportMode === "interact" && focusAxes(axisConstraint) ? focusLock : undefined,
     /** The other button just abandoned a stroke or put the tool away, so this context menu is not a request for the ring. */
     swallowsContextMenu(timeStamp: number): boolean {
       return active.current !== undefined || timeStamp - secondaryCancelAt.current < SECONDARY_CANCEL_QUIET_MS;
@@ -268,7 +308,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
       }
       // The ghost promised a stroke; a press the camera takes must not leave it hanging over the orbit.
       const camera = () => { ghost(null); return "camera" as const; };
-      if (event.button !== 0 || event.shiftKey || event.ctrlKey || spaceHeld.current) return camera();
+      // Shift is a pan request unless a lock key is held, when it is half of that key's chord.
+      if (event.button !== 0 || (event.shiftKey && !focusKeys.holding) || event.ctrlKey || spaceHeld.current) return camera();
       // An edit still being accepted does not hold the press up: this one is
       // authored over it and queued behind it.
       const scene = solidEditQueue(session).head();
@@ -283,11 +324,13 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
         }
       } catch (error) { notice(error); return true; }
       let begun: ReturnType<VoxelToolPlugin["begin"]>;
+      // The stroke's focus: anchored by this press, re-anchored when a lock key changes mid-drag.
+      const focus = focusSession(scene);
       try {
         // Asked before the transaction opens, so a press on the empty room never
         // flickers the document into a pending stroke on its way to the camera.
         begun = plugin.begin({ scene, ray: initial, values: currentValues(plugin, scene), invert: event.altKey,
-          clipboard: ui.voxelClipboard });
+          clipboard: ui.voxelClipboard, focus });
         if (!begun || begun.surface === false) return camera();
       } catch (error) { notice(error); return true; }
       const unavailable = plugin.unavailable({ scene, methodId: session.method.getState().methodId,
@@ -304,11 +347,14 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
           catch (error) { void transaction.finish(true).catch(notice); throw error; }
           const element = event.currentTarget;
           const stroke: VoxelStroke = new VoxelStroke(event.pointerId, transaction, plugin.execution === "release", {
-            outline: update => outline(stroke, update),
+            outline: update => { outline(stroke, update); if (strokeFocus.current === focus) setFocusLock(focus.lock); },
             notice,
             frame: run => { const id = requestAnimationFrame(run); return () => cancelAnimationFrame(id); },
             released: () => {
               if (active.current === stroke) active.current = undefined;
+              // The next press over open air stands where this one did.
+              if (focus.anchor) lastAnchor.current = focus.anchor;
+              if (strokeFocus.current === focus) strokeFocus.current = undefined;
               if (element.hasPointerCapture(stroke.pointerId)) element.releasePointerCapture(stroke.pointerId);
               // The sample the ghost was last drawn from predates the stroke.
               hover.current = undefined;
@@ -322,6 +368,8 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
             },
           });
           active.current = stroke;
+          strokeFocus.current = focus;
+          setFocusLock(focus.lock);
           // The ghost that promised this stroke is its outline from here on.
           outlined.current = stroke;
           stroke.begin(initial);
@@ -344,7 +392,7 @@ export function useVoxelToolGesture(ray: (event: PointerEvent<HTMLCanvasElement>
     /** The pointer left the canvas: there is no longer a place for the ghost to stand. */
     leave() {
       hover.current = undefined;
-      if (!active.current) { ghost(null); setAim(undefined); }
+      if (!active.current) { ghost(null); setAim(undefined); setFocusLock(undefined); }
     },
     up(event: PointerEvent<HTMLCanvasElement>): boolean {
       const stroke = active.current;
