@@ -85,3 +85,49 @@ Not done, with measurements (stub A/B, paddleboats):
   - The air-owner share of project is about 0.18 ms (0.78 → 0.60 when stubbed). buildRhs, toPressureFine and toPressureCoarse are 0.26, 0.18 and 0.09 ms, mostly liquid work.
   - roKeys (0.10 ms) is per key, not per liquid owner.
 - **Memory accounting.** The simulation authority's `allocatedBytes` (stamps and the new list, about 0.1 MB) is not summed in `uniform-mixed-frame.ts:473`, which counts only `split.authority`. This gap predates the change.
+
+## 2026-11-03: loose ends, and P9 diagnosed (cycles), no fix landed
+
+**pTailV (the fused page tail)** is removed and was never committed. Fused-tail timings were 1.06, 0.99 and 0.71 ms against the base tail's 1.46 ms, none under the 0.6 ms bar. Letters' residual was also worse: geo-mean final 0.053 against 0.042, worst 1.73 against 0.47.
+
+**Authority body list (31d3607b).** Independently checked:
+
+- `pr/exactA.mts` on paddleboats, new path only, at frames 20, 45 and 70: written 130986, 155052 and 165825 words, with diff 0 and valueVsAll 0 (every written word equals `encodeAll`).
+- Back-to-back kernel A/B, 90 steps, kernels=60: authority total 1.888 → 1.524 ms (−0.36 ms). surfaceRegions 0.539 is replaced by bodyRegions 0.082, bodyFine 0.070, bodyReset 0.006 and bodyArgs 0.002.
+
+**P9 diagnosis.** The new tool `tools/probe-pressure-classes.ts` reads the arena's per-class header diagnostics (`UniformPressureArena.diagnostics`, off and empty by default). Paddleboats, frames 31–90:
+
+- Baseline: 3.07–3.13 cycles, geo-mean final 0.016–0.027 (it varies with the tree).
+- The residual falls about 10× per V-cycle: log10 max 1.2 → 0.15 → −0.8 → −1.7.
+- **The worst rows are band rows with no surface, seam or wall faces.** In 40–60 of 60 frames the largest residual is a deep-interior band row, one whose six faces are all unit-coefficient liquid links (no θ, seam or wall):
+
+  | Cycle | Deep interior: log10 max / rows past target | Free surface (θ < 1 or ghost face): log10 max / rows |
+  |---|---|---|
+  | 0 | 1.21 / 14.5k | 1.10 / 4.3k |
+  | 1 | 0.16 / 6.6k | 0.00 / 0.9k |
+  | 2 | −0.80 / 1.1k | −0.95 / 100 |
+  | 3 | −1.58 / 27 | −1.74 / 1 |
+
+  Seam rows sit roughly 0.5 log10 below the deep-interior rows and walls about 1 below. Native rows sit 2–3 below.
+- **Ruled out: smoothing.** Contraction is the same about 10× per cycle at sweeps 3, 4 and 5. sweeps 4 gives 2.85 cycles and sweeps 5 gives 2.70, but their geo-mean finals are worse (0.0194 and 0.0234 against 0.018), so they fail the equal-or-better rule and were not timed. coarsestSweeps 12 changes nothing (3.08), so the level-2 boxes are solved.
+- **The factor moves with coarseScale:**
+
+  | coarseScale | Cycles | Geo-mean final | Worst |
+  |---|---|---|---|
+  | 0.4 | 2.88 | 0.0147 | 0.054 |
+  | 0.5 | 3.07 | 0.018 | — |
+  | 0.6 | 3.43 | 0.027 | 0.44 |
+
+- **Ruled out: the scale itself.** 0.5 is the consistent value. Sum restriction R needs 8× the 2h FV operator, which is 2/h² per link, against 4/h² for the 4 aggregated fine links. 0.5 is also the 7-point lumped Galerkin of R A P with the trilinear P.
+- **Cause: the 7-point lumping.** The true Galerkin operator is a tensor 27-point stencil, (−½, 1, −½)/h² along an axis times M = (¼, 3/2, ¼) across each transverse axis. Lumping M to its row sum makes the coarse operator up to 4× too stiff on transverse-oscillating coarse modes. Those modes are under-corrected, so a smaller scale helps.
+- Because of that, 0.4 is a fitted number, not a derivation, and is not landed.
+
+**Fix needed: a Galerkin (27-point) coarse operator at levels 1 and 2.** Stored couplings, or the analytic tensor form for all-unit aggregates. It touches:
+
+- the level-1/2 bake;
+- the box smoother (27-point reads, colouring);
+- the coarse residual and restriction;
+- the Krylov apply;
+- the level-2 composite with the 7-point native 4h rows, which then need a consistent 27-point form.
+
+It is a hierarchy redesign, not started here. The expected gain, from the coarseScale response, is about 0.2–0.4 cycles (0.4–0.8 ms). Reaching 2 cycles needs about 0.03 per cycle, so it may also need a better initial guess.

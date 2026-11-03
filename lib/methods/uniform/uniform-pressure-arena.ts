@@ -162,6 +162,9 @@ const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena proje
  * initial residual. The tile slot+1 map (presentation slots), the
  * per-brick band-tile masks, the band tile list (by presentation slot:
  * brick slot << 3 | tile bit, from the rows) and the arena table follow. */
+/** Diagnostics (UniformPressureArena.diagnostics): per measured cycle and row class, the
+ * largest residual and the rows past the target, in DIAG_WORDS header words after HEADER. */
+const DIAG_CLASSES=8,DIAG_CYCLES=8,DIAG_WORDS=2*DIAG_CLASSES*DIAG_CYCLES;
 const HEADER=63,HISTORY_WORD=8,HISTORY=16,INITIAL_WORD=26,VALID_WORD=25,DONE_WORD=24,BRICKS_WORD=3,LEVEL1_WORD=6,LEVEL2_WORD=7;
 /** Header words 27 and 28: the native rows' largest initial and final residual (diagnostics). */
 const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29;
@@ -294,7 +297,9 @@ export class UniformPressureArena {
  /** The 32h rows' correction goes through the super-block levels (schedule.tail). */
  readonly superTail:boolean;
  private readonly super?:UniformPressureSuperWords;
- get slotMapOffset():number{return 4*HEADER;}
+ get slotMapOffset():number{return 4*this.header;}
+ /** Header words: HEADER, and with diagnostics their DIAG_WORDS. */
+ readonly header:number;
  private workBricks=1;private workLevel1=1;private level1Groups=1;private workLevel2=1;private workHeld=1;private pageGroups=PAGE_GROUPS;
  private workTiles=1;private tileGroups=1;private relaxGroups=1;
  private readonly recentCycles=new Uint32Array(BAND_CYCLE_WINDOW);
@@ -315,6 +320,7 @@ export class UniformPressureArena {
  private get cold():UniformColdFreeze|undefined{return UNIFORM_COLD_FREEZE?this.fields.freeze:undefined;}
  constructor(private readonly device:GPUDevice,private readonly simulation:UniformMixedOwnership,private readonly pressure:UniformMixedOwnership,private fields:UniformPressureArenaFields,
   readonly schedule:UniformPressureArenaSchedule=UNIFORM_PRESSURE_ARENA_SCHEDULE,private readonly solid?:UniformMixedSolid){
+  this.header=HEADER+(UniformPressureArena.diagnostics?DIAG_WORDS:0);
   if(pressure.layout.tiles.some(word=>(word&0xc0000000)!==0))throw new Error("The pressure arena's global stage must be all-4h");
   if(solid&&!solid.coarse)throw new Error("The solid pressure arena needs the all-4h solid record");
   if(!Number.isInteger(schedule.cycles)||schedule.cycles<1||schedule.cycles>=HISTORY)throw new Error(`Pressure arena cycles must be 1..${HISTORY-1}`);
@@ -375,7 +381,7 @@ export class UniformPressureArena {
   const level2=(last-first)/(UBA_STRIDE*blocks);
   if(!Number.isInteger(level2))throw new Error("Pressure arena: level 2's band channels are not whole slots");
   this.level2Clear={first,channels:level2};
-  this.maskWord=HEADER+this.tiles;this.tileListWord=this.maskWord+a.bricks;this.geometryListWord=this.tileListWord+this.tiles;this.tableWord=this.geometryListWord+this.tiles;
+  this.maskWord=this.header+this.tiles;this.tileListWord=this.maskWord+a.bricks;this.geometryListWord=this.tileListWord+this.tiles;this.tableWord=this.geometryListWord+this.tiles;
   const limit=device.limits.maxStorageBufferBindingSize;
   // The super-block tail's lists and maps follow the arena table; its rows pool B's channels.
   if(a.poolWords.length!==2)throw new Error("Pressure arena: the channels fill pools A and B");
@@ -498,7 +504,7 @@ export class UniformPressureArena {
   const C=(name:string,level:0|1|2=0)=>a.base(name,level);
   const tableWGSL=uniformStageListsWGSL+a.tableWGSL("state",`${this.tableWord}u`,`atomicLoad(&state[MASK+id])`);
   const constants=/* wgsl */`
-const SLOTS:u32=${HEADER}u;const MASK:u32=${this.maskWord}u;const TLIST:u32=${this.tileListWord}u;const GLIST:u32=${this.geometryListWord}u;const GCOUNT:u32=${GEOMETRY_WORD}u;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=${DONE_WORD}u;const BRICKS:u32=${BRICKS_WORD}u;
+const SLOTS:u32=${this.header}u;const MASK:u32=${this.maskWord}u;const TLIST:u32=${this.tileListWord}u;const GLIST:u32=${this.geometryListWord}u;const GCOUNT:u32=${GEOMETRY_WORD}u;const HISTORY:u32=${HISTORY_WORD}u;const CYCLE:u32=4u;const DONE:u32=${DONE_WORD}u;const BRICKS:u32=${BRICKS_WORD}u;
 const INITIAL:u32=${INITIAL_WORD}u;const VALID:u32=${VALID_WORD}u;const INITIAL_BIT:u32=1u<<${HISTORY}u;const CYCLES:u32=${schedule.cycles}u;
 const K_GHOST:u32=0u;const K_BAND:u32=1u;const K_WALL:u32=2u;const K_OPEN:u32=3u;const K_NEUMANN:u32=4u;const K_CLOSED:u32=5u;
 const P_ACTIVE:u32=${ACTIVE_BIT}u;const P_WARM:u32=${WARM_BIT}u;const P_FINE:u32=${UNIFORM_ARENA_CLASS.fine}u;
@@ -540,6 +546,9 @@ struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec
 `;
   const helpers=/* wgsl */`
 fn pIndex(i:u32)->u32{return atomicLoad(&state[i]);}
+// Diagnostics: a measured row's class and band-equivalent magnitude (UniformPressureArena.diagnostics).
+fn pDiag(cycle:u32,cls:u32,mag:u32){${UniformPressureArena.diagnostics?`let w=${HEADER}u+${DIAG_CLASSES}u*min(cycle,${DIAG_CYCLES-1}u)+cls;atomicMax(&state[w],mag);if(bitcast<f32>(mag)>params.solve.x){atomicAdd(&state[w+${DIAG_CLASSES*DIAG_CYCLES}u],1u);}`:""}}
+fn pDiagClass(kinds:u32)->u32{var c=select(0u,3u,bInside(kinds));for(var f=0u;f<6u;f++){let k=bFaceKind(kinds,f);if(k==K_WALL){return 2u;}if(k==K_SEAM){c=1u;}if((k==K_OPEN||k==K_GHOST||(k==K_BAND&&!bUnit(kinds,f)))&&c==0u){c=7u;}}if(!bLiquid(kinds)&&c==0u){c=3u;}return c;}
 fn bLocal(lane:u32)->vec3u{return vec3u(lane%4u,(lane/4u)%4u,lane/16u);}
 fn bUnit(kinds:u32,f:u32)->bool{return (kinds&(1u<<(18u+f)))!=0u;}
 fn bFaceKind(kinds:u32,f:u32)->u32{return (kinds>>(3u*f))&7u;}
@@ -2038,6 +2047,7 @@ fn nSeamSum(first:u32,f:u32)->f32{
  for(var j=0u;j<16u;j++){let at=first+(j&3u)*u+(j>>2u)*v;if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){s+=pF(P_C+g*PLANE,at)*pF(P_X,at);}}
  return s;
 }
+fn pDiagNative(m:u32)->u32{var c=4u;for(var f=0u;f<6u;f++){let k=nKind(m,f);if(k==N_WALL){return 6u;}if(k==N_SEAM){c=5u;}}return c;}
 @compute @workgroup_size(${WG}) fn pResidual2(${lanes}){
  if(lane==0u){atomicStore(&worst,0u);rN=select(ubaLevelCount(2u),0u,bConvergedBefore(pCycle));}
  let n=workgroupUniformLoad(&rN);
@@ -2063,10 +2073,10 @@ fn nSeamSum(first:u32,f:u32)->f32{
      if(x+base<=0.0&&r*nScale()*nStopScale()>params.solve.x){atomicAdd(&state[${KRYLOV_SIGN_WORD}u],1u);}
     }
     if((m&N_CLOSED)!=0u&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
-    ${B?"if((m&N_BULK)==0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}":"atomicMax(&worst,bResidualMagnitude(r*nScale()));"}
+    ${B?"if((m&N_BULK)==0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));pDiag(pCycle,pDiagNative(m),bResidualMagnitude(r*nScale()*nStopScale()));}":"atomicMax(&worst,bResidualMagnitude(r*nScale()));pDiag(pCycle,pDiagNative(m),bResidualMagnitude(r*nScale()*nStopScale()));"}
    }
 ${B?`   if((workgroupUniformLoad(&rFlags)&4u)!=0u){
-    r=nBulkMean(r,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));}
+    r=nBulkMean(r,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&worst,bResidualMagnitude(r*nScale()));pDiag(pCycle,7u,bResidualMagnitude(r*nScale()*nStopScale()));}
     // The check that a region is one pressure: its members' spread about
     // their mean, at the end (0 on every path).
     if(pLast){let xb=qF(PN_X,at2);let mean=nBulkMean(xb,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&state[${KRYLOV_SPREAD_WORD}u],bResidualMagnitude(xb-mean));}}
@@ -2080,7 +2090,7 @@ ${BP?`  // The BULK16 rows: a region's residual is its row's (64 4h rows' sum,
  let nb=workgroupUniformLoad(&rN);
  for(var e=group.x;e<nb;e+=groups.x){
   let slot=bsSlot(e);let r=bResidual(slot,lane);
-  if(lane<8u){atomicMax(&worst,bResidualMagnitude(r/64.0*nScale()));if(!pLast){bsSet(slot,BS_T3+16u+lane,r);}}
+  if(lane<8u){atomicMax(&worst,bResidualMagnitude(r/64.0*nScale()));pDiag(pCycle,7u,bResidualMagnitude(r/64.0*nScale()*nStopScale()));if(!pLast){bsSet(slot,BS_T3+16u+lane,r);}}
  }
 `:""} if(lane==0u&&n>0u){
   let w=atomicLoad(&worst);let word=HISTORY+pCycle;let scaled=bitcast<u32>(bitcast<f32>(w)*nStopScale());if(scaled>pIndex(word)){atomicMax(&state[word],scaled);}
@@ -2163,7 +2173,7 @@ var<workgroup> fSum:array<vec2f,64>;
     var r=pF(P_RHS,at)+off-d0*own;
     if(bInside(kinds)&&own+base<=0.0&&r*params.policy.z>params.solve.x){atomicAdd(&state[${KRYLOV_SIGN_WORD}u],1u);}
     if(bInside(kinds)&&own+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
-    atomicMax(&worst,bResidualMagnitude(r*params.policy.z));
+    atomicMax(&worst,bResidualMagnitude(r*params.policy.z));pDiag(CYCLES,pDiagClass(kinds),bResidualMagnitude(r*params.policy.z));
    }
   }
   if(pActive(kinds)&&bInside(kinds)&&own+base<0.0){atomicAdd(&state[${KRYLOV_BOUND_WORD}u],1u);}
@@ -2319,7 +2329,7 @@ var<workgroup> rRes:array<f32,64>;
    r=pF(P_RHS,at)+off-pF(P_DIAG,at)*x;
    pool[P_KINDS+at]=(kinds&~P_CORRECT)|select(0u,P_CORRECT,pCorrectionFree(bInside(kinds),x+base,r));
    if(bInside(kinds)&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
-   atomicMax(&worst,bResidualMagnitude(r*params.policy.z));
+   atomicMax(&worst,bResidualMagnitude(r*params.policy.z));pDiag(pCycle,pDiagClass(kinds),bResidualMagnitude(r*params.policy.z));
   }
   rRes[lane]=r;workgroupBarrier();
   if(lane<8u){
@@ -3721,7 +3731,7 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
   const a=this.arena,step=a.stepClear(this.tableWord);
   if(this.indexClean){
    const unmark=encoder.beginComputePass(UNMARK_PASS);this.dispatch(unmark,"pUnmark",UNIFORM_LIVE_KEY_GROUPS);unmark.end();
-   encoder.clearBuffer(this.index,0,4*HEADER);
+   encoder.clearBuffer(this.index,0,4*this.header);
   }else{encoder.clearBuffer(this.index,0,4*this.tableWord);this.indexClean=true;}
   encoder.clearBuffer(this.index,step.offset,step.size);
   const band=!this.empty;
@@ -3847,6 +3857,8 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
  /** Equivalence checks (tools/pressure-arena-equivalence.ts): compile the
   * reference forms of rewritten kernels beside them. Off in every solver. */
  static reference=false;
+ /** Per-class residual diagnostics in the header (tools; slower). */
+ static diagnostics=false;
  /** Equivalence checks: one projection entry (a reference form or its
   * rewrite) over the band as the frame left it. */
  encodeProjectEntry(encoder:GPUCommandEncoder,entry:"pProjectNative"|"pProjectNativeRef"):void{
