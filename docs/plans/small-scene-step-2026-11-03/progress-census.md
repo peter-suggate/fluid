@@ -124,3 +124,30 @@ Of the 2,207 tiles holding particles:
 - The shape trigger reading particle roughness is the latch. It needs a noise-robust shape measure (the error at
   scales 4h loses, not the 0.2 h sampling roughness) or a smoother particle surface (APIC, the particles lane).
   Both are physics changes that need the letters volume regression first; not attempted here.
+
+## 2026-11-03: census kernels after item 20; the per-workgroup atomic reductions were measured and dropped
+
+The paddleboats census at HEAD 56b738d7 (`--bodies --steps=90 --kernels=60`, kernel means, ms) costs 4.4 ms over about 40 kernels. The largest:
+
+| kernel | ms |
+|---|---|
+| classify | 0.91 |
+| localSpeed | 0.65 |
+| classifyCoarse | 0.65 |
+| decide | 0.32 |
+| pageMark | 0.24 |
+| frame plan seed | 0.22 |
+| solidPromote | 0.15 |
+
+The global surface volume kernels (`metric` 1.05 and `dilate` 0.59) are outside the census and belong to the level-set lane.
+
+One experiment measured the census.md item 7 atomics, together with the same fix for classify and classifyCoarse:
+- classify and classifyCoarse flushed the group census (reach, extremes) once per workgroup instead of once per tile;
+- localSpeed reduced `regionVelocity` in workgroup memory, with one flush per workgroup for the workgroup's region.
+
+Both are maxima, so the values are unchanged. Result: classify 0.909 → 0.922, localSpeed 0.651 → 0.668, classifyCoarse 0.649 → 0.662 ms.
+The contended atomics are not what these kernels wait on, so both changes are reverted.
+
+The census.md premise for item 5 (classify replays an unchanged class) also does not hold here. A tile's class carries its face-velocity bounds, which change every step wherever liquid moves. Deep COLD regions already replay.
+
+What remains is latency per tile in classify, classifyCoarse and localSpeed. The h tiles they visit fell 25% with item 20, but the kernel times above did not fall with them. The next lever there is the vertex-centric classifyCoarse (census.md item 6).
