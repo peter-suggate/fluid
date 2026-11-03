@@ -215,3 +215,40 @@ The gate, on a clean export of HEAD with this change:
 | letters 120 | −0.0112 | 94.6 ms |
 | paddleboats 90 | −0.0067 | 54.8 ms (shared GPU) |
 | garden-pond 60 | −0.0300 | 28.7 ms |
+
+## Follow-on: per-tile terrain-far flag for the remaining scene-global terrain gates (not landed)
+
+Tried: a third static bit, UM_STATIC_TERRAIN_FAR, built in umBuildTile, plus a 27-tile `far27` in
+umBuildSurfaceClear. A tile is terrain-far when:
+- the heightfield is under its 2-cell ring;
+- no sculpt page is present;
+- every terrain plane-box fraction is 1;
+- the contact distance exceeds the 0.5-cell sample radius.
+
+Consumers:
+- nbFastSolid / nbHullUncut / NB_WIN_UNCUT;
+- nbClearWalk;
+- the per-stride nbTerrainContact (skipped on far tiles);
+- uniform-narrow-band-air's terrain bottom (NO_TERRAIN);
+- umReachSolidClear / umReachCellsOpen (far27 / FAR).
+
+1372/1373 were left alone, because both blocked tests are equivalent there. 548 (umReachBuried) was
+left alone because the general twin's terrain path was unverified. The static-flags oracle test
+was extended (far ⇒ no plane fraction < 1, no contact ≤ 0.5h) and passed. The two surface-support
+tests fail identically on base, so those failures are pre-existing.
+
+Kernel A/B, interleaved on clean exports, `--kernels=60 --steps=90`:
+
+| Scene | Change | Sum | advectParticlesDeferred |
+|---|---|---|---|
+| open-ground-slope (no bodies) | full | +0.17 to +0.26 over 3 pairs | +0.13 to +0.19, every pair |
+| open-ground-slope | NB fast/clear-walk consumers restored | +0.27 to +0.5 | +0.10 |
+| garden-pond (held bodies) | full | +0.55 | +0.09 |
+| paddleboats | full | −0.54 | neutral |
+
+advectDeferred moved ±0.35 between runs, which is noise; the surface edit alone was not separable.
+
+Verdict: there is no terrain-scene gain, and both terrain scenes regress. The liquid sits within a
+tile or two of the terrain, so few tiles are terrain-far. Per-particle hull/record reads then cost
+more than the skipped contacts. Not landed. The patch is kept out of tree for a deep-water terrain
+scene.
