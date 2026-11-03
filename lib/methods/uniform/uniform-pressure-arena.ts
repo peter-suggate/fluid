@@ -466,11 +466,13 @@ export class UniformPressureArena {
   * a receipted frame. Launch width only; no evidence of the held blocks
   * takes them all. reserve counts h tiles (UNIFORM_WORK_RELAYOUT_RESERVE):
   * the block widths take the blocks those tiles fill, 512 a block, not that
-  * many blocks (which held every launch at the pool). */
+  * many blocks (which held every launch at the pool). Bricks and level 1
+  * likewise: 8 and 64 h tiles a slot (a reserve of 1024 h tiles held
+  * level 1's launch at 1,024 workgroups of 512 lanes for ~140 bricks). */
  observeWork(tiles:number,reserve=0,bricks=tiles,level1=bricks,level2=level1,held=this.simulation.capacity.address.blocks):void{
   const cap=this.arena.fineCapacity,blocks=this.simulation.capacity.address.blocks,blockReserve=Math.ceil(reserve/512);
-  this.workBricks=uniformBufferedWork(this.workBricks,Math.min(bricks,tiles),cap,reserve);
-  this.workLevel1=uniformBufferedWork(this.workLevel1,Math.min(level1,this.workBricks),cap,reserve);
+  this.workBricks=uniformBufferedWork(this.workBricks,Math.min(bricks,tiles),cap,Math.ceil(reserve/8));
+  this.workLevel1=uniformBufferedWork(this.workLevel1,Math.min(level1,this.workBricks),cap,Math.ceil(reserve/64));
   this.workLevel2=uniformBufferedWork(this.workLevel2,Math.min(level2,this.workLevel1,blocks),blocks,blockReserve);
   this.level1Groups=Math.min(this.workLevel1,BRICK_GROUPS);
   this.workHeld=uniformBufferedWork(this.workHeld,Math.min(held,blocks),blocks,blockReserve);this.pageGroups=Math.min(this.workHeld,PAGE_GROUPS);
@@ -2214,15 +2216,17 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
     var w=vec2f(0.0);var d=vec2f(0.0);
     for(var side=0u;side<2u;side++){
      let f=2u*axis+side;let kind=bFaceKind(kinds,f);let c=pF(P_C+f*PLANE,at);d0+=c;
+     // The start's RHS sums (bSeamHead's 4-12 loads a seam face) are the
+     // first rebase's alone: a correction rebase rebakes level 1 only.
      if(kind==K_BAND){
-      let m=pNear(at,p,f);w[side]=c;d[side]=pF(P_BASE,m)-own;
+      let m=pNear(at,p,f);if(!pCorrection){w[side]=c;d[side]=pF(P_BASE,m)-own;}
       // Level 1: a coupling to an active row, inside the aggregate or out of it.
       if(pActive(pool[P_KINDS+m])&&(!pCorrection||(pool[P_KINDS+m]&P_CORRECT)!=0u)){if(side==(lb[axis]&1u)){cross[axis]=c;}else{part-=c;}}
      }
      else if(kind==K_SEAM){
       // A seam: the native row's start; out of the aggregate (a tile face)
       // toward an active native row, its level 2 cell.
-      let m=nAcross(p,f);w[side]=c;d[side]=qF(PN_B,m)+bSeamHead(at,f)-own;let sc=seamCoarse(c);
+      let m=nAcross(p,f);if(!pCorrection){w[side]=c;d[side]=qF(PN_B,m)+bSeamHead(at,f)-own;}let sc=seamCoarse(c);
       if((poolB[PN_M+m]&N_ACTIVE)!=0u&&(!pCorrection||(poolB[PN_M+m]&N_CORRECT)!=0u)){part+=sc.x;cross[axis]=sc.y;}
      }
      else if(kind==K_GHOST||kind==K_OPEN){open+=c;}
@@ -2233,9 +2237,9 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
    var given=pF(P_RHS,at);if(pStash==1u){pSet(P_WARMP,at,given);}else if(pStash==2u){given=pF(P_WARMP,at);}
    let rhs=given+((sums.x+sums.z)+sums.y-open*own);if(!pCorrection){pSet(P_RHS,at,rhs);}
    if(pActive(kinds)&&(!pCorrection||(kinds&P_CORRECT)!=0u)){
-    // The band's residual of the zero iterate (its halos at their start).
-    var r=rhs+lifted;if(bInside(kinds)&&own<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
-    let m=bResidualMagnitude(r*params.policy.z);atomicMax(&worst,m);atomicMax(&tileWorst,m);
+    // The band's residual of the zero iterate (its halos at their start): the first rebase's measure.
+    if(!pCorrection){var r=rhs+lifted;if(bInside(kinds)&&own<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
+    let m=bResidualMagnitude(r*params.policy.z);atomicMax(&worst,m);atomicMax(&tileWorst,m);}
     // The error equation's diagonal: the walls follow their row.
     part+=d0-walls;if(!pCorrection){pSet(P_DIAG,at,d0);}
    }else{part=0.0;cross=vec3f(0.0);}
@@ -3116,41 +3120,115 @@ fn bRootFace(p:vec3i,axis:u32,sign:i32)->f32{
  }
  return select(0.0,sum/max(weight,1e-30),weight>1e-6);
 }
+// A job a band tile: its six faces' root tiles. Only a root tile beside the
+// band does work, so the band's faces reach every one of them; the root's
+// first band face owns it (one visit a root tile). A root face across the
+// band takes the volume-weighted mean of the band tile's 16 h fluxes there
+// (the composite solve couples the native row to those same projected
+// fluxes): the 96 subfaces of a root a lane each, summed in bRootFace's order.
+var<workgroup> bRootTests:array<atomic<u32>,6>;
+var<workgroup> bRootOwned:u32;
 var<workgroup> bRootValues:array<f32,6>;
+var<workgroup> bRootSlot:array<u32,6>;
 var<workgroup> bRootBits:array<u32,3>;
+var<workgroup> bRootW:array<f32,96>;
+var<workgroup> bRootV:array<f32,96>;
 var<workgroup> bRootCount:u32;
-var<workgroup> bRootTests:atomic<u32>;
 @compute @workgroup_size(${TILE_WG}) fn pProjectNative(${lanes}){
+ if(lane==0u){bRootCount=pTileCount();}
+ let n=workgroupUniformLoad(&bRootCount);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+ for(var j=group.x;j<n;j+=groups.x){
+  let w=pIndex(TLIST+j);let origin=vec3i(ubaOrigin(ubaBrick(pTileSlot(w)))+pTileCell(w,vec3u(0u)));
+  if(lane<6u){atomicStore(&bRootTests[lane],0u);}
+  workgroupBarrier();
+  // Face f's root, test t a lane: bit t a band cell across the root's face t, bit 6 no stored tile, a held or a frozen one.
+  if(lane<42u){
+   let f=lane/7u;let t=lane%7u;var p=origin;p[f/2u]+=4*bSign(f);
+   if(t<6u){var q=p;q[t/2u]+=4*bSign(t);if(pBandCell(q)){atomicOr(&bRootTests[f],1u<<t);}}
+   else if(!umCellPresent(p)||pIndex(SLOTS+umTileAt(vec3u(p)/4u))!=0u||umFrozenCell(p)){atomicOr(&bRootTests[f],64u);}
+  }
+  workgroupBarrier();
+  if(lane==0u){var owned=0u;for(var f=0u;f<6u;f++){let tests=atomicLoad(&bRootTests[f]);if((tests&64u)==0u&&(tests&((1u<<(f^1u))-1u))==0u){owned|=1u<<f;}}bRootOwned=owned;}
+  var owned=workgroupUniformLoad(&bRootOwned);
+  while(owned!=0u){
+   let f=firstTrailingBit(owned);owned&=owned-1u;
+   var p=origin;p[f/2u]+=4*bSign(f);let band=atomicLoad(&bRootTests[f]);
+   // A root face a lane: a band neighbour's brick slot, or its 4h (or low boundary) value.
+   if(lane<6u){
+    let axis=lane/2u;let sign=bSign(lane);var other=p;other[axis]+=4*sign;var slot=UB_NONE_ID;
+    if((band&(1u<<lane))!=0u){slot=ubaSlot(ubaBrickAt(other));}
+    else{var anchor=p;anchor[axis]+=select(-1,3,sign>0);
+     if(umFaceLow(anchor,axis)){bRootValues[lane]=boundary[umLowFaceIndex(vec3u(p),axis)];}else{bRootValues[lane]=/*4h*/textureLoad(field,anchor,0)[axis];}}
+    bRootSlot[lane]=slot;
+   }
+   if(lane<3u){var q=p;q[lane]+=3;bRootBits[lane]=u32(max(0.0,/*4h*/textureLoad(field,q,0).w));}
+   workgroupBarrier();
+   for(var k=lane;k<96u;k+=64u){
+    let g=k/16u;let slot=bRootSlot[g];if(slot==UB_NONE_ID){continue;}
+    let axis=g/2u;let sign=bSign(g);let u=(axis+1u)%3u;let v=(axis+2u)%3u;let i=k&15u;
+    let face=2u*axis+select(1u,0u,sign>0);
+    var q=p;q[axis]+=select(-1,4,sign>0);q[u]+=i32(i&3u);q[v]+=i32(i>>2u);
+    let at=pAddr(slot,vec3u(q)&vec3u(7u));bRootW[k]=pVolume(at,face);bRootV[k]=bFace(at,q,face);
+   }
+   workgroupBarrier();
+   if(lane<6u&&bRootSlot[lane]!=UB_NONE_ID){
+    var sum=0.0;var weight=0.0;for(var i=0u;i<16u;i++){let wv=bRootW[16u*lane+i];sum+=wv*bRootV[16u*lane+i];weight+=wv;}
+    bRootValues[lane]=select(0.0,sum/max(weight,1e-30),weight>1e-6);
+   }
+   workgroupBarrier();
+   let tile=umTileAt(vec3u(p)/4u);
+   if(umTileWidth(tile)==1u){
+    var value=vec4f(0.0);var bits=0u;
+    for(var axis=0u;axis<3u;axis++){
+     value[axis]=mix(bRootValues[2u*axis],bRootValues[2u*axis+1u],f32(l[axis]+1u)/4.0);
+     if(l[axis]==3u){bits|=bRootBits[axis]&(1u<<axis);}
+     if(l[axis]==0u){bits|=bRootBits[axis]&(1u<<(axis+3u));}
+    }
+    value.w=f32(bits);textureStore(output,p+vec3i(l),value);
+   }else if(lane<3u){
+    var q=p;q[lane]+=3;var value=vec4f(0.0);value[lane]=bRootValues[2u*lane+1u];value.w=f32(bRootBits[lane]);textureStore(output,q,value);
+   }
+   workgroupBarrier();
+  }
+ }
+}
+// The reference form (a job a band tile and face, bRootFace's serial 16
+// subfaces): compiled only for the equivalence check (referenceEntries).
+var<workgroup> bRefValues:array<f32,6>;
+var<workgroup> bRefBits:array<u32,3>;
+var<workgroup> bRefCount:u32;
+var<workgroup> bRefTests:atomic<u32>;
+@compute @workgroup_size(${TILE_WG}) fn pProjectNativeRef(${lanes}){
  // A job a band tile and face: the root tile across it. Only a root tile
  // beside the band does work, so the band's faces reach every one of them;
  // the root's first band face owns it (one visit a root tile).
- if(lane==0u){bRootCount=6u*pTileCount();}
- let n=workgroupUniformLoad(&bRootCount);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
+ if(lane==0u){bRefCount=6u*pTileCount();}
+ let n=workgroupUniformLoad(&bRefCount);let l=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);
  for(var j=group.x;j<n;j+=groups.x){
   let w=pIndex(TLIST+j/6u);let f=j%6u;
   var p=vec3i(ubaOrigin(ubaBrick(pTileSlot(w)))+pTileCell(w,vec3u(0u)));p[f/2u]+=4*bSign(f);
   // The skip's seven tests a lane each: bit f a band cell across face f, bit 6 no stored tile, a held or a frozen one.
-  if(lane==0u){atomicStore(&bRootTests,0u);}
+  if(lane==0u){atomicStore(&bRefTests,0u);}
   workgroupBarrier();
-  if(lane<6u){var q=p;q[lane/2u]+=4*bSign(lane);if(pBandCell(q)){atomicOr(&bRootTests,1u<<lane);}}
-  else if(lane==6u){if(!umCellPresent(p)||pIndex(SLOTS+umTileAt(vec3u(p)/4u))!=0u||umFrozenCell(p)){atomicOr(&bRootTests,64u);}}
+  if(lane<6u){var q=p;q[lane/2u]+=4*bSign(lane);if(pBandCell(q)){atomicOr(&bRefTests,1u<<lane);}}
+  else if(lane==6u){if(!umCellPresent(p)||pIndex(SLOTS+umTileAt(vec3u(p)/4u))!=0u||umFrozenCell(p)){atomicOr(&bRefTests,64u);}}
   workgroupBarrier();
-  if(lane==0u){let tests=atomicLoad(&bRootTests);bRootCount=u32((tests&64u)!=0u||(tests&((1u<<(f^1u))-1u))!=0u);}
-  if(workgroupUniformLoad(&bRootCount)!=0u){continue;}
+  if(lane==0u){let tests=atomicLoad(&bRefTests);bRefCount=u32((tests&64u)!=0u||(tests&((1u<<(f^1u))-1u))!=0u);}
+  if(workgroupUniformLoad(&bRefCount)!=0u){continue;}
   let tile=umTileAt(vec3u(p)/4u);
-  if(lane<6u){bRootValues[lane]=bRootFace(p,lane/2u,bSign(lane));}
-  if(lane<3u){var q=p;q[lane]+=3;bRootBits[lane]=u32(max(0.0,/*4h*/textureLoad(field,q,0).w));}
+  if(lane<6u){bRefValues[lane]=bRootFace(p,lane/2u,bSign(lane));}
+  if(lane<3u){var q=p;q[lane]+=3;bRefBits[lane]=u32(max(0.0,/*4h*/textureLoad(field,q,0).w));}
   workgroupBarrier();
   if(umTileWidth(tile)==1u){
    var value=vec4f(0.0);var bits=0u;
    for(var axis=0u;axis<3u;axis++){
-    value[axis]=mix(bRootValues[2u*axis],bRootValues[2u*axis+1u],f32(l[axis]+1u)/4.0);
-    if(l[axis]==3u){bits|=bRootBits[axis]&(1u<<axis);}
-    if(l[axis]==0u){bits|=bRootBits[axis]&(1u<<(axis+3u));}
+    value[axis]=mix(bRefValues[2u*axis],bRefValues[2u*axis+1u],f32(l[axis]+1u)/4.0);
+    if(l[axis]==3u){bits|=bRefBits[axis]&(1u<<axis);}
+    if(l[axis]==0u){bits|=bRefBits[axis]&(1u<<(axis+3u));}
    }
    value.w=f32(bits);textureStore(output,p+vec3i(l),value);
   }else if(lane<3u){
-   var q=p;q[lane]+=3;var value=vec4f(0.0);value[lane]=bRootValues[2u*lane+1u];value.w=f32(bRootBits[lane]);textureStore(output,q,value);
+   var q=p;q[lane]+=3;var value=vec4f(0.0);value[lane]=bRefValues[2u*lane+1u];value.w=f32(bRefBits[lane]);textureStore(output,q,value);
   }
   workgroupBarrier();
  }
@@ -3518,7 +3596,7 @@ fn sProlong6(g:vec3i)->f32{
   sources.rowsG=sources.rows!.replace("const pGeometry:bool=false;","const pGeometry:bool=true;").replace("fn pRows(","fn pRowsG(");
   const layoutOf:Record<string,string>={bulk:"bulk",nrhs:"nrhs",table:"table",mark:"mark",rows:"rows",rowsG:"rows",init:"init",copy:"copy",native:"native",final:"native",project:"project"};
   const entryOf:Record<string,string[]>={bulk:["pBulkRows","pBulkProject","pBulkCommit"],bulkLevels:["pBulkLift"],nrhs:["pRhs"],table:[...UNIFORM_ARENA_TABLE_ENTRIES,UNIFORM_ARENA_RELEASE_ENTRY],mark:["pMark","pUnmark"],rows:["pRows"],rowsG:["pRowsG"],init:["pInit"],copy:["pCopy","pCopyNative"],native:["pNative","pNativeOperator","pWrite"],residual:["pResidual2","pNativeRelax"],final:["pFinal"],clear2:["pClear2"],
-   krylov:["kStart","kApplyT",BP?"kApplyNB":"kApplyN","kReduce","kBound","kStep"],rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative"],
+   krylov:["kStart","kApplyT",BP?"kApplyNB":"kApplyN","kReduce","kBound","kStep"],rebase:["pRebase"],relax:["pRelax"],restrict:["pRestrict0"],downA:["pDownA"],downB:["pDownB"],down2:["pDown2"],down3:["pDown3"],down4:["pDown4"],tail:["pTail"],up4:["pUp4"],up3:["pUp3"],upB:["pUpB"],upA:["pUpA"],prolong:["pProlong0"],project:["pProject","pProjectNative",...(UniformPressureArena.reference?["pProjectNativeRef"]:[])],
    group6:["sGroup6"],group7:["sGroup7"],bake7:["sBake7"],down45:["sDown45"],down6:["sDown6"],down7:["sDown7"],tail7:["sTail7"],up7:["sUp7"],up6:["sUp6"],forget:["sForget"]};
   type Variant=[string,Record<string,number>];
   const variants:Record<string,Variant[]>={
@@ -3765,6 +3843,14 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
   // Leaving slots return to the stack (after every reader of this frame).
   this.dispatch(pass,"ubaRelease",Math.min(groupsOf(this.workBricks,64),TABLE_GROUPS));
   pass.end();
+ }
+ /** Equivalence checks (tools/pressure-arena-equivalence.ts): compile the
+  * reference forms of rewritten kernels beside them. Off in every solver. */
+ static reference=false;
+ /** Equivalence checks: one projection entry (a reference form or its
+  * rewrite) over the band as the frame left it. */
+ encodeProjectEntry(encoder:GPUCommandEncoder,entry:"pProjectNative"|"pProjectNativeRef"):void{
+  const pass=encoder.beginComputePass(PROJECT_PASS);this.dispatch(pass,entry,this.tileGroups);pass.end();
  }
  encodeReceipt(encoder:GPUCommandEncoder,target:GPUBuffer,offset:number):void{encoder.copyBufferToBuffer(this.index,0,target,offset,32);}
  static readonly historyWord=HISTORY_WORD;
