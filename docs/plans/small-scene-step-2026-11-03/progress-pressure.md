@@ -183,3 +183,54 @@ What this shows:
 - **The scale changes** are fitted constants, so they are not landable.
 - **Reaching 2 cycles** needs about 1.25 decades per cycle where the GPU now gets about 0.95. Only the full P^T·A·P coarse operator reached that on the CPU, and that would be a hierarchy redesign. The CPU also suggests it is mostly lost again under box smoothing unless the level-1 smoother becomes global.
 - **Prototypes:** `scratchpad/pl-proto/{mg.ts,gpu.ts}`. They are not checked in.
+
+## P11: pricing a global smoother with PtAP at levels 1–3, 2026-11-03 (no-go, not built)
+
+**CPU prototype with GPU-realistic coarse smoothers.** These are colour-parallel, so each colour updates in parallel as it would on the GPU. GCR, frames past the first, geo-mean per-cycle contraction:
+
+| Coarse operator and smoother | Pool | Hull |
+|---|---|---|
+| Lumped, 2-colour or 8-colour | 10–13× | — |
+| Lumped, 8-colour inside 8^3 bricks with Jacobi across bricks ("brick8": one dispatch a sweep) | ~9× | ~7× |
+| PtAP (70 nnz at level 1, 90 at level 2), 2-colour red-black | diverges (same-colour couplings) | — |
+| PtAP, parameter-free L1-Jacobi | ~15× | — |
+| PtAP, 8-colour | ~38× | ~30× |
+| PtAP, 27-colour | ~41× | ~33× |
+| PtAP, brick8 | ~33× (1.52 decades) | ~27× (1.43) |
+| PtAP at levels 1–2 only, lumped below, brick8 | ~28× | ~25× |
+| PtAP at level 1 only, brick8 | ~13× | ~11× |
+
+PtAP is needed through level 3 (8h, inside the page tail), with a multicolour smoother.
+
+**What 2 cycles requires.** The history must reach the target (log10 about −1.3) after 2 cycles:
+
+| Scene | Start (log10) | Decades per cycle needed | Contraction needed |
+|---|---|---|---|
+| Paddleboats | 1.24 | 1.27 | ≥19× |
+| Letters | 1.66 | 1.48 | ≥30× |
+
+On the CPU, PtAP covers paddleboats with little margin and letters only at the pool scene's best.
+
+**The CPU model overpredicts GPU gains.** The model matches the GPU baseline (~10×). But:
+- it predicted x1 at +12% log-contraction, and the GPU gave +4%;
+- it predicted scale 0.4 to be catastrophic, and the GPU improved.
+
+The real hierarchy (native 4h rows at level 2, seams, page tail) is not in the model.
+
+**Cost:**
+- **Bake.** θ moves every step across the whole band, and the band is the surface region. So nearly every level-1 row's PtAP support changes every step, and a per-layout cache does not hold.
+  - The per-step bake gathers about 64 fine rows × about 56 AP entries per coarse row: about 72M FMAs at level 1, plus levels 2 and 3. Today's 7-point pRows alone is 0.35–0.6 ms.
+  - Estimated bake: 0.4–0.8 ms per step.
+- **Per cycle.** Level 1 and level 2 become global brick8 sweeps: about 9 dispatches each, at 20–40 µs latency each. They read about 10× the coefficients of today's two box kernels. Level 3 PtAP sits in the tail.
+  - Estimated extra: +0.5–0.9 ms per cycle, so 2.4–2.8 ms against today's 1.9.
+
+**Projection for paddleboats** (today 3.2 × 1.9 = 6.1 ms):
+
+| Cycles | Step cost | Net |
+|---|---|---|
+| Exactly 2 | 5.2–6.4 ms | −0.9 to +0.3 ms |
+| 2.5 (if half the CPU gain transfers, as x1 did) | 6.4–7.8 ms | worse than today |
+
+**Verdict:** under the 1 ms bar even in the best case. Not built.
+
+The structural fact: once θ is in the band, a Galerkin hierarchy pays its operator every step, and level-1 global sweeps cost dispatches. The per-cycle work has to come down, not the cycle count.
