@@ -119,6 +119,8 @@ export function uniformMixedRootMaskWords(layout:UniformMixedLayout):number{retu
 const counted:readonly string[]=["rows","build","resolve","surface"];
 /** The stage's passes, described once. */
 const SURFACE_PASS:GPUComputePassDescriptor={label:"NB-FLIP surface pressure authority"};
+/** Body mode's launches (encodeBodies), which bind the h tile list. */
+const BODY_ENTRIES:readonly string[]=["bodyReset","bodyRegions","bodyArgs","bodyFine"];
 const BALANCE_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure authority and volume correction"};
 const PHASE_PASS:GPUComputePassDescriptor={label:"Uniform mixed pressure authority phase"};
 
@@ -168,6 +170,10 @@ export class UniformMixedPressureAuthority {
  /** Surface-only simulation authority with solids: a regional phase launch
   * for a head whose only change is rigid bodies (encodeBodies). */
  private readonly bodyRegional:boolean;
+ /** Body mode's h tile list (umBodyList, group 3), its indirect launch and
+  * the list's capacity: an h tile holds 64 of the owners. */
+ private readonly bodies?:{list:GPUBuffer;args:GPUBuffer;layout:GPUBindGroupLayout;group:GPUBindGroup};
+ private readonly bodyListTiles:number;
  private forced=true;
  private bodyHeads=0;
  private seenGeneration=-1;
@@ -200,7 +206,14 @@ export class UniformMixedPressureAuthority {
   // Held mode: the stamps, then a word a tile, its owner base at the pass
   // that last wrote it, plus one (a rank shift rewrites the tile).
   if(this.heldRegional)this.retained={stamps:device.createBuffer({label:"Uniform mixed pressure authority region stamps and tile bases",size:4*(STAMP_WORDS*this.pages+ownership.capacity.tiles),usage})};
-  this.allocatedBytes=(this.retained?.cut?.size??0)+(this.retained?.stamps.size??0);
+  this.bodyListTiles=Math.max(1,Math.ceil(this.owners/64));
+  if(this.bodyRegional){
+   const list=device.createBuffer({label:"Uniform mixed pressure authority body h tiles",size:4*(4+this.bodyListTiles),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+   const args=device.createBuffer({label:"Uniform mixed pressure authority body launch",size:16,usage:GPUBufferUsage.INDIRECT|GPUBufferUsage.COPY_DST});
+   const layout=device.createBindGroupLayout({label:"Uniform mixed pressure authority body list",entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+   this.bodies={list,args,layout,group:device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:list}}]})};
+  }
+  this.allocatedBytes=(this.retained?.cut?.size??0)+(this.retained?.stamps.size??0)+(this.bodies?(this.bodies.list.size+this.bodies.args.size):0);
   this.resources=uniformDetailBindLayout(device,{entries:[
    ...[0,1,2].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
    ...[3,6].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
@@ -709,20 +722,25 @@ ${this.bodyRegional?`// A head whose only change since the last authority is rig
 // Record and geometry change only in regions within
 // UNIFORM_BODY_GEOMETRY_REACH h of the swept support, and an owner's phi
 // reads cells at most a tile beyond its own: a tile is rewritten when a
-// region its 3x3x3-tile box touches was reached. An eighth of a 16h region
-// (eight of its tiles) a workgroup (fixed grid, strided): bit
-// (dx+1)+3(dy+1)+9(dz+1) of the region's mask for each reached neighbour,
-// then its 4h tiles a lane each and its h tiles one after another, their
-// owners a lane each (a region a workgroup ran 64 h tiles in series).
+// region its 3x3x3-tile box touches was reached. bodyRegions takes a held
+// region a workgroup (fixed grid, strided): bit (dx+1)+3(dy+1)+9(dz+1) of
+// the region's mask for each reached neighbour, then its 64 tiles a lane
+// each. A reached 4h tile's owner runs on its lane; a reached h tile is
+// listed (umBodyList), and bodyFine runs each listed tile's owners, a
+// workgroup a tile, over an indirect launch of exactly the listed tiles.
+// Eight 8-tile items a region ran 27-neighbour scans eight times over and
+// the h tiles of each item one after another (0.4 ms of a paddleboat step).
+// umBodyList: the h tile count, the indirect launch (bodyArgs), then the tiles.
+@group(3) @binding(0) var<storage,read_write> umBodyList:array<atomic<u32>>;
+const UM_BODY_LIST_TILES:u32=${this.bodyListTiles}u;
 var<workgroup> umAuthorityBodyNear:atomic<u32>;
-var<workgroup> umAuthorityFine:atomic<u32>;
 var<workgroup> umAuthorityBodyGate:u32;
-var<workgroup> umAuthorityFineTiles:u32;
+@compute @workgroup_size(1) fn bodyReset(){atomicStore(&umBodyList[0],0u);}
 // Items of the held regions only (umHeldPage): a free region reaches nothing.
-@compute @workgroup_size(64) fn surfaceRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
- for(var item=group.x;item<8u*umHeldPageCount();item+=groups.x){
-  let region=umHeldPage(item>>3u);let first=8u*(item&7u);
-  if(l==0u){atomicStore(&umAuthorityBodyNear,0u);atomicStore(&umAuthorityFine,0u);}
+@compute @workgroup_size(64) fn bodyRegions(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ for(var item=group.x;item<umHeldPageCount();item+=groups.x){
+  let region=umHeldPage(item);
+  if(l==0u){atomicStore(&umAuthorityBodyNear,0u);}
   workgroupBarrier();
   if(l<27u&&umTileLive(umPageTile(region,0u))){
    let q=4*(vec3i(umPageCoord(region))+vec3i(umCorner(l,3u))-vec3i(1));let key=umTileKey(q);
@@ -731,24 +749,27 @@ var<workgroup> umAuthorityFineTiles:u32;
   workgroupBarrier();
   if(l==0u){umAuthorityBodyGate=atomicLoad(&umAuthorityBodyNear);}
   let near=workgroupUniformLoad(&umAuthorityBodyGate);if(near==0u){continue;}
-  if(l<8u){
-   let t=umPageTile(region,first+l);let local=umCorner(first+l,4u);var reached=false;
-   for(var k=0u;k<27u;k++){
-    let d=vec3i(umCorner(k,3u))-vec3i(1);
-    reached=reached||(all((d>=vec3i(0))|(local==vec3u(0u)))&&all((d<=vec3i(0))|(local==vec3u(3u)))&&((near>>k)&1u)!=0u);
-   }
-   if(reached&&umTileLive(t)){
-    if(umTileWidth(t)==1u){atomicOr(&umAuthorityFine,1u<<l);}
-    else{umSurfaceOwner(UMOwner(t,0u,4u,umTopology[t]&0x3fffffffu),false);}
-   }
+  let t=umPageTile(region,l);let local=umCorner(l,4u);var reached=false;
+  for(var k=0u;k<27u;k++){
+   let d=vec3i(umCorner(k,3u))-vec3i(1);
+   reached=reached||(all((d>=vec3i(0))|(local==vec3u(0u)))&&all((d<=vec3i(0))|(local==vec3u(3u)))&&((near>>k)&1u)!=0u);
   }
-  workgroupBarrier();
-  if(l==0u){umAuthorityFineTiles=atomicLoad(&umAuthorityFine);}
-  let fine=workgroupUniformLoad(&umAuthorityFineTiles);
-  for(var k=0u;k<8u;k++){
-   if(((fine>>k)&1u)==0u){continue;}
-   let tile=umPageTile(region,first+k);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
+  if(reached&&umTileLive(t)){
+   // An h tile is at most one of the owners' 64: the list cannot overflow.
+   if(umTileWidth(t)==1u){let at=atomicAdd(&umBodyList[0],1u);if(at<UM_BODY_LIST_TILES){atomicStore(&umBodyList[4u+at],t);}}
+   else{umSurfaceOwner(UMOwner(t,0u,4u,umTopology[t]&0x3fffffffu),false);}
   }
+ }
+}
+// The listed h tiles' launch (copied to the indirect buffer): no tile, no workgroup.
+@compute @workgroup_size(1) fn bodyArgs(){
+ let count=min(atomicLoad(&umBodyList[0]),UM_BODY_LIST_TILES);
+ atomicStore(&umBodyList[1],min(count,65535u));atomicStore(&umBodyList[2],1u);atomicStore(&umBodyList[3],1u);
+}
+@compute @workgroup_size(64) fn bodyFine(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) l:u32){
+ let count=min(atomicLoad(&umBodyList[0]),UM_BODY_LIST_TILES);
+ for(var j=group.x;j<count;j+=groups.x){
+  let tile=atomicLoad(&umBodyList[4u+j]);umSurfaceOwner(UMOwner(tile,l,1u,(umTopology[tile]&0x3fffffffu)+l),false);
  }
 }`:""}
 fn umReduce(l:u32){workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l<stride){sums[l]+=sums[l+stride];}workgroupBarrier();}}
@@ -803,15 +824,17 @@ ${this.resident?`// A group per page (fixed grid, strided): the 4h owners of an 
 `,counted)});
   const info=await module.getCompilationInfo(),errors=info.messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,...(this.solid?[this.solid.tileLayout]:[])]});
+  // Body mode's launches add the h tile list (group 3).
+  const bodyLayout=this.bodies?this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid!.tileLayout,this.bodies.layout]}):layout;
   const mode=this.resident?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all;
-  await Promise.all(this.entries().map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:mode}:{}),...s}}})));}));
+  await Promise.all(this.entries().map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout:BODY_ENTRIES.includes(entryPoint)?bodyLayout:layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:mode}:{}),...s}}})));}));
   if(this.revisions)this.pipelines.set("stampForce",await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"stamp",constants:{umDispatchX:this.ownership.dispatchX,umStampForce:1,...s}}})));
   if(!this.surfaceOnly)this.pipelines.set("phase",await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"build",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:mode,umAuthorityBalance:0,...s}}})));
  }
  /** The entry points this mode builds (stampForce and phase are variants). */
  private entries():string[]{
   return [...(this.surfaceOnly?["surface"]:["rows","build","chunks","reduce","resolve"]),...(this.revisions?["stamp","stampHeld"]:[]),...(this.coarse&&!this.regional?["cut","wet"]:[]),...(this.regional?["cutRegions","wetRegions"]:[]),
-   ...(this.resident?["absent"]:[]),...(this.bodyRegional?["surfaceRegions"]:[]),...(this.heldRegional?["surfaceHeld"]:[])];
+   ...(this.resident?["absent"]:[]),...(this.bodyRegional?BODY_ENTRIES:[]),...(this.heldRegional?["surfaceHeld"]:[])];
  }
  /** Every region's retained results are rebuilt by the next pass: a host
   * write of phi, solids, volume or ownership (UniformMixedFrame.invalidate). */
@@ -836,12 +859,20 @@ ${this.resident?`// A group per page (fixed grid, strided): the 4h owners of an 
  }
  /** The surface pass of a head whose only change since this authority's last
   * pass is rigid bodies: the owners of the regions near their swept support
-  * (surfaceRegions). Every other owner's phi and phase are that pass's
+  * (bodyRegions, bodyFine). Every other owner's phi and phase are that pass's
   * values on unchanged inputs. */
  encodeBodies(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
-  const pipeline=this.pipelines.get("surfaceRegions");if(!pipeline)throw new Error("Mixed pressure authority has no regional body launch (surface-only simulation authority with solids)");
-  const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.solid!.tileGroup);
-  pass.setPipeline(this.variant(pipeline));pass.dispatchWorkgroups(Math.min(REGION_GRID,8*this.pages));pass.end();
+  const bodies=this.bodies,pipelines=BODY_ENTRIES.map(entry=>this.pipelines.get(entry));
+  if(!bodies||pipelines.some(p=>!p))throw new Error("Mixed pressure authority has no regional body launch (surface-only simulation authority with solids)");
+  const [reset,regions,args,fine]=pipelines.map(p=>this.variant(p!));
+  const begin=()=>{const pass=encoder.beginComputePass(SURFACE_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setBindGroup(2,this.solid!.tileGroup);pass.setBindGroup(3,bodies.group);return pass;};
+  let pass=begin();
+  pass.setPipeline(reset!);pass.dispatchWorkgroups(1);
+  pass.setPipeline(regions!);pass.dispatchWorkgroups(Math.min(REGION_GRID,this.pages));
+  pass.setPipeline(args!);pass.dispatchWorkgroups(1);pass.end();
+  // The listed h tiles' owners: an indirect launch of exactly the list.
+  encoder.copyBufferToBuffer(bodies.list,4,bodies.args,0,12);
+  pass=begin();pass.setPipeline(fine!);pass.dispatchWorkgroupsIndirect(bodies.args,0);pass.end();
  }
  /** The work tiers and their epochs beside the revisions (the group has no
   * storage binding to spare). */
