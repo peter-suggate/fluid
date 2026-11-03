@@ -122,10 +122,11 @@ no voxel tool may declare X/Y/Z as a shortcut (unit-tested).
   follows the lock.
 - **DRAG (`d`), placing a body**: as BALL, with the body kept inside the
   container (same clamp as `restOnHover`).
-- **Throwing/sweeping an existing body** (press on a body with DRAG armed or
-  with nothing armed): unlocked = the camera-facing plane through the grab
-  point (unchanged). With a lock up, the body moves on the lock through the
-  grab point.
+- **Throwing/sweeping an existing body**: unlocked = the camera-facing plane
+  through the grab point (unchanged — the drag always resolves through a
+  `FocusSession` whose free pick is that plane). With a lock up (the keys are
+  live with DRAG armed, or with a selection standing), or taken mid-drag, the
+  body moves on the lock through the grab point.
 - **Selected entity handles**: unchanged (they already consume
   `axisConstraint` through `constrainHandleAxes`).
 - **Carry**: not changed; it owns the keyboard while active (Q/E tilt, wheel
@@ -148,6 +149,15 @@ no voxel tool may declare X/Y/Z as a shortcut (unit-tested).
 `tests/editor-focus-consumers.test.ts` (Pen unlocked identical to the plain
 pick, Pen straight-line/level strokes and air strokes, water tools lifted on
 `Y`, placement rest points, no tool shortcut on X/Y/Z).
+
+## Verification
+
+Unit tests cover the resolver, the key state machine, the guide, and each
+consumer's locked and unlocked behaviour. The dev server compiles every changed
+module; driving the running app (pointer + keys over WebGPU) was not possible
+from the automation available, so the on-screen guide/caption and the
+viewport's BALL/DRAG/throw wiring are type-checked but not yet exercised by
+hand.
 
 ## Milestones
 

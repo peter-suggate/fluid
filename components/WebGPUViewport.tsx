@@ -2,7 +2,7 @@
 
 import { rigidControlOwnerId } from "../lib/core/rigid-motor";
 
-import { useEffect, useRef, useState , useMemo} from "react";
+import { useEffect, useEffectEvent, useRef, useState , useMemo} from "react";
 import { useVoxelToolGesture } from "./useVoxelToolGesture";
 import { pickLanding } from "./viewport-pick";
 import type { PixelTraceConfig, PixelTraceStatus } from "../lib/core/webgpu-renderer";
@@ -49,6 +49,10 @@ import {
   constrainedAxes,
   type AxisConstraint,
 } from "../lib/core/editor-axis-constraint";
+import {
+  FocusSession, bodyPlacementCentre, focusAxes, focusKeys, focusGuide, focusLockAxis, focusLockHint, focusLockLabel, focusReach_m,
+  placementCentre, type FocusLock, type FocusPoint,
+} from "../lib/core/editor-focus";
 import {
   entityHandleAtPointer,
   entityOutline,
@@ -229,9 +233,16 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   // moves again: the circle promises the *next* click puts something there, and
   // it must not outlive the gesture that would.
   const [cursorDropGesture, setCursorDropGesture] = useState(armedGesture);
+  // The scene-focus lock as BALL, DRAG and a body sweep meet it: the guide it is
+  // drawn as, the last anchor a press over open air stands on, and the ray the
+  // cursor preview was last drawn from, so a lock key redraws it where it rests.
+  const [placementFocusLock, setPlacementFocusLock] = useState<FocusLock | undefined>(undefined);
+  const placementAnchorRef = useRef<Vec3 | undefined>(undefined);
+  const lastPreviewRayRef = useRef<{ origin: Vec3; direction: Vec3 } | undefined>(undefined);
   if (armedGesture !== cursorDropGesture) {
     setCursorDropGesture(armedGesture);
     if (cursorDrop) setCursorDrop(null);
+    if (placementFocusLock) setPlacementFocusLock(undefined);
   }
   /** Handle under the pointer, so it can announce what it does before the press. */
   const [handleHover, setHandleHover] = useState<{
@@ -514,7 +525,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // press origin too: selecting on the press would drop a bounding box around
     // everything the user only meant to fling, and only the release knows which
     // gesture this was.
-    | { id: number; action: "body"; bodyId: string; dragging: boolean; orientation?: RigidBodyState["orientation"]; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
+    | { id: number; action: "body"; bodyId: string; dragging: boolean; orientation?: RigidBodyState["orientation"]; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number; focus: FocusSession }
     // Every arm that edits the document carries the gesture it opened, and
     // closes that one: never whichever gesture the pane has open by then.
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3; gesture: EditGesture }
@@ -539,8 +550,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // grows instead of sinking into the floor it was dropped on. `moved` is
     // what separates the two gestures this tool has: a click drops a default
     // ball, a drag sizes one.
-    | { id: number; action: "body-place"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; template: RigidBodyDescription; dimensions_m: Vec3; position: Vec3 }
-    | { id: number; action: "fluid-ball"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string; gesture: EditGesture }
+    // `focus` is set when the press was made with a lock up: the drag then moves the object along the lock rather than sizing it.
+    | { id: number; action: "body-place"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; template: RigidBodyDescription; dimensions_m: Vec3; position: Vec3; focus?: FocusSession }
+    | { id: number; action: "fluid-ball"; anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string; gesture: EditGesture; focus?: FocusSession; centre_m?: Vec3 }
     | { id: number; action: "fill-level"; gesture: EditGesture }
     // One arm for every editable thing. `entity` is the entity as it stood when
     // the gesture opened, resolved against the committed scene: re-resolving it
@@ -904,12 +916,22 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    *
    * The selection is deliberately not moved here. See `pointerUp`.
    */
+  /** A body drag's free pick: the camera-facing plane through the grab point. */
+  const bodyDragPick = (planePoint: Vec3, planeNormal: Vec3) => (ray: { origin: Vec3; direction: Vec3 }): FocusPoint | undefined => {
+    const point = planeHit(ray.origin, ray.direction, planePoint, planeNormal);
+    return Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z) ? { point, normal: planeNormal } : undefined;
+  };
   const beginBodyDrag = (pointerId: number, timeStamp: number, downX: number, downY: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"], surfacePosition = position) => {
     // Record the press without issuing a kinematic command. A click selects;
     // only crossing the drag threshold may hold or move the body.
     const basis = cameraBasis(session.ui.getState().camera);
     const dragPoint = planeHit(ray.origin, ray.direction, surfacePosition, basis.forward), grabOffset = sub(position, dragPoint);
-    setPointer({ id: pointerId, action: "body", bodyId: body.description.id, dragging: false, orientation, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp });
+    // The grab point is the focus: free it rides the camera-facing plane as
+    // always; with a lock up, or one taken mid-drag, it rides the lock instead.
+    const focus = placementFocusSession();
+    focus.resolve(ray, bodyDragPick(surfacePosition, basis.forward));
+    if (focus.lock) setPlacementFocusLock(focus.lock);
+    setPointer({ id: pointerId, action: "body", bodyId: body.description.id, dragging: false, orientation, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp, focus });
   };
 
   /**
@@ -1356,13 +1378,15 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     ray: { origin: Vec3; direction: Vec3 },
     hover: EditorHover | undefined,
     radius_m: number,
+    locked?: Vec3,
   ) => {
     const committed = session.scene.getState().scene;
     // Re-rested at every radius rather than held at the press point, so a ball
     // dragged larger goes on sitting on what it was dropped on instead of
     // growing through it. The press ray, never the moving one: the pointer is
-    // sizing the ball here, not aiming it again.
-    const centre = fluidBallCentre(ray, hover, radius_m);
+    // sizing the ball here, not aiming it again. A ball placed on a focus lock
+    // is where the lock put it.
+    const centre = locked ?? fluidBallCentre(ray, hover, radius_m);
     if (!centre) return;
     // Authored t=0 volumes remain tank contents. Outside it, the draft is only
     // the cursor shape; release sends the ball to the live SparseWorld instead
@@ -1396,6 +1420,17 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * object — a circle over a place the click will not use is a promise broken
    * as soon as it is tested.
    */
+  /** A focus for one BALL or DRAG placement (docs/plans/scene-focus.md), reading the live lock. */
+  const placementFocusSession = () => new FocusSession({
+    constraint: () => session.ui.getState().axisConstraint,
+    fallback: placementAnchorRef.current,
+    reach_m: focusReach_m(session.scene.getState().scene.container),
+  });
+  /** With a lock up and nothing anchored, the guide stands on the last placement's anchor. */
+  const restingPlacementLock = (): FocusLock | undefined => {
+    const axes = focusAxes(session.ui.getState().axisConstraint);
+    return axes && placementAnchorRef.current ? { axes, anchor: placementAnchorRef.current } : undefined;
+  };
   const previewCursorDrop = (ray: { origin: Vec3; direction: Vec3 }) => {
     const ui = session.ui.getState();
     const scene = session.scene.getState().scene;
@@ -1405,10 +1440,15 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // hover target reports no useful surface normal, while `hoverSceneAt`
     // returns the exact one a prop has to stand on — so the placement arms keep
     // asking their own question instead of reinterpreting the highlight's.
-    const hover = ui.armedGesture ? hoverSceneAt(scene, drawnBodies(session.diagnostics), ray) : undefined;
+    lastPreviewRayRef.current = ray;
+    // The press's focus, resolved the same way, so the guide promises the press's lock.
+    const focus = placementFocusSession();
+    const rested = (rest: (ray: { origin: Vec3; direction: Vec3 }, hover: EditorHover | undefined) => Vec3 | undefined) =>
+      (r: { origin: Vec3; direction: Vec3 }) => rest(r, hoverSceneAt(scene, drawnBodies(session.diagnostics), r));
     if (ui.armedGesture === "fluid-ball") {
       const radius_m = defaultFluidBallRadius_m(scene);
-      const centre_m = restFluidInWorld(scene, ray, hover, radius_m);
+      const centre_m = placementCentre(focus, ray, rested((r, hover) => restFluidInWorld(scene, r, hover, radius_m)))?.centre;
+      setPlacementFocusLock(focus.lock ?? restingPlacementLock());
       if (!centre_m) { setCursorDrop(null); return; }
       setCursorDrop({ centre_m, radius_m, tone: "fluid" });
       return;
@@ -1416,16 +1456,27 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     if (ui.armedGesture === "body-drag") {
       const radius_m = boundingRadius(
         placementBodyDescription(ui.placementShape, ui.placementDimensions, 1, scene.container.height_m));
-      const centre_m = restInContainer(scene, ray, hover, radius_m);
+      const centre_m = bodyPlacementCentre(scene, focus, ray, radius_m,
+        rested((r, hover) => restInContainer(scene, r, hover, radius_m)));
+      setPlacementFocusLock(focus.lock ?? restingPlacementLock());
       if (!centre_m) { setCursorDrop(null); return; }
       setCursorDrop({ centre_m, radius_m, tone: "body" });
       return;
     }
+    if (placementFocusLock) setPlacementFocusLock(undefined);
     // A prop has no preview any more: resting one is a ring verb chosen at a
     // point, not a mode whose next click lands somewhere, so there is no "next
     // click" for a circle to promise anything about.
     setCursorDrop(null);
   };
+
+  // A lock key redraws the cursor's object and its guide where the pointer rests, not on the next move.
+  const repreviewCursorDrop = useEffectEvent(() => {
+    if (!pointerRef.current && lastPreviewRayRef.current && session.ui.getState().viewportMode === "interact") {
+      previewCursorDrop(lastPreviewRayRef.current);
+    }
+  });
+  useEffect(() => { repreviewCursorDrop(); }, [axisConstraint]);
 
   /**
    * Open a ball drop on whatever the press is over.
@@ -1437,7 +1488,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const scene = session.scene.getState().scene;
     const hover = hoverSceneAt(scene, drawnBodies(session.diagnostics), ray);
     const radius_m = defaultFluidBallRadius_m(scene);
-    const anchor = restFluidInWorld(scene, ray, hover, radius_m);
+    // With a lock up the press anchors it, and the drag moves the ball along it instead of sizing it.
+    const focus = focusAxes(session.ui.getState().axisConstraint) ? placementFocusSession() : undefined;
+    const placed = focus && placementCentre(focus, ray, (r) => restFluidInWorld(scene, r,
+      r === ray ? hover : hoverSceneAt(scene, drawnBodies(session.diagnostics), r), radius_m));
+    const anchor = placed?.centre ?? restFluidInWorld(scene, ray, hover, radius_m);
     if (!anchor) return;
     const gesture = simulation.beginDraft("fluid-body", "Dropped a ball of water", paneId);
     if (!gesture) return;
@@ -1445,8 +1500,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       id: event.pointerId, action: "fluid-ball", anchor, ray, hover,
       downX: event.clientX, downY: event.clientY, moved: false, radius_m,
       selectionId: addFluidBall(scene, anchor, radius_m).id, gesture,
+      ...(focus ? { focus, centre_m: anchor } : {}),
     });
-    updateFluidBallDraft(ray, hover, radius_m);
+    if (focus) setPlacementFocusLock(focus.lock);
+    updateFluidBallDraft(ray, hover, radius_m, focus ? anchor : undefined);
   };
 
   /**
@@ -1467,7 +1524,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    */
   const finishFluidBallDrop = async (active: {
     anchor: Vec3; ray: { origin: Vec3; direction: Vec3 }; hover?: EditorHover; radius_m: number; selectionId: string;
-    gesture: EditGesture;
+    gesture: EditGesture; centre_m?: Vec3;
   }) => {
     const committed = session.scene.getState().scene;
     const authored = () => {
@@ -1478,7 +1535,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       if (!active.gesture.commit({ reseed: committed.systems?.fluid !== false })) return;
       session.ui.getState().select({ kind: "fluid-body", id: active.selectionId });
     };
-    const centre = fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor;
+    const centre = active.centre_m ?? fluidBallCentre(active.ray, active.hover, active.radius_m) ?? active.anchor;
     // Once fluid authority exists, a drop is a live field edit even at t = 0.
     // Treating the zero timestamp as an unconditional document edit changed the
     // seed key and rebuilt the entire Sparse CM12 world for every drop. A dry
@@ -1560,12 +1617,18 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     }
     const template = placementBodyDescription(
       ui.placementShape, ui.placementDimensions, 1, scene.container.height_m);
-    const position = restInContainer(scene, ray, surface, boundingRadius(template));
+    // With a lock up the press anchors it, and the drag moves the body along it instead of sizing it.
+    const focus = focusAxes(ui.axisConstraint) ? placementFocusSession() : undefined;
+    const position = focus
+      ? bodyPlacementCentre(scene, focus, ray, boundingRadius(template), (r) => restInContainer(scene, r,
+        r === ray ? surface : hoverSceneAt(scene, bodies, r), boundingRadius(template)))
+      : restInContainer(scene, ray, surface, boundingRadius(template));
     if (!position) return;
+    if (focus) setPlacementFocusLock(focus.lock);
     setPointer({
       id: event.pointerId, action: "body-place", anchor: position, ray, hover: surface,
       downX: event.clientX, downY: event.clientY, moved: false,
-      template, dimensions_m: template.dimensions_m, position,
+      template, dimensions_m: template.dimensions_m, position, ...(focus ? { focus } : {}),
     });
     setCursorDrop({ centre_m: position, radius_m: boundingRadius(template), tone: "body" });
   };
@@ -1586,6 +1649,21 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     const result = await renderer.editFluid(action.edit);
     if (!result.accepted) throw new Error(result.reason ?? "Fluid edit was rejected.");
   }, (patches, base) => rendererRef.current?.previewLiveSolidEdit(patches, base));
+
+  /**
+   * The scene-focus guide: the lock's axis line or plane through its anchor,
+   * for whichever placing gesture has the hand (docs/plans/scene-focus.md).
+   */
+  const shownFocusLock: FocusLock | undefined = voxelGesture.focusLock
+    ?? (focusAxes(axisConstraint) ? placementFocusLock : undefined);
+  const focusGuideLayer = shownFocusLock && viewportMode === "interact" ? {
+    highlight: focusGuide(shownFocusLock, Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m)),
+    axis: focusLockAxis(shownFocusLock.axes),
+  } : undefined;
+  /** A lock held by a placing tool rather than by a selection's handles is named as the focus's. */
+  const focusLockAxes = focusAxes(axisConstraint);
+  const focusChip = focusLockAxes && !heldHandle && viewportMode === "interact"
+    && (voxelToolId !== undefined || armedGesture === "fluid-ball" || armedGesture === "body-drag") ? focusLockAxes : undefined;
 
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
     // An armed sculpt tool answers first: it takes the press — the secondary
@@ -1642,7 +1720,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // would know shift is false and the button is not the middle one, and a
     // catalog handed two constants would have its rules compiled away rather
     // than merely unreached.
-    const modifiers = { shift: event.shiftKey, middleButton: event.button === 1 };
+    // Shift is a pan request unless a focus-lock key is held, when it is half of that key's chord.
+    const shiftPans = event.shiftKey && !focusKeys.holding;
+    const modifiers = { shift: shiftPans, middleButton: event.button === 1 };
     const traceUI = session.ui.getState();
     const probes = { ray: traceUI.pixelTraceEnabled, cell: false };
     const probeClaim = probeClaimsPress(probes, traceUI.armedGesture, modifiers);
@@ -1667,7 +1747,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         downX: event.clientX, downY: event.clientY, action: "orbit", claimed: true });
       return;
     }
-    if (event.button === 0 && !event.shiftKey) {
+    if (event.button === 0 && !shiftPans) {
       const ray = pointerRay(event);
       // Handles first, and never GPU-gated: they are the selection's own
       // document geometry, so a gesture already under way — or one started
@@ -1915,9 +1995,19 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       const moved = active.moved
         || Math.hypot(event.clientX - active.downX, event.clientY - active.downY) > CLICK_SLOP_PX;
       if (!moved) return;
+      const scene = session.scene.getState().scene;
+      if (active.focus) {
+        const radius_m = boundingRadius({ ...active.template, dimensions_m: active.dimensions_m });
+        const position = bodyPlacementCentre(scene, active.focus, pointerRay(event), radius_m, (r) =>
+          restInContainer(scene, r, hoverSceneAt(scene, drawnBodies(session.diagnostics), r), radius_m));
+        setPlacementFocusLock(active.focus.lock);
+        if (!position) return;
+        setPointer({ ...active, moved, position });
+        setCursorDrop({ centre_m: position, radius_m, tone: "body" });
+        return;
+      }
       const radius = dropDragRadius(active, pointerRay(event));
       if (radius === undefined) return;
-      const scene = session.scene.getState().scene;
       const maximumRadius = Math.min(scene.container.width_m, scene.container.depth_m) / 2;
       const dimensions_m = placementDimensionsForRadius(active.template, Math.min(radius, maximumRadius));
       const radius_m = boundingRadius({ ...active.template, dimensions_m });
@@ -1931,6 +2021,16 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       const moved = active.moved
         || Math.hypot(event.clientX - active.downX, event.clientY - active.downY) > CLICK_SLOP_PX;
       if (!moved) return;
+      if (active.focus) {
+        const scene = session.scene.getState().scene;
+        const centre_m = placementCentre(active.focus, pointerRay(event), (r) =>
+          restFluidInWorld(scene, r, hoverSceneAt(scene, drawnBodies(session.diagnostics), r), active.radius_m))?.centre;
+        setPlacementFocusLock(active.focus.lock);
+        if (!centre_m) return;
+        setPointer({ ...active, moved, centre_m });
+        updateFluidBallDraft(active.ray, active.hover, active.radius_m, centre_m);
+        return;
+      }
       const radius_m = dropDragRadius(active, pointerRay(event));
       setPointer({ ...active, moved, radius_m: radius_m ?? active.radius_m });
       if (radius_m !== undefined) updateFluidBallDraft(active.ray, active.hover, radius_m);
@@ -1991,7 +2091,11 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         if (pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) return;
         simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "start", active.orientation, paneId);
       }
-      const ray = pointerRay(event), position = add(planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal), active.grabOffset);
+      const ray = pointerRay(event);
+      const focus = active.focus.resolve(ray, bodyDragPick(active.planePoint, active.planeNormal));
+      setPlacementFocusLock(active.focus.lock);
+      if (!focus) return;
+      const position = add(focus.point, active.grabOffset);
       const dt = Math.max((event.timeStamp - active.lastTime) / 1000, 1 / 240), rawVelocity = scale(sub(position, active.lastPosition), 1 / dt), speed = length(rawVelocity), velocity = speed > 6 ? scale(rawVelocity, 6 / speed) : rawVelocity;
       setPointer({ ...active, dragging: true, lastPosition: position, lastTime: event.timeStamp });
       simulation.dragBody(active.bodyId, position, velocity, "move", undefined, paneId); return;
@@ -2043,7 +2147,12 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // user asked a question about the body, and never when they were playing
     // with it. Same slop as the background click, so the two agree on what
     // "moved" means.
+    // The next placement over open air stands where this one's lock did.
+    if ((active.action === "body" || active.action === "body-place" || active.action === "fluid-ball") && active.focus?.anchor) {
+      placementAnchorRef.current = active.focus.anchor;
+    }
     if (active.action === "body") {
+      if (active.focus.lock && !session.ui.getState().armedGesture) setPlacementFocusLock(undefined);
       if (active.dragging) simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end", undefined, paneId);
       if (!cancelled && !active.dragging && pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) {
         session.ui.getState().selectBody(active.bodyId);
@@ -2180,7 +2289,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
-      onPointerLeave={() => { voxelGesture.leave(); setHoverTarget(null); publishHoverHighlight(null); setHandleHover(null); setCursorDrop(null); }}
+      onPointerLeave={() => { voxelGesture.leave(); setHoverTarget(null); publishHoverHighlight(null); setHandleHover(null); setCursorDrop(null); if (!pointerRef.current) setPlacementFocusLock(undefined); }}
       onWheel={(event) => {
         // The wheel is the carry's one extra degree of freedom: a single pointer
         // cannot say "further away", and reaching across the tank is most of
@@ -2243,6 +2352,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       held={heldHighlight ? { ...heldHighlight, tone: voxelSweep?.tone ?? "region" } : undefined}
       // A tool's ghost does not replace the selection it is working beside.
       standing={voxelSweep && standingHighlight ? standingHighlight : undefined}
+      guide={focusGuideLayer}
       camera={camera}
       width={viewportSize.width}
       height={viewportSize.height}
@@ -2328,8 +2438,8 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       data-blocked={heldAxes?.length === 0 ? "true" : undefined}
       aria-hidden="true"
     >
-      <strong>{axisConstraintLabel(axisConstraint)}</strong>
-      <span>{heldAxes?.length === 0
+      <strong>{focusChip ? focusLockLabel(focusChip) : axisConstraintLabel(axisConstraint)}</strong>
+      <span>{focusChip ? focusLockHint(focusChip) : heldAxes?.length === 0
         ? "this handle moves none of it — press Esc, or grab another handle"
         : axisConstraint.length === 1
           ? "only this axis moves"

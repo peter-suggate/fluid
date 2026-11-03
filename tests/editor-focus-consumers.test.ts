@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AxisConstraint } from "../lib/core/editor-axis-constraint";
 import type { EditorRay } from "../lib/core/editor-entity";
-import { FocusSession } from "../lib/core/editor-focus";
+import { FocusSession, bodyPlacementCentre, placementCentre } from "../lib/core/editor-focus";
 import { createEmptyScene, minimalRoomSceneryGraph } from "../lib/core/empty-scene";
 import { voxelToolKeyControls } from "../lib/core/editor-voxel-tool-actions";
 import { cloneScene, defaultScene, type SceneDescription, type Vec3 } from "../lib/core/model";
@@ -118,4 +118,27 @@ test("a Y lock lifts a water drop straight up from where the press met its plane
     assert.ok(Math.abs(bottom - Math.round(bottom)) < 1e-9, `${plugin.id} keeps its bottom on the grid`);
     assert.throws(() => gesture.update(towards({ ...pressed.center_m, y: 40 }, { x: 3, y: 30, z: 3 })), /inside the tank/);
   }
+});
+
+test("BALL and DRAG place on the resting point unlocked, and on the lock through it when one is up", () => {
+  const base = tank();
+  const rest = (ray: EditorRay): Vec3 | undefined => {
+    if (!(ray.direction.y < 0)) return undefined;
+    const t = (0.25 - ray.origin.y) / ray.direction.y;
+    return { x: ray.origin.x + t * ray.direction.x, y: 0.25, z: ray.origin.z + t * ray.direction.z };
+  };
+  const ray = towards({ x: .5, y: .25, z: -.5 });
+  assert.deepEqual(placementCentre(undefined, ray, rest), { centre: rest(ray)!, locked: false });
+  assert.deepEqual(placementCentre(focus(undefined), ray, rest), { centre: rest(ray)!, locked: false });
+  const lift = focus(["y"]);
+  assert.deepEqual(placementCentre(lift, ray, rest)!.centre, rest(ray), "the press anchors at the rest point");
+  const up = placementCentre(lift, towards({ x: .5, y: 1.5, z: -.5 }), rest)!;
+  assert.equal(up.locked, true);
+  assert.ok(Math.abs(up.centre.y - 1.5) < 1e-9 && Math.abs(up.centre.x - .5) < 1e-12 && Math.abs(up.centre.z + .5) < 1e-12);
+  // A body stays inside the container, as a resting one does.
+  const body = focus(["x"]);
+  bodyPlacementCentre(base, body, ray, .2, rest);
+  const pushed = bodyPlacementCentre(base, body, towards({ x: 9, y: .25, z: -.5 }, { x: 0, y: 3, z: 6 }), .2, rest)!;
+  assert.ok(Math.abs(pushed.x - (base.container.width_m / 2 - .2)) < 1e-12, "clamped to the wall less its radius");
+  assert.equal(pushed.y, .25);
 });

@@ -6,6 +6,7 @@ import {
   type BoxExtent, type EditorEntityTone, type EditorFrame,
 } from "../lib/core/editor-entity";
 import type { EditorHighlight, EditorTarget } from "../lib/core/editor-target";
+import type { EditorAxis } from "../lib/core/editor-axis-constraint";
 import type { CameraState, Vec3 } from "../lib/core/model";
 import { viewportProjector } from "../lib/core/webgpu-camera";
 
@@ -26,6 +27,12 @@ interface EditorHighlightLayerProps {
   };
   /** A selection that stands while a gesture runs over it, drawn quietly under the gesture's own. */
   standing?: { readonly highlight: EditorHighlight };
+  /**
+   * The scene-focus lock's guide through its anchor (docs/plans/scene-focus.md),
+   * drawn dashed in the colour of `axis` — the axis it runs along, or the one a
+   * plane holds fixed. A drawing only: nothing picks against it.
+   */
+  guide?: { readonly highlight: EditorHighlight; readonly axis: EditorAxis };
 }
 
 /**
@@ -58,7 +65,7 @@ interface EditorHighlightLayerProps {
  * stroke that grew by a cell draws that cell and compares the rest.
  */
 export const EditorHighlightLayer = memo(function EditorHighlightLayer(
-  { target, camera, width, height, held, standing, showHoverWithHeld = false }: EditorHighlightLayerProps,
+  { target, camera, width, height, held, standing, guide, showHoverWithHeld = false }: EditorHighlightLayerProps,
 ) {
   // One basis per view, shared by every corner of every layer.
   const project = useMemo(() => viewportProjector(camera, width, height), [camera, width, height]);
@@ -70,6 +77,7 @@ export const EditorHighlightLayer = memo(function EditorHighlightLayer(
     live: false, hover: Boolean(target.hoverHighlight),
   });
   if (standing) drawn.push({ highlight: standing.highlight, tone: "region", live: false, hover: false });
+  if (guide) drawn.push({ highlight: guide.highlight, tone: "region", live: false, hover: false, guide: guide.axis });
   if (held) drawn.push({
     highlight: held.highlight, tone: held.tone ?? target?.tone ?? "prop",
     caption: held.caption, live: true, hover: false,
@@ -89,6 +97,7 @@ export const EditorHighlightLayer = memo(function EditorHighlightLayer(
       data-tone={layer.tone}
       data-live={layer.live || undefined}
       data-hover={layer.hover || undefined}
+      data-guide={layer.guide}
       data-highlight-kind={layer.highlight.kind}
     >
       <HighlightShape highlight={layer.highlight} project={project} width={width} height={height}
@@ -103,6 +112,7 @@ interface HighlightLayer {
   readonly caption?: string;
   readonly live: boolean;
   readonly hover: boolean;
+  readonly guide?: EditorAxis;
 }
 
 type Project = (point_m: Vec3) => { leftFraction: number; topFraction: number; depth_m: number };
@@ -179,7 +189,8 @@ function sameLayerProps(a: EditorHighlightLayerProps, b: EditorHighlightLayerPro
     && Boolean(a.held) === Boolean(b.held)
     && a.held?.caption === b.held?.caption && a.held?.tone === b.held?.tone
     && sameHighlight(a.held?.highlight, b.held?.highlight)
-    && sameHighlight(a.standing?.highlight, b.standing?.highlight);
+    && sameHighlight(a.standing?.highlight, b.standing?.highlight)
+    && a.guide?.axis === b.guide?.axis && sameHighlight(a.guide?.highlight, b.guide?.highlight);
 }
 
 interface HighlightShapeProps {

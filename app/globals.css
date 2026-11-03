@@ -1357,6 +1357,11 @@ button.card[data-active] { border-color: var(--accent); }
 .editor-highlight[data-tone="prop"] { --tone: var(--tone-prop); }
 .editor-highlight[data-tone="inflow"] { --tone: var(--tone-inflow); }
 .editor-highlight[data-tone="region"] { --tone: var(--tone-region); }
+/* The scene-focus lock's guide (docs/plans/scene-focus.md): dashed, in its axis colour. */
+.editor-highlight[data-guide="x"] { --tone: var(--red); }
+.editor-highlight[data-guide="y"] { --tone: var(--accent); }
+.editor-highlight[data-guide="z"] { --tone: var(--axis-z); }
+.editor-highlight[data-guide] .highlight-edge { stroke-dasharray: 6 5; stroke-width: 1; }
 .editor-highlight .highlight-edge { fill: none; stroke: color-mix(in srgb, var(--tone) 72%, transparent); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
 /* A wall is a plane, not a wireframe: a stroked rectangle over a whole tank side
    reads as a box floating in the room, while a wash reads as the surface it is. */

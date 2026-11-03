@@ -166,7 +166,6 @@ export function hoverSceneAt(
  * container so the drop is always a legal scene.
  */
 export function restOnHover(hover: EditorHover, radius_m: number, scene: SceneDescription): Vec3 {
-  const c = scene.container;
   const normal = hover.kind === "body" || hover.kind === "fluid" ? hover.normal
     : hover.kind === "terrain" ? terrainSurfaceNormal(scene, hover)
       : { x: 0, y: 1, z: 0 };
@@ -176,6 +175,15 @@ export function restOnHover(hover: EditorHover, radius_m: number, scene: SceneDe
   // the running frame has room to let it fall.
   const airGap_m = hover.kind === "fluid" ? Math.min(...sceneCellSizes_m(scene)) : 0;
   const placed = add(hover.position_m, scale(normal, radius_m + airGap_m));
+  return containPlacement(scene, placed, radius_m);
+}
+
+/**
+ * Keep a body of this radius inside the container — and no higher than a
+ * little above its rim — so a placement is always a legal scene.
+ */
+export function containPlacement(scene: SceneDescription, placed: Vec3, radius_m: number): Vec3 {
+  const c = scene.container;
   return {
     x: Math.min(c.width_m / 2 - radius_m, Math.max(-c.width_m / 2 + radius_m, placed.x)),
     y: Math.min(c.height_m + 0.8, Math.max(radius_m, placed.y)),
