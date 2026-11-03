@@ -45,3 +45,43 @@ The bodies gate measured seep +0.000315 at 31.3 ms and letters −0.0113 at 104.
 - Fusing the 16h and 32h tail levels. Their cost is dependent latency, not launches.
 - Zero-workgroup launches for converged cycles.
 - `tailCycles=1` cut the tail from about 1.5 to 0.48 ms, but the step-90 residual rose from 0.033 to 0.153. Rejected: a weaker tail is not a convergence-neutral change.
+
+## 2026-11-03: P7 body head as a list, and P6 dropped (sub-implementer)
+
+Landed in 31d3607b. The simulation authority's bodies-only head (`encodeBodies`) used to scan each held region as eight 8-tile items, repeating the 27-neighbour reach scan eight times and running each item's h tiles in series. Now:
+
+- `bodyRegions` takes one region per workgroup, one lane per tile.
+- It surfaces reached 4h owners in place and appends reached h tiles to one list.
+- `bodyFine` runs exactly the listed tiles through an indirect launch. The args are copied between two passes, and the launch has zero workgroups when nothing is reached.
+- Root topology, phi and balance are untouched. Checked by a GPU probe on paddleboats at frames 20, 40, 60 and 80: the owner set is identical to the old scan (missed 0, extra 0), and every written word equals `encodeAll`.
+- Regression: `tests/uniform-authority-body-list.test.ts`, a randomized mirror of the old and new selection.
+
+Paddleboats kernel ms (90 steps, kernels=60) against `pr/base.json`:
+
+| Kernel | Before (ms) | After (ms) |
+|---|---|---|
+| surfaceRegions | 0.531 | — |
+| bodyRegions | — | 0.099 |
+| bodyFine | — | 0.063 |
+| bodyArgs | — | 0.006 |
+| Total | 0.531 | 0.168 |
+
+Gate. The tree carries other lanes' uncommitted edits. check:types is clean and test:unit is 1540 pass / 0 fail.
+
+| Run | Drift | lateHalfMedian (ms) |
+|---|---|---|
+| seep 300 | −3.5e-5 | 31.7 |
+| letters 120 | −0.0111 | 93.6 |
+| paddleboats 90 | — | 47.8 (median 44.6) |
+
+Not done, with measurements (stub A/B, paddleboats):
+
+- **The rest of the P7 list idea.** It is not worth it on this scene. With held = 0 (every quiet region borders a non-quiet one), changed ≈ 877 of 1536 regions and nearChanged ≈ 1535.
+  - surfaceHeld's scan overhead is only about 0.06 ms of its 0.55 ms: every owner genuinely reruns.
+  - wetRegions (0.40 ms) and cutRegions (0.27 ms) do genuine work for every near-changed region.
+  - A change list cannot shrink any of these three. The real lever is the relayout-head surfaceHeld pass, which is mostly redundant. Removing it needs an "unchanged revisions" held criterion: a correctness question, so it is left to the owner.
+- **P6 is dropped because it cannot be bit-identical.**
+  - project, buildRhs and toPressure write every resident 4h owner, and skipping air owners leaves `velocityScratch` holding forced velocities where project wrote zeros.
+  - The air-owner share of project is about 0.18 ms (0.78 → 0.60 when stubbed). buildRhs, toPressureFine and toPressureCoarse are 0.26, 0.18 and 0.09 ms, mostly liquid work.
+  - roKeys (0.10 ms) is per key, not per liquid owner.
+- **Memory accounting.** The simulation authority's `allocatedBytes` (stamps and the new list, about 0.1 MB) is not summed in `uniform-mixed-frame.ts:473`, which counts only `split.authority`. This gap predates the change.
