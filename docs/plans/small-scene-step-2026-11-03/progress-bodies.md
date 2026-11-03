@@ -66,3 +66,19 @@ Gate: check:types clean; test:unit 1540/0; seep 300: drift −0.0027, lateHalfMe
 The tree carries other lanes' uncommitted pressure/surface/census edits; the seep change (31.3 →
 48.8 ms, drift +0.0003 → −0.0027) is not from this change: seep has no bodies, and its bodyMask is
 0.034 ms with no other solid-record kernel above 0.06 ms.
+
+## 2026-11-03: per-cell dirty certificate measured and dropped; what remains
+
+When the tile-level SDF certificate fails, a cell-by-cell form could still prove a tile unchanged:
+each cell centre beyond 1.51 hmax of both surfaces on one side, and each face centre reached or
+missed by both poses' spheres. The extended tile-mask and query-reuse regressions passed (4/4).
+It cut paddleboats dirty tiles only from about 1930 to 1800 per step (80–88 of 2320 regions dirty).
+That is 7% of a buildRegions of about 1.2 ms, so at most about 0.08 ms, below the 0.3 ms bar. It was
+reverted unmeasured, and the timing run was cancelled.
+
+What remains is a body-free static record, so the body pass rebuilds only the cut rows of these tiles:
+
+- buildRegions (about 1.2 ms) is per-tile build latency over about 1800 genuinely touched tiles.
+  The census found a wider grid bought only 0.19 ms.
+- couple's remaining 0.63 ms is umBodyAmbient's six all-body probes per cut cell.
+- pRows' body share (about 1.0 ms) still runs the face-fraction geometry per cut face.
