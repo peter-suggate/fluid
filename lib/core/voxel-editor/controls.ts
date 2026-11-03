@@ -134,6 +134,8 @@ export function toolPatchOperation(context: Pick<ToolContext, "values" | "invert
 
 /** What `toolPatchOperation` makes of the modifier, as a tool that reads it tells a legend. */
 export const OPERATION_OPPOSITE = "attach ↔ erase; under paint, picks the material under the pointer";
+/** Why a press that paints scenery is refused: paint writes voxel materials, and scenery has its own. */
+export const PAINT_KEEPS_SCENERY = "Paint recolours voxels; scenery keeps its own materials. Erase still cuts it.";
 /** The same modifier on a tool whose direction already says attach or erase. */
 export const PAINT_SAMPLES = "under paint, picks the material under the pointer";
 

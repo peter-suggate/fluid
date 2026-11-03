@@ -1,8 +1,8 @@
 import { sculptCylinderDistance, sculptCylinderWGSL } from "./sculpt-cut-cylinder";
 import { SCULPT_ARENA_WORDS, sculptSubstrateWGSL } from "./svo-sculpt-substrate";
 import type { SolidWorldVoxelPatch } from "../../../core/solid-world";
-import { ellipsoidBounds } from "../../../core/solid-patch/ellipsoid-bounds";
-import { solidPatchKindId, SOLID_PATCH_BOX_KIND, SOLID_PATCH_ELLIPSOID_KIND, SOLID_PATCH_CYLINDER_KIND } from "../../../core/solid-patch/kind";
+import { subcellBounds } from "../../../core/solid-patch/ellipsoid-bounds";
+import { solidPatchKindId, SOLID_PATCH_BOX_KIND, SOLID_PATCH_CUBOID_KIND, SOLID_PATCH_ELLIPSOID_KIND, SOLID_PATCH_CYLINDER_KIND } from "../../../core/solid-patch/kind";
 
 type V3 = readonly [number, number, number];
 export interface SvoSculptLattice { readonly origin_m: V3; readonly cellSize_m: V3 }
@@ -57,8 +57,10 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
     const cached = packedCutRecords.get(patch)?.get(latticeKey);
     if (cached) { words.set(cached, at); return; }
     const kind = solidPatchKindId(patch);
-    if (kind !== SOLID_PATCH_BOX_KIND && kind !== SOLID_PATCH_ELLIPSOID_KIND && kind !== SOLID_PATCH_CYLINDER_KIND) throw new RangeError(`Scenery sculpt does not support ${kind} cuts`);
-    const bounds = kind === SOLID_PATCH_ELLIPSOID_KIND ? ellipsoidBounds(patch) : patch;
+    if (kind !== SOLID_PATCH_BOX_KIND && kind !== SOLID_PATCH_CUBOID_KIND && kind !== SOLID_PATCH_ELLIPSOID_KIND
+      && kind !== SOLID_PATCH_CYLINDER_KIND) throw new RangeError(`Scenery sculpt does not support ${kind} cuts`);
+    // A cuboid is the box record at its subcell bounds; a round kind's insets likewise place its record.
+    const bounds = kind === SOLID_PATCH_BOX_KIND ? patch : subcellBounds(patch);
     for (let a = 0; a < 3; a++) {
       const lo = lattice.origin_m[a]! + bounds.minimum[a]! * lattice.cellSize_m[a]!;
       const hi = lattice.origin_m[a]! + bounds.maximumExclusive[a]! * lattice.cellSize_m[a]!;
@@ -66,7 +68,7 @@ export function packSvoSculptCuts(patches: readonly SolidWorldVoxelPatch[], latt
       floats[at + a] = lo; floats[at + 4 + a] = hi;
     }
     if (kind === SOLID_PATCH_CYLINDER_KIND && ![0, 1, 2].includes(patch.axis ?? 1)) throw new RangeError("Invalid sculpt cylinder axis");
-    words[at + 3] = kind === SOLID_PATCH_BOX_KIND ? 1 : kind === SOLID_PATCH_ELLIPSOID_KIND ? 2 : 3 + (patch.axis ?? 1);
+    words[at + 3] = kind === SOLID_PATCH_BOX_KIND || kind === SOLID_PATCH_CUBOID_KIND ? 1 : kind === SOLID_PATCH_ELLIPSOID_KIND ? 2 : 3 + (patch.axis ?? 1);
     let byLattice = packedCutRecords.get(patch);
     if (!byLattice) { byLattice = new Map(); packedCutRecords.set(patch, byLattice); }
     byLattice.set(latticeKey, words.slice(at, at + SVO_SCULPT_CUT_RECORD_WORDS));

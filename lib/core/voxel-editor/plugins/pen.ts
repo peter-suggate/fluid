@@ -5,7 +5,7 @@ import type { Vec3 } from "../../model";
 import { sceneCellSizes_m } from "../../scene-lattice";
 import { sceneWithSolidStroke, type SolidWorldCoordinate as Cell, type SolidWorldVoxelPatch as Patch } from "../../solid-world";
 import { subcellEllipsoidPatch } from "../../solid-patch/ellipsoid-bounds";
-import { OPERATION_OPPOSITE, materialControl, mirrorControls, operationCaption, operationControl, operationTone,
+import { OPERATION_OPPOSITE, PAINT_KEEPS_SCENERY, materialControl, mirrorControls, operationCaption, operationControl, operationTone,
   toolMaterialId, toolOperation, toolPatchOperation } from "../controls";
 import { MAX_STROKE_PATCHES, MAX_STROKE_VOXELS, mirroredPatches, shapePatches, strokeHighlight,
   voxelToolUnavailable } from "../geometry";
@@ -16,7 +16,6 @@ export const penDiameterControl: ToolNumberControl = {
   id: "size", label: "Diameter · voxels", short: "Ø", adjust: "primary", min: 1, max: 64, step: 1, initial: 5,
 };
 interface PenSurface { readonly point: Vec3; readonly normal: Vec3; readonly scenery?: string }
-const PAINT_SCENERY = "Paint recolours voxels; scenery keeps its own materials. Erase still cuts it.";
 
 /**
  * A real, nearest surface. The pen never invents a ground plane after a miss.
@@ -46,7 +45,7 @@ function beginPen(context: ToolContext): ToolGesture | undefined {
   const first = surfaceAt(context, context.ray, true);
   if (!first) return undefined;
   // A repaint writes voxel materials; scenery keeps its own. Said at the press rather than painted into nothing.
-  if (paint && first.scenery !== undefined) throw new Error(PAINT_SCENERY);
+  if (paint && first.scenery !== undefined) throw new Error(PAINT_KEEPS_SCENERY);
   const diameter = context.values[penDiameterControl.id] ?? penDiameterControl.initial;
   const cell = sceneCellSizes_m(context.scene);
   const origin = [-context.scene.container.width_m / 2, 0, -context.scene.container.depth_m / 2];
@@ -178,7 +177,7 @@ export const penTool: VoxelToolPlugin = {
     group: "Brush", order: -1, key: "p", icon: "m4 20 4-1 12-12-3-3L5 16Zm10-13 3 3M4 20l1-4 3 3",
     hints: {
       armed: { keys: ["operation", "adjust"], text: "drag across any surface" },
-      active: (values) => ({ keys: ["cancel"], text: toolOperation(values) === "paint"
+      active: (values) => ({ keys: ["lock", "cancel"], text: toolOperation(values) === "paint"
         ? "recolours what the nib covers" : "leave a spot and come back to go further" }),
       after: (values) => ({ keys: ["adjust", "opposite"], text: passAgain(values) }),
     },

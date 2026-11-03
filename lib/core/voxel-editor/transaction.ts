@@ -64,7 +64,9 @@ export async function publishSolidPatches(host: ToolHost, base: SceneDescription
  * the pointer lets go. Cancelling has no document to roll back: it takes the
  * preview down.
  * Live tools instead publish append-only suffixes during the drag, with one
- * history entry on release and a validated rollback on cancellation.
+ * history entry on release and a validated rollback on cancellation. A live
+ * proposal that `replaces` its stroke is published as a rewind to the base and
+ * the new proposal over it, still within the one entry.
  *
  * `begun` is the gesture a caller already opened to ask where the press landed,
  * over this host's scene and with these values; the plugin is not asked twice.
@@ -186,7 +188,19 @@ function beginLiveToolTransaction(plugin: VoxelToolPlugin, host: ToolHost,
         const update = latest;
         latest = undefined;
         if (!solidPatchListExtends(accepted, update.patches)) {
-          throw new Error("A live tool must append patches to its accepted stroke.");
+          if (!update.replaces) throw new Error("A live tool must append patches to its accepted stroke.");
+          // Back to the base, then the new proposal over it: both sent at once,
+          // so the runtime answers them in one exchange — a truncation to a
+          // document it already holds, then an append.
+          const rewind = host.publish(base, current);
+          proposed = update.patches.length ? sceneWithSolidStroke(base, update.patches) : base;
+          const results = await Promise.allSettled(proposed === base ? [rewind] : [rewind, host.publish(proposed, base)]);
+          const refused = results.find((result) => result.status === "rejected");
+          if (refused) throw (refused as PromiseRejectedResult).reason;
+          current = proposed;
+          proposed = undefined;
+          accepted = update.patches;
+          continue;
         }
         const suffix = update.patches.slice(accepted.length);
         if (!suffix.length) continue;

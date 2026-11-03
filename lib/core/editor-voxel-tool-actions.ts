@@ -255,6 +255,8 @@ function hintKey(tool: VoxelToolPlugin, key: ToolHintKey, values: ToolValues): s
         && toolOperation(values) === "paint";
       return painting ? "Alt-click picks a colour" : "Alt inverts";
     }
+    // The scene focus (lib/core/editor-focus): the lock keys work under every tool that resolves through it.
+    case "lock": return "X Y Z lock an axis · ⇧ a plane";
     case "cancel": return "esc cancels";
     case "undo": return "⌘Z undoes";
     default: {

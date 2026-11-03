@@ -121,6 +121,8 @@ export const SOLID_PATCH_BOX_KIND = "box";
 export const SOLID_PATCH_ELLIPSOID_KIND = "ellipsoid";
 /** The elliptic cylinder inscribed in the patch box, running the box's full length along `axis`. */
 export const SOLID_PATCH_CYLINDER_KIND = "cylinder";
+/** An axis-aligned box at subcell bounds: insets in `payload`, inside the whole-cell patch box. */
+export const SOLID_PATCH_CUBOID_KIND = "cuboid";
 /** Dense cells carried in `payload`: whatever shape, coverage and materials were captured. */
 export const SOLID_PATCH_BLOCK_KIND = "block";
 

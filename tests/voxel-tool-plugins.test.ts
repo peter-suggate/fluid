@@ -86,7 +86,7 @@ test("hints teach the next thing by phase, naming only keys the tool has", () =>
   assert.equal(voxelToolHint("pen", "after", values(0)), "[ ] diameter · Alt inverts · pass again to build higher");
   assert.equal(voxelToolHint("pen", "after", values(1)), "[ ] diameter · Alt inverts · pass again to carve deeper");
   assert.match(voxelToolHint("pen", "after", values(2))!, /Alt-click picks a colour/);
-  assert.match(voxelToolHint("pen", "active", values(0))!, /^esc cancels/);
+  assert.equal(voxelToolHint("pen", "active", values(0)), "X Y Z lock an axis · ⇧ a plane · esc cancels · leave a spot and come back to go further");
   for (const plugin of voxelTools.tools) for (const phase of ["armed", "active", "after"] as const) {
     const hint = voxelToolHint(plugin.id, phase, toolValues(plugin));
     if (hint) assert.ok(hint.length <= 90, `${plugin.id} ${phase} hint stays short: ${hint}`);

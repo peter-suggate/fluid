@@ -135,11 +135,14 @@ export type ToolHintPhase = "armed" | "active" | "after";
  * - `operation`: the rail switch's letters (attach / erase / paint).
  * - `adjust` / `adjustSecondary`: the brackets, and Shift with them.
  * - `opposite`: the "do the opposite" modifier, in the words the values call for.
+ * - `lock`: X, Y and Z (Shift for a plane), the scene focus's locks, for a
+ *   tool that resolves its positions through `focus`.
  * - `cancel`: Escape, or the other button, mid-stroke.
  * - `undo`: ⌘Z after a stroke.
  * - `control:<id>`: a toggle's or a choice's own letter(s).
  */
-export type ToolHintKey = "operation" | "adjust" | "adjustSecondary" | "opposite" | "cancel" | "undo" | `control:${string}`;
+export type ToolHintKey = "operation" | "adjust" | "adjustSecondary" | "opposite" | "lock" | "cancel" | "undo"
+  | `control:${string}`;
 export interface ToolHint {
   readonly keys?: readonly ToolHintKey[];
   /** The next useful thing, in a few words. */
@@ -151,8 +154,17 @@ export interface ToolUpdate {
   /** A transient action is previewed during the gesture and executed once on release. */
   readonly action?: ToolAction;
   /** Complete proposal for this stroke, relative to its immutable base.
-   * Live gestures append to this list; accepted prefixes must not change. */
+   * Live gestures append to this list; accepted prefixes must not change,
+   * unless the update `replaces` the stroke. */
   readonly patches: readonly SolidWorldVoxelPatch[];
+  /**
+   * A live proposal that is not an extension of the last — a shape whose
+   * radius changed. The transaction takes the stroke back to its base and
+   * stands this proposal there in the same exchange; it is still one stroke,
+   * one history entry and one rollback. Absent, a live proposal that does not
+   * extend the accepted one is refused.
+   */
+  readonly replaces?: boolean;
   /**
    * The cells this gesture selects. Like the patches it is a proposal until
    * release, when the host makes it the standing voxel selection — after the
@@ -357,7 +369,7 @@ export function validateControls(owner: string, list: readonly ToolControl[],
  */
 export const RESERVED_EDITOR_KEYS: readonly string[] =
   ["b", "t", "y", "g", "d", "s", "v", "h", "o", "r", "x", "z", "f", "q", "e", "c"];
-const hintKeys = new Set(["operation", "adjust", "adjustSecondary", "opposite", "cancel", "undo"]);
+const hintKeys = new Set(["operation", "adjust", "adjustSecondary", "opposite", "lock", "cancel", "undo"]);
 export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[],
   reservedKeys: readonly string[] = RESERVED_EDITOR_KEYS) {
   const ids = new Set<string>();

@@ -8,7 +8,7 @@ import { mirroredPatches } from "../lib/core/voxel-editor/geometry";
 import { materialControl, mirrorControls } from "../lib/core/voxel-editor/controls";
 import { toolValues } from "../lib/core/voxel-editor/plugin";
 import { penTool } from "../lib/core/voxel-editor/plugins/pen";
-import { centerTool } from "../lib/core/voxel-editor/plugins/center";
+import { shapeTool } from "../lib/core/voxel-editor/plugins/shape";
 import { lineTool } from "../lib/core/voxel-editor/plugins/line";
 import { patternTool } from "../lib/core/voxel-editor/plugins/pattern";
 
@@ -36,12 +36,13 @@ test("Pen Draw uses the same subcell sphere as Carve and retains the chosen mate
   assert.notDeepEqual(draw.update(ray(10.875))!.patches, first.patches);
 });
 
-test("Center spheres stay on the press point and grow at subcell radii", () => {
+test("Shape spheres stay on the press point and grow at subcell radii", () => {
   const { scene, ray } = fixture(), start = ray(10.625);
-  const gesture = centerTool.begin({ scene, ray: start, values: toolValues(centerTool, { shape: 0 }) })!;
+  const gesture = shapeTool.begin({ scene, ray: start, values: toolValues(shapeTool, { shape: 0 }) })!;
   const click = gesture.update(start)!;
   click.patches.forEach(validateSolidPatch);
-  assert.deepEqual(click.patches[0]!.maximumExclusive.map((v, a) => v - click.patches[0]!.minimum[a]!), [1, 1, 1]);
+  const dot = ellipsoidBounds(click.patches[0]!);
+  assert.deepEqual(dot.maximumExclusive.map((v, a) => v - dot.minimum[a]!), [1, 1, 1], "a click is one voxel across");
   const grown = gesture.update(ray(13))!, bounds = ellipsoidBounds(grown.patches[0]!);
   grown.patches.forEach(validateSolidPatch);
   assert.deepEqual(bounds.minimum.map((v, a) => (v + bounds.maximumExclusive[a]!) / 2), [10.625, 4, 8.625]);

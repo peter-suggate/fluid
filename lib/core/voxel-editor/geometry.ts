@@ -6,7 +6,7 @@ import { sceneCellSizes_m } from "../scene-lattice";
 import type { EditorHighlight } from "../editor-target";
 import type { SceneDescription, Vec3 } from "../model";
 import { decodeVoxelBlock, encodeVoxelBlock } from "../solid-patch/block";
-import { ellipsoidBounds, ellipsoidInsets } from "../solid-patch/ellipsoid-bounds";
+import { subcellBounds, subcellInsets } from "../solid-patch/ellipsoid-bounds";
 import { SOLID_PATCH_BLOCK_KIND, SOLID_PATCH_CYLINDER_KIND, SOLID_PATCH_ELLIPSOID_KIND,
   solidPatchKindId } from "../solid-patch/kind";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../solid-world";
@@ -57,16 +57,17 @@ function flippedPayload(patch: Patch, axis: 0 | 1 | 2): string {
  * A patch's image in the plane `2 x = centre` across one axis.
  *
  * A box, and the ellipsoid or cylinder inscribed in one, are symmetric about
- * every axis plane, so kind and axis survive reflection. Subcell ellipsoid
- * insets swap sides; a block's cells are flipped along the axis as well.
+ * every axis plane, so kind and axis survive reflection. Subcell insets (an
+ * ellipsoid's, a cylinder's or a cuboid's) swap sides; a block's cells are
+ * flipped along the axis as well.
  */
 export function mirrorPatch(patch: Patch, axis: 0 | 1 | 2, centre: number): Patch {
   const minimum = [...patch.minimum], maximumExclusive = [...patch.maximumExclusive];
   minimum[axis] = centre - patch.maximumExclusive[axis];
   maximumExclusive[axis] = centre - patch.minimum[axis];
   let payload = patch.payload;
-  if (solidPatchKindId(patch) === SOLID_PATCH_ELLIPSOID_KIND && payload !== undefined) {
-    const insets = [...ellipsoidInsets(patch)];
+  if (solidPatchKindId(patch) !== SOLID_PATCH_BLOCK_KIND && payload !== undefined) {
+    const insets = [...subcellInsets(patch)];
     [insets[axis], insets[axis + 3]] = [insets[axis + 3]!, insets[axis]!];
     payload = JSON.stringify(insets);
   }
@@ -163,7 +164,7 @@ const worldBox = (scene: SceneDescription, patch: Pick<Patch, "minimum" | "maxim
  * shape the bake evaluates, so the ghost is the solid that release will write.
  */
 function curveOutline(scene: SceneDescription, patch: Patch): Vec3[][] {
-  const box = worldBox(scene, solidPatchKindId(patch) === SOLID_PATCH_ELLIPSOID_KIND ? ellipsoidBounds(patch) : patch);
+  const box = worldBox(scene, subcellBounds(patch));
   const lo = [box.min.x, box.min.y, box.min.z], hi = [box.max.x, box.max.y, box.max.z];
   const centre = lo.map((v, a) => (v + hi[a]!) / 2), radius = lo.map((v, a) => (hi[a]! - v) / 2);
   const point = (q: readonly number[]): Vec3 => ({ x: q[0]!, y: q[1]!, z: q[2]! });
@@ -194,9 +195,12 @@ function curveOutline(scene: SceneDescription, patch: Patch): Vec3[][] {
  * curve it is, because its bounding box would promise a cube.
  */
 export function strokeHighlight(scene: SceneDescription, patches: readonly Patch[]): EditorHighlight {
+  // A shape at subcell bounds is outlined where it stands, not on the cells it touches.
+  const piece = (patch: Patch) => solidPatchKindId(patch) === SOLID_PATCH_BLOCK_KIND ? patch : subcellBounds(patch);
+  const pieces = patches.map(piece);
   const bounds = worldBox(scene, {
-    minimum: [0, 1, 2].map((a) => Math.min(...patches.map((p) => p.minimum[a]!))) as unknown as Cell,
-    maximumExclusive: [0, 1, 2].map((a) => Math.max(...patches.map((p) => p.maximumExclusive[a]!))) as unknown as Cell,
+    minimum: [0, 1, 2].map((a) => Math.min(...pieces.map((p) => p.minimum[a]!))) as unknown as Cell,
+    maximumExclusive: [0, 1, 2].map((a) => Math.max(...pieces.map((p) => p.maximumExclusive[a]!))) as unknown as Cell,
   });
   const curved = (patch: Patch) => {
     const kind = solidPatchKindId(patch);
@@ -204,7 +208,7 @@ export function strokeHighlight(scene: SceneDescription, patches: readonly Patch
   };
   if (!patches.some(curved)) {
     return patches.length === 1 ? { kind: "box", box: bounds }
-      : { kind: "boxes", boxes: [bounds, ...patches.slice(-MAX_PREVIEW_BOXES).map((p) => worldBox(scene, p))],
+      : { kind: "boxes", boxes: [bounds, ...pieces.slice(-MAX_PREVIEW_BOXES).map((p) => worldBox(scene, p))],
         truncated: patches.length > MAX_PREVIEW_BOXES };
   }
   const corner = (box: { min: Vec3; max: Vec3 }, i: number): Vec3 =>
@@ -214,7 +218,7 @@ export function strokeHighlight(scene: SceneDescription, patches: readonly Patch
     [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]].map(([a, b]) => [corner(box, a!), corner(box, b!)]);
   // The corner a box highlight hangs its caption on, so the caption does not jump between kinds.
   return { kind: "paths", anchor_m: { x: bounds.min.x, y: bounds.max.y, z: bounds.max.z },
-    paths: patches.slice(-MAX_PREVIEW_CURVES).flatMap((p) => curved(p) ? curveOutline(scene, p) : boxEdges(worldBox(scene, p))) };
+    paths: patches.slice(-MAX_PREVIEW_CURVES).flatMap((p) => curved(p) ? curveOutline(scene, p) : boxEdges(worldBox(scene, piece(p)))) };
 }
 
 /** A face a stroke can stand on: a solid cell, and which of its six sides the ray met. */
@@ -228,6 +232,11 @@ export interface ToolSurface {
 }
 const worldOrigin = (scene: SceneDescription): readonly [number, number, number] =>
   [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
+/** A world point in lattice cells and fractions of one: where a shape centred on it stands. */
+export function latticePoint(scene: SceneDescription, point: Vec3): number[] {
+  const cell = sceneCellSizes_m(scene), origin = worldOrigin(scene);
+  return [point.x, point.y, point.z].map((v, a) => (v - origin[a]!) / cell[a]!);
+}
 /**
  * Where a ray meets the plane of a surface's face, in cells and fractions of
  * one. Undefined when the ray runs along the plane or away from it.

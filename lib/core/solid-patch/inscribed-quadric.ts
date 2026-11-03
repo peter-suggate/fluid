@@ -1,6 +1,6 @@
 import type { SolidWorldCoordinate, SolidWorldVoxelPatch } from "../solid-world";
 import type { SolidPatchRasterizer } from "./kind";
-import { ellipsoidBounds } from "./ellipsoid-bounds";
+import { subcellBounds } from "./ellipsoid-bounds";
 
 /**
  * The round shapes a patch box inscribes: an ellipsoid over its round axes and
@@ -29,13 +29,16 @@ interface InscribedQuadric {
   readonly inverseRadius: SolidWorldCoordinate;
   /** The smallest round radius; infinite when every axis is flat. */
   readonly minimumRadius: number;
+  /** The shape's bounds stand at fractions of a cell, so a flat axis' end caps can cut through cells. */
+  readonly subcell: boolean;
 }
 
 function inscribedQuadric(patch: Pick<SolidWorldVoxelPatch, "minimum" | "maximumExclusive" | "payload">,
   flatAxis: number | undefined): InscribedQuadric {
-  const subcell = flatAxis === undefined && patch.payload !== undefined;
+  // Subcell bounds (`./ellipsoid-bounds`): the shape spans its insets' bounds, not its box.
+  const subcell = patch.payload !== undefined;
   if (subcell) {
-    patch = { ...patch, ...ellipsoidBounds(patch as SolidWorldVoxelPatch) };
+    patch = { ...patch, ...subcellBounds(patch as SolidWorldVoxelPatch) };
   }
   const half = patch.minimum.map((value, axis) => 0.5 * (patch.maximumExclusive[axis]! - value));
   const round = half.map((value, axis) => axis !== flatAxis && (value > 0.5 || subcell));
@@ -44,6 +47,7 @@ function inscribedQuadric(patch: Pick<SolidWorldVoxelPatch, "minimum" | "maximum
     half: half as unknown as SolidWorldCoordinate,
     inverseRadius: half.map((value, axis) => round[axis] ? 1 / value : 0) as unknown as SolidWorldCoordinate,
     minimumRadius: Math.min(...half.map((value, axis) => round[axis] ? value : Number.POSITIVE_INFINITY)),
+    subcell,
   };
 }
 
@@ -79,9 +83,12 @@ export const coverageForSignedDistance = (distance: number): number =>
 
 export function inscribedQuadricRasterizer(patch: SolidWorldVoxelPatch,
   flatAxis: number | undefined): SolidPatchRasterizer {
-  const { centre, inverseRadius: [ix, iy, iz], minimumRadius } = inscribedQuadric(patch, flatAxis);
+  const shape = inscribedQuadric(patch, flatAxis);
+  const { centre, inverseRadius: [ix, iy, iz], minimumRadius } = shape;
   // Every axis flat: the shape is its box.
   if (minimumRadius === Number.POSITIVE_INFINITY) return { row: () => "full" };
+  // A subcell cylinder's caps stand inside its box, so the slab decides cells there.
+  if (shape.subcell && flatAxis !== undefined) return subcellPrismRasterizer(shape, flatAxis);
   // The cell centre nearest the shape's own: on it for an odd width, half a cell off for an even one.
   const centreOffset = Math.abs(centre[0] - Math.floor(centre[0]) - 0.5);
   return {
@@ -106,6 +113,41 @@ export function inscribedQuadricRasterizer(patch: SolidWorldVoxelPatch,
         const coverage = coverageForSignedDistance(distance);
         out.coverage[index] = coverage;
         // Half a cell inside is as deep as a covered cell is ever recorded: what a box writes.
+        out.signedDistanceQ8[index] = coverage === 255 ? -128
+          : Math.max(-0x8000, Math.min(0x7fff, Math.round(256 * distance)));
+        out.materialId[index] = 0;
+        if (coverage > 0) covered += 1;
+        if (coverage === 255) whole += 1;
+      }
+      return covered === 0 ? "empty" : whole === count ? "full" : "cells";
+    },
+  };
+}
+
+/**
+ * A subcell cylinder, cell by cell: the same distance as
+ * `inscribedQuadricSignedDistance_cells` — the ellipse's estimate, or the
+ * slab of its fractional end caps where that is farther — at every centre.
+ */
+function subcellPrismRasterizer(shape: InscribedQuadric, flatAxis: number): SolidPatchRasterizer {
+  const { centre, half, inverseRadius, minimumRadius } = shape;
+  return {
+    row(y, z, x0, x1, out) {
+      let covered = 0, whole = 0;
+      const count = x1 - x0;
+      for (let index = 0; index < count; index += 1) {
+        const point = [x0 + index + 0.5, y + 0.5, z + 0.5];
+        let s0 = 0, s1 = 0, slab = Number.NEGATIVE_INFINITY;
+        for (let axis = 0; axis < 3; axis += 1) {
+          const offset = point[axis]! - centre[axis]!, inverse = inverseRadius[axis]!;
+          if (axis === flatAxis) { slab = Math.abs(offset) - half[axis]!; continue; }
+          s0 += (offset * inverse) ** 2;
+          s1 += (offset * inverse * inverse) ** 2;
+        }
+        const k0 = Math.sqrt(s0);
+        const distance = Math.max(slab, s1 > 0 ? k0 * (k0 - 1) / Math.sqrt(s1) : -minimumRadius);
+        const coverage = coverageForSignedDistance(distance);
+        out.coverage[index] = coverage;
         out.signedDistanceQ8[index] = coverage === 255 ? -128
           : Math.max(-0x8000, Math.min(0x7fff, Math.round(256 * distance)));
         out.materialId[index] = 0;

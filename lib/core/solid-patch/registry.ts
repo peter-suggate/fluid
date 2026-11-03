@@ -1,6 +1,7 @@
 import { createSolidPatchKindRegistry } from "./kind";
 import { blockSolidPatchKind } from "./kinds/block";
 import { boxSolidPatchKind } from "./kinds/box";
+import { cuboidSolidPatchKind } from "./kinds/cuboid";
 import { cylinderSolidPatchKind } from "./kinds/cylinder";
 import { ellipsoidSolidPatchKind } from "./kinds/ellipsoid";
 
@@ -9,5 +10,6 @@ export const solidPatchKinds = createSolidPatchKindRegistry([
   boxSolidPatchKind,
   ellipsoidSolidPatchKind,
   cylinderSolidPatchKind,
+  cuboidSolidPatchKind,
   blockSolidPatchKind,
 ]);
