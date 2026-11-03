@@ -188,7 +188,7 @@ export interface ToolGesture {
   update(ray: EditorRay): ToolUpdate | undefined;
   /**
    * Asked once, when the pointer is released. True means the gesture has a
-   * further phase that follows the bare pointer (push/pull's extrusion after
+   * further phase that follows the bare pointer (an extrusion after
    * its footprint); the host keeps the stroke open and the next press commits.
    */
   advance?(): boolean;

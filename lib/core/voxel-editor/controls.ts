@@ -11,8 +11,8 @@ import type { ToolChoiceControl, ToolContext, ToolNumberControl, ToolValues } fr
  * follow from the declaration here.
  *
  * Two scopes. A number such as a width is the *tool's* — a sphere opens five
- * wide and a brush one, and neither should move the other — so those are
- * declared here and stored per tool. What the hand is holding is the
+ * wide and a brush one, and neither should move the other — so each tool
+ * declares its own beside it, stored per tool. What the hand is holding is the
  * *editor's*: the operation, the material, the mirror planes and whether the
  * tank's walls may be touched are stored once (`scope: "shared"`), and every
  * tool that lists them reads the same value. A shared control is listed by
@@ -20,8 +20,6 @@ import type { ToolChoiceControl, ToolContext, ToolNumberControl, ToolValues } fr
  * shared id.
  */
 
-export const sizeControl: ToolNumberControl = { id: "size", label: "Width · voxels", short: "W", adjust: "primary", min: 1, max: 64, step: 1, initial: 1 };
-export const depthControl: ToolNumberControl = { id: "depth", label: "Depth · voxels", short: "D", adjust: "secondary", min: 1, max: 128, step: 1, initial: 1 };
 /**
  * Whether voxel region searches may include the collision shell. Surface
  * picks always stop at visible geometry; this never enables picking through it.
@@ -37,7 +35,7 @@ const SELECTION_MODES: readonly { readonly name: ToolSelectionMode; readonly lab
   { name: "add", label: "Add", hint: "The gesture's cells join the selection already standing.", icon: "M5 5h14v14H5ZM12 8v8M8 12h8" },
   { name: "subtract", label: "Subtract", hint: "The gesture's cells leave the selection already standing.", icon: "M5 5h14v14H5ZM8 12h8" },
 ];
-/** The editor's, like the mirrors: a hand that is adding with the marquee is adding with the wand. */
+/** The editor's, like the mirrors: a hand that is adding stays adding, by click or by box, whatever is armed. */
 export const selectionModeControl: ToolChoiceControl = {
   id: "selectionMode", kind: "choice", scope: "shared", label: "Selection", initial: 0,
   options: SELECTION_MODES.map((mode, value) => ({ value, label: mode.label, hint: mode.hint, icon: mode.icon })),

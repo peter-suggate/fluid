@@ -11,8 +11,8 @@ import { SOLID_PATCH_BLOCK_KIND, SOLID_PATCH_CYLINDER_KIND, SOLID_PATCH_ELLIPSOI
   solidPatchKindId } from "../solid-patch/kind";
 import type { SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../solid-world";
 import { DEFAULT_VOXEL_MATERIAL_ID } from "../voxel-palette";
-import { depthControl, materialControl, operationControl, shellControl, toolMirrorAxes, toolOperation } from "./controls";
-import { toolReader, type ToolContext, type ToolGesture, type ToolUpdate, type VoxelToolPlugin } from "./plugin";
+import { materialControl, operationControl, shellControl, toolMirrorAxes, toolOperation } from "./controls";
+import { toolReader, type ToolContext, type ToolUpdate, type VoxelToolPlugin } from "./plugin";
 import { flipBlock } from "./voxel-grid";
 
 /**
@@ -312,32 +312,6 @@ export function sampledMaterial(plugin: VoxelToolPlugin, context: Pick<ToolConte
     caption: `PICK MATERIAL · ${entry.label.toUpperCase()}` } };
 }
 /**
- * How far along a surface's outward normal a ray points, in whole layers:
- * measured where the ray passes closest to the normal through `through`, a
- * point of the face as `facePoint` gives it. Positive is out of the solid.
- * Undefined looking straight down the normal, where the pointer says nothing
- * about depth.
- *
- * `through` is where the hand last touched the face, not the middle of what it
- * drew there: the ray that put it there then measures exactly zero, so a click
- * that does not move is a depth of nothing from any angle.
- */
-export function normalTravel(scene: SceneDescription, surface: Pick<ToolSurface, "coordinate" | "faceAxis" | "faceSign">,
-  through: readonly number[], ray: EditorRay, limit: number): number | undefined {
-  const cell = sceneCellSizes_m(scene), origin = worldOrigin(scene), axis = surface.faceAxis, sign = surface.faceSign;
-  const plane = origin[axis] + (surface.coordinate[axis] + (sign > 0 ? 1 : 0)) * cell[axis];
-  const centre = [0, 1, 2].map((a) => a === axis ? plane : origin[a]! + through[a]! * cell[a]!);
-  const o = [ray.origin.x, ray.origin.y, ray.origin.z];
-  const d = [ray.direction.x, ray.direction.y, ray.direction.z];
-  const w = centre.map((v, a) => v - o[a]!);
-  const dd = d.reduce((sum, v) => sum + v * v, 0), dn = d[axis]! * sign;
-  const denominator = dd - dn * dn;
-  if (!(denominator > 1e-6 * dd)) return undefined;
-  const dw = d.reduce((sum, v, a) => sum + v * w[a]!, 0), nw = w[axis]! * sign;
-  const along_m = (dn * dw - dd * nw) / denominator;
-  return Math.max(-limit, Math.min(limit, Math.round(along_m / cell[axis])));
-}
-/**
  * The box `layers` deep that stands on a face over a tangential span of cells
  * (`lo` and `hi` inclusive): out from the solid, or back into it starting at
  * the face's own layer.
@@ -357,56 +331,6 @@ export function patchesSize(patches: readonly Pick<Patch, "minimum" | "maximumEx
     - Math.min(...patches.map((p) => p.minimum[a]!))).join(" × ");
 }
 
-/** A drag's footprint on a face and how far it has since been pulled or pushed. */
-export interface Footprint {
-  readonly surface: ToolSurface;
-  /** The dragged span of the face's layer, inclusive at both corners. */
-  readonly lo: readonly number[];
-  readonly hi: readonly number[];
-  /** Layers along the outward normal: positive pulled out, negative pushed in, 0 at the face. */
-  readonly depth: number;
-  /** False while the footprint is still being dragged. */
-  readonly extruding: boolean;
-}
-/**
- * The two-phase gesture: drag a footprint across a face, let go, then move the
- * bare pointer along the face normal and click to commit.
- *
- * Depth is the one dimension a single drag on a plane cannot express. Splitting
- * the gesture at the release gives it a drag of its own: it is measured along
- * the normal through the point of the face where the drag let go, so it starts
- * at nothing and follows the cursor from any view except straight down that
- * normal.
- *
- * What a footprint and a depth *mean* — a box built or cut, a box selected —
- * is the caller's `propose`; this owns only the hand.
- */
-export function beginFootprintGesture(context: ToolContext,
-  propose: (footprint: Footprint) => ToolUpdate): ToolGesture | undefined {
-  const { scene, ray } = context;
-  const surface = toolSurface(context, ray);
-  const start = surface && faceCell(scene, surface, ray);
-  let released = surface && facePoint(scene, surface, ray);
-  if (!surface || !start || !released) return undefined;
-  let lo: readonly number[] = start, hi: readonly number[] = start, extruding = false, depth = 0;
-  return {
-    surface: surface.picked,
-    advance() {
-      if (extruding) return false;
-      extruding = true;
-      return true;
-    },
-    update(input): ToolUpdate | undefined {
-      if (!extruding) {
-        const end = faceCell(scene, surface, input);
-        if (!end) return undefined;
-        released = facePoint(scene, surface, input)!;
-        lo = start.map((v, a) => Math.min(v, end[a]!)); hi = start.map((v, a) => Math.max(v, end[a]!));
-      } else depth = normalTravel(scene, surface, released!, input, depthControl.max) ?? depth;
-      return propose({ surface, lo, hi, depth, extruding });
-    },
-  };
-}
 /** The outline of one box of cells. */
 export function boxHighlight(scene: SceneDescription, box: Pick<Patch, "minimum" | "maximumExclusive">): EditorHighlight {
   return { kind: "box", box: worldBox(scene, box) };
