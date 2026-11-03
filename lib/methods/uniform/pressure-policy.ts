@@ -9,6 +9,14 @@ export const UNIFORM_CM11A_V_CYCLES = 4;
 export const UNIFORM_CM11A_PRE_SWEEPS = 6;
 export const UNIFORM_CM11A_POST_SWEEPS = 6;
 export const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS = 2;
+// The native port's cycle budget floor, coarsest-level sweep cap and
+// divergence recovery (batches of sweeps until the residual falls to a tenth
+// of its initial value). The WebGPU arena has its own bounds.
+export const UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET = 1;
+export const UNIFORM_CM11A_COARSE_SWEEP_CAP = 4096;
+export const UNIFORM_CM11A_RECOVERY_BATCHES = 8;
+export const UNIFORM_CM11A_RECOVERY_SWEEPS = 8;
+export const UNIFORM_CM11A_RECOVERY_REDUCTION = 0.1;
 // TallCells reports 1e-4 s^-1 as its GPU/single-precision absolute L-infinity
 // tolerance; 1e-8 belongs to its double-precision CPU comparison. CM11a
 // itself fixes the cycle schedule but does not prescribe a residual tolerance.

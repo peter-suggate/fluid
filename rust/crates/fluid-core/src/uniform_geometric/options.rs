@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 pub const UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE: f32 = 0.0001_f32;
 pub const UNIFORM_CM11A_COARSE_SWEEP_CAP: usize = 4096;
-pub const UNIFORM_CM11A_DEFAULT_BUDGET_HEADROOM: usize = 1;
 pub const UNIFORM_CM11A_FULL_CYCLES: usize = 3;
 pub const UNIFORM_CM11A_MINIMUM_CYCLE_BUDGET: usize = 1;
 pub const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS: usize = 2;
@@ -58,7 +57,7 @@ impl Default for UniformGeometricOptions {
             pressure_v_cycles: 4_f32,
             pressure_sweeps: 6_f32,
             volume_dust_threshold: 0.001_f32,
-            phi_cubic_advection: "on".into(),
+            phi_cubic_advection: "off".into(),
             phi_drain: "on".into(),
             total_surface_volume: "on".into(),
             surface_deficit_balancing: "on".into(),
