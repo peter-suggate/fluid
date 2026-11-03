@@ -1,13 +1,20 @@
 import { solidFractionOccupies, type VoxelBlock } from "../../solid-patch/kind";
 import type { SolidPatchOperation, SolidWorldCoordinate as Cell, SolidWorldVoxelPatch as Patch } from "../../solid-world";
-import { OPERATION_OPPOSITE, mirrorControls, operationCaption, operationControl, operationTone, 
+import { OPERATION_OPPOSITE, mirrorControls, operationCaption, operationControl, operationTone,
   toolPatchOperation } from "../controls";
 import { assertStrokeCaps, faceBox, mirroredPatches, strokeHighlight, toolSurface, voxelToolUnavailable } from "../geometry";
 import type { ToolAvailabilityContext, ToolContext, ToolGesture, ToolNumberControl, ToolUpdate, VoxelToolPlugin } from "../plugin";
 import { blockPatches, rotateBlock90 } from "../voxel-grid";
 
 const EMPTY_CLIPBOARD = "Copy a selection first.";
-const turnsControl: ToolNumberControl = { id: "turns", label: "Quarter turns · about the up axis", short: "Turn", adjust: "primary", min: 0, max: 3, step: 1, initial: 0 };
+/**
+ * Why a pasted block cannot erase or repaint scenery: its cells are voxels, and
+ * scenery is cut by the analytic shapes alone. Said at the press, and on the
+ * caption while the pointer is over scenery, rather than proposing an edit that
+ * would change nothing there.
+ */
+export const PASTE_SCENERY = "A pasted block erases and repaints voxels only; scenery is cut with Pen or Shape.";
+export const pasteTurnsControl: ToolNumberControl = { id: "turns", label: "Quarter turns · about the up axis", short: "Turn", adjust: "primary", min: 0, max: 3, step: 1, initial: 0 };
 
 /** A copied block as it is stamped: turned, cut down to its solid cells, and its patches for each operation. */
 interface Stamp {
@@ -51,21 +58,25 @@ function stampOf(copied: VoxelBlock, turns: number): Stamp {
 }
 
 /**
- * Stamp the copied voxels where the pointer is.
+ * Paste: stamp the copied voxels where the pointer is. Armed by the Paste verb
+ * (⌘V), not from the rail — it is how a paste is told where.
  *
  * The block stands against the picked face, centred under the pointer: on the
  * face when attaching, sunk into it from the picked cell when erasing or
  * repainting, since those act on what is already there. Attaching writes the
- * block's cells with their own materials; erasing takes away the cells the
- * block has; repainting gives the solids under it the block's materials.
+ * block's cells with their own materials, on voxels, terrain or scenery alike;
+ * erasing takes away the voxels the block has; repainting gives the voxels
+ * under it the block's materials. Erase and repaint cannot reach scenery, and
+ * say so (`PASTE_SCENERY`) instead of proposing a stamp that does nothing.
  */
-function beginPattern(context: ToolContext): ToolGesture | undefined {
+function beginPaste(context: ToolContext): ToolGesture | undefined {
   const { scene, values, ray, clipboard } = context;
   if (!clipboard) throw new Error(EMPTY_CLIPBOARD);
   const first = toolSurface(context, ray);
   if (!first) return undefined;
   const operation = toolPatchOperation(context);
-  const stamp = stampOf(clipboard.block, values[turnsControl.id]!);
+  if (operation !== "fill" && first.scenery !== undefined) throw new Error(PASTE_SCENERY);
+  const stamp = stampOf(clipboard.block, values[pasteTurnsControl.id]!);
   let atOrigin = stamp.patches.get(operation);
   if (!atOrigin) stamp.patches.set(operation, atOrigin = blockPatches(operation, [0, 0, 0], stamp.block));
   const size = stamp.block.size;
@@ -73,6 +84,11 @@ function beginPattern(context: ToolContext): ToolGesture | undefined {
   return { surface: first.picked, update(input): ToolUpdate | undefined {
     const surface = toolSurface(context, input, false);
     if (!surface) return undefined;
+    if (operation !== "fill" && surface.scenery !== undefined) {
+      shown = undefined;
+      return { patches: [], tone: operationTone(operation), highlight: { kind: "paths", paths: [] },
+        caption: `${operationCaption(operation)} PASTE · ${PASTE_SCENERY}` };
+    }
     const lo = surface.coordinate.map((v, a) => v - Math.floor((size[a]! - 1) / 2)), hi = lo.map((v, a) => v + size[a]! - 1);
     const corner = faceBox(surface, lo, hi, size[surface.faceAxis], operation === "fill").minimum;
     if (shown && corner.every((v, a) => v === shown!.corner[a])) return shown.update;
@@ -81,17 +97,22 @@ function beginPattern(context: ToolContext): ToolGesture | undefined {
       maximumExclusive: patch.maximumExclusive.map((v, a) => v + corner[a]!) as unknown as Cell })));
     assertStrokeCaps(patches, "The copied block is too large to stamp in one stroke; copy a smaller selection or use fewer mirror planes.");
     const update: ToolUpdate = { patches, tone: operationTone(operation), highlight: strokeHighlight(scene, patches),
-      caption: `${operationCaption(operation)} PATTERN · ${size.join(" × ")}` };
+      caption: `${operationCaption(operation)} PASTE · ${size.join(" × ")}` };
     shown = { corner, update }; return update;
   } };
 }
 
-export const patternTool: VoxelToolPlugin = {
-  id: "pattern", version: 1,
-  ui: { label: "Pattern", hint: "Stamp the copied voxels against the face under the pointer.", group: "Brush", order: 5,
+export const pasteTool: VoxelToolPlugin = {
+  id: "paste", version: 1,
+  ui: { label: "Paste", hint: "Stamp the copied voxels against the surface you click. Brackets turn them.", group: "Clipboard", order: 30,
     opposite: OPERATION_OPPOSITE,
-    icon: "M4 4h7v7H4ZM13 4h7v7h-7ZM4 13h7v7H4ZM13 13h7v7h-7Z",
-    controls: [operationControl, turnsControl, ...mirrorControls] },
+    icon: "M8 5H6v15h12V5h-2M9 3h6v4H9z",
+    hints: {
+      armed: { keys: ["operation", "adjust"], text: "click where the copy goes" },
+      active: { keys: ["cancel"], text: "release to stamp it" },
+      after: { keys: ["adjust", "undo"], text: "click again for another copy" },
+    },
+    controls: [operationControl, pasteTurnsControl, ...mirrorControls] },
   unavailable: (context: ToolAvailabilityContext) => context.clipboard ? voxelToolUnavailable(context) : EMPTY_CLIPBOARD,
-  begin: beginPattern,
+  begin: beginPaste,
 };

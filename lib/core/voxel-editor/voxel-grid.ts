@@ -1,4 +1,3 @@
-import type { PickedSolidVoxel } from "../editor-solid-voxel";
 import { VOXEL_BLOCK_MAXIMUM_CELLS, voxelBlockPatch } from "../solid-patch/block";
 import { solidFractionOccupies, type VoxelBlock } from "../solid-patch/kind";
 import type { SolidPatchOperation, SolidWorldCoordinate, SolidWorldVoxelPatch } from "../solid-world";
@@ -46,12 +45,6 @@ export interface FoundVoxelRegion extends VoxelRegion {
   readonly cellCount: number;
   /** True when the piece carries on past the search window, which is where this region stops. */
   readonly clipped: boolean;
-}
-
-/** The exposed faces a search found, as the layer of cells that carry them. */
-export interface FoundVoxelFaceRegion extends FoundVoxelRegion {
-  readonly faceAxis: 0 | 1 | 2;
-  readonly faceSign: -1 | 1;
 }
 
 const boxSize = (minimum: SolidWorldCoordinate, maximumExclusive: SolidWorldCoordinate): SolidWorldCoordinate =>
@@ -178,37 +171,6 @@ export function connectedRegion(reader: VoxelReader, seed: SolidWorldCoordinate,
     return reader.solid(probe) && (material === undefined || reader.material(probe) === material);
   }, limit, "The connected piece");
   return found(windowMinimum, [side, side, side], result);
-}
-
-/**
- * The exposed faces that continue the picked one: cells in the picked cell's
- * layer, joined edge to edge, each solid with nothing in front of it.
- *
- * Returned as that layer of cells, one deep along `faceAxis` — the footprint a
- * face extrude pushes or pulls, and what a wand on a face selects. Throws when
- * the picked cell has no exposed face on that side.
- */
-export function faceRegion(reader: VoxelReader,
-  picked: Pick<PickedSolidVoxel, "coordinate" | "faceAxis" | "faceSign">,
-  options: RegionSearchOptions = {}): FoundVoxelFaceRegion {
-  const { reach, limit } = searchBounds(options);
-  const { coordinate, faceAxis, faceSign } = picked;
-  const probe: [number, number, number] = [coordinate[0], coordinate[1], coordinate[2]];
-  const material = options.byMaterial ? reader.material(probe) : undefined;
-  const side: [number, number, number] = [2 * reach + 1, 2 * reach + 1, 2 * reach + 1];
-  const start: [number, number, number] = [reach, reach, reach];
-  const windowMinimum = [coordinate[0] - reach, coordinate[1] - reach, coordinate[2] - reach];
-  side[faceAxis] = 1; start[faceAxis] = 0; windowMinimum[faceAxis] = coordinate[faceAxis];
-  const exposed = (x: number, y: number, z: number): boolean => {
-    probe[0] = windowMinimum[0]! + x; probe[1] = windowMinimum[1]! + y; probe[2] = windowMinimum[2]! + z;
-    if (!reader.solid(probe) || (material !== undefined && reader.material(probe) !== material)) return false;
-    probe[faceAxis] += faceSign;
-    return !reader.solid(probe);
-  };
-  if (!exposed(start[0], start[1], start[2])) {
-    throw new RangeError(`Voxel ${coordinate.join(", ")} has no exposed face on its ${faceSign > 0 ? "+" : "-"}${"xyz"[faceAxis]} side`);
-  }
-  return { ...found(windowMinimum, side, flood(side, start, exposed, limit, "The connected face")), faceAxis, faceSign };
 }
 
 /** Whether a cell belongs to a region. */

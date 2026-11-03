@@ -2,7 +2,7 @@ import type { VoxelRegionVerbPlugin } from "../verb";
 import { solidEditUnavailable } from "./region";
 
 /** The tool that stamps the clipboard where the pointer is, by its registry id. */
-export const PASTE_TOOL_ID = "pattern";
+export const PASTE_TOOL_ID = "paste";
 
 /**
  * Hand the clipboard to the pointer.

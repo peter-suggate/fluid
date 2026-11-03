@@ -229,6 +229,8 @@ export interface ToolSurface {
   readonly faceSign: -1 | 1;
   /** False when the ray met nothing and the surface is the ground plane. */
   readonly picked: boolean;
+  /** The scenery node the ray met, when the surface is scenery's rather than a voxel's. */
+  readonly scenery?: string;
 }
 const worldOrigin = (scene: SceneDescription): readonly [number, number, number] =>
   [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
@@ -286,7 +288,7 @@ export function toolSurface(context: Pick<ToolContext, "scene" | "values">, ray:
   const origin = worldOrigin(scene), h = sceneCellSizes_m(scene);
   const coordinate = [hit.point.x, hit.point.y, hit.point.z].map((v, a) =>
     Math.floor((v - origin[a]!) / h[a]! - normal[a]! * 1e-5)) as unknown as Cell;
-  return { coordinate, faceAxis, faceSign, picked: true };
+  return { coordinate, faceAxis, faceSign, picked: true, ...(hit.scenery !== undefined ? { scenery: hit.scenery } : {}) };
 }
 /**
  * What the "do the opposite" modifier samples while the hand paints: the

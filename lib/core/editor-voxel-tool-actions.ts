@@ -37,7 +37,7 @@ const GROUP_FACES: Record<string, {
     label: "Brushes",
     icon: "solid",
     tone: "body",
-    hint: "Attach, erase or paint solids, terrain and scenery: the pen, shapes and lines",
+    hint: "Attach, erase or paint solids, terrain and scenery: the pen and shapes",
   },
   Select: {
     rail: true,
@@ -46,6 +46,14 @@ const GROUP_FACES: Record<string, {
     icon: "region",
     tone: "region",
     hint: "Select solid voxels: click a connected piece or drag a box",
+  },
+  // Not on the rail: the Paste verb arms it, and it stands as the rail's guest while it does.
+  Clipboard: {
+    id: "sculpt-clipboard",
+    label: "Paste",
+    icon: "solid",
+    tone: "body",
+    hint: "Stamp the copied voxels where you click",
   },
   Fluid: {
     id: "sculpt-water",

@@ -9,8 +9,7 @@ import { materialControl, mirrorControls } from "../lib/core/voxel-editor/contro
 import { toolValues } from "../lib/core/voxel-editor/plugin";
 import { penTool } from "../lib/core/voxel-editor/plugins/pen";
 import { shapeTool } from "../lib/core/voxel-editor/plugins/shape";
-import { lineTool } from "../lib/core/voxel-editor/plugins/line";
-import { patternTool } from "../lib/core/voxel-editor/plugins/pattern";
+import { pasteTool } from "../lib/core/voxel-editor/plugins/paste";
 
 function fixture() {
   const scene = createEmptyScene();
@@ -62,11 +61,11 @@ test("mirroring preserves both asymmetric subcell spheres sharing one integer bo
   assert.equal(mirroredPatches({ scene, values: { [mirrorControls[0].id]: 1 } }, [symmetric]).length, 1);
 });
 
-test("Line and Pattern rebuild only when their lattice placement changes", () => {
+test("Paste rebuilds only when its lattice placement changes", () => {
   const { scene, ray } = fixture(), start = ray(4.5);
   const clipboard = { minimum: [0, 0, 0] as const, block: { size: [1, 1, 1] as const,
     solidFraction: new Uint8Array([255]), signedDistanceQ8: new Int16Array([-128]), materialId: new Uint16Array([2]) } };
-  for (const tool of [lineTool, patternTool]) {
+  for (const tool of [pasteTool]) {
     const gesture = tool.begin({ scene, ray: start, values: toolValues(tool), clipboard })!;
     const first = gesture.update(ray(8.5))!;
     assert.equal(gesture.update(ray(8.6)), first, tool.id);
