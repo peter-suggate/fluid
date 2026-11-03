@@ -54,3 +54,28 @@ The patch and its regression are kept outside the tree. They are not committed b
   - inflow.
 
   Moving them into `momentumStep` changes the frame's texture flow. Not started.
+
+## 2026-11-03: the separation and merge levers, measured and dropped; M2/M3(a) premises checked
+
+Runs from different times are not comparable: other agents' uncommitted edits change the flow, and live counts reached 238k–258k on the same move code. Every comparison below is therefore a back-to-back pair on one tree (paddleboats `--bodies`, 90 steps, ns per particle).
+
+| change (all exact unless noted) | before | after | ms |
+|---|---|---|---|
+| prepass pair reads from the compact position stream (bin order, 16 B) instead of the 48 B record; inexact form (no w test) | separationPrepass 3.58 | 2.93 | −0.14 |
+| merge: skip the centre depth when the run is within the cap's lower bound (`nbCellCapFloor`), plus surface shift reusing G2P's depth (`velocity.w`) when the rigid push-out left q unchanged | advect 14.40 | 14.26 | −0.035 |
+
+Both rows are under 0.3 ms, so both are dropped. The pair loop already reads its neighbours contiguously in sorted order. The merge gather (`nbMergeRun`/`nbMergeAbsorbed`) already walks the cell's contiguous sorted run, and only in cells over the cap (20, ungraded).
+
+The two exact patches remove one or two depth evaluations per particle and buy nothing, which confirms that the depth and run chains are cache-resident. The knockout deltas were the work itself (pair arithmetic, merges), not lookup latency.
+
+**M2 already exists.** The tail's `pair_*` extension (`uniform-mixed-extension-pair.wgsl.ts`) carries both payloads as one vec2: "all distance decisions and ordered reductions stay scalar and execute once". The second, non-pair sweep is the head's `encode()`, which re-extends after relayout. It is regional when the layout holds, but the paddleboats layout changes every frame (census churn).
+
+Per-step costs: pair sweeps 1.15 ms, head sweeps 0.68, hierarchy 1.14 (prolong 0.64, block sweeps 0.30, restrict 0.20), publish 0.86.
+
+**M3(a)'s launch-floor premise does not hold.**
+- Every hierarchy launch strides only the held-block list (`heJobs` scales with `heHeldBlocks()`, not with capacity).
+- The dirty and old-payload gates already zero the jobs.
+- The 5.7 × 52–98 µs per run is per-cell work over about 192 held blocks.
+- The skippable part is the level-0 prolong over blocks fully known at 4h. The coarser levels feed neighbour blocks' prolongs, so they would need a dilated list. Known cells already exit after 3 loads, so this bounds the gain at about 0.1–0.2 ms, under 0.3.
+
+The remaining lever on the extension is the head re-extension that churn forces: the census agent's area.
