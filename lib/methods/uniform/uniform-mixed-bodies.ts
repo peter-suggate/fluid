@@ -4,6 +4,94 @@ import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
 import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedSolidWGSL,type UniformMixedSolid,type UniformMixedSolidPool} from "./uniform-mixed-solid.wgsl";
 import {UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
+import {GPU_RIGID_BODY_CAPACITY} from "../../core/rigid-capacity";
+
+/** The rigid coupling kernel (couple) and its per-body face fraction, over
+ * the solid library and the helpers its module defines: umBodyPressure,
+ * umBodyOwnerWet, umBodyOwnerVelocity, umBodyAmbient, rigidExchange and
+ * umAllOwner over the h list (its job is an h tile, a lane a cell). Exported
+ * for the all-body reference test. */
+export const uniformMixedCoupleWGSL=/* wgsl */`
+// Match the pressure operator's four transverse aperture samples.
+fn umBodyFaceFraction(i:u32,p:vec3i,axis:u32)->f32{
+ let world=umSolidFaceWorld(p,axis);let h=umSolidParams.cellGravity.xyz;var blocked=0.0;
+ for(var k=0u;k<4u;k++){
+  var sample=world;let a=(axis+1u)%3u;let b=(axis+2u)%3u;
+  sample[a]+=select(-0.35,0.35,(k&1u)!=0u)*h[a];sample[b]+=select(-0.35,0.35,(k&2u)!=0u)*h[b];
+  blocked+=select(0.0,0.25,umInsideBody(i,sample));
+ }return blocked;
+}
+// The exchange's fixed-point words of one h tile's job, summed in workgroup
+// memory (integer adds commute: the sums equal the per-cell global adds) and
+// flushed once a job; a word whose sum is zero is not touched.
+var<workgroup> coupleSum:array<atomic<i32>,${12*GPU_RIGID_BODY_CAPACITY}>;
+// The bodies whose bounding sphere, grown by the per-cell margin, reaches
+// the tile's box (a superset of every cell's umBodyNear), and those some
+// cell is near (word 10: pressure coupled).
+var<workgroup> coupleBodies:atomic<u32>;
+var<workgroup> coupleNear:atomic<u32>;
+fn coupleAdd(word:u32,value:i32){if(value!=0){atomicAdd(&coupleSum[word],value);}}
+// One job an h tile (the h list), a lane a cell.
+@compute @workgroup_size(64) fn couple(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let o=umAllOwner(vec3u(64u*group.x+lane,0u,0u));
+ let id=vec3i(umOrigin(o));let h=umSolidParams.cellGravity.xyz;let world=umSolidWorldCell(id);
+ let count=umBodyCount();
+ if(lane==0u){atomicStore(&coupleBodies,0u);atomicStore(&coupleNear,0u);}
+ workgroupBarrier();
+ // Every cell centre lies in the tile's box: a body whose sphere misses the
+ // box by more than the margin is near no cell of it.
+ if(lane<count&&o.width==1u){
+  let lo=umSolidWorldCell(vec3i(4u*umTileCoord(o.tile)));let hi=lo+3.0*h;
+  let b=umSolidBodies[lane];let c=b.positionShape.xyz;
+  if(b.positionShape.w<0.0||distance(clamp(c,lo,hi),c)<=b.dimensions.w+1.01*length(h)){atomicOr(&coupleBodies,1u<<lane);}
+ }
+ let bodies=workgroupUniformLoad(&coupleBodies);
+ if(bodies==0u){return;}
+ for(var i=lane;i<12u*count;i+=64u){if(((bodies>>(i/12u))&1u)!=0u){atomicStore(&coupleSum[i],0);}}
+ workgroupBarrier();
+ var remaining=bodies;
+ while(remaining!=0u){
+  let owner=firstTrailingBit(remaining);remaining&=remaining-1u;
+  if(!umBodyNear(owner,world,length(h))){continue;}
+  atomicOr(&coupleNear,1u<<owner);let base=owner*12u;
+  // The shapes' distances are exact (1-Lipschitz, signed as umInsideBody):
+  // every face and corner sample lies within half the cell's diagonal of its
+  // centre, so a centre farther than that from the surface has all of them on
+  // its own side. Its face fractions then cancel and its fraction is 0 or 1.
+  let distance=umBodyDistance(owner,world);let clear=abs(distance)>0.505*length(h);
+  var area=vec3f(0.0);
+  if(!clear){
+   for(var axis=0u;axis<3u;axis++){
+    var low=id;low[axis]-=1;
+    area[axis]=(umBodyFaceFraction(owner,id,axis)-umBodyFaceFraction(owner,low,axis))*h[(axis+1u)%3u]*h[(axis+2u)%3u];
+   }
+  }
+  // No cut face: the reaction and its torque are zero whatever the pressure.
+  if(any(area!=vec3f(0.0))){
+   let reaction=umBodyPressure(id)*area*umSolidParams.dimsDt.w;
+   let torque=cross(world-umSolidBodies[owner].positionShape.xyz,reaction);
+   coupleAdd(base,i32(round(reaction.x*1000000.0)));coupleAdd(base+1u,i32(round(reaction.y*1000000.0)));coupleAdd(base+2u,i32(round(reaction.z*1000000.0)));
+   coupleAdd(base+3u,i32(round(torque.x*1000000.0)));coupleAdd(base+4u,i32(round(torque.y*1000000.0)));coupleAdd(base+5u,i32(round(torque.z*1000000.0)));
+  }
+  var fraction=select(0.0,1.0,distance<0.0);if(!clear){fraction=umBodyFraction(owner,id);}
+  if(fraction==0.0){continue;}
+  let displaced=umBodyOwnerWet(o)*fraction;
+  // A dry cell displaces nothing and weighs no ambient velocity.
+  if(displaced==0.0){continue;}
+  coupleAdd(base+6u,i32(round(displaced*65536.0)));
+  coupleAdd(base+11u,i32(round(displaced*65536.0)));
+  let ambient=umBodyAmbient(owner,id,umBodyOwnerVelocity(o));
+  coupleAdd(base+7u,i32(round(displaced*ambient.x*10000.0)));coupleAdd(base+8u,i32(round(displaced*ambient.y*10000.0)));coupleAdd(base+9u,i32(round(displaced*ambient.z*10000.0)));
+ }
+ workgroupBarrier();
+ let near=atomicLoad(&coupleNear);
+ for(var i=lane;i<12u*count;i+=64u){
+  let body=i/12u;if(((bodies>>body)&1u)==0u){continue;}
+  if(i%12u==10u){if(((near>>body)&1u)!=0u){atomicStore(&rigidExchange[i],1);}continue;}
+  let v=atomicLoad(&coupleSum[i]);if(v!=0){atomicAdd(&rigidExchange[i],v);}
+ }
+}
+`;
 
 export interface UniformMixedBodyFields {
  /** The frame's velocity (the projected field when coupling runs). */
@@ -84,15 +172,6 @@ fn umBodyPressure(p:vec3i)->f32{
  let l=vec3u(p)&vec3u(3u);
  return bodyPressure[${this.fields.pressure().word+this.ownership.capacity.tiles}u+(slot-1u)*64u+l.x+4u*(l.y+4u*l.z)];
 }
-// Match the pressure operator's four transverse aperture samples.
-fn umBodyFaceFraction(i:u32,p:vec3i,axis:u32)->f32{
- let world=umSolidFaceWorld(p,axis);let h=umSolidParams.cellGravity.xyz;var blocked=0.0;
- for(var k=0u;k<4u;k++){
-  var sample=world;let a=(axis+1u)%3u;let b=(axis+2u)%3u;
-  sample[a]+=select(-0.35,0.35,(k&1u)!=0u)*h[a];sample[b]+=select(-0.35,0.35,(k&2u)!=0u)*h[b];
-  blocked+=select(0.0,0.25,umInsideBody(i,sample));
- }return blocked;
-}
 // An owner's centre phi (the trilinear vertex phi at its centre) and wet
 // fraction, surfaceOccupancy's level-set branch.
 fn umBodyOwnerWet(o:UMOwner)->f32{
@@ -123,30 +202,7 @@ fn umBodyAmbient(i:u32,p:vec3i,fallback:vec3f)->vec3f{
  }
  return select(fallback,total/max(weight,1e-6),weight>0.0);
 }
-@compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
- let o=umAllOwner(gid);if(o.width!=1u){return;}
- let id=vec3i(umOrigin(o));let h=umSolidParams.cellGravity.xyz;let world=umSolidWorldCell(id);
- for(var owner=0u;owner<umBodyCount();owner++){
-  if(!umBodyNear(owner,world,length(h))){continue;}
-  let pressure=umBodyPressure(id);let base=owner*12u;
-  var area=vec3f(0.0);
-  for(var axis=0u;axis<3u;axis++){
-   var low=id;low[axis]-=1;
-   area[axis]=(umBodyFaceFraction(owner,id,axis)-umBodyFaceFraction(owner,low,axis))*h[(axis+1u)%3u]*h[(axis+2u)%3u];
-  }
-  let reaction=pressure*area*umSolidParams.dimsDt.w;
-  let torque=cross(world-umSolidBodies[owner].positionShape.xyz,reaction);
-  atomicAdd(&rigidExchange[base],i32(round(reaction.x*1000000.0)));atomicAdd(&rigidExchange[base+1u],i32(round(reaction.y*1000000.0)));atomicAdd(&rigidExchange[base+2u],i32(round(reaction.z*1000000.0)));
-  atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1000000.0)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1000000.0)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1000000.0)));
-  atomicStore(&rigidExchange[base+10u],1);
-  let fraction=umBodyFraction(owner,id);if(fraction==0.0){continue;}
-  let displaced=umBodyOwnerWet(o)*fraction;
-  atomicAdd(&rigidExchange[base+6u],i32(round(displaced*65536.0)));
-  atomicAdd(&rigidExchange[base+11u],i32(round(displaced*65536.0)));
-  let ambient=umBodyAmbient(owner,id,umBodyOwnerVelocity(o));
-  atomicAdd(&rigidExchange[base+7u],i32(round(displaced*ambient.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(displaced*ambient.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(displaced*ambient.z*10000.0)));
- }
-}
+${uniformMixedCoupleWGSL}
 fn umBodyMarkTile(tile:u32){
  if(!umTileLive(tile)){return;}
  // bodyTiles is a bit per tile key (the census's body words).
@@ -169,7 +225,7 @@ fn umBodyMarkTile(tile:u32){
 ${this.pool?/* wgsl */`@compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  for(var i=gid.x;i<512u*ulResidentCount();i+=64u*groups.x){umBodyMarkTile(512u*ulResidentBlock(i>>9u)+(i&511u));}
 }`:/* wgsl */`@compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u){umBodyMarkTile(gid.x+umDispatchX*64u*gid.y);}`}
-`,["couple"])});
+`,["couple"],"umCounts.x")});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const couple=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.coupleLayout,this.solid.bindLayout]});
   const tiles=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.tilesLayout,this.solid.bindLayout]});
