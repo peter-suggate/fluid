@@ -26,9 +26,9 @@ export const depthControl: ToolNumberControl = { id: "depth", label: "Depth · v
  * Whether voxel region searches may include the collision shell. Surface
  * picks always stop at visible geometry; this never enables picking through it.
  */
-export const shellControl: ToolNumberControl = { id: "shell", kind: "toggle", scope: "shared", label: "Include tank shell in selections", short: "Shell", shortcut: "w", min: 0, max: 1, step: 1, initial: 0 };
+export const shellControl: ToolNumberControl = { id: "shell", kind: "toggle", scope: "shared", tier: "advanced", label: "Include tank shell in selections", short: "Shell", shortcut: "i", min: 0, max: 1, step: 1, initial: 0 };
 /** Keep a search to the material it starts on. Each tool that searches keeps its own. */
-export const byMaterialControl: ToolNumberControl = { id: "byMaterial", kind: "toggle", label: "Stop at a change of material", short: "By material", min: 0, max: 1, step: 1, initial: 0 };
+export const byMaterialControl: ToolNumberControl = { id: "byMaterial", kind: "toggle", tier: "advanced", label: "Stop at a change of material", short: "By material", min: 0, max: 1, step: 1, initial: 0 };
 
 /** What a selecting gesture does to the selection already standing. */
 export type ToolSelectionMode = "replace" | "add" | "subtract";
@@ -77,7 +77,7 @@ export function shapeControl<const Name extends string>(shapes: readonly Name[])
  * keeps the id and the key the single mirror had.
  */
 const mirror = (id: string, axis: string, shortcut?: string): ToolNumberControl => ({
-  id, kind: "toggle", scope: "shared", label: `Mirror ${axis}`, short: axis === "X" ? "Mirror X" : axis,
+  id, kind: "toggle", scope: "shared", tier: "advanced", label: `Mirror ${axis}`, short: axis === "X" ? "Mirror X" : axis,
   ...(shortcut ? { shortcut } : {}), min: 0, max: 1, step: 1, initial: 0,
 });
 export const mirrorControls: readonly [ToolNumberControl, ToolNumberControl, ToolNumberControl] =

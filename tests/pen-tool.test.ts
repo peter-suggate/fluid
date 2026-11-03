@@ -14,8 +14,11 @@ import { sceneCellSizes_m } from "../lib/core/scene-lattice";
 import { SOLID_PATCH_ELLIPSOID_KIND } from "../lib/core/solid-patch/kind";
 import { ellipsoidBounds } from "../lib/core/solid-patch/ellipsoid-bounds";
 import { packSvoSculptCuts, sampleSvoSculptCuts } from "../lib/svo/features/scene-publication/svo-sculpt-cuts";
+import { createHash } from "node:crypto";
 import { penDiameterControl, penTool } from "../lib/core/voxel-editor/plugins/pen";
-import { adjustableControl, toolValues } from "../lib/core/voxel-editor/plugin";
+import { adjustableControl, toolValues, type ToolUpdate } from "../lib/core/voxel-editor/plugin";
+import { materialControl, mirrorControls, operationControl } from "../lib/core/voxel-editor/controls";
+import { mirrorCentres } from "../lib/core/voxel-editor/geometry";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
 
 function scene(): SceneDescription {
@@ -29,18 +32,108 @@ function ray(scene: SceneDescription, x: number, z = 8): EditorRay {
   return { origin: { x: -scene.container.width_m / 2 + (x + .5) * h[0], y: 2,
     z: -scene.container.depth_m / 2 + (z + .5) * h[2] }, direction: { x: 0, y: -1, z: 0 } };
 }
-const values = (size = 1, mode = 0) => toolValues(penTool, { size, mode });
+const values = (size = 1, mode = 0) => toolValues(penTool, { size, operation: mode });
 
-test("pen is a live tool with adjustable diameter and direct Draw/Carve controls", () => {
+test("pen is a live tool with adjustable diameter that reads the rail's shared operation", () => {
   assert.equal(voxelTools.get("pen"), penTool);
   assert.equal(penTool.execution, "live");
   assert.equal(adjustableControl(penTool, false), penDiameterControl);
   assert.equal(adjustableControl(penTool, true), penDiameterControl);
   assert.equal(values(500).size, 64);
   assert.equal(values(0).size, 1);
-  const modes = penTool.ui.controls.find(c => c.id === "mode");
-  assert.ok(modes?.kind === "choice");
-  assert.deepEqual(modes.options.map(option => option.label), ["Draw", "Carve"]);
+  assert.ok(penTool.ui.controls.includes(operationControl), "one operation switch, the rail's, not a second Draw/Carve");
+  assert.ok(!penTool.ui.controls.some(c => c.id === "mode"));
+  for (const mirror of mirrorControls) assert.ok(penTool.ui.controls.includes(mirror));
+  assert.equal(voxelTools.get("voxel"), undefined, "the Voxel brush is folded into the pen");
+});
+
+/**
+ * The pen's feel, pinned: the exact patches of a long scripted drag — subcell
+ * motion, a slope onto a step, a scenery block, a miss and a return — for every
+ * diameter class and both directions, before and after it was moved onto the
+ * shared operation switch. A change here is a change to how drawing feels.
+ */
+test("Draw and Carve produce exactly the strokes they did before Pen absorbed the Voxel brush", () => {
+  const base = createEmptyScene();
+  base.scenery = { ...minimalRoomSceneryGraph, nodes: [{ ...minimalRoomSceneryGraph.nodes.find(n => n.kind === "room-shell")!, faces: [] },
+    { kind: "box", id: "block", place: { units: "metres", position: { x: 0.3, y: .6, z: 0 } }, halfSize: { x: .2, y: .1, z: .2 },
+      material: { colorLinear: [1, 1, 1] } }] } as never;
+  base.solidVoxels = [{ operation: "fill", minimum: [2, 1, 2], maximumExclusive: [30, 6, 30], materialId: 2 },
+    { operation: "fill", minimum: [16, 6, 2], maximumExclusive: [30, 10, 30], materialId: 3 }];
+  const h = sceneCellSizes_m(base);
+  const at = (x: number, z: number, dx = 0, dz = 0) => ({ origin: { x: -base.container.width_m / 2 + x * h[0], y: 2,
+    z: -base.container.depth_m / 2 + z * h[2] }, direction: { x: dx, y: -1, z: dz } });
+  const path = [...Array.from({ length: 40 }, (_, i) => at(6 + i * .55, 8 + i * .31, .1, -.05)),
+    ...Array.from({ length: 40 }, (_, i) => at(28 - i * .5, 20 - i * .2)), at(10, 10), { ...at(10, 10), direction: { x: 0, y: 1, z: 0 } },
+    at(10.3, 10.1)];
+  const canonical = (v: unknown): string => JSON.stringify(v, (_k, x) => x && typeof x === "object" && !Array.isArray(x)
+    ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a < b ? -1 : 1)) : x);
+  const golden: Record<string, string> = {
+    "1/0/false": "8a0e00c2cef72c69:65", "1/0/true": "7451022b533645b8:63", "1/1/false": "7451022b533645b8:63", "1/1/true": "8a0e00c2cef72c69:65",
+    "2/0/false": "3dbde67c38027302:191", "2/0/true": "3e1f6bbb6d561014:191", "2/1/false": "3e1f6bbb6d561014:191", "2/1/true": "3dbde67c38027302:191",
+    "5/0/false": "a0a1c3b7b63fdbb0:201", "5/0/true": "a32f7b5a1bfd9c47:191", "5/1/false": "a32f7b5a1bfd9c47:191", "5/1/true": "a0a1c3b7b63fdbb0:201",
+    "9/0/false": "ec62e4696cd9abd6:202", "9/0/true": "e96b98e2e459e777:192", "9/1/false": "e96b98e2e459e777:192", "9/1/true": "ec62e4696cd9abd6:202",
+  };
+  for (const size of [1, 2, 5, 9]) for (const operation of [0, 1]) for (const invert of [false, true]) {
+    const gesture = penTool.begin({ scene: base, ray: path[0]!, values: toolValues(penTool, { size, operation, material: 4 }), invert })!;
+    let last: ToolUpdate | undefined;
+    for (const sample of path) last = gesture.update(sample) ?? last;
+    const digest = createHash("sha256").update(canonical(last!.patches)).digest("hex").slice(0, 16);
+    assert.equal(`${digest}:${last!.patches.length}`, golden[`${size}/${operation}/${invert}`], `size ${size}, operation ${operation}, invert ${invert}`);
+  }
+});
+
+test("Paint repaints solids under the nib, live and subcell, and Alt does not turn it into an edit", () => {
+  const base = scene(), start = ray(base, 10);
+  const material = materialControl.options.find(option => option.value !== 2)!.value;
+  for (const invert of [false, true]) {
+    const gesture = penTool.begin({ scene: base, ray: start, values: toolValues(penTool, { size: 5, operation: 2, material }), invert })!;
+    const first = gesture.update(start)!;
+    assert.equal(first.patches.length, 1);
+    const patch = first.patches[0]!;
+    assert.equal(patch.operation, "paint");
+    assert.equal(patch.kind, SOLID_PATCH_ELLIPSOID_KIND);
+    assert.equal(patch.materialId, material);
+    assert.equal(patch.affectsScenery, undefined);
+    assert.equal(first.tone, "prop");
+    const moved = gesture.update(ray(base, 16))!;
+    assert.deepEqual(moved.patches.slice(0, 1), first.patches, "paint appends like every live stroke");
+    assert.ok(moved.patches.length > 3);
+    const painted = sceneWithSolidStroke(base, moved.patches);
+    assert.deepEqual(painted.solidVoxels.slice(0, 1), base.solidVoxels, "the authored solid stays; paint is a later patch");
+    // A return pass over painted ground lands at the same height: paint moves no surface.
+    gesture.update({ ...start, direction: { x: 0, y: 1, z: 0 } });
+    const returned = gesture.update(start)!;
+    assert.ok(returned.patches.every(p => ellipsoidBounds(p).minimum[1] === ellipsoidBounds(patch).minimum[1]));
+  }
+  const single = penTool.begin({ scene: base, ray: start, values: toolValues(penTool, { size: 1, operation: 2 }) })!.update(start)!;
+  assert.deepEqual(single.patches[0]!.minimum, [10, 3, 8], "a one-voxel repaint takes the cell under the surface");
+});
+
+test("Paint refuses a press on scenery rather than painting nothing", () => {
+  const base = scene();
+  base.scenery = { ...base.scenery!, nodes: [minimalRoomSceneryGraph.nodes[0]!, { kind: "box", id: "block", place: { units: "metres", position: { x: 0, y: .6, z: 0 } },
+    halfSize: { x: .2, y: .1, z: .2 }, material: { colorLinear: [1, 1, 1] } }] };
+  const start = { origin: { x: .025, y: 2, z: .025 }, direction: { x: 0, y: -1, z: 0 } };
+  assert.throws(() => penTool.begin({ scene: base, ray: start, values: toolValues(penTool, { size: 5, operation: 2 }) }), /scenery keeps its own/);
+  // The same press erasing cuts the scenery.
+  assert.equal(penTool.begin({ scene: base, ray: start, values: values(5, 1) })!.update(start)!.patches[0]!.affectsScenery, true);
+});
+
+test("the pen's mirrors stamp every image live and keep accumulating on the mirrored side", () => {
+  const base = scene(), start = ray(base, 6);
+  const mirror = { [mirrorControls[0].id]: 1 };
+  const gesture = penTool.begin({ scene: base, ray: start, values: toolValues(penTool, { size: 5, operation: 0, ...mirror }) })!;
+  const first = gesture.update(start)!;
+  assert.equal(first.patches.length, 2, "the stamp and its image");
+  const [a, b] = first.patches.map(p => ellipsoidBounds(p));
+  const centre = mirrorCentres(base)[0];
+  assert.equal(a!.minimum[0] + b!.maximumExclusive[0], centre, "the image is the stamp reflected through the tank's middle");
+  assert.equal(first.highlight.kind, "paths");
+  gesture.update({ ...start, direction: { x: 0, y: 1, z: 0 } });
+  const second = gesture.update(start)!;
+  assert.equal(second.patches.length, 4);
+  assert.ok(ellipsoidBounds(second.patches[3]!).minimum[1] > b!.minimum[1], "the image builds higher on the return pass too");
 });
 
 test("pen fills fast-motion gaps with surface samples and never creates a selection", () => {

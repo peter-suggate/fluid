@@ -1021,7 +1021,7 @@ function planPenStroke(scene: SceneDescription, site: readonly [number, number],
     return [{ primitive, nodeId: owner.get(index), distance: Math.hypot(x - site[0], z - site[1]),
       preferred: /paver|lounger/.test(primitive.program.sampledVolume.asset) }];
   }).sort((a, b) => Number(b.preferred) - Number(a.preferred) || a.distance - b.distance);
-  const values = toolValues(penTool, { size: diameter, mode: carve ? 1 : 0 });
+  const values = toolValues(penTool, { size: diameter, operation: carve ? 1 : 0 });
   const cells = sceneCellSizes_m(scene);
   for (const candidate of candidates.slice(0, 64)) {
     if (!candidate.nodeId) continue;

@@ -26,7 +26,7 @@ test("tank wall carves at the visible face, opens collision, and retains all aut
   ] };
   const hit = visibleToolSurface(scene, ray)!;
   assert.ok(Math.abs(hit.point.z - 1.3) < 1e-6);
-  const values = toolValues(penTool, { mode: 1, size: 16, shell: 0 });
+  const values = toolValues(penTool, { operation: 1, size: 16 });
   const voxelHit = toolSurface({ scene, values }, ray)!;
   assert.equal(voxelHit.faceAxis, 2); assert.equal(voxelHit.faceSign, 1);
   const gesture = penTool.begin({ scene, values, ray })!;
@@ -58,7 +58,7 @@ test("tank wall carves at the visible face, opens collision, and retains all aut
 
 test("all surface tools hit foreground scenery before voxels, regardless of the old walls switch", async () => {
   const { createEmptyScene } = await import("../lib/core/empty-scene");
-  const { voxelBrushTool } = await import("../lib/core/voxel-editor/plugins/voxel");
+  const { penTool } = await import("../lib/core/voxel-editor/plugins/pen");
   const { sceneCellSizes_m } = await import("../lib/core/scene-lattice");
   const scene = createEmptyScene();
   scene.scenery = { ...scene.scenery!, nodes: [{ ...scene.scenery!.nodes.find(node => node.kind === "room-shell")!, faces: [] }, {
@@ -70,10 +70,10 @@ test("all surface tools hit foreground scenery before voxels, regardless of the 
   for (const walls of [0, 1]) {
     const hit = visibleToolSurface(scene, input)!;
     assert.equal(hit.scenery, "foreground"); assert.ok(Math.abs(hit.point.y - .55) < 1e-6);
-    const values = toolValues(voxelBrushTool, { operation: 1, size: 1, shell: walls });
+    const values = { ...toolValues(penTool, { operation: 1, size: 1 }), shell: walls };
     const surface = toolSurface({ scene, values }, input)!;
     assert.ok(surface.coordinate[1] * sceneCellSizes_m(scene)[1] > .4);
-    const patches = voxelBrushTool.begin({ scene, values, ray: input })!.update(input)!.patches;
+    const patches = penTool.begin({ scene, values, ray: input })!.update(input)!.patches;
     assert.ok(patches.every(p => p.minimum[1] * sceneCellSizes_m(scene)[1] > .4), "no edit is placed on the hidden background");
     assert.ok(patches.every(p => p.operation === "clear" && p.affectsScenery));
   }

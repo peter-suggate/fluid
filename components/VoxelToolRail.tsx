@@ -1,12 +1,12 @@
 "use client";
 
-import { Fragment } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { MousePointer2, RotateCcw } from "lucide-react";
-import { VOXEL_RAIL_CONTROLS, voxelToolRail } from "../lib/core/editor-voxel-tool-actions";
+import { VOXEL_RAIL_CONTROLS, voxelToolHint, voxelToolLineControls, voxelToolRail } from "../lib/core/editor-voxel-tool-actions";
 import { simulation } from "../lib/core/simulation/controller";
 import { useSession } from "../lib/core/session/session-context";
 import { SHARED_TOOL_VALUES_ID, adjustableControl, controlValueOwner, controlValues, storedControlValues,
-  storedToolValues, toolValues, type ToolChoiceControl, type ToolControl, type ToolNumberControl,
+  storedToolValues, toolValues, type ToolChoiceControl, type ToolControl, type ToolHintPhase, type ToolNumberControl,
   type VoxelToolPlugin } from "../lib/core/voxel-editor/plugin";
 import { voxelTools } from "../lib/core/voxel-editor/registry";
 import { EditorActionPathGlyph } from "./EditorActionIcon";
@@ -25,7 +25,8 @@ import { Stepper, Swatch, ToggleButton } from "./ui";
  * a column of typed number fields on what a hand already knows how to say with
  * a bracket key.
  *
- * So: one mark per tool, in one fixed place, each on the digit of its position.
+ * So: one mark per tool, in one fixed place, each on its own letter (or the
+ * digit of its position).
  * The armed mark is lit, and the only thing that opens is a single line beside
  * it — the tool's own numbers and switches, each of which is also a key (see
  * `useVoxelToolGesture`). Clicking the lit mark, or the pointer at the head of
@@ -119,18 +120,78 @@ function ControlLine({ controls }: { controls: readonly LineControl[] }) {
   </>;
 }
 
-/** The armed tool's numbers, choices and switches, on one line beside its mark. */
-function ToolOptions({ plugin }: { plugin: VoxelToolPlugin }) {
+/**
+ * A small per-viewer memory, kept in the browser: which lines are expanded and
+ * how often each tool has been used. A convenience only — private windows and
+ * blocked storage simply start fresh every time.
+ */
+function remembered<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw) as T;
+  } catch { return fallback; }
+}
+function remember(key: string, value: unknown): void {
+  try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable: forget */ }
+}
+const EXPANDED_KEY = "fluid.voxelTool.expanded";
+const USES_KEY = "fluid.voxelTool.uses";
+/** Strokes after which a tool stops teaching: by then the keys are known, and the words are noise. */
+const HINT_FADE_AFTER_USES = 6;
+
+/**
+ * Where the hand is with the armed tool, for its hints: armed, mid-stroke, or
+ * after one. A stroke is the edit queue's pending flag rising and falling under
+ * the tool — so a stroke cancelled still counts as a try, which is what a hint
+ * is for — and each one is counted per tool so the hints can fade.
+ */
+function useToolHintPhase(toolId: string | undefined, pending: boolean): { phase: ToolHintPhase; uses: number } {
+  const [phase, setPhase] = useState<ToolHintPhase>("armed");
+  const [uses, setUses] = useState<Record<string, number>>({});
+  const loaded = useRef(false);
+  const was = useRef({ toolId, pending });
+  useEffect(() => {
+    if (!loaded.current) { loaded.current = true; setUses(remembered(USES_KEY, {})); }
+    const before = was.current;
+    was.current = { toolId, pending };
+    if (before.toolId !== toolId) { setPhase(pending ? "active" : "armed"); return; }
+    if (!toolId || before.pending === pending) return;
+    if (pending) { setPhase("active"); return; }
+    setPhase("after");
+    setUses((current) => {
+      const next = { ...current, [toolId]: (current[toolId] ?? 0) + 1 };
+      remember(USES_KEY, next);
+      return next;
+    });
+  }, [toolId, pending]);
+  return { phase, uses: toolId ? uses[toolId] ?? 0 : 0 };
+}
+
+/**
+ * The armed tool's numbers, choices and switches, on one line beside its mark.
+ *
+ * The line holds what the tool needs every stroke; the rest waits behind a
+ * "more" mark, which remembers whether it was open. Under it, one line of what
+ * to try next — the hint for where the hand is — until the tool is familiar.
+ */
+function ToolOptions({ plugin, phase, uses }: { plugin: VoxelToolPlugin; phase: ToolHintPhase; uses: number }) {
   const session = useSession();
   const stored = session.ui((state) => state.voxelToolValues);
   const scene = session.scene((state) => state.scene);
   const methodId = session.method((state) => state.methodId);
   const clipboard = session.ui((state) => state.voxelClipboard);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  useEffect(() => { setExpanded(remembered(EXPANDED_KEY, {})); }, []);
   const values = toolValues(plugin, storedToolValues(plugin, stored), scene);
   const unavailable = plugin.unavailable({ scene, methodId, clipboard });
-  // The rail's own switch is drawn on the rail, and a control put away by the
-  // values that stand (a material while erasing) keeps its value and its place.
-  const shown = plugin.ui.controls.filter((control) => control.surface !== "rail" && control.when?.(values) !== false);
+  const open = expanded[plugin.id] === true;
+  const { shown, advanced } = voxelToolLineControls(plugin, values, open);
+  const toggle = () => setExpanded((current) => {
+    const next = { ...current, [plugin.id]: !open };
+    remember(EXPANDED_KEY, next);
+    return next;
+  });
+  const hint = uses < HINT_FADE_AFTER_USES ? voxelToolHint(plugin.id, phase, values) : undefined;
   return <div className="tool-options" role="group" aria-label={`${plugin.ui.label} options`}
     data-testid="voxel-tool-options">
     <div className="tool-options-line">
@@ -139,9 +200,13 @@ function ToolOptions({ plugin }: { plugin: VoxelToolPlugin }) {
         control, owner: controlValueOwner(plugin.id, control), value: values[control.id] ?? control.initial,
         keys: adjustKeys(plugin, control),
       }))} />
+      {advanced > 0 && <ToggleButton className="tool-options-more" pressed={open} onChange={toggle}
+        ariaLabel={open ? "Fewer options" : "More options"} hint={open ? "Fewer options" : "More options"}
+        testId="voxel-tool-options-more">{open ? "less" : "more"}</ToggleButton>}
     </div>
     {unavailable && <p className="tool-options-note is-blocked">{unavailable}</p>}
     {!unavailable && plugin.ui.notice && <p className="tool-options-note">{plugin.ui.notice}</p>}
+    {!unavailable && hint && <p className="tool-options-note" data-testid="voxel-tool-hint" data-phase={phase}>{hint}</p>}
   </div>;
 }
 
@@ -183,6 +248,7 @@ export function VoxelToolRail() {
   const armedId = session.ui((state) => state.voxelToolId);
   const pending = session.ui((state) => state.voxelStrokePending);
   const clipboard = session.ui((state) => state.voxelClipboard);
+  const { phase, uses } = useToolHintPhase(mode === "interact" ? armedId : undefined, pending);
   // The region and the selection that names it land together (`selectVoxelRegion`); read as one.
   const selected = session.ui((state) => state.selection?.kind === "voxel-region" ? state.voxelRegion : undefined);
   const scene = session.scene((state) => state.scene);
@@ -226,7 +292,7 @@ export function VoxelToolRail() {
             <RailKeyFace glyph={<EditorActionPathGlyph path={tool.iconPath} size={16} />} label={tool.label} shortcut={tool.key} />
           </button>
           {lit && armed
-            ? <ToolOptions plugin={armed} />
+            ? <ToolOptions plugin={armed} phase={phase} uses={uses} />
             : <span className="tool-rail-tip"><strong>{tool.label}{tool.key && <kbd>{tool.key}</kbd>}</strong>
               <small>{tool.hint}</small></span>}
         </div>;
@@ -239,7 +305,7 @@ export function VoxelToolRail() {
           data-testid={`voxel-tool-rail-${guest.id}`} onMouseDown={keepFocus} onClick={() => arm(guest.id)}>
           <RailKeyFace glyph={<EditorActionPathGlyph path={guest.ui.icon} size={16} />} label={guest.ui.label} />
         </button>
-        <ToolOptions plugin={guest} />
+        <ToolOptions plugin={guest} phase={phase} uses={uses} />
       </div>
     </>}
     {/* Last, apart from the tools: it ends every edit rather than making one.

@@ -9,7 +9,6 @@ import { materialControl, mirrorControls } from "../lib/core/voxel-editor/contro
 import { toolValues } from "../lib/core/voxel-editor/plugin";
 import { penTool } from "../lib/core/voxel-editor/plugins/pen";
 import { centerTool } from "../lib/core/voxel-editor/plugins/center";
-import { voxelBrushTool } from "../lib/core/voxel-editor/plugins/voxel";
 import { lineTool } from "../lib/core/voxel-editor/plugins/line";
 import { patternTool } from "../lib/core/voxel-editor/plugins/pattern";
 
@@ -26,9 +25,9 @@ function fixture() {
 test("Pen Draw uses the same subcell sphere as Carve and retains the chosen material", () => {
   const { scene, ray } = fixture(), start = ray(10.625);
   const material = materialControl.options.find(option => option.value !== materialControl.initial)!.value;
-  const draw = penTool.begin({ scene, ray: start, values: toolValues(penTool, { size: 5, mode: 0, material }) })!;
+  const draw = penTool.begin({ scene, ray: start, values: toolValues(penTool, { size: 5, operation: 0, material }) })!;
   const first = draw.update(start)!;
-  const carve = penTool.begin({ scene, ray: start, values: toolValues(penTool, { size: 5, mode: 1 }) })!.update(start)!;
+  const carve = penTool.begin({ scene, ray: start, values: toolValues(penTool, { size: 5, operation: 1 }) })!.update(start)!;
   assert.deepEqual(ellipsoidBounds(first.patches[0]!), ellipsoidBounds(carve.patches[0]!));
   assert.equal(first.patches[0]!.materialId, material);
   assert.equal(first.patches[0]!.affectsScenery, undefined);
@@ -60,17 +59,6 @@ test("mirroring preserves both asymmetric subcell spheres sharing one integer bo
   assert.equal(ellipsoidBounds(images[1]!).minimum[0], 14.875);
   const symmetric = subcellEllipsoidPatch([14.125, 2, 6], [17.875, 5, 9], "clear");
   assert.equal(mirroredPatches({ scene, values: { [mirrorControls[0].id]: 1 } }, [symmetric]).length, 1);
-});
-
-test("Voxel misses break interpolation and unchanged brush proposals reuse their preview", () => {
-  const { scene, ray } = fixture(), start = ray(4.5);
-  const gesture = voxelBrushTool.begin({ scene, ray: start, values: toolValues(voxelBrushTool) })!;
-  const first = gesture.update(start)!;
-  assert.equal(gesture.update(ray(4.6)), first);
-  gesture.update({ ...start, direction: { x: 0, y: 1, z: 0 } });
-  const moved = gesture.update(ray(20.5))!;
-  assert.deepEqual(moved.patches.map(p => p.minimum[0]), [4, 20], "re-entry does not bridge the off-surface excursion");
-  assert.notEqual(moved, first);
 });
 
 test("Line and Pattern rebuild only when their lattice placement changes", () => {

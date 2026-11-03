@@ -2442,6 +2442,7 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .tool-choice-swatch .ui-swatch { width: 12px; height: 12px; border-radius: 3px; }
 .tool-options-note { max-width: 340px; margin: 0 0 2px; color: var(--muted); font: var(--text-micro); }
 .tool-options-note.is-blocked { color: var(--amber); }
+.tool-options-more { padding: 0 6px; color: var(--muted); font: var(--text-micro); text-transform: lowercase; }
 /* A standing selection's verbs: the same card, a row to each group. It hangs
    down from the Select mark instead of straddling it — that mark is the rail's
    first, and a card of several rows centred on it would run off the top of a

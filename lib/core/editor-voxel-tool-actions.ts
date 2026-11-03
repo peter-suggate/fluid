@@ -1,6 +1,8 @@
 import type { EditorAction, EditorActionIcon, EditorActionTone } from "./editor-action";
 import type { SceneDescription } from "./model";
-import { adjustableControl, type ToolControl } from "./voxel-editor/plugin";
+import { materialControl, operationControl, toolOperation } from "./voxel-editor/controls";
+import { adjustableControl, type ToolControl, type ToolHintKey, type ToolHintPhase, type ToolValues,
+  type VoxelToolPlugin } from "./voxel-editor/plugin";
 import { voxelTools } from "./voxel-editor/registry";
 import type { VoxelClipboard } from "./voxel-editor/verb";
 
@@ -35,7 +37,7 @@ const GROUP_FACES: Record<string, {
     label: "Brushes",
     icon: "solid",
     tone: "body",
-    hint: "Attach, erase or paint solid voxels: voxel, face, box, line, center and pattern brushes",
+    hint: "Attach, erase or paint solids, terrain and scenery: the pen, shapes and lines",
   },
   Select: {
     rail: true,
@@ -43,7 +45,7 @@ const GROUP_FACES: Record<string, {
     label: "Select voxels",
     icon: "region",
     tone: "region",
-    hint: "Select solid voxels: a box by marquee, or a whole connected piece by wand",
+    hint: "Select solid voxels: click a connected piece or drag a box",
   },
   Fluid: {
     id: "sculpt-water",
@@ -105,7 +107,7 @@ export function voxelToolGroups(
 }
 
 export interface VoxelRailTool extends VoxelToolEntry {
-  /** The digit that arms it: its place on the rail, counted from one. Absent past nine. */
+  /** The key that arms it: the letter it declares, or else its place on the rail, counted from one. Absent past nine. */
   readonly key?: string;
 }
 
@@ -127,7 +129,7 @@ export function voxelToolRail(
     .filter((group) => GROUP_FACES[group.group]?.rail)
     .map((group) => ({ ...group, tools: group.tools.map((tool) => {
       place += 1;
-      return { ...tool, key: place <= 9 ? String(place) : undefined };
+      return { ...tool, key: voxelTools.get(tool.id)?.ui.key?.toUpperCase() ?? (place <= 9 ? String(place) : undefined) };
     }) }));
 }
 
@@ -135,13 +137,22 @@ const RAIL_TOOL_IDS: readonly string[] = [...new Set(voxelTools.tools.map((tool)
   .filter((group) => GROUP_FACES[group]?.rail)
   .flatMap((group) => voxelTools.tools.filter((tool) => tool.ui.group === group).map((tool) => tool.id));
 
-/** The rail tool a digit arms, by place. The scene is not asked: a tool that cannot run still arms and says why. */
+/**
+ * The rail tool a key arms: the letter a tool declares (`ui.key`), or a digit
+ * by place. The scene is not asked: a tool that cannot run still arms and says
+ * why. The registry has already refused a letter the editor or a control
+ * answers to, so this cannot shadow one.
+ */
 export function voxelRailToolForKey(key: string): string | undefined {
-  return /^[1-9]$/.test(key) ? RAIL_TOOL_IDS[Number(key) - 1] : undefined;
+  if (/^[1-9]$/.test(key)) return RAIL_TOOL_IDS[Number(key) - 1];
+  const letter = key.toLowerCase();
+  return /^[a-z]$/.test(letter) ? RAIL_TOOL_IDS.find((id) => voxelTools.get(id)!.ui.key === letter) : undefined;
 }
 
-/** The digit that arms a tool, when it stands on the rail. */
+/** The key that arms a tool when it stands on the rail: its letter, or its digit. */
 export function voxelRailKeyForTool(toolId: string): string | undefined {
+  const letter = RAIL_TOOL_IDS.includes(toolId) ? voxelTools.get(toolId)!.ui.key : undefined;
+  if (letter) return letter;
   const place = RAIL_TOOL_IDS.indexOf(toolId);
   return place >= 0 && place < 9 ? String(place + 1) : undefined;
 }
@@ -196,6 +207,76 @@ export function voxelToolLegend(toolId: string | undefined): string | undefined 
     "space-drag orbits",
     "right-click cancels the stroke, then puts the tool away",
   ].filter(Boolean).join(" · ");
+}
+
+/**
+ * The controls a tool's rail line draws, and how many wait behind its "more".
+ *
+ * The rail's own switch is drawn on the rail, and a control put away by the
+ * values that stand (a material while erasing) keeps its value and its place.
+ * An advanced control shows only with the line expanded, unless it holds
+ * something other than its initial value: a mirror that is on is changing every
+ * stroke, and must be in view to be turned off.
+ */
+export function voxelToolLineControls(plugin: VoxelToolPlugin, values: ToolValues, expanded: boolean):
+  { readonly shown: readonly ToolControl[]; readonly advanced: number } {
+  const drawn = plugin.ui.controls.filter((control) => control.surface !== "rail" && control.when?.(values) !== false);
+  const advanced = drawn.filter((control) => control.tier === "advanced");
+  return {
+    shown: drawn.filter((control) => control.tier !== "advanced" || expanded
+      || (values[control.id] ?? control.initial) !== control.initial),
+    advanced: advanced.length,
+  };
+}
+
+/**
+ * What a hint's named key reads as, for this tool with these values — or
+ * nothing, where the tool does not have it. Resolved from the declaration, as
+ * the legend above is, so a hint cannot promise a key the host would not take.
+ */
+function hintKey(tool: VoxelToolPlugin, key: ToolHintKey, values: ToolValues): string | undefined {
+  const name = (control: { readonly label: string }) => control.label.split(" · ")[0]!.toLowerCase();
+  const letters = (control: ToolControl) => control.kind === "choice"
+    ? control.options.flatMap((option) => option.shortcut ? [option.shortcut.toUpperCase()] : []).join(" ")
+    : control.shortcut?.toUpperCase() ?? "";
+  switch (key) {
+    case "operation": {
+      const control = voxelToolKeyControls(tool.id).find((candidate) => candidate === operationControl);
+      return control && `${letters(control)} attach · erase · paint`;
+    }
+    case "adjust": { const control = adjustableControl(tool, false); return control && `[ ] ${name(control)}`; }
+    case "adjustSecondary": {
+      const control = adjustableControl(tool, true);
+      return control && control !== adjustableControl(tool, false) ? `⇧[ ] ${name(control)}` : undefined;
+    }
+    case "opposite": {
+      if (!tool.ui.opposite) return undefined;
+      const painting = tool.ui.controls.includes(operationControl) && tool.ui.controls.includes(materialControl)
+        && toolOperation(values) === "paint";
+      return painting ? "Alt-click picks a colour" : "Alt inverts";
+    }
+    case "cancel": return "esc cancels";
+    case "undo": return "⌘Z undoes";
+    default: {
+      const control = tool.ui.controls.find((candidate) => `control:${candidate.id}` === key);
+      const keys = control && letters(control);
+      return keys ? `${keys} ${name(control)}` : undefined;
+    }
+  }
+}
+
+/**
+ * The one line a tool teaches in this phase: the keys that apply right now,
+ * then its own words. Undefined where it declares nothing for the phase.
+ */
+export function voxelToolHint(toolId: string | undefined, phase: ToolHintPhase, values: ToolValues): string | undefined {
+  const tool = voxelTools.get(toolId);
+  const declared = tool?.ui.hints?.[phase];
+  const hint = typeof declared === "function" ? declared(values) : declared;
+  if (!tool || !hint) return undefined;
+  // Keys first, then the words: the keys are what the eye looks for once the words are known.
+  const parts = [...(hint.keys ?? []).map((key) => hintKey(tool, key, values)), hint.text].filter(Boolean);
+  return parts.length ? parts.join(" · ") : undefined;
 }
 
 export function voxelSculptActions(

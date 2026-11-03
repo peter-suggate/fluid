@@ -1,5 +1,4 @@
 import { createVoxelToolRegistry } from "./plugin";
-import { voxelBrushTool } from "./plugins/voxel";
 import { penTool } from "./plugins/pen";
 import { faceTool } from "./plugins/face";
 import { boxTool } from "./plugins/box";
@@ -14,4 +13,4 @@ import { fluidBallTool } from "./plugins/fluid-ball";
 import { fluidCubeTool } from "./plugins/fluid-cube";
 import { fluidTorusTool } from "./plugins/fluid-torus";
 
-export const voxelTools = createVoxelToolRegistry([penTool, voxelBrushTool, faceTool, boxTool, lineTool, centerTool, patternTool, marqueeTool, wandTool, fluidBallTool, fluidCubeTool, fluidTorusTool]);
+export const voxelTools = createVoxelToolRegistry([penTool, faceTool, boxTool, lineTool, centerTool, patternTool, marqueeTool, wandTool, fluidBallTool, fluidCubeTool, fluidTorusTool]);

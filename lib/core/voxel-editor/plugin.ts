@@ -41,6 +41,13 @@ interface ToolControlBase {
    * kept either way: a material is not forgotten because erasing has no use for it.
    */
   readonly when?: (values: ToolValues) => boolean;
+  /**
+   * How readily a host shows it. `"essential"` (the default) is always on the
+   * line; `"advanced"` waits behind the line's "more", unless it holds
+   * something other than its initial value — a mirror that is on is never
+   * hidden, because it is changing what every stroke does.
+   */
+  readonly tier?: "essential" | "advanced";
 }
 export interface ToolNumberControl extends ToolControlBase, ControlMetadata {
   readonly kind?: "number" | "toggle";
@@ -106,6 +113,32 @@ export interface ToolContext {
   readonly hover?: boolean;
 }
 export type ToolAction = { readonly kind: "fluid"; readonly edit: LiveFluidEdit };
+/**
+ * Where the hand is with a tool, as a hint is chosen for it: `"armed"` before
+ * the first stroke, `"active"` while one is in flight, `"after"` once one has
+ * been made.
+ */
+export type ToolHintPhase = "armed" | "active" | "after";
+/**
+ * The keys a hint may name, by what they do rather than which letter they
+ * are: the host resolves each from the tool's own declaration, so a hint can
+ * never promise a key the gesture host would not take.
+ *
+ * - `operation`: the rail switch's letters (attach / erase / paint).
+ * - `adjust` / `adjustSecondary`: the brackets, and Shift with them.
+ * - `opposite`: the "do the opposite" modifier, in the words the values call for.
+ * - `cancel`: Escape, or the other button, mid-stroke.
+ * - `undo`: ⌘Z after a stroke.
+ * - `control:<id>`: a toggle's or a choice's own letter(s).
+ */
+export type ToolHintKey = "operation" | "adjust" | "adjustSecondary" | "opposite" | "cancel" | "undo" | `control:${string}`;
+export interface ToolHint {
+  readonly keys?: readonly ToolHintKey[];
+  /** The next useful thing, in a few words. */
+  readonly text?: string;
+}
+/** A tool's hints by phase; a function reads the tool's resolved values. */
+export type ToolHints = Partial<Record<ToolHintPhase, ToolHint | ((values: ToolValues) => ToolHint | undefined)>>;
 export interface ToolUpdate {
   /** A transient action is previewed during the gesture and executed once on release. */
   readonly action?: ToolAction;
@@ -172,6 +205,14 @@ export interface VoxelToolPlugin {
     readonly order: number;
     /** SVG path, so adding an icon does not require a second registry. */
     readonly icon: string;
+    /**
+     * The single letter that arms this tool while editing, beside its digit.
+     * The registry refuses one that another tool, any control, or the editor
+     * itself already answers to (`RESERVED_EDITOR_KEYS`).
+     */
+    readonly key?: string;
+    /** What the tool teaches as it is used. See `ToolHintPhase`. */
+    readonly hints?: ToolHints;
     readonly controls: readonly ToolControl[];
   };
   /** Context-aware initial values; explicit user values always take precedence. */
@@ -260,6 +301,9 @@ export function validateControls(owner: string, list: readonly ToolControl[],
       // tool's own value; and it draws a switch, which is a choice.
       || (control.surface === "rail" && (control.scope !== "shared" || control.kind !== "choice"))
       || (control.when !== undefined && typeof control.when !== "function")
+      || (control.tier !== undefined && control.tier !== "essential" && control.tier !== "advanced")
+      // The rail draws its switch once for every tool; there is no line to tuck it behind.
+      || (control.surface === "rail" && control.tier === "advanced")
       || !Number.isFinite(control.initial)) {
       throw invalid();
     }
@@ -295,9 +339,24 @@ export function validateControls(owner: string, list: readonly ToolControl[],
     controls.add(control.id);
   }
 }
-export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[]) {
+/**
+ * Letters the editor answers to while editing, ahead of or instead of a rail
+ * tool: the gestures (b t y g d), the instruments (s v h), the scene chooser
+ * (o), the ray picker (r), the axis locks (x y z), framing a body (f), a
+ * carry's tilt (q e) and the cell probe (c). A tool's arming letter must be
+ * none of them. A control's letter may be — it answers only while its tool is
+ * armed, ahead of the editor's — which is how T R G work.
+ */
+export const RESERVED_EDITOR_KEYS: readonly string[] =
+  ["b", "t", "y", "g", "d", "s", "v", "h", "o", "r", "x", "z", "f", "q", "e", "c"];
+const hintKeys = new Set(["operation", "adjust", "adjustSecondary", "opposite", "cancel", "undo"]);
+export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[],
+  reservedKeys: readonly string[] = RESERVED_EDITOR_KEYS) {
   const ids = new Set<string>();
   const shared = new Map<string, ToolControl>();
+  /** Every letter a control answers to, under any tool: a tool's arming letter would be shadowed by one. */
+  const controlKeys = new Set<string>();
+  const toolKeys = new Set<string>();
   for (const plugin of plugins) {
     // A tool's id is also the owner its values are stored under, beside the editor's and the verbs'.
     if (!plugin.id || ids.has(plugin.id) || plugin.id === SHARED_TOOL_VALUES_ID || plugin.id.includes(":")) {
@@ -312,6 +371,32 @@ export function createVoxelToolRegistry(plugins: readonly VoxelToolPlugin[]) {
       throw new Error(`Invalid voxel tool definition: ${plugin.id}`);
     }
     validateControls(plugin.id, plugin.ui.controls, shared);
+    for (const control of plugin.ui.controls) {
+      if (control.kind === "choice") for (const option of control.options) { if (option.shortcut) controlKeys.add(option.shortcut); }
+      else if (control.shortcut) controlKeys.add(control.shortcut);
+    }
+    const key = plugin.ui.key;
+    if (key !== undefined) {
+      if (!/^[a-z]$/.test(key) || toolKeys.has(key) || reservedKeys.includes(key)) {
+        throw new Error(`Voxel tool ${plugin.id} cannot take the key "${key}": it is malformed, reserved, or another tool's.`);
+      }
+      toolKeys.add(key);
+    }
+    for (const phase of Object.keys(plugin.ui.hints ?? {})) {
+      const hint = plugin.ui.hints![phase as ToolHintPhase];
+      if (!["armed", "active", "after"].includes(phase) || (typeof hint !== "function" && typeof hint !== "object")) {
+        throw new Error(`Invalid hint ${plugin.id}.${phase}`);
+      }
+      if (typeof hint === "object") for (const named of hint.keys ?? []) {
+        if (!hintKeys.has(named) && !(named.startsWith("control:")
+          && plugin.ui.controls.some((control) => `control:${control.id}` === named))) {
+          throw new Error(`Hint ${plugin.id}.${phase} names a key the tool does not have: ${named}`);
+        }
+      }
+    }
+  }
+  for (const key of toolKeys) {
+    if (controlKeys.has(key)) throw new Error(`The key "${key}" arms a voxel tool and also drives a control.`);
   }
   const ordered = Object.freeze([...plugins].sort((a, b) => a.ui.order - b.ui.order));
   return Object.freeze({ tools: ordered, get: (id: string | undefined) => ordered.find((tool) => tool.id === id) });
