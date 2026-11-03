@@ -1,4 +1,4 @@
-import type { UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformSolidSlotRowWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformVelocityWallCacheWGSL } from "./uniform-velocity-wall-cache.wgsl";
 import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailStorage, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
@@ -417,7 +417,7 @@ fn umCacheTileKind(p:vec3i)->u32{
  // The tile's fraction slot (umSolidTileSlot): none is every cell whole; the
  // slots running out leave the geometry's, unknown here.
  let word=wallRecord[${this.solid!.coarse!.count}u+4u*UM_TILES+2u*t+1u].w;if(!(word>0.0)){return 1u;}if(word>=16777216.0){return 2u;}
- let capacity=wallRecord[${this.solid!.coarse!.count}u+8u*UM_TILES+UM_TILES/64u+2u+77u*(u32(word)-1u)+(c>>2u)][c&3u];
+ let capacity=wallRecord[${uniformSolidSlotRowWGSL(`${this.solid!.coarse!.count}u`,"UM_TILES","u32(word)-1u")}+(c>>2u)][c&3u];
  if(capacity==0.0){return 0u;}if(capacity==1.0){return 1u;}return 2u;
 }
 ${uniformVelocityWallCacheWGSL}

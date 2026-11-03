@@ -41,6 +41,13 @@ import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
  * layout's own index (uniformMixedPressureStorage) up to umSolidCount; after
  * them a flag pair a key, three words a key, two boundary rows a key, the
  * field-cut row and the aperture stamp row of each key. */
+/** The first row of the record's slot s (umSolidSlotRow) as a WGSL u32
+ * expression of its pressure-storage count, its tile-key count and the slot
+ * (each a u32 expression): the per-key rows, the candidate masks, the region
+ * mirror and its header, and the epoch row precede the 77-row slots. Every
+ * reader of the slots outside this file takes their rows from here, so the
+ * layout has one definition. */
+export function uniformSolidSlotRowWGSL(count:string,tiles:string,slot:string):string{return `(${count}+8u*${tiles}+${tiles}/4u+${tiles}/512u+1u+${tiles}/64u+2u+77u*(${slot}))`;}
 function solidRecordRowsWGSL(keys:number):string{return `
 fn umSolidTiles()->u32{return ${keys}u;}
 fn umSolidCount()->u32{return ${keys+uniformFaceTileSlots(keys/512)}u;}
@@ -81,7 +88,7 @@ fn umSolidApertureEpochRow()->u32{return umBodyRegionBase()+umSolidTiles()/64u+1
 // Only a tile whose fractions or apertures are not all 1 holds a slot
 // (UniformMixedSolid's slot capacity: every key, or the tiles solids and the
 // box's walls can cut).
-fn umSolidSlotRow(s:u32)->u32{return umSolidApertureEpochRow()+1u+77u*s;}
+fn umSolidSlotRow(s:u32)->u32{return ${uniformSolidSlotRowWGSL("umSolidCount()","umSolidTiles()","s")};}
 fn umSolidApertureSlotRow(s:u32)->u32{return umSolidSlotRow(s)+16u;}
 // A tile's slot word, its decoded slot: none and every fraction and aperture
 // 1 (UM_SOLID_WHOLE, a word of 0 or below: a word below 0 is a slot the tile

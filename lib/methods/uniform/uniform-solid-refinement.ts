@@ -1,3 +1,4 @@
+import {uniformSolidSlotRowWGSL} from "./uniform-mixed-solid.wgsl";
 /** Exact static geometry test for the spatial census, independent of heat.
  * Requires solidRecord, UM_TILES and the topology accessors. Unknown records
  * and body contact never certify. Whole capacities and uniform face patches
@@ -30,7 +31,7 @@ fn umCoarseSolidFaceExact(t:u32,axis:u32)->bool{
 // every face whole, the slots running out the geometry's (unknown here).
 fn umCoarseSolidLowFaceExact(t:u32,axis:u32)->bool{
  let word=solidRecord[${recordCount}u+4u*UM_TILES+2u*t+1u].w;if(!(word>0.0)){return true;}if(word>=16777216.0){return false;}
- let row=${recordCount}u+8u*UM_TILES+UM_TILES/64u+2u+77u*(u32(word)-1u)+16u+49u+4u*axis;
+ let row=${uniformSolidSlotRowWGSL(`${recordCount}u`,"UM_TILES","u32(word)-1u")}+16u+49u+4u*axis;
  let face=solidRecord[row].x;if(face!=0.0&&face!=0.5&&face!=1.0){return false;}
  for(var i=0u;i<4u;i++){if(any(solidRecord[row+i]!=vec4f(face))){return false;}}
  return true;
