@@ -44,10 +44,10 @@ import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
 /** The first row of the record's slot s (umSolidSlotRow) as a WGSL u32
  * expression of its pressure-storage count, its tile-key count and the slot
  * (each a u32 expression): the per-key rows, the candidate masks, the region
- * mirror and its header, and the epoch row precede the 77-row slots. Every
- * reader of the slots outside this file takes their rows from here, so the
- * layout has one definition. */
-export function uniformSolidSlotRowWGSL(count:string,tiles:string,slot:string):string{return `(${count}+8u*${tiles}+${tiles}/4u+${tiles}/512u+1u+${tiles}/64u+2u+77u*(${slot}))`;}
+ * mirror and its header, the epoch row and the static rows (a row a key)
+ * precede the 77-row slots. Every reader of the slots outside this file takes
+ * their rows from here, so the layout has one definition. */
+export function uniformSolidSlotRowWGSL(count:string,tiles:string,slot:string):string{return `(${count}+8u*${tiles}+${tiles}/4u+${tiles}/512u+1u+${tiles}/64u+2u+${tiles}+77u*(${slot}))`;}
 function solidRecordRowsWGSL(keys:number):string{return `
 fn umSolidTiles()->u32{return ${keys}u;}
 fn umSolidCount()->u32{return ${keys+uniformFaceTileSlots(keys/512)}u;}
@@ -79,7 +79,14 @@ fn umBodyRegionBase()->u32{return umBodyMaskFrameRow()+1u;}
 // y certifies that the record was built at the currently published body pose.
 // Publishing bodies clears it; the last full/body record-build dispatch sets it.
 fn umSolidApertureEpochRow()->u32{return umBodyRegionBase()+umSolidTiles()/64u+1u;}
-// A tile slot's 77 rows, after the epoch: the exact 64 h-cell open fractions
+// The static flags of each key, a row a key after the epoch (x: the bits
+// UM_STATIC_*, an exact f32). They hold for the tile's 64 cells and their
+// one-cell ring, the 6x6x6 cells from 4 tc - 1 to 4 tc + 4, and depend on the
+// static solids alone: a full build and a claimed block's build write them; a
+// bodies-only build keeps them.
+// (umSolidStaticAt has the bits.)
+fn umSolidStaticRow(t:u32)->u32{return umSolidApertureEpochRow()+1u+t;}
+// A tile slot's 77 rows, after the static rows: the exact 64 h-cell open fractions
 // (16 rows, four cells a vec4 in x+4y+16z order), then the h face apertures
 // (umPressureFaceV's value of each cell's +x, +y and +z face, four cells a
 // vec4 in x+4y+16z order, 16 rows an axis), the slot's owner (x: its key + 1,
@@ -386,12 +393,12 @@ export class UniformMixedSolid {
    this.recordSolids={layout:writable,group:device.createBindGroup({layout:writable,entries:resourcesOf()})};
    const count=uniformMixedPressureStorage(coarseLayout).count;
    // 8 vec4 rows per tile, the candidate masks, then the body mask mirror: a vec4 per 16h region
-   // and its header, the epoch row and 77 rows a slot (umSolidSlotRow).
+   // and its header, the epoch row, a static row per tile and 77 rows a slot (umSolidSlotRow).
    const slots=this.slots=Math.min(tiles,Math.max(1,resources.slots??tiles));
    if(!Number.isSafeInteger(slots))throw new Error(`The solid record's ${resources.slots} slots are not a whole count`);
    // The candidate masks: four keys a row, a stamp row a block, a frame row (umBodyTileMaskRow).
    const perTile=8*tiles+tiles/4+tiles/512+1;
-   const recordBytes=16*(count+perTile+tiles/64+2+77*slots);this.bodyPendingByte=16*(count+perTile+tiles/64);this.epochByte=16*(count+perTile+tiles/64+1);
+   const recordBytes=16*(count+perTile+tiles/64+2+tiles+77*slots);this.bodyPendingByte=16*(count+perTile+tiles/64);this.epochByte=16*(count+perTile+tiles/64+1);
    // The free stack (pooled slots): [top, tiles the stack could not serve, 0, 0, slot ids].
    this.slotState=device.createBuffer({label:"Uniform mixed solid record slots",size:4*(4+(slots<tiles?slots:0)),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    if(slots<tiles){const stack=new Uint32Array(4+slots);stack[0]=slots;for(let i=0;i<slots;i++)stack[4+i]=i;device.queue.writeBuffer(this.slotState,0,stack);}
@@ -735,6 +742,8 @@ fn umBuilderItemRegion(item:u32)->u32{return ${pool?"8u*ulResidentBlock(item>>6u
 // until encodeSimulation.
 var<workgroup> buildDirty:u32;
 var<workgroup> buildBodyCandidates:u32;
+var<workgroup> buildStatic:u32;
+var<workgroup> staticHits:atomic<u32>;
 var<workgroup> apertures:array<vec3f,64>;
 var<workgroup> lowApertures:array<vec3f,64>;
 // Some fraction or aperture of the tile is not 1; the tile's slot word.
@@ -752,7 +761,33 @@ fn umBuildTile(t:u32,lane:u32,widths:bool){
  // this tile. The three-cell radius covers its one-cell neighbor queries
  // and their sampling margins; each query retains its original near test.
  if(lane==0u){buildBodyCandidates=umBodyTileCandidates(tc);}
+ // The tile's static flags (umSolidStaticAt): a bodies-only build reads the
+ // ones its full or claim build wrote; those evaluate them.
+ let ring=vec3i(tc*4u)-vec3i(1);
+ if(umBodyTiles){if(lane==0u){buildStatic=u32(record[umSolidStaticRow(t)].x);}}
+ else{
+  if(lane==0u){atomicStore(&staticHits,0u);}
+  workgroupBarrier();
+  for(var k=lane;k<216u;k+=64u){
+   let q=ring+vec3i(vec3u(k%6u,(k/6u)%6u,k/36u));
+   if(umSolidVoxel(q)||umBoundaryRecord(q)!=0u){atomicOr(&staticHits,UM_STATIC_NO_VOXEL);}
+  }
+  // The heightfield is bilinear between column centres and continues
+  // bilinearly (or flat) past the outer ones; every piece's breaks lie on
+  // half-cell lines. A bilinear piece takes its maximum over a rectangle at
+  // a corner, so the half-cell lattice over the ring's footprint holds the
+  // heightfield's maximum there.
+  if(umSolidHasTerrain()){
+   for(var k=lane;k<169u;k+=64u){
+    let x=f32(ring.x)+0.5*f32(k%13u);let z=f32(ring.z)+0.5*f32(k/13u);
+    if(!(umTerrainSurface(vec3f(x,0.0,z)).x<=f32(ring.y))){atomicOr(&staticHits,UM_STATIC_NO_TERRAIN);}
+   }
+  }
+  workgroupBarrier();
+  if(lane==0u){buildStatic=(UM_STATIC_NO_VOXEL|UM_STATIC_NO_TERRAIN)&~atomicLoad(&staticHits);record[umSolidStaticRow(t)]=vec4f(f32(buildStatic),0.0,0.0,0.0);}
+ }
  umSolidQueryBodies=workgroupUniformLoad(&buildBodyCandidates);
+ umSolidQueryStatic=workgroupUniformLoad(&buildStatic);umSolidQueryStaticLow=ring;
  var own=vec4f(umCellOpen(c),0.0,0.0,0.0);var low=vec4f(0.0);var face=vec3f(0.0);var lowFace=vec3f(0.0);
  // Every cell's +faces (the aperture rows; a tile's own +faces also feed its
  // sums and patch codes), then the tile's low faces (its low aperture rows;
@@ -1429,6 +1464,30 @@ fn umBedSlope(p:vec3i)->vec2f{
  return vec2f(vec2i(bitcast<i32>(entry<<24u)>>24u,bitcast<i32>(entry<<16u)>>24u))/${UNIFORM_SOLID_BED_SLOPE_UNITS}.0;
 }
 fn umSolidHasTerrain()->bool{return umSolidParams.frame.w>0.5;}
+// What no static solid holds about h cell p: the static flags of p's tile
+// (umSolidStaticRow), which hold for its 64 cells and their one-cell ring,
+// so for both cells of every face of a cell of the tile and every face sample
+// in them. 0 (nothing known) where no page stores the tile or no record is
+// bound. The bits:
+//   UM_STATIC_NO_VOXEL: umSolidVoxel is false and umBoundaryRecord 0 at
+//     every one of those cells (so umSolidVoxelAtWorld is false in them).
+//   UM_STATIC_NO_TERRAIN: the terrain heightfield (umTerrainSurface) lies at
+//     or below the floor of their box over all of its footprint, or the scene
+//     has none. A sculpt cut only opens terrain (umTerrainBoundary's w is at
+//     least the heightfield's), so umSolidTerrainAtWorld is false at every
+//     face sample in them (each lies 0.1 h or more above that floor).
+const UM_STATIC_NO_VOXEL:u32=1u;const UM_STATIC_NO_TERRAIN:u32=2u;
+${writable?/* wgsl */`// The record builder's tile (umBuildTile sets both for the tile it builds,
+// workgroup-uniform): the low cell of its ring and its flags.
+var<private> umSolidQueryStaticLow:vec3i=vec3i(0);
+var<private> umSolidQueryStatic:u32=0u;
+fn umSolidStaticAt(p:vec3i)->u32{
+ if(any(p<umSolidQueryStaticLow)||any(p>umSolidQueryStaticLow+vec3i(5))){return 0u;}
+ return umSolidQueryStatic;
+}`:coarse!==undefined&&gated?/* wgsl */`fn umSolidStaticAt(p:vec3i)->u32{
+ let t=umTileKey(p>>vec3u(2u));if(!umKeyStored(t)){return 0u;}
+ return u32(umSolidRecord[umSolidStaticRow(t)].x);
+}`:"fn umSolidStaticAt(p:vec3i)->u32{return 0u;}"}
 ${uniformTerrainSamplingWGSL}
 ${sculptCollisionWGSL("umSolidScratch")}
 // Positive in fluid space, gradient in lattice coordinates, value in metres.
@@ -1579,8 +1638,11 @@ ${uniformRigidCoverageSource(writable?"umSolidQueryBodies":undefined)}
 fn umCellOpenGeometry(p:vec3i)->f32{
  if(!umSolidEnabled()){return select(0.0,1.0,umSolidValid(p));}
  if(umSolidTileClear(p)){return 1.0;}
- let boundary=umBoundaryRecord(p);
- if(boundary==0u&&umSolidVoxel(p)){return 0.0;}
+ var boundary=0u;
+ if((umSolidStaticAt(p)&UM_STATIC_NO_VOXEL)==0u){
+  boundary=umBoundaryRecord(p);
+  if(boundary==0u&&umSolidVoxel(p)){return 0.0;}
+ }
  // One body and one terrain site for both forms: Metal inlines each site,
  // and this function is inlined at every umCellOpen site of a kernel.
  let body=umCellBodyFraction(p);let box=umUnitBoxOpen(vec3f(p)+0.5,boundary!=0u);let terrain=1.0-box.x;
@@ -1625,12 +1687,18 @@ fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{
  return (select(mask.x,mask.y,lane>=32u)&(1u<<(lane&31u)))!=0u;`:"return umCellIsOpen(p);"}
 }
 // cellInsideSolid: voxel, terrain or a body at the centre -- the CM11a p_min=0 rows.
+// The tile's static flags (umSolidStaticAt) skip the voxel, boundary and
+// terrain probes they rule out: the centre is a face-sample position.
 fn umCellInsideSolid(p:vec3i)->bool{
  if(!umSolidEnabled()){return false;}
  if(umSolidTileClear(p)){return false;}
- if(umBoundaryRecord(p)!=0u){return umBoundarySample(vec3f(p)+0.5).w<0.0||umCellInsideTerrain(p)||umBodyAtCell(p,umSolidWorldCell(p))>=0;}
- if(umSolidVoxel(p)){return true;}
- return umCellInsideTerrain(p)||umBodyAtCell(p,umSolidWorldCell(p))>=0;
+ let statics=umSolidStaticAt(p);
+ if((statics&UM_STATIC_NO_VOXEL)==0u){
+  if(umBoundaryRecord(p)!=0u){if(umBoundarySample(vec3f(p)+0.5).w<0.0){return true;}}
+  else if(umSolidVoxel(p)){return true;}
+ }
+ if((statics&UM_STATIC_NO_TERRAIN)==0u&&umCellInsideTerrain(p)){return true;}
+ return umBodyAtCell(p,umSolidWorldCell(p))>=0;
 }
 fn umSolidFaceWorld(id:vec3i,axis:u32)->vec3f{var world=umSolidWorldCell(id);world[axis]+=0.5*umSolidParams.cellGravity.xyz[axis];return world;}
 fn umSolidTraceWorld(p:vec3f)->vec3f{let h=umSolidParams.cellGravity.xyz;
@@ -1666,19 +1734,23 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
  if(!umSolidEnabled()){return 0.0;}
  if(umBodyCount()==0u){return 0.0;}
  var neighbor=id;neighbor[axis]+=1;
- let voxelLow=umSolidVoxel(id);let voxelHigh=umSolidVoxel(neighbor);
- if((voxelLow&&umBoundaryRecord(id)==0u)||(voxelHigh&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;let reach=max(h.x,max(h.y,h.z));
  // Keep the existing broad-phase reach, retaining its candidate identities.
  // Every dual-cell sample is within 0.4*sqrt(3)*reach, and the nearest-wall
  // fallback reaches one cell: both are contained in this same 2*reach set.
+ // No candidate and a voxel wall both answer 0, so their order is free.
  var candidates=0u;var near=${writable?"umSolidQueryBodies&((1u<<umBodyCount())-1u)":"umBodyCellMask(id)"};
  while(near!=0u){let i=firstTrailingBit(near);near&=near-1u;if(umBodyNear(i,world,2.0*reach)){candidates|=1u<<i;}}
  if(candidates==0u){return 0.0;}
+ // id's tile's static flags cover both cells (umSolidStaticAt).
+ let statics=umSolidStaticAt(id);let voxelFree=(statics&UM_STATIC_NO_VOXEL)!=0u;
+ var voxelLow=false;var voxelHigh=false;
+ if(!voxelFree){voxelLow=umSolidVoxel(id);voxelHigh=umSolidVoxel(neighbor);}
+ if((voxelLow&&umBoundaryRecord(id)==0u)||(voxelHigh&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
  // Every sample lies within 0.4h of the face centre, in one of its two
- // cells: with neither holding a voxel or a boundary record and no terrain,
- // no static solid holds any of them.
- let staticClear=!umSolidHasTerrain()&&!voxelLow&&!voxelHigh&&umBoundaryRecord(id)==0u&&umBoundaryRecord(neighbor)==0u;
+ // cells: with neither holding a voxel or a boundary record and no terrain
+ // reaching them, no static solid holds any of them.
+ let staticClear=(statics&UM_STATIC_NO_TERRAIN)!=0u&&(voxelFree||(!voxelLow&&!voxelHigh&&umBoundaryRecord(id)==0u&&umBoundaryRecord(neighbor)==0u));
  // One signed distance per candidate at the face centre serves both the
  // nearest-body fallback and an exact clearance certificate: every sample
  // lies within length(0.4h) of the centre and shape distances are
@@ -1711,8 +1783,9 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
 // reaches (its samples lie within 0.35 sqrt(2) h of the face centre) that is
 // neither clear nor beside a voxel: umPressureFaceV's rigid contact, its one
 // caller, has taken those forms. staticClear: neither cell of the face holds
-// a voxel or a boundary record and there is no terrain; every sample lies on
-// the face, in one of its two cells, so no static solid holds any of them.
+// a voxel or a boundary record and no terrain reaches them (umSolidStaticAt);
+// every sample lies on the face, in one of its two cells, so no static solid
+// holds any of them.
 fn umFaceOpen(id:vec3i,axis:u32,candidates:u32,staticClear:bool)->f32{
  if(!umSolidEnabled()){return 1.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
@@ -1756,10 +1829,16 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
  if(!boxed){
   var neighbor=id;neighbor[axis]+=1;
   if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
-  let voxelLow=umSolidVoxel(id);let voxelHigh=umSolidVoxel(neighbor);
-  var recordLow=0u;var recordHigh=0u;
-  if(voxelLow||bodyNear){recordLow=umBoundaryRecord(id);}
-  if(voxelHigh||bodyNear){recordHigh=umBoundaryRecord(neighbor);}
+  // A face a body reaches reads id's tile's static flags (they cover the
+  // neighbor too): without voxels and boundary records there it skips their
+  // reads, and without terrain as well its aperture skips every static probe.
+  var statics=0u;if(bodyNear){statics=umSolidStaticAt(id);}
+  var voxelLow=false;var voxelHigh=false;var recordLow=0u;var recordHigh=0u;
+  if((statics&UM_STATIC_NO_VOXEL)==0u){
+   voxelLow=umSolidVoxel(id);voxelHigh=umSolidVoxel(neighbor);
+   if(voxelLow||bodyNear){recordLow=umBoundaryRecord(id);}
+   if(voxelHigh||bodyNear){recordHigh=umBoundaryRecord(neighbor);}
+  }
   if((voxelLow&&recordLow==0u)||(voxelHigh&&recordHigh==0u)){
    var open=0.0;
    for(var j=0u;j<2u;j++){let cell=umCellOpen(select(id,neighbor,j==1u));if(j==0u){open=cell;}else{return 0.5*(open+cell);}}
@@ -1768,7 +1847,7 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
   // one side of a completely blocked face; treating that volume as an open
   // face couples the fluid to ghost liquid inside the body at the waterline.
   // Gravity then creates velocity through the body even while it is fixed.
-  if(bodyNear){return umFaceOpen(id,axis,candidates,!umSolidHasTerrain()&&!voxelLow&&!voxelHigh&&recordLow==0u&&recordHigh==0u);}
+  if(bodyNear){return umFaceOpen(id,axis,candidates,(statics&UM_STATIC_NO_TERRAIN)!=0u&&!voxelLow&&!voxelHigh&&recordLow==0u&&recordHigh==0u);}
  }
  let box=umUnitBoxOpen(q,boxed);
  if(boxed){return min(box.y,box.x);}

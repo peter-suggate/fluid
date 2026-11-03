@@ -19,10 +19,10 @@ test("no reader outside the solid record derives its 77-row slots by hand",()=>{
  assert.deepEqual(offenders,[]);
 });
 
-test("slot s starts 77 s rows after the per-key rows, the candidate masks, the region mirror, its header and the epoch",()=>{
+test("slot s starts 77 s rows after the per-key rows, the candidate masks, the region mirror, its header, the epoch and the static rows",()=>{
  for(const tiles of [512,4096,512*37]){
   const count=tiles+1234;
-  const rows=count+8*tiles+(tiles/4+tiles/512+1)+(tiles/64+1)+1;
+  const rows=count+8*tiles+(tiles/4+tiles/512+1)+(tiles/64+1)+1+tiles;
   for(const slot of [0,5]){const value=Function(`return ${uniformSolidSlotRowWGSL(String(count),String(tiles),String(slot)).replace(/(\d+)u/g,"$1")};`)() as number;
   assert.equal(value,rows+77*slot);}
  }

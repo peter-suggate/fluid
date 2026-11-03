@@ -83,6 +83,9 @@ fn umBoundaryRecord(p:vec3i)->u32{return 0u;}
 fn umSolidVoxelAtWorld(p:vec3f)->bool{return settings.y!=0u&&p.y<0.0;}
 fn umSolidTerrainAtWorld(p:vec3f)->bool{return settings.y!=0u&&p.y<.07*p.x;}
 fn umSolidHasTerrain()->bool{return settings.y!=0u;}
+// The static flags: everything clear without the static walls, nothing known with them.
+const UM_STATIC_NO_VOXEL:u32=1u;const UM_STATIC_NO_TERRAIN:u32=2u;
+fn umSolidStaticAt(p:vec3i)->u32{return select(0u,UM_STATIC_NO_VOXEL|UM_STATIC_NO_TERRAIN,settings.y==0u);}
 ${functions}\n${reference}\n${referenceFace}
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3u){
  let p=vec3i(i32(id.x&127u)-64,i32((id.x>>7u)&15u)-4,i32(id.x>>11u)-8);

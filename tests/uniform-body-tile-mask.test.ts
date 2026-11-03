@@ -60,6 +60,37 @@ fn refFaceOpen(id:vec3i,axis:u32,candidates:u32)->f32{
   solid+=select(0.0,1.0,umSolidVoxelAtWorld(p)||umSolidTerrainAtWorld(p)||umBodyAtCandidates(p,candidates)>=0);}
  return 1.0-solid*0.25;
 }
+// umPressureFaceV before the static flags: every static probe at every sample.
+fn refPressureFaceV(id:vec3i,axis:u32)->f32{
+ if(!umSolidEnabled()){return 1.0;}
+ var q=vec3f(id)+0.5;q[axis]+=0.5;
+ let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
+ var candidates=0u;for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,world,length(0.5*h))){candidates|=1u<<i;}}
+ let bodyNear=candidates!=0u;let boxed=!bodyNear&&umBoundaryTouchesBox(q,vec3f(1));
+ if(!boxed){
+  var n=id;n[axis]+=1;
+  if(umSolidFaceClear(id,n,axis)){return 1.0;}
+  if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(n)&&umBoundaryRecord(n)==0u)){let low=umCellOpen(id);return 0.5*(low+umCellOpen(n));}
+  if(bodyNear){return refFaceOpen(id,axis,candidates);}
+ }
+ let box=umUnitBoxOpen(q,boxed);
+ if(boxed){return min(box.y,box.x);}
+ return box.x;
+}
+// The static flags' premise at cell p, for every tile whose ring holds it
+// (the tiles of p's 27 neighbours): bit 0 a voxel or boundary record where a
+// tile claims none, bit 1 terrain at a face sample position where one claims
+// none (a 5^3 lattice of every offset a face sample of p takes).
+fn refStaticViolation(p:vec3i)->u32{
+ var flags=0u;for(var k=0u;k<27u;k++){flags|=umSolidStaticAt(p+vec3i(vec3u(k%3u,(k/3u)%3u,k/9u))-vec3i(1));}
+ var bad=0u;
+ if((flags&UM_STATIC_NO_VOXEL)!=0u&&(umSolidVoxel(p)||umBoundaryRecord(p)!=0u)){bad|=1u;}
+ if((flags&UM_STATIC_NO_TERRAIN)!=0u){
+  let o=array<f32,5>(0.1,0.15,0.5,0.85,0.9);
+  for(var k=0u;k<125u;k++){if(umSolidTerrainAtWorld(umSolidTraceWorld(vec3f(p)+vec3f(o[k%5u],o[(k/5u)%5u],o[k/25u])))){bad|=2u;}}
+ }
+ return bad;
+}
 fn refCellBodyFraction(p:vec3i)->f32{
  let h=umSolidParams.cellGravity.xyz;let centre=umSolidWorldCell(p);var mask=0u;
  for(var i=0u;i<umBodyCount();i++){for(var k=0u;k<8u;k++){
@@ -79,6 +110,9 @@ test("tile body masks cover every reaching body and leave each masked or certifi
   // Terrain beside the bodies: a face a body's sphere reaches weighs the
   // terrain by samples, one it does not by the plane fraction.
   scene.terrain={baseHeight_m:0,features:[{kind:"mound",center_m:{x:.15,z:.15},radius_m:{x:.3,z:.3},amount_m:.34,flat:0}]};
+  // And voxels: a block beside the first body's path (its tiles' rings hold
+  // voxels; the static flags must not clear them).
+  scene.solidVoxels=[{operation:"fill",minimum:[11,8,6],maximumExclusive:[13,10,8],materialId:1}];
   const first=scene.rigidBodies[0]!;
   Object.assign(first,{position_m:{x:0,y:.4,z:0},linearVelocity_m_s:{x:.3,y:0,z:0}});
   const extra:[string,{x:number,y:number,z:number},{x:number,y:number,z:number}][]=[
@@ -117,6 +151,17 @@ test("tile body masks cover every reaching body and leave each masked or certifi
   let world=umSolidFaceWorld(c,axis);var near=0u;
   for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,world,length(0.5*h))){near|=1u<<i;}}
   if(bitcast<u32>(umFaceOpen(c,axis,near,false))!=bitcast<u32>(refFaceOpen(c,axis,near))){flags|=2048u<<axis;}
+  // The aperture with umPressureFaceV's static shortcut from the tile's
+  // flags, and umPressureFaceV itself, against the probe-everything forms.
+  if(bitcast<u32>(umPressureFaceV(c,axis))!=bitcast<u32>(refPressureFaceV(c,axis))){flags|=1u<<19u;}
+  if(near!=0u){
+   var m=c;m[axis]+=1;let statics=umSolidStaticAt(c);
+   let voxelFree=(statics&UM_STATIC_NO_VOXEL)!=0u;
+   let clear=(statics&UM_STATIC_NO_TERRAIN)!=0u&&(voxelFree||(!umSolidVoxel(c)&&!umSolidVoxel(m)&&umBoundaryRecord(c)==0u&&umBoundaryRecord(m)==0u));
+   if(bitcast<u32>(umFaceOpen(c,axis,near,clear))!=bitcast<u32>(refFaceOpen(c,axis,near))){flags|=1u<<19u;}
+   // The skip fires on a face a body reaches in a scene with terrain.
+   if(clear&&umSolidHasTerrain()){flags|=1u<<22u;}
+  }
   // The static shortcut: with no voxel or boundary record in either cell,
   // no aperture or dual-cell sample of the face is a static voxel.
   var n=c;n[axis]+=1;
@@ -129,6 +174,13 @@ test("tile body masks cover every reaching body and leave each masked or certifi
   }
  }
  if(bitcast<u32>(umCellBodyFraction(c))!=bitcast<u32>(refCellBodyFraction(c))){flags|=16384u;}
+ flags|=refStaticViolation(c)<<20u;
+ // Tiles where each flag holds, and cells of tiles where it must not.
+ let statics=umSolidStaticAt(c);
+ if((statics&UM_STATIC_NO_TERRAIN)==0u&&umCellInsideTerrain(c)){flags|=1u<<23u;}
+ if((statics&UM_STATIC_NO_VOXEL)!=0u){flags|=1u<<24u;}
+ if((statics&UM_STATIC_NO_VOXEL)==0u&&umSolidVoxel(c)&&all(c>=vec3i(0))&&all(c<vec3i(${nx},${ny},${nz}))){flags|=1u<<25u;}
+ if((statics&UM_STATIC_NO_TERRAIN)!=0u){flags|=1u<<26u;}
  // Both certificates are exercised: cells clear of, and deep inside, a body
  // its bounding sphere reaches.
  for(var i=0u;i<umBodyCount();i++){
@@ -157,7 +209,7 @@ test("tile body masks cover every reaching body and leave each masked or certifi
  if(g.x>=${count}u){return;}let c=vec3i(i32(g.x%${nx}u),i32((g.x/${nx}u)%${ny}u),i32(g.x/${nx*ny}u));
  output[g.x]=vec4f(umCellOpen(c),umPressureFaceVRecorded(c,0u),umPressureFaceVRecorded(c,1u),umPressureFaceVRecorded(c,2u));
 }`}),entryPoint:"probe"}})));
-   let active=0,clear=0,deep=0;
+   let active=0,clear=0,deep=0;const statics:Record<string,number>={};
    for(let step=1;step<=3;step++){
     assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,bodies));await solver.awaitFrameCompletion();
     assert.equal(solver.info.simulationPipelineError,undefined);
@@ -170,7 +222,8 @@ test("tile body masks cover every reaching body and leave each masked or certifi
      const direct=new Uint32Array((await readMixedBuffer(device,geometry[0]!)).buffer),recorded=new Uint32Array((await readMixedBuffer(device,geometry[1]!)).buffer);
      assert.deepEqual(recorded,direct,`step ${step}, rebuilt ${rebuild}: the record must equal the direct geometry`);
      const flags=new Uint32Array((await readMixedBuffer(device,out)).buffer);
-     for(let i=0;i<count;i++)assert.equal(flags[i]!&0xffff,0,`step ${step}, rebuilt ${rebuild}, cell ${i}: flags ${flags[i]!.toString(2)}`);
+     for(let i=0;i<count;i++)assert.equal(flags[i]!&(0xffff|7<<19),0,`step ${step}, rebuilt ${rebuild}, cell ${i}: flags ${flags[i]!.toString(2)}`);
+     for(const [bit,name] of [[22,"body faces taking the tile-flag skip with terrain"],[23,"terrain cells in tiles flagged with terrain"],[24,"cells of voxel-free tiles"],[25,"voxels in tiles flagged with voxels"],[26,"cells of terrain-free tiles"]] as const)statics[name]=(statics[name]??0)+flags.reduce((n,f)=>n+(f>>bit&1),0);
      const masked=flags.reduce((n,f)=>n+(f>>16&1),0);
      clear+=flags.reduce((n,f)=>n+(f>>17&1),0);deep+=flags.reduce((n,f)=>n+(f>>18&1),0);
      // After publication the pose is not certified: every query takes the whole roster.
@@ -179,6 +232,9 @@ test("tile body masks cover every reaching body and leave each masked or certifi
    }
    assert.ok(active>count/4,`masks narrowed ${active} cell queries`);
    assert.ok(clear>0&&deep>0,`clearance certificates exercised: ${clear} clear, ${deep} deep`);
+   // The static flags fire where no static solid reaches and not where one does.
+   for(const [name,n] of Object.entries(statics))assert.ok(n>0,`${name}: ${n}`);
+   assert.equal(Object.keys(statics).length,5);
   }finally{out.destroy();for(const buffer of geometry)buffer.destroy();solver.destroy();}
  });
 });

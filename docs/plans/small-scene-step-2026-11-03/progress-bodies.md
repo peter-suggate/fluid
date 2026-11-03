@@ -163,3 +163,55 @@ What remains of the body cost is mostly buildRegions at 0.90 ms. A knockout that
 face-level voxel and record reads of body-near faces reached 0.78 ms. Recovering that last
 0.13 ms would need the tile's per-cell static flags shared through workgroup memory, which is
 below the 0.3 ms bar, so it is not done.
+
+## Per-tile static flags replace the scene-global terrain test (2026-11-03)
+
+6ef4ae59's static shortcut needed `!umSolidHasTerrain()`, so it never fired in a terrain scene. The
+solid record now carries one static row per key (umSolidStaticRow, after the epoch row and inside
+uniformSolidSlotRowWGSL, so every slot base moves through the one helper). The full build
+(umBuildTile, every page claim and static edit) writes two bits per tile. Each covers the tile's
+64 cells and their one-cell ring:
+- **UM_STATIC_NO_VOXEL.** No voxel and no boundary record anywhere in the 6³ ring block.
+- **UM_STATIC_NO_TERRAIN.** The heightfield lies at or below the ring's floor at all 13×13
+  half-cell lattice points. The bilinear surface's maximum over the footprint is at those points.
+  A sculpt cut only opens terrain, so a carve cannot invalidate the bit.
+
+The bodies-only buildRegions reads the stored bits rather than recomputing them. Unstored tiles
+read 0, which means nothing is known. The following now consult the flags instead of the scene
+bit: umPressureFaceV, umFaceOpen, umSolidFaceVelocity, umCellOpenGeometry and umCellInsideSolid.
+On a flagged tile they skip the voxel, record and terrain probes, in any scene.
+
+Regressions:
+- **uniform-body-tile-mask.** The fixture gains a voxel fill beside its terrain mound and 6 bodies.
+  Every flagged query must still equal the sample-by-sample all-roster oracle. The test requires
+  the skip to fire on body faces in a terrain scene, and requires tiles to be found with and
+  without each flag. It also checks each flag's premise against direct voxel, record and terrain
+  samples.
+- **uniform-solid-static-flags (new).** The flags must follow a voxel fill, a carve through
+  terrain and fill, undo, redo, and a save and load of the edited document. At every state no
+  flag may overclaim.
+- **slot-layout and query-reuse.** Both are updated.
+
+| `--bodies --kernels=60`, mean ms | garden-pond before | after | paddleboats before | after |
+|---|---|---|---|---|
+| buildRegions | 0.027 | 0.040 | 0.909 | 0.909 |
+| pRows | 0.628 | 0.514 | 0.928 | 0.719 |
+| coupleFine | 0.700 | 0.689 | 0.827 | 0.846 |
+| remapFaces (twinned) | 0.636 | 0.520 | 0.712 | 0.734 |
+
+Garden-pond's bodies are held (none has a motor), so its buildRegions is idle and the gain lands in
+pRows (−0.11) and remapFaces (−0.12). That totals about −0.23 ms, which is under the 0.3 ms bar.
+Paddleboats gains −0.21 ms in pRows, because body-near faces of voxel-free tiles now skip the
+face-level voxel and record reads. That is cost-positive, so the change lands. No step-time claim
+is made; these are single kernel runs.
+
+The gate, on a clean export of HEAD with this change:
+- check:types is clean, and test:unit is 1542/0.
+- The GPU regressions pass 7/0: slot-layout, query-reuse, body-tile-mask and static-flags.
+
+| Scene | Drift | lateHalfMedian |
+|---|---|---|
+| seep 300 | +0.00020; step-1 volume 688.2k | 31.4 ms, no closure error |
+| letters 120 | −0.0112 | 94.6 ms |
+| paddleboats 90 | −0.0067 | 54.8 ms (shared GPU) |
+| garden-pond 60 | −0.0300 | 28.7 ms |
