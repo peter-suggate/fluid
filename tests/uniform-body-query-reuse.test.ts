@@ -7,6 +7,7 @@ import { uniformMixedSolidWGSL, UniformMixedSolid } from "../lib/methods/uniform
 import { withUniformDevice } from "./helpers/uniform-geometric";
 import {pairedComputeTimings} from "./helpers/gpu-paired-timing";
 import { readMixedBuffer } from "./helpers/uniform-mixed-native-fields";
+import { GPU_RIGID_BODY_CAPACITY } from "../lib/core/rigid-capacity";
 
 function fn(source:string,name:string):string {
  const start=source.indexOf(`fn ${name}(`);assert.ok(start>=0,name);let depth=0;
@@ -62,7 +63,7 @@ fn candidateFace(p:vec3i,axis:u32)->f32{
 test("face candidate reuse preserves all-roster velocities, overlaps, nearest ties and interiors",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("exact rigid query reuse",async device=>{
   const count=32768,source=uniformMixedSolidWGSL(0);
-  const functions=["umQuatRotate","umBodyLocal","umBodyNear","umInsideBody","umBodyDistance","umBodyVelocity","umBodyAt","umBodyAtCandidates","umBodyCandidates","umAnyBodyNear","umSolidFaceWorld","umSolidFaceVelocity","umFaceOpen"].map(n=>fn(source,n)).join("\n");
+  const functions=["umQuatRotate","umBodyLocal","umBodyNear","umInsideBody","umBodyDistance","umBodyVelocity","umBodyAt","umBodyAtCandidates","umBodyCandidates","umAnyBodyNear","umBodyCellMask","umSolidFaceWorld","umSolidFaceVelocity","umFaceOpen"].map(n=>fn(source,n)).join("\n");
   const body=device.createBuffer({size:12*128,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   const settings=device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   const output=device.createBuffer({size:count*48,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
@@ -152,8 +153,8 @@ ${["baseline","candidate","apertureBaseline","apertureCandidate"].map(name=>`@co
 
 test("body publication invalidates cached geometry in command order without clearing the edit epoch",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("body record lifetime",async device=>{
-  const source=device.createBuffer({size:1536,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  const mirror=device.createBuffer({size:1536,usage:GPUBufferUsage.COPY_DST});
+  const source=device.createBuffer({size:128*GPU_RIGID_BODY_CAPACITY,usage:GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  const mirror=device.createBuffer({size:128*GPU_RIGID_BODY_CAPACITY,usage:GPUBufferUsage.COPY_DST});
   const record=device.createBuffer({size:32,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const fresh=device.createBuffer({size:4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   const output=device.createBuffer({size:48,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});

@@ -52,9 +52,22 @@ fn umSolidFieldCutRow(t:u32)->u32{return umSolidCount()+6u*umSolidTiles()+t;}
 // The aperture stamp of a key: the tile's world coordinate and the epoch of
 // its build. Every stored tile's, slot or none.
 fn umSolidApertureStampRow(t:u32)->u32{return umSolidCount()+7u*umSolidTiles()+t;}
+// The candidate bodies of each key (bodyMask, every head, at the pose it
+// reads): bit i set where slot i < count is inverted or its bounding sphere
+// comes within UM_BODY_MASK_REACH hmax (plus 1% of a cell for rounding) of
+// the key's tile box (its cells' extent). Four keys a row, one key a lane,
+// each an exact f32 of at most GPU_RIGID_BODY_CAPACITY (24) bits. Valid
+// only while umSolidBodyPoseCurrent and the stamps match (umBodyTileMask):
+// a block stamp row per 512 keys (its page, w 1 when live at the head) and
+// one row of the frame origin and the body count.
+const UM_BODY_MASK_REACH:u32=3u;
+fn umBodyTileMaskRow(t:u32)->u32{return umSolidCount()+8u*umSolidTiles()+(t>>2u);}
+fn umBodyBlockStampRow(b:u32)->u32{return umSolidCount()+8u*umSolidTiles()+umSolidTiles()/4u+b;}
+fn umBodyMaskFrameRow()->u32{return umSolidCount()+8u*umSolidTiles()+umSolidTiles()/4u+umSolidTiles()/512u;}
 // The swept-body region mask's mirror (UniformMixedSolid.bodyRegions): a vec4
-// per 16h region after the 8 per-tile rows, then the pending/count header.
-fn umBodyRegionBase()->u32{return umSolidCount()+8u*umSolidTiles();}
+// per 16h region after the per-tile rows and the candidate masks, then the
+// pending/count header.
+fn umBodyRegionBase()->u32{return umBodyMaskFrameRow()+1u;}
 // The epoch the host advances with every solid edit, after the mask's header.
 // y certifies that the record was built at the currently published body pose.
 // Publishing bodies clears it; the last full/body record-build dispatch sets it.
@@ -365,11 +378,13 @@ export class UniformMixedSolid {
    const writable=device.createBindGroupLayout({label:"Uniform mixed static solids of the record build",entries:entries.map(entry=>entry.binding===1?{...entry,buffer:{type:"storage" as const}}:entry)});
    this.recordSolids={layout:writable,group:device.createBindGroup({layout:writable,entries:resourcesOf()})};
    const count=uniformMixedPressureStorage(coarseLayout).count;
-   // 8 vec4 rows per tile, then the body mask mirror: a vec4 per 16h region
+   // 8 vec4 rows per tile, the candidate masks, then the body mask mirror: a vec4 per 16h region
    // and its header, the epoch row and 77 rows a slot (umSolidSlotRow).
    const slots=this.slots=Math.min(tiles,Math.max(1,resources.slots??tiles));
    if(!Number.isSafeInteger(slots))throw new Error(`The solid record's ${resources.slots} slots are not a whole count`);
-   const recordBytes=16*(count+8*tiles+tiles/64+2+77*slots);this.bodyPendingByte=16*(count+8*tiles+tiles/64);this.epochByte=16*(count+8*tiles+tiles/64+1);
+   // The candidate masks: four keys a row, a stamp row a block, a frame row (umBodyTileMaskRow).
+   const perTile=8*tiles+tiles/4+tiles/512+1;
+   const recordBytes=16*(count+perTile+tiles/64+2+77*slots);this.bodyPendingByte=16*(count+perTile+tiles/64);this.epochByte=16*(count+perTile+tiles/64+1);
    // The free stack (pooled slots): [top, tiles the stack could not serve, 0, 0, slot ids].
    this.slotState=device.createBuffer({label:"Uniform mixed solid record slots",size:4*(4+(slots<tiles?slots:0)),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
    if(slots<tiles){const stack=new Uint32Array(4+slots);stack[0]=slots;for(let i=0;i<slots;i++)stack[4+i]=i;device.queue.writeBuffer(this.slotState,0,stack);}
@@ -471,13 +486,44 @@ fn umBodyMoved(i:u32)->bool{
  return any(bitcast<vec4u>(a.positionShape)!=bitcast<vec4u>(b.positionShape))||any(bitcast<vec4u>(a.dimensions)!=bitcast<vec4u>(b.dimensions))||any(bitcast<vec4u>(a.orientation)!=bitcast<vec4u>(b.orientation));
 }
 fn umBuilderRegionOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
-// The tile near a moved body: one moved-slot bitmask, the tile's 4h box.
+// A pose's signed distance (fluidRigidDistance) at a world point.
+fn umBodyPoseDistance(b:UMRigidBody,world:vec3f)->f32{
+ return fluidRigidDistance(i32(round(b.positionShape.w)),b.dimensions.xyz,umQuatRotate(vec4f(b.orientation.x,-b.orientation.yzw),world-b.positionShape.xyz));
+}
+// The tile a moved body may change: one moved-slot bitmask, the tile's 4h
+// box. Its record reads the body at points within 2 hmax of that box (cut
+// ring and face samples), its touched flag (umSolidBodyBuilt) the bounding
+// sphere within hmax, and each face's aperture whether the sphere comes
+// within |h|/2 of the face centre (umPressureFaceV's body-near form). A slot
+// present at both poses whose flag agrees changes nothing where both poses'
+// centre distances exceed, with one sign, the reach R from the tile's
+// centre to those points (the shape distances are 1-Lipschitz, scene-shape.ts;
+// the cup's max of exact distances is), so every point is outside both poses
+// or inside both, and where outside, the sphere reaches every face centre of
+// the tile at both poses or none at either.
+// How a pose's bounding sphere, grown by m, meets a box: 0 misses all of
+// it, 2 holds all of it, 1 neither (a slack keeps rounding out of both).
+fn umBodySphereClass(b:UMRigidBody,lo:vec3f,hi:vec3f,m:f32,slack:f32)->u32{
+ if(b.positionShape.w<0.0){return 2u;}
+ let p=b.positionShape.xyz;let reach=b.dimensions.w+m;
+ if(distance(clamp(p,lo,hi),p)>reach+slack){return 0u;}
+ if(length(max(abs(lo-p),abs(hi-p)))<=reach-slack){return 2u;}
+ return 1u;
+}
 fn umBodyTileSwept(tc:vec3u,moved:u32)->bool{
- let h=umSolidParams.cellGravity.xyz;let lo=umSolidWorldCell(vec3i(tc*4u))-0.5*h;let hi=lo+4.0*h;
- let margin=2.0*max(h.x,max(h.y,h.z));
+ let h=umSolidParams.cellGravity.xyz;let hmax=max(h.x,max(h.y,h.z));
+ let lo=umSolidWorldCell(vec3i(tc*4u))-0.5*h;let hi=lo+4.0*h;
+ let margin=2.0*hmax;let centre=0.5*(lo+hi);let reach=1.01*length(2.0*h+vec3f(margin));
  for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i++){
   if(((moved>>i)&1u)==0u){continue;}
-  if((umBodyPresentNow(i)&&umBodyTileNear(umSolidBodies[i],lo,hi,margin))||(umBodyPresentBuilt(i)&&umBodyTileNear(umBuiltBodies[i],lo,hi,margin))){return true;}
+  let now=umBodyPresentNow(i);let built=umBodyPresentBuilt(i);let a=umSolidBodies[i];let b=umBuiltBodies[i];
+  if(!((now&&umBodyTileNear(a,lo,hi,margin))||(built&&umBodyTileNear(b,lo,hi,margin)))){continue;}
+  if(now!=built||umBodyTileNear(a,lo,hi,hmax)!=umBodyTileNear(b,lo,hi,hmax)){return true;}
+  let d=vec2f(umBodyPoseDistance(a,centre),umBodyPoseDistance(b,centre));
+  if(all(d<vec2f(-reach))){continue;}
+  if(!all(d>vec2f(reach))){return true;}
+  let near=vec2u(umBodySphereClass(a,lo,hi,0.5*length(h),1e-3*hmax),umBodySphereClass(b,lo,hi,0.5*length(h),1e-3*hmax));
+  if(near.x!=near.y||near.x==1u){return true;}
  }
  return false;
 }
@@ -508,39 +554,71 @@ fn umBodyReach(d:f32,hmax:f32)->u32{
  // NaN and negative distances intersect.
  if(!(d>0.0)){return 0u;}return u32(min(floor(d/hmax),255.0));
 }
-// One lane per 16h region: the swept/pose reaches (UniformMixedSolid.bodyRegions
-// and its mirror at umBodyRegionBase in the record), then the region's tile
-// bits (umBodyTileDirty): a region beyond a swept reach of 2 has none set.
-@compute @workgroup_size(64) fn bodyMask(@builtin(global_invocation_id) g:vec3u){
- let region=g.x+umDispatchX*64u*g.y;
- if(region==0u){
+// A workgroup per 16h region, a lane per tile: the swept/pose reaches
+// (UniformMixedSolid.bodyRegions and its mirror at umBodyRegionBase in the
+// record), the region's tile bits (umBodyTileDirty: a region beyond a swept
+// reach of 2 has none set), and each tile's candidate bodies
+// (umBodyTileMaskRow). Lanes below the capacity take a body each.
+var<workgroup> maskMoved:atomic<u32>;
+var<workgroup> maskBodies:atomic<u32>;
+var<workgroup> maskSwept:atomic<u32>;
+var<workgroup> maskPose:atomic<u32>;
+var<workgroup> maskTileBits:array<atomic<u32>,2>;
+var<workgroup> maskTiles:array<u32,64>;
+// Slot i's bounding sphere within the mask reach of a box (umBodyTileMaskRow).
+fn umBodyMaskNear(i:u32,lo:vec3f,hi:vec3f)->bool{
+ let b=umSolidBodies[i];let h=umSolidParams.cellGravity.xyz;let p=b.positionShape.xyz;
+ return b.positionShape.w<0.0||distance(clamp(p,lo,hi),p)<=b.dimensions.w+(f32(UM_BODY_MASK_REACH)+0.01)*max(h.x,max(h.y,h.z));
+}
+@compute @workgroup_size(64) fn bodyMask(@builtin(workgroup_id) g:vec3u,@builtin(local_invocation_index) lane:u32){
+ let region=g.x+umDispatchX*g.y;
+ if(region==0u&&lane==0u){
   var moved=0u;for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i++){if(umBodyMoved(i)){moved|=1u<<i;}}
   bodyRegions[UM_REGIONS]=umBodyCount();bodyRegions[UM_REGIONS+2u]=moved;bodyRegions[UM_REGIONS+3u]=u32(moved!=0u);
   // Pending: the first derived-geometry consumer after this head takes the swept evidence.
   record[umBodyRegionBase()+UM_REGIONS]=vec4f(1.0,f32(moved!=0u),f32(umBodyCount()),0.0);
+  record[umBodyMaskFrameRow()]=vec4f(umSolidParams.frame.xyz,f32(umBodyCount()));
  }
  if(region>=UM_REGIONS){return;}
  let first=umSolidRegionTile(region,0u);
  let bits=UM_BODY_TILE_BITS+${UNIFORM_BODY_TILE_WORDS}u*region;
- if(!umTileLive(first)){bodyRegions[region]=${UNIFORM_BODY_REGION_UNKNOWN}u;record[umBodyRegionBase()+region]=vec4f(0.0,0.0,1.0,0.0);bodyRegions[bits]=0u;bodyRegions[bits+1u]=0u;return;}
+ let live=umTileLive(first);
+ if((region&7u)==0u&&lane==0u){record[umBodyBlockStampRow(region>>3u)]=vec4f(vec3f(umBlockPage(region>>3u)),select(0.0,1.0,live));}
+ if(!live){if(lane==0u){bodyRegions[region]=${UNIFORM_BODY_REGION_UNKNOWN}u;record[umBodyRegionBase()+region]=vec4f(0.0,0.0,1.0,0.0);bodyRegions[bits]=0u;bodyRegions[bits+1u]=0u;}return;}
  let h=umSolidParams.cellGravity.xyz;let hmax=max(h.x,max(h.y,h.z));
  let lo=umSolidWorldCell(vec3i(umTileCoord(first)*4u))-0.5*h;let hi=lo+16.0*h;
- var swept=3.402823e38;var pose=3.402823e38;var moved=0u;
- for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i++){
-  let now=umBodyPresentNow(i);let b=umSolidBodies[i];
-  if(now){let p=b.positionShape.xyz;pose=min(pose,distance(clamp(p,lo,hi),p)-b.dimensions.w);}
-  if(!umBodyMoved(i)){continue;}
-  moved|=1u<<i;
-  let built=umBodyPresentBuilt(i);let o=umBuiltBodies[i];
-  if(now&&built){swept=min(swept,umBoxSegmentDistance(lo,hi,o.positionShape.xyz,b.positionShape.xyz)-max(o.dimensions.w,b.dimensions.w));}
-  else if(now){let p=b.positionShape.xyz;swept=min(swept,distance(clamp(p,lo,hi),p)-b.dimensions.w);}
-  else if(built){let p=o.positionShape.xyz;swept=min(swept,distance(clamp(p,lo,hi),p)-o.dimensions.w);}
+ if(lane==0u){atomicStore(&maskMoved,0u);atomicStore(&maskBodies,0u);atomicStore(&maskSwept,255u);atomicStore(&maskPose,255u);atomicStore(&maskTileBits[0],0u);atomicStore(&maskTileBits[1],0u);}
+ workgroupBarrier();
+ // umBodyReach is monotone in the distance, so the minimum of the slots'
+ // reaches is the reach of their minimum distance.
+ if(lane<${GPU_RIGID_BODY_CAPACITY}u){
+  let i=lane;let now=umBodyPresentNow(i);let b=umSolidBodies[i];
+  if(i<umBodyCount()&&umBodyMaskNear(i,lo,hi)){atomicOr(&maskBodies,1u<<i);}
+  if(now){let p=b.positionShape.xyz;atomicMin(&maskPose,umBodyReach(distance(clamp(p,lo,hi),p)-b.dimensions.w,hmax));}
+  if(umBodyMoved(i)){
+   atomicOr(&maskMoved,1u<<i);
+   let built=umBodyPresentBuilt(i);let o=umBuiltBodies[i];var swept=3.402823e38;
+   if(now&&built){swept=umBoxSegmentDistance(lo,hi,o.positionShape.xyz,b.positionShape.xyz)-max(o.dimensions.w,b.dimensions.w);}
+   else if(now){let p=b.positionShape.xyz;swept=distance(clamp(p,lo,hi),p)-b.dimensions.w;}
+   else if(built){let p=o.positionShape.xyz;swept=distance(clamp(p,lo,hi),p)-o.dimensions.w;}
+   atomicMin(&maskSwept,umBodyReach(swept,hmax));
+  }
  }
- let s=umBodyReach(swept,hmax);let q=umBodyReach(pose,hmax);
- bodyRegions[region]=s|(q<<8u);record[umBodyRegionBase()+region]=vec4f(f32(s),f32(q),0.0,0.0);
- var tiles=vec2u(0u);
- if(s<=2u){for(var k=0u;k<64u;k++){if(umBodyTileSwept(umTileCoord(umSolidRegionTile(region,k)),moved)){tiles[k>>5u]|=1u<<(k&31u);}}}
- bodyRegions[bits]=tiles.x;bodyRegions[bits+1u]=tiles.y;
+ workgroupBarrier();
+ let s=atomicLoad(&maskSwept);let q=atomicLoad(&maskPose);let moved=atomicLoad(&maskMoved);let near=atomicLoad(&maskBodies);
+ let t=umSolidRegionTile(region,lane);let tc=umTileCoord(t);
+ if(s<=2u&&umBodyTileSwept(tc,moved)){atomicOr(&maskTileBits[lane>>5u],1u<<(lane&31u));}
+ let tlo=umSolidWorldCell(vec3i(tc*4u))-0.5*h;let thi=tlo+4.0*h;
+ var mask=0u;var remaining=near;
+ while(remaining!=0u){let i=firstTrailingBit(remaining);remaining&=remaining-1u;if(umBodyMaskNear(i,tlo,thi)){mask|=1u<<i;}}
+ maskTiles[lane]=mask;
+ workgroupBarrier();
+ // Lanes 4k..4k+3 hold keys 4j..4j+3 (umSolidRegionTile): one row.
+ if((lane&3u)==0u){record[umBodyTileMaskRow(t)]=vec4f(f32(maskTiles[lane]),f32(maskTiles[lane+1u]),f32(maskTiles[lane+2u]),f32(maskTiles[lane+3u]));}
+ if(lane==0u){
+  bodyRegions[region]=s|(q<<8u);record[umBodyRegionBase()+region]=vec4f(f32(s),f32(q),0.0,0.0);
+  bodyRegions[bits]=atomicLoad(&maskTileBits[0]);bodyRegions[bits+1u]=atomicLoad(&maskTileBits[1]);
+ }
 }
 var<workgroup> sums:array<vec4f,64>;
 var<workgroup> lows:array<vec4f,64>;
@@ -977,8 +1055,8 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
   const pass=encoder.beginComputePass(RECORD_PASS);
   pass.setBindGroup(0,this.recordSolids!.group);pass.setBindGroup(1,this.builderGroup(topology));
   // The swept-body mask every head: from the record's built mirror to the current one.
-  const regionGroups=ceilDiv(keys/64,64),rx=Math.min(regionGroups,this.maxGroups);
-  pass.setPipeline(this.builder.bodyMask);pass.dispatchWorkgroups(rx,ceilDiv(regionGroups,rx));
+  const regions=keys/64,rx=Math.min(regions,this.maxGroups);
+  pass.setPipeline(this.builder.bodyMask);pass.dispatchWorkgroups(rx,ceilDiv(regions,rx));
   if(!this.built){
    // A full build: a lane (cuts), a workgroup (build) per tile key. Bodies
    // only: fixed grids over the regions (cutsRegions) and their tile jobs
@@ -1193,6 +1271,8 @@ fn umBodyPoseReach(region:u32)->u32{return select(255u,0u,umBodyCount()>0u);}
 fn umBodySweptNearTile(t:u32,margin:u32)->bool{return umBodyCount()>0u;}
 fn umBodyPoseNearTile(t:u32,margin:u32)->bool{return umBodyCount()>0u;}
 fn umBodyEvidencePending()->bool{return umBodyCount()>0u;}
+fn umBodyTileMask(t:u32)->u32{return (1u<<umBodyCount())-1u;}
+fn umBodyCellMask(p:vec3i)->u32{return (1u<<umBodyCount())-1u;}
 fn umTileOpen(t:u32)->f32{return 1.0;}
 fn umTileOpenAt(p:vec3i)->f32{return 1.0;}
 fn umTileSupported(t:u32)->bool{return false;}`:`@group(${group}) @binding(3) var<storage,read> umSolidRecord:array<vec4f>;
@@ -1256,12 +1336,27 @@ fn umBodyPoseReach(region:u32)->u32{if(!umSolidEnabled()){return 255u;}if(region
 // Tile key t's region is within margin h of the swept/pose support; a key no
 // page stores answers true.
 fn umBodySweptNearTile(t:u32,margin:u32)->bool{if(!umSolidEnabled()){return false;}if(!umKeyStored(t)){return true;}return umBodySweptReach(umBodyRegionOfTile(t))<=margin;}
+// The candidate bodies of key t (umBodyTileMaskRow): every slot below the
+// count where the head's masks do not certify the pose, the frame, the
+// count and t's block. Every body query of a point of the tile's cells
+// with a margin up to UM_BODY_MASK_REACH hmax visits only these: a slot
+// outside the mask lies farther than that from all of them.
+fn umBodyTileMask(t:u32)->u32{
+ let every=(1u<<umBodyCount())-1u;
+ if(!umSolidEnabled()||t>=umSolidTiles()||!umTileLive(t)||!umSolidBodyPoseCurrent()){return every;}
+ let b=t>>9u;let stamp=umSolidRecord[umBodyBlockStampRow(b)];let frame=umSolidRecord[umBodyMaskFrameRow()];
+ if(stamp.w!=1.0||any(stamp.xyz!=vec3f(umBlockPage(b)))||any(frame.xyz!=umSolidParams.frame.xyz)||frame.w!=f32(umBodyCount())){return every;}
+ return u32(umSolidRecord[umBodyTileMaskRow(t)][t&3u])&every;
+}
+// The candidates of h cell p's tile.
+fn umBodyCellMask(p:vec3i)->u32{return umBodyTileMask(umTileKey(p>>vec3u(2u)));}
 fn umBodyPoseNearTile(t:u32,margin:u32)->bool{
  if(!umSolidEnabled()){return false;}if(!umKeyStored(t)){return true;}
  if(umBodyPoseReach(umBodyRegionOfTile(t))>margin){return false;}
  // Region reach is a broad phase only: a body must reach this tile itself.
  let h=umSolidParams.cellGravity.xyz;let lo=umSolidWorldCell(vec3i(4u*umTileCoord(t)))-.5*h;let hi=lo+4.0*h;
- for(var i=0u;i<umBodyCount();i++){let b=umSolidBodies[i];if(b.dimensions.w<=0.0){continue;}
+ var remaining=select((1u<<umBodyCount())-1u,umBodyTileMask(t),margin<=UM_BODY_MASK_REACH);
+ while(remaining!=0u){let i=firstTrailingBit(remaining);remaining&=remaining-1u;let b=umSolidBodies[i];if(b.dimensions.w<=0.0){continue;}
   if(distance(clamp(b.positionShape.xyz,lo,hi),b.positionShape.xyz)<=b.dimensions.w+f32(margin)*max(h.x,max(h.y,h.z))){return true;}}
  return false;
 }
@@ -1417,7 +1512,8 @@ fn umSolidTileClear(p:vec3i)->bool{
  if(!umKeyStored(t)||umSolidScratch[umSolidCutMap()+t]!=0u){return false;}
  if(umSolidParams.boundary.z<0.5){return true;}
  let world=umSolidWorldCell(p);let h=umSolidParams.cellGravity.xyz;
- for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,world,3.0*max(h.x,max(h.y,h.z)))){return false;}}
+ var remaining=umBodyTileMask(t);
+ while(remaining!=0u){let i=firstTrailingBit(remaining);remaining&=remaining-1u;if(umBodyNear(i,world,3.0*max(h.x,max(h.y,h.z)))){return false;}}
  return true;`:"return false;"}
 }
 // The +axis face of id (neighbor across it) meets no solid: a wall page is
@@ -1469,6 +1565,8 @@ fn umBodyAtCandidates(world:vec3f,candidates:u32)->i32{
  }
  return -1;
 }
+// umBodyAt of a point of h cell p: its tile's candidates (umBodyTileMask).
+fn umBodyAtCell(p:vec3i,world:vec3f)->i32{${writable?"return umBodyAt(world);":"return umBodyAtCandidates(world,umBodyCellMask(p));"}}
 ${uniformRigidCoverageSource(writable?"umSolidQueryBodies":undefined)}
 // cellOpenFraction.
 fn umCellOpenGeometry(p:vec3i)->f32{
@@ -1523,9 +1621,9 @@ fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{
 fn umCellInsideSolid(p:vec3i)->bool{
  if(!umSolidEnabled()){return false;}
  if(umSolidTileClear(p)){return false;}
- if(umBoundaryRecord(p)!=0u){return umBoundarySample(vec3f(p)+0.5).w<0.0||umCellInsideTerrain(p)||umBodyAt(umSolidWorldCell(p))>=0;}
+ if(umBoundaryRecord(p)!=0u){return umBoundarySample(vec3f(p)+0.5).w<0.0||umCellInsideTerrain(p)||umBodyAtCell(p,umSolidWorldCell(p))>=0;}
  if(umSolidVoxel(p)){return true;}
- return umCellInsideTerrain(p)||umBodyAt(umSolidWorldCell(p))>=0;
+ return umCellInsideTerrain(p)||umBodyAtCell(p,umSolidWorldCell(p))>=0;
 }
 fn umSolidFaceWorld(id:vec3i,axis:u32)->vec3f{var world=umSolidWorldCell(id);world[axis]+=0.5*umSolidParams.cellGravity.xyz[axis];return world;}
 fn umSolidTraceWorld(p:vec3f)->vec3f{let h=umSolidParams.cellGravity.xyz;
@@ -1549,8 +1647,8 @@ fn umSolidAtWorld(world:vec3f)->bool{return umSolidVoxelAtWorld(world)||umSolidT
 // (terrain is not a trace solid natively).
 fn umSolidAtWorldCell(p:vec3f)->bool{
  if(!umSolidEnabled()){return false;}
- if(umSolidTileClear(vec3i(floor(p)))){return false;}
- let world=umSolidTraceWorld(p);return umSolidVoxelAtWorld(world)||umBodyAt(world)>=0;}
+ let cell=vec3i(floor(p));if(umSolidTileClear(cell)){return false;}
+ let world=umSolidTraceWorld(p);return umSolidVoxelAtWorld(world)||umBodyAtCell(cell,world)>=0;}
 // pressureFaceData(id,axis)[axis]: the moving-wall velocity u_s of a MAC
 // face. Its dual-cell samples classify ownership; each covering body's
 // rigid velocity is evaluated at the face centre (static voxels and terrain
@@ -1566,7 +1664,8 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
  // Keep the existing broad-phase reach, retaining its candidate identities.
  // Every dual-cell sample is within 0.4*sqrt(3)*reach, and the nearest-wall
  // fallback reaches one cell: both are contained in this same 2*reach set.
- let candidates=umBodyCandidates(world,2.0*reach);
+ var candidates=0u;var near=${writable?"umSolidQueryBodies&((1u<<umBodyCount())-1u)":"umBodyCellMask(id)"};
+ while(near!=0u){let i=firstTrailingBit(near);near&=near-1u;if(umBodyNear(i,world,2.0*reach)){candidates|=1u<<i;}}
  if(candidates==0u){return 0.0;}
  var solid=0.0;var velocity=0.0;
  for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
