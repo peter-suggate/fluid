@@ -49,9 +49,26 @@ fn refFaceVelocity(id:vec3i,axis:u32)->f32{
  var nearest=reach;var result=0.0;
  for(var i=0u;i<umBodyCount();i++){if(((candidates>>i)&1u)==0u){continue;}let d=abs(umBodyDistance(i,world));if(d<=nearest){nearest=d;result=umBodyVelocity(i,world)[axis];}}
  return result;
+}
+// The aperture and cell coverage sample by sample, before their clearance
+// certificates.
+fn refFaceOpen(id:vec3i,axis:u32,candidates:u32)->f32{
+ if(!umSolidEnabled()){return 1.0;}
+ let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
+ let a=(axis+1u)%3u;let b=(axis+2u)%3u;var solid=0.0;
+ for(var j=0u;j<4u;j++){var p=world;p[a]+=select(-0.35,0.35,(j&1u)!=0u)*h[a];p[b]+=select(-0.35,0.35,(j&2u)!=0u)*h[b];
+  solid+=select(0.0,1.0,umSolidVoxelAtWorld(p)||umSolidTerrainAtWorld(p)||umBodyAtCandidates(p,candidates)>=0);}
+ return 1.0-solid*0.25;
+}
+fn refCellBodyFraction(p:vec3i)->f32{
+ let h=umSolidParams.cellGravity.xyz;let centre=umSolidWorldCell(p);var mask=0u;
+ for(var i=0u;i<umBodyCount();i++){for(var k=0u;k<8u;k++){
+  let o=vec3f(select(-0.4,0.4,(k&1u)!=0u),select(-0.4,0.4,(k&2u)!=0u),select(-0.4,0.4,(k&4u)!=0u));
+  if(umInsideBody(i,centre+o*h)){mask|=1u<<k;}}}
+ return f32(countOneBits(mask))/8.0;
 }`;
 
-test("tile body masks cover every reaching body and leave each masked query equal to the all-roster one",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+test("tile body masks cover every reaching body and leave each masked or certified query equal to the all-roster sample-by-sample one",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  const {createRigidCouplingOracleScene}=await import("../lib/core/scenes");
  const {initializeRigidBodies}=await import("../lib/core/rigid-body");
  const {createUniformSolver}=await import("./helpers/uniform-geometric");
@@ -96,6 +113,30 @@ test("tile body masks cover every reaching body and leave each masked query equa
  // Every body whose sphere comes within the mask reach of a point of the
  // cell (centre and corners) is a candidate of its tile.
  let h=umSolidParams.cellGravity.xyz;let reach=f32(UM_BODY_MASK_REACH)*max(h.x,max(h.y,h.z));
+ for(var axis=0u;axis<3u;axis++){
+  let world=umSolidFaceWorld(c,axis);var near=0u;
+  for(var i=0u;i<umBodyCount();i++){if(umBodyNear(i,world,length(0.5*h))){near|=1u<<i;}}
+  if(bitcast<u32>(umFaceOpen(c,axis,near,false))!=bitcast<u32>(refFaceOpen(c,axis,near))){flags|=2048u<<axis;}
+  // The static shortcut: with no voxel or boundary record in either cell,
+  // no aperture or dual-cell sample of the face is a static voxel.
+  var n=c;n[axis]+=1;
+  if(!umSolidVoxel(c)&&!umSolidVoxel(n)&&umBoundaryRecord(c)==0u&&umBoundaryRecord(n)==0u){
+   for(var j=0u;j<4u;j++){var p=world;let a=(axis+1u)%3u;let b=(axis+2u)%3u;
+    p[a]+=select(-0.35,0.35,(j&1u)!=0u)*h[a];p[b]+=select(-0.35,0.35,(j&2u)!=0u)*h[b];
+    if(umSolidVoxelAtWorld(p)){flags|=32768u;}}
+   for(var j=0u;j<8u;j++){
+    if(umSolidVoxelAtWorld(world+vec3f(select(-0.4,0.4,(j&1u)!=0u)*h.x,select(-0.4,0.4,(j&2u)!=0u)*h.y,select(-0.4,0.4,(j&4u)!=0u)*h.z))){flags|=32768u;}}
+  }
+ }
+ if(bitcast<u32>(umCellBodyFraction(c))!=bitcast<u32>(refCellBodyFraction(c))){flags|=16384u;}
+ // Both certificates are exercised: cells clear of, and deep inside, a body
+ // its bounding sphere reaches.
+ for(var i=0u;i<umBodyCount();i++){
+  if(!umBodyNear(i,umSolidWorldCell(c),length(0.4*h))){continue;}
+  let d=umBodyDistance(i,umSolidWorldCell(c));
+  if(d>1.01*length(0.4*h)){flags|=1u<<17u;}
+  if(d< -1.01*length(0.4*h)&&umBodyNear(i,umSolidWorldCell(c),-1.01*length(0.4*h))){flags|=1u<<18u;}
+ }
  let mask=umBodyCellMask(c);
  for(var i=0u;i<umBodyCount();i++){
   for(var k=0u;k<9u;k++){
@@ -116,7 +157,7 @@ test("tile body masks cover every reaching body and leave each masked query equa
  if(g.x>=${count}u){return;}let c=vec3i(i32(g.x%${nx}u),i32((g.x/${nx}u)%${ny}u),i32(g.x/${nx*ny}u));
  output[g.x]=vec4f(umCellOpen(c),umPressureFaceVRecorded(c,0u),umPressureFaceVRecorded(c,1u),umPressureFaceVRecorded(c,2u));
 }`}),entryPoint:"probe"}})));
-   let active=0;
+   let active=0,clear=0,deep=0;
    for(let step=1;step<=3;step++){
     assert.ok(solver.advanceTo(step*scene.numerics.fixedDt_s,bodies));await solver.awaitFrameCompletion();
     assert.equal(solver.info.simulationPipelineError,undefined);
@@ -131,11 +172,13 @@ test("tile body masks cover every reaching body and leave each masked query equa
      const flags=new Uint32Array((await readMixedBuffer(device,out)).buffer);
      for(let i=0;i<count;i++)assert.equal(flags[i]!&0xffff,0,`step ${step}, rebuilt ${rebuild}, cell ${i}: flags ${flags[i]!.toString(2)}`);
      const masked=flags.reduce((n,f)=>n+(f>>16&1),0);
+     clear+=flags.reduce((n,f)=>n+(f>>17&1),0);deep+=flags.reduce((n,f)=>n+(f>>18&1),0);
      // After publication the pose is not certified: every query takes the whole roster.
      if(!rebuild)assert.equal(masked,0,`step ${step}: published pose`);else active+=masked;
     }
    }
    assert.ok(active>count/4,`masks narrowed ${active} cell queries`);
+   assert.ok(clear>0&&deep>0,`clearance certificates exercised: ${clear} clear, ${deep} deep`);
   }finally{out.destroy();for(const buffer of geometry)buffer.destroy();solver.destroy();}
  });
 });

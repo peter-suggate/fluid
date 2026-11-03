@@ -1215,7 +1215,7 @@ fn umCellOpen(p:vec3i)->f32{return select(0.0,1.0,umSolidValid(p));}
 fn umCellIsOpen(p:vec3i)->bool{return umSolidValid(p);}
 fn umStoredCellIsOpen(p:vec3i,t:u32)->bool{return umSolidValid(p);}
 fn umCellInsideSolid(p:vec3i)->bool{return false;}
-fn umFaceOpen(id:vec3i,axis:u32,candidates:u32)->f32{return 1.0;}
+fn umFaceOpen(id:vec3i,axis:u32,candidates:u32,staticClear:bool)->f32{return 1.0;}
 fn umPressureFaceV(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umPressureFaceVRecorded(id:vec3i,axis:u32)->f32{return 1.0;}
 fn umSolidAperturesServe(p:vec3i)->u32{return 0u;}
@@ -1666,7 +1666,8 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
  if(!umSolidEnabled()){return 0.0;}
  if(umBodyCount()==0u){return 0.0;}
  var neighbor=id;neighbor[axis]+=1;
- if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
+ let voxelLow=umSolidVoxel(id);let voxelHigh=umSolidVoxel(neighbor);
+ if((voxelLow&&umBoundaryRecord(id)==0u)||(voxelHigh&&umBoundaryRecord(neighbor)==0u)){return 0.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;let reach=max(h.x,max(h.y,h.z));
  // Keep the existing broad-phase reach, retaining its candidate identities.
  // Every dual-cell sample is within 0.4*sqrt(3)*reach, and the nearest-wall
@@ -1674,35 +1675,64 @@ fn umSolidFaceVelocity(id:vec3i,axis:u32)->f32{
  var candidates=0u;var near=${writable?"umSolidQueryBodies&((1u<<umBodyCount())-1u)":"umBodyCellMask(id)"};
  while(near!=0u){let i=firstTrailingBit(near);near&=near-1u;if(umBodyNear(i,world,2.0*reach)){candidates|=1u<<i;}}
  if(candidates==0u){return 0.0;}
- var solid=0.0;var velocity=0.0;
- for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
-  let sampleWorld=world+vec3f(select(-0.4,0.4,(sampleIndex&1u)!=0u)*h.x,select(-0.4,0.4,(sampleIndex&2u)!=0u)*h.y,select(-0.4,0.4,(sampleIndex&4u)!=0u)*h.z);
-  if(umSolidVoxelAtWorld(sampleWorld)||umSolidTerrainAtWorld(sampleWorld)){solid+=1.0;continue;}
-  let body=umBodyAtCandidates(sampleWorld,candidates);
-  if(body>=0){solid+=1.0;velocity+=umBodyVelocity(u32(body),world)[axis];}
- }
- if(solid>0.0){return velocity/solid;}
+ // Every sample lies within 0.4h of the face centre, in one of its two
+ // cells: with neither holding a voxel or a boundary record and no terrain,
+ // no static solid holds any of them.
+ let staticClear=!umSolidHasTerrain()&&!voxelLow&&!voxelHigh&&umBoundaryRecord(id)==0u&&umBoundaryRecord(neighbor)==0u;
+ // One signed distance per candidate at the face centre serves both the
+ // nearest-body fallback and an exact clearance certificate: every sample
+ // lies within length(0.4h) of the centre and shape distances are
+ // 1-Lipschitz, so a body farther than that (with 1% slack for rounding)
+ // contains none, and the first remaining body, deeper than that and with
+ // its bounding sphere around every sample, owns every non-static sample.
+ let sampleReach=1.01*length(0.4*h);
+ var sampled=0u;var owner=-1;var leading=true;
  var nearest=reach;var result=0.0;
  var remaining=candidates;
  while(remaining!=0u){let i=firstTrailingBit(remaining);remaining&=remaining-1u;
-  let d=abs(umBodyDistance(i,world));
+  let sd=umBodyDistance(i,world);let d=abs(sd);
   if(d<=nearest){nearest=d;result=umBodyVelocity(i,world)[axis];}
+  if(sd<=sampleReach){
+   if(leading&&sd< -sampleReach&&umBodyNear(i,world,-sampleReach)){owner=i32(i);}
+   leading=false;sampled|=1u<<i;
+  }
  }
+ var solid=0.0;var velocity=0.0;
+ for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
+  let sampleWorld=world+vec3f(select(-0.4,0.4,(sampleIndex&1u)!=0u)*h.x,select(-0.4,0.4,(sampleIndex&2u)!=0u)*h.y,select(-0.4,0.4,(sampleIndex&4u)!=0u)*h.z);
+  if(!staticClear&&(umSolidVoxelAtWorld(sampleWorld)||umSolidTerrainAtWorld(sampleWorld))){solid+=1.0;continue;}
+  var body=owner;if(owner<0){body=umBodyAtCandidates(sampleWorld,sampled);}
+  if(body>=0){solid+=1.0;velocity+=umBodyVelocity(u32(body),world)[axis];}
+ }
+ if(solid>0.0){return velocity/solid;}
  return result;
 }
 // faceOpenFraction: the Sec. 3.6 transverse face aperture, at a face a body
 // reaches (its samples lie within 0.35 sqrt(2) h of the face centre) that is
 // neither clear nor beside a voxel: umPressureFaceV's rigid contact, its one
-// caller, has taken those forms.
-fn umFaceOpen(id:vec3i,axis:u32,candidates:u32)->f32{
+// caller, has taken those forms. staticClear: neither cell of the face holds
+// a voxel or a boundary record and there is no terrain; every sample lies on
+// the face, in one of its two cells, so no static solid holds any of them.
+fn umFaceOpen(id:vec3i,axis:u32,candidates:u32,staticClear:bool)->f32{
  if(!umSolidEnabled()){return 1.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
  let tangentA=(axis+1u)%3u;let tangentB=(axis+2u)%3u;var solid=0.0;
+ // Exact clearance certificate: the samples lie within 0.35 of the face's
+ // tangential diagonal of its centre and shape distances are 1-Lipschitz
+ // (1% slack for rounding). A body farther than that holds no sample; one
+ // deeper than that, its bounding sphere around them, holds all four.
+ let sampleReach=1.01*0.35*length(vec2f(h[tangentA],h[tangentB]));
+ var bodies=0u;var remaining=candidates;
+ while(remaining!=0u){let i=firstTrailingBit(remaining);remaining&=remaining-1u;
+  let d=umBodyDistance(i,world);
+  if(d< -sampleReach&&umBodyNear(i,world,-sampleReach)){return 0.0;}
+  if(d<=sampleReach){bodies|=1u<<i;}
+ }
  for(var sampleIndex=0u;sampleIndex<4u;sampleIndex+=1u){
   var sampleWorld=world;
   sampleWorld[tangentA]+=select(-0.35,0.35,(sampleIndex&1u)!=0u)*h[tangentA];
   sampleWorld[tangentB]+=select(-0.35,0.35,(sampleIndex&2u)!=0u)*h[tangentB];
-  solid+=select(0.0,1.0,umSolidVoxelAtWorld(sampleWorld)||umSolidTerrainAtWorld(sampleWorld)||umBodyAtCandidates(sampleWorld,candidates)>=0);
+  solid+=select(0.0,1.0,(!staticClear&&(umSolidVoxelAtWorld(sampleWorld)||umSolidTerrainAtWorld(sampleWorld)))||umBodyAtCandidates(sampleWorld,bodies)>=0);
  }
  return 1.0-solid*0.25;
 }
@@ -1726,7 +1756,11 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
  if(!boxed){
   var neighbor=id;neighbor[axis]+=1;
   if(umSolidFaceClear(id,neighbor,axis)){return 1.0;}
-  if((umSolidVoxel(id)&&umBoundaryRecord(id)==0u)||(umSolidVoxel(neighbor)&&umBoundaryRecord(neighbor)==0u)){
+  let voxelLow=umSolidVoxel(id);let voxelHigh=umSolidVoxel(neighbor);
+  var recordLow=0u;var recordHigh=0u;
+  if(voxelLow||bodyNear){recordLow=umBoundaryRecord(id);}
+  if(voxelHigh||bodyNear){recordHigh=umBoundaryRecord(neighbor);}
+  if((voxelLow&&recordLow==0u)||(voxelHigh&&recordHigh==0u)){
    var open=0.0;
    for(var j=0u;j<2u;j++){let cell=umCellOpen(select(id,neighbor,j==1u));if(j==0u){open=cell;}else{return 0.5*(open+cell);}}
   }
@@ -1734,7 +1768,7 @@ fn umPressureFaceV(id:vec3i,axis:u32)->f32{
   // one side of a completely blocked face; treating that volume as an open
   // face couples the fluid to ghost liquid inside the body at the waterline.
   // Gravity then creates velocity through the body even while it is fixed.
-  if(bodyNear){return umFaceOpen(id,axis,candidates);}
+  if(bodyNear){return umFaceOpen(id,axis,candidates,!umSolidHasTerrain()&&!voxelLow&&!voxelHigh&&recordLow==0u&&recordHigh==0u);}
  }
  let box=umUnitBoxOpen(q,boxed);
  if(boxed){return min(box.y,box.x);}

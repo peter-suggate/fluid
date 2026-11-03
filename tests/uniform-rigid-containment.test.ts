@@ -14,6 +14,7 @@ const umSolidParams=Params(vec4f(1));
 fn umSolidWorldCell(p:vec3i)->vec3f{return vec3f(p)+vec3f(0.5);}
 fn umBodyCount()->u32{return 2u;}
 fn umBodyNear(i:u32,p:vec3f,margin:f32)->bool{return p.x<3.0;}
+fn umBodyDistance(i:u32,p:vec3f)->f32{return 0.0;}
 fn umInsideBody(i:u32,p:vec3f)->bool{
  if(p.x<1.0){return select((p.y<0.5),(p.y>=0.5),i==1u);}
  if(p.x<2.0){return p.y<0.5;}

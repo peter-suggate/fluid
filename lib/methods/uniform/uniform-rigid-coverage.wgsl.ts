@@ -16,6 +16,11 @@ fn umCellBodyFraction(p:vec3i)->f32{
  var mask=0u;
  ${bodyMask?`var bodyCandidates=${bodyMask}&((1u<<umBodyCount())-1u);while(bodyCandidates!=0u){let i=firstTrailingBit(bodyCandidates);bodyCandidates&=bodyCandidates-1u;`:"for(var i=0u;i<umBodyCount();i++){"}
   if(!umBodyNear(i,centre,length(0.4*h))){continue;}
+  // Exact clearance certificate: corners lie length(0.4h) from the centre
+  // and shape distances are 1-Lipschitz (1% slack for rounding).
+  let d=umBodyDistance(i,centre);let reach=1.01*length(0.4*h);
+  if(d>reach){continue;}
+  if(d< -reach&&umBodyNear(i,centre,-reach)){return 1.0;}
   for(var corner=0u;corner<8u;corner++){
    let bit=1u<<corner;if((mask&bit)!=0u){continue;}
    let offset=vec3f(select(-0.4,0.4,(corner&1u)!=0u),select(-0.4,0.4,(corner&2u)!=0u),select(-0.4,0.4,(corner&4u)!=0u));

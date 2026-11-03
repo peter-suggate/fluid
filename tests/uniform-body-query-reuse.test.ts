@@ -56,7 +56,7 @@ fn baselineFace(p:vec3i,axis:u32)->f32{
 }
 fn candidateFace(p:vec3i,axis:u32)->f32{
  let mask=umBodyCandidates(umSolidFaceWorld(p,axis),length(.5*umSolidParams.cellGravity.xyz));
- if(mask==0u){return 1.0;}return umFaceOpen(p,axis,mask);
+ if(mask==0u){return 1.0;}return umFaceOpen(p,axis,mask,false);
 }
 `;
 
@@ -82,6 +82,7 @@ fn umSolidVoxel(p:vec3i)->bool{return settings.y!=0u&&p.y<0;}
 fn umBoundaryRecord(p:vec3i)->u32{return 0u;}
 fn umSolidVoxelAtWorld(p:vec3f)->bool{return settings.y!=0u&&p.y<0.0;}
 fn umSolidTerrainAtWorld(p:vec3f)->bool{return settings.y!=0u&&p.y<.07*p.x;}
+fn umSolidHasTerrain()->bool{return settings.y!=0u;}
 ${functions}\n${reference}\n${referenceFace}
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3u){
  let p=vec3i(i32(id.x&127u)-64,i32((id.x>>7u)&15u)-4,i32(id.x>>11u)-8);
