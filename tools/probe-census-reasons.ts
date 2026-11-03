@@ -93,10 +93,10 @@ await withUniformDevice("census reasons probe", async device => {
   // Samples sit in world cells about the frame's world origin (source.frame words 8..10, metres); the tank's corner is centred in x and z.
   const frameWords = new Float32Array(await read(source.frame!.buffer, source.frame!.offset ?? 0, 48));
   const shift = [frameWords[8]! / h + scene.container.width_m / (2 * h), frameWords[9]! / h, frameWords[10]! / h + scene.container.depth_m / (2 * h)];
-  const particleTiles = new Map<number, number>();
+  const particleTiles = new Map<number, number>(), sampleHeat = new Map<number, number>();
   for (let i = 0; i < records; i++) {
     const o = i * source.strideFloats; if (!(samples[o]! > 0 && samples[o + 3]! > 0)) continue;
-    const k = keyOf(Math.floor((samples[o]! + shift[0]!) / 4), Math.floor((samples[o + 1]! + shift[1]!) / 4), Math.floor((samples[o + 2]! + shift[2]!) / 4)); if (k >= 0) particleTiles.set(k, (particleTiles.get(k) ?? 0) + 1);
+    const k = keyOf(Math.floor((samples[o]! + shift[0]!) / 4), Math.floor((samples[o + 1]! + shift[1]!) / 4), Math.floor((samples[o + 2]! + shift[2]!) / 4)); if (k >= 0) { particleTiles.set(k, (particleTiles.get(k) ?? 0) + 1); sampleHeat.set(k, Math.max(sampleHeat.get(k) ?? 0, samples[o + 3]!)); }
   }
   const fields = await readUniformFields(device, solver);
   const raw = (x: number, y: number, z: number) => fields.phi[Math.min(x, nx) + (nx + 1) * (Math.min(y, ny) + (ny + 1) * Math.min(z, nz))]!;
@@ -108,8 +108,9 @@ await withUniformDevice("census reasons probe", async device => {
   // NB-FLIP activity: the importance words the census handed it (2 a tile key: triggered criteria in bits 16..21
   // of word 1) and the activity heat (1 a tile key; 2 where triggered this step, cooling by params.activity.x a second).
   const nb = (internal.mixedFrame as unknown as { narrowBandFlip?: { bins: GPUBuffer; activityWord: number } }).narrowBandFlip;
-  const activity = nb ? new Uint32Array(await read(nb.bins, 4 * nb.activityWord, 12 * n)) : undefined;
+  const activity = nb ? new Uint32Array(await read(nb.bins, 4 * nb.activityWord, 16 * n)) : undefined;
   const heatOf = (t: number) => activity ? new Float32Array(activity.buffer, 4 * (2 * n + t), 1)[0]! : 0;
+  const targetOf = (t: number) => activity ? new Float32Array(activity.buffer, 4 * (3 * n + t), 1)[0]! : 0;
   const criteria = ["shape", "thin", "strain", "rotation", "impact", "approach"];
   const triggers = (t: number) => activity ? criteria.filter((_, c) => ((activity[2 * t + 1]! >>> (16 + c)) & 1) === 1) : [];
   const counts: Record<string, number> = {}, add = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
@@ -119,6 +120,61 @@ await withUniformDevice("census reasons probe", async device => {
     for (const c of fired) add(`trigger.${c}`);
     if (fired.length) add(`trigger.any${fired.length === 1 ? "." + fired[0] + ".only" : ""}`);
     if (particleTiles.has(t)) add(`particleTile.heat.${heat >= 2 ? "2" : heat > 1 ? "1-2" : heat > 0 ? "0-1" : "0"}${fired.length ? ".triggered" : ""}`);
+    // A tile of heat 0 holds samples as the hot tiles' collar (target heat over 0, spread from a neighbour) or as heat they carried in.
+    if (particleTiles.has(t) && heat <= 0) { const w = sampleHeat.get(t)!; add(`particleTile.heat.0.${targetOf(t) > 0 ? "collar" : "carried"}.sample${w > 1 ? "1-2" : w >= 1 ? "1" : w > 0.5 ? "0.5-1" : "0-0.5"}`); }
+  }
+  // --terms: umSurfaceDisplacement's four terms (in h) at every h tile the shape criterion triggered,
+  // on the raw field and on the smoothed one (umStageSmoothTile's tangential [1,2,1]/4 pass), by
+  // which terms exceed the tolerance (0.5 h) and their medians. The curve and corner terms count only
+  // for a moving tile (umClassMoving), which this does not test.
+  if (activity && process.argv.includes("--terms")) {
+    const VOLUME = 4, terms: Record<string, number[]> = {};
+    const shapeTerms = (x: number, y: number, z: number, smooth: boolean) => {
+      const R = (a: number, b: number, d: number) => raw(4 * x + a, 4 * y + b, 4 * z + d) / h;
+      const F = new Float64Array(125), at = (a: number, b: number, d: number) => F[a + 5 * b + 25 * d]!;
+      for (let d = 0; d <= 4; d++) for (let b = 0; b <= 4; b++) for (let a = 0; a <= 4; a++) {
+        if (!smooth) { F[a + 5 * b + 25 * d] = R(a, b, d); continue; }
+        const r = [a, b, d].map(u => u > 0 && u < 4 ? 1 : 0); let sum = 0, weight = 0;
+        for (let k = -r[2]!; k <= r[2]!; k++) for (let j = -r[1]!; j <= r[1]!; j++) for (let i = -r[0]!; i <= r[0]!; i++) { const w = (i ? 1 : 2) * (j ? 1 : 2) * (k ? 1 : 2); sum += w * R(a + i, b + j, d + k); weight += w; }
+        F[a + 5 * b + 25 * d] = sum / weight;
+      }
+      const c = [0, 1].map(a => [0, 1].map(b => [0, 1].map(d => R(4 * a, 4 * b, 4 * d))));
+      const tri = (p: number[]) => { let v = 0; for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let d = 0; d < 2; d++) v += (a ? p[0]! : 1 - p[0]!) * (b ? p[1]! : 1 - p[1]!) * (d ? p[2]! : 1 - p[2]!) * c[a]![b]![d]!; return v; };
+      const grad = (p: number[]) => [0, 1, 2].map(a => { const lo = [...p], hi = [...p]; lo[a] = 0; hi[a] = 1; return tri(hi) - tri(lo); });
+      let worst = 0, along = 0, crossings = 0, curve = 0, curves = 0, corner = 0;
+      for (let d = 0; d <= 4; d++) for (let b = 0; b <= 4; b++) for (let a = 0; a <= 4; a++) {
+        const v = [a, b, d], value = at(a, b, d);
+        if (v.every(u => u >= 1 && u <= 3) && Math.abs(value) <= 1.5) {
+          const P = (i: number, j: number, k: number) => at(a + i, b + j, d + k);
+          const g = [(P(1, 0, 0) - P(-1, 0, 0)) / 2, (P(0, 1, 0) - P(0, -1, 0)) / 2, (P(0, 0, 1) - P(0, 0, -1)) / 2];
+          const e = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+          const H = [0, 1, 2].map(i => [0, 1, 2].map(j => i === j ? P(e[i]![0]!, e[i]![1]!, e[i]![2]!) + P(-e[i]![0]!, -e[i]![1]!, -e[i]![2]!) - 2 * value
+            : (P(e[i]![0]! + e[j]![0]!, e[i]![1]! + e[j]![1]!, e[i]![2]! + e[j]![2]!) - P(e[i]![0]! - e[j]![0]!, e[i]![1]! - e[j]![1]!, e[i]![2]! - e[j]![2]!) - P(-e[i]![0]! + e[j]![0]!, -e[i]![1]! + e[j]![1]!, -e[i]![2]! + e[j]![2]!) + P(-e[i]![0]! - e[j]![0]!, -e[i]![1]! - e[j]![1]!, -e[i]![2]! - e[j]![2]!)) / 4));
+          const gg = g[0]! ** 2 + g[1]! ** 2 + g[2]! ** 2;
+          if (gg >= 1e-4) { let gHg = 0; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) gHg += g[i]! * H[i]![j]! * g[j]!; curve += (gg * (H[0]![0]! + H[1]![1]! + H[2]![2]!) - gHg) / gg ** 1.5 * (4 / 3); curves++; }
+        }
+        if (a % 4 === 0 && b % 4 === 0 && d % 4 === 0 && Math.abs(value) <= 2) {
+          let lap = 0; for (let i = 0; i < 3; i++) { const u = [0, 0, 0]; u[i] = 4; lap += R(a + u[0]!, b + u[1]!, d + u[2]!) - 2 * value + R(a - u[0]!, b - u[1]!, d - u[2]!); }
+          corner = Math.max(corner, Math.abs(lap) / 12);
+        }
+        for (let ax = 0; ax < 3; ax++) {
+          if (v[ax]! >= 4) continue; const nb = [...v]; nb[ax]!++; const next = at(nb[0]!, nb[1]!, nb[2]!);
+          if ((value < 0) === (next < 0)) continue;
+          const p = v.map(u => u / 4); p[ax] = p[ax]! + 0.25 * value / (value - next);
+          const dd = 4 * tri(p) / Math.max(Math.hypot(...grad(p)), 4e-3); worst = Math.max(worst, Math.abs(dd)); along += dd; crossings++;
+        }
+      }
+      return { worst, volume: crossings ? VOLUME * Math.abs(along / crossings) : 0, curve: curves ? VOLUME * Math.abs(curve / curves) : 0, corner: VOLUME * corner };
+    };
+    for (let z = 0; z < tz; z++) for (let y = 0; y < ty; y++) for (let x = 0; x < tx; x++) {
+      const t = keyOf(x, y, z); if (t < 0 || (after[t]! >>> 31) !== 1 || !(triggers(t).includes("shape"))) continue;
+      for (const smooth of [false, true]) {
+        const m = shapeTerms(x, y, z, smooth), tag = smooth ? "smooth" : "raw";
+        for (const [k, v] of Object.entries(m)) (terms[`${tag}.${k}`] ??= []).push(v);
+        add(`terms.${tag}.over.${Object.entries(m).filter(([, v]) => v > 0.5).map(([k]) => k).join("+") || "none"}`);
+      }
+    }
+    for (const [k, v] of Object.entries(terms)) { v.sort((a, b) => a - b); counts[`terms.${k}.median`] = Number(v[v.length >> 1]!.toFixed(3)); }
   }
   let fine = 0, entered = 0, left = 0;
   for (let z = 0; z < tz; z++) for (let y = 0; y < ty; y++) for (let x = 0; x < tx; x++) {

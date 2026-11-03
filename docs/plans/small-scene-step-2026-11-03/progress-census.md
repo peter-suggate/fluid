@@ -151,3 +151,60 @@ The contended atomics are not what these kernels wait on, so both changes are re
 The census.md premise for item 5 (classify replays an unchanged class) also does not hold here. A tile's class carries its face-velocity bounds, which change every step wherever liquid moves. Deep COLD regions already replay.
 
 What remains is latency per tile in classify, classifyCoarse and localSpeed. The h tiles they visit fell 25% with item 20, but the kernel times above did not fall with them. The next lever there is the vertex-centric classifyCoarse (census.md item 6).
+
+## 2026-11-03: item 21: shape measured on the smoothed surface; the letters volume regression
+
+**Regression first.** `tests/nbflip-letters-volume.test.ts` runs the falling letters 120 steps and requires the drift
+to stay above −1.3%. One run each, at HEAD 3744a2d9:
+
+| variant | drift at 120 |
+|---|---|
+| HEAD (shape refines and heats) | −1.07% to −1.12% (three runs) |
+| `detailShape: "off"` | −1.51% |
+| shape refines h but heats no particles (scratch edit) | −1.51% |
+| `detailShapeTolerance: 2` | −1.09% |
+
+The −4.21% of the old body gate (one-pass plan §9) is not reproduced on this code: it predates the level-set curvature
+term. Shape is worth about 0.4 points here, so the floor sits between the two.
+
+**(b) The shape measure ignores sub-tolerance roughness.** `umSurfaceDisplacement` now stages the h tile's 125 phi
+vertices in workgroup memory and measures on one binomial pass ([1,2,1]/4 per axis). That is the crossings, the volume
+term and the interior curvature. The filter removes the 2h wavelength and halves 4h, where the particle roughness lies
+(about 0.2 h rms, union-of-spheres caps). It keeps 8h at 85%, which is where the shape 4h loses lies.
+
+- The pass is tangential at the tile boundary, so both sides of a shared face agree.
+- Tiles with a static wall keep their raw values.
+- The 4h corner term is unchanged.
+- classify calls the measure in uniform control flow (`workgroupUniformLoad`).
+
+Paddleboats `--bodies --steps=90`, timing, clean HEAD + this change:
+
+| | HEAD | smoothed |
+|---|---|---|
+| step median / late-half median, ms | 45.57 / 50.14 | 44.27 / 47.82 |
+| h tiles | 3260 | 2924 |
+| particles | 273,897 | 238,189 |
+| band tiles | 1709 | 1504 |
+| paddleboats drift | −0.665% | −0.669% |
+
+- Seep is +0.002% at step 150 and +0.012% at step 300 (it previously ran −0.03% to −0.08%). No closure failure this run.
+- Letters are −1.093% (gate) and −1.096% (regression), against −1.07% to −1.12% before.
+
+Two passes (σ = h) gave 44.00 / 47.23 ms, 2772 h tiles and letters at −1.14%: under 0.3 ms more, so it was dropped.
+
+**What still holds the latch.** Shape triggers at step 300 (`probe-census-reasons --terms`) drop only from 775 to 740.
+With smoothing, the worst and volume medians fall from 2.2 / 3.1 h to 0.25 / 0.2 h. The remaining shaped tiles are held
+by the 4h corner Laplacian (median about 2 h, unaffected by smoothing) and by the moving curve term (median 0.8–0.9 h
+smoothed). Both are 4h-scale curvature of the paddle wake (VOLUME_SHAPE × (4h)²/12 κ), the deliberate free-fall
+geometric heat, not roughness.
+
+**(a) Carried heat is mostly the designed collar.** The probe now splits heat-0 particle tiles by target heat. At HEAD,
+714 are the support collar (target heat 1, spread from a hot neighbour) and only 160 carry heat in. With smoothing the
+carried tiles fall to 109.
+
+The ceiling on a faster physical decay was measured with `adaptiveFadeSeconds: 0.1`, five times shorter than now:
+- step 43.91 / 46.76 ms (−0.36 / −1.06 ms);
+- 2663 h tiles, 209,788 particles;
+- letters at −1.15%.
+
+A physical timescale for sample heat (the tile's advective time, 4h/|u|) is bounded by that. It is not implemented here.

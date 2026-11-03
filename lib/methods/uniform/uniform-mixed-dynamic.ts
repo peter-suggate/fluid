@@ -655,7 +655,43 @@ fn umCensusVertexOpen(mask:vec2u,v:vec3u)->bool{
  for(var k=0u;k<8u;k++){if(!umCensusCellOpen(mask,vec3i(v)-vec3i(umCorner(k,2u)))){return false;}}
  return true;
 }
-${UNIFORM_LEVEL_SET_CURVATURE_WGSL}
+// The h tile's 125 vertices (umCorner(i,5u)), raw and smoothed, staged once
+// for umSurfaceDisplacement's crossings and curvature.
+var<workgroup> umTileRaw:array<f32,125>;
+var<workgroup> umTileSmooth:array<f32,125>;
+fn umSmoothAt(v:vec3u)->f32{return umTileSmooth[v.x+5u*v.y+25u*v.z];}
+${UNIFORM_LEVEL_SET_CURVATURE_WGSL.replace("fn umLevelSetCurvature(","fn umSmoothCurvature(").replaceAll("umLoadFine(","umSmoothAt(")}
+// The shape the tile's samples carry, without their roughness: one binomial
+// pass, [1,2,1]/4 per axis. A particle-sampled level set is a union of
+// spheres, about 0.2 h rms off its plane fit (one-pass plan §9) at the
+// lattice's shortest wavelengths, with convex caps and concave cusps; its
+// curvature, a second difference, reads several h of it at 4h and its mean
+// is biased convex. Those wavelengths are what the filter removes (2h fully,
+// 4h by half), and the shape 4h would lose lies at the longer ones it keeps
+// (8h at 85%): a letter's strokes, a 90 degree corner rounded by about h,
+// still score several h. Along an axis on which the vertex lies on the tile
+// boundary the pass does not reach outside the tile, so it is tangential:
+// the same on both sides of a shared face. A tile with a static wall
+// (umCensusOpenCells) keeps its raw values: buried vertices hold air markers.
+fn umStageSmoothTile(origin:vec3u,lane:u32,open:vec2u){
+ for(var i=lane;i<125u;i+=64u){umTileRaw[i]=umLoadFine(origin+umCorner(i,5u));}
+ workgroupBarrier();
+ let filtered=all(open==vec2u(0xffffffffu));
+ for(var i=lane;i<125u;i+=64u){
+  let v=umCorner(i,5u);var value=umTileRaw[i];
+  if(filtered){
+   let r=select(vec3u(0u),vec3u(1u),(v>vec3u(0u))&(v<vec3u(4u)));
+   var sum=0.0;var weight=0.0;
+   for(var z=v.z-r.z;z<=v.z+r.z;z++){for(var y=v.y-r.y;y<=v.y+r.y;y++){for(var x=v.x-r.x;x<=v.x+r.x;x++){
+    let w=select(1.0,2.0,x==v.x)*select(1.0,2.0,y==v.y)*select(1.0,2.0,z==v.z);
+    sum+=w*umTileRaw[x+5u*y+25u*z];weight+=w;
+   }}}
+   value=sum/weight;
+  }
+  umTileSmooth[i]=value;
+ }
+ workgroupBarrier();
+}
 // How far an h tile's surface moves when its eight 4h corners carry it, in
 // h: at every zero crossing of an h edge, the corners' trilinear phi over
 // its gradient (the distance to their zero set, to first order). Signed
@@ -664,13 +700,16 @@ ${UNIFORM_LEVEL_SET_CURVATURE_WGSL}
 // surface's is one-signed, (4h)^2/12 of its curvature, however small the
 // largest is, and every closed body loses 2 pi (4h)^2/12 of area per section
 // when coarsened (Gauss-Bonnet), whatever its radius.
+// Measured on the smoothed surface (umStageSmoothTile). Called by every lane
+// of the workgroup: it stages through workgroup memory.
 fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
  let origin=umTileCoord(tile)*4u;let open=umCensusOpenCells(tile);
+ umStageSmoothTile(origin,lane,open);
  var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
  c=umLoadCorner8(origin,4u);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
-  let v=umCorner(i,5u);let value=umLoadFine(origin+v);
+  let v=umCorner(i,5u);let value=umTileSmooth[i];
   // An interior vertex within 1.5 h of the surface: the mean displacement a
   // 4h lattice makes of it anywhere, (L^2/12) kappa h^2 with L = 4 cells,
   // 4/3 h kappa (umCurveError). kappa is the level set's own curvature
@@ -678,7 +717,7 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
   // is a distance, and an interface vertex keeps the magnitude that places
   // its zero (arenaStore), so phi_nn there is no geometry.
   if(all(v>=vec3u(1u))&&all(v<=vec3u(3u))&&abs(value)<=1.5*UM_H&&umCensusVertexOpen(open,v)){
-   let kappa=umLevelSetCurvature(origin+v,value);
+   let kappa=umSmoothCurvature(v,value);
    if(kappa.y>0.0){curve+=kappa.x*(4.0/3.0)*UM_H;curves++;}
   }
   // A tile corner: no h stencil fits, so its curvature is the 4h lattice's
@@ -699,7 +738,7 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
   }
   for(var a=0u;a<3u;a++){
    if(v[a]>=4u||!umCensusEdgeOpen(open,v,a)){continue;}
-   var n=v;n[a]+=1u;let next=umLoadFine(origin+n);
+   var n=v;n[a]+=1u;let next=umSmoothAt(n);
    if((value<0.0)==(next<0.0)){continue;}
    var t=vec3f(v)*0.25;t[a]+=0.25*value/(value-next);
    let x0=mix(low,high,t.x);
@@ -767,7 +806,8 @@ fn umClassMoving(c:TileClass)->bool{
 fn umResolutionError(tile:u32,lane:u32,width:u32,wide:u32)->f32{
  let origin=umTileCoord(tile)*4u;var worst=0.0;
  if(width==1u){
-  if(shapeDisplacement()){return umSurfaceDisplacement(tile,lane);}
+  // shapeDisplacement: classify calls umSurfaceDisplacement itself, in
+  // uniform control flow (it stages through workgroup memory).
   var corners:array<f32,8>;
   corners=umLoadCorner8(origin,4u);
   for(var i=lane;i<125u;i+=64u){
@@ -1093,7 +1133,10 @@ fn umReplayTile(tile:u32){
   for(var k=0u;k<2u;k++){if(c.crossing[k]!=0u){atomicOr(&tileCrossing[k],c.crossing[k]);}}
  }
  workgroupBarrier();
- if((atomicLoad(&mixedTile)&2u)!=0u&&policy.step.y>0.0){atomicMax(&tileError,bitcast<u32>(umResolutionError(tile,lane,width,atomicLoad(&tileWide))));}
+ if(lane==0u){replayTile=atomicLoad(&mixedTile);}
+ let shaping=(workgroupUniformLoad(&replayTile)&2u)!=0u&&policy.step.y>0.0;
+ if(shaping&&shapeDisplacement()){atomicMax(&tileError,bitcast<u32>(umSurfaceDisplacement(tile,lane)));}
+ else if(shaping){atomicMax(&tileError,bitcast<u32>(umResolutionError(tile,lane,width,atomicLoad(&tileWide))));}
  if((atomicLoad(&mixedTile)&2u)!=0u&&thinWanted()){let deep=umDepthSample(tile,lane);for(var k=0u;k<2u;k++){atomicMax(&tileDeep[k],deep[k]);}}
  workgroupBarrier();
  if(lane==0u){
