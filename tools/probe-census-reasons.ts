@@ -1,0 +1,151 @@
+/** Why each h tile is h, on a scene with its bodies driven (tools/moored-motor-bodies.ts):
+ * the census band reason (UNIFORM_STAGE_REASON) of every h tile, split further where the
+ * reason has several sources.
+ *   solid: the promoted tile itself an active contact (cut and wet or band), a cut neighbour
+ *          of one (its own record not exact), an uncut wet neighbour, an uncut dry neighbour.
+ *   join:  the tile holds particles, or lies 1, 2 or 3+ tiles (Chebyshev) from one that does.
+ * Also the particles, the h tiles and the pressure band, and the layout's churn: h tiles
+ * entering and leaving between the last two steps.
+ * node --import tsx tools/probe-census-reasons.ts [--scene=paddleboats] [--steps=300] [--values={...}]
+ * Run through tools/gpu/fluid-gpu-run.sh check. */
+import assert from "node:assert/strict";
+import { resolve } from "node:path";
+import "../lib/methods";
+import { createUniformSolver, readUniformFields, readUniformLiveAddress, withUniformDevice } from "../tests/helpers/uniform-geometric";
+import { uniformTileKey, uniformTileLive } from "../lib/methods/uniform/uniform-lattice-address";
+import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
+import { getSceneDefinition } from "../lib/core/scenes";
+import { sceneDocument } from "../lib/core/scene-definition";
+import type { MethodParamValues } from "../lib/core/method-contract";
+import { UNIFORM_STAGE_REASON } from "../lib/methods/uniform/uniform-stage-grids";
+import { mooredMotorBodies } from "./moored-motor-bodies";
+
+const option = (name: string) => process.argv.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3);
+const sceneId = option("scene") ?? "paddleboats", steps = Number(option("steps") ?? 300);
+const values: MethodParamValues = JSON.parse(option("values") ?? "{}");
+process.env.WEBGPU_NODE_MODULE ??= resolve("node_modules/webgpu/index.js");
+paceDawnEventPolling();
+const definition = getSceneDefinition(sceneId), scene = structuredClone(sceneDocument(definition));
+scene.duration_s = Math.max(scene.duration_s, (steps + 1) * scene.numerics.fixedDt_s);
+const names = Object.fromEntries(Object.entries(UNIFORM_STAGE_REASON).map(([k, v]) => [v, k])) as Record<number, string>;
+
+await withUniformDevice("census reasons probe", async device => {
+  const solver = await createUniformSolver(device, scene, { ...definition.methodProfile?.overrides, ...values });
+  const internal = solver as unknown as {
+    mixedFrame: { setLayoutViews(on: boolean): void; ownership: { presentation: GPUBufferBinding; capacity: { tiles: number } } };
+    mixedDynamic: { reasons: { buffer: GPUBuffer; offset: number }; solidGeometry: { record: GPUBuffer; count: number } };
+  };
+  const poseBodies = process.argv.includes("--no-bodies") ? () => [] : mooredMotorBodies(scene, scene.numerics.fixedDt_s);
+  const read = async (buffer: GPUBuffer, offset: number, size: number) => {
+    const staging = device.createBuffer({ size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const e = device.createCommandEncoder(); e.copyBufferToBuffer(buffer, offset, staging, 0, size); device.queue.submit([e.finish()]);
+    await staging.mapAsync(GPUMapMode.READ); const out = staging.getMappedRange().slice(0); staging.destroy(); return out;
+  };
+  const n = internal.mixedFrame.ownership.capacity.tiles, words = Math.ceil(n / 32);
+  const widths = async () => new Uint32Array(await read(internal.mixedFrame.ownership.presentation.buffer, internal.mixedFrame.ownership.presentation.offset ?? 0, 4 * n));
+  let before: Uint32Array | undefined;
+  // --churn=K: over the last K steps, which frames change the layout, and why: the reason a tile
+  // entered with (and whether it left within the last 10 steps: a flip), the reason a leaving tile last held.
+  const churnSteps = Number(option("churn") ?? 0), churn: Record<string, number> = {}, lastLeft = new Map<number, number>(), lastEntered = new Map<number, number>();
+  let changedFrames = 0, previousReasons: Uint32Array | undefined;
+  const readReasons = async () => new Uint32Array(await read(internal.mixedDynamic.reasons.buffer, internal.mixedDynamic.reasons.offset, 4 * n));
+  for (let step = 1; step <= steps; step++) {
+    const watching = churnSteps > 0 && step > steps - churnSteps;
+    if (step === steps || (watching && !before)) { before ??= await widths(); internal.mixedFrame.setLayoutViews(true); }
+    assert.ok(solver.advanceTo(step * scene.numerics.fixedDt_s, poseBodies(step * scene.numerics.fixedDt_s)));
+    await solver.awaitFrameCompletion();
+    if (watching && step < steps) {
+      const now = await widths(), reasonsNow = await readReasons(); let changed = 0;
+      for (let t = 0; t < n; t++) {
+        const was = (before![t]! >>> 31) === 1, is = (now[t]! >>> 31) === 1; if (was === is) continue; changed++;
+        // A flip: the tile changed the other way within 10 steps, by its gap in steps.
+        const gap = step - ((is ? lastLeft : lastEntered).get(t) ?? -99), flip = gap > 10 ? "" : `.flip${gap <= 2 ? gap : gap <= 4 ? "3-4" : "5-10"}`;
+        const tag = is ? `enter.${names[reasonsNow[t]!] ?? "r" + reasonsNow[t]}${flip}` : `leave.${names[previousReasons?.[t] ?? 99] ?? "?"}${flip}`;
+        churn[tag] = (churn[tag] ?? 0) + 1; (is ? lastEntered : lastLeft).set(t, step);
+      }
+      if (changed) changedFrames++; churn[`frame.changed${changed === 0 ? "0" : changed < 8 ? "lt8" : changed < 32 ? "lt32" : "ge32"}`] = (churn[`frame.changed${changed === 0 ? "0" : changed < 8 ? "lt8" : changed < 32 ? "lt32" : "ge32"}`] ?? 0) + 1;
+      before = now; previousReasons = reasonsNow;
+    }
+  }
+  if (churnSteps > 0) console.log(JSON.stringify({ churnSteps: churnSteps - 1, changedFrames, churn: Object.fromEntries(Object.entries(churn).sort((a, b) => a[0].localeCompare(b[0]))) }, null, 1));
+  await solver.awaitFrameCompletion();
+  const stats = await solver.readStats();
+  const after = await widths();
+  const reasonView = internal.mixedDynamic.reasons;
+  const reasons = new Uint32Array(await read(reasonView.buffer, reasonView.offset, 4 * n));
+  // wet, then active bits, then the reasons (wetOffset, +words, +2 words).
+  const bits = new Uint32Array(await read(reasonView.buffer, reasonView.offset - 8 * words, 8 * words));
+  const wet = (t: number) => ((bits[t >> 5]! >>> (t & 31)) & 1) === 1, active = (t: number) => ((bits[words + (t >> 5)]! >>> (t & 31)) & 1) === 1;
+  const geometry = internal.mixedDynamic.solidGeometry;
+  const record = new Float32Array(await read(geometry.record, 0, 16 * n));
+  const contact = new Float32Array(await read(geometry.record, 16 * (geometry.count + 4 * n), 32 * n));
+  const capacity = (t: number) => record[4 * t]!, body = (t: number) => contact[8 * t + 4 + 2]! > 0.5;
+  const cut = (t: number) => body(t) || (capacity(t) !== 0 && capacity(t) !== 1);
+  const address = await readUniformLiveAddress(device, solver);
+  const { nx, ny, nz } = solver.info, tx = Math.ceil(nx / 4), ty = Math.ceil(ny / 4), tz = Math.ceil(nz / 4);
+  const keyOf = (x: number, y: number, z: number) => x < 0 || y < 0 || z < 0 || x >= tx || y >= ty || z >= tz ? -1 : (() => { const k = uniformTileKey(address, x, y, z); return k >= 0 && k < n && uniformTileLive(address, k) ? k : -1; })();
+  // Particle tiles.
+  const source = solver.particleSource!, h = scene.voxelDomain.finestCellSize_m;
+  const live = new Uint32Array(await read(source.liveCount!.buffer, source.liveCount!.byteOffset ?? 0, 4))[0]!;
+  const records = Math.min(Math.floor(source.buffer.size / (4 * source.strideFloats)), Math.ceil(1.5 * live + 1024));
+  const samples = new Float32Array(await read(source.buffer, 0, records * source.strideFloats * 4));
+  // Samples sit in world cells: the window's first page (presentation, after the tile words and the page table).
+  // Samples sit in world cells about the frame's world origin (source.frame words 8..10, metres); the tank's corner is centred in x and z.
+  const frameWords = new Float32Array(await read(source.frame!.buffer, source.frame!.offset ?? 0, 48));
+  const shift = [frameWords[8]! / h + scene.container.width_m / (2 * h), frameWords[9]! / h, frameWords[10]! / h + scene.container.depth_m / (2 * h)];
+  const particleTiles = new Map<number, number>();
+  for (let i = 0; i < records; i++) {
+    const o = i * source.strideFloats; if (!(samples[o]! > 0 && samples[o + 3]! > 0)) continue;
+    const k = keyOf(Math.floor((samples[o]! + shift[0]!) / 4), Math.floor((samples[o + 1]! + shift[1]!) / 4), Math.floor((samples[o + 2]! + shift[2]!) / 4)); if (k >= 0) particleTiles.set(k, (particleTiles.get(k) ?? 0) + 1);
+  }
+  const fields = await readUniformFields(device, solver);
+  const raw = (x: number, y: number, z: number) => fields.phi[Math.min(x, nx) + (nx + 1) * (Math.min(y, ny) + (ny + 1) * Math.min(z, nz))]!;
+  // The least phi (in h) over a tile's eight 4h corners, and over its 125 vertices.
+  const cornerMin = (x: number, y: number, z: number) => { let m = Infinity; for (let k = 0; k < 8; k++) m = Math.min(m, raw(4 * x + 4 * (k & 1), 4 * y + 4 * ((k >> 1) & 1), 4 * z + 4 * (k >> 2))); return m / h; };
+  const vertexMin = (x: number, y: number, z: number) => { let m = Infinity; for (let c = 0; c <= 4; c++) for (let b = 0; b <= 4; b++) for (let a = 0; a <= 4; a++) m = Math.min(m, raw(4 * x + a, 4 * y + b, 4 * z + c)); return m / h; };
+  const bucket = (v: number) => v < 0 ? "lt0" : v < 2 ? "lt2" : v < 4 ? "lt4" : v < 8 ? "lt8" : "ge8";
+  if (process.argv.includes("--debug")) { let v = 0; for (let i = 0; i < records && v < 3; i++) { const o = i * source.strideFloats; if (samples[o + 3]! !== 0) { v++; console.log("sample", i, [...samples.subarray(o, o + 8)]); } } console.log({ nx, ny, nz, records, live, shift }); }
+  // NB-FLIP activity: the importance words the census handed it (2 a tile key: triggered criteria in bits 16..21
+  // of word 1) and the activity heat (1 a tile key; 2 where triggered this step, cooling by params.activity.x a second).
+  const nb = (internal.mixedFrame as unknown as { narrowBandFlip?: { bins: GPUBuffer; activityWord: number } }).narrowBandFlip;
+  const activity = nb ? new Uint32Array(await read(nb.bins, 4 * nb.activityWord, 12 * n)) : undefined;
+  const heatOf = (t: number) => activity ? new Float32Array(activity.buffer, 4 * (2 * n + t), 1)[0]! : 0;
+  const criteria = ["shape", "thin", "strain", "rotation", "impact", "approach"];
+  const triggers = (t: number) => activity ? criteria.filter((_, c) => ((activity[2 * t + 1]! >>> (16 + c)) & 1) === 1) : [];
+  const counts: Record<string, number> = {}, add = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
+  if (activity) for (let z = 0; z < tz; z++) for (let y = 0; y < ty; y++) for (let x = 0; x < tx; x++) {
+    const t = keyOf(x, y, z); if (t < 0) continue;
+    const heat = heatOf(t), fired = triggers(t);
+    for (const c of fired) add(`trigger.${c}`);
+    if (fired.length) add(`trigger.any${fired.length === 1 ? "." + fired[0] + ".only" : ""}`);
+    if (particleTiles.has(t)) add(`particleTile.heat.${heat >= 2 ? "2" : heat > 1 ? "1-2" : heat > 0 ? "0-1" : "0"}${fired.length ? ".triggered" : ""}`);
+  }
+  let fine = 0, entered = 0, left = 0;
+  for (let z = 0; z < tz; z++) for (let y = 0; y < ty; y++) for (let x = 0; x < tx; x++) {
+    const t = keyOf(x, y, z); if (t < 0) continue;
+    const isFine = (after[t]! >>> 31) === 1, was = before ? (before[t]! >>> 31) === 1 : isFine;
+    if (isFine && !was) entered++; if (was && !isFine) left++;
+    if (!isFine) continue;
+    fine++;
+    const reason = names[reasons[t]!] ?? `r${reasons[t]}`; add(reason);
+    if (reason === "solid") {
+      let nearActive = false;
+      for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const q = keyOf(x + dx, y + dy, z + dz); if (q >= 0 && q !== t && active(q)) nearActive = true; }
+      add(`solid.${active(t) ? "active" : cut(t) ? "cutNeighbour" : wet(t) ? "wetUncut" : "dryUncut"}${nearActive || active(t) ? "" : ".wallSupport"}`);
+      add(`solid.${body(t) ? "body" : "static"}${capacity(t) === 0 ? ".closed" : ""}`);
+      if (!active(t)) add(`solid.${cut(t) ? "cut" : "uncut"}.corner.${bucket(cornerMin(x, y, z))}.vertex.${bucket(vertexMin(x, y, z))}`);
+      if (!active(t) && cut(t)) add(`solid.cutNeighbourAt.y${y}.cap${capacity(t) === 0 ? 0 : capacity(t) === 1 ? 1 : "p"}${body(t) ? ".body" : ""}${wet(t) ? ".wet" : ""}`);
+    }
+    if (reason === "join" || reason === "crossing" || reason === "travel" || reason === "closure") {
+      let d = 9;
+      for (let r = 0; r <= 3 && d === 9; r++) for (let dz = -r; dz <= r; dz++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        const q = keyOf(x + dx, y + dy, z + dz); if (q >= 0 && particleTiles.has(q)) d = Math.min(d, r);
+      }
+      add(`${reason}.particles${d === 9 ? "3+" : d}${wet(t) ? "" : ".dry"}`);
+    }
+  }
+  console.log(JSON.stringify({ scene: sceneId, steps, fine, infoFine: solver.info.uniformMixedFineTiles, particles: live, particleTiles: particleTiles.size,
+    bandTiles: stats.uniformPressureBandTiles, churn: { entered, left }, drift: stats.volumeDrift,
+    reasons: Object.fromEntries(Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))) }, null, 1));
+  solver.destroy();
+});

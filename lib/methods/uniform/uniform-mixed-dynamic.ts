@@ -821,7 +821,16 @@ fn umObstacleAt(q:vec3i)->bool{
  let t=umTileKey(q);if(umKeyStored(t)){return solidRecord[t].x<1.0;}
  return umSolidAt(q);
 }
-${uniformSolidRefinementWGSL(this.solidGeometry.count)}
+// Body contact for the exact-geometry test: a body's bounding ball reached
+// the tile at the record's build (the record's flag) and its swept shape
+// reaches it this step (markTiles' bit, umSolidAt's key word: its own
+// 1-Lipschitz distance against the step's travel plus a cell). The ball alone
+// covered every tile within a hull's half diagonal, wet floor and walls
+// included, so they read inexact and promoted a ring each.
+fn umCensusBodyContact(t:u32)->bool{
+ return ((solidTiles[t/32u]>>(t%32u))&1u)!=0u&&solidRecord[${this.solidGeometry.count}u+4u*UM_TILES+2u*t+1u].z>0.5;
+}
+${uniformSolidRefinementWGSL(this.solidGeometry.count,"umCensusBodyContact")}
 // Tiles between tile t and the closed wall of its page across direction k
 // (-x,-y,-z,+x,+y,+z): the SOLID or BULK16 page there. NO_WALL where that
 // page is stored or AIR: past every tile scan.
@@ -1630,9 +1639,15 @@ fn solidPromoteTile(tile:u32){
    if(umKeyStored(t)&&solidRecord[t].x>1e-5){let d=abs(q-p);wallDistance=min(wallDistance,d.x+d.y+d.z);}
   }}}
  }
- // Every active contact keeps its complete stencil, including dry tiles.
- // A coarse dry neighbour also owns shared vertices and can interpolate
- // liquid across a thin wall, so wet-only rings are not safe.
+ // Every active contact keeps its stencil, including dry tiles: a coarse
+ // dry neighbour also owns shared vertices and can interpolate liquid
+ // across a thin wall, so wet-only rings are not safe. The stencil is the
+ // neighbours the solid support reaches (umSolidTile: a static solid cell
+ // within a cell of the tile, or a body's swept shape within its travel and
+ // a cell). A neighbour beyond it holds no wall this step, nor does any
+ // vertex it shares, so it couples to the cut tile as any 4h tile beside an
+ // h tile in open liquid: no coupling term reads it.
+ let supported=umSolidTile(vec3u(p));
  for(var z=a.z;z<=b.z;z++){for(var y=a.y;y<=b.y;y++){for(var x=a.x;x<=b.x;x++){
   let t=umTileKey(vec3i(x,y,z));
   if(!umKeyStored(t)){continue;}
@@ -1643,7 +1658,7 @@ fn solidPromoteTile(tile:u32){
   // cannot race or recursively spread through the padding.
   let d=abs(vec3i(x,y,z)-p);
   let wallSupport=solidRecord[tile].x==0.0&&d.x+d.y+d.z==wallDistance&&solidRecord[t].x>1e-5&&(umBit(CC_DECIDED,t)||umStaticFine(t));
-  if(!wallSupport&&!umBit(activeIndex(0u),t)){continue;}
+  if(!wallSupport&&!(supported&&umBit(activeIndex(0u),t))){continue;}
   atomicOr(&census[${HEADER}u+tile/32u],1u<<(tile%32u));atomicOr(&census[CC_STATIC+tile/32u],1u<<(tile%32u));
   atomicAdd(&census[2],1u);atomicAdd(&census[19],1u);recordReason(tile,${REASON.solid}u);
   if(umTileWidth(tile)==1u){atomicSub(&census[5],1u);}else{atomicAdd(&census[4],1u);}

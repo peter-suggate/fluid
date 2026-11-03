@@ -4,7 +4,7 @@
  * mean the 4h geometric restriction loses no sub-cell occupancy information.
  * Static CM11a walls use a dual-cell face weight of 1/2, at both resolutions;
  * it is exact only when all sixteen native patches agree. */
-export function uniformSolidRefinementWGSL(recordCount:number):string{return /* wgsl */`
+export function uniformSolidRefinementWGSL(recordCount:number,bodyContact?:string):string{return /* wgsl */`
 // Static geometry exactly representable on the 4h lattice has no sub-tile
 // capacity or face-area defect. Do not refine a whole wall collar merely
 // because a neighbouring coarse cell is solid. Fractions and moving-body
@@ -35,8 +35,11 @@ fn umCoarseSolidLowFaceExact(t:u32,axis:u32)->bool{
  for(var i=0u;i<4u;i++){if(any(solidRecord[row+i]!=vec4f(face))){return false;}}
  return true;
 }
+// A body may cut tile t: by default the record's build flag (a body's
+// bounding ball within a cell of the tile at the record's build). bodyContact
+// replaces it with a caller's test, a fn of the tile key.
 fn umSolidBodyContact(t:u32)->bool{
- return solidRecord[${recordCount}u+4u*UM_TILES+2u*t+1u].z>0.5;
+ return ${bodyContact?`${bodyContact}(t)`:`solidRecord[${recordCount}u+4u*UM_TILES+2u*t+1u].z>0.5`};
 }
 // Geometry is a spatial requirement, independent of surface activity or heat.
 // A cut 4h owner can join liquid and air across a voxel wall; remapping its
@@ -66,7 +69,7 @@ fn umSolidGeometryExact(t:u32)->bool{
    continue;
   }
   if(!umCoarseSolidFaceExact(n,a)){return false;}
-  if(solidRecord[${recordCount}u+4u*UM_TILES+2u*n+1u].z>0.5){return false;}
+  if(umSolidBodyContact(n)){return false;}
  }
  return true;
 }
