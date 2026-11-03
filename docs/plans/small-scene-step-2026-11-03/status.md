@@ -1,6 +1,36 @@
 # Small-scene step: status (2026-11-03)
 
-## Milestone 1, 9edb739d against plan commit 98ce7bae
+## Milestone 2 (final for this round): 6ef4ae59 against plan commit 98ce7bae
+
+Paddleboats `--bodies`, 300 steps, clean `git archive` exports, two interleaved pairs (A B A B):
+
+| | 98ce7bae run 1 / run 2 | 6ef4ae59 run 1 / run 2 |
+|---|---|---|
+| median step ms | 60.2 / 61.5 | 50.0 / 50.3 |
+| late-half median ms | 62.8 / 64.5 | 50.4 / 51.3 |
+| h tiles (step 300) | 4655 / 4722 | 3173 / 3016 |
+| pressure band tiles | 2660 / 2742 | 1590 / 1527 |
+| live particles | 325k / 347k | 280k / 275k |
+| drift | −1.22% / −1.19% | −1.20% / −1.14% |
+
+The median step fell by 10.7 ms (−18%) and the late-half median by 12.8 ms (−20%). Drift is equal or better. Seep 300 passed on each commit (30–32 ms, drift ≤ 0.05%); letters drift held at −1.1%.
+
+Milestone 1 below was measured with af94e6fa's slot-row bug (fixed in 0cbf053a), which coarsened tiles by accident. Its numbers are superseded.
+
+Landed after milestone 1:
+
+| commit | change | effect |
+|---|---|---|
+| 0cbf053a | one definition of the solid slot row (fixes seep's intermittent closure overrun) | correctness; regression test |
+| 5bf2d836 | couple drops the ambient probes, which are dead under pressure coupling | couple 0.62 → 0.19 ms |
+| 01206173 | census shape measured on a [1,2,1]-smoothed tile surface; letters volume regression | −1.5 ms median, −3 ms late (interleaved A/B) |
+| 6ef4ae59 | body queries: exact signed-distance clearance certificates; static-probe skip | buildRegions 1.26 → 0.90, pRows 1.01 → 0.94 |
+
+Note: 6ef4ae59's static-probe skip applies only when the scene has no terrain. Terrain scenes get only the certificates. A per-tile terrain flag in the solid record would make the skip general.
+
+Run-to-run spread is large on paddleboats: final h tiles range 3200–3801 on one commit. Only interleaved pairs answer step-time questions.
+
+## Milestone 1, 9edb739d against plan commit 98ce7bae (superseded)
 
 Paddleboats `--bodies`, 300 steps, `fluid-gpu-run.sh timing`, clean `git archive` exports, one run each:
 
