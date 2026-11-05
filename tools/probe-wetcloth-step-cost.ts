@@ -18,7 +18,9 @@ const option = (key: string) => process.argv.find(v => v.startsWith(`--${key}=`)
 const id = option('scene') ?? 'wetcloth-source-simple-cloth', steps = Number(option('steps') ?? 60);
 const request: typeof fetch = async input => new Response(await readFile(resolve('public' + String(input))));
 
-await withUniformDevice('wetcloth step cost', async device => {
+// --cpu: the Float64 CPU owner only (no device); --solver=gauss-seidel|newton-pcg.
+const cpu = process.argv.includes('--cpu'), solver = (option('solver') ?? 'newton-pcg') as 'newton-pcg' | 'gauss-seidel';
+const measure = async (device?: GPUDevice) => {
   composeClothFeatures();
   await prepareWetClothSource(id, request);
   // --cut: the one-cell pen erase the app's browser check makes on the lower ribbon.
@@ -27,27 +29,34 @@ await withUniformDevice('wetcloth step cost', async device => {
     : built, document = scene.cloth![0]!;
   const runtime = new ClothRuntime(document, await loadClothTopology(document.geometry), {
     sourceFields: scene.wetClothSource?.fields, excludedSourceColliderIndices: scene.wetClothSource?.bakedSolidFieldIndices,
-    sourceOffset_m: scene.wetClothSource?.sourceOffset_m});
-  await runtime.initializeGPU(device);
+    sourceOffset_m: scene.wetClothSource?.sourceOffset_m, nonlinearSolver: solver});
+  if (device) await runtime.initializeGPU(device);
   const g = scene.fluid.gravity_m_s2, colliders = [...clothContainerColliders(scene), ...clothSceneStaticColliders(scene)];
-  const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number}[] = [];
+  const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number; linear: number}[] = [];
   for (let i = 0; i < steps; i++) {
     const t0 = performance.now();
     let report;
     try {
-      report = await runtime.stepAsync(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z]}) as {gpuIterations?: number; refinementIterations?: number};
+      report = await runtime.stepAsync(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z], ...(option('iterations') ? {iterations: Number(option('iterations'))} : {})}) as {iterations: number; gpuIterations?: number; refinementIterations?: number; linearIterations?: number};
     } catch (error) {
       console.log(JSON.stringify({id, failedAtStep: i, error: String(error).slice(0, 160)}));
       break;
     }
-    rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: report.refinementIterations ?? 0});
+    rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: device ? report.refinementIterations ?? 0 : report.iterations, linear: report.linearIterations ?? 0});
   }
   const mean = (f: (r: typeof rows[0]) => number, from = 0) => rows.slice(from).reduce((s, r) => s + f(r), 0) / Math.max(1, rows.length - from);
   const refined = rows.filter(r => r.cpu > 0);
+  if (!device) {
+    console.log(JSON.stringify({id, owner: 'cpu', solver, cut: process.argv.includes('--cut'), dt_s: dt, completedSteps: rows.length, vertices: runtime.prepared.vertexCount,
+      meanStep_ms: +mean(r => r.ms, 5).toFixed(2), maxStep_ms: +Math.max(...rows.map(r => r.ms)).toFixed(2),
+      meanIterations: +mean(r => r.cpu).toFixed(1), maxIterations: Math.max(...rows.map(r => r.cpu)), meanLinearIterations: +mean(r => r.linear).toFixed(1)}));
+    return;
+  }
   console.log(JSON.stringify({id, dt_s: dt, steps, vertices: document.geometry.kind === 'inline' ? document.geometry.data.restPositions_m.length / 3 : undefined,
     meanStep_ms: +mean(r => r.ms, 5).toFixed(2), meanGpuIterations: +mean(r => r.gpu).toFixed(1),
     refinedSteps: refined.length, meanRefinementIterations: +(refined.reduce((s, r) => s + r.cpu, 0) / Math.max(1, refined.length)).toFixed(1),
     meanRefinedStep_ms: +(refined.reduce((s, r) => s + r.ms, 0) / Math.max(1, refined.length)).toFixed(2),
     meanUnrefinedStep_ms: +(rows.filter(r => !r.cpu).reduce((s, r) => s + r.ms, 0) / Math.max(1, rows.length - refined.length)).toFixed(2),
     simSecondsPerWallSecond: +(dt / (mean(r => r.ms, 5) / 1000)).toFixed(4)}));
-});
+};
+if (cpu) await measure(); else await withUniformDevice('wetcloth step cost', measure);

@@ -4,6 +4,7 @@ import type { ClothCollider } from "./contact";
 import { SourceMotionRuntime, type SourceMotionCheckpoint } from "./source-motion";
 import { sourceClothColliders } from "./source-contact";
 import { GPUClothMechanics } from "./gpu-mechanics";
+import { solveClothIncrement } from "./nonlinear-solve";
 import type { WetClothSourceField } from "./source-types";
 import type { ClothDocument, ClothFrameIdentity, ClothState, ClothSurfacePublication, ClothTopologyData, ClothVector } from "./types";
 export interface ClothRuntimeOptions {
@@ -11,6 +12,9 @@ export interface ClothRuntimeOptions {
     readonly sourceOffset_m?: ClothVector;
     readonly mechanics?: ClothStepOptions;
     readonly excludedSourceColliderIndices?:readonly number[];
+    /** CPU Float64 owner of the incremental-potential minimization: global
+     * Newton-PCG (lib/cloth/nonlinear-solve.ts) or coordinate Gauss-Seidel. */
+    readonly nonlinearSolver?: 'newton-pcg' | 'gauss-seidel';
 }
 export interface ClothRuntimeCheckpoint {
     readonly state: ClothState;
@@ -99,7 +103,7 @@ export class ClothRuntime {
         const checkpoint = this.staged?.checkpoint ?? this.checkpoint();
         try {
             const prepared = this.prepareStep(dt_s, colliders, options);
-            const report = this.document.physics?.solveSolid===false ? this.stepPrescribed(dt_s,prepared) : stepCloth(this.prepared, this.state, dt_s, prepared);
+            const report = this.document.physics?.solveSolid===false ? this.stepPrescribed(dt_s,prepared) : this.options.nonlinearSolver==='newton-pcg' ? solveClothIncrement(this.prepared, this.state, dt_s, prepared) : stepCloth(this.prepared, this.state, dt_s, prepared);
             if (!report.converged)
                 throw new Error(`Cloth nonlinear solve did not converge (${report.maximumUpdate_m} m after ${report.iterations} iterations)`);
             this.pendingImpulse = undefined;

@@ -11,18 +11,18 @@ import { composeClothFeatures } from './definition';
 
 /** Which owner runs a cloth's nonlinear solve. The GPU sweep is Gauss-Seidel
  * over independent colors, so its latency is colors x one thread's serial
- * line-searched Newton update, whatever the vertex count; the Float64 CPU
- * solve of the same energy costs per vertex. Measured on the released small
- * fixtures (tools/probe-wetcloth-step-cost.ts, 1 ms steps, 40 steps from
- * rest): simple_cloth's 52 vertices take 188 ms per GPU step (53 sweeps, plus
- * Float64 refinement in 32 of 40 steps) against 35 ms on the CPU; simple_yarn
- * (28) 25 ms and simple_yarn_loop (20) 42 ms on the CPU. Both minimize the same
- * energy to the same tolerance; only the owner changes. */
+ * line-searched Newton update, whatever the vertex count. The Float64 CPU
+ * owner is a global Newton-PCG solve of the same energy to the same tolerance
+ * (lib/cloth/nonlinear-solve.ts), costing per vertex. Measured on the released
+ * small fixtures (tools/probe-wetcloth-step-cost.ts --cpu, 1 ms steps, 40 steps
+ * from rest; Newton iterations / coordinate sweeps per step):
+ *   simple_cloth (52 vertices)   5.3 ms, 3.0   vs Gauss-Seidel   42 ms, 24
+ *   simple_plastic (52)          4.2 ms, 2.0   vs Gauss-Seidel 2627 ms, 900
+ *   cut simple_cloth (56, 120)   4.9 ms, 3.3   vs Gauss-Seidel  135 ms, 92
+ *   simple_yarn (28)            25 ms,   3.9   vs Gauss-Seidel   97 ms, 12
+ *   simple_yarn_loop (20)       21 ms,   4.7   vs Gauss-Seidel  289 ms, 73
+ * The GPU owner took 188 ms per simple_cloth step. */
 export const CLOTH_CPU_SOLVE_MAX_VERTICES=256;
-/** The GPU owner's budget: 64 Float32 sweeps, then up to 64 Float64 sweeps of
- * refinement. The CPU owner gets the same number of sweeps of the same energy
- * and the same tolerance. */
-export const CLOTH_CPU_SOLVE_ITERATIONS=128;
 export function clothSolvesOnGPU(runtime:ClothRuntime):boolean{return runtime.prepared.vertexCount>CLOTH_CPU_SOLVE_MAX_VERTICES;}
 
 /** Attach the same mechanical plugin to a dry scene owner. No fluid fields
@@ -34,7 +34,7 @@ export async function withDryClothPhysics(base:GPUSolverInstance,device:GPUDevic
  if(initial.systems?.fluid!==false)throw new Error('Dry cloth host requires explicit fluid:false');
  composeClothFeatures();
  let scene=initial,last=0,pending:Promise<void>|undefined,stepping=false,generation=0,failure:Error|undefined,disposed=false;
- const options=(s:SceneDescription)=>({sourceFields:s.wetClothSource?.fields,excludedSourceColliderIndices:s.wetClothSource?.bakedSolidFieldIndices,sourceOffset_m:s.wetClothSource?.sourceOffset_m});
+ const options=(s:SceneDescription)=>({sourceFields:s.wetClothSource?.fields,excludedSourceColliderIndices:s.wetClothSource?.bakedSolidFieldIndices,sourceOffset_m:s.wetClothSource?.sourceOffset_m,nonlinearSolver:'newton-pcg' as const});
  let runtimes:ClothRuntime[]=[];
  try {
   for(const document of initial.cloth){
@@ -72,7 +72,7 @@ export async function withDryClothPhysics(base:GPUSolverInstance,device:GPUDevic
   pending=(async()=>{
    try {
     const g=scene.fluid.gravity_m_s2,colliders=[...clothCollidersForRigidBodies(bodies),...clothContainerColliders(scene),...clothSceneStaticColliders(scene)];
-    for(const runtime of runtimes)await runtime.stepAsync(dt,colliders,{gravity_m_s2:[g.x,g.y,g.z],...(clothSolvesOnGPU(runtime)?{}:{iterations:CLOTH_CPU_SOLVE_ITERATIONS})});
+    for(const runtime of runtimes)await runtime.stepAsync(dt,colliders,{gravity_m_s2:[g.x,g.y,g.z]});
     if(disposed)return;
     surfaces=runtimes.map(r=>r.publish());last=end;base.info.completedTime_s=end;
    }catch(error){runtimes.forEach((r,i)=>r.restore(checkpoints[i]!));throw error;}

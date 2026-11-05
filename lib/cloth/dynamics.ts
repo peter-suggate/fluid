@@ -5,7 +5,7 @@ import type { ClothState, ClothVector } from "./types";
 import { resolveClothContacts, type ClothCollider, type ClothContactReport } from "./contact";
 
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
-function bendingPhi(angle:number,mode: "theta"|"tan-half"|"sin-half" = "theta") {
+export function bendingPhi(angle:number,mode: "theta"|"tan-half"|"sin-half" = "theta") {
   if(mode==="tan-half") {const t=Math.tan(angle/2);return {value:2*t,first:1+t*t,second:t*(1+t*t)};}
   if(mode==="sin-half") return {value:Math.sin(angle/2),first:.5*Math.cos(angle/2),second:-.25*Math.sin(angle/2)};
   return {value:angle,first:1,second:0};
@@ -20,7 +20,7 @@ export function triangleStrain(face: ClothTriangle, positions: ArrayLike<number>
   return [.5 * (dot3(u, u) - 1), .5 * (dot3(v, v) - 1), dot3(u, v)];
 }
 
-function membraneEnergy(topology: PreparedClothTopology, state: ClothState, f: number, prior?: ArrayLike<number>, dt = 1): number {
+export function membraneEnergy(topology: PreparedClothTopology, state: ClothState, f: number, prior?: ArrayLike<number>, dt = 1): number {
   const face = topology.triangles[f]!, m = topology.materials[face.material]!, strain = triangleStrain(face, state.positions_m);
   const fraction = face.vertices.reduce((sum, i) => sum + state.solidFraction[i]!, 0) / 3;
   const modulus = membraneModulus(m, fraction), nu = m.poissonRatio;
@@ -46,7 +46,7 @@ export function membraneCoordinateDerivatives(topology: PreparedClothTopology, s
   return {gradient: factor * (sx * a + sy * b + ss * c), diagonal: factor * ((1 + gamma) * (a * a + b * b + 2 * nu * a * b + .5 * (1 - nu) * c * c) + sx * ru * ru + sy * rv * rv + 2 * ss * ru * rv)};
 }
 
-function hingeEnergy(topology: PreparedClothTopology, state: ClothState, index: number, prior?: ArrayLike<number>, dt = 1): number {
+export function hingeEnergy(topology: PreparedClothTopology, state: ClothState, index: number, prior?: ArrayLike<number>, dt = 1): number {
   const hinge = topology.hinges[index]!, face = topology.triangles[hinge.faces[0]]!, m = topology.materials[face.material]!;
   const fraction = (state.solidFraction[hinge.vertices[0]]! + state.solidFraction[hinge.vertices[1]]!) / 2;
   let angle: number;
@@ -102,7 +102,7 @@ function rodLocalVertices(rod: ClothRod, vertex: number): readonly number[] {
   if (!map) { map = new Map<number, number[]>(); rod.vertices.forEach((v, i) => map!.set(v, [...(map!.get(v) ?? []), i])); rodLocalCache.set(rod, map); }
   return map.get(vertex) ?? [];
 }
-function rodEnergy(topology: PreparedClothTopology, state: ClothState, index: number, vertex?: number, prior?: Float64Array, priorTwist?: Float64Array, dt = 1, twistSegment?: number, skipStretch = false): number {
+export function rodEnergy(topology: PreparedClothTopology, state: ClothState, index: number, vertex?: number, prior?: Float64Array, priorTwist?: Float64Array, dt = 1, twistSegment?: number, skipStretch = false): number {
   const rod = topology.rods[index]!, material = topology.materials[rod.material]!;
   const localVertices = vertex === undefined ? undefined : rodLocalVertices(rod, vertex);
   const segments = skipStretch || twistSegment !== undefined ? [] : localVertices ? [...new Set(localVertices.flatMap(i => [i - 1, i]))].filter(j => j >= 0 && j < rod.restLengths_m.length) : rod.restLengths_m.keys();
@@ -133,7 +133,7 @@ function rodEnergy(topology: PreparedClothTopology, state: ClothState, index: nu
   return energy;
 }
 
-function rodStretchCoordinateDerivatives(topology:PreparedClothTopology,state:ClothState,index:number,vertex:number,axis:number,prior:Float64Array,dt:number) {
+export function rodStretchCoordinateDerivatives(topology:PreparedClothTopology,state:ClothState,index:number,vertex:number,axis:number,prior:Float64Array,dt:number) {
   const rod=topology.rods[index]!,material=topology.materials[rod.material]!;
   let gradient=0,diagonal=0;
   const segments=[...new Set(rodLocalVertices(rod,vertex).flatMap(i=>[i-1,i]))].filter(j=>j>=0&&j<rod.restLengths_m.length);

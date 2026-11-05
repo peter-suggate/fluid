@@ -75,11 +75,24 @@ function convexTriangles(polygon:readonly Vertex[]):[Vertex,Vertex,Vertex][]{
 }
 /** Inside is n·x <= offset. A rounded sculpt shape is the intersection of these. */
 export interface ClothCutHalfSpace { readonly normal:ClothVector; readonly offset_m:number }
+/** A corner within a millionth of the piece's size of the plane lies on it.
+ * Cut planes come from Float32 cell coordinates, so a plane through an
+ * authored vertex misses it by ~1e-10 m; splitting there would emit a vertex
+ * 1e-10 m from the corner, a zero-length edge and a zero-area triangle whose
+ * stiffness no solver can resolve. An on-plane corner belongs to both sides. */
+const ON_PLANE_RELATIVE=1e-6;
 function split(poly:Vertex[],distance:(p:ClothVector)=>number):[Vertex[],Vertex[]] {
   const inside:Vertex[]=[],outside:Vertex[]=[];
+  let size=0;
+  for(let i=0;i<poly.length;i++){const a=poly[i]!.p,b=poly[(i+1)%poly.length]!.p;size=Math.max(size,Math.hypot(b[0]-a[0],b[1]-a[1],b[2]-a[2]));}
+  const distances=poly.map(v=>{const d=distance(v.p);return Math.abs(d)<=ON_PLANE_RELATIVE*size?0:d;});
+  // Wholly on one side (a piece lying in the plane counts as inside).
+  if(distances.every(d=>d<=0))return [[...poly],[]];
+  if(distances.every(d=>d>=0))return [[],[...poly]];
   for(let i=0;i<poly.length;i++){
-    const a=poly[i]!,b=poly[(i+1)%poly.length]!,da=distance(a.p),db=distance(b.p);
-    (da<=0?inside:outside).push(a);
+    const a=poly[i]!,b=poly[(i+1)%poly.length]!,da=distances[i]!,db=distances[(i+1)%poly.length]!;
+    if(da<=0)inside.push(a);
+    if(da>=0)outside.push(a);
     if((da<0&&db>0)||(da>0&&db<0)){
       const t=da/(da-db),weights=new Map<number,number>();
       for(const [k,v] of a.weights)weights.set(k,(1-t)*v);

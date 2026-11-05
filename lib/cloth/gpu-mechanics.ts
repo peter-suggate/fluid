@@ -1,6 +1,7 @@
 import type { GPUInitializationTask } from '../core/gpu-initialization';
 import { bendingRigidity, membraneModulus, rodRigidity, rodSegmentInertia_kg_m2 } from './material';
-import { finishClothMechanicalStep, stepCloth, type ClothStepOptions, type ClothStepReport } from './dynamics';
+import { finishClothMechanicalStep, type ClothStepOptions, type ClothStepReport } from './dynamics';
+import { solveClothIncrement } from './nonlinear-solve';
 import { point3, type PreparedClothTopology } from './topology';
 import type { ClothState } from './types';
 /** GPU stores increments, not absolute updated positions. Small physical dt
@@ -311,10 +312,12 @@ export class GPUClothMechanics {
         if(maximumUpdate>=tolerance||(options.cohesionPairs?.length??0)>0){
             // Float32 constitutive cancellation can stall a stiff small mesh.
             // Refine the GPU candidate against the identical Float64 energy,
-            // retaining the original inertial target and previous-step strain.
+            // retaining the original inertial target and previous-step strain,
+            // with the global Newton-PCG solve (refinementIterations counts
+            // Newton iterations).
             const initialGuess={positions_m:state.positions_m.slice(),twist_rad:state.twist_rad.slice()};
             state.positions_m.set(old);state.twist_rad.set(oldTwist);
-            const refined=stepCloth(topology,state,dt,options,initialGuess);
+            const refined=solveClothIncrement(topology,state,dt,options,initialGuess);
             return {...refined,iterations:iterations+refined.iterations,gpuIterations:iterations,refinementIterations:refined.iterations};
         }
         return {...finishClothMechanicalStep(topology, state, old, oldTwist, dt, options, { iterations, converged: maximumUpdate < tolerance, maximumUpdate_m: maximumUpdate }),gpuIterations:iterations,refinementIterations:0};
