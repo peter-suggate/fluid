@@ -230,9 +230,9 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
  return (corners&(1u<<k))!=0u;
 }
 // Workgroup-aggregated: one device atomic a 64-owner round.
-@compute @workgroup_size(64) fn coarseCorners(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+@compute @workgroup_size(64) fn coarseCorners(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  let n=umCounts.y;
- for(var base=64u*group.x;base<n;base+=65536u){
+ for(var base=64u*group.x;base<n;base+=64u*groups.x){
   let i=base+lane;var flags=0u;var m=0u;
   if(i<n){
    let owner=umAllOwner(vec3u(umCounts.x*64u+i,0u,0u));
@@ -284,9 +284,9 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
  let key=umVertexAt(umOrigin(nbCoarseOwner(entry))+4u*umCorner(entry&7u,2u));atomicStore(&bins[NB_DEPTH_A+key],0u);atomicStore(&bins[NB_SURFACE_HOT_NEAREST+key],0u);
 }
 // A lane to a listed corner: couple's work is the corner's, not the owner's.
-@compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u){
+@compute @workgroup_size(64) fn couple(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let n=nbCoarseEntries();
- for(var j=gid.x;j<n;j+=65536u){
+ for(var j=gid.x;j<n;j+=64u*groups.x){
   let entry=nbCoarseEntry(j);if((entry&16u)==0u){continue;}
   let owner=nbCoarseOwner(entry);let origin=umOrigin(owner);let q=origin+4u*umCorner(entry&7u,2u);
   let bulk=particleSurfaceBulk(owner.tile,vec3i(origin),vec3i(q),false);var value=bulk.x;

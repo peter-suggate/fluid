@@ -1712,12 +1712,12 @@ fn storeSeedCandidate(p:Particle,mandatory:bool){
  storeSeedCandidate(seedCandidate(group,lane,false),false);
 }
 
-@compute @workgroup_size(64) fn countInitial(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<UM_CELL_KEYS;i+=65536u){if(!umCellLive(i)){continue;}seedCell(umCellCoord(i),false);}
+@compute @workgroup_size(64) fn countInitial(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var i=gid.x;i<UM_CELL_KEYS;i+=64u*groups.x){if(!umCellLive(i)){continue;}seedCell(umCellCoord(i),false);}
 }
 // The initial band appends to the scratch bank's slabs; SORT files it.
-@compute @workgroup_size(64) fn seedInitial(@builtin(global_invocation_id) gid:vec3u){
- for(var i=gid.x;i<UM_CELL_KEYS;i+=65536u){if(!umCellLive(i)){continue;}let c=umCellCoord(i);seedCell(c,true);}
+@compute @workgroup_size(64) fn seedInitial(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var i=gid.x;i<UM_CELL_KEYS;i+=64u*groups.x){if(!umCellLive(i)){continue;}let c=umCellCoord(i);seedCell(c,true);}
 }
 fn weight(x:f32)->f32{let a=abs(x);if(a<0.5){return 0.75-a*a;}let b=max(0.0,1.5-a);return 0.5*b*b;}
 fn transferFace(face:UMFace)->f32{
@@ -1825,9 +1825,9 @@ fn nbSampleCold(q:vec3f)->bool{return nbTileCold(umTileKey(vec3i(floor(q))>>vec3
  }
 }
 // A lane reduces its own samples and touches the shared receipt once.
-@compute @workgroup_size(64) fn diagnoseBefore(@builtin(global_invocation_id) gid:vec3u){
+@compute @workgroup_size(64) fn diagnoseBefore(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  var outside=0.0;
- for(var i=gid.x;i<nbExtent();i+=65536u){
+ for(var i=gid.x;i<nbExtent();i+=64u*groups.x){
   if(!nbLive(particles[i])){continue;}
   outside=max(outside,bandPhi(particles[i].position.xyz));
  }

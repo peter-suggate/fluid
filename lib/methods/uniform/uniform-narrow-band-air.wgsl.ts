@@ -70,8 +70,8 @@ fn nbAirSeed(t:u32,first:u32,end:u32)->bool{
  return nbAirTileWet(t,first,end);
 }
 // 4h tiles (and absent ones) a lane each; h tiles are airSeedsFine's.
-@compute @workgroup_size(64) fn airSeeds(@builtin(global_invocation_id) id:vec3u){
- for(var t=id.x;t<UM_TILES;t+=65536u){
+@compute @workgroup_size(64) fn airSeeds(@builtin(global_invocation_id) id:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var t=id.x;t<UM_TILES;t+=64u*groups.x){
   var wet=false;
   if(umTileLive(t)){if(umTileWidth(t)==1u){continue;}wet=nbAirSeed(t,0u,64u);}
   atomicStore(&bins[NB_AIR+t],u32(wet));
@@ -117,8 +117,8 @@ var<workgroup> nbAirSeedRegion:u32;
  }
 }
 ${[0,1,2].map(axis=>/* wgsl */`
-@compute @workgroup_size(64) fn airSpread${axis}(@builtin(global_invocation_id) id:vec3u){
- for(var t=id.x;t<UM_TILES;t+=65536u){
+@compute @workgroup_size(64) fn airSpread${axis}(@builtin(global_invocation_id) id:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var t=id.x;t<UM_TILES;t+=64u*groups.x){
   var keep=0u;
   if(umTileLive(t)){
    let p=vec3i(umTileCoord(t));
@@ -134,8 +134,8 @@ ${[0,1,2].map(axis=>/* wgsl */`
 // leaves out is a tile beyond the collar's edge: the liquid's next step
 // cannot bring the collar to it, so this step's clear would hold every
 // value its advection could take at the far marker or above.
-@compute @workgroup_size(64) fn airGate(@builtin(global_invocation_id) id:vec3u){
- for(var t=id.x;t<UM_TILES;t+=65536u){
+@compute @workgroup_size(64) fn airGate(@builtin(global_invocation_id) id:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var t=id.x;t<UM_TILES;t+=64u*groups.x){
   var near=0u;
   if(umTileLive(t)){
    let p=vec3i(umTileCoord(t));
@@ -297,9 +297,9 @@ ${width===1?`// An h tile's 125 vertices (the ownership's h list) are a workgrou
   let width=1u;let origin=4u*umTileCoord(t);let side=5u;
   let regular=umTileMinimumWidth(t)==width&&umTileMaximumWidth(t)==width;
   var low=vec3<bool>(false);if(regular){low=umLowOpen(vec3i(origin));}
-  for(var k=lane;k<125u;k+=64u){`:`@compute @workgroup_size(64) fn airClearCoarse(@builtin(global_invocation_id) id:vec3u){
+  for(var k=lane;k<125u;k+=64u){`:`@compute @workgroup_size(64) fn airClearCoarse(@builtin(global_invocation_id) id:vec3u,@builtin(num_workgroups) groups:vec3u){
  let count=select(UM_TILES,64u*atomicLoad(&bins[NB_FRAME_PLAN+4u+6u*NB_REUSE_REGIONS]),nbAirListed);
- for(var job=id.x;job<count;job+=65536u){
+ for(var job=id.x;job<count;job+=64u*groups.x){
   var t=job;if(nbAirListed){let region=atomicLoad(&bins[NB_FRAME_PLAN+5u+6u*NB_REUSE_REGIONS+job/64u]);t=nbReuseTile(region,job%64u);}
   if(!umTileLive(t)||umTileWidth(t)!=${width}u||nbTileCold(t)){continue;}
   if(atomicLoad(&bins[NB_AIR+t])!=0u){continue;}

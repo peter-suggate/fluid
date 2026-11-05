@@ -177,10 +177,10 @@ fn nbCoarseBuild(entry:u32)->vec4u{
  let c=vec3u(umCellNearFromPage(owner.tile>>9u,vec3i(origin>>vec3u(5u)),vec3i(p)));
  return vec4u(c,select(0u,1u,umTileMinimumWidth(umTileAt(c/4u))==1u&&(nbBandReach(c)&2u)!=0u&&!nbSurfaceHotCornerFrom(vec3i(origin>>vec3u(2u)),p)));
 }
-@compute @workgroup_size(64) fn coarseBuilds(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+@compute @workgroup_size(64) fn coarseBuilds(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  if(lane==0u){nbCoarseBase=nbCoarseEntries();}
  let n=workgroupUniformLoad(&nbCoarseBase);
- for(var base=64u*group.x;base<n;base+=65536u){
+ for(var base=64u*group.x;base<n;base+=64u*groups.x){
   let j=base+lane;var entry=0u;var m=0u;
   if(j<n){entry=nbCoarseEntry(j);if((entry&8u)!=0u&&nbCoarseBuild(entry).w!=0u){m=1u;}}
   if(lane==0u){atomicStore(&nbCoarseCount,0u);}
@@ -192,9 +192,9 @@ fn nbCoarseBuild(entry:u32)->vec4u{
   if(m!=0u&&at<NB_COARSE_CAP){atomicStore(&bins[NB_COARSE_LIST+4u+NB_COARSE_CAP+at],entry);}
  }
 }
-@compute @workgroup_size(64) fn depthCoarse(@builtin(global_invocation_id) gid:vec3u){
+@compute @workgroup_size(64) fn depthCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let n=min(atomicLoad(&bins[NB_COARSE_LIST+1u]),NB_COARSE_CAP);
- for(var j=gid.x;j<n;j+=65536u){
+ for(var j=gid.x;j<n;j+=64u*groups.x){
   let entry=atomicLoad(&bins[NB_COARSE_LIST+4u+NB_COARSE_CAP+j]);
   let p=umOrigin(nbCoarseOwner(entry))+4u*umCorner(entry&7u,2u);let c=nbCoarseBuild(entry).xyz;
   nbBuildDistance(p,c,nbBandTile(c));
@@ -235,9 +235,9 @@ fn nbBoundCoarseMetric(p:vec3u){
  atomicStore(&bins[at],bitcast<u32>(select(-bound,bound,d>=0.0)));
 }
 // A lane to a listed retirement corner (flag 8).
-@compute @workgroup_size(64) fn redistanceCoarse(@builtin(global_invocation_id) gid:vec3u){
+@compute @workgroup_size(64) fn redistanceCoarse(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  let n=nbCoarseEntries();
- for(var j=gid.x;j<n;j+=65536u){
+ for(var j=gid.x;j<n;j+=64u*groups.x){
   let entry=nbCoarseEntry(j);if((entry&8u)==0u){continue;}
   let owner=nbCoarseOwner(entry);let origin=umOrigin(owner);
   nbRedistanceVertex(owner.tile,origin,origin+4u*umCorner(entry&7u,2u));

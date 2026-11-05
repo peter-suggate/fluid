@@ -242,9 +242,9 @@ fn nbDepthList(t:u32){
  if((reach&1u)!=0u){let slot=atomicAdd(&bins[NB_BAND+1u],1u);atomicStore(&bins[NB_BAND_SEARCH+slot],t);}
  if((reach&2u)!=0u){let slot=atomicAdd(&bins[NB_BAND+2u],1u);atomicStore(&bins[NB_BAND_DISTANCE+slot],t);}
 }
-// The live tiles (uniformStageListsWGSL), a fixed grid striding them.
-@compute @workgroup_size(64) fn depthLists(@builtin(global_invocation_id) gid:vec3u){
- for(var j=gid.x;j<umLiveTileCount();j+=65536u){nbDepthList(umLiveTile(j));}
+// The live tiles (uniformStageListsWGSL), the launch striding them.
+@compute @workgroup_size(64) fn depthLists(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var j=gid.x;j<umLiveTileCount();j+=64u*groups.x){nbDepthList(umLiveTile(j));}
 }
 // The crossings of one x row, 14 cells from five below the tile: its own
 // four and five either side, read from the masks of the five tiles across.

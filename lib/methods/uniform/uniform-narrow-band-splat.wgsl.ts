@@ -4,9 +4,9 @@ export const narrowBandSplatWGSL=/* wgsl */`
 // Before the deposit, the expired motion bank holds either the separate
 // cell list or the fused path's two-word jobs, each bounded by particle count.
 fn nbSurfaceCells()->u32{return NB_LINKS+4u*arrayLength(&particles);}
-// The live tiles' cells (uniformStageListsWGSL), a fixed grid striding them.
-@compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u){
- for(var j=gid.x;j<64u*umLiveTileCount();j+=65536u){
+// The live tiles' cells (uniformStageListsWGSL), the launch striding them.
+@compute @workgroup_size(64) fn surfaceCells(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ for(var j=gid.x;j<64u*umLiveTileCount();j+=64u*groups.x){
   let cell=64u*umLiveTile(j/64u)+j%64u;
   if(nbSparseBins&&atomicLoad(&bins[NB_COVERAGE+cell/64u])==0u){continue;}
   if(atomicLoad(&bins[nbBinCell(cell)])==0u){continue;}
