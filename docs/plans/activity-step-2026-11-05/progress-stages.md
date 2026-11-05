@@ -207,3 +207,80 @@ Reading:
   in still water, and it needs the letters 120 / seep 300 drift gates and
   a COLD-omission regression first. It is small next to the 8 ms fixed
   floor.
+
+## Round 3 (2026-11-06): launch widths by live work, measured before building the rest
+
+The judge's thesis: drop=2's 238,863 extra workgroups over rest are sized by
+capacity or by the domain, and at that count they cost milliseconds. All
+runs come from clean `git archive HEAD` exports (739271cb code) through
+fluid-gpu-run.sh: one 60-step run per configuration, 16x8x4 unless named.
+
+**Item 1, built: the particle sort launches from its producers' counts.**
+- slabPlace writes slabSort's width (a workgroup a slab) and the record
+  passes' width (256 records a workgroup) into free receipt words 27-28.
+- A one-thread slabSortArgs writes the merge rounds' width into word 29,
+  zero unless a cell is dense.
+- The host copies the three x words into an INDIRECT buffer. slabSort, the
+  23 merge rounds and slabSortFinish then launch from it: the merges run
+  in a second pass after the copy, and they launch zero workgroups unless
+  a cell is dense.
+- Results: tests/uniform-particle-slab.test.ts passes on the GPU; drop=2's
+  direct workgroups fall 293.8k -> 268.7k; drift -1.6e-6.
+- Median 17.89 ms against 17.58. Same tree family, with W 143 vs 118:
+  no gain.
+- Not committed (time-neutral). The patch lives in the session scratchpad
+  (sort-indirect.patch) and applies to both the index and the work tree.
+
+**The cost of an early-exit workgroup, measured in the solver.** A scratch
+wrapper multiplies every 1-D launch of 64+ workgroups by 4 (capped at
+65535). Every such kernel strides or bounds-checks, so the extra
+workgroups exit as the existing excess ones do.
+
+| run | workgroups / frame | median ms | tiers C/W/H at 60 |
+|---|---|---|---|
+| drop=2, sort indirect | 268.7k | 17.89 | 876/143/5 |
+| drop=2, every 1-D launch x4 | 990.9k | 18.53 | 874/149/1 |
+| rest | 55.1k | 4.69 | 1024/0/0 |
+| rest, x4 | 218.6k | 4.88 | 1024/0/0 |
+
+- +722k workgroups cost +0.64 ms at drop=2, and +164k cost +0.19 ms at
+  rest: about 0.9-1.2 ns a workgroup.
+- drop=2's ~240k extra workgroups therefore cost about 0.2-0.3 ms of its
+  +12.9 ms floor.
+- A standalone microbenchmark agrees: 100 dependent launches of 1024 empty
+  256-lane workgroups take 0.33-0.72 ms, against 0.20-0.39 ms at width 1.
+  That is 1-3 us a launch for the 1023 extra workgroups.
+- Sizing every launch by live work meets "5x fewer workgroups" but buys
+  at most ~0.3 ms.
+
+**The discriminator (drop=2 on 8x8x4 against 16x8x4).**
+
+| tank | rest ms | drop=2 ms | jump | W at 60 | drop=2 workgroups |
+|---|---|---|---|---|---|
+| 8x8x4 | 3.42 | 13.72 | 10.3 | 118 | 259.0k |
+| 16x8x4 | 4.69 | 17.58 | 12.9 | 118 | 293.8k |
+
+- The step does fall with the tank, by 2.6 ms of jump over 512 extra COLD
+  regions.
+- Kernel time at drop=2, 8x8x4 -> 16x8x4: 15.00 -> 18.62 ms. Of the
+  +3.6 ms, pressure is +1.8 (Lane P: solve +1.45, project +0.26, rhs +0.08).
+- The other +1.8 ms is spread thinly:
+  - pair_sweepSeams +0.16, classifyCoarse +0.15, bulkSelect +0.08,
+    prolong +0.08, pageMark +0.08;
+  - clearBand, the 4h cache and localSpeed +0.07 each;
+  - layout scan +0.05, then <= 0.05 each.
+- This is the same set round 1 found (+1.43 ms over 509 COLD regions):
+  sweeps over every coarse tile or resident page. Their workgroup counts
+  barely change with the tank (35k), so the cost is in-kernel loops over
+  domain lists, not launch width.
+- About 10 ms of the jump remains on the 8x8x4 tank with only 512
+  regions. It is neither workgroup count nor domain size: it is the real
+  work of the ~280 launches that a non-quiet frame switches on, at
+  0.05-1.3 ms a stage.
+
+So the build order the judge set (launch widths) moves the floor by about
+0.3 ms. The domain-sized part (about 1.8 ms non-pressure per 512 COLD
+regions) lives in the loops of the kernels named above. Those loops would
+have to stride the active-region list instead of every coarse tile or
+page. Round 1's knockout of two of them (census decide, the extension's
+coarse sweep) gained nothing measurable, so each is worth <= 0.16 ms.
