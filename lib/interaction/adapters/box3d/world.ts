@@ -36,6 +36,7 @@ export class Box3DWorld {
   private add(entityId: string, description: RigidBodyDescription, recipe?: BodyRecipe) {
     if (recipe?.character && (Math.abs(description.orientation.x) > 1e-6 || Math.abs(description.orientation.z) > 1e-6)) throw new Error("Character capsules must be upright");
     if (this.bodies.has(entityId)) throw new Error(`Duplicate runtime entity ${entityId}`);
+    if(description.shape==='rounded-plate')throw new Error('Box3D rounded-plate hulls are not supported; use the exact analytic kinematic source host');
     const native = this.world.createBody({ type: recipe?.motion ?? description.motion ?? 'dynamic', position: description.position_m, rotation: description.orientation, linearVelocity: description.linearVelocity_m_s, angularVelocity: description.angularVelocity_rad_s,
       motionLocks: recipe?.character ? { angularX: true, angularY: true, angularZ: true } : {}, enableSleep: !recipe?.character, isBullet: true });
     const body: WorldBody = { entityId, generation: this.generation, description, recipe, native, tag: native.getUserData(), grounded: false, coyote: 0, jumpBuffer: 0, submerged: 0 };

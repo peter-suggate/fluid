@@ -1244,12 +1244,15 @@ export function unpackSvoPrimitiveRecords(packed: Uint32Array): SvoPrimitiveDesc
 
 /** Map the repository's existing rigid dimension semantics into the render ABI. */
 export function svoPrimitiveForRigidBody(
-  body: Pick<RigidBodyDescription, "shape" | "dimensions_m" | "position_m" | "orientation">,
+  body: Pick<RigidBodyDescription, "shape" | "dimensions_m" | "position_m" | "orientation" | "cuts">,
   primitiveId: number,
   ownerId: number,
   materialId = materialIdForRigidShape(body.shape),
 ): Exclude<SvoPrimitiveDescriptor, SvoEllipsoidPrimitive> {
   const identity = { primitiveId, materialId, ownerId, center_m: { ...body.position_m } };
+  if(body.shape === "rounded-plate")return canonicalSvoPrimitive({...identity,kind:"field-program",orientation:{...body.orientation},
+    envelopeRadii_m:{x:body.dimensions_m.x+body.dimensions_m.y,y:body.dimensions_m.y,z:body.dimensions_m.z+body.dimensions_m.y},fieldProgramReference:0,
+    program:{result:0,boxCuts:body.cuts,ops:[{op:"rounded-box",out:0,parameters:{a:body.dimensions_m.x,b:0,c:body.dimensions_m.z,d:body.dimensions_m.y}}]}}) as SvoFieldProgramPrimitive;
   if (body.shape === "sphere") return canonicalSvoPrimitive({ ...identity, kind: "sphere", radius_m: body.dimensions_m.x }) as SvoSpherePrimitive;
   if (body.shape === "box") return canonicalSvoPrimitive({
     ...identity, kind: "box", orientation: { ...body.orientation },

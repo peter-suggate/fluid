@@ -232,6 +232,8 @@ export interface OctreeTechniqueDebugSource {
 /** Fixed geometric support of a liquid level set. These are the solver's
  * obstacle resources, independent of fluid h/4h ownership. */
 export interface LevelSetSolidBoundarySource {
+  /** Exact local subtractions shared with native rigid collision. */
+  readonly bodyCuts?: GPUTexture;
   readonly params: GPUBufferBinding;
   readonly mask: GPUBufferBinding;
   readonly terrain: GPUTexture;

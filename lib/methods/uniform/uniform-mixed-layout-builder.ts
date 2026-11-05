@@ -85,13 +85,14 @@ export const UNIFORM_MIXED_REGION_LIMIT=32;
  * spare words, then eight words a region (min x, y, z; max x, y, z; kind, 1
  * fine or 2 coarse; spare). */
 export const UNIFORM_MIXED_REGION_TABLE_WORDS=4+8*UNIFORM_MIXED_REGION_LIMIT;
-export function uniformMixedRegionTable(regions:readonly UniformMixedRegion[]):Uint32Array<ArrayBuffer>{
+export function uniformMixedRegionTable(regions:readonly UniformMixedRegion[],tileLimit=512):Uint32Array<ArrayBuffer>{
+ if(!Number.isSafeInteger(tileLimit)||tileLimit<1||tileLimit>2048)throw new RangeError(`Invalid mixed region tile extent ${tileLimit}`);
  if(regions.length>UNIFORM_MIXED_REGION_LIMIT)throw new RangeError(`Uniform mixed regions: ${regions.length} authored, the region table holds ${UNIFORM_MIXED_REGION_LIMIT}`);
  const table=new Uint32Array(UNIFORM_MIXED_REGION_TABLE_WORDS);table[0]=regions.length;
  regions.forEach((r,i)=>{
   const kind=r.kind==="fine"?1:r.kind==="coarse"?2:0;
-  if(!kind||r.min.length!==3||r.max.length!==3||[0,1,2].some(a=>!Number.isInteger(r.min[a])||!Number.isInteger(r.max[a])||r.min[a]!<0||r.max[a]!>512||r.min[a]!>=r.max[a]!))
-   throw new RangeError(`Uniform mixed regions: region ${i} (${String(r.kind)}, ${r.min.join(",")} to ${r.max.join(",")}) is not a fine or coarse box of tiles of the 512-tile window`);
+  if(!kind||r.min.length!==3||r.max.length!==3||[0,1,2].some(a=>!Number.isInteger(r.min[a])||!Number.isInteger(r.max[a])||r.min[a]!<0||r.max[a]!>tileLimit||r.min[a]!>=r.max[a]!))
+   throw new RangeError(`Uniform mixed regions: region ${i} (${String(r.kind)}, ${r.min.join(",")} to ${r.max.join(",")}) is not a fine or coarse box of tiles of the ${tileLimit}-tile window`);
   table.set([r.min[0],r.min[1],r.min[2],r.max[0],r.max[1],r.max[2],kind,0],4+8*i);
  });
  return table;

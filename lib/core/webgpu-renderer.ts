@@ -1,4 +1,8 @@
+import { ROUNDED_PLATE_RENDER_TAG } from "./rigid-cut-render";
+import {publishSceneRigidSurfaces} from './rigid-surface';
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
+import { clothSceneContentStamp } from "../cloth/content-stamp";
+import { clothDocumentsKey } from "../cloth/document-key";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StagedReadback } from "./staged-readback";
 import { rigidControlOwnerId } from "./rigid-motor";
@@ -42,7 +46,7 @@ import type { ScenePresentationMode } from "./scene-definition";
 import { sceneHasTerrain, terrainContentStamp } from "./terrain";
 import { solidVoxelPatchesKey, solidWorldContentStamp } from "./solid-world";
 import type { SparseVoxelSceneRenderSource } from "./webgpu-voxel-debug";
-import { cameraTanHalfFov, viewportAspect } from "./webgpu-camera";
+import { VIEW_UNIFORM_FLOATS, VIEW_UNIFORM_BYTES, cameraTanHalfFov, viewportAspect } from "./webgpu-camera";
 import {
   type SvoPixelTrace,
   type SvoPixelTraceLayer,
@@ -61,6 +65,10 @@ import { containerDecorationSpace, DecorationBuilder } from "./visualization-dec
 import { buildVesselOutlineGeometry, sceneVesselPresentation } from "./vessel-outline";
 import { canConsumeSparseVoxelLighting, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "../svo/pipeline/webgpu-svo-dry-scene";
 import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from "../svo/features/shading/program";
+import { ClothSurfaceRenderer } from "../cloth/render";
+import {RigidCutRenderAtlas} from './rigid-cut-render';
+import { withDryClothPhysics } from "../cloth/dry-host";
+import { publishSceneClothSurfaces } from "../cloth/scene-geometry";
 import { svoRenderScenePublication, type SvoRenderScenePublication } from "../svo/features/scene-publication/svo-render-scene-publication";
 import {
   createSvoPrimitiveCandidateRefitPlan,
@@ -316,7 +324,7 @@ export interface GridOverlayConfig {
   lensPhase?: number;
 }
 
-export type OptionalRendererPipeline = "grid-overlay" | "svo-dry-scene" | "decoration-overlay" | "particle-overlay" | "particle-surface" | "svo-stage-overlay";
+export type OptionalRendererPipeline = "grid-overlay" | "svo-dry-scene" | "decoration-overlay" | "particle-overlay" | "particle-surface" | "svo-stage-overlay" | "cloth-surface";
 
 /**
  * Live pixel-trace diagnostic state.
@@ -468,6 +476,7 @@ export function structuralMethodValues(config: SimulationRunConfig): MethodParam
 /** Renderer-only worlds are method-independent; fluid worlds require a GPU solver factory. */
 export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: string): boolean {
   const method = getMethod(methodId);
+  if (scene.cloth?.length && planSceneRuntime(scene).fluidSolver && methodId !== "uniform-narrow-band-flip") return false;
   return !planSceneRuntime(scene).fluidSolver || Boolean(method.createSolver || method.createSolverAsync);
 }
 
@@ -506,7 +515,7 @@ export function sceneStructuralKey(scene: SceneDescription): string {
       .map((value) => Math.round(value / cellSize_m)).join(",")
     : "none";
   const lattice = `${sceneLatticeDimensions(scene).join("x")}:${scene.voxelDomain.brickSize_cells}:${boundsCells}`;
-  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}:${scene.container.depthBoundary ?? "closed"}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}:${scene.container.depthBoundary ?? "closed"}:boundary:${scene.container.boundary??"tank"}:cloth-roster:${JSON.stringify((scene.cloth ?? []).map(d => d.id))}`;
 }
 
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
@@ -647,7 +656,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${authoredFluidGeometryKey(scene)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${solidVoxelPatchesKey(scene.solidVoxels)}`;
+  return `${authoredFluidGeometryKey(scene)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${solidVoxelPatchesKey(scene.solidVoxels)}:${clothDocumentsKey(scene.cloth)}:${clothSceneContentStamp({wetClothSource:scene.wetClothSource})}`;
 }
 
 /**
@@ -851,6 +860,8 @@ export class FluidLabRenderer {
   private upscaleBindGroup?: GPUBindGroup;
   private waterPipeline?: RasterWaterPipeline;
   private svoDryScenePipeline?: SparseVoxelDrySceneRenderer;
+  private clothSurfaceRenderer?: ClothSurfaceRenderer;
+  private rigidCutRenderAtlas?:RigidCutRenderAtlas;
   private svoDrySceneSource?: SparseVoxelSceneRenderSource;
   private svoDrySceneData?: SparseVoxelDrySceneData;
   /** The document `svoDrySceneData` was published from, and the parts it was assembled from. */
@@ -980,7 +991,7 @@ export class FluidLabRenderer {
   private svoLightingSupported = true;
   private svoPipelineAvailable = false;
   private readonly surfaceTuningCache = new SvoSurfaceTuningCache();
-  private readonly viewUniformWords = new Float32Array(104);
+  private readonly viewUniformWords = new Float32Array(VIEW_UNIFORM_FLOATS);
   private readonly bodyUploadWords = new Float32Array(GPU_RIGID_BODY_CAPACITY * 16);
   private readonly rigidBoundsScratch: { centre_m: [number, number, number]; radius_m: number } = { centre_m: [0, 0, 0], radius_m: 0 };
   /**
@@ -1247,6 +1258,13 @@ export class FluidLabRenderer {
 
   private ensureRequestedOptionalPipelines(requested: readonly OptionalRendererPipeline[]) {
     const wants = new Set(requested);
+    if (wants.has("cloth-surface")) this.ensureOptionalPipeline(
+      "cloth-surface", this.clothSurfaceRenderer,
+      (device) => new ClothSurfaceRenderer(device, this.uniformBuffer!),
+      (pipeline) => pipeline.initialize(),
+      (pipeline) => { this.clothSurfaceRenderer = pipeline; },
+      (pipeline) => pipeline.destroy(),
+    );
     // The two technique overlays are the running method's own passes, resolved
     // by registration key. A method that registers nothing under a key compiles
     // nothing for it: the pass could only ever read a compact debug source that
@@ -1361,11 +1379,16 @@ export class FluidLabRenderer {
    * object than the one whose pose was copied, which is a gizmo drawn around the
    * wrong crate for as long as it takes the next readback to land.
    */
-  private publishRigidBodyPoses(readback: StagedReadback, ids: readonly string[]) {
+  private rigidPoseSubmitted=0;
+  private rigidPoseAccepted=0;
+  private publishRigidBodyPoses(readback: StagedReadback, ids: readonly string[],scene:SceneDescription) {
+    const ticket=++this.rigidPoseSubmitted,stamp=this.renderSceneStamp;
     void readback.read((bytes) => decodeGPURigidBodyPoses(new Float32Array(bytes), ids.length)).then((poses) => {
       // A stale device's frame must not overwrite the live one's poses.
-      if (!poses || !this.lifecycle.open) return;
+      if (!poses || !this.lifecycle.open||stamp!==this.renderSceneStamp||ticket<this.rigidPoseAccepted) return;
+      this.rigidPoseAccepted=ticket;
       this.latestRigidBodyPoses = poses.map((pose, index) => ({ id: ids[index], ...pose }));
+      publishSceneRigidSurfaces(scene,this.latestRigidBodyPoses);
       this.latestRigidBodyPoseRevision += 1;
     }, () => { /* Device loss: the host keeps the last poses. */ });
   }
@@ -1696,7 +1719,7 @@ export class FluidLabRenderer {
     if (!this.lifecycle.open || this.device !== device) return;
     this.upscalePipeline=upscalePipeline;
     this.upscaleSampler=device.createSampler({magFilter:"linear",minFilter:"linear"});
-    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: 416, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uniformBuffer = device.createBuffer({ label: "Fluid Lab view uniforms", size: VIEW_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bodyBuffer = device.createBuffer({ label: "Fluid Lab rigid bodies", size: GPU_RIGID_BODY_CAPACITY * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fluidTexture = device.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.columnBaseTexture = device.createTexture({ label: "Uniform-grid tall-cell fallback", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
@@ -2064,7 +2087,9 @@ export class FluidLabRenderer {
           environmentPlanarRefinementExemption: config.values.svoEnvironmentPlanarRefinementExemption === true,
           backdropRefinedRings: typeof config.values.svoBackdropRefinedRings === "number" ? config.values.svoBackdropRefinedRings : undefined,
         });
+        solver=await withDryClothPhysics(solver,device,scene);
       } else {
+        if (scene.cloth?.length && config.methodId !== "uniform-narrow-band-flip") throw new Error("Liquid–cloth coupling requires the narrowband FLIP method");
         if (scene.fluid.scheduledDrops && !takesScheduledDrops(method.id))
           throw new Error(`${method.label} cannot add liquid on a schedule; this scene's timed drops need a Uniform method`);
         solver=await (method.createSolverAsync
@@ -2824,12 +2849,12 @@ export class FluidLabRenderer {
         environmentRefinementDepth,
       }, primaryWorkMapRequested, activeSvoTuning.sunlightCacheEnabled, activeSvoTuning.waterShadowsEnabled, svoLightingOptions.coneTracingMode === "raster-ao" && !primaryWorkMapRequested);
     }
-    this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
+    this.ensureRequestedOptionalPipelines([...optionalRendererPipelineRequests(
       gridOverlay, pixelTraceRequested,
       sparsePresentationRequired && activeSvoDiagnostics.stageView !== "off",
       sparsePresentationRequired,
       sceneVesselPresentation(scene) === "outline",
-    ));
+    ), ...(scene.cloth?.length ? ["cloth-surface" as const] : [])]);
     // The probe's answer depends on the scene epoch, the presentation, and the
     // traversal tuning as much as on the pixel. Tracking them as one revision is
     // what lets a pinned ray notice that its numbers describe a frame that has
@@ -2851,7 +2876,7 @@ export class FluidLabRenderer {
         Math.min(width - 1, Math.floor(Math.max(0, Math.min(1, pixelTrace.normalizedX)) * width)),
         Math.min(height - 1, Math.floor(Math.max(0, Math.min(1, pixelTrace.normalizedY)) * height)),
       ];
-      pixelTraceRequestKey = `${width}x${height}:${pixelTracePixel[0]},${pixelTracePixel[1]}|${camera.azimuth_rad},${camera.elevation_rad},${camera.distance_m},${camera.target_m.x},${camera.target_m.y},${camera.target_m.z},${cameraTanHalfFov(camera)}|${this.pixelTraceSceneRevisionValue}`;
+      pixelTraceRequestKey = `${width}x${height}:${pixelTracePixel[0]},${pixelTracePixel[1]}|${camera.azimuth_rad},${camera.elevation_rad},${camera.roll_rad??0},${camera.distance_m},${camera.target_m.x},${camera.target_m.y},${camera.target_m.z},${cameraTanHalfFov(camera)}|${this.pixelTraceSceneRevisionValue}`;
     }
     const pixelTraceNow_ms = performance.now();
     const pixelTraceProbing = pixelTraceRequestKey !== undefined && svoPixelTraceProbeDue(
@@ -2938,7 +2963,8 @@ export class FluidLabRenderer {
     const cameraChanging = packed[4] !== Math.fround(position.x) || packed[5] !== Math.fround(position.y)
       || packed[6] !== Math.fround(position.z) || packed[7] !== Math.fround(cameraTanHalfFov(camera))
       || packed[8] !== Math.fround(camera.target_m.x) || packed[9] !== Math.fround(camera.target_m.y)
-      || packed[10] !== Math.fround(camera.target_m.z);
+      || packed[10] !== Math.fround(camera.target_m.z)
+      ||packed[104]!==Math.fround(basis.right.x)||packed[105]!==Math.fround(basis.right.y)||packed[106]!==Math.fround(basis.right.z);
     const composedLayers = gridOverlay ? composedVisualLayers(gridOverlay) : undefined;
     const particlesVisible = gridOverlay?.axis !== "off" && (composedLayers
       ? particleLayerShown(composedLayers) : gridOverlay?.mode === "particles");
@@ -2987,6 +3013,7 @@ export class FluidLabRenderer {
     // shader's view of this buffer is byte-identical.
     packed[100] = this.hoverHighlight?.first ?? 0; packed[101] = this.hoverHighlight?.last ?? 0;
     packed[102] = this.hoverHighlight ? .45 : 0; packed[103] = this.hoverHighlight ? 2.6 : 0;
+    packed.set([basis.right.x,basis.right.y,basis.right.z,0],104);
     this.device.queue.writeBuffer(this.uniformBuffer, 0, packed);
     // A body-free dry view can remain identical while the water advances.
     // The visibility key ignores only simulation-only uniform lanes; scene,
@@ -3014,13 +3041,19 @@ export class FluidLabRenderer {
         const orientation = body.renderOrientation ?? body.orientation;
         const color = SCENE_SHAPE_PALETTE_LINEAR[sceneShapeCode(shape)];
         bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, rigidAppearanceSkin(body.description)?.radius ?? robotRenderRadius(body) ?? boundingRadius(body)], offset);
-        bodyData.set([half[0], half[1], half[2], skin?.shape ?? (robotExtent ? BUB_RENDER_SHAPE : sceneShapeCode(shape))], offset + 4);
+        bodyData.set([half[0], half[1], half[2], skin?.shape ?? (robotExtent ? BUB_RENDER_SHAPE : shape === "rounded-plate" ? ROUNDED_PLATE_RENDER_TAG : sceneShapeCode(shape))], offset + 4);
         bodyData.set([orientation.w, orientation.x, orientation.y, orientation.z], offset + 8);
         bodyData.set([color[0], color[1], color[2], body.description.renderHidden ? -1 : rigidControlOwnerId(body.description) === selectedBodyId ? 1 : 0], offset + 12);
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
-    if (sparsePresentationRequired) this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies, this.rigidBoundsScratch));
+    const surfaceBodies=bodies.slice(0,GPU_RIGID_BODY_CAPACITY).map(body=>body.description);
+    const rigidCuts=this.rigidCutRenderAtlas??=new RigidCutRenderAtlas(this.device);
+    rigidCuts.setBodies(surfaceBodies);this.waterPipeline.setRigidSurfaceCuts(rigidCuts.view);
+    if (sparsePresentationRequired) {
+      this.svoDryScenePipeline?.setRigidSurfaceBodies(surfaceBodies);
+      this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies, this.rigidBoundsScratch));
+    }
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
     if (sparsePresentationRequired) {
@@ -3131,6 +3164,9 @@ export class FluidLabRenderer {
 
     }
     let svoEncoded = false;
+    const clothSurfaces = this.gpuFluid?.clothSurfaces ?? [];
+    if (this.clothSurfaceRenderer) this.clothSurfaceRenderer.setSurfaces(scene.cloth ?? [], clothSurfaces);
+    if (clothSurfaces.length) publishSceneClothSurfaces(scene, clothSurfaces);
     let requestedBundleStatus = this.svoDryScenePipeline?.presentationBundleStatus;
     const drySceneReplacement = (
       replacementEncoder: GPUCommandEncoder,
@@ -3146,6 +3182,11 @@ export class FluidLabRenderer {
         this.optionalPipelineFailures.set("svo-dry-scene", requestedBundleStatus.detail);
       } else if (replacementResult && this.svoDryScenePipeline) {
         this.optionalPipelineFailures.delete("svo-dry-scene");
+      }
+      const clothDepth = this.svoDryScenePipeline?.gBufferTextures?.hardwareDepth;
+      if (replacementResult && typeof replacementResult === "object" && clothDepth && this.clothSurfaceRenderer) {
+        this.clothSurfaceRenderer.encode(replacementEncoder, replacementResult.sampledTargetView, clothDepth.createView());
+        closeStage("cloth-surface");
       }
       return replacementResult;
     };
@@ -3434,7 +3475,7 @@ export class FluidLabRenderer {
         this.onStatus({ state: "unavailable", label: `GPU submission failed: ${error instanceof Error ? error.message : String(error)}`, failure: error instanceof SimulationFailureError ? error.failure : undefined, resource: webGPUPlatformResourcePlugin });
       }
     });
-    if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, GPU_RIGID_BODY_CAPACITY).map((body) => body.description.id));
+    if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, GPU_RIGID_BODY_CAPACITY).map((body) => body.description.id),scene);
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read({ onSubmittedWorkDone: () => presentationCompletion });
     const presentationStageTraceRead = presentationTraceResolved && presentationTrace
@@ -3510,6 +3551,8 @@ export class FluidLabRenderer {
     try { this.particleOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.particleSurfacePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.clothSurfaceRenderer?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
+    try { this.rigidCutRenderAtlas?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseReadbacks]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
     }

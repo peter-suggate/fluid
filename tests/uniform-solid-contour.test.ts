@@ -12,9 +12,9 @@ test("trough contact mesh retains native voxel contact through ball impact",{ski
  await withUniformDevice("resolution-independent solid contact",async device=>{
   const h=.0125,scene=createUniformTroughScene("settled-tank",h);
   const level=Math.max(...scene.fluid.initialLiquidVolumes!.map(v=>v.shape==="box"?v.max_m.y:0));
-  const uniform=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const uniform=device.createBuffer({size:432,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   const bodies=device.createBuffer({size:1536,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM});
-  const words=new Float32Array(104);words.set([3.2,1.2,1.2,0],12);words.set([256,96,96,1],20);device.queue.writeBuffer(uniform,0,words);
+  const words=new Float32Array(108);words.set([3.2,1.2,1.2,0],12);words.set([256,96,96,1],20);device.queue.writeBuffer(uniform,0,words);
   const water=new RasterWaterPipeline(device,"rgba8unorm",uniform,bodies);
   await water.initialize();
   const full=await device.createComputePipelineAsync({layout:water.denseExtractionLayoutForQA,compute:{module:device.createShaderModule({code:surfaceExtractionShader.replace("  classifyCube(vec3i(gid));","  classifyCube(vec3i(gid)+umWallLow());")}),entryPoint:"extractMain"}});

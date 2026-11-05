@@ -6,7 +6,7 @@ import { RasterWaterPipeline, surfaceExtractionShader } from "../lib/core/webgpu
 
 test("shared dense water samples preserve the reference triangle multiset", {skip:!process.env.WEBGPU_NODE_MODULE}, async()=>{
   await withUniformDevice("shared water classification",async device=>{
-    const uniform=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    const uniform=device.createBuffer({size:432,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
     const bodies=device.createBuffer({size:GPU_RIGID_BODY_CAPACITY*64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM});
     const water=new RasterWaterPipeline(device,"rgba8unorm",uniform,bodies);
     const textures:GPUTexture[]=[];
@@ -15,7 +15,7 @@ test("shared dense water samples preserve the reference triangle multiset", {ski
       const module=device.createShaderModule({code:surfaceExtractionShader});
       const reference=await device.createComputePipelineAsync({layout:water.denseExtractionLayoutForQA,compute:{module,entryPoint:"extractMain"}});
       const n=17;
-      const words=new Float32Array(104);words.set([1.7,1.7,1.7,0],12);words.set([n,n,n,1],20);
+      const words=new Float32Array(108);words.set([1.7,1.7,1.7,0],12);words.set([n,n,n,1],20);
       device.queue.writeBuffer(uniform,0,words);
       const extract=async(legacy:boolean)=>{
         const encoder=device.createCommandEncoder();

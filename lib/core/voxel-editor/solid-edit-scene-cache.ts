@@ -1,4 +1,5 @@
 import type { SceneDescription } from "../model";
+import { copySceneClothSurfaces } from "../../cloth/scene-geometry";
 import { solidPatchListExtends } from "../solid-patch-list";
 import { reuseSolidWorld, sceneHoldsSolidWorld, sceneWithSolidStroke, solidWorldContentStamp,
   type SolidWorldVoxelPatch } from "../solid-world";
@@ -28,8 +29,9 @@ export function extendSolidEditScene(base: SceneDescription,
 export function truncatedSolidEditScene(base: SceneDescription, patchCount: number,
   remembered: SceneDescription | undefined): SceneDescription {
   const held = remembered?.solidVoxels.length === patchCount ? remembered : undefined;
-  const scene = { ...base, solidVoxels: held ? held.solidVoxels : base.solidVoxels.slice(0, patchCount) };
-  if (held) reuseSolidWorld(held, scene);
+  if (base.cloth?.length && !held) throw new Error("Cloth undo requires its retained document endpoint; resend the whole scene");
+  const scene = { ...base, ...(held && {cloth: held.cloth}), solidVoxels: held ? held.solidVoxels : base.solidVoxels.slice(0, patchCount) };
+  if (held) { reuseSolidWorld(held, scene); copySceneClothSurfaces(held, scene); }
   return scene;
 }
 

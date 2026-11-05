@@ -44,7 +44,7 @@ import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,uniformMixedVertexBuried
  * h cells and the shift is bounded by 4h, including large timesteps; the
  * required shift is the budget's diagnostic. */
 /** Floats of the NB scalar volume budget, and where its control rate sits. */
-export const NB_VOLUME_BUDGET_FLOATS=9,NB_VOLUME_RATE_FLOAT=8;
+export const NB_VOLUME_BUDGET_FLOATS=10,NB_VOLUME_RATE_FLOAT=8,NB_VOLUME_COMPENSATION_FLOAT=9;
 /** The most volume control may ask of the liquid, in 1/s: the long dam break
  * at 1/30 s loses its volume at about 1/s where its front lands. */
 const NB_VOLUME_RATE_LIMIT=4;
@@ -58,15 +58,15 @@ const NB_VOLUME_DEAD_BAND=0.01;
 const REDUCE_GRID=4096;
 const VOLUME_PASS:GPUComputePassDescriptor={label:"Uniform mixed global surface volume"},BUDGET_PASS:GPUComputePassDescriptor={label:"NB scalar volume sources"};
 export class UniformMixedSurfaceVolume {
- /** NB budget: target, initialized, a word no stage writes, last normal shift,
+ /** NB budget: target, initialized, reserved outflow tally, last normal shift,
   * volume before correction, initial volume, last measured volume, target,
-  * then the gauge's volume control rate in 1/s. */
+  * then the gauge's volume control rate in 1/s and the compensated source remainder. */
  readonly budget:GPUBuffer;
  private readonly budgetParams:GPUBuffer;
  /** beginStep's parameter words: dt, added cells, open top, control rate. */
  private readonly budgetWords=new Float32Array(4);
  private budgetCaptured=false;
- get allocatedBytes():number{return 48;}
+ get allocatedBytes():number{return 4*NB_VOLUME_BUDGET_FLOATS+16;}
  /** Bytes of bind()'s scratch at that many h tiles. The sections the lattice
   * fixes come first: the corner scales (a word a vertex), the partial rows
   * and their chunk sums, the Newton state and three flags a tile. Then the
@@ -181,14 +181,14 @@ ${sourceScale}
 ${levelSetFillWGSL}
 ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}${this.solid?uniformMixedVertexBuriedWGSL:""}
 // What an owner can hold: its open fraction (an h cell's, a 4h owner's tile's).
-fn umCapacity(o:UMOwner)->f32{if(!umSolidEnabled()){return 1.0;}if(o.width==1u){return umCellOpen(vec3i(umOrigin(o)));}return umTileOpen(o.tile);}
+fn umCapacity(o:UMOwner)->f32{if(o.width==1u){return umFreeCellCapacity(vec3i(umOrigin(o)));}return umFreeTileCapacity(o.tile);}
 // A cut 4h owner's filled volume in h cells: the tetrahedral fill of each h
 // cell of its tile under the owner's trilinear field, times the cell's open
 // fraction.
 fn svOpenFill(v:array<f32,8>,origin:vec3i)->f32{
  var sum=0.0;
  for(var s=0u;s<64u;s++){
-  let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umCellOpen(origin+vec3i(cell));
+  let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umFreeCellCapacity(origin+vec3i(cell));
   if(open<=0.0){continue;}
   let base=vec3f(cell);var c:array<f32,8>;var negative=0u;
   for(var k=0u;k<8u;k++){

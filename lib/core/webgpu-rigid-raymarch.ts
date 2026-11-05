@@ -1,3 +1,4 @@
+import { rigidCutRenderWGSL } from "./rigid-cut-render";
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { seaweedShaderLibrary } from "./seaweed-render";
 import { robotShaderLibrary } from '../interaction/features/robot/render';
@@ -20,7 +21,8 @@ import { unifiedLightingShaderLibrary, waterSceneOpticsShaderLibrary } from "./w
  * its first consumer and WGSL requires declaration before use; a shader that
  * wants the slab test for its own tank bounds gets it from the same include.
  */
-export const rigidBodyRaymarchShaderLibrary = /* wgsl */ `
+export function rigidBodyRaymarchWGSL(cutBinding = 9): string { return /* wgsl */ `
+${rigidCutRenderWGSL(0, cutBinding)}
 ${robotShaderLibrary}
 ${seaweedShaderLibrary}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
@@ -45,7 +47,7 @@ fn cylinderRigidHit(ro:vec3f,rd:vec3f,radius:f32,halfHeight:f32,capped:bool)->Ri
     if(t>1e-4&&t<best.t&&dot(p.xz,p.xz)<=radius*radius){best=RigidHit(t,vec3f(0,side,0));}}}
   return best;
 }
-fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU)->RigidHit{
+fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU,bodyIndex:u32)->RigidHit{
   if(body.colorSelected.w<0.0){return RigidHit(1e20,vec3f(0,1,0));}
   let o=qinv(body.orientation,ro-body.positionRadius.xyz);let d=qinv(body.orientation,rd);let shape=i32(round(body.halfSizeShape.w));var hit=RigidHit(1e20,vec3f(0,1,0));
   if(shape==0){hit=sphereRigidHit(o,d,vec3f(0),body.halfSizeShape.x);}
@@ -54,13 +56,15 @@ fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU)->RigidHit{
       if(q.x>=q.y&&q.x>=q.z){n=vec3f(sign(p.x),0,0);}else if(q.y>=q.z){n=vec3f(0,sign(p.y),0);}hit=RigidHit(t,n);}}
   else if(shape==2){hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,false);let upper=sphereRigidHit(o,d,vec3f(0,body.halfSizeShape.y,0),body.halfSizeShape.x);let lower=sphereRigidHit(o,d,vec3f(0,-body.halfSizeShape.y,0),body.halfSizeShape.x);if(upper.t<hit.t){hit=upper;}if(lower.t<hit.t){hit=lower;}}
   else if(shape==5){let robot=bubHit(o,d,body.halfSizeShape.xyz);hit=RigidHit(robot.t,robot.normal);}
+  else if(shape==10){let plate=roundedPlateSurfaceHit(o,d,body.halfSizeShape.xyz,bodyIndex);hit=RigidHit(plate.t,plate.normal);}
   else if(shape==9){let weed=seaweedHit(o,d);hit=RigidHit(weed.t,weed.normal);}
   else{hit=cylinderRigidHit(o,d,body.halfSizeShape.x,body.halfSizeShape.y,true);}
   return RigidHit(hit.t,normalize(qrot(body.orientation,hit.n)));
 }
-fn pickNearestRigid(ro:vec3f,rd:vec3f)->RigidPick{var best=RigidPick(1e20,vec3f(0,1,0),0u);for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i+=1u){if(i>=u32(round(u.options.z))){break;}let hit=bodyRigidHit(ro,rd,bodies[i]);if(hit.t<best.t){best=RigidPick(hit.t,hit.n,i);}}return best;}
+fn pickNearestRigid(ro:vec3f,rd:vec3f)->RigidPick{var best=RigidPick(1e20,vec3f(0,1,0),0u);for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i+=1u){if(i>=u32(round(u.options.z))){break;}let hit=bodyRigidHit(ro,rd,bodies[i],i);if(hit.t<best.t){best=RigidPick(hit.t,hit.n,i);}}return best;}
 fn nearestRigid(ro:vec3f,rd:vec3f)->RigidHit{let pick=pickNearestRigid(ro,rd);return RigidHit(pick.t,pick.n);}
-`;
+`; }
+export const rigidBodyRaymarchShaderLibrary = rigidBodyRaymarchWGSL();
 
 /**
  * Beyond this the pick missed every body. Mirrors the marcher's own sentinel.
@@ -105,13 +109,13 @@ export const RIGID_SCENE_SURFACE = Object.freeze({
  * a fluid-only scene stays a fluid-only scene.
  */
 export const fluidOnlyRigidSceneShader = /* wgsl */ `
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16>, cameraBasisPadding:array<vec4f,1>, cameraBasisRight:vec4f }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var<storage,read> bodies:array<BodyGPU,${GPU_RIGID_BODY_CAPACITY}>;
 ${waterSceneOpticsShaderLibrary(0, 2, 3)}
 ${cameraApertureShaderLibrary("u")}
-${rigidBodyRaymarchShaderLibrary}
+${rigidBodyRaymarchWGSL(4)}
 ${environmentShaderLibrary}
 ${unifiedLightingShaderLibrary}
 // The same key the water shades with, resolved the same way: an authored
@@ -124,7 +128,7 @@ struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   let ndc=input.uv*2.0-1.0;let ro=u.cameraPosition.xyz;
-  let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  let forward=normalize(u.cameraTarget.xyz-ro);let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));
   let aperture=cameraTanHalfFov();
   let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
   let pick=pickNearestRigid(ro,rd);

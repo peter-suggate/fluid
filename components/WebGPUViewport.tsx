@@ -327,7 +327,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
    * the user pointed at.
    */
   const pixelTraceCameraKey = (view: CameraState): string =>
-    `${view.azimuth_rad}|${view.elevation_rad}|${view.distance_m}|${view.target_m.x},${view.target_m.y},${view.target_m.z}`;
+    `${view.azimuth_rad}|${view.elevation_rad}|${view.roll_rad??0}|${view.distance_m}|${view.target_m.x},${view.target_m.y},${view.target_m.z}`;
 
   const pixelTraceDrawConfig = (
     ui: Parameters<GPUViewportRenderBinding["pixelTraceDrawConfig"]>[0],

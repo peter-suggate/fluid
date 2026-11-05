@@ -546,14 +546,14 @@ function toneByte(linear: number): number {
   return Math.max(0, Math.min(255, Math.round(255 * Math.min(1, Math.max(0, linear)) ** (1 / 2.2))));
 }
 
-const SVO_VIEW_UNIFORM_FLOATS = 104;
+const SVO_VIEW_UNIFORM_FLOATS = 108;
 // The packing itself lives in ./svo-dry-frame-harness so the smoke lane and this
 // benchmark cannot mirror FluidLabRenderer differently. The literal stays named
 // here because it is this file's buffer-size contract; a divergence is loud.
 assert.equal(SVO_VIEW_UNIFORM_FLOATS, HARNESS_SVO_VIEW_UNIFORM_FLOATS,
   "view-uniform float count drifted from the shared dry-frame harness");
 
-/** Mirror of the FluidLabRenderer 416-byte view-uniform packing (webgpu-renderer.ts). */
+/** Mirror of the FluidLabRenderer 432-byte view-uniform packing (webgpu-renderer.ts). */
 function packViewUniforms(
   scene: SceneDescription,
   camera: CameraState,

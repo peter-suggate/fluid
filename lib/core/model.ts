@@ -1,3 +1,4 @@
+import { validateSolidBoxCuts, type SolidBoxCut } from './solid-cuts';
 import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
 import { sceneRenderProfileErrors, type SceneRenderProfile } from "./scene-render-profile";
 import sharedDefaultScene from "./default-scene.json";
@@ -16,6 +17,10 @@ import type { DisplayGradeAuthoring, WaterOpticsAuthoring } from "./webgpu-light
 import { WATER_ROUGHNESS_MIN } from "./webgpu-lighting";
 import type { InteractionDocument } from "../interaction/contracts";
 import { interactionCatalog } from "../interaction/installed";
+import type { ClothDocument } from "../cloth/types";
+import type { WetClothSourceProgram } from "../cloth/source-types";
+import { validateWetClothSourceProgram } from "../cloth/source-validation";
+import { validateClothDocument } from "../cloth/topology";
 
 export type { BackdropDescription } from "./backdrop";
 
@@ -46,7 +51,7 @@ export interface Quaternion {
  * `cup` is the first hollow one: an open-top vessel that carries water rather
  * than only displacing it.
  */
-export type RigidShape = "sphere" | "box" | "capsule" | "cylinder" | "cup";
+export type RigidShape = "sphere" | "box" | "capsule" | "cylinder" | "cup" | "rounded-plate";
 
 /** Simulation-time orbit with smooth acceleration, a steady run and a stop. */
 export interface PrescribedOrbitMotion {
@@ -76,6 +81,10 @@ export interface RigidBodyDescription {
   restitution: number;
   friction: number;
   motion?: "dynamic" | "static";
+  /** A plugin supplies each accepted pose; never bake this body as fixed scenery. */
+  kinematic?: boolean;
+  /** Exact local cuts, currently supported for static rounded plates. */
+  cuts?: readonly SolidBoxCut[];
   /** Motor-driven static body; the fluid receives its moving boundary velocity. */
   prescribedMotion?: PrescribedOrbitMotion;
   /** Absolute-time rigid pose track. localOffset_m attaches pieces to one moving pivot. */
@@ -119,7 +128,7 @@ export interface RigidPoseTrack {
 
 /** A motor resists forces like a static body, but its geometry moves each frame. */
 export function rigidBodyHasFixedPose(body: RigidBodyDescription): boolean {
-  return body.motion === "static" && !body.prescribedMotion && !body.poseTrack && !body.motorAttachment;
+  return body.motion === "static" && !body.prescribedMotion && !body.poseTrack && !body.motorAttachment && !body.kinematic;
 }
 
 export function rigidBodyHasVisibleFixedPose(body: RigidBodyDescription): boolean {
@@ -128,6 +137,10 @@ export function rigidBodyHasVisibleFixedPose(body: RigidBodyDescription): boolea
 
 export interface SceneDescription {
   schemaVersion: "2.0.0";
+  /** Deformable physical surfaces, resolved by the cloth domain plugins. */
+  cloth?: readonly ClothDocument[];
+  /** Exact source fields, emission and support/solid scripts for water-fabric fixtures. */
+  wetClothSource?: WetClothSourceProgram;
   /** Optional versioned interactive content; omitted legacy scenes retain their behavior. */
   interaction?: InteractionDocument;
   sceneId: string;
@@ -231,6 +244,8 @@ export interface SceneDescription {
      * regions.
      */
     walls?: "none";
+    /** No implicit floor or walls: this box allocates the initial free-space window. */
+    boundary?: "free-space";
   };
   /** Authoritative uniform lattice shared by scene geometry, SVO rendering, and fluid when enabled. */
   voxelDomain: {
@@ -508,6 +523,8 @@ export interface FluidInflow {
 export interface CameraState {
   azimuth_rad: number;
   elevation_rad: number;
+  /** Rotation of image up toward image right, in radians. Omitted is zero. */
+  roll_rad?: number;
   distance_m: number;
   target_m: Vec3;
   /**
@@ -639,6 +656,22 @@ export function parseScene(input: string): SceneDescription {
 
 export function validateScene(scene: SceneDescription): string[] {
   const errors: string[] = [];
+  if (scene.cloth !== undefined) {
+    if (!Array.isArray(scene.cloth)) errors.push("Scene cloth must be an array");
+    else {
+      const ids = new Set<string>();
+      for (const document of scene.cloth) {
+        try { errors.push(...validateClothDocument(document)); }
+        catch (error) { errors.push(`Cloth document: ${error instanceof Error ? error.message : String(error)}`); }
+        if (ids.has(document?.id)) errors.push(`Duplicate cloth document ${document.id}`);
+        ids.add(document?.id);
+      }
+    }
+  }
+  if (scene.wetClothSource !== undefined) {
+    try { errors.push(...validateWetClothSourceProgram(scene.wetClothSource)); }
+    catch (error) { errors.push(`Wet-cloth source: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   if (scene.renderProfile !== undefined) errors.push(...sceneRenderProfileErrors(scene.renderProfile));
   if (scene.interaction !== undefined) {
     try { interactionCatalog.inspectDocument(scene.interaction); }
@@ -699,6 +732,12 @@ export function validateScene(scene: SceneDescription): string[] {
   if (scene.solidSurface?.kind === "swept-flume") errors.push(...sweptFlumeSurfaceErrors(scene.solidSurface));
   else if (scene.solidSurface !== undefined && scene.solidSurface.kind !== "bath") errors.push("Unknown solid surface kind");
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
+  if (c?.boundary !== undefined) {
+    if (c.boundary !== "free-space") errors.push("Unsupported container boundary");
+    else if (c.walls !== undefined || c.top !== "open" || (c.shape ?? "box") !== "box" || c.depthBoundary === "symmetry" || c.fillFraction !== 0) {
+      errors.push("Free-space allocation requires an open box, zero implicit fill, closed depth faces and no grounded walls policy");
+    }
+  }
   if (c?.walls !== undefined) {
     if (c.walls !== "none") errors.push("Container walls must be omitted or 'none'");
     else if (c.top !== "open" || (c.shape ?? "box") !== "box" || c.depthBoundary === "symmetry" || scene.solidBoundary || scene.solidSurface
@@ -959,6 +998,8 @@ export function validateScene(scene: SceneDescription): string[] {
       if (!body.id || ids.has(body.id)) errors.push("Rigid body IDs must be unique and non-empty");
       ids.add(body.id);
       if (!SCENE_SHAPES_BY_CODE.some(shape => shape.name === body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
+      if(body.kinematic!==undefined&&(typeof body.kinematic!=='boolean'||body.kinematic&&body.motion!=='static'))errors.push('Kinematic pose ownership requires a static body');
+      if(body.cuts){try{validateSolidBoxCuts(body.cuts);}catch(e){errors.push(String(e));}if(body.shape!=='rounded-plate'||body.motion!=='static')errors.push('Solid cuts currently require static rounded plates');}
       if (body.appearance !== undefined && !(body.appearance === 'bub' && body.shape === 'capsule')
         && !(['paddleboat-red', 'paddleboat-teal', 'paddleboat-wheel', 'seaweed'].includes(body.appearance) && body.shape === 'box')) errors.push(`Unsupported appearance for body ${body.id}`);
       if (body.motorAttachment) {

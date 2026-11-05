@@ -121,8 +121,9 @@ export function createWorkerSolidEditAcceptance<T extends { document: SceneDescr
       queued(request.chain);
       const current = authoredBase(request.base);
       const { patchCount, stamp } = request.target;
-      const scene = patchCount <= current.document.solidVoxels.length
-        ? truncatedSolidEditScene(current.document, patchCount, scenes.held(stamp)) : undefined;
+      const held = scenes.held(stamp);
+      const scene = patchCount <= current.document.solidVoxels.length && (!current.document.cloth?.length || held)
+        ? truncatedSolidEditScene(current.document, patchCount, held) : undefined;
       if (!scene || solidWorldContentStamp(scene) !== stamp) {
         throw new SolidEditReferenceError(`Solid edit reference unresolved: no document of ${patchCount} patches `
           + `stamped ${stamp} precedes the ${current.document.solidVoxels.length} the worker holds `

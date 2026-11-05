@@ -43,9 +43,11 @@ import type { Vec3 } from "./model";
  */
 export const UNUSED_DIMENSION = "unused";
 
-export type SceneShapeName = "sphere" | "box" | "capsule" | "cylinder" | "cup";
+export type SceneShapeName = "sphere" | "box" | "capsule" | "cylinder" | "cup" | "rounded-plate";
 
 export interface SceneShapeKind {
+  /** Validation-only representations stay out of authoring until their shared edit contract passes. */
+  readonly editorPlacement?: boolean;
   readonly name: SceneShapeName;
   /**
    * What a person calls it. Here rather than in a component because two
@@ -404,6 +406,28 @@ export const SCENE_SHAPE_TABLE = Object.freeze({
     wgslVolume: `let t = ${CUP_WALL_FUNCTION}(d);
   return ${PI} * (d.x * d.x * d.y - (d.x - t) * (d.x - t) * (d.y - t));`,
   },
+  "rounded-plate": {
+    name:"rounded-plate",label:"Rounded plate",code:5,editorPlacement:false,
+    dimensionLabels:["core half width","rounding radius","core half length"],hollow:false,
+    inside:(d,p)=>Math.hypot(Math.max(Math.abs(p.x)-d.x,0),p.y,Math.max(Math.abs(p.z)-d.z,0))<=d.y,
+    distance_m:(d,p)=>Math.hypot(Math.max(Math.abs(p.x)-d.x,0),p.y,Math.max(Math.abs(p.z)-d.z,0))-d.y,
+    supportRadius_m:(d,n)=>d.x*Math.abs(n.x)+d.z*Math.abs(n.z)+d.y*Math.hypot(n.x,n.y,n.z),
+    boundingRadius_m:d=>Math.hypot(d.x,d.z)+d.y,
+    volume_m3:d=>8*d.x*d.z*d.y+2*Math.PI*(d.x+d.z)*d.y*d.y+4*Math.PI*d.y**3/3,
+    inertia_kg_m2:(d,rho)=>{
+      const x=d.x,r=d.y,z=d.z,m0=8*rho*x*z*r,mx=2*rho*Math.PI*r*r*x,mz=2*rho*Math.PI*r*r*z,mc=4*rho*Math.PI*r**3/3;
+      return {x:m0*(r*r+z*z)/3+mx*(z*z+8*z*r/(3*Math.PI)+r*r/2)+mz*(z*z/3+r*r/4)+mc*(z*z+.75*z*r+.4*r*r),
+        y:m0*(x*x+z*z)/3+mx*(x*x/3+z*z+8*z*r/(3*Math.PI)+r*r/4)+mz*(z*z/3+x*x+8*x*r/(3*Math.PI)+r*r/4)+mc*(x*x+z*z+.75*(x+z)*r+.4*r*r),
+        z:m0*(x*x+r*r)/3+mx*(x*x/3+r*r/4)+mz*(x*x+8*x*r/(3*Math.PI)+r*r/2)+mc*(x*x+.75*x*r+.4*r*r)};
+    },
+    renderHalfExtent_m:d=>[d.x+d.y,d.y,d.z+d.y],paletteLinear:[.24,.26,.29],
+    wgslRenderHalf:`return vec3f(d.x+d.y,d.y,d.z+d.y);`,
+    wgslInside:`return length(vec3f(max(abs(p.x)-d.x,0.0),p.y,max(abs(p.z)-d.z,0.0)))<=d.y;`,
+    wgslDistance:`return length(vec3f(max(abs(p.x)-d.x,0.0),p.y,max(abs(p.z)-d.z,0.0)))-d.y;`,
+    wgslSupportRadius:`return d.x*abs(local.x)+d.z*abs(local.z)+d.y*length(local);`,
+    wgslBoundingRadius:`return length(d.xz)+d.y;`,
+    wgslVolume:`return 8.0*d.x*d.z*d.y+6.283185307179586*(d.x+d.z)*d.y*d.y+4.1887902047863905*d.y*d.y*d.y;`,
+  },
 } as const satisfies Record<SceneShapeName, SceneShapeKind>);
 
 export const SCENE_SHAPE_NAMES = Object.freeze(
@@ -506,7 +530,7 @@ function emitDispatch(signature: string, arm: (shape: SceneShapeKind) => string,
  */
 export function sceneShapeWgsl(): string {
   const constants = SCENE_SHAPES_BY_CODE
-    .map((shape) => `const RIGID_SHAPE_${shape.name.toUpperCase()}: i32 = ${shape.code};`)
+    .map((shape) => `const RIGID_SHAPE_${shape.name.toUpperCase().replaceAll('-', '_')}: i32 = ${shape.code};`)
     .join("\n");
   return [
     "// Generated from SCENE_SHAPE_TABLE in lib/core/scene-shape.ts. Do not edit here.",

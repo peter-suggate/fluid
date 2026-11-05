@@ -1,3 +1,4 @@
+import { RigidCutRenderAtlas } from "./rigid-cut-render";
 import { Compiled } from "./compiled";
 import { StagedReadback } from "./staged-readback";
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
@@ -1470,7 +1471,7 @@ export const WATER_INTERFACE_CULL_MODES = Object.freeze({
 
 export const surfaceRasterShader = /* wgsl */ `
 ${waterInterfaceDepthWGSL}
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, cameraBasisPadding:array<vec4f,19>, cameraBasisRight:vec4f }
 struct SurfaceVertex { position:vec4f, normal:vec4f }
 override interfaceCoverageExpansionPixels:f32=0.0;
 override peelBehindFirstExit:f32=0.0;
@@ -1481,7 +1482,7 @@ ${cameraApertureShaderLibrary("u")}
 struct Out { @builtin(position) clip:vec4f, @location(0) world:vec3f, @location(1) normal:vec3f, @location(2) film:f32 }
 fn project(world:vec3f)->vec4f {
   let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
-  let right=normalize(cross(forward,vec3f(0.0,1.0,0.0))); let up=normalize(cross(right,forward));
+  let right=cameraRightDirection(forward); let up=normalize(cross(right,forward));
   let relative=world-u.cameraPosition.xyz; let depth=max(dot(relative,forward),0.001);
   let aspect=u.viewport.x/max(u.viewport.y,1.0);
   let aperture=cameraTanHalfFov();
@@ -1539,7 +1540,7 @@ struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
  */
 export const surfaceWireframeShader = /* wgsl */ `
 ${waterInterfaceDepthWGSL}
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, cameraBasisPadding:array<vec4f,19>, cameraBasisRight:vec4f }
 struct SurfaceVertex { position:vec4f, normal:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var<storage,read> vertices:array<SurfaceVertex>;
@@ -1552,7 +1553,7 @@ struct Out {
 }
 fn project(world:vec3f)->vec4f {
   let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
-  let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));
+  let right=cameraRightDirection(forward);
   let up=normalize(cross(right,forward));
   let relative=world-u.cameraPosition.xyz;
   let depth=max(dot(relative,forward),0.001);
@@ -1755,7 +1756,7 @@ export const compositeShader = /* wgsl */ `
 override wireframeOnly:f32=0.0;
 override simpleSurface:f32=0.0;
 override linearHdrOutput:f32=0.0;
-struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16> }
+struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, terrainMeta:vec4f, terrainFeatures:array<vec4f,16>, cameraBasisPadding:array<vec4f,1>, cameraBasisRight:vec4f }
 struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, colorSelected:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var sceneTexture:texture_2d<f32>;
@@ -1788,7 +1789,7 @@ ${waterSceneOpticsShaderLibrary(0, 15, 16)}
 ${cameraApertureShaderLibrary("u")}
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
-fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let aperture=cameraTanHalfFov();let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*aperture),dot(q,up)/(d*aperture));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
+fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=cameraRightDirection(f);let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let aperture=cameraTanHalfFov();let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*aperture),dot(q,up)/(d*aperture));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
 ${waterInterfaceSamplingWGSL}
 // Interface targets carry a binary validity mask in alpha. Their RGB is not
@@ -1805,7 +1806,7 @@ fn safeInterfaceSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{
 fn recoveredWallFilm(positionSample:vec4f,normalSample:vec4f)->f32{
   return max(0.0,normalSample.a/max(positionSample.a,1e-4)-1.0);
 }
-fn cameraRay(textureUV:vec2f)->vec3f{let ndc=vec2f(textureUV.x*2.0-1.0,1.0-textureUV.y*2.0);let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();return normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);}
+fn cameraRay(textureUV:vec2f)->vec3f{let ndc=vec2f(textureUV.x*2.0-1.0,1.0-textureUV.y*2.0);let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();return normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);}
 ${rigidBodyRaymarchShaderLibrary}
 ${environmentShaderLibrary}
 ${unifiedLightingShaderLibrary}
@@ -2061,7 +2062,7 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{if(linearHdrOutput>.5){return vec4f(colo
   // while sampled WebGPU textures have Y=0 there. The shared legacy upscaler
   // performs the same conversion for the final target; all raster-path
   // intermediate reads and world projections must do it here as well.
-  let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
+  let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
   let scene=safeSample(sceneTexture,textureUV);if(wireframeOnly>.5){return finish(scene.rgb,ndc);}var front=safePositionSample(frontPosition,textureUV);if(front.a<.5){return finish(scene.rgb,ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
   // Simple material: the actual mesh silhouette and normals over undistorted
@@ -2308,6 +2309,8 @@ export class RasterWaterPipeline {
   private rigidScenePipeline?: GPURenderPipeline;
   private rigidSceneBindGroup?: GPUBindGroup;
   private rigidBodyCount = 0;
+  private rigidSurfaceCuts?: GPUTextureView;
+  private fallbackRigidSurfaceCuts?: RigidCutRenderAtlas;
   private sceneTexture?: GPUTexture;
   private sceneTextureView?: GPUTextureView;
   private interfaceViews?: SimpleWaterInterfaces;
@@ -2493,6 +2496,7 @@ export class RasterWaterPipeline {
   async initialize(
     onProgress:(label:string,completed:number,total:number)=>void=()=>{},
   ) {
+    if (this.device.limits.maxSampledTexturesPerShaderStage < 17) throw new Error("Water composite with editable rigid surfaces requires 17 sampled textures per shader stage");
     const [extract, prepare, bulkPrepare, surface, wireframe, caustic, composite, rigidScene, reflectionBounds] = await Promise.all([
       checkedModule(this.device, "Water isosurface extraction", surfaceExtractionShader),
       checkedModule(this.device, "Water extraction dispatch prepare", extractionPrepareShader),
@@ -2521,6 +2525,7 @@ export class RasterWaterPipeline {
       ,{ binding: 21, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
       ,{ binding: 22, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
       ,{ binding: 23, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+      ,{ binding: 24, visibility: GPUShaderStage.COMPUTE, texture:{sampleType:"unfilterable-float",viewDimension:"2d"} }
     ] });
     this.bulkPrepareLayout = this.device.createBindGroupLayout({ label: "Water BULK16 window prepare bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
@@ -2542,6 +2547,7 @@ export class RasterWaterPipeline {
     // finally reads — the consumer whose absence made the whole caustic path a
     // no-op. 15 and 16 are the scene's own optics and caustic receiver; 17 is
     // the mixed topology whose detail table addresses a packed liquid field.
+    this.fallbackRigidSurfaceCuts ??= new RigidCutRenderAtlas(this.device);
     this.compositeLayout = this.device.createBindGroupLayout({ label: "Water composite bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ...[1,3,5,11,13,14].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
@@ -2549,6 +2555,7 @@ export class RasterWaterPipeline {
       ...[2,4,10,12].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" as const } })),
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+      { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
       { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
@@ -2564,7 +2571,8 @@ export class RasterWaterPipeline {
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
     ] });
     this.causticLayout = this.device.createBindGroupLayout({ label: "Water caustic projection bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
@@ -3066,6 +3074,12 @@ export class RasterWaterPipeline {
    * attachment to its once-only clear, which is why this invalidates it:
    * removing the last body must repaint the background the body was over.
    */
+  setRigidSurfaceCuts(view: GPUTextureView) {
+    if (this.rigidSurfaceCuts === view) return;
+    this.rigidSurfaceCuts = view;
+    this.rebuildBindGroups();
+  }
+
   setRigidBodyCount(count: number) {
     const bodies = Math.max(0, Math.min(RASTER_WATER_MAXIMUM_BODIES, Math.floor(count)));
     if (this.rigidBodyCount === bodies) return;
@@ -3114,7 +3128,8 @@ export class RasterWaterPipeline {
       { binding: 20, resource: (this.levelSetSource?.solidBoundary?.terrain ?? this.fallbackSolidTerrain!).createView() },
       { binding: 21, resource: this.levelSetSource?.solidBoundary?.bodies ?? {buffer:this.fallbackSolidUniform!} },
       { binding: 22, resource: this.levelSetSource?.solidBoundary?.analyticTerrain ?? {buffer:this.fallbackSolidUniform!} },
-      { binding: 23, resource: this.mixedBulk?.binding ?? { buffer: this.fallbackSparseControl, size: 4 } }
+      { binding: 23, resource: this.mixedBulk?.binding ?? { buffer: this.fallbackSparseControl, size: 4 } },
+      { binding: 24, resource: (this.levelSetSource?.solidBoundary?.bodyCuts??this.fallbackSolidTerrain!).createView() }
     ] });
     if (this.bulkPrepareLayout && this.bulkWindowsDispatchBuffer && this.fallbackSparseControl) this.bulkPrepareBindGroup = this.device.createBindGroup({ layout: this.bulkPrepareLayout, entries: [
       { binding: 0, resource: this.mixedBulk?.binding ?? { buffer: this.fallbackSparseControl, size: 4 } }, { binding: 1, resource: { buffer: this.bulkWindowsDispatchBuffer } }
@@ -3131,6 +3146,7 @@ export class RasterWaterPipeline {
     if (this.surfacePeelLayout && this.backPosition) this.surfacePeelBindGroup = this.device.createBindGroup({ layout: this.surfacePeelLayout, entries: [{ binding: 0, resource: this.backPosition.createView() }] });
     if (this.rigidSceneLayout && this.waterSceneOpticsBuffer && this.causticReceiver) this.rigidSceneBindGroup = this.device.createBindGroup({ label: "Fluid-only rigid body inputs", layout: this.rigidSceneLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.bodyBuffer } },
+      { binding: 4, resource: this.rigidSurfaceCuts ?? this.fallbackRigidSurfaceCuts!.view },
       { binding: 2, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 3, resource: this.causticReceiver.createView() }
     ] });
     this.compositeBindGroup = this.sceneTextureView ? this.compositeBindGroupFor(this.sceneTextureView) : undefined;
@@ -3147,6 +3163,7 @@ export class RasterWaterPipeline {
     const contourField = this.levelSetSource?.contourVertexPhi ? this.levelSetSource.vertexPhi : this.volume;
     const bindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
       { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: (mixedSurface ? this.fallbackField : contourField!).createView({ dimension: "3d" }) }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() },
+      { binding: 9, resource: this.rigidSurfaceCuts ?? this.fallbackRigidSurfaceCuts!.view },
       { binding: 17, resource: mixedSurface ? this.mixedOwnership! : { buffer: this.fallbackSparseControl, size: 4 } },
       { binding: 18, resource: ((mixedSurface ? this.denseNormalPhi : undefined) ?? this.fallbackField).createView({ dimension: "3d" }) },
       { binding: 19, resource: (this.coarseVertexPhi ?? this.fallbackField).createView({ dimension: "3d" }) },
@@ -3440,6 +3457,7 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
+    this.fallbackRigidSurfaceCuts?.destroy();
     this.lensCamera?.destroy();
     this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
     for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.bulkWindowsDispatchBuffer,this.reflectionBounds,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }

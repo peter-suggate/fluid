@@ -652,7 +652,7 @@ fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
   let ndc=uv*2.0-1.0;
   let ro=uniforms.cameraPosition.xyz;
   let forward=normalize(uniforms.cameraTarget.xyz-ro);
-  let right=normalize(cross(forward,vec3f(0,1,0)));
+  let right=cameraRightDirection(forward);
   let up=normalize(cross(right,forward));
   let rd=normalize(forward+right*ndc.x*viewport.x/viewport.y*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
 

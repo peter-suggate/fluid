@@ -77,9 +77,23 @@ export const CAMERA_APERTURE_UNIFORM_LANE = 7;
  * historical lens keeps them rendering what they rendered, where a clamp to
  * 0.02 would collapse every one of their frames to a pinhole.
  */
-export function cameraApertureShaderLibrary(uniformName = "uniforms"): string {
+export const VIEW_UNIFORM_FLOATS=108;
+export const VIEW_UNIFORM_BYTES=VIEW_UNIFORM_FLOATS*4;
+export const CAMERA_RIGHT_UNIFORM_LANE=104;
+/** Appended orientation ABI. A zero vector preserves legacy unrolled views. */
+export function cameraBasisShaderLibrary(uniformName='uniforms'):string{return /* wgsl */ `
+fn cameraRightDirection(forward:vec3f)->vec3f{
+ let authored=${uniformName}.cameraBasisRight.xyz;
+ if(dot(authored,authored)>.5){return normalize(authored);}
+ let horizontal=cross(forward,vec3f(0.0,1.0,0.0));
+ if(dot(horizontal,horizontal)<1e-20){return vec3f(1.0,0.0,0.0);}
+ return normalize(horizontal);
+}
+`;}
+export function cameraApertureShaderLibrary(uniformName = "uniforms",includeBasis=true): string {
   return /* wgsl */ `
 fn cameraTanHalfFov()->f32{let authored=${uniformName}.cameraPosition.w;return select(${CAMERA_TAN_HALF_FOV},authored,authored>0.0);}
+${includeBasis?cameraBasisShaderLibrary(uniformName):""}
 `;
 }
 

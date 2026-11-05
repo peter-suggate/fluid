@@ -94,14 +94,14 @@ export const uniformWindowFixedFrame = (policy: number): boolean => policy === 1
 
 /** Shared classification in signed world pages. Policy 0 is the standalone
  * allocator's explicit table, 1 a closed tank, 2 its open-top column, 3 open
- * ground. Voxel/procedural solids inside stored pages remain the solid
+ * ground, 4 free space without a floor. Voxel/procedural solids inside stored pages remain the solid
  * sampler's responsibility. The authored box never moves with the frame. */
 export function uniformWindowWorldWGSL(word: (index: string) => string, prefix: string): string {
   return /* wgsl */ `
 fn ${prefix}FramePage()->vec3i{return bitcast<vec3i>(vec3u(${word("0u")},${word("1u")},${word("2u")}));}
 fn ${prefix}Policy()->u32{return ${word("12u")};}
 fn ${prefix}WorldSolid(q:vec3i)->bool{
- let policy=${prefix}Policy();if(policy==0u){return false;}
+ let policy=${prefix}Policy();if(policy==0u||policy==4u){return false;}
  let lo=bitcast<vec3i>(vec3u(${word("13u")},${word("14u")},${word("15u")}));
  let size=vec3i(vec3u(${word("16u")},${word("17u")},${word("18u")}));
  if(policy==3u){return q.y<lo.y;}

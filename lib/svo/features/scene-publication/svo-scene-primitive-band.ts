@@ -324,7 +324,7 @@ ${svoPrimitiveWGSL}
 ${svoScreenSpaceTerminationWGSL}
 
 @group(0) @binding(${bindings.uniforms}) var<uniform> uniforms:Uniforms;
-${cameraApertureShaderLibrary()}
+${cameraApertureShaderLibrary("uniforms",false)}
 @group(0) @binding(${bindings.params}) var<uniform> params:SvoBandParams;
 @group(0) @binding(${bindings.scene}) var<storage,read> bandScene:array<u32>;
 @group(0) @binding(${bindings.state}) var<storage,read_write> bandState:array<atomic<u32>>;

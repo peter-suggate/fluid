@@ -63,7 +63,7 @@ fn probeBuildFrontier(groupId:vec3u){
   if(mapping.nodeCount==0u || svoControlLoad(12u)!=0u){return;}
   let ro=uniforms.cameraPosition.xyz;
   let forward=normalize(uniforms.cameraTarget.xyz-ro);
-  let right=normalize(cross(forward,vec3f(0,1,0)));
+  let right=cameraRightDirection(forward);
   let up=normalize(cross(right,forward));
   // Pixel outer edges bound every pixel-center ray, including partial edge tiles.
   let minimum=vec2f(groupId.xy*vec2u(${x}u,${y}u));

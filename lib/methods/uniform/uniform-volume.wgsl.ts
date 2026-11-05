@@ -72,7 +72,7 @@ fn umSurfaceTargetOpen(vertices:array<f32,8>,origin:vec3i)->f32{
   let planar=residual<=1e-4*(1.0+magnitude);
   var fill=0.0;
   for(var s=0u;s<64u;s++){
-    let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umCellOpen(origin+vec3i(cell));
+    let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umFreeCellCapacity(origin+vec3i(cell));
     if(open<=0.0){continue;}
     let f=0.25*(vec3f(cell)+vec3f(0.5));
     if(planar){fill+=open*geometricPlaneBoxFraction(gradient,-(centre+dot(gradient,f-vec3f(0.5))),vec3f(0.25));}
@@ -84,7 +84,7 @@ fn umSurfaceTargetOpen(vertices:array<f32,8>,origin:vec3i)->f32{
 // plane): a workgroup holding the tile takes a lane per cell, and their sum
 // in cell order over 64 is umSurfaceTargetOpen.
 fn umSurfaceTargetOpenTerm(vertices:array<f32,8>,origin:vec3i,s:u32)->f32{
-  let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umCellOpen(origin+vec3i(cell));
+  let cell=vec3u(s&3u,(s>>2u)&3u,s>>4u);let open=umFreeCellCapacity(origin+vec3i(cell));
   if(open<=0.0){return 0.0;}
   var samples:array<f32,8>;var centre=0.0;var magnitude=0.0;
   for(var k=0u;k<8u;k++){let value=umTargetSample(vertices,vec3f(0.25)+0.5*vec3f(uvCorner(k)));

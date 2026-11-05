@@ -118,3 +118,27 @@ test("a cut retains the exact planar source through edit and undo", () => {
   assert.equal(undo.primitives.size, 0);
   assert.equal(dirty.length, 0, "undo never swaps representations or invalidates the whole source");
 });
+
+test("an authored empty initial world stages a complete generation without claiming geometry", () => {
+  const base = scene();
+  base.container = {...base.container, boundary:"free-space", vessel:"none"};
+  base.scenery = {palettes:{},nodes:[{id:"empty",kind:"room-shell",materialModel:"room",faces:[],floor:{colorLinear:[1,1,1]},wall:{colorLinear:[1,1,1]},ceiling:{colorLinear:[1,1,1]}}]};
+  delete base.terrain;
+  const solid=solidWorldForScene(base),residual=svoRenderResidual(base,solid);
+  const publications:{revision:number;dirty:unknown;added:unknown;initial:boolean}[]=[];
+  const world=Object.assign(Object.create(OctreeSparseBrickWorld.prototype),{
+    destroyed:false,sceneRevision:0,solidWorld:solid,renderSolidWorld:residual.residual,renderResidual:residual,
+    solidWorldStamp:solidWorldContentStamp(base),terrainFieldStamp:terrainFieldStamp(base),
+    stagedAuthored:[],stagedStaticBodies:"",
+    liveScenePrimitiveStates:new Map(),liveScenePrimitives:new Map(),liveScenePrimitiveList:[],
+    environmentDetailCellSize_m:0,planarTerminalsBaked:false,sceneWorldOrigin:[-.5,0,-.5],
+    sceneBrickDimensions:[4,4,4],brickSize:8,cellSize:[.03125,.03125,.03125],
+    proxyVoxelizer:{},stageAppearanceTables(){return false;},
+    stagePrimitivePublication(revision:number,dirty:unknown,added:unknown,initial:boolean){publications.push({revision,dirty,added,initial});},
+    advanceSceneRevision(){return ++this.sceneRevision;},
+  }) as OctreeSparseBrickWorld;
+  assert.equal(world.stageSceneUpdate(base),true);
+  assert.deepEqual(publications,[{revision:1,dirty:[{minimum:[-.5,0,-.5],maximum:[.5,1,.5]}],added:[],initial:true}]);
+  assert.equal(world.stageSceneUpdate(base),false,"unchanged empty revisions need no work");
+  assert.equal(publications.length,1);
+});

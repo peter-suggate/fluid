@@ -1,3 +1,4 @@
+import { sourceInitialBounds } from '../cloth/source-initial';
 import { proceduralSolidField } from "./procedural-solid";
 import { initialHeightFieldHeight } from "./initial-height-field";
 import { damBreakSignedDistanceAtNode, initialFluidBrickSignedDistanceAtNode,
@@ -385,6 +386,7 @@ export function initialLiquidCellBounds(scene: SceneDescription, dimensions: rea
     const half = v.shape === "torus" ? { x: r, y: v.tubeRadius_m, z: r } : v.shape === "cylinder" ? { x: r, y: r, z: v.halfHeight_m } : { x: r, y: r, z: r };
     metres({ x: o.x-half.x, y: o.y-half.y, z: o.z-half.z }, { x: o.x+half.x, y: o.y+half.y, z: o.z+half.z });
   }
+  for (const b of sourceInitialBounds(scene)) metres({x:b.min[0],y:b.min[1],z:b.min[2]}, {x:b.max[0],y:b.max[1],z:b.max[2]});
   return out.every(([lo, hi]) => lo.concat(hi).every(Number.isFinite)) ? out : undefined;
 }
 

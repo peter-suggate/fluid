@@ -17,8 +17,8 @@ await withUniformDevice('trough impact probe',async device=>{
  const scene=createUniformTroughScene('settled-tank',h);const level=Math.max(...scene.fluid.initialLiquidVolumes!.map(v=>(v as any).max_m.y));
  if(process.env.ZERO_G)scene.fluid.gravity_m_s2={x:0,y:0,z:0};
  const owned:GPUBuffer[]=[];let water:RasterWaterPipeline|undefined;
- if(process.env.MESH){const u=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});const bodies=device.createBuffer({size:1536,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE});owned.push(u,bodies);
-  const words=new Float32Array(104);words.set([3.2,1.2,1.2,0],12);words.set([Math.round(3.2/h),Math.round(1.2/h),Math.round(1.2/h),1],20);device.queue.writeBuffer(u,0,words);
+ if(process.env.MESH){const u=device.createBuffer({size:432,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});const bodies=device.createBuffer({size:1536,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE});owned.push(u,bodies);
+  const words=new Float32Array(108);words.set([3.2,1.2,1.2,0],12);words.set([Math.round(3.2/h),Math.round(1.2/h),Math.round(1.2/h),1],20);device.queue.writeBuffer(u,0,words);
   water=new RasterWaterPipeline(device,'rgba8unorm',u,bodies);await water.initialize();console.log('water ready');}
  const solver=await createUniformSolver(device,scene,{...(process.env.STRICT?{bandExit:'strict'}:{}),...(process.env.FINE_CONTACT?{warmResolution:'h',coldRegions:'fine',coldFrameSkip:'off',regionTiering:'motion'}:{})});
  try{

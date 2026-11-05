@@ -16,7 +16,8 @@ export const VOXEL_MATERIAL_IDS = {
   capsule: 18,
   cylinder: 19,
   cup: 20,
-  white: 21
+  white: 21,
+  "rounded-plate":22
 } as const;
 
 export interface VoxelMaterial {
@@ -45,6 +46,7 @@ export interface VoxelMaterial {
  * They must not receive an sRGB-to-linear conversion when uploaded.
  */
 export const VOXEL_MATERIALS: ReadonlyArray<VoxelMaterial> = [
+  {id:VOXEL_MATERIAL_IDS["rounded-plate"],key:"rounded-plate",name:"Rounded clamp",closure:"opaque",baseColorLinear:[.24,.26,.29],emissiveLinear:[0,0,0],metallic:.3,roughness:.45,transmission:0,ior:1.45,colorProvenance:"Authored clamp neutral material"},
   {
     id: VOXEL_MATERIAL_IDS.white, key: "white", name: "White composite", closure: "opaque",
     baseColorLinear: [0.9, 0.9, 0.9], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.32, transmission: 0, ior: 1.45,

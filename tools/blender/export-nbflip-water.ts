@@ -71,8 +71,8 @@ try {
     if (step % 30 === 0 || step === steps) console.log(JSON.stringify({ phase: "simulate", step, time_s: solver.info.completedTime_s }));
   }
   const buffer = (size: number, usage: number) => { const b = device.createBuffer({ size, usage }); owned.push(b); return b; };
-  const uniforms = buffer(416, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-  const view = new Float32Array(104);
+  const uniforms = buffer(432, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+  const view = new Float32Array(108);
   const info = solver.info, tank = info.tankCells ?? [info.nx, info.ny, info.nz];
   view.set([scene.container.width_m, scene.container.height_m, scene.container.depth_m, 0], 12);
   view.set([...tank, 1], 20);

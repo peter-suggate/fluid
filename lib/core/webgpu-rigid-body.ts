@@ -1,3 +1,4 @@
+import { ROUNDED_PLATE_RENDER_TAG } from "./rigid-cut-render";
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { RIGID_MOTOR_FLOATS, rigidMotorWGSL, rigidControlOwnerId, rigidMotorStrength, updateRigidMotorDrive, type RigidMotorDrive } from "./rigid-motor";
 import { rigidAppearanceSkin } from "./rigid-appearance";
@@ -5,7 +6,7 @@ import { sculptCollisionWGSL } from "./sculpt-collision.wgsl";
 import type { RigidBodyDescription, SceneDescription } from "./model";
 import { Box3DMotorContacts } from "../interaction/adapters/box3d/motor-contacts";
 import type { Quaternion, Vec3 } from "./model";
-import { boundingRadius, primitiveVolume, type RigidBodyState } from "./rigid-body";
+import { boundingRadius, primitiveVolume, quaternionInverseRotate, quaternionRotate, type RigidBodyState } from "./rigid-body";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "../svo/features/scene-publication/svo-primitive-motion";
 import { sceneHasTerrain } from "./terrain";
 import {
@@ -80,6 +81,34 @@ export interface GPURigidBodyPick {
 export interface GPURigidBodyPose {
   position_m: Vec3;
   orientation: Quaternion;
+}
+
+export interface GPURigidExternalImpulse {
+  readonly bodyId: string;
+  readonly linearImpulse_N_s: readonly [number, number, number];
+  readonly angularImpulse_N_m_s: readonly [number, number, number];
+}
+
+/** Apply physical SI impulses to the resident record format. Mass/inertia
+ * lanes are density-normalized; angular momentum lanes already use SI. */
+export function applyGPURigidExternalImpulses(values: Float32Array, bodyIds: readonly string[], impulses: readonly GPURigidExternalImpulse[], fluidDensity_kg_m3: number): number[] {
+  if (!(fluidDensity_kg_m3 > 0 && Number.isFinite(fluidDensity_kg_m3))) throw new Error("Invalid rigid impulse density");
+  if (values.length < bodyIds.length * GPU_RIGID_STATE_FLOATS) throw new Error("Incomplete rigid state records");
+  for (const impulse of impulses) {
+    if (!bodyIds.includes(impulse.bodyId)) throw new Error(`Unknown rigid impulse body ${impulse.bodyId}`);
+    if (![...impulse.linearImpulse_N_s, ...impulse.angularImpulse_N_m_s].every(Number.isFinite)) throw new Error("Nonfinite rigid external impulse");
+  }
+  const changed = new Set<number>();
+  for (const impulse of impulses) {
+    const i = bodyIds.indexOf(impulse.bodyId), at = i * GPU_RIGID_STATE_FLOATS;
+    if (values[at + 30] !== GPU_RIGID_MOTION_LANES.dynamic) continue;
+    for (let a = 0; a < 3; a++) { values[at + 12 + a]! += impulse.linearImpulse_N_s[a]! * values[at + 20]! / fluidDensity_kg_m3; values[at + 24 + a]! += impulse.angularImpulse_N_m_s[a]!; }
+    const q = {w: values[at + 8]!, x: values[at + 9]!, y: values[at + 10]!, z: values[at + 11]!};
+    const local = quaternionInverseRotate(q, {x: values[at + 24]!, y: values[at + 25]!, z: values[at + 26]!});
+    const angular = quaternionRotate(q, {x: local.x * values[at + 21]! / fluidDensity_kg_m3, y: local.y * values[at + 22]! / fluidDensity_kg_m3, z: local.z * values[at + 23]! / fluidDensity_kg_m3});
+    values.set([angular.x, angular.y, angular.z], at + 16); changed.add(i);
+  }
+  return [...changed];
 }
 
 /**
@@ -531,11 +560,11 @@ fn solveBodyPair(aIndex: u32,bIndex: u32) {
   bodies[aIndex]=a;bodies[bIndex]=b;
 }
 fn publish(index: u32) {
-  let body=bodies[index];let shape=rigidShapeTag(body);
+  let body=bodies[index];let physicalShape=rigidShapeTag(body);let shape=select(physicalShape,-physicalShape-1,physicalShape<0);
   let skin=motors[index].renderHalfShape;
   let half=select(rigidShapeRenderHalf(shape,body.dimensions.xyz),skin.xyz,skin.w>0.0);
   let color=rigidShapePalette(shape);
-  renderBodies[index]=RenderBody(vec4f(body.positionShape.xyz,select(body.dimensions.w,length(half),skin.w>0.0)),vec4f(half,select(body.positionShape.w,skin.w,skin.w>0.0)),body.orientation,vec4f(color,body.material.w));
+  renderBodies[index]=RenderBody(vec4f(body.positionShape.xyz,select(body.dimensions.w,length(half),skin.w>0.0)),vec4f(half,select(select(f32(shape),${ROUNDED_PLATE_RENDER_TAG}.0,shape==5),skin.w,skin.w>0.0)),body.orientation,vec4f(color,body.material.w));
 }
 fn motionQuaternionXyzw(qWxyz:vec4f)->vec4f{return vec4f(qWxyz.yzw,qWxyz.x);}
 fn motionTransformMatches(record:SvoPrimitiveMotionRecord,body:RigidBody)->bool{
@@ -626,7 +655,7 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
   }
   // Native motor assemblies consume the kicked velocities and own contacts/drift.
   if(params.solidCell.w>.5){return;}
-  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}"}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body);" : "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
+  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "if(params.terrain.y>=0.0){planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}}"}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body);" : "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
   // A held body is the host's to place. Whatever the contact iterations did to
   // it — a pair impulse from a crate it was shoved into, an angular momentum it
   // would spin off the instant it is let go — is rolled back to the pose the
@@ -968,7 +997,7 @@ export class WebGPURigidBodySystem {
       stateWords[o+29]=nextMotionGenerations[index];
       const half = sceneShapeRenderHalfExtent_m(body.description.shape, d);
       const skin=rigidAppearanceSkin(body.description), renderHalf=skin?.half??half;
-      render.set([body.position_m.x,body.position_m.y,body.position_m.z,skin?.radius??state[o+7],renderHalf[0],renderHalf[1],renderHalf[2],skin?.shape??shape,q.w,q.x,q.y,q.z,...palette[shape],selection],index*GPU_RIGID_RENDER_FLOATS);
+      render.set([body.position_m.x,body.position_m.y,body.position_m.z,skin?.radius??state[o+7],renderHalf[0],renderHalf[1],renderHalf[2],skin?.shape??(body.description.shape==="rounded-plate"?ROUNDED_PLATE_RENDER_TAG:shape),q.w,q.x,q.y,q.z,...palette[shape],selection],index*GPU_RIGID_RENDER_FLOATS);
       const volume = primitiveVolume(body.description.shape, body.description.dimensions_m);
       const waterline = this.scene.container.fillFraction * this.scene.container.height_m;
       if (body.description.shape === "sphere") {
@@ -1047,6 +1076,50 @@ export class WebGPURigidBodySystem {
     finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
   }
 
+  private async readStateRecords(): Promise<Float32Array<ArrayBuffer>> {
+    if (this.disposed) throw new Error("Rigid system disposed");
+    const readback = this.device.createBuffer({label: "Coupled rigid state readback", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
+    try {
+      const encoder = this.device.createCommandEncoder({label: "Read accepted rigid state for cloth contact"});
+      encoder.copyBufferToBuffer(this.stateBuffer, 0, readback, 0, GPU_RIGID_STATE_BYTES); this.device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(GPUMapMode.READ);
+      if (this.disposed) throw new Error("Rigid system disposed during contact readback");
+      return new Float32Array(readback.getMappedRange().slice(0));
+    } finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
+  }
+
+  /** Explicit coupling barrier: callers await this before cloth CCD so neither
+   * stale host poses nor authored velocities enter the contact solve. */
+  async readStates(roster: readonly RigidBodyState[]): Promise<RigidBodyState[]> {
+    await this.finishNativeStep();
+    if (!this.bodyCount) return [];
+    const ids = [...this.bodyIds], values = await this.readStateRecords();
+    if (ids.some((id, i) => this.bodyIds[i] !== id) || ids.length !== this.bodyIds.length) throw new Error("Rigid roster changed during contact readback");
+    return ids.map((id, i) => {
+      const source = roster.find(body => body.description.id === id);
+      if (!source) throw new Error(`Rigid contact roster missing ${id}`);
+      const at = i * GPU_RIGID_STATE_FLOATS, vector = (offset: number): Vec3 => ({x: values[at + offset]!, y: values[at + offset + 1]!, z: values[at + offset + 2]!});
+      return {...source, position_m: vector(0), orientation: {w: values[at + 8]!, x: values[at + 9]!, y: values[at + 10]!, z: values[at + 11]!},
+        linearVelocity_m_s: vector(12), angularVelocity_rad_s: vector(16), angularMomentum_kg_m2_s: vector(24), held: values[at + 30] === GPU_RIGID_MOTION_LANES.held};
+    });
+  }
+
+  /** Contact kicks alter only momentum/velocity; the next native Box3D step
+   * imports these exact lanes through its existing velocity handoff. */
+  async applyExternalImpulses(impulses: readonly GPURigidExternalImpulse[]): Promise<void> {
+    if (!impulses.length) return;
+    await this.finishNativeStep();
+    const ids = [...this.bodyIds], values = await this.readStateRecords();
+    if (ids.some((id, i) => this.bodyIds[i] !== id) || ids.length !== this.bodyIds.length) throw new Error("Rigid roster changed during impulse handoff");
+    const changed = applyGPURigidExternalImpulses(values, ids, impulses, this.scene.fluid.density_kg_m3);
+    for (const i of changed) {
+      const at = i * GPU_RIGID_STATE_FLOATS;
+      this.device.queue.writeBuffer(this.stateBuffer, (at + 12) * 4, values, at + 12, 3);
+      this.device.queue.writeBuffer(this.stateBuffer, (at + 16) * 4, values, at + 16, 3);
+      this.device.queue.writeBuffer(this.stateBuffer, (at + 24) * 4, values, at + 24, 3);
+    }
+  }
+
   /** A bounded, user-triggered readback used only to begin mouse interaction. */
   async pick(origin: Vec3, direction: Vec3): Promise<GPURigidBodyPick | undefined> {
     if (this.bodyCount === 0 || this.disposed) return undefined;
@@ -1077,7 +1150,7 @@ export class WebGPURigidBodySystem {
     this.motorTime_s += dt_s;
     const c=this.scene.container,g=this.scene.fluid.gravity_m_s2;
     const solid=this.solidWorldCollisionSource;
-    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,this.motorTime_s,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),this.nativeMotorContacts?1:0]));
+    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,this.motorTime_s,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.boundary === "free-space"?-1:c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),this.nativeMotorContacts?1:0]));
     const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(1);pass.end();
   }
 

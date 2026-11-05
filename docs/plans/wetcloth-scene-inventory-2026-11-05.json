@@ -1,0 +1,2946 @@
+{
+  "schema_version": 1,
+  "purpose": "Planning inventory, not runnable scene definitions or verified reproductions",
+  "audited_on": "2026-11-05",
+  "upstream_repository": "https://github.com/raymondyfei/libwetcloth",
+  "upstream_commit": "b43993d775a0f9e3a9e32611f26936f2528fac37",
+  "source_units": "CGS; values in *_source are deliberately unconverted. Particle records are authored structural records, not a fluid-particle census.",
+  "scope": "All 39 upstream XML sources inventoried; 36 water sources imported. Honey, oil and acetaldehyde excluded by user instruction. Imported topology does not certify physical reproduction.",
+  "counts_by_family": {
+    "buoyancy_tests": 2,
+    "drag_tests": 3,
+    "general_examples": 11,
+    "parameter_tests": 11,
+    "ring_tests": 2,
+    "unit_tests": 10
+  },
+  "scenes": [
+    {
+      "id": "wetcloth-source-buoyancy-test-with",
+      "source_path": "assets/buoyancy_tests/buoyancy_test_with.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/buoyancy_tests/buoyancy_test_with.xml",
+      "git_blob_sha": "ad5ac4d392fc7fefd8c8629b663e5b4195879fc7",
+      "sha256": "838c670b94b33998cbbd748e8b301af0da5e69a683e5681627fe380cc3192faa",
+      "bytes": 514344,
+      "family": "buoyancy_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-4",
+        "manifoldsubsteps": "32",
+        "maxiters": "200"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 4833,
+        "cloth_objects": 3,
+        "triangle_faces": 8544,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 4,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "halfThickness": {
+          "value": "0.0165"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solidCohesion": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/buoyancy_test_with.hipnc",
+        "git_blob_sha": "a43faa81e0023f2b2d5cc43cdd5201cfc0ff410c"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-buoyancy-test-without",
+      "source_path": "assets/buoyancy_tests/buoyancy_test_without.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/buoyancy_tests/buoyancy_test_without.xml",
+      "git_blob_sha": "2d321c12790b5c020352e72bc2783ad1434559f8",
+      "sha256": "7743dcb15b7d42c104f8ee28106f1dcf5b397c0e0c4942275b304d05954ebf42",
+      "bytes": 514380,
+      "family": "buoyancy_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-4",
+        "manifoldsubsteps": "32",
+        "maxiters": "200"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 4833,
+        "cloth_objects": 3,
+        "triangle_faces": 8544,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 4,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "halfThickness": {
+          "value": "0.0165"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solidCohesion": {
+          "value": "0"
+        },
+        "applyPressureSolid": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/buoyancy_test_without.hipnc",
+        "git_blob_sha": "1d9f068d389b119ce3347f099a2272a9c5221195"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-dam-break-linear-drag",
+      "source_path": "assets/drag_tests/dam_break_linear_drag.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/drag_tests/dam_break_linear_drag.xml",
+      "git_blob_sha": "0b6df3cdffc17123ff0b567dee6eb4330e5a6757",
+      "sha256": "1a2e813eec71f0ad0474a066ea135b8a479233c797b0ecd79797e37cc8647a53",
+      "bytes": 504449,
+      "family": "drag_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "manifoldsubsteps": "36",
+        "maxiters": "200"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 4833,
+        "cloth_objects": 3,
+        "triangle_faces": 8544,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 4,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solidCohesion": {
+          "value": "0"
+        },
+        "cohesion": {
+          "value": "0"
+        },
+        "useNonlinearDrag": {
+          "value": "0"
+        },
+        "bendingScheme": {
+          "value": "tantheta"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/dam_break_linear_drag.hipnc",
+        "git_blob_sha": "52403947cb1924d91a99a3acd002708fff0e02fe"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-dam-break-nonlinear-drag",
+      "source_path": "assets/drag_tests/dam_break_nonlinear_drag.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/drag_tests/dam_break_nonlinear_drag.xml",
+      "git_blob_sha": "730331d5db87d1441a3de2b9977ec62c7de7146d",
+      "sha256": "0653ee98d1cc322975b1c90783492d84be8a126b595f25d969e187e0aca93926",
+      "bytes": 504415,
+      "family": "drag_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "manifoldsubsteps": "36",
+        "maxiters": "200"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 4833,
+        "cloth_objects": 3,
+        "triangle_faces": 8544,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 4,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solidCohesion": {
+          "value": "0"
+        },
+        "cohesion": {
+          "value": "0"
+        },
+        "bendingScheme": {
+          "value": "tantheta"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/dam_break_nonlinear_drag.hipnc",
+        "git_blob_sha": "464fb32aae944bb7bfe361b26192df3108b0ad1e"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-dam-break-nonlinear-drag-small",
+      "source_path": "assets/drag_tests/dam_break_nonlinear_drag_small.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/drag_tests/dam_break_nonlinear_drag_small.xml",
+      "git_blob_sha": "88b55b63eec3adb3a84b675519c3f89e0bd8f473",
+      "sha256": "b16f313fa3d9bdb7a12a03158ebaa02955edc9113c30192d5985c211df65b7c8",
+      "bytes": 164977,
+      "family": "drag_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "manifoldsubsteps": "36",
+        "maxiters": "200"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 1611,
+        "cloth_objects": 1,
+        "triangle_faces": 2848,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 4,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solidCohesion": {
+          "value": "0"
+        },
+        "yazdchiPower": {
+          "value": "1.0"
+        },
+        "cohesion": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/dam_break_nonlinear_drag_small.hipnc",
+        "git_blob_sha": "e1829cbc4e0240e07df998106a7d140b0a14f911"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-fuzzy-cloth",
+      "source_path": "assets/general_examples/fuzzy_cloth.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/fuzzy_cloth.xml",
+      "git_blob_sha": "7f9f7e98497c3749783100c52769e374a677798a",
+      "sha256": "57701bdf3d9942835ba0f224442d0905fb9f0351476b807beefdcf9882b2c47d",
+      "bytes": 9290470,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 8.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "pressurecriterion": "1e-8",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "1000"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 79200,
+        "cloth_objects": 1,
+        "triangle_faces": 79202,
+        "hair_records": 39200,
+        "rod_segments": 39200,
+        "scripts": 0,
+        "distancefields": 3,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.9992"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.9992"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.9992"
+        },
+        "cohesion": {
+          "value": "0"
+        },
+        "softCohesion": {
+          "value": "0"
+        },
+        "solidCohesion": {
+          "value": "0"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        },
+        "useVaryingFraction": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/fuzzy_cloth.hipnc",
+        "git_blob_sha": "ad22c5d11edb5b954c87007954a26f42a8d941a0"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-impermeable-medium",
+      "source_path": "assets/general_examples/impermeable_medium.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/impermeable_medium.xml",
+      "git_blob_sha": "dde0c14d727c545fe628a020a72794d2d7d5d3c4",
+      "sha256": "42eaf1b7a2a10ddcc875edcfdf70be4ba44bb8c1212ac814a4e15aff6bac8b1e",
+      "bytes": 4594293,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-6",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 40000,
+        "cloth_objects": 1,
+        "triangle_faces": 79202,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.001"
+        },
+        "restVolumeFraction": {
+          "value": "0.99"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        },
+        "restContactAngle": {
+          "value": "1.5707963268"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/impermeable_medium.hipnc",
+        "git_blob_sha": "79eee0a301ff5c3f25b8879f726466d4754371cb"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-impermeable-small",
+      "source_path": "assets/general_examples/impermeable_small.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/impermeable_small.xml",
+      "git_blob_sha": "cddc20495cce29e3a0aa31c384cc8d2c7bd95557",
+      "sha256": "7776c84d9663b54d6dbae1dd22af2c663ba84e3bfa950a99bddb71994035a8e7",
+      "bytes": 1089120,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-6",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 10000,
+        "cloth_objects": 1,
+        "triangle_faces": 19602,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.001"
+        },
+        "restVolumeFraction": {
+          "value": "0.99"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        },
+        "restContactAngle": {
+          "value": "1.5707963268"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-splash-cloth-large",
+      "source_path": "assets/general_examples/splash_cloth_large.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/splash_cloth_large.xml",
+      "git_blob_sha": "07023a96d78390a4209d10d563cc4850ff40b74c",
+      "sha256": "97946f045f4748248c671d7087c03c0046be19ff92afce4a06b65ff97506a231",
+      "bytes": 18884324,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 8.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "pressurecriterion": "1e-8",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "1000"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 159201,
+        "cloth_objects": 1,
+        "triangle_faces": 316808,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 3,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.9992"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.9992"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.9992"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "softCohesion": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/splash_cloth_large.hipnc",
+        "git_blob_sha": "14b1337d465e10a225813277723bc9549fbcead1"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-splash-cloth-medium",
+      "source_path": "assets/general_examples/splash_cloth_medium.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/splash_cloth_medium.xml",
+      "git_blob_sha": "cf1462d9fd009a4affe52834c91f0136f9da9591",
+      "sha256": "0d152f2e8c4b44debad88801b41721120f3db27cce12b3f6944416f06f729928",
+      "bytes": 4534502,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 39601,
+        "cloth_objects": 1,
+        "triangle_faces": 78408,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 3,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.9992"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.9992"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.9992"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "softCohesion": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/splash_cloth_medium.hipnc",
+        "git_blob_sha": "31c83d530e862af9eaf6150f700ef5aa689429c3"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-splash-cloth-small",
+      "source_path": "assets/general_examples/splash_cloth_small.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/splash_cloth_small.xml",
+      "git_blob_sha": "7e1afd1ae52dc15f6faca00bea5c2af6e2fcc50f",
+      "sha256": "ed600f9d44dbdef9ef69a9a8efd98f0de2143d2ce9b4522d3e282e3c8d48c024",
+      "bytes": 1062270,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "8"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 9801,
+        "cloth_objects": 1,
+        "triangle_faces": 19208,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 3,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.9992"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.9992"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.9992"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "softCohesion": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-splash-plastic-medium",
+      "source_path": "assets/general_examples/splash_plastic_medium.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/splash_plastic_medium.xml",
+      "git_blob_sha": "bf7d183d3ca4b9a8c18786a608aadbd87081ec19",
+      "sha256": "7a7e59e86ed763e73b29bd3fe779e8eb3ee2f63fb5b86b896a5ec027d3182412",
+      "bytes": 4601888,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "pressurecriterion": "1e-12",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "10000"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 40000,
+        "cloth_objects": 1,
+        "triangle_faces": 79202,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.16"
+        },
+        "yarnDiameter": {
+          "value": "0.018"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.9992"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.9992"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.9992"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "softCohesion": {
+          "value": "0"
+        },
+        "restContactAngle": {
+          "value": "1.3404128655"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-splash-yarn-medium",
+      "source_path": "assets/general_examples/splash_yarn_medium.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/splash_yarn_medium.xml",
+      "git_blob_sha": "66e7e07a82c9ccb366031d30f79db30e8bd07acb",
+      "sha256": "c3fac971c8fe0ac4c653553f31c8462567545c76ef8a065ddab52801c2f51ffa",
+      "bytes": 5072155,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-4",
+        "manifoldsubsteps": "36"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 79204,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 400,
+        "rod_segments": 796,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.048"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/splash_yarn_medium.hipnc",
+        "git_blob_sha": "fef99ed1f4ca80ab9f393cc3605712816dbccdad"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-splash-yarn-small",
+      "source_path": "assets/general_examples/splash_yarn_small.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/splash_yarn_small.xml",
+      "git_blob_sha": "991019d1df266e1acd8c80c690828fef916ee051",
+      "sha256": "f18c3d5381cbe9d2295d949ac1e67dd42e4451735f2c0ebdf03c421cbdd4ee33",
+      "bytes": 1400950,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-4",
+        "manifoldsubsteps": "36"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 19604,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 200,
+        "rod_segments": 396,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.048"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/splash_yarn_small.hipnc",
+        "git_blob_sha": "e625ab75bc8b8f495b7cdd56904b650dd8d1b736"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-tighten-towel",
+      "source_path": "assets/general_examples/tighten_towel.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/tighten_towel.xml",
+      "git_blob_sha": "1204d83641e945a415443751dd681d23f0dd5899",
+      "sha256": "e24448fa29c746b65037261f2c0941e4b3c3f3d42c64b5acf64601a62922972f",
+      "bytes": 5512952,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 12.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-9",
+        "manifoldsubsteps": "36",
+        "maxiters": "2000"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 47072,
+        "cloth_objects": 1,
+        "triangle_faces": 48954,
+        "hair_records": 22272,
+        "rod_segments": 22272,
+        "scripts": 32,
+        "distancefields": 8,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.0165"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/tighten_towel.hipnc",
+        "git_blob_sha": "03de42dd0fc77688edadc3c2134db781c7cee37d"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-yarn-small",
+      "source_path": "assets/general_examples/yarn_small.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/general_examples/yarn_small.xml",
+      "git_blob_sha": "686e9c54b32e21045cf3d94e76e86f4dadeef0b3",
+      "sha256": "0dd22e09c36267940a481fd0bf63225e08e100837d5267f50bf3442e658c9bea",
+      "bytes": 1400806,
+      "family": "general_examples",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-4",
+        "manifoldsubsteps": "1"
+      },
+      "bucket_source": {
+        "size": "5.0",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 19604,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 200,
+        "rod_segments": 396,
+        "scripts": 0,
+        "distancefields": 1,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.048"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-acetal",
+      "source_path": "assets/parameter_tests/pore_test_acetal.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_acetal.xml",
+      "git_blob_sha": "563c9abbba648ab7ce50c7fbb15fa1a77acfff65",
+      "sha256": "4c6b5b9d26aa424f4cfd95a774e603cf4ed4d31ccfd39982ac40ae52bade0d4e",
+      "bytes": 3700385,
+      "family": "parameter_tests",
+      "status": "excluded-by-water-only-scope",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "2.208e-3"
+        },
+        "liquidDensity": {
+          "value": "0.7802"
+        },
+        "surfTensionCoeff": {
+          "value": "20.59375"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_acetal.hipnc",
+        "git_blob_sha": "b589b29ea33b6cdcabb1afa7ac32d487e6b04b49"
+      },
+      "audit_notes": [],
+      "implementation_scope": "reference-only-non-water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-fd-high",
+      "source_path": "assets/parameter_tests/pore_test_fd_high.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_fd_high.xml",
+      "git_blob_sha": "66bfa589b29987f2a5bf865b4978379025706d6a",
+      "sha256": "8eca2160b2e95396f35036dd6b1be3b8fa7d79d6777043974c1894d2ce77ef30",
+      "bytes": 3700341,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "fabricThreadCount": {
+          "value": "400"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_fd_high.hipnc",
+        "git_blob_sha": "56755608869a34e40b7d5a2796c420e111f39c39"
+      },
+      "audit_notes": [
+        "fabricThreadCount occurs in XML but was not found in pinned TwoDSceneXMLParser.cpp; effective material state requires audit."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-fd-low",
+      "source_path": "assets/parameter_tests/pore_test_fd_low.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_fd_low.xml",
+      "git_blob_sha": "53567a9e45d0d947c362905ad2ad7910b2ffba3d",
+      "sha256": "09204181d7e2160d946aede24b85c67bf0380863c9f127b7ddede19bc1a34f5a",
+      "bytes": 3700340,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "fabricThreadCount": {
+          "value": "80"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_fd_low.hipnc",
+        "git_blob_sha": "07f745e9c2edc4bdf3c17b931751771d4e73529e"
+      },
+      "audit_notes": [
+        "fabricThreadCount occurs in XML but was not found in pinned TwoDSceneXMLParser.cpp; effective material state requires audit."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-ft-high",
+      "source_path": "assets/parameter_tests/pore_test_ft_high.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_ft_high.xml",
+      "git_blob_sha": "7cfec1382840d75fe01249ba99d2009f6d2122e8",
+      "sha256": "58e1f642fca4c78b8f338a69059cdba7d3dd6b7d50f7184989ebaf6c29a82b57",
+      "bytes": 3700413,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.015"
+        },
+        "fabricThreadCount": {
+          "value": "180"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        },
+        "dragByFutureSolid": {
+          "value": "1"
+        },
+        "useVaryingFraction": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_ft_high.hipnc",
+        "git_blob_sha": "abd973d3e1c9b8681f8c729fe017ad7740e97fc2"
+      },
+      "audit_notes": [
+        "fabricThreadCount occurs in XML but was not found in pinned TwoDSceneXMLParser.cpp; effective material state requires audit."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-ft-low",
+      "source_path": "assets/parameter_tests/pore_test_ft_low.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_ft_low.xml",
+      "git_blob_sha": "b1ef44530f5a07f5b415fb3ff4b79943635afa3b",
+      "sha256": "fc29bcda3335c476794966fac1c82ef430391ffe61295c9d2c8c4bea8555f24d",
+      "bytes": 3700342,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.005"
+        },
+        "fabricThreadCount": {
+          "value": "180"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_ft_low.hipnc",
+        "git_blob_sha": "1b3a48e02068f35ed5c16ce6b834af7c04fbea19"
+      },
+      "audit_notes": [
+        "fabricThreadCount occurs in XML but was not found in pinned TwoDSceneXMLParser.cpp; effective material state requires audit."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-high",
+      "source_path": "assets/parameter_tests/pore_test_high.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_high.xml",
+      "git_blob_sha": "a720882f0e1761373f5ab7f50507a6818f8cac65",
+      "sha256": "df19316989f499c5b1730dc1f3db98a11fa81ec1dc6b51155f57e3c0592314c2",
+      "bytes": 3700342,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.02"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_high.hipnc",
+        "git_blob_sha": "995e9f34ce87e8b4fcb280eb0a61732fec266d76"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-honey",
+      "source_path": "assets/parameter_tests/pore_test_honey.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_honey.xml",
+      "git_blob_sha": "99356c0b0c496f73ea7b35b5d5f502d3ddac5c76",
+      "sha256": "2219bc895a1722db7cc013f1fda92f13f25bfef79f7f7db1620678ffc2103115",
+      "bytes": 3700475,
+      "family": "parameter_tests",
+      "status": "excluded-by-water-only-scope",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300",
+        "viscositysubsteps": "40"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "80.0"
+        },
+        "liquidDensity": {
+          "value": "1.45"
+        },
+        "surfTensionCoeff": {
+          "value": "50.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        },
+        "computeViscosity": {
+          "value": "1"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_honey.hipnc",
+        "git_blob_sha": "813292c2788df5af0455f11f0e5b64f0ce0835dd"
+      },
+      "audit_notes": [],
+      "implementation_scope": "reference-only-non-water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-low",
+      "source_path": "assets/parameter_tests/pore_test_low.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_low.xml",
+      "git_blob_sha": "8a08544a5058a9a0b4db94f86af6ce933f0f273b",
+      "sha256": "4b3ddb3834733937e79879a4f03a2c0a20da8db381f415d54ae2fc49f9fdc7d3",
+      "bytes": 3700411,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.002"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.99"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.99"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.99"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        },
+        "dragByFutureSolid": {
+          "value": "1"
+        },
+        "useVaryingFraction": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_low.hipnc",
+        "git_blob_sha": "50fa0a0c405e5a483e7e69a6e583ae3ed2bc7e29"
+      },
+      "audit_notes": [
+        "XML yarnDiameter=0.002 cm gives 20 micrometres; paper Figure 10b labels 25 micrometres."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-mid",
+      "source_path": "assets/parameter_tests/pore_test_mid.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_mid.xml",
+      "git_blob_sha": "384c55f457432f93fcc25b6a7c6e022201e2a612",
+      "sha256": "7f500ed3621041278a2e444112dc6bcf48a838748ccac0660bab6e17ea04f4dd",
+      "bytes": 3700343,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_mid.hipnc",
+        "git_blob_sha": "e08f690adeb493773a646fedbf500f3934f73989"
+      },
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-oil",
+      "source_path": "assets/parameter_tests/pore_test_oil.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_oil.xml",
+      "git_blob_sha": "d51eae836a938d56813d7761e83f45dcf0feb871",
+      "sha256": "066b3dead573abbdbf6decc81670020f7f9f641132cfc08c238558d9c4b28a5a",
+      "bytes": 3700475,
+      "family": "parameter_tests",
+      "status": "excluded-by-water-only-scope",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300",
+        "viscositysubsteps": "10"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "0.81"
+        },
+        "liquidDensity": {
+          "value": "0.92"
+        },
+        "surfTensionCoeff": {
+          "value": "32.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        },
+        "computeViscosity": {
+          "value": "1"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_oil.hipnc",
+        "git_blob_sha": "7f79168487541f15bcef06bedf434efb3de6c432"
+      },
+      "audit_notes": [],
+      "implementation_scope": "reference-only-non-water"
+    },
+    {
+      "id": "wetcloth-source-pore-test-zero",
+      "source_path": "assets/parameter_tests/pore_test_zero.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/parameter_tests/pore_test_zero.xml",
+      "git_blob_sha": "7164f85125ab15bc9ab00a96283c3fc042b0cf0c",
+      "sha256": "fb5bcb9a6913d904284a7a11012a775c00a97d51ff47132c2b64d6ab74091464",
+      "bytes": 3700387,
+      "family": "parameter_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 4.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "36",
+        "maxiters": "300"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 32400,
+        "cloth_objects": 1,
+        "triangle_faces": 64052,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "0.0"
+        },
+        "restContactAngle": {
+          "value": "1.5707963268"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "useLevelSetForce": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/pore_test_zero.hipnc",
+        "git_blob_sha": "7701a3964197591b908778dec11b3990fcc627f1"
+      },
+      "audit_notes": [
+        "XML sets surfTensionCoeff=0; Figure 10j describes contact angle 90 degrees. Keep source and paper-corrected variants separate."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-ring-test",
+      "source_path": "assets/ring_tests/ring_test.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/ring_tests/ring_test.xml",
+      "git_blob_sha": "660960bf872536b92791ceea4cafaa4bb2fed997",
+      "sha256": "40fabe229362dea52cc0704248c9a37b0f17a24c18e9f34633314de28d20f537",
+      "bytes": 4953246,
+      "family": "ring_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 8.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-4",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "16"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "8",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 40000,
+        "cloth_objects": 1,
+        "triangle_faces": 79202,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.0165"
+        },
+        "yarnDiameter": {
+          "value": "0.005"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "1"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.75"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solveSolid": {
+          "value": "0"
+        },
+        "initNonuniformFraction": {
+          "value": "1"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/ring_test.hipnc",
+        "git_blob_sha": "cbffb1d67ff635f659a4054816a181e2d6dc8e51"
+      },
+      "audit_notes": [
+        "Effective initialization audited: initNonuniformFraction=1 with no vertex vf preserves vf=1 through all startup stages; useVaryingFraction defaults false. Released ring pore capacity is zero. A uniform material-packing 0.4 comparison is exploratory, not a verified paper ring parameter."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-ring-test-nonuniform",
+      "source_path": "assets/ring_tests/ring_test_nonuniform.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/ring_tests/ring_test_nonuniform.xml",
+      "git_blob_sha": "b261af562783c6c8bd17892cbf59ae503881c853",
+      "sha256": "985210cd880c58c4033705ae51e058383f96c56e88a825c953e6d16b3fa50cb8",
+      "bytes": 5878238,
+      "family": "ring_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 8.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-4",
+        "surftensionsubsteps": "1",
+        "manifoldsubsteps": "16"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "8",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 40000,
+        "cloth_objects": 1,
+        "triangle_faces": 79202,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 40000
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.0165"
+        },
+        "yarnDiameter": {
+          "value": "0.005"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "1"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.75"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solveSolid": {
+          "value": "0"
+        },
+        "initNonuniformFraction": {
+          "value": "1"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": {
+        "path": "houdini/ring_test_nonuniform.hipnc",
+        "git_blob_sha": "997db80e3813ea14f927fa3e459ca8376c128eb8"
+      },
+      "audit_notes": [
+        "Preserve all 40000 explicit per-particle vf values."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-capillary-suction",
+      "source_path": "assets/unit_tests/capillary_suction.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/capillary_suction.xml",
+      "git_blob_sha": "b28eab1dd41a74e123b9edd2973c9309a37a6b76",
+      "sha256": "0a2fb7f46a0e4a1898b0aba4d26ebf557196255b423c83e45b7db03d00449f91",
+      "bytes": 9756,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 16.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-4",
+        "manifoldsubsteps": "16"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 100,
+        "cloth_objects": 1,
+        "triangle_faces": 98,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 4,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "solveSolid": {
+          "value": "0"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-double-surf-tension",
+      "source_path": "assets/unit_tests/double_surf_tension.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/double_surf_tension.xml",
+      "git_blob_sha": "2559fc788faae194e8179e96d69a1780de4505b6",
+      "sha256": "4a75ac64c00be5ecd5e8f50d25f7ad7f0c8c068e185fd692b3c5df24e10acb11",
+      "bytes": 1266,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.004",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 0,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "surfTension": {
+          "value": "1"
+        },
+        "flipCoeff": {
+          "value": "1"
+        },
+        "checkDivergence": {
+          "value": "1"
+        },
+        "surfTensionSmoothingStep": {
+          "value": "7"
+        },
+        "correctionStep": {
+          "value": "1"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-simple-cloth",
+      "source_path": "assets/unit_tests/simple_cloth.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/simple_cloth.xml",
+      "git_blob_sha": "6daa1af8ba66b326e204c6d775432be422d9ee4b",
+      "sha256": "387f6bd434f12e5720faff5d89bb7490b86a43b9f79f32baac19f9fe7034e5dc",
+      "bytes": 6701,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-6"
+      },
+      "bucket_source": {
+        "size": "4.0",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 52,
+        "cloth_objects": 2,
+        "triangle_faces": 48,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 12,
+        "distancefields": 0,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.75"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "halfThickness": {
+          "value": "0.0165"
+        },
+        "yarnDiameter": {
+          "value": "0.005"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-simple-fluid",
+      "source_path": "assets/unit_tests/simple_fluid.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/simple_fluid.xml",
+      "git_blob_sha": "16bddda2e970aa6298bc6517e91018a60a81decb",
+      "sha256": "b8f0b0136657f8b0a6c181ef46f0990836d8e01f869681c4819e5f3f277fcffe",
+      "bytes": 1234,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.004",
+        "apic": "1",
+        "criterion": "1e-4",
+        "surftensionsubsteps": "1"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 0,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "flipCoeff": {
+          "value": "0.85"
+        },
+        "checkDivergence": {
+          "value": "1"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-simple-fluid-mesh",
+      "source_path": "assets/unit_tests/simple_fluid_mesh.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/simple_fluid_mesh.xml",
+      "git_blob_sha": "3aa065db1bae575cbd86687c9ddfa94da52e88bd",
+      "sha256": "473b5a017a01f643f27975ef31f166bf1e666c54c7796f45c1b6539e6a621df9",
+      "bytes": 1408,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.004",
+        "apic": "1",
+        "criterion": "1e-6",
+        "surftensionsubsteps": "1"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 0,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 3,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        }
+      },
+      "external_dependencies": [
+        {
+          "path": "assets/meshes/spot_triangulated.obj",
+          "available_in_release": false,
+          "recovered_from": "https://www.cs.cmu.edu/~kmcrane/Projects/ModelRepository/spot.zip",
+          "recovered_sha256": "0738b5e8608fed74e5e8c7aa8dd0af97b4b74f9f6cbf7aac84cd7e40b2e44a75",
+          "license": "CC0-1.0",
+          "upstream_byte_identity_verified": false
+        }
+      ],
+      "houdini_source": null,
+      "audit_notes": [
+        "Referenced Spot OBJ absent from pinned upstream tree; canonical same-name triangulated model recovered from author CC0 distribution. Byte identity to unpublished upstream copy cannot be verified."
+      ],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-simple-plastic",
+      "source_path": "assets/unit_tests/simple_plastic.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/simple_plastic.xml",
+      "git_blob_sha": "afb855820df550aeebedc0e362752f5ae99e341f",
+      "sha256": "54bb42db8bc2ea4c064e5d8e6740c8bcf8892b615f7aa494e92760146f74c997",
+      "bytes": 5765,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-4",
+        "maxiters": "1000"
+      },
+      "bucket_source": {
+        "size": "4.0",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 52,
+        "cloth_objects": 2,
+        "triangle_faces": 48,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 2,
+        "distancefields": 0,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "flipCoeff": {
+          "value": "0.9995"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.75"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.9995"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.9995"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "halfThickness": {
+          "value": "0.0165"
+        },
+        "yarnDiameter": {
+          "value": "0.005"
+        },
+        "restVolumeFraction": {
+          "value": "0.99"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-simple-surf-tension",
+      "source_path": "assets/unit_tests/simple_surf_tension.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/simple_surf_tension.xml",
+      "git_blob_sha": "d00ab565a77c7c6c64a8b58d6c8b7a9725e8a262",
+      "sha256": "823d28be4e7ce95dec150e7f0318d034b73ed6a048229e360f19d5e294845199",
+      "bytes": 1175,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.004",
+        "apic": "1",
+        "criterion": "1e-8",
+        "surftensionsubsteps": "1"
+      },
+      "bucket_source": {
+        "size": "1.152",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 0,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 0,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 1,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "surfTension": {
+          "value": "1"
+        },
+        "flipCoeff": {
+          "value": "1"
+        },
+        "checkDivergence": {
+          "value": "1"
+        },
+        "surfTensionSmoothingStep": {
+          "value": "7"
+        },
+        "correctionStep": {
+          "value": "1"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-simple-yarn",
+      "source_path": "assets/unit_tests/simple_yarn.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/simple_yarn.xml",
+      "git_blob_sha": "7b6b4701d0090ba09294239dea4a218e3ce3fb93",
+      "sha256": "611166718cc2a7dda3786b9c8e9be01c633580f2680500ed8e6e82617e895a59",
+      "bytes": 3087,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-6"
+      },
+      "bucket_source": {
+        "size": "4.0",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 28,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 2,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 0,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-simple-yarn-loop",
+      "source_path": "assets/unit_tests/simple_yarn_loop.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/simple_yarn_loop.xml",
+      "git_blob_sha": "e1d92c8a1cc5275529e3ab47ede94ed34c90173e",
+      "sha256": "50950ab55ef535f1815cf42d34639c599a2c0127bf27724bd64a6648c9ff13b1",
+      "bytes": 2814,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.001",
+        "apic": "1",
+        "criterion": "1e-6"
+      },
+      "bucket_source": {
+        "size": "4.0",
+        "numcells": "4"
+      },
+      "authored_counts": {
+        "particle_records": 20,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 1,
+        "rod_segments": 0,
+        "scripts": 2,
+        "distancefields": 0,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.018"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.9996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.9996"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.9996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.9996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    },
+    {
+      "id": "wetcloth-source-splash-single-yarn",
+      "source_path": "assets/unit_tests/splash_single_yarn.xml",
+      "source_url": "https://github.com/raymondyfei/libwetcloth/blob/b43993d775a0f9e3a9e32611f26936f2528fac37/assets/unit_tests/splash_single_yarn.xml",
+      "git_blob_sha": "be546ed900001bc7a558e92a53b52152f66f7368",
+      "sha256": "36d0cac011524e048110ef8afa2db77729c919045fd4b4f8bc64c9d1c4ceeb6f",
+      "bytes": 2019,
+      "family": "unit_tests",
+      "status": "source-imported-not-simulated",
+      "duration_s": 20.0,
+      "integrator_source": {
+        "type": "linearized-implicit-euler",
+        "dt": "0.0002",
+        "apic": "1",
+        "criterion": "1e-4",
+        "manifoldsubsteps": "36"
+      },
+      "bucket_source": {
+        "size": "0.4",
+        "numcells": "4",
+        "kernelorder": "2"
+      },
+      "authored_counts": {
+        "particle_records": 8,
+        "cloth_objects": 0,
+        "triangle_faces": 0,
+        "hair_records": 1,
+        "rod_segments": 0,
+        "scripts": 0,
+        "distancefields": 2,
+        "particles_with_vf": 0
+      },
+      "liquid_source": {
+        "viscosity": {
+          "value": "8.9e-3"
+        },
+        "surfTensionCoeff": {
+          "value": "72.0"
+        },
+        "halfThickness": {
+          "value": "0.048"
+        },
+        "yarnDiameter": {
+          "value": "0.01"
+        },
+        "restVolumeFraction": {
+          "value": "0.4"
+        },
+        "flipCoeff": {
+          "value": "0.996"
+        },
+        "elastoFlipCoeff": {
+          "value": "0.0"
+        },
+        "elastoFlipAsymCoeff": {
+          "value": "0.996"
+        },
+        "elastoAdvectCoeff": {
+          "value": "0.996"
+        },
+        "multiLevel": {
+          "value": "0"
+        },
+        "particleCellMultiplier": {
+          "value": "0.25"
+        }
+      },
+      "external_dependencies": [],
+      "houdini_source": null,
+      "audit_notes": [],
+      "implementation_scope": "water"
+    }
+  ],
+  "water_scene_count": 36,
+  "excluded_non_water_count": 3
+}

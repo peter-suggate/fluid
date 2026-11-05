@@ -861,6 +861,8 @@ export interface UniformLatticeAddress extends UniformLatticeBox {
   readonly boxPage: Extent;
   /** An open world: outside the box every page above the floor is AIR, and below it SOLID. */
   readonly world: boolean;
+  /** World policy 4: no implicit ground or enclosing walls. */
+  readonly freeSpace?: boolean;
 }
 
 /** The box of a lattice the page directory's window holds: the moving
@@ -895,7 +897,7 @@ export const UNIFORM_FRAME_FLOOR_PAGES = 8;
  * (UNIFORM_MIXED_ROOT_UNREACHED). The pool's default then holds a block more
  * for each page of the layer above the box, which the residency closure
  * asks for when the liquid nears the top. */
-export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}, world?: { readonly boxPage: readonly number[] }): UniformLatticeAddress {
+export function uniformLatticeAddress(cells: readonly number[], openTop = false, scene: UniformPagePoolScene = {}, world?: { readonly boxPage: readonly number[]; readonly freeSpace?: boolean }): UniformLatticeAddress {
   const box = uniformLatticeWindowBox(cells), [px, py, pz] = box.pages;
   if (world && !openTop) throw new RangeError("Uniform lattice: an open world has an open top");
   const boxPage: Extent = world ? [world.boxPage[0]!, world.boxPage[1]!, world.boxPage[2]!] : [0, 0, 0];
@@ -926,7 +928,7 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
   // The child tables are allocated whatever the count; it is a fail-fast budget.
   const footprint = box.pages.reduce((n, p, a) => n * (Math.floor((boxPage[a]! + p) / 4) - Math.floor((boxPage[a]! - 1) / 4) + 1), 1);
   const superBlocks = scene.superBlocks ?? Math.min(UNIFORM_SUPER_BLOCK_SLOTS - 2, openTop ? 2 * blocks : Math.ceil(1.5 * footprint));
-  const pool = { table: UNIFORM_PAGE_WINDOW, superBlocks, blocks, idleSteps: 1, worldPolicy: world ? 3 : openTop ? 2 : 1, box: { origin: boxPage, pages: box.pages } };
+  const pool = { table: UNIFORM_PAGE_WINDOW, superBlocks, blocks, idleSteps: 1, worldPolicy: world?.freeSpace ? 4 : world ? 3 : openTop ? 2 : 1, box: { origin: boxPage, pages: box.pages } };
   const floor = UNIFORM_PAGE_WINDOW - UNIFORM_FRAME_FLOOR_PAGES;
   // Every policy here is a world box, which umPageWord makes SOLID outside
   // itself (uniformWindowPageWord on the host): the seed stores no SOLID word.
@@ -950,7 +952,7 @@ export function uniformLatticeAddress(cells: readonly number[], openTop = false,
     tileTexture: [8 * blockGrid[0], 8 * blockGrid[1], 8 * blockGrid[2]], faceBaseTexture: [8 * blockGrid[0], 8 * blockGrid[1], 32 * blockGrid[2]],
     wideVertexTexture: [9 * blockGrid[0], 9 * blockGrid[1], 9 * blockGrid[2]], lowFaceKeys: 3072 * blocks,
     blocks, blockBits, blockGrid, pool, seed, liveTiles,
-    poolTiles: 512 * (world ? blocks - 2 : Math.min(px * py * pz + (openTop ? px * pz * (floor - py) : 0), blocks - 2)), openTop, boxPage, world: !!world,
+    poolTiles: 512 * (world ? blocks - 2 : Math.min(px * py * pz + (openTop ? px * pz * (floor - py) : 0), blocks - 2)), openTop, boxPage, world: !!world, freeSpace: world?.freeSpace ?? false,
   };
 }
 

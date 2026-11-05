@@ -1,3 +1,6 @@
+import {publishSceneRigidSurfaces} from './rigid-surface';
+import { publishSceneClothSurfaces, clearSceneClothSurfaces } from "../cloth/scene-geometry";
+import type { ClothSurfacePublication } from "../cloth/types";
 import type { FluidStepRequest } from "../interaction/runtime/physics";
 import type { FluidExchange } from "../interaction/contracts";
 import { registerMeshAssetDistanceField } from "./imported-assets/asset-library";
@@ -41,6 +44,9 @@ export interface WebGPURenderWorkerSnapshot {
   /** Poses the drawn frame used, in roster order. See FluidLabRenderer. */
   rigidBodyPoses: FluidLabRenderer["rigidBodyPoses"];
   rigidBodyPoseRevision: number;
+  /** Accepted geometry from the displayed worker frame, mirrored for editor queries. */
+  clothSceneRevision?: number;
+  clothSurfaces?: readonly ClothSurfacePublication[];
 }
 
 export type { SolidEditBaseIdentity };
@@ -438,6 +444,7 @@ export class WebGPURenderWorkerClient {
 
   shutdown(): Promise<void> {
     if (this.stopping) return this.stopping;
+    if (this.publishedRenderDocument) clearSceneClothSurfaces(this.publishedRenderDocument);
     this.lifecycle.dispose();
     this.rejectAll(new Error("WebGPU runtime stopped; the last accepted scene is retained."));
     // A runtime that ended still drains its GPU work before the worker goes; a worker that failed cannot.
@@ -656,6 +663,11 @@ export class WebGPURenderWorkerClient {
       if (presentationStages && presentationStages !== cpu && presentationStages !== presentation) presentationStages.capturedAt_ms += offset;
       if (presentationQueue && presentationQueue !== cpu && presentationQueue !== presentation && presentationQueue !== presentationStages) presentationQueue.capturedAt_ms += offset;
       this.snapshot = message.snapshot;
+      if (this.publishedRenderDocument && message.snapshot.clothSceneRevision === this.publishedRenderSceneRevision) {
+        publishSceneRigidSurfaces(this.publishedRenderDocument,message.snapshot.rigidBodyPoses);
+        if (message.snapshot.clothSurfaces?.length) publishSceneClothSurfaces(this.publishedRenderDocument, message.snapshot.clothSurfaces);
+        else clearSceneClothSurfaces(this.publishedRenderDocument);
+      }
       this.completedMetrics = message.metrics;
       this.frameInFlight = false;
       const queued = this.queuedFrame;

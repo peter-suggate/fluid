@@ -1,4 +1,5 @@
 import { uniformComputePassEpoch } from "./uniform-compute-blit";
+import { uniformPressureMixtureWGSL } from "./uniform-pressure-mixture";
 import { uniformDetailBindLayout, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import { uniformBufferedWork } from "./uniform-buffered-work";
 import type {UniformMixedOwnership} from "./uniform-mixed-ownership";
@@ -256,6 +257,8 @@ export interface UniformPressureArenaFields {
  * that was liquid in the same slot starts it (warm), and the 4h trilinear
  * start does elsewhere. */
 export class UniformPressureArena {
+ private readonly emptyMixture:GPUTexture;
+ private mixture?:GPUTexture;
  readonly arena:UniformBrickArena;
  /** Header, tile slot map, brick masks and the arena table (one storage binding). */
  readonly index:GPUBuffer;
@@ -406,6 +409,7 @@ export class UniformPressureArena {
   }
   if(schedule.krylov){this.krylovDotWord=poolWords[1]!;poolWords[1]=this.krylovDotWord+KRYLOV_DOTS*KRYLOV_PARTIALS;}
   for(const [k,words] of poolWords.entries())if(4*words>Math.min(limit,device.limits.maxBufferSize))throw new Error(`Pressure arena pool ${"AB"[k]} (${4*words} bytes) exceeds the storage binding limit ${Math.min(limit,device.limits.maxBufferSize)}`);
+  this.emptyMixture=device.createTexture({label:"Uniform empty pressure mixture",size:[1,1],format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING});
   this.index=device.createBuffer({label:"Uniform pressure arena state",size:4*indexWords,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.pool=device.createBuffer({label:"Uniform pressure arena pool",size:4*poolWords[0]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.poolB=device.createBuffer({label:"Uniform pressure arena pool B",size:4*poolWords[1]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
@@ -433,6 +437,7 @@ export class UniformPressureArena {
    // control's rate) and their projection.
    ...(fields.bulkPages?{bulk:[params,buffer(2),buffer(9),buffer(10),buffer(26),buffer(4,"uniform")]}:{}),
   };
+  for(const name of ["rows","project"])entries[name]!.push({binding:31,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"2d"}});
   for(const [name,list] of Object.entries(entries))this.layouts.set(name,uniformDetailBindLayout(device,{label:`Uniform pressure arena ${name}`,entries:list}));
   this.bind();
  }
@@ -461,6 +466,7 @@ export class UniformPressureArena {
    project:{...P,...S,...Q,7:f.forced.velocity,15:f.copy,16:f.velocity,17:{buffer:f.negative,size:4*faces},21:{buffer:f.presentation.buffer}},
    ...(f.bulkPages?{bulk:{...P,...S,...Q,26:this.rootSpan.binding,4:{buffer:f.authorityParams,size:16}}}:{}),
   };
+  for(const name of ["rows","project"])resources[name]![31]=(this.mixture??this.emptyMixture).createView();
   if(f.dynamics)resources.solver![24]={buffer:f.dynamics};
   if(f.root.topology)resources.native![30]=f.root.topology;
   const freeze=this.cold;if(freeze)for(const name of ["mark","rows","init","project",...(UNIFORM_PRESSURE_ARENA_NATIVE_RHS?["nrhs"]:[])])resources[name]![14]=freeze.regions;
@@ -1470,7 +1476,7 @@ var<workgroup> member:atomic<u32>;
   atomicStore(&state[SLOTS+t],0u);atomicStore(&state[MASK+id],0u);
  }
 }`,
-   rows:header()+poolWGSL+theta+owner+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
+   rows:header()+poolWGSL+theta+owner+UniformColdFreeze.wgsl(this.cold,1,14)+uniformPressureMixtureWGSL(1,31)+/* wgsl */`
 @group(1) @binding(4) var<uniform> authority:vec4f;
 @group(1) @binding(7) var velocity:texture_3d<f32>;
 @group(1) @binding(8) var<storage,read> negative:array<f32>;
@@ -1551,7 +1557,7 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
   if(bodies||!bLocalSolidWork){capacity=bHeadCapacity(p,open);}`:""}
   for(var f=0u;f<6u;f++){
    let axis=f/2u;let sign=bSign(f);let h=params.hDt[axis];var q=p;q[axis]+=sign;
-   let forced=bForcedField(p,axis,sign);var kind=K_GHOST;var coefficient=0.0;var fraction=1.0;
+   var forced=bForcedField(p,axis,sign);var kind=K_GHOST;var coefficient=0.0;var fraction=1.0;
    ${S?`var low=p;if(sign<0){low[axis]-=1;}var high=low;high[axis]+=1;
    var volume=1.0;if(!solidClear||!umSolidValid(low)||!umSolidValid(high)){if(pGeometry){volume=umPressureFaceVRecorded(low,axis);if(volume<0.0){atomicStore(&state[1],${STALE_APERTURES}u);volume=0.0;}}else{volume=umSolidApertureAt(pApertureRows[select(0u,1u+axis,sign<0&&l[axis]==0u)],low,axis);}}var sealed=false;`:""}
    var across=UM_RESIDENT;if(l[axis]==select(0u,3u,sign>0)){across=umCellKind(q);}
@@ -1584,6 +1590,8 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
    else if(kind==K_NEUMANN){fraction=volume;}
    else{if(kind==K_WALL){coefficient=volume/(h*h);}else{coefficient*=volume;}fraction=volume;}
    qSet(P_V+f*PLANE,at,volume);`:""}
+   var mixtureAnchor=p;if(sign<0){mixtureAnchor[axis]-=1;}
+   let mixture=umMixtureMaterial(mixtureAnchor,axis,forced);coefficient*=mixture.x;forced=mixture.y;
    kinds|=(kind<<(3u*f))|select(0u,1u<<(18u+f),kind==K_BAND&&coefficient==params.solve[1u+axis]);qSet(P_U+f*PLANE,at,forced);pSet(P_C+f*PLANE,at,coefficient);
    if(kind!=K_NEUMANN){diagonal+=coefficient;divergence+=f32(sign)*fraction*forced/h;}
    ${S?"if(bodies&&kind!=K_WALL&&kind!=K_OPEN&&(!bLocalSolidWork||capacity!=fraction)){divergence+=f32(sign)*(capacity-fraction)*umSolidFaceVelocity(low,axis)/h;}":""}
@@ -3112,7 +3120,7 @@ override pDst:u32=0u;
   workgroupBarrier();
  }
 }`,
-   project:header()+poolWGSL+zero+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
+   project:header()+poolWGSL+zero+UniformColdFreeze.wgsl(this.cold,1,14)+uniformPressureMixtureWGSL(1,31)+/* wgsl */`
 @group(1) @binding(7) var velocity:texture_3d<f32>;
 @group(1) @binding(15) var field:texture_3d<f32>;
 @group(1) @binding(16) var output:texture_storage_3d<rgba32float,write>;
@@ -3130,13 +3138,13 @@ fn bFace(at:u32,p:vec3i,f:u32)->f32{
  ${S?"if(kind==K_CLOSED){var low=p;if(sign<0){low[axis]-=1;}return umSolidFaceVelocity(low,axis);}":""}
  let forced=pForced(at,f);let coefficient=pF(P_C+f*PLANE,at)${S?"/pVolume(at,f)":""};let own=pF(P_X,at);let base=pF(P_BASE,at);let scale=params.policy.z;
  if(kind==K_WALL){if(!liquid){return forced;}return forced-scale*f32(sign)*(max(own+pLift(at,f),-base)-own)/h;}
- if(kind==K_OPEN){if(!liquid){return forced;}return forced+scale*f32(sign)*(base+own)*coefficient*h;}
+ if(kind==K_OPEN){if(!liquid){return forced;}return umMixtureFluid(anchor,axis,forced+scale*f32(sign)*(base+own)*coefficient*h);}
  var other=0.0;var otherBase=0.0;var otherLiquid=false;
  if(kind==K_BAND){let m=pNear(at,p,f);other=pF(P_X,m);otherBase=pF(P_BASE,m);otherLiquid=bLiquid(pool[P_KINDS+m]);}
  else if(kind==K_SEAM){let m=nAcross(p,f);other=qF(PN_X,m);otherBase=qF(PN_B,m)+bSeamHead(at,f);otherLiquid=true;}
  if(!liquid&&!otherLiquid){return 0.0;}
  let value=forced-scale*f32(sign)*((otherBase-base)+(other-own))*coefficient*h;
- return value;
+ return umMixtureFluid(anchor,axis,value);
 }
 // The composite solve couples a native row to the individual h faces.
 // Restrict those same projected fluxes, rather than differentiating the
@@ -3902,5 +3910,7 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
  /** The overflow word's value when a row read a stale solid aperture record. */
  static readonly staleApertures=STALE_APERTURES;
  get slotCapacity():number{return this.arena.fineCapacity;}
- destroy():void{this.index.destroy();this.pool.destroy();this.launch?.destroy();}
+ /** A frame-owned sparse mixture field, detached before its owner destroys it. */
+ setMixtureFaces(faces?:GPUTexture):void{this.mixture=faces;this.bind();}
+ destroy():void{this.emptyMixture.destroy();this.index.destroy();this.pool.destroy();this.launch?.destroy();}
 }

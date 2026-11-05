@@ -1,0 +1,13 @@
+{
+  "filename": "spot_triangulated.obj",
+  "author": "Keenan Crane",
+  "url": "https://www.cs.cmu.edu/~kmcrane/Projects/ModelRepository/spot.zip",
+  "archiveMember": "spot/spot_triangulated.obj",
+  "retrieved": "2026-11-05",
+  "license": "CC0-1.0",
+  "sha256": "0738b5e8608fed74e5e8c7aa8dd0af97b4b74f9f6cbf7aac84cd7e40b2e44a75",
+  "vertices": 2930,
+  "triangles": 5856,
+  "upstreamReference": "assets/meshes/spot_triangulated.obj",
+  "verification": "Canonical author's triangulation, exact referenced basename. The libWetCloth release omits its copy, so byte identity with that unavailable copy cannot be established."
+}

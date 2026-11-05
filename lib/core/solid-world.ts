@@ -1,4 +1,7 @@
+import {sceneWithRoundedPlateCuts,copySceneRigidSurfaces} from './rigid-surface';
 import type { SceneDescription } from "./model";
+import { sceneWithClothStroke } from "../cloth/scene-edit";
+import { copySceneClothSurfaces } from "../cloth/scene-geometry";
 import { sceneCellSizes_m, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 import {
   PLANAR_BOUNDARY_MINIMUM_ASPECT_RATIO,
@@ -995,7 +998,7 @@ export function solidWorldForFluidLattice(scene: SceneDescription): SolidWorld {
   const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   const lattice = sceneFluidLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
   // A container without walls pads nothing: past its high faces is the open world's air.
-  const padding = scene.container.walls === "none" ? [] : solidVoxelPaddingForLattice(cells, lattice, scene.container.top);
+  const padding = scene.container.walls === "none" || scene.container.boundary === "free-space" ? [] : solidVoxelPaddingForLattice(cells, lattice, scene.container.top);
   if (padding.length === 0) return world;
   const key = `${cells.join(":")}:${lattice.join(":")}:${scene.container.top}`, held = fluidLatticeSolidWorlds.get(world);
   if (held?.key === key) return held.world;
@@ -1269,7 +1272,16 @@ export function materializedSolidWorldPages(world: SolidWorld): readonly SolidWo
 /** Compile only this stroke over an immutable base; the ground and prior edits are reused. */
 export function sceneWithSolidStroke(base: SceneDescription,
   patches: readonly SolidWorldVoxelPatch[]): SceneDescription {
-  const scene = { ...base, solidVoxels: base.solidVoxels.concat(patches) };
+  const clothEdited = sceneWithClothStroke(base, patches.filter(p => p.operation === "clear" && p.affectsScenery).map(p => {
+    const bounds = solidWorldVoxelPatchBounds_m(base, p);
+    return {kind: solidPatchKindId(p), box: {minimum_m: bounds.minimum, maximum_m: bounds.maximum}};
+  }));
+  copySceneRigidSurfaces(base,clothEdited);
+  const edited=sceneWithRoundedPlateCuts(clothEdited,patches.filter(p=>p.operation==='clear'&&p.affectsScenery).map(p=>{const bounds=solidWorldVoxelPatchBounds_m(base,p);return {kind:solidPatchKindId(p),box:{minimum_m:bounds.minimum,maximum_m:bounds.maximum}};}));
+  copySceneClothSurfaces(clothEdited,edited);
+  const scene = { ...edited, solidVoxels: base.solidVoxels.concat(patches) };
+  copySceneRigidSurfaces(edited,scene);
+  copySceneClothSurfaces(edited, scene);
   solidVoxelPatchFold(scene.solidVoxels, solidVoxelPatchFold(base.solidVoxels));
   // A browser input transaction may hold no image of its document; authoring
   // a descriptor must not synchronously compose the document's whole history

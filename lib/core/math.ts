@@ -25,9 +25,14 @@ export function cameraPosition(camera: CameraState): Vec3 {
 export function cameraBasis(camera: CameraState) {
   const position = cameraPosition(camera);
   const forward = normalize(sub(camera.target_m, position));
-  const right = normalize(cross(forward, { x: 0, y: 1, z: 0 }));
-  const up = normalize(cross(right, forward));
-  return { position, forward, right, up };
+  const horizontal = cross(forward, { x: 0, y: 1, z: 0 });
+  const right = length(horizontal)>1e-12 ? normalize(horizontal)
+    : {x:Math.cos(camera.azimuth_rad),y:0,z:-Math.sin(camera.azimuth_rad)};
+  const up = normalize(cross(right, forward)),roll=camera.roll_rad??0;
+  if(!Number.isFinite(roll))throw new Error('Camera roll must be finite');
+  if(!roll)return { position, forward, right, up };
+  const c=Math.cos(roll),s=Math.sin(roll);
+  return {position,forward,right:add(scale(right,c),scale(up,-s)),up:add(scale(up,c),scale(right,s))};
 }
 
 /**

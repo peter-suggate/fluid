@@ -59,7 +59,7 @@ fn receiverNormal(n:vec3f,metadata:u32)->vec3f{
  let owner=select(identity.y&65535u,DRY_OWNER_NONE,(identity.y&0x80000000u)!=0u);
  var status=SAMPLED_AO_NOT_APPLICABLE;var raster=1.;var reference=1.;var blocked=0u;var unknown=0u;var steps=0u;var centerStatus=4u;var centerDistance=0.;var cell=0.;
  if(g.w>0.0&&g.w<1e19&&owner!=DRY_OWNER_NONE){
-  let ndc=(vec2f(coord)+.5)/dims*vec2f(2,-2)+vec2f(-1,1);let forward=normalize(view[2].xyz-view[1].xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  let ndc=(vec2f(coord)+.5)/dims*vec2f(2,-2)+vec2f(-1,1);let forward=normalize(view[2].xyz-view[1].xyz);let right=normalize(view[26].xyz);let up=normalize(cross(right,forward));
   let direction=normalize(forward+right*ndc.x*dims.x/dims.y*view[1].w+up*ndc.y*view[1].w);let world=view[1].xyz+direction*g.w;
   raster=rasterSunVisibility(world,receiverNormal(normalize(g.xyz),identity.y));
   let index=drySampledMaterialOwner(owner);

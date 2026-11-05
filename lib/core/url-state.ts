@@ -639,6 +639,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
     camera: {
       azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
       elevation_rad: numberParam(query, "camera.elevation", presetCamera.elevation_rad, -1.45, 1.45),
+      ...(query.has('camera.roll')||presetCamera.roll_rad!==undefined?{roll_rad:numberParam(query,'camera.roll',presetCamera.roll_rad??0)}:{}),
       // The wheel's own range, shared rather than restated: `numberParam`
       // *drops* an out-of-range value back to the preset, so a bound tighter
       // than the one the camera can reach would silently reframe a link
@@ -725,6 +726,7 @@ function cameraQueryValues(camera: CameraState, presetId: string): ReadonlyArray
   return [
     ["camera.azimuth", camera.azimuth_rad, presetCamera.azimuth_rad],
     ["camera.elevation", camera.elevation_rad, presetCamera.elevation_rad],
+    ["camera.roll", camera.roll_rad??0, presetCamera.roll_rad??0],
     ["camera.distance", camera.distance_m, presetCamera.distance_m],
     ["camera.targetX", camera.target_m.x, presetCamera.target_m.x],
     ["camera.targetY", camera.target_m.y, presetCamera.target_m.y],

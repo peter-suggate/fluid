@@ -114,8 +114,7 @@ struct Uniforms {
   // the field modes can color CFL and normalized speed without any readback.
   // .w identifies the quadtree optical strategy: 0 = unavailable,
   // 1 = fixed quarter-depth, 2 = motion-adaptive.
-  environment: vec4f,
-}
+  environment: vec4f, cameraBasisPadding:array<vec4f,18>, cameraBasisRight:vec4f }
 struct BodyGPU {
   positionRadius: vec4f,
   halfSizeShape: vec4f,
@@ -628,7 +627,7 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, fineOrigin:vec3i,
     // The region's resolution label, in its rectangle's top-left corner.
     let normal=3-firstPlaneAxis-secondPlaneAxis;
     let eye=u.cameraPosition.xyz;let ahead=normalize(u.cameraTarget.xyz-eye);
-    var side=cross(ahead,vec3f(0,1,0));if(length(side)<1e-5){side=vec3f(1,0,0);}side=normalize(side);
+    let side=cameraRightDirection(ahead);
     let pixel=overlayFramebufferPixel(point,eye,ahead,side,normalize(cross(side,ahead))).xy;
     let label=domainHeatLabel(vec3i(floor(pagePoint/half)),tier,pixel,normal,point[normal]);
     let mark=max(label.x,label.y)*label.z;
@@ -1401,9 +1400,7 @@ fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
   let ndc = input.uv * 2.0 - 1.0;
   let origin = u.cameraPosition.xyz;
   let forward = normalize(u.cameraTarget.xyz - origin);
-  var right = cross(forward, vec3f(0.0, 1.0, 0.0));
-  if (length(right) < 1e-5) { right = vec3f(1.0, 0.0, 0.0); }
-  right = normalize(right);
+  let right=cameraRightDirection(forward);
   let up = normalize(cross(right, forward));
   let direction = normalize(forward + right * ndc.x * u.viewport.x / max(u.viewport.y, 1.0) * cameraTanHalfFov() + up * ndc.y * cameraTanHalfFov());
   let frame=overlayGridFrame();let size=frame.size;let boundsMin=frame.boundsMin;

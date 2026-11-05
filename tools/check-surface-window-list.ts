@@ -34,7 +34,7 @@ try{
  d.addEventListener('uncapturederror',e=>{e.preventDefault();errors.push(e.error.message);console.error(e.error.message);});
  const buffer=(size:number,usage:number)=>{const b=d.createBuffer({size,usage});owned.push(b);return b;};
  const read=async(b:GPUBuffer,offset=0,size=b.size-offset)=>{const r=d.createBuffer({size,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});try{const e=d.createCommandEncoder();e.copyBufferToBuffer(b,offset,r,0,size);d.queue.submit([e.finish()]);await r.mapAsync(GPUMapMode.READ);return r.getMappedRange().slice(0);}finally{r.unmap();r.destroy();}};
- const u=buffer(416,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
+ const u=buffer(432,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
  if(!overlayOnly){water=new RasterWaterPipeline(d,'bgra8unorm',u,buffer(GPU_RIGID_BODY_CAPACITY*64,GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM));await water.initialize();}
  console.log('water ready');
  solver=await method.createSolverAsync!(d,scene,'balanced',{...method.appDefaults,timeStep:'scene'},undefined,()=>{}) as WebGPUUniformReferenceSolver;
@@ -59,7 +59,7 @@ try{
  console.log(`PASS overlay step=${steps} drawn=${drawn} resident=${state[S.resident]} missing=${missing} F=${F.join(',')} fatal=none`);
  if(!overlayOnly){
   const source=solver.denseLevelSetVolumeSource;assert.ok(source?.mixedFrame&&source.mixedOwnership);water!.setVolume(solver.surfaceFieldTexture,source);
-  const info=solver.info,tank=info.tankCells??[info.nx,info.ny,info.nz],view=new Float32Array(104);
+  const info=solver.info,tank=info.tankCells??[info.nx,info.ny,info.nz],view=new Float32Array(108);
   view.set([scene.container.width_m,scene.container.height_m,scene.container.depth_m,0],12);view.set([...tank,1],20);d.queue.writeBuffer(u,0,view);
   const size=high.map((v,a)=>v-low[a]!) as [number,number,number];
   // Full reference scans the resident bounding rectangle, including AIR gaps.

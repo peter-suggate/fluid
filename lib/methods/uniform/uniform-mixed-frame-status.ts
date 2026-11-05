@@ -15,10 +15,11 @@ export const UNIFORM_MIXED_STATUS_WORDS=16;
 export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8,residencyAudit:9} as const;
 /** Latched causes. The final pressure schedule gate latches 1-4 (its verdict);
  * 6-9 are for the layout and transport stages; 10 is a stage reading the
- * solid record's apertures before their build. 5 is retired. */
-export const UNIFORM_MIXED_FAILURE={pressureRejected:1,pressureUnconverged:2,pressureNonfinite:3,bandCapacity:4,layoutCapacity:6,invalidSupport:7,transportCapacity:8,planeCapacity:9,staleApertures:10} as const;
+ * solid record's apertures before their build; 11 is unresolved geometric
+ * coverage integration. 5 is retired. */
+export const UNIFORM_MIXED_FAILURE={pressureRejected:1,pressureUnconverged:2,pressureNonfinite:3,bandCapacity:4,layoutCapacity:6,invalidSupport:7,transportCapacity:8,planeCapacity:9,staleApertures:10,solidIntegration:11} as const;
 const CAUSE_NAMES:Record<number,string>={1:"pressure rejected a non-improving cycle",2:"pressure did not converge",3:"pressure went nonfinite",4:"pressure band over capacity",
- 6:"layout or hanging-tap capacity exceeded",7:"invalid support",8:"transport capacity exceeded",9:"remap plane corners over capacity",10:"solid aperture record read before its build"};
+ 6:"layout or hanging-tap capacity exceeded",7:"invalid support",8:"transport capacity exceeded",9:"remap plane corners over capacity",10:"solid aperture record read before its build",11:"solid coverage integration did not converge"};
 
 /** WGSL for the record at @group(group) @binding(binding). "read" gives
  * umFrameFailed(); "read_write" also gives umLatchFailure(cause, a, b), which
@@ -51,17 +52,17 @@ export function describeUniformMixedFrameStatus(words:Uint32Array):string|undefi
 }
 function describeFailure(words:Uint32Array,cause:number):string{
  const f=new Float32Array(words.buffer,words.byteOffset,words.length);
- const detail=cause===1||cause===3?`candidate ${f[3]}, accepted ${f[4]}`:cause===2?`accepted ${f[3]} after ${words[4]} cycles`:cause===4?(words[4]===3?`${words[3]} tiles, the brick slots full`:`${words[3]} tiles`):cause===6||cause===7?relayoutDetail(words[3]!,words[4]!):cause===9?`${words[3]} corners, ${words[4]} held`:`detail ${words[3]} ${words[4]}`;
+ const detail=cause===11?`reason ${words[3]}, unresolved fraction error ${f[4]}`:cause===1||cause===3?`candidate ${f[3]}, accepted ${f[4]}`:cause===2?`accepted ${f[3]} after ${words[4]} cycles`:cause===4?(words[4]===3?`${words[3]} tiles, the brick slots full`:`${words[3]} tiles`):cause===6||cause===7?relayoutDetail(words[3]!,words[4]!):cause===9?`${words[3]} corners, ${words[4]} held`:`detail ${words[3]} ${words[4]}`;
  const all=Array.from({length:31},(_,i)=>i+1).filter(i=>words[5]!&(1<<i)&&i!==cause).map(i=>CAUSE_NAMES[i]??`cause ${i}`);
  return `GPU failure record: ${CAUSE_NAMES[cause]??`cause ${cause}`} (${detail}) at frame ${words[1]}, layout generation ${words[2]}; last accepted frame ${words[6]}${all.length?`; also ${all.join(", ")}`:""}`;
 }
 
 /** Causes 6 and 7 from a GPU relayout (UniformMixedRemap.applyGpu): the
  * builder's sticky fatal bits (UNIFORM_MIXED_RELAYOUT_FATAL: 1 hanging tap
- * capacity, 2 tier sum, 4 tile words, 16 h-tile capacity) and the build that first raised one. */
+ * capacity, 2 tier sum, 4 tile words, 8 residency, 16 h-tile capacity) and the build that first raised one. */
 function relayoutDetail(fatal:number,build:number):string{
  const names=[[1,"hanging tap slots over the cache's capacity"],[2,"h + 4h tiles differ from the lattice's"],[4,"a tile word, owner index or worklist entry disagrees with the receipt counts"],
-  [16,"h tiles over the owner-indexed storage's capacity"]] as const;
+  [8,"residency audit: liquid outside the resident pages, or a reader outside the closure"],[16,"h tiles over the owner-indexed storage's capacity"]] as const;
  const causes=names.filter(([bit])=>fatal&bit).map(([,name])=>name);
  return `layout build ${build}: ${causes.length?causes.join("; "):`fatal bits ${fatal}`}`;
 }

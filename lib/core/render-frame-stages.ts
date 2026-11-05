@@ -85,6 +85,7 @@ export const RENDER_FRAME_STAGES = Object.freeze([
   // arm's fusion.
   "deferred-lighting",
   "inline-traversal-shading",
+  "cloth-surface",
   // OUTPUT — the fluid-only fallbacks, the interfaces, the composite, present.
   "fluid-only-rigid-bodies",
   "fluid-only-background",
@@ -153,6 +154,11 @@ export interface RenderFrameStagePlugin {
  * the finest grain available and why the stage id is a separate thing.
  */
 export const RENDER_FRAME_STAGE_PLUGINS = Object.freeze({
+  "cloth-surface": {
+    owner: "renderer",
+    node: "scene-primitive",
+    phase: { id: "svo-scene-primitive", label: "Cloth physical surface raster" },
+  },
   "world-topology-publish": {
     owner: "world",
     node: "sparse-world-build",

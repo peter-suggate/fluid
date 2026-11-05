@@ -285,7 +285,7 @@ fn umPressurePhiCell(p:vec3i)->f32{
  return select(0.5*UM_HMIN,sum/max(weight,1e-9),weight>0.0);
 }
 // What an owner can hold: its open fraction (an h cell's, a 4h owner's tile's).
-fn umCapacity(o:UMOwner)->f32{${this.coarse?"return umSolidCoarse(o.index).x;":"if(!umSolidEnabled()){return 1.0;}if(o.width==1u){return umCellOpen(vec3i(umOrigin(o)));}return umTileOpen(o.tile);"}}
+fn umCapacity(o:UMOwner)->f32{${this.coarse?"if(bitcast<u32>(umPorousWord(0u).x)==0u){return umSolidCoarse(o.index).x;}return umFreeTileCapacityAt(vec3i(umOrigin(o))/4);":"if(o.width==1u){return umFreeCellCapacity(vec3i(umOrigin(o)));}return umFreeTileCapacity(o.tile);"}}
 // umPressureLiquid on this authority's phi: the rows' liquid owners.
 fn umAuthorityLiquid(o:UMOwner,distance:f32)->bool{return ${uniformMixedPressureLiquidWGSL("distance","f32(o.width)*UM_HMIN")};}
 // A closed owner continues its neighbours' phi in the pressure rows but owns

@@ -135,7 +135,7 @@ test("the resolution advice names the cell size a cup needs to hold water", () =
 test("the emitted WGSL states every shape exactly once, with a neutral fallback", () => {
   const wgsl = sceneShapeWgsl();
   for (const shape of SCENE_SHAPES_BY_CODE) {
-    assert.ok(wgsl.includes(`const RIGID_SHAPE_${shape.name.toUpperCase()}: i32 = ${shape.code};`),
+    assert.ok(wgsl.includes(`const RIGID_SHAPE_${shape.name.toUpperCase().replaceAll('-', '_')}: i32 = ${shape.code};`),
       `${shape.name} has no emitted tag`);
   }
   // Five ladders, each ending in a neutral rather than in its last shape's arm:

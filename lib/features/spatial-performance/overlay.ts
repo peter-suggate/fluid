@@ -5,7 +5,7 @@ import { cameraApertureShaderLibrary } from "../../core/webgpu-camera";
 /** Generic instanced boxes/quads: no solver imports, field reads, atomics, GPU
  * timestamp queries or CPU synchronisation in the presentation pass. */
 export const spatialPerformanceWGSL = /* wgsl */`
-struct View { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f }
+struct View { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f, cameraBasisPadding:array<vec4f,18>, cameraBasisRight:vec4f }
 @group(0) @binding(0) var<uniform> u:View;
 struct Settings { control:vec4f, scale:vec4f, low:vec4f, high:vec4f }
 @group(0) @binding(1) var<uniform> s:Settings;
@@ -37,7 +37,7 @@ fn tierColor(t:f32)->vec3f {if(t<.5){return vec3f(.25,.58,.94);}if(t<1.5){return
   if(coordinate<origin[a]||coordinate>=origin[a]+size[a]){return result;}
   if(a==0u){p+=vec3f(0,corner)*size;}else if(a==1u){p+=vec3f(corner.x,0,corner.y)*size;}else{p+=vec3f(corner,0)*size;}p[a]=coordinate;
  }
- let eye=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-eye);var right=cross(forward,vec3f(0,1,0));if(length(right)<1e-5){right=vec3f(1,0,0);}right=normalize(right);let up=normalize(cross(right,forward));
+ let eye=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-eye);let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));
  let delta=p-eye;let depth=dot(delta,forward);let fov=cameraTanHalfFov();
  result.position=vec4f(dot(delta,right)/(fov*u.viewport.x/max(1.0,u.viewport.y)),dot(delta,up)/fov,max(.0001,depth-.001),depth);
  let ratio=cell.cost.x/f32(owners)/max(s.scale.x,1e-20);

@@ -1,3 +1,4 @@
+import {applySolidBoxCuts, packSolidBoxCuts, unpackSolidBoxCuts, validateSolidBoxCuts, solidBoxCutWGSL, type SolidBoxCut} from '../../../core/solid-cuts';
 /**
  * The shape language — H2 of `docs/hero-fidelity-1000x-handoff.md`.
  *
@@ -387,6 +388,7 @@ export const SVO_FIELD_OP_TABLE = Object.freeze([
     // repetition does not attenuate a feature, it deletes instances.
     coarsestPeriod_m: (parameters: SvoFieldOpParameters) => (parameters.a > 0 ? parameters.a : Infinity),
   }),
+  Object.freeze({name:"rounded-box",readsFields:0,code:14,result:"field",wgslConstant:"SVO_FIELD_OP_ROUNDED_BOX",buys:"exact Minkowski sum of a box and a sphere; zero core extents permit rounded plates",coarsestPeriod_m:null}),
 ] as const satisfies readonly SvoFieldOpPolicy[]);
 
 export type SvoFieldOpName = (typeof SVO_FIELD_OP_TABLE)[number]["name"];
@@ -650,6 +652,8 @@ export interface SvoFieldOpDescriptor {
 }
 
 export interface SvoFieldProgram {
+  /** Exact local-space subtraction retained separately from the source tape. */
+  readonly boxCuts?: readonly SolidBoxCut[];
   readonly ops: readonly SvoFieldOpDescriptor[];
   /** Field register holding the result. */
   readonly result: number;
@@ -717,11 +721,13 @@ function sourceBoundingRadius_m(op: SvoFieldOpPolicy, parameters: SvoFieldOpPara
   // is not. Getting this the wrong way round would let a scattered box poke
   // through its own cell wall, which is the one thing the clearance forbids.
   if (op.name === "box") return Math.hypot(parameters.a, parameters.b, parameters.c);
+  if (op.name === "rounded-box") return Math.hypot(parameters.a, parameters.b, parameters.c)+parameters.d;
   return Math.max(Math.abs(parameters.a), Math.abs(parameters.b), Math.abs(parameters.c));
 }
 
 /** The characteristic feature radius a source writes into its field register; see `smooth-union`. */
 function sourceCharacteristicRadius_m(op: SvoFieldOpPolicy, parameters: SvoFieldOpParameters): number {
+  if(op.name === "rounded-box") return parameters.d;
   if (op.name === "sphere") return Math.abs(parameters.a);
   // The *smallest* semi-axis, not the largest: a blend wider than the tightest
   // curvature on a solid swallows the feature it was supposed to join.
@@ -776,6 +782,7 @@ function scatterGeometry(parameters: SvoFieldOpParameters): ScatterGeometry {
  * stop producing, and it would do it without a single error.
  */
 export function validateSvoFieldProgram(program: SvoFieldProgram): void {
+  if(program.boxCuts){validateSolidBoxCuts(program.boxCuts);if(program.sampledVolume)throw new Error("Sampled field box cuts require a shared sampled implementation");}
   if (program.sampledVolume) {
     meshAssetHeader(program.sampledVolume.asset);
     const base = program.sampledVolume.materialBase ?? 0;
@@ -861,7 +868,9 @@ export function validateSvoFieldProgram(program: SvoFieldProgram): void {
       }
       case "sphere":
       case "ellipsoid":
-      case "box": {
+      case "box":
+      case "rounded-box": {
+        if(op.name === "rounded-box"&&([parameters.a,parameters.b,parameters.c].some(v=>v<0)||!(parameters.d>0)))throw new RangeError("Rounded box needs nonnegative core extents and a positive radius");
         const radius_m = sourceBoundingRadius_m(op, parameters);
         if (radius_m > budget_m[point]) {
           throw new RangeError(
@@ -1259,8 +1268,9 @@ export function evaluateValidatedSvoFieldProgram(
         writeSource(descriptor.out, distance_m, pointIndex, op, parameters);
         break;
       }
-      case "box": {
-        const distance_m = boxDistance_m(point, [parameters.a, parameters.b, parameters.c]);
+      case "box":
+      case "rounded-box": {
+        const distance_m = boxDistance_m(point, [parameters.a, parameters.b, parameters.c])-(op.name === "rounded-box"?parameters.d:0);
         writeSource(descriptor.out, distance_m, pointIndex, op, parameters);
         break;
       }
@@ -1425,7 +1435,8 @@ export function evaluateValidatedSvoFieldProgram(
       }
     }
   }
-  return fields[program.result];
+  const result=fields[program.result]!;
+  return {...result,distance_m:applySolidBoxCuts(result.distance_m,program.boxCuts,localPoint)};
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,11 +1577,12 @@ export function svoFieldProgramExtent_m(program: SvoFieldProgram): [number, numb
       }
       case "sphere":
       case "ellipsoid":
-      case "box": {
+      case "box":
+      case "rounded-box": {
         const radii: [number, number, number] =
           op.name === "sphere"
             ? [Math.abs(parameters.a), Math.abs(parameters.a), Math.abs(parameters.a)]
-            : [Math.abs(parameters.a), Math.abs(parameters.b), Math.abs(parameters.c)];
+            : [Math.abs(parameters.a), Math.abs(parameters.b), Math.abs(parameters.c)].map(v=>v+(op.name === "rounded-box"?parameters.d:0)) as [number,number,number];
         const bounding_m = sourceBoundingRadius_m(op, parameters);
         for (const axis of axes) {
           // Under a rotation neither half of this is per-axis any more. The
@@ -1668,7 +1680,7 @@ export function svoFieldProgramExtent_m(program: SvoFieldProgram): [number, numb
  */
 export function svoFieldProgramFeatureRadius_m(program: SvoFieldProgram): number {
   validateSvoFieldProgram(program);
-  let finest_m = Infinity;
+  let finest_m = Math.min(Infinity,...(program.boxCuts??[]).flatMap(c=>[c.halfExtents_m.x,c.halfExtents_m.y,c.halfExtents_m.z]));
   for (const descriptor of program.ops) {
     const op = svoFieldOp(descriptor.op);
     const parameters = parametersOf(descriptor);
@@ -1714,6 +1726,7 @@ export function packSvoFieldProgramArena(
     const words = packMeshAsset(program.sampledVolume.asset);
     images.set(program.sampledVolume.asset, { offset: wordCount, words }); wordCount += words.length;
   }
+  const cutsOffset=wordCount;wordCount+=programs.reduce((n,p)=>n+12*(p.boxCuts?.length??0),0);
   const buffer = new ArrayBuffer(wordCount * 4);
   const words = new Uint32Array(buffer);
   const floats = new Float32Array(buffer);
@@ -1723,6 +1736,7 @@ export function packSvoFieldProgramArena(
     words[image.offset + 15] = textureLayerBase;
     textureLayerBase += meshAssetVolume(asset).surfaceMapping?.header.textureLayerCount ?? 0;
   }
+  let cutWord=cutsOffset;
   programs.forEach((program, index) => {
     validateSvoFieldProgram(program);
     const base = index * SVO_FIELD_PROGRAM_BLOCK_WORDS;
@@ -1735,6 +1749,7 @@ export function packSvoFieldProgramArena(
     }
     words[base] = program.ops.length >>> 0;
     words[base + 1] = program.result >>> 0;
+    if(program.boxCuts?.length){words[base+2]=cutWord;words[base+3]=program.boxCuts.length;const image=packSolidBoxCuts(program.boxCuts);floats.set(image,cutWord);cutWord+=image.length;}
     program.ops.forEach((descriptor, opIndex) => {
       const op = svoFieldOp(descriptor.op);
       const parameters = parametersOf(descriptor);
@@ -1798,7 +1813,7 @@ export function unpackSvoFieldProgram(words: Uint32Array, index: number): SvoFie
       },
     });
   }
-  return { ops, result: words[base + 1] };
+  return { ops, result: words[base + 1],...(words[base+3]?{boxCuts:unpackSolidBoxCuts(floats,words[base+3]!,words[base+2]!)}:{}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1854,6 +1869,7 @@ export function svoFieldProgramWGSL(options: SvoFieldProgramWGSLOptions): string
   const { functionName, loadWord, baseWordExpression, capacityExpression } = options;
   return /* wgsl */ `
 ${wgslOpConstants}
+${solidBoxCutWGSL}
 const SVO_FIELD_PROGRAM_BLOCK_WORDS:u32=${SVO_FIELD_PROGRAM_BLOCK_WORDS}u;
 const SVO_FIELD_PROGRAM_HEADER_WORDS:u32=${SVO_FIELD_PROGRAM_HEADER_WORDS}u;
 const SVO_FIELD_PROGRAM_OP_WORDS:u32=${SVO_FIELD_PROGRAM_OP_WORDS}u;
@@ -2040,6 +2056,9 @@ fn ${functionName}Banded(blockIndex:u32,localPoint:vec3f,samplingLength_m:f32)->
       fieldLipschitz[out]=carriedLipschitz;
       fieldRadius[out]=abs(a);
       fieldClearance[out]=carriedClearance;
+    }else if(code==${svoFieldOp("rounded-box").wgslConstant}){
+      fieldDistance[out]=min(svoFieldBox_m(point,vec3f(a,b,c))-d,carriedClearance);
+      fieldLipschitz[out]=carriedLipschitz;fieldRadius[out]=d;fieldClearance[out]=carriedClearance;
     }else if(code==${svoFieldOp("ellipsoid").wgslConstant}){
       let semiAxes=abs(vec3f(a,b,c));
       let radii=max(semiAxes,vec3f(1e-6));
@@ -2120,7 +2139,16 @@ fn ${functionName}Banded(blockIndex:u32,localPoint:vec3f,samplingLength_m:f32)->
       fieldClearance[out]=fieldClearance[fieldA];
     }
   }
-  return SvoFieldValue(fieldDistance[resultRegister],fieldLipschitz[resultRegister]);
+  var result=fieldDistance[resultRegister];
+  let cutBase=(${baseWordExpression})+${loadWord}(base+2u);let cutCount=${loadWord}(base+3u);
+  for(var i=0u;i<cutCount;i++){
+   let at=cutBase+12u*i;
+   let center=vec3f(bitcast<f32>(${loadWord}(at)),bitcast<f32>(${loadWord}(at+1u)),bitcast<f32>(${loadWord}(at+2u)));
+   let extent=vec3f(bitcast<f32>(${loadWord}(at+4u)),bitcast<f32>(${loadWord}(at+5u)),bitcast<f32>(${loadWord}(at+6u)));
+   let rotation=vec4f(bitcast<f32>(${loadWord}(at+8u)),bitcast<f32>(${loadWord}(at+9u)),bitcast<f32>(${loadWord}(at+10u)),bitcast<f32>(${loadWord}(at+11u)));
+   result=max(result,-solidBoxCutDistance(localPoint,center,extent,rotation));
+  }
+  return SvoFieldValue(result,fieldLipschitz[resultRegister]);
 }
 
 // The unbanded entry point every existing call site spells. Threading a real

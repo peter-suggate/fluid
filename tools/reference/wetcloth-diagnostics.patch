@@ -1,0 +1,75 @@
+diff --git a/libWetCloth/App/Main.cpp b/libWetCloth/App/Main.cpp
+index eb16a97..ec6d2b9 100755
+--- a/libWetCloth/App/Main.cpp
++++ b/libWetCloth/App/Main.cpp
+@@ -13,6 +13,9 @@
+ 
+ #include <Eigen/StdVector>
+ #include <cmath>
++#include <cstdlib>
++#include <iomanip>
++#include <tbb/global_control.h>
+ #include <fstream>
+ #include <iostream>
+ #include <sstream>
+@@ -113,7 +116,38 @@ void stepSystem() {
+ 
+ void syncScene() {}
+ 
++// Optional diagnostic-only bounded run; the authored dt and physics are unchanged.
++void referenceHeadlessRun(int steps, const char* path, int every) {
++  std::ofstream out(path); out << std::setprecision(17);
++  if (!out || steps < 0 || every <= 0) throw std::runtime_error("Invalid reference output configuration");
++  for (int step=0; step<=steps; ++step) {
++    if (step % every == 0 || step == steps) {
++      const auto& scene=*g_executable_simulation->referenceScene();
++      out << "{\"step\":" << step << ",\"time_s\":" << step*g_dt
++          << ",\"dt_s\":" << g_dt << ",\"units\":\"CGS\",\"softParticles\":"
++          << scene.getNumSoftElastoParticles() << ",\"elastoParticles\":" << scene.getNumElastoParticles()
++          << ",\"fluidParticles\":" << scene.getNumFluidParticles();
++      auto field=[&](const char* name,const VectorXs& values) {
++        out << ",\"" << name << "\":[";
++        for (int i=0; i<values.size(); ++i) {if(i)out << ',';out << values[i];}
++        out << ']';
++      };
++      field("x",scene.getX());field("v",scene.getV());field("fluidV",scene.getFluidV());
++      field("waterVolume",scene.getFluidVol());field("volume",scene.getVol());field("solidFraction",scene.getVolumeFraction());
++      out << "}\n";out.flush();
++      if(!out)throw std::runtime_error("Reference output write failed");
++    }
++    if(step<steps)g_executable_simulation->stepSystem(g_dt);
++  }
++}
++
+ void headlessSimLoop() {
++  if (const char* output=std::getenv("WETCLOTH_REFERENCE_OUTPUT")) {
++    const char* steps=std::getenv("WETCLOTH_REFERENCE_STEPS");
++    const char* every=std::getenv("WETCLOTH_REFERENCE_EVERY");
++    if(!steps)throw std::runtime_error("WETCLOTH_REFERENCE_STEPS is required");
++    referenceHeadlessRun(std::stoi(steps),output,every?std::stoi(every):1);return;
++  }
+   while (true) {
+     while (g_current_step <= g_num_steps) {
+       stepSystem();
+@@ -566,6 +600,8 @@ void miscOutputCallback() {
+ }
+ 
+ int main(int argc, char** argv) {
++  const char* threadCount=std::getenv("WETCLOTH_REFERENCE_THREADS");
++  tbb::global_control referenceThreads(tbb::global_control::max_allowed_parallelism, threadCount?std::stoul(threadCount):std::thread::hardware_concurrency());
+   Eigen::initParallel();
+   Eigen::setNbThreads(std::thread::hardware_concurrency());
+ 
+diff --git a/libWetCloth/App/ParticleSimulation.h b/libWetCloth/App/ParticleSimulation.h
+index 0a2d458..e7a1476 100755
+--- a/libWetCloth/App/ParticleSimulation.h
++++ b/libWetCloth/App/ParticleSimulation.h
+@@ -95,6 +95,8 @@ class ParticleSimulation {
+ 
+   const LiquidInfo& getLiquidInfo();
+ 
++  const std::shared_ptr<TwoDScene>& referenceScene() const { return m_core->getScene(); }
++
+  private:
+   std::shared_ptr<WetClothCore> m_core;
+   std::shared_ptr<TwoDSceneRenderer> m_scene_renderer;

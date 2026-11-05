@@ -1,4 +1,5 @@
 import { settleGPUInitialization } from "../../core/gpu-initialization";
+import type { UniformClothGridFields } from "./uniform-cloth-grid-coupling";
 import { uniformMixedGravitySupport } from "./uniform-mixed-detached-mass.wgsl";
 import { UniformNarrowBandFlip, type NarrowBandParticleBudget } from "./uniform-narrow-band-flip";
 import { NARROW_BAND_AIR_CHANGED_WORD } from "./uniform-narrow-band-air.wgsl";
@@ -171,6 +172,18 @@ export const UNIFORM_MIXED_RECEIPT_RING=2;
  * on, encodes the fluid-to-body exchange and the body integration after the
  * projection, before the census. */
 export interface UniformMixedFrameBodies{couple?:(encoder:GPUCommandEncoder)=>void}
+/** Physics extensions run against the production grid. Support is published
+ * before freeze decisions; forces run after the FLIP snapshot and gravity,
+ * before the pressure solve. A pressure-only initialization kick skips them. */
+export interface UniformMixedFramePhysicsPlugin {
+ readonly id:string;
+ encodeSupport?(encoder:GPUCommandEncoder):void;
+ /** After census adoption, before advection and the FLIP force snapshot.
+  * Return true only when native phi/velocity changed. */
+ encodeSources?(encoder:GPUCommandEncoder,dt_s:number):boolean;
+ encodeForces(encoder:GPUCommandEncoder,dt_s:number):void;
+ encodeAfterProjection?(encoder:GPUCommandEncoder):void;
+}
 /** Dynamic coarsening at horizon one (UniformMixedFrame.setRelayout): the
  * census and layout builder the frame head encodes, with no readback. */
 export interface UniformMixedFrameRelayout{
@@ -271,6 +284,7 @@ export interface UniformMixedFrameCapacity{fineTiles:number;liquidBand:boolean;b
  bulkReach?:number}
 
 export class UniformMixedFrame {
+ private physicsPlugins:readonly UniformMixedFramePhysicsPlugin[]=[];
  /** The NB-FLIP near-settled settings, fixed for the frame's life. */
  readonly nearSettled:UniformNearSettled;
  /** The h tiles the frame ever holds (UniformMixedFrameCapacity.fineCeiling). */
@@ -513,8 +527,8 @@ export class UniformMixedFrame {
   // A static pool takes any reach: every page it could ask for is pinned.
   // Host commands and pins take the pool's fixed capacities: a step that
   // asks for more drop pages, or a scene that pins more, is refused there.
-  this.pagePool=new UniformPagePool(device,{...layout.address.pool,closureCap:f.residency.live?4*UNIFORM_RESIDENCY_PAGE_REACH:0xffffffff});this.pagePool.seed(layout.address.seed);this.pagePool.pin(f.residency.pins);
-  const solid=this.solid=new UniformMixedSolid(device,f.solid,coarseLayout,this.pagePool);
+  this.pagePool=new UniformPagePool(device,{...layout.address.pool,pinCapacity:Math.max(64,layout.address.blocks,f.residency.pins.length),closureCap:f.residency.live?4*UNIFORM_RESIDENCY_PAGE_REACH:0xffffffff});this.pagePool.seed(layout.address.seed);this.pagePool.pin(f.residency.pins);
+  const solid=this.solid=new UniformMixedSolid(device,{...f.solid,frameStatus:this.status},coarseLayout,this.pagePool);
   this.coarseCache=caches[0]!;
   const bulkPages=this.bulkPages=this.nearSettled.bulkTier==="16h"?new UniformBulkPages(device,capacity.bulkSlots??layout.address.pool.box.pages[0]*layout.address.pool.box.pages[1]*layout.address.pool.box.pages[2],capacity.bulkReach??0):undefined;
   const o=this.ownership=new UniformMixedOwnership(device,layout,true,capacity.fineTiles,capacity.fixedWorldGeometry,bulkPages);
@@ -1051,7 +1065,7 @@ export class UniformMixedFrame {
    // same: p's extension key is the last advance's.
    const dt=p.dt,gravity=p.gravity,same=this.write(p,dt,gravity);this.blit.setSharedSchedule(false);let encoder=this.beginEncoder(trace);
    {const generation=this.surfaceWorkControl.generation,moved=generation!==this.coldGeneration;this.coldGeneration=generation;
-    this.cold.begin(frame,frame-UNIFORM_MIXED_RECEIPT_RING,work?.heat,kick>0||!same||moved||edit!==undefined||firstCensus||(p.addedVolumeCells??0)!==0);
+    this.cold.begin(frame,frame-UNIFORM_MIXED_RECEIPT_RING,work?.heat,kick>0||!same||moved||edit!==undefined||firstCensus||(p.addedVolumeCells??0)!==0||this.physicsPlugins.length>0);
     this.frozenQuiet=this.freeze!==undefined&&this.cold.quiet;
     // NB-FLIP's idle advance (no live sample, every region frozen and COLD) leaves its stages out.
     this.surfaceWorkControl.framePlan.beginFrame();this.narrowBandFlip.beginAdvance(this.cold);this.extensionIdle=this.frozenQuiet&&this.narrowBandFlip.idle;}
@@ -1075,6 +1089,7 @@ export class UniformMixedFrame {
    this.solid?.encodeCoarse(encoder,this.ownership.presentation);
    // Where this frame's non-pressure work goes: after the swept-body mask, before every stage that reads the tiers.
    this.heat.encode(encoder,dt,p.density,this.words.band[8]!,gravity);
+   if(!kick&&this.physicsPlugins.length){for(const plugin of this.physicsPlugins)plugin.encodeSupport?.(encoder);this.heat.encodeDeep(encoder);}
    if(this.bulkTransfer){const h=this.ownership.capacity.lattice.cellSize_m;for(let a=0;a<3;a++)this.bulkGradient[a]=p.density*gravity[a]!*h[a]!;}
    // The freeze follows the final tiers: a relayout head's after its promotions (encodeRelayoutHead).
    if(!relayout)this.freeze?.encodeHead(encoder,dt,gravity,this.frozenQuiet);
@@ -1142,6 +1157,20 @@ export class UniformMixedFrame {
     // The gauge's rate reaches the authorities' parameters on the GPU: this
     // frame's host write left that word zero, and no readback sets it.
     if(control>0)encoder.copyBufferToBuffer(this.surfaceVolume!.budget!,4*NB_VOLUME_RATE_FLOAT,this.params.authority,8,4);
+   }
+   // The native budget is initialized above before any source delta lands.
+   // Sources use the adopted fine support, and derived advection inputs are
+   // refreshed from their newly committed phi and MAC momentum.
+   {let changed=false;if(!kick)for(const plugin of this.physicsPlugins)changed=plugin.encodeSources?.(encoder,dt)===true||changed;
+    if(changed){
+     this.phiResolve.encode(encoder,this.phiResolveGroups.phi,undefined,true);
+     for(const cache of ["cold","heldAuthority","splitAuthority","extension","geometry"] as const)this.reach(cache,this.frameIndex);
+     this.plan.encode(encoder,p.supportPolicy,true);this.encodeGeometry(encoder);
+     this.authority.encode(encoder,this.authorityGroup,false);
+     this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,false,false);
+     this.plan.encodeCertificate(encoder,dt);this.cache.encode(encoder,this.cacheGroup);
+     if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);
+    }
    }
    // The samples' move is the frame's first long stage: it runs while the
    // host encodes the surface stages behind it.
@@ -1219,6 +1248,7 @@ export class UniformMixedFrame {
    }
    // An idle frozen advance holds phi (no geometry change, so no capillary cache is dirty) and every owner is frozen: the forces write nothing.
    this.dynamics.encodeClassify(encoder);if(!this.extensionIdle)this.forces.encode(encoder,this.forceGroup,p.surfaceTension>0);
+   if(!kick)for(const plugin of this.physicsPlugins)plugin.encodeForces(encoder,dt);
    trace?.phase(encoder,A.advectionCorrection);encoder=this.flush(encoder,trace);
    // Pressure stays all-4h; no layout build and no CPU wait. The band rows
    // need this frame's simulation authority and u*, both rewritten in
@@ -1268,6 +1298,7 @@ export class UniformMixedFrame {
    trace?.phase(encoder,A.pressureProjection);
    if(!this.frozenQuiet)split.transfer.encodeToSimulation(encoder,split.toSimulation);
    this.band.encodeProject(encoder);
+   if(!kick)for(const plugin of this.physicsPlugins)plugin.encodeAfterProjection?.(encoder);
    // The projected field is final here: each region's change since the last frame.
    this.dynamics.encodePublish(encoder);
    if(!kick){
@@ -1518,6 +1549,37 @@ export class UniformMixedFrame {
   * this replaces (UniformMixedFrameRelayout.edit bounds it), so that
   * layout's receipts and budgets stand and the edit's count is added: a
   * small request arriving launches a small frame. */
+ /** Stable handles to the actual forced velocity and liquid occupancy. */
+ /** Capture initialized free water after plugins install material capacity.
+  * This measures the native phi/ownership geometry; it never changes phi or
+  * compensates for displaced material by moving a remote surface. */
+ async initializePhysicalWaterBudget():Promise<number>{
+  if(this.phase!=="ready"||this.frameIndex!==0||!this.surfaceVolume)throw new Error("Physical water initialization requires the unadvanced native frame");
+  const read=this.device.createBuffer({label:"Initialized physical free-water budget",size:40,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  try{
+   const encoder=this.device.createCommandEncoder({label:"Initialize porous free-water accounting"});
+   this.plan.encode(encoder);this.encodeGeometry(encoder);
+   this.surfaceVolume.beginStep(encoder,this.surfaceVolumeGroup,0,0);
+   encoder.copyBufferToBuffer(this.surfaceVolume.budget,0,read,0,40);this.device.queue.submit([encoder.finish()]);
+   await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange());
+   const volume=values[0]!+values[9]!;
+   if(values[1]!==1||!Number.isFinite(volume)||volume<0)throw new Error("Native physical water budget capture failed");
+   return volume;
+  }finally{if(read.mapState==='mapped')read.unmap();read.destroy();}
+ }
+ clothCouplingFields(origin_m:readonly [number,number,number],cellSize_m:readonly [number,number,number]):UniformClothGridFields{
+  if(!this.narrowBandVolumeBudget)throw new Error("Cloth water exchange requires the NB-FLIP scalar budget");
+  if(!this.solid)throw new Error("Cloth requires the shared solid and porous capacity bindings");
+  const solid=this.solid;
+  return {get porousCapacity(){return solid.porousCapacity;},setPorousCapacity:texture=>solid.setPorousCapacity(texture),device:this.device,ownership:this.ownership,velocity:this.fields.velocityScratch,projectedVelocity:this.fields.velocity,phi:this.fields.phi,waterBudget:this.narrowBandVolumeBudget,solid:this.solid,volume:this.fields.volume,heat:this.heat,
+   invalidateLocalWater:()=>{for(const cache of ["cold","heldAuthority","splitAuthority","extension","geometry"] as const)this.reach(cache,this.frameIndex);},
+   setPressureMixtureFaces:faces=>this.band.setMixtureFaces(faces),origin_m,cellSize_m};
+ }
+ setPhysicsPlugins(plugins:readonly UniformMixedFramePhysicsPlugin[]):void{
+  if(this.phase==="encoding")throw new Error("Physics plugins cannot change during an advance");
+  if(new Set(plugins.map(p=>p.id)).size!==plugins.length)throw new Error("Duplicate mixed physics plugin id");
+  this.physicsPlugins=[...plugins];this.cold.trigger();
+ }
  setRelayout(relayout?:UniformMixedFrameRelayout,reserved?:number,counted=false):void{
   if(this.phase==="encoding")throw new Error("The mixed relayout cannot change during an advance");
   // A census's first build has no receipt to size from: storage at the
@@ -1621,6 +1683,7 @@ export class UniformMixedFrame {
   this.phiResolve.encode(encoder,this.phiResolveGroups.phi,this.phiResolved?changes:undefined);
   this.surfaceWorkControl.encodeRemapRevisions(encoder,changes);
   // Claims and remaps raised tiers: the deep COLD flags and epochs follow.
+  for(const plugin of this.physicsPlugins)plugin.encodeSupport?.(encoder);
   this.heat.encodeDeep(encoder);this.freeze?.encodeHead(encoder,dt,p.gravity,this.frozenQuiet);
   // The patches the generation no longer needs return to the base.
   this.fields.detail?.encodeRetire(encoder);

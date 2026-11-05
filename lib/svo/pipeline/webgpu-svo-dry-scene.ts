@@ -1,3 +1,5 @@
+import {RigidCutRenderAtlas} from '../../core/rigid-cut-render';
+import type {RigidBodyDescription} from '../../core/model';
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { StagedReadback } from "../../core/staged-readback";
 import { Compiled } from "../../core/compiled";
@@ -230,6 +232,7 @@ export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
   ...[2, 3, 4, 5, 6].map((binding) => ({ binding, type: "read-only-storage" as const })),
   { binding: 9, type: "uniform" as const },
   ...[13, 14].map((binding) => ({ binding, type: "uniform" as const })),
+  { binding: 15, type: "texture-2d-unfilterable" as const },
   { binding: 16, type: "texture-3d-float" as const },
   { binding: 17, type: "filtering-sampler" as const },
   { binding: 18, type: "texture-2d-uint" as const },
@@ -262,7 +265,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
   // Specular diagnostics (29) are written only by fragment shading. Exposing
   // them to compute would push mesh construction from 10 storage buffers to
   // 11, even though its entry points never access that buffer.
-  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 6, 9, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
+  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 6, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]);
   // Raster analytic impostors consume the camera/body uniforms, their scene
   // record arena, and the live primitive-count/structural-offset parameters.
   const vertexBindings = new Set([0, 1, 2, 3, 4, 6, 9]);
@@ -273,6 +276,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
     const visibility = GPUShaderStage.FRAGMENT
       | (computeBindings.has(binding) ? GPUShaderStage.COMPUTE : 0)
       | (vertexBindings.has(binding) ? GPUShaderStage.VERTEX : 0);
+    if(type === "texture-2d-unfilterable")return {binding,visibility,texture:{sampleType:"unfilterable-float",viewDimension:"2d"}};
     if (type === "texture-2d-array-float") return { binding, visibility, texture: { sampleType: "float", viewDimension: "2d-array" } };
     if (type === "texture-3d-float") return { binding, visibility, texture: { sampleType: "float", viewDimension: "3d" } };
     if (type === "texture-2d-uint") return { binding, visibility, texture: { sampleType: "uint", viewDimension: "2d" } };
@@ -1518,6 +1522,7 @@ export class SparseVoxelDrySceneRenderer {
   private readonly paramsBuffer: GPUBuffer;
   private readonly voxelSpecularCounters: GPUBuffer;
   private readonly lightingBuffer: GPUBuffer;
+  private readonly rigidCutAtlas:RigidCutRenderAtlas;
   private readonly rigidMotionUniformBuffer: GPUBuffer;
   private readonly nodeMipFallbackAtlas: GPUTexture;
   private readonly nodeMipFallbackAtlasView: GPUTextureView;
@@ -1649,6 +1654,7 @@ export class SparseVoxelDrySceneRenderer {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     this.lightingBuffer = device.createBuffer({ label: "Sparse voxel dry scene lighting arena", size: SVO_DRY_SCENE_LIGHTING_ARENA_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.rigidCutAtlas=new RigidCutRenderAtlas(device);
     this.rigidMotionUniformBuffer = device.createBuffer({ label: "Sparse voxel rigid motion uniform mirror", size: SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     if (this.rasterPrimary) {
       // Viewport-independent by construction: the band is per authored record,
@@ -1995,6 +2001,7 @@ export class SparseVoxelDrySceneRenderer {
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: { buffer: this.bodyBuffer } },
         { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
+        {binding:15,resource:this.rigidCutAtlas.view},
       ],
     });
     const module = await checkedModule(this.device, "Sparse voxel analytic rigid raster", svoRigidRasterShader);
@@ -2529,7 +2536,7 @@ export class SparseVoxelDrySceneRenderer {
     });
     // Binding 6 joins the resolve set because `traceLeafPayload` resolves
     // accepted planar terminal records, including from raster-generated hits.
-    const resolveBindings = new Set([0, 1, 2, 3, 4, 6, 9, 14, 28]);
+    const resolveBindings = new Set([0, 1, 2, 3, 4, 6, 9, 14, 15, 28]);
     this.brickResolveSceneLayout = this.device.createBindGroupLayout({
       label: "Sparse voxel conservative brick resolve scene bindings",
         entries: sparseVoxelDrySceneBindGroupLayoutEntries(this.traversalMode).filter((entry) => resolveBindings.has(entry.binding)),
@@ -3019,6 +3026,7 @@ export class SparseVoxelDrySceneRenderer {
         { binding: 6, resource: structural.planarBoundaries.records },
         { binding: 9, resource: { buffer: this.paramsBuffer } },
         { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
+        {binding:15,resource:this.rigidCutAtlas.view},
         { binding: 28, resource: this.surfaceTextures.view },
       ],
     });
@@ -6304,6 +6312,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 9, resource: { buffer: this.paramsBuffer } },
       { binding: 13, resource: { buffer: this.lightingBuffer } },
       { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
+        {binding:15,resource:this.rigidCutAtlas.view},
       { binding: 16, resource: nodeMip?.view ?? this.nodeMipFallbackAtlasView },
       { binding: 17, resource: nodeMip?.sampler ?? this.nodeMipFallbackSampler },
       { binding: 18, resource: nodeMip?.directoryView ?? this.nodeMipFallbackDirectoryView },
@@ -6376,6 +6385,13 @@ export class SparseVoxelDrySceneRenderer {
     if (this.voxelLightUserEnabled === enabled) return;
     this.voxelLightUserEnabled = enabled;
     this.ensureVoxelLightCache(this.source, this.scene);
+  }
+
+  setRigidSurfaceBodies(bodies:readonly RigidBodyDescription[]):void{
+    if(this.rigidCutAtlas.setBodies(bodies)){
+      this.dryFrameReuse.invalidate();this.rasterAo?.invalidateVisibility();this.rasterAo?.invalidateNativeGeometry();
+      this.invalidateVoxelLightCache();this.worldGiCacheDirty=true;this.visibilityViewRevision++;this.pickingFrameToken++;
+    }
   }
 
   setRigidMotionSource(source: GPUBuffer | undefined): void {
@@ -7594,6 +7610,7 @@ export class SparseVoxelDrySceneRenderer {
     this.surfaceMeshWork?.destroy();
     this.surfaceMeshVisible?.destroy();
     this.lightingBuffer.destroy();
+    this.rigidCutAtlas.destroy();
     this.rigidMotionUniformBuffer.destroy();
     this.coneFanoutFrameBuffer?.destroy();
     this.coneFanoutFrameBuffer = undefined;

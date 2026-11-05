@@ -7,9 +7,7 @@ export const gridStructure3DWGSL = /* wgsl */ `
   udrInit();
   let eye=u.cameraPosition.xyz;
   let forward=normalize(u.cameraTarget.xyz-eye);
-  var right=cross(forward,vec3f(0,1,0));
-  if(length(right)<1e-5){right=vec3f(1,0,0);}
-  right=normalize(right);
+  let right=cameraRightDirection(forward);
   let up=normalize(cross(right,forward));
   let ndc=input.uv*2.0-1.0;
   let ray=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());

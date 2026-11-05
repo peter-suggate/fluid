@@ -1267,7 +1267,7 @@ fn remapTileCells(group:vec3u,lane:u32){
   donor=oldumOwnerAt(vec3i(cell));
   tileVolume[lane]=textureLoad(volume,vec3i(oldumOrigin(donor))).x;
   split=o.width<donor.width;
-  tileOpen[lane]=umCellOpen(vec3i(cell));
+  tileOpen[lane]=umFreeCellCapacity(vec3i(cell));
  }
 `}
  workgroupBarrier();textureBarrier();

@@ -14,6 +14,7 @@ export type SceneRuntimeCapability =
   | "fluid-authority"
   | "fluid-rigid-coupling"
   | "water-presentation"
+  | "cloth-dynamics"
   | "sparse-voxel-presentation";
 
 export type SceneReadinessRequirement = "required" | "not-required";
@@ -47,7 +48,7 @@ export interface SceneRuntimePlan {
 
 /** Derive runtime ownership from scene content/capabilities, not preset IDs. */
 export function planSceneRuntime(
-  scene: Pick<SceneDescription, "systems" | "terrain" | "rigidBodies" | "interaction">,
+  scene: Pick<SceneDescription, "systems" | "terrain" | "rigidBodies" | "interaction" | "cloth">,
 ): SceneRuntimePlan {
   // Do not infer this from fillFraction. Legacy scenes that intentionally
   // start empty still own a solver, while an explicit false is authoritative.
@@ -62,6 +63,7 @@ export function planSceneRuntime(
     "fluid-authority": fluidEnabled,
     "fluid-rigid-coupling": rigidCoupling,
     "water-presentation": fluidEnabled,
+    "cloth-dynamics": (scene.cloth?.length ?? 0) > 0,
     "sparse-voxel-presentation": sparseVoxelPresentation,
   };
   const gate = (
@@ -72,6 +74,7 @@ export function planSceneRuntime(
   if (capabilities["water-presentation"]) presentationCapabilities.push("water-presentation");
   if (capabilities["sparse-voxel-presentation"]) presentationCapabilities.push("sparse-voxel-presentation");
   const transportCapabilities: SceneRuntimeCapability[] = [];
+  if (capabilities["cloth-dynamics"]) transportCapabilities.push("cloth-dynamics");
   if (fluidEnabled) transportCapabilities.push("fluid-authority", "water-presentation");
   if (rigidDynamics) transportCapabilities.push("rigid-dynamics");
   if (rigidCoupling) transportCapabilities.push("fluid-rigid-coupling");

@@ -68,7 +68,7 @@ export function solidOccupancyMaskLayout(tileKeys: number, slots: number, laneWo
  * floor over its footprint; 3 open ground, walled below its floor alone.
  */
 export interface SolidOccupancyMaskWalls {
-  readonly policy: 1 | 2 | 3;
+  readonly policy: 1 | 2 | 3 | 4;
   /** The box's low window page, and its pages an axis. */
   readonly origin: readonly [number, number, number];
   readonly pages: readonly [number, number, number];
@@ -76,6 +76,7 @@ export interface SolidOccupancyMaskWalls {
 /** Whether the lattice walls off window page (x, y, z). */
 export function solidOccupancyMaskWall(walls: SolidOccupancyMaskWalls, x: number, y: number, z: number): boolean {
   const o = walls.origin, n = walls.pages;
+  if (walls.policy === 4) return false;
   if (walls.policy === 3) return y < o[1];
   const rx = x - o[0], ry = y - o[1], rz = z - o[2];
   return rx < 0 || ry < 0 || rz < 0 || rx >= n[0] || rz >= n[2] || (walls.policy === 1 && ry >= n[1]);
@@ -169,7 +170,7 @@ export function solidOccupancyMaskWGSL(buffer: string, page: string, voxel: stri
       : `let e=vec3u(p>>vec3u(5u))&vec3u(63u);return ${buffer}[e.x|(e.y<<6u)|(e.z<<12u)];`;
   const wall = !moving && walls ? `fn ${page}Wall(q:vec3i)->bool{
  let r=q-vec3i(${walls.origin.join(",")});
- ${walls.policy === 3 ? "return r.y<0;" : `return any(r<vec3i(0))||r.x>=${walls.pages[0]}||r.z>=${walls.pages[2]}${walls.policy === 1 ? `||r.y>=${walls.pages[1]}` : ""};`}
+ ${walls.policy === 4 ? "return false;" : walls.policy === 3 ? "return r.y<0;" : `return any(r<vec3i(0))||r.x>=${walls.pages[0]}||r.z>=${walls.pages[2]}${walls.policy === 1 ? `||r.y>=${walls.pages[1]}` : ""};`}
 }
 ` : "";
   return /* wgsl */ `${wall}fn ${page}(p:vec3i)->u32{

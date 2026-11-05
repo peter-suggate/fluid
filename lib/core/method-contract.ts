@@ -26,6 +26,7 @@ import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
 import type { ConfigurationReadout, DiagnosticRow } from "./method-diagnostics";
 import type { WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
 import type { ViewportFailureIndicator } from "./viewport-failure-diagnostics";
+import type { ClothSurfacePublication } from "../cloth/types";
 
 /**
  * Method plugin contract.
@@ -195,6 +196,10 @@ export interface InjectedLiquidBall {
 /** Minimal interface the renderer needs from a GPU solver. */
 export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
+  /** Accepted mechanical geometry, shared by rendering, picking and editing. */
+  readonly clothSurfaces?: readonly ClothSurfacePublication[];
+  /** Paired native free-water/bound-water commits from the accepted frame. */
+  readonly clothWaterLedgers?: readonly import('../cloth/definition').ClothWaterLedger[];
   /** Physical frame of the fluid lattice when it extends beyond the tank. */
   readonly fluidDomain?: {
     readonly origin_m: readonly [number, number, number];

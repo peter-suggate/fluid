@@ -139,7 +139,7 @@ export function createSvoPrimaryEntryPrepassWGSL(options: { reversedZNear_m: num
   const contract = SVO_PRIMARY_ENTRY_PREPASS_CONTRACT;
   const { bindings } = contract;
   return /* wgsl */ `
-struct Uniforms{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>}
+struct Uniforms {viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>, cameraBasisPadding:array<vec4f,1>, cameraBasisRight:vec4f }
 struct SvoNode{address:vec4u,links:vec4u}
 struct SvoLeaf{topology:vec4u}
 struct SvoMapping{worldOrigin:vec3f,brickSize:u32,cellSize:vec3f,maximumDepth:u32,nodeCount:u32,leafCount:u32,maxVisits:u32,_padding:u32}
@@ -193,7 +193,7 @@ struct SvoEntryCamera{origin:vec3f,forward:vec3f,right:vec3f,up:vec3f,aspect:f32
 fn svoEntryCamera()->SvoEntryCamera{
   let origin=uniforms.cameraPosition.xyz;
   let forward=normalize(uniforms.cameraTarget.xyz-origin);
-  let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));
+  let right=cameraRightDirection(forward);
   return SvoEntryCamera(origin,forward,right,normalize(cross(right,forward)),
     uniforms.viewport.x/max(uniforms.viewport.y,1.0));
 }
@@ -272,7 +272,7 @@ struct SvoPrimaryEntryOut{
 @vertex fn ${contract.entryPoints.vertex}(@builtin(vertex_index) vertexIndex:u32,@builtin(instance_index) instanceIndex:u32)->SvoPrimaryEntryVertexOut{
   let record=svoEntryInstances[instanceIndex];
   let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);
-  let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));let up=normalize(cross(right,forward));
+  let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));
   let aspect=uniforms.viewport.x/max(uniforms.viewport.y,1.0);
   var position=vec4f(0.0,0.0,0.0,1.0);
   // Back faces let a camera inside a leaf still produce a fragment, but they

@@ -3,6 +3,7 @@
 // Composition root: installs the simulation methods this worker's renderer
 // looks up by id. Nothing else in the worker imports the method package.
 import "../methods/index";
+import { sceneClothSurface } from "../cloth/scene-geometry";
 import { loadedSceneMeshAssetDistanceFields } from "./imported-assets/asset-library";
 import { cachedEnvironmentProxyCatalog, reuseEnvironmentProxyCatalog, type EnvironmentProxyCatalog } from "./voxel-environments";
 import { documentDelta } from "./document-delta";
@@ -90,7 +91,7 @@ setInterval(() => {
   post({ type: "load", sample: { thread: threadLoad.meter.sample(now_ms), ...(gpu ? { gpu } : {}) } });
 }, LOAD_SAMPLE_INTERVAL_MS);
 
-function snapshot(runtime: FluidLabRenderer): WebGPURenderWorkerSnapshot {
+function snapshot(runtime: FluidLabRenderer, sceneRevision?: number): WebGPURenderWorkerSnapshot {
   return {
     presentationRevision: runtime.presentationRevision,
     presentationResolution: runtime.presentationResolution,
@@ -103,6 +104,10 @@ function snapshot(runtime: FluidLabRenderer): WebGPURenderWorkerSnapshot {
     pixelTraceStale: runtime.pixelTraceStale,
     rigidBodyPoses: runtime.rigidBodyPoses,
     rigidBodyPoseRevision: runtime.rigidBodyPoseRevision,
+    ...(renderScene && renderScene.revision === sceneRevision ? {clothSceneRevision: sceneRevision,
+      clothSurfaces: (renderScene.document.cloth ?? []).flatMap(d => {
+        const surface = sceneClothSurface(renderScene!.document, d.id); return surface ? [surface] : [];
+      })} : {}),
   };
 }
 
@@ -256,7 +261,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
     })().catch((error: unknown) => {
       runtime.stopAfterFailure(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
       return { context: "webgpu-worker-failed", methodId: message.args[4].methodId, presentationSubmitted: false };
-    }).then(metrics => post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime) }));
+    }).then(metrics => post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime, message.sceneRevision) }));
   } else if (message.type === "set-simulation-scene") {
     runtime.setSimulationScene(message.scene ? markSceneRevision(message.scene) : undefined);
   }

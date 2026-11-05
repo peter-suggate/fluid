@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { snapshotSceneClothPose } from "../../cloth/scene-geometry";
 import { cloneScene, type SceneDescription } from "../model";
 
 /**
@@ -78,6 +79,7 @@ interface EditorHistoryStore {
  * written.
  */
 export function historySceneCopy(scene: SceneDescription): SceneDescription {
+  scene = snapshotSceneClothPose(scene);
   // Emptied and nulled where they stand, so each keeps its place among the fields.
   const copy = cloneScene({ ...scene, solidVoxels: [], ...(scene.terrain && { terrain: null }),
     ...(scene.scenery && { scenery: null }) } as unknown as SceneDescription);

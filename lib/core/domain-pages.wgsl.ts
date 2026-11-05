@@ -133,7 +133,7 @@ fn domainHeatCovers(text:vec2u,local:vec2i,scale:i32)->bool {
 // a slice's labels cannot pile up behind each other, so they start at 1.25.
 fn domainHeatLabel(q:vec3i,tier:u32,pixel:vec2f,normal:i32,coordinate:f32)->vec3f {
   let origin=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-origin);
-  var right=cross(forward,vec3f(0,1,0));if(length(right)<1e-5){right=vec3f(1,0,0);}right=normalize(right);
+  let right=cameraRightDirection(forward);
   let up=normalize(cross(right,forward));
   let size=0.5*f32(viewRecords[u32(layers.control.w)])*domainPageCellSize();
   let low=domainPageFrameOrigin()+vec3f(q)*size;
@@ -182,9 +182,7 @@ const domainBoxes3DWGSL = (entry: string, opacity: string, split: number, box: s
   if(opacity<=0.0 || u.gridInfo.w<=0.5 || !domainPagesValid()){discard;}
   let eye=u.cameraPosition.xyz;
   let forward=normalize(u.cameraTarget.xyz-eye);
-  var right=cross(forward,vec3f(0,1,0));
-  if(length(right)<1e-5){right=vec3f(1,0,0);}
-  right=normalize(right);
+  let right=cameraRightDirection(forward);
   let up=normalize(cross(right,forward));
   let ndc=input.uv*2.0-1.0;
   let ray=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());

@@ -19,8 +19,7 @@ struct ViewUniforms {
   viewport: vec4f,
   cameraPosition: vec4f,
   cameraTarget: vec4f,
-  container: vec4f,
-}
+  container: vec4f, cameraBasisPadding:array<vec4f,22>, cameraBasisRight:vec4f }
 
 struct Particle {
   positionRadius: vec4f,
@@ -50,7 +49,7 @@ struct InterfaceFragment {
 }
 
 fn cameraForward() -> vec3f { return normalize(view.cameraTarget.xyz - view.cameraPosition.xyz); }
-fn cameraRight() -> vec3f { return normalize(cross(cameraForward(), vec3f(0.0, 1.0, 0.0))); }
+fn cameraRight() -> vec3f { return cameraRightDirection(cameraForward()); }
 fn cameraUp() -> vec3f { return normalize(cross(cameraRight(), cameraForward())); }
 
 fn safeNormalize(value: vec3f, fallback: vec3f) -> vec3f {

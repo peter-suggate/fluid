@@ -598,7 +598,7 @@ fn svoBrickBoxCorner(vertexIndex:u32)->vec3f{
 export function createSvoBrickRasterCullWGSL(options: { reversedZNear_m: number }): string {
   const { bindings } = SVO_BRICK_RASTER_CONTRACT;
   return /* wgsl */ `
-struct Uniforms{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>}
+struct Uniforms {viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>, cameraBasisPadding:array<vec4f,1>, cameraBasisRight:vec4f }
 struct SvoNode{address:vec4u,links:vec4u}
 struct SvoLeaf{topology:vec4u}
 struct SvoMapping{worldOrigin:vec3f,brickSize:u32,cellSize:vec3f,maximumDepth:u32,nodeCount:u32,leafCount:u32,maxVisits:u32,_padding:u32}
@@ -658,7 +658,7 @@ struct SvoBrickCamera{origin:vec3f,forward:vec3f,right:vec3f,up:vec3f,aspect:f32
 fn svoBrickCamera()->SvoBrickCamera{
   let origin=uniforms.cameraPosition.xyz;
   let forward=normalize(uniforms.cameraTarget.xyz-origin);
-  let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));
+  let right=cameraRightDirection(forward);
   return SvoBrickCamera(origin,forward,right,normalize(cross(right,forward)),
     uniforms.viewport.x/max(uniforms.viewport.y,1.0));
 }

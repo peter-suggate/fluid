@@ -41,7 +41,7 @@ ${adapter}
  let owner=select(identity.y&65535u,DRY_OWNER_NONE,(identity.y&0x80000000u)!=0u);
  var native=SampledAmbientVisibility(1.,SAMPLED_AO_NOT_APPLICABLE,0u,0u);
  if(g.w>0.0&&g.w<1e19){
-  let ndc=(vec2f(coord)+.5)/dims*vec2f(2,-2)+vec2f(-1,1);let forward=normalize(view[2].xyz-view[1].xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  let ndc=(vec2f(coord)+.5)/dims*vec2f(2,-2)+vec2f(-1,1);let forward=normalize(view[2].xyz-view[1].xyz);let right=normalize(view[26].xyz);let up=normalize(cross(right,forward));
   let direction=normalize(forward+right*ndc.x*dims.x/dims.y*view[1].w+up*ndc.y*view[1].w);
   let cell=bitcast<vec3f>(params[1].xyz);let sceneScale=max(view[3].x,max(view[3].y,view[3].z));
   let radius=bitcast<vec4f>(params[22]).z*min(sceneScale*.06,max(max(cell.x,max(cell.y,cell.z))*6.,sceneScale*.01));

@@ -178,7 +178,7 @@ ${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
 // the launch's serial depth). gcSharedFill adds them in cell order.
 var<workgroup> gcTerms:array<f32,64>;
 fn gcShare(owner:UMOwner){
- if(owner.width!=1u||umTileOpen(owner.tile)>=0.99999){return;}
+ if(owner.width!=1u||umFreeTileCapacity(owner.tile)>=0.99999){return;}
  let base=umTileCoord(owner.tile)*4u;var corners:array<f32,8>;
  corners=umLoadCorner8(base,4u);
  // gcEvaluate's far air and deep liquid take no terms.
@@ -274,10 +274,10 @@ fn gcOwner(owner:UMOwner,terms:bool,mode:u32){
  let origin=umOrigin(owner);
  // select eagerly evaluates its operands: coarse owners must not evaluate
  // discarded fractional h-cell geometry (the tile fraction is in value.x).
- var cellOpen=1.0;if(owner.width==1u){cellOpen=umCellOpen(vec3i(origin));}
+ var cellOpen=1.0;if(owner.width==1u){cellOpen=umFreeCellCapacity(vec3i(origin));}
  // gcEvaluate has one call site (Metal inlines it whole): turn 0 is this
  // owner, turn 1 the pressure variant's lane-0 tile owner of an h tile.
- let turns=select(1u,2u,geometryPressure&&owner.lane==0u&&owner.width!=4u&&(mode!=1u||umTileOpen(owner.tile)<0.99999));
+ let turns=select(1u,2u,geometryPressure&&owner.lane==0u&&owner.width!=4u&&(mode!=1u||umFreeTileCapacity(owner.tile)<0.99999));
  var value=vec2f(0.0);
  for(var r=0u;r<turns;r++){
   // An owner's corners are width-aligned vertices of its tile closure. Their
@@ -287,7 +287,7 @@ fn gcOwner(owner:UMOwner,terms:bool,mode:u32){
   // stencil loads per corner.
   var job=owner;var vertices:array<f32,8>;var open=1.0;
   if(r!=0u){job=UMOwner(owner.tile,0u,4u,0u);}
-  if(job.width==4u){vertices=umLoadCorner8(origin,4u);open=umTileOpen(owner.tile);}
+  if(job.width==4u){vertices=umLoadCorner8(origin,4u);open=umFreeTileCapacity(owner.tile);}
   else{vertices=umLoadVertex8(origin,job.width);}
   value=gcEvaluate(job,vertices,open,terms&&r!=0u);
   // Native uvTarget scales by the open fraction; a 4h owner's fill is already
@@ -377,7 +377,7 @@ var<workgroup> gcRegionalJobs:vec3u;
   var owner=UMOwner(0u,0u,0u,0u);var mode=1u;
   if(job<jobs.x){let tile=regionalPlan[${this.workControl.framePlan.layout.fine}u+job];owner=UMOwner(tile,lane,1u,(umTopology[tile]&0x3fffffffu)+lane);}
   else if(job<jobs.y){let slot=(job-jobs.x)*64u+lane;if(slot<regionalPlan[8u]){let tile=regionalPlan[${this.workControl.framePlan.layout.coarse}u+slot];owner=UMOwner(tile,0u,4u,umTopology[tile]&0x3fffffffu);}}
-  else{let slot=(job-jobs.y)*64u+lane;mode=2u;if(slot<jobs.x){let tile=regionalPlan[${this.workControl.framePlan.layout.fine}u+slot];if(umTileOpen(tile)>=0.99999){owner=UMOwner(tile,0u,4u,0u);}}}
+  else{let slot=(job-jobs.y)*64u+lane;mode=2u;if(slot<jobs.x){let tile=regionalPlan[${this.workControl.framePlan.layout.fine}u+slot];if(umFreeTileCapacity(tile)>=0.99999){owner=UMOwner(tile,0u,4u,0u);}}}
   let needed=owner.width!=0u&&gcNeeds(owner);
   if(needed&&mode!=2u){gcShare(owner);}workgroupBarrier();
   if(needed){gcOwner(owner,true,mode);}workgroupBarrier();

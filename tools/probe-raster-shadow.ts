@@ -31,7 +31,7 @@ ${rasterShadowAtlasWGSL}
 ${sampling}
 fn worldAt(c:vec2i)->vec3f{
  let dimensions=vec2f(textureDimensions(geometry));let uv=(vec2f(c)+.5)/dimensions*vec2f(2,-2)+vec2f(-1,1);
- let forward=normalize(view[2].xyz-view[1].xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+ let forward=normalize(view[2].xyz-view[1].xyz);let right=normalize(view[26].xyz);let up=normalize(cross(right,forward));
  let ray=normalize(forward+right*uv.x*dimensions.x/dimensions.y*view[1].w+up*uv.y*view[1].w);
  return view[1].xyz+ray*textureLoad(geometry,c,0).w;
 }

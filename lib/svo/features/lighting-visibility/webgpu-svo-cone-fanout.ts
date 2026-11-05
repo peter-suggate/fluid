@@ -410,7 +410,7 @@ const FANOUT_AO_LAYERS:u32=${SVO_CONE_FANOUT_CONTRACT.maximumAoSamples}u;
 const FANOUT_LIGHT_BASE:u32=${SVO_CONE_FANOUT_CONTRACT.lightLayerBase}u;
 const FANOUT_LIGHT_SAMPLES:u32=${SVO_CONE_FANOUT_CONTRACT.maximumLightSamples}u;
 const FANOUT_LAYER_COUNT:u32=${SVO_CONE_FANOUT_CONTRACT.layerCount}u;
-struct Uniforms {viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>}
+struct Uniforms {viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>, cameraBasisPadding:array<vec4f,1>, cameraBasisRight:vec4f }
 struct SvoMapping {
   worldOrigin:vec3f,brickSize:u32,
   cellSize:vec3f,maximumDepth:u32,
@@ -500,7 +500,7 @@ fn fanoutDecodeNormal(octIn:vec2f)->vec3f{
 fn fanoutRay(coordinate:vec2u)->mat2x3f{
   let uv=vec2f((f32(coordinate.x)+.5)/f32(fanout.dimensions.x),1.0-(f32(coordinate.y)+.5)/f32(fanout.dimensions.y));
   let ndc=uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);
-  let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));
   let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   return mat2x3f(ro,rd);
 }

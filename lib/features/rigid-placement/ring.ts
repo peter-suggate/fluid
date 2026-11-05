@@ -10,7 +10,7 @@ export function rigidPlacementWedge(point_m: Vec3): EditorAction {
     icon: "solid",
     tone: "body",
     hint: "Place a solid here",
-    children: SCENE_SHAPES_BY_CODE.map((shape) => ({
+    children: SCENE_SHAPES_BY_CODE.filter(shape => shape.editorPlacement !== false).map((shape) => ({
       id: shape.name,
       label: shape.label,
       icon: shape.name,

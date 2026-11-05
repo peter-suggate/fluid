@@ -82,7 +82,7 @@ if(process.env.FLUID_EXPLORE_DERIVED_TRIALS==='1'){
 const source=world.sparseVoxelSceneSource;assert.ok(source?.structural);
 const {drySceneData}=buildSvoDrySceneAssembly(scene,source);
 const bodies=packSvoDryRigidBodies(scene),width=Number(process.env.FLUID_PROBE_WIDTH??64),height=Number(process.env.FLUID_PROBE_HEIGHT??64);
-const uniforms=device.createBuffer({size:416,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+const uniforms=device.createBuffer({size:432,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
 const body=device.createBuffer({size:GPU_RIGID_BODY_CAPACITY*64,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
 device.queue.writeBuffer(uniforms,0,packSvoDryViewUniforms({scene,camera:baseCamera,environmentId:scene.environment??'default',info:world.info,bodyCount:bodies.count,width,height}));
 device.queue.writeBuffer(body,0,bodies.data);

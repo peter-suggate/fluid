@@ -73,6 +73,7 @@ const ICONS = {
   cylinder: Cylinder,
   capsule: Pill,
   cup: Beaker,
+  "rounded-plate": Square,
   ellipsoid: Egg,
   pipeline: Workflow,
   "render-pipeline": Aperture,

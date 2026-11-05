@@ -55,6 +55,7 @@ const SHAPE_EXTENTS: Readonly<Record<RigidShape, {
   dimensions: (half: Vec3, previous: Vec3) => Vec3;
   links?: readonly (readonly EditorAxis[])[];
 }>> = Object.freeze({
+  "rounded-plate": {half:d=>({x:d.x+d.y,y:d.y,z:d.z+d.y}),dimensions:half=>({x:Math.max(1e-8,half.x-half.y),y:half.y,z:Math.max(1e-8,half.z-half.y)})},
   sphere: {
     half: (d) => ({ x: d.x, y: d.x, z: d.x }),
     dimensions: (half) => ({ x: half.x, y: half.x, z: half.x }),

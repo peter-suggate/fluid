@@ -780,6 +780,9 @@ function sparseScenePrimitiveForRigidBody(body: RigidBodyDescription, ownerId: n
   const center = [body.position_m.x, body.position_m.y, body.position_m.z] as const;
   const orientation = [body.orientation.x, body.orientation.y, body.orientation.z, body.orientation.w] as const;
   const materialId = materialIdForRigidShape(body.shape);
+  if(body.shape === "rounded-plate")return {kind:"field-program",center,orientation,materialId,ownerId,
+    envelopeRadii:[body.dimensions_m.x+body.dimensions_m.y,body.dimensions_m.y,body.dimensions_m.z+body.dimensions_m.y],
+    program:{result:0,boxCuts:body.cuts,ops:[{op:"rounded-box",out:0,parameters:{a:body.dimensions_m.x,b:0,c:body.dimensions_m.z,d:body.dimensions_m.y}}]}};
   if (body.shape === "sphere") {
     return { kind: "ellipsoid", center, radii: [body.dimensions_m.x, body.dimensions_m.x, body.dimensions_m.x], materialId, ownerId };
   }
@@ -3245,6 +3248,16 @@ export class OctreeSparseBrickWorld {
       ...renderChanges.dirtyBounds,
       ...(initialPublication && this.backdropDetailBounds ? [this.backdropDetailBounds] : []),
     ];
+    // An authored empty world still owns a complete geometry generation. With
+    // no bounds the first revision used to be skipped, leaving every mesh
+    // consumer waiting forever for geometry/material validity. Invalidate the
+    // existing domain through the ordinary voxelizer/finalizer; this claims no
+    // new bricks and adds no surfaces, and later empty no-op edits stay cheap.
+    if (initialPublication && dirtyRegions.length === 0) dirtyRegions.push({
+      minimum: this.sceneWorldOrigin,
+      maximum: this.sceneWorldOrigin.map((origin, axis) => origin
+        + this.sceneBrickDimensions[axis]! * this.brickSize * this.cellSize[axis]!) as [number, number, number],
+    });
     const newBounds: SparseSceneAxisAlignedBounds[] = [...nextSolidBounds,
       ...renderChanges.addedBounds, ...sculpt.dirtyBounds];
     const listed = relist ? this.listLivePrimitives(scene, authored, dirtyRegions, newBounds) : undefined;

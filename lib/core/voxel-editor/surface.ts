@@ -1,9 +1,12 @@
+import {roundedPlateSurfaceAt} from '../rigid-surface';
 import { vesselCutawayPatches } from "../vessel-cutaway";
 import { scenerySurfaceAt } from "../editor-scenery";
 import type { EditorRay } from "../editor-entity";
 import type { SceneDescription, Vec3 } from "../model";
 import { buildSvoSolidWorldPlanarBoundaryCatalog } from "../../svo/features/scene-publication/svo-planar-boundary";
 import { voxelReaderForScene } from "./voxel-reader";
+import { clothSurfaceAt } from "../../cloth/scene-geometry";
+import type { ClothSurfaceHit } from "../../cloth/geometry";
 
 const visibleScenes = new WeakMap<SceneDescription, { key: readonly unknown[]; visible: SceneDescription }>();
 
@@ -32,6 +35,8 @@ export interface VisibleToolSurface {
   readonly normal: Vec3;
   readonly distance_m: number;
   readonly scenery?: string;
+  readonly rigidBodyId?: string;
+  readonly cloth?: ClothSurfaceHit;
 }
 
 /** Nearest visible opaque surface, never a ray cast through scenery to the
@@ -39,6 +44,11 @@ export interface VisibleToolSurface {
 export function visibleToolSurface(scene: SceneDescription, ray: EditorRay, press = false): VisibleToolSurface | undefined {
   const voxel = voxelReaderForScene(visibleVoxelScene(scene)).pick(ray, { rejectBudgetExhaustion: press });
   const scenery = scenerySurfaceAt(scene, ray, voxel?.distance_m, undefined, true);
+  const rigid=roundedPlateSurfaceAt(scene,ray,scenery?.t_m??voxel?.distance_m??Infinity);
+  const cloth = clothSurfaceAt(scene, ray, rigid?.hit.t_m??scenery?.t_m ?? voxel?.distance_m ?? Infinity);
+  if (cloth) return { point: {x:cloth.point_m[0],y:cloth.point_m[1],z:cloth.point_m[2]},
+    normal: {x:cloth.normal[0],y:cloth.normal[1],z:cloth.normal[2]}, distance_m:cloth.distance_m, cloth };
+  if(rigid)return {point:rigid.hit.position_m,normal:rigid.hit.normal,distance_m:rigid.hit.t_m,rigidBodyId:rigid.bodyId};
   if (scenery) return { point: scenery.position_m, normal: scenery.normal, distance_m: scenery.t_m, scenery: scenery.nodeId };
   if (!voxel) return undefined;
   const normal = { x: 0, y: 0, z: 0 };

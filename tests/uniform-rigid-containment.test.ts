@@ -39,7 +39,7 @@ test("surface extraction solid bindings match the renderer resource map", async 
   const { uniformSolidContourWGSL } = await import("../lib/methods/uniform/uniform-solid-contour.wgsl");
   assert.doesNotMatch(uniformSolidContourWGSL, /\bundefined\b/);
   const bindings = Array.from(uniformSolidContourWGSL.matchAll(/@binding\((\d+)\)/g), match => Number(match[1]));
-  assert.deepEqual(bindings.sort((a,b) => a-b), [18,19,20,21,22]);
+  assert.deepEqual(bindings.sort((a,b) => a-b), [18,19,20,21,22,24]);
 });
 
 test("surface seed fitting cannot walk through a solid wall", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {

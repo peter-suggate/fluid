@@ -1,3 +1,4 @@
+import {rigidCutRenderWGSL} from '../../../core/rigid-cut-render';
 import { GPU_RIGID_BODY_CAPACITY } from "../../../core/rigid-capacity";
 import { seaweedShaderLibrary } from "../../../core/seaweed-render";
 import { paddleboatShaderLibrary } from "../../../core/paddleboat-render";
@@ -24,6 +25,7 @@ export const SVO_RIGID_RASTER_CONTRACT = Object.freeze({
   uniformBinding: 0,
   bodyBinding: 1,
   rigidMotionBinding: 14,
+  bodyCutsBinding: 15,
   uniformBufferType: "uniform" as const,
   bodyBufferType: "read-only-storage" as const,
   rigidMotionBufferType: "uniform" as const,
@@ -65,6 +67,7 @@ export const SVO_RIGID_RASTER_CONTRACT = Object.freeze({
  */
 export function svoRigidRasterInputBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
   return [
+    {binding:SVO_RIGID_RASTER_CONTRACT.bodyCutsBinding,visibility:GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float",viewDimension:"2d"}},
     {
       binding: SVO_RIGID_RASTER_CONTRACT.uniformBinding,
       visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
@@ -224,6 +227,7 @@ const RIGID_RASTER_MATERIAL_BOX:u32=${VOXEL_MATERIAL_IDS.box}u;
 const RIGID_RASTER_MATERIAL_CAPSULE:u32=${VOXEL_MATERIAL_IDS.capsule}u;
 const RIGID_RASTER_MATERIAL_CYLINDER:u32=${VOXEL_MATERIAL_IDS.cylinder}u;
 
+${rigidCutRenderWGSL(0,15)}
 ${robotShaderLibrary}
 ${paddleboatShaderLibrary}
 ${seaweedShaderLibrary}
@@ -232,13 +236,12 @@ ${svoGBufferWGSL}
 
 // Prefix-compatible with the production Uniforms arena. options.z is the live
 // body count; viewport/camera lanes are rewritten by the renderer every frame.
-struct RigidRasterUniforms{
+struct RigidRasterUniforms {
   viewport:vec4f,
   cameraPosition:vec4f,
   cameraTarget:vec4f,
   container:vec4f,
-  options:vec4f,
-}
+  options:vec4f, cameraBasisPadding:array<vec4f,21>, cameraBasisRight:vec4f }
 // Existing 64-byte BodyGPU ABI; orientation is quaternion wxyz.
 struct BodyGPU{
   positionRadius:vec4f,
@@ -307,7 +310,7 @@ struct RigidRasterVertexOut{
   let local=rigidProxyCorner(vertexIndex)*rigidProxyExtent(body);
   let world=body.positionRadius.xyz+rigidQrot(body.orientation,local);
   let camera=rigidUniforms.cameraPosition.xyz;let forward=normalize(rigidUniforms.cameraTarget.xyz-camera);
-  let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));
   let relative=world-camera;let viewDepth=max(dot(relative,forward),RIGID_RASTER_NEAR_M);
   let aspect=rigidUniforms.viewport.x/max(rigidUniforms.viewport.y,1.0);
   // This is the exact inverse of the production ray construction. Proxy depth
@@ -318,7 +321,7 @@ struct RigidRasterVertexOut{
 
 fn rigidRasterRay(pixelCoordinate:vec2f)->mat2x3f{
   let pixelUv=vec2f(pixelCoordinate.x/max(rigidUniforms.viewport.x,1.0),1.0-pixelCoordinate.y/max(rigidUniforms.viewport.y,1.0));let ndc=pixelUv*2.0-1.0;
-  let origin=rigidUniforms.cameraPosition.xyz;let forward=normalize(rigidUniforms.cameraTarget.xyz-origin);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
+  let origin=rigidUniforms.cameraPosition.xyz;let forward=normalize(rigidUniforms.cameraTarget.xyz-origin);let right=cameraRightDirection(forward);let up=normalize(cross(right,forward));
   let direction=normalize(forward+right*ndc.x*rigidUniforms.viewport.x/max(rigidUniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());return mat2x3f(origin,direction);
 }
 
@@ -362,13 +365,14 @@ fn rigidCapsuleHit(origin:vec3f,direction:vec3f,radius:f32,halfHeight:f32)->Rigi
         if(t>1e-4&&t<best.t&&onOuterHemisphere){best=RigidRasterHit(t,normalize(point-center),RIGID_RASTER_FEATURE_SMOOTH,1u);}}}}
   return best;
 }
-fn rigidBodyHit(origin:vec3f,direction:vec3f,body:BodyGPU)->RigidRasterHit{
+fn rigidBodyHit(origin:vec3f,direction:vec3f,body:BodyGPU,bodyIndex:u32)->RigidRasterHit{
   let localOrigin=rigidQinv(body.orientation,origin-body.positionRadius.xyz);let localDirection=normalize(rigidQinv(body.orientation,direction));
   let shape=i32(round(body.halfSizeShape.w));var hit=rigidMiss();
   if(shape==0){hit=rigidSphereHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6));}
   else if(shape==1){hit=rigidBoxHit(localOrigin,localDirection,max(body.halfSizeShape.xyz,vec3f(1e-6)));}
   else if(shape==2){hit=rigidCapsuleHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6),max(body.halfSizeShape.y,0.0));}
   else if(shape==3){hit=rigidCylinderHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6),max(body.halfSizeShape.y,1e-6));}
+  else if(shape==10){let plate=roundedPlateSurfaceHit(localOrigin,localDirection,body.halfSizeShape.xyz,bodyIndex);hit=RigidRasterHit(plate.t,plate.normal,0u,select(0u,1u,plate.t<1e19));}
   else if(shape==5){let robot=bubHit(localOrigin,localDirection,body.halfSizeShape.xyz);hit=RigidRasterHit(robot.t,robot.normal,0u,select(0u,1u,robot.t<1e19));}
   else if(shape>=6&&shape<=8){let boat=paddleboatHit(localOrigin,localDirection,shape);hit=RigidRasterHit(boat.t,boat.normal,0u,select(0u,1u,boat.t<1e19));}
   else if(shape==9){let weed=seaweedHit(localOrigin,localDirection);hit=RigidRasterHit(weed.t,weed.normal,0u,select(0u,1u,weed.t<1e19));}
@@ -376,7 +380,7 @@ fn rigidBodyHit(origin:vec3f,direction:vec3f,body:BodyGPU)->RigidRasterHit{
 }
 
 fn rigidResolvedMaterialId(body:BodyGPU)->u32{
-  let shape=i32(round(body.halfSizeShape.w));if(shape==0){return RIGID_RASTER_MATERIAL_SPHERE;}if(shape==1){return RIGID_RASTER_MATERIAL_BOX;}if(shape==2){return RIGID_RASTER_MATERIAL_CAPSULE;}return RIGID_RASTER_MATERIAL_CYLINDER;
+  let shape=i32(round(body.halfSizeShape.w));if(shape==10){return ${VOXEL_MATERIAL_IDS["rounded-plate"]}u;}if(shape==0){return RIGID_RASTER_MATERIAL_SPHERE;}if(shape==1){return RIGID_RASTER_MATERIAL_BOX;}if(shape==2){return RIGID_RASTER_MATERIAL_CAPSULE;}return RIGID_RASTER_MATERIAL_CYLINDER;
 }
 struct RigidRasterMotion{velocity_m_s:vec3f,generation:u32,valid:u32}
 fn rigidRasterMotionSurface(bodyIndex:u32,body:BodyGPU,materialId:u32,worldSurfacePosition_m:vec3f)->RigidRasterMotion{
@@ -397,7 +401,7 @@ fn rigidRasterSurface(input:RigidRasterVertexOut)->RigidRasterFragmentOut{
   let bodyCount=min(u32(round(max(rigidUniforms.options.z,0.0))),min(RIGID_RASTER_MAX_BODIES,arrayLength(&rigidBodies)));
   if(input.bodyIndex>=bodyCount){discard;}
   let ray=rigidRasterRay(input.position.xy);let origin=ray[0];let direction=ray[1];let forward=normalize(rigidUniforms.cameraTarget.xyz-origin);
-  let body=rigidBodies[input.bodyIndex];let hit=rigidBodyHit(origin,direction,body);if(hit.valid==0u){discard;}
+  let body=rigidBodies[input.bodyIndex];let hit=rigidBodyHit(origin,direction,body,input.bodyIndex);if(hit.valid==0u){discard;}
   let materialId=rigidResolvedMaterialId(body);let worldSurfacePosition_m=origin+direction*hit.t;let motion=rigidRasterMotionSurface(input.bodyIndex,body,materialId,worldSurfacePosition_m);
   let media=select(vec2u(RIGID_RASTER_MEDIUM_OPAQUE,RIGID_RASTER_MEDIUM_AIR),vec2u(RIGID_RASTER_MEDIUM_AIR,RIGID_RASTER_MEDIUM_OPAQUE),dot(direction,hit.normal)<0.0);
   let flags=select(0u,SVO_GBUFFER_MOTION_VALID,motion.valid!=0u)|select(SVO_GBUFFER_HARD_FEATURE,0u,hit.featureId==RIGID_RASTER_FEATURE_SMOOTH)
@@ -450,7 +454,7 @@ struct RigidSplitBridgeFragmentOut{
   let identityMedia=textureLoad(rigidIdentityMediaRead,coordinate,0);let bodyIndex=identityMedia.y;
   let bodyCount=min(u32(round(max(rigidUniforms.options.z,0.0))),min(RIGID_RASTER_MAX_BODIES,arrayLength(&rigidBodies)));if(bodyIndex>=bodyCount){return;}
   let body=rigidBodies[bodyIndex];if(identityMedia.x!=rigidResolvedMaterialId(body)){return;}
-  let ray=rigidRasterRay(vec2f(globalId.xy)+vec2f(.5));let hit=rigidBodyHit(ray[0],ray[1],body);if(hit.valid==0u){return;}
+  let ray=rigidRasterRay(vec2f(globalId.xy)+vec2f(.5));let hit=rigidBodyHit(ray[0],ray[1],body,bodyIndex);if(hit.valid==0u){return;}
   let metadata=(bodyIndex&0xffffu)|((hit.featureId&15u)<<16u)|(RIGID_RASTER_FIELD_ANALYTIC<<20u)|(RIGID_RASTER_MOTION_RIGID<<24u);
   textureStore(rigidSplitGeometryWrite,coordinate,vec4f(hit.normal,hit.t));textureStore(rigidSplitIdentityWrite,coordinate,vec4u(0x80000000u|bodyIndex,metadata,0u,0u));
 }

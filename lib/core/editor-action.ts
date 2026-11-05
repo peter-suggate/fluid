@@ -252,6 +252,7 @@ export type EditorActionIcon =
   | "cylinder"
   | "capsule"
   | "cup"
+  | "rounded-plate"
   | "ellipsoid"
   | "pipeline"
   | "render-pipeline"

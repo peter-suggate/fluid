@@ -39,7 +39,7 @@ export function solidVoxelShellForScene(
   scene: SceneDescription,
 ): readonly SolidWorldVoxelPatch[] {
   // A container without walls has no shell: it only places an open world.
-  if (scene.container.walls === "none") return [];
+  if (scene.container.walls === "none" || scene.container.boundary === "free-space") return [];
   const dimensions = sceneLatticeDimensions(scene);
   if (scene.container.shape === "sphere") return sphericalSolidVoxelShell(dimensions);
   return boxSolidVoxelShell(dimensions, {

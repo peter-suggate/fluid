@@ -259,6 +259,8 @@ function supportRadius(body: RigidBodyState, directionWorld: Vec3): number {
   let support: Vec3;
   if (body.description.shape === "sphere") {
     support = scale(normalize(local), d.x);
+  } else if(body.description.shape === "rounded-plate"){
+    support=add(scale(normalize(local),d.y),{x:Math.sign(local.x||1)*d.x,y:0,z:Math.sign(local.z||1)*d.z});
   } else if (body.description.shape === "box") {
     support = { x: Math.sign(local.x || 1) * d.x / 2, y: Math.sign(local.y || 1) * d.y / 2, z: Math.sign(local.z || 1) * d.z / 2 };
   } else if (body.description.shape === "cylinder" || body.description.shape === "cup") {
@@ -418,12 +420,12 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
   }
 
   const c = scene.container;
-  const planes: Array<[Vec3, number]> = [
+  const planes: Array<[Vec3, number]> = c.boundary === "free-space" ? [] : [
     [{ x: 1, y: 0, z: 0 }, -c.width_m / 2], [{ x: -1, y: 0, z: 0 }, -c.width_m / 2],
     [{ x: 0, y: 0, z: 1 }, -c.depth_m / 2], [{ x: 0, y: 0, z: -1 }, -c.depth_m / 2],
     [{ x: 0, y: 1, z: 0 }, 0]
   ];
-  if (c.top === "closed") planes.push([{ x: 0, y: -1, z: 0 }, -c.height_m]);
+  if (c.boundary !== "free-space" && c.top === "closed") planes.push([{ x: 0, y: -1, z: 0 }, -c.height_m]);
   const terrain = sceneHasTerrain(scene) ? scene.terrain : undefined;
 
   // Where the hand put them. The contact solver has no notion of an immovable
@@ -480,7 +482,7 @@ const CUP_DIMENSIONS_M: Vec3 = { x: 0.15, y: 0.26, z: 0.05 };
  */
 export function defaultBodyDimensions_m(shape: RigidShape): Vec3 {
   const radius = 0.075;
-  return shape === "cup" ? { ...CUP_DIMENSIONS_M }
+  return shape === "rounded-plate" ? {x:.05,y:.005,z:.08} : shape === "cup" ? { ...CUP_DIMENSIONS_M }
     : shape === "box" ? { x: 0.15, y: 0.12, z: 0.13 }
     : shape === "sphere" ? { x: radius, y: radius, z: radius }
     : { x: radius, y: 0.14, z: radius };

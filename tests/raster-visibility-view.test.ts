@@ -28,7 +28,7 @@ test("older tuning objects inherit reuse default without overwriting explicit fa
 });
 
 test("dry visibility view key ignores only the four simulation-only lanes",()=>{
-  const view=Float32Array.from({length:104},(_,i)=>i+.25);
+  const view=Float32Array.from({length:108},(_,i)=>i+.25);
   assert.ok(rasterVisibilityViewsEqual(view,new Float32Array(view)));
   for(let lane=0;lane<view.length;lane++){
     const changed=new Float32Array(view);changed[lane]=changed[lane]!+1;
@@ -44,7 +44,7 @@ test("running fluid telemetry keeps the view epoch while camera and body changes
     dryFrameReuse:new ExactDryFrameReuse(),dryFrameReuseEligibility:"disabled",
     renderTuning:{rasterStillViewReuse:true},experiments:{waterShadows:false},
     rasterAo:{invalidateVisibility:()=>invalidations++,visibilityCacheStatistics:{reusedFrames:0,producedFrames:0,lastFrameReused:false}}});
-  const view=new Float32Array(104);view[0]=1200;view[1]=800;view[7]=.5;
+  const view=new Float32Array(108);view[0]=1200;view[1]=800;view[7]=.5;
   renderer.setRasterVisibilityView(view);
   assert.equal(renderer.rasterVisibilityCacheStatistics.viewRevision,1);
   const movingWater=new Float32Array(view);movingWater[2]=2;movingWater[19]=4;movingWater[29]=1/60;movingWater[30]=3;

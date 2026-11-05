@@ -189,7 +189,7 @@ fn dryVoxelCapacity()->u32{return params.payloadLanes1.z;}`;
 // Raster-primary pixel probe. Reads the frame's own instance list and cull
 // counters; mirrors only the per-fragment AABB clamp and in-brick DDA.
 // ---------------------------------------------------------------------------
-struct Uniforms{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>}
+struct Uniforms {viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>, cameraBasisPadding:array<vec4f,1>, cameraBasisRight:vec4f }
 struct SvoNode{address:vec4u,links:vec4u}
 struct SvoLeaf{topology:vec4u}
 struct SvoMapping{worldOrigin:vec3f,brickSize:u32,cellSize:vec3f,maximumDepth:u32,nodeCount:u32,leafCount:u32,maxVisits:u32,_padding:u32}
@@ -325,7 +325,7 @@ fn svoProbeRayAabb(ro:vec3f,inverseDirection:vec3f,bounds:mat2x3f)->vec3f{
 fn svoProbeRay()->vec3f{
   let ro=uniforms.cameraPosition.xyz;
   let forward=normalize(uniforms.cameraTarget.xyz-ro);
-  let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));
+  let right=cameraRightDirection(forward);
   let up=normalize(cross(right,forward));
   let viewport=max(uniforms.viewport.xy,vec2f(1.0));
   let pixel=vec2f(f32(probeRequest.x)+.5,f32(probeRequest.y)+.5);

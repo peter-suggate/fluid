@@ -15,7 +15,7 @@ import type { SparseVoxelDrySceneData } from "../lib/svo/contracts/scene-publica
  *   - Dawn/Metal bring-up with `requiredFluidDeviceLimits`, which is what keeps
  *     the derived-lighting stack affordable; a device that cannot host it
  *     silently withdraws the opacity pyramid and renders ~15x slow.
- *   - The 416-byte view-uniform packing.
+ *   - The 432-byte view-uniform packing.
  *   - The CPU rigid-body packing.
  *   - The `SparseVoxelDrySceneData` assembly: primitives, the material table,
  *     the terrain heightfield and the lighting mirrors.
@@ -42,7 +42,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { environmentIndex, type EnvironmentId } from "../lib/core/environments";
-import { cameraPosition } from "../lib/core/math";
+import { cameraBasis, cameraPosition } from "../lib/core/math";
 import { sceneryGraphForEnvironment } from "../lib/core/scenery-presets";
 import { type CameraState, type SceneDescription } from "../lib/core/model";
 import { cameraTanHalfFov } from "../lib/core/webgpu-camera";
@@ -55,8 +55,8 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME, svoDryRigidBounds } from "../lib/core/webgpu-renderer";
 import type { SparseVoxelSceneRenderSource } from "../lib/core/webgpu-voxel-debug";
 
-/** Floats in the 416-byte view uniform block (`FluidLabRenderer`, webgpu-renderer.ts). */
-export const SVO_VIEW_UNIFORM_FLOATS = 104;
+/** Floats in the 432-byte view uniform block (`FluidLabRenderer`, webgpu-renderer.ts). */
+export const SVO_VIEW_UNIFORM_FLOATS = 108;
 
 // ---------------------------------------------------------------------------
 // Dawn/Metal bring-up
@@ -189,7 +189,7 @@ export interface SvoDryViewUniformInputs {
   readonly overlay?: { mode: number; opacity: number };
 }
 
-/** Mirror of the FluidLabRenderer 416-byte view-uniform packing (webgpu-renderer.ts). */
+/** Mirror of the FluidLabRenderer 432-byte view-uniform packing (webgpu-renderer.ts). */
 export function packSvoDryViewUniforms(inputs: SvoDryViewUniformInputs): Float32Array<ArrayBuffer> {
   const { scene, camera, environmentId, info, bodyCount, width, height, overlay } = inputs;
   const position = cameraPosition(camera);
@@ -215,6 +215,7 @@ export function packSvoDryViewUniforms(inputs: SvoDryViewUniformInputs): Float32
   ]);
   const packed = new Float32Array(SVO_VIEW_UNIFORM_FLOATS);
   packed.set(uniform, 0);
+  const right=cameraBasis(camera).right;packed.set([right.x,right.y,right.z,0],104);
   return packed;
 }
 

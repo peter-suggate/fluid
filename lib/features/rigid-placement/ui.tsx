@@ -54,7 +54,7 @@ export function RigidDropRow() {
             testId="scene-body-pick"
             onOpen={pick}
           >
-            {SCENE_SHAPES_BY_CODE.map((candidate) => (
+            {SCENE_SHAPES_BY_CODE.filter(shape => shape.editorPlacement !== false).map((candidate) => (
               <ToolstripMenuItem
                 key={candidate.name}
                 icon={<EditorActionGlyph name={candidate.name} size={13} />}

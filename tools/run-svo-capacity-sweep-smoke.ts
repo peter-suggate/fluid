@@ -221,7 +221,7 @@ async function proveNodeIndexTripwireOnGPU(): Promise<void> {
   control[16] = nodes.length;
   const publication = Uint32Array.of(1, 0xffff_ffff, 1, 1);
 
-  const uniforms = new Float32Array(100);
+  const uniforms = new Float32Array(108);
   uniforms.set([256, 256, 0, -1], 0);
   uniforms.set([-40, 16, 16, 0], 4);
   uniforms.set([0, 16, 16, 0], 8);
