@@ -44,3 +44,42 @@ S1 checks (default, no override):
 Unit tests: one failure, `merge cap protects neither the outer layer nor
 mass-saturated deep runs`, from the other lane's uncommitted NB-FLIP hunks
 (it fails without this change too).
+
+## S2: stages over the active region list (measured, not built)
+
+Same disturbance, twice the tank (`--drop=8`, kernel timer, 60 steps):
+
+| tank | tiers C/W/H at 60 | fine | particles | kernel-run median ms | distorted sum |
+|---|---|---|---|---|---|
+| 8x8x4 | 247/282/15 | 459 | 59.2k | 17.10 | 20.67 |
+| 16x8x4 | 756/285/15 | 452 | 57.8k | 21.30 | 23.91 |
+
+The extra 509 COLD regions cost +3.24 ms of distorted kernel time:
+- pressure (Lane P) +1.81: arena solve +1.43, project +0.24, rhs +0.08;
+- every other stage +1.43, spread over about 15 kernels, none above 0.18:
+  classifyCoarse +0.17, the extension's coarse sweep (pair_sweepSeams,
+  sweep kind 2 over every regular 4h tile) +0.16, 4h cache +0.10,
+  bulkSelect +0.10, census decide +0.09, localSpeed +0.08, pageMark +0.08,
+  then 0.02-0.07 each (prolong, layout classify, authority stamp,
+  surfaceHeld, wetRegions, fillUnitHalo, momentumAffineFit, transferSeams).
+
+Knockout before building (16x8x4 `--drop=8`, `--every=5`, env-gated, now
+reverted): census decide over the active list's 64 tiles a region instead of
+every resident block's 512, and the extension's regular-coarse sweep
+(scalar and paired) under umActiveCoarse. The every-5 readback breaks
+pipelining into a 5-step pattern (about 5, readback, 22, 24, 47 ms), so the
+comparison is per phase:
+
+| run | phase 2 | phase 3 | frames 10-25, phases 2+3 | fine / particles at 60 |
+|---|---|---|---|---|
+| baseline | 23.65 | 24.69 | 22.1 | 544 / 68.8k |
+| knockout | 22.78 | 23.32 | 22.4 | 466 / 58.5k |
+
+Where the disturbance matched (frames 10-25) the knockout gains nothing;
+the later gap follows the baseline's larger disturbance (fine tiles and
+particles), not the knockout. Both stages are under 0.3 ms, so they were
+not built. The other non-pressure stages are smaller still, and each holds
+its outputs differently (census counters and wet bits are cleared every
+frame, the extension's slot arrays alternate parity, the 4h cache reads
+the COLD term T). So converting them one by one is about 15 ideas of
+0.02-0.17 ms each.
