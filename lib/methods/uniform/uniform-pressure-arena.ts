@@ -660,6 +660,8 @@ fn pZeroSeam(p:vec3i,word:u32)->f32{return 0.0;}
 fn nAt(q:vec3i)->u32{let b=umPageWord(q>>vec3u(5u));let l=(vec3u(q)>>vec3u(2u))&vec3u(7u);return UBA_STRIDE*b+l.x+8u*(l.y+8u*l.z);}
 fn nAcross(p:vec3i,f:u32)->u32{var q=p;q[f/2u]+=bSign(f);return nAt(q);}
 fn nKind(m:u32,f:u32)->u32{return (m>>(3u*f))&7u;}
+// Diagnostics: a native row's class (4 interior, 5 seam, 6 wall).
+fn pDiagNative(m:u32)->u32{var c=4u;for(var f=0u;f<6u;f++){let k=nKind(m,f);if(k==N_WALL){return 6u;}if(k==N_SEAM){c=5u;}}return c;}
 fn nStride(axis:u32)->u32{return select(select(64u,8u,axis==1u),1u,axis==0u);}
 // A page's flags (word 512 of its native mask): bit 0 live (band tiles or
 // native rows: the level 2 box and the tail's), bit 1 native rows.
@@ -1820,11 +1822,11 @@ ${B?"   if(member){m|=N_BULK;}\n":""}  }
    // Level 2's correction operator: the walls follow their row.
    qSet(PB_D,at2,diagonal${B?"+bulkDelta":""}-walls);
    var r=rhs+lifted;if((m&N_CLOSED)!=0u&&start<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
-   ${B?"rInit=r;if((m&N_BULK)==0u){atomicMax(&nWorst,bResidualMagnitude(r*nScale()));}":"atomicMax(&nWorst,bResidualMagnitude(r*nScale()));"}
+   ${B?"rInit=r;if((m&N_BULK)==0u){atomicMax(&nWorst,bResidualMagnitude(r*nScale()));pDiag(7u,pDiagNative(m),bResidualMagnitude(r*nScale()));}pDiag(6u,select(pDiagNative(m),3u,(m&N_BULK)!=0u),bResidualMagnitude(1.2e-7*(abs(64.0*rootArena[R_RHS+k])+2.0*diagonal*abs(start))*nScale()));":"atomicMax(&nWorst,bResidualMagnitude(r*nScale()));pDiag(7u,pDiagNative(m),bResidualMagnitude(r*nScale()));"}
   }
   workgroupBarrier();
 ${B?`  // A member region's residual is its 16h row's: the mean of its lanes'.
-  if(bulkPage){let mean=nBulkMean(rInit,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&nWorst,bResidualMagnitude(mean*nScale()));}if(lane==0u){atomicOr(&nFlags,4u);}workgroupBarrier();}
+  if(bulkPage){let mean=nBulkMean(rInit,(m&N_BULK)!=0u,lane);if((m&N_BULK)!=0u){atomicMax(&nWorst,bResidualMagnitude(mean*nScale()));pDiag(7u,3u,bResidualMagnitude(mean*nScale()));}if(lane==0u){atomicOr(&nFlags,4u);}workgroupBarrier();}
 `:""}  if(lane==0u){poolB[PN_M+UBA_STRIDE*block+512u]=atomicLoad(&nFlags);}
  }
  workgroupBarrier();
@@ -2051,7 +2053,6 @@ fn nSeamSum(first:u32,f:u32)->f32{
  for(var j=0u;j<16u;j++){let at=first+(j&3u)*u+(j>>2u)*v;if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){s+=pF(P_C+g*PLANE,at)*pF(P_X,at);}}
  return s;
 }
-fn pDiagNative(m:u32)->u32{var c=4u;for(var f=0u;f<6u;f++){let k=nKind(m,f);if(k==N_WALL){return 6u;}if(k==N_SEAM){c=5u;}}return c;}
 @compute @workgroup_size(${WG}) fn pResidual2(${lanes}){
  if(lane==0u){atomicStore(&worst,0u);rN=select(ubaLevelCount(2u),0u,bConvergedBefore(pCycle));}
  let n=workgroupUniformLoad(&rN);
@@ -2095,7 +2096,7 @@ ${BP?`  // The BULK16 rows: a region's residual is its row's (64 4h rows' sum,
  for(var e=group.x;e<nb;e+=groups.x){
   let slot=bsSlot(e);let r=bResidual(slot,lane);
   if(lane<8u){atomicMax(&worst,bResidualMagnitude(r/64.0*nScale()));pDiag(pCycle,7u,bResidualMagnitude(r/64.0*nScale()*nStopScale()));if(!pLast){bsSet(slot,BS_T3+16u+lane,r);}}
- }
+${UniformPressureArena.diagnostics?"  if(lane<8u&&pCycle==1u&&!pLast){let r0=bsF(slot,BS_RHS+lane);if(abs(r0)/64.0*nScale()>2.5e-7){let q=r/r0;if(q<0.0){pDiag(5u,7u,bitcast<u32>(-q));}else{pDiag(5u,0u,bitcast<u32>(q));}}}\n":""} }
 `:""} if(lane==0u&&n>0u){
   let w=atomicLoad(&worst);let word=HISTORY+pCycle;let scaled=bitcast<u32>(bitcast<f32>(w)*nStopScale());if(scaled>pIndex(word)){atomicMax(&state[word],scaled);}
   if(!pLast&&w>pIndex(NATIVE_HISTORY+pCycle)){atomicMax(&state[NATIVE_HISTORY+pCycle],w);}
@@ -2770,7 +2771,7 @@ fn bAdvect(s:u32,p:vec3i,k:u32)->f32{
    let r=bSum6(bRed[k],bRed[k+1u],bRed[k+2u],bRed[k+3u],bRed[k+4u],bRed[k+5u])+4096.0*params.policy.x*authority.z/params.hDt.w;
    bsSet(slot,BS_T4+24u+lane,d);bsSet(slot,BS_RHS+lane,r);
    for(var c=0u;c<3u;c++){bsSet(slot,BS_T3+8u*c+lane,0.0);bsSet(slot,BS_T4+8u*c+lane,0.0);}
-   atomicMax(&bW,bResidualMagnitude(r/64.0*nScale()));
+   atomicMax(&bW,bResidualMagnitude(r/64.0*nScale()));${UniformPressureArena.diagnostics?"var cls=7u;for(var f=0u;f<6u;f++){let kind=bNear(slot,page,lane,f).kind;if(kind==B_NONE&&cls==7u){cls=1u;}if(kind==B_BLOCK){cls=2u;}}":"let cls=7u;"}pDiag(7u,cls,bResidualMagnitude(r/64.0*nScale()));pDiag(6u,cls,bResidualMagnitude(1.2e-7*2.0*d*abs(bsF(slot,BS_P+lane))/64.0*nScale()));
   }
   workgroupBarrier();
  }
