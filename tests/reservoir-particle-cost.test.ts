@@ -61,7 +61,7 @@ test("scene geometry allows a 50k-particle catch film far shallower than the mer
   // Geometric scenario only: seed-volume equivalents, not a fluid prediction.
   const depthInCells = (50_000 / 8) / catchFloorCells;
   assert.ok(depthInCells < 0.4);
-  assert.equal(uniformNearSettled({}).coldSurface, "warm");
+  assert.equal(uniformNearSettled({}).coldSurface, "still");
   assert.equal(uniformNearSettled({}).warmResolution, "h");
   // Slab reserve's breakpoint is 65,536 of *capacity*, not live population.
   assert.equal(particleSlabSpill(50_000), 4096);

@@ -57,13 +57,14 @@ test("nativeSmoothing defaults to composite, relaxing the native rows with the b
   assert.ok(param && param.kind === "select" && param.update === "solver");
 });
 
-test("coldSurface still holds a surface COLD only within round-off, and keeps warm the default", () => {
-  assert.equal(uniformNearSettled({}).coldSurface, "warm");
+test("coldSurface still holds a surface COLD only within round-off, and is the default", () => {
+  assert.equal(uniformNearSettled({}).coldSurface, "still");
+  assert.equal(uniformNearSettled({ coldSurface: "warm" }).coldSurface, "warm");
   assert.equal(uniformNearSettled({ coldSurface: "still" }).coldSurface, "still");
   assert.equal(uniformNearSettled({ coldSurface: "budget" }).coldSurface, "budget");
-  assert.equal(uniformNearSettled({ coldSurface: "bogus" }).coldSurface, "warm");
+  assert.equal(uniformNearSettled({ coldSurface: "bogus" }).coldSurface, "still");
   const param = uniformNarrowBandMethod.params.find(p => p.key === "coldSurface");
-  assert.ok(param && param.kind === "select" && param.options.some(o => o.value === "still"));
+  assert.ok(param && param.kind === "select" && param.default === "still" && param.options.some(o => o.value === "still"));
   assert.equal(UNIFORM_REGION_HEAT_STILL_ROUNDOFF, 256);
   assert.equal(UNIFORM_REGION_HEAT_STILL_H, 0.01);
   assert.equal(UNIFORM_REGION_HEAT_STATE_WORDS, 19);

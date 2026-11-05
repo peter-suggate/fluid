@@ -79,7 +79,9 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   except that a surface whose omitted transport is provably round-off (a
  *   step's within 256 f32 ulps of the hydrostatic balance, its sum since
  *   the last trigger within 0.01 h) and no neighbouring region is moving
- *   (not COLD) may stay COLD.
+ *   (not COLD) may stay COLD. "still" is the default (2026-11-05): on letters
+ *   its frames 31/32 lie within the warm arm's own A/A spread, and its COLD
+ *   surface regions omit at most 2e-5 h a step, under 1% of the bound.
  * - momentumSampler: how grid momentum's unit sampler interpolates
  *   (UniformMomentumSampler); "texture32" falls back to "texture16" on a
  *   device without float32-filterable.
@@ -150,7 +152,7 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  particleBandDepth:typeof values.particleBandDepth==="number"&&Number.isFinite(values.particleBandDepth)?Math.min(4,Math.max(2,values.particleBandDepth)):3,
  particleDensity:values.particleDensity==="uniform"?"uniform":"graded",
  bulkTier:values.bulkTier==="off"?"off":"16h",
- coldSurface:values.coldSurface==="budget"?"budget":values.coldSurface==="still"?"still":"warm",
+ coldSurface:values.coldSurface==="budget"?"budget":values.coldSurface==="warm"?"warm":"still",
  seedScoring:values.seedScoring==="unshaped"?"unshaped":"every",
  outerSeeding:values.outerSeeding==="retain"?"retain":"uncovered",
  heatExpiry:values.heatExpiry==="anywhere"?"anywhere":"held",
