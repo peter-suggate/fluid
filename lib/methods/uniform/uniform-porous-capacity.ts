@@ -24,25 +24,40 @@ fn umPorousTileCapacity(origin:vec3i)->f32{
 `;}
 
 type CapacityLattice=Pick<UniformClothGridFields,'origin_m'|'cellSize_m'>;
-const apertureOf=new WeakMap<object,ReadonlyMap<string,number>>();
-export function setClothHardApertures(fields:CapacityLattice,values:ReadonlyMap<string,number>):void{apertureOf.set(fields,values);}
+/** Exact integer key of a cell coordinate (|c| < 65536 on each axis). */
+export const clothCellKey=(x:number,y:number,z:number):number=>((z+65536)*131072+(y+65536))*131072+(x+65536);
+const apertureOf=new WeakMap<object,ReadonlyMap<number,number>>();
+/** Accepts integer cell keys, or legacy "x,y,z" strings. */
+export function setClothHardApertures(fields:CapacityLattice,values:ReadonlyMap<string,number>|ReadonlyMap<number,number>):void{
+ const numeric=new Map<number,number>();
+ for(const [k,v] of values as ReadonlyMap<string|number,number>){if(typeof k==='number')numeric.set(k,v);else{const [x,y,z]=k.split(',').map(Number);numeric.set(clothCellKey(x!,y!,z!),v);}}
+ apertureOf.set(fields,numeric);
+}
+export function setClothHardAperturesByKey(fields:CapacityLattice,values:ReadonlyMap<number,number>):void{apertureOf.set(fields,values);}
 export function clothHardAperture(fields:CapacityLattice,p:readonly number[]):number{
  const aperture=apertureOf.get(fields);if(!aperture)return 1;
- const value=aperture.get(p.join(','));if(value===undefined)throw new Error(`Cloth hard aperture was not sampled at ${p}`);return value;
+ const value=aperture.get(clothCellKey(p[0]!,p[1]!,p[2]!));if(value===undefined)throw new Error(`Cloth hard aperture was not sampled at ${p}`);return value;
 }
 export interface ClothCellWeight {p:[number,number,number];weight:number;porosityWeight:number;hardOpen:number}
 /** One normalized physical basis for storage, momentum and adjoint forces.
  * porosityWeight is relative to the cell's open volume; weight is relative
  * to full cell volume, so hardOpen*porosityWeight === weight. */
 export function clothCellWeights(fields:CapacityLattice,position:ArrayLike<number>,raw=false):ClothCellWeight[]{
- const q=fields.cellSize_m.map((h,k)=>(position[k]!-fields.origin_m[k]!)/h-.5),base=q.map(Math.floor),fraction=q.map((v,k)=>v-base[k]!);
- if(q.some(x=>!Number.isFinite(x)))throw new Error('Invalid cloth capacity position');
- const cells:ClothCellWeight[]=[];let normalization=0;
- for(let c=0;c<8;c++){let w=1;const p=base.map((a,k)=>{const bit=(c>>k)&1;w*=bit?fraction[k]!:1-fraction[k]!;return a+bit;}) as [number,number,number];if(w<=0)continue;
-  const hard=raw?1:clothHardAperture(fields,p);normalization+=w*hard;cells.push({p,weight:w*hard,porosityWeight:w,hardOpen:hard});
+ const h=fields.cellSize_m,o=fields.origin_m;
+ const q0=(position[0]!-o[0]!)/h[0]!-.5,q1=(position[1]!-o[1]!)/h[1]!-.5,q2=(position[2]!-o[2]!)/h[2]!-.5;
+ if(!Number.isFinite(q0)||!Number.isFinite(q1)||!Number.isFinite(q2))throw new Error('Invalid cloth capacity position');
+ const b0=Math.floor(q0),b1=Math.floor(q1),b2=Math.floor(q2),f0=q0-b0,f1=q1-b1,f2=q2-b2;
+ const aperture=raw?undefined:apertureOf.get(fields),cells:ClothCellWeight[]=[];let normalization=0;
+ for(let c=0;c<8;c++){
+  // Same left-to-right product as the axis loop: w=((1*w0)*w1)*w2.
+  const x=c&1,y=(c>>1)&1,z=(c>>2)&1,w=(x?f0:1-f0)*(y?f1:1-f1)*(z?f2:1-f2);if(w<=0)continue;
+  const p:[number,number,number]=[b0+x,b1+y,b2+z];let hard=1;
+  if(aperture){const value=aperture.get(clothCellKey(p[0],p[1],p[2]));if(value===undefined)throw new Error(`Cloth hard aperture was not sampled at ${p}`);hard=value;}
+  normalization+=w*hard;cells.push({p,weight:w*hard,porosityWeight:w,hardOpen:hard});
  }
  if(normalization<=1e-12)throw new Error('Cloth has no open local cell support; collision/admission must be resolved');
- return cells.filter(c=>c.hardOpen>0).map(c=>({...c,weight:c.weight/normalization,porosityWeight:c.porosityWeight/normalization}));
+ const out:ClothCellWeight[]=[];for(const c of cells)if(c.hardOpen>0)out.push({p:c.p,weight:c.weight/normalization,porosityWeight:c.porosityWeight/normalization,hardOpen:c.hardOpen});
+ return out;
 }
 
 /** The source capture reservoir is the sum of the three staggered MAC
@@ -50,20 +65,20 @@ export function clothCellWeights(fields:CapacityLattice,position:ArrayLike<numbe
  * Weights sum to three, and are shared by available-volume measurement and
  * the local level-set receiver footprint (normalized there only for shape). */
 export function clothMacCaptureReservoir(fields:CapacityLattice,position:ArrayLike<number>):readonly {p:[number,number,number];weight:number}[]{
- const cells=new Map<string,{p:[number,number,number];weight:number}>();
+ const cells=new Map<number,{p:[number,number,number];weight:number}>();
  for(const cell of clothCellWeights(fields,position))for(let axis=0;axis<3;axis++)for(const offset of [-1,0,1]){
-  const p=[...cell.p] as [number,number,number];p[axis]!+=offset;const key=p.join(','),entry=cells.get(key)??{p,weight:0};entry.weight+=.25*cell.weight*(offset===0?2:1);cells.set(key,entry);
+  const p=[...cell.p] as [number,number,number];p[axis]!+=offset;const key=clothCellKey(p[0],p[1],p[2]);let entry=cells.get(key);if(!entry){entry={p,weight:0};cells.set(key,entry);}entry.weight+=.25*cell.weight*(offset===0?2:1);
  }return [...cells.values()];
 }
 
 export function prepareClothPorousCapacity(fields:Pick<UniformClothGridFields,'origin_m'|'cellSize_m'>,step:Pick<UniformClothStep,'state'>):ClothPorousCapacity{
- const s=step.state,h=fields.cellSize_m,V=h.reduce((a,b)=>a*b,1),map=new Map<string,{p:[number,number,number];solidFraction:number;boundFraction:number}>();
+ const s=step.state,h=fields.cellSize_m,V=h.reduce((a,b)=>a*b,1),map=new Map<number,{p:[number,number,number];solidFraction:number;boundFraction:number}>();
  if(!(V>0))throw new Error('Invalid cloth capacity lattice');
  for(let v=0;v<s.solidVolume_m3.length;v++){
   const solid=s.solidVolume_m3[v]!,bound=s.waterVolume_m3[v]!;if(!Number.isFinite(solid)||!Number.isFinite(bound)||solid<0||bound<0)throw new Error('Invalid material capacity volume');
   if(solid+bound===0)continue;
   for(const {p,porosityWeight:weight} of clothCellWeights(fields,s.positions_m.subarray(3*v,3*v+3))){
-   const key=p.join(','),cell=map.get(key)??{p,solidFraction:0,boundFraction:0};cell.solidFraction+=solid*weight/V;cell.boundFraction+=bound*weight/V;map.set(key,cell);
+   const key=clothCellKey(p[0],p[1],p[2]);let cell=map.get(key);if(!cell){cell={p,solidFraction:0,boundFraction:0};map.set(key,cell);}cell.solidFraction+=solid*weight/V;cell.boundFraction+=bound*weight/V;
   }
  }
  const cells=[...map.values()].sort((a,b)=>a.p[2]-b.p[2]||a.p[1]-b.p[1]||a.p[0]-b.p[0]);

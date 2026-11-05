@@ -1,5 +1,6 @@
 import type {PreparedUniformClothStencil,UniformClothGridFields,UniformClothStep} from './uniform-cloth-grid-coupling';
-import {clothCellWeights} from './uniform-porous-capacity';
+import {clothCellKey,clothCellWeights} from './uniform-porous-capacity';
+import {writeBufferChunked} from './uniform-chunked-upload';
 import {porousDragCoefficients} from '../../cloth/porous-material';
 import {uniformDetailBindLayout,uniformDetailGroup,uniformDetailModule,uniformDetailPipeline,type UniformDetailGroup} from './uniform-detail-fields';
 import {uniformMixedTopologyWGSL} from './uniform-mixed-topology.wgsl';
@@ -11,9 +12,9 @@ export interface GridDragCell {p:readonly number[];fiberVolume_m3:number;boundVo
  * mixture exactly once. The SPD block solve still uses an adjoint stencil. */
 export function prepareGridDragMaterial(fields:Pick<UniformClothGridFields,'origin_m'|'cellSize_m'>,p:PreparedUniformClothStencil,step:UniformClothStep):GridDragCell[]{
  const V=fields.cellSize_m.reduce((a,b)=>a*b,1),s=step.state;
- const cells=new Map<string,{p:readonly number[];fiber:number;bound:number;weight:number;diameter:number;viscosity:number;alpha:Float64Array;members:{vertex:number;volume:number}[]}>();
+ const cells=new Map<number,{p:readonly number[];fiber:number;bound:number;weight:number;diameter:number;viscosity:number;alpha:Float64Array;members:{vertex:number;volume:number}[]}>();
  for(let v=0;v<p.vertices;v++)for(const {p:at,weight} of clothCellWeights(fields,s.positions_m.subarray(3*v,3*v+3))){
-  const key=at.join(','),cell=cells.get(key)??{p:at,fiber:0,bound:0,weight:0,diameter:0,viscosity:0,alpha:new Float64Array(9),members:[]},volume=weight*s.solidVolume_m3[v]!;
+  const key=clothCellKey(at[0],at[1],at[2]),cell=cells.get(key)??{p:at,fiber:0,bound:0,weight:0,diameter:0,viscosity:0,alpha:new Float64Array(9),members:[]},volume=weight*s.solidVolume_m3[v]!;
   cell.fiber+=volume;cell.bound+=weight*s.waterVolume_m3[v]!;cell.weight+=weight;cell.diameter+=weight*p.vertexMicro[2*v]!;cell.viscosity+=weight*p.vertexMicro[2*v+1]!;
   for(let k=0;k<9;k++)cell.alpha[k]!+=weight*((k%4===0?2:0)-p.poreTensor[9*v+k]!);
   cell.members.push({vertex:v,volume});cells.set(key,cell);
@@ -64,7 +65,7 @@ struct Vertex {velocityMass:vec4f,linear0:vec4f,linear1:vec4f,linear2:vec4f,nonl
   this.release();const d=this.fields.device,cells=prepareGridDragMaterial(this.fields,p,step),values=new Float32Array(32*cells.length),bits=new Int32Array(values.buffer),lists=Array.from({length:p.vertices},()=>[] as {cell:number;share:number}[]);
   cells.forEach((cell,i)=>{bits.set([...cell.p,0],32*i);values.set([cell.fiberVolume_m3,cell.boundVolume_m3,0,0],32*i+4);for(let a=0;a<3;a++){values.set(cell.linear.subarray(3*a,3*a+3),32*i+8+4*a);values.set(cell.nonlinear.subarray(3*a,3*a+3),32*i+20+4*a);}for(const m of cell.members)lists[m.vertex]!.push({cell:i,share:m.share});});
   const ranges=new Uint32Array(2*p.vertices),links=new Uint32Array(2*lists.reduce((n,l)=>n+l.length,0)),floatLinks=new Float32Array(links.buffer);let at=0;lists.forEach((list,i)=>{ranges.set([at,list.length],2*i);for(const link of list){links[2*at]=link.cell;floatLinks[2*at+1]=link.share;at++;}});
-  const create=(size:number,data?:ArrayBufferView,usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST)=>{const b=d.createBuffer({label:'Cloth grid constitutive quadrature',size:Math.max(16,size),usage});if(data)d.queue.writeBuffer(b,0,data.buffer as ArrayBuffer,data.byteOffset,data.byteLength);this.buffers.push(b);return b;};
+  const create=(size:number,data?:ArrayBufferView,usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST)=>{const b=d.createBuffer({label:'Cloth grid constitutive quadrature',size:Math.max(16,size),usage});if(data)writeBufferChunked(d.queue,b,0,data);this.buffers.push(b);return b;};
   const source=create(values.byteLength,values),result=create(values.byteLength),range=create(ranges.byteLength,ranges),link=create(links.byteLength,links),params=create(16,new Float32Array([this.fields.cellSize_m.reduce((a,b)=>a*b,1),0,0,0]),GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST);
   this.cellGroup=uniformDetailGroup(d,{layout:this.cellLayout,entries:[{binding:0,resource:{buffer:source}},{binding:1,resource:this.fields.volume},{binding:2,resource:{buffer:result}},{binding:3,resource:{buffer:params}}]});
   this.vertexGroup=d.createBindGroup({layout:this.vertexLayout,entries:[result,range,link,vertices].map((buffer,binding)=>({binding,resource:{buffer}}))});this.cells=cells.length;this.vertices=p.vertices;

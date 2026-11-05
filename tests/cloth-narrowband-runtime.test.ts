@@ -126,13 +126,14 @@ test('cloth native advance waits for current collider apertures before preparing
  const runtime=new ClothRuntime(scene().cloth![0]!),events:string[]=[];
  let release!:()=>void;const fence=new Promise<void>(resolve=>{release=resolve;});
  const host=Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype),{disposed:false,scene:scene(),clothRuntimes:[runtime],prepareClothCohesionPairs:async()=>[],
-  clothWaterExchanges:[{async reconcileCapacity(_step:unknown,refresh:boolean,current:boolean){assert.equal(refresh,true);assert.equal(current,true);events.push('sample-current-collider');await fence;events.push('capacity-published');}}],
+  clothWaterExchanges:[{async refreshApertures(){events.push('sample-current-collider');await fence;events.push('capacity-published');}}],
   clothCouplings:[{prepare(){events.push('force-stencil');}}],mixedKicked:true,
   mixedFrameTrace(){return undefined;},readMixedRelayout(){events.push('read-layout');},
- }) as {advanceClothFluidFrame(frame:unknown,parameters:unknown,dt:number,bodies:undefined):Promise<unknown>};
+ }) as {advanceClothFluidFrame(frame:unknown,parameters:unknown,dt:number,bodies:undefined,roster:readonly unknown[]):Promise<unknown>};
  Object.defineProperty(host,'mixedGpuLayout',{value:false});
  const receipt={accepted:true},frame={advance(){events.push('native-advance');return Promise.resolve(receipt);}};
- const completion=host.advanceClothFluidFrame(frame,{},.001,undefined);
+ // A moving collider in the roster requires current-pose apertures.
+ const completion=host.advanceClothFluidFrame(frame,{},.001,undefined,[{description:{id:'clamp'}}]);
  assert.deepEqual(events,['sample-current-collider']);release();
  assert.equal(await completion,receipt);
  assert.deepEqual(events,['sample-current-collider','capacity-published','force-stencil','native-advance','read-layout']);runtime.dispose();

@@ -76,6 +76,37 @@ export function hingeCoordinateDerivatives(topology: PreparedClothTopology, stat
   return {gradient:factor*strain*phi.first*derivative,diagonal:factor*((1+gamma)*phi.first*phi.first*derivative*derivative+strain*(phi.first*second+phi.second*derivative*derivative))};
 }
 
+/** Every (vertex, axis) gradient of one hinge's bending energy, evaluated
+ * with the same arithmetic as hingeCoordinateDerivatives(...).gradient but
+ * sharing the hinge's angle, strain and rigidity across its 12 coordinates. */
+export function hingeCoordinateGradients(topology: PreparedClothTopology, state: ClothState, index: number, prior: ArrayLike<number> | undefined, dt: number, out: Float64Array, offset = 0): void {
+  const hinge = topology.hinges[index]!, P = state.positions_m, [ia, ib, ic, id] = hinge.vertices;
+  const e0 = P[3*ib]! - P[3*ia]!, e1 = P[3*ib+1]! - P[3*ia+1]!, e2 = P[3*ib+2]! - P[3*ia+2]!;
+  const u0 = P[3*ic]! - P[3*ia]!, u1 = P[3*ic+1]! - P[3*ia+1]!, u2 = P[3*ic+2]! - P[3*ia+2]!;
+  const v0 = P[3*id]! - P[3*ia]!, v1 = P[3*id+1]! - P[3*ia+1]!, v2 = P[3*id+2]! - P[3*ia+2]!;
+  const n0 = e1*u2 - e2*u1, n1 = e2*u0 - e0*u2, n2 = e0*u1 - e1*u0, m0 = v1*e2 - v2*e1, m1 = v2*e0 - v0*e2, m2 = v0*e1 - v1*e0;
+  const l = Math.hypot(e0, e1, e2), il = 1/l, ll = l*l, t0 = e0*il, t1 = e1*il, t2 = e2*il;
+  const p0 = n1*m2 - n2*m1, p1 = n2*m0 - n0*m2, p2 = n0*m1 - n1*m0, x = n0*m0 + n1*m1 + n2*m2, y = t0*p0 + t1*p1 + t2*p2;
+  const denominator = x*x + y*y, angle = Math.atan2(y, x);
+  const material = topology.materials[topology.triangles[hinge.faces[0]]!.material]!, gamma = prior ? (material.bendingDamping_s ?? material.mechanicalDamping_s) / dt : 0;
+  const phi = bendingPhi(angle, material.bendingMode), strain = phi.value - bendingPhi(hinge.restAngle_rad, material.bendingMode).value + gamma * (prior ? phi.value - bendingPhi(hingeAngle(prior, hinge.vertices), material.bendingMode).value : 0);
+  const fraction = (state.solidFraction[hinge.vertices[0]]! + state.solidFraction[hinge.vertices[1]]!) / 2, coefficient = bendingRigidity(material, fraction) * hinge.shapeFactor * strain * phi.first;
+  for (let local = 0; local < 4; local++) {
+    const sE = local === 0 ? -1 : local === 1 ? 1 : 0, sU = local === 0 ? -1 : local === 2 ? 1 : 0, sV = local === 0 ? -1 : local === 3 ? 1 : 0;
+    for (let axis = 0; axis < 3; axis++) {
+      const k0 = axis === 0 ? 1 : 0, k1 = axis === 1 ? 1 : 0, k2 = axis === 2 ? 1 : 0;
+      const de0 = k0*sE, de1 = k1*sE, de2 = k2*sE, du0 = k0*sU, du1 = k1*sU, du2 = k2*sU, dv0 = k0*sV, dv1 = k1*sV, dv2 = k2*sV;
+      const dn0 = (de1*u2 - de2*u1) + (e1*du2 - e2*du1), dn1 = (de2*u0 - de0*u2) + (e2*du0 - e0*du2), dn2 = (de0*u1 - de1*u0) + (e0*du1 - e1*du0);
+      const dm0 = (dv1*e2 - dv2*e1) + (v1*de2 - v2*de1), dm1 = (dv2*e0 - dv0*e2) + (v2*de0 - v0*de2), dm2 = (dv0*e1 - dv1*e0) + (v0*de1 - v1*de0);
+      const dl = (e0*de0 + e1*de1 + e2*de2) / l, s = dl / ll;
+      const td0 = de0*il - e0*s, td1 = de1*il - e1*s, td2 = de2*il - e2*s;
+      const q0 = (dn1*m2 - dn2*m1) + (n1*dm2 - n2*dm1), q1 = (dn2*m0 - dn0*m2) + (n2*dm0 - n0*dm2), q2 = (dn0*m1 - dn1*m0) + (n0*dm1 - n1*dm0);
+      const dx = (dn0*m0 + dn1*m1 + dn2*m2) + (n0*dm0 + n1*dm1 + n2*dm2), dy = (td0*p0 + td1*p1 + td2*p2) + (t0*q0 + t1*q1 + t2*q2);
+      out[offset + 3*local + axis] = coefficient * ((x*dy - y*dx) / denominator);
+    }
+  }
+}
+
 function rodFrame(rod: ClothRod, segment: number, state: ClothState, positions = state.positions_m, twists = state.twist_rad) {
   const global = rod.segmentOffset + segment, edge = sub3(point3(positions, rod.vertices[segment + 1]!), point3(positions, rod.vertices[segment]!)), length = norm3(edge);
   if (length < 1e-14) return undefined;
@@ -188,6 +219,7 @@ export function nonFluidClothPredictor(topology:PreparedClothTopology,state:Clot
   if(!(Number.isFinite(dt)&&dt>0))throw new Error('Cloth predictor timestep must be positive and finite');
   const x=state.positions_m,old=x.slice(),twist=state.twist_rad.slice(),target=options.supportPositions_m??topology.data.restPositions_m,gravity=options.gravity_m_s2??[0,-9.81,0],result=state.velocities_m_s.slice(),cohesive=options.cohesionPairs??[],incident:number[][]=Array.from({length:topology.vertexCount},()=>[]);
   for(let j=0;j<cohesive.length;j++)for(const i of new Set(cohesive[j]!.vertices))incident[i]!.push(j);
+  const hingeGradient=new Float64Array(12*topology.hinges.length);for(let h=0;h<topology.hinges.length;h++)hingeCoordinateGradients(topology,state,h,old,dt,hingeGradient,12*h);
   for(let i=0;i<topology.vertexCount;i++){
     const mass=state.dryMass_kg[i]!+topology.materials[topology.vertexMaterial[i]!]!.waterDensity_kg_m3*state.waterVolume_m3[i]!;
     if(!(mass>0&&Number.isFinite(mass)))throw new Error('Invalid cloth predictor mass');
@@ -196,7 +228,7 @@ export function nonFluidClothPredictor(topology:PreparedClothTopology,state:Clot
       const k=3*i+axis;if((topology.kinematicFixed[i]??0)&1){result[k]=(target[k]!-old[k]!)/dt;continue;}
       let gradient=topology.attachmentTranslation_N_m[i]!*(x[k]!-target[k]!);
       for(const f of topology.incidentTriangles[i]!)gradient+=membraneCoordinateDerivatives(topology,state,f,i,axis,old,dt).gradient;
-      for(const f of topology.incidentHinges[i]!)gradient+=hingeCoordinateDerivatives(topology,state,f,i,axis,old,dt).gradient;
+      for(const f of topology.incidentHinges[i]!)gradient+=hingeGradient[12*f+3*topology.hinges[f]!.vertices.indexOf(i)+axis]!;
       for(const r of topology.incidentRods[i]!)gradient+=rodStretchCoordinateDerivatives(topology,state,r,i,axis,old,dt).gradient;
       if(topology.incidentRods[i]!.some(r=>topology.rods[r]!.vertices.length>2)){
         try{x[k]=old[k]!+h;const plus=localBending();x[k]=old[k]!-h;gradient+=(plus-localBending())/(2*h);}finally{x[k]=old[k]!;}

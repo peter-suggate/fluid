@@ -117,6 +117,12 @@ import { sampleSolidWorld, solidWorldForFluidLattice } from "../../core/solid-wo
 import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
 import { narrowBandParticleCellCap, narrowBandSparseNeighbours, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
+/** Opt-in host phase timing for wet-cloth probes: a probe installs
+ * globalThis.fluidClothPhaseTimes; without it this is a no-op. */
+function clothPhase(name?:string,since=0,count?:number):number{
+  const sink=(globalThis as {fluidClothPhaseTimes?:Record<string,number>}).fluidClothPhaseTimes;if(!sink)return 0;
+  const now=performance.now();if(name)sink[name]=(sink[name]??0)+(count??now-since);return now;
+}
 import { UNIFORM_DETAIL_TWIN_BINDING, UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
@@ -1279,6 +1285,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private async prepareClothCohesionPairs(runtime:ClothRuntime,water:UniformClothWaterExchange,bodies:readonly RigidBodyState[]):Promise<readonly ClothCohesionPair[]>{
     const source=this.scene.wetClothSource?wetClothSource(this.scene.wetClothSource.sourceId):undefined;
     const liquid=source?.sourceSettings.liquid,h=this.frame.cellSize_m[0];
+    // Disabled source cohesion needs no free-liquid evidence: skip both fences.
+    if(Number(liquid?.cohesion??1)===0||Number(liquid?.cohesionCoeff??.002)===0||(Number(liquid?.softCohesion??1)===0&&Number(liquid?.solidCohesion??1)===0))return [];
     const bridges=prepareClothCohesion(runtime.prepared,runtime.state,{cellSize_m:h,
       bucketSize_m:h*Number(source?.sourceSettings.bucket.numcells??5),bucketOrigin_m:this.frame.origin_m,
       // The native free-water budget is the nonempty-free-phase guard even
@@ -1297,19 +1305,28 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       if(this.disposed)throw new Error('Cloth fluid preparation was disposed');
       const runtime=this.clothRuntimes[i]!,step={state:runtime.state,data:runtime.prepared.data,kinematicFixed:runtime.prepared.kinematicFixed,
         materials:runtime.document.materials,physics:runtime.document.physics,identity:runtime.identity,dt_s};
-      await this.clothWaterExchanges[i]!.reconcileCapacity(step,true,true);
+      // Collider poses for this step are already published: resample the
+      // hard aperture basis only when hard geometry can actually move.
+      let mark=clothPhase();
+      if(bodies.length||this.scene.rigidBodies.length||(this.scene.wetClothSource?.scripts.length??0)>0)await this.clothWaterExchanges[i]!.refreshApertures(step);
+      mark=clothPhase('apertures',mark);
       if(this.disposed)throw new Error('Cloth fluid preparation was disposed');
       const cohesionPairs=await this.prepareClothCohesionPairs(runtime,this.clothWaterExchanges[i]!,bodies);pairs.push([...cohesionPairs]);
+      mark=clothPhase('cohesion',mark);
       const g=this.scene.fluid.gravity_m_s2;
       const solidPredictorVelocity_m_s=runtime.prepareNonFluidPredictor(dt_s,{gravity_m_s2:[g.x,g.y,g.z],cohesionPairs});
+      mark=clothPhase('predictor',mark);
       this.clothCouplings[i]!.prepare({...step,solidPredictorVelocity_m_s});
+      clothPhase('couplingPrepare',mark);
     }
   }
   private async finishClothStep(dt_s: number, bodies: readonly RigidBodyState[]): Promise<void> {
     if (!this.clothRuntimes.length) return;
     const checkpoints = this.clothStepCheckpoints??this.clothRuntimes.map(runtime => runtime.checkpoint());
     try {
+    let mark=clothPhase();
     const exchanges = await Promise.all(this.clothCouplings.map(coupling => coupling.finish()));
+    mark=clothPhase('couplingFinish',mark);
     const states = await this.rigidSystem.readStates(bodies);
     const colliders: ClothCollider[] = [...clothCollidersForRigidBodies(states),...clothContainerColliders(this.scene),...clothSceneStaticColliders(this.scene)];
     const reactions: ClothReaction[] = [];
@@ -1320,18 +1337,26 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         const beforeVelocity=runtime.state.velocities_m_s.slice();
         runtime.acceptFluidImpulse(exchange.impulse_Ns, exchange);
         const g = this.scene.fluid.gravity_m_s2;
+        mark=clothPhase('colliders',mark);
         const report = await runtime.stepAsync(dt_s, colliders, {gravity_m_s2:[g.x,g.y,g.z],cohesionPairs});
+        mark=clothPhase('mechanics',mark);clothPhase('mechanicsIterations',0,report.iterations);clothPhase('mechanicsRefinementIterations',0,(report as {refinementIterations?:number}).refinementIterations??0);
         reactions.push(...report.contacts.reactions);
         // Lie split at the accepted FLIP field: capture before release prevents
         // freshly squeezed water from being recaptured in the same substep.
         // Both transactions alter native phi, its volume budget and momentum.
         const step={state:runtime.state,data:runtime.prepared.data,kinematicFixed:runtime.prepared.kinematicFixed,materials:runtime.document.materials,physics:runtime.document.physics,identity:runtime.identity,dt_s};
-        await water.reconcileCapacity(step);
-        waterLedgers.push(await water.absorb(step,runtime.prepared.vertexMaterial));
+        // One native sample at the accepted material positions serves the
+        // aperture basis, capture reservoir, seepage and momentum exchange.
+        const sample=await water.sampleSupport(runtime.state.positions_m);
+        mark=clothPhase('supportSample',mark);
+        const captured=water.captureFromSample(step,sample,runtime.prepared.vertexMaterial);
+        mark=clothPhase('capture',mark);
         const solidAcceleration=Float64Array.from(runtime.state.velocities_m_s,(v,k)=>(v-beforeVelocity[k]!)/dt_s);
         advanceClothPoreTransport({...step,gravity_m_s2:[g.x,g.y,g.z],pressureAcceleration_m_s2:exchange.fluidPressureAcceleration_m_s2,solidAcceleration_m_s2:solidAcceleration});
-        await water.reconcileCapacity(step);
-        waterLedgers.push(await water.releaseOverflow(step));
+        mark=clothPhase('poreTransport',mark);
+        const released=water.releaseFromSample(step,sample);
+        waterLedgers.push(water.commitPoreWater(step,released.reduce((a,b)=>a+b,0)-captured.reduce((a,b)=>a+b,0)));
+        mark=clothPhase('releaseCommit',mark);
 
       }
       if (!this.scene.interaction?.entities.length) await this.rigidSystem.applyExternalImpulses(reactions);

@@ -1,6 +1,7 @@
 import type { PreparedUniformClothStencil, UniformClothGridFields, UniformClothStep } from './uniform-cloth-grid-coupling';
 import { uniformDetailBindLayout,uniformDetailGroup,uniformDetailModule,uniformDetailPipeline,type UniformDetailGroup } from './uniform-detail-fields';
 import { UniformClothDragMaterial } from './uniform-cloth-drag-material';
+import { writeBufferChunked } from './uniform-chunked-upload';
 import { uniformMixedTopologyWGSL } from './uniform-mixed-topology.wgsl';
 import { uniformMixedSolidWGSL } from './uniform-mixed-solid.wgsl';
 
@@ -108,11 +109,13 @@ fn inverse3(m:mat3x3f)->mat3x3f{let a=cross(m[1],m[2]);let b=cross(m[2],m[0]);le
   ]);
  }
  prepare(p:PreparedUniformClothStencil,step:UniformClothStep,shared:Shared):void{
-  this.release();const d=this.device,create=(size:number,data?:ArrayBufferView,usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST)=>{const b=d.createBuffer({label:'Cloth tensor block data',size:Math.max(16,size),usage});this.buffers.push(b);if(data)d.queue.writeBuffer(b,0,data.buffer as ArrayBuffer,data.byteOffset,data.byteLength);return b;};
-  const vertexData=new Float32Array(32*p.vertices),anchorColors=Array.from({length:p.coordinates.length},()=>new Set<number>()),colors:number[][]=[];
+  this.release();const d=this.device,create=(size:number,data?:ArrayBufferView,usage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST)=>{const b=d.createBuffer({label:'Cloth tensor block data',size:Math.max(16,size),usage});this.buffers.push(b);if(data)writeBufferChunked(d.queue,b,0,data);return b;};
+  const vertexData=new Float32Array(32*p.vertices),anchorColors:number[][]=Array.from({length:p.coordinates.length},()=>[]),colors:number[][]=[];
+  // Greedy coloring: a vertex takes the least color no anchor it touches holds.
+  const anchorStamp=new Int32Array(p.coordinates.length).fill(-1),usedStamp:number[]=[],anchors:number[]=[];
   for(let v=0;v<p.vertices;v++){
-   const used=new Set<number>(),anchors=new Set<number>();for(let axis=0;axis<3;axis++)for(let j=0;j<p.ranges[6*v+2*axis+1]!;j++)anchors.add(Math.floor(p.linkFaces[p.gather[p.ranges[6*v+2*axis]!+j]!]!/3));
-   for(const a of anchors)for(const color of anchorColors[a]!)used.add(color);let color=0;while(used.has(color))color++;(colors[color]??=[]).push(v);for(const a of anchors)anchorColors[a]!.add(color);
+   anchors.length=0;for(let axis=0;axis<3;axis++)for(let j=0;j<p.ranges[6*v+2*axis+1]!;j++){const a=Math.floor(p.linkFaces[p.gather[p.ranges[6*v+2*axis]!+j]!]!/3);if(anchorStamp[a]!==v){anchorStamp[a]=v;anchors.push(a);}}
+   for(const a of anchors)for(const used of anchorColors[a]!)usedStamp[used]=v;let color=0;while(usedStamp[color]===v)color++;(colors[color]??=[]).push(v);for(const a of anchors)anchorColors[a]!.push(color);
    const mass=(step.physics?.solveSolid===false||(((step.kinematicFixed??step.data.fixed)?.[v]??0)&1))?0:step.state.dryMass_kg[v]!+p.density_kg_m3*step.state.waterVolume_m3[v]!;
    const predictor=step.solidPredictorVelocity_m_s??step.state.velocities_m_s;
    vertexData.set([predictor[3*v]!,predictor[3*v+1]!,predictor[3*v+2]!,mass],32*v);

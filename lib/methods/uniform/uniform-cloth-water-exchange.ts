@@ -1,18 +1,22 @@
 import type { ClothWaterLedger } from '../../cloth/definition';
 import { planLocalPoreExchange, planLocalCapacityRemap, remapCapacityMomentum, tetrahedralWaterFill, type LocalWaterCell, type LocalLevelSetExchange } from '../../cloth/grid-water-transfer';
 import { porousCaptureFraction } from '../../cloth/porous-material';
+import { planPoreAbsorption, type PoreWaterExchangeRequest } from '../../cloth/porous-transport';
 import type { UniformClothGridFields, UniformClothStep } from './uniform-cloth-grid-coupling';
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline } from './uniform-detail-fields';
 import { uniformMixedTopologyWGSL } from './uniform-mixed-topology.wgsl';
 import { uniformMixedSolidWGSL } from './uniform-mixed-solid.wgsl';
-import { clothPorousCapacityOf, clothCellWeights,clothMacCaptureReservoir, setClothHardApertures, prepareClothPorousCapacity, publishClothPorousCapacity, releaseClothPorousCapacity } from './uniform-porous-capacity';
+import { clothPorousCapacityOf, clothCellWeights,clothMacCaptureReservoir, setClothHardApertures, setClothHardAperturesByKey, clothCellKey, prepareClothPorousCapacity, publishClothPorousCapacity, releaseClothPorousCapacity } from './uniform-porous-capacity';
 import { NB_VOLUME_COMPENSATION_FLOAT } from './uniform-mixed-surface-volume';
+import { writeBufferChunked } from './uniform-chunked-upload';
 import {uniformMixedVertexSamplingSource} from './uniform-mixed-vertex-sampling.wgsl';
 import {UNIFORM_DETAIL_4H_LOAD} from '../../core/uniform-detail-abi';
 
 type Point=[number,number,number];
 interface Cell {p:Point;vertices:number[]}
-const key=(p:readonly number[])=>p.join(',');
+/** Exact integer cell key (insertion-ordered Maps; no key ordering is used). */
+const key=(p:readonly number[])=>clothCellKey(p[0]!,p[1]!,p[2]!);
+const ck=(p:readonly number[])=>clothCellKey(p[0]!,p[1]!,p[2]!);
 const corner=(i:number):Point=>[i&1,(i>>1)&1,(i>>2)&1];
 
 /** Correctness-first local free/bound water transaction. Reads a compact
@@ -93,6 +97,15 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
  if(site.w==0){textureStore(field,site.xyz-32*umFramePage(),values[i]);}else{textureStore(output,site.xyz-32*umFramePage(),values[i]);}
  if(i==0u){budget[0]=params.x;budget[${NB_VOLUME_COMPENSATION_FLOAT}]=params.y;budget[3]=0.0;}
 }`});
+  {
+   const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}}]});
+   this.budgetPipeline=await d.createComputePipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{entryPoint:'addBudget',module:d.createShaderModule({label:'Cloth pore water budget delta',code:/* wgsl */`
+@group(0) @binding(0) var<storage,read_write> budget:array<f32>;
+@group(0) @binding(1) var<uniform> delta:vec4f;
+@compute @workgroup_size(1) fn addBudget(){let old=budget[0];let next=max(0.0,old+delta.x);budget[0]=next;budget[${NB_VOLUME_COMPENSATION_FLOAT}]+=(old-next)+delta.x;budget[3]=0.0;}`})}});
+   this.budgetParams=d.createBuffer({label:'Cloth pore water budget delta',size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+   this.budgetGroup=d.createBindGroup({layout,entries:[{binding:0,resource:{buffer:this.fields.waterBudget}},{binding:1,resource:{buffer:this.budgetParams}}]});
+  }
   for(const module of [read,currentRead,write,phiQuery]){const errors=(await module.getCompilationInfo()).messages.filter(x=>x.type==='error');if(errors.length)throw new Error(errors.map(x=>x.message).join('\n'));}
   [this.readPipeline,this.currentReadPipeline,this.writePipeline,this.phiQueryPipeline]=await Promise.all([
    uniformDetailPipeline(d,this.fields.ownership,{layout:d.createPipelineLayout({bindGroupLayouts:[this.fields.ownership.bindLayout,this.readLayout,...(solid?[solid.tileLayout]:[])]}),compute:{module:read,entryPoint:'sampleWater'}}),
@@ -106,13 +119,13 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
   * free-volume census. No water ledger or synthetic geometry is involved. */
  async initializeCapacity(step:Pick<UniformClothStep,'state'>):Promise<void>{
   if(!this.readPipeline)throw new Error('Initialize the water adapter before capacity');
-  const cells=new Map<string,Point>();for(let v=0;v<step.state.waterVolume_m3.length;v++)for(const cell of clothCellWeights(this.fields,step.state.positions_m.subarray(3*v,3*v+3),true))cells.set(key(cell.p),cell.p);
+  const cells=new Map<number,Point>();for(let v=0;v<step.state.waterVolume_m3.length;v++)for(const cell of clothCellWeights(this.fields,step.state.positions_m.subarray(3*v,3*v+3),true))cells.set(key(cell.p),cell.p);
   const points=[...cells.values()],records=new Int32Array(4*points.length);points.forEach((p,i)=>records.set([...p,1],4*i));
   const d=this.device,sites=d.createBuffer({label:'Cloth initial hard-aperture sites',size:Math.max(16,records.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST}),result=d.createBuffer({label:'Cloth initial hard apertures',size:Math.max(16,records.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),read=d.createBuffer({label:'Cloth aperture readback',size:Math.max(16,records.byteLength),usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   try{
-   d.queue.writeBuffer(sites,0,records);const group=uniformDetailGroup(d,{layout:this.readLayout,entries:[{binding:0,resource:{buffer:sites}},{binding:1,resource:{buffer:result}},{binding:2,resource:this.fields.phi},{binding:3,resource:this.fields.projectedVelocity}]});
+   writeBufferChunked(d.queue,sites,0,records);const group=uniformDetailGroup(d,{layout:this.readLayout,entries:[{binding:0,resource:{buffer:sites}},{binding:1,resource:{buffer:result}},{binding:2,resource:this.fields.phi},{binding:3,resource:this.fields.projectedVelocity}]});
    const e=d.createCommandEncoder(),pass=e.beginComputePass({label:'Cloth native initial hard apertures'});pass.setPipeline(this.readPipeline);pass.setBindGroup(0,this.fields.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.fields.solid)pass.setBindGroup(2,this.fields.solid.tileGroup);pass.dispatchWorkgroups(Math.ceil(points.length/64));pass.end();e.copyBufferToBuffer(result,0,read,0,records.byteLength);d.queue.submit([e.finish()]);await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange());
-   const aperture=new Map<string,number>();points.forEach((p,i)=>{if(values[4*i+3]===3)throw new Error('Initial cloth capacity hard-geometry integration did not converge');if(values[4*i+3])throw new Error('Initial cloth capacity requires actual h support');aperture.set(key(p),values[4*i]!);});
+   const aperture=new Map<number,number>();points.forEach((p,i)=>{if(values[4*i+3]===3)throw new Error('Initial cloth capacity hard-geometry integration did not converge');if(values[4*i+3])throw new Error('Initial cloth capacity requires actual h support');aperture.set(key(p),values[4*i]!);});
    setClothHardApertures(this.fields,aperture);publishClothPorousCapacity(this.fields,step);
   }finally{if(read.mapState==='mapped')read.unmap();sites.destroy();result.destroy();read.destroy();}
  }
@@ -142,7 +155,7 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
   const d=this.device,input=d.createBuffer({label:'Cloth mixed phi sites',size:records.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST}),output=d.createBuffer({label:'Cloth mixed phi values',size:16*count,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),read=d.createBuffer({label:'Cloth mixed phi readback',size:16*count,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
   this.busy=true;
   try{
-   d.queue.writeBuffer(input,0,records);const group=uniformDetailGroup(d,{layout:this.phiQueryLayout,entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:{buffer:output}},{binding:2,resource:this.fields.phi}]});
+   writeBufferChunked(d.queue,input,0,records);const group=uniformDetailGroup(d,{layout:this.phiQueryLayout,entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:{buffer:output}},{binding:2,resource:this.fields.phi}]});
    const e=d.createCommandEncoder(),pass=e.beginComputePass({label:'Cloth accepted mixed-resolution liquid samples'});pass.setPipeline(this.phiQueryPipeline);pass.setBindGroup(0,this.fields.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.dispatchWorkgroups(Math.ceil(count/64));pass.end();e.copyBufferToBuffer(output,0,read,0,16*count);d.queue.submit([e.finish()]);await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange());
    return Float64Array.from({length:count},(_,i)=>{if(values[4*i+3]||!Number.isFinite(values[4*i]!))throw new Error(`Cohesion bridge has no accepted resident liquid owner at query ${i}`);return values[4*i]!;});
   }finally{if(read.mapState==='mapped')read.unmap();input.destroy();output.destroy();read.destroy();this.busy=false;if(this.disposed)releaseClothPorousCapacity(this.fields);}
@@ -167,10 +180,10 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
   this.busy=true;const resources:GPUBuffer[]=[];
   const allocate=(size:number,usage:GPUBufferUsageFlags,values?:ArrayBufferView)=>{
    const b=this.device.createBuffer({label:'Cloth local water transaction',size:Math.max(16,size),usage});resources.push(b);
-   if(values)this.device.queue.writeBuffer(b,0,values.buffer as ArrayBuffer,values.byteOffset,values.byteLength);return b;
+   if(values)writeBufferChunked(this.device.queue,b,0,values);return b;
   };
   try{
-   const h=this.fields.cellSize_m,cellVolume=h[0]*h[1]*h[2],vertices:Point[]=[],vertexMap=new Map<string,number>(),weights:number[]=[],samples:{indices:number[];weights:number[]}[]=Array.from({length:n},()=>({indices:[],weights:[]}));
+   const h=this.fields.cellSize_m,cellVolume=h[0]*h[1]*h[2],vertices:Point[]=[],vertexMap=new Map<number,number>(),weights:number[]=[],samples:{indices:number[];weights:number[]}[]=Array.from({length:n},()=>({indices:[],weights:[]}));
    const vertex=(p:Point)=>{const k=key(p);let i=vertexMap.get(k);if(i===undefined){i=vertices.length;vertexMap.set(k,i);vertices.push(p);weights.push(0);}return i;};
    for(let v=0;v<n;v++)if(capacityOnly||requests[v]!==0){
     const sample=new Map<number,number>(),add=(p:Point,w:number)=>{if(!(w>0))return;const i=vertex(p);sample.set(i,(sample.get(i)??0)+w);};
@@ -205,13 +218,13 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
     if(previous.nodePositions_m.length===state.positions_m.length)addPath(previous.nodePositions_m);
     for(const cell of previous.cells)for(let c=0;c<8;c++){const bits=corner(c),i=vertex(cell.p.map((x,a)=>x+bits[a]!) as Point);weights[i]=1;}
    }
-   const supportCount=vertices.length,affected=new Map<string,Point>();
+   const supportCount=vertices.length,affected=new Map<number,Point>();
    for(let i=0;i<supportCount;i++)for(let c=0;c<8;c++){const bit=corner(c),p=vertices[i]!.map((x,a)=>x-bit[a]!) as Point;affected.set(key(p),p);}
    // Neighbor cells give the actual masses of affected MAC dual faces.
    const allCells=new Map(affected);for(const p of affected.values())for(let a=0;a<3;a++)for(const sign of [-1,1]){const q=[...p] as Point;q[a]!+=sign;allCells.set(key(q),q);}
-   const cells:Cell[]=[],cellMap=new Map<string,number>();
+   const cells:Cell[]=[],cellMap=new Map<number,number>();
    for(const [k,p] of allCells){cellMap.set(k,cells.length);cells.push({p,vertices:Array.from({length:8},(_,i)=>vertex(p.map((x,a)=>x+corner(i)[a]!) as Point))});}
-   const faceMap=new Map<string,Point>();for(const p of affected.values())for(let a=0;a<3;a++){faceMap.set(key(p),p);const q=[...p] as Point;q[a]!--;faceMap.set(key(q),q);}
+   const faceMap=new Map<number,Point>();for(const p of affected.values())for(let a=0;a<3;a++){faceMap.set(key(p),p);const q=[...p] as Point;q[a]!--;faceMap.set(key(q),q);}
    const faces=[...faceMap.values()],records=new Int32Array(4*(vertices.length+cells.length+faces.length));
    vertices.forEach((p,i)=>records.set([...p,0],4*i));cells.forEach((c,i)=>records.set([...c.p,1],4*(vertices.length+i)));faces.forEach((p,i)=>records.set([...p,2],4*(vertices.length+cells.length+i)));
    const siteBuffer=allocate(records.byteLength,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST,records),resultBuffer=allocate(records.byteLength,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC),readback=allocate(records.byteLength+16,GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ);
@@ -338,5 +351,138 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
  async releaseOverflow(step:UniformClothStep):Promise<ClothWaterLedger>{
   return this.transfer(step,Float64Array.from(step.state.waterVolume_m3,(water,i)=>-Math.max(0,water-Math.max(0,step.state.controlVolume_m3[i]!-step.state.solidVolume_m3[i]!))));
  }
- destroy():void{this.disposed=true;if(!this.busy)releaseClothPorousCapacity(this.fields);}
+ /** One readback of the accepted native fields around every material control:
+  * hard aperture (installed for the shared capacity basis), tetrahedral free
+  * fill and MAC velocity, on each control's staggered capture reservoir. */
+ async sampleSupport(positions_m:ArrayLike<number>,currentHardGeometry=false):Promise<ClothSupportSample>{
+  if(this.disposed)throw new Error('Cloth water exchange was disposed');
+  if(this.busy)throw new Error('Cloth water samples must be serialized');
+  if(!this.readPipeline||!this.currentReadPipeline)throw new Error('Cloth water exchange is not initialized');
+  const cells:Point[]=[],cellIndex=new Map<number,number>(),points:Point[]=[],pointIndex=new Map<number,number>();
+  const point=(p:Point)=>{const k=ck(p);let i=pointIndex.get(k);if(i===undefined){i=points.length;pointIndex.set(k,i);points.push(p);}return i;};
+  const corners:number[]=[];
+  const cell=(p:Point)=>{const k=ck(p);if(cellIndex.has(k))return;cellIndex.set(k,cells.length);cells.push(p);for(let c=0;c<8;c++)corners.push(point(p.map((x,a)=>x+corner(c)[a]!) as Point));};
+  for(let v=0;v<positions_m.length/3;v++)for(const raw of clothCellWeights(this.fields,[positions_m[3*v]!,positions_m[3*v+1]!,positions_m[3*v+2]!],true)){
+   cell(raw.p);for(let a=0;a<3;a++)for(const s of [-1,1]){const q=[...raw.p] as Point;q[a]!+=s;cell(q);}
+  }
+  const records=new Int32Array(4*(points.length+2*cells.length));
+  points.forEach((p,i)=>records.set([...p,0],4*i));cells.forEach((p,i)=>{records.set([...p,1],4*(points.length+i));records.set([...p,2],4*(points.length+cells.length+i));});
+  const d=this.device,sites=d.createBuffer({label:'Cloth support sites',size:Math.max(16,records.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST}),
+   result=d.createBuffer({label:'Cloth support samples',size:Math.max(16,records.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),
+   read=d.createBuffer({label:'Cloth support readback',size:Math.max(16,records.byteLength),usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  this.busy=true;
+  try{
+   writeBufferChunked(d.queue,sites,0,records);
+   const group=uniformDetailGroup(d,{layout:this.readLayout,entries:[{binding:0,resource:{buffer:sites}},{binding:1,resource:{buffer:result}},{binding:2,resource:this.fields.phi},{binding:3,resource:this.fields.projectedVelocity}]});
+   const e=d.createCommandEncoder({label:'Sample cloth native support'}),pass=e.beginComputePass();
+   pass.setPipeline(currentHardGeometry?this.currentReadPipeline:this.readPipeline);pass.setBindGroup(0,this.fields.ownership.bindGroup);pass.setBindGroup(1,group.group);
+   if(this.fields.solid)pass.setBindGroup(2,currentHardGeometry?this.fields.solid.currentGeometryGroup:this.fields.solid.tileGroup);
+   pass.dispatchWorkgroups(Math.ceil(records.length/256));pass.end();e.copyBufferToBuffer(result,0,read,0,records.byteLength);d.queue.submit([e.finish()]);
+   await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange()).slice();read.unmap();
+   const open=new Float64Array(cells.length),fill=new Float64Array(cells.length),velocity=new Float64Array(3*cells.length),apertures=new Map<number,number>();
+   cells.forEach((p,i)=>{
+    const at=4*(points.length+i);if(values[at+3]===3)throw new Error('Cloth support hard-geometry integration did not converge');
+    if(values[at+3])throw new Error(`Cloth support requires h ownership at cell ${p}`);
+    open[i]=values[at]!;apertures.set(ck(p),open[i]!);
+    fill[i]=tetrahedralWaterFill(Array.from({length:8},(_,c)=>values[4*corners[8*i+c]!]!));
+    for(let a=0;a<3;a++)velocity[3*i+a]=values[4*(points.length+cells.length+i)+a]!;
+   });
+   setClothHardAperturesByKey(this.fields,apertures);
+   return {cellIndex,cells,open,fill,velocity};
+  }finally{if(read.mapState==='mapped')read.unmap();sites.destroy();result.destroy();read.destroy();this.busy=false;if(this.disposed)releaseClothPorousCapacity(this.fields);}
+ }
+
+ /** Add a committed free-water delta to the native NB budget target on the
+  * GPU queue, with the same compensated low word as source emission. */
+ private commitBudgetDelta(delta_m3:number):void{
+  if(!this.budgetPipeline||!this.budgetParams||!this.budgetGroup)throw new Error('Cloth pore budget is not initialized');
+  const cells=delta_m3/this.fields.cellSize_m.reduce((a,b)=>a*b,1);
+  this.device.queue.writeBuffer(this.budgetParams!,0,new Float32Array([cells,0,0,0]));
+  const e=this.device.createCommandEncoder({label:'Cloth pore water budget'}),pass=e.beginComputePass();pass.setPipeline(this.budgetPipeline);pass.setBindGroup(0,this.budgetGroup!);pass.dispatchWorkgroups(1);pass.end();this.device.queue.submit([e.finish()]);
+ }
+ private budgetPipeline?:GPUComputePipeline;
+ private budgetParams?:GPUBuffer;
+ private budgetGroup?:GPUBindGroup;
+
+ /** Darcy capture from the measured local free reservoir. Native free water
+  * is fill(phi)*open*(1-fiber-bound), so raising the bound partition removes
+  * the captured water from the same cells without editing phi; the budget
+  * target falls by exactly the accepted volume. Captured water brings its
+  * fluid momentum into the material. Returns the accepted per-vertex volumes. */
+ captureFromSample(step:UniformClothStep,sample:ClothSupportSample,vertexMaterial?:ArrayLike<number>):Float64Array{
+  const s=step.state,n=s.waterVolume_m3.length,accepted=new Float64Array(n);
+  if(step.physics?.absorption===false)return accepted;
+  const captureRate=step.physics?.captureRate??1,h=Math.min(...this.fields.cellSize_m),V=this.fields.cellSize_m.reduce((a,b)=>a*b,1);
+  if(!Number.isFinite(captureRate)||captureRate<0)throw new Error('Invalid cloth capture-rate multiplier');
+  const table=clothPorousCapacityOf(this.fields.porousCapacity);if(!table)throw new Error('Cloth capacity must be installed before capture');
+  const occupied=new Map(table.cells.map(c=>[ck(c.p),c.solidFraction+c.boundFraction]));
+  const free=Float64Array.from(sample.cells,(p,i)=>sample.fill[i]!*sample.open[i]!*V*Math.max(0,1-(occupied.get(ck(p))??0)));
+  const capacity=Float64Array.from(s.controlVolume_m3,(c,v)=>Math.max(0,c-s.solidVolume_m3[v]!));
+  const requests:PoreWaterExchangeRequest[]=[];
+  for(let v=0;v<n;v++){
+   const room=capacity[v]!-s.waterVolume_m3[v]!,fraction=s.solidFraction[v]!;if(!(room>0)||!(fraction>0&&fraction<1))continue;
+   const material=step.materials[vertexMaterial?.[v]??0]!,rate=porousCaptureFraction(fraction,material,h,step.dt_s,captureRate);if(!(rate>0))continue;
+   const own:PoreWaterExchangeRequest[]=[];let total=0;
+   for(const c of clothMacCaptureReservoir(this.fields,s.positions_m.subarray(3*v,3*v+3))){
+    const i=sample.cellIndex.get(ck(c.p));if(i===undefined)throw new Error('Capture reservoir escaped its sampled support');
+    const volume=rate*c.weight*free[i]!;if(volume>0){own.push({cell:i,vertex:v,volume_m3:volume});total+=volume;}
+   }
+   const scale=total>room?room/total:1;for(const r of own)requests.push({...r,volume_m3:r.volume_m3*scale});
+  }
+  if(!requests.length)return accepted;
+  const plan=planPoreAbsorption(free,s.waterVolume_m3,capacity,requests);
+  for(const t of plan.transfers)accepted[t.vertex]!+=t.volume_m3;
+  const rho=step.materials[0]!.waterDensity_kg_m3;
+  for(let v=0;v<n;v++)if(accepted[v]!>0){
+   if(step.physics?.solveSolid!==false&&!(((step.kinematicFixed??step.data.fixed)?.[v]??0)&1)){
+    const u=this.fluidVelocityAt(sample,s.positions_m.subarray(3*v,3*v+3),s.velocities_m_s.subarray(3*v,3*v+3)),mass=s.dryMass_kg[v]!+rho*s.waterVolume_m3[v]!,added=rho*accepted[v]!;
+    for(let a=0;a<3;a++)s.velocities_m_s[3*v+a]=(mass*s.velocities_m_s[3*v+a]!+added*u[a]!)/(mass+added);
+   }
+   s.waterVolume_m3[v]!+=accepted[v]!;
+  }
+  return accepted;
+ }
+
+ /** Water above the compressed pore capacity seeps into adjoining free
+  * liquid in proportion to the control's wetted kernel. Overflow in air is
+  * retained as explicit unresolved storage (never deleted or duplicated). */
+ releaseFromSample(step:UniformClothStep,sample:ClothSupportSample):Float64Array{
+  const s=step.state,n=s.waterVolume_m3.length,released=new Float64Array(n),rho=step.materials[0]!.waterDensity_kg_m3;
+  for(let v=0;v<n;v++){
+   const overflow=s.waterVolume_m3[v]!-Math.max(0,s.controlVolume_m3[v]!-s.solidVolume_m3[v]!);if(!(overflow>0))continue;
+   let wet=0;for(const c of clothCellWeights(this.fields,s.positions_m.subarray(3*v,3*v+3)))wet+=c.weight*sample.fill[sample.cellIndex.get(ck(c.p))!]!;
+   const amount=overflow*Math.min(1,Math.max(0,wet));if(!(amount>0))continue;
+   if(step.physics?.solveSolid!==false&&!(((step.kinematicFixed??step.data.fixed)?.[v]??0)&1)){
+    const u=this.fluidVelocityAt(sample,s.positions_m.subarray(3*v,3*v+3),s.velocities_m_s.subarray(3*v,3*v+3)),mass=s.dryMass_kg[v]!+rho*s.waterVolume_m3[v]!,removed=rho*amount;
+    for(let a=0;a<3;a++)s.velocities_m_s[3*v+a]=(mass*s.velocities_m_s[3*v+a]!-removed*u[a]!)/(mass-removed);
+   }
+   s.waterVolume_m3[v]!-=amount;released[v]=amount;
+  }
+  return released;
+ }
+
+ /** Fill-weighted cell-centred MAC velocity over the control's kernel. */
+ private fluidVelocityAt(sample:ClothSupportSample,position:ArrayLike<number>,fallback:ArrayLike<number>):[number,number,number]{
+  const u=[0,0,0];let weight=0;
+  for(const c of clothCellWeights(this.fields,position)){
+   const i=sample.cellIndex.get(ck(c.p))!,w=c.weight*sample.fill[i]!;if(!(w>0))continue;weight+=w;
+   for(let a=0;a<3;a++){const q=[...c.p] as Point;q[a]!--;const low=sample.cellIndex.get(ck(q));u[a]!+=w*.5*(sample.velocity[3*i+a]!+(low===undefined?sample.velocity[3*i+a]!:sample.velocity[3*low+a]!));}
+  }
+  return weight>0?u.map(x=>x/weight) as [number,number,number]:[fallback[0]!,fallback[1]!,fallback[2]!];
+ }
+
+ /** Moving hard geometry changes the shared aperture basis: resample it at
+  * the current collider poses and republish the material partition. */
+ async refreshApertures(step:Pick<UniformClothStep,'state'>):Promise<void>{
+  await this.sampleSupport(step.state.positions_m,true);publishClothPorousCapacity(this.fields,step);
+ }
+ /** Install the accepted capacity partition and commit the paired budget. */
+ commitPoreWater(step:UniformClothStep,freeDelta_m3:number):ClothWaterLedger{
+  if(!Number.isFinite(freeDelta_m3))throw new Error('Non-finite pore water exchange');
+  publishClothPorousCapacity(this.fields,step);
+  if(freeDelta_m3!==0)this.commitBudgetDelta(freeDelta_m3);
+  return {generation:step.identity.generation,tick:step.identity.tick,freeDelta_m3,boundDelta_m3:-freeDelta_m3,externalDelta_m3:0};
+ }
+ destroy():void{this.disposed=true;this.budgetParams?.destroy();if(!this.busy)releaseClothPorousCapacity(this.fields);}
 }
+export interface ClothSupportSample {readonly cellIndex:ReadonlyMap<number,number>;readonly cells:readonly Point[];readonly open:Float64Array;readonly fill:Float64Array;readonly velocity:Float64Array}

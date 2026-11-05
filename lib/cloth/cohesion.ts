@@ -69,10 +69,17 @@ export function prepareClothCohesion(topology:PreparedClothTopology,state:ClothS
   if(!Number.isSafeInteger(sample.id)||sample.id<0||![...sample.position_m,...sample.normal,sample.volume_m3,...(sample.bodyCenter_m??[])].every(Number.isFinite)||sample.volume_m3<=0||Math.abs(norm3(sample.normal)-1)>1e-6||(sample.bodyId&&!sample.bodyCenter_m))throw new Error('Invalid source cohesion solid sample');
   elements.push({id:elements.length,vertices:[],weights:[],position:[...sample.position_m],directions:[],normal:[...sample.normal],volume_m3:sample.volume_m3,water_m3:0,solidFraction:1,equivalentLength_m:0,gamma_N_m:0,contactAngle_rad:0,solid:{...sample,position_m:[...sample.position_m],normal:[...sample.normal],...(sample.bodyCenter_m?{bodyCenter_m:[...sample.bodyCenter_m] as ClothVector}:{})}});
  }
- const coordinate=(p:ClothVector)=>p.map((v,a)=>Math.floor((v-options.bucketOrigin_m[a]!)/bucket)),key=(v:readonly number[])=>v.join(':'),buckets=new Map<string,Element[]>();for(const e of elements){const k=key(coordinate(e.position)),list=buckets.get(k);if(list)list.push(e);else buckets.set(k,[e]);}
+ // Exact integer bucket keys (|coordinate| < 2^16 per axis, key < 2^51).
+ const coordinate=(p:ClothVector)=>p.map((v,a)=>Math.floor((v-options.bucketOrigin_m[a]!)/bucket)),key=(x:number,y:number,z:number)=>((z+65536)*131072+(y+65536))*131072+(x+65536),buckets=new Map<number,Element[]>();
+ for(const e of elements){const c=coordinate(e.position);if(c.some(v=>!(Math.abs(v)<65535)))throw new Error('Cohesion bucket coordinate out of range');const k=key(c[0]!,c[1]!,c[2]!),list=buckets.get(k);if(list)list.push(e);else buckets.set(k,[e]);}
  const candidates:Candidate[]=[],samples:number[]=[];
  for(const start of elements){if(start.water_m3<1e-26||start.gamma_N_m===0)continue;const origin=coordinate(start.position),nearest:({end:Element;distance:number;point:ClothVector;weights:readonly number[]}|undefined)[]=start.directions.map(()=>undefined);
-  for(let z=-1;z<=1;z++)for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++)for(const end of buckets.get(key([origin[0]!+x,origin[1]!+y,origin[2]!+z]))??[]){if(end.id===start.id||(!end.solid&&options.softCohesion===false))continue;const delta=sub3(end.position,start.position),distance=norm3(delta);if(distance<1e-22)continue;const direction=scale3(delta,1/distance),cone=start.directions.findIndex(n=>dot3(direction,n)>=.866);if(cone<0||(end.solid&&dot3(direction,end.normal)<.866))continue;let point:ClothVector,weights:readonly number[];
+  const sp=start.position,cones=start.directions;
+  for(let z=-1;z<=1;z++)for(let y=-1;y<=1;y++)for(let x=-1;x<=1;x++)for(const end of buckets.get(key(origin[0]!+x,origin[1]!+y,origin[2]!+z))??[]){if(end.id===start.id||(!end.solid&&options.softCohesion===false))continue;
+   // Scalar form of sub3/norm3/scale3/dot3 (identical arithmetic).
+   const ep=end.position,dx=ep[0]-sp[0],dy=ep[1]-sp[1],dz=ep[2]-sp[2],distance=Math.hypot(dx,dy,dz);if(distance<1e-22)continue;const inverse=1/distance,ux=dx*inverse,uy=dy*inverse,uz=dz*inverse;
+   let cone=-1;for(let c=0;c<cones.length;c++){const n=cones[c]!;if(ux*n[0]+uy*n[1]+uz*n[2]>=.866){cone=c;break;}}
+   if(cone<0||(end.solid&&ux*end.normal[0]+uy*end.normal[1]+uz*end.normal[2]<.866))continue;let point:ClothVector,weights:readonly number[];
    if(end.solid){point=end.position;weights=[];}else if(end.vertices.length===2){const a=point3(state.positions_m,end.vertices[0]!),b=point3(state.positions_m,end.vertices[1]!),e=sub3(b,a),t=Math.max(0,Math.min(1,dot3(sub3(start.position,a),e)/dot3(e,e)));point=add(a,scale3(e,t));weights=[1-t,t];}else{const q=closestTrianglePoint(start.position,...end.vertices.map(i=>point3(state.positions_m,i)) as unknown as [ClothVector,ClothVector,ClothVector]);point=q.point;weights=q.weights;}
    const gap=norm3(sub3(point,start.position));if(!nearest[cone]||gap<nearest[cone]!.distance)nearest[cone]={end,distance:gap,point,weights};
   }

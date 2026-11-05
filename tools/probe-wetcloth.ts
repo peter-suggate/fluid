@@ -98,18 +98,18 @@ if(process.argv.includes('--audit')){
       nativeOutflowVolume_m3:(stats.narrowBandOutflowVolume_cells??0)*cellVolume,
       pairedTransactions:structuredClone(solver!.clothWaterLedgers??[]),
     };
-    const row={step,time_s:step*dt,elapsed_ms,...cloth,water,stats};rows.push(row);report.lastSampledStep=step;
+    const pool=(solver as {pagePoolInfo?:object}).pagePoolInfo,row={step,time_s:step*dt,elapsed_ms,...cloth,water,stats,...(pool?{pagePool:{...pool}}:{})};rows.push(row);report.lastSampledStep=step;
     const file=out+`.frame-${step.toString().padStart(8,'0')}.json.gz`;
     await writeFile(file,gzipSync(JSON.stringify({step,sourceId:id,surfaces},(_key,v)=>ArrayBuffer.isView(v)?Array.from(v as unknown as ArrayLike<number>):v)));
     console.log(JSON.stringify({step,time_s:row.time_s,...metrics(surfaces)}));await save();
    };
-   await sample(0,0);
+   await sample(0,0);let stepTotal_ms=0;const phases:Record<string,number>={};(globalThis as {fluidClothPhaseTimes?:Record<string,number>}).fluidClothPhaseTimes=phases;
    for(let step=1;step<=steps;step++){
     const t=performance.now();assert.ok(solver.advanceTo(step*dt,bodies),`Rejected source step ${step}`);
     await solver.awaitFrameCompletion?.();await solver.assertSimulationHealthy?.();
     assert.equal(solver.info.simulationPipelineError,undefined);
     for(const s of solver.clothSurfaces??[])assert.ok(Math.abs(s.time_s-step*dt)<1e-8,'Cloth clock diverged from experiment clock');
-    report.lastAcceptedStep=step;
+    report.lastAcceptedStep=step;stepTotal_ms+=performance.now()-t;report.meanStep_ms=stepTotal_ms/step;report.meanPhase_ms=Object.fromEntries(Object.entries(phases).map(([k,v])=>[k,v/step]));
     if(step%every===0||step===steps)await sample(step,performance.now()-t);
    }
    report.completedSteps=steps;report.elapsed_ms=performance.now()-started;

@@ -1,7 +1,8 @@
 import type { ClothFrameIdentity, ClothMaterial, ClothPhysicsOptions, ClothState, ClothTopologyData } from '../../cloth/types';
 import type { ClothImpulsePublication } from '../../cloth/coupling';
 import { porousTensor, porousPermeability } from '../../cloth/porous-material';
-import {clothCellWeights} from './uniform-porous-capacity';
+import { writeBufferChunked } from './uniform-chunked-upload';
+import {clothCellWeights,clothCellKey} from './uniform-porous-capacity';
 import { UniformClothPorePressure } from './uniform-cloth-pore-pressure';
 import {uniformMixedSolidWGSL} from './uniform-mixed-solid.wgsl';
 import { UniformClothTensorDrag } from './uniform-cloth-tensor-drag';
@@ -82,12 +83,17 @@ export function prepareUniformClothStencil(fields: Pick<UniformClothGridFields, 
   if (!(density! > 0) || materials.some(m => m.waterDensity_kg_m3 !== density)) throw new Error('Cloth coupling requires one water density');
   if (fields.cellSize_m.some(h => !Number.isFinite(h) || h <= 0)) throw new Error('Invalid cloth grid cell size');
   const geometricVolume=new Float64Array(vertices),poreTensor=new Float64Array(9*vertices),poreCoefficient_Pa=new Float64Array(vertices),vertexMicro=new Float64Array(2*vertices);
-  const addMaterial = (v: number, material: ClothMaterial, axis: [number, number, number], shape: number, volume: number) => {
-    geometricVolume[v]!+=volume;vertexMicro[2*v]!+=volume*material.fiberDiameter_m;vertexMicro[2*v+1]!+=volume*material.waterViscosity_Pa_s;
+  // The tensor and capillary coefficient depend only on the element: one
+  // evaluation is shared by that element's vertices (same values).
+  const elementPore = (material: ClothMaterial, axis: [number, number, number], shape: number) => {
     const pore=porousTensor(2,1,axis,shape),radius=porousPermeability(material.solidFraction,material.fiberDiameter_m).capillaryRadius_m;
-    for(let k=0;k<9;k++)poreTensor[9*v+k]!+=volume*pore[k]!;
     const cosine=Math.abs(material.contactAngle_rad-Math.PI/2)<1e-14?0:Math.cos(material.contactAngle_rad);
-    poreCoefficient_Pa[v]!+=volume*material.surfaceTension_N_m*cosine/radius;
+    return {pore,cosine,radius};
+  };
+  const addMaterial = (v: number, material: ClothMaterial, element: {pore:ArrayLike<number>;cosine:number;radius:number}, volume: number) => {
+    geometricVolume[v]!+=volume;vertexMicro[2*v]!+=volume*material.fiberDiameter_m;vertexMicro[2*v+1]!+=volume*material.waterViscosity_Pa_s;
+    const pore=element.pore;for(let k=0;k<9;k++)poreTensor[9*v+k]!+=volume*pore[k]!;
+    poreCoefficient_Pa[v]!+=volume*material.surfaceTension_N_m*element.cosine/element.radius;
   };
   for (let t = 0; t < data.triangles.length / 3; t++) {
     const ids = data.triangles.slice(3 * t, 3 * t + 3), material = materials[data.triangleMaterials?.[t] ?? 0];
@@ -98,7 +104,7 @@ export function prepareUniformClothStencil(fields: Pick<UniformClothGridFields, 
     const n: [number, number, number] = [u[1]! * v[2]! - u[2]! * v[1]!, u[2]! * v[0]! - u[0]! * v[2]!, u[0]! * v[1]! - u[1]! * v[0]!];
     const twiceArea = Math.hypot(...n);
     if (!(twiceArea > 0)) throw new Error('Degenerate cloth face cannot exchange fluid');
-    for (const id of ids) addMaterial(id, material, n, 1, twiceArea * material.thickness_m / 6);
+    const element=elementPore(material, n, 1);for (const id of ids) addMaterial(id, material, element, twiceArea * material.thickness_m / 6);
   }
   for (let rod = 0; rod + 1 < data.rodOffsets.length; rod++) {
     const material = materials[data.rodMaterials?.[rod] ?? 0];
@@ -109,35 +115,41 @@ export function prepareUniformClothStencil(fields: Pick<UniformClothGridFields, 
       const length = Math.hypot(...tangent);
       if (!(length > 0)) throw new Error('Degenerate cloth rod cannot exchange fluid');
       const halfVolume = .5 * Math.PI * material.rodRadius_m * (material.rodRadiusB_m??material.rodRadius_m) * length;
-      addMaterial(a, material, tangent, 0, halfVolume); addMaterial(b, material, tangent, 0, halfVolume);
+      const element=elementPore(material, tangent, 0);addMaterial(a, material, element, halfVolume); addMaterial(b, material, element, halfVolume);
     }
   }
   for(let v=0;v<vertices;v++)if(geometricVolume[v]!>0){poreCoefficient_Pa[v]!/=geometricVolume[v]!;vertexMicro[2*v]!/=geometricVolume[v]!;vertexMicro[2*v+1]!/=geometricVolume[v]!;for(let k=0;k<9;k++)poreTensor[9*v+k]!/=geometricVolume[v]!;}
-  const anchors = new Map<string, Anchor>(), linkCoefficients: number[][] = [], linkVertices: number[] = [], linkVolumes: number[] = [],weights:number[]=[];
+  const faceKey=new Float64Array(16),faceX=new Int32Array(16),faceY=new Int32Array(16),faceZ=new Int32Array(16),faceWeight=new Float64Array(16);
+  const anchors = new Map<number, Anchor>(), linkCoefficients: number[] = [], linkVertices: number[] = [], linkVolumes: number[] = [],weights:number[]=[];
   for (let v = 0; v < vertices; v++) {
     const mass = state.dryMass_kg[v]! + density! * state.waterVolume_m3[v]!;
     const fixed = step.physics?.solveSolid===false||(((step.kinematicFixed??data.fixed)?.[v] ?? 0) & 1) !== 0;
     if (!(mass > 0) && !fixed) throw new Error('Free cloth vertex has no mass');
+    const cellWeights = geometricVolume[v]===0 ? [] : clothCellWeights(fields,state.positions_m.subarray(3*v,3*v+3));
     for (let a = 0; a < 3; a++) {
       if (geometricVolume[v]===0) continue;
       // The pressure face partition is the average of the two native cell
       // partitions. Use that SAME adjoint basis for mass and drag transfer.
       // Along the face axis this has three entries, rather than a different
       // independently rasterized eight-point MAC material fraction.
-      const faceWeights=new Map<string,{p:[number,number,number];weight:number}>();
-      for(const {p:cell,weight:cellWeight} of clothCellWeights(fields,state.positions_m.subarray(3*v,3*v+3))){
+      // Insertion-ordered face accumulation (at most 16 faces; linear search).
+      let faces=0;
+      for(const {p:cell,weight:cellWeight} of cellWeights){
        const weight=.5*cellWeight;
-       for(const offset of [-1,0]){const p=[...cell] as [number,number,number];p[a]!+=offset;const key=p.join(','),old=faceWeights.get(key);if(old)old.weight+=weight;else faceWeights.set(key,{p,weight});}
+       for(let offset=-1;offset<=0;offset++){const x=cell[0]+(a===0?offset:0),y=cell[1]+(a===1?offset:0),z=cell[2]+(a===2?offset:0),key=clothCellKey(x,y,z);
+        let f=0;while(f<faces&&faceKey[f]!==key)f++;
+        if(f<faces)faceWeight[f]!+=weight;else{faceKey[faces]=key;faceX[faces]=x;faceY[faces]=y;faceZ[faces]=z;faceWeight[faces]=weight;faces++;}}
       }
-      for (const {p,weight} of faceWeights.values()) {
+      for (let f=0;f<faces;f++) {
+        const weight=faceWeight[f]!;
         if (weight <= 1e-12) continue;
-        const key = p.join(','); let anchor = anchors.get(key);
-        if (!anchor) { anchor = { p, links: [[], [], []] }; anchors.set(key, anchor); }
-        const index = linkCoefficients.length;
+        const key = faceKey[f]!; let anchor = anchors.get(key);
+        if (!anchor) { anchor = { p:[faceX[f]!,faceY[f]!,faceZ[f]!], links: [[], [], []] }; anchors.set(key, anchor); }
+        const index = linkVertices.length;
         // Drag is evaluated at deposited GRID packing, including vf=1
         // controls whose subresolution grid psi remains below one. The two
         // reserved lanes are not a second vertex-local constitutive model.
-        linkCoefficients.push([fixed ? 0 : weight * mass,0,0,predictor[3 * v + a]!]);
+        linkCoefficients.push(fixed ? 0 : weight * mass,0,0,predictor[3 * v + a]!);
         linkVolumes.push(weight * (state.solidVolume_m3[v]! + state.waterVolume_m3[v]!) * (step.physics?.pressureOnSolid===false?-1:1));
         weights.push(weight);
         linkVertices.push(3 * v + a); anchor.links[a]!.push(index);
@@ -145,20 +157,23 @@ export function prepareUniformClothStencil(fields: Pick<UniformClothGridFields, 
     }
   }
   const ordered = [...anchors.values()].sort((a, b) => a.p[2] - b.p[2] || a.p[1] - b.p[1] || a.p[0] - b.p[0]);
-  const records = new Int32Array(8 * ordered.length), coefficients = new Float32Array(4 * linkCoefficients.length), occupiedVolumes_m3 = new Float32Array(linkVolumes.length);
-  const linkWeights=new Float32Array(weights.length),linkFaces=new Uint32Array(weights.length);
-  const vertexLinks = Array.from({ length: 3 * vertices }, () => [] as number[]);
+  const links=linkVertices.length,records = new Int32Array(8 * ordered.length), coefficients = new Float32Array(4 * links), occupiedVolumes_m3 = new Float32Array(links);
+  const linkWeights=new Float32Array(links),linkFaces=new Uint32Array(links),linkOwner=new Uint32Array(links);
+  // Per-coordinate link lists by counting sort: within each coordinate the
+  // links keep increasing face-major order, exactly as sequential pushes.
+  const ranges = new Uint32Array(6 * vertices), gather = new Uint32Array(links);
   let at = 0;
   ordered.forEach((anchor, index) => {
-    records.set([...anchor.p, at, ...anchor.links.map(links => links.length), 0], 8 * index);
-    for (let axis=0;axis<3;axis++)for (const original of anchor.links[axis]!) {
-      coefficients.set(linkCoefficients[original]!, 4 * at); occupiedVolumes_m3[at] = linkVolumes[original]!;linkWeights[at]=weights[original]!;linkFaces[at]=3*index+axis;vertexLinks[linkVertices[original]!]!.push(at++);
+    const p=anchor.p,l=anchor.links,base=8*index;records[base]=p[0];records[base+1]=p[1];records[base+2]=p[2];records[base+3]=at;records[base+4]=l[0].length;records[base+5]=l[1].length;records[base+6]=l[2].length;records[base+7]=0;
+    for (let axis=0;axis<3;axis++)for (const original of l[axis]!) {
+      for(let j=0;j<4;j++)coefficients[4*at+j]=linkCoefficients[4*original+j]!; occupiedVolumes_m3[at] = linkVolumes[original]!;linkWeights[at]=weights[original]!;linkFaces[at]=3*index+axis;const owner=linkVertices[original]!;linkOwner[at++]=owner;ranges[2*owner+1]!++;
     }
   });
   for (const coefficient of coefficients) if (!Number.isFinite(coefficient)) throw new Error('Cloth coupling exceeds f32 representable range');
-  const ranges = new Uint32Array(2 * vertexLinks.length), gather = new Uint32Array(linkCoefficients.length);
   at = 0;
-  vertexLinks.forEach((links, index) => { ranges.set([at, links.length], 2 * index); gather.set(links, at); at += links.length; });
+  for(let index=0;index<3*vertices;index++){ranges[2*index]=at;at+=ranges[2*index+1]!;}
+  const fill=new Uint32Array(3*vertices);
+  for(let link=0;link<links;link++){const owner=linkOwner[link]!;gather[ranges[2*owner]!+fill[owner]!++]=link;}
   return { anchors: records, coefficients, occupiedVolumes_m3, ranges, gather, coordinates: ordered.map(a => a.p), identity: { ...step.identity },
     dt_s: step.dt_s, density_kg_m3: density!, vertices,exponent:step.physics?.dragExponent??1.6,linkWeights,linkFaces,vertexOccupiedVolume_m3:Float64Array.from(state.solidVolume_m3,(v,i)=>v+state.waterVolume_m3[i]!),poreTensor,poreCoefficient_Pa,vertexMicro };
 }
@@ -351,7 +366,7 @@ fn supported(p:vec3i)->bool {
     const create = (size: number, label: string, data?: ArrayBufferView, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST) => {
       if (size > this.device.limits.maxStorageBufferBindingSize) throw new Error(`Cloth ${label} exceeds storage binding capacity`);
       const buffer = this.device.createBuffer({ label: `Cloth ${label}`, size: Math.max(16, size), usage }); this.buffers.push(buffer);
-      if (data) this.device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength); return buffer;
+      if (data) writeBufferChunked(this.device.queue, buffer, 0, data); return buffer;
     };
     const anchors = create(p.anchors.byteLength, 'MAC anchors', p.anchors), links = create(p.coefficients.byteLength, 'drag links', p.coefficients);
     const occupied = create(p.occupiedVolumes_m3.byteLength,'occupied volume',p.occupiedVolumes_m3);

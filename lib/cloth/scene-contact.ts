@@ -16,14 +16,19 @@ export function clothContainerColliders(scene:SceneDescription):ClothCollider[]{
 }
 
 import { ProceduralSolidField, sampleSolidNodes } from '../core/procedural-solid';
-import { sampleClothCollider } from './contact';
 import { sourceFieldDistance } from './source-fields';
 import type { ClothVector } from './types';
 
 interface StaticRecord {min:ClothVector;max:ClothVector;values?:readonly number[];lipschitz:number}
 interface StaticNode {min:ClothVector;max:ClothVector;records?:StaticRecord[];children?:[StaticNode,StaticNode]}
 const staticColliders=new WeakMap<SceneDescription,readonly ClothCollider[]>();
-const boxDistance=(p:ClothVector,min:ClothVector,max:ClothVector)=>sampleClothCollider({kind:'box',minimum_m:min,maximum_m:max},p).distance_m;
+/** Allocation-free scalar form of sampleClothCollider's static box distance
+ * (same closest-point norm outside, same least-gap penetration inside). */
+const boxDistance=(p:ClothVector,min:ClothVector,max:ClothVector):number=>{
+ const x=p[0],y=p[1],z=p[2],dx=x-Math.max(min[0],Math.min(max[0],x)),dy=y-Math.max(min[1],Math.min(max[1],y)),dz=z-Math.max(min[2],Math.min(max[2],z)),outside=Math.hypot(dx,dy,dz);
+ if(outside>1e-14)return outside;
+ return -Math.min(x-min[0],max[0]-x,y-min[1],max[1]-y,z-min[2],max[2]-z);
+};
 /** The cloth boundary is the same trilinear surface used by the fluid and
  * shared picking. Original node values survive edits; authored box cuts are
  * applied geometrically, so no stale analytic source remains behind a cut.
@@ -85,7 +90,7 @@ export function clothSceneStaticColliders(scene:SceneDescription):readonly Cloth
   for(const cut of cuts){let lower=Infinity;for(let k=0;k<8;k++)lower=Math.min(lower,sourceFieldDistance(program.fields,cut.index,[k&1?maximum[0]:minimum[0],k&2?maximum[1]:minimum[1],k&4?maximum[2]:minimum[2]]));best=Math.max(best,lower);}
   return best;
  };
- const collider:ClothCollider={kind:'sampled',maximumSpeed_m_s:0,velocityAt:()=>[0,0,0],distanceLowerBound,sample:p=>{
+ const collider:ClothCollider={kind:'sampled',maximumSpeed_m_s:0,velocityAt:()=>[0,0,0],distanceLowerBound,distanceAt:p=>distance(p),sample:p=>{
   const value=distance(p),q=p.map((v,a)=>(v-origin[a]!)/h) as unknown as ClothVector,raw=field.sample(q);
   // Away from cuts an interior brick has an exact trilinear derivative.
   let gradient=raw&&cuts.every(c=>sourceFieldDistance(program.fields,c.index,p)<value)?raw.slice(0,3):undefined;

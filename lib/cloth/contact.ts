@@ -59,6 +59,8 @@ export type ClothCollider = (ColliderBase & {
     /** Bound on the spatial gradient of the sampled signed field. */
     readonly spatialLipschitz?:number;
     readonly distanceLowerBound?:(minimum:ClothVector,maximum:ClothVector,beforeEnd_s:number)=>number;
+    /** The same signed distance as sample(), without its normal. */
+    readonly distanceAt?:(p:ClothVector,beforeEnd_s:number)=>number;
 }) | (ColliderBase & {
     readonly kind: "rigid";
     readonly body: RigidBodyState;
@@ -96,6 +98,9 @@ const lerp3 = (a: ClothVector, b: ClothVector, t: number): [
 ] => [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])];
 /** Collider geometry describes its end-of-step pose; prescribed velocity
  * reconstructs its swept pose. Box3D remains the dynamic-body authority. */
+function clothColliderDistance(c: ClothCollider, p: ClothVector, beforeEnd_s: number): number {
+    return c.kind === "sampled" && c.distanceAt ? c.distanceAt(p, beforeEnd_s) : sampleClothCollider(c, p, beforeEnd_s).distance_m;
+}
 export function sampleClothCollider(c: ClothCollider, p: ClothVector, beforeEnd_s = 0): {
     distance_m: number;
     normal: ClothVector;
@@ -339,23 +344,33 @@ function resolveClothContactsSweep(topology: PreparedClothTopology, state: Cloth
             const rotationSpeed = collider.kind === "rigid" ? Math.hypot(collider.body.angularVelocity_rad_s.x, collider.body.angularVelocity_rad_s.y, collider.body.angularVelocity_rad_s.z) * sceneShape(collider.body.description.shape).boundingRadius_m(collider.body.description.dimensions_m) : 0;
             const speed = (norm3(delta) + dt * (collider.kind === "sampled" ? collider.maximumSpeed_m_s : norm3(collider.velocity_m_s ?? [0, 0, 0]) + rotationSpeed))*(collider.kind==="sampled"?(collider.spatialLipschitz??2):1);
             let time = 0, hit = false, hitNormal: ClothVector = [0, 1, 0];
+            const tolerance = Math.max(1e-10, r * 1e-6);
+            let clear = false;
             for (let iteration = 0; iteration < 80; iteration++) {
-                const sample = sampleClothCollider(collider, lerp3(old, next, time), (1 - time) * dt), distance = sample.distance_m - r;
-                if (distance <= Math.max(1e-10, r * 1e-6)) {
+                const at = lerp3(old, next, time), distance = clothColliderDistance(collider, at, (1 - time) * dt) - r;
+                if (distance <= tolerance) {
                     hit = true;
-                    hitNormal = sample.normal;
+                    hitNormal = sampleClothCollider(collider, at, (1 - time) * dt).normal;
+                    break;
+                }
+                // speed bounds the clearance change over the whole sweep, so a
+                // start clearance above it cannot reach the surface or end inside.
+                if (iteration === 0 && distance - speed > tolerance) {
+                    clear = true;
                     break;
                 }
                 if (time >= 1 || speed === 0)
                     break;
                 time = Math.min(1, time + Math.max(1e-9, .9 * distance / speed));
             }
-            const end = sampleClothCollider(collider, next), penetration = Math.max(0, r - end.distance_m);
+            if (clear)
+                continue;
+            const endDistance = clothColliderDistance(collider, next, 0), penetration = Math.max(0, r - endDistance);
             maximumPenetration = Math.max(maximumPenetration, penetration);
             if (!hit && penetration === 0)
                 continue;
             contacts++;
-            const normal = hit ? hitNormal : end.normal;
+            const normal = hit ? hitNormal : sampleClothCollider(collider, next).normal;
             // Retain tangential travel while removing travel through the obstacle.
             const impact = lerp3(old, next, time), obstacleRemaining = scale3(colliderVelocity(collider, impact), (1 - time) * dt), relativeRemaining = sub3(sub3(next, impact), obstacleRemaining);
             let corrected = add3(impact, add3(obstacleRemaining, sub3(relativeRemaining, scale3(normal, Math.min(0, dot3(relativeRemaining, normal))))));
