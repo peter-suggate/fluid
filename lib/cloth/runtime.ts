@@ -4,6 +4,7 @@ import type { ClothCollider } from "./contact";
 import { SourceMotionRuntime, type SourceMotionCheckpoint } from "./source-motion";
 import { sourceClothColliders } from "./source-contact";
 import { GPUClothMechanics } from "./gpu-mechanics";
+import { GPUClothNewton, gpuClothNewtonSupported } from "./gpu-newton";
 import { solveClothIncrement } from "./nonlinear-solve";
 import type { WetClothSourceField } from "./source-types";
 import type { ClothDocument, ClothFrameIdentity, ClothState, ClothSurfacePublication, ClothTopologyData, ClothVector } from "./types";
@@ -12,8 +13,11 @@ export interface ClothRuntimeOptions {
     readonly sourceOffset_m?: ClothVector;
     readonly mechanics?: ClothStepOptions;
     readonly excludedSourceColliderIndices?:readonly number[];
-    /** CPU Float64 owner of the incremental-potential minimization: global
-     * Newton-PCG (lib/cloth/nonlinear-solve.ts) or coordinate Gauss-Seidel. */
+    /** Owner of the incremental-potential minimization. On the CPU (Float64)
+     * the default is coordinate Gauss-Seidel; 'newton-pcg' selects the global
+     * solve (lib/cloth/nonlinear-solve.ts). On the GPU the default is Newton-PCG
+     * (lib/cloth/gpu-newton.ts) wherever the topology has no rod joints;
+     * 'gauss-seidel' keeps the colored coordinate sweep (gpu-mechanics.ts). */
     readonly nonlinearSolver?: 'newton-pcg' | 'gauss-seidel';
 }
 export interface ClothRuntimeCheckpoint {
@@ -31,7 +35,7 @@ export class ClothRuntime {
     readonly state: ClothState;
     readonly motion: SourceMotionRuntime;
     private tick = 0;
-    private gpu?: GPUClothMechanics;
+    private gpu?: GPUClothMechanics | GPUClothNewton;
     private stepping = false;
     private excludedSourceColliderIndices:readonly number[]=[];
     private staged?: {dt_s:number; checkpoint:ClothRuntimeCheckpoint; previousFields:readonly WetClothSourceField[]};
@@ -190,7 +194,7 @@ export class ClothRuntime {
         if(this.document.physics?.solveSolid===false)return;
         if (this.gpu)
             return;
-        const solver = new GPUClothMechanics(device, this.prepared);
+        const solver = this.options.nonlinearSolver !== 'gauss-seidel' && gpuClothNewtonSupported(this.prepared) ? new GPUClothNewton(device, this.prepared) : new GPUClothMechanics(device, this.prepared);
         try {
             await solver.initialize();
             this.gpu = solver;

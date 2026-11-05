@@ -21,7 +21,16 @@ import { composeClothFeatures } from './definition';
  *   cut simple_cloth (56, 120)   4.9 ms, 3.3   vs Gauss-Seidel  135 ms, 92
  *   simple_yarn (28)            25 ms,   3.9   vs Gauss-Seidel   97 ms, 12
  *   simple_yarn_loop (20)       21 ms,   4.7   vs Gauss-Seidel  289 ms, 73
- * The GPU owner took 188 ms per simple_cloth step. */
+ * The GPU owner is now the same Newton-PCG in Float32 (lib/cloth/gpu-newton.ts)
+ * wherever no rod has joints; Gauss-Seidel remains for rod joints. GPU, dry,
+ * from rest (ms per step, Newton | Gauss-Seidel; solve + Float64 finish):
+ *   simple_cloth (52, dt 1e-3)            6.2 |   27   (5.2 + 0.8)
+ *   dam_break_nonlinear_drag_small (1611)  57  |  235   (13 + 43)
+ *   buoyancy_test_with (4833)             158  |  203   (2.9 + 153)
+ *   pore_test_mid (32400)                 824  | 1132   (26 + 788)
+ *   tighten_towel (47072, 22272 rods)   33530 Newton   (53 + 33448)
+ *   splash_cloth_large (159201)          5840 Newton   (43 + 5646)
+ * Above ~1k vertices the finish, chiefly the CPU contact sweep, dominates. */
 export const CLOTH_CPU_SOLVE_MAX_VERTICES=256;
 export function clothSolvesOnGPU(runtime:ClothRuntime):boolean{return runtime.prepared.vertexCount>CLOTH_CPU_SOLVE_MAX_VERTICES;}
 
