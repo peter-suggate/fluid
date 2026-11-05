@@ -83,3 +83,127 @@ its outputs differently (census counters and wet bits are cleared every
 frame, the extension's slot arrays alternate parity, the 4h cache reads
 the COLD term T). So converting them one by one is about 15 ideas of
 0.02-0.17 ms each.
+
+## Round 2 (2026-11-06): the corner disturbance's footprint and the non-quiet floor
+
+All runs come from a clean `git archive HEAD` export (739271cb) with
+node_modules symlinked. Each is a single 60-step run through
+fluid-gpu-run.sh at 16x8x4 `--pure --cell=0.01`, pipelined with
+`--every=60` (every=5 breaks the pipelining). The heat-reason breakdown
+comes from a scratch-only probe diagnostic (`--heatReasons`), which reads
+the heat state words, the trigger bits, the tiers and the still words back
+each frame. It is not committed.
+
+| run | median ms | late-half median | tiers C/W/H | fine tiles | particles | dispatches direct+indirect | kernel sum ms |
+|---|---|---|---|---|---|---|---|
+| rest | 4.69 | 4.60 | 1024/0/0 | 0 | 0 | 114+37 | 5.50 |
+| drop=2 | 17.58 | 17.33 | 890/130/4 | 99 | 7.9k | 390+53 | 18.62 |
+| drop=8 | 22.53 | 22.91 | 756/285/15 | 409 | 53.7k | 416+69 | 23.91 |
+
+### (b) The non-quiet floor is fixed per frame, not per active item
+
+Going from drop=2 to drop=8 adds 2.2x the WARM regions, 4x the fine tiles
+and 7x the particles, yet costs only +4.9 ms (about 0.03 ms a region).
+Extrapolated to zero activity, the floor is about 14-16 ms against the
+4.7 ms idle step. The 13.1 ms of extra kernel time from rest to drop=2
+splits as:
+
+- pressure arena solve +2.17 (Lane P), which grows a further +2.37 by
+  drop=8;
+- 201 kernels, +8.0 ms, whose cost barely moves from drop=2 to drop=8
+  (d8 <= 1.25 x d2): the fixed floor;
+- 51 kernels, +2.9 ms, that grow with the disturbance (advectParticlesDeferred
+  0.47 -> 0.94, arenaDistance and arenaPublishCanonical, transferSeams,
+  momentumStep, remapFaces).
+
+The workgroup counts per stage are almost identical at drop=2 and drop=8.
+Examples: particle sort 25 dispatches / 25600 workgroups in both,
+geometric fill 14.3k / 14.8k, extension 13.0k / 14.7k, surface advect
+12.8k / 13.3k, remap 8448 / 8448, reconstruction 7168 / 7168. These
+launches are direct and sized by capacity or by the domain. They do not
+follow the active list.
+
+The fixed 8 ms is mostly launch count:
+
+- about 195 kernels at 0.01-0.06 ms each, about 6.4 ms in all;
+- five larger sweeps, about 1.6 ms:
+  - pair_sweepSeams 0.47 / 0.49;
+  - classifyCoarse 0.43 / 0.49, a direct launch over min(live key groups, tiles/64);
+  - geometryRegional 0.24 / 0.28;
+  - depthCoarse 0.24 / 0.18;
+  - prolong 0.225 / 0.225.
+
+The round-1 knockout already moved two of these to the active list
+(census decide and the extension's coarse sweep) and gained nothing. So
+narrowing these launches will not remove the floor. The floor is the
+number of dependent passes a non-quiet frame runs: about 280 more kernels
+than rest. Removing it means fewer passes per frame, an architectural
+change, not more active-list launches.
+
+Caveat: with `--kernels=40`, the k-d2 wall time drops to about 10.5 ms
+after frame 40 while the kernel sum stays 18.6 ms. Timestamp capture
+changes the overlap, so the kernel times show where the time goes, not
+the wall time.
+
+### (a) Footprint by reason, frames 10-60
+
+drop=8 (WARM regions by reason):
+
+| frame | WARM | omission (own trigger) | still halo face / diagonal | held | HOT | of which detail |
+|---|---|---|---|---|---|---|
+| 10 | 76 | 31 | 27 / 17 | 0 | 8 | 4 |
+| 30 | 184 | 95 | 74 / 12 | 0 | - | - |
+| 60 | 285 | 130 | 106 / 34 | 15 | 15 | 13 |
+
+drop=2 at frame 60: WARM 138 = omission 45 + halo 59 face / 30 diagonal +
+held 4. HOT 4.
+
+Reasons that never fire:
+- travel reach: travel stays at 0.5-2.3 h, against the 16 h bound;
+- fading heat;
+- the HOT collar.
+
+Particle heat makes only 1-5 HOT regions. The fine band (127-433 tiles at
+drop=8) is mostly particle-heated core tiles (56-152), collar tiles
+(37-104) and held tiles. Newly required (shape) tiles number 32-112.
+
+The omission triggers:
+- The dominant term is pressure at frame 10 and the surface term from
+  frame 20 on.
+- Per step, the omission is mostly 1e-3 to 1e-2 h.
+- The live projection's floor is about 8e-4 h a step (accepted residual x dt).
+
+| run, frame 60 | at or below floor | 1-3x | 3-10x | above 10x |
+|---|---|---|---|---|
+| drop=8 | 2 | 33 | 33 | 62 |
+| drop=2 | 17 | 11 | 8 | 9 |
+
+COLD surface regions do omit less than their budget:
+
+| run | max omission a step (h) | max summed (h) |
+|---|---|---|
+| drop=8 | 6e-4, bound 6.7e-4 | 0.008, bound 0.01 |
+| drop=2 | 2e-4 | 0.0027 |
+
+Reading:
+
+- At drop=8 the footprint is real motion. Inviscid waves cross the 2.5 m
+  tank at about 5 m/s and never decay, and 95 of 130 omission triggers
+  are at least 3x above the solver floor.
+- The still halo is not wider than the physics it protects. COLD freezes
+  every face and vertex incident to a COLD region, and the 4h vertices
+  are shared with diagonal neighbours. A face-only halo would leave a
+  moving region's edge and corner vertices frozen. The halo reads its
+  neighbours' own evidence, not their tiers, so it does not chain within
+  a frame. It chains over frames only when the wave itself arrives. Not
+  narrowed.
+- At drop=2, the still bound (about 4e-4 h a step at head 3) sits below
+  the solver's own floor (about 8e-4 h a step). 17 of the 45 omission
+  triggers are at or below the floor and 28 are below 3x. Budget mode
+  subtracts the floor; the still rule does not. A still rule that
+  compared against the floor would cut perhaps 20-30 drop=2 regions plus
+  their halo, about 1 ms at 0.03 ms a region, and nothing at drop=8 or at
+  rest. Not built: it would admit an omission up to the solver residual
+  in still water, and it needs the letters 120 / seep 300 drift gates and
+  a COLD-omission regression first. It is small next to the 8 ms fixed
+  floor.
