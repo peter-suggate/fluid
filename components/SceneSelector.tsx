@@ -58,12 +58,12 @@ export function SceneSelector() {
       cards={cards}
       currentId={presetId}
       label="Choose a scene for this pane"
-      choose={(card) => {
+      choose={async (card) => {
         // The notice on a refused card is the controller's; a stored document
         // that an older schema wrote fails here rather than becoming a corrupt
         // live scene, and the list stays where it was so the reader can pick
         // another.
-        if (!simulation.openSceneCard(card, session.id, { retainConfiguration: true })) return;
+        if (!(await simulation.openPreparedSceneCard(card, session.id, { retainConfiguration: true }))) return;
         setOpen(false);
         recordSceneOpen(browserSceneLibraryStorage(), card.id, Date.now());
       }}

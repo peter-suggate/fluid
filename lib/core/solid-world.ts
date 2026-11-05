@@ -1,6 +1,7 @@
 import {sceneWithRoundedPlateCuts,copySceneRigidSurfaces} from './rigid-surface';
 import type { SceneDescription } from "./model";
 import { sceneWithClothStroke } from "../cloth/scene-edit";
+import { clothCutForSolidPatch } from "../cloth/round-cut";
 import { copySceneClothSurfaces } from "../cloth/scene-geometry";
 import { sceneCellSizes_m, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 import {
@@ -1272,10 +1273,8 @@ export function materializedSolidWorldPages(world: SolidWorld): readonly SolidWo
 /** Compile only this stroke over an immutable base; the ground and prior edits are reused. */
 export function sceneWithSolidStroke(base: SceneDescription,
   patches: readonly SolidWorldVoxelPatch[]): SceneDescription {
-  const clothEdited = sceneWithClothStroke(base, patches.filter(p => p.operation === "clear" && p.affectsScenery).map(p => {
-    const bounds = solidWorldVoxelPatchBounds_m(base, p);
-    return {kind: solidPatchKindId(p), box: {minimum_m: bounds.minimum, maximum_m: bounds.maximum}};
-  }));
+  const clothEdited = sceneWithClothStroke(base, patches.filter(p => p.operation === "clear" && p.affectsScenery)
+    .map(p => clothCutForSolidPatch(base, p)));
   copySceneRigidSurfaces(base,clothEdited);
   const edited=sceneWithRoundedPlateCuts(clothEdited,patches.filter(p=>p.operation==='clear'&&p.affectsScenery).map(p=>{const bounds=solidWorldVoxelPatchBounds_m(base,p);return {kind:solidPatchKindId(p),box:{minimum_m:bounds.minimum,maximum_m:bounds.maximum}};}));
   copySceneClothSurfaces(clothEdited,edited);

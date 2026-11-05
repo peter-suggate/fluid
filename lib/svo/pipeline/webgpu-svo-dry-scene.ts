@@ -5858,6 +5858,9 @@ export class SparseVoxelDrySceneRenderer {
   private readonly dryFrameReuse = new ExactDryFrameReuse();
   private dryFrameReuseEligibility = "not-evaluated";
   private dryFrameControlRevision = 0;
+  /** Content drawn into the dry target after this pass (cloth surfaces) moved:
+   * a reused still frame would keep its previous pose underneath the new one. */
+  invalidateStillFrame(): void { this.dryFrameControlRevision++; }
   private dryFrameTilingEnabled = false;
   private visibilityView?: Float32Array;
   private visibilityViewRevision = 0;

@@ -861,6 +861,7 @@ export class FluidLabRenderer {
   private waterPipeline?: RasterWaterPipeline;
   private svoDryScenePipeline?: SparseVoxelDrySceneRenderer;
   private clothSurfaceRenderer?: ClothSurfaceRenderer;
+  private clothPresentationKey = "";
   private rigidCutRenderAtlas?:RigidCutRenderAtlas;
   private svoDrySceneSource?: SparseVoxelSceneRenderSource;
   private svoDrySceneData?: SparseVoxelDrySceneData;
@@ -3167,6 +3168,13 @@ export class FluidLabRenderer {
     const clothSurfaces = this.gpuFluid?.clothSurfaces ?? [];
     if (this.clothSurfaceRenderer) this.clothSurfaceRenderer.setSurfaces(scene.cloth ?? [], clothSurfaces);
     if (clothSurfaces.length) publishSceneClothSurfaces(scene, clothSurfaces);
+    // Cloth is drawn over the dry target; a still-view reuse of that target
+    // must not keep the previous pose (it smeared a falling cloth into a band).
+    const clothPresentationKey = clothSurfaces.map((s) => `${s.documentId}:${s.generation}:${s.topologyRevision}:${s.tick}`).join("|");
+    if (clothPresentationKey !== this.clothPresentationKey) {
+      this.clothPresentationKey = clothPresentationKey;
+      this.svoDryScenePipeline?.invalidateStillFrame();
+    }
     let requestedBundleStatus = this.svoDryScenePipeline?.presentationBundleStatus;
     const drySceneReplacement = (
       replacementEncoder: GPUCommandEncoder,

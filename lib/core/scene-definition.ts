@@ -189,6 +189,39 @@ export interface SceneDefinition {
    */
   readonly preview?: () => SceneDescription;
   readonly variants?: Readonly<Record<string, SceneVariant>>;
+  /**
+   * Asynchronous inputs `build` reads synchronously, such as a checksummed
+   * source asset fetched over the network.
+   *
+   * Every product path that builds the document — opening a card, hydrating a
+   * link, reverting — awaits this first; `build` must throw an explicit error,
+   * never return a placeholder, when it runs unprepared. `prepared` answers
+   * whether that has already happened, so a synchronous caller can tell a scene
+   * that is not loaded yet from one that is broken.
+   */
+  readonly prepare?: () => Promise<void>;
+  readonly prepared?: () => boolean;
+  /**
+   * A camera derived from the built document, for a scene whose framing depends
+   * on what it loaded (an imported scene's authored camera is expressed in its
+   * source coordinates, offset by the translation its import chose). Layered
+   * over `camera`.
+   */
+  readonly cameraForDocument?: (scene: SceneDescription) => Partial<CameraState> | undefined;
+  /** Where the scene's inputs came from, shown on its card. */
+  readonly attribution?: SceneAttribution;
+  /** One honest line about what the scene does and does not yet demonstrate. */
+  readonly status?: string;
+}
+
+export interface SceneAttribution {
+  readonly label: string;
+  readonly url: string;
+}
+
+/** Whether a definition can be built synchronously right now. */
+export function sceneDefinitionPrepared(definition: Pick<SceneDefinition, "prepare" | "prepared">): boolean {
+  return !definition.prepare || definition.prepared?.() === true;
 }
 
 /** Recursively freeze declarative data while leaving factories callable. */
@@ -219,6 +252,9 @@ export function defineScene(definition: SceneDefinition): SceneDefinition {
   if (!definition.name.trim()) throw new Error(`Scene ${id} needs a name`);
   if (!definition.blurb.trim()) throw new Error(`Scene ${id} needs a blurb`);
   if (!definition.shelf.trim()) throw new Error(`Scene ${id} needs a shelf`);
+  if ((definition.prepare === undefined) !== (definition.prepared === undefined)) {
+    throw new Error(`Scene ${id} must declare prepare and prepared together`);
+  }
   if (!ENVIRONMENT_IDS.has(definition.environment)) {
     throw new Error(`Scene ${id} names an unknown environment ${definition.environment}`);
   }
@@ -456,8 +492,9 @@ function sceneEnvironmentPayloadBytes(scene: SceneDescription): number {
 }
 
 /** The camera a definition opens on, filled out from the shared default. */
-export function sceneDefinitionCamera(definition: SceneDefinition): CameraState {
-  return { ...defaultCamera, ...definition.camera };
+export function sceneDefinitionCamera(definition: SceneDefinition, scene?: SceneDescription): CameraState {
+  const derived = scene && definition.cameraForDocument?.(scene);
+  return { ...defaultCamera, ...definition.camera, ...derived };
 }
 
 export function duplicateSceneDefinitionIds(definitions: readonly SceneDefinition[]): string[] {
@@ -509,6 +546,11 @@ export interface SceneCard {
   readonly open: () => SceneOpening;
   /** The document to draw the card from, when it is cheaper than `open`'s. */
   readonly preview?: () => SceneDescription;
+  /** Must settle before `open`; see {@link SceneDefinition.prepare}. */
+  readonly prepare?: () => Promise<void>;
+  readonly prepared?: () => boolean;
+  readonly attribution?: SceneAttribution;
+  readonly status?: string;
 }
 
 export function sceneCardForDefinition(definition: SceneDefinition): SceneCard {
@@ -519,13 +561,19 @@ export function sceneCardForDefinition(definition: SceneDefinition): SceneCard {
     blurb: definition.blurb,
     audience: definition.audience,
     shelf: definition.shelf,
-    open: () => ({
-      scene: sceneDocument(definition),
-      presetId: definition.id,
-      camera: sceneDefinitionCamera(definition),
-      methodProfile: definition.methodProfile,
-    }),
+    open: () => {
+      const scene = sceneDocument(definition);
+      return {
+        scene,
+        presetId: definition.id,
+        camera: sceneDefinitionCamera(definition, scene),
+        methodProfile: definition.methodProfile,
+      };
+    },
     preview: definition.preview && (() => scenePreviewDocument(definition)),
+    ...(definition.prepare ? { prepare: definition.prepare, prepared: () => sceneDefinitionPrepared(definition) } : {}),
+    ...(definition.attribution ? { attribution: definition.attribution } : {}),
+    ...(definition.status ? { status: definition.status } : {}),
   };
 }
 

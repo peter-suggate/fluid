@@ -60,6 +60,7 @@ import { TOKYO_RAIN_ID, createTokyoRainScene, tokyoRainCamera } from "./tokyo-ra
 import { ATLANTIC_LIGHTHOUSE_ID, createAtlanticLighthouseScene, atlanticLighthouseCamera } from "./atlantic-lighthouse-scene";
 import { BEACH_SCENE_ID, createBeachScene, beachCamera } from "./beach-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
+import { wetClothShelfDefinitions } from "../cloth/scenes/shelf";
 import { createReservoirSeepScene, RESERVOIR_SEEP_CAMERA, RESERVOIR_SEEP_ID } from "./reservoir-seep-scene";
 import { BULK_REST_TANK_CAMERA, BULK_REST_TANK_ID, createBulkRestTankScene } from "./bulk-rest-tank-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
@@ -74,6 +75,7 @@ import {
   defineScene,
   presentationModeForScene,
   sceneCardForDefinition,
+  sceneDefinitionPrepared,
   sceneDocument,
   type SceneCard,
   type SceneDefinition,
@@ -2624,6 +2626,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createMidairCornerDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),
+  // Imported libWetCloth inputs. Their builds read a checksummed source asset,
+  // so each declares `prepare`; see SceneDefinition.prepare.
+  ...wetClothShelfDefinitions,
 ]);
 
 export function getSceneDefinition(id: string): SceneDefinition {
@@ -2665,6 +2670,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((defin
    * viewport reads this every animation frame.
    */
   let resolved: ScenePresentationMode | undefined;
+  let derivedCamera: Partial<CameraState> | undefined;
   return {
     id: definition.id,
     name: definition.name,
@@ -2672,9 +2678,18 @@ export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((defin
     description: definition.blurb,
     background: definition.environment,
     get presentationMode(): ScenePresentationMode {
-      return resolved ??= presentationModeForScene(definition, sceneDocument(definition));
+      // An authored mode needs no document, which also keeps a scene whose
+      // inputs are still loading off this per-frame path.
+      return resolved ??= definition.presentationMode
+        ?? presentationModeForScene(definition, sceneDocument(definition));
     },
-    camera: definition.camera,
+    get camera(): Partial<CameraState> | undefined {
+      if (!definition.cameraForDocument) return definition.camera;
+      // Derived from the document, so only once its inputs have loaded; until
+      // then the authored partial camera is the honest answer.
+      if (!sceneDefinitionPrepared(definition)) return definition.camera;
+      return derivedCamera ??= { ...definition.camera, ...definition.cameraForDocument(sceneDocument(definition)) };
+    },
     renderProfile: definition.renderProfile,
     create: () => sceneDocument(definition),
   };

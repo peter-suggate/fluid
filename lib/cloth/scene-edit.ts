@@ -28,17 +28,19 @@ export function sceneWithClothStroke(base: SceneDescription, cuts: readonly Clot
       initialRodDirectors:live.rodDirectors?Array.from(live.rodDirectors):data.initialRodDirectors,
       initialRodTangents:live.rodTangents?Array.from(live.rodTangents):data.initialRodTangents};
     let next = document, revision = live?.topologyRevision ?? 0;
-    for (const {box, kind} of cuts) {
+    for (const {box, kind, halfSpaces} of cuts) {
       const intersects = [0, 1, 2].every(axis => {
         let lo = Infinity, hi = -Infinity;
         for (let i = axis; i < current.length; i += 3) { lo = Math.min(lo, current[i]!); hi = Math.max(hi, current[i]!); }
-        const radius=data!.rodIndices.length?Math.max(...document.materials.map(m=>Math.max(m.rodRadius_m,m.rodRadiusB_m??m.rodRadius_m))):0;
+        // Yarn is a capsule of its radius and a shell a solid of its thickness (see cutClothShellBox).
+        const radius=Math.max(data!.rodIndices.length?Math.max(...document.materials.map(m=>Math.max(m.rodRadius_m,m.rodRadiusB_m??m.rodRadius_m))):0,
+          data!.triangles.length?Math.max(...document.materials.map(m=>m.thickness_m/2)):0);
         return lo-radius < box.maximum_m[axis]! && hi+radius > box.minimum_m[axis]!;
       });
       if (!intersects) continue;
-      const cut = cutClothShellBox(next, data, current, box);
+      const cut = cutClothShellBox(next, data, current, box, halfSpaces);
       if (!cut.changed) continue;
-      if (kind !== 'box') throw new Error(`Cloth ${kind} cuts need a matching surface operation; refusing a bounding-box substitute`);
+      if (kind !== 'box' && !halfSpaces?.length) throw new Error(`Cloth ${kind} cuts need a matching surface operation; refusing a bounding-box substitute`);
       next = cut.document; data = cut.topology; current = cut.positions_m;
       changed = true; revision++;
     }

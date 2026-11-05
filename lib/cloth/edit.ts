@@ -22,10 +22,63 @@ const crossArea=(a:ClothVector,b:ClothVector,c:ClothVector)=>Math.hypot(
   (b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),
   (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))/2;
 const p3=(p:ArrayLike<number>,i:number):ClothVector=>[p[3*i]!,p[3*i+1]!,p[3*i+2]!];
-function split(poly:Vertex[],axis:number,value:number,sign:number):[Vertex[],Vertex[]] {
+/** Unit normal of a current-pose face; a degenerate face has none and moves no plane. */
+const faceNormal=(a:ClothVector,b:ClothVector,c:ClothVector):ClothVector=>{
+  const n:ClothVector=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])];
+  const length=Math.hypot(...n);return length>0?n.map(v=>v/length) as unknown as ClothVector:[0,0,0];
+};
+/** A piece split off by one plane shares its cut edge with the remainder, which
+ * later planes split again. Insert those later points into every piece edge
+ * they lie on, so neighbouring pieces meet vertex to vertex (no T-junction
+ * that would let the membrane open along a cut line). */
+function conformingPieces(pieces:readonly Vertex[][]):Vertex[][]{
+  const pool=[...new Set(pieces.flat())];
+  return pieces.map(polygon=>polygon.flatMap((a,j)=>{
+    const b=polygon[(j+1)%polygon.length]!,d=[0,1,2].map(k=>b.p[k]!-a.p[k]!),length2=d[0]!**2+d[1]!**2+d[2]!**2,eps=1e-10*Math.sqrt(length2);
+    if(!(length2>0))return [a];
+    const on:{v:Vertex;t:number}[]=[];
+    for(const v of pool){
+      if(v===a||v===b)continue;
+      const t=((v.p[0]-a.p[0])*d[0]!+(v.p[1]-a.p[1])*d[1]!+(v.p[2]-a.p[2])*d[2]!)/length2;
+      if(!(t>1e-10&&t<1-1e-10))continue;
+      if(Math.hypot(...[0,1,2].map(k=>v.p[k]!-a.p[k]!-t*d[k]!))>eps)continue;
+      if(on.some(o=>Math.abs(o.t-t)*Math.sqrt(length2)<=eps))continue;
+      on.push({v,t});
+    }
+    return [a,...on.sort((x,y)=>x.t-y.t).map(o=>o.v)];
+  }));
+}
+/** The piece over distinct mesh vertices. Several planes meeting near one
+ * point leave split points the vertex key merges; a piece that then encloses
+ * no area (it doubles back over one line) is dropped, and its neighbours,
+ * which share those vertices, still meet. */
+function distinctPiece(piece:readonly Vertex[],index:(v:Vertex)=>number):Vertex[]{
+  const ids=piece.map(index),kept=piece.filter((_,j)=>ids[j]!==ids[(j+1)%ids.length]);
+  if(new Set(kept.map(v=>index(v))).size<3)return [];
+  const area=[0,0,0];let perimeter=0;
+  for(let j=0;j<kept.length;j++){
+    const a=kept[j]!.p,b=kept[(j+1)%kept.length]!.p;
+    area[0]+=a[1]*b[2]-a[2]*b[1];area[1]+=a[2]*b[0]-a[0]*b[2];area[2]+=a[0]*b[1]-a[1]*b[0];
+    perimeter+=Math.hypot(b[0]-a[0],b[1]-a[1],b[2]-a[2]);
+  }
+  return Math.hypot(...area)/2>1e-9*perimeter*perimeter?kept:[];
+}
+/** A convex piece as triangles. With points standing on its sides a fan from
+ * a corner would pass straight along them, so it fans from its centroid. */
+function convexTriangles(polygon:readonly Vertex[]):[Vertex,Vertex,Vertex][]{
+  const n=polygon.length,collinear=polygon.some((b,j)=>crossArea(polygon[(j+n-1)%n]!.p,b.p,polygon[(j+1)%n]!.p)<1e-20);
+  if(!collinear||n<=3)return Array.from({length:Math.max(0,n-2)},(_,j)=>[polygon[0]!,polygon[j+1]!,polygon[j+2]!]);
+  const weights=new Map<number,number>();
+  for(const v of polygon)for(const [k,w] of v.weights)weights.set(k,(weights.get(k)??0)+w/n);
+  const centre:Vertex={p:[0,1,2].map(k=>polygon.reduce((s,v)=>s+v.p[k]!,0)/n) as unknown as ClothVector,weights};
+  return polygon.map((a,j)=>[centre,a,polygon[(j+1)%n]!]);
+}
+/** Inside is n·x <= offset. A rounded sculpt shape is the intersection of these. */
+export interface ClothCutHalfSpace { readonly normal:ClothVector; readonly offset_m:number }
+function split(poly:Vertex[],distance:(p:ClothVector)=>number):[Vertex[],Vertex[]] {
   const inside:Vertex[]=[],outside:Vertex[]=[];
   for(let i=0;i<poly.length;i++){
-    const a=poly[i]!,b=poly[(i+1)%poly.length]!,da=sign*(a.p[axis]!-value),db=sign*(b.p[axis]!-value);
+    const a=poly[i]!,b=poly[(i+1)%poly.length]!,da=distance(a.p),db=distance(b.p);
     (da<=0?inside:outside).push(a);
     if((da<0&&db>0)||(da>0&&db<0)){
       const t=da/(da-db),weights=new Map<number,number>();
@@ -42,8 +95,9 @@ function split(poly:Vertex[],axis:number,value:number,sign:number):[Vertex[],Ver
  * and materials are interpolated in source coordinates, never voxelized.
  * Through-section rod cuts retain material frames and clipped end planes.
  * Grazing partial-section cuts explicitly require the analytic CSG extension. */
-export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,positions:ArrayLike<number>,box:ClothCutBox):ClothShellCut {
+export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,positions:ArrayLike<number>,box:ClothCutBox,halfSpaces:readonly ClothCutHalfSpace[]=[]):ClothShellCut {
   if(![...box.minimum_m,...box.maximum_m].every(Number.isFinite)||box.minimum_m.some((v,a)=>v>=box.maximum_m[a]!))throw new Error('Cloth cut box must have finite positive extents');
+  if(!halfSpaces.every(h=>h.normal.every(Number.isFinite)&&Number.isFinite(h.offset_m)&&Math.abs(Math.hypot(...h.normal)-1)<1e-9))throw new Error('Cloth cut half-spaces need unit normals and finite offsets');
   if(positions.length!==data.restPositions_m.length)throw new Error('Cloth cut requires current geometry');
   const rest=[...data.restPositions_m],current=Array.from(positions),origins:ClothVertexOrigin[]=Array.from({length:rest.length/3},(_,i)=>({vertices:[i],weights:[1]}));
   const ids=new Map(origins.map((_,i)=>[`${i}:1`,i]));
@@ -61,17 +115,36 @@ export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,p
   };
   for(let f=0;f<data.triangles.length/3;f++){
     const vertices=data.triangles.slice(3*f,3*f+3),poly:Vertex[]=vertices.map(i=>({p:p3(positions,i),weights:new Map([[i,1]])}));
+    // The shell is a solid of its material's thickness about this mid-surface,
+    // as a yarn is a capsule of its radius: a mid-surface point goes when its
+    // through-thickness fibre (the normal segment of half-length h/2) meets the
+    // cut. Each box plane moves out by that segment's support, h/2 |n.m|, so a
+    // sheet lying on a cut box's face is cut by either neighbouring cell rather
+    // than by neither, and planes across the sheet do not move at all. A
+    // rounded cut's planes stay put: h/2 is far inside their polytope
+    // tolerance (an eighth of a cell), and a sheet tangent to a quadric loses
+    // no area.
+    const half=(document.materials[data.triangleMaterials?.[f]??0]?.thickness_m??0)/2,normal=faceNormal(poly[0]!.p,poly[1]!.p,poly[2]!.p);
+    const lower=box.minimum_m.map((v,a)=>v-half*Math.abs(normal[a]!)),upper=box.maximum_m.map((v,a)=>v+half*Math.abs(normal[a]!));
     // Preserve untouched faces byte-for-byte, including their authored identity.
-    const disjoint=[0,1,2].some(a=>poly.every(v=>v.p[a]!<=box.minimum_m[a]!)||poly.every(v=>v.p[a]!>=box.maximum_m[a]!));
+    const disjoint=[0,1,2].some(a=>poly.every(v=>v.p[a]!<=lower[a]!)||poly.every(v=>v.p[a]!>=upper[a]!));
     if(disjoint){triangles.push(...vertices);triangleMaterials.push(data.triangleMaterials?.[f]??0);triangleIds.push(data.triangleIds?.[f]??f);continue;}
     let remaining=poly;const kept:Vertex[][]=[];
-    for(let a=0;a<3&&remaining.length>=3;a++)for(const [value,sign] of [[box.minimum_m[a]!,-1],[box.maximum_m[a]!,1]] as const){
-      const [inside,outside]=split(remaining,a,value,sign);if(outside.length>=3)kept.push(outside);remaining=inside;
+    for(let a=0;a<3&&remaining.length>=3;a++)for(const [value,sign] of [[lower[a]!,-1],[upper[a]!,1]] as const){
+      const [inside,outside]=split(remaining,p=>sign*(p[a]!-value));if(outside.length>=3)kept.push(outside);remaining=inside;
     }
+    for(const h of halfSpaces){
+      if(remaining.length<3)break;
+      const [inside,outside]=split(remaining,p=>dot3(h.normal,p)-h.offset_m);if(outside.length>=3)kept.push(outside);remaining=inside;
+    }
+    // A face split but not removed is still re-fanned: its edge points are
+    // shared with the neighbour that was cut, so the mesh stays conforming.
     if(remaining.length>=3)for(let j=1;j<remaining.length-1;j++)removedArea+=crossArea(remaining[0]!.p,remaining[j]!.p,remaining[j+1]!.p);
-    for(const polygon of kept)for(let j=1;j<polygon.length-1;j++){
-      const a=polygon[0]!,b=polygon[j]!,c=polygon[j+1]!;if(crossArea(a.p,b.p,c.p)<1e-20)continue;
-      triangles.push(index(a),index(b),index(c));triangleMaterials.push(data.triangleMaterials?.[f]??0);triangleIds.push(nextId++);
+    for(const polygon of conformingPieces(kept).map(piece=>distinctPiece(piece,index)))for(const [a,b,c] of convexTriangles(polygon)){
+      if(crossArea(a.p,b.p,c.p)<1e-20)continue;
+      // Planes meeting near one point leave split points the weight key merges.
+      const ia=index(a),ib=index(b),ic=index(c);if(ia===ib||ib===ic||ic===ia)continue;
+      triangles.push(ia,ib,ic);triangleMaterials.push(data.triangleMaterials?.[f]??0);triangleIds.push(nextId++);
     }
   }
   const sourceTopology=prepareClothTopology(data,document.materials),rodOffsets=[0],rodIndices:number[]=[],rodMaterials:number[]=[],rodIds:number[]=[],startNormals:number[]=[],endNormals:number[]=[],segmentOrigins:{rodId:number;segment:number}[]=[],twist:number[]=[],referenceTwist:number[]=[],attachmentTwist:number[]=[],angular:number[]=[],directors:number[]=[],tangents:number[]=[],restDirectors:number[]=[];
@@ -83,6 +156,7 @@ export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,p
     const finish=()=>{if(!piece||piece.vertices.length<2){piece=undefined;return;}rodIndices.push(...piece.vertices);rodOffsets.push(rodIndices.length);rodMaterials.push(data.rodMaterials?.[r]??0);rodIds.push(pieceCount++===0?sourceId:nextRodId++);startNormals.push(...piece.start);endNormals.push(...(piece.end??[0,0,0]));for(const j of piece.segments){const local=j-first,global=j-r,frame=clothRodMaterialFrame(data,positions,r,local),theta=data.initialTwist_rad?.[global]??0,c=Math.cos(theta),sin=Math.sin(theta);segmentOrigins.push({rodId:sourceId,segment:local});twist.push(theta);referenceTwist.push(j===piece.segments[0]?0:data.initialReferenceTwist_rad?.[global]??0);attachmentTwist.push(data.initialAttachmentTwist_rad?.[global]??0);angular.push(data.initialAngularVelocity_rad_s?.[global]??0);directors.push(...frame.d1.map((v,k)=>c*v-sin*frame.d2[k]!));tangents.push(...frame.t);restDirectors.push(...point3(sourceTopology.rods[r]!.restDirectors,local));}piece=undefined;};
     for(let j=first;j<last;j++){
       const a=data.rodIndices[j]!,b=data.rodIndices[j+1]!,pa=p3(positions,a),pb=p3(positions,b),parts=clipRodThroughBox(pa,pb,radius,box,clothRodCapsuleGeometry(document,data,positions,r,j-first)),frame=clothRodMaterialFrame(data,positions,r,j-first);
+      if(halfSpaces.length&&(parts.length!==1||parts[0]!.start!==0||parts[0]!.end!==1))throw new Error('Rounded yarn cuts require analytic section CSG; refusing a bounding-box substitute');
       const localNormal=(normal:ClothVector):ClothVector=>[dot3(normal,frame.d1),dot3(normal,frame.d2),dot3(normal,frame.t)];
       removedRodLength+=Math.hypot(pb[0]-pa[0],pb[1]-pa[1],pb[2]-pa[2])*(1-parts.reduce((sum,p)=>sum+p.end-p.start,0));
       if(parts.length!==1||parts[0]?.start!==0||parts[0]?.end!==1||parts[0]?.startNormal||parts[0]?.endNormal)rodChanged=true;
@@ -120,4 +194,6 @@ export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,p
   return {document:{...document,geometry:{kind:'inline',data:topology}},topology,positions_m:new Float64Array(compact(current,3)!),vertexOrigins:keptOrigins,removedArea_m2:removedArea,removedRodLength_m:removedRodLength,changed:removedArea>0||rodChanged,removedWaterVolume_m3:removedWater};
 }
 
-export interface ClothStrokeCut { readonly box: ClothCutBox; readonly kind: string }
+/** `box` bounds the cut; a rounded kind also carries the half-spaces of its
+ * polygonal surface (see `./round-cut`), and is otherwise refused. */
+export interface ClothStrokeCut { readonly box: ClothCutBox; readonly kind: string; readonly halfSpaces?: readonly ClothCutHalfSpace[] }

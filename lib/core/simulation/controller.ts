@@ -51,7 +51,7 @@ import { collapseGPUFixedSteps } from "./gpu-clock";
 import { LOCKSTEP_IN_FLIGHT_DEPTH, PaneClockHost, PRIMARY_PANE_ID, type PaneClockReport } from "./pane-clock";
 import { applyHostRunState, hostResetPlan, paneResetPlan } from "./pane-transport";
 import { safeBrowserGPUBringupEnabled } from "../gpu-startup";
-import { planSceneRuntime } from "../scene-runtime";
+import { planSceneRuntime, sceneAdvancesOnClock } from "../scene-runtime";
 import { addSceneryNode, createSceneryNodeAt, scenerySelectionId, sceneryIdFromSelection } from "../editor-scenery";
 import { findSceneryNode, withoutSceneryNode } from "../scenery-edit";
 import { scaleScene as scaleSceneBy, sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../scene-scale";
@@ -692,7 +692,7 @@ export class SimulationController {
     // no attached pane plans a solver.
     let hostFluidSolver = false;
     for (const pane of this.paneSessions.values()) {
-      if (planSceneRuntime(pane.scene.getState().scene).fluidSolver || pane.scene.getState().scene.interaction?.entities.length) { hostFluidSolver = true; break; }
+      if (sceneAdvancesOnClock(pane.scene.getState().scene)) { hostFluidSolver = true; break; }
     }
     if (!hostFluidSolver) {
       this.setRunState("paused");
@@ -766,7 +766,7 @@ export class SimulationController {
     // queued work at the next pause. See `setRunState`.
     this.setRunState("paused");
     const scene = this.session(PRIMARY_PANE_ID).scene.getState().scene;
-    if (![...this.paneSessions.values()].some(p => planSceneRuntime(p.scene.getState().scene).fluidSolver || p.scene.getState().scene.interaction?.entities.length)) return;
+    if (![...this.paneSessions.values()].some(p => sceneAdvancesOnClock(p.scene.getState().scene))) return;
     const dt = effectiveSimulationStep_s(scene, this.session(PRIMARY_PANE_ID).method.getState());
     if (!this.webgpuTransportReady()) return;
     // One STEP is one step for every pane: the host refuses it until the
@@ -1010,8 +1010,34 @@ export class SimulationController {
     return true;
   }
 
+  /**
+   * `openSceneCard`, after the card's asynchronous inputs have loaded.
+   *
+   * A card that declares `prepare` (an imported scene's checksummed source
+   * asset) cannot build until it settles. The wait is announced, and a failed
+   * load is the card's explicit error as a notice; nothing is replaced in the
+   * meantime, so the reader keeps the scene they had.
+   */
+  async openPreparedSceneCard(
+    card: SceneCard,
+    paneId: PaneId = PRIMARY_PANE_ID,
+    options: OpenSceneCardOptions = {},
+  ): Promise<boolean> {
+    if (card.prepare && card.prepared?.() !== true) {
+      const runtime = this.session(paneId).runtime.getState();
+      runtime.setNotice(`Loading ${card.name} source assets…`);
+      try {
+        await card.prepare();
+      } catch (error) {
+        runtime.setNotice(`${card.name} could not load: ${error instanceof Error ? error.message : String(error)}`, "warn");
+        return false;
+      }
+    }
+    return this.openSceneCard(card, paneId, options);
+  }
+
   loadPreset(presetId: string, paneId: PaneId = PRIMARY_PANE_ID) {
-    this.openSceneCard(sceneCardForDefinition(getSceneDefinition(presetId)), paneId);
+    void this.openPreparedSceneCard(sceneCardForDefinition(getSceneDefinition(presetId)), paneId);
   }
 
   /**
@@ -1028,7 +1054,7 @@ export class SimulationController {
     const { presetId } = this.session(paneId).scene.getState();
     const definition = findSceneDefinition(presetId);
     const starter = SCENE_STARTERS.find((candidate) => `starter:${candidate.id}` === presetId);
-    const card = definition ? sceneCardForDefinition(definition) : starter ? {
+    const card: SceneCard | undefined = definition ? sceneCardForDefinition(definition) : starter ? {
       id: presetId,
       source: "starter" as const,
       name: starter.name,
@@ -1039,6 +1065,16 @@ export class SimulationController {
     const runtime = this.session(paneId).runtime.getState();
     if (!card) {
       runtime.setNotice(`${presetId} has no authored scene in this build to revert to`, "warn");
+      return false;
+    }
+    if (card.prepare && card.prepared?.() !== true) {
+      // A document restored from storage carries its own geometry, so its
+      // source asset may never have been fetched in this session.
+      runtime.setNotice(`Loading ${card.name} source assets to revert…`);
+      card.prepare().then(() => {
+        if (this.session(paneId).scene.getState().presetId === presetId) this.revertScene(paneId);
+      }, (error: unknown) => runtime.setNotice(
+        `${card.name} could not load: ${error instanceof Error ? error.message : String(error)}`, "warn"));
       return false;
     }
     const camera = this.session(paneId).ui.getState().camera;

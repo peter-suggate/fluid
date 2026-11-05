@@ -12,7 +12,7 @@ import { defaultMethodId, getMethod, registeredSimulationMethods } from "./metho
 import { resolveMethodValues, type MethodParamValue, type MethodParamValues } from "./method-contract";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
-import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
+import { sceneDefinitionPrepared, sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
 import { solidVoxelsOnMovedLattice } from "./scene-lattice";
 import { resolveSession, type PaneSession } from "./session/session";
 import { replaceLocationSearch, startHostQueryStateSync } from "./query-state-sync";
@@ -164,8 +164,25 @@ function exactMethod(id: string | null) {
   return registeredSimulationMethods().find((method) => method.id === id);
 }
 
+/**
+ * The preset a link names, when it can be built now.
+ *
+ * A scene whose inputs load asynchronously (see `SceneDefinition.prepare`) is
+ * absent until they have: `startQueryStateSync` waits for them before the first
+ * hydration, so this only declines a link that reached a parse some other way
+ * (a compare mirror, back/forward) before its asset arrived.
+ */
 function exactPreset(id: string | null) {
-  return scenePresets.find((preset) => preset.id === id);
+  const preset = scenePresets.find((candidate) => candidate.id === id);
+  const definition = preset && findSceneDefinition(preset.id);
+  return definition && !sceneDefinitionPrepared(definition) ? undefined : preset;
+}
+
+/** The asynchronous inputs a link's scene still needs, if any. */
+function pendingScenePreparation(search: string): { readonly name: string; readonly ready: Promise<void> } | undefined {
+  const definition = findSceneDefinition(new URLSearchParams(search).get("scene") ?? "");
+  if (!definition?.prepare || sceneDefinitionPrepared(definition)) return undefined;
+  return { name: definition.name, ready: definition.prepare() };
 }
 
 function getAtPath(value: unknown, path: string): unknown {
@@ -233,11 +250,17 @@ interface SceneQueryBaseline {
 
 const sceneQueryBaselineCache = new WeakMap<ScenePreset, SceneQueryBaseline>();
 
-function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
+function sceneQueryBaseline(presetId: string, current?: SceneDescription): SceneQueryBaseline {
   const preset = getScenePreset(presetId);
   const cached = sceneQueryBaselineCache.get(preset);
   if (cached) return cached;
-  const baseScene = preset.create();
+  const definition = findSceneDefinition(preset.id);
+  // A restored document can name a preset whose inputs have not loaded in this
+  // session. Diffing against itself writes no scene keys rather than building
+  // a document that cannot exist yet; it is not cached, so the real baseline
+  // takes over once the inputs arrive.
+  const unprepared = definition !== undefined && !sceneDefinitionPrepared(definition);
+  const baseScene = unprepared && current ? current : preset.create();
   const baseline: SceneQueryBaseline = {
     paths: sceneQueryPaths.map((path) => JSON.stringify(getAtPath(baseScene, path))),
     regions: refinementRegionsToQuery(baseScene),
@@ -246,7 +269,7 @@ function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
     rim: sceneRimQuery(baseScene),
     seeds: sceneSeedsQuery(baseScene),
   };
-  sceneQueryBaselineCache.set(preset, baseline);
+  if (!unprepared) sceneQueryBaselineCache.set(preset, baseline);
   return baseline;
 }
 
@@ -297,7 +320,7 @@ const RIM_QUERY_KEY = "rim";
 const SEEDS_QUERY_KEY = "seeds";
 
 function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQueryEntry[] {
-  const baseline = sceneQueryBaseline(sceneState.presetId);
+  const baseline = sceneQueryBaseline(sceneState.presetId, sceneState.scene);
   const entries: SceneQueryEntry[] = [];
   const regions = refinementRegionsToQuery(sceneState.scene);
   if (regions !== baseline.regions) entries.push([REGIONS_QUERY_KEY, regions]);
@@ -905,6 +928,28 @@ export interface QueryStateSyncOptions {
  */
 export function startQueryStateSync(onHydrated: (presetId: string) => void, options: QueryStateSyncOptions = {}) {
   const session = options.session ?? resolveSession();
+  // A link to a scene with asynchronous inputs hydrates once they have loaded.
+  // Until then nothing mirrors, so the address keeps naming the scene asked
+  // for; a failed load hydrates without it and says why.
+  const pending = options.hydrateFromUrl === false ? undefined : pendingScenePreparation(readLocationQuery());
+  if (pending) {
+    let stop: (() => void) | undefined;
+    let cancelled = false;
+    const runtime = session.runtime.getState();
+    runtime.setNotice(`Loading ${pending.name} source assets…`);
+    pending.ready.then(() => undefined, (error: unknown) => {
+      runtime.setNotice(`${pending.name} could not load: ${error instanceof Error ? error.message : String(error)}`, "warn");
+    }).then(() => { if (!cancelled) stop = startPreparedQueryStateSync(onHydrated, options, session); });
+    return () => { cancelled = true; stop?.(); };
+  }
+  return startPreparedQueryStateSync(onHydrated, options, session);
+}
+
+function startPreparedQueryStateSync(
+  onHydrated: (presetId: string) => void,
+  options: QueryStateSyncOptions,
+  session: PaneSession,
+) {
   const cachedSceneLayer = createSceneQueryLayerCache();
   return startHostQueryStateSync({
     // AppShell retains this component while the library route is visible. Its

@@ -100,3 +100,17 @@ export function planSceneRuntime(
     sparseVoxelPresentation,
   };
 }
+
+/**
+ * Whether a scene has anything for the transport clock to advance.
+ *
+ * Water, interactive entities, and deformable cloth each evolve on the shared
+ * clock; a dry cloth scene has no fluid solver but its mechanics still step.
+ * A scenery-only document has nothing to play.
+ */
+export function sceneAdvancesOnClock(
+  scene: Pick<SceneDescription, "systems" | "terrain" | "rigidBodies" | "interaction" | "cloth">,
+): boolean {
+  const plan = planSceneRuntime(scene);
+  return plan.fluidSolver || Boolean(scene.interaction?.entities.length) || plan.capabilities["cloth-dynamics"];
+}

@@ -25,7 +25,10 @@ test('cloth picking uses nearest current surface, metre distances, both sides, a
 
 test('local cloth cut opens the same surface while preserving untouched authored triangles, UVs and materials',()=>{
   const cut=cutClothShellBox(doc,data,data.restPositions_m,{minimum_m:[-.25,.9,-.25],maximum_m:[.25,1.1,.25]});
+  // Planes across the sheet do not move: the in-plane cut is exactly the box's.
   assert.ok(Math.abs(cut.removedArea_m2-.25)<1e-12);
+  // A sheet lying on a box face is cut by the cells on both sides of it.
+  for(const [lo,hi] of [[.9,1],[1,1.1]])assert.ok(cutClothShellBox(doc,data,data.restPositions_m,{minimum_m:[-.25,lo,-.25],maximum_m:[.25,hi,.25]}).changed);
   assert.equal(pickClothSurface(cut.document,cut.topology,cut.positions_m,ray),undefined);
   assert.ok(pickClothSurface(cut.document,cut.topology,cut.positions_m,{origin:[.8,3,.8],direction:[0,-1,0]}));
   const f=cut.topology.triangleIds!.indexOf(90);assert.ok(f>=0);assert.equal(cut.topology.triangleMaterials![f],1);
@@ -95,6 +98,11 @@ test('shared solid stroke edits the accepted deformed shell, and real save/load/
   const workerUndo=truncatedSolidEditScene(cut,0,base);assert.equal(workerUndo.cloth,base.cloth);
   assert.throws(()=>truncatedSolidEditScene(cut,0,undefined),/retained document/);
   assert.equal(sceneWithSolidStroke(base,[{...patch,affectsScenery:false}]).cloth,base.cloth);
-  assert.throws(()=>sceneWithSolidStroke(base,[{...patch,kind:'ellipsoid'}]),/bounding-box substitute/);
+  // A rounded nib opens its inscribed ellipsoid's section, not its bounding box.
+  const round=sceneWithSolidStroke(base,[{...patch,kind:'ellipsoid'}]);
+  assert.equal(clothSurfaceAt(round,inputRay),undefined);
+  assert.equal(clothSurfaceAt(round,{...inputRay,origin:{x:.2,y:3,z:0}}),undefined);
+  assert.equal(clothSurfaceAt(round,{...inputRay,origin:{x:.22,y:3,z:.22}})?.distance_m,1,'the box corner the sphere leaves is kept');
+  assert.throws(()=>sceneWithSolidStroke(base,[{...patch,kind:'block'}]),/bounding-box substitute|block/);
   assert.equal(base.solidVoxels.length,0);assert.equal(base.cloth![0],doc);
 });

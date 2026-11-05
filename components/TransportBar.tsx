@@ -6,7 +6,7 @@ import { simulation } from "../lib/core/simulation/controller";
 import { simulationRecording } from "../lib/core/simulation/recording";
 import { requestManualGPUStop } from "../lib/core/gpu-startup";
 import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
-import { planSceneRuntime } from "../lib/core/scene-runtime";
+import { planSceneRuntime, sceneAdvancesOnClock } from "../lib/core/scene-runtime";
 import { resourceInteractionGates } from "../lib/core/resource-readiness";
 import { transportLockReason, transportReadiness } from "../lib/core/transport-status";
 import { useSession } from "../lib/core/session/session-context";
@@ -205,7 +205,7 @@ export function TransportBar({ hostBlockReason, viewSession, sessions }: {
   const noticeTone = session.runtime((state) => state.noticeTone);
   const noticeSaid = session.runtime((state) => state.noticeSaid);
   const fluidRequired = session.scene((state) => planSceneRuntime(state.scene).fluidSolver);
-  const rendererOnlyScene = session.scene((state) => !planSceneRuntime(state.scene).fluidSolver && !state.scene.interaction?.entities.length);
+  const rendererOnlyScene = session.scene((state) => !sceneAdvancesOnClock(state.scene));
   const resourceReadiness = session.diagnostics((state) => state.resourceReadiness);
   const gpuInfo = session.diagnostics((state) => state.gpuInfo);
   const methodId = session.method((state) => state.methodId);

@@ -69,6 +69,9 @@ function SceneCardArt({ card }: { card: SceneCard }) {
  * later; deriving them means a card cannot claim water a scene does not have.
  */
 function SceneCardChips({ card }: { card: SceneCard }) {
+  // A card whose inputs load on open has no document to read yet; that is not
+  // the same as one that will not build.
+  if (card.prepared?.() === false) return <span className="chip">loads source on open</span>;
   const scene = sceneCardPreview(card);
   if (!scene) return <span className="chip" data-tone="warn">unreadable</span>;
   const plan = planSceneRuntime(scene);
@@ -96,12 +99,39 @@ function SceneCardFace({ card, title }: { card: SceneCard; title?: ReactNode }) 
     <span className="card-body">
       {title ?? <strong>{card.name}</strong>}
       <small>{card.blurb}</small>
+      {card.status && <small className="card-status" data-testid={`scene-card-status-${card.id}`}>{card.status}</small>}
+      {card.attribution && <small className="card-attribution">Source: {card.attribution.label}</small>}
       <span className="chip-row"><SceneCardChips card={card} /></span>
     </span>
   </>;
 }
 
 function SceneCardButton({ card, active, open }: { card: SceneCard; active: boolean; open: (card: SceneCard) => void }) {
+  // A link cannot sit inside a button, so an attributed card is a slot: the
+  // card, and the original source one tab stop after it.
+  if (card.attribution) return (
+    <div className="scene-card-slot">
+      <SceneCardFaceButton card={card} active={active} open={open} />
+      <span className="card-actions">
+        <a
+          className="card-action"
+          href={card.attribution.url}
+          target="_blank"
+          rel="noreferrer"
+          title={`Original source: ${card.attribution.label}`}
+          aria-label={`Original source of ${card.name}`}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4" />
+          </svg>
+        </a>
+      </span>
+    </div>
+  );
+  return <SceneCardFaceButton card={card} active={active} open={open} />;
+}
+
+function SceneCardFaceButton({ card, active, open }: { card: SceneCard; active: boolean; open: (card: SceneCard) => void }) {
   return (
     <button
       type="button"
@@ -455,8 +485,8 @@ export function SceneLibrary() {
     return () => { active = false; };
   }, []);
 
-  const open = (card: SceneCard) => {
-    if (!simulation.openSceneCard(card, session.id)) return;
+  const open = async (card: SceneCard) => {
+    if (!(await simulation.openPreparedSceneCard(card, session.id))) return;
     recordSceneOpen(browserSceneLibraryStorage(), card.id, Date.now());
     router.push(currentScenePageUrl(session));
   };

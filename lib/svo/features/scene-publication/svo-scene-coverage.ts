@@ -1,6 +1,7 @@
 import { environmentIds, type EnvironmentId } from "../../../core/environments";
 import { cloneScene, defaultScene, type CameraState, type SceneDescription } from "../../../core/model";
-import { cameraForPreset, scenePresets } from "../../../core/scenes";
+import { cameraForPreset, findSceneDefinition, scenePresets } from "../../../core/scenes";
+import { sceneDefinitionPrepared } from "../../../core/scene-definition";
 import { buildSvoSceneLights } from "../../contracts/svo-light-abi";
 import { svoFieldProgramFeatureRadius_m } from "./svo-field-program";
 import { svoClusterFeatureRadius_m } from "../../contracts/svo-primitive-abi";
@@ -211,7 +212,13 @@ export function buildSvoShippedSceneCoverage(): SvoShippedSceneCoverageReport {
     scene.environment = environmentId;
     return buildSvoEnvironmentCoverage(scene, environmentId);
   });
-  const presets = scenePresets.map((preset): SvoPresetCoverageReport => {
+  // A preset with asynchronous inputs that have not loaded has no document to
+  // cover; imported cloth publishes through the cloth surface path instead.
+  const buildable = scenePresets.filter((preset) => {
+    const definition = findSceneDefinition(preset.id);
+    return !definition || sceneDefinitionPrepared(definition);
+  });
+  const presets = buildable.map((preset): SvoPresetCoverageReport => {
     const scene = preset.create();
     const environmentId = scene.environment ?? preset.background;
     const environment = buildSvoEnvironmentCoverage(scene, environmentId);

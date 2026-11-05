@@ -65,12 +65,17 @@ export function savedSceneCard(entry: SceneLibraryEntry): SceneCard {
     blurb: origin ? `Saved from ${origin.name}.` : "A scene you saved in this browser.",
     shelf: "My scenes",
     savedAt_ms: entry.savedAt_ms,
-    open: () => ({
-      scene: loadSceneFromLibrary(entry),
-      presetId: entry.presetId,
-      camera: origin ? sceneDefinitionCamera(origin) : undefined,
-      methodProfile: entry.methodProfile,
-    }),
+    open: () => {
+      // The document is self-contained (an imported cloth carries its topology
+      // inline), so it opens without its origin's asynchronous inputs.
+      const scene = loadSceneFromLibrary(entry);
+      return {
+        scene,
+        presetId: entry.presetId,
+        camera: origin ? sceneDefinitionCamera(origin, scene) : undefined,
+        methodProfile: entry.methodProfile,
+      };
+    },
   };
 }
 

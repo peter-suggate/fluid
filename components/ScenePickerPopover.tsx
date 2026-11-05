@@ -135,7 +135,7 @@ function ScenePickerTile({ card, at, active, current, query, shelf, choose, aim 
       data-current={current}
       data-testid={`scene-selector-tile-${card.id}`}
       className="scene-selector-tile"
-      title={card.blurb}
+      title={card.status ? `${card.blurb}\n${card.status}` : card.blurb}
       // Pointer move rather than hover CSS: the cursor and the keyboard have to
       // agree on which tile Enter opens, and two separately drawn highlights
       // would say they do not.
